@@ -10,6 +10,7 @@
 /// The fixed lineage of every fixture log.
 pub const LINEAGE: u64 = 0x0123_4567_89ab_cdef;
 pub const FLAG_GRAPH: u16 = 4;
+pub const FLAG_HISTORY: u16 = 8;
 
 /// IEEE CRC-32, bit by bit.
 pub fn crc32(bytes: &[u8]) -> u32 {
@@ -139,6 +140,20 @@ impl Entry {
     }
 }
 
+/// A DO-003 body: version 1, reserved byte, graph ID, then each entry's
+/// tag, three reserved bytes, payload length and payload.
+fn graph_body(graph: u16, entries: &[Entry]) -> Vec<u8> {
+    let mut body = vec![1, 0];
+    body.extend_from_slice(&graph.to_le_bytes());
+    for entry in entries {
+        let payload = entry.payload();
+        body.extend_from_slice(&[entry.tag(), 0, 0, 0]);
+        body.extend_from_slice(&(payload.len() as u32).to_le_bytes());
+        body.extend_from_slice(&payload);
+    }
+    body
+}
+
 /// A plain V5 graph-enabled log under construction; frames get sequences
 /// 1, 2, ... in order.
 pub struct Log {
@@ -150,13 +165,18 @@ impl Log {
     /// Header: magic, version 5, dimensions, lineage, collection floor 0,
     /// flags, CRC of the first 28 bytes.
     pub fn new(dimensions: u32) -> Self {
+        Self::with_flags(dimensions, FLAG_GRAPH)
+    }
+
+    /// [`Log::new`] with other header flags.
+    pub fn with_flags(dimensions: u32, flags: u16) -> Self {
         let mut bytes = Vec::new();
         bytes.extend_from_slice(b"VLITEDB\0");
         bytes.extend_from_slice(&5u32.to_le_bytes());
         bytes.extend_from_slice(&dimensions.to_le_bytes());
         bytes.extend_from_slice(&LINEAGE.to_le_bytes());
         bytes.extend_from_slice(&0u16.to_le_bytes());
-        bytes.extend_from_slice(&FLAG_GRAPH.to_le_bytes());
+        bytes.extend_from_slice(&flags.to_le_bytes());
         let crc = crc32(&bytes);
         bytes.extend_from_slice(&crc.to_le_bytes());
         Self { bytes, sequence: 0 }
@@ -164,6 +184,11 @@ impl Log {
 
     fn frame(&mut self, operation: u8, id: u64, count: u32, payload_len: u32, body: &[u8]) {
         self.sequence += 1;
+        self.frame_at(operation, id, count, payload_len, body);
+    }
+
+    /// A frame at the current sequence (restated checkpoint frames).
+    fn frame_at(&mut self, operation: u8, id: u64, count: u32, payload_len: u32, body: &[u8]) {
         let mut frame = Vec::new();
         frame.extend_from_slice(b"VREC");
         frame.push(operation);
@@ -202,20 +227,56 @@ impl Log {
 
     /// One op-12 frame for `graph`; the prefix ID counts the reclaims.
     pub fn graph(&mut self, graph: u16, entries: &[Entry]) -> &mut Self {
-        let mut body = vec![1, 0];
-        body.extend_from_slice(&graph.to_le_bytes());
-        for entry in entries {
-            let payload = entry.payload();
-            body.extend_from_slice(&[entry.tag(), 0, 0, 0]);
-            body.extend_from_slice(&(payload.len() as u32).to_le_bytes());
-            body.extend_from_slice(&payload);
-        }
+        let body = graph_body(graph, entries);
         let reclaims = entries
             .iter()
             .filter(|entry| matches!(entry, Entry::Reclaim(_)))
             .count() as u64;
         let len = body.len() as u32;
         self.frame(12, reclaims, entries.len() as u32, len, &body);
+        self
+    }
+
+    /// The op-13 advance frame of a `FLAG_HISTORY` image restating history
+    /// through `floor`; it must be the first frame. Later restated frames
+    /// share its sequence.
+    pub fn advance(&mut self, floor: u64) -> &mut Self {
+        assert_eq!(self.sequence, 0, "the advance frame comes first");
+        self.sequence = floor;
+        self.frame_at(13, 0, 0, 0, &[]);
+        self
+    }
+
+    /// An op-14 record block of default-collection records `(id, revision,
+    /// vector, payload)`, without expiry or metadata, at the floor.
+    pub fn records(&mut self, records: &[(u64, u64, &[f32], &[u8])]) -> &mut Self {
+        let mut body = Vec::new();
+        for (id, revision, vector, payload) in records {
+            let mut extended = Vec::new();
+            for value in *vector {
+                extended.extend_from_slice(&value.to_le_bytes());
+            }
+            extended.extend_from_slice(&(payload.len() as u32).to_le_bytes());
+            extended.extend_from_slice(payload);
+            extended.extend_from_slice(&0u32.to_le_bytes());
+            body.extend_from_slice(&id.to_le_bytes());
+            body.extend_from_slice(&revision.to_le_bytes());
+            body.push(0);
+            body.extend_from_slice(&0u64.to_le_bytes());
+            body.extend_from_slice(&(extended.len() as u32).to_le_bytes());
+            body.extend_from_slice(&extended);
+        }
+        let len = body.len() as u32;
+        self.frame_at(14, 0, records.len() as u32, len, &body);
+        self
+    }
+
+    /// One op-15 snapshot frame for `graph` at the floor: laid out as an
+    /// op-12 frame, with a zero prefix ID.
+    pub fn snapshot(&mut self, graph: u16, entries: &[Entry]) -> &mut Self {
+        let body = graph_body(graph, entries);
+        let len = body.len() as u32;
+        self.frame_at(15, 0, entries.len() as u32, len, &body);
         self
     }
 
@@ -264,4 +325,130 @@ pub fn reclaim_fixture() -> Log {
         .graph(0, &[Reclaim(400), DropGraph]) // 13
         .graph(0, &[CreateGraph("g"), PutNode(0, "a", &[])]); // 14
     log
+}
+
+/// The TTL stream of `reclaim_fixture`, derived by hand from its 14 commits.
+pub const RECLAIM_TTL: [&str; 18] = [
+    "1/0 put 1",
+    "2/0 put 2",
+    "3/0 create g",
+    "4/0 g: node+0:a ttl=null, node+1:b ttl=null, node+2:c ttl=null, \
+     edge+0:ab(0>1) ttl=null, edge+1:_(1>1) ttl=null, edge+2:_(0>2) ttl=null, \
+     attach 0:default/1",
+    "5/0 g: node~0:a ttl=100!",
+    "6/0 g: edge~2:_ ttl=50!, node~1:b ttl=null",
+    "7/0 g: edge-0:ab node_expired=100@100, edge-2:_ expired=50@100, \
+     detach 0:default/1, node-0:a expired=100@100",
+    "7/1 g: node+3:a ttl=null, attach 3:default/1",
+    "8/0 g: node~1:b ttl=150!",
+    "8/1 g: edge-1:_ node_expired=150@150, node-1:b expired=150@150",
+    "9/0 g: edge+3:ca(2>3) ttl=null, edge~3:ca ttl=300!, edge~3:ca ttl=null!",
+    "10/0 g: node~2:c ttl=400!, node=2:c ttl=400",
+    "11/0 g: edge-3:ca explicit, detach 3:default/1, node-3:a explicit",
+    "12/0 delete 1",
+    "13/0 g: node-2:c expired=400@400",
+    "13/1 drop g",
+    "14/0 create g",
+    "14/1 g: node+0:a ttl=null",
+];
+
+/// One feed event as text: `sequence/ordinal`, then the event; a graph
+/// batch lists `operation ttl` pairs. The notation is this file's own, so
+/// expected streams are written out by hand.
+pub fn describe(event: &vlite::changes::GraphFeedChange) -> String {
+    use vlite::changes::{ChangeKind, GraphChange, GraphRemovalReason, GraphTtl};
+    let change = &event.change;
+    let head = format!("{}/{}", change.sequence, change.ordinal);
+    let at = change
+        .committed_at_ms
+        .map(|ms| format!(" t={ms}"))
+        .unwrap_or_default();
+    let body = match &change.kind {
+        ChangeKind::Put { id, .. } => format!("put {id}"),
+        ChangeKind::Delete { id } => format!("delete {id}"),
+        ChangeKind::GraphCreated { graph } => format!("create {graph}"),
+        ChangeKind::GraphDropped { graph } => format!("drop {graph}"),
+        ChangeKind::GraphBatch {
+            graph,
+            revision,
+            operations,
+        } => {
+            assert_eq!(*revision, change.sequence, "graph batch revision");
+            assert_eq!(event.ttl.len(), operations.len(), "one annotation each");
+            let key = |key: &Option<String>| key.clone().unwrap_or_else(|| "_".into());
+            let parts: Vec<String> = operations
+                .iter()
+                .zip(&event.ttl)
+                .map(|(operation, ttl)| {
+                    let operation = match operation {
+                        GraphChange::NodeUpserted {
+                            id, key, created, ..
+                        } => format!("node{}{id}:{key}", if *created { "+" } else { "=" }),
+                        GraphChange::NodePatched { id, key, .. } => format!("node~{id}:{key}"),
+                        GraphChange::NodeDeleted { id, key } => format!("node-{id}:{key}"),
+                        GraphChange::EdgeUpserted {
+                            id,
+                            key: edge,
+                            source,
+                            destination,
+                            created,
+                            ..
+                        } => format!(
+                            "edge{}{id}:{}({source}>{destination})",
+                            if *created { "+" } else { "=" },
+                            key(edge)
+                        ),
+                        GraphChange::EdgePatched { id, key: edge, .. } => {
+                            format!("edge~{id}:{}", key(edge))
+                        }
+                        GraphChange::EdgeDeleted { id, key: edge } => {
+                            format!("edge-{id}:{}", key(edge))
+                        }
+                        GraphChange::Attached {
+                            node,
+                            collection,
+                            record,
+                            ..
+                        } => format!("attach {node}:{collection}/{record}"),
+                        GraphChange::Detached {
+                            node,
+                            collection,
+                            record,
+                            ..
+                        } => format!("detach {node}:{collection}/{record}"),
+                        other => format!("{other:?}"),
+                    };
+                    let ttl = match ttl {
+                        None => String::new(),
+                        Some(GraphTtl::Updated {
+                            expires_at_ms,
+                            expiry_changed,
+                        }) => format!(
+                            " ttl={}{}",
+                            expires_at_ms.map_or("null".into(), |ms| ms.to_string()),
+                            if *expiry_changed { "!" } else { "" }
+                        ),
+                        Some(GraphTtl::ExplicitRemoval) => " explicit".into(),
+                        Some(GraphTtl::ExpiryRemoval {
+                            removal_reason,
+                            expires_at_ms,
+                            removed_at_ms,
+                        }) => format!(
+                            " {}={expires_at_ms}@{removed_at_ms}",
+                            match removal_reason {
+                                GraphRemovalReason::Expired => "expired",
+                                GraphRemovalReason::NodeExpired => "node_expired",
+                                other => panic!("{other:?}"),
+                            }
+                        ),
+                        Some(other) => format!(" {other:?}"),
+                    };
+                    format!("{operation}{ttl}")
+                })
+                .collect();
+            format!("{graph}: {}", parts.join(", "))
+        }
+        other => format!("{other:?}"),
+    };
+    format!("{head}{at} {body}")
 }

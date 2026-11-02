@@ -68,6 +68,7 @@ enums vlite::metadata_index::MetadataIndexKind
 enums vlite::quantize::Quantization
 enums vlite::records::GeoSort
 functions vlite::changes::read_log_changes
+functions vlite::changes::read_log_graph_changes
 functions vlite::disk_ann::default_sidecar_path
 functions vlite::hybrid::fuse_ranked
 functions vlite::kv::first_slot

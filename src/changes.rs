@@ -10,6 +10,7 @@
 
 use crate::crypto::EncryptionKey;
 use crate::format::{self, LogHeader, OP_TIME_ANCHOR};
+use crate::property_graph::ttl_feed::TtlEvent;
 use crate::{CollectionSettings, Error, Metadata, Record, Result};
 use std::collections::BTreeMap;
 use std::io::{Read, Seek};
@@ -18,8 +19,6 @@ use std::path::Path;
 /// Re-exported from [`crate::property_graph`], where it is defined.
 pub use crate::property_graph::{GraphChange, GraphRemovalReason, GraphTtl, TemporalChange};
 
-// Gap 3: the TTL feed reader that numbers commits lands next.
-#[cfg_attr(not(test), allow(dead_code))]
 mod ttl_chunk;
 
 /// Default and maximum events returned by one batch.
@@ -484,7 +483,6 @@ fn scan<R: Read + Seek>(
         offset += frame.disk.len() as u64;
         // A compact image's blocks, and in a precision image the frames
         // they restate context for, are checked as full replay checks them.
-        #[cfg_attr(not(test), allow(unused_variables))]
         let supplement = if let Some(check) = &mut check {
             check.frame(&frame, at)?
         } else {
@@ -511,195 +509,31 @@ fn scan<R: Read + Seek>(
         }
         head = head.max(frame.sequence);
         let committed_at = anchor_ms.take();
-        let body = frame.body();
-        let name_of = |collections: &BTreeMap<u16, (String, usize)>| {
-            collections
-                .get(&frame.collection)
-                .map(|entry| entry.0.clone())
-                .unwrap_or_default()
-        };
-        let dimensions = collections
-            .get(&frame.collection)
-            .map(|entry| entry.1)
-            .unwrap_or(0);
-        let mut events = Vec::new();
-        let corrupt = || Error::Corrupt {
-            offset,
-            reason: "undecodable frame in change feed",
-        };
-        match frame.operation {
-            1 => {
-                let vector = format::decode_vector(&body[..frame.count as usize * 4], offset)?;
-                events.push((
-                    name_of(&collections),
-                    ChangeKind::Put {
-                        id: frame.id,
-                        record: Record {
-                            vector,
-                            payload: body[frame.count as usize * 4..].to_vec(),
-                            metadata: Metadata::new(),
-                        },
-                        expires_at_ms: None,
-                    },
-                ));
-            }
-            2 => events.push((name_of(&collections), ChangeKind::Delete { id: frame.id })),
-            3 => {
-                let (operations, _marker) = format::decode_batch(
-                    body,
-                    frame.count as usize,
-                    dimensions,
-                    offset,
-                    header.version,
-                )?;
-                let name = name_of(&collections);
-                for operation in operations {
-                    let kind = match operation {
-                        crate::Mutation::Put {
-                            id,
-                            vector,
-                            payload,
-                        } => ChangeKind::Put {
-                            id,
-                            record: Record {
-                                vector,
-                                payload,
-                                metadata: Metadata::new(),
-                            },
-                            expires_at_ms: None,
-                        },
-                        crate::Mutation::PutWithMetadata {
-                            id,
-                            vector,
-                            payload,
-                            metadata,
-                        } => ChangeKind::Put {
-                            id,
-                            record: Record {
-                                vector,
-                                payload,
-                                metadata,
-                            },
-                            expires_at_ms: None,
-                        },
-                        crate::Mutation::Delete { id } => ChangeKind::Delete { id },
-                    };
-                    events.push((name.clone(), kind));
+        let events = match record_events(&frame, header, &mut collections, offset)? {
+            Some(events) => events,
+            None => match frame.operation {
+                crate::property_graph::engine::codec::OP_GRAPH | format::OP_GRAPH_SNAPSHOT => {
+                    // Snapshot bodies of a checkpoint image track graph keys
+                    // for later frames; like all restated frames, they are
+                    // at or before every valid cursor.
+                    graphs.frame(&frame, offset, &collections)?
                 }
-            }
-            4 => {
-                let record =
-                    format::decode_extended(body, dimensions, offset, header.version >= 5)?;
-                events.push((
-                    name_of(&collections),
-                    ChangeKind::Put {
-                        id: frame.id,
-                        record,
-                        expires_at_ms: None,
-                    },
-                ));
-            }
-            9 => {
-                if body.len() < 9 {
-                    return Err(corrupt());
-                }
-                let expires = (body[0] == 1)
-                    .then(|| u64::from_le_bytes(body[1..9].try_into().expect("8 bytes")));
-                let record = format::decode_extended(&body[9..], dimensions, offset, true)?;
-                events.push((
-                    name_of(&collections),
-                    ChangeKind::Put {
-                        id: frame.id,
-                        record,
-                        expires_at_ms: expires,
-                    },
-                ));
-            }
-            8 => {
-                let metadata = crate::metadata::decode(body).map_err(|_| corrupt())?;
-                events.push((
-                    name_of(&collections),
-                    ChangeKind::MetadataUpdate {
-                        id: frame.id,
-                        metadata,
-                    },
-                ));
-            }
-            10 => events.push((name_of(&collections), ChangeKind::VectorsUpdated)),
-            5 | format::OP_COLLECTION_PRECISE => {
-                let (name, dimensions, settings) = if frame.operation == 5 {
-                    format::decode_create(body, offset)?
-                } else {
-                    let (_, name, dimensions, settings) = format::decode_precise(body, offset)?;
-                    (name, dimensions, settings)
-                };
-                collections.insert(frame.id as u16, (name.clone(), dimensions));
-                events.push((
-                    name,
-                    ChangeKind::CollectionCreated {
-                        dimensions,
-                        settings,
-                    },
-                ));
-            }
-            6 => {
-                let name = collections
-                    .remove(&(frame.id as u16))
-                    .map(|entry| entry.0)
-                    .unwrap_or_default();
-                events.push((name, ChangeKind::CollectionDropped));
-            }
-            7 => {
-                let settings = format::decode_settings(body).map_err(|_| corrupt())?;
-                let name = collections
-                    .get(&(frame.id as u16))
-                    .map(|entry| entry.0.clone())
-                    .unwrap_or_default();
-                events.push((name, ChangeKind::SettingsUpdated { settings }));
-            }
-            crate::property_graph::engine::codec::OP_GRAPH | format::OP_GRAPH_SNAPSHOT => {
-                // Snapshot bodies of a checkpoint image track graph keys for
-                // later frames; like all restated frames, they are at or
-                // before every valid cursor.
-                events = graphs.frame(&frame, offset, &collections)?;
-            }
-            // Record blocks restate records at the checkpoint: no change is
-            // after the cursor, and no later frame needs their contents.
-            format::OP_RECORD_BLOCK => {}
-            // Compact blocks restate the checkpoint too; they were checked
-            // above, and only exist behind FLAG_COMPACT.
-            format::OP_COMPACT_BLOCK if check.is_some() => {
-                #[cfg(test)]
-                if let Some(crate::compact::Supplement::GraphSnapshot(bodies)) = supplement {
-                    for body in bodies {
-                        let encoded =
-                            crate::property_graph::engine::encode_body(&body).map_err(|_| {
-                                Error::Corrupt {
-                                    offset: at,
-                                    reason: "invalid compact graph snapshot",
-                                }
-                            })?;
-                        let count =
-                            u32::try_from(body.entries.len()).map_err(|_| Error::Corrupt {
-                                offset: at,
-                                reason: "invalid compact graph snapshot",
-                            })?;
-                        let plain = format::graph_snapshot_frame(frame.sequence, count, &encoded);
-                        let snapshot = format::RawFrame {
-                            operation: format::OP_GRAPH_SNAPSHOT,
-                            collection: body.graph_id.0,
-                            sequence: frame.sequence,
-                            id: 0,
-                            count,
-                            disk: plain.clone(),
-                            plain,
-                        };
+                // Record blocks restate records at the checkpoint: no change
+                // is after the cursor, and no later frame needs their
+                // contents.
+                format::OP_RECORD_BLOCK => Vec::new(),
+                // Compact blocks restate the checkpoint too; they were
+                // checked above, and only exist behind FLAG_COMPACT.
+                format::OP_COMPACT_BLOCK if check.is_some() => {
+                    let mut events = Vec::new();
+                    for snapshot in snapshot_frames(supplement, frame.sequence, at)? {
                         events.extend(graphs.frame(&snapshot, at, &collections)?);
                     }
+                    events
                 }
-            }
-            _ => return Err(corrupt()),
-        }
+                _ => return Err(undecodable(offset)),
+            },
+        };
         if frame.sequence <= after {
             continue;
         }
@@ -744,6 +578,442 @@ fn scan<R: Read + Seek>(
     Ok((batch, skipped))
 }
 
+/// The events of a vector or collection frame (operations 1-10 and the
+/// collection creates), `None` for any other operation. `offset` is where
+/// decoding errors are reported (the end of the frame, as the feed always
+/// reported them).
+fn record_events(
+    frame: &format::RawFrame,
+    header: &LogHeader,
+    collections: &mut BTreeMap<u16, (String, usize)>,
+    offset: u64,
+) -> Result<Option<Vec<(String, ChangeKind)>>> {
+    let body = frame.body();
+    let name_of = |collections: &BTreeMap<u16, (String, usize)>| {
+        collections
+            .get(&frame.collection)
+            .map(|entry| entry.0.clone())
+            .unwrap_or_default()
+    };
+    let dimensions = collections
+        .get(&frame.collection)
+        .map(|entry| entry.1)
+        .unwrap_or(0);
+    let mut events = Vec::new();
+    let corrupt = || undecodable(offset);
+    match frame.operation {
+        1 => {
+            let vector = format::decode_vector(&body[..frame.count as usize * 4], offset)?;
+            events.push((
+                name_of(collections),
+                ChangeKind::Put {
+                    id: frame.id,
+                    record: Record {
+                        vector,
+                        payload: body[frame.count as usize * 4..].to_vec(),
+                        metadata: Metadata::new(),
+                    },
+                    expires_at_ms: None,
+                },
+            ));
+        }
+        2 => events.push((name_of(collections), ChangeKind::Delete { id: frame.id })),
+        3 => {
+            let (operations, _marker) = format::decode_batch(
+                body,
+                frame.count as usize,
+                dimensions,
+                offset,
+                header.version,
+            )?;
+            let name = name_of(collections);
+            for operation in operations {
+                let kind = match operation {
+                    crate::Mutation::Put {
+                        id,
+                        vector,
+                        payload,
+                    } => ChangeKind::Put {
+                        id,
+                        record: Record {
+                            vector,
+                            payload,
+                            metadata: Metadata::new(),
+                        },
+                        expires_at_ms: None,
+                    },
+                    crate::Mutation::PutWithMetadata {
+                        id,
+                        vector,
+                        payload,
+                        metadata,
+                    } => ChangeKind::Put {
+                        id,
+                        record: Record {
+                            vector,
+                            payload,
+                            metadata,
+                        },
+                        expires_at_ms: None,
+                    },
+                    crate::Mutation::Delete { id } => ChangeKind::Delete { id },
+                };
+                events.push((name.clone(), kind));
+            }
+        }
+        4 => {
+            let record = format::decode_extended(body, dimensions, offset, header.version >= 5)?;
+            events.push((
+                name_of(collections),
+                ChangeKind::Put {
+                    id: frame.id,
+                    record,
+                    expires_at_ms: None,
+                },
+            ));
+        }
+        9 => {
+            if body.len() < 9 {
+                return Err(corrupt());
+            }
+            let expires =
+                (body[0] == 1).then(|| u64::from_le_bytes(body[1..9].try_into().expect("8 bytes")));
+            let record = format::decode_extended(&body[9..], dimensions, offset, true)?;
+            events.push((
+                name_of(collections),
+                ChangeKind::Put {
+                    id: frame.id,
+                    record,
+                    expires_at_ms: expires,
+                },
+            ));
+        }
+        8 => {
+            let metadata = crate::metadata::decode(body).map_err(|_| corrupt())?;
+            events.push((
+                name_of(collections),
+                ChangeKind::MetadataUpdate {
+                    id: frame.id,
+                    metadata,
+                },
+            ));
+        }
+        10 => events.push((name_of(collections), ChangeKind::VectorsUpdated)),
+        5 | format::OP_COLLECTION_PRECISE => {
+            let (name, dimensions, settings) = if frame.operation == 5 {
+                format::decode_create(body, offset)?
+            } else {
+                let (_, name, dimensions, settings) = format::decode_precise(body, offset)?;
+                (name, dimensions, settings)
+            };
+            collections.insert(frame.id as u16, (name.clone(), dimensions));
+            events.push((
+                name,
+                ChangeKind::CollectionCreated {
+                    dimensions,
+                    settings,
+                },
+            ));
+        }
+        6 => {
+            let name = collections
+                .remove(&(frame.id as u16))
+                .map(|entry| entry.0)
+                .unwrap_or_default();
+            events.push((name, ChangeKind::CollectionDropped));
+        }
+        7 => {
+            let settings = format::decode_settings(body).map_err(|_| corrupt())?;
+            let name = collections
+                .get(&(frame.id as u16))
+                .map(|entry| entry.0.clone())
+                .unwrap_or_default();
+            events.push((name, ChangeKind::SettingsUpdated { settings }));
+        }
+        _ => return Ok(None),
+    }
+    Ok(Some(events))
+}
+
+fn undecodable(offset: u64) -> Error {
+    Error::Corrupt {
+        offset,
+        reason: "undecodable frame in change feed",
+    }
+}
+
+/// The op-15 frames that a compact image's graph block restates. Only the
+/// test-gated supplement carries them; production images report none.
+#[cfg_attr(not(test), allow(unused_variables))]
+fn snapshot_frames(
+    supplement: Option<crate::compact::Supplement>,
+    sequence: u64,
+    at: u64,
+) -> Result<Vec<format::RawFrame>> {
+    #[cfg_attr(not(test), allow(unused_mut))]
+    let mut frames = Vec::new();
+    #[cfg(test)]
+    if let Some(crate::compact::Supplement::GraphSnapshot(bodies)) = supplement {
+        let invalid = || Error::Corrupt {
+            offset: at,
+            reason: "invalid compact graph snapshot",
+        };
+        for body in bodies {
+            let encoded =
+                crate::property_graph::engine::encode_body(&body).map_err(|_| invalid())?;
+            let count = u32::try_from(body.entries.len()).map_err(|_| invalid())?;
+            let plain = format::graph_snapshot_frame(sequence, count, &encoded);
+            frames.push(format::RawFrame {
+                operation: format::OP_GRAPH_SNAPSHOT,
+                collection: body.graph_id.0,
+                sequence,
+                id: 0,
+                count,
+                disk: plain.clone(),
+                plain,
+            });
+        }
+    }
+    Ok(frames)
+}
+
+/// Gap 3: a page of the graph feed with exactly `graph_events`, with the
+/// derived blocks a compact image skipped. `Empty` is the legacy reader's
+/// page, unchanged; `Ttl` is the TTL projection, paged by unit.
+pub(crate) fn read_graph_changes<R: Read + Seek>(
+    file: &mut R,
+    key: Option<&EncryptionKey>,
+    known: Option<&crate::crypto::Cipher>,
+    cursor: &GraphFeedCursor,
+    graph_events: GraphEventSet,
+    max_events: usize,
+) -> std::result::Result<(GraphFeedBatch, crate::compact::Skips), GraphFeedError> {
+    if cursor.graph_events != graph_events {
+        return Err(GraphFeedError::CursorModeMismatch {
+            cursor: cursor.graph_events,
+            requested: graph_events,
+        });
+    }
+    match graph_events {
+        GraphEventSet::Empty => {
+            let (batch, skipped) = read_changes(file, key, known, &cursor.position, max_events)?;
+            let changes = batch
+                .changes
+                .into_iter()
+                .map(|change| GraphFeedChange {
+                    change,
+                    ttl: Vec::new(),
+                })
+                .collect();
+            let next = GraphFeedCursor::at_commit(batch.next, GraphEventSet::Empty);
+            let batch = GraphFeedBatch {
+                changes,
+                next,
+                has_more: batch.has_more,
+                head: batch.head,
+            };
+            Ok((batch, skipped))
+        }
+        GraphEventSet::Ttl => {
+            let header = format::read_log_header_with(file, key, known)?;
+            let lineage = header.lineage.ok_or(Error::ChangeFeedRequiresUpgrade)?;
+            let position = cursor.position;
+            if position.lineage != 0 && position.lineage != lineage {
+                return Err(Error::CursorCompacted {
+                    cursor_lineage: position.lineage,
+                    current_lineage: lineage,
+                }
+                .into());
+            }
+            if position.lineage == 0 && position.sequence != 0 {
+                return Err(Error::InvalidCursor("sequence requires a lineage").into());
+            }
+            ttl_scan(
+                file,
+                &header,
+                lineage,
+                (position.sequence, cursor.ordinal),
+                max_events.clamp(1, MAX_FEED_BATCH),
+            )
+        }
+    }
+}
+
+/// The TTL projection of every frame after `cursor` (a sequence and the
+/// last consumed ordinal of it, if inside it). The tracker replays the log
+/// from its start; each commit after the cursor is expanded
+/// ([`ttl_chunk::expand`]) and delivered by whole units, the first even
+/// above `max_events`. Once a unit does not fit, the rest of the log is
+/// only read for its head.
+fn ttl_scan<R: Read + Seek>(
+    file: &mut R,
+    header: &LogHeader,
+    lineage: u64,
+    cursor: (u64, Option<u32>),
+    max_events: usize,
+) -> std::result::Result<(GraphFeedBatch, crate::compact::Skips), GraphFeedError> {
+    let (after, ordinal) = cursor;
+    let mut collections: BTreeMap<u16, (String, usize)> = BTreeMap::new();
+    collections.insert(0, ("default".to_string(), header.dimensions));
+    let mut offset = header.start;
+    let mut head = 0u64;
+    let mut changes: Vec<GraphFeedChange> = Vec::new();
+    let mut next = cursor;
+    let mut anchor_ms: Option<u64> = None;
+    let mut has_more = false;
+    // An ordinal names an event of a commit that must be read.
+    let mut found = ordinal.is_none();
+    let mut graphs = crate::property_graph::ttl_feed::TtlGraphs::new(header.flags);
+    let mut check = crate::compact::ImageCheck::new(
+        header.version,
+        header.flags,
+        header.dimensions,
+        header.collection_floor,
+    );
+    while let Some(frame) = format::next_checked_frame(file, header, offset, check.as_mut())? {
+        let at = offset;
+        offset += frame.disk.len() as u64;
+        let supplement = if let Some(check) = &mut check {
+            check.frame(&frame, at)?
+        } else {
+            None
+        };
+        if frame.operation == OP_TIME_ANCHOR {
+            anchor_ms = frame
+                .plain
+                .get(format::PREFIX_SIZE..format::PREFIX_SIZE + 8)
+                .map(|bytes| u64::from_le_bytes(bytes.try_into().expect("8 bytes")));
+            continue;
+        }
+        // The snapshot's frames end at the first frame that is neither one
+        // of them nor a compact block (which may restate graphs too).
+        if !matches!(
+            frame.operation,
+            format::OP_GRAPH_SNAPSHOT | format::OP_COMPACT_BLOCK
+        ) {
+            graphs.end_snapshot()?;
+        }
+        if frame.operation == format::OP_ADVANCE {
+            if after < frame.sequence {
+                return Err(Error::CursorBeforeHistory {
+                    cursor: after,
+                    floor: frame.sequence,
+                }
+                .into());
+            }
+            // The image cannot restate the rest of a commit at its floor.
+            if after == frame.sequence && ordinal.is_some() {
+                return Err(GraphFeedError::CursorBeforeHistory {
+                    cursor: after,
+                    floor: frame.sequence,
+                });
+            }
+            head = frame.sequence;
+            continue;
+        }
+        head = head.max(frame.sequence);
+        let committed_at = anchor_ms.take();
+        if has_more {
+            continue;
+        }
+        let events = match record_events(&frame, header, &mut collections, offset)? {
+            Some(events) => events
+                .into_iter()
+                .map(|(collection, kind)| TtlEvent {
+                    collection,
+                    kind,
+                    ttl: Vec::new(),
+                    reclaim: false,
+                })
+                .collect(),
+            None => match frame.operation {
+                crate::property_graph::engine::codec::OP_GRAPH | format::OP_GRAPH_SNAPSHOT => {
+                    graphs.frame(&frame, at, &collections)?
+                }
+                format::OP_RECORD_BLOCK => Vec::new(),
+                format::OP_COMPACT_BLOCK if check.is_some() => {
+                    let mut events = Vec::new();
+                    for snapshot in snapshot_frames(supplement, frame.sequence, at)? {
+                        events.extend(graphs.frame(&snapshot, at, &collections)?);
+                    }
+                    events
+                }
+                _ => return Err(undecodable(offset).into()),
+            },
+        };
+        if frame.sequence < after || (frame.sequence == after && ordinal.is_none()) {
+            continue;
+        }
+        // A commit with temporal entries is never split.
+        let whole = events.iter().any(|event| {
+            matches!(&event.kind, ChangeKind::GraphBatch { operations, .. }
+                if operations.iter().any(|operation| matches!(operation, GraphChange::Temporal(_))))
+        });
+        let expanded = ttl_chunk::expand(frame.sequence, committed_at, events, whole, at)?;
+        let mut start = 0;
+        if frame.sequence == after
+            && let Some(ordinal) = ordinal
+        {
+            start = ordinal as usize + 1;
+            if start > expanded.events.len() {
+                return Err(Error::InvalidCursor("cursor ordinal beyond its commit").into());
+            }
+            found = true;
+        }
+        let mut pending = expanded.events.into_iter().skip(start);
+        let mut delivered = start;
+        for end in expanded.ends {
+            if end <= delivered {
+                continue;
+            }
+            let unit = end - delivered;
+            if !changes.is_empty() && changes.len() + unit > max_events {
+                has_more = true;
+                break;
+            }
+            changes.extend(pending.by_ref().take(unit));
+            delivered = end;
+            next = (frame.sequence, Some(delivered as u32 - 1));
+        }
+        if !has_more {
+            // The whole commit is consumed, including an eventless one.
+            next = (frame.sequence, None);
+        }
+    }
+    if let Some(check) = &check {
+        check.end(offset)?;
+    }
+    graphs.end_snapshot()?;
+    if after > head {
+        return Err(Error::CursorAhead {
+            cursor: after,
+            head,
+        }
+        .into());
+    }
+    if !found {
+        return Err(Error::InvalidCursor("cursor ordinal names no commit").into());
+    }
+    let position = FeedCursor {
+        lineage,
+        sequence: next.0,
+    };
+    let batch = GraphFeedBatch {
+        changes,
+        next: GraphFeedCursor {
+            position,
+            ordinal: next.1,
+            graph_events: GraphEventSet::Ttl,
+        },
+        has_more,
+        head,
+    };
+    let skipped = check
+        .map(crate::compact::ImageCheck::into_skips)
+        .unwrap_or_default();
+    Ok((batch, skipped))
+}
+
 /// Reads changes from a closed (or copied) log file without opening a
 /// `Database`. Pass `key` for encrypted logs.
 pub fn read_log_changes(
@@ -754,6 +1024,31 @@ pub fn read_log_changes(
 ) -> Result<ChangeBatch> {
     let mut file = std::fs::File::open(path.as_ref())?;
     let (batch, skipped) = read_changes(&mut file, key, None, cursor, max_events)?;
+    crate::compact::report(&skipped, "change_feed");
+    Ok(batch)
+}
+
+/// Gap 3 (unreleased): reads a page of the graph feed with exactly
+/// `graph_events` from a closed (or copied) log file or log directory,
+/// without opening a `Database`. Pass `key` for encrypted logs. See
+/// [`Database::graph_changes_after`](crate::Database::graph_changes_after)
+/// for the cursor, paging and errors.
+pub fn read_log_graph_changes(
+    path: impl AsRef<Path>,
+    key: Option<&EncryptionKey>,
+    cursor: &GraphFeedCursor,
+    graph_events: GraphEventSet,
+    max_events: usize,
+) -> std::result::Result<GraphFeedBatch, GraphFeedError> {
+    let path = path.as_ref();
+    let (batch, skipped) = if path.is_dir() {
+        let chain = crate::directory::open(path, crate::directory::Access::ReadShared)?;
+        let mut file = crate::LockedFile::chain(chain);
+        read_graph_changes(&mut file, key, None, cursor, graph_events, max_events)?
+    } else {
+        let mut file = std::fs::File::open(path).map_err(Error::from)?;
+        read_graph_changes(&mut file, key, None, cursor, graph_events, max_events)?
+    };
     crate::compact::report(&skipped, "change_feed");
     Ok(batch)
 }

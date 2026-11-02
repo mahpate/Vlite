@@ -13,12 +13,15 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 
-use crate::changes::{ChangeKind, GraphChange};
-use crate::{Error, Metadata, Mutation, Record, Result, format};
+use crate::changes::{
+    ChangeKind, GraphChange, GraphEventSet, GraphFeedBatch, GraphFeedCursor, GraphFeedError,
+};
+use crate::{Database, Error, Metadata, Mutation, Record, Result, format};
 
-use super::change::{GraphRemovalReason, GraphTtl};
+use super::change::{GraphRemovalReason, GraphTtl, TemporalChange};
 use super::convert::metadata_from_properties;
-use super::engine::GraphEntry;
+use super::engine::codec::TemporalEntry;
+use super::engine::{GraphEntry, SnapshotBuilder};
 
 #[cfg(test)]
 mod tests;
@@ -73,12 +76,77 @@ pub(crate) struct TtlEvent {
     pub(crate) reclaim: bool,
 }
 
+impl Database {
+    /// Gap 3 (unreleased): a page of committed changes after `cursor`, with
+    /// exactly the optional graph events `graph_events` selects.
+    ///
+    /// [`GraphEventSet::Empty`] is the legacy feed of
+    /// [`changes_after`](Database::changes_after), each change wrapped with
+    /// an empty `ttl`. [`GraphEventSet::Ttl`] also reports graph TTL: each
+    /// logged deadline change as an otherwise-empty node or edge patch, and
+    /// each logged expiry reclaim as its edge deletes, detaches and node
+    /// deletes, with one [`GraphTtl`](crate::changes::GraphTtl) annotation
+    /// per graph operation. Removals come only from reclaims in the log,
+    /// never from the reader's clock. A large reclaim is delivered in
+    /// chunks, so `next` may stand inside a commit; pass it back unchanged.
+    /// A page holds whole units and at least one; `max_events` is clamped
+    /// to `1..=10000`.
+    ///
+    /// Errors: a cursor bound to another set is
+    /// [`GraphFeedError::CursorModeMismatch`] (convert a boundary with
+    /// [`GraphFeedCursor::at_commit`]); a split cursor at a checkpoint
+    /// floor is [`GraphFeedError::CursorBeforeHistory`]; a reclaim
+    /// operation whose event exceeds 16 MiB is
+    /// [`GraphFeedError::ResponseTooLarge`]; everything the legacy feed
+    /// refuses (lineage, ahead, before history, corruption, temporal
+    /// entries) is [`GraphFeedError::Engine`], and an ordinal naming no
+    /// event is `Engine(Error::InvalidCursor)`.
+    pub fn graph_changes_after(
+        &self,
+        cursor: &GraphFeedCursor,
+        graph_events: GraphEventSet,
+        max_events: usize,
+    ) -> std::result::Result<GraphFeedBatch, GraphFeedError> {
+        self.lineage.ok_or(Error::ChangeFeedRequiresUpgrade)?;
+        // As `changes_after`: never publish commits a crash could lose.
+        self.sync()?;
+        let _scan = self.lock_log_scan()?;
+        let mut file = &self.file;
+        crate::changes::read_graph_changes(
+            &mut file,
+            None,
+            self.cipher.as_ref(),
+            cursor,
+            graph_events,
+            max_events,
+        )
+        .map(|(batch, _)| batch)
+    }
+}
+
+/// Where the log is relative to its op-15 snapshot, which a checkpoint
+/// image restates before any op-12 commit, at one sequence.
+enum Snapshot {
+    /// No op-12 frame and no snapshot yet.
+    Before,
+    /// Snapshot frames at `sequence` from the frame at `first` on, loaded
+    /// through the engine's snapshot path to check their order.
+    Open {
+        builder: Box<SnapshotBuilder>,
+        sequence: u64,
+        first: u64,
+    },
+    /// A snapshot ended or an op-12 frame was read: no snapshot may follow.
+    Done,
+}
+
 /// Graph state the TTL projection needs. `owners` maps each attached
 /// `(collection, record)` to its `(graph, node)` across graphs.
 pub(crate) struct TtlGraphs {
     graphs: BTreeMap<u16, Graph>,
     owners: BTreeMap<(u16, u64), (u16, u64)>,
     flags: u16,
+    snapshot: Snapshot,
 }
 
 /// Static reasons of the tracker's `Error::Corrupt`.
@@ -98,6 +166,8 @@ pub(crate) mod reason {
     pub(crate) const ATTACHED: &str = "graph node or record attached twice";
     pub(crate) const DETACHED: &str = "graph detach without an attachment";
     pub(crate) const ID_SPACE: &str = "graph ID space exhausted";
+    pub(crate) const SNAPSHOT: &str = "invalid graph snapshot";
+    pub(crate) const SNAPSHOT_ORDER: &str = "graph snapshot out of order";
 }
 
 fn labels(set: &BTreeSet<String>) -> Vec<String> {
@@ -151,14 +221,35 @@ impl TtlGraphs {
             graphs: BTreeMap::new(),
             owners: BTreeMap::new(),
             flags,
+            snapshot: Snapshot::Before,
         }
+    }
+
+    /// Ends an open snapshot where the frames restating it end: it must be
+    /// complete and canonical, as full replay loads it.
+    pub(crate) fn end_snapshot(&mut self) -> Result<()> {
+        if !matches!(self.snapshot, Snapshot::Open { .. }) {
+            return Ok(());
+        }
+        if let Snapshot::Open { builder, first, .. } =
+            std::mem::replace(&mut self.snapshot, Snapshot::Done)
+        {
+            builder.finish().map_err(|_| Error::Corrupt {
+                offset: first,
+                reason: reason::SNAPSHOT,
+            })?;
+        }
+        Ok(())
     }
 
     /// Projects one checksum-verified op-12 or op-15 frame that starts at
     /// `offset`, decoded by the rule full replay applies
     /// ([`super::temporal::decode_logged`]). `collections` maps collection
-    /// IDs to names and dimensions. Temporal entries are refused with
-    /// `UnsupportedFeature(FLAG_TEMPORAL)`, never omitted.
+    /// IDs to names and dimensions. Op-15 snapshot frames only hydrate the
+    /// tracker: they restate history at the floor and report nothing.
+    /// Temporal entries are refused with `UnsupportedFeature(FLAG_TEMPORAL)`,
+    /// never omitted, while temporal support is off; a test that switches
+    /// it on gets them as unannotated `GraphChange::Temporal` operations.
     pub(crate) fn frame(
         &mut self,
         frame: &format::RawFrame,
@@ -168,6 +259,29 @@ impl TtlGraphs {
         let corrupt = |reason| Error::Corrupt { offset, reason };
         let sequence = frame.sequence;
         let body = super::temporal::decode_logged(self.flags, frame, offset)?;
+        let restated = frame.operation == format::OP_GRAPH_SNAPSHOT;
+        if restated {
+            if let Snapshot::Before = self.snapshot {
+                self.snapshot = Snapshot::Open {
+                    builder: Box::new(SnapshotBuilder::new(sequence)),
+                    sequence,
+                    first: offset,
+                };
+            }
+            match &mut self.snapshot {
+                Snapshot::Open {
+                    builder,
+                    sequence: restated_at,
+                    ..
+                } if *restated_at == sequence => builder
+                    .push(body.clone())
+                    .map_err(|_| corrupt(reason::SNAPSHOT))?,
+                _ => return Err(corrupt(reason::SNAPSHOT_ORDER)),
+            }
+        } else {
+            self.end_snapshot()?;
+            self.snapshot = Snapshot::Done;
+        }
         let graph_id = body.graph_id.0;
         let collection_name = |collection: u16| {
             collections
@@ -279,7 +393,7 @@ impl TtlGraphs {
                     reclaimed.flush(&graph_name, sequence, true, &mut events);
                     continue;
                 }
-                GraphEntry::Temporal(_) => {
+                GraphEntry::Temporal(_) if !super::temporal::supported() => {
                     return Err(Error::UnsupportedFeature(format::FLAG_TEMPORAL));
                 }
                 _ => {}
@@ -579,17 +693,128 @@ impl TtlGraphs {
                     )
                 }
                 GraphEntry::PutSchema { schema } => (GraphChange::SchemaUpdated { schema }, None),
+                GraphEntry::Temporal(entry) => {
+                    (GraphChange::Temporal(temporal(graph, entry, offset)?), None)
+                }
                 GraphEntry::CreateGraph { .. }
                 | GraphEntry::DropGraph
                 | GraphEntry::VectorMutation { .. }
-                | GraphEntry::Reclaim { .. }
-                | GraphEntry::Temporal(_) => continue,
+                | GraphEntry::Reclaim { .. } => continue,
             };
             run.push(operation, ttl);
         }
         flush(&mut run, &mut events, &self.graphs)?;
+        if restated {
+            // Hydrated only: history at the floor is not reported.
+            events.clear();
+        }
         Ok(events)
     }
+}
+
+/// One temporal entry's change (test-only temporal support): a new
+/// temporal edge is tracked like an edge put, and every reference must
+/// resolve. Corrections carry the entry's bounds and new values only.
+fn temporal(graph: &mut Graph, entry: TemporalEntry, offset: u64) -> Result<TemporalChange> {
+    use super::temporal::segment_out;
+    let corrupt = |reason| Error::Corrupt { offset, reason };
+    let key = |graph: &Graph, id: u64| {
+        graph
+            .edges
+            .get(&id)
+            .map(|edge| edge.key.clone())
+            .ok_or_else(|| corrupt(reason::EDGE))
+    };
+    let node_key = |graph: &Graph, id: u64| {
+        graph
+            .nodes
+            .get(&id)
+            .map(|node| node.key.clone())
+            .ok_or_else(|| corrupt(reason::NODE))
+    };
+    Ok(match entry {
+        TemporalEntry::PutEdge {
+            edge_id,
+            source,
+            destination,
+            relationship,
+            key,
+            segments,
+            ..
+        } => {
+            let id = edge_id.0;
+            let source_key = node_key(graph, source.0)?;
+            let destination_key = node_key(graph, destination.0)?;
+            let created = !graph.edges.contains_key(&id);
+            if created {
+                graph.next_edge_id = allocate(graph.next_edge_id, id, reason::EDGE_ID, offset)?;
+                if let Some(key) = &key
+                    && !graph.edge_keys.insert(key.clone())
+                {
+                    return Err(corrupt(reason::EDGE_KEY));
+                }
+                graph.edges.insert(
+                    id,
+                    Edge {
+                        key: key.clone(),
+                        source: source.0,
+                        destination: destination.0,
+                        expires_at_ms: None,
+                    },
+                );
+            }
+            TemporalChange::EdgePut {
+                id,
+                key,
+                source: source.0,
+                source_key,
+                relationship,
+                destination: destination.0,
+                destination_key,
+                segments: segments.iter().map(segment_out).collect(),
+                created,
+            }
+        }
+        TemporalEntry::AppendSegment { edge_id, segment } => TemporalChange::SegmentAppended {
+            id: edge_id.0,
+            key: key(graph, edge_id.0)?,
+            segment: segment_out(&segment),
+        },
+        TemporalEntry::ReplaceSegment {
+            edge_id,
+            valid_from,
+            valid_to,
+            segment,
+        } => TemporalChange::SegmentReplaced {
+            id: edge_id.0,
+            key: key(graph, edge_id.0)?,
+            valid_from,
+            valid_to,
+            segment: segment_out(&segment),
+        },
+        TemporalEntry::CloseSegment {
+            edge_id,
+            valid_from,
+            valid_to,
+            at,
+        } => TemporalChange::SegmentClosed {
+            id: edge_id.0,
+            key: key(graph, edge_id.0)?,
+            valid_from,
+            valid_to,
+            at,
+        },
+        TemporalEntry::RemoveSegment {
+            edge_id,
+            valid_from,
+            valid_to,
+        } => TemporalChange::SegmentRemoved {
+            id: edge_id.0,
+            key: key(graph, edge_id.0)?,
+            valid_from,
+            valid_to,
+        },
+    })
 }
 
 fn event(kind: ChangeKind) -> TtlEvent {

@@ -711,6 +711,365 @@ fn ttl_tracker_corrupt() {
     );
 }
 
+/// An op-15 snapshot frame of `entries` for graph 0 at `sequence`.
+fn restated(sequence: u64, entries: Vec<GraphEntry>) -> format::RawFrame {
+    let mut frame = raw(sequence, 0, entries);
+    frame.operation = format::OP_GRAPH_SNAPSHOT;
+    frame.id = 0;
+    frame
+}
+
+#[test]
+fn ttl_tracker_corrupt_snapshot_order() {
+    use reason::{SNAPSHOT, SNAPSHOT_ORDER};
+    let all = collections();
+    let high_water = |next_node_id| GraphEntry::GraphHighWater {
+        next_node_id,
+        next_edge_id: 0,
+    };
+    let opening = || vec![create(), put_node(0, "a", &[]), node_expiry(0, Some(9))];
+    // `(frames, end the snapshot after them, expected reason, offset)`.
+    let cases: Vec<(Vec<format::RawFrame>, bool, &str, u64)> = vec![
+        // A snapshot after an op-12 frame, or after it ended.
+        (
+            vec![raw(5, 0, vec![create()]), restated(5, opening())],
+            false,
+            SNAPSHOT_ORDER,
+            1,
+        ),
+        (
+            vec![
+                restated(5, vec![create(), high_water(0)]),
+                raw(6, 0, vec![put_node(0, "a", &[])]),
+                restated(6, opening()),
+            ],
+            false,
+            SNAPSHOT_ORDER,
+            2,
+        ),
+        // Frames of one snapshot at two sequences.
+        (
+            vec![restated(5, opening()), restated(6, vec![high_water(1)])],
+            false,
+            SNAPSHOT_ORDER,
+            1,
+        ),
+        // Not canonical: IDs descending, a deadline away from its node.
+        (
+            vec![restated(
+                5,
+                vec![create(), put_node(1, "b", &[]), put_node(0, "a", &[])],
+            )],
+            true,
+            SNAPSHOT,
+            0,
+        ),
+        (
+            vec![restated(
+                5,
+                vec![
+                    create(),
+                    put_node(0, "a", &[]),
+                    put_node(1, "b", &[]),
+                    node_expiry(0, Some(9)),
+                ],
+            )],
+            true,
+            SNAPSHOT,
+            0,
+        ),
+        // Incomplete: no closing high-water mark where the frames end,
+        // reported at the snapshot's first frame.
+        (
+            vec![
+                restated(5, opening()),
+                restated(5, vec![put_node(1, "b", &[])]),
+            ],
+            true,
+            SNAPSHOT,
+            0,
+        ),
+    ];
+    for (frames, end, expected, at) in cases {
+        let mut graphs = TtlGraphs::new(format::FLAG_GRAPH | format::FLAG_HISTORY);
+        let mut result = Ok(());
+        for (index, frame) in frames.iter().enumerate() {
+            if let Err(error) = graphs.frame(frame, index as u64, &all) {
+                result = Err(error);
+                break;
+            }
+        }
+        if end && result.is_ok() {
+            result = graphs.end_snapshot();
+        }
+        let error = result.expect_err("corrupt snapshot");
+        assert!(
+            matches!(error, Error::Corrupt { offset, reason } if reason == expected && offset == at),
+            "{expected}: {error:?}"
+        );
+    }
+    // The complete snapshot hydrates without reporting anything; its
+    // deadline drives the next reclaim.
+    let mut graphs = TtlGraphs::new(format::FLAG_GRAPH | format::FLAG_HISTORY);
+    let mut frames = vec![restated(5, opening()), restated(5, vec![high_water(1)])];
+    frames.push(raw(6, 0, vec![reclaim_at(9), high_water(1)]));
+    let mut events = Vec::new();
+    for frame in &frames {
+        events.push(graphs.frame(frame, OFFSET, &all).expect("valid frame"));
+    }
+    assert!(events[0].is_empty() && events[1].is_empty());
+    assert_eq!(
+        events[2],
+        vec![batch(
+            6,
+            vec![(node_deleted(0, "a"), removed(EXPIRED, 9, 9))],
+            true
+        )]
+    );
+}
+
+/// Test-only temporal activation: a commit with a temporal entry is one
+/// paging unit even when its reclaim fills several chunks, and the public
+/// reader still refuses the temporal flag while support is off.
+#[test]
+fn ttl_temporal_whole() {
+    use crate::changes::{GraphEventSet, GraphFeedCursor, GraphFeedError, read_log_graph_changes};
+    use crate::property_graph::temporal::{Activation, enable_temporal};
+    use crate::property_graph::{GraphOp, TemporalOp, TemporalSegment};
+    use crate::{Database, Expected, Metadata};
+
+    let dir = tempfile::tempdir().unwrap();
+    let (plain, path) = (dir.path().join("plain.vlite"), dir.path().join("t.vlite"));
+    let gate = Activation::on();
+    let mut db = Database::create(&plain, 2).unwrap();
+    db.create_graph("g").unwrap();
+    db.close().unwrap();
+    enable_temporal(&plain, &path, None).unwrap();
+    let mut db = Database::open(&path).unwrap();
+    // Hub h with 300 spokes from s, then x and y.
+    let mut ops: Vec<GraphOp> = ["h", "s", "x", "y"]
+        .into_iter()
+        .map(|key| GraphOp::CreateNode {
+            key: key.into(),
+            labels: Vec::new(),
+            properties: Metadata::new(),
+        })
+        .collect();
+    ops.extend((0..300).map(|_| GraphOp::CreateEdge {
+        key: None,
+        source: "s".into(),
+        relationship: "R".into(),
+        destination: "h".into(),
+        properties: Metadata::new(),
+    }));
+    db.graph_mut("g").unwrap().write_batch(&ops).unwrap();
+    let before = db.feed_cursor().unwrap();
+    // One commit: h expires, is reclaimed with its 300 edges before the
+    // next operation, a temporal edge.
+    let temporal = GraphOp::Temporal(TemporalOp::CreateEdge {
+        key: Some("xy".into()),
+        source: "x".into(),
+        relationship: "R".into(),
+        destination: "y".into(),
+        segments: vec![TemporalSegment {
+            valid_from: None,
+            valid_to: None,
+            properties: Metadata::new(),
+        }],
+    });
+    let expire = GraphOp::SetNodeExpiry {
+        key: "h".into(),
+        expires_at_ms: Some(1),
+        expected: Expected::Any,
+    };
+    db.graph_mut("g")
+        .unwrap()
+        .write_batch(&[expire, temporal])
+        .unwrap();
+    db.close().unwrap();
+
+    let cursor = GraphFeedCursor::at_commit(before, GraphEventSet::Ttl);
+    let page = read_log_graph_changes(&path, None, &cursor, GraphEventSet::Ttl, 1).unwrap();
+    let sequence = before.sequence + 1;
+    let shape: Vec<(u64, u32, usize, usize)> = page
+        .changes
+        .iter()
+        .map(|event| match &event.change.kind {
+            ChangeKind::GraphBatch { operations, .. } => (
+                event.change.sequence,
+                event.change.ordinal,
+                operations.len(),
+                operations
+                    .iter()
+                    .filter(|operation| matches!(operation, GraphChange::Temporal(_)))
+                    .count(),
+            ),
+            other => panic!("{other:?}"),
+        })
+        .collect();
+    // The deadline patch, the reclaim of 301 removals in one event (never
+    // cut into chunks) and the temporal run, all in one page of limit 1.
+    assert_eq!(
+        shape,
+        [
+            (sequence, 0, 1, 0),
+            (sequence, 1, 301, 0),
+            (sequence, 2, 1, 1)
+        ]
+    );
+    assert_eq!(page.changes[2].ttl, vec![None]);
+    assert_eq!(page.next.position().sequence, sequence);
+    assert_eq!(page.next.ordinal(), None);
+    assert!(!page.has_more);
+    assert_eq!(page.head, sequence);
+
+    drop(gate);
+    let _off = Activation::set(false);
+    assert!(matches!(
+        read_log_graph_changes(&path, None, &cursor, GraphEventSet::Ttl, 1),
+        Err(GraphFeedError::Engine(Error::UnsupportedFeature(
+            format::FLAG_TEMPORAL
+        )))
+    ));
+}
+
+/// GATED FIXTURE (test-only precision and compact graph blocks, never on
+/// in a release build): a precision checkpoint image restating the graph
+/// as op-15 frames and as a compact graph block hydrates the same
+/// deadlines and attachment, so the first reclaim after the floor reports
+/// the same removals; with the gates off the compact image is refused.
+#[test]
+fn ttl_compact_precision_images_gated() {
+    use crate::changes::{
+        FeedCursor, GraphEventSet, GraphFeedCursor, GraphFeedError, read_log_graph_changes,
+    };
+    use crate::compact::{Activation as Precision, GraphBlocks};
+    use crate::{Database, Expected, Metadata};
+    const LINEAGE: u64 = 0x7717_0000_0000_0003;
+
+    let dir = tempfile::tempdir().unwrap();
+    let source_path = dir.path().join("source.vlite");
+    let mut db = Database::create(&source_path, 2).unwrap();
+    db.put(1, &[1.0, 0.0], b"one").unwrap();
+    db.create_graph("g").unwrap();
+    {
+        let mut graph = db.graph_mut("g").unwrap();
+        graph.create_node("a", &[], &Metadata::new()).unwrap();
+        graph.create_node("b", &[], &Metadata::new()).unwrap();
+        graph
+            .create_edge(Some("ab"), "a", "R", "b", &Metadata::new())
+            .unwrap();
+        graph.attach("b", "default", 1).unwrap();
+        // Due already, but stored until the next write reclaims it.
+        graph.set_node_expiry("b", Some(2), Expected::Any).unwrap();
+    }
+    db.close().unwrap();
+    let mut source =
+        format::load_with(&mut std::fs::File::open(&source_path).unwrap(), None).unwrap();
+    source.collections.get_mut(&0).unwrap().precision =
+        Some(crate::compact::catalog::Precision::Float32);
+    let floor = source.sequence;
+    let ttl = GraphEventSet::Ttl;
+    let at_floor = GraphFeedCursor::at_commit(
+        FeedCursor {
+            lineage: LINEAGE,
+            sequence: floor,
+        },
+        ttl,
+    );
+    let mut compact_image = None;
+    for graph_blocks in [true, false] {
+        let _precision = Precision::on();
+        let _blocks = GraphBlocks::set(graph_blocks);
+        let mut bytes = Vec::new();
+        crate::maintenance::write_v5_image(
+            &mut bytes,
+            &source,
+            LINEAGE,
+            None,
+            None,
+            None,
+            format::FLAG_GRAPH | format::FLAG_PRECISION,
+            floor,
+        )
+        .unwrap();
+        let path = dir.path().join(format!("image-{graph_blocks}.vlite"));
+        std::fs::write(&path, &bytes).unwrap();
+        if graph_blocks {
+            compact_image = Some(path.clone());
+        }
+        let mut db = Database::open(&path).unwrap();
+        db.graph_mut("g")
+            .unwrap()
+            .create_node("z", &[], &Metadata::new())
+            .unwrap();
+        let page = db.graph_changes_after(&at_floor, ttl, 100).unwrap();
+        db.close().unwrap();
+        assert_eq!(
+            read_log_graph_changes(&path, None, &at_floor, ttl, 100).unwrap(),
+            page
+        );
+        // The reclaim clock is the writer's; everything else is literal.
+        let at = match page.changes[0].ttl.first() {
+            Some(Some(GraphTtl::ExpiryRemoval { removed_at_ms, .. })) => *removed_at_ms,
+            other => panic!("{other:?}"),
+        };
+        assert!(at >= 2);
+        let expected = [
+            batch(
+                floor + 1,
+                vec![
+                    (edge_deleted(0, Some("ab")), removed(NODE_EXPIRED, 2, at)),
+                    (detached(1, "b", "default", 1), None),
+                    (node_deleted(1, "b"), removed(EXPIRED, 2, at)),
+                ],
+                true,
+            ),
+            batch(
+                floor + 1,
+                vec![(node_upserted(2, "z", &[], true), updated(None, false))],
+                false,
+            ),
+        ];
+        let actual: Vec<(u64, u32, &ChangeKind, &Vec<Option<GraphTtl>>)> = page
+            .changes
+            .iter()
+            .map(|event| {
+                let change = &event.change;
+                (change.sequence, change.ordinal, &change.kind, &event.ttl)
+            })
+            .collect();
+        let expected: Vec<(u64, u32, &ChangeKind, &Vec<Option<GraphTtl>>)> = expected
+            .iter()
+            .zip(0..)
+            .map(|(event, ordinal)| (floor + 1, ordinal, &event.kind, &event.ttl))
+            .collect();
+        assert_eq!(actual, expected, "graph blocks {graph_blocks}");
+        assert_eq!((page.head, page.has_more), (floor + 1, false));
+        // Nothing at or below the floor is reported; a split cursor at the
+        // floor is refused as for any checkpoint image.
+        let split = GraphFeedCursor::from_token(&format!(
+            "vlc2.{LINEAGE:016x}.{floor:016x}.00000000.ttl.{:08x}",
+            format::crc32(format!("vlc2.{LINEAGE:016x}.{floor:016x}.00000000.ttl").as_bytes())
+        ))
+        .unwrap();
+        assert!(matches!(
+            read_log_graph_changes(&path, None, &split, ttl, 100),
+            Err(GraphFeedError::CursorBeforeHistory { cursor, floor: at })
+                if cursor == floor && at == floor
+        ));
+    }
+    // Production gates: the compact image is refused, not misread.
+    let refused = read_log_graph_changes(compact_image.unwrap(), None, &at_floor, ttl, 100);
+    assert!(
+        matches!(
+            refused,
+            Err(GraphFeedError::Engine(Error::UnsupportedFeature(_)))
+        ),
+        "{refused:?}"
+    );
+}
+
 type ModelNode = (u64, String, Option<u64>);
 type ModelEdge = (u64, Option<String>, u64, u64, Option<u64>);
 

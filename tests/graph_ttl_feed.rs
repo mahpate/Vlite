@@ -9,7 +9,9 @@ mod ttl_log;
 use tempfile::tempdir;
 use ttl_log::reclaim_fixture;
 use vlite::changes::{Change, ChangeBatch, ChangeKind, FeedCursor, GraphChange, read_log_changes};
-use vlite::changes::{GraphEventSet, GraphFeedCursor, GraphFeedError};
+use vlite::changes::{
+    GraphEventSet, GraphFeedBatch, GraphFeedCursor, GraphFeedError, read_log_graph_changes,
+};
 use vlite::{Database, Error, Metadata, Record};
 
 const LINEAGE: u64 = ttl_log::LINEAGE;
@@ -634,4 +636,565 @@ fn graph_feed_error_display() {
             usize::MAX
         )
     );
+}
+
+// Phase 2 reader: TTL pages, resume and the history floor. Expected streams
+// are written out by hand in `ttl_log::describe` notation.
+
+const TTL: GraphEventSet = GraphEventSet::Ttl;
+
+type GraphRead<'a> = &'a dyn Fn(&GraphFeedCursor, usize) -> Result<GraphFeedBatch, GraphFeedError>;
+
+/// The commit-boundary TTL cursor after `sequence`.
+fn end(sequence: u64) -> GraphFeedCursor {
+    GraphFeedCursor::at_commit(cursor(sequence), TTL)
+}
+
+/// The TTL cursor after event `ordinal` of `sequence`, from its own token.
+fn split(sequence: u64, ordinal: u32) -> GraphFeedCursor {
+    let text = format!("vlc2.{LINEAGE:016x}.{sequence:016x}.{ordinal:08x}.ttl");
+    let token = format!("{text}.{:08x}", ttl_log::crc32(text.as_bytes()));
+    GraphFeedCursor::from_token(&token).unwrap()
+}
+
+fn lines(page: &GraphFeedBatch) -> Vec<String> {
+    page.changes.iter().map(ttl_log::describe).collect()
+}
+
+/// Reads to the end in pages of `limit`: every line and each page's `next`.
+fn drain(
+    read: GraphRead,
+    mut from: GraphFeedCursor,
+    limit: usize,
+    head: u64,
+) -> (Vec<String>, Vec<GraphFeedCursor>) {
+    let (mut all, mut nexts) = (Vec::new(), Vec::new());
+    loop {
+        let page = read(&from, limit).unwrap();
+        // A soft limit: a commit's legacy events are never split.
+        let first = page.changes.first().map(|event| event.change.sequence);
+        assert!(
+            page.changes.len() <= limit.clamp(1, 10_000)
+                || page
+                    .changes
+                    .iter()
+                    .all(|event| Some(event.change.sequence) == first),
+            "{limit}"
+        );
+        assert_eq!(page.next.graph_events(), TTL);
+        all.extend(lines(&page));
+        nexts.push(page.next);
+        if !page.has_more {
+            assert_eq!(page.head, head);
+            break;
+        }
+        assert!(!page.changes.is_empty(), "a continuing page is never empty");
+        assert_ne!(page.next, from, "a continuing page moves the cursor");
+        assert!(page.head >= page.next.position().sequence);
+        from = page.next;
+    }
+    (all, nexts)
+}
+
+fn engine_error(result: Result<GraphFeedBatch, GraphFeedError>) -> Error {
+    match result {
+        Err(GraphFeedError::Engine(error)) => error,
+        other => panic!("{other:?}"),
+    }
+}
+
+/// The 300-node reclaim log: 300 deadlines at 100, eventless commits 4
+/// and 7, and a reclaim chunked 256 + 44 before its ordinary operation.
+fn chunked_log() -> ttl_log::Log {
+    use ttl_log::Entry::*;
+    let mut entries = Vec::new();
+    for id in 0..300u64 {
+        let key: &'static str = Box::leak(format!("n{id:03}").into_boxed_str());
+        entries.push(PutNode(id, key, &[]));
+        entries.push(NodeExpiry(id, Some(100)));
+    }
+    let mut log = ttl_log::Log::new(2);
+    log.put(1, &[1.0, 0.0], b"r1") // 1
+        .graph(0, &[CreateGraph("g")]) // 2
+        .graph(0, &entries) // 3
+        .graph(0, &[HighWater(300, 0)]) // 4
+        .graph(0, &[Reclaim(100), PutNode(300, "z", &[])]) // 5
+        .delete(1) // 6
+        .graph(0, &[Reclaim(100), HighWater(301, 0)]); // 7
+    log
+}
+
+fn chunked_expected() -> Vec<String> {
+    let created: Vec<String> = (0..300)
+        .flat_map(|id| {
+            [
+                format!("node+{id}:n{id:03} ttl=null"),
+                format!("node~{id}:n{id:03} ttl=100!"),
+            ]
+        })
+        .collect();
+    let removed = |ids: std::ops::Range<u32>| -> String {
+        ids.map(|id| format!("node-{id}:n{id:03} expired=100@100"))
+            .collect::<Vec<_>>()
+            .join(", ")
+    };
+    vec![
+        "1/0 put 1".into(),
+        "2/0 create g".into(),
+        format!("3/0 g: {}", created.join(", ")),
+        format!("5/0 g: {}", removed(0..256)),
+        format!("5/1 g: {}", removed(256..300)),
+        "5/2 g: node+300:z ttl=null".into(),
+        "6/0 delete 1".into(),
+    ]
+}
+
+/// Resuming from every boundary, at every page size, continues the one
+/// hand-built stream; invalid ordinals, other sets and lineages are refused.
+#[test]
+fn ttl_resume_every_chunk() {
+    let bytes = chunked_log().bytes;
+    let dir = tempdir().unwrap();
+    let path = dir.path().join("chunked.vlite");
+    std::fs::write(&path, &bytes).unwrap();
+    let memory = Database::open_from_bytes(bytes, None).unwrap();
+    let expected = chunked_expected();
+    // (cursor, events already consumed)
+    let boundaries = [
+        (GraphFeedCursor::beginning(TTL), 0),
+        (end(1), 1),
+        (split(1, 0), 1),
+        (end(2), 2),
+        (end(3), 3),
+        (split(3, 0), 3),
+        (end(4), 3),
+        (split(5, 0), 4),
+        (split(5, 1), 5),
+        (split(5, 2), 6),
+        (end(5), 6),
+        (split(6, 0), 7),
+        (end(6), 7),
+        (end(7), 7),
+    ];
+    let closed = |at: &GraphFeedCursor, limit| read_log_graph_changes(&path, None, at, TTL, limit);
+    let copy = |at: &GraphFeedCursor, limit| memory.graph_changes_after(at, TTL, limit);
+    // The closed reads run first: an open handle locks the file.
+    let db = std::cell::OnceCell::new();
+    let live = |at: &GraphFeedCursor, limit| {
+        db.get_or_init(|| Database::open(&path).unwrap())
+            .graph_changes_after(at, TTL, limit)
+    };
+    for at in [split(5, 1), end(3)] {
+        assert!(matches!(
+            read_log_graph_changes(&path, None, &at, GraphEventSet::Empty, 1),
+            Err(GraphFeedError::CursorModeMismatch {
+                cursor: GraphEventSet::Ttl,
+                requested: GraphEventSet::Empty
+            })
+        ));
+    }
+    for read in [&closed as GraphRead, &copy, &live] {
+        for (from, consumed) in boundaries {
+            for limit in [0, 1, 2, 3, 10_000, 10_001] {
+                let (all, _) = drain(read, from, limit, 7);
+                assert_eq!(all, expected[consumed..], "{from:?} limit {limit}");
+            }
+        }
+        let (_, nexts) = drain(read, GraphFeedCursor::beginning(TTL), 1, 7);
+        assert_eq!(
+            nexts,
+            [
+                end(1),
+                end(2),
+                end(4),
+                split(5, 0),
+                split(5, 1),
+                end(5),
+                end(7)
+            ]
+        );
+        let last = read(&end(7), 1).unwrap();
+        assert_eq!(
+            (last.changes.len(), last.next, last.has_more),
+            (0, end(7), false)
+        );
+
+        for invalid in [split(5, 3), split(4, 0), split(2, 1), split(7, 0)] {
+            assert!(
+                matches!(engine_error(read(&invalid, 1)), Error::InvalidCursor(_)),
+                "{invalid:?}"
+            );
+        }
+        assert!(matches!(
+            engine_error(read(&end(8), 1)),
+            Error::CursorAhead { cursor: 8, head: 7 }
+        ));
+        let other = FeedCursor {
+            lineage: 7,
+            sequence: 3,
+        };
+        assert!(matches!(
+            engine_error(read(&GraphFeedCursor::at_commit(other, TTL), 1)),
+            Error::CursorCompacted {
+                cursor_lineage: 7,
+                current_lineage: LINEAGE
+            }
+        ));
+        let v1 = GraphFeedCursor::at_commit(cursor(3), GraphEventSet::Empty);
+        assert!(matches!(
+            read(&v1, 1),
+            Err(GraphFeedError::CursorModeMismatch {
+                cursor: GraphEventSet::Empty,
+                requested: GraphEventSet::Ttl
+            })
+        ));
+    }
+    let db = db.into_inner().unwrap();
+    for at in [split(5, 1), end(3)] {
+        assert!(matches!(
+            db.graph_changes_after(&at, GraphEventSet::Empty, 1),
+            Err(GraphFeedError::CursorModeMismatch {
+                cursor: GraphEventSet::Ttl,
+                requested: GraphEventSet::Empty
+            })
+        ));
+    }
+    db.close().unwrap();
+}
+
+/// The reclaim fixture from the open handle, the closed file, an in-memory
+/// copy and a preserving directory relocation: one literal stream.
+#[test]
+fn ttl_live_closed_parity() {
+    let bytes = reclaim_fixture().bytes;
+    let dir = tempdir().unwrap();
+    let path = dir.path().join("reclaim.vlite");
+    std::fs::write(&path, &bytes).unwrap();
+    let directory = dir.path().join("reclaim.dir");
+    vlite::maintenance::convert_to_directory(&path, &directory).unwrap();
+    let memory = Database::open_from_bytes(bytes, None).unwrap();
+    let closed = |at: &GraphFeedCursor, limit| read_log_graph_changes(&path, None, at, TTL, limit);
+    let copy = |at: &GraphFeedCursor, limit| memory.graph_changes_after(at, TTL, limit);
+    let moved =
+        |at: &GraphFeedCursor, limit| read_log_graph_changes(&directory, None, at, TTL, limit);
+    // The closed reads run first: an open handle locks the file.
+    let db = std::cell::OnceCell::new();
+    let live = |at: &GraphFeedCursor, limit| {
+        db.get_or_init(|| Database::open(&path).unwrap())
+            .graph_changes_after(at, TTL, limit)
+    };
+    for read in [&closed as GraphRead, &copy, &live] {
+        for limit in [1, 3, 10_000] {
+            let (all, _) = drain(read, GraphFeedCursor::beginning(TTL), limit, 14);
+            assert_eq!(all, ttl_log::RECLAIM_TTL, "limit {limit}");
+        }
+        let (all, _) = drain(read, split(7, 0), 2, 14);
+        assert_eq!(all, ttl_log::RECLAIM_TTL[7..]);
+        let (all, _) = drain(read, split(13, 0), 2, 14);
+        assert_eq!(all, ttl_log::RECLAIM_TTL[15..]);
+    }
+    db.into_inner().unwrap().close().unwrap();
+    // The relocated directory restates everything through 14 under the
+    // same lineage: earlier cursors meet the floor rule, not deletes.
+    let page = moved(&end(14), 10).unwrap();
+    assert_eq!((page.changes, page.next, page.head), (vec![], end(14), 14));
+    assert!(matches!(
+        engine_error(moved(&end(6), 10)),
+        Error::CursorBeforeHistory {
+            cursor: 6,
+            floor: 14
+        }
+    ));
+    assert!(matches!(
+        moved(&split(14, 0), 10),
+        Err(GraphFeedError::CursorBeforeHistory {
+            cursor: 14,
+            floor: 14
+        })
+    ));
+    let reopened = Database::open(&directory).unwrap();
+    assert_eq!(
+        reopened
+            .graph_changes_after(&end(14), TTL, 10)
+            .unwrap()
+            .head,
+        14
+    );
+}
+
+/// The log of `ttl_restart_no_clock`: deadline 1 has long passed, but no
+/// reclaim is logged.
+fn unreclaimed() -> ttl_log::Log {
+    use ttl_log::Entry::*;
+    let mut log = ttl_log::Log::new(2);
+    log.graph(0, &[CreateGraph("g")]).graph(
+        0,
+        &[
+            PutNode(0, "a", &[]),
+            NodeExpiry(0, Some(1)),
+            PutNode(1, "b", &[]),
+            NodeExpiry(1, Some(u64::MAX)),
+            PutEdge(0, 0, 1, "R", Some("ab")),
+        ],
+    );
+    log
+}
+
+/// Removals come only from logged reclaim clocks, never the reader's.
+#[test]
+fn ttl_restart_no_clock() {
+    let expected = [
+        "1/0 create g",
+        "2/0 g: node+0:a ttl=null, node~0:a ttl=1!, node+1:b ttl=null, \
+         node~1:b ttl=18446744073709551615!, edge+0:ab(0>1) ttl=null",
+    ];
+    let bytes = unreclaimed().bytes;
+    let dir = tempdir().unwrap();
+    let path = dir.path().join("due.vlite");
+    std::fs::write(&path, &bytes).unwrap();
+    let beginning = GraphFeedCursor::beginning(TTL);
+    let first = read_log_graph_changes(&path, None, &beginning, TTL, 100).unwrap();
+    assert_eq!(lines(&first), expected);
+    std::thread::sleep(std::time::Duration::from_millis(5));
+    let second = read_log_graph_changes(&path, None, &beginning, TTL, 100).unwrap();
+    assert_eq!(second, first);
+    let db = Database::open(&path).unwrap();
+    assert_eq!(db.graph_changes_after(&beginning, TTL, 100).unwrap(), first);
+    db.close().unwrap();
+    let db = Database::open(&path).unwrap();
+    assert_eq!(
+        db.graph_changes_after(&end(2), TTL, 100).unwrap().changes,
+        []
+    );
+    db.close().unwrap();
+    assert_eq!(std::fs::read(&path).unwrap(), bytes);
+
+    let mut log = unreclaimed();
+    log.graph(
+        0,
+        &[
+            ttl_log::Entry::Reclaim(77),
+            ttl_log::Entry::PutNode(2, "c", &[]),
+        ],
+    );
+    std::fs::write(&path, &log.bytes).unwrap();
+    let db = Database::open(&path).unwrap();
+    let page = db.graph_changes_after(&end(2), TTL, 100).unwrap();
+    assert_eq!(
+        lines(&page),
+        [
+            "3/0 g: edge-0:ab node_expired=1@77, node-0:a expired=1@77",
+            "3/1 g: node+2:c ttl=null",
+        ]
+    );
+    db.close().unwrap();
+    assert_eq!(
+        read_log_graph_changes(&path, None, &end(2), TTL, 100).unwrap(),
+        page
+    );
+}
+
+/// A hand-built history image: floor 5, a record block, two op-15 frames
+/// restating deadlines, an edge's own deadline and an attachment, then a
+/// suffix with two logged reclaims.
+fn floor_image() -> ttl_log::Log {
+    use ttl_log::Entry::*;
+    let mut log = ttl_log::Log::with_flags(2, ttl_log::FLAG_GRAPH | ttl_log::FLAG_HISTORY);
+    log.advance(5)
+        .records(&[(1, 2, &[1.0, 0.0], b"r1")])
+        .snapshot(
+            0,
+            &[
+                CreateGraph("g"),
+                PutNode(0, "a", &[]),
+                NodeExpiry(0, Some(100)),
+                PutNode(1, "b", &[]),
+                NodeExpiry(1, Some(200)),
+            ],
+        )
+        .snapshot(
+            0,
+            &[
+                PutEdge(0, 0, 1, "KNOWS", Some("ab")),
+                EdgeExpiry(0, Some(90)),
+                PutEdge(1, 1, 1, "SELF", None),
+                Attach(1, 0, 1),
+                HighWater(2, 2),
+            ],
+        )
+        .graph(0, &[Reclaim(100), PutNode(2, "c", &[])]) // 6
+        .put(2, &[0.0, 1.0], b"r2") // 7
+        .graph(0, &[Reclaim(200), PutNode(3, "d", &[])]); // 8
+    log
+}
+
+const FLOOR_SUFFIX: [&str; 5] = [
+    "6/0 g: edge-0:ab expired=90@100, node-0:a expired=100@100",
+    "6/1 g: node+2:c ttl=null",
+    "7/0 put 2",
+    "8/0 g: edge-1:_ node_expired=200@200, detach 1:default/1, node-1:b expired=200@200",
+    "8/1 g: node+3:d ttl=null",
+];
+
+/// Snapshot deadlines (node and edge) and the snapshot attachment drive the
+/// suffix's reclaims exactly as if the history had been logged.
+#[test]
+fn ttl_image_deadlines() {
+    let bytes = floor_image().bytes;
+    let dir = tempdir().unwrap();
+    let path = dir.path().join("image.vlite");
+    std::fs::write(&path, &bytes).unwrap();
+    let closed = |at: &GraphFeedCursor, limit| read_log_graph_changes(&path, None, at, TTL, limit);
+    let memory = Database::open_from_bytes(bytes, None).unwrap();
+    let copy = |at: &GraphFeedCursor, limit| memory.graph_changes_after(at, TTL, limit);
+    for read in [&closed as GraphRead, &copy] {
+        for limit in [1, 2, 10_000] {
+            let (all, _) = drain(read, end(5), limit, 8);
+            assert_eq!(all, FLOOR_SUFFIX, "limit {limit}");
+        }
+    }
+    // A record block between the snapshot frames ends the snapshot early:
+    // the second frame is out of order, never silently merged.
+    use ttl_log::Entry::*;
+    let mut log = ttl_log::Log::with_flags(2, ttl_log::FLAG_GRAPH | ttl_log::FLAG_HISTORY);
+    log.advance(5)
+        .snapshot(
+            0,
+            &[CreateGraph("g"), PutNode(0, "a", &[]), HighWater(1, 0)],
+        )
+        .records(&[(1, 2, &[1.0, 0.0], b"r1")])
+        .snapshot(0, &[PutNode(1, "b", &[]), NodeExpiry(1, Some(100))])
+        .graph(0, &[Reclaim(100), PutNode(2, "c", &[])]);
+    std::fs::write(&path, &log.bytes).unwrap();
+    let refused = read_log_graph_changes(&path, None, &end(5), TTL, 10);
+    assert!(
+        matches!(
+            &refused,
+            Err(GraphFeedError::Engine(Error::Corrupt {
+                reason: "graph snapshot out of order",
+                ..
+            }))
+        ),
+        "{refused:?}"
+    );
+}
+
+/// Below the floor fails as before; a split cursor at the floor fails with
+/// the typed error; the end-of-commit cursor at the floor resumes. A real
+/// directory checkpoint follows the same rule.
+#[test]
+fn ttl_checkpoint_floor() {
+    let dir = tempdir().unwrap();
+    let path = dir.path().join("image.vlite");
+    std::fs::write(&path, floor_image().bytes).unwrap();
+    let read = |at: &GraphFeedCursor| read_log_graph_changes(&path, None, at, TTL, 100);
+    for (at, sequence) in [
+        (GraphFeedCursor::beginning(TTL), 0),
+        (end(4), 4),
+        (split(4, 0), 4),
+    ] {
+        assert!(
+            matches!(
+                engine_error(read(&at)),
+                Error::CursorBeforeHistory { cursor, floor: 5 } if cursor == sequence
+            ),
+            "{at:?}"
+        );
+    }
+    assert!(matches!(
+        read(&split(5, 0)),
+        Err(GraphFeedError::CursorBeforeHistory {
+            cursor: 5,
+            floor: 5
+        })
+    ));
+    assert_eq!(lines(&read(&end(5)).unwrap()), FLOOR_SUFFIX);
+    assert_eq!(lines(&read(&split(6, 0)).unwrap()), FLOOR_SUFFIX[1..]);
+
+    // A directory checkpoint at the writer's clock: `c` is already due and
+    // the image drops it without a delete; `b` is still live, so the image
+    // restates its deadline and the first write after it falls due logs the
+    // reclaim with the cascade and the detach.
+    let store = dir.path().join("store");
+    let mut db = Database::create_directory(&store, 2, vlite::CreateOptions::default()).unwrap();
+    db.put(1, &[1.0, 0.0], b"one").unwrap();
+    db.create_graph("g").unwrap();
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_millis() as u64;
+    let deadline = now + 1_500;
+    {
+        let mut graph = db.graph_mut("g").unwrap();
+        for key in ["a", "b", "c"] {
+            graph.create_node(key, &[], &Metadata::new()).unwrap();
+        }
+        graph
+            .create_edge(Some("ab"), "a", "R", "b", &Metadata::new())
+            .unwrap();
+        graph.attach("b", "default", 1).unwrap();
+        graph
+            .set_node_expiry("b", Some(deadline), vlite::Expected::Any)
+            .unwrap();
+        graph
+            .set_node_expiry("c", Some(2), vlite::Expected::Any)
+            .unwrap();
+    }
+    db.checkpoint().unwrap();
+    db.close().unwrap();
+    let mut db = Database::open(&store).unwrap();
+    let floor = db.feed_cursor().unwrap().sequence;
+    let at_floor = GraphFeedCursor::at_commit(db.feed_cursor().unwrap(), TTL);
+    while std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_millis() as u64
+        <= deadline
+    {
+        std::thread::sleep(std::time::Duration::from_millis(50));
+    }
+    db.graph_mut("g")
+        .unwrap()
+        .create_node("z", &[], &Metadata::new())
+        .unwrap();
+    let page = db.graph_changes_after(&at_floor, TTL, 100).unwrap();
+    let at = match page.changes[0].ttl[0] {
+        Some(vlite::changes::GraphTtl::ExpiryRemoval { removed_at_ms, .. }) => removed_at_ms,
+        ref other => panic!("{other:?}"),
+    };
+    assert!(at > deadline);
+    let next = floor + 1;
+    assert_eq!(
+        lines(&page),
+        [
+            format!(
+                "{next}/0 g: edge-0:ab node_expired={deadline}@{at}, detach 1:default/1, \
+                 node-1:b expired={deadline}@{at}"
+            ),
+            format!("{next}/1 g: node+3:z ttl=null"),
+        ]
+    );
+    let lineage = db.lineage().unwrap();
+    let text = format!("vlc2.{lineage:016x}.{floor:016x}.00000000.ttl");
+    let split_at_floor =
+        GraphFeedCursor::from_token(&format!("{text}.{:08x}", ttl_log::crc32(text.as_bytes())))
+            .unwrap();
+    db.close().unwrap();
+    let closed = |at: &GraphFeedCursor| read_log_graph_changes(&store, None, at, TTL, 100);
+    assert_eq!(closed(&at_floor).unwrap(), page);
+    assert!(matches!(
+        closed(&split_at_floor),
+        Err(GraphFeedError::CursorBeforeHistory { cursor, floor: f }) if cursor == floor && f == floor
+    ));
+    let before = GraphFeedCursor::at_commit(
+        FeedCursor {
+            lineage,
+            sequence: floor - 1,
+        },
+        TTL,
+    );
+    assert!(matches!(
+        engine_error(closed(&before)),
+        Error::CursorBeforeHistory { .. }
+    ));
 }
