@@ -1,6 +1,7 @@
 # Gap 3: Rust TTL-aware graph feed
 
-Status: **design accepted 2026-11-02**, not implemented or released.
+Status: **design accepted 2026-11-02; implemented in Rust (unreleased), phase 2**
+(see section 13). Not activated, exposed by server/bindings/CLI, or released.
 Slice: `gap3-rust-feed`, phase 1; baseline
 `49c77d6f8f2ed87d85b5a570e74457af248bcd45`.
 All source anchors below refer to that baseline, not a future implementation.
@@ -112,8 +113,10 @@ impl Database {
 &mut std::fmt::Formatter<'_>) -> std::fmt::Result`,
 `std::error::Error::source(&self) -> Option<&(dyn std::error::Error + 'static)>`
 and `From<Error>::from(error: Error) -> Self`; only `Engine` has a source.
-Mismatch displays `cursor_mode_mismatch: cursor and requested graph_events differ`;
-size failure displays `response_too_large: canonical event exceeds 16777216 bytes`.
+Mismatch displays `cursor_mode_mismatch: cursor graph_events {cursor:?} differ from
+requested {requested:?}`, naming both sets; size failure displays
+`response_too_large: canonical event of {bytes} bytes exceeds {limit} bytes`,
+printing the actual size and the limit (16777216).
 No public `Error` variant is added; the wrapper is a typed opt-in error.
 Later handlers map its mismatch to 409 `cursor_mode_mismatch`, and map
 `Engine` with existing rules; they must not inspect error message strings.
@@ -545,3 +548,40 @@ No scanner changes are needed for re-exports and the new impl module.
 These are accepted planning defaults, not implementation, activation,
 relaxation or a release criterion. Static inspection verified cited source
 anchors; phase 2 must establish runtime behaviour and all listed test oracles.
+
+## 13. Implementation record (phase 2)
+
+Implemented as local commits on top of the accepted design; nothing is
+activated, exposed by server, bindings, CLI, OpenAPI or proto, or released.
+
+1. Default-feed byte goldens captured before any production edit.
+2. `GraphFeedCursor` v1/v2 codec and public types (`ttl_cursor_goldens`).
+3. Private TTL tracker and reclaim projection (`ttl_replay_model`,
+   `ttl_reclaim_order`, `ttl_tracker_corrupt`, `ttl_operation_goldens`).
+4. Chunking of event units with the canonical per-event limit; typed
+   `GraphFeedError` Display prints its fields.
+5. Reader: `Database::graph_changes_after` and
+   `vlite::changes::read_log_graph_changes`, snapshot-image deadline
+   hydration, checkpoint floor, temporal whole commits, live/closed parity and
+   path tests (`tests/graph_ttl_feed.rs`, `tests/graph_ttl_paths.rs`).
+
+Accepted deviations from the text above:
+
+1. `site/api.html` rows and fixture lines land with the functions (step 5),
+   not with the types.
+2. Re-export aliases need no extra fixture lines; the surface check passes
+   without them.
+3. The reader-level cursor-mode mismatch check landed with the reader.
+4. Operation 15 snapshot hydration landed with the reader (step 5).
+5. A temporary `dead_code` allowance on the private modules existed between
+   steps 3 and 5 and is removed.
+6. Reclaim test frames carry a trailing ordinary entry, matching the writer.
+7. On a full page the legacy `head` is the first sequence that did not fit.
+
+Observed behaviour recorded by tests: checkpoint and compaction images omit
+entities already due at the writer clock without logging deletes, so the
+feed reports no removal for them; reads already hide them. Compact graph-block
+images are covered only by `cfg(test)` fixtures (production still refuses
+them). Precision conversion is covered through the new-lineage rule. The
+reader's "cursor commit not found" `InvalidCursor` branch is defensive and was
+not reached by any fixture.
