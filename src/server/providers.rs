@@ -1,5 +1,4 @@
-//! Private, inert provider startup registry. No live handler dispatches through it.
-#![allow(dead_code)] // Dispatch is deliberately reserved for the next acceptance slice.
+//! Opt-in provider registry and bounded transports for managed REST inference.
 
 use std::{
     collections::{BTreeMap, BTreeSet},
@@ -155,9 +154,17 @@ struct Provider {
 struct Bound {
     definition: Binding,
     slots: Arc<Semaphore>,
+    generation: Arc<()>,
 }
 
-type BindingKey = (u64, u16, String, String);
+pub(crate) type BindingKey = (u64, u16, String, String);
+
+pub(crate) struct BindingSnapshot {
+    generation: Arc<()>,
+    pub(crate) dimensions: Option<usize>,
+    pub(crate) payload_fields: Vec<String>,
+    pub(crate) timeout: Duration,
+}
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum ConfigReason {
@@ -184,10 +191,14 @@ enum ConfigReason {
 
 #[derive(Debug, PartialEq, Eq)]
 enum SecretReason {
+    #[cfg(not(unix))]
     UnsupportedPlatform,
     InvalidPath,
+    #[cfg(unix)]
     FileUnavailable,
+    #[cfg(unix)]
     FileNotPrivate,
+    #[cfg(any(unix, test))]
     TooLarge,
     InvalidValue,
     MissingEnvironment,
@@ -262,10 +273,12 @@ fn name(value: &str) -> bool {
             .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'-' | b'_' | b'.'))
 }
 
+#[cfg(any(unix, test))]
 fn mode_is_private(mode: u32) -> bool {
     mode & 0o077 == 0
 }
 
+#[cfg(any(unix, test))]
 fn trim_secret_file(bytes: &[u8]) -> Result<&[u8], SecretReason> {
     if bytes.len() > MAX_SECRET_BYTES {
         return Err(SecretReason::TooLarge);
@@ -349,6 +362,7 @@ impl ProviderRegistry {
         Self::parse_detailed(&bytes).map_err(|error| error.public_message().to_owned())
     }
 
+    #[cfg(test)]
     fn parse(bytes: &[u8]) -> Result<Self, String> {
         Self::parse_detailed(bytes).map_err(|error| error.public_message().to_owned())
     }
@@ -502,6 +516,7 @@ impl ProviderRegistry {
                     Bound {
                         definition: binding,
                         slots,
+                        generation: Arc::new(()),
                     },
                 )
                 .is_some()
@@ -524,12 +539,47 @@ impl ProviderRegistry {
         Ok((provider, bound))
     }
 
+    pub(crate) fn snapshot(
+        &self,
+        key: &BindingKey,
+        embedding: bool,
+    ) -> Result<BindingSnapshot, ProviderError> {
+        if !name(&key.3) {
+            return Err(ProviderError::InvalidInput);
+        }
+        let (provider, bound) = self.bound(
+            key,
+            if embedding {
+                Kind::Embedding
+            } else {
+                Kind::Rerank
+            },
+        )?;
+        Ok(BindingSnapshot {
+            generation: bound.generation.clone(),
+            dimensions: provider.definition.dimensions,
+            payload_fields: bound.definition.payload_fields.clone(),
+            timeout: Duration::from_millis(provider.definition.total_timeout_ms),
+        })
+    }
+
+    pub(crate) fn unchanged(&self, key: &BindingKey, snapshot: &BindingSnapshot) -> bool {
+        self.bindings
+            .get(key)
+            .is_some_and(|bound| Arc::ptr_eq(&bound.generation, &snapshot.generation))
+    }
+
     pub(crate) async fn embed_bound(
         &self,
         key: &BindingKey,
         input: &str,
+        started: Instant,
     ) -> Result<Vec<f32>, ProviderError> {
-        self.embed(key, input, self.transport.as_ref()).await
+        let result = self
+            .embed_inner(key, input, self.transport.as_ref(), started)
+            .await;
+        self.record(key, started, 1, &result);
+        result
     }
 
     pub(crate) async fn rerank_bound(
@@ -538,11 +588,16 @@ impl ProviderRegistry {
         query: &[f32],
         candidates: &[Candidate],
         k: usize,
+        started: Instant,
     ) -> Result<Vec<Ranked>, ProviderError> {
-        self.rerank(key, query, candidates, k, self.transport.as_ref())
-            .await
+        let result = self
+            .rerank_inner(key, query, candidates, k, self.transport.as_ref(), started)
+            .await;
+        self.record(key, started, candidates.len(), &result);
+        result
     }
 
+    #[cfg(test)]
     async fn embed(
         &self,
         key: &BindingKey,
@@ -595,6 +650,7 @@ impl ProviderRegistry {
         Ok(vector)
     }
 
+    #[cfg(test)]
     async fn rerank(
         &self,
         key: &BindingKey,

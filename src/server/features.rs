@@ -577,11 +577,29 @@ struct EmbedRequest {
 async fn embed_text(
     State(service): State<Service>,
     Extension(role): Extension<admin::Role>,
+    headers: HeaderMap,
     target: Result<Path<String>, PathRejection>,
     input: Result<Json<EmbedRequest>, JsonRejection>,
-) -> Result<Json<Value>, ApiError> {
+) -> Result<Json<provider_serving::EmbedResponse>, ApiError> {
+    let started = Instant::now();
     let target = collection_path(target)?;
     let request = body(input)?;
+    if let Some(alias) = request
+        .provider
+        .as_ref()
+        .filter(|alias| !matches!(alias.as_str(), "hashing" | "http"))
+    {
+        return provider_serving::embed(
+            &service,
+            headers,
+            target,
+            alias.clone(),
+            request.text,
+            started,
+        )
+        .await
+        .map(Json);
+    }
     if request.text.len() > 16_384 {
         return Err(unprocessable("text must be at most 16384 UTF-8 bytes"));
     }
@@ -627,9 +645,11 @@ async fn embed_text(
             "embedding dimensions do not match the collection",
         ));
     }
-    Ok(Json(
-        json!({"vector":vector,"dimensions":dimensions,"provider":provider}),
-    ))
+    Ok(Json(provider_serving::EmbedResponse {
+        vector,
+        dimensions,
+        provider,
+    }))
 }
 
 #[derive(Default, Deserialize)]

@@ -1,9 +1,10 @@
 # Serving contract: embeddings, rerankers and gRPC graphs
 
-Status: approved 2026-11-02 as the wire contract to implement. Gap 8 delivery 1
-has a private, unreleased registry/adapter candidate pending independent
-acceptance; it is inert in live handlers. No proposed wire changes are shipped.
-All requirements below are proposed unless labeled Current.
+Status: approved 2026-11-02 as the wire contract to implement. Gap 8 step 2a
+has a private, unreleased REST wiring/client-shape candidate; it does not
+activate serving in production or authorize a release. Step 2b (gRPC/proto)
+remains unimplemented. All requirements below are proposed unless labeled
+Current.
 Open means not verified or not decided. Evidence uses repository `path:line`.
 Audit citations refer to base `d530b4c`; existing embedding/reranking routes and
 unused proposed search field tags were rechecked at `cf146fe`.
@@ -410,5 +411,16 @@ caught, and an independent second-machine matrix (58 commands) passed.
 Next wire REST/gRPC embedding/custom ranking and Python types; then graph unary parity and generated clients.
 Last add parity/auth/compatibility tests and update API/MCP/security/graph references. No benchmark campaign is needed.
 Risks: external data disclosure, unsafe endpoint resolution, tenant secret mixing, lock-held inference and score confusion.
-Open: text cross-encoder API, concurrency defaults, snapshot-conflict error mapping and graph field/tag manifest.
+Open: text cross-encoder API, concurrency defaults and graph field/tag manifest.
 Open: whether to reconcile existing REST/gRPC rerank defaults in a separately approved compatibility change.
+
+### Gap 8 step 2a: private REST candidate
+
+This private, unreleased candidate covers existing REST embed/search routes, the
+OpenAPI contract, and typed Python client shapes. It does not activate provider
+serving in production. Step 2b (gRPC/proto) remains deferred and unimplemented.
+snapshot-conflict REST mapping: ratified 2026-11-03
+A 409 `provider_snapshot_conflict` response is sanitized, contains no candidate,
+tenant, or provider data, and has no `Retry-After`; callers retry the whole
+request. Step 2b gRPC remains untouched. Startup flag names still await
+ratification; this is an unreleased candidate pending independent acceptance.

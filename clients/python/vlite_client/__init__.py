@@ -91,6 +91,23 @@ class Fusion(TypedDict, total=False):
     candidates: int
 
 
+# Functional syntax preserves the wire key ``lambda`` (a Python keyword).
+# Custom mode requires provider; lambda is valid only for MMR. The server
+# validates these mode-dependent constraints and candidate bounds.
+RerankOptions = TypedDict("RerankOptions", {
+    "mode": Literal["exact", "mmr", "custom"],
+    "candidates": NotRequired[int],
+    "lambda": NotRequired[float],
+    "provider": NotRequired[str],
+})
+
+
+class EmbedResponse(TypedDict):
+    vector: list[float]
+    dimensions: int
+    provider: str
+
+
 class Search(TypedDict):
     """One request shape for every mode. Approximate modes support squared_l2 and
     cosine only. ``filter`` is an AND of typed conditions (None/[] keeps every
@@ -116,6 +133,7 @@ class Search(TypedDict):
     vector_leg: NotRequired[Literal["exact", "approximate_ready"]]
     quantization: NotRequired[Literal["none", "scalar_u8"]]
     rerank_multiplier: NotRequired[int]
+    rerank: NotRequired[RerankOptions]
     config: NotRequired["IndexConfig"]
     explain: NotRequired[bool]
 
@@ -133,6 +151,7 @@ class BatchDelete(TypedDict):
 class Hit(TypedDict):
     id: str
     distance: float
+    rerank_score: NotRequired[float]
 
 
 class HybridHit(TypedDict):
@@ -144,6 +163,7 @@ class HybridHit(TypedDict):
     bm25: float | None
     vector_rank: int | None
     text_rank: int | None
+    rerank_score: NotRequired[float]
 
 
 class QueryPlan(TypedDict):
@@ -164,8 +184,16 @@ class SearchStats(TypedDict):
     index_candidates: int
 
 
+class Ranking(TypedDict):
+    """Custom scores descend, with numeric ID ascending for ties."""
+
+    provider: str
+    order: Literal["score_desc_id_asc"]
+
+
 class SearchResponse(TypedDict):
     hits: list[Hit] | list[HybridHit]
+    ranking: NotRequired[Ranking]
     # Present only with explain; plan is None outside auto mode.
     plan: NotRequired[QueryPlan | None]
     stats: NotRequired[SearchStats]
@@ -536,22 +564,27 @@ class _Records:
         """Send the request unchanged and return the hits. There is no exact
         fallback: an older server's 422 (approximate filter, unknown mode/field) or
         a 409 from a ready-only mode is raised. Hybrid mode returns HybridHit
-        entries ordered by score descending; other modes order by distance."""
+        entries ordered by score descending; custom reranking orders by
+        rerank_score descending then numeric ID, preserving metric distance.
+        Use search_detailed to retain ranking metadata."""
         return self.search_detailed(request)["hits"]
 
     def search_detailed(self, request: Search) -> SearchResponse:
         """Like search, but return the whole response. With ``explain: True`` it
-        carries ``stats`` and ``plan`` (``plan`` is null outside ``auto`` mode)."""
+        carries ``stats`` and ``plan`` (``plan`` is null outside ``auto`` mode).
+        Custom reranking may add ``ranking``; older responses may omit it."""
         return self._transport()._request("POST", self._prefix + "/search", request)
 
     def _feature_prefix(self) -> str:
         return "/v1/collections/default" if self._prefix == "/v1" else self._prefix
 
-    def embed_text(self, text: str, *, provider: str = "hashing") -> dict:
+    def embed_text(self, text: str, *, provider: str = "hashing") -> EmbedResponse:
+        """Embed using hashing, legacy http or an admin-authorized alias.
+        Provider failures propagate without retry or fallback."""
         if not isinstance(text, str) or len(text.encode("utf-8")) > 16384:
             raise ValueError("text must be at most 16384 UTF-8 bytes")
-        if provider not in {"hashing", "http"}:
-            raise ValueError("provider must be hashing or http")
+        if not isinstance(provider, str) or not re.fullmatch(r"[A-Za-z0-9._-]{1,256}", provider):
+            raise ValueError("provider must be 1..256 ASCII letters, digits, dot, underscore or hyphen")
         return self._transport()._request(
             "POST", self._feature_prefix() + "/embed", {"text": text, "provider": provider}
         )

@@ -1,5 +1,6 @@
 use super::*;
 mod collector;
+mod serving;
 mod survivors;
 use std::{
     collections::VecDeque,
@@ -203,9 +204,6 @@ impl Loopback {
             body.len()
         )
     }
-    fn raw(status: u16, headers: &str, body: &str) -> String {
-        format!("HTTP/1.1 {status} Test\r\n{headers}\r\nConnection: close\r\n\r\n{body}")
-    }
     fn one(body: &str) -> Self {
         Self::new(vec![(Self::json(200, body), Duration::ZERO)])
     }
@@ -284,10 +282,6 @@ impl Drop for BlockingReleaseGuard {
     }
 }
 
-struct CountedHttp {
-    calls: AtomicUsize,
-}
-
 #[test]
 fn dns_admission_rejects_before_scheduling_blocking_work() {
     let runtime = tokio::runtime::Builder::new_current_thread()
@@ -307,7 +301,9 @@ fn dns_admission_rejects_before_scheduling_blocking_work() {
         "admission.invalid",
         "127.0.0.1".parse().unwrap(),
     );
-    let resolver = Arc::new(QueueResolver::new([vec!["127.0.0.1:1234".parse().unwrap()]]));
+    let resolver = Arc::new(QueueResolver::new([vec![
+        "127.0.0.1:1234".parse().unwrap(),
+    ]]));
     configured.providers.get_mut("test").unwrap().resolver = resolver.clone();
     let provider = &configured.providers["test"];
     let _slots = provider.dns_slots.try_acquire_many(2).unwrap();
@@ -330,11 +326,48 @@ fn dns_admission_rejects_before_scheduling_blocking_work() {
     assert_eq!(resolver.calls.load(Ordering::SeqCst), 0);
 }
 
-impl Transport for CountedHttp {
-    fn send<'a>(&'a self, request: TransportRequest<'a>) -> TransportFuture<'a> {
-        self.calls.fetch_add(1, Ordering::SeqCst);
-        HttpTransport.send(request)
+#[test]
+fn ranked_ids_and_cardinality_are_checked_before_sorting() {
+    let ids = BTreeSet::from([1, 2]);
+    assert_eq!(
+        check_ranked(
+            &[Ranked { id: 1, cost: 0.0 }, Ranked { id: 1, cost: 1.0 }],
+            2,
+            &ids
+        ),
+        Err(ProviderError::InvalidResponse)
+    );
+    assert_eq!(
+        check_ranked(&[Ranked { id: 3, cost: 0.0 }], 1, &ids),
+        Err(ProviderError::InvalidResponse)
+    );
+    assert_eq!(
+        check_ranked(&[], 1, &ids),
+        Err(ProviderError::InvalidResponse)
+    );
+    assert_eq!(
+        check_ranked(&[Ranked { id: 1, cost: 0.0 }], 1, &ids),
+        Ok(())
+    );
+}
+
+#[test]
+fn nonfinite_embedding_components_and_ranked_scores_are_rejected() {
+    for value in [f32::NAN, f32::INFINITY, f32::NEG_INFINITY] {
+        assert_eq!(
+            check_embedding(&[value, 0.0], 2),
+            Err(ProviderError::InvalidResponse)
+        );
+        assert_eq!(
+            check_ranked(&[Ranked { id: 1, cost: value }], 1, &BTreeSet::from([1])),
+            Err(ProviderError::InvalidResponse)
+        );
     }
+    assert_eq!(check_embedding(&[0.0, 1.0], 2), Ok(()));
+    assert_eq!(
+        check_ranked(&[Ranked { id: 1, cost: -1.0 }], 1, &BTreeSet::from([1])),
+        Ok(())
+    );
 }
 
 #[test]
@@ -1049,6 +1082,15 @@ async fn custom_candidate_ceiling_is_inclusive() {
         1
     );
     assert_eq!(fake.calls.load(Ordering::SeqCst), 1);
+    let candidates: Vec<_> = (1..=1001).map(candidate).collect();
+    assert_eq!(
+        registry
+            .rerank(&key(), &[VECTOR, 1.0], &candidates, 1, &fake)
+            .await
+            .unwrap_err(),
+        ProviderError::InvalidInput
+    );
+    assert_eq!(fake.calls.load(Ordering::SeqCst), 1);
 }
 #[test]
 fn file_read_errors_and_size_are_sanitized() {
@@ -1136,7 +1178,10 @@ async fn zero_outbound_without_config_or_bindings_including_existing_handlers() 
         let mut registry = registry(&value);
         registry.transport = fake.clone();
         assert_eq!(
-            registry.embed_bound(&key(), TEXT).await.unwrap_err(),
+            registry
+                .embed_bound(&key(), TEXT, Instant::now())
+                .await
+                .unwrap_err(),
             ProviderError::NotConfigured
         );
         let db = crate::Database::create_in_memory(2, Default::default()).unwrap();
@@ -1183,7 +1228,11 @@ async fn zero_outbound_without_config_or_bindings_including_existing_handlers() 
     let key = (lineage, collection_id, "global".into(), "test".into());
     let service = super::super::Service::new(database).with_providers(registry);
     assert_eq!(
-        service.providers().embed_bound(&key, TEXT).await.unwrap(),
+        service
+            .providers()
+            .embed_bound(&key, TEXT, Instant::now())
+            .await
+            .unwrap(),
         vec![1.0, 2.0]
     );
     assert_eq!(fake.calls.load(Ordering::SeqCst), 1);
@@ -1219,7 +1268,9 @@ async fn provider_wire_contract_uses_only_pinned_fields_and_bearer_auth() {
     let mut configured = registry(&config(&server.endpoint, "embedding"));
     configured.providers.get_mut("test").unwrap().secret = Some(SECRET.into());
     assert_eq!(
-        bounded(configured.embed_bound(&key(), TEXT)).await.unwrap(),
+        bounded(configured.embed_bound(&key(), TEXT, Instant::now()))
+            .await
+            .unwrap(),
         vec![1.0, 2.0]
     );
     {
@@ -1253,9 +1304,15 @@ async fn provider_wire_contract_uses_only_pinned_fields_and_bearer_auth() {
 
     let server = Loopback::one(r#"{"data":[{"embedding":[1,2]}]}"#);
     assert!(
-        bounded(registry(&config(&server.endpoint, "embedding")).embed_bound(&key(), TEXT))
-            .await
-            .is_ok()
+        bounded(
+            registry(&config(&server.endpoint, "embedding")).embed_bound(
+                &key(),
+                TEXT,
+                Instant::now()
+            )
+        )
+        .await
+        .is_ok()
     );
     assert!(
         !server.headers.lock().unwrap()[0]

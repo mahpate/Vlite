@@ -44,6 +44,7 @@ pub mod grpc;
 mod logs;
 mod observability;
 mod ops;
+mod provider_serving;
 pub mod providers;
 #[cfg(feature = "otel")]
 pub mod telemetry;
@@ -278,13 +279,12 @@ impl Service {
         })
     }
 
-    /// Install inert startup provider state; live handlers do not dispatch through it.
+    /// Install opt-in startup provider state for managed REST inference.
     pub fn with_providers(mut self, registry: providers::ProviderRegistry) -> Self {
         self.providers = Arc::new(registry);
         self
     }
 
-    #[allow(dead_code)] // Reserved for the independently accepted handler-wiring slice.
     pub(crate) fn providers(&self) -> &providers::ProviderRegistry {
         &self.providers
     }
@@ -2649,6 +2649,7 @@ struct Search {
 enum RerankMode {
     Exact,
     Mmr,
+    Custom,
 }
 
 #[derive(Deserialize)]
@@ -2657,6 +2658,7 @@ struct RerankRequest {
     mode: RerankMode,
     candidates: Option<usize>,
     lambda: Option<f64>,
+    provider: Option<String>,
 }
 
 impl Search {
@@ -2664,6 +2666,18 @@ impl Search {
     fn validate(&self, role: &admin::Role) -> Result<(), ApiError> {
         let hybrid = self.mode == SearchMode::Hybrid;
         if let Some(rerank) = &self.rerank {
+            if rerank.mode == RerankMode::Custom {
+                if hybrid
+                    || rerank.lambda.is_some()
+                    || rerank.provider.as_deref().is_none_or(str::is_empty)
+                    || self.k == 0
+                    || !(self.k..=1000).contains(&rerank.candidates.unwrap_or(self.k.max(50)))
+                {
+                    return Err(providers::ProviderError::InvalidInput.into());
+                }
+            } else if rerank.provider.is_some() {
+                return Err(providers::ProviderError::InvalidInput.into());
+            }
             if hybrid {
                 return Err(unprocessable("reranking is only valid for vector search"));
             }
@@ -2756,19 +2770,29 @@ async fn search(
     State(service): State<Service>,
     Extension(role): Extension<admin::Role>,
     Extension(request): Extension<RequestId>,
+    headers: HeaderMap,
     input: Result<Json<Search>, JsonRejection>,
 ) -> Result<Json<Value>, ApiError> {
-    search_in(service, role, request, Target::Legacy, input).await
+    search_in(service, role, request, headers, Target::Legacy, input).await
 }
 
 async fn collection_search(
     State(service): State<Service>,
     Extension(role): Extension<admin::Role>,
     Extension(request): Extension<RequestId>,
+    headers: HeaderMap,
     target: Result<Path<String>, PathRejection>,
     input: Result<Json<Search>, JsonRejection>,
 ) -> Result<Json<Value>, ApiError> {
-    search_in(service, role, request, collection_path(target)?, input).await
+    search_in(
+        service,
+        role,
+        request,
+        headers,
+        collection_path(target)?,
+        input,
+    )
+    .await
 }
 
 /// Ranked results: vector hits (exact, approximate, auto) or fused hybrid hits.
@@ -3050,6 +3074,7 @@ fn execute(
             RerankMode::Mmr => Box::new(crate::rerank::MmrReranker {
                 lambda: rerank.lambda.unwrap_or(0.5),
             }),
+            RerankMode::Custom => return Ok(Some(executed)),
         };
         let (reranked, candidate_count) = {
             let Hits::Vector(candidates) = &executed.hits else {
@@ -3074,10 +3099,21 @@ async fn search_in(
     service: Service,
     role: admin::Role,
     request: RequestId,
+    headers: HeaderMap,
     target: Target,
     input: Result<Json<Search>, JsonRejection>,
 ) -> Result<Json<Value>, ApiError> {
+    let started = Instant::now();
     let input = body(input)?;
+    if input
+        .rerank
+        .as_ref()
+        .is_some_and(|r| r.mode == RerankMode::Custom)
+    {
+        return provider_serving::search(&service, headers, target, input, started)
+            .await
+            .map(Json);
+    }
     let route = if target.legacy() {
         "/v1/search"
     } else {

@@ -3,9 +3,13 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 import tempfile
 from threading import Event, Thread
+from typing import get_args, get_type_hints
 import unittest
 
-from vlite_client import Client, ImportRejectedError, TransportError, UnsupportedError, VLiteError
+from vlite_client import (
+    Client, EmbedResponse, Hit, HybridHit, ImportRejectedError, Ranking,
+    RerankOptions, Search, SearchResponse, TransportError, UnsupportedError, VLiteError,
+)
 
 TOKEN = "test_" + "a" * 32
 MAX_ID = "18446744073709551615"
@@ -367,6 +371,148 @@ class CapabilityTests(unittest.TestCase):
     def answer(self, table):
         """Route (method, path) to a fixed response; anything else is a 599."""
         Scripted.respond = lambda method, path, body: table.get((method, path), (599, None, {}))
+
+    def test_provider_typing_preserves_required_and_optional_fields(self):
+        self.assertEqual(RerankOptions.__required_keys__, {"mode"})
+        self.assertEqual(RerankOptions.__optional_keys__, {"candidates", "lambda", "provider"})
+        hints = get_type_hints(RerankOptions)
+        self.assertEqual(set(get_args(hints["mode"])), {"exact", "mmr", "custom"})
+        self.assertIs(hints["lambda"], float)
+        self.assertIs(hints["provider"], str)
+        self.assertIn("rerank", Search.__optional_keys__)
+        self.assertIs(get_type_hints(Search)["rerank"], RerankOptions)
+        self.assertEqual(EmbedResponse.__required_keys__, {"vector", "dimensions", "provider"})
+        self.assertEqual(get_type_hints(EmbedResponse),
+                         {"vector": list[float], "dimensions": int, "provider": str})
+        self.assertIs(get_type_hints(Client.embed_text)["return"], EmbedResponse)
+        self.assertEqual(Ranking.__required_keys__, {"provider", "order"})
+        self.assertEqual(get_args(get_type_hints(Ranking)["order"]), ("score_desc_id_asc",))
+        self.assertIn("ranking", SearchResponse.__optional_keys__)
+        self.assertIs(get_type_hints(SearchResponse)["ranking"], Ranking)
+        for hit_type in (Hit, HybridHit):
+            self.assertIn("rerank_score", hit_type.__optional_keys__)
+            self.assertIs(get_type_hints(hit_type)["rerank_score"], float)
+
+    def test_embed_response_and_provider_aliases_on_existing_routes(self):
+        response: EmbedResponse = {
+            "vector": [0.1, 0.2, 0.3], "dimensions": 3, "provider": "local-semantic",
+        }
+        paths = ("/v1/collections/default/embed", "/v1/collections/docs/embed")
+        self.answer({("POST", path): (200, response, {}) for path in paths})
+        for records, path in zip((self.client, self.client.collection("docs")), paths):
+            self.assertEqual(records.embed_text("hello"), response)
+            for provider in ("hashing", "http", "local-semantic", "Rank_1.v2", "a" * 256):
+                with self.subTest(path=path, provider=provider):
+                    self.assertEqual(records.embed_text("hello", provider=provider), response)
+                    self.assertEqual(Scripted.log[-1],
+                                     ("POST", path, {"text": "hello", "provider": provider}))
+        self.assertEqual(len(Scripted.log), 12)
+        self.assertEqual(Scripted.log[0][2], {"text": "hello", "provider": "hashing"})
+
+    def test_embed_invalid_aliases_and_text_never_send(self):
+        for provider in ("", "a" * 257, "https://provider", "has space", "é", "a\n", None, 1, []):
+            with self.subTest(provider=provider), self.assertRaises(ValueError):
+                self.client.embed_text("hello", provider=provider)
+        for text in (None, 1, "é" * 8193):
+            with self.subTest(text_type=type(text)), self.assertRaises(ValueError):
+                self.client.embed_text(text)
+        self.assertEqual(Scripted.log, [])
+
+    def test_rerank_options_forward_unchanged_on_both_search_routes(self):
+        response = {
+            "hits": [{"id": "7", "distance": 0.4, "rerank_score": 0.8}],
+            "ranking": {"provider": "rank-a", "order": "score_desc_id_asc"},
+        }
+        paths = ("/v1/search", "/v1/collections/docs/search")
+        self.answer({("POST", path): (200, response, {}) for path in paths})
+        options: list[RerankOptions] = [
+            {"mode": "exact"},
+            {"mode": "mmr", "candidates": 50, "lambda": 0.25},
+            {"mode": "custom", "provider": "rank-a"},
+            {"mode": "custom", "provider": "rank-a", "candidates": 1000},
+        ]
+        expected = []
+        for records, path in zip((self.client, self.client.collection("docs")), paths):
+            for rerank in options:
+                request: Search = {"vector": [0.1, 0.2, 0.3], "k": 1, "rerank": rerank}
+                original = json.loads(json.dumps(request))
+                self.assertEqual(records.search(request), response["hits"])
+                self.assertEqual(records.search_detailed(request), response)
+                self.assertEqual(request, original)
+                expected.extend([("POST", path, original)] * 2)
+        self.assertEqual(Scripted.log, expected)
+
+    def test_optional_ranking_and_scores_are_not_synthesized(self):
+        distance_hits = [{"id": "7", "distance": 0.4}]
+        hybrid_hits = [{"id": "7", "score": 0.5, "distance": None,
+                        "bm25": 1.0, "vector_rank": None, "text_rank": 1}]
+        for records in (self.client, self.client.collection("docs")):
+            for hits in (distance_hits, hybrid_hits):
+                for custom in (False, True):
+                    response = {"hits": hits}
+                    if custom:
+                        response = {
+                            "hits": [dict(hits[0], rerank_score=-0.2)],
+                            "ranking": {"provider": "rank-a", "order": "score_desc_id_asc"},
+                        }
+                    Scripted.respond = lambda *_, response=response: (200, response, {})
+                    request: Search = {"k": 1, "vector": [1.0]}
+                    self.assertEqual(records.search_detailed(request), response)
+                    self.assertEqual(records.search(request), response["hits"])
+                    self.assertEqual(Scripted.log[-1][2], request)
+        self.assertEqual(len(Scripted.log), 16)
+
+    def test_provider_failures_propagate_once_without_fallback(self):
+        request: Search = {
+            "vector": [1.0], "k": 1, "rerank": {"mode": "custom", "provider": "rank-a"},
+        }
+        failures = [
+            (409, "provider_not_configured"), (422, "invalid_provider_input"),
+            (502, "provider_invalid_response"), (503, "provider_unavailable"),
+            (504, "provider_timeout"), (429, "provider_busy"),
+        ]
+        for records in (self.client, self.client.collection("docs")):
+            for status, code in failures:
+                Scripted.respond = lambda *_, status=status, code=code: error(status, code)
+                calls = (lambda: records.embed_text("hello", provider="local-semantic"),
+                         lambda: records.search(request), lambda: records.search_detailed(request))
+                for call in calls:
+                    before = len(Scripted.log)
+                    with self.assertRaises(VLiteError) as result:
+                        call()
+                    self.assertEqual((result.exception.status, result.exception.code,
+                                      result.exception.request_id), (status, code, f"rid-{status}"))
+                    self.assertEqual(len(Scripted.log), before + 1)
+
+    def test_provider_snapshot_conflict_propagates_once_without_fallback(self):
+        request: Search = {
+            "vector": [1.0], "k": 1, "rerank": {"mode": "custom", "provider": "rank-a"},
+        }
+        message = "provider snapshot conflict"
+        response = (409, {"error": {"code": "provider_snapshot_conflict", "message": message}},
+                    {"X-Request-ID": "rid-snapshot"})
+        self.assertNotIn("Retry-After", response[2])
+        Scripted.respond = lambda *_: response
+        for records, prefix in ((self.client, "/v1"),
+                                (self.client.collection("docs"), "/v1/collections/docs")):
+            embed_path = "/v1/collections/default/embed" if prefix == "/v1" else prefix + "/embed"
+            calls = (
+                (lambda: records.embed_text("hello", provider="local-semantic"),
+                 embed_path, {"text": "hello", "provider": "local-semantic"}),
+                (lambda: records.search(request), prefix + "/search", request),
+                (lambda: records.search_detailed(request), prefix + "/search", request),
+            )
+            for call, path, body in calls:
+                with self.subTest(path=path):
+                    before = len(Scripted.log)
+                    with self.assertRaises(VLiteError) as result:
+                        call()
+                    self.assertEqual((result.exception.status, result.exception.code,
+                                      result.exception.request_id),
+                                     (409, "provider_snapshot_conflict", "rid-snapshot"))
+                    self.assertEqual(str(result.exception),
+                                     f"HTTP 409: provider_snapshot_conflict: {message}")
+                    self.assertEqual(Scripted.log[before:], [("POST", path, body)])
 
     def test_scoped_record_routes_and_bodies(self):
         tag = '"r2-0123456789abcdef-1-7-9-' + "a" * 64 + '"'
