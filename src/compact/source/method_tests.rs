@@ -289,6 +289,18 @@ fn compact_installed_database_and_snapshot_method_matrix() {
         );
         d!("Database::feed_cursor", db.feed_cursor());
         d!("Database::changes_after", db.changes_after(&cursor, 0));
+        for events in [changes::GraphEventSet::Empty, changes::GraphEventSet::Ttl] {
+            let graph_cursor = changes::GraphFeedCursor::beginning(events);
+            d!(
+                "Database::graph_changes_after",
+                db.graph_changes_after(&graph_cursor, events, 0)
+                    .map_err(|error| match error {
+                        changes::GraphFeedError::Engine(error) => error,
+                        other =>
+                            panic!("graph feed {events:?} must refuse compact records: {other:?}"),
+                    })
+            );
+        }
         d!(
             "Database::temporal_changes_after",
             db.temporal_changes_after(&cursor, 0)

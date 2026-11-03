@@ -138,6 +138,12 @@ class Policy(unittest.TestCase):
         self.assertIn("cargo test --locked -p vlite-graph --doc", text)
         self.assertNotIn("cargo test --locked -p vlite-graph\n", text)
 
+    def test_compact_method_inventory_runs_with_documentation_gates(self):
+        text = (ROOT / ".github/workflows/ci.yml").read_text(encoding="utf-8")
+        documentation = text.split("\n  documentation:\n", 1)[1].split("\n  native:\n", 1)[0]
+        self.assertIn("python tests/compact_method_matrix.py", documentation)
+        self.assertIn("python tests/api_reference.py", documentation)
+
     def test_graph_oracles_run_before_ci_routing(self):
         text = (ROOT / ".github/workflows/ci.yml").read_text(encoding="utf-8")
         changes = text.split("\n  changes:\n", 1)[1].split("\n  documentation:\n", 1)[0]

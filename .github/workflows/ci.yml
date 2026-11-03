@@ -65,6 +65,7 @@ jobs:
           python tests/agent_docs.py
           python tests/content_budget.py
           python tests/api_reference.py
+          python tests/compact_method_matrix.py
           python tests/api_route_inventory.py
 
   native:
