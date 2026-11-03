@@ -219,6 +219,18 @@ fn mutation_conditionals_are_unsupported_at_on() {
 }
 
 #[test]
+fn read_statements_with_trailing_mutation_conditionals_remain_syntax_errors() {
+    for text in [
+        "MATCH (n) RETURN n ON MATCH SET n:B",
+        "MATCH (n) RETURN n ON CREATE SET n:B",
+    ] {
+        let error = query_error(text, &[]);
+        assert_eq!(error.kind, LanguageErrorKind::Syntax, "{text}: {error}");
+        assert_eq!(error.position, text.find("ON").unwrap(), "{text}: {error}");
+    }
+}
+
+#[test]
 fn as_of_writes_are_unsupported_at_as() {
     let text = "CREATE (n KEY $k) AS OF $t RETURN n";
     let error = query_error(
@@ -252,6 +264,36 @@ fn as_of_writes_are_unsupported_at_as() {
 }
 
 #[test]
+fn malformed_write_as_of_tail_stays_syntax_at_the_stray_word() {
+    let text = "CREATE (n KEY $k) RETURN n m OF $t";
+    let error = query_error(
+        text,
+        &[
+            param("k", PropertyValue::String("secret-node-key".into())),
+            param("t", PropertyValue::Integer(0)),
+        ],
+    );
+    assert_eq!(error.kind, LanguageErrorKind::Syntax, "{error}");
+    assert_eq!(error.position, text.find("m OF").unwrap(), "{error}");
+}
+
+#[test]
+fn read_return_as_of_remains_unchanged() {
+    let text = "MATCH (n) RETURN n AS OF $t";
+    let error = query_error(text, &[param("t", PropertyValue::Integer(0))]);
+    assert_eq!(error.kind, LanguageErrorKind::Syntax, "{error}");
+    assert_eq!(error.position, text.find("OF").unwrap(), "{error}");
+}
+
+#[test]
+fn malformed_inward_creation_without_node_close_keeps_its_syntax_error() {
+    let text = "CREATE (a x <-[r:T]-(b))";
+    let error = query_error(text, &[]);
+    assert_eq!(error.kind, LanguageErrorKind::Syntax, "{error}");
+    assert_eq!(error.position, text.find('x').unwrap(), "{error}");
+}
+
+#[test]
 fn qualified_function_calls_in_return_are_unsupported_at_the_name() {
     let text = "MATCH (n) RETURN n.custom($v)";
     let error = query_error(
@@ -267,6 +309,62 @@ fn qualified_function_calls_in_return_are_unsupported_at_the_name() {
     assert_eq!(error.kind, LanguageErrorKind::Unsupported, "{error}");
     assert_eq!(error.position, text.find("custom").unwrap(), "{error}");
     assert_diagnostic_does_not_disclose(&error, text, &[]);
+}
+
+#[test]
+fn multi_segment_qualified_function_calls_are_unsupported_at_the_name() {
+    let text = "MATCH (n) RETURN n.ns.custom($v)";
+    let error = query_error(
+        text,
+        &[param("v", PropertyValue::String("secret-value".into()))],
+    );
+    assert_eq!(error.kind, LanguageErrorKind::Unsupported, "{error}");
+    assert_eq!(error.position, text.find("custom").unwrap(), "{error}");
+    assert_diagnostic_does_not_disclose(&error, text, &["secret-value", "$v"]);
+
+    let text = "MATCH (n) WHERE n.ns.custom($v) = $x RETURN n";
+    let error = query_error(
+        text,
+        &[
+            param("v", PropertyValue::String("secret-value".into())),
+            param("x", PropertyValue::Integer(1)),
+        ],
+    );
+    assert_eq!(error.kind, LanguageErrorKind::Unsupported, "{error}");
+    assert_eq!(error.position, text.find("custom").unwrap(), "{error}");
+    assert_diagnostic_does_not_disclose(&error, text, &["secret-value", "$v", "$x"]);
+
+    let text = "MATCH (n) RETURN n ORDER BY n.ns.custom($v)";
+    let error = query_error(
+        text,
+        &[param("v", PropertyValue::String("secret-value".into()))],
+    );
+    assert_eq!(error.kind, LanguageErrorKind::Unsupported, "{error}");
+    assert_eq!(error.position, text.find("custom").unwrap(), "{error}");
+    assert_diagnostic_does_not_disclose(&error, text, &["secret-value", "$v"]);
+}
+
+#[test]
+fn multi_segment_dotted_names_without_calls_keep_their_syntax_errors() {
+    for (text, parameters, is_order_by) in [
+        ("MATCH (n) RETURN n.ns.custom", vec![], false),
+        (
+            "MATCH (n) WHERE n.ns.custom = $x RETURN n",
+            vec![param("x", PropertyValue::Integer(1))],
+            false,
+        ),
+        ("MATCH (n) RETURN n ORDER BY n.ns.custom", vec![], true),
+    ] {
+        let error = query_error(text, &parameters);
+        assert_eq!(error.kind, LanguageErrorKind::Syntax, "{text}: {error}");
+        let expected = if is_order_by {
+            let start = text.find("ORDER BY").unwrap();
+            text[start..].find('.').unwrap() + start
+        } else {
+            text.rfind('.').unwrap()
+        };
+        assert_eq!(error.position, expected, "{text}: {error}");
+    }
 }
 
 #[test]
@@ -334,6 +432,14 @@ fn bracketless_relationship_shorthand_is_unsupported_at_its_opener() {
         assert_eq!(error.position, text.find("(b)").unwrap(), "{text}: {error}");
         assert_diagnostic_does_not_disclose(&error, text, &["secret-start-key", "$k"]);
     }
+}
+
+#[test]
+fn non_bracket_relationship_tokens_are_syntax_at_the_token() {
+    let text = "MATCH (a KEY $k)-T(b) RETURN b";
+    let error = query_error(text, &[param("k", PropertyValue::String("start".into()))]);
+    assert_eq!(error.kind, LanguageErrorKind::Syntax, "{error}");
+    assert_eq!(error.position, text.find("T(b)").unwrap(), "{error}");
 }
 
 #[test]

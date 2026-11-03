@@ -174,10 +174,28 @@ impl Parser {
     }
 
     fn qualified_function_call_position(&self) -> Option<usize> {
-        (self.is_symbol(".")
-            && Self::is_identifier_kind(self.kind_at(1))
-            && self.kind_at(2) == &Kind::Symbol("("))
-            .then(|| self.tokens[self.at + 1].position)
+        if !self.is_symbol(".") {
+            return None;
+        }
+        let mut index = self.at;
+        let mut final_name_position = None;
+        while matches!(
+            self.tokens.get(index).map(|token| &token.kind),
+            Some(Kind::Symbol("."))
+        ) {
+            index += 1;
+            let token = self.tokens.get(index)?;
+            if !Self::is_identifier_kind(&token.kind) {
+                return None;
+            }
+            final_name_position = Some(token.position);
+            index += 1;
+        }
+        matches!(
+            self.tokens.get(index).map(|token| &token.kind),
+            Some(Kind::Symbol("("))
+        )
+        .then_some(final_name_position?)
     }
 
     fn eat_keyword(&mut self, keyword: &str) -> Option<usize> {
@@ -560,6 +578,12 @@ impl Parser {
                 "bracketless relationship patterns are not supported",
             ));
         }
+        if !self.is_symbol("[") {
+            return Err(syntax(
+                self.position(),
+                "expected '[' after a relationship direction",
+            ));
+        }
         self.expect_symbol("[")?;
         let variable = if Self::is_identifier_kind(&self.token().kind)
             && !self.is_symbol(":")
@@ -776,6 +800,12 @@ impl Parser {
         if self.is_symbol("(") {
             return Err(unsupported(
                 field.position,
+                "function invocation is not supported",
+            ));
+        }
+        if let Some(position) = self.qualified_function_call_position() {
+            return Err(unsupported(
+                position,
                 "function invocation is not supported",
             ));
         }
@@ -1060,6 +1090,12 @@ impl Parser {
             if self.is_symbol("(") {
                 return Err(unsupported(
                     field.position,
+                    "function invocation is not supported",
+                ));
+            }
+            if let Some(position) = self.qualified_function_call_position() {
+                return Err(unsupported(
+                    position,
                     "function invocation is not supported",
                 ));
             }
