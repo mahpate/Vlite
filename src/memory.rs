@@ -6,6 +6,7 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 
+mod consolidate;
 mod ranking;
 mod recall;
 
