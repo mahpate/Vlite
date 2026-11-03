@@ -805,7 +805,7 @@ searchManyF32(vectors: Float32Array[], k: number, options?: Scope &amp; { filter
       </tbody>
     </table>
     <h4 id="rust-graphfeedcursor">GraphFeedCursor <span class="api-kind">unreleased</span></h4>
-    <p><code class="api-path">vlite::changes::GraphFeedCursor</code> Gap 3, implemented but unreleased: a graph feed position bound to one exact <code>GraphEventSet</code> (<code>Empty</code>, the legacy feed, or <code>Ttl</code>, graph TTL events). A TTL cursor can stand inside one commit, after an event ordinal, because a large expiry reclaim is delivered in several chunks. The graph feed reader that consumes it is not part of this API yet.</p>
+    <p><code class="api-path">vlite::changes::GraphFeedCursor</code> Gap 3, implemented but unreleased: a graph feed position bound to one exact <code>GraphEventSet</code> (<code>Empty</code>, the legacy feed, or <code>Ttl</code>, graph TTL events). A TTL cursor can stand inside one commit, after an event ordinal, because a large expiry reclaim is delivered in several chunks. <code>Database::graph_changes_after</code> and <code>changes::read_log_graph_changes</code> consume it.</p>
     <table class="api-table cols-2">
       <thead><tr><th>Signature</th><th>Description</th></tr></thead>
       <tbody>

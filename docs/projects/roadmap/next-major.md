@@ -156,9 +156,11 @@ Local numbers below show direction only (see rules).
   reviewed; its six owner decisions were approved individually on 2026-11-02,
   without activation or release authorization. Slice 0 (a test-gated pinned
   source with standalone point reads) and slice 1a (exhaustive private
-  resident/compact record dispatch with fail-closed refusals) are
-  independently accepted and integrated. Slice 1b loader installation,
-  slices 2–5 and all normal `Database` wiring remain.
+  resident/compact record dispatch with fail-closed refusals) and slice 1b
+  (private installation of a verified compact generation, refusing partial
+  collection coverage, with real-open method-matrix coverage) are
+  independently accepted and integrated, but unreleased. Slices 2–5 and all
+  normal `Database` wiring remain.
   The [P3c compact-ANN design](p3c-compact-ann.md) (source-bound flat
   topology, persisted scalar-u8 codes, background rebuild and a separately
   opted-in rotated one-bit candidate) is independently reviewed; its nine
@@ -307,20 +309,28 @@ accepted and integrated, with no production caller. This decoded
 - **Further design proposals:** [agent memory](gap1-agent-memory.md) defines
   the embedded operations and their prerequisites; [scale-out](scale-out.md)
   compares branching, object storage and replication. Both received source
-  and first-party-reference review. Memory's private A1/A2/B slices are
-  independently accepted and integrated, but remain unreleased and inactive;
-  consolidation, resumable erasure and public serving remain outstanding.
+  and first-party-reference review. Memory's private A1/A2/B slices and the
+  crate-private C1 consolidation (exact golden replay) are independently
+  accepted and integrated, but remain unreleased and inactive. C1 still needs
+  a test-strength follow-up before any activation; resumable erasure and public
+  serving remain outstanding.
   Scale-out is not implemented. Its order 11 → 10 → 9 was decided 2026-11-02; the track is
   backlogged until the owner revisits it. The
   [Cypher-style subset](gap6-cypher-subset.md) has ten owner-approved
   private-implementation choices (2026-11-02): the explicitly non-conformant
   `vlite-cypher-1` dialect, bounded atomic writes and unchanged legacy queries.
+  Its crate-private parser and planner are independently accepted and
+  integrated, but remain unreleased and inactive, with no executor, binding or
+  public surface; a test-strength follow-up is required before any activation.
   Exact public APIs, new errors and serving remain separately gated. The
   [GraphRAG ingestion](gap7-graphrag-ingestion.md) design is source-reviewed
   with thirteen embedded-design choices approved individually on 2026-11-02:
   atomic default, explicit incremental progress, deterministic local extraction
-  and protected receipts. External extraction, purge mechanics and exact serving
-  remain gated. Neither design is implemented or active.
+  and protected receipts. Only its test-side preparation reference (a Python
+  oracle with hand-authored goldens) is integrated; the Rust core is not
+  started, and the 1 MiB decoded-output and 8 KiB attribute ceilings still need
+  defined byte accounting. External extraction, purge mechanics and exact
+  serving remain gated. Neither design is active.
 
 ## Rules for every item
 
