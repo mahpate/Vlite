@@ -833,5 +833,5 @@ fn truncation(reason: kernel::AlgorithmTruncation) -> GraphAlgorithmTruncation {
 mod tests;
 
 #[cfg(test)]
-#[path = "engine/algorithm_csr.rs"]
+#[path = "algorithm_csr.rs"]
 mod csr;

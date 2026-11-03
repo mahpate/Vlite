@@ -205,11 +205,11 @@ allocate then charge, or silently fall back to a rebuilt resident graph.
 | C / T | C is `ExecutionContext.now_ms`, matching resident wrapper. T is always `None`: current algorithms ignore GraphRef's as-of selector. No new historical algorithm semantics. |
 | Sequence | Caller supplies the same database `view_sequence`, not `CompactGraphView::graph_sequence()` (last graph mutation may be older). No implicit clock/sequence refresh. |
 
-Adapter implementation file: `src/property_graph/engine/algorithm_csr.rs`,
+Adapter implementation file: `src/property_graph/algorithm_csr.rs`,
 compiled **as a child of the root-only `algorithms` adapter**, not the shared
-engine, using `#[cfg(test)] #[path = "engine/algorithm_csr.rs"] mod csr;`
+engine, using `#[cfg(test)] #[path = "algorithm_csr.rs"] mod csr;`
 in `src/property_graph/algorithms.rs`. This avoids referencing `crate::compact`
-from the std-only engine; `src/compact/mod.rs:36-37` is already test-only.
+from the std-only engine; `src/compact/mod.rs:36-37` is already test-only. The file lives beside the `engine/` tree, not in it: `tests/graph_build_boundary.py` (a CI gate) forbids `crate::` in every file under `engine/`, which the standalone `vlite-graph` harness also compiles.
 Inside it, `pub(crate) struct CsrSource<'g> { view: &'g CompactGraphView }`
 has private `view` and `pub(crate) fn new(view: &'g CompactGraphView) -> Self`.
 Implement Source there; use physical node/edge views, and `view.read(C,None)`
@@ -343,7 +343,7 @@ betweenness `every_budget_stops_at_its_boundary_and_keeps_only_full_sources`
 |---|---|---|
 | 1. Resident-only seam | `src/property_graph/engine/algorithm.rs`, `algorithm/source.rs`, `algorithm/iterative.rs` | Existing signatures, all 82 existing tests and oracle consumers unchanged; exact counters/float bits unchanged. No compact imports. |
 | Dependency, P4-owned plus authorized test seam | Accepted view and indexed physical key/adjacency accessors; algorithm commit 2a adds only the approved test construction seam | Independently reviewed contract for bounded effective membership and snapshot pinning. No production view behavior is changed by commit 2a. |
-| 2. CSR source (commit `6386b86e`) | New `src/property_graph/engine/algorithm_csr.rs`; test-only module declaration in `src/property_graph/algorithms.rs` | Two base/overlay source-contract tests; no public selection/serving switch. |
+| 2. CSR source (commit `6386b86e`) | New `src/property_graph/algorithm_csr.rs` (first placed under `engine/`, moved out after the CI boundary gate rejected its `crate::` imports); test-only module declaration in `src/property_graph/algorithms.rs` | Two base/overlay source-contract tests; no public selection/serving switch. |
 | 3. Parity evidence (commit `594d492e`, additive follow-up pending) | Test-only module declaration in `algorithm_csr.rs`; new `algorithm_csr/tests.rs`; authorized test-only `view/history.rs` | 540 comparisons per construction order, exhaustive assigned boundary sweep, independent cycle and algorithm expectations, indexed-work and allocator observations, and named fail-first probes; existing test/fixture/oracle files unchanged. |
 | 4. Documentation (this commit) | This file and the two current status locations | Record actual evidence and residual limitations, no invented qualification. |
 
