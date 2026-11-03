@@ -59,6 +59,8 @@ pub mod property_map;
 mod query;
 pub mod schema;
 mod state;
+#[allow(dead_code)] // Private parser/planner slice is not activated by this engine.
+pub(crate) mod subset;
 pub mod temporal;
 pub(super) mod temporal_visibility;
 #[allow(unused_imports)] // No adapter in the standalone harness.
