@@ -6,19 +6,30 @@ in ``tests/fixtures/ingestion/golden.json``; this reference never writes them.
 This models original-byte chunking, local dictionary extraction, ascii-key-v1
 normalization, and source-local evidence validation/resolution only. It does not
 model canonical identity digests, embeddings, storage plans, commits, receipts,
-providers, serving, or performance. The design does not define the byte encoding
-for decoded-output or per-observation attribute-size accounting; those two byte
-ceilings are deliberately not asserted here.
+providers, serving, or performance.
+
+Documented reading of section 4 (ratified at delta review): an endpoint containing
+literal LF is not on one literal-LF line and is skipped for pairing. A union over
+1,024 bytes is not a candidate (skip, not preparation failure). Relation ordering
+is deterministically pinned by these private goldens, not a persisted ordering.
+Not enforced here: the 1 MiB decoded-output and 8 KiB per-observation attribute
+ceilings have no specified encoded representation to measure. Rust-core admission
+must carry those outstanding accounting gates; these tests do not cover them.
 
 Fixture source values are exact UTF-8 strings, hexadecimal bytes, or explicitly
 concatenated/repeated byte pieces. A nonfinite confidence is represented in the
 fixture by ``{"nonfinite": "nan"}`` (or ``"infinity"``); it is converted to an
 IEEE float only when constructing a fixed local extraction observation.
+Stage-check goldens use explicit text repetitions and integer-indexed row products
+to spell out large regular outputs, never a call to the implementation under test.
 """
 
 import argparse
 import copy
+from contextlib import redirect_stderr
 import hashlib
+import io
+import itertools
 import json
 import math
 from pathlib import Path
@@ -298,7 +309,6 @@ def validate_extraction(chunk, extraction):
     require(isinstance(entities, list) and isinstance(relations, list),
             "extraction_fields")
     require(len(entities) <= MAX_CHUNK_ENTITIES, "chunk_entity_limit")
-    require(len(relations) <= MAX_CHUNK_RELATIONS, "chunk_relation_limit")
     local = {}
     for observation in entities:
         require(exact_keys(observation, (
@@ -348,7 +358,9 @@ def validate_extraction(chunk, extraction):
             "confidence": confidence,
         })
         require(bool(predicate), "predicate")
-    return list(local.values()), checked_relations
+    relations = list({json_key(item): item for item in checked_relations}.values())
+    require(len(relations) <= MAX_CHUNK_RELATIONS, "chunk_relation_limit")
+    return list(local.values()), relations
 
 
 def _validate_rule(rule, required, category):
@@ -359,6 +371,9 @@ def _validate_rule(rule, required, category):
 
 
 def dictionary_entities(chunk, rules):
+    # Each matching rule emits its own local observation, even if another rule
+    # has identical evidence. Both count toward 256; resolution later deduplicates
+    # exact mentions. Local IDs distinguish endpoint observations before pairing.
     require(isinstance(rules, list), "entity_rules")
     seen_ids = set()
     checked = []
@@ -394,7 +409,7 @@ def dictionary_entities(chunk, rules):
 
 def dictionary_relations(chunk, entities, rules):
     require(isinstance(rules, list), "relation_rules")
-    seen_ids, candidates = set(), []
+    seen_ids, unique = set(), {}
     raw = bytes.fromhex(chunk["text_hex"])
     for rule in rules:
         _validate_rule(rule, (
@@ -419,15 +434,17 @@ def dictionary_relations(chunk, entities, rules):
                 start, end = min(s0, o0), max(s1, o1)
                 if end - start > MAX_RELATION_UNION_BYTES:
                     continue
-                candidates.append({
+                candidate = {
                     "subject_local_id": subject["local_id"],
                     "predicate": rule["predicate"],
                     "object_local_id": obj["local_id"],
                     "span": [start, end],
                     "attributes": {},
                     "confidence": None,
-                })
-                require(len(candidates) <= MAX_CHUNK_RELATIONS, "chunk_relation_limit")
+                }
+                unique[json_key(candidate)] = candidate
+    candidates = list(unique.values())
+    require(len(candidates) <= MAX_CHUNK_RELATIONS, "chunk_relation_limit")
     candidates.sort(key=lambda item: (
         item["span"][0], item["span"][1], item["subject_local_id"],
         item["predicate"].encode("utf-8"), item["object_local_id"]))
@@ -617,13 +634,108 @@ def expand_expected(case):
     return expected
 
 
+def expand_pattern(value, variables=None):
+    """Expand fixture notation only; no ingestion algorithm supplies expected rows."""
+    variables = {} if variables is None else variables
+    if isinstance(value, list):
+        return [expand_pattern(item, variables) for item in value]
+    if not isinstance(value, dict):
+        return value
+    if set(value) == {"$text"}:
+        unit, count = value["$text"]
+        require(isinstance(unit, str) and type(count) is int and count >= 0,
+                "fixture_text")
+        return unit * count
+    if set(value) == {"$integer"}:
+        name, add = value["$integer"]
+        require(name in variables and type(add) is int, "fixture_integer")
+        return variables[name] + add
+    if set(value) == {"$string"}:
+        name, template = value["$string"]
+        require(name in variables and isinstance(template, str), "fixture_string")
+        return template.format(variables[name])
+    if set(value) == {"$rows"}:
+        rows = value["$rows"]
+        require(exact_keys(rows, ("ranges", "value"))
+                and isinstance(rows["ranges"], dict), "fixture_rows")
+        names, ranges = [], []
+        for name, bounds in rows["ranges"].items():
+            require(isinstance(bounds, list) and len(bounds) == 2
+                    and all(type(bound) is int for bound in bounds)
+                    and 0 <= bounds[0] <= bounds[1], "fixture_rows")
+            names.append(name)
+            ranges.append(range(*bounds))
+        return [expand_pattern(rows["value"], dict(variables, **dict(zip(names, row))))
+                for row in itertools.product(*ranges)]
+    if set(value) == {"$concat"}:
+        parts = expand_pattern(value["$concat"], variables)
+        require(isinstance(parts, list) and all(isinstance(part, list) for part in parts),
+                "fixture_concat")
+        return [item for part in parts for item in part]
+    return {key: expand_pattern(item, variables) for key, item in value.items()}
+
+
+def main_error_probe():
+    original = globals()["load_fixture"]
+
+    def fail(_path):
+        raise PreparationError("in-process regression error")
+
+    captured = io.StringIO()
+    globals()["load_fixture"] = fail
+    try:
+        with redirect_stderr(captured):
+            status = main(["--fixture", "in-process-error.json"])
+    finally:
+        globals()["load_fixture"] = original
+    return {"status": status, "stderr": captured.getvalue()}
+
+
+def run_stage_check(check):
+    operation, inputs = check["operation"], check["inputs"]
+    if operation == "main_error":
+        require(inputs == {}, "stage_inputs")
+        return main_error_probe()
+    if operation == "key":
+        require(exact_keys(inputs, ("key",)), "stage_inputs")
+        return normalize_key(inputs["key"])
+    raw = fixture_source(inputs["source"])
+    if operation == "source":
+        require(exact_keys(inputs, ("source", "identity")), "stage_inputs")
+        return validate_source(inputs["identity"], raw)
+    if operation == "chunks":
+        require(exact_keys(inputs, ("source", "strategy", "chunk_bytes", "overlap_bytes")),
+                "stage_inputs")
+        validate_chunk_config(inputs["strategy"], inputs["chunk_bytes"],
+                              inputs["overlap_bytes"])
+        return {"chunks": split_chunks(raw, inputs["strategy"], inputs["chunk_bytes"],
+                                      inputs["overlap_bytes"])}
+    chunk = {"text_hex": raw.hex()}
+    if operation == "dictionary":
+        require(exact_keys(inputs, ("source", "entity_rules", "relation_rules")),
+                "stage_inputs")
+        entities = dictionary_entities(chunk, inputs["entity_rules"])
+        relations = dictionary_relations(chunk, entities, inputs["relation_rules"])
+        # Exercise the common validator too, so no raw duplicate-count gate can
+        # regress between built-in extraction and source-local resolution.
+        validate_extraction(chunk, {"entities": entities, "relations": relations})
+        return {"entities": entities, "relations": relations}
+    if operation == "extraction":
+        require(exact_keys(inputs, ("source", "entities", "relations")), "stage_inputs")
+        entities, relations = validate_extraction(
+            chunk, {"entities": inputs["entities"], "relations": inputs["relations"]})
+        return {"entities": entities, "relations": relations}
+    raise PreparationError("stage_operation")
+
+
 def verify_document(document):
-    require(exact_keys(document, ("schema", "version", "cases")), "root_fields")
+    require(exact_keys(document, ("schema", "version", "cases"), ("checks",)), "root_fields")
     require(document["schema"] == SCHEMA, "schema")
     require(type(document["version"]) is int and document["version"] == 1, "version")
     require(isinstance(document["cases"], list) and bool(document["cases"]), "cases")
     names = set()
-    for case in document["cases"]:
+    for template in document["cases"]:
+        case = expand_pattern(template)
         require(isinstance(case, dict) and isinstance(case.get("name"), str)
                 and case["name"], "case_name")
         require(case["name"] not in names, "case_duplicate")
@@ -635,6 +747,25 @@ def verify_document(document):
             actual = {"error": error.category}
         require(json_key(actual) == json_key(expected),
                 f"golden_mismatch:{case['name']}")
+    checks = document.get("checks", [])
+    require(isinstance(checks, list), "checks")
+    for template in checks:
+        check = expand_pattern(template)
+        require(exact_keys(check, ("name", "operation", "inputs", "expected")),
+                "check_fields")
+        require(isinstance(check["name"], str) and check["name"]
+                and check["name"] not in names, "check_name")
+        names.add(check["name"])
+        expected = check["expected"]
+        if check["operation"] == "chunks" and "error" not in expected:
+            expected = expand_expected({
+                "source": check["inputs"]["source"], "expected": expected})
+        try:
+            actual = run_stage_check(check)
+        except PreparationError as error:
+            actual = {"error": error.category}
+        require(json_key(actual) == json_key(expected),
+                f"golden_mismatch:{check['name']}")
     return len(names)
 
 
@@ -834,12 +965,12 @@ def self_test(document):
     return detected
 
 
-def main():
+def main(argv=None):
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--fixture", type=Path, default=FIXTURE, help="override golden JSON")
     parser.add_argument("--self-test", action="store_true",
                         help="also kill representative hand-mutants")
-    args = parser.parse_args()
+    args = parser.parse_args(argv)
     try:
         document = load_fixture(args.fixture)
         count = verify_document(document)
@@ -848,7 +979,7 @@ def main():
             detected = self_test(document)
             print("Killed hand-mutants: " + ", ".join(detected))
             print("Rejected a hand-mutated golden and nonfinite confidence.")
-    except (OSError, ValueError, subprocess.SubprocessError) as error:
+    except (OSError, ValueError) as error:
         print(f"{args.fixture}: {error}", file=sys.stderr)
         return 1
     return 0

@@ -607,13 +607,410 @@
             {"local_id": 0, "kind": "Left", "key": "a", "surface": "A", "span": [0, 1], "attributes": {}, "confidence": null},
             {"local_id": 1, "kind": "Right", "key": "b", "surface": "B", "span": [1, 2], "attributes": {}, "confidence": null}
           ],
-          "relations": {
-            "repeat": 513,
-            "value": {"subject_local_id": 0, "predicate": "links", "object_local_id": 1, "span": [0, 2], "attributes": {}, "confidence": null}
-          }
+          "relations": {"$rows": {
+            "ranges": {"i": [0, 513]},
+            "value": {"subject_local_id": 0, "predicate": "links", "object_local_id": 1, "span": [0, 2], "attributes": {"ordinal": {"$integer": ["i", 0]}}, "confidence": null}
+          }}
         }
       ],
       "expected": {"error": "chunk_relation_limit"}
+    }
+  ],
+  "checks": [
+    {
+      "name": "paragraph-even-break-at-lower",
+      "operation": "chunks",
+      "inputs": {"source": {"pieces": [{"repeat_utf8": "a", "count": 510}, {"utf8": "\n\n"}, {"repeat_utf8": "b", "count": 600}]}, "strategy": "ParagraphV1", "chunk_bytes": 1024, "overlap_bytes": 0},
+      "expected": {"chunks": [
+        {"ordinal": 0, "start": 0, "end": 512, "sha256": "ee09b78ac64877eaf4a5de3544e27458f20fe03d1a9420b272bd67f8907e88b7"},
+        {"ordinal": 1, "start": 512, "end": 1112, "sha256": "3d0686a69a2c5b9bce3fe8d4ec51bea1720c04b7045046c0a9c09248be314453"}
+      ]}
+    },
+    {
+      "name": "paragraph-even-break-one-below-lower",
+      "operation": "chunks",
+      "inputs": {"source": {"pieces": [{"repeat_utf8": "a", "count": 509}, {"utf8": "\n\n"}, {"repeat_utf8": "b", "count": 600}]}, "strategy": "ParagraphV1", "chunk_bytes": 1024, "overlap_bytes": 0},
+      "expected": {"chunks": [
+        {"ordinal": 0, "start": 0, "end": 1024, "sha256": "338948e49efb263c2c2f67b32ad7719725e957eedd651299d3e2870daa0e1756"},
+        {"ordinal": 1, "start": 1024, "end": 1111, "sha256": "4a1efb8b26ce7f2668df7f9e6b9c1ffbaca109127d16188f9b0a6062cb810235"}
+      ]}
+    },
+    {
+      "name": "paragraph-odd-break-one-below-ceiling-half",
+      "operation": "chunks",
+      "inputs": {"source": {"pieces": [{"repeat_utf8": "a", "count": 510}, {"utf8": "\n\n"}, {"repeat_utf8": "b", "count": 600}]}, "strategy": "ParagraphV1", "chunk_bytes": 1025, "overlap_bytes": 0},
+      "expected": {"chunks": [
+        {"ordinal": 0, "start": 0, "end": 1025, "sha256": "18e3d979768251487c320c1e47cbbc337ac99c825336d8dae4d86aec55b1cd91"},
+        {"ordinal": 1, "start": 1025, "end": 1112, "sha256": "4a1efb8b26ce7f2668df7f9e6b9c1ffbaca109127d16188f9b0a6062cb810235"}
+      ]}
+    },
+    {
+      "name": "paragraph-odd-break-at-ceiling-half",
+      "operation": "chunks",
+      "inputs": {"source": {"pieces": [{"repeat_utf8": "a", "count": 511}, {"utf8": "\n\n"}, {"repeat_utf8": "b", "count": 600}]}, "strategy": "ParagraphV1", "chunk_bytes": 1025, "overlap_bytes": 0},
+      "expected": {"chunks": [
+        {"ordinal": 0, "start": 0, "end": 513, "sha256": "6bce25870d22a4db6e3a6c88099f88ecfe3deb77d4165f4c5a4deae755d38527"},
+        {"ordinal": 1, "start": 513, "end": 1113, "sha256": "3d0686a69a2c5b9bce3fe8d4ec51bea1720c04b7045046c0a9c09248be314453"}
+      ]}
+    },
+    {
+      "name": "paragraph-last-eligible-break",
+      "operation": "chunks",
+      "inputs": {"source": {"pieces": [{"repeat_utf8": "a", "count": 510}, {"utf8": "\n\n"}, {"repeat_utf8": "b", "count": 100}, {"utf8": "\n\n"}, {"repeat_utf8": "c", "count": 600}]}, "strategy": "ParagraphV1", "chunk_bytes": 1024, "overlap_bytes": 0},
+      "expected": {"chunks": [
+        {"ordinal": 0, "start": 0, "end": 614, "sha256": "a90cd9bd5221613d991b5d6c3d6d06c0a1f43a8ba805f917c17ec2bafa71b0ca"},
+        {"ordinal": 1, "start": 614, "end": 1214, "sha256": "8a88f9e43d03b7d9108742e08073a17ed8a36b1eb9326195938374ffeb14a16e"}
+      ]}
+    },
+    {
+      "name": "paragraph-overlapping-lf-triple",
+      "operation": "chunks",
+      "inputs": {"source": {"pieces": [{"repeat_utf8": "a", "count": 510}, {"utf8": "\n\n\n"}, {"repeat_utf8": "b", "count": 600}]}, "strategy": "ParagraphV1", "chunk_bytes": 1024, "overlap_bytes": 0},
+      "expected": {"chunks": [
+        {"ordinal": 0, "start": 0, "end": 513, "sha256": "5b53ef638915301553cd33d2879086cbb718f82ea0a254715a0aee20840df865"},
+        {"ordinal": 1, "start": 513, "end": 1113, "sha256": "3d0686a69a2c5b9bce3fe8d4ec51bea1720c04b7045046c0a9c09248be314453"}
+      ]}
+    },
+    {
+      "name": "paragraph-final-eof-ignores-eligible-break",
+      "operation": "chunks",
+      "inputs": {"source": {"pieces": [{"repeat_utf8": "a", "count": 600}, {"utf8": "\n\n"}, {"repeat_utf8": "b", "count": 100}]}, "strategy": "ParagraphV1", "chunk_bytes": 1024, "overlap_bytes": 0},
+      "expected": {"chunks": [{"ordinal": 0, "start": 0, "end": 702, "sha256": "dfbbbcff9e39d2823016e47d9fe307906443f5408c58508329595804552d28aa"}]}
+    },
+    {
+      "name": "paragraph-break-at-hard-end",
+      "operation": "chunks",
+      "inputs": {"source": {"pieces": [{"repeat_utf8": "a", "count": 510}, {"utf8": "\n\n"}, {"repeat_utf8": "a", "count": 510}, {"utf8": "\n\n"}, {"repeat_utf8": "b", "count": 100}]}, "strategy": "ParagraphV1", "chunk_bytes": 1024, "overlap_bytes": 0},
+      "expected": {"chunks": [
+        {"ordinal": 0, "start": 0, "end": 1024, "sha256": "787b2fa123390667bc97429bfc5088720422025766bc3a8a683002b6c3eb42a6"},
+        {"ordinal": 1, "start": 1024, "end": 1124, "sha256": "d6cbb053abf2933889a0ccbf6ac244623a63a2e3397e991dde09266bdaa932d1"}
+      ]}
+    },
+    {
+      "name": "paragraph-no-break-keeps-hard-end",
+      "operation": "chunks",
+      "inputs": {"source": {"$text": ["a", 1100]}, "strategy": "ParagraphV1", "chunk_bytes": 1024, "overlap_bytes": 0},
+      "expected": {"chunks": [
+        {"ordinal": 0, "start": 0, "end": 1024, "sha256": "2edc986847e209b4016e141a6dc8716d3207350f416969382d431539bf292e4a"},
+        {"ordinal": 1, "start": 1024, "end": 1100, "sha256": "f8b8aba652e5b3cde6bc74bcb7bff15289a222cfdb7759a9809dc08574911f60"}
+      ]}
+    },
+    {
+      "name": "overlap-quarter-inclusive",
+      "operation": "chunks",
+      "inputs": {"source": {"$text": ["a", 1025]}, "strategy": "FixedUtf8V1", "chunk_bytes": 1024, "overlap_bytes": 256},
+      "expected": {"chunks": [
+        {"ordinal": 0, "start": 0, "end": 1024, "sha256": "2edc986847e209b4016e141a6dc8716d3207350f416969382d431539bf292e4a"},
+        {"ordinal": 1, "start": 768, "end": 1025, "sha256": "e8d95cc2b4bc198c54b40bd214df958afb65f5e73d2c2eafe0593cf5c635c1f0"}
+      ]}
+    },
+    {
+      "name": "overlap-quarter-plus-one",
+      "operation": "chunks",
+      "inputs": {"source": "a", "strategy": "FixedUtf8V1", "chunk_bytes": 1024, "overlap_bytes": 257},
+      "expected": {"error": "chunk_overlap"}
+    },
+    {
+      "name": "overlap-one-third-is-not-one-quarter",
+      "operation": "chunks",
+      "inputs": {"source": "a", "strategy": "FixedUtf8V1", "chunk_bytes": 1024, "overlap_bytes": 341},
+      "expected": {"error": "chunk_overlap"}
+    },
+    {
+      "name": "overlap-absolute-1024-inclusive",
+      "operation": "chunks",
+      "inputs": {"source": {"$text": ["a", 4097]}, "strategy": "FixedUtf8V1", "chunk_bytes": 4096, "overlap_bytes": 1024},
+      "expected": {"chunks": [
+        {"ordinal": 0, "start": 0, "end": 4096, "sha256": "c93eee2d0db02f10acc7460d9576e122dcf8cd53c4bf8dfcae1b3e74ebcfff5a"},
+        {"ordinal": 1, "start": 3072, "end": 4097, "sha256": "4a82297889eb505cf6b5cbdf69977afab4632d6557539782f657bd7dc78091a5"}
+      ]}
+    },
+    {
+      "name": "overlap-absolute-1025-rejected",
+      "operation": "chunks",
+      "inputs": {"source": "a", "strategy": "FixedUtf8V1", "chunk_bytes": 8192, "overlap_bytes": 1025},
+      "expected": {"error": "chunk_overlap"}
+    },
+    {
+      "name": "chunk-size-below-minimum",
+      "operation": "chunks",
+      "inputs": {"source": "a", "strategy": "FixedUtf8V1", "chunk_bytes": 1023, "overlap_bytes": 0},
+      "expected": {"error": "chunk_size"}
+    },
+    {
+      "name": "chunk-size-above-maximum",
+      "operation": "chunks",
+      "inputs": {"source": "a", "strategy": "FixedUtf8V1", "chunk_bytes": 16385, "overlap_bytes": 0},
+      "expected": {"error": "chunk_size"}
+    },
+    {"name": "key-exactly-256-utf8-bytes", "operation": "key", "inputs": {"key": {"$text": ["É", 128]}}, "expected": {"$text": ["É", 128]}},
+    {"name": "key-257-utf8-bytes", "operation": "key", "inputs": {"key": {"$text": ["a", 257]}}, "expected": {"error": "entity_key_too_long"}},
+    {"name": "key-whitespace-normalizes-empty", "operation": "key", "inputs": {"key": " \t\r\n"}, "expected": {"error": "entity_key_empty"}},
+    {"name": "key-all-ascii-whitespace-collapses-and-z-lowercases", "operation": "key", "inputs": {"key": "\r\t A \t\r\n Z\r\nÉ İ́ \r"}, "expected": "a z É İ́"},
+    {
+      "name": "source-identity-byte-ceilings-inclusive",
+      "operation": "source",
+      "inputs": {"source": "a", "identity": {"tenant": {"$text": ["é", 64]}, "source_id": {"$text": ["é", 128]}, "uri": {"$text": ["é", 1024]}}},
+      "expected": {"tenant": {"$text": ["é", 64]}, "source_id": {"$text": ["é", 128]}, "uri": {"$text": ["é", 1024]}, "byte_length": 1}
+    },
+    {"name": "source-tenant-129-bytes", "operation": "source", "inputs": {"source": "a", "identity": {"tenant": {"$text": ["t", 129]}, "source_id": "s"}}, "expected": {"error": "source_identity"}},
+    {"name": "source-id-257-bytes", "operation": "source", "inputs": {"source": "a", "identity": {"tenant": "t", "source_id": {"$text": ["s", 257]}}}, "expected": {"error": "source_identity"}},
+    {"name": "source-uri-2049-bytes", "operation": "source", "inputs": {"source": "a", "identity": {"tenant": "t", "source_id": "s", "uri": {"$text": ["u", 2049]}}}, "expected": {"error": "source_identity"}},
+    {
+      "name": "dictionary-entities-255",
+      "operation": "dictionary",
+      "inputs": {"source": {"$text": ["a", 255]}, "entity_rules": [{"rule_id": "a", "literal": "a", "kind": "K", "key": "a"}], "relation_rules": []},
+      "expected": {"entities": {"$rows": {"ranges": {"i": [0, 255]}, "value": {"local_id": {"$integer": ["i", 0]}, "kind": "K", "key": "a", "surface": "a", "span": [{"$integer": ["i", 0]}, {"$integer": ["i", 1]}], "attributes": {}, "confidence": null}}}, "relations": []}
+    },
+    {
+      "name": "dictionary-entities-256",
+      "operation": "dictionary",
+      "inputs": {"source": {"$text": ["a", 256]}, "entity_rules": [{"rule_id": "a", "literal": "a", "kind": "K", "key": "a"}], "relation_rules": []},
+      "expected": {"entities": {"$rows": {"ranges": {"i": [0, 256]}, "value": {"local_id": {"$integer": ["i", 0]}, "kind": "K", "key": "a", "surface": "a", "span": [{"$integer": ["i", 0]}, {"$integer": ["i", 1]}], "attributes": {}, "confidence": null}}}, "relations": []}
+    },
+    {
+      "name": "dictionary-entities-257",
+      "operation": "dictionary",
+      "inputs": {"source": {"$text": ["a", 257]}, "entity_rules": [{"rule_id": "a", "literal": "a", "kind": "K", "key": "a"}], "relation_rules": []},
+      "expected": {"error": "chunk_entity_limit"}
+    },
+    {
+      "name": "dictionary-exact-entity-evidence-256-rules-keeps-local-observations",
+      "operation": "dictionary",
+      "inputs": {"source": "a", "entity_rules": {"$rows": {"ranges": {"i": [0, 256]}, "value": {"rule_id": {"$string": ["i", "rule-{:03d}"]}, "literal": "a", "kind": "K", "key": "a"}}}, "relation_rules": []},
+      "expected": {"entities": {"$rows": {"ranges": {"i": [0, 256]}, "value": {"local_id": {"$integer": ["i", 0]}, "kind": "K", "key": "a", "surface": "a", "span": [0, 1], "attributes": {}, "confidence": null}}}, "relations": []}
+    },
+    {
+      "name": "dictionary-exact-entity-evidence-257-rules-counts-before-resolution",
+      "operation": "dictionary",
+      "inputs": {"source": "a", "entity_rules": {"$rows": {"ranges": {"i": [0, 257]}, "value": {"rule_id": {"$string": ["i", "rule-{:03d}"]}, "literal": "a", "kind": "K", "key": "a"}}}, "relation_rules": []},
+      "expected": {"error": "chunk_entity_limit"}
+    },
+    {
+      "name": "dictionary-duplicate-rules-578-candidates-289-distinct",
+      "operation": "dictionary",
+      "inputs": {
+        "source": "AAAAAAAAAAAAAAAAABBBBBBBBBBBBBBBBB",
+        "entity_rules": [{"rule_id": "a", "literal": "A", "kind": "A", "key": "a"}, {"rule_id": "b", "literal": "B", "kind": "B", "key": "b"}],
+        "relation_rules": [{"rule_id": "p1", "predicate": "P", "subject_kind": "A", "object_kind": "B"}, {"rule_id": "p2", "predicate": "P", "subject_kind": "A", "object_kind": "B"}]
+      },
+      "expected": {
+        "entities": {"$concat": [
+          {"$rows": {"ranges": {"i": [0, 17]}, "value": {"local_id": {"$integer": ["i", 0]}, "kind": "A", "key": "a", "surface": "A", "span": [{"$integer": ["i", 0]}, {"$integer": ["i", 1]}], "attributes": {}, "confidence": null}}},
+          {"$rows": {"ranges": {"i": [17, 34]}, "value": {"local_id": {"$integer": ["i", 0]}, "kind": "B", "key": "b", "surface": "B", "span": [{"$integer": ["i", 0]}, {"$integer": ["i", 1]}], "attributes": {}, "confidence": null}}}
+        ]},
+        "relations": {"$rows": {"ranges": {"s": [0, 17], "o": [17, 34]}, "value": {"subject_local_id": {"$integer": ["s", 0]}, "predicate": "P", "object_local_id": {"$integer": ["o", 0]}, "span": [{"$integer": ["s", 0]}, {"$integer": ["o", 1]}], "attributes": {}, "confidence": null}}}
+      }
+    },
+    {
+      "name": "dictionary-relations-511",
+      "operation": "dictionary",
+      "inputs": {
+        "source": {"pieces": [{"repeat_utf8": "A", "count": 7}, {"repeat_utf8": "B", "count": 73}]},
+        "entity_rules": [{"rule_id": "a", "literal": "A", "kind": "A", "key": "a"}, {"rule_id": "b", "literal": "B", "kind": "B", "key": "b"}],
+        "relation_rules": [{"rule_id": "p", "predicate": "P", "subject_kind": "A", "object_kind": "B"}]
+      },
+      "expected": {
+        "entities": {"$concat": [
+          {"$rows": {"ranges": {"i": [0, 7]}, "value": {"local_id": {"$integer": ["i", 0]}, "kind": "A", "key": "a", "surface": "A", "span": [{"$integer": ["i", 0]}, {"$integer": ["i", 1]}], "attributes": {}, "confidence": null}}},
+          {"$rows": {"ranges": {"i": [7, 80]}, "value": {"local_id": {"$integer": ["i", 0]}, "kind": "B", "key": "b", "surface": "B", "span": [{"$integer": ["i", 0]}, {"$integer": ["i", 1]}], "attributes": {}, "confidence": null}}}
+        ]},
+        "relations": {"$rows": {"ranges": {"s": [0, 7], "o": [7, 80]}, "value": {"subject_local_id": {"$integer": ["s", 0]}, "predicate": "P", "object_local_id": {"$integer": ["o", 0]}, "span": [{"$integer": ["s", 0]}, {"$integer": ["o", 1]}], "attributes": {}, "confidence": null}}}
+      }
+    },
+    {
+      "name": "dictionary-relations-512-with-duplicates",
+      "operation": "dictionary",
+      "inputs": {
+        "source": {"pieces": [{"repeat_utf8": "A", "count": 16}, {"repeat_utf8": "B", "count": 32}]},
+        "entity_rules": [{"rule_id": "a", "literal": "A", "kind": "A", "key": "a"}, {"rule_id": "b", "literal": "B", "kind": "B", "key": "b"}],
+        "relation_rules": [{"rule_id": "p1", "predicate": "P", "subject_kind": "A", "object_kind": "B"}, {"rule_id": "p2", "predicate": "P", "subject_kind": "A", "object_kind": "B"}]
+      },
+      "expected": {
+        "entities": {"$concat": [
+          {"$rows": {"ranges": {"i": [0, 16]}, "value": {"local_id": {"$integer": ["i", 0]}, "kind": "A", "key": "a", "surface": "A", "span": [{"$integer": ["i", 0]}, {"$integer": ["i", 1]}], "attributes": {}, "confidence": null}}},
+          {"$rows": {"ranges": {"i": [16, 48]}, "value": {"local_id": {"$integer": ["i", 0]}, "kind": "B", "key": "b", "surface": "B", "span": [{"$integer": ["i", 0]}, {"$integer": ["i", 1]}], "attributes": {}, "confidence": null}}}
+        ]},
+        "relations": {"$rows": {"ranges": {"s": [0, 16], "o": [16, 48]}, "value": {"subject_local_id": {"$integer": ["s", 0]}, "predicate": "P", "object_local_id": {"$integer": ["o", 0]}, "span": [{"$integer": ["s", 0]}, {"$integer": ["o", 1]}], "attributes": {}, "confidence": null}}}
+      }
+    },
+    {
+      "name": "dictionary-relations-513-distinct",
+      "operation": "dictionary",
+      "inputs": {
+        "source": {"pieces": [{"repeat_utf8": "A", "count": 19}, {"repeat_utf8": "B", "count": 27}]},
+        "entity_rules": [{"rule_id": "a", "literal": "A", "kind": "A", "key": "a"}, {"rule_id": "b", "literal": "B", "kind": "B", "key": "b"}],
+        "relation_rules": [{"rule_id": "p", "predicate": "P", "subject_kind": "A", "object_kind": "B"}]
+      },
+      "expected": {"error": "chunk_relation_limit"}
+    },
+    {
+      "name": "dictionary-subject-only-containing-lf-is-skipped",
+      "operation": "dictionary",
+      "inputs": {"source": "AB\n", "entity_rules": [{"rule_id": "a", "literal": "AB\n", "kind": "A", "key": "a"}, {"rule_id": "b", "literal": "B", "kind": "B", "key": "b"}], "relation_rules": [{"rule_id": "p", "predicate": "P", "subject_kind": "A", "object_kind": "B"}]},
+      "expected": {"entities": [
+        {"local_id": 0, "kind": "A", "key": "a", "surface": "AB\n", "span": [0, 3], "attributes": {}, "confidence": null},
+        {"local_id": 1, "kind": "B", "key": "b", "surface": "B", "span": [1, 2], "attributes": {}, "confidence": null}
+      ], "relations": []}
+    },
+    {
+      "name": "dictionary-object-only-containing-lf-is-skipped",
+      "operation": "dictionary",
+      "inputs": {"source": "AB\n", "entity_rules": [{"rule_id": "a", "literal": "A", "kind": "A", "key": "a"}, {"rule_id": "b", "literal": "B\n", "kind": "B", "key": "b"}], "relation_rules": [{"rule_id": "p", "predicate": "P", "subject_kind": "A", "object_kind": "B"}]},
+      "expected": {"entities": [
+        {"local_id": 0, "kind": "A", "key": "a", "surface": "A", "span": [0, 1], "attributes": {}, "confidence": null},
+        {"local_id": 1, "kind": "B", "key": "b", "surface": "B\n", "span": [1, 3], "attributes": {}, "confidence": null}
+      ], "relations": []}
+    },
+    {
+      "name": "extraction-duplicate-relations-1024-raw-one-distinct",
+      "operation": "extraction",
+      "inputs": {
+        "source": "AB",
+        "entities": [
+          {"local_id": 0, "kind": "A", "key": "a", "surface": "A", "span": [0, 1], "attributes": {}, "confidence": null},
+          {"local_id": 1, "kind": "B", "key": "b", "surface": "B", "span": [1, 2], "attributes": {}, "confidence": null}
+        ],
+        "relations": {"$rows": {"ranges": {"i": [0, 1024]}, "value": {"subject_local_id": 0, "predicate": "P", "object_local_id": 1, "span": [0, 2], "attributes": {}, "confidence": null}}}
+      },
+      "expected": {
+        "entities": [
+          {"local_id": 0, "kind": "A", "normalized_key": "a", "surface": "A", "span": [0, 1], "attributes": {}, "confidence": null},
+          {"local_id": 1, "kind": "B", "normalized_key": "b", "surface": "B", "span": [1, 2], "attributes": {}, "confidence": null}
+        ],
+        "relations": [{"subject_local_id": 0, "predicate": "P", "object_local_id": 1, "span": [0, 2], "attributes": {}, "confidence": null}]
+      }
+    },
+    {
+      "name": "extraction-512-distinct-relations-with-duplicates",
+      "operation": "extraction",
+      "inputs": {
+        "source": "AB",
+        "entities": [
+          {"local_id": 0, "kind": "A", "key": "a", "surface": "A", "span": [0, 1], "attributes": {}, "confidence": null},
+          {"local_id": 1, "kind": "B", "key": "b", "surface": "B", "span": [1, 2], "attributes": {}, "confidence": null}
+        ],
+        "relations": {"$concat": [
+          {"$rows": {"ranges": {"i": [0, 512]}, "value": {"subject_local_id": 0, "predicate": "P", "object_local_id": 1, "span": [0, 2], "attributes": {"ordinal": {"$integer": ["i", 0]}}, "confidence": null}}},
+          {"$rows": {"ranges": {"i": [0, 512]}, "value": {"subject_local_id": 0, "predicate": "P", "object_local_id": 1, "span": [0, 2], "attributes": {"ordinal": {"$integer": ["i", 0]}}, "confidence": null}}}
+        ]}
+      },
+      "expected": {
+        "entities": [
+          {"local_id": 0, "kind": "A", "normalized_key": "a", "surface": "A", "span": [0, 1], "attributes": {}, "confidence": null},
+          {"local_id": 1, "kind": "B", "normalized_key": "b", "surface": "B", "span": [1, 2], "attributes": {}, "confidence": null}
+        ],
+        "relations": {"$rows": {"ranges": {"i": [0, 512]}, "value": {"subject_local_id": 0, "predicate": "P", "object_local_id": 1, "span": [0, 2], "attributes": {"ordinal": {"$integer": ["i", 0]}}, "confidence": null}}}
+      }
+    },
+    {
+      "name": "extraction-empty-span-rejected",
+      "operation": "extraction",
+      "inputs": {"source": "a", "entities": [{"local_id": 0, "kind": "K", "key": "a", "surface": "a", "span": [0, 0], "attributes": {}, "confidence": null}], "relations": []},
+      "expected": {"error": "evidence_span"}
+    },
+    {
+      "name": "extraction-only-start-unaligned",
+      "operation": "extraction",
+      "inputs": {"source": "😀", "entities": [{"local_id": 0, "kind": "K", "key": "a", "surface": "😀", "span": [1, 4], "attributes": {}, "confidence": null}], "relations": []},
+      "expected": {"error": "evidence_boundary"}
+    },
+    {
+      "name": "extraction-only-end-unaligned",
+      "operation": "extraction",
+      "inputs": {"source": "😀", "entities": [{"local_id": 0, "kind": "K", "key": "a", "surface": "😀", "span": [0, 3], "attributes": {}, "confidence": null}], "relations": []},
+      "expected": {"error": "evidence_boundary"}
+    },
+    {
+      "name": "extraction-surface-mismatches-exact-bytes",
+      "operation": "extraction",
+      "inputs": {"source": "a", "entities": [{"local_id": 0, "kind": "K", "key": "a", "surface": "b", "span": [0, 1], "attributes": {}, "confidence": null}], "relations": []},
+      "expected": {"error": "entity_surface_mismatch"}
+    },
+    {
+      "name": "extraction-duplicate-local-id-rejected",
+      "operation": "extraction",
+      "inputs": {"source": "AB", "entities": [
+        {"local_id": 0, "kind": "A", "key": "a", "surface": "A", "span": [0, 1], "attributes": {}, "confidence": null},
+        {"local_id": 0, "kind": "B", "key": "b", "surface": "B", "span": [1, 2], "attributes": {}, "confidence": null}
+      ], "relations": []},
+      "expected": {"error": "local_id_duplicate"}
+    },
+    {
+      "name": "extraction-only-subject-local-id-foreign",
+      "operation": "extraction",
+      "inputs": {"source": "a", "entities": [{"local_id": 0, "kind": "K", "key": "a", "surface": "a", "span": [0, 1], "attributes": {}, "confidence": null}], "relations": [
+        {"subject_local_id": 1, "predicate": "P", "object_local_id": 0, "span": [0, 1], "attributes": {}, "confidence": null}
+      ]},
+      "expected": {"error": "local_reference_invalid"}
+    },
+    {
+      "name": "extraction-only-object-local-id-foreign",
+      "operation": "extraction",
+      "inputs": {"source": "a", "entities": [{"local_id": 0, "kind": "K", "key": "a", "surface": "a", "span": [0, 1], "attributes": {}, "confidence": null}], "relations": [
+        {"subject_local_id": 0, "predicate": "P", "object_local_id": 1, "span": [0, 1], "attributes": {}, "confidence": null}
+      ]},
+      "expected": {"error": "local_reference_invalid"}
+    },
+    {
+      "name": "extraction-confidence-zero-and-one-inclusive",
+      "operation": "extraction",
+      "inputs": {"source": "AB", "entities": [
+        {"local_id": 0, "kind": "A", "key": "a", "surface": "A", "span": [0, 1], "attributes": {}, "confidence": 0.0},
+        {"local_id": 1, "kind": "B", "key": "b", "surface": "B", "span": [1, 2], "attributes": {}, "confidence": 1.0}
+      ], "relations": [
+        {"subject_local_id": 0, "predicate": "P", "object_local_id": 1, "span": [0, 2], "attributes": {}, "confidence": 0.0},
+        {"subject_local_id": 1, "predicate": "P", "object_local_id": 0, "span": [0, 2], "attributes": {}, "confidence": 1.0}
+      ]},
+      "expected": {"entities": [
+        {"local_id": 0, "kind": "A", "normalized_key": "a", "surface": "A", "span": [0, 1], "attributes": {}, "confidence": 0.0},
+        {"local_id": 1, "kind": "B", "normalized_key": "b", "surface": "B", "span": [1, 2], "attributes": {}, "confidence": 1.0}
+      ], "relations": [
+        {"subject_local_id": 0, "predicate": "P", "object_local_id": 1, "span": [0, 2], "attributes": {}, "confidence": 0.0},
+        {"subject_local_id": 1, "predicate": "P", "object_local_id": 0, "span": [0, 2], "attributes": {}, "confidence": 1.0}
+      ]}
+    },
+    {
+      "name": "extraction-confidence-below-zero",
+      "operation": "extraction",
+      "inputs": {"source": "a", "entities": [{"local_id": 0, "kind": "K", "key": "a", "surface": "a", "span": [0, 1], "attributes": {}, "confidence": -0.001}], "relations": []},
+      "expected": {"error": "confidence_invalid"}
+    },
+    {
+      "name": "extraction-confidence-above-one",
+      "operation": "extraction",
+      "inputs": {"source": "a", "entities": [{"local_id": 0, "kind": "K", "key": "a", "surface": "a", "span": [0, 1], "attributes": {}, "confidence": 1.001}], "relations": []},
+      "expected": {"error": "confidence_invalid"}
+    },
+    {
+      "name": "extraction-attributes-16-fields-and-4096-byte-string",
+      "operation": "extraction",
+      "inputs": {"source": "a", "entities": [{"local_id": 0, "kind": "K", "key": "a", "surface": "a", "span": [0, 1], "attributes": {
+        "a": {"$text": ["é", 2048]}, "b": 1, "c": 2, "d": 3, "e": 4, "f": 5, "g": 6, "h": 7, "i": 8, "j": 9, "k": 10, "l": 11, "m": 12, "n": 13, "o": 14, "p": 15
+      }, "confidence": null}], "relations": []},
+      "expected": {"entities": [{"local_id": 0, "kind": "K", "normalized_key": "a", "surface": "a", "span": [0, 1], "attributes": {
+        "a": {"$text": ["é", 2048]}, "b": 1, "c": 2, "d": 3, "e": 4, "f": 5, "g": 6, "h": 7, "i": 8, "j": 9, "k": 10, "l": 11, "m": 12, "n": 13, "o": 14, "p": 15
+      }, "confidence": null}], "relations": []}
+    },
+    {
+      "name": "extraction-attributes-17-fields",
+      "operation": "extraction",
+      "inputs": {"source": "a", "entities": [{"local_id": 0, "kind": "K", "key": "a", "surface": "a", "span": [0, 1], "attributes": {
+        "a": 0, "b": 1, "c": 2, "d": 3, "e": 4, "f": 5, "g": 6, "h": 7, "i": 8, "j": 9, "k": 10, "l": 11, "m": 12, "n": 13, "o": 14, "p": 15, "q": 16
+      }, "confidence": null}], "relations": []},
+      "expected": {"error": "attribute_fields"}
+    },
+    {
+      "name": "extraction-attribute-string-4097-bytes",
+      "operation": "extraction",
+      "inputs": {"source": "a", "entities": [{"local_id": 0, "kind": "K", "key": "a", "surface": "a", "span": [0, 1], "attributes": {"a": {"$text": ["x", 4097]}}, "confidence": null}], "relations": []},
+      "expected": {"error": "attribute_string_limit"}
+    },
+    {
+      "name": "main-error-is-nonzero-with-sanitized-message-not-traceback",
+      "operation": "main_error",
+      "inputs": {},
+      "expected": {"status": 1, "stderr": "in-process-error.json: in-process regression error\n"}
     }
   ]
 }
