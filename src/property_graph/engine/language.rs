@@ -13,7 +13,9 @@
 //! Values come from literals or `$parameters` bound from a caller-supplied
 //! map; a missing or unused parameter is an error. The graph is selected
 //! outside the text. Parsing is bounded: at most [`MAX_QUERY_BYTES`] bytes and
-//! [`MAX_QUERY_TOKENS`] tokens, one statement, no recursion.
+//! [`MAX_QUERY_TOKENS`] tokens, one statement, and no recursion in this
+//! legacy parser. The private embedded-subset parser separately bounds its
+//! predicate-parenthesis recursion.
 
 use super::filter::NodeFilter;
 use super::limits::GraphLimits;

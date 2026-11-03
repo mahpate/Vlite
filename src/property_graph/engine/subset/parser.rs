@@ -175,6 +175,9 @@ impl Parser {
 
     fn unexpected(&self, expected: &str) -> LanguageError {
         let token = self.token();
+        if Self::is_identifier_kind(&token.kind) && self.kind_at(1) == &Kind::Symbol("(") {
+            return unsupported(token.position, "function invocation is not supported");
+        }
         if let Kind::Word(word) = &token.kind {
             if UNSUPPORTED_CLAUSES
                 .iter()
@@ -286,6 +289,19 @@ impl Parser {
         {
             return Err(unsupported(self.position(), "subqueries are not supported"));
         }
+        if let Kind::Word(word) = &self.token().kind
+            && UNSUPPORTED_CLAUSES
+                .iter()
+                .any(|reserved| word.eq_ignore_ascii_case(reserved))
+        {
+            return Err(unsupported(
+                self.position(),
+                format!(
+                    "{} is not supported by vlite-cypher-1",
+                    word.to_ascii_uppercase()
+                ),
+            ));
+        }
         if Self::is_identifier_kind(&self.token().kind) && self.kind_at(1) == &Kind::Symbol("(") {
             return Err(unsupported(
                 self.position(),
@@ -362,6 +378,12 @@ impl Parser {
         if pattern.is_none() && self.is_keyword("WHERE") {
             return Err(syntax(self.position(), "WHERE requires a preceding MATCH"));
         }
+        if pattern.is_some() && self.is_keyword("MATCH") {
+            return Err(unsupported(
+                self.position(),
+                "MATCH accepts exactly one pattern",
+            ));
+        }
         let predicate = if self.eat_keyword("WHERE").is_some() {
             Some(self.disjunction()?)
         } else {
@@ -406,16 +428,14 @@ impl Parser {
 
     fn pattern(&mut self) -> Result<Pattern, LanguageError> {
         let position = self.position();
-        let path_variable = if Self::is_identifier_kind(self.kind_at(0))
-            && self.kind_at(1) == &Kind::Symbol("=")
-            && self.kind_at(2) == &Kind::Symbol("(")
-        {
-            let variable = self.identifier()?;
-            self.expect_symbol("=")?;
-            Some(variable)
-        } else {
-            None
-        };
+        let path_variable =
+            if Self::is_identifier_kind(self.kind_at(0)) && self.kind_at(1) == &Kind::Symbol("=") {
+                let variable = self.identifier()?;
+                self.expect_symbol("=")?;
+                Some(variable)
+            } else {
+                None
+            };
         let start = self.node_pattern()?;
         let relationship = if self.is_symbol("-") || self.is_symbol("<-") {
             Some((self.relationship_pattern()?, self.node_pattern()?))
@@ -444,13 +464,7 @@ impl Parser {
 
     fn node_pattern(&mut self) -> Result<NodePattern, LanguageError> {
         let position = self.expect_symbol("(")?;
-        let variable = if Self::is_identifier_kind(&self.token().kind)
-            && !matches!(&self.token().kind, Kind::Word(word) if ["KEY", "ID"].iter().any(|kw| word.eq_ignore_ascii_case(kw)))
-        {
-            Some(self.identifier()?)
-        } else {
-            None
-        };
+        let variable = Some(self.identifier()?);
         let mut labels = Vec::new();
         while self.eat_symbol(":").is_some() {
             labels.push(self.name("a label name")?);
@@ -469,11 +483,11 @@ impl Parser {
 
     fn relationship_pattern(&mut self) -> Result<RelationshipPattern, LanguageError> {
         let position = self.position();
-        let direction = if self.eat_symbol("<-").is_some() {
-            Direction::In
+        let incoming = if self.eat_symbol("<-").is_some() {
+            true
         } else {
             self.expect_symbol("-")?;
-            Direction::Out
+            false
         };
         self.expect_symbol("[")?;
         let variable = if Self::is_identifier_kind(&self.token().kind)
@@ -556,17 +570,14 @@ impl Parser {
         };
         let properties = self.properties(true)?;
         self.expect_symbol("]")?;
-        let direction = match direction {
-            Direction::In => {
-                self.expect_symbol("-")?;
-                Direction::In
-            }
-            Direction::Out if self.eat_symbol("->").is_some() => Direction::Out,
-            Direction::Out => {
-                self.expect_symbol("-")?;
-                Direction::Both
-            }
-            Direction::Both => unreachable!(),
+        let direction = if incoming {
+            self.expect_symbol("-")?;
+            Direction::In
+        } else if self.eat_symbol("->").is_some() {
+            Direction::Out
+        } else {
+            self.expect_symbol("-")?;
+            Direction::Both
         };
         Ok(RelationshipPattern {
             variable,
@@ -641,7 +652,7 @@ impl Parser {
             terms.push(self.conjunction()?);
         }
         Ok(if terms.len() == 1 {
-            terms.pop().expect("one term")
+            terms.remove(0)
         } else {
             Predicate::Or(terms)
         })
@@ -653,7 +664,7 @@ impl Parser {
             terms.push(self.negation()?);
         }
         Ok(if terms.len() == 1 {
-            terms.pop().expect("one term")
+            terms.remove(0)
         } else {
             Predicate::And(terms)
         })
@@ -661,6 +672,12 @@ impl Parser {
 
     fn negation(&mut self) -> Result<Predicate, LanguageError> {
         if self.eat_keyword("NOT").is_some() {
+            if self.is_keyword("NOT") {
+                return Err(syntax(
+                    self.position(),
+                    "NOT may prefix only one predicate; use parentheses to nest negation",
+                ));
+            }
             return Ok(Predicate::Not(Box::new(self.negation()?)));
         }
         self.atomic_predicate()

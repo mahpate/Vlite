@@ -10,7 +10,7 @@ use engine::language::{LanguageError, LanguageErrorKind};
 use engine::model::PropertyValue;
 use engine::subset::plan::{ParameterEntry, PlanError, plan};
 use engine::subset::{
-    Anchor, AnchorKind, Creation, CreationNode, Direction, FieldTarget, Mutation, Name,
+    Anchor, AnchorKind, Compare, Creation, CreationNode, Direction, FieldTarget, Mutation, Name,
     NodePattern, ParameterRef, Pattern, Plan, Predicate, ReturnClause, ReturnItem, ReturnValue,
     Statement,
 };
@@ -50,6 +50,17 @@ fn query_error(text: &str, parameters: &[ParameterEntry]) -> LanguageError {
         }
         other => panic!("expected query error, got {other:?}"),
     }
+}
+
+fn assert_query_error_at(
+    text: &str,
+    parameters: &[ParameterEntry],
+    kind: LanguageErrorKind,
+    position: usize,
+) {
+    let error = query_error(text, parameters);
+    assert_eq!(error.kind, kind, "{text}: {error}");
+    assert_eq!(error.position, position, "{text}: {error}");
 }
 
 fn limit_map(count: usize) -> String {
@@ -303,6 +314,464 @@ fn parser_rejections_pin_kind_and_utf8_byte_offset() {
         assert_eq!(error.kind, kind, "{text}: {error}");
         assert_eq!(error.position, position, "{text}: {error}");
     }
+}
+
+#[test]
+fn rejected_grammar_forms_have_the_specified_kind_and_introducer_offset() {
+    let unsupported_clauses = [
+        "OPTIONAL",
+        "WITH",
+        "UNWIND",
+        "CALL",
+        "YIELD",
+        "UNION",
+        "FOREACH",
+        "LOAD",
+        "CSV",
+        "USE",
+        "INSERT",
+        "UPDATE",
+        "DROP",
+        "ALTER",
+        "INDEX",
+        "CONSTRAINT",
+        "EXPLAIN",
+        "PROFILE",
+        "SHORTEST",
+        "SEARCH",
+        "NEAR",
+        "DISTINCT",
+        "IN",
+        "EXISTS",
+    ];
+    for keyword in unsupported_clauses {
+        let text = format!("MATCH (n) RETURN {keyword}");
+        assert_query_error_at(
+            &text,
+            &[],
+            LanguageErrorKind::Unsupported,
+            text.find(keyword).unwrap(),
+        );
+    }
+
+    let reserved_as_expression = [
+        ("MATCH (n) RETURN DISTINCT n", "DISTINCT"),
+        ("MATCH (a) MATCH (b) RETURN b", "MATCH"),
+        (
+            "MATCH shortestPath((a KEY $k)-[:R*1..2]->(b)) RETURN a",
+            "shortestPath",
+        ),
+        (
+            "MATCH p = shortestPath((a KEY $k)-[:R*1..2]->(b)) RETURN p",
+            "shortestPath",
+        ),
+        ("MATCH (n) WHERE n.x IN $values RETURN n", "IN"),
+        ("MATCH (n) WHERE n.x = make($value) RETURN n", "make"),
+        ("MATCH (n) RETURN EXISTS {}", "EXISTS"),
+        ("MATCH (n) RETURN COUNT {}", "COUNT"),
+        ("MATCH (n) RETURN n != $x", "!="),
+        ("MATCH (n) WHERE n.x = $x + $y RETURN n", "+"),
+        ("MATCH (n) WHERE n.x = [$x] RETURN n", "["),
+        ("MATCH (n) // comment\nRETURN n", "//"),
+        ("MATCH (n) RETURN n;", ";"),
+    ];
+    for (text, introducer) in reserved_as_expression {
+        let parameters = [
+            param("k", PropertyValue::String("k".into())),
+            param("values", PropertyValue::Integer(1)),
+            param("value", PropertyValue::Integer(1)),
+            param("x", PropertyValue::Integer(1)),
+            param("y", PropertyValue::Integer(2)),
+        ];
+        if text == "MATCH (a) MATCH (b) RETURN b" {
+            let error = query_error(text, &parameters);
+            assert_eq!(error.kind, LanguageErrorKind::Unsupported);
+            assert_eq!(
+                error.position,
+                text.match_indices("MATCH").nth(1).unwrap().0
+            );
+            assert!(error.message.contains("exactly one pattern"));
+            continue;
+        }
+        assert_query_error_at(
+            text,
+            &parameters,
+            LanguageErrorKind::Unsupported,
+            if text == "MATCH (a) MATCH (b) RETURN b" {
+                text.match_indices("MATCH").nth(1).unwrap().0
+            } else {
+                text.find(introducer).unwrap()
+            },
+        );
+    }
+
+    let malformed = [
+        ("", 0),
+        ("WHERE n.x = $v", 0),
+        ("MATCH (n) RETURN 1", 17),
+        ("MATCH (n {x: 1}) RETURN n", 13),
+        ("MATCH (n) RETURN *", 17),
+        ("MATCH (a), (b) RETURN a", 9),
+        ("MATCH (a)-[:R]->(b)-[:S]->(c) RETURN a", 19),
+    ];
+    for (text, position) in malformed {
+        let expected = if text.contains("RETURN 1")
+            || text.contains("{x: 1}")
+            || text.contains("RETURN *")
+            || text.contains("), (")
+            || text.contains("->(b)-")
+        {
+            LanguageErrorKind::Unsupported
+        } else {
+            LanguageErrorKind::Syntax
+        };
+        assert_query_error_at(text, &[], expected, position);
+    }
+
+    for suffix in ["*2..3", "*", "*..3"] {
+        let text = format!("MATCH (a KEY $k)-[:R{suffix}]->(b) RETURN b");
+        assert_query_error_at(
+            &text,
+            &[param("k", PropertyValue::String("k".into()))],
+            LanguageErrorKind::Unsupported,
+            text.find('*').unwrap(),
+        );
+    }
+    for (suffix, kind) in [
+        ("*1..02", LanguageErrorKind::Syntax),
+        ("*1..0", LanguageErrorKind::Syntax),
+        ("*1..5", LanguageErrorKind::Limit),
+        ("*1..99999999999999999999", LanguageErrorKind::Limit),
+    ] {
+        let text = format!("MATCH (a KEY $k)-[:R{suffix}]->(b) RETURN b");
+        assert_query_error_at(
+            &text,
+            &[param("k", PropertyValue::String("k".into()))],
+            kind,
+            text.find(suffix).unwrap() + suffix.find("..").unwrap() + 2,
+        );
+    }
+    let text = "MATCH (a KEY $k)-[:R*1..1]->(b) RETURN b";
+    successful(text, &[param("k", PropertyValue::String("k".into()))]);
+
+    let flat_predicates = std::iter::repeat_n("(n.x = $v)", 17)
+        .collect::<Vec<_>>()
+        .join(" AND ");
+    let text = format!("MATCH (n) WHERE {flat_predicates} RETURN n");
+    successful(&text, &[param("v", PropertyValue::Integer(1))]);
+
+    let nested_predicate = format!("{}n.x = $v{}", "(".repeat(17), ")".repeat(17));
+    let text = format!("MATCH (n) WHERE {nested_predicate} RETURN n");
+    assert_query_error_at(
+        &text,
+        &[param("v", PropertyValue::Integer(1))],
+        LanguageErrorKind::Limit,
+        text.find("WHERE").unwrap() + 6 + 16,
+    );
+
+    let merge_without_key = "CREATE (a KEY $a), (b KEY $b) MERGE (a)-[r:R]->(b)";
+    assert_query_error_at(
+        merge_without_key,
+        &[
+            param("a", PropertyValue::String("a".into())),
+            param("b", PropertyValue::String("b".into())),
+        ],
+        LanguageErrorKind::Syntax,
+        merge_without_key.find(']').unwrap(),
+    );
+}
+
+#[test]
+fn lexer_rejections_pin_categories_and_utf8_offsets() {
+    successful("match (n)\treturn n", &[]);
+    successful("match (n)\rreturn n", &[]);
+    let cases = [
+        ("MATCH (n)\u{000c} RETURN n", 9, LanguageErrorKind::Syntax),
+        ("MATCH (n)\u{000b} RETURN n", 9, LanguageErrorKind::Syntax),
+        ("MATCH (n)\u{00a0} RETURN n", 9, LanguageErrorKind::Syntax),
+        ("MATCH (`\u{007f}`) RETURN n", 8, LanguageErrorKind::Syntax),
+        ("MATCH (`\u{0085}`) RETURN n", 8, LanguageErrorKind::Syntax),
+        ("MATCH (`\0`) RETURN n", 8, LanguageErrorKind::Syntax),
+        ("MATCH (``) RETURN n", 7, LanguageErrorKind::Syntax),
+        (
+            "MATCH (`unterminated) RETURN n",
+            7,
+            LanguageErrorKind::Syntax,
+        ),
+        ("MATCH (n) RETURN $", 17, LanguageErrorKind::Syntax),
+        ("MATCH (n) RETURN $1x", 17, LanguageErrorKind::Syntax),
+        ("MATCH (é) RETURN n", 7, LanguageErrorKind::Syntax),
+        ("MATCH (aé) RETURN n", 8, LanguageErrorKind::Syntax),
+        ("MATCH (n) RETURN n ! $x", 19, LanguageErrorKind::Syntax),
+        (
+            "MATCH (n) RETURN n != $x",
+            19,
+            LanguageErrorKind::Unsupported,
+        ),
+        (
+            "MATCH (n) RETURN n ^ $x",
+            19,
+            LanguageErrorKind::Unsupported,
+        ),
+        ("MATCH (n) RETURN \"a\"", 17, LanguageErrorKind::Unsupported),
+        ("match (match) return match", 7, LanguageErrorKind::Syntax),
+    ];
+    for (text, position, kind) in cases {
+        assert_query_error_at(text, &[], kind, position);
+    }
+}
+
+#[test]
+fn double_not_is_syntax_but_parenthesized_negation_is_legal() {
+    let text = "MATCH (n) WHERE NOT NOT n.x = $v RETURN n";
+    let second_not = text.find("NOT").unwrap() + "NOT ".len();
+    assert_query_error_at(
+        text,
+        &[param("v", PropertyValue::Integer(1))],
+        LanguageErrorKind::Syntax,
+        second_not,
+    );
+
+    let text = "MATCH (n) WHERE NOT (NOT n.x = $v) RETURN n";
+    let planned = successful(text, &[param("v", PropertyValue::Integer(1))]);
+    assert!(matches!(
+        &planned.statement.predicate,
+        Some(Predicate::Not(inner)) if matches!(inner.as_ref(), Predicate::Not(_))
+    ));
+}
+
+#[test]
+fn long_not_chain_is_rejected_on_a_256k_stack() {
+    let text = format!("MATCH (n) WHERE {}n.x = $v RETURN n", "NOT ".repeat(1_012));
+    let parameters = vec![param("v", PropertyValue::Integer(1))];
+    let worker = std::thread::Builder::new()
+        .stack_size(256 * 1024)
+        .spawn(move || plan(&text, &parameters))
+        .unwrap();
+    let error = match worker.join().expect("bounded parser worker") {
+        Err(PlanError::Query(error)) => error,
+        other => panic!("expected a syntax error for chained NOT prefixes: {other:?}"),
+    };
+    assert_eq!(error.kind, LanguageErrorKind::Syntax);
+    assert_eq!(error.position, "MATCH (n) WHERE ".len() + "NOT ".len());
+}
+
+#[test]
+fn predicate_ast_operator_polarity_precedence_and_write_items_are_golden() {
+    let operators = [
+        ("=", Compare::Equal),
+        ("<>", Compare::NotEqual),
+        ("<=", Compare::LessEqual),
+        (">=", Compare::GreaterEqual),
+        ("<", Compare::Less),
+        (">", Compare::Greater),
+    ];
+    for (operator, expected) in operators {
+        let text = format!("MATCH (n) WHERE n.x {operator} $v RETURN n");
+        let planned = successful(&text, &[param("v", PropertyValue::Integer(1))]);
+        assert!(
+            matches!(
+                &planned.statement.predicate,
+                Some(Predicate::Compare { operation, .. }) if *operation == expected
+            ),
+            "{text}"
+        );
+    }
+
+    for (suffix, expected_negated) in [("IS NULL", false), ("IS NOT NULL", true)] {
+        let text = format!("MATCH (n) WHERE n.x {suffix} RETURN n");
+        let planned = successful(&text, &[]);
+        assert!(
+            matches!(
+                &planned.statement.predicate,
+                Some(Predicate::IsNull { negated, .. }) if *negated == expected_negated
+            ),
+            "{text}"
+        );
+    }
+
+    let text = "MATCH (n) WHERE n.a = $a OR n.b = $b AND NOT (n.c = $c) RETURN n";
+    let planned = successful(
+        text,
+        &[
+            param("a", PropertyValue::Integer(1)),
+            param("b", PropertyValue::Integer(2)),
+            param("c", PropertyValue::Integer(3)),
+        ],
+    );
+    assert!(matches!(
+        &planned.statement.predicate,
+        Some(Predicate::Or(terms))
+            if terms.len() == 2
+                && matches!(&terms[0], Predicate::Compare { .. })
+                && matches!(&terms[1], Predicate::And(conjunction)
+                    if conjunction.len() == 2
+                        && matches!(&conjunction[0], Predicate::Compare { .. })
+                        && matches!(&conjunction[1], Predicate::Not(_)))
+    ));
+
+    let text = "CREATE (n KEY $k) SET n.x = $x, n:New REMOVE n.y, n:Old RETURN n";
+    let planned = successful(
+        text,
+        &[
+            param("k", PropertyValue::String("k".into())),
+            param("x", PropertyValue::Integer(1)),
+        ],
+    );
+    assert!(matches!(
+        &planned.statement.mutations[1],
+        Mutation::Set { assignments, .. } if assignments.len() == 2
+    ));
+    assert!(matches!(
+        &planned.statement.mutations[2],
+        Mutation::Remove { removals, .. } if removals.len() == 2
+    ));
+}
+
+#[test]
+fn planner_scope_parameter_and_token_boundaries_are_pinned() {
+    for (text, marker) in [
+        ("MATCH (a KEY $k)-[:R]->() RETURN a", ")"),
+        ("MATCH (:L KEY $k)-[:R]->(b) RETURN b", ":"),
+    ] {
+        assert_query_error_at(
+            text,
+            &[param("k", PropertyValue::String("k".into()))],
+            LanguageErrorKind::Syntax,
+            if marker == ")" {
+                text.rfind(marker).unwrap()
+            } else {
+                text.find(marker).unwrap()
+            },
+        );
+    }
+    assert_query_error_at(
+        "MATCH () RETURN n",
+        &[],
+        LanguageErrorKind::Syntax,
+        "MATCH () RETURN n".find(')').unwrap(),
+    );
+
+    for (text, marker) in [
+        ("MATCH (a)-[:R]->(b) RETURN b", "-[:"),
+        ("MATCH p = (n) RETURN p", "p"),
+        (
+            "MATCH p = (a KEY $k)-[:R]->(b) WHERE p.x = $x RETURN p",
+            "p.x",
+        ),
+        ("MATCH (a KEY $a)-[r:R]->(b) DETACH DELETE r", "r"),
+        ("MATCH p = (a KEY $a)-[:R]->(b) DELETE p", "p"),
+        ("MATCH (n) RETURN n, n", "n, n"),
+        ("MATCH (n) RETURN n ORDER BY missing", "missing"),
+        ("MATCH (n) WHERE NOT m.x = $v RETURN n", "m"),
+    ] {
+        let parameters = [
+            param("k", PropertyValue::String("k".into())),
+            param("a", PropertyValue::String("a".into())),
+            param("x", PropertyValue::Integer(1)),
+            param("v", PropertyValue::Integer(1)),
+        ];
+        let position = match marker {
+            "-[:" => text.find(marker).unwrap(),
+            "MATCH" if text.matches("MATCH").count() > 1 => {
+                text.match_indices("MATCH").nth(1).unwrap().0
+            }
+            "n, n" => text.rfind("n").unwrap(),
+            "r" if text.contains("DETACH") => text.rfind('r').unwrap(),
+            "p" if text.contains("WHERE") => text.find("p.x").unwrap(),
+            "p" if text.contains("DELETE") => text.rfind('p').unwrap(),
+            _ => text.find(marker).unwrap(),
+        };
+        assert_query_error_at(text, &parameters, LanguageErrorKind::Syntax, position);
+    }
+
+    let text = "MATCH p = (a KEY $a)-[:R]->(b) RETURN p.x";
+    assert_query_error_at(
+        text,
+        &[param("a", PropertyValue::String("a".into()))],
+        LanguageErrorKind::Syntax,
+        text.rfind("p.x").unwrap(),
+    );
+
+    let text = "CREATE (a KEY $a), (b KEY $b), (c KEY $c), (a)-[r:R]->(b), (r)-[s:S]->(c)";
+    assert_query_error_at(
+        text,
+        &[
+            param("a", PropertyValue::String("a".into())),
+            param("b", PropertyValue::String("b".into())),
+            param("c", PropertyValue::String("c".into())),
+        ],
+        LanguageErrorKind::Syntax,
+        text.rfind("(r)").unwrap() + 1,
+    );
+
+    let skip_limit = "MATCH (n) RETURN n SKIP $skip LIMIT $limit";
+    successful(
+        skip_limit,
+        &[
+            param("skip", PropertyValue::Integer(0)),
+            param("limit", PropertyValue::Integer(0)),
+        ],
+    );
+    let negative_pagination = "MATCH (n) RETURN n SKIP $skip";
+    assert_query_error_at(
+        negative_pagination,
+        &[param("skip", PropertyValue::Integer(-1))],
+        LanguageErrorKind::Parameter,
+        negative_pagination.find("$skip").unwrap(),
+    );
+    let negative_limit = "MATCH (n) RETURN n LIMIT $limit";
+    assert_query_error_at(
+        negative_limit,
+        &[param("limit", PropertyValue::Integer(-1))],
+        LanguageErrorKind::Parameter,
+        negative_limit.find("$limit").unwrap(),
+    );
+    let id_zero = "MATCH (n ID $id) RETURN n";
+    successful(id_zero, &[param("id", PropertyValue::Integer(0))]);
+    assert_query_error_at(
+        id_zero,
+        &[param("id", PropertyValue::Integer(-1))],
+        LanguageErrorKind::Parameter,
+        id_zero.find("$id").unwrap(),
+    );
+    let text = "MATCH (n KEY $k) RETURN n";
+    for invalid_name in ["1x", "a-b"] {
+        let parameter = ParameterEntry {
+            name: invalid_name.into(),
+            value: PropertyValue::String("k".into()),
+            position: 0,
+        };
+        assert_query_error_at(text, &[parameter], LanguageErrorKind::Parameter, 0);
+    }
+
+    let where_terms = (0..64)
+        .map(|_| "n.x = $v")
+        .collect::<Vec<_>>()
+        .join(" AND ");
+    let text = format!("MATCH (n) WHERE {where_terms} RETURN n");
+    successful(&text, &[param("v", PropertyValue::Integer(1))]);
+    let where_terms = (0..65)
+        .map(|_| "n.x = $v")
+        .collect::<Vec<_>>()
+        .join(" AND ");
+    let text = format!("MATCH (n) WHERE {where_terms} RETURN n");
+    let excess_position = text.match_indices("n.x").nth(64).unwrap().0;
+    assert_query_error_at(
+        &text,
+        &[param("v", PropertyValue::Integer(1))],
+        LanguageErrorKind::Limit,
+        excess_position,
+    );
+
+    let prefix = "MATCH (n) RETURN n ";
+    let text = format!("{prefix}{}", "x ".repeat(1_019));
+    assert_query_error_at(
+        &text,
+        &[],
+        LanguageErrorKind::Limit,
+        text.rfind('x').unwrap(),
+    );
 }
 
 #[test]
@@ -607,6 +1076,17 @@ fn malformed_inputs_never_panic() {
             let text = format!("{first} {second}");
             let result = std::panic::catch_unwind(|| plan(&text, &[]));
             assert!(result.is_ok(), "parser panicked for {text:?}");
+            let outcome = result.unwrap();
+            let error = match outcome {
+                Err(PlanError::Query(error)) => error,
+                other => {
+                    panic!("malformed input did not produce a query error: {text:?}: {other:?}")
+                }
+            };
+            assert!(
+                error.position <= text.len(),
+                "error offset out of bounds for {text:?}: {error}"
+            );
         }
     }
 }

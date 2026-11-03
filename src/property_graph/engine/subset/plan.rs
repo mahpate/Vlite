@@ -555,3 +555,40 @@ fn validate_return_item(
         .as_ref()
         .map_or(natural_name, |alias| alias.text.clone()))
 }
+
+#[cfg(test)]
+mod tests {
+    use super::super::super::model::Properties;
+    use super::*;
+
+    #[test]
+    fn parameter_size_matches_encoded_metadata_for_each_value_type() {
+        let cases = [
+            ("string", PropertyValue::String("é".into())),
+            ("integer", PropertyValue::Integer(-7)),
+            ("float", PropertyValue::Float(1.5)),
+            ("boolean", PropertyValue::Boolean(true)),
+            (
+                "point",
+                PropertyValue::GeoPoint {
+                    latitude: 47.6,
+                    longitude: -122.3,
+                },
+            ),
+        ];
+        for (name, value) in cases {
+            let parameter = ParameterEntry {
+                name: name.into(),
+                value: value.clone(),
+                position: 0,
+            };
+            let properties = Properties::from([(name.to_owned(), value)]);
+            let encoded_length = super::super::super::properties::validate(&properties).unwrap();
+            assert_eq!(
+                parameter_size(&parameter),
+                encoded_length - 4,
+                "value type for {name}"
+            );
+        }
+    }
+}
