@@ -543,7 +543,7 @@ pub(crate) fn dictionary_extract(
     let mut entity_ids = BTreeSet::new();
     for rule in entity_rules {
         validate_name(&rule.rule_id, ErrorCategory::EntityRules)?;
-        validate_name(&rule.kind, ErrorCategory::EntityKind)?;
+        validate_name(&rule.kind, ErrorCategory::EntityRules)?;
         validate_name(&rule.key, ErrorCategory::EntityRules)?;
         if rule.literal.is_empty() {
             return fail(ErrorCategory::EntityRules);
@@ -556,7 +556,7 @@ pub(crate) fn dictionary_extract(
     let mut relation_ids = BTreeSet::new();
     for rule in relation_rules {
         validate_name(&rule.rule_id, ErrorCategory::RelationRules)?;
-        validate_name(&rule.predicate, ErrorCategory::Predicate)?;
+        validate_name(&rule.predicate, ErrorCategory::RelationRules)?;
         validate_name(&rule.subject_kind, ErrorCategory::RelationRules)?;
         validate_name(&rule.object_kind, ErrorCategory::RelationRules)?;
         if !relation_ids.insert(&rule.rule_id) {

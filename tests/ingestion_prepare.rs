@@ -1049,6 +1049,42 @@ fn b1_dictionary_relations_follow_span_then_endpoint_predicate_order() {
 }
 
 #[test]
+fn dictionary_relation_equal_span_orders_subject_local_ids() {
+    let rules = [
+        entity_rule("a1", "A", "A", "a"),
+        entity_rule("a2", "A", "A", "a"),
+        entity_rule("b", "B", "B", "b"),
+    ];
+    let output = prepare::dictionary_extract("AB", &rules, &[relation_rule("r", "p")]).unwrap();
+    assert_eq!(
+        output
+            .relations
+            .iter()
+            .map(|r| (r.subject_local_id, r.object_local_id))
+            .collect::<Vec<_>>(),
+        [(0, 2), (1, 2)]
+    );
+}
+
+#[test]
+fn dictionary_relation_equal_span_orders_object_local_ids() {
+    let rules = [
+        entity_rule("a", "A", "A", "a"),
+        entity_rule("b1", "B", "B", "b"),
+        entity_rule("b2", "B", "B", "b"),
+    ];
+    let output = prepare::dictionary_extract("AB", &rules, &[relation_rule("r", "p")]).unwrap();
+    assert_eq!(
+        output
+            .relations
+            .iter()
+            .map(|r| (r.subject_local_id, r.object_local_id))
+            .collect::<Vec<_>>(),
+        [(0, 1), (0, 2)]
+    );
+}
+
+#[test]
 fn b2_extraction_rejects_empty_and_nul_kind_predicate() {
     for invalid in ["", "K\0"] {
         let mut entity = test_entity(0, "x".into(), [0, 1]);
@@ -1083,11 +1119,7 @@ fn b3_dictionary_validates_all_rules_eagerly() {
                 "kind" => rule.kind = invalid.into(),
                 _ => rule.key = invalid.into(),
             }
-            let label = if field == "kind" {
-                "entity_kind"
-            } else {
-                "entity_rules"
-            };
+            let label = "entity_rules";
             assert_eq!(
                 prepare::dictionary_extract("unmatched", &[rule], &[])
                     .unwrap_err()
@@ -1104,11 +1136,7 @@ fn b3_dictionary_validates_all_rules_eagerly() {
                 "subject_kind" => rule.subject_kind = invalid.into(),
                 _ => rule.object_kind = invalid.into(),
             }
-            let label = if field == "predicate" {
-                "predicate"
-            } else {
-                "relation_rules"
-            };
+            let label = "relation_rules";
             assert_eq!(
                 prepare::dictionary_extract("unmatched", &[], &[rule])
                     .unwrap_err()
