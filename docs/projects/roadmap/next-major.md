@@ -46,6 +46,9 @@ independent acceptance or the unchanged DO-005 quiet-host policy.
   settings; float32 stays the default. Measured at the major release.
 - **Parity:** F1–F3 and F7 are tracked goals that the release reports but
   does not wait for. Must-not-regress items still block.
+- **Size targets:** S1–S6 are best-effort (decided 2026-11-03). The release
+  reports their measured values; a miss does not block it. Correctness,
+  durability and compatibility gates are unchanged.
 - **Public APIs and wire:** approved as drafted: the
   [P3 precision API](p3-precision-api.md) (design A), the
   [serving contract](serving-contract.md) and the

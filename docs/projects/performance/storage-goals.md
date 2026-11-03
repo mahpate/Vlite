@@ -2,7 +2,7 @@
 
 | Field | Value |
 |---|---|
-| Status | Goals approved 2026-10-30. Work order and progress in [`next-major.md`](../roadmap/next-major.md); no goal counts as met until the major-release DO-005 run measures it |
+| Status | Goals approved 2026-10-30. Work order and progress in [`next-major.md`](../roadmap/next-major.md); no goal counts as met until the major-release DO-005 run measures it. S1–S6 are best-effort (decision 6) |
 | Created | 2026-10-29 |
 | Replaces | Options B and C of [`performance-proposal.md`](performance-proposal.md). Option A there still applies to today's format |
 | Key decision | VLite no longer has to keep a database in one file |
@@ -25,6 +25,9 @@ unchanged quiet gate (background CPU mean ≤10%, no half-second sample above
 same build before any claim is made.
 
 ### Smaller
+
+These are best-effort targets (decision 6): the release reports the measured
+values, and a miss does not block it.
 
 | ID | Goal | Today | Target |
 |---|---|---|---|
@@ -159,3 +162,8 @@ phases.
    instead of default settings; float32 stays the default. The release
    measures that profile in the DO-005 run; a design estimate is not
    qualification.
+6. **Decided 2026-11-03:** the size goals S1–S6 are best-effort targets. The
+   major-release benchmark reports their measured values, but a miss does not
+   fail qualification or block a release. Must-not-regress items still block,
+   and the target numbers are unchanged. Which S-driven work ships in a given
+   release is decided at that release's go/no-go.
