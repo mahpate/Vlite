@@ -12,6 +12,9 @@ use sha2::{Digest, Sha256};
 use std::collections::{BTreeMap, HashMap};
 use std::io::{Read, Seek, SeekFrom};
 
+#[cfg(test)]
+type CompactBaseRows = BTreeMap<u16, BTreeMap<u64, (u64, Option<u64>)>>;
+
 pub(crate) const HEADER_SIZE: u64 = 32;
 /// Header flag (v5 bytes 26..28): frame bodies are sealed; a 64-byte
 /// encryption descriptor follows the header.
@@ -459,7 +462,7 @@ pub(crate) struct Loaded {
     #[cfg(test)]
     pub compact_generation: Option<std::sync::Arc<crate::compact::source::CompactGeneration>>,
     #[cfg(test)]
-    pub compact_base: Option<BTreeMap<u16, BTreeMap<u64, (u64, Option<u64>)>>>,
+    pub compact_base: Option<CompactBaseRows>,
 }
 
 impl Loaded {
@@ -2403,7 +2406,7 @@ fn load_inner<R: Read + Seek>(
 }
 
 #[cfg(test)]
-fn compact_base_rows(loaded: &Loaded) -> Result<BTreeMap<u16, BTreeMap<u64, (u64, Option<u64>)>>> {
+fn compact_base_rows(loaded: &Loaded) -> Result<CompactBaseRows> {
     loaded
         .collections
         .iter()

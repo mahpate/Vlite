@@ -189,12 +189,14 @@ fn compact_dispatch_mutable_acquisition_keeps_other_refusals() {
             }};
         }
         for info in oracle.collections().unwrap() {
-            let handle = candidate.collection_mut(&info.name).unwrap();
-            assert_eq!(handle.view().len(), info.live_records);
-            drop(handle);
-            let handle = candidate.collection_mut_in(info.id).unwrap();
-            assert_eq!(handle.view().len(), info.live_records);
-            drop(handle);
+            {
+                let handle = candidate.collection_mut(&info.name).unwrap();
+                assert_eq!(handle.view().len(), info.live_records);
+            }
+            {
+                let handle = candidate.collection_mut_in(info.id).unwrap();
+                assert_eq!(handle.view().len(), info.live_records);
+            }
             refuse!("kv_store", candidate.kv_store(&info.name));
             refuse!("kv_view", candidate.kv_view(&info.name));
             refuse!(

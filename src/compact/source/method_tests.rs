@@ -270,22 +270,24 @@ fn compact_installed_database_and_snapshot_method_matrix() {
                 .iter()
                 .all(|method| !COMPACT_MUTATIONS.contains(method))
         );
-        let mut mutable = db.collection_mut("full").unwrap();
-        a!(
-            "Database::collection_mut",
-            mutable.view().len(),
-            oracle.collection("full").unwrap().len()
-        );
-        a!(
-            "CollectionMut::text_index_status",
-            mutable.text_index_status(),
-            oracle.collection("full").unwrap().text_index_status()
-        );
-        assert!(
-            !mutable.cancel_hnsw_rebuild(),
-            "no compact rebuild can be pending"
-        );
-        drop(mutable);
+        {
+            let mut mutable = db.collection_mut("full").unwrap();
+            a!(
+                "Database::collection_mut",
+                mutable.view().len(),
+                oracle.collection("full").unwrap().len()
+            );
+            a!(
+                "CollectionMut::text_index_status",
+                mutable.text_index_status(),
+                oracle.collection("full").unwrap().text_index_status()
+            );
+            a!(
+                "CollectionMut::cancel_hnsw_rebuild",
+                mutable.cancel_hnsw_rebuild(),
+                false
+            );
+        }
         d!(
             "CollectionMut::configure_vector",
             db.collection_mut("full").unwrap().configure_vector(
