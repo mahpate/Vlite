@@ -502,7 +502,7 @@ fn rejected_grammar_forms_have_the_specified_kind_and_introducer_offset() {
                 error.position,
                 text.match_indices("MATCH").nth(1).unwrap().0
             );
-            assert!(error.message.contains("exactly one pattern"));
+            assert!(error.message.contains("MATCH"));
             continue;
         }
         assert_query_error_at(
@@ -591,6 +591,60 @@ fn rejected_grammar_forms_have_the_specified_kind_and_introducer_offset() {
         LanguageErrorKind::Syntax,
         merge_without_key.find(']').unwrap(),
     );
+}
+
+#[test]
+fn second_match_is_unsupported_across_clause_positions() {
+    let cases = [
+        ("MATCH (a) MATCH (b) RETURN b", vec![]),
+        ("MATCH (a) MATCH p = (b) RETURN p", vec![]),
+        (
+            "MATCH (a KEY $ak) WHERE a.x = $p MATCH p = (b)",
+            vec![
+                param("ak", PropertyValue::String("a".into())),
+                param("p", PropertyValue::Integer(1)),
+            ],
+        ),
+        ("MATCH (a) WHERE a.x = MATCH (b)", vec![]),
+        ("MATCH (a) RETURN a MATCH (b)", vec![]),
+        ("MATCH (a) RETURN a MATCH p = (b)", vec![]),
+        (
+            "MATCH (a) SET a.x = $p MATCH (b) RETURN a",
+            vec![param("p", PropertyValue::Integer(1))],
+        ),
+    ];
+    for (text, parameters) in cases {
+        let error = query_error(text, &parameters);
+        assert_eq!(
+            error.kind,
+            LanguageErrorKind::Unsupported,
+            "{text}: {error}"
+        );
+        assert_eq!(
+            error.position,
+            text.match_indices("MATCH").nth(1).unwrap().0,
+            "{text}: {error}"
+        );
+        assert!(error.message.contains("MATCH"), "{text}: {error}");
+    }
+}
+
+#[test]
+fn clause_keywords_followed_by_parentheses_keep_clause_classification() {
+    let supported_clause = "MATCH (n) RETURN n CREATE (m KEY $k)";
+    assert_query_error_at(
+        supported_clause,
+        &[],
+        LanguageErrorKind::Syntax,
+        supported_clause.find("CREATE").unwrap(),
+    );
+
+    let excluded_clause = "MATCH (n) RETURN n DISTINCT (m)";
+    let error = query_error(excluded_clause, &[]);
+    assert_eq!(error.kind, LanguageErrorKind::Unsupported);
+    assert_eq!(error.position, excluded_clause.find("DISTINCT").unwrap());
+    assert!(error.message.contains("DISTINCT"));
+    assert!(!error.message.contains("function invocation"));
 }
 
 #[test]

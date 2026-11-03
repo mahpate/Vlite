@@ -103,6 +103,7 @@ pub(super) fn parse(text: &str) -> Result<Parsed, LanguageError> {
         parameter_uses: Vec::new(),
         predicate_count: 0,
         parenthesis_depth: 0,
+        match_clause_seen: false,
     };
     let statement = parser.statement()?;
     if !parser.is_end() {
@@ -120,6 +121,7 @@ struct Parser {
     parameter_uses: Vec<ParameterUse>,
     predicate_count: usize,
     parenthesis_depth: usize,
+    match_clause_seen: bool,
 }
 
 impl Parser {
@@ -151,6 +153,13 @@ impl Parser {
         matches!(&self.token().kind, Kind::Word(word) if word.eq_ignore_ascii_case(keyword))
     }
 
+    fn is_match_clause_start(&self) -> bool {
+        self.is_keyword("MATCH")
+            && (self.kind_at(1) == &Kind::Symbol("(")
+                || (Self::is_identifier_kind(self.kind_at(1))
+                    && self.kind_at(2) == &Kind::Symbol("=")))
+    }
+
     fn eat_keyword(&mut self, keyword: &str) -> Option<usize> {
         self.is_keyword(keyword).then(|| self.bump().position)
     }
@@ -169,13 +178,26 @@ impl Parser {
             .any(|keyword| self.is_keyword(keyword))
     }
 
+    fn second_match_error(&self) -> LanguageError {
+        unsupported(
+            self.position(),
+            "a second MATCH clause is not supported by vlite-cypher-1",
+        )
+    }
+
     fn is_identifier_kind(kind: &Kind) -> bool {
         matches!(kind, Kind::Word(_) | Kind::Quoted(_))
     }
 
     fn unexpected(&self, expected: &str) -> LanguageError {
         let token = self.token();
-        if Self::is_identifier_kind(&token.kind) && self.kind_at(1) == &Kind::Symbol("(") {
+        if self.match_clause_seen && self.is_keyword("MATCH") {
+            return self.second_match_error();
+        }
+        if Self::is_identifier_kind(&token.kind)
+            && !matches!(&token.kind, Kind::Word(word) if Self::bare_reserved(word))
+            && self.kind_at(1) == &Kind::Symbol("(")
+        {
             return unsupported(token.position, "function invocation is not supported");
         }
         if let Kind::Word(word) = &token.kind {
@@ -271,6 +293,9 @@ impl Parser {
     }
 
     fn identifier(&mut self) -> Result<Name, LanguageError> {
+        if self.match_clause_seen && self.is_match_clause_start() {
+            return Err(self.second_match_error());
+        }
         if let Kind::Word(word) = &self.token().kind
             && ["TRUE", "FALSE", "NULL"]
                 .iter()
@@ -302,7 +327,10 @@ impl Parser {
                 ),
             ));
         }
-        if Self::is_identifier_kind(&self.token().kind) && self.kind_at(1) == &Kind::Symbol("(") {
+        if Self::is_identifier_kind(&self.token().kind)
+            && !matches!(&self.token().kind, Kind::Word(word) if Self::bare_reserved(word))
+            && self.kind_at(1) == &Kind::Symbol("(")
+        {
             return Err(unsupported(
                 self.position(),
                 "function invocation is not supported",
@@ -337,7 +365,10 @@ impl Parser {
                     "numeric literals are not supported; bind data with a typed parameter",
                 ));
             }
-            if Self::is_identifier_kind(&token.kind) && self.kind_at(1) == &Kind::Symbol("(") {
+            if Self::is_identifier_kind(&token.kind)
+                && !matches!(&token.kind, Kind::Word(word) if Self::bare_reserved(word))
+                && self.kind_at(1) == &Kind::Symbol("(")
+            {
                 return Err(unsupported(
                     token.position,
                     "function invocation is not supported",
@@ -359,7 +390,9 @@ impl Parser {
 
     fn statement(&mut self) -> Result<Statement, LanguageError> {
         let pattern = if self.eat_keyword("MATCH").is_some() {
-            Some(self.pattern()?)
+            let pattern = self.pattern()?;
+            self.match_clause_seen = true;
+            Some(pattern)
         } else {
             None
         };
@@ -379,10 +412,7 @@ impl Parser {
             return Err(syntax(self.position(), "WHERE requires a preceding MATCH"));
         }
         if pattern.is_some() && self.is_keyword("MATCH") {
-            return Err(unsupported(
-                self.position(),
-                "MATCH accepts exactly one pattern",
-            ));
+            return Err(self.second_match_error());
         }
         let predicate = if self.eat_keyword("WHERE").is_some() {
             Some(self.disjunction()?)
