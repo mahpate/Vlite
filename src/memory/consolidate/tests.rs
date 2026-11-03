@@ -27,12 +27,13 @@ use std::{
 };
 
 use serde_json::{Map, Value, json};
+use sha2::{Digest, Sha256};
 
 use super::super::{
-    LABEL_MEMORY, LABEL_RECEIPT, LABEL_RECEIPT_OUTCOME, LABEL_SCOPE, MemoryError, MemoryEvidence,
-    MemoryMut, MemoryProperties, MemoryScope, Provenance, content_digest, decode_sources,
-    evidence_record_id, hex, memory_key, memory_properties, operation_receipt_key,
-    receipt_outcome_key,
+    LABEL_MEMORY, LABEL_RECEIPT, LABEL_RECEIPT_OUTCOME, LABEL_SCOPE, MAX_BODY_BYTES, MemoryError,
+    MemoryEvidence, MemoryMut, MemoryProperties, MemoryScope, Provenance, content_digest,
+    decode_sources, encode_provenance, evidence_record_id, hex, memory_key, memory_properties,
+    operation_receipt_key, receipt_outcome_key,
 };
 use super::{
     ConsolidateInput, ConsolidateRequest, ConsolidateSummary, canonical_decimal, decode_outcome,
@@ -1914,5 +1915,635 @@ fn c1_outcome_decoder_and_decimal_boundaries() {
         ("", None),
     ] {
         assert_eq!(canonical_decimal(value, 20), expected, "{value:?}");
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Boundary, ordering and precedence witnesses beyond the golden. Each pins a
+// contract-defined, Rust-visible result (contract sections 2-7) that a
+// single-site change to `consolidate.rs` would alter.
+
+const FAR_EXPIRY_MS: u64 = 4_102_444_800_000;
+
+fn base_raw() -> Value {
+    expand(&golden()["base_request"])
+}
+
+fn base_request() -> ConsolidateRequest {
+    request_of(&base_raw(), 0)
+}
+
+fn normalized(request: &ConsolidateRequest) -> Result<super::Normalized, String> {
+    normalize(request).map_err(|error| error_name(&error))
+}
+
+fn normalize_error(request: &ConsolidateRequest) -> Option<String> {
+    normalized(request).err()
+}
+
+/// Runs one harness case over the golden base request.
+fn run_steps(setup: Value, steps: Value) -> Vec<Value> {
+    let fixture = golden();
+    let case = json!({"name": "witness", "setup": setup, "steps": steps});
+    run_case(&case, &fixture["base_request"])
+}
+
+fn retain(id: &str, revision: u64) -> Value {
+    json!({"id": id, "expected_memory_revision": revision, "disposition": "retain"})
+}
+
+fn other_scope() -> MemoryScope {
+    MemoryScope {
+        tenant: "t".into(),
+        agent: "other".into(),
+        user: None,
+        session: None,
+    }
+}
+
+/// A database with graph, collection `c` and the provisioned base scope.
+fn direct_db() -> (tempfile::TempDir, Database) {
+    let dir = tempfile::tempdir().unwrap();
+    let mut db = Database::create(dir.path().join("c1.vlite"), 2).unwrap();
+    db.create_graph(GRAPH).unwrap();
+    db.create_collection(
+        "c",
+        crate::CollectionSpec {
+            dimensions: 2,
+            settings: crate::CollectionSettings::default(),
+        },
+    )
+    .unwrap();
+    MemoryMut::bind(&mut db, GRAPH, None)
+        .unwrap()
+        .provision_scope(&base_request().scope)
+        .unwrap();
+    (dir, db)
+}
+
+/// Valid entity memory properties (revision 1) claiming `scope` and `id`.
+fn source_properties(scope: &str, id: &str) -> Metadata {
+    let origin = "origin".to_owned();
+    memory_properties(MemoryProperties {
+        scope,
+        id,
+        kind: "entity",
+        content: "source",
+        digest: &content_digest("source"),
+        sources: std::slice::from_ref(&origin),
+        provenance: &[Provenance {
+            source: origin.clone(),
+            kind: None,
+            uri: None,
+            transformation: None,
+        }],
+        importance: 0.5,
+        created_at_ms: 0,
+        updated_at_ms: 0,
+        observed_at_ms: 0,
+        memory_revision: 1,
+        reference_count: 0,
+        evidence: &[],
+    })
+}
+
+fn direct_write(db: &mut Database, graph: &str, ops: &[GraphOp]) {
+    db.graph_mut(graph).unwrap().write_batch(ops).unwrap();
+}
+
+/// Consolidates with binding `c`; a rejection must not append.
+fn direct_consolidate(
+    db: &mut Database,
+    request: &ConsolidateRequest,
+) -> Result<super::ConsolidateResult, String> {
+    let before = (db.sequence, db.end);
+    let result = MemoryMut::bind(db, GRAPH, Some("c"))
+        .unwrap()
+        .consolidate(request);
+    if result.is_err() {
+        assert_eq!(before, (db.sequence, db.end), "a rejection appended");
+    }
+    result.map_err(|error| error_name(&error))
+}
+
+#[test]
+fn c1_receipt_window_overflow_boundary_is_exact() {
+    // Section 2: C+window must not overflow u64. C = i64::MAX is the largest
+    // valid clock; window 2^63 reaches u64::MAX exactly, 2^63+1 reaches 2^64.
+    let mut request = base_request();
+    request.now_ms = I64_MAX;
+    request.receipt_window_ms = u64::MAX - I64_MAX;
+    assert_eq!(normalize_error(&request), None, "C + window == u64::MAX");
+    request.receipt_window_ms += 1;
+    assert_eq!(
+        normalize_error(&request).as_deref(),
+        Some("InvalidReceiptWindow"),
+        "C + window == 2^64"
+    );
+}
+
+#[test]
+fn c1_canonical_source_order_is_utf8_bytes_ascending() {
+    // Caller order is neither ascending nor descending. UTF-8 byte order puts
+    // U+FF5E (EF BD 9E) before U+10000 (F0 90 80 80); UTF-16 code-unit order
+    // (D800 < FF5E) or a descending sort would not.
+    let ids = ["\u{10000}", "a", "\u{FF5E}"];
+    let canonical = ["a", "\u{FF5E}", "\u{10000}"];
+    let scope = base_request().scope;
+    let scope_bytes = scope.encode();
+    let mut expected = b"vlite.memory.consolidate.sources.v1\0".to_vec();
+    expected.extend_from_slice(&(scope_bytes.len() as u32).to_be_bytes());
+    expected.extend_from_slice(&scope_bytes);
+    expected.extend_from_slice(&3u32.to_be_bytes());
+    for id in canonical {
+        expected.extend_from_slice(&(id.len() as u32).to_be_bytes());
+        expected.extend_from_slice(id.as_bytes());
+        expected.extend_from_slice(&1u64.to_be_bytes());
+        expected.push(0);
+    }
+    let expected_digest = format!("v1:{}", hex(&Sha256::digest(&expected)));
+
+    let inputs: Vec<Value> = ids.iter().map(|id| retain(id, 1)).collect();
+    let mut request = base_request();
+    request.inputs = request_of(&merge(&base_raw(), &json!({"inputs": inputs})), 0).inputs;
+    let normal = normalized(&request).unwrap();
+    let order: Vec<&str> = normal.inputs.iter().map(|(id, _)| id.as_str()).collect();
+    assert_eq!(order, canonical);
+    assert_eq!(normal.source_bytes, expected);
+
+    let sources: Vec<Value> = ids.iter().map(|id| json!({"id": id})).collect();
+    let created = run_steps(
+        json!({"sources": sources}),
+        json!([{"request": {"inputs": inputs}}]),
+    )
+    .remove(0);
+    assert_eq!(created["status"], "created", "{created}");
+    assert_eq!(created["source_bytes_hex"], json!(hex(&expected)));
+    assert_eq!(created["source_digest"], json!(expected_digest));
+    assert_eq!(created["outcome"]["N"], 3);
+    let derived: Vec<Value> = created["entries"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter(|entry| entry["role"] == "derived")
+        .map(|entry| entry["to"].clone())
+        .collect();
+    let expected_to: Vec<Value> = canonical
+        .iter()
+        .map(|id| json!(memory_key(&scope.key(), id)))
+        .collect();
+    assert_eq!(
+        derived, expected_to,
+        "DERIVED_FROM edges in canonical order"
+    );
+}
+
+#[test]
+fn c1_raw_content_limit_is_inclusive_and_precedes_later_summary_checks() {
+    // Section 2: content is at most 16 MiB raw bytes; section 6: raw oversize
+    // BodyLimit precedes importance, observation and expiry representation.
+    type Defect = fn(&mut ConsolidateRequest);
+    let defects: [(&str, Defect); 4] = [
+        ("BodyLimit", |_| {}),
+        ("InvalidImportance", |request| {
+            request.summary.importance = Some(2.0)
+        }),
+        ("InvalidObservation", |request| {
+            request.summary.observed_at_ms = None
+        }),
+        ("InvalidExpiry", |request| {
+            request.summary.expiry_valid = false
+        }),
+    ];
+    let at_limit = "x".repeat(MAX_BODY_BYTES);
+    let over_limit = "x".repeat(MAX_BODY_BYTES + 1);
+    for (later, defect) in defects {
+        let mut request = base_request();
+        defect(&mut request);
+        // Exactly 16 MiB passes the raw check; without a later defect the
+        // canonical request bytes (content plus framing) then exceed the cap.
+        request.summary.content = at_limit.clone();
+        assert_eq!(
+            normalize_error(&request).as_deref(),
+            Some(later),
+            "raw == MAX with {later}"
+        );
+        request.summary.content = over_limit.clone();
+        assert_eq!(
+            normalize_error(&request).as_deref(),
+            Some("BodyLimit"),
+            "raw == MAX + 1 with {later}"
+        );
+    }
+}
+
+#[test]
+fn c1_expected_revision_must_equal_actual_in_both_directions() {
+    // Section 6.5: any expected MEMORY revision mismatch -> RevisionConflict.
+    for (expected, error) in [
+        (1, Some("RevisionConflict")),
+        (2, None),
+        (3, Some("RevisionConflict")),
+    ] {
+        let actual = run_steps(
+            json!({"sources": [{"id": "m", "revision": 2}]}),
+            json!([{"request": {"inputs": [retain("m", expected)]}}]),
+        )
+        .remove(0);
+        match error {
+            Some(error) => assert_eq!(actual, json!({"error": error}), "expected {expected}"),
+            None => assert_eq!(actual["status"], "created", "expected {expected}: {actual}"),
+        }
+    }
+}
+
+#[test]
+fn c1_dedup_identity_is_episodic_only() {
+    // Section 6.5: only an existing Episodic exact content/source collides.
+    for (kind, error) in [("entity", None), ("episodic", Some("IdentityConflict"))] {
+        let actual = run_steps(
+            json!({"sources": [{"id": "m", "kind": kind, "content": "x", "source": "s"}]}),
+            json!([{}]),
+        )
+        .remove(0);
+        match error {
+            Some(error) => assert_eq!(actual, json!({"error": error}), "{kind}"),
+            None => assert_eq!(actual["status"], "created", "{kind}: {actual}"),
+        }
+    }
+}
+
+#[test]
+fn c1_replacement_receipt_charges_logical_budget_at_exact_limit() {
+    // Section 7: P = N + 2K + A + X + 3; an expired receipt replacement adds
+    // exactly two logical charges. K = 2045 fully packed ASCII chunks.
+    let bytes = 2045 * 4096;
+    let content = |text: &str| json!({"$text": text, "bytes": bytes});
+    let results = run_steps(
+        json!({}),
+        json!([
+            {},
+            // Replacement, X = 1: P = 4095, logical 4097 -> refused.
+            {"request": {"C": 110, "summary": {
+                "id": "y", "content": content("y"), "expiry_ms": FAR_EXPIRY_MS}}},
+            // Replacement, X = 0: P = 4094, logical exactly 4096 -> accepted.
+            {"request": {"C": 110, "summary": {"id": "y", "content": content("y")}}},
+            // Fresh receipt, X = 1: P = logical = 4095 -> accepted.
+            {"request": {"C": 110, "idempotency_key": "k2", "summary": {
+                "id": "w", "content": content("w"), "expiry_ms": FAR_EXPIRY_MS}}},
+        ]),
+    );
+    assert_eq!(results[0]["status"], "created");
+    assert_eq!(results[1], json!({"error": "OperationLimit"}));
+    let replaced = &results[2];
+    assert_eq!(replaced["status"], "created");
+    assert_eq!(replaced["receipt_revision"], 2, "a replacement write");
+    assert_eq!(replaced["chunk_bytes"].as_array().unwrap().len(), 2045);
+    assert_eq!(
+        (&replaced["physical_ops"], &replaced["logical_ops"]),
+        (&json!(4094), &json!(4096))
+    );
+    let fresh = &results[3];
+    assert_eq!(fresh["status"], "created");
+    assert_eq!(fresh["receipt_revision"], 1, "a fresh receipt");
+    assert_eq!(
+        (&fresh["physical_ops"], &fresh["logical_ops"]),
+        (&json!(4095), &json!(4095))
+    );
+}
+
+#[test]
+fn c1_receipt_and_outcome_with_extra_reserved_label_reject() {
+    // Section 5: exact label on reserved receipt/outcome nodes.
+    // Direct API: a mutant replay must surface as a result, not a harness panic.
+    let request = base_request();
+    let scope_key = request.scope.key();
+    let receipt_key = operation_receipt_key("consolidate", &scope_key, &request.idempotency_key);
+    let outcome_key = receipt_outcome_key(&receipt_key, 0);
+    for key in [receipt_key, outcome_key] {
+        for extra_label in [false, true] {
+            let (_dir, mut db) = direct_db();
+            direct_write(
+                &mut db,
+                GRAPH,
+                &[GraphOp::CreateNode {
+                    key: memory_key(&scope_key, "m"),
+                    labels: vec![LABEL_MEMORY.into()],
+                    properties: source_properties(&scope_key, "m"),
+                }],
+            );
+            let created = direct_consolidate(&mut db, &request).unwrap();
+            assert!(!created.replayed);
+            if extra_label {
+                let node = db
+                    .graph(GRAPH)
+                    .unwrap()
+                    .get_node(&key)
+                    .unwrap()
+                    .output
+                    .unwrap();
+                assert_eq!(node.labels.len(), 1);
+                direct_write(
+                    &mut db,
+                    GRAPH,
+                    &[GraphOp::DeleteNode {
+                        key: key.clone(),
+                        expected: Expected::Any,
+                    }],
+                );
+                direct_write(
+                    &mut db,
+                    GRAPH,
+                    &[GraphOp::CreateNode {
+                        key: key.clone(),
+                        labels: vec![LABEL_RECEIPT.into(), LABEL_RECEIPT_OUTCOME.into()],
+                        properties: node.properties.clone(),
+                    }],
+                );
+            }
+            let replay = direct_consolidate(&mut db, &request);
+            if extra_label {
+                assert_eq!(replay.err().as_deref(), Some("InvalidBundle"), "{key}");
+            } else {
+                assert!(replay.is_ok_and(|result| result.replayed), "{key}");
+            }
+        }
+    }
+}
+
+#[test]
+fn c1_twenty_digit_receipt_expiry_replays() {
+    // Section 5: expires_at_ms is any canonical decimal u64 (up to 20 digits).
+    let window = 10_000_000_000_000_000_000u64;
+    let results = run_steps(
+        json!({}),
+        json!([
+            {"request": {"receipt_window_ms": window}},
+            {"request": {"receipt_window_ms": window, "C": 11}},
+        ]),
+    );
+    let receipt = results[0]["entries"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|entry| entry["role"] == "receipt")
+        .unwrap();
+    assert_eq!(
+        receipt["properties"]["expires_at_ms"],
+        "10000000000000000010"
+    );
+    assert_eq!(results[1]["status"], "replayed", "{}", results[1]);
+    assert_eq!(results[1]["sequence"], 1);
+}
+
+#[test]
+fn c1_inline_content_boundary_is_4096_bytes() {
+    // Section 4: String content is present iff raw content <= 4096 bytes.
+    for (bytes, chunks) in [(4095, vec![]), (4096, vec![]), (4097, vec![4096, 1])] {
+        let created = run_steps(
+            json!({}),
+            json!([{"request": {"summary": {"content": {"$text": "x", "bytes": bytes}}}}]),
+        )
+        .remove(0);
+        assert_eq!(created["status"], "created", "{bytes}");
+        assert_eq!(created["chunk_bytes"], json!(chunks), "{bytes}");
+        assert_eq!(created["physical_ops"], 4 + 2 * chunks.len(), "{bytes}");
+        let summary = &created["entries"][0];
+        assert_eq!(summary["role"], "summary");
+        let inline = chunks.is_empty().then(|| json!("x".repeat(bytes)));
+        assert_eq!(
+            summary["properties"].get("content"),
+            inline.as_ref(),
+            "{bytes}"
+        );
+    }
+}
+
+#[test]
+fn c1_evidence_scope_shape_is_invalid_scope_before_cross_scope() {
+    // Section 6.1: evidence ID InvalidEvidence; evidence scope shape
+    // InvalidScope; explicit different scope CrossScope.
+    let mut request = base_request();
+    let mut session_without_user = request.scope.clone();
+    session_without_user.session = Some("s".into());
+    let mut empty_tenant = request.scope.clone();
+    empty_tenant.tenant = String::new();
+    let mut different = request.scope.clone();
+    different.user = Some("u".into());
+    for (id, scope, error) in [
+        ("e", session_without_user.clone(), "InvalidScope"),
+        ("e", empty_tenant, "InvalidScope"),
+        ("e", different, "CrossScope"),
+        ("", session_without_user, "InvalidEvidence"),
+    ] {
+        request.evidence = Some(MemoryEvidence {
+            id: id.into(),
+            scope: scope.clone(),
+        });
+        assert_eq!(
+            normalize_error(&request).as_deref(),
+            Some(error),
+            "{id:?} {scope:?}"
+        );
+    }
+}
+
+#[test]
+fn c1_importance_rejects_negative_values() {
+    // Section 2: importance is finite [0,1]; -0.0 normalizes to +0.0.
+    let mut request = base_request();
+    for value in [-0.5, -1.0, -f64::MIN_POSITIVE, f64::NEG_INFINITY] {
+        request.summary.importance = Some(value);
+        assert_eq!(
+            normalize_error(&request).as_deref(),
+            Some("InvalidImportance"),
+            "{value}"
+        );
+    }
+    for (value, bits) in [(-0.0, 0), (0.0, 0), (1.0, 1.0f64.to_bits())] {
+        request.summary.importance = Some(value);
+        assert_eq!(normalized(&request).unwrap().importance.to_bits(), bits);
+    }
+}
+
+#[test]
+fn c1_provenance_encoded_cap_is_inclusive_and_ordered() {
+    // Section 6.1: provenance count, then encoded bytes (ProvenanceLimit),
+    // then field validity (InvalidProvenance). "1:s;" + "-;" + "L:<L>;" + "-;".
+    let entry = |uri: usize, kind: Option<usize>| Provenance {
+        source: "s".into(),
+        kind: kind.map(|bytes| "k".repeat(bytes)),
+        uri: Some("u".repeat(uri)),
+        transformation: None,
+    };
+    let mut at_cap = vec![entry(243, None); 16];
+    assert_eq!(encode_provenance(&at_cap).len(), 4096);
+    let mut over_cap = at_cap.clone();
+    over_cap[15] = entry(244, None);
+    assert_eq!(encode_provenance(&over_cap).len(), 4097);
+    let mut request = base_request();
+    let mut check = |provenance: Vec<Provenance>, error: Option<&str>, what: &str| {
+        request.summary.provenance = provenance;
+        assert_eq!(normalize_error(&request).as_deref(), error, "{what}");
+    };
+    check(at_cap.clone(), None, "exactly 4096 encoded bytes");
+    check(
+        over_cap.clone(),
+        Some("ProvenanceLimit"),
+        "4097 encoded bytes",
+    );
+    // Bytes precede fields: an oversize 257-byte kind also overflows bytes.
+    over_cap[0] = entry(243, Some(257));
+    check(over_cap, Some("ProvenanceLimit"), "bytes before fields");
+    at_cap.truncate(1);
+    at_cap[0] = entry(243, Some(257));
+    check(at_cap, Some("InvalidProvenance"), "field alone");
+    // Count precedes fields (and bytes).
+    let empty_source = Provenance {
+        source: String::new(),
+        kind: None,
+        uri: None,
+        transformation: None,
+    };
+    check(
+        vec![empty_source.clone(); 64],
+        Some("InvalidProvenance"),
+        "64",
+    );
+    check(vec![empty_source; 65], Some("ProvenanceLimit"), "65");
+}
+
+#[test]
+fn c1_source_node_scope_and_id_must_match_its_key() {
+    // Section 6.5: a source whose stored scope/id disagree with its exact
+    // request-scope key is malformed (InvalidBundle), not a valid source.
+    let request = base_request();
+    let scope_key = request.scope.key();
+    let foreign = other_scope().key();
+    for (scope, id, error) in [
+        (scope_key.as_str(), "m", None),
+        (foreign.as_str(), "m", Some("InvalidBundle")),
+        (scope_key.as_str(), "n", Some("InvalidBundle")),
+    ] {
+        let (_dir, mut db) = direct_db();
+        direct_write(
+            &mut db,
+            GRAPH,
+            &[GraphOp::CreateNode {
+                key: memory_key(&scope_key, "m"),
+                labels: vec![LABEL_MEMORY.into()],
+                properties: source_properties(scope, id),
+            }],
+        );
+        let result = direct_consolidate(&mut db, &request);
+        match error {
+            Some(error) => assert_eq!(result.err().as_deref(), Some(error), "{id}"),
+            None => assert!(result.is_ok_and(|result| !result.replayed)),
+        }
+    }
+}
+
+#[test]
+fn c1_source_node_without_memory_label_is_invalid_bundle() {
+    // Section 6.5: a node at the source key that is not a VliteMemory node is
+    // malformed even when its properties decode as a memory.
+    let request = base_request();
+    let scope_key = request.scope.key();
+    for (label, error) in [
+        (LABEL_MEMORY, None),
+        ("FixtureNotMemory", Some("InvalidBundle")),
+    ] {
+        let (_dir, mut db) = direct_db();
+        direct_write(
+            &mut db,
+            GRAPH,
+            &[GraphOp::CreateNode {
+                key: memory_key(&scope_key, "m"),
+                labels: vec![label.into()],
+                properties: source_properties(&scope_key, "m"),
+            }],
+        );
+        let result = direct_consolidate(&mut db, &request);
+        match error {
+            Some(error) => assert_eq!(result.err().as_deref(), Some(error), "{label}"),
+            None => assert!(result.is_ok_and(|result| !result.replayed)),
+        }
+    }
+}
+
+#[test]
+fn c1_foreign_graph_owner_is_already_attached_not_cross_scope() {
+    // Section 6.5: CrossScope only for a local memory owner in another scope;
+    // an owner in another graph is RecordAlreadyAttached even when the local
+    // graph has a foreign-scope memory at the same key.
+    let mut request = base_request();
+    request.evidence = Some(MemoryEvidence {
+        id: "e".into(),
+        scope: request.scope.clone(),
+    });
+    let foreign = other_scope().key();
+    let owner_key = memory_key(&foreign, "f");
+    let record = evidence_record_id("e");
+    for (owner_graph, error) in [(GRAPH, "CrossScope"), ("other", "RecordAlreadyAttached")] {
+        let (_dir, mut db) = direct_db();
+        db.create_graph("other").unwrap();
+        let mut owner = Metadata::new();
+        owner.insert("scope".into(), MetadataValue::String(foreign.clone()));
+        direct_write(
+            &mut db,
+            GRAPH,
+            &[
+                GraphOp::CreateNode {
+                    key: memory_key(&request.scope.key(), "m"),
+                    labels: vec![LABEL_MEMORY.into()],
+                    properties: source_properties(&request.scope.key(), "m"),
+                },
+                GraphOp::CreateNode {
+                    key: owner_key.clone(),
+                    labels: vec![LABEL_MEMORY.into()],
+                    properties: owner,
+                },
+            ],
+        );
+        if owner_graph != GRAPH {
+            direct_write(
+                &mut db,
+                owner_graph,
+                &[GraphOp::CreateNode {
+                    key: owner_key.clone(),
+                    labels: vec![OWNER_LABEL.into()],
+                    properties: Metadata::new(),
+                }],
+            );
+        }
+        direct_write(
+            &mut db,
+            owner_graph,
+            &[
+                GraphOp::Vector {
+                    collection: "c".into(),
+                    mutation: crate::Mutation::Put {
+                        id: record,
+                        vector: vec![1.0, 0.0],
+                        payload: Vec::new(),
+                    },
+                },
+                GraphOp::Attach {
+                    node: owner_key.clone(),
+                    collection: "c".into(),
+                    record,
+                },
+            ],
+        );
+        assert_eq!(
+            db.memory_attachment_owner("c", record, request.now_ms)
+                .unwrap(),
+            Some((owner_graph.to_owned(), owner_key.clone()))
+        );
+        assert_eq!(
+            direct_consolidate(&mut db, &request).err().as_deref(),
+            Some(error),
+            "{owner_graph}"
+        );
     }
 }
