@@ -718,3 +718,43 @@ approval gates; private engine completion is not public feature delivery.
 Every implementation slice still needs independent acceptance. Public API
 publication and serving require the remaining exact-surface approvals and
 qualification; no openCypher-conformance or release claim is authorized.
+
+## 12. Diagnostics clarifications (provisional, 2026-11-03)
+
+Sections 3, 4, 6 and 7 fix which statements are accepted and which error
+category and position each rejection reports. Comparing the parser/planner with
+an independent reading of those sections left the cases below open. They are
+settled here under the standing rule for unforeseen decisions (backward
+compatible, long-term, provisional) and await owner ratification. None changes
+an accepted or rejected statement, a limit, a public name, a wire shape or the
+error mapping; each only fixes the kind or position reported for an already
+rejected statement, or corrects the independent reading.
+
+Principle: `Unsupported` marks a construct that is valid in openCypher, or a
+combination of subset features, which this dialect leaves out; it is reported at
+the token that introduces it. `Syntax` marks input that is invalid even in
+openCypher, or malformed supported syntax; it is reported at the first
+offending token. Where sections 3 and 7 enumerate a result, the enumeration
+wins. Positions are 0-based UTF-8 byte offsets.
+
+| Input | Result | Corrected side |
+|---|---|---|
+| a. A character outside the section 3 alphabet and outside a quoted name: non-ASCII whitespace (no-break space, em space, vertical tab, form feed, line and paragraph separators), non-ASCII, wide or accented letters in a word or keyword, emoji | `Syntax` at that character | reference |
+| b. `#` as a comment; only `//` and `/* ... */` are comment forms | `#`: `Syntax` at the `#`; the two comment forms: `Unsupported` at the opener | reference |
+| c. Empty or unterminated quoted name | `Syntax` at the opening backtick | reference |
+| d. `ON CREATE` or `ON MATCH` after any mutation clause, `MERGE` included | `Unsupported` at `ON` | parser |
+| e. `AS OF` in a statement with a mutation clause | `Unsupported` at `AS` | parser |
+| f. Function or UDF call, plain or qualified (`f(x)`, `n.f(x)`) | `Unsupported` at the name before `(` | parser |
+| g. Any hop form other than `*1..N` (`*`, `*1`, `*2..3`, `*..3`, `*1..$h`, `*1..]`) | `Unsupported` at the `*`; `*0..N` and a leading-zero bound stay `Syntax` at the bound, N above 4 stays `Limit` | reference |
+| h. A relationship variable or anchor together with `*` | `Unsupported` at the `*` | reference |
+| i. Bracketless relationship shorthand (`-->`, `--`, `<--`, `<-->`) | `Unsupported` at the first `-` or `<-`; any other token after that opener except `[` stays `Syntax` at that token | parser |
+| j. `KEY $k` bound to an empty string | Planning accepts it; the existing key validators reject it at execution as `Error::InvalidQuery` (section 7) | reference |
+| k. A parameter used in several roles that suits the first but not a later one | `Parameter` at the first reference whose role the value cannot satisfy | reference |
+| l. Parameter byte cap | The 65,536-byte cap counts the metadata encoding: 4 for the count, then per parameter 2 + name length + 1 for the tag + the value (string 4 + length, integer or float 8, boolean 1, geo point 16); an unused parameter still reports at EOF | reference |
+| m. `CREATE` or `MERGE` relationship written inward (`(a)<-[r:T]-(b)`) | `Syntax` at the `<-` | parser |
+
+The parser/planner changes (d, e, f, i, m) alter only the reported kind or
+position. The independent reference and its fixtures take a, b, c, g, h, j, k
+and l. The differential between them is re-run on both fixed heads before either
+is wired into CI. Cases the table does not list, such as MERGE `(a)` followed by
+anything other than `<-`, stay open and keep the behavior of sections 3 and 7.
