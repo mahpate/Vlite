@@ -1,6 +1,7 @@
 use super::*;
 use crate::{CollectionSpec, CreateOptions, Database, FormatVersion, server};
 use axum::{Router, body::Body, http::Request};
+use sha2::Digest;
 use tower::ServiceExt;
 
 const TENANT: &str = "0123456789abcdef0123456789abcdef";
@@ -931,7 +932,11 @@ async fn rest_expiry_and_collection_identity_changes_abort_the_snapshot() {
             let db = owner.as_mut().unwrap();
             if expiry_only {
                 let id = db.collection(&name).unwrap().id();
-                Arc::make_mut(&mut db.state_mut(id).expiries).insert(2, 1);
+                let revision = db.collection(&name).unwrap().revision(2).unwrap();
+                Arc::make_mut(&mut db.state_mut(id).expiries)
+                    .insert(2, crate::current_time_ms() + 600_000);
+                assert_eq!(db.collection(&name).unwrap().revision(2).unwrap(), revision);
+                assert!(db.collection(&name).unwrap().get(2).unwrap().is_some());
             } else {
                 let mut collection = db.collection_mut(&name).unwrap();
                 collection.delete(1).unwrap();
@@ -952,4 +957,399 @@ async fn rest_expiry_and_collection_identity_changes_abort_the_snapshot() {
         assert_eq!(status, 409, "{body}");
         assert_eq!(body["error"]["code"], "provider_snapshot_conflict");
     }
+}
+
+fn replace_registry(f: &mut Fixture, kind: &str, alias: &str, connect_ms: u64, total_ms: u64) {
+    let key = f.service.providers.bindings.keys().next().unwrap().clone();
+    let mut value = config("http://127.0.0.1:9", kind);
+    value["aliases"][0]["alias"] = json!(alias);
+    value["aliases"][0]["connect_timeout_ms"] = json!(connect_ms);
+    value["aliases"][0]["total_timeout_ms"] = json!(total_ms);
+    value["bindings"][0]["lineage"] = json!(key.0);
+    value["bindings"][0]["collection_id"] = json!(key.1);
+    value["bindings"][0]["tenant"] = json!(key.2);
+    value["bindings"][0]["alias"] = json!(alias);
+    let mut registry = registry(&value);
+    registry.transport = f.transport.clone();
+    f.service.providers = Arc::new(registry);
+    f.app = server::configured_routes(f.service.clone());
+}
+
+#[tokio::test]
+async fn rest_embedding_recreated_collection_identity_aborts_without_candidates() {
+    let f = fixture(
+        "embedding",
+        200,
+        r#"{"data":[{"embedding":[1.0,0.0]}]}"#,
+        &[],
+    );
+    let database = f.service.database.clone();
+    let name = f.name.clone();
+    *f.transport.action.lock().unwrap() = Some(Box::new(move || {
+        let mut owner = database.try_write().expect("database guard released");
+        let db = owner.as_mut().unwrap();
+        let old_id = db.collection(&name).unwrap().id();
+        let mut collection = db.collection_mut(&name).unwrap();
+        collection.delete(1).unwrap();
+        collection.delete(2).unwrap();
+        db.drop_collection(&name).unwrap();
+        let new = db
+            .create_collection(
+                &name,
+                CollectionSpec {
+                    dimensions: 2,
+                    settings: Default::default(),
+                },
+            )
+            .unwrap();
+        assert_ne!(old_id, new.id);
+        assert_eq!(db.collection(&name).unwrap().dimensions(), 2);
+    }));
+    let path = format!("/v1/collections/{}/embed", f.name);
+    let (status, body, _) = request(
+        &f.app,
+        &path,
+        Some(ADMIN),
+        json!({"text":"hello","provider":"test"}),
+    )
+    .await;
+    assert_eq!(status, 409, "{body}");
+    assert_eq!(body["error"]["code"], "provider_snapshot_conflict");
+    assert_eq!(f.transport.calls.load(Ordering::SeqCst), 1);
+}
+
+#[tokio::test]
+async fn rest_candidate_expiration_without_revision_change_aborts_snapshot() {
+    let f = fixture("rerank", 200, r#"{"results":[{"id":1,"cost":0.0}]}"#, &[]);
+    let expires = crate::current_time_ms() + 1_500;
+    let (revision, id) = {
+        let mut owner = f.service.database.write().unwrap();
+        let db = owner.as_mut().unwrap();
+        let id = db.collection(&f.name).unwrap().id();
+        Arc::make_mut(&mut db.state_mut(id).expiries).insert(2, expires);
+        (db.collection(&f.name).unwrap().revision(2).unwrap(), id)
+    };
+    let database = f.service.database.clone();
+    let name = f.name.clone();
+    *f.transport.action.lock().unwrap() = Some(Box::new(move || {
+        while crate::current_time_ms() <= expires {
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        let owner = database.try_read().expect("database guard released");
+        let db = owner.as_ref().unwrap();
+        assert_eq!(db.collection(&name).unwrap().id(), id);
+        assert_eq!(db.collection(&name).unwrap().revision(2).unwrap(), revision);
+        assert_eq!(
+            db.collection(&name).unwrap().expires_at(2).unwrap(),
+            Some(expires)
+        );
+    }));
+    let path = format!("/v1/collections/{}/search", f.name);
+    let (status, body, _) = request(&f.app, &path, Some(ADMIN), search()).await;
+    assert_eq!(status, 409, "{body}");
+    assert_eq!(body["error"]["code"], "provider_snapshot_conflict");
+    assert_eq!(f.transport.calls.load(Ordering::SeqCst), 1);
+}
+
+#[tokio::test]
+async fn rest_provider_receives_stored_candidate_vectors_and_explain_count() {
+    let f = fixture("rerank", 200, r#"{"results":[{"id":1,"cost":0.0}]}"#, &[]);
+    let mut input = search();
+    input["explain"] = json!(true);
+    input["mode"] = json!("auto");
+    let path = format!("/v1/collections/{}/search", f.name);
+    let (status, body, _) = request(&f.app, &path, Some(ADMIN), input).await;
+    assert_eq!(status, 200, "{body}");
+    assert_eq!(body["stats"]["reranked_candidates"], 2);
+    assert!(body["plan"].is_object(), "{body}");
+    let bodies = f.transport.bodies.lock().unwrap();
+    let candidates = bodies[0]["candidates"].as_array().unwrap();
+    assert_eq!(candidates.len(), 2);
+    for candidate in candidates {
+        let expected = match candidate["id"].as_u64().unwrap() {
+            1 => json!([1.0, 0.0]),
+            2 => json!([0.0, 1.0]),
+            id => panic!("foreign candidate {id}"),
+        };
+        assert_eq!(candidate["vector"], expected);
+    }
+}
+
+#[tokio::test]
+async fn rest_custom_validation_maps_422_but_preserves_role_403() {
+    let f = fixture("rerank", 200, r#"{"results":[{"id":1,"cost":0.0}]}"#, &[]);
+    let path = format!("/v1/collections/{}/search", f.name);
+    for field in ["ef_search", "text", "fusion"] {
+        let mut input = search();
+        input[field] = match field {
+            "text" => json!("not a hybrid request"),
+            "fusion" => json!({}),
+            _ => json!(10),
+        };
+        let (status, body, _) = request(&f.app, &path, Some(ADMIN), input).await;
+        assert_eq!(status, 422, "{body}");
+        assert_eq!(body["error"]["code"], "invalid_provider_input");
+    }
+    let token = "fake-read-only-validation-token-for-tests";
+    f.service.admin.auth.lock().unwrap().read_only = Some(server::BearerToken::new(token).unwrap());
+    let mut input = search();
+    input["mode"] = json!("approximate");
+    let (status, body, _) = request(&f.app, &path, Some(token), input).await;
+    assert_eq!(status, 403, "{body}");
+    assert_eq!(body["error"]["code"], "read_only");
+    assert_eq!(f.transport.calls.load(Ordering::SeqCst), 0);
+}
+
+#[tokio::test]
+async fn rest_malformed_tenant_names_have_no_managed_binding() {
+    let f = fixture(
+        "embedding",
+        200,
+        r#"{"data":[{"embedding":[1.0,0.0]}]}"#,
+        &[],
+    );
+    let uppercase = "tABCDEF0123456789ABCDEF0123456789__x";
+    assert!(matches!(
+        f.service
+            .database
+            .write()
+            .unwrap()
+            .as_mut()
+            .unwrap()
+            .create_collection(
+                uppercase,
+                CollectionSpec {
+                    dimensions: 2,
+                    settings: Default::default()
+                }
+            ),
+        Err(crate::Error::InvalidCollectionName)
+    ));
+    for (name, expected, code) in [("tabcd__x", 409, "provider_not_configured")] {
+        f.service
+            .database
+            .write()
+            .unwrap()
+            .as_mut()
+            .unwrap()
+            .create_collection(
+                name,
+                CollectionSpec {
+                    dimensions: 2,
+                    settings: Default::default(),
+                },
+            )
+            .unwrap();
+        let path = format!("/v1/collections/{name}/embed");
+        let (status, body, _) = request(
+            &f.app,
+            &path,
+            Some(ADMIN),
+            json!({"text":"hello","provider":"test"}),
+        )
+        .await;
+        assert_eq!(status, expected, "{body}");
+        assert_eq!(body["error"]["code"], code);
+    }
+    assert_eq!(f.transport.calls.load(Ordering::SeqCst), 0);
+}
+
+#[tokio::test]
+async fn rest_invalid_managed_aliases_fail_before_egress() {
+    let f = fixture(
+        "embedding",
+        200,
+        r#"{"data":[{"embedding":[1.0,0.0]}]}"#,
+        &[],
+    );
+    let path = format!("/v1/collections/{}/embed", f.name);
+    for alias in ["".to_owned(), "bad alias".to_owned(), "a".repeat(257)] {
+        let (status, body, _) = request(
+            &f.app,
+            &path,
+            Some(ADMIN),
+            json!({"text":"hello","provider":alias}),
+        )
+        .await;
+        assert_eq!(status, 422, "{body}");
+        assert_eq!(body["error"]["code"], "invalid_provider_input");
+    }
+    assert_eq!(f.transport.calls.load(Ordering::SeqCst), 0);
+    let f = fixture("rerank", 200, r#"{"results":[{"id":1,"cost":0.0}]}"#, &[]);
+    let path = format!("/v1/collections/{}/search", f.name);
+    let mut input = search();
+    input["rerank"]["provider"] = json!("bad alias");
+    let (status, body, _) = request(&f.app, &path, Some(ADMIN), input).await;
+    assert_eq!(status, 422, "{body}");
+    assert_eq!(body["error"]["code"], "invalid_provider_input");
+    assert_eq!(f.transport.calls.load(Ordering::SeqCst), 0);
+}
+
+#[tokio::test]
+async fn rest_total_budget_allows_work_longer_than_connect_budget() {
+    let mut f = fixture(
+        "embedding",
+        200,
+        r#"{"data":[{"embedding":[1.0,0.0]}]}"#,
+        &[],
+    );
+    replace_registry(&mut f, "embedding", "test", 10, 10_000);
+    *f.transport.action.lock().unwrap() = Some(Box::new(|| {
+        std::thread::sleep(Duration::from_millis(100));
+    }));
+    let path = format!("/v1/collections/{}/embed", f.name);
+    let (status, body, _) = request(
+        &f.app,
+        &path,
+        Some(ADMIN),
+        json!({"text":"hello","provider":"test"}),
+    )
+    .await;
+    assert_eq!(status, 200, "{body}");
+    assert_eq!(f.transport.calls.load(Ordering::SeqCst), 1);
+}
+
+#[tokio::test]
+async fn rest_custom_rerank_records_provider_outcome() {
+    let mut f = fixture("rerank", 200, r#"{"results":[{"id":1,"cost":0.0}]}"#, &[]);
+    let alias = "rest-rank-log-proof-21f93";
+    replace_registry(&mut f, "rerank", alias, 2_000, 10_000);
+    let mut input = search();
+    input["rerank"]["provider"] = json!(alias);
+    let path = format!("/v1/collections/{}/search", f.name);
+    let (status, body, _) = request(&f.app, &path, Some(ADMIN), input).await;
+    assert_eq!(status, 200, "{body}");
+    let expected = format!("{:x}", sha2::Sha256::digest(TENANT.as_bytes()));
+    let entries: Vec<_> = server::logs::buffer()
+        .snapshot()
+        .0
+        .into_iter()
+        .filter(|entry| {
+            entry.target == "providers"
+                && entry.fields["alias"] == alias
+                && entry.fields["tenant_fingerprint"] == expected
+        })
+        .collect();
+    assert_eq!(entries.len(), 1);
+    assert_eq!(entries[0].fields["outcome"], "ok");
+    assert_eq!(entries[0].fields["batch_count"], 2);
+}
+
+#[tokio::test]
+async fn rest_builtin_rerank_rejects_provider_field_without_egress() {
+    let f = fixture("rerank", 200, r#"{"results":[{"id":1,"cost":0.0}]}"#, &[]);
+    let path = format!("/v1/collections/{}/search", f.name);
+    for mode in ["exact", "mmr"] {
+        let mut input = search();
+        input["rerank"]["mode"] = json!(mode);
+        let (status, body, _) = request(&f.app, &path, Some(ADMIN), input).await;
+        assert_eq!(status, 422, "{body}");
+        assert_eq!(body["error"]["code"], "invalid_provider_input");
+    }
+    assert_eq!(f.transport.calls.load(Ordering::SeqCst), 0);
+}
+
+#[tokio::test]
+async fn rest_http_alias_preserves_legacy_dispatch() {
+    #[cfg(feature = "http-embedder")]
+    if std::env::var_os("VLITE_TEST_HTTP_PRECEDENCE_CHILD").is_none() {
+        let output = std::process::Command::new(std::env::current_exe().unwrap())
+            .args([
+                "--exact",
+                "server::providers::tests::serving::rest_http_alias_preserves_legacy_dispatch",
+                "--nocapture",
+            ])
+            .env("VLITE_TEST_HTTP_PRECEDENCE_CHILD", "1")
+            .env_remove("VLITE_EMBEDDING_URL")
+            .env_remove("VLITE_EMBEDDING_MODEL")
+            .env_remove("VLITE_EMBEDDING_KEY")
+            .output()
+            .unwrap();
+        assert!(
+            output.status.success(),
+            "{}",
+            String::from_utf8_lossy(&output.stdout)
+        );
+        return;
+    }
+    let mut f = fixture(
+        "embedding",
+        200,
+        r#"{"data":[{"embedding":[1.0,0.0]}]}"#,
+        &[],
+    );
+    replace_registry(&mut f, "embedding", "http", 2_000, 10_000);
+    let path = format!("/v1/collections/{}/embed", f.name);
+    let (status, body, _) = request(
+        &f.app,
+        &path,
+        Some(ADMIN),
+        json!({"text":"hello","provider":"http"}),
+    )
+    .await;
+    assert_eq!(f.transport.calls.load(Ordering::SeqCst), 0);
+    #[cfg(not(feature = "http-embedder"))]
+    {
+        assert_eq!(status, 409, "{body}");
+        assert_eq!(body["error"]["code"], "http_embedder_disabled");
+    }
+    #[cfg(feature = "http-embedder")]
+    {
+        assert_ne!(status, 200, "{body}");
+        assert_ne!(body["error"]["code"], "provider_not_configured");
+    }
+}
+
+#[test]
+fn registry_snapshot_generation_requires_the_same_instance_and_key() {
+    let value = config("http://127.0.0.1:9", "embedding");
+    let first = registry(&value);
+    let second = registry(&value);
+    let snapshot = first.snapshot(&key(), true).unwrap();
+    assert!(first.unchanged(&key(), &snapshot));
+    assert!(!second.unchanged(&key(), &snapshot));
+    let mut missing = key();
+    missing.3 = "missing".into();
+    assert!(!first.unchanged(&missing, &snapshot));
+}
+
+#[test]
+fn collection_settings_preserve_identity_name_and_dimensions() {
+    let f = fixture(
+        "embedding",
+        200,
+        r#"{"data":[{"embedding":[1.0,0.0]}]}"#,
+        &[],
+    );
+    let mut owner = f.service.database.write().unwrap();
+    let db = owner.as_mut().unwrap();
+    let before = db.collection(&f.name).unwrap();
+    let identity = (before.id(), before.name().to_owned(), before.dimensions());
+    db.set_collection_settings(&f.name, Default::default())
+        .unwrap();
+    let after = db.collection(&f.name).unwrap();
+    assert_eq!(
+        (after.id(), after.name().to_owned(), after.dimensions()),
+        identity
+    );
+}
+
+#[tokio::test]
+async fn rest_float_overflow_query_is_provider_input_error_without_egress() {
+    let f = fixture("rerank", 200, r#"{"results":[{"id":1,"cost":0.0}]}"#, &[]);
+    let path = format!("/v1/collections/{}/search", f.name);
+    let response = f.app.clone().oneshot(
+        Request::builder().method("POST").uri(&path)
+            .header("content-type", "application/json")
+            .header("authorization", format!("Bearer {ADMIN}"))
+            .body(Body::from(r#"{"vector":[1e39,0],"k":1,"rerank":{"mode":"custom","provider":"test","candidates":2}}"#)).unwrap()
+    ).await.unwrap();
+    let status = response.status().as_u16();
+    let bytes = axum::body::to_bytes(response.into_body(), 1_048_576)
+        .await
+        .unwrap();
+    let body: Value = serde_json::from_slice(&bytes).unwrap();
+    assert_eq!(status, 422, "{body}");
+    assert_eq!(body["error"]["code"], "invalid_provider_input");
+    assert_eq!(f.transport.calls.load(Ordering::SeqCst), 0);
 }
