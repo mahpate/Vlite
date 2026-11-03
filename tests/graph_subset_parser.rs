@@ -429,7 +429,7 @@ fn parser_rejections_pin_kind_and_utf8_byte_offset() {
 }
 
 #[test]
-fn rejected_grammar_forms_have_the_specified_kind_and_introducer_offset() {
+fn excluded_grammar_forms_pin_kinds_and_introducer_offsets() {
     let unsupported_clauses = [
         "OPTIONAL",
         "WITH",
@@ -466,7 +466,7 @@ fn rejected_grammar_forms_have_the_specified_kind_and_introducer_offset() {
         );
     }
 
-    let reserved_as_expression = [
+    let excluded_forms = [
         ("MATCH (n) RETURN DISTINCT n", "DISTINCT"),
         ("MATCH (a) MATCH (b) RETURN b", "MATCH"),
         (
@@ -487,7 +487,7 @@ fn rejected_grammar_forms_have_the_specified_kind_and_introducer_offset() {
         ("MATCH (n) // comment\nRETURN n", "//"),
         ("MATCH (n) RETURN n;", ";"),
     ];
-    for (text, introducer) in reserved_as_expression {
+    for (text, introducer) in excluded_forms {
         let parameters = [
             param("k", PropertyValue::String("k".into())),
             param("values", PropertyValue::Integer(1)),
@@ -502,18 +502,17 @@ fn rejected_grammar_forms_have_the_specified_kind_and_introducer_offset() {
                 error.position,
                 text.match_indices("MATCH").nth(1).unwrap().0
             );
-            assert!(error.message.contains("MATCH"));
+            assert_eq!(
+                error.message,
+                "a second MATCH clause is not supported by vlite-cypher-1"
+            );
             continue;
         }
         assert_query_error_at(
             text,
             &parameters,
             LanguageErrorKind::Unsupported,
-            if text == "MATCH (a) MATCH (b) RETURN b" {
-                text.match_indices("MATCH").nth(1).unwrap().0
-            } else {
-                text.find(introducer).unwrap()
-            },
+            text.find(introducer).unwrap(),
         );
     }
 
@@ -625,8 +624,64 @@ fn second_match_is_unsupported_across_clause_positions() {
             text.match_indices("MATCH").nth(1).unwrap().0,
             "{text}: {error}"
         );
-        assert!(error.message.contains("MATCH"), "{text}: {error}");
+        assert_eq!(
+            error.message, "a second MATCH clause is not supported by vlite-cypher-1",
+            "{text}: {error}"
+        );
     }
+
+    let identifier_slots = [
+        "MATCH (n) WHERE MATCH (b).x = $v RETURN n",
+        "MATCH (n) WHERE MATCH p = (b).x = $v RETURN n",
+        "MATCH (n) WHERE n.x = MATCH (b)",
+        "MATCH (n) WHERE n.x = MATCH p = (b)",
+        "MATCH (n) RETURN MATCH (b)",
+        "MATCH (n) RETURN MATCH p = (b)",
+        "MATCH (n) RETURN n AS MATCH (b)",
+        "MATCH (n) RETURN n AS MATCH p = (b)",
+        "MATCH (n) RETURN n ORDER BY MATCH (b)",
+        "MATCH (n) RETURN n ORDER BY MATCH p = (b)",
+        "MATCH (n) DELETE MATCH (b)",
+        "MATCH (n) DELETE MATCH p = (b)",
+    ];
+    for text in identifier_slots {
+        let error = query_error(text, &[]);
+        assert_eq!(
+            error.kind,
+            LanguageErrorKind::Unsupported,
+            "{text}: {error}"
+        );
+        assert_eq!(
+            error.position,
+            text.match_indices("MATCH").nth(1).unwrap().0,
+            "{text}: {error}"
+        );
+        assert_eq!(
+            error.message, "a second MATCH clause is not supported by vlite-cypher-1",
+            "{text}: {error}"
+        );
+    }
+
+    for text in ["MATCH (MATCH (n)) RETURN n", "CREATE (MATCH (n))"] {
+        let error = query_error(text, &[]);
+        assert_eq!(error.kind, LanguageErrorKind::Syntax, "{text}: {error}");
+        assert_eq!(
+            error.position,
+            text.rfind("MATCH").unwrap(),
+            "{text}: {error}"
+        );
+        assert_eq!(
+            error.message, "reserved words must be backquoted when used as variables or aliases",
+            "{text}: {error}"
+        );
+    }
+
+    assert_query_error_at(
+        "MATCH MATCH (n)",
+        &[],
+        LanguageErrorKind::Syntax,
+        "MATCH ".len(),
+    );
 }
 
 #[test]
@@ -638,13 +693,106 @@ fn clause_keywords_followed_by_parentheses_keep_clause_classification() {
         LanguageErrorKind::Syntax,
         supported_clause.find("CREATE").unwrap(),
     );
+    let error = query_error(supported_clause, &[]);
+    assert_eq!(
+        error.message,
+        "expected the end of the statement, found word"
+    );
 
     let excluded_clause = "MATCH (n) RETURN n DISTINCT (m)";
     let error = query_error(excluded_clause, &[]);
     assert_eq!(error.kind, LanguageErrorKind::Unsupported);
     assert_eq!(error.position, excluded_clause.find("DISTINCT").unwrap());
-    assert!(error.message.contains("DISTINCT"));
-    assert!(!error.message.contains("function invocation"));
+    assert_eq!(error.message, "DISTINCT is not supported by vlite-cypher-1");
+
+    let variable_slot = "MATCH (n) RETURN CREATE (m)";
+    let error = query_error(variable_slot, &[]);
+    assert_eq!(error.kind, LanguageErrorKind::Syntax);
+    assert_eq!(error.position, variable_slot.find("CREATE").unwrap());
+    assert_eq!(
+        error.message,
+        "reserved words must be backquoted when used as variables or aliases"
+    );
+
+    let parameter_slot = "MATCH (n) AS OF DISTINCT (m) RETURN n";
+    let error = query_error(parameter_slot, &[]);
+    assert_eq!(error.kind, LanguageErrorKind::Unsupported);
+    assert_eq!(error.position, parameter_slot.find("DISTINCT").unwrap());
+    assert_eq!(error.message, "DISTINCT is not supported by vlite-cypher-1");
+}
+
+#[test]
+fn reserved_function_names_remain_unsupported_at_expression_sites() {
+    for function in ["id", "all"] {
+        for spacing in ["", " "] {
+            let cases = [
+                format!("MATCH (n) RETURN {function}{spacing}(n)"),
+                format!("MATCH (n) WHERE {function}{spacing}(n).x = $v RETURN n"),
+                format!("MATCH (n) RETURN n ORDER BY {function}{spacing}(n)"),
+            ];
+            for text in cases {
+                let error = query_error(&text, &[]);
+                assert_eq!(
+                    error.kind,
+                    LanguageErrorKind::Unsupported,
+                    "{text}: {error}"
+                );
+                assert_eq!(
+                    error.position,
+                    text.find(function).unwrap(),
+                    "{text}: {error}"
+                );
+                assert_eq!(
+                    error.message, "function invocation is not supported",
+                    "{text}: {error}"
+                );
+            }
+        }
+    }
+
+    let not_a_clause_start = "MATCH (n) WHERE MATCH 1 = n.x RETURN n";
+    let error = query_error(not_a_clause_start, &[]);
+    assert_eq!(error.kind, LanguageErrorKind::Syntax);
+    assert_eq!(
+        error.position,
+        not_a_clause_start.match_indices("MATCH").nth(1).unwrap().0
+    );
+    assert_eq!(
+        error.message,
+        "reserved words must be backquoted when used as variables or aliases"
+    );
+
+    let function_invocation = "MATCH (n) RETURN count(n)";
+    let error = query_error(function_invocation, &[]);
+    assert_eq!(error.kind, LanguageErrorKind::Unsupported);
+    assert_eq!(error.position, function_invocation.find("count").unwrap());
+    assert_eq!(error.message, "function invocation is not supported");
+}
+
+#[test]
+fn return_star_and_pagination_literals_pin_unsupported_diagnostics() {
+    let text = "MATCH (n) RETURN *";
+    let error = query_error(text, &[]);
+    assert_eq!(error.kind, LanguageErrorKind::Unsupported);
+    assert_eq!(error.position, text.find('*').unwrap());
+    assert_eq!(
+        error.message,
+        "RETURN * is not supported; name each projected variable or field"
+    );
+
+    for text in ["MATCH (n) RETURN n SKIP 5", "MATCH (n) RETURN n LIMIT 5"] {
+        let error = query_error(text, &[]);
+        assert_eq!(
+            error.kind,
+            LanguageErrorKind::Unsupported,
+            "{text}: {error}"
+        );
+        assert_eq!(error.position, text.find('5').unwrap(), "{text}: {error}");
+        assert_eq!(
+            error.message, "numeric literals are not supported; bind data with a typed parameter",
+            "{text}: {error}"
+        );
+    }
 }
 
 #[test]

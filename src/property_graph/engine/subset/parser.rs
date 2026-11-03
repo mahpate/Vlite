@@ -90,6 +90,8 @@ const UNSUPPORTED_CLAUSES: &[&str] = &[
     "EXISTS",
 ];
 
+const RESERVED_FUNCTIONS: &[&str] = &["ID", "ALL"];
+
 pub(super) struct Parsed {
     pub(super) statement: Statement,
     pub(super) parameter_uses: Vec<ParameterUse>,
@@ -194,10 +196,11 @@ impl Parser {
         if self.match_clause_seen && self.is_keyword("MATCH") {
             return self.second_match_error();
         }
-        if Self::is_identifier_kind(&token.kind)
-            && !matches!(&token.kind, Kind::Word(word) if Self::bare_reserved(word))
-            && self.kind_at(1) == &Kind::Symbol("(")
-        {
+        let unreserved_function = Self::is_identifier_kind(&token.kind)
+            && !matches!(&token.kind, Kind::Word(word) if Self::bare_reserved(word));
+        let reserved_function = matches!(&token.kind, Kind::Word(word)
+            if RESERVED_FUNCTIONS.iter().any(|name| word.eq_ignore_ascii_case(name)));
+        if (unreserved_function || reserved_function) && self.kind_at(1) == &Kind::Symbol("(") {
             return unsupported(token.position, "function invocation is not supported");
         }
         if let Kind::Word(word) = &token.kind {
@@ -327,10 +330,11 @@ impl Parser {
                 ),
             ));
         }
-        if Self::is_identifier_kind(&self.token().kind)
-            && !matches!(&self.token().kind, Kind::Word(word) if Self::bare_reserved(word))
-            && self.kind_at(1) == &Kind::Symbol("(")
-        {
+        let unreserved_function = Self::is_identifier_kind(&self.token().kind)
+            && !matches!(&self.token().kind, Kind::Word(word) if Self::bare_reserved(word));
+        let reserved_function = matches!(&self.token().kind, Kind::Word(word)
+            if RESERVED_FUNCTIONS.iter().any(|name| word.eq_ignore_ascii_case(name)));
+        if (unreserved_function || reserved_function) && self.kind_at(1) == &Kind::Symbol("(") {
             return Err(unsupported(
                 self.position(),
                 "function invocation is not supported",
@@ -365,10 +369,11 @@ impl Parser {
                     "numeric literals are not supported; bind data with a typed parameter",
                 ));
             }
-            if Self::is_identifier_kind(&token.kind)
-                && !matches!(&token.kind, Kind::Word(word) if Self::bare_reserved(word))
-                && self.kind_at(1) == &Kind::Symbol("(")
-            {
+            let unreserved_function = Self::is_identifier_kind(&token.kind)
+                && !matches!(&token.kind, Kind::Word(word) if Self::bare_reserved(word));
+            let reserved_function = matches!(&token.kind, Kind::Word(word)
+                if RESERVED_FUNCTIONS.iter().any(|name| word.eq_ignore_ascii_case(name)));
+            if (unreserved_function || reserved_function) && self.kind_at(1) == &Kind::Symbol("(") {
                 return Err(unsupported(
                     token.position,
                     "function invocation is not supported",
