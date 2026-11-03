@@ -770,6 +770,39 @@ fn reserved_function_names_remain_unsupported_at_expression_sites() {
 }
 
 #[test]
+fn reserved_function_names_remain_unsupported_at_clause_positions() {
+    for function in ["ID", "ALL", "id", "all"] {
+        for spacing in ["", " "] {
+            let cases = [
+                format!("MATCH (n) {function}{spacing}(n)"),
+                format!("{function}{spacing}(n)"),
+                format!("MATCH (n) RETURN n {function}{spacing}(n)"),
+                format!("MATCH (n) WHERE n.x = $v {function}{spacing}(n)"),
+                format!("MATCH (n) RETURN n ORDER BY n {function}{spacing}(n)"),
+                format!("MATCH (n) AS OF {function}{spacing}(n) RETURN n"),
+            ];
+            for text in cases {
+                let error = query_error(&text, &[]);
+                assert_eq!(
+                    error.kind,
+                    LanguageErrorKind::Unsupported,
+                    "{text}: {error}"
+                );
+                assert_eq!(
+                    error.position,
+                    text.find(function).unwrap(),
+                    "{text}: {error}"
+                );
+                assert_eq!(
+                    error.message, "function invocation is not supported",
+                    "{text}: {error}"
+                );
+            }
+        }
+    }
+}
+
+#[test]
 fn return_star_and_pagination_literals_pin_unsupported_diagnostics() {
     let text = "MATCH (n) RETURN *";
     let error = query_error(text, &[]);
