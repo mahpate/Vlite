@@ -1,0 +1,619 @@
+{
+  "schema": "vlite.ingestion-preparation-golden",
+  "version": 1,
+  "cases": [
+    {
+      "name": "fixed-utf8-boundaries-overlap-bom-combining",
+      "source": {
+        "pieces": [
+          {"utf8": "﻿"},
+          {"repeat_utf8": "a", "count": 1020},
+          {"utf8": "😀é"},
+          {"repeat_utf8": "z", "count": 1024}
+        ]
+      },
+      "strategy": "FixedUtf8V1",
+      "chunk_bytes": 1024,
+      "overlap_bytes": 1,
+      "binding": "binding-a",
+      "source_identity": {"tenant": "tenant-a", "source_id": "doc-a"},
+      "entity_rules": [],
+      "relation_rules": [],
+      "expected": {
+        "source": {"tenant": "tenant-a", "source_id": "doc-a", "uri": null, "byte_length": 2054},
+        "chunks": [
+          {"ordinal": 0, "start": 0, "end": 1023, "sha256": "d587d0fd41e6afb3b84e7ecea2cdd590ffcededc9e939d87e05474b9261d4871"},
+          {"ordinal": 1, "start": 1022, "end": 2046, "sha256": "3ff177ae8f3b2d7a039c2f19c47efdf289a1128974685e8d97f5783a02a4bd1f"},
+          {"ordinal": 2, "start": 2045, "end": 2054, "sha256": "f6dad0e59524cee41f6888a77281d94436f4c0615326875613cd55f521714033"}
+        ],
+        "entities": [],
+        "mentions": [],
+        "relations": []
+      }
+    },
+    {
+      "name": "paragraph-lf-break",
+      "source": {"pieces": [
+        {"repeat_utf8": "a", "count": 600},
+        {"utf8": "\n\n"},
+        {"repeat_utf8": "b", "count": 500}
+      ]},
+      "strategy": "ParagraphV1",
+      "chunk_bytes": 1024,
+      "overlap_bytes": 0,
+      "binding": "binding-a",
+      "source_identity": {"tenant": "tenant-a", "source_id": "paragraph-lf"},
+      "entity_rules": [],
+      "relation_rules": [],
+      "expected": {
+        "source": {"tenant": "tenant-a", "source_id": "paragraph-lf", "uri": null, "byte_length": 1102},
+        "chunks": [
+          {"ordinal": 0, "start": 0, "end": 602, "sha256": "fea4edb1d4135441b316fec790e6a13b2a87bf4f684c5a1f3ab33df7bfce53e9"},
+          {"ordinal": 1, "start": 602, "end": 1102, "sha256": "ba44b93823e5c24e99d64a916b3e53a97613d4c438c0c2896cadc2dd8195c14a"}
+        ],
+        "entities": [],
+        "mentions": [],
+        "relations": []
+      }
+    },
+    {
+      "name": "paragraph-crlf-is-not-lf-lf",
+      "source": {"pieces": [
+        {"repeat_utf8": "a", "count": 600},
+        {"utf8": "\r\n\r\n"},
+        {"repeat_utf8": "b", "count": 500}
+      ]},
+      "strategy": "ParagraphV1",
+      "chunk_bytes": 1024,
+      "overlap_bytes": 0,
+      "binding": "binding-a",
+      "source_identity": {"tenant": "tenant-a", "source_id": "paragraph-crlf"},
+      "entity_rules": [],
+      "relation_rules": [],
+      "expected": {
+        "source": {"tenant": "tenant-a", "source_id": "paragraph-crlf", "uri": null, "byte_length": 1104},
+        "chunks": [
+          {"ordinal": 0, "start": 0, "end": 1024, "sha256": "4e06e04ddac9b6ee2bc2ad35376d5243c9c24f2f2133f19be034834d54f0a1fb"},
+          {"ordinal": 1, "start": 1024, "end": 1104, "sha256": "18766a15ea395280cbc0ef07de4e38be7e5319ee6d8f2537236a6c3ac294b039"}
+        ],
+        "entities": [],
+        "mentions": [],
+        "relations": []
+      }
+    },
+    {
+      "name": "whitespace-only-source-is-valid",
+      "source": " \t\r\n ",
+      "strategy": "FixedUtf8V1",
+      "chunk_bytes": 1024,
+      "overlap_bytes": 0,
+      "binding": "binding-a",
+      "source_identity": {"tenant": "tenant-a", "source_id": "whitespace"},
+      "entity_rules": [],
+      "relation_rules": [],
+      "expected": {
+        "source": {"tenant": "tenant-a", "source_id": "whitespace", "uri": null, "byte_length": 5},
+        "chunks": [
+          {"ordinal": 0, "start": 0, "end": 5, "sha256": "99bd4bf70afd578be43331e7831daf2e50833a23dd8cef951b679782eef24e3d"}
+        ],
+        "entities": [],
+        "mentions": [],
+        "relations": []
+      }
+    },
+    {
+      "name": "empty-source-rejects",
+      "source": {"hex": ""},
+      "strategy": "FixedUtf8V1",
+      "chunk_bytes": 1024,
+      "overlap_bytes": 0,
+      "binding": "binding-a",
+      "source_identity": {"tenant": "tenant-a", "source_id": "empty"},
+      "entity_rules": [],
+      "relation_rules": [],
+      "expected": {"error": "source_empty"}
+    },
+    {
+      "name": "invalid-utf8-source",
+      "source": {"hex": "61ff"},
+      "strategy": "FixedUtf8V1",
+      "chunk_bytes": 1024,
+      "overlap_bytes": 0,
+      "binding": "binding-a",
+      "source_identity": {"tenant": "tenant-a", "source_id": "invalid-utf8"},
+      "entity_rules": [],
+      "relation_rules": [],
+      "expected": {"error": "source_invalid_utf8"}
+    },
+    {
+      "name": "chunk-limit-exactly-512",
+      "source": {"pieces": [{"repeat_utf8": "a", "count": 524288}]},
+      "strategy": "FixedUtf8V1",
+      "chunk_bytes": 1024,
+      "overlap_bytes": 0,
+      "binding": "binding-a",
+      "source_identity": {"tenant": "tenant-a", "source_id": "chunk-512"},
+      "entity_rules": [],
+      "relation_rules": [],
+      "expected": {
+        "source": {"tenant": "tenant-a", "source_id": "chunk-512", "uri": null, "byte_length": 524288},
+        "chunks_repeat": {
+          "count": 512,
+          "length": 1024,
+          "stride": 1024,
+          "sha256": "2edc986847e209b4016e141a6dc8716d3207350f416969382d431539bf292e4a"
+        },
+        "entities": [],
+        "mentions": [],
+        "relations": []
+      }
+    },
+    {
+      "name": "chunk-limit-above-512",
+      "source": {"pieces": [{"repeat_utf8": "a", "count": 525312}]},
+      "strategy": "FixedUtf8V1",
+      "chunk_bytes": 1024,
+      "overlap_bytes": 0,
+      "binding": "binding-a",
+      "source_identity": {"tenant": "tenant-a", "source_id": "chunk-513"},
+      "entity_rules": [],
+      "relation_rules": [],
+      "expected": {"error": "chunk_limit"}
+    },
+    {
+      "name": "source-limit-exactly-one-mebibyte",
+      "source": {"pieces": [{"repeat_utf8": "a", "count": 1048576}]},
+      "strategy": "FixedUtf8V1",
+      "chunk_bytes": 16384,
+      "overlap_bytes": 0,
+      "binding": "binding-a",
+      "source_identity": {"tenant": "tenant-a", "source_id": "source-maximum"},
+      "entity_rules": [],
+      "relation_rules": [],
+      "expected": {
+        "source": {"tenant": "tenant-a", "source_id": "source-maximum", "uri": null, "byte_length": 1048576},
+        "chunks_repeat": {
+          "count": 64,
+          "length": 16384,
+          "stride": 16384,
+          "sha256": "f3336bea752b5a28743033dd2c844a4a63fba08871aaee2586a2bf2d69be83a2"
+        },
+        "entities": [],
+        "mentions": [],
+        "relations": []
+      }
+    },
+    {
+      "name": "source-limit-above-one-mebibyte",
+      "source": {"pieces": [{"repeat_utf8": "a", "count": 1048577}]},
+      "strategy": "FixedUtf8V1",
+      "chunk_bytes": 16384,
+      "overlap_bytes": 0,
+      "binding": "binding-a",
+      "source_identity": {"tenant": "tenant-a", "source_id": "source-maximum-plus-one"},
+      "entity_rules": [],
+      "relation_rules": [],
+      "expected": {"error": "source_too_large"}
+    },
+    {
+      "name": "ascii-only-normalization-and-line-local-relations",
+      "source": "Alice met Bob.\nAlice sees Bob.",
+      "strategy": "ParagraphV1",
+      "chunk_bytes": 1024,
+      "overlap_bytes": 0,
+      "binding": "binding-a",
+      "source_identity": {"tenant": "tenant-a", "source_id": "relations"},
+      "entity_rules": [
+        {"rule_id": "alice", "literal": "Alice", "kind": "Person", "key": "  ALICE \t"},
+        {"rule_id": "bob", "literal": "Bob", "kind": "Place", "key": " BOB "}
+      ],
+      "relation_rules": [
+        {"rule_id": "knows", "predicate": "knows", "subject_kind": "Person", "object_kind": "Place"}
+      ],
+      "expected": {
+        "source": {"tenant": "tenant-a", "source_id": "relations", "uri": null, "byte_length": 30},
+        "chunks": [
+          {"ordinal": 0, "start": 0, "end": 30, "sha256": "662d2582c778ade3c19403d947f232a5ca6a67070f57b412b245989c0b1d2e43"}
+        ],
+        "entities": [
+          {"binding": "binding-a", "tenant": "tenant-a", "kind": "Person", "normalized_key": "alice"},
+          {"binding": "binding-a", "tenant": "tenant-a", "kind": "Place", "normalized_key": "bob"}
+        ],
+        "mentions": [
+          {"chunk": 0, "entity": {"binding": "binding-a", "tenant": "tenant-a", "kind": "Person", "normalized_key": "alice"}, "source_span": [0, 5], "chunk_span": [0, 5], "surface": "Alice", "attributes": {}, "confidence": null},
+          {"chunk": 0, "entity": {"binding": "binding-a", "tenant": "tenant-a", "kind": "Place", "normalized_key": "bob"}, "source_span": [10, 13], "chunk_span": [10, 13], "surface": "Bob", "attributes": {}, "confidence": null},
+          {"chunk": 0, "entity": {"binding": "binding-a", "tenant": "tenant-a", "kind": "Person", "normalized_key": "alice"}, "source_span": [15, 20], "chunk_span": [15, 20], "surface": "Alice", "attributes": {}, "confidence": null},
+          {"chunk": 0, "entity": {"binding": "binding-a", "tenant": "tenant-a", "kind": "Place", "normalized_key": "bob"}, "source_span": [26, 29], "chunk_span": [26, 29], "surface": "Bob", "attributes": {}, "confidence": null}
+        ],
+        "relations": [
+          {"chunk": 0, "subject": {"binding": "binding-a", "tenant": "tenant-a", "kind": "Person", "normalized_key": "alice"}, "predicate": "knows", "object": {"binding": "binding-a", "tenant": "tenant-a", "kind": "Place", "normalized_key": "bob"}, "source_span": [0, 13], "chunk_span": [0, 13], "attributes": {}, "confidence": null},
+          {"chunk": 0, "subject": {"binding": "binding-a", "tenant": "tenant-a", "kind": "Person", "normalized_key": "alice"}, "predicate": "knows", "object": {"binding": "binding-a", "tenant": "tenant-a", "kind": "Place", "normalized_key": "bob"}, "source_span": [15, 29], "chunk_span": [15, 29], "attributes": {}, "confidence": null}
+        ]
+      }
+    },
+    {
+      "name": "turkish-i-and-non-ascii-preserved",
+      "source": "İ I ı",
+      "strategy": "FixedUtf8V1",
+      "chunk_bytes": 1024,
+      "overlap_bytes": 0,
+      "binding": "binding-a",
+      "source_identity": {"tenant": "tenant-a", "source_id": "turkish-i"},
+      "entity_rules": [
+        {"rule_id": "capital-dotted", "literal": "İ", "kind": "K", "key": " İ "},
+        {"rule_id": "ascii-capital", "literal": "I", "kind": "K", "key": "I"},
+        {"rule_id": "dotless", "literal": "ı", "kind": "K", "key": "ı"}
+      ],
+      "relation_rules": [],
+      "expected": {
+        "source": {"tenant": "tenant-a", "source_id": "turkish-i", "uri": null, "byte_length": 7},
+        "chunks": [
+          {"ordinal": 0, "start": 0, "end": 7, "sha256": "91666c23dcd2c765fc3c1df2eadf4f673e0c9f3f6dbebc9af0cbb0454500c5bd"}
+        ],
+        "entities": [
+          {"binding": "binding-a", "tenant": "tenant-a", "kind": "K", "normalized_key": "i"},
+          {"binding": "binding-a", "tenant": "tenant-a", "kind": "K", "normalized_key": "İ"},
+          {"binding": "binding-a", "tenant": "tenant-a", "kind": "K", "normalized_key": "ı"}
+        ],
+        "mentions": [
+          {"chunk": 0, "entity": {"binding": "binding-a", "tenant": "tenant-a", "kind": "K", "normalized_key": "İ"}, "source_span": [0, 2], "chunk_span": [0, 2], "surface": "İ", "attributes": {}, "confidence": null},
+          {"chunk": 0, "entity": {"binding": "binding-a", "tenant": "tenant-a", "kind": "K", "normalized_key": "i"}, "source_span": [3, 4], "chunk_span": [3, 4], "surface": "I", "attributes": {}, "confidence": null},
+          {"chunk": 0, "entity": {"binding": "binding-a", "tenant": "tenant-a", "kind": "K", "normalized_key": "ı"}, "source_span": [5, 7], "chunk_span": [5, 7], "surface": "ı", "attributes": {}, "confidence": null}
+        ],
+        "relations": []
+      }
+    },
+    {
+      "name": "one-observation-is-not-a-relation",
+      "source": "A",
+      "strategy": "FixedUtf8V1",
+      "chunk_bytes": 1024,
+      "overlap_bytes": 0,
+      "binding": "binding-a",
+      "source_identity": {"tenant": "tenant-a", "source_id": "one-observation"},
+      "entity_rules": [{"rule_id": "a", "literal": "A", "kind": "Person", "key": "A"}],
+      "relation_rules": [{"rule_id": "self", "predicate": "knows", "subject_kind": "Person", "object_kind": "Person"}],
+      "expected": {
+        "source": {"tenant": "tenant-a", "source_id": "one-observation", "uri": null, "byte_length": 1},
+        "chunks": [{"ordinal": 0, "start": 0, "end": 1, "sha256": "559aead08264d5795d3909718cdd05abd49572e84fe55590eef31a88a08fdffd"}],
+        "entities": [{"binding": "binding-a", "tenant": "tenant-a", "kind": "Person", "normalized_key": "a"}],
+        "mentions": [{"chunk": 0, "entity": {"binding": "binding-a", "tenant": "tenant-a", "kind": "Person", "normalized_key": "a"}, "source_span": [0, 1], "chunk_span": [0, 1], "surface": "A", "attributes": {}, "confidence": null}],
+        "relations": []
+      }
+    },
+    {
+      "name": "relation-union-at-1024-bytes",
+      "source": {"pieces": [
+        {"utf8": "A"},
+        {"repeat_utf8": "x", "count": 1022},
+        {"utf8": "B"}
+      ]},
+      "strategy": "FixedUtf8V1",
+      "chunk_bytes": 2048,
+      "overlap_bytes": 0,
+      "binding": "binding-a",
+      "source_identity": {"tenant": "tenant-a", "source_id": "union-1024"},
+      "entity_rules": [
+        {"rule_id": "a", "literal": "A", "kind": "Left", "key": "a"},
+        {"rule_id": "b", "literal": "B", "kind": "Right", "key": "b"}
+      ],
+      "relation_rules": [{"rule_id": "r", "predicate": "links", "subject_kind": "Left", "object_kind": "Right"}],
+      "expected": {
+        "source": {"tenant": "tenant-a", "source_id": "union-1024", "uri": null, "byte_length": 1024},
+        "chunks": [{"ordinal": 0, "start": 0, "end": 1024, "sha256": "086e8d4c107dd2155f999539b15a7faf190b2023ba3452b186de792465ea2f65"}],
+        "entities": [
+          {"binding": "binding-a", "tenant": "tenant-a", "kind": "Left", "normalized_key": "a"},
+          {"binding": "binding-a", "tenant": "tenant-a", "kind": "Right", "normalized_key": "b"}
+        ],
+        "mentions": [
+          {"chunk": 0, "entity": {"binding": "binding-a", "tenant": "tenant-a", "kind": "Left", "normalized_key": "a"}, "source_span": [0, 1], "chunk_span": [0, 1], "surface": "A", "attributes": {}, "confidence": null},
+          {"chunk": 0, "entity": {"binding": "binding-a", "tenant": "tenant-a", "kind": "Right", "normalized_key": "b"}, "source_span": [1023, 1024], "chunk_span": [1023, 1024], "surface": "B", "attributes": {}, "confidence": null}
+        ],
+        "relations": [
+          {"chunk": 0, "subject": {"binding": "binding-a", "tenant": "tenant-a", "kind": "Left", "normalized_key": "a"}, "predicate": "links", "object": {"binding": "binding-a", "tenant": "tenant-a", "kind": "Right", "normalized_key": "b"}, "source_span": [0, 1024], "chunk_span": [0, 1024], "attributes": {}, "confidence": null}
+        ]
+      }
+    },
+    {
+      "name": "relation-union-above-1024-is-excluded",
+      "source": {"pieces": [
+        {"utf8": "A"},
+        {"repeat_utf8": "x", "count": 1023},
+        {"utf8": "B"}
+      ]},
+      "strategy": "FixedUtf8V1",
+      "chunk_bytes": 2048,
+      "overlap_bytes": 0,
+      "binding": "binding-a",
+      "source_identity": {"tenant": "tenant-a", "source_id": "union-1025"},
+      "entity_rules": [
+        {"rule_id": "a", "literal": "A", "kind": "Left", "key": "a"},
+        {"rule_id": "b", "literal": "B", "kind": "Right", "key": "b"}
+      ],
+      "relation_rules": [{"rule_id": "r", "predicate": "links", "subject_kind": "Left", "object_kind": "Right"}],
+      "expected": {
+        "source": {"tenant": "tenant-a", "source_id": "union-1025", "uri": null, "byte_length": 1025},
+        "chunks": [{"ordinal": 0, "start": 0, "end": 1025, "sha256": "a81fca3182e5a3621c663249e52f9c2ace0f4a1dec1991cef945f36038ec444e"}],
+        "entities": [
+          {"binding": "binding-a", "tenant": "tenant-a", "kind": "Left", "normalized_key": "a"},
+          {"binding": "binding-a", "tenant": "tenant-a", "kind": "Right", "normalized_key": "b"}
+        ],
+        "mentions": [
+          {"chunk": 0, "entity": {"binding": "binding-a", "tenant": "tenant-a", "kind": "Left", "normalized_key": "a"}, "source_span": [0, 1], "chunk_span": [0, 1], "surface": "A", "attributes": {}, "confidence": null},
+          {"chunk": 0, "entity": {"binding": "binding-a", "tenant": "tenant-a", "kind": "Right", "normalized_key": "b"}, "source_span": [1024, 1025], "chunk_span": [1024, 1025], "surface": "B", "attributes": {}, "confidence": null}
+        ],
+        "relations": []
+      }
+    },
+    {
+      "name": "identical-duplicate-mention-evidence-deduplicates",
+      "source": "x",
+      "strategy": "FixedUtf8V1",
+      "chunk_bytes": 1024,
+      "overlap_bytes": 0,
+      "binding": "binding-a",
+      "source_identity": {"tenant": "tenant-a", "source_id": "duplicate-mention"},
+      "entity_rules": [],
+      "relation_rules": [],
+      "extractions": [
+        {
+          "chunk": 0,
+          "entities": {
+            "repeat": 2,
+            "value": {"local_id": 0, "kind": "K", "key": "same", "surface": "x", "span": [0, 1], "attributes": {}, "confidence": null}
+          },
+          "relations": []
+        }
+      ],
+      "expected": {
+        "source": {"tenant": "tenant-a", "source_id": "duplicate-mention", "uri": null, "byte_length": 1},
+        "chunks": [{"ordinal": 0, "start": 0, "end": 1, "sha256": "2d711642b726b04401627ca9fbac32f5c8530fb1903cc4db02258717921a4881"}],
+        "entities": [{"binding": "binding-a", "tenant": "tenant-a", "kind": "K", "normalized_key": "same"}],
+        "mentions": [{"chunk": 0, "entity": {"binding": "binding-a", "tenant": "tenant-a", "kind": "K", "normalized_key": "same"}, "source_span": [0, 1], "chunk_span": [0, 1], "surface": "x", "attributes": {}, "confidence": null}],
+        "relations": []
+      }
+    },
+    {
+      "name": "conflicting-duplicate-mention-evidence-rejects",
+      "source": "x",
+      "strategy": "FixedUtf8V1",
+      "chunk_bytes": 1024,
+      "overlap_bytes": 0,
+      "binding": "binding-a",
+      "source_identity": {"tenant": "tenant-a", "source_id": "conflict-mention"},
+      "entity_rules": [],
+      "relation_rules": [],
+      "extractions": [
+        {
+          "chunk": 0,
+          "entities": [
+            {"local_id": 0, "kind": "K", "key": "same", "surface": "x", "span": [0, 1], "attributes": {}, "confidence": 0.2},
+            {"local_id": 1, "kind": "K", "key": "same", "surface": "x", "span": [0, 1], "attributes": {}, "confidence": 0.7}
+          ],
+          "relations": []
+        }
+      ],
+      "expected": {"error": "mention_conflict"}
+    },
+    {
+      "name": "conflicting-duplicate-relation-evidence-rejects",
+      "source": "AB",
+      "strategy": "FixedUtf8V1",
+      "chunk_bytes": 1024,
+      "overlap_bytes": 0,
+      "binding": "binding-a",
+      "source_identity": {"tenant": "tenant-a", "source_id": "conflict-relation"},
+      "entity_rules": [],
+      "relation_rules": [],
+      "extractions": [
+        {
+          "chunk": 0,
+          "entities": [
+            {"local_id": 0, "kind": "Left", "key": "a", "surface": "A", "span": [0, 1], "attributes": {}, "confidence": null},
+            {"local_id": 1, "kind": "Right", "key": "b", "surface": "B", "span": [1, 2], "attributes": {}, "confidence": null}
+          ],
+          "relations": [
+            {"subject_local_id": 0, "predicate": "links", "object_local_id": 1, "span": [0, 2], "attributes": {}, "confidence": 0.2},
+            {"subject_local_id": 0, "predicate": "links", "object_local_id": 1, "span": [0, 2], "attributes": {}, "confidence": 0.7}
+          ]
+        }
+      ],
+      "expected": {"error": "relation_conflict"}
+    },
+    {
+      "name": "distinct-relation-attributes-remain-distinct",
+      "source": "AB",
+      "strategy": "FixedUtf8V1",
+      "chunk_bytes": 1024,
+      "overlap_bytes": 0,
+      "binding": "binding-a",
+      "source_identity": {"tenant": "tenant-a", "source_id": "distinct-relation-attributes"},
+      "entity_rules": [],
+      "relation_rules": [],
+      "extractions": [
+        {
+          "chunk": 0,
+          "entities": [
+            {"local_id": 0, "kind": "Left", "key": "a", "surface": "A", "span": [0, 1], "attributes": {}, "confidence": null},
+            {"local_id": 1, "kind": "Right", "key": "b", "surface": "B", "span": [1, 2], "attributes": {}, "confidence": null}
+          ],
+          "relations": [
+            {"subject_local_id": 0, "predicate": "links", "object_local_id": 1, "span": [0, 2], "attributes": {"label": "first"}, "confidence": null},
+            {"subject_local_id": 0, "predicate": "links", "object_local_id": 1, "span": [0, 2], "attributes": {"label": "second"}, "confidence": null}
+          ]
+        }
+      ],
+      "expected": {
+        "source": {"tenant": "tenant-a", "source_id": "distinct-relation-attributes", "uri": null, "byte_length": 2},
+        "chunks": [{"ordinal": 0, "start": 0, "end": 2, "sha256": "38164fbd17603d73f696b8b4d72664d735bb6a7c88577687fd2ae33fd6964153"}],
+        "entities": [
+          {"binding": "binding-a", "tenant": "tenant-a", "kind": "Left", "normalized_key": "a"},
+          {"binding": "binding-a", "tenant": "tenant-a", "kind": "Right", "normalized_key": "b"}
+        ],
+        "mentions": [
+          {"chunk": 0, "entity": {"binding": "binding-a", "tenant": "tenant-a", "kind": "Left", "normalized_key": "a"}, "source_span": [0, 1], "chunk_span": [0, 1], "surface": "A", "attributes": {}, "confidence": null},
+          {"chunk": 0, "entity": {"binding": "binding-a", "tenant": "tenant-a", "kind": "Right", "normalized_key": "b"}, "source_span": [1, 2], "chunk_span": [1, 2], "surface": "B", "attributes": {}, "confidence": null}
+        ],
+        "relations": [
+          {"chunk": 0, "subject": {"binding": "binding-a", "tenant": "tenant-a", "kind": "Left", "normalized_key": "a"}, "predicate": "links", "object": {"binding": "binding-a", "tenant": "tenant-a", "kind": "Right", "normalized_key": "b"}, "source_span": [0, 2], "chunk_span": [0, 2], "attributes": {"label": "first"}, "confidence": null},
+          {"chunk": 0, "subject": {"binding": "binding-a", "tenant": "tenant-a", "kind": "Left", "normalized_key": "a"}, "predicate": "links", "object": {"binding": "binding-a", "tenant": "tenant-a", "kind": "Right", "normalized_key": "b"}, "source_span": [0, 2], "chunk_span": [0, 2], "attributes": {"label": "second"}, "confidence": null}
+        ]
+      }
+    },
+    {
+      "name": "foreign-local-entity-reference-rejects",
+      "source": "x",
+      "strategy": "FixedUtf8V1",
+      "chunk_bytes": 1024,
+      "overlap_bytes": 0,
+      "binding": "binding-a",
+      "source_identity": {"tenant": "tenant-a", "source_id": "foreign-local-id"},
+      "entity_rules": [],
+      "relation_rules": [],
+      "extractions": [
+        {"chunk": 0, "entities": [], "relations": [
+          {"subject_local_id": 10, "predicate": "links", "object_local_id": 11, "span": [0, 1], "attributes": {}, "confidence": null}
+        ]}
+      ],
+      "expected": {"error": "local_reference_invalid"}
+    },
+    {
+      "name": "unaligned-local-evidence-span-rejects",
+      "source": "😀",
+      "strategy": "FixedUtf8V1",
+      "chunk_bytes": 1024,
+      "overlap_bytes": 0,
+      "binding": "binding-a",
+      "source_identity": {"tenant": "tenant-a", "source_id": "unaligned-span"},
+      "entity_rules": [],
+      "relation_rules": [],
+      "extractions": [
+          {"chunk": 0, "entities": [
+            {"local_id": 0, "kind": "K", "key": "x", "surface": "x", "span": [1, 2], "attributes": {}, "confidence": null}
+          ], "relations": []}
+      ],
+      "expected": {"error": "evidence_boundary"}
+    },
+    {
+      "name": "nonfinite-confidence-rejects",
+      "source": "x",
+      "strategy": "FixedUtf8V1",
+      "chunk_bytes": 1024,
+      "overlap_bytes": 0,
+      "binding": "binding-a",
+      "source_identity": {"tenant": "tenant-a", "source_id": "nonfinite-confidence"},
+      "entity_rules": [],
+      "relation_rules": [],
+      "extractions": [
+        {"chunk": 0, "entities": [
+          {"local_id": 0, "kind": "K", "key": "x", "surface": "x", "span": [0, 1], "attributes": {}, "confidence": {"nonfinite": "nan"}}
+        ], "relations": []}
+      ],
+      "expected": {"error": "confidence_invalid"}
+    },
+    {
+      "name": "chunk-extraction-entity-limit-exactly-256",
+      "source": "a",
+      "strategy": "FixedUtf8V1",
+      "chunk_bytes": 1024,
+      "overlap_bytes": 0,
+      "binding": "binding-a",
+      "source_identity": {"tenant": "tenant-a", "source_id": "entity-256"},
+      "entity_rules": [],
+      "relation_rules": [],
+      "extractions": [
+        {
+          "chunk": 0,
+          "entities": {
+            "repeat": 256,
+            "value": {"local_id": 0, "kind": "K", "key": "same", "surface": "a", "span": [0, 1], "attributes": {}, "confidence": null}
+          },
+          "relations": []
+        }
+      ],
+      "expected": {
+        "source": {"tenant": "tenant-a", "source_id": "entity-256", "uri": null, "byte_length": 1},
+        "chunks": [{"ordinal": 0, "start": 0, "end": 1, "sha256": "ca978112ca1bbdcafac231b39a23dc4da786eff8147c4e72b9807785afee48bb"}],
+        "entities": [{"binding": "binding-a", "tenant": "tenant-a", "kind": "K", "normalized_key": "same"}],
+        "mentions": [{"chunk": 0, "entity": {"binding": "binding-a", "tenant": "tenant-a", "kind": "K", "normalized_key": "same"}, "source_span": [0, 1], "chunk_span": [0, 1], "surface": "a", "attributes": {}, "confidence": null}],
+        "relations": []
+      }
+    },
+    {
+      "name": "chunk-extraction-entity-limit-above-256",
+      "source": {"pieces": [{"repeat_utf8": "a", "count": 257}]},
+      "strategy": "FixedUtf8V1",
+      "chunk_bytes": 1024,
+      "overlap_bytes": 0,
+      "binding": "binding-a",
+      "source_identity": {"tenant": "tenant-a", "source_id": "entity-257"},
+      "entity_rules": [{"rule_id": "a", "literal": "a", "kind": "K", "key": "a"}],
+      "relation_rules": [],
+      "expected": {"error": "chunk_entity_limit"}
+    },
+    {
+      "name": "chunk-extraction-relation-limit-exactly-512",
+      "source": "AB",
+      "strategy": "FixedUtf8V1",
+      "chunk_bytes": 1024,
+      "overlap_bytes": 0,
+      "binding": "binding-a",
+      "source_identity": {"tenant": "tenant-a", "source_id": "relations-512"},
+      "entity_rules": [],
+      "relation_rules": [],
+      "extractions": [
+        {
+          "chunk": 0,
+          "entities": [
+            {"local_id": 0, "kind": "Left", "key": "a", "surface": "A", "span": [0, 1], "attributes": {}, "confidence": null},
+            {"local_id": 1, "kind": "Right", "key": "b", "surface": "B", "span": [1, 2], "attributes": {}, "confidence": null}
+          ],
+          "relations": {
+            "repeat": 512,
+            "value": {"subject_local_id": 0, "predicate": "links", "object_local_id": 1, "span": [0, 2], "attributes": {}, "confidence": null}
+          }
+        }
+      ],
+      "expected": {
+        "source": {"tenant": "tenant-a", "source_id": "relations-512", "uri": null, "byte_length": 2},
+        "chunks": [{"ordinal": 0, "start": 0, "end": 2, "sha256": "38164fbd17603d73f696b8b4d72664d735bb6a7c88577687fd2ae33fd6964153"}],
+        "entities": [
+          {"binding": "binding-a", "tenant": "tenant-a", "kind": "Left", "normalized_key": "a"},
+          {"binding": "binding-a", "tenant": "tenant-a", "kind": "Right", "normalized_key": "b"}
+        ],
+        "mentions": [
+          {"chunk": 0, "entity": {"binding": "binding-a", "tenant": "tenant-a", "kind": "Left", "normalized_key": "a"}, "source_span": [0, 1], "chunk_span": [0, 1], "surface": "A", "attributes": {}, "confidence": null},
+          {"chunk": 0, "entity": {"binding": "binding-a", "tenant": "tenant-a", "kind": "Right", "normalized_key": "b"}, "source_span": [1, 2], "chunk_span": [1, 2], "surface": "B", "attributes": {}, "confidence": null}
+        ],
+        "relations": [
+          {"chunk": 0, "subject": {"binding": "binding-a", "tenant": "tenant-a", "kind": "Left", "normalized_key": "a"}, "predicate": "links", "object": {"binding": "binding-a", "tenant": "tenant-a", "kind": "Right", "normalized_key": "b"}, "source_span": [0, 2], "chunk_span": [0, 2], "attributes": {}, "confidence": null}
+        ]
+      }
+    },
+    {
+      "name": "chunk-extraction-relation-limit-above-512",
+      "source": "AB",
+      "strategy": "FixedUtf8V1",
+      "chunk_bytes": 1024,
+      "overlap_bytes": 0,
+      "binding": "binding-a",
+      "source_identity": {"tenant": "tenant-a", "source_id": "relations-513"},
+      "entity_rules": [],
+      "relation_rules": [],
+      "extractions": [
+        {
+          "chunk": 0,
+          "entities": [
+            {"local_id": 0, "kind": "Left", "key": "a", "surface": "A", "span": [0, 1], "attributes": {}, "confidence": null},
+            {"local_id": 1, "kind": "Right", "key": "b", "surface": "B", "span": [1, 2], "attributes": {}, "confidence": null}
+          ],
+          "relations": {
+            "repeat": 513,
+            "value": {"subject_local_id": 0, "predicate": "links", "object_local_id": 1, "span": [0, 2], "attributes": {}, "confidence": null}
+          }
+        }
+      ],
+      "expected": {"error": "chunk_relation_limit"}
+    }
+  ]
+}
