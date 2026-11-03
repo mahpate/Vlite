@@ -108,6 +108,17 @@ pub(super) fn parse(text: &str) -> Result<Parsed, LanguageError> {
         match_clause_seen: false,
     };
     let statement = parser.statement()?;
+    if !statement.mutations.is_empty() {
+        if parser.is_on_mutation_clause() {
+            return Err(unsupported(
+                parser.position(),
+                "ON CREATE and ON MATCH mutation clauses are not supported",
+            ));
+        }
+        if parser.is_as_of_clause() {
+            return Err(unsupported(parser.position(), "AS OF is read-only"));
+        }
+    }
     if !parser.is_end() {
         return Err(parser.unexpected("the end of the statement"));
     }
@@ -162,6 +173,13 @@ impl Parser {
                     && self.kind_at(2) == &Kind::Symbol("=")))
     }
 
+    fn qualified_function_call_position(&self) -> Option<usize> {
+        (self.is_symbol(".")
+            && Self::is_identifier_kind(self.kind_at(1))
+            && self.kind_at(2) == &Kind::Symbol("("))
+            .then(|| self.tokens[self.at + 1].position)
+    }
+
     fn eat_keyword(&mut self, keyword: &str) -> Option<usize> {
         self.is_keyword(keyword).then(|| self.bump().position)
     }
@@ -178,6 +196,18 @@ impl Parser {
         ["CREATE", "MERGE", "SET", "REMOVE", "DELETE", "DETACH"]
             .iter()
             .any(|keyword| self.is_keyword(keyword))
+    }
+
+    fn is_on_mutation_clause(&self) -> bool {
+        self.is_keyword("ON")
+            && ["CREATE", "MATCH"]
+                .iter()
+                .any(|keyword| matches!(self.kind_at(1), Kind::Word(word) if word.eq_ignore_ascii_case(keyword)))
+    }
+
+    fn is_as_of_clause(&self) -> bool {
+        self.is_keyword("AS")
+            && matches!(self.kind_at(1), Kind::Word(word) if word.eq_ignore_ascii_case("OF"))
     }
 
     fn second_match_error(&self) -> LanguageError {
@@ -430,7 +460,7 @@ impl Parser {
                 return Err(self.unexpected("MATCH or a write clause"));
             };
             self.expect_keyword("RETURN")?;
-            let returning = Some(self.return_clause()?);
+            let returning = Some(self.return_clause(false)?);
             return Ok(Statement {
                 pattern: Some(pattern),
                 as_of,
@@ -448,7 +478,7 @@ impl Parser {
             mutations.push(self.mutation()?);
         }
         let returning = if self.eat_keyword("RETURN").is_some() {
-            Some(self.return_clause()?)
+            Some(self.return_clause(!mutations.is_empty())?)
         } else {
             None
         };
@@ -524,6 +554,12 @@ impl Parser {
             self.expect_symbol("-")?;
             false
         };
+        if matches!(&self.token().kind, Kind::Symbol("-" | "->")) {
+            return Err(unsupported(
+                position,
+                "bracketless relationship patterns are not supported",
+            ));
+        }
         self.expect_symbol("[")?;
         let variable = if Self::is_identifier_kind(&self.token().kind)
             && !self.is_symbol(":")
@@ -737,6 +773,12 @@ impl Parser {
         let variable = self.identifier()?;
         self.expect_symbol(".")?;
         let field = self.name("a property name")?;
+        if self.is_symbol("(") {
+            return Err(unsupported(
+                field.position,
+                "function invocation is not supported",
+            ));
+        }
         let predicate = if self.eat_symbol("=").is_some() {
             let parameter = self.parameter(ParameterKind::Any)?;
             Predicate::Compare {
@@ -866,6 +908,15 @@ impl Parser {
         if is_edge {
             return self.creation_edge(merge).map(Creation::Edge);
         }
+        if Self::is_identifier_kind(self.kind_at(1))
+            && self.kind_at(2) == &Kind::Symbol(")")
+            && self.kind_at(3) == &Kind::Symbol("<-")
+        {
+            return Err(syntax(
+                self.tokens[self.at + 3].position,
+                "CREATE and MERGE relationships must point outward",
+            ));
+        }
         self.creation_node().map(Creation::Node)
     }
 
@@ -962,7 +1013,7 @@ impl Parser {
         }
     }
 
-    fn return_clause(&mut self) -> Result<ReturnClause, LanguageError> {
+    fn return_clause(&mut self, is_write: bool) -> Result<ReturnClause, LanguageError> {
         let position = self.tokens[self.at - 1].position;
         if self.is_symbol("*") {
             return Err(unsupported(
@@ -970,9 +1021,9 @@ impl Parser {
                 "RETURN * is not supported; name each projected variable or field",
             ));
         }
-        let mut items = vec![self.return_item()?];
+        let mut items = vec![self.return_item(is_write)?];
         while self.eat_symbol(",").is_some() {
-            items.push(self.return_item()?);
+            items.push(self.return_item(is_write)?);
         }
         let mut order_by = Vec::new();
         if self.eat_keyword("ORDER").is_some() {
@@ -1001,15 +1052,24 @@ impl Parser {
         })
     }
 
-    fn return_item(&mut self) -> Result<ReturnItem, LanguageError> {
+    fn return_item(&mut self, is_write: bool) -> Result<ReturnItem, LanguageError> {
         let position = self.position();
         let variable = self.identifier()?;
         let value = if self.eat_symbol(".").is_some() {
             let field = self.name("a property name")?;
+            if self.is_symbol("(") {
+                return Err(unsupported(
+                    field.position,
+                    "function invocation is not supported",
+                ));
+            }
             ReturnValue::Field(FieldTarget { variable, field })
         } else {
             ReturnValue::Variable(variable)
         };
+        if is_write && self.is_as_of_clause() {
+            return Err(unsupported(self.position(), "AS OF is read-only"));
+        }
         let alias = if self.eat_keyword("AS").is_some() {
             Some(self.identifier()?)
         } else {
@@ -1024,6 +1084,12 @@ impl Parser {
 
     fn sort_item(&mut self) -> Result<SortItem, LanguageError> {
         let name = self.identifier()?;
+        if let Some(position) = self.qualified_function_call_position() {
+            return Err(unsupported(
+                position,
+                "function invocation is not supported",
+            ));
+        }
         let direction = if self.eat_keyword("DESC").is_some() {
             SortDirection::Descending
         } else {

@@ -175,12 +175,196 @@ fn assert_query_error_at(
     assert_eq!(error.position, position, "{text}: {error}");
 }
 
+fn assert_diagnostic_does_not_disclose(error: &LanguageError, text: &str, secrets: &[&str]) {
+    assert!(!error.message.contains(text), "{error}");
+    assert!(!error.to_string().contains(text), "{error}");
+    for secret in secrets {
+        assert!(!error.message.contains(secret), "{error}");
+        assert!(!error.to_string().contains(secret), "{error}");
+    }
+}
+
 fn limit_map(count: usize) -> String {
     let properties = (0..count)
         .map(|index| format!("p{index}:$value"))
         .collect::<Vec<_>>()
         .join(", ");
     format!("MATCH (n {{{properties}}}) RETURN n")
+}
+
+#[test]
+fn mutation_conditionals_are_unsupported_at_on() {
+    let cases = [
+        ("MATCH (n) SET n:A ON CREATE SET n:B", vec![]),
+        ("MATCH (n) SET n:A ON MATCH SET n:B", vec![]),
+        (
+            "MERGE (n:A KEY $k) ON CREATE SET n:B",
+            vec![param("k", PropertyValue::String("secret-node-key".into()))],
+        ),
+        (
+            "CREATE (n KEY $k) RETURN n ON CREATE SET n:B",
+            vec![param("k", PropertyValue::String("secret-node-key".into()))],
+        ),
+    ];
+    for (text, parameters) in cases {
+        let error = query_error(text, &parameters);
+        assert_eq!(
+            error.kind,
+            LanguageErrorKind::Unsupported,
+            "{text}: {error}"
+        );
+        assert_eq!(error.position, text.find("ON").unwrap(), "{text}: {error}");
+        assert_diagnostic_does_not_disclose(&error, text, &["secret-node-key", "$k"]);
+    }
+}
+
+#[test]
+fn as_of_writes_are_unsupported_at_as() {
+    let text = "CREATE (n KEY $k) AS OF $t RETURN n";
+    let error = query_error(
+        text,
+        &[
+            param("k", PropertyValue::String("secret-node-key".into())),
+            param("t", PropertyValue::Integer(0)),
+        ],
+    );
+    assert_eq!(error.kind, LanguageErrorKind::Unsupported, "{error}");
+    assert_eq!(error.position, text.find("AS").unwrap(), "{error}");
+    assert_diagnostic_does_not_disclose(&error, text, &["secret-node-key", "$k", "$t"]);
+
+    let text = "CREATE (n KEY $k) RETURN n AS OF $t";
+    let error = query_error(
+        text,
+        &[
+            param("k", PropertyValue::String("secret-node-key".into())),
+            param("t", PropertyValue::Integer(0)),
+        ],
+    );
+    assert_eq!(error.kind, LanguageErrorKind::Unsupported, "{error}");
+    assert_eq!(error.position, text.find("AS").unwrap(), "{error}");
+    assert_diagnostic_does_not_disclose(&error, text, &["secret-node-key", "$k", "$t"]);
+
+    let text = "MATCH (n) AS OF $t SET n:A";
+    let error = query_error(text, &[param("t", PropertyValue::Integer(0))]);
+    assert_eq!(error.kind, LanguageErrorKind::Unsupported, "{error}");
+    assert_eq!(error.position, text.find("AS").unwrap(), "{error}");
+    assert_diagnostic_does_not_disclose(&error, text, &["$t"]);
+}
+
+#[test]
+fn qualified_function_calls_in_return_are_unsupported_at_the_name() {
+    let text = "MATCH (n) RETURN n.custom($v)";
+    let error = query_error(
+        text,
+        &[param("v", PropertyValue::String("secret-value".into()))],
+    );
+    assert_eq!(error.kind, LanguageErrorKind::Unsupported, "{error}");
+    assert_eq!(error.position, text.find("custom").unwrap(), "{error}");
+    assert_diagnostic_does_not_disclose(&error, text, &["secret-value", "$v"]);
+
+    let text = "MATCH (n) RETURN custom(n)";
+    let error = query_error(text, &[]);
+    assert_eq!(error.kind, LanguageErrorKind::Unsupported, "{error}");
+    assert_eq!(error.position, text.find("custom").unwrap(), "{error}");
+    assert_diagnostic_does_not_disclose(&error, text, &[]);
+}
+
+#[test]
+fn qualified_function_calls_in_where_are_unsupported_at_the_name() {
+    let text = "MATCH (n) WHERE n.custom($v) = $x RETURN n";
+    let error = query_error(
+        text,
+        &[
+            param("v", PropertyValue::String("secret-value".into())),
+            param("x", PropertyValue::Integer(1)),
+        ],
+    );
+    assert_eq!(error.kind, LanguageErrorKind::Unsupported, "{error}");
+    assert_eq!(error.position, text.find("custom").unwrap(), "{error}");
+    assert_diagnostic_does_not_disclose(&error, text, &["secret-value", "$v", "$x"]);
+}
+
+#[test]
+fn qualified_function_calls_in_order_by_are_unsupported_at_the_name() {
+    let text = "MATCH (n) RETURN n ORDER BY n.custom($v)";
+    let error = query_error(
+        text,
+        &[param("v", PropertyValue::String("secret-value".into()))],
+    );
+    assert_eq!(error.kind, LanguageErrorKind::Unsupported, "{error}");
+    assert_eq!(error.position, text.find("custom").unwrap(), "{error}");
+    assert_diagnostic_does_not_disclose(&error, text, &["secret-value", "$v"]);
+}
+
+#[test]
+fn bracketless_relationship_shorthand_is_unsupported_at_its_opener() {
+    let cases = [
+        ("MATCH (a KEY $k)-->(b) RETURN b", "-"),
+        ("MATCH (a KEY $k)--(b) RETURN b", "-"),
+        ("MATCH (a KEY $k)<--(b) RETURN b", "<-"),
+        ("MATCH (a KEY $k)<-->(b) RETURN b", "<-"),
+    ];
+    for (text, opener) in cases {
+        let error = query_error(
+            text,
+            &[param("k", PropertyValue::String("secret-start-key".into()))],
+        );
+        assert_eq!(
+            error.kind,
+            LanguageErrorKind::Unsupported,
+            "{text}: {error}"
+        );
+        assert_eq!(
+            error.position,
+            text.find(opener).unwrap(),
+            "{text}: {error}"
+        );
+        assert_diagnostic_does_not_disclose(&error, text, &["secret-start-key", "$k"]);
+    }
+
+    for text in [
+        "MATCH (a KEY $k)-(b) RETURN b",
+        "MATCH (a KEY $k)<-(b) RETURN b",
+    ] {
+        let error = query_error(
+            text,
+            &[param("k", PropertyValue::String("secret-start-key".into()))],
+        );
+        assert_eq!(error.kind, LanguageErrorKind::Syntax, "{text}: {error}");
+        assert_eq!(error.position, text.find("(b)").unwrap(), "{text}: {error}");
+        assert_diagnostic_does_not_disclose(&error, text, &["secret-start-key", "$k"]);
+    }
+}
+
+#[test]
+fn inward_create_relationship_is_syntax_at_the_incoming_opener() {
+    let text = "MATCH (a KEY $k)-[]->(b) CREATE (a)<-[r:T]-(b)";
+    let error = query_error(
+        text,
+        &[param("k", PropertyValue::String("secret-start-key".into()))],
+    );
+    assert_eq!(error.kind, LanguageErrorKind::Syntax, "{error}");
+    assert_eq!(error.position, text.find("<-").unwrap(), "{error}");
+    assert_diagnostic_does_not_disclose(&error, text, &["secret-start-key", "$k"]);
+}
+
+#[test]
+fn inward_merge_relationship_is_syntax_at_the_incoming_opener() {
+    let text = "MATCH (a KEY $k)-[]->(b) MERGE (a)<-[r:T KEY $edge]-(b)";
+    let error = query_error(
+        text,
+        &[
+            param("k", PropertyValue::String("secret-start-key".into())),
+            param("edge", PropertyValue::String("secret-edge-key".into())),
+        ],
+    );
+    assert_eq!(error.kind, LanguageErrorKind::Syntax, "{error}");
+    assert_eq!(error.position, text.find("<-").unwrap(), "{error}");
+    assert_diagnostic_does_not_disclose(
+        &error,
+        text,
+        &["secret-start-key", "secret-edge-key", "$k", "$edge"],
+    );
 }
 
 #[test]
