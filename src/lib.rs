@@ -1516,6 +1516,25 @@ impl Database {
         if compact_records && loaded.sequence != loaded.history_floor {
             return Err(Error::UnsupportedFeature(format::FLAG_COMPACT));
         }
+        #[cfg(test)]
+        if let Some(generation) = &loaded.compact_generation {
+            for (&id, collection) in &loaded.collections {
+                if generation.has_collection(id) {
+                    let view = generation.view(id);
+                    // A valid image may mix legacy and compact record blocks.
+                    // Capturing any block does not prove complete coverage.
+                    if view.len() != collection.records.len()
+                        || collection.records.keys().enumerate().any(|(row, &id)| {
+                            view.id(row) != Some(id)
+                                || view.revision(row) != collection.revisions.get(&id).copied()
+                                || view.expiry(row) != Some(collection.expiries.get(&id).copied())
+                        })
+                    {
+                        return Err(Error::UnsupportedFeature(format::FLAG_COMPACT));
+                    }
+                }
+            }
+        }
         let imports = import::Registry::from_markers(&loaded.imports);
         Ok(Self {
             flusher: None,

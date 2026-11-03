@@ -7,6 +7,151 @@ use std::io::Cursor;
 use std::sync::{Arc, atomic::Ordering};
 
 #[test]
+fn compact_install_same_collection_mixed_encodings_refuse_without_losing_rows() {
+    use crate::{Metadata, Record, compact, format, maintenance};
+    use sha2::{Digest, Sha256};
+
+    let _gates = gates();
+    for encrypted in [true, false] {
+        let key = encrypted.then(source_key);
+        let (_, mut loaded) = compact::catalog::tests::source_empty_fixture(key.as_ref());
+        loaded.sequence = 3;
+        for (id, revision) in [(10, 1), (20, 2)] {
+            loaded.collections.get_mut(&0).unwrap().put(
+                id,
+                Record {
+                    vector: vec![id as f32, 0.0],
+                    payload: vec![id as u8],
+                    metadata: Metadata::new(),
+                },
+                revision,
+                None,
+            );
+        }
+        let mut image = Vec::new();
+        maintenance::write_v5_image(
+            &mut image,
+            &loaded,
+            loaded.lineage.unwrap(),
+            None,
+            None,
+            loaded.cipher.as_ref(),
+            loaded.flags & (format::FLAG_GRAPH | format::FLAG_PRECISION),
+            loaded.sequence,
+        )
+        .unwrap();
+        let mut reader = Cursor::new(&image);
+        let header = format::read_log_header(&mut reader, key.as_ref()).unwrap();
+        let mut at = header.start;
+        let mut frames = Vec::new();
+        let mut inserted = false;
+        while let Some(frame) = format::next_frame(&mut reader, &header, at).unwrap() {
+            at += frame.disk.len() as u64;
+            if frame.operation == format::OP_COMPACT_BLOCK && frame.id as u16 == compact::KIND_END {
+                break;
+            }
+            if frame.operation == format::OP_COMPACT_BLOCK
+                && frame.id as u16 == compact::catalog::payload::KIND
+                && !inserted
+            {
+                let mut legacy = format::RecordBlock::new(0);
+                legacy.push(
+                    1,
+                    1,
+                    None,
+                    &Record {
+                        vector: vec![1.0, 0.0],
+                        payload: b"legacy row".to_vec(),
+                        metadata: Metadata::new(),
+                    },
+                );
+                let plain = legacy.take_frame(loaded.sequence);
+                frames.push(match &loaded.cipher {
+                    Some(cipher) => cipher.seal_frame(&plain).unwrap(),
+                    None => plain,
+                });
+                inserted = true;
+            }
+            frames.push(frame.disk);
+        }
+        assert!(inserted);
+        let mut mixed = image[..header.start as usize].to_vec();
+        let mut digest = Sha256::new();
+        for frame in &frames {
+            digest.update(&frame[..format::PREFIX_SIZE]);
+            mixed.extend_from_slice(frame);
+        }
+        let end = compact::end_frame(
+            loaded.sequence,
+            frames.len() as u64,
+            digest.finalize().into(),
+        );
+        mixed.extend(match &loaded.cipher {
+            Some(cipher) => cipher.seal_frame(&end).unwrap(),
+            None => end,
+        });
+        let oracle = {
+            let _source_off = Activation::set(false);
+            Database::open_from_bytes(mixed.clone(), key.as_ref()).unwrap()
+        };
+        assert_eq!(oracle.len(), 3);
+        assert_eq!(oracle.get_at(1, 0).unwrap().unwrap().payload, b"legacy row");
+        for id in [10, 20] {
+            assert!(oracle.get_at(id, 0).unwrap().is_some());
+        }
+        let checked = format::load_with(&mut Cursor::new(&mixed), key.as_ref()).unwrap();
+        assert_eq!(
+            checked.sequence, checked.history_floor,
+            "valid image, not a WAL suffix"
+        );
+        assert_eq!(checked.collections[&0].records.len(), 3);
+        assert_eq!(checked.compact_generation.unwrap().view(0).len(), 2);
+        unsupported(
+            Database::open_from_bytes(mixed.clone(), key.as_ref()),
+            "partial same-collection compact coverage",
+        );
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("mixed.vlite");
+        std::fs::write(&path, &mixed).unwrap();
+        let result = if let Some(key) = &key {
+            Database::open_encrypted(&path, key)
+        } else {
+            Database::open(&path)
+        };
+        unsupported(result, "partial same-collection file coverage");
+        assert_eq!(std::fs::read(path).unwrap(), mixed);
+        assert_eq!(oracle.to_bytes().unwrap(), mixed);
+        assert_eq!(oracle.get_at(1, 0).unwrap().unwrap().payload, b"legacy row");
+    }
+}
+
+#[test]
+fn compact_install_empty_image_with_committed_suffix_stays_resident_and_writable() {
+    let _gates = gates();
+    for encrypted in [false, true] {
+        let key = encrypted.then(source_key);
+        let (image, _) = crate::compact::catalog::tests::source_empty_fixture(key.as_ref());
+        let mut resident = Database::open_from_bytes(image, key.as_ref()).unwrap();
+        resident.put(99, &[1.0, 2.0], b"suffix").unwrap();
+        let bytes = resident.to_bytes().unwrap();
+        let loaded = crate::format::load_with(&mut Cursor::new(&bytes), key.as_ref()).unwrap();
+        assert!(loaded.compact_generation.is_some());
+        assert!(loaded.sequence > loaded.history_floor);
+        let mut reopened = Database::open_from_bytes(bytes, key.as_ref()).unwrap();
+        assert!(matches!(
+            reopened.state(0).records,
+            CollectionRecords::Resident(_)
+        ));
+        assert_eq!(
+            reopened.get_at(99, 0).unwrap(),
+            resident.get_at(99, 0).unwrap()
+        );
+        reopened.put(100, &[2.0, 3.0], b"still writable").unwrap();
+        assert!(reopened.get_at(100, 0).unwrap().is_some());
+    }
+}
+
+#[test]
 fn compact_install_real_open_owns_source_and_snapshot_accounting() {
     let _gates = gates();
     for encrypted in [false, true] {

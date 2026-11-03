@@ -945,6 +945,16 @@ before writable-directory cleanup. File and read-only opens initialize
 their ordinary durability internally; public durability changes still
 refuse compact handles.
 
+Independent acceptance found that a valid collection may combine legacy
+op-14 rows and compact op-16 rows: capturing one block is not proof of
+complete collection coverage. The corrected candidate compares captured
+row count, every ordered ID, revision and expiry with the validated resident
+collection before any installation. Partial same-collection coverage
+refuses with `UnsupportedFeature(FLAG_COMPACT)`; it never replaces the full
+map with only the captured subset. Plaintext and encrypted regressions
+cover that refusal, source-byte preservation, and an empty compact image
+followed by a committed WAL suffix remaining resident and writable.
+
 Until slice 2 supplies base-plus-WAL overlays, an image with captured
 compact records installs only at `sequence == history_floor`. A real
 committed suffix (`sequence != history_floor`) refuses with the existing
