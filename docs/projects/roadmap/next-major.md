@@ -310,24 +310,27 @@ accepted and integrated, with no production caller. This decoded
   the embedded operations and their prerequisites; [scale-out](scale-out.md)
   compares branching, object storage and replication. Both received source
   and first-party-reference review. Memory's private A1/A2/B slices and the
-  crate-private C1 consolidation (exact golden replay) are independently
-  accepted and integrated, but remain unreleased and inactive. C1 still needs
-  a test-strength follow-up before any activation; resumable erasure and public
-  serving remain outstanding.
+  crate-private C1 consolidation (exact golden replay, with its test-strength
+  follow-up) are independently accepted and integrated, but remain unreleased
+  and inactive; resumable erasure and public serving remain outstanding.
   Scale-out is not implemented. Its order 11 → 10 → 9 was decided 2026-11-02; the track is
   backlogged until the owner revisits it. The
   [Cypher-style subset](gap6-cypher-subset.md) has ten owner-approved
   private-implementation choices (2026-11-02): the explicitly non-conformant
   `vlite-cypher-1` dialect, bounded atomic writes and unchanged legacy queries.
-  Its crate-private parser and planner are independently accepted and
-  integrated, but remain unreleased and inactive, with no executor, binding or
-  public surface; a test-strength follow-up is required before any activation.
+  Its crate-private parser and planner, with their test-strength follow-up
+  (pinned acceptance boundaries; consistent second-MATCH and reserved-function
+  diagnostics), are independently accepted and integrated, but remain
+  unreleased and inactive, with no executor, binding or public surface.
   Exact public APIs, new errors and serving remain separately gated. The
   [GraphRAG ingestion](gap7-graphrag-ingestion.md) design is source-reviewed
   with thirteen embedded-design choices approved individually on 2026-11-02:
   atomic default, explicit incremental progress, deterministic local extraction
-  and protected receipts. Only its test-side preparation reference (a Python
-  oracle with hand-authored goldens) is integrated; the Rust core is not
+  and protected receipts. Its test-side preparation reference (a Python
+  oracle with hand-authored goldens) and a crate-private, test-only Rust
+  preparation foundation (bounded chunking, validation and deterministic
+  dictionary extraction, checked against those goldens) are independently
+  accepted and integrated but unwired; the typed prepare/commit core is not
   started, and the 1 MiB decoded-output and 8 KiB attribute ceilings still need
   defined byte accounting. External extraction, purge mechanics and exact
   serving remain gated. Neither design is active.
