@@ -116,8 +116,9 @@ Local numbers below show direction only (see rules).
   REST, gRPC and MCP wait for the OpenAPI review. The
   [TTL-aware feed design](gap3-ttl-feed.md), an additive opt-in feed that
   reports deadlines and removals while the default feed bytes stay unchanged,
-  is accepted as a docs-only proposal (2026-11-02); its Rust implementation is
-  not yet accepted or integrated.
+  was accepted on 2026-11-02. Its embedded Rust implementation
+  (`Database::graph_changes_after`) is independently reviewed and integrated
+  but unreleased; server, bindings and CLI exposure still wait for that review.
 - **Gap 4, temporal graph:** private model and persistence slices A and B
   are implemented, independently reviewed and integrated, but unreleased
   ([plan](gap4-temporal-graph.md)). They preserve atomic writes, TTL and
