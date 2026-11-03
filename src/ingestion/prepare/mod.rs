@@ -47,7 +47,12 @@ enum ErrorCategory {
     AttributeValue,
     MentionConflict,
     RelationConflict,
-    DictionaryRule,
+    EntityKind,
+    Predicate,
+    EntityRules,
+    RelationRules,
+    EntityRuleDuplicate,
+    RelationRuleDuplicate,
 }
 
 impl ErrorCategory {
@@ -81,7 +86,12 @@ impl ErrorCategory {
             Self::AttributeValue => "attribute_value",
             Self::MentionConflict => "mention_conflict",
             Self::RelationConflict => "relation_conflict",
-            Self::DictionaryRule => "dictionary_rule",
+            Self::EntityKind => "entity_kind",
+            Self::Predicate => "predicate",
+            Self::EntityRules => "entity_rules",
+            Self::RelationRules => "relation_rules",
+            Self::EntityRuleDuplicate => "entity_rule_duplicate",
+            Self::RelationRuleDuplicate => "relation_rule_duplicate",
         }
     }
 }
@@ -108,6 +118,13 @@ type ResolvedRelationKey = (
 
 fn fail<T>(category: ErrorCategory) -> PrepResult<T> {
     Err(PreparationError(category))
+}
+
+fn validate_name(value: &str, category: ErrorCategory) -> PrepResult<()> {
+    if value.is_empty() || value.as_bytes().contains(&0) {
+        return fail(category);
+    }
+    Ok(())
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -444,6 +461,7 @@ pub(crate) fn validate_extraction(
     let mut ids = BTreeSet::new();
     let mut validated_entities = Vec::with_capacity(entities.len());
     for mut entity in entities {
+        validate_name(&entity.kind, ErrorCategory::EntityKind)?;
         if !ids.insert(entity.local_id) {
             return fail(ErrorCategory::LocalIdDuplicate);
         }
@@ -461,6 +479,7 @@ pub(crate) fn validate_extraction(
     let mut local_relations: Vec<RelationObservation> = Vec::new();
     let mut relation_indexes: BTreeMap<LocalRelationKey, usize> = BTreeMap::new();
     for mut relation in relations {
+        validate_name(&relation.predicate, ErrorCategory::Predicate)?;
         if !ids.contains(&relation.subject_local_id) || !ids.contains(&relation.object_local_id) {
             return fail(ErrorCategory::LocalReferenceInvalid);
         }
@@ -521,11 +540,31 @@ pub(crate) fn dictionary_extract(
     entity_rules: &[EntityRule],
     relation_rules: &[RelationRule],
 ) -> PrepResult<Extraction> {
+    let mut entity_ids = BTreeSet::new();
+    for rule in entity_rules {
+        validate_name(&rule.rule_id, ErrorCategory::EntityRules)?;
+        validate_name(&rule.kind, ErrorCategory::EntityKind)?;
+        validate_name(&rule.key, ErrorCategory::EntityRules)?;
+        if rule.literal.is_empty() {
+            return fail(ErrorCategory::EntityRules);
+        }
+        normalize_key(&rule.key)?;
+        if !entity_ids.insert(&rule.rule_id) {
+            return fail(ErrorCategory::EntityRuleDuplicate);
+        }
+    }
+    let mut relation_ids = BTreeSet::new();
+    for rule in relation_rules {
+        validate_name(&rule.rule_id, ErrorCategory::RelationRules)?;
+        validate_name(&rule.predicate, ErrorCategory::Predicate)?;
+        validate_name(&rule.subject_kind, ErrorCategory::RelationRules)?;
+        validate_name(&rule.object_kind, ErrorCategory::RelationRules)?;
+        if !relation_ids.insert(&rule.rule_id) {
+            return fail(ErrorCategory::RelationRuleDuplicate);
+        }
+    }
     let mut trie = vec![TrieNode::default()];
     for (index, rule) in entity_rules.iter().enumerate() {
-        if rule.literal.is_empty() {
-            return fail(ErrorCategory::DictionaryRule);
-        }
         let mut state = 0usize;
         for &byte in rule.literal.as_bytes() {
             let next = if let Some(next) = trie[state].next.get(&byte) {
@@ -665,6 +704,13 @@ pub(crate) fn dictionary_extract(
             }
         }
     }
+    distinct.sort_by(|left, right| {
+        left.span
+            .cmp(&right.span)
+            .then_with(|| left.subject_local_id.cmp(&right.subject_local_id))
+            .then_with(|| left.predicate.as_bytes().cmp(right.predicate.as_bytes()))
+            .then_with(|| left.object_local_id.cmp(&right.object_local_id))
+    });
     let relations = distinct;
     Ok(Extraction {
         entities,
@@ -710,6 +756,17 @@ pub(crate) struct Resolution {
     pub(crate) relations: Vec<ResolvedRelation>,
 }
 
+fn source_span(start: usize, span: [usize; 2]) -> PrepResult<[usize; 2]> {
+    Ok([
+        start
+            .checked_add(span[0])
+            .ok_or(PreparationError(ErrorCategory::EvidenceSpan))?,
+        start
+            .checked_add(span[1])
+            .ok_or(PreparationError(ErrorCategory::EvidenceSpan))?,
+    ])
+}
+
 pub(crate) fn resolve(
     binding: &str,
     tenant: &str,
@@ -734,10 +791,7 @@ pub(crate) fn resolve(
             };
             anchors.insert(identity.clone());
             by_local_id.insert(observation.local_id, identity.clone());
-            let source_span = [
-                chunk.start + observation.span[0],
-                chunk.start + observation.span[1],
-            ];
+            let source_span = source_span(chunk.start, observation.span)?;
             let mention = ResolvedMention {
                 chunk: chunk.ordinal,
                 entity: identity.clone(),
@@ -765,10 +819,7 @@ pub(crate) fn resolve(
                 .get(&observation.object_local_id)
                 .ok_or(PreparationError(ErrorCategory::LocalReferenceInvalid))?
                 .clone();
-            let source_span = [
-                chunk.start + observation.span[0],
-                chunk.start + observation.span[1],
-            ];
+            let source_span = source_span(chunk.start, observation.span)?;
             let relation = ResolvedRelation {
                 chunk: chunk.ordinal,
                 subject: subject.clone(),

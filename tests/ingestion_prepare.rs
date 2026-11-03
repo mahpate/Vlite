@@ -985,6 +985,174 @@ fn test_chunk(ordinal: usize, source_offset: usize) -> prepare::Chunk {
     }
 }
 
+fn entity_rule(id: &str, literal: &str, kind: &str, key: &str) -> prepare::EntityRule {
+    prepare::EntityRule {
+        rule_id: id.into(),
+        literal: literal.into(),
+        kind: kind.into(),
+        key: key.into(),
+    }
+}
+
+fn relation_rule(id: &str, predicate: &str) -> prepare::RelationRule {
+    prepare::RelationRule {
+        rule_id: id.into(),
+        predicate: predicate.into(),
+        subject_kind: "A".into(),
+        object_kind: "B".into(),
+    }
+}
+
+fn test_relation(
+    subject: u32,
+    predicate: &str,
+    object: u32,
+    span: [usize; 2],
+) -> prepare::RelationObservation {
+    prepare::RelationObservation {
+        subject_local_id: subject,
+        predicate: predicate.into(),
+        object_local_id: object,
+        span,
+        attributes: prepare::Attributes::new(),
+        confidence: None,
+    }
+}
+
+#[test]
+fn b1_dictionary_relations_follow_span_then_endpoint_predicate_order() {
+    let rules = [
+        entity_rule("a", "A", "A", "a"),
+        entity_rule("b", "B", "B", "b"),
+    ];
+    let output = prepare::dictionary_extract("BABA", &rules, &[relation_rule("r", "p")]).unwrap();
+    let pairs: Vec<_> = output
+        .relations
+        .iter()
+        .map(|r| (r.subject_local_id, r.object_local_id))
+        .collect();
+    assert_eq!(pairs, [(1, 0), (3, 0), (1, 2), (3, 2)]);
+    let output = prepare::dictionary_extract(
+        "AB",
+        &rules,
+        &[relation_rule("2", "z"), relation_rule("1", "y")],
+    )
+    .unwrap();
+    assert_eq!(
+        output
+            .relations
+            .iter()
+            .map(|r| r.predicate.as_str())
+            .collect::<Vec<_>>(),
+        ["y", "z"]
+    );
+}
+
+#[test]
+fn b2_extraction_rejects_empty_and_nul_kind_predicate() {
+    for invalid in ["", "K\0"] {
+        let mut entity = test_entity(0, "x".into(), [0, 1]);
+        entity.kind = invalid.into();
+        assert_eq!(
+            prepare::validate_extraction("xx", vec![entity], vec![])
+                .unwrap_err()
+                .category(),
+            "entity_kind"
+        );
+        assert_eq!(
+            prepare::validate_extraction(
+                "xx",
+                vec![test_entity(0, "x".into(), [0, 1])],
+                vec![test_relation(0, invalid, 0, [0, 1])]
+            )
+            .unwrap_err()
+            .category(),
+            "predicate"
+        );
+    }
+}
+
+#[test]
+fn b3_dictionary_validates_all_rules_eagerly() {
+    let valid = entity_rule("e", "A", "A", "a");
+    for invalid in ["", "bad\0"] {
+        for field in ["rule_id", "kind", "key"] {
+            let mut rule = valid.clone();
+            match field {
+                "rule_id" => rule.rule_id = invalid.into(),
+                "kind" => rule.kind = invalid.into(),
+                _ => rule.key = invalid.into(),
+            }
+            let label = if field == "kind" {
+                "entity_kind"
+            } else {
+                "entity_rules"
+            };
+            assert_eq!(
+                prepare::dictionary_extract("unmatched", &[rule], &[])
+                    .unwrap_err()
+                    .category(),
+                label,
+                "{field}"
+            );
+        }
+        for field in ["rule_id", "predicate", "subject_kind", "object_kind"] {
+            let mut rule = relation_rule("r", "p");
+            match field {
+                "rule_id" => rule.rule_id = invalid.into(),
+                "predicate" => rule.predicate = invalid.into(),
+                "subject_kind" => rule.subject_kind = invalid.into(),
+                _ => rule.object_kind = invalid.into(),
+            }
+            let label = if field == "predicate" {
+                "predicate"
+            } else {
+                "relation_rules"
+            };
+            assert_eq!(
+                prepare::dictionary_extract("unmatched", &[], &[rule])
+                    .unwrap_err()
+                    .category(),
+                label,
+                "{field}"
+            );
+        }
+    }
+    let mut empty_literal = valid.clone();
+    empty_literal.literal.clear();
+    assert_eq!(
+        prepare::dictionary_extract("A", &[empty_literal], &[])
+            .unwrap_err()
+            .category(),
+        "entity_rules"
+    );
+    assert_eq!(
+        prepare::dictionary_extract("unmatched", &[valid.clone(), valid.clone()], &[])
+            .unwrap_err()
+            .category(),
+        "entity_rule_duplicate"
+    );
+    let relation = relation_rule("r", "p");
+    assert_eq!(
+        prepare::dictionary_extract("unmatched", &[], &[relation.clone(), relation])
+            .unwrap_err()
+            .category(),
+        "relation_rule_duplicate"
+    );
+    for (key, label) in [
+        ("   ".to_owned(), "entity_key_empty"),
+        ("x".repeat(257), "entity_key_too_long"),
+    ] {
+        let mut rule = valid.clone();
+        rule.key = key;
+        assert_eq!(
+            prepare::dictionary_extract("unmatched", &[rule], &[])
+                .unwrap_err()
+                .category(),
+            label
+        );
+    }
+}
 #[test]
 fn document_resolution_ceilings_accept_the_limit_and_reject_one_more() {
     let mut entity_chunks = Vec::new();
@@ -999,6 +1167,7 @@ fn document_resolution_ceilings_accept_the_limit_and_reject_one_more() {
             relations: Vec::new(),
         });
     }
+
     let exact_entities = prepare::resolve("binding", "tenant", &entity_chunks, &entity_extractions)
         .expect("4,096 document entities are accepted");
     assert_eq!(exact_entities.entities.len(), 4_096);
@@ -1095,5 +1264,383 @@ fn document_resolution_ceilings_accept_the_limit_and_reject_one_more() {
             .unwrap_err()
             .category(),
         "document_mention_limit"
+    );
+}
+
+#[test]
+fn source_identity_and_binding_reject_empty_or_nul_fields() {
+    let valid = prepare::SourceIdentity {
+        tenant: "t".into(),
+        source_id: "s".into(),
+        uri: None,
+    };
+    for value in ["", "bad\0"] {
+        let mut identity = valid.clone();
+        identity.tenant = value.into();
+        assert_eq!(
+            prepare::validate_source(b"x", &identity)
+                .unwrap_err()
+                .category(),
+            "source_identity"
+        );
+        let mut identity = valid.clone();
+        identity.source_id = value.into();
+        assert_eq!(
+            prepare::validate_source(b"x", &identity)
+                .unwrap_err()
+                .category(),
+            "source_identity"
+        );
+        assert_eq!(
+            prepare::validate_binding(value).unwrap_err().category(),
+            "source_identity"
+        );
+    }
+    let mut identity = valid;
+    identity.uri = Some("uri\0".into());
+    assert_eq!(
+        prepare::validate_source(b"x", &identity)
+            .unwrap_err()
+            .category(),
+        "source_identity"
+    );
+}
+
+#[test]
+fn ascii_keys_preserve_vertical_tab_and_form_feed() {
+    assert_eq!(
+        prepare::normalize_key(" \x0bA\x0c\tB\x0b ").unwrap(),
+        "\x0ba\x0c b\x0b"
+    );
+    assert_eq!(prepare::normalize_key("\x0c").unwrap(), "\x0c");
+}
+
+#[test]
+fn dictionary_equal_offset_uses_rule_id_and_multi_hop_failure_links() {
+    let output = prepare::dictionary_extract(
+        "x",
+        &[
+            entity_rule("z", "x", "K", "last"),
+            entity_rule("a", "x", "K", "first"),
+        ],
+        &[],
+    )
+    .unwrap();
+    assert_eq!(
+        output
+            .entities
+            .iter()
+            .map(|e| (e.local_id, e.key.as_str(), e.span))
+            .collect::<Vec<_>>(),
+        [(0, "first", [0, 1]), (1, "last", [0, 1])]
+    );
+    let build_rules = [
+        entity_rule("long", "abcp", "K", "long"),
+        entity_rule("bc", "bcq", "K", "bc"),
+        entity_rule("c", "cr", "K", "c"),
+        entity_rule("suffix", "p", "K", "suffix"),
+    ];
+    let output = prepare::dictionary_extract("abcp", &build_rules, &[]).unwrap();
+    assert_eq!(
+        output
+            .entities
+            .iter()
+            .map(|e| (e.key.as_str(), e.span))
+            .collect::<Vec<_>>(),
+        [("long", [0, 4]), ("suffix", [3, 4])]
+    );
+    let match_rules = [
+        entity_rule("long", "abcq", "K", "long"),
+        entity_rule("bc", "bcr", "K", "bc"),
+        entity_rule("c", "cs", "K", "c"),
+        entity_rule("suffix", "p", "K", "suffix"),
+    ];
+    let output = prepare::dictionary_extract("abcp", &match_rules, &[]).unwrap();
+    assert_eq!(
+        output
+            .entities
+            .iter()
+            .map(|e| (e.key.as_str(), e.span))
+            .collect::<Vec<_>>(),
+        [("suffix", [3, 4])]
+    );
+}
+
+#[test]
+fn relation_dedup_retains_predicate_and_span() {
+    let relations = vec![
+        test_relation(0, "p", 0, [0, 1]),
+        test_relation(0, "q", 0, [0, 1]),
+        test_relation(0, "p", 0, [1, 2]),
+        test_relation(0, "p", 0, [0, 1]),
+    ];
+    let output =
+        prepare::validate_extraction("xx", vec![test_entity(0, "x".into(), [0, 1])], relations)
+            .unwrap();
+    assert_eq!(
+        output
+            .relations
+            .iter()
+            .map(|r| (r.predicate.as_str(), r.span))
+            .collect::<Vec<_>>(),
+        [("p", [0, 1]), ("q", [0, 1]), ("p", [1, 2])]
+    );
+}
+
+#[test]
+fn attribute_validation_and_identity_preserve_numeric_types_and_zero() {
+    use prepare::Attribute;
+    let attributes = |value| prepare::Attributes::from([("n".into(), value)]);
+    let signed = prepare::attributes_key(&attributes(Attribute::Integer(0)));
+    let unsigned = prepare::attributes_key(&attributes(Attribute::Unsigned(0)));
+    let float = prepare::attributes_key(&attributes(Attribute::Float(0.0)));
+    assert_ne!(signed, unsigned);
+    assert_ne!(signed, float);
+    assert_ne!(unsigned, float);
+    assert_eq!(
+        float,
+        prepare::attributes_key(&attributes(Attribute::Float(-0.0)))
+    );
+    for value in [f64::INFINITY, f64::NEG_INFINITY, f64::NAN] {
+        assert_eq!(
+            prepare::validate_attributes(attributes(Attribute::Float(value)))
+                .unwrap_err()
+                .category(),
+            "attribute_value"
+        );
+    }
+    assert_eq!(
+        prepare::validate_attributes(prepare::Attributes::from([("".into(), Attribute::Null)]))
+            .unwrap_err()
+            .category(),
+        "attribute_key"
+    );
+    assert!(
+        prepare::validate_attributes(prepare::Attributes::from([(
+            "k".repeat(4096),
+            Attribute::Null
+        )]))
+        .is_ok()
+    );
+    assert_eq!(
+        prepare::validate_attributes(prepare::Attributes::from([(
+            "k".repeat(4097),
+            Attribute::Null
+        )]))
+        .unwrap_err()
+        .category(),
+        "attribute_string_limit"
+    );
+    let mut entity = test_entity(0, "x".into(), [0, 1]);
+    entity.confidence = Some(-0.0);
+    let mut relation = test_relation(0, "p", 0, [0, 1]);
+    relation.confidence = Some(-0.0);
+    let output = prepare::validate_extraction("x", vec![entity.clone()], vec![relation]).unwrap();
+    assert_eq!(
+        output.entities[0].confidence.unwrap().to_bits(),
+        0.0f64.to_bits()
+    );
+    assert_eq!(
+        output.relations[0].confidence.unwrap().to_bits(),
+        0.0f64.to_bits()
+    );
+    entity.confidence = Some(-1e-9);
+    assert_eq!(
+        prepare::validate_extraction("x", vec![entity], vec![])
+            .unwrap_err()
+            .category(),
+        "confidence_invalid"
+    );
+}
+
+fn resolution_extraction() -> prepare::Extraction {
+    let mut a = test_entity(0, "z".into(), [0, 1]);
+    a.kind = "A".into();
+    let mut b = test_entity(1, "y".into(), [0, 1]);
+    b.kind = "A".into();
+    let mut c = test_entity(2, "a".into(), [0, 1]);
+    c.kind = "B".into();
+    prepare::Extraction {
+        entities: vec![a, c, b],
+        relations: vec![
+            test_relation(0, "z", 2, [0, 1]),
+            test_relation(0, "p", 2, [0, 1]),
+            test_relation(0, "p", 1, [0, 1]),
+            test_relation(1, "p", 2, [0, 1]),
+        ],
+    }
+}
+
+#[test]
+fn resolution_source_offsets_include_second_chunk_start() {
+    let chunks = [test_chunk(0, 0), test_chunk(1, 1024)];
+    let output = prepare::resolve(
+        "b",
+        "t",
+        &chunks,
+        &[resolution_extraction(), resolution_extraction()],
+    )
+    .unwrap();
+    assert_eq!(
+        output
+            .mentions
+            .iter()
+            .map(|m| m.source_span)
+            .collect::<Vec<_>>(),
+        [
+            [0, 1],
+            [0, 1],
+            [0, 1],
+            [1024, 1025],
+            [1024, 1025],
+            [1024, 1025]
+        ]
+    );
+    assert_eq!(
+        output
+            .relations
+            .iter()
+            .map(|r| r.source_span)
+            .collect::<Vec<_>>(),
+        [
+            [0, 1],
+            [0, 1],
+            [0, 1],
+            [0, 1],
+            [1024, 1025],
+            [1024, 1025],
+            [1024, 1025],
+            [1024, 1025]
+        ]
+    );
+}
+
+#[test]
+fn resolution_chunk_keys_and_oracle_defined_output_order() {
+    // Oracle-defined presentation order, not a frozen persisted-order contract.
+    let chunks = [test_chunk(1, 0), test_chunk(0, 0)];
+    let output = prepare::resolve(
+        "b",
+        "t",
+        &chunks,
+        &[resolution_extraction(), resolution_extraction()],
+    )
+    .unwrap();
+    assert_eq!(
+        output
+            .entities
+            .iter()
+            .map(|e| (e.kind.as_str(), e.normalized_key.as_str()))
+            .collect::<Vec<_>>(),
+        [("A", "y"), ("A", "z"), ("B", "a")]
+    );
+    assert_eq!(
+        output
+            .mentions
+            .iter()
+            .map(|m| (
+                m.chunk,
+                m.entity.kind.as_str(),
+                m.entity.normalized_key.as_str()
+            ))
+            .collect::<Vec<_>>(),
+        [
+            (0, "A", "y"),
+            (0, "A", "z"),
+            (0, "B", "a"),
+            (1, "A", "y"),
+            (1, "A", "z"),
+            (1, "B", "a")
+        ]
+    );
+    assert_eq!(
+        output
+            .relations
+            .iter()
+            .map(|r| (
+                r.chunk,
+                r.subject.normalized_key.as_str(),
+                r.predicate.as_str(),
+                r.object.normalized_key.as_str()
+            ))
+            .collect::<Vec<_>>(),
+        [
+            (0, "y", "p", "a"),
+            (0, "z", "p", "y"),
+            (0, "z", "p", "a"),
+            (0, "z", "z", "a"),
+            (1, "y", "p", "a"),
+            (1, "z", "p", "y"),
+            (1, "z", "p", "a"),
+            (1, "z", "z", "a")
+        ]
+    );
+}
+
+#[test]
+fn resolved_relation_confidence_conflict_rejected_after_alias_resolution() {
+    let mut extraction = resolution_extraction();
+    let mut alias = extraction.entities[0].clone();
+    alias.local_id = 3;
+    extraction.entities.push(alias);
+    let mut relation = extraction.relations[0].clone();
+    relation.subject_local_id = 3;
+    relation.confidence = Some(0.7);
+    extraction.relations.push(relation);
+    assert_eq!(
+        prepare::resolve("b", "t", &[test_chunk(0, 0)], &[extraction])
+            .unwrap_err()
+            .category(),
+        "relation_conflict"
+    );
+}
+
+#[test]
+fn resolution_rejects_extra_extractions_and_untrimmed_strategy_names() {
+    assert_eq!(
+        prepare::resolve("b", "t", &[], &[resolution_extraction()])
+            .unwrap_err()
+            .category(),
+        "local_reference_invalid"
+    );
+    assert_eq!(
+        prepare::ChunkStrategy::parse(" FixedUtf8V1")
+            .unwrap_err()
+            .category(),
+        "chunk_strategy"
+    );
+}
+
+#[test]
+fn h1_mention_source_span_overflow_is_sanitized() {
+    let mut chunk = test_chunk(0, 0);
+    chunk.start = usize::MAX;
+    for span in [[0, 1], [1, 2]] {
+        let extraction = prepare::Extraction {
+            entities: vec![test_entity(0, "x".into(), span)],
+            relations: vec![],
+        };
+        assert_eq!(
+            prepare::resolve("b", "t", &[chunk.clone()], &[extraction])
+                .unwrap_err()
+                .category(),
+            "evidence_span"
+        );
+    }
+}
+
+#[test]
+fn h1_relation_source_span_overflow_is_sanitized() {
+    let mut chunk = test_chunk(0, 0);
+    chunk.start = usize::MAX - 1;
+    let extraction = prepare::Extraction {
+        entities: vec![test_entity(0, "x".into(), [0, 1])],
+        relations: vec![test_relation(0, "p", 0, [0, 2])],
+    };
+    assert_eq!(
+        prepare::resolve("b", "t", &[chunk], &[extraction])
+            .unwrap_err()
+            .category(),
+        "evidence_span"
     );
 }
