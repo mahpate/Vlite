@@ -1621,13 +1621,11 @@ async fn retry_after_delta_seconds_is_honored_and_invalid_values_do_not_retry() 
 
 #[tokio::test]
 async fn refused_connect_is_retried_only_for_replay_safe_aliases() {
-    // Binding without listening reserves the port while still refusing connections.
     let reservation = tokio::net::TcpSocket::new_v4().unwrap();
     reservation.bind("127.0.0.1:0".parse().unwrap()).unwrap();
     let socket = reservation.local_addr().unwrap();
-    // Windows refuses the URL's port-zero endpoint immediately; Linux needs the closed port.
     let endpoint_port = if cfg!(windows) { 0 } else { socket.port() };
-    for (replay_safe, expected_attempts) in [(true, 2), (false, 1)] {
+    for replay_safe in [true, false] {
         let mut configured = hostname_config(
             &format!("http://pinned.invalid:{endpoint_port}/inference"),
             "pinned.invalid",
@@ -1644,15 +1642,45 @@ async fn refused_connect_is_retried_only_for_replay_safe_aliases() {
         let error = bounded(configured.embed(&key(), TEXT, &HttpTransport))
             .await
             .unwrap_err();
-        assert!(matches!(
-            error,
-            ProviderError::Unavailable | ProviderError::Timeout
-        ));
+        let expected_attempts = match error {
+            ProviderError::Unavailable if replay_safe => 2,
+            ProviderError::Unavailable | ProviderError::Timeout => 1,
+            other => panic!("unexpected connect error: {other:?}"),
+        };
         assert_eq!(
             resolver.calls.load(Ordering::SeqCst),
             expected_attempts,
-            "replay_safe={replay_safe}"
+            "replay_safe={replay_safe}, error={error:?}"
         );
+    }
+}
+
+#[tokio::test]
+async fn retryable_transport_failure_is_retried_only_for_replay_safe_aliases() {
+    for replay_safe in [true, false] {
+        for expected_error in [ProviderError::Unavailable, ProviderError::Timeout] {
+            let mut value = config("http://127.0.0.1:1234/inference", "embedding");
+            value["aliases"][0]["replay_safe"] = json!(replay_safe);
+            let configured = registry(&value);
+            let mut transport = Fake::new(200, "");
+            transport.error = Some(expected_error);
+            assert_eq!(
+                bounded(configured.embed(&key(), TEXT, &transport))
+                    .await
+                    .unwrap_err(),
+                expected_error
+            );
+            let expected_attempts = if replay_safe && expected_error == ProviderError::Unavailable {
+                2
+            } else {
+                1
+            };
+            assert_eq!(
+                transport.calls.load(Ordering::SeqCst),
+                expected_attempts,
+                "replay_safe={replay_safe}, error={expected_error:?}"
+            );
+        }
     }
 }
 
