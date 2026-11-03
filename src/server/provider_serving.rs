@@ -334,7 +334,7 @@ pub(super) async fn search(
         };
         let distances: BTreeMap<_, _> = hits.iter().map(|hit| (hit.id, hit.distance)).collect();
         let ranked_hits: Vec<_> = ranked.into_iter().map(|hit| {
-            json!({"id":hit.id.to_string(),"distance":distances[&hit.id],"rerank_score":-hit.cost})
+            json!({"id":hit.id.to_string(),"distance":distances[&hit.id],"rerank_score":0.0 - hit.cost})
         }).collect();
         let mut response =
             json!({"hits":ranked_hits,"ranking":{"provider":alias,"order":"score_desc_id_asc"}});

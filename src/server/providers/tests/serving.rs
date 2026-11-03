@@ -208,6 +208,17 @@ async fn rest_custom_ranking_is_bound_sorted_and_payload_allowlisted() {
 }
 
 #[tokio::test]
+async fn rest_zero_cost_score_is_positive_zero() {
+    let f = fixture("rerank", 200, r#"{"results":[{"id":1,"cost":0.0}]}"#, &[]);
+    let path = format!("/v1/collections/{}/search", f.name);
+    let (status, body, _) = request(&f.app, &path, Some(ADMIN), search()).await;
+    assert_eq!(status, 200, "{body}");
+    let score = body["hits"][0]["rerank_score"].as_f64().unwrap();
+    assert_eq!(score.to_bits(), 0.0_f64.to_bits(), "{body}");
+    assert_eq!(f.transport.calls.load(Ordering::SeqCst), 1);
+}
+
+#[tokio::test]
 async fn rest_auth_and_tenant_checks_precede_provider_dispatch() {
     let f = fixture("rerank", 200, r#"{"results":[{"id":1,"cost":0.0}]}"#, &[]);
     let path = format!("/v1/collections/{}/search", f.name);
@@ -517,8 +528,10 @@ async fn rest_empty_registry_means_zero_egress() {
         r#"{"data":[{"embedding":[1.0,0.0]}]}"#,
         &[],
     );
-    let mut registry = ProviderRegistry::default();
-    registry.transport = f.transport.clone();
+    let registry = ProviderRegistry {
+        transport: f.transport.clone(),
+        ..ProviderRegistry::default()
+    };
     f.service.providers = Arc::new(registry);
     f.app = server::configured_routes(f.service.clone());
     let path = format!("/v1/collections/{}/embed", f.name);
