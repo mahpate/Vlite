@@ -236,16 +236,21 @@ impl Collection {
     ) -> Result<()> {
         self.vectors.invalidate_staged(id);
         self.vector_indexes.clear();
-        let Some(previous) = self.records.get_physical(id)?.cloned() else {
-            return Ok(());
+        let (previous_body_len, compact_record) = {
+            let Some(previous) = self.records.get_physical(id)? else {
+                return Ok(());
+            };
+            self.metadata_indexes
+                .track(id, Some(&previous.metadata), Some(&metadata));
+            self.text_index
+                .track(id, Some(&previous.metadata), Some(&metadata));
+            (
+                format::record_body_len(previous),
+                self.records.is_compact().then(|| previous.clone()),
+            )
         };
-        self.metadata_indexes
-            .track(id, Some(&previous.metadata), Some(&metadata));
-        self.text_index
-            .track(id, Some(&previous.metadata), Some(&metadata));
-        self.live_body_bytes -= format::record_body_len(&previous);
-        if self.records.is_compact() {
-            let mut record = previous;
+        self.live_body_bytes -= previous_body_len;
+        if let Some(mut record) = compact_record {
             record.metadata = metadata;
             self.live_body_bytes += format::record_body_len(&record);
             self.records.apply_committed(

@@ -94,6 +94,44 @@ pub(crate) fn source_default_fixture(key: Option<&EncryptionKey>) -> Vec<u8> {
     image_of(&before)
 }
 
+pub(crate) fn source_indexed_fixture(key: Option<&EncryptionKey>) -> Vec<u8> {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("source-indexed");
+    let mut db = create_store(Backing::Memory, &path, key);
+    db.create_collection_as(
+        "indexed",
+        CollectionSpec {
+            dimensions: 2,
+            settings: CollectionSettings {
+                metadata_indexes: vec![crate::MetadataIndexSpec {
+                    field: "tag".into(),
+                    kind: crate::MetadataIndexKind::Eq,
+                }],
+                text_fields: vec!["title".into()],
+                ..CollectionSettings::default()
+            },
+        },
+        F32,
+    )
+    .unwrap();
+    for (id, tag, title) in [(1, "alpha", "red apple"), (2, "beta", "blue berry")] {
+        db.collection_mut("indexed")
+            .unwrap()
+            .put_with_metadata(
+                id,
+                &[id as f32, 1.0],
+                title.as_bytes(),
+                &Metadata::from([
+                    ("tag".into(), crate::MetadataValue::String(tag.into())),
+                    ("title".into(), crate::MetadataValue::String(title.into())),
+                ]),
+            )
+            .unwrap();
+    }
+    let before = payload::snapshot(&mut db, key);
+    image_of(&before)
+}
+
 pub(crate) fn source_empty_fixture(key: Option<&EncryptionKey>) -> (Vec<u8>, Loaded) {
     let before = initial(key);
     let image = image_of(&before);

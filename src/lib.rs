@@ -1494,6 +1494,37 @@ impl Database {
         &self.compact_skipped
     }
 
+    #[cfg(test)]
+    fn compact_base_matches(loaded: &format::Loaded) -> bool {
+        let Some(generation) = &loaded.compact_generation else {
+            return true;
+        };
+        let Some(compact_base) = &loaded.compact_base else {
+            return false;
+        };
+        for &id in loaded.collections.keys() {
+            if generation.has_collection(id) {
+                let view = generation.view(id);
+                let Some(base_rows) = compact_base.get(&id) else {
+                    return false;
+                };
+                if view.len() != base_rows.len()
+                    || base_rows
+                        .iter()
+                        .enumerate()
+                        .any(|(row, (&id, &(revision, expiry)))| {
+                            view.id(row) != Some(id)
+                                || view.revision(row) != Some(revision)
+                                || view.expiry(row) != Some(expiry)
+                        })
+                {
+                    return false;
+                }
+            }
+        }
+        true
+    }
+
     fn open_backed(mut file: LockedFile, key: Option<&EncryptionKey>) -> Result<Self> {
         let loaded = format::load_with(&mut file, key)?;
         if loaded.incomplete_bytes != 0 {
@@ -1513,30 +1544,8 @@ impl Database {
                     .any(|&id| generation.has_collection(id))
             });
         #[cfg(test)]
-        if let Some(generation) = &loaded.compact_generation {
-            let Some(compact_base) = &loaded.compact_base else {
-                return Err(Error::UnsupportedFeature(format::FLAG_COMPACT));
-            };
-            for &id in loaded.collections.keys() {
-                if generation.has_collection(id) {
-                    let view = generation.view(id);
-                    let Some(base_rows) = compact_base.get(&id) else {
-                        return Err(Error::UnsupportedFeature(format::FLAG_COMPACT));
-                    };
-                    if view.len() != base_rows.len()
-                        || base_rows
-                            .iter()
-                            .enumerate()
-                            .any(|(row, (&id, &(revision, expiry)))| {
-                                view.id(row) != Some(id)
-                                    || view.revision(row) != Some(revision)
-                                    || view.expiry(row) != Some(expiry)
-                            })
-                    {
-                        return Err(Error::UnsupportedFeature(format::FLAG_COMPACT));
-                    }
-                }
-            }
+        if !Self::compact_base_matches(&loaded) {
+            return Err(Error::UnsupportedFeature(format::FLAG_COMPACT));
         }
         let imports = import::Registry::from_markers(&loaded.imports);
         Ok(Self {
@@ -2133,8 +2142,13 @@ impl Database {
         let sequence = self.next_sequence()?;
         let frame = format::metadata_frame_v5(sequence, collection, id, metadata);
         self.commit_frame(sequence, &frame)?;
-        self.state_mut(collection)
-            .apply_metadata_committed(id, metadata.clone(), sequence)?;
+        let applied =
+            self.state_mut(collection)
+                .apply_metadata_committed(id, metadata.clone(), sequence);
+        if let Err(error) = applied {
+            self.poisoned = true;
+            return Err(error);
+        }
         self.touch_graph_record(collection, id, sequence);
         Ok(sequence)
     }
@@ -2635,20 +2649,27 @@ impl Database {
         sequence: u64,
         expires_at_ms: Option<u64>,
     ) -> Result<()> {
-        let vector_bytes = record.as_ref().map_or(0, |record| record.vector.len() * 4);
-        self.ensure_mutable_in(collection)?;
-        self.touch_graph_record(collection, id, sequence);
-        let state = self
-            .collections
-            .get_mut(&collection)
-            .expect("committed collection is live");
-        if let Some((owner, job)) = &mut self.rebuild
-            && *owner == collection
-        {
-            job.track(id, state.records.resident()?.get(&id), vector_bytes);
-            job.set_vector_sequence(sequence);
+        let applied = (|| {
+            let vector_bytes = record.as_ref().map_or(0, |record| record.vector.len() * 4);
+            self.ensure_mutable_in(collection)?;
+            self.touch_graph_record(collection, id, sequence);
+            let state = self
+                .collections
+                .get_mut(&collection)
+                .expect("committed collection is live");
+            if let Some((owner, job)) = &mut self.rebuild
+                && *owner == collection
+            {
+                job.track(id, state.records.resident()?.get(&id), vector_bytes);
+                job.set_vector_sequence(sequence);
+            }
+            state.apply_committed(id, record, sequence, vector_bytes, expires_at_ms)?;
+            Ok(())
+        })();
+        if let Err(error) = applied {
+            self.poisoned = true;
+            return Err(error);
         }
-        state.apply_committed(id, record, sequence, vector_bytes, expires_at_ms)?;
         Ok(())
     }
 

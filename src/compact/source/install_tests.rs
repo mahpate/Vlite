@@ -7,6 +7,45 @@ use std::io::Cursor;
 use std::sync::{Arc, atomic::Ordering};
 
 #[test]
+fn compact_install_validation_checks_base_count_revision_and_expiry() {
+    let _gates = gates();
+    for mismatch in ["count", "revision", "expiry"] {
+        let (_, mut loaded) = source_view_fixture(None);
+        assert!(Database::compact_base_matches(&loaded));
+        let generation = loaded.compact_generation.as_ref().unwrap();
+        let collection = *loaded
+            .collections
+            .keys()
+            .find(|&&id| generation.has_collection(id))
+            .unwrap();
+        let rows = loaded
+            .compact_base
+            .as_mut()
+            .unwrap()
+            .get_mut(&collection)
+            .unwrap();
+        match mismatch {
+            "count" => {
+                rows.pop_last().unwrap();
+            }
+            "revision" => {
+                let (_, (revision, _)) = rows.iter_mut().next().unwrap();
+                *revision += 1;
+            }
+            "expiry" => {
+                let (_, (_, expiry)) = rows.iter_mut().next().unwrap();
+                *expiry = expiry.map_or(Some(1), |_| None);
+            }
+            _ => unreachable!(),
+        }
+        assert!(
+            !Database::compact_base_matches(&loaded),
+            "open validation must reject {mismatch} mismatch"
+        );
+    }
+}
+
+#[test]
 fn compact_install_same_collection_mixed_encodings_refuse_without_losing_rows() {
     use crate::{Metadata, Record, compact, format, maintenance};
     use sha2::{Digest, Sha256};
@@ -289,6 +328,9 @@ fn compact_install_real_committed_suffix_replays_into_overlay() {
                     },
                 ])
                 .unwrap();
+            collection
+                .put(u64::MAX, &[9.0, 10.0], b"last base row replacement")
+                .unwrap();
         }
         let bytes = resident.to_bytes().unwrap();
         let sequence = resident.sequence;
@@ -312,6 +354,16 @@ fn compact_install_real_committed_suffix_replays_into_overlay() {
                 .unwrap()
                 .payload,
             b"batch replacement"
+        );
+        assert_eq!(
+            reopened
+                .collection("full")
+                .unwrap()
+                .get_at(u64::MAX, 0)
+                .unwrap()
+                .unwrap()
+                .payload,
+            b"last base row replacement"
         );
     }
 }

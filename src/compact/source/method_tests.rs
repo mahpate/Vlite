@@ -775,3 +775,69 @@ fn compact_installed_collection_method_matrix() {
         point_parity(&db, &oracle);
     }
 }
+
+#[test]
+fn compact_installed_restricted_method_guards_refuse() {
+    let _gates = gates();
+    let (mut db, _, _) = compact_dispatch_fixture(false);
+    let (name, id) = db
+        .collections
+        .iter()
+        .find_map(|(&id, state)| {
+            state
+                .records
+                .is_compact()
+                .then_some((state.name.clone(), id))
+        })
+        .expect("fixture has a compact collection");
+    let query = &[1.0, 2.0];
+    let metric = DistanceMetric::SquaredL2;
+    let invalid_config = HnswConfig {
+        m: 1,
+        ef_construction: 1,
+        seed: 42,
+    };
+    let options = AnnOptions::default();
+    unsupported(
+        db.collection_mut(&name)
+            .unwrap()
+            .rebuild_named_hnsw("n", None, invalid_config),
+        "P3B2-V8 rebuild_named_hnsw",
+    );
+    let view = db.collection(&name).unwrap();
+    unsupported(
+        view.search_grouped(query, 1, 1, "", &[], metric),
+        "P3B2-R2 search_grouped",
+    );
+    unsupported(
+        view.recommend(&RecommendationQuery {
+            positive_ids: vec![],
+            negative_ids: vec![],
+            positive_vectors: vec![vec![1.0]],
+            negative_vectors: vec![],
+            k: 1,
+            conditions: vec![],
+            metric,
+        }),
+        "P3B2-R3 recommend",
+    );
+    unsupported(view.facets("", &[]), "P3B2-R4 facets");
+    unsupported(view.numeric_stats("", &[]), "P3B2-R5 numeric_stats");
+    unsupported(
+        view.search_hybrid(&hybrid::HybridQuery::new(Some(query.to_vec()), "", 1_001)),
+        "P3B2-H1 search_hybrid",
+    );
+    unsupported(
+        view.search_auto(&[], 1, &[], metric, HnswConfig::default(), options, 1),
+        "P3B2-P1 planner search",
+    );
+    unsupported(
+        crate::query_language::parse("SEARCH TEXT MATCH \"word\"")
+            .unwrap()
+            .execute(view, &std::collections::BTreeMap::new()),
+        "P3B2-QL1 query-language execute",
+    );
+    let kv = crate::kv::compact_view_for_test(&db, id);
+    unsupported(kv.get_at("", "", 0), "P3B2-K2 kv get_at");
+    unsupported(kv.list_at("", "", None, 0, 0), "P3B2-K3 kv list_at");
+}

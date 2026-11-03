@@ -81,6 +81,7 @@ fn compact_delete_tombstone_shadows_base() {
     let collection = candidate.collection(&name).unwrap();
     assert!(collection.get_at(id, 0).unwrap().is_none());
     assert_eq!(collection.revision(id).unwrap(), None);
+    assert!(!candidate.state(collection.id()).records.contains_key(&id));
     assert_eq!(collection.len(), before - 1);
     point_parity(&candidate, &oracle);
 
@@ -109,6 +110,294 @@ fn compact_delete_tombstone_shadows_base() {
         .unwrap();
     assert_eq!(revision, expected);
     point_parity(&candidate, &oracle);
+}
+
+#[test]
+fn compact_tombstones_hide_membership_and_advance_first_id() {
+    let _gates = gates();
+    let image = crate::compact::catalog::tests::source_indexed_fixture(None);
+    let mut candidate = crate::Database::open_from_bytes(image, None).unwrap();
+    assert_eq!(candidate.collection("indexed").unwrap().first_id(), Some(1));
+
+    candidate
+        .collection_mut("indexed")
+        .unwrap()
+        .delete(1)
+        .unwrap();
+    let collection = candidate.collection("indexed").unwrap();
+    assert!(!candidate.state(collection.id()).records.contains_key(&1));
+    assert_eq!(collection.first_id(), Some(2));
+}
+
+#[test]
+fn compact_reinsert_and_replacement_keep_derived_indexes_and_body_accounting() {
+    let _gates = gates();
+    let image = crate::compact::catalog::tests::source_indexed_fixture(None);
+    let mut candidate = crate::Database::open_from_bytes(image.clone(), None).unwrap();
+    let mut oracle = {
+        let _source_off = crate::compact::source::Activation::set(false);
+        crate::Database::open_from_bytes(image, None).unwrap()
+    };
+    let name = "indexed";
+
+    candidate.collection_mut(name).unwrap().delete(1).unwrap();
+    oracle.collection_mut(name).unwrap().delete(1).unwrap();
+    candidate
+        .collection_mut(name)
+        .unwrap()
+        .put_with_metadata(
+            1,
+            &[11.0, 1.0],
+            b"green apple",
+            &Metadata::from([
+                ("tag".into(), MetadataValue::String("gamma".into())),
+                ("title".into(), MetadataValue::String("green apple".into())),
+            ]),
+        )
+        .unwrap();
+    oracle
+        .collection_mut(name)
+        .unwrap()
+        .put_with_metadata(
+            1,
+            &[11.0, 1.0],
+            b"green apple",
+            &Metadata::from([
+                ("tag".into(), MetadataValue::String("gamma".into())),
+                ("title".into(), MetadataValue::String("green apple".into())),
+            ]),
+        )
+        .unwrap();
+
+    for (id, tag, title) in [(2, "gamma", "green berry"), (2, "delta", "yellow berry")] {
+        let metadata = Metadata::from([
+            ("tag".into(), MetadataValue::String(tag.into())),
+            ("title".into(), MetadataValue::String(title.into())),
+        ]);
+        candidate
+            .collection_mut(name)
+            .unwrap()
+            .put_with_metadata(id, &[12.0, 1.0], title.as_bytes(), &metadata)
+            .unwrap();
+        oracle
+            .collection_mut(name)
+            .unwrap()
+            .put_with_metadata(id, &[12.0, 1.0], title.as_bytes(), &metadata)
+            .unwrap();
+    }
+
+    let candidate_state = candidate.state(candidate.collection(name).unwrap().id());
+    let oracle_state = oracle.state(oracle.collection(name).unwrap().id());
+    for (tag, expected) in [
+        ("alpha", vec![]),
+        ("beta", vec![]),
+        ("gamma", vec![1]),
+        ("delta", vec![2]),
+    ] {
+        let condition = [crate::Condition::Eq {
+            field: "tag".into(),
+            value: MetadataValue::String(tag.into()),
+        }];
+        assert_eq!(
+            candidate_state
+                .metadata_indexes
+                .lookup(&condition, 10)
+                .unwrap()
+                .ids
+                .unwrap()
+                .into_iter()
+                .collect::<Vec<_>>(),
+            expected
+        );
+    }
+    let terms = std::collections::BTreeSet::from([
+        "green".to_owned(),
+        "red".to_owned(),
+        "yellow".to_owned(),
+    ]);
+    assert_eq!(
+        candidate_state
+            .text_index
+            .search(&terms, 10, |_| true)
+            .into_iter()
+            .map(|(id, _)| id)
+            .collect::<Vec<_>>(),
+        vec![1, 2]
+    );
+    assert_eq!(
+        candidate_state.live_body_bytes, oracle_state.live_body_bytes,
+        "compact replacement accounting must match resident records"
+    );
+    point_parity(&candidate, &oracle);
+}
+
+#[test]
+fn compact_mutations_match_resident_put_delete_metadata_and_ttl() {
+    let _gates = gates();
+    let (mut candidate, mut oracle, _) = compact_dispatch_fixture(false);
+    let name = "full";
+    let id = 3;
+    let metadata = Metadata::from([("phase".into(), MetadataValue::String("updated".into()))]);
+
+    candidate
+        .collection_mut(name)
+        .unwrap()
+        .put_with_expiry(id, &[4.0, 5.0], b"put", &Metadata::new(), Some(50))
+        .unwrap();
+    oracle
+        .collection_mut(name)
+        .unwrap()
+        .put_with_expiry(id, &[4.0, 5.0], b"put", &Metadata::new(), Some(50))
+        .unwrap();
+    point_parity(&candidate, &oracle);
+
+    candidate
+        .collection_mut(name)
+        .unwrap()
+        .update_metadata(id, &metadata)
+        .unwrap();
+    oracle
+        .collection_mut(name)
+        .unwrap()
+        .update_metadata(id, &metadata)
+        .unwrap();
+    assert_eq!(
+        candidate.collection(name).unwrap().expires_at(id).unwrap(),
+        Some(50)
+    );
+    point_parity(&candidate, &oracle);
+
+    candidate.collection_mut(name).unwrap().delete(id).unwrap();
+    oracle.collection_mut(name).unwrap().delete(id).unwrap();
+    point_parity(&candidate, &oracle);
+}
+
+#[test]
+fn compact_overlays_are_isolated_across_collections() {
+    let _gates = gates();
+    let (mut candidate, mut oracle, _) = compact_dispatch_fixture(false);
+    let metadata = Metadata::from([("scope".into(), MetadataValue::String("half".into()))]);
+
+    candidate
+        .collection_mut("half")
+        .unwrap()
+        .update_metadata(3, &metadata)
+        .unwrap();
+    oracle
+        .collection_mut("half")
+        .unwrap()
+        .update_metadata(3, &metadata)
+        .unwrap();
+    candidate
+        .collection_mut("full")
+        .unwrap()
+        .put_with_expiry(
+            3,
+            &[4.0, 5.0],
+            b"full replacement",
+            &Metadata::new(),
+            Some(50),
+        )
+        .unwrap();
+    oracle
+        .collection_mut("full")
+        .unwrap()
+        .put_with_expiry(
+            3,
+            &[4.0, 5.0],
+            b"full replacement",
+            &Metadata::new(),
+            Some(50),
+        )
+        .unwrap();
+    candidate
+        .collection_mut("half")
+        .unwrap()
+        .delete(10)
+        .unwrap();
+    oracle.collection_mut("half").unwrap().delete(10).unwrap();
+
+    assert_eq!(
+        candidate
+            .collection("full")
+            .unwrap()
+            .get_at(3, 0)
+            .unwrap()
+            .unwrap()
+            .payload,
+        b"full replacement"
+    );
+    assert_eq!(
+        candidate.collection("full").unwrap().expires_at(3).unwrap(),
+        Some(50)
+    );
+    assert!(
+        candidate
+            .collection("half")
+            .unwrap()
+            .get_at(10, 0)
+            .unwrap()
+            .is_none()
+    );
+    assert!(
+        candidate
+            .collection("full")
+            .unwrap()
+            .get_at(10, 0)
+            .unwrap()
+            .is_some()
+    );
+    point_parity(&candidate, &oracle);
+}
+
+#[test]
+fn committed_apply_errors_poison_compact_handle() {
+    let _gates = gates();
+    for metadata_only in [false, true] {
+        let image = crate::compact::catalog::tests::source_indexed_fixture(None);
+        let mut candidate = crate::Database::open_from_bytes(image, None).unwrap();
+        let id = candidate.collection("indexed").unwrap().id();
+        for (&other, state) in &mut candidate.collections {
+            if other != id {
+                state.records =
+                    crate::records::CollectionRecords::Resident(crate::records::RecordMap::new());
+            }
+        }
+        let crate::records::CollectionRecords::Compact { view, .. } =
+            &mut candidate.state_mut(id).records
+        else {
+            panic!("fixture must install compact records");
+        };
+        let generation = std::sync::Arc::get_mut(&mut view.generation)
+            .expect("fixture generation is uniquely owned");
+        generation.backing =
+            crate::compact::source::Backing::Owned(std::sync::Arc::from(Vec::<u8>::new()));
+        let sequence = candidate.sequence;
+        let result = if metadata_only {
+            candidate
+                .collection_mut("indexed")
+                .unwrap()
+                .update_metadata(
+                    1,
+                    &Metadata::from([("tag".into(), MetadataValue::String("broken".into()))]),
+                )
+                .map(|_| ())
+        } else {
+            candidate
+                .collection_mut("indexed")
+                .unwrap()
+                .put(1, &[3.0, 4.0], b"committed before apply")
+                .map(|_| ())
+        };
+        assert!(matches!(result, Err(Error::Corrupt { .. })));
+        assert!(candidate.sequence > sequence, "the frame was committed");
+        assert!(candidate.is_poisoned());
+        assert!(matches!(candidate.get_at(1, 0), Err(Error::Poisoned)));
+        assert!(matches!(
+            candidate.collection_mut("indexed"),
+            Err(Error::Poisoned)
+        ));
+    }
 }
 
 #[test]
@@ -156,7 +445,18 @@ fn compact_metadata_update_preserves_vector_payload() {
     let _gates = gates();
     let (mut candidate, mut oracle, _) = compact_dispatch_fixture(false);
     let (name, ids) = compact_collection(&candidate);
-    let id = ids[0];
+    let id = ids
+        .into_iter()
+        .find(|&id| {
+            candidate
+                .collection(&name)
+                .unwrap()
+                .expires_at(id)
+                .unwrap()
+                .is_some()
+        })
+        .expect("fixture has an expiring base row");
+    let expiry = candidate.collection(&name).unwrap().expires_at(id).unwrap();
     let before = candidate
         .collection(&name)
         .unwrap()
@@ -186,8 +486,28 @@ fn compact_metadata_update_preserves_vector_payload() {
     assert_eq!(after.payload, before.payload);
     assert_eq!(after.metadata, metadata);
     assert_eq!(
+        candidate.collection(&name).unwrap().expires_at(id).unwrap(),
+        expiry
+    );
+    assert_eq!(
         candidate.collection(&name).unwrap().revision(id).unwrap(),
         Some(revision)
+    );
+    assert_eq!(
+        candidate
+            .state(candidate.collection(&name).unwrap().id())
+            .revisions
+            .get(&id),
+        Some(&revision),
+        "metadata commits must refresh the resident revision map"
+    );
+    assert_eq!(
+        candidate
+            .state(candidate.collection(&name).unwrap().id())
+            .live_body_bytes,
+        oracle
+            .state(oracle.collection(&name).unwrap().id())
+            .live_body_bytes
     );
     point_parity(&candidate, &oracle);
 }

@@ -112,6 +112,11 @@ impl Database {
     }
 }
 
+#[cfg(test)]
+pub(crate) fn compact_view_for_test(db: &Database, id: u16) -> KvView<'_> {
+    KvView { db, id }
+}
+
 fn check_kv_collection(db: &Database, id: u16) -> Result<()> {
     db.ensure_resident_in(id)?;
     if db.state(id).dimensions == 1 {
