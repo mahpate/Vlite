@@ -397,6 +397,18 @@ impl CompactView {
         if row.expiry.is_some_and(|expiry| expiry <= now_ms) {
             return Ok(None);
         }
+        self.get_physical(id)
+    }
+
+    pub(crate) fn get_physical(&self, id: u64) -> Result<Option<&Record>> {
+        let Some(source) = self.source() else {
+            return Ok(None);
+        };
+        let Some((block_index, row_index)) = source.row(id) else {
+            return Ok(None);
+        };
+        let block = &source.blocks[block_index];
+        let row = &block.source.rows[row_index];
         let cell = &source.cells[source.block_starts[block_index] + row_index];
         if cell.record.get().is_none() {
             let _guard = cell
@@ -422,3 +434,5 @@ mod dispatch_tests;
 mod install_tests;
 #[cfg(test)]
 mod method_tests;
+#[cfg(test)]
+mod overlay_tests;

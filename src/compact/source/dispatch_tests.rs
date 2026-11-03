@@ -1,7 +1,7 @@
 use crate::compact::catalog::tests::{source_key, source_view_fixture};
 use crate::records::CollectionRecords;
 use crate::rerank::{ExactReranker, RerankCandidate, Reranker};
-use crate::{CollectionSettings, DistanceMetric, Expected, HnswConfig, Metadata, Mutation};
+use crate::{CollectionSettings, DistanceMetric, HnswConfig};
 use crate::{Database, Error, Record, Result, SearchHit};
 use std::collections::BTreeMap;
 use std::sync::Arc;
@@ -173,7 +173,7 @@ fn compact_dispatch_point_observations_and_raw_image_match_resident() {
 }
 
 #[test]
-fn compact_dispatch_mutable_acquisition_and_writes_refuse_before_changes() {
+fn compact_dispatch_mutable_acquisition_keeps_other_refusals() {
     let _gates = gates();
     for encrypted in [false, true] {
         let (mut candidate, oracle, bytes) = compact_dispatch_fixture(encrypted);
@@ -189,8 +189,12 @@ fn compact_dispatch_mutable_acquisition_and_writes_refuse_before_changes() {
             }};
         }
         for info in oracle.collections().unwrap() {
-            refuse!("collection_mut", candidate.collection_mut(&info.name));
-            refuse!("collection_mut_in", candidate.collection_mut_in(info.id));
+            let handle = candidate.collection_mut(&info.name).unwrap();
+            assert_eq!(handle.view().len(), info.live_records);
+            drop(handle);
+            let handle = candidate.collection_mut_in(info.id).unwrap();
+            assert_eq!(handle.view().len(), info.live_records);
+            drop(handle);
             refuse!("kv_store", candidate.kv_store(&info.name));
             refuse!("kv_view", candidate.kv_view(&info.name));
             refuse!(
@@ -198,36 +202,10 @@ fn compact_dispatch_mutable_acquisition_and_writes_refuse_before_changes() {
                 candidate.set_collection_settings(&info.name, CollectionSettings::default())
             );
         }
-        refuse!("put", candidate.put(99, &[1.0, 2.0], b"new"));
-        refuse!(
-            "put_with_metadata",
-            candidate.put_with_metadata(99, &[1.0, 2.0], b"new", &Metadata::new())
-        );
-        refuse!(
-            "put_with_expiry",
-            candidate.put_with_expiry(99, &[1.0, 2.0], b"new", &Metadata::new(), Some(1))
-        );
-        refuse!(
-            "put_with_metadata_if",
-            candidate.put_with_metadata_if(
-                99,
-                &[1.0, 2.0],
-                b"new",
-                &Metadata::new(),
-                Expected::Any
-            )
-        );
-        refuse!("delete", candidate.delete(u64::MAX));
-        refuse!("delete_if", candidate.delete_if(u64::MAX, Expected::Any));
-        refuse!(
-            "update_metadata",
-            candidate.update_metadata(0, &Metadata::new())
-        );
-        refuse!("write_batch empty", candidate.write_batch(&[]));
-        refuse!(
-            "write_batch",
-            candidate.write_batch(&[Mutation::Delete { id: 0 }])
-        );
+        candidate.write_batch(&[]).unwrap();
+        assert_eq!(candidate.sequence, sequence, "empty batch sequence");
+        assert_eq!(candidate.end, end, "empty batch end");
+        assert_eq!(candidate.to_bytes().unwrap(), bytes, "empty batch bytes");
         refuse!("checkpoint", candidate.checkpoint());
         refuse!("sync", candidate.sync());
         refuse!("feed_cursor", candidate.feed_cursor());
@@ -334,6 +312,7 @@ fn compact_dispatch_enum_clone_pins_source_and_refuses_resident_access() {
         .0;
     let mut records = CollectionRecords::Compact {
         view: generation.view(*collection),
+        overlay: Default::default(),
     };
     let retained = records.clone();
     unsupported(records.resident(), "resident scan");
@@ -371,7 +350,7 @@ fn compact_dispatch_snapshot_fixture_pins_generation_after_database_drop() {
         let view = candidate.collection(&expected.name).unwrap();
         let weak = match &candidate.state(view.id()).records {
             CollectionRecords::Resident(_) => panic!("fixture must inject compact records"),
-            CollectionRecords::Compact { view } => Arc::downgrade(&view.generation),
+            CollectionRecords::Compact { view, .. } => Arc::downgrade(&view.generation),
         };
         let snapshot = view.read_snapshot().unwrap();
         let clone = snapshot.clone();

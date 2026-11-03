@@ -165,7 +165,7 @@ fn compact_install_real_open_owns_source_and_snapshot_accounting() {
         let state = candidate.state(info.id);
         let weak = match &state.records {
             CollectionRecords::Resident(_) => panic!("real open must install compact records"),
-            CollectionRecords::Compact { view } => {
+            CollectionRecords::Compact { view, .. } => {
                 assert!(
                     matches!(view.generation.backing, Backing::Owned(_)),
                     "Database installation must own its verified source"
@@ -244,49 +244,75 @@ fn compact_install_real_open_owns_source_and_snapshot_accounting() {
 }
 
 #[test]
-fn compact_install_real_committed_suffix_refuses_without_changing_source() {
+fn compact_install_real_committed_suffix_replays_into_overlay() {
     let _gates = gates();
     for encrypted in [false, true] {
         let key = encrypted.then(source_key);
         let (image, _) = source_view_fixture(key.as_ref());
-        let boundary = Database::open_from_bytes(image.clone(), key.as_ref()).unwrap();
-        assert!(
-            matches!(boundary.state(1).records, CollectionRecords::Compact { .. }),
-            "sequence equal to history floor must install"
-        );
-        drop(boundary);
         let _source_off = Activation::set(false);
         let mut resident = Database::open_from_bytes(image, key.as_ref()).unwrap();
-        resident
-            .collection_mut("full")
-            .unwrap()
-            .put(99, &[1.0, 2.0], b"committed suffix")
-            .unwrap();
+        {
+            let mut collection = resident.collection_mut("full").unwrap();
+            collection
+                .put(99, &[1.0, 2.0], b"committed suffix")
+                .unwrap();
+            collection
+                .update_metadata(
+                    0,
+                    &crate::Metadata::from([(
+                        "suffix".into(),
+                        crate::MetadataValue::Boolean(true),
+                    )]),
+                )
+                .unwrap();
+            collection.delete(10).unwrap();
+            collection
+                .put_with_expiry(
+                    3,
+                    &[3.0, 4.0],
+                    b"expiry suffix",
+                    &crate::Metadata::new(),
+                    Some(10),
+                )
+                .unwrap();
+            collection
+                .write_batch(&[
+                    crate::Mutation::Put {
+                        id: 99,
+                        vector: vec![5.0, 6.0],
+                        payload: b"batch replacement".to_vec(),
+                    },
+                    crate::Mutation::Put {
+                        id: 101,
+                        vector: vec![7.0, 8.0],
+                        payload: b"batch new".to_vec(),
+                    },
+                ])
+                .unwrap();
+        }
         let bytes = resident.to_bytes().unwrap();
         let sequence = resident.sequence;
         let loaded = crate::format::load_with(&mut Cursor::new(&bytes), key.as_ref()).unwrap();
         assert!(loaded.sequence > loaded.history_floor);
-        {
-            let _source_on = Activation::on();
-            unsupported(
-                Database::open_from_bytes(bytes.clone(), key.as_ref()),
-                "post-image committed suffix",
-            );
-        }
+        let _source_on = Activation::on();
+        let reopened = Database::open_from_bytes(bytes.clone(), key.as_ref()).unwrap();
+        assert!(matches!(
+            reopened.state(1).records,
+            CollectionRecords::Compact { .. }
+        ));
+        point_parity(&reopened, &resident);
         assert_eq!(resident.sequence, sequence);
         assert_eq!(resident.to_bytes().unwrap(), bytes);
         assert_eq!(
-            resident
+            reopened
                 .collection("full")
                 .unwrap()
                 .get_at(99, 0)
                 .unwrap()
                 .unwrap()
                 .payload,
-            b"committed suffix"
+            b"batch replacement"
         );
-        let reopened = Database::open_from_bytes(bytes, key.as_ref()).unwrap();
-        point_parity(&reopened, &resident);
     }
 }
 
@@ -473,7 +499,7 @@ fn compact_install_encrypted_point_authenticates_before_cell_publication() {
         }
     }
     let state = db.collections.get_mut(&1).unwrap();
-    let CollectionRecords::Compact { view } = &mut state.records else {
+    let CollectionRecords::Compact { view, .. } = &mut state.records else {
         panic!("real compact installation required")
     };
     let generation = Arc::get_mut(&mut view.generation).unwrap();
@@ -503,7 +529,7 @@ fn compact_install_encrypted_point_authenticates_before_cell_publication() {
             "installed encrypted point must authenticate before publication"
         );
     }
-    let CollectionRecords::Compact { view } = &db.state(1).records else {
+    let CollectionRecords::Compact { view, .. } = &db.state(1).records else {
         unreachable!()
     };
     assert!(view.source().unwrap().cells[0].record.get().is_none());

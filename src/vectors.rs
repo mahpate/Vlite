@@ -611,7 +611,7 @@ pub struct DenseSparseQuery {
 }
 impl CollectionMut<'_> {
     fn commit_vectors(&mut self, data: VectorData) -> Result<()> {
-        self.db.ensure_healthy()?;
+        self.db.ensure_resident_in(self.id)?;
         if self.db.version < crate::format::V5 {
             return Err(Error::InvalidQuery(
                 "named and sparse vectors require format v5",
@@ -706,6 +706,7 @@ impl CollectionMut<'_> {
         version: Option<&str>,
         config: HnswConfig,
     ) -> Result<()> {
+        self.db.ensure_resident_in(self.id)?;
         config.validate()?;
         let (s, rs) = self.view().named_records(n, version)?;
         crate::validate_ann_metric(s.metric)?;

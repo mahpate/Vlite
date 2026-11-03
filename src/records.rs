@@ -22,7 +22,47 @@ pub(crate) enum CollectionRecords {
     #[cfg(test)]
     Compact {
         view: crate::compact::source::CompactView,
+        overlay: RecordOverlay,
     },
+}
+
+#[cfg(test)]
+#[derive(Clone, Debug)]
+enum OverlayEntry {
+    Put {
+        revision: u64,
+        expiry: Option<u64>,
+        record: Arc<Record>,
+    },
+    Delete {
+        revision: u64,
+    },
+}
+
+#[cfg(test)]
+#[derive(Clone, Debug, Default)]
+pub(crate) struct RecordOverlay(Arc<BTreeMap<u64, OverlayEntry>>);
+
+#[cfg(test)]
+impl RecordOverlay {
+    fn get(&self, id: u64) -> Option<&OverlayEntry> {
+        self.0.get(&id)
+    }
+
+    fn put(&mut self, id: u64, record: Record, revision: u64, expiry: Option<u64>) {
+        Arc::make_mut(&mut self.0).insert(
+            id,
+            OverlayEntry::Put {
+                revision,
+                expiry,
+                record: Arc::new(record),
+            },
+        );
+    }
+
+    fn delete(&mut self, id: u64, revision: u64) {
+        Arc::make_mut(&mut self.0).insert(id, OverlayEntry::Delete { revision });
+    }
 }
 
 impl CollectionRecords {
@@ -46,7 +86,17 @@ impl CollectionRecords {
         match self {
             Self::Resident(records) => records.len(),
             #[cfg(test)]
-            Self::Compact { view } => view.len(),
+            Self::Compact { view, overlay } => {
+                let mut len = view.len();
+                for (&id, entry) in overlay.0.iter() {
+                    match (view.contains_id(id), entry) {
+                        (true, OverlayEntry::Delete { .. }) => len -= 1,
+                        (false, OverlayEntry::Put { .. }) => len += 1,
+                        _ => {}
+                    }
+                }
+                len
+            }
         }
     }
 
@@ -58,7 +108,20 @@ impl CollectionRecords {
         match self {
             Self::Resident(records) => records.keys().next().copied(),
             #[cfg(test)]
-            Self::Compact { view } => view.first_id(),
+            Self::Compact { view, overlay } => {
+                let base = (0..view.len())
+                    .filter_map(|row| view.id(row))
+                    .find(|id| !matches!(overlay.get(*id), Some(OverlayEntry::Delete { .. })));
+                let added = overlay.0.iter().find_map(|(&id, entry)| {
+                    (!view.contains_id(id) && matches!(entry, OverlayEntry::Put { .. }))
+                        .then_some(id)
+                });
+                match (base, added) {
+                    (Some(base), Some(added)) => Some(base.min(added)),
+                    (Some(id), None) | (None, Some(id)) => Some(id),
+                    (None, None) => None,
+                }
+            }
         }
     }
 
@@ -66,7 +129,11 @@ impl CollectionRecords {
         match self {
             Self::Resident(records) => records.contains_key(id),
             #[cfg(test)]
-            Self::Compact { view } => view.contains_id(*id),
+            Self::Compact { view, overlay } => match overlay.get(*id) {
+                Some(OverlayEntry::Put { .. }) => true,
+                Some(OverlayEntry::Delete { .. }) => false,
+                None => view.contains_id(*id),
+            },
         }
     }
 
@@ -81,8 +148,114 @@ impl CollectionRecords {
                 .get(&id)
                 .filter(|_| !expiries.get(&id).is_some_and(|expiry| *expiry <= now_ms))),
             #[cfg(test)]
-            Self::Compact { view } => view.get_at(id, now_ms),
+            Self::Compact { view, overlay } => match overlay.get(id) {
+                Some(OverlayEntry::Put { expiry, record, .. }) => {
+                    Ok((!expiry.is_some_and(|expiry| expiry <= now_ms)).then_some(record.as_ref()))
+                }
+                Some(OverlayEntry::Delete { .. }) => Ok(None),
+                None => view.get_at(id, now_ms),
+            },
         }
+    }
+
+    pub(crate) fn get_physical(&self, id: u64) -> Result<Option<&Record>> {
+        match self {
+            Self::Resident(records) => Ok(records.get(&id)),
+            #[cfg(test)]
+            Self::Compact { view, overlay } => match overlay.get(id) {
+                Some(OverlayEntry::Put { record, .. }) => Ok(Some(record.as_ref())),
+                Some(OverlayEntry::Delete { .. }) => Ok(None),
+                None => view.get_physical(id),
+            },
+        }
+    }
+
+    pub(crate) fn apply_committed(
+        &mut self,
+        id: u64,
+        record: Option<Record>,
+        _revision: u64,
+        _expiry: Option<u64>,
+    ) -> Result<()> {
+        match self {
+            Self::Resident(records) => {
+                if let Some(record) = record {
+                    records.insert(id, record);
+                } else {
+                    records.remove(&id);
+                }
+            }
+            #[cfg(test)]
+            Self::Compact { overlay, .. } => {
+                if let Some(record) = record {
+                    overlay.put(id, record, _revision, _expiry);
+                } else {
+                    overlay.delete(id, _revision);
+                }
+            }
+        }
+        Ok(())
+    }
+
+    pub(crate) fn is_compact(&self) -> bool {
+        #[cfg(test)]
+        {
+            matches!(self, Self::Compact { .. })
+        }
+        #[cfg(not(test))]
+        {
+            false
+        }
+    }
+
+    #[cfg(test)]
+    pub(crate) fn compact_overlay_revision(&self, id: u64) -> Option<(u64, bool)> {
+        let Self::Compact { overlay, .. } = self else {
+            return None;
+        };
+        match overlay.get(id) {
+            Some(OverlayEntry::Put { revision, .. }) => Some((*revision, false)),
+            Some(OverlayEntry::Delete { revision }) => Some((*revision, true)),
+            None => None,
+        }
+    }
+
+    #[cfg(test)]
+    pub(crate) fn compact_from_replay(
+        view: crate::compact::source::CompactView,
+        records: &RecordMap,
+        revisions: &BTreeMap<u64, u64>,
+        expiries: &BTreeMap<u64, u64>,
+        sequence: u64,
+    ) -> Result<Self> {
+        let mut overlay = RecordOverlay::default();
+        for row in 0..view.len() {
+            let id = view
+                .id(row)
+                .ok_or(Error::InvalidQuery("compact replay row is missing"))?;
+            let Some(record) = records.get(&id) else {
+                overlay.delete(id, sequence);
+                continue;
+            };
+            let revision = revisions
+                .get(&id)
+                .copied()
+                .ok_or(Error::InvalidQuery("compact replay revision is missing"))?;
+            let expiry = expiries.get(&id).copied();
+            if view.revision(row) != Some(revision) || view.expiry(row).flatten() != expiry {
+                overlay.put(id, record.clone(), revision, expiry);
+            }
+        }
+        for (&id, record) in records {
+            if !view.contains_id(id) {
+                let revision = revisions
+                    .get(&id)
+                    .copied()
+                    .ok_or(Error::InvalidQuery("compact replay revision is missing"))?;
+                overlay.put(id, record.clone(), revision, expiries.get(&id).copied());
+            }
+        }
+        Ok(Self::Compact { view, overlay })
     }
 }
 

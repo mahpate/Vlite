@@ -1068,6 +1068,7 @@ mod tests {
             .unwrap();
         db.state_mut(compact_id).records = crate::records::CollectionRecords::Compact {
             view: generation.view(compact_id),
+            overlay: Default::default(),
         };
         let sequence = db.sequence;
         let bytes = db.to_bytes();

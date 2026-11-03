@@ -33,13 +33,9 @@ as corruption. The accessor has no unsafe
 vector alignment or casting; adding a safe aligned borrow is deferred. Its
 owned-versus-mapped parity test uses a test-only memory map with a documented
 safety condition. Accessors borrow only the caller-supplied verified body
-slice, so they do not yet pin an image generation or integrate the mutable WAL
-overlay. Engine integration
-still needs generation ownership/lifetime handling, overlay precedence and
-deletes/expiry, lazy generation-owned `Record` compatibility, snapshot
-retention accounting, authenticated I/O propagation, and end-to-end search,
-graph-attachment, maintenance and reopen wiring. This accessor makes no
-performance, size, or release-qualification claim.
+slice; generation ownership, overlays and `Database` integration are separate
+engine layers tracked below. This accessor makes no performance, size, or
+release-qualification claim.
 
 **P3b slice 0 status — private and unreleased; independently accepted and
 integrated.** Independent acceptance replayed fail-first mutations of block
@@ -50,9 +46,10 @@ restored. The test-only source module retains each checked record block's
 on-disk frame and the row/column extents produced by the same `ImageCheck`
 validation pass. `format::load_inner` constructs the `Arc<CompactGeneration>`
 only after the image end block validates. The normal loader's resident
-`RecordMap` remains the oracle; no `Database`, `Collection`, `ReadSnapshot`,
-`Chain`, mutation path or public API uses this generation. Release builds do
-not compile the source module or its gate.
+`RecordMap` remains the oracle for subsequent private integration slices;
+slice 0 itself adds no `Database`, `Collection`, `ReadSnapshot`, `Chain`,
+mutation path or public API wiring. Release builds do not compile the source
+module or its gate.
 
 The standalone view supports only the following surface:
 
@@ -75,9 +72,9 @@ before decoding. The temporary plaintext frame is operation-local; the
 stable decoded `Record` cell is memory-resident and is not evicted while the
 generation lives. Mapped bytes, decoded cells and temporary plaintext are
 separate accounting categories; no public snapshot counter is changed.
-Database installation, snapshot retention, overlays, writes and lifecycle
-parity remain for slices 1–5. This slice makes no performance, size or
-release-qualification claim.
+Database installation, snapshot retention and overlays are tracked in Part J;
+ordered reads and lifecycle parity remain for later slices. This slice makes
+no performance, size or release-qualification claim.
 
 The engine-integration design below has been independently reviewed; owner
 decisions K.1-K.6 were explicitly approved on 2026-11-02. Each code slice
@@ -955,13 +952,10 @@ map with only the captured subset. Plaintext and encrypted regressions
 cover that refusal, source-byte preservation, and an empty compact image
 followed by a committed WAL suffix remaining resident and writable.
 
-Until slice 2 supplies base-plus-WAL overlays, an image with captured
-compact records installs only at `sequence == history_floor`. A real
-committed suffix (`sequence != history_floor`) refuses with the existing
-`UnsupportedFeature(FLAG_COMPACT)` before installation; source bytes and
-resident replay remain unchanged and usable. Images without captured
-compact records retain resident dispatch; no rows are discarded to force
-installation.
+Slice 2's private candidate reconciles a committed suffix over the captured
+compact image as a base-plus-overlay view. This remains pending independent
+acceptance and is test-gated; images without captured compact records retain
+resident dispatch, and no rows are discarded to force installation.
 
 The real-open A-D matrix covers plaintext and encrypted images, populated
 default/named collections and empty collections. Every public receiver
@@ -1019,8 +1013,8 @@ not performance/size claims.
 |---|---|---|
 | 0. Pinned source and standalone point-read view | **Implemented, independently accepted and integrated (private, test-gated).** Retain a verified-block directory from the same `ImageCheck` pass in an owned frame buffer; mapped backing is exercised by parity tests only. Add generation-owned once-cells and a standalone view with point reads only. Files: `src/compact/source.rs` and tests; `src/compact/mod.rs` (`ImageCheck::block`); `src/format.rs` (`load_inner`, `verified_frame`). Tests: `compact_generation_authenticates_before_publish`, `compact_generation_pins_source_until_last_handle_drop`, `compact_view_get_matches_resident_after_source_drop`, `compact_get_decodes_each_record_once`, encrypted wrong-key/tag rejection, mapped/owned parity and gate-off refusal. Accept complete-image publication, exact fields/revisions/expiry, authentication-before-publish and byte-source parity. | ~500-800 LOC; no Database/Chain/collection wiring; foundation for 1. |
 | 1a. Enum and fail-closed dispatch | **Implemented, independently accepted and integrated (private, unreleased).** Migrate record consumers through exhaustive resident/compact dispatch and typed resident-only access; guard mutation acquisition and unsupported operations before early returns or side effects. Dispatch fixtures exercise point parity, refusals and source/snapshot retention; normal loader installation remains resident. No loader, directory or P4 codec hunk. | Bounded split from 1; depends on accepted 0; stop for independent acceptance before 1b. |
-| 1b. Database installation and point-read acceptance | **Private, unreleased candidate pending independent acceptance.** Owned verified generation installation after full-image validation; directory/segment and post-image WAL-suffix refusal. Real-open A-D method matrix, late-image failure atomicity, explicit expiry, encrypted reads and snapshot/accounting lifetime. | Depends on independently accepted 1a; minimal loader hooks only. No partial or mapped installation; suffix refusal is lifted only by slice 2 overlays. |
-| 2. WAL overlay and committed mutation semantics | Replace direct collection mutation with base+overlay; replay put/batch/delete/metadata/TTL and retain tombstones. Files: `src/collection.rs` (`apply_metadata_committed`, `apply_committed`), `src/format.rs` (`LoadedCollection::{put,delete,update_metadata}`, frame replay/checks), `src/lib.rs` (`put_in`, `delete_in`, `apply`, `apply_batch`), `src/property_graph/frame.rs` (`GraphRecords` liveness), `src/property_graph/maintain.rs` (attachment validation). Tests: `compact_overlay_ordered_batch_matches_replay`, `compact_delete_tombstone_shadows_base`, `compact_expired_overlay_never_reveals_base`, `compact_metadata_update_preserves_vector_payload`, `compact_graph_attachment_tracks_effective_row`. Accept durability-before-apply, CAS/revision and graph atomic parity. | ~450-700 LOC; depends 1; serialize with 1 and 5. |
+| 1b. Database installation and point-read acceptance | **Private, unreleased candidate pending independent acceptance.** Owned verified generation installation after full-image validation; directory/segment refusal. Real-open A-D method matrix, late-image failure atomicity, explicit expiry, encrypted reads and snapshot/accounting lifetime. Slice 2 now covers the post-image WAL suffix path (tracked separately in row 2). | Depends on independently accepted 1a; minimal loader hooks only. No partial or mapped installation. |
+| 2. WAL overlay and committed mutation semantics | **Private, test-gated candidate pending independent acceptance.** Reconcile committed put/batch/delete/metadata/TTL suffixes over the immutable compact base, retaining tombstones and WAL durability-before-apply, CAS/revision, graph-attachment and COW snapshot behavior. Files: `src/records.rs`, `src/collection.rs`, `src/format.rs` (image-floor row capture), `src/lib.rs`, and `src/vectors.rs` (retain later-slice refusals). Tests: `compact_overlay_ordered_batch_matches_replay`, `compact_delete_tombstone_shadows_base`, `compact_expired_overlay_never_reveals_base`, `compact_metadata_update_preserves_vector_payload`, `compact_overlay_snapshot_and_revision_condition_are_immutable`, `compact_graph_attachment_tracks_effective_row`, and `compact_install_real_committed_suffix_replays_into_overlay`. No public surface, production activation or later-slice capability. | Depends on 1a/1b; selected row only; serialize with 1 and 5. |
 | 3. Ordered public reads and exact/filter paths | Merge base/overlay IDs, unify TTL/filter/clock semantics and bounded vector access. Files: `src/records.rs` (`browse_at`, `search_with_stats_at`), `src/collection.rs` (browse/group/exact), `src/lib.rs` (`search_in_at`, `exact_search*`), `src/hybrid.rs`, `src/query_language.rs`. Tests: `compact_ordered_merge_matches_resident_with_gaps`, `compact_exact_scan_is_bit_identical_at_same_clock`, `compact_search_filters_after_overlay_resolution`, `compact_browse_cursor_skips_tombstones_and_expiry`. Accept exact order/stat semantics and bounded scratch. | ~300-500 LOC; depends 1-2; can split API/search tests after interface freeze, but shared `records.rs`/`lib.rs` edits serialize. |
 | 4. Record consumers and derived indexes | Port payload APIs, named vectors, summary indexes, HNSW/rebuild/sidecars, metrics and record serializers. Files: `src/vectors.rs`, `src/kv.rs`, `src/server.rs`, `src/server/grpc.rs`, `src/server/features.rs`, `src/server/webhooks.rs`, `src/bin/vlite-mcp.rs`, `src/rerank.rs`, `src/property_graph/retrieve.rs`, `src/server/observability.rs`, `src/server/tenants.rs`, `src/hnsw.rs`, `src/rebuild.rs`, `src/metadata_index.rs`, `src/text_index.rs`, `src/ann_snapshot.rs`, `src/disk_ann.rs`, `src/gpu.rs`, `src/quality.rs`, `src/planner.rs`, `src/compact/stats.rs`. Tests: `compact_kv_point_and_prefix_match_resident`, `compact_named_vector_visibility_matches_resident`, `compact_hnsw_rerank_uses_pinned_generation`, `compact_rebuild_snapshot_survives_checkpoint`, `compact_metadata_text_indexes_verify_overlay`, `compact_ann_snapshot_rejects_other_generation`, `compact_server_materializes_only_results`. Accept no stale index result and accurate cache/source accounting. | ~600-1,000 LOC; depends 1-3; file-disjoint vector/KV/server and index groups can run in parallel after seam freeze; `hnsw.rs`/`lib.rs` hooks serialize. |
 | 5. Checkpoint, maintenance, feed and replica lifecycle | Stream complete output, pin/retire images and preserve byte-copy/copy-out/error behavior. Files: `src/format.rs` (`write_v5_image`, `BlockRun`, `apply_supplement`, `verified_frame`), `src/compact/mod.rs` (`ImageCheck::{frame,block}`), `src/directory.rs` (`build_image`, `Chain::{install,open}`), `src/lib.rs` (`start_checkpoint`, `finish_checkpoint`, `replica_extend`, feed/export hooks), `src/maintenance.rs` (`backup_inner`, `restore_inner`, `compact_inner`, `write_v5`, `write_v5_image`, `convert_precision`), `src/changes.rs` (`scan`), `src/logops.rs` (`restore_to`, `reencrypt`), `src/property_graph/{frame.rs,maintain.rs}`. Tests: `compact_overlay_checkpoint_reopen_is_identical`, `compact_checkpoint_keeps_old_snapshot_mapped`, `compact_backup_restore_reencrypt_authenticate_all_blocks`, `compact_change_feed_starts_after_image_floor`, `compact_replica_failure_keeps_old_generation`, `compact_graph_copyout_keeps_attachment_rules`. Accept full lifecycle matrix before any writer is production-enabled. | ~700-1,100 LOC; depends 1-4; serialize with P4 checkpoint/read work. |

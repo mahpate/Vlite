@@ -1513,22 +1513,25 @@ impl Database {
                     .any(|&id| generation.has_collection(id))
             });
         #[cfg(test)]
-        if compact_records && loaded.sequence != loaded.history_floor {
-            return Err(Error::UnsupportedFeature(format::FLAG_COMPACT));
-        }
-        #[cfg(test)]
         if let Some(generation) = &loaded.compact_generation {
-            for (&id, collection) in &loaded.collections {
+            let Some(compact_base) = &loaded.compact_base else {
+                return Err(Error::UnsupportedFeature(format::FLAG_COMPACT));
+            };
+            for &id in loaded.collections.keys() {
                 if generation.has_collection(id) {
                     let view = generation.view(id);
-                    // A valid image may mix legacy and compact record blocks.
-                    // Capturing any block does not prove complete coverage.
-                    if view.len() != collection.records.len()
-                        || collection.records.keys().enumerate().any(|(row, &id)| {
-                            view.id(row) != Some(id)
-                                || view.revision(row) != collection.revisions.get(&id).copied()
-                                || view.expiry(row) != Some(collection.expiries.get(&id).copied())
-                        })
+                    let Some(base_rows) = compact_base.get(&id) else {
+                        return Err(Error::UnsupportedFeature(format::FLAG_COMPACT));
+                    };
+                    if view.len() != base_rows.len()
+                        || base_rows
+                            .iter()
+                            .enumerate()
+                            .any(|(row, (&id, &(revision, expiry)))| {
+                                view.id(row) != Some(id)
+                                    || view.revision(row) != Some(revision)
+                                    || view.expiry(row) != Some(expiry)
+                            })
                     {
                         return Err(Error::UnsupportedFeature(format::FLAG_COMPACT));
                     }
@@ -1554,24 +1557,34 @@ impl Database {
             collections: loaded
                 .collections
                 .into_iter()
-                .map(|(id, collection)| {
+                .map(|(id, collection)| -> Result<_> {
                     let collection = Collection::from_loaded(collection);
                     #[cfg(test)]
                     let collection = {
                         let mut collection = collection;
                         if let Some(generation) = &loaded.compact_generation
                             && (generation.has_collection(id)
-                                || (compact_records && collection.records.is_empty()))
+                                || (compact_records
+                                    && loaded
+                                        .compact_base
+                                        .as_ref()
+                                        .and_then(|rows| rows.get(&id))
+                                        .is_some_and(BTreeMap::is_empty)))
                         {
-                            collection.records = records::CollectionRecords::Compact {
-                                view: generation.view(id),
-                            };
+                            let records = collection.records.resident()?.clone();
+                            collection.records = records::CollectionRecords::compact_from_replay(
+                                generation.view(id),
+                                &records,
+                                &collection.revisions,
+                                &collection.expiries,
+                                loaded.sequence,
+                            )?;
                         }
                         collection
                     };
-                    (id, collection)
+                    Ok((id, collection))
                 })
-                .collect(),
+                .collect::<Result<_>>()?,
             rebuild: None,
             imports,
             collection_high: loaded.collection_high,
@@ -1676,6 +1689,15 @@ impl Database {
 
     fn ensure_resident_in(&self, collection: u16) -> Result<()> {
         self.ensure_healthy()?;
+        self.state(collection).records.resident()?;
+        Ok(())
+    }
+
+    fn ensure_mutable_in(&self, collection: u16) -> Result<()> {
+        self.ensure_healthy()?;
+        if self.state(collection).records.is_compact() {
+            return Ok(());
+        }
         self.state(collection).records.resident()?;
         Ok(())
     }
@@ -1957,7 +1979,12 @@ impl Database {
 
     fn revision_in(&self, collection: u16, id: u64) -> Result<Option<u64>> {
         self.ensure_healthy()?;
-        Ok(self.state(collection).revisions.get(&id).copied())
+        let state = self.state(collection);
+        #[cfg(test)]
+        if let Some((revision, deleted)) = state.records.compact_overlay_revision(id) {
+            return Ok((!deleted).then_some(revision));
+        }
+        Ok(state.revisions.get(&id).copied())
     }
 
     /// Durably replaces one record's vector and opaque payload, clearing any metadata.
@@ -2053,7 +2080,7 @@ impl Database {
         expiry: Option<u64>,
         expected: Expected,
     ) -> Result<u64> {
-        self.ensure_resident_in(collection)?;
+        self.ensure_mutable_in(collection)?;
         if self.version < format::V5 {
             return Err(Error::ExpiryRequiresUpgrade);
         }
@@ -2090,7 +2117,7 @@ impl Database {
         metadata: &Metadata,
         expected: Expected,
     ) -> Result<u64> {
-        self.ensure_resident_in(collection)?;
+        self.ensure_mutable_in(collection)?;
         if self.version < format::V5 {
             return Err(Error::ExpiryRequiresUpgrade);
         }
@@ -2121,7 +2148,7 @@ impl Database {
         metadata: &Metadata,
         expected: Expected,
     ) -> Result<u64> {
-        self.ensure_resident_in(collection)?;
+        self.ensure_mutable_in(collection)?;
         let state = self.state(collection);
         validate_stored(state.dimensions, state.precision, vector)?;
         if payload.len() > MAX_PAYLOAD_BYTES {
@@ -2160,7 +2187,7 @@ impl Database {
     }
 
     fn delete_in(&mut self, collection: u16, id: u64, expected: Expected) -> Result<bool> {
-        self.ensure_resident_in(collection)?;
+        self.ensure_mutable_in(collection)?;
         let current = self.state(collection).revisions.get(&id).copied();
         expected.check(current)?;
         if current.is_none() {
@@ -2187,7 +2214,7 @@ impl Database {
     }
 
     fn write_batch_in(&mut self, collection: u16, operations: &[Mutation]) -> Result<()> {
-        self.ensure_resident_in(collection)?;
+        self.ensure_mutable_in(collection)?;
         if operations.is_empty() {
             return Ok(());
         }
@@ -2609,7 +2636,7 @@ impl Database {
         expires_at_ms: Option<u64>,
     ) -> Result<()> {
         let vector_bytes = record.as_ref().map_or(0, |record| record.vector.len() * 4);
-        self.state(collection).records.resident()?;
+        self.ensure_mutable_in(collection)?;
         self.touch_graph_record(collection, id, sequence);
         let state = self
             .collections
@@ -2660,12 +2687,12 @@ impl Database {
     /// Mutable handle to a collection. `default` is always available.
     pub fn collection_mut(&mut self, name: &str) -> Result<CollectionMut<'_>> {
         let id = self.resolve(name)?;
-        self.ensure_resident_in(id)?;
+        self.ensure_mutable_in(id)?;
         self.collection_mut_in(id)
     }
 
     fn collection_mut_in(&mut self, id: u16) -> Result<CollectionMut<'_>> {
-        self.state(id).records.resident()?;
+        self.ensure_mutable_in(id)?;
         Ok(CollectionMut { db: self, id })
     }
 

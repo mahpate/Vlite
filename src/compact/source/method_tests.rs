@@ -1,4 +1,4 @@
-//! A-D matrix through real open. CollectionMut methods are D at acquisition.
+//! A-D matrix through real open, with slice-2 committed mutations enabled.
 use super::dispatch_tests::{gates, point_parity, unsupported};
 use crate::*;
 
@@ -13,23 +13,14 @@ fn compact_dispatch_fixture(encrypted: bool) -> (Database, Database, Vec<u8>) {
     (candidate, oracle, image)
 }
 
-// D: no public CollectionMut method is reachable for a compact target.
-const MUTABLE_ACQUISITION: &[&str] = &[
-    "CollectionMut::view",
-    "CollectionMut::put",
-    "CollectionMut::put_with_metadata",
-    "CollectionMut::put_with_expiry",
-    "CollectionMut::update_metadata",
-    "CollectionMut::put_with_metadata_if",
-    "CollectionMut::delete",
-    "CollectionMut::delete_if",
-    "CollectionMut::write_batch",
+// Keep every CollectionMut receiver in the closed method matrix. Only the
+// selected committed-mutation methods are enabled by slice 2.
+const COMPACT_REFUSALS: &[&str] = &[
     "CollectionMut::build_hnsw_with_metric",
     "CollectionMut::set_background_hnsw_rebuild",
     "CollectionMut::search_approximate_filtered_with_metric",
     "CollectionMut::start_hnsw_rebuild",
     "CollectionMut::poll_hnsw_rebuild",
-    "CollectionMut::cancel_hnsw_rebuild",
     "CollectionMut::hnsw_maintenance_status",
     "CollectionMut::maintain_hnsw",
     "CollectionMut::search_hybrid",
@@ -52,7 +43,6 @@ const MUTABLE_ACQUISITION: &[&str] = &[
     "CollectionMut::facets",
     "CollectionMut::numeric_stats",
     "CollectionMut::search_geo",
-    "CollectionMut::text_index_status",
     "CollectionMut::configure_vector",
     "CollectionMut::put_vectors",
     "CollectionMut::put_vector_version",
@@ -62,6 +52,27 @@ const MUTABLE_ACQUISITION: &[&str] = &[
     "CollectionMut::apply_reembed_batch_checked",
     "CollectionMut::apply_reembed_batch",
     "CollectionMut::finish_reembed",
+];
+
+const COMPACT_MUTATIONS: &[&str] = &[
+    "Database::collection_mut",
+    "Database::put",
+    "Database::put_with_metadata",
+    "Database::put_with_expiry",
+    "Database::put_with_metadata_if",
+    "Database::update_metadata",
+    "Database::delete",
+    "Database::delete_if",
+    "Database::write_batch",
+    "CollectionMut::view",
+    "CollectionMut::put",
+    "CollectionMut::put_with_metadata",
+    "CollectionMut::put_with_expiry",
+    "CollectionMut::update_metadata",
+    "CollectionMut::put_with_metadata_if",
+    "CollectionMut::delete",
+    "CollectionMut::delete_if",
+    "CollectionMut::write_batch",
 ];
 
 #[test]
@@ -78,7 +89,6 @@ fn compact_installed_database_and_snapshot_method_matrix() {
         let policy = HnswMaintenancePolicy::default();
         let cursor = changes::FeedCursor::beginning();
         let query = &[1.0, 2.0];
-        let metadata = Metadata::new();
         let path_dir = tempfile::tempdir().unwrap();
         let path = path_dir.path().join("must-not-exist");
         macro_rules! d {
@@ -255,32 +265,54 @@ fn compact_installed_database_and_snapshot_method_matrix() {
         );
         drop(snapshot);
         drop(reference);
-        for method in MUTABLE_ACQUISITION {
-            unsupported(db.collection_mut("full"), method);
-            assert_eq!(db.sequence, sequence, "{method} acquisition sequence");
-            assert_eq!(db.to_bytes().unwrap(), image, "{method} acquisition bytes");
-        }
-        d!("Database::collection_mut", db.collection_mut("full"));
-        d!("Database::put", db.put(99, query, b"new"));
+        assert!(
+            COMPACT_REFUSALS
+                .iter()
+                .all(|method| !COMPACT_MUTATIONS.contains(method))
+        );
+        let mut mutable = db.collection_mut("full").unwrap();
+        a!(
+            "Database::collection_mut",
+            mutable.view().len(),
+            oracle.collection("full").unwrap().len()
+        );
+        a!(
+            "CollectionMut::text_index_status",
+            mutable.text_index_status(),
+            oracle.collection("full").unwrap().text_index_status()
+        );
+        assert!(
+            !mutable.cancel_hnsw_rebuild(),
+            "no compact rebuild can be pending"
+        );
+        drop(mutable);
         d!(
-            "Database::put_with_metadata",
-            db.put_with_metadata(99, query, b"new", &metadata)
+            "CollectionMut::configure_vector",
+            db.collection_mut("full").unwrap().configure_vector(
+                "new",
+                vectors::VectorSpec {
+                    dimensions: 2,
+                    metric,
+                    active_version: "v1".into(),
+                    history: 1,
+                }
+            )
         );
         d!(
-            "Database::put_with_expiry",
-            db.put_with_expiry(99, query, b"new", &metadata, Some(1))
+            "CollectionMut::import_chunk",
+            db.collection_mut("full").unwrap().import_chunk(
+                1,
+                1,
+                &[],
+                import::InvalidRowPolicy::RejectChunk
+            )
         );
         d!(
-            "Database::put_with_metadata_if",
-            db.put_with_metadata_if(99, query, b"new", &metadata, Expected::Any)
+            "CollectionMut::build_hnsw_with_metric",
+            db.collection_mut("full")
+                .unwrap()
+                .build_hnsw_with_metric(config, metric)
         );
-        d!(
-            "Database::update_metadata",
-            db.update_metadata(0, &metadata)
-        );
-        d!("Database::delete", db.delete(0));
-        d!("Database::delete_if", db.delete_if(0, Expected::Any));
-        d!("Database::write_batch", db.write_batch(&[]));
         d!("Database::sync", db.sync());
         d!("Database::checkpoint", db.checkpoint());
         d!(

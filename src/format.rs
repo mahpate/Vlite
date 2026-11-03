@@ -458,6 +458,8 @@ pub(crate) struct Loaded {
     pub compact_skipped: crate::compact::Skips,
     #[cfg(test)]
     pub compact_generation: Option<std::sync::Arc<crate::compact::source::CompactGeneration>>,
+    #[cfg(test)]
+    pub compact_base: Option<BTreeMap<u16, BTreeMap<u64, (u64, Option<u64>)>>>,
 }
 
 impl Loaded {
@@ -1875,6 +1877,8 @@ fn load_inner<R: Read + Seek>(
         compact_skipped: Default::default(),
         #[cfg(test)]
         compact_generation: None,
+        #[cfg(test)]
+        compact_base: None,
     };
     // Gap 4: a temporal file's graph state accepts temporal entries.
     if let Some(state) = loaded.graph.as_mut() {
@@ -1907,6 +1911,8 @@ fn load_inner<R: Read + Seek>(
     let mut compact_source = crate::compact::source::Capture::default();
     #[cfg(test)]
     let compact_image = check.is_some();
+    #[cfg(test)]
+    let mut compact_base = None;
     let mut disk = Vec::new();
     loop {
         let anchor_len = anchor.map_or(0, |(_, len)| len);
@@ -2044,6 +2050,11 @@ fn load_inner<R: Read + Seek>(
                 false
             }
         };
+        #[cfg(test)]
+        if !restated && compact_image && crate::compact::source::enabled() && compact_base.is_none()
+        {
+            compact_base = Some(compact_base_rows(&loaded)?);
+        }
         let id = u64_at(&prefix, 16);
         let count = u32_at(&prefix, 24) as usize;
         let (body_len, target_dimensions, _) =
@@ -2382,9 +2393,35 @@ fn load_inner<R: Read + Seek>(
     }
     #[cfg(test)]
     if compact_image && crate::compact::source::enabled() {
+        loaded.compact_base = Some(match compact_base {
+            Some(rows) => rows,
+            None => compact_base_rows(&loaded)?,
+        });
         loaded.compact_generation = Some(compact_source.finish(loaded.cipher.clone())?);
     }
     Ok(loaded)
+}
+
+#[cfg(test)]
+fn compact_base_rows(loaded: &Loaded) -> Result<BTreeMap<u16, BTreeMap<u64, (u64, Option<u64>)>>> {
+    loaded
+        .collections
+        .iter()
+        .map(|(&collection_id, collection)| {
+            let rows = collection
+                .records
+                .keys()
+                .map(|&id| {
+                    let revision =
+                        collection.revisions.get(&id).copied().ok_or_else(|| {
+                            corrupt(loaded.end, "compact base row has no revision")
+                        })?;
+                    Ok((id, (revision, collection.expiries.get(&id).copied())))
+                })
+                .collect::<Result<_>>()?;
+            Ok((collection_id, rows))
+        })
+        .collect()
 }
 
 /// Revisions of one graph's nodes and edges in a precision image (P3a).

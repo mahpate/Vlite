@@ -234,19 +234,36 @@ impl Collection {
         metadata: Metadata,
         sequence: u64,
     ) -> Result<()> {
-        let records = self.records.resident_mut()?;
         self.vectors.invalidate_staged(id);
         self.vector_indexes.clear();
-        if let Some(record) = records.get_mut(&id) {
-            let previous = record.metadata.clone();
-            self.metadata_indexes
-                .track(id, Some(&previous), Some(&metadata));
-            self.text_index.track(id, Some(&previous), Some(&metadata));
-            self.live_body_bytes -= format::record_body_len(record);
+        let Some(previous) = self.records.get_physical(id)?.cloned() else {
+            return Ok(());
+        };
+        self.metadata_indexes
+            .track(id, Some(&previous.metadata), Some(&metadata));
+        self.text_index
+            .track(id, Some(&previous.metadata), Some(&metadata));
+        self.live_body_bytes -= format::record_body_len(&previous);
+        if self.records.is_compact() {
+            let mut record = previous;
+            record.metadata = metadata;
+            self.live_body_bytes += format::record_body_len(&record);
+            self.records.apply_committed(
+                id,
+                Some(record),
+                sequence,
+                self.expiries.get(&id).copied(),
+            )?;
+        } else {
+            let record = self
+                .records
+                .resident_mut()?
+                .get_mut(&id)
+                .expect("record was checked before metadata mutation");
             record.metadata = metadata;
             self.live_body_bytes += format::record_body_len(record);
-            self.revisions.insert(id, sequence);
         }
+        self.revisions.insert(id, sequence);
         Ok(())
     }
 
@@ -261,40 +278,37 @@ impl Collection {
         vector_bytes: usize,
         expires_at_ms: Option<u64>,
     ) -> Result<()> {
-        let records = self.records.resident_mut()?;
         self.vector_sequence = sequence;
         self.vectors.records.remove(&id);
         self.sparse_index.remove(id);
         self.vector_indexes.clear();
+        let previous = self.records.get_physical(id)?;
         if let Some(index) = &mut self.index
-            && !index.track(id, records.get(&id), vector_bytes)
+            && !index.track(id, previous, vector_bytes)
         {
             self.index = None;
         }
-        let previous = records.get(&id).map(|record| &record.metadata);
+        let previous_metadata = previous.map(|record| &record.metadata);
         let current = record.as_ref().map(|record| &record.metadata);
-        self.metadata_indexes.track(id, previous, current);
-        self.text_index.track(id, previous, current);
-        match record {
-            Some(record) => {
-                self.live_body_bytes += format::record_body_len(&record);
-                if let Some(previous) = records.insert(id, record) {
-                    self.live_body_bytes -= format::record_body_len(&previous);
-                }
-                self.revisions.insert(id, sequence);
-                if let Some(expiry) = expires_at_ms {
-                    std::sync::Arc::make_mut(&mut self.expiries).insert(id, expiry);
-                } else {
-                    std::sync::Arc::make_mut(&mut self.expiries).remove(&id);
-                }
-            }
-            None => {
-                if let Some(previous) = records.remove(&id) {
-                    self.live_body_bytes -= format::record_body_len(&previous);
-                }
-                self.revisions.remove(&id);
+        let present = record.is_some();
+        self.metadata_indexes.track(id, previous_metadata, current);
+        self.text_index.track(id, previous_metadata, current);
+        self.live_body_bytes -= previous.map_or(0, format::record_body_len);
+        if let Some(record) = &record {
+            self.live_body_bytes += format::record_body_len(record);
+        }
+        self.records
+            .apply_committed(id, record, sequence, expires_at_ms)?;
+        if present {
+            self.revisions.insert(id, sequence);
+            if let Some(expiry) = expires_at_ms {
+                std::sync::Arc::make_mut(&mut self.expiries).insert(id, expiry);
+            } else {
                 std::sync::Arc::make_mut(&mut self.expiries).remove(&id);
             }
+        } else {
+            self.revisions.remove(&id);
+            std::sync::Arc::make_mut(&mut self.expiries).remove(&id);
         }
         Ok(())
     }
