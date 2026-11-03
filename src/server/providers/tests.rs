@@ -288,6 +288,48 @@ struct CountedHttp {
     calls: AtomicUsize,
 }
 
+#[test]
+fn dns_admission_rejects_before_scheduling_blocking_work() {
+    let runtime = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .max_blocking_threads(1)
+        .build()
+        .unwrap();
+    let (release, released) = std::sync::mpsc::channel();
+    let (entered, observed) = std::sync::mpsc::channel();
+    let worker = runtime.spawn_blocking(move || {
+        entered.send(()).unwrap();
+        let _ = released.recv_timeout(Duration::from_secs(20));
+    });
+    observed.recv_timeout(Duration::from_secs(5)).unwrap();
+    let mut configured = hostname_config(
+        "http://admission.invalid:1234/inference",
+        "admission.invalid",
+        "127.0.0.1".parse().unwrap(),
+    );
+    let resolver = Arc::new(QueueResolver::new([vec!["127.0.0.1:1234".parse().unwrap()]]));
+    configured.providers.get_mut("test").unwrap().resolver = resolver.clone();
+    let provider = &configured.providers["test"];
+    let _slots = provider.dns_slots.try_acquire_many(2).unwrap();
+    let result = runtime.block_on(async {
+        let operation = HttpTransport.send(TransportRequest {
+            provider,
+            body: b"{}",
+            remaining: Duration::from_secs(10),
+        });
+        tokio::pin!(operation);
+        let mut context = std::task::Context::from_waker(std::task::Waker::noop());
+        match operation.as_mut().poll(&mut context) {
+            std::task::Poll::Ready(Err(failure)) => Some(failure.error),
+            _ => None,
+        }
+    });
+    release.send(()).unwrap();
+    runtime.block_on(worker).unwrap();
+    assert_eq!(result, Some(ProviderError::Busy));
+    assert_eq!(resolver.calls.load(Ordering::SeqCst), 0);
+}
+
 impl Transport for CountedHttp {
     fn send<'a>(&'a self, request: TransportRequest<'a>) -> TransportFuture<'a> {
         self.calls.fetch_add(1, Ordering::SeqCst);

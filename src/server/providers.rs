@@ -790,14 +790,16 @@ impl Transport for HttpTransport {
                 vec![SocketAddr::new(ip, port)]
             } else {
                 let resolver = provider.resolver.clone();
-                let dns_slots = provider.dns_slots.clone();
+                let permit = provider
+                    .dns_slots
+                    .clone()
+                    .try_acquire_owned()
+                    .map_err(|_| ProviderError::Busy)?;
                 let host = host.to_owned();
                 tokio::time::timeout(
                     connect_budget,
                     tokio::task::spawn_blocking(move || {
-                        let _permit = dns_slots
-                            .try_acquire_owned()
-                            .map_err(|_| ProviderError::Busy)?;
+                        let _permit = permit;
                         resolver.resolve(&host, port)
                     }),
                 )
