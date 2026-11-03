@@ -11,8 +11,8 @@ use engine::model::PropertyValue;
 use engine::subset::plan::{ParameterEntry, PlanError, plan};
 use engine::subset::{
     Anchor, AnchorKind, Compare, Creation, CreationNode, Direction, FieldTarget, Mutation, Name,
-    NodePattern, ParameterRef, Pattern, Plan, Predicate, ReturnClause, ReturnItem, ReturnValue,
-    Statement,
+    NodePattern, ParameterRef, Pattern, Plan, Predicate, RelationshipPattern, ReturnClause,
+    ReturnItem, ReturnValue, Statement,
 };
 
 fn name(text: &str, position: usize) -> Name {
@@ -20,6 +20,118 @@ fn name(text: &str, position: usize) -> Name {
         text: text.into(),
         position,
         quoted: false,
+    }
+}
+
+#[test]
+fn undirected_relationship_ast_is_golden() {
+    let text = "MATCH (a KEY $ak)-[:R]-(b) RETURN b";
+    let planned = successful(text, &[param("ak", PropertyValue::String("a".into()))]);
+    let (relationship, _) = planned
+        .statement
+        .pattern
+        .as_ref()
+        .unwrap()
+        .relationship
+        .as_ref()
+        .unwrap();
+    assert_eq!(
+        relationship,
+        &RelationshipPattern {
+            variable: None,
+            types: vec![name("R", text.find("R]").unwrap())],
+            anchor: None,
+            max_hops: None,
+            hop_position: None,
+            properties: vec![],
+            direction: Direction::Both,
+            position: text.find("-[").unwrap(),
+        }
+    );
+}
+
+#[test]
+fn relationship_anchor_without_variable_is_golden_for_key_and_id() {
+    for (text, kind, parameter, value) in [
+        (
+            "MATCH (a KEY $ak)-[KEY $rk]->(b) RETURN b",
+            AnchorKind::Key,
+            "rk",
+            PropertyValue::String("r".into()),
+        ),
+        (
+            "MATCH (a KEY $ak)-[ID $rid]->(b) RETURN b",
+            AnchorKind::Id,
+            "rid",
+            PropertyValue::Integer(7),
+        ),
+    ] {
+        let planned = successful(
+            text,
+            &[
+                param("ak", PropertyValue::String("a".into())),
+                param(parameter, value),
+            ],
+        );
+        let (relationship, _) = planned
+            .statement
+            .pattern
+            .as_ref()
+            .unwrap()
+            .relationship
+            .as_ref()
+            .unwrap();
+        let relationship_start = text.find("-[").unwrap();
+        let anchor_keyword = if kind == AnchorKind::Key { "KEY" } else { "ID" };
+        assert_eq!(
+            relationship,
+            &RelationshipPattern {
+                variable: None,
+                types: vec![],
+                anchor: Some(Anchor {
+                    kind,
+                    parameter: parameter_ref(
+                        parameter,
+                        text.find(&format!("${parameter}")).unwrap()
+                    ),
+                    position: relationship_start
+                        + text[relationship_start..].find(anchor_keyword).unwrap(),
+                }),
+                max_hops: None,
+                hop_position: None,
+                properties: vec![],
+                direction: Direction::Out,
+                position: relationship_start,
+            }
+        );
+    }
+
+    let text = "MATCH (KEY $k) RETURN n";
+    assert_query_error_at(
+        text,
+        &[param("k", PropertyValue::String("k".into()))],
+        LanguageErrorKind::Syntax,
+        text.find("KEY").unwrap(),
+    );
+}
+
+#[test]
+fn incoming_second_relationship_hop_is_rejected_at_its_introducer() {
+    for text in [
+        "MATCH (a)-[:R]->(b)<-[:S]-(c) RETURN c",
+        "MATCH (a)-[:R]->(b)-[:S]->(c) RETURN c",
+    ] {
+        let error = query_error(text, &[]);
+        assert_eq!(
+            error.kind,
+            LanguageErrorKind::Unsupported,
+            "{text}: {error}"
+        );
+        assert_eq!(error.position, 19, "{text}: {error}");
+        assert!(
+            error.message.contains("chained relationships"),
+            "{text}: {error}"
+        );
     }
 }
 
@@ -519,6 +631,21 @@ fn lexer_rejections_pin_categories_and_utf8_offsets() {
     for (text, position, kind) in cases {
         assert_query_error_at(text, &[], kind, position);
     }
+
+    for text in [
+        "MATCH (a) WHERE a.x = $1abc RETURN a",
+        "MATCH (a) WHERE a.x = $ RETURN a",
+    ] {
+        let error = query_error(text, &[]);
+        assert_eq!(error.kind, LanguageErrorKind::Syntax, "{text}: {error}");
+        assert_eq!(error.position, text.find('$').unwrap(), "{text}: {error}");
+        assert!(
+            error
+                .message
+                .contains("expected a bare parameter name after $"),
+            "{text}: {error}"
+        );
+    }
 }
 
 #[test]
@@ -705,6 +832,53 @@ fn planner_scope_parameter_and_token_boundaries_are_pinned() {
         text.rfind("(r)").unwrap() + 1,
     );
 
+    let text = "MATCH (a KEY $ak)-[:R KEY $rk *1..3]->(b) RETURN b";
+    assert_query_error_at(
+        text,
+        &[
+            param("ak", PropertyValue::String("a".into())),
+            param("rk", PropertyValue::String("r".into())),
+        ],
+        LanguageErrorKind::Unsupported,
+        text.find('*').unwrap(),
+    );
+
+    let variable_alias = "MATCH (n) RETURN n AS m ORDER BY m";
+    assert_query_error_at(
+        variable_alias,
+        &[],
+        LanguageErrorKind::Syntax,
+        variable_alias.rfind('m').unwrap(),
+    );
+    let variable_order = "MATCH (a KEY $ak) RETURN a ORDER BY a";
+    assert_query_error_at(
+        variable_order,
+        &[param("ak", PropertyValue::String("a".into()))],
+        LanguageErrorKind::Syntax,
+        variable_order.rfind('a').unwrap(),
+    );
+
+    for (text, position) in [
+        (
+            "MATCH (a KEY $ak)-[r:R]->(b) CREATE (a)-[e:S KEY $k]->(r)",
+            55,
+        ),
+        (
+            "MATCH (a KEY $ak)-[r:R]->(b) CREATE (r)-[e:S KEY $k]->(b)",
+            37,
+        ),
+    ] {
+        assert_query_error_at(
+            text,
+            &[
+                param("ak", PropertyValue::String("a".into())),
+                param("k", PropertyValue::String("edge".into())),
+            ],
+            LanguageErrorKind::Syntax,
+            position,
+        );
+    }
+
     let skip_limit = "MATCH (n) RETURN n SKIP $skip LIMIT $limit";
     successful(
         skip_limit,
@@ -828,6 +1002,18 @@ fn parameters_are_typed_and_missing_unused_or_duplicate_values_are_rejected() {
     );
     assert_eq!(error.kind, LanguageErrorKind::Parameter);
     assert_eq!(error.position, "MATCH (n) RETURN n".len());
+
+    let partially_used_text = "MATCH (a KEY $ak) WHERE a.x = $p RETURN a";
+    assert_query_error_at(
+        partially_used_text,
+        &[
+            param("ak", PropertyValue::String("a".into())),
+            param("p", PropertyValue::Integer(1)),
+            param("q", PropertyValue::Boolean(true)),
+        ],
+        LanguageErrorKind::Parameter,
+        partially_used_text.len(),
+    );
 
     let duplicate = [
         ParameterEntry {
