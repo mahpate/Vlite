@@ -910,6 +910,8 @@ pub struct Database {
     snapshot_retained_bytes: std::sync::Arc<std::sync::atomic::AtomicU64>,
     #[cfg(test)]
     fail_next_group_sync: bool,
+    #[cfg(test)]
+    fail_flusher_after_commit: bool,
     /// Live collections by ID; ID 0 (`default`) is always present.
     collections: BTreeMap<u16, Collection>,
     /// At most one background rebuild per database, owned by one collection.
@@ -1411,6 +1413,8 @@ impl Database {
             snapshot_retained_bytes: Default::default(),
             #[cfg(test)]
             fail_next_group_sync: false,
+            #[cfg(test)]
+            fail_flusher_after_commit: false,
             collections: BTreeMap::from([(
                 0,
                 Collection::empty(
@@ -1563,6 +1567,8 @@ impl Database {
             snapshot_retained_bytes: Default::default(),
             #[cfg(test)]
             fail_next_group_sync: false,
+            #[cfg(test)]
+            fail_flusher_after_commit: false,
             collections: loaded
                 .collections
                 .into_iter()
@@ -2389,12 +2395,22 @@ impl Database {
         if self.group_active || self.flusher.is_some() {
             self.commit_frame_with_sync(sequence, frame, |_| Ok(()))?;
             if let Some(flusher) = &self.flusher {
+                #[cfg(test)]
+                if self.fail_flusher_after_commit {
+                    flusher.inject_sync_failure();
+                }
                 flusher.mark_written();
             }
         } else {
             self.commit_frame_with_sync(sequence, frame, LockedFile::sync_all)?;
         }
         self.checkpoint_after_commit();
+        #[cfg(test)]
+        if std::mem::take(&mut self.fail_flusher_after_commit) {
+            let flusher = self.flusher.as_ref().expect("failpoint needs a flusher");
+            assert!(flusher.sync_now().is_err());
+            assert!(flusher.failed());
+        }
         Ok(())
     }
 
@@ -2649,6 +2665,10 @@ impl Database {
         sequence: u64,
         expires_at_ms: Option<u64>,
     ) -> Result<()> {
+        if !self.state(collection).records.is_compact() {
+            self.apply_resident(collection, id, record, sequence, expires_at_ms);
+            return Ok(());
+        }
         let applied = (|| {
             let vector_bytes = record.as_ref().map_or(0, |record| record.vector.len() * 4);
             self.ensure_mutable_in(collection)?;
@@ -2671,6 +2691,35 @@ impl Database {
             return Err(error);
         }
         Ok(())
+    }
+
+    fn apply_resident(
+        &mut self,
+        collection: u16,
+        id: u64,
+        record: Option<Record>,
+        sequence: u64,
+        expires_at_ms: Option<u64>,
+    ) {
+        let vector_bytes = record.as_ref().map_or(0, |record| record.vector.len() * 4);
+        self.touch_graph_record(collection, id, sequence);
+        let state = self
+            .collections
+            .get_mut(&collection)
+            .expect("committed collection is live");
+        if let Some((owner, job)) = &mut self.rebuild
+            && *owner == collection
+        {
+            job.track(
+                id,
+                state.records.resident().expect("resident apply").get(&id),
+                vector_bytes,
+            );
+            job.set_vector_sequence(sequence);
+        }
+        state
+            .apply_committed(id, record, sequence, vector_bytes, expires_at_ms)
+            .expect("resident apply cannot fail");
     }
 
     // ---------------------------------------------------------------- collections
@@ -4322,7 +4371,7 @@ mod tests {
         db.set_durability(periodic(5)).unwrap();
         db.put(1, &[1.0], b"").unwrap();
         db.sync().unwrap();
-        db.flusher.as_ref().unwrap().inject_sync_failure();
+        db.fail_flusher_after_commit = true;
         db.put(2, &[2.0], b"").unwrap();
         assert!(wait_until(|| db.is_poisoned()), "the flusher must poison");
         assert!(matches!(db.put(3, &[3.0], b""), Err(Error::Poisoned)));
@@ -4341,6 +4390,234 @@ mod tests {
             db.set_durability(Durability::Full),
             Err(Error::Poisoned)
         ));
+    }
+
+    fn post_append_contract(kind: &str) {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("post-append.vlite");
+        let mut db = Database::create(&path, 1).unwrap();
+        db.put(1, &[1.0], b"old").unwrap();
+        if kind == "graph" {
+            db.create_graph("g").unwrap();
+        }
+        let before = db.sequence;
+        let rows = [
+            Mutation::Put {
+                id: 2,
+                vector: vec![2.0],
+                payload: b"two".to_vec(),
+            },
+            Mutation::Put {
+                id: 3,
+                vector: vec![3.0],
+                payload: b"three".to_vec(),
+            },
+            Mutation::Delete { id: 1 },
+        ];
+        let marker = format::ImportMarker {
+            job: 1,
+            chunk: 1,
+            rows_committed: rows.len() as u64,
+            rows_skipped: 0,
+            flags: 0,
+            digest: import::chunk_digest(&rows, InvalidRowPolicy::RejectChunk),
+        };
+        db.fail_flusher_after_commit = true;
+        let result = match kind {
+            "put" => db.put(2, &[2.0], b"two"),
+            "expiry" => db
+                .put_with_expiry(2, &[2.0], b"two", &Metadata::new(), Some(u64::MAX))
+                .map(drop),
+            "delete" => db.delete(1).map(drop),
+            "batch" => db.write_batch(&rows),
+            "import" => db.commit_import_frame(0, &rows, &marker).map(drop),
+            "graph" => {
+                let mut operations = vec![property_graph::GraphOp::CreateNode {
+                    key: "node".into(),
+                    labels: Vec::new(),
+                    properties: Metadata::new(),
+                }];
+                operations.extend(rows.iter().cloned().map(|mutation| {
+                    property_graph::GraphOp::Vector {
+                        collection: "default".into(),
+                        mutation,
+                    }
+                }));
+                db.graph_mut("g")
+                    .unwrap()
+                    .write_batch(&operations)
+                    .map(drop)
+            }
+            _ => unreachable!(),
+        };
+        assert_eq!(db.sequence, before + 1, "frame must have been appended");
+        let records = db.default_state().records.resident().unwrap().clone();
+        let revisions = db.default_state().revisions.clone();
+        let expiries = db.default_state().expiries.clone();
+        let live_body_bytes = db.default_state().live_body_bytes;
+        let vector_sequence = db.default_state().vector_sequence;
+        let import_state = db.imports.clone();
+        let graph_nodes = db
+            .graph
+            .as_ref()
+            .and_then(|state| state.graph_by_name("g"))
+            .map(|graph| graph.node_count());
+        assert!(db.flusher.as_ref().unwrap().failed());
+        assert!(matches!(db.put(99, &[99.0], b""), Err(Error::Poisoned)));
+        assert_eq!(db.sequence, before + 1, "next write must not append");
+        drop(db);
+        let reopened = Database::open(&path).unwrap();
+        assert_eq!(reopened.sequence, before + 1);
+        assert_eq!(
+            records,
+            *reopened.default_state().records.resident().unwrap(),
+            "appended {kind} returned {result:?}"
+        );
+        assert_eq!(revisions, reopened.default_state().revisions);
+        assert_eq!(expiries, reopened.default_state().expiries);
+        assert_eq!(live_body_bytes, reopened.default_state().live_body_bytes);
+        assert_eq!(vector_sequence, before + 1);
+        assert_eq!(import_state, reopened.imports);
+        if let Some(nodes) = graph_nodes {
+            assert_eq!(nodes, 1);
+            assert_eq!(reopened.graph("g").unwrap().info().node_count, 1);
+        }
+        match kind {
+            "delete" => assert!(reopened.get(1).unwrap().is_none()),
+            "batch" | "import" | "graph" => {
+                assert!(reopened.get(1).unwrap().is_none());
+                assert_eq!(reopened.get(2).unwrap().unwrap().payload, b"two");
+                assert_eq!(reopened.get(3).unwrap().unwrap().payload, b"three");
+            }
+            _ => assert_eq!(reopened.get(2).unwrap().unwrap().payload, b"two"),
+        }
+        assert!(result.is_ok(), "appended {kind} returned {result:?}");
+    }
+
+    #[test]
+    fn post_append_put() {
+        post_append_contract("put");
+    }
+
+    #[test]
+    fn post_append_put_with_expiry() {
+        post_append_contract("expiry");
+    }
+
+    #[test]
+    fn post_append_delete() {
+        post_append_contract("delete");
+    }
+
+    #[test]
+    fn post_append_write_batch() {
+        post_append_contract("batch");
+    }
+
+    #[test]
+    fn post_append_import() {
+        post_append_contract("import");
+    }
+
+    #[test]
+    fn post_append_graph_vectors() {
+        post_append_contract("graph");
+    }
+
+    #[test]
+    fn resident_writes_refuse_read_only_before_append() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("apply-read-only.vlite");
+        let mut db = Database::create(&path, 1).unwrap();
+        db.put(1, &[1.0], b"old").unwrap();
+        db.create_graph("g").unwrap();
+        drop(db);
+        let mut db = Database::open_read_only(&path).unwrap();
+        let sequence = db.sequence;
+        let length = std::fs::metadata(&path).unwrap().len();
+        let rows = [Mutation::Delete { id: 1 }];
+        let marker = format::ImportMarker {
+            job: 1,
+            chunk: 1,
+            rows_committed: 1,
+            rows_skipped: 0,
+            flags: 0,
+            digest: import::chunk_digest(&rows, InvalidRowPolicy::RejectChunk),
+        };
+        assert!(matches!(db.put(2, &[2.0], b""), Err(Error::ReadOnly)));
+        assert!(matches!(
+            db.put_with_expiry(2, &[2.0], b"", &Metadata::new(), Some(u64::MAX)),
+            Err(Error::ReadOnly)
+        ));
+        assert!(matches!(db.delete(1), Err(Error::ReadOnly)));
+        assert!(matches!(db.write_batch(&rows), Err(Error::ReadOnly)));
+        assert!(matches!(
+            db.commit_import_frame(0, &rows, &marker),
+            Err(Error::ReadOnly)
+        ));
+        assert!(matches!(db.graph_mut("g"), Err(Error::ReadOnly)));
+        assert_eq!(db.sequence, sequence);
+        assert_eq!(std::fs::metadata(&path).unwrap().len(), length);
+        assert_eq!(db.get(1).unwrap().unwrap().payload, b"old");
+        assert!(db.get(2).unwrap().is_none());
+    }
+
+    #[test]
+    fn resident_apply_preserves_graph_rebuild_and_accounting_after_append() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("apply-derived.vlite");
+        let mut db = Database::create(&path, 1).unwrap();
+        db.put(1, &[1.0], b"old").unwrap();
+        db.create_graph("g").unwrap();
+        db.graph_mut("g")
+            .unwrap()
+            .write_batch(&[
+                property_graph::GraphOp::CreateNode {
+                    key: "node".into(),
+                    labels: Vec::new(),
+                    properties: Metadata::new(),
+                },
+                property_graph::GraphOp::Attach {
+                    node: "node".into(),
+                    collection: "default".into(),
+                    record: 1,
+                },
+            ])
+            .unwrap();
+        db.start_hnsw_rebuild(
+            HnswConfig::default(),
+            DistanceMetric::SquaredL2,
+            HnswRebuildLimits::default(),
+        )
+        .unwrap();
+        db.fail_flusher_after_commit = true;
+        db.put(1, &[2.0], b"replacement").unwrap();
+        let sequence = db.sequence;
+        assert_eq!(
+            db.graph
+                .as_ref()
+                .unwrap()
+                .graph_by_name("g")
+                .unwrap()
+                .graph_sequence(),
+            sequence
+        );
+        let (_, job) = db.rebuild.as_ref().unwrap();
+        assert!(job.covers_vector_sequence(sequence));
+        let buffer = job.progress().catchup_buffer.unwrap();
+        assert_eq!(buffer.buffered_ids, 1);
+        assert_eq!(buffer.buffer_vector_bytes, 8);
+        let state = db.default_state();
+        assert_eq!(state.vector_sequence, sequence);
+        assert_eq!(state.revisions.get(&1), Some(&sequence));
+        let bodies = state
+            .records
+            .resident()
+            .unwrap()
+            .values()
+            .map(format::record_body_len)
+            .sum::<u64>();
+        assert_eq!(state.live_body_bytes, bodies);
     }
 
     #[test]
