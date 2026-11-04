@@ -193,6 +193,7 @@ impl CollectionSource {
 }
 
 pub(crate) struct CompactGeneration {
+    identity: GenerationId,
     backing: Backing,
     collections: BTreeMap<u16, CollectionSource>,
     cipher: Option<Cipher>,
@@ -226,6 +227,7 @@ impl CompactGeneration {
             })
             .collect::<Result<_>>()?;
         Ok(Self {
+            identity: GenerationId::next()?,
             backing,
             collections,
             cipher,
@@ -334,6 +336,155 @@ impl CompactGeneration {
     }
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub(crate) struct GenerationId(u64);
+
+impl GenerationId {
+    fn next() -> Result<Self> {
+        static NEXT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
+        use std::sync::atomic::Ordering::Relaxed;
+        let mut id = NEXT.load(Relaxed);
+        loop {
+            let next = id
+                .checked_add(1)
+                .ok_or(Error::InvalidQuery("compact generation identity exhausted"))?;
+            match NEXT.compare_exchange_weak(id, next, Relaxed, Relaxed) {
+                Ok(_) => return Ok(Self(id)),
+                Err(current) => id = current,
+            }
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
+struct CacheKey {
+    generation: GenerationId,
+    collection: u16,
+    kind: u16,
+    partition: u64,
+}
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub(crate) struct SeamAccounting {
+    pub(crate) mapped_live: usize,
+    pub(crate) mapped_peak: usize,
+    pub(crate) vectors_live: usize,
+    pub(crate) vectors_peak: usize,
+    pub(crate) plaintext_live: usize,
+    pub(crate) plaintext_peak: usize,
+    pub(crate) cells_live: usize,
+    pub(crate) cells_peak: usize,
+    pub(crate) hits: u64,
+    pub(crate) misses: u64,
+    pub(crate) evictions: u64,
+}
+
+struct VectorBlock {
+    values: Vec<f32>,
+    dimensions: usize,
+    precision: Precision,
+    used: u64,
+}
+
+/// Serial operation-local storage, never shared by a generation or persisted.
+pub(crate) struct ReadWorkspace {
+    budget: usize,
+    clock: u64,
+    vectors: BTreeMap<CacheKey, VectorBlock>,
+    plaintext: Vec<u8>,
+    accounting: SeamAccounting,
+}
+
+fn increment(value: &mut u64) -> Result<()> {
+    *value = value
+        .checked_add(1)
+        .ok_or(Error::InvalidQuery("compact workspace counter exhausted"))?;
+    Ok(())
+}
+
+impl ReadWorkspace {
+    pub(crate) fn new(budget: usize) -> Result<Self> {
+        if budget > 4 * 1024 * 1024 {
+            return Err(Error::InvalidQuery("compact workspace exceeds 4 MiB"));
+        }
+        Ok(Self {
+            budget,
+            clock: 0,
+            vectors: BTreeMap::new(),
+            plaintext: Vec::new(),
+            accounting: SeamAccounting::default(),
+        })
+    }
+
+    pub(crate) fn accounting(&mut self, view: &CompactView) -> Result<SeamAccounting> {
+        let mapped = match &view.generation.backing {
+            Backing::Owned(_) => 0,
+            #[cfg(not(target_arch = "wasm32"))]
+            Backing::Mapped(bytes) => bytes.len(),
+        };
+        let mut cells = 0usize;
+        for collection in view.generation.collections.values() {
+            for record in collection.cells.iter().filter_map(|cell| cell.record.get()) {
+                cells = cells
+                    .checked_add(
+                        usize::try_from(crate::format::record_body_len(record))
+                            .map_err(|_| Error::InvalidQuery("compact cell accounting overflow"))?,
+                    )
+                    .ok_or(Error::InvalidQuery("compact cell accounting overflow"))?;
+            }
+        }
+        self.accounting.mapped_live = mapped;
+        self.accounting.mapped_peak = self.accounting.mapped_peak.max(mapped);
+        self.accounting.cells_live = cells;
+        self.accounting.cells_peak = self.accounting.cells_peak.max(cells);
+        Ok(self.accounting)
+    }
+
+    fn body<'a>(&'a mut self, view: &'a CompactView, block: &SourceFrame) -> Result<&'a [u8]> {
+        // Release the previous plaintext before authentication allocates its frame.
+        self.plaintext = Vec::new();
+        self.accounting.plaintext_live = 0;
+        let disk = view
+            .generation
+            .backing
+            .as_slice()
+            .get(block.frame.clone())
+            .ok_or_else(|| corrupt(block.offset, "compact source frame is out of bounds"))?;
+        if disk.len() < PREFIX_SIZE + FOOTER_SIZE
+            || disk.len() - PREFIX_SIZE - FOOTER_SIZE
+                > super::catalog::payload::MAX_BODY + crate::crypto::SEAL_OVERHEAD
+            || block.kind != block.source.frame_id as u16
+            || u32_at(disk, disk.len() - FOOTER_SIZE + 4) != block.checksum
+        {
+            return Err(corrupt(block.offset, "compact source frame changed"));
+        }
+        let frame = if let Some(cipher) = &view.generation.cipher {
+            self.plaintext =
+                format::verified_frame(disk, Some(cipher), block.sequence, block.offset)?
+                    .into_owned();
+            self.accounting.plaintext_live = self.plaintext.len();
+            self.accounting.plaintext_peak = self
+                .accounting
+                .plaintext_peak
+                .max(self.accounting.plaintext_live);
+            self.plaintext.as_slice()
+        } else {
+            disk
+        };
+        let end = frame
+            .len()
+            .checked_sub(FOOTER_SIZE)
+            .ok_or_else(|| corrupt(block.offset, "compact source frame is truncated"))?;
+        let body = frame
+            .get(PREFIX_SIZE..end)
+            .ok_or_else(|| corrupt(block.offset, "compact source frame is truncated"))?;
+        if body.len() > super::catalog::payload::MAX_BODY {
+            return Err(corrupt(block.offset, "compact source body exceeds limit"));
+        }
+        Ok(body)
+    }
+}
+
 #[derive(Clone)]
 pub(crate) struct CompactView {
     generation: Arc<CompactGeneration>,
@@ -341,6 +492,143 @@ pub(crate) struct CompactView {
 }
 
 impl CompactView {
+    pub(crate) fn generation_id(&self) -> GenerationId {
+        self.generation.identity
+    }
+
+    pub(crate) fn read_metadata(
+        &self,
+        row: usize,
+        workspace: &mut ReadWorkspace,
+    ) -> Result<Option<crate::Metadata>> {
+        let Some((block, row, _)) = self.source().and_then(|source| source.row_at(row)) else {
+            return Ok(None);
+        };
+        let bytes = workspace
+            .body(self, block)?
+            .get(row.metadata.clone())
+            .ok_or_else(|| corrupt(block.offset, "compact metadata extent is out of bounds"))?;
+        crate::metadata::decode(bytes)
+            .map(Some)
+            .map_err(|_| corrupt(block.offset, "invalid compact record metadata"))
+    }
+
+    pub(crate) fn read_vector<'w>(
+        &self,
+        row: usize,
+        workspace: &'w mut ReadWorkspace,
+    ) -> Result<Option<&'w [f32]>> {
+        let Some(source) = self.source() else {
+            return Ok(None);
+        };
+        let Some((block, _, _)) = source.row_at(row) else {
+            return Ok(None);
+        };
+        let dimensions = block.source.layout.dimensions;
+        let elements = block
+            .source
+            .rows
+            .len()
+            .checked_mul(dimensions)
+            .ok_or(Error::InvalidQuery("compact vector size overflow"))?;
+        let bytes = elements
+            .checked_mul(4)
+            .ok_or(Error::InvalidQuery("compact vector size overflow"))?;
+        if bytes > workspace.budget {
+            return Err(Error::InvalidQuery(
+                "compact scratch budget is smaller than one block",
+            ));
+        }
+        let key = CacheKey {
+            generation: self.generation_id(),
+            collection: self.collection,
+            kind: block.kind,
+            partition: block.source.frame_id >> 16,
+        };
+        increment(&mut workspace.clock)?;
+        if workspace.vectors.contains_key(&key) {
+            // Authentication is per read, even when decoded vectors are cached.
+            workspace.body(self, block)?;
+            let entry = workspace
+                .vectors
+                .get_mut(&key)
+                .expect("checked cache entry");
+            if entry.values.len() != elements
+                || entry.dimensions != dimensions
+                || entry.precision != block.source.layout.precision
+            {
+                return Err(Error::InvalidQuery("compact cached block shape changed"));
+            }
+            increment(&mut workspace.accounting.hits)?;
+            entry.used = workspace.clock;
+        } else {
+            increment(&mut workspace.accounting.misses)?;
+            while workspace
+                .accounting
+                .vectors_live
+                .checked_add(bytes)
+                .ok_or(Error::InvalidQuery("compact vector accounting overflow"))?
+                > workspace.budget
+            {
+                let key = workspace
+                    .vectors
+                    .iter()
+                    .min_by_key(|(key, entry)| (entry.used, **key))
+                    .map(|(key, _)| *key)
+                    .ok_or(Error::InvalidQuery("compact cache accounting mismatch"))?;
+                let removed = workspace.vectors.remove(&key).expect("selected entry");
+                workspace.accounting.vectors_live = workspace
+                    .accounting
+                    .vectors_live
+                    .checked_sub(removed.values.len() * 4)
+                    .ok_or(Error::InvalidQuery("compact vector accounting underflow"))?;
+                increment(&mut workspace.accounting.evictions)?;
+            }
+            let body = workspace.body(self, block)?;
+            let width = match block.source.layout.precision {
+                Precision::Float32 => 4,
+                Precision::Float16 => 2,
+            };
+            let mut values = Vec::with_capacity(elements);
+            for row in &block.source.rows {
+                let vector = body
+                    .get(row.vector.clone())
+                    .filter(|extent| extent.len() == dimensions * width)
+                    .ok_or_else(|| corrupt(block.offset, "invalid compact vector extent"))?;
+                values.extend(vector.chunks_exact(width).map(|component| match width {
+                    4 => f32::from_le_bytes(component.try_into().expect("component width")),
+                    2 => from_half(u16::from_le_bytes(
+                        component.try_into().expect("component width"),
+                    )),
+                    _ => unreachable!("checked precision"),
+                }));
+            }
+            workspace.accounting.vectors_live = workspace
+                .accounting
+                .vectors_live
+                .checked_add(bytes)
+                .ok_or(Error::InvalidQuery("compact vector accounting overflow"))?;
+            workspace.accounting.vectors_peak = workspace
+                .accounting
+                .vectors_peak
+                .max(workspace.accounting.vectors_live);
+            workspace.vectors.insert(
+                key,
+                VectorBlock {
+                    values,
+                    dimensions,
+                    precision: block.source.layout.precision,
+                    used: workspace.clock,
+                },
+            );
+        }
+        let block_index = source.block_starts.partition_point(|&start| start <= row) - 1;
+        let start = (row - source.block_starts[block_index]) * dimensions;
+        Ok(Some(
+            &workspace.vectors[&key].values[start..start + dimensions],
+        ))
+    }
+
     fn source(&self) -> Option<&CollectionSource> {
         self.generation.collections.get(&self.collection)
     }
@@ -436,3 +724,5 @@ mod install_tests;
 mod method_tests;
 #[cfg(test)]
 mod overlay_tests;
+#[cfg(test)]
+mod seam_tests;
