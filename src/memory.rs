@@ -9,6 +9,7 @@ use std::collections::{BTreeMap, BTreeSet};
 mod consolidate;
 mod ranking;
 mod recall;
+mod stale;
 
 use sha2::{Digest, Sha256};
 
