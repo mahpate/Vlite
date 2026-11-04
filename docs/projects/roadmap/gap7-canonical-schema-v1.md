@@ -1,6 +1,9 @@
 # Gap 7 canonical schema v1
 
-Status: **PROPOSED for coordinator ratification**. This appendix specifies bytes,
+Status: **RATIFIED PROVISIONALLY by the coordinator on 2026-11-04** after independent
+review (214 vectors and 80 hand mutants pass in both Python modes). Every persisted byte
+below freezes at the release go/no-go; until then a change needs a new coordinator ruling.
+This appendix specifies bytes,
 not an implementation acceptance, public API, wire, activation or release decision.
 It supplements sections 3-6 of `gap7-graphrag-ingestion.md` without changing their
 operation order, state derivation, admission limits or thirteen approved decisions.
@@ -680,9 +683,10 @@ replaces the engine's exact encoder. No Rust/compiler/frame-reference change.
 
 ## 8. Ruling table
 
-All choices are proposed; none alters an approved Gap7-* decision.
+All choices below were proposed by the schema lane and ratified provisionally by the
+coordinator; none alters an approved Gap7-* decision.
 
-| Ambiguity | Options | Proposed choice / rationale | Compatibility / gate |
+| Ambiguity | Options | Chosen rule / rationale | Compatibility / gate |
 |---|---|---|---|
 | Hash framing | delimiter; fixed domain tag; framed ASCII | version + U32 domain + U32 payload, no concatenation ambiguity | New private v1 bytes only |
 | Internal digest | hex64; raw32 | raw32, compact and unambiguous | Text remains lowercase hex64 |
@@ -705,7 +709,7 @@ All choices are proposed; none alters an approved Gap7-* decision.
 | Cleanup receipt with no resulting revision | Opt; sentinel | empty revision_key only for Deleted/Aborted outcome | Explicit sentinel cannot be a valid graph key; head fields still use Opt |
 | Deadlines | persist; execution-only | no stored deadline/TTL; execution envelope only | Existing explicit-delete policy unchanged |
 | Edge creation/comparison | keyless; keyed | all four edge roles keyed; every physical property participates | Bit-identical equality after canonical F32/F64 positive-zero normalization |
-| New source head order | head progress reused; distinct creation | tag 13 creates the absent-guard head as operation zero in the first frame; tag 11 only patches later | One clarification will be added to the contract at ratification; no approved decision changes |
+| New source head order | head progress reused; distinct creation | tag 13 creates the absent-guard head as operation zero in the first frame; tag 11 only patches later | One clarification is in the contract (section 4) as of ratification; no approved decision changes |
 | Physical vector shape | vector envelope; graph-like metadata | Integer version + four String metadata fields, exact chunk payload, normalized F32 bytes, no expiry | Canonical `vector_data` remains the preflight/digest source |
 | Readable projections | fragments only; redundant scalars | required canonical-derived scalar properties, compared on replay | v1 required for graph reads/dashboard; mismatch is evidence conflict |
 | Pipeline labels | shared reserved list; registry split | All four: 1..256 ASCII `[A-Za-z0-9._-]+`, preserved verbatim; extractor/model versions reject ASCII-case-insensitive `latest`/`default`; extractor/embedder aliases have no reserved words | Exact implemented Gap 8 registry rule (`src/server/providers.rs:373-391`); case remains in canonical bytes and digests, no normalization |

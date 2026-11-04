@@ -2,6 +2,8 @@
 
 Status: embedded design choices approved individually on 2026-11-02;
 nothing in this document is implemented or qualified.
+The byte-level schema is the [canonical schema appendix](gap7-canonical-schema-v1.md),
+ratified provisionally on 2026-11-04; its persisted bytes freeze at the release go/no-go.
 This document follows the [serving wire conventions](serving-wire-conventions.md), whose shared owner decisions were selected on 2026-11-02; items still unchecked for it in that note's section 7 remain conformance work.
 Scope: one source document becomes embedded chunks, resolved entities, directed
 relations and evidence in a graph-enabled database. Section 10 records the
@@ -308,6 +310,11 @@ nodes sorted by key; chunks by ordinal with vector put before attachment; proven
 edges; relation edges sorted by canonical identity; receipt and ownership shards; the
 batch receipt; head progress/state; and, in the first frame only, the root receipt
 last. Retained existing anchors are not rewritten.
+For a source that does not exist yet, the first operation of the first frame is a
+distinct create-head operation (the absent-guard head in its final state for that
+frame, never a patch), and it cannot be reordered; every later frame and every
+existing head changes the head only through a guarded patch. The exact operation,
+field and framing bytes are in the [canonical schema appendix](gap7-canonical-schema-v1.md).
 Every changed existing graph object uses its captured revision; new receipt/head
 creation uses `Expected::Absent`. Each frame's final checks and append share the
 exclusive borrow; a prepared bundle is not a lock across calls or frames.
@@ -577,6 +584,10 @@ input bytes, spans, canonical digests, normalized identities, ordered operations
 and batch boundaries; provider fixtures are fixed accepted outputs/vector bits.
 Test exact encoded-byte boundaries against a separately specified frame-size
 calculation; compare the engine encoder as the implementation, not the oracle.
+The exact byte schema has its own independent reference,
+`tests/ingestion_schema_reference.py` with `tests/fixtures/ingestion/schema-v1/`
+(provisionally ratified; run in CI in both Python modes). The Rust core is compared
+with those vectors, never the reverse.
 
 | Requirement | Independent acceptance |
 |---|---|
@@ -622,6 +633,10 @@ oracle early but runs its final gate after all enabled surfaces.
 | `gap7-providers` / **BLOCKED**: accepted core and a Gap 8 amendment adding an extraction-provider kind (section 10) | `src/ingestion/providers.rs`; ingestion-only fixtures in `tests/ingestion_providers.rs`; ingestion provider documentation; `site/api.html` rows for any new public items | Cannot start until Gap 8 accepts that amendment and names its slice; then consume its contracts and do not implement a competing registry. Checklist: explicit egress only; alias/tenant/binding checks; response/deadline/concurrency caps; prompt-injection fixtures; no fallback or sensitive logs; `python tests/api_reference.py` passes. Shared registry edits remain owned by Gap 8 |
 | `gap7-serving` / step 9 of [wire conventions section 5.1](serving-wire-conventions.md#51-order), accepted core (and providers, only if enabled) and owner approval of exact public wire **before work starts** | New `src/server/ingestion.rs`; narrowly coordinated dispatch in `src/server.rs` and `src/server/grpc.rs`; `src/openapi_graph.json` for any `/v1/graphs` paths and `src/openapi.json` for components (and any non-graph paths), per [wire conventions section 5.2](serving-wire-conventions.md#52-per-file-owner-and-sequence); `proto/vlite/v1/vlite.proto`, relevant client/binding/tool adapters and API documentation only as enumerated in the approved wire inventory | Write exact request/result/error/status/resume schemas first, including numeric encoding and transport body caps. Checklist: approved surface/file/tag inventory; auth/quota/cancellation parity; section 6 provider/admission error mappings; proposed raw-write rejection for reserved `G7*` objects; receipt replay across adapters; transport limits fail explicitly; no unapproved REST/gRPC/MCP/CLI/Python additions |
 | `gap7-qualification` / accepted enabled slices | `tests/ingestion_reference.py`, `tests/fixtures/ingestion/`, `tests/ingestion_qualification.rs`; this design's acceptance/status updates | Own independent Python oracle and hand-reviewed goldens. Checklist: cross-platform digest parity; every mutation killed; frame/crash/replay and maintenance matrix; tenant/egress/redaction tests; publish pass/fail evidence before release |
+
+`gap7-core` acceptance also requires reproducing every vector of
+`tests/fixtures/ingestion/schema-v1/vectors.json` byte for byte from the schema
+appendix text, without reading `tests/ingestion_schema_reference.py`.
 
 `gap7-providers` is blocked. Gap 8 as written defines embedding and reranker
 providers only and has no extraction-provider kind (C15); `gap8-provider-registry` is
