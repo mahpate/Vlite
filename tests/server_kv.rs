@@ -175,6 +175,201 @@ async fn kv_contract_wire_goldens() {
 }
 
 #[tokio::test]
+async fn kv_put_expected_and_query_encoding_are_strict() {
+    let directory = tempfile::tempdir().unwrap();
+    let mut db = database(FormatVersion::V5);
+    {
+        let mut store = db.kv_store("default").unwrap();
+        store
+            .put("n", "\u{fffd}", b"replacement", KvPut::default())
+            .unwrap();
+        store.put("n", "a b", b"space", KvPut::default()).unwrap();
+    }
+    let app = start(db, directory.path());
+    for (expected, code) in [
+        (json!("5"), "invalid_input"),
+        (json!(""), "invalid_input"),
+        (Value::Null, "invalid_input"),
+        (json!(5), "invalid_input"),
+        (json!({"revision":"1","extra":2}), "invalid_json"),
+    ] {
+        let mut input = put("expected");
+        input["expected"] = expected;
+        let (status, body) = call(
+            &app,
+            ADMIN,
+            "PUT",
+            "/v1/collections/default/kv/entry",
+            input,
+        )
+        .await;
+        assert_eq!(status, 422, "{body}");
+        assert_eq!(body["error"]["code"], code, "{body}");
+    }
+    let (status, body) = call(
+        &app,
+        ADMIN,
+        "PUT",
+        "/v1/collections/default/kv/entry",
+        json!({"namespace":"n","key":"missing-value"}),
+    )
+    .await;
+    assert_eq!(status, 422);
+    assert_eq!(body["error"]["code"], "invalid_json");
+
+    for uri in [
+        "/v1/collections/default/kv/entry?namespace=n&key=expected&unexpected=x",
+        "/v1/collections/default/kv/entries?namespace=n&unexpected=x",
+        "/v1/collections/default/kv/entries?namespace=n&limit=+5",
+        "/v1/collections/default/kv/entries?namespace=n&limit=05",
+    ] {
+        let (status, body) = call(&app, ADMIN, "GET", uri, Value::Null).await;
+        assert_eq!(
+            status,
+            if uri.contains("limit=") { 422 } else { 400 },
+            "{uri}: {body}"
+        );
+        assert_eq!(
+            body["error"]["code"],
+            if uri.contains("limit=") {
+                "invalid_input"
+            } else {
+                "invalid_query"
+            }
+        );
+    }
+    let (status, body) = call(
+        &app,
+        ADMIN,
+        "DELETE",
+        "/v1/collections/default/kv/entry?namespace=n&key=missing&unexpected=x",
+        Value::Null,
+    )
+    .await;
+    assert_eq!(status, 400, "{body}");
+    assert_eq!(body["error"]["code"], "invalid_query");
+
+    let (status, body) = call(
+        &app,
+        ADMIN,
+        "GET",
+        "/v1/collections/default/kv/entry?namespace=n&key=%FF",
+        Value::Null,
+    )
+    .await;
+    assert_eq!(status, 400, "{body}");
+    assert_eq!(body["error"]["code"], "invalid_query");
+    let (status, body) = call(
+        &app,
+        ADMIN,
+        "GET",
+        "/v1/collections/default/kv/entry?namespace=n&key=a+b",
+        Value::Null,
+    )
+    .await;
+    assert_eq!(status, 200, "{body}");
+    assert_eq!(body["key"], "a b");
+    assert_eq!(body["value_base64"], BASE64_STANDARD.encode(b"space"));
+}
+
+#[tokio::test]
+async fn kv_capabilities_advertise_supported_routes_and_format() {
+    let directory = tempfile::tempdir().unwrap();
+    for (format, expected) in [(FormatVersion::V5, true), (FormatVersion::V3, false)] {
+        let mut db = Database::create_in_memory(
+            1,
+            CreateOptions {
+                format: Some(format),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        if format == FormatVersion::V5 {
+            db.create_collection(
+                "wide",
+                CollectionSpec {
+                    dimensions: 2,
+                    settings: Default::default(),
+                },
+            )
+            .unwrap();
+        }
+        let app = start(db, directory.path());
+        let (status, caps) = call(&app, ADMIN, "GET", "/v1/capabilities", Value::Null).await;
+        assert_eq!(status, 200);
+        assert_eq!(caps["features"]["kv"], expected);
+        let routes = caps["routes"].as_array().unwrap();
+        for route in [
+            "/v1/collections/{collection}/kv/entry",
+            "/v1/collections/{collection}/kv/entries",
+        ] {
+            assert_eq!(
+                routes
+                    .iter()
+                    .filter(|item| item.as_str() == Some(route))
+                    .count(),
+                1
+            );
+        }
+    }
+}
+
+#[tokio::test]
+async fn kv_large_list_limits_preserve_order_and_continuation() {
+    let directory = tempfile::tempdir().unwrap();
+    let mut db = database(FormatVersion::V5);
+    let mut store = db.kv_store("default").unwrap();
+    for i in 0..2_000 {
+        store
+            .put("bulk", &format!("{i:05}"), b"x", KvPut::default())
+            .unwrap();
+    }
+    let app = start(db, directory.path());
+    for (limit, expected_len, next) in [(1_000, 1_000, Some("00999")), (10_000, 2_000, None)] {
+        let uri = format!("/v1/collections/default/kv/entries?namespace=bulk&limit={limit}");
+        let (status, page) = call(&app, ADMIN, "GET", &uri, Value::Null).await;
+        assert_eq!(status, 200);
+        assert_eq!(page["items"].as_array().unwrap().len(), expected_len);
+        assert_eq!(page["items"][0]["key"], "00000");
+        assert_eq!(
+            page["items"][expected_len - 1]["key"],
+            next.unwrap_or("01999")
+        );
+        assert_eq!(
+            page["next_after"],
+            next.map(Value::from).unwrap_or(Value::Null)
+        );
+    }
+}
+
+#[tokio::test]
+async fn kv_put_audit_records_safe_identity_and_expiry() {
+    let directory = tempfile::tempdir().unwrap();
+    let app = start(database(FormatVersion::V5), directory.path());
+    let mut input = put("audit");
+    input["expires_at_ms"] = json!("18446744073709551615");
+    let (status, body) = call(
+        &app,
+        ADMIN,
+        "PUT",
+        "/v1/collections/default/kv/entry",
+        input,
+    )
+    .await;
+    assert_eq!(status, 200, "{body}");
+    let audit = std::fs::read_to_string(directory.path().join("audit.jsonl")).unwrap();
+    let event = audit
+        .lines()
+        .map(|line| serde_json::from_str::<Value>(line).unwrap())
+        .find(|event| event["event"] == "kv_put")
+        .unwrap();
+    assert_eq!(event["outcome"], "ok");
+    assert_eq!(event["principal"], "admin");
+    assert_eq!(event["collection"], "default");
+    assert_eq!(event["expires_at_ms"], "18446744073709551615");
+}
+
+#[tokio::test]
 async fn kv_utf8_address_and_value_bounds() {
     let directory = tempfile::tempdir().unwrap();
     let app = start(database(FormatVersion::V5), directory.path());

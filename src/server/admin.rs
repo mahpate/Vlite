@@ -445,6 +445,7 @@ async fn capabilities(
     for (name, enabled) in [
         ("change_feed", v4),
         ("record_expiry", s.format_version >= 5),
+        ("kv", s.format_version >= 5),
         ("metadata_updates", s.format_version >= 5),
         ("grouped_search", s.format_version >= 5),
         ("recommendations", s.format_version >= 5),
@@ -472,6 +473,8 @@ async fn capabilities(
             "/v1/admin/replication/export",
             "/v1/vectors/{id}/metadata",
             "/v1/collections/{collection}/vectors/{id}/metadata",
+            "/v1/collections/{collection}/kv/entry",
+            "/v1/collections/{collection}/kv/entries",
             "/v1/collections/{collection}/vectors/{id}/named",
             "/v1/collections/{collection}/vectors/configure",
             "/v1/collections/{collection}/search/grouped",
