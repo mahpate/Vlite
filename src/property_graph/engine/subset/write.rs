@@ -451,12 +451,11 @@ fn materialize(
         let mut degree = 0;
         for edge_id in incident(graph, node.id.0, relationship.direction) {
             let edge = graph.edge(edge_id).expect("adjacency edge");
-            let destination =
-                if edge.source == node.id && relationship.direction != Direction::In {
-                    edge.destination
-                } else {
-                    edge.source
-                };
+            let destination = if edge.source == node.id && relationship.direction != Direction::In {
+                edge.destination
+            } else {
+                edge.source
+            };
             degree += 1;
             meter.examine(degree)?;
             if graph.edge_expired(edge, ttl_clock_ms) {
@@ -524,6 +523,37 @@ enum Kind {
     Edge,
 }
 
+/// One item of a SET or REMOVE clause.
+enum Target<'a> {
+    Set(&'a str, &'a ParameterRef),
+    Unset(&'a str),
+    AddLabel(&'a str),
+    RemoveLabel(&'a str),
+}
+
+/// One pending SET/REMOVE operation of one entity.
+struct Patch {
+    kind: Kind,
+    id: u64,
+    set: Properties,
+    unset: BTreeSet<String>,
+    add_labels: BTreeSet<String>,
+    remove_labels: BTreeSet<String>,
+}
+
+/// `1 + Σ(1 + len)`, after the label-set rules.
+fn labels_size(labels: &BTreeSet<String>) -> Result<u64, GraphError> {
+    model::validate_labels(labels)?;
+    Ok(1 + labels
+        .iter()
+        .map(|label| 1 + label.len() as u64)
+        .sum::<u64>())
+}
+
+fn unset_size(unset: &BTreeSet<String>) -> u64 {
+    1 + unset.iter().map(|name| 2 + name.len() as u64).sum::<u64>()
+}
+
 struct Transaction<'s, 'p, 'm, C> {
     planner: Planner<'s>,
     plan: &'p Plan,
@@ -544,8 +574,41 @@ impl<C: MeterClock> Transaction<'_, '_, '_, C> {
     }
 
     fn apply(&mut self, mutation: &Mutation) -> Result<(), WriteError> {
-        let _ = mutation;
-        Err(GraphError::InvalidQuery("subset mutation clause not staged").into())
+        match mutation {
+            Mutation::Create { creations, .. } => self.create(creations, false),
+            Mutation::Merge { creation, .. } => self.create(std::slice::from_ref(creation), true),
+            Mutation::Set { assignments, .. } => {
+                let targets = assignments
+                    .iter()
+                    .map(|assignment| match assignment {
+                        Assignment::Property { target, parameter } => {
+                            (&target.variable, Target::Set(&target.field.text, parameter))
+                        }
+                        Assignment::Label { variable, label } => {
+                            (variable, Target::AddLabel(&label.text))
+                        }
+                    })
+                    .collect::<Vec<_>>();
+                self.patch(&targets)
+            }
+            Mutation::Remove { removals, .. } => {
+                let targets = removals
+                    .iter()
+                    .map(|removal| match removal {
+                        Removal::Property(target) => {
+                            (&target.variable, Target::Unset(&target.field.text))
+                        }
+                        Removal::Label { variable, label } => {
+                            (variable, Target::RemoveLabel(&label.text))
+                        }
+                    })
+                    .collect::<Vec<_>>();
+                self.patch(&targets)
+            }
+            Mutation::Delete {
+                variables, detach, ..
+            } => self.delete(variables, *detach),
+        }
     }
 
     /// The live entity a binding names; a deleted one is an error.
@@ -607,6 +670,327 @@ impl<C: MeterClock> Transaction<'_, '_, '_, C> {
         Ok((properties, size))
     }
 
+    /// CREATE or MERGE: row-major, each row gaining the bound variables.
+    fn create(&mut self, creations: &[Creation], merge: bool) -> Result<(), WriteError> {
+        for index in 0..self.rows.len() {
+            for creation in creations {
+                let (variable, bound) = match creation {
+                    Creation::Node(node) => (&node.variable, self.create_node(node, merge)?),
+                    Creation::Edge(edge) => {
+                        let row = self.rows[index].clone();
+                        (&edge.variable, self.create_edge(edge, &row, merge)?)
+                    }
+                };
+                self.rows[index].insert(variable.text.clone(), bound);
+            }
+        }
+        Ok(())
+    }
+
+    fn create_node(&mut self, node: &CreationNode, merge: bool) -> Result<BoundValue, GraphError> {
+        let key = string_parameter(self.plan, &node.key);
+        model::validate_node_key(key)?;
+        let (properties, properties_size) = self.properties(&node.properties)?;
+        let labels = node
+            .labels
+            .iter()
+            .map(|label| label.text.clone())
+            .collect::<BTreeSet<_>>();
+        let labels_bytes = labels_size(&labels)?;
+        self.meter.charge()?;
+        if let Some(existing) = self.graph().node_by_key(key) {
+            if !merge {
+                return Err(GraphError::NodeKeyExists(key.into()));
+            }
+            let fits = properties.iter().all(|(name, value)| {
+                existing
+                    .properties
+                    .get(name)
+                    .is_some_and(|current| typed_equal(value, current))
+            }) && labels.is_subset(&existing.labels);
+            if !fits {
+                return Err(GraphError::EdgeKeyConflict(key.into()));
+            }
+            return Ok(BoundValue::Node(existing.id.0));
+        }
+        if self.graph().next_node_id() == u64::MAX {
+            return Err(GraphError::IdSpaceExhausted);
+        }
+        let size = 8 + 8 + 2 + key.len() as u64 + labels_bytes + 4 + properties_size;
+        let mutation = GraphMutation::CreateNode {
+            key: key.into(),
+            labels,
+            properties,
+        };
+        let MutationOutcome::Node { id, .. } = self.stage(|| Ok(size), mutation, None)? else {
+            unreachable!("CreateNode plans a node")
+        };
+        self.touched.insert((Kind::Node, id.0));
+        Ok(BoundValue::Node(id.0))
+    }
+
+    fn create_edge(
+        &mut self,
+        edge: &CreationEdge,
+        row: &BindingRow,
+        merge: bool,
+    ) -> Result<BoundValue, GraphError> {
+        let key = edge
+            .key
+            .as_ref()
+            .map(|reference| string_parameter(self.plan, reference));
+        if let Some(key) = key {
+            model::validate_edge_key(key)?;
+        }
+        let (properties, properties_size) = self.properties(&edge.properties)?;
+        let (_, source) = self.resolve(row, &edge.source.text)?;
+        let (_, destination) = self.resolve(row, &edge.destination.text)?;
+        let relationship = &edge.relationship_type.text;
+        model::validate_relationship_type(relationship)?;
+        if let Some(key) = key {
+            self.meter.charge()?;
+            let graph = self.graph();
+            if let Some(existing) = graph.edge_by_key(key) {
+                if graph.segments(existing.id).is_some() {
+                    return Err(if merge {
+                        TEMPORAL
+                    } else {
+                        GraphError::EdgeKeyConflict(key.into())
+                    });
+                }
+                let same = |value: &PropertyValue, current: &PropertyValue| {
+                    if merge {
+                        typed_equal(value, current)
+                    } else {
+                        bit_equal(value, current)
+                    }
+                };
+                let fits = properties.iter().all(|(name, value)| {
+                    existing
+                        .properties
+                        .get(name)
+                        .is_some_and(|current| same(value, current))
+                }) && (merge || existing.properties.len() == properties.len())
+                    && existing.source.0 == source
+                    && existing.destination.0 == destination
+                    && existing.relationship == *relationship;
+                if !fits {
+                    return Err(GraphError::EdgeKeyConflict(key.into()));
+                }
+                return Ok(BoundValue::Edge(existing.id.0));
+            }
+        }
+        let graph = self.graph();
+        if graph.next_edge_id() == u64::MAX {
+            return Err(GraphError::IdSpaceExhausted);
+        }
+        let node_key = |id: u64| graph.node(NodeId(id)).expect("live endpoint").key.clone();
+        let mutation = GraphMutation::CreateEdge {
+            key: key.map(str::to_owned),
+            source: node_key(source),
+            relationship: relationship.clone(),
+            destination: node_key(destination),
+            properties,
+        };
+        let size = 8
+            + 24
+            + 1
+            + relationship.len() as u64
+            + 2
+            + key.map_or(0, |key| key.len() as u64)
+            + 4
+            + properties_size;
+        let MutationOutcome::Edge { id, .. } = self.stage(|| Ok(size), mutation, None)? else {
+            unreachable!("CreateEdge plans an edge")
+        };
+        self.touched.insert((Kind::Edge, id.0));
+        Ok(BoundValue::Edge(id.0))
+    }
+
+    /// One SET or REMOVE clause: one operation per entity, in order of first
+    /// appearance across rows and items.
+    fn patch(&mut self, targets: &[(&Name, Target<'_>)]) -> Result<(), WriteError> {
+        let mut pending: Vec<Patch> = Vec::new();
+        for row in &self.rows {
+            for (variable, target) in targets {
+                let (kind, id) = self.resolve(row, &variable.text)?;
+                if kind == Kind::Edge && self.graph().segments(EdgeId(id)).is_some() {
+                    return Err(TEMPORAL.into());
+                }
+                let index = match pending
+                    .iter()
+                    .position(|patch| patch.kind == kind && patch.id == id)
+                {
+                    Some(index) => index,
+                    None => {
+                        pending.push(Patch {
+                            kind,
+                            id,
+                            set: Properties::new(),
+                            unset: BTreeSet::new(),
+                            add_labels: BTreeSet::new(),
+                            remove_labels: BTreeSet::new(),
+                        });
+                        pending.len() - 1
+                    }
+                };
+                let patch = &mut pending[index];
+                match target {
+                    Target::Set(name, reference) => {
+                        patch
+                            .set
+                            .insert((*name).to_owned(), parameter(self.plan, reference).clone());
+                    }
+                    Target::Unset(name) => {
+                        patch.unset.insert((*name).to_owned());
+                    }
+                    Target::AddLabel(name) => {
+                        patch.add_labels.insert((*name).to_owned());
+                    }
+                    Target::RemoveLabel(name) => {
+                        patch.remove_labels.insert((*name).to_owned());
+                    }
+                }
+            }
+        }
+        for patch in pending {
+            self.stage_patch(patch)?;
+        }
+        Ok(())
+    }
+
+    fn stage_patch(&mut self, patch: Patch) -> Result<(), GraphError> {
+        let expected = self.precondition(patch.kind, patch.id);
+        let set_size = properties::validate(&patch.set)? as u64;
+        let unset_bytes = unset_size(&patch.unset);
+        let graph = self.graph();
+        let (current, labels, key) = match patch.kind {
+            Kind::Node => {
+                let node = graph.node(NodeId(patch.id)).expect("live node");
+                (&node.properties, Some(&node.labels), Some(node.key.clone()))
+            }
+            Kind::Edge => {
+                let edge = graph.edge(EdgeId(patch.id)).expect("live edge");
+                (&edge.properties, None, None)
+            }
+        };
+        let mut merged = current.clone();
+        merged.extend(patch.set.clone());
+        merged.retain(|name, _| !patch.unset.contains(name));
+        properties::validate(&merged)?;
+        if let Some(labels) = labels {
+            let merged = labels
+                .union(&patch.add_labels)
+                .filter(|label| !patch.remove_labels.contains(*label))
+                .cloned()
+                .collect::<BTreeSet<_>>();
+            model::validate_labels(&merged)?;
+        }
+        match key {
+            Some(key) => {
+                let (add, remove) = (patch.add_labels.clone(), patch.remove_labels.clone());
+                let size = || {
+                    Ok(
+                        16 + labels_size(&add)?
+                            + labels_size(&remove)?
+                            + 4
+                            + set_size
+                            + unset_bytes,
+                    )
+                };
+                let mutation = GraphMutation::PatchNode {
+                    key,
+                    add_labels: patch.add_labels,
+                    remove_labels: patch.remove_labels,
+                    set: patch.set,
+                    unset: patch.unset,
+                    expected,
+                };
+                self.stage(size, mutation, Some(expected))?;
+            }
+            None => {
+                let mutation = GraphMutation::PatchEdge {
+                    edge: EdgeSelector::Id(EdgeId(patch.id)),
+                    set: patch.set,
+                    unset: patch.unset,
+                    expected,
+                };
+                self.stage(
+                    || Ok(16 + 4 + set_size + unset_bytes),
+                    mutation,
+                    Some(expected),
+                )?;
+            }
+        }
+        Ok(())
+    }
+
+    /// One DELETE clause: relationships in ascending ID order, then nodes.
+    fn delete(&mut self, variables: &[Name], detach: bool) -> Result<(), WriteError> {
+        let mut nodes = Vec::new();
+        let mut edges = Vec::new();
+        for row in &self.rows {
+            for variable in variables {
+                let (kind, id) = self.resolve(row, &variable.text)?;
+                let targets = if kind == Kind::Node {
+                    &mut nodes
+                } else {
+                    &mut edges
+                };
+                if !targets.contains(&id) {
+                    targets.push(id);
+                }
+            }
+        }
+        if detach {
+            // Bounded discovery before any deletion is staged.
+            for &node in &nodes {
+                let mut degree = 0;
+                for edge in incident(self.graph(), node, Direction::Both) {
+                    degree += 1;
+                    self.meter.examine(degree)?;
+                    self.detach_edges_examined += 1;
+                    if !edges.contains(&edge.0) {
+                        if self.expected.len() + nodes.len() + edges.len() + 1 > MAX_OPERATIONS {
+                            return Err(GraphError::BatchSize("more than 4096 entries").into());
+                        }
+                        edges.push(edge.0);
+                    }
+                }
+            }
+        }
+        edges.sort_unstable();
+        nodes.sort_unstable();
+        for id in edges {
+            let expected = self.precondition(Kind::Edge, id);
+            let mutation = GraphMutation::DeleteEdge {
+                edge: EdgeSelector::Id(EdgeId(id)),
+                expected,
+            };
+            self.stage(|| Ok(16), mutation, Some(expected))?;
+        }
+        for id in nodes {
+            let incident = incident(self.graph(), id, Direction::Both).len();
+            if incident > 0 {
+                return Err(GraphError::NodeHasEdges {
+                    node: NodeId(id),
+                    incident,
+                }
+                .into());
+            }
+            let expected = self.precondition(Kind::Node, id);
+            let key = self
+                .graph()
+                .node(NodeId(id))
+                .expect("live node")
+                .key
+                .clone();
+            let mutation = GraphMutation::DeleteNode { key, expected };
+            self.stage(|| Ok(16), mutation, Some(expected))?;
+        }
+        Ok(())
+    }
+
     fn cell(&self, row: &BindingRow, value: &ReturnValue) -> Result<OutputValue, GraphError> {
         let (variable, field) = match value {
             ReturnValue::Variable(variable) => (&variable.text, None),
@@ -658,7 +1042,8 @@ impl<C: MeterClock> Transaction<'_, '_, '_, C> {
         let mut projected = Vec::with_capacity(self.rows.len());
         for row in &self.rows {
             self.meter.charge()?;
-            self.meter.allocate(8 * (1 + returning.items.len()) as u64)?;
+            self.meter
+                .allocate(8 * (1 + returning.items.len()) as u64)?;
             let cells = returning
                 .items
                 .iter()
@@ -746,5 +1131,25 @@ impl<C: MeterClock> Transaction<'_, '_, '_, C> {
         }
         self.meter.output(nodes.len(), edges.len(), paths)?;
         Ok((columns, rows))
+    }
+}
+
+/// Bit-exact equality: `-0.0` differs from `0.0` and integers from floats.
+fn bit_equal(left: &PropertyValue, right: &PropertyValue) -> bool {
+    match (left, right) {
+        (PropertyValue::Float(left), PropertyValue::Float(right)) => {
+            left.to_bits() == right.to_bits()
+        }
+        (
+            PropertyValue::GeoPoint {
+                latitude: a,
+                longitude: b,
+            },
+            PropertyValue::GeoPoint {
+                latitude: c,
+                longitude: d,
+            },
+        ) => a.to_bits() == c.to_bits() && b.to_bits() == d.to_bits(),
+        _ => left == right,
     }
 }
