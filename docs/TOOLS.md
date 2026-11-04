@@ -75,6 +75,33 @@ quit
   rebuild change only in-memory indexes. For a shared-lock reader, use
   `Database::open_read_only` or `vlite-mcp`.
 
+## Local key-value shell commands
+
+`vlite-shell --db PATH` accepts `kv-get`, `kv-put`, `kv-delete` and `kv-list`.
+Each takes one JSON object through the end of the line, using exactly the
+[local MCP KV request fields and bounds](MCP.md#local-key-value-tools).
+The required `collection` is independent of `use NAME`; it must already exist
+and have one dimension. The shell never creates a KV collection implicitly.
+
+```text
+kv-put {"collection":"default","namespace":"cache","key":"a","value_base64":"AAEC","expected":"absent"}
+kv-get {"collection":"default","namespace":"cache","key":"a"}
+kv-list {"collection":"default","namespace":"cache","prefix":"","limit":100}
+kv-delete {"collection":"default","namespace":"cache","key":"a","expected":"any"}
+```
+
+Each successful command prints one JSON object and exits 0 when the script
+finishes. Failure exits 1 with `error: <code>: <message>` on stderr; scripts
+and non-terminal stdin stop at the first error, while terminal sessions print
+the error and continue. `--read-only` refuses `kv-put` and `kv-delete`
+(`read_only`). No retries occur. Output uses base64 values, decimal-string
+versions/deadlines and explicit null deadlines. A missing/due get is
+`kv_not_found`; a failed expected-version check is `precondition_failed`.
+An omitted/null put deadline clears TTL; a due deadline succeeds but hides
+the key immediately. TTL needs v5 (`upgrade_required` on older files).
+Writes acknowledge after commit, synced only under full durability.
+There are no lease commands or server-forwarded KV commands.
+
 ## Validated, atomic or resumable imports
 
 ```powershell

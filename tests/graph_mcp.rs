@@ -153,7 +153,20 @@ fn vector_only_files_match_the_golden_transcript_byte_for_byte() {
         vector_fixture(&path);
         let golden_text = fixture_text(golden);
         let expected: Vec<Value> = serde_json::from_str(&golden_text).unwrap();
-        let actual = session(&path, writable, &requests);
+        let actual: Vec<_> = session(&path, writable, &requests)
+            .into_iter()
+            .map(|line| {
+                let mut value: Value = serde_json::from_str(&line).unwrap();
+                if let Some(tools) = value["result"]["tools"].as_array_mut() {
+                    // The original nine-tool transcript remains pinned; the additive
+                    // KV tools have their own contract and schema tests.
+                    tools.retain(|tool| !tool["name"].as_str().unwrap().starts_with("vlite_kv_"));
+                    value.to_string()
+                } else {
+                    line
+                }
+            })
+            .collect();
         assert_eq!(actual.len(), expected.len(), "{mode}: response count");
         // The golden file is the pretty-printed array of the served lines;
         // compare raw text so number formatting is checked too (parsing
