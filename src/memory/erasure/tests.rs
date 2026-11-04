@@ -803,6 +803,23 @@ impl Harness {
             return;
         }
         let mut ops = Vec::new();
+        if path == ["expires_at_ms"] {
+            // A graph TTL on one node, in the same frame (rule d).
+            let mut expiry = None;
+            for (node_name, key) in keys {
+                ops.push(upsert(&self.node(&key).unwrap()));
+                if node_name == target {
+                    expiry = Some(GraphOp::SetNodeExpiry {
+                        key,
+                        expires_at_ms: Some(change["set"].as_u64().unwrap()),
+                        expected: Expected::Any,
+                    });
+                }
+            }
+            ops.push(expiry.expect("unknown TTL target"));
+            self.raw(ops);
+            return;
+        }
         for (node_name, key) in keys {
             let mut node = self.node(&key).unwrap();
             if node_name == target {
@@ -1502,6 +1519,73 @@ fn explicit_precedence_probes_hold() {
         );
     } else {
         assert_eq!(count, 1, "E1_PROBE names no probe");
+    }
+}
+
+#[test]
+fn live_corruption_probes_beyond_the_golden() {
+    let fixture = golden();
+    let base = &fixture["base_request"];
+    // Far beyond the wall clock: the TTL never reclaims during the test, and
+    // the live read at C=11 still sees the node.
+    let ttl = json!(4_000_000_000_000u64);
+    let probes = [
+        (
+            "job-visibility",
+            "job",
+            json!(["properties", "logical_visibility"]),
+            json!("visible"),
+        ),
+        (
+            "job-deleted-count",
+            "job",
+            json!(["properties", "deleted_count"]),
+            json!("1"),
+        ),
+        (
+            "job-schema",
+            "job",
+            json!(["properties", "e1_schema"]),
+            json!("erase-scope:v2"),
+        ),
+        (
+            "receipt-schema",
+            "receipt",
+            json!(["properties", "e1_schema"]),
+            json!("erase-scope:v2"),
+        ),
+        (
+            "receipt-chunks-two",
+            "receipt",
+            json!(["properties", "outcome_chunks"]),
+            json!(2),
+        ),
+        (
+            "outcome-receipt-key",
+            "outcome",
+            json!(["properties", "receipt_key"]),
+            json!("wrong"),
+        ),
+        ("job-ttl", "job", json!(["expires_at_ms"]), ttl.clone()),
+        (
+            "receipt-ttl",
+            "receipt",
+            json!(["expires_at_ms"]),
+            ttl.clone(),
+        ),
+        ("outcome-ttl", "outcome", json!(["expires_at_ms"]), ttl),
+    ];
+    for (name, node, path, set) in probes {
+        for (suffix, now) in [("live", 11), ("expired", 110)] {
+            let case = json!({"name": format!("{name}-{suffix}"), "steps": [
+                {"expect": {"replayed": false}},
+                {"request": {"now_ms": now},
+                 "corrupt": {"enabled": true, "node": node,
+                             "change": {"path": path, "set": set}},
+                 "expect": {"error": "InvalidBundle"}},
+            ]});
+            run_case(&case, base);
+        }
     }
 }
 
