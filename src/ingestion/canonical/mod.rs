@@ -4,6 +4,8 @@ use std::collections::BTreeMap;
 
 use sha2::{Digest, Sha256};
 
+pub(crate) mod stored;
+
 pub(crate) type Result<T> = std::result::Result<T, &'static str>;
 const MAX_BYTES: usize = 64 * 1024 * 1024;
 const MAX_DEPTH: usize = 32;
@@ -44,6 +46,7 @@ pub(crate) enum Type {
     List(Box<Type>),
     Map(Box<Type>),
     Identity,
+    Record(&'static str),
 }
 
 pub(crate) fn unhex(text: &str) -> Result<Vec<u8>> {
@@ -322,6 +325,7 @@ fn put(w: &mut Writer, kind: &Type, v: &Value, depth: usize) -> Result<()> {
             }
         }
         Type::Identity => put_identity(w, v, depth + 1),
+        Type::Record(name) => stored::put_record(w, name, v, depth + 1),
     }
 }
 
@@ -707,6 +711,7 @@ fn read(r: &mut Reader<'_>, kind: &Type, depth: usize) -> Result<Value> {
                 ("fields".into(), Value::Map(values)),
             ]))
         }
+        Type::Record(name) => stored::read_record(r, name, depth + 1)?,
     };
     Ok(value)
 }
