@@ -59,6 +59,10 @@ fn compact_seam_vector_metadata_leave_cells_empty() {
             if view.len() > 0 {
                 assert!(accounting.vectors_live > 0);
                 assert_eq!(accounting.plaintext_live > 0, encrypted);
+                if encrypted {
+                    assert!(accounting.plaintext_peak >= accounting.plaintext_live);
+                    assert!(accounting.plaintext_peak > 0);
+                }
             }
             assert!(accounting.vectors_peak <= 4 * 1024 * 1024);
             assert_eq!(accounting.mapped_live, 0);
@@ -82,6 +86,72 @@ fn generation() -> Arc<CompactGeneration> {
 
 fn first_view(generation: &Arc<CompactGeneration>) -> CompactView {
     generation.view(*generation.collections.keys().next().unwrap())
+}
+
+#[test]
+fn compact_seam_partitions_have_distinct_cache_entries() {
+    let _precision = PrecisionActivation::on();
+    let _records = RecordsActivation::on();
+    let _source = Activation::on();
+    let mut db = crate::Database::create_in_memory(2, crate::CreateOptions::default()).unwrap();
+    db.put(0, &[1.0, 2.0], b"p").unwrap();
+    let mut loaded =
+        crate::format::load_with(&mut std::io::Cursor::new(db.to_bytes().unwrap()), None).unwrap();
+    loaded.flags |= crate::format::FLAG_PRECISION;
+    let collection = 0;
+    let state = loaded.collections.get_mut(&collection).unwrap();
+    state.precision = Some(Precision::Float32);
+    let template = state.records.values().next().unwrap().clone();
+    state.records = crate::records::RecordMap::default();
+    state.revisions.clear();
+    state.expiries.clear();
+    for id in 0..8192 {
+        let mut record = template.clone();
+        record.vector = vec![id as f32; state.dimensions];
+        state.records.insert(id, record);
+        state.revisions.insert(id, loaded.sequence);
+    }
+    let mut image = Vec::new();
+    crate::maintenance::write_v5_image(
+        &mut image,
+        &loaded,
+        loaded.lineage.unwrap(),
+        None,
+        None,
+        loaded.cipher.as_ref(),
+        loaded.flags,
+        loaded.sequence,
+    )
+    .unwrap();
+    let checked = crate::format::load_with(&mut std::io::Cursor::new(image), None).unwrap();
+    let generation = checked.compact_generation.unwrap();
+    let view = generation.view(collection);
+    let blocks = &view.source().unwrap().blocks;
+    assert!(blocks.len() >= 2);
+    assert_eq!(blocks[0].kind, blocks[1].kind);
+    let second = blocks[0].source.rows.len();
+    let mut workspace = ReadWorkspace::new(4 << 20).unwrap();
+    let first_vector = view
+        .read_vector(0, &mut workspace)
+        .unwrap()
+        .unwrap()
+        .to_vec();
+    let second_vector = view
+        .read_vector(second, &mut workspace)
+        .unwrap()
+        .unwrap()
+        .to_vec();
+    assert_ne!(first_vector, second_vector);
+    assert_eq!(
+        first_vector,
+        checked.collections[&collection].records[&view.id(0).unwrap()].vector
+    );
+    assert_eq!(
+        second_vector,
+        checked.collections[&collection].records[&view.id(second).unwrap()].vector
+    );
+    assert_eq!(workspace.vectors.len(), 2);
+    assert_eq!(workspace.accounting(&view).unwrap().misses, 2);
 }
 
 #[test]
@@ -139,6 +209,11 @@ fn compact_seam_lru_budget_and_accounting() {
     let views: Vec<_> = generations.iter().map(first_view).collect();
     let block = &views[0].source().unwrap().blocks[0];
     let bytes = block.source.rows.len() * block.source.layout.dimensions * 4;
+    let mut exact = ReadWorkspace::new(bytes).unwrap();
+    assert!(views[0].read_vector(0, &mut exact).unwrap().is_some());
+    assert_eq!(exact.accounting(&views[0]).unwrap().vectors_live, bytes);
+    let mut one_component_short = ReadWorkspace::new(bytes - 4).unwrap();
+    assert!(views[0].read_vector(0, &mut one_component_short).is_err());
     let mut small = ReadWorkspace::new(bytes - 1).unwrap();
     assert!(
         views[0].read_vector(0, &mut small).is_err(),
