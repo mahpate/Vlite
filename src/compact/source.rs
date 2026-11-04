@@ -501,6 +501,21 @@ impl CompactView {
         self.generation.identity
     }
 
+    pub(crate) fn read_payload(
+        &self,
+        row: usize,
+        workspace: &mut ReadWorkspace,
+    ) -> Result<Option<Vec<u8>>> {
+        let Some((block, row, _)) = self.source().and_then(|source| source.row_at(row)) else {
+            return Ok(None);
+        };
+        let bytes = workspace
+            .body(self, block)?
+            .get(row.payload.clone())
+            .ok_or_else(|| corrupt(block.offset, "compact payload extent is out of bounds"))?;
+        Ok(Some(bytes.to_vec()))
+    }
+
     pub(crate) fn read_metadata(
         &self,
         row: usize,
