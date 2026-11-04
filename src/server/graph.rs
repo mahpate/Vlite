@@ -257,6 +257,9 @@ fn reason_name(reason: &TruncationReason) -> &'static str {
 }
 
 async fn guard_stats(State(service): State<Service>) -> Result<Json<Value>, ApiError> {
+    if !service.memory_bindings.is_empty() {
+        return Err(forbidden_scope());
+    }
     let inner = service.graph_stats.inner.lock().map_err(internal)?;
     Ok(Json(json!({
         "read_guard": inner.read.json(),

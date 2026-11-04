@@ -215,6 +215,16 @@ async fn reserved_graph_and_collection_are_denied_and_lists_filter_them() {
         "credential scope does not permit this operation or collection"
     );
     assert_eq!(get(&app, "/v1/collections/ordinary").await.0, 200);
+    let missing_bindings = BINDINGS.replace("\"notes_ev\"", "\"missing_ev\"");
+    let missing_directory = tempfile::tempdir().unwrap();
+    let missing_app = start(&missing_directory, Some(&missing_bindings), false).unwrap();
+    let (missing_status, missing_error) = get(&missing_app, "/v1/collections/missing_ev").await;
+    assert_eq!(missing_status, 403);
+    assert_eq!(missing_error["error"]["code"], "forbidden_scope");
+    assert_eq!(
+        missing_error["error"]["message"],
+        "credential scope does not permit this operation or collection"
+    );
     assert_eq!(
         call(&app, "DELETE", "/v1/graphs/notes_graph", Body::empty())
             .await
@@ -243,13 +253,35 @@ async fn reserved_graph_and_collection_are_denied_and_lists_filter_them() {
         .0,
         403
     );
-    assert_eq!(get(&app, "/v1/database").await.0, 403);
+    assert_eq!(
+        call(
+            &app,
+            "POST",
+            "/v1/admin/webhooks",
+            Body::from(r#"{"url":"http://127.0.0.1:8080/hook","secret":"fake-secret-for-test","graphs":["notes_graph"]}"#)
+        )
+        .await
+        .0,
+        403
+    );
+    let (info_status, info) = get(&app, "/v1/database").await;
+    assert_eq!(info_status, 200);
+    assert_eq!(info["records"], 0);
+    let default_bindings = BINDINGS.replace("\"notes_ev\"", "\"default\"");
+    let default_directory = tempfile::tempdir().unwrap();
+    let default_app = start(&default_directory, Some(&default_bindings), false).unwrap();
+    let (status, error) = get(&default_app, "/v1/database").await;
+    assert_eq!(status, 403);
+    assert_eq!(error["error"]["code"], "forbidden_scope");
     for (method, path, body) in [
         ("GET", "/v1/imports/1", Body::empty()),
         ("GET", "/v1/admin/replication/export", Body::empty()),
         ("GET", "/v1/admin/maintenance/auto", Body::empty()),
         ("GET", "/v1/admin/webhooks", Body::empty()),
         ("GET", "/v1/admin/webhooks/not-a-real-id", Body::empty()),
+        ("GET", "/v1/admin/metrics/summary", Body::empty()),
+        ("GET", "/metrics", Body::empty()),
+        ("GET", "/v1/admin/graph/stats", Body::empty()),
         ("PUT", "/v1/admin/maintenance/auto", Body::from("{}")),
         ("POST", "/v1/admin/maintenance/auto/tick", Body::empty()),
     ] {
@@ -258,11 +290,38 @@ async fn reserved_graph_and_collection_are_denied_and_lists_filter_them() {
         assert_eq!(error["error"]["code"], "forbidden_scope", "{method} {path}");
     }
 
-    let (_, feed) = get(&app, "/v1/changes?limit=1000").await;
-    assert!(feed["changes"].as_array().unwrap().iter().all(|change| {
-        change["collection"] != "notes_ev" && change["change"]["graph"] != "notes_graph"
-    }));
-    assert!(feed["next_cursor"].as_str().is_some());
+    let (_, diagnostics) = get(&app, "/v1/admin/diagnostics/slow-queries").await;
+    assert!(
+        diagnostics["items"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .all(|item| { item.to_string().find("notes_ev").is_none() })
+    );
+
+    let (_, first_page) = get(&app, "/v1/changes?limit=1").await;
+    assert!(first_page["changes"].as_array().unwrap().is_empty());
+    assert_eq!(first_page["has_more"], true);
+    let first_cursor = first_page["next_cursor"].as_str().unwrap();
+    let (_, second_page) = get(&app, &format!("/v1/changes?limit=1&cursor={first_cursor}")).await;
+    assert_eq!(second_page["changes"][0]["collection"], "ordinary");
+    let second_cursor = second_page["next_cursor"].as_str().unwrap();
+    assert_ne!(first_cursor, second_cursor);
+    let (_, remaining_pages) = get(
+        &app,
+        &format!("/v1/changes?limit=1000&cursor={second_cursor}"),
+    )
+    .await;
+    assert!(
+        remaining_pages["changes"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .all(|change| {
+                change["collection"] != "notes_ev" && change["change"]["graph"] != "notes_graph"
+            })
+    );
+    assert!(remaining_pages["next_cursor"].as_str().is_some());
 
     let (_, graphs) = get(&app, "/v1/graphs").await;
     assert_eq!(graphs["graphs"].as_array().unwrap().len(), 1);
@@ -276,6 +335,576 @@ async fn reserved_graph_and_collection_are_denied_and_lists_filter_them() {
         .collect::<Vec<_>>();
     assert!(names.contains(&"ordinary"));
     assert!(!names.contains(&"notes_ev"));
+}
+
+#[tokio::test]
+async fn reserved_resource_routes_deny_before_resource_lookup_across_families() {
+    let directory = tempfile::tempdir().unwrap();
+    let app = start(&directory, Some(BINDINGS), false).unwrap();
+    let cases = [
+        ("GET", "/v1/collections/notes_ev/vectors", ""),
+        ("GET", "/v1/collections/notes_ev/vectors/7", ""),
+        (
+            "GET",
+            "/v1/collections/notes_ev/kv/entry?namespace=n&key=k",
+            "",
+        ),
+        (
+            "GET",
+            "/v1/collections/notes_ev/kv/entries?namespace=n&limit=1",
+            "",
+        ),
+        (
+            "PUT",
+            "/v1/collections/notes_ev/kv/entry",
+            r#"{"namespace":"n","key":"k","value_base64":"AQ=="}"#,
+        ),
+        (
+            "DELETE",
+            "/v1/collections/notes_ev/kv/entry?namespace=n&key=k",
+            "",
+        ),
+        (
+            "PATCH",
+            "/v1/collections/notes_ev/vectors/7/metadata",
+            r#"{"metadata":{}}"#,
+        ),
+        ("PUT", "/v1/collections/notes_ev/vectors/7/named", "{}"),
+        ("DELETE", "/v1/collections/notes_ev/vectors/7", ""),
+        (
+            "POST",
+            "/v1/collections/notes_ev/search",
+            r#"{"vector":[0,0],"k":1}"#,
+        ),
+        (
+            "POST",
+            "/v1/collections/notes_ev/search/grouped",
+            r#"{"vector":[0,0],"field":"tag","groups":1,"hits_per_group":1}"#,
+        ),
+        (
+            "POST",
+            "/v1/collections/notes_ev/recommend",
+            r#"{"positive_ids":[],"k":1}"#,
+        ),
+        (
+            "POST",
+            "/v1/collections/notes_ev/facets",
+            r#"{"field":"tag"}"#,
+        ),
+        (
+            "POST",
+            "/v1/collections/notes_ev/stats/numeric",
+            r#"{"field":"score"}"#,
+        ),
+        (
+            "POST",
+            "/v1/collections/notes_ev/search/geo",
+            r#"{"vector":[0,0],"k":1,"field":"location","latitude":0,"longitude":0,"radius_meters":1}"#,
+        ),
+        (
+            "POST",
+            "/v1/collections/notes_ev/vectors/configure",
+            r#"{"name":"v","dimensions":2,"metric":"cosine","active_version":"v1"}"#,
+        ),
+        (
+            "POST",
+            "/v1/collections/notes_ev/search/named",
+            r#"{"name":"v","vector":[0,0],"k":1}"#,
+        ),
+        (
+            "POST",
+            "/v1/collections/notes_ev/search/sparse",
+            r#"{"name":"v","vector":[],"k":1}"#,
+        ),
+        (
+            "POST",
+            "/v1/collections/notes_ev/search/dense-sparse",
+            r#"{"dense_name":"v","dense":[0,0],"sparse_name":"s","sparse":[],"k":1}"#,
+        ),
+        ("POST", "/v1/collections/notes_ev/query", r#"{"query":"*"}"#),
+        ("POST", "/v1/collections/notes_ev/embed", r#"{"text":"x"}"#),
+        ("POST", "/v1/collections/notes_ev/index/disk-ann", "{}"),
+        (
+            "POST",
+            "/v1/collections/notes_ev/search/disk-ann",
+            r#"{"vector":[0,0],"k":1,"ef_search":1}"#,
+        ),
+        ("GET", "/v1/collections/notes_ev/index/hnsw", ""),
+        ("GET", "/v1/collections/notes_ev/index/hnsw/maintenance", ""),
+        ("GET", "/v1/collections/notes_ev/index/hnsw/rebuild", ""),
+        (
+            "POST",
+            "/v1/collections/notes_ev/index/hnsw/maintenance/tick",
+            "",
+        ),
+        ("POST", "/v1/collections/notes_ev/index/hnsw", "{}"),
+        ("POST", "/v1/collections/notes_ev/index/hnsw/quality", "{}"),
+        ("POST", "/v1/collections/notes_ev/index/hnsw/rebuild", "{}"),
+        (
+            "POST",
+            "/v1/collections/notes_ev/index/hnsw/rebuild/cancel",
+            "{}",
+        ),
+        (
+            "POST",
+            "/v1/collections/notes_ev/index/hnsw/rebuild/poll",
+            "{}",
+        ),
+        (
+            "POST",
+            "/v1/collections/notes_ev/batches",
+            r#"{"operations":[]}"#,
+        ),
+        ("POST", "/v1/collections/notes_ev/imports", ""),
+        ("POST", "/v1/collections/ordinary/imports", ""),
+        ("GET", "/v1/imports/not-a-job", ""),
+        ("PUT", "/v1/imports/1/chunks/0", "{}"),
+        ("POST", "/v1/imports/not-a-job/finish", ""),
+        ("POST", "/v1/imports/not-a-job/abort", ""),
+        ("POST", "/v1/graphs", r#"{"graph":"notes_graph"}"#),
+        ("POST", "/v1/graphs/notes_graph/batch", "{}"),
+        ("POST", "/v1/graphs/notes_graph/nodes/get", "{}"),
+        ("POST", "/v1/graphs/notes_graph/edges/get", "{}"),
+        ("POST", "/v1/graphs/notes_graph/nodes/find", "{}"),
+        ("POST", "/v1/graphs/notes_graph/neighbors", "{}"),
+        ("POST", "/v1/graphs/notes_graph/traverse", "{}"),
+        ("POST", "/v1/graphs/notes_graph/shortest-path", "{}"),
+        ("POST", "/v1/graphs/notes_graph/explain", "{}"),
+        ("POST", "/v1/graphs/notes_graph/retrieve", "{}"),
+        ("POST", "/v1/graphs/notes_graph/query", "{}"),
+        ("PUT", "/v1/graphs/notes_graph/schema", "{}"),
+        ("DELETE", "/v1/graphs/notes_graph", ""),
+    ];
+
+    for (method, path, body) in cases {
+        let (status, error) = call(&app, method, path, Body::from(body)).await;
+        assert_eq!(status, 403, "{method} {path}: {error}");
+        assert_eq!(error["error"]["code"], "forbidden_scope", "{method} {path}");
+        assert_eq!(
+            error["error"]["message"],
+            "credential scope does not permit this operation or collection",
+            "{method} {path}"
+        );
+    }
+
+    for (method, path, body) in [
+        (
+            "POST",
+            "/v1/graphs/ordinary_graph/batch",
+            r#"{"ops":[{"op":"attach","node":"node","collection":"notes_ev","record":"1"}]}"#,
+        ),
+        (
+            "POST",
+            "/v1/graphs/ordinary_graph/retrieve",
+            r#"{"pivot":{"collection":"notes_ev","vector":[0,0],"k":1}}"#,
+        ),
+    ] {
+        let (status, error) = call(&app, method, path, Body::from(body)).await;
+        assert_eq!(status, 403, "{method} {path}: {error}");
+        assert_eq!(error["error"]["code"], "forbidden_scope", "{method} {path}");
+    }
+
+    for (method, path, body) in [
+        ("PUT", "/v1/collections/notes_ev/settings", "{}"),
+        ("DELETE", "/v1/collections/notes_ev", ""),
+        (
+            "POST",
+            "/v1/collections",
+            r#"{"name":"notes_ev","dimensions":2}"#,
+        ),
+    ] {
+        let (status, error) = call(&app, method, path, Body::from(body)).await;
+        assert_eq!(status, 403, "{method} {path}: {error}");
+        assert_eq!(error["error"]["code"], "forbidden_scope", "{method} {path}");
+    }
+
+    let legacy_bindings = BINDINGS.replace("\"notes_ev\"", "\"default\"");
+    let legacy_directory = tempfile::tempdir().unwrap();
+    let legacy_app = start(&legacy_directory, Some(&legacy_bindings), false).unwrap();
+    for (method, path, body) in [
+        ("GET", "/v1/vectors/7", ""),
+        ("PUT", "/v1/vectors/7", r#"{"vector":[0,0]}"#),
+        ("DELETE", "/v1/vectors/7", ""),
+        ("PATCH", "/v1/vectors/7/metadata", r#"{"metadata":{}}"#),
+        ("GET", "/v1/vectors", ""),
+        ("POST", "/v1/search", r#"{"vector":[0,0],"k":1}"#),
+        ("POST", "/v1/batches", r#"{"operations":[]}"#),
+        ("GET", "/v1/index/hnsw", ""),
+        ("POST", "/v1/index/hnsw", "{}"),
+        ("POST", "/v1/index/hnsw/quality", "{}"),
+        ("GET", "/v1/index/hnsw/maintenance", ""),
+        ("PUT", "/v1/index/hnsw/maintenance", "{}"),
+        ("POST", "/v1/index/hnsw/maintenance/tick", ""),
+        ("GET", "/v1/index/hnsw/rebuild", ""),
+        ("POST", "/v1/index/hnsw/rebuild", "{}"),
+        ("POST", "/v1/index/hnsw/rebuild/poll", ""),
+    ] {
+        let (status, error) = call(&legacy_app, method, path, Body::from(body)).await;
+        assert_eq!(status, 403, "{method} {path}: {error}");
+        assert_eq!(error["error"]["code"], "forbidden_scope", "{method} {path}");
+    }
+}
+
+#[tokio::test]
+async fn tenant_qualified_reservations_follow_scoped_credentials_and_raw_access() {
+    const TENANT: &str = "0123456789abcdef0123456789abcdef";
+    const ID: &str = "abcdefghij27";
+    let secret = "A".repeat(43);
+    let build = |directory: &TempDir, raw_access: bool, operations: &[&str]| {
+        let mut db = Database::create_in_memory(
+            2,
+            CreateOptions {
+                format: Some(FormatVersion::V5),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        let stored = format!("t{TENANT}__notes_ev");
+        let ordinary = format!("t{TENANT}__ordinary");
+        db.create_collection(
+            &stored,
+            CollectionSpec {
+                dimensions: 2,
+                settings: Default::default(),
+            },
+        )
+        .unwrap();
+        db.create_collection(
+            &ordinary,
+            CollectionSpec {
+                dimensions: 2,
+                settings: Default::default(),
+            },
+        )
+        .unwrap();
+        db.create_graph(&format!("t{TENANT}__notes_graph")).unwrap();
+        db.create_graph(&format!("t{TENANT}__ordinary_graph"))
+            .unwrap();
+        let lineage = db.lineage().unwrap();
+        let credentials = serde_json::json!({
+            "schema": 1,
+            "credentials": [{
+                "id": ID,
+                "name": "fake tenant credential",
+                "all": true,
+                "collections": [],
+                "graphs": ["*"],
+                "operations": operations,
+                "lineage": format!("{lineage:016x}"),
+                "secret_sha256": format!("{:x}", Sha256::digest(secret.as_bytes())),
+                "created_unix_ms": 0,
+                "expires_unix_ms": 9_999_999_999_999u64,
+                "revoked_unix_ms": null,
+                "rotated_from": null,
+                "tenant_id": TENANT
+            }]
+        });
+        std::fs::write(
+            directory.path().join("credentials.json"),
+            serde_json::to_vec(&credentials).unwrap(),
+        )
+        .unwrap();
+        std::fs::write(
+            directory.path().join("tenants.json"),
+            serde_json::to_vec(&serde_json::json!([{
+                "id": TENANT,
+                "name": "test tenant",
+                "max_vectors": null
+            }]))
+            .unwrap(),
+        )
+        .unwrap();
+        let mut bindings: Value = serde_json::from_str(BINDINGS).unwrap();
+        let binding = &mut bindings["bindings"][0];
+        binding["tenant"] = serde_json::json!(TENANT);
+        binding["graph"] = serde_json::json!("notes_graph");
+        binding["evidence_collection"] = serde_json::json!("notes_ev");
+        binding["grants"][0]["raw_access"] = serde_json::json!(raw_access);
+        binding["grants"][0]["principal"] = serde_json::json!(ID);
+        let path = directory.path().join("memory-bindings.json");
+        std::fs::write(&path, serde_json::to_vec(&bindings).unwrap()).unwrap();
+        let app = configured_admin_router(
+            Service::new(db),
+            ServerOptions {
+                admin_token: Some(BearerToken::new(ADMIN).unwrap()),
+                read_only_token: Some(BearerToken::new(READ_ONLY).unwrap()),
+                admin_directory: Some(directory.path().into()),
+                memory_bindings_file: Some(path),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        (app, format!("vlk_{ID}_{secret}"))
+    };
+
+    let no_raw_directory = tempfile::tempdir().unwrap();
+    let (no_raw, token) = build(
+        &no_raw_directory,
+        false,
+        &["read", "write", "collections", "graph_read", "graph_write"],
+    );
+    let (status, error) = call_token(
+        &no_raw,
+        "GET",
+        "/v1/collections/notes_ev",
+        Body::empty(),
+        &token,
+    )
+    .await;
+    assert_eq!(status, 403);
+    assert_eq!(error["error"]["code"], "forbidden_scope");
+    let (status, error) = call_token(
+        &no_raw,
+        "GET",
+        "/v1/graphs/notes_graph",
+        Body::empty(),
+        &token,
+    )
+    .await;
+    assert_eq!(status, 403);
+    assert_eq!(error["error"]["code"], "forbidden_scope");
+    assert_eq!(
+        call_token(
+            &no_raw,
+            "GET",
+            "/v1/graphs/ordinary_graph",
+            Body::empty(),
+            &token,
+        )
+        .await
+        .0,
+        200
+    );
+    assert_eq!(
+        call_token(
+            &no_raw,
+            "DELETE",
+            "/v1/graphs/notes_graph",
+            Body::empty(),
+            &token,
+        )
+        .await
+        .0,
+        403
+    );
+    assert_eq!(
+        call_token(
+            &no_raw,
+            "GET",
+            "/v1/collections/ordinary",
+            Body::empty(),
+            &token,
+        )
+        .await
+        .0,
+        200
+    );
+    let (_, list) = call_token(&no_raw, "GET", "/v1/collections", Body::empty(), &token).await;
+    let listed = list["items"].as_array().unwrap();
+    assert!(listed.iter().any(|item| item["name"] == "ordinary"));
+    assert!(listed.iter().all(|item| item["name"] != "notes_ev"));
+    let (_, feed) = call_token(
+        &no_raw,
+        "GET",
+        "/v1/changes?limit=100",
+        Body::empty(),
+        ADMIN,
+    )
+    .await;
+    assert!(
+        feed["changes"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .all(|change| { change["collection"] != format!("t{TENANT}__notes_ev") })
+    );
+    let (_, usage) = call_token(
+        &no_raw,
+        "GET",
+        &format!("/v1/admin/tenants/{TENANT}/usage"),
+        Body::empty(),
+        ADMIN,
+    )
+    .await;
+    assert!(usage["collections"].as_array().unwrap().iter().all(|item| {
+        item["name"] != "notes_ev" && item["physical_name"] != format!("t{TENANT}__notes_ev")
+    }));
+    assert!(
+        usage["collections"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|item| item["name"] == "ordinary")
+    );
+
+    let raw_read_directory = tempfile::tempdir().unwrap();
+    let (raw_read, token) = build(
+        &raw_read_directory,
+        true,
+        &["read", "collections", "graph_read"],
+    );
+    assert_eq!(
+        call_token(
+            &raw_read,
+            "GET",
+            "/v1/collections/notes_ev",
+            Body::empty(),
+            &token,
+        )
+        .await
+        .0,
+        200
+    );
+    let (_, raw_collections) =
+        call_token(&raw_read, "GET", "/v1/collections", Body::empty(), &token).await;
+    assert!(
+        raw_collections["items"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|item| item["name"] == "notes_ev")
+    );
+    assert_eq!(
+        call_token(
+            &raw_read,
+            "GET",
+            "/v1/graphs/notes_graph",
+            Body::empty(),
+            &token,
+        )
+        .await
+        .0,
+        200
+    );
+    let (_, raw_graphs) = call_token(&raw_read, "GET", "/v1/graphs", Body::empty(), &token).await;
+    assert!(
+        raw_graphs["graphs"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|graph| graph["name"] == "notes_graph")
+    );
+    assert_eq!(
+        call_token(
+            &raw_read,
+            "DELETE",
+            "/v1/graphs/notes_graph",
+            Body::empty(),
+            &token,
+        )
+        .await
+        .0,
+        403
+    );
+    assert_eq!(
+        call_token(
+            &raw_read,
+            "PUT",
+            "/v1/collections/notes_ev/vectors/7",
+            Body::from(r#"{"vector":[0.1,0.2],"payload_base64":"","metadata":{}}"#),
+            &token,
+        )
+        .await
+        .0,
+        403
+    );
+
+    let raw_write_directory = tempfile::tempdir().unwrap();
+    let (raw_write, token) = build(
+        &raw_write_directory,
+        true,
+        &["read", "write", "graph_read", "graph_write"],
+    );
+    assert_eq!(
+        call_token(
+            &raw_write,
+            "PUT",
+            "/v1/collections/notes_ev/vectors/7",
+            Body::from(r#"{"vector":[0.1,0.2],"payload_base64":"","metadata":{}}"#),
+            &token,
+        )
+        .await
+        .0,
+        204
+    );
+    assert_eq!(
+        call_token(
+            &raw_write,
+            "DELETE",
+            "/v1/graphs/notes_graph",
+            Body::empty(),
+            &token,
+        )
+        .await
+        .0,
+        200
+    );
+}
+
+#[tokio::test]
+async fn webhook_dispatcher_never_delivers_reserved_resource_events() {
+    use std::{io::ErrorKind, net::TcpListener, time::Duration};
+
+    let directory = tempfile::tempdir().unwrap();
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    listener.set_nonblocking(true).unwrap();
+    let endpoint = format!("http://{}/hook", listener.local_addr().unwrap());
+    let webhook_store = serde_json::json!({
+        "subscriptions": {
+            "fake-subscription-id": {
+                "id": "fake-subscription-id",
+                "url": endpoint,
+                "collections": ["notes_ev"],
+                "events": ["collection_created"],
+                "graphs": null,
+                "secret": "fake-webhook-secret"
+            },
+            "fake-graph-subscription-id": {
+                "id": "fake-graph-subscription-id",
+                "url": endpoint,
+                "collections": null,
+                "events": ["graph_created"],
+                "graphs": ["notes_graph"],
+                "secret": "fake-graph-webhook-secret"
+            }
+        },
+        "deliveries": {}
+    });
+    std::fs::write(
+        directory.path().join("webhooks.json"),
+        serde_json::to_vec(&webhook_store).unwrap(),
+    )
+    .unwrap();
+    std::fs::write(
+        directory.path().join("webhooks.cursor"),
+        vlite::changes::FeedCursor::beginning().to_token(),
+    )
+    .unwrap();
+    let bindings_path = directory.path().join("memory-bindings.json");
+    std::fs::write(&bindings_path, BINDINGS).unwrap();
+    let service = Service::new(database());
+    let _app = configured_admin_router(
+        service.clone(),
+        ServerOptions {
+            admin_token: Some(BearerToken::new(ADMIN).unwrap()),
+            admin_directory: Some(directory.path().into()),
+            memory_bindings_file: Some(bindings_path),
+            ..Default::default()
+        },
+    )
+    .unwrap();
+
+    let until = std::time::Instant::now() + Duration::from_secs(2);
+    while std::time::Instant::now() < until {
+        match listener.accept() {
+            Ok((_, _)) => panic!("reserved resource event was delivered"),
+            Err(error) if error.kind() == ErrorKind::WouldBlock => {
+                tokio::time::sleep(Duration::from_millis(25)).await;
+            }
+            Err(error) => panic!("webhook listener failed: {error}"),
+        }
+    }
+    service.close().await.unwrap();
 }
 
 #[tokio::test]
@@ -304,9 +933,11 @@ async fn no_bindings_preserves_raw_access_and_nonempty_bindings_fail_closed_for_
             auto_maintenance_interval: Some(std::time::Duration::from_secs(60)),
             ..Default::default()
         },
-    )
-    .err()
-    .expect("scheduled maintenance must refuse reserved resources");
+    );
+    let error = match error {
+        Ok(_) => panic!("scheduled maintenance must refuse reserved resources"),
+        Err(error) => error,
+    };
     assert!(error.to_string().contains("automatic index maintenance"));
 }
 
@@ -384,17 +1015,48 @@ async fn api_raw_access_requires_the_binding_grant_and_does_not_replace_collecti
 
     let directory = tempfile::tempdir().unwrap();
     let (app, token) = start_scoped(&directory, true, "ordinary");
+    let (reserved_status, reserved_error) = call_token(
+        &app,
+        "GET",
+        "/v1/collections/notes_ev",
+        Body::empty(),
+        &token,
+    )
+    .await;
+    let (missing_status, missing_error) = call_token(
+        &app,
+        "GET",
+        "/v1/collections/not-a-collection",
+        Body::empty(),
+        &token,
+    )
+    .await;
+    assert_eq!(reserved_status, 403);
+    assert_eq!(missing_status, 403);
+    assert_eq!(reserved_error, missing_error);
     assert_eq!(
         call_token(
             &app,
             "GET",
-            "/v1/collections/notes_ev",
+            "/v1/collections/ordinary",
             Body::empty(),
             &token
         )
         .await
         .0,
-        403
+        200
+    );
+    assert_eq!(
+        call_token(
+            &app,
+            "PUT",
+            "/v1/collections/ordinary/vectors/7",
+            Body::from(r#"{"vector":[0.1,0.2],"payload_base64":"","metadata":{}}"#),
+            &token,
+        )
+        .await
+        .0,
+        204
     );
 
     let directory = tempfile::tempdir().unwrap();
@@ -452,6 +1114,18 @@ async fn read_only_role_cannot_raw_access_a_reserved_collection() {
         .await
         .0,
         200
+    );
+    assert_eq!(
+        call_token(
+            &app,
+            "PUT",
+            "/v1/collections/ordinary/vectors/7",
+            Body::from(r#"{"vector":[0.1,0.2],"payload_base64":"","metadata":{}}"#),
+            READ_ONLY,
+        )
+        .await
+        .0,
+        403
     );
 }
 
