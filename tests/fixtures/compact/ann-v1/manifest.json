@@ -1,0 +1,29 @@
+{
+  "schema": "vlite.compact-ann-manifest",
+  "version": 1,
+  "files": {
+    "goldens.json": "aed6a9ae6d256b3960c945e4853d4813f095da3707551f9f6f893ef2a382f897",
+    "malformed.json": "f3fe93d36564f3d57b9c04ff76775b116c55f7cc5d6e09f8ae059d597cb3d783"
+  },
+  "mutants": {
+    "wrong-source-bytes": "golden-1",
+    "omit-set-section": "golden-1",
+    "reorder-neighbors": "reorder-neighbors",
+    "neighbor-N": "neighbor-N",
+    "skip-level-cap": "level-cap",
+    "degree-above": "degree-above",
+    "round-code-stride": "rotated-768",
+    "hash-padding": "golden-1",
+    "native-endian": "golden-1",
+    "accept-trailing": "trailing-byte-p1",
+    "stale-as-corrupt": "binding",
+    "unsupported-as-corrupt": "binding",
+    "split-257": "topology-257",
+    "allow-padding-64": "padding-64",
+    "half-even": "half-away",
+    "accept-NaN-norm": "rotated-norm-NaN-p1",
+    "omit-B-section": "golden-1",
+    "omit-lineage": "golden-1",
+    "drop-signed-zero": "signed-zero-C"
+  }
+}
