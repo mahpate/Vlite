@@ -625,11 +625,111 @@ mod tests {
         )
         .unwrap();
         assert_eq!(page["items"].as_array().unwrap().len(), 2_000);
-        assert!(
-            scans.get() <= 20,
-            "page required {} full-list scans",
-            scans.get()
-        );
+        // Seven chunks (16+32+64+128+256+512+992), each with one lookahead.
+        assert_eq!(scans.get(), 14, "full-list scans");
+        assert_eq!(page["next_after"], Value::Null);
+    }
+
+    fn boundary_fixture(
+        count: usize,
+        last_key: &str,
+        bytes: usize,
+        more: bool,
+    ) -> (Vec<KvEntry>, Value) {
+        let mut entries = (0..count)
+            .map(|index| KvEntry {
+                key: if index + 1 == count {
+                    last_key.to_owned()
+                } else {
+                    format!("{index:03}")
+                },
+                value: Vec::new(),
+                version: 1,
+                expires_at_ms: None,
+            })
+            .collect::<Vec<_>>();
+        let oracle = |entries: &[KvEntry]| {
+            let items = entries
+                .iter()
+                .map(|entry| {
+                    json!({"key":entry.key,"value_base64":BASE64_STANDARD.encode(&entry.value),
+                        "version":"1","expires_at_ms":null})
+                })
+                .collect::<Vec<_>>();
+            json!({"items":items,"next_after":if more { Some(last_key) } else { None }})
+        };
+        let overhead = serde_json::to_vec(&oracle(&entries)).unwrap().len();
+        let padding = (bytes - overhead) % 4;
+        entries[0].key.push_str(&"x".repeat(padding));
+        let mut remaining = bytes - overhead - padding;
+        for entry in &mut entries {
+            let encoded = remaining.min(1_396_384);
+            entry.value = vec![1; encoded / 4 * 3];
+            remaining -= encoded;
+        }
+        assert_eq!(remaining, 0);
+        let expected = oracle(&entries);
+        assert_eq!(serde_json::to_vec(&expected).unwrap().len(), bytes);
+        (entries, expected)
+    }
+
+    fn synthetic_page(entries: &[KvEntry]) -> Value {
+        build_page(
+            ListQuery {
+                namespace: "boundary".into(),
+                prefix: String::new(),
+                after: None,
+                limit: Some("10000".into()),
+            },
+            10_000,
+            0,
+            |_, _, after, count, _| {
+                Ok(entries
+                    .iter()
+                    .filter(|entry| after.is_none_or(|after| entry.key.as_str() > after))
+                    .take(count)
+                    .cloned()
+                    .collect())
+            },
+        )
+        .unwrap()
+    }
+
+    #[test]
+    fn chunk_edge_page_uses_live_lookahead_at_exact_byte_boundary() {
+        for more in [false, true] {
+            for bytes in [16_777_216, 16_777_217] {
+                let (mut entries, expected) = boundary_fixture(16, "zzz", bytes, more);
+                if more {
+                    entries.push(KvEntry {
+                        key: "zzzz".into(),
+                        value: Vec::new(),
+                        version: 1,
+                        expires_at_ms: None,
+                    });
+                }
+                let page = synthetic_page(&entries);
+                if bytes == 16_777_216 {
+                    assert_eq!(page["items"].as_array().unwrap().len(), 16, "more={more}");
+                    assert_eq!(page["next_after"], expected["next_after"]);
+                    assert_eq!(page, expected);
+                } else {
+                    assert_eq!(page["items"].as_array().unwrap().len(), 15, "more={more}");
+                    assert_eq!(page["next_after"], "014");
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn final_page_budgets_null_not_a_cursor_for_long_and_short_keys() {
+        for key in ["zzz", "z"] {
+            let (entries, expected) = boundary_fixture(16, key, 16_777_216, false);
+            let page = synthetic_page(&entries);
+            assert_eq!(page["items"].as_array().unwrap().len(), 16, "key={key}");
+            assert_eq!(page["next_after"], Value::Null, "key={key}");
+            assert_eq!(page, expected);
+        }
     }
 
     #[tokio::test]
