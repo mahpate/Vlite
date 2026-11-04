@@ -10,7 +10,6 @@ use super::{
     AnchorKind, Direction, NodePattern, ParameterRef, Plan, RelationshipPattern, ReturnValue,
     Statement, plan,
 };
-use std::cell::RefCell;
 use std::cmp::Ordering;
 use std::collections::BTreeSet;
 
@@ -58,7 +57,7 @@ pub(crate) fn execute<
         plan::PlanError::Query(error) => ReadError::Query(error),
         plan::PlanError::InvalidMetadata(error) => ReadError::Graph(error),
     })?;
-    validate_hops(&planned.statement, bounds.graph.max_hops)?;
+    validate_hops(&planned.statement, bounds.graph.max_hops, text)?;
     if !planned.statement.mutations.is_empty() {
         return Ok(None);
     }
@@ -159,7 +158,7 @@ pub(crate) fn execute<
     }))
 }
 
-fn validate_hops(statement: &Statement, max_hops: u64) -> Result<(), ReadError> {
+fn validate_hops(statement: &Statement, max_hops: u64, text: &str) -> Result<(), ReadError> {
     let Some((relationship, _)) = statement
         .pattern
         .as_ref()
@@ -169,13 +168,19 @@ fn validate_hops(statement: &Statement, max_hops: u64) -> Result<(), ReadError> 
     };
     let hops = relationship.max_hops.unwrap_or(1);
     if hops > max_hops {
+        let position = if let Some(position) = relationship.hop_position {
+            let tokens = super::lexer::lex(text).map_err(ReadError::Query)?;
+            let index = tokens
+                .iter()
+                .position(|token| token.position == position)
+                .expect("planned hop token");
+            tokens[index + 3].position
+        } else {
+            relationship.position
+        };
         return Err(ReadError::At {
             error: GraphError::InvalidQuery("subset hop bound exceeds max_hops"),
-            position: relationship
-                .hop_position
-                // The supported bound prefix `*1..` is four ASCII bytes.
-                .map(|position| position + 4)
-                .unwrap_or(relationship.position),
+            position,
         });
     }
     Ok(())
@@ -251,10 +256,39 @@ enum EdgeCandidates<'a> {
 }
 
 impl EdgeCandidates<'_> {
-    fn iter(&self) -> Box<dyn Iterator<Item = &GraphEdge> + '_> {
+    fn incident(
+        &self,
+        node: u64,
+        direction: Direction,
+        meter: &mut Meter<'_, impl MeterClock>,
+    ) -> Result<Vec<&GraphEdge>, GraphError> {
         match self {
-            Self::Scan(graph) => Box::new(graph.edges()),
-            Self::Anchored(edge) => Box::new(edge.iter().copied()),
+            Self::Scan(graph) => {
+                let direction = match direction {
+                    Direction::Out => super::super::model::Direction::Out,
+                    Direction::In => super::super::model::Direction::In,
+                    Direction::Both => super::super::model::Direction::Both,
+                };
+                let mut edges = Vec::new();
+                for (_, id) in graph.adjacency(NodeId(node), direction, None, None) {
+                    meter.examine(edges.len() as u64 + 1)?;
+                    meter.allocate(8)?;
+                    edges.push(graph.edge(id).expect("adjacency edge"));
+                }
+                edges.sort_unstable_by_key(|edge| edge.id);
+                Ok(edges)
+            }
+            Self::Anchored(edge) => {
+                let mut edges = Vec::new();
+                for edge in edge.iter().copied() {
+                    if destinations(edge, node, direction).next().is_some() {
+                        meter.examine(1)?;
+                        meter.allocate(8)?;
+                        edges.push(edge);
+                    }
+                }
+                Ok(edges)
+            }
         }
     }
 }
@@ -362,11 +396,11 @@ fn enumerate_rows(
             if edge_ids.len() >= maximum {
                 continue;
             }
-            let mut degree = 0u64;
-            for edge in edges.iter() {
+            for edge in edges
+                .incident(current, relationship.direction, meter)
+                .map_err(ReadError::Graph)?
+            {
                 for destination in destinations(edge, current, relationship.direction) {
-                    degree = degree.saturating_add(1);
-                    meter.examine(degree).map_err(ReadError::Graph)?;
                     let Some(properties) =
                         active_edge_properties(graph, edge, as_of_ms, ttl_clock_ms, meter)
                             .map_err(ReadError::Graph)?
@@ -551,20 +585,11 @@ fn canonical_sort(
     {
         meter.check("sort")?;
         meter.allocate(8 * rows.len() as u64)?;
-        let failure = RefCell::new(None);
+        precharge_sort(rows.len(), meter)?;
         rows.sort_by(|left, right| {
-            if failure.borrow().is_some() {
-                return Ordering::Equal;
-            }
-            if let Err(error) = meter.charge().and_then(|()| meter.check("sort")) {
-                *failure.borrow_mut() = Some(error);
-                return Ordering::Equal;
-            }
             canonical_identity(left, plan).cmp(&canonical_identity(right, plan))
         });
-        if let Some(error) = failure.into_inner() {
-            return Err(error);
-        }
+        meter.check("sort")?;
     }
     Ok(rows)
 }
@@ -597,30 +622,22 @@ fn project_rows(
                 let properties =
                     super::eval::bound_properties(&row, variable, graph, as_of_ms, ttl_clock_ms)
                         .map_err(ReadError::Graph)?;
-                let value = properties
-                    .and_then(|properties| properties.get(field))
-                    .cloned();
-                meter
-                    .allocate(value.as_ref().map_or(1, property_value_size))
-                    .map_err(ReadError::Graph)?;
-                cells.push(OutputValue::Scalar(value));
+                let value = properties.and_then(|properties| properties.get(field));
+                cells.push(allocate_owned(
+                    meter,
+                    value.map_or(1, property_value_size),
+                    || OutputValue::Scalar(value.cloned()),
+                )?);
             } else {
                 match value {
                     BoundValue::Node(id) => {
-                        let node = graph
-                            .node(NodeId(*id))
-                            .expect("validated bound node")
-                            .clone();
-                        meter
-                            .allocate(node_result_size(&node))
-                            .map_err(ReadError::Graph)?;
-                        cells.push(OutputValue::Node(node));
+                        let node = graph.node(NodeId(*id)).expect("validated bound node");
+                        cells.push(allocate_owned(meter, node_result_size(node), || {
+                            OutputValue::Node(node.clone())
+                        })?);
                     }
                     BoundValue::Edge(id) => {
-                        let edge = graph
-                            .edge(EdgeId(*id))
-                            .expect("validated bound edge")
-                            .clone();
+                        let edge = graph.edge(EdgeId(*id)).expect("validated bound edge");
                         let properties = active_edge_properties(
                             graph,
                             graph.edge(EdgeId(*id)).expect("bound edge"),
@@ -629,21 +646,25 @@ fn project_rows(
                             meter,
                         )
                         .map_err(ReadError::Graph)?
-                        .expect("edge stayed visible in one read view")
-                        .clone();
-                        meter
-                            .allocate(edge_result_size(&edge, &properties))
-                            .map_err(ReadError::Graph)?;
-                        cells.push(OutputValue::Edge { edge, properties });
+                        .expect("edge stayed visible in one read view");
+                        cells.push(allocate_owned(
+                            meter,
+                            edge_result_size(edge, properties),
+                            || OutputValue::Edge {
+                                edge: edge.clone(),
+                                properties: properties.clone(),
+                            },
+                        )?);
                     }
                     BoundValue::Path { nodes, edges } => {
-                        meter
-                            .allocate(8 * (1 + edges.len() + nodes.len()) as u64)
-                            .map_err(ReadError::Graph)?;
-                        cells.push(OutputValue::Path {
-                            nodes: nodes.clone(),
-                            edges: edges.clone(),
-                        });
+                        cells.push(allocate_owned(
+                            meter,
+                            8 * (1 + edges.len() + nodes.len()) as u64,
+                            || OutputValue::Path {
+                                nodes: nodes.clone(),
+                                edges: edges.clone(),
+                            },
+                        )?);
                     }
                 }
             }
@@ -651,6 +672,15 @@ fn project_rows(
         projected.push((canonical_identity(&row, plan), cells));
     }
     Ok(projected)
+}
+
+fn allocate_owned<T>(
+    meter: &mut Meter<'_, impl MeterClock>,
+    bytes: u64,
+    build: impl FnOnce() -> T,
+) -> Result<T, GraphError> {
+    meter.allocate(bytes)?;
+    Ok(build())
 }
 
 fn property_value_size(value: &PropertyValue) -> u64 {
@@ -711,15 +741,8 @@ fn scalar_sort(
             )
         })
         .collect::<Vec<_>>();
-    let failure = RefCell::new(None);
+    precharge_sort(projected.len(), meter)?;
     projected.sort_by(|left, right| {
-        if failure.borrow().is_some() {
-            return Ordering::Equal;
-        }
-        if let Err(error) = meter.charge().and_then(|()| meter.check("sort")) {
-            *failure.borrow_mut() = Some(error);
-            return Ordering::Equal;
-        }
         for item in &returning.order_by {
             let Some(index) = columns.iter().position(|name| name == &item.name.text) else {
                 continue;
@@ -733,10 +756,24 @@ fn scalar_sort(
         }
         left.0.cmp(&right.0)
     });
-    if let Some(error) = failure.into_inner() {
-        return Err(error);
-    }
+    meter.check("sort")?;
     Ok(projected)
+}
+
+fn precharge_sort(count: usize, meter: &mut Meter<'_, impl MeterClock>) -> Result<(), GraphError> {
+    // Reserve a deterministic comparison bound, independent of std's sorting strategy.
+    let comparisons = if count < 2 {
+        0
+    } else if count == 2 {
+        1
+    } else {
+        (count as u64).saturating_mul(u64::from(usize::BITS - (count - 1).leading_zeros()))
+    };
+    for _ in 0..comparisons {
+        meter.charge()?;
+        meter.check("sort")?;
+    }
+    Ok(())
 }
 
 fn scalar_value(value: &OutputValue) -> Option<PropertyValue> {
@@ -781,6 +818,148 @@ fn check_output(
 mod tests {
     use super::super::meter::MeterClock;
     use super::*;
+
+    #[test]
+    fn sorts_precharge_the_same_bound_regardless_of_input_order() {
+        let fake = Fake {
+            elapsed: 0,
+            cancelled: false,
+        };
+        let plan = plan::plan("MATCH (n) RETURN n.x AS x ORDER BY x", &[]).unwrap();
+        let returning = plan.statement.returning.as_ref().unwrap();
+        let mut costs = Vec::new();
+        for reverse in [false, true] {
+            let rows = (0..32)
+                .map(|id| {
+                    let value = if reverse { 31 - id } else { id };
+                    (
+                        vec![CanonicalValue::Entity(id)],
+                        vec![OutputValue::Scalar(Some(PropertyValue::Integer(
+                            value as i64,
+                        )))],
+                    )
+                })
+                .collect();
+            let mut meter = Meter::new(ReadBounds::DEFAULT, &fake).unwrap();
+            scalar_sort(rows, returning, &plan, &mut meter).unwrap();
+            costs.push(meter.work);
+        }
+        assert_eq!(
+            costs[0], costs[1],
+            "sort work must not depend on std comparator scheduling"
+        );
+        assert!(costs[0] >= 32 * 5);
+    }
+
+    #[test]
+    fn projection_charges_before_cloning_owned_values() {
+        let fake = Fake {
+            elapsed: 0,
+            cancelled: false,
+        };
+        let mut bounds = ReadBounds::DEFAULT;
+        bounds.max_scratch_bytes = 16;
+        let mut meter = Meter::new(bounds, &fake).unwrap();
+        let cloned = std::cell::Cell::new(false);
+        assert_eq!(
+            allocate_owned(&mut meter, 17, || cloned.set(true)),
+            Err(GraphError::InvalidQuery("subset scratch budget exhausted"))
+        );
+        assert!(
+            !cloned.get(),
+            "owned value was built before its allocation charge"
+        );
+    }
+
+    #[test]
+    fn adjacency_candidates_examine_only_incident_edges_in_id_order() {
+        use super::super::super::GraphState;
+        use super::super::super::codec::{GraphBody, GraphEntry};
+        use super::super::super::model::GraphId;
+        let mut entries = vec![GraphEntry::CreateGraph { name: "g".into() }];
+        for id in 1..=4 {
+            entries.push(GraphEntry::PutNode {
+                node_id: NodeId(id),
+                key: id.to_string(),
+                labels: BTreeSet::new(),
+                properties: Properties::new(),
+            });
+        }
+        for (id, source, destination, relationship) in
+            [(3, 1, 2, "Z"), (9, 1, 2, "A"), (10, 3, 4, "A")]
+        {
+            entries.push(GraphEntry::PutEdge {
+                edge_id: EdgeId(id),
+                source: NodeId(source),
+                destination: NodeId(destination),
+                relationship: relationship.into(),
+                key: None,
+                properties: Properties::new(),
+            });
+        }
+        let mut state = GraphState::default();
+        state
+            .apply_at(
+                1,
+                &GraphBody {
+                    graph_id: GraphId(0),
+                    entries,
+                },
+                false,
+            )
+            .unwrap();
+        let graph = state.graph(GraphId(0)).unwrap();
+        let fake = Fake {
+            elapsed: 0,
+            cancelled: false,
+        };
+        let mut meter = Meter::new(ReadBounds::DEFAULT, &fake).unwrap();
+        let scan = EdgeCandidates::Scan(graph);
+        let candidates = scan.incident(1, Direction::Out, &mut meter).unwrap();
+        assert_eq!(
+            candidates.iter().map(|edge| edge.id.0).collect::<Vec<_>>(),
+            [3, 9]
+        );
+        assert_eq!(meter.work, 2, "unrelated edge must not enter the scan");
+    }
+
+    #[test]
+    fn sort_exhaustion_above_twenty_rows_is_an_error_not_a_panic() {
+        let fake = Fake {
+            elapsed: 0,
+            cancelled: false,
+        };
+        let plan = plan::plan("MATCH (n) RETURN n.x AS x ORDER BY x", &[]).unwrap();
+        for cap in [1, 159, 160, 161] {
+            let rows = (0..32)
+                .map(|id| {
+                    (
+                        vec![CanonicalValue::Entity(id)],
+                        vec![OutputValue::Scalar(Some(PropertyValue::Integer(
+                            ((id * 17) % 32) as i64,
+                        )))],
+                    )
+                })
+                .collect();
+            let mut bounds = ReadBounds::DEFAULT;
+            bounds.max_work_units = cap;
+            let mut meter = Meter::new(bounds, &fake).unwrap();
+            let result = scalar_sort(
+                rows,
+                plan.statement.returning.as_ref().unwrap(),
+                &plan,
+                &mut meter,
+            );
+            if cap < 160 {
+                assert_eq!(
+                    result,
+                    Err(GraphError::InvalidQuery("subset work budget exhausted"))
+                );
+            } else {
+                assert_eq!(result.unwrap().len(), 32);
+            }
+        }
+    }
 
     struct Fake {
         elapsed: u64,

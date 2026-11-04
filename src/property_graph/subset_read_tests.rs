@@ -91,6 +91,149 @@ fn endpoint_anchors_are_enforced() {
     assert_fixture_case("read-endpoint-anchor");
 }
 
+#[test]
+fn spaced_hop_bounds_report_the_upper_numeral() {
+    let document: Value = serde_json::from_str(FIXTURE).unwrap();
+    let graphs = document["graphs"].as_object().unwrap();
+    let baseline = document["cases"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|case| case["id"] == "read-hop-plus-one")
+        .unwrap();
+    for bound in ["*1 ..3", "* 1 .. 3", "*1\t..\n3"] {
+        let mut case = baseline.clone();
+        let text = baseline["text"].as_str().unwrap().replace("*1..3", bound);
+        assert!(text.contains(bound));
+        case["expect"]["error"]["offset"] = json!(text.find('3').unwrap());
+        case["text"] = json!(text);
+        assert_case(graphs, &case).unwrap();
+    }
+}
+
+#[test]
+fn frontier_exhaustion_returns_no_partial_rows() {
+    let document: Value = serde_json::from_str(FIXTURE).unwrap();
+    let graphs = document["graphs"].as_object().unwrap();
+    let mut case = document["cases"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|case| case["id"] == "read-parallel")
+        .unwrap()
+        .clone();
+    case["limits"] = json!({"max_frontier_entries":1});
+    case["expect"] = json!({"outcome":"reject","error":{
+        "kind":"InvalidQuery","reason":"subset frontier budget exhausted"}});
+    assert_case(graphs, &case).unwrap();
+}
+
+#[test]
+fn execute_validates_unvalidated_bounds_before_any_clock_or_graph_work() {
+    let document: Value = serde_json::from_str(FIXTURE).unwrap();
+    let graph = graph_from_fixture(&document["graphs"]["empty"]);
+    let clock = FakeClock {
+        value: json!({"cancelled":true}),
+    };
+    let mut bounds = ReadBounds::DEFAULT;
+    bounds.max_scratch_bytes = u64::MAX;
+    assert!(matches!(
+        execute(
+            &graph,
+            7,
+            false,
+            100,
+            "MATCH (n) RETURN n",
+            &[],
+            bounds,
+            &clock,
+            fixture_as_of
+        ),
+        Err(ReadError::Graph(GraphError::LimitExceedsCeiling {
+            limit: "max_scratch_bytes",
+            ..
+        }))
+    ));
+}
+
+#[test]
+fn real_database_subset_adapter_uses_one_view_and_temporal_capability() {
+    use crate::property_graph::read::GraphTextError;
+    use crate::property_graph::subset::SubsetLimits;
+    use crate::property_graph::temporal::{Activation, enable_temporal};
+    use crate::{Database, Error, Metadata};
+    let activation = Activation::on();
+    let dir = tempfile::tempdir_in(concat!(env!("CARGO_MANIFEST_DIR"), "/target")).unwrap();
+    let source = dir.path().join("subset-source.vlite");
+    let mut db = Database::create(&source, 2).unwrap();
+    db.create_graph("g").unwrap();
+    db.graph_mut("g")
+        .unwrap()
+        .create_node("n", &["N"], &Metadata::new())
+        .unwrap();
+    let parameters = [ParameterEntry {
+        name: "t".into(),
+        value: PropertyValue::Integer(0),
+        position: 16,
+    }];
+    let graph = db.graph("g").unwrap();
+    let result = graph
+        .read_subset("MATCH (n) RETURN n", &[], SubsetLimits::DEFAULT, None)
+        .unwrap()
+        .unwrap();
+    assert_eq!(result.view_sequence, graph.view_sequence());
+    assert_eq!(result.rows.len(), 1);
+    let error = graph
+        .read_subset(
+            "MATCH (n) AS OF $t RETURN n",
+            &parameters,
+            SubsetLimits::DEFAULT,
+            None,
+        )
+        .unwrap_err();
+    assert!(matches!(
+        error.error,
+        GraphTextError::Read(Error::UnsupportedFeature(64))
+    ));
+    let mut limits = SubsetLimits::DEFAULT;
+    limits.max_binding_rows = 0;
+    assert!(matches!(
+        graph
+            .read_subset("MATCH (n) RETURN n", &[], limits, None)
+            .unwrap_err()
+            .error,
+        GraphTextError::Read(Error::InvalidQuery("subset work limits must be positive"))
+    ));
+    db.close().unwrap();
+    let temporal = dir.path().join("subset-temporal.vlite");
+    enable_temporal(&source, &temporal, None).unwrap();
+    let db = Database::open(&temporal).unwrap();
+    let graph = db.graph("g").unwrap();
+    let result = graph
+        .read_subset(
+            "MATCH (n) AS OF $t RETURN n",
+            &parameters,
+            SubsetLimits::DEFAULT,
+            None,
+        )
+        .unwrap()
+        .unwrap();
+    assert_eq!(result.as_of_ms, Some(0));
+    drop(activation);
+    let error = graph
+        .read_subset(
+            "MATCH (n) AS OF $t RETURN n",
+            &parameters,
+            SubsetLimits::DEFAULT,
+            None,
+        )
+        .unwrap_err();
+    assert!(matches!(
+        error.error,
+        GraphTextError::Read(Error::UnsupportedFeature(64))
+    ));
+}
+
 fn assert_fixture_case(case_id: &str) {
     let document: Value = serde_json::from_str(FIXTURE).expect("read fixture JSON");
     let graphs = document["graphs"].as_object().expect("graph map");

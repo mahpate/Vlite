@@ -2,7 +2,6 @@ use super::super::error::GraphError;
 use super::super::limits::GraphLimits;
 use std::collections::BTreeSet;
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::time::Instant;
 
 const DEFAULT_BINDING_ROWS: u64 = 1_000;
 const MAX_BINDING_ROWS: u64 = 10_000;
@@ -156,23 +155,26 @@ pub(crate) trait MeterClock {
     fn cancelled(&self, phase: &'static str, work: u64) -> bool;
 }
 
-pub(crate) struct SystemClock<'a> {
-    started: Instant,
+pub(crate) struct SystemClock<'a, F> {
+    elapsed: F,
+    started: u64,
     cancel: Option<&'a AtomicBool>,
 }
 
-impl<'a> SystemClock<'a> {
-    pub(crate) fn new(cancel: Option<&'a AtomicBool>) -> Self {
+impl<'a, F: Fn() -> u64> SystemClock<'a, F> {
+    pub(crate) fn new(cancel: Option<&'a AtomicBool>, elapsed: F) -> Self {
+        let started = elapsed();
         Self {
-            started: Instant::now(),
+            elapsed,
+            started,
             cancel,
         }
     }
 }
 
-impl MeterClock for SystemClock<'_> {
+impl<F: Fn() -> u64> MeterClock for SystemClock<'_, F> {
     fn elapsed_ms(&self, _phase: &'static str, _work: u64) -> u64 {
-        self.started.elapsed().as_millis().min(u128::from(u64::MAX)) as u64
+        (self.elapsed)().saturating_sub(self.started)
     }
 
     fn cancelled(&self, _phase: &'static str, _work: u64) -> bool {
@@ -417,5 +419,152 @@ mod tests {
             meter.charge(),
             Err(GraphError::InvalidQuery("subset work budget exhausted"))
         );
+    }
+
+    #[test]
+    fn every_meter_cap_accepts_minus_one_and_cap_then_rejects_plus_one() {
+        type Action = fn(&mut Meter<'_, NoTime>, usize) -> Result<(), GraphError>;
+        let checks: [(&str, Action); 11] = [
+            ("subset visited-node budget exhausted", |meter, n| {
+                meter.visit(n as u64)
+            }),
+            ("subset edge budget exhausted", |meter, _| meter.examine(1)),
+            ("subset degree budget exhausted", |meter, n| {
+                meter.examine(n as u64)
+            }),
+            ("subset frontier budget exhausted", |meter, n| {
+                meter.frontier_insert(n)
+            }),
+            ("subset binding-row budget exhausted", |meter, n| {
+                meter.binding_insert(n)
+            }),
+            ("subset result-row budget exhausted", |meter, n| {
+                meter.returned(n)
+            }),
+            ("subset work budget exhausted", |meter, _| meter.charge()),
+            ("subset scratch budget exhausted", |meter, _| {
+                meter.allocate(1)
+            }),
+            ("subset output budget exhausted", |meter, n| {
+                meter.output(n, 0, 0)
+            }),
+            ("subset output budget exhausted", |meter, n| {
+                meter.output(0, n, 0)
+            }),
+            ("subset output budget exhausted", |meter, n| {
+                meter.output(0, 0, n)
+            }),
+        ];
+        let clock = NoTime;
+        for (index, (reason, action)) in checks.into_iter().enumerate() {
+            let mut bounds = ReadBounds::DEFAULT;
+            match index {
+                0 => bounds.graph.max_visited_nodes = 2,
+                1 => bounds.graph.max_edges_examined = 2,
+                2 => bounds.graph.max_edges_per_node = 2,
+                3 => bounds.max_frontier_entries = 2,
+                4 => bounds.max_binding_rows = 2,
+                5 => bounds.max_returned_rows = 2,
+                6 => bounds.max_work_units = 2,
+                7 => bounds.max_scratch_bytes = 2,
+                8 => bounds.graph.max_output_nodes = 2,
+                9 => bounds.graph.max_output_edges = 2,
+                10 => bounds.graph.max_output_paths = 2,
+                _ => unreachable!(),
+            }
+            let mut meter = Meter::new(bounds, &clock).unwrap();
+            assert_eq!(action(&mut meter, 1), Ok(()), "{index}: cap-1");
+            assert_eq!(action(&mut meter, 2), Ok(()), "{index}: cap");
+            assert_eq!(
+                action(&mut meter, 3),
+                Err(GraphError::InvalidQuery(reason)),
+                "{index}: cap+1"
+            );
+        }
+    }
+
+    #[test]
+    fn every_caller_ceiling_is_exact_and_never_clamped() {
+        let graph = GraphLimits::CEILING;
+        let ceilings = [
+            graph.max_hops,
+            graph.max_visited_nodes,
+            graph.max_edges_examined,
+            graph.max_edges_per_node,
+            graph.deadline_ms,
+            graph.max_output_nodes,
+            graph.max_output_edges,
+            graph.max_output_paths,
+            MAX_BINDING_ROWS,
+            MAX_FRONTIER_ENTRIES,
+            MAX_RETURNED_ROWS,
+            MAX_WORK_UNITS,
+            MAX_SCRATCH_BYTES,
+            MAX_WRITE_DEADLINE_MS,
+        ];
+        for (index, ceiling) in ceilings.into_iter().enumerate() {
+            for requested in [ceiling - 1, ceiling, ceiling + 1] {
+                let mut values = [None; 14];
+                values[index] = Some(requested);
+                let result = ReadBounds::DEFAULT.with_overrides(values);
+                if requested > ceiling {
+                    assert!(
+                        matches!(result, Err(GraphError::LimitExceedsCeiling { requested: actual, .. }) if actual == requested)
+                    );
+                } else {
+                    assert!(result.is_ok(), "{index}: {requested}");
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn scratch_larger_than_one_byte_and_frontier_stop_fail_closed() {
+        let clock = NoTime;
+        let mut bounds = ReadBounds::DEFAULT;
+        bounds.max_scratch_bytes = 256;
+        bounds.max_frontier_entries = 2;
+        let mut meter = Meter::new(bounds, &clock).unwrap();
+        meter.allocate(255).unwrap();
+        meter.allocate(1).unwrap();
+        assert_eq!(
+            meter.allocate(1),
+            Err(GraphError::InvalidQuery("subset scratch budget exhausted"))
+        );
+        assert_eq!(
+            meter.frontier_insert(3),
+            Err(GraphError::InvalidQuery("subset frontier budget exhausted"))
+        );
+    }
+
+    #[test]
+    fn system_clock_uses_only_the_injected_clock_and_cancellation_flag() {
+        let cancel = AtomicBool::new(false);
+        let value = std::cell::Cell::new(1);
+        let clock = SystemClock::new(Some(&cancel), || value.get());
+        assert_eq!(clock.elapsed_ms("before", 0), 0);
+        value.set(2);
+        assert_eq!(clock.elapsed_ms("sort", 64), 1);
+        assert!(!clock.cancelled("before", 0));
+        cancel.store(true, Ordering::Relaxed);
+        assert!(clock.cancelled("interval", 64));
+    }
+
+    #[test]
+    fn deadline_is_exclusive_at_the_exact_cap() {
+        let value = std::cell::Cell::new(0);
+        let clock = SystemClock::new(None, || value.get());
+        let mut bounds = ReadBounds::DEFAULT;
+        bounds.graph.deadline_ms = 2;
+        let meter = Meter::new(bounds, &clock).unwrap();
+        value.set(1);
+        assert_eq!(meter.check("sort"), Ok(()));
+        for elapsed in [2, 3] {
+            value.set(elapsed);
+            assert_eq!(
+                meter.check("sort"),
+                Err(GraphError::InvalidQuery("subset deadline exceeded"))
+            );
+        }
     }
 }

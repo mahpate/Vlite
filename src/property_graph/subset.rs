@@ -79,7 +79,7 @@ impl<'db> GraphRef<'db> {
     ) -> std::result::Result<Option<ReadResult>, SubsetReadError> {
         let ttl_clock_ms = self.now();
         let temporal_capable = self.db.flags & crate::format::FLAG_TEMPORAL != 0;
-        let clock = SystemClock::new(cancel);
+        let clock = SystemClock::new(cancel, super::read::clock());
         engine::subset::read::execute(
             self.graph,
             self.view_sequence,
@@ -160,6 +160,30 @@ mod tests {
                 ..
             })
         ));
+    }
+
+    #[test]
+    fn adapter_error_mapping_preserves_kind_and_diagnostic_position() {
+        let error = read_error(ReadError::At {
+            error: engine::GraphError::InvalidQuery("subset hop bound exceeds max_hops"),
+            position: 23,
+        });
+        assert_eq!(error.position, Some(23));
+        assert!(matches!(
+            error.error,
+            GraphTextError::Read(Error::InvalidQuery("subset hop bound exceeds max_hops"))
+        ));
+        let error = read_error(ReadError::Runtime("default time overflow"));
+        assert!(matches!(
+            error.error,
+            GraphTextError::Read(Error::InvalidQuery("default time overflow"))
+        ));
+        let error = read_error(ReadError::Query(engine::language::LanguageError {
+            kind: engine::language::LanguageErrorKind::Syntax,
+            position: 7,
+            message: "expected token".into(),
+        }));
+        assert!(matches!(error.error, GraphTextError::Query(error) if error.position == 7));
     }
 }
 
