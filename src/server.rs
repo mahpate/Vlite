@@ -38,6 +38,7 @@ mod credentials;
 mod features;
 mod graph;
 mod group_commit;
+mod kv;
 pub use group_commit::GroupCommitConfig;
 #[cfg(feature = "grpc")]
 pub mod grpc;
@@ -556,6 +557,7 @@ fn configured_routes(service: Service) -> Router {
         .merge(credentials::routes())
         .merge(data_routes())
         .merge(features::routes())
+        .merge(kv::routes())
         .merge(
             Router::new()
                 .route("/health", get(|| async { Json(json!({"status": "ok"})) }))
@@ -881,6 +883,8 @@ fn permission(method: &Method, route: &str) -> Need {
             | "/v1/collections/{collection}"
             | "/v1/collections/{collection}/vectors"
             | "/v1/collections/{collection}/vectors/{id}"
+            | "/v1/collections/{collection}/kv/entry"
+            | "/v1/collections/{collection}/kv/entries"
             | "/v1/collections/{collection}/search/grouped"
             | "/v1/collections/{collection}/recommend"
             | "/v1/collections/{collection}/facets"
@@ -893,7 +897,12 @@ fn permission(method: &Method, route: &str) -> Need {
             | "/v1/collections/{collection}/query"
             | "/v1/imports/{job}",
         ) => Need::Op(Op::Read, Reach::Collection),
-        ("PUT" | "DELETE", "/v1/vectors/{id}" | "/v1/collections/{collection}/vectors/{id}")
+        (
+            "PUT" | "DELETE",
+            "/v1/vectors/{id}"
+            | "/v1/collections/{collection}/vectors/{id}"
+            | "/v1/collections/{collection}/kv/entry",
+        )
         | (
             "PATCH",
             "/v1/vectors/{id}/metadata" | "/v1/collections/{collection}/vectors/{id}/metadata",
@@ -1540,6 +1549,7 @@ impl From<Error> for ApiError {
                 error.to_string(),
             ),
             Error::InvalidCollectionName
+            | Error::InvalidKvKey(_)
             | Error::InvalidCollectionSettings(_)
             | Error::InvalidQuery(_) => Self::new(
                 StatusCode::UNPROCESSABLE_ENTITY,
@@ -1635,6 +1645,14 @@ impl From<Error> for ApiError {
                 graph_code(&error),
                 error.to_string(),
             ),
+            Error::KvSlotsExhausted => Self::new(
+                StatusCode::CONFLICT,
+                "kv_slots_exhausted",
+                error.to_string(),
+            ),
+            Error::NotKvCollection => {
+                Self::new(StatusCode::CONFLICT, "not_kv_collection", error.to_string())
+            }
             error => internal(error),
         }
     }
