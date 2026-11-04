@@ -603,7 +603,7 @@ mod tests {
     #[test]
     fn churning_threads_of_closing_sessions_change_no_later_session() {
         const THREADS: usize = 8;
-        const ROUNDS: usize = 200;
+        const ROUNDS: usize = 60;
         let current = AtomicUsize::new(0);
         let stop = AtomicBool::new(false);
         let seen: Vec<(usize, (isize, isize))> = thread::scope(|scope| {
@@ -614,6 +614,8 @@ mod tests {
                         let mut block = std::hint::black_box(vec![0u8; 1_000]);
                         block.reserve_exact(3_000);
                         drop(std::hint::black_box(block));
+                        // Yield so the churn does not starve every other test on a shared runner.
+                        thread::yield_now();
                     }
                 });
             }

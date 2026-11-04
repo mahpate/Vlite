@@ -185,7 +185,9 @@ class Policy(unittest.TestCase):
             "cargo nextest run --locked --workspace --all-targets --all-features --test-threads 2",
             workflow,
         )
-        self.assertIn("cargo nextest run --locked --workspace --all-targets --test-threads 2", workflow)
+        # The default-feature suite runs once (Linux stable); other cells only compile it.
+        self.assertIn("cargo check --locked --workspace --all-targets\n", workflow)
+        self.assertNotIn("cargo nextest run --locked --workspace --all-targets --test-threads 2", workflow)
         self.assertIn("cargo test --locked --workspace --all-targets --all-features", workflow)
         self.assertIn("run: cargo test --locked --workspace --all-targets\n", workflow)
 
