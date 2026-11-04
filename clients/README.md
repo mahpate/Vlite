@@ -106,6 +106,21 @@ Ordinary KV acknowledgements sync only under server `--durability full`.
 See the [Python](python/README.md#key-value-operations) and
 [JavaScript](javascript/README.md#key-value-operations) examples and .NET below.
 
+The JavaScript client also exposes the unreleased agent-memory REST candidate through
+`client.memory(binding)`, a binding-local facade with `remember`, `recall`, `findFacts`,
+`correctFacts`, `consolidate`, `forget`, `getReceipt`, `getErasure` and `resumeErasure`, each taking
+one request object and returning the full response. The first server slice supports remember
+(`entity` and `episodic`), recall, consolidate (retain, commit only), forget (`ids` target, logical
+delete) and receipt lookup; other operations and fields answer 409 `memory_capability_unavailable`
+with `details.feature`, and the client surfaces that refusal unchanged. u64 and i64 inputs are
+decimal strings, safe integers or `bigint` (an unsafe `Number` is a `TypeError`) and are sent as
+decimal strings; outputs stay decimal strings. `deadline_ms` is the engine deadline, not the HTTP
+timeout. HTTP 202 is an ordinary pending response. Errors carry `code`, `status`, `requestId` and
+optional `details`; only 404 `not_found` becomes `UnsupportedError`. A timeout or cancellation is a
+`TransportError` and never a retry: reconcile a mutation with `getReceipt`. No embedding, splitting,
+paging or idempotency key is added. See the
+[JavaScript](javascript/README.md#memory-operations) example.
+
 Exact search accepts `metric: "squared_l2" | "cosine" | "inner_product"` in the
 request (Python uses a dictionary). Omission preserves squared L2.
 Cosine distance is 1 minus similarity; zero queries are rejected and zero-norm
