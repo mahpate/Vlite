@@ -2915,6 +2915,9 @@ impl Database {
         if self.state(id).records.is_compact() {
             self.ensure_healthy()?;
             validate_settings(&settings)?;
+            if self.read_only {
+                return Err(Error::ReadOnly);
+            }
             let state = self.state(id);
             let records = state.records.pin_effective();
             let mut workspace = compact::source::ReadWorkspace::new(4 << 20)?;

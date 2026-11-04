@@ -51,6 +51,10 @@ pub struct GpuExactSearcher {
     adapter_name: String,
 }
 
+pub(crate) fn resident_preflight(database: &Database) -> Result<()> {
+    database.ensure_resident_in(0)
+}
+
 impl GpuExactSearcher {
     /// Returns `None` when no compute-capable adapter is available.
     pub fn new() -> Option<Self> {
@@ -94,7 +98,7 @@ impl GpuExactSearcher {
 
     /// Exact squared-L2 search of the default collection on the GPU.
     pub fn search(&self, database: &Database, query: &[f32], k: usize) -> Result<Vec<SearchHit>> {
-        database.ensure_resident_in(0)?;
+        resident_preflight(database)?;
         let state = database.state(0);
         let records = state.records.resident()?;
         crate::validate_vector(state.dimensions, query)?;

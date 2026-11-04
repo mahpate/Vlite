@@ -523,6 +523,12 @@ mod effective_rows_tests {
             )
             .unwrap();
             loaded.flags |= crate::format::FLAG_PRECISION;
+            loaded
+                .collections
+                .get_mut(&0)
+                .unwrap()
+                .expiries
+                .insert(3, 100);
             loaded.collections.get_mut(&0).unwrap().precision =
                 Some(crate::compact::catalog::Precision::Float16);
             let mut image = Vec::new();
@@ -552,6 +558,16 @@ mod effective_rows_tests {
                 )
                 .unwrap();
                 let pin = rows.pin_effective();
+                assert!(pin.effective_visible(3, 99, &Default::default()));
+                assert!(!pin.effective_visible(3, 100, &Default::default()));
+                let base_only = CollectionRecords::Compact {
+                    view: loaded.compact_generation.as_ref().unwrap().view(collection),
+                    overlay: Default::default(),
+                };
+                assert_eq!(base_only.source_identity(), pin.source_identity());
+                assert!(base_only.effective_visible(3, 99, &Default::default()));
+                assert!(!base_only.effective_visible(3, 100, &Default::default()));
+                assert!(!pin.effective_visible(999, 99, &Default::default()));
                 assert!(pin.source_identity().is_some());
                 assert_eq!(
                     pin.effective_ids(),
@@ -596,6 +612,11 @@ mod effective_rows_tests {
                     "tombstones hold no logical record body"
                 );
                 assert!(rows.effective_vector(id, &mut workspace).unwrap().is_none());
+                assert!(
+                    rows.effective_payload(id, &mut workspace)
+                        .unwrap()
+                        .is_none()
+                );
                 assert!(
                     rows.effective_metadata(id, &mut workspace)
                         .unwrap()
@@ -679,6 +700,13 @@ mod effective_rows_tests {
                 assert_eq!(resident.source_accounting(&mut workspace).unwrap(), None);
                 assert_eq!(resident.overlay_logical_bytes().unwrap(), 0);
                 assert_eq!(resident.effective_ids(), pin.effective_ids());
+                assert!(resident.effective_visible(3, 99, &expected.expiries));
+                assert!(!resident.effective_visible(3, 100, &expected.expiries));
+                assert!(!resident.effective_visible(999, 99, &expected.expiries));
+                rows.apply_committed(new_id, Some(replacement), loaded.sequence + 5, Some(100))
+                    .unwrap();
+                assert!(rows.effective_visible(new_id, 99, &Default::default()));
+                assert!(!rows.effective_visible(new_id, 100, &Default::default()));
             }
         }
     }
