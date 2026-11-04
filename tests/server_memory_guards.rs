@@ -215,6 +215,16 @@ async fn reserved_graph_and_collection_are_denied_and_lists_filter_them() {
         "credential scope does not permit this operation or collection"
     );
     assert_eq!(get(&app, "/v1/collections/ordinary").await.0, 200);
+    let missing_bindings = BINDINGS.replace("\"notes_ev\"", "\"missing_ev\"");
+    let missing_directory = tempfile::tempdir().unwrap();
+    let missing_app = start(&missing_directory, Some(&missing_bindings), false).unwrap();
+    let (missing_status, missing_error) = get(&missing_app, "/v1/collections/missing_ev").await;
+    assert_eq!(missing_status, 403);
+    assert_eq!(missing_error["error"]["code"], "forbidden_scope");
+    assert_eq!(
+        missing_error["error"]["message"],
+        "credential scope does not permit this operation or collection"
+    );
     assert_eq!(
         call(&app, "DELETE", "/v1/graphs/notes_graph", Body::empty())
             .await
@@ -827,6 +837,14 @@ async fn webhook_dispatcher_never_delivers_reserved_resource_events() {
                 "events": ["collection_created"],
                 "graphs": null,
                 "secret": "fake-webhook-secret"
+            },
+            "fake-graph-subscription-id": {
+                "id": "fake-graph-subscription-id",
+                "url": endpoint,
+                "collections": null,
+                "events": ["graph_created"],
+                "graphs": ["notes_graph"],
+                "secret": "fake-graph-webhook-secret"
             }
         },
         "deliveries": {}
