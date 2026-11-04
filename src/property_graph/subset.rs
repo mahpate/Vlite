@@ -8,8 +8,9 @@ use super::engine::GraphLimits;
 use super::engine::subset::meter::{ReadBounds, SystemClock};
 use super::engine::subset::plan::ParameterEntry;
 use super::engine::subset::read::{ReadError, ReadResult};
+use super::engine::subset::write::{WriteError, WriteResult};
 use super::read::GraphTextError;
-use super::{GraphRef, convert, engine};
+use super::{GraphMut, GraphRef, convert, engine};
 
 const DEFAULT_WRITE_DEADLINE_MS: u64 = 100;
 
@@ -103,6 +104,72 @@ impl<'db> GraphRef<'db> {
             },
         )
         .map_err(read_error)
+    }
+}
+
+impl GraphMut<'_> {
+    /// Plans one write statement at a single captured clock and commits it
+    /// as one graph frame, or commits nothing. Test-gated: no route or
+    /// public surface reaches it.
+    #[allow(dead_code)]
+    pub(crate) fn write_subset(
+        &mut self,
+        text: &str,
+        parameters: &[ParameterEntry],
+        limits: SubsetLimits,
+        cancel: Option<&AtomicBool>,
+        requested_now_ms: Option<u64>,
+    ) -> std::result::Result<Option<WriteResult>, GraphTextError> {
+        let db = &mut *self.db;
+        db.graphs().map_err(GraphTextError::Read)?;
+        if db.read_only {
+            return Err(GraphTextError::Read(Error::ReadOnly));
+        }
+        // Clock C is captured once and threaded through planning and commit.
+        let now = match requested_now_ms {
+            Some(requested) => db.graph_clock.max(crate::current_time_ms()).max(requested),
+            None => db.graph_now(),
+        };
+        let temporal_capable = db.flags & crate::format::FLAG_TEMPORAL != 0;
+        let clock = SystemClock::new(cancel, super::read::clock());
+        let state = db
+            .graph
+            .as_mut()
+            .ok_or(GraphTextError::Read(Error::GraphsNotEnabled))?;
+        let staged = engine::subset::write::execute(
+            state,
+            self.id,
+            db.sequence,
+            temporal_capable,
+            now,
+            text,
+            parameters,
+            limits.engine_bounds(),
+            &clock,
+        )
+        .map_err(write_error)?;
+        let Some(staged) = staged else {
+            return Ok(None);
+        };
+        if let Some(revision) = staged.result.revision {
+            let committed = db
+                .commit_graph(&staged.body, &[])
+                .map_err(GraphTextError::Read)?;
+            debug_assert_eq!(committed, revision);
+            db.graph_clock = db.graph_clock.max(now);
+        }
+        Ok(Some(staged.result))
+    }
+}
+
+#[allow(dead_code)]
+fn write_error(error: WriteError) -> GraphTextError {
+    match error {
+        WriteError::Query(error) => GraphTextError::Query(error),
+        WriteError::Metadata(error) | WriteError::Graph(error) => {
+            GraphTextError::Read(convert::graph_error(error))
+        }
+        WriteError::SequenceExhausted => GraphTextError::Read(Error::SequenceExhausted),
     }
 }
 
