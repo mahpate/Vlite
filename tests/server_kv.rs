@@ -507,6 +507,62 @@ async fn kv_scopes_binding_tenancy_quota_and_audit() {
             200
         );
     }
+    let audit = std::fs::read_to_string(directory.path().join("audit.jsonl")).unwrap();
+    let mutations: Vec<Value> = audit
+        .lines()
+        .map(|line| serde_json::from_str::<Value>(line).unwrap())
+        .filter(|event| matches!(event["event"].as_str(), Some("kv_put" | "kv_delete")))
+        .collect();
+    assert!(
+        mutations
+            .iter()
+            .any(|event| event["event"] == "kv_put" && event["outcome"] == "ok")
+    );
+    assert!(
+        mutations
+            .iter()
+            .any(|event| event["event"] == "kv_delete" && event["outcome"] == "ok")
+    );
+    for event in mutations {
+        assert!(event.get("request_id").is_some());
+        assert!(event.get("principal").is_some());
+        for forbidden in [
+            "namespace",
+            "key",
+            "value",
+            "value_base64",
+            "token",
+            "payload",
+        ] {
+            assert!(event.get(forbidden).is_none());
+        }
+    }
+}
+
+#[tokio::test]
+async fn kv_read_only_handle_refuses_even_missing_delete() {
+    let directory = tempfile::tempdir().unwrap();
+    let path = directory.path().join("read-only.vlite");
+    Database::create_with_format(&path, 1, FormatVersion::V5)
+        .unwrap()
+        .close()
+        .unwrap();
+    let app = start(
+        Database::open_read_only(&path).unwrap(),
+        &directory.path().join("admin"),
+    );
+    for (method, uri, body) in [
+        (
+            "PUT",
+            "/v1/collections/default/kv/entry".to_owned(),
+            put("k"),
+        ),
+        ("DELETE", entry("missing"), Value::Null),
+    ] {
+        let (status, response) = call(&app, ADMIN, method, &uri, body).await;
+        assert_eq!(status, 403);
+        assert_eq!(response["error"]["code"], "read_only");
+    }
 }
 
 #[tokio::test]

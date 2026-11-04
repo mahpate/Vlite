@@ -133,6 +133,26 @@ pub fn first_slot(namespace: &str, key: &str) -> u64 {
 }
 
 impl KvView<'_> {
+    #[cfg(feature = "server")]
+    pub(crate) fn put_slot_at(
+        &self,
+        namespace: &str,
+        key: &str,
+        expected: Expected,
+        now_ms: u64,
+    ) -> Result<u64> {
+        validate(namespace, key)?;
+        let probe = probe(self.db, self.id, namespace, key, now_ms)?;
+        expected.check(probe.live_version())?;
+        match probe.found {
+            Some(found) => Ok(found.slot),
+            None => probe
+                .free
+                .map(|(slot, _)| slot)
+                .ok_or(Error::KvSlotsExhausted),
+        }
+    }
+
     pub fn get(&self, namespace: &str, key: &str) -> Result<Option<KvEntry>> {
         get_at(self.db, self.id, namespace, key, current_time_ms())
     }
