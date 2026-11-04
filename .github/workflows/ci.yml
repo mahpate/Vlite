@@ -49,6 +49,8 @@ jobs:
           python -O tests/agent_memory_oracle.py --self-test
           python tests/c1_consolidation_oracle.py --self-test
           python -O tests/c1_consolidation_oracle.py --self-test
+          python tests/memory_erasure_oracle.py --self-test
+          python -O tests/memory_erasure_oracle.py --self-test
           python tests/ingestion_reference.py --self-test
           python -O tests/ingestion_reference.py --self-test
           python tests/graph_subset_oracle.py --self-test
