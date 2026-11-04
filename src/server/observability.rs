@@ -22,10 +22,8 @@ pub(super) fn record_slow(metrics: &Metrics, entry: Value) {
 /// A slow-query entry is visible to a scoped principal only under the same
 /// binding as normal access: database lineage, collection ID and name. A
 /// dropped and recreated collection (new ID) is never visible to an old grant.
-fn visible(role: &admin::Role, item: &Value) -> bool {
-    let admin::Role::Scoped(grant) = role else {
-        return true;
-    };
+fn visible(role: &admin::Role, item: &Value, reserved: &reserved::Reserved) -> bool {
+    let credential = super::raw_credential(role);
     let lineage = item["lineage"]
         .as_str()
         .and_then(|lineage| u64::from_str_radix(lineage, 16).ok());
@@ -33,7 +31,13 @@ fn visible(role: &admin::Role, item: &Value) -> bool {
         .as_u64()
         .and_then(|id| u16::try_from(id).ok());
     match (collection, item["collection"].as_str()) {
-        (Some(collection), Some(name)) => grant.covers(lineage, collection, name),
+        (Some(collection), Some(name)) => {
+            reserved.raw_allowed(credential, reserved::Resource::Collection, name)
+                && match role {
+                    admin::Role::Scoped(grant) => grant.covers(lineage, collection, name),
+                    admin::Role::Admin | admin::Role::ReadOnly => true,
+                }
+        }
         _ => false,
     }
 }
@@ -45,12 +49,22 @@ fn global(role: &admin::Role) -> bool {
     }
 }
 
-fn collection_metrics(db: &Database, role: &admin::Role) -> Vec<Value> {
+fn collection_metrics(
+    db: &Database,
+    role: &admin::Role,
+    reserved: &reserved::Reserved,
+) -> Vec<Value> {
+    let credential = super::raw_credential(role);
     db.collections
         .iter()
         .filter(|&(&id, state)| match role {
-            admin::Role::Scoped(grant) => grant.covers(db.lineage(), id, &state.name),
-            _ => true,
+            admin::Role::Scoped(grant) => {
+                grant.covers(db.lineage(), id, &state.name)
+                    && reserved.raw_allowed(credential, reserved::Resource::Collection, &state.name)
+            }
+            admin::Role::Admin | admin::Role::ReadOnly => {
+                reserved.raw_allowed(credential, reserved::Resource::Collection, &state.name)
+            }
         })
         .map(|(&id, state)| {
             let index = state.index.as_ref();
@@ -81,11 +95,13 @@ async fn snapshot(service: Service, role: admin::Role) -> Result<Value, ApiError
     let format_version = service.format_version;
     let snapshot_reads = service.snapshot_reads;
     let group_stats = service.group_commit.as_ref().map(|group| group.stats());
+    let bindings = service.memory_bindings.clone();
     service
         .run_read(move |db| {
+            let reserved = bindings.reserved();
             let healthy = !db.is_poisoned();
             let collections = if healthy {
-                collection_metrics(db, &role)
+                collection_metrics(db, &role, reserved)
             } else {
                 Vec::new()
             };
@@ -399,13 +415,14 @@ pub(super) async fn slow_queries(
     State(service): State<Service>,
     Extension(role): Extension<admin::Role>,
 ) -> Result<Json<Value>, ApiError> {
+    let reserved = service.memory_bindings.reserved();
     let items = service
         .metrics
         .slow
         .lock()
         .map_err(internal)?
         .iter()
-        .filter(|item| visible(&role, item))
+        .filter(|item| visible(&role, item, reserved))
         .cloned()
         .collect::<Vec<_>>();
     let threshold = service.metrics.slow_threshold_ns.load(Ordering::Relaxed);

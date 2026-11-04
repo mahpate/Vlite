@@ -15,10 +15,11 @@ use vlite::{
     },
 };
 
-const USAGE: &str = "usage: vlite-server <database-path> [--providers-file <path> | VLITE_PROVIDERS_FILE] [--create-if-missing <dimensions> [--create-format 3|4|5]] (default 5: graph-enabled; 3 and 4 create plain vector files) [--bind <ip:port>] [--tls-cert <pem> --tls-key <pem>] [--otlp-endpoint <url>] [--grpc-bind <ip:port> [--grpc-tls-cert <pem> --grpc-tls-key <pem> [--grpc-tls-client-ca <pem>]]] [--allow-remote] [--ann-snapshot] [--lock-held-reads] [--group-commit [--group-commit-requests <1..16>] [--group-commit-bytes <1024..268435456>] [--group-commit-delay-ms <0..100>]] [--durability periodic|full|none] (default periodic) [--flush-interval-ms <1..60000>] (periodic only, default 60000; none keeps the database in memory only, needs --create-if-missing and loses all data when the server stops) [--encryption-key-file <path> | VLITE_ENCRYPTION_KEY | VLITE_ENCRYPTION_KEY_HEX] [--token-file <path> | --insecure-local]; admin: VLITE_AUTH_TOKEN or VLITE_AUTH_TOKEN_FILE; optional read-only: VLITE_READ_ONLY_TOKEN or VLITE_READ_ONLY_TOKEN_FILE; backups/credentials/persistent audit: VLITE_ADMIN_DIR; off-by-default schedules: VLITE_AUTO_MAINTENANCE_INTERVAL_SECS, VLITE_BACKUP_INTERVAL_SECS, VLITE_BACKUP_RETENTION_ENABLED=1, VLITE_BACKUP_RETAIN_LAST, VLITE_BACKUP_RETAIN_DAYS, VLITE_BACKUP_DRILL_EVERY, VLITE_BACKUP_DRILL_MAX_BYTES; VLITE_SLOW_QUERY_MS; dashboard sign-in (needs VLITE_ADMIN_DIR and an admin token): VLITE_TRUSTED_PROXY=1 behind a proxy that sets X-Forwarded-Proto/For, VLITE_SESSION_IDLE_MINUTES (default 30), VLITE_SESSION_MAX_HOURS (default 8), optional first super admin: VLITE_ADMIN_USERNAME with VLITE_ADMIN_PASSWORD_FILE; [--log-buffer <n>] (default 2000, maximum 100000)";
+const USAGE: &str = "usage: vlite-server <database-path> [--providers-file <path> | VLITE_PROVIDERS_FILE] [--memory-bindings-file <path> | VLITE_MEMORY_BINDINGS_FILE] [--create-if-missing <dimensions> [--create-format 3|4|5]] (default 5: graph-enabled; 3 and 4 create plain vector files) [--bind <ip:port>] [--tls-cert <pem> --tls-key <pem>] [--otlp-endpoint <url>] [--grpc-bind <ip:port> [--grpc-tls-cert <pem> --grpc-tls-key <pem> [--grpc-tls-client-ca <pem>]]] [--allow-remote] [--ann-snapshot] [--lock-held-reads] [--group-commit [--group-commit-requests <1..16>] [--group-commit-bytes <1024..268435456>] [--group-commit-delay-ms <0..100>]] [--durability periodic|full|none] (default periodic) [--flush-interval-ms <1..60000>] (periodic only, default 60000; none keeps the database in memory only, needs --create-if-missing and loses all data when the server stops) [--encryption-key-file <path> | VLITE_ENCRYPTION_KEY | VLITE_ENCRYPTION_KEY_HEX] [--token-file <path> | --insecure-local]; admin: VLITE_AUTH_TOKEN or VLITE_AUTH_TOKEN_FILE; optional read-only: VLITE_READ_ONLY_TOKEN or VLITE_READ_ONLY_TOKEN_FILE; backups/credentials/persistent audit: VLITE_ADMIN_DIR; off-by-default schedules: VLITE_AUTO_MAINTENANCE_INTERVAL_SECS, VLITE_BACKUP_INTERVAL_SECS, VLITE_BACKUP_RETENTION_ENABLED=1, VLITE_BACKUP_RETAIN_LAST, VLITE_BACKUP_RETAIN_DAYS, VLITE_BACKUP_DRILL_EVERY, VLITE_BACKUP_DRILL_MAX_BYTES; VLITE_SLOW_QUERY_MS; dashboard sign-in (needs VLITE_ADMIN_DIR and an admin token): VLITE_TRUSTED_PROXY=1 behind a proxy that sets X-Forwarded-Proto/For, VLITE_SESSION_IDLE_MINUTES (default 30), VLITE_SESSION_MAX_HOURS (default 8), optional first super admin: VLITE_ADMIN_USERNAME with VLITE_ADMIN_PASSWORD_FILE; [--log-buffer <n>] (default 2000, maximum 100000)";
 
 struct Config {
     providers: vlite::server::providers::ProviderRegistry,
+    memory_bindings_file: Option<PathBuf>,
     lock_held_reads: bool,
     group_commit: Option<GroupCommitConfig>,
     /// Per-open commit durability: `Periodic` every 60 s unless `--durability`
@@ -152,6 +153,8 @@ fn options(config: &Config, database_path: Option<PathBuf>) -> ServerOptions {
         session_lifetime: config.accounts.session_lifetime,
         admin_username: config.accounts.admin_username.clone(),
         admin_password_file: config.accounts.admin_password_file.clone(),
+        memory_bindings_file: config.memory_bindings_file.clone(),
+        grpc_enabled: config.grpc_bind.is_some(),
     }
 }
 
@@ -173,6 +176,9 @@ fn config() -> Result<Config, Box<dyn Error>> {
     let path = args.next().ok_or(USAGE)?;
     let mut providers_file = std::env::var_os("VLITE_PROVIDERS_FILE").map(PathBuf::from);
     let mut seen_providers_file = false;
+    let mut memory_bindings_file =
+        std::env::var_os("VLITE_MEMORY_BINDINGS_FILE").map(PathBuf::from);
+    let mut seen_memory_bindings_file = false;
     let mut otlp_endpoint = std::env::var("OTEL_EXPORTER_OTLP_ENDPOINT").ok();
     let mut dimensions = None;
     let mut format = None;
@@ -200,6 +206,10 @@ fn config() -> Result<Config, Box<dyn Error>> {
             Some("--providers-file") if !seen_providers_file => {
                 providers_file = Some(args.next().ok_or(USAGE)?.into());
                 seen_providers_file = true;
+            }
+            Some("--memory-bindings-file") if !seen_memory_bindings_file => {
+                memory_bindings_file = Some(args.next().ok_or(USAGE)?.into());
+                seen_memory_bindings_file = true;
             }
             Some("--lock-held-reads") if !lock_held_reads => lock_held_reads = true,
             Some("--group-commit") if group_commit.is_none() => {
@@ -473,6 +483,7 @@ fn config() -> Result<Config, Box<dyn Error>> {
             .map(vlite::server::providers::ProviderRegistry::from_file)
             .transpose()?
             .unwrap_or_default(),
+        memory_bindings_file,
         lock_held_reads,
         group_commit,
         durability,

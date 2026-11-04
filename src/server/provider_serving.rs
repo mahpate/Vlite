@@ -117,7 +117,7 @@ fn capture(
 ) -> Result<(Snapshot, admin::Role), ApiError> {
     // Authorization and exact collection access precede even alias lookup.
     let role = fresh_role(service, headers, target)?;
-    let id = open(db, &role, target)?;
+    let id = open_guarded(db, &role, target, &service.memory_bindings)?;
     let collection = CollectionRef { db, id };
     let tenant =
         binding_tenant(service, &role, collection.name())?.ok_or(ProviderError::NotConfigured)?;
@@ -151,7 +151,7 @@ fn recheck(
     started: Instant,
 ) -> Result<(), ApiError> {
     let role = fresh_role(service, headers, target)?;
-    let id = open(db, &role, target).map_err(|error| {
+    let id = open_guarded(db, &role, target, &service.memory_bindings).map_err(|error| {
         if error.status == StatusCode::NOT_FOUND {
             snapshot_conflict()
         } else {

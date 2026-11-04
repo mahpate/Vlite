@@ -63,6 +63,21 @@ as `redacted`. Tenant API keys may hold graph operations with tenant-local
 
 The routes are listed in [API.md](API.md#dashboard-sign-in-and-accounts).
 
+## Memory-bound resources
+
+When `VLITE_MEMORY_BINDINGS_FILE` is configured, each binding reserves its
+stored graph and evidence collection from raw server routes. Memory operation
+grants do not grant raw graph, record, search, feed or attachment access.
+`raw_access` is false unless explicitly granted in the private bindings file;
+even with it, the caller still needs the ordinary tenant, collection and
+operation permissions. Reserved resources are omitted from raw lists and feeds.
+If any binding is configured, the gRPC listener and scheduled automatic index
+maintenance fail closed until those paths can enforce the same checks.
+
+These checks apply only at the server boundary. Direct embedded/file access and
+operator-managed backups are outside this authorization policy and must be
+protected separately.
+
 ## Native REST TLS and gRPC mutual TLS
 
 Build with `--features server` (REST) or `--features grpc` (REST and gRPC):
