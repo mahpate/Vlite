@@ -1,0 +1,316 @@
+{
+  "schema":"fixture.memory-erasure.v1",
+  "base_request":{"scope":{"tenant":"t","agent":"a"},"idempotency_key":"k","expected_scope_revision":1,"now_ms":10,"receipt_window_ms":100},
+  "groups":{
+    "E1":{
+      "node_manifests":[
+        {"labels":["VliteMemoryErasureJob"],
+         "types":{"e1_schema":"String","scope":"String","e1_scope_tuple":"String","e1_collection":"String","begin_digest":"String","generation":"String","state":"String","logical_visibility":"String","deleted_count":"String","remaining":"String","created_at_ms":"Integer"},
+         "values":{"e1_schema":"erase-scope:v1","scope":"scope:v1:25df3b6eb4f13c27b083539f86658272207df67b469883b90ef564843228bd78","e1_scope_tuple":"73636f70653a76310100000001740100000001610000","e1_collection":"c","begin_digest":"v1:a7406ffa10f1a06533d75c5760d02adf382161db3225c1a93dbc8d726f9add3c","generation":"1","state":"pending","logical_visibility":"hidden","deleted_count":"0","remaining":"unknown","created_at_ms":10}},
+        {"labels":["VliteMemoryReceiptOutcome"],
+         "types":{"receipt_key":"String","index":"Integer","outcome":"String"},
+         "values":{"receipt_key":"receipt:v1:scope:v1:25df3b6eb4f13c27b083539f86658272207df67b469883b90ef564843228bd78:48fd9f86ba0020c18ebb70a5c596e347d87593acd7d9aad0c34d0d7700d6d6f4","index":0}},
+        {"labels":["VliteMemoryReceipt"],
+         "types":{"e1_schema":"String","scope":"String","e1_scope_tuple":"String","e1_collection":"String","digest":"String","expires_at_ms":"String","job_key":"String","outcome_chunks":"Integer"},
+         "values":{"e1_schema":"erase-scope:v1","scope":"scope:v1:25df3b6eb4f13c27b083539f86658272207df67b469883b90ef564843228bd78","e1_scope_tuple":"73636f70653a76310100000001740100000001610000","e1_collection":"c","digest":"v1:a7406ffa10f1a06533d75c5760d02adf382161db3225c1a93dbc8d726f9add3c","expires_at_ms":"110","job_key":"receipt:v1:scope:v1:25df3b6eb4f13c27b083539f86658272207df67b469883b90ef564843228bd78:054a1b80072d0821721255beafb6a24fe0b4fc19d746ff7c56631537f17be705","outcome_chunks":1}}
+      ],
+      "cases":[
+        {
+          "name":"maximum-schema-body",
+          "assumptions":["spec: all four scope components and binding use the 256-byte maximum, expiry uses 20 decimal digits; exact E1 body maximum 6480, not 16MiB.","fixture: bounded text descriptors expand inputs only."],
+          "setup":{"scopes":[{"scope":{"tenant":{"$text":"t","count":256},"agent":{"$text":"a","count":256},"user":{"$text":"u","count":256},"session":{"$text":"s","count":256}},"collection":{"$text":"c","count":256}}]},
+          "steps":[{"request":{"scope":{"tenant":{"$text":"t","count":256},"agent":{"$text":"a","count":256},"user":{"$text":"u","count":256},"session":{"$text":"s","count":256}},"now_ms":9223372036854775807,"receipt_window_ms":9223372036854775808},"expect":{"physical_ops":3,"frame_bytes":6480,"outcome_bytes":183,"status":{"remaining":null,"resume_token":null}}}]
+        },
+        {
+          "name":"malformed-barrier-still-blocks",
+          "assumptions":["spec: barrier is presence; malformed job properties cannot authorize a fresh memory write."],
+          "setup":{"scopes":[{"scope":{"tenant":"t","agent":"a"}},{"scope":{"tenant":"other","agent":"a"}}]},
+          "steps":[
+            {"expect":{"replayed":false}},
+            {"op":"remember","request":{"scope":{"tenant":"t"}},"corrupt":{"enabled":true,"node":"job","change":{"path":["properties","state"],"set":"logical"}},"expect":{"error":"DeletionPending"},"defect":{"tag":"barred-target","path":["steps",1,"request","scope","tenant"],"set":"other"}}
+          ]
+        },
+        {
+          "name":"barrier-survives-clock-and-reopen",
+          "assumptions":["spec: no graph TTL on the job; clock advance past receipt expiry does not remove its barrier."],
+          "setup":{"scopes":[{"scope":{"tenant":"t","agent":"a"}},{"scope":{"tenant":"other","agent":"a"}}]},
+          "steps":[
+            {"expect":{"replayed":false}},
+            {"op":"reopen","expect":{"reopened":true}},
+            {"op":"remember","request":{"now_ms":9223372036854775807,"scope":{"tenant":"t"}},"expect":{"error":"DeletionPending"},"defect":{"tag":"permanent-exact-barrier","path":["steps",2,"request","scope","tenant"],"set":"other"}},
+            {"op":"erasure_status","expect":{"status":{"state":"pending","revision":2}}}
+          ]
+        },
+        {
+          "name":"read-status-malformed-job",
+          "assumptions":["spec: read-only status strictly decodes a malformed job instead of returning success-shaped defaults."],
+          "steps":[
+            {"expect":{"replayed":false}},
+            {"op":"erasure_status","corrupt":{"enabled":true,"node":"job","change":{"path":["properties","state"],"set":"logical"}},"expect":{"error":"InvalidBundle"},"defect":{"tag":"malformed-job-state","path":["steps",1,"corrupt","enabled"],"set":false}}
+          ]
+        },
+        {
+          "name":"orphan-job-provision-refusal",
+          "assumptions":["spec: an orphan job cannot be bypassed by recreating its scope.","fixture: raw scope-node removal injects inconsistent state."],
+          "steps":[
+            {"expect":{"replayed":false}},
+            {"op":"provision_scope","request":{"scope":{"tenant":"t"}},"edits":[{"path":["scopes"],"set":{}}],"expect":{"error":"InvalidBundle"},"defect":{"tag":"orphan-target","path":["steps",1,"request","scope","tenant"],"set":"other"}}
+          ]
+        },
+        {
+          "name":"exact-vectors",
+          "assumptions":["spec: E1 binary domain, framed scope, bound collection, expected scope revision and receipt window.","fixture: static SHA and node-size vectors independently calculated with struct, not oracle output."],
+          "steps":[
+            {"expect":{"replayed":false,"status":{"job_key":"receipt:v1:scope:v1:25df3b6eb4f13c27b083539f86658272207df67b469883b90ef564843228bd78:054a1b80072d0821721255beafb6a24fe0b4fc19d746ff7c56631537f17be705","revision":2,"generation":1,"state":"pending","logical_visibility":"hidden","deleted_count":0,"remaining":null,"resume_token":null},
+              "begin_hex":"766c6974652e6d656d6f72792e657261737572652e626567696e2e7631000000001673636f70653a7631010000000174010000000161000001000000016300000000000000010000000000000064",
+              "digest":"v1:a7406ffa10f1a06533d75c5760d02adf382161db3225c1a93dbc8d726f9add3c",
+              "receipt_key":"receipt:v1:scope:v1:25df3b6eb4f13c27b083539f86658272207df67b469883b90ef564843228bd78:48fd9f86ba0020c18ebb70a5c596e347d87593acd7d9aad0c34d0d7700d6d6f4",
+              "outcome_key":"receipt-outcome:v1:a12b118b4cc41740994d4c1e52ba0b38284899f6298c08957e3ea013112ef3ed:0000",
+              "outcome":"erase-scope:v1\nreceipt:v1:scope:v1:25df3b6eb4f13c27b083539f86658272207df67b469883b90ef564843228bd78:054a1b80072d0821721255beafb6a24fe0b4fc19d746ff7c56631537f17be705\n1\npending\nunknown\n",
+              "outcome_bytes":183,"physical_ops":3,"entry_bytes":[621,521,687],"frame_bytes":1833}},
+            {"op":"erasure_status","expect":{"status":{"revision":2,"generation":1,"state":"pending","logical_visibility":"hidden","deleted_count":0,"remaining":null,"resume_token":null}}},
+            {"request":{"now_ms":11,"deadline_ms":0},"expect":{"replayed":true,"status":{"revision":2,"generation":1}}},
+            {"op":"inspect","expect":{"sequence":2}}
+          ]
+        },
+        {
+          "name":"preserve-items-status-reopen",
+          "assumptions":["spec: E1 creates a barrier only; no memory deletion, no TTL and status reads are read-only.","fixture: JSON snapshot is logical reopen, not four-backend storage proof."],
+          "steps":[
+            {"expect":{"replayed":false}},
+            {"op":"inspect","expect":{"scopes":{"scope:v1:25df3b6eb4f13c27b083539f86658272207df67b469883b90ef564843228bd78":{"scope":{"tenant":"t","agent":"a"},"tuple":"73636f70653a76310100000001740100000001610000","revision":1,"collection":"c","items":["m"]}},"sequence":2}},
+            {"op":"erasure_status","request":{"now_ms":18446744073709551615},"expect":{"status":{"state":"pending","remaining":null,"resume_token":null,"deleted_count":0}}},
+            {"op":"reopen","expect":{"reopened":true}},
+            {"request":{"now_ms":109},"expect":{"replayed":true,"status":{"revision":2}}},
+            {"op":"inspect","expect":{"sequence":2}}
+          ]
+        },
+        {
+          "name":"begin-window-conflict",
+          "assumptions":["spec: live begin replay requires identical digest including window."],
+          "steps":[
+            {"expect":{"replayed":false}},
+            {"request":{"receipt_window_ms":101},"expect":{"error":"IdempotencyConflict"},"defect":{"tag":"window-change","path":["steps",1,"request","receipt_window_ms"],"set":100}}
+          ]
+        },
+        {
+          "name":"begin-revision-conflict",
+          "assumptions":["spec: expected scope revision is hashed, even though fresh compare follows replay."],
+          "steps":[
+            {"expect":{"replayed":false}},
+            {"request":{"expected_scope_revision":2},"expect":{"error":"IdempotencyConflict"},"defect":{"tag":"revision-change","path":["steps",1,"request","expected_scope_revision"],"set":1}}
+          ]
+        },
+        {
+          "name":"begin-expiry-equality",
+          "assumptions":["spec: equality expires receipt but never removes barrier or recreates job."],
+          "steps":[
+            {"expect":{"replayed":false}},
+            {"request":{"now_ms":110},"expect":{"error":"JobConflict"},"defect":{"tag":"receipt-expiry","path":["steps",1,"request","now_ms"],"set":109}},
+            {"op":"erasure_status","expect":{"status":{"revision":2,"state":"pending"}}}
+          ]
+        },
+        {
+          "name":"begin-new-key-conflict",
+          "assumptions":["spec: singleton job identity does not depend on begin idempotency key."],
+          "steps":[
+            {"expect":{"replayed":false}},
+            {"request":{"idempotency_key":"other"},"expect":{"error":"JobConflict"},"defect":{"tag":"second-job","path":["steps",1,"request","idempotency_key"],"set":"k"}}
+          ]
+        },
+        {
+          "name":"preappend-no-barrier",
+          "assumptions":["spec: rejected preappend frame leaves no job, receipt, outcome or cleanup.","fixture: injected preappend failure only; no arbitrary I/O rollback claim."],
+          "steps":[
+            {"fault":true,"expect":{"error":"fixture:PreappendRefused"},"defect":{"tag":"preappend","path":["steps",0,"fault"],"set":false}},
+            {"op":"inspect","expect":{"nodes":{},"sequence":1}},
+            {"op":"remember","expect":{"status":"allowed"}},
+            {"expect":{"replayed":false,"status":{"revision":2}}}
+          ]
+        },
+        {
+          "name":"multi-scope-recall",
+          "assumptions":["spec: barred scope omitted with one diagnostic per distinct scope, not allow_partial exhaustion.","fixture: literal memory-ID catalog, not B ranking/provider discovery."],
+          "setup":{"scopes":[{"scope":{"tenant":"t","agent":"a"},"items":["secret"]},{"scope":{"tenant":"other","agent":"a"},"items":["public"]}]},
+          "steps":[
+            {"expect":{"replayed":false}},
+            {"op":"recall","scopes":[{"tenant":"t","agent":"a"},{"tenant":"t","agent":"a"},{"tenant":"other","agent":"a"}],"expect":{"partial":false,"diagnostics":[{"scope":"scope:v1:25df3b6eb4f13c27b083539f86658272207df67b469883b90ef564843228bd78","code":"deletion_barrier"}]}},
+            {"op":"recall","expect":{"hits":[],"diagnostics":[{"scope":"scope:v1:25df3b6eb4f13c27b083539f86658272207df67b469883b90ef564843228bd78","code":"deletion_barrier"}],"partial":false}}
+          ]
+        },
+        {
+          "name":"child-and-ancestor-isolation",
+          "assumptions":["spec: absent optional scope components are not wildcards; child scopes remain independent."],
+          "setup":{"scopes":[{"scope":{"tenant":"t","agent":"a"}},{"scope":{"tenant":"t","agent":"a","user":"u"}},{"scope":{"tenant":"t","agent":"a","user":"u","session":"s"}}]},
+          "steps":[
+            {"expect":{"replayed":false}},
+            {"op":"remember","request":{"scope":{"user":"u"}},"expect":{"status":"allowed"}},
+            {"op":"summary_status","request":{"scope":{"user":"u","session":"s"}},"expect":{"status":"allowed"}},
+            {"op":"provision_scope","request":{"scope":{"user":"u","session":"s"}},"expect":{"status":"allowed"}}
+          ]
+        },
+        {
+          "name":"session-sibling-parent-isolation",
+          "assumptions":["spec: session is a full scope tuple, not a global ID; parent/sibling/other-agent copies need independent authorization."],
+          "setup":{"scopes":[{"scope":{"tenant":"t","agent":"a"}},{"scope":{"tenant":"t","agent":"a","user":"u"}},{"scope":{"tenant":"t","agent":"a","user":"u","session":"s"}},{"scope":{"tenant":"t","agent":"a","user":"u","session":"q"}},{"scope":{"tenant":"t","agent":"b","user":"u","session":"s"}}]},
+          "steps":[
+            {"request":{"scope":{"user":"u","session":"s"}},"expect":{"replayed":false}},
+            {"op":"remember","expect":{"status":"allowed"}},
+            {"op":"forget","request":{"scope":{"user":"u"}},"expect":{"status":"allowed"}},
+            {"op":"consolidate","request":{"scope":{"user":"u","session":"q"}},"expect":{"status":"allowed"}},
+            {"op":"summary_status","request":{"scope":{"agent":"b","user":"u","session":"s"}},"expect":{"status":"allowed"}}
+          ]
+        },
+        {
+          "name":"status-missing-job",
+          "assumptions":["spec: read-only status needs an existing job; another scope's job does not match."],
+          "setup":{"scopes":[{"scope":{"tenant":"t","agent":"a"}},{"scope":{"tenant":"other","agent":"a"}}]},
+          "steps":[
+            {"expect":{"replayed":false}},
+            {"op":"erasure_status","request":{"scope":{"tenant":"other"}},"expect":{"error":"MissingMemory"},"defect":{"tag":"job-scope","path":["steps",1,"request","scope","tenant"],"set":"t"}}
+          ]
+        },
+        {
+          "name":"old-malformed-receipt",
+          "assumptions":["spec: the original operation's malformed receipt error survives the replay exception.","fixture: malformed flag abstracts the unchanged original receipt decoder."],
+          "setup":{"ordinary_receipts":[{"op":"remember","malformed":true}]},
+          "steps":[
+            {"expect":{"replayed":false}},
+            {"op":"remember","expect":{"error":"InvalidBundle"},"defect":{"tag":"old-malformed","path":["setup","ordinary_receipts",0,"malformed"],"set":false}}
+          ]
+        },
+        {
+          "name":"different-operation-no-replay",
+          "assumptions":["spec: a different operation's receipt cannot authorize a barred write."],
+          "setup":{"ordinary_receipts":[{"op":"remember"}]},
+          "steps":[
+            {"expect":{"replayed":false}},
+            {"op":"forget","expect":{"error":"DeletionPending"},"defect":{"tag":"wrong-receipt-operation","path":["setup","ordinary_receipts",0,"op"],"set":"forget"}}
+          ]
+        },
+        {
+          "name":"no-binding",
+          "assumptions":["spec: absent evidence binding is encoded as O(None), not an empty present String."],
+          "setup":{"scopes":[{"scope":{"tenant":"t","agent":"a"},"collection":null}]},
+          "steps":[{"expect":{"replayed":false}},{"expect":{"replayed":true}},{"op":"erasure_status","expect":{"status":{"generation":1,"remaining":null}}}]
+        },
+        {
+          "name":"new-scope-provisioning",
+          "assumptions":["spec: unrelated new exact scope can still be provisioned; barrier does not become an ancestor wildcard."],
+          "steps":[{"expect":{"replayed":false}},{"op":"provision_scope","request":{"scope":{"user":"new"}},"expect":{"status":"allowed"}}]
+        }
+      ],
+      "matrix":[
+        {
+          "name":"barrier","ops":["remember","forget","consolidate","provision_scope","summary_status"],
+          "assumptions":["spec: every exact-scope write/status hook refuses after barrier; no receipt exception for provision or S1.","fixture: unbarred allowed is permission only, not A/C1/S1 operation execution."],
+          "setup":{"scopes":[{"scope":{"tenant":"t","agent":"a"}},{"scope":{"tenant":"other","agent":"a"}}]},
+          "steps":[{"expect":{"replayed":false}},{"request":{"scope":{"tenant":"t"}},"expect":{"error":"DeletionPending"},"defect":{"tag":"barred-scope","path":["steps",1,"request","scope","tenant"],"set":"other"}}]
+        },
+        {
+          "name":"old-replay","ops":["remember","forget","consolidate"],
+          "assumptions":["spec: live matching original operation receipt older than the barrier replays unchanged.","fixture: ordinary receipt semantic/delivery state, not its accepted operation digest encoding."],
+          "setup":{"ordinary_receipts":[{"op":"remember"},{"op":"forget"},{"op":"consolidate"}]},
+          "steps":[{"expect":{"replayed":false}},{"request":{"now_ms":11,"deadline_ms":0},"expect":{"status":"replayed","result":"original"}},{"op":"inspect","expect":{"sequence":2}}]
+        },
+        {
+          "name":"old-mismatch","ops":["remember","forget","consolidate"],
+          "assumptions":["spec: changed semantic retry is not authorized by a pre-barrier receipt."],
+          "setup":{"ordinary_receipts":[{"op":"remember"},{"op":"forget"},{"op":"consolidate"}]},
+          "steps":[{"expect":{"replayed":false}},{"request":{"digest":"changed"},"expect":{"error":"DeletionPending"},"defect":{"tag":"old-digest","path":["steps",1,"request","digest"],"set":"same"}}]
+        },
+        {
+          "name":"old-expiry","ops":["remember","forget","consolidate"],
+          "assumptions":["spec: an expired pre-barrier receipt cannot authorize a fresh operation."],
+          "setup":{"ordinary_receipts":[{"op":"remember"},{"op":"forget"},{"op":"consolidate"}]},
+          "steps":[{"expect":{"replayed":false}},{"request":{"now_ms":100},"expect":{"error":"DeletionPending"},"defect":{"tag":"old-expired","path":["steps",1,"request","now_ms"],"set":99}}]
+        },
+        {
+          "name":"old-revision","ops":["remember","forget","consolidate"],
+          "assumptions":["spec: same/newer revision is not a pre-barrier receipt."],
+          "setup":{"ordinary_receipts":[{"op":"remember","revision":2},{"op":"forget","revision":2},{"op":"consolidate","revision":2}]},
+          "steps":[{"expect":{"replayed":false}},{"request":{"scope":{"tenant":"t"}},"expect":{"error":"DeletionPending"},"defect":{"tag":"barrier-revision","path":["setup","sequence"],"set":2}}]
+        }
+      ],
+      "rejections":[
+        {"name":"scope-tuple-collision","request":{},"setup":{"scopes":[{"scope":{"tenant":"t","agent":"a"},"tuple":"00"}]},"error":"DigestCollision","repair":{"path":["setup","scopes",0,"tuple"],"set":"73636f70653a76310100000001740100000001610000"}},
+        {"name":"scope-byte-limit","request":{"scope":{"tenant":{"$text":"t","count":257}}},"error":"InvalidScope","repair":{"path":["steps",0,"request","scope","tenant","count"],"set":1}},
+        {"name":"binding-name-empty","request":{},"setup":{"scopes":[{"scope":{"tenant":"t","agent":"a"},"collection":""}]},"error":"InvalidBundle","repair":{"path":["setup","scopes",0,"collection"],"set":"c"}},
+        {"name":"scope-session-needs-user","request":{"scope":{"session":"s"}},"error":"InvalidScope","repair":{"path":["steps",0,"request","scope","session"],"delete":true}},
+        {"name":"key-empty","request":{"idempotency_key":""},"error":"InvalidKey","repair":{"path":["steps",0,"request","idempotency_key"],"set":"k"}},
+        {"name":"clock-negative","request":{"now_ms":-1},"error":"InvalidClock","repair":{"path":["steps",0,"request","now_ms"],"set":10}},
+        {"name":"clock-bool","request":{"now_ms":true},"error":"InvalidClock","repair":{"path":["steps",0,"request","now_ms"],"set":10}},
+        {"name":"clock-i64","request":{"now_ms":9223372036854775808},"error":"InvalidClock","repair":{"path":["steps",0,"request","now_ms"],"set":9223372036854775807}},
+        {"name":"window-zero","request":{"receipt_window_ms":0},"error":"InvalidReceiptWindow","repair":{"path":["steps",0,"request","receipt_window_ms"],"set":100}},
+        {"name":"window-overflow","request":{"receipt_window_ms":18446744073709551615},"error":"InvalidReceiptWindow","repair":{"path":["steps",0,"request","receipt_window_ms"],"set":18446744073709551605}},
+        {"name":"revision-zero","request":{"expected_scope_revision":0},"error":"InvalidTarget","repair":{"path":["steps",0,"request","expected_scope_revision"],"set":1}},
+        {"name":"revision-stale","request":{"expected_scope_revision":2},"error":"RevisionConflict","repair":{"path":["steps",0,"request","expected_scope_revision"],"set":1}},
+        {"name":"deadline-equality","request":{"deadline_ms":10},"error":"DeadlineExceeded","repair":{"path":["steps",0,"request","deadline_ms"],"set":11}},
+        {"name":"unprovisioned","request":{},"setup":{"scopes":[{"scope":{"tenant":"other","agent":"a"}}]},"error":"InvalidScope","repair":{"path":["setup","scopes",0,"scope","tenant"],"set":"t"}}
+      ],
+      "digest_probes":[
+        {"name":"tenant","step":{"request":{"scope":{"tenant":"other"}}},"equal":{"digest":false,"job_key":false,"receipt_key":false}},
+        {"name":"agent","step":{"request":{"scope":{"agent":"other"}}},"equal":{"digest":false,"job_key":false,"receipt_key":false}},
+        {"name":"user","step":{"request":{"scope":{"user":"u"}}},"equal":{"digest":false,"job_key":false,"receipt_key":false}},
+        {"name":"session","step":{"request":{"scope":{"user":"u","session":"s"}}},"equal":{"digest":false,"job_key":false,"receipt_key":false}},
+        {"name":"binding","step":{"collection":"other"},"equal":{"digest":false,"job_key":true,"receipt_key":true}},
+        {"name":"binding-absent","step":{"collection":null},"equal":{"digest":false,"job_key":true,"receipt_key":true}},
+        {"name":"expected-revision","step":{"request":{"expected_scope_revision":2}},"equal":{"digest":false,"job_key":true,"receipt_key":true}},
+        {"name":"receipt-window","step":{"request":{"receipt_window_ms":101}},"equal":{"digest":false,"job_key":true,"receipt_key":true}},
+        {"name":"clock-excluded","step":{"request":{"now_ms":20}},"equal":{"digest":true,"job_key":true,"receipt_key":true}},
+        {"name":"deadline-excluded","step":{"request":{"deadline_ms":0}},"equal":{"digest":true,"job_key":true,"receipt_key":true}},
+        {"name":"key-excluded","step":{"request":{"idempotency_key":"new"}},"equal":{"digest":true,"job_key":true,"receipt_key":false}},
+        {"name":"null-scope","step":{"request":{"scope":{"user":null,"session":null}}},"equal":{"digest":true,"job_key":true,"receipt_key":true}},
+        {"name":"no-unicode-normalization","baseline":{"request":{"scope":{"tenant":"\u00e9"}}},"step":{"request":{"scope":{"tenant":"e\u0301"}}},"equal":{"digest":false,"job_key":false,"receipt_key":false}},
+        {"name":"no-slash-alias","baseline":{"request":{"scope":{"tenant":"a/b","agent":"c"}}},"step":{"request":{"scope":{"tenant":"a","agent":"b/c"}}},"equal":{"digest":false,"job_key":false,"receipt_key":false}}
+      ],
+      "corruptions":[
+        {"name":"job-tuple","node":"job","error":"DigestCollision","change":{"path":["properties","e1_scope_tuple"],"set":"00"}},
+        {"name":"job-label","node":"job","change":{"path":["labels",0],"set":"Other"}},
+        {"name":"job-generation","node":"job","change":{"path":["properties","generation"],"set":"01"}},
+        {"name":"job-remaining","node":"job","change":{"path":["properties","remaining"],"set":"0"}},
+        {"name":"job-extra","node":"job","change":{"path":["properties","extra"],"set":""}},
+        {"name":"receipt-expiry-leading-zero","node":"receipt","change":{"path":["properties","expires_at_ms"],"set":"0110"}},
+        {"name":"receipt-expiry-zero","node":"receipt","change":{"path":["properties","expires_at_ms"],"set":"0"}},
+        {"name":"receipt-expiry-overflow","node":"receipt","change":{"path":["properties","expires_at_ms"],"set":"18446744073709551616"}},
+        {"name":"receipt-expiry-type","node":"receipt","change":{"path":["properties","expires_at_ms"],"set":110}},
+        {"name":"receipt-chunks-bool","node":"receipt","change":{"path":["properties","outcome_chunks"],"set":true}},
+        {"name":"receipt-tuple","node":"receipt","error":"DigestCollision","change":{"path":["properties","e1_scope_tuple"],"set":"00"}},
+        {"name":"receipt-binding","node":"receipt","change":{"path":["properties","e1_collection"],"set":"other"}},
+        {"name":"receipt-extra","node":"receipt","change":{"path":["properties","extra"],"set":""}},
+        {"name":"receipt-missing-digest","node":"receipt","change":{"path":["properties","digest"],"delete":true}},
+        {"name":"outcome-index-string","node":"outcome","change":{"path":["properties","index"],"set":"0"}},
+        {"name":"outcome-extra","node":"outcome","change":{"path":["properties","extra"],"set":""}},
+        {"name":"outcome-garbage","node":"outcome","change":{"path":["properties","outcome"],"set":"garbage\n"}}
+      ]
+    }
+  },
+  "equivalent_mutations":[
+    {"name":"frame_exclusive","rationale":"Exact E1 schema max body6480, or6496 with opening reclaim, is strictly below16MiB. No legal equality witness."},
+    {"name":"ops_exclusive","rationale":"Exactly3 E1 CreateNode operations are strictly below4096. No legal equality witness."}
+  ],
+  "mutations":[
+    {"name":"no_barrier","case":"barrier-remember","step":1,"reason":"error"},
+    {"name":"replace_job","case":"begin-new-key-conflict","step":1,"reason":"error"},
+    {"name":"window","case":"exact-vectors","step":0,"reason":"digest"},
+    {"name":"skip_expired_decode","probe":"receipt-extra","reason":"InvalidBundle"},
+    {"name":"revision_hash","case":"exact-vectors","step":0,"reason":"digest"},
+    {"name":"binding_hash","case":"exact-vectors","step":0,"reason":"digest"},
+    {"name":"skip_remember","case":"barrier-remember","step":1,"reason":"error"},
+    {"name":"skip_forget","case":"barrier-forget","step":1,"reason":"error"},
+    {"name":"skip_consolidate","case":"barrier-consolidate","step":1,"reason":"error"},
+    {"name":"skip_provision_scope","case":"barrier-provision_scope","step":1,"reason":"error"},
+    {"name":"skip_summary_status","case":"barrier-summary_status","step":1,"reason":"error"},
+    {"name":"skip_recall","case":"multi-scope-recall","step":1,"reason":"diagnostics"},
+    {"name":"no_diagnostic","case":"multi-scope-recall","step":1,"reason":"diagnostics"},
+    {"name":"children_barred","case":"child-and-ancestor-isolation","step":1,"reason":"status"},
+    {"name":"no_old_replay","case":"old-replay-remember","step":1,"reason":"status"},
+    {"name":"ignore_old_revision","case":"old-revision-forget","step":1,"reason":"error"},
+    {"name":"expiry_inclusive","case":"begin-expiry-equality","step":1,"reason":"error"},
+    {"name":"skip_scope_revision","case":"revision-stale","step":0,"reason":"error"},
+    {"name":"loose_properties","case":"job-extra-live","step":1,"reason":"error"},
+    {"name":"loose_outcome","case":"outcome-garbage-live","step":1,"reason":"error"},
+    {"name":"non_atomic","case":"preappend-no-barrier","step":0,"reason":"refusal changed state"},
+    {"name":"delete_items","case":"preserve-items-status-reopen","step":1,"reason":"items"}
+  ]
+}
