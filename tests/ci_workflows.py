@@ -156,6 +156,7 @@ class Policy(unittest.TestCase):
             "compact_graph_schema_oracle",
             "temporal_read_oracle",
             "ingestion_reference",
+            "ingestion_schema_reference",
             "memory_erasure_oracle",
             "graph_subset_oracle",
         ):
