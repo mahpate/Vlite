@@ -1,0 +1,76 @@
+[
+  {
+    "name": "sorted_unique_snapshot_rows",
+    "kind": "SnapshotGrant",
+    "frames": ["domain_init_snapshot", "snapshot_inactive", "snapshot_active"],
+    "high_water": 9,
+    "rows": 2
+  },
+  {
+    "name": "duplicate_snapshot_address",
+    "kind": "SnapshotGrant",
+    "frames": ["domain_init_snapshot", "snapshot_inactive", "snapshot_inactive"],
+    "expected_error": "Corrupt"
+  },
+  {
+    "name": "out_of_order_snapshot_address",
+    "kind": "SnapshotGrant",
+    "frames": ["domain_init_snapshot", "snapshot_active", "snapshot_inactive"],
+    "expected_error": "Corrupt"
+  },
+  {
+    "name": "reservation_at_eof_is_burned",
+    "kind": "Reserve",
+    "frames": ["domain_init", "reserve"],
+    "high_water": 9,
+    "rows": 0
+  },
+  {
+    "name": "reservation_followed_by_matching_acquire",
+    "kind": "Acquire",
+    "frames": ["domain_init", "reserve", "acquire"],
+    "high_water": 9,
+    "rows": 1
+  },
+  {
+    "name": "acquire_without_reservation",
+    "kind": "Acquire",
+    "frames": ["domain_init_snapshot", "acquire"],
+    "expected_error": "Corrupt"
+  },
+  {
+    "name": "reservation_cannot_skip_to_ordinary_commit",
+    "kind": "Reserve",
+    "frames": ["domain_init", "reserve"],
+    "ordinary": true,
+    "expected_error": "Corrupt"
+  },
+  {
+    "name": "startup_barrier_burns_pending_reservation",
+    "kind": "StartupBarrier",
+    "frames": ["domain_init", "reserve", "startup_barrier"],
+    "high_water": 9,
+    "rows": 0
+  },
+  {
+    "name": "recovery_barrier_burns_pending_reservation",
+    "kind": "RecoveryRequired",
+    "frames": ["domain_init", "reserve", "recovery_required"],
+    "high_water": 9,
+    "rows": 0,
+    "recovery": true
+  },
+  {
+    "name": "startup_barrier_cannot_clear_recovery",
+    "kind": "RecoveryRequired",
+    "frames": ["domain_init_snapshot", "recovery_required", "startup_barrier"],
+    "expected_error": "Corrupt"
+  },
+  {
+    "name": "revoked_row_kept_as_evidence",
+    "kind": "Revoke",
+    "frames": ["domain_init", "reserve", "acquire", "renew", "revoke"],
+    "high_water": 9,
+    "rows": 1
+  }
+]

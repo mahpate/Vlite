@@ -172,6 +172,7 @@ class Policy(unittest.TestCase):
             "memory_erasure_oracle",
             "graph_subset_oracle",
             "graph_subset_write_oracle",
+            "lease_ledger_oracle",
         ):
             command = f"python tests/{oracle}.py --self-test"
             self.assertIn(command, changes)
