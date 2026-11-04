@@ -103,7 +103,7 @@ absent. Replica transport/status RPCs are not yet provided.
 also supply vectors from their own provider. The embedded engine's `Embedder`
 trait and optional HTTP provider remain usable by applications.
 
-### Managed inference (private, unreleased candidate)
+### Managed inference
 
 `EmbedText {collection, text, provider}` returns `{vector, dimensions, provider}`.
 An empty provider or `hashing` selects the local hashing embedder; `http` retains

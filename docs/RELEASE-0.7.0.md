@@ -302,7 +302,7 @@ it up.
   automatically to eligible exact filtered scans, including the exact scan
   inside `search_auto`. Hits, distances and order are unchanged, and only
   `SearchStats::records_scanned` can be lower. Nothing is written to disk.
-  <!-- source: docs/STORAGE-FEATURES.md#filter-block-summaries-unreleased, tests/filter_summaries.rs, src/metadata_index.rs -->
+  <!-- source: docs/STORAGE-FEATURES.md#filter-block-summaries, tests/filter_summaries.rs, src/metadata_index.rs -->
 
 ### Approximate search: opt-in background rebuild (Rust)
 

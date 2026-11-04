@@ -126,14 +126,13 @@ shortest-path search reports `exhausted`, never an uncertified "no path".
 - **Query text.** A small read-only language that maps to one typed read; see
   [GRAPH-QUERY.md](GRAPH-QUERY.md).
 
-## Bounded local algorithms (Rust, unreleased)
+## Bounded local algorithms (Rust)
 
 `GraphRef::algorithm(&request, &options)` runs one algorithm on one explicit
 local scope (Gap 5 slices S1 to S4). Its embedded Rust surface is implemented,
 reviewed and accepted, including PageRank, label propagation and sampled
-betweenness. All of it is unreleased; REST, gRPC, MCP, query text,
-the CLI and the bindings do not expose it. Nothing is stored and nothing
-writes.
+betweenness. REST, gRPC, MCP, query text, the CLI and the bindings do not
+expose it. Nothing is stored and nothing writes.
 
 - **Scope** (`GraphAlgorithmScope`): up to 10,000 seed selectors of this
   graph (resolved, deduplicated, sorted; each must be visible and carry every
@@ -189,8 +188,8 @@ writes.
   before it returns nothing. Only the stopping reason is listed, even
   when rows were also cut. Scores and communities describe the local
   scope only, never the whole graph.
-- **Sampled betweenness** (`GraphAlgorithm::Betweenness { sampling_seed }`,
-  unreleased): unweighted Brandes over the scope's arcs
+- **Sampled betweenness** (`GraphAlgorithm::Betweenness { sampling_seed }`):
+  unweighted Brandes over the scope's arcs
   (`Both` walks each edge both ways), with parallel arcs collapsed and
   self-loops ignored; every shortest path counts and endpoints are
   excluded. The scoped nodes are ranked by
@@ -227,7 +226,7 @@ writes.
 | `max_vertex_operations` | 100,000 | 1,000,000 |
 | `max_scratch_bytes` | 64 MiB | 256 MiB |
 | `max_iterations` | 20 | 100 |
-| `max_sampled_sources` (unreleased S4) | 16 | 64 |
+| `max_sampled_sources` | 16 | 64 |
 
 Results echo `view_sequence`, `read_time_unix_ms`, `algorithm_version`, the
 normalized request (with every output) and work statistics. There are no cursors, no attachment

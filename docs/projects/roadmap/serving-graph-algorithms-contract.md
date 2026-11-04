@@ -17,7 +17,7 @@ Expose exactly five read-only algorithms over one explicit local projection:
 degree, weighted shortest path, PageRank, label propagation and sampled betweenness.
 Preserve the accepted [Gap 5 semantics](gap5-graph-algorithms.md), including its
 implemented corrections, and the [Gap 12 serving contract](serving-contract.md#gap-12-graph-rpc-parity).
-The [graph guide](../../GRAPH.md#bounded-local-algorithms-rust-unreleased) remains the embedded usage reference.
+The [graph guide](../../GRAPH.md#bounded-local-algorithms-rust) remains the embedded usage reference.
 
 Non-goals: new algorithms, whole-graph/offline jobs, query-text syntax, persisted
 scores, graph writes, vector or attachment retrieval, historical/as-of reads,

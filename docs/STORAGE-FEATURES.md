@@ -330,7 +330,7 @@ store/
   trims a torn tail of the active log only; damage elsewhere is reported as
   corruption.
 
-## Filter block summaries (unreleased)
+## Filter block summaries
 
 A collection with declared metadata indexes (`CollectionSettings::metadata_indexes`)
 also keeps in-memory summaries of each block of 1024 records over the declared
