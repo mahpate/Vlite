@@ -19,7 +19,7 @@
           "name":"maximum-schema-body",
           "assumptions":["spec: all four scope components use the 256-byte maximum, binding uses the engine's 63-byte maximum, expiry uses 20 decimal digits; exact E1 body maximum 6094, not 16MiB.","fixture: bounded text descriptors expand inputs only."],
           "setup":{"scopes":[{"scope":{"tenant":{"$text":"t","count":256},"agent":{"$text":"a","count":256},"user":{"$text":"u","count":256},"session":{"$text":"s","count":256}},"collection":{"$text":"c","count":63}}]},
-          "steps":[{"request":{"scope":{"tenant":{"$text":"t","count":256},"agent":{"$text":"a","count":256},"user":{"$text":"u","count":256},"session":{"$text":"s","count":256}},"now_ms":9223372036854775807,"receipt_window_ms":9223372036854775808},"expect":{"physical_ops":3,"frame_bytes":6094,"outcome_bytes":183,"status":{"remaining":null,"resume_token":null}}}]
+          "steps":[{"request":{"scope":{"tenant":{"$text":"t","count":256},"agent":{"$text":"a","count":256},"user":{"$text":"u","count":256},"session":{"$text":"s","count":256}},"now_ms":9223372036854775807,"receipt_window_ms":9223372036854775808},"expect":{"physical_ops":3,"frame_bytes":6094,"frame_bytes_with_reclaim":6110,"outcome_bytes":183,"status":{"remaining":null,"resume_token":null}}}]
         },
         {
           "name":"malformed-barrier-still-blocks",
@@ -160,10 +160,17 @@
         {
           "name":"barred-seed-is-deletion-pending",
           "assumptions":["spec: an entity seed in a barred scope is DeletionPending and yields no hit, label, or scope leak."],
+          "setup":{"scopes":[{"scope":{"tenant":"t","agent":"a"}},{"scope":{"tenant":"other","agent":"a"},"items":["public"]}]},
           "steps":[
             {"expect":{"replayed":false}},
-            {"op":"recall","seeds":[{"scope":{"tenant":"t","agent":"a"},"id":"secret"}],"expect":{"error":"DeletionPending"},"defect":{"tag":"barred-seed","path":["steps",1,"seeds",0,"scope","tenant"],"set":"other"}}
+            {"op":"recall","scopes":[{"tenant":"t","agent":"a"},{"tenant":"other","agent":"a"}],"seeds":[{"scope":{"tenant":"t","agent":"a"},"id":"secret"}],"expect":{"error":"DeletionPending"},"defect":{"tag":"barred-seed","path":["steps",1,"seeds",0,"scope","tenant"],"set":"other"}}
           ]
+        },
+        {
+          "name":"recall-seed-outside-requested-scopes-rejected",
+          "assumptions":["spec: recall structural validation requires every seed scope to be in request.scopes before barrier work."],
+          "setup":{"scopes":[{"scope":{"tenant":"t","agent":"a"}},{"scope":{"tenant":"other","agent":"a"},"items":["public"]}]},
+          "steps":[{"op":"recall","seeds":[{"scope":{"tenant":"other","agent":"a"},"id":"public"}],"expect":{"error":"InvalidScopes"},"defect":{"tag":"seed-outside-scopes","path":["steps",0,"seeds",0,"scope","tenant"],"set":"t"}}]
         },
         {
           "name":"scope-revision-identity-guard-is-barrier-exempt",
@@ -217,11 +224,29 @@
         {
           "name":"old-malformed-receipt",
           "assumptions":["spec: the original operation's malformed receipt error survives the replay exception.","fixture: malformed flag abstracts the unchanged original receipt decoder."],
-          "setup":{"ordinary_receipts":[{"op":"remember","malformed":true}]},
+          "setup":{"ordinary_receipts":[{"op":"remember","malformed_outcome":true}]},
           "steps":[
             {"expect":{"replayed":false}},
-            {"op":"remember","expect":{"error":"InvalidBundle"},"defect":{"tag":"old-malformed","path":["setup","ordinary_receipts",0,"malformed"],"set":false}}
+            {"op":"remember","expect":{"error":"InvalidBundle"},"defect":{"tag":"old-malformed-outcome","path":["setup","ordinary_receipts",0,"malformed_outcome"],"set":false}}
           ]
+        },
+        {
+          "name":"old-scope-decode-stage",
+          "assumptions":["spec: live legacy receipt scope decoding precedes digest and outcome decoding."],
+          "setup":{"ordinary_receipts":[{"op":"remember","malformed_scope":true,"scope_error":"DigestCollision"}]},
+          "steps":[{"expect":{"replayed":false}},{"op":"remember","expect":{"error":"DigestCollision"},"defect":{"tag":"old-scope-decode","path":["setup","ordinary_receipts",0,"malformed_scope"],"set":false}}]
+        },
+        {
+          "name":"old-digest-decode-stage",
+          "assumptions":["spec: after scope verification, a live changed stored digest preserves the operation's IdempotencyConflict."],
+          "setup":{"ordinary_receipts":[{"op":"remember","malformed_digest":true,"digest_error":"IdempotencyConflict"}]},
+          "steps":[{"expect":{"replayed":false}},{"op":"remember","expect":{"error":"IdempotencyConflict"},"defect":{"tag":"old-digest-decode","path":["setup","ordinary_receipts",0,"malformed_digest"],"set":false}}]
+        },
+        {
+          "name":"old-outcome-decode-stage",
+          "assumptions":["spec: a live receipt's outcome is decoded after its scope and digest checks."],
+          "setup":{"ordinary_receipts":[{"op":"forget","malformed_outcome":true,"outcome_error":"fixture:ForgetOutcomeDecodeFailure"}]},
+          "steps":[{"expect":{"replayed":false}},{"op":"forget","expect":{"error":"fixture:ForgetOutcomeDecodeFailure"},"defect":{"tag":"old-outcome-decode","path":["setup","ordinary_receipts",0,"malformed_outcome"],"set":false}}]
         },
         {
           "name":"different-operation-no-replay",
@@ -290,8 +315,8 @@
         {
           "name":"remember-preserves-its-existing-malformed-receipt-error",
           "assumptions":["spec: malformed replay state returns remember's existing decoder error instead of a blanket E1 error.","fixture: decode_error supplies an opaque existing-operation result for this harness case."],
-          "setup":{"ordinary_receipts":[{"op":"remember","malformed":true,"decode_error":"fixture:RememberDecodeFailure"}]},
-          "steps":[{"expect":{"replayed":false}},{"op":"remember","expect":{"error":"fixture:RememberDecodeFailure"},"defect":{"tag":"remember-decode-error","path":["setup","ordinary_receipts",0,"malformed"],"set":false}}]
+          "setup":{"ordinary_receipts":[{"op":"remember","malformed_outcome":true,"outcome_error":"fixture:RememberDecodeFailure"}]},
+          "steps":[{"expect":{"replayed":false}},{"op":"remember","expect":{"error":"fixture:RememberDecodeFailure"},"defect":{"tag":"remember-decode-error","path":["setup","ordinary_receipts",0,"malformed_outcome"],"set":false}}]
         },
         {
           "name":"old-mismatch","ops":["remember","forget","consolidate"],
@@ -315,6 +340,7 @@
       "rejections":[
         {"name":"scope-tuple-collision","request":{},"setup":{"scopes":[{"scope":{"tenant":"t","agent":"a"},"tuple":"00"}]},"error":"DigestCollision","repair":{"path":["setup","scopes",0,"tuple"],"set":"73636f70653a76310100000001740100000001610000"}},
         {"name":"scope-byte-limit","request":{"scope":{"tenant":{"$text":"t","count":257}}},"error":"InvalidScope","repair":{"path":["steps",0,"request","scope","tenant","count"],"set":1}},
+        {"name":"binding-name-empty","request":{},"setup":{"scopes":[{"scope":{"tenant":"t","agent":"a"},"collection":""}]},"error":"InvalidBundle","repair":{"path":["setup","scopes",0,"collection"],"set":"c"}},
         {"name":"binding-name-64-bytes","request":{},"setup":{"scopes":[{"scope":{"tenant":"t","agent":"a"},"collection":{"$text":"c","count":64}}]},"error":"InvalidBundle","repair":{"path":["setup","scopes",0,"collection","count"],"set":63}},
         {"name":"scope-session-needs-user","request":{"scope":{"session":"s"}},"error":"InvalidScope","repair":{"path":["steps",0,"request","scope","session"],"delete":true}},
         {"name":"key-empty","request":{"idempotency_key":""},"error":"InvalidKey","repair":{"path":["steps",0,"request","idempotency_key"],"set":"k"}},
@@ -406,5 +432,12 @@
     ,{"name":"barrier_before_scope","probe":"tuple-collision-before-barrier","reason":"DigestCollision"}
     ,{"name":"barrier_before_scope","probe":"begin-missing-scope-before-barrier","reason":"InvalidScope"}
     ,{"name":"barrier_before_scope","probe":"begin-tuple-collision-before-barrier","reason":"DigestCollision"}
+    ,{"name":"early_barred_seed","probe":"recall-barred-seed-after-scope-loop","reason":"InvalidScope"}
+    ,{"name":"recall_before_scope","probe":"recall-missing-scope-before-barrier","reason":"InvalidScope"}
+    ,{"name":"recall_before_tuple","probe":"recall-tuple-collision-before-barrier","reason":"DigestCollision"}
+    ,{"name":"decode_expired_old","probe":"expired-malformed-remember","reason":"DigestCollision"}
+    ,{"name":"decode_expired_old","probe":"expired-malformed-forget","reason":"DigestCollision"}
+    ,{"name":"allow_empty_binding","case":"binding-name-empty","step":0,"reason":"error"}
+    ,{"name":"omit_reclaim_bytes","case":"maximum-schema-body","step":0,"reason":"frame_bytes_with_reclaim"}
   ]
 }

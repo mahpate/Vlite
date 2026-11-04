@@ -255,7 +255,11 @@ class Model:
         for receipt in setup.get("ordinary_receipts", []):
             self.old.append(merge({"scope": base_scope, "key": "old", "digest": "same",
                                    "expires": 100, "expiry_valid": True, "revision": 1,
-                                   "malformed": False,
+                                   "malformed_scope": False, "malformed_digest": False,
+                                   "malformed_outcome": False,
+                                   "scope_error": "InvalidBundle",
+                                   "digest_error": "InvalidBundle",
+                                   "outcome_error": "InvalidBundle",
                                    "result": "original"}, receipt))
 
     def lookup_scope(self, scope):
@@ -288,7 +292,8 @@ class Model:
             need(False, "DeletionPending")
         seed = self.lookup_scope(request["scope"])
         collection = seed["collection"]
-        need(collection is None or opaque(collection, 1, 63), "InvalidBundle")
+        need(collection is None or opaque(collection, 0 if MUTANT == "allow_empty_binding" else 1, 63),
+             "InvalidBundle")
         scope, c = request["scope"], request["now_ms"]
         job = self.nodes.get(jkey(scope))
         if job is not None:
@@ -357,7 +362,10 @@ class Model:
                 "begin_hex": raw.hex(), "digest": digest, "receipt_key": key,
                 "outcome_key": okey(key), "outcome": outcome(jkey(scope)),
                 "outcome_bytes": len(outcome(jkey(scope))), "physical_ops": physical,
-                "entry_bytes": lengths, "frame_bytes": body, "nodes": planned}
+                "entry_bytes": lengths, "frame_bytes": body,
+                "frame_bytes_with_reclaim": (
+                    body if MUTANT == "omit_reclaim_bytes" else body + 16),
+                "nodes": planned}
 
     def gate(self, op, request):
         need(op in ("provision_scope", "erasure_status", "remember", "forget",
@@ -391,18 +399,21 @@ class Model:
                             receipt["key"] == request.get("key", "old"))]
                 if old:
                     receipt = old[0]
-                    if op == "consolidate":
-                        need(not receipt["malformed"] and receipt["expiry_valid"],
-                             receipt.get("decode_error", "InvalidBundle"))
+                    live = (not receipt["expiry_valid"] or
+                            request.get("now_ms", 10) < receipt["expires"])
+                    if op in ("remember", "forget") and not live and MUTANT != "decode_expired_old":
+                        continue_replay = False
                     else:
-                        need(not receipt["malformed"], receipt.get("decode_error", "InvalidBundle"))
-                    live = (not receipt["expiry_valid"] if op in ("remember", "forget")
-                            else request.get("now_ms", 10) < receipt["expires"])
-                    if op in ("remember", "forget") and receipt["expiry_valid"]:
-                        live = request.get("now_ms", 10) < receipt["expires"]
+                        continue_replay = True
+                    if continue_replay:
+                        if op == "consolidate":
+                            need(receipt["expiry_valid"], receipt.get("expiry_error", "InvalidBundle"))
+                        need(not receipt["malformed_scope"], receipt["scope_error"])
+                        need(not receipt["malformed_digest"], receipt["digest_error"])
+                        need(not receipt["malformed_outcome"], receipt["outcome_error"])
                     older = receipt["revision"] < job["revision"]
                     matches = receipt["digest"] == request.get("digest", "same")
-                    if MUTANT != "no_old_replay" and live and matches and (
+                    if MUTANT != "no_old_replay" and continue_replay and live and matches and (
                             older or MUTANT == "ignore_old_revision"):
                         return {"status": "replayed", "result": receipt["result"]}
             need(False, "DeletionPending")
@@ -410,21 +421,34 @@ class Model:
 
     def recall(self, scopes, seeds=None):
         need(len({scope_bytes(scope) for scope in scopes}) == len(scopes), "InvalidScopes")
+        requested = {scope_bytes(scope) for scope in scopes}
+        seeds = seeds or []
+        for seed in seeds:
+            need(scope_bytes(seed["scope"]) in requested, "InvalidScopes")
         # This is the existing whole-request scan preflight, before per-scope probes.
         preflight_scopes = len(scopes)
         hits, barred, seen = [], [], set()
-        seeds = seeds or []
+        barred_seed = False
         for scope in scopes:
-            seed = self.lookup_scope(scope)
+            job = self.barrier(scope)
+            if MUTANT == "recall_before_scope" and job is not None:
+                seed = self.scopes.get(skey(scope))
+            elif MUTANT == "recall_before_tuple" and job is not None:
+                seed = self.scopes.get(skey(scope))
+            else:
+                seed = self.lookup_scope(scope)
             key = skey(scope)
-            if self.barrier(scope) is not None and MUTANT != "skip_recall":
+            if job is not None and MUTANT != "skip_recall":
                 if any(scope_bytes(item["scope"]) == scope_bytes(scope) for item in seeds):
-                    need(False, "DeletionPending")
+                    if MUTANT == "early_barred_seed":
+                        need(False, "DeletionPending")
+                    barred_seed = True
                 if key not in seen and MUTANT != "no_diagnostic":
                     barred.append(copy.deepcopy(scope))
                 seen.add(key)
                 continue
             hits.extend({"scope": key, "id": item} for item in seed["items"])
+        need(not barred_seed, "DeletionPending")
         return {"hits": hits, "deletion_barriers": barred, "partial": False,
                 "preflight_scope_count": preflight_scopes}
 
@@ -626,6 +650,10 @@ def self_test(fixture):
                 "job-conflict-before-deadline", "revision-after-deadline",
                 "missing-scope-before-barrier", "tuple-collision-before-barrier",
                 "begin-missing-scope-before-barrier", "begin-tuple-collision-before-barrier",
+                "recall-missing-scope-before-barrier", "recall-tuple-collision-before-barrier",
+                "recall-barred-seed-after-scope-loop",
+                "expired-malformed-remember", "expired-malformed-forget",
+                "expired-malformed-consolidate",
             }
             prefix = ((mutation["probe"] + ":" if mutation["probe"] in named_probes
                        else "expired precedence " + mutation["probe"])
@@ -663,6 +691,10 @@ def precedence_probes(fixture, only=None):
         "job-conflict-before-deadline", "revision-after-deadline",
         "missing-scope-before-barrier", "tuple-collision-before-barrier",
         "begin-missing-scope-before-barrier", "begin-tuple-collision-before-barrier",
+        "recall-missing-scope-before-barrier", "recall-tuple-collision-before-barrier",
+        "recall-barred-seed-after-scope-loop",
+        "expired-malformed-remember", "expired-malformed-forget",
+        "expired-malformed-consolidate",
     )
     if only is None:
         count += sum(precedence_probes(fixture, name) for name in named)
@@ -691,6 +723,43 @@ def precedence_probes(fixture, only=None):
             expected = "DigestCollision"
         operation = "begin" if only.startswith("begin-") else "remember"
         actual = execute(model, {"op": operation}, base)
+        verify(actual == {"error": expected},
+               f"{only}: expected {expected}, got {actual}")
+        return 1
+    if only in ("recall-missing-scope-before-barrier",
+                "recall-tuple-collision-before-barrier",
+                "recall-barred-seed-after-scope-loop"):
+        model = Model({}, base["scope"])
+        execute(model, {}, base)
+        if only == "recall-missing-scope-before-barrier":
+            model.scopes.clear()
+            step = {"op": "recall", "scopes": [base["scope"]]}
+            expected = "InvalidScope"
+        elif only == "recall-tuple-collision-before-barrier":
+            model.scopes[skey(base["scope"])]["tuple"] = "00"
+            step = {"op": "recall", "scopes": [base["scope"]]}
+            expected = "DigestCollision"
+        else:
+            missing = {"tenant": "missing", "agent": "a"}
+            step = {"op": "recall", "scopes": [base["scope"], missing],
+                    "seeds": [{"scope": base["scope"], "id": "secret"}]}
+            expected = "InvalidScope"
+        actual = execute(model, step, base)
+        verify(actual == {"error": expected},
+               f"{only}: expected {expected}, got {actual}")
+        return 1
+    if only in ("expired-malformed-remember", "expired-malformed-forget",
+                "expired-malformed-consolidate"):
+        operation = only.rsplit("-", 1)[-1]
+        model = Model({"ordinary_receipts": [{
+            "op": operation, "expires": 10, "malformed_scope": True,
+            "scope_error": "DigestCollision",
+        }]}, base["scope"])
+        execute(model, {}, base)
+        actual = execute(model, {
+            "op": operation, "request": {"now_ms": 10},
+        }, base)
+        expected = "DigestCollision" if operation == "consolidate" else "DeletionPending"
         verify(actual == {"error": expected},
                f"{only}: expected {expected}, got {actual}")
         return 1

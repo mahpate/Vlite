@@ -191,9 +191,10 @@ InvalidBundle; tuple collision is DigestCollision. Other malformed state is
 InvalidBundle; no legacy E1 receipts or forgiving fallbacks exist.
 The singleton job node carries a schema version. E1 strict decoding recognizes
 only `erase-scope:v1` and fails closed on unknown versions. E2 extends the job
-under a new schema version and advances generation; it must not weaken the E1
-decoder. The E1 receipt-revision-below-job check is defensive for E1's atomic
-frame and must be revisited in E4 if maintenance renumbers revisions.
+under a new schema version and advances the job revision; generation changes
+only under C2 decision 10 (E4). The E1 receipt-revision-below-job check is
+defensive for E1's atomic frame and must be revisited in E4 if maintenance
+renumbers revisions.
 No checksum authenticates coordinated malicious changes to valid stored fields.
 
 ## 5. Barrier and replay matrix
@@ -234,18 +235,22 @@ This exception protects retries, not reads of hidden memory content.
 | erasure_status | strict read-only current job status; allowed through barrier | MissingMemory if no job |
 | begin_erasure | own strict live replay/digest conflict; otherwise JobConflict | begin fresh |
 
-Recall's existing structural validation rejects duplicate scopes as
-`RecallError::InvalidScopes` before any barrier work. The probe is per requested
-scope in the existing loop, after `recall_collection()` and the
+Recall's existing structural validation rejects duplicate scopes and seeds
+whose scope is absent from `request.scopes` as `RecallError::InvalidScopes`
+before any barrier work. The probe is per requested scope in the existing loop,
+after `recall_collection()` and the
 `memory_scan_bound * scopes + collection.len()` source-record preflight; barred
 scopes remain charged by that preflight. At the scope-node read, verify tuple,
-then probe job. If a valid entity seed belongs to a barred scope, return
-DeletionPending rather than today's MissingMemory; it must not become a hit,
-S2 label, or leak. RecallOutput has no diagnostics field today: E1 adds exactly
-one crate-private `deletion_barriers: Vec<MemoryScope>`, distinct barred scopes
-in request order. Existing private `complete` and allow_partial semantics do
-not change. Serving's `meta.truncation += deletion_barrier` and `complete=false`
-mapping is owned by gap1d, not this contract.
+then probe job. Process every requested scope before reporting a barred seed, so
+a later missing scope still returns InvalidScope and a later tuple collision
+still returns DigestCollision. If a valid entity seed belongs to a barred
+scope, return DeletionPending after the scope loop rather than today's
+MissingMemory; it must not become a hit, S2 label, or leak. RecallOutput has no
+diagnostics field today: E1 adds exactly one crate-private
+`deletion_barriers: Vec<MemoryScope>`, distinct barred scopes in request order.
+Existing private `complete` and allow_partial semantics do not change. Serving's
+`meta.truncation += deletion_barrier` and `complete=false` mapping is owned by
+gap1d, not this contract.
 
 The S1 probe belongs immediately after S1's existing scope-node read and tuple
 check. The `stale.rs` and S2 recall-label hook is added by whichever slice lands
@@ -317,7 +322,7 @@ is a logical test, **not** evidence that these four storage backends passed.
 | recall barrier output | `deletion_barriers: Vec<MemoryScope>` in request order; no partial flag change | scope omission is deliberate, not budget exhaustion |
 | orphan job during provision | InvalidBundle, never recreate scope | fail closed on inconsistent stored state |
 | begin while job exists | JobConflict, including same-key expired begin | permanent job remains authoritative; C2 E2 uses same fence error |
-| E1/E2 persisted job schema | fail-closed E1 version; E2 uses new version and advances generation | never reinterpret unknown state under old schema |
+| E1/E2 persisted job schema | fail-closed E1 version; E2 uses new version and advances job revision; generation changes only under C2 decision 10 (E4) | never reinterpret unknown state under old schema |
 | receipt revision equality | require initial same-frame equality in E1; revisit in E4 | maintenance may renumber revisions |
 | deletion count/status | pending, hidden, 0 deleted, unknown remaining | barrier is not erasure completion |
 | additions to private errors | DeletionPending, JobConflict only | existing categories suffice elsewhere |
@@ -336,9 +341,11 @@ Goldens pin byte/digest/key vectors, schema, status, every barrier hook,
 pre-barrier replay versus expiry/conflict, exact child/sibling isolation,
 preappend-no-barrier, read-only status and logical reopen. Every rejected golden
 declares one repairable defect; precedence probes are explicitly separate.
-The implementation hook files are `memory.rs`, `forget.rs`, `consolidate.rs`,
-`recall.rs`, `erasure.rs`, and `stale.rs` (one S1 probe call); the S1/S2 hook
-lands in E1 if that slice lands first.
+This hook-file list amends C2 section 6 E1's allowed files by adding
+`src/memory/stale.rs` for one S1 probe call; forget is implemented in
+`src/memory.rs`. Other E1 hooks are in `memory.rs`, `consolidate.rs`,
+`recall.rs`, and `erasure.rs`; the S1/S2 hook lands in E1 if that slice lands
+first.
 Run normal and optimized Python; mutation kills must name the intended case.
 Fixtures label harness-only faults/receipt seeds/backend snapshots; no Rust
 logic copying or claim that a Python filter proves B/S1 implementation parity.
