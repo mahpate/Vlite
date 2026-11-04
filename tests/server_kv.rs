@@ -273,6 +273,23 @@ async fn kv_put_expected_and_query_encoding_are_strict() {
 }
 
 #[tokio::test]
+async fn kv_entries_rejects_mutation_methods() {
+    let directory = tempfile::tempdir().unwrap();
+    let app = start(database(FormatVersion::V5), directory.path());
+    for method in ["PUT", "DELETE", "POST"] {
+        let (status, response) = call(
+            &app,
+            ADMIN,
+            method,
+            "/v1/collections/default/kv/entries?namespace=n",
+            json!({"namespace":"n","key":"k","value_base64":"YQ=="}),
+        )
+        .await;
+        assert_eq!(status, 405, "{method}: {response}");
+    }
+}
+
+#[tokio::test]
 async fn kv_capabilities_advertise_supported_routes_and_format() {
     let directory = tempfile::tempdir().unwrap();
     for (format, expected) in [(FormatVersion::V5, true), (FormatVersion::V3, false)] {
@@ -312,6 +329,60 @@ async fn kv_capabilities_advertise_supported_routes_and_format() {
             );
         }
     }
+}
+
+#[tokio::test]
+async fn kv_deadline_round_trips_and_due_entries_are_hidden_from_get_and_list() {
+    let directory = tempfile::tempdir().unwrap();
+    let app = start(database(FormatVersion::V5), directory.path());
+    let deadline = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_millis() as u64
+        + 60_000;
+    let mut input = put("live");
+    input["expires_at_ms"] = json!(deadline.to_string());
+    let (status, inserted) = call(
+        &app,
+        ADMIN,
+        "PUT",
+        "/v1/collections/default/kv/entry",
+        input,
+    )
+    .await;
+    assert_eq!(status, 200, "{inserted}");
+    assert_eq!(inserted["expires_at_ms"], deadline.to_string());
+    let (status, current) = call(&app, ADMIN, "GET", &entry("live"), Value::Null).await;
+    assert_eq!(status, 200, "{current}");
+    assert_eq!(current["expires_at_ms"], deadline.to_string());
+
+    let mut expired = put("due");
+    expired["expires_at_ms"] = json!("0");
+    let (status, inserted) = call(
+        &app,
+        ADMIN,
+        "PUT",
+        "/v1/collections/default/kv/entry",
+        expired,
+    )
+    .await;
+    assert_eq!(status, 200, "{inserted}");
+    assert_eq!(inserted["expires_at_ms"], "0");
+    let (status, missing) = call(&app, ADMIN, "GET", &entry("due"), Value::Null).await;
+    assert_eq!(status, 404, "{missing}");
+    assert_eq!(missing["error"]["code"], "kv_not_found");
+    let (status, page) = call(
+        &app,
+        ADMIN,
+        "GET",
+        "/v1/collections/default/kv/entries?namespace=n",
+        Value::Null,
+    )
+    .await;
+    assert_eq!(status, 200, "{page}");
+    assert_eq!(page["items"].as_array().unwrap().len(), 1);
+    assert_eq!(page["items"][0]["key"], "live");
+    assert_eq!(page["next_after"], Value::Null);
 }
 
 #[tokio::test]
@@ -367,6 +438,23 @@ async fn kv_put_audit_records_safe_identity_and_expiry() {
     assert_eq!(event["principal"], "admin");
     assert_eq!(event["collection"], "default");
     assert_eq!(event["expires_at_ms"], "18446744073709551615");
+
+    let (status, response) = call(
+        &app,
+        ADMIN,
+        "PUT",
+        "/v1/collections/missing/kv/entry",
+        put("rejected"),
+    )
+    .await;
+    assert_eq!(status, 404, "{response}");
+    let audit = std::fs::read_to_string(directory.path().join("audit.jsonl")).unwrap();
+    let rejected = audit
+        .lines()
+        .map(|line| serde_json::from_str::<Value>(line).unwrap())
+        .find(|event| event["event"] == "kv_put" && event["outcome"] == "collection_not_found")
+        .unwrap();
+    assert_eq!(rejected["collection"], "(invalid)");
 }
 
 #[tokio::test]
@@ -419,6 +507,20 @@ async fn kv_utf8_address_and_value_bounds() {
             );
             let (status, response) = call(&app, ADMIN, "GET", &uri, Value::Null).await;
             assert_eq!(status, if size == 1024 { 200 } else { 422 }, "{response}");
+        }
+        for size in [512, 513] {
+            let value = "é".repeat(size);
+            let url = reqwest::Url::parse_with_params(
+                "http://localhost/v1/collections/default/kv/entries",
+                &[("namespace", "n"), (field, value.as_str())],
+            )
+            .unwrap();
+            let uri = format!("{}?{}", url.path(), url.query().unwrap());
+            let (status, response) = call(&app, ADMIN, "GET", &uri, Value::Null).await;
+            assert_eq!(status, if size == 512 { 200 } else { 422 }, "{response}");
+            if size == 513 {
+                assert_eq!(response["error"]["code"], "invalid_input");
+            }
         }
     }
     let (status, response, _) = raw(
@@ -659,6 +761,7 @@ async fn kv_scopes_binding_tenancy_quota_and_audit() {
     let app = start(database(FormatVersion::V5), directory.path());
     let reader = credential(&app, json!({})).await;
     let writer = credential(&app, json!({"operations":["write"],"max_vectors":1})).await;
+    let bound_reader_writer = credential(&app, json!({"operations":["read","write"]})).await;
     let graph = credential(&app, json!({"operations":["graph_read"],"graphs":["*"]})).await;
     for token in [&reader, READ, &graph] {
         let (status, response) = call(
@@ -739,6 +842,23 @@ async fn kv_scopes_binding_tenancy_quota_and_audit() {
         assert_eq!(status, 403);
         assert_eq!(response["error"]["code"], "forbidden_scope");
     }
+    for (method, uri, body) in [
+        ("PUT", "/v1/collections/wide/kv/entry", put("bound-denied")),
+        (
+            "DELETE",
+            "/v1/collections/wide/kv/entry?namespace=n&key=secret",
+            Value::Null,
+        ),
+        (
+            "GET",
+            "/v1/collections/wide/kv/entries?namespace=n",
+            Value::Null,
+        ),
+    ] {
+        let (status, response) = call(&app, &bound_reader_writer, method, uri, body).await;
+        assert_eq!(status, 403, "{method}: {response}");
+        assert_eq!(response["error"]["code"], "forbidden_scope");
+    }
     assert_eq!(
         call(&app, &writer, "GET", &entry("k"), Value::Null).await.0,
         403
@@ -749,6 +869,7 @@ async fn kv_scopes_binding_tenancy_quota_and_audit() {
             .0,
         200
     );
+    let mut tenant_tokens = Vec::new();
     for name in ["one", "two"] {
         let (_, tenant) = call(
             &app,
@@ -772,7 +893,8 @@ async fn kv_scopes_binding_tenancy_quota_and_audit() {
             201
         );
         let uri = "/v1/collections/items/kv/entry?namespace=n&key=k";
-        assert_eq!(call(&app, &token, "GET", uri, Value::Null).await.0, 404);
+        let (status, missing) = call(&app, &token, "GET", uri, Value::Null).await;
+        assert_eq!(status, 404, "{missing}");
         assert_eq!(
             call(
                 &app,
@@ -785,7 +907,47 @@ async fn kv_scopes_binding_tenancy_quota_and_audit() {
             .0,
             200
         );
+        let (status, read) = call(&app, &token, "GET", uri, Value::Null).await;
+        assert_eq!(status, 200, "{read}");
+        assert_eq!(read["key"], "k");
+        assert_eq!(read["value_base64"], "YQ==");
+        let (status, page) = call(
+            &app,
+            &token,
+            "GET",
+            "/v1/collections/items/kv/entries?namespace=n",
+            Value::Null,
+        )
+        .await;
+        assert_eq!(status, 200, "{page}");
+        assert_eq!(page["items"].as_array().unwrap().len(), 1);
+        assert_eq!(page["items"][0]["key"], "k");
+        tenant_tokens.push(token);
     }
+    let tenant_uri = "/v1/collections/items/kv/entry?namespace=n&key=k";
+    for token in &tenant_tokens {
+        let (status, read) = call(&app, token, "GET", tenant_uri, Value::Null).await;
+        assert_eq!(status, 200, "{read}");
+        assert_eq!(read["value_base64"], "YQ==");
+    }
+    let (status, deleted) = call(&app, &tenant_tokens[0], "DELETE", tenant_uri, Value::Null).await;
+    assert_eq!(status, 200, "{deleted}");
+    assert_eq!(deleted, json!({"deleted":true}));
+    assert_eq!(
+        call(&app, &tenant_tokens[0], "GET", tenant_uri, Value::Null)
+            .await
+            .0,
+        404
+    );
+    assert_eq!(
+        call(&app, &tenant_tokens[1], "GET", tenant_uri, Value::Null)
+            .await
+            .0,
+        200
+    );
+    let (status, deleted) = call(&app, &tenant_tokens[1], "DELETE", tenant_uri, Value::Null).await;
+    assert_eq!(status, 200, "{deleted}");
+    assert_eq!(deleted, json!({"deleted":true}));
     let audit = std::fs::read_to_string(directory.path().join("audit.jsonl")).unwrap();
     let mutations: Vec<Value> = audit
         .lines()

@@ -545,6 +545,7 @@ fn audit<T>(
         role => role.name(),
     };
     let outcome = result.as_ref().map_or_else(|error| error.code, |_| "ok");
+    // Success proves `open` accepted the collection and its binding.
     let collection = if result.is_ok() && crate::format::valid_collection_name(target.name()) {
         tenants::qualify(role, target.name())
     } else {
