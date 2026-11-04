@@ -1,7 +1,11 @@
-# Gap 1 E1: exact-scope erasure barrier and job (proposed)
+# Gap 1 E1: exact-scope erasure barrier and job (ratified, provisional)
 
-Status: **PROPOSED, awaiting coordinator ratification.** Documentation and
-independent Python reference only; not implemented, activated or public.
+Status: **RATIFIED by the coordinator on 2026-11-04 (PROVISIONAL: logged in
+the decision ledger and revisited at the release go/no-go).** Documentation
+and independent Python reference only; not implemented, activated or public.
+The Rust sub-slice E1 is authorized against this contract and its oracle. The
+job and receipt schemas of sections 3-4 are persisted formats and freeze at
+the 0.6.2 release; they are flagged for the go/no-go.
 Base `136d72c5a94e1c0d1878f99c461a555a91b7c3f6`.
 Authority: [C2 remainder](gap1-c2-remainder-contract.md) section 6 E1,
 decisions 4-12 and section 9, subordinate to
@@ -297,7 +301,7 @@ encrypted file, directory and encrypted directory. Reopen does not equal
 revision-changing compaction/upgrade; those need E4. Python snapshot roundtrip
 is a logical test, **not** evidence that these four storage backends passed.
 
-## 7. Ruling table (all choices proposed for ratification)
+## 7. Ruling table (choices ratified provisionally on 2026-11-04)
 
 | Open point / options | Choice | Rationale |
 |---|---|---|

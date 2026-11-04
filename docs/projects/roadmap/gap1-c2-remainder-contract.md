@@ -254,6 +254,13 @@ They are not effort, schedule, code-size or performance estimates.
   independent author; E1 replays its barrier cases.
 - **Size.** M.
 - **Acceptance.** Oracle replay exact; no deletion occurs in E1.
+- **Status (2026-11-04).** The frozen contract
+  [gap1-e1-erasure-barrier-contract.md](gap1-e1-erasure-barrier-contract.md)
+  and its independent oracle (`tests/memory_erasure_oracle.py`, 87 cases and 40
+  of 40 oracle mutations killed, two bounded-equivalent survivors) are
+  independently reviewed, integrated and ratified provisionally. The Rust
+  slice is authorized; the S1/S2 hook placement is stated in contract
+  section 8 and amends the allowed files above by adding `src/memory/stale.rs`.
 
 ### E2: fenced resume chunks
 

@@ -332,7 +332,7 @@ accepted and integrated, with no production caller. This decoded
   E1-E4 and F1-F6 with provisional coordinator rulings: the scoping is accepted,
   S1 is implemented, independently accepted and integrated (crate-private,
   inactive, unreleased), the E1 contract with its independent oracle is
-  authorized and in review, the fact
+  ratified provisionally and its Rust slice is authorized, the fact
   slices wait for the owner's slice D decisions, and public serving remains
   outstanding.
   Scale-out is not implemented. Its order 11 → 10 → 9 was decided 2026-11-02; the track is
