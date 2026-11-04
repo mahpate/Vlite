@@ -29,9 +29,9 @@ half-second sample above 50%); none was discarded or retried.
 | Filtered exact (1 in 10) | 167,202 → 165,459 | 295 → 297 | 3.631 → 2.782 | – | – | 382 → 382 |
 | HNSW m=16, ef=200/64 | 212,699 → 218,014 | 247 → 251 | 8.208 → 4.715 | 18.0 → 18.3 | 2.033 → 2.053 | 389 → 390 |
 
-- **Exact scans have 42% lower p50 latency** (on the exact workload and on the
-  exact scan of the HNSW workload) and **filtered queries 23% lower**, with
-  identical recall (1.0) and file bytes.
+- **Exact scans have 42–43% lower p50 latency** (42.3% on the exact workload and
+  42.6% on the exact scan of the HNSW workload) and **filtered queries 23%
+  lower**, with identical recall (1.0) and file bytes.
 - **Ingest, reopen and peak memory are within about 3%.**
 - **The approximate HNSW query and the index build are within 2%.** HNSW recall
   is 0.26 in both builds at search ef=64 on uniform random 384-dimensional

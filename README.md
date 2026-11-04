@@ -44,11 +44,11 @@ service to operate.
 - **Tools.** Interactive shell, validated imports, offline maintenance, index
   tuning, a graph CLI, an MCP server and agent skills, with local key-value
   commands in the shell and MCP.
-- **Performance.** At 100,000 × 384 dimensions, the last measured release
-  ingests 5–6× faster, reopens about 4× faster and builds HNSW 44× faster than
-  the previous baseline, with exact queries 4–6% slower. These results are the
-  benchmark baseline; later releases are not re-measured until the next run.
-  [Results](benchmarks/RESULTS.md#release-060-against-81ff901-october-27-2026-utc)
+- **Performance.** At 100,000 × 384 dimensions, this release has about 42% lower
+  exact query latency and 23% lower filtered query latency than the previous
+  one (p50), with identical recall and file size. Ingest, reopen and memory
+  stay within about 3%. Patch releases are not re-measured.
+  [Results](benchmarks/RESULTS.md#release-candidate-070-against-v060-november-4-2026-utc)
 
 ## Key terms
 

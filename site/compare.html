@@ -54,10 +54,10 @@
 
   <section class="stats-strip" aria-label="Baseline highlights">
     <div class="wrap stats">
-      <div class="card stat"><b>220k</b><span>vectors/s ingest, 5.9&times; the previous baseline</span></div>
-      <div class="card stat"><b>240 ms</b><span>reopen of 100k vectors, down from 1,018 ms</span></div>
-      <div class="card stat"><b>18 s</b><span>HNSW build, 44&times; faster</span></div>
-      <div class="card stat"><b>2.14 ms</b><span>HNSW query p50, 19% lower</span></div>
+      <div class="card stat"><b>4.83 ms</b><span>exact query p50, 42% lower than the previous release</span></div>
+      <div class="card stat"><b>2.78 ms</b><span>filtered exact query p50, 23% lower</span></div>
+      <div class="card stat"><b>209k</b><span>vectors/s ingest, within 3% of the previous release</span></div>
+      <div class="card stat"><b>249 ms</b><span>reopen of 100k vectors, within 2% of the previous release</span></div>
     </div>
   </section>
 
@@ -67,28 +67,30 @@
         <div class="kicker">Baseline</div>
         <h2>Current performance baseline</h2>
         <p>100,000 vectors &times; 384 dimensions, k=10, 10 queries per run, five runs per workload.
-          Dedicated Azure Standard_D16s_v5 VM, October 27, 2026 UTC. Medians; previous baseline &rarr; current.</p>
+          Identical Azure Standard_D16s_v5 VMs, November 4, 2026 UTC. Medians; previous release &rarr; current.</p>
       </div>
       <div class="table-wrap"><table>
-        <thead><tr><th>Workload</th><th>Ingest (vectors/s)</th><th>Reopen</th><th>Query p50</th><th>HNSW build</th><th>Peak memory</th></tr></thead>
+        <thead><tr><th>Workload</th><th>Ingest (vectors/s)</th><th>Reopen</th><th>Query p50</th><th>HNSW build</th><th>HNSW p50</th><th>Peak memory</th></tr></thead>
         <tbody>
-          <tr><td>Exact</td><td>37,092 &rarr; <strong>220,074</strong></td><td>1,018 &rarr; <strong>240 ms</strong></td><td>8.17 &rarr; 8.54 ms</td><td>&ndash;</td><td>328 &rarr; 326 MiB</td></tr>
-          <tr><td>Filtered exact</td><td>33,183 &rarr; <strong>163,754</strong></td><td>1,078 &rarr; <strong>298 ms</strong></td><td>3.80 &rarr; 4.02 ms</td><td>&ndash;</td><td>384 &rarr; 382 MiB</td></tr>
-          <tr><td>HNSW (m=16, ef=64)</td><td>34,500 &rarr; <strong>219,562</strong></td><td>1,018 &rarr; <strong>241 ms</strong></td><td>2.65 &rarr; <strong>2.14 ms</strong> (HNSW)</td><td>796 &rarr; <strong>18 s</strong></td><td>347 &rarr; 388 MiB</td></tr>
+          <tr><td>Exact</td><td>210,981 &rarr; 208,508</td><td>246 &rarr; 249 ms</td><td>8.38 &rarr; <strong>4.83 ms</strong></td><td>&ndash;</td><td>&ndash;</td><td>325 &rarr; 326 MiB</td></tr>
+          <tr><td>Filtered exact</td><td>167,202 &rarr; 165,459</td><td>295 &rarr; 297 ms</td><td>3.63 &rarr; <strong>2.78 ms</strong></td><td>&ndash;</td><td>&ndash;</td><td>382 &rarr; 382 MiB</td></tr>
+          <tr><td>HNSW (m=16, ef=200/64)</td><td>212,699 &rarr; 218,014</td><td>247 &rarr; 251 ms</td><td>8.21 &rarr; <strong>4.72 ms</strong> (exact scan)</td><td>18.0 &rarr; 18.3 s</td><td>2.03 &rarr; 2.05 ms</td><td>389 &rarr; 390 MiB</td></tr>
         </tbody>
       </table></div>
       <div class="grid cols-3" style="margin-top: 28px">
-        <div class="card"><h3>Faster writes</h3><p>Ingest is 5&ndash;6&times; faster, reopen about 4&times; faster and HNSW builds 44&times; faster.</p></div>
-        <div class="card"><h3>Trade-offs</h3><p>Exact queries are 4&ndash;6% slower and HNSW peak memory is 12% higher. HNSW recall is 0.26 in both builds on uniform random data.</p></div>
-        <div class="card"><h3>Quiet runs</h3><p>All 60 runs passed the background-CPU check. Six small runs were repeated on a second identical VM.</p></div>
+        <div class="card"><h3>Faster exact queries</h3><p>Exact scans have 42&ndash;43% lower p50 latency and filtered queries 23% lower, with identical recall (1.0) and file size.</p></div>
+        <div class="card"><h3>Everything else steady</h3><p>Ingest, reopen and peak memory are within about 3%, and the HNSW query and build within 2%. HNSW recall is 0.26 in both builds on uniform random data.</p></div>
+        <div class="card"><h3>Quiet runs</h3><p>All 90 runs passed the background-CPU check; none was discarded or retried.</p></div>
       </div>
       <details class="benchmark-archive"><summary>Builds and method</summary>
-        <p>The 0.6 release (commit <code>6428b69</code>), measured against the previous baseline commit <code>81ff901</code> in the same campaign. Later releases are not re-measured until the next benchmark run.
-          Clean source builds with Rust 1.99.1, release profile, default features; build order alternated per run.
-          Windows Server 2022, Xeon Platinum 8370C (16 vCPU), 64 GiB, Premium SSD data disk.</p>
+        <p>Release candidate <code>30901be1</code> (the integration head with a green full CI run), measured against the previous release (commit <code>6428b69</code>) and its patch release (commit <code>fb46702</code>) in the same campaign.
+          Clean source builds with Rust 1.99.1, release profile, default features; revision order rotated per run, with a 1,200 s wait after the builds.
+          Windows Server 2022, Xeon Platinum 8370C (16 vCPU), 64 GiB, Premium SSD data disk.
+          Patch releases are not re-measured until the next major release.</p>
       </details>
       <p class="muted"><a href="https://github.com/mahpate/Vlite/blob/main/docs/projects/feature-agent-graph/baseline.md">Baseline record</a>
-        &middot; <a href="https://github.com/mahpate/Vlite/blob/main/benchmarks/RESULTS.md#release-060-against-81ff901-october-27-2026-utc">Full tables</a>
+        &middot; <a href="https://github.com/mahpate/Vlite/blob/main/benchmarks/RESULTS.md#release-candidate-070-against-v060-november-4-2026-utc">Full tables</a>
+        &middot; <a href="https://github.com/mahpate/Vlite/blob/main/benchmarks/RESULTS.md#release-060-against-81ff901-october-27-2026-utc">Previous baseline</a>
         &middot; <a href="https://github.com/mahpate/Vlite/tree/main/benchmarks/results">Raw runs</a></p>
     </div>
   </section>

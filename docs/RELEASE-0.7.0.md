@@ -359,8 +359,8 @@ identical Azure Standard_D16s_v5 VMs, and 90 of 90 slots passed the unchanged
 background-CPU gate; none was discarded or retried. At 100,000 × 384
 dimensions, against v0.6.0:
 
-- Query p50 is 42% lower on the exact workload, 23% lower on the filtered
-  workload and 42% lower on the exact scan of the HNSW workload. The
+- Query p50 is 42.3% lower on the exact workload, 23.4% lower on the filtered
+  workload and 42.6% lower on the exact scan of the HNSW workload. The
   approximate HNSW query and the index build are within 2%.
 - Recall and file bytes are identical.
 - Ingest, reopen and peak memory are within about 3%.
