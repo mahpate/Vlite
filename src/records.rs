@@ -928,6 +928,34 @@ impl ReadSnapshot {
 mod snapshot_tests {
     use super::*;
 
+    #[test]
+    fn browse_keeps_the_entry_health_observation_when_the_flusher_fails_during_read() {
+        let directory = tempfile::tempdir().unwrap();
+        let mut db = Database::create(directory.path().join("browse.vlite"), 1).unwrap();
+        db.put(1, &[1.0], b"one").unwrap();
+        db.put(2, &[2.0], b"two").unwrap();
+        FAIL_FLUSHER_AFTER_BROWSE_HEALTH.with(|fail| fail.set(true));
+        let page = db.browse_at(None, 1, 0).unwrap();
+        assert_eq!(page.hits.len(), 1);
+        assert_eq!(page.hits[0].id, 1);
+        assert_eq!(page.hits[0].record.payload, b"one");
+        assert_eq!(page.next_after, Some(1));
+        assert!(db.flusher.as_ref().unwrap().failed());
+        assert!(matches!(db.browse_at(None, 1, 0), Err(Error::Poisoned)));
+        assert!(matches!(db.browse_at(None, 0, 0), Err(Error::Poisoned)));
+    }
+
+    #[test]
+    fn browse_validates_limit_after_entry_health_and_before_reading() {
+        let db = database();
+        for limit in [0, MAX_BROWSE_PAGE + 1] {
+            assert!(matches!(
+                db.browse_at(None, limit, 0),
+                Err(Error::InvalidQuery("browse limit must be 1..=1000"))
+            ));
+        }
+    }
+
     fn database() -> Database {
         Database::create_in_memory(1, crate::CreateOptions::default()).unwrap()
     }
@@ -1492,6 +1520,11 @@ fn valid_field(field: &str) -> bool {
     !field.is_empty() && field.len() <= 256
 }
 
+#[cfg(test)]
+thread_local! {
+    static FAIL_FLUSHER_AFTER_BROWSE_HEALTH: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+}
+
 impl CollectionRef<'_> {
     /// Exact filtered retrieval at a caller-provided Unix-millisecond time.
     pub fn search_filtered_with_metric_at(
@@ -1521,6 +1554,13 @@ impl CollectionRef<'_> {
     /// Deterministic form of `browse` for tests and applications with an injected clock.
     pub fn browse_at(&self, after: Option<u64>, limit: usize, now_ms: u64) -> Result<BrowsePage> {
         self.db.ensure_healthy()?;
+        #[cfg(test)]
+        if FAIL_FLUSHER_AFTER_BROWSE_HEALTH.with(|fail| fail.replace(false)) {
+            let flusher = self.db.flusher.as_ref().expect("failpoint needs a flusher");
+            flusher.inject_sync_failure();
+            assert!(flusher.sync_now().is_err());
+            assert!(flusher.failed());
+        }
         if !(1..=MAX_BROWSE_PAGE).contains(&limit) {
             return Err(Error::InvalidQuery("browse limit must be 1..=1000"));
         }
@@ -1529,7 +1569,6 @@ impl CollectionRef<'_> {
         if let Some(page) = compact_browse(&state.records, &state.expiries, after, limit, now_ms)? {
             return Ok(page);
         }
-        self.db.ensure_resident_in(self.id)?;
         let mut selected = Vec::with_capacity(limit.saturating_add(1));
         for (&id, record) in state
             .records

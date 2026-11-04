@@ -190,7 +190,22 @@ fn recheck(
 pub(super) struct EmbedResponse {
     pub(super) dimensions: usize,
     pub(super) provider: String,
+    #[serde(serialize_with = "serialize_embedding")]
     pub(super) vector: Vec<f32>,
+}
+
+fn serialize_embedding<S: serde::Serializer>(
+    vector: &[f32],
+    serializer: S,
+) -> Result<S::Ok, S::Error> {
+    use serde::ser::SerializeSeq;
+
+    let mut sequence = serializer.serialize_seq(Some(vector.len()))?;
+    for &component in vector {
+        // Preserve the f64 number text produced by the original json! response.
+        sequence.serialize_element(&f64::from(component))?;
+    }
+    sequence.end()
 }
 
 pub(super) async fn embed(
@@ -478,10 +493,10 @@ mod tests {
 
     #[test]
     fn typed_legacy_embedding_preserves_json_bytes() {
-        let vector = vec![0.25, 0.75];
-        let legacy = json!({"vector":vector,"dimensions":2,"provider":"hashing"});
+        let vector = vec![0.1, -0.2, 0.33333334, 0.25, 0.75, -0.0];
+        let legacy = json!({"vector":vector,"dimensions":6,"provider":"hashing"});
         let typed = EmbedResponse {
-            dimensions: 2,
+            dimensions: 6,
             provider: "hashing".into(),
             vector,
         };
@@ -489,5 +504,30 @@ mod tests {
             serde_json::to_vec(&typed).unwrap(),
             serde_json::to_vec(&legacy).unwrap()
         );
+    }
+
+    #[test]
+    fn every_embedding_provider_uses_widened_component_text_without_changing_f32_values() {
+        for provider in ["hashing", "http", "managed-alias"] {
+            let typed = EmbedResponse {
+                dimensions: 3,
+                provider: provider.into(),
+                vector: vec![0.1, -0.2, 0.33333334],
+            };
+            assert_eq!(
+                serde_json::to_string(&typed).unwrap(),
+                format!(
+                    "{{\"dimensions\":3,\"provider\":\"{provider}\",\"vector\":[0.10000000149011612,-0.20000000298023224,0.3333333432674408]}}"
+                )
+            );
+            assert_eq!(
+                typed
+                    .vector
+                    .iter()
+                    .map(|value| value.to_bits())
+                    .collect::<Vec<_>>(),
+                [0.1f32, -0.2, 0.33333334].map(f32::to_bits)
+            );
+        }
     }
 }
