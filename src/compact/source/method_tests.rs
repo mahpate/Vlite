@@ -377,10 +377,20 @@ fn compact_installed_database_and_snapshot_method_matrix() {
             )
         );
         d!("Database::drop_collection", db.drop_collection("full"));
-        d!(
-            "Database::set_collection_settings",
-            db.set_collection_settings("full", CollectionSettings::default())
-        );
+        {
+            let (mut actual, mut expected, _) = compact_dispatch_fixture(encrypted);
+            a!(
+                "Database::set_collection_settings",
+                actual
+                    .set_collection_settings("full", CollectionSettings::default())
+                    .unwrap(),
+                expected
+                    .set_collection_settings("full", CollectionSettings::default())
+                    .unwrap()
+            );
+            assert_eq!(actual.sequence, expected.sequence);
+            point_parity(&actual, &expected);
+        }
         d!("Database::next_import_job_id", db.next_import_job_id());
         d!(
             "Database::import_chunk",
@@ -808,9 +818,13 @@ fn compact_installed_collection_method_matrix() {
                 "CollectionRef::reembed_pending_checked",
                 view.reembed_pending_checked("n", 0)
             );
-            d!(
+            a!(
                 "CollectionRef::rerank",
                 view.rerank(query, &[], 0, &rerank::ExactReranker { metric })
+                    .unwrap(),
+                reference
+                    .rerank(query, &[], 0, &rerank::ExactReranker { metric })
+                    .unwrap()
             );
             d!(
                 "CollectionRef::search_hybrid",

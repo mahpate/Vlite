@@ -129,6 +129,20 @@ impl crate::CollectionRef<'_> {
         limit: usize,
         reranker: &dyn Reranker,
     ) -> Result<Vec<SearchHit>> {
+        #[cfg(test)]
+        if self.db.state(self.id).records.is_compact() {
+            self.db.ensure_healthy()?;
+            let state = self.db.state(self.id);
+            return rerank_effective(
+                &state.records.pin_effective(),
+                &state.expiries,
+                crate::current_time_ms(),
+                query,
+                hits,
+                limit,
+                reranker,
+            );
+        }
         self.db.state(self.id).records.resident()?;
         if hits.len() > crate::MAX_BATCH_OPERATIONS {
             return Err(Error::BatchTooLarge);
@@ -146,6 +160,44 @@ impl crate::CollectionRef<'_> {
         }
         reranker.rerank(query, &candidates, limit)
     }
+}
+
+#[cfg(test)]
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn rerank_effective(
+    records: &crate::records::CollectionRecords,
+    expiries: &std::collections::BTreeMap<u64, u64>,
+    now_ms: u64,
+    query: &[f32],
+    hits: &[SearchHit],
+    limit: usize,
+    reranker: &dyn Reranker,
+) -> Result<Vec<SearchHit>> {
+    if hits.len() > crate::MAX_BATCH_OPERATIONS {
+        return Err(Error::BatchTooLarge);
+    }
+    let mut workspace = crate::compact::source::ReadWorkspace::new(4 << 20)?;
+    let mut candidates = Vec::new();
+    for hit in hits {
+        if !records.effective_visible(hit.id, now_ms, expiries) {
+            continue;
+        }
+        let vector = records
+            .effective_vector(hit.id, &mut workspace)?
+            .ok_or(Error::InvalidQuery("compact rerank vector disappeared"))?
+            .to_vec();
+        let payload = records
+            .effective_payload(hit.id, &mut workspace)?
+            .ok_or(Error::InvalidQuery("compact rerank payload disappeared"))?
+            .into_owned();
+        candidates.push(RerankCandidate {
+            id: hit.id,
+            vector,
+            payload,
+            distance: hit.distance,
+        });
+    }
+    reranker.rerank(query, &candidates, limit)
 }
 
 #[cfg(test)]

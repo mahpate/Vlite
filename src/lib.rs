@@ -2837,6 +2837,32 @@ impl Database {
         settings: CollectionSettings,
     ) -> Result<SettingsPersistence> {
         let id = self.resolve(name)?;
+        #[cfg(test)]
+        if self.state(id).records.is_compact() {
+            self.ensure_healthy()?;
+            validate_settings(&settings)?;
+            let state = self.state(id);
+            let records = state.records.pin_effective();
+            let mut workspace = compact::source::ReadWorkspace::new(4 << 20)?;
+            let metadata = state.metadata_indexes.rebuilt_effective(
+                &settings.metadata_indexes,
+                &records,
+                &mut workspace,
+            )?;
+            let text = state.text_index.rebuilt_effective(
+                &settings.text_fields,
+                &records,
+                &mut workspace,
+            )?;
+            let sequence = self.next_sequence()?;
+            self.commit_frame(sequence, &format::settings_frame(sequence, id, &settings))?;
+            let state = self.state_mut(id);
+            state.settings = settings;
+            state.settings_persisted = true;
+            state.metadata_indexes = metadata;
+            state.text_index = text;
+            return Ok(SettingsPersistence::Persisted);
+        }
         self.ensure_resident_in(id)?;
         validate_settings(&settings)?;
         let persistence = if self.version >= format::V4 {

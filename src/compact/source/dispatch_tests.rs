@@ -199,10 +199,19 @@ fn compact_dispatch_mutable_acquisition_keeps_other_refusals() {
             }
             refuse!("kv_store", candidate.kv_store(&info.name));
             refuse!("kv_view", candidate.kv_view(&info.name));
-            refuse!(
-                "set_collection_settings",
-                candidate.set_collection_settings(&info.name, CollectionSettings::default())
-            );
+            {
+                let (mut actual, mut expected, _) = compact_dispatch_fixture(encrypted);
+                assert_eq!(
+                    actual
+                        .set_collection_settings(&info.name, CollectionSettings::default())
+                        .unwrap(),
+                    expected
+                        .set_collection_settings(&info.name, CollectionSettings::default())
+                        .unwrap()
+                );
+                assert_eq!(actual.sequence, expected.sequence);
+                point_parity(&actual, &expected);
+            }
         }
         candidate.write_batch(&[]).unwrap();
         assert_eq!(candidate.sequence, sequence, "empty batch sequence");
@@ -254,14 +263,38 @@ fn compact_dispatch_unqualified_scans_and_derived_reads_refuse() {
             let empty = view.rerank(&query, &[], 0, &exact);
             let populated = view.rerank(&query, &hits, 1, &exact);
             let custom = view.rerank(&query, &hits, 1, &sentinel);
+            let resident = oracle.collection(&info.name).unwrap();
+            assert_eq!(
+                empty.unwrap(),
+                resident.rerank(&query, &[], 0, &exact).unwrap()
+            );
+            assert_eq!(
+                populated.unwrap(),
+                resident.rerank(&query, &hits, 1, &exact).unwrap()
+            );
+            assert!(sentinel.0.load(Ordering::SeqCst));
+            assert_eq!(
+                custom.unwrap(),
+                resident.rerank(&query, &hits, 1, &sentinel).unwrap()
+            );
+            assert!(matches!(
+                view.rerank(&[], &[], 0, &exact),
+                Err(Error::InvalidDimensions(0))
+            ));
+            sentinel.0.store(false, Ordering::SeqCst);
+            assert!(matches!(
+                view.rerank(
+                    &query,
+                    &vec![hits[0].clone(); crate::MAX_BATCH_OPERATIONS + 1],
+                    1,
+                    &sentinel
+                ),
+                Err(Error::BatchTooLarge)
+            ));
             assert!(
                 !sentinel.0.load(Ordering::SeqCst),
-                "compact rerank must not invoke the provider"
+                "invalid batch must not invoke provider"
             );
-            unsupported(empty, "rerank empty");
-            unsupported(populated, "rerank populated");
-            unsupported(custom, "rerank custom provider");
-            unsupported(view.rerank(&[], &[], 0, &exact), "rerank invalid query");
             let resident_view = oracle.collection(&info.name).unwrap();
             assert_eq!(
                 view.browse_at(None, 1, 0).unwrap(),

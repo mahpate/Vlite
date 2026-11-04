@@ -312,6 +312,25 @@ fn field_of(condition: &Condition) -> &str {
 }
 
 impl MetadataIndexes {
+    #[cfg(test)]
+    pub(crate) fn rebuilt_effective(
+        &self,
+        specs: &[MetadataIndexSpec],
+        records: &crate::records::CollectionRecords,
+        workspace: &mut crate::compact::source::ReadWorkspace,
+    ) -> crate::Result<Self> {
+        let mut rebuilt = Self::default();
+        rebuilt.rebuild(specs, &crate::records::RecordMap::default());
+        if !rebuilt.fields.is_empty() {
+            for id in records.effective_ids() {
+                if let Some(metadata) = records.effective_metadata(id, workspace)? {
+                    rebuilt.track(id, None, Some(&metadata));
+                }
+            }
+        }
+        Ok(rebuilt)
+    }
+
     /// Rebuilds from all live records after open or a declaration change.
     pub(crate) fn rebuild(
         &mut self,
@@ -424,6 +443,312 @@ impl MetadataIndexes {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn compact_ann_paths_remain_refused_with_unchanged_state() {
+        let _precision = crate::compact::Activation::on();
+        let _records = crate::compact::catalog::payload::Activation::on();
+        let _source = crate::compact::source::Activation::on();
+        let mut original = crate::Database::create_in_memory(2, Default::default()).unwrap();
+        original.put(1, &[1.0, 2.0], b"p").unwrap();
+        let mut loaded = crate::format::load_with(
+            &mut std::io::Cursor::new(original.to_bytes().unwrap()),
+            None,
+        )
+        .unwrap();
+        loaded.flags |= crate::format::FLAG_PRECISION;
+        loaded.collections.get_mut(&0).unwrap().precision =
+            Some(crate::compact::catalog::Precision::Float32);
+        let mut bytes = Vec::new();
+        crate::maintenance::write_v5_image(
+            &mut bytes,
+            &loaded,
+            loaded.lineage.unwrap(),
+            None,
+            None,
+            None,
+            loaded.flags,
+            loaded.sequence,
+        )
+        .unwrap();
+        let mut db = crate::Database::open_from_bytes(bytes.clone(), None).unwrap();
+        let oracle = {
+            let _off = crate::compact::source::Activation::set(false);
+            crate::Database::open_from_bytes(bytes, None).unwrap()
+        };
+        let sequence = db.sequence;
+        let pin = db.default_state().records.pin_effective();
+        let config = crate::HnswConfig::default();
+        let metric = crate::DistanceMetric::SquaredL2;
+        let limits = crate::HnswRebuildLimits::default();
+        let options = crate::AnnOptions::default();
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("refused.ann");
+        macro_rules! refused {
+            ($expression:expr) => {{
+                assert!(
+                    matches!(
+                        $expression,
+                        Err(crate::Error::UnsupportedFeature(
+                            crate::format::FLAG_COMPACT
+                        ))
+                    ),
+                    stringify!($expression)
+                );
+                assert_eq!(db.sequence, sequence);
+                assert_eq!(
+                    db.default_state().records.source_identity(),
+                    pin.source_identity()
+                );
+                assert_eq!(
+                    db.default_state().records.effective_ids(),
+                    pin.effective_ids()
+                );
+                assert!(db.default_state().index.is_none());
+                assert!(db.default_state().background_hnsw.is_none());
+                assert!(db.rebuild.is_none());
+            }};
+        }
+        refused!(db.build_hnsw(config));
+        refused!(db.build_hnsw_with_options(config, metric, options));
+        refused!(db.set_background_hnsw_rebuild(Some(limits)));
+        refused!(db.start_hnsw_rebuild(config, metric, limits));
+        refused!(db.poll_hnsw_rebuild());
+        refused!(db.search_approximate(&[1.0, 2.0], 1, 1, config));
+        refused!(db.search_approximate_ready_with_options(
+            &[1.0, 2.0],
+            1,
+            1,
+            config,
+            options,
+            &[],
+            metric
+        ));
+        refused!(db.save_ann_snapshot(&path));
+        refused!(db.load_ann_snapshot(&path));
+        refused!(db.build_disk_ann("default", &path, config, metric));
+        assert!(!path.exists());
+        let sidecar = directory.path().join("oracle.disk");
+        oracle
+            .build_disk_ann("default", &sidecar, config, metric)
+            .unwrap();
+        let disk = crate::disk_ann::DiskAnnIndex::open(&sidecar, Default::default()).unwrap();
+        refused!(db.search_disk_ann(&disk, &[1.0, 2.0], 1, 1));
+        #[cfg(feature = "gpu")]
+        if let Some(gpu) = crate::gpu::GpuExactSearcher::new() {
+            refused!(gpu.search(&db, &[1.0, 2.0], 1));
+        }
+        refused!(db.checkpoint());
+    }
+
+    #[test]
+    fn compact_metadata_text_indexes_verify_overlay() {
+        let _precision = crate::compact::Activation::on();
+        let _records = crate::compact::catalog::payload::Activation::on();
+        let _source = crate::compact::source::Activation::on();
+        for encrypted in [false, true] {
+            let key = encrypted.then(|| crate::EncryptionKey::from_bytes([9; 32]));
+            let mut original = crate::Database::create_in_memory(
+                2,
+                crate::CreateOptions {
+                    encryption: key.clone(),
+                    ..crate::CreateOptions::default()
+                },
+            )
+            .unwrap();
+            let old = crate::Metadata::from([
+                ("tag".into(), MetadataValue::String("old".into())),
+                ("body".into(), MetadataValue::String("old text".into())),
+            ]);
+            original
+                .put_with_metadata(10, &[0.25, -0.0], b"a", &old)
+                .unwrap();
+            original
+                .put_with_metadata(20, &[0.5, 1.0], b"b", &old)
+                .unwrap();
+            original
+                .put_with_metadata(40, &[1.0, 0.5], b"d", &old)
+                .unwrap();
+            original
+                .put_with_metadata(50, &[1.0, 2.0], b"e", &old)
+                .unwrap();
+            let mut loaded = crate::format::load_with(
+                &mut std::io::Cursor::new(original.to_bytes().unwrap()),
+                key.as_ref(),
+            )
+            .unwrap();
+            loaded.flags |= crate::format::FLAG_PRECISION;
+            loaded
+                .collections
+                .get_mut(&0)
+                .unwrap()
+                .expiries
+                .insert(40, 100);
+            loaded.collections.get_mut(&0).unwrap().precision =
+                Some(crate::compact::catalog::Precision::Float16);
+            let mut image = Vec::new();
+            crate::maintenance::write_v5_image(
+                &mut image,
+                &loaded,
+                loaded.lineage.unwrap(),
+                None,
+                None,
+                loaded.cipher.as_ref(),
+                loaded.flags,
+                loaded.sequence,
+            )
+            .unwrap();
+            let mut db = crate::Database::open_from_bytes(image.clone(), key.as_ref()).unwrap();
+            let image_bytes = image.len();
+            let mut oracle = {
+                let _off = crate::compact::source::Activation::set(false);
+                crate::Database::open_from_bytes(image, key.as_ref()).unwrap()
+            };
+            let current = crate::Metadata::from([
+                ("tag".into(), MetadataValue::String("new".into())),
+                ("body".into(), MetadataValue::String("new text".into())),
+            ]);
+            for db in [&mut db, &mut oracle] {
+                db.delete(10).unwrap();
+                db.update_metadata(20, &current).unwrap();
+                db.put_with_metadata(30, &[2.0, 3.0], b"c", &current)
+                    .unwrap();
+            }
+            let pin = db.default_state().records.pin_effective();
+            let mut workspace = crate::compact::source::ReadWorkspace::new(4 << 20).unwrap();
+            let initial_accounting = pin.source_accounting(&mut workspace).unwrap().unwrap();
+            let cells = initial_accounting.cells_live;
+            let source_bytes = initial_accounting.source_live;
+            assert!(source_bytes > 0 && source_bytes <= image_bytes);
+            let indexes = MetadataIndexes::default()
+                .rebuilt_effective(&[spec("tag", MetadataIndexKind::Eq)], &pin, &mut workspace)
+                .unwrap();
+            let text = crate::text_index::TextIndex::default()
+                .rebuilt_effective(&["body".into()], &pin, &mut workspace)
+                .unwrap();
+            let filter = [Condition::Eq {
+                field: "tag".into(),
+                value: MetadataValue::String("new".into()),
+            }];
+            assert_eq!(
+                indexes.lookup(&filter, 10).unwrap().ids.unwrap(),
+                [20, 30].into()
+            );
+            let terms = crate::text_index::tokenize("new").into_iter().collect();
+            assert_eq!(
+                text.search(&terms, 10, |_| true)
+                    .iter()
+                    .map(|(id, _)| *id)
+                    .collect::<Vec<_>>(),
+                vec![20, 30]
+            );
+            assert_eq!(
+                pin.effective_ids(),
+                oracle.default_state().records.effective_ids()
+            );
+            let mut expected = MetadataIndexes::default();
+            expected.rebuild(
+                &[spec("tag", MetadataIndexKind::Eq)],
+                oracle.default_state().records.resident().unwrap(),
+            );
+            assert_eq!(
+                indexes.lookup(&filter, 10).unwrap().ids,
+                expected.lookup(&filter, 10).unwrap().ids
+            );
+            assert_eq!(
+                pin.source_accounting(&mut workspace)
+                    .unwrap()
+                    .unwrap()
+                    .cells_live,
+                cells
+            );
+            let mut settings = db.default_state().settings.clone();
+            settings.metadata_indexes = vec![spec("tag", MetadataIndexKind::Eq)];
+            settings.text_fields = vec!["body".into()];
+            db.set_collection_settings("default", settings.clone())
+                .unwrap();
+            oracle.set_collection_settings("default", settings).unwrap();
+            db.state_mut(0).rebuild_derived().unwrap();
+            let state = db.default_state();
+            assert_eq!(
+                state.metadata_indexes.lookup(&filter, 10).unwrap().ids,
+                Some([20, 30].into())
+            );
+            let hits = [20, 30, 40, 10, 50].map(|id| crate::SearchHit { id, distance: 0.0 });
+            let reranker = crate::rerank::ExactReranker {
+                metric: crate::DistanceMetric::SquaredL2,
+            };
+            let expected = crate::CollectionRef { db: &oracle, id: 0 }
+                .rerank(&[0.0, 0.0], &hits, 10, &reranker)
+                .unwrap();
+            struct Verify(std::collections::BTreeMap<u64, crate::Record>);
+            impl crate::rerank::Reranker for Verify {
+                fn rerank(
+                    &self,
+                    query: &[f32],
+                    candidates: &[crate::rerank::RerankCandidate],
+                    limit: usize,
+                ) -> crate::Result<Vec<crate::SearchHit>> {
+                    assert_eq!(candidates.len(), self.0.len());
+                    for candidate in candidates {
+                        let expected = &self.0[&candidate.id];
+                        assert_eq!(candidate.payload, expected.payload);
+                        assert_eq!(
+                            candidate
+                                .vector
+                                .iter()
+                                .map(|value| value.to_bits())
+                                .collect::<Vec<_>>(),
+                            expected
+                                .vector
+                                .iter()
+                                .map(|value| value.to_bits())
+                                .collect::<Vec<_>>()
+                        );
+                        assert_eq!(candidate.distance, 0.0);
+                    }
+                    crate::rerank::Reranker::rerank(
+                        &crate::rerank::ExactReranker {
+                            metric: crate::DistanceMetric::SquaredL2,
+                        },
+                        query,
+                        candidates,
+                        limit,
+                    )
+                }
+            }
+            let verifier = Verify(
+                hits.iter()
+                    .filter_map(|hit| oracle.get(hit.id).unwrap().map(|row| (hit.id, row.clone())))
+                    .collect(),
+            );
+            let actual = crate::CollectionRef { db: &db, id: 0 }
+                .rerank(&[0.0, 0.0], &hits, 10, &verifier)
+                .unwrap();
+            assert_eq!(actual, expected);
+            let memory = crate::quality::effective_memory(&pin, &mut workspace)
+                .unwrap()
+                .unwrap();
+            assert_eq!(memory.source.source_live, source_bytes);
+            assert_eq!(memory.source.mapped_live, 0);
+            assert_eq!(memory.source.cells_live, cells);
+            assert!(memory.overlay_bytes > 0);
+            assert_eq!(memory.source.vectors_live, 0);
+            db.delete(50).unwrap();
+            drop(db);
+            let pinned = crate::rerank::rerank_effective(
+                &pin,
+                &Default::default(),
+                u64::MAX,
+                &[0.0, 0.0],
+                &hits,
+                10,
+                &verifier,
+            )
+            .unwrap();
+            assert_eq!(pinned, expected);
+        }
+    }
 
     fn record(fields: &[(&str, MetadataValue)]) -> Record {
         Record {
