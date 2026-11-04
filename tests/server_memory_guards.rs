@@ -738,7 +738,11 @@ async fn tenant_qualified_reservations_follow_scoped_credentials_and_raw_access(
     );
 
     let raw_read_directory = tempfile::tempdir().unwrap();
-    let (raw_read, token) = build(&raw_read_directory, true, &["read", "graph_read"]);
+    let (raw_read, token) = build(
+        &raw_read_directory,
+        true,
+        &["read", "collections", "graph_read"],
+    );
     assert_eq!(
         call_token(
             &raw_read,
@@ -751,6 +755,15 @@ async fn tenant_qualified_reservations_follow_scoped_credentials_and_raw_access(
         .0,
         200
     );
+    let (_, raw_collections) =
+        call_token(&raw_read, "GET", "/v1/collections", Body::empty(), &token).await;
+    assert!(
+        raw_collections["items"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|item| item["name"] == "notes_ev")
+    );
     assert_eq!(
         call_token(
             &raw_read,
@@ -762,6 +775,14 @@ async fn tenant_qualified_reservations_follow_scoped_credentials_and_raw_access(
         .await
         .0,
         200
+    );
+    let (_, raw_graphs) = call_token(&raw_read, "GET", "/v1/graphs", Body::empty(), &token).await;
+    assert!(
+        raw_graphs["graphs"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|graph| graph["name"] == "notes_graph")
     );
     assert_eq!(
         call_token(
