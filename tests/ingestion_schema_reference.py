@@ -13,6 +13,7 @@ import hashlib
 import json
 import math
 from pathlib import Path
+import re
 import struct
 import sys
 
@@ -33,7 +34,6 @@ REGISTRY = {
     "ownership_shard": (12, "ownership-shard", "own"),
     "delete_receipt": (13, "delete-receipt", "del"),
     "abort_receipt": (14, "abort-receipt", "abt"),
-    "vector": (15, "vector", None),
 }
 EXTRA_DOMAINS = ("pipeline", "request", "plan", "batch", "delete-action", "abort-action",
                  "policy", "properties")
@@ -90,7 +90,6 @@ IDENTITIES = {
                              expected="u64"),
     "abort_receipt": fields(binding="binding", tenant="text", source_id="text",
                             aborted=ident("root")),
-    "vector": fields(binding="binding", record="u64"),
 }
 RECORDS = {
     "head_data": fields(revision_key=opt("text"), revision_digest=opt("digest"),
@@ -103,10 +102,10 @@ RECORDS = {
     "entity_data": (),
     "link_data": (),
     "mention_data": fields(source_key="text", revision_key="text", chunk_key="text",
-                           surface="text", confidence=opt("f64"), extractor_version="digest",
+                           surface="text", confidence=opt("f64"), extractor_version="text",
                            attributes="attributes"),
     "relation_data": fields(source_key="text", revision_key="text", chunk_key="text",
-                            confidence=opt("f64"), extractor_version="digest"),
+                            confidence=opt("f64"), extractor_version="text"),
     "receipt_data": fields(request_digest="digest", plan_digest="slot", batch_count="u32",
                            revision_key="text", outcome=("enum", 4), chunks="u32",
                            entities="u32", relations="u32", mentions="u32"),
@@ -123,7 +122,7 @@ RECORDS = {
     "relation_rule": fields(rule_id="text", predicate="text",
                             subject_kind="text", object_kind="text"),
     "pipeline": fields(chunker=("enum", 2), chunk_bytes="u32", overlap="u32",
-                       extractor_alias="text", extractor_version="digest",
+                       extractor_alias="text", extractor_version="text",
                        entity_rules=seq(record("entity_rule")),
                        relation_rules=seq(record("relation_rule")), normalization="text",
                        embedder_alias="text", model_version="text", dimensions="u32",
@@ -170,6 +169,7 @@ OPS = {
     10: fields(object="object"),
     11: fields(source=ident("source"), expected="revision_ref", data=record("head_data")),
     12: fields(object="object"),
+    13: fields(source=ident("source"), data=record("head_data")),
 }
 DATA = dict(source="head_data", revision="revision_data", chunk="chunk_data",
             entity="entity_data", has_revision="link_data", has_chunk="link_data",
@@ -193,6 +193,21 @@ def text(value):
         return value.encode("utf-8", "strict")
     except UnicodeError as error:
         raise Invalid("utf8") from error
+
+
+def strict_utf8(raw):
+    try:
+        return raw.decode("utf-8", "strict")
+    except UnicodeError as error:
+        raise Invalid("utf8") from error
+
+
+def attributes_key(value, masked=False):
+    need(isinstance(value, dict) and len(value) <= 16, "attributes")
+    raw = b"".join(blob(text(key)) + encode("attribute", value[key], masked)
+                   for key in sorted(value, key=lambda key: text(key)))
+    need(len(raw) <= 8192, "attribute_bytes")
+    return raw
 
 
 def unhex(value, size=None):
@@ -228,7 +243,7 @@ def encode(kind, value, masked=False):
                 for key in sorted(value, key=text))
         if tag == "record":
             need(item in RECORDS, "record")
-            return blob(b"\1" + struct_bytes(RECORDS[item], value, masked))
+            return blob(named(item, value, masked))
         if tag == "identity":
             raw = identity(value)
             need(item == "any" or value["kind"] == item
@@ -244,14 +259,20 @@ def encode(kind, value, masked=False):
         need(type(value) is int and -(1 << 63) <= value < 1 << 63, "integer_range")
         return value.to_bytes(8, "little", signed=True)
     if kind in ("f32", "f64"):
-        need(type(value) in (float, int), "float")
+        need(type(value) is float, "float")
         try:
             need(math.isfinite(value), "float")
-            result = struct.pack("<f" if kind == "f32" else "<d",
-                                 0.0 if value == 0 else value)
+            if kind == "f32":
+                result = struct.pack("<f", value)
+                rounded = struct.unpack("<f", result)[0]
+                if rounded == 0.0:
+                    result = bytes(4)
+            else:
+                result = struct.pack("<d", 0.0 if value == 0 else value)
         except (OverflowError, struct.error) as error:
             raise Invalid("float") from error
-        need(math.isfinite(struct.unpack("<f" if kind == "f32" else "<d", result)[0]),
+        decoded = struct.unpack("<f" if kind == "f32" else "<d", result)[0]
+        need(math.isfinite(decoded) and not (decoded == 0.0 and result[-1] & 0x80),
              "float")
         return result
     if kind == "bool":
@@ -271,11 +292,7 @@ def encode(kind, value, masked=False):
                  "binding")
         return struct_bytes(BINDING, value, masked)
     if kind == "attributes":
-        need(isinstance(value, dict) and len(value) <= 16, "attributes")
-        raw = b"".join(blob(text(key)) + encode("attribute", value[key], masked)
-                       for key in sorted(value, key=lambda key: text(key)))
-        need(len(raw) <= 8192, "attribute_bytes")
-        return blob(raw)
+        return blob(attributes_key(value, masked))
     if kind == "attribute":
         need(isinstance(value, list) and len(value) == 2, "attribute")
         tag, content = value
@@ -308,6 +325,7 @@ def encode(kind, value, masked=False):
     if kind == "operation":
         need(isinstance(value, dict) and set(value) == {"tag", "fields"}, "operation")
         need(type(value["tag"]) is int and value["tag"] in OPS, "operation_tag")
+        validate_operation(value)
         return uint(value["tag"], 1) + struct_bytes(OPS[value["tag"]], value["fields"], masked)
     if kind == "object":
         need(isinstance(value, dict) and set(value) == {"identity", "data"}, "object")
@@ -328,11 +346,298 @@ def identity(value):
     need(isinstance(values, dict), "identity_fields")
     if "binding" in values and "tenant" in values:
         need(values["binding"]["tenant"] == values["tenant"], "tenant_mismatch")
+    if role == "entity":
+        need(is_identifier(values["kind"]) and len(text(values["normalized_key"])) in range(1, 257),
+             "entity_identity")
+        need(ascii_key(values["normalized_key"]) == values["normalized_key"],
+             "normalized_key")
+    if role in ("source", "receipt", "delete_receipt", "abort_receipt"):
+        raw_source_id = text(values["source_id"])
+        need(1 <= len(raw_source_id) <= 256 and "\0" not in values["source_id"],
+             "source_id")
+    if role == "chunk":
+        need(values["start"] < values["end"], "chunk_span")
+    if role in ("mention", "relation"):
+        need(values["start"] < values["end"], "observation_span")
+    if role == "relation":
+        need(is_identifier(values["predicate"]), "predicate")
+    if role == "abort_receipt":
+        need(values["aborted"]["kind"] in ("receipt", "delete_receipt"), "abort_of_abort")
     return b"\1" + uint(REGISTRY[role][0], 1) + struct_bytes(IDENTITIES[role], values)
+
+
+def is_identifier(value):
+    raw = text(value)
+    return 1 <= len(raw) <= 63 and re.fullmatch(rb"[A-Za-z0-9_]+", raw) is not None
+
+
+def extractor_label(value):
+    raw = text(value)
+    return (1 <= len(raw) <= 256
+            and re.fullmatch(rb"[A-Za-z0-9._-]+", raw) is not None
+            and value not in ("latest", "default"))
+
+
+def ascii_key(value):
+    raw = text(value).strip(b" \t\r\n")
+    raw = re.sub(rb"[ \t\r\n]+", b" ", raw)
+    return raw.translate(bytes.maketrans(b"ABCDEFGHIJKLMNOPQRSTUVWXYZ",
+                                         b"abcdefghijklmnopqrstuvwxyz")).decode("utf-8")
+
+
+def identity_order(value):
+    role = value["kind"]
+    schema = IDENTITIES[role]
+    parts = []
+    for (name, kind) in schema:
+        field = value["fields"][name]
+        if isinstance(kind, (tuple, list)) and kind[0] == "identity":
+            part = identity_order(field)
+        elif kind == "binding":
+            part = tuple(text(field[key]) for key in ("graph", "collection", "tenant")) + (
+                unhex(field["generation"], 32),)
+        elif kind == "attributes":
+            part = attributes_key(field)
+        elif kind == "digest":
+            part = unhex(field, 32)
+        elif kind == "text":
+            part = text(field)
+        else:
+            part = field
+        parts.append(part)
+    return (REGISTRY[role][0], tuple(parts))
+
+
+def graph_key_order(value):
+    return text(graph_key(value))
+
+
+def validate_operation(value):
+    tag, op = value["tag"], value["fields"]
+    if tag == 5:
+        need(op["object"]["identity"]["kind"] in ("revision", "entity", "chunk"),
+             "operation_object_role")
+    elif tag == 8:
+        need(op["object"]["identity"]["kind"] in
+             ("has_revision", "has_chunk", "mention", "relation"), "operation_object_role")
+    elif tag == 10:
+        need(op["object"]["identity"]["kind"] == "batch_receipt", "operation_object_role")
+        need(op["object"]["data"]["batch_digest"]["tag"] == 2, "batch_slot_kind")
+    elif tag == 12:
+        need(op["object"]["identity"]["kind"] in
+             ("receipt", "delete_receipt", "abort_receipt"), "operation_object_role")
+        need(op["object"]["data"]["plan_digest"]["tag"] == 1, "plan_slot_kind")
+    elif tag == 13:
+        need(op["source"]["kind"] == "source", "operation_object_role")
+    elif tag == 11:
+        need(op["expected"]["tag"] in (1, 2), "head_patch_expected")
+
+
+def validate_record(name, value):
+    if name == "pipeline":
+        need(value["normalization"] == "ascii-key-v1", "normalization")
+        need(value["schema_version"] == 1 and value["dimensions"] > 0, "pipeline_version")
+        need(extractor_label(value["extractor_version"]), "extractor_version")
+        for field in ("entity_rules", "relation_rules"):
+            ids = [text(rule["rule_id"]) for rule in value[field]]
+            need(ids == sorted(ids) and len(ids) == len(set(ids)), "rule_order")
+    elif name in ("mention_data", "relation_data"):
+        need(extractor_label(value["extractor_version"]), "extractor_version")
+    elif name == "entity_rule":
+        need(is_identifier(value["kind"]), "entity_kind")
+        need(value["key"] and ascii_key(value["key"]) == value["key"], "normalized_key")
+    elif name == "relation_rule":
+        need(is_identifier(value["predicate"])
+             and is_identifier(value["subject_kind"])
+             and is_identifier(value["object_kind"]), "relation_rule_identifier")
+    elif name == "request":
+        need(value["expected_source"]["tag"] in (0, 1), "request_revision_ref")
+        content = unhex(value["text"])
+        strict_utf8(content)
+        need(value["content_digest"] == hashlib.sha256(content).hexdigest(),
+             "request_content_digest")
+        need(value["pipeline"]["binding_generation"]
+             == value["source"]["fields"]["binding"]["generation"], "binding_generation")
+        if value["uri"] is not None:
+            uri = text(value["uri"])
+            need(len(uri) <= 2048 and "\0" not in value["uri"], "uri")
+    elif name == "revision_data":
+        if value["uri"] is not None:
+            uri = text(value["uri"])
+            need(len(uri) <= 2048 and "\0" not in value["uri"], "uri")
+    elif name == "head_data":
+        need(value["revision_key"] is None or "\0" not in value["revision_key"],
+             "revision_key")
+        need(value["job_receipt_key"] is None or "\0" not in value["job_receipt_key"],
+             "job_receipt_key")
+    elif name == "entity_observation":
+        need(is_identifier(value["kind"]), "entity_kind")
+        need(value["key"] and ascii_key(value["key"]) == value["key"], "normalized_key")
+        need(value["start"] < value["end"], "observation_span")
+        need(value["confidence"] is None or
+             (0.0 <= value["confidence"] <= 1.0), "confidence")
+    elif name == "relation_observation":
+        need(is_identifier(value["predicate"]), "predicate")
+        need(value["start"] < value["end"], "observation_span")
+        need(value["confidence"] is None or
+             (0.0 <= value["confidence"] <= 1.0), "confidence")
+    elif name == "accepted_chunk":
+        chunk_text = unhex(value["text"])
+        strict_utf8(chunk_text)
+        ids = [row["local_id"] for row in value["entities"]]
+        need(len(ids) == len(set(ids)), "duplicate_local_id")
+        for row in value["entities"]:
+            validate_record("entity_observation", row)
+            span = chunk_text[row["start"]:row["end"]]
+            need(row["end"] <= len(chunk_text) and span == text(row["surface"]),
+                 "observation_surface")
+            decode_utf8_boundaries(chunk_text, row["start"], row["end"])
+        for row in value["relations"]:
+            validate_record("relation_observation", row)
+            need(row["subject_local_id"] in ids and row["object_local_id"] in ids,
+                 "relation_local_id")
+            need(row["end"] <= len(chunk_text), "observation_span")
+            decode_utf8_boundaries(chunk_text, row["start"], row["end"])
+        need(all(type(v) is float for v in value["vector"]), "float")
+    elif name == "receipt_data":
+        need(value["plan_digest"]["tag"] == 1, "plan_slot_kind")
+    elif name == "batch_data":
+        need(value["batch_digest"]["tag"] == 2, "batch_slot_kind")
+    elif name == "captured":
+        need(value["expected"]["tag"] in (0, 1), "captured_revision_ref")
+    elif name == "plan":
+        rows = [identity_order(row["object"]) for row in value["captured"]]
+        need(rows == sorted(rows) and len(rows) == len(set(rows)), "captured_order")
+        validate_plan_order(value)
+    elif name == "vector_data":
+        need(all("\0" not in value[field] for field in
+                 ("tenant", "source_key", "revision_key", "chunk_key")), "vector_metadata")
+        strict_utf8(unhex(value["text"]))
+        need(bool(value["vector"]), "vector_dimensions")
+        need(all(type(item) is float for item in value["vector"]), "float")
+    elif name == "delete_action":
+        need(value["root"]["kind"] == "delete_receipt", "action_root")
+    elif name == "abort_action":
+        need(value["root"]["kind"] == "abort_receipt", "action_root")
+    elif name == "entry":
+        validate_entry(value)
+
+
+def decode_utf8_boundaries(raw, start, end):
+    need(0 <= start < end <= len(raw), "observation_span")
+    try:
+        raw[:start].decode("utf-8", "strict")
+        raw[:end].decode("utf-8", "strict")
+    except UnicodeError as error:
+        raise Invalid("observation_utf8_boundary") from error
+
+
+def validate_plan_order(plan):
+    captured = {identity(row["object"]) for row in plan["captured"]}
+    known = {raw for raw in captured
+             if decode_identity(raw)["kind"] in ("source", "revision", "chunk", "entity")}
+    for batch in plan["batches"]:
+        ops = [op for group in batch["groups"] for op in group["operations"]]
+        if not ops:
+            raise Invalid("empty_batch")
+        validate_batch_start(ops, batch["ordinal"], known)
+        previous_phase = -1
+        anchor_keys, chunk_order, provenance_order, relation_order = [], [], [], []
+        for index, operation in enumerate(ops):
+            tag, fields_ = operation["tag"], operation["fields"]
+            phase = operation_phase(operation)
+            need(phase >= previous_phase, "operation_order")
+            previous_phase = phase
+            if tag == 13:
+                need(batch["ordinal"] == 1 and index == 0, "head_create_first")
+                known.add(identity(fields_["source"]))
+            elif tag == 5:
+                obj = fields_["object"]
+                role, data = obj["identity"]["kind"], obj["identity"]
+                if role == "revision":
+                    need(identity(data["fields"]["source"]) in known, "revision_endpoint")
+                    anchor_keys.append(graph_key_order(data))
+                elif role == "chunk":
+                    need(identity(data["fields"]["revision"]) in known, "chunk_endpoint")
+                    chunk_order.append((data["fields"]["ordinal"], graph_key_order(data)))
+                elif role == "entity":
+                    anchor_keys.append(graph_key_order(data))
+                known.add(identity(data))
+            elif tag == 8:
+                ident_ = fields_["object"]["identity"]
+                validate_edge_order(ident_, known)
+                if ident_["kind"] == "relation":
+                    relation_order.append(identity_order(ident_))
+                else:
+                    provenance_order.append(graph_key_order(ident_))
+            elif tag == 11:
+                need(identity(fields_["source"]) in known, "head_patch_source")
+            if tag == 12:
+                need(index == len(ops) - 1 and batch["ordinal"] == 1, "root_receipt_last")
+        need(anchor_keys == sorted(anchor_keys), "node_key_order")
+        need(chunk_order == sorted(chunk_order), "chunk_ordinal_order")
+        need(provenance_order == sorted(provenance_order), "provenance_key_order")
+        need(relation_order == sorted(relation_order), "relation_identity_order")
+    ordinals = [batch["ordinal"] for batch in plan["batches"]]
+    need(ordinals == list(range(1, len(ordinals) + 1)), "batch_order")
+
+
+def operation_phase(operation):
+    tag = operation["tag"]
+    if tag == 13:
+        return -1
+    if tag == 0:
+        return 0
+    if tag == 1:
+        return 1
+    if tag in (2, 3):
+        return 2
+    if tag == 4:
+        return 3
+    if tag == 5:
+        role = operation["fields"]["object"]["identity"]["kind"]
+        return 4 if role in ("revision", "entity") else 5
+    if tag == 6:
+        return 6
+    if tag == 7:
+        return 7
+    if tag == 8:
+        return (8 if operation["fields"]["object"]["identity"]["kind"]
+                in ("has_revision", "has_chunk", "mention") else 9)
+    if tag == 9:
+        return 10
+    if tag == 10:
+        return 11
+    if tag == 11:
+        return 12
+    if tag == 12:
+        return 13
+    raise Invalid("operation_tag")
+
+
+def validate_batch_start(ops, ordinal, known):
+    first = ops[0]
+    if ordinal == 1 and first["tag"] == 13:
+        return
+    need(first["tag"] == 0, "batch_guard_first")
+    need(identity(first["fields"]["source"]) in known, "guard_source")
+
+
+def validate_edge_order(edge, known):
+    role, links = edge["kind"], edge["fields"]
+    endpoints = {
+        "has_revision": ("source", "revision"),
+        "has_chunk": ("revision", "chunk"),
+        "mention": ("chunk", "entity"),
+        "relation": ("revision", "chunk", "subject", "object"),
+    }[role]
+    for endpoint in endpoints:
+        need(identity(links[endpoint]) in known, "edge_endpoint")
 
 
 def named(name, value, masked=False):
     need(name in RECORDS, "record")
+    validate_record(name, value)
     return b"\1" + struct_bytes(RECORDS[name], value, masked)
 
 
@@ -396,6 +701,7 @@ def decode(kind, reader):
             need(nested.number(1) == 1, "version")
             result = decode_struct(RECORDS[item], nested)
             need(nested.at == len(nested.raw), "trailing")
+            named(item, result)
             return result
         if tag == "identity":
             result = decode_identity(reader.blob())
@@ -459,7 +765,9 @@ def decode(kind, reader):
     if kind == "operation":
         tag = reader.number(1)
         need(tag in OPS, "operation_tag")
-        return {"tag": tag, "fields": decode_struct(OPS[tag], reader)}
+        value = {"tag": tag, "fields": decode_struct(OPS[tag], reader)}
+        validate_operation(value)
+        return value
     if kind == "object":
         value = decode(ident(), reader)
         need(value["kind"] in DATA, "object_role")
@@ -486,7 +794,21 @@ def decode_identity(raw):
 
 
 def entry_bytes(entry, masked=False):
+    validate_entry(entry)
     return struct_bytes(RECORDS["entry"], entry, masked)
+
+
+def validate_entry(entry):
+    exact(entry, RECORDS["entry"])
+    need(entry["object_kind"] in (0, 1, 2), "object_kind")
+    if entry["object_kind"] == 2:
+        need(entry["object_key"] == "" and entry["collection"] is not None
+             and entry["record"] is not None and entry["attached_chunk_key"] is not None,
+             "entry_vector_fields")
+    else:
+        need(bool(entry["object_key"]) and entry["collection"] is None
+             and entry["record"] is None and entry["attached_chunk_key"] is None,
+             "entry_graph_fields")
 
 
 def entry_order(entry):
@@ -505,6 +827,8 @@ def shard_binary(value, masked=False):
     need(isinstance(entries, list) and entries, "shard_empty")
     order = [entry_order(entry) for entry in entries]
     need(order == sorted(order) and len(set(order)) == len(order), "entry_order")
+    for entry in entries:
+        validate_entry(entry)
     header = {name: value[name] for name, _ in SHARD_HEADER}
     raw = b"\1" + struct_bytes(SHARD_HEADER, header, masked) + uint(len(entries), 4)
     raw += b"".join(entry_bytes(entry, masked) for entry in entries)
@@ -570,15 +894,65 @@ def physical(identity_value, data):
     need(role in DATA and role != "vector", "stored_role")
     result = {"g7_v": 1, "g7_kind": REGISTRY[role][2]}
     for prefix, raw in (("i", identity(identity_value)), ("d", named(DATA[role], data))):
-        parts = [raw[index:index + 3072] for index in range(0, len(raw), 3072)] or [b""]
-        need(len(parts) <= 99, "fragments")
+        parts = split_fragments(raw)
+        need(len(parts) <= 64, "fragments")
         for index, part in enumerate(parts):
             result[f"{prefix}{index:02}"] = b64(part)
     for field in ("source_key", "revision_key", "chunk_key"):
         if field in data and data[field] is not None:
             result[field] = data[field]
+    result.update(readable_projection(identity_value, data))
     metadata_bytes(result)
     return result
+
+
+def split_fragments(raw):
+    return [raw[index:index + 3072] for index in range(0, len(raw), 3072)] or [b""]
+
+
+def readable_projection(identity_value, data):
+    role, fields_ = identity_value["kind"], identity_value["fields"]
+    projection = {}
+    if role == "source":
+        projection["status"] = data["status"]
+        if data["revision_key"] is not None:
+            projection["revision_key"] = data["revision_key"]
+        projection["last_batch"] = data["last_batch"]
+    elif role == "revision":
+        if data["uri"] is not None:
+            projection["uri"] = data["uri"]
+        projection.update(text_length=data["text_length"], chunk_count=data["chunk_count"],
+                          content_digest=fields_["content"])
+    elif role == "chunk":
+        projection.update(ordinal=data["ordinal"], start_byte=data["start"],
+                          end_byte=data["end"], chunk_digest=data["chunk_digest"])
+    elif role == "entity":
+        projection.update(entity_kind=fields_["kind"], normalized_key=fields_["normalized_key"])
+    elif role in ("mention", "relation"):
+        projection.update(span_start=fields_["start"], span_end=fields_["end"])
+        if data["confidence"] is not None:
+            projection["confidence"] = (0.0 if data["confidence"] == 0.0
+                                       else data["confidence"])
+        projection["extractor_version"] = data["extractor_version"]
+        if role == "mention" and len(text(data["surface"])) <= 4096:
+            projection["surface"] = data["surface"]
+    return projection
+
+
+def physical_vector(data):
+    validate_record("vector_data", data)
+    return {
+        "metadata": {
+            "g7_v": 1,
+            "tenant": data["tenant"],
+            "source_key": data["source_key"],
+            "revision_key": data["revision_key"],
+            "chunk_key": data["chunk_key"],
+        },
+        "payload": unhex(data["text"]),
+        "vector": b"".join(encode("f32", value) for value in data["vector"]),
+        "expiry": None,
+    }
 
 
 def decode_physical(expected_identity, properties):
@@ -600,7 +974,8 @@ def decode_physical(expected_identity, properties):
     need(reader.number(1) == 1, "version")
     data = decode_struct(RECORDS[DATA[role]], reader)
     need(reader.at == len(reader.raw), "noncanonical")
-    need(physical(stored_identity, data) == properties, "stored_properties")
+    need(metadata_binary(physical(stored_identity, data)) == metadata_binary(properties),
+         "evidence_conflict")
     return data
 
 
@@ -623,6 +998,8 @@ def metadata_binary(properties):
         elif type(value) is int:
             need(-(1 << 63) <= value < 1 << 63, "property_integer")
             raw += b"\2" + value.to_bytes(8, "little", signed=True)
+        elif type(value) is float:
+            raw += b"\3" + encode("f64", value)
         else:
             raise Invalid("property_type")
     need(len(raw) <= 65536, "property_bytes")
@@ -703,21 +1080,22 @@ def stored_checks(document):
     need(physical(sample, expand(templates["head_data"], templates)) == {
         "g7_v": 1, "g7_kind": "src",
         "i00": b64(expected_bytes(document["atoms"]["source"], document["atoms"])),
-        "d00": "AQAAAAAAAAAAAA=="}, "stored-head-properties")
+        "d00": "AQAAAAAAAAAAAA==", "status": 0, "last_batch": 0},
+         "stored-head-properties")
     need(metadata_binary({"z": 1, "a": "x"}).hex()
          == "0200000001006101010000007801007a020100000000000000",
          "metadata-name-u16-type-order")
-    need(metadata_bytes(physical(sample, expand(templates["head_data"], templates))) == 152,
-         "head-metadata-size-152")
+    need(metadata_bytes(physical(sample, expand(templates["head_data"], templates))) == 190,
+         "head-metadata-size-190")
     props = physical(sample, expand(templates["head_data"], templates))
     rejects(lambda: decode_physical(sample, dict(props, unexpected="x")),
-            "stored_properties", "stored-unknown-property")
+            "evidence_conflict", "stored-unknown-property")
     broken = dict(props)
     broken["i01"] = broken.pop("i00")
     rejects(lambda: decode_physical(sample, broken), "fragment_indexes",
             "stored-missing-first-fragment")
     rejects(lambda: decode_physical(sample, dict(props, g7_kind="ent")),
-            "stored_properties", "stored-wrong-role")
+            "evidence_conflict", "stored-wrong-role")
     rejects(lambda: metadata_bytes({"u": 1 << 63}), "property_integer", "no-native-u64")
     rejects(lambda: metadata_bytes({"n": None}), "property_type", "no-native-null")
     need(metadata_bytes({"s": "s" * 4096}) == 4108, "C9-string-4096")
@@ -750,28 +1128,177 @@ def stored_checks(document):
                                                 start=0, end=16384)}
     evidence = dict(source_key="g7_src_" + "0" * 64, revision_key="g7_rev_" + "0" * 64,
                     chunk_key="g7_chk_" + "0" * 64, surface="s" * 16384, confidence=1.0,
-                    extractor_version="00" * 32, attributes=attrs)
+                    extractor_version="v" * 256, attributes=attrs)
     need(len(identity(source)) == 692 and len(identity(revision)) == 762
          and len(identity(chunk)) == 780 and len(identity(entity)) == 759,
          "max-identity-arithmetic")
     need(len(identity(mention)) == 1557
-         and len(named("mention_data", evidence)) == 24851
-         and metadata_bytes(physical(mention, evidence)) == 35613,
-         "max-mention-C9-35613")
+         and len(named("mention_data", evidence)) == 25079
+         and len(physical(mention, evidence)) == 19
+         and metadata_bytes(physical(mention, evidence)) == 36258,
+         "max-mention-C9-projected")
     relation = {"kind": "relation", "fields": dict(
         revision=revision, chunk=chunk, subject=entity, predicate="P" * 63,
         object=entity, start=0, end=16384, attributes=attrs)}
     need(len(identity(relation)) == 11349, "max-relation-identity-11349")
     relation_data = {key: value for key, value in evidence.items()
                      if key not in ("surface", "attributes")}
-    need(metadata_bytes(physical(relation, relation_data)) < 65536,
-         "max-relation-C9")
-    return ["stored-head-properties", "all-stored-schema-roundtrips"]
+    relation_bytes = metadata_bytes(physical(relation, relation_data))
+    need(relation_bytes < 65536, "max-relation-C9")
+    vector_data = {"tenant": "t" * 128, "source_key": "g7_src_" + "0" * 64,
+                   "revision_key": "g7_rev_" + "0" * 64,
+                   "chunk_key": "g7_chk_" + "0" * 64, "text": "61",
+                   "vector": [1.0] * 1536}
+    vector_record = physical_vector(vector_data)
+    need(vector_record["metadata"] == {
+        "g7_v": 1, "tenant": "t" * 128, "source_key": "g7_src_" + "0" * 64,
+        "revision_key": "g7_rev_" + "0" * 64, "chunk_key": "g7_chk_" + "0" * 64}
+         and vector_record["payload"] == b"a" and vector_record["expiry"] is None
+         and len(vector_record["vector"]) == 6144
+         and metadata_bytes(vector_record["metadata"]) < 65536,
+         "vector-physical-form")
+    root = {"kind": "receipt", "fields": {
+        "binding": binding, "tenant": "t" * 128, "source_id": "s" * 256,
+        "content": "00" * 32, "pipeline": "11" * 32}}
+    identities = {
+        "source": source,
+        "revision": revision,
+        "chunk": chunk,
+        "entity": entity,
+        "has_revision": {"kind": "has_revision", "fields": {"source": source,
+                                                             "revision": revision}},
+        "has_chunk": {"kind": "has_chunk", "fields": {"revision": revision,
+                                                       "chunk": chunk}},
+        "mention": mention,
+        "relation": relation,
+        "receipt": root,
+        "batch_receipt": {"kind": "batch_receipt", "fields": {"root": root,
+                                                               "ordinal": 0xffffffff}},
+        "delete_receipt": {"kind": "delete_receipt", "fields": {
+            "binding": binding, "tenant": "t" * 128, "source_id": "s" * 256,
+            "expected": (1 << 64) - 1}},
+        "abort_receipt": {"kind": "abort_receipt", "fields": {
+            "binding": binding, "tenant": "t" * 128, "source_id": "s" * 256,
+            "aborted": root}},
+    }
+    key_map = {role: graph_key(value) for role, value in identities.items()}
+    maximal_data = {
+        "source": dict(revision_key=key_map["revision"], revision_digest="00" * 32,
+                       pipeline="11" * 32, status=3,
+                       job_receipt_key=key_map["receipt"], last_batch=0xffffffff),
+        "revision": dict(source_key=key_map["source"], uri="u" * 2048,
+                         text_length=0xffffffff, chunk_count=0xffffffff,
+                         receipt_key=key_map["receipt"]),
+        "chunk": dict(source_key=key_map["source"], revision_key=key_map["revision"],
+                      ordinal=0xffffffff, start=0, end=0xffffffff,
+                      chunk_digest="00" * 32, pipeline="11" * 32),
+        "entity": {},
+        "has_revision": {},
+        "has_chunk": {},
+        "mention": evidence,
+        "relation": relation_data,
+        "receipt": dict(request_digest="22" * 32,
+                        plan_digest={"tag": 1, "value": "11" * 32},
+                        batch_count=0xffffffff, revision_key=key_map["revision"],
+                        outcome=3, chunks=0xffffffff, entities=0xffffffff,
+                        relations=0xffffffff, mentions=0xffffffff),
+        "batch_receipt": expand(templates["batch_data"], templates),
+        "delete_receipt": dict(request_digest="22" * 32,
+                               plan_digest={"tag": 1, "value": "11" * 32},
+                               batch_count=0xffffffff, revision_key="",
+                               outcome=2, chunks=0xffffffff, entities=0xffffffff,
+                               relations=0xffffffff, mentions=0xffffffff),
+        "abort_receipt": dict(request_digest="22" * 32,
+                              plan_digest={"tag": 1, "value": "11" * 32},
+                              batch_count=0xffffffff, revision_key="",
+                              outcome=3, chunks=0xffffffff, entities=0xffffffff,
+                              relations=0xffffffff, mentions=0xffffffff),
+    }
+    physical_sizes = {}
+    for role, identity_value in identities.items():
+        properties = physical(identity_value, maximal_data[role])
+        byte_count = metadata_bytes(properties)
+        need(len(properties) <= 64 and byte_count <= 65536,
+             "all-role-C9-capacity:" + role)
+        physical_sizes[role] = (len(properties), byte_count)
+    need(physical_sizes["mention"] == (19, 36258), "max-mention-C9-projected")
+    need(len(physical_vector(vector_data)["metadata"]) == 5,
+         "max-vector-metadata-fields")
+    vector_metadata_bytes = metadata_bytes(physical_vector(vector_data)["metadata"])
+    for role in ("result_shard", "ownership_shard"):
+        shard_raw = shard_binary({"channel": 0 if role == "result_shard" else 1,
+                                  "root_key": key_map["receipt"], "batch": 0xffffffff,
+                                  "group": 0xffffffff, "index": 0xffffffff,
+                                  "entries": [expand(templates["entry"], templates)]})
+        need(len(shard_raw) <= 3072, "shard_capacity:" + role)
+        props = {"data": b64(bytes(3072))}
+        need(len(props) == 1 and metadata_bytes(props) <= 65536,
+             "all-role-C9-capacity:" + role)
+        physical_sizes[role] = (len(props), metadata_bytes(props))
+    physical_sizes["vector_record_metadata"] = (
+        len(physical_vector(vector_data)["metadata"]), vector_metadata_bytes)
+    return ["stored-head-properties", "all-stored-schema-roundtrips",
+            "max-mention-C9-projected", "max-relation-C9", "vector-physical-form"] + [
+                f"C9-{role}:{fields_}-fields/{size}-bytes"
+                for role, (fields_, size) in physical_sizes.items()] + [
+                "all-graph-role-C9-capacity"]
 
 
 def invariants(document):
     templates = document["templates"]
     rejects(lambda: encode("f64", 10 ** 1000), "float", "float-conversion-overflow")
+    rejects(lambda: encode("f32", 1), "float", "float-requires-float")
+    need(encode("f32", -1e-100) == bytes(4), "f32-underflow-zero")
+    pipeline = expand(templates["pipeline"], templates)
+    named("pipeline", dict(pipeline, extractor_version="v" * 256))
+    for label in ("latest", "default", "v 1", "é", "x" * 257):
+        broken = copy.deepcopy(pipeline)
+        broken["extractor_version"] = label
+        rejects(lambda: named("pipeline", broken), "extractor_version",
+                "extractor-label-" + label[:8])
+    rejects(lambda: named("pipeline", dict(pipeline, dimensions=0)),
+            "pipeline_version", "pipeline-dimensions")
+    rejects(lambda: named("pipeline", dict(pipeline, normalization="unicode")),
+            "normalization", "pipeline-normalization")
+    unsorted_rules = copy.deepcopy(pipeline)
+    unsorted_rules["entity_rules"] = [
+        {"rule_id": "z", "literal": "z", "kind": "K", "key": "z"},
+        {"rule_id": "a", "literal": "a", "kind": "K", "key": "a"}]
+    rejects(lambda: named("pipeline", unsorted_rules), "rule_order", "rule-sort")
+    duplicate_rules = copy.deepcopy(unsorted_rules)
+    duplicate_rules["entity_rules"] = [unsorted_rules["entity_rules"][1]] * 2
+    rejects(lambda: named("pipeline", duplicate_rules), "rule_order", "rule-duplicate")
+    rejects(lambda: identity({"kind": "relation", "fields": {
+        "revision": expand(templates["revision"], templates),
+        "chunk": expand(templates["chunk"], templates),
+        "subject": expand(templates["entity"], templates), "predicate": "bad-name",
+        "object": expand(templates["entity"], templates), "start": 0, "end": 1,
+        "attributes": {}}}), "predicate", "predicate-charset")
+    rejects(lambda: identity({"kind": "abort_receipt", "fields": {
+        "binding": expand(templates["binding"], templates), "tenant": "t",
+        "source_id": "s", "aborted": expand(templates["abort_receipt"], templates)}}),
+        "abort_of_abort", "abort-of-abort")
+    wrong_slot = expand(templates["receipt_data"], templates)
+    wrong_slot["plan_digest"]["tag"] = 2
+    rejects(lambda: named("receipt_data", wrong_slot), "plan_slot_kind", "receipt-slot-tag")
+    wrong_batch_slot = expand(templates["batch_data"], templates)
+    wrong_batch_slot["batch_digest"]["tag"] = 1
+    rejects(lambda: named("batch_data", wrong_batch_slot), "batch_slot_kind", "batch-slot-tag")
+    bad_request = expand(templates["request"], templates)
+    bad_request["expected_source"] = {"tag": 2, "value": [1, 0]}
+    rejects(lambda: named("request", bad_request), "request_revision_ref",
+            "request-symbolic-revision")
+    request_at_uri_limit = expand(templates["request"], templates)
+    request_at_uri_limit["uri"] = "u" * 2048
+    named("request", request_at_uri_limit)
+    bad_generation = copy.deepcopy(request_at_uri_limit)
+    bad_generation["pipeline"]["binding_generation"] = "11" * 32
+    rejects(lambda: named("request", bad_generation), "binding_generation",
+            "pipeline-binding-generation")
+    accepts_delete_abort_target = {"kind": "abort_receipt", "fields": {
+        "binding": expand(templates["binding"], templates), "tenant": "t",
+        "source_id": "s", "aborted": expand(templates["delete_receipt"], templates)}}
+    identity(accepts_delete_abort_target)
     plan = expand(templates["plan_with_slots"], templates)
     base = digest_record("plan", plan, {"lineage": "a", "revision": 1})
     need(base == digest_record("plan", plan, {"lineage": "b", "revision": 999}),
@@ -780,17 +1307,19 @@ def invariants(document):
     changed["request_digest"] = "01" * 32
     need(base != digest_record("plan", changed), "literal-inclusion")
     changed = copy.deepcopy(plan)
-    slot = changed["batches"][0]["groups"][0]["operations"][0]["fields"]["object"][
-        "data"]["plan_digest"]
+    slot = next(op["fields"]["object"]["data"]["plan_digest"]
+                for op in changed["batches"][0]["groups"][0]["operations"]
+                if op["tag"] == 12)
     slot["value"] = "ab" * 32
     need(base == digest_record("plan", changed), "placeholder-invariance")
     slot["tag"] = 0
-    need(base != digest_record("plan", changed), "placeholder-tag")
+    rejects(lambda: digest_record("plan", changed), "plan_slot_kind", "placeholder-tag")
     batch = expand(templates["batch"], templates)
     batch_hash = digest_record("batch", batch)
     changed_batch = copy.deepcopy(batch)
-    changed_batch["groups"][0]["operations"][0]["fields"]["object"]["data"][
-        "plan_digest"]["value"] = "cd" * 32
+    root_op = next(op for op in changed_batch["groups"][0]["operations"]
+                   if op["tag"] == 12)
+    root_op["fields"]["object"]["data"]["plan_digest"]["value"] = "cd" * 32
     need(batch_hash == digest_record("batch", changed_batch),
          "batch-plan-placeholder-invariance")
     slot = {"batch_digest": {"tag": 2, "value": "00" * 32}, "final": True,
@@ -804,6 +1333,10 @@ def invariants(document):
     for raw, expected in ((b"", ""), (b"a", "YQ=="), (b"ab", "YWI="),
                           (b"abc", "YWJj")):
         need(b64(raw) == expected and unb64(expected) == raw, "base64-positive")
+    need([len(part) for part in split_fragments(bytes(3072))] == [3072]
+         and [len(part) for part in split_fragments(bytes(3073))] == [3072, 1]
+         and [len(part) for part in split_fragments(b"")] == [0],
+         "fragment-boundaries")
     for invalid in ("YQ", "YR==", "YQ=== ", "YQ==\n", "!!!!"):
         try:
             unb64(invalid)
@@ -881,10 +1414,105 @@ def invariants(document):
     else:
         raise Invalid("collision-accepted")
     need(lookup(first, first, bytes(32)), "identity-equality")
+    malformed_plan = expand(templates["plan_with_slots"], templates)
+    malformed_ops = malformed_plan["batches"][0]["groups"][0]["operations"]
+    malformed_ops.reverse()
+    rejects(lambda: named("plan", malformed_plan), "batch_guard_first",
+            "new-source-head-first")
+    source = expand(templates["source"], templates)
+    revision = expand(templates["revision"], templates)
+    chunk = expand(templates["chunk"], templates)
+    entity = expand(templates["entity"], templates)
+    head_op = {"tag": 13, "fields": {"source": source, "data": expand(
+        templates["head_data"], templates)}}
+    def create(role, identity_value, data):
+        return {"tag": 5, "fields": {"object": {"identity": identity_value, "data": data}}}
+    revision_op = create("revision", revision, expand(
+        templates["revision_projection_data"], templates))
+    chunk_op = create("chunk", chunk, expand(templates["chunk_projection_data"], templates))
+    entity_op = create("entity", entity, {})
+    has_revision = {"kind": "has_revision", "fields": {"source": source,
+                                                       "revision": revision}}
+    has_chunk = {"kind": "has_chunk", "fields": {"revision": revision, "chunk": chunk}}
+    mention = {"kind": "mention", "fields": {"chunk": chunk, "entity": entity,
+                                             "start": 0, "end": 1}}
+    relation = {"kind": "relation", "fields": {"revision": revision, "chunk": chunk,
+                "subject": entity, "predicate": "P", "object": entity,
+                "start": 0, "end": 1, "attributes": {}}}
+    relation_a = copy.deepcopy(relation)
+    relation_a["fields"]["attributes"] = {"a": [5, "x" * 100]}
+    relation_z = copy.deepcopy(relation)
+    relation_z["fields"]["attributes"] = {"z": [0, None]}
+    need(identity_order(relation_a) < identity_order(relation_z),
+         "attributes-frozen-byte-order")
+    source_a = {"kind": "source", "fields": {"binding": expand(
+        templates["binding"], templates), "tenant": "t", "source_id": "a"}}
+    source_z = copy.deepcopy(source_a)
+    source_z["fields"]["source_id"] = "z"
+    need(identity_order(source_a) < identity_order(source_z), "identity-string-byte-order")
+    edge_ops = [{"tag": 8, "fields": {"object": {"identity": ident_,
+                "data": data}}} for ident_, data in [
+                (has_revision, {}), (has_chunk, {}),
+                (mention, expand(templates["mention_projection_data"], templates)),
+                (relation, expand(templates["relation_projection_data"], templates))]]
+    edge_ops.sort(key=lambda op: (1, identity_order(op["fields"]["object"]["identity"]))
+                  if op["fields"]["object"]["identity"]["kind"] == "relation"
+                  else (0, graph_key_order(op["fields"]["object"]["identity"])))
+    ordered = expand(templates["plan"], templates)
+    ordered["batches"] = [dict(root=expand(templates["receipt"], templates),
+                               ordinal=1, groups=[dict(ordinal=0, operations=[
+                                   head_op, entity_op, revision_op, chunk_op,
+                                   *edge_ops, expand(templates["root_operation"], templates)])])]
+    named("plan", ordered)
+    broken_edges = copy.deepcopy(ordered)
+    ops = broken_edges["batches"][0]["groups"][0]["operations"]
+    ops.remove(edge_ops[0])
+    ops.insert(1, edge_ops[0])
+    rejects(lambda: named("plan", broken_edges), "edge_endpoint", "edge-endpoint-order")
+    late_head = copy.deepcopy(ordered)
+    ops = late_head["batches"][0]["groups"][0]["operations"]
+    ops.remove(head_op)
+    ops.insert(0, revision_op)
+    ops.insert(1, head_op)
+    rejects(lambda: named("plan", late_head), "batch_guard_first", "head-create-position")
+    existing = expand(templates["plan"], templates)
+    existing["captured"] = [{"object": source, "expected": expand(
+        templates["absent"], templates), "properties_digest": "00" * 32}]
+    existing["batches"] = [dict(root=expand(templates["receipt"], templates),
+                                ordinal=1, groups=[dict(ordinal=0, operations=[
+                                    entity_op, expand(templates["root_operation"], templates)])])]
+    rejects(lambda: named("plan", existing), "batch_guard_first", "existing-guard-first")
+
+    mention_identity = expand(next(row["input"] for row in document["vectors"]
+                                   if row["name"] == "projection-mention"), templates)["identity"]
+    mention_data = expand(templates["mention_projection_data"], templates)
+    small_properties = physical(mention_identity, mention_data)
+    for changed in (
+            {key: value for key, value in small_properties.items() if key != "surface"},
+            dict(small_properties, surface="wrong"),
+            dict(small_properties, rogue_projection="x")):
+        rejects(lambda: decode_physical(mention_identity, changed),
+                "evidence_conflict", "projection-conflict")
+    long_evidence = dict(mention_data, surface="s" * 4097)
+    long_properties = physical(mention_identity, long_evidence)
+    need("surface" not in long_properties
+         and decode_physical(mention_identity, long_properties) == long_evidence,
+         "long-surface-omitted-projection")
+    vector_data = expand(templates["vector_projection_data"], templates)
+    vector_data["vector"] = [-0.0]
+    need(physical_vector(vector_data)["vector"] == bytes(4)
+         and named("vector_data", vector_data).endswith(bytes(4)),
+         "vector-bits-plan-equal-physical")
     return ["runtime-substitution-invariance", "placeholder-invariance",
             "placeholder-tag", "typed-shard-exact-fit", "typed-shard-plus-one",
             "shard-split-27-1", "frame-size-14", "frame-size-16777216",
-            "frame-body-plus-one", "collision-is-conflict"]
+            "frame-body-plus-one", "collision-is-conflict", "schema-rule-negatives",
+            "new-source-head-first", "edge-endpoint-order", "existing-guard-first",
+            "projection-conflict", "long-surface-omitted-projection",
+            "vector-bits-plan-equal-physical", "pipeline-label-256",
+            "request-uri-2048", "pipeline-binding-generation",
+            "abort-delete-root", "fragment-boundaries",
+            "attributes-frozen-byte-order", "identity-string-byte-order"]
 
 
 def expand(value, templates):
@@ -910,7 +1538,7 @@ def expected_bytes(parts, atoms):
 
 
 def vector_bytes(vector):
-    category, name, value = vector["category"], vector["type"], vector["input"]
+    category, name, value = vector["category"], vector.get("type", ""), vector["input"]
     if category == "primitive":
         return encode(name, value)
     if category == "identity":
@@ -921,6 +1549,12 @@ def vector_bytes(vector):
         return encode("operation", value, vector.get("masked", False))
     if category == "shard":
         return shard_binary(value)
+    if category == "ordering":
+        rows = value
+        ordered = sorted(rows, key=lambda key: identity_order(rows[key]))
+        return b"".join(blob(identity(rows[key])) for key in ordered)
+    if category == "frame":
+        return uint(frame_size(value["body"], value["encrypted"]), 4)
     raise Invalid("fixture_category")
 
 
@@ -932,6 +1566,16 @@ def verify(document):
         vector = expand(template, document["templates"])
         need(vector["name"] not in names, "fixture_name")
         names.add(vector["name"])
+        if vector["category"] == "projection":
+            actual = readable_projection(vector["input"]["identity"], vector["input"]["data"])
+            need(actual == vector["expected"], "projection:" + vector["name"])
+            continue
+        if vector["category"] == "vector_record":
+            actual = physical_vector(vector["input"])
+            actual = dict(actual, payload=actual["payload"].hex(),
+                          vector=actual["vector"].hex())
+            need(actual == vector["expected"], "vector_record:" + vector["name"])
+            continue
         actual = vector_bytes(vector)
         expected = expected_bytes(vector["hex"], document["atoms"])
         need(actual == expected, "vector:" + vector["name"])
@@ -945,6 +1589,13 @@ def verify(document):
                 need(graph_key(vector["input"]).endswith(hand_hash), "key:" + vector["name"])
                 if "key" in vector:
                     need(graph_key(vector["input"]) == vector["key"], "literal-key")
+        if vector["category"] == "ordering":
+            names_order = sorted(vector["input"],
+                                 key=lambda key: identity_order(vector["input"][key]))
+            need(names_order == vector["order"], "ordering:" + vector["name"])
+        if vector["category"] == "collision":
+            need(not lookup(vector["input"]["left"], vector["input"]["right"],
+                            bytes(32)), "collision:" + vector["name"])
         if vector["category"] == "primitive":
             reader = Reader(expected)
             decoded = decode(vector["type"], reader)
@@ -961,7 +1612,20 @@ def verify(document):
         need(vector["name"] not in names, "fixture_name")
         names.add(vector["name"])
         try:
-            if "decode_hex" in vector:
+            if vector.get("category") == "collision":
+                lookup(vector["input"]["left"], vector["input"]["right"], bytes(32))
+            elif vector.get("category") == "projection":
+                properties = physical(vector["input"]["identity"], vector["input"]["data"])
+                if vector["input"]["change"] == "missing":
+                    properties.pop(vector["input"]["property"])
+                elif vector["input"]["change"] == "mismatch":
+                    properties[vector["input"]["property"]] = vector["input"]["value"]
+                else:
+                    properties["unexpected_projection"] = "x"
+                decode_physical(vector["input"]["identity"], properties)
+            elif vector.get("category") == "frame":
+                vector_bytes(vector)
+            elif "decode_hex" in vector:
                 raw = expected_bytes(vector["decode_hex"], document["atoms"])
                 reader = Reader(raw)
                 decoded = decode(vector["type"], reader)
@@ -1002,6 +1666,17 @@ def self_test(document):
         ("float-zero", "encode", lambda old: lambda kind, value, masked=False:
          struct.pack("<d", value) if kind == "f64" and value == 0
          else old(kind, value, masked)),
+        ("semantic-comparator", "identity_order",
+         lambda old: lambda value: identity(value)),
+        ("head-first", "validate_plan_order", lambda old: lambda plan: None),
+        ("edge-endpoint", "validate_edge_order", lambda old: lambda edge, known: None),
+        ("vector-record-form", "physical_vector",
+         lambda old: lambda data: dict(old(data), expiry="present")),
+        ("readable-projection", "readable_projection",
+         lambda old: lambda identity_value, data: {}),
+        ("extractor-label", "extractor_label", lambda old: lambda value: True),
+        ("fragment-final", "split_fragments",
+         lambda old: lambda raw: old(raw) + ([b""] if raw and len(raw) % 3072 == 0 else [])),
     ]
     killed = []
     for label, name, replacement in checks:
