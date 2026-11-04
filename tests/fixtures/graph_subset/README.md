@@ -219,6 +219,10 @@ Edges have the same identity/properties/revision, nullable `key`, `type`,
 decimal-string `source`/`target`, optional expiry and optional `segments`.
 Segments have nullable signed-i64 decimal-string `from_ms`/`to_ms` and their
 own typed `properties`; intervals are ordered, disjoint and half-open.
+Graph inputs must be states the engine can hold: it allocates node and edge IDs
+up to u64 max minus one and rejects u64 max with `IdSpaceExhausted`
+(`src/property_graph/engine/state/tests.rs`), so the `wide` graph uses u64 max
+minus one for its IDs and u64 max only for revisions and `view_sequence`.
 
 Results have `outcome: result`, ordered `columns`/`rows`, signed decimal-string
 or null `as_of_ms`, decimal-string `ttl_clock_ms` and `view_sequence`.
