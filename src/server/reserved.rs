@@ -205,6 +205,22 @@ mod tests {
     }
 
     #[test]
+    fn a_registry_without_raw_grants_still_reserves() {
+        let mut only = binding(ROOT_TENANT, "notes", "notes_graph", None);
+        for grant in &mut only.grants {
+            grant.raw_access = false;
+        }
+        let bindings = Bindings::new(BindingSet {
+            bindings: vec![only],
+        });
+        let reserved = bindings.reserved();
+        assert!(!reserved.is_empty());
+        let mut items = vec!["notes_graph", "x"];
+        reserved.retain_visible(Some(RAW), Resource::Graph, &mut items, |n| n);
+        assert_eq!(items, ["x"]);
+    }
+
+    #[test]
     fn stored_names_are_reserved_per_namespace_and_tenant() {
         let bindings = registry();
         let reserved = bindings.reserved();
