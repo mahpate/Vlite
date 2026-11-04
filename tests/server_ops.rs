@@ -26,7 +26,7 @@ const READER: &str = "reader_secret_0123456789_ABCDEFGHIJKLMNOPQRSTUVWXYZ";
 async fn kv_engine_errors_have_explicit_rest_status_and_code() {
     let dir = tempfile::tempdir().unwrap();
     let db =
-        Database::create_with_format(&dir.path().join("wide.vlite"), 2, FormatVersion::V5).unwrap();
+        Database::create_with_format(dir.path().join("wide.vlite"), 2, FormatVersion::V5).unwrap();
     let (_, app) = start(db, options(&dir.path().join("wide-admin")));
     let (status, body) = call(
         &app,
@@ -49,7 +49,7 @@ async fn kv_engine_errors_have_explicit_rest_status_and_code() {
     assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY);
     assert_eq!(body["error"]["code"], "invalid_input");
     let mut db =
-        Database::create_with_format(&dir.path().join("kv.vlite"), 1, FormatVersion::V5).unwrap();
+        Database::create_with_format(dir.path().join("kv.vlite"), 1, FormatVersion::V5).unwrap();
     let slot = vlite::kv::first_slot("n", "k");
     for offset in 0..16 {
         db.put(slot.wrapping_add(offset), &[0.0], b"occupied")
