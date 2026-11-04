@@ -448,3 +448,25 @@ five equivalent, each only under today's call-site invariants:
 
 A future collection rename, dimension change, id reuse, registry reload, step 2b,
 path-sensitive authorization or injectable clock must add killing tests first.
+
+### Gap 8 step 2b: private gRPC candidate
+
+This private candidate adds the `EmbedText` RPC (the service now has 35 RPCs) and the custom reranker fields on the
+existing gRPC `Search`, on the same bounded managed-provider path as the REST routes: identical authorization before any
+lookup, tenant binding, deadline, snapshot recheck and zero egress when the binding is absent. The existing exact and MMR
+rerank depth (4 x k) and candidate ceiling (`MAX_BATCH_OPERATIONS`) are unchanged and now pinned by tests. It is
+independently accepted (2026-11-04) and integrated, but unreleased and inactive until a provider registry is configured.
+
+Owner rulings recorded here: (A) the REST mapping `409 provider_snapshot_conflict` (ratified 2026-11-03); (B) the
+binding tenant is the owning tenant of the collection (its `t<32hex>__` prefix), and a non-tenant collection answers
+`409 provider_not_configured` with zero egress; (C) the payload-fields rule: an empty `payload_fields` never inspects
+payload bytes, a non-empty list requires a JSON-object payload and copies only the named top-level fields, and a
+non-object or non-JSON payload is rejected with `invalid_provider_input` (fail closed); metadata is never sent implicitly.
+Provisional (coordinator, owner away): gRPC maps `provider_snapshot_conflict` to `ABORTED` with a sanitized message and no
+retry hint (`FAILED_PRECONDITION` was rejected because the request has no failed precondition: a concurrent change
+caused the conflict); the owner is asked to ratify it at the release go/no-go.
+
+Independent acceptance: the fix-forward adds eight tests that kill the eight reconstructed mutants of the first
+independent campaign (including the four that survived it: malformed `grpc-timeout` replaced by the default, the
+read-only bearer role on `EmbedText`, and the two existing exact/MMR bounds); a second independent run killed all four
+survivors against the full gRPC test module.
