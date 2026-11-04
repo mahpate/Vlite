@@ -77,7 +77,8 @@ default collection and remains available when that collection is not reserved;
 it returns `403 forbidden_scope` when the default collection is reserved
 without raw access. With any binding configured, global metrics, graph guard
 statistics, replication export, webhook list/status, all import operations,
-and automatic-maintenance routes return `403 forbidden_scope`. Webhook
+and automatic-maintenance routes return `403 forbidden_scope`, including for
+credentials with `raw_access`. Webhook
 subscriptions naming a reserved graph or collection are refused, and the
 dispatcher filters reserved events from existing subscriptions. The gRPC
 listener and scheduled automatic index maintenance also fail closed until those
