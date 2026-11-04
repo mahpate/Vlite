@@ -67,6 +67,7 @@ pub(crate) mod frame;
 mod maintain;
 mod read;
 mod retrieve;
+mod subset;
 pub(crate) mod temporal;
 pub(crate) mod ttl_feed;
 

@@ -4,9 +4,12 @@ use super::language::{LanguageError, LanguageErrorKind};
 use super::model::PropertyValue;
 use std::collections::BTreeMap;
 
+pub(crate) mod eval;
 pub(crate) mod lexer;
+pub(crate) mod meter;
 pub(crate) mod parser;
 pub(crate) mod plan;
+pub(crate) mod read;
 
 #[allow(unused_imports)] // The standalone graph harness has no embedded-query adapter.
 pub(crate) use plan::{ParameterEntry, plan};

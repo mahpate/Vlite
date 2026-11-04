@@ -78,6 +78,39 @@ pub(crate) fn resolve_as_of(as_of: Option<i64>, clock: u64) -> Result<i64> {
     )
 }
 
+#[allow(dead_code)]
+pub(crate) enum SubsetTimeError {
+    UnsupportedFeature(u16),
+    InvalidQuery(&'static str),
+}
+
+#[allow(dead_code)]
+pub(crate) fn subset_as_of(
+    as_of: Option<i64>,
+    ttl_clock_ms: u64,
+    temporal_capable: bool,
+) -> std::result::Result<Option<i64>, SubsetTimeError> {
+    if as_of.is_some() && !temporal_capable {
+        return Err(SubsetTimeError::UnsupportedFeature(FLAG_TEMPORAL));
+    }
+    if temporal_capable {
+        if !super::supported() {
+            return Err(SubsetTimeError::UnsupportedFeature(FLAG_TEMPORAL));
+        }
+        let instant = match as_of {
+            Some(instant) => instant,
+            None => i64::try_from(ttl_clock_ms).map_err(|_| {
+                SubsetTimeError::InvalidQuery(
+                    "TTL clock does not fit a default validity instant; specify as_of",
+                )
+            })?,
+        };
+        Ok(Some(instant))
+    } else {
+        Ok(None)
+    }
+}
+
 impl<'db> GraphRef<'db> {
     fn temporal_view(&self, as_of_ms: Option<i64>) -> Result<TemporalReadView<'db>> {
         if !super::supported() || self.db.flags & FLAG_TEMPORAL == 0 {
