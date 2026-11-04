@@ -135,8 +135,11 @@ each committed chunk; a request rate is charged once per RPC, not per message.
 ## Key-value permissions
 
 Collection KV GET/HEAD and list need the collection's `read` scope; PUT and
-DELETE need `write`. Read-only credentials cannot mutate. Tenant-local names
-and immutable lineage/collection bindings are checked before collection lookup;
+DELETE need `write`. These scopes also apply to `vlite.v1.Kv`:
+`GetKvEntry`/`ListKvEntries` need `read`, and
+`PutKvEntry`/`DeleteKvEntry` need `write`. Graph scopes do not grant KV access.
+Read-only credentials cannot mutate. Tenant-local names and immutable
+lineage/collection bindings are checked before collection lookup;
 a binding for a dropped collection does not authorize its replacement.
 KV never implicitly creates a collection and shares ordinary record quotas.
 Mutation audit entries contain operation, principal, collection, request ID and

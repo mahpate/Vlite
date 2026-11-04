@@ -20,6 +20,8 @@ pub mod proto {
 
 use proto::v_lite_server::{VLite, VLiteServer};
 
+mod kv;
+
 /// Decoded request message limit; equals the REST body limit.
 pub const MAX_DECODING_MESSAGE_BYTES: usize = MAX_JSON_BYTES;
 /// Encoded response message limit.
@@ -65,12 +67,13 @@ pub struct GrpcHealth(tonic_health::server::HealthReporter);
 
 impl GrpcHealth {
     async fn set(&self, status: tonic_health::ServingStatus) {
-        for name in ["", SERVICE_NAME] {
+        for name in ["", SERVICE_NAME, "vlite.v1.Kv"] {
             self.0.set_service_status(name, status).await;
         }
     }
 
-    /// Reports `NOT_SERVING` for `""` and `vlite.v1.VLite`; call first on shutdown.
+    /// Reports `NOT_SERVING` for `""`, `vlite.v1.VLite` and `vlite.v1.Kv`.
+    /// Call first on shutdown.
     pub async fn set_not_serving(&self) {
         self.set(tonic_health::ServingStatus::NotServing).await;
     }
@@ -95,10 +98,16 @@ pub async fn grpc_router(mut service: Service) -> GrpcServer {
     let (reporter, health_service) = tonic_health::server::health_reporter();
     let health = GrpcHealth(reporter);
     health.set(tonic_health::ServingStatus::Serving).await;
-    let vlite = VLiteServer::new(Adapter { service })
+    let adapter = Adapter { service };
+    let kv = proto::kv_server::KvServer::new(adapter.clone())
         .max_decoding_message_size(MAX_DECODING_MESSAGE_BYTES)
         .max_encoding_message_size(MAX_ENCODING_MESSAGE_BYTES);
-    let routes = tonic::service::Routes::new(health_service).add_service(vlite);
+    let vlite = VLiteServer::new(adapter)
+        .max_decoding_message_size(MAX_DECODING_MESSAGE_BYTES)
+        .max_encoding_message_size(MAX_ENCODING_MESSAGE_BYTES);
+    let routes = tonic::service::Routes::new(health_service)
+        .add_service(vlite)
+        .add_service(kv);
     GrpcServer {
         routes,
         health,
@@ -174,6 +183,7 @@ impl GrpcServer {
     }
 }
 
+#[derive(Clone)]
 struct Adapter {
     service: Service,
 }
@@ -2518,6 +2528,21 @@ fn request_collection<T: 'static>(request: &T) -> String {
     field!(proto::EmbedTextRequest, collection);
     field!(proto::ReserveImportRequest, collection);
     field!(proto::ExportVectorsRequest, collection);
+    field!(proto::KvListRequest, collection);
+    macro_rules! address {
+        ($type:ty) => {
+            if let Some(r) = request.downcast_ref::<$type>() {
+                return r
+                    .address
+                    .as_ref()
+                    .map(|a| a.collection.clone())
+                    .unwrap_or_default();
+            }
+        };
+    }
+    address!(proto::KvGetRequest);
+    address!(proto::KvPutRequest);
+    address!(proto::KvDeleteRequest);
     String::new()
 }
 

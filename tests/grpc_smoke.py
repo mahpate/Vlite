@@ -248,12 +248,26 @@ def run(modules, http_address, grpc_address):
     channel = grpc.insecure_channel(grpc_address)
     grpc.channel_ready_future(channel).result(timeout=30)
     health = modules["health_rpc"].HealthStub(channel)
-    for service in ["", "vlite.v1.VLite"]:
+    for service in ["", "vlite.v1.VLite", "vlite.v1.Kv"]:
         response = health.Check(health_pb2.HealthCheckRequest(service=service), timeout=10)
         assert response.status == health_pb2.HealthCheckResponse.SERVING, response
 
     stub = rpc.VLiteStub(channel)
     auth = (("authorization", "Bearer " + TOKEN),)
+    kv = rpc.KvStub(channel)
+    try:
+        kv.PutKvEntry(
+            pb.KvPutRequest(
+                address=pb.KvAddress(collection="default", namespace="n", key="large"),
+                value=b"\0" * 8_388_609,
+            ),
+            metadata=auth,
+            timeout=10,
+        )
+        raise AssertionError("oversize KV request accepted")
+    except grpc.RpcError as error:
+        assert error.code() == grpc.StatusCode.OUT_OF_RANGE, error
+        assert "vlite-error-code" not in dict(error.trailing_metadata() or ()), error
     expect_error(
         lambda: stub.ListCollections(pb.ListCollectionsRequest(), timeout=10),
         grpc.StatusCode.UNAUTHENTICATED,

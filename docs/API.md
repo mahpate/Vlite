@@ -114,8 +114,29 @@ Ordinary KV follows configured durability: `full` syncs before acknowledgment,
 `periodic` can lose up to a flush interval on OS crash/power loss, and `none` is
 memory-only. There is no per-call forced sync, automatic retry or lease
 guarantee; disconnects and `commit_indeterminate` do not prove a write failed.
-gRPC, MCP, CLI, client helpers and lease operations are not part of this REST
-surface.
+MCP, CLI, client helpers and lease operations are not exposed.
+
+## Key-value gRPC service
+
+`vlite.v1.Kv` adds four unary RPCs alongside the 34 `VLite` RPCs (38 total):
+`GetKvEntry`, `PutKvEntry`, `DeleteKvEntry`, and `ListKvEntries`. Generate clients
+from `proto/vlite/v1/vlite.proto`. Each address requires an explicit nonempty
+`collection`; unlike legacy vector RPCs, empty does not mean `default`.
+Get/list require collection `read`, and put/delete require collection `write`.
+
+The [KV rules above](#key-value-entries) also apply to gRPC, including byte
+bounds, CAS, expiry, tenant bindings, quotas, audit and the canonical-JSON page
+boundary. Protobuf values are raw `bytes`; versions and deadlines are `uint64`.
+Unset `Expected` (or its oneof) means any. Unset put expiry clears TTL; an
+explicit zero is a due deadline, not absence. List `after`, `limit` and
+`next_after` preserve optional presence.
+
+Errors carry `vlite-error-code` and `x-request-id`: missing entries use
+`NOT_FOUND`, invalid input `INVALID_ARGUMENT`, CAS mismatch `ABORTED`,
+collection/probe/upgrade conflicts `FAILED_PRECONDITION`, permission failures
+`PERMISSION_DENIED`, and quotas `RESOURCE_EXHAUSTED`. Every service applies
+8 MiB request and 16 MiB response caps; tonic size errors are `OUT_OF_RANGE`
+without an application error trailer. No lease RPCs are provided.
 
 ## Collection retrieval
 

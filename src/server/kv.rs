@@ -17,7 +17,7 @@ pub(super) fn routes() -> Router<Service> {
 
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
-struct Address {
+pub(super) struct Address {
     namespace: String,
     key: String,
 }
@@ -52,7 +52,7 @@ impl Expectation {
 
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
-struct PutInput {
+pub(super) struct PutInput {
     namespace: String,
     key: String,
     value_base64: String,
@@ -63,7 +63,7 @@ struct PutInput {
 
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
-struct DeleteQuery {
+pub(super) struct DeleteQuery {
     namespace: String,
     key: String,
     #[serde(default = "any")]
@@ -76,7 +76,7 @@ fn any() -> String {
 
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
-struct ListQuery {
+pub(super) struct ListQuery {
     namespace: String,
     #[serde(default)]
     prefix: String,
@@ -86,7 +86,7 @@ struct ListQuery {
 
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
-struct NoQuery {}
+pub(super) struct NoQuery {}
 
 fn query<T>(input: Result<Query<T>, QueryRejection>) -> Result<T, ApiError> {
     input.map(|Query(input)| input).map_err(|_| {
@@ -163,7 +163,7 @@ fn writable(db: &Database) -> Result<(), ApiError> {
     Ok(())
 }
 
-async fn fetch(
+pub(super) async fn fetch(
     State(service): State<Service>,
     Extension(role): Extension<admin::Role>,
     target: Result<Path<String>, PathRejection>,
@@ -187,7 +187,7 @@ async fn fetch(
         .await
 }
 
-async fn save(
+pub(super) async fn save(
     State(service): State<Service>,
     Extension(role): Extension<admin::Role>,
     Extension(request_id): Extension<RequestId>,
@@ -248,7 +248,7 @@ async fn save(
     result
 }
 
-async fn remove(
+pub(super) async fn remove(
     State(service): State<Service>,
     Extension(role): Extension<admin::Role>,
     Extension(request_id): Extension<RequestId>,
@@ -290,7 +290,7 @@ async fn remove(
     result
 }
 
-async fn list(
+pub(super) async fn list(
     State(service): State<Service>,
     Extension(role): Extension<admin::Role>,
     target: Result<Path<String>, PathRejection>,

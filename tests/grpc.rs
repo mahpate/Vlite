@@ -263,7 +263,7 @@ async fn every_rpc_matches_rest_on_the_same_service() {
     let mut h = start(v4(&dir.path().join("db.vlite")), None).await;
 
     // Health is public and SERVING for "" and the service name.
-    for service in ["", "vlite.v1.VLite"] {
+    for service in ["", "vlite.v1.VLite", "vlite.v1.Kv"] {
         let response = h
             .health
             .check(tonic_health::pb::HealthCheckRequest {

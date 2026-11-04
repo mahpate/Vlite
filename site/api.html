@@ -1527,7 +1527,19 @@ searchManyF32(vectors: Float32Array[], k: number, options?: Scope &amp; { filter
     <p>This inventory includes every explicitly registered HTTP method, including dashboard assets that are not in the OpenAPI snapshot. <code>GET</code> routes also accept <code>HEAD</code> through Axum. The server publishes the API schema at <code>/openapi.json</code>. See the <a href="docs/API.html">REST guide</a> for request bodies, responses and errors.</p>
 
     <h2 id="grpc">gRPC</h2>
-    <p>The gRPC service <code>vlite.v1.VLite</code> serves the same database as REST, with the same credentials, scopes and limits. It is off until you start <code>vlite-server</code> with <code>--grpc-bind ADDR</code>. Release binaries and the Docker image include it; source builds need the <code>grpc</code> Cargo feature. Add <code>--grpc-tls-cert</code> and <code>--grpc-tls-key</code> for TLS, and <code>--grpc-tls-client-ca</code> to require client certificates. The contract is <code>proto/vlite/v1/vlite.proto</code>. See the <a href="docs/GRPC.html">gRPC guide</a>.</p>
+    <p>The gRPC services <code>vlite.v1.VLite</code> and <code>vlite.v1.Kv</code> serve the same database as REST, with the same credentials, scopes and limits. They are off until you start <code>vlite-server</code> with <code>--grpc-bind ADDR</code>. Release binaries and the Docker image include them; source builds need the <code>grpc</code> Cargo feature. Add <code>--grpc-tls-cert</code> and <code>--grpc-tls-key</code> for TLS, and <code>--grpc-tls-client-ca</code> to require client certificates. The contract is <code>proto/vlite/v1/vlite.proto</code>. See the <a href="docs/GRPC.html">gRPC guide</a>.</p>
+    <h3 id="grpc-kv">Key-value entries</h3>
+    <p><code>vlite.v1.Kv</code> uses explicit collection names, raw byte values and uint64 versions and deadlines. Validation, CAS, expiry, quotas, tenant bindings and the canonical-JSON page boundary match REST. No lease RPCs are provided.</p>
+    <table class="api-table cols-3">
+      <thead><tr><th>RPC</th><th>Description</th><th>Access</th></tr></thead>
+      <tbody>
+        <tr><td><code class="sig" data-api="grpc:GetKvEntry">GetKvEntry(KvGetRequest) returns (KvEntry)</code></td><td>Reads a live entry; missing or due entries return <code>kv_not_found</code>.</td><td><code title="Credential scope">read</code></td></tr>
+        <tr><td><code class="sig" data-api="grpc:PutKvEntry">PutKvEntry(KvPutRequest) returns (KvPutResponse)</code></td><td>Writes bytes with an optional atomic precondition. Unset expiry clears TTL.</td><td><code title="Credential scope">write</code></td></tr>
+        <tr><td><code class="sig" data-api="grpc:DeleteKvEntry">DeleteKvEntry(KvDeleteRequest) returns (KvDeleteResponse)</code></td><td>Deletes an entry with an optional atomic precondition; missing unconditional deletes return false.</td><td><code title="Credential scope">write</code></td></tr>
+        <tr><td><code class="sig" data-api="grpc:ListKvEntries">ListKvEntries(KvListRequest) returns (KvListResponse)</code></td><td>Lists live matching keys in UTF-8 byte order with exclusive <code>after</code> and optional <code>next_after</code>.</td><td><code title="Credential scope">read</code></td></tr>
+      </tbody>
+    </table>
+    <h3 id="grpc-vlite">Collections, vectors and imports</h3>
     <p>Send the credential as <code>authorization: Bearer &lt;token&gt;</code> metadata. Errors carry the REST error message, and the <code>vlite-error-code</code> trailer carries the REST error code. An empty <code>collection</code> field means the <code>default</code> collection. Requests are capped at 8 MiB and responses at 16 MiB. Graphs, automatic search planning, HNSW index builds and maintenance, backups, credentials, tenants, accounts and diagnostics are REST-only.</p>
     <table class="api-table cols-3">
       <thead><tr><th>RPC</th><th>Description</th><th>Access</th></tr></thead>
