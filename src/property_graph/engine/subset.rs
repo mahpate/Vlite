@@ -10,6 +10,7 @@ pub(crate) mod meter;
 pub(crate) mod parser;
 pub(crate) mod plan;
 pub(crate) mod read;
+pub(crate) mod write;
 
 #[allow(unused_imports)] // The standalone graph harness has no embedded-query adapter.
 pub(crate) use plan::{ParameterEntry, plan};

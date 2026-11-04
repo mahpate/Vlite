@@ -190,3 +190,7 @@ mod tests {
 #[cfg(test)]
 #[path = "subset_read_tests.rs"]
 mod graph_subset_read;
+
+#[cfg(test)]
+#[path = "subset_write_tests.rs"]
+mod graph_subset_write;
