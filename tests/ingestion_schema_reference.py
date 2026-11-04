@@ -424,7 +424,13 @@ def graph_key_order(value):
 
 def validate_operation(value):
     tag, op = value["tag"], value["fields"]
-    if tag == 5:
+    if tag == 1:
+        need(op["edge"]["kind"] in
+             ("has_revision", "has_chunk", "mention", "relation"), "operation_object_role")
+    elif tag == 4:
+        need(op["node"]["kind"] in ("source", "revision", "chunk"),
+             "operation_object_role")
+    elif tag == 5:
         need(op["object"]["identity"]["kind"] in ("revision", "entity", "chunk"),
              "operation_object_role")
     elif tag == 8:
@@ -1931,6 +1937,10 @@ def self_test(document):
         return mutated
 
     targeted = [
+        ("remove-edge-role-unchecked", "op-remove-edge-node-role", "need",
+         omit_check("operation_object_role")),
+        ("remove-node-role-unchecked", "op-remove-node-entity-role", "need",
+         omit_check("operation_object_role")),
         ("stored-confidence-lower-bound", "mention-confidence-negative",
          "validate_stored_confidence", lambda old: lambda value:
          need(value is None or value <= 1.0, "confidence")),

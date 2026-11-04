@@ -1,7 +1,7 @@
 # Gap 7 canonical schema v1
 
 Status: **RATIFIED PROVISIONALLY by the coordinator on 2026-11-04** after independent
-review (223 vectors: 113 positive / 110 negative, and 84 hand mutants pass in both
+review (233 vectors: 118 positive / 115 negative, and 86 hand mutants pass in both
 Python modes; attribute-key and stored-confidence rules were added on 2026-11-04
 as additive rulings). Every persisted byte
 below freezes at the release go/no-go; until then a change needs a new coordinator ruling.
@@ -584,6 +584,14 @@ Operation is a U8 tag followed by exactly these fields (no separate version):
 Object = I(role), B(data record for that role). Kinds select the data schema
 from section 4, not a caller-controlled opaque blob. Result/ownership shard
 operations use Shard's channel to choose the keyed identity.
+Ruling `G7-removal-roles`: tag 1 requires `has_revision`, `has_chunk`, `mention`
+or `relation`; tag 4 requires `source`, `revision` or `chunk`. A wrong identity
+kind rejects with the existing `operation_object_role` class on encode/decode.
+The single intentional fixture migration is `op-remove-edge` (an erroneous
+positive using tag 1 with I(source)) to negative `op-remove-edge-node-role`,
+preserving its input and bytes verbatim. Existing tag-4 positive
+`op-remove-node` names a source and remains unchanged. Every other prior
+fixture, pin, class and positive byte is preserved.
 No expiry, EnsureEdge, unguarded overwrite or raw provider operation exists.
 For a new source, tag 13 is a distinct operation and must be first in the first
 frame. It creates the head in its final state for that frame using
