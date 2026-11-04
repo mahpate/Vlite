@@ -124,6 +124,12 @@ whole set; no default is invented.
   grant. Absent principals have no scopes, including admins.
 - `state` is `active` or `retired`; `retired` requires `retired_at_ms`, which
   `active` forbids.
+- **PROVISIONAL** where the field rules above are silent: `tenant` hex is
+  lowercase; `graph` and `evidence_collection` follow the stored graph and
+  collection name rule `^[a-z][a-z0-9_-]{0,62}$`, graph names and collection
+  names being separate namespaces; `principal` is 1..256 bytes; a grant lists
+  at least one scope and every scope is in the entry's own tenant (the JSON
+  scope has no `tenant` key).
 
 **Generation rotation rule.** A new set is validated against the running one:
 
@@ -134,8 +140,13 @@ whole set; no default is invented.
    `idempotency_conflict`; a new window needs a new binding name.
    **PROVISIONAL.**
 2. Any change to an entry (grants or state) increases `generation`; an
-   unchanged entry keeps it. Generations never decrease.
+   unchanged entry keeps it. Generations never decrease. Grants compare as
+   written, so reordering them is a change (**PROVISIONAL**). A new entry may
+   start at any valid generation.
 3. `active` may become `retired`; `retired` never becomes `active`.
+   **PROVISIONAL** consequences of rule 5: `retired_at_ms` is not earlier than
+   the validation clock of the change that retires the entry, and never
+   changes afterwards, so removal can never precede a receipt's retry window.
 4. A retired binding serves GetReceipt (and later GetErasure) only; every
    other operation returns 409 `memory_capability_unavailable`
    (`details.feature` `binding_retired`), so retained receipts stay readable
@@ -155,6 +166,6 @@ own `retry_until_ms`.
 | Prerequisite | Status | Remaining |
 |---|---|---|
 | 1. Final type/error names | Sections 1-3 | Receipt lookup accessor |
-| 2. Binding configuration and rotation | Section 4 | Implementation with strict parser and rotation validator |
+| 2. Binding configuration and rotation | Section 4; crate-private `src/memory/binding.rs` (strict parser behind `json`, rotation validator), unwired | Startup wiring with the REST adapter |
 | 3. Digest byte goldens | A1/A2/C1 core goldens exist | Loader/verifier for the independent wire fixtures under `tests/fixtures/agent_memory/wire/` once published; existing goldens unchanged |
 | 4. Manifest cleanup and restore reconciliation | E4, after E2 | Deferred; not blocking the first slice, whose Forget is small logical deletion |

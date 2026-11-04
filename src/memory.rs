@@ -6,6 +6,7 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 
+mod binding;
 mod consolidate;
 mod erasure;
 mod mapping;
