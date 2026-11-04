@@ -175,10 +175,13 @@ for no resulting revision, revision_key is the empty string, counts are planned
 cleanup counts, and the outcome disambiguates it. No change to public result shape.
 
 `extractor_version` is a label, not an opaque token: 1..=256 ASCII bytes matching
-`[A-Za-z0-9._-]+`, except the literal reserved values `latest` and `default`.
-Labels are case-sensitive: `Latest` is distinct and accepted without casefolding.
-The same label rule applies to `extractor_alias`,
-`embedder_alias` and `model_version`. Pipeline configuration, mention/relation
+`[A-Za-z0-9._-]+`. All four labels (`extractor_version`, `model_version`,
+`extractor_alias`, `embedder_alias`) are preserved verbatim without normalization.
+The two versions additionally reject `latest` and `default` ASCII-case-insensitively:
+`Latest` and `DEFAULT` are rejected too. Aliases have no reserved words; aliases
+`default`, `latest` and `Latest` are valid. This is the implemented Gap 8 rule
+(`src/server/providers.rs:373-391`, `src/server/providers/tests.rs:485-487`).
+Pipeline configuration, mention/relation
 stored evidence and their readable projections carry the extractor version;
 accepted observation records themselves carry no version label. This follows
 the Gap 8 serving-contract registry. The binding's `generation` remains an opaque D32 supplied by the
@@ -675,7 +678,7 @@ All choices are proposed; none alters an approved Gap7-* decision.
 | New source head order | head progress reused; distinct creation | tag 13 creates the absent-guard head as operation zero in the first frame; tag 11 only patches later | One clarification will be added to the contract at ratification; no approved decision changes |
 | Physical vector shape | vector envelope; graph-like metadata | Integer version + four String metadata fields, exact chunk payload, normalized F32 bytes, no expiry | Canonical `vector_data` remains the preflight/digest source |
 | Readable projections | fragments only; redundant scalars | required canonical-derived scalar properties, compared on replay | v1 required for graph reads/dashboard; mismatch is evidence conflict |
-| Pipeline labels | opaque D32; arbitrary text; bounded label | `S(label)`, 1..256 ASCII from `[A-Za-z0-9._-]+`, excluding literal `latest`/`default` for extractor version/alias, embedder alias and model version | Case-sensitive; `Latest` is preserved, not silently normalized |
+| Pipeline labels | shared reserved list; registry split | All four: 1..256 ASCII `[A-Za-z0-9._-]+`, preserved verbatim; extractor/model versions reject ASCII-case-insensitive `latest`/`default`; extractor/embedder aliases have no reserved words | Exact implemented Gap 8 registry rule (`src/server/providers.rs:373-391`); case remains in canonical bytes and digests, no normalization |
 | Binding generation | integer; UUID; opaque bytes | opaque D32 supplied by provisioning API; zero-extension permitted there | Ingestion does not interpret it |
 | Collection ordering | encoded identity bytes; semantic field order | typed semantic comparator; numeric fields numeric, strings unsigned UTF-8 | Avoids little-endian ordering inversion |
 | Pipeline version | raw configuration hash; framed domain hash | `H(pipeline domain, pipeline)` | Exact refinement of contract's canonical-configuration SHA-256 wording |

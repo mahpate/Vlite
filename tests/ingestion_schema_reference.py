@@ -371,11 +371,14 @@ def is_identifier(value):
     return 1 <= len(raw) <= 63 and re.fullmatch(rb"[A-Za-z0-9_]+", raw) is not None
 
 
-def extractor_label(value):
+def pipeline_label(value):
     raw = text(value)
     return (1 <= len(raw) <= 256
-            and re.fullmatch(rb"[A-Za-z0-9._-]+", raw) is not None
-            and value not in ("latest", "default"))
+            and re.fullmatch(rb"[A-Za-z0-9._-]+", raw) is not None)
+
+
+def extractor_label(value):
+    return pipeline_label(value) and value.lower() not in ("latest", "default")
 
 
 def ascii_key(value):
@@ -438,8 +441,9 @@ def validate_record(name, value):
         need(value["normalization"] == "ascii-key-v1", "normalization")
         need(value["schema_version"] == 1 and value["dimensions"] > 0, "pipeline_version")
         need(extractor_label(value["extractor_version"]), "extractor_version")
-        for field in ("extractor_alias", "embedder_alias", "model_version"):
-            need(extractor_label(value[field]), "pipeline_label")
+        for field in ("extractor_alias", "embedder_alias"):
+            need(pipeline_label(value[field]), "pipeline_label")
+        need(extractor_label(value["model_version"]), "pipeline_label")
         for field in ("entity_rules", "relation_rules"):
             ids = [text(rule["rule_id"]) for rule in value[field]]
             need(ids == sorted(ids) and len(ids) == len(set(ids)), "rule_order")
@@ -1564,6 +1568,9 @@ def vector_bytes(vector):
         return identity(value)
     if category == "record":
         return named(name, value, vector.get("masked", False))
+    if category == "pipeline_label":
+        pipeline = dict(value["pipeline"], **{value["field"]: value["value"]})
+        return named("pipeline", pipeline)
     if category == "operation":
         return encode("operation", value, vector.get("masked", False))
     if category == "shard":
@@ -1630,7 +1637,13 @@ def verify(document):
             need(hashlib.sha256(actual).hexdigest() == vector["sha256"],
                  "hash:" + vector["name"])
         if "framed_sha256" in vector:
-            need(digest_record(vector["type"], vector["input"])
+            if vector["category"] == "pipeline_label":
+                value = vector["input"]
+                digest = digest_record("pipeline", dict(
+                    value["pipeline"], **{value["field"]: value["value"]}))
+            else:
+                digest = digest_record(vector["type"], vector["input"])
+            need(digest
                  == vector["framed_sha256"], "framed-hash:" + vector["name"])
     for template in document["negatives"]:
         vector = expand(template, document["templates"])
@@ -1769,9 +1782,12 @@ def self_test(document):
          omit_check("plan_slot_kind")),
         ("absent-head-patch", "head-patch-absent", "need",
          omit_check("head_patch_expected")),
-        ("casefolded-reserved-label", "extractor-label-uppercase-latest",
-         "extractor_label", lambda old: lambda value: old(value)
-         and value.lower() not in ("latest", "default")),
+        ("case-sensitive-version", "extractor-label-uppercase-latest",
+         "extractor_label", lambda old: lambda value: pipeline_label(value)
+         and value not in ("latest", "default")),
+        ("case-sensitive-model-version", "model-version-uppercase-default",
+         "extractor_label", lambda old: lambda value: pipeline_label(value)
+         and value not in ("latest", "default")),
         ("surface-strict-4096", "projection-mention-surface-4096", "readable_projection",
          lambda old: lambda ident_, data: {
              key: value for key, value in old(ident_, data).items()
@@ -1783,8 +1799,13 @@ def self_test(document):
          lambda old: lambda ident_, data: dict(old(ident_, data), outcome=data["outcome"])
          if ident_["kind"] == "receipt" else old(ident_, data)),
     ]
-    for field in ("extractor-alias", "embedder-alias", "model-version"):
-        targeted.append((field + "-unpinned", field + "-latest", "need",
+    for field in ("extractor-alias", "embedder-alias"):
+        targeted.append((field + "-reserved", field + "-default", "pipeline_label",
+                         lambda old: lambda value: old(value)
+                         and value.lower() not in ("latest", "default")))
+    for field, suffix in (("extractor-alias", "-invalid"),
+                          ("embedder-alias", "-invalid"), ("model-version", "-latest")):
+        targeted.append((field + "-unpinned", field + suffix, "need",
                          omit_check("pipeline_label")))
     for record_name in ("pipeline", "request", "batch"):
         targeted.append(("framed-" + record_name, record_name, "framed_hash",
