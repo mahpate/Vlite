@@ -202,8 +202,15 @@ def strict_utf8(raw):
         raise Invalid("utf8") from error
 
 
+def validate_attribute_key(raw_key):
+    need(len(raw_key) > 0, "attribute_key")
+    need(len(raw_key) <= 4096, "attribute_string")
+
+
 def attributes_key(value, masked=False):
     need(isinstance(value, dict) and len(value) <= 16, "attributes")
+    for key in value:
+        validate_attribute_key(text(key))
     raw = b"".join(blob(text(key)) + encode("attribute", value[key], masked)
                    for key in sorted(value, key=lambda key: text(key)))
     need(len(raw) <= 8192, "attribute_bytes")
@@ -870,6 +877,7 @@ def decode(kind, reader):
         while nested.at < len(nested.raw):
             key = decode("text", nested)
             raw_key = text(key)
+            validate_attribute_key(raw_key)
             need(previous is None or previous < raw_key, "map_order")
             result[key] = decode("attribute", nested)
             previous = raw_key
@@ -1664,6 +1672,12 @@ def expected_bytes(parts, atoms):
 
 def vector_bytes(vector):
     category, name, value = vector["category"], vector.get("type", ""), vector["input"]
+    if category == "attribute_key":
+        raw = encode("attributes", {value: [0, None]})
+        reader = Reader(raw)
+        need(decode("attributes", reader) == {value: [0, None]}
+             and reader.at == len(raw), "attribute_key_roundtrip")
+        return raw
     if category == "primitive":
         return encode(name, value)
     if category == "identity":
@@ -1912,6 +1926,10 @@ def self_test(document):
         return mutated
 
     targeted = [
+        ("empty-attribute-key-accepted", "attribute-key-empty", "need",
+         omit_check("attribute_key")),
+        ("overlong-attribute-key-accepted", "attribute-key-too-long", "need",
+         omit_check("attribute_string")),
         ("provenance-graph-key", "plan-provenance-order", "identity_order",
          lambda old: lambda value: graph_key_order(value)
          if value["kind"] in ("has_revision", "has_chunk", "mention") else old(value)),

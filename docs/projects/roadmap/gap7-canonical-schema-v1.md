@@ -40,6 +40,14 @@ order, with **no map count**. Attrs adds only an outer byte-array frame so a
 following field is unambiguous. Empty Attrs is `00000000`. Null and Unsigned
 remain distinct from missing, signed, and string values. This is not the engine's
 metadata encoding. No existing scalar tag, preparation fixture or function changes.
+Each attribute key must contain 1..=4,096 UTF-8 bytes
+(`MAX_ATTRIBUTE_STRING_BYTES`); both encoding and canonical decoding of Attrs /
+`attributes_key` reject an empty key (`attribute_key`) or an overlong key
+(`attribute_string`). This additive ruling is
+`G7-attribute-key-rule-decode-strict`; scalar tags and valid encoded bytes stay
+unchanged. The positive `attribute-key-4096` pins the inclusive limit; the
+negative vectors `attribute-key-empty` and `attribute-key-too-long` pin these
+two error classes.
 
 All named records have a leading U8(1); nested record values use B(the complete
 record including its version). A binding and an Entry inside Shard are inline
@@ -610,7 +618,8 @@ The Python reference rejects malformed canonical bytes/values for versions,
 tags/enums, widths, presence, map order, UTF-8, float finiteness/zero, slot
 kinds, object-role/tag combinations, entry-kind/presence combinations, identity
 duplicates/order, rule sort/duplicates, ascii-key-v1 normalization, dimensions,
-label syntax and length, identifier syntax, request symbolic-reference kinds
+label syntax and length, identifier syntax, empty/overlong attribute keys
+(`attribute-key-empty` / `attribute-key-too-long`), request symbolic-reference kinds
 and content digest/binding-generation mismatch, abort-of-abort, source-head
 first-operation and uniqueness, edge endpoint order, projection mismatch,
 group membership/strict ordinals/nonempty groups/duplicate operations, strict

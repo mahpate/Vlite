@@ -129,6 +129,7 @@
     "shard": ["0100", "0100000072", "@one4", "@z4", "@z4", "@one4", "@entry"]
   },
   "vectors": [
+    {"name": "attribute-key-4096", "category": "attribute_key", "input": {"repeat": "a", "count": 4096}, "hex": ["0510000000100000", {"repeat_hex": "61", "count": 4096}, "00"]},
     {"name": "pipeline-label-256", "category": "pipeline_label", "input": {"pipeline": {"ref": "pipeline"}, "field": "extractor_version", "value": {"repeat": "v", "count": 256}}, "hex": ["0100", "00040000", "@z4", "0100000078", "00010000", "@v256", "@z4", "@z4", "0c00000061736369692d6b65792d7631", "0100000065", "010000006d", "@one4", "@z32", "@one4", "3d000000", "@policy"]},
     {"name": "counted-map", "category": "primitive", "type": ["map", "u8"], "input": {"z": 2, "a": 1}, "hex": ["02000000", "010000006101", "010000007a02"]},
     {"name": "counted-map-empty", "category": "primitive", "type": ["map", "u8"], "input": {}, "hex": "00000000"},
@@ -241,6 +242,8 @@
     ,{"name": "plan-cleanup-split", "category": "plan_order", "input": {"request_digest": {"ref": "zero"}, "captured": {"ref": "captured_endpoints"}, "accepted": [], "batches": [{"root": {"ref": "receipt"}, "ordinal": 1, "groups": [{"ordinal": 0, "operations": [{"ref": "guard_operation"}, {"ref": "remove_chunk_edge_other_operation"}]}, {"ordinal": 1, "operations": [{"ref": "detach_chunk_other_operation"}, {"ref": "delete_other_operation"}, {"ref": "remove_chunk_other_operation"}, {"ref": "root_operation"}]}]}]}, "expected": [[[0, 1], [2, 3, 4, 12]]]}
   ],
   "negatives": [
+    {"name": "attribute-key-empty", "type": "attributes", "decode_hex": "050000000000000000", "error": "attribute_key"},
+    {"name": "attribute-key-too-long", "type": "attributes", "decode_hex": ["0610000001100000", {"repeat_hex": "61", "count": 4097}, "00"], "error": "attribute_string"},
     {"name": "extractor-label-latest", "category": "pipeline_label", "input": {"pipeline": {"ref": "pipeline"}, "field": "extractor_version", "value": "latest"}, "error": "extractor_version"},
     {"name": "extractor-label-uppercase-latest", "category": "pipeline_label", "input": {"pipeline": {"ref": "pipeline"}, "field": "extractor_version", "value": "Latest"}, "error": "extractor_version"},
     {"name": "extractor-label-uppercase-default", "category": "pipeline_label", "input": {"pipeline": {"ref": "pipeline"}, "field": "extractor_version", "value": "DEFAULT"}, "error": "extractor_version"},
