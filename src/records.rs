@@ -209,6 +209,29 @@ impl CollectionRecords {
     }
 
     #[cfg(test)]
+    pub(crate) fn compact_iter(&self, after: Option<u64>) -> Option<CompactRecordIter<'_>> {
+        let Self::Compact { view, overlay } = self else {
+            return None;
+        };
+        use std::ops::Bound::{Excluded, Unbounded};
+        let base_row = after.map_or(0, |after| {
+            (0..view.len())
+                .take_while(|&row| view.id(row).is_some_and(|id| id <= after))
+                .count()
+        });
+        let bounds = match after {
+            Some(id) => (Excluded(id), Unbounded),
+            None => (Unbounded, Unbounded),
+        };
+        let overlay = overlay.0.range(bounds).peekable();
+        Some(CompactRecordIter {
+            view,
+            overlay,
+            base_row,
+        })
+    }
+
+    #[cfg(test)]
     pub(crate) fn compact_overlay_revision(&self, id: u64) -> Option<(u64, bool)> {
         let Self::Compact { overlay, .. } = self else {
             return None;
@@ -256,6 +279,65 @@ impl CollectionRecords {
             }
         }
         Ok(Self::Compact { view, overlay })
+    }
+}
+
+#[cfg(test)]
+pub(crate) struct CompactRecordIter<'a> {
+    view: &'a crate::compact::source::CompactView,
+    overlay: std::iter::Peekable<std::collections::btree_map::Range<'a, u64, OverlayEntry>>,
+    base_row: usize,
+}
+
+#[cfg(test)]
+impl<'a> Iterator for CompactRecordIter<'a> {
+    type Item = Result<(u64, &'a Record)>;
+
+    fn next(&mut self) -> Option<Self::Item> {
+        loop {
+            let base_id = self.view.id(self.base_row);
+            let overlay_id = self.overlay.peek().map(|(id, _)| **id);
+            match (base_id, overlay_id) {
+                (Some(id), Some(overlay_id)) if id < overlay_id => {
+                    self.base_row += 1;
+                    return Some(self.view.get_physical(id).and_then(|record| {
+                        record
+                            .map(|record| (id, record))
+                            .ok_or(Error::InvalidQuery("compact base row is missing"))
+                    }));
+                }
+                (Some(id), Some(overlay_id)) if id == overlay_id => {
+                    self.base_row += 1;
+                    let (overlay_id, entry) = self.overlay.next().expect("peeked entry");
+                    debug_assert_eq!(id, *overlay_id);
+                    if let OverlayEntry::Put { record, .. } = entry {
+                        return Some(Ok((id, record.as_ref())));
+                    }
+                }
+                (Some(base_id), Some(overlay_id)) => {
+                    debug_assert!(overlay_id < base_id);
+                    let (id, entry) = self.overlay.next().expect("peeked entry");
+                    if let OverlayEntry::Put { record, .. } = entry {
+                        return Some(Ok((*id, record.as_ref())));
+                    }
+                }
+                (Some(id), _) => {
+                    self.base_row += 1;
+                    return Some(self.view.get_physical(id).and_then(|record| {
+                        record
+                            .map(|record| (id, record))
+                            .ok_or(Error::InvalidQuery("compact base row is missing"))
+                    }));
+                }
+                (None, Some(_)) => {
+                    let (id, entry) = self.overlay.next().expect("peeked entry");
+                    if let OverlayEntry::Put { record, .. } = entry {
+                        return Some(Ok((*id, record.as_ref())));
+                    }
+                }
+                (None, None) => return None,
+            }
+        }
     }
 }
 
@@ -796,10 +878,14 @@ impl ReadSnapshot {
         self.browse_at(after, limit, self.captured_at_ms)
     }
     pub fn browse_at(&self, after: Option<u64>, limit: usize, now_ms: u64) -> Result<BrowsePage> {
-        self.records.resident()?;
         if !(1..=MAX_BROWSE_PAGE).contains(&limit) {
             return Err(Error::InvalidQuery("browse limit must be 1..=1000"));
         }
+        #[cfg(test)]
+        if let Some(page) = compact_browse(&self.records, &self.expiries, after, limit, now_ms)? {
+            return Ok(page);
+        }
+        self.records.resident()?;
         use std::ops::Bound::{Excluded, Unbounded};
         let mut hits: Vec<_> = self
             .records
@@ -860,10 +946,26 @@ impl ReadSnapshot {
         now_ms: u64,
         stats: &mut crate::SearchStats,
     ) -> Result<Vec<SearchHit>> {
-        let records = self.records.resident()?;
         validate_vector(self.dimensions, query)?;
         metadata::validate_filter(conditions)?;
         let norm = crate::validate_metric_query(query, metric)?;
+        #[cfg(test)]
+        if let Some(scan) = self.records.compact_iter(None) {
+            return crate::exact_search_compact(
+                scan,
+                self.records.len(),
+                &self.expiries,
+                query,
+                norm,
+                k,
+                conditions,
+                metric,
+                None,
+                now_ms,
+                stats,
+            );
+        }
+        let records = self.records.resident()?;
         Ok(crate::exact_search(
             records,
             &self.expiries,
@@ -892,6 +994,37 @@ pub struct BrowseHit {
 pub struct BrowsePage {
     pub hits: Vec<BrowseHit>,
     pub next_after: Option<u64>,
+}
+
+#[cfg(test)]
+fn compact_browse(
+    records: &CollectionRecords,
+    expiries: &BTreeMap<u64, u64>,
+    after: Option<u64>,
+    limit: usize,
+    now_ms: u64,
+) -> Result<Option<BrowsePage>> {
+    let Some(scan) = records.compact_iter(after) else {
+        return Ok(None);
+    };
+    let mut hits = Vec::with_capacity(limit.saturating_add(1));
+    for row in scan {
+        let (id, record) = row?;
+        if expiries.get(&id).is_some_and(|expiry| *expiry <= now_ms) {
+            continue;
+        }
+        hits.push(BrowseHit {
+            id,
+            record: record.clone(),
+        });
+        if hits.len() > limit {
+            break;
+        }
+    }
+    let more = hits.len() > limit;
+    hits.truncate(limit);
+    let next_after = more.then(|| hits.last().expect("nonempty page").id);
+    Ok(Some(BrowsePage { hits, next_after }))
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -1046,11 +1179,16 @@ impl CollectionRef<'_> {
 
     /// Deterministic form of `browse` for tests and applications with an injected clock.
     pub fn browse_at(&self, after: Option<u64>, limit: usize, now_ms: u64) -> Result<BrowsePage> {
-        self.db.ensure_resident_in(self.id)?;
+        self.db.ensure_healthy()?;
         if !(1..=MAX_BROWSE_PAGE).contains(&limit) {
             return Err(Error::InvalidQuery("browse limit must be 1..=1000"));
         }
         let state = self.db.state(self.id);
+        #[cfg(test)]
+        if let Some(page) = compact_browse(&state.records, &state.expiries, after, limit, now_ms)? {
+            return Ok(page);
+        }
+        self.db.ensure_resident_in(self.id)?;
         let mut selected = Vec::with_capacity(limit.saturating_add(1));
         for (&id, record) in state
             .records

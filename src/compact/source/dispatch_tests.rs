@@ -235,7 +235,7 @@ fn compact_dispatch_mutable_acquisition_keeps_other_refusals() {
 }
 
 #[test]
-fn compact_dispatch_scan_search_and_snapshot_scans_refuse() {
+fn compact_dispatch_unqualified_scans_and_derived_reads_refuse() {
     let _gates = gates();
     for encrypted in [false, true] {
         let (candidate, oracle, bytes) = compact_dispatch_fixture(encrypted);
@@ -262,13 +262,21 @@ fn compact_dispatch_scan_search_and_snapshot_scans_refuse() {
             unsupported(populated, "rerank populated");
             unsupported(custom, "rerank custom provider");
             unsupported(view.rerank(&[], &[], 0, &exact), "rerank invalid query");
-            unsupported(view.browse(None, 1), "browse");
-            unsupported(view.browse_at(None, 0, 0), "browse invalid limit");
-            unsupported(view.search(&query, 0), "search zero k");
-            unsupported(view.search_filtered(&query, 1, &[]), "search_filtered");
-            unsupported(
-                view.search_with_metric(&query, 1, DistanceMetric::Cosine),
-                "search_with_metric",
+            let resident_view = oracle.collection(&info.name).unwrap();
+            assert_eq!(
+                view.browse_at(None, 1, 0).unwrap(),
+                resident_view.browse_at(None, 1, 0).unwrap()
+            );
+            assert!(matches!(
+                view.browse_at(None, 0, 0),
+                Err(Error::InvalidQuery("browse limit must be 1..=1000"))
+            ));
+            assert_eq!(
+                view.search_filtered_with_metric_at(&query, 1, &[], DistanceMetric::SquaredL2, 0)
+                    .unwrap(),
+                resident_view
+                    .search_filtered_with_metric_at(&query, 1, &[], DistanceMetric::SquaredL2, 0)
+                    .unwrap()
             );
             unsupported(view.facets("tag", &[]), "facets");
             unsupported(view.numeric_stats("number", &[]), "numeric_stats");
@@ -281,18 +289,28 @@ fn compact_dispatch_scan_search_and_snapshot_scans_refuse() {
                 "search_named",
             );
             let snapshot = view.read_snapshot().unwrap();
-            let resident = oracle
+            let resident_snapshot = oracle
                 .collection(&info.name)
                 .unwrap()
                 .read_snapshot()
                 .unwrap();
-            assert_eq!(snapshot.sequence(), resident.sequence());
-            assert_eq!(snapshot.lineage(), resident.lineage());
-            assert_eq!(snapshot.dimensions(), resident.dimensions());
-            assert_eq!(snapshot.len(), resident.len());
-            assert_eq!(snapshot.is_empty(), resident.is_empty());
-            unsupported(snapshot.browse(None, 1), "snapshot browse");
-            unsupported(snapshot.search(&query, 0), "snapshot search");
+            assert_eq!(snapshot.sequence(), resident_snapshot.sequence());
+            assert_eq!(snapshot.lineage(), resident_snapshot.lineage());
+            assert_eq!(snapshot.dimensions(), resident_snapshot.dimensions());
+            assert_eq!(snapshot.len(), resident_snapshot.len());
+            assert_eq!(snapshot.is_empty(), resident_snapshot.is_empty());
+            assert_eq!(
+                snapshot.browse_at(None, 1, 0).unwrap(),
+                resident_snapshot.browse_at(None, 1, 0).unwrap()
+            );
+            assert_eq!(
+                snapshot
+                    .search_filtered_with_metric_at(&query, 1, &[], DistanceMetric::SquaredL2, 0)
+                    .unwrap(),
+                resident_snapshot
+                    .search_filtered_with_metric_at(&query, 1, &[], DistanceMetric::SquaredL2, 0)
+                    .unwrap()
+            );
         }
         assert_eq!(candidate.sequence, sequence);
         assert_eq!(candidate.to_bytes().unwrap(), bytes);

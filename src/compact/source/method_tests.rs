@@ -37,7 +37,6 @@ const COMPACT_REFUSALS: &[&str] = &[
     "CollectionMut::hnsw_health",
     "CollectionMut::ann_quality",
     "CollectionMut::search_approximate_ready_with_options",
-    "CollectionMut::browse",
     "CollectionMut::search_grouped",
     "CollectionMut::recommend",
     "CollectionMut::facets",
@@ -252,16 +251,38 @@ fn compact_installed_database_and_snapshot_method_matrix() {
             snapshot.get_at(0, 0).unwrap(),
             reference.get_at(0, 0).unwrap()
         );
-        d!("ReadSnapshot::browse", snapshot.browse(None, 0));
-        d!("ReadSnapshot::browse_at", snapshot.browse_at(None, 0, 0));
-        d!("ReadSnapshot::search", snapshot.search(query, 0));
-        d!(
-            "ReadSnapshot::search_filtered_with_metric",
-            snapshot.search_filtered_with_metric(query, 0, &[], metric)
+        a!(
+            "ReadSnapshot::browse",
+            snapshot.browse(None, 1).unwrap(),
+            reference.browse(None, 1).unwrap()
         );
-        d!(
+        a!(
+            "ReadSnapshot::browse_at",
+            snapshot.browse_at(None, 1, 0).unwrap(),
+            reference.browse_at(None, 1, 0).unwrap()
+        );
+        a!(
+            "ReadSnapshot::search",
+            snapshot.search(query, 2).unwrap(),
+            reference.search(query, 2).unwrap()
+        );
+        a!(
+            "ReadSnapshot::search_filtered_with_metric",
+            snapshot
+                .search_filtered_with_metric(query, 2, &[], metric)
+                .unwrap(),
+            reference
+                .search_filtered_with_metric(query, 2, &[], metric)
+                .unwrap()
+        );
+        a!(
             "ReadSnapshot::search_filtered_with_metric_at",
-            snapshot.search_filtered_with_metric_at(query, 0, &[], metric, 0)
+            snapshot
+                .search_filtered_with_metric_at(query, 2, &[], metric, 0)
+                .unwrap(),
+            reference
+                .search_filtered_with_metric_at(query, 2, &[], metric, 0)
+                .unwrap()
         );
         drop(snapshot);
         drop(reference);
@@ -442,23 +463,41 @@ fn compact_installed_database_and_snapshot_method_matrix() {
             "Database::search_disk_ann",
             db.search_disk_ann(&disk, query, 0, 1)
         );
-        d!("Database::search", db.search(query, 0));
-        d!("Database::search_at", db.search_at(query, 0, 0));
-        d!(
+        a!(
+            "Database::search",
+            db.search(query, 2).unwrap(),
+            oracle.search(query, 2).unwrap()
+        );
+        a!(
+            "Database::search_at",
+            db.search_at(query, 2, 0).unwrap(),
+            oracle.search_at(query, 2, 0).unwrap()
+        );
+        a!(
             "Database::search_filtered",
-            db.search_filtered(query, 0, &[])
+            db.search_filtered(query, 2, &[]).unwrap(),
+            oracle.search_filtered(query, 2, &[]).unwrap()
         );
-        d!(
+        a!(
             "Database::search_with_metric",
-            db.search_with_metric(query, 0, metric)
+            db.search_with_metric(query, 2, metric).unwrap(),
+            oracle.search_with_metric(query, 2, metric).unwrap()
         );
-        d!(
+        a!(
             "Database::search_filtered_with_metric",
-            db.search_filtered_with_metric(query, 0, &[], metric)
+            db.search_filtered_with_metric(query, 2, &[], metric)
+                .unwrap(),
+            oracle
+                .search_filtered_with_metric(query, 2, &[], metric)
+                .unwrap()
         );
-        d!(
+        a!(
             "Database::search_filtered_with_metric_at",
-            db.search_filtered_with_metric_at(query, 0, &[], metric, 0)
+            db.search_filtered_with_metric_at(query, 2, &[], metric, 0)
+                .unwrap(),
+            oracle
+                .search_filtered_with_metric_at(query, 2, &[], metric, 0)
+                .unwrap()
         );
         d!(
             "Database::search_approximate",
@@ -496,8 +535,16 @@ fn compact_installed_database_and_snapshot_method_matrix() {
             "Database::search_hybrid",
             db.search_hybrid(&hybrid::HybridQuery::new(Some(query.to_vec()), "", 0))
         );
-        d!("Database::browse", db.browse(None, 0));
-        d!("Database::browse_at", db.browse_at(None, 0, 0));
+        a!(
+            "Database::browse",
+            db.browse(None, 1).unwrap(),
+            oracle.browse(None, 1).unwrap()
+        );
+        a!(
+            "Database::browse_at",
+            db.browse_at(None, 1, 0).unwrap(),
+            oracle.browse_at(None, 1, 0).unwrap()
+        );
         d!("Database::facets", db.facets("x", &[]));
         d!("Database::numeric_stats", db.numeric_stats("x", &[]));
         let recommendation = RecommendationQuery {
@@ -617,26 +664,41 @@ fn compact_installed_collection_method_matrix() {
                 view.read_snapshot().unwrap().sequence(),
                 reference.read_snapshot().unwrap().sequence()
             );
-            d!("CollectionRef::search", view.search(query, 0));
-            d!(
+            a!(
+                "CollectionRef::search",
+                view.search(query, 2).unwrap(),
+                reference.search(query, 2).unwrap()
+            );
+            a!(
                 "CollectionRef::search_filtered",
-                view.search_filtered(query, 0, &[])
+                view.search_filtered(query, 2, &[]).unwrap(),
+                reference.search_filtered(query, 2, &[]).unwrap()
             );
-            d!(
+            a!(
                 "CollectionRef::search_with_metric",
-                view.search_with_metric(query, 0, metric)
+                view.search_with_metric(query, 2, metric).unwrap(),
+                reference.search_with_metric(query, 2, metric).unwrap()
             );
-            d!(
+            a!(
                 "CollectionRef::search_filtered_with_metric",
-                view.search_filtered_with_metric(query, 0, &[], metric)
+                view.search_filtered_with_metric(query, 2, &[], metric)
+                    .unwrap(),
+                reference
+                    .search_filtered_with_metric(query, 2, &[], metric)
+                    .unwrap()
             );
-            d!(
+            a!(
                 "CollectionRef::search_filtered_with_metric_at",
-                view.search_filtered_with_metric_at(query, 0, &[], metric, 0)
+                view.search_filtered_with_metric_at(query, 2, &[], metric, 0)
+                    .unwrap(),
+                reference
+                    .search_filtered_with_metric_at(query, 2, &[], metric, 0)
+                    .unwrap()
             );
-            d!(
+            a!(
                 "CollectionRef::search_with_stats",
-                view.search_with_stats(query, 0, &[], metric)
+                view.search_with_stats(query, 2, &[], metric).unwrap(),
+                reference.search_with_stats(query, 2, &[], metric).unwrap()
             );
             d!(
                 "CollectionRef::search_approximate_ready_filtered_with_metric",
@@ -686,8 +748,16 @@ fn compact_installed_collection_method_matrix() {
                     quality::QualitySampleOptions::default()
                 )
             );
-            d!("CollectionRef::browse", view.browse(None, 0));
-            d!("CollectionRef::browse_at", view.browse_at(None, 0, 0));
+            a!(
+                "CollectionRef::browse",
+                view.browse(None, 1).unwrap(),
+                reference.browse(None, 1).unwrap()
+            );
+            a!(
+                "CollectionRef::browse_at",
+                view.browse_at(None, 1, 0).unwrap(),
+                reference.browse_at(None, 1, 0).unwrap()
+            );
             d!("CollectionRef::facets", view.facets("x", &[]));
             d!("CollectionRef::numeric_stats", view.numeric_stats("x", &[]));
             d!("CollectionRef::vector_specs", view.vector_specs());

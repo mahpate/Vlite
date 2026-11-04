@@ -645,3 +645,231 @@ fn compact_graph_attachment_tracks_effective_row() {
     );
     point_parity(&candidate, &oracle);
 }
+
+#[test]
+fn compact_ordered_merge_matches_resident_with_gaps() {
+    let _gates = gates();
+    let (mut candidate, mut oracle, _) = compact_dispatch_fixture(false);
+    for db in [&mut candidate, &mut oracle] {
+        let mut collection = db.collection_mut("full").unwrap();
+        collection.delete(10).unwrap();
+        collection
+            .put_with_expiry(3, &[2.0, 3.0], b"replacement", &Metadata::new(), Some(50))
+            .unwrap();
+        collection.put(7, &[3.0, 4.0], b"gap seven").unwrap();
+        collection.put(13, &[4.0, 5.0], b"gap thirteen").unwrap();
+    }
+
+    let actual = candidate
+        .collection("full")
+        .unwrap()
+        .browse_at(None, 100, 20)
+        .unwrap();
+    let expected = oracle
+        .collection("full")
+        .unwrap()
+        .browse_at(None, 100, 20)
+        .unwrap();
+    assert_eq!(actual, expected);
+    assert_eq!(
+        actual.hits.iter().map(|hit| hit.id).collect::<Vec<_>>(),
+        vec![0, 3, 7, 13, 20, u64::MAX]
+    );
+}
+
+#[test]
+fn compact_exact_scan_is_bit_identical_at_same_clock() {
+    let _gates = gates();
+    let (mut candidate, mut oracle, _) = compact_dispatch_fixture(false);
+    for db in [&mut candidate, &mut oracle] {
+        let mut collection = db.collection_mut("full").unwrap();
+        collection.delete(10).unwrap();
+        collection
+            .put_with_expiry(
+                3,
+                &[0.2, -0.0],
+                b"expires at 20",
+                &Metadata::new(),
+                Some(20),
+            )
+            .unwrap();
+        collection.put(7, &[0.1, -0.0], b"gap").unwrap();
+    }
+
+    let query = [0.1, -0.0];
+    let actual = candidate
+        .collection("full")
+        .unwrap()
+        .search_filtered_with_metric_at(&query, 20, &[], crate::DistanceMetric::SquaredL2, 20)
+        .unwrap();
+    let expected = oracle
+        .collection("full")
+        .unwrap()
+        .search_filtered_with_metric_at(&query, 20, &[], crate::DistanceMetric::SquaredL2, 20)
+        .unwrap();
+    assert_eq!(
+        actual
+            .iter()
+            .map(|hit| (hit.id, hit.distance.to_bits()))
+            .collect::<Vec<_>>(),
+        expected
+            .iter()
+            .map(|hit| (hit.id, hit.distance.to_bits()))
+            .collect::<Vec<_>>()
+    );
+
+    let candidate_snapshot = candidate
+        .collection("full")
+        .unwrap()
+        .read_snapshot()
+        .unwrap();
+    let oracle_snapshot = oracle.collection("full").unwrap().read_snapshot().unwrap();
+    let mut actual_stats = crate::SearchStats::default();
+    let mut expected_stats = crate::SearchStats::default();
+    let actual = candidate_snapshot
+        .search_with_stats_at(
+            &query,
+            20,
+            &[],
+            crate::DistanceMetric::SquaredL2,
+            20,
+            &mut actual_stats,
+        )
+        .unwrap();
+    let expected = oracle_snapshot
+        .search_with_stats_at(
+            &query,
+            20,
+            &[],
+            crate::DistanceMetric::SquaredL2,
+            20,
+            &mut expected_stats,
+        )
+        .unwrap();
+    assert_eq!(
+        actual
+            .iter()
+            .map(|hit| (hit.id, hit.distance.to_bits()))
+            .collect::<Vec<_>>(),
+        expected
+            .iter()
+            .map(|hit| (hit.id, hit.distance.to_bits()))
+            .collect::<Vec<_>>()
+    );
+    assert_eq!(actual_stats, expected_stats);
+}
+
+#[test]
+fn compact_search_filters_after_overlay_resolution() {
+    let _gates = gates();
+    let (mut candidate, mut oracle, _) = compact_dispatch_fixture(false);
+    let yes = Metadata::from([("marker".into(), MetadataValue::String("yes".into()))]);
+    let no = Metadata::from([("marker".into(), MetadataValue::String("no".into()))]);
+    for db in [&mut candidate, &mut oracle] {
+        let mut collection = db.collection_mut("full").unwrap();
+        collection
+            .put_with_metadata(3, &[0.1, -0.0], b"matching replacement", &yes)
+            .unwrap();
+        collection
+            .put_with_metadata(10, &[0.1, -0.0], b"non-matching replacement", &no)
+            .unwrap();
+        collection
+            .put_with_metadata(7, &[0.1, -0.0], b"matching gap", &yes)
+            .unwrap();
+    }
+
+    let condition = [crate::Condition::Eq {
+        field: "marker".into(),
+        value: MetadataValue::String("yes".into()),
+    }];
+    let query = [0.1, -0.0];
+    let actual = candidate
+        .collection("full")
+        .unwrap()
+        .search_filtered_with_metric_at(
+            &query,
+            20,
+            &condition,
+            crate::DistanceMetric::SquaredL2,
+            20,
+        )
+        .unwrap();
+    let expected = oracle
+        .collection("full")
+        .unwrap()
+        .search_filtered_with_metric_at(
+            &query,
+            20,
+            &condition,
+            crate::DistanceMetric::SquaredL2,
+            20,
+        )
+        .unwrap();
+    assert_eq!(actual, expected);
+    assert_eq!(
+        actual.iter().map(|hit| hit.id).collect::<Vec<_>>(),
+        vec![3, 7]
+    );
+}
+
+#[test]
+fn compact_browse_cursor_skips_tombstones_and_expiry() {
+    let _gates = gates();
+    let (mut candidate, mut oracle, _) = compact_dispatch_fixture(false);
+    for db in [&mut candidate, &mut oracle] {
+        let mut collection = db.collection_mut("full").unwrap();
+        collection.delete(10).unwrap();
+        collection
+            .put_with_expiry(
+                11,
+                &[1.0, 2.0],
+                b"expired at 20",
+                &Metadata::new(),
+                Some(20),
+            )
+            .unwrap();
+        collection
+            .put_with_expiry(
+                12,
+                &[1.0, 2.0],
+                b"expired before 20",
+                &Metadata::new(),
+                Some(19),
+            )
+            .unwrap();
+        collection
+            .put(13, &[1.0, 2.0], b"first after cursor")
+            .unwrap();
+    }
+
+    let actual = candidate
+        .collection("full")
+        .unwrap()
+        .browse_at(Some(10), 1, 20)
+        .unwrap();
+    let expected = oracle
+        .collection("full")
+        .unwrap()
+        .browse_at(Some(10), 1, 20)
+        .unwrap();
+    assert_eq!(actual, expected);
+    assert_eq!(
+        actual.hits.iter().map(|hit| hit.id).collect::<Vec<_>>(),
+        vec![13]
+    );
+    assert_eq!(actual.next_after, Some(13));
+}
+
+#[test]
+fn compact_poisoned_text_only_query_preserves_health_error() {
+    let _gates = gates();
+    let (mut candidate, _, _) = compact_dispatch_fixture(false);
+    let id = candidate.collection("full").unwrap().id();
+    candidate.poisoned = true;
+    let query = crate::query_language::parse("SEARCH TEXT MATCH \"apple\"").unwrap();
+    let collection = crate::CollectionRef { db: &candidate, id };
+    assert!(matches!(
+        query.execute(collection, &std::collections::BTreeMap::new()),
+        Err(Error::Poisoned)
+    ));
+}

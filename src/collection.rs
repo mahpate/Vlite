@@ -206,6 +206,22 @@ impl Collection {
         now_ms: u64,
         stats: &mut SearchStats,
     ) -> Result<Vec<SearchHit>> {
+        #[cfg(test)]
+        if let Some(scan) = self.records.compact_iter(None) {
+            return crate::exact_search_compact(
+                scan,
+                self.records.len(),
+                &self.expiries,
+                query,
+                query_norm,
+                k,
+                conditions,
+                metric,
+                candidates,
+                now_ms,
+                stats,
+            );
+        }
         Ok(crate::exact_search(
             self.records.resident()?,
             &self.expiries,

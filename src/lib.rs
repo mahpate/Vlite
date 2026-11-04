@@ -3734,8 +3734,18 @@ impl Database {
         now_ms: u64,
         stats: &mut SearchStats,
     ) -> Result<Vec<SearchHit>> {
-        self.ensure_resident_in(collection)?;
         let state = self.state(collection);
+        #[cfg(test)]
+        if state.records.is_compact() {
+            self.ensure_healthy()?;
+            validate_vector(state.dimensions, query)?;
+            metadata::validate_filter(conditions)?;
+            let query_norm = validate_metric_query(query, metric)?;
+            return state.exact_search_candidates(
+                query, query_norm, k, conditions, metric, None, now_ms, stats,
+            );
+        }
+        self.ensure_resident_in(collection)?;
         let records = state.records.resident()?;
         validate_vector(state.dimensions, query)?;
         metadata::validate_filter(conditions)?;
@@ -3894,6 +3904,43 @@ fn exact_search(
     }
 }
 
+/// Exact compact top-k scan. The merge iterator is deliberately consumed
+/// serially so at most one base vector is decoded by this operation at a time.
+#[cfg(test)]
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn exact_search_compact<'a>(
+    scan: impl Iterator<Item = Result<(u64, &'a Record)>>,
+    rows: usize,
+    expiries: &BTreeMap<u64, u64>,
+    query: &[f32],
+    query_norm: f64,
+    k: usize,
+    conditions: &[Condition],
+    metric: DistanceMetric,
+    candidates: Option<&BTreeSet<u64>>,
+    now_ms: u64,
+    stats: &mut SearchStats,
+) -> Result<Vec<SearchHit>> {
+    let limit = k.min(rows.min(candidates.map_or(rows, BTreeSet::len)));
+    if limit == 0 {
+        return Ok(Vec::new());
+    }
+    let scan = scan.filter_map(|row| match row {
+        Ok((id, record)) if candidates.is_none_or(|ids| ids.contains(&id)) => {
+            Some(Ok((id, record)))
+        }
+        Ok(_) => None,
+        Err(error) => Some(Err(error)),
+    });
+    Ok(exact_scan_rows(
+        scan, expiries, query, query_norm, limit, conditions, metric, now_ms, stats,
+    )?
+    .into_sorted_vec()
+    .into_iter()
+    .map(|hit| hit.0)
+    .collect())
+}
+
 // Keep the concrete iterator through collection and the serial scan so record
 // dereferencing can inline instead of calling an adapter through a vtable.
 #[allow(clippy::too_many_arguments)]
@@ -4019,12 +4066,39 @@ fn exact_scan<'a>(
     now_ms: u64,
     stats: &mut SearchStats,
 ) -> BinaryHeap<RankedHit> {
+    exact_scan_rows(
+        scan.map(|(id, record)| Ok((*id, record))),
+        expiries,
+        query,
+        query_norm,
+        limit,
+        conditions,
+        metric,
+        now_ms,
+        stats,
+    )
+    .expect("resident record iteration is infallible")
+}
+
+#[allow(clippy::too_many_arguments)]
+fn exact_scan_rows<'a>(
+    scan: impl Iterator<Item = Result<(u64, &'a Record)>>,
+    expiries: &BTreeMap<u64, u64>,
+    query: &[f32],
+    query_norm: f64,
+    limit: usize,
+    conditions: &[Condition],
+    metric: DistanceMetric,
+    now_ms: u64,
+    stats: &mut SearchStats,
+) -> Result<BinaryHeap<RankedHit>> {
     let scorer = exact_kernels::Scorer::new(query, metric, query_norm);
     let mut hits: BinaryHeap<RankedHit> = BinaryHeap::with_capacity(limit);
     let mut ids = [0; exact_kernels::LANES];
     let mut rows: [&[f32]; exact_kernels::LANES] = [&[]; exact_kernels::LANES];
     let mut pending = 0;
-    for (&id, record) in scan {
+    for row in scan {
+        let (id, record) = row?;
         stats.records_scanned += 1;
         if expiries.get(&id).is_some_and(|expires| *expires <= now_ms)
             || !metadata::matches(&record.metadata, conditions)
@@ -4043,7 +4117,7 @@ fn exact_scan<'a>(
     if pending > 0 {
         offer_scored(&scorer, &ids[..pending], &rows[..pending], limit, &mut hits);
     }
-    hits
+    Ok(hits)
 }
 
 /// Scores one batch of scanned rows and offers the hits to the bounded heap in
