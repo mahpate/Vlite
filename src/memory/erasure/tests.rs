@@ -1733,6 +1733,62 @@ fn barrier_survives_reopen_on_all_backends() {
             matches!(refused, Err(MemoryError::DeletionPending)),
             "{label}"
         );
+        let refused = MemoryMut::bind(&mut db, GRAPH, None)
+            .unwrap()
+            .forget(&ordinary.forget());
+        assert!(
+            matches!(refused, Err(MemoryError::DeletionPending)),
+            "{label} forget: {refused:?}"
+        );
+        let refused = MemoryMut::bind(&mut db, GRAPH, None)
+            .unwrap()
+            .consolidate(&ordinary.consolidate());
+        assert!(
+            matches!(refused, Err(MemoryError::DeletionPending)),
+            "{label} consolidate: {refused:?}"
+        );
+        let reader = MemoryRef::bind(&db, GRAPH, None).unwrap();
+        let refused = reader.summary_status(&SummaryStatusRequest {
+            scope: scope.clone(),
+            summary_id: "summary".into(),
+            now_ms: request.now_ms,
+        });
+        assert!(
+            matches!(refused, Err(MemoryError::DeletionPending)),
+            "{label} summary_status: {refused:?}"
+        );
+        let refused = reader.recall(&RecallRequest {
+            scopes: vec![scope.clone()],
+            kinds: vec![MemoryKind::Entity],
+            filter: Vec::new(),
+            query: None,
+            seeds: vec![RecallSeed {
+                scope: scope.clone(),
+                id: "write".into(),
+            }],
+            as_of_ms: None,
+            clock_ms: request.now_ms,
+            policy: RankingPolicy::default(),
+            selection: Selection::Ranked,
+            limits: RecallLimits {
+                graph: GraphLimits {
+                    deadline_ms: 5_000,
+                    ..GraphLimits::default()
+                },
+                ..RecallLimits::default()
+            },
+            expand: false,
+            allow_partial: false,
+            snippet_bytes: 64,
+            cancel: None,
+        });
+        assert!(
+            matches!(
+                refused,
+                Err(RecallError::Memory(MemoryError::DeletionPending))
+            ),
+            "{label} seeded recall: {refused:?}"
+        );
         assert_eq!(db.sequence, before, "{label}");
     }
 }
