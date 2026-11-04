@@ -533,13 +533,29 @@ async fn rest_empty_registry_means_zero_egress() {
         r#"{"data":[{"embedding":[1.0,0.0]}]}"#,
         &[],
     );
-    let registry = ProviderRegistry {
+    let unconfigured = ProviderRegistry {
         transport: f.transport.clone(),
         ..ProviderRegistry::default()
     };
-    f.service.providers = Arc::new(registry);
+    f.service.providers = Arc::new(unconfigured);
     f.app = server::configured_routes(f.service.clone());
     let path = format!("/v1/collections/{}/embed", f.name);
+    // Without a providers file the original v0.6.1 dispatch applies.
+    let (status, body, _) = request(
+        &f.app,
+        &path,
+        Some(ADMIN),
+        json!({"text":"hello","provider":"test"}),
+    )
+    .await;
+    assert_eq!(status, 422, "{body}");
+    assert_eq!(body["error"]["code"], "invalid_input");
+    assert_eq!(f.transport.calls.load(Ordering::SeqCst), 0);
+    // A loaded providers file, even an empty one, enables the alias behavior.
+    let mut loaded = registry(&json!({"aliases":[],"bindings":[]}));
+    loaded.transport = f.transport.clone();
+    f.service.providers = Arc::new(loaded);
+    f.app = server::configured_routes(f.service.clone());
     let (status, body, _) = request(
         &f.app,
         &path,

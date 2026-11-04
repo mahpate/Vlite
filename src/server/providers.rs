@@ -250,6 +250,7 @@ fn check_addresses(
 
 /// Opaque startup configuration; empty by default and never used by live handlers.
 pub struct ProviderRegistry {
+    configured: bool,
     providers: BTreeMap<String, Provider>,
     bindings: BTreeMap<BindingKey, Bound>,
     transport: Arc<dyn Transport>,
@@ -258,6 +259,7 @@ pub struct ProviderRegistry {
 impl Default for ProviderRegistry {
     fn default() -> Self {
         Self {
+            configured: false,
             providers: BTreeMap::new(),
             bindings: BTreeMap::new(),
             transport: Arc::new(HttpTransport),
@@ -367,6 +369,11 @@ impl ProviderRegistry {
         Self::parse_detailed(bytes).map_err(|error| error.public_message().to_owned())
     }
 
+    /// True only after a providers file was loaded. Without one, REST embed keeps its original dispatch.
+    pub(crate) fn configured(&self) -> bool {
+        self.configured
+    }
+
     fn parse_detailed(bytes: &[u8]) -> Result<Self, ConfigFailure> {
         let config: Config =
             serde_json::from_slice(bytes).map_err(|_| ConfigFailure(ConfigReason::JsonShape))?;
@@ -376,7 +383,10 @@ impl ProviderRegistry {
         if config.bindings.len() > MAX_BINDINGS {
             return Err(ConfigFailure(ConfigReason::BindingCount));
         }
-        let mut registry = Self::default();
+        let mut registry = Self {
+            configured: true,
+            ..Self::default()
+        };
         for alias in config.aliases {
             if !name(&alias.alias) {
                 return Err(ConfigFailure(ConfigReason::AliasName));

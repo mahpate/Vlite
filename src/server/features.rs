@@ -584,6 +584,11 @@ async fn embed_text(
     let started = Instant::now();
     let target = collection_path(target)?;
     let request = body(input)?;
+    if !service.providers().configured() {
+        return embed_builtin_in(service, role, target, request.text, request.provider)
+            .await
+            .map(Json);
+    }
     embed_in(
         service,
         role,
@@ -613,6 +618,17 @@ pub(super) async fn embed_in(
         return provider_serving::embed(&service, headers, target, alias.clone(), text, started)
             .await;
     }
+    embed_builtin_in(service, role, target, text, provider).await
+}
+
+// The original embed dispatch: only the built-in hashing and http providers exist.
+async fn embed_builtin_in(
+    service: Service,
+    role: admin::Role,
+    target: Target,
+    text: String,
+    provider: Option<String>,
+) -> Result<provider_serving::EmbedResponse, ApiError> {
     if text.len() > 16_384 {
         return Err(unprocessable("text must be at most 16384 UTF-8 bytes"));
     }
