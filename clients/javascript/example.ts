@@ -1,7 +1,8 @@
 import {
-  Client, Collection, ImportRejectedError, VLiteError,
+  Client, Collection, ImportRejectedError, Memory, UnsupportedError, VLiteError,
   type AnnQuality, type BatchOperation, type CollectionIndexStatus, type CollectionInfo, type Condition, type Credential,
-  type ImportChunkReport, type ImportStatus, type IssuedCredential, type Metadata, type SearchResponse,
+  type ImportChunkReport, type ImportStatus, type IssuedCredential, type MemoryConsolidateResponse, type MemoryScalar,
+  type MemoryTarget, type Metadata, type SearchResponse,
 } from "./index.js";
 
 // Supply the token at runtime; never hard-code real credentials.
@@ -98,6 +99,38 @@ export async function capabilities(baseUrl: string, token: string, ndjsonPath: s
   console.log((await client.listCredentials()).items.map((c: Credential) => c.state), await client.persistentAudit({ limit: 10 }));
 }
 
+// Agent memory: one binding-local facade. Responses are whole objects; u64/i64 outputs are decimal strings.
+// A server without memory routes answers with UnsupportedError (404 not_found); nothing is retried or embedded.
+export async function memoryExample(baseUrl: string, token: string): Promise<void> {
+  const memory: Memory = new Client(baseUrl, token).memory("notes");
+  const scope = { agent: "assistant", user: "ada" };
+  try {
+    // The idempotency key is yours: reuse it to replay a mutation whose outcome is unknown, then getReceipt.
+    const remembered = await memory.remember({
+      scope, idempotency_key: "remember-1",
+      items: [{ id: "ada", kind: "entity", content: "Ada", observed_at_ms: 1700000000000n,
+        source: { source_id: "chat", source_kind: "caller" } }],
+    });
+    console.log(remembered.receipt.id, remembered.receipt.sequence, remembered.outcomes[0]?.revision);
+    const found = await memory.recall({ scope, text: "Ada", limit: 5 });
+    console.log(found.memories.map((hit) => hit.id), found.meta.complete, found.meta.limitations);
+    const receipt = await memory.getReceipt({ scope, operation: "remember", idempotency_key: "remember-1" });
+    console.log(receipt.result.replayed);
+    const forgotten = await memory.forget({ scope, idempotency_key: "forget-1", mode: "logical_delete",
+      target: { ids: [{ id: "ada", revision: remembered.outcomes[0]?.revision ?? 1n }] } });
+    // HTTP 202 is an ordinary result: the logical deletion is accepted and the job continues.
+    if (forgotten.state === "pending") console.log(forgotten.erasure?.resume_token);
+    const plan: MemoryConsolidateResponse = await memory.consolidate({ scope, idempotency_key: "c-1", dry_run: true,
+      inputs: [{ id: "ada", revision: 1 }],
+      output: { id: "s", kind: "episodic", content: "Summary", observed_at_ms: "1", source: { source_id: "s", source_kind: "caller", transformation_id: "v1" } } });
+    console.log(plan.dry_run ? plan.user_operations : plan.receipt.id);
+  } catch (error) {
+    if (error instanceof UnsupportedError) return;
+    if (error instanceof VLiteError) console.error(error.code, error.status, error.requestId, error.details?.feature);
+    throw error;
+  }
+}
+
 // Compile-time contract assertions; never executed.
 function typeChecks(client: Client): void {
   // @ts-expect-error IDs must remain strings, not lossy JavaScript numbers.
@@ -128,3 +161,103 @@ function typeChecks(client: Client): void {
   client.importChunk("1", "1", [], { policy: "ignore" });
 }
 void typeChecks;
+
+async function memoryTypeChecks(memory: Memory): Promise<void> {
+  const scope = { agent: "a" };
+  const item = { id: "e", kind: "entity", content: "c", observed_at_ms: "1", source: { source_id: "s", source_kind: "k" } } as const;
+  const slot = { subject_id: "e", predicate: "p", slot_key: "k" };
+  // @ts-expect-error The idempotency key is required on every mutation; the client never invents one.
+  memory.remember({ scope, items: [item] });
+  // @ts-expect-error MemoryExpected is {absent: true} or {revision}, never both.
+  memory.remember({ scope, idempotency_key: "k", items: [{ ...item, expected: { absent: true, revision: "1" } }] });
+  // @ts-expect-error absent can only be true.
+  memory.remember({ scope, idempotency_key: "k", items: [{ ...item, expected: { absent: false } }] });
+  // @ts-expect-error A forget target selects exactly one variant.
+  memory.forget({ scope, idempotency_key: "k", mode: "logical_delete", target: { scope: true, session: true } });
+  // @ts-expect-error session and scope targets are the literal true.
+  memory.forget({ scope, idempotency_key: "k", mode: "logical_delete", target: { session: false } });
+  // @ts-expect-error A scalar value must match its tag.
+  memory.recall({ scope, text: "x", filter: { all: [{ field: "n", op: "eq", value: { type: "integer", value: true } }] } });
+  // @ts-expect-error Float scalars are numbers.
+  memory.recall({ scope, text: "x", filter: { all: [{ field: "n", op: "eq", value: { type: "float", value: "1" } }] } });
+  memory.correctFacts({ scope, idempotency_key: "k", slot, series: { id: "f", revision: "1" }, slot_revision: "1",
+    // @ts-expect-error The old validity names are not part of the contract.
+    interval: { from_ms: "0", to_ms: null }, action: "close", at_ms: "1" });
+  memory.correctFacts({ scope, idempotency_key: "k", slot, series: { id: "f", revision: "1" }, slot_revision: "1",
+    // @ts-expect-error Bounds are required: null is an explicit unbounded end, omission is not.
+    interval: { valid_from_ms: "0" }, action: "close", at_ms: "1" });
+  // @ts-expect-error Requests are closed objects: a client tenant is never accepted.
+  memory.recall({ scope, text: "x", tenant: "t" });
+  // @ts-expect-error A signal belongs to the options, not to the request.
+  memory.recall({ scope, text: "x", signal: AbortSignal.abort() });
+  // @ts-expect-error Options carry only a signal.
+  memory.recall({ scope, text: "x" }, { timeoutMs: 1 });
+
+  // Exact inputs: decimal string, safe integer or bigint for every u64 and i64 position.
+  await memory.resumeErasure({ scope, idempotency_key: "k", job_id: "j", revision: 18446744073709551615n, generation: "1", resume_token: "t" });
+  await memory.recall({ scope, text: "x", as_of_ms: -9223372036854775808n });
+  // @ts-expect-error A boolean is not an integer.
+  memory.recall({ scope, text: "x", as_of_ms: true });
+
+  // Outputs are canonical strings, never numbers or bigints.
+  const received = await memory.getReceipt({ scope, operation: "remember", idempotency_key: "k" });
+  const sequence: string = received.result.receipt.sequence;
+  // @ts-expect-error A u64 output is not a number.
+  const asNumber: number = received.result.receipt.sequence;
+  // @ts-expect-error A u64 output is not a bigint.
+  const asBigint: bigint = received.result.receipt.sequence;
+  void [sequence, asNumber, asBigint];
+
+  // MemoryConsolidateResponse is discriminated by dry_run.
+  const consolidated: MemoryConsolidateResponse = await memory.consolidate({ scope, idempotency_key: "k", inputs: [], output: item });
+  if (consolidated.dry_run) {
+    const operations: string = consolidated.user_operations;
+    // @ts-expect-error A plan has no receipt.
+    consolidated.receipt;
+    void operations;
+  } else {
+    const receiptId: string = consolidated.receipt.id;
+    void receiptId;
+  }
+
+  // MemoryTarget narrows by its key.
+  const target: MemoryTarget = (await memory.getErasure({ scope, job_id: "j" })).erasure.target;
+  if (target.ids) {
+    const first: string | undefined = target.ids[0]?.revision;
+    void first;
+  } else if (target.series) {
+    const series: string = target.series.id;
+    void series;
+  } else if (target.session) {
+    const session: true = target.session;
+    void session;
+  }
+
+  // MemoryScalar narrows by its tag.
+  const view = (await memory.recall({ scope, text: "x" })).memories[0];
+  const scalar: MemoryScalar | undefined = view?.metadata?.["m"];
+  switch (scalar?.type) {
+    case "integer": { const value: string = scalar.value; void value; break; }
+    case "float": { const value: number = scalar.value; void value; break; }
+    case "boolean": { const value: boolean = scalar.value; void value; break; }
+    case "string": { const value: string = scalar.value; void value; break; }
+    default: break;
+  }
+
+  // Responses keep nullable and optional members as the contract defines them.
+  const meta = (await memory.findFacts({ scope, slot })).meta;
+  const remaining: string | null = (await memory.forget({ scope, idempotency_key: "k", mode: "logical_delete", target: { scope: true } })).remaining_work;
+  const distance: number | undefined = view?.scores.distance;
+  const decay: number | null | undefined = view?.scores.D;
+  void [meta.complete, remaining, distance, decay];
+
+  // Error details are optional and typed.
+  try { await memory.recall({ scope, text: "x" }); } catch (error) {
+    if (error instanceof VLiteError) {
+      const feature: string | undefined = error.details?.feature;
+      const limit: string | undefined = error.details?.limit;
+      void [feature, limit];
+    }
+  }
+}
+void memoryTypeChecks;
