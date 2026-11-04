@@ -77,6 +77,31 @@ impl Default for TextIndex {
 }
 
 impl TextIndex {
+    #[cfg(test)]
+    pub(crate) fn rebuilt_effective(
+        &self,
+        fields: &[String],
+        records: &crate::records::CollectionRecords,
+        workspace: &mut crate::compact::source::ReadWorkspace,
+    ) -> crate::Result<Self> {
+        let mut rebuilt = Self {
+            limit: self.limit,
+            ..Self::default()
+        };
+        rebuilt.rebuild(fields, &crate::records::RecordMap::default());
+        if !rebuilt.fields.is_empty() {
+            for id in records.effective_ids() {
+                if let Some(metadata) = records.effective_metadata(id, workspace)? {
+                    rebuilt.track(id, None, Some(&metadata));
+                }
+                if !rebuilt.available {
+                    break;
+                }
+            }
+        }
+        Ok(rebuilt)
+    }
+
     /// Term frequencies and token count of one record over declared fields.
     fn document(&self, metadata: &Metadata) -> (BTreeMap<String, u32>, u32) {
         let mut terms = BTreeMap::new();

@@ -138,6 +138,17 @@ class Policy(unittest.TestCase):
         self.assertIn("cargo test --locked -p vlite-graph --doc", text)
         self.assertNotIn("cargo test --locked -p vlite-graph\n", text)
 
+    def test_native_x86_64_jobs_require_avx2(self):
+        text = (ROOT / ".github/workflows/ci.yml").read_text(encoding="utf-8")
+        native = text.split("\n  native:\n", 1)[1].split("\n  clients:\n", 1)[0]
+        self.assertIn(
+            "    env:\n"
+            "      VLITE_REQUIRE_AVX2: ${{ (matrix.os == 'ubuntu-latest' || "
+            "matrix.os == 'windows-latest') && '1' || '0' }}\n",
+            native,
+        )
+        self.assertEqual(text.count("VLITE_REQUIRE_AVX2:"), 1)
+
     def test_compact_method_inventory_runs_with_documentation_gates(self):
         text = (ROOT / ".github/workflows/ci.yml").read_text(encoding="utf-8")
         documentation = text.split("\n  documentation:\n", 1)[1].split("\n  native:\n", 1)[0]
@@ -159,8 +170,10 @@ class Policy(unittest.TestCase):
             "ingestion_reference",
             "ingestion_schema_reference",
             "memory_erasure_oracle",
+            "memory_wire_oracle",
             "graph_subset_oracle",
             "graph_subset_write_oracle",
+            "lease_ledger_oracle",
         ):
             command = f"python tests/{oracle}.py --self-test"
             self.assertIn(command, changes)

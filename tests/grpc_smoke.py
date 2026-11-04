@@ -11,6 +11,8 @@ built with `--features grpc` (or `--all-features`).
 """
 
 import http.client
+from concurrent.futures import ThreadPoolExecutor
+import hashlib
 import importlib
 import json
 import os
@@ -25,6 +27,7 @@ from pathlib import Path
 
 import grpc
 from grpc_tools import protoc
+from google.protobuf import descriptor_pb2
 
 ROOT = Path(__file__).resolve().parent.parent
 # The standard grpc.health.v1 schema (grpcio-health-checking is not required).
@@ -158,9 +161,73 @@ def expect_error(call, code, stable):
     raise AssertionError(f"expected {code}")
 
 
+def wire_signature(descriptor):
+    """Canonical wire identity, independent of compiler-added JSON names."""
+    descriptor.ClearField("source_code_info")
+
+    def clear_json_names(messages):
+        for message in messages:
+            for field in message.field:
+                field.ClearField("json_name")
+            clear_json_names(message.nested_type)
+
+    clear_json_names(descriptor.message_type)
+    return hashlib.sha256(descriptor.SerializeToString(deterministic=True)).hexdigest()
+
+
+def check_additive_wire(pb):
+    descriptor = descriptor_pb2.FileDescriptorProto()
+    pb.DESCRIPTOR.CopyToProto(descriptor)
+    messages = {message.name: message for message in descriptor.message_type}
+    for name in ["EmbedTextRequest", "EmbedTextResponse", "Ranking"]:
+        assert name in messages, name
+        descriptor.message_type.remove(messages[name])
+    for message, field, tag in [
+        ("SearchRequest", "rerank_provider", 18),
+        ("Hit", "rerank_score", 3),
+        ("SearchResponse", "ranking", 3),
+    ]:
+        definition = messages[message]
+        addition = next(item for item in definition.field if item.name == field)
+        assert addition.number == tag and addition.proto3_optional, addition
+        assert definition.oneof_decl[addition.oneof_index].name == "_" + field
+        del definition.oneof_decl[addition.oneof_index]
+        definition.field.remove(addition)
+    modes = next(item for item in descriptor.enum_type if item.name == "RerankMode")
+    addition = next(item for item in modes.value if item.name == "RERANK_MODE_CUSTOM")
+    assert addition.number == 3, addition
+    modes.value.remove(addition)
+    service = next(item for item in descriptor.service if item.name == "VLite")
+    addition = next(item for item in service.method if item.name == "EmbedText")
+    assert addition.input_type == ".vlite.v1.EmbedTextRequest", addition
+    assert addition.output_type == ".vlite.v1.EmbedTextResponse", addition
+    assert not addition.client_streaming and not addition.server_streaming, addition
+    service.method.remove(addition)
+    # Frozen descriptor of the approved pre-provider v1 schema. After removing
+    # only the reviewed additions, every old tag, type, enum and RPC must match.
+    assert wire_signature(descriptor) == "798ea524ec3d4aa48289f6e37e66836bb3a67cac9193a766c60d7b04036795fa"
+
+
 def main():
     with tempfile.TemporaryDirectory() as directory:
         modules = generate(Path(directory) / "stubs")
+        check_additive_wire(modules["pb"])
+        # A server without the additive RPC must be visible to the caller,
+        # not silently retried through hashing or Search.
+        old = grpc.server(ThreadPoolExecutor(max_workers=1))
+        old_address = old.add_insecure_port("127.0.0.1:0")
+        old.start()
+        try:
+            with grpc.insecure_channel(f"127.0.0.1:{old_address}") as channel:
+                stub = modules["rpc"].VLiteStub(channel)
+                try:
+                    stub.EmbedText(modules["pb"].EmbedTextRequest(text="hello"), timeout=10)
+                except grpc.RpcError as error:
+                    assert error.code() == grpc.StatusCode.UNIMPLEMENTED, error
+                else:
+                    raise AssertionError("missing RPC silently fell back")
+        finally:
+            old.stop(0).wait()
         process, http_address, grpc_address, stderr = start(directory)
         try:
             run(modules, http_address, grpc_address)
@@ -204,6 +271,28 @@ def run(modules, http_address, grpc_address):
         pb.CreateCollectionRequest(name="docs", dimensions=2), metadata=auth, timeout=10
     )
     assert created.name == "docs" and created.dimensions == 2, created
+    embedding = stub.EmbedText(
+        pb.EmbedTextRequest(collection="docs", text="hello"), metadata=auth, timeout=10
+    )
+    assert embedding.provider == "hashing" and embedding.dimensions == 2, embedding
+    assert len(embedding.vector) == 2, embedding
+    expect_error(
+        lambda: stub.EmbedText(
+            pb.EmbedTextRequest(collection="docs", text="hello", provider="missing"),
+            metadata=auth, timeout=10
+        ),
+        grpc.StatusCode.FAILED_PRECONDITION,
+        "provider_not_configured",
+    )
+    expect_error(
+        lambda: stub.Search(
+            pb.SearchRequest(collection="docs", vector=[1.0, 0.0], k=1,
+                             rerank_mode=pb.RERANK_MODE_CUSTOM, rerank_provider="missing"),
+            metadata=auth, timeout=10
+        ),
+        grpc.StatusCode.FAILED_PRECONDITION,
+        "provider_not_configured",
+    )
     written = stub.PutVector(
         pb.PutVectorRequest(
             collection="docs",

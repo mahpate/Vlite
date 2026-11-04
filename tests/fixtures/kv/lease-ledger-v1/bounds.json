@@ -1,0 +1,13 @@
+[
+  {"name": "minimum_grant_body", "kind": "SnapshotGrant", "input": {"namespace_bytes": 1, "key_bytes": 1, "holder_bytes": 1, "body_bytes": 67}},
+  {"name": "maximum_valid_body", "kind": "SnapshotGrant", "input": {"namespace_bytes": 255, "key_bytes": 1024, "holder_bytes": 255, "body_bytes": 1598}},
+  {"name": "empty_namespace", "kind": "SnapshotGrant", "input": {"namespace_bytes": 0, "key_bytes": 1, "holder_bytes": 1, "body_bytes": 66}, "expected_error": "Corrupt"},
+  {"name": "empty_key", "kind": "SnapshotGrant", "input": {"namespace_bytes": 1, "key_bytes": 0, "holder_bytes": 1, "body_bytes": 66}, "expected_error": "Corrupt"},
+  {"name": "empty_holder", "kind": "SnapshotGrant", "input": {"namespace_bytes": 1, "key_bytes": 1, "holder_bytes": 0, "body_bytes": 66}, "expected_error": "Corrupt"},
+  {"name": "namespace_256_bytes", "kind": "SnapshotGrant", "input": {"namespace_bytes": 256, "key_bytes": 1, "holder_bytes": 1, "body_bytes": 322}, "expected_error": "Corrupt"},
+  {"name": "key_1025_bytes", "kind": "SnapshotGrant", "input": {"namespace_bytes": 1, "key_bytes": 1025, "holder_bytes": 1, "body_bytes": 1091}, "expected_error": "Corrupt"},
+  {"name": "holder_256_bytes", "kind": "SnapshotGrant", "input": {"namespace_bytes": 1, "key_bytes": 1, "holder_bytes": 256, "body_bytes": 322}, "expected_error": "Corrupt"},
+  {"name": "body_2047_bytes_invalid_v1_fields", "kind": "SnapshotGrant", "input": {"namespace_bytes": 255, "key_bytes": 1473, "holder_bytes": 255, "body_bytes": 2047}, "expected_error": "Corrupt"},
+  {"name": "body_2048_bytes_invalid_v1_fields", "kind": "SnapshotGrant", "input": {"namespace_bytes": 255, "key_bytes": 1474, "holder_bytes": 255, "body_bytes": 2048}, "expected_error": "Corrupt"},
+  {"name": "body_2049_bytes_prefix_bound", "kind": "SnapshotGrant", "input": {"namespace_bytes": 255, "key_bytes": 1475, "holder_bytes": 255, "body_bytes": 2049}, "expected_error": "Corrupt"}
+]

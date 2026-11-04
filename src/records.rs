@@ -343,6 +343,347 @@ impl<'a> Iterator for CompactRecordIter<'a> {
 
 pub(crate) struct RecordIter<'a>(std::collections::btree_map::Iter<'a, u64, Arc<Record>>);
 
+// Test-gated derived-index access: one clone pins the base and overlay root.
+#[cfg(test)]
+impl CollectionRecords {
+    pub(crate) fn pin_effective(&self) -> Self {
+        self.clone()
+    }
+
+    pub(crate) fn effective_ids(&self) -> Vec<u64> {
+        match self {
+            Self::Resident(records) => records.keys().copied().collect(),
+            Self::Compact { view, overlay } => {
+                let mut ids: std::collections::BTreeSet<_> =
+                    (0..view.len()).filter_map(|row| view.id(row)).collect();
+                for (&id, entry) in overlay.0.iter() {
+                    match entry {
+                        OverlayEntry::Put { .. } => {
+                            ids.insert(id);
+                        }
+                        OverlayEntry::Delete { .. } => {
+                            ids.remove(&id);
+                        }
+                    }
+                }
+                ids.into_iter().collect()
+            }
+        }
+    }
+
+    pub(crate) fn effective_vector<'a>(
+        &'a self,
+        id: u64,
+        workspace: &'a mut crate::compact::source::ReadWorkspace,
+    ) -> Result<Option<&'a [f32]>> {
+        match self {
+            Self::Resident(records) => Ok(records.get(&id).map(|record| record.vector.as_slice())),
+            Self::Compact { view, overlay } => match overlay.get(id) {
+                Some(OverlayEntry::Put { record, .. }) => Ok(Some(&record.vector)),
+                Some(OverlayEntry::Delete { .. }) => Ok(None),
+                None => match view.row_of(id) {
+                    Some(row) => view.read_vector(row, workspace),
+                    None => Ok(None),
+                },
+            },
+        }
+    }
+
+    pub(crate) fn effective_metadata<'a>(
+        &'a self,
+        id: u64,
+        workspace: &mut crate::compact::source::ReadWorkspace,
+    ) -> Result<Option<std::borrow::Cow<'a, crate::Metadata>>> {
+        use std::borrow::Cow;
+        match self {
+            Self::Resident(records) => Ok(records
+                .get(&id)
+                .map(|record| Cow::Borrowed(&record.metadata))),
+            Self::Compact { view, overlay } => match overlay.get(id) {
+                Some(OverlayEntry::Put { record, .. }) => Ok(Some(Cow::Borrowed(&record.metadata))),
+                Some(OverlayEntry::Delete { .. }) => Ok(None),
+                None => match view.row_of(id) {
+                    Some(row) => Ok(view.read_metadata(row, workspace)?.map(Cow::Owned)),
+                    None => Ok(None),
+                },
+            },
+        }
+    }
+
+    pub(crate) fn source_identity(&self) -> Option<crate::compact::source::GenerationId> {
+        match self {
+            Self::Resident(_) => None,
+            Self::Compact { view, .. } => Some(view.generation_id()),
+        }
+    }
+
+    pub(crate) fn source_accounting(
+        &self,
+        workspace: &mut crate::compact::source::ReadWorkspace,
+    ) -> Result<Option<crate::compact::source::SeamAccounting>> {
+        match self {
+            Self::Resident(_) => Ok(None),
+            Self::Compact { view, .. } => workspace.accounting(view).map(Some),
+        }
+    }
+
+    pub(crate) fn overlay_logical_bytes(&self) -> Result<u64> {
+        match self {
+            Self::Resident(_) => Ok(0),
+            Self::Compact { overlay, .. } => overlay.0.values().try_fold(0u64, |bytes, entry| {
+                let row = match entry {
+                    OverlayEntry::Put { record, .. } => crate::format::record_body_len(record),
+                    OverlayEntry::Delete { .. } => 0,
+                };
+                bytes
+                    .checked_add(row)
+                    .ok_or(Error::InvalidQuery("compact overlay accounting overflow"))
+            }),
+        }
+    }
+}
+// End test-gated derived-index access.
+
+// Test-gated owned rerank output and visibility over the same pinned root.
+#[cfg(test)]
+impl CollectionRecords {
+    pub(crate) fn effective_payload<'a>(
+        &'a self,
+        id: u64,
+        workspace: &mut crate::compact::source::ReadWorkspace,
+    ) -> Result<Option<std::borrow::Cow<'a, [u8]>>> {
+        use std::borrow::Cow;
+        match self {
+            Self::Resident(records) => Ok(records
+                .get(&id)
+                .map(|row| Cow::Borrowed(row.payload.as_slice()))),
+            Self::Compact { view, overlay } => match overlay.get(id) {
+                Some(OverlayEntry::Put { record, .. }) => Ok(Some(Cow::Borrowed(&record.payload))),
+                Some(OverlayEntry::Delete { .. }) => Ok(None),
+                None => match view.row_of(id) {
+                    Some(row) => Ok(view.read_payload(row, workspace)?.map(Cow::Owned)),
+                    None => Ok(None),
+                },
+            },
+        }
+    }
+
+    pub(crate) fn effective_visible(
+        &self,
+        id: u64,
+        now_ms: u64,
+        expiries: &BTreeMap<u64, u64>,
+    ) -> bool {
+        match self {
+            Self::Resident(records) => {
+                records.contains_key(&id)
+                    && !expiries.get(&id).is_some_and(|expiry| *expiry <= now_ms)
+            }
+            Self::Compact { view, overlay } => match overlay.get(id) {
+                Some(OverlayEntry::Put { expiry, .. }) => {
+                    !expiry.is_some_and(|expiry| expiry <= now_ms)
+                }
+                Some(OverlayEntry::Delete { .. }) => false,
+                None => view.row_of(id).is_some_and(|row| {
+                    !view
+                        .expiry(row)
+                        .flatten()
+                        .is_some_and(|expiry| expiry <= now_ms)
+                }),
+            },
+        }
+    }
+}
+// End test-gated rerank access.
+
+#[cfg(test)]
+mod effective_rows_tests {
+    use super::*;
+
+    #[test]
+    fn compact_effective_accessor_pins_overlay_without_materializing_cells() {
+        let _precision = crate::compact::Activation::on();
+        let _records = crate::compact::catalog::payload::Activation::on();
+        let _source = crate::compact::source::Activation::on();
+        for encrypted in [false, true] {
+            let key = encrypted.then(|| crate::EncryptionKey::from_bytes([7; 32]));
+            let mut db = Database::create_in_memory(
+                2,
+                crate::CreateOptions {
+                    encryption: key.clone(),
+                    ..crate::CreateOptions::default()
+                },
+            )
+            .unwrap();
+            db.put(1, &[0.25, -0.0], b"body").unwrap();
+            db.put(3, &[2.0, 3.0], b"other").unwrap();
+            let mut loaded = crate::format::load_with(
+                &mut std::io::Cursor::new(db.to_bytes().unwrap()),
+                key.as_ref(),
+            )
+            .unwrap();
+            loaded.flags |= crate::format::FLAG_PRECISION;
+            loaded.collections.get_mut(&0).unwrap().precision =
+                Some(crate::compact::catalog::Precision::Float16);
+            let mut image = Vec::new();
+            crate::maintenance::write_v5_image(
+                &mut image,
+                &loaded,
+                loaded.lineage.unwrap(),
+                None,
+                None,
+                loaded.cipher.as_ref(),
+                loaded.flags,
+                loaded.sequence,
+            )
+            .unwrap();
+            let loaded =
+                crate::format::load_with(&mut std::io::Cursor::new(image), key.as_ref()).unwrap();
+            for (&collection, expected) in &loaded.collections {
+                let Some((&id, record)) = expected.records.iter().next() else {
+                    continue;
+                };
+                let mut rows = CollectionRecords::compact_from_replay(
+                    loaded.compact_generation.as_ref().unwrap().view(collection),
+                    &expected.records,
+                    &expected.revisions,
+                    &expected.expiries,
+                    loaded.sequence,
+                )
+                .unwrap();
+                let pin = rows.pin_effective();
+                assert!(pin.source_identity().is_some());
+                assert_eq!(
+                    pin.effective_ids(),
+                    expected.records.keys().copied().collect::<Vec<_>>()
+                );
+                let mut workspace =
+                    crate::compact::source::ReadWorkspace::new(4 * 1024 * 1024).unwrap();
+                for (&id, record) in &expected.records {
+                    assert_eq!(
+                        pin.effective_vector(id, &mut workspace)
+                            .unwrap()
+                            .unwrap()
+                            .iter()
+                            .map(|value| value.to_bits())
+                            .collect::<Vec<_>>(),
+                        record
+                            .vector
+                            .iter()
+                            .map(|value| value.to_bits())
+                            .collect::<Vec<_>>()
+                    );
+                    assert_eq!(
+                        pin.effective_metadata(id, &mut workspace)
+                            .unwrap()
+                            .unwrap()
+                            .as_ref(),
+                        &record.metadata
+                    );
+                }
+                assert_eq!(
+                    pin.source_accounting(&mut workspace)
+                        .unwrap()
+                        .unwrap()
+                        .cells_live,
+                    0
+                );
+                rows.apply_committed(id, None, loaded.sequence + 1, None)
+                    .unwrap();
+                assert_eq!(
+                    rows.overlay_logical_bytes().unwrap(),
+                    0,
+                    "tombstones hold no logical record body"
+                );
+                assert!(rows.effective_vector(id, &mut workspace).unwrap().is_none());
+                assert!(
+                    rows.effective_metadata(id, &mut workspace)
+                        .unwrap()
+                        .is_none()
+                );
+                assert!(!rows.effective_ids().contains(&id));
+                assert!(
+                    pin.effective_ids().contains(&id),
+                    "pinned overlay must remain unchanged"
+                );
+                rows.apply_committed(id, Some(record.clone()), loaded.sequence + 2, None)
+                    .unwrap();
+                assert_eq!(
+                    rows.overlay_logical_bytes().unwrap(),
+                    crate::format::record_body_len(record)
+                );
+                assert_eq!(
+                    rows.effective_vector(id, &mut workspace).unwrap().unwrap(),
+                    record.vector
+                );
+                let mut replacement = record.clone();
+                replacement.vector = vec![7.0, -9.0];
+                replacement.metadata.insert(
+                    "overlay".into(),
+                    crate::MetadataValue::String("replacement".into()),
+                );
+                replacement.payload = b"replacement body".to_vec();
+                rows.apply_committed(id, Some(replacement.clone()), loaded.sequence + 3, None)
+                    .unwrap();
+                let new_id = expected.records.keys().next_back().unwrap() + 1;
+                rows.apply_committed(new_id, Some(replacement.clone()), loaded.sequence + 4, None)
+                    .unwrap();
+                let mut expected_ids: Vec<_> = expected.records.keys().copied().collect();
+                expected_ids.push(new_id);
+                assert_eq!(
+                    rows.effective_ids(),
+                    expected_ids,
+                    "new overlay IDs must join the ordered base"
+                );
+                for id in [id, new_id] {
+                    assert_eq!(
+                        rows.effective_vector(id, &mut workspace).unwrap().unwrap(),
+                        replacement.vector
+                    );
+                    assert_eq!(
+                        rows.effective_metadata(id, &mut workspace)
+                            .unwrap()
+                            .unwrap()
+                            .as_ref(),
+                        &replacement.metadata
+                    );
+                    assert_eq!(
+                        rows.effective_payload(id, &mut workspace)
+                            .unwrap()
+                            .unwrap()
+                            .as_ref(),
+                        replacement.payload
+                    );
+                }
+                assert_eq!(
+                    rows.overlay_logical_bytes().unwrap(),
+                    2 * crate::format::record_body_len(&replacement)
+                );
+                assert_eq!(
+                    pin.effective_ids(),
+                    expected.records.keys().copied().collect::<Vec<_>>()
+                );
+                assert_eq!(
+                    pin.effective_vector(id, &mut workspace).unwrap().unwrap(),
+                    record.vector
+                );
+                assert_eq!(
+                    pin.effective_metadata(id, &mut workspace)
+                        .unwrap()
+                        .unwrap()
+                        .as_ref(),
+                    &record.metadata
+                );
+                let resident = CollectionRecords::Resident(expected.records.clone());
+                assert_eq!(resident.source_identity(), None);
+                assert_eq!(resident.source_accounting(&mut workspace).unwrap(), None);
+                assert_eq!(resident.overlay_logical_bytes().unwrap(), 0);
+                assert_eq!(resident.effective_ids(), pin.effective_ids());
+            }
+        }
+    }
+}
+
 impl<'a> Iterator for RecordIter<'a> {
     type Item = (&'a u64, &'a Record);
 

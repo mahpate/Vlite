@@ -7,6 +7,7 @@
 use std::collections::{BTreeMap, BTreeSet};
 
 mod consolidate;
+mod erasure;
 mod ranking;
 mod recall;
 mod stale;
@@ -77,6 +78,10 @@ pub(crate) enum MemoryError {
     ForeignAttachment,
     InvalidTarget,
     DuplicateTarget,
+    /// E1: the exact scope is behind an erasure barrier.
+    DeletionPending,
+    /// E1: a different or expired begin cannot start a second job.
+    JobConflict,
     Storage(Error),
 }
 
@@ -292,11 +297,19 @@ impl<'db> MemoryMut<'db> {
         scope.validate()?;
         let key = scope.key();
         let tuple = hex(&scope.encode());
-        if let Some(node) = self.db.graph(&self.graph)?.get_node(&key)?.output {
+        let graph = self.db.graph(&self.graph)?;
+        if let Some(node) = graph.get_node(&key)?.output {
             if string_property(&node, "tuple")? != tuple {
                 return Err(MemoryError::DigestCollision);
             }
+            if erasure::barrier(&graph, &key)?.is_some() {
+                return Err(MemoryError::DeletionPending);
+            }
             return Ok(());
+        }
+        if erasure::barrier(&graph, &key)?.is_some() {
+            // An orphan job never reactivates or recreates its scope.
+            return Err(MemoryError::InvalidBundle);
         }
         let mut properties = Metadata::new();
         properties.insert("tuple".into(), MetadataValue::String(tuple));
@@ -323,6 +336,10 @@ impl<'db> MemoryMut<'db> {
         if string_property(&scope_node, "tuple")? != hex(&request.scope.encode()) {
             return Err(MemoryError::DigestCollision);
         }
+        let barrier = erasure::barrier(
+            &self.db.graph(&self.graph)?.with_clock(request.now_ms),
+            &scope_key,
+        )?;
         let receipt_key = receipt_key(&scope_key, &request.idempotency_key);
         let digest = request_digest(request, &normalized);
         let receipt_read = self
@@ -345,14 +362,24 @@ impl<'db> MemoryMut<'db> {
                 verify_scope(&receipt, &scope_key)?;
                 let stored_digest = string_property(&receipt, "digest")?;
                 if stored_digest != digest {
-                    return Err(MemoryError::IdempotencyConflict);
+                    return Err(match barrier {
+                        Some(_) => MemoryError::DeletionPending,
+                        None => MemoryError::IdempotencyConflict,
+                    });
                 }
                 let outcome = decode_outcome(
                     &self.db.graph(&self.graph)?.with_clock(request.now_ms),
                     &receipt,
                 )?;
-                return decode_result(&outcome, receipt.revision, true, &normalized);
+                let result = decode_result(&outcome, receipt.revision, true, &normalized)?;
+                if barrier.is_some_and(|job| receipt.revision >= job) {
+                    return Err(MemoryError::DeletionPending);
+                }
+                return Ok(result);
             }
+        }
+        if barrier.is_some() {
+            return Err(MemoryError::DeletionPending);
         }
         if request
             .deadline_ms
@@ -514,6 +541,7 @@ impl<'db> MemoryMut<'db> {
         if string_property(&scope_node, "tuple")? != hex(&request.scope.encode()) {
             return Err(MemoryError::DigestCollision);
         }
+        let barrier = erasure::barrier(&read, &scope_key)?;
         let key = forget_receipt_key(&scope_key, &request.idempotency_key);
         let digest = forget_request_digest(request);
         let existing_receipt = read.get_node(&key)?.output;
@@ -522,10 +550,20 @@ impl<'db> MemoryMut<'db> {
         {
             verify_scope(receipt, &scope_key)?;
             if string_property(receipt, "digest")? != digest {
-                return Err(MemoryError::IdempotencyConflict);
+                return Err(match barrier {
+                    Some(_) => MemoryError::DeletionPending,
+                    None => MemoryError::IdempotencyConflict,
+                });
             }
             let outcome = decode_outcome(&read, receipt)?;
-            return decode_forget_result(&outcome, receipt.revision, true, &request.targets);
+            let result = decode_forget_result(&outcome, receipt.revision, true, &request.targets)?;
+            if barrier.is_some_and(|job| receipt.revision >= job) {
+                return Err(MemoryError::DeletionPending);
+            }
+            return Ok(result);
+        }
+        if barrier.is_some() {
+            return Err(MemoryError::DeletionPending);
         }
         if request
             .deadline_ms
@@ -4561,6 +4599,8 @@ mod tests {
             MemoryError::ForeignAttachment => "ForeignAttachment",
             MemoryError::InvalidTarget => "InvalidTarget",
             MemoryError::DuplicateTarget => "DuplicateTarget",
+            MemoryError::DeletionPending => "DeletionPending",
+            MemoryError::JobConflict => "JobConflict",
             MemoryError::Storage(_) => "Storage",
         }
     }

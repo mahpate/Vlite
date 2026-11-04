@@ -133,6 +133,8 @@ pub(super) struct RecallHit {
     pub bm25: Option<f64>,
     pub vector_rank: Option<u32>,
     pub text_rank: Option<u32>,
+    /// S2: the S1 stale label of a C1 summary hit; `None` otherwise.
+    pub stale: Option<bool>,
 }
 
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
@@ -158,6 +160,8 @@ pub(super) struct RecallOutput {
     pub selection: Selection,
     pub candidate_mode: &'static str,
     pub historical_discovery: &'static str,
+    /// E1: distinct barred requested scopes, in request order.
+    pub deletion_barriers: Vec<MemoryScope>,
 }
 
 struct Work<'a> {
@@ -349,6 +353,7 @@ impl MemoryRef<'_> {
         work.stats.source_records_charged = scan;
         // Bound all node discovery before cloning properties or scanning filters.
         let mut eligible = BTreeMap::<String, (MemoryScope, NodeView)>::new();
+        let mut deletion_barriers = Vec::new();
         for scope in &request.scopes {
             work.check()?;
             let Some(scope_node) = graph.get_node(&scope.key())?.output else {
@@ -356,6 +361,11 @@ impl MemoryRef<'_> {
             };
             if string_property(&scope_node, "tuple")? != hex(&scope.encode()) {
                 return Err(MemoryError::DigestCollision.into());
+            }
+            if super::erasure::barrier(&graph, &scope.key())?.is_some() {
+                // E1: omit the barred scope entirely; it stays preflight-charged.
+                deletion_barriers.push(scope.clone());
+                continue;
             }
             let mut cursor = None;
             loop {
@@ -415,6 +425,13 @@ impl MemoryRef<'_> {
                     None => return Err(RecallError::Budget("source_scan")),
                 }
             }
+        }
+        if request
+            .seeds
+            .iter()
+            .any(|seed| deletion_barriers.contains(&seed.scope))
+        {
+            return Err(MemoryError::DeletionPending.into());
         }
         let mut owners = BTreeMap::<u64, String>::new();
         if let Some(collection) = collection {
@@ -667,6 +684,14 @@ impl MemoryRef<'_> {
             let (content, content_truncated) =
                 content_excerpt(&graph, node, request.snippet_bytes, &mut work)?;
             let candidate = &candidates[key];
+            let stale = self.recall_stale_label(
+                request,
+                &ranking.candidate.scope,
+                &ranking.candidate.id,
+                work.remaining_ms()?,
+                &mut work.stats.edges_charged,
+                &mut truncation,
+            )?;
             hits.push(RecallHit {
                 ranking,
                 memory_revision: memory.memory_revision,
@@ -680,6 +705,7 @@ impl MemoryRef<'_> {
                 bm25: candidate.bm25,
                 vector_rank: candidate.vector_rank,
                 text_rank: candidate.text_rank,
+                stale,
             });
         }
         work.check()?;
@@ -697,6 +723,7 @@ impl MemoryRef<'_> {
             selection: request.selection,
             candidate_mode: "exact-eligible-evidence-union",
             historical_discovery: "retained current anchors and evidence only; not exhaustive history",
+            deletion_barriers,
         })
     }
 

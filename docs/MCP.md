@@ -119,7 +119,8 @@ that specific local server if the host requests trust. Ask:
 
 > Use VLite to show database information and list the collections. Do not write.
 
-The host should discover the seven read-only tools listed below and call
+The host should discover the seven core vector read-only tools listed below
+(plus the local KV tools and graph tools on graph-enabled files) and call
 `vlite_info` / `vlite_list_collections`. Supply a compatible query vector when
 asking for a search; this MCP server does not generate embeddings.
 
@@ -256,9 +257,54 @@ command line, logged, or echoed in errors. `--server` cannot be combined with
 Server errors keep their `<code>: <message>` form; an unreachable server returns
 `server_unavailable: ...`.
 
+## Local key-value tools
+
+These four tools work with `--db PATH`, independently of graph support.
+They require an explicit `collection` naming an existing one-dimensional
+collection: they never create one and do not default to `default`.
+Use dedicated KV collections; vector/import/graph operations can otherwise
+overwrite the ordinary records used for KV. A namespace partitions keys, not
+access permissions. KV tools are not forwarded in `--server` mode.
+
+- `vlite_kv_get`: `collection`, `namespace`, `key`. Returns
+  `{"key":"a","value_base64":"AAEC","version":"42","expires_at_ms":null}`.
+- `vlite_kv_put`: the same address plus required `value_base64`, optional
+  `expected` and `expires_at_ms`. Returns `version` and `expires_at_ms`.
+- `vlite_kv_delete`: the address and optional `expected`. Returns
+  `{"deleted":true}` (false for an absent/due key with any/absent expectation).
+- `vlite_kv_list`: `collection`, `namespace`, optional `prefix` (default `""`),
+  `after` (exclusive, nonempty key) and `limit` (integer 1..10000, default 100).
+  Returns `{"items":[...],"next_after":null}`; pass a non-null `next_after`
+  as `after` to continue. Keys sort by unsigned UTF-8 bytes. Each page uses one
+  expiry clock; pages do not share a snapshot. A page is the largest prefix
+  fitting the limit and 16 MiB canonical JSON page budget. An empty page has
+  no continuation.
+
+Put/delete are listed and callable only with `--writable`; direct calls in a
+read-only session fail `read_only: ...`. Namespace is 1..255 UTF-8 bytes,
+key/after 1..1024 bytes and prefix 0..1024 bytes, without normalization.
+Values are canonical padded RFC 4648 standard base64, at most 1,047,290 decoded
+bytes (empty is valid). `expected` is `"any"` (default), `"absent"` or
+`{"revision":"42"}`. Revisions and absolute Unix-millisecond deadlines are
+canonical decimal u64 **strings**, never JSON numbers; `"0"` is valid input.
+An omitted/null put deadline clears TTL. Due means `deadline <= now`; a due
+put succeeds but is immediately absent. TTL requires v5; no automatic upgrade
+occurs. Versions increase within a file lineage but must be re-read after
+maintenance that rewrites revisions.
+
+Unknown/duplicate fields and wrong types fail `invalid_request`; bounds and
+noncanonical values fail `invalid_input`. Other stable error prefixes include
+`kv_not_found`, `collection_not_found`, `not_kv_collection`,
+`precondition_failed`, `kv_slots_exhausted` and `upgrade_required`.
+Success has identical JSON in `structuredContent` and its single text block.
+Failures have `isError:true` and a code-first string in
+`structuredContent.error`. Malformed JSON-RPC params remain error -32602.
+Writes acknowledge after commit and sync only under full durability; no
+automatic retries or lease/fencing guarantees are added.
+
 ## Access and locking
 
-Read-only is the safe default and opens the file through VLite's shared-lock read-only API. Multiple read-only processes may open the same file concurrently. Writable mode opens with an exclusive lock and persists each mutation synchronously. Do not run `vlite-mcp --writable` while `vlite-server` or another writer has the same database open. In-memory ANN index construction is available in read-only mode, but its derived index is not persisted.
+Read-only is the safe default and opens the file through VLite's shared-lock read-only API. Multiple read-only processes may open the same file concurrently. Writable mode opens with an exclusive lock and acknowledges each mutation after commit (synced only under full durability). Do not run `vlite-mcp --writable` while `vlite-server` or another writer has the same database open. In-memory ANN index construction is available in read-only mode, but its derived index is not persisted.
 
 ## Security notes
 

@@ -1,5 +1,7 @@
 """Synchronous VLite REST client. No retries or redirect following."""
 
+import base64
+import binascii
 import json
 from http.client import HTTPException
 import math
@@ -7,7 +9,7 @@ from os import PathLike
 import re
 from typing import Literal, NotRequired, TypedDict
 from urllib.error import HTTPError, URLError
-from urllib.parse import urlencode, urlsplit
+from urllib.parse import quote, urlencode, urlsplit
 from urllib.request import HTTPRedirectHandler, ProxyHandler, Request, build_opener
 
 
@@ -65,6 +67,30 @@ class Summary(TypedDict):
 
 class Page(TypedDict):
     items: list[Summary]
+    next_after: str | None
+
+
+class Revision(TypedDict):
+    revision: int
+
+
+Expected = Literal["any", "absent"] | Revision
+
+
+class KvEntry(TypedDict):
+    key: str
+    value: bytes
+    version: int
+    expires_at_ms: int | None
+
+
+class KvPutResult(TypedDict):
+    version: int
+    expires_at_ms: int | None
+
+
+class KvPage(TypedDict):
+    items: list[KvEntry]
     next_after: str | None
 
 
@@ -416,7 +442,7 @@ class TransportError(Exception):
 
 
 class UnsupportedError(Exception):
-    """The server does not advertise conditional writes; nothing was mutated."""
+    """The server lacks the requested feature; no fallback is performed."""
 
 
 class ImportRejectedError(VLiteError):
@@ -480,6 +506,52 @@ def _object(value, name: str) -> dict:
     if not isinstance(value, dict):
         raise ValueError(f"{name} must be an object")
     return value
+
+
+def _kv_text(value: str, name: str, maximum: int, minimum: int = 1) -> str:
+    if not isinstance(value, str):
+        raise ValueError(f"{name} must be a string")
+    try:
+        size = len(value.encode("utf-8"))
+    except UnicodeEncodeError as error:
+        raise ValueError(f"{name} must contain Unicode scalar values") from error
+    if not minimum <= size <= maximum:
+        raise ValueError(f"{name} must be {minimum}..{maximum} UTF-8 bytes")
+    return value
+
+
+def _kv_decimal(value: int) -> str:
+    return str(_int(value, 0, 18446744073709551615, "u64"))
+
+
+def _kv_expected(value: Expected):
+    if isinstance(value, str) and value in ("any", "absent"):
+        return value
+    if isinstance(value, dict) and set(value) == {"revision"}:
+        return {"revision": _kv_decimal(value["revision"])}
+    raise ValueError("expected must be any, absent or {revision: int}")
+
+
+def _kv_read_decimal(value, *, nonzero: bool = False) -> int:
+    result = int(_id(value))
+    if nonzero and result == 0:
+        raise ValueError("issued version must be nonzero")
+    return result
+
+
+def _kv_read_put(value) -> KvPutResult:
+    return {"version": _kv_read_decimal(value["version"], nonzero=True),
+            "expires_at_ms": None if value["expires_at_ms"] is None else _kv_read_decimal(value["expires_at_ms"])}
+
+
+def _kv_read_entry(value) -> KvEntry:
+    encoded = value["value_base64"]
+    if not isinstance(encoded, str) or len(encoded) > 1396388:
+        raise ValueError("invalid KV base64")
+    decoded = base64.b64decode(encoded, validate=True)
+    if len(decoded) > 1047290 or base64.b64encode(decoded).decode("ascii") != encoded:
+        raise ValueError("noncanonical KV base64")
+    return {"key": _kv_text(value["key"], "key", 1024), "value": decoded, **_kv_read_put(value)}
 
 
 def _policy(value: str) -> str:
@@ -940,6 +1012,60 @@ class Client(_Records):
             raise
 
     # Operations (admin).
+
+    def _kv_request(self, method: str, path: str, body=None):
+        try:
+            return self._request(method, path, body)
+        except VLiteError as error:
+            if error.status == 404 and error.code == "not_found":
+                raise UnsupportedError("Server does not support KV routes; no fallback performed") from error
+            raise
+
+    def _kv_decode(self, decoder, value):
+        try:
+            return decoder(value)
+        except (ValueError, KeyError, TypeError, binascii.Error) as error:
+            raise TransportError("Invalid KV response; no retry performed") from error
+
+    def kv_get(self, *, collection: str, namespace: str, key: str) -> KvEntry:
+        query = urlencode({"namespace": _kv_text(namespace, "namespace", 255),
+                           "key": _kv_text(key, "key", 1024)}, quote_via=quote)
+        value = self._kv_request("GET", "/v1/collections/" + _collection(collection) + "/kv/entry?" + query)
+        return self._kv_decode(_kv_read_entry, value)
+
+    def kv_put(self, *, collection: str, namespace: str, key: str, value: bytes,
+               expected: Expected = "any", expires_at_ms: int | None = None) -> KvPutResult:
+        if not isinstance(value, bytes) or len(value) > 1047290:
+            raise ValueError("value must be bytes of length at most 1047290")
+        body = {"namespace": _kv_text(namespace, "namespace", 255), "key": _kv_text(key, "key", 1024),
+                "value_base64": base64.b64encode(value).decode("ascii"), "expected": _kv_expected(expected),
+                "expires_at_ms": None if expires_at_ms is None else _kv_decimal(expires_at_ms)}
+        result = self._kv_request("PUT", "/v1/collections/" + _collection(collection) + "/kv/entry", body)
+        return self._kv_decode(_kv_read_put, result)
+
+    def kv_delete(self, *, collection: str, namespace: str, key: str, expected: Expected = "any") -> bool:
+        condition = _kv_expected(expected)
+        query = urlencode({"namespace": _kv_text(namespace, "namespace", 255), "key": _kv_text(key, "key", 1024),
+                           "expected": condition["revision"] if isinstance(condition, dict) else condition}, quote_via=quote)
+        value = self._kv_request("DELETE", "/v1/collections/" + _collection(collection) + "/kv/entry?" + query)
+        if not isinstance(value, dict) or type(value.get("deleted")) is not bool:
+            raise TransportError("Invalid KV delete response; no retry performed")
+        return value["deleted"]
+
+    def kv_list(self, *, collection: str, namespace: str, prefix: str = "", after: str | None = None,
+                limit: int = 100) -> KvPage:
+        query = {"namespace": _kv_text(namespace, "namespace", 255), "prefix": _kv_text(prefix, "prefix", 1024, 0)}
+        if after is not None:
+            query["after"] = _kv_text(after, "after", 1024)
+        query["limit"] = str(_int(limit, 1, 10000, "limit"))
+        value = self._kv_request("GET", "/v1/collections/" + _collection(collection) + "/kv/entries?"
+                                 + urlencode(query, quote_via=quote))
+        def decode(page) -> KvPage:
+            if not isinstance(page["items"], list):
+                raise ValueError("items must be an array")
+            return {"items": [_kv_read_entry(item) for item in page["items"]],
+                    "next_after": None if page["next_after"] is None else _kv_text(page["next_after"], "next_after", 1024)}
+        return self._kv_decode(decode, value)
 
     def changes(self, *, cursor: str | None = None, limit: int = 1000) -> dict:
         if type(limit) is not int or not 1 <= limit <= 10000:

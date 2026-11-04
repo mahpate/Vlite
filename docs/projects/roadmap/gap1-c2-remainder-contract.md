@@ -201,6 +201,9 @@ They are not effort, schedule, code-size or performance estimates.
   hit (`None` for non-summaries).
 - **Contract.** Label examination is charged to recall's graph budget; budget
   exhaustion follows existing `allow_partial` rules, never a guessed label.
+  Cancellation and the deadline are not budget exhaustion: a label read they
+  stop returns recall's `Cancelled` or `Deadline` error, partial or not, and
+  never a partial label or `Budget("graph")`.
   Ranking, eligibility and ordering are unchanged.
 - **Tests.** Label true/false/None; budget charge at exact boundary; partial
   versus refusal; ranking golden unchanged.

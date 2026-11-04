@@ -1,0 +1,166 @@
+{
+  "schema": "memory-rest-wire-v1",
+  "cases": [
+    {
+      "name": "facts-core-capability-absent",
+      "operation": "facts",
+      "request": {
+        "method": "POST",
+        "path": "/v1/memory/notes/facts/query",
+        "headers": {
+          "Authorization": "Bearer fixture-root"
+        },
+        "body": {
+          "scope": {
+            "agent": "a"
+          },
+          "slot": {
+            "subject_id": "e1",
+            "predicate": "role",
+            "slot_key": "primary"
+          }
+        }
+      },
+      "view": {
+        "clock_ms": 100,
+        "sequence": 6,
+        "receipt_window_ms": 100,
+        "scope_grants": [
+          {
+            "tenant": "@root",
+            "agent": "a"
+          }
+        ],
+        "next_receipt_id": "r1",
+        "pre_state": [],
+        "capabilities": {}
+      },
+      "expected": {
+        "status": 409,
+        "body": {
+          "error": {
+            "code": "memory_capability_unavailable",
+            "message": "sanitized"
+          }
+        }
+      },
+      "defect": {
+        "tag": "facts-core-capability-absent",
+        "path": [
+          "view",
+          "capabilities"
+        ],
+        "set": {
+          "facts": true
+        }
+      },
+      "repair_check": "gate"
+    }
+  ],
+  "structural": [
+    {
+      "name": "fact-history-forbids-asof",
+      "schema": "FactsRequest",
+      "request": true,
+      "value": {
+        "scope": {
+          "agent": "a"
+        },
+        "slot": {
+          "subject_id": "e1",
+          "predicate": "role",
+          "slot_key": "primary"
+        },
+        "history": true,
+        "as_of_ms": "100"
+      },
+      "valid": false,
+      "error": "invalid_input",
+      "defect": {
+        "path": [
+          "value",
+          "as_of_ms"
+        ],
+        "delete": true
+      },
+      "operation": "facts"
+    },
+    {
+      "name": "response-facts",
+      "schema": "exchange",
+      "request": false,
+      "value": {
+        "facts": [
+          {
+            "series": {
+              "id": "e1",
+              "revision": "1"
+            },
+            "slot": {
+              "subject_id": "e1",
+              "predicate": "role",
+              "slot_key": "primary"
+            },
+            "slot_revision": "7",
+            "destination_id": "e2",
+            "interval": {
+              "valid_from_ms": "-9223372036854775808",
+              "valid_to_ms": "9223372036854775807"
+            },
+            "status": "disputed",
+            "stale": true,
+            "evidence": []
+          }
+        ],
+        "meta": {
+          "scopes": [
+            {
+              "tenant": "@root",
+              "agent": "a"
+            }
+          ],
+          "as_of_ms": "100",
+          "ttl_clock_ms": "100",
+          "sequence": "6",
+          "complete": true,
+          "truncation": [],
+          "limitations": [
+            "retained_state_only"
+          ],
+          "mode": "exact_enumeration",
+          "candidates_examined": "0",
+          "edges_charged": "0",
+          "vector_components": "0",
+          "mmr_components": "0",
+          "evidence_bytes": "0"
+        }
+      },
+      "valid": true,
+      "operation": "facts",
+      "status": 200
+    },
+    {
+      "name": "http-inventory-facts",
+      "schema": "http",
+      "request": true,
+      "value": {
+        "method": "POST",
+        "path": "/v1/memory/notes/facts/query",
+        "headers": {},
+        "body": {
+          "scope": {
+            "agent": "a"
+          },
+          "slot": {
+            "subject_id": "e1",
+            "predicate": "role",
+            "slot_key": "primary"
+          }
+        }
+      },
+      "valid": true,
+      "operation": "facts"
+    }
+  ],
+  "operation_id": "MemoryFindFacts"
+}

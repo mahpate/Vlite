@@ -11,7 +11,9 @@ use super::super::{
     MemoryProperties, MemoryRef, MemoryScope, Provenance, RememberRequest, content_digest, hex,
     memory_key, memory_properties,
 };
-use super::{SummaryStatus, SummaryStatusRequest, derived_edge_key};
+use super::{
+    MAX_EDGES, SummaryStatus, SummaryStatusRequest, derived_edge_key, hard_stop, label_limits,
+};
 use crate::{
     Database, Expected, Metadata, MetadataValue,
     property_graph::{EdgeRef, GraphOp},
@@ -912,5 +914,378 @@ fn s1_status_survives_reopen_on_every_backend() {
             status(&db, "fresh", expiry).unwrap(),
         ];
         assert_eq!(after, before, "{name}");
+    }
+}
+
+// S2: staleness label in recall (Gap 1 C2 contract section 6 S2). Summaries
+// reach recall through a real entity whose REFERENCES edge targets them.
+
+use super::super::MemoryError;
+use super::super::ranking::RankingPolicy;
+use super::super::recall::{
+    RecallError, RecallLimits, RecallOutput, RecallRequest, RecallSeed, Selection,
+};
+use crate::property_graph::{GraphLimits, TruncationReason};
+use std::sync::atomic::AtomicBool;
+
+/// A real entity `root` in the base scope that references `targets`.
+fn root(db: &mut Database, targets: &[&str], now: u64) {
+    let request = RememberRequest {
+        scope: scope(),
+        idempotency_key: "root".into(),
+        receipt_window_ms: 1_000,
+        now_ms: now,
+        deadline_ms: None,
+        allow_future_observations: false,
+        items: vec![MemoryItem {
+            id: "root".into(),
+            kind: MemoryKind::Entity,
+            content: "content root".into(),
+            source: "origin".into(),
+            importance: None,
+            observed_at_ms: Some(now as i64),
+            provenance: Vec::new(),
+            references: ids(targets),
+            merge_into: None,
+            expected_revision: None,
+            expiry_ms: None,
+            expiry_valid: true,
+            evidence: Vec::new(),
+        }],
+    };
+    MemoryMut::bind(db, GRAPH, None)
+        .unwrap()
+        .remember(&request)
+        .unwrap();
+}
+
+/// Seeded expansion from `root` at C with `max_edges_examined = budget`.
+fn recall_request(now: u64, budget: u64, allow_partial: bool) -> RecallRequest<'static> {
+    RecallRequest {
+        scopes: vec![scope()],
+        kinds: vec![MemoryKind::Entity, MemoryKind::Episodic],
+        filter: Vec::new(),
+        query: None,
+        seeds: vec![RecallSeed {
+            scope: scope(),
+            id: "root".into(),
+        }],
+        as_of_ms: None,
+        clock_ms: now,
+        policy: RankingPolicy::default(),
+        selection: Selection::Ranked,
+        limits: RecallLimits {
+            graph: GraphLimits {
+                max_edges_examined: budget,
+                deadline_ms: 5_000,
+                ..GraphLimits::default()
+            },
+            ..RecallLimits::default()
+        },
+        expand: true,
+        allow_partial,
+        snippet_bytes: 64,
+        cancel: None,
+    }
+}
+
+fn recall(db: &Database, request: &RecallRequest<'_>) -> Result<RecallOutput, RecallError> {
+    let before = (db.sequence, db.end);
+    let result = MemoryRef::bind(db, GRAPH, None).unwrap().recall(request);
+    assert_eq!(before, (db.sequence, db.end), "recall appended");
+    result
+}
+
+/// `(id, stale)` of every hit in output order.
+fn labels(output: &RecallOutput) -> Vec<(&str, Option<bool>)> {
+    output
+        .hits
+        .iter()
+        .map(|hit| (hit.ranking.candidate.id.as_str(), hit.stale))
+        .collect()
+}
+
+/// Summary `s` over a, b, c referenced by `root`: expansion examines root's
+/// one REFERENCES edge, then the label examines three DERIVED_FROM edges.
+fn labelled(dir: &Path) -> (Database, u64) {
+    let (mut db, now) = three(dir);
+    root(&mut db, &["s"], now + 2);
+    (db, now)
+}
+
+const EXPANSION_EDGES: u64 = 1;
+const LABEL_EDGES: u64 = 3;
+
+#[test]
+fn s2_recall_labels_summaries_true_false_and_none() {
+    let dir = tempfile::tempdir().unwrap();
+    let (mut db, now) = labelled(dir.path());
+    let fresh = recall(&db, &recall_request(now + 3, 10_000, false)).unwrap();
+    assert!(fresh.complete);
+    let mut fresh_labels = labels(&fresh);
+    fresh_labels.sort();
+    assert_eq!(fresh_labels, [("root", None), ("s", Some(false))]);
+
+    forget(&mut db, "b", now + 4);
+    let forgotten = recall(&db, &recall_request(now + 5, 10_000, false)).unwrap();
+    assert!(forgotten.complete);
+    let mut stale = labels(&forgotten);
+    stale.sort();
+    assert_eq!(
+        stale,
+        [("root", None), ("s", Some(true))],
+        "an entity is never labelled; a forgotten source makes the summary stale"
+    );
+    // Labels never change eligibility or order.
+    assert_eq!(
+        forgotten
+            .hits
+            .iter()
+            .map(|hit| hit.ranking.candidate.id.clone())
+            .collect::<Vec<_>>(),
+        fresh
+            .hits
+            .iter()
+            .map(|hit| hit.ranking.candidate.id.clone())
+            .collect::<Vec<_>>()
+    );
+}
+
+#[test]
+fn s2_label_work_is_charged_to_the_graph_budget_at_the_exact_boundary() {
+    let dir = tempfile::tempdir().unwrap();
+    let (db, now) = labelled(dir.path());
+    let at = now + 3;
+    let total = EXPANSION_EDGES + LABEL_EDGES;
+    let exact = recall(&db, &recall_request(at, total, false)).unwrap();
+    assert!(exact.complete);
+    assert!(exact.truncation.is_empty());
+    assert_eq!(exact.stats.edges_charged, total, "label edges are charged");
+    let label = |output: &RecallOutput| {
+        output
+            .hits
+            .iter()
+            .find(|hit| hit.ranking.candidate.id == "s")
+            .map(|hit| hit.stale)
+    };
+    assert_eq!(label(&exact), Some(Some(false)));
+    assert_eq!(
+        recall(&db, &recall_request(at, 10_000, false))
+            .unwrap()
+            .stats
+            .edges_charged,
+        total
+    );
+
+    // One edge short: refused unless partial results were requested.
+    assert!(matches!(
+        recall(&db, &recall_request(at, total - 1, false)),
+        Err(RecallError::Budget("graph"))
+    ));
+    let partial = recall(&db, &recall_request(at, total - 1, true)).unwrap();
+    assert!(!partial.complete);
+    assert_eq!(partial.truncation, [TruncationReason::EdgeLimit]);
+    assert_eq!(partial.stats.edges_charged, total - 1);
+    assert_eq!(
+        label(&partial),
+        Some(None),
+        "an exhausted label is not guessed"
+    );
+    assert_eq!(labels(&partial).len(), labels(&exact).len());
+
+    // Nothing left after expansion: the label read is not attempted.
+    assert!(matches!(
+        recall(&db, &recall_request(at, EXPANSION_EDGES, false)),
+        Err(RecallError::Budget("graph"))
+    ));
+    let empty = recall(&db, &recall_request(at, EXPANSION_EDGES, true)).unwrap();
+    assert!(!empty.complete);
+    assert_eq!(empty.truncation, [TruncationReason::EdgeLimit]);
+    assert_eq!(empty.stats.edges_charged, EXPANSION_EDGES);
+    assert_eq!(label(&empty), Some(None));
+}
+
+#[test]
+fn s2_two_exhausted_summary_labels_report_edge_limit_once() {
+    let dir = tempfile::tempdir().unwrap();
+    let (mut db, now) = three(dir.path());
+    sources(&mut db, &ids(&["d", "e", "f"]), now, None);
+    consolidate(&mut db, "t", &ids(&["d", "e", "f"]), now + 1);
+    root(&mut db, &["s", "t"], now + 2);
+    let at = now + 3;
+    // Expansion spends the whole budget on root's two REFERENCES edges, so
+    // both summary labels find nothing left and each yields EdgeLimit.
+    let budget = 2;
+    assert!(matches!(
+        recall(&db, &recall_request(at, budget, false)),
+        Err(RecallError::Budget("graph"))
+    ));
+    let partial = recall(&db, &recall_request(at, budget, true)).unwrap();
+    assert!(!partial.complete);
+    assert_eq!(partial.stats.edges_charged, budget);
+    let mut partial_labels = labels(&partial);
+    partial_labels.sort();
+    assert_eq!(
+        partial_labels,
+        [("root", None), ("s", None), ("t", None)],
+        "neither exhausted label is guessed"
+    );
+    assert_eq!(
+        partial.truncation,
+        [TruncationReason::EdgeLimit],
+        "the same reason from two labels is reported exactly once"
+    );
+}
+
+/// The label read directly, as recall runs it after search: `budget` is the
+/// recall graph budget with nothing yet charged.
+fn label_read(
+    db: &Database,
+    request: &RecallRequest<'_>,
+    summary: &str,
+) -> (
+    Result<Option<bool>, RecallError>,
+    u64,
+    Vec<TruncationReason>,
+) {
+    let mut charged = 0;
+    let mut truncation = Vec::new();
+    let label = MemoryRef::bind(db, GRAPH, None)
+        .unwrap()
+        .recall_stale_label(
+            request,
+            &scope(),
+            summary,
+            5_000,
+            &mut charged,
+            &mut truncation,
+        );
+    (label, charged, truncation)
+}
+
+#[test]
+fn s2_cancellation_after_search_reaches_the_label_read() {
+    static CANCELLED: AtomicBool = AtomicBool::new(true);
+    let dir = tempfile::tempdir().unwrap();
+    let (db, now) = three(dir.path());
+    let at = now + 3;
+    let live = recall_request(at, 100, true);
+    let (label, charged, truncation) = label_read(&db, &live, "s");
+    assert_eq!(label.ok(), Some(Some(false)));
+    assert_eq!((charged, truncation), (LABEL_EDGES, Vec::new()));
+    // Search already finished; the flag is set before the label read. Recall's
+    // own `work.check()` immediately precedes the label call, so only the
+    // label read itself can observe a flag raised in between.
+    // Cancellation is a hard error, never budget exhaustion or a partial,
+    // under recall's own budget (100) and at the engine cap (256).
+    for remaining in [100, 256] {
+        for allow_partial in [false, true] {
+            let mut cancelled = recall_request(at, remaining, allow_partial);
+            cancelled.cancel = Some(&CANCELLED);
+            let (label, charged, truncation) = label_read(&db, &cancelled, "s");
+            assert!(
+                matches!(label, Err(RecallError::Cancelled)),
+                "{remaining} {allow_partial}: {label:?}"
+            );
+            assert_eq!(charged, 0, "{remaining} {allow_partial}");
+            assert!(truncation.is_empty(), "{remaining} {allow_partial}");
+        }
+    }
+}
+
+#[test]
+fn s2_label_deadline_and_cancellation_are_hard_stops_not_budget() {
+    use TruncationReason::*;
+    // The engine's deadline runs on a real monotonic clock with a 1 ms floor,
+    // so the label read's classification of its reasons is pinned directly.
+    let stop = |reasons: &[TruncationReason]| match hard_stop(reasons) {
+        Some(RecallError::Cancelled) => "cancelled",
+        Some(RecallError::Deadline) => "deadline",
+        Some(other) => panic!("{other:?}"),
+        None => "budget",
+    };
+    assert_eq!(stop(&[Deadline]), "deadline");
+    assert_eq!(stop(&[EdgeLimit, Deadline]), "deadline");
+    assert_eq!(stop(&[Cancelled]), "cancelled");
+    assert_eq!(stop(&[EdgeLimit, Deadline, Cancelled]), "cancelled");
+    assert_eq!(stop(&[EdgeLimit]), "budget");
+    assert_eq!(stop(&[OutputLimit]), "budget");
+    assert_eq!(stop(&[]), "budget");
+}
+
+#[test]
+fn s2_label_remaining_edges_255_256_257_pin_budget_versus_engine_cap() {
+    let dir = tempfile::tempdir().unwrap();
+    let now = clock();
+    let mut db = database(dir.path());
+    let inputs = numbered(256);
+    sources(&mut db, &inputs, now, None);
+    sources(&mut db, &ids(&["extra"]), now, None);
+    consolidate(&mut db, "s", &inputs, now + 1);
+    write(
+        &mut db,
+        &[GraphOp::CreateEdge {
+            key: None,
+            source: key("s"),
+            relationship: "DERIVED_FROM".into(),
+            destination: key("extra"),
+            properties: Metadata::new(),
+        }],
+    );
+    let at = now + 2;
+    // 255 remaining: recall's own budget ran out first -> Budget("graph"),
+    // or with allow_partial an unguessed label marked EdgeLimit.
+    let (label, charged, _) = label_read(&db, &recall_request(at, 255, false), "s");
+    assert!(matches!(label, Err(RecallError::Budget("graph"))));
+    assert_eq!(charged, 255);
+    let (label, charged, truncation) = label_read(&db, &recall_request(at, 255, true), "s");
+    assert_eq!(label.ok(), Some(None));
+    assert_eq!(
+        (charged, truncation),
+        (255, vec![TruncationReason::EdgeLimit])
+    );
+    // remaining >= 256 is the engine's own S1 cap, so 257 retained edges are
+    // OperationLimit, not the recall budget's Budget("graph"), even partially.
+    for remaining in [256, 257] {
+        for allow_partial in [false, true] {
+            let request = recall_request(at, remaining, allow_partial);
+            let (label, charged, truncation) = label_read(&db, &request, "s");
+            assert!(
+                matches!(label, Err(RecallError::Memory(MemoryError::OperationLimit))),
+                "{remaining} {allow_partial}: {label:?}"
+            );
+            assert_eq!(charged, 256, "{remaining} {allow_partial}");
+            assert!(truncation.is_empty(), "{remaining} {allow_partial}");
+        }
+    }
+}
+
+/// S2 label budget without a clock: the remaining recall deadline reaches the
+/// label read unchanged and the edge budget is the unspent recall edges,
+/// capped at `MAX_EDGES`; nothing is left means no engine read at all.
+#[test]
+fn s2_label_read_budget_carries_the_remaining_deadline() {
+    assert_eq!(MAX_EDGES, 256);
+    for deadline in [1, 250, 251, 5_000, u64::MAX] {
+        assert_eq!(label_limits(0, deadline), None, "deadline {deadline}");
+        for (remaining, edges) in [
+            (1, 1),
+            (250, 250),
+            (251, 251),
+            (255, 255),
+            (256, 256),
+            (257, 256),
+            (u64::MAX, 256),
+        ] {
+            assert_eq!(
+                label_limits(remaining, deadline),
+                Some(GraphLimits {
+                    max_edges_examined: edges,
+                    deadline_ms: deadline,
+                    ..GraphLimits::DEFAULT
+                }),
+                "remaining {remaining}, deadline {deadline}"
+            );
+        }
     }
 }

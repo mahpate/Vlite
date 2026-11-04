@@ -1,0 +1,1095 @@
+{
+  "schema": "memory-rest-wire-v1",
+  "cases": [
+    {
+      "name": "receipt-live-before-expiry",
+      "operation": "receipt",
+      "request": {
+        "method": "POST",
+        "path": "/v1/memory/notes/receipts/lookup",
+        "headers": {
+          "Authorization": "Bearer fixture-root"
+        },
+        "body": {
+          "scope": {
+            "agent": "a"
+          },
+          "operation": "remember",
+          "idempotency_key": "k1"
+        }
+      },
+      "view": {
+        "clock_ms": 199,
+        "sequence": 6,
+        "receipt_window_ms": 100,
+        "scope_grants": [
+          {
+            "tenant": "@root",
+            "agent": "a"
+          }
+        ],
+        "next_receipt_id": "r1",
+        "pre_state": [],
+        "receipts": [
+          {
+            "operation": "remember",
+            "scope": {
+              "tenant": "@root",
+              "agent": "a"
+            },
+            "key": "k1",
+            "request": {
+              "scope": {
+                "agent": "a"
+              },
+              "idempotency_key": "k1",
+              "items": [
+                {
+                  "id": "e1",
+                  "kind": "entity",
+                  "content": "Ada",
+                  "observed_at_ms": "90",
+                  "source": {
+                    "source_id": "s1",
+                    "source_kind": "caller"
+                  }
+                }
+              ]
+            },
+            "retry_until_ms": 200,
+            "result": {
+              "receipt": {
+                "id": "r1",
+                "operation": "remember",
+                "scope": {
+                  "tenant": "@root",
+                  "agent": "a"
+                },
+                "sequence": "7",
+                "retry_until_ms": "200",
+                "digest_version": "memory-request-v1"
+              },
+              "replayed": false,
+              "outcomes": [
+                {
+                  "id": "e1",
+                  "action": "created",
+                  "revision": "1"
+                }
+              ],
+              "feed": {
+                "mode": "ordinary_changes",
+                "temporal_complete": false,
+                "ttl_complete": false,
+                "consumer_purge_acknowledged": false
+              },
+              "remaining_work": "0"
+            }
+          }
+        ],
+        "elapsed_ms": 5000
+      },
+      "expected": {
+        "status": 200,
+        "body": {
+          "result": {
+            "receipt": {
+              "id": "r1",
+              "operation": "remember",
+              "scope": {
+                "tenant": "@root",
+                "agent": "a"
+              },
+              "sequence": "7",
+              "retry_until_ms": "200",
+              "digest_version": "memory-request-v1"
+            },
+            "replayed": true,
+            "outcomes": [
+              {
+                "id": "e1",
+                "action": "created",
+                "revision": "1"
+              }
+            ],
+            "feed": {
+              "mode": "ordinary_changes",
+              "temporal_complete": false,
+              "ttl_complete": false,
+              "consumer_purge_acknowledged": false
+            },
+            "remaining_work": "0"
+          }
+        }
+      }
+    },
+    {
+      "name": "receipt-expiry-equality",
+      "operation": "receipt",
+      "request": {
+        "method": "POST",
+        "path": "/v1/memory/notes/receipts/lookup",
+        "headers": {
+          "Authorization": "Bearer fixture-root"
+        },
+        "body": {
+          "scope": {
+            "agent": "a"
+          },
+          "operation": "remember",
+          "idempotency_key": "k1"
+        }
+      },
+      "view": {
+        "clock_ms": 200,
+        "sequence": 6,
+        "receipt_window_ms": 100,
+        "scope_grants": [
+          {
+            "tenant": "@root",
+            "agent": "a"
+          }
+        ],
+        "next_receipt_id": "r1",
+        "pre_state": [],
+        "receipts": [
+          {
+            "operation": "remember",
+            "scope": {
+              "tenant": "@root",
+              "agent": "a"
+            },
+            "key": "k1",
+            "request": {
+              "scope": {
+                "agent": "a"
+              },
+              "idempotency_key": "k1",
+              "items": [
+                {
+                  "id": "e1",
+                  "kind": "entity",
+                  "content": "Ada",
+                  "observed_at_ms": "90",
+                  "source": {
+                    "source_id": "s1",
+                    "source_kind": "caller"
+                  }
+                }
+              ]
+            },
+            "retry_until_ms": 200,
+            "result": {
+              "receipt": {
+                "id": "r1",
+                "operation": "remember",
+                "scope": {
+                  "tenant": "@root",
+                  "agent": "a"
+                },
+                "sequence": "7",
+                "retry_until_ms": "200",
+                "digest_version": "memory-request-v1"
+              },
+              "replayed": false,
+              "outcomes": [
+                {
+                  "id": "e1",
+                  "action": "created",
+                  "revision": "1"
+                }
+              ],
+              "feed": {
+                "mode": "ordinary_changes",
+                "temporal_complete": false,
+                "ttl_complete": false,
+                "consumer_purge_acknowledged": false
+              },
+              "remaining_work": "0"
+            }
+          }
+        ],
+        "elapsed_ms": 0
+      },
+      "expected": {
+        "status": 404,
+        "body": {
+          "error": {
+            "code": "receipt_not_found",
+            "message": "sanitized"
+          }
+        }
+      },
+      "defect": {
+        "tag": "receipt-expiry-equality",
+        "path": [
+          "view",
+          "clock_ms"
+        ],
+        "set": 199
+      }
+    },
+    {
+      "name": "receipt-absent",
+      "operation": "receipt",
+      "request": {
+        "method": "POST",
+        "path": "/v1/memory/notes/receipts/lookup",
+        "headers": {
+          "Authorization": "Bearer fixture-root"
+        },
+        "body": {
+          "scope": {
+            "agent": "a"
+          },
+          "operation": "remember",
+          "idempotency_key": "absent"
+        }
+      },
+      "view": {
+        "clock_ms": 199,
+        "sequence": 6,
+        "receipt_window_ms": 100,
+        "scope_grants": [
+          {
+            "tenant": "@root",
+            "agent": "a"
+          }
+        ],
+        "next_receipt_id": "r1",
+        "pre_state": [],
+        "receipts": [
+          {
+            "operation": "remember",
+            "scope": {
+              "tenant": "@root",
+              "agent": "a"
+            },
+            "key": "k1",
+            "request": {
+              "scope": {
+                "agent": "a"
+              },
+              "idempotency_key": "k1",
+              "items": [
+                {
+                  "id": "e1",
+                  "kind": "entity",
+                  "content": "Ada",
+                  "observed_at_ms": "90",
+                  "source": {
+                    "source_id": "s1",
+                    "source_kind": "caller"
+                  }
+                }
+              ]
+            },
+            "retry_until_ms": 200,
+            "result": {
+              "receipt": {
+                "id": "r1",
+                "operation": "remember",
+                "scope": {
+                  "tenant": "@root",
+                  "agent": "a"
+                },
+                "sequence": "7",
+                "retry_until_ms": "200",
+                "digest_version": "memory-request-v1"
+              },
+              "replayed": false,
+              "outcomes": [
+                {
+                  "id": "e1",
+                  "action": "created",
+                  "revision": "1"
+                }
+              ],
+              "feed": {
+                "mode": "ordinary_changes",
+                "temporal_complete": false,
+                "ttl_complete": false,
+                "consumer_purge_acknowledged": false
+              },
+              "remaining_work": "0"
+            }
+          }
+        ],
+        "elapsed_ms": 5000
+      },
+      "expected": {
+        "status": 404,
+        "body": {
+          "error": {
+            "code": "receipt_not_found",
+            "message": "sanitized"
+          }
+        }
+      },
+      "defect": {
+        "tag": "receipt-absent",
+        "path": [
+          "request",
+          "body",
+          "idempotency_key"
+        ],
+        "set": "k1"
+      }
+    },
+    {
+      "name": "receipt-operation-is-part-of-identity",
+      "operation": "receipt",
+      "request": {
+        "method": "POST",
+        "path": "/v1/memory/notes/receipts/lookup",
+        "headers": {
+          "Authorization": "Bearer fixture-root"
+        },
+        "body": {
+          "scope": {
+            "agent": "a"
+          },
+          "operation": "forget",
+          "idempotency_key": "k1"
+        }
+      },
+      "view": {
+        "clock_ms": 199,
+        "sequence": 6,
+        "receipt_window_ms": 100,
+        "scope_grants": [
+          {
+            "tenant": "@root",
+            "agent": "a"
+          }
+        ],
+        "next_receipt_id": "r1",
+        "pre_state": [],
+        "receipts": [
+          {
+            "operation": "remember",
+            "scope": {
+              "tenant": "@root",
+              "agent": "a"
+            },
+            "key": "k1",
+            "request": {
+              "scope": {
+                "agent": "a"
+              },
+              "idempotency_key": "k1",
+              "items": [
+                {
+                  "id": "e1",
+                  "kind": "entity",
+                  "content": "Ada",
+                  "observed_at_ms": "90",
+                  "source": {
+                    "source_id": "s1",
+                    "source_kind": "caller"
+                  }
+                }
+              ]
+            },
+            "retry_until_ms": 200,
+            "result": {
+              "receipt": {
+                "id": "r1",
+                "operation": "remember",
+                "scope": {
+                  "tenant": "@root",
+                  "agent": "a"
+                },
+                "sequence": "7",
+                "retry_until_ms": "200",
+                "digest_version": "memory-request-v1"
+              },
+              "replayed": false,
+              "outcomes": [
+                {
+                  "id": "e1",
+                  "action": "created",
+                  "revision": "1"
+                }
+              ],
+              "feed": {
+                "mode": "ordinary_changes",
+                "temporal_complete": false,
+                "ttl_complete": false,
+                "consumer_purge_acknowledged": false
+              },
+              "remaining_work": "0"
+            }
+          }
+        ],
+        "elapsed_ms": 5000
+      },
+      "expected": {
+        "status": 404,
+        "body": {
+          "error": {
+            "code": "receipt_not_found",
+            "message": "sanitized"
+          }
+        }
+      },
+      "defect": {
+        "tag": "receipt-operation-is-part-of-identity",
+        "path": [
+          "request",
+          "body",
+          "operation"
+        ],
+        "set": "remember"
+      }
+    },
+    {
+      "name": "receipt-scope-authorized-first",
+      "operation": "receipt",
+      "request": {
+        "method": "POST",
+        "path": "/v1/memory/notes/receipts/lookup",
+        "headers": {
+          "Authorization": "Bearer fixture-root"
+        },
+        "body": {
+          "scope": {
+            "agent": "a"
+          },
+          "operation": "remember",
+          "idempotency_key": "k1"
+        }
+      },
+      "view": {
+        "clock_ms": 199,
+        "sequence": 6,
+        "receipt_window_ms": 100,
+        "scope_grants": [],
+        "next_receipt_id": "r1",
+        "pre_state": [],
+        "receipts": [
+          {
+            "operation": "remember",
+            "scope": {
+              "tenant": "@root",
+              "agent": "a"
+            },
+            "key": "k1",
+            "request": {
+              "scope": {
+                "agent": "a"
+              },
+              "idempotency_key": "k1",
+              "items": [
+                {
+                  "id": "e1",
+                  "kind": "entity",
+                  "content": "Ada",
+                  "observed_at_ms": "90",
+                  "source": {
+                    "source_id": "s1",
+                    "source_kind": "caller"
+                  }
+                }
+              ]
+            },
+            "retry_until_ms": 200,
+            "result": {
+              "receipt": {
+                "id": "r1",
+                "operation": "remember",
+                "scope": {
+                  "tenant": "@root",
+                  "agent": "a"
+                },
+                "sequence": "7",
+                "retry_until_ms": "200",
+                "digest_version": "memory-request-v1"
+              },
+              "replayed": false,
+              "outcomes": [
+                {
+                  "id": "e1",
+                  "action": "created",
+                  "revision": "1"
+                }
+              ],
+              "feed": {
+                "mode": "ordinary_changes",
+                "temporal_complete": false,
+                "ttl_complete": false,
+                "consumer_purge_acknowledged": false
+              },
+              "remaining_work": "0"
+            }
+          }
+        ],
+        "elapsed_ms": 5000
+      },
+      "expected": {
+        "status": 403,
+        "body": {
+          "error": {
+            "code": "forbidden_scope",
+            "message": "sanitized"
+          }
+        }
+      },
+      "defect": {
+        "tag": "receipt-scope-authorized-first",
+        "path": [
+          "view",
+          "scope_grants"
+        ],
+        "set": [
+          {
+            "tenant": "@root",
+            "agent": "a"
+          }
+        ]
+      }
+    },
+    {
+      "name": "receipt-read-only",
+      "operation": "receipt",
+      "request": {
+        "method": "POST",
+        "path": "/v1/memory/notes/receipts/lookup",
+        "headers": {
+          "Authorization": "Bearer fixture-root"
+        },
+        "body": {
+          "scope": {
+            "agent": "a"
+          },
+          "operation": "remember",
+          "idempotency_key": "k1"
+        }
+      },
+      "view": {
+        "clock_ms": 199,
+        "sequence": 6,
+        "receipt_window_ms": 100,
+        "scope_grants": [
+          {
+            "tenant": "@root",
+            "agent": "a"
+          }
+        ],
+        "next_receipt_id": "r1",
+        "pre_state": [],
+        "receipts": [
+          {
+            "operation": "remember",
+            "scope": {
+              "tenant": "@root",
+              "agent": "a"
+            },
+            "key": "k1",
+            "request": {
+              "scope": {
+                "agent": "a"
+              },
+              "idempotency_key": "k1",
+              "items": [
+                {
+                  "id": "e1",
+                  "kind": "entity",
+                  "content": "Ada",
+                  "observed_at_ms": "90",
+                  "source": {
+                    "source_id": "s1",
+                    "source_kind": "caller"
+                  }
+                }
+              ]
+            },
+            "retry_until_ms": 200,
+            "result": {
+              "receipt": {
+                "id": "r1",
+                "operation": "remember",
+                "scope": {
+                  "tenant": "@root",
+                  "agent": "a"
+                },
+                "sequence": "7",
+                "retry_until_ms": "200",
+                "digest_version": "memory-request-v1"
+              },
+              "replayed": false,
+              "outcomes": [
+                {
+                  "id": "e1",
+                  "action": "created",
+                  "revision": "1"
+                }
+              ],
+              "feed": {
+                "mode": "ordinary_changes",
+                "temporal_complete": false,
+                "ttl_complete": false,
+                "consumer_purge_acknowledged": false
+              },
+              "remaining_work": "0"
+            }
+          }
+        ],
+        "elapsed_ms": 5000,
+        "read_only": true
+      },
+      "expected": {
+        "status": 200,
+        "body": {
+          "result": {
+            "receipt": {
+              "id": "r1",
+              "operation": "remember",
+              "scope": {
+                "tenant": "@root",
+                "agent": "a"
+              },
+              "sequence": "7",
+              "retry_until_ms": "200",
+              "digest_version": "memory-request-v1"
+            },
+            "replayed": true,
+            "outcomes": [
+              {
+                "id": "e1",
+                "action": "created",
+                "revision": "1"
+              }
+            ],
+            "feed": {
+              "mode": "ordinary_changes",
+              "temporal_complete": false,
+              "ttl_complete": false,
+              "consumer_purge_acknowledged": false
+            },
+            "remaining_work": "0"
+          }
+        }
+      }
+    },
+    {
+      "name": "receipt-forget-preserves-notice",
+      "operation": "receipt",
+      "request": {
+        "method": "POST",
+        "path": "/v1/memory/notes/receipts/lookup",
+        "headers": {
+          "Authorization": "Bearer fixture-root"
+        },
+        "body": {
+          "scope": {
+            "agent": "a"
+          },
+          "operation": "forget",
+          "idempotency_key": "erase"
+        }
+      },
+      "view": {
+        "clock_ms": 100,
+        "sequence": 6,
+        "receipt_window_ms": 100,
+        "scope_grants": [
+          {
+            "tenant": "@root",
+            "agent": "a"
+          }
+        ],
+        "next_receipt_id": "r1",
+        "pre_state": [],
+        "receipts": [
+          {
+            "operation": "forget",
+            "scope": {
+              "tenant": "@root",
+              "agent": "a"
+            },
+            "key": "erase",
+            "request": {
+              "scope": {
+                "agent": "a"
+              },
+              "idempotency_key": "erase",
+              "target": {
+                "ids": [
+                  {
+                    "id": "e1",
+                    "revision": "1"
+                  }
+                ]
+              },
+              "mode": "logical_delete"
+            },
+            "retry_until_ms": 200,
+            "result": {
+              "receipt": {
+                "id": "r1",
+                "operation": "forget",
+                "scope": {
+                  "tenant": "@root",
+                  "agent": "a"
+                },
+                "sequence": "7",
+                "retry_until_ms": "200",
+                "digest_version": "memory-request-v1"
+              },
+              "replayed": false,
+              "outcomes": [
+                {
+                  "id": "e1",
+                  "action": "deleted",
+                  "revision": "7"
+                }
+              ],
+              "feed": {
+                "mode": "ordinary_changes",
+                "temporal_complete": false,
+                "ttl_complete": false,
+                "consumer_purge_acknowledged": false
+              },
+              "remaining_work": "0",
+              "state": "logical",
+              "erasure_notice": {
+                "live_state_only": true,
+                "secure_erasure": false,
+                "external_copies": "operator_managed",
+                "restore_requires_manifest": true,
+                "backup_history_purge": "not_verified",
+                "manifest_id": "manifest1"
+              }
+            }
+          }
+        ]
+      },
+      "expected": {
+        "status": 200,
+        "body": {
+          "result": {
+            "receipt": {
+              "id": "r1",
+              "operation": "forget",
+              "scope": {
+                "tenant": "@root",
+                "agent": "a"
+              },
+              "sequence": "7",
+              "retry_until_ms": "200",
+              "digest_version": "memory-request-v1"
+            },
+            "replayed": true,
+            "outcomes": [
+              {
+                "id": "e1",
+                "action": "deleted",
+                "revision": "7"
+              }
+            ],
+            "feed": {
+              "mode": "ordinary_changes",
+              "temporal_complete": false,
+              "ttl_complete": false,
+              "consumer_purge_acknowledged": false
+            },
+            "remaining_work": "0",
+            "state": "logical",
+            "erasure_notice": {
+              "live_state_only": true,
+              "secure_erasure": false,
+              "external_copies": "operator_managed",
+              "restore_requires_manifest": true,
+              "backup_history_purge": "not_verified",
+              "manifest_id": "manifest1"
+            }
+          }
+        }
+      }
+    },
+    {
+      "name": "receipt-absent-correct_facts-identity",
+      "operation": "receipt",
+      "request": {
+        "method": "POST",
+        "path": "/v1/memory/notes/receipts/lookup",
+        "headers": {
+          "Authorization": "Bearer fixture-root"
+        },
+        "body": {
+          "scope": {
+            "agent": "a"
+          },
+          "operation": "correct_facts",
+          "idempotency_key": "k1"
+        }
+      },
+      "view": {
+        "clock_ms": 199,
+        "sequence": 6,
+        "receipt_window_ms": 100,
+        "scope_grants": [
+          {
+            "tenant": "@root",
+            "agent": "a"
+          }
+        ],
+        "next_receipt_id": "r1",
+        "pre_state": [],
+        "receipts": [
+          {
+            "operation": "remember",
+            "scope": {
+              "tenant": "@root",
+              "agent": "a"
+            },
+            "key": "k1",
+            "request": {
+              "scope": {
+                "agent": "a"
+              },
+              "idempotency_key": "k1",
+              "items": [
+                {
+                  "id": "e1",
+                  "kind": "entity",
+                  "content": "Ada",
+                  "observed_at_ms": "90",
+                  "source": {
+                    "source_id": "s1",
+                    "source_kind": "caller"
+                  }
+                }
+              ]
+            },
+            "retry_until_ms": 200,
+            "result": {
+              "receipt": {
+                "id": "r1",
+                "operation": "remember",
+                "scope": {
+                  "tenant": "@root",
+                  "agent": "a"
+                },
+                "sequence": "7",
+                "retry_until_ms": "200",
+                "digest_version": "memory-request-v1"
+              },
+              "replayed": false,
+              "outcomes": [
+                {
+                  "id": "e1",
+                  "action": "created",
+                  "revision": "1"
+                }
+              ],
+              "feed": {
+                "mode": "ordinary_changes",
+                "temporal_complete": false,
+                "ttl_complete": false,
+                "consumer_purge_acknowledged": false
+              },
+              "remaining_work": "0"
+            }
+          }
+        ],
+        "elapsed_ms": 5000
+      },
+      "expected": {
+        "status": 404,
+        "body": {
+          "error": {
+            "code": "receipt_not_found",
+            "message": "sanitized"
+          }
+        }
+      },
+      "defect": {
+        "tag": "receipt-absent-correct_facts-identity",
+        "path": [
+          "request",
+          "body",
+          "operation"
+        ],
+        "set": "remember"
+      }
+    },
+    {
+      "name": "receipt-absent-resume_erasure-identity",
+      "operation": "receipt",
+      "request": {
+        "method": "POST",
+        "path": "/v1/memory/notes/receipts/lookup",
+        "headers": {
+          "Authorization": "Bearer fixture-root"
+        },
+        "body": {
+          "scope": {
+            "agent": "a"
+          },
+          "operation": "resume_erasure",
+          "idempotency_key": "k1"
+        }
+      },
+      "view": {
+        "clock_ms": 199,
+        "sequence": 6,
+        "receipt_window_ms": 100,
+        "scope_grants": [
+          {
+            "tenant": "@root",
+            "agent": "a"
+          }
+        ],
+        "next_receipt_id": "r1",
+        "pre_state": [],
+        "receipts": [
+          {
+            "operation": "remember",
+            "scope": {
+              "tenant": "@root",
+              "agent": "a"
+            },
+            "key": "k1",
+            "request": {
+              "scope": {
+                "agent": "a"
+              },
+              "idempotency_key": "k1",
+              "items": [
+                {
+                  "id": "e1",
+                  "kind": "entity",
+                  "content": "Ada",
+                  "observed_at_ms": "90",
+                  "source": {
+                    "source_id": "s1",
+                    "source_kind": "caller"
+                  }
+                }
+              ]
+            },
+            "retry_until_ms": 200,
+            "result": {
+              "receipt": {
+                "id": "r1",
+                "operation": "remember",
+                "scope": {
+                  "tenant": "@root",
+                  "agent": "a"
+                },
+                "sequence": "7",
+                "retry_until_ms": "200",
+                "digest_version": "memory-request-v1"
+              },
+              "replayed": false,
+              "outcomes": [
+                {
+                  "id": "e1",
+                  "action": "created",
+                  "revision": "1"
+                }
+              ],
+              "feed": {
+                "mode": "ordinary_changes",
+                "temporal_complete": false,
+                "ttl_complete": false,
+                "consumer_purge_acknowledged": false
+              },
+              "remaining_work": "0"
+            }
+          }
+        ],
+        "elapsed_ms": 5000
+      },
+      "expected": {
+        "status": 404,
+        "body": {
+          "error": {
+            "code": "receipt_not_found",
+            "message": "sanitized"
+          }
+        }
+      },
+      "defect": {
+        "tag": "receipt-absent-resume_erasure-identity",
+        "path": [
+          "request",
+          "body",
+          "operation"
+        ],
+        "set": "remember"
+      }
+    }
+  ],
+  "structural": [
+    {
+      "name": "response-receipt",
+      "schema": "exchange",
+      "request": false,
+      "value": {
+        "result": {
+          "receipt": {
+            "id": "r1",
+            "operation": "forget",
+            "scope": {
+              "tenant": "@root",
+              "agent": "a"
+            },
+            "sequence": "7",
+            "retry_until_ms": "200",
+            "digest_version": "memory-request-v1"
+          },
+          "replayed": true,
+          "outcomes": [
+            {
+              "id": "e1",
+              "action": "deleted",
+              "revision": "7"
+            }
+          ],
+          "feed": {
+            "mode": "ordinary_changes",
+            "temporal_complete": false,
+            "ttl_complete": false,
+            "consumer_purge_acknowledged": false
+          },
+          "remaining_work": "0",
+          "state": "logical",
+          "erasure_notice": {
+            "live_state_only": true,
+            "secure_erasure": false,
+            "external_copies": "operator_managed",
+            "restore_requires_manifest": true,
+            "backup_history_purge": "not_verified",
+            "manifest_id": "manifest1"
+          }
+        }
+      },
+      "valid": true,
+      "operation": "receipt",
+      "status": 200
+    },
+    {
+      "name": "http-inventory-receipt",
+      "schema": "http",
+      "request": true,
+      "value": {
+        "method": "POST",
+        "path": "/v1/memory/notes/receipts/lookup",
+        "headers": {},
+        "body": {
+          "scope": {
+            "agent": "a"
+          },
+          "operation": "remember",
+          "idempotency_key": "k1"
+        }
+      },
+      "valid": true,
+      "operation": "receipt"
+    }
+  ],
+  "operation_id": "MemoryGetReceipt"
+}

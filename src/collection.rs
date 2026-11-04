@@ -237,6 +237,24 @@ impl Collection {
     }
 
     pub(crate) fn rebuild_derived(&mut self) -> Result<()> {
+        #[cfg(test)]
+        if self.records.is_compact() {
+            let records = self.records.pin_effective();
+            let mut workspace = crate::compact::source::ReadWorkspace::new(4 << 20)?;
+            let metadata = self.metadata_indexes.rebuilt_effective(
+                &self.settings.metadata_indexes,
+                &records,
+                &mut workspace,
+            )?;
+            let text = self.text_index.rebuilt_effective(
+                &self.settings.text_fields,
+                &records,
+                &mut workspace,
+            )?;
+            self.metadata_indexes = metadata;
+            self.text_index = text;
+            return Ok(());
+        }
         let records = self.records.resident()?;
         self.metadata_indexes
             .rebuild(&self.settings.metadata_indexes, records);

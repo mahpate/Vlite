@@ -584,26 +584,39 @@ async fn embed_text(
     let started = Instant::now();
     let target = collection_path(target)?;
     let request = body(input)?;
-    if let Some(alias) = request
-        .provider
+    embed_in(
+        service,
+        role,
+        headers,
+        target,
+        request.text,
+        request.provider,
+        started,
+    )
+    .await
+    .map(Json)
+}
+
+pub(super) async fn embed_in(
+    service: Service,
+    role: admin::Role,
+    headers: HeaderMap,
+    target: Target,
+    text: String,
+    provider: Option<String>,
+    started: Instant,
+) -> Result<provider_serving::EmbedResponse, ApiError> {
+    if let Some(alias) = provider
         .as_ref()
         .filter(|alias| !matches!(alias.as_str(), "hashing" | "http"))
     {
-        return provider_serving::embed(
-            &service,
-            headers,
-            target,
-            alias.clone(),
-            request.text,
-            started,
-        )
-        .await
-        .map(Json);
+        return provider_serving::embed(&service, headers, target, alias.clone(), text, started)
+            .await;
     }
-    if request.text.len() > 16_384 {
+    if text.len() > 16_384 {
         return Err(unprocessable("text must be at most 16384 UTF-8 bytes"));
     }
-    let provider = request.provider.as_deref().unwrap_or("hashing").to_owned();
+    let provider = provider.as_deref().unwrap_or("hashing").to_owned();
     let target_for_dimensions = target.clone();
     let dimensions = service
         .run(move |db| {
@@ -635,7 +648,6 @@ async fn embed_text(
         }
         _ => return Err(unprocessable("provider must be hashing or http")),
     };
-    let text = request.text;
     let vector = tokio::task::spawn_blocking(move || embedder.embed_text(&text))
         .await
         .map_err(internal)?
@@ -645,11 +657,11 @@ async fn embed_text(
             "embedding dimensions do not match the collection",
         ));
     }
-    Ok(Json(provider_serving::EmbedResponse {
+    Ok(provider_serving::EmbedResponse {
         vector,
         dimensions,
         provider,
-    }))
+    })
 }
 
 #[derive(Default, Deserialize)]

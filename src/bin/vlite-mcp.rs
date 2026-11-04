@@ -5,6 +5,8 @@ mod graph_mcp;
 #[cfg(feature = "mcp-proxy")]
 #[path = "tool_support/graph_proxy.rs"]
 mod graph_proxy;
+#[path = "tool_support/kv_mcp.rs"]
+mod kv_mcp;
 
 use std::{
     collections::BTreeMap,
@@ -352,72 +354,16 @@ fn payload_bytes(args: &Value) -> Result<Vec<u8>, String> {
 }
 
 fn decode_base64(text: &str) -> Result<Vec<u8>, String> {
-    if !text.len().is_multiple_of(4) {
-        return Err("payload_base64 must use padded standard base64".into());
-    }
-    let mut out = Vec::with_capacity(text.len() / 4 * 3);
-    for (chunk_index, chunk) in text.as_bytes().as_chunks::<4>().0.iter().enumerate() {
-        let last = chunk_index + 1 == text.len() / 4;
-        let value = |byte: u8| -> Option<u8> {
-            match byte {
-                b'A'..=b'Z' => Some(byte - b'A'),
-                b'a'..=b'z' => Some(byte - b'a' + 26),
-                b'0'..=b'9' => Some(byte - b'0' + 52),
-                b'+' => Some(62),
-                b'/' => Some(63),
-                _ => None,
-            }
-        };
-        let a = value(chunk[0]).ok_or("invalid base64 payload")?;
-        let b = value(chunk[1]).ok_or("invalid base64 payload")?;
-        let c = if chunk[2] == b'=' {
-            None
-        } else {
-            Some(value(chunk[2]).ok_or("invalid base64 payload")?)
-        };
-        let d = if chunk[3] == b'=' {
-            None
-        } else {
-            Some(value(chunk[3]).ok_or("invalid base64 payload")?)
-        };
-        if !last && (c.is_none() || d.is_none()) || c.is_none() && d.is_some() {
-            return Err("invalid base64 padding".into());
-        }
-        out.push((a << 2) | (b >> 4));
-        if let Some(c) = c {
-            out.push((b << 4) | (c >> 2));
-            if let Some(d) = d {
-                out.push((c << 6) | d);
-            }
-        }
-    }
-    if encode_base64(&out) != text {
-        return Err("payload_base64 must be canonical padded base64".into());
-    }
-    Ok(out)
+    kv_mcp::decode_base64(text).map_err(|error| {
+        error
+            .trim_start_matches("invalid_input: ")
+            .replace("value_base64", "payload_base64")
+            .replace("base64 value", "base64 payload")
+    })
 }
 
 fn encode_base64(bytes: &[u8]) -> String {
-    const TABLE: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
-    let mut out = String::with_capacity(bytes.len().div_ceil(3) * 4);
-    for chunk in bytes.chunks(3) {
-        let a = chunk[0];
-        let b = *chunk.get(1).unwrap_or(&0);
-        let c = *chunk.get(2).unwrap_or(&0);
-        out.push(TABLE[(a >> 2) as usize] as char);
-        out.push(TABLE[(((a & 3) << 4) | (b >> 4)) as usize] as char);
-        out.push(if chunk.len() > 1 {
-            TABLE[(((b & 15) << 2) | (c >> 6)) as usize] as char
-        } else {
-            '='
-        });
-        out.push(if chunk.len() > 2 {
-            TABLE[(c & 63) as usize] as char
-        } else {
-            '='
-        });
-    }
-    out
+    kv_mcp::encode_base64(bytes)
 }
 
 fn record_json(id: u64, record: &vlite::Record, include_vector: bool) -> Value {
@@ -483,6 +429,9 @@ fn tool_call(
     name: &str,
     args: &Value,
 ) -> ToolResult {
+    if let Some(result) = kv_mcp::call(db, read_only, name, args) {
+        return result;
+    }
     if let Some(result) = graph_mcp::call(db, read_only, name, args) {
         return result;
     }
@@ -681,7 +630,12 @@ fn tool_result(result: ToolResult) -> Value {
     }
 }
 
-fn dispatch(backend: &mut Backend, config: &Config, message: Value) -> Option<Value> {
+fn dispatch(
+    backend: &mut Backend,
+    config: &Config,
+    message: Value,
+    message_text: &str,
+) -> Option<Value> {
     let Some(object) = message.as_object() else {
         return Some(protocol_error(Value::Null, -32600, "Invalid Request"));
     };
@@ -736,6 +690,7 @@ fn dispatch(backend: &mut Backend, config: &Config, message: Value) -> Option<Va
             Backend::Local(db) => {
                 #[allow(unused_mut)]
                 let mut tools = tool_definitions(config.read_only);
+                tools.extend(kv_mcp::tool_definitions(config.read_only));
                 tools.extend(graph_mcp::tool_definitions(db, config.read_only));
                 Some(json!({"tools":tools}))
             }
@@ -756,7 +711,14 @@ fn dispatch(backend: &mut Backend, config: &Config, message: Value) -> Option<Va
             match (name, args.as_object()) {
                 (Some(name), Some(_)) => Some(tool_result(match backend {
                     Backend::Local(db) => {
-                        tool_call(db, &config.path, config.read_only, name, &args)
+                        let validation = if kv_mcp::is_tool(name) {
+                            kv_mcp::unique_json(message_text)
+                        } else {
+                            Ok(())
+                        };
+                        validation.and_then(|()| {
+                            tool_call(db, &config.path, config.read_only, name, &args)
+                        })
                     }
                     #[cfg(feature = "mcp-proxy")]
                     Backend::Proxy(remote) => remote
@@ -807,7 +769,7 @@ fn run() -> Result<(), Box<dyn Error>> {
             continue;
         }
         let response = match serde_json::from_str::<Value>(&line) {
-            Ok(message) => dispatch(&mut backend, &config, message),
+            Ok(message) => dispatch(&mut backend, &config, message, &line),
             Err(_) => Some(protocol_error(Value::Null, -32700, "Parse error")),
         };
         if let Some(response) = response {

@@ -9,6 +9,12 @@
 // collection with legacy defaults (the REST `/v1/...` routes); a non-empty
 // value addresses that named collection (`/v1/collections/{collection}/...`).
 // Limits: requests are capped at 8 MiB and responses at 16 MiB.
+// Managed provider errors carry vlite-error-code: provider_not_configured ->
+// FAILED_PRECONDITION; invalid_provider_input -> INVALID_ARGUMENT;
+// provider_invalid_response/provider_unavailable -> UNAVAILABLE;
+// provider_timeout -> DEADLINE_EXCEEDED; provider_busy -> RESOURCE_EXHAUSTED
+// (existing retry-after: 1 trailer); provider_snapshot_conflict -> ABORTED,
+// no retry hint, caller retries the whole request. No automatic fallback.
 syntax = "proto3";
 
 package vlite.v1;
@@ -25,6 +31,7 @@ service VLite {
   rpc WriteBatch(WriteBatchRequest) returns (WriteBatchResponse);
   // Exact or ready-index ANN search. Never builds an index.
   rpc Search(SearchRequest) returns (SearchResponse);
+  rpc EmbedText(EmbedTextRequest) returns (EmbedTextResponse);
   rpc UpdateMetadata(UpdateMetadataRequest) returns (UpdateMetadataResponse);
   rpc SearchGrouped(GroupedSearchRequest) returns (GroupedSearchResponse);
   rpc Recommend(RecommendRequest) returns (SearchResponse);
@@ -258,11 +265,27 @@ message SearchRequest {
   RerankMode rerank_mode = 15;
   optional double mmr_lambda = 16;
   optional uint32 rerank_candidates = 17;
+  // Required only for CUSTOM; administrator-bound alias, never an endpoint.
+  optional string rerank_provider = 18;
+}
+
+message EmbedTextRequest {
+  string collection = 1;
+  string text = 2;
+  // Empty selects hashing; http retains legacy environment configuration.
+  string provider = 3;
+}
+
+message EmbedTextResponse {
+  repeated float vector = 1;
+  uint32 dimensions = 2;
+  string provider = 3;
 }
 
 message Hit {
   uint64 id = 1;
   double distance = 2;
+  optional double rerank_score = 3;
 }
 
 enum HybridVectorLeg {
@@ -289,6 +312,13 @@ message HybridHit {
 message SearchResponse {
   repeated Hit hits = 1;
   repeated HybridHit hybrid_hits = 2;
+  optional Ranking ranking = 3;
+}
+
+message Ranking {
+  string provider = 1;
+  // The only supported value is score_desc_id_asc.
+  string order = 2;
 }
 
 // Successful import responses contain the same JSON shape as REST, preserving
@@ -353,6 +383,7 @@ enum RerankMode {
   RERANK_MODE_NONE = 0;
   RERANK_MODE_EXACT = 1;
   RERANK_MODE_MMR = 2;
+  RERANK_MODE_CUSTOM = 3;
 }
 message GroupedSearchRequest {
   string collection = 1;

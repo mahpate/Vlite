@@ -1,0 +1,69 @@
+{
+  "success": [
+    {"command":"kv-put","request":{"collection":"default","namespace":"n","key":"a","value_base64":"AAEC","expected":"absent"},"result":{"expires_at_ms":null},"version":true},
+    {"command":"kv-get","request":{"collection":"default","namespace":"n","key":"a"},"result":{"key":"a","value_base64":"AAEC","expires_at_ms":null},"version":true},
+    {"command":"kv-list","request":{"collection":"default","namespace":"n","limit":1},"result":{"items":[{"key":"a","value_base64":"AAEC","expires_at_ms":null}],"next_after":null},"item_versions":true},
+    {"command":"kv-delete","request":{"collection":"default","namespace":"n","key":"a","expected":"any"},"result":{"deleted":true}},
+    {"command":"kv-delete","request":{"collection":"default","namespace":"n","key":"a","expected":"absent"},"result":{"deleted":false}},
+    {"command":"kv-put","request":{"collection":"default","namespace":"n","key":"empty","value_base64":"","expires_at_ms":"18446744073709551615"},"result":{"expires_at_ms":"18446744073709551615"},"version":true},
+    {"command":"kv-get","request":{"collection":"default","namespace":"n","key":"empty"},"result":{"key":"empty","value_base64":"","expires_at_ms":"18446744073709551615"},"version":true},
+    {"command":"kv-put","request":{"collection":"default","namespace":"n","key":"empty","value_base64":""},"result":{"expires_at_ms":null},"version":true},
+    {"command":"kv-put","request":{"collection":"default","namespace":"n","key":"due","value_base64":"","expires_at_ms":"0"},"result":{"expires_at_ms":"0"},"version":true},
+    {"command":"kv-delete","request":{"collection":"default","namespace":"n","key":"due","expected":"absent"},"result":{"deleted":false}},
+    {"command":"kv-put","request":{"collection":"default","namespace":"n","key":"large-deadline","value_base64":"","expires_at_ms":"9007199254740993"},"result":{"expires_at_ms":"9007199254740993"},"version":true},
+    {"command":"kv-put","request":{"collection":"default","namespace":"n","key":"large-deadline","value_base64":"","expires_at_ms":null},"result":{"expires_at_ms":null},"version":true}
+  ],
+  "errors": [
+    {"name":"missing-key","command":"kv-get","request":{"collection":"default","namespace":"n","key":"missing"},"code":"kv_not_found"},
+    {"name":"due-key","command":"kv-get","request":{"collection":"default","namespace":"n","key":"due"},"code":"kv_not_found"},
+    {"name":"missing-collection","command":"kv-put","request":{"collection":"missing","namespace":"n","key":"a","value_base64":""},"code":"collection_not_found"},
+    {"name":"non-kv","command":"kv-list","request":{"collection":"vectors","namespace":"n"},"code":"not_kv_collection"},
+    {"name":"unknown","command":"kv-get","request":{"collection":"default","namespace":"n","key":"a","extra":true},"code":"invalid_request"},
+    {"name":"wrong-type","command":"kv-put","request":{"collection":"default","namespace":"n","key":"a","value_base64":1},"code":"invalid_request"},
+    {"name":"integer-deadline","command":"kv-put","request":{"collection":"default","namespace":"n","key":"a","value_base64":"","expires_at_ms":0},"code":"invalid_request"},
+    {"name":"integer-revision","command":"kv-delete","request":{"collection":"default","namespace":"n","key":"a","expected":{"revision":0}},"code":"invalid_request"},
+    {"name":"missing-address","command":"kv-get","request":{"namespace":"n","key":"a"},"code":"invalid_request"},
+    {"name":"empty-namespace","command":"kv-get","request":{"collection":"default","namespace":"","key":"a"},"code":"invalid_input"},
+    {"name":"empty-key","command":"kv-get","request":{"collection":"default","namespace":"n","key":""},"code":"invalid_input"},
+    {"name":"empty-after","command":"kv-list","request":{"collection":"default","namespace":"n","after":""},"code":"invalid_input"},
+    {"name":"zero-limit","command":"kv-list","request":{"collection":"default","namespace":"n","limit":0},"code":"invalid_input"},
+    {"name":"large-limit","command":"kv-list","request":{"collection":"default","namespace":"n","limit":10001},"code":"invalid_input"},
+    {"name":"noncanonical-base64","command":"kv-put","request":{"collection":"default","namespace":"n","key":"a","value_base64":"AB=="},"code":"invalid_input"},
+    {"name":"unpadded-base64","command":"kv-put","request":{"collection":"default","namespace":"n","key":"a","value_base64":"AA"},"code":"invalid_input"},
+    {"name":"bad-decimal","command":"kv-delete","request":{"collection":"default","namespace":"n","key":"a","expected":{"revision":"00"}},"code":"invalid_input"},
+    {"name":"overflow","command":"kv-put","request":{"collection":"default","namespace":"n","key":"a","value_base64":"","expires_at_ms":"18446744073709551616"},"code":"invalid_input"},
+    {"name":"cas-zero","command":"kv-put","request":{"collection":"default","namespace":"n","key":"empty","value_base64":"","expected":{"revision":"0"}},"code":"precondition_failed"},
+    {"name":"absent-live","command":"kv-delete","request":{"collection":"default","namespace":"n","key":"empty","expected":"absent"},"code":"precondition_failed"},
+    {"name":"object-any","command":"kv-delete","request":{"collection":"default","namespace":"n","key":"empty","expected":{"any":null}},"code":"invalid_request"},
+    {"name":"object-absent","command":"kv-delete","request":{"collection":"default","namespace":"n","key":"empty","expected":{"absent":null}},"code":"invalid_request"},
+    {"name":"negative-limit","command":"kv-list","request":{"collection":"default","namespace":"n","limit":-1},"code":"invalid_request"},
+    {"name":"string-limit","command":"kv-list","request":{"collection":"default","namespace":"n","limit":"1"},"code":"invalid_request"},
+    {"name":"null-after","command":"kv-list","request":{"collection":"default","namespace":"n","after":null},"code":"invalid_request"},
+    {"name":"invalid-collection","command":"kv-get","request":{"collection":"UPPER","namespace":"n","key":"empty"},"code":"invalid_input"},
+    {"name":"missing-collection-get","command":"kv-get","request":{"collection":"missing","namespace":"n","key":"a"},"code":"collection_not_found"},
+    {"name":"missing-collection-delete","command":"kv-delete","request":{"collection":"missing","namespace":"n","key":"a"},"code":"collection_not_found"},
+    {"name":"missing-collection-list","command":"kv-list","request":{"collection":"missing","namespace":"n"},"code":"collection_not_found"},
+    {"name":"non-kv-get","command":"kv-get","request":{"collection":"vectors","namespace":"n","key":"a"},"code":"not_kv_collection"},
+    {"name":"non-kv-put","command":"kv-put","request":{"collection":"vectors","namespace":"n","key":"a","value_base64":""},"code":"not_kv_collection"},
+    {"name":"non-kv-delete","command":"kv-delete","request":{"collection":"vectors","namespace":"n","key":"a"},"code":"not_kv_collection"}
+  ],
+  "readonly": [
+    {"command":"kv-put","request":{"collection":"default","namespace":"n","key":"a","value_base64":""},"code":"read_only"},
+    {"command":"kv-delete","request":{"collection":"default","namespace":"n","key":"a"},"code":"read_only"}
+  ],
+  "legacy": [
+    {"command":"kv-put","request":{"collection":"default","namespace":"n","key":"a","value_base64":"","expires_at_ms":"0"},"code":"upgrade_required"}
+  ],
+  "bounds": [
+    {"field":"namespace","length":1,"valid":true},
+    {"field":"namespace","length":255,"valid":true},
+    {"field":"namespace","length":256,"valid":false},
+    {"field":"key","length":1,"valid":true},
+    {"field":"key","length":1024,"valid":true},
+    {"field":"key","length":1025,"valid":false},
+    {"field":"prefix","length":1024,"valid":true},
+    {"field":"prefix","length":1025,"valid":false},
+    {"field":"after","length":1024,"valid":true},
+    {"field":"after","length":1025,"valid":false}
+  ]
+}

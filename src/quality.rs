@@ -13,6 +13,29 @@ use crate::{
 };
 use std::collections::BTreeSet;
 
+#[cfg(test)]
+#[derive(Debug)]
+pub(crate) struct EffectiveMemory {
+    pub(crate) source: crate::compact::source::SeamAccounting,
+    pub(crate) overlay_bytes: u64,
+}
+
+#[cfg(test)]
+pub(crate) fn effective_memory(
+    records: &crate::records::CollectionRecords,
+    workspace: &mut crate::compact::source::ReadWorkspace,
+) -> Result<Option<EffectiveMemory>> {
+    records
+        .source_accounting(workspace)?
+        .map(|source| {
+            Ok(EffectiveMemory {
+                source,
+                overlay_bytes: records.overlay_logical_bytes()?,
+            })
+        })
+        .transpose()
+}
+
 /// Sampled recall options. Bounds: `samples` 1..=32 (default 8), `k` 1..=100
 /// (default 10), `ef_search` 1..=`MAX_EF_SEARCH` and ≥ min(k, live),
 /// `max_distance_evaluations` default 50,000,000.

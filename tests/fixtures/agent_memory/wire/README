@@ -1,0 +1,53 @@
+Independent REST memory wire fixtures
+====================================
+
+Authority: docs/projects/roadmap/serving-memory-contract.md, especially sections
+3-9 and the selected decisions in section 11. No expectations come from Rust or
+server output. Run python -B tests\memory_wire_oracle.py --self-test, also with -O.
+These are logical/schema goldens, not a running REST adapter qualification.
+
+Each named case has operation, request (method/path/headers/body), independent
+view, and expected status/body. A body string denotes raw JSON, allowing duplicate
+key and malformed-JSON tests. All other bodies are actual decoded JSON objects.
+Errors compare exact status/code/envelope; message text is deliberately ignored:
+the contract requires a sanitized string but does not prescribe English wording.
+Every rejection declares one defect and a repair; repairing it must make the
+exchange acceptable. A repair_check of gate validates authorization and the
+repaired capability gate, without inventing a successful unaccepted operation.
+A repair_check of structure validates the repaired request only when its
+execution mapping is explicitly OPEN. Other repairs must execute successfully.
+Every repaired exchange receives an orthogonal unknown-field second defect.
+
+View fields are test injection, not request fields or provisioning APIs:
+clock_ms, sequence, tenant (omitted means @root), exact effective scope_grants,
+receipt_window_ms (required), next_receipt_id (opaque accessor result), pre_state
+(existing agent_memory_oracle fixture steps), receipts (retained logical identity,
+request, retry_until_ms and static result), and explicit authorization/capability
+or planner observations. Receipt IDs are injected accessor values, not calculated
+keys. Semantic request equality is logical only, never a production digest.
+No test fabricates a digest encoding or physical-frame byte count.
+
+Input-only compression: {"$text":"x","count":4096}, {"$repeat":object,"count":n,
+"enumerate":["id"]}, and {"$properties":typed_scalar,"count":n} expand request/view
+inputs. Expected outputs are always literal; they are never expanded, calculated,
+sorted, sliced or captured from oracle output.
+{"$json_padding":body,"size":n} produces input-only raw JSON plus leading spaces
+to test the actual serialized request byte boundary, not a reserialized proxy.
+
+Each family has a literal operation_id and a structural catalog. A structural
+case names a schema, input value, request/response direction and valid boolean;
+invalid cases declare an expected error and one repair. Special schema values
+json, http, exchange and headers exercise decoding and HTTP/envelope rules.
+Successful fact/pending structural examples describe only section 8 JSON shapes.
+
+Structural cases exercise the full nine-operation inventory independently of
+which core capabilities are accepted. Execution successes are restricted to
+accepted core behavior. Unspecified mappings/encodings are recorded as OPEN items
+in tests/memory_wire_report.md, not guessed in wire success/error expectations.
+Recall views use the ranking reference's id/scope/O/rank/importance vocabulary,
+with retained kind/expiry/metadata and optional stored unit vectors. Optional
+raw_scores are independently injected eligible-leg BM25/RRF observations, not
+computed retrieval expectations. Filters and authoritative scope/kind/owner TTL
+are applied independently before ranking. These are not candidate-discovery or
+index-analyzer parity claims. Consolidation views use the existing C1 setup
+vocabulary; source revisions/expiry are rechecked by that unchanged reference.

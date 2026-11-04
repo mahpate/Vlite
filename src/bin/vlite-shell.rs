@@ -13,6 +13,8 @@ Without --script reads stdin; prompts only on a terminal. One command per line.
 Commands: help | header | format | collections | stats | use NAME | browse [LIMIT] [AFTER_ID]
 get ID | delete ID | put {"id":1,"vector":[1,2],"payload":"text","metadata":{}}
 search {"vector":[1,2],"k":10,"ann":false,"ef_search":100,"metric":"squared_l2","filters":[]}
+kv-get REQUEST | kv-put REQUEST | kv-delete REQUEST | kv-list REQUEST
+KV REQUEST is one JSON object with required collection and namespace; see docs/TOOLS.md.
 Metadata uses typed values, e.g. {"tag":{"type":"string","value":"x"}}.
 Filters use engine JSON: [{"op":"eq","field":"tag","value":{"type":"string","value":"x"}}].
 verify | backup DEST | compact DEST | upgrade DEST | rebuild | quit
@@ -131,6 +133,11 @@ fn run() -> Result<()> {
                 return maintenance;
             }
             let db = db.as_mut().ok_or("database unavailable")?;
+            if let Some(tool) = tool_support::kv_mcp::shell_tool(command) {
+                let result = tool_support::kv_mcp::run(db, readonly, tool, rest)?;
+                println!("{result}");
+                return Ok(());
+            }
             match command {
                 "help" => print!("{HELP}"),
                 "header" | "format" | "stats" => println!(

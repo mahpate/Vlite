@@ -1,0 +1,118 @@
+{
+  "schema": "memory-rest-wire-v1",
+  "cases": [
+    {
+      "name": "erasure-core-capability-absent",
+      "operation": "erasure",
+      "request": {
+        "method": "POST",
+        "path": "/v1/memory/notes/erasures/get",
+        "headers": {
+          "Authorization": "Bearer fixture-root"
+        },
+        "body": {
+          "scope": {
+            "agent": "a"
+          },
+          "job_id": "j1"
+        }
+      },
+      "view": {
+        "clock_ms": 100,
+        "sequence": 6,
+        "receipt_window_ms": 100,
+        "scope_grants": [
+          {
+            "tenant": "@root",
+            "agent": "a"
+          }
+        ],
+        "next_receipt_id": "r1",
+        "pre_state": [],
+        "capabilities": {}
+      },
+      "expected": {
+        "status": 409,
+        "body": {
+          "error": {
+            "code": "memory_capability_unavailable",
+            "message": "sanitized"
+          }
+        }
+      },
+      "defect": {
+        "tag": "erasure-core-capability-absent",
+        "path": [
+          "view",
+          "capabilities"
+        ],
+        "set": {
+          "erasure": true
+        }
+      },
+      "repair_check": "gate"
+    }
+  ],
+  "structural": [
+    {
+      "name": "response-erasure",
+      "schema": "exchange",
+      "request": false,
+      "value": {
+        "erasure": {
+          "id": "j1",
+          "scope": {
+            "tenant": "@root",
+            "agent": "a"
+          },
+          "target": {
+            "scope": true
+          },
+          "revision": "8",
+          "generation": "1",
+          "state": "pending",
+          "logical_visibility": "hidden",
+          "deleted_count": "0",
+          "remaining_count": null,
+          "resume_token": "opaque"
+        },
+        "erasure_notice": {
+          "live_state_only": true,
+          "secure_erasure": false,
+          "external_copies": "operator_managed",
+          "restore_requires_manifest": true,
+          "backup_history_purge": "not_verified",
+          "manifest_id": "manifest1"
+        },
+        "feed": {
+          "mode": "ordinary_changes",
+          "temporal_complete": false,
+          "ttl_complete": false,
+          "consumer_purge_acknowledged": false
+        }
+      },
+      "valid": true,
+      "operation": "erasure",
+      "status": 200
+    },
+    {
+      "name": "http-inventory-erasure",
+      "schema": "http",
+      "request": true,
+      "value": {
+        "method": "POST",
+        "path": "/v1/memory/notes/erasures/get",
+        "headers": {},
+        "body": {
+          "scope": {
+            "agent": "a"
+          },
+          "job_id": "j1"
+        }
+      },
+      "valid": true,
+      "operation": "erasure"
+    }
+  ],
+  "operation_id": "MemoryGetErasure"
+}

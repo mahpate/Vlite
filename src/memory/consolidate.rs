@@ -509,12 +509,16 @@ impl MemoryMut<'_> {
         if string_property(&scope_node, "tuple")? != hex(&request.scope.encode()) {
             return Err(MemoryError::DigestCollision);
         }
+        let barrier = super::erasure::barrier(&read, &scope_key)?;
         let mut replaced = None;
         if let Some(receipt) = read.get_node(&receipt_key)?.output {
             let stored = decode_receipt(&read, &receipt, &request.scope, &scope_key, &collection)?;
             if now < stored.expires_at_ms {
                 if stored.digest != request_digest {
-                    return Err(MemoryError::IdempotencyConflict);
+                    return Err(match barrier {
+                        Some(_) => MemoryError::DeletionPending,
+                        None => MemoryError::IdempotencyConflict,
+                    });
                 }
                 let expected = StoredOutcome {
                     id: summary.id.clone(),
@@ -523,6 +527,9 @@ impl MemoryMut<'_> {
                 };
                 if stored.outcome != expected {
                     return Err(MemoryError::InvalidBundle);
+                }
+                if barrier.is_some_and(|job| stored.receipt_revision >= job) {
+                    return Err(MemoryError::DeletionPending);
                 }
                 return Ok(ConsolidateResult {
                     summary_id: expected.id,
@@ -536,6 +543,9 @@ impl MemoryMut<'_> {
                 });
             }
             replaced = Some((stored.receipt_revision, stored.outcome_revision));
+        }
+        if barrier.is_some() {
+            return Err(MemoryError::DeletionPending);
         }
 
         if request.deadline_ms.is_some_and(|deadline| now >= deadline) {

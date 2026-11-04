@@ -4,11 +4,12 @@
 //! uses and calls the same transport-neutral cores, so authentication
 //! (`authenticate`), scope policy (`authorize_need`), shared admission and
 //! worker permits, engine limits, validation, metrics and audit are
-//! identical. Nothing here issues an HTTP call. Errors carry the REST error
+//! identical. Managed inference uses the shared bounded provider adapters.
+//! Errors carry the REST error
 //! message and the stable REST code in the `vlite-error-code` trailer.
 
 use super::*;
-use std::{collections::HashMap, future::Future};
+use std::{collections::HashMap, future::Future, time::Duration};
 use tonic::{Request, Response, Status, metadata::MetadataValue as Ascii};
 
 /// Generated protobuf types, server and client for `proto/vlite/v1/vlite.proto`.
@@ -177,10 +178,33 @@ struct Adapter {
     service: Service,
 }
 
+#[cfg(test)]
+pub(super) async fn test_embed(
+    service: Service,
+    request: Request<proto::EmbedTextRequest>,
+) -> Result<Response<proto::EmbedTextResponse>, Status> {
+    Adapter { service }.embed_text(request).await
+}
+
+#[cfg(test)]
+pub(super) async fn test_search(
+    service: Service,
+    request: Request<proto::SearchRequest>,
+) -> Result<Response<proto::SearchResponse>, Status> {
+    Adapter { service }.search(request).await
+}
+
 /// Maps the single REST error currency onto gRPC codes.
 fn status_code(error: &ApiError) -> tonic::Code {
     use tonic::Code;
     match (error.status.as_u16(), error.code) {
+        (409, "provider_not_configured") => Code::FailedPrecondition,
+        (422, "invalid_provider_input") => Code::InvalidArgument,
+        (502, "provider_invalid_response") => Code::Unavailable,
+        (503, "provider_unavailable") => Code::Unavailable,
+        (504, "provider_timeout") => Code::DeadlineExceeded,
+        (429, "provider_busy") => Code::ResourceExhausted,
+        (409, "provider_snapshot_conflict") => Code::Aborted,
         (429, _) => Code::ResourceExhausted,
         (401, _) => Code::Unauthenticated,
         (403, _) => Code::PermissionDenied,
@@ -568,10 +592,105 @@ fn hits_out(hits: Vec<crate::SearchHit>) -> proto::SearchResponse {
             .map(|hit| proto::Hit {
                 id: hit.id,
                 distance: hit.distance,
+                rerank_score: None,
             })
             .collect(),
         hybrid_hits: Vec::new(),
+        ranking: None,
     }
+}
+
+fn custom_hits_out(value: Value) -> Result<proto::SearchResponse, ApiError> {
+    #[derive(Deserialize)]
+    struct Hit {
+        id: String,
+        distance: f64,
+        rerank_score: f64,
+    }
+    #[derive(Deserialize)]
+    struct Ranking {
+        provider: String,
+        order: String,
+    }
+    #[derive(Deserialize)]
+    struct Ranked {
+        hits: Vec<Hit>,
+        ranking: Ranking,
+    }
+    let ranked: Ranked =
+        serde_json::from_value(value).map_err(|_| internal("invalid managed ranking result"))?;
+    let hits = ranked
+        .hits
+        .into_iter()
+        .map(|hit| {
+            Ok(proto::Hit {
+                id: hit
+                    .id
+                    .parse()
+                    .map_err(|_| internal("invalid managed ranking id"))?,
+                distance: hit.distance,
+                rerank_score: Some(hit.rerank_score),
+            })
+        })
+        .collect::<Result<Vec<_>, ApiError>>()?;
+    Ok(proto::SearchResponse {
+        hits,
+        hybrid_hits: Vec::new(),
+        ranking: Some(proto::Ranking {
+            provider: ranked.ranking.provider,
+            order: ranked.ranking.order,
+        }),
+    })
+}
+
+// Tonic enforces grpc-timeout on the response future. Adapter::call also owns a
+// detached task, so managed inference must cancel its outbound work separately.
+async fn managed_call<T>(
+    headers: &HeaderMap,
+    started: Instant,
+    inference: impl Future<Output = Result<T, ApiError>>,
+) -> Result<T, ApiError> {
+    let budget = managed_budget(headers)?;
+    if started.elapsed() >= budget {
+        return Err(providers::ProviderError::Timeout.into());
+    }
+    let deadline = tokio::time::Instant::from_std(started) + budget;
+    let result = tokio::time::timeout_at(deadline, inference)
+        .await
+        .map_err(|_| ApiError::from(providers::ProviderError::Timeout))?;
+    if started.elapsed() >= budget {
+        return Err(providers::ProviderError::Timeout.into());
+    }
+    result
+}
+
+fn managed_budget(headers: &HeaderMap) -> Result<Duration, ApiError> {
+    let maximum = Duration::from_secs(10);
+    let Some(value) = headers.get("grpc-timeout") else {
+        return Ok(maximum);
+    };
+    let value = value
+        .to_str()
+        .map_err(|_| providers::ProviderError::InvalidInput)?;
+    let (digits, unit) = value
+        .split_at_checked(value.len().saturating_sub(1))
+        .ok_or(providers::ProviderError::InvalidInput)?;
+    if digits.is_empty() || digits.len() > 8 || !digits.bytes().all(|byte| byte.is_ascii_digit()) {
+        return Err(providers::ProviderError::InvalidInput.into());
+    }
+    let number: u64 = digits
+        .parse()
+        .map_err(|_| providers::ProviderError::InvalidInput)?;
+    let duration = match unit {
+        "H" => Duration::from_secs(number * 3600),
+        "M" => Duration::from_secs(number * 60),
+        "S" => Duration::from_secs(number),
+        "m" => Duration::from_millis(number),
+        "u" => Duration::from_micros(number),
+        "n" => Duration::from_nanos(number),
+        _ => return Err(providers::ProviderError::InvalidInput.into()),
+    };
+    Ok(duration.min(maximum))
 }
 
 fn sparse_in(indices: Vec<u32>, values: Vec<f32>) -> Result<Vec<(u32, f32)>, ApiError> {
@@ -1070,19 +1189,47 @@ impl VLite for Adapter {
         const ROUTE: &str = "grpc:/vlite.v1.VLite/Search";
         let need = Need::Op(Op::Search, Reach::Collection);
         let legacy = request.get_ref().collection.is_empty();
+        let headers = request.metadata().clone().into_headers();
+        let started = Instant::now();
         self.call(
             ROUTE,
             request,
             need,
             true,
             legacy,
-            |service, role, request_id, request| async move {
+            move |service, role, request_id, request| async move {
                 let target = target(request.collection.clone());
                 let requested_k = request.k as usize;
-                let rerank_metric = metric_in(request.metric)?;
                 let rerank_metric_explicit = request.metric != proto::Metric::Unspecified as i32;
                 let rerank_mode = proto::RerankMode::try_from(request.rerank_mode)
                     .map_err(|_| unprocessable("unknown rerank mode"))?;
+                if rerank_mode == proto::RerankMode::Custom {
+                    let rerank = RerankRequest {
+                        mode: RerankMode::Custom,
+                        candidates: request.rerank_candidates.map(|value| value as usize),
+                        lambda: request.mmr_lambda,
+                        provider: request.rerank_provider.clone(),
+                    };
+                    let mut input = search_input(request).map_err(|error| {
+                        if error.status == StatusCode::UNPROCESSABLE_ENTITY {
+                            providers::ProviderError::InvalidInput.into()
+                        } else {
+                            error
+                        }
+                    })?;
+                    input.rerank = Some(rerank);
+                    let response = managed_call(
+                        &headers,
+                        started,
+                        provider_serving::search(&service, headers.clone(), target, input, started),
+                    )
+                    .await?;
+                    return custom_hits_out(response);
+                }
+                if request.rerank_provider.is_some() {
+                    return Err(providers::ProviderError::InvalidInput.into());
+                }
+                let rerank_metric = metric_in(request.metric)?;
                 let candidate_count = request.rerank_candidates.map_or_else(
                     || requested_k.saturating_mul(4).max(requested_k),
                     |value| value as usize,
@@ -1145,7 +1292,9 @@ impl VLite for Adapter {
                                                     lambda: mmr_lambda,
                                                 })
                                             }
-                                            proto::RerankMode::None => unreachable!(),
+                                            proto::RerankMode::None | proto::RerankMode::Custom => {
+                                                unreachable!()
+                                            }
                                         };
                                     Ok(db.collection(&name)?.rerank(
                                         &query,
@@ -1186,9 +1335,53 @@ impl VLite for Adapter {
                         Ok(proto::SearchResponse {
                             hits: Vec::new(),
                             hybrid_hits,
+                            ranking: None,
                         })
                     }
                 }
+            },
+        )
+        .await
+    }
+
+    async fn embed_text(
+        &self,
+        request: Request<proto::EmbedTextRequest>,
+    ) -> Result<Response<proto::EmbedTextResponse>, Status> {
+        let legacy = request.get_ref().collection.is_empty();
+        let headers = request.metadata().clone().into_headers();
+        let started = Instant::now();
+        self.call(
+            "grpc:/vlite.v1.VLite/EmbedText",
+            request,
+            Need::Op(Op::Search, Reach::Collection),
+            true,
+            legacy,
+            move |service, role, _, request| async move {
+                let target = target(request.collection);
+                let provider = (!request.provider.is_empty()).then_some(request.provider);
+                let managed = provider
+                    .as_deref()
+                    .is_some_and(|alias| !matches!(alias, "hashing" | "http"));
+                let inference = features::embed_in(
+                    service,
+                    role,
+                    headers.clone(),
+                    target,
+                    request.text,
+                    provider,
+                    started,
+                );
+                let response = if managed {
+                    managed_call(&headers, started, inference).await?
+                } else {
+                    inference.await?
+                };
+                Ok(proto::EmbedTextResponse {
+                    vector: response.vector,
+                    dimensions: response.dimensions as u32,
+                    provider: response.provider,
+                })
             },
         )
         .await
@@ -1260,6 +1453,7 @@ impl VLite for Adapter {
                                         .map(|hit| proto::Hit {
                                             id: hit.id,
                                             distance: hit.distance,
+                                            rerank_score: None,
                                         })
                                         .collect(),
                                 })
@@ -1640,6 +1834,7 @@ impl VLite for Adapter {
                         let hits = db.collection(&name)?.search_dense_sparse(&query)?;
                         Ok(proto::SearchResponse {
                             hits: Vec::new(),
+                            ranking: None,
                             hybrid_hits: hits
                                 .into_iter()
                                 .map(|hit| proto::HybridHit {
@@ -1690,6 +1885,7 @@ impl VLite for Adapter {
                                 .map(|hit| proto::Hit {
                                     id: hit.id,
                                     distance: hit.distance,
+                                    rerank_score: None,
                                 })
                                 .collect(),
                             groups: output
@@ -1703,6 +1899,7 @@ impl VLite for Adapter {
                                         .map(|hit| proto::Hit {
                                             id: hit.id,
                                             distance: hit.distance,
+                                            rerank_score: None,
                                         })
                                         .collect(),
                                 })
@@ -2318,6 +2515,7 @@ fn request_collection<T: 'static>(request: &T) -> String {
     field!(proto::DeleteVectorRequest, collection);
     field!(proto::WriteBatchRequest, collection);
     field!(proto::SearchRequest, collection);
+    field!(proto::EmbedTextRequest, collection);
     field!(proto::ReserveImportRequest, collection);
     field!(proto::ExportVectorsRequest, collection);
     String::new()
@@ -2347,5 +2545,120 @@ mod graph_errors {
                 Some(code)
             );
         }
+    }
+}
+
+#[cfg(test)]
+mod provider_errors {
+    use super::*;
+
+    macro_rules! mapping {
+        ($name:ident, $http:ident, $stable:literal, $grpc:ident) => {
+            #[test]
+            fn $name() {
+                let result = status(
+                    ApiError::new(StatusCode::$http, $stable, "sanitized provider error"),
+                    "provider-mapping",
+                );
+                assert_eq!(result.code(), tonic::Code::$grpc);
+                assert_eq!(result.metadata().get(ERROR_CODE_TRAILER).unwrap(), $stable);
+                assert_eq!(result.message(), "sanitized provider error");
+                assert_eq!(
+                    result.metadata().get("retry-after").is_some(),
+                    $stable == "provider_busy"
+                );
+            }
+        };
+    }
+
+    mapping!(
+        not_configured,
+        CONFLICT,
+        "provider_not_configured",
+        FailedPrecondition
+    );
+    mapping!(
+        invalid_input,
+        UNPROCESSABLE_ENTITY,
+        "invalid_provider_input",
+        InvalidArgument
+    );
+    mapping!(
+        invalid_response,
+        BAD_GATEWAY,
+        "provider_invalid_response",
+        Unavailable
+    );
+    mapping!(
+        unavailable,
+        SERVICE_UNAVAILABLE,
+        "provider_unavailable",
+        Unavailable
+    );
+    mapping!(
+        timeout,
+        GATEWAY_TIMEOUT,
+        "provider_timeout",
+        DeadlineExceeded
+    );
+    mapping!(busy, TOO_MANY_REQUESTS, "provider_busy", ResourceExhausted);
+    mapping!(
+        snapshot_conflict,
+        CONFLICT,
+        "provider_snapshot_conflict",
+        Aborted
+    );
+
+    #[test]
+    fn client_deadline_units_are_bounded_and_invalid_values_fail_closed() {
+        for (value, nanos) in [
+            ("1H", 10_000_000_000),
+            ("1M", 10_000_000_000),
+            ("1S", 1_000_000_000),
+            ("1m", 1_000_000),
+            ("1u", 1_000),
+            ("1n", 1),
+            ("0n", 0),
+        ] {
+            let mut headers = HeaderMap::new();
+            headers.insert("grpc-timeout", value.parse().unwrap());
+            assert_eq!(managed_budget(&headers).unwrap().as_nanos(), nanos);
+        }
+        assert_eq!(
+            managed_budget(&HeaderMap::new()).unwrap(),
+            Duration::from_secs(10)
+        );
+        for value in ["", "1", "m", "123456789n", "1x", "-1S"] {
+            let mut headers = HeaderMap::new();
+            headers.insert("grpc-timeout", value.parse().unwrap());
+            let error = managed_budget(&headers).unwrap_err();
+            assert_eq!(error.code, "invalid_provider_input");
+        }
+    }
+
+    #[tokio::test]
+    async fn expired_client_deadline_does_not_poll_inference() {
+        let mut headers = HeaderMap::new();
+        headers.insert("grpc-timeout", "0n".parse().unwrap());
+        let mut polled = false;
+        let result = managed_call(&headers, Instant::now(), async {
+            polled = true;
+            Ok(())
+        })
+        .await;
+        assert_eq!(result.unwrap_err().code, "provider_timeout");
+        assert!(!polled);
+    }
+
+    #[tokio::test]
+    async fn client_deadline_catches_ready_future_that_crosses_budget() {
+        let mut headers = HeaderMap::new();
+        headers.insert("grpc-timeout", "20m".parse().unwrap());
+        let result = managed_call(&headers, Instant::now(), async {
+            std::thread::sleep(Duration::from_millis(40));
+            Ok(())
+        })
+        .await;
+        assert_eq!(result.unwrap_err().code, "provider_timeout");
     }
 }

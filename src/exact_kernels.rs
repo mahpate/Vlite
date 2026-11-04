@@ -437,6 +437,26 @@ mod tests {
         DistanceMetric::InnerProduct,
     ];
 
+    #[test]
+    fn ci_requires_avx2_when_requested() {
+        #[cfg(target_arch = "x86_64")]
+        {
+            fn require_avx2(required: bool, available: bool) {
+                assert!(!required || available, "VLITE_REQUIRE_AVX2=1 requires AVX2");
+            }
+
+            require_avx2(
+                std::env::var("VLITE_REQUIRE_AVX2").as_deref() == Ok("1"),
+                std::arch::is_x86_feature_detected!("avx2"),
+            );
+            require_avx2(false, false);
+            require_avx2(false, true);
+            require_avx2(true, true);
+            // Exercise the failure path even on an AVX2-capable host.
+            assert!(std::panic::catch_unwind(|| require_avx2(true, false)).is_err());
+        }
+    }
+
     /// Every kernel this host can run; AVX2 is skipped (and reported) when absent.
     fn kernels() -> Vec<Kernel> {
         #[allow(unused_mut)]

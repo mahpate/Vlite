@@ -20,7 +20,8 @@ Keys and their sources:
   wasm:name, wasm:Class.name     bindings/wasm/src/lib.rs (JavaScript names)
   rest:METHOD /path              registered routers in src/server.rs and src/server/
   grpc:Rpc                       proto/vlite/v1/vlite.proto
-  mcp:tool                       src/bin/vlite-mcp.rs and src/bin/tool_support/graph_mcp.rs
+  mcp:tool                       src/bin/vlite-mcp.rs and graph_mcp.rs / kv_mcp.rs
+  cli:vlite-shell/command        KV commands in src/bin/tool_support/kv_mcp.rs
 
 Rust visibility follows the module tree: an item is public when it is declared
 `pub` in a module reachable through `pub mod` declarations, or re-exported
@@ -454,7 +455,14 @@ def mcp_keys(root: Path) -> set[str]:
         name = raw.strip('"') if raw.startswith('"') else consts.get(raw)
         if name and name.startswith("vlite_"):
             keys.add(f"mcp:{name}")
+    kv = (root / "src/bin/tool_support/kv_mcp.rs").read_text(encoding="utf-8")
+    keys.update(f"mcp:{name}" for name in re.findall(r'const \w+: &str = "(vlite_kv_[a-z_]+)";', kv))
     return keys
+
+
+def cli_keys(root: Path) -> set[str]:
+    kv = (root / "src/bin/tool_support/kv_mcp.rs").read_text(encoding="utf-8")
+    return {f"cli:vlite-shell/{name}" for name in re.findall(r'"(kv-[a-z]+)" => Some\(', kv)}
 
 
 # --------------------------------------------------------------------------- check
@@ -467,6 +475,7 @@ SURFACES = {
     "REST": rest_keys,
     "gRPC": grpc_keys,
     "MCP": mcp_keys,
+    "CLI": cli_keys,
 }
 
 

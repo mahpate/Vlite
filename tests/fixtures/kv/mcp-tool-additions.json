@@ -1,0 +1,306 @@
+{
+  "read-only": [
+    {
+      "annotations": {
+        "destructiveHint": false,
+        "idempotentHint": true,
+        "readOnlyHint": true
+      },
+      "description": "Fetch a live namespaced KV entry.",
+      "inputSchema": {
+        "additionalProperties": false,
+        "properties": {
+          "collection": {
+            "description": "Required existing one-dimensional collection; never created implicitly.",
+            "minLength": 1,
+            "type": "string"
+          },
+          "key": {
+            "minLength": 1,
+            "type": "string",
+            "x-maxUtf8Bytes": 1024
+          },
+          "namespace": {
+            "minLength": 1,
+            "type": "string",
+            "x-maxUtf8Bytes": 255
+          }
+        },
+        "required": [
+          "collection",
+          "namespace",
+          "key"
+        ],
+        "type": "object"
+      },
+      "name": "vlite_kv_get"
+    },
+    {
+      "annotations": {
+        "destructiveHint": false,
+        "idempotentHint": true,
+        "readOnlyHint": true
+      },
+      "description": "List live KV entries in UTF-8 byte order with exclusive pagination.",
+      "inputSchema": {
+        "additionalProperties": false,
+        "properties": {
+          "after": {
+            "minLength": 1,
+            "type": "string",
+            "x-maxUtf8Bytes": 1024
+          },
+          "collection": {
+            "description": "Required existing one-dimensional collection; never created implicitly.",
+            "minLength": 1,
+            "type": "string"
+          },
+          "limit": {
+            "default": 100,
+            "maximum": 10000,
+            "minimum": 1,
+            "type": "integer"
+          },
+          "namespace": {
+            "minLength": 1,
+            "type": "string",
+            "x-maxUtf8Bytes": 255
+          },
+          "prefix": {
+            "default": "",
+            "type": "string",
+            "x-maxUtf8Bytes": 1024
+          }
+        },
+        "required": [
+          "collection",
+          "namespace"
+        ],
+        "type": "object"
+      },
+      "name": "vlite_kv_list"
+    }
+  ],
+  "writable": [
+    {
+      "annotations": {
+        "destructiveHint": false,
+        "idempotentHint": true,
+        "readOnlyHint": true
+      },
+      "description": "Fetch a live namespaced KV entry.",
+      "inputSchema": {
+        "additionalProperties": false,
+        "properties": {
+          "collection": {
+            "description": "Required existing one-dimensional collection; never created implicitly.",
+            "minLength": 1,
+            "type": "string"
+          },
+          "key": {
+            "minLength": 1,
+            "type": "string",
+            "x-maxUtf8Bytes": 1024
+          },
+          "namespace": {
+            "minLength": 1,
+            "type": "string",
+            "x-maxUtf8Bytes": 255
+          }
+        },
+        "required": [
+          "collection",
+          "namespace",
+          "key"
+        ],
+        "type": "object"
+      },
+      "name": "vlite_kv_get"
+    },
+    {
+      "annotations": {
+        "destructiveHint": true,
+        "idempotentHint": false,
+        "readOnlyHint": false
+      },
+      "description": "Commit a KV value with an atomic expected-version check; synced only under full durability.",
+      "inputSchema": {
+        "additionalProperties": false,
+        "properties": {
+          "collection": {
+            "description": "Required existing one-dimensional collection; never created implicitly.",
+            "minLength": 1,
+            "type": "string"
+          },
+          "expected": {
+            "default": "any",
+            "oneOf": [
+              {
+                "enum": [
+                  "any",
+                  "absent"
+                ]
+              },
+              {
+                "additionalProperties": false,
+                "properties": {
+                  "revision": {
+                    "pattern": "^(0|[1-9][0-9]{0,19})$",
+                    "type": "string",
+                    "x-maximumUint64": "18446744073709551615"
+                  }
+                },
+                "required": [
+                  "revision"
+                ],
+                "type": "object"
+              }
+            ]
+          },
+          "expires_at_ms": {
+            "anyOf": [
+              {
+                "pattern": "^(0|[1-9][0-9]{0,19})$",
+                "type": "string",
+                "x-maximumUint64": "18446744073709551615"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null
+          },
+          "key": {
+            "minLength": 1,
+            "type": "string",
+            "x-maxUtf8Bytes": 1024
+          },
+          "namespace": {
+            "minLength": 1,
+            "type": "string",
+            "x-maxUtf8Bytes": 255
+          },
+          "value_base64": {
+            "contentEncoding": "base64",
+            "maxLength": 1396388,
+            "type": "string",
+            "x-maxDecodedBytes": 1047290
+          }
+        },
+        "required": [
+          "collection",
+          "namespace",
+          "key",
+          "value_base64"
+        ],
+        "type": "object"
+      },
+      "name": "vlite_kv_put"
+    },
+    {
+      "annotations": {
+        "destructiveHint": true,
+        "idempotentHint": true,
+        "readOnlyHint": false
+      },
+      "description": "Delete a live KV entry with an atomic expected-version check.",
+      "inputSchema": {
+        "additionalProperties": false,
+        "properties": {
+          "collection": {
+            "description": "Required existing one-dimensional collection; never created implicitly.",
+            "minLength": 1,
+            "type": "string"
+          },
+          "expected": {
+            "default": "any",
+            "oneOf": [
+              {
+                "enum": [
+                  "any",
+                  "absent"
+                ]
+              },
+              {
+                "additionalProperties": false,
+                "properties": {
+                  "revision": {
+                    "pattern": "^(0|[1-9][0-9]{0,19})$",
+                    "type": "string",
+                    "x-maximumUint64": "18446744073709551615"
+                  }
+                },
+                "required": [
+                  "revision"
+                ],
+                "type": "object"
+              }
+            ]
+          },
+          "key": {
+            "minLength": 1,
+            "type": "string",
+            "x-maxUtf8Bytes": 1024
+          },
+          "namespace": {
+            "minLength": 1,
+            "type": "string",
+            "x-maxUtf8Bytes": 255
+          }
+        },
+        "required": [
+          "collection",
+          "namespace",
+          "key"
+        ],
+        "type": "object"
+      },
+      "name": "vlite_kv_delete"
+    },
+    {
+      "annotations": {
+        "destructiveHint": false,
+        "idempotentHint": true,
+        "readOnlyHint": true
+      },
+      "description": "List live KV entries in UTF-8 byte order with exclusive pagination.",
+      "inputSchema": {
+        "additionalProperties": false,
+        "properties": {
+          "after": {
+            "minLength": 1,
+            "type": "string",
+            "x-maxUtf8Bytes": 1024
+          },
+          "collection": {
+            "description": "Required existing one-dimensional collection; never created implicitly.",
+            "minLength": 1,
+            "type": "string"
+          },
+          "limit": {
+            "default": 100,
+            "maximum": 10000,
+            "minimum": 1,
+            "type": "integer"
+          },
+          "namespace": {
+            "minLength": 1,
+            "type": "string",
+            "x-maxUtf8Bytes": 255
+          },
+          "prefix": {
+            "default": "",
+            "type": "string",
+            "x-maxUtf8Bytes": 1024
+          }
+        },
+        "required": [
+          "collection",
+          "namespace"
+        ],
+        "type": "object"
+      },
+      "name": "vlite_kv_list"
+    }
+  ]
+}

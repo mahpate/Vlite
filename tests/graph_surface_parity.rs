@@ -455,6 +455,81 @@ async fn reg008_served_openapi_matches_baseline_except_approved_additions() {
     assert_eq!(version, env!("CARGO_PKG_VERSION"), "served OpenAPI version");
 }
 
+/// Private Gap 2 K3a (owner-approved 2026-11-04): `tools/list` gains the
+/// ordinary key-value tools, `vlite_kv_get` and `vlite_kv_list` in read-only
+/// mode and all four with writes enabled. Their exact definitions are pinned
+/// in `tests/fixtures/kv/mcp-tool-additions.json`; every baseline tool and every other
+/// response must still match the capture.
+fn approved_mcp_additions(mode: &str) -> Vec<Value> {
+    let path = Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("tests")
+        .join("fixtures")
+        .join("kv")
+        .join("mcp-tool-additions.json");
+    let text =
+        fs::read_to_string(&path).unwrap_or_else(|error| panic!("{}: {error}", path.display()));
+    let approved: Value = serde_json::from_str(&text).unwrap();
+    approved[mode].as_array().unwrap().clone()
+}
+
+/// Removes the approved additions from a served `tools/list` result and
+/// returns them in served order; `None` for every other response.
+fn take_mcp_additions(response: &mut Value, approved: &[Value]) -> Option<Vec<Value>> {
+    let tools = response.pointer_mut("/result/tools")?.as_array_mut()?;
+    let mut taken = Vec::new();
+    tools.retain(|tool| {
+        let listed = approved
+            .iter()
+            .any(|candidate| candidate["name"] == tool["name"]);
+        if listed {
+            taken.push(tool.clone());
+        }
+        !listed
+    });
+    Some(taken)
+}
+
+#[test]
+fn reg008_mcp_allowlist_accepts_only_the_exact_approved_tools() {
+    let golden: Vec<Value> = serde_json::from_str(&fixture("mcp_read_only.json")).unwrap();
+    let approved = approved_mcp_additions("read-only");
+    assert_eq!(approved.len(), 2);
+    assert_eq!(approved_mcp_additions("writable").len(), 4);
+    let mut served = golden[1].clone();
+    served["result"]["tools"]
+        .as_array_mut()
+        .unwrap()
+        .extend(approved.iter().cloned());
+    assert_eq!(
+        take_mcp_additions(&mut served, &approved),
+        Some(approved.clone())
+    );
+    assert_eq!(
+        served, golden[1],
+        "removing the additions restores the baseline"
+    );
+    let mut drift = golden[1].clone();
+    let mut changed = approved.clone();
+    changed[0]["description"] = Value::String("changed".to_string());
+    drift["result"]["tools"]
+        .as_array_mut()
+        .unwrap()
+        .extend(changed);
+    assert_ne!(
+        take_mcp_additions(&mut drift, &approved),
+        Some(approved.clone())
+    );
+    let mut extra = golden[1].clone();
+    extra["result"]["tools"]
+        .as_array_mut()
+        .unwrap()
+        .push(serde_json::json!({"name": "vlite_unapproved"}));
+    assert_eq!(take_mcp_additions(&mut extra, &approved), Some(Vec::new()));
+    assert_ne!(extra, golden[1], "an unapproved tool is never removed");
+    let mut other = golden[0].clone();
+    assert_eq!(take_mcp_additions(&mut other, &approved), None);
+}
+
 fn mcp_transcript(mode: &str) -> Vec<Value> {
     let directory = tempfile::tempdir().unwrap();
     let path = directory.path().join("mcp.vlite");
@@ -499,11 +574,15 @@ fn reg008_mcp_tools_list_and_outputs_match_baseline() {
     ] {
         let expected: Vec<Value> = serde_json::from_str(&fixture(golden)).unwrap();
         let actual = mcp_transcript(mode);
+        let approved = approved_mcp_additions(mode);
         assert_eq!(actual.len(), expected.len(), "{mode}: response count");
         for (actual, expected) in actual.iter().zip(&expected) {
             let (mut actual, mut expected) = (actual.clone(), expected.clone());
             let served_version = mask_mcp_version(&mut actual);
             let golden_version = mask_mcp_version(&mut expected);
+            if let Some(taken) = take_mcp_additions(&mut actual, &approved) {
+                assert_eq!(taken, approved, "{mode}: approved KV tools");
+            }
             assert_eq!(
                 served_version.is_some(),
                 golden_version.is_some(),

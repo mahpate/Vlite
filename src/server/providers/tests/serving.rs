@@ -4,6 +4,10 @@ use axum::{Router, body::Body, http::Request};
 use sha2::Digest;
 use tower::ServiceExt;
 
+#[cfg(feature = "grpc")]
+#[path = "grpc_serving.rs"]
+mod grpc;
+
 const TENANT: &str = "0123456789abcdef0123456789abcdef";
 const OTHER: &str = "1123456789abcdef0123456789abcdef";
 const ADMIN: &str = "fake-admin-token-for-provider-tests";

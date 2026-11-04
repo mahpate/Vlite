@@ -366,6 +366,8 @@ struct CacheKey {
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub(crate) struct SeamAccounting {
+    pub(crate) source_live: usize,
+    pub(crate) source_peak: usize,
     pub(crate) mapped_live: usize,
     pub(crate) mapped_peak: usize,
     pub(crate) vectors_live: usize,
@@ -417,6 +419,7 @@ impl ReadWorkspace {
     }
 
     pub(crate) fn accounting(&mut self, view: &CompactView) -> Result<SeamAccounting> {
+        let source = view.generation.backing.as_slice().len();
         let mapped = match &view.generation.backing {
             Backing::Owned(_) => 0,
             #[cfg(not(target_arch = "wasm32"))]
@@ -433,6 +436,8 @@ impl ReadWorkspace {
                     .ok_or(Error::InvalidQuery("compact cell accounting overflow"))?;
             }
         }
+        self.accounting.source_live = source;
+        self.accounting.source_peak = self.accounting.source_peak.max(source);
         self.accounting.mapped_live = mapped;
         self.accounting.mapped_peak = self.accounting.mapped_peak.max(mapped);
         self.accounting.cells_live = cells;
@@ -494,6 +499,21 @@ pub(crate) struct CompactView {
 impl CompactView {
     pub(crate) fn generation_id(&self) -> GenerationId {
         self.generation.identity
+    }
+
+    pub(crate) fn read_payload(
+        &self,
+        row: usize,
+        workspace: &mut ReadWorkspace,
+    ) -> Result<Option<Vec<u8>>> {
+        let Some((block, row, _)) = self.source().and_then(|source| source.row_at(row)) else {
+            return Ok(None);
+        };
+        let bytes = workspace
+            .body(self, block)?
+            .get(row.payload.clone())
+            .ok_or_else(|| corrupt(block.offset, "compact payload extent is out of bounds"))?;
+        Ok(Some(bytes.to_vec()))
     }
 
     pub(crate) fn read_metadata(
