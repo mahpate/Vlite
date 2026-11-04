@@ -360,6 +360,90 @@ async fn kv_list_order_defaults_and_exact_size_boundary() {
     assert_eq!(tail["next_after"], Value::Null);
 }
 
+#[tokio::test]
+async fn kv_page_canonical_byte_boundary_is_inclusive() {
+    for boundary in [16_777_215, 16_777_216, 16_777_217] {
+        let directory = tempfile::tempdir().unwrap();
+        let mut db = database(FormatVersion::V5);
+        let mut store = db.kv_store("default").unwrap();
+        let mut expected = Vec::new();
+        let bytes = vec![255; 1_047_290];
+        for i in 0..12 {
+            let key = if i == 0 {
+                "00\"".to_owned()
+            } else {
+                format!("{i:02}")
+            };
+            let version = store.put("edge", &key, &bytes, KvPut::default()).unwrap();
+            expected.push(
+                json!({"key":key,"value_base64":BASE64_STANDARD.encode(&bytes),
+                "version":version.to_string(),"expires_at_ms":null}),
+            );
+        }
+        let version = store.put("edge", "m", b"", KvPut::default()).unwrap();
+        store.put("edge", "z", b"", KvPut::default()).unwrap();
+        // Build the oracle from the specified JSON envelope, not a served page.
+        // Only opaque engine versions are read from the fixture.
+        let empty =
+            json!({"key":"m","value_base64":"","version":version.to_string(),"expires_at_ms":null});
+        let mut oracle = expected.clone();
+        oracle.push(empty);
+        let mut overhead = serde_json::to_vec(&json!({"items":oracle,"next_after":"m"}))
+            .unwrap()
+            .len();
+        for _ in 0..3 {
+            if (boundary - overhead) % 2 == 0 {
+                break;
+            }
+            let old = expected[0]["key"].as_str().unwrap();
+            let key = format!("{old}x");
+            store.delete("edge", old, vlite::Expected::Any).unwrap();
+            let version = store.put("edge", &key, &bytes, KvPut::default()).unwrap();
+            expected[0]["key"] = json!(key);
+            expected[0]["version"] = json!(version.to_string());
+            oracle[0] = expected[0].clone();
+            overhead = serde_json::to_vec(&json!({"items":oracle,"next_after":"m"}))
+                .unwrap()
+                .len();
+        }
+        let remaining = boundary - overhead;
+        // A last-key byte appears twice; base64 grows in four-byte units.
+        let key = if remaining % 4 == 2 { "mx" } else { "m" };
+        let encoded_size = remaining - if key == "mx" { 2 } else { 0 };
+        let value = vec![1; encoded_size / 4 * 3];
+        store.delete("edge", "m", vlite::Expected::Any).unwrap();
+        let version = store.put("edge", key, &value, KvPut::default()).unwrap();
+        expected.push(
+            json!({"key":key,"value_base64":BASE64_STANDARD.encode(value),
+            "version":version.to_string(),"expires_at_ms":null}),
+        );
+        let oracle = json!({"items":expected,"next_after":key});
+        let oracle_bytes = serde_json::to_vec(&oracle).unwrap().len();
+        assert_eq!(
+            oracle_bytes, boundary,
+            "independent fixture must hit exact boundary"
+        );
+        let app = start(db, directory.path());
+        let (status, page, size) = raw(
+            &app,
+            ADMIN,
+            "GET",
+            "/v1/collections/default/kv/entries?namespace=edge&limit=13",
+            String::new(),
+        )
+        .await;
+        assert_eq!(status, 200);
+        if boundary <= 16_777_216 {
+            assert_eq!(size, boundary);
+            assert_eq!(page, oracle);
+        } else {
+            assert!(size <= 16_777_216);
+            assert_eq!(page["items"].as_array().unwrap().len(), 12);
+            assert_eq!(page["next_after"], "11");
+        }
+    }
+}
+
 async fn credential(app: &Router, extra: Value) -> String {
     let now = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
@@ -565,6 +649,52 @@ async fn kv_read_only_handle_refuses_even_missing_delete() {
     }
 }
 
+#[tokio::test]
+async fn kv_configured_file_durability_survives_orderly_restart() {
+    for durability in [
+        vlite::Durability::Full,
+        vlite::Durability::periodic_ms(60_000).unwrap(),
+    ] {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("kv.vlite");
+        let mut db = Database::create_with_format(&path, 1, FormatVersion::V5).unwrap();
+        db.set_durability(durability).unwrap();
+        let service = Service::new(db);
+        let app = configured_admin_router(
+            service.clone(),
+            ServerOptions {
+                admin_token: Some(BearerToken::new(ADMIN).unwrap()),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        let (status, response) = call(
+            &app,
+            ADMIN,
+            "PUT",
+            "/v1/collections/default/kv/entry",
+            put("persisted"),
+        )
+        .await;
+        assert_eq!(status, 200, "{response}");
+        canonical_version(&response["version"]);
+        let version = response["version"]
+            .as_str()
+            .unwrap()
+            .parse::<u64>()
+            .unwrap();
+        service.close().await.unwrap();
+        let db = Database::open(&path).unwrap();
+        let entry = db
+            .kv_view("default")
+            .unwrap()
+            .get("n", "persisted")
+            .unwrap()
+            .unwrap();
+        assert_eq!(entry.version, version);
+        assert_eq!(entry.value, b"a");
+    }
+}
 #[tokio::test]
 async fn kv_slots_exhaustion_and_upgrade_errors() {
     let directory = tempfile::tempdir().unwrap();
