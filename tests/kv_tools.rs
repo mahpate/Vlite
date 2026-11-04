@@ -616,6 +616,164 @@ fn list_limit_10000_peeks_for_continuation() {
 }
 
 #[test]
+fn list_page_exact_byte_cap_mcp_and_shell() {
+    const CAP: usize = 16_777_216;
+    let encode_zeros = |length: usize| {
+        let mut encoded = "AAAA".repeat(length / 3);
+        encoded.push_str(match length % 3 {
+            1 => "AA==",
+            2 => "AAA=",
+            _ => "",
+        });
+        encoded
+    };
+    let temp = tempfile::tempdir_in(".").unwrap();
+    let path = temp.path().join("exact-cap.vlite");
+    fixture(&path);
+    let mut db = Database::open(&path).unwrap();
+    let large = vec![0; vlite::kv::MAX_KV_VALUE_BYTES];
+    let encoded = encode_zeros(large.len());
+    let mut items = Vec::new();
+    for index in 0..12 {
+        let key = format!("k{index:02}");
+        let version = db
+            .kv_store("cap")
+            .unwrap()
+            .put("n", &key, &large, Default::default())
+            .unwrap();
+        items.push(json!({"key":key,"value_base64":encoded,
+            "version":version.to_string(),"expires_at_ms":null}));
+    }
+    db.close().unwrap();
+
+    let prefix_size = json!({"items":items,"next_after":null}).to_string().len();
+    let empty_item_size = json!({"key":"","value_base64":"","version":"10","expires_at_ms":null})
+        .to_string()
+        .len();
+    let budget = CAP - 8 - prefix_size - 1 - empty_item_size;
+    let initial_length = (budget - 7) / 4 * 3;
+    let case = json!({"command":"kv-list",
+        "request":{"collection":"cap","namespace":"n","limit":100}});
+    let mut previous_key: Option<String> = None;
+    let mut continuation_fits = [false; 2];
+
+    for step in 0..=10 {
+        let target = CAP - 8 + step;
+        let value = vec![0; initial_length + step];
+        assert!(value.len() <= vlite::kv::MAX_KV_VALUE_BYTES);
+        let encoded = encode_zeros(value.len());
+        // Base64 grows four bytes at a time; key padding supplies single-byte precision.
+        let key_length = target - prefix_size - 1 - empty_item_size - encoded.len();
+        assert!((1..=10).contains(&key_length));
+        let key = format!("z{}", "x".repeat(key_length - 1));
+        let mut db = Database::open(&path).unwrap();
+        if let Some(previous_key) = previous_key.take() {
+            assert!(
+                db.kv_store("cap")
+                    .unwrap()
+                    .delete("n", &previous_key, vlite::Expected::Any)
+                    .unwrap()
+            );
+        }
+        let version = db
+            .kv_store("cap")
+            .unwrap()
+            .put("n", &key, &value, Default::default())
+            .unwrap()
+            .to_string();
+        assert_eq!(version.len(), 2);
+        db.close().unwrap();
+        items.push(json!({"key":key,"value_base64":encoded,
+            "version":version,"expires_at_ms":null}));
+        assert_eq!(prefix_size + 1 + items[12].to_string().len(), target);
+
+        for extra in [false, true] {
+            if extra {
+                let mut db = Database::open(&path).unwrap();
+                db.kv_store("cap")
+                    .unwrap()
+                    .put("n", "~", b"", Default::default())
+                    .unwrap();
+                db.close().unwrap();
+            }
+            // Replacing null (four bytes) with a quoted cursor changes the envelope.
+            let candidate_size = if extra {
+                target + key.len() + 2 - 4
+            } else {
+                target
+            };
+            let fits = candidate_size <= CAP;
+            if extra {
+                continuation_fits[usize::from(fits)] = true;
+            }
+            let count = if fits { 13 } else { 12 };
+            let next = if !fits {
+                items[11]["key"].clone()
+            } else if extra {
+                json!(key)
+            } else {
+                Value::Null
+            };
+            let expected_size =
+                if fits { target } else { prefix_size } - 4 + next.to_string().len();
+            assert!(expected_size <= CAP);
+
+            for mcp in [true, false] {
+                let context = format!("size={target}, extra={extra}, mcp={mcp}");
+                let output = process(&path, mcp, true, &[line(&case, mcp, 1)]);
+                assert!(
+                    output.status.success(),
+                    "{context}: {}",
+                    String::from_utf8_lossy(&output.stderr)
+                );
+                let responses = values(&output);
+                assert_eq!(responses.len(), 1, "{context}");
+                let response = &responses[0];
+                let actual = if mcp {
+                    assert_eq!(response["result"]["isError"], false, "{context}");
+                    let result = &response["result"];
+                    assert_eq!(result["content"].as_array().unwrap().len(), 1, "{context}");
+                    let text = result["content"][0]["text"].as_str().unwrap();
+                    assert_eq!(text.len(), expected_size, "{context}");
+                    &result["structuredContent"]
+                } else {
+                    let stdout = std::str::from_utf8(&output.stdout).unwrap();
+                    assert_eq!(
+                        stdout.lines().next().unwrap().len(),
+                        expected_size,
+                        "{context}"
+                    );
+                    response
+                };
+                assert_eq!(
+                    actual["items"].as_array().unwrap().len(),
+                    count,
+                    "{context}"
+                );
+                assert_eq!(actual["next_after"], next, "{context}");
+                for (index, expected) in items.iter().take(count).enumerate() {
+                    assert!(
+                        actual["items"][index] == *expected,
+                        "{context}: item {index} differs"
+                    );
+                }
+            }
+        }
+        let mut db = Database::open(&path).unwrap();
+        assert!(
+            db.kv_store("cap")
+                .unwrap()
+                .delete("n", "~", vlite::Expected::Any)
+                .unwrap()
+        );
+        db.close().unwrap();
+        items.pop().unwrap();
+        previous_key = Some(key);
+    }
+    assert_eq!(continuation_fits, [true, true]);
+}
+
+#[test]
 fn shell_script_uses_explicit_collection_and_stops() {
     let temp = tempfile::tempdir_in(".").unwrap();
     let path = temp.path().join("script.vlite");
