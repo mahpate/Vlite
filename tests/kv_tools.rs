@@ -146,6 +146,53 @@ fn contract_goldens_mcp_and_shell() {
         }
         assert_eq!(std::fs::read(&path).unwrap(), before);
     }
+
+    let temp = tempfile::tempdir_in(".").unwrap();
+    let path = temp.path().join("attached.vlite");
+    let mut db = Database::create(&path, 1).unwrap();
+    let revision = db
+        .kv_store("default")
+        .unwrap()
+        .put("n", "attached", b"original", Default::default())
+        .unwrap();
+    db.create_graph("g").unwrap();
+    db.graph_mut("g")
+        .unwrap()
+        .write_batch(&[
+            vlite::property_graph::GraphOp::CreateNode {
+                key: "node".into(),
+                labels: Vec::new(),
+                properties: vlite::Metadata::new(),
+            },
+            vlite::property_graph::GraphOp::Attach {
+                node: "node".into(),
+                collection: "default".into(),
+                record: vlite::kv::first_slot("n", "attached"),
+            },
+        ])
+        .unwrap();
+    db.close().unwrap();
+    for mcp in [true, false] {
+        check_error(
+            &path,
+            mcp,
+            false,
+            &json!({"command":"kv-put","request":{
+                "collection":"default","namespace":"n","key":"attached",
+                "value_base64":"","expires_at_ms":"18446744073709551615"
+            },"code":"graph_attached_record_expiry"}),
+        );
+        let db = Database::open(&path).unwrap();
+        let entry = db
+            .kv_view("default")
+            .unwrap()
+            .get("n", "attached")
+            .unwrap()
+            .unwrap();
+        assert_eq!(entry.value, b"original");
+        assert_eq!(entry.version, revision);
+        assert_eq!(entry.expires_at_ms, None);
+    }
 }
 
 fn check_error(path: &Path, mcp: bool, readonly: bool, case: &Value) {
@@ -531,6 +578,7 @@ fn list_limit_10000_peeks_for_continuation() {
         let cases = [
             json!({"command":"kv-list","request":{"collection":"default","namespace":"n","limit":10000}}),
             json!({"command":"kv-list","request":{"collection":"default","namespace":"n","limit":10000,"after":"09999"}}),
+            json!({"command":"kv-list","request":{"collection":"default","namespace":"n","limit":10000,"after":"00000"}}),
         ];
         let output = process(
             &path,
@@ -560,6 +608,10 @@ fn list_limit_10000_peeks_for_continuation() {
         assert_eq!(pages[1]["items"].as_array().unwrap().len(), 1);
         assert_eq!(pages[1]["items"][0]["key"], "10000");
         assert_eq!(pages[1]["next_after"], Value::Null);
+        assert_eq!(pages[2]["items"].as_array().unwrap().len(), 10_000);
+        assert_eq!(pages[2]["items"][0]["key"], "00001");
+        assert_eq!(pages[2]["items"][9999]["key"], "10000");
+        assert_eq!(pages[2]["next_after"], Value::Null);
     }
 }
 

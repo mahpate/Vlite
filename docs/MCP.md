@@ -278,7 +278,9 @@ access permissions. KV tools are not forwarded in `--server` mode.
   as `after` to continue. Keys sort by unsigned UTF-8 bytes. Each page uses one
   expiry clock; pages do not share a snapshot. A page is the largest prefix
   fitting the limit and 16 MiB canonical JSON page budget. An empty page has
-  no continuation.
+  no continuation. Values are fetched in batches of at most eight entries,
+  stopping once the byte budget rules out another item rather than cloning
+  the entire requested limit before applying the page cap.
 
 Put/delete are listed and callable only with `--writable`; direct calls in a
 read-only session fail `read_only: ...`. Namespace is 1..255 UTF-8 bytes,
