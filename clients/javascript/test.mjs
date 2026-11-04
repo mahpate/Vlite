@@ -777,9 +777,9 @@ async function refuses(call, pattern) {
   await assert.rejects(promise, (error) => error instanceof TypeError && pattern.test(error.message), String(pattern));
 }
 // The rejection of a promise, for tests that assert several properties of it.
-async function failure(promise) {
+async function failure(promise, label = "") {
   try { await promise; } catch (error) { return error; }
-  return assert.fail("expected a rejection");
+  return assert.fail(`expected a rejection ${label}`.trim());
 }
 
 const scope = { agent: "a" };
@@ -1395,6 +1395,47 @@ test("memory: null is refused everywhere except the nullable interval bounds", a
   });
 });
 
+function setAt(request, path, value) {
+  const copy = structuredClone(request);
+  const index = /\[(\d+)\]$/.exec(path);
+  const split = index ? index.index : path.lastIndexOf(".");
+  (split === -1 ? copy : at(copy, path.slice(0, split)))[index ? index[1] : path.slice(split + 1)] = value;
+  return copy;
+}
+const isInteger = (path, request) => {
+  const dot = path.lastIndexOf(".");
+  const key = path.slice(dot + 1);
+  return U64_KEYS.has(key) || I64_KEYS.has(key) || (key === "value" && at(request, path.slice(0, dot)).type === "integer");
+};
+const wrongTypes = (value, integer) => Array.isArray(value) ? [{}, "x", 7, true]
+  : value !== null && typeof value === "object" ? [[], "x", 7, true]
+    : integer ? [true, {}, []]
+      : typeof value === "boolean" ? ["true", 1, {}, []]
+        : typeof value === "number" ? ["1", true, {}, []] : [7, true, {}, []];
+
+test("memory: a wrong JSON type is refused at every member of every request", async () => {
+  await memoryServer(async ({ client, calls }) => {
+    const memory = client.memory("notes");
+    let refused = 0;
+    for (const method of MEMORY_METHODS) {
+      for (const path of propertyPaths(FULL[method])) {
+        const value = at(FULL[method], path);
+        const targets = [[path, value, isInteger(path, FULL[method])]];
+        // The first element of an array of strings or numbers stands for all of them.
+        if (Array.isArray(value) && value.length > 0 && typeof value[0] !== "object") targets.push([`${path}[0]`, value[0], false]);
+        for (const [target, original, integer] of targets) {
+          for (const wrong of wrongTypes(original, integer)) {
+            await refuses(() => memory[method](setAt(FULL[method], target, wrong)), new RegExp(`^request\\.${escaped(target)} must be`));
+            refused += 1;
+          }
+        }
+      }
+    }
+    assert.equal(calls.length, 0);
+    assert.ok(refused >= 700, `${refused} wrong-typed members refused`);
+  });
+});
+
 test("memory: no automatic idempotency key, and the caller's key and request are never altered", async () => {
   const frozen = (value) => {
     if (value !== null && typeof value === "object") Object.values(value).forEach(frozen);
@@ -1611,7 +1652,7 @@ test("memory: every error code of the registry carries status, code, request id 
         const before = calls.length;
         serial += 1;
         reply({ status: failed.status, body: failed.value, headers: { "X-Request-ID": `req-${serial}` } });
-        const error = await failure(memory[method](structuredClone(FULL[method])));
+        const error = await failure(memory[method](structuredClone(FULL[method])), `${method} ${failed.name}`);
         const label = `${method} ${failed.name}`;
         assert.ok(error instanceof VLiteError && !(error instanceof UnsupportedError), label);
         assert.equal(error.name, "VLiteError", label);
@@ -1644,7 +1685,7 @@ test("memory: structured error details reach the caller unchanged", async () => 
     ];
     for (const [method, status, code, details] of cases) {
       reply({ status, headers: { "X-Request-ID": "req-d" }, body: { error: { code, message: "sanitized", details } } });
-      const error = await failure(memory[method](structuredClone(FULL[method])));
+      const error = await failure(memory[method](structuredClone(FULL[method])), `${method} ${code}`);
       assert.ok(error instanceof VLiteError, `${method} ${code}`);
       assert.equal(error.status, status);
       assert.equal(error.code, code);
@@ -1654,7 +1695,7 @@ test("memory: structured error details reach the caller unchanged", async () => 
     // A malformed details member is ignored, never promoted to something else.
     for (const details of [null, "feature=facts", ["facts"], 7, true]) {
       reply({ status: 409, body: { error: { code: "memory_capability_unavailable", message: "m", details } } });
-      const error = await failure(memory.recall(structuredClone(FULL.recall)));
+      const error = await failure(memory.recall(structuredClone(FULL.recall)), `details ${JSON.stringify(details)}`);
       assert.ok(error instanceof VLiteError && error.code === "memory_capability_unavailable");
       assert.equal(Object.hasOwn(error, "details"), false, JSON.stringify(details));
     }
@@ -1672,7 +1713,7 @@ test("memory: nonstandard failures keep an explicit code and a null request id",
       [{ status: 500, body: { error: { message: "only a message" } } }, "http_error", /only a message/],
       [{ status: 429, headers: { "Retry-After": "1" }, body: { error: { code: "rate_limited", message: "slow down" } } }, "rate_limited", /slow down/]]) {
       reply(scripted);
-      const error = await failure(memory.remember(structuredClone(FULL.remember)));
+      const error = await failure(memory.remember(structuredClone(FULL.remember)), code);
       assert.ok(error instanceof VLiteError, code);
       assert.equal(error.code, code);
       assert.equal(error.requestId, null);
@@ -1766,7 +1807,7 @@ test("memory: a success response missing a required envelope member or mistyping
           const body = structuredClone(accepted);
           if (wrong === undefined) delete body[member]; else body[member] = wrong;
           reply({ text: JSON.stringify(wrap(body)) });
-          const error = await failure(memory[method](structuredClone(FULL[method])));
+          const error = await failure(memory[method](structuredClone(FULL[method])), `${method}.${member} = ${JSON.stringify(wrong)}`);
           assert.ok(error instanceof TransportError && !(error instanceof VLiteError), `${method}.${member} = ${JSON.stringify(wrong)}`);
           rejected += 1;
         }

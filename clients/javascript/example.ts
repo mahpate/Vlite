@@ -1,8 +1,10 @@
 import {
   Client, Collection, ImportRejectedError, Memory, UnsupportedError, VLiteError,
   type AnnQuality, type BatchOperation, type CollectionIndexStatus, type CollectionInfo, type Condition, type Credential,
-  type ImportChunkReport, type ImportStatus, type IssuedCredential, type MemoryConsolidateResponse, type MemoryScalar,
-  type MemoryTarget, type Metadata, type SearchResponse,
+  type ImportChunkReport, type ImportStatus, type IssuedCredential, type MemoryConsolidateResponse, type MemoryEffectiveScope,
+  type MemoryErasure, type MemoryErasureNotice, type MemoryFactsRequest, type MemoryFeed, type MemoryForgetRequest, type MemoryItem,
+  type MemoryMutationResponse, type MemoryReadMeta, type MemoryReceipt, type MemoryReceiptRequest, type MemoryRecallRequest,
+  type MemoryResumeRequest, type MemoryScalar, type MemoryTarget, type MemoryView, type Metadata, type SearchResponse,
 } from "./index.js";
 
 // Supply the token at runtime; never hard-code real credentials.
@@ -261,3 +263,60 @@ async function memoryTypeChecks(memory: Memory): Promise<void> {
   }
 }
 void memoryTypeChecks;
+
+// Required and optional members of the section 8 types, in both directions; never executed.
+function memoryShapeChecks(): void {
+  const scope: MemoryEffectiveScope = { tenant: "@root", agent: "a" };
+  const feed: MemoryFeed = { mode: "ordinary_changes", temporal_complete: false, ttl_complete: false, consumer_purge_acknowledged: false };
+  // retry_until_ms and expires_at_ms are optional.
+  const receipt: MemoryReceipt = { id: "r1", operation: "remember", scope, sequence: "7", digest_version: "memory-request-v1" };
+  const mutation: MemoryMutationResponse = { receipt, replayed: false, outcomes: [{ id: "e1", action: "created", revision: "1" }], feed, remaining_work: null };
+  // @ts-expect-error The feed block is always present.
+  const noFeed: MemoryMutationResponse = { receipt, replayed: false, outcomes: [], remaining_work: "0" };
+  // @ts-expect-error remaining_work is nullable but never omitted.
+  const noWork: MemoryMutationResponse = { receipt, replayed: false, outcomes: [], feed };
+  // @ts-expect-error The receipt always carries its digest version.
+  const noDigest: MemoryReceipt = { id: "r1", operation: "remember", scope, sequence: "7" };
+  // resume_token is absent once an erasure finished; remaining_count is null when unknown, never omitted.
+  const erasure: MemoryErasure = { id: "j", scope, target: { scope: true }, revision: "8", generation: "1", state: "pending",
+    logical_visibility: "hidden", deleted_count: "0", remaining_count: null };
+  // @ts-expect-error remaining_count is nullable but never omitted.
+  const noRemaining: MemoryErasure = { id: "j", scope, target: { scope: true }, revision: "8", generation: "1", state: "pending", logical_visibility: "hidden", deleted_count: "0" };
+  // manifest_id is absent for retention expiry.
+  const notice: MemoryErasureNotice = { live_state_only: true, secure_erasure: false, external_copies: "operator_managed",
+    restore_requires_manifest: true, backup_history_purge: "not_verified" };
+  // @ts-expect-error The notice never claims secure erasure.
+  const secure: MemoryErasureNotice = { ...notice, secure_erasure: true };
+  const view: MemoryView = { id: "a", revision: "1", scope, kind: "entity", content: "a", observed_at_ms: "90", created_at_ms: "100",
+    updated_at_ms: "100", importance: 0.5, status: "accepted", stale: false, segment: null, evidence: [], scores: { R: 1, D: null, I: 0.5, S: 1 } };
+  // @ts-expect-error segment is nullable but never omitted.
+  const noSegment: MemoryView = { ...view, segment: undefined };
+  // @ts-expect-error D is null when decay is off, never omitted.
+  const noDecay: MemoryView = { ...view, scores: { R: 1, I: 0.5, S: 1 } };
+  const meta: MemoryReadMeta = { scopes: [scope], as_of_ms: "100", ttl_clock_ms: "100", sequence: "6", complete: true, truncation: [],
+    limitations: ["retained_state_only"], mode: "exact_enumeration", candidates_examined: "0", edges_charged: "0", vector_components: "0",
+    mmr_components: "0", evidence_bytes: "0" };
+  // @ts-expect-error Read metadata counters are strings.
+  const numeric: MemoryReadMeta = { ...meta, candidates_examined: 0 };
+  void [mutation, noFeed, noWork, noDigest, erasure, noRemaining, notice, secure, view, noSegment, noDecay, meta, numeric];
+
+  // Requests: only the contract's required members are required.
+  const source = { source_id: "s", source_kind: "k" };
+  const item: MemoryItem = { id: "e", kind: "entity", content: "c", observed_at_ms: 1, source };
+  // @ts-expect-error observed_at_ms is required.
+  const noObserved: MemoryItem = { id: "e", kind: "entity", content: "c", source };
+  const recall: MemoryRecallRequest = { scope: { agent: "a" } };
+  // @ts-expect-error The scope is required.
+  const noScope: MemoryRecallRequest = { text: "x" };
+  const facts: MemoryFactsRequest = { scope: { agent: "a" }, slot: { subject_id: "e", predicate: "p", slot_key: "k" } };
+  // @ts-expect-error The slot is required.
+  const noSlot: MemoryFactsRequest = { scope: { agent: "a" } };
+  // @ts-expect-error A forget request needs its mode.
+  const noMode: MemoryForgetRequest = { scope: { agent: "a" }, idempotency_key: "k", target: { scope: true } };
+  // @ts-expect-error A resume request needs its token.
+  const noToken: MemoryResumeRequest = { scope: { agent: "a" }, idempotency_key: "k", job_id: "j", revision: "1", generation: "1" };
+  // @ts-expect-error A receipt lookup needs its operation.
+  const noOperation: MemoryReceiptRequest = { scope: { agent: "a" }, idempotency_key: "k" };
+  void [item, noObserved, recall, noScope, facts, noSlot, noMode, noToken, noOperation];
+}
+void memoryShapeChecks;

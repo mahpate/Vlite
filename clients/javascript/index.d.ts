@@ -228,6 +228,8 @@ export type MemoryI64 = string;
 export type MemoryU64Input = MemoryU64 | number | bigint;
 /** Accepted inputs for an i64; the same rules as MemoryU64Input. */
 export type MemoryI64Input = MemoryI64 | number | bigint;
+/** An unqualified local name matching ^[a-z][a-z0-9_-]{0,62}$: a memory binding or an evidence collection alias. */
+export type MemoryBinding = string;
 /** 1..256 UTF-8 bytes; the server validates the bytes. */
 export type MemoryKey = string;
 export type MemoryKind = "entity" | "episodic" | "fact" | "relation";
@@ -255,9 +257,9 @@ export type MemoryProperties<I extends MemoryI64Input = MemoryI64> = Record<stri
 export interface MemoryCondition { field: MemoryKey; op: "eq" | "lt" | "lte" | "gt" | "gte" | "exists"; value?: MemoryScalar<MemoryI64Input> }
 /** AND of `all` and OR of `any`; the mandatory scope, kind and retention checks always apply as well. */
 export interface MemoryFilter { all?: MemoryCondition[]; any?: MemoryCondition[] }
-export interface MemoryEvidenceRef { collection: string; record: MemoryU64Input }
+export interface MemoryEvidenceRef { collection: MemoryBinding; record: MemoryU64Input }
 export interface MemoryEvidence {
-  collection: string; record: MemoryU64Input; vector?: number[]; text?: string; payload_base64?: string;
+  collection: MemoryBinding; record: MemoryU64Input; vector?: number[]; text?: string; payload_base64?: string;
   metadata?: MemoryProperties<MemoryI64Input>;
 }
 export interface MemoryAssertion {
@@ -361,7 +363,7 @@ export interface MemoryPlanResponse {
 }
 /** Discriminated by `dry_run`: true for a plan, absent for a committed mutation. */
 export type MemoryConsolidateResponse = MemoryMutationResponse | MemoryPlanResponse;
-export interface MemoryEvidenceView { collection: string; record: MemoryU64; snippet?: string }
+export interface MemoryEvidenceView { collection: MemoryBinding; record: MemoryU64; snippet?: string }
 export interface MemoryPath { nodes: MemoryU64[]; edges: MemoryU64[] }
 export interface MemoryScores {
   R: number; D: number | null; I: number; S: number; dense_rank?: number; sparse_rank?: number; text_rank?: number;
@@ -391,6 +393,8 @@ export interface MemoryFactView {
 export interface MemoryFactsResponse { facts: MemoryFactView[]; meta: MemoryReadMeta }
 /** The shared optional `error.details` object of a REST error; every member is optional. */
 export interface MemoryErrorContext { field?: string; limit?: MemoryU64; requested?: MemoryU64; feature?: string; category?: string }
+/** The JSON body of a failed response; the client surfaces it as a VLiteError. */
+export interface MemoryError { error: { code: string; message: string; details?: MemoryErrorContext } }
 /** Only an abort signal; cancellation or timeout is a TransportError and never a retry. */
 export interface MemoryCallOptions { signal?: AbortSignal }
 
@@ -461,7 +465,7 @@ export class Collection extends Records {
  * Nothing is retried, embedded, split or paged, and the client never invents an idempotency key.
  */
 export class Memory {
-  readonly binding: string;
+  readonly binding: MemoryBinding;
   remember(request: MemoryRememberRequest, options?: MemoryCallOptions): Promise<MemoryMutationResponse>;
   recall(request: MemoryRecallRequest, options?: MemoryCallOptions): Promise<MemoryRecallResponse>;
   findFacts(request: MemoryFactsRequest, options?: MemoryCallOptions): Promise<MemoryFactsResponse>;
@@ -499,7 +503,7 @@ export class Client extends Records {
 
   collection(name: string): Collection;
   /** Binding names match ^[a-z][a-z0-9_-]{0,62}$; a server without memory routes answers with UnsupportedError. */
-  memory(binding: string): Memory;
+  memory(binding: MemoryBinding): Memory;
   listCollections(): Promise<CollectionList>;
   createCollection(name: string, dimensions: number, settings?: SettingsUpdate): Promise<CollectionInfo>;
   getCollection(name: string): Promise<CollectionDetail>;
