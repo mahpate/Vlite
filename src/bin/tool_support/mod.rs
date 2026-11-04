@@ -1,6 +1,8 @@
 #![allow(dead_code)]
 #[cfg(feature = "json")]
 pub(crate) mod kv_mcp;
+#[cfg(feature = "mcp-proxy")]
+pub(crate) mod memory_mcp;
 use std::{collections::BTreeMap, error::Error, process::ExitCode};
 use vlite::{CollectionRef, Record};
 pub type Result<T> = std::result::Result<T, Box<dyn Error>>;

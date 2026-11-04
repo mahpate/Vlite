@@ -15,6 +15,13 @@ kv_tools = set(re.findall(r'const \w+: &str = "(vlite_kv_[a-z_]+)";', kv_source)
 kv_section = mcp.split("## Local key-value tools\n", 1)[1].split("\n## ", 1)[0]
 assert kv_tools == {"vlite_kv_get", "vlite_kv_put", "vlite_kv_delete", "vlite_kv_list"}
 assert kv_tools == set(re.findall(r"^- `(vlite_kv_[a-z_]+)`:", kv_section, re.MULTILINE))
+memory_source = (ROOT / "src/bin/tool_support/memory_mcp.rs").read_text(encoding="utf-8")
+memory_tools = set(re.findall(r'name: "(vlite_memory_[a-z_]+)"', memory_source))
+memory_section = mcp.split("## Server-backed agent memory\n", 1)[1].split("\n## ", 1)[0]
+assert len(memory_tools) == 9
+assert memory_tools == set(re.findall(r"^- `(vlite_memory_[a-z_]+)`:", memory_section, re.MULTILINE))
+for text in ("--server URL", "--writable", "UNKNOWN", "vlite_memory_receipt", "isError:true"):
+    assert text in memory_section
 tool_docs = (ROOT / "docs/TOOLS.md").read_text(encoding="utf-8")
 shell_section = tool_docs.split("## Local key-value shell commands\n", 1)[1].split("\n## ", 1)[0]
 for command in ("kv-get", "kv-put", "kv-delete", "kv-list"):
@@ -33,4 +40,4 @@ for heading in ("## Install for GitHub Copilot", "## Install for Claude Code", "
 for path in (".copilot\\skills", ".github/skills", ".claude/skills"):
     assert path in skills
 assert "Copy-Item -Recurse" in skills and 'cp -R "skills/$name"' in skills
-print("Agent guides cover nine core MCP tools, four local KV tools, four skills, installation and verification.")
+print("Agent guides cover nine core MCP tools, four local KV tools, nine remote memory tools, four skills, installation and verification.")

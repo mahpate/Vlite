@@ -458,6 +458,8 @@ def mcp_keys(root: Path) -> set[str]:
             keys.add(f"mcp:{name}")
     kv = (root / "src/bin/tool_support/kv_mcp.rs").read_text(encoding="utf-8")
     keys.update(f"mcp:{name}" for name in re.findall(r'const \w+: &str = "(vlite_kv_[a-z_]+)";', kv))
+    memory = (root / "src/bin/tool_support/memory_mcp.rs").read_text(encoding="utf-8")
+    keys.update(f"mcp:{name}" for name in re.findall(r'name: "(vlite_memory_[a-z_]+)"', memory))
     return keys
 
 
