@@ -55,8 +55,24 @@ impl Budget {
                 if count > r.bytes.len() {
                     return Err("truncated");
                 }
-                for _ in 0..count {
-                    self.scan(r, inner, depth + 1, true)?;
+                let width = match inner.as_ref() {
+                    Type::Bool | Type::U8 => Some(1),
+                    Type::U16 => Some(2),
+                    Type::U32 | Type::F32 => Some(4),
+                    Type::U64 | Type::I64 | Type::F64 => Some(8),
+                    _ => None,
+                };
+                if let Some(width) = width {
+                    let cells = count
+                        .checked_mul(std::mem::size_of::<Value>())
+                        .ok_or("prepared_bytes")?;
+                    self.charge(cells)?;
+                    let bytes = count.checked_mul(width).ok_or("truncated")?;
+                    r.take(bytes)?;
+                } else {
+                    for _ in 0..count {
+                        self.scan(r, inner, depth + 1, true)?;
+                    }
                 }
             }
             Type::Map(inner) => {
@@ -215,6 +231,16 @@ impl Budget {
                     }
                 }
             } else {
+                if matches!(t, Type::Slot)
+                    && let Some(tag) = r.bytes.first()
+                    && *tag > 2
+                {
+                    return Err(match (name, key) {
+                        ("receipt_data", "plan_digest") => "plan_slot_kind",
+                        ("batch_data", "batch_digest") => "batch_slot_kind",
+                        _ => "reference_tag",
+                    });
+                }
                 self.scan(r, &t, depth + 1, true)?;
             }
             if name == "accepted_chunk" && matches!(key, "entities" | "relations") {

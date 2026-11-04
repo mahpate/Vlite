@@ -2,6 +2,9 @@
 #[path = "../src/ingestion/canonical/mod.rs"]
 mod canonical;
 
+#[path = "ingestion_canonical/review.rs"]
+mod review;
+
 use canonical::{Type, Value};
 use serde_json::Value as Json;
 use std::collections::BTreeMap;
@@ -272,8 +275,8 @@ fn ingestion_canonical_foundation_vectors() {
         (45, 28),
         "bounded foundation coverage; remaining records, physical maps, plan validation and frame vectors are NOT implemented"
     );
-    assert_eq!(fixture["vectors"].as_array().unwrap().len(), 113);
-    assert_eq!(fixture["negatives"].as_array().unwrap().len(), 110);
+    assert_eq!(fixture["vectors"].as_array().unwrap().len(), 120);
+    assert_eq!(fixture["negatives"].as_array().unwrap().len(), 114);
 }
 
 fn json(v: &Value) -> Json {
@@ -466,8 +469,8 @@ fn ingestion_plan_budget_before_materialization() {
         canonical::decode_with_policy(&Type::Bool, &[2], &policy),
         Err("prepared_bytes")
     );
-    let mut large = 300000u32.to_le_bytes().to_vec();
-    large.extend_from_slice(&vec![2; 300000]);
+    let mut large = 2_100_000u32.to_le_bytes().to_vec();
+    large.extend_from_slice(&vec![2; 2_100_000]);
     assert_eq!(
         canonical::decode(&Type::List(Box::new(Type::Bool)), &large),
         Err("prepared_bytes")
@@ -850,11 +853,8 @@ fn ingestion_canonical_complete_plan_vectors() {
             let name = case["name"].as_str().unwrap();
             let actual = remaining_case(case, &fixture["templates"]);
             if index == 1 {
-                assert_eq!(
-                    actual.unwrap_err(),
-                    case["error"].as_str().unwrap(),
-                    "{name}"
-                );
+                assert!(actual.is_err(), "{name}: got {actual:?}");
+                assert_eq!(actual.unwrap_err(), case["error"].as_str().unwrap(), "{name}");
             } else {
                 let (bytes, t, v) = actual.unwrap_or_else(|e| panic!("{name}: {e}"));
                 if case["category"] == "plan_order" {
@@ -907,7 +907,7 @@ fn ingestion_canonical_complete_plan_vectors() {
             counts[index] += 1;
         }
     }
-    assert_eq!(counts, [41, 61]);
+    assert_eq!(counts, [48, 65]);
 }
 
 fn template(name: &str) -> Value {
@@ -1875,7 +1875,11 @@ fn ingestion_stored_strictness_ruling() {
         );
         assert_eq!(
             canonical::encode(&Type::Record(name), &data),
-            Err("reference_tag")
+            Err(if name == "receipt_data" {
+                "plan_slot_kind"
+            } else {
+                "batch_slot_kind"
+            })
         );
     }
     let mut revision = template("revision_projection_data");

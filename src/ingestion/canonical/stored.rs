@@ -140,7 +140,7 @@ fn validate(name: &str, value: &Value) -> Result<()> {
         "receipt_data" => {
             enumeration("outcome", 3, "enum")?;
             if unsigned(field(field(value, "plan_digest")?, "tag")?, 2)
-                .map_err(|_| "reference_tag")?
+                .map_err(|_| "plan_slot_kind")?
                 != 1
             {
                 return Err("plan_slot_kind");
@@ -148,7 +148,7 @@ fn validate(name: &str, value: &Value) -> Result<()> {
         }
         "batch_data" => {
             if unsigned(field(field(value, "batch_digest")?, "tag")?, 2)
-                .map_err(|_| "reference_tag")?
+                .map_err(|_| "batch_slot_kind")?
                 != 2
             {
                 return Err("batch_slot_kind");

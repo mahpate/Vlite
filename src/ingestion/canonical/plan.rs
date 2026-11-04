@@ -356,6 +356,12 @@ pub(super) fn operation_schema(tag: u64) -> Result<Vec<(&'static str, Type)>> {
 fn validate_operation(v: &Value) -> Result<()> {
     let t = tag(v)?;
     let f = of(v)?;
+    if t == 1 && !matches!(role(field(f, "edge")?)?, "has_revision" | "has_chunk" | "mention" | "relation") {
+        return Err("operation_object_role");
+    }
+    if t == 4 && !matches!(role(field(f, "node")?)?, "source" | "revision" | "chunk") {
+        return Err("operation_object_role");
+    }
     if matches!(t, 5 | 8 | 10 | 12) {
         let r = role(field(field(f, "object")?, "identity")?)?;
         let valid = match t {
@@ -450,7 +456,10 @@ fn mask(v: &mut Value) {
             for (key, value) in map {
                 if matches!(key.as_str(), "plan_digest" | "batch_digest")
                     && let Value::Map(slot) = value
-                    && matches!(slot.get("tag"), Some(Value::Unsigned(1 | 2)))
+                    && matches!(
+                        slot.get("tag"),
+                        Some(Value::Unsigned(1 | 2) | Value::Integer(1 | 2))
+                    )
                 {
                     slot.insert("value".into(), Value::Text("00".repeat(32)));
                 } else {

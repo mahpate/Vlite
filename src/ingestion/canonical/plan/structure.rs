@@ -174,6 +174,7 @@ pub(super) fn validate(plan: &Value) -> Result<()> {
             for op in group_ops {
                 let t = tag(op)?;
                 let associated = match t {
+                    1 => None,
                     2 | 7 => Some(field(of(op)?, "chunk")?),
                     3 => Some(
                         *detaches

@@ -34,6 +34,9 @@ pub mod import;
 #[cfg(test)]
 #[path = "../tests/ingestion_canonical.rs"]
 mod ingestion_canonical;
+#[cfg(test)]
+#[path = "ingestion/preflight.rs"]
+mod ingestion_preflight;
 pub mod kv;
 mod metadata;
 pub mod metadata_index;
