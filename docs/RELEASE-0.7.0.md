@@ -4,7 +4,7 @@ VLite 0.7.0 adds a key-value store, an opt-in directory store, graph expiry, bou
 
 <!-- source: docs/STORAGE-FEATURES.md#key-value-store, docs/STORAGE-FEATURES.md#directory-store, docs/GRAPH.md#expiry-ttl, docs/GRPC.md, site/api.html -->
 
-It follows [0.6.1](RELEASE-0.6.1.md). The additions are embedded Rust APIs, local shell and MCP tools, and REST and gRPC key-value and provider operations. Existing files open as before and new files are written as before. New stores and application-facing operations need explicit use or setup. Exact SIMD scoring, filter-summary pruning and the fixes below apply automatically, and search hits and distances stay unchanged. Rust code that matches `GraphChange` exhaustively needs a new arm, and code that uses the generated `grpc` types has further source changes (see [Compatibility](#compatibility)). This release makes no new performance claims. <!-- source: docs/STORAGE-FEATURES.md, docs/GRAPH.md, docs/GRPC.md, docs/API.md, src/exact_kernels.rs, tests/filter_summaries.rs, tests/graph_regression.rs, src/property_graph/change.rs, proto/vlite/v1/vlite.proto -->
+It follows [0.6.1](RELEASE-0.6.1.md). The additions are embedded Rust APIs, local shell and MCP tools, and REST and gRPC key-value and provider operations. Existing files open as before and new files are written as before. New stores and application-facing operations need explicit use or setup. Exact SIMD scoring, filter-summary pruning and the fixes below apply automatically, and search hits and distances stay unchanged. Rust code that matches `GraphChange` exhaustively needs a new arm, and code that uses the generated `grpc` types has further source changes (see [Compatibility](#compatibility)). Measured speed results are in [Benchmarks](#benchmarks); this release makes no size claims. <!-- source: docs/STORAGE-FEATURES.md, docs/GRAPH.md, docs/GRPC.md, docs/API.md, src/exact_kernels.rs, tests/filter_summaries.rs, tests/graph_regression.rs, src/property_graph/change.rs, proto/vlite/v1/vlite.proto, benchmarks/RESULTS.md -->
 
 > **Draft for release-candidate review.** The version number is provisional. Resolve or delete every `[TO CONFIRM AT RC]`, `[TO FILL AT RC]`, `[TO FILL AT FREEZE]` and `[VERIFY]` marker before publishing. A `<!-- source: ... -->` comment names the repository document or test that backs the statement before it.
 
@@ -254,7 +254,7 @@ it up.
   planned search, HNSW exact re-scoring, `ExactReranker`, named-vector exact
   search, disk ANN neighbor scoring, MMR pairwise scoring and the GPU
   searcher's CPU re-score. The NEON kernel was validated on native aarch64 CI.
-  No performance claim is made here (see [Benchmarks](#benchmarks)).
+  Measured speed is in [Benchmarks](#benchmarks).
   <!-- source: docs/projects/roadmap/p3-compact-vectors.md#p3d-progress-exact-simd-kernels-reviewed-unreleased, src/exact_kernels.rs, .github/workflows/ci.yml -->
 - **Filter block summaries.** Exact filtered search on a collection
   with declared metadata indexes keeps in-memory summaries of each block of
@@ -312,8 +312,29 @@ was added. See
 
 ## Benchmarks
 
-[TO FILL AT RC] Link this release's results in the DO-005 record ([baseline](projects/feature-agent-graph/baseline.md), [results](../benchmarks/RESULTS.md)). No 0.7.0 result is linked in this draft, which quotes no benchmark numbers.
-<!-- source: docs/projects/feature-agent-graph/baseline.md, benchmarks/RESULTS.md, docs/projects/roadmap/next-major.md -->
+The DO-005 campaign measured release candidate `30901be1`, the integration
+head with a green full CI run, against v0.6.0 and v0.6.1. It used the unchanged
+`graph_baseline.py` reference profile (five runs per workload and revision) on
+identical Azure Standard_D16s_v5 VMs, and 90 of 90 slots passed the unchanged
+background-CPU gate; none was discarded or retried. At 100,000 × 384
+dimensions, against v0.6.0:
+
+- Query p50 is 42% lower on the exact workload, 23% lower on the filtered
+  workload and 42% lower on the exact scan of the HNSW workload. The
+  approximate HNSW query and the index build are within 2%.
+- Recall and file bytes are identical.
+- Ingest, reopen and peak memory are within about 3%.
+
+The candidate commits after `30901be1` add server adapters, tools, clients and
+documentation only. [TO FILL AT FREEZE] State the final release revision and
+show that no measured path changed since `30901be1`.
+
+[Full tables, per-run CPU and method](../benchmarks/results/graph-reference-0.7.0-rc-vs-v0.6.0-azure.md) ·
+[raw runs](../benchmarks/results/graph-reference-0.7.0-rc-vs-v0.6.0-azure.json) ·
+[DO-005 baseline](projects/feature-agent-graph/baseline.md) ·
+[published results](../benchmarks/RESULTS.md). These are measured values on one
+host type, not performance guarantees.
+<!-- source: benchmarks/results/graph-reference-0.7.0-rc-vs-v0.6.0-azure.md, benchmarks/results/graph-reference-0.7.0-rc-vs-v0.6.0-azure.json, docs/projects/feature-agent-graph/baseline.md, benchmarks/RESULTS.md, docs/projects/roadmap/next-major.md -->
 
 ## Upgrade
 
