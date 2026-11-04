@@ -41,6 +41,22 @@ quit
             .output()
             .unwrap(),
     );
+    for help in [
+        out.as_str(),
+        &success(
+            Command::new(env!("CARGO_BIN_EXE_vlite-shell"))
+                .arg("--help")
+                .output()
+                .unwrap(),
+        ),
+    ] {
+        assert!(
+            help.lines().any(|line| line
+                == "kv-get REQUEST | kv-put REQUEST | kv-delete REQUEST | kv-list REQUEST")
+        );
+        assert!(help.lines().any(|line| line
+            == "KV REQUEST is one JSON object with required collection and namespace; see docs/TOOLS.md."));
+    }
     assert!(out.contains("hello world"));
     assert!(out.contains("\"verified\":true"));
     assert!(out.contains("\"id\":7"));

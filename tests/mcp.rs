@@ -140,6 +140,36 @@ fn mcp_stdio_lifecycle_tools_and_protocol_errors() {
     );
     assert_eq!(response(&responses, 6)["error"]["code"], -32601);
     assert_eq!(response(&responses, 7)["result"]["isError"], true);
+
+    // Raw requests preserve repeated keys, which Value would collapse before sending.
+    let responses = run(
+        &path,
+        true,
+        &[
+            r#"{"jsonrpc":"2.0","id":10,"method":"tools/call","params":{"name":"vlite_get","arguments":{"id":"1","id":"2"}}}"#,
+            r#"{"jsonrpc":"2.0","id":11,"method":"tools/call","params":{"name":"vlite_graph_create","arguments":{"graph":"first","graph":"last"}}}"#,
+            &request(
+                12,
+                "tools/call",
+                json!({"name":"vlite_graph_list","arguments":{}}),
+            ),
+        ],
+    );
+    assert_eq!(response(&responses, 10)["result"]["isError"], false);
+    assert_eq!(
+        response(&responses, 10)["result"]["structuredContent"],
+        json!({"record":{"id":"2","metadata":{},"payload":"near"}})
+    );
+    assert_eq!(response(&responses, 11)["result"]["isError"], false);
+    assert_eq!(
+        response(&responses, 11)["result"]["structuredContent"],
+        json!({"graph":{"name":"last","node_count":0,"edge_count":0}})
+    );
+    assert_eq!(response(&responses, 12)["result"]["isError"], false);
+    assert_eq!(
+        response(&responses, 12)["result"]["structuredContent"],
+        json!({"graphs":[{"name":"last","node_count":0,"edge_count":0}]})
+    );
 }
 
 #[test]
@@ -178,6 +208,11 @@ fn read_only_mutation_fails_and_writable_changes_persist() {
                 "tools/call",
                 json!({"name":"vlite_upsert","arguments":{"id":"5","vector":[5,5],"payload_base64":"AAEC"}}),
             ),
+            &request(
+                6,
+                "tools/call",
+                json!({"name":"vlite_upsert","arguments":{"id":"6","vector":[6,6],"payload_base64":"AP/+gA=="}}),
+            ),
         ],
     );
     let names: Vec<&str> = response(&responses, 2)["result"]["tools"]
@@ -191,8 +226,74 @@ fn read_only_mutation_fails_and_writable_changes_persist() {
     assert_eq!(response(&responses, 3)["result"]["isError"], false);
     assert_eq!(response(&responses, 4)["result"]["isError"], false);
     assert_eq!(response(&responses, 5)["result"]["isError"], false);
+    assert_eq!(response(&responses, 6)["result"]["isError"], false);
+
+    for writable in [false, true] {
+        let responses = run(
+            &path,
+            writable,
+            &[
+                &request(
+                    7,
+                    "tools/call",
+                    json!({"name":"vlite_get","arguments":{"id":"6","include_vector":true}}),
+                ),
+                &request(
+                    8,
+                    "tools/call",
+                    json!({"name":"vlite_list","arguments":{"after":"5","limit":1}}),
+                ),
+                &request(
+                    9,
+                    "tools/call",
+                    json!({"name":"vlite_search","arguments":{"vector":[6,6],"k":1}}),
+                ),
+            ],
+        );
+        for id in 7..=9 {
+            assert_eq!(response(&responses, id)["result"]["isError"], false);
+        }
+        assert_eq!(
+            response(&responses, 7)["result"]["structuredContent"],
+            json!({"record":{"id":"6","metadata":{},"payload_base64":"AP/+gA==","vector":[6.0,6.0]}})
+        );
+        assert_eq!(
+            response(&responses, 8)["result"]["structuredContent"],
+            json!({"records":[{"id":"6","metadata":{},"payload_base64":"AP/+gA=="}],"next_after":null})
+        );
+        // Search has always returned only IDs and distances, not record payloads.
+        assert_eq!(
+            response(&responses, 9)["result"]["structuredContent"],
+            json!({"hits":[{"id":"6","distance":0.0}]})
+        );
+    }
+
+    for (payload, message) in [
+        ("AA-_", "invalid base64 payload"),
+        ("AA", "payload_base64 must use padded standard base64"),
+        ("AA=A", "invalid base64 padding"),
+        ("AA==AAAA", "invalid base64 padding"),
+        ("AB==", "payload_base64 must be canonical padded base64"),
+        ("AAF=", "payload_base64 must be canonical padded base64"),
+    ] {
+        let responses = run(
+            &path,
+            true,
+            &[&request(
+                10,
+                "tools/call",
+                json!({"name":"vlite_upsert","arguments":{"id":"6","vector":[6,6],"payload_base64":payload}}),
+            )],
+        );
+        assert_eq!(
+            response(&responses, 10)["result"],
+            json!({"isError":true,"content":[{"type":"text","text":message}],"structuredContent":{"error":message}}),
+            "payload_base64={payload:?}"
+        );
+    }
     let db = Database::open(path).unwrap();
     assert_eq!(db.get(4).unwrap().unwrap().payload, b"added");
     assert_eq!(db.get(5).unwrap().unwrap().payload, [0, 1, 2]);
+    assert_eq!(db.get(6).unwrap().unwrap().payload, [0, 255, 254, 128]);
     assert!(db.get(1).unwrap().is_none());
 }

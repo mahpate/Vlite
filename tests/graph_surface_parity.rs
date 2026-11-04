@@ -584,11 +584,16 @@ fn reg008_mcp_allowlist_accepts_only_the_exact_approved_tools() {
     assert_eq!(take_mcp_additions(&mut other, &approved), None);
 }
 
-fn mcp_transcript(mode: &str) -> Vec<Value> {
+fn mcp_transcript(mode: &str, graph_enabled: bool) -> Vec<Value> {
     let directory = tempfile::tempdir().unwrap();
     let path = directory.path().join("mcp.vlite");
-    // The baseline transcript is of a vector-only file.
-    let mut db = Database::create_with_format(&path, 2, vlite::FormatVersion::V3).unwrap();
+    let format = if graph_enabled {
+        vlite::FormatVersion::V5
+    } else {
+        // The baseline transcript is of a vector-only file.
+        vlite::FormatVersion::V3
+    };
+    let mut db = Database::create_with_format(&path, 2, format).unwrap();
     db.put(1, &[0.0, 0.0], b"origin").unwrap();
     db.put(2, &[1.0, 1.0], b"near").unwrap();
     db.put(3, &[2.0, 2.0], b"far").unwrap();
@@ -627,13 +632,22 @@ fn reg008_mcp_tools_list_and_outputs_match_baseline() {
         ("writable", "mcp_writable.json"),
     ] {
         let expected: Vec<Value> = serde_json::from_str(&fixture(golden)).unwrap();
-        let actual = mcp_transcript(mode);
+        let actual = mcp_transcript(mode, false);
         let approved = approved_mcp_additions(mode);
         assert_eq!(actual.len(), expected.len(), "{mode}: response count");
         for (actual, expected) in actual.iter().zip(&expected) {
             let (mut actual, mut expected) = (actual.clone(), expected.clone());
             let served_version = mask_mcp_version(&mut actual);
             let golden_version = mask_mcp_version(&mut expected);
+            if let Some(baseline) = expected.pointer("/result/tools") {
+                let mut ordered = baseline.as_array().unwrap().clone();
+                ordered.extend(approved.iter().cloned());
+                assert_eq!(
+                    actual["result"]["tools"],
+                    serde_json::json!(ordered),
+                    "{mode}: baseline tools followed by approved KV tools"
+                );
+            }
             if let Some(taken) = take_mcp_additions(&mut actual, &approved) {
                 assert_eq!(taken, approved, "{mode}: approved KV tools");
             }
@@ -656,5 +670,20 @@ fn reg008_mcp_tools_list_and_outputs_match_baseline() {
                 expected["id"]
             );
         }
+
+        let graph_actual = mcp_transcript(mode, true);
+        let graph_tools = graph_actual[1]["result"]["tools"].as_array().unwrap();
+        let mut ordered = expected[1]["result"]["tools"].as_array().unwrap().clone();
+        ordered.extend(approved.iter().cloned());
+        assert_eq!(
+            graph_tools.get(..ordered.len()),
+            Some(ordered.as_slice()),
+            "{mode}: graph-enabled files keep baseline tools then approved KV tools"
+        );
+        assert_eq!(
+            graph_tools[ordered.len()]["name"],
+            "vlite_graph_list",
+            "{mode}: graph tools follow the approved KV tools"
+        );
     }
 }
