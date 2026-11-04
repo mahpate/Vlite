@@ -59,6 +59,8 @@ jobs:
           python -O tests/ingestion_schema_reference.py --self-test
           python tests/graph_subset_oracle.py --self-test
           python -O tests/graph_subset_oracle.py --self-test
+          python tests/graph_subset_write_oracle.py --self-test
+          python -O tests/graph_subset_write_oracle.py --self-test
       - id: route
         run: python scripts/ci_policy.py route
 
