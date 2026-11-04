@@ -257,14 +257,7 @@ impl MemoryRef<'_> {
             .graph
             .max_edges_examined
             .saturating_sub(*edges_charged);
-        let reasons = if remaining == 0 {
-            vec![TruncationReason::EdgeLimit]
-        } else {
-            let limits = GraphLimits {
-                max_edges_examined: remaining.min(MAX_EDGES),
-                deadline_ms,
-                ..GraphLimits::DEFAULT
-            };
+        let reasons = if let Some(limits) = label_limits(remaining, deadline_ms) {
             let (counts, examined, reasons) = derive(
                 &graph,
                 &scope_key,
@@ -284,6 +277,8 @@ impl MemoryRef<'_> {
                 None if remaining >= MAX_EDGES => return Err(MemoryError::OperationLimit.into()),
                 None => reasons,
             }
+        } else {
+            vec![TruncationReason::EdgeLimit]
         };
         if !request.allow_partial {
             return Err(RecallError::Budget("graph"));
@@ -295,6 +290,17 @@ impl MemoryRef<'_> {
         }
         Ok(None)
     }
+}
+
+/// The engine budget of one S2 label read: the recall edges still unspent,
+/// capped at `MAX_EDGES`, and the recall's remaining deadline unchanged.
+/// `None` when no edge budget is left (the read is then `EdgeLimit`).
+fn label_limits(remaining_edges: u64, remaining_deadline_ms: u64) -> Option<GraphLimits> {
+    (remaining_edges > 0).then_some(GraphLimits {
+        max_edges_examined: remaining_edges.min(MAX_EDGES),
+        deadline_ms: remaining_deadline_ms,
+        ..GraphLimits::DEFAULT
+    })
 }
 
 /// A label read stopped by cancellation or the deadline is a hard error,

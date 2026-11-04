@@ -11,7 +11,9 @@ use super::super::{
     MemoryProperties, MemoryRef, MemoryScope, Provenance, RememberRequest, content_digest, hex,
     memory_key, memory_properties,
 };
-use super::{SummaryStatus, SummaryStatusRequest, derived_edge_key, hard_stop};
+use super::{
+    MAX_EDGES, SummaryStatus, SummaryStatusRequest, derived_edge_key, hard_stop, label_limits,
+};
 use crate::{
     Database, Expected, Metadata, MetadataValue,
     property_graph::{EdgeRef, GraphOp},
@@ -1254,6 +1256,36 @@ fn s2_label_remaining_edges_255_256_257_pin_budget_versus_engine_cap() {
             );
             assert_eq!(charged, 256, "{remaining} {allow_partial}");
             assert!(truncation.is_empty(), "{remaining} {allow_partial}");
+        }
+    }
+}
+
+/// S2 label budget without a clock: the remaining recall deadline reaches the
+/// label read unchanged and the edge budget is the unspent recall edges,
+/// capped at `MAX_EDGES`; nothing is left means no engine read at all.
+#[test]
+fn s2_label_read_budget_carries_the_remaining_deadline() {
+    assert_eq!(MAX_EDGES, 256);
+    for deadline in [1, 250, 251, 5_000, u64::MAX] {
+        assert_eq!(label_limits(0, deadline), None, "deadline {deadline}");
+        for (remaining, edges) in [
+            (1, 1),
+            (250, 250),
+            (251, 251),
+            (255, 255),
+            (256, 256),
+            (257, 256),
+            (u64::MAX, 256),
+        ] {
+            assert_eq!(
+                label_limits(remaining, deadline),
+                Some(GraphLimits {
+                    max_edges_examined: edges,
+                    deadline_ms: deadline,
+                    ..GraphLimits::DEFAULT
+                }),
+                "remaining {remaining}, deadline {deadline}"
+            );
         }
     }
 }
