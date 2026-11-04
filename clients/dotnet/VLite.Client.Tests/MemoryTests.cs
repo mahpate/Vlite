@@ -91,7 +91,11 @@ static partial class MemoryTests
     {
         if (only is not null && !name.Contains(only, StringComparison.OrdinalIgnoreCase)) return;
         try { await body(); }
-        catch (Exception error) { failures.Add($"{name}: {error.Message}"); }
+        catch (Exception error)
+        {
+            var cause = error.InnerException is { } inner ? " <- " + inner.Message : "";
+            failures.Add($"{name}: {error.Message}{cause}");
+        }
     }
 
     public static async Task<int> RunAsync(string[] args)
@@ -136,6 +140,11 @@ static partial class MemoryTests
         await Scenario("memory-number-helpers", NumberHelpers);
         await Scenario("memory-misc-api", MiscApi);
         await Scenario("memory-order-preserved", OrderPreserved);
+        await Scenario("memory-response-boolean-positions", ResponseBooleanPositions);
+        await Scenario("memory-request-boolean-positions", RequestBooleanPositions);
+        await Scenario("memory-culture-invariance", CultureInvariance);
+        await Scenario("memory-union-converters", UnionConverters);
+        await Scenario("memory-number-edges", NumberEdges);
         if (failures.Count > 0)
         {
             Console.Error.WriteLine($"{failures.Count} memory scenario(s) FAILED:");
