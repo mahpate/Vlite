@@ -88,6 +88,31 @@ impl MemoryRef<'_> {
     }
 }
 
+impl MemoryRef<'_> {
+    /// The stored `retry_until_ms` of the receipt a mutation just wrote or
+    /// replayed, for any first-slice operation (remember included): read by
+    /// identity alone, without decoding the outcome. `None` when absent.
+    pub(crate) fn retry_until(
+        &self,
+        operation: ReceiptOperation,
+        scope: &MemoryScope,
+        idempotency_key: &str,
+        now_ms: u64,
+    ) -> MemoryResult<Option<u64>> {
+        let scope_key = scope.key();
+        let key = operation_receipt_key(operation.name(), &scope_key, idempotency_key);
+        let Some(receipt) = self.graph()?.with_clock(now_ms).get_node(&key)?.output else {
+            return Ok(None);
+        };
+        if string_property(&receipt, "scope")? != scope_key {
+            return Err(MemoryError::DigestCollision);
+        }
+        consolidate::canonical_decimal(string_property(&receipt, "expires_at_ms")?, 20)
+            .map(Some)
+            .ok_or(MemoryError::InvalidBundle)
+    }
+}
+
 /// Exactly the A2 forget receipt label and properties; returns the expiry.
 fn forget_receipt_expiry(receipt: &NodeView, scope_key: &str) -> MemoryResult<u64> {
     let typed = |name: &str, integer: bool| {

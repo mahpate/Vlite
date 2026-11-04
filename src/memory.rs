@@ -10,8 +10,10 @@ pub(crate) mod binding;
 mod consolidate;
 mod erasure;
 mod mapping;
-#[cfg(all(test, feature = "server"))]
-pub(crate) use mapping::ReceiptOperation;
+#[cfg(feature = "server")]
+pub(crate) use mapping::{
+    ReceiptOperation, WireCode, WireMapping, WireOperation, memory_error, receipt_id, unavailable,
+};
 mod ranking;
 mod recall;
 mod receipt;

@@ -557,3 +557,69 @@ fn consolidate_receipt_returns_summary_and_pins_the_bound_collection() {
         "InvalidBundle"
     );
 }
+
+fn retry_until(db: &Database, operation: ReceiptOperation, agent: &str, key: &str) -> String {
+    match MemoryRef::bind(db, GRAPH, None)
+        .unwrap()
+        .retry_until(operation, &scope(agent), key, 50)
+    {
+        Ok(found) => format!("{found:?}"),
+        Err(MemoryError::Storage(_)) => "Storage".into(),
+        Err(error) => format!("{error:?}"),
+    }
+}
+
+#[test]
+fn retry_until_reads_each_operation_receipt_by_identity() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut db = database(&dir.path().join("receipt.vlite"));
+    remember(&mut db, &["e3"], 10);
+    forgotten(&mut db);
+    remember(&mut db, &["e1"], 30);
+    MemoryMut::bind(&mut db, GRAPH, None)
+        .unwrap()
+        .consolidate(&consolidate_request("c1"))
+        .unwrap();
+    assert_eq!(
+        retry_until(&db, ReceiptOperation::Remember, "a", "r-e3"),
+        "Some(110)"
+    );
+    assert_eq!(
+        retry_until(&db, ReceiptOperation::Forget, "a", "f1"),
+        "Some(120)"
+    );
+    assert_eq!(
+        retry_until(&db, ReceiptOperation::Consolidate, "a", "c1"),
+        "Some(120)"
+    );
+    // Operation, scope and key are all identity.
+    assert_eq!(
+        retry_until(&db, ReceiptOperation::Forget, "a", "r-e3"),
+        "None"
+    );
+    assert_eq!(
+        retry_until(&db, ReceiptOperation::Remember, "b", "r-e3"),
+        "None"
+    );
+    assert_eq!(
+        retry_until(&db, ReceiptOperation::Remember, "a", "r-e4"),
+        "None"
+    );
+    // Tampered expiry or scope is a fault, never a guess.
+    let key = operation_receipt_key("remember", &scope("a").key(), "r-e3");
+    rewrite(&mut db, &key, |p| {
+        p.insert("expires_at_ms".into(), MetadataValue::String("0110".into()));
+    });
+    assert_eq!(
+        retry_until(&db, ReceiptOperation::Remember, "a", "r-e3"),
+        "InvalidBundle"
+    );
+    rewrite(&mut db, &key, |p| {
+        p.insert("expires_at_ms".into(), MetadataValue::String("110".into()));
+        p.insert("scope".into(), MetadataValue::String(scope("b").key()));
+    });
+    assert_eq!(
+        retry_until(&db, ReceiptOperation::Remember, "a", "r-e3"),
+        "DigestCollision"
+    );
+}

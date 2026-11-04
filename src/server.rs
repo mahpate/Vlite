@@ -571,6 +571,7 @@ fn configured_routes(service: Service) -> Router {
         .merge(data_routes())
         .merge(features::routes())
         .merge(kv::routes())
+        .merge(memory::routes(&service))
         .merge(
             Router::new()
                 .route("/health", get(|| async { Json(json!({"status": "ok"})) }))
@@ -965,6 +966,15 @@ fn permission(method: &Method, route: &str) -> Need {
             | "/v1/admin/backups/{name}/drill",
         ) => Need::Op(Op::Backup, Reach::All),
         ("GET" | "HEAD", "/v1/admin/maintenance/auto") => Need::Op(Op::Index, Reach::All),
+        // Memory routes exist only with a bindings file; binding and scope
+        // grants are checked by the handler (mapping section 6). Any method
+        // reaches the router's 405 only after the same route permission.
+        (_, memory_route) if memory::read_route(memory_route) => {
+            Need::Op(Op::GraphRead, Reach::Filtered)
+        }
+        (_, memory_route) if memory::write_route(memory_route) => {
+            Need::Op(Op::GraphWrite, Reach::Filtered)
+        }
         _ => Need::Admin,
     }
 }
@@ -1004,7 +1014,9 @@ fn authorize(
             || route == "/v1/collections/{collection}/query"
             || route == "/v1/collections/{collection}/embed"
             || route == "/v1/collections/{collection}/search/disk-ann");
-    let search = search || graph::read_post(method, route);
+    let search = search
+        || graph::read_post(method, route)
+        || (method == Method::POST && memory::read_route(route));
     let read_only_allowed =
         path.starts_with("/v1/auth/") || (!path.starts_with("/v1/admin/") && (read || search));
     // Legacy routes address `default` (ID 0); their handlers may not resolve

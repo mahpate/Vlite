@@ -6,6 +6,8 @@
 
 use std::collections::BTreeSet;
 
+use axum::Router;
+
 use super::{Service, reserved};
 use crate::Database;
 use crate::memory::binding::{Binding, BindingState};
@@ -85,6 +87,35 @@ fn prepare(db: &mut Database, bindings: &reserved::Bindings) -> Result<(), &'sta
     Ok(())
 }
 
+/// The memory routes: none (plain 404) without bindings (mapping section 6).
+pub(super) fn routes(service: &Service) -> Router<Service> {
+    if service.memory_bindings.is_empty() {
+        Router::new()
+    } else {
+        routes::routes()
+    }
+}
+
+/// Read routes (`graph_read`; read-only roles may reach them).
+pub(super) fn read_route(route: &str) -> bool {
+    matches!(
+        route,
+        routes::RECALL | routes::RECEIPT | routes::FIND_FACTS | routes::GET_ERASURE
+    )
+}
+
+/// Write routes (`graph_write`).
+pub(super) fn write_route(route: &str) -> bool {
+    matches!(
+        route,
+        routes::REMEMBER
+            | routes::CONSOLIDATE
+            | routes::FORGET
+            | routes::CORRECT_FACTS
+            | routes::RESUME_ERASURE
+    )
+}
+
 fn resources(binding: &Binding) -> (String, Option<String>) {
     let evidence = binding
         .evidence_collection
@@ -103,6 +134,11 @@ fn scope_tuple(scope: &MemoryScope) -> ScopeTuple {
         scope.session.clone(),
     )
 }
+
+#[cfg(test)]
+mod replay;
+mod routes;
+mod wire;
 
 #[cfg(test)]
 mod tests;
