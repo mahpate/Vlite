@@ -14,6 +14,8 @@ mod ranking;
 mod recall;
 mod receipt;
 mod stale;
+#[cfg(test)]
+mod wire_verify;
 
 use sha2::{Digest, Sha256};
 
