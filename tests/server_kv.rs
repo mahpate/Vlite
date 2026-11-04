@@ -392,7 +392,7 @@ async fn kv_page_canonical_byte_boundary_is_inclusive() {
             .unwrap()
             .len();
         for _ in 0..3 {
-            if (boundary - overhead) % 2 == 0 {
+            if (boundary - overhead).is_multiple_of(2) {
                 break;
             }
             let old = expected[0]["key"].as_str().unwrap();
