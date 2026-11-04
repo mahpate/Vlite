@@ -13,7 +13,9 @@ sections 1-8 together; changes before implementation need a new ratification.
 ## 1. Boundary, identity and isolation
 
 E1 begins logical erasure of precisely one already provisioned scope. It creates
-a persistent barrier and pending job; **it deletes no memory or evidence**.
+a persistent barrier and pending job; **it deletes no live memory or evidence**.
+The successful graph frame can still perform the engine's opening reclamation
+of unrelated TTL-expired graph nodes; it is not E1 erasure progress.
 No automatic transition to complete, no implicit job from an oversized forget.
 The scope node is neither replaced nor given a TTL. Job-node presence is the
 barrier, including after eventual logical completion. No automatic reactivation.
@@ -63,6 +65,14 @@ Revision is an actual graph-node revision, never a caller memory revision.
 `erasure_status` returns the current job revision; replay returns the original
 revision from its receipt, whose initial frame also created the job.
 
+`expected_scope_revision` is an identity guard: the provisioned scope node's
+revision is the provisioning-frame revision and is immutable in E1. Because
+`provision_scope` returns `()`, add crate-private read-only
+`MemoryRef::scope_revision(&MemoryScope) -> MemoryResult<u64>` in erasure.rs.
+It reads the scope node, verifies its exact tuple, and returns its graph revision.
+It is barrier-exempt so a caller can inspect the stable identity guard after a
+job begins. It never mutates the scope node or proves job progress.
+
 New crate-private MemoryError variants: DeletionPending and JobConflict.
 The latter means a different/expired begin cannot start a second job for a scope.
 Reuse InvalidTarget for zero/overflow expected_scope_revision, RevisionConflict
@@ -75,8 +85,8 @@ JobConflict anticipates E2 fencing but E1 does not implement a resume operation.
 Begin structural order: scope; opaque key (1..256 UTF-8 bytes); now_ms in
 0..i64::MAX; positive receipt window with checked u64 now+window;
 nonzero u64 expected_scope_revision; optional u64 deadline; binding validation.
-E1 requires a present collection name to be 1..256 UTF-8 bytes; None is legal.
-This is an E1 bound, not a claim about all existing collection names.
+E1 requires a present collection name to be 1..63 UTF-8 bytes, matching the
+engine collection-name bound (`src/format.rs:125,570`); None is legal.
 Deadline, now and numeric booleans are not interchangeable. No silently accepted
 extra request fields, mode/target discriminants or caller graph properties.
 Status request validates only scope, not clock/window/key.
@@ -94,6 +104,8 @@ Replay requires the corresponding valid job to exist; missing job is
 InvalidBundle, not a reconstruction or a new barrier.
 At now=expiry the receipt is expired. With a valid job, a fresh begin returns
 JobConflict, including the same key; it never replaces the permanent job.
+JobConflict also covers any begin attempted while a job already exists; E2
+uses the same category for its job-fence conflicts (C2 section 6).
 Without a job, any existing begin receipt is inconsistent (InvalidBundle).
 Otherwise check deadline (now>=deadline refuses), scope expected revision,
 then physical limits and complete lower-layer validation before append.
@@ -177,8 +189,11 @@ correct job; its digest must equal the job's begin_digest, and its initial
 revision must equal the job's initial revision in E1. Wrong binding is
 InvalidBundle; tuple collision is DigestCollision. Other malformed state is
 InvalidBundle; no legacy E1 receipts or forgiving fallbacks exist.
-Strict job decode recognizes only the E1 schema/state/generation. E2-E4 must
-version and freeze their additional states/properties rather than weakening it.
+The singleton job node carries a schema version. E1 strict decoding recognizes
+only `erase-scope:v1` and fails closed on unknown versions. E2 extends the job
+under a new schema version and advances generation; it must not weaken the E1
+decoder. The E1 receipt-revision-below-job check is defensive for E1's atomic
+frame and must be revisited in E4 if maintenance renumbers revisions.
 No checksum authenticates coordinated malicious changes to valid stored fields.
 
 ## 5. Barrier and replay matrix
@@ -195,7 +210,13 @@ the barrier, only the requested operation's exact receipt key may be read to
 recognize a valid **live, matching** pre-barrier commit. Its actual graph receipt
 revision must be strictly less than the job revision. No scans, other-operation
 lookups or fresh planning are allowed. Its existing decoder and retention
-semantics remain unchanged. A malformed receipt preserves its existing error.
+semantics remain unchanged, including operation-specific expiry decoding:
+remember and forget parse a String `expires_at_ms` as u64 and treat missing,
+wrong-typed or unparsable expiry as **not expired**; their usual scope/digest/
+outcome decoder then decides replay or its existing error. Consolidate strictly
+decodes its receipt before expiry classification, including on expired rows.
+Malformed receipt therefore means that operation's existing decoder result,
+not a blanket InvalidBundle.
 Expired, absent, nonmatching or non-pre-barrier receipts cannot authorize work:
 DeletionPending. Even a mismatching digest yields DeletionPending here; before
 a barrier it keeps its operation's usual IdempotencyConflict behavior.
@@ -206,16 +227,32 @@ This exception protects retries, not reads of hidden memory content.
 |---|---|---|
 | remember / forget / consolidate | matching live pre-barrier receipt replays, otherwise DeletionPending | unchanged |
 | provision_scope | DeletionPending; no receipt exception | unchanged |
-| recall (including broad multi-scope) | omit that scope entirely; one deletion_barrier diagnostic per distinct scope, including an empty scope; never produce hits/stale labels from it | existing discovery/rank/limits |
-| summary_status (S1) | DeletionPending before summary lookup/TTL/edge work; no receipt exception | S1 contract |
+| recall (including broad multi-scope) | omit that scope entirely; one crate-private deletion_barriers scope entry per barred scope in request order; never produce hits/stale labels from it | existing discovery/rank/limits |
+| summary_status (S1) | DeletionPending after its existing scope-node read and tuple check, before summary lookup/TTL/edge work; no receipt exception | S1 contract |
+| scope_revision | strict provisioned-scope tuple/revision read; exempt and read-only | same identity revision |
 | S2 recall label | no hit, hence no label or S1 call from barred scope | S2 contract |
 | erasure_status | strict read-only current job status; allowed through barrier | MissingMemory if no job |
 | begin_erasure | own strict live replay/digest conflict; otherwise JobConflict | begin fresh |
 
-Barred recall is a complete scope omission, not allow_partial exhaustion.
-Existing recall structural validation/budget preflight still precede its scope
-loop; no promise that an already-invalid request becomes a successful omission.
-Budget/deadline/cancellation rules for unbarred scopes remain unchanged.
+Recall's existing structural validation rejects duplicate scopes as
+`RecallError::InvalidScopes` before any barrier work. The probe is per requested
+scope in the existing loop, after `recall_collection()` and the
+`memory_scan_bound * scopes + collection.len()` source-record preflight; barred
+scopes remain charged by that preflight. At the scope-node read, verify tuple,
+then probe job. If a valid entity seed belongs to a barred scope, return
+DeletionPending rather than today's MissingMemory; it must not become a hit,
+S2 label, or leak. RecallOutput has no diagnostics field today: E1 adds exactly
+one crate-private `deletion_barriers: Vec<MemoryScope>`, distinct barred scopes
+in request order. Existing private `complete` and allow_partial semantics do
+not change. Serving's `meta.truncation += deletion_barrier` and `complete=false`
+mapping is owned by gap1d, not this contract.
+
+The S1 probe belongs immediately after S1's existing scope-node read and tuple
+check. The `stale.rs` and S2 recall-label hook is added by whichever slice lands
+second; E1 implementation adds it if S1 lands first. `erasure_status` also
+requires the live handle's evidence-collection binding to exactly match the
+job's recorded binding (None only matches None); mismatch is InvalidBundle.
+Status remains strict, read-only and barrier-exempt.
 Metadata status is the only new readable job information, never forgotten text.
 
 ## 6. Atomicity, budgets, clocks and reopen
@@ -235,10 +272,10 @@ sum(1+label_bytes)+4+M. Body=4+sum(entries). Optional opening reclaim adds
 16 bytes and zero user ops. Schema-bounded E1 cannot attain either cap;
 do not manufacture invalid large E1 properties just to reach them.
 Check actual batch and lower-layer frame limits; do not silently truncate.
-The exact schema maximum is 6,480 body bytes: start from the tiny vector's
-1,833, add 2*(2,104-44) for maximum tuple hex, 2*(256-1) for collection,
+The exact schema maximum is 6,094 body bytes: start from the tiny vector's
+1,833, add 2*(2,104-44) for maximum tuple hex, 2*(63-1) for collection,
 and 20-3 for receipt expiry decimal. Keys/digests/outcome remain fixed-width.
-One opening reclaim raises this to 6,496. Thus changing <= to < at either
+One opening reclaim raises this to 6,110. Thus changing <= to < at either
 4,096 ops or 16 MiB is E1-schema-equivalent, not a counted mutation kill.
 Commit clock=max(now,wall,graph high-water), captured once. No object here has
 TTL; created_at_ms is request now, not a promise about append wall time.
@@ -274,11 +311,14 @@ is a logical test, **not** evidence that these four storage backends passed.
 | begin replay status revision | original receipt revision; status read uses current job | same-frame actual revision, no anticipatory number |
 | no job status error | existing MissingMemory | avoid an unnecessary new private variant |
 | malformed barrier | writes stay barred; status/begin strict decode fail | presence cannot be bypassed by malformed properties |
-| reserved receipt expiry decode | strict even if expired | no E1 legacy or silent fallback |
-| binding absent/long name | None allowed; Some 1..256 bytes for E1 | bounded exact metadata, bind digest to collection |
+| begin-erasure receipt expiry decode | strict even if expired | no E1 legacy or silent fallback; old remember/forget/consolidate retain their own decoders |
+| binding absent/long name | None allowed; Some 1..63 bytes for E1 | engine collection-name limit; bind digest to collection |
 | S1/S2 barrier behavior | S1 DeletionPending; S2 omission, no label work | read privacy before status source inspection |
-| recall diagnostics | distinct exact scope with deletion_barrier, no partial flag | scope omission is deliberate, not budget exhaustion |
+| recall barrier output | `deletion_barriers: Vec<MemoryScope>` in request order; no partial flag change | scope omission is deliberate, not budget exhaustion |
 | orphan job during provision | InvalidBundle, never recreate scope | fail closed on inconsistent stored state |
+| begin while job exists | JobConflict, including same-key expired begin | permanent job remains authoritative; C2 E2 uses same fence error |
+| E1/E2 persisted job schema | fail-closed E1 version; E2 uses new version and advances generation | never reinterpret unknown state under old schema |
+| receipt revision equality | require initial same-frame equality in E1; revisit in E4 | maintenance may renumber revisions |
 | deletion count/status | pending, hidden, 0 deleted, unknown remaining | barrier is not erasure completion |
 | additions to private errors | DeletionPending, JobConflict only | existing categories suffice elsewhere |
 | outcomes JSON/binary/LF | exact bounded LF ASCII; digest binary | easy strict decode, no floating/escaping ambiguity |
@@ -296,6 +336,9 @@ Goldens pin byte/digest/key vectors, schema, status, every barrier hook,
 pre-barrier replay versus expiry/conflict, exact child/sibling isolation,
 preappend-no-barrier, read-only status and logical reopen. Every rejected golden
 declares one repairable defect; precedence probes are explicitly separate.
+The implementation hook files are `memory.rs`, `forget.rs`, `consolidate.rs`,
+`recall.rs`, `erasure.rs`, and `stale.rs` (one S1 probe call); the S1/S2 hook
+lands in E1 if that slice lands first.
 Run normal and optimized Python; mutation kills must name the intended case.
 Fixtures label harness-only faults/receipt seeds/backend snapshots; no Rust
 logic copying or claim that a Python filter proves B/S1 implementation parity.

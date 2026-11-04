@@ -209,12 +209,15 @@ def decode_job(node, scope, collection):
 def decode_receipt(receipt, nodes, scope, collection, key, job):
     props = exact(receipt, key, "VliteMemoryReceipt", RECEIPT_TYPES)
     common(props, scope, collection)
-    need(digest_shape(props["digest"]) and props["job_key"] == jkey(scope)
+    need(digest_shape(props["digest"]) and
+         (MUTANT == "receipt_job_key" or props["job_key"] == jkey(scope))
          and props["outcome_chunks"] == 1, "InvalidBundle")
     expiry = decimal(props["expires_at_ms"], 1)
     need(job is not None, "InvalidBundle")
-    need(props["digest"] == job["properties"]["begin_digest"]
-         and receipt["revision"] == job["revision"], "InvalidBundle")
+    need((MUTANT == "receipt_digest" or
+          props["digest"] == job["properties"]["begin_digest"])
+         and (MUTANT == "receipt_revision" or receipt["revision"] == job["revision"]),
+         "InvalidBundle")
     expected = okey(key)
     siblings = [node for node in nodes.values() if
                 node["key"].startswith(expected.rsplit(":", 1)[0] + ":")]
@@ -251,7 +254,8 @@ class Model:
                 "items": seed.get("items", ["m"])}
         for receipt in setup.get("ordinary_receipts", []):
             self.old.append(merge({"scope": base_scope, "key": "old", "digest": "same",
-                                   "expires": 100, "revision": 1, "malformed": False,
+                                   "expires": 100, "expiry_valid": True, "revision": 1,
+                                   "malformed": False,
                                    "result": "original"}, receipt))
 
     def lookup_scope(self, scope):
@@ -280,9 +284,11 @@ class Model:
 
     def begin(self, request, fault):
         validate(request)
+        if MUTANT == "barrier_before_scope" and self.barrier(request["scope"]) is not None:
+            need(False, "DeletionPending")
         seed = self.lookup_scope(request["scope"])
         collection = seed["collection"]
-        need(collection is None or opaque(collection), "InvalidBundle")
+        need(collection is None or opaque(collection, 1, 63), "InvalidBundle")
         scope, c = request["scope"], request["now_ms"]
         job = self.nodes.get(jkey(scope))
         if job is not None:
@@ -302,11 +308,23 @@ class Model:
                 need(props["digest"] == digest, "IdempotencyConflict")
                 return {"status": self.status(job, scope, collection, receipt["revision"]),
                         "replayed": True}
-        need(job is None or MUTANT == "replace_job", "JobConflict")
-        need(request.get("deadline_ms") is None or c < request["deadline_ms"],
-             "DeadlineExceeded")
-        need(MUTANT == "skip_scope_revision"
-             or seed["revision"] == request["expected_scope_revision"], "RevisionConflict")
+        if MUTANT == "job_after_deadline":
+            need(request.get("deadline_ms") is None or c < request["deadline_ms"],
+                 "DeadlineExceeded")
+            need(job is None or MUTANT == "replace_job", "JobConflict")
+        else:
+            need(job is None or MUTANT == "replace_job", "JobConflict")
+        if MUTANT == "revision_before_deadline":
+            need(MUTANT == "skip_scope_revision"
+                 or seed["revision"] == request["expected_scope_revision"], "RevisionConflict")
+            need(request.get("deadline_ms") is None or c < request["deadline_ms"],
+                 "DeadlineExceeded")
+        elif MUTANT != "job_after_deadline":
+            need(request.get("deadline_ms") is None or c < request["deadline_ms"],
+                 "DeadlineExceeded")
+        if MUTANT != "revision_before_deadline":
+            need(MUTANT == "skip_scope_revision"
+                 or seed["revision"] == request["expected_scope_revision"], "RevisionConflict")
         revision = self.sequence + 1
         props = {"e1_schema": SCHEMA, "scope": skey(scope),
                  "e1_scope_tuple": scope_bytes(scope).hex(), "e1_collection": collection or ""}
@@ -343,7 +361,7 @@ class Model:
 
     def gate(self, op, request):
         need(op in ("provision_scope", "erasure_status", "remember", "forget",
-                    "consolidate", "summary_status"), "InvalidBundle")
+                    "consolidate", "summary_status", "scope_revision"), "InvalidBundle")
         scope = request["scope"]
         scope_bytes(scope)
         if op == "provision_scope":
@@ -354,20 +372,34 @@ class Model:
                                            "revision": self.sequence + 1}
                 self.sequence += 1
                 return {"status": "allowed"}
+        if MUTANT == "barrier_before_scope" and self.barrier(scope) is not None:
+            need(False, "DeletionPending")
         self.lookup_scope(scope)
         job = self.barrier(scope)
         if op == "erasure_status":
             need(job is not None, "MissingMemory")
             return {"status": self.status(job, scope, self.scopes[skey(scope)]["collection"])}
+        if op == "scope_revision":
+            return {"revision": self.scopes[skey(scope)]["revision"]}
         if job is not None and MUTANT != "skip_" + op:
             if op in ("remember", "forget", "consolidate"):
                 old = [receipt for receipt in self.old
-                       if scope_bytes(receipt["scope"]) == scope_bytes(scope)
-                       and receipt["op"] == op and receipt["key"] == request.get("key", "old")]
+                       if (MUTANT == "old_cross_scope" or
+                           scope_bytes(receipt["scope"]) == scope_bytes(scope))
+                       and receipt["op"] == op
+                       and (MUTANT == "old_cross_key" or
+                            receipt["key"] == request.get("key", "old"))]
                 if old:
                     receipt = old[0]
-                    need(not receipt["malformed"], "InvalidBundle")
-                    live = request.get("now_ms", 10) < receipt["expires"]
+                    if op == "consolidate":
+                        need(not receipt["malformed"] and receipt["expiry_valid"],
+                             receipt.get("decode_error", "InvalidBundle"))
+                    else:
+                        need(not receipt["malformed"], receipt.get("decode_error", "InvalidBundle"))
+                    live = (not receipt["expiry_valid"] if op in ("remember", "forget")
+                            else request.get("now_ms", 10) < receipt["expires"])
+                    if op in ("remember", "forget") and receipt["expiry_valid"]:
+                        live = request.get("now_ms", 10) < receipt["expires"]
                     older = receipt["revision"] < job["revision"]
                     matches = receipt["digest"] == request.get("digest", "same")
                     if MUTANT != "no_old_replay" and live and matches and (
@@ -376,18 +408,25 @@ class Model:
             need(False, "DeletionPending")
         return {"status": "allowed"}
 
-    def recall(self, scopes):
-        hits, diagnostics, seen = [], [], set()
+    def recall(self, scopes, seeds=None):
+        need(len({scope_bytes(scope) for scope in scopes}) == len(scopes), "InvalidScopes")
+        # This is the existing whole-request scan preflight, before per-scope probes.
+        preflight_scopes = len(scopes)
+        hits, barred, seen = [], [], set()
+        seeds = seeds or []
         for scope in scopes:
             seed = self.lookup_scope(scope)
             key = skey(scope)
             if self.barrier(scope) is not None and MUTANT != "skip_recall":
+                if any(scope_bytes(item["scope"]) == scope_bytes(scope) for item in seeds):
+                    need(False, "DeletionPending")
                 if key not in seen and MUTANT != "no_diagnostic":
-                    diagnostics.append({"scope": key, "code": "deletion_barrier"})
+                    barred.append(copy.deepcopy(scope))
                 seen.add(key)
                 continue
             hits.extend({"scope": key, "id": item} for item in seed["items"])
-        return {"hits": hits, "diagnostics": diagnostics, "partial": False}
+        return {"hits": hits, "deletion_barriers": barred, "partial": False,
+                "preflight_scope_count": preflight_scopes}
 
 
 def at(value, path):
@@ -433,7 +472,7 @@ def execute(model, step, base):
             verify(model.__dict__ == before, "reopen changed logical state")
             return {"reopened": True}
         if op == "recall":
-            return model.recall(step.get("scopes", [request["scope"]]))
+            return model.recall(step.get("scopes", [request["scope"]]), step.get("seeds"))
         if op == "vectors":
             validate(request)
             collection = step.get("collection", "c")
@@ -443,7 +482,7 @@ def execute(model, step, base):
                     "receipt_key": rkey("begin-erasure", request["scope"],
                                         request["idempotency_key"])}
         result = model.gate(op, request)
-        if op in ("erasure_status", "summary_status"):
+        if op in ("erasure_status", "summary_status", "scope_revision"):
             verify(model.__dict__ == before, "status read mutated state")
         return result
     except Refusal as error:
@@ -480,6 +519,9 @@ def cases(fixture):
                        "steps": [{"request": item["request"], "expect": {"error": item["error"]},
                                   "defect": dict(item["repair"], tag=item["name"])}]})
     for item in fixture["groups"]["E1"].get("matrix", []):
+        if "ops" not in item:
+            result.append(copy.deepcopy(item))
+            continue
         for op in item["ops"]:
             value = copy.deepcopy(item)
             value["name"] += "-" + op
@@ -580,8 +622,14 @@ def self_test(fixture):
                 case = next(item for item in all_cases if item["name"] == mutation["case"])
                 run_case(case, base)
         except AssertionError as error:
-            prefix = ("expired precedence " + mutation["probe"] if "probe" in mutation else
-                      f"{case['name']} step {mutation['step']}:")
+            named_probes = {
+                "job-conflict-before-deadline", "revision-after-deadline",
+                "missing-scope-before-barrier", "tuple-collision-before-barrier",
+                "begin-missing-scope-before-barrier", "begin-tuple-collision-before-barrier",
+            }
+            prefix = ((mutation["probe"] + ":" if mutation["probe"] in named_probes
+                       else "expired precedence " + mutation["probe"])
+                      if "probe" in mutation else f"{case['name']} step {mutation['step']}:")
             verify(str(error).startswith(prefix) and mutation["reason"] in str(error),
                    f"unintended mutation kill: {error}")
             killed += 1
@@ -611,6 +659,41 @@ def precedence_probes(fixture, only=None):
     are deliberately combined only here; removing corruption yields JobConflict.
     """
     count, base = 0, fixture["base_request"]
+    named = (
+        "job-conflict-before-deadline", "revision-after-deadline",
+        "missing-scope-before-barrier", "tuple-collision-before-barrier",
+        "begin-missing-scope-before-barrier", "begin-tuple-collision-before-barrier",
+    )
+    if only is None:
+        count += sum(precedence_probes(fixture, name) for name in named)
+    if only in ("job-conflict-before-deadline", "revision-after-deadline"):
+        model = Model({}, base["scope"])
+        if only == "job-conflict-before-deadline":
+            execute(model, {}, base)
+            actual = execute(model, {"request": {"now_ms": 110, "deadline_ms": 0}}, base)
+            verify(actual == {"error": "JobConflict"},
+                   f"{only}: expected JobConflict, got {actual}")
+        else:
+            actual = execute(model, {"request": {
+                "deadline_ms": 0, "expected_scope_revision": 2}}, base)
+            verify(actual == {"error": "DeadlineExceeded"},
+                   f"{only}: expected DeadlineExceeded, got {actual}")
+        return 1
+    if only in ("missing-scope-before-barrier", "tuple-collision-before-barrier",
+                "begin-missing-scope-before-barrier", "begin-tuple-collision-before-barrier"):
+        model = Model({}, base["scope"])
+        execute(model, {}, base)
+        if only in ("missing-scope-before-barrier", "begin-missing-scope-before-barrier"):
+            model.scopes.clear()
+            expected = "InvalidScope"
+        else:
+            model.scopes[skey(base["scope"])]["tuple"] = "00"
+            expected = "DigestCollision"
+        operation = "begin" if only.startswith("begin-") else "remember"
+        actual = execute(model, {"op": operation}, base)
+        verify(actual == {"error": expected},
+               f"{only}: expected {expected}, got {actual}")
+        return 1
     for corruption in fixture["groups"]["E1"]["corruptions"]:
         if only is not None and corruption["name"] != only:
             continue
