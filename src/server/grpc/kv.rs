@@ -1,6 +1,7 @@
 //! KV wire conversion only; REST owns validation, pagination and mutation policy.
 use super::*;
 use crate::server::kv as rest;
+use axum::extract::RawQuery;
 use serde::de::DeserializeOwned;
 
 fn decode<T: DeserializeOwned>(value: Value) -> Result<T, ApiError> {
@@ -72,6 +73,7 @@ impl proto::kv_server::Kv for Adapter {
                     State(service),
                     Extension(role),
                     Ok(target),
+                    RawQuery(None),
                     Ok(Query(input)),
                 )
                 .await?;
@@ -105,6 +107,7 @@ impl proto::kv_server::Kv for Adapter {
                     Extension(role),
                     Extension(RequestId(request_id)),
                     Ok(target),
+                    RawQuery(None),
                     Ok(Query(rest::NoQuery {})),
                     Ok(Json(input)),
                 )
@@ -154,6 +157,7 @@ impl proto::kv_server::Kv for Adapter {
                     Extension(role),
                     Extension(RequestId(request_id)),
                     Ok(target),
+                    RawQuery(None),
                     Ok(Query(input)),
                 )
                 .await?;
@@ -190,6 +194,7 @@ impl proto::kv_server::Kv for Adapter {
                     State(service),
                     Extension(role),
                     Ok(target),
+                    RawQuery(None),
                     Ok(Query(input)),
                 )
                 .await?;
