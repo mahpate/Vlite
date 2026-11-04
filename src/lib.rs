@@ -31,6 +31,9 @@ mod format;
 mod hnsw;
 pub mod hybrid;
 pub mod import;
+#[cfg(test)]
+#[path = "../tests/ingestion_canonical.rs"]
+mod ingestion_canonical;
 pub mod kv;
 mod metadata;
 pub mod metadata_index;
