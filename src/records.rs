@@ -444,6 +444,58 @@ impl CollectionRecords {
 }
 // End test-gated derived-index access.
 
+// Test-gated owned rerank output and visibility over the same pinned root.
+#[cfg(test)]
+impl CollectionRecords {
+    pub(crate) fn effective_payload<'a>(
+        &'a self,
+        id: u64,
+        workspace: &mut crate::compact::source::ReadWorkspace,
+    ) -> Result<Option<std::borrow::Cow<'a, [u8]>>> {
+        use std::borrow::Cow;
+        match self {
+            Self::Resident(records) => Ok(records
+                .get(&id)
+                .map(|row| Cow::Borrowed(row.payload.as_slice()))),
+            Self::Compact { view, overlay } => match overlay.get(id) {
+                Some(OverlayEntry::Put { record, .. }) => Ok(Some(Cow::Borrowed(&record.payload))),
+                Some(OverlayEntry::Delete { .. }) => Ok(None),
+                None => match view.row_of(id) {
+                    Some(row) => Ok(view.read_payload(row, workspace)?.map(Cow::Owned)),
+                    None => Ok(None),
+                },
+            },
+        }
+    }
+
+    pub(crate) fn effective_visible(
+        &self,
+        id: u64,
+        now_ms: u64,
+        expiries: &BTreeMap<u64, u64>,
+    ) -> bool {
+        match self {
+            Self::Resident(records) => {
+                records.contains_key(&id)
+                    && !expiries.get(&id).is_some_and(|expiry| *expiry <= now_ms)
+            }
+            Self::Compact { view, overlay } => match overlay.get(id) {
+                Some(OverlayEntry::Put { expiry, .. }) => {
+                    !expiry.is_some_and(|expiry| expiry <= now_ms)
+                }
+                Some(OverlayEntry::Delete { .. }) => false,
+                None => view.row_of(id).is_some_and(|row| {
+                    !view
+                        .expiry(row)
+                        .flatten()
+                        .is_some_and(|expiry| expiry <= now_ms)
+                }),
+            },
+        }
+    }
+}
+// End test-gated rerank access.
+
 #[cfg(test)]
 mod effective_rows_tests {
     use super::*;
