@@ -486,6 +486,9 @@ pub(super) async fn reserve_core(
     role: admin::Role,
     target: Target,
 ) -> Result<Value, ApiError> {
+    if !service.memory_bindings.is_empty() {
+        return Err(forbidden_scope());
+    }
     let reservations = service.imports.clone();
     let bindings = service.memory_bindings.clone();
     service
@@ -584,6 +587,9 @@ async fn status(
     Extension(role): Extension<admin::Role>,
     job: Result<Path<String>, PathRejection>,
 ) -> Result<Json<Value>, ApiError> {
+    if !service.memory_bindings.is_empty() {
+        return Err(forbidden_scope());
+    }
     let job = job_path(job)?;
     Ok(Json(status_core(&service, role, job).await?))
 }
@@ -644,6 +650,9 @@ async fn chunk(
     params: Result<Path<(String, String)>, PathRejection>,
     input: Result<Json<Chunk>, JsonRejection>,
 ) -> Result<Response, ApiError> {
+    if !service.memory_bindings.is_empty() {
+        return Err(forbidden_scope());
+    }
     let Path((job, number)) = params.map_err(|error| {
         ApiError::new(StatusCode::BAD_REQUEST, "invalid_path", error.body_text())
     })?;
@@ -769,6 +778,9 @@ async fn close(
     job: Result<Path<String>, PathRejection>,
     abort: bool,
 ) -> Result<Json<Value>, ApiError> {
+    if !service.memory_bindings.is_empty() {
+        return Err(forbidden_scope());
+    }
     let job = job_path(job)?;
     Ok(Json(close_core(&service, role, job, abort).await?))
 }

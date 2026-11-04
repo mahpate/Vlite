@@ -3,10 +3,122 @@ import json
 import unittest
 from pathlib import Path
 
-from api_reference import canonical_rest_key, route_keys
+from api_reference import canonical_rest_key, rest_keys, route_keys
 
 
 ROOT = Path(__file__).resolve().parents[1]
+
+RESERVED_ROUTE_INVENTORY = {
+    "collection": set("""
+rest:DELETE /v1/collections/{collection}
+rest:DELETE /v1/collections/{collection}/kv/entry
+rest:DELETE /v1/collections/{collection}/vectors/{id}
+rest:DELETE /v1/vectors/{id}
+rest:GET /v1/collections
+rest:GET /v1/collections/{collection}
+rest:GET /v1/collections/{collection}/kv/entries
+rest:GET /v1/collections/{collection}/kv/entry
+rest:GET /v1/collections/{collection}/vectors
+rest:GET /v1/collections/{collection}/vectors/{id}
+rest:GET /v1/database
+rest:GET /v1/vectors
+rest:GET /v1/vectors/{id}
+rest:PATCH /v1/collections/{collection}/vectors/{id}/metadata
+rest:PATCH /v1/vectors/{id}/metadata
+rest:POST /v1/batches
+rest:POST /v1/collections
+rest:POST /v1/collections/{collection}/batches
+rest:POST /v1/collections/{collection}/embed
+rest:POST /v1/collections/{collection}/facets
+rest:POST /v1/collections/{collection}/query
+rest:POST /v1/collections/{collection}/recommend
+rest:POST /v1/collections/{collection}/search
+rest:POST /v1/collections/{collection}/search/dense-sparse
+rest:POST /v1/collections/{collection}/search/disk-ann
+rest:POST /v1/collections/{collection}/search/geo
+rest:POST /v1/collections/{collection}/search/grouped
+rest:POST /v1/collections/{collection}/search/named
+rest:POST /v1/collections/{collection}/search/sparse
+rest:POST /v1/collections/{collection}/stats/numeric
+rest:POST /v1/collections/{collection}/vectors/configure
+rest:POST /v1/search
+rest:PUT /v1/collections/{collection}/kv/entry
+rest:PUT /v1/collections/{collection}/settings
+rest:PUT /v1/collections/{collection}/vectors/{id}
+rest:PUT /v1/collections/{collection}/vectors/{id}/named
+rest:PUT /v1/vectors/{id}
+""".strip().splitlines()),
+    "graph": set("""
+rest:DELETE /v1/graphs/{graph}
+rest:GET /v1/graphs
+rest:GET /v1/graphs/{graph}
+rest:GET /v1/graphs/{graph}/schema
+rest:POST /v1/graphs
+rest:POST /v1/graphs/{graph}/batch
+rest:POST /v1/graphs/{graph}/edges/get
+rest:POST /v1/graphs/{graph}/explain
+rest:POST /v1/graphs/{graph}/neighbors
+rest:POST /v1/graphs/{graph}/nodes/find
+rest:POST /v1/graphs/{graph}/nodes/get
+rest:POST /v1/graphs/{graph}/query
+rest:POST /v1/graphs/{graph}/retrieve
+rest:POST /v1/graphs/{graph}/shortest-path
+rest:POST /v1/graphs/{graph}/traverse
+rest:PUT /v1/graphs/{graph}/schema
+""".strip().splitlines()),
+    "feed-export": set("""
+rest:GET /v1/admin/replication/export
+rest:GET /v1/changes
+""".strip().splitlines()),
+    "imports": set("""
+rest:GET /v1/imports/{job}
+rest:POST /v1/collections/{collection}/imports
+rest:POST /v1/imports/{job}/abort
+rest:POST /v1/imports/{job}/finish
+rest:PUT /v1/imports/{job}/chunks/{chunk}
+""".strip().splitlines()),
+    "index-admin": set("""
+rest:GET /v1/collections/{collection}/index/hnsw
+rest:GET /v1/collections/{collection}/index/hnsw/maintenance
+rest:GET /v1/collections/{collection}/index/hnsw/rebuild
+rest:GET /v1/index/hnsw
+rest:GET /v1/index/hnsw/maintenance
+rest:GET /v1/index/hnsw/rebuild
+rest:POST /v1/collections/{collection}/index/disk-ann
+rest:POST /v1/collections/{collection}/index/hnsw
+rest:POST /v1/collections/{collection}/index/hnsw/maintenance/tick
+rest:POST /v1/collections/{collection}/index/hnsw/quality
+rest:POST /v1/collections/{collection}/index/hnsw/rebuild
+rest:POST /v1/collections/{collection}/index/hnsw/rebuild/cancel
+rest:POST /v1/collections/{collection}/index/hnsw/rebuild/poll
+rest:POST /v1/index/hnsw
+rest:POST /v1/index/hnsw/maintenance/tick
+rest:POST /v1/index/hnsw/quality
+rest:POST /v1/index/hnsw/rebuild
+rest:POST /v1/index/hnsw/rebuild/cancel
+rest:POST /v1/index/hnsw/rebuild/poll
+rest:GET /v1/admin/maintenance/auto
+rest:PUT /v1/admin/maintenance/auto
+rest:POST /v1/admin/maintenance/auto/tick
+rest:PUT /v1/index/hnsw/maintenance
+""".strip().splitlines()),
+    "observability": set("""
+rest:GET /metrics
+rest:GET /v1/admin/diagnostics/slow-queries
+rest:GET /v1/admin/metrics/summary
+""".strip().splitlines()),
+    "webhooks": set("""
+rest:DELETE /v1/admin/webhooks/{id}
+rest:GET /v1/admin/webhooks
+rest:GET /v1/admin/webhooks/{id}
+rest:POST /v1/admin/webhooks
+""".strip().splitlines()),
+    "tenant-metadata": set("""
+rest:DELETE /v1/admin/tenants/{id}
+rest:GET /v1/admin/tenants
+rest:GET /v1/admin/tenants/{id}/usage
+""".strip().splitlines()),
+}
 
 
 class RouteInventoryTests(unittest.TestCase):
@@ -55,6 +167,53 @@ class RouteInventoryTests(unittest.TestCase):
                          "rest:GET /v1/collections/{collection}")
         self.assertEqual(canonical_rest_key("rest:PUT /v1/imports/{job}/chunks/{n}"),
                          "rest:PUT /v1/imports/{job}/chunks/{chunk}")
+
+    def test_reserved_resource_routes_have_explicit_classification(self):
+        classified = set().union(*RESERVED_ROUTE_INVENTORY.values())
+        self.assertEqual(
+            len(classified),
+            sum(map(len, RESERVED_ROUTE_INVENTORY.values())),
+            "a route cannot be assigned to multiple guard families",
+        )
+        registered = rest_keys(ROOT)
+
+        def needs_reserved_guard(route):
+            method, path = route.removeprefix("rest:").split(" ", 1)
+            return (
+                path.startswith((
+                    "/v1/collections",
+                    "/v1/vectors",
+                    "/v1/graphs",
+                    "/v1/imports",
+                    "/v1/index/hnsw",
+                    "/v1/admin/webhooks",
+                ))
+                or path in {
+                    "/v1/database",
+                    "/v1/search",
+                    "/v1/batches",
+                    "/v1/changes",
+                    "/v1/admin/replication/export",
+                    "/v1/admin/maintenance/auto",
+                    "/v1/admin/maintenance/auto/tick",
+                    "/v1/admin/diagnostics/slow-queries",
+                    "/v1/admin/metrics/summary",
+                    "/metrics",
+                }
+                or (
+                    path.startswith("/v1/admin/tenants")
+                    and method in {"GET", "DELETE"}
+                )
+            )
+
+        candidates = {route for route in registered if needs_reserved_guard(route)}
+        self.assertEqual(
+            candidates,
+            classified,
+            f"update explicit reserved-route classification: "
+            f"unclassified={sorted(candidates - classified)}, "
+            f"stale={sorted(classified - candidates)}",
+        )
 
 
 class Gap8OpenApiTests(unittest.TestCase):

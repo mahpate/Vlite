@@ -206,6 +206,9 @@ pub(super) async fn metrics_route(
     Extension(role): Extension<admin::Role>,
     query: Result<Query<MetricsQuery>, QueryRejection>,
 ) -> Result<Response, ApiError> {
+    if !service.memory_bindings.is_empty() {
+        return Err(forbidden_scope());
+    }
     let Query(query) = query.map_err(|error| {
         ApiError::new(StatusCode::BAD_REQUEST, "invalid_query", error.body_text())
     })?;
@@ -239,6 +242,9 @@ pub(super) async fn logs(
 /// completed observations per route; search totals use the existing strategy
 /// counters, and database fields come from a shared database read lock.
 pub(super) async fn summary(State(service): State<Service>) -> Result<Json<Value>, ApiError> {
+    if !service.memory_bindings.is_empty() {
+        return Err(forbidden_scope());
+    }
     let metrics = service.metrics.clone();
     let route_snapshot = metrics
         .by_route
