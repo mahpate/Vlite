@@ -1,0 +1,573 @@
+#!/usr/bin/env python3
+"""HP-3 cross-version compatibility check: v0.6.1 (reference) against a candidate.
+
+Subcommands:
+  fixtures [--check]   Write (or, with --check, verify) the byte-built matrix C
+                       fixtures in tests/fixtures/cross_version/ (hex text plus
+                       MANIFEST.sha256 of the decoded bytes).
+  run [--candidate REV] [--work DIR] [--json FILE]
+                       Extract each revision with `git archive`, copy the shared
+                       probe (scripts/cross_version_probe.rs, v0.6.1 public API
+                       only) into each extraction as src/bin/, build it with
+                       `cargo build --locked --offline` into a per-revision
+                       target directory, then run:
+                         A  one deterministic workload per revision; canonical
+                            transcripts (one JSON line per operation with args and
+                            result digests) must match;
+                         B  files written by each revision are read, appended and
+                            re-read by both revisions;
+                         C  byte-built flagged files and directory stores must be
+                            refused explicitly by v0.6.1; unknown flag 128 must be
+                            refused by both revisions.
+                       Exits 1 on any unexplained difference (a "finding"), 2 on a
+                       harness failure. Findings are reported, never fixed.
+  compare A B          Diff two matrix A transcripts written by `run`.
+
+Method follows DO-001 (scripts/graph_compat_check.py). The working tree is never
+modified; all builds and runs live under --work. Standard library only.
+"""
+
+from __future__ import annotations
+
+import argparse
+import difflib
+import hashlib
+import json
+import os
+import shutil
+import struct
+import subprocess
+import sys
+import tarfile
+import tempfile
+import zlib
+from pathlib import Path
+
+ROOT = Path(__file__).resolve().parents[1]
+PROBE = ROOT / "scripts" / "cross_version_probe.rs"
+FIXTURE_DIR = ROOT / "tests" / "fixtures" / "cross_version"
+REFERENCE = "v0.6.1"
+CANDIDATE = "136d72c5a94e1c0d1878f99c461a555a91b7c3f6"
+DIMS = 2
+LINEAGE = 0x4752_4150_4801_0001
+RECORD_ID = 7
+VECTOR = (1.0, 2.0)
+PAYLOAD = b"probe"
+OP_PUT = 1
+KNOWN_V061 = 1 | 2 | 4
+FILE_FLAGS = (0, 4, 8, 12, 16, 24, 28, 32, 60, 64, 68, 128, 132)
+DIR_FLAGS = (4, 36, 68, 132)
+ENC_FLAGS = (5, 13, 29, 61, 69, 133)
+ENC_DIR_FLAGS = (5, 133)
+B_NAMES = ("b_v5", "b_v3", "b_v4", "b_ts", "enc_b", "b_compact", "b_restore", "b_mem", "b_torn")
+JUSTIFIED_A = {
+    "dir.": "candidate-only directory store (byte-built); v0.6.1 refuses the directory explicitly at dir.open",
+}
+
+
+def crc32(data: bytes) -> int:
+    return zlib.crc32(data) & 0xFFFFFFFF
+
+
+def header_v5(flags: int) -> bytes:
+    head = b"VLITEDB\0" + struct.pack("<IIQHH", 5, DIMS, LINEAGE, 0, flags)
+    return head + struct.pack("<I", crc32(head))
+
+
+def set_header_flags(data: bytes, flags: int) -> bytes:
+    head = data[:26] + struct.pack("<H", flags)
+    return head + struct.pack("<I", crc32(head)) + data[32:]
+
+
+def frame(op: int, sequence: int, record_id: int, count: int, payload_len: int, body: bytes) -> bytes:
+    prefix = b"VREC" + struct.pack("<BHBQQII", op, 0, 0, sequence, record_id, count, payload_len)
+    prefix += struct.pack("<I", crc32(prefix))
+    data = prefix + body
+    return data + b"VCMT" + struct.pack("<IQ", crc32(data), sequence)
+
+
+def put_frame(sequence: int) -> bytes:
+    body = struct.pack("<2f", *VECTOR) + PAYLOAD
+    return frame(OP_PUT, sequence, RECORD_ID, DIMS, len(PAYLOAD), body)
+
+
+def manifest(names: list[str]) -> bytes:
+    """Candidate directory-store MANIFEST: CRC-32 of all preceding text."""
+    text = "vlite-manifest 1\n" + "".join(f"file {name}\n" for name in names)
+    return (text + f"crc {crc32(text.encode('ascii')):08x}\n").encode("ascii")
+
+
+def fixtures() -> dict[str, bytes]:
+    """Relative member path -> bytes. Directory stores also get an empty LOCK at run time."""
+    out = {f"f_{flags}.vlite": header_v5(flags) + put_frame(1) for flags in FILE_FLAGS}
+    for flags in DIR_FLAGS:
+        out[f"d_{flags}/wal-1.log"] = header_v5(flags) + put_frame(1)
+        out[f"d_{flags}/MANIFEST"] = manifest(["wal-1.log"])
+    out["d_image_12/image-1.vlite"] = header_v5(12) + put_frame(1)
+    out["d_image_12/wal-2.log"] = header_v5(12 & (1 | 4 | 32 | 64))
+    out["d_image_12/MANIFEST"] = manifest(["image-1.vlite", "wal-2.log"])
+    return out
+
+
+def hex_name(member: str) -> str:
+    return member.replace("/", "__") + ".hex"
+
+
+def manifest_text(data: dict[str, bytes]) -> str:
+    lines = [f"{hashlib.sha256(blob).hexdigest()}  {hex_name(member)}" for member, blob in sorted(data.items())]
+    return (
+        "# SHA-256 of the DECODED bytes of each .hex file (hex text is whitespace-insensitive).\n"
+        "# `__` in a name separates a directory-store fixture from its member file.\n"
+        "# Generated by: python scripts/cross_version_check.py fixtures\n" + "\n".join(lines) + "\n"
+    )
+
+
+def write_fixtures() -> None:
+    FIXTURE_DIR.mkdir(parents=True, exist_ok=True)
+    data = fixtures()
+    for member, blob in data.items():
+        (FIXTURE_DIR / hex_name(member)).write_text(blob.hex() + "\n", encoding="ascii", newline="\n")
+    (FIXTURE_DIR / "MANIFEST.sha256").write_text(manifest_text(data), encoding="ascii", newline="\n")
+    print(f"wrote {len(data)} fixtures to {FIXTURE_DIR.relative_to(ROOT)}")
+
+
+def load_fixtures() -> dict[str, bytes]:
+    """Committed fixtures, verified against MANIFEST.sha256 and the generator."""
+    expected = fixtures()
+    listed = {}
+    for line in (FIXTURE_DIR / "MANIFEST.sha256").read_text(encoding="ascii").splitlines():
+        if line and not line.startswith("#"):
+            digest, name = line.split("  ", 1)
+            listed[name] = digest
+    loaded = {}
+    for member, blob in expected.items():
+        path = FIXTURE_DIR / hex_name(member)
+        data = bytes.fromhex("".join(path.read_text(encoding="ascii").split()))
+        if hashlib.sha256(data).hexdigest() != listed.get(hex_name(member)) or data != blob:
+            raise RuntimeError(f"fixture {path.name} does not match MANIFEST.sha256 or the generator")
+        loaded[member] = data
+    if set(listed) != {hex_name(member) for member in expected}:
+        raise RuntimeError("MANIFEST.sha256 lists a different fixture set")
+    return loaded
+
+
+def masked(data: bytes) -> bytes:
+    """Zeroes the random lineage (16..24) and header CRC (28..32) of v4/v5 headers."""
+    if len(data) >= 32 and data[:8] == b"VLITEDB\0" and struct.unpack_from("<I", data, 8)[0] >= 4:
+        return data[:16] + bytes(8) + data[24:28] + bytes(4) + data[32:]
+    return data
+
+
+# ---------------------------------------------------------------------------
+# Isolated revision builds (DO-001 method).
+# ---------------------------------------------------------------------------
+
+COMMANDS: list[dict] = []
+
+
+def run_cmd(args: list, cwd: Path | None = None, env: dict | None = None, check: bool = True) -> subprocess.CompletedProcess:
+    if env is not None and not os.path.dirname(str(args[0])):
+        found = shutil.which(str(args[0]), path=env.get("PATH"))
+        if found:
+            args = [found] + list(args[1:])
+    result = subprocess.run(
+        [str(arg) for arg in args], cwd=cwd, env=env, capture_output=True, text=True, encoding="utf-8", errors="replace"
+    )
+    COMMANDS.append({"argv": [Path(str(args[0])).name] + [str(arg) for arg in args[1:]], "exit": result.returncode})
+    if check and result.returncode != 0:
+        raise RuntimeError(f"{' '.join(map(str, args))} failed ({result.returncode}):\n{result.stdout[-4000:]}\n{result.stderr[-4000:]}")
+    return result
+
+
+def resolve(rev: str) -> str:
+    return run_cmd(["git", "rev-parse", "--verify", f"{rev}^{{commit}}"], cwd=ROOT).stdout.strip()
+
+
+def extract(label: str, sha: str, work: Path) -> Path:
+    """`git archive` of the exact commit; never the working tree."""
+    source = work / f"src-{label}"
+    stamp = source / ".vlite-archive-sha"
+    if stamp.is_file() and stamp.read_text().strip() == sha:
+        return source
+    if source.exists():
+        shutil.rmtree(source)
+    source.mkdir(parents=True)
+    archive = work / f"{label}.tar"
+    with archive.open("wb") as handle:
+        subprocess.run(["git", "archive", "--format=tar", sha], cwd=ROOT, stdout=handle, check=True)
+    COMMANDS.append({"argv": ["git", "archive", "--format=tar", sha], "exit": 0})
+    with tarfile.open(archive) as tar:
+        if hasattr(tarfile, "data_filter"):
+            tar.extractall(source, filter="data")
+        else:
+            tar.extractall(source)
+    archive.unlink()
+    stamp.write_text(sha + "\n")
+    return source
+
+
+def cargo_env() -> dict:
+    env = dict(os.environ)
+    env["PATH"] = f"{Path.home() / '.cargo' / 'bin'}{os.pathsep}{env.get('PATH', '')}"
+    env["CARGO_NET_OFFLINE"] = "true"
+    env["CARGO_INCREMENTAL"] = "0"
+    env.setdefault("CARGO_BUILD_JOBS", "8")
+    return env
+
+
+def build_probe(label: str, source: Path, work: Path) -> Path:
+    """The probe becomes a bin target of the extracted crate, so `--locked` uses its own Cargo.lock."""
+    target = source / "src" / "bin" / "cross_version_probe.rs"
+    target.parent.mkdir(parents=True, exist_ok=True)
+    shutil.copyfile(PROBE, target)
+    target_dir = work / f"target-{label}"
+    run_cmd(
+        ["cargo", "build", "--locked", "--offline", "--bin", "cross_version_probe", "--target-dir", target_dir],
+        cwd=source,
+        env=cargo_env(),
+    )
+    return target_dir / "debug" / ("cross_version_probe.exe" if os.name == "nt" else "cross_version_probe")
+
+
+def probe(exe: Path, *args) -> tuple[list[list[str]], str | None]:
+    """Probe rows plus a crash note: a panic or abort is never an explicit refusal."""
+    result = run_cmd([exe, *args], check=False)
+    rows = [line.split("\t") for line in result.stdout.splitlines() if line]
+    return rows, None if result.returncode == 0 else f"exit {result.returncode}"
+
+
+def fresh(path: Path) -> Path:
+    if path.exists():
+        shutil.rmtree(path)
+    path.mkdir(parents=True)
+    return path
+
+
+# ---------------------------------------------------------------------------
+# Matrix A: one deterministic workload per revision.
+# ---------------------------------------------------------------------------
+
+
+def digest(text: str) -> str:
+    return hashlib.sha256(text.encode("utf-8")).hexdigest()
+
+
+def transcript(rows: list[list[str]], crash: str | None) -> list[dict]:
+    steps = [row[1:] for row in rows if row[0] == "STEP" and len(row) == 4]
+    if crash:
+        steps.append(["process", "", crash])
+    return [
+        {
+            "i": index,
+            "op": op,
+            "args": args,
+            "args_sha256": digest(args),
+            "result_sha256": digest(result),
+            "result": result if len(result) <= 160 else result[:160] + "...",
+        }
+        for index, (op, args, result) in enumerate(steps)
+    ]
+
+
+def write_jsonl(path: Path, rows: list[dict]) -> None:
+    text = "".join(json.dumps(row, sort_keys=True, allow_nan=False) + "\n" for row in rows)
+    path.write_text(text, encoding="utf-8", newline="\n")
+
+
+def read_jsonl(path: Path) -> list[dict]:
+    return [json.loads(line) for line in path.read_text(encoding="utf-8").splitlines() if line]
+
+
+def diff_transcripts(ref: list[dict], cand: list[dict]) -> list[dict]:
+    """Every difference, classified `justified` (allowlisted with reason) or `finding`."""
+    refused_dir = any(row["op"] == "dir.open" and row["result"].startswith("err:") for row in ref)
+    keys = [[(row["op"], row["args"], row["result_sha256"]) for row in rows] for rows in (ref, cand)]
+    out = []
+    for tag, i1, i2, j1, j2 in difflib.SequenceMatcher(None, *keys, autojunk=False).get_opcodes():
+        if tag == "equal":
+            continue
+        left, right = ref[i1:i2], cand[j1:j2]
+        for index in range(max(len(left), len(right))):
+            pair = [rows[index] if index < len(rows) else None for rows in (left, right)]
+            first = pair[0] or pair[1]
+            entry = {"op": first["op"], "args": first["args"]}
+            entry["reference"], entry["candidate"] = (row and row["result"] for row in pair)
+            if refused_dir and all(row is None or row["op"].startswith("dir.") for row in pair):
+                entry.update(verdict="justified", reason=JUSTIFIED_A["dir."])
+            else:
+                entry["verdict"] = "finding"
+            out.append(entry)
+    return out
+
+
+def matrix_a(exes: dict, labels: list[str], work: Path) -> dict:
+    transcripts = {}
+    for label in labels:
+        runs = []
+        for attempt in (1, 2):
+            runs.append(transcript(*probe(exes[label], "workload", fresh(work / "A" / f"{label}-{attempt}"))))
+        if runs[0] != runs[1]:
+            raise RuntimeError(f"workload is not deterministic on {label}; transcripts cannot be compared")
+        transcripts[label] = runs[0]
+        write_jsonl(work / f"transcript-{label}.jsonl", runs[0])
+    return {
+        "operations": {label: len(rows) for label, rows in transcripts.items()},
+        "determinism": "each revision ran the workload twice; both transcripts identical",
+        "differences": diff_transcripts(*(transcripts[label] for label in labels)),
+    }
+
+
+# ---------------------------------------------------------------------------
+# Matrix B: files written by one revision, read and appended by both.
+# ---------------------------------------------------------------------------
+
+
+def row(check: str, subject: str, verdict: str, detail: str = "") -> dict:
+    return {"check": check, "subject": subject, "verdict": verdict, "detail": detail}
+
+
+def dump(exe: Path, name: str, path: Path) -> list[str]:
+    rows, crash = probe(exe, "dump", f"{name}={path}")
+    return ["\t".join(row[2:]) for row in rows if row[0] == "DUMP"] + ([f"crash\t{crash}"] if crash else [])
+
+
+def judge(subject: str, dumps: list[list[str]], candidate_touched: bool) -> dict:
+    ref, cand = dumps
+    if ref == cand:
+        return row("read", subject, "identical", f"{len(ref)} lines")
+    if candidate_touched and ref and ref[0].startswith("open\terr:") and not any(x.startswith("crash") for x in ref):
+        return row("read", subject, "justified", f"v0.6.1 refuses explicitly: {ref[0][5:]}")
+    diff = next((f"{a!r} != {b!r}" for a, b in zip(ref, cand) if a != b), f"{len(ref)} vs {len(cand)} lines")
+    return row("read", subject, "finding", diff[:600])
+
+
+def compare_bytes(check: str, subject: str, paths: list[Path]) -> dict | None:
+    if "enc" in subject or not all(path.is_file() for path in paths):
+        return None
+    same = masked(paths[0].read_bytes()) == masked(paths[1].read_bytes())
+    return row(check, subject, "identical" if same else "info", "" if same else "masked bytes differ")
+
+
+def matrix_b(exes: dict, labels: list[str], work: Path) -> list[dict]:
+    base = fresh(work / "B")
+    out: list[dict] = []
+
+    def read_all(folder: Path, candidate_touched: bool) -> None:
+        for name in B_NAMES:
+            dumps = [dump(exes[label], name, folder / f"{name}.vlite") for label in labels]
+            out.append(judge(f"{folder.name}/{name}", dumps, candidate_touched))
+
+    produced = []
+    for label in labels:
+        rows, crash = probe(exes[label], "produce", fresh(base / f"written-by-{label}"))
+        produced.append({row[1]: row[2] for row in rows if row[0] == "PRODUCE"} | ({"crash": crash} if crash else {}))
+    if produced[0] != produced[1] or any(value != "ok" for value in produced[0].values()):
+        out.append(row("produce", "all", "finding", json.dumps(produced, sort_keys=True)[:600]))
+    else:
+        out.append(row("produce", "all", "identical", f"{len(produced[0])} files ok on both"))
+    for name in B_NAMES:
+        found = compare_bytes("bytes", name, [base / f"written-by-{label}" / f"{name}.vlite" for label in labels])
+        out += [found] if found else []
+    for writer in labels:
+        read_all(base / f"written-by-{writer}", writer == labels[1])
+    for writer in labels:
+        appended = []
+        for appender in labels:
+            folder = fresh(base / f"written-by-{writer}-appended-by-{appender}")
+            for name in B_NAMES:
+                shutil.copyfile(base / f"written-by-{writer}" / f"{name}.vlite", folder / f"{name}.vlite")
+            rows, crash = probe(exes[appender], "append", *(f"{name}={folder / name}.vlite" for name in B_NAMES))
+            appended.append([row[1:] for row in rows if row[0] == "APPEND"] + ([["crash", crash]] if crash else []))
+            read_all(folder, labels[1] in (writer, appender))
+        same = appended[0] == appended[1]
+        detail = f"{len(appended[0])} operations" if same else json.dumps(appended, sort_keys=True)[:600]
+        out.append(row("append", f"written-by-{writer}", "identical" if same else "finding", detail))
+        for name in B_NAMES:
+            paths = [base / f"written-by-{writer}-appended-by-{label}" / f"{name}.vlite" for label in labels]
+            found = compare_bytes("append-bytes", f"written-by-{writer}/{name}", paths)
+            out += [found] if found else []
+    return out
+
+
+# ---------------------------------------------------------------------------
+# Matrix C: byte-built flagged files and directory stores.
+# ---------------------------------------------------------------------------
+
+
+def matrix_c(exes: dict, labels: list[str], work: Path, data: dict[str, bytes]) -> list[dict]:
+    base = fresh(work / "C")
+    inputs = fresh(base / "inputs")
+    for member, blob in data.items():
+        (inputs / member).parent.mkdir(parents=True, exist_ok=True)
+        (inputs / member).write_bytes(blob)
+    rows, crash = probe(exes[labels[0]], "make-encrypted", base / "encrypted-base.vlite")
+    if crash or rows != [["MADE", "ok:"]]:
+        raise RuntimeError(f"make-encrypted failed: {rows} {crash}")
+    encrypted = (base / "encrypted-base.vlite").read_bytes()
+    for flags in ENC_FLAGS:
+        (inputs / f"encf_{flags}.vlite").write_bytes(set_header_flags(encrypted, flags))
+    for flags in ENC_DIR_FLAGS:
+        folder = fresh(inputs / f"denc_{flags}")
+        (folder / "wal-1.log").write_bytes(set_header_flags(encrypted, flags))
+        (folder / "MANIFEST").write_bytes(manifest(["wal-1.log"]))
+    for folder in (path for path in inputs.iterdir() if path.is_dir()):
+        (folder / "LOCK").write_bytes(b"")
+    results: dict[str, dict[str, dict[str, str]]] = {}
+    for label in labels:
+        folder = fresh(base / label)
+        for entry in sorted(inputs.iterdir(), key=lambda path: path.name):
+            target = folder / entry.name
+            (shutil.copytree if entry.is_dir() else shutil.copyfile)(entry, target)
+            name = entry.name.removesuffix(".vlite")
+            rows, crash = probe(exes[label], "check", f"{name}={target}")
+            outcome = {row[2]: f"{row[3]}:{row[4]}" for row in rows if row[0] == "RESULT" and len(row) == 5}
+            results.setdefault(name, {})[label] = outcome | ({"crash": crash} if crash else {})
+    out = []
+    for name, by_label in sorted(results.items(), key=lambda item: (item[0].split("_")[0], int(item[0].rsplit("_", 1)[1]))):
+        flags = int(name.rsplit("_", 1)[1])
+        unknown = flags & ~KNOWN_V061
+        directory = name.startswith(("d_", "denc_"))
+        ref, cand = (by_label[label] for label in labels)
+        refused = [bool(r) and "crash" not in r and all(v.startswith("err:") for v in r.values()) for r in (ref, cand)]
+        accepted = [bool(r) and all(v.startswith("ok:") for v in r.values()) for r in (ref, cand)]
+        problems = []
+        if directory or unknown:
+            if not refused[0]:
+                problems.append("v0.6.1 did not refuse every entry point explicitly")
+            expected = f"err:UnsupportedFeature({unknown})"
+            if name.startswith("f_") and ref.get("open_read_only") != expected:
+                problems.append(f"v0.6.1 open_read_only is not {expected}")
+        elif not accepted[0]:
+            problems.append("v0.6.1 control did not open")
+        if flags & 128 and not refused[1]:
+            problems.append("candidate did not refuse unknown flag 128 explicitly")
+        if not directory and not unknown and not accepted[1]:
+            problems.append("candidate control did not open")
+        if "crash" in cand:
+            problems.append(f"candidate crashed ({cand['crash']})")
+        state = "accepted" if accepted[1] else "refused" if refused[1] else "mixed"
+        if problems:
+            verdict = "finding"
+        elif flags == 4 and not directory:
+            verdict = "accepted by both (flag 4 = GRAPH, known since v0.5.1; brief conflict, not a finding)"
+        elif not directory and not unknown:
+            verdict = "control: accepted by both"
+        else:
+            verdict = f"refused by v0.6.1; candidate {state}"
+        out.append({"subject": name, "flags": flags, "verdict": verdict, "problems": problems, "reference": ref, "candidate": cand})
+    return out
+
+
+# ---------------------------------------------------------------------------
+# Entry points.
+# ---------------------------------------------------------------------------
+
+
+def toolchain() -> dict:
+    env = cargo_env()
+    return {
+        "rustc": run_cmd(["rustc", "-V"], env=env).stdout.strip(),
+        "cargo": run_cmd(["cargo", "-V"], env=env).stdout.strip(),
+        "python": sys.version.split()[0],
+        "platform": sys.platform,
+    }
+
+
+def scrub(value, replacements: list[tuple[str, str]]):
+    if isinstance(value, str):
+        for old, new in replacements:
+            value = value.replace(old, new)
+        return value
+    if isinstance(value, list):
+        return [scrub(item, replacements) for item in value]
+    if isinstance(value, dict):
+        return {key: scrub(item, replacements) for key, item in value.items()}
+    return value
+
+
+def run(args: argparse.Namespace) -> int:
+    data = load_fixtures()
+    shas = [resolve(args.reference), resolve(args.candidate)]
+    labels = [args.reference.replace("/", "_"), shas[1][:7]]
+    temporary = None if args.work else tempfile.TemporaryDirectory(prefix="vlite-xv-", ignore_cleanup_errors=True)
+    work = Path(args.work or temporary.name).resolve()
+    work.mkdir(parents=True, exist_ok=True)
+    try:
+        exes = {}
+        for label, sha in zip(labels, shas):
+            print(f"build {label} ({sha})", flush=True)
+            exes[label] = build_probe(label, extract(label, sha, work), work)
+        print("matrix A", flush=True)
+        a = matrix_a(exes, labels, work)
+        print("matrix B", flush=True)
+        b = matrix_b(exes, labels, work)
+        print("matrix C", flush=True)
+        c = matrix_c(exes, labels, work, data)
+        findings = [x for x in a["differences"] + b + c if x["verdict"] == "finding"]
+        result = {
+            "revisions": dict(zip(["reference", "candidate"], [{"label": l, "sha": s} for l, s in zip(labels, shas)])),
+            "toolchain": toolchain(),
+            "matrix_a": a,
+            "matrix_b": b,
+            "matrix_c": c,
+            "findings": len(findings),
+            "commands": COMMANDS,
+        }
+        result = scrub(result, [(str(work), "<work>"), (str(ROOT), "<repo>")])
+    finally:
+        if temporary:
+            temporary.cleanup()
+    print(f"A: {a['operations']} operations; {len(a['differences'])} differences")
+    for entry in a["differences"]:
+        print(f"  {entry['verdict']}: {entry['op']} {entry['args']}: {entry['reference']} | {entry['candidate']}"[:300])
+    print(f"B: {len(b)} checks")
+    for entry in b:
+        if entry["verdict"] != "identical":
+            print(f"  {entry['verdict']}: {entry['check']} {entry['subject']}: {entry['detail']}"[:300])
+    print(f"C: {len(c)} inputs")
+    for entry in c:
+        print(f"  {entry['subject']}: {entry['verdict']} {'; '.join(entry['problems'])}"[:300])
+    if args.json:
+        Path(args.json).write_text(json.dumps(result, indent=1, sort_keys=True, allow_nan=False) + "\n", encoding="utf-8", newline="\n")
+    print(f"{len(findings)} finding(s)")
+    return 1 if findings else 0
+
+
+def compare(args: argparse.Namespace) -> int:
+    differences = diff_transcripts(read_jsonl(Path(args.a)), read_jsonl(Path(args.b)))
+    for entry in differences:
+        print(json.dumps(entry, sort_keys=True, allow_nan=False))
+    findings = sum(entry["verdict"] == "finding" for entry in differences)
+    print(f"{len(differences)} difference(s), {findings} finding(s)")
+    return 1 if findings else 0
+
+
+def main() -> int:
+    parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
+    commands = parser.add_subparsers(dest="command", required=True)
+    fixture_parser = commands.add_parser("fixtures", help="write or --check the committed matrix C fixtures")
+    fixture_parser.add_argument("--check", action="store_true", help="verify instead of writing")
+    run_parser = commands.add_parser("run", help="build both revisions and run matrices A, B and C")
+    run_parser.add_argument("--reference", default=REFERENCE, help=f"reference revision (default {REFERENCE})")
+    run_parser.add_argument("--candidate", default=CANDIDATE, help="candidate revision (default the HP-3 base)")
+    run_parser.add_argument("--work", help="persistent work directory (default: a temporary directory)")
+    run_parser.add_argument("--json", help="write the full results as JSON to this file")
+    compare_parser = commands.add_parser("compare", help="diff two matrix A transcripts (reference first)")
+    compare_parser.add_argument("a")
+    compare_parser.add_argument("b")
+    args = parser.parse_args()
+    try:
+        if args.command == "fixtures":
+            if not args.check:
+                write_fixtures()
+            load_fixtures()
+            print("fixtures match MANIFEST.sha256 and the generator")
+            return 0
+        return run(args) if args.command == "run" else compare(args)
+    except (RuntimeError, OSError, ValueError) as error:
+        print(f"error: {error}", file=sys.stderr)
+        return 2
+
+
+if __name__ == "__main__":
+    sys.exit(main())
