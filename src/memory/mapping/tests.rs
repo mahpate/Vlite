@@ -49,7 +49,7 @@ fn first_slice_serves_five_operations_and_refuses_four_explicitly() {
 fn receipt_operations_map_from_wire_names() {
     assert_eq!(
         ReceiptOperation::from_wire("remember"),
-        Ok(ReceiptOperation::Remember)
+        Err(unavailable("remember_receipt_lookup"))
     );
     assert_eq!(
         ReceiptOperation::from_wire("forget"),
@@ -127,10 +127,9 @@ fn every_memory_error_has_its_pinned_wire_code() {
         (DuplicateTarget, invalid),
         (DeletionPending, wire(409, "memory_deletion_pending")),
         (JobConflict, wire(412, "precondition_failed")),
-        (
-            Storage(crate::Error::InvalidQuery("storage")),
-            WireMapping::Delegate,
-        ),
+        (Storage(crate::Error::InvalidQuery("storage")), internal),
+        (Storage(crate::Error::GraphNotFound), WireMapping::Delegate),
+        (Storage(crate::Error::ReadOnly), WireMapping::Delegate),
     ];
     for (error, expected) in cases {
         assert_eq!(memory_error(&error), expected, "{error:?}");
@@ -182,10 +181,14 @@ fn every_recall_and_ranking_error_has_its_pinned_wire_code() {
         ),
         (
             RecallError::Memory(MemoryError::Storage(crate::Error::InvalidQuery("s"))),
-            WireMapping::Delegate,
+            internal,
         ),
         (
             RecallError::Storage(crate::Error::InvalidQuery("storage")),
+            internal,
+        ),
+        (
+            RecallError::Storage(crate::Error::GraphNotFound),
             WireMapping::Delegate,
         ),
         (RecallError::InvalidLimits, invalid),

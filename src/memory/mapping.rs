@@ -41,7 +41,8 @@ pub(crate) struct WireCode {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum WireMapping {
     Code(WireCode),
-    /// `Storage(e)`: the existing server-private mapper owns the code.
+    /// `Storage(e)` other than `InvalidQuery`: the existing server-private
+    /// mapper owns the code.
     Delegate,
     /// Cancellation has no wire code and is never a success or a partial.
     Cancelled,
@@ -77,7 +78,7 @@ impl WireOperation {
 }
 
 impl ReceiptOperation {
-    fn name(self) -> &'static str {
+    pub(super) fn name(self) -> &'static str {
         match self {
             Self::Remember => "remember",
             Self::Forget => "forget",
@@ -86,10 +87,11 @@ impl ReceiptOperation {
     }
 
     /// Maps a wire `MemoryOperation` for GetReceipt: unknown names are
-    /// `invalid_input`, operations without first-slice receipts are refused.
+    /// `invalid_input`, operations without first-slice lookup are refused.
+    /// Remember receipts need the request to decode (mapping section 3).
     pub(crate) fn from_wire(operation: &str) -> Result<Self, WireCode> {
         match operation {
-            "remember" => Ok(Self::Remember),
+            "remember" => Err(unavailable("remember_receipt_lookup")),
             "forget" => Ok(Self::Forget),
             "consolidate" => Ok(Self::Consolidate),
             "correct_facts" => Err(unavailable("facts")),
@@ -163,7 +165,18 @@ pub(crate) fn memory_error(error: &MemoryError) -> WireMapping {
         // PROVISIONAL: a second erasure begin is a job generation mismatch;
         // unreachable in the first slice, which refuses erasure jobs.
         JobConflict => code(412, "precondition_failed"),
-        Storage(_) => WireMapping::Delegate,
+        Storage(error) => storage_error(error),
+    }
+}
+
+/// The memory core raises `InvalidQuery` only for a missing or mistyped
+/// stored property once the adapter has validated the request against the
+/// contract bounds: an integrity fault, 500 rather than the mapper's 422
+/// (mapping section 2). **PROVISIONAL.**
+fn storage_error(error: &crate::Error) -> WireMapping {
+    match error {
+        crate::Error::InvalidQuery(_) => code(500, "internal_error"),
+        _ => WireMapping::Delegate,
     }
 }
 
@@ -181,7 +194,7 @@ pub(crate) fn ranking_error(error: RankingError) -> WireMapping {
 pub(crate) fn recall_error(error: &RecallError) -> WireMapping {
     match error {
         RecallError::Memory(error) => memory_error(error),
-        RecallError::Storage(_) => WireMapping::Delegate,
+        RecallError::Storage(error) => storage_error(error),
         RecallError::Ranking(error) => ranking_error(*error),
         RecallError::InvalidLimits
         | RecallError::InvalidScopes

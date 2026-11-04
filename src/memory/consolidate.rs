@@ -303,7 +303,7 @@ fn normalize(request: &ConsolidateRequest) -> MemoryResult<Normalized> {
     })
 }
 
-fn digest_shaped(value: &str) -> bool {
+pub(super) fn digest_shaped(value: &str) -> bool {
     value.len() == 67
         && value.starts_with("v1:")
         && value[3..]
@@ -312,7 +312,7 @@ fn digest_shaped(value: &str) -> bool {
 }
 
 /// Nonzero canonical decimal: no sign, leading zero or whitespace.
-fn canonical_decimal(value: &str, max_digits: usize) -> Option<u64> {
+pub(super) fn canonical_decimal(value: &str, max_digits: usize) -> Option<u64> {
     let bytes = value.as_bytes();
     if bytes.is_empty()
         || bytes.len() > max_digits
@@ -454,6 +454,19 @@ fn decode_receipt(
         receipt_revision: receipt.revision,
         outcome_revision: outcome_node.revision,
     })
+}
+
+/// GetReceipt lookup of any present C1 receipt, decoded with the same strict
+/// rules as replay: the summary ID and the stored expiry.
+pub(super) fn lookup(
+    read: &GraphRef<'_>,
+    receipt: &NodeView,
+    scope: &MemoryScope,
+    scope_key: &str,
+    collection: &str,
+) -> MemoryResult<(String, u64)> {
+    let stored = decode_receipt(read, receipt, scope, scope_key, collection)?;
+    Ok((stored.outcome.id, stored.expires_at_ms))
 }
 
 fn derived_edge_key(summary_key: &str, source_key: &str) -> MemoryResult<String> {

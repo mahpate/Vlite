@@ -12,6 +12,7 @@ mod erasure;
 mod mapping;
 mod ranking;
 mod recall;
+mod receipt;
 mod stale;
 
 use sha2::{Digest, Sha256};
