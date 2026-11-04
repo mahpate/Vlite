@@ -420,6 +420,7 @@ pub(crate) struct Remote {
 impl Remote {
     pub(crate) fn new(url: &str, token: Option<String>) -> Result<Self, String> {
         let client = Client::builder()
+            .no_proxy()
             .timeout(TIMEOUT)
             .redirect(Policy::none())
             .retry(reqwest::retry::never())
@@ -437,14 +438,38 @@ impl Remote {
         read_only: bool,
         name: &str,
         args: &Value,
-    ) -> Option<Result<Value, String>> {
-        TOOLS
-            .iter()
-            .find(|tool| tool.name == name)
-            .map(|tool| self.run(read_only, tool, args))
+        message_text: &str,
+    ) -> Option<Value> {
+        TOOLS.iter().find(|tool| tool.name == name).map(|tool| {
+            let result = super::kv_mcp::unique_json(message_text)
+                .and_then(|()| self.run(read_only, tool, args));
+            safe_result(result, self.token.as_deref(), tool.read_only)
+        })
     }
 
     fn run(&self, read_only: bool, tool: &Tool, args: &Value) -> Result<Value, String> {
+        let url = reqwest::Url::parse(&self.base)
+            .map_err(|_| "insecure_url: invalid memory server URL")?;
+        let loopback = url.host_str().is_some_and(|host| {
+            host == "localhost"
+                || host
+                    .trim_start_matches('[')
+                    .trim_end_matches(']')
+                    .parse::<std::net::IpAddr>()
+                    .is_ok_and(|address| address.is_loopback())
+        });
+        if url.scheme() == "http" && !loopback {
+            return Err(
+                "insecure_url: HTTP is permitted only for loopback hosts; use HTTPS".into(),
+            );
+        }
+        if let Some(token) = &self.token
+            && (token.is_empty()
+                || token.len() > 4096
+                || !token.bytes().all(|byte| (0x21..=0x7e).contains(&byte)))
+        {
+            return Err("invalid_token: token must contain 1..4096 visible ASCII bytes".into());
+        }
         if read_only && !tool.read_only {
             return Err(format!(
                 "read_only: database is read-only; {} is unavailable",
@@ -458,21 +483,15 @@ impl Remote {
         let mut body = args.as_object().expect("validated object").clone();
         let binding = body.remove("binding").expect("required binding");
         let binding = binding.as_str().expect("validated binding");
-        // Dot-only segments are normalized by URL parsers. Reject them rather
-        // than risk forwarding to a different route; all other strings are inert.
-        if binding.is_empty() || binding.bytes().all(|byte| byte == b'.') {
-            return Err("invalid_request: binding must not be empty or dot-only".into());
-        }
-        let binding: String = binding
-            .bytes()
-            .map(|byte| {
-                if byte.is_ascii_alphanumeric() || matches!(byte, b'_' | b'-') {
-                    char::from(byte).to_string()
-                } else {
-                    format!("%{byte:02X}")
-                }
+        if binding.is_empty()
+            || binding.len() > 63
+            || !binding.as_bytes()[0].is_ascii_lowercase()
+            || !binding.bytes().all(|byte| {
+                byte.is_ascii_lowercase() || byte.is_ascii_digit() || b"_-".contains(&byte)
             })
-            .collect();
+        {
+            return Err("invalid_request: binding must match [a-z][a-z0-9_-]{0,62}".into());
+        }
         let mut request = self
             .client
             .post(format!("{}/v1/memory/{binding}/{}", self.base, tool.suffix))
@@ -489,19 +508,37 @@ impl Remote {
         response
             .take((MAX_BYTES + 1) as u64)
             .read_to_end(&mut bytes)
-            .map_err(|_| transport_error(tool.read_only))?;
+            .map_err(|_| {
+                response_error(
+                    tool.read_only,
+                    "invalid_response: cannot read memory response",
+                )
+            })?;
         if bytes.len() > MAX_BYTES {
             return Err(response_error(
                 tool.read_only,
                 "response_too_large: memory response exceeds 8388608 bytes",
             ));
         }
-        let value: Value = serde_json::from_slice(&bytes).map_err(|_| {
+        let invalid = || {
             response_error(
                 tool.read_only,
-                "server_error: the server returned a non-JSON response",
+                "invalid_response: expected a JSON object without duplicate keys",
             )
-        })?;
+        };
+        let text = std::str::from_utf8(&bytes).map_err(|_| invalid())?;
+        super::kv_mcp::unique_json(text).map_err(|_| invalid())?;
+        let value: Value = serde_json::from_str(text).map_err(|_| invalid())?;
+        if !value.is_object() {
+            return Err(invalid());
+        }
+        if self
+            .token
+            .as_deref()
+            .is_some_and(|token| credential_in_value(&value, token))
+        {
+            return Err(credential_error(tool.read_only));
+        }
         if !status.is_success() || value.get("error").is_some() {
             let code = value["error"]["code"].as_str();
             let message = value["error"]["message"].as_str();
@@ -511,7 +548,7 @@ impl Remote {
                 }
                 _ => response_error(
                     tool.read_only,
-                    &format!("http_{}: invalid server error envelope", status.as_u16()),
+                    "invalid_response: invalid server error envelope",
                 ),
             });
         }
@@ -527,6 +564,97 @@ impl Remote {
         }
         Ok(value)
     }
+}
+
+fn credential_in_value(value: &Value, token: &str) -> bool {
+    if token.is_empty() {
+        return false;
+    }
+    match value {
+        Value::String(text) => text.contains(token),
+        Value::Array(values) => values.iter().any(|value| credential_in_value(value, token)),
+        Value::Object(fields) => fields
+            .iter()
+            .any(|(key, value)| key.contains(token) || credential_in_value(value, token)),
+        _ => false,
+    }
+}
+
+fn credential_error(read_only: bool) -> String {
+    response_error(
+        read_only,
+        "credential_in_response: response contained the bearer credential and was not returned",
+    )
+}
+
+fn result_value(result: Result<Value, String>) -> Value {
+    match result {
+        Ok(value) => json!({
+            "content":[{"type":"text","text":value.to_string()}],
+            "structuredContent":value,"isError":false
+        }),
+        Err(message) => json!({
+            "content":[{"type":"text","text":message}],
+            "structuredContent":{"error":message},"isError":true
+        }),
+    }
+}
+
+fn representation_contains(result: &Value, token: &str) -> bool {
+    !token.is_empty()
+        && (result
+            .get("structuredContent")
+            .is_some_and(|value| value.to_string().contains(token))
+            || result
+                .get("content")
+                .is_some_and(|value| value.to_string().contains(token)))
+}
+
+fn safe_result(result: Result<Value, String>, token: Option<&str>, read_only: bool) -> Value {
+    let token = token.unwrap_or_default();
+    let message = match result {
+        Ok(value) => {
+            let result = result_value(Ok(value));
+            if !representation_contains(&result, token) {
+                return result;
+            }
+            credential_error(read_only)
+        }
+        Err(message) => message,
+    };
+    let message = if token.is_empty() {
+        message
+    } else {
+        message.replace(token, "[REDACTED]")
+    };
+    let message: String = message
+        .chars()
+        .map(|ch| if ch.is_control() { ' ' } else { ch })
+        .collect();
+    let mut result = result_value(Err(bounded_error(message, read_only)));
+    if representation_contains(&result, token) {
+        result = result_value(Err("error: details withheld".into()));
+        if representation_contains(&result, token) {
+            result = result_value(Err(String::new()));
+            // A short credential can collide with fixed representation keys.
+            if result["structuredContent"].to_string().contains(token) {
+                result
+                    .as_object_mut()
+                    .expect("tool result")
+                    .remove("structuredContent");
+            }
+            if result["content"].to_string().contains(token) {
+                result["content"] = json!([]);
+                if result["content"].to_string().contains(token) {
+                    result
+                        .as_object_mut()
+                        .expect("tool result")
+                        .remove("content");
+                }
+            }
+        }
+    }
+    result
 }
 
 fn response_error(read_only: bool, message: &str) -> String {
@@ -553,5 +681,60 @@ fn bounded_error(message: String, read_only: bool) -> String {
         )
     } else {
         message
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn structured_representation_guard() {
+        assert!(representation_contains(
+            &json!({"structuredContent":{"n":123},"content":[]}),
+            "123"
+        ));
+    }
+
+    #[test]
+    fn text_representation_guard() {
+        assert!(representation_contains(
+            &json!({"structuredContent":{},"content":[{"type":"text","text":"123"}]}),
+            "123"
+        ));
+    }
+
+    #[test]
+    fn diagnostic_fallback_and_shortest_safe_result() {
+        let result = safe_result(
+            Err("invalid_request: [REDACTED]".into()),
+            Some("[REDACTED]"),
+            false,
+        );
+        assert_eq!(
+            result["structuredContent"]["error"],
+            "error: details withheld"
+        );
+        for token in ["error", "text", "\"", "[", "]", ":", "{}"] {
+            let result = safe_result(Err(format!("invalid_request: {token}")), Some(token), false);
+            assert_eq!(result["isError"], true);
+            assert!(
+                !representation_contains(&result, token),
+                "{token}: {result}"
+            );
+        }
+    }
+
+    #[test]
+    fn diagnostic_redaction_and_controls() {
+        let result = safe_result(
+            Err("invalid_request: secret\n\tmessage".into()),
+            Some("secret"),
+            true,
+        );
+        assert_eq!(
+            result["structuredContent"]["error"],
+            "invalid_request: [REDACTED]  message"
+        );
     }
 }

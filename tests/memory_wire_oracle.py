@@ -1170,6 +1170,12 @@ def self_test():
     for exchange in cli_exchanges:
         validate_response(exchange["verb"].replace("-", "_"), exchange["status"],
                           parse_json(exchange["stdout"]), request=exchange["request"])
+    mcp_path = Path(__file__).parent / "fixtures" / "memory_tools" / "exchanges.json"
+    mcp_exchanges = parse_json(mcp_path.read_text(encoding="utf-8"))
+    for exchange in mcp_exchanges["cases"]:
+        operation = exchange["name"].removeprefix("vlite_memory_")
+        status = 202 if operation == "resume_erasure" else 200
+        validate_response(operation, status, exchange["response"], request=exchange["request"])
     cases, structural = [], []
     for path in sorted(ROOT.glob("*.json")):
         fixture = parse_json(path.read_text(encoding="utf-8"))

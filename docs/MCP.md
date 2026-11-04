@@ -165,10 +165,29 @@ missing required fields and wrong JSON types fail locally; semantic validation
 belongs to the server. No defaults, integer conversions or receipt keys are
 inserted into the forwarded body.
 
-Success preserves the complete server JSON in `structuredContent` and an
-identical JSON text block, including pending HTTP 202 responses. Failures use
+Binding names must match `[a-z][a-z0-9_-]{0,62}`. Memory calls require HTTPS
+except for loopback HTTP (`localhost`, `127.0.0.0/8`, `::1`) and refuse tokens
+outside 1..4096 visible ASCII bytes (0x21..0x7e) locally. Ambient proxies are
+disabled for memory calls. Graph discovery and graph tools retain their
+pre-existing ambient-proxy behavior; graph/KV configuration is unchanged.
+
+Success preserves the exact JSON value of a valid server object in
+`structuredContent` and an identical JSON text block, including pending HTTP
+202 responses; whitespace, key order and escape spellings are not preserved.
+Credential-bearing responses (decoded keys/strings or serialized output),
+duplicate keys at any depth, non-objects, invalid UTF-8 and malformed or
+truncated responses are refused, never rewritten into successful data.
+Failures use
 `isError:true` and a string `structuredContent.error`, `"<code>: <message>"`.
-Requests and serialized tool results are capped at 8 MiB; HTTP calls time out
+Diagnostics redact the credential and flatten control characters; serialization
+is checked again. A colliding diagnostic becomes `error: details withheld`,
+then the shortest safe text (empty). If fixed representation syntax still
+collides, that representation is omitted (no text blocks or structured content);
+`isError:true` remains, but such an extreme collision may prevent normal client
+error rendering.
+The stdio host is trusted: the 8 MiB request limit applies to compact arguments
+after parsing, not the incoming stdio line. HTTP response bodies and serialized
+tool results are also capped at 8 MiB; HTTP calls time out
 after five seconds. A mutation transport failure has **UNKNOWN** outcome:
 reconcile with `vlite_memory_receipt`, never blindly retry. Oversized or invalid
 success responses likewise cannot establish rollback. There are no automatic

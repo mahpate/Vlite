@@ -26,6 +26,10 @@ struct Fake {
 
 impl Fake {
     fn new(status: u16, body: Value, delay: Duration) -> Self {
+        Self::raw(status, body.to_string().into_bytes(), delay, 0)
+    }
+
+    fn raw(status: u16, body: Vec<u8>, delay: Duration, missing: usize) -> Self {
         let listener = TcpListener::bind("127.0.0.1:0").unwrap();
         let url = format!("http://{}/prefix", listener.local_addr().unwrap());
         listener.set_nonblocking(true).unwrap();
@@ -80,19 +84,22 @@ impl Fake {
                 let (code, response) = if path == "/prefix/v1/graphs" {
                     (
                         403,
-                        json!({"error":{"code":"forbidden_scope","message":"No raw access"}}),
+                        json!({"error":{"code":"forbidden_scope","message":"No raw access"}})
+                            .to_string()
+                            .into_bytes(),
                     )
                 } else {
                     thread::sleep(delay);
                     (status, body.clone())
                 };
-                let text = response.to_string();
+                let text = response;
                 let response = format!(
-                    "HTTP/1.1 {code} Test\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{text}",
-                    text.len()
+                    "HTTP/1.1 {code} Test\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+                    text.len() + missing
                 );
                 // A timeout deliberately closes the other end first.
                 let _ = reader.get_mut().write_all(response.as_bytes());
+                let _ = reader.get_mut().write_all(&text);
             }
         });
         Self {
@@ -544,29 +551,247 @@ fn memory_error_envelopes_never_become_success_even_with_http_200() {
 }
 
 #[test]
-fn memory_binding_is_one_inert_path_segment() {
+fn memory_binding_grammar_is_local() {
     let server = Fake::new(
         409,
         json!({"error":{"code":"memory_not_configured","message":"No binding"}}),
         Duration::ZERO,
     );
-    let mut message = call(&goldens()["cases"][1]);
-    message["params"]["arguments"]["binding"] = json!("notes/../../admin?token=hidden#fragment");
-    let output = run(&server, true, vec![message]);
-    assert_eq!(output[0]["result"]["isError"], true);
-    assert_eq!(
-        server.memory_requests()[0]["path"],
-        "/prefix/v1/memory/notes%2F%2E%2E%2F%2E%2E%2Fadmin%3Ftoken%3Dhidden%23fragment/recall"
-    );
-    for binding in ["", ".", ".."] {
+    for binding in [
+        "",
+        ".",
+        "..",
+        "A",
+        "aA",
+        "1a",
+        "_a",
+        "a.b",
+        "a/b",
+        "a%2fb",
+        "é",
+        &"a".repeat(64),
+    ] {
         let mut message = call(&goldens()["cases"][1]);
         message["params"]["arguments"]["binding"] = json!(binding);
         let output = run(&server, true, vec![message]);
         assert_eq!(output[0]["result"]["isError"], true);
         assert_eq!(
             output[0]["result"]["structuredContent"]["error"],
-            "invalid_request: binding must not be empty or dot-only"
+            "invalid_request: binding must match [a-z][a-z0-9_-]{0,62}"
         );
     }
+    assert!(server.memory_requests().is_empty());
+    for binding in ["a", "a0_-", &"a".repeat(63)] {
+        let mut message = call(&goldens()["cases"][1]);
+        message["params"]["arguments"]["binding"] = json!(binding);
+        run(&server, true, vec![message]);
+        assert_eq!(
+            server.memory_requests().last().unwrap()["path"],
+            format!("/prefix/v1/memory/{binding}/recall")
+        );
+    }
+}
+
+#[test]
+fn memory_response_integrity_is_fail_closed() {
+    for (status, body, missing) in [
+        (200, b"null".to_vec(), 0),
+        (200, b"[]".to_vec(), 0),
+        (200, b"123".to_vec(), 0),
+        (200, b"not json".to_vec(), 0),
+        (200, br#"{"unfinished":"#.to_vec(), 0),
+        (200, br#"{"x":1,"x":2}"#.to_vec(), 0),
+        (200, br#"{"nested":[{"id":1,"\u0069d":2}]}"#.to_vec(), 0),
+        (200, vec![b'{', b'"', 255, b'"', b':', b'0', b'}'], 0),
+        (200, b"{}".to_vec(), 5),
+        (403, b"not json".to_vec(), 0),
+        (403, b"{}".to_vec(), 0),
+        (
+            403,
+            br#"{"error":{"code":"a","code":"b","message":"c"}}"#.to_vec(),
+            0,
+        ),
+    ] {
+        let server = Fake::raw(status, body.clone(), Duration::ZERO, missing);
+        let output = run(&server, true, vec![call(&goldens()["cases"][0])]);
+        let error = output[0]["result"]["structuredContent"]["error"]
+            .as_str()
+            .unwrap();
+        assert!(error.starts_with("invalid_response:"), "{body:?}: {error}");
+        assert!(
+            error.contains("UNKNOWN") && error.contains("receipt"),
+            "{error}"
+        );
+    }
+}
+
+#[test]
+fn memory_credentials_are_refused_not_rewritten() {
+    for body in [
+        br#"{"secret":"memory-test-token"}"#.as_slice(),
+        br#"{"memory-test-token":"value"}"#,
+        br#"{"nested":[{"secret":"memory-test-\u0074oken"}]}"#,
+        br#"{"error":{"code":"server_error","message":"memory-test-token"}}"#,
+    ] {
+        for status in [200, 403] {
+            let server = Fake::raw(status, body.to_vec(), Duration::ZERO, 0);
+            let output = run(&server, true, vec![call(&goldens()["cases"][0])]);
+            let result = &output[0]["result"];
+            assert_eq!(result["isError"], true);
+            let error = result["structuredContent"]["error"].as_str().unwrap();
+            assert!(error.starts_with("credential_in_response:"), "{error}");
+            assert!(error.contains("UNKNOWN") && error.contains("receipt"));
+            assert!(!result.to_string().contains("memory-test-token"));
+        }
+    }
+}
+
+#[test]
+fn memory_serialized_credentials_and_error_fallbacks() {
+    for (token, body) in [
+        ("123", json!({"n":123})),
+        (r"\n", json!({"s":"\n"})),
+        (r#"\""#, json!({"s":"\""})),
+        ("error", json!({"error":{"code":"x","message":"error"}})),
+        (
+            "details",
+            json!({"error":{"code":"details","message":"details"}}),
+        ),
+        (
+            "[REDACTED]",
+            json!({"error":{"code":"[REDACTED]","message":"bad"}}),
+        ),
+        ("text", json!({})),
+        ("\"", json!({})),
+        ("[", json!({})),
+        ("]", json!({})),
+    ] {
+        let server = Fake::new(200, body, Duration::ZERO);
+        let mut command = proxy_command(&server, true);
+        command.env("MEMORY_MCP_TEST_TOKEN", token);
+        let output = run_command(command, vec![call(&goldens()["cases"][0])]);
+        let result = &output[0]["result"];
+        assert_eq!(result["isError"], true, "{token}");
+        if let Some(structured) = result.get("structuredContent") {
+            assert!(!structured.to_string().contains(token), "{token}: {result}");
+        }
+        if let Some(content) = result.get("content") {
+            assert!(!content.to_string().contains(token), "{token}: {result}");
+        }
+    }
+    let server = Fake::new(200, json!({}), Duration::ZERO);
+    let mut message = call(&goldens()["cases"][0]);
+    message["params"]["arguments"]["memory-test-token"] = json!(1);
+    let output = run(&server, true, vec![message]);
+    assert!(
+        !output[0]["result"]
+            .to_string()
+            .contains("memory-test-token")
+    );
+}
+
+#[test]
+fn memory_decoded_credentials_cannot_hide_behind_json_escaping() {
+    for token in ["a\"b", "a\\b"] {
+        let mut keyed = serde_json::Map::new();
+        keyed.insert(token.into(), json!("ordinary"));
+        for body in [Value::Object(keyed), json!({"nested":[{"value":token}]})] {
+            let server = Fake::new(200, body, Duration::ZERO);
+            let mut command = proxy_command(&server, true);
+            command.env("MEMORY_MCP_TEST_TOKEN", token);
+            let output = run_command(command, vec![call(&goldens()["cases"][0])]);
+            assert_eq!(output[0]["result"]["isError"], true, "{output:?}");
+            assert!(
+                output[0]["result"]["structuredContent"]["error"]
+                    .as_str()
+                    .unwrap()
+                    .starts_with("credential_in_response:"),
+                "{output:?}"
+            );
+        }
+    }
+}
+
+#[test]
+fn memory_token_grammar_is_local() {
+    let server = Fake::new(200, json!({}), Duration::ZERO);
+    for token in [
+        "has space",
+        "tab\t",
+        "line\n",
+        "\u{7f}",
+        "é",
+        &"a".repeat(4097),
+    ] {
+        let mut command = proxy_command(&server, true);
+        command.env("MEMORY_MCP_TEST_TOKEN", token);
+        let output = run_command(command, vec![call(&goldens()["cases"][1])]);
+        assert!(
+            output[0]["result"]["structuredContent"]["error"]
+                .as_str()
+                .unwrap()
+                .starts_with("invalid_token:"),
+            "{output:?}"
+        );
+    }
+    assert!(server.memory_requests().is_empty());
+    for token in ["!", "~", &"a".repeat(4096)] {
+        let mut command = proxy_command(&server, true);
+        command.env("MEMORY_MCP_TEST_TOKEN", token);
+        let output = run_command(command, vec![call(&goldens()["cases"][1])]);
+        assert_eq!(output[0]["result"]["isError"], false, "{output:?}");
+    }
+}
+
+#[test]
+fn memory_http_requires_loopback() {
+    for url in [
+        "http://192.0.2.1:9",
+        "http://localhost.example:9",
+        "http://[::2]:9",
+    ] {
+        let mut command = Command::new(env!("CARGO_BIN_EXE_vlite-mcp"));
+        command.args(["--server", url, "--read-only"]);
+        let output = run_command(command, vec![call(&goldens()["cases"][1])]);
+        assert!(
+            output[0]["result"]["structuredContent"]["error"]
+                .as_str()
+                .unwrap()
+                .starts_with("insecure_url:"),
+            "{output:?}"
+        );
+    }
+    let server = Fake::new(200, json!({}), Duration::ZERO);
+    let mut command = Command::new(env!("CARGO_BIN_EXE_vlite-mcp"));
+    command.args([
+        "--server",
+        &server.url.replace("127.0.0.1", "localhost"),
+        "--read-only",
+    ]);
+    assert_eq!(
+        run_command(command, vec![call(&goldens()["cases"][1])])[0]["result"]["isError"],
+        false
+    );
+}
+
+#[test]
+fn memory_ambient_proxies_are_never_contacted() {
+    let server = Fake::new(200, json!({"ok":true}), Duration::ZERO);
+    let proxy = Fake::new(200, json!({"proxied":true}), Duration::ZERO);
+    let mut command = proxy_command(&server, true);
+    for name in [
+        "HTTP_PROXY",
+        "HTTPS_PROXY",
+        "ALL_PROXY",
+        "http_proxy",
+        "https_proxy",
+        "all_proxy",
+    ] {
+        command.env(name, &proxy.url);
+    }
+    command.env_remove("NO_PROXY").env_remove("no_proxy");
+    let output = run_command(command, vec![call(&goldens()["cases"][1])]);
+    assert_eq!(output[0]["result"]["structuredContent"], json!({"ok":true}));
     assert_eq!(server.memory_requests().len(), 1);
+    assert!(proxy.requests.lock().unwrap().is_empty());
 }

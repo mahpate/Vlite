@@ -719,6 +719,17 @@ fn dispatch(
                 .get("arguments")
                 .cloned()
                 .unwrap_or_else(|| json!({}));
+            #[cfg(feature = "mcp-proxy")]
+            if let Some(name) = name
+                && memory_mcp::is_tool(name)
+                && args.is_object()
+                && let Backend::Proxy(_, memory) = backend
+            {
+                let result = memory
+                    .call(config.read_only, name, &args, message_text)
+                    .expect("known memory tool");
+                return has_id.then(|| json!({"jsonrpc":"2.0","id":response_id,"result":result}));
+            }
             match (name, args.as_object()) {
                 (Some(name), Some(_)) => Some(tool_result(match backend {
                     Backend::Local(db) => {
@@ -732,19 +743,9 @@ fn dispatch(
                         })
                     }
                     #[cfg(feature = "mcp-proxy")]
-                    Backend::Proxy(remote, memory) => {
-                        if memory_mcp::is_tool(name) {
-                            kv_mcp::unique_json(message_text).and_then(|()| {
-                                memory
-                                    .call(config.read_only, name, &args)
-                                    .expect("known memory tool")
-                            })
-                        } else {
-                            remote
-                                .call(config.read_only, name, &args)
-                                .unwrap_or_else(|| Err(format!("unknown tool: {name}")))
-                        }
-                    }
+                    Backend::Proxy(remote, _) => remote
+                        .call(config.read_only, name, &args)
+                        .unwrap_or_else(|| Err(format!("unknown tool: {name}"))),
                 })),
                 _ => {
                     return Some(protocol_error(
