@@ -308,6 +308,11 @@ fn compact_installed_database_and_snapshot_method_matrix() {
                 mutable.cancel_hnsw_rebuild(),
                 false
             );
+            a!(
+                "CollectionMut::browse",
+                mutable.browse(None, 1).unwrap(),
+                oracle.collection("full").unwrap().browse(None, 1).unwrap()
+            );
         }
         d!(
             "CollectionMut::configure_vector",
