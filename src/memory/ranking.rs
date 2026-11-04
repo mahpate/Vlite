@@ -4,21 +4,21 @@ use super::MemoryScope;
 use std::cmp::Ordering;
 use std::collections::BTreeSet;
 
-pub(super) const RANKING_VERSION: &str = "private.agent-memory-ranking.v1";
+pub(crate) const RANKING_VERSION: &str = "private.agent-memory-ranking.v1";
 const MAX_CANDIDATES: usize = 1_000;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(super) enum FutureObservations {
+pub(crate) enum FutureObservations {
     Reject,
     Clamp,
 }
 
 #[derive(Clone, Debug, PartialEq)]
-pub(super) struct RankingPolicy {
-    pub(super) weights: [f64; 3],
-    pub(super) half_life_ms: Option<f64>,
-    pub(super) limit: usize,
-    pub(super) future_observations: FutureObservations,
+pub(crate) struct RankingPolicy {
+    pub(crate) weights: [f64; 3],
+    pub(crate) half_life_ms: Option<f64>,
+    pub(crate) limit: usize,
+    pub(crate) future_observations: FutureObservations,
 }
 
 impl Default for RankingPolicy {
@@ -33,29 +33,29 @@ impl Default for RankingPolicy {
 }
 
 #[derive(Clone, Debug, PartialEq)]
-pub(super) struct RankedCandidate {
-    pub(super) scope: MemoryScope,
-    pub(super) id: String,
-    pub(super) observed_at_ms: i64,
-    pub(super) rank: Option<usize>,
-    pub(super) importance: f64,
-    pub(super) segment: Option<(i64, i64)>,
+pub(crate) struct RankedCandidate {
+    pub(crate) scope: MemoryScope,
+    pub(crate) id: String,
+    pub(crate) observed_at_ms: i64,
+    pub(crate) rank: Option<usize>,
+    pub(crate) importance: f64,
+    pub(crate) segment: Option<(i64, i64)>,
 }
 
 #[derive(Clone, Debug, PartialEq)]
-pub(super) struct ScoredCandidate {
-    pub(super) candidate: RankedCandidate,
-    pub(super) relevance: f64,
-    pub(super) decay: Option<f64>,
-    pub(super) importance: f64,
-    pub(super) score: f64,
-    pub(super) effective_t: i64,
-    pub(super) ranking_version: &'static str,
-    pub(super) expanded_only: bool,
+pub(crate) struct ScoredCandidate {
+    pub(crate) candidate: RankedCandidate,
+    pub(crate) relevance: f64,
+    pub(crate) decay: Option<f64>,
+    pub(crate) importance: f64,
+    pub(crate) score: f64,
+    pub(crate) effective_t: i64,
+    pub(crate) ranking_version: &'static str,
+    pub(crate) expanded_only: bool,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(super) enum RankingError {
+pub(crate) enum RankingError {
     Weights,
     HalfLifeRequired,
     HalfLife,
