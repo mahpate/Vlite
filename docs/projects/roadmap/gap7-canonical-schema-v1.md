@@ -131,15 +131,15 @@ endpoint identity. Root means an ingestion/delete/abort receipt identity.
 | result_shard / ownership_shard | I(root), U32(batch_ordinal), U32(dependency_group), U32(shard_index) |
 | delete_receipt | Binding, S(tenant), S(source_id), U64(expected_source_revision) |
 | abort_receipt | Binding, S(tenant), S(source_id), I(aborted root) |
-| vector | Binding, U64(planned_record_id) |
 
 Chunk ordinals and dependency-group ordinals start at zero. Batch ordinals start
 at one. Shard indexes start at zero **within (root, batch, group, shard role)**.
 Reject missing, skipped or duplicate indexes during replay. Spans are source
 offsets, checked as in preparation; no change to chunk-relative extraction.
 Entity keys are already ascii-key-v1 normalized, 1..256 bytes. Kind/predicate are
-case-sensitive provisioned identifiers, 1..63 bytes, as required by the engine's
-label/type rules; no arbitrary extractor strings become executable schema.
+case-sensitive provisioned identifiers matching `[A-Za-z0-9_]{1,63}`, as required
+by the engine's label/type rules; no arbitrary extractor strings become
+executable schema. Every chunk/evidence span satisfies start < end.
 
 Lookup recomputes the role key, decodes the stored full identity and compares
 **all fields, recursively, byte-for-byte** after canonical validation. Equal
@@ -175,10 +175,13 @@ for no resulting revision, revision_key is the empty string, counts are planned
 cleanup counts, and the outcome disambiguates it. No change to public result shape.
 
 `extractor_version` is a label, not an opaque token: 1..=256 ASCII bytes matching
-`[A-Za-z0-9._-]+`, except the reserved values `latest` and `default`. Pipeline
-configuration, extraction observations, mention/relation evidence and readable
-projections carry the same exact label. This follows the Gap 8 serving-contract
-registry. The binding's `generation` remains an opaque D32 supplied by the
+`[A-Za-z0-9._-]+`, except the literal reserved values `latest` and `default`.
+Labels are case-sensitive: `Latest` is distinct and accepted without casefolding.
+The same label rule applies to `extractor_alias`,
+`embedder_alias` and `model_version`. Pipeline configuration, mention/relation
+stored evidence and their readable projections carry the extractor version;
+accepted observation records themselves carry no version label. This follows
+the Gap 8 serving-contract registry. The binding's `generation` remains an opaque D32 supplied by the
 provisioning API; ingestion does not interpret it, and a smaller counter may be
 zero-extended by that API. Reprovisioning still requires a different generation.
 
@@ -202,8 +205,9 @@ Physical C9 properties for every non-shard graph object:
 * Readable projections are additional native C9 scalar properties, derived
   canonically from the identity/data and never included in either. Names are
   lower_snake ASCII and may not collide with `g7_*`, `iNN`, `dNN`, or the three
-  key-copy names. Source projects `status`, optional `revision_key`, and
-  `last_batch`; revision projects optional `uri`, `text_length`, `chunk_count`,
+  key-copy names. Source projects `status` and `last_batch`; its optional
+  `revision_key` is the same key-copy property above, not a second projection.
+  Revision projects optional `uri`, `text_length`, `chunk_count`,
   and lowercase-hex `content_digest`; chunk projects `ordinal`, `start_byte`,
   `end_byte`, and lowercase-hex `chunk_digest`; entity projects `entity_kind`
   and `normalized_key`; mention/relation project `span_start`, `span_end`,
@@ -212,6 +216,9 @@ Physical C9 properties for every non-shard graph object:
   canonical identity/data fragments. These redundant scalars are required for
   ordinary graph reads and dashboard use, compared bit-identically on replay,
   and any missing, extra, or mismatching projection is an evidence conflict.
+  The head's `job_receipt_key`, revision digest and pipeline remain blob-only.
+  Receipts (root, batch, delete, abort) have no additional readable projections;
+  receipt `revision_key` is still copied by the key-copy rule above.
 
 Split each binary value at 3,072 raw bytes; independently encode each fragment
 with RFC 4648 section 4 standard Base64 (`A-Z a-z 0-9 + /`, `=` padding, no line
@@ -226,8 +233,9 @@ complete original bytes, so a long surface in `dNN` does not violate the
 This representation deliberately stores Null and Unsigned inside tagged Attrs:
 C9 PropertyValue has no Null or unsigned-u64 variant. No conversion to signed,
 lossy float, string sentinel or new engine hook is authorized. All physical
-properties are existing String/Integer scalars. Confidence remains a finite F64
-in the data record. The immutable entity has no mutable descriptive data.
+properties are existing String/Integer/Float scalars. Confidence remains a
+finite F64 in the data record and its optional native Float projection.
+The immutable entity has no mutable descriptive data.
 
 Within the approved preparation limits, identities/data fit the C9 envelope.
 Exact preflight must check the actual physical maps: at most 64 fields, field
@@ -271,9 +279,9 @@ that role, including projections and key-copy fields) is:
 | MENTIONS | 19 | 36,258 |
 | extracted relation | 14 | 16,484 |
 | ingestion root receipt | 5 | 1,370 |
-| batch receipt | 4 | 1,148 |
+| batch receipt (largest root: abort of ingestion) | 4 | 2,076 |
 | delete root receipt | 5 | 1,135 |
-| abort root receipt | 5 | 2,135 |
+| abort root receipt (target: ingestion root) | 5 | 2,135 |
 | result/ownership shard | 1 (`data`) | at most 4,111 |
 | vector record metadata | 5 | 425 |
 
@@ -353,6 +361,16 @@ requires nodes sorted by graph key, compare the ASCII key bytes. Where it requir
 relation/provenance edges sorted by canonical identity, use the semantic
 field-wise identity comparator above. Operation order itself remains section 4's
 frozen order and is never replaced by a global key sort.
+In particular, provenance kinds ascend HAS_REVISION, HAS_CHUNK, MENTIONS.
+Phase order and within-phase anchor/provenance/relation sorting apply **within
+each dependency group**, not across the whole batch. A later chunk-contiguous
+group may restart at its chunk-create/put/attach phases after the previous
+group's evidence phases. Chunk ordinals remain ascending across groups;
+accepted-chunk ordinals also ascend. Detach is a distinct phase strictly before
+vector delete. The source guard/create remains first in the batch, tag 13 is
+for batch one only, and the first-frame root receipt remains last in that batch;
+group boundaries do not relax these batch-wide rules. Groups are phase slices
+of section 4's dependency order, preserving section 6's chunk-contiguous packing.
 
 For a 71-byte receipt key, the binary header through count is:
 1+1+(4+71)+4+4+4+4 = **93 bytes**. Base64 capacity 4,096 ASCII bytes means
@@ -470,6 +488,7 @@ observation spans are chunk-relative; graph mention/relation identity spans are
 source offsets.
 Content digest must equal SHA256(original_text). Request expected_source permits
 Absent or captured Revision, not a previous-batch symbolic value.
+Request pipeline.binding_generation must equal source.binding.generation.
 
 Captured rows sort by the semantic identity comparator in section 5, with
 duplicates rejected. Accepted
@@ -568,7 +587,7 @@ admission validation for cross-record semantics, authorization, live graph
 state, plan policy ceilings, or execution outcomes.
 
 **Admission-only; the future Rust core must enforce these contract checks:**
-preparation source/URI/decoded-text limits; line and chunk-boundary semantics;
+preparation source/decoded-text limits; line and chunk-boundary semantics;
 observation spans against the source and exact extraction text; accepted
 observation/entity/relation caps and dedup/conflict behavior; request expected
 revision against live state; captured state against the graph; endpoint source,
@@ -612,8 +631,10 @@ Do not treat schema-operation tag count as an engine-entry count.
 Each tag-6 vector put lowers to one `VectorMutation` and consumes one batch
 entry. Its metadata is exactly the five-field vector record metadata specified
 in section 4; the body includes the existing engine vector-entry encoding of
-record ID, expiry-absent marker, exact UTF-8 payload length/bytes, dimensions and
-the normalized F32 bytes. Preflight measures the existing encoder output, not
+record ID, exact UTF-8 payload length/bytes, dimensions and the normalized F32
+bytes, with **no expiry marker** in PutWithMetadata batch entries
+(`src/format.rs:781`). Expiry is absent by the selected operation, not encoded
+as an extra sentinel byte. Preflight measures the existing encoder output, not
 the canonical `vector_data` record size. Its metadata contributes
 `metadata_bytes({g7_v: 1, tenant, source_key, revision_key, chunk_key})` to the
 engine record's measured bytes; the exact text and F32 bytes contribute to the
@@ -635,14 +656,14 @@ All choices are proposed; none alters an approved Gap7-* decision.
 | Binding | ephemeral ids; names+generation | authorized stored names, tenant, opaque32 generation | No lineage/renumbered IDs in keys |
 | Nested identities | digest-only; complete | length-framed complete versioned identities | Collision mismatch cannot masquerade as an endpoint |
 | Attributes | native C9 values; tagged bytes | retain frozen tags and attributes_key, wrap B | Null/Unsigned need no new engine variants |
-| Identity/data properties | one overlong string; fragments | maximal 3,072-byte binary fragments as base64 | Existing String/Integer C9 only |
+| Identity/data properties | one overlong string; fragments | maximal 3,072-byte binary fragments as base64 plus canonical-derived projections | Existing String/Integer/Float C9 only |
 | Shard backrefs | separate props; header | one `data` string with key/batch/group/index header | Exact 93-byte header for key length 71 |
 | Shard entry identity | full; key+lookup | compact key plus captured ID/revision; validate target's full identity on lookup | Full recursive identities would exceed one shard |
 | Recursive digest fields | hash filled values; typed mask | tagged 32-zero placeholders only in typed slots | Breaks root/first-batch/plan circularity without a fixed point |
 | Result IDs and guards | runtime numeric; symbolic | IdRef 0/1 and RevisionRef 0/1/2 | No predicted sequences; actual record candidates remain frozen |
 | Later delete/abort | reuse ingest domain; reserve domains | separate literals/tokens, root shapes retained | No implementation authorization |
 | Stored U64 record IDs/revisions | signed narrowing; text | tagged U64 bytes inside base64 data/shard strings | Full range preserved; no unsigned PropertyValue needed |
-| Stored spans/counts | bounded i64; text | U32 bytes inside the same data strings | Checked U32; engine Integer used only for g7_v=1 |
+| Stored spans/counts | bounded i64; text | U32 canonical bytes and redundant native Integer projections | Nonnegative U32 fits i64 exactly; no narrowing of U64 fields |
 | Stored generation | numeric; UUID text; bytes | opaque D, base64 inside full identity | No lossy integer interpretation |
 | Encoded attribute / decoded-output measure | JSON; canonical bytes | frozen inner attributes_key / versioned observation lists | New explicit accounting, not retroactive preparation-oracle coverage |
 | Captured properties/policy hashes | unframed; shared domain | distinct properties/policy domains with exact metadata/Policy bytes | No undefined hash inputs remain |
@@ -654,7 +675,7 @@ All choices are proposed; none alters an approved Gap7-* decision.
 | New source head order | head progress reused; distinct creation | tag 13 creates the absent-guard head as operation zero in the first frame; tag 11 only patches later | One clarification will be added to the contract at ratification; no approved decision changes |
 | Physical vector shape | vector envelope; graph-like metadata | Integer version + four String metadata fields, exact chunk payload, normalized F32 bytes, no expiry | Canonical `vector_data` remains the preflight/digest source |
 | Readable projections | fragments only; redundant scalars | required canonical-derived scalar properties, compared on replay | v1 required for graph reads/dashboard; mismatch is evidence conflict |
-| Extractor version | opaque D32; arbitrary text; bounded label | `S(label)`, 1..256 ASCII from `[A-Za-z0-9._-]+`, excluding `latest`/`default` | Uses serving-contract registry; all occurrences identical |
+| Pipeline labels | opaque D32; arbitrary text; bounded label | `S(label)`, 1..256 ASCII from `[A-Za-z0-9._-]+`, excluding literal `latest`/`default` for extractor version/alias, embedder alias and model version | Case-sensitive; `Latest` is preserved, not silently normalized |
 | Binding generation | integer; UUID; opaque bytes | opaque D32 supplied by provisioning API; zero-extension permitted there | Ingestion does not interpret it |
 | Collection ordering | encoded identity bytes; semantic field order | typed semantic comparator; numeric fields numeric, strings unsigned UTF-8 | Avoids little-endian ordering inversion |
 | Pipeline version | raw configuration hash; framed domain hash | `H(pipeline domain, pipeline)` | Exact refinement of contract's canonical-configuration SHA-256 wording |
@@ -662,6 +683,7 @@ All choices are proposed; none alters an approved Gap7-* decision.
 | Span coordinates | chunk-relative everywhere; source offsets everywhere | accepted observations chunk-relative; graph edge identity spans source offsets | Bridges extraction-local spans to document evidence |
 | New key tokens/relation-rule kinds | inferred from existing names; explicit registry | explicit v1 token registry and identifier validation | New private schema names; no public endpoint or operation decision |
 | Node retries | CreateNode retry; guarded create | Absent guard for new keyed nodes; only head can patch | GraphKeyExists is not successful reuse |
+| Abort target identity | S(job receipt key) as in section 6's tuple; I(aborted root) | full validated ingestion/delete root identity, whose derived key is that job receipt key | Explicit proposed refinement of section 6: collision-safe nested encoding, no abort-of-abort; coordinator ratification required, no contract edit here |
 
 ## 9. Deliberately not frozen and resumption rule
 
@@ -730,7 +752,7 @@ goldens unchanged. No implementation may cherry-pick this draft as authorization
 * Guard operation is `00` + framed Source identity + Absent `00`;
   delete-vector is `03 0100 0100000000000000`. Every operation tag has a
   positive byte vector. Plan-empty is `01` + raw32 request digest + three
-  zero U32 counts (45 bytes); pipeline minimal codec example is 186 bytes.
+  zero U32 counts (45 bytes); pipeline minimal codec example is 160 bytes.
   The fixture pins complete Request, populated Plan and Batch nested preimages
   and independently hashed lowercase digest constants. These are byte examples,
   not permission to bypass source/captured-state semantic admission.

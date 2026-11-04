@@ -438,6 +438,8 @@ def validate_record(name, value):
         need(value["normalization"] == "ascii-key-v1", "normalization")
         need(value["schema_version"] == 1 and value["dimensions"] > 0, "pipeline_version")
         need(extractor_label(value["extractor_version"]), "extractor_version")
+        for field in ("extractor_alias", "embedder_alias", "model_version"):
+            need(extractor_label(value[field]), "pipeline_label")
         for field in ("entity_rules", "relation_rules"):
             ids = [text(rule["rule_id"]) for rule in value[field]]
             need(ids == sorted(ids) and len(ids) == len(set(ids)), "rule_order")
@@ -508,6 +510,9 @@ def validate_record(name, value):
     elif name == "plan":
         rows = [identity_order(row["object"]) for row in value["captured"]]
         need(rows == sorted(rows) and len(rows) == len(set(rows)), "captured_order")
+        ordinals = [row["chunk"]["fields"]["ordinal"] for row in value["accepted"]]
+        need(ordinals == sorted(ordinals) and len(ordinals) == len(set(ordinals)),
+             "accepted_chunk_order")
         validate_plan_order(value)
     elif name == "vector_data":
         need(all("\0" not in value[field] for field in
@@ -541,9 +546,21 @@ def validate_plan_order(plan):
         if not ops:
             raise Invalid("empty_batch")
         validate_batch_start(ops, batch["ordinal"], known)
+        chunk_order = []
+        previous_group = None
         previous_phase = -1
-        anchor_keys, chunk_order, provenance_order, relation_order = [], [], [], []
+        anchor_keys, provenance_order, relation_order = [], [], []
+        group_indexes = [group_index for group_index, group in enumerate(batch["groups"])
+                         for _ in group["operations"]]
         for index, operation in enumerate(ops):
+            group_index = group_indexes[index]
+            if group_index != previous_group:
+                need(anchor_keys == sorted(anchor_keys), "node_key_order")
+                need(provenance_order == sorted(provenance_order), "provenance_identity_order")
+                need(relation_order == sorted(relation_order), "relation_identity_order")
+                previous_phase = -1
+                anchor_keys, provenance_order, relation_order = [], [], []
+                previous_group = group_index
             tag, fields_ = operation["tag"], operation["fields"]
             phase = operation_phase(operation)
             need(phase >= previous_phase, "operation_order")
@@ -569,14 +586,14 @@ def validate_plan_order(plan):
                 if ident_["kind"] == "relation":
                     relation_order.append(identity_order(ident_))
                 else:
-                    provenance_order.append(graph_key_order(ident_))
+                    provenance_order.append(identity_order(ident_))
             elif tag == 11:
                 need(identity(fields_["source"]) in known, "head_patch_source")
             if tag == 12:
                 need(index == len(ops) - 1 and batch["ordinal"] == 1, "root_receipt_last")
         need(anchor_keys == sorted(anchor_keys), "node_key_order")
         need(chunk_order == sorted(chunk_order), "chunk_ordinal_order")
-        need(provenance_order == sorted(provenance_order), "provenance_key_order")
+        need(provenance_order == sorted(provenance_order), "provenance_identity_order")
         need(relation_order == sorted(relation_order), "relation_identity_order")
     ordinals = [batch["ordinal"] for batch in plan["batches"]]
     need(ordinals == list(range(1, len(ordinals) + 1)), "batch_order")
@@ -590,28 +607,30 @@ def operation_phase(operation):
         return 0
     if tag == 1:
         return 1
-    if tag in (2, 3):
+    if tag == 2:
         return 2
-    if tag == 4:
+    if tag == 3:
         return 3
+    if tag == 4:
+        return 4
     if tag == 5:
         role = operation["fields"]["object"]["identity"]["kind"]
-        return 4 if role in ("revision", "entity") else 5
+        return 5 if role in ("revision", "entity") else 6
     if tag == 6:
-        return 6
-    if tag == 7:
         return 7
+    if tag == 7:
+        return 8
     if tag == 8:
-        return (8 if operation["fields"]["object"]["identity"]["kind"]
-                in ("has_revision", "has_chunk", "mention") else 9)
+        return (9 if operation["fields"]["object"]["identity"]["kind"]
+                in ("has_revision", "has_chunk", "mention") else 10)
     if tag == 9:
-        return 10
-    if tag == 10:
         return 11
-    if tag == 11:
+    if tag == 10:
         return 12
-    if tag == 12:
+    if tag == 11:
         return 13
+    if tag == 12:
+        return 14
     raise Invalid("operation_tag")
 
 
@@ -1181,6 +1200,7 @@ def stored_checks(document):
             "binding": binding, "tenant": "t" * 128, "source_id": "s" * 256,
             "aborted": root}},
     }
+    identities["batch_receipt"]["fields"]["root"] = identities["abort_receipt"]
     key_map = {role: graph_key(value) for role, value in identities.items()}
     maximal_data = {
         "source": dict(revision_key=key_map["revision"], revision_digest="00" * 32,
@@ -1222,6 +1242,7 @@ def stored_checks(document):
              "all-role-C9-capacity:" + role)
         physical_sizes[role] = (len(properties), byte_count)
     need(physical_sizes["mention"] == (19, 36258), "max-mention-C9-projected")
+    need(physical_sizes["batch_receipt"] == (4, 2076), "max-batch-abort-root")
     need(len(physical_vector(vector_data)["metadata"]) == 5,
          "max-vector-metadata-fields")
     vector_metadata_bytes = metadata_bytes(physical_vector(vector_data)["metadata"])
@@ -1455,9 +1476,7 @@ def invariants(document):
                 (has_revision, {}), (has_chunk, {}),
                 (mention, expand(templates["mention_projection_data"], templates)),
                 (relation, expand(templates["relation_projection_data"], templates))]]
-    edge_ops.sort(key=lambda op: (1, identity_order(op["fields"]["object"]["identity"]))
-                  if op["fields"]["object"]["identity"]["kind"] == "relation"
-                  else (0, graph_key_order(op["fields"]["object"]["identity"])))
+    edge_ops.sort(key=lambda op: identity_order(op["fields"]["object"]["identity"]))
     ordered = expand(templates["plan"], templates)
     ordered["batches"] = [dict(root=expand(templates["receipt"], templates),
                                ordinal=1, groups=[dict(ordinal=0, operations=[
@@ -1576,6 +1595,12 @@ def verify(document):
                           vector=actual["vector"].hex())
             need(actual == vector["expected"], "vector_record:" + vector["name"])
             continue
+        if vector["category"] == "plan_order":
+            named("plan", vector["input"])
+            actual = [[[op["tag"] for op in group["operations"]]
+                       for group in batch["groups"]] for batch in vector["input"]["batches"]]
+            need(actual == vector["expected"], "plan_order:" + vector["name"])
+            continue
         actual = vector_bytes(vector)
         expected = expected_bytes(vector["hex"], document["atoms"])
         need(actual == expected, "vector:" + vector["name"])
@@ -1605,7 +1630,7 @@ def verify(document):
             need(hashlib.sha256(actual).hexdigest() == vector["sha256"],
                  "hash:" + vector["name"])
         if "framed_sha256" in vector:
-            need(framed_hash("vlite.g7.v1." + vector["type"], actual).hex()
+            need(digest_record(vector["type"], vector["input"])
                  == vector["framed_sha256"], "framed-hash:" + vector["name"])
     for template in document["negatives"]:
         vector = expand(template, document["templates"])
@@ -1696,6 +1721,94 @@ def self_test(document):
         verify(document)
         stored_checks(document)
         invariants(document)
+
+    def omit_check(*reasons):
+        return lambda old: lambda condition, reason: (
+            None if reason in reasons else old(condition, reason))
+
+    def batch_global_phases(old):
+        def mutated(plan):
+            flattened = copy.deepcopy(plan)
+            for batch in flattened["batches"]:
+                batch["groups"] = [{"ordinal": 0, "operations": [
+                    op for group in batch["groups"] for op in group["operations"]]}]
+            return old(flattened)
+        return mutated
+
+    targeted = [
+        ("provenance-graph-key", "plan-provenance-order", "identity_order",
+         lambda old: lambda value: graph_key_order(value)
+         if value["kind"] in ("has_revision", "has_chunk", "mention") else old(value)),
+        ("provenance-unchecked", "plan-provenance-reversed", "need",
+         omit_check("provenance_identity_order")),
+        ("batch-global-phases", "plan-two-chunk-groups", "validate_plan_order",
+         batch_global_phases),
+        ("head-create-later-batch", "plan-head-create-batch-two", "need",
+         omit_check("batch_guard_first", "head_create_first")),
+        ("descending-chunks", "plan-chunk-ordinals-descending", "need",
+         omit_check("chunk_ordinal_order")),
+        ("descending-accepted", "accepted-chunks-descending", "need",
+         omit_check("accepted_chunk_order")),
+        ("reversed-relations", "plan-relations-reversed", "need",
+         omit_check("relation_identity_order")),
+        ("attach-put-same-phase", "plan-attach-before-put", "operation_phase",
+         lambda old: lambda op: 7 if op["tag"] == 7 else old(op)),
+        ("delete-detach-same-phase", "plan-delete-before-detach", "operation_phase",
+         lambda old: lambda op: 2 if op["tag"] == 3 else old(op)),
+        ("request-content-unchecked", "request-content-digest-mismatch", "need",
+         omit_check("request_content_digest")),
+        ("binding-generation-unchecked", "request-binding-generation-mismatch", "need",
+         omit_check("binding_generation")),
+        ("graph-entry-collection", "graph-entry-with-collection", "need",
+         omit_check("entry_graph_fields")),
+        ("empty-chunk", "chunk-empty-span", "need", omit_check("chunk_span")),
+        ("confidence-over-one", "observation-confidence-above-one", "need",
+         omit_check("confidence")),
+        ("kind-64", "entity-kind-64", "need", omit_check("entity_identity")),
+        ("literal-plan-slot", "plan-digest-literal-slot", "need",
+         omit_check("plan_slot_kind")),
+        ("absent-head-patch", "head-patch-absent", "need",
+         omit_check("head_patch_expected")),
+        ("casefolded-reserved-label", "extractor-label-uppercase-latest",
+         "extractor_label", lambda old: lambda value: old(value)
+         and value.lower() not in ("latest", "default")),
+        ("surface-strict-4096", "projection-mention-surface-4096", "readable_projection",
+         lambda old: lambda ident_, data: {
+             key: value for key, value in old(ident_, data).items()
+             if key != "surface" or len(text(value)) < 4096}),
+        ("f32-negative-underflow", "float32-underflow-positive-zero", "encode",
+         lambda old: lambda kind, value, masked=False: struct.pack("<f", value)
+         if kind == "f32" else old(kind, value, masked)),
+        ("receipt-extra-projection", "projection-receipt-none", "readable_projection",
+         lambda old: lambda ident_, data: dict(old(ident_, data), outcome=data["outcome"])
+         if ident_["kind"] == "receipt" else old(ident_, data)),
+    ]
+    for field in ("extractor-alias", "embedder-alias", "model-version"):
+        targeted.append((field + "-unpinned", field + "-latest", "need",
+                         omit_check("pipeline_label")))
+    for record_name in ("pipeline", "request", "batch"):
+        targeted.append(("framed-" + record_name, record_name, "framed_hash",
+                         lambda old: lambda domain, payload: old(domain, payload + b"\0")))
+    for label, vector_name, name, replacement in targeted:
+        selected = dict(document, vectors=[], negatives=[])
+        for category in ("vectors", "negatives"):
+            selected[category] = [row for row in document[category]
+                                  if row["name"] == vector_name]
+        need(len(selected["vectors"]) + len(selected["negatives"]) == 1,
+             "mutant_vector:" + vector_name)
+        verify(selected)
+        original = globals()[name]
+        globals()[name] = replacement(original)
+        try:
+            try:
+                verify(selected)
+            except Invalid as error:
+                killed.append((label, vector_name + ":" + str(error)))
+            else:
+                raise Invalid("surviving_mutant:" + label)
+        finally:
+            globals()[name] = original
+        verify(selected)
 
     need(hashlib.sha256(Path(__file__).read_bytes()).hexdigest() == before,
          "source-restore")
