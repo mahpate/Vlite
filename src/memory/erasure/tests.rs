@@ -1455,6 +1455,31 @@ fn explicit_precedence_probes_hold() {
             &collision,
             "DigestCollision",
         ),
+        (
+            "provision-tuple-collision-before-barrier",
+            "provision_scope",
+            &collision,
+            "DigestCollision",
+        ),
+        // An orphan job never lets provision recreate its scope.
+        (
+            "provision-missing-scope-under-barrier",
+            "provision_scope",
+            &missing,
+            "InvalidBundle",
+        ),
+        (
+            "summary-status-missing-scope-before-barrier",
+            "summary_status",
+            &missing,
+            "InvalidScope",
+        ),
+        (
+            "summary-status-tuple-collision-before-barrier",
+            "summary_status",
+            &collision,
+            "DigestCollision",
+        ),
     ] {
         run(
             name,
@@ -1510,7 +1535,7 @@ fn explicit_precedence_probes_hold() {
         );
     }
     if only.is_none() {
-        assert_eq!(count, 34);
+        assert_eq!(count, 38);
         // Without corruption the expired valid receipt still keeps the job.
         run_case(
             &json!({"name": "expired-valid", "steps": [
