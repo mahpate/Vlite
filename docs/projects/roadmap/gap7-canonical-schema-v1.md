@@ -80,7 +80,6 @@ edge, never EnsureEdge or UniqueTriple.
 | 12 | ownership shard | `vlite.g7.v1.ownership-shard` | `own` |
 | 13 | delete root receipt | `vlite.g7.v1.delete-receipt` | `del` |
 | 14 | abort root receipt | `vlite.g7.v1.abort-receipt` | `abt` |
-| 15 | vector allocation identity, not a graph node | `vlite.g7.v1.vector` | none |
 
 Additional non-key domains: `vlite.g7.v1.pipeline`, `vlite.g7.v1.request`,
 `vlite.g7.v1.plan`, `vlite.g7.v1.batch`, `vlite.g7.v1.delete-action`,
@@ -162,8 +161,8 @@ Absent expiry/TTL is mandatory, including on vector records.
 | chunk_data | S(source_key), S(revision_key), U32(ordinal), U32(start), U32(end), D(chunk_digest), D(pipeline) |
 | entity_data | empty; immutable kind/normalized key live in full identity |
 | link_data | empty; directed endpoints live in full identity |
-| mention_data | S(source_key), S(revision_key), S(chunk_key), S(surface), Opt(F64 confidence), D(extractor_version), Attrs |
-| relation_data | S(source_key), S(revision_key), S(chunk_key), Opt(F64 confidence), D(extractor_version) |
+| mention_data | S(source_key), S(revision_key), S(chunk_key), S(surface), Opt(F64 confidence), S(extractor_version label), Attrs |
+| relation_data | S(source_key), S(revision_key), S(chunk_key), Opt(F64 confidence), S(extractor_version label) |
 | receipt_data | D(request_digest), DigestSlot(plan), U32(batch_count), S(revision_key), U8(outcome), U32(chunks), U32(entities), U32(relations), U32(mentions) |
 | batch_data | DigestSlot(batch), Bool(final), U32(created_anchors), U32(reused_anchors), U32(result_shards), U32(ownership_shards) |
 | vector_data | S(tenant), S(source_key), S(revision_key), S(chunk_key), B(exact text), List(F32 vector bits) |
@@ -175,13 +174,13 @@ receipt_revision remain derived exactly as contract section 3 says. Outcome tags
 for no resulting revision, revision_key is the empty string, counts are planned
 cleanup counts, and the outcome disambiguates it. No change to public result shape.
 
-Extractor version is proposed as an opaque, provisioned **32-byte immutable
-version token**, not an arbitrarily long display label and not an inferred hash
-of an unspecified registry encoding. The pipeline and evidence carry the identical
-token. Model-version/alias strings occur in the bounded prepared pipeline, not in
-stored evidence. This choice needs explicit ratification: an unbounded textual
-extractor version cannot always fit a C9 evidence object. Changing the version
-token requires a new canonical pipeline/version; never truncate a version string.
+`extractor_version` is a label, not an opaque token: 1..=256 ASCII bytes matching
+`[A-Za-z0-9._-]+`, except the reserved values `latest` and `default`. Pipeline
+configuration, extraction observations, mention/relation evidence and readable
+projections carry the same exact label. This follows the Gap 8 serving-contract
+registry. The binding's `generation` remains an opaque D32 supplied by the
+provisioning API; ingestion does not interpret it, and a smaller counter may be
+zero-extended by that API. Reprovisioning still requires a different generation.
 
 Exactly one node label is used: source=`G7Source`, revision=`G7Revision`,
 chunk=`G7Chunk`, entity=`G7Entity`, receipt=`G7Receipt`,
@@ -200,14 +199,29 @@ Physical C9 properties for every non-shard graph object:
 * `d00`, `d01`, ...: canonical padded RFC 4648 base64 fragments of stored data.
 * `source_key`, `revision_key`, `chunk_key`: String, **only** when present and
   non-absent in the data schema. Copy exactly and check against decoded data.
+* Readable projections are additional native C9 scalar properties, derived
+  canonically from the identity/data and never included in either. Names are
+  lower_snake ASCII and may not collide with `g7_*`, `iNN`, `dNN`, or the three
+  key-copy names. Source projects `status`, optional `revision_key`, and
+  `last_batch`; revision projects optional `uri`, `text_length`, `chunk_count`,
+  and lowercase-hex `content_digest`; chunk projects `ordinal`, `start_byte`,
+  `end_byte`, and lowercase-hex `chunk_digest`; entity projects `entity_kind`
+  and `normalized_key`; mention/relation project `span_start`, `span_end`,
+  optional `confidence`, and `extractor_version`; mention additionally projects
+  `surface` only when it is at most 4,096 UTF-8 bytes. Attributes remain only in
+  canonical identity/data fragments. These redundant scalars are required for
+  ordinary graph reads and dashboard use, compared bit-identically on replay,
+  and any missing, extra, or mismatching projection is an evidence conflict.
 
-Split each binary value at 3,072 raw bytes; independently base64-encode each
-fragment to at most 4,096 ASCII bytes. Always emit at least `i00` and `d00`, even
-for an empty logical payload. Require contiguous two-digit decimal suffixes,
-maximal nonfinal fragments, canonical padding, no whitespace and exact reencoding.
-Reject >99 fragments or any C9 field/byte limit; never silently drop a field.
-Concatenating decoded fragments recovers the complete original bytes, so a
-16,384-byte surface does not violate the 4,096-byte single-string cap.
+Split each binary value at 3,072 raw bytes; independently encode each fragment
+with RFC 4648 section 4 standard Base64 (`A-Z a-z 0-9 + /`, `=` padding, no line
+breaks), producing at most 4,096 ASCII bytes. Always emit at least `i00` and
+`d00`, even for empty bytes. An exact multiple of 3,072 emits no empty final
+fragment. Require contiguous two-digit decimal suffixes, maximal nonfinal
+fragments, canonical padding and exact re-encoding. Reject any C9 field/byte
+limit; never silently drop a field. Concatenating decoded fragments recovers the
+complete original bytes, so a long surface in `dNN` does not violate the
+4,096-byte single-string cap.
 
 This representation deliberately stores Null and Unsigned inside tagged Attrs:
 C9 PropertyValue has no Null or unsigned-u64 variant. No conversion to signed,
@@ -223,22 +237,68 @@ fit, report it instead of truncating; this appendix is not permission to lower
 the approved bounds. `src/property_graph/engine/model.rs` and `limits.rs` were
 read read-only; no schema/codec/export change is proposed there.
 
-For the String/Integer properties used here, canonical C9 metadata is U32(field
-count), then fields sorted by unsigned UTF-8 name bytes: U16(name byte length),
-name bytes, U8(type), value. Type 1=String with S(value); type 2=Integer with I64.
-No native Null, unsigned, float, boolean or geographic field is introduced by this
-schema. This is the existing metadata encoding, not the frozen Attr encoding.
-The metadata length includes its field count but not an outer engine length.
+Canonical C9 metadata is U32(field count), then fields sorted by unsigned UTF-8
+name bytes: U16(name byte length), name bytes, U8(type), value. Type 1=String
+with S(value); type 2=Integer with I64; type 3=finite Float with canonical F64
+positive-zero bits. No native Null, unsigned, boolean or geographic field is
+introduced by this schema. This is the existing metadata encoding, not the frozen
+Attr encoding. The metadata length includes its field count but not an outer
+engine length.
 
-Capacity witnesses use the largest 63/63-byte names, tenant128, source256,
-kind63/key256, surface16,384, Attrs inner8,192, confidence present and fixed32
-extractor version. Source/revision/chunk/entity identities are respectively
-692/762/780/759 bytes. The mention identity is 1,557 and mention data 24,851;
-its complete physical map is **35,613 bytes / 15 fields**. A relation identity is
-11,349 bytes; its smaller data/map also fits. Other nonrecursive stored roles
-are smaller. These witnesses do not authorize a new source/surface limit.
-Abort targets must be the existing ingestion/delete job root, not recursively
-nested newly invented abort requests; ongoing abort resumes its existing root.
+Capacity witnesses use the largest 63/63-byte binding names, tenant128,
+source256, kind63/key256, URI2048, surface16,384, Attrs inner8,192, confidence
+present and extractor label256. Source/revision/chunk/entity identities are
+692/762/780/759 bytes. The maximum mention identity is 1,557 bytes; its data is
+25,079 bytes and its complete physical map is **36,258 bytes / 19 fields**,
+including readable projections. The maximum relation identity is 11,349 bytes;
+its physical map is also below 65,536 bytes and 64 fields. The reference checks
+the field/byte ceilings for every graph object role. These witnesses do not
+authorize a new source/surface limit. Abort targets must be the existing
+ingestion/delete job root, not recursively nested newly invented abort requests;
+ongoing abort resumes its existing root.
+
+The conservative per-role C9 witness (maximum allowed identity/data input for
+that role, including projections and key-copy fields) is:
+
+| Stored role | Fields | Metadata bytes |
+|---|---:|---:|
+| source | 7 | 1,408 |
+| revision | 9 | 6,299 |
+| chunk | 10 | 1,719 |
+| entity | 6 | 1,430 |
+| HAS_REVISION | 4 | 2,011 |
+| HAS_CHUNK | 4 | 2,131 |
+| MENTIONS | 19 | 36,258 |
+| extracted relation | 14 | 16,484 |
+| ingestion root receipt | 5 | 1,370 |
+| batch receipt | 4 | 1,148 |
+| delete root receipt | 5 | 1,135 |
+| abort root receipt | 5 | 2,135 |
+| result/ownership shard | 1 (`data`) | at most 4,111 |
+| vector record metadata | 5 | 425 |
+
+Every listed map remains within 64 properties and 65,536 metadata bytes.
+U64 record IDs/revisions and expected revisions are preserved only in canonical
+`dNN` or shard `data` bytes, or in native engine operation fields where the
+engine requires them; they are never narrowed into a C9 property. U32 byte
+offsets/spans, counts and ordinals may appear as native Integer projections,
+whose nonnegative U32 range fits PropertyValue::Integer(i64); canonical bytes
+remain U32. The 32-byte binding generation stays opaque in identities and
+pipeline bytes, never an Integer. Deadlines are execution-only and never stored
+in a property or canonical identity. Optional URI, confidence, head revision
+fields and receipt references use explicit Opt presence in canonical bytes;
+their optional readable properties are absent when the value is absent, never
+a sentinel or C9 Null.
+
+The physical vector record has metadata `g7_v`=Integer(1), `tenant`,
+`source_key`, `revision_key`, `chunk_key` as Strings; its payload is the exact
+chunk UTF-8 bytes, its vector is the concatenation of canonical little-endian
+F32 component bits, and expiry is absent. The record ID is the planned U64 in
+the vector operation, not metadata. Vector bytes are normalized at F32
+conversion (including negative zero to positive zero); the plan hashes the same
+normalized F32 bits used by the physical vector mutation. The canonical
+`vector_data` record is the source for all those fields, not an additional
+persisted metadata blob.
 
 ## 5. Result-ID and ownership shards
 
@@ -271,7 +331,7 @@ Refs and kinds must agree with the named operation/object. Duplicate entries
 are invalid, not silently coalesced.
 
 Entry order is ascending `(producing op ordinal, result ordinal, action,
-object_kind, object_key UTF-8 bytes)` from the frozen ordered manifest. For objects
+object_kind, object_key unsigned UTF-8 bytes)` from the frozen ordered manifest. For objects
 that already exist, use their captured manifest ordinal as the producing ordinal;
 IdRef's literal id is the checked captured value. Never sort by newly allocated
 numeric IDs or completion order. Removal/cascade semantics remain section 4's.
@@ -281,6 +341,18 @@ Each v1 object-producing operation returns one object, result ordinal zero;
 guards have no result. Removed/captured rows use the corresponding removal
 operation's ordinal and captured literal id. RevisionRef(kind=2) names the
 previous batch receipt's graph revision; its result ordinal must be zero.
+
+Identity comparison for captured-state ordering and identity-ordered edge lists
+is semantic and field-wise, not a bytewise comparison of the little-endian
+identity encoding. Compare the registry tag as U8; then compare fields in schema
+order. Compare U8/U16/U32/U64 values numerically, text by unsigned UTF-8 bytes,
+digests and opaque byte strings lexicographically, attributes by their frozen
+canonical bytes, optional presence (absent before present) then value, and nested
+identities recursively. This keeps ordinal 1 before ordinal 256. Where section 4
+requires nodes sorted by graph key, compare the ASCII key bytes. Where it requires
+relation/provenance edges sorted by canonical identity, use the semantic
+field-wise identity comparator above. Operation order itself remains section 4's
+frozen order and is never replaced by a global key sort.
 
 For a 71-byte receipt key, the binary header through count is:
 1+1+(4+71)+4+4+4+4 = **93 bytes**. Base64 capacity 4,096 ASCII bytes means
@@ -372,10 +444,10 @@ The following named records all begin with 01. Field order is normative:
 | policy | U32(source_bytes), U32(chunks), U32(entities), U32(relations), U32(mentions), U32(chunk_entities), U32(chunk_relations), U32(decoded_bytes), U32(attribute_bytes), U32(attribute_fields), U32(attribute_string_bytes), U32(frames), U32(operations), U64(prepared_bytes) |
 | entity_rule | S(rule_id), S(literal), S(kind), S(key) |
 | relation_rule | S(rule_id), S(predicate), S(subject_kind), S(object_kind) |
-| pipeline | U8(chunker: FixedUtf8V1=0, ParagraphV1=1), U32(chunk_bytes), U32(overlap), S(extractor_alias), D(extractor_version), List(entity_rule), List(relation_rule), S(normalization), S(embedder_alias), S(model_version), U32(dimensions), D(binding_generation), U32(schema_version), policy |
+| pipeline | U8(chunker: FixedUtf8V1=0, ParagraphV1=1), U32(chunk_bytes), U32(overlap), S(extractor_alias), S(extractor_version label), List(entity_rule), List(relation_rule), S(normalization), S(embedder_alias), S(model_version), U32(dimensions), D(binding_generation), U32(schema_version), policy |
 | request | I(source), D(content_digest), Opt(S uri), pipeline, RevisionRef(expected_source), U8(mode: AtomicDocument=0, Incremental=1), B(original_text) |
-| entity_observation | U32(local_id), S(kind), S(key), S(surface), U32(start), U32(end), Attrs, Opt(F64 confidence) |
-| relation_observation | U32(subject_local_id), S(predicate), U32(object_local_id), U32(start), U32(end), Attrs, Opt(F64 confidence) |
+| entity_observation | U32(local_id), S(kind), S(key), S(surface), U32(chunk_relative_start), U32(chunk_relative_end), Attrs, Opt(F64 confidence) |
+| relation_observation | U32(subject_local_id), S(predicate), U32(object_local_id), U32(chunk_relative_start), U32(chunk_relative_end), Attrs, Opt(F64 confidence) |
 | accepted_chunk | I(chunk), B(exact_text), List(entity_observation), List(relation_observation), List(F32 accepted_vector) |
 | captured | I(any object), RevisionRef(expected), D(canonical stored-property digest) |
 | group | U32(ordinal), List(Operation) |
@@ -389,10 +461,18 @@ Policy values are the contract ceilings or operator-lowered values, never widene
 Pipeline rule lists sort by unsigned rule-ID UTF-8 bytes with duplicates rejected.
 Normalization must be literal `ascii-key-v1`, schema_version=1. Dimensions are
 positive; the embedder is explicit. `pipeline_version=H(pipeline domain, pipeline)`.
+This is the exact framed-hash refinement of the contract's "SHA-256 of the
+canonical configuration" wording. The head's `revision_digest` is the current
+revision's **content digest**, not the digest of its revision key; `pipeline`
+stores its pipeline-version digest. Observation keys are ascii-key-v1 normalized,
+while observation surfaces preserve exact extracted text. Entity/relation
+observation spans are chunk-relative; graph mention/relation identity spans are
+source offsets.
 Content digest must equal SHA256(original_text). Request expected_source permits
 Absent or captured Revision, not a previous-batch symbolic value.
 
-Captured rows sort by full identity bytes, with duplicates rejected. Accepted
+Captured rows sort by the semantic identity comparator in section 5, with
+duplicates rejected. Accepted
 chunks ascend chunk ordinal; observations use preparation order, not regenerated
 model output. Batches ascend from one, groups preserve frozen dependency order
 and ordinal, operations preserve section 4's order. No sorting rewrites operation
@@ -403,11 +483,14 @@ envelope**, rejected if unexpected at execution; they are not fields accepted by
 these canonical records. Unknown fields in a canonical record are errors.
 
 The per-observation 8 KiB measurement is the frozen attributes_key stream length,
-excluding the new four-byte outer Attrs length. The 1 MiB decoded-output
-measurement is 01 || List(entity_observation) || List(relation_observation),
-with nested records framed as above, before deduplication except the contract's
-post-dedup relation-output cap. This newly selects a measurement representation;
-the unchanged preparation oracle still does not claim either ceiling.
+excluding the new four-byte outer Attrs length; this schema codec checks that
+canonical representation limit. Rust admission must still apply the contract
+limit before accepting extractor output. The 1 MiB decoded-output measurement is
+01 || List(entity_observation) || List(relation_observation), with nested records
+framed as above, before deduplication except the contract's post-dedup
+relation-output cap. The canonical codec does not enforce that aggregate
+admission ceiling; the Rust core must. The separate preparation oracle does not
+claim coverage of either ceiling.
 The byte codec checks representation, not every preparation admission invariant:
 for example, its empty Request vector exercises syntax, not an accepted empty
 source. Cross-field evidence, bounds and operation-order admission remain the
@@ -428,16 +511,20 @@ Operation is a U8 tag followed by exactly these fields (no separate version):
 | 8 | create provenance/mention/relation edge | Object |
 | 9 | create shard | Shard |
 | 10 | create batch receipt | Object |
-| 11 | head progress | I(source), RevisionRef, head_data |
+| 11 | guarded patch of an existing head | I(source), RevisionRef, head_data |
 | 12 | create root receipt, first frame last | Object |
+| 13 | create a new source head, first operation of its first frame | I(source), head_data |
 
 Object = I(role), B(data record for that role). Kinds select the data schema
 from section 4, not a caller-controlled opaque blob. Result/ownership shard
 operations use Shard's channel to choose the keyed identity.
 No expiry, EnsureEdge, unguarded overwrite or raw provider operation exists.
-Source creation is represented by tag 11 with Absent; execution uses
-UpsertNode(Expected::Absent) or equivalent guarded creation, never a live-key
-CreateNode retry. Existing heads alone use guarded PatchNode.
+For a new source, tag 13 is a distinct operation and must be first in the first
+frame. It creates the head in its final state for that frame using
+UpsertNode(Expected::Absent); it is not a tag-11 patch and cannot be reordered.
+Every edge create follows creation or capture of each endpoint in the same plan.
+Later frames update an existing head only through tag 11 and guarded PatchNode.
+Keyed CreateNode is not a successful retry path.
 Shared entity tag 5 is a **possible** create, preflight charged as such; reuse
 omits only its executed form, not its canonical planned operation.
 
@@ -466,6 +553,31 @@ planned pessimistic counts. Replay validates the stored planned digest against
 that retained record, then validates actual IDs/counts against committed shards.
 It must not hash runtime-filled shards or receipt counts as a new planned batch.
 Fixed-width outcomes/counts and refs keep projected capacity unchanged.
+
+### Reference enforcement boundary
+
+The Python reference rejects malformed canonical bytes/values for versions,
+tags, widths, presence, map order, UTF-8, float finiteness/zero, slot kinds,
+object-role/tag combinations, entry-kind/presence combinations, identity
+duplicates/order, rule sort/duplicates, ascii-key-v1 normalization, dimensions,
+label syntax, identifier syntax, request symbolic-reference kinds, abort-of-
+abort, source-head first-operation order, edge endpoint order, projection
+mismatch, shard order/capacity, and frame limits. Named negative vectors and
+self-test checks pin these byte-level constraints. It does not claim complete
+admission validation for cross-record semantics, authorization, live graph
+state, plan policy ceilings, or execution outcomes.
+
+**Admission-only; the future Rust core must enforce these contract checks:**
+preparation source/URI/decoded-text limits; line and chunk-boundary semantics;
+observation spans against the source and exact extraction text; accepted
+observation/entity/relation caps and dedup/conflict behavior; request expected
+revision against live state; captured state against the graph; endpoint source,
+revision and ownership consistency beyond endpoint existence; operation
+semantics, removal authorization and exactly-once replay; relation tuple/predicate
+rules; input-level enforcement of the per-observation attribute ceiling and the
+1 MiB decoded-output ceiling; and provider dimension/finite-output admission.
+The codec checks the canonical Attrs byte representation only. The independent
+preparation oracle's scope and limitations remain unchanged.
 
 ## 7. Frame-size consequences
 
@@ -497,6 +609,16 @@ admission; anchor reuse can reduce the actual list only. Preserve C7's explicit
 distinction for internal reclaim versus user-operation counting; reserve its bytes.
 Do not treat schema-operation tag count as an engine-entry count.
 
+Each tag-6 vector put lowers to one `VectorMutation` and consumes one batch
+entry. Its metadata is exactly the five-field vector record metadata specified
+in section 4; the body includes the existing engine vector-entry encoding of
+record ID, expiry-absent marker, exact UTF-8 payload length/bytes, dimensions and
+the normalized F32 bytes. Preflight measures the existing encoder output, not
+the canonical `vector_data` record size. Its metadata contributes
+`metadata_bytes({g7_v: 1, tenant, source_key, revision_key, chunk_key})` to the
+engine record's measured bytes; the exact text and F32 bytes contribute to the
+existing vector entry. No canonical-only vector metadata is added to that entry.
+
 Outer plaintext/encrypted envelopes add 52/80 bytes, preserving **66/94** for
 body14 and **16,777,268/16,777,296** for body16,777,216. Body+1 rejects.
 The reference qualifies this arithmetic against hand numbers; it neither runs nor
@@ -522,14 +644,23 @@ All choices are proposed; none alters an approved Gap7-* decision.
 | Stored U64 record IDs/revisions | signed narrowing; text | tagged U64 bytes inside base64 data/shard strings | Full range preserved; no unsigned PropertyValue needed |
 | Stored spans/counts | bounded i64; text | U32 bytes inside the same data strings | Checked U32; engine Integer used only for g7_v=1 |
 | Stored generation | numeric; UUID text; bytes | opaque D, base64 inside full identity | No lossy integer interpretation |
-| Stored extractor version | arbitrary text; provisioned fixed token | opaque D shared with pipeline/evidence | Needs ratification; no unbounded evidence property or invented string truncation |
 | Encoded attribute / decoded-output measure | JSON; canonical bytes | frozen inner attributes_key / versioned observation lists | New explicit accounting, not retroactive preparation-oracle coverage |
 | Captured properties/policy hashes | unframed; shared domain | distinct properties/policy domains with exact metadata/Policy bytes | No undefined hash inputs remain |
 | Runtime anchor outcomes | mutate the plan; execution projection | planned pessimistic counts immutable, committed counters/shards projected | Planned digest must never be recomputed from actual outcomes |
-| Stored optional URI/job/revision/pipeline/confidence | omitted property; sentinel; presence tag | Opt with explicit 0/1 inside canonical data strings | Absent differs from empty; no C9 Null |
+| Stored optional URI/job/revision/pipeline/confidence | omitted property; sentinel; presence tag | Opt with explicit 0/1 inside canonical data strings; optional readable properties are absent when their source value is absent | Absent differs from empty; no C9 Null |
 | Cleanup receipt with no resulting revision | Opt; sentinel | empty revision_key only for Deleted/Aborted outcome | Explicit sentinel cannot be a valid graph key; head fields still use Opt |
 | Deadlines | persist; execution-only | no stored deadline/TTL; execution envelope only | Existing explicit-delete policy unchanged |
-| Edge creation/comparison | keyless; keyed | all four edge roles keyed; every physical property participates | Bit-identical equality, normalize all float zero bits first |
+| Edge creation/comparison | keyless; keyed | all four edge roles keyed; every physical property participates | Bit-identical equality after canonical F32/F64 positive-zero normalization |
+| New source head order | head progress reused; distinct creation | tag 13 creates the absent-guard head as operation zero in the first frame; tag 11 only patches later | One clarification will be added to the contract at ratification; no approved decision changes |
+| Physical vector shape | vector envelope; graph-like metadata | Integer version + four String metadata fields, exact chunk payload, normalized F32 bytes, no expiry | Canonical `vector_data` remains the preflight/digest source |
+| Readable projections | fragments only; redundant scalars | required canonical-derived scalar properties, compared on replay | v1 required for graph reads/dashboard; mismatch is evidence conflict |
+| Extractor version | opaque D32; arbitrary text; bounded label | `S(label)`, 1..256 ASCII from `[A-Za-z0-9._-]+`, excluding `latest`/`default` | Uses serving-contract registry; all occurrences identical |
+| Binding generation | integer; UUID; opaque bytes | opaque D32 supplied by provisioning API; zero-extension permitted there | Ingestion does not interpret it |
+| Collection ordering | encoded identity bytes; semantic field order | typed semantic comparator; numeric fields numeric, strings unsigned UTF-8 | Avoids little-endian ordering inversion |
+| Pipeline version | raw configuration hash; framed domain hash | `H(pipeline domain, pipeline)` | Exact refinement of contract's canonical-configuration SHA-256 wording |
+| Revision head digest | revision-key digest; content digest | current revision content digest | Does not duplicate the derived key hash |
+| Span coordinates | chunk-relative everywhere; source offsets everywhere | accepted observations chunk-relative; graph edge identity spans source offsets | Bridges extraction-local spans to document evidence |
+| New key tokens/relation-rule kinds | inferred from existing names; explicit registry | explicit v1 token registry and identifier validation | New private schema names; no public endpoint or operation decision |
 | Node retries | CreateNode retry; guarded create | Absent guard for new keyed nodes; only head can patch | GraphKeyExists is not successful reuse |
 
 ## 9. Deliberately not frozen and resumption rule
@@ -549,13 +680,29 @@ goldens unchanged. No implementation may cherry-pick this draft as authorization
 * U16(258) = `0201`; U32(1) = `01000000`; U64(1) = `0100000000000000`.
 * I64(-1) = `ffffffffffffffff`; Bool(true) = `01`.
 * S("g") = `0100000067`; S("") = `00000000`; Opt(S("")) = `0100000000`.
-* F64(+0), after canonicalizing -0, = `0000000000000000`.
+* F32(1.0) = `0000803f`; F32(-0.0), after canonicalizing, = `00000000`.
+  F64(+0), after canonicalizing -0, = `0000000000000000`.
+* D(32 zero bytes) is exactly 32 `00` bytes, with no length prefix.
+* List(U8)[] = `00000000`; List(U8)[1,2] = `020000000102`; Map(U8){} =
+  `00000000`.
 * Attr Null = `00`; Attr Unsigned(1) = `030100000000000000`.
 * attributes_key({"a": Null}) = `010000006100`; Attrs of that map =
   `06000000010000006100`, preserving the existing no-count inner representation.
+* Base64 of raw byte `61` is `YQ==`. A 3,072-byte fragment encodes to exactly
+  4,096 Base64 characters; 3,073 bytes split into a full fragment and one byte,
+  with no trailing empty fragment.
+* Symbolic IdRef(kind=1, operation=3, result=4) =
+  `010300000004000000`; previous-batch RevisionRef(kind=2, batch=3, result=4)
+  has the same bytes. Plan DigestSlot(kind=1, digest=32 `11` bytes) begins
+  `01 11...`; its masked form begins `01 00...`, preserving the kind tag.
 * H input for domain `"vlite.g7.v1.plan"` (16 ASCII bytes) and empty payload =
   `01 10000000 766c6974652e67372e76312e706c616e 00000000`.
   This frames a proposed domain; it is not a valid complete Plan record.
+* The fixture's source identity pins its exact `01 01 ...` bytes and literal
+  `g7_src_353371371de324dabc2e1a9f912cc12810c0606a5d23142253bb24fef8c9129e`
+  key. Other graph-key literals are pinned independently by role in
+  `schema-v1/vectors.json`; the implementation must not derive expected keys
+  from its own registry at test time.
 * A 71-byte receipt-key shard header occupies 93 bytes; 93+2,979=3,072 bytes
   gives 4,096 base64 characters. 3,073 raw bytes need 4,100 characters and fail.
 * A relation's 8,192-byte Attrs alone requires 8,196 bytes including B length,
