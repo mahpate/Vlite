@@ -1,0 +1,8 @@
+{
+  "method":"POST",
+  "headers":{
+    "authorization":"Bearer memory-cli-test-secret",
+    "content-type":"application/json",
+    "accept":"application/json"
+  }
+}

@@ -22,6 +22,7 @@ Keys and their sources:
   grpc:Rpc                       proto/vlite/v1/vlite.proto
   mcp:tool                       src/bin/vlite-mcp.rs and graph_mcp.rs / kv_mcp.rs
   cli:vlite-shell/command        KV commands in src/bin/tool_support/kv_mcp.rs
+  cli:vlite-memory-cli/verb      ROUTES in src/bin/vlite-memory-cli.rs
 
 Rust visibility follows the module tree: an item is public when it is declared
 `pub` in a module reachable through `pub mod` declarations, or re-exported
@@ -462,7 +463,14 @@ def mcp_keys(root: Path) -> set[str]:
 
 def cli_keys(root: Path) -> set[str]:
     kv = (root / "src/bin/tool_support/kv_mcp.rs").read_text(encoding="utf-8")
-    return {f"cli:vlite-shell/{name}" for name in re.findall(r'"(kv-[a-z]+)" => Some\(', kv)}
+    keys = {f"cli:vlite-shell/{name}" for name in re.findall(r'"(kv-[a-z]+)" => Some\(', kv)}
+    memory = (root / "src/bin/vlite-memory-cli.rs").read_text(encoding="utf-8")
+    routes = re.search(r"const ROUTES:.*?= &\[(.*?)\];", memory, re.S)
+    if not routes:
+        raise SystemExit("api_reference: missing memory CLI ROUTES")
+    keys.update(f"cli:vlite-memory-cli/{name}" for name in re.findall(
+        r'\("([a-z-]+)", "/[a-z/]+\"\)', routes.group(1)))
+    return keys
 
 
 # --------------------------------------------------------------------------- check

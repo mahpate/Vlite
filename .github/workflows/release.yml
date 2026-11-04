@@ -142,7 +142,7 @@ jobs:
                   bundle.write("target/release/vlite_ffi.dll.lib", "vlite_ffi.dll.lib")
               for name in ["vlite-server", "vlite-maintain", "vlite-bench", "vlite-smoke",
                            "vlite-shell", "vlite-import", "vlite-tune", "vlite-quality",
-                           "vlite-mcp", "vlite-graph-cli"]:
+                           "vlite-mcp", "vlite-graph-cli", "vlite-memory-cli"]:
                   bundle.write(pathlib.Path("target/release") / (name + suffix), name + suffix)
               for name in ["README.md", "LICENSE", "Cargo.toml", "Cargo.lock", "src/openapi.json",
                            "compose.yaml", "compose.tls.yaml", "deploy/Caddyfile", "deploy/dashboard.conf", "Dockerfile",
@@ -226,7 +226,7 @@ jobs:
           with zipfile.ZipFile(archive, "w", zipfile.ZIP_DEFLATED) as bundle:
               for name in ["vlite-server", "vlite-maintain", "vlite-bench", "vlite-smoke",
                            "vlite-shell", "vlite-import", "vlite-tune", "vlite-quality",
-                           "vlite-mcp", "vlite-graph-cli"]:
+                           "vlite-mcp", "vlite-graph-cli", "vlite-memory-cli"]:
                   bundle.write(pathlib.Path("target/release") / name, name)
               for name in ["README.md", "LICENSE", "Cargo.toml", "Cargo.lock", "src/openapi.json",
                            "src/openapi_graph.json", "proto/vlite/v1/vlite.proto"]:

@@ -1626,6 +1626,22 @@ searchManyF32(vectors: Float32Array[], k: number, options?: Scope &amp; { filter
         <tr><td><code class="sig" data-api="cli:vlite-shell/kv-list">kv-list REQUEST</code></td><td>Collection, namespace, optional prefix/after/limit; returns items and nullable next_after.</td><td>Read</td></tr>
       </tbody>
     </table>
+    <h3 id="cli-memory">Remote memory CLI</h3>
+    <p><code>vlite-memory-cli --url URL --binding NAME --token-env ENV VERB --request FILE|-</code> sends one authenticated POST to a provisioned memory binding. No database or tenant flags, retries, paging or job loops. Requests and responses are bounded to 8,388,608 bytes. Success prints one JSON line, including 202 pending; failures print <code>code: message</code> to stderr. Optional <code>--timeout-ms 1..5000</code> changes only HTTP timeout; reconcile ambiguous mutations by receipt. See the <a href="docs/TOOLS.html#remote-agent-memory">memory CLI guide</a>.</p>
+    <table class="api-table cols-3">
+      <thead><tr><th>Verb</th><th>REST suffix under /v1/memory/{binding}</th><th>Result</th></tr></thead>
+      <tbody>
+        <tr><td><code class="sig" data-api="cli:vlite-memory-cli/remember">remember</code></td><td>/remember</td><td>Mutation receipt and ordered outcomes</td></tr>
+        <tr><td><code class="sig" data-api="cli:vlite-memory-cli/recall">recall</code></td><td>/recall</td><td>Ranked memories and completeness metadata</td></tr>
+        <tr><td><code class="sig" data-api="cli:vlite-memory-cli/facts">facts</code></td><td>/facts/query</td><td>Retained fact segments</td></tr>
+        <tr><td><code class="sig" data-api="cli:vlite-memory-cli/correct-facts">correct-facts</code></td><td>/facts/correct</td><td>Atomic correction receipt</td></tr>
+        <tr><td><code class="sig" data-api="cli:vlite-memory-cli/consolidate">consolidate</code></td><td>/consolidate</td><td>Mutation receipt or dry-run plan</td></tr>
+        <tr><td><code class="sig" data-api="cli:vlite-memory-cli/forget">forget</code></td><td>/forget</td><td>Logical deletion, retention or pending erasure</td></tr>
+        <tr><td><code class="sig" data-api="cli:vlite-memory-cli/receipt">receipt</code></td><td>/receipts/lookup</td><td>Original replayed mutation result</td></tr>
+        <tr><td><code class="sig" data-api="cli:vlite-memory-cli/erasure">erasure</code></td><td>/erasures/get</td><td>Erasure status without polling</td></tr>
+        <tr><td><code class="sig" data-api="cli:vlite-memory-cli/resume-erasure">resume-erasure</code></td><td>/erasures/resume</td><td>One guarded chunk, possibly pending</td></tr>
+      </tbody>
+    </table>
   </main>
 </div>
 

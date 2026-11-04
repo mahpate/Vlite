@@ -123,6 +123,10 @@ required-features = ["tools"]
 name = "vlite-mcp"
 required-features = ["mcp"]
 
+[[bin]]
+name = "vlite-memory-cli"
+required-features = ["mcp-proxy"]
+
 [[test]]
 name = "mcp"
 required-features = ["mcp"]
