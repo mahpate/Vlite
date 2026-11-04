@@ -163,7 +163,7 @@ fn real_database_subset_adapter_uses_one_view_and_temporal_capability() {
     use crate::property_graph::temporal::{Activation, enable_temporal};
     use crate::{Database, Error, Metadata};
     let activation = Activation::on();
-    let dir = tempfile::tempdir_in(concat!(env!("CARGO_MANIFEST_DIR"), "/target")).unwrap();
+    let dir = tempfile::tempdir().unwrap();
     let source = dir.path().join("subset-source.vlite");
     let mut db = Database::create(&source, 2).unwrap();
     db.create_graph("g").unwrap();
@@ -232,6 +232,174 @@ fn real_database_subset_adapter_uses_one_view_and_temporal_capability() {
         error.error,
         GraphTextError::Read(Error::UnsupportedFeature(64))
     ));
+}
+
+#[test]
+fn adapter_captures_the_handle_clock_and_hides_expired_nodes() {
+    use crate::property_graph::subset::SubsetLimits;
+    use crate::{CreateOptions, Database, Expected, Metadata};
+    let mut db = Database::create_in_memory(2, CreateOptions::default()).unwrap();
+    db.create_graph("g").unwrap();
+    let expiry = u64::MAX / 2;
+    {
+        let mut graph = db.graph_mut("g").unwrap();
+        graph.create_node("expires", &[], &Metadata::new()).unwrap();
+        graph
+            .set_node_expiry("expires", Some(expiry), Expected::Any)
+            .unwrap();
+    }
+    let graph = db.graph("g").unwrap();
+    for (clock, expected_rows) in [(expiry - 1, 1), (expiry, 0), (expiry + 1, 0)] {
+        let captured = graph.with_clock(clock);
+        let result = captured
+            .read_subset("MATCH (n) RETURN n", &[], SubsetLimits::DEFAULT, None)
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            result.ttl_clock_ms,
+            captured.now(),
+            "adapter must capture the handle clock"
+        );
+        assert_eq!(result.rows.len(), expected_rows, "expiry uses captured C");
+    }
+}
+
+#[test]
+fn adapter_production_clock_enforces_a_real_deadline() {
+    use crate::property_graph::read::GraphTextError;
+    use crate::property_graph::subset::SubsetLimits;
+    use crate::{CreateOptions, Database, Error, Metadata, MetadataValue};
+    let mut db = Database::create_in_memory(2, CreateOptions::default()).unwrap();
+    db.create_graph("g").unwrap();
+    // A bounded owned projection keeps work pending beyond the one-ms deadline,
+    // without substituting a fake clock for the production adapter's source.
+    let properties: Metadata = (0..14)
+        .map(|field| {
+            (
+                format!("p{field}"),
+                MetadataValue::String("x".repeat(4_096)),
+            )
+        })
+        .collect();
+    {
+        let mut graph = db.graph_mut("g").unwrap();
+        for id in 0..512 {
+            graph
+                .create_node(&format!("n{id}"), &[], &properties)
+                .unwrap();
+        }
+    }
+    let graph = db.graph("g").unwrap();
+    let mut limits = SubsetLimits::DEFAULT;
+    limits.graph.deadline_ms = 1;
+    limits.max_returned_rows = 1_000;
+    limits.graph.max_output_nodes = 1_000;
+    limits.max_scratch_bytes = 128 * 1024 * 1024;
+    let error = match graph.read_subset("MATCH (n) RETURN n", &[], limits, None) {
+        Err(error) => error,
+        Ok(_) => panic!("real production clock did not enforce the deadline"),
+    };
+    assert!(
+        matches!(
+            error.error,
+            GraphTextError::Read(Error::InvalidQuery("subset deadline exceeded"))
+        ),
+        "real clock must stop the read, not another budget: {error:?}"
+    );
+}
+
+#[test]
+fn production_default_validity_instant_is_exactly_the_captured_clock() {
+    use crate::property_graph::subset::SubsetLimits;
+    use crate::property_graph::temporal::{Activation, enable_temporal};
+    use crate::{Database, Metadata};
+    let _activation = Activation::on();
+    let dir = tempfile::tempdir().unwrap();
+    let source = dir.path().join("default-time-source.vlite");
+    let mut db = Database::create(&source, 2).unwrap();
+    db.create_graph("g").unwrap();
+    db.graph_mut("g")
+        .unwrap()
+        .create_node("n", &[], &Metadata::new())
+        .unwrap();
+    db.close().unwrap();
+    let temporal = dir.path().join("default-time.vlite");
+    enable_temporal(&source, &temporal, None).unwrap();
+    let db = Database::open(temporal).unwrap();
+    for clock in [0, 100, i64::MAX as u64] {
+        let graph = db.graph("g").unwrap().with_clock(clock);
+        let result = graph
+            .read_subset("MATCH (n) RETURN n", &[], SubsetLimits::DEFAULT, None)
+            .unwrap()
+            .unwrap();
+        assert_eq!(result.ttl_clock_ms, clock);
+        assert_eq!(
+            result.as_of_ms,
+            Some(clock as i64),
+            "default T must equal C, not C+1"
+        );
+    }
+}
+
+#[test]
+fn plain_relationship_requires_one_caller_hop() {
+    let document: Value = serde_json::from_str(FIXTURE).unwrap();
+    let graphs = document["graphs"].as_object().unwrap();
+    let mut case = document["cases"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|case| case["id"] == "read-parallel")
+        .unwrap()
+        .clone();
+    let text = case["text"].as_str().unwrap();
+    let position = text.find('-').unwrap();
+    case["limits"] = json!({"max_hops":0});
+    case["expect"] = json!({"outcome":"reject","error":{
+        "kind":"InvalidQuery","reason":"subset hop bound exceeds max_hops","offset":position}});
+    assert_case(graphs, &case).unwrap();
+}
+
+#[test]
+fn outgoing_expansion_does_not_examine_or_charge_incoming_edges() {
+    let graph_json = json!({
+        "temporal_capable":false,"ttl_clock_ms":"100","view_sequence":"7",
+        "nodes":[
+            {"id":"1","key":"a","labels":[],"properties":{},"revision":"7"},
+            {"id":"2","key":"b","labels":[],"properties":{},"revision":"7"},
+            {"id":"3","key":"c","labels":[],"properties":{},"revision":"7"}],
+        "edges":[
+            {"id":"10","key":null,"type":"R","source":"1","target":"2","properties":{},"revision":"7"},
+            {"id":"11","key":null,"type":"R","source":"3","target":"1","properties":{},"revision":"7"}]
+    });
+    let graph = graph_from_fixture(&graph_json);
+    let clock = FakeClock { value: json!({}) };
+    let mut bounds = ReadBounds::DEFAULT;
+    bounds.graph.max_edges_examined = 1;
+    bounds.graph.max_edges_per_node = 1;
+    // key1 + initial frontier insert/pop2 + adjacency1 + next frontier
+    // insert/pop2 + projection1 = 7; incoming adjacency must cost nothing.
+    bounds.max_work_units = 7;
+    let parameters = [ParameterEntry {
+        name: "k".into(),
+        value: PropertyValue::String("a".into()),
+        position: 13,
+    }];
+    let result = execute(
+        &graph,
+        7,
+        false,
+        100,
+        "MATCH (a KEY $k)-[r:R]->(b) RETURN b",
+        &parameters,
+        bounds,
+        &clock,
+        fixture_as_of,
+    )
+    .unwrap()
+    .unwrap();
+    assert_eq!(result.rows.len(), 1);
+    assert!(matches!(&result.rows[0][0], OutputValue::Node(node) if node.key == "b"));
 }
 
 fn assert_fixture_case(case_id: &str) {
