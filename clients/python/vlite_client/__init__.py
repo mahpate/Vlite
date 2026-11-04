@@ -429,11 +429,518 @@ class IndexStatus(TypedDict):
     config: IndexConfig
 
 
-class VLiteError(Exception):
-    """HTTP failure; status, server code and request ID are available."""
+# Agent memory (Gap 1). Names and required presence follow section 8 of the serving
+# memory contract. MemoryU64/MemoryI64 values in responses are canonical decimal
+# strings. Requests accept the same string or an exact in-range int (the *Input
+# forms) and send the canonical string; components shared by requests and responses
+# (MemoryRef, MemoryInterval, MemoryScalar, MemoryTarget) are typed with the input
+# forms but always carry strings in responses.
+MemoryKey = str
+MemoryBinding = str
+MemoryU64 = str
+MemoryI64 = str
+MemoryU64Input = str | int
+MemoryI64Input = str | int
+MemoryKind = Literal["entity", "episodic", "fact", "relation"]
+MemoryOperation = Literal["remember", "correct_facts", "consolidate", "forget", "resume_erasure"]
 
-    def __init__(self, status: int, code: str, message: str, request_id: str | None):
-        self.status, self.code, self.request_id = status, code, request_id
+
+class MemoryScope(TypedDict):
+    agent: MemoryKey
+    user: NotRequired[MemoryKey]  # required when session is given
+    session: NotRequired[MemoryKey]
+
+
+class MemoryEffectiveScope(TypedDict):
+    tenant: MemoryKey  # derived by the server, never supplied
+    agent: MemoryKey
+    user: NotRequired[MemoryKey]
+    session: NotRequired[MemoryKey]
+
+
+class MemoryExpectedAbsent(TypedDict):
+    absent: Literal[True]
+
+
+class MemoryExpectedRevision(TypedDict):
+    revision: MemoryU64Input
+
+
+MemoryExpected = MemoryExpectedAbsent | MemoryExpectedRevision
+
+
+class MemoryInterval(TypedDict):
+    """Half-open validity window; null endpoints are unbounded and always sent."""
+
+    valid_from_ms: MemoryI64Input | None
+    valid_to_ms: MemoryI64Input | None
+
+
+class MemoryRef(TypedDict):
+    id: MemoryKey
+    revision: MemoryU64Input  # 0 names an item created in the same bundle
+
+
+class MemorySlot(TypedDict):
+    subject_id: MemoryKey
+    predicate: MemoryKey
+    slot_key: MemoryKey
+
+
+class MemorySource(TypedDict):
+    source_id: MemoryKey
+    source_kind: MemoryKey
+    uri: NotRequired[str]  # inert: never fetched
+    transformation_id: NotRequired[MemoryKey]
+
+
+class MemoryProvenance(TypedDict):
+    source_id: MemoryKey
+    source_kind: MemoryKey
+    uri: NotRequired[str]
+    transformation_id: NotRequired[MemoryKey]
+    content_digest: str
+
+
+class MemoryStringScalar(TypedDict):
+    type: Literal["string"]
+    value: str
+
+
+class MemoryIntegerScalar(TypedDict):
+    type: Literal["integer"]
+    value: MemoryI64Input
+
+
+class MemoryFloatScalar(TypedDict):
+    type: Literal["float"]
+    value: float
+
+
+class MemoryBooleanScalar(TypedDict):
+    type: Literal["boolean"]
+    value: bool
+
+
+MemoryScalar = MemoryStringScalar | MemoryIntegerScalar | MemoryFloatScalar | MemoryBooleanScalar
+MemoryProperties = dict[str, MemoryScalar]
+
+
+class MemoryCondition(TypedDict):
+    field: MemoryKey
+    op: Literal["eq", "lt", "lte", "gt", "gte", "exists"]
+    value: NotRequired[MemoryScalar]  # forbidden for exists, required otherwise
+
+
+class MemoryFilter(TypedDict, total=False):
+    """AND of ``all`` and OR of ``any``; at most 64 conditions in all."""
+
+    all: list[MemoryCondition]
+    any: list[MemoryCondition]
+
+
+class MemoryEvidenceRef(TypedDict):
+    collection: MemoryBinding
+    record: MemoryU64Input
+
+
+class MemoryEvidence(TypedDict):
+    collection: MemoryBinding
+    record: MemoryU64Input
+    vector: NotRequired[list[float]]
+    text: NotRequired[str]
+    payload_base64: NotRequired[str]
+    metadata: NotRequired[MemoryProperties]
+
+
+class MemoryAssertion(TypedDict):
+    subject_id: MemoryKey
+    predicate: MemoryKey
+    slot_key: MemoryKey
+    destination_id: MemoryKey
+    interval: MemoryInterval
+    slot_expected: MemoryExpected
+    disagreement: NotRequired[Literal["reject", "disputed"]]
+
+
+class MemoryItem(TypedDict):
+    id: MemoryKey
+    kind: MemoryKind
+    content: str
+    observed_at_ms: MemoryI64Input
+    importance: NotRequired[float]
+    confidence: NotRequired[float]
+    expires_at_ms: NotRequired[MemoryU64Input]
+    source: MemorySource
+    provenance: NotRequired[list[MemorySource]]
+    references: NotRequired[list[MemoryRef]]
+    evidence: NotRequired[list[MemoryEvidenceRef]]
+    metadata: NotRequired[MemoryProperties]
+    assertion: NotRequired[MemoryAssertion]
+    expected: NotRequired[MemoryExpected]
+    merge: NotRequired[Literal["none", "merge_provenance"]]
+
+
+class MemoryMutation(TypedDict):
+    """Fields shared by every mutating request. ``deadline_ms`` is the engine
+    deadline (1..5000, default 250), never the HTTP timeout."""
+
+    scope: MemoryScope
+    idempotency_key: MemoryKey
+    max_references: NotRequired[int]
+    deadline_ms: NotRequired[int]
+    require_complete_feed: NotRequired[bool]
+
+
+class MemoryRememberRequest(MemoryMutation):
+    items: list[MemoryItem]
+    evidence: NotRequired[list[MemoryEvidence]]
+
+
+MemoryRanking = TypedDict("MemoryRanking", {
+    "selection": NotRequired[Literal["weighted", "exact", "mmr"]],
+    "weights": NotRequired[list[float]],
+    "half_life_ms": NotRequired[float],
+    "future_observations": NotRequired[Literal["reject", "clamp"]],
+    "lambda": NotRequired[float],
+})
+
+
+class MemoryLimits(TypedDict, total=False):
+    candidates: int
+    vector_components: int
+    evidence_bytes: int
+    mmr_components: int
+    deadline_ms: int
+    max_hops: int
+    max_visited_nodes: int
+    max_edges_examined: int
+    max_edges_per_node: int
+    max_output_nodes: int
+    max_output_edges: int
+    max_output_paths: int
+
+
+class MemoryProjection(TypedDict, total=False):
+    snippets: bool
+    provenance: bool
+    paths: bool
+    metadata: list[MemoryKey]
+
+
+class MemoryRecallRequest(TypedDict):
+    scope: MemoryScope
+    scopes: NotRequired[list[MemoryScope]]
+    vector: NotRequired[list[float]]
+    text: NotRequired[str]
+    embedding_provider: NotRequired[MemoryKey]
+    entity_seeds: NotRequired[list[MemoryKey]]
+    kinds: NotRequired[list[MemoryKind]]
+    filter: NotRequired[MemoryFilter]
+    as_of_ms: NotRequired[MemoryI64Input]
+    ranking: NotRequired[MemoryRanking]
+    limits: NotRequired[MemoryLimits]
+    projection: NotRequired[MemoryProjection]
+    mode: NotRequired[Literal["exact", "approximate"]]
+    limit: NotRequired[int]
+    allow_partial: NotRequired[bool]
+
+
+class MemoryFactsRequest(TypedDict):
+    scope: MemoryScope
+    slot: MemorySlot
+    as_of_ms: NotRequired[MemoryI64Input]
+    history: NotRequired[bool]
+    limit: NotRequired[int]
+    limits: NotRequired[MemoryLimits]
+    projection: NotRequired[MemoryProjection]
+    allow_partial: NotRequired[bool]
+
+
+class MemoryCorrectionRequest(MemoryMutation):
+    slot: MemorySlot
+    series: MemoryRef
+    slot_revision: MemoryU64Input
+    interval: MemoryInterval
+    action: Literal["close", "replace", "remove"]
+    at_ms: NotRequired[MemoryI64Input]
+    correction_interval: NotRequired[MemoryInterval]
+    replacement: NotRequired[MemoryItem]
+    evidence: NotRequired[list[MemoryEvidence]]
+
+
+class MemoryInput(TypedDict):
+    id: MemoryKey
+    revision: MemoryU64Input
+    disposition: NotRequired[Literal["retain", "logical_delete"]]
+
+
+class MemoryConsolidateRequest(MemoryMutation):
+    inputs: list[MemoryInput]
+    output: MemoryItem
+    evidence: NotRequired[list[MemoryEvidence]]
+    dry_run: NotRequired[bool]
+
+
+class MemoryTargetIds(TypedDict):
+    ids: list[MemoryRef]
+
+
+class MemoryTargetSeries(TypedDict):
+    series: MemoryRef
+
+
+class MemoryTargetEntity(TypedDict):
+    entity: MemoryRef
+
+
+class MemoryTargetSession(TypedDict):
+    session: Literal[True]
+
+
+class MemoryTargetScope(TypedDict):
+    scope: Literal[True]
+
+
+MemoryTarget = MemoryTargetIds | MemoryTargetSeries | MemoryTargetEntity | MemoryTargetSession | MemoryTargetScope
+
+
+class MemoryForgetRequest(MemoryMutation):
+    target: MemoryTarget
+    mode: Literal["logical_delete", "expire"]
+    expires_at_ms: NotRequired[MemoryU64Input]
+    allow_job: NotRequired[bool]
+
+
+class MemoryReceiptRequest(TypedDict):
+    scope: MemoryScope
+    operation: MemoryOperation
+    idempotency_key: MemoryKey
+
+
+class MemoryErasureRequest(TypedDict):
+    scope: MemoryScope
+    job_id: MemoryKey
+
+
+class MemoryResumeRequest(MemoryMutation):
+    job_id: MemoryKey
+    revision: MemoryU64Input
+    generation: MemoryU64Input
+    resume_token: str
+
+
+class MemoryReceipt(TypedDict):
+    id: MemoryKey
+    operation: MemoryOperation
+    scope: MemoryEffectiveScope
+    sequence: MemoryU64
+    retry_until_ms: NotRequired[MemoryU64]
+    digest_version: Literal["memory-request-v1"]
+
+
+class MemoryOutcome(TypedDict):
+    id: MemoryKey
+    action: Literal["created", "merged", "noop", "corrected", "deleted", "expired", "retained_shared"]
+    revision: MemoryU64
+    expires_at_ms: NotRequired[MemoryU64]
+
+
+class MemoryFeed(TypedDict):
+    mode: Literal["ordinary_changes"]
+    temporal_complete: Literal[False]
+    ttl_complete: Literal[False]
+    consumer_purge_acknowledged: Literal[False]
+
+
+class MemoryErasureNotice(TypedDict):
+    """Deletion is logical: never secure erasure or a backup purge."""
+
+    live_state_only: Literal[True]
+    secure_erasure: Literal[False]
+    external_copies: Literal["operator_managed"]
+    restore_requires_manifest: Literal[True]
+    backup_history_purge: Literal["not_verified"]
+    manifest_id: NotRequired[MemoryKey]
+
+
+class MemoryErasure(TypedDict):
+    id: MemoryKey
+    scope: MemoryEffectiveScope
+    target: MemoryTarget
+    revision: MemoryU64
+    generation: MemoryU64
+    state: Literal["pending", "logical"]
+    logical_visibility: Literal["hidden"]
+    deleted_count: MemoryU64
+    remaining_count: MemoryU64 | None  # None: unknown
+    resume_token: NotRequired[str]  # absent when finished
+
+
+class MemoryMutationResponse(TypedDict):
+    receipt: MemoryReceipt
+    replayed: bool
+    outcomes: list[MemoryOutcome]
+    feed: MemoryFeed
+    remaining_work: MemoryU64 | None  # None: unknown
+    state: NotRequired[Literal["logical", "pending", "retention_set"]]
+    erasure: NotRequired[MemoryErasure]
+    erasure_notice: NotRequired[MemoryErasureNotice]
+
+
+class MemoryReceiptResponse(TypedDict):
+    result: MemoryMutationResponse  # replayed is true
+
+
+class MemoryErasureResponse(TypedDict):
+    erasure: MemoryErasure
+    erasure_notice: MemoryErasureNotice
+    feed: MemoryFeed
+
+
+class MemoryCompeting(TypedDict):
+    id: MemoryKey
+    interval: MemoryInterval
+    revision: MemoryU64
+
+
+class MemoryErrorDetail(TypedDict, total=False):
+    """One consolidation-plan conflict."""
+
+    field: MemoryKey
+    limit: MemoryU64
+    requested: MemoryU64
+    competing: list[MemoryCompeting]
+    receipt_lookup_required: bool
+    code: str
+
+
+class MemoryPlanResponse(TypedDict):
+    dry_run: Literal[True]
+    user_operations: MemoryU64
+    encoded_bytes: MemoryU64
+    conflicts: list[MemoryErrorDetail]
+    remaining_work: MemoryU64 | None
+
+
+MemoryConsolidateResponse = MemoryMutationResponse | MemoryPlanResponse
+
+
+class MemoryEvidenceView(TypedDict):
+    collection: MemoryBinding
+    record: MemoryU64
+    snippet: NotRequired[str]
+
+
+class MemoryPath(TypedDict):
+    nodes: list[MemoryU64]
+    edges: list[MemoryU64]
+
+
+class MemoryScores(TypedDict):
+    """R, D, I and S are policy-versioned diagnostics: never compare them across
+    ranking versions or read a fused or BM25 value as cosine similarity."""
+
+    R: float
+    D: float | None
+    I: float
+    S: float
+    dense_rank: NotRequired[int]
+    sparse_rank: NotRequired[int]
+    text_rank: NotRequired[int]
+    distance: NotRequired[float]
+    bm25: NotRequired[float]
+    sparse_score: NotRequired[float]
+    fused_rank: NotRequired[int]
+    fused_score: NotRequired[float]
+
+
+class MemoryView(TypedDict):
+    id: MemoryKey
+    revision: MemoryU64
+    scope: MemoryEffectiveScope
+    kind: MemoryKind
+    content: str
+    observed_at_ms: MemoryI64
+    created_at_ms: MemoryU64
+    updated_at_ms: MemoryU64
+    importance: float
+    confidence: NotRequired[float]
+    expires_at_ms: NotRequired[MemoryU64]
+    status: Literal["accepted", "disputed"]
+    stale: bool
+    segment: MemoryInterval | None
+    evidence: list[MemoryEvidenceView]
+    scores: MemoryScores
+    provenance: NotRequired[list[MemoryProvenance]]
+    references: NotRequired[list[MemoryRef]]
+    paths: NotRequired[list[MemoryPath]]
+    metadata: NotRequired[MemoryProperties]
+
+
+class MemoryReadMeta(TypedDict):
+    """``complete`` means the declared bounded plan finished, not that the answer is
+    exhaustive; ``limitations`` always lists retained_state_only."""
+
+    scopes: list[MemoryEffectiveScope]
+    as_of_ms: MemoryI64
+    ttl_clock_ms: MemoryU64
+    sequence: MemoryU64
+    complete: bool
+    truncation: list[Literal["candidates", "source_scan", "vector_components", "evidence_bytes", "mmr_components",
+                             "visited_nodes", "edges", "degree", "deadline", "output", "deletion_barrier"]]
+    limitations: list[Literal["historical_candidate_discovery_not_exhaustive", "retained_state_only"]]
+    mode: Literal["exact_enumeration", "approximate", "bounded_expansion"]
+    candidates_examined: MemoryU64
+    edges_charged: MemoryU64
+    vector_components: MemoryU64
+    mmr_components: MemoryU64
+    evidence_bytes: MemoryU64
+
+
+class MemoryRecallResponse(TypedDict):
+    memories: list[MemoryView]
+    meta: MemoryReadMeta
+    ranking_version: Literal["memory-ranking-v1"]
+    selection: Literal["weighted", "exact", "mmr"]
+
+
+class MemoryFactView(TypedDict):
+    series: MemoryRef
+    slot: MemorySlot
+    slot_revision: MemoryU64
+    destination_id: MemoryKey
+    interval: MemoryInterval
+    status: Literal["accepted", "disputed"]
+    stale: bool
+    evidence: list[MemoryEvidenceView]
+    provenance: NotRequired[list[MemoryProvenance]]
+
+
+class MemoryFactsResponse(TypedDict):
+    facts: list[MemoryFactView]
+    meta: MemoryReadMeta
+
+
+class MemoryErrorContext(TypedDict, total=False):
+    """Structured error context (``VLiteError.details``). ``feature`` names the
+    capability behind a 409 memory_capability_unavailable."""
+
+    field: str
+    limit: MemoryU64
+    requested: MemoryU64
+    feature: str
+    category: str
+
+
+class VLiteError(Exception):
+    """HTTP failure; status, server code and request ID are available. ``details`` is
+    the optional structured error context (``field``, ``limit``, ``requested``,
+    ``feature``, ``category``; unknown keys are kept), or None."""
+
+    def __init__(self, status: int, code: str, message: str, request_id: str | None,
+                 details: MemoryErrorContext | None = None):
+        self.status, self.code, self.request_id, self.details = status, code, request_id, details
         super().__init__(f"HTTP {status}: {code}: {message}")
 
 
@@ -577,6 +1084,207 @@ def _ndjson_chunks(file, size: int):
             rows = []
     if rows:
         yield rows
+
+
+_MEMORY_U64_TEXT = re.compile(r"0|[1-9][0-9]{0,19}")
+_MEMORY_I64_TEXT = re.compile(r"0|-?[1-9][0-9]{0,18}")
+
+
+def _memory_binding(value: str) -> str:
+    if not isinstance(value, str) or not re.fullmatch(r"[a-z][a-z0-9_-]{0,62}", value):
+        raise ValueError("binding must match ^[a-z][a-z0-9_-]{0,62}$")
+    return value
+
+
+# Memory requests are validated for encoding only: field names, JSON types and the
+# U64/I64 forms. Unknown fields raise and are never sent; limits, conditional rules and
+# capability gates stay with the server. Each encoder returns a new value (the caller's
+# request is never modified) and names the offending path in its ValueError.
+def _memory_decimal(value, low: int, high: int, shape, path: str) -> str:
+    if type(value) is int:
+        number = value
+    elif isinstance(value, str) and shape.fullmatch(value):
+        number = int(value)
+    else:
+        raise ValueError(f"{path} must be a canonical decimal string or an exact integer")
+    if not low <= number <= high:
+        raise ValueError(f"{path} must be in {low}..{high}")
+    return str(number)
+
+
+def _memory_u64(value, path: str) -> str:
+    return _memory_decimal(value, 0, 18446744073709551615, _MEMORY_U64_TEXT, path)
+
+
+def _memory_i64(value, path: str) -> str:
+    return _memory_decimal(value, -9223372036854775808, 9223372036854775807, _MEMORY_I64_TEXT, path)
+
+
+def _memory_text(value, path: str) -> str:
+    if not isinstance(value, str):
+        raise ValueError(f"{path} must be a string")
+    try:
+        value.encode("utf-8")
+    except UnicodeEncodeError as error:
+        raise ValueError(f"{path} must contain Unicode scalar values") from error
+    return value
+
+
+def _memory_bool(value, path: str) -> bool:
+    if type(value) is not bool:
+        raise ValueError(f"{path} must be a boolean")
+    return value
+
+
+def _memory_true(value, path: str) -> bool:
+    if value is not True:
+        raise ValueError(f"{path} must be true")
+    return True
+
+
+def _memory_budget(value, path: str) -> int:
+    if type(value) is not int:
+        raise ValueError(f"{path} must be an integer")
+    return value
+
+
+def _memory_number(value, path: str):
+    if type(value) is int or (isinstance(value, float) and math.isfinite(value)):
+        return value
+    raise ValueError(f"{path} must be a finite number")
+
+
+def _memory_nullable(encode):
+    return lambda value, path: None if value is None else encode(value, path)
+
+
+def _memory_array(encode):
+    def encoder(value, path):
+        if not isinstance(value, list):
+            raise ValueError(f"{path} must be an array")
+        return [encode(item, f"{path}[{index}]") for index, item in enumerate(value)]
+    return encoder
+
+
+def _memory_map(encode):
+    def encoder(value, path):
+        if not isinstance(value, dict):
+            raise ValueError(f"{path} must be an object")
+        return {_memory_text(key, f"{path} key"): encode(item, f"{path}.{key}") for key, item in value.items()}
+    return encoder
+
+
+def _memory_object(required: dict, optional: dict | None = None):
+    fields = {**required, **(optional or {})}
+
+    def encoder(value, path):
+        if not isinstance(value, dict):
+            raise ValueError(f"{path} must be an object")
+        for key in value:
+            if key not in fields:
+                raise ValueError(f"{path}: unknown field {key!r} is never sent")
+        for key in required:
+            if key not in value:
+                raise ValueError(f"{path}: missing required field {key!r}")
+        return {key: fields[key](item, f"{path}.{key}") for key, item in value.items()}
+    return encoder
+
+
+def _memory_variant(variants: dict):
+    def encoder(value, path):
+        if not isinstance(value, dict) or len(value) != 1:
+            raise ValueError(f"{path} must be an object with exactly one of {', '.join(variants)}")
+        ((key, item),) = value.items()
+        if key not in variants:
+            raise ValueError(f"{path}: unknown variant {key!r}")
+        return {key: variants[key](item, f"{path}.{key}")}
+    return encoder
+
+
+_MEMORY_SCALARS = {"string": _memory_text, "integer": _memory_i64, "float": _memory_number, "boolean": _memory_bool}
+
+
+def _memory_scalar(value, path: str):
+    if not isinstance(value, dict) or set(value) != {"type", "value"}:
+        raise ValueError(f"{path} must be an object with type and value")
+    kind = value["type"]
+    if not isinstance(kind, str) or kind not in _MEMORY_SCALARS:
+        raise ValueError(f"{path}.type must be one of {', '.join(_MEMORY_SCALARS)}")
+    return {"type": kind, "value": _MEMORY_SCALARS[kind](value["value"], f"{path}.value")}
+
+
+def _memory_mutation(required: dict, optional: dict | None = None):
+    return _memory_object({"scope": _MEMORY_SCOPE, "idempotency_key": _memory_text, **required},
+                          {"max_references": _memory_budget, "deadline_ms": _memory_budget,
+                           "require_complete_feed": _memory_bool, **(optional or {})})
+
+
+_MEMORY_SCOPE = _memory_object({"agent": _memory_text}, {"user": _memory_text, "session": _memory_text})
+_MEMORY_SOURCE = _memory_object({"source_id": _memory_text, "source_kind": _memory_text},
+                                {"uri": _memory_text, "transformation_id": _memory_text})
+_MEMORY_REF = _memory_object({"id": _memory_text, "revision": _memory_u64})
+_MEMORY_INTERVAL = _memory_object({"valid_from_ms": _memory_nullable(_memory_i64),
+                                   "valid_to_ms": _memory_nullable(_memory_i64)})
+_MEMORY_SLOT = _memory_object({"subject_id": _memory_text, "predicate": _memory_text, "slot_key": _memory_text})
+_MEMORY_EXPECTED = _memory_variant({"absent": _memory_true, "revision": _memory_u64})
+_MEMORY_PROPERTIES = _memory_map(_memory_scalar)
+_MEMORY_EVIDENCE_REF = _memory_object({"collection": _memory_text, "record": _memory_u64})
+_MEMORY_EVIDENCE = _memory_object(
+    {"collection": _memory_text, "record": _memory_u64},
+    {"vector": _memory_array(_memory_number), "text": _memory_text, "payload_base64": _memory_text,
+     "metadata": _MEMORY_PROPERTIES})
+_MEMORY_ASSERTION = _memory_object(
+    {"subject_id": _memory_text, "predicate": _memory_text, "slot_key": _memory_text, "destination_id": _memory_text,
+     "interval": _MEMORY_INTERVAL, "slot_expected": _MEMORY_EXPECTED}, {"disagreement": _memory_text})
+_MEMORY_ITEM = _memory_object(
+    {"id": _memory_text, "kind": _memory_text, "content": _memory_text, "observed_at_ms": _memory_i64,
+     "source": _MEMORY_SOURCE},
+    {"importance": _memory_number, "confidence": _memory_number, "expires_at_ms": _memory_u64,
+     "provenance": _memory_array(_MEMORY_SOURCE), "references": _memory_array(_MEMORY_REF),
+     "evidence": _memory_array(_MEMORY_EVIDENCE_REF), "metadata": _MEMORY_PROPERTIES,
+     "assertion": _MEMORY_ASSERTION, "expected": _MEMORY_EXPECTED, "merge": _memory_text})
+_MEMORY_RANKING = _memory_object(
+    {}, {"selection": _memory_text, "weights": _memory_array(_memory_number), "half_life_ms": _memory_number,
+         "future_observations": _memory_text, "lambda": _memory_number})
+_MEMORY_LIMITS = _memory_object({}, dict.fromkeys(
+    ("candidates", "vector_components", "evidence_bytes", "mmr_components", "deadline_ms", "max_hops",
+     "max_visited_nodes", "max_edges_examined", "max_edges_per_node", "max_output_nodes", "max_output_edges",
+     "max_output_paths"), _memory_budget))
+_MEMORY_PROJECTION = _memory_object(
+    {}, {"snippets": _memory_bool, "provenance": _memory_bool, "paths": _memory_bool,
+         "metadata": _memory_array(_memory_text)})
+_MEMORY_CONDITION = _memory_object({"field": _memory_text, "op": _memory_text}, {"value": _memory_scalar})
+_MEMORY_FILTER = _memory_object({}, {"all": _memory_array(_MEMORY_CONDITION), "any": _memory_array(_MEMORY_CONDITION)})
+_MEMORY_TARGET = _memory_variant({"ids": _memory_array(_MEMORY_REF), "series": _MEMORY_REF, "entity": _MEMORY_REF,
+                                  "session": _memory_true, "scope": _memory_true})
+_MEMORY_REMEMBER = _memory_mutation({"items": _memory_array(_MEMORY_ITEM)},
+                                    {"evidence": _memory_array(_MEMORY_EVIDENCE)})
+_MEMORY_RECALL = _memory_object(
+    {"scope": _MEMORY_SCOPE},
+    {"scopes": _memory_array(_MEMORY_SCOPE), "vector": _memory_array(_memory_number), "text": _memory_text,
+     "embedding_provider": _memory_text, "entity_seeds": _memory_array(_memory_text),
+     "kinds": _memory_array(_memory_text), "filter": _MEMORY_FILTER, "as_of_ms": _memory_i64,
+     "ranking": _MEMORY_RANKING, "limits": _MEMORY_LIMITS, "projection": _MEMORY_PROJECTION, "mode": _memory_text,
+     "limit": _memory_budget, "allow_partial": _memory_bool})
+_MEMORY_FACTS = _memory_object(
+    {"scope": _MEMORY_SCOPE, "slot": _MEMORY_SLOT},
+    {"as_of_ms": _memory_i64, "history": _memory_bool, "limit": _memory_budget, "limits": _MEMORY_LIMITS,
+     "projection": _MEMORY_PROJECTION, "allow_partial": _memory_bool})
+_MEMORY_CORRECTION = _memory_mutation(
+    {"slot": _MEMORY_SLOT, "series": _MEMORY_REF, "slot_revision": _memory_u64, "interval": _MEMORY_INTERVAL,
+     "action": _memory_text},
+    {"at_ms": _memory_i64, "correction_interval": _MEMORY_INTERVAL, "replacement": _MEMORY_ITEM,
+     "evidence": _memory_array(_MEMORY_EVIDENCE)})
+_MEMORY_CONSOLIDATE = _memory_mutation(
+    {"inputs": _memory_array(_memory_object({"id": _memory_text, "revision": _memory_u64},
+                                            {"disposition": _memory_text})), "output": _MEMORY_ITEM},
+    {"evidence": _memory_array(_MEMORY_EVIDENCE), "dry_run": _memory_bool})
+_MEMORY_FORGET = _memory_mutation({"target": _MEMORY_TARGET, "mode": _memory_text},
+                                  {"expires_at_ms": _memory_u64, "allow_job": _memory_bool})
+_MEMORY_RECEIPT = _memory_object({"scope": _MEMORY_SCOPE, "operation": _memory_text, "idempotency_key": _memory_text})
+_MEMORY_ERASURE = _memory_object({"scope": _MEMORY_SCOPE, "job_id": _memory_text})
+_MEMORY_RESUME = _memory_mutation({"job_id": _memory_text, "revision": _memory_u64, "generation": _memory_u64,
+                                   "resume_token": _memory_text})
 
 
 class _Records:
@@ -775,6 +1483,74 @@ class Collection(_Records):
         return self._client._request("POST", self._prefix + "/index/hnsw/quality", body)
 
 
+class Memory:
+    """The nine agent-memory operations of one provisioned binding
+    (``/v1/memory/{binding}``). Obtain with ``Client.memory(binding)``: no request
+    is made and the client's connection is shared. Each method takes one request
+    mapping, POSTs it and returns the server's full response, including a 202
+    pending result; nothing is retried, split, paginated, embedded or defaulted.
+
+    Requests are checked for encoding only. Unknown fields raise ValueError and are
+    never sent; U64/I64 inputs take a canonical decimal string or an exact in-range
+    int and are sent as the canonical string. Limits, conditional rules and
+    capability gates belong to the server, whose refusals are raised unchanged as
+    VLiteError (``code``, ``status``, ``request_id`` and ``details``; for example 409
+    memory_capability_unavailable with ``details["feature"]``). A server without
+    memory routes (404 not_found) raises UnsupportedError. A mutation that ends in
+    TransportError may have committed: reconcile with ``get_receipt`` before
+    retrying with the same idempotency key.
+
+    ``deadline_ms`` in a body is the engine deadline, not the HTTP timeout
+    (``Client(timeout=...)``)."""
+
+    def __init__(self, client: "Client", binding: str):
+        self._client, self.binding = client, _memory_binding(binding)
+        self._prefix = "/v1/memory/" + binding
+
+    def _post(self, route: str, encode, request):
+        return self._client._memory_request(self._prefix + route, encode(request, "request"))
+
+    def remember(self, request: MemoryRememberRequest) -> MemoryMutationResponse:
+        """Commit 1-4,096 caller-built items atomically with a receipt (kinds
+        entity and episodic on the first server slice)."""
+        return self._post("/remember", _MEMORY_REMEMBER, request)
+
+    def recall(self, request: MemoryRecallRequest) -> MemoryRecallResponse:
+        """Ranked bounded read of retained state; there is no pagination."""
+        return self._post("/recall", _MEMORY_RECALL, request)
+
+    def find_facts(self, request: MemoryFactsRequest) -> MemoryFactsResponse:
+        """Query one fact slot (not available on the first server slice)."""
+        return self._post("/facts/query", _MEMORY_FACTS, request)
+
+    def correct_facts(self, request: MemoryCorrectionRequest) -> MemoryMutationResponse:
+        """Close, replace or remove a fact segment (not available on the first server slice)."""
+        return self._post("/facts/correct", _MEMORY_CORRECTION, request)
+
+    def consolidate(self, request: MemoryConsolidateRequest) -> MemoryConsolidateResponse:
+        """Commit a caller-produced summary (a MemoryMutationResponse) or, with
+        ``dry_run``, return a MemoryPlanResponse; the whole response is returned."""
+        return self._post("/consolidate", _MEMORY_CONSOLIDATE, request)
+
+    def forget(self, request: MemoryForgetRequest) -> MemoryMutationResponse:
+        """Logical deletion or retention expiry: HTTP 200 for a logical result and
+        202 for a pending job; neither means secure erasure."""
+        return self._post("/forget", _MEMORY_FORGET, request)
+
+    def get_receipt(self, request: MemoryReceiptRequest) -> MemoryReceiptResponse:
+        """Look up a retained receipt by scope, operation and idempotency key."""
+        return self._post("/receipts/lookup", _MEMORY_RECEIPT, request)
+
+    def get_erasure(self, request: MemoryErasureRequest) -> MemoryErasureResponse:
+        """Read an erasure job's status (not available on the first server slice)."""
+        return self._post("/erasures/get", _MEMORY_ERASURE, request)
+
+    def resume_erasure(self, request: MemoryResumeRequest) -> MemoryMutationResponse:
+        """Commit one bounded erasure chunk with the job's exact revision,
+        generation and token (not available on the first server slice)."""
+        return self._post("/erasures/resume", _MEMORY_RESUME, request)
+
+
 class Client(_Records):
     _prefix = "/v1"
 
@@ -824,13 +1600,14 @@ class Client(_Records):
                     document = json.loads(raw)
                     detail = document["error"]
                     code, message = detail["code"], detail["message"]
+                    details = detail.get("details")
                 except (ValueError, KeyError, TypeError):
-                    document, code, message = None, "http_error", "Server returned a nonstandard error response"
+                    document, code, message, details = None, "http_error", "Server returned a nonstandard error response", None
                 request_id = error.headers.get("X-Request-ID")
                 if error.code == 422 and code == "import_rows_invalid" and isinstance(document, dict):
                     report = {key: value for key, value in document.items() if key != "error"}
                     raise ImportRejectedError(error.code, code, message, request_id, dict(report, outcome="rejected")) from None
-                raise VLiteError(error.code, code, message, request_id) from None
+                raise VLiteError(error.code, code, message, request_id, details if isinstance(details, dict) else None) from None
         except (URLError, OSError, HTTPException, ValueError) as error:
             raise TransportError("Request failed or response was invalid; mutation outcome may be unknown; no retry performed") from error
 
@@ -1066,6 +1843,24 @@ class Client(_Records):
             return {"items": [_kv_read_entry(item) for item in page["items"]],
                     "next_after": None if page["next_after"] is None else _kv_text(page["next_after"], "next_after", 1024)}
         return self._kv_decode(decode, value)
+
+    # Agent memory (Gap 1): see the Memory facade.
+
+    def memory(self, binding: str) -> Memory:
+        """Return the memory facade for one provisioned binding. No request is
+        made, and the facade shares this client's connection settings."""
+        return Memory(self, binding)
+
+    def _memory_request(self, path: str, body: dict) -> dict:
+        try:
+            value = self._request("POST", path, body)
+        except VLiteError as error:
+            if error.status == 404 and error.code == "not_found":
+                raise UnsupportedError("Server does not support memory routes; no fallback performed") from error
+            raise
+        if not isinstance(value, dict):
+            raise TransportError("Invalid memory response; no retry performed")
+        return value
 
     def changes(self, *, cursor: str | None = None, limit: int = 1000) -> dict:
         if type(limit) is not int or not 1 <= limit <= 10000:
