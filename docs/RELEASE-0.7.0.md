@@ -100,8 +100,8 @@ Keep values under namespaced string keys, with no vector. <!-- source: docs/STOR
 ### Agent memory
 
 Agent memory (remember, recall, consolidate and forget) is part of the 0.7.0
-plan, and the release waits for it. The clients and the command line below are
-in this candidate; the server that answers them is not.
+plan, and the release waits for it. The clients, the command line and the MCP
+tools below are in this candidate; the server that answers them is not.
 <!-- source: docs/projects/roadmap/next-major.md#decided-2026-11-04, docs/projects/roadmap/gap1-agent-memory.md -->
 
 - **Clients.** The JavaScript, Python and .NET clients have a binding-local
@@ -120,11 +120,21 @@ in this candidate; the server that answers them is not.
   line on stderr, and requires HTTPS except for loopback hosts. See
   [Remote agent memory](TOOLS.md#remote-agent-memory).
   <!-- source: docs/TOOLS.md#remote-agent-memory, tests/memory_cli.rs, tests/fixtures/memory_cli, .github/workflows/release.yml, Dockerfile; commits 4ba4e2bb and 02853281 -->
+- **MCP tools.** `vlite-mcp --server URL`, built with `mcp-proxy`, lists nine
+  `vlite_memory_*` tools: remember, recall, facts, correct facts, consolidate,
+  forget, receipt, erasure and resume erasure. Recall, facts, receipt and
+  erasure are read-only tools; the other five need `--writable`. Each takes
+  flat arguments plus a `binding`, forwards them unchanged, and the tools never
+  appear with `--db`. Memory calls ignore ambient proxies, allow plain HTTP only
+  for loopback hosts, and refuse a response that contains the bearer token or
+  repeats a key. See
+  [Server-backed agent memory](MCP.md#server-backed-agent-memory).
+  <!-- source: docs/MCP.md#server-backed-agent-memory, tests/memory_mcp.rs, tests/fixtures/memory_tools; commits 2bf3ff0a and 4b9af2dc -->
 - **Server.** [TO CONFIRM AT RC] The server-side REST adapter that the clients
-  and the command line call is not merged in this candidate, and neither are
-  the memory MCP tools, so nothing here answers a memory request yet; the
-  memory engine itself is crate-private and inactive. Describe the shipped
-  surface, limits and defaults here after independent acceptance.
+  and the command line call is not merged in this candidate, so nothing here
+  answers a memory request yet; the memory engine itself is crate-private and
+  inactive. Describe the shipped surface, limits and defaults here after
+  independent acceptance.
   <!-- source: src/lib.rs, src/server.rs, src/openapi.json, src/bin/vlite-memory-cli.rs (the only /v1/memory reference in src), docs/projects/roadmap/serving-memory-contract.md -->
 - **First-slice limitation.** [TO CONFIRM AT RC] The first server slice will
   refuse receipt lookups (`GetReceipt`) of `remember` receipts with 409
