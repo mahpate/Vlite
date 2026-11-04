@@ -198,7 +198,12 @@ from codes. Descriptor parameters are `dimensions u32,reserved u32=0`,
 then dimensions f64 minima followed by dimensions f64 scales. Finite
 minima, finite nonnegative scales, constant dimensions scale +0 and code 0.
 Empty training yields all +0 parameters; the dimensions count remains the
-collection's dimensions, not an empty 0-dimension exception.
+collection's dimensions, not an empty 0-dimension exception. Persisted
+minima are canonical: `f64::min` does not specify which zero a tie returns,
+so a -0.0 minimum is encoded, and compared at bind, as +0.0, and a stored
+-0.0 minimum is malformed. Codes and scales are unchanged because +0 and -0
+both quantize to code 0 (ruling P3C-scalar-min-signed-zero-canonical,
+provisional).
 
 Training excludes zero vectors for cosine and otherwise includes all base
 rows. Reuse existing f64 min/max, scale `(max-min)/255`, round-half-away-
