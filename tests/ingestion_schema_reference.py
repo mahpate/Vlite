@@ -515,7 +515,7 @@ def validate_record(name, value):
         rows = [identity_order(row["object"]) for row in value["captured"]]
         need(rows == sorted(rows) and len(rows) == len(set(rows)), "captured_order")
         ordinals = [row["chunk"]["fields"]["ordinal"] for row in value["accepted"]]
-        need(ordinals == sorted(ordinals) and len(ordinals) == len(set(ordinals)),
+        need(strict_order(ordinals),
              "accepted_chunk_order")
         validate_plan_order(value)
     elif name == "vector_data":
@@ -541,38 +541,62 @@ def decode_utf8_boundaries(raw, start, end):
         raise Invalid("observation_utf8_boundary") from error
 
 
+def strict_order(values):
+    return values == sorted(values) and len(values) == len(set(values))
+
+
 def validate_plan_order(plan):
     captured = {identity(row["object"]) for row in plan["captured"]}
     known = {raw for raw in captured
              if decode_identity(raw)["kind"] in ("source", "revision", "chunk", "entity")}
+    plan_chunk_ordinals = []
+    head_creates = 0
     for batch in plan["batches"]:
+        groups = batch["groups"]
+        need(groups and [group["ordinal"] for group in groups]
+             == list(range(len(groups))), "group_order")
+        need(all(group["operations"] for group in groups), "empty_group")
         ops = [op for group in batch["groups"] for op in group["operations"]]
         if not ops:
             raise Invalid("empty_batch")
+        op_bytes = [encode("operation", op) for op in ops]
+        need(len(op_bytes) == len(set(op_bytes)), "duplicate_operation")
         validate_batch_start(ops, batch["ordinal"], known)
         chunk_order = []
         previous_group = None
         previous_phase = -1
         anchor_keys, provenance_order, relation_order = [], [], []
+        group_chunk_ordinals = []
         group_indexes = [group_index for group_index, group in enumerate(batch["groups"])
                          for _ in group["operations"]]
+        vector_chunks = {}
+        for group_index, group in enumerate(batch["groups"]):
+            for operation in group["operations"]:
+                if operation["tag"] in (2, 7):
+                    op_fields = operation["fields"]
+                    vector_chunks[(group_index, op_fields["collection"], op_fields["record"])] = (
+                        op_fields["chunk"]["fields"]["ordinal"])
         for index, operation in enumerate(ops):
             group_index = group_indexes[index]
             if group_index != previous_group:
-                need(anchor_keys == sorted(anchor_keys), "node_key_order")
-                need(provenance_order == sorted(provenance_order), "provenance_identity_order")
-                need(relation_order == sorted(relation_order), "relation_identity_order")
+                need(strict_order(anchor_keys), "node_key_order")
+                need(strict_order(provenance_order), "provenance_identity_order")
+                need(strict_order(relation_order), "relation_identity_order")
+                need(len(set(group_chunk_ordinals)) <= 1, "group_chunk_membership")
                 previous_phase = -1
                 anchor_keys, provenance_order, relation_order = [], [], []
+                group_chunk_ordinals = []
                 previous_group = group_index
             tag, fields_ = operation["tag"], operation["fields"]
+            if tag == 13:
+                head_creates += 1
+                need(head_creates == 1, "head_create_count")
+                need(batch["ordinal"] == 1 and index == 0, "head_create_first")
+                known.add(identity(fields_["source"]))
             phase = operation_phase(operation)
             need(phase >= previous_phase, "operation_order")
             previous_phase = phase
-            if tag == 13:
-                need(batch["ordinal"] == 1 and index == 0, "head_create_first")
-                known.add(identity(fields_["source"]))
-            elif tag == 5:
+            if tag == 5:
                 obj = fields_["object"]
                 role, data = obj["identity"]["kind"], obj["identity"]
                 if role == "revision":
@@ -580,27 +604,58 @@ def validate_plan_order(plan):
                     anchor_keys.append(graph_key_order(data))
                 elif role == "chunk":
                     need(identity(data["fields"]["revision"]) in known, "chunk_endpoint")
-                    chunk_order.append((data["fields"]["ordinal"], graph_key_order(data)))
+                    ordinal = data["fields"]["ordinal"]
+                    chunk_order.append(ordinal)
+                    plan_chunk_ordinals.append(ordinal)
+                    group_chunk_ordinals.append(ordinal)
                 elif role == "entity":
                     anchor_keys.append(graph_key_order(data))
                 known.add(identity(data))
             elif tag == 8:
                 ident_ = fields_["object"]["identity"]
                 validate_edge_order(ident_, known)
+                edge_fields = ident_["fields"]
+                if ident_["kind"] in ("has_chunk", "mention", "relation"):
+                    chunk = edge_fields["chunk"]
+                    group_chunk_ordinals.append(chunk["fields"]["ordinal"])
                 if ident_["kind"] == "relation":
                     relation_order.append(identity_order(ident_))
                 else:
                     provenance_order.append(identity_order(ident_))
+            elif tag == 1:
+                edge = fields_["edge"]
+                edge_role = edge["kind"]
+                if edge_role in ("has_chunk", "mention", "relation"):
+                    group_chunk_ordinals.append(edge["fields"]["chunk"]["fields"]["ordinal"])
+            elif tag == 4:
+                node = fields_["node"]
+                if node["kind"] == "chunk":
+                    group_chunk_ordinals.append(node["fields"]["ordinal"])
+            elif tag in (2, 7):
+                group_chunk_ordinals.append(fields_["chunk"]["fields"]["ordinal"])
+            elif tag == 3:
+                key = (group_index, fields_["collection"], fields_["record"])
+                need(key in vector_chunks, "group_chunk_membership")
+                group_chunk_ordinals.append(vector_chunks[key])
+            elif tag == 6:
+                chunk_key = fields_["data"]["chunk_key"]
+                matching = [decode_identity(raw)["fields"]["ordinal"] for raw in known
+                            if decode_identity(raw)["kind"] == "chunk"
+                            and graph_key(decode_identity(raw)) == chunk_key]
+                need(len(matching) == 1, "group_chunk_membership")
+                group_chunk_ordinals.extend(matching)
             elif tag == 11:
                 need(identity(fields_["source"]) in known, "head_patch_source")
             if tag == 12:
                 need(index == len(ops) - 1 and batch["ordinal"] == 1, "root_receipt_last")
-        need(anchor_keys == sorted(anchor_keys), "node_key_order")
-        need(chunk_order == sorted(chunk_order), "chunk_ordinal_order")
-        need(provenance_order == sorted(provenance_order), "provenance_identity_order")
-        need(relation_order == sorted(relation_order), "relation_identity_order")
+        need(strict_order(anchor_keys), "node_key_order")
+        need(strict_order(provenance_order), "provenance_identity_order")
+        need(strict_order(relation_order), "relation_identity_order")
+        need(len(set(group_chunk_ordinals)) <= 1, "group_chunk_membership")
+        need(strict_order(chunk_order), "chunk_ordinal_order")
     ordinals = [batch["ordinal"] for batch in plan["batches"]]
     need(ordinals == list(range(1, len(ordinals) + 1)), "batch_order")
+    need(strict_order(plan_chunk_ordinals), "chunk_ordinal_order")
 
 
 def operation_phase(operation):
@@ -938,8 +993,6 @@ def readable_projection(identity_value, data):
     projection = {}
     if role == "source":
         projection["status"] = data["status"]
-        if data["revision_key"] is not None:
-            projection["revision_key"] = data["revision_key"]
         projection["last_batch"] = data["last_batch"]
     elif role == "revision":
         if data["uri"] is not None:
@@ -1493,11 +1546,12 @@ def invariants(document):
     ops.insert(1, edge_ops[0])
     rejects(lambda: named("plan", broken_edges), "edge_endpoint", "edge-endpoint-order")
     late_head = copy.deepcopy(ordered)
-    ops = late_head["batches"][0]["groups"][0]["operations"]
-    ops.remove(head_op)
-    ops.insert(0, revision_op)
-    ops.insert(1, head_op)
-    rejects(lambda: named("plan", late_head), "batch_guard_first", "head-create-position")
+    late_head["captured"] = expand(templates["captured_endpoints"], templates)
+    late_head["batches"][0]["groups"][0]["operations"] = [
+        expand(templates["guard_operation"], templates),
+        expand(templates["source_create_other_operation"], templates),
+        expand(templates["root_operation"], templates)]
+    rejects(lambda: named("plan", late_head), "head_create_first", "head-create-position")
     existing = expand(templates["plan"], templates)
     existing["captured"] = [{"object": source, "expected": expand(
         templates["absent"], templates), "properties_digest": "00" * 32}]
@@ -1554,6 +1608,8 @@ def expand(value, templates):
 def expected_bytes(parts, atoms):
     if isinstance(parts, str):
         return unhex(parts)
+    if isinstance(parts, dict) and set(parts) == {"repeat_hex", "count"}:
+        return bytes.fromhex(parts["repeat_hex"]) * parts["count"]
     need(isinstance(parts, list), "fixture_bytes")
     return b"".join(expected_bytes(atoms[part[1:]], atoms)
                     if isinstance(part, str) and part.startswith("@")
@@ -1798,6 +1854,36 @@ def self_test(document):
         ("receipt-extra-projection", "projection-receipt-none", "readable_projection",
          lambda old: lambda ident_, data: dict(old(ident_, data), outcome=data["outcome"])
          if ident_["kind"] == "receipt" else old(ident_, data)),
+        ("chunk-order-cross-batch", "plan-chunk-ordinals-across-batches", "need",
+         omit_check("chunk_ordinal_order")),
+        ("group-ordinal-gap", "plan-group-ordinals-gap", "need",
+         omit_check("group_order")),
+        ("group-ordinal-duplicate", "plan-group-ordinals-duplicate", "need",
+         omit_check("group_order")),
+        ("empty-group", "plan-empty-group", "need", omit_check("empty_group")),
+        ("duplicate-operation", "plan-duplicate-operation", "need",
+         omit_check("duplicate_operation")),
+        ("duplicate-edge", "plan-duplicate-edge", "need",
+         omit_check("duplicate_operation", "provenance_identity_order")),
+        ("duplicate-accepted-ordinal", "plan-duplicate-accepted-ordinal", "need",
+         omit_check("accepted_chunk_order")),
+        ("mixed-group-membership", "plan-group-mixed-chunks", "need",
+         omit_check("group_chunk_membership")),
+        ("vector-put-group-membership", "plan-vector-put-wrong-chunk-group", "need",
+         omit_check("group_chunk_membership")),
+        ("second-head-create", "plan-second-head-create", "need",
+         omit_check("head_create_count", "head_create_first")),
+        ("label-256-rejected", "pipeline-label-256", "pipeline_label",
+         lambda old: lambda value: old(value) and len(text(value)) <= 255),
+        ("label-257-accepted", "pipeline-label-257", "pipeline_label",
+         lambda old: lambda value: len(text(value)) <= 257
+         and re.fullmatch(rb"[A-Za-z0-9._-]+", text(value)) is not None),
+        ("label-plus-accepted", "pipeline-label-plus-sign", "pipeline_label",
+         lambda old: lambda value: old(value) or value == "a+b"),
+        ("enum-chunker-range", "pipeline-enum-chunker-out-of-range", "need",
+         omit_check("enum")),
+        ("enum-request-mode-range", "request-enum-mode-out-of-range", "need",
+         omit_check("enum")),
     ]
     for field in ("extractor-alias", "embedder-alias"):
         targeted.append((field + "-reserved", field + "-default", "pipeline_label",
