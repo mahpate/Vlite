@@ -193,6 +193,147 @@ fn start_scoped_with_operations(
     (app, format!("vlk_{ID}_{secret}"))
 }
 
+fn start_wildcard_scoped(
+    directory: &TempDir,
+    raw_access: bool,
+    operations: &[&str],
+) -> (Router, String) {
+    const ID: &str = "abcdefghij27";
+    let secret = "A".repeat(43);
+    let db = database();
+    let lineage = db.lineage().unwrap();
+    let credentials = serde_json::json!({
+        "schema": 1,
+        "credentials": [{
+            "id": ID,
+            "name": "fake wildcard test credential",
+            "all": true,
+            "collections": [],
+            "graphs": ["*"],
+            "operations": operations,
+            "lineage": format!("{lineage:016x}"),
+            "secret_sha256": format!("{:x}", Sha256::digest(secret.as_bytes())),
+            "created_unix_ms": 0,
+            "expires_unix_ms": 9_999_999_999_999u64,
+            "revoked_unix_ms": null,
+            "rotated_from": null
+        }]
+    });
+    std::fs::write(
+        directory.path().join("credentials.json"),
+        serde_json::to_vec(&credentials).unwrap(),
+    )
+    .unwrap();
+    let path = directory.path().join("memory-bindings.json");
+    let bindings = BINDINGS.replace(
+        "\"raw_access\":false",
+        if raw_access {
+            "\"raw_access\":true"
+        } else {
+            "\"raw_access\":false"
+        },
+    );
+    std::fs::write(&path, bindings).unwrap();
+    let app = configured_admin_router(
+        Service::new(db),
+        ServerOptions {
+            admin_token: Some(BearerToken::new(ADMIN).unwrap()),
+            read_only_token: Some(BearerToken::new(READ_ONLY).unwrap()),
+            admin_directory: Some(directory.path().into()),
+            memory_bindings_file: Some(path),
+            ..Default::default()
+        },
+    )
+    .unwrap();
+    (app, format!("vlk_{ID}_{secret}"))
+}
+
+fn start_tenant_scoped(
+    directory: &TempDir,
+    raw_access: bool,
+    operations: &[&str],
+) -> (Router, String) {
+    const TENANT: &str = "0123456789abcdef0123456789abcdef";
+    const ID: &str = "abcdefghij27";
+    let secret = "A".repeat(43);
+    let mut db = Database::create_in_memory(
+        2,
+        CreateOptions {
+            format: Some(FormatVersion::V5),
+            ..Default::default()
+        },
+    )
+    .unwrap();
+    for name in ["notes_ev", "ordinary"] {
+        db.create_collection(
+            &format!("t{TENANT}__{name}"),
+            CollectionSpec {
+                dimensions: 2,
+                settings: Default::default(),
+            },
+        )
+        .unwrap();
+    }
+    db.create_graph(&format!("t{TENANT}__notes_graph")).unwrap();
+    db.create_graph(&format!("t{TENANT}__ordinary_graph"))
+        .unwrap();
+    let lineage = db.lineage().unwrap();
+    let credentials = serde_json::json!({
+        "schema": 1,
+        "credentials": [{
+            "id": ID,
+            "name": "fake tenant credential",
+            "all": true,
+            "collections": [],
+            "graphs": ["*"],
+            "operations": operations,
+            "lineage": format!("{lineage:016x}"),
+            "secret_sha256": format!("{:x}", Sha256::digest(secret.as_bytes())),
+            "created_unix_ms": 0,
+            "expires_unix_ms": 9_999_999_999_999u64,
+            "revoked_unix_ms": null,
+            "rotated_from": null,
+            "tenant_id": TENANT
+        }]
+    });
+    std::fs::write(
+        directory.path().join("credentials.json"),
+        serde_json::to_vec(&credentials).unwrap(),
+    )
+    .unwrap();
+    std::fs::write(
+        directory.path().join("tenants.json"),
+        serde_json::to_vec(&serde_json::json!([{
+            "id": TENANT,
+            "name": "test tenant",
+            "max_vectors": null
+        }]))
+        .unwrap(),
+    )
+    .unwrap();
+    let mut bindings: Value = serde_json::from_str(BINDINGS).unwrap();
+    let binding = &mut bindings["bindings"][0];
+    binding["tenant"] = serde_json::json!(TENANT);
+    binding["graph"] = serde_json::json!("notes_graph");
+    binding["evidence_collection"] = serde_json::json!("notes_ev");
+    binding["grants"][0]["raw_access"] = serde_json::json!(raw_access);
+    binding["grants"][0]["principal"] = serde_json::json!(ID);
+    let path = directory.path().join("memory-bindings.json");
+    std::fs::write(&path, serde_json::to_vec(&bindings).unwrap()).unwrap();
+    let app = configured_admin_router(
+        Service::new(db),
+        ServerOptions {
+            admin_token: Some(BearerToken::new(ADMIN).unwrap()),
+            read_only_token: Some(BearerToken::new(READ_ONLY).unwrap()),
+            admin_directory: Some(directory.path().into()),
+            memory_bindings_file: Some(path),
+            ..Default::default()
+        },
+    )
+    .unwrap();
+    (app, format!("vlk_{ID}_{secret}"))
+}
+
 #[tokio::test]
 async fn reserved_graph_and_collection_are_denied_and_lists_filter_them() {
     let directory = tempfile::tempdir().unwrap();
@@ -289,6 +430,15 @@ async fn reserved_graph_and_collection_are_denied_and_lists_filter_them() {
         assert_eq!(status, 403, "{method} {path}");
         assert_eq!(error["error"]["code"], "forbidden_scope", "{method} {path}");
     }
+    let (missing_webhook_status, missing_webhook_error) = call(
+        &app,
+        "DELETE",
+        "/v1/admin/webhooks/not-a-real-id",
+        Body::empty(),
+    )
+    .await;
+    assert_eq!(missing_webhook_status, 404);
+    assert_eq!(missing_webhook_error["error"]["code"], "webhook_not_found");
 
     let (_, diagnostics) = get(&app, "/v1/admin/diagnostics/slow-queries").await;
     assert!(
@@ -342,6 +492,14 @@ async fn reserved_resource_routes_deny_before_resource_lookup_across_families() 
     let directory = tempfile::tempdir().unwrap();
     let app = start(&directory, Some(BINDINGS), false).unwrap();
     let cases = [
+        ("GET", "/v1/collections/notes_ev", ""),
+        (
+            "POST",
+            "/v1/collections",
+            r#"{"name":"notes_ev","dimensions":2}"#,
+        ),
+        ("PUT", "/v1/collections/notes_ev/settings", "{}"),
+        ("DELETE", "/v1/collections/notes_ev", ""),
         ("GET", "/v1/collections/notes_ev/vectors", ""),
         ("GET", "/v1/collections/notes_ev/vectors/7", ""),
         (
@@ -362,6 +520,11 @@ async fn reserved_resource_routes_deny_before_resource_lookup_across_families() 
         (
             "DELETE",
             "/v1/collections/notes_ev/kv/entry?namespace=n&key=k",
+            "",
+        ),
+        (
+            "DELETE",
+            "/v1/collections/notes_ev/kv/entry?namespace=n&key=missing",
             "",
         ),
         (
@@ -462,6 +625,8 @@ async fn reserved_resource_routes_deny_before_resource_lookup_across_families() 
         ("POST", "/v1/imports/not-a-job/finish", ""),
         ("POST", "/v1/imports/not-a-job/abort", ""),
         ("POST", "/v1/graphs", r#"{"graph":"notes_graph"}"#),
+        ("GET", "/v1/graphs/notes_graph", ""),
+        ("GET", "/v1/graphs/notes_graph/schema", ""),
         ("POST", "/v1/graphs/notes_graph/batch", "{}"),
         ("POST", "/v1/graphs/notes_graph/nodes/get", "{}"),
         ("POST", "/v1/graphs/notes_graph/edges/get", "{}"),
@@ -485,6 +650,182 @@ async fn reserved_resource_routes_deny_before_resource_lookup_across_families() 
             "credential scope does not permit this operation or collection",
             "{method} {path}"
         );
+    }
+
+    for token in [READ_ONLY] {
+        for (method, path, body) in cases {
+            let (status, error) = call_token(&app, method, path, Body::from(body), token).await;
+            assert_eq!(status, 403, "{method} {path}: {error}");
+        }
+    }
+
+    let all_operations = [
+        "read",
+        "search",
+        "search_build",
+        "write",
+        "import",
+        "index",
+        "collections",
+        "diagnostics",
+        "backup",
+        "graph_read",
+        "graph_write",
+    ];
+    for operations in [
+        &["read", "search", "diagnostics", "graph_read"][..],
+        &[
+            "read",
+            "search",
+            "search_build",
+            "write",
+            "import",
+            "index",
+            "collections",
+            "diagnostics",
+            "backup",
+            "graph_read",
+            "graph_write",
+        ][..],
+    ] {
+        let scoped_directory = tempfile::tempdir().unwrap();
+        let (scoped, scoped_token) = start_wildcard_scoped(&scoped_directory, false, operations);
+        for (method, path, body) in cases {
+            let (status, error) =
+                call_token(&scoped, method, path, Body::from(body), &scoped_token).await;
+            assert_eq!(status, 403, "{method} {path}: {error}");
+            assert_eq!(error["error"]["code"], "forbidden_scope", "{method} {path}");
+            assert_eq!(
+                error["error"]["message"],
+                "credential scope does not permit this operation or collection",
+                "{method} {path}"
+            );
+        }
+    }
+
+    let ordinary_directory = tempfile::tempdir().unwrap();
+    let (ordinary_app, ordinary_token) =
+        start_wildcard_scoped(&ordinary_directory, false, &all_operations);
+    for (method, path, body) in cases {
+        if path.contains("/imports") {
+            continue;
+        }
+        let path = path
+            .replace("notes_ev", "ordinary")
+            .replace("notes_graph", "ordinary_graph");
+        let body = body
+            .replace("notes_ev", "ordinary")
+            .replace("notes_graph", "ordinary_graph");
+        let (status, error) = call_token(
+            &ordinary_app,
+            method,
+            &path,
+            Body::from(body),
+            &ordinary_token,
+        )
+        .await;
+        assert!(
+            status != 403 || error["error"]["code"] != "forbidden_scope",
+            "{method} {path}: {error}"
+        );
+    }
+
+    let raw_directory = tempfile::tempdir().unwrap();
+    let (raw_app, raw_token) = start_wildcard_scoped(&raw_directory, true, &all_operations);
+    for (method, path, body) in cases {
+        if path.contains("/imports") {
+            continue;
+        }
+        if !path.contains("notes_ev")
+            && !path.contains("notes_graph")
+            && !body.contains("notes_ev")
+            && !body.contains("notes_graph")
+        {
+            continue;
+        }
+        let (status, error) =
+            call_token(&raw_app, method, path, Body::from(body), &raw_token).await;
+        assert!(
+            status != 403 || error["error"]["code"] != "forbidden_scope",
+            "{method} {path}: {error}"
+        );
+    }
+    for (method, path, body) in [
+        ("POST", "/v1/collections/notes_ev/imports", ""),
+        ("POST", "/v1/collections/ordinary/imports", ""),
+        ("GET", "/v1/imports/not-a-job", ""),
+        ("PUT", "/v1/imports/1/chunks/0", "{}"),
+        ("POST", "/v1/imports/not-a-job/finish", ""),
+        ("POST", "/v1/imports/not-a-job/abort", ""),
+    ] {
+        let (status, error) =
+            call_token(&raw_app, method, path, Body::from(body), &raw_token).await;
+        assert_eq!(status, 403, "{method} {path}: {error}");
+        assert_eq!(error["error"]["code"], "forbidden_scope", "{method} {path}");
+    }
+
+    for raw_access in [false, true] {
+        let tenant_directory = tempfile::tempdir().unwrap();
+        let (tenant_app, tenant_token) =
+            start_tenant_scoped(&tenant_directory, raw_access, &all_operations);
+        for (method, path, body) in cases {
+            if path.contains("/imports") {
+                continue;
+            }
+            let reserved = path.contains("notes_ev")
+                || path.contains("notes_graph")
+                || body.contains("notes_ev")
+                || body.contains("notes_graph");
+            if !reserved {
+                continue;
+            }
+            let (status, error) =
+                call_token(&tenant_app, method, path, Body::from(body), &tenant_token).await;
+            if raw_access {
+                assert!(
+                    status != 403 || error["error"]["code"] != "forbidden_scope",
+                    "tenant {method} {path}: {error}"
+                );
+            } else {
+                assert_eq!(status, 403, "tenant {method} {path}: {error}");
+                assert_eq!(
+                    error["error"]["code"], "forbidden_scope",
+                    "tenant {method} {path}"
+                );
+                assert_eq!(
+                    error["error"]["message"],
+                    "credential scope does not permit this operation or collection",
+                    "tenant {method} {path}"
+                );
+            }
+        }
+
+        let ordinary_directory = tempfile::tempdir().unwrap();
+        let (ordinary_app, ordinary_token) =
+            start_tenant_scoped(&ordinary_directory, raw_access, &all_operations);
+        for (method, path, body) in cases {
+            if path.contains("/imports") {
+                continue;
+            }
+            let path = path
+                .replace("notes_ev", "ordinary")
+                .replace("notes_graph", "ordinary_graph");
+            let body = body
+                .replace("notes_ev", "ordinary")
+                .replace("notes_graph", "ordinary_graph");
+            let (status, error) = call_token(
+                &ordinary_app,
+                method,
+                &path,
+                Body::from(body),
+                &ordinary_token,
+            )
+            .await;
+            assert!(
+                status != 403 || error["error"]["code"] != "forbidden_scope",
+                "tenant {method} {path}: {error}"
+            );
+        }
     }
 
     for (method, path, body) in [
@@ -537,6 +878,7 @@ async fn reserved_resource_routes_deny_before_resource_lookup_across_families() 
         ("POST", "/v1/index/hnsw/maintenance/tick", ""),
         ("GET", "/v1/index/hnsw/rebuild", ""),
         ("POST", "/v1/index/hnsw/rebuild", "{}"),
+        ("POST", "/v1/index/hnsw/rebuild/cancel", "{}"),
         ("POST", "/v1/index/hnsw/rebuild/poll", ""),
     ] {
         let (status, error) = call(&legacy_app, method, path, Body::from(body)).await;
@@ -548,94 +890,7 @@ async fn reserved_resource_routes_deny_before_resource_lookup_across_families() 
 #[tokio::test]
 async fn tenant_qualified_reservations_follow_scoped_credentials_and_raw_access() {
     const TENANT: &str = "0123456789abcdef0123456789abcdef";
-    const ID: &str = "abcdefghij27";
-    let secret = "A".repeat(43);
-    let build = |directory: &TempDir, raw_access: bool, operations: &[&str]| {
-        let mut db = Database::create_in_memory(
-            2,
-            CreateOptions {
-                format: Some(FormatVersion::V5),
-                ..Default::default()
-            },
-        )
-        .unwrap();
-        let stored = format!("t{TENANT}__notes_ev");
-        let ordinary = format!("t{TENANT}__ordinary");
-        db.create_collection(
-            &stored,
-            CollectionSpec {
-                dimensions: 2,
-                settings: Default::default(),
-            },
-        )
-        .unwrap();
-        db.create_collection(
-            &ordinary,
-            CollectionSpec {
-                dimensions: 2,
-                settings: Default::default(),
-            },
-        )
-        .unwrap();
-        db.create_graph(&format!("t{TENANT}__notes_graph")).unwrap();
-        db.create_graph(&format!("t{TENANT}__ordinary_graph"))
-            .unwrap();
-        let lineage = db.lineage().unwrap();
-        let credentials = serde_json::json!({
-            "schema": 1,
-            "credentials": [{
-                "id": ID,
-                "name": "fake tenant credential",
-                "all": true,
-                "collections": [],
-                "graphs": ["*"],
-                "operations": operations,
-                "lineage": format!("{lineage:016x}"),
-                "secret_sha256": format!("{:x}", Sha256::digest(secret.as_bytes())),
-                "created_unix_ms": 0,
-                "expires_unix_ms": 9_999_999_999_999u64,
-                "revoked_unix_ms": null,
-                "rotated_from": null,
-                "tenant_id": TENANT
-            }]
-        });
-        std::fs::write(
-            directory.path().join("credentials.json"),
-            serde_json::to_vec(&credentials).unwrap(),
-        )
-        .unwrap();
-        std::fs::write(
-            directory.path().join("tenants.json"),
-            serde_json::to_vec(&serde_json::json!([{
-                "id": TENANT,
-                "name": "test tenant",
-                "max_vectors": null
-            }]))
-            .unwrap(),
-        )
-        .unwrap();
-        let mut bindings: Value = serde_json::from_str(BINDINGS).unwrap();
-        let binding = &mut bindings["bindings"][0];
-        binding["tenant"] = serde_json::json!(TENANT);
-        binding["graph"] = serde_json::json!("notes_graph");
-        binding["evidence_collection"] = serde_json::json!("notes_ev");
-        binding["grants"][0]["raw_access"] = serde_json::json!(raw_access);
-        binding["grants"][0]["principal"] = serde_json::json!(ID);
-        let path = directory.path().join("memory-bindings.json");
-        std::fs::write(&path, serde_json::to_vec(&bindings).unwrap()).unwrap();
-        let app = configured_admin_router(
-            Service::new(db),
-            ServerOptions {
-                admin_token: Some(BearerToken::new(ADMIN).unwrap()),
-                read_only_token: Some(BearerToken::new(READ_ONLY).unwrap()),
-                admin_directory: Some(directory.path().into()),
-                memory_bindings_file: Some(path),
-                ..Default::default()
-            },
-        )
-        .unwrap();
-        (app, format!("vlk_{ID}_{secret}"))
-    };
+    let build = start_tenant_scoped;
 
     let no_raw_directory = tempfile::tempdir().unwrap();
     let (no_raw, token) = build(
@@ -643,6 +898,35 @@ async fn tenant_qualified_reservations_follow_scoped_credentials_and_raw_access(
         false,
         &["read", "write", "collections", "graph_read", "graph_write"],
     );
+    for path in [
+        format!("/v1/collections/t{TENANT}__notes_ev"),
+        format!("/v1/graphs/t{TENANT}__notes_graph"),
+    ] {
+        for token in [ADMIN, READ_ONLY] {
+            let (status, error) = call_token(&no_raw, "GET", &path, Body::empty(), token).await;
+            assert_eq!(status, 403, "{path}: {error}");
+            assert_eq!(error["error"]["code"], "forbidden_scope", "{path}");
+        }
+    }
+    let (tenant_list_status, tenant_list) = get(&no_raw, "/v1/admin/tenants").await;
+    assert_eq!(tenant_list_status, 200);
+    assert!(
+        tenant_list["items"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .all(|item| item["id"] != TENANT || item["collections"] == 1)
+    );
+    let (delete_tenant_status, delete_tenant_error) = call_token(
+        &no_raw,
+        "DELETE",
+        &format!("/v1/admin/tenants/{TENANT}"),
+        Body::empty(),
+        ADMIN,
+    )
+    .await;
+    assert_eq!(delete_tenant_status, 403);
+    assert_eq!(delete_tenant_error["error"]["code"], "forbidden_scope");
     let (status, error) = call_token(
         &no_raw,
         "GET",
@@ -736,6 +1020,60 @@ async fn tenant_qualified_reservations_follow_scoped_credentials_and_raw_access(
             .iter()
             .any(|item| item["name"] == "ordinary")
     );
+
+    let full_tenant_operations = [
+        "read",
+        "search",
+        "search_build",
+        "write",
+        "import",
+        "index",
+        "collections",
+        "diagnostics",
+        "backup",
+        "graph_read",
+        "graph_write",
+    ];
+    for (raw_access, reserved_status) in [(false, 403), (true, 200)] {
+        let directory = tempfile::tempdir().unwrap();
+        let (app, token) = build(&directory, raw_access, &full_tenant_operations);
+        for (method, path, body, expected) in [
+            ("GET", "/v1/collections/notes_ev", "", reserved_status),
+            ("GET", "/v1/collections/ordinary", "", 200),
+            (
+                "PUT",
+                "/v1/collections/notes_ev/vectors/7",
+                r#"{"vector":[0.1,0.2],"payload_base64":"","metadata":{}}"#,
+                if raw_access { 204 } else { 403 },
+            ),
+            (
+                "PUT",
+                "/v1/collections/ordinary/vectors/7",
+                r#"{"vector":[0.1,0.2],"payload_base64":"","metadata":{}}"#,
+                204,
+            ),
+            ("GET", "/v1/graphs/notes_graph", "", reserved_status),
+            ("GET", "/v1/graphs/ordinary_graph", "", 200),
+            (
+                "DELETE",
+                "/v1/graphs/notes_graph",
+                "",
+                if raw_access { 200 } else { 403 },
+            ),
+            ("DELETE", "/v1/graphs/ordinary_graph", "", 200),
+        ] {
+            let (status, error) = call_token(&app, method, path, Body::from(body), &token).await;
+            assert_eq!(status, expected, "{method} {path}: {error}");
+            if expected == 403 {
+                assert_eq!(error["error"]["code"], "forbidden_scope", "{method} {path}");
+                assert_eq!(
+                    error["error"]["message"],
+                    "credential scope does not permit this operation or collection",
+                    "{method} {path}"
+                );
+            }
+        }
+    }
 
     let raw_read_directory = tempfile::tempdir().unwrap();
     let (raw_read, token) = build(
