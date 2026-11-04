@@ -367,22 +367,37 @@ frozen order and is never replaced by a global key sort.
 In particular, provenance kinds ascend HAS_REVISION, HAS_CHUNK, MENTIONS.
 Phase order and within-phase anchor/provenance/relation sorting apply **within
 each dependency group**, not across the whole batch. Group ordinals are exactly
-0..N-1 in order, groups are nonempty, and duplicate operations/edges are
-rejected. A group is one chunk's complete dependency bundle: every
-chunk-associated operation in it must name the same chunk; chunk bundles cannot
-be split across groups. A later chunk-contiguous
-group may restart at its chunk-create/put/attach phases after the previous
-group's evidence phases. Chunk ordinals remain ascending across groups;
-across the entire plan and accepted-chunk ordinals also ascend strictly with no
-duplicates. Detach is a distinct phase strictly before
-vector delete. The source guard/create remains first in the batch, tag 13 is
-allowed at most once in the plan, only for batch one, and the first-frame root
-receipt remains last in that batch;
-group boundaries do not relax these batch-wide rules. Groups are phase slices
-of section 4's dependency order (read per group), preserving section 6's
-chunk-contiguous packing and its requirement that one chunk's dependency group
-fit alone. Shared anchors may be assigned to the first group that depends on
-them; no dependency may refer to a later group.
+0..N-1 in order and groups are nonempty. Duplicate encoded operations and edge
+identities are rejected across all groups in a batch, not merely within each
+group. Gap 7 contract section 6 says: “Cleanup groups are one ownership shard with
+the owned edges it lists, or one chunk plus detach/vector delete after its
+edges are gone.” An edge identity therefore occurs at most once in the batch's
+cleanup work; listing/removing the same owned edge in two groups is rejected.
+
+A **creation group** is one chunk's indivisible dependency bundle: every
+chunk-associated operation in it must name the same complete chunk identity
+(revision identity plus ordinal, byte start and end), and the bundle cannot be
+split across groups. For tag 6, the `vector_data.chunk_key` must resolve to
+exactly one canonical chunk identity, and that exact identity must belong to
+the same creation group as its put, attachment and evidence. This is the
+`put-names-chunk` rule. A later chunk-contiguous creation group may restart at
+its chunk-create/put/attach phases after the previous group's evidence phases.
+Chunk ordinals remain ascending across groups; across the entire plan and
+accepted-chunk ordinals also ascend strictly with no duplicates.
+
+Cleanup work may span groups at the boundaries section 6 specifies: an
+ownership-shard group can list its owned edges, followed by a separate
+single-chunk group for detach/vector delete and chunk removal after those edges
+are gone. Tag 3 has no chunk field: it resolves to the same group's tag-2
+detach only by an exact `(collection, record)` match, and inherits that
+detach's chunk identity. Cleanup groups are not required to be indivisible
+creation bundles. Detach is a distinct phase strictly before vector delete.
+The source guard/create remains first in the batch, tag 13 is allowed at most
+once in the plan, only for batch one, and the first-frame root receipt remains
+last in that batch; group boundaries do not relax these batch-wide rules.
+Groups are phase slices of section 4's dependency order (read per group),
+preserving section 6's chunk-contiguous packing. Shared anchors may be assigned
+to the first group that depends on them; no dependency may refer to a later group.
 
 For a 71-byte receipt key, the binary header through count is:
 1+1+(4+71)+4+4+4+4 = **93 bytes**. Base64 capacity 4,096 ASCII bytes means
@@ -596,9 +611,11 @@ label syntax and length, identifier syntax, request symbolic-reference kinds
 and content digest/binding-generation mismatch, abort-of-abort, source-head
 first-operation and uniqueness, edge endpoint order, projection mismatch,
 group membership/strict ordinals/nonempty groups/duplicate operations, strict
-chunk/accepted-chunk ordinals across the plan, strict per-group edge ordering,
-shard order/capacity, and frame limits. Named positive/negative vectors and
-self-test mutants pin these checks. It does not claim complete
+per-batch edge-identity uniqueness, creation-bundle splitting, complete chunk
+identity membership (including tag-6 `chunk_key` resolution), cleanup-group
+splitting, strict plan-wide chunk and accepted-chunk ordinals, strict per-group
+edge ordering, shard order/capacity, and frame limits. Named positive/negative
+vectors and self-test mutants pin these checks. It does not claim complete
 admission validation for cross-record semantics, authorization, live graph
 state, plan policy ceilings, or execution outcomes.
 
@@ -694,7 +711,7 @@ All choices are proposed; none alters an approved Gap7-* decision.
 | Pipeline labels | shared reserved list; registry split | All four: 1..256 ASCII `[A-Za-z0-9._-]+`, preserved verbatim; extractor/model versions reject ASCII-case-insensitive `latest`/`default`; extractor/embedder aliases have no reserved words | Exact implemented Gap 8 registry rule (`src/server/providers.rs:373-391`); case remains in canonical bytes and digests, no normalization |
 | Binding generation | integer; UUID; opaque bytes | opaque D32 supplied by provisioning API; zero-extension permitted there | Ingestion does not interpret it |
 | Collection ordering | encoded identity bytes; semantic field order | typed semantic comparator; numeric fields numeric, strings unsigned UTF-8 | Avoids little-endian ordering inversion |
-| Dependency-group ordering/membership | batch-global phases or arbitrary grouping; per-group slices | section 4's phase order is applied independently in each contiguous, nonempty group numbered 0..N-1; a chunk's full dependency bundle is indivisible and every chunk-associated operation belongs to that chunk's group | Preserves chunk-contiguous bounded packing; no dependency may refer forward to a later group |
+| Dependency-group ordering/membership | batch-global phases or arbitrary grouping; per-group slices | section 4's phase order applies per contiguous nonempty group numbered 0..N-1; creation bundles are indivisible and all chunk references in them match the complete chunk identity; cleanup groups may split as Gap 7 contract section 6 specifies; operation and edge-identity duplicates are forbidden per batch | Preserves chunk-contiguous bounded packing; tag-6 put's `chunk_key` resolves to the same chunk identity in its creation group; no dependency may refer forward to a later group |
 | Pipeline version | raw configuration hash; framed domain hash | `H(pipeline domain, pipeline)` | Exact refinement of contract's canonical-configuration SHA-256 wording |
 | Revision head digest | revision-key digest; content digest | current revision content digest | Does not duplicate the derived key hash |
 | Span coordinates | chunk-relative everywhere; source offsets everywhere | accepted observations chunk-relative; graph edge identity spans source offsets | Bridges extraction-local spans to document evidence |

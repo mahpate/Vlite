@@ -545,12 +545,33 @@ def strict_order(values):
     return values == sorted(values) and len(values) == len(set(values))
 
 
+def add_chunk_group_member(group_members, creation_groups, chunk, tag,
+                           batch_ordinal, group_index):
+    chunk_id = identity(chunk)
+    group_members.append((tag, chunk_id))
+    if tag in (5, 6, 7, 8):
+        location = (batch_ordinal, group_index)
+        previous = creation_groups.setdefault(chunk_id, location)
+        need(previous == location, "chunk_creation_split")
+
+
+def validate_group_chunk_membership(members):
+    creation_ids = {chunk_id for tag, chunk_id in members if tag in (5, 6, 7, 8)}
+    if creation_ids:
+        need(len({chunk_id for _, chunk_id in members}) <= 1,
+             "group_chunk_membership")
+    else:
+        cleanup_ids = {chunk_id for tag, chunk_id in members if tag in (2, 3, 4)}
+        need(len(cleanup_ids) <= 1, "group_chunk_membership")
+
+
 def validate_plan_order(plan):
     captured = {identity(row["object"]) for row in plan["captured"]}
     known = {raw for raw in captured
              if decode_identity(raw)["kind"] in ("source", "revision", "chunk", "entity")}
     plan_chunk_ordinals = []
     head_creates = 0
+    chunk_creation_groups = {}
     for batch in plan["batches"]:
         groups = batch["groups"]
         need(groups and [group["ordinal"] for group in groups]
@@ -561,31 +582,35 @@ def validate_plan_order(plan):
             raise Invalid("empty_batch")
         op_bytes = [encode("operation", op) for op in ops]
         need(len(op_bytes) == len(set(op_bytes)), "duplicate_operation")
+        edge_ids = [identity(op["fields"]["edge"])
+                    if op["tag"] == 1 else identity(op["fields"]["object"]["identity"])
+                    for op in ops if op["tag"] in (1, 8)]
+        need(len(edge_ids) == len(set(edge_ids)), "duplicate_edge")
         validate_batch_start(ops, batch["ordinal"], known)
         chunk_order = []
         previous_group = None
         previous_phase = -1
         anchor_keys, provenance_order, relation_order = [], [], []
-        group_chunk_ordinals = []
+        group_chunk_identities = []
         group_indexes = [group_index for group_index, group in enumerate(batch["groups"])
                          for _ in group["operations"]]
-        vector_chunks = {}
+        detached_chunks = {}
         for group_index, group in enumerate(batch["groups"]):
             for operation in group["operations"]:
-                if operation["tag"] in (2, 7):
+                if operation["tag"] == 2:
                     op_fields = operation["fields"]
-                    vector_chunks[(group_index, op_fields["collection"], op_fields["record"])] = (
-                        op_fields["chunk"]["fields"]["ordinal"])
+                    detached_chunks[(group_index, op_fields["collection"], op_fields["record"])] = (
+                        identity(op_fields["chunk"]))
         for index, operation in enumerate(ops):
             group_index = group_indexes[index]
             if group_index != previous_group:
                 need(strict_order(anchor_keys), "node_key_order")
                 need(strict_order(provenance_order), "provenance_identity_order")
                 need(strict_order(relation_order), "relation_identity_order")
-                need(len(set(group_chunk_ordinals)) <= 1, "group_chunk_membership")
+                validate_group_chunk_membership(group_chunk_identities)
                 previous_phase = -1
                 anchor_keys, provenance_order, relation_order = [], [], []
-                group_chunk_ordinals = []
+                group_chunk_identities = []
                 previous_group = group_index
             tag, fields_ = operation["tag"], operation["fields"]
             if tag == 13:
@@ -607,7 +632,9 @@ def validate_plan_order(plan):
                     ordinal = data["fields"]["ordinal"]
                     chunk_order.append(ordinal)
                     plan_chunk_ordinals.append(ordinal)
-                    group_chunk_ordinals.append(ordinal)
+                    add_chunk_group_member(
+                        group_chunk_identities, chunk_creation_groups, data, tag,
+                        batch["ordinal"], group_index)
                 elif role == "entity":
                     anchor_keys.append(graph_key_order(data))
                 known.add(identity(data))
@@ -617,7 +644,9 @@ def validate_plan_order(plan):
                 edge_fields = ident_["fields"]
                 if ident_["kind"] in ("has_chunk", "mention", "relation"):
                     chunk = edge_fields["chunk"]
-                    group_chunk_ordinals.append(chunk["fields"]["ordinal"])
+                    add_chunk_group_member(
+                        group_chunk_identities, chunk_creation_groups, chunk, tag,
+                        batch["ordinal"], group_index)
                 if ident_["kind"] == "relation":
                     relation_order.append(identity_order(ident_))
                 else:
@@ -626,24 +655,41 @@ def validate_plan_order(plan):
                 edge = fields_["edge"]
                 edge_role = edge["kind"]
                 if edge_role in ("has_chunk", "mention", "relation"):
-                    group_chunk_ordinals.append(edge["fields"]["chunk"]["fields"]["ordinal"])
+                    add_chunk_group_member(
+                        group_chunk_identities, chunk_creation_groups,
+                        edge["fields"]["chunk"], tag, batch["ordinal"], group_index)
             elif tag == 4:
                 node = fields_["node"]
                 if node["kind"] == "chunk":
-                    group_chunk_ordinals.append(node["fields"]["ordinal"])
-            elif tag in (2, 7):
-                group_chunk_ordinals.append(fields_["chunk"]["fields"]["ordinal"])
+                    add_chunk_group_member(
+                        group_chunk_identities, chunk_creation_groups, node, tag,
+                        batch["ordinal"], group_index)
+            elif tag == 2:
+                add_chunk_group_member(
+                    group_chunk_identities, chunk_creation_groups, fields_["chunk"], tag,
+                    batch["ordinal"], group_index)
             elif tag == 3:
                 key = (group_index, fields_["collection"], fields_["record"])
-                need(key in vector_chunks, "group_chunk_membership")
-                group_chunk_ordinals.append(vector_chunks[key])
+                need(key in detached_chunks, "group_chunk_membership")
+                add_chunk_group_member(
+                    group_chunk_identities, chunk_creation_groups,
+                    decode_identity(detached_chunks[key]), tag,
+                    batch["ordinal"], group_index)
+            elif tag == 7:
+                add_chunk_group_member(
+                    group_chunk_identities, chunk_creation_groups, fields_["chunk"], tag,
+                    batch["ordinal"], group_index)
+                detached_chunks[(group_index, fields_["collection"], fields_["record"])] = (
+                    identity(fields_["chunk"]))
             elif tag == 6:
                 chunk_key = fields_["data"]["chunk_key"]
-                matching = [decode_identity(raw)["fields"]["ordinal"] for raw in known
+                matching = [decode_identity(raw) for raw in known
                             if decode_identity(raw)["kind"] == "chunk"
                             and graph_key(decode_identity(raw)) == chunk_key]
                 need(len(matching) == 1, "group_chunk_membership")
-                group_chunk_ordinals.extend(matching)
+                add_chunk_group_member(
+                    group_chunk_identities, chunk_creation_groups, matching[0], tag,
+                    batch["ordinal"], group_index)
             elif tag == 11:
                 need(identity(fields_["source"]) in known, "head_patch_source")
             if tag == 12:
@@ -651,7 +697,7 @@ def validate_plan_order(plan):
         need(strict_order(anchor_keys), "node_key_order")
         need(strict_order(provenance_order), "provenance_identity_order")
         need(strict_order(relation_order), "relation_identity_order")
-        need(len(set(group_chunk_ordinals)) <= 1, "group_chunk_membership")
+        validate_group_chunk_membership(group_chunk_identities)
         need(strict_order(chunk_order), "chunk_ordinal_order")
     ordinals = [batch["ordinal"] for batch in plan["batches"]]
     need(ordinals == list(range(1, len(ordinals) + 1)), "batch_order")
@@ -1804,6 +1850,67 @@ def self_test(document):
             return old(flattened)
         return mutated
 
+    def skip_chunk_tag(tag):
+        def replace(old):
+            def mutated(members, creation_groups, chunk, op_tag,
+                        batch_ordinal, group_index):
+                if op_tag == tag:
+                    return
+                return old(members, creation_groups, chunk, op_tag,
+                           batch_ordinal, group_index)
+            return mutated
+        return replace
+
+    def omit_creation_split(old):
+        def mutated(members, creation_groups, chunk, tag,
+                    batch_ordinal, group_index):
+            if tag in (5, 6, 7, 8):
+                members.append((tag, identity(chunk)))
+                creation_groups.setdefault(identity(chunk), (batch_ordinal, group_index))
+                return
+            return old(members, creation_groups, chunk, tag,
+                       batch_ordinal, group_index)
+        return mutated
+
+    def make_cleanup_indivisible(old):
+        def mutated(plan):
+            for batch in plan["batches"]:
+                if len(batch["groups"]) > 1:
+                    raise Invalid("cleanup_group_split")
+            return old(plan)
+        return mutated
+
+    def ordinal_chunk_membership(old):
+        def mutated(members, creation_groups, chunk, tag,
+                    batch_ordinal, group_index):
+            if chunk["kind"] == "chunk":
+                chunk_id = chunk["fields"]["ordinal"]
+                members.append((tag, chunk_id))
+                if tag in (5, 6, 7, 8):
+                    location = (batch_ordinal, group_index)
+                    previous = creation_groups.setdefault(chunk_id, location)
+                    need(previous == location, "chunk_creation_split")
+                return
+            return old(members, creation_groups, chunk, tag,
+                       batch_ordinal, group_index)
+        return mutated
+
+    def ignore_tag3_record_pair(old):
+        def mutated(plan):
+            candidate = copy.deepcopy(plan)
+            for batch in candidate["batches"]:
+                for group in batch["groups"]:
+                    detach = next((op for op in group["operations"]
+                                   if op["tag"] == 2), None)
+                    if detach is None:
+                        continue
+                    for op in group["operations"]:
+                        if op["tag"] == 3:
+                            op["fields"]["collection"] = detach["fields"]["collection"]
+                            op["fields"]["record"] = detach["fields"]["record"]
+            return old(candidate)
+        return mutated
+
     targeted = [
         ("provenance-graph-key", "plan-provenance-order", "identity_order",
          lambda old: lambda value: graph_key_order(value)
@@ -1869,8 +1976,28 @@ def self_test(document):
          omit_check("accepted_chunk_order")),
         ("mixed-group-membership", "plan-group-mixed-chunks", "need",
          omit_check("group_chunk_membership")),
-        ("vector-put-group-membership", "plan-vector-put-wrong-chunk-group", "need",
-         omit_check("group_chunk_membership")),
+        ("vector-put-group-membership", "plan-vector-put-wrong-chunk-group",
+         "add_chunk_group_member", skip_chunk_tag(6)),
+        ("creation-bundle-split", "plan-creation-group-split",
+         "add_chunk_group_member", omit_creation_split),
+        ("cleanup-groups-indivisible", "plan-cleanup-split",
+         "validate_plan_order", make_cleanup_indivisible),
+        ("chunk-identity-to-ordinal", "plan-chunk-identity-cross-revision-same-ordinal",
+         "add_chunk_group_member", ordinal_chunk_membership),
+        ("chunk-tag-1-membership", "plan-chunk-membership-tag-1",
+         "add_chunk_group_member", skip_chunk_tag(1)),
+        ("chunk-tag-2-membership", "plan-chunk-membership-tag-2",
+         "add_chunk_group_member", skip_chunk_tag(2)),
+        ("chunk-tag-3-record-pair", "plan-chunk-membership-tag-3",
+         "validate_plan_order", ignore_tag3_record_pair),
+        ("chunk-tag-4-membership", "plan-chunk-membership-tag-4",
+         "add_chunk_group_member", skip_chunk_tag(4)),
+        ("chunk-tag-7-membership", "plan-chunk-membership-tag-7",
+         "add_chunk_group_member", skip_chunk_tag(7)),
+        ("chunk-tag-8-membership", "plan-chunk-identity-cross-revision-same-ordinal",
+         "add_chunk_group_member", skip_chunk_tag(8)),
+        ("cross-group-duplicate-edge", "plan-cross-group-duplicate-edge", "need",
+         omit_check("duplicate_edge")),
         ("second-head-create", "plan-second-head-create", "need",
          omit_check("head_create_count", "head_create_first")),
         ("label-256-rejected", "pipeline-label-256", "pipeline_label",
@@ -1883,6 +2010,20 @@ def self_test(document):
         ("enum-chunker-range", "pipeline-enum-chunker-out-of-range", "need",
          omit_check("enum")),
         ("enum-request-mode-range", "request-enum-mode-out-of-range", "need",
+         omit_check("enum")),
+        ("enum-head-status-range", "head-status-out-of-range", "need",
+         omit_check("enum")),
+        ("enum-receipt-outcome-range", "receipt-outcome-out-of-range", "need",
+         omit_check("enum")),
+        ("enum-entry-action-range", "entry-action-out-of-range", "need",
+         omit_check("enum")),
+        ("enum-entry-kind-range", "entry-kind-out-of-range", "need",
+         omit_check("object_kind")),
+        ("enum-shard-channel-range", "shard-channel-out-of-range", "need",
+         omit_check("enum")),
+        ("enum-delete-mode-range", "delete-mode-out-of-range", "need",
+         omit_check("enum")),
+        ("enum-abort-mode-range", "abort-mode-out-of-range", "need",
          omit_check("enum")),
     ]
     for field in ("extractor-alias", "embedder-alias"):
