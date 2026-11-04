@@ -53,6 +53,8 @@ fn compact_seam_vector_metadata_leave_cells_empty() {
             }
             assert!(accounting.vectors_peak <= 4 * 1024 * 1024);
             assert_eq!(accounting.mapped_live, 0);
+            assert_eq!(accounting.source_live, generation.backing.as_slice().len());
+            assert_eq!(accounting.source_peak, accounting.source_live);
         }
         assert_eq!(
             generation
@@ -266,6 +268,7 @@ fn compact_seam_mapped_source_accounting() {
     );
     let accounting = workspace.accounting(&view).unwrap();
     assert_eq!(accounting.mapped_live, mapped.backing.as_slice().len());
+    assert_eq!(accounting.source_live, accounting.mapped_live);
     assert_eq!(accounting.mapped_peak, accounting.mapped_live);
     assert_eq!(accounting.plaintext_live, 0);
     assert_eq!(accounting.cells_live, 0);
