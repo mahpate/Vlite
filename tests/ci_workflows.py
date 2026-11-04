@@ -170,6 +170,7 @@ class Policy(unittest.TestCase):
             "ingestion_reference",
             "ingestion_schema_reference",
             "memory_erasure_oracle",
+            "memory_wire_oracle",
             "graph_subset_oracle",
             "graph_subset_write_oracle",
             "lease_ledger_oracle",

@@ -53,6 +53,8 @@ jobs:
           python -O tests/c1_consolidation_oracle.py --self-test
           python tests/memory_erasure_oracle.py --self-test
           python -O tests/memory_erasure_oracle.py --self-test
+          python tests/memory_wire_oracle.py --self-test
+          python -O tests/memory_wire_oracle.py --self-test
           python tests/ingestion_reference.py --self-test
           python -O tests/ingestion_reference.py --self-test
           python tests/ingestion_schema_reference.py --self-test
