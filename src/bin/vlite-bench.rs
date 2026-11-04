@@ -1,19 +1,42 @@
 use std::error::Error;
 use std::hint::black_box;
 use std::io::{self, Read};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 use std::time::Instant;
 use vlite::{
-    Condition, Database, DistanceMetric, HnswConfig, HnswMaintenancePolicy, HnswRebuildLimits,
-    HnswRebuildStatus, MAX_BATCH_BYTES, MAX_BATCH_OPERATIONS, MAX_DIMENSIONS, MAX_EF_SEARCH,
-    Metadata, MetadataValue, Mutation,
+    Condition, CreateOptions, Database, DistanceMetric, HnswConfig, HnswMaintenancePolicy,
+    HnswRebuildLimits, HnswRebuildStatus, MAX_BATCH_BYTES, MAX_BATCH_OPERATIONS, MAX_DIMENSIONS,
+    MAX_EF_SEARCH, Metadata, MetadataIndexKind, MetadataIndexSpec, MetadataValue, Mutation,
 };
 
 type Result<T> = std::result::Result<T, Box<dyn Error>>;
-const USAGE: &str = "usage: vlite-bench [--metric squared_l2|cosine|inner_product] [--vectors <file> --query-vectors <file>] [--update-vectors <file>] [--mixed-writes <updates per query>] [--mixed-deletes <deletes per query>] [--rebuild-mode lazy|background|maintenance] [--query-interval-ms <0..1000>] [--filter-every <N>|--filter-none] [--ann <m> <ef_construction> <ef_search>] [records=1000 dimensions=32 queries=100 batch_size=100 k=10 seed=42]; background/maintenance require mixed ANN and report ready-only rejections without fallback; filtered ANN retains eligible candidates, selective filters may traverse the whole graph; inner product is exact-only";
+const USAGE: &str = "usage: vlite-bench [--layout file|directory|directory-auto|directory-log] [--metric squared_l2|cosine|inner_product] [--vectors <file> --query-vectors <file>] [--update-vectors <file>] [--mixed-writes <updates per query>] [--mixed-deletes <deletes per query>] [--rebuild-mode lazy|background|maintenance] [--query-interval-ms <0..1000>] [--filter-every <N> [--filter-block <B>]|--filter-none] [--metadata-index] [--ann <m> <ef_construction> <ef_search>] [records=1000 dimensions=32 queries=100 batch_size=100 k=10 seed=42]; background/maintenance require mixed ANN and report ready-only rejections without fallback; filtered ANN retains eligible candidates, selective filters may traverse the whole graph; inner product is exact-only";
 const MAX_DATA_BYTES: usize = 256 * 1024 * 1024;
 const MAX_DISTANCE_COMPONENTS: u64 = 500_000_000;
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Layout {
+    File,
+    Directory,
+    DirectoryAuto,
+    DirectoryLog,
+}
+
+impl Layout {
+    fn name(self) -> &'static str {
+        match self {
+            Self::File => "file",
+            Self::Directory => "directory",
+            Self::DirectoryAuto => "directory-auto",
+            Self::DirectoryLog => "directory-log",
+        }
+    }
+
+    fn is_directory(self) -> bool {
+        self != Self::File
+    }
+}
 
 struct Config {
     records: usize,
@@ -25,6 +48,9 @@ struct Config {
     ann: Option<(HnswConfig, usize)>,
     filter_every: Option<usize>,
     filter_none: bool,
+    filter_block: Option<usize>,
+    metadata_index: bool,
+    layout: Option<Layout>,
     input: Option<(PathBuf, PathBuf)>,
     mixed_writes: usize,
     mixed_deletes: usize,
@@ -38,6 +64,19 @@ struct Config {
 impl Config {
     fn parse() -> Result<Self> {
         let mut args: Vec<_> = std::env::args().skip(1).collect();
+        let layout = if args.first().is_some_and(|arg| arg == "--layout") {
+            let layout = match args.get(1).ok_or(USAGE)?.as_str() {
+                "file" => Layout::File,
+                "directory" => Layout::Directory,
+                "directory-auto" => Layout::DirectoryAuto,
+                "directory-log" => Layout::DirectoryLog,
+                _ => return Err(USAGE.into()),
+            };
+            args.drain(..2);
+            Some(layout)
+        } else {
+            None
+        };
         let mut input_vectors = None;
         let mut input_queries = None;
         let mut mixed_writes = None;
@@ -136,6 +175,27 @@ impl Config {
             } else {
                 None
             };
+        let filter_block = if args.first().is_some_and(|arg| arg == "--filter-block") {
+            let block = args
+                .get(1)
+                .ok_or(USAGE)?
+                .parse::<usize>()
+                .map_err(|_| USAGE)?;
+            if filter_every.is_none() || block == 0 {
+                return Err(USAGE.into());
+            }
+            args.drain(..2);
+            Some(block)
+        } else {
+            None
+        };
+        let metadata_index = args.first().is_some_and(|arg| arg == "--metadata-index");
+        if metadata_index {
+            if filter_every.is_none() && !filter_none {
+                return Err(USAGE.into());
+            }
+            args.remove(0);
+        }
         let ann = if args.first().is_some_and(|arg| arg == "--ann") {
             if args.len() < 4 {
                 return Err(USAGE.into());
@@ -161,6 +221,15 @@ impl Config {
         } else {
             None
         };
+        if layout.is_some()
+            && (ann.is_some()
+                || mixed_writes.is_some()
+                || mixed_deletes.is_some()
+                || rebuild_mode.is_some()
+                || update_vectors.is_some())
+        {
+            return Err(USAGE.into());
+        }
         let metric = metric.unwrap_or_default();
         if ann.is_some() && metric == DistanceMetric::InnerProduct {
             return Err("inner_product is exact-only".into());
@@ -262,6 +331,9 @@ impl Config {
             ann,
             filter_every,
             filter_none,
+            filter_block,
+            metadata_index,
+            layout,
             input,
             mixed_writes,
             mixed_deletes,
@@ -277,7 +349,7 @@ impl Config {
         !self.filter_none
             && self
                 .filter_every
-                .is_none_or(|every| id.is_multiple_of(every))
+                .is_none_or(|every| (id / self.filter_block.unwrap_or(1)).is_multiple_of(every))
     }
 }
 
@@ -387,6 +459,23 @@ fn percentile(sorted_ms: &[f64], percentile: usize) -> f64 {
     sorted_ms[(sorted_ms.len() * percentile).div_ceil(100) - 1]
 }
 
+fn storage_bytes(path: &Path) -> io::Result<u64> {
+    if path.is_file() {
+        return Ok(std::fs::metadata(path)?.len());
+    }
+    let mut bytes = 0;
+    for entry in std::fs::read_dir(path)? {
+        let entry = entry?;
+        let kind = entry.file_type()?;
+        if kind.is_file() {
+            bytes += entry.metadata()?.len();
+        } else if kind.is_dir() {
+            bytes += storage_bytes(&entry.path())?;
+        }
+    }
+    Ok(bytes)
+}
+
 fn run() -> Result<()> {
     if std::env::args().nth(1).as_deref() == Some("--help") {
         println!("{USAGE}");
@@ -424,8 +513,29 @@ fn run() -> Result<()> {
         .map(std::path::PathBuf::from)
         .unwrap_or(std::env::current_dir()?);
     let directory = tempfile::tempdir_in(parent)?;
-    let path = directory.path().join("benchmark.vlite");
-    let mut db = Database::create(&path, config.dimensions)?;
+    let is_directory = config.layout.is_some_and(Layout::is_directory);
+    let path = directory.path().join(if is_directory {
+        "benchmark.vlited"
+    } else {
+        "benchmark.vlite"
+    });
+    let mut db = if is_directory {
+        Database::create_directory(&path, config.dimensions, CreateOptions::default())?
+    } else {
+        Database::create(&path, config.dimensions)?
+    };
+    if config.layout == Some(Layout::DirectoryLog) {
+        db.set_checkpoint_threshold(None);
+    }
+    if config.metadata_index {
+        let mut settings = db.collection("default")?.settings().clone();
+        settings.metadata_indexes = vec![MetadataIndexSpec {
+            field: "selected".into(),
+            // Range declares summaries without boolean equality postings.
+            kind: MetadataIndexKind::Range,
+        }];
+        db.set_collection_settings("default", settings)?;
+    }
     let format_version = db.format_version();
     let start = Instant::now();
     for (batch_index, chunk) in dataset.chunks(config.batch_size).enumerate() {
@@ -456,8 +566,15 @@ fn run() -> Result<()> {
         db.write_batch(&operations)?;
     }
     let ingest_seconds = start.elapsed().as_secs_f64();
+    let (checkpoint_ms, checkpoint_floor) = if config.layout == Some(Layout::Directory) {
+        let start = Instant::now();
+        let floor = db.checkpoint()?;
+        (Some(start.elapsed().as_secs_f64() * 1000.0), floor)
+    } else {
+        (None, None)
+    };
     db.close()?;
-    let file_bytes = std::fs::metadata(&path)?.len();
+    let file_bytes = storage_bytes(&path)?;
     let start = Instant::now();
     let mut db = Database::open(&path)?;
     let reopen_ms = start.elapsed().as_secs_f64() * 1000.0;
@@ -480,8 +597,11 @@ fn run() -> Result<()> {
         })
         .count();
     let result_count = config.k.min(eligible_records);
+    let first_query_start = config.layout.map(|_| Instant::now());
     black_box(db.search_filtered_with_metric(&queries[0], config.k, &filter, config.metric)?);
+    let first_query_ms = first_query_start.map(|start| start.elapsed().as_secs_f64() * 1000.0);
     let mut times_ms = Vec::with_capacity(config.queries);
+    let mut records_scanned = Vec::new();
     let mut matched = 0usize;
     let mut exact_denominator = 0usize;
     let mut exact_returned_counts = Vec::new();
@@ -495,6 +615,16 @@ fn run() -> Result<()> {
             config.metric,
         )?);
         times_ms.push(start.elapsed().as_secs_f64() * 1000.0);
+        if config.metadata_index {
+            let (hits, stats) = db.collection("default")?.search_with_stats(
+                query,
+                config.k,
+                &filter,
+                config.metric,
+            )?;
+            black_box(hits);
+            records_scanned.push(stats.records_scanned);
+        }
         // The oracle works directly from the generated input, outside timing.
         let expected: Vec<_> = ground_truth(&dataset, query, config.metric)
             .into_iter()
@@ -854,12 +984,33 @@ fn run() -> Result<()> {
         config.filter_none
     );
     db.close()?;
-    let final_file_bytes = std::fs::metadata(&path)?.len();
+    let final_file_bytes = storage_bytes(&path)?;
     directory.close()?;
     let samples = format!("{times_ms:?}");
     let update_json = update_checksum.map_or(String::new(), |value| {
         format!(",\"update_checksum\":\"{value:016x}\"")
     });
+    let mut supplemental_json = String::new();
+    if let Some(layout) = config.layout {
+        supplemental_json.push_str(&format!(
+            ",\"layout\":\"{}\",\"first_query_ms\":{},\"checkpoint_ms\":{},\"checkpoint_floor\":{},\"directory_bytes\":{}",
+            layout.name(),
+            first_query_ms.ok_or("missing first query timing")?,
+            checkpoint_ms.map_or("null".into(), |value| value.to_string()),
+            checkpoint_floor.map_or("null".into(), |value| value.to_string()),
+            if is_directory { final_file_bytes.to_string() } else { "null".into() },
+        ));
+    }
+    if let Some(block) = config.filter_block {
+        supplemental_json.push_str(&format!(",\"filter_block\":{block}"));
+    }
+    if config.metadata_index {
+        records_scanned.sort_unstable();
+        let median = records_scanned[records_scanned.len().div_ceil(2) - 1];
+        supplemental_json.push_str(&format!(
+            ",\"metadata_index\":\"selected\",\"filter_records_scanned_p50\":{median}"
+        ));
+    }
     times_ms.sort_by(f64::total_cmp);
     println!(
         concat!(
@@ -868,7 +1019,7 @@ fn run() -> Result<()> {
             "\"dataset_checksum\":\"{:016x}\",\"query_checksum\":\"{:016x}\",\"input\":\"{}\",\"ingest_seconds\":{:.9},\"ingest_vectors_per_second\":{:.3},",
             "\"reopen_ms\":{:.6},\"query_p50_ms\":{:.6},\"query_p95_ms\":{:.6},\"query_p99_ms\":{:.6},\"query_samples_ms\":{},\"final_file_bytes\":{},",
             "\"file_bytes\":{},\"vector_data_bytes\":{},\"query_data_bytes\":{},\"process_peak_rss_bytes\":null,",
-            "\"recall_at_k\":{:.6}{}{}{}{}}}"
+            "\"recall_at_k\":{:.6}{}{}{}{}{}}}"
         ),
         env!("CARGO_PKG_VERSION"),
         format_version,
@@ -919,7 +1070,8 @@ fn run() -> Result<()> {
         format_args!(
             ",\"final_live_records\":{}",
             live.iter().filter(|&&value| value).count()
-        )
+        ),
+        supplemental_json
     );
     Ok(())
 }

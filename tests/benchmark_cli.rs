@@ -679,3 +679,207 @@ fn maintenance_benchmark_starts_before_exhaustion_and_reports_capacity() {
         20
     );
 }
+
+fn supplemental_benchmark(flags: &[&str], workload: &[&str]) -> serde_json::Value {
+    let directory = tempfile::tempdir().unwrap();
+    let output = Command::new(env!("CARGO_BIN_EXE_vlite-bench"))
+        .args(flags)
+        .args(workload)
+        .env("VLITE_BENCH_DIR", directory.path())
+        .output()
+        .unwrap();
+    assert!(output.status.success(), "{flags:?}: {output:?}");
+    let value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(std::fs::read_dir(directory.path()).unwrap().count(), 0);
+    value
+}
+
+#[test]
+fn supplemental_layouts_reopen_all_records_with_identical_checksums_and_recall() {
+    let workload = ["3000", "16", "3", "1000", "10", "42"];
+    let baseline = supplemental_benchmark(&["--layout", "file"], &workload);
+    for layout in ["file", "directory", "directory-auto", "directory-log"] {
+        let value = supplemental_benchmark(&["--layout", layout], &workload);
+        assert_eq!(value["layout"], layout);
+        assert_eq!(value["dataset_checksum"], baseline["dataset_checksum"]);
+        assert_eq!(value["query_checksum"], baseline["query_checksum"]);
+        assert_eq!(value["recall_at_k"], 1.0);
+        assert_eq!(value["final_live_records"], 3000);
+        assert!(value["first_query_ms"].as_f64().unwrap() >= 0.0);
+        if layout == "file" {
+            assert!(value["directory_bytes"].is_null());
+        } else {
+            assert!(value["directory_bytes"].as_u64().unwrap() > 0);
+            assert_eq!(value["directory_bytes"], value["file_bytes"]);
+            assert_eq!(value["directory_bytes"], value["final_file_bytes"]);
+        }
+        if layout == "directory" {
+            assert!(value["checkpoint_ms"].as_f64().unwrap() >= 0.0);
+            assert!(value["checkpoint_floor"].as_u64().unwrap() > 0);
+        } else {
+            assert!(value["checkpoint_ms"].is_null());
+            assert!(value["checkpoint_floor"].is_null());
+        }
+        for key in [
+            "filter_block",
+            "metadata_index",
+            "filter_records_scanned_p50",
+        ] {
+            assert!(value.get(key).is_none(), "{key}: {value}");
+        }
+    }
+}
+
+#[test]
+fn supplemental_filter_blocks_follow_integer_arithmetic_and_preserve_block_one() {
+    let workload = ["3000", "16", "3", "1000", "10", "42"];
+    for (every, block) in [(1, 1024), (3, 1), (10, 1024), (3, 7), (10, 4000)] {
+        let every_arg = every.to_string();
+        let block_arg = block.to_string();
+        let value = supplemental_benchmark(
+            &["--filter-every", &every_arg, "--filter-block", &block_arg],
+            &workload,
+        );
+        let eligible = (0..3000).filter(|id| (id / block) % every == 0).count();
+        assert_eq!(value["eligible_records"], eligible);
+        assert_eq!(value["filter_block"], block);
+        assert_eq!(value["recall_at_k"], 1.0);
+        assert!(value.get("filter_records_scanned_p50").is_none());
+    }
+    let mut old = supplemental_benchmark(&["--filter-every", "3"], &workload);
+    let mut block_one =
+        supplemental_benchmark(&["--filter-every", "3", "--filter-block", "1"], &workload);
+    block_one.as_object_mut().unwrap().remove("filter_block");
+    for key in [
+        "ingest_seconds",
+        "ingest_vectors_per_second",
+        "reopen_ms",
+        "query_p50_ms",
+        "query_p95_ms",
+        "query_p99_ms",
+        "query_samples_ms",
+    ] {
+        old.as_object_mut().unwrap().remove(key);
+        block_one.as_object_mut().unwrap().remove(key);
+    }
+    assert_eq!(old, block_one);
+}
+
+#[test]
+fn supplemental_metadata_index_measures_block_summary_scans_without_changing_results() {
+    let workload = ["3000", "16", "3", "1000", "10", "42"];
+    let spread = supplemental_benchmark(&["--filter-every", "10", "--metadata-index"], &workload);
+    assert_eq!(spread["metadata_index"], "selected");
+    assert_eq!(spread["filter_records_scanned_p50"], 3000);
+    assert!(spread.get("filter_block").is_none());
+    assert!(spread.get("layout").is_none());
+    for layout_flags in [
+        vec![],
+        vec!["--layout", "directory"],
+        vec!["--layout", "directory-auto"],
+        vec!["--layout", "directory-log"],
+    ] {
+        let mut flags = layout_flags;
+        flags.extend(["--filter-every", "10", "--filter-block", "1024"]);
+        let unindexed = supplemental_benchmark(&flags, &workload);
+        flags.push("--metadata-index");
+        let indexed = supplemental_benchmark(&flags, &workload);
+        assert_eq!(indexed["metadata_index"], "selected");
+        assert_eq!(indexed["filter_records_scanned_p50"], 1024);
+        assert!(unindexed.get("filter_records_scanned_p50").is_none());
+        assert!(unindexed.get("metadata_index").is_none());
+        for key in [
+            "dataset_checksum",
+            "query_checksum",
+            "eligible_records",
+            "recall_at_k",
+            "returned_counts",
+            "final_live_records",
+        ] {
+            assert_eq!(indexed[key], unindexed[key], "{key}: {indexed}");
+        }
+        assert_eq!(indexed["recall_at_k"], 1.0);
+    }
+    let empty = supplemental_benchmark(&["--filter-none", "--metadata-index"], &workload);
+    assert_eq!(empty["eligible_records"], 0);
+    assert_eq!(empty["recall_at_k"], 1.0);
+    assert!(empty["filter_records_scanned_p50"].as_u64().unwrap() <= 3000);
+}
+
+#[test]
+fn supplemental_flags_reject_invalid_values_combinations_and_order_before_creating_files() {
+    let directory = tempfile::tempdir().unwrap();
+    let mut cases = vec![
+        vec!["--layout"],
+        vec!["--layout", "invalid"],
+        vec!["--metric", "cosine", "--layout", "file"],
+        vec!["--layout", "file", "--layout", "directory"],
+        vec!["--filter-block", "1"],
+        vec!["--filter-every", "2", "--filter-block"],
+        vec!["--filter-every", "2", "--filter-block", "0"],
+        vec!["--filter-every", "2", "--filter-block", "-1"],
+        vec!["--filter-every", "2", "--filter-block", "x"],
+        vec!["--filter-none", "--filter-block", "1"],
+        vec!["--metadata-index"],
+        vec!["--metadata-index", "--filter-every", "2"],
+        vec![
+            "--filter-every",
+            "2",
+            "--metadata-index",
+            "--filter-block",
+            "1",
+        ],
+        vec!["--filter-none", "--metadata-index", "--metadata-index"],
+        vec![
+            "--filter-every",
+            "2",
+            "--filter-block",
+            "1",
+            "--filter-block",
+            "1",
+        ],
+    ];
+    for layout in ["file", "directory", "directory-auto", "directory-log"] {
+        for rejected in [
+            vec!["--ann", "8", "32", "32"],
+            vec!["--mixed-writes", "1"],
+            vec!["--mixed-deletes", "1"],
+            vec!["--rebuild-mode", "lazy"],
+            vec!["--rebuild-mode", "background"],
+            vec!["--rebuild-mode", "maintenance"],
+            vec!["--update-vectors", "missing"],
+        ] {
+            let mut flags = vec!["--layout", layout];
+            flags.extend(rejected);
+            cases.push(flags);
+        }
+    }
+    for flags in cases {
+        let output = Command::new(env!("CARGO_BIN_EXE_vlite-bench"))
+            .args(&flags)
+            .env("VLITE_BENCH_DIR", directory.path())
+            .output()
+            .unwrap();
+        assert!(!output.status.success(), "{flags:?}: {output:?}");
+        let stderr = String::from_utf8(output.stderr).unwrap();
+        assert!(stderr.starts_with("FAIL:"), "{flags:?}: {stderr}");
+    }
+    assert_eq!(std::fs::read_dir(directory.path()).unwrap().count(), 0);
+}
+
+#[test]
+fn default_benchmark_emits_no_supplemental_keys() {
+    let value = supplemental_benchmark(&[], &["32", "4", "3", "8", "3", "42"]);
+    for key in [
+        "layout",
+        "first_query_ms",
+        "checkpoint_ms",
+        "checkpoint_floor",
+        "directory_bytes",
+        "filter_block",
+        "metadata_index",
+        "filter_records_scanned_p50",
+    ] {
+        assert!(value.get(key).is_none(), "{key}: {value}");
+    }
+}
