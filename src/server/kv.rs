@@ -398,6 +398,23 @@ mod tests {
     use super::*;
 
     #[test]
+    fn engine_errors_have_explicit_client_mapping() {
+        for (error, status, code) in [
+            (
+                Error::InvalidKvKey("invalid namespace"),
+                422,
+                "invalid_input",
+            ),
+            (Error::KvSlotsExhausted, 409, "kv_slots_exhausted"),
+            (Error::NotKvCollection, 409, "not_kv_collection"),
+        ] {
+            let mapped = ApiError::from(error);
+            assert_eq!(mapped.status.as_u16(), status);
+            assert_eq!(mapped.code, code);
+        }
+    }
+
+    #[test]
     fn decimal_expected_and_base64_are_canonical() {
         assert_eq!(decimal("18446744073709551615").unwrap(), u64::MAX);
         assert_eq!(decimal("9007199254740993").unwrap(), 9_007_199_254_740_993);
