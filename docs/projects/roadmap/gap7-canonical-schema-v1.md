@@ -1,9 +1,9 @@
 # Gap 7 canonical schema v1
 
 Status: **RATIFIED PROVISIONALLY by the coordinator on 2026-11-04** after independent
-review (233 vectors: 118 positive / 115 negative, and 86 hand mutants pass in both
-Python modes; attribute-key and stored-confidence rules were added on 2026-11-04
-as additive rulings). Every persisted byte
+review (234 vectors: 120 positive / 114 negative, and 87 hand mutants pass in both
+Python modes; attribute-key, stored-confidence and cleanup tag-1 membership rules
+were added as additive rulings). Every persisted byte
 below freezes at the release go/no-go; until then a change needs a new coordinator ruling.
 This appendix specifies bytes,
 not an implementation acceptance, public API, wire, activation or release decision.
@@ -395,9 +395,10 @@ edges are gone.” An edge identity therefore occurs at most once in the batch's
 cleanup work; listing/removing the same owned edge in two groups is rejected.
 
 A **creation group** is one chunk's indivisible dependency bundle: every
-chunk-associated operation in it must name the same complete chunk identity
+creation operation (tags 5-8) in it must name the same complete chunk identity
 (revision identity plus ordinal, byte start and end), and the bundle cannot be
-split across groups. For tag 6, the `vector_data.chunk_key` must resolve to
+split across groups. A tag-1 cleanup edge does not participate in this creation
+membership check. For tag 6, the `vector_data.chunk_key` must resolve to
 exactly one canonical chunk identity, and that exact identity must belong to
 the same creation group as its put, attachment and evidence. This is the
 `put-names-chunk` rule. A later chunk-contiguous creation group may restart at
@@ -406,9 +407,14 @@ Chunk ordinals remain ascending across groups; across the entire plan and
 accepted-chunk ordinals also ascend strictly with no duplicates.
 
 Cleanup work may span groups at the boundaries section 6 specifies: an
-ownership-shard group can list its owned edges, followed by a separate
-single-chunk group for detach/vector delete and chunk removal after those edges
-are gone. Tag 3 has no chunk field: it resolves to the same group's tag-2
+ownership-shard group can list its owned edges, including edges belonging to
+multiple chunks, followed by a separate single-chunk group for detach/vector
+delete and chunk removal after those edges are gone. Tag-1 edge removals in a
+cleanup group are not constrained to one chunk; creation-group membership remains
+strict. The negative `plan-chunk-membership-tag-1` is intentionally migrated to
+the positive `plan-cleanup-multichunk-tag-1`: its input is unchanged, and the
+new positive pins the accepted cleanup encoding. Tag 3 has no chunk field: it
+resolves to the same group's tag-2
 detach only by an exact `(collection, record)` match, and inherits that
 detach's chunk identity. Cleanup groups are not required to be indivisible
 creation bundles. Detach is a distinct phase strictly before vector delete.
@@ -639,8 +645,9 @@ label syntax and length, identifier syntax, empty/overlong attribute keys
 (`attribute-key-empty` / `attribute-key-too-long`), request symbolic-reference kinds
 and content digest/binding-generation mismatch, abort-of-abort, source-head
 first-operation and uniqueness, edge endpoint order, projection mismatch,
-group membership/strict ordinals/nonempty groups/duplicate operations, strict
-per-batch edge-identity uniqueness, creation-bundle splitting, complete chunk
+group membership/strict ordinals/nonempty groups/duplicate operations,
+multi-chunk tag-1 cleanup edges, strict per-batch edge-identity uniqueness,
+creation-bundle splitting, complete chunk
 identity membership (including tag-6 `chunk_key` resolution), cleanup-group
 splitting, strict plan-wide chunk and accepted-chunk ordinals, strict per-group
 edge ordering, shard order/capacity, and frame limits. Named positive/negative
@@ -741,7 +748,7 @@ coordinator; none alters an approved Gap7-* decision.
 | Pipeline labels | shared reserved list; registry split | All four: 1..256 ASCII `[A-Za-z0-9._-]+`, preserved verbatim; extractor/model versions reject ASCII-case-insensitive `latest`/`default`; extractor/embedder aliases have no reserved words | Exact implemented Gap 8 registry rule (`src/server/providers.rs:373-391`); case remains in canonical bytes and digests, no normalization |
 | Binding generation | integer; UUID; opaque bytes | opaque D32 supplied by provisioning API; zero-extension permitted there | Ingestion does not interpret it |
 | Collection ordering | encoded identity bytes; semantic field order | typed semantic comparator; numeric fields numeric, strings unsigned UTF-8 | Avoids little-endian ordering inversion |
-| Dependency-group ordering/membership | batch-global phases or arbitrary grouping; per-group slices | section 4's phase order applies per contiguous nonempty group numbered 0..N-1; creation bundles are indivisible and all chunk references in them match the complete chunk identity; cleanup groups may split as Gap 7 contract section 6 specifies; operation and edge-identity duplicates are forbidden per batch | Preserves chunk-contiguous bounded packing; tag-6 put's `chunk_key` resolves to the same chunk identity in its creation group; no dependency may refer forward to a later group |
+| Dependency-group ordering/membership | batch-global phases or arbitrary grouping; per-group slices | section 4's phase order applies per contiguous nonempty group numbered 0..N-1; creation operations (tags 5-8) form indivisible bundles and their chunk references match the complete chunk identity; cleanup groups may split as Gap 7 contract section 6 specifies and an ownership-shard group may list edges for multiple chunks; tag-1 cleanup edges do not participate in creation-group membership; operation and edge-identity duplicates are forbidden per batch | Preserves chunk-contiguous bounded packing; tag-6 put's `chunk_key` resolves to the same chunk identity in its creation group; no dependency may refer forward to a later group |
 | Pipeline version | raw configuration hash; framed domain hash | `H(pipeline domain, pipeline)` | Exact refinement of contract's canonical-configuration SHA-256 wording |
 | Revision head digest | revision-key digest; content digest | current revision content digest | Does not duplicate the derived key hash |
 | Span coordinates | chunk-relative everywhere; source offsets everywhere | accepted observations chunk-relative; graph edge identity spans source offsets | Bridges extraction-local spans to document evidence |
