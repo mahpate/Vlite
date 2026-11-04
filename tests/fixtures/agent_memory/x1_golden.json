@@ -27,7 +27,11 @@
     "manifest":"0000000162c66a7a5dd70c3146618063c344e531e6d4b59e379808443ce962b3abd63c5a000000000000000101",
     "receipt_key":"receipt:v1:scope:v1:25df3b6eb4f13c27b083539f86658272207df67b469883b90ef564843228bd78:87d855ef33b183dafb08e5eab4af1558b390fef26e519bb6e52eacb2fa100d4a",
     "outcome_hex":"766c6974652e6d656d6f72792e636f6e736f6c69646174652d78312e6f7574636f6d652e763200000000017a0000000000000001000000010000004376323a6533383963306336366165376165386439353565356539396535613866383131663465336639313138343237306130653936306137386265623662343334386100000001000000016d00000000",
-    "outcome_length":140
+    "outcome_length":140,
+    "entry_lengths":[912,16,618,527],
+    "derived_key":"derived-x1:v2:1e006db355ccbd97ba092522d48a36de8379f9b40bf903066cef6a48c6564088",
+    "derived_edge_length":199,
+    "outcome_chunk_key_000a":"receipt-outcome:v1:714fec71e4ad658b374cd8efca33a0f342baf65efad3d9d5e964598ea07ffcef:000a"
   },
   "cases":[
     {
@@ -45,7 +49,7 @@
     {
       "name":"all-retain-is-separate-v2",
       "steps":[
-        {"request":{"inputs":[{"id":"m","expected_memory_revision":1,"disposition":"retain"}]},"expect":{"status":"created","physical_ops":4,"logical_ops":4,"outcome":{"deleted":[]}}},
+        {"request":{"inputs":[{"id":"m","expected_memory_revision":1,"disposition":"retain"}]},"expect":{"status":"created","physical_ops":4,"logical_ops":4,"frame_bytes":2250,"roles":["summary","derived","outcome","receipt"],"outcome":{"deleted":[]}}},
         {"op":"state","expect":{"memories":["m","z"],"sequence":1}},
         {"op":"status","expect":{"stale":false,"intentionally_deleted":0}}
       ]
@@ -54,7 +58,7 @@
       "name":"mixed-canonical-input-order",
       "setup":{"sources":[{"id":"b"},{"id":"a"}]},
       "steps":[
-        {"request":{"inputs":[{"id":"b","expected_memory_revision":1,"disposition":"retain"},{"id":"a","expected_memory_revision":1,"disposition":"logical_delete"}]},"expect":{"status":"created","physical_ops":5,"logical_ops":6,"outcome":{"N":2,"deleted":["a"]}}},
+        {"request":{"inputs":[{"id":"b","expected_memory_revision":1,"disposition":"retain"},{"id":"a","expected_memory_revision":1,"disposition":"logical_delete"}]},"expect":{"status":"created","physical_ops":5,"logical_ops":6,"frame_bytes":2358,"outcome":{"N":2,"deleted":["a"]}}},
         {"op":"state","expect":{"memories":["b","z"]}},
         {"op":"status","expect":{"stale":false,"source_count":2,"intentionally_deleted":1}},
         {"request":{"inputs":[{"id":"a","expected_memory_revision":1,"disposition":"logical_delete"},{"id":"b","expected_memory_revision":1,"disposition":"retain"}]},"expect":{"status":"replayed","sequence":1}}
@@ -106,7 +110,7 @@
       "name":"unshared-evidence-deleted",
       "setup":{"sources":[{"id":"m","evidence":["e"],"attachments":["e"]}],"records":[{"id":"e","owners":["m"]}]},
       "steps":[
-        {"expect":{"status":"created","physical_ops":6,"logical_ops":7,"outcome":{"deleted":["m"],"retained_shared":[]}}},
+        {"expect":{"status":"created","physical_ops":6,"logical_ops":7,"frame_bytes":2125,"roles":["summary","detach","vector_delete","target","outcome","receipt"],"outcome":{"deleted":["m"],"retained_shared":[]}}},
         {"op":"state","expect":{"memories":["z"],"records":[],"owners":{}}}
       ]
     },
@@ -118,7 +122,7 @@
         "edges":[{"id":7,"from":"n","to":"m"}]
       },
       "steps":[
-        {"expect":{"status":"created","physical_ops":6,"logical_ops":7,"outcome":{"retained_shared":["e"]}}},
+        {"expect":{"status":"created","physical_ops":6,"logical_ops":7,"frame_bytes":2123,"outcome":{"retained_shared":["e"]}}},
         {"op":"state","expect":{"memories":["n","z"],"records":["e"],"owners":{"e":[]},"edges":[]}},
         {"request":{"C":11},"expect":{"status":"replayed","outcome":{"retained_shared":["e"]}}}
       ]
@@ -309,6 +313,15 @@
       "steps":[{"expect":{"error":"fixture:EndpointRefused"}}]
     },
     {
+      "name":"expiry-guard-refuses-due-summary",
+      "setup":{"wall":11},
+      "steps":[
+        {"request":{"summary":{"expiry_ms":11}},"expect":{"error":"fixture:EndpointRefused"}},
+        {"op":"state","expect":{"memories":["m"],"sequence":0}},
+        {"request":{"summary":{"expiry_ms":12}},"expect":{"status":"created","physical_ops":6,"logical_ops":7,"frame_bytes":2125,"roles":["summary","expiry","guard","target","outcome","receipt"]}}
+      ]
+    },
+    {
       "name":"default-input65-refused",
       "steps":[{"request":{"inputs":{"$repeat":{"id":"m","expected_memory_revision":1,"disposition":"retain"},"count":65,"enumerate":["id"]}},"expect":{"error":"OperationLimit"}}]
     },
@@ -322,7 +335,15 @@
     },
     {
       "name":"logical4096-accepted",
-      "steps":[{"request":{"summary":{"content":{"$text":"x","bytes":8376320},"expiry_ms":200}},"expect":{"status":"created","physical_ops":4095,"logical_ops":4096,"commit_frames":1}}]
+      "setup":{"sources":[{"id":"m"},{"id":"n"}]},
+      "steps":[{"request":{"inputs":[{"id":"m","expected_memory_revision":1,"disposition":"logical_delete"},{"id":"n","expected_memory_revision":1,"disposition":"retain"}],"summary":{"content":{"$text":"x","bytes":8376320}}},"expect":{"status":"created","physical_ops":4095,"logical_ops":4096,"commit_frames":1}}]
+    },
+    {
+      "name":"expiry-guard-logical4097-refused",
+      "steps":[
+        {"request":{"summary":{"content":{"$text":"x","bytes":8376320},"expiry_ms":200}},"expect":{"error":"OperationLimit"}},
+        {"op":"state","expect":{"memories":["m"],"sequence":0}}
+      ]
     },
     {
       "name":"logical4097-refused",
@@ -435,6 +456,103 @@
         {"op":"status","expect":{"stale":true}},
         {"op":"status","id":"other","expect":{"stale":false,"intentionally_deleted":1}}
       ]
+    },
+    {
+      "name":"composite-role-order",
+      "setup":{
+        "sources":[{"id":"m","content":{"$text":"x","bytes":8192},"evidence":["e"],"attachments":["e"]},{"id":"n","evidence":["f"],"attachments":["f"]},{"id":"r"}],
+        "records":[{"id":"e","owners":["m"]},{"id":"f","owners":["n"]},{"id":"new","owners":[]}],
+        "edges":[{"id":2,"from":"m","to":"chunk0","relationship":"HAS_CONTENT"},{"id":3,"from":"m","to":"chunk1","relationship":"HAS_CONTENT"},{"id":7,"from":"r","to":"n"}]
+      },
+      "steps":[
+        {"request":{"inputs":[{"id":"m","expected_memory_revision":1,"disposition":"logical_delete"},{"id":"n","expected_memory_revision":1,"disposition":"logical_delete"},{"id":"r","expected_memory_revision":1,"disposition":"retain"}],"summary":{"content":{"$text":"y","bytes":8192},"expiry_ms":200},"evidence":{"id":"new","scope":{"tenant":"t","agent":"a"}}},"expect":{"status":"created","physical_ops":21,"logical_ops":23,"roles":["summary","expiry","guard","content","content_edge","content","content_edge","derived","attach","detach","vector_delete","detach","incident","incident","incident","old_content","old_content","target","target","outcome","receipt"],"outcome":{"deleted":["m","n"],"retained_shared":["f"]}}},
+        {"op":"state","expect":{"memories":["r","z"],"records":["f","new"],"owners":{"f":[],"new":["z"]},"edges":[8,9,10],"sequence":1}}
+      ]
+    },
+    {
+      "name":"retained-input-evidence-untouched",
+      "setup":{"sources":[{"id":"m"},{"id":"n","evidence":["f"],"attachments":["f"]}],"records":[{"id":"f","owners":["n"]}]},
+      "steps":[
+        {"request":{"inputs":[{"id":"n","expected_memory_revision":1,"disposition":"retain"},{"id":"m","expected_memory_revision":1,"disposition":"logical_delete"}]},"expect":{"status":"created","physical_ops":5,"logical_ops":6,"frame_bytes":2358,"roles":["summary","derived","target","outcome","receipt"]}},
+        {"op":"state","expect":{"memories":["n","z"],"records":["f"],"owners":{"f":["n"]}}}
+      ]
+    },
+    {
+      "name":"evidence-shared-through-deleted-target",
+      "setup":{
+        "sources":[{"id":"m","evidence":["e"],"attachments":["e"]},{"id":"n"},{"id":"o"}],
+        "records":[{"id":"e","owners":["m"]}],
+        "edges":[{"id":8,"from":"n","to":"o"},{"id":7,"from":"o","to":"m"}]
+      },
+      "steps":[
+        {"request":{"inputs":[{"id":"m","expected_memory_revision":1,"disposition":"logical_delete"},{"id":"o","expected_memory_revision":1,"disposition":"logical_delete"}]},"expect":{"status":"created","physical_ops":8,"logical_ops":10,"outcome":{"deleted":["m","o"],"retained_shared":["e"]}}},
+        {"op":"state","expect":{"memories":["n","z"],"records":["e"],"owners":{"e":[]},"edges":[]}}
+      ]
+    },
+    {
+      "name":"expired-incident-left-unplanned",
+      "setup":{
+        "sources":[{"id":"m"},{"id":"n"},{"id":"p","expiry_ms":10}],
+        "edges":[{"id":7,"from":"n","to":"m","expiry_ms":10},{"id":8,"from":"p","to":"m"},{"id":9,"from":"n","to":"m"}]
+      },
+      "steps":[
+        {"expect":{"status":"created","physical_ops":5,"logical_ops":6,"roles":["summary","incident","target","outcome","receipt"]}},
+        {"op":"state","expect":{"memories":["n","z"],"edges":[]}}
+      ]
+    },
+    {
+      "name":"expired-receipt-two-new-chunks",
+      "setup":{"sources":{"$repeat":{"id":{"$text":"a","bytes":250}},"count":9,"enumerate":["id"]}},
+      "steps":[
+        {"request":{"inputs":{"$repeat":{"id":{"$text":"a","bytes":250},"expected_memory_revision":1,"disposition":"retain"},"count":1,"enumerate":["id"]}},"expect":{"status":"created","physical_ops":4,"outcome_chunks":1}},
+        {"request":{"C":110,"inputs":{"$repeat":{"id":{"$text":"a","bytes":250},"expected_memory_revision":1,"disposition":"logical_delete"},"count":9,"enumerate":["id"]},"summary":{"id":"other","content":"y"}},"expect":{"status":"created","physical_ops":14,"logical_ops":25,"outcome_chunks":2,"obsolete_outcomes":0,"sequence":2}},
+        {"op":"state","expect":{"memories":["other","z"],"edges":[],"sequence":2}}
+      ]
+    },
+    {
+      "name":"dry-run-charges-expired-receipt-replacement",
+      "steps":[
+        {"request":{"inputs":[{"id":"m","expected_memory_revision":1,"disposition":"retain"}]},"expect":{"status":"created"}},
+        {"request":{"dry_run":true,"C":110,"inputs":[{"id":"m","expected_memory_revision":1,"disposition":"retain"}],"summary":{"id":"other","content":"y"}},"expect":{"status":"plan","conflicts":[],"physical_ops":4,"logical_ops":6,"commit_frames":0}},
+        {"op":"state","expect":{"memories":["m","z"],"sequence":1}},
+        {"request":{"C":110,"inputs":[{"id":"m","expected_memory_revision":1,"disposition":"retain"}],"summary":{"id":"other","content":"y"}},"expect":{"status":"created","physical_ops":4,"logical_ops":6,"sequence":2}},
+        {"op":"edit","change":{"path":["receipts","$only","outcomes",0,"properties","outcome"],"set":"00"}},
+        {"request":{"dry_run":true,"C":110,"inputs":[{"id":"m","expected_memory_revision":1,"disposition":"retain"}],"summary":{"id":"other","content":"y"}},"expect":{"status":"plan","conflicts":["InvalidBundle"],"physical_ops":null,"logical_ops":null,"frame_bytes":null,"commit_frames":0}}
+      ]
+    },
+    {
+      "name":"altered-deleted-list-live-replay-refused",
+      "steps":[
+        {"expect":{"status":"created"}},
+        {"op":"edit","change":{"path":["receipts","$only","outcomes",0,"properties","outcome"],"set":"766c6974652e6d656d6f72792e636f6e736f6c69646174652d78312e6f7574636f6d652e763200000000017a0000000000000001000000010000004376323a6533383963306336366165376165386439353565356539396535613866383131663465336639313138343237306130653936306137386265623662343334386100000001000000016e00000000"}},
+        {"request":{"C":11},"expect":{"error":"InvalidBundle"}},
+        {"op":"state","expect":{"memories":["z"],"sequence":1}}
+      ]
+    },
+    {
+      "name":"manifest-wrong-embedded-count-refused",
+      "steps":[
+        {"expect":{"status":"created"}},
+        {"op":"edit","change":{"path":["summaries",0,"properties","x1_sources_0000"],"set":"0000000262c66a7a5dd70c3146618063c344e531e6d4b59e379808443ce962b3abd63c5a000000000000000101"}},
+        {"op":"status","expect":{"error":"InvalidBundle"}}
+      ]
+    },
+    {
+      "name":"manifest-seven-chunks-refused",
+      "steps":[
+        {"expect":{"status":"created"}},
+        {"op":"edit","change":{"path":["summaries",0,"properties","x1_source_chunks"],"set":7}},
+        {"op":"status","expect":{"error":"InvalidBundle"}}
+      ]
+    },
+    {
+      "name":"extra-outcome-chunk-refused",
+      "steps":[
+        {"expect":{"status":"created","outcome_chunks":1}},
+        {"op":"edit","change":{"path":["receipts","$only","outcomes"],"append":{"key":"receipt-outcome:v1:714fec71e4ad658b374cd8efca33a0f342baf65efad3d9d5e964598ea07ffcef:0001","labels":["VliteMemoryReceiptOutcome"],"properties":{"receipt_key":"receipt:v1:scope:v1:25df3b6eb4f13c27b083539f86658272207df67b469883b90ef564843228bd78:87d855ef33b183dafb08e5eab4af1558b390fef26e519bb6e52eacb2fa100d4a","index":1,"outcome":"00"}}}},
+        {"request":{"C":11},"expect":{"error":"InvalidBundle"}},
+        {"op":"state","expect":{"memories":["z"],"sequence":1}}
+      ]
     }
   ],
   "mutations":[
@@ -448,6 +566,28 @@
     {"name":"dry_run_writes","case":"dry-run-never-writes"},
     {"name":"partial_failure","case":"revision-conflict-no-partial-delete"},
     {"name":"delete_guard_free","case":"logical4097-refused"},
-    {"name":"obsolete_chunks_kept","case":"expired-receipt-shorter-outcome-removes-suffix"}
+    {"name":"obsolete_chunks_kept","case":"expired-receipt-shorter-outcome-removes-suffix"},
+    {"name":"guard_omitted","case":"expiry-guard-refuses-due-summary"},
+    {"name":"walk_expiry_inclusive","case":"expiry-guard-refuses-due-summary"},
+    {"name":"guard_uncounted","case":"expiry-guard-logical4097-refused"},
+    {"name":"logical_cap_exclusive","case":"logical4096-accepted"},
+    {"name":"receipt_collection_dropped","case":"one-delete-and-replay"},
+    {"name":"derived_key_v1","case":"$byte_vectors"},
+    {"name":"outcome_index_decimal","case":"$byte_vectors"},
+    {"name":"derived_edge_metadata","case":"all-retain-is-separate-v2"},
+    {"name":"derived_edge_metadata","case":"mixed-canonical-input-order"},
+    {"name":"cleanup_entries_charged_16","case":"unshared-evidence-deleted"},
+    {"name":"cleanup_entries_charged_16","case":"shared-evidence-detached-retained-reported"},
+    {"name":"role_order_nodes_first","case":"composite-role-order"},
+    {"name":"vector_before_detach","case":"composite-role-order"},
+    {"name":"retained_evidence_detached","case":"retained-input-evidence-untouched"},
+    {"name":"shared_via_deleted_ignored","case":"evidence-shared-through-deleted-target"},
+    {"name":"expired_incident_planned","case":"expired-incident-left-unplanned"},
+    {"name":"replacement_guard_max","case":"expired-receipt-two-new-chunks"},
+    {"name":"dry_run_ignores_receipt","case":"dry-run-charges-expired-receipt-replacement"},
+    {"name":"replay_deleted_unchecked","case":"altered-deleted-list-live-replay-refused"},
+    {"name":"manifest_count_unchecked","case":"manifest-wrong-embedded-count-refused"},
+    {"name":"extra_chunk_unprobed","case":"extra-outcome-chunk-refused"},
+    {"name":"manifest_chunk_cap7","case":"manifest-seven-chunks-refused","equivalent":"the exact key set, full non-final chunks and length 2*(4+41N) with N<=256 (at most 21,000 hex, six chunks) refuse every seven-chunk manifest first"}
   ]
 }

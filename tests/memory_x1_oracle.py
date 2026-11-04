@@ -10,6 +10,8 @@ content_chunk_revisions overrides them, and content_attachments injects a block.
 HAS_CONTENT edges of setup sources have explicit fixture IDs. Generated edges
 receive monotonic fixture IDs, not predictions of actual engine allocation.
 opening_reclaims explicitly charges the one optional opening reclaim envelope.
+Commit-time refusal is a fixture walk over the planned entries at the captured
+clock (a due node is absent to every later operation), never a planning check.
 No I/O rollback, real-backend durability, concurrency or performance is modeled.
 Run with --self-test, also under -O; otherwise read one fixture case on stdin.
 """
@@ -93,11 +95,13 @@ def manifest(inputs):
         for identity, revision, disposition in entries)).hex()
 
 
-def decode_manifest(value, count):
+def decode_manifest(value, count, mutation=None):
     require(type(value) is str and len(value) == 2 * (4 + 41 * count)
             and re.fullmatch(r"[0-9a-f]+", value) is not None, "InvalidBundle")
     raw = bytes.fromhex(value)
-    require(struct.unpack(">I", raw[:4])[0] == count and 1 <= count <= 256, "InvalidBundle")
+    require((mutation == "manifest_count_unchecked"
+             or struct.unpack(">I", raw[:4])[0] == count) and 1 <= count <= 256,
+            "InvalidBundle")
     result, previous = [], b""
     for offset in range(4, len(raw), 41):
         identity = raw[offset:offset + 32]
@@ -117,9 +121,10 @@ def manifest_properties(inputs):
     return dict(values, x1_source_chunks=len(values))
 
 
-def stored_manifest(properties):
+def stored_manifest(properties, mutation=None):
     count = properties.get("x1_source_chunks")
-    require(type(count) is int and 1 <= count <= 6, "InvalidBundle")
+    require(type(count) is int and 1 <= count <= (
+        7 if mutation == "manifest_chunk_cap7" else 6), "InvalidBundle")
     keys = {"x1_sources_" + format(index, "04x") for index in range(count)}
     require({key for key in properties if key.startswith("x1_sources")} == keys,
             "InvalidBundle")
@@ -190,20 +195,22 @@ def receipt_key(request):
             + c1.sha(b"consolidate-x1:v1\0" + c1.utf8(request["idempotency_key"])))
 
 
-def chunk_key(key, index):
-    return "receipt-outcome:v1:" + c1.sha(c1.utf8(key)) + ":" + format(index, "04x")
+def chunk_key(key, index, mutation=None):
+    width = "04d" if mutation == "outcome_index_decimal" else "04x"
+    return "receipt-outcome:v1:" + c1.sha(c1.utf8(key)) + ":" + format(index, width)
 
 
-def receipt_nodes(request, collection, outcome):
+def receipt_nodes(request, collection, outcome, mutation=None):
     key = receipt_key(request)
     encoded = outcome_bytes(outcome).hex()
-    chunks = [c1.node(chunk_key(key, index // 4096), "VliteMemoryReceiptOutcome", {
+    chunks = [c1.node(chunk_key(key, index // 4096, mutation), "VliteMemoryReceiptOutcome", {
         "receipt_key": key, "index": index // 4096, "outcome": encoded[index:index + 4096],
     }) for index in range(0, len(encoded), 4096)]
+    bound = "" if mutation == "receipt_collection_dropped" else collection or ""
     receipt = c1.node(key, "VliteMemoryReceipt", {
         "scope": c1.scope_key(request["scope"]),
         "x1_scope_tuple": c1.scope_bytes(request["scope"]).hex(),
-        "x1_schema": SCHEMA, "x1_collection": collection or "",
+        "x1_schema": SCHEMA, "x1_collection": bound,
         "digest": request["request_digest"],
         "expires_at_ms": str(request["C"] + request["receipt_window_ms"]),
         "outcome_chunks": len(chunks),
@@ -211,27 +218,31 @@ def receipt_nodes(request, collection, outcome):
     return receipt, chunks
 
 
-def decode_receipt(value, request, collection):
+def decode_receipt(value, request, collection, mutation=None):
     props = c1.exact_node(value["node"], "VliteMemoryReceipt", RECEIPT_FIELDS)
     key = receipt_key(request)
     require(value["node"]["key"] == key and props["scope"] == c1.scope_key(request["scope"])
             and props["x1_schema"] == SCHEMA, "InvalidBundle")
     require(props["x1_scope_tuple"] == c1.scope_bytes(request["scope"]).hex(),
             "DigestCollision")
+    # The stored list position is the chunk index. Position K stands for the
+    # single absence probe of receipt_outcome_key(key, K); nothing is scanned.
+    count = props["outcome_chunks"]
+    stored = (value["outcomes"][:count] if mutation == "extra_chunk_unprobed"
+              else value["outcomes"])
     require(props["x1_collection"] == (collection or "")
             and DIGEST.fullmatch(props["digest"]) is not None
             and re.fullmatch(r"[1-9][0-9]{0,19}", props["expires_at_ms"]) is not None
             and int(props["expires_at_ms"]) <= c1.U64_MAX
-            and 1 <= props["outcome_chunks"] <= 66
-            and len(value["outcomes"]) == props["outcome_chunks"], "InvalidBundle")
+            and 1 <= count <= 66 and len(stored) == count, "InvalidBundle")
     encoded = ""
-    for index, chunk in enumerate(value["outcomes"]):
+    for index, chunk in enumerate(stored):
         cp = c1.exact_node(chunk, "VliteMemoryReceiptOutcome", c1.OUTCOME_FIELDS)
-        require(chunk["key"] == chunk_key(key, index) and cp["receipt_key"] == key
+        require(chunk["key"] == chunk_key(key, index, mutation) and cp["receipt_key"] == key
                 and cp["index"] == index
                 and re.fullmatch(r"[0-9a-f]{2,4096}", cp["outcome"]) is not None
                 and len(cp["outcome"]) % 2 == 0
-                and (index == len(value["outcomes"]) - 1 or len(cp["outcome"]) == 4096),
+                and (index == count - 1 or len(cp["outcome"]) == 4096),
                 "InvalidBundle")
         encoded += cp["outcome"]
     return props, decode_outcome(bytes.fromhex(encoded))
@@ -287,6 +298,36 @@ class Model(c1.Model):
             for memory in (self.find(edge["scope"], edge[endpoint])
                            for endpoint in ("from", "to")))
 
+    def commit_walk(self, entries, selected, scope, clock):
+        """Batch-order presence at the captured commit clock.
+
+        From its deadline a node is absent to every later operation of the same
+        batch (src/property_graph/mod.rs:301-306). Any entry that references an
+        absent node or edge refuses the whole frame before append.
+        """
+        key_of = {m["id"]: c1.memory_key(scope, m["id"]) for m in selected}
+        live = {key_of[m["id"]]: visible(m, clock) for m in selected}
+        edges = {e["id"]: e for e in self.edges}
+        summary_live = True
+        for entry in entries:
+            role = entry["role"]
+            if role in ("expiry", "guard"):
+                present = summary_live
+                summary_live = (entry["expiry"] >= clock
+                                if self.mutation == "walk_expiry_inclusive"
+                                else entry["expiry"] > clock)
+            elif role in ("content_edge", "attach"):
+                present = summary_live
+            elif role == "derived":
+                present = summary_live and live[entry["to"]]
+            elif role in ("detach", "target"):
+                present = live[key_of[entry["owner" if role == "detach" else "id"]]]
+            elif role == "incident":
+                present = self.edge_visible(edges[entry["id"]], clock)
+            else:
+                present = True
+            require(present, "fixture:EndpointRefused")
+
     def plan(self, request, collection, old):
         c, scope, summary = request["C"], request["scope"], request["summary"]
         require(request.get("deadline") is None or c < request["deadline"], "DeadlineExceeded")
@@ -325,13 +366,15 @@ class Model(c1.Model):
                 if (same_scope(edge["scope"], scope) and edge["from"] == identity
                         and edge["relationship"] == "REFERENCES"
                         and (edge["expiry_ms"] is None or c < edge["expiry_ms"])
-                        and edge["to"] in live and edge["to"] not in reachable):
+                        and edge["to"] in live and edge["to"] not in reachable
+                        and not (self.mutation == "shared_via_deleted_ignored"
+                                 and edge["to"] in dead)):
                     reachable.add(edge["to"])
                     pending.append(edge["to"])
         shared = {evidence for identity in reachable for evidence in live[identity]["evidence"]}
         cleanups, kept = [], []
         for memory in selected:
-            if memory["id"] not in dead:
+            if memory["id"] not in dead and self.mutation != "retained_evidence_detached":
                 continue
             require(not memory.get("content_attachments"), "ForeignAttachment")
             actual = [r for r in self.records if same_scope(r["scope"], scope)
@@ -371,34 +414,48 @@ class Model(c1.Model):
         props.update(x1_schema=SCHEMA, x1_transformation=request["transformation"],
                      x1_source_digest=request["source_digest"], x1_source_count=len(selected))
         props.update(manifest_properties(request["inputs"]))
+        if summary["expiry_ms"] is not None and self.mutation != "guard_omitted":
+            # The guard repeats the expiry operation byte-for-byte. A summary
+            # already due at the commit clock is absent to it, so the frame
+            # refuses even when nothing later references the summary.
+            at = next(i for i, e in enumerate(creates) if e["role"] == "expiry")
+            creates.insert(at + 1, {"op": "SetNodeExpiry", "expiry": summary["expiry_ms"],
+                                    "role": "guard"})
         retained = {i["id"] for i in request["inputs"] if i["disposition"] == "retain"}
         derived = []
+        prefix = "derived-x1:v1:" if self.mutation == "derived_key_v1" else "derived-x1:v2:"
+        revision_field = ("x1_revision" if self.mutation == "derived_edge_metadata"
+                          else "x1_source_memory_revision")
         for item in request["inputs"]:
             if item["id"] not in retained:
                 continue
             source = c1.memory_key(scope, summary["id"])
             target = c1.memory_key(scope, item["id"])
             derived.append({"op": "PutEdge", "role": "derived", "from": source, "to": target,
-                            "key": "derived-x1:v2:" + c1.sha(
+                            "key": prefix + c1.sha(
                                 EDGE_DOMAIN + c1.s(source) + c1.s(target)),
                             "relationship": "DERIVED_FROM",
                             "properties": {"x1_schema": SCHEMA,
-                                           "x1_source_memory_revision":
+                                           revision_field:
                                            str(item["expected_memory_revision"])}})
         attach = [e for e in creates if e["role"] == "attach"]
         entries = [e for e in creates if e["role"] != "attach"] + derived + attach
         for record_id, identity, retain in sorted(cleanups, key=lambda x: c1.utf8(x[0])):
-            entries.append({"op": "Detach", "role": "detach", "id": record_id, "owner": identity})
+            pair = [{"op": "Detach", "role": "detach", "id": record_id, "owner": identity}]
             if not retain:
-                entries.append({"op": "VectorDelete", "role": "vector_delete", "id": record_id})
+                pair.append({"op": "VectorDelete", "role": "vector_delete", "id": record_id})
+            entries += pair[::-1] if self.mutation == "vector_before_detach" else pair
         incident = sorted((e for e in self.edges if same_scope(e["scope"], scope)
                            and (e["from"] in dead or e["to"] in dead)
-                           and self.edge_visible(e, c)),
+                           and (self.mutation == "expired_incident_planned"
+                                or self.edge_visible(e, c))),
                           key=lambda e: e["id"])
         if self.mutation == "incident_omitted":
             incident = incident[1:]
-        entries += [{"op": "DeleteEdge", "role": "incident", "id": e["id"],
-                     "expected_revision": e["revision"]} for e in incident]
+        edge_deletes = [{"op": "DeleteEdge", "role": "incident", "id": e["id"],
+                         "expected_revision": e["revision"]} for e in incident]
+        node_start = len(entries)
+        entries += edge_deletes
         # Source content chunks use the accepted C1 scalar-safe packing; their
         # HAS_CONTENT edges are supplied explicitly in fixtures, never inferred.
         content_keys = sorted((
@@ -413,24 +470,32 @@ class Model(c1.Model):
         entries += [{"op": "DeleteNode", "role": "target", "id": m["id"],
                      "expected_revision": m["graph_revision"]}
                     for m in selected if m["id"] in dead]
-        receipt, chunks = receipt_nodes(request, collection, outcome)
+        if self.mutation == "role_order_nodes_first":
+            entries = (entries[:node_start] + entries[node_start + len(edge_deletes):]
+                       + edge_deletes)
+        receipt, chunks = receipt_nodes(request, collection, outcome, self.mutation)
         previous = [] if old is None else old["outcomes"]
         if self.mutation != "obsolete_chunks_kept":
             entries += [{"op": "DeleteNode", "role": "obsolete_outcome", "key": node["key"]}
                         for node in previous[len(chunks):]]
         entries += [dict(node, op="PutNode", role="outcome") for node in chunks]
         entries.append(dict(receipt, op="PutNode", role="receipt"))
-        physical = len(entries)
-        logical = physical + len(deleted) + (1 + min(len(previous), len(chunks)) if old else 0)
-        require(physical <= 4096 and (self.mutation == "delete_guard_free" or logical <= 4096),
+        physical = len(entries) - (sum(e["role"] == "guard" for e in entries)
+                                   if self.mutation == "guard_uncounted" else 0)
+        overlap = (max if self.mutation == "replacement_guard_max" else min)(
+            len(previous), len(chunks))
+        logical = physical + len(deleted) + (1 + overlap if old else 0)
+        require(physical <= 4096 and (self.mutation == "delete_guard_free" or logical <= 4096
+                                      and (self.mutation != "logical_cap_exclusive"
+                                           or logical < 4096)),
                 "OperationLimit")
         commit_clock = max(c, self.wall, self.high_water)
-        require(all(visible(m, commit_clock) for m in selected)
-                and (summary["expiry_ms"] is None or summary["expiry_ms"] > commit_clock),
-                "fixture:EndpointRefused")
+        self.commit_walk(entries, selected, scope, commit_clock)
         opening = [{"op": "Reclaim", "role": "opening_reclaim"}] * self.opening_reclaims
         physical_entries = opening + entries
-        frame_bytes = 4 + sum(entry_len(e) for e in physical_entries)
+        frame_bytes = 4 + sum(16 if self.mutation == "cleanup_entries_charged_16"
+                              and e["op"] in ("Detach", "VectorDelete") else entry_len(e)
+                              for e in physical_entries)
         require(frame_bytes <= c1.LIMIT, "BodyLimit")
         return {"outcome": outcome, "entries": physical_entries,
                 "physical_ops": physical, "logical_ops": logical, "frame_bytes": frame_bytes,
@@ -449,23 +514,38 @@ class Model(c1.Model):
         require(binding["tuple"] == c1.scope_bytes(request["scope"]).hex(), "DigestCollision")
         key = receipt_key(request)
         old = self.receipts.get(key)
-        if not request["dry_run"] and old is not None:
-            props, outcome = decode_receipt(old, request, binding["collection"])
-            if request["C"] < int(props["expires_at_ms"]):
+        replaced = None
+        if old is not None and not (request["dry_run"]
+                                    and self.mutation == "dry_run_ignores_receipt"):
+            try:
+                props, outcome = decode_receipt(old, request, binding["collection"],
+                                                self.mutation)
+            except c1.Rejected as error:
+                if not request["dry_run"]:
+                    raise
+                return {"status": "plan", "conflicts": [str(error)], "physical_ops": None,
+                        "logical_ops": None, "frame_bytes": None, "commit_frames": 0}
+            live = request["C"] < int(props["expires_at_ms"])
+            if live and not request["dry_run"]:
                 require(props["digest"] == request["request_digest"], "IdempotencyConflict")
                 require(outcome["id"] == request["summary"]["id"]
                         and outcome["N"] == len(request["inputs"])
                         and outcome["source_digest"] == request["source_digest"]
-                        and outcome["deleted"] == [i["id"] for i in request["inputs"]
-                                                  if i["disposition"] == "logical_delete"],
+                        and (self.mutation == "replay_deleted_unchecked"
+                             or outcome["deleted"] == [
+                                 i["id"] for i in request["inputs"]
+                                 if i["disposition"] == "logical_delete"]),
                         "InvalidBundle")
                 if self.mutation == "replay_checks_missing_source":
                     self.plan(request, binding["collection"], old)
                 return {"status": "replayed", "outcome": outcome,
                         "sequence": old["sequence"], "receipt_revision": old["revision"],
                         "physical_ops": 0, "logical_ops": 0, "commit_frames": 0}
+            # Dry-run never replays a live receipt; it plans current state.
+            # An expired one is charged exactly as commit would replace it.
+            replaced = None if live else old
         try:
-            plan = self.plan(request, binding["collection"], None if request["dry_run"] else old)
+            plan = self.plan(request, binding["collection"], replaced)
         except c1.Rejected as error:
             if self.mutation == "partial_failure":
                 self.sequence += 1
@@ -476,7 +556,8 @@ class Model(c1.Model):
         result = {k: plan[k] for k in ("physical_ops", "logical_ops", "frame_bytes")}
         result.update(outcome_chunks=len(plan["chunks"]),
                       obsolete_outcomes=sum(e["role"] == "obsolete_outcome"
-                                            for e in plan["entries"]))
+                                            for e in plan["entries"]),
+                      roles=[e["role"] for e in plan["entries"]])
         if request["dry_run"] and self.mutation != "dry_run_writes":
             return dict(result, status="plan", conflicts=[], commit_frames=0)
         # Publish only after every check. Explicit fixture injection represents
@@ -553,7 +634,8 @@ class Model(c1.Model):
                 and type(props.get("x1_source_count")) is int
                 and DIGEST.fullmatch(props.get("x1_source_digest", "")) is not None,
                 "InvalidBundle")
-        sources = decode_manifest(stored_manifest(props), props["x1_source_count"])
+        sources = decode_manifest(stored_manifest(props, self.mutation),
+                                  props["x1_source_count"], self.mutation)
         require(isinstance(summary["derived"], list), "InvalidBundle")
         retained = {}
         for edge in summary["derived"]:
@@ -619,7 +701,11 @@ def run_case(case, base, mutation=None):
                           "owners": {r["id"]: r["owners"] for r in model.records},
                           "edges": sorted(e["id"] for e in model.edges), "sequence": model.sequence}
             elif operation == "edit":
-                c1.edit(model.__dict__, step["change"])
+                change = step["change"]
+                if "append" in change:
+                    c1.at(model.__dict__, change["path"]).append(copy.deepcopy(change["append"]))
+                else:
+                    c1.edit(model.__dict__, change)
                 result = {"edited": True}
             elif operation == "reopen":
                 restored = json.loads(json.dumps(snapshot(model), allow_nan=False))
@@ -639,6 +725,33 @@ def run_case(case, base, mutation=None):
     return results
 
 
+def check_vectors(fixture, mutation=None):
+    """Compare hand-authored byte vectors with the model under one mutation."""
+    base, vectors = fixture["base_request"], fixture["byte_vectors"]
+    request = normalize(base, mutation)
+    actual = {
+        "source_hex": request["source_bytes"].hex(),
+        "source_digest": request["source_digest"],
+        "request_hex": request["request_bytes"].hex(),
+        "request_digest": request["request_digest"],
+        "request_length": len(request["request_bytes"]),
+        "manifest": manifest(request["inputs"]),
+        "receipt_key": receipt_key(request),
+        "outcome_chunk_key_000a": chunk_key(receipt_key(request), 10, mutation),
+    }
+    initial = Model({}, base["scope"], mutation).write(base)
+    actual.update(outcome_hex=outcome_bytes(initial["outcome"]).hex(),
+                  outcome_length=len(outcome_bytes(initial["outcome"])),
+                  entry_lengths=[entry_len(e) for e in initial["entries"]])
+    retain = c1.merge(base, {"inputs": [{"id": "m", "expected_memory_revision": 1,
+                                       "disposition": "retain"}]})
+    edge = next(e for e in Model({}, base["scope"], mutation).write(retain)["entries"]
+                if e["role"] == "derived")
+    actual.update(derived_key=edge["key"], derived_edge_length=entry_len(edge))
+    ensure(actual == vectors, "independently authored binary byte vectors differ: "
+           + ", ".join(sorted(k for k in vectors if actual.get(k) != vectors[k])))
+
+
 def self_test(fixture):
     ensure(fixture["schema"] == "fixture.memory-x1.v2", "wrong fixture schema")
     cases, base = fixture["cases"], fixture["base_request"]
@@ -646,17 +759,26 @@ def self_test(fixture):
     ensure(len(names) == len(cases), "duplicate case name")
     for case in cases:
         run_case(case, base)
-    kills = []
+    check_vectors(fixture)
+    kills, equivalents = [], []
     for mutant in fixture["mutations"]:
+        target = mutant["case"]
         try:
-            run_case(names[mutant["case"]], base, mutant["name"])
+            if target == "$byte_vectors":
+                check_vectors(fixture, mutant["name"])
+            else:
+                run_case(names[target], base, mutant["name"])
         except AssertionError as error:
             # A named assertion mismatch/atomicity failure is the only kill;
             # no syntax/import/process errors qualify.
-            kills.append((mutant["name"], mutant["case"], str(error)[:160]))
+            ensure("equivalent" not in mutant, "declared equivalent was killed: "
+                   + mutant["name"])
+            kills.append((mutant["name"], target, str(error)[:160]))
         else:
-            raise AssertionError("surviving mutation: " + mutant["name"])
-        run_case(names[mutant["case"]], base)
+            ensure("equivalent" in mutant, "surviving mutation: " + mutant["name"])
+            equivalents.append((mutant["name"], target, mutant["equivalent"]))
+        if target != "$byte_vectors":
+            run_case(names[target], base)
     for count in (1, 64, 256):
         items = [{"id": f"m{index:03}", "expected_memory_revision": index + 1,
                   "disposition": "logical_delete" if index % 2 else "retain"}
@@ -680,22 +802,6 @@ def self_test(fixture):
                      ("VectorDelete", 28), ("Attach", 28), ("Reclaim", 16)):
         ensure(entry_len({"op": op}) == size, "codec arithmetic: " + op)
     request = normalize(base)
-    vectors = fixture["byte_vectors"]
-    actual_vectors = {
-        "source_hex": request["source_bytes"].hex(),
-        "source_digest": request["source_digest"],
-        "request_hex": request["request_bytes"].hex(),
-        "request_digest": request["request_digest"],
-        "request_length": len(request["request_bytes"]),
-        "manifest": manifest(request["inputs"]),
-        "receipt_key": receipt_key(request),
-    }
-    initial = Model({}, base["scope"]).write(base)
-    actual_vectors.update(outcome_hex=outcome_bytes(initial["outcome"]).hex(),
-                          outcome_length=len(outcome_bytes(initial["outcome"])))
-    ensure(actual_vectors == vectors, "independently authored binary byte vectors differ")
-    ensure([entry_len(e) for e in initial["entries"]] == [912, 16, 618, 527],
-           "independently counted smallest-delete entry lengths")
     changed = c1.merge(base, {"inputs": [{"id": "m", "expected_memory_revision": 1,
                                         "disposition": "retain"}]})
     ensure(request["request_digest"] != normalize(changed)["request_digest"],
@@ -707,9 +813,12 @@ def self_test(fixture):
     ensure(v1["request_digest"] == fixture["c1_request_digest"], "C1 v1 bytes changed")
     codec_checks(request)
     print(f"X1 proposed contract: {len(cases)} cases, {len(kills)} killed, "
-          "0 survived, 0 equivalents; manifest and fixed-entry boundary checks passed.")
+          f"{len(equivalents)} survived as declared equivalents; manifest and "
+          "fixed-entry boundary checks passed.")
     for name, case, evidence in kills:
         print(f"  KILL {name} via {case}: {evidence}")
+    for name, case, argument in equivalents:
+        print(f"  EQUIV {name} via {case}: {argument}")
 
 
 def codec_checks(request):
