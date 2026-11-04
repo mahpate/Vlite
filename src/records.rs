@@ -1354,10 +1354,9 @@ impl ReadSnapshot {
         metadata::validate_filter(conditions)?;
         let norm = crate::validate_metric_query(query, metric)?;
         #[cfg(test)]
-        if let Some(scan) = self.records.compact_iter(None) {
+        if self.records.is_compact() {
             return crate::exact_search_compact(
-                scan,
-                self.records.len(),
+                &self.records,
                 &self.expiries,
                 query,
                 norm,
