@@ -1017,3 +1017,470 @@ fn decimal(value: &Value) -> u64 {
 fn signed_decimal(value: &Value) -> Option<i64> {
     value.as_str().map(|value| value.parse().unwrap())
 }
+
+/// Every staged corpus body encodes to exactly the accounted bytes and holds
+/// one reclaim (at most) plus one entry per counted operation.
+#[test]
+fn staged_corpus_bodies_match_the_real_encoding() {
+    let document: Value = serde_json::from_str(FIXTURE).expect("write fixture JSON");
+    let graphs = document["graphs"].as_object().expect("graph map");
+    let mut checked = 0;
+    for case in document["cases"].as_array().expect("write cases") {
+        let input = expand_graph(&case["graph"], graphs);
+        let text = expand_text(&case["text"]);
+        let empty = json!({});
+        let clock = case.get("clock").unwrap_or(&empty).clone();
+        let ttl = clock
+            .get("ttl_clock_ms")
+            .unwrap_or(&input["ttl_clock_ms"])
+            .clone();
+        let (mut state, _) = graph_state(&input);
+        let before = state.clone();
+        let staged = run(
+            &mut state,
+            &input,
+            &text,
+            &case["params"],
+            case.get("limits").unwrap_or(&empty),
+            clock,
+            decimal(&ttl),
+        );
+        assert_eq!(state, before, "{}: planning changed the state", case["id"]);
+        let Ok(Some(staged)) = staged else { continue };
+        let counters = staged.result.counters;
+        assert_eq!(counters.operations, staged.expected.len());
+        if staged.result.revision.is_none() {
+            assert_eq!(counters.operations, 0);
+            continue;
+        }
+        let encoded = crate::property_graph::engine::encode_body(&staged.body).unwrap();
+        assert_eq!(
+            encoded.len() as u64,
+            counters.body_bytes,
+            "{}: accounted body bytes differ from the encoding",
+            case["id"]
+        );
+        assert_eq!(
+            staged.body.entries.len(),
+            counters.reclaim_entries + counters.operations,
+            "{}",
+            case["id"]
+        );
+        let revision = staged.result.revision.unwrap();
+        assert_eq!(revision, staged.result.view_sequence + 1);
+        state.apply(revision, &staged.body).unwrap();
+        checked += 1;
+    }
+    assert!(checked > 60, "only {checked} committed bodies checked");
+}
+
+mod database {
+    use crate::property_graph::engine::Graph;
+    use crate::property_graph::engine::model::PropertyValue;
+    use crate::property_graph::engine::subset::plan::ParameterEntry;
+    use crate::property_graph::read::GraphTextError;
+    use crate::property_graph::subset::SubsetLimits;
+    use crate::property_graph::{EdgeRef, GraphOp, NodePatch};
+    use crate::{CreateOptions, Database, Error, Expected, Metadata, MetadataValue};
+    use std::sync::atomic::AtomicBool;
+
+    fn params(values: &[(&str, PropertyValue)]) -> Vec<ParameterEntry> {
+        values
+            .iter()
+            .map(|(name, value)| ParameterEntry {
+                name: (*name).into(),
+                value: value.clone(),
+                position: 0,
+            })
+            .collect()
+    }
+
+    type Parameters = Vec<(&'static str, PropertyValue)>;
+
+    fn text(value: &str) -> PropertyValue {
+        PropertyValue::String(value.into())
+    }
+
+    fn graph(db: &Database) -> Graph {
+        db.graph("g").unwrap().graph.clone()
+    }
+
+    fn write(
+        db: &mut Database,
+        statement: &str,
+        values: &[(&str, PropertyValue)],
+    ) -> Result<Option<crate::property_graph::engine::subset::write::WriteResult>, GraphTextError>
+    {
+        db.graph_mut("g").unwrap().write_subset(
+            statement,
+            &params(values),
+            SubsetLimits::DEFAULT,
+            None,
+            None,
+        )
+    }
+
+    fn memory() -> Database {
+        let mut db = Database::create_in_memory(2, CreateOptions::default()).unwrap();
+        db.create_graph("g").unwrap();
+        db
+    }
+
+    #[test]
+    fn a_statement_commits_one_frame_and_survives_reopen() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("write.vlite");
+        let mut db = Database::create(&path, 2).unwrap();
+        db.create_graph("g").unwrap();
+        let before = db.sequence;
+        let result = write(
+            &mut db,
+            "CREATE (a:Person KEY $a {v:$v}) CREATE (b KEY $b) \
+             CREATE (a)-[r:T KEY $r]->(b) RETURN a.v AS v",
+            &[
+                ("a", text("a")),
+                ("b", text("b")),
+                ("r", text("r")),
+                ("v", PropertyValue::Integer(7)),
+            ],
+        )
+        .unwrap()
+        .unwrap();
+        assert_eq!(db.sequence, before + 1, "one statement is one frame");
+        assert_eq!(result.revision, Some(before + 1));
+        assert_eq!(result.view_sequence, before);
+        assert_eq!(result.counters.operations, 3);
+        assert_eq!(result.columns, ["v"]);
+        let node = db
+            .graph("g")
+            .unwrap()
+            .graph
+            .node_by_key("a")
+            .unwrap()
+            .clone();
+        assert_eq!(node.revision, before + 1);
+        // A MERGE hit stages nothing and appends nothing.
+        let hit = write(&mut db, "MERGE (n KEY $a)", &[("a", text("a"))])
+            .unwrap()
+            .unwrap();
+        assert_eq!(hit.revision, None);
+        assert_eq!(db.sequence, before + 1);
+        let committed = graph(&db);
+        db.close().unwrap();
+        let db = Database::open(&path).unwrap();
+        assert_eq!(db.sequence, before + 1);
+        assert_eq!(graph(&db), committed, "reopen replays the same frame");
+    }
+
+    #[test]
+    fn a_failing_statement_commits_nothing_and_reopens_unchanged() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("rollback.vlite");
+        let mut db = Database::create(&path, 2).unwrap();
+        db.create_graph("g").unwrap();
+        write(&mut db, "CREATE (n KEY $k)", &[("k", text("a"))])
+            .unwrap()
+            .unwrap();
+        let sequence = db.sequence;
+        let committed = graph(&db);
+        // The first clause stages a node; the second fails: no partial frame.
+        let error = write(
+            &mut db,
+            "CREATE (b KEY $b) CREATE (c KEY $a)",
+            &[("a", text("a")), ("b", text("b"))],
+        )
+        .unwrap_err();
+        assert!(
+            matches!(error, GraphTextError::Read(Error::GraphKeyExists)),
+            "{error:?}"
+        );
+        // Last-clause failure after earlier staged patches also rolls back.
+        let error = write(
+            &mut db,
+            "MATCH (n KEY $a) SET n.v = $v CREATE (m KEY $a)",
+            &[("a", text("a")), ("v", PropertyValue::Integer(1))],
+        )
+        .unwrap_err();
+        assert!(matches!(error, GraphTextError::Read(_)), "{error:?}");
+        assert_eq!(db.sequence, sequence);
+        assert_eq!(graph(&db), committed, "tentative changes rolled back");
+        db.close().unwrap();
+        let db = Database::open(&path).unwrap();
+        assert_eq!(db.sequence, sequence);
+        assert_eq!(graph(&db), committed);
+    }
+
+    #[test]
+    fn statements_match_the_equivalent_typed_graph_ops() {
+        let mut subset = memory();
+        let mut typed = memory();
+        let properties = |pairs: &[(&str, MetadataValue)]| -> Metadata {
+            pairs
+                .iter()
+                .map(|(name, value)| ((*name).to_owned(), value.clone()))
+                .collect()
+        };
+        let steps: Vec<(&str, Parameters, Vec<GraphOp>)> = vec![
+            (
+                "CREATE (a:Person KEY $a {v:$v}) CREATE (b KEY $b) \
+                 CREATE (a)-[r:T KEY $r {w:$w}]->(b)",
+                vec![
+                    ("a", text("a")),
+                    ("b", text("b")),
+                    ("r", text("r")),
+                    ("v", PropertyValue::Integer(1)),
+                    ("w", PropertyValue::Boolean(true)),
+                ],
+                vec![
+                    GraphOp::CreateNode {
+                        key: "a".into(),
+                        labels: vec!["Person".into()],
+                        properties: properties(&[("v", MetadataValue::Integer(1))]),
+                    },
+                    GraphOp::CreateNode {
+                        key: "b".into(),
+                        labels: vec![],
+                        properties: Metadata::new(),
+                    },
+                    GraphOp::CreateEdge {
+                        key: Some("r".into()),
+                        source: "a".into(),
+                        relationship: "T".into(),
+                        destination: "b".into(),
+                        properties: properties(&[("w", MetadataValue::Boolean(true))]),
+                    },
+                ],
+            ),
+            (
+                "MATCH (a KEY $a)-[r:T]->(b) SET a.x = $x SET a:Admin REMOVE a.v SET r.w = $w",
+                vec![
+                    ("a", text("a")),
+                    ("x", text("y")),
+                    ("w", PropertyValue::Integer(2)),
+                ],
+                vec![
+                    GraphOp::PatchNode {
+                        key: "a".into(),
+                        patch: NodePatch {
+                            set: properties(&[("x", MetadataValue::String("y".into()))]),
+                            ..NodePatch::default()
+                        },
+                        expected: Expected::Any,
+                    },
+                    GraphOp::PatchNode {
+                        key: "a".into(),
+                        patch: NodePatch {
+                            add_labels: vec!["Admin".into()],
+                            ..NodePatch::default()
+                        },
+                        expected: Expected::Any,
+                    },
+                    GraphOp::PatchNode {
+                        key: "a".into(),
+                        patch: NodePatch {
+                            unset: vec!["v".into()],
+                            ..NodePatch::default()
+                        },
+                        expected: Expected::Any,
+                    },
+                    GraphOp::PatchEdge {
+                        edge: EdgeRef::Key("r".into()),
+                        set: properties(&[("w", MetadataValue::Integer(2))]),
+                        unset: vec![],
+                        expected: Expected::Any,
+                    },
+                ],
+            ),
+            (
+                "MATCH (b KEY $b) DETACH DELETE b",
+                vec![("b", text("b"))],
+                vec![
+                    GraphOp::DeleteEdge {
+                        edge: EdgeRef::Key("r".into()),
+                        expected: Expected::Any,
+                    },
+                    GraphOp::DeleteNode {
+                        key: "b".into(),
+                        expected: Expected::Any,
+                    },
+                ],
+            ),
+        ];
+        for (statement, values, ops) in steps {
+            let result = write(&mut subset, statement, &values).unwrap().unwrap();
+            let batch = typed.graph_mut("g").unwrap().write_batch(&ops).unwrap();
+            assert_eq!(result.revision, batch.revision, "{statement}");
+            assert_eq!(result.counters.operations, ops.len(), "{statement}");
+            assert_eq!(graph(&subset), graph(&typed), "{statement}");
+        }
+    }
+
+    #[test]
+    fn one_captured_clock_reclaims_and_is_never_sampled_again() {
+        let mut db = memory();
+        let expiry = u64::MAX / 2;
+        {
+            let mut graph = db.graph_mut("g").unwrap();
+            graph.create_node("old", &[], &Metadata::new()).unwrap();
+            graph.create_node("live", &[], &Metadata::new()).unwrap();
+            graph
+                .set_node_expiry("old", Some(expiry), Expected::Any)
+                .unwrap();
+            graph
+                .set_node_expiry("live", Some(expiry + 1), Expected::Any)
+                .unwrap();
+        }
+        let sequence = db.sequence;
+        let result = db
+            .graph_mut("g")
+            .unwrap()
+            .write_subset(
+                "MATCH (n) SET n:Seen RETURN n",
+                &[],
+                SubsetLimits::DEFAULT,
+                None,
+                Some(expiry),
+            )
+            .unwrap()
+            .unwrap();
+        assert_eq!(result.ttl_clock_ms, expiry);
+        assert_eq!(result.counters.reclaim_entries, 1, "deadline == C is due");
+        assert_eq!(result.counters.binding_rows, 1, "deadline C+1 stays live");
+        assert_eq!(result.counters.operations, 1);
+        assert_eq!(db.sequence, sequence + 1);
+        assert!(graph(&db).node_by_key("old").is_none());
+        assert!(
+            graph(&db)
+                .node_by_key("live")
+                .unwrap()
+                .labels
+                .contains("Seen")
+        );
+        assert_eq!(
+            db.graph_clock, expiry,
+            "commit advances the graph clock to C"
+        );
+        // A later default-clock statement never runs before C.
+        let later = write(&mut db, "MATCH (n) SET n.v = $v", &[("v", text("x"))])
+            .unwrap()
+            .unwrap();
+        assert!(later.ttl_clock_ms >= expiry);
+    }
+
+    #[test]
+    fn deadline_and_operation_cap_refuse_without_appending() {
+        let mut db = memory();
+        let nodes = (0..4097)
+            .map(|id| GraphOp::CreateNode {
+                key: format!("n{id}"),
+                labels: vec![],
+                properties: Metadata::new(),
+            })
+            .collect::<Vec<_>>();
+        {
+            let mut graph = db.graph_mut("g").unwrap();
+            graph.write_batch(&nodes[..4096]).unwrap();
+            graph.write_batch(&nodes[4096..]).unwrap();
+        }
+        let mut limits = SubsetLimits::DEFAULT;
+        limits.max_binding_rows = 10_000;
+        limits.graph.max_visited_nodes = 10_000;
+        // The real clock still bounds the hold; allow the ceiling here.
+        limits.write_deadline_ms = 1_000;
+        let sequence = db.sequence;
+        let before = graph(&db);
+        // The production clock bounds the writer-guard hold.
+        let short = SubsetLimits {
+            write_deadline_ms: 1,
+            ..limits
+        };
+        let error = db
+            .graph_mut("g")
+            .unwrap()
+            .write_subset("MATCH (n) SET n:X", &[], short, None, None)
+            .unwrap_err();
+        assert!(
+            matches!(
+                error,
+                GraphTextError::Read(Error::InvalidQuery("subset deadline exceeded"))
+            ),
+            "{error:?}"
+        );
+        assert_eq!(db.sequence, sequence);
+        let error = db
+            .graph_mut("g")
+            .unwrap()
+            .write_subset("MATCH (n) SET n:X", &[], limits, None, None)
+            .unwrap_err();
+        assert!(
+            matches!(error, GraphTextError::Read(Error::BatchTooLarge)),
+            "{error:?}"
+        );
+        assert_eq!(db.sequence, sequence);
+        assert_eq!(graph(&db), before);
+        db.graph_mut("g")
+            .unwrap()
+            .delete_node("n0", Expected::Any)
+            .unwrap();
+        let result = db
+            .graph_mut("g")
+            .unwrap()
+            .write_subset("MATCH (n) SET n:X", &[], limits, None, None)
+            .unwrap()
+            .unwrap();
+        assert_eq!(result.counters.operations, 4096);
+        assert_eq!(db.sequence, sequence + 2);
+    }
+
+    #[test]
+    fn cancellation_stops_planning_before_any_append() {
+        let mut db = memory();
+        {
+            let mut graph = db.graph_mut("g").unwrap();
+            for id in 0..200 {
+                graph
+                    .create_node(&format!("n{id}"), &[], &Metadata::new())
+                    .unwrap();
+            }
+        }
+        let sequence = db.sequence;
+        let before = graph(&db);
+        let cancel = AtomicBool::new(true);
+        let error = db
+            .graph_mut("g")
+            .unwrap()
+            .write_subset(
+                "MATCH (n) SET n:X",
+                &[],
+                SubsetLimits::DEFAULT,
+                Some(&cancel),
+                None,
+            )
+            .unwrap_err();
+        assert!(
+            matches!(
+                error,
+                GraphTextError::Read(Error::InvalidQuery("subset cancelled"))
+            ),
+            "{error:?}"
+        );
+        assert_eq!(db.sequence, sequence);
+        assert_eq!(graph(&db), before);
+    }
+
+    #[test]
+    fn read_only_statements_and_planning_errors_never_append() {
+        let mut db = memory();
+        let sequence = db.sequence;
+        assert!(write(&mut db, "MATCH (n) RETURN n", &[]).unwrap().is_none());
+        assert!(matches!(
+            write(&mut db, "CREATE (n KEY $k", &[("k", text("a"))]),
+            Err(GraphTextError::Query(_))
+        ));
+        assert!(matches!(
+            write(&mut db, "CREATE (n KEY $k)", &[("k", text(""))]),
+            Err(GraphTextError::Read(_))
+        ));
+        assert_eq!(db.sequence, sequence);
+    }
+}
