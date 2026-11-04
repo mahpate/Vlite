@@ -1,0 +1,52 @@
+{
+  "schema": "vlite.compact-ann-boundaries",
+  "version": 1,
+  "level_worksheet": [
+    {"id": 0, "outputs": ["e220a8397b1dcdaf"], "level": 0},
+    {"id": 2, "outputs": ["975835de1c9756ce", "bfc846100bfc1e42", "987bbcbfdd7e532f"], "level": 2},
+    {"id": 4, "outputs": ["6e73e372e2338aca", "e474c66a4b98b030", "dbef19fc8e7b845f"], "level": 2}
+  ],
+  "bind_cases": [
+    {"name":"different-partition-splits","mode":"valid","outcome":"ok"},
+    {"name":"profile-none-bind","mode":"none","outcome":"ok"},
+    {"name":"topology-global-gap","mode":"topology-gap","reason":"topology gap/overlap/global N"},
+    {"name":"topology-global-overlap","mode":"topology-overlap","reason":"topology gap/overlap/global N"},
+    {"name":"code-global-gap","mode":"code-gap","reason":"code gap/overlap/dimensions"},
+    {"name":"code-global-overlap","mode":"code-overlap","reason":"code gap/overlap/dimensions"},
+    {"name":"global-duplicate-ID","mode":"duplicate-id","reason":"global ID order"},
+    {"name":"source-ID-mismatch","mode":"source-id","reason":"source ID/revision/ordinal"},
+    {"name":"source-revision-mismatch","mode":"source-revision","reason":"source ID/revision/ordinal"},
+    {"name":"source-ordinal-mismatch","mode":"source-ordinal","reason":"source ID/revision/ordinal"},
+    {"name":"wrong-level-neighbor","mode":"wrong-level","reason":"wrong-level neighbor"},
+    {"name":"recomputed-level-mismatch","mode":"level","reason":"recomputed level"},
+    {"name":"entry-first-maximum-tie","mode":"entry","reason":"entry/max level"},
+    {"name":"descriptor-maximum-mismatch","mode":"maximum","reason":"entry/max level"},
+    {"name":"cosine-eligibility-mismatch","mode":"eligibility","reason":"eligibility coverage"},
+    {"name":"source-code-mismatch","mode":"source-code","reason":"source codes"},
+    {"name":"stale-metadata-section","mode":"metadata","outcome":"stale"},
+    {"name":"stale-source-revision","mode":"revision","outcome":"stale"},
+    {"name":"stale-source-expiry","mode":"expiry","outcome":"stale"},
+    {"name":"stale-requested-ef","mode":"config-ef","outcome":"stale"},
+    {"name":"stale-requested-seed","mode":"config-seed","outcome":"stale"},
+    {"name":"stale-requested-rotation-seed","mode":"config-rotation","outcome":"stale"}
+  ],
+  "numeric_cases": [
+    {"name":"smallest-subnormal","bits":{"1":"01000000","2":"0100"},"minimum_f64":{"1":"000000000000a036","2":"000000000000703e"}},
+    {"name":"largest-finite","bits":{"1":"ffff7f7f","2":"ff7b"},"minimum_f64":{"1":"000000e0ffffef47","2":"0000000000fcef40"}},
+    {"name":"negative-smallest-subnormal","bits":{"1":"01000080","2":"0180"},"minimum_f64":{"1":"000000000000a0b6","2":"00000000000070be"}},
+    {"name":"source-NaN","bits":{"1":"0000c07f","2":"007e"},"outcome":"corrupt"},
+    {"name":"source-positive-infinity","bits":{"1":"0000807f","2":"007c"},"outcome":"corrupt"},
+    {"name":"source-negative-infinity","bits":{"1":"000080ff","2":"00fc"},"outcome":"corrupt"},
+    {"name":"source-wrong-component-width","bits":{"1":"0000","2":"00000000"},"outcome":"corrupt"}
+  ],
+  "unsupported_cases": [
+    {"name":"binding-v2-short"},
+    {"name":"settings-v2-short"},
+    {"name":"rotation-family-v2-short"},
+    {"name":"rotation-algorithm-v2-short"},
+    {"name":"settings-v2-bad-entry","outcome":"corrupt","reason":"complete descriptor"},
+    {"name":"settings-v2-bad-minimum","outcome":"corrupt","reason":"noncanonical scalar minimum"},
+    {"name":"quantizer-v2-bad-settings","outcome":"corrupt","reason":"settings fields"}
+  ],
+  "tampered_expectations": ["norm-bit", "source-ordinal", "source-digest"]
+}

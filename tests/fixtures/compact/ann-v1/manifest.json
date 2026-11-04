@@ -1,0 +1,36 @@
+{
+  "schema": "vlite.compact-ann-manifest",
+  "version": 1,
+  "files": {
+    "goldens.json": "aed6a9ae6d256b3960c945e4853d4813f095da3707551f9f6f893ef2a382f897",
+    "malformed.json": "0a2acacf7619b06419472e49b9fd471d74ff14093537245660446626ebd34504",
+    "scalar-minima.json": "77d64c2ffb6175b7d0b02b8ecccfccd7c67fe4cc76750fb3531553e6af273874",
+    "boundaries.json": "092e25f44fe98bca538402fd544bd287ea4f7fb9dac471b8be597b51a6f5d3ed"
+  },
+  "mutants": {
+    "wrong-source-bytes": "golden-1",
+    "omit-set-section": "golden-1",
+    "reorder-neighbors": "reorder-neighbors",
+    "neighbor-N": "neighbor-N",
+    "skip-level-cap": "level-cap",
+    "degree-above": "degree-above",
+    "round-code-stride": "rotated-768",
+    "hash-padding": "golden-1",
+    "native-endian": "golden-1",
+    "accept-trailing": "trailing-byte-p1",
+    "stale-as-corrupt": "bind-foreign-valid-set-p1",
+    "unsupported-as-corrupt": "bind-unsupported-set-atomic-p1",
+    "split-257": "topology-257",
+    "allow-padding-64": "padding-64",
+    "half-even": "half-away",
+    "accept-NaN-norm": "rotated-norm-NaN-p1",
+    "omit-B-section": "golden-1",
+    "omit-lineage": "golden-1",
+    "drop-signed-zero": "signed-zero-C",
+    "encode-raw-minimum": "all-zero-constant-p1",
+    "accept-negative-zero-minimum": "minimum-negative-zero-middle-p1",
+    "bind-raw-minimum": "bind-canonical-retrained-minus-zero-p1",
+    "first-equal-minimum": "zero-tie-minus-first-p1",
+    "canonicalize-negative-minimum": "negative-minimum-preserved-p1"
+  }
+}

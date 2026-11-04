@@ -29,6 +29,8 @@ jobs:
       - name: Verify compact precision, graph, temporal, filter, memory and ingestion golden oracles
         run: |
           python tests/compact_float16_oracle.py --self-test
+          python tests/compact_ann_oracle.py --self-test
+          python -O tests/compact_ann_oracle.py --self-test
           python tests/precision_catalog_oracle.py --self-test
           python tests/graph_algorithm_oracle.py --self-test
           python tests/graph_iteration_oracle.py --self-test

@@ -148,6 +148,7 @@ class Policy(unittest.TestCase):
         text = (ROOT / ".github/workflows/ci.yml").read_text(encoding="utf-8")
         changes = text.split("\n  changes:\n", 1)[1].split("\n  documentation:\n", 1)[0]
         for oracle in (
+            "compact_ann_oracle",
             "compact_graph_oracle",
             "compact_graph_overlay_oracle",
             "compact_graph_property_oracle",
