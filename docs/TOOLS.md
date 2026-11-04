@@ -76,7 +76,11 @@ including malformed error bodies; validated remote errors retain their mappings.
 `--timeout-ms` accepts 1..5000 (default 5000) and changes only the HTTP timeout,
 never JSON `deadline_ms`. There are no automatic retries, paging or job loops.
 After an ambiguous mutation, explicitly use `receipt` with the original scope,
-operation and idempotency key before considering resubmission. Pending erasure
+operation and idempotency key before considering resubmission. The first server
+slice will refuse a `receipt` lookup of a `remember` (409
+`memory_capability_unavailable`; its `details.feature` is
+`remember_receipt_lookup`, which the error line does not carry), and the original
+`remember` response carries the complete receipt. Pending erasure
 status and resumption are explicit `erasure` and `resume-erasure` calls.
 Logical deletion is not secure erasure of backups or external copies.
 

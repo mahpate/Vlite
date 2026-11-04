@@ -101,8 +101,8 @@ Peer-pool gaps are tracked in the pool repository's `TODO.md` under
 1. **Approved:** the agent memory track (items 1–4) runs alongside the
    storage goals, starting with the key-value API (item 2). Its embedded
    Rust API has landed
-   ([storage features](../../STORAGE-FEATURES.md#key-value-store)); REST and
-   gRPC routes wait for the OpenAPI review.
+   ([storage features](../../STORAGE-FEATURES.md#key-value-store)), and its
+   REST and gRPC routes are integrated in the 0.7.0 candidate (unreleased).
 2. **Decided 2026-10-30:** for graph TTL, an expiring node takes its edges
    with it (cascade), and an edge can also expire on its own. This matches
    Memgraph TTL ("the vertex and all its associated edges will be deleted")

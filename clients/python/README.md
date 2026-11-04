@@ -41,7 +41,7 @@ If the caller elects to retry, it must retry the whole request.
 
 ## Key-value operations
 
-The unreleased KV REST surface requires a server with KV routes and an existing,
+The KV REST surface (added in 0.7.0) requires a server with KV routes and an existing,
 dedicated one-dimensional collection (`cache` below). Namespaces are application
 partitions, not authorization boundaries. Run with `VLITE_URL` and
 `VLITE_AUTH_TOKEN` set:
@@ -113,11 +113,15 @@ returns a `MemoryMutationResponse` or, with `dry_run`, a `MemoryPlanResponse`.
 404 `memory_not_found`, `receipt_not_found` and `erasure_not_found` are ordinary
 errors. The first server slice (provisional) serves `remember` for kinds `entity`
 and `episodic`, `recall`, `consolidate` (retain only, commit only), `forget` (an
-`ids` target with `logical_delete`) and `get_receipt`; `find_facts`, `correct_facts`,
+`ids` target with `logical_delete`) and `get_receipt`, except that it will refuse a
+lookup of a `remember` receipt with 409 `memory_capability_unavailable` and
+`details["feature"]` `remember_receipt_lookup` (the original `remember` response
+carries the complete receipt); `find_facts`, `correct_facts`,
 `get_erasure`, `resume_erasure` and options such as fact kinds, `dry_run`, `expire`,
 `embedding_provider` and `as_of_ms` answer 409 `memory_capability_unavailable` with
 `details["feature"]`. Body `deadline_ms` is the engine deadline, not the HTTP
 `timeout`. Nothing is retried, split, paginated or embedded; after a
-`TransportError` a mutation may have committed, so reconcile with `get_receipt`.
+`TransportError` a mutation may have committed, so reconcile with `get_receipt`
+(the first server slice will refuse a lookup of a `remember` receipt).
 
 Licensed under MIT; see LICENSE.

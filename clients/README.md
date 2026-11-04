@@ -88,8 +88,8 @@ Node.js is the tested runtime; browser clients are not a separate supported SDK.
 
 ## Supported operations and wire contracts
 
-The Python, JavaScript and .NET clients also expose the unreleased KV REST
-candidate: `kv_get`, `kv_put`, `kv_delete`, `kv_list`; `kvGet`, `kvPut`,
+The Python, JavaScript and .NET clients also expose the key-value REST
+operations added in 0.7.0: `kv_get`, `kv_put`, `kv_delete`, `kv_list`; `kvGet`, `kvPut`,
 `kvDelete`, `kvList`; and `KvGetAsync`, `KvPutAsync`, `KvDeleteAsync`,
 `KvListAsync`, respectively. These flat methods require an explicit collection,
 namespace and (except list) key. Use a pre-existing, dedicated one-dimensional
@@ -111,13 +111,16 @@ The JavaScript client also exposes the unreleased agent-memory REST candidate th
 `correctFacts`, `consolidate`, `forget`, `getReceipt`, `getErasure` and `resumeErasure`, each taking
 one request object and returning the full response. The first server slice supports remember
 (`entity` and `episodic`), recall, consolidate (retain, commit only), forget (`ids` target, logical
-delete) and receipt lookup; other operations and fields answer 409 `memory_capability_unavailable`
-with `details.feature`, and the client surfaces that refusal unchanged. u64 and i64 inputs are
+delete) and receipt lookup, except that it will refuse a lookup of a `remember` receipt (the original
+`remember` response carries the complete receipt). That lookup and other operations and fields answer
+409 `memory_capability_unavailable` with `details.feature` (`remember_receipt_lookup` for the lookup),
+and the client surfaces that refusal unchanged. u64 and i64 inputs are
 decimal strings, safe integers or `bigint` (an unsafe `Number` is a `TypeError`) and are sent as
 decimal strings; outputs stay decimal strings. `deadline_ms` is the engine deadline, not the HTTP
 timeout. HTTP 202 is an ordinary pending response. Errors carry `code`, `status`, `requestId` and
 optional `details`; only 404 `not_found` becomes `UnsupportedError`. A timeout or cancellation is a
-`TransportError` and never a retry: reconcile a mutation with `getReceipt`. No embedding, splitting,
+`TransportError` and never a retry: reconcile a mutation with `getReceipt` (the first server slice
+will refuse a lookup of a `remember` receipt). No embedding, splitting,
 paging or idempotency key is added. See the
 [JavaScript](javascript/README.md#memory-operations) example.
 
@@ -460,7 +463,7 @@ nine synchronous methods are `remember`, `recall`, `find_facts`, `correct_facts`
 `consolidate`, `forget`, `get_receipt`, `get_erasure` and `resume_erasure`. Each
 takes one request mapping (a `TypedDict` named as in the contract's section 8) and
 returns the full typed response; an HTTP 202 pending result is a normal response.
-JavaScript and .NET do not have it yet.
+The JavaScript and .NET clients have the same nine operations.
 
 - Integers: U64/I64 values are canonical decimal strings in responses. Requests
   accept the same string or an exact in-range `int` and always send the canonical
@@ -476,11 +479,15 @@ JavaScript and .NET do not have it yet.
   `erasure_not_found` are ordinary errors.
 - Nothing is retried, split, paginated, embedded or defaulted. A mutation that
   ends in `TransportError` (timeout, disconnect, cancellation) may have committed:
-  reconcile with `get_receipt` before reusing the key.
+  reconcile with `get_receipt` before reusing the key (the first server slice
+  will refuse a lookup of a `remember` receipt).
 - The first server slice (provisional; the server is authoritative) supports
   `remember` for kinds `entity` and `episodic`, `recall`, `consolidate` (retain
   only, commit only), `forget` (an `ids` target with `logical_delete`) and
-  `get_receipt`. `find_facts`, `correct_facts`, `get_erasure` and `resume_erasure`,
+  `get_receipt`, except that it will refuse a lookup of a `remember` receipt
+  with 409 `memory_capability_unavailable` and `details["feature"]`
+  `remember_receipt_lookup` (the original `remember` response carries the
+  complete receipt). `find_facts`, `correct_facts`, `get_erasure` and `resume_erasure`,
   and options such as fact kinds, `dry_run`, `expire`, `embedding_provider` and
   `as_of_ms`, answer 409 `memory_capability_unavailable` with `details["feature"]`.
   The client exposes all nine methods and does not hide these refusals.
@@ -607,7 +614,7 @@ transports (the caller is responsible for equivalent transport safety).
 
 ### .NET key-value operations
 
-For a server supporting the KV REST candidate and an existing dedicated
+For a server that serves the key-value routes (0.7.0 or newer) and an existing dedicated
 one-dimensional `cache` collection, run in a .NET 8+ console application
 referencing `VLite.Client`:
 
@@ -661,11 +668,14 @@ var scope = new MemoryScope("agent-1");
 var saved = await memory.RememberAsync(new MemoryRememberRequest(scope, "key-1",
     [new MemoryItem("e1", MemoryKind.Entity, "Ada", observedAtMs, new MemorySource("s1", "caller"))]));
 var found = await memory.RecallAsync(new MemoryRecallRequest(scope, Text: "Ada", Limit: 5));
-var receipt = await memory.GetReceiptAsync(new MemoryReceiptRequest(scope, MemoryOperation.Remember, "key-1"));
+Console.WriteLine(saved.Receipt.Sequence);
 ```
 
 The first server slice implements remember (kinds `entity` and `episodic`),
-recall, consolidate, forget (`ids` targets, logical delete) and receipt lookup.
+recall, consolidate, forget (`ids` targets, logical delete) and receipt lookup,
+except that it will refuse a lookup of a `remember` receipt (409
+`memory_capability_unavailable` with `Details.Feature` `remember_receipt_lookup`;
+the `RememberAsync` response carries the complete receipt).
 Facts, fact correction and erasure lookup/resume answer 409
 `memory_capability_unavailable` with `Details.Feature`; the client exposes all
 nine and never hides a refusal. Mutations carry an `idempotency_key` in the body.
@@ -680,7 +690,8 @@ with `Field`, `Limit`, `Requested`, `Feature`, `Category`). HTTP 202 (a pending
 erasure) is a normal result. Only 404 `not_found` (unknown route) raises
 `UnsupportedException`. A timeout, cancellation or unreadable reply is a
 `TransportException`: a mutation may have committed, so reconcile it with
-`GetReceiptAsync` instead of retrying. Nothing is retried, paged, split or
+`GetReceiptAsync` instead of retrying (the first server slice will refuse a
+lookup of a `remember` receipt). Nothing is retried, paged, split or
 embedded for you, and `DeadlineMs` is the engine deadline, never the HTTP timeout.
 
 ### Optional live Go/.NET e2e
