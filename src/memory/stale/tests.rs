@@ -918,11 +918,13 @@ fn s1_status_survives_reopen_on_every_backend() {
 // S2: staleness label in recall (Gap 1 C2 contract section 6 S2). Summaries
 // reach recall through a real entity whose REFERENCES edge targets them.
 
+use super::super::MemoryError;
 use super::super::ranking::RankingPolicy;
 use super::super::recall::{
     RecallError, RecallLimits, RecallOutput, RecallRequest, RecallSeed, Selection,
 };
 use crate::property_graph::{GraphLimits, TruncationReason};
+use std::sync::atomic::AtomicBool;
 
 /// A real entity `root` in the base scope that references `targets`.
 fn root(db: &mut Database, targets: &[&str], now: u64) {
@@ -1099,4 +1101,130 @@ fn s2_label_work_is_charged_to_the_graph_budget_at_the_exact_boundary() {
     assert_eq!(empty.truncation, [TruncationReason::EdgeLimit]);
     assert_eq!(empty.stats.edges_charged, EXPANSION_EDGES);
     assert_eq!(label(&empty), Some(None));
+}
+
+#[test]
+fn s2_two_exhausted_summary_labels_report_edge_limit_once() {
+    let dir = tempfile::tempdir().unwrap();
+    let (mut db, now) = three(dir.path());
+    sources(&mut db, &ids(&["d", "e", "f"]), now, None);
+    consolidate(&mut db, "t", &ids(&["d", "e", "f"]), now + 1);
+    root(&mut db, &["s", "t"], now + 2);
+    let at = now + 3;
+    // Expansion spends the whole budget on root's two REFERENCES edges, so
+    // both summary labels find nothing left and each yields EdgeLimit.
+    let budget = 2;
+    assert!(matches!(
+        recall(&db, &recall_request(at, budget, false)),
+        Err(RecallError::Budget("graph"))
+    ));
+    let partial = recall(&db, &recall_request(at, budget, true)).unwrap();
+    assert!(!partial.complete);
+    assert_eq!(partial.stats.edges_charged, budget);
+    let mut partial_labels = labels(&partial);
+    partial_labels.sort();
+    assert_eq!(
+        partial_labels,
+        [("root", None), ("s", None), ("t", None)],
+        "neither exhausted label is guessed"
+    );
+    assert_eq!(
+        partial.truncation,
+        [TruncationReason::EdgeLimit],
+        "the same reason from two labels is reported exactly once"
+    );
+}
+
+/// The label read directly, as recall runs it after search: `budget` is the
+/// recall graph budget with nothing yet charged.
+fn label_read(
+    db: &Database,
+    request: &RecallRequest<'_>,
+    summary: &str,
+) -> (
+    Result<Option<bool>, RecallError>,
+    u64,
+    Vec<TruncationReason>,
+) {
+    let mut charged = 0;
+    let mut truncation = Vec::new();
+    let label = MemoryRef::bind(db, GRAPH, None)
+        .unwrap()
+        .recall_stale_label(
+            request,
+            &scope(),
+            summary,
+            5_000,
+            &mut charged,
+            &mut truncation,
+        );
+    (label, charged, truncation)
+}
+
+#[test]
+fn s2_cancellation_after_search_reaches_the_label_read() {
+    static CANCELLED: AtomicBool = AtomicBool::new(true);
+    let dir = tempfile::tempdir().unwrap();
+    let (db, now) = three(dir.path());
+    let at = now + 3;
+    let live = recall_request(at, 100, true);
+    let (label, charged, truncation) = label_read(&db, &live, "s");
+    assert_eq!(label.ok(), Some(Some(false)));
+    assert_eq!((charged, truncation), (LABEL_EDGES, Vec::new()));
+    // Search already finished; the flag is set before the label read. Recall's
+    // own `work.check()` immediately precedes the label call, so only the
+    // label read itself can observe a flag raised in between.
+    let mut cancelled = recall_request(at, 100, true);
+    cancelled.cancel = Some(&CANCELLED);
+    let (label, charged, truncation) = label_read(&db, &cancelled, "s");
+    assert_eq!(label.ok(), Some(None), "a cancelled label is not guessed");
+    assert_eq!(charged, 0);
+    assert_eq!(truncation, [TruncationReason::Cancelled]);
+}
+
+#[test]
+fn s2_label_remaining_edges_255_256_257_pin_budget_versus_engine_cap() {
+    let dir = tempfile::tempdir().unwrap();
+    let now = clock();
+    let mut db = database(dir.path());
+    let inputs = numbered(256);
+    sources(&mut db, &inputs, now, None);
+    sources(&mut db, &ids(&["extra"]), now, None);
+    consolidate(&mut db, "s", &inputs, now + 1);
+    write(
+        &mut db,
+        &[GraphOp::CreateEdge {
+            key: None,
+            source: key("s"),
+            relationship: "DERIVED_FROM".into(),
+            destination: key("extra"),
+            properties: Metadata::new(),
+        }],
+    );
+    let at = now + 2;
+    // 255 remaining: recall's own budget ran out first -> Budget("graph"),
+    // or with allow_partial an unguessed label marked EdgeLimit.
+    let (label, charged, _) = label_read(&db, &recall_request(at, 255, false), "s");
+    assert!(matches!(label, Err(RecallError::Budget("graph"))));
+    assert_eq!(charged, 255);
+    let (label, charged, truncation) = label_read(&db, &recall_request(at, 255, true), "s");
+    assert_eq!(label.ok(), Some(None));
+    assert_eq!(
+        (charged, truncation),
+        (255, vec![TruncationReason::EdgeLimit])
+    );
+    // remaining >= 256 is the engine's own S1 cap, so 257 retained edges are
+    // OperationLimit, not the recall budget's Budget("graph"), even partially.
+    for remaining in [256, 257] {
+        for allow_partial in [false, true] {
+            let request = recall_request(at, remaining, allow_partial);
+            let (label, charged, truncation) = label_read(&db, &request, "s");
+            assert!(
+                matches!(label, Err(RecallError::Memory(MemoryError::OperationLimit))),
+                "{remaining} {allow_partial}: {label:?}"
+            );
+            assert_eq!(charged, 256, "{remaining} {allow_partial}");
+            assert!(truncation.is_empty(), "{remaining} {allow_partial}");
+        }
+    }
 }
