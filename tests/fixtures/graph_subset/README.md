@@ -222,7 +222,10 @@ own typed `properties`; intervals are ordered, disjoint and half-open.
 Graph inputs must be states the engine can hold: it allocates node and edge IDs
 up to u64 max minus one and rejects u64 max with `IdSpaceExhausted`
 (`src/property_graph/engine/state/tests.rs`), so the `wide` graph uses u64 max
-minus one for its IDs and u64 max only for revisions and `view_sequence`.
+minus one for its IDs and u64 max only for revisions and `view_sequence`. The
+engine also stamps every entity with the commit sequence that last wrote it
+(`src/property_graph/engine/state/temporal.rs`, `apply_temporal`), so no
+revision may exceed its graph's `view_sequence`.
 
 Results have `outcome: result`, ordered `columns`/`rows`, signed decimal-string
 or null `as_of_ms`, decimal-string `ttl_clock_ms` and `view_sequence`.
