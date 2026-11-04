@@ -5,16 +5,24 @@
 use super::mapping::{WireCode, WireOperation, unavailable};
 use std::collections::BTreeSet;
 
-use super::{MemoryScope, opaque};
+use super::MemoryScope;
 use crate::format::valid_collection_name;
 use crate::property_graph::engine::model::validate_graph_name;
 
+pub(crate) const ROOT_TENANT: &str = "@root";
 pub(crate) const VERSION: &str = "memory-bindings-v1";
 pub(crate) const SCHEMA_VERSION: &str = "memory-schema-v1";
 pub(crate) const RANKING_VERSION: &str = "memory-ranking-v1";
 pub(crate) const DIGEST_VERSION: &str = "memory-request-v1";
 const MAX_RECEIPT_WINDOW_MS: u64 = 2_592_000_000;
 const MAX_GENERATION: u64 = i64::MAX as u64;
+/// PROVISIONAL caps (mapping section 4).
+pub(crate) const MAX_FILE_BYTES: usize = 1024 * 1024;
+const MAX_BINDINGS: usize = 256;
+const MAX_GRANTS: usize = 1024;
+const MAX_SCOPES: usize = 256;
+/// Credential IDs are 12 characters of this alphabet (`server::credentials`).
+const PRINCIPAL_ALPHABET: &[u8] = b"abcdefghijklmnopqrstuvwxyz234567";
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum BindingState {
@@ -24,9 +32,13 @@ pub(crate) enum BindingState {
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) struct Grant {
+    /// A credential ID, never a token.
     pub principal: String,
     /// Exact scopes; each scope's tenant is the entry's tenant.
     pub scopes: Vec<MemoryScope>,
+    /// Raw access to the reserved resources (mapping section 6). Never a
+    /// memory scope grant; the underlying grants are still required.
+    pub raw_access: bool,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -52,6 +64,8 @@ pub(crate) enum BindingError {
     /// Not strict `memory-bindings-v1` JSON (syntax, unknown or duplicate
     /// key, null, missing field, wrong type or unsupported version value).
     Malformed,
+    /// Over a section 4 cap (file bytes, bindings, grants or scopes).
+    TooLarge,
     InvalidName,
     InvalidTenant,
     InvalidGeneration,
@@ -70,8 +84,12 @@ pub(crate) enum BindingError {
     StorageReused,
 }
 
+fn valid_principal(principal: &str) -> bool {
+    principal.len() == 12 && principal.bytes().all(|b| PRINCIPAL_ALPHABET.contains(&b))
+}
+
 fn valid_tenant(tenant: &str) -> bool {
-    tenant == "@root"
+    tenant == ROOT_TENANT
         || (tenant.len() == 32
             && tenant
                 .bytes()
@@ -92,6 +110,17 @@ impl Binding {
         if !(1..=MAX_RECEIPT_WINDOW_MS).contains(&self.receipt_window_ms) {
             return Err(BindingError::InvalidWindow);
         }
+        if self.state == (BindingState::Retired { at_ms: 0 }) {
+            return Err(BindingError::InvalidState);
+        }
+        if self.grants.len() > MAX_GRANTS
+            || self
+                .grants
+                .iter()
+                .any(|grant| grant.scopes.len() > MAX_SCOPES)
+        {
+            return Err(BindingError::TooLarge);
+        }
         if validate_graph_name(&self.graph).is_err()
             || self
                 .evidence_collection
@@ -102,7 +131,7 @@ impl Binding {
         }
         let mut principals = BTreeSet::new();
         for grant in &self.grants {
-            if !opaque(&grant.principal)
+            if !valid_principal(&grant.principal)
                 || !principals.insert(grant.principal.as_str())
                 || grant.scopes.is_empty()
             {
@@ -130,11 +159,23 @@ impl Binding {
         )
     }
 
-    fn storage(&self) -> impl Iterator<Item = (bool, &str)> {
-        std::iter::once((true, self.graph.as_str())).chain(
+    /// The stored name of a caller-visible graph or collection name: the
+    /// tenant-qualified `t{tenant}__{name}` exactly as the existing routes
+    /// qualify it, unchanged for `@root`.
+    pub(crate) fn stored(&self, name: &str) -> String {
+        if self.tenant == ROOT_TENANT {
+            name.to_owned()
+        } else {
+            format!("t{}__{name}", self.tenant)
+        }
+    }
+
+    /// Stored names, `true` for the graph and `false` for the collection.
+    pub(crate) fn storage(&self) -> impl Iterator<Item = (bool, String)> + '_ {
+        std::iter::once((true, self.stored(&self.graph))).chain(
             self.evidence_collection
                 .as_deref()
-                .map(|name| (false, name)),
+                .map(|name| (false, self.stored(name))),
         )
     }
 
@@ -155,6 +196,9 @@ impl Binding {
 impl BindingSet {
     /// Validates one set on its own (section 4 field rules).
     pub(crate) fn validate(&self) -> Result<(), BindingError> {
+        if self.bindings.len() > MAX_BINDINGS {
+            return Err(BindingError::TooLarge);
+        }
         let mut keys = BTreeSet::new();
         let mut storage = BTreeSet::new();
         for binding in &self.bindings {
@@ -177,6 +221,16 @@ impl BindingSet {
         old.validate()?;
         self.validate()?;
         let mut removed = BTreeSet::new();
+        for after in &self.bindings {
+            // Anti-backdating: an entry first seen already retired starts its
+            // removal window no earlier than this change (PROVISIONAL).
+            if let BindingState::Retired { at_ms } = after.state
+                && old.find(&after.tenant, &after.binding).is_none()
+                && at_ms < now_ms
+            {
+                return Err(BindingError::BackdatedRetirement);
+            }
+        }
         for before in &old.bindings {
             let Some(after) = self.find(&before.tenant, &before.binding) else {
                 // Rule 5.
@@ -220,7 +274,7 @@ impl BindingSet {
             }
         }
         // Rule 6: kept entries cannot rename storage (rule 1), so any user is
-        // a different key.
+        // a different key. Stored names are tenant-qualified.
         if self
             .bindings
             .iter()
@@ -326,6 +380,8 @@ mod json {
     struct GrantEntry {
         principal: String,
         scopes: Vec<ScopeEntry>,
+        #[serde(default)]
+        raw_access: bool,
     }
 
     #[derive(Deserialize)]
@@ -339,6 +395,9 @@ mod json {
     }
 
     pub(crate) fn parse(bytes: &[u8]) -> Result<BindingSet, BindingError> {
+        if bytes.len() > MAX_FILE_BYTES {
+            return Err(BindingError::TooLarge);
+        }
         let document: Document =
             serde_json::from_slice(bytes).map_err(|_| BindingError::Malformed)?;
         let mut bindings = Vec::with_capacity(document.bindings.len());
@@ -354,6 +413,7 @@ mod json {
                 .into_iter()
                 .map(|grant| Grant {
                     principal: grant.principal,
+                    raw_access: grant.raw_access,
                     scopes: grant
                         .scopes
                         .into_iter()

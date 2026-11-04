@@ -2,6 +2,7 @@ use super::*;
 
 const HEX_TENANT: &str = "0123456789abcdef0123456789abcdef";
 const DAY_MS: u64 = 86_400_000;
+const PRINCIPAL: &str = "abcdefghij27";
 
 fn scope(tenant: &str, agent: &str) -> MemoryScope {
     MemoryScope {
@@ -22,7 +23,8 @@ fn entry(binding: &str, graph: &str) -> Binding {
         evidence_collection: None,
         receipt_window_ms: DAY_MS,
         grants: vec![Grant {
-            principal: "key-id".into(),
+            principal: PRINCIPAL.into(),
+            raw_access: false,
             scopes: vec![scope("@root", "a")],
         }],
     }
@@ -56,7 +58,8 @@ fn field_rules_accept_their_boundaries() {
         session: Some("s".into()),
     }];
     let mut retired = entry("r_9-x", "g4");
-    retired.state = BindingState::Retired { at_ms: 0 };
+    retired.state = BindingState::Retired { at_ms: 1 };
+    retired.grants[0].raw_access = true;
     assert_eq!(
         set(vec![longest, smallest, same_name_other_tenant, retired]).validate(),
         Ok(())
@@ -106,39 +109,56 @@ fn field_rules_reject_each_bad_field() {
         bad.evidence_collection = Some(collection.into());
         cases.push((bad, InvalidName));
     }
-    let grant_cases: Vec<Vec<Grant>> = vec![
-        vec![Grant {
-            principal: "p".repeat(257),
+    let mut grant_cases: Vec<Vec<Grant>> = Vec::new();
+    // A principal is a 12-character credential ID, never a token.
+    for principal in [
+        "",
+        "abcdefghij2",
+        "abcdefghij277",
+        "Abcdefghij27",
+        "abcdefghij21",
+        "abcdefghij28",
+        "abcdefghij-7",
+        "vlk_abcdefghij27_secret",
+        "vlk_abcdefgh",
+    ] {
+        grant_cases.push(vec![Grant {
+            principal: principal.into(),
+            raw_access: false,
             scopes: vec![scope("@root", "a")],
-        }],
+        }]);
+    }
+    grant_cases.extend([
         vec![Grant {
-            principal: String::new(),
-            scopes: vec![scope("@root", "a")],
-        }],
-        vec![Grant {
-            principal: "p".into(),
+            principal: PRINCIPAL.into(),
+            raw_access: false,
             scopes: Vec::new(),
         }],
         vec![
             Grant {
-                principal: "p".into(),
+                principal: PRINCIPAL.into(),
+                raw_access: false,
                 scopes: vec![scope("@root", "a")],
             },
             Grant {
-                principal: "p".into(),
+                principal: PRINCIPAL.into(),
+                raw_access: false,
                 scopes: vec![scope("@root", "b")],
             },
         ],
         vec![Grant {
-            principal: "p".into(),
+            principal: PRINCIPAL.into(),
+            raw_access: false,
             scopes: vec![scope("@root", "a"), scope("@root", "a")],
         }],
         vec![Grant {
-            principal: "p".into(),
+            principal: PRINCIPAL.into(),
+            raw_access: false,
             scopes: vec![scope("@root", "")],
         }],
         vec![Grant {
-            principal: "p".into(),
+            principal: PRINCIPAL.into(),
+            raw_access: false,
             scopes: vec![MemoryScope {
                 tenant: "@root".into(),
                 agent: "a".into(),
@@ -148,15 +168,19 @@ fn field_rules_reject_each_bad_field() {
         }],
         // A scope must be in the entry's own tenant.
         vec![Grant {
-            principal: "p".into(),
+            principal: PRINCIPAL.into(),
+            raw_access: false,
             scopes: vec![scope(HEX_TENANT, "a")],
         }],
-    ];
+    ]);
     for grants in grant_cases {
         let mut bad = entry("n", "g");
         bad.grants = grants;
         cases.push((bad, InvalidGrant));
     }
+    let mut zero = entry("n", "g");
+    zero.state = BindingState::Retired { at_ms: 0 };
+    cases.push((zero, InvalidState));
     for (binding, expected) in cases {
         assert_eq!(invalid(binding.clone()), Err(expected), "{binding:?}");
     }
@@ -214,7 +238,7 @@ fn rotation_keeps_identity_and_advances_generation_only_on_change() {
         Err(GenerationChanged)
     );
     let mut regranted = old.clone();
-    regranted.grants[0].principal = "other".into();
+    regranted.grants[0].principal = "bbbbbbbbbbbb".into();
     assert_eq!(
         rotate(vec![old.clone()], vec![regranted.clone()], 10),
         Err(GenerationNotAdvanced)
@@ -332,12 +356,23 @@ fn rotation_removes_only_after_the_last_receipt_window() {
         rotate(vec![with_evidence], vec![reuser], 150),
         Err(StorageReused)
     );
-    // The same name in another tenant is a different key, so also refused.
+    // Storage compares stored names: the same name in another tenant is
+    // `t{tenant}__g`, different storage, so it is not a reuse.
     let mut other_tenant = entry("n", "g");
     other_tenant.tenant = HEX_TENANT.into();
     other_tenant.grants[0].scopes = vec![scope(HEX_TENANT, "a")];
     assert_eq!(
-        rotate(vec![retired], vec![other_tenant], 150),
+        rotate(vec![retired.clone()], vec![other_tenant.clone()], 150),
+        Ok(())
+    );
+    // Reuse by the same stored name in a tenant is refused.
+    let mut tenant_retired = other_tenant.clone();
+    tenant_retired.state = BindingState::Retired { at_ms: 100 };
+    tenant_retired.receipt_window_ms = 50;
+    let mut tenant_reuser = other_tenant;
+    tenant_reuser.binding = "m".into();
+    assert_eq!(
+        rotate(vec![tenant_retired], vec![tenant_reuser], 150),
         Err(StorageReused)
     );
 }
@@ -374,6 +409,71 @@ fn retired_bindings_serve_receipt_reads_only() {
     }
 }
 
+#[test]
+fn stored_names_are_tenant_qualified() {
+    let root = entry("n", "g");
+    assert_eq!(root.stored("g"), "g");
+    let mut tenant = entry("n", "g");
+    tenant.tenant = HEX_TENANT.into();
+    tenant.evidence_collection = Some("e".into());
+    assert_eq!(
+        tenant.storage().collect::<Vec<_>>(),
+        vec![
+            (true, format!("t{HEX_TENANT}__g")),
+            (false, format!("t{HEX_TENANT}__e")),
+        ]
+    );
+}
+
+#[test]
+fn caps_reject_the_whole_set() {
+    let many: Vec<Binding> = (0..=MAX_BINDINGS)
+        .map(|i| entry(&format!("n{i}"), &format!("g{i}")))
+        .collect();
+    assert_eq!(
+        set(many[..MAX_BINDINGS].to_vec()).validate(),
+        Ok(()),
+        "at the cap"
+    );
+    assert_eq!(set(many).validate(), Err(BindingError::TooLarge));
+    let principal = |i: usize| -> String {
+        (0..12)
+            .map(|d| PRINCIPAL_ALPHABET[(i >> (5 * (d % 3))) % 32] as char)
+            .collect()
+    };
+    let mut grants = entry("n", "g");
+    grants.grants = (0..=MAX_GRANTS)
+        .map(|i| Grant {
+            principal: principal(i),
+            raw_access: false,
+            scopes: vec![scope("@root", "a")],
+        })
+        .collect();
+    let mut at_cap = grants.clone();
+    at_cap.grants.truncate(MAX_GRANTS);
+    assert_eq!(invalid(at_cap), Ok(()));
+    assert_eq!(invalid(grants), Err(BindingError::TooLarge));
+    let mut scopes = entry("n", "g");
+    scopes.grants[0].scopes = (0..=MAX_SCOPES)
+        .map(|i| scope("@root", &format!("a{i}")))
+        .collect();
+    let mut at_cap = scopes.clone();
+    at_cap.grants[0].scopes.truncate(MAX_SCOPES);
+    assert_eq!(invalid(at_cap), Ok(()));
+    assert_eq!(invalid(scopes), Err(BindingError::TooLarge));
+}
+
+#[test]
+fn a_new_entry_first_seen_retired_is_never_backdated() {
+    let mut retired = entry("n", "g");
+    retired.state = BindingState::Retired { at_ms: 10 };
+    assert_eq!(rotate(vec![], vec![retired.clone()], 10), Ok(()));
+    assert_eq!(
+        rotate(vec![], vec![retired], 11),
+        Err(BindingError::BackdatedRetirement)
+    );
+}
+
 #[cfg(feature = "json")]
 mod json {
     use super::*;
@@ -382,7 +482,7 @@ mod json {
  "generation":1,"state":"active","graph":"notes_graph","evidence_collection":null,
  "schema_version":"memory-schema-v1","ranking_version":"memory-ranking-v1",
  "digest_version":"memory-request-v1","receipt_window_ms":86400000,
- "grants":[{"principal":"key-id","scopes":[{"agent":"a"}]}]}]}"#;
+ "grants":[{"principal":"abcdefghij27","scopes":[{"agent":"a"}]}]}]}"#;
 
     fn edit(from: &str, to: &str) -> String {
         assert!(EXAMPLE.contains(from), "{from}");
@@ -420,6 +520,40 @@ mod json {
                 session: Some("s".into()),
             }]
         );
+    }
+
+    #[test]
+    fn raw_access_is_a_strict_optional_bool() {
+        let raw = edit(
+            r#""scopes":[{"agent":"a"}]"#,
+            r#""scopes":[{"agent":"a"}],"raw_access":true"#,
+        );
+        assert!(parse(raw.as_bytes()).unwrap().bindings[0].grants[0].raw_access);
+        let off = edit(
+            r#""scopes":[{"agent":"a"}]"#,
+            r#""scopes":[{"agent":"a"}],"raw_access":false"#,
+        );
+        assert!(!parse(off.as_bytes()).unwrap().bindings[0].grants[0].raw_access);
+        for bad in ["null", "1", "\"true\""] {
+            let text = edit(
+                r#""scopes":[{"agent":"a"}]"#,
+                &format!(r#""scopes":[{{"agent":"a"}}],"raw_access":{bad}"#),
+            );
+            assert_eq!(
+                parse(text.as_bytes()),
+                Err(BindingError::Malformed),
+                "{text}"
+            );
+        }
+    }
+
+    #[test]
+    fn the_file_cap_is_checked_before_parsing() {
+        let mut padded = EXAMPLE.to_owned();
+        padded.push_str(&" ".repeat(MAX_FILE_BYTES - EXAMPLE.len()));
+        assert!(parse(padded.as_bytes()).is_ok());
+        padded.push(' ');
+        assert_eq!(parse(padded.as_bytes()), Err(BindingError::TooLarge));
     }
 
     #[test]
@@ -508,6 +642,14 @@ mod json {
                 InvalidName,
             ),
             (edit(window, r#""receipt_window_ms":0"#), InvalidWindow),
+            (
+                edit(r#""principal":"abcdefghij27""#, r#""principal":"key-id""#),
+                InvalidGrant,
+            ),
+            (
+                edit(state, r#""state":"retired","retired_at_ms":0"#),
+                InvalidState,
+            ),
         ];
         for (text, expected) in cases {
             assert_eq!(parse(text.as_bytes()), Err(expected), "{text}");

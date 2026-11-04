@@ -47,6 +47,7 @@ mod observability;
 mod ops;
 mod provider_serving;
 pub mod providers;
+mod reserved;
 #[cfg(feature = "otel")]
 pub mod telemetry;
 mod tenants;

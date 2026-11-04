@@ -162,7 +162,7 @@ whole set; no default is invented.
  "generation":1,"state":"active","graph":"notes_graph","evidence_collection":null,
  "schema_version":"memory-schema-v1","ranking_version":"memory-ranking-v1",
  "digest_version":"memory-request-v1","receipt_window_ms":86400000,
- "grants":[{"principal":"key-id","scopes":[{"agent":"a"}]}]}]}
+ "grants":[{"principal":"abcdefghij27","scopes":[{"agent":"a"}]}]}]}
 ```
 
 - Key `(tenant, binding)` is unique; `tenant` is `@root` or a 32-hex `Tenant.id`.
