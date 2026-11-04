@@ -67,4 +67,57 @@ route (404 `not_found`) raises `UnsupportedError`. No fallback or automatic retr
 occurs. A timeout may hide a committed mutation; re-read before deciding what
 to do. Acknowledgements sync only with server `--durability full`.
 
+## Agent memory
+
+The unreleased agent-memory REST surface needs a server with a provisioned memory
+binding (`notes` below). `client.memory(binding)` makes no request and returns a
+facade with nine methods; each takes one `TypedDict` request and returns the full
+typed response, including an HTTP 202 pending result. Run with `VLITE_URL` and
+`VLITE_AUTH_TOKEN` set:
+
+```python
+import os
+from vlite_client import Client, UnsupportedError, VLiteError
+
+client = Client(os.environ["VLITE_URL"], os.environ["VLITE_AUTH_TOKEN"])
+memory = client.memory("notes")
+scope = {"agent": "assistant", "user": "ada"}
+done = memory.remember({
+    "scope": scope,
+    "idempotency_key": "turn-42",  # required; never generated or retried
+    "items": [{"id": "e1", "kind": "entity", "content": "Ada", "observed_at_ms": 90,
+               "source": {"source_id": "chat", "source_kind": "caller"}}],
+})
+print(done["receipt"]["sequence"], done["outcomes"])
+for view in memory.recall({"scope": scope, "text": "Ada", "limit": 5})["memories"]:
+    print(view["id"], view["scores"]["S"])
+try:
+    memory.find_facts({"scope": scope, "slot": {"subject_id": "e1", "predicate": "role", "slot_key": "main"}})
+except VLiteError as error:  # a refusal is never hidden
+    print(error.status, error.code, error.request_id, error.details)
+except UnsupportedError:  # 404 not_found: the server has no memory routes
+    pass
+```
+
+The methods are `remember`, `recall`, `find_facts`, `correct_facts`, `consolidate`,
+`forget`, `get_receipt`, `get_erasure` and `resume_erasure`; types carry the
+contract's names (`MemoryRememberRequest`, `MemoryTarget`, `MemoryConsolidateResponse`
+and so on). `MemoryU64`/`MemoryI64` values in responses are canonical decimal
+strings; requests accept the same string or an exact in-range `int` and send the
+canonical string. Unknown request fields raise `ValueError` and are never sent;
+optional fields are omitted (only interval endpoints may be `None`). `consolidate`
+returns a `MemoryMutationResponse` or, with `dry_run`, a `MemoryPlanResponse`.
+
+`VLiteError.details` carries the optional structured context (`field`, `limit`,
+`requested`, `feature`, `category`). Only 404 `not_found` raises `UnsupportedError`;
+404 `memory_not_found`, `receipt_not_found` and `erasure_not_found` are ordinary
+errors. The first server slice (provisional) serves `remember` for kinds `entity`
+and `episodic`, `recall`, `consolidate` (retain only, commit only), `forget` (an
+`ids` target with `logical_delete`) and `get_receipt`; `find_facts`, `correct_facts`,
+`get_erasure`, `resume_erasure` and options such as fact kinds, `dry_run`, `expire`,
+`embedding_provider` and `as_of_ms` answer 409 `memory_capability_unavailable` with
+`details["feature"]`. Body `deadline_ms` is the engine deadline, not the HTTP
+`timeout`. Nothing is retried, split, paginated or embedded; after a
+`TransportError` a mutation may have committed, so reconcile with `get_receipt`.
+
 Licensed under MIT; see LICENSE.

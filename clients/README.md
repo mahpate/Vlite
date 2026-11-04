@@ -451,10 +451,48 @@ without a durable chunk (`durable: false`) does not survive a restart.
   bound to the collection identity and database lineage: a dropped and
   recreated collection, or a restored different database, fails closed.
 
+## Agent memory (Python, unreleased)
+
+`client.memory(binding)` returns a binding-local facade for an explicitly
+provisioned memory binding (`POST /v1/memory/{binding}/...`; see the
+[serving contract](../docs/projects/roadmap/serving-memory-contract.md)). Its
+nine synchronous methods are `remember`, `recall`, `find_facts`, `correct_facts`,
+`consolidate`, `forget`, `get_receipt`, `get_erasure` and `resume_erasure`. Each
+takes one request mapping (a `TypedDict` named as in the contract's section 8) and
+returns the full typed response; an HTTP 202 pending result is a normal response.
+JavaScript and .NET do not have it yet.
+
+- Integers: U64/I64 values are canonical decimal strings in responses. Requests
+  accept the same string or an exact in-range `int` and always send the canonical
+  string. Names and encodings are checked locally and unknown fields are never
+  sent (`ValueError`); limits, conditional rules and capability gates are the
+  server's.
+- The body `idempotency_key` is required on mutations and is never generated;
+  there is no header alias, tenant field or hidden default. `deadline_ms` is the
+  engine deadline; the HTTP timeout is `Client(timeout=...)`.
+- Refusals raise `VLiteError` unchanged, with `status`, `code`, `request_id` and
+  the optional structured `details`. Only 404 `not_found` (a server without memory
+  routes) raises `UnsupportedError`; 404 `memory_not_found`, `receipt_not_found` and
+  `erasure_not_found` are ordinary errors.
+- Nothing is retried, split, paginated, embedded or defaulted. A mutation that
+  ends in `TransportError` (timeout, disconnect, cancellation) may have committed:
+  reconcile with `get_receipt` before reusing the key.
+- The first server slice (provisional; the server is authoritative) supports
+  `remember` for kinds `entity` and `episodic`, `recall`, `consolidate` (retain
+  only, commit only), `forget` (an `ids` target with `logical_delete`) and
+  `get_receipt`. `find_facts`, `correct_facts`, `get_erasure` and `resume_erasure`,
+  and options such as fact kinds, `dry_run`, `expire`, `embedding_provider` and
+  `as_of_ms`, answer 409 `memory_capability_unavailable` with `details["feature"]`.
+  The client exposes all nine methods and does not hide these refusals.
+
+See the [Python README](python/README.md#agent-memory) for an example.
+
 ## Errors and uncertain writes
 
 `VLiteError` exposes HTTP `status`, server `code`, and `request_id` (Python) or
-`requestId` (JavaScript). Missing records raise 404 rather than returning null.
+`requestId` (JavaScript). Python also exposes the optional structured `details`
+(`field`, `limit`, `requested`, `feature`, `category`; otherwise `None`).
+Missing records raise 404 rather than returning null.
 Nonstandard HTTP errors use `http_error`; Python surfaces redirects as an HTTP
 error, while fetch rejects them as `TransportError`.
 
