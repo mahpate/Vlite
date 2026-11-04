@@ -1,6 +1,6 @@
 #[allow(dead_code)]
 #[path = "../src/ingestion/canonical/mod.rs"]
-mod canonical;
+pub(crate) mod canonical;
 
 #[path = "ingestion_canonical/review.rs"]
 mod review;
@@ -9,11 +9,11 @@ use canonical::{Type, Value};
 use serde_json::Value as Json;
 use std::collections::BTreeMap;
 
-fn fixture() -> Json {
+pub(crate) fn fixture() -> Json {
     serde_json::from_str(include_str!("fixtures/ingestion/schema-v1/vectors.json")).unwrap()
 }
 
-fn expand(value: &Json, templates: &Json) -> Json {
+pub(crate) fn expand(value: &Json, templates: &Json) -> Json {
     match value {
         Json::Object(map) if map.contains_key("ref") => {
             assert_eq!(map.len(), 1);
@@ -43,7 +43,7 @@ fn expand(value: &Json, templates: &Json) -> Json {
     }
 }
 
-fn value(input: &Json) -> Value {
+pub(crate) fn value(input: &Json) -> Value {
     match input {
         Json::Null => Value::Null,
         Json::Bool(v) => Value::Bool(*v),
@@ -405,7 +405,7 @@ fn source() -> Value {
     ))
 }
 
-fn plan_value(input: &Json, templates: &Json) -> Value {
+pub(crate) fn plan_value(input: &Json, templates: &Json) -> Value {
     fn convert(value: &mut Value) {
         match value {
             Value::Map(map) => {

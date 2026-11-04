@@ -1,5 +1,7 @@
 use super::*;
+use crate::ingestion_canonical::canonical::{self, Value};
 use crate::property_graph::engine::model::GraphId;
+use sha2::Digest;
 use std::fs;
 
 fn database() -> (tempfile::TempDir, Database) {
@@ -7,6 +9,211 @@ fn database() -> (tempfile::TempDir, Database) {
     let mut db = Database::create(dir.path().join("test.vlite"), 2).unwrap();
     db.create_graph("g").unwrap();
     (dir, db)
+}
+
+fn canonical_source_plan() -> Value {
+    let fixture = crate::ingestion_canonical::fixture();
+    let templates = &fixture["templates"];
+    let binding = serde_json::json!({
+        "graph": "g",
+        "collection": "default",
+        "tenant": "t",
+        "generation": {"ref": "zero"}
+    });
+    let source_json = serde_json::json!({
+        "kind": "source",
+        "fields": {"binding": binding, "tenant": "t", "source_id": "s"}
+    });
+    let receipt_json = serde_json::json!({
+        "kind": "receipt",
+        "fields": {
+            "binding": binding,
+            "tenant": "t",
+            "source_id": "s",
+            "content": {"ref": "zero"},
+            "pipeline": {"ref": "zero"}
+        }
+    });
+    let source = crate::ingestion_canonical::plan_value(&source_json, templates);
+    let receipt = crate::ingestion_canonical::plan_value(&receipt_json, templates);
+    let source_key = canonical::identity_key(&source).unwrap();
+    let receipt_key = canonical::identity_key(&receipt).unwrap();
+    let entity_json = serde_json::json!({
+        "kind": "entity",
+        "fields": {
+            "binding": binding,
+            "tenant": "t",
+            "kind": "person",
+            "normalized_key": "alice"
+        }
+    });
+    let revision_json = serde_json::json!({
+        "kind": "revision",
+        "fields": {
+            "source": source_json,
+            "content": {"ref": "zero"},
+            "pipeline": {"ref": "zero"}
+        }
+    });
+    let revision = crate::ingestion_canonical::plan_value(&revision_json, templates);
+    let revision_key = canonical::identity_key(&revision).unwrap();
+    let chunk_json = serde_json::json!({
+        "kind": "chunk",
+        "fields": {
+            "revision": revision_json,
+            "ordinal": 0,
+            "start": 0,
+            "end": 1
+        }
+    });
+    let chunk = crate::ingestion_canonical::plan_value(&chunk_json, templates);
+    let chunk_key = canonical::identity_key(&chunk).unwrap();
+    let chunk_digest = canonical::hex(&sha2::Sha256::digest(b"c"));
+    let batch_receipt_json = serde_json::json!({
+        "kind": "batch_receipt",
+        "fields": {"root": receipt_json, "ordinal": 1}
+    });
+    let input = serde_json::json!({
+        "request_digest": {"ref": "zero"},
+        "captured": [],
+        "accepted": [{
+            "chunk": chunk_json,
+            "text": "63",
+            "entities": [],
+            "relations": [],
+            "vector": [1.0, 0.0]
+        }],
+        "batches": [{
+            "root": receipt_json,
+            "ordinal": 1,
+            "groups": [{
+                "ordinal": 0,
+                "operations": [
+                    {"tag": 13, "fields": {
+                        "source": source_json,
+                        "data": {
+                            "revision_key": revision_key,
+                            "revision_digest": {"ref": "zero"},
+                            "pipeline": {"ref": "zero"},
+                            "status": 1,
+                            "job_receipt_key": receipt_key,
+                            "last_batch": 1
+                        }
+                    }},
+                    {"tag": 5, "fields": {"object": {
+                        "identity": entity_json,
+                        "data": {}
+                    }}},
+                    {"tag": 5, "fields": {"object": {
+                        "identity": revision_json,
+                        "data": {
+                            "source_key": source_key,
+                            "uri": null,
+                            "text_length": 1,
+                            "chunk_count": 1,
+                            "receipt_key": receipt_key
+                        }
+                    }}},
+                    {"tag": 5, "fields": {"object": {
+                        "identity": chunk_json,
+                        "data": {
+                            "source_key": source_key,
+                            "revision_key": revision_key,
+                            "ordinal": 0,
+                            "start": 0,
+                            "end": 1,
+                            "chunk_digest": chunk_digest,
+                            "pipeline": {"ref": "zero"}
+                        }
+                    }}},
+                    {"tag": 6, "fields": {
+                        "collection": 0,
+                        "record": 7,
+                        "data": {
+                            "tenant": "t",
+                            "source_key": source_key,
+                            "revision_key": revision_key,
+                            "chunk_key": chunk_key,
+                            "text": "63",
+                            "vector": [1.0, 0.0]
+                        }
+                    }},
+                    {"tag": 7, "fields": {
+                        "chunk": chunk_json,
+                        "collection": 0,
+                        "record": 7
+                    }},
+                    {"tag": 8, "fields": {"object": {
+                        "identity": {
+                            "kind": "has_revision",
+                            "fields": {"source": source_json, "revision": revision_json}
+                        },
+                        "data": {}
+                    }}},
+                    {"tag": 8, "fields": {"object": {
+                        "identity": {
+                            "kind": "has_chunk",
+                            "fields": {"revision": revision_json, "chunk": chunk_json}
+                        },
+                        "data": {}
+                    }}},
+                    {"tag": 10, "fields": {"object": {
+                        "identity": batch_receipt_json,
+                        "data": {
+                            "batch_digest": {"tag": 2, "value": {"ref": "zero"}},
+                            "final": true,
+                            "created_anchors": 0,
+                            "reused_anchors": 0,
+                            "result_shards": 0,
+                            "ownership_shards": 0
+                        }
+                    }}},
+                    {"tag": 12, "fields": {"object": {
+                        "identity": receipt_json,
+                        "data": {
+                            "request_digest": {"ref": "zero"},
+                            "plan_digest": {"tag": 1, "value": {"ref": "zero"}},
+                            "batch_count": 1,
+                            "revision_key": revision_key,
+                            "outcome": 0,
+                            "chunks": 1,
+                            "entities": 0,
+                            "relations": 0,
+                            "mentions": 0
+                        }
+                    }}}
+                ]
+            }]
+        }]
+    });
+    let mut plan = crate::ingestion_canonical::plan_value(&input, templates);
+    let batch = match super::cfield(&plan, "batches").unwrap() {
+        Value::List(batches) => &batches[0],
+        _ => panic!("batches"),
+    };
+    let batch_digest = canonical::hex(&canonical::plan::digest("batch", batch).unwrap());
+    fn fill(value: &mut Value, field: &str, digest: &str) {
+        match value {
+            Value::Map(map) => {
+                if let Some(Value::Map(slot)) = map.get_mut(field) {
+                    slot.insert("value".into(), Value::Text(digest.into()));
+                }
+                for value in map.values_mut() {
+                    fill(value, field, digest);
+                }
+            }
+            Value::List(items) => {
+                for value in items {
+                    fill(value, field, digest);
+                }
+            }
+            _ => {}
+        }
+    }
+    fill(&mut plan, "batch_digest", &batch_digest);
+    let digest = canonical::hex(&canonical::plan::digest("plan", &plan).unwrap());
+    fill(&mut plan, "plan_digest", &digest);
+    plan
 }
 
 fn node(key: &str) -> GraphOp {
@@ -19,6 +226,54 @@ fn node(key: &str) -> GraphOp {
         ]),
         expected: Expected::Absent,
     }
+}
+
+fn canonical_entity_op(db: &Database, plan: &Value) -> GraphOp {
+    let batch = match super::cfield(plan, "batches").unwrap() {
+        Value::List(batches) => &batches[0],
+        _ => panic!("batches"),
+    };
+    let root = super::cfield(batch, "root").unwrap();
+    let groups = match super::cfield(batch, "groups").unwrap() {
+        Value::List(groups) => groups,
+        _ => panic!("groups"),
+    };
+    let operations = match super::cfield(&groups[0], "operations").unwrap() {
+        Value::List(operations) => operations,
+        _ => panic!("operations"),
+    };
+    let operation = operations
+        .iter()
+        .find(|operation| {
+            super::cu64(super::cfield(operation, "tag").unwrap()).unwrap() == 5
+                && super::crole(
+                    super::cfield(
+                        super::cfield(super::cfield(operation, "fields").unwrap(), "object")
+                            .unwrap(),
+                        "identity",
+                    )
+                    .unwrap(),
+                )
+                .is_ok_and(|role| role == "entity")
+        })
+        .unwrap();
+    super::canonical_operation(db, operation, root, 1, None)
+        .unwrap()
+        .unwrap()
+}
+
+fn canonical_operation_value(tag: u64, fields: BTreeMap<String, Value>) -> Value {
+    Value::Map(BTreeMap::from([
+        ("tag".into(), Value::Unsigned(tag)),
+        ("fields".into(), Value::Map(fields)),
+    ]))
+}
+
+fn expected_value(tag: u64, value: Value) -> Value {
+    Value::Map(BTreeMap::from([
+        ("tag".into(), Value::Unsigned(tag)),
+        ("value".into(), value),
+    ]))
 }
 
 fn vector(id: u64) -> GraphOp {
@@ -48,6 +303,39 @@ fn attach() -> GraphOp {
         collection: "default".into(),
         record: 7,
     }
+}
+
+#[test]
+fn ingestion_preflight_scratch_budget_accepts_canonical_cleanup_operations() {
+    let ops = vec![
+        GraphOp::DeleteEdge {
+            edge: EdgeRef::Key("edge".into()),
+            expected: Expected::Any,
+        },
+        GraphOp::Detach {
+            node: "chunk".into(),
+            collection: "default".into(),
+        },
+        GraphOp::Vector {
+            collection: "default".into(),
+            mutation: Mutation::Delete { id: 7 },
+        },
+        GraphOp::DeleteNode {
+            key: "chunk".into(),
+            expected: Expected::Any,
+        },
+        GraphOp::PatchNode {
+            key: "source".into(),
+            patch: NodePatch {
+                add_labels: Vec::new(),
+                remove_labels: Vec::new(),
+                set: Metadata::from([("g7_status".into(), MetadataValue::Integer(1))]),
+                unset: vec!["g7_old".into()],
+            },
+            expected: Expected::Any,
+        },
+    ];
+    assert!(scratch_admission(&ops).is_ok());
 }
 
 #[test]
@@ -233,6 +521,183 @@ fn ingestion_preflight_rejects_non_new_source_operations() {
         )))
     ));
 }
+
+#[test]
+fn ingestion_preflight_lowers_and_measures_a_canonical_new_source_batch() {
+    let (_dir, mut db) = database();
+    let plan = canonical_source_plan();
+    let entity = canonical_entity_op(&db, &plan);
+    db.graph_mut("g").unwrap().write_batch(&[entity]).unwrap();
+    let admission = preflight_canonical_batch(&mut db, &plan, 0, None).unwrap();
+    assert_eq!(admission.user_operations, 10);
+    assert_eq!(admission.outcomes.len(), 10);
+    for index in [0, 2, 3, 8, 9] {
+        assert!(matches!(
+            admission.outcomes[index],
+            Some(MutationOutcome::Node { created: true, .. })
+        ));
+    }
+    assert!(matches!(
+        admission.outcomes[1],
+        Some(MutationOutcome::Node { created: false, .. })
+    ));
+    assert!(admission.outcomes[4].is_none());
+    assert!(matches!(
+        admission.outcomes[5],
+        Some(MutationOutcome::Attached(_))
+    ));
+    for index in [6, 7] {
+        assert!(matches!(
+            admission.outcomes[index],
+            Some(MutationOutcome::Edge { created: true, .. })
+        ));
+    }
+    assert_eq!(
+        db.graph
+            .as_ref()
+            .unwrap()
+            .graph_by_name("g")
+            .unwrap()
+            .node_count(),
+        1
+    );
+}
+
+#[test]
+fn ingestion_preflight_lowers_canonical_cleanup_and_head_patch_tags() {
+    let (_dir, mut db) = database();
+    let plan = canonical_source_plan();
+    let batch = match super::cfield(&plan, "batches").unwrap() {
+        Value::List(batches) => &batches[0],
+        _ => panic!("batches"),
+    };
+    let root = super::cfield(batch, "root").unwrap();
+    let groups = match super::cfield(batch, "groups").unwrap() {
+        Value::List(groups) => groups,
+        _ => panic!("groups"),
+    };
+    let operations = match super::cfield(&groups[0], "operations").unwrap() {
+        Value::List(operations) => operations,
+        _ => panic!("operations"),
+    };
+    let source_operation = operations
+        .iter()
+        .find(|operation| super::cu64(super::cfield(operation, "tag").unwrap()).unwrap() == 13)
+        .unwrap();
+    let source =
+        super::cfield(super::cfield(source_operation, "fields").unwrap(), "source").unwrap();
+    let source_data =
+        super::cfield(super::cfield(source_operation, "fields").unwrap(), "data").unwrap();
+    let chunk_operation = operations
+        .iter()
+        .find(|operation| {
+            if super::cu64(super::cfield(operation, "tag").unwrap()).unwrap() != 5 {
+                return false;
+            }
+            let identity = super::cfield(
+                super::cfield(super::cfield(operation, "fields").unwrap(), "object").unwrap(),
+                "identity",
+            )
+            .unwrap();
+            super::crole(identity).is_ok_and(|role| role == "chunk")
+        })
+        .unwrap();
+    let chunk_object = super::cfield(
+        super::cfield(super::cfield(chunk_operation, "fields").unwrap(), "object").unwrap(),
+        "identity",
+    )
+    .unwrap();
+    let chunk_data = super::cfield(
+        super::cfield(super::cfield(chunk_operation, "fields").unwrap(), "object").unwrap(),
+        "data",
+    )
+    .unwrap();
+    let edge_operation = operations
+        .iter()
+        .find(|operation| super::cu64(super::cfield(operation, "tag").unwrap()).unwrap() == 8)
+        .unwrap();
+    let edge = super::cfield(
+        super::cfield(super::cfield(edge_operation, "fields").unwrap(), "object").unwrap(),
+        "identity",
+    )
+    .unwrap()
+    .clone();
+    db.graph_mut("g")
+        .unwrap()
+        .write_batch(&[
+            cnode(source, source_data, Expected::Absent).unwrap(),
+            cnode(chunk_object, chunk_data, Expected::Absent).unwrap(),
+        ])
+        .unwrap();
+
+    let graph = db.graph.as_ref().unwrap().graph_by_name("g").unwrap();
+    let source_revision = graph
+        .node_by_key(&cidentity_key(source).unwrap())
+        .unwrap()
+        .revision;
+    let chunk_revision = graph
+        .node_by_key(&cidentity_key(chunk_object).unwrap())
+        .unwrap()
+        .revision;
+    let expected_source = expected_value(1, Value::Unsigned(source_revision));
+    let expected_chunk = expected_value(1, Value::Unsigned(chunk_revision));
+    let edge_delete = canonical_operation_value(
+        1,
+        BTreeMap::from([
+            ("edge".into(), edge),
+            ("expected".into(), expected_value(0, Value::Null)),
+        ]),
+    );
+    assert!(matches!(
+        canonical_operation(&db, &edge_delete, root, 1, None).unwrap(),
+        Some(GraphOp::DeleteEdge { .. })
+    ));
+
+    let detach = canonical_operation_value(
+        2,
+        BTreeMap::from([
+            ("chunk".into(), chunk_object.clone()),
+            ("expected".into(), expected_chunk.clone()),
+        ]),
+    );
+    assert!(matches!(
+        canonical_operation(&db, &detach, root, 1, None).unwrap(),
+        Some(GraphOp::Detach { .. })
+    ));
+    let delete_vector =
+        canonical_operation_value(3, BTreeMap::from([("record".into(), Value::Unsigned(7))]));
+    assert!(matches!(
+        canonical_operation(&db, &delete_vector, root, 1, None).unwrap(),
+        Some(GraphOp::Vector {
+            mutation: Mutation::Delete { id: 7 },
+            ..
+        })
+    ));
+    let delete_node = canonical_operation_value(
+        4,
+        BTreeMap::from([
+            ("node".into(), chunk_object.clone()),
+            ("expected".into(), expected_chunk),
+        ]),
+    );
+    assert!(matches!(
+        canonical_operation(&db, &delete_node, root, 1, None).unwrap(),
+        Some(GraphOp::DeleteNode { .. })
+    ));
+    let patch = canonical_operation_value(
+        11,
+        BTreeMap::from([
+            ("source".into(), source.clone()),
+            ("data".into(), source_data.clone()),
+            ("expected".into(), expected_source),
+        ]),
+    );
+    assert!(matches!(
+        canonical_operation(&db, &patch, root, 1, None).unwrap(),
+        Some(GraphOp::PatchNode { .. })
+    ));
+}
+
 fn budget_vectors(body_bytes: usize, reserve: bool) -> Vec<GraphOp> {
     // The five-field metadata in vector() is 109 bytes. Each metadata put
     // contributes entry envelope 8, collection 4, batch prefix 16, F32s 8,
