@@ -853,7 +853,8 @@ edits the JSON `deadline_ms` (engine default 250) or its digest. A timeout is
 transport ambiguity (exit 6); reconcile a mutation by receipt.
 No token literal flag or automatic retry/paging/job loop. Success prints exactly
 one response JSON line; pending is a successful accepted request with state pending.
-Failures print `"<code>: <message>"` to stderr per that same failure convention;
+Failures print one coded JSON line `{"error":{"code":"<code>","message":"<message>"}}`
+to stderr per wire conventions section 2.3 (withheld if it would expose the credential);
 exit 0 success, 2 usage/input, 3 auth,
 4 conflict/precondition, 5 deadline/cancel (an exhausted work budget is
 `invalid_input`, exit 2), 6 transport/storage ambiguity,

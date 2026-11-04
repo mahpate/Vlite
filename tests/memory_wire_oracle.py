@@ -1165,6 +1165,11 @@ MUTATIONS = {
 
 
 def self_test():
+    cli_path = Path(__file__).parent / "fixtures" / "memory_cli" / "exchanges.json"
+    cli_exchanges = parse_json(cli_path.read_text(encoding="utf-8"))
+    for exchange in cli_exchanges:
+        validate_response(exchange["verb"].replace("-", "_"), exchange["status"],
+                          parse_json(exchange["stdout"]), request=exchange["request"])
     cases, structural = [], []
     for path in sorted(ROOT.glob("*.json")):
         fixture = parse_json(path.read_text(encoding="utf-8"))

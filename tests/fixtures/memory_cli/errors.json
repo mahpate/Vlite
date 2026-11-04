@@ -1,12 +1,13 @@
 [
-  {"status":401,"body":{"error":{"code":"unauthorized","message":"authentication required"}},"exit":3,"stderr":"unauthorized: authentication required\n"},
-  {"status":403,"body":{"error":{"code":"forbidden_scope","message":"scope denied"}},"exit":3,"stderr":"forbidden_scope: scope denied\n"},
-  {"status":404,"body":{"error":{"code":"receipt_not_found","message":"receipt absent"}},"exit":1,"stderr":"receipt_not_found: receipt absent\n"},
-  {"status":409,"body":{"error":{"code":"idempotency_conflict","message":"key reused"}},"exit":4,"stderr":"idempotency_conflict: key reused\n"},
-  {"status":412,"body":{"error":{"code":"precondition_failed","message":"revision changed","details":{"field":"revision"}}},"exit":4,"stderr":"precondition_failed: revision changed\n"},
-  {"status":422,"body":{"error":{"code":"invalid_input","message":"work budget exhausted","details":{"field":"candidates","limit":"1000","requested":"1001"}}},"exit":2,"stderr":"invalid_input: work budget exhausted\n"},
-  {"status":504,"body":{"error":{"code":"deadline_exceeded","message":"deadline elapsed"}},"exit":5,"stderr":"deadline_exceeded: deadline elapsed\n"},
-  {"status":500,"body":{"error":{"code":"internal_error","message":"storage integrity fault"}},"exit":1,"stderr":"internal_error: storage integrity fault\n"},
-  {"status":503,"body":{"error":{"code":"commit_indeterminate","message":"lookup receipt"}},"exit":6,"stderr":"commit_indeterminate: lookup receipt\n"},
-  {"status":503,"body":{"error":{"code":"poisoned","message":"reopen storage"}},"exit":6,"stderr":"poisoned: reopen storage\n"}
+  {"status":401,"body":{"error":{"code":"unauthorized","message":"authentication required"}},"exit":3,"stderr":"{\"error\":{\"code\":\"unauthorized\",\"message\":\"authentication required\"}}\n"},
+  {"status":403,"body":{"error":{"code":"forbidden_scope","message":"scope denied"}},"exit":3,"stderr":"{\"error\":{\"code\":\"forbidden_scope\",\"message\":\"scope denied\"}}\n"},
+  {"status":404,"body":{"error":{"code":"receipt_not_found","message":"receipt absent"}},"exit":1,"stderr":"{\"error\":{\"code\":\"receipt_not_found\",\"message\":\"receipt absent\"}}\n"},
+  {"status":409,"body":{"error":{"code":"idempotency_conflict","message":"key reused"}},"exit":4,"stderr":"{\"error\":{\"code\":\"idempotency_conflict\",\"message\":\"key reused\"}}\n"},
+  {"status":412,"body":{"error":{"code":"precondition_failed","message":"revision changed","details":{"field":"revision"}}},"exit":4,"stderr":"{\"error\":{\"code\":\"precondition_failed\",\"message\":\"revision changed\"}}\n"},
+  {"status":413,"body":{"error":{"code":"invalid_json","message":"request too large"}},"exit":2,"stderr":"{\"error\":{\"code\":\"invalid_json\",\"message\":\"request too large\"}}\n"},
+  {"status":422,"body":{"error":{"code":"invalid_input","message":"work budget exhausted","details":{"field":"candidates","limit":"1000","requested":"1001"}}},"exit":2,"stderr":"{\"error\":{\"code\":\"invalid_input\",\"message\":\"work budget exhausted\"}}\n"},
+  {"status":504,"body":{"error":{"code":"deadline_exceeded","message":"deadline elapsed"}},"exit":5,"stderr":"{\"error\":{\"code\":\"deadline_exceeded\",\"message\":\"deadline elapsed\"}}\n"},
+  {"status":500,"body":{"error":{"code":"internal_error","message":"storage integrity fault"}},"exit":1,"stderr":"{\"error\":{\"code\":\"internal_error\",\"message\":\"storage integrity fault\"}}\n"},
+  {"status":503,"body":{"error":{"code":"commit_indeterminate","message":"lookup receipt"}},"exit":6,"stderr":"{\"error\":{\"code\":\"commit_indeterminate\",\"message\":\"lookup receipt\"}}\n"},
+  {"status":503,"body":{"error":{"code":"poisoned","message":"reopen storage"}},"exit":6,"stderr":"{\"error\":{\"code\":\"poisoned\",\"message\":\"reopen storage\"}}\n"}
 ]

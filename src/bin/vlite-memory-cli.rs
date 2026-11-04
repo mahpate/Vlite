@@ -1,6 +1,7 @@
 //! One authenticated agent-memory REST operation, without retries or local file access.
 
 use std::collections::BTreeSet;
+use std::ffi::{OsStr, OsString};
 use std::fmt;
 use std::fs::File;
 use std::io::{self, Read, Write};
@@ -23,6 +24,8 @@ Send one JSON object to an authenticated running vlite-server; no local mode.
 Requests and responses are bounded to 8388608 bytes. The timeout (default 5000)
 affects only HTTP, never the request's deadline_ms. No automatic retries,
 paging or job loops. Reconcile ambiguous mutations explicitly using receipt.
+HTTPS is required except for loopback HTTP; ambient proxies are disabled.
+Errors are coded JSON on stderr (withheld if they would expose the credential).
 Exit: 0 success (including pending), 2 usage/input, 3 auth, 4 conflict,
       5 deadline/cancel, 6 transport/storage ambiguity, 1 other failure.
 ";
@@ -65,16 +68,19 @@ struct Cli {
     binding: String,
     token_env: String,
     suffix: &'static str,
-    request: String,
+    request: OsString,
     timeout_ms: u64,
 }
 
-fn parse_args(args: impl Iterator<Item = String>) -> Result<Cli, Failure> {
+fn parse_args(args: impl Iterator<Item = OsString>) -> Result<Cli, Failure> {
     let mut args = args.peekable();
     let (mut url, mut binding, mut token_env, mut request, mut timeout) =
         (None, None, None, None, None);
     let mut verb = None;
     while let Some(arg) = args.next() {
+        let arg = arg
+            .into_string()
+            .map_err(|_| Failure::usage("options and verb must be UTF-8"))?;
         let target = match arg.as_str() {
             "--url" => &mut url,
             "--binding" => &mut binding,
@@ -94,19 +100,26 @@ fn parse_args(args: impl Iterator<Item = String>) -> Result<Cli, Failure> {
         }
         let value = args
             .next()
-            .filter(|value| !value.starts_with("--"))
+            .filter(|value| !value.to_string_lossy().starts_with("--"))
             .ok_or_else(|| Failure::usage("missing option value"))?;
         if arg == "--timeout-ms"
-            && (!value.bytes().all(|byte| byte.is_ascii_digit())
-                || !matches!(value.parse::<u64>(), Ok(1..=5000)))
+            && value.to_str().is_none_or(|value| {
+                !value.bytes().all(|byte| byte.is_ascii_digit())
+                    || !matches!(value.parse::<u64>(), Ok(1..=5000))
+            })
         {
             return Err(Failure::usage("--timeout-ms must be 1..5000"));
         }
         *target = Some(value);
     }
-    let url = url.ok_or_else(|| Failure::usage("missing --url"))?;
-    let binding = binding.ok_or_else(|| Failure::usage("missing --binding"))?;
-    let token_env = token_env.ok_or_else(|| Failure::usage("missing --token-env"))?;
+    let text = |value: OsString| {
+        value
+            .into_string()
+            .map_err(|_| Failure::usage("non-file option values must be UTF-8"))
+    };
+    let url = text(url.ok_or_else(|| Failure::usage("missing --url"))?)?;
+    let binding = text(binding.ok_or_else(|| Failure::usage("missing --binding"))?)?;
+    let token_env = text(token_env.ok_or_else(|| Failure::usage("missing --token-env"))?)?;
     let request = request.ok_or_else(|| Failure::usage("missing --request"))?;
     let suffix = verb
         .and_then(|verb| {
@@ -133,6 +146,21 @@ fn parse_args(args: impl Iterator<Item = String>) -> Result<Cli, Failure> {
     {
         return Err(url_error());
     }
+    let loopback = parsed.host_str().is_some_and(|host| {
+        host == "localhost"
+            || host
+                .trim_start_matches('[')
+                .trim_end_matches(']')
+                .parse::<std::net::IpAddr>()
+                .is_ok_and(|address| address.is_loopback())
+    });
+    if parsed.scheme() == "http" && !loopback {
+        return Err(Failure::new(
+            2,
+            "insecure_url",
+            "HTTP is permitted only for loopback hosts; use HTTPS",
+        ));
+    }
     if binding.is_empty()
         || binding.len() > 63
         || !binding.as_bytes()[0].is_ascii_lowercase()
@@ -149,7 +177,11 @@ fn parse_args(args: impl Iterator<Item = String>) -> Result<Cli, Failure> {
         suffix,
         request,
         timeout_ms: timeout.map_or(5000, |value| {
-            value.parse().expect("timeout validated above")
+            value
+                .to_str()
+                .expect("timeout validated above")
+                .parse()
+                .expect("timeout validated above")
         }),
     })
 }
@@ -210,9 +242,9 @@ fn is_json_object(bytes: &[u8]) -> bool {
     )
 }
 
-fn request_bytes(path: &str) -> Result<Vec<u8>, Failure> {
+fn request_bytes(path: &OsStr) -> Result<Vec<u8>, Failure> {
     let read_error = || Failure::new(2, "invalid_input", "cannot read request file or stdin");
-    let reader: Box<dyn Read> = if path == "-" {
+    let reader: Box<dyn Read> = if path == OsStr::new("-") {
         Box::new(io::stdin())
     } else {
         Box::new(File::open(path).map_err(|_| read_error())?)
@@ -271,14 +303,44 @@ fn clean(text: &str, token: &str) -> String {
         .collect()
 }
 
-// Preserve response key order and exact numeric lexemes; redact decoded strings,
-// including escaped spellings of the credential, then serialize those strings.
+fn diagnostic_line(failure: &Failure, token: &str) -> String {
+    let redact = |text: &str| {
+        if token.is_empty() {
+            text.to_owned()
+        } else {
+            clean(text, token)
+        }
+    };
+    let mut line = format!(
+        "{}\n",
+        serde_json::json!({"error": {
+            "code": redact(&failure.code), "message": redact(&failure.message)
+        }})
+    );
+    if !token.is_empty() && line.contains(token) {
+        line = "{\"error\":{\"code\":\"error\",\"message\":\"error details withheld\"}}\n".into();
+        if line.contains(token) {
+            // Some credentials collide with JSON syntax or the fixed fallback itself.
+            line.clear();
+        }
+    }
+    line
+}
+
+fn print_failure(failure: Failure, token: &str) -> ExitCode {
+    let _ = io::stderr()
+        .lock()
+        .write_all(diagnostic_line(&failure, token).as_bytes());
+    ExitCode::from(failure.exit)
+}
+
+// Preserve string and numeric lexemes and key order; refuse credential collisions.
 fn response_line(bytes: &[u8], token: &str) -> Result<String, Failure> {
     let invalid = || {
         Failure::new(
             6,
             "invalid_response",
-            "server response is not a JSON object",
+            "server response is not a JSON object; reconcile mutations by receipt",
         )
     };
     if !is_json_object(bytes) {
@@ -299,22 +361,42 @@ fn response_line(bytes: &[u8], token: &str) -> Result<String, Failure> {
                 }
             }
             let decoded: String = serde_json::from_str(&text[start..end]).map_err(|_| invalid())?;
-            line.push_str(
-                &serde_json::to_string(&decoded.replace(token, "[REDACTED]"))
-                    .map_err(|_| invalid())?,
-            );
+            if decoded.contains(token) {
+                return Err(credential_in_response());
+            }
+            line.push_str(&text[start..end]);
         } else if !ch.is_ascii_whitespace() {
             line.push(ch);
         }
     }
     line.push('\n');
+    if line.contains(token) {
+        return Err(credential_in_response());
+    }
+    if line.len() as u64 > MAX_BYTES {
+        return Err(Failure::new(
+            6,
+            "response_too_large",
+            "compact response exceeds 8388608 bytes including LF; reconcile mutations by receipt",
+        ));
+    }
     Ok(line)
 }
 
+fn credential_in_response() -> Failure {
+    Failure::new(
+        6,
+        "credential_in_response",
+        "response contained the bearer credential and was not printed; reconcile mutations by receipt",
+    )
+}
+
 fn execute(cli: Cli, token: &str) -> Result<String, Failure> {
-    let token_error =
-        || Failure::usage("token variable must contain a non-empty UTF-8 bearer token");
-    if token.is_empty() || token.chars().any(char::is_control) {
+    let token_error = || Failure::usage("token variable must contain 1..4096 visible ASCII bytes");
+    if token.is_empty()
+        || token.len() > 4096
+        || !token.bytes().all(|byte| (0x21..=0x7e).contains(&byte))
+    {
         return Err(token_error());
     }
     let mut authorization =
@@ -322,6 +404,7 @@ fn execute(cli: Cli, token: &str) -> Result<String, Failure> {
     authorization.set_sensitive(true);
     let body = request_bytes(&cli.request)?;
     let client = Client::builder()
+        .no_proxy()
         .timeout(Duration::from_millis(cli.timeout_ms))
         .redirect(reqwest::redirect::Policy::none())
         .retry(reqwest::retry::never())
@@ -349,7 +432,7 @@ fn execute(cli: Cli, token: &str) -> Result<String, Failure> {
         .map_err(|_| {
             Failure::new(
                 6,
-                "transport_error",
+                "invalid_response",
                 "cannot read HTTP response; reconcile mutations by receipt",
             )
         })?;
@@ -373,9 +456,9 @@ fn execute(cli: Cli, token: &str) -> Result<String, Failure> {
         return Err(Failure::new(exit_for(status.as_u16(), code), code, message));
     }
     Err(Failure::new(
-        exit_for(status.as_u16(), ""),
-        "http_error",
-        format!("HTTP {} without a valid error envelope", status.as_u16()),
+        6,
+        "invalid_response",
+        "server response is not a valid error envelope; reconcile mutations by receipt",
     ))
 }
 
@@ -386,39 +469,25 @@ fn main() -> ExitCode {
         return ExitCode::SUCCESS;
     }
     let mut token = String::new();
-    let result = args
-        .into_iter()
-        .map(|arg| {
-            arg.into_string()
-                .map_err(|_| Failure::usage("arguments must be UTF-8"))
-        })
-        .collect::<Result<Vec<_>, _>>()
-        .and_then(|args| parse_args(args.into_iter()))
-        .and_then(|cli| {
-            token = std::env::var(&cli.token_env).map_err(|_| {
-                Failure::usage("token variable must contain a non-empty UTF-8 bearer token")
-            })?;
-            execute(cli, &token)
-        });
+    let result = parse_args(args.into_iter()).and_then(|cli| {
+        token = std::env::var(&cli.token_env).map_err(|_| {
+            Failure::usage("token variable must contain 1..4096 visible ASCII bytes")
+        })?;
+        execute(cli, &token)
+    });
     match result {
         Ok(line) => match io::stdout().lock().write_all(line.as_bytes()) {
             Ok(()) => ExitCode::SUCCESS,
-            Err(_) => {
-                eprintln!("output_error: cannot write response; reconcile mutations by receipt");
-                ExitCode::from(6)
-            }
+            Err(_) => print_failure(
+                Failure::new(
+                    6,
+                    "output_error",
+                    "cannot write response; reconcile mutations by receipt",
+                ),
+                &token,
+            ),
         },
-        Err(failure) => {
-            let redact = |text: &str| {
-                if token.is_empty() {
-                    text.to_owned()
-                } else {
-                    clean(text, &token)
-                }
-            };
-            eprintln!("{}: {}", redact(&failure.code), redact(&failure.message));
-            ExitCode::from(failure.exit)
-        }
+        Err(failure) => print_failure(failure, &token),
     }
 }
 
@@ -437,7 +506,7 @@ mod tests {
     }
 
     #[test]
-    fn response_compaction_preserves_numbers_and_redacts_escaped_credentials() {
+    fn response_compaction_preserves_numbers_and_string_lexemes() {
         let body = br#"{
               "sequence":"18446744073709551615",
               "as_of_ms":-9223372036854775808,
@@ -445,8 +514,35 @@ mod tests {
               "unknown":{"secret":"\u0073ecret","line":"a\nb","quoted":"\""}
             }"#;
         assert_eq!(
-            response_line(body, "secret").unwrap_or_else(|_| panic!("valid response rejected")),
-            "{\"sequence\":\"18446744073709551615\",\"as_of_ms\":-9223372036854775808,\"score\":1.2300e-9,\"unknown\":{\"[REDACTED]\":\"[REDACTED]\",\"line\":\"a\\nb\",\"quoted\":\"\\\"\"}}\n"
+            response_line(body, "absent-token")
+                .unwrap_or_else(|_| panic!("valid response rejected")),
+            "{\"sequence\":\"18446744073709551615\",\"as_of_ms\":-9223372036854775808,\"score\":1.2300e-9,\"unknown\":{\"secret\":\"\\u0073ecret\",\"line\":\"a\\nb\",\"quoted\":\"\\\"\"}}\n"
+        );
+    }
+
+    #[test]
+    fn response_rejects_decoded_and_serialized_credential_matches() {
+        for (body, token) in [
+            (br#"{"\u0073ecret":"ok"}"#.as_slice(), "secret"),
+            (br#"{"value":"\u0073ecret"}"#.as_slice(), "secret"),
+            (br#"{"value":1}"#.as_slice(), "1"),
+            (br#"{"value":"a\nb"}"#.as_slice(), r"\n"),
+        ] {
+            let failure = response_line(body, token).expect_err("credential accepted");
+            assert_eq!(failure.exit, 6);
+            assert_eq!(failure.code, "credential_in_response");
+        }
+    }
+
+    #[test]
+    fn response_output_bound_counts_the_final_lf() {
+        let body = format!("{{\"value\":\"{}\"}}", "x".repeat(MAX_BYTES as usize - 12));
+        assert_eq!(body.len(), MAX_BYTES as usize);
+        assert_eq!(
+            response_line(body.as_bytes(), "absent-token")
+                .expect_err("LF overflow accepted")
+                .code,
+            "response_too_large"
         );
     }
 }

@@ -42,21 +42,37 @@ it never opens a database or supplies a tenant/provider endpoint.
 ```powershell
 # Set VLITE_TOKEN securely in the environment, not on the command line.
 vlite-memory-cli --url https://localhost:8443 --binding notes --token-env VLITE_TOKEN remember --request remember.json
-Get-Content recall.json | vlite-memory-cli --url https://localhost:8443 --binding notes --token-env VLITE_TOKEN recall --request -
+vlite-memory-cli --url https://localhost:8443 --binding notes --token-env VLITE_TOKEN recall --request recall.json
 ```
 
 Required flags are `--url`, `--binding`, `--token-env` and `--request FILE|-`.
 Verbs: `remember`, `recall`, `facts`, `correct-facts`, `consolidate`, `forget`,
 `receipt`, `erasure`, `resume-erasure`. Supply the operation's JSON body,
 including scope, mutation idempotency key, revisions and policies; semantic
-validation and authorization belong to the server. Input must be a UTF-8 JSON
-object without duplicate keys; input and response limits are 8,388,608 bytes.
-Tokens must be nonempty UTF-8 environment values and are never printed.
+validation and authorization belong to the server. Request files use native OS
+paths and preserve bytes; prefix a file name starting with `--` with `./`.
+Stdin must be piped as bytes, not through a text-decoding pipeline.
+Input must be a UTF-8 JSON object without duplicate keys. Request and received
+response limits are 8,388,608 bytes; compact stdout including its final LF
+must also fit that limit. Success validation is generic (a duplicate-free JSON
+object); the server is authoritative for operation schemas.
+Tokens must contain 1..4096 visible ASCII bytes (0x21..0x7e), without trimming.
+The credential is never written to stdout or stderr: credential-bearing
+successes are refused, not rewritten. Diagnostics are redacted and checked
+after JSON serialization; if even the fixed fallback contains the credential,
+stderr is empty. HTTPS is required except for loopback HTTP hosts (`localhost`,
+127.0.0.0/8, or `::1`); ambient proxies are explicitly disabled.
+Docker images intentionally do not ship this client.
 
 Success prints exactly one response JSON line; HTTP 202 pending is success.
-Errors print `<code>: <message>` to stderr. Exit codes: 0 success; 2 usage/input
+Errors print one coded JSON line `{"error":{"code":"<code>","message":"<message>"}}`
+to stderr, unless credential safety requires silence as above.
+Exit codes: 0 success; 2 usage/input
 (including exhausted work budgets); 3 authentication/authorization; 4 conflict/
-precondition; 5 server deadline/cancel; 6 transport/storage ambiguity; 1 other.
+precondition; 5 server deadline/cancel; 6 transport/storage ambiguity or local
+response-integrity failure; 1 other. Malformed, duplicate-key, non-object,
+invalid UTF-8, truncated and oversized responses fail locally with empty stdout,
+including malformed error bodies; validated remote errors retain their mappings.
 `--timeout-ms` accepts 1..5000 (default 5000) and changes only the HTTP timeout,
 never JSON `deadline_ms`. There are no automatic retries, paging or job loops.
 After an ambiguous mutation, explicitly use `receipt` with the original scope,

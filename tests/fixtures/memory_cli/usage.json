@@ -1,10 +1,10 @@
 [
-  {"args":[],"stderr":"usage: missing --url\n"},
-  {"args":["--url","http://127.0.0.1","--url","http://127.0.0.1"],"stderr":"usage: duplicate option\n"},
-  {"args":["--timeout-ms","0"],"stderr":"usage: --timeout-ms must be 1..5000\n"},
-  {"args":["--timeout-ms","5001"],"stderr":"usage: --timeout-ms must be 1..5000\n"},
-  {"args":["--db","local.vlite"],"stderr":"usage: unknown option\n"},
-  {"args":["--tenant","root"],"stderr":"usage: unknown option\n"},
-  {"args":["--provider-url","https://example.invalid"],"stderr":"usage: unknown option\n"},
-  {"args":["--token","secret"],"stderr":"usage: unknown option\n"}
+  {"args":[],"stderr":"{\"error\":{\"code\":\"usage\",\"message\":\"missing --url\"}}\n"},
+  {"args":["--url","http://127.0.0.1","--url","http://127.0.0.1"],"stderr":"{\"error\":{\"code\":\"usage\",\"message\":\"duplicate option\"}}\n"},
+  {"args":["--timeout-ms","0"],"stderr":"{\"error\":{\"code\":\"usage\",\"message\":\"--timeout-ms must be 1..5000\"}}\n"},
+  {"args":["--timeout-ms","5001"],"stderr":"{\"error\":{\"code\":\"usage\",\"message\":\"--timeout-ms must be 1..5000\"}}\n"},
+  {"args":["--db","local.vlite"],"stderr":"{\"error\":{\"code\":\"usage\",\"message\":\"unknown option\"}}\n"},
+  {"args":["--tenant","root"],"stderr":"{\"error\":{\"code\":\"usage\",\"message\":\"unknown option\"}}\n"},
+  {"args":["--provider-url","https://example.invalid"],"stderr":"{\"error\":{\"code\":\"usage\",\"message\":\"unknown option\"}}\n"},
+  {"args":["--token","secret"],"stderr":"{\"error\":{\"code\":\"usage\",\"message\":\"unknown option\"}}\n"}
 ]
