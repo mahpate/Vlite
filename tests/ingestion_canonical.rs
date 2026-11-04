@@ -929,6 +929,11 @@ fn set(v: &mut Value, key: &str, item: Value) {
     map.insert(key.into(), item);
 }
 
+fn get<'a>(v: &'a Value, key: &str) -> &'a Value {
+    let Value::Map(map) = v else { panic!("map") };
+    &map[key]
+}
+
 fn stored_head() -> Value {
     template("head_data")
 }
@@ -1651,6 +1656,218 @@ fn ingestion_canonical_attribute_byte_ceiling_and_numeric_tags() {
         )
         .unwrap();
         assert_eq!(u64::from(encoded[0]), tag);
+    }
+}
+
+#[test]
+fn ingestion_stored_review_distinct_field_bytes() {
+    let head = map(&[
+        ("revision_key", Value::Text("r".into())),
+        ("revision_digest", Value::Text("11".repeat(32))),
+        ("pipeline", Value::Text("22".repeat(32))),
+        ("status", Value::Unsigned(2)),
+        ("job_receipt_key", Value::Text("j".into())),
+        ("last_batch", Value::Unsigned(0x33445566)),
+    ]);
+    let revision = map(&[
+        ("source_key", Value::Text("S".into())),
+        ("uri", Value::Text("U".into())),
+        ("text_length", Value::Unsigned(0x11223344)),
+        ("chunk_count", Value::Unsigned(0x55667788)),
+        ("receipt_key", Value::Text("R".into())),
+    ]);
+    let chunk = map(&[
+        ("source_key", Value::Text("S".into())),
+        ("revision_key", Value::Text("R".into())),
+        ("ordinal", Value::Unsigned(0x01020304)),
+        ("start", Value::Unsigned(0x05060708)),
+        ("end", Value::Unsigned(0x090a0b0c)),
+        ("chunk_digest", Value::Text("33".repeat(32))),
+        ("pipeline", Value::Text("44".repeat(32))),
+    ]);
+    let batch = map(&[
+        (
+            "batch_digest",
+            map(&[
+                ("tag", Value::Unsigned(2)),
+                ("value", Value::Text("55".repeat(32))),
+            ]),
+        ),
+        ("final", Value::Bool(true)),
+        ("created_anchors", Value::Unsigned(0x01020304)),
+        ("reused_anchors", Value::Unsigned(0x05060708)),
+        ("result_shards", Value::Unsigned(0x090a0b0c)),
+        ("ownership_shards", Value::Unsigned(0x0d0e0f10)),
+    ]);
+    let mut entry = template("entry");
+    for (key, n) in [
+        ("producing_op", 0x01020304),
+        ("result_ordinal", 0x05060708),
+        ("object_kind", 1),
+    ] {
+        set(&mut entry, key, Value::Unsigned(n));
+    }
+    set(&mut entry, "object_key", Value::Text("K".into()));
+    set(
+        &mut entry,
+        "id",
+        map(&[
+            ("tag", Value::Unsigned(0)),
+            ("value", Value::Unsigned(0x1112131415161718)),
+        ]),
+    );
+    set(
+        &mut entry,
+        "revision",
+        map(&[
+            ("tag", Value::Unsigned(1)),
+            ("value", Value::Unsigned(0x2122232425262728)),
+        ]),
+    );
+    set(&mut entry, "retained", Value::Bool(true));
+    // Literal witnesses from the appendix field order and fixed LE widths.
+    let entry_hex = "0104030201080706050001010000004b00181716151413121101282726252423222100000001";
+    let shard = map(&[
+        ("channel", Value::Unsigned(1)),
+        ("root_key", Value::Text("S".into())),
+        ("batch", Value::Unsigned(0x01020304)),
+        ("group", Value::Unsigned(0x05060708)),
+        ("index", Value::Unsigned(0x090a0b0c)),
+        ("entries", Value::List(vec![entry.clone()])),
+    ]);
+    for (name, data, expected) in [
+        (
+            "head_data",
+            head,
+            format!(
+                "0101010000007201{}01{}0201010000006a66554433",
+                "11".repeat(32),
+                "22".repeat(32)
+            ),
+        ),
+        (
+            "revision_data",
+            revision,
+            "01010000005301010000005544332211887766550100000052".into(),
+        ),
+        (
+            "chunk_data",
+            chunk,
+            format!(
+                "010100000053010000005204030201080706050c0b0a09{}{}",
+                "33".repeat(32),
+                "44".repeat(32)
+            ),
+        ),
+        (
+            "batch_data",
+            batch,
+            format!("0102{}0104030201080706050c0b0a09100f0e0d", "55".repeat(32)),
+        ),
+        ("entry", entry, entry_hex.into()),
+        (
+            "shard",
+            shard,
+            format!(
+                "0101010000005304030201080706050c0b0a0901000000{}",
+                &entry_hex[2..]
+            ),
+        ),
+    ] {
+        let expected = canonical::unhex(&expected).unwrap();
+        assert_eq!(
+            canonical::encode(&Type::Record(name), &data).unwrap(),
+            expected,
+            "{name}"
+        );
+        assert_eq!(
+            canonical::decode(&Type::Record(name), &expected).unwrap(),
+            data,
+            "{name}"
+        );
+    }
+}
+
+#[test]
+fn ingestion_stored_review_negative_fields_and_projection_overflow() {
+    use canonical::stored;
+    let mut entry = template("entry");
+    set(&mut entry, "object_kind", Value::Unsigned(2));
+    set(&mut entry, "collection", Value::Unsigned(1));
+    set(&mut entry, "record", Value::Unsigned(2));
+    set(
+        &mut entry,
+        "attached_chunk_key",
+        Value::Text("chunk".into()),
+    );
+    assert_eq!(
+        canonical::encode(&Type::Record("entry"), &entry),
+        Err("entry_vector_fields")
+    );
+    let mention = get(get(&template("mention_edge_operation"), "fields"), "object").clone();
+    let mut id = get(&mention, "identity").clone();
+    let mut fields = get(&id, "fields").clone();
+    set(&mut fields, "end", Value::Unsigned(0));
+    set(&mut id, "fields", fields);
+    assert_eq!(
+        canonical::encode(&Type::Identity, &id),
+        Err("evidence_span")
+    );
+    let id = get(&mention, "identity").clone();
+    let mut data = get(&mention, "data").clone();
+    set(&mut data, "surface", Value::Text("a".repeat(50_000)));
+    assert_eq!(stored::physical(&id, &data), Err("properties"));
+    let mut vector = template("vector_projection_data");
+    vector_text(&mut vector).unwrap();
+    set(&mut vector, "tenant", Value::Text("t".repeat(5_000)));
+    assert_eq!(stored::vector_record(&vector), Err("properties"));
+}
+
+#[test]
+fn ingestion_stored_review_physical_roles() {
+    use canonical::stored;
+    for (name, token) in [
+        ("has_revision_edge_operation", "hr"),
+        ("has_chunk_edge_operation", "hc"),
+    ] {
+        let op = template(name);
+        let object = get(get(&op, "fields"), "object");
+        let id = get(object, "identity");
+        let data = get(object, "data");
+        let physical = stored::physical(id, data).unwrap();
+        assert_eq!(physical["g7_kind"], Value::Text(token.into()));
+        stored::validate_physical(id, data, &physical).unwrap();
+    }
+    let batch = identity(
+        "batch_receipt",
+        map(&[
+            ("root", template("receipt")),
+            ("ordinal", Value::Unsigned(1)),
+        ]),
+    );
+    let physical = stored::physical(&batch, &template("batch_data")).unwrap();
+    assert_eq!(physical["g7_kind"], Value::Text("bat".into()));
+    stored::validate_physical(&batch, &template("batch_data"), &physical).unwrap();
+    for (name, token) in [("delete_receipt", "del"), ("abort_receipt", "abt")] {
+        let id = template(name);
+        let mut data = template("receipt_data");
+        set(&mut data, "revision_key", Value::Text(String::new()));
+        let physical = stored::physical(&id, &data).unwrap();
+        assert_eq!(physical["g7_kind"], Value::Text(token.into()));
+        assert_eq!(physical["revision_key"], Value::Text(String::new()));
+        stored::validate_physical(&id, &data, &physical).unwrap();
+    }
+    for role in ["result_shard", "ownership_shard"] {
+        let id = identity(
+            role,
+            map(&[
+                ("root", template("receipt")),
+                ("batch", Value::Unsigned(1)),
+                ("group", Value::Unsigned(2)),
+                ("index", Value::Unsigned(3)),
+            ]),
+        );
+        assert_eq!(stored::physical(&id, &map(&[])), Err("object_role"));
     }
 }
 
