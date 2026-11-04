@@ -70,6 +70,17 @@ independent acceptance or the unchanged DO-005 quiet-host policy.
   until the owner revisits it. Synchronous acknowledgement needs its own
   approval.
 
+## Decided 2026-11-04
+
+- **Size work parked:** size-driven work (P3b engine integration, P3c, P4, P5
+  writers and compression) is parked for 0.7.0 as best effort. The release
+  does not wait for it; the DO-005 run reports measured values only; the work
+  is revisited if a size goal is required. Must-not-regress items still block
+  ([storage goals](../performance/storage-goals.md#decisions), decision 7).
+- **Memory track:** Key-value (Gap 2) and agent memory (Gap 1) are P0 for
+  0.7.0: the release waits for their independent acceptance and green CI;
+  leases stay design-only; publishing stays with the owner.
+
 ## Progress
 
 Local numbers below show direction only (see rules).

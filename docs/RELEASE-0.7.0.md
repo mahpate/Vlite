@@ -449,16 +449,21 @@ reads them as records of a one-dimension collection.
 
 ## Not included in this release
 
-These are private, test-only, gated or design-only. They are not available, and
-you should not rely on them:
-<!-- source: docs/projects/roadmap/next-major.md -->
+These are private, test-only, gated, parked or design-only. They are not
+available, and you should not rely on them. Size-driven work is parked for
+0.7.0 as best effort: the release does not wait for it and makes no size
+claims.
+<!-- source: docs/projects/roadmap/next-major.md, docs/projects/performance/storage-goals.md -->
 
-- **Compact and float16 vector storage.** Float32 stays the only storage
-  precision, and release builds refuse stores that carry the precision flag.
-  <!-- source: docs/projects/roadmap/next-major.md, src/compact/mod.rs -->
-- **Compact graph storage.** It is test-only, and production graph storage is
-  unchanged.
-  <!-- source: docs/GRAPH.md, src/compact/mod.rs -->
+- **Compact and float16 vector storage (parked).** Float32 stays the only
+  storage precision, and release builds refuse stores that carry the precision
+  flag. Release builds validate the envelope of a compact checkpoint image,
+  skipping authenticated derived blocks with one `log` warning, but no
+  production writer creates one.
+  <!-- source: docs/projects/roadmap/next-major.md, docs/projects/performance/storage-goals.md, src/compact/mod.rs -->
+- **Compact graph storage (parked).** It is test-only, and production graph
+  storage is unchanged.
+  <!-- source: docs/GRAPH.md, docs/projects/performance/storage-goals.md, src/compact/mod.rs -->
 - **Temporal graph** (validity intervals and as-of reads). Production builds
   refuse temporal operations and temporal files with `UnsupportedFeature(64)`.
   The public `GraphChange::Temporal`, `GraphOp::Temporal`, `TemporalOp`,
@@ -475,8 +480,8 @@ you should not rely on them:
   implemented. Key-value versions are not such a ledger (see
   [Key-value store](#key-value-store)).
   <!-- source: docs/projects/roadmap/next-major.md, docs/projects/roadmap/gap2-lease-ledger.md -->
-- **Filter-aware approximate search.** It is private and gated.
-  <!-- source: docs/projects/roadmap/next-major.md, docs/projects/roadmap/p5-filters-and-serving.md -->
+- **Filter-aware approximate search (parked).** It is private and gated.
+  <!-- source: docs/projects/roadmap/next-major.md, docs/projects/performance/storage-goals.md, docs/projects/roadmap/p5-filters-and-serving.md -->
 - **Access beyond Rust to graph expiry, the TTL-aware feed and graph
   algorithms.** REST, gRPC, MCP, the graph CLI and the bindings do not expose
   them.
