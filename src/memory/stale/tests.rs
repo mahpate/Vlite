@@ -7,9 +7,9 @@ use std::path::Path;
 
 use super::super::consolidate::{ConsolidateInput, ConsolidateRequest, ConsolidateSummary};
 use super::super::{
-    ForgetRequest, ForgetTarget, LABEL_MEMORY, MemoryItem, MemoryKind, MemoryMut, MemoryProperties,
-    MemoryRef, MemoryScope, Provenance, RememberRequest, content_digest, memory_key,
-    memory_properties,
+    ForgetRequest, ForgetTarget, LABEL_MEMORY, LABEL_SCOPE, MemoryItem, MemoryKind, MemoryMut,
+    MemoryProperties, MemoryRef, MemoryScope, Provenance, RememberRequest, content_digest, hex,
+    memory_key, memory_properties,
 };
 use super::{SummaryStatus, SummaryStatusRequest, derived_edge_key};
 use crate::{
@@ -725,6 +725,94 @@ fn s1_scope_identity_and_clock_are_checked() {
     assert_eq!(status(&db, &"x".repeat(257), at), error("InvalidTarget"));
     assert_eq!(status(&db, "s", i64::MAX as u64 + 1), error("InvalidClock"));
     assert!(status(&db, "s", i64::MAX as u64).is_ok());
+}
+
+#[test]
+fn s1_scope_tuple_mismatch_is_digest_collision() {
+    // A scope node at the request's scope key whose tuple encodes another
+    // scope: the key collided, so the read stops before any summary decode.
+    let dir = tempfile::tempdir().unwrap();
+    let (mut db, now) = three(dir.path());
+    let at = now + 2;
+    let scope_key = scope().key();
+    let node = db
+        .graph(GRAPH)
+        .unwrap()
+        .get_node(&scope_key)
+        .unwrap()
+        .output
+        .unwrap();
+    let foreign = MetadataValue::String(hex(&other_scope().encode()));
+    assert_ne!(node.properties.get("tuple"), Some(&foreign));
+    let mut properties = node.properties.clone();
+    properties.insert("tuple".into(), foreign);
+    write(
+        &mut db,
+        &[GraphOp::UpsertNode {
+            key: scope_key.clone(),
+            labels: vec![LABEL_SCOPE.into()],
+            properties,
+            expected: Expected::Revision(node.revision),
+        }],
+    );
+    let planted = db
+        .graph(GRAPH)
+        .unwrap()
+        .get_node(&scope_key)
+        .unwrap()
+        .output
+        .unwrap();
+    let summary = db
+        .graph(GRAPH)
+        .unwrap()
+        .get_node(&key("s"))
+        .unwrap()
+        .output
+        .unwrap();
+    assert_eq!(status(&db, "s", at), error("DigestCollision"));
+    assert_eq!(status(&db, "unknown", at), error("DigestCollision"));
+    // No side effects: status_of checks nothing was appended; both nodes
+    // are byte-for-byte what they were before the reads.
+    let graph = db.graph(GRAPH).unwrap();
+    assert_eq!(graph.get_node(&scope_key).unwrap().output, Some(planted));
+    assert_eq!(graph.get_node(&key("s")).unwrap().output, Some(summary));
+}
+
+#[test]
+fn s1_ignores_non_derived_from_outgoing_edges() {
+    // Only DERIVED_FROM edges are examined; any other well-formed outgoing
+    // edge of the summary changes neither the counts nor the verdict.
+    let dir = tempfile::tempdir().unwrap();
+    let (mut db, now) = three(dir.path());
+    let at = now + 2;
+    let before = status(&db, "s", at).unwrap();
+    assert_eq!(before, expect(&db, "s", (3, 3, 0, 0, false)));
+    write(
+        &mut db,
+        &[GraphOp::CreateEdge {
+            key: Some("relates:s:a".into()),
+            source: key("s"),
+            relationship: "RELATES_TO".into(),
+            destination: key("a"),
+            properties: Metadata::from([("note".into(), text("x"))]),
+        }],
+    );
+    let after = status(&db, "s", at).unwrap();
+    assert_eq!(after, expect(&db, "s", (3, 3, 0, 0, false)));
+    assert_eq!(
+        SummaryStatus {
+            view_sequence: before.view_sequence,
+            ..after.clone()
+        },
+        before
+    );
+    assert_eq!(after.view_sequence, db.sequence);
+    // Still independent of the other edge once the summary goes stale.
+    forget(&mut db, "b", now + 3);
+    assert_eq!(
+        status(&db, "s", now + 4),
+        Ok(expect(&db, "s", (3, 2, 0, 0, true)))
+    );
 }
 
 #[test]
