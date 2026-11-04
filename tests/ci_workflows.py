@@ -156,6 +156,7 @@ class Policy(unittest.TestCase):
             "compact_graph_schema_oracle",
             "temporal_read_oracle",
             "ingestion_reference",
+            "graph_subset_oracle",
         ):
             command = f"python tests/{oracle}.py --self-test"
             self.assertIn(command, changes)

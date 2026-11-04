@@ -745,7 +745,7 @@ wins. Positions are 0-based UTF-8 byte offsets.
 | d. `ON CREATE` or `ON MATCH` after any mutation clause, `MERGE` included | `Unsupported` at `ON` | parser |
 | e. `AS OF` in a statement with a mutation clause | `Unsupported` at `AS` | parser |
 | f. Function or UDF call, plain or qualified (`f(x)`, `n.f(x)`) | `Unsupported` at the name before `(` | parser |
-| g. Any hop form other than `*1..N` (`*`, `*1`, `*2..3`, `*..3`, `*1..$h`, `*1..]`) | `Unsupported` at the `*`; `*0..N` and a leading-zero bound stay `Syntax` at the bound, N above 4 stays `Limit` | reference |
+| g. Any hop form other than `*1..N` (`*`, `*0..3`, `*1`, `*2..3`, `*..3`, `*1..$h`, `*1..]`) | `Unsupported` at the `*` for every minimum other than 1, including 0 and a leading-zero minimum; a zero or leading-zero maximum (`*1..0`, `*1..04`) stays `Syntax` at the maximum, and a maximum above 4 stays `Limit` | reference |
 | h. A relationship variable or anchor together with `*` | `Unsupported` at the `*` | reference |
 | i. Bracketless relationship shorthand (`-->`, `--`, `<--`, `<-->`) | `Unsupported` at the first `-` or `<-`; any other token after that opener except `[` stays `Syntax` at that token | parser |
 | j. `KEY $k` bound to an empty string | Planning accepts it; the existing key validators reject it at execution as `Error::InvalidQuery` (section 7) | reference |
@@ -755,6 +755,12 @@ wins. Positions are 0-based UTF-8 byte offsets.
 
 The parser/planner changes (d, e, f, i, m) alter only the reported kind or
 position. The independent reference and its fixtures take a, b, c, g, h, j, k
-and l. The differential between them is re-run on both fixed heads before either
-is wired into CI. Cases the table does not list, such as MERGE `(a)` followed by
-anything other than `<-`, stay open and keep the behavior of sections 3 and 7.
+and l; row g reads N = 0 as the maximum bound, so `*0..N` is `Unsupported` like
+every other minimum, as the parser already reports. The differential between
+them now runs on the integrated tree and is wired in:
+`tests/graph_subset_differential.rs` checks the 303-case parse corpus against
+`plan(text, parameters)` (288 cases match, none differ, and 15 expect a section 7
+envelope or execution error that lies outside `plan`), and CI runs the reference
+self-test. These rows stay provisional until the owner ratifies them. Cases the
+table does not list, such as MERGE `(a)` followed by anything other than `<-`,
+stay open and keep the behavior of sections 3 and 7.
