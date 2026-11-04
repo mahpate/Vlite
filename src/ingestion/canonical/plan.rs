@@ -356,7 +356,12 @@ pub(super) fn operation_schema(tag: u64) -> Result<Vec<(&'static str, Type)>> {
 fn validate_operation(v: &Value) -> Result<()> {
     let t = tag(v)?;
     let f = of(v)?;
-    if t == 1 && !matches!(role(field(f, "edge")?)?, "has_revision" | "has_chunk" | "mention" | "relation") {
+    if t == 1
+        && !matches!(
+            role(field(f, "edge")?)?,
+            "has_revision" | "has_chunk" | "mention" | "relation"
+        )
+    {
         return Err("operation_object_role");
     }
     if t == 4 && !matches!(role(field(f, "node")?)?, "source" | "revision" | "chunk") {

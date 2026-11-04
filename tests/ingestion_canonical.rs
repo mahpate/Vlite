@@ -854,7 +854,11 @@ fn ingestion_canonical_complete_plan_vectors() {
             let actual = remaining_case(case, &fixture["templates"]);
             if index == 1 {
                 assert!(actual.is_err(), "{name}: got {actual:?}");
-                assert_eq!(actual.unwrap_err(), case["error"].as_str().unwrap(), "{name}");
+                assert_eq!(
+                    actual.unwrap_err(),
+                    case["error"].as_str().unwrap(),
+                    "{name}"
+                );
             } else {
                 let (bytes, t, v) = actual.unwrap_or_else(|e| panic!("{name}: {e}"));
                 if case["category"] == "plan_order" {
