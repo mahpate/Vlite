@@ -1118,7 +1118,7 @@ def with_unknown_fields(value):
 SCOPE = {"agent": "a", "user": "u", "session": "s"}
 SLOT = {"subject_id": "i0", "predicate": "role", "slot_key": "primary"}
 REF = {"id": "r1", "revision": MAX_ID}
-INTERVAL = {"valid_from_ms": MIN_I64, "valid_to_ms": MAX_I64}
+INTERVAL = {"valid_from_ms": MIN_I64, "valid_to_ms": "-1"}
 SOURCE = {"source_id": "src", "source_kind": "caller", "uri": "https://example.test/doc", "transformation_id": "xf"}
 EVIDENCE_REF = {"collection": "docs", "record": MAX_ID}
 EVIDENCE = {"collection": "docs", "record": "0", "vector": [0.5, 0.25], "text": "t", "payload_base64": "AP8=",
@@ -1162,7 +1162,7 @@ FULL = {
     "find_facts": {"scope": SCOPE, "slot": SLOT, "as_of_ms": MAX_I64, "history": True, "limit": 100,
                    "limits": LIMITS, "projection": PROJECTION, "allow_partial": True},
     "correct_facts": {**MUTATION, "slot": SLOT, "series": REF, "slot_revision": MAX_ID,
-                      "interval": {"valid_from_ms": None, "valid_to_ms": MAX_I64}, "action": "replace",
+                      "interval": {"valid_from_ms": None, "valid_to_ms": "-1"}, "action": "replace",
                       "at_ms": MIN_I64, "correction_interval": {"valid_from_ms": "-1", "valid_to_ms": None},
                       "replacement": ITEM, "evidence": [EVIDENCE]},
     "consolidate": {**MUTATION, "inputs": [INPUT, {"id": "m2", "revision": "1"}],
@@ -1298,8 +1298,27 @@ TEXT_KEYS = {"agent", "user", "session", "idempotency_key", "source_id", "source
              "disposition", "type"}
 BOOLEAN_KEYS = {"require_complete_feed", "allow_partial", "history", "dry_run", "allow_job", "snippets",
                 "provenance", "paths"}
+LITERAL_TRUE_KEYS = {"absent", "session", "scope"}
 INTEGER_KEYS = {"max_references", "deadline_ms", "limit", *LIMITS}
 NUMBER_KEYS = {"importance", "confidence", "half_life_ms", "lambda"}
+SCALAR_HOST = {**MIN["recall"], "filter": {"all": [{"field": "x", "op": "eq", "value": {"type": "string", "value": "v"}}]}}
+# Where each schema of the fixtures' invalid structural requests sits in a minimal request.
+FIXTURE_HOSTS = {
+    "U64": hosted("forget", SERIES_HOST, ("target", "series", "revision")),
+    "I64": hosted("remember", MIN["remember"], ("items", 0, "observed_at_ms")),
+    "Source": PIECES["source"][3], "Scope": PIECES["scope"][3], "Interval": PIECES["interval"][3],
+    "Expected": PIECES["expected-absent"][3], "Target": PIECES["target-0"][3], "Item": PIECES["item"][3],
+    "Scalar": hosted("recall", SCALAR_HOST, ("filter", "all", 0, "value")),
+    "Condition": PIECES["condition"][3], "Ranking": PIECES["ranking"][3],
+    "RecallRequest": lambda value: ("recall", value),
+    "CorrectionRequest": lambda value: ("correct_facts", value),
+    "FactsRequest": lambda value: ("find_facts", value),
+}
+# Invalid-request fixtures the client refuses itself because they violate a form (names, JSON
+# types, canonical integers, null) rather than a semantic rule; the integer-invalid-* ones join them.
+LOCAL_REFUSALS = {"source-required-kind", "source-unknown-field", "old-validity-name-rejected", "expected-invalid-90",
+                  "expected-invalid-91", "expected-invalid-92", "typed-boolean-not-integer",
+                  "target-multiple-branches-rejected", "correction-close-requires-time"}
 PENDING = {"receipt": {"id": "r2", "operation": "resume_erasure", "scope": {"tenant": "@root", "agent": "a"},
                        "sequence": "9", "digest_version": "memory-request-v1"},
            "replayed": False, "outcomes": [],
@@ -1541,25 +1560,39 @@ class MemoryTests(unittest.TestCase):
             ("remember", lambda v: remember_with(observed_at_ms=v), lambda body: body["items"][0]["observed_at_ms"]),
             ("recall", lambda v: {**MIN["recall"], "as_of_ms": v}, lambda body: body["as_of_ms"]),
             ("find_facts", lambda v: {**MIN["find_facts"], "as_of_ms": v}, lambda body: body["as_of_ms"]),
-            ("correct_facts", lambda v: {**MIN["correct_facts"], "at_ms": v}, lambda body: body["at_ms"]))
+            ("correct_facts", lambda v: {**MIN["correct_facts"], "at_ms": v}, lambda body: body["at_ms"]),
+            # Interval endpoints are the only nullable integers: null is sent, never dropped.
+            *[("correct_facts", lambda v, name=name, end=end: {**MIN["correct_facts"], name: {
+                "valid_from_ms": v if end == "valid_from_ms" else None,
+                "valid_to_ms": v if end == "valid_to_ms" else None}},
+               lambda body, name=name, end=end: body[name][end], True)
+              for name in ("interval", "correction_interval") for end in ("valid_from_ms", "valid_to_ms")],
+            *[("remember", lambda v, end=end: remember_with(assertion={**ASSERTION, "interval": {
+                "valid_from_ms": v if end == "valid_from_ms" else None,
+                "valid_to_ms": v if end == "valid_to_ms" else None}}),
+               lambda body, end=end: body["items"][0]["assertion"]["interval"][end], True)
+              for end in ("valid_from_ms", "valid_to_ms")])
         valid_u64 = [("0", "0"), (0, "0"), ("7", "7"), (7, "7"), (MAX_ID, MAX_ID), (18446744073709551615, MAX_ID),
                      (2 ** 63, "9223372036854775808"), ("9223372036854775808", "9223372036854775808")]
         invalid_u64 = ["-1", -1, "18446744073709551616", 2 ** 64, "00", "01", "+1", " 1", "1 ", "1\n", "1.0", 1.0,
-                       True, False, None, "", "0x1", "1_0", "\uff11", "\u0661\u0662", b"1", [1], {"a": 1},
+                       True, False, None, "", "0x1", "1_0", "\uff11", "\u0661\u0662", "1\u0662", b"1", [1], {"a": 1},
                        float("nan"), "1e3", 1e3, "9" * 30, 10 ** 30]
         valid_i64 = [("0", "0"), (0, "0"), ("-1", "-1"), (-1, "-1"), ("5", "5"), (MIN_I64, MIN_I64),
                      (-2 ** 63, MIN_I64), (MAX_I64, MAX_I64), (2 ** 63 - 1, MAX_I64)]
         invalid_i64 = ["-0", "-01", "00", "+1", "-9223372036854775809", -2 ** 63 - 1, "9223372036854775808",
                        2 ** 63, MAX_ID, 2 ** 64, True, False, None, 1.0, "1.0", " 1", "-", "--1", "", "1e3",
-                       "\u0661", "\u22121", float("inf"), b"1"]
+                       "\u0661", "\u22121", "-1\u0662", float("inf"), b"1"]
         for positions, valid, invalid in ((u64_positions, valid_u64, invalid_u64), (i64_positions, valid_i64, invalid_i64)):
-            for method, build, extract in positions:
-                for given, canonical in valid:
+            for method, build, extract, *nullable in positions:
+                nullable = bool(nullable)
+                for given, canonical in valid + ([(None, None)] if nullable else []):
                     with self.subTest(method=method, given=given):
                         Scripted.log.clear()
                         self.call(method, build(given))
                         self.assertWire(extract(Scripted.log[0][2]), canonical)
                 for given in invalid:
+                    if given is None and nullable:
+                        continue
                     with self.subTest(method=method, invalid=given):
                         self.assertRefused(method, build(given))
 
@@ -1619,7 +1652,8 @@ class MemoryTests(unittest.TestCase):
             with self.subTest(piece=label, key=key, check="foreign"):
                 self.assertRefused(*build({**piece, key: b"x"}))
                 if isinstance(piece[key], list):
-                    self.assertRefused(*build({**piece, key: [b"x"]}))
+                    for foreign in ([b"x"], "", "s", (), {}):
+                        self.assertRefused(*build({**piece, key: foreign}))
                 if key == "metadata" and isinstance(piece[key], dict):
                     self.assertRefused(*build({**piece, key: {"m": b"x"}}))
                     self.assertRefused(*build({**piece, key: {1: {"type": "string", "value": "v"}}}))
@@ -1629,6 +1663,9 @@ class MemoryTests(unittest.TestCase):
                         self.assertRefused(*build({**piece, key: foreign}))
                 if key in BOOLEAN_KEYS and isinstance(piece[key], bool):
                     for foreign in (1, 0, "true", 1.0):
+                        self.assertRefused(*build({**piece, key: foreign}))
+                if key in LITERAL_TRUE_KEYS and piece[key] is True:
+                    for foreign in (False, 1, 0, "true", 1.0):
                         self.assertRefused(*build({**piece, key: foreign}))
                 if key in INTEGER_KEYS and isinstance(piece[key], int):
                     for foreign in (True, 1.0, "1", [1]):
@@ -1649,7 +1686,8 @@ class MemoryTests(unittest.TestCase):
         for value in expected:
             self.assertRefused("remember", remember_with(expected=value), value)
             self.assertRefused("remember", remember_with(assertion={**ASSERTION, "slot_expected": value}), value)
-        targets = [{}, {"scope": True, "session": True}, {"session": False}, {"scope": 1}, {"scope": "true"},
+        targets = [{}, {"scope": True, "session": True}, {"session": False}, {"scope": False}, {"scope": 1},
+                   {"scope": "true"},
                    {"ids": [REF], "scope": True}, {"ids": REF}, {"ids": [True]}, {"series": [REF]},
                    {"entity": {"id": "x"}}, {"entity": {"revision": "1"}}, {"zz": True}, None, "scope", True, [],
                    [{"scope": True}], {"ids": None}, {"ids": [REF], "series": REF}]
@@ -1746,6 +1784,27 @@ class MemoryTests(unittest.TestCase):
             self.assertEqual((raised.exception.status, raised.exception.code), (422, "invalid_input"))
             self.assertEqual(len(Scripted.log), 1)
             self.assertWire(Scripted.log[0][2], request)
+
+    def test_fixture_invalid_requests_split_between_local_forms_and_server_semantics(self):
+        cases = [c for operation, _, _ in MEMORY_OPERATIONS for c in memory_fixture(operation)["structural"]
+                 if c["request"] and not c["valid"] and c["schema"] in FIXTURE_HOSTS and not has_directive(c["value"])]
+        self.assertEqual(len(cases), 38)
+        forms = {c["name"] for c in cases if c["name"].startswith(("integer-invalid-U64-", "integer-invalid-I64-"))}
+        local = LOCAL_REFUSALS | forms
+        self.assertEqual((len(forms), len(local - forms), local <= {c["name"] for c in cases}), (12, 9, True))
+        Scripted.respond = lambda *_: memory_error(422, "invalid_input", {"field": "x"})
+        for case in cases:
+            method, request = FIXTURE_HOSTS[case["schema"]](copy.deepcopy(case["value"]))
+            with self.subTest(case=case["name"]):
+                if case["name"] in local:
+                    self.assertRefused(method, request, case["name"])
+                    continue
+                Scripted.log.clear()
+                with self.assertRaises(VLiteError) as raised:
+                    self.call(method, copy.deepcopy(request))
+                self.assertEqual((raised.exception.status, raised.exception.code, len(Scripted.log)),
+                                 (422, "invalid_input", 1))
+                self.assertWire(Scripted.log[0][2], request, case["name"])
 
     def test_numbers_strings_and_vectors_are_not_rewritten(self):
         vector = [0.1, 16777217.0, 3.5e38, 1, -0.0, 1e-45, 5e-324, 2 ** 70]
@@ -1967,7 +2026,10 @@ class MemoryTests(unittest.TestCase):
                 except OSError:
                     return
                 with connection:
-                    accepted.append(connection.recv(65536))
+                    try:
+                        accepted.append(connection.recv(65536))
+                    except OSError:
+                        accepted.append(b"")
 
         thread = Thread(target=serve, daemon=True)
         thread.start()
@@ -2046,6 +2108,32 @@ class MemoryTests(unittest.TestCase):
         self.assertIsNone(raised.exception.details)
         self.assertIsNone(VLiteError(500, "internal_error", "m", None).details)
         self.assertEqual(VLiteError(409, "c", "m", "rid", {"feature": "f"}).details, {"feature": "f"})
+
+    def test_local_errors_name_the_offending_field(self):
+        cases = [
+            ("remember", remember_with(observed_at_ms="01"), r"request\.items\[0\]\.observed_at_ms must be a canonical"),
+            ("remember", remember_with(observed_at_ms=2 ** 63), r"request\.items\[0\]\.observed_at_ms must be in"),
+            ("recall", {**MIN["recall"], "limits": {"candidates": True}}, r"request\.limits\.candidates must be an integer"),
+            ("recall", {**MIN["recall"], "zz": 1}, r"request: unknown field 'zz' is never sent"),
+            ("recall", {"text": "t"}, r"request: missing required field 'scope'"),
+            ("remember", remember_with(metadata={"m": {"type": "x", "value": 1}}),
+             r"request\.items\[0\]\.metadata\.m\.type must be one of"),
+            ("remember", remember_with(metadata={1: {"type": "string", "value": "v"}}),
+             r"request\.items\[0\]\.metadata key must be a string"),
+            ("forget", {**MIN["forget"], "target": {"ids": [REF, {"id": "r"}]}},
+             r"request\.target\.ids\[1\]: missing required field 'revision'"),
+            ("forget", {**MIN["forget"], "target": {"scope": False}}, r"request\.target\.scope must be true"),
+            ("correct_facts", {**MIN["correct_facts"], "interval": {"valid_from_ms": None}},
+             r"request\.interval: missing required field 'valid_to_ms'"),
+            ("get_erasure", {"scope": {"agent": "\ud800"}, "job_id": "j"},
+             r"request\.scope\.agent must contain Unicode scalar values"),
+            ("find_facts", {**MIN["find_facts"], "slot": {"subject_id": "s", "predicate": "p", "slot_key": "k", "zz": 1}},
+             r"request\.slot: unknown field 'zz'"),
+        ]
+        for method, request, message in cases:
+            with self.subTest(method=method, message=message), self.assertRaisesRegex(ValueError, message):
+                self.call(method, request)
+        self.assertEqual(Scripted.log, [])
 
     TYPED = {
         "MemoryScope": ({"agent"}, {"user", "session"}),
