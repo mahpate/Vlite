@@ -574,12 +574,13 @@ def add_chunk_group_member(group_members, creation_groups, chunk, tag,
 
 
 def validate_group_chunk_membership(members):
-    creation_ids = {chunk_id for tag, chunk_id in members if tag in (5, 6, 7, 8)}
+    checked_members = [(tag, chunk_id) for tag, chunk_id in members if tag != 1]
+    creation_ids = {chunk_id for tag, chunk_id in checked_members if tag in (5, 6, 7, 8)}
     if creation_ids:
-        need(len({chunk_id for _, chunk_id in members}) <= 1,
+        need(len({chunk_id for _, chunk_id in checked_members}) <= 1,
              "group_chunk_membership")
     else:
-        cleanup_ids = {chunk_id for tag, chunk_id in members if tag in (2, 3, 4)}
+        cleanup_ids = {chunk_id for tag, chunk_id in checked_members if tag in (2, 3, 4)}
         need(len(cleanup_ids) <= 1, "group_chunk_membership")
 
 
@@ -1905,6 +1906,13 @@ def self_test(document):
             return old(plan)
         return mutated
 
+    def enforce_single_chunk_membership(old):
+        def mutated(members):
+            old(members)
+            chunk_ids = {chunk_id for _, chunk_id in members}
+            need(len(chunk_ids) <= 1, "group_chunk_membership")
+        return mutated
+
     def ordinal_chunk_membership(old):
         def mutated(members, creation_groups, chunk, tag,
                     batch_ordinal, group_index):
@@ -2023,8 +2031,10 @@ def self_test(document):
          "validate_plan_order", make_cleanup_indivisible),
         ("chunk-identity-to-ordinal", "plan-chunk-identity-cross-revision-same-ordinal",
          "add_chunk_group_member", ordinal_chunk_membership),
-        ("chunk-tag-1-membership", "plan-chunk-membership-tag-1",
-         "add_chunk_group_member", skip_chunk_tag(1)),
+        ("cleanup-tag1-single-chunk", "plan-cleanup-multichunk-tag-1",
+         "validate_group_chunk_membership", enforce_single_chunk_membership),
+        ("creation-group-chunk-mix", "plan-group-mixed-chunks",
+         "add_chunk_group_member", skip_chunk_tag(5)),
         ("chunk-tag-2-membership", "plan-chunk-membership-tag-2",
          "add_chunk_group_member", skip_chunk_tag(2)),
         ("chunk-tag-3-record-pair", "plan-chunk-membership-tag-3",
