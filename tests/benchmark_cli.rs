@@ -807,6 +807,50 @@ fn supplemental_metadata_index_measures_block_summary_scans_without_changing_res
 }
 
 #[test]
+fn supplemental_metadata_index_kind_is_selectable_and_defaults_to_range() {
+    let workload = ["3000", "16", "3", "1000", "10", "42"];
+    let unindexed = supplemental_benchmark(&["--filter-every", "10"], &workload);
+    for (flags, kind) in [
+        (vec!["--filter-every", "10", "--metadata-index"], "range"),
+        (
+            vec!["--filter-every", "10", "--metadata-index", "range"],
+            "range",
+        ),
+        (vec!["--filter-every", "10", "--metadata-index", "eq"], "eq"),
+        (
+            vec!["--filter-every", "10", "--metadata-index", "eq-range"],
+            "eq-range",
+        ),
+    ] {
+        let indexed = supplemental_benchmark(&flags, &workload);
+        assert_eq!(indexed["metadata_index"], "selected", "{flags:?}");
+        assert_eq!(indexed["metadata_index_kind"], kind, "{flags:?}");
+        assert_eq!(indexed["recall_at_k"], 1.0, "{flags:?}");
+        for key in [
+            "dataset_checksum",
+            "query_checksum",
+            "eligible_records",
+            "returned_counts",
+            "final_live_records",
+        ] {
+            assert_eq!(indexed[key], unindexed[key], "{flags:?} {key}");
+        }
+        assert!(indexed["filter_records_scanned_p50"].as_u64().unwrap() <= 3000);
+    }
+    let output = Command::new(env!("CARGO_BIN_EXE_vlite-bench"))
+        .args(["--filter-every", "10", "--metadata-index", "bogus"])
+        .args(workload)
+        .output()
+        .unwrap();
+    assert!(!output.status.success(), "{output:?}");
+    assert!(
+        String::from_utf8(output.stderr)
+            .unwrap()
+            .starts_with("FAIL:")
+    );
+}
+
+#[test]
 fn supplemental_flags_reject_invalid_values_combinations_and_order_before_creating_files() {
     let directory = tempfile::tempdir().unwrap();
     let mut cases = vec![
@@ -878,6 +922,7 @@ fn default_benchmark_emits_no_supplemental_keys() {
         "directory_bytes",
         "filter_block",
         "metadata_index",
+        "metadata_index_kind",
         "filter_records_scanned_p50",
     ] {
         assert!(value.get(key).is_none(), "{key}: {value}");

@@ -33,10 +33,11 @@ or update vectors.
 
 Immediately after `--filter-every E`, `--filter-block B` selects IDs where
 `(id / B) % E == 0` and adds `filter_block`; B must be positive.
-After the filter flags, `--metadata-index` declares `selected` with a range
-index so boolean equality uses block summaries, not equality postings.
-It requires `--filter-every` or `--filter-none`, adds `metadata_index: "selected"`
-and `filter_records_scanned_p50`, and gathers stats outside the unchanged timed
+After the filter flags, `--metadata-index [eq|range|eq-range]` declares `selected`
+with an index of that kind (default `range`, which gives block summaries and no
+equality postings; `eq` gives equality postings). It requires `--filter-every`
+or `--filter-none`, adds `metadata_index: "selected"`, `metadata_index_kind` and
+`filter_records_scanned_p50`, and gathers stats outside the unchanged timed
 search call. New keys appear only with their owning flag.
 
 ```sh
@@ -45,6 +46,7 @@ vlite-bench --layout directory 100000 384 10 1000 10 42
 vlite-bench --layout directory-auto 100000 384 10 1000 10 42
 vlite-bench --layout directory-log 100000 384 10 1000 10 42
 vlite-bench --filter-every 10 --filter-block 1024 --metadata-index 100000 384 10 1000 10 42
+vlite-bench --filter-every 10 --metadata-index eq 100000 384 10 1000 10 42
 ```
 
 ### Paired source-revision regression, October 25, 2026 UTC

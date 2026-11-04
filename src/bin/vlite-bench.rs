@@ -11,7 +11,7 @@ use vlite::{
 };
 
 type Result<T> = std::result::Result<T, Box<dyn Error>>;
-const USAGE: &str = "usage: vlite-bench [--layout file|directory|directory-auto|directory-log] [--metric squared_l2|cosine|inner_product] [--vectors <file> --query-vectors <file>] [--update-vectors <file>] [--mixed-writes <updates per query>] [--mixed-deletes <deletes per query>] [--rebuild-mode lazy|background|maintenance] [--query-interval-ms <0..1000>] [--filter-every <N> [--filter-block <B>]|--filter-none] [--metadata-index] [--ann <m> <ef_construction> <ef_search>] [records=1000 dimensions=32 queries=100 batch_size=100 k=10 seed=42]; background/maintenance require mixed ANN and report ready-only rejections without fallback; filtered ANN retains eligible candidates, selective filters may traverse the whole graph; inner product is exact-only";
+const USAGE: &str = "usage: vlite-bench [--layout file|directory|directory-auto|directory-log] [--metric squared_l2|cosine|inner_product] [--vectors <file> --query-vectors <file>] [--update-vectors <file>] [--mixed-writes <updates per query>] [--mixed-deletes <deletes per query>] [--rebuild-mode lazy|background|maintenance] [--query-interval-ms <0..1000>] [--filter-every <N> [--filter-block <B>]|--filter-none] [--metadata-index [eq|range|eq-range]] [--ann <m> <ef_construction> <ef_search>] [records=1000 dimensions=32 queries=100 batch_size=100 k=10 seed=42]; background/maintenance require mixed ANN and report ready-only rejections without fallback; filtered ANN retains eligible candidates, selective filters may traverse the whole graph; inner product is exact-only";
 const MAX_DATA_BYTES: usize = 256 * 1024 * 1024;
 const MAX_DISTANCE_COMPONENTS: u64 = 500_000_000;
 
@@ -49,7 +49,7 @@ struct Config {
     filter_every: Option<usize>,
     filter_none: bool,
     filter_block: Option<usize>,
-    metadata_index: bool,
+    metadata_index: Option<MetadataIndexKind>,
     layout: Option<Layout>,
     input: Option<(PathBuf, PathBuf)>,
     mixed_writes: usize,
@@ -189,13 +189,24 @@ impl Config {
         } else {
             None
         };
-        let metadata_index = args.first().is_some_and(|arg| arg == "--metadata-index");
-        if metadata_index {
+        let metadata_index = if args.first().is_some_and(|arg| arg == "--metadata-index") {
             if filter_every.is_none() && !filter_none {
                 return Err(USAGE.into());
             }
             args.remove(0);
-        }
+            let kind = match args.first().map(String::as_str) {
+                Some("eq") => Some(MetadataIndexKind::Eq),
+                Some("range") => Some(MetadataIndexKind::Range),
+                Some("eq-range") => Some(MetadataIndexKind::EqRange),
+                _ => None,
+            };
+            if kind.is_some() {
+                args.remove(0);
+            }
+            Some(kind.unwrap_or(MetadataIndexKind::Range))
+        } else {
+            None
+        };
         let ann = if args.first().is_some_and(|arg| arg == "--ann") {
             if args.len() < 4 {
                 return Err(USAGE.into());
@@ -459,6 +470,14 @@ fn percentile(sorted_ms: &[f64], percentile: usize) -> f64 {
     sorted_ms[(sorted_ms.len() * percentile).div_ceil(100) - 1]
 }
 
+fn index_kind_name(kind: MetadataIndexKind) -> &'static str {
+    match kind {
+        MetadataIndexKind::Eq => "eq",
+        MetadataIndexKind::Range => "range",
+        MetadataIndexKind::EqRange => "eq-range",
+    }
+}
+
 fn storage_bytes(path: &Path) -> io::Result<u64> {
     if path.is_file() {
         return Ok(std::fs::metadata(path)?.len());
@@ -527,12 +546,11 @@ fn run() -> Result<()> {
     if config.layout == Some(Layout::DirectoryLog) {
         db.set_checkpoint_threshold(None);
     }
-    if config.metadata_index {
+    if let Some(kind) = config.metadata_index {
         let mut settings = db.collection("default")?.settings().clone();
         settings.metadata_indexes = vec![MetadataIndexSpec {
             field: "selected".into(),
-            // Range declares summaries without boolean equality postings.
-            kind: MetadataIndexKind::Range,
+            kind,
         }];
         db.set_collection_settings("default", settings)?;
     }
@@ -615,7 +633,7 @@ fn run() -> Result<()> {
             config.metric,
         )?);
         times_ms.push(start.elapsed().as_secs_f64() * 1000.0);
-        if config.metadata_index {
+        if config.metadata_index.is_some() {
             let (hits, stats) = db.collection("default")?.search_with_stats(
                 query,
                 config.k,
@@ -1004,11 +1022,12 @@ fn run() -> Result<()> {
     if let Some(block) = config.filter_block {
         supplemental_json.push_str(&format!(",\"filter_block\":{block}"));
     }
-    if config.metadata_index {
+    if let Some(kind) = config.metadata_index {
         records_scanned.sort_unstable();
         let median = records_scanned[records_scanned.len().div_ceil(2) - 1];
         supplemental_json.push_str(&format!(
-            ",\"metadata_index\":\"selected\",\"filter_records_scanned_p50\":{median}"
+            ",\"metadata_index\":\"selected\",\"metadata_index_kind\":\"{}\",\"filter_records_scanned_p50\":{median}",
+            index_kind_name(kind)
         ));
     }
     times_ms.sort_by(f64::total_cmp);
