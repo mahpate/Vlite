@@ -1,0 +1,1461 @@
+{
+  "schema": "memory-rest-wire-v1",
+  "cases": [
+    {
+      "name": "forget-small-logical",
+      "operation": "forget",
+      "request": {
+        "method": "POST",
+        "path": "/v1/memory/notes/forget",
+        "headers": {
+          "Authorization": "Bearer fixture-root"
+        },
+        "body": {
+          "scope": {
+            "agent": "a"
+          },
+          "idempotency_key": "erase",
+          "target": {
+            "ids": [
+              {
+                "id": "e1",
+                "revision": "1"
+              }
+            ]
+          },
+          "mode": "logical_delete"
+        }
+      },
+      "view": {
+        "clock_ms": 100,
+        "sequence": 6,
+        "receipt_window_ms": 100,
+        "scope_grants": [
+          {
+            "tenant": "@root",
+            "agent": "a"
+          }
+        ],
+        "next_receipt_id": "r1",
+        "pre_state": [
+          {
+            "op": "remember",
+            "clock": 100,
+            "request": {
+              "scope": {
+                "tenant": "@root",
+                "agent": "a"
+              },
+              "key": "seed",
+              "receipt_window": 100,
+              "items": [
+                {
+                  "id": "e1",
+                  "kind": "entity",
+                  "content": "Ada",
+                  "source": "s1",
+                  "observed_at": 90
+                }
+              ]
+            }
+          }
+        ],
+        "manifest_id": "manifest1"
+      },
+      "expected": {
+        "status": 200,
+        "body": {
+          "receipt": {
+            "id": "r1",
+            "operation": "forget",
+            "scope": {
+              "tenant": "@root",
+              "agent": "a"
+            },
+            "sequence": "7",
+            "retry_until_ms": "200",
+            "digest_version": "memory-request-v1"
+          },
+          "replayed": false,
+          "outcomes": [
+            {
+              "id": "e1",
+              "action": "deleted",
+              "revision": "7"
+            }
+          ],
+          "feed": {
+            "mode": "ordinary_changes",
+            "temporal_complete": false,
+            "ttl_complete": false,
+            "consumer_purge_acknowledged": false
+          },
+          "remaining_work": "0",
+          "state": "logical",
+          "erasure_notice": {
+            "live_state_only": true,
+            "secure_erasure": false,
+            "external_copies": "operator_managed",
+            "restore_requires_manifest": true,
+            "backup_history_purge": "not_verified",
+            "manifest_id": "manifest1"
+          }
+        }
+      }
+    },
+    {
+      "name": "forget-missing-target",
+      "operation": "forget",
+      "request": {
+        "method": "POST",
+        "path": "/v1/memory/notes/forget",
+        "headers": {
+          "Authorization": "Bearer fixture-root"
+        },
+        "body": {
+          "scope": {
+            "agent": "a"
+          },
+          "idempotency_key": "erase",
+          "target": {
+            "ids": [
+              {
+                "id": "absent",
+                "revision": "1"
+              }
+            ]
+          },
+          "mode": "logical_delete"
+        }
+      },
+      "view": {
+        "clock_ms": 100,
+        "sequence": 6,
+        "receipt_window_ms": 100,
+        "scope_grants": [
+          {
+            "tenant": "@root",
+            "agent": "a"
+          }
+        ],
+        "next_receipt_id": "r1",
+        "pre_state": [
+          {
+            "op": "remember",
+            "clock": 100,
+            "request": {
+              "scope": {
+                "tenant": "@root",
+                "agent": "a"
+              },
+              "key": "seed",
+              "receipt_window": 100,
+              "items": [
+                {
+                  "id": "e1",
+                  "kind": "entity",
+                  "content": "Ada",
+                  "source": "s1",
+                  "observed_at": 90
+                }
+              ]
+            }
+          }
+        ],
+        "manifest_id": "manifest1"
+      },
+      "expected": {
+        "status": 404,
+        "body": {
+          "error": {
+            "code": "memory_not_found",
+            "message": "sanitized"
+          }
+        }
+      },
+      "defect": {
+        "tag": "forget-missing-target",
+        "path": [
+          "request",
+          "body",
+          "target",
+          "ids",
+          0,
+          "id"
+        ],
+        "set": "e1"
+      }
+    },
+    {
+      "name": "forget-revision-conflict",
+      "operation": "forget",
+      "request": {
+        "method": "POST",
+        "path": "/v1/memory/notes/forget",
+        "headers": {
+          "Authorization": "Bearer fixture-root"
+        },
+        "body": {
+          "scope": {
+            "agent": "a"
+          },
+          "idempotency_key": "erase",
+          "target": {
+            "ids": [
+              {
+                "id": "e1",
+                "revision": "2"
+              }
+            ]
+          },
+          "mode": "logical_delete"
+        }
+      },
+      "view": {
+        "clock_ms": 100,
+        "sequence": 6,
+        "receipt_window_ms": 100,
+        "scope_grants": [
+          {
+            "tenant": "@root",
+            "agent": "a"
+          }
+        ],
+        "next_receipt_id": "r1",
+        "pre_state": [
+          {
+            "op": "remember",
+            "clock": 100,
+            "request": {
+              "scope": {
+                "tenant": "@root",
+                "agent": "a"
+              },
+              "key": "seed",
+              "receipt_window": 100,
+              "items": [
+                {
+                  "id": "e1",
+                  "kind": "entity",
+                  "content": "Ada",
+                  "source": "s1",
+                  "observed_at": 90
+                }
+              ]
+            }
+          }
+        ],
+        "manifest_id": "manifest1"
+      },
+      "expected": {
+        "status": 412,
+        "body": {
+          "error": {
+            "code": "precondition_failed",
+            "message": "sanitized"
+          }
+        }
+      },
+      "defect": {
+        "tag": "forget-revision-conflict",
+        "path": [
+          "request",
+          "body",
+          "target",
+          "ids",
+          0,
+          "revision"
+        ],
+        "set": "1"
+      }
+    },
+    {
+      "name": "forget-zero-retained-revision",
+      "operation": "forget",
+      "request": {
+        "method": "POST",
+        "path": "/v1/memory/notes/forget",
+        "headers": {
+          "Authorization": "Bearer fixture-root"
+        },
+        "body": {
+          "scope": {
+            "agent": "a"
+          },
+          "idempotency_key": "erase",
+          "target": {
+            "ids": [
+              {
+                "id": "e1",
+                "revision": "0"
+              }
+            ]
+          },
+          "mode": "logical_delete"
+        }
+      },
+      "view": {
+        "clock_ms": 100,
+        "sequence": 6,
+        "receipt_window_ms": 100,
+        "scope_grants": [
+          {
+            "tenant": "@root",
+            "agent": "a"
+          }
+        ],
+        "next_receipt_id": "r1",
+        "pre_state": [
+          {
+            "op": "remember",
+            "clock": 100,
+            "request": {
+              "scope": {
+                "tenant": "@root",
+                "agent": "a"
+              },
+              "key": "seed",
+              "receipt_window": 100,
+              "items": [
+                {
+                  "id": "e1",
+                  "kind": "entity",
+                  "content": "Ada",
+                  "source": "s1",
+                  "observed_at": 90
+                }
+              ]
+            }
+          }
+        ],
+        "manifest_id": "manifest1"
+      },
+      "expected": {
+        "status": 422,
+        "body": {
+          "error": {
+            "code": "invalid_input",
+            "message": "sanitized"
+          }
+        }
+      },
+      "defect": {
+        "tag": "forget-zero-retained-revision",
+        "path": [
+          "request",
+          "body",
+          "target",
+          "ids",
+          0,
+          "revision"
+        ],
+        "set": "1"
+      }
+    },
+    {
+      "name": "forget-expire-requires-deadline",
+      "operation": "forget",
+      "request": {
+        "method": "POST",
+        "path": "/v1/memory/notes/forget",
+        "headers": {
+          "Authorization": "Bearer fixture-root"
+        },
+        "body": {
+          "scope": {
+            "agent": "a"
+          },
+          "idempotency_key": "erase",
+          "target": {
+            "ids": [
+              {
+                "id": "e1",
+                "revision": "1"
+              }
+            ]
+          },
+          "mode": "expire"
+        }
+      },
+      "view": {
+        "clock_ms": 100,
+        "sequence": 6,
+        "receipt_window_ms": 100,
+        "scope_grants": [
+          {
+            "tenant": "@root",
+            "agent": "a"
+          }
+        ],
+        "next_receipt_id": "r1",
+        "pre_state": [
+          {
+            "op": "remember",
+            "clock": 100,
+            "request": {
+              "scope": {
+                "tenant": "@root",
+                "agent": "a"
+              },
+              "key": "seed",
+              "receipt_window": 100,
+              "items": [
+                {
+                  "id": "e1",
+                  "kind": "entity",
+                  "content": "Ada",
+                  "source": "s1",
+                  "observed_at": 90
+                }
+              ]
+            }
+          }
+        ],
+        "manifest_id": "manifest1"
+      },
+      "expected": {
+        "status": 422,
+        "body": {
+          "error": {
+            "code": "invalid_input",
+            "message": "sanitized"
+          }
+        }
+      },
+      "defect": {
+        "tag": "forget-expire-requires-deadline",
+        "path": [
+          "request",
+          "body",
+          "expires_at_ms"
+        ],
+        "set": "150"
+      },
+      "repair_check": "structure"
+    },
+    {
+      "name": "forget-logical-forbids-expiry",
+      "operation": "forget",
+      "request": {
+        "method": "POST",
+        "path": "/v1/memory/notes/forget",
+        "headers": {
+          "Authorization": "Bearer fixture-root"
+        },
+        "body": {
+          "scope": {
+            "agent": "a"
+          },
+          "idempotency_key": "erase",
+          "target": {
+            "ids": [
+              {
+                "id": "e1",
+                "revision": "1"
+              }
+            ]
+          },
+          "mode": "logical_delete",
+          "expires_at_ms": "150"
+        }
+      },
+      "view": {
+        "clock_ms": 100,
+        "sequence": 6,
+        "receipt_window_ms": 100,
+        "scope_grants": [
+          {
+            "tenant": "@root",
+            "agent": "a"
+          }
+        ],
+        "next_receipt_id": "r1",
+        "pre_state": [
+          {
+            "op": "remember",
+            "clock": 100,
+            "request": {
+              "scope": {
+                "tenant": "@root",
+                "agent": "a"
+              },
+              "key": "seed",
+              "receipt_window": 100,
+              "items": [
+                {
+                  "id": "e1",
+                  "kind": "entity",
+                  "content": "Ada",
+                  "source": "s1",
+                  "observed_at": 90
+                }
+              ]
+            }
+          }
+        ],
+        "manifest_id": "manifest1"
+      },
+      "expected": {
+        "status": 422,
+        "body": {
+          "error": {
+            "code": "invalid_input",
+            "message": "sanitized"
+          }
+        }
+      },
+      "defect": {
+        "tag": "forget-logical-forbids-expiry",
+        "path": [
+          "request",
+          "body",
+          "expires_at_ms"
+        ],
+        "delete": true
+      }
+    },
+    {
+      "name": "forget-complete-feed",
+      "operation": "forget",
+      "request": {
+        "method": "POST",
+        "path": "/v1/memory/notes/forget",
+        "headers": {
+          "Authorization": "Bearer fixture-root"
+        },
+        "body": {
+          "scope": {
+            "agent": "a"
+          },
+          "idempotency_key": "erase",
+          "target": {
+            "ids": [
+              {
+                "id": "e1",
+                "revision": "1"
+              }
+            ]
+          },
+          "mode": "logical_delete",
+          "require_complete_feed": true
+        }
+      },
+      "view": {
+        "clock_ms": 100,
+        "sequence": 6,
+        "receipt_window_ms": 100,
+        "scope_grants": [
+          {
+            "tenant": "@root",
+            "agent": "a"
+          }
+        ],
+        "next_receipt_id": "r1",
+        "pre_state": [
+          {
+            "op": "remember",
+            "clock": 100,
+            "request": {
+              "scope": {
+                "tenant": "@root",
+                "agent": "a"
+              },
+              "key": "seed",
+              "receipt_window": 100,
+              "items": [
+                {
+                  "id": "e1",
+                  "kind": "entity",
+                  "content": "Ada",
+                  "source": "s1",
+                  "observed_at": 90
+                }
+              ]
+            }
+          }
+        ],
+        "manifest_id": "manifest1"
+      },
+      "expected": {
+        "status": 409,
+        "body": {
+          "error": {
+            "code": "memory_feed_unsupported",
+            "message": "sanitized"
+          }
+        }
+      },
+      "defect": {
+        "tag": "forget-complete-feed",
+        "path": [
+          "request",
+          "body",
+          "require_complete_feed"
+        ],
+        "set": false
+      }
+    },
+    {
+      "name": "forget-replay-after-target-deleted",
+      "operation": "forget",
+      "request": {
+        "method": "POST",
+        "path": "/v1/memory/notes/forget",
+        "headers": {
+          "Authorization": "Bearer fixture-root"
+        },
+        "body": {
+          "scope": {
+            "agent": "a"
+          },
+          "idempotency_key": "erase",
+          "target": {
+            "ids": [
+              {
+                "id": "e1",
+                "revision": "1"
+              }
+            ]
+          },
+          "mode": "logical_delete"
+        }
+      },
+      "view": {
+        "clock_ms": 100,
+        "sequence": 6,
+        "receipt_window_ms": 100,
+        "scope_grants": [
+          {
+            "tenant": "@root",
+            "agent": "a"
+          }
+        ],
+        "next_receipt_id": "r1",
+        "pre_state": [],
+        "receipts": [
+          {
+            "operation": "forget",
+            "scope": {
+              "tenant": "@root",
+              "agent": "a"
+            },
+            "key": "erase",
+            "request": {
+              "scope": {
+                "agent": "a"
+              },
+              "idempotency_key": "erase",
+              "target": {
+                "ids": [
+                  {
+                    "id": "e1",
+                    "revision": "1"
+                  }
+                ]
+              },
+              "mode": "logical_delete"
+            },
+            "retry_until_ms": 200,
+            "result": {
+              "receipt": {
+                "id": "r1",
+                "operation": "forget",
+                "scope": {
+                  "tenant": "@root",
+                  "agent": "a"
+                },
+                "sequence": "7",
+                "retry_until_ms": "200",
+                "digest_version": "memory-request-v1"
+              },
+              "replayed": false,
+              "outcomes": [
+                {
+                  "id": "e1",
+                  "action": "deleted",
+                  "revision": "7"
+                }
+              ],
+              "feed": {
+                "mode": "ordinary_changes",
+                "temporal_complete": false,
+                "ttl_complete": false,
+                "consumer_purge_acknowledged": false
+              },
+              "remaining_work": "0",
+              "state": "logical",
+              "erasure_notice": {
+                "live_state_only": true,
+                "secure_erasure": false,
+                "external_copies": "operator_managed",
+                "restore_requires_manifest": true,
+                "backup_history_purge": "not_verified",
+                "manifest_id": "manifest1"
+              }
+            }
+          }
+        ]
+      },
+      "expected": {
+        "status": 200,
+        "body": {
+          "receipt": {
+            "id": "r1",
+            "operation": "forget",
+            "scope": {
+              "tenant": "@root",
+              "agent": "a"
+            },
+            "sequence": "7",
+            "retry_until_ms": "200",
+            "digest_version": "memory-request-v1"
+          },
+          "replayed": true,
+          "outcomes": [
+            {
+              "id": "e1",
+              "action": "deleted",
+              "revision": "7"
+            }
+          ],
+          "feed": {
+            "mode": "ordinary_changes",
+            "temporal_complete": false,
+            "ttl_complete": false,
+            "consumer_purge_acknowledged": false
+          },
+          "remaining_work": "0",
+          "state": "logical",
+          "erasure_notice": {
+            "live_state_only": true,
+            "secure_erasure": false,
+            "external_copies": "operator_managed",
+            "restore_requires_manifest": true,
+            "backup_history_purge": "not_verified",
+            "manifest_id": "manifest1"
+          }
+        }
+      }
+    },
+    {
+      "name": "forget-external-attachment-atomic-refusal",
+      "operation": "forget",
+      "request": {
+        "method": "POST",
+        "path": "/v1/memory/notes/forget",
+        "headers": {
+          "Authorization": "Bearer fixture-root"
+        },
+        "body": {
+          "scope": {
+            "agent": "a"
+          },
+          "idempotency_key": "erase",
+          "target": {
+            "ids": [
+              {
+                "id": "e1",
+                "revision": "1"
+              }
+            ]
+          },
+          "mode": "logical_delete"
+        }
+      },
+      "view": {
+        "clock_ms": 100,
+        "sequence": 6,
+        "receipt_window_ms": 100,
+        "scope_grants": [
+          {
+            "tenant": "@root",
+            "agent": "a"
+          }
+        ],
+        "next_receipt_id": "r1",
+        "pre_state": [
+          {
+            "op": "remember",
+            "clock": 100,
+            "request": {
+              "scope": {
+                "tenant": "@root",
+                "agent": "a"
+              },
+              "key": "seed",
+              "receipt_window": 100,
+              "items": [
+                {
+                  "id": "e1",
+                  "kind": "entity",
+                  "content": "Ada",
+                  "source": "s1",
+                  "observed_at": 90,
+                  "evidence": [
+                    {
+                      "id": "rec1",
+                      "scope": {
+                        "tenant": "@root",
+                        "agent": "a"
+                      }
+                    }
+                  ]
+                }
+              ]
+            }
+          },
+          {
+            "op": "attach",
+            "evidence": "rec1",
+            "owner": "external"
+          }
+        ],
+        "manifest_id": "manifest1"
+      },
+      "expected": {
+        "status": 409,
+        "body": {
+          "error": {
+            "code": "memory_attachment_conflict",
+            "message": "sanitized"
+          }
+        }
+      },
+      "defect": {
+        "tag": "external-owner",
+        "path": [
+          "view",
+          "pre_state",
+          1
+        ],
+        "delete": true
+      }
+    },
+    {
+      "name": "forget-final-target-guard-atomic",
+      "operation": "forget",
+      "request": {
+        "method": "POST",
+        "path": "/v1/memory/notes/forget",
+        "headers": {
+          "Authorization": "Bearer fixture-root"
+        },
+        "body": {
+          "scope": {
+            "agent": "a"
+          },
+          "idempotency_key": "erase",
+          "target": {
+            "ids": [
+              {
+                "id": "e1",
+                "revision": "1"
+              },
+              {
+                "id": "n",
+                "revision": "2"
+              }
+            ]
+          },
+          "mode": "logical_delete"
+        }
+      },
+      "view": {
+        "clock_ms": 100,
+        "sequence": 6,
+        "receipt_window_ms": 100,
+        "scope_grants": [
+          {
+            "tenant": "@root",
+            "agent": "a"
+          }
+        ],
+        "next_receipt_id": "r1",
+        "pre_state": [
+          {
+            "op": "remember",
+            "clock": 100,
+            "request": {
+              "scope": {
+                "tenant": "@root",
+                "agent": "a"
+              },
+              "key": "seed",
+              "receipt_window": 100,
+              "items": [
+                {
+                  "id": "e1",
+                  "kind": "entity",
+                  "content": "Ada",
+                  "source": "s1",
+                  "observed_at": 90
+                },
+                {
+                  "id": "n",
+                  "kind": "entity",
+                  "content": "Other",
+                  "source": "s2",
+                  "observed_at": 90
+                }
+              ]
+            }
+          }
+        ],
+        "manifest_id": "manifest1"
+      },
+      "expected": {
+        "status": 412,
+        "body": {
+          "error": {
+            "code": "precondition_failed",
+            "message": "sanitized"
+          }
+        }
+      },
+      "defect": {
+        "tag": "forget-final-target-guard-atomic",
+        "path": [
+          "request",
+          "body",
+          "target",
+          "ids",
+          1,
+          "revision"
+        ],
+        "set": "1"
+      }
+    },
+    {
+      "name": "forget-scope-core-absent",
+      "operation": "forget",
+      "request": {
+        "method": "POST",
+        "path": "/v1/memory/notes/forget",
+        "headers": {
+          "Authorization": "Bearer fixture-root"
+        },
+        "body": {
+          "scope": {
+            "agent": "a"
+          },
+          "idempotency_key": "erase",
+          "target": {
+            "scope": true
+          },
+          "mode": "logical_delete",
+          "allow_job": true
+        }
+      },
+      "view": {
+        "clock_ms": 100,
+        "sequence": 6,
+        "receipt_window_ms": 100,
+        "scope_grants": [
+          {
+            "tenant": "@root",
+            "agent": "a"
+          }
+        ],
+        "next_receipt_id": "r1",
+        "pre_state": [],
+        "capabilities": {}
+      },
+      "expected": {
+        "status": 409,
+        "body": {
+          "error": {
+            "code": "memory_capability_unavailable",
+            "message": "sanitized"
+          }
+        }
+      },
+      "defect": {
+        "tag": "forget-scope-core-absent",
+        "path": [
+          "view",
+          "capabilities"
+        ],
+        "set": {
+          "erasure": true
+        }
+      },
+      "repair_check": "gate"
+    },
+    {
+      "name": "forget-session-core-absent",
+      "operation": "forget",
+      "request": {
+        "method": "POST",
+        "path": "/v1/memory/notes/forget",
+        "headers": {
+          "Authorization": "Bearer fixture-root"
+        },
+        "body": {
+          "scope": {
+            "agent": "a",
+            "user": "u",
+            "session": "s"
+          },
+          "idempotency_key": "erase",
+          "target": {
+            "session": true
+          },
+          "mode": "logical_delete",
+          "allow_job": true
+        }
+      },
+      "view": {
+        "clock_ms": 100,
+        "sequence": 6,
+        "receipt_window_ms": 100,
+        "scope_grants": [
+          {
+            "tenant": "@root",
+            "agent": "a",
+            "user": "u",
+            "session": "s"
+          }
+        ],
+        "next_receipt_id": "r1",
+        "pre_state": [],
+        "capabilities": {}
+      },
+      "expected": {
+        "status": 409,
+        "body": {
+          "error": {
+            "code": "memory_capability_unavailable",
+            "message": "sanitized"
+          }
+        }
+      },
+      "defect": {
+        "tag": "forget-session-core-absent",
+        "path": [
+          "view",
+          "capabilities"
+        ],
+        "set": {
+          "erasure": true
+        }
+      },
+      "repair_check": "gate"
+    },
+    {
+      "name": "forget-entity-core-absent",
+      "operation": "forget",
+      "request": {
+        "method": "POST",
+        "path": "/v1/memory/notes/forget",
+        "headers": {
+          "Authorization": "Bearer fixture-root"
+        },
+        "body": {
+          "scope": {
+            "agent": "a"
+          },
+          "idempotency_key": "erase",
+          "target": {
+            "entity": {
+              "id": "e1",
+              "revision": "1"
+            }
+          },
+          "mode": "logical_delete",
+          "allow_job": true
+        }
+      },
+      "view": {
+        "clock_ms": 100,
+        "sequence": 6,
+        "receipt_window_ms": 100,
+        "scope_grants": [
+          {
+            "tenant": "@root",
+            "agent": "a"
+          }
+        ],
+        "next_receipt_id": "r1",
+        "pre_state": [],
+        "capabilities": {}
+      },
+      "expected": {
+        "status": 409,
+        "body": {
+          "error": {
+            "code": "memory_capability_unavailable",
+            "message": "sanitized"
+          }
+        }
+      },
+      "defect": {
+        "tag": "forget-entity-core-absent",
+        "path": [
+          "view",
+          "capabilities"
+        ],
+        "set": {
+          "erasure": true
+        }
+      },
+      "repair_check": "gate"
+    },
+    {
+      "name": "forget-series-core-absent",
+      "operation": "forget",
+      "request": {
+        "method": "POST",
+        "path": "/v1/memory/notes/forget",
+        "headers": {
+          "Authorization": "Bearer fixture-root"
+        },
+        "body": {
+          "scope": {
+            "agent": "a"
+          },
+          "idempotency_key": "erase",
+          "target": {
+            "series": {
+              "id": "f1",
+              "revision": "1"
+            }
+          },
+          "mode": "logical_delete",
+          "allow_job": true
+        }
+      },
+      "view": {
+        "clock_ms": 100,
+        "sequence": 6,
+        "receipt_window_ms": 100,
+        "scope_grants": [
+          {
+            "tenant": "@root",
+            "agent": "a"
+          }
+        ],
+        "next_receipt_id": "r1",
+        "pre_state": [],
+        "capabilities": {}
+      },
+      "expected": {
+        "status": 409,
+        "body": {
+          "error": {
+            "code": "memory_capability_unavailable",
+            "message": "sanitized"
+          }
+        }
+      },
+      "defect": {
+        "tag": "forget-series-core-absent",
+        "path": [
+          "view",
+          "capabilities"
+        ],
+        "set": {
+          "erasure": true
+        }
+      },
+      "repair_check": "gate"
+    },
+    {
+      "name": "forget-id-fact-core-absent",
+      "operation": "forget",
+      "request": {
+        "method": "POST",
+        "path": "/v1/memory/notes/forget",
+        "headers": {
+          "Authorization": "Bearer fixture-root"
+        },
+        "body": {
+          "scope": {
+            "agent": "a"
+          },
+          "idempotency_key": "erase",
+          "target": {
+            "ids": [
+              {
+                "id": "e1",
+                "revision": "1"
+              }
+            ]
+          },
+          "mode": "logical_delete"
+        }
+      },
+      "view": {
+        "clock_ms": 100,
+        "sequence": 6,
+        "receipt_window_ms": 100,
+        "scope_grants": [
+          {
+            "tenant": "@root",
+            "agent": "a"
+          }
+        ],
+        "next_receipt_id": "r1",
+        "pre_state": [],
+        "target_kinds": {
+          "e1": "fact"
+        },
+        "capabilities": {}
+      },
+      "expected": {
+        "status": 409,
+        "body": {
+          "error": {
+            "code": "memory_capability_unavailable",
+            "message": "sanitized"
+          }
+        }
+      },
+      "defect": {
+        "tag": "forget-id-fact-core-absent",
+        "path": [
+          "view",
+          "capabilities"
+        ],
+        "set": {
+          "facts": true
+        }
+      },
+      "repair_check": "gate"
+    },
+    {
+      "name": "forget-id-relation-core-absent",
+      "operation": "forget",
+      "request": {
+        "method": "POST",
+        "path": "/v1/memory/notes/forget",
+        "headers": {
+          "Authorization": "Bearer fixture-root"
+        },
+        "body": {
+          "scope": {
+            "agent": "a"
+          },
+          "idempotency_key": "erase",
+          "target": {
+            "ids": [
+              {
+                "id": "e1",
+                "revision": "1"
+              }
+            ]
+          },
+          "mode": "logical_delete"
+        }
+      },
+      "view": {
+        "clock_ms": 100,
+        "sequence": 6,
+        "receipt_window_ms": 100,
+        "scope_grants": [
+          {
+            "tenant": "@root",
+            "agent": "a"
+          }
+        ],
+        "next_receipt_id": "r1",
+        "pre_state": [],
+        "target_kinds": {
+          "e1": "relation"
+        },
+        "capabilities": {}
+      },
+      "expected": {
+        "status": 409,
+        "body": {
+          "error": {
+            "code": "memory_capability_unavailable",
+            "message": "sanitized"
+          }
+        }
+      },
+      "defect": {
+        "tag": "forget-id-relation-core-absent",
+        "path": [
+          "view",
+          "capabilities"
+        ],
+        "set": {
+          "facts": true
+        }
+      },
+      "repair_check": "gate"
+    }
+  ],
+  "structural": [
+    {
+      "name": "response-forget",
+      "schema": "exchange",
+      "request": false,
+      "value": {
+        "receipt": {
+          "id": "r1",
+          "operation": "forget",
+          "scope": {
+            "tenant": "@root",
+            "agent": "a"
+          },
+          "sequence": "7",
+          "retry_until_ms": "200",
+          "digest_version": "memory-request-v1"
+        },
+        "replayed": false,
+        "outcomes": [
+          {
+            "id": "e1",
+            "action": "deleted",
+            "revision": "7"
+          }
+        ],
+        "feed": {
+          "mode": "ordinary_changes",
+          "temporal_complete": false,
+          "ttl_complete": false,
+          "consumer_purge_acknowledged": false
+        },
+        "remaining_work": "0",
+        "state": "logical",
+        "erasure_notice": {
+          "live_state_only": true,
+          "secure_erasure": false,
+          "external_copies": "operator_managed",
+          "restore_requires_manifest": true,
+          "backup_history_purge": "not_verified",
+          "manifest_id": "manifest1"
+        }
+      },
+      "valid": true,
+      "operation": "forget",
+      "status": 200
+    },
+    {
+      "name": "response-retention",
+      "schema": "exchange",
+      "request": false,
+      "value": {
+        "receipt": {
+          "id": "r1",
+          "operation": "forget",
+          "scope": {
+            "tenant": "@root",
+            "agent": "a"
+          },
+          "sequence": "7",
+          "retry_until_ms": "200",
+          "digest_version": "memory-request-v1"
+        },
+        "replayed": false,
+        "outcomes": [
+          {
+            "id": "e1",
+            "action": "expired",
+            "revision": "7",
+            "expires_at_ms": "150"
+          }
+        ],
+        "feed": {
+          "mode": "ordinary_changes",
+          "temporal_complete": false,
+          "ttl_complete": false,
+          "consumer_purge_acknowledged": false
+        },
+        "remaining_work": "0",
+        "state": "retention_set",
+        "erasure_notice": {
+          "live_state_only": true,
+          "secure_erasure": false,
+          "external_copies": "operator_managed",
+          "restore_requires_manifest": true,
+          "backup_history_purge": "not_verified"
+        }
+      },
+      "valid": true,
+      "operation": "forget",
+      "status": 200
+    },
+    {
+      "name": "forget-notice-required",
+      "schema": "exchange",
+      "request": false,
+      "value": {
+        "receipt": {
+          "id": "r1",
+          "operation": "forget",
+          "scope": {
+            "tenant": "@root",
+            "agent": "a"
+          },
+          "sequence": "7",
+          "retry_until_ms": "200",
+          "digest_version": "memory-request-v1"
+        },
+        "replayed": false,
+        "outcomes": [
+          {
+            "id": "e1",
+            "action": "deleted",
+            "revision": "7"
+          }
+        ],
+        "feed": {
+          "mode": "ordinary_changes",
+          "temporal_complete": false,
+          "ttl_complete": false,
+          "consumer_purge_acknowledged": false
+        },
+        "remaining_work": "0",
+        "state": "logical"
+      },
+      "valid": false,
+      "error": "invalid_input",
+      "defect": {
+        "path": [
+          "value",
+          "erasure_notice"
+        ],
+        "set": {
+          "live_state_only": true,
+          "secure_erasure": false,
+          "external_copies": "operator_managed",
+          "restore_requires_manifest": true,
+          "backup_history_purge": "not_verified",
+          "manifest_id": "manifest1"
+        }
+      },
+      "operation": "forget",
+      "status": 200
+    },
+    {
+      "name": "http-inventory-forget",
+      "schema": "http",
+      "request": true,
+      "value": {
+        "method": "POST",
+        "path": "/v1/memory/notes/forget",
+        "headers": {},
+        "body": {
+          "scope": {
+            "agent": "a"
+          },
+          "idempotency_key": "erase",
+          "target": {
+            "ids": [
+              {
+                "id": "e1",
+                "revision": "1"
+              }
+            ]
+          },
+          "mode": "logical_delete"
+        }
+      },
+      "valid": true,
+      "operation": "forget"
+    }
+  ],
+  "operation_id": "MemoryForget"
+}

@@ -1,0 +1,3922 @@
+{
+  "schema": "memory-rest-wire-v1",
+  "cases": [
+    {
+      "name": "recall-lexical-does-not-embed",
+      "operation": "recall",
+      "request": {
+        "method": "POST",
+        "path": "/v1/memory/notes/recall",
+        "headers": {
+          "Authorization": "Bearer fixture-root"
+        },
+        "body": {
+          "scope": {
+            "agent": "a"
+          },
+          "text": "Ada"
+        }
+      },
+      "view": {
+        "clock_ms": 100,
+        "sequence": 6,
+        "receipt_window_ms": 100,
+        "scope_grants": [
+          {
+            "tenant": "@root",
+            "agent": "a"
+          }
+        ],
+        "next_receipt_id": "r1",
+        "pre_state": []
+      },
+      "expected": {
+        "status": 200,
+        "body": {
+          "memories": [],
+          "meta": {
+            "scopes": [
+              {
+                "tenant": "@root",
+                "agent": "a"
+              }
+            ],
+            "as_of_ms": "100",
+            "ttl_clock_ms": "100",
+            "sequence": "6",
+            "complete": true,
+            "truncation": [],
+            "limitations": [
+              "retained_state_only"
+            ],
+            "mode": "exact_enumeration",
+            "candidates_examined": "0",
+            "edges_charged": "0",
+            "vector_components": "0",
+            "mmr_components": "0",
+            "evidence_bytes": "0"
+          },
+          "ranking_version": "memory-ranking-v1",
+          "selection": "weighted"
+        }
+      }
+    },
+    {
+      "name": "recall-candidate-ceiling-200",
+      "operation": "recall",
+      "request": {
+        "method": "POST",
+        "path": "/v1/memory/notes/recall",
+        "headers": {
+          "Authorization": "Bearer fixture-root"
+        },
+        "body": {
+          "scope": {
+            "agent": "a"
+          },
+          "text": "Ada",
+          "limits": {
+            "candidates": 200
+          }
+        }
+      },
+      "view": {
+        "clock_ms": 100,
+        "sequence": 6,
+        "receipt_window_ms": 100,
+        "scope_grants": [
+          {
+            "tenant": "@root",
+            "agent": "a"
+          }
+        ],
+        "next_receipt_id": "r1",
+        "pre_state": []
+      },
+      "expected": {
+        "status": 200,
+        "body": {
+          "memories": [],
+          "meta": {
+            "scopes": [
+              {
+                "tenant": "@root",
+                "agent": "a"
+              }
+            ],
+            "as_of_ms": "100",
+            "ttl_clock_ms": "100",
+            "sequence": "6",
+            "complete": true,
+            "truncation": [],
+            "limitations": [
+              "retained_state_only"
+            ],
+            "mode": "exact_enumeration",
+            "candidates_examined": "0",
+            "edges_charged": "0",
+            "vector_components": "0",
+            "mmr_components": "0",
+            "evidence_bytes": "0"
+          },
+          "ranking_version": "memory-ranking-v1",
+          "selection": "weighted"
+        }
+      }
+    },
+    {
+      "name": "recall-candidate-ceiling-1000",
+      "operation": "recall",
+      "request": {
+        "method": "POST",
+        "path": "/v1/memory/notes/recall",
+        "headers": {
+          "Authorization": "Bearer fixture-root"
+        },
+        "body": {
+          "scope": {
+            "agent": "a"
+          },
+          "text": "Ada",
+          "limits": {
+            "candidates": 1000
+          }
+        }
+      },
+      "view": {
+        "clock_ms": 100,
+        "sequence": 6,
+        "receipt_window_ms": 100,
+        "scope_grants": [
+          {
+            "tenant": "@root",
+            "agent": "a"
+          }
+        ],
+        "next_receipt_id": "r1",
+        "pre_state": []
+      },
+      "expected": {
+        "status": 200,
+        "body": {
+          "memories": [],
+          "meta": {
+            "scopes": [
+              {
+                "tenant": "@root",
+                "agent": "a"
+              }
+            ],
+            "as_of_ms": "100",
+            "ttl_clock_ms": "100",
+            "sequence": "6",
+            "complete": true,
+            "truncation": [],
+            "limitations": [
+              "retained_state_only"
+            ],
+            "mode": "exact_enumeration",
+            "candidates_examined": "0",
+            "edges_charged": "0",
+            "vector_components": "0",
+            "mmr_components": "0",
+            "evidence_bytes": "0"
+          },
+          "ranking_version": "memory-ranking-v1",
+          "selection": "weighted"
+        }
+      }
+    },
+    {
+      "name": "recall-candidate-1001",
+      "operation": "recall",
+      "request": {
+        "method": "POST",
+        "path": "/v1/memory/notes/recall",
+        "headers": {
+          "Authorization": "Bearer fixture-root"
+        },
+        "body": {
+          "scope": {
+            "agent": "a"
+          },
+          "text": "Ada",
+          "limits": {
+            "candidates": 1001
+          }
+        }
+      },
+      "view": {
+        "clock_ms": 100,
+        "sequence": 6,
+        "receipt_window_ms": 100,
+        "scope_grants": [
+          {
+            "tenant": "@root",
+            "agent": "a"
+          }
+        ],
+        "next_receipt_id": "r1",
+        "pre_state": []
+      },
+      "expected": {
+        "status": 422,
+        "body": {
+          "error": {
+            "code": "invalid_input",
+            "message": "sanitized"
+          }
+        }
+      },
+      "defect": {
+        "tag": "recall-candidate-1001",
+        "path": [
+          "request",
+          "body",
+          "limits"
+        ],
+        "set": {
+          "candidates": 1000
+        }
+      }
+    },
+    {
+      "name": "recall-limit-exceeds-candidates",
+      "operation": "recall",
+      "request": {
+        "method": "POST",
+        "path": "/v1/memory/notes/recall",
+        "headers": {
+          "Authorization": "Bearer fixture-root"
+        },
+        "body": {
+          "scope": {
+            "agent": "a"
+          },
+          "text": "Ada",
+          "limits": {
+            "candidates": 19
+          }
+        }
+      },
+      "view": {
+        "clock_ms": 100,
+        "sequence": 6,
+        "receipt_window_ms": 100,
+        "scope_grants": [
+          {
+            "tenant": "@root",
+            "agent": "a"
+          }
+        ],
+        "next_receipt_id": "r1",
+        "pre_state": []
+      },
+      "expected": {
+        "status": 422,
+        "body": {
+          "error": {
+            "code": "invalid_input",
+            "message": "sanitized"
+          }
+        }
+      },
+      "defect": {
+        "tag": "recall-limit-exceeds-candidates",
+        "path": [
+          "request",
+          "body",
+          "limits"
+        ],
+        "set": {
+          "candidates": 20
+        }
+      }
+    },
+    {
+      "name": "recall-default-candidates-200-is-charged",
+      "operation": "recall",
+      "request": {
+        "method": "POST",
+        "path": "/v1/memory/notes/recall",
+        "headers": {
+          "Authorization": "Bearer fixture-root"
+        },
+        "body": {
+          "scope": {
+            "agent": "a"
+          },
+          "text": "Ada"
+        }
+      },
+      "view": {
+        "clock_ms": 100,
+        "sequence": 6,
+        "receipt_window_ms": 100,
+        "scope_grants": [
+          {
+            "tenant": "@root",
+            "agent": "a"
+          }
+        ],
+        "next_receipt_id": "r1",
+        "pre_state": [],
+        "candidate_units": 201
+      },
+      "expected": {
+        "status": 422,
+        "body": {
+          "error": {
+            "code": "invalid_input",
+            "message": "sanitized"
+          }
+        }
+      },
+      "defect": {
+        "tag": "recall-default-candidates-200-is-charged",
+        "path": [
+          "view",
+          "candidate_units"
+        ],
+        "set": 200
+      }
+    },
+    {
+      "name": "recall-default-candidates-inclusive-200",
+      "operation": "recall",
+      "request": {
+        "method": "POST",
+        "path": "/v1/memory/notes/recall",
+        "headers": {
+          "Authorization": "Bearer fixture-root"
+        },
+        "body": {
+          "scope": {
+            "agent": "a"
+          },
+          "text": "Ada"
+        }
+      },
+      "view": {
+        "clock_ms": 100,
+        "sequence": 6,
+        "receipt_window_ms": 100,
+        "scope_grants": [
+          {
+            "tenant": "@root",
+            "agent": "a"
+          }
+        ],
+        "next_receipt_id": "r1",
+        "pre_state": [],
+        "candidate_units": 200
+      },
+      "expected": {
+        "status": 200,
+        "body": {
+          "memories": [],
+          "meta": {
+            "scopes": [
+              {
+                "tenant": "@root",
+                "agent": "a"
+              }
+            ],
+            "as_of_ms": "100",
+            "ttl_clock_ms": "100",
+            "sequence": "6",
+            "complete": true,
+            "truncation": [],
+            "limitations": [
+              "retained_state_only"
+            ],
+            "mode": "exact_enumeration",
+            "candidates_examined": "200",
+            "edges_charged": "0",
+            "vector_components": "0",
+            "mmr_components": "0",
+            "evidence_bytes": "0"
+          },
+          "ranking_version": "memory-ranking-v1",
+          "selection": "weighted"
+        }
+      }
+    },
+    {
+      "name": "recall-zero-candidates",
+      "operation": "recall",
+      "request": {
+        "method": "POST",
+        "path": "/v1/memory/notes/recall",
+        "headers": {
+          "Authorization": "Bearer fixture-root"
+        },
+        "body": {
+          "scope": {
+            "agent": "a"
+          },
+          "text": "Ada",
+          "limits": {
+            "candidates": 0
+          }
+        }
+      },
+      "view": {
+        "clock_ms": 100,
+        "sequence": 6,
+        "receipt_window_ms": 100,
+        "scope_grants": [
+          {
+            "tenant": "@root",
+            "agent": "a"
+          }
+        ],
+        "next_receipt_id": "r1",
+        "pre_state": []
+      },
+      "expected": {
+        "status": 422,
+        "body": {
+          "error": {
+            "code": "invalid_input",
+            "message": "sanitized"
+          }
+        }
+      },
+      "defect": {
+        "tag": "recall-zero-candidates",
+        "path": [
+          "request",
+          "body",
+          "limits"
+        ],
+        "set": {
+          "candidates": 20
+        }
+      }
+    },
+    {
+      "name": "recall-zero-scopes",
+      "operation": "recall",
+      "request": {
+        "method": "POST",
+        "path": "/v1/memory/notes/recall",
+        "headers": {
+          "Authorization": "Bearer fixture-root"
+        },
+        "body": {
+          "scope": {
+            "agent": "a"
+          },
+          "text": "Ada",
+          "scopes": []
+        }
+      },
+      "view": {
+        "clock_ms": 100,
+        "sequence": 6,
+        "receipt_window_ms": 100,
+        "scope_grants": [
+          {
+            "tenant": "@root",
+            "agent": "a"
+          }
+        ],
+        "next_receipt_id": "r1",
+        "pre_state": []
+      },
+      "expected": {
+        "status": 422,
+        "body": {
+          "error": {
+            "code": "invalid_input",
+            "message": "sanitized"
+          }
+        }
+      },
+      "defect": {
+        "tag": "recall-zero-scopes",
+        "path": [
+          "request",
+          "body",
+          "scopes"
+        ],
+        "set": [
+          {
+            "agent": "a"
+          }
+        ]
+      }
+    },
+    {
+      "name": "recall-scope-not-in-allowlist",
+      "operation": "recall",
+      "request": {
+        "method": "POST",
+        "path": "/v1/memory/notes/recall",
+        "headers": {
+          "Authorization": "Bearer fixture-root"
+        },
+        "body": {
+          "scope": {
+            "agent": "a"
+          },
+          "text": "Ada",
+          "scopes": [
+            {
+              "agent": "b"
+            }
+          ]
+        }
+      },
+      "view": {
+        "clock_ms": 100,
+        "sequence": 6,
+        "receipt_window_ms": 100,
+        "scope_grants": [
+          {
+            "tenant": "@root",
+            "agent": "a"
+          }
+        ],
+        "next_receipt_id": "r1",
+        "pre_state": []
+      },
+      "expected": {
+        "status": 422,
+        "body": {
+          "error": {
+            "code": "invalid_input",
+            "message": "sanitized"
+          }
+        }
+      },
+      "defect": {
+        "tag": "recall-scope-not-in-allowlist",
+        "path": [
+          "request",
+          "body",
+          "scopes"
+        ],
+        "set": [
+          {
+            "agent": "a"
+          }
+        ]
+      }
+    },
+    {
+      "name": "recall-duplicate-scopes",
+      "operation": "recall",
+      "request": {
+        "method": "POST",
+        "path": "/v1/memory/notes/recall",
+        "headers": {
+          "Authorization": "Bearer fixture-root"
+        },
+        "body": {
+          "scope": {
+            "agent": "a"
+          },
+          "text": "Ada",
+          "scopes": [
+            {
+              "agent": "a"
+            },
+            {
+              "agent": "a"
+            }
+          ]
+        }
+      },
+      "view": {
+        "clock_ms": 100,
+        "sequence": 6,
+        "receipt_window_ms": 100,
+        "scope_grants": [
+          {
+            "tenant": "@root",
+            "agent": "a"
+          }
+        ],
+        "next_receipt_id": "r1",
+        "pre_state": []
+      },
+      "expected": {
+        "status": 422,
+        "body": {
+          "error": {
+            "code": "invalid_input",
+            "message": "sanitized"
+          }
+        }
+      },
+      "defect": {
+        "tag": "recall-duplicate-scopes",
+        "path": [
+          "request",
+          "body",
+          "scopes"
+        ],
+        "set": [
+          {
+            "agent": "a"
+          }
+        ]
+      }
+    },
+    {
+      "name": "recall-empty-kinds",
+      "operation": "recall",
+      "request": {
+        "method": "POST",
+        "path": "/v1/memory/notes/recall",
+        "headers": {
+          "Authorization": "Bearer fixture-root"
+        },
+        "body": {
+          "scope": {
+            "agent": "a"
+          },
+          "text": "Ada",
+          "kinds": []
+        }
+      },
+      "view": {
+        "clock_ms": 100,
+        "sequence": 6,
+        "receipt_window_ms": 100,
+        "scope_grants": [
+          {
+            "tenant": "@root",
+            "agent": "a"
+          }
+        ],
+        "next_receipt_id": "r1",
+        "pre_state": []
+      },
+      "expected": {
+        "status": 422,
+        "body": {
+          "error": {
+            "code": "invalid_input",
+            "message": "sanitized"
+          }
+        }
+      },
+      "defect": {
+        "tag": "recall-empty-kinds",
+        "path": [
+          "request",
+          "body",
+          "kinds"
+        ],
+        "set": [
+          "entity"
+        ]
+      }
+    },
+    {
+      "name": "recall-duplicate-kinds",
+      "operation": "recall",
+      "request": {
+        "method": "POST",
+        "path": "/v1/memory/notes/recall",
+        "headers": {
+          "Authorization": "Bearer fixture-root"
+        },
+        "body": {
+          "scope": {
+            "agent": "a"
+          },
+          "text": "Ada",
+          "kinds": [
+            "entity",
+            "entity"
+          ]
+        }
+      },
+      "view": {
+        "clock_ms": 100,
+        "sequence": 6,
+        "receipt_window_ms": 100,
+        "scope_grants": [
+          {
+            "tenant": "@root",
+            "agent": "a"
+          }
+        ],
+        "next_receipt_id": "r1",
+        "pre_state": []
+      },
+      "expected": {
+        "status": 422,
+        "body": {
+          "error": {
+            "code": "invalid_input",
+            "message": "sanitized"
+          }
+        }
+      },
+      "defect": {
+        "tag": "recall-duplicate-kinds",
+        "path": [
+          "request",
+          "body",
+          "kinds"
+        ],
+        "set": [
+          "entity"
+        ]
+      }
+    },
+    {
+      "name": "recall-unsupported-ann",
+      "operation": "recall",
+      "request": {
+        "method": "POST",
+        "path": "/v1/memory/notes/recall",
+        "headers": {
+          "Authorization": "Bearer fixture-root"
+        },
+        "body": {
+          "scope": {
+            "agent": "a"
+          },
+          "text": "Ada",
+          "mode": "approximate"
+        }
+      },
+      "view": {
+        "clock_ms": 100,
+        "sequence": 6,
+        "receipt_window_ms": 100,
+        "scope_grants": [
+          {
+            "tenant": "@root",
+            "agent": "a"
+          }
+        ],
+        "next_receipt_id": "r1",
+        "pre_state": []
+      },
+      "expected": {
+        "status": 422,
+        "body": {
+          "error": {
+            "code": "memory_bounded_plan_unsupported",
+            "message": "sanitized"
+          }
+        }
+      },
+      "defect": {
+        "tag": "recall-unsupported-ann",
+        "path": [
+          "request",
+          "body",
+          "mode"
+        ],
+        "set": "exact"
+      }
+    },
+    {
+      "name": "recall-source-scan-100001",
+      "operation": "recall",
+      "request": {
+        "method": "POST",
+        "path": "/v1/memory/notes/recall",
+        "headers": {
+          "Authorization": "Bearer fixture-root"
+        },
+        "body": {
+          "scope": {
+            "agent": "a"
+          },
+          "text": "Ada"
+        }
+      },
+      "view": {
+        "clock_ms": 100,
+        "sequence": 6,
+        "receipt_window_ms": 100,
+        "scope_grants": [
+          {
+            "tenant": "@root",
+            "agent": "a"
+          }
+        ],
+        "next_receipt_id": "r1",
+        "pre_state": [],
+        "source_count": 100001
+      },
+      "expected": {
+        "status": 422,
+        "body": {
+          "error": {
+            "code": "invalid_input",
+            "message": "sanitized"
+          }
+        }
+      },
+      "defect": {
+        "tag": "recall-source-scan-100001",
+        "path": [
+          "view",
+          "source_count"
+        ],
+        "set": 100000
+      }
+    },
+    {
+      "name": "recall-unbounded-plan-refused",
+      "operation": "recall",
+      "request": {
+        "method": "POST",
+        "path": "/v1/memory/notes/recall",
+        "headers": {
+          "Authorization": "Bearer fixture-root"
+        },
+        "body": {
+          "scope": {
+            "agent": "a"
+          },
+          "text": "Ada"
+        }
+      },
+      "view": {
+        "clock_ms": 100,
+        "sequence": 6,
+        "receipt_window_ms": 100,
+        "scope_grants": [
+          {
+            "tenant": "@root",
+            "agent": "a"
+          }
+        ],
+        "next_receipt_id": "r1",
+        "pre_state": [],
+        "bounded_plan": false
+      },
+      "expected": {
+        "status": 422,
+        "body": {
+          "error": {
+            "code": "memory_bounded_plan_unsupported",
+            "message": "sanitized"
+          }
+        }
+      },
+      "defect": {
+        "tag": "recall-unbounded-plan-refused",
+        "path": [
+          "view",
+          "bounded_plan"
+        ],
+        "set": true
+      }
+    },
+    {
+      "name": "recall-no-lazy-text-index",
+      "operation": "recall",
+      "request": {
+        "method": "POST",
+        "path": "/v1/memory/notes/recall",
+        "headers": {
+          "Authorization": "Bearer fixture-root"
+        },
+        "body": {
+          "scope": {
+            "agent": "a"
+          },
+          "text": "Ada"
+        }
+      },
+      "view": {
+        "clock_ms": 100,
+        "sequence": 6,
+        "receipt_window_ms": 100,
+        "scope_grants": [
+          {
+            "tenant": "@root",
+            "agent": "a"
+          }
+        ],
+        "next_receipt_id": "r1",
+        "pre_state": [],
+        "text_index_ready": false
+      },
+      "expected": {
+        "status": 409,
+        "body": {
+          "error": {
+            "code": "index_not_ready",
+            "message": "sanitized"
+          }
+        }
+      },
+      "defect": {
+        "tag": "recall-no-lazy-text-index",
+        "path": [
+          "view",
+          "text_index_ready"
+        ],
+        "set": true
+      }
+    },
+    {
+      "name": "recall-deadline-no-empty-success",
+      "operation": "recall",
+      "request": {
+        "method": "POST",
+        "path": "/v1/memory/notes/recall",
+        "headers": {
+          "Authorization": "Bearer fixture-root"
+        },
+        "body": {
+          "scope": {
+            "agent": "a"
+          },
+          "text": "Ada"
+        }
+      },
+      "view": {
+        "clock_ms": 100,
+        "sequence": 6,
+        "receipt_window_ms": 100,
+        "scope_grants": [
+          {
+            "tenant": "@root",
+            "agent": "a"
+          }
+        ],
+        "next_receipt_id": "r1",
+        "pre_state": [],
+        "elapsed_ms": 250
+      },
+      "expected": {
+        "status": 504,
+        "body": {
+          "error": {
+            "code": "deadline_exceeded",
+            "message": "sanitized"
+          }
+        }
+      },
+      "defect": {
+        "tag": "recall-deadline-no-empty-success",
+        "path": [
+          "view",
+          "elapsed_ms"
+        ],
+        "set": 249
+      }
+    },
+    {
+      "name": "recall-weight-sum",
+      "operation": "recall",
+      "request": {
+        "method": "POST",
+        "path": "/v1/memory/notes/recall",
+        "headers": {
+          "Authorization": "Bearer fixture-root"
+        },
+        "body": {
+          "scope": {
+            "agent": "a"
+          },
+          "text": "Ada",
+          "ranking": {
+            "weights": [
+              2,
+              0,
+              0
+            ]
+          }
+        }
+      },
+      "view": {
+        "clock_ms": 100,
+        "sequence": 6,
+        "receipt_window_ms": 100,
+        "scope_grants": [
+          {
+            "tenant": "@root",
+            "agent": "a"
+          }
+        ],
+        "next_receipt_id": "r1",
+        "pre_state": []
+      },
+      "expected": {
+        "status": 422,
+        "body": {
+          "error": {
+            "code": "invalid_input",
+            "message": "sanitized"
+          }
+        }
+      },
+      "defect": {
+        "tag": "recall-weight-sum",
+        "path": [
+          "request",
+          "body",
+          "ranking"
+        ],
+        "set": {
+          "weights": [
+            1,
+            0,
+            0
+          ]
+        }
+      }
+    },
+    {
+      "name": "recall-decay-requires-half-life",
+      "operation": "recall",
+      "request": {
+        "method": "POST",
+        "path": "/v1/memory/notes/recall",
+        "headers": {
+          "Authorization": "Bearer fixture-root"
+        },
+        "body": {
+          "scope": {
+            "agent": "a"
+          },
+          "text": "Ada",
+          "ranking": {
+            "weights": [
+              0,
+              1,
+              0
+            ]
+          }
+        }
+      },
+      "view": {
+        "clock_ms": 100,
+        "sequence": 6,
+        "receipt_window_ms": 100,
+        "scope_grants": [
+          {
+            "tenant": "@root",
+            "agent": "a"
+          }
+        ],
+        "next_receipt_id": "r1",
+        "pre_state": []
+      },
+      "expected": {
+        "status": 422,
+        "body": {
+          "error": {
+            "code": "invalid_input",
+            "message": "sanitized"
+          }
+        }
+      },
+      "defect": {
+        "tag": "recall-decay-requires-half-life",
+        "path": [
+          "request",
+          "body",
+          "ranking"
+        ],
+        "set": {
+          "weights": [
+            0,
+            1,
+            0
+          ],
+          "half_life_ms": 10
+        }
+      }
+    },
+    {
+      "name": "recall-zero-half-life",
+      "operation": "recall",
+      "request": {
+        "method": "POST",
+        "path": "/v1/memory/notes/recall",
+        "headers": {
+          "Authorization": "Bearer fixture-root"
+        },
+        "body": {
+          "scope": {
+            "agent": "a"
+          },
+          "text": "Ada",
+          "ranking": {
+            "half_life_ms": 0
+          }
+        }
+      },
+      "view": {
+        "clock_ms": 100,
+        "sequence": 6,
+        "receipt_window_ms": 100,
+        "scope_grants": [
+          {
+            "tenant": "@root",
+            "agent": "a"
+          }
+        ],
+        "next_receipt_id": "r1",
+        "pre_state": []
+      },
+      "expected": {
+        "status": 422,
+        "body": {
+          "error": {
+            "code": "invalid_input",
+            "message": "sanitized"
+          }
+        }
+      },
+      "defect": {
+        "tag": "recall-zero-half-life",
+        "path": [
+          "request",
+          "body",
+          "ranking"
+        ],
+        "set": {}
+      }
+    },
+    {
+      "name": "recall-provider-off-even-with-ambient-credential",
+      "operation": "recall",
+      "request": {
+        "method": "POST",
+        "path": "/v1/memory/notes/recall",
+        "headers": {
+          "Authorization": "Bearer fixture-root"
+        },
+        "body": {
+          "scope": {
+            "agent": "a"
+          },
+          "text": "Ada",
+          "embedding_provider": "remote"
+        }
+      },
+      "view": {
+        "clock_ms": 100,
+        "sequence": 6,
+        "receipt_window_ms": 100,
+        "scope_grants": [
+          {
+            "tenant": "@root",
+            "agent": "a"
+          }
+        ],
+        "next_receipt_id": "r1",
+        "pre_state": [],
+        "ambient_credentials": true
+      },
+      "expected": {
+        "status": 409,
+        "body": {
+          "error": {
+            "code": "provider_not_configured",
+            "message": "sanitized"
+          }
+        }
+      },
+      "defect": {
+        "tag": "recall-provider-off-even-with-ambient-credential",
+        "path": [
+          "request",
+          "body",
+          "embedding_provider"
+        ],
+        "delete": true
+      }
+    },
+    {
+      "name": "recall-as-of-keeps-independent-ttl-clock",
+      "operation": "recall",
+      "request": {
+        "method": "POST",
+        "path": "/v1/memory/notes/recall",
+        "headers": {
+          "Authorization": "Bearer fixture-root"
+        },
+        "body": {
+          "scope": {
+            "agent": "a"
+          },
+          "text": "Ada",
+          "as_of_ms": "-1"
+        }
+      },
+      "view": {
+        "clock_ms": 100,
+        "sequence": 6,
+        "receipt_window_ms": 100,
+        "scope_grants": [
+          {
+            "tenant": "@root",
+            "agent": "a"
+          }
+        ],
+        "next_receipt_id": "r1",
+        "pre_state": []
+      },
+      "expected": {
+        "status": 200,
+        "body": {
+          "memories": [],
+          "meta": {
+            "scopes": [
+              {
+                "tenant": "@root",
+                "agent": "a"
+              }
+            ],
+            "as_of_ms": "-1",
+            "ttl_clock_ms": "100",
+            "sequence": "6",
+            "complete": true,
+            "truncation": [],
+            "limitations": [
+              "historical_candidate_discovery_not_exhaustive",
+              "retained_state_only"
+            ],
+            "mode": "exact_enumeration",
+            "candidates_examined": "0",
+            "edges_charged": "0",
+            "vector_components": "0",
+            "mmr_components": "0",
+            "evidence_bytes": "0"
+          },
+          "ranking_version": "memory-ranking-v1",
+          "selection": "weighted"
+        }
+      }
+    },
+    {
+      "name": "recall-marked-deadline-partial",
+      "operation": "recall",
+      "request": {
+        "method": "POST",
+        "path": "/v1/memory/notes/recall",
+        "headers": {
+          "Authorization": "Bearer fixture-root"
+        },
+        "body": {
+          "scope": {
+            "agent": "a"
+          },
+          "text": "Ada",
+          "allow_partial": true
+        }
+      },
+      "view": {
+        "clock_ms": 100,
+        "sequence": 6,
+        "receipt_window_ms": 100,
+        "scope_grants": [
+          {
+            "tenant": "@root",
+            "agent": "a"
+          }
+        ],
+        "next_receipt_id": "r1",
+        "pre_state": [],
+        "elapsed_ms": 250
+      },
+      "expected": {
+        "status": 200,
+        "body": {
+          "memories": [],
+          "meta": {
+            "scopes": [
+              {
+                "tenant": "@root",
+                "agent": "a"
+              }
+            ],
+            "as_of_ms": "100",
+            "ttl_clock_ms": "100",
+            "sequence": "6",
+            "complete": false,
+            "truncation": [
+              "deadline"
+            ],
+            "limitations": [
+              "retained_state_only"
+            ],
+            "mode": "exact_enumeration",
+            "candidates_examined": "0",
+            "edges_charged": "0",
+            "vector_components": "0",
+            "mmr_components": "0",
+            "evidence_bytes": "0"
+          },
+          "ranking_version": "memory-ranking-v1",
+          "selection": "weighted"
+        }
+      }
+    },
+    {
+      "name": "recall-ranking-golden-default",
+      "operation": "recall",
+      "request": {
+        "method": "POST",
+        "path": "/v1/memory/notes/recall",
+        "headers": {
+          "Authorization": "Bearer fixture-root"
+        },
+        "body": {
+          "scope": {
+            "agent": "a"
+          },
+          "text": "Ada"
+        }
+      },
+      "view": {
+        "clock_ms": 100,
+        "sequence": 6,
+        "receipt_window_ms": 100,
+        "scope_grants": [
+          {
+            "tenant": "@root",
+            "agent": "a"
+          }
+        ],
+        "next_receipt_id": "r1",
+        "pre_state": [],
+        "candidates": [
+          {
+            "id": "b",
+            "scope": [
+              "@root",
+              "a",
+              null,
+              null
+            ],
+            "O": 90,
+            "rank": 2
+          },
+          {
+            "id": "a",
+            "scope": [
+              "@root",
+              "a",
+              null,
+              null
+            ],
+            "O": 90,
+            "rank": 1
+          }
+        ]
+      },
+      "expected": {
+        "status": 200,
+        "body": {
+          "memories": [
+            {
+              "id": "a",
+              "revision": "1",
+              "scope": {
+                "tenant": "@root",
+                "agent": "a"
+              },
+              "kind": "entity",
+              "content": "a",
+              "observed_at_ms": "90",
+              "created_at_ms": "100",
+              "updated_at_ms": "100",
+              "importance": 0.5,
+              "status": "accepted",
+              "stale": false,
+              "segment": null,
+              "evidence": [],
+              "scores": {
+                "R": 1,
+                "D": null,
+                "I": 0.5,
+                "S": 1
+              },
+              "provenance": [],
+              "references": [],
+              "metadata": {}
+            },
+            {
+              "id": "b",
+              "revision": "1",
+              "scope": {
+                "tenant": "@root",
+                "agent": "a"
+              },
+              "kind": "entity",
+              "content": "b",
+              "observed_at_ms": "90",
+              "created_at_ms": "100",
+              "updated_at_ms": "100",
+              "importance": 0.5,
+              "status": "accepted",
+              "stale": false,
+              "segment": null,
+              "evidence": [],
+              "scores": {
+                "R": 0.5,
+                "D": null,
+                "I": 0.5,
+                "S": 0.5
+              },
+              "provenance": [],
+              "references": [],
+              "metadata": {}
+            }
+          ],
+          "meta": {
+            "scopes": [
+              {
+                "tenant": "@root",
+                "agent": "a"
+              }
+            ],
+            "as_of_ms": "100",
+            "ttl_clock_ms": "100",
+            "sequence": "6",
+            "complete": true,
+            "truncation": [],
+            "limitations": [
+              "retained_state_only"
+            ],
+            "mode": "exact_enumeration",
+            "candidates_examined": "2",
+            "edges_charged": "0",
+            "vector_components": "0",
+            "mmr_components": "0",
+            "evidence_bytes": "0"
+          },
+          "ranking_version": "memory-ranking-v1",
+          "selection": "weighted"
+        }
+      }
+    },
+    {
+      "name": "recall-ranking-golden-id-tie-expanded-R-zero",
+      "operation": "recall",
+      "request": {
+        "method": "POST",
+        "path": "/v1/memory/notes/recall",
+        "headers": {
+          "Authorization": "Bearer fixture-root"
+        },
+        "body": {
+          "scope": {
+            "agent": "a"
+          },
+          "entity_seeds": [
+            "z",
+            "a"
+          ]
+        }
+      },
+      "view": {
+        "clock_ms": 100,
+        "sequence": 6,
+        "receipt_window_ms": 100,
+        "scope_grants": [
+          {
+            "tenant": "@root",
+            "agent": "a"
+          }
+        ],
+        "next_receipt_id": "r1",
+        "pre_state": [],
+        "temporal_enabled": true,
+        "candidates": [
+          {
+            "id": "z",
+            "scope": [
+              "@root",
+              "a",
+              null,
+              null
+            ],
+            "O": 90
+          },
+          {
+            "id": "a",
+            "scope": [
+              "@root",
+              "a",
+              null,
+              null
+            ],
+            "O": 90
+          }
+        ]
+      },
+      "expected": {
+        "status": 200,
+        "body": {
+          "memories": [
+            {
+              "id": "a",
+              "revision": "1",
+              "scope": {
+                "tenant": "@root",
+                "agent": "a"
+              },
+              "kind": "entity",
+              "content": "a",
+              "observed_at_ms": "90",
+              "created_at_ms": "100",
+              "updated_at_ms": "100",
+              "importance": 0.5,
+              "status": "accepted",
+              "stale": false,
+              "segment": null,
+              "evidence": [],
+              "scores": {
+                "R": 0,
+                "D": null,
+                "I": 0.5,
+                "S": 0
+              },
+              "provenance": [],
+              "references": [],
+              "metadata": {}
+            },
+            {
+              "id": "z",
+              "revision": "1",
+              "scope": {
+                "tenant": "@root",
+                "agent": "a"
+              },
+              "kind": "entity",
+              "content": "z",
+              "observed_at_ms": "90",
+              "created_at_ms": "100",
+              "updated_at_ms": "100",
+              "importance": 0.5,
+              "status": "accepted",
+              "stale": false,
+              "segment": null,
+              "evidence": [],
+              "scores": {
+                "R": 0,
+                "D": null,
+                "I": 0.5,
+                "S": 0
+              },
+              "provenance": [],
+              "references": [],
+              "metadata": {}
+            }
+          ],
+          "meta": {
+            "scopes": [
+              {
+                "tenant": "@root",
+                "agent": "a"
+              }
+            ],
+            "as_of_ms": "100",
+            "ttl_clock_ms": "100",
+            "sequence": "6",
+            "complete": true,
+            "truncation": [],
+            "limitations": [
+              "retained_state_only"
+            ],
+            "mode": "bounded_expansion",
+            "candidates_examined": "2",
+            "edges_charged": "0",
+            "vector_components": "0",
+            "mmr_components": "0",
+            "evidence_bytes": "0"
+          },
+          "ranking_version": "memory-ranking-v1",
+          "selection": "weighted"
+        }
+      }
+    },
+    {
+      "name": "recall-ranking-golden-weighted-tie",
+      "operation": "recall",
+      "request": {
+        "method": "POST",
+        "path": "/v1/memory/notes/recall",
+        "headers": {
+          "Authorization": "Bearer fixture-root"
+        },
+        "body": {
+          "scope": {
+            "agent": "a"
+          },
+          "text": "Ada",
+          "ranking": {
+            "weights": [
+              0.5,
+              0.25,
+              0.25
+            ],
+            "half_life_ms": 10
+          }
+        }
+      },
+      "view": {
+        "clock_ms": 100,
+        "sequence": 6,
+        "receipt_window_ms": 100,
+        "scope_grants": [
+          {
+            "tenant": "@root",
+            "agent": "a"
+          }
+        ],
+        "next_receipt_id": "r1",
+        "pre_state": [],
+        "candidates": [
+          {
+            "id": "low",
+            "scope": [
+              "@root",
+              "a",
+              null,
+              null
+            ],
+            "O": 90,
+            "rank": 1,
+            "importance": 0
+          },
+          {
+            "id": "high",
+            "scope": [
+              "@root",
+              "a",
+              null,
+              null
+            ],
+            "O": 90,
+            "rank": 2,
+            "importance": 1
+          }
+        ]
+      },
+      "expected": {
+        "status": 200,
+        "body": {
+          "memories": [
+            {
+              "id": "high",
+              "revision": "1",
+              "scope": {
+                "tenant": "@root",
+                "agent": "a"
+              },
+              "kind": "entity",
+              "content": "high",
+              "observed_at_ms": "90",
+              "created_at_ms": "100",
+              "updated_at_ms": "100",
+              "importance": 1,
+              "status": "accepted",
+              "stale": false,
+              "segment": null,
+              "evidence": [],
+              "scores": {
+                "R": 0.5,
+                "D": 0.5,
+                "I": 1,
+                "S": 0.625
+              },
+              "provenance": [],
+              "references": [],
+              "metadata": {}
+            },
+            {
+              "id": "low",
+              "revision": "1",
+              "scope": {
+                "tenant": "@root",
+                "agent": "a"
+              },
+              "kind": "entity",
+              "content": "low",
+              "observed_at_ms": "90",
+              "created_at_ms": "100",
+              "updated_at_ms": "100",
+              "importance": 0,
+              "status": "accepted",
+              "stale": false,
+              "segment": null,
+              "evidence": [],
+              "scores": {
+                "R": 1,
+                "D": 0.5,
+                "I": 0,
+                "S": 0.625
+              },
+              "provenance": [],
+              "references": [],
+              "metadata": {}
+            }
+          ],
+          "meta": {
+            "scopes": [
+              {
+                "tenant": "@root",
+                "agent": "a"
+              }
+            ],
+            "as_of_ms": "100",
+            "ttl_clock_ms": "100",
+            "sequence": "6",
+            "complete": true,
+            "truncation": [],
+            "limitations": [
+              "retained_state_only"
+            ],
+            "mode": "exact_enumeration",
+            "candidates_examined": "2",
+            "edges_charged": "0",
+            "vector_components": "0",
+            "mmr_components": "0",
+            "evidence_bytes": "0"
+          },
+          "ranking_version": "memory-ranking-v1",
+          "selection": "weighted"
+        }
+      }
+    },
+    {
+      "name": "recall-owner-ttl-equality-and-foreign-scope-hidden",
+      "operation": "recall",
+      "request": {
+        "method": "POST",
+        "path": "/v1/memory/notes/recall",
+        "headers": {
+          "Authorization": "Bearer fixture-root"
+        },
+        "body": {
+          "scope": {
+            "agent": "a"
+          },
+          "text": "Ada"
+        }
+      },
+      "view": {
+        "clock_ms": 100,
+        "sequence": 6,
+        "receipt_window_ms": 100,
+        "scope_grants": [
+          {
+            "tenant": "@root",
+            "agent": "a"
+          }
+        ],
+        "next_receipt_id": "r1",
+        "pre_state": [],
+        "candidates": [
+          {
+            "id": "expired",
+            "scope": [
+              "@root",
+              "a",
+              null,
+              null
+            ],
+            "O": 90,
+            "expires_at_ms": 100
+          },
+          {
+            "id": "foreign",
+            "scope": [
+              "other",
+              "a",
+              null,
+              null
+            ],
+            "O": 90
+          }
+        ]
+      },
+      "expected": {
+        "status": 200,
+        "body": {
+          "memories": [],
+          "meta": {
+            "scopes": [
+              {
+                "tenant": "@root",
+                "agent": "a"
+              }
+            ],
+            "as_of_ms": "100",
+            "ttl_clock_ms": "100",
+            "sequence": "6",
+            "complete": true,
+            "truncation": [],
+            "limitations": [
+              "retained_state_only"
+            ],
+            "mode": "exact_enumeration",
+            "candidates_examined": "0",
+            "edges_charged": "0",
+            "vector_components": "0",
+            "mmr_components": "0",
+            "evidence_bytes": "0"
+          },
+          "ranking_version": "memory-ranking-v1",
+          "selection": "weighted"
+        }
+      }
+    },
+    {
+      "name": "recall-vector-exact",
+      "operation": "recall",
+      "request": {
+        "method": "POST",
+        "path": "/v1/memory/notes/recall",
+        "headers": {
+          "Authorization": "Bearer fixture-root"
+        },
+        "body": {
+          "scope": {
+            "agent": "a"
+          },
+          "vector": [
+            1,
+            0
+          ],
+          "ranking": {
+            "selection": "exact"
+          }
+        }
+      },
+      "view": {
+        "clock_ms": 100,
+        "sequence": 6,
+        "receipt_window_ms": 100,
+        "scope_grants": [
+          {
+            "tenant": "@root",
+            "agent": "a"
+          }
+        ],
+        "next_receipt_id": "r1",
+        "pre_state": [],
+        "candidates": [
+          {
+            "id": "b",
+            "scope": [
+              "@root",
+              "a",
+              null,
+              null
+            ],
+            "O": 90,
+            "record": 2,
+            "vector": [
+              0,
+              1
+            ]
+          },
+          {
+            "id": "a",
+            "scope": [
+              "@root",
+              "a",
+              null,
+              null
+            ],
+            "O": 90,
+            "record": 1,
+            "vector": [
+              1,
+              0
+            ]
+          }
+        ]
+      },
+      "expected": {
+        "status": 200,
+        "body": {
+          "memories": [
+            {
+              "id": "a",
+              "revision": "1",
+              "scope": {
+                "tenant": "@root",
+                "agent": "a"
+              },
+              "kind": "entity",
+              "content": "a",
+              "observed_at_ms": "90",
+              "created_at_ms": "100",
+              "updated_at_ms": "100",
+              "importance": 0.5,
+              "status": "accepted",
+              "stale": false,
+              "segment": null,
+              "evidence": [],
+              "scores": {
+                "R": 1,
+                "D": null,
+                "I": 0.5,
+                "S": 1,
+                "distance": 0
+              },
+              "provenance": [],
+              "references": [],
+              "metadata": {}
+            },
+            {
+              "id": "b",
+              "revision": "1",
+              "scope": {
+                "tenant": "@root",
+                "agent": "a"
+              },
+              "kind": "entity",
+              "content": "b",
+              "observed_at_ms": "90",
+              "created_at_ms": "100",
+              "updated_at_ms": "100",
+              "importance": 0.5,
+              "status": "accepted",
+              "stale": false,
+              "segment": null,
+              "evidence": [],
+              "scores": {
+                "R": 0.5,
+                "D": null,
+                "I": 0.5,
+                "S": 0.5,
+                "distance": 1
+              },
+              "provenance": [],
+              "references": [],
+              "metadata": {}
+            }
+          ],
+          "meta": {
+            "scopes": [
+              {
+                "tenant": "@root",
+                "agent": "a"
+              }
+            ],
+            "as_of_ms": "100",
+            "ttl_clock_ms": "100",
+            "sequence": "6",
+            "complete": true,
+            "truncation": [],
+            "limitations": [
+              "retained_state_only"
+            ],
+            "mode": "exact_enumeration",
+            "candidates_examined": "2",
+            "edges_charged": "0",
+            "vector_components": "4",
+            "mmr_components": "0",
+            "evidence_bytes": "0"
+          },
+          "ranking_version": "memory-ranking-v1",
+          "selection": "exact"
+        }
+      }
+    },
+    {
+      "name": "recall-vector-mmr",
+      "operation": "recall",
+      "request": {
+        "method": "POST",
+        "path": "/v1/memory/notes/recall",
+        "headers": {
+          "Authorization": "Bearer fixture-root"
+        },
+        "body": {
+          "scope": {
+            "agent": "a"
+          },
+          "vector": [
+            1,
+            0
+          ],
+          "ranking": {
+            "selection": "mmr"
+          }
+        }
+      },
+      "view": {
+        "clock_ms": 100,
+        "sequence": 6,
+        "receipt_window_ms": 100,
+        "scope_grants": [
+          {
+            "tenant": "@root",
+            "agent": "a"
+          }
+        ],
+        "next_receipt_id": "r1",
+        "pre_state": [],
+        "candidates": [
+          {
+            "id": "b",
+            "scope": [
+              "@root",
+              "a",
+              null,
+              null
+            ],
+            "O": 90,
+            "record": 2,
+            "vector": [
+              0,
+              1
+            ]
+          },
+          {
+            "id": "a",
+            "scope": [
+              "@root",
+              "a",
+              null,
+              null
+            ],
+            "O": 90,
+            "record": 1,
+            "vector": [
+              1,
+              0
+            ]
+          }
+        ]
+      },
+      "expected": {
+        "status": 200,
+        "body": {
+          "memories": [
+            {
+              "id": "a",
+              "revision": "1",
+              "scope": {
+                "tenant": "@root",
+                "agent": "a"
+              },
+              "kind": "entity",
+              "content": "a",
+              "observed_at_ms": "90",
+              "created_at_ms": "100",
+              "updated_at_ms": "100",
+              "importance": 0.5,
+              "status": "accepted",
+              "stale": false,
+              "segment": null,
+              "evidence": [],
+              "scores": {
+                "R": 1,
+                "D": null,
+                "I": 0.5,
+                "S": 1,
+                "distance": 0
+              },
+              "provenance": [],
+              "references": [],
+              "metadata": {}
+            },
+            {
+              "id": "b",
+              "revision": "1",
+              "scope": {
+                "tenant": "@root",
+                "agent": "a"
+              },
+              "kind": "entity",
+              "content": "b",
+              "observed_at_ms": "90",
+              "created_at_ms": "100",
+              "updated_at_ms": "100",
+              "importance": 0.5,
+              "status": "accepted",
+              "stale": false,
+              "segment": null,
+              "evidence": [],
+              "scores": {
+                "R": 0.5,
+                "D": null,
+                "I": 0.5,
+                "S": 0.5,
+                "distance": 1
+              },
+              "provenance": [],
+              "references": [],
+              "metadata": {}
+            }
+          ],
+          "meta": {
+            "scopes": [
+              {
+                "tenant": "@root",
+                "agent": "a"
+              }
+            ],
+            "as_of_ms": "100",
+            "ttl_clock_ms": "100",
+            "sequence": "6",
+            "complete": true,
+            "truncation": [],
+            "limitations": [
+              "retained_state_only"
+            ],
+            "mode": "exact_enumeration",
+            "candidates_examined": "2",
+            "edges_charged": "0",
+            "vector_components": "4",
+            "mmr_components": "16",
+            "evidence_bytes": "0"
+          },
+          "ranking_version": "memory-ranking-v1",
+          "selection": "mmr"
+        }
+      }
+    },
+    {
+      "name": "recall-mmr-hybrid-refused",
+      "operation": "recall",
+      "request": {
+        "method": "POST",
+        "path": "/v1/memory/notes/recall",
+        "headers": {
+          "Authorization": "Bearer fixture-root"
+        },
+        "body": {
+          "scope": {
+            "agent": "a"
+          },
+          "vector": [
+            1,
+            0
+          ],
+          "ranking": {
+            "selection": "mmr"
+          },
+          "text": "Ada"
+        }
+      },
+      "view": {
+        "clock_ms": 100,
+        "sequence": 6,
+        "receipt_window_ms": 100,
+        "scope_grants": [
+          {
+            "tenant": "@root",
+            "agent": "a"
+          }
+        ],
+        "next_receipt_id": "r1",
+        "pre_state": [],
+        "candidates": [
+          {
+            "id": "b",
+            "scope": [
+              "@root",
+              "a",
+              null,
+              null
+            ],
+            "O": 90,
+            "record": 2,
+            "vector": [
+              0,
+              1
+            ]
+          },
+          {
+            "id": "a",
+            "scope": [
+              "@root",
+              "a",
+              null,
+              null
+            ],
+            "O": 90,
+            "record": 1,
+            "vector": [
+              1,
+              0
+            ]
+          }
+        ]
+      },
+      "expected": {
+        "status": 422,
+        "body": {
+          "error": {
+            "code": "memory_unsupported_ranking",
+            "message": "sanitized"
+          }
+        }
+      },
+      "defect": {
+        "tag": "recall-mmr-hybrid-refused",
+        "path": [
+          "request",
+          "body",
+          "text"
+        ],
+        "delete": true
+      }
+    },
+    {
+      "name": "recall-fact-core-absent",
+      "operation": "recall",
+      "request": {
+        "method": "POST",
+        "path": "/v1/memory/notes/recall",
+        "headers": {
+          "Authorization": "Bearer fixture-root"
+        },
+        "body": {
+          "scope": {
+            "agent": "a"
+          },
+          "text": "Ada",
+          "kinds": [
+            "fact"
+          ]
+        }
+      },
+      "view": {
+        "clock_ms": 100,
+        "sequence": 6,
+        "receipt_window_ms": 100,
+        "scope_grants": [
+          {
+            "tenant": "@root",
+            "agent": "a"
+          }
+        ],
+        "next_receipt_id": "r1",
+        "pre_state": [],
+        "capabilities": {}
+      },
+      "expected": {
+        "status": 409,
+        "body": {
+          "error": {
+            "code": "memory_capability_unavailable",
+            "message": "sanitized"
+          }
+        }
+      },
+      "defect": {
+        "tag": "recall-fact-core-absent",
+        "path": [
+          "view",
+          "capabilities"
+        ],
+        "set": {
+          "facts": true
+        }
+      },
+      "repair_check": "gate"
+    },
+    {
+      "name": "recall-relation-core-absent",
+      "operation": "recall",
+      "request": {
+        "method": "POST",
+        "path": "/v1/memory/notes/recall",
+        "headers": {
+          "Authorization": "Bearer fixture-root"
+        },
+        "body": {
+          "scope": {
+            "agent": "a"
+          },
+          "text": "Ada",
+          "kinds": [
+            "relation"
+          ]
+        }
+      },
+      "view": {
+        "clock_ms": 100,
+        "sequence": 6,
+        "receipt_window_ms": 100,
+        "scope_grants": [
+          {
+            "tenant": "@root",
+            "agent": "a"
+          }
+        ],
+        "next_receipt_id": "r1",
+        "pre_state": [],
+        "capabilities": {}
+      },
+      "expected": {
+        "status": 409,
+        "body": {
+          "error": {
+            "code": "memory_capability_unavailable",
+            "message": "sanitized"
+          }
+        }
+      },
+      "defect": {
+        "tag": "recall-relation-core-absent",
+        "path": [
+          "view",
+          "capabilities"
+        ],
+        "set": {
+          "facts": true
+        }
+      },
+      "repair_check": "gate"
+    },
+    {
+      "name": "recall-temporal-expansion-gated",
+      "operation": "recall",
+      "request": {
+        "method": "POST",
+        "path": "/v1/memory/notes/recall",
+        "headers": {
+          "Authorization": "Bearer fixture-root"
+        },
+        "body": {
+          "scope": {
+            "agent": "a"
+          },
+          "entity_seeds": [
+            "e1"
+          ],
+          "limit": 1
+        }
+      },
+      "view": {
+        "clock_ms": 100,
+        "sequence": 6,
+        "receipt_window_ms": 100,
+        "scope_grants": [
+          {
+            "tenant": "@root",
+            "agent": "a"
+          }
+        ],
+        "next_receipt_id": "r1",
+        "pre_state": [],
+        "temporal_enabled": false
+      },
+      "expected": {
+        "status": 409,
+        "body": {
+          "error": {
+            "code": "memory_capability_unavailable",
+            "message": "sanitized"
+          }
+        }
+      },
+      "defect": {
+        "tag": "recall-temporal-expansion-gated",
+        "path": [
+          "view",
+          "temporal_enabled"
+        ],
+        "set": true
+      }
+    },
+    {
+      "name": "recall-bm25-rrf-preeligible-leg-diagnostics",
+      "operation": "recall",
+      "request": {
+        "method": "POST",
+        "path": "/v1/memory/notes/recall",
+        "headers": {
+          "Authorization": "Bearer fixture-root"
+        },
+        "body": {
+          "scope": {
+            "agent": "a"
+          },
+          "text": "Ada"
+        }
+      },
+      "view": {
+        "clock_ms": 100,
+        "sequence": 6,
+        "receipt_window_ms": 100,
+        "scope_grants": [
+          {
+            "tenant": "@root",
+            "agent": "a"
+          }
+        ],
+        "next_receipt_id": "r1",
+        "pre_state": [],
+        "candidates": [
+          {
+            "id": "b",
+            "scope": [
+              "@root",
+              "a",
+              null,
+              null
+            ],
+            "O": 90,
+            "rank": 2
+          },
+          {
+            "id": "a",
+            "scope": [
+              "@root",
+              "a",
+              null,
+              null
+            ],
+            "O": 90,
+            "rank": 1,
+            "raw_scores": {
+              "dense_rank": 1,
+              "text_rank": 2,
+              "fused_rank": 1,
+              "bm25": 1.25,
+              "fused_score": 0.25
+            }
+          }
+        ]
+      },
+      "expected": {
+        "status": 200,
+        "body": {
+          "memories": [
+            {
+              "id": "a",
+              "revision": "1",
+              "scope": {
+                "tenant": "@root",
+                "agent": "a"
+              },
+              "kind": "entity",
+              "content": "a",
+              "observed_at_ms": "90",
+              "created_at_ms": "100",
+              "updated_at_ms": "100",
+              "importance": 0.5,
+              "status": "accepted",
+              "stale": false,
+              "segment": null,
+              "evidence": [],
+              "scores": {
+                "R": 1,
+                "D": null,
+                "I": 0.5,
+                "S": 1,
+                "dense_rank": 1,
+                "text_rank": 2,
+                "fused_rank": 1,
+                "bm25": 1.25,
+                "fused_score": 0.25
+              },
+              "provenance": [],
+              "references": [],
+              "metadata": {}
+            },
+            {
+              "id": "b",
+              "revision": "1",
+              "scope": {
+                "tenant": "@root",
+                "agent": "a"
+              },
+              "kind": "entity",
+              "content": "b",
+              "observed_at_ms": "90",
+              "created_at_ms": "100",
+              "updated_at_ms": "100",
+              "importance": 0.5,
+              "status": "accepted",
+              "stale": false,
+              "segment": null,
+              "evidence": [],
+              "scores": {
+                "R": 0.5,
+                "D": null,
+                "I": 0.5,
+                "S": 0.5
+              },
+              "provenance": [],
+              "references": [],
+              "metadata": {}
+            }
+          ],
+          "meta": {
+            "scopes": [
+              {
+                "tenant": "@root",
+                "agent": "a"
+              }
+            ],
+            "as_of_ms": "100",
+            "ttl_clock_ms": "100",
+            "sequence": "6",
+            "complete": true,
+            "truncation": [],
+            "limitations": [
+              "retained_state_only"
+            ],
+            "mode": "exact_enumeration",
+            "candidates_examined": "2",
+            "edges_charged": "0",
+            "vector_components": "0",
+            "mmr_components": "0",
+            "evidence_bytes": "0"
+          },
+          "ranking_version": "memory-ranking-v1",
+          "selection": "weighted"
+        }
+      }
+    },
+    {
+      "name": "recall-caller-OR-cannot-replace-mandatory-scope",
+      "operation": "recall",
+      "request": {
+        "method": "POST",
+        "path": "/v1/memory/notes/recall",
+        "headers": {
+          "Authorization": "Bearer fixture-root"
+        },
+        "body": {
+          "scope": {
+            "agent": "a"
+          },
+          "text": "Ada",
+          "filter": {
+            "any": [
+              {
+                "field": "team",
+                "op": "eq",
+                "value": {
+                  "type": "string",
+                  "value": "approved"
+                }
+              }
+            ]
+          },
+          "projection": {
+            "metadata": [
+              "team"
+            ]
+          }
+        }
+      },
+      "view": {
+        "clock_ms": 100,
+        "sequence": 6,
+        "receipt_window_ms": 100,
+        "scope_grants": [
+          {
+            "tenant": "@root",
+            "agent": "a"
+          }
+        ],
+        "next_receipt_id": "r1",
+        "pre_state": [],
+        "candidates": [
+          {
+            "id": "b",
+            "scope": [
+              "@root",
+              "a",
+              null,
+              null
+            ],
+            "O": 90,
+            "rank": 2,
+            "metadata": {
+              "team": {
+                "type": "string",
+                "value": "other"
+              }
+            }
+          },
+          {
+            "id": "a",
+            "scope": [
+              "@root",
+              "a",
+              null,
+              null
+            ],
+            "O": 90,
+            "rank": 1,
+            "metadata": {
+              "team": {
+                "type": "string",
+                "value": "approved"
+              }
+            }
+          },
+          {
+            "id": "foreign",
+            "scope": [
+              "foreign",
+              "a",
+              null,
+              null
+            ],
+            "O": 90,
+            "metadata": {
+              "team": {
+                "type": "string",
+                "value": "approved"
+              }
+            }
+          }
+        ]
+      },
+      "expected": {
+        "status": 200,
+        "body": {
+          "memories": [
+            {
+              "id": "a",
+              "revision": "1",
+              "scope": {
+                "tenant": "@root",
+                "agent": "a"
+              },
+              "kind": "entity",
+              "content": "a",
+              "observed_at_ms": "90",
+              "created_at_ms": "100",
+              "updated_at_ms": "100",
+              "importance": 0.5,
+              "status": "accepted",
+              "stale": false,
+              "segment": null,
+              "evidence": [],
+              "scores": {
+                "R": 1,
+                "D": null,
+                "I": 0.5,
+                "S": 1
+              },
+              "provenance": [],
+              "references": [],
+              "metadata": {
+                "team": {
+                  "type": "string",
+                  "value": "approved"
+                }
+              }
+            }
+          ],
+          "meta": {
+            "scopes": [
+              {
+                "tenant": "@root",
+                "agent": "a"
+              }
+            ],
+            "as_of_ms": "100",
+            "ttl_clock_ms": "100",
+            "sequence": "6",
+            "complete": true,
+            "truncation": [],
+            "limitations": [
+              "retained_state_only"
+            ],
+            "mode": "exact_enumeration",
+            "candidates_examined": "1",
+            "edges_charged": "0",
+            "vector_components": "0",
+            "mmr_components": "0",
+            "evidence_bytes": "0"
+          },
+          "ranking_version": "memory-ranking-v1",
+          "selection": "weighted"
+        }
+      }
+    },
+    {
+      "name": "recall-future-observation-default-refused",
+      "operation": "recall",
+      "request": {
+        "method": "POST",
+        "path": "/v1/memory/notes/recall",
+        "headers": {
+          "Authorization": "Bearer fixture-root"
+        },
+        "body": {
+          "scope": {
+            "agent": "a"
+          },
+          "text": "Ada"
+        }
+      },
+      "view": {
+        "clock_ms": 100,
+        "sequence": 6,
+        "receipt_window_ms": 100,
+        "scope_grants": [
+          {
+            "tenant": "@root",
+            "agent": "a"
+          }
+        ],
+        "next_receipt_id": "r1",
+        "pre_state": [],
+        "candidates": [
+          {
+            "id": "future",
+            "scope": [
+              "@root",
+              "a",
+              null,
+              null
+            ],
+            "O": 101,
+            "rank": 1
+          }
+        ]
+      },
+      "expected": {
+        "status": 422,
+        "body": {
+          "error": {
+            "code": "invalid_input",
+            "message": "sanitized"
+          }
+        }
+      },
+      "defect": {
+        "tag": "recall-future-observation-default-refused",
+        "path": [
+          "view",
+          "candidates",
+          0,
+          "O"
+        ],
+        "set": 100
+      }
+    },
+    {
+      "name": "recall-future-clamp-explicit",
+      "operation": "recall",
+      "request": {
+        "method": "POST",
+        "path": "/v1/memory/notes/recall",
+        "headers": {
+          "Authorization": "Bearer fixture-root"
+        },
+        "body": {
+          "scope": {
+            "agent": "a"
+          },
+          "text": "Ada",
+          "ranking": {
+            "future_observations": "clamp"
+          }
+        }
+      },
+      "view": {
+        "clock_ms": 100,
+        "sequence": 6,
+        "receipt_window_ms": 100,
+        "scope_grants": [
+          {
+            "tenant": "@root",
+            "agent": "a"
+          }
+        ],
+        "next_receipt_id": "r1",
+        "pre_state": [],
+        "candidates": [
+          {
+            "id": "future",
+            "scope": [
+              "@root",
+              "a",
+              null,
+              null
+            ],
+            "O": 101,
+            "rank": 1
+          }
+        ]
+      },
+      "expected": {
+        "status": 200,
+        "body": {
+          "memories": [
+            {
+              "id": "future",
+              "revision": "1",
+              "scope": {
+                "tenant": "@root",
+                "agent": "a"
+              },
+              "kind": "entity",
+              "content": "future",
+              "observed_at_ms": "101",
+              "created_at_ms": "100",
+              "updated_at_ms": "100",
+              "importance": 0.5,
+              "status": "accepted",
+              "stale": false,
+              "segment": null,
+              "evidence": [],
+              "scores": {
+                "R": 1,
+                "D": null,
+                "I": 0.5,
+                "S": 1
+              },
+              "provenance": [],
+              "references": [],
+              "metadata": {}
+            }
+          ],
+          "meta": {
+            "scopes": [
+              {
+                "tenant": "@root",
+                "agent": "a"
+              }
+            ],
+            "as_of_ms": "100",
+            "ttl_clock_ms": "100",
+            "sequence": "6",
+            "complete": true,
+            "truncation": [],
+            "limitations": [
+              "retained_state_only"
+            ],
+            "mode": "exact_enumeration",
+            "candidates_examined": "1",
+            "edges_charged": "0",
+            "vector_components": "0",
+            "mmr_components": "0",
+            "evidence_bytes": "0"
+          },
+          "ranking_version": "memory-ranking-v1",
+          "selection": "weighted"
+        }
+      }
+    },
+    {
+      "name": "recall-exact-distance-tie-record-before-memory-id",
+      "operation": "recall",
+      "request": {
+        "method": "POST",
+        "path": "/v1/memory/notes/recall",
+        "headers": {
+          "Authorization": "Bearer fixture-root"
+        },
+        "body": {
+          "scope": {
+            "agent": "a"
+          },
+          "vector": [
+            1,
+            0
+          ],
+          "ranking": {
+            "selection": "exact"
+          }
+        }
+      },
+      "view": {
+        "clock_ms": 100,
+        "sequence": 6,
+        "receipt_window_ms": 100,
+        "scope_grants": [
+          {
+            "tenant": "@root",
+            "agent": "a"
+          }
+        ],
+        "next_receipt_id": "r1",
+        "pre_state": [],
+        "candidates": [
+          {
+            "id": "a",
+            "scope": [
+              "@root",
+              "a",
+              null,
+              null
+            ],
+            "O": 90,
+            "record": 2,
+            "vector": [
+              1,
+              0
+            ]
+          },
+          {
+            "id": "z",
+            "scope": [
+              "@root",
+              "a",
+              null,
+              null
+            ],
+            "O": 90,
+            "record": 1,
+            "vector": [
+              1,
+              0
+            ]
+          }
+        ]
+      },
+      "expected": {
+        "status": 200,
+        "body": {
+          "memories": [
+            {
+              "id": "z",
+              "revision": "1",
+              "scope": {
+                "tenant": "@root",
+                "agent": "a"
+              },
+              "kind": "entity",
+              "content": "z",
+              "observed_at_ms": "90",
+              "created_at_ms": "100",
+              "updated_at_ms": "100",
+              "importance": 0.5,
+              "status": "accepted",
+              "stale": false,
+              "segment": null,
+              "evidence": [],
+              "scores": {
+                "R": 1,
+                "D": null,
+                "I": 0.5,
+                "S": 1,
+                "distance": 0
+              },
+              "provenance": [],
+              "references": [],
+              "metadata": {}
+            },
+            {
+              "id": "a",
+              "revision": "1",
+              "scope": {
+                "tenant": "@root",
+                "agent": "a"
+              },
+              "kind": "entity",
+              "content": "a",
+              "observed_at_ms": "90",
+              "created_at_ms": "100",
+              "updated_at_ms": "100",
+              "importance": 0.5,
+              "status": "accepted",
+              "stale": false,
+              "segment": null,
+              "evidence": [],
+              "scores": {
+                "R": 0.5,
+                "D": null,
+                "I": 0.5,
+                "S": 0.5,
+                "distance": 0
+              },
+              "provenance": [],
+              "references": [],
+              "metadata": {}
+            }
+          ],
+          "meta": {
+            "scopes": [
+              {
+                "tenant": "@root",
+                "agent": "a"
+              }
+            ],
+            "as_of_ms": "100",
+            "ttl_clock_ms": "100",
+            "sequence": "6",
+            "complete": true,
+            "truncation": [],
+            "limitations": [
+              "retained_state_only"
+            ],
+            "mode": "exact_enumeration",
+            "candidates_examined": "2",
+            "edges_charged": "0",
+            "vector_components": "4",
+            "mmr_components": "0",
+            "evidence_bytes": "0"
+          },
+          "ranking_version": "memory-ranking-v1",
+          "selection": "exact"
+        }
+      }
+    },
+    {
+      "name": "recall-mmr-diversity-not-weighted-score-order",
+      "operation": "recall",
+      "request": {
+        "method": "POST",
+        "path": "/v1/memory/notes/recall",
+        "headers": {
+          "Authorization": "Bearer fixture-root"
+        },
+        "body": {
+          "scope": {
+            "agent": "a"
+          },
+          "vector": [
+            1,
+            0
+          ],
+          "ranking": {
+            "selection": "mmr",
+            "lambda": 0.25
+          }
+        }
+      },
+      "view": {
+        "clock_ms": 100,
+        "sequence": 6,
+        "receipt_window_ms": 100,
+        "scope_grants": [
+          {
+            "tenant": "@root",
+            "agent": "a"
+          }
+        ],
+        "next_receipt_id": "r1",
+        "pre_state": [],
+        "candidates": [
+          {
+            "id": "b",
+            "scope": [
+              "@root",
+              "a",
+              null,
+              null
+            ],
+            "O": 90,
+            "record": 2,
+            "vector": [
+              1,
+              0
+            ],
+            "raw_scores": {
+              "dense_rank": 2
+            }
+          },
+          {
+            "id": "a",
+            "scope": [
+              "@root",
+              "a",
+              null,
+              null
+            ],
+            "O": 90,
+            "record": 1,
+            "vector": [
+              1,
+              0
+            ],
+            "raw_scores": {
+              "dense_rank": 1
+            }
+          },
+          {
+            "id": "c",
+            "scope": [
+              "@root",
+              "a",
+              null,
+              null
+            ],
+            "O": 90,
+            "record": 3,
+            "vector": [
+              0,
+              1
+            ],
+            "raw_scores": {
+              "dense_rank": 3
+            }
+          }
+        ]
+      },
+      "expected": {
+        "status": 200,
+        "body": {
+          "memories": [
+            {
+              "id": "a",
+              "revision": "1",
+              "scope": {
+                "tenant": "@root",
+                "agent": "a"
+              },
+              "kind": "entity",
+              "content": "a",
+              "observed_at_ms": "90",
+              "created_at_ms": "100",
+              "updated_at_ms": "100",
+              "importance": 0.5,
+              "status": "accepted",
+              "stale": false,
+              "segment": null,
+              "evidence": [],
+              "scores": {
+                "R": 1,
+                "D": null,
+                "I": 0.5,
+                "S": 1,
+                "distance": 0,
+                "dense_rank": 1
+              },
+              "provenance": [],
+              "references": [],
+              "metadata": {}
+            },
+            {
+              "id": "c",
+              "revision": "1",
+              "scope": {
+                "tenant": "@root",
+                "agent": "a"
+              },
+              "kind": "entity",
+              "content": "c",
+              "observed_at_ms": "90",
+              "created_at_ms": "100",
+              "updated_at_ms": "100",
+              "importance": 0.5,
+              "status": "accepted",
+              "stale": false,
+              "segment": null,
+              "evidence": [],
+              "scores": {
+                "R": 0.5,
+                "D": null,
+                "I": 0.5,
+                "S": 0.5,
+                "distance": 1,
+                "dense_rank": 3
+              },
+              "provenance": [],
+              "references": [],
+              "metadata": {}
+            },
+            {
+              "id": "b",
+              "revision": "1",
+              "scope": {
+                "tenant": "@root",
+                "agent": "a"
+              },
+              "kind": "entity",
+              "content": "b",
+              "observed_at_ms": "90",
+              "created_at_ms": "100",
+              "updated_at_ms": "100",
+              "importance": 0.5,
+              "status": "accepted",
+              "stale": false,
+              "segment": null,
+              "evidence": [],
+              "scores": {
+                "R": 0.3333333333333333,
+                "D": null,
+                "I": 0.5,
+                "S": 0.3333333333333333,
+                "distance": 0,
+                "dense_rank": 2
+              },
+              "provenance": [],
+              "references": [],
+              "metadata": {}
+            }
+          ],
+          "meta": {
+            "scopes": [
+              {
+                "tenant": "@root",
+                "agent": "a"
+              }
+            ],
+            "as_of_ms": "100",
+            "ttl_clock_ms": "100",
+            "sequence": "6",
+            "complete": true,
+            "truncation": [],
+            "limitations": [
+              "retained_state_only"
+            ],
+            "mode": "exact_enumeration",
+            "candidates_examined": "3",
+            "edges_charged": "0",
+            "vector_components": "6",
+            "mmr_components": "54",
+            "evidence_bytes": "0"
+          },
+          "ranking_version": "memory-ranking-v1",
+          "selection": "mmr"
+        }
+      }
+    },
+    {
+      "name": "recall-mmr-nondefault-weights-refused",
+      "operation": "recall",
+      "request": {
+        "method": "POST",
+        "path": "/v1/memory/notes/recall",
+        "headers": {
+          "Authorization": "Bearer fixture-root"
+        },
+        "body": {
+          "scope": {
+            "agent": "a"
+          },
+          "vector": [
+            1,
+            0
+          ],
+          "ranking": {
+            "selection": "mmr",
+            "lambda": 0.25,
+            "weights": [
+              0,
+              0,
+              1
+            ]
+          }
+        }
+      },
+      "view": {
+        "clock_ms": 100,
+        "sequence": 6,
+        "receipt_window_ms": 100,
+        "scope_grants": [
+          {
+            "tenant": "@root",
+            "agent": "a"
+          }
+        ],
+        "next_receipt_id": "r1",
+        "pre_state": [],
+        "candidates": [
+          {
+            "id": "b",
+            "scope": [
+              "@root",
+              "a",
+              null,
+              null
+            ],
+            "O": 90,
+            "record": 2,
+            "vector": [
+              1,
+              0
+            ],
+            "raw_scores": {
+              "dense_rank": 2
+            }
+          },
+          {
+            "id": "a",
+            "scope": [
+              "@root",
+              "a",
+              null,
+              null
+            ],
+            "O": 90,
+            "record": 1,
+            "vector": [
+              1,
+              0
+            ],
+            "raw_scores": {
+              "dense_rank": 1
+            }
+          },
+          {
+            "id": "c",
+            "scope": [
+              "@root",
+              "a",
+              null,
+              null
+            ],
+            "O": 90,
+            "record": 3,
+            "vector": [
+              0,
+              1
+            ],
+            "raw_scores": {
+              "dense_rank": 3
+            }
+          }
+        ]
+      },
+      "expected": {
+        "status": 422,
+        "body": {
+          "error": {
+            "code": "memory_unsupported_ranking",
+            "message": "sanitized"
+          }
+        }
+      },
+      "defect": {
+        "tag": "recall-mmr-nondefault-weights-refused",
+        "path": [
+          "request",
+          "body",
+          "ranking",
+          "weights"
+        ],
+        "set": [
+          1,
+          0,
+          0
+        ]
+      }
+    },
+    {
+      "name": "recall-vector-component-budget-before-fetch",
+      "operation": "recall",
+      "request": {
+        "method": "POST",
+        "path": "/v1/memory/notes/recall",
+        "headers": {
+          "Authorization": "Bearer fixture-root"
+        },
+        "body": {
+          "scope": {
+            "agent": "a"
+          },
+          "vector": [
+            1,
+            0
+          ],
+          "ranking": {
+            "selection": "mmr",
+            "lambda": 0.25
+          },
+          "limits": {
+            "vector_components": 5
+          }
+        }
+      },
+      "view": {
+        "clock_ms": 100,
+        "sequence": 6,
+        "receipt_window_ms": 100,
+        "scope_grants": [
+          {
+            "tenant": "@root",
+            "agent": "a"
+          }
+        ],
+        "next_receipt_id": "r1",
+        "pre_state": [],
+        "candidates": [
+          {
+            "id": "b",
+            "scope": [
+              "@root",
+              "a",
+              null,
+              null
+            ],
+            "O": 90,
+            "record": 2,
+            "vector": [
+              1,
+              0
+            ],
+            "raw_scores": {
+              "dense_rank": 2
+            }
+          },
+          {
+            "id": "a",
+            "scope": [
+              "@root",
+              "a",
+              null,
+              null
+            ],
+            "O": 90,
+            "record": 1,
+            "vector": [
+              1,
+              0
+            ],
+            "raw_scores": {
+              "dense_rank": 1
+            }
+          },
+          {
+            "id": "c",
+            "scope": [
+              "@root",
+              "a",
+              null,
+              null
+            ],
+            "O": 90,
+            "record": 3,
+            "vector": [
+              0,
+              1
+            ],
+            "raw_scores": {
+              "dense_rank": 3
+            }
+          }
+        ]
+      },
+      "expected": {
+        "status": 422,
+        "body": {
+          "error": {
+            "code": "invalid_input",
+            "message": "sanitized"
+          }
+        }
+      },
+      "defect": {
+        "tag": "recall-vector-component-budget-before-fetch",
+        "path": [
+          "request",
+          "body",
+          "limits"
+        ],
+        "set": {
+          "vector_components": 6
+        }
+      }
+    },
+    {
+      "name": "recall-mmr-component-budget-before-selection",
+      "operation": "recall",
+      "request": {
+        "method": "POST",
+        "path": "/v1/memory/notes/recall",
+        "headers": {
+          "Authorization": "Bearer fixture-root"
+        },
+        "body": {
+          "scope": {
+            "agent": "a"
+          },
+          "vector": [
+            1,
+            0
+          ],
+          "ranking": {
+            "selection": "mmr",
+            "lambda": 0.25
+          },
+          "limits": {
+            "mmr_components": 53
+          }
+        }
+      },
+      "view": {
+        "clock_ms": 100,
+        "sequence": 6,
+        "receipt_window_ms": 100,
+        "scope_grants": [
+          {
+            "tenant": "@root",
+            "agent": "a"
+          }
+        ],
+        "next_receipt_id": "r1",
+        "pre_state": [],
+        "candidates": [
+          {
+            "id": "b",
+            "scope": [
+              "@root",
+              "a",
+              null,
+              null
+            ],
+            "O": 90,
+            "record": 2,
+            "vector": [
+              1,
+              0
+            ],
+            "raw_scores": {
+              "dense_rank": 2
+            }
+          },
+          {
+            "id": "a",
+            "scope": [
+              "@root",
+              "a",
+              null,
+              null
+            ],
+            "O": 90,
+            "record": 1,
+            "vector": [
+              1,
+              0
+            ],
+            "raw_scores": {
+              "dense_rank": 1
+            }
+          },
+          {
+            "id": "c",
+            "scope": [
+              "@root",
+              "a",
+              null,
+              null
+            ],
+            "O": 90,
+            "record": 3,
+            "vector": [
+              0,
+              1
+            ],
+            "raw_scores": {
+              "dense_rank": 3
+            }
+          }
+        ]
+      },
+      "expected": {
+        "status": 422,
+        "body": {
+          "error": {
+            "code": "invalid_input",
+            "message": "sanitized"
+          }
+        }
+      },
+      "defect": {
+        "tag": "recall-mmr-component-budget-before-selection",
+        "path": [
+          "request",
+          "body",
+          "limits"
+        ],
+        "set": {
+          "mmr_components": 54
+        }
+      }
+    },
+    {
+      "name": "recall-ranking-golden-scope-before-memory-id",
+      "operation": "recall",
+      "request": {
+        "method": "POST",
+        "path": "/v1/memory/notes/recall",
+        "headers": {
+          "Authorization": "Bearer fixture-root"
+        },
+        "body": {
+          "scope": {
+            "agent": "a"
+          },
+          "text": "Ada",
+          "scopes": [
+            {
+              "agent": "a",
+              "user": "u"
+            },
+            {
+              "agent": "a"
+            }
+          ],
+          "ranking": {
+            "weights": [
+              0,
+              0,
+              1
+            ]
+          }
+        }
+      },
+      "view": {
+        "clock_ms": 100,
+        "sequence": 6,
+        "receipt_window_ms": 100,
+        "scope_grants": [
+          {
+            "tenant": "@root",
+            "agent": "a",
+            "user": "u"
+          },
+          {
+            "tenant": "@root",
+            "agent": "a"
+          }
+        ],
+        "next_receipt_id": "r1",
+        "pre_state": [],
+        "candidates": [
+          {
+            "id": "z",
+            "scope": [
+              "@root",
+              "a",
+              null,
+              null
+            ],
+            "O": 90,
+            "rank": 2
+          },
+          {
+            "id": "a",
+            "scope": [
+              "@root",
+              "a",
+              "u",
+              null
+            ],
+            "O": 90,
+            "rank": 1
+          }
+        ]
+      },
+      "expected": {
+        "status": 200,
+        "body": {
+          "memories": [
+            {
+              "id": "z",
+              "revision": "1",
+              "scope": {
+                "tenant": "@root",
+                "agent": "a"
+              },
+              "kind": "entity",
+              "content": "z",
+              "observed_at_ms": "90",
+              "created_at_ms": "100",
+              "updated_at_ms": "100",
+              "importance": 0.5,
+              "status": "accepted",
+              "stale": false,
+              "segment": null,
+              "evidence": [],
+              "scores": {
+                "R": 0.5,
+                "D": null,
+                "I": 0.5,
+                "S": 0.5
+              },
+              "provenance": [],
+              "references": [],
+              "metadata": {}
+            },
+            {
+              "id": "a",
+              "revision": "1",
+              "scope": {
+                "tenant": "@root",
+                "agent": "a",
+                "user": "u"
+              },
+              "kind": "entity",
+              "content": "a",
+              "observed_at_ms": "90",
+              "created_at_ms": "100",
+              "updated_at_ms": "100",
+              "importance": 0.5,
+              "status": "accepted",
+              "stale": false,
+              "segment": null,
+              "evidence": [],
+              "scores": {
+                "R": 1,
+                "D": null,
+                "I": 0.5,
+                "S": 0.5
+              },
+              "provenance": [],
+              "references": [],
+              "metadata": {}
+            }
+          ],
+          "meta": {
+            "scopes": [
+              {
+                "tenant": "@root",
+                "agent": "a"
+              },
+              {
+                "tenant": "@root",
+                "agent": "a",
+                "user": "u"
+              }
+            ],
+            "as_of_ms": "100",
+            "ttl_clock_ms": "100",
+            "sequence": "6",
+            "complete": true,
+            "truncation": [],
+            "limitations": [
+              "retained_state_only"
+            ],
+            "mode": "exact_enumeration",
+            "candidates_examined": "2",
+            "edges_charged": "0",
+            "vector_components": "0",
+            "mmr_components": "0",
+            "evidence_bytes": "0"
+          },
+          "ranking_version": "memory-ranking-v1",
+          "selection": "weighted"
+        }
+      }
+    }
+  ],
+  "structural": [
+    {
+      "name": "response-recall",
+      "schema": "exchange",
+      "request": false,
+      "value": {
+        "memories": [
+          {
+            "id": "a",
+            "revision": "1",
+            "scope": {
+              "tenant": "@root",
+              "agent": "a"
+            },
+            "kind": "entity",
+            "content": "a",
+            "observed_at_ms": "90",
+            "created_at_ms": "100",
+            "updated_at_ms": "100",
+            "importance": 0.5,
+            "status": "accepted",
+            "stale": false,
+            "segment": null,
+            "evidence": [],
+            "scores": {
+              "R": 1,
+              "D": null,
+              "I": 0.5,
+              "S": 1
+            },
+            "provenance": [],
+            "references": [],
+            "metadata": {}
+          },
+          {
+            "id": "b",
+            "revision": "1",
+            "scope": {
+              "tenant": "@root",
+              "agent": "a"
+            },
+            "kind": "entity",
+            "content": "b",
+            "observed_at_ms": "90",
+            "created_at_ms": "100",
+            "updated_at_ms": "100",
+            "importance": 0.5,
+            "status": "accepted",
+            "stale": false,
+            "segment": null,
+            "evidence": [],
+            "scores": {
+              "R": 0.5,
+              "D": null,
+              "I": 0.5,
+              "S": 0.5
+            },
+            "provenance": [],
+            "references": [],
+            "metadata": {}
+          }
+        ],
+        "meta": {
+          "scopes": [
+            {
+              "tenant": "@root",
+              "agent": "a"
+            }
+          ],
+          "as_of_ms": "100",
+          "ttl_clock_ms": "100",
+          "sequence": "6",
+          "complete": true,
+          "truncation": [],
+          "limitations": [
+            "retained_state_only"
+          ],
+          "mode": "exact_enumeration",
+          "candidates_examined": "2",
+          "edges_charged": "0",
+          "vector_components": "0",
+          "mmr_components": "0",
+          "evidence_bytes": "0"
+        },
+        "ranking_version": "memory-ranking-v1",
+        "selection": "weighted"
+      },
+      "valid": true,
+      "operation": "recall",
+      "status": 200
+    },
+    {
+      "name": "http-inventory-recall",
+      "schema": "http",
+      "request": true,
+      "value": {
+        "method": "POST",
+        "path": "/v1/memory/notes/recall",
+        "headers": {},
+        "body": {
+          "scope": {
+            "agent": "a"
+          },
+          "text": "Ada"
+        }
+      },
+      "valid": true,
+      "operation": "recall"
+    },
+    {
+      "name": "historical-read-must-explain-limitations",
+      "schema": "exchange",
+      "request": false,
+      "value": {
+        "memories": [],
+        "meta": {
+          "scopes": [
+            {
+              "tenant": "@root",
+              "agent": "a"
+            }
+          ],
+          "as_of_ms": "100",
+          "ttl_clock_ms": "100",
+          "sequence": "6",
+          "complete": true,
+          "truncation": [],
+          "limitations": [
+            "retained_state_only"
+          ],
+          "mode": "exact_enumeration",
+          "candidates_examined": "0",
+          "edges_charged": "0",
+          "vector_components": "0",
+          "mmr_components": "0",
+          "evidence_bytes": "0"
+        },
+        "ranking_version": "memory-ranking-v1",
+        "selection": "weighted"
+      },
+      "valid": false,
+      "error": "invalid_input",
+      "defect": {
+        "path": [
+          "value",
+          "meta",
+          "limitations"
+        ],
+        "set": [
+          "historical_candidate_discovery_not_exhaustive",
+          "retained_state_only"
+        ]
+      },
+      "operation": "recall",
+      "status": 200,
+      "input_request": {
+        "scope": {
+          "agent": "a"
+        },
+        "text": "Ada",
+        "as_of_ms": "100"
+      }
+    }
+  ],
+  "operation_id": "MemoryRecall"
+}
