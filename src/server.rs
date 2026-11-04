@@ -1869,28 +1869,6 @@ fn identity(
     }
 }
 
-fn require_raw_access_to_reserved_collections(
-    bindings: &reserved::Bindings,
-    role: &admin::Role,
-) -> Result<(), ApiError> {
-    let credential = raw_credential(role);
-    if bindings
-        .iter()
-        .flat_map(|binding| binding.storage())
-        .any(|(graph, stored)| {
-            !graph
-                && !bindings.reserved().raw_allowed(
-                    credential,
-                    reserved::Resource::Collection,
-                    &stored,
-                )
-        })
-    {
-        return Err(forbidden_scope());
-    }
-    Ok(())
-}
-
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
 struct ListVectors {
@@ -2008,7 +1986,6 @@ async fn info(
     let bindings = service.memory_bindings.clone();
     service
         .run_read(move |db| {
-            require_raw_access_to_reserved_collections(&bindings, &role)?;
             open_guarded(db, &role, &Target::Legacy, &bindings)?;
             Ok(Json(json!({
                 "dimensions": db.dimensions(),

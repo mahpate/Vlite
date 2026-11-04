@@ -70,13 +70,16 @@ stored graph and evidence collection from raw server routes. Memory operation
 grants do not grant raw graph, record, search, feed or attachment access.
 `raw_access` is false unless explicitly granted in the private bindings file;
 even with it, the caller still needs the ordinary tenant, collection and
-operation permissions. Reserved resources are omitted from raw collection/graph lists, tenant usage,
-slow-query diagnostics, and change feeds; feed cursors still advance across the
-unfiltered page. With any binding configured, the database aggregate, global
-metrics, graph guard statistics, replication export, webhook list/status, all
-import operations, and automatic maintenance return `403 forbidden_scope`.
-Webhook subscriptions naming a reserved graph or collection are refused, and
-the dispatcher filters reserved events from existing subscriptions. The gRPC
+operation permissions. Reserved resources are omitted from raw collection/graph
+lists, tenant usage, slow-query diagnostics, and change feeds; feed cursors
+still advance across the unfiltered page. `GET /v1/database` reports only the
+default collection and remains available when that collection is not reserved;
+it returns `403 forbidden_scope` when the default collection is reserved
+without raw access. With any binding configured, global metrics, graph guard
+statistics, replication export, webhook list/status, all import operations,
+and automatic-maintenance routes return `403 forbidden_scope`. Webhook
+subscriptions naming a reserved graph or collection are refused, and the
+dispatcher filters reserved events from existing subscriptions. The gRPC
 listener and scheduled automatic index maintenance also fail closed until those
 paths can enforce the same checks.
 

@@ -254,7 +254,15 @@ async fn reserved_graph_and_collection_are_denied_and_lists_filter_them() {
         .0,
         403
     );
-    assert_eq!(get(&app, "/v1/database").await.0, 403);
+    let (info_status, info) = get(&app, "/v1/database").await;
+    assert_eq!(info_status, 200);
+    assert_eq!(info["records"], 0);
+    let default_bindings = BINDINGS.replace("\"notes_ev\"", "\"default\"");
+    let default_directory = tempfile::tempdir().unwrap();
+    let default_app = start(&default_directory, Some(&default_bindings), false).unwrap();
+    let (status, error) = get(&default_app, "/v1/database").await;
+    assert_eq!(status, 403);
+    assert_eq!(error["error"]["code"], "forbidden_scope");
     for (method, path, body) in [
         ("GET", "/v1/imports/1", Body::empty()),
         ("GET", "/v1/admin/replication/export", Body::empty()),
