@@ -190,6 +190,9 @@ impl MemoryRef<'_> {
         if string_property(&scope_node, "tuple")? != hex(&request.scope.encode()) {
             return Err(MemoryError::DigestCollision);
         }
+        if super::erasure::barrier(&read, &scope_key)?.is_some() {
+            return Err(MemoryError::DeletionPending);
+        }
         let summary_key = memory_key(&scope_key, &request.summary_id);
         let summary = read.get_node(&summary_key)?;
         let view_sequence = summary.view_sequence;
