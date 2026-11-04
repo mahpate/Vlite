@@ -444,9 +444,9 @@ mod json {
 }
 
 #[cfg(feature = "json")]
-#[allow(
-    unused_imports,
-    reason = "unwired until the REST adapter reads bindings at startup"
+#[cfg_attr(
+    not(feature = "server"),
+    allow(unused_imports, reason = "only the server reads a bindings file")
 )]
 pub(crate) use json::parse;
 

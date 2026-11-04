@@ -10,10 +10,13 @@ pub(crate) mod binding;
 mod consolidate;
 mod erasure;
 mod mapping;
+#[cfg(all(test, feature = "server"))]
+pub(crate) use mapping::ReceiptOperation;
 mod ranking;
 mod recall;
 mod receipt;
 mod stale;
+mod startup;
 #[cfg(test)]
 mod wire_verify;
 

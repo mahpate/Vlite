@@ -242,6 +242,7 @@ pub fn configured_admin_router(
             "automatic index maintenance is disabled while memory bindings are configured",
         ));
     }
+    super::memory::startup(&service)?;
     super::logs::configure(
         options
             .log_buffer_capacity

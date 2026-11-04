@@ -43,6 +43,7 @@ pub use group_commit::GroupCommitConfig;
 #[cfg(feature = "grpc")]
 pub mod grpc;
 mod logs;
+mod memory;
 mod observability;
 mod ops;
 mod provider_serving;
