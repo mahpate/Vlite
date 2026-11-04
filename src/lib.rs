@@ -4058,13 +4058,11 @@ fn exact_search(
     }
 }
 
-/// Exact compact top-k scan. The merge iterator is deliberately consumed
-/// serially so at most one base vector is decoded by this operation at a time.
+/// Exact compact top-k scan, decoding vectors through the bounded read seam.
 #[cfg(test)]
 #[allow(clippy::too_many_arguments)]
-pub(crate) fn exact_search_compact<'a>(
-    scan: impl Iterator<Item = Result<(u64, &'a Record)>>,
-    rows: usize,
+pub(crate) fn exact_search_compact(
+    records: &records::CollectionRecords,
     expiries: &BTreeMap<u64, u64>,
     query: &[f32],
     query_norm: f64,
@@ -4075,24 +4073,69 @@ pub(crate) fn exact_search_compact<'a>(
     now_ms: u64,
     stats: &mut SearchStats,
 ) -> Result<Vec<SearchHit>> {
+    let mut workspace = compact::source::ReadWorkspace::new(4 << 20)?;
+    exact_search_compact_with_workspace(
+        records,
+        expiries,
+        query,
+        query_norm,
+        k,
+        conditions,
+        metric,
+        candidates,
+        now_ms,
+        stats,
+        &mut workspace,
+    )
+}
+
+#[cfg(test)]
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn exact_search_compact_with_workspace(
+    records: &records::CollectionRecords,
+    expiries: &BTreeMap<u64, u64>,
+    query: &[f32],
+    query_norm: f64,
+    k: usize,
+    conditions: &[Condition],
+    metric: DistanceMetric,
+    candidates: Option<&BTreeSet<u64>>,
+    now_ms: u64,
+    stats: &mut SearchStats,
+    workspace: &mut compact::source::ReadWorkspace,
+) -> Result<Vec<SearchHit>> {
+    let rows = records.len();
     let limit = k.min(rows.min(candidates.map_or(rows, BTreeSet::len)));
     if limit == 0 {
         return Ok(Vec::new());
     }
-    let scan = scan.filter_map(|row| match row {
-        Ok((id, record)) if candidates.is_none_or(|ids| ids.contains(&id)) => {
-            Some(Ok((id, record)))
+    let scorer = exact_kernels::Scorer::new(query, metric, query_norm);
+    let mut hits: BinaryHeap<RankedHit> = BinaryHeap::with_capacity(limit);
+    for id in records.effective_ids() {
+        if candidates.is_some_and(|ids| !ids.contains(&id)) {
+            continue;
         }
-        Ok(_) => None,
-        Err(error) => Some(Err(error)),
-    });
-    Ok(exact_scan_rows(
-        scan, expiries, query, query_norm, limit, conditions, metric, now_ms, stats,
-    )?
-    .into_sorted_vec()
-    .into_iter()
-    .map(|hit| hit.0)
-    .collect())
+        stats.records_scanned += 1;
+        if !records.effective_visible(id, now_ms, expiries) {
+            continue;
+        }
+        let Some(metadata) = records.effective_metadata(id, workspace)? else {
+            return Err(Error::InvalidQuery("compact scan metadata is missing"));
+        };
+        if !metadata::matches(&metadata, conditions) {
+            continue;
+        }
+        stats.distance_evaluations += 1;
+        let Some(vector) = records.effective_vector(id, workspace)? else {
+            return Err(Error::InvalidQuery("compact scan vector is missing"));
+        };
+        offer_scored(&scorer, &[id], &[vector], limit, &mut hits);
+    }
+    Ok(hits
+        .into_sorted_vec()
+        .into_iter()
+        .map(|hit| hit.0)
+        .collect())
 }
 
 // Keep the concrete iterator through collection and the serial scan so record

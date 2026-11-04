@@ -760,6 +760,33 @@ fn compact_exact_scan_is_bit_identical_at_same_clock() {
 }
 
 #[test]
+fn compact_exact_scan_reports_workspace_exhaustion() {
+    let _gates = gates();
+    let (candidate, _, _) = compact_dispatch_fixture(false);
+    let id = candidate.collection("full").unwrap().id();
+    let state = candidate.state(id);
+    let mut workspace = crate::compact::source::ReadWorkspace::new(0).unwrap();
+    let error = crate::exact_search_compact_with_workspace(
+        &state.records,
+        &state.expiries,
+        &[0.1, -0.0],
+        0.0,
+        1,
+        &[],
+        crate::DistanceMetric::SquaredL2,
+        None,
+        0,
+        &mut crate::SearchStats::default(),
+        &mut workspace,
+    )
+    .unwrap_err();
+    assert!(matches!(
+        error,
+        Error::InvalidQuery("compact scratch budget is smaller than one block")
+    ));
+}
+
+#[test]
 fn compact_search_filters_after_overlay_resolution() {
     let _gates = gates();
     let (mut candidate, mut oracle, _) = compact_dispatch_fixture(false);
