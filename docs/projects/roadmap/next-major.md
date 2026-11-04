@@ -360,9 +360,13 @@ accepted and integrated, with no production caller. This decoded
   preparation foundation (bounded chunking, validation and deterministic
   dictionary extraction, checked against those goldens) are independently
   accepted and integrated but unwired; the typed prepare/commit core is not
-  started, and the 1 MiB decoded-output and 8 KiB attribute ceilings still need
-  defined byte accounting. External extraction, purge mechanics and exact
-  serving remain gated. Neither design is active.
+  started. Its byte-level canonical schema
+  ([appendix](gap7-canonical-schema-v1.md)) is ratified provisionally with an
+  independent Python reference (214 vectors, 80 hand mutants) running in CI;
+  its persisted bytes freeze at the release go/no-go. The 1 MiB decoded-output
+  and 8 KiB attribute ceilings still need defined byte accounting. External
+  extraction, purge mechanics and exact serving remain gated. Neither design
+  is active.
 
 ## Rules for every item
 
