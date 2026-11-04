@@ -61,6 +61,62 @@ Expiry is checked at read/search time and does not create a separate feed event.
 `{"metadata":{...}}` and leave vector/payload bytes unchanged. An optional
 `If-Match` is checked under the database owner lock.
 
+## Key-value entries
+
+Ordinary KV uses an **existing one-dimension collection**; these routes never
+create a collection. Use dedicated collections: ordinary vector, graph and
+import operations can overwrite KV records. A namespace partitions application
+keys, not permissions.
+
+| Route | Scope | Result (HTTP 200) |
+|---|---|---|
+| `GET /v1/collections/{collection}/kv/entry?namespace=n&key=k` | `read` | `key`, `value_base64`, `version`, `expires_at_ms` |
+| `PUT /v1/collections/{collection}/kv/entry` | `write` | `version`, `expires_at_ms` |
+| `DELETE /v1/collections/{collection}/kv/entry?namespace=n&key=k` | `write` | `deleted` |
+| `GET /v1/collections/{collection}/kv/entries?namespace=n` | `read` | `items`, `next_after` |
+
+A put body is `{"namespace":"n","key":"k","value_base64":"YQ=="}`.
+Optional `expected` is `"any"` (default), `"absent"`, or
+`{"revision":"42"}`; it is checked atomically with the write. DELETE takes
+`expected=any|absent|<revision>` in the query. A revision mismatch returns
+412 `precondition_failed`, including a missing/due key. An unconditional or
+absence-conditional delete of a missing key succeeds with `deleted:false`.
+
+Versions and deadlines are canonical uint64 **decimal strings**, without signs
+or leading zeroes except `"0"` (maximum `"18446744073709551615"`). Expected
+revision `"0"` is valid but cannot match a live entry. Optional
+`expires_at_ms` is an absolute Unix-millisecond string or null; omitted/null
+clears expiry. Already-due puts succeed, then read absent. Expiry needs v5.
+Namespaces are 1..255 UTF-8 bytes and keys 1..1,024; strings are not normalized.
+Values are canonical padded standard base64, at most **1,047,290 decoded bytes**
+(1,396,388 encoded characters); an empty value is valid. Unknown/duplicate JSON
+fields and wrong types are rejected with `invalid_json`; parsed bound or
+canonical-encoding violations return 422 `invalid_input`. Unknown/duplicate
+query parameters return 400 `invalid_query`. The existing 8 MiB body cap applies.
+
+List `prefix` defaults to empty (at most 1,024 UTF-8 bytes), `after` is omitted
+or a nonempty key, and `limit` is 1..10,000 (default 100). Keys sort by unsigned
+UTF-8 bytes; `after` is exclusive. A page is the largest prefix fitting both
+`limit` and **16,777,216 bytes of compact canonical JSON**, including the
+`{"items":[...],"next_after":...}` envelope. `next_after` is the last returned
+key only when another live matching entry exists at that page's clock;
+otherwise it is null, including empty pages. One owner guard and expiry clock
+cover a page; no snapshot spans pages.
+
+Missing/due reads return 404 `kv_not_found`; a collection with other dimensions
+returns 409 `not_kv_collection`. Sixteen occupied collision-probe slots return
+409 `kv_slots_exhausted`; expiry before v5 returns 409 `upgrade_required`.
+Operation scope, tenant and immutable collection bindings apply before lookup.
+Ordinary record quotas also count KV entries. Mutations are audited without
+keys, namespaces or values. Read-only handles refuse mutations.
+
+Ordinary KV follows configured durability: `full` syncs before acknowledgment,
+`periodic` can lose up to a flush interval on OS crash/power loss, and `none` is
+memory-only. There is no per-call forced sync, automatic retry or lease
+guarantee; disconnects and `commit_indeterminate` do not prove a write failed.
+gRPC, MCP, CLI, client helpers and lease operations are not part of this REST
+surface.
+
 ## Collection retrieval
 
 * `POST /v1/collections/{collection}/search/grouped` takes `vector`, `field`,

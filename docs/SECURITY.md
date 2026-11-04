@@ -132,6 +132,22 @@ whose valid subset would fit. Already-expired records still occupying engine
 storage can consume quota until physically removed. Streaming quotas apply to
 each committed chunk; a request rate is charged once per RPC, not per message.
 
+## Key-value permissions
+
+Collection KV GET/HEAD and list need the collection's `read` scope; PUT and
+DELETE need `write`. Read-only credentials cannot mutate. Tenant-local names
+and immutable lineage/collection bindings are checked before collection lookup;
+a binding for a dropped collection does not authorize its replacement.
+KV never implicitly creates a collection and shares ordinary record quotas.
+Mutation audit entries contain operation, principal, collection, request ID and
+outcome, never namespace, key or value.
+
+A namespace is an application partition **inside** an authorized collection,
+not an authorization boundary. Put sensitive KV data in dedicated collections
+and bind credentials narrowly: vector, graph-attachment and import permissions
+can also expose, overwrite, delete or expire ordinary KV records. CAS revisions
+are not a durable lease-fencing service. See [REST KV](API.md#key-value-entries).
+
 ## Tenants
 
 Tenant routes need a super admin and `VLITE_ADMIN_DIR`:

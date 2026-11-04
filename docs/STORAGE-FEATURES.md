@@ -254,7 +254,7 @@ C ABI, Python and Node: `durability` and `flush_interval_ms` plus `sync`. See
 
 ## Key-value store
 
-`Database::kv_store(collection)` (Rust only, v4+) stores namespaced string keys
+`Database::kv_store(collection)` (Rust, v4+) stores namespaced string keys
 with byte values, no vector needed. It uses an ordinary one-dimension
 collection, created on first use, so the file format is unchanged.
 
@@ -280,7 +280,13 @@ kv.delete("pool", "claim/42", Expected::Revision(token))?;
 - **Hash collisions:** keys hash to 16 consecutive record IDs. If all 16 hold
   other keys, `KvSlotsExhausted` is returned. Other records in the collection
   are never overwritten.
-- REST, gRPC and bindings come after the OpenAPI review.
+- REST provides ordinary get, put/CAS, delete and prefix listing on existing
+  one-dimension collections; see [REST KV](API.md#key-value-entries) for wire
+  bounds and pagination. Unlike the Rust handle, REST never creates a collection.
+  gRPC, MCP, CLI, client helpers and leases are not yet exposed.
+- Ordinary KV follows configured durability: `full` syncs, `periodic` can lose
+  a flush interval on OS crash/power loss, and `none` is memory-only. Entry
+  revisions do not establish durable, never-reused lease fencing domains.
 
 ## Directory store
 
