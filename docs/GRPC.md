@@ -190,6 +190,9 @@ put/delete require collection `write`. Validation, CAS, tenant bindings,
 quotas, audit, durability and pagination match [the REST KV rules](API.md#key-value-entries).
 The list page boundary is measured using the canonical REST JSON encoding,
 including base64 values, not the smaller protobuf encoding.
+A client needs a receive limit of at least 16 MiB + 1 KiB for `ListKvEntries`
+(the canonical JSON page cap is 16,777,216 bytes; the protobuf page is not larger)
+and a send limit above 1 MiB.
 
 ## Streaming export and import
 

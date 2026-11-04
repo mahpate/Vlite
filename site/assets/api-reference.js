@@ -8,7 +8,7 @@
     rust: ["Rust", "Native types, methods and functions in the vlite crate.", "docs/REFERENCE.html"],
     c: ["C ABI", "Native functions and UTF-8 JSON requests through vlite_execute.", "docs/REFERENCE.html"],
     py: ["Python", "Embedded synchronous methods. IDs and revisions are decimal strings.", "docs/REFERENCE.html"],
-    grpc: ["gRPC", "Methods on vlite.v1.VLite. Graph operations remain REST-only.", "docs/GRPC.html"],
+    grpc: ["gRPC", "Methods on vlite.v1.VLite and vlite.v1.Kv. Graph operations remain REST-only.", "docs/GRPC.html"],
     mcp: ["MCP", "Agent tools over stdio. Mutations require the --writable option.", "docs/MCP.html"],
     wasm: ["WebAssembly", "In-memory databases. Persist byte images explicitly.", "docs/REFERENCE.html"],
   };
