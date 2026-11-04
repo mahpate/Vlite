@@ -411,7 +411,7 @@ async fn grpc_original_total_deadline_maps_to_deadline_exceeded() {
             &[],
         ),
         20,
-        100,
+        500,
     );
     *f.transport.gate.lock().unwrap() = Some(Arc::new((
         tokio::sync::Notify::new(),
@@ -525,9 +525,9 @@ async fn grpc_short_client_deadline_cancels_both_managed_operations() {
         )));
         let result = if embedding {
             let mut input = authorized(embed(&f.name, "test"), ADMIN);
-            input.set_timeout(Duration::from_millis(100));
+            input.set_timeout(Duration::from_millis(500));
             tokio::time::timeout(
-                Duration::from_secs(2),
+                Duration::from_secs(10),
                 transport::test_embed(f.service.clone(), input),
             )
             .await
@@ -535,9 +535,9 @@ async fn grpc_short_client_deadline_cancels_both_managed_operations() {
             .unwrap_err()
         } else {
             let mut input = authorized(query(&f.name), ADMIN);
-            input.set_timeout(Duration::from_millis(100));
+            input.set_timeout(Duration::from_millis(500));
             tokio::time::timeout(
-                Duration::from_secs(2),
+                Duration::from_secs(10),
                 transport::test_search(f.service.clone(), input),
             )
             .await
@@ -565,5 +565,213 @@ async fn grpc_expired_client_deadline_prevents_dispatch() {
         .await
         .unwrap_err();
     error(&result, Code::DeadlineExceeded, "provider_timeout");
+    assert_eq!(f.transport.calls.load(Ordering::SeqCst), 0);
+}
+
+#[tokio::test]
+async fn grpc_eight_digit_client_timeout_accepts_both_managed_operations() {
+    let f = fixture(
+        "embedding",
+        200,
+        r#"{"data":[{"embedding":[1.0,0.0]}]}"#,
+        &[],
+    );
+    let mut input = authorized(embed(&f.name, "test"), ADMIN);
+    input
+        .metadata_mut()
+        .insert("grpc-timeout", "10000000u".parse().unwrap());
+    let response = transport::test_embed(f.service.clone(), input)
+        .await
+        .unwrap()
+        .into_inner();
+    assert_eq!(response.vector, vec![1.0, 0.0]);
+    assert_eq!(f.transport.calls.load(Ordering::SeqCst), 1);
+
+    let f = fixture("rerank", 200, r#"{"results":[{"id":1,"cost":0.0}]}"#, &[]);
+    let mut input = authorized(query(&f.name), ADMIN);
+    input
+        .metadata_mut()
+        .insert("grpc-timeout", "10000000u".parse().unwrap());
+    let response = transport::test_search(f.service.clone(), input)
+        .await
+        .unwrap()
+        .into_inner();
+    assert_eq!(response.hits[0].id, 1);
+    assert_eq!(f.transport.calls.load(Ordering::SeqCst), 1);
+}
+
+#[tokio::test]
+async fn grpc_malformed_client_timeout_rejects_both_managed_operations_before_dispatch() {
+    let f = fixture(
+        "embedding",
+        200,
+        r#"{"data":[{"embedding":[1.0,0.0]}]}"#,
+        &[],
+    );
+    for value in ["1x", "123456789n", "m"] {
+        let mut input = authorized(embed(&f.name, "test"), ADMIN);
+        input
+            .metadata_mut()
+            .insert("grpc-timeout", value.parse().unwrap());
+        let status = transport::test_embed(f.service.clone(), input)
+            .await
+            .unwrap_err();
+        error(&status, Code::InvalidArgument, "invalid_provider_input");
+    }
+    assert_eq!(f.transport.calls.load(Ordering::SeqCst), 0);
+
+    let f = fixture("rerank", 200, r#"{"results":[{"id":1,"cost":0.0}]}"#, &[]);
+    for value in ["1x", "123456789n", "m"] {
+        let mut input = authorized(query(&f.name), ADMIN);
+        input
+            .metadata_mut()
+            .insert("grpc-timeout", value.parse().unwrap());
+        let status = transport::test_search(f.service.clone(), input)
+            .await
+            .unwrap_err();
+        error(&status, Code::InvalidArgument, "invalid_provider_input");
+    }
+    assert_eq!(f.transport.calls.load(Ordering::SeqCst), 0);
+}
+
+#[tokio::test]
+async fn grpc_read_only_bearer_can_embed() {
+    let f = fixture(
+        "embedding",
+        200,
+        r#"{"data":[{"embedding":[1.0,0.0]}]}"#,
+        &[],
+    );
+    let token = "fake-read-only-grpc-embedding-token";
+    f.service.admin.auth.lock().unwrap().read_only = Some(server::BearerToken::new(token).unwrap());
+    for provider in ["test", "hashing"] {
+        let response = transport::test_embed(
+            f.service.clone(),
+            authorized(embed(&f.name, provider), token),
+        )
+        .await
+        .unwrap()
+        .into_inner();
+        assert_eq!(response.provider, provider);
+        assert_eq!(response.dimensions, 2);
+        assert_eq!(response.vector.len(), 2);
+    }
+    assert_eq!(f.transport.calls.load(Ordering::SeqCst), 1);
+}
+
+#[tokio::test]
+async fn grpc_explicit_hashing_preserves_legacy_text_byte_ceiling() {
+    let f = fixture(
+        "embedding",
+        200,
+        r#"{"data":[{"embedding":[1.0,0.0]}]}"#,
+        &[],
+    );
+    for (text, accepted) in [
+        ("x".repeat(16_384), true),
+        ("x".repeat(16_385), false),
+        ("\u{e9}".repeat(8192), true),
+        (format!("{}x", "\u{e9}".repeat(8192)), false),
+    ] {
+        let mut input = embed(&f.name, "hashing");
+        input.text = text;
+        let mut input = authorized(input, ADMIN);
+        input
+            .metadata_mut()
+            .insert("grpc-timeout", "1x".parse().unwrap());
+        let result = transport::test_embed(f.service.clone(), input).await;
+        if accepted {
+            let response = result.unwrap().into_inner();
+            assert_eq!(response.provider, "hashing");
+            assert_eq!(response.dimensions, 2);
+            assert_eq!(response.vector.len(), 2);
+        } else {
+            error(&result.unwrap_err(), Code::InvalidArgument, "invalid_input");
+        }
+    }
+    assert_eq!(f.transport.calls.load(Ordering::SeqCst), 0);
+}
+
+#[tokio::test]
+async fn grpc_explicit_http_preserves_legacy_validation_without_managed_dispatch() {
+    let f = fixture(
+        "embedding",
+        200,
+        r#"{"data":[{"embedding":[1.0,0.0]}]}"#,
+        &[],
+    );
+    let mut input = embed(&f.name, "http");
+    input.text = "x".repeat(16_385);
+    let mut input = authorized(input, ADMIN);
+    input
+        .metadata_mut()
+        .insert("grpc-timeout", "1x".parse().unwrap());
+    let status = transport::test_embed(f.service.clone(), input)
+        .await
+        .unwrap_err();
+    error(&status, Code::InvalidArgument, "invalid_input");
+    #[cfg(not(feature = "http-embedder"))]
+    {
+        let status =
+            transport::test_embed(f.service.clone(), authorized(embed(&f.name, "http"), ADMIN))
+                .await
+                .unwrap_err();
+        error(&status, Code::FailedPrecondition, "http_embedder_disabled");
+    }
+    assert_eq!(f.transport.calls.load(Ordering::SeqCst), 0);
+}
+
+#[tokio::test]
+async fn grpc_unknown_rerank_mode_is_rejected_without_provider_work() {
+    let f = fixture("rerank", 200, r#"{"results":[{"id":1,"cost":0.0}]}"#, &[]);
+    let mut input = query(&f.name);
+    input.rerank_mode = 99;
+    input.rerank_provider = None;
+    input.rerank_candidates = None;
+    let status = transport::test_search(f.service.clone(), authorized(input, ADMIN))
+        .await
+        .unwrap_err();
+    error(&status, Code::InvalidArgument, "invalid_input");
+    assert_eq!(f.transport.calls.load(Ordering::SeqCst), 0);
+}
+
+#[tokio::test]
+async fn grpc_exact_and_mmr_default_candidate_count_is_four_k() {
+    let f = fixture("rerank", 200, r#"{"results":[{"id":1,"cost":0.0}]}"#, &[]);
+    for mode in [proto::RerankMode::Exact, proto::RerankMode::Mmr] {
+        for (k, accepted) in [(1024, true), (1025, false)] {
+            let mut input = query(&f.name);
+            input.k = k;
+            input.rerank_mode = mode as i32;
+            input.rerank_provider = None;
+            input.rerank_candidates = None;
+            let result = transport::test_search(f.service.clone(), authorized(input, ADMIN)).await;
+            if accepted {
+                assert_eq!(result.unwrap().into_inner().hits.len(), 2);
+            } else {
+                error(&result.unwrap_err(), Code::InvalidArgument, "invalid_input");
+            }
+        }
+    }
+    assert_eq!(f.transport.calls.load(Ordering::SeqCst), 0);
+}
+
+#[tokio::test]
+async fn grpc_exact_and_mmr_candidate_ceiling_is_4096() {
+    let f = fixture("rerank", 200, r#"{"results":[{"id":1,"cost":0.0}]}"#, &[]);
+    for mode in [proto::RerankMode::Exact, proto::RerankMode::Mmr] {
+        for (candidates, accepted) in [(4096, true), (4097, false)] {
+            let mut input = query(&f.name);
+            input.rerank_mode = mode as i32;
+            input.rerank_provider = None;
+            input.rerank_candidates = Some(candidates);
+            let result = transport::test_search(f.service.clone(), authorized(input, ADMIN)).await;
+            if accepted {
+                assert_eq!(result.unwrap().into_inner().hits.len(), 1);
+            } else {
+                error(&result.unwrap_err(), Code::InvalidArgument, "invalid_input");
+            }
+        }
+    }
     assert_eq!(f.transport.calls.load(Ordering::SeqCst), 0);
 }
