@@ -362,7 +362,7 @@ accepted and integrated, with no production caller. This decoded
   accepted and integrated but unwired; the typed prepare/commit core is not
   started. Its byte-level canonical schema
   ([appendix](gap7-canonical-schema-v1.md)) is ratified provisionally with an
-  independent Python reference (217 vectors, 82 hand mutants) running in CI;
+  independent Python reference (223 vectors, 84 hand mutants) running in CI;
   its persisted bytes freeze at the release go/no-go. The 1 MiB decoded-output
   and 8 KiB attribute ceilings still need defined byte accounting. External
   extraction, purge mechanics and exact serving remain gated. Neither design

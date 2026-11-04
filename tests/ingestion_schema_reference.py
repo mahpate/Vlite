@@ -443,6 +443,10 @@ def validate_operation(value):
         need(op["expected"]["tag"] in (1, 2), "head_patch_expected")
 
 
+def validate_stored_confidence(value):
+    need(value is None or 0.0 <= value <= 1.0, "confidence")
+
+
 def validate_record(name, value):
     if name == "pipeline":
         need(value["normalization"] == "ascii-key-v1", "normalization")
@@ -456,6 +460,7 @@ def validate_record(name, value):
             need(ids == sorted(ids) and len(ids) == len(set(ids)), "rule_order")
     elif name in ("mention_data", "relation_data"):
         need(extractor_label(value["extractor_version"]), "extractor_version")
+        validate_stored_confidence(value["confidence"])
     elif name == "entity_rule":
         need(is_identifier(value["kind"]), "entity_kind")
         need(value["key"] and ascii_key(value["key"]) == value["key"], "normalized_key")
@@ -1926,6 +1931,12 @@ def self_test(document):
         return mutated
 
     targeted = [
+        ("stored-confidence-lower-bound", "mention-confidence-negative",
+         "validate_stored_confidence", lambda old: lambda value:
+         need(value is None or value <= 1.0, "confidence")),
+        ("stored-confidence-upper-bound", "relation-confidence-above-1",
+         "validate_stored_confidence", lambda old: lambda value:
+         need(value is None or value >= 0.0, "confidence")),
         ("empty-attribute-key-accepted", "attribute-key-empty", "need",
          omit_check("attribute_key")),
         ("overlong-attribute-key-accepted", "attribute-key-too-long", "need",

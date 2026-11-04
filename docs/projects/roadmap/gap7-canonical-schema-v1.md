@@ -1,8 +1,9 @@
 # Gap 7 canonical schema v1
 
 Status: **RATIFIED PROVISIONALLY by the coordinator on 2026-11-04** after independent
-review (217 vectors and 82 hand mutants pass in both Python modes; the attribute-key rule
-was added on 2026-11-04 as an additive ruling). Every persisted byte
+review (223 vectors: 113 positive / 110 negative, and 84 hand mutants pass in both
+Python modes; attribute-key and stored-confidence rules were added on 2026-11-04
+as additive rulings). Every persisted byte
 below freezes at the release go/no-go; until then a change needs a new coordinator ruling.
 This appendix specifies bytes,
 not an implementation acceptance, public API, wire, activation or release decision.
@@ -178,6 +179,13 @@ Absent expiry/TTL is mandatory, including on vector records.
 | receipt_data | D(request_digest), DigestSlot(plan), U32(batch_count), S(revision_key), U8(outcome), U32(chunks), U32(entities), U32(relations), U32(mentions) |
 | batch_data | DigestSlot(batch), Bool(final), U32(created_anchors), U32(reused_anchors), U32(result_shards), U32(ownership_shards) |
 | vector_data | S(tenant), S(source_key), S(revision_key), S(chunk_key), B(exact text), List(F32 vector bits) |
+
+Stored `mention_data` and `relation_data` confidence, when present, must be in
+the inclusive range [0.0, 1.0]; violations reject with class `confidence`.
+This is additive ruling `G7-slice2-strictness-provisional`, mirroring
+`prepare::validate_confidence` (`src/ingestion/prepare/mod.rs:433-439`).
+Canonical float decoding already rejects nonfinite values and negative zero;
+the existing encoder canonicalizes negative zero to positive zero.
 
 Head status tags: 0 Partial, 1 Complete, 2 Deleted, 3 Aborted. These describe the
 **head's** current job, not stored receipt states. Superseded/receipt state and
