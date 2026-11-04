@@ -423,4 +423,28 @@ snapshot-conflict REST mapping: ratified 2026-11-03
 A 409 `provider_snapshot_conflict` response is sanitized, contains no candidate,
 tenant, or provider data, and has no `Retry-After`; callers retry the whole
 request. Step 2b gRPC remains untouched. Startup flag names still await
-ratification; this is an unreleased candidate pending independent acceptance.
+ratification. The candidate is independently accepted (2026-11-03) and
+integrated, but unreleased.
+
+Parity allowlist (approved 2026-11-03): this candidate's exact OpenAPI changes
+are recorded by extending the reviewed `APPROVED_OPENAPI_EDITS` and
+`APPROVED_OPENAPI_ADDITIONS` in `tests/graph_surface_parity.rs`. The `347b01d`
+baseline capture stays pinned, so any unreviewed drift still fails REG-008.
+
+Recheck invariants: the independent survivor run killed 13 mutants and found
+five equivalent, each only under today's call-site invariants:
+
+- G8A1-03, inverted legacy/named search path in `fresh_role`: `Target::name()`
+  cannot fail (it is `default` on the legacy routes), and role resolution does
+  not depend on which of the two search paths is used.
+- G8A1-06, `recheck` ignoring a tenant change: the tenant derives from the
+  immutable collection name, and collection ids are never reused.
+- G8A1-07, ignoring a dimension change: a collection's dimensions are fixed at
+  creation.
+- G8A1-08, ignoring a binding-generation change: the provider registry is
+  immutable after startup.
+- G8A4-04, dropping the deadline check after an embed call: `recheck()` also ends
+  with `elapsed >= timeout`, so a late response still times out.
+
+A future collection rename, dimension change, id reuse, registry reload, step 2b,
+path-sensitive authorization or injectable clock must add killing tests first.

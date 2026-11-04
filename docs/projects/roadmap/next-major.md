@@ -162,8 +162,11 @@ Local numbers below show direction only (see rules).
   resident/compact record dispatch with fail-closed refusals) and slice 1b
   (private installation of a verified compact generation, refusing partial
   collection coverage, with real-open method-matrix coverage) are
-  independently accepted and integrated, but unreleased. Slices 2–5 and all
-  normal `Database` wiring remain.
+  independently accepted and integrated, but unreleased. Slice 2 (a
+  test-gated base-plus-overlay view that reconciles committed mutations over
+  the captured compact image, keeping tombstones, expiry, revisions and
+  snapshots) is accepted with notes and integrated on the same terms. Slices
+  3–5 and all normal `Database` wiring remain; slice 3 is next.
   The [P3c compact-ANN design](p3c-compact-ann.md) (source-bound flat
   topology, persisted scalar-u8 codes, background rebuild and a separately
   opted-in rotated one-bit candidate) is independently reviewed; its nine
@@ -270,7 +273,12 @@ accepted and integrated, with no production caller. This decoded
 - **Serving design:** [serving](serving-contract.md) has implementation
   boundaries and acceptance matrices, not shipped capabilities. Approximate
   search does not acquire an exact top-k guarantee. Its schemas were approved
-  2026-11-02 and are not yet implemented. The
+  2026-11-02. Gap 8 step 2a, a private REST candidate for opt-in managed
+  providers on the existing embed and search routes (with its OpenAPI parity
+  allowlist and typed Python client shapes), is independently accepted and
+  integrated, but unreleased and not active in production; gRPC step 2b is not
+  started and the startup flag names await ratification. The rest of the
+  contract is not yet implemented. The
   [binary search results](serving-binary-results-contract.md) contract
   specifies an opt-in HTTP protobuf representation with its negotiation,
   bounds and independent oracle plan; it is a reviewed specification, not an
@@ -325,7 +333,14 @@ accepted and integrated, with no production caller. This decoded
   (pinned acceptance boundaries; consistent second-MATCH and reserved-function
   diagnostics), are independently accepted and integrated, but remain
   unreleased and inactive, with no executor, binding or public surface.
-  Exact public APIs, new errors and serving remain separately gated. The
+  The four owner-approved diagnostic rulings of 2026-11-03 (lexical,
+  unsupported-kind, inward edge create and parameter errors) are applied by a
+  crate-private parser fix, and an independent Python reference with a Rust
+  differential runs in CI as a self-test; all are independently accepted and
+  integrated, still unreleased and inactive. Two readings (the zero-minimum
+  hop and the literal reading of rows f and i) stay provisional until the
+  owner ratifies them. Exact public APIs, new errors and serving remain
+  separately gated. The
   [GraphRAG ingestion](gap7-graphrag-ingestion.md) design is source-reviewed
   with thirteen embedded-design choices approved individually on 2026-11-02:
   atomic default, explicit incremental progress, deterministic local extraction
