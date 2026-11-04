@@ -567,6 +567,9 @@ async fn tenant_qualified_reservations_follow_scoped_credentials_and_raw_access(
             },
         )
         .unwrap();
+        db.create_graph(&format!("t{TENANT}__notes_graph")).unwrap();
+        db.create_graph(&format!("t{TENANT}__ordinary_graph"))
+            .unwrap();
         let lineage = db.lineage().unwrap();
         let credentials = serde_json::json!({
             "schema": 1,
@@ -575,6 +578,7 @@ async fn tenant_qualified_reservations_follow_scoped_credentials_and_raw_access(
                 "name": "fake tenant credential",
                 "all": true,
                 "collections": [],
+                "graphs": ["*"],
                 "operations": operations,
                 "lineage": format!("{lineage:016x}"),
                 "secret_sha256": format!("{:x}", Sha256::digest(secret.as_bytes())),
@@ -624,7 +628,11 @@ async fn tenant_qualified_reservations_follow_scoped_credentials_and_raw_access(
     };
 
     let no_raw_directory = tempfile::tempdir().unwrap();
-    let (no_raw, token) = build(&no_raw_directory, false, &["read", "write", "collections"]);
+    let (no_raw, token) = build(
+        &no_raw_directory,
+        false,
+        &["read", "write", "collections", "graph_read", "graph_write"],
+    );
     let (status, error) = call_token(
         &no_raw,
         "GET",
@@ -635,6 +643,40 @@ async fn tenant_qualified_reservations_follow_scoped_credentials_and_raw_access(
     .await;
     assert_eq!(status, 403);
     assert_eq!(error["error"]["code"], "forbidden_scope");
+    let (status, error) = call_token(
+        &no_raw,
+        "GET",
+        "/v1/graphs/notes_graph",
+        Body::empty(),
+        &token,
+    )
+    .await;
+    assert_eq!(status, 403);
+    assert_eq!(error["error"]["code"], "forbidden_scope");
+    assert_eq!(
+        call_token(
+            &no_raw,
+            "GET",
+            "/v1/graphs/ordinary_graph",
+            Body::empty(),
+            &token,
+        )
+        .await
+        .0,
+        200
+    );
+    assert_eq!(
+        call_token(
+            &no_raw,
+            "DELETE",
+            "/v1/graphs/notes_graph",
+            Body::empty(),
+            &token,
+        )
+        .await
+        .0,
+        403
+    );
     assert_eq!(
         call_token(
             &no_raw,
@@ -686,7 +728,7 @@ async fn tenant_qualified_reservations_follow_scoped_credentials_and_raw_access(
     );
 
     let raw_read_directory = tempfile::tempdir().unwrap();
-    let (raw_read, token) = build(&raw_read_directory, true, &["read"]);
+    let (raw_read, token) = build(&raw_read_directory, true, &["read", "graph_read"]);
     assert_eq!(
         call_token(
             &raw_read,
@@ -702,6 +744,30 @@ async fn tenant_qualified_reservations_follow_scoped_credentials_and_raw_access(
     assert_eq!(
         call_token(
             &raw_read,
+            "GET",
+            "/v1/graphs/notes_graph",
+            Body::empty(),
+            &token,
+        )
+        .await
+        .0,
+        200
+    );
+    assert_eq!(
+        call_token(
+            &raw_read,
+            "DELETE",
+            "/v1/graphs/notes_graph",
+            Body::empty(),
+            &token,
+        )
+        .await
+        .0,
+        403
+    );
+    assert_eq!(
+        call_token(
+            &raw_read,
             "PUT",
             "/v1/collections/notes_ev/vectors/7",
             Body::from(r#"{"vector":[0.1,0.2],"payload_base64":"","metadata":{}}"#),
@@ -713,7 +779,11 @@ async fn tenant_qualified_reservations_follow_scoped_credentials_and_raw_access(
     );
 
     let raw_write_directory = tempfile::tempdir().unwrap();
-    let (raw_write, token) = build(&raw_write_directory, true, &["read", "write"]);
+    let (raw_write, token) = build(
+        &raw_write_directory,
+        true,
+        &["read", "write", "graph_read", "graph_write"],
+    );
     assert_eq!(
         call_token(
             &raw_write,
@@ -725,6 +795,18 @@ async fn tenant_qualified_reservations_follow_scoped_credentials_and_raw_access(
         .await
         .0,
         204
+    );
+    assert_eq!(
+        call_token(
+            &raw_write,
+            "DELETE",
+            "/v1/graphs/notes_graph",
+            Body::empty(),
+            &token,
+        )
+        .await
+        .0,
+        200
     );
 }
 
