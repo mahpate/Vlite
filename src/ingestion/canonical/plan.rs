@@ -192,7 +192,7 @@ pub(super) fn validate(name: &str, v: &Value) -> Result<()> {
                 ("attribute_fields", 16),
                 ("attribute_string_bytes", 4096),
                 ("frames", 64),
-                ("operations", 4096),
+                ("operations", 131072),
                 ("prepared_bytes", 67108864),
             ] {
                 if unsigned(field(v, key)?, ceiling).is_err() {
@@ -201,15 +201,13 @@ pub(super) fn validate(name: &str, v: &Value) -> Result<()> {
             }
         }
         "entity_rule" | "relation_rule" => {
-            bounded_text(field(v, "rule_id")?, 1, 256, "rule_id")?;
+            bounded_text(field(v, "rule_id")?, 1, super::MAX_BYTES, "rule_id")?;
             if name == "entity_rule" {
-                bounded_text(field(v, "literal")?, 1, 1048576, "entity_rule")?;
+                bounded_text(field(v, "literal")?, 1, super::MAX_BYTES, "entity_rule")?;
                 if !identifier(field(v, "kind")?) {
                     return Err("entity_rule_identifier");
                 }
-                if !normalized(field(v, "key")?) {
-                    return Err("normalized_key");
-                }
+                bounded_text(field(v, "key")?, 1, super::MAX_BYTES, "entity_rule")?;
             } else {
                 for key in ["predicate", "subject_kind", "object_kind"] {
                     if !identifier(field(v, key)?) {

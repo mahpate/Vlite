@@ -428,8 +428,376 @@ fn plan_value(input: &Json, templates: &Json) -> Value {
     v
 }
 
+fn full_policy() -> Value {
+    map(&[
+        ("source_bytes", Value::Unsigned(1048576)),
+        ("chunks", Value::Unsigned(512)),
+        ("entities", Value::Unsigned(4096)),
+        ("relations", Value::Unsigned(8192)),
+        ("mentions", Value::Unsigned(16384)),
+        ("chunk_entities", Value::Unsigned(256)),
+        ("chunk_relations", Value::Unsigned(512)),
+        ("decoded_bytes", Value::Unsigned(1048576)),
+        ("attribute_bytes", Value::Unsigned(8192)),
+        ("attribute_fields", Value::Unsigned(16)),
+        ("attribute_string_bytes", Value::Unsigned(4096)),
+        ("frames", Value::Unsigned(64)),
+        ("operations", Value::Unsigned(4096)),
+        ("prepared_bytes", Value::Unsigned(67108864)),
+    ])
+}
+
+#[test]
+fn ingestion_plan_budget_before_materialization() {
+    let mut policy = full_policy();
+    set(&mut policy, "prepared_bytes", Value::Unsigned(257));
+    assert_eq!(
+        canonical::decode_with_policy(&Type::Bool, &[1], &policy).unwrap(),
+        Value::Bool(true)
+    );
+    set(&mut policy, "prepared_bytes", Value::Unsigned(256));
+    assert_eq!(
+        canonical::decode_with_policy(&Type::Bool, &[1], &policy),
+        Err("prepared_bytes")
+    );
+    // Invalid Bool would yield "boolean" if any Value were materialized before the full budget scan.
+    set(&mut policy, "prepared_bytes", Value::Unsigned(256));
+    assert_eq!(
+        canonical::decode_with_policy(&Type::Bool, &[2], &policy),
+        Err("prepared_bytes")
+    );
+    let mut large = 300000u32.to_le_bytes().to_vec();
+    large.extend_from_slice(&vec![2; 300000]);
+    assert_eq!(
+        canonical::decode(&Type::List(Box::new(Type::Bool)), &large),
+        Err("prepared_bytes")
+    );
+    let mut policy = full_policy();
+    set(&mut policy, "prepared_bytes", Value::Unsigned(67108865));
+    assert_eq!(
+        canonical::decode_with_policy(&Type::Bool, &[1], &policy),
+        Err("policy")
+    );
+    let chunk = identity(
+        "chunk",
+        match template("chunk") {
+            Value::Map(mut m) => m.remove("fields").unwrap(),
+            _ => unreachable!(),
+        },
+    );
+    let observation = map(&[
+        ("local_id", Value::Unsigned(0)),
+        ("kind", Value::Text("K".into())),
+        ("key", Value::Text("a".into())),
+        ("surface", Value::Text("a".into())),
+        ("start", Value::Unsigned(0)),
+        ("end", Value::Unsigned(1)),
+        ("attributes", map(&[])),
+        ("confidence", Value::Null),
+    ]);
+    let accepted = map(&[
+        ("chunk", chunk),
+        ("text", Value::Bytes(b"a".to_vec())),
+        ("entities", Value::List(vec![observation])),
+        ("relations", Value::List(vec![])),
+        ("vector", Value::List(vec![])),
+    ]);
+    let bytes = canonical::encode(&Type::Record("accepted_chunk"), &accepted).unwrap();
+    let mut policy = full_policy();
+    set(&mut policy, "decoded_bytes", Value::Unsigned(46));
+    assert!(
+        canonical::decode_with_policy(&Type::Record("accepted_chunk"), &bytes, &policy).is_ok()
+    );
+    set(&mut policy, "decoded_bytes", Value::Unsigned(45));
+    assert_eq!(
+        canonical::decode_with_policy(&Type::Record("accepted_chunk"), &bytes, &policy),
+        Err("decoded_bytes")
+    );
+    set(&mut policy, "decoded_bytes", Value::Unsigned(46));
+    set(&mut policy, "chunk_entities", Value::Unsigned(0));
+    assert_eq!(
+        canonical::decode_with_policy(&Type::Record("accepted_chunk"), &bytes, &policy),
+        Err("policy_limit")
+    );
+    let mut policy = full_policy();
+    set(&mut policy, "frames", Value::Unsigned(0));
+    let f = fixture();
+    let plan = plan_value(&f["templates"]["plan_with_slots"], &f["templates"]);
+    let bytes = canonical::encode(&Type::Record("plan"), &plan).unwrap();
+    assert_eq!(
+        canonical::decode_with_policy(&Type::Record("plan"), &bytes, &policy),
+        Err("policy_limit")
+    );
+    let mut policy = full_policy();
+    set(&mut policy, "operations", Value::Unsigned(1));
+    assert_eq!(
+        canonical::decode_with_policy(&Type::Record("plan"), &bytes, &policy),
+        Err("policy_limit")
+    );
+}
+
+fn filled_plan() -> Value {
+    let f = fixture();
+    let mut plan = plan_value(&f["templates"]["plan_with_slots"], &f["templates"]);
+    let plan_hash = canonical::hex(&canonical::plan::digest("plan", &plan).unwrap());
+    fn fill(value: &mut Value, plan_hash: &str) {
+        match value {
+            Value::Map(map) => {
+                if let Some(Value::Map(slot)) = map.get_mut("plan_digest") {
+                    slot.insert("value".into(), Value::Text(plan_hash.into()));
+                }
+                for v in map.values_mut() {
+                    fill(v, plan_hash);
+                }
+            }
+            Value::List(items) => {
+                for v in items {
+                    fill(v, plan_hash);
+                }
+            }
+            _ => {}
+        }
+    }
+    fill(&mut plan, &plan_hash);
+    plan
+}
+
+#[test]
+fn ingestion_plan_digests_and_typed_slots() {
+    let plan = filled_plan();
+    canonical::plan::validate_slots(&plan).unwrap();
+    let f = fixture();
+    let unfilled = plan_value(&f["templates"]["plan_with_slots"], &f["templates"]);
+    assert_eq!(
+        canonical::plan::digest("plan", &plan).unwrap(),
+        canonical::plan::digest("plan", &unfilled).unwrap()
+    );
+    assert_eq!(
+        canonical::plan::validate_slots(&unfilled),
+        Err("digest_slot")
+    );
+    let mut changed = plan.clone();
+    set(&mut changed, "request_digest", Value::Text("01".repeat(32)));
+    assert_ne!(
+        canonical::plan::digest("plan", &plan).unwrap(),
+        canonical::plan::digest("plan", &changed).unwrap()
+    );
+    assert_eq!(
+        canonical::plan::validate_slots(&changed),
+        Err("digest_slot")
+    );
+    for (name, input) in [
+        ("pipeline", template("pipeline")),
+        ("policy", full_policy()),
+        (
+            "request",
+            plan_value(&f["templates"]["request"], &f["templates"]),
+        ),
+    ] {
+        let bytes = canonical::encode(&Type::Record(name), &input).unwrap();
+        assert_eq!(
+            canonical::plan::digest(name, &input).unwrap(),
+            canonical::framed_hash(&format!("vlite.g7.v1.{name}"), &bytes).unwrap()
+        );
+    }
+    assert_eq!(
+        canonical::plan::frame_length(16777216, false).unwrap(),
+        16777268
+    );
+    assert_eq!(
+        canonical::plan::frame_length(16777216, true).unwrap(),
+        16777296
+    );
+    assert_eq!(
+        canonical::plan::frame_length(16777217, false),
+        Err("body_limit")
+    );
+    assert_eq!(
+        canonical::plan::frame_length(u64::MAX, true),
+        Err("body_limit")
+    );
+    let mut extended = filled_plan();
+    let batch_op = f["vectors"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|c| c["name"] == "op-create-batch")
+        .unwrap();
+    let batch_op = plan_value(&batch_op["input"], &f["templates"]);
+    let Value::Map(root) = &mut extended else {
+        panic!("plan")
+    };
+    let Value::List(batches) = root.get_mut("batches").unwrap() else {
+        panic!("batches")
+    };
+    let Value::Map(batch) = &mut batches[0] else {
+        panic!("batch")
+    };
+    let Value::List(groups) = batch.get_mut("groups").unwrap() else {
+        panic!("groups")
+    };
+    let Value::Map(group) = &mut groups[0] else {
+        panic!("group")
+    };
+    let Value::List(ops) = group.get_mut("operations").unwrap() else {
+        panic!("operations")
+    };
+    ops.insert(ops.len() - 1, batch_op);
+    fn fill(value: &mut Value, key: &str, digest: &str) {
+        match value {
+            Value::Map(map) => {
+                if let Some(Value::Map(slot)) = map.get_mut(key) {
+                    slot.insert("value".into(), Value::Text(digest.into()));
+                }
+                for item in map.values_mut() {
+                    fill(item, key, digest);
+                }
+            }
+            Value::List(items) => {
+                for item in items {
+                    fill(item, key, digest);
+                }
+            }
+            _ => {}
+        }
+    }
+    let original = canonical::plan::digest("plan", &extended).unwrap();
+    let Value::Map(root) = &extended else {
+        panic!("plan")
+    };
+    let Value::List(batches) = &root["batches"] else {
+        panic!("batches")
+    };
+    let batch_hash = canonical::plan::digest("batch", &batches[0]).unwrap();
+    fill(&mut extended, "batch_digest", &canonical::hex(&batch_hash));
+    fill(&mut extended, "plan_digest", &canonical::hex(&original));
+    canonical::plan::validate_slots(&extended).unwrap();
+    assert_eq!(
+        canonical::plan::digest("plan", &extended).unwrap(),
+        original
+    );
+    fill(&mut extended, "batch_digest", &"ff".repeat(32));
+    assert_eq!(
+        canonical::plan::validate_slots(&extended),
+        Err("digest_slot")
+    );
+    assert_eq!(
+        canonical::plan::digest("plan", &extended).unwrap(),
+        original
+    );
+}
+
 fn plan_selected(case: &Json) -> bool {
     !selected(case) && !stored_selected(case)
+}
+
+#[test]
+fn ingestion_plan_config_and_record_guards() {
+    let f = fixture();
+    let mut pipeline = template("pipeline");
+    set(&mut pipeline, "schema_version", Value::Unsigned(2));
+    assert_eq!(
+        canonical::encode(&Type::Record("pipeline"), &pipeline),
+        Err("pipeline_version")
+    );
+    let mut policy = full_policy();
+    for (key, cap) in [
+        ("source_bytes", 1048576),
+        ("chunks", 512),
+        ("entities", 4096),
+        ("relations", 8192),
+        ("mentions", 16384),
+        ("chunk_entities", 256),
+        ("chunk_relations", 512),
+        ("decoded_bytes", 1048576),
+        ("attribute_bytes", 8192),
+        ("attribute_fields", 16),
+        ("attribute_string_bytes", 4096),
+        ("frames", 64),
+        ("operations", 131072),
+        ("prepared_bytes", 67108864),
+    ] {
+        set(&mut policy, key, Value::Unsigned(cap));
+        assert!(
+            canonical::encode(&Type::Record("policy"), &policy).is_ok(),
+            "{key}"
+        );
+        set(&mut policy, key, Value::Unsigned(cap + 1));
+        assert_eq!(
+            canonical::encode(&Type::Record("policy"), &policy),
+            Err("policy"),
+            "{key}"
+        );
+        set(&mut policy, key, Value::Unsigned(1));
+    }
+    let row = f["vectors"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|c| c["name"] == "entity-observation")
+        .unwrap();
+    let observation = plan_value(&row["input"], &f["templates"]);
+    for (key, bad, error) in [
+        ("key", Value::Text("UPPER".into()), "normalized_key"),
+        ("end", Value::Unsigned(0), "evidence_span"),
+        ("kind", Value::Text("k-".into()), "entity_kind"),
+    ] {
+        let mut bad_row = observation.clone();
+        set(&mut bad_row, key, bad);
+        assert_eq!(
+            canonical::encode(&Type::Record("entity_observation"), &bad_row),
+            Err(error)
+        );
+    }
+    let mut plan = filled_plan();
+    let Value::Map(root) = &mut plan else {
+        panic!("plan")
+    };
+    let Value::List(batches) = root.get_mut("batches").unwrap() else {
+        panic!("batches")
+    };
+    set(&mut batches[0], "ordinal", Value::Unsigned(2));
+    assert_eq!(
+        canonical::encode(&Type::Record("plan"), &plan),
+        Err("batch_order")
+    );
+    let mut plan = filled_plan();
+    let Value::Map(root) = &mut plan else {
+        panic!("plan")
+    };
+    let Value::List(batches) = root.get_mut("batches").unwrap() else {
+        panic!("batches")
+    };
+    let Value::Map(batch) = &mut batches[0] else {
+        panic!("batch")
+    };
+    let Value::List(groups) = batch.get_mut("groups").unwrap() else {
+        panic!("groups")
+    };
+    let Value::Map(group) = &mut groups[0] else {
+        panic!("group")
+    };
+    let Value::List(ops) = group.get_mut("operations").unwrap() else {
+        panic!("ops")
+    };
+    let create_entity = plan_value(&f["templates"]["create_entity_operation"], &f["templates"]);
+    ops.push(create_entity);
+    assert_eq!(
+        canonical::encode(&Type::Record("plan"), &plan),
+        Err("root_receipt_last")
+    );
+    let mut rule = map(&[
+        ("rule_id", Value::Text("r".into())),
+        ("literal", Value::Text("A".into())),
+        ("kind", Value::Text("K".into())),
+        ("key", Value::Text(" A ".into())),
+    ]);
+    assert!(canonical::encode(&Type::Record("entity_rule"), &rule).is_ok());
+    set(&mut rule, "rule_id", Value::Text("".into()));
+    assert_eq!(
+        canonical::encode(&Type::Record("entity_rule"), &rule),
+        Err("rule_id")
+    );
 }
 
 fn remaining_case(case: &Json, templates: &Json) -> canonical::Result<(Vec<u8>, Type, Value)> {

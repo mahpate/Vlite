@@ -237,7 +237,7 @@ pub(super) fn check(kind: &Type, bytes: &[u8], policy: &Value) -> Result<()> {
         entities: cap("chunk_entities")?,
         relations: cap("chunk_relations")?,
         frames: cap("frames")?,
-        operations: cap("operations")?,
+        operations: cap("operations")?.min(4096),
     };
     budget.charge(bytes.len())?;
     let mut r = Reader { bytes };

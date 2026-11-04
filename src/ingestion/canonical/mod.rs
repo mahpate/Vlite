@@ -575,16 +575,17 @@ pub(crate) fn decode(kind: &Type, bytes: &[u8]) -> Result<Value> {
     }
     budget::check_default(kind, bytes)?;
 
-    pub(crate) fn decode_with_policy(kind: &Type, bytes: &[u8], policy: &Value) -> Result<Value> {
-        budget::check(kind, bytes, policy)?;
-        decode(kind, bytes)
-    }
     let mut r = Reader { bytes };
     let value = read(&mut r, kind, 0)?;
     if !r.bytes.is_empty() || encode(kind, &value)? != bytes {
         return Err("noncanonical");
     }
     Ok(value)
+}
+
+pub(crate) fn decode_with_policy(kind: &Type, bytes: &[u8], policy: &Value) -> Result<Value> {
+    budget::check(kind, bytes, policy)?;
+    decode(kind, bytes)
 }
 
 fn read(r: &mut Reader<'_>, kind: &Type, depth: usize) -> Result<Value> {
