@@ -8,6 +8,7 @@ use std::collections::{BTreeMap, BTreeSet};
 
 mod consolidate;
 mod erasure;
+mod mapping;
 mod ranking;
 mod recall;
 mod stale;
