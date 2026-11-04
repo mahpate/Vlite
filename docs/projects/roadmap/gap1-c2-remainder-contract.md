@@ -182,6 +182,15 @@ They are not effort, schedule, code-size or performance estimates.
 - **Size.** S.
 - **Acceptance.** All tests above pass; no file outside the allowed list
   changes; C1 golden replay unchanged.
+- **Status (2026-11-04).** Implemented, independently accepted with notes and
+  integrated (crate-private, inactive, unreleased). Accepted deviations: a
+  malformed or foreign summary ID is `InvalidTarget`; an expired summary is
+  `MissingMemory`; edges are read at clock 0 and their expiry is judged at C;
+  `live_sources` includes sources that are live but changed; three C1 helpers
+  are copied rather than shared. Independent mutation review killed four of
+  six deliberately failing mutants. The two survivors are test gaps (a foreign
+  scope-node tuple at the scope key, and a non-`DERIVED_FROM` edge on the
+  summary) and are closed by a test-only follow-up before S2.
 
 ### S2: staleness label in recall
 

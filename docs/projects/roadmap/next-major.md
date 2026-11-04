@@ -330,7 +330,9 @@ accepted and integrated, with no production caller. This decoded
   and inactive. The remainder of slice C is scoped in the
   [C2 remainder contract](gap1-c2-remainder-contract.md) as sub-slices S1-S2, X1,
   E1-E4 and F1-F6 with provisional coordinator rulings: the scoping is accepted,
-  S1 and the E1 contract with its independent oracle are authorized, the fact
+  S1 is implemented, independently accepted and integrated (crate-private,
+  inactive, unreleased), the E1 contract with its independent oracle is
+  authorized and in review, the fact
   slices wait for the owner's slice D decisions, and public serving remains
   outstanding.
   Scale-out is not implemented. Its order 11 → 10 → 9 was decided 2026-11-02; the track is
