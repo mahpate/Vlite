@@ -1,7 +1,8 @@
 # Gap 7 canonical schema v1
 
 Status: **RATIFIED PROVISIONALLY by the coordinator on 2026-11-04** after independent
-review (214 vectors and 80 hand mutants pass in both Python modes). Every persisted byte
+review (217 vectors and 82 hand mutants pass in both Python modes; the attribute-key rule
+was added on 2026-11-04 as an additive ruling). Every persisted byte
 below freezes at the release go/no-go; until then a change needs a new coordinator ruling.
 This appendix specifies bytes,
 not an implementation acceptance, public API, wire, activation or release decision.
