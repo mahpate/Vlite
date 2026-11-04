@@ -89,6 +89,31 @@ fn first_view(generation: &Arc<CompactGeneration>) -> CompactView {
 }
 
 #[test]
+fn compact_seam_source_peak_survives_smaller_generation() {
+    let _precision = PrecisionActivation::on();
+    let _records = RecordsActivation::on();
+    let _source = Activation::on();
+    let (_, plain) = source_view_fixture(None);
+    let (_, encrypted) = source_view_fixture(Some(&source_key()));
+    let mut generations = [
+        plain.compact_generation.unwrap(),
+        encrypted.compact_generation.unwrap(),
+    ];
+    generations.sort_by_key(|generation| std::cmp::Reverse(generation.backing.as_slice().len()));
+    let large = first_view(&generations[0]);
+    let small = first_view(&generations[1]);
+    let mut workspace = ReadWorkspace::new(4 << 20).unwrap();
+    let first = workspace.accounting(&large).unwrap();
+    let second = workspace.accounting(&small).unwrap();
+    assert!(
+        first.source_live > second.source_live,
+        "fixture must exercise a smaller source"
+    );
+    assert_eq!(second.source_peak, first.source_live);
+    assert_eq!(second.source_live, generations[1].backing.as_slice().len());
+}
+
+#[test]
 fn compact_seam_partitions_have_distinct_cache_entries() {
     let _precision = PrecisionActivation::on();
     let _records = RecordsActivation::on();

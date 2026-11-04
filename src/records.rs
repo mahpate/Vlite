@@ -590,6 +590,11 @@ mod effective_rows_tests {
                 );
                 rows.apply_committed(id, None, loaded.sequence + 1, None)
                     .unwrap();
+                assert_eq!(
+                    rows.overlay_logical_bytes().unwrap(),
+                    0,
+                    "tombstones hold no logical record body"
+                );
                 assert!(rows.effective_vector(id, &mut workspace).unwrap().is_none());
                 assert!(
                     rows.effective_metadata(id, &mut workspace)
@@ -610,6 +615,64 @@ mod effective_rows_tests {
                 assert_eq!(
                     rows.effective_vector(id, &mut workspace).unwrap().unwrap(),
                     record.vector
+                );
+                let mut replacement = record.clone();
+                replacement.vector = vec![7.0, -9.0];
+                replacement.metadata.insert(
+                    "overlay".into(),
+                    crate::MetadataValue::String("replacement".into()),
+                );
+                replacement.payload = b"replacement body".to_vec();
+                rows.apply_committed(id, Some(replacement.clone()), loaded.sequence + 3, None)
+                    .unwrap();
+                let new_id = expected.records.keys().next_back().unwrap() + 1;
+                rows.apply_committed(new_id, Some(replacement.clone()), loaded.sequence + 4, None)
+                    .unwrap();
+                let mut expected_ids: Vec<_> = expected.records.keys().copied().collect();
+                expected_ids.push(new_id);
+                assert_eq!(
+                    rows.effective_ids(),
+                    expected_ids,
+                    "new overlay IDs must join the ordered base"
+                );
+                for id in [id, new_id] {
+                    assert_eq!(
+                        rows.effective_vector(id, &mut workspace).unwrap().unwrap(),
+                        replacement.vector
+                    );
+                    assert_eq!(
+                        rows.effective_metadata(id, &mut workspace)
+                            .unwrap()
+                            .unwrap()
+                            .as_ref(),
+                        &replacement.metadata
+                    );
+                    assert_eq!(
+                        rows.effective_payload(id, &mut workspace)
+                            .unwrap()
+                            .unwrap()
+                            .as_ref(),
+                        replacement.payload
+                    );
+                }
+                assert_eq!(
+                    rows.overlay_logical_bytes().unwrap(),
+                    2 * crate::format::record_body_len(&replacement)
+                );
+                assert_eq!(
+                    pin.effective_ids(),
+                    expected.records.keys().copied().collect::<Vec<_>>()
+                );
+                assert_eq!(
+                    pin.effective_vector(id, &mut workspace).unwrap().unwrap(),
+                    record.vector
+                );
+                assert_eq!(
+                    pin.effective_metadata(id, &mut workspace)
+                        .unwrap()
+                        .unwrap()
+                        .as_ref(),
+                    &record.metadata
                 );
                 let resident = CollectionRecords::Resident(expected.records.clone());
                 assert_eq!(resident.source_identity(), None);
