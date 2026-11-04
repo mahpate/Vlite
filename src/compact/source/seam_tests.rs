@@ -34,6 +34,10 @@ fn compact_seam_vector_metadata_leave_cells_empty() {
                     view.read_metadata(row, &mut workspace).unwrap().unwrap(),
                     expected.records[&id].metadata
                 );
+                assert_eq!(
+                    view.read_payload(row, &mut workspace).unwrap().unwrap(),
+                    expected.records[&id].payload
+                );
             }
             assert!(
                 view.read_vector(view.len(), &mut workspace)
@@ -42,6 +46,11 @@ fn compact_seam_vector_metadata_leave_cells_empty() {
             );
             assert!(
                 view.read_metadata(view.len(), &mut workspace)
+                    .unwrap()
+                    .is_none()
+            );
+            assert!(
+                view.read_payload(view.len(), &mut workspace)
                     .unwrap()
                     .is_none()
             );
