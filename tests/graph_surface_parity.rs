@@ -458,10 +458,17 @@ async fn reg008_served_openapi_matches_baseline_except_approved_additions() {
 /// Private Gap 2 K3a (owner-approved 2026-11-04): `tools/list` gains the
 /// ordinary key-value tools, `vlite_kv_get` and `vlite_kv_list` in read-only
 /// mode and all four with writes enabled. Their exact definitions are pinned
-/// in `mcp_kv_tool_additions.json`; every baseline tool and every other
+/// in `tests/fixtures/kv/mcp-tool-additions.json`; every baseline tool and every other
 /// response must still match the capture.
 fn approved_mcp_additions(mode: &str) -> Vec<Value> {
-    let approved: Value = serde_json::from_str(&fixture("mcp_kv_tool_additions.json")).unwrap();
+    let path = Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("tests")
+        .join("fixtures")
+        .join("kv")
+        .join("mcp-tool-additions.json");
+    let text =
+        fs::read_to_string(&path).unwrap_or_else(|error| panic!("{}: {error}", path.display()));
+    let approved: Value = serde_json::from_str(&text).unwrap();
     approved[mode].as_array().unwrap().clone()
 }
 
