@@ -165,8 +165,12 @@ Local numbers below show direction only (see rules).
   independently accepted and integrated, but unreleased. Slice 2 (a
   test-gated base-plus-overlay view that reconciles committed mutations over
   the captured compact image, keeping tombstones, expiry, revisions and
-  snapshots) is accepted with notes and integrated on the same terms. Slices
-  3–5 and all normal `Database` wiring remain; slice 3 is next.
+  snapshots) is accepted with notes and integrated on the same terms. Slice 3
+  (a test-gated ordered browse and exact, filtered search over base plus
+  overlay, identical to the resident path at the same clock) is accepted with
+  notes and integrated on the same terms; hybrid, query-language, grouping and
+  facet reads still refuse compact records. Slices 4–5 and all normal
+  `Database` wiring remain; slice 4 is next.
   The [P3c compact-ANN design](p3c-compact-ann.md) (source-bound flat
   topology, persisted scalar-u8 codes, background rebuild and a separately
   opted-in rotated one-bit candidate) is independently reviewed; its nine
