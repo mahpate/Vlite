@@ -645,6 +645,44 @@ filters. The broader Python/JS convenience APIs for imports, backups, diagnostic
 credentials, conditional writes and maintenance are not yet wrapped in these two
 clients. No client silently retries or falls back between search modes.
 
+### .NET agent-memory operations
+
+For a server with a provisioned memory binding (here `notes`), `client.Memory(binding)`
+returns a facade with nine methods, one unary POST each: `RememberAsync`,
+`RecallAsync`, `FindFactsAsync`, `CorrectFactsAsync`, `ConsolidateAsync`,
+`ForgetAsync`, `GetReceiptAsync`, `GetErasureAsync` and `ResumeErasureAsync`.
+Each takes one request record and returns the full response record;
+`ConsolidateAsync` returns a `MemoryConsolidateResponse`, which is a
+`MemoryMutationResponse` or, for `DryRun`, a `MemoryPlanResponse`.
+
+```csharp
+var memory = client.Memory("notes");
+var scope = new MemoryScope("agent-1");
+var saved = await memory.RememberAsync(new MemoryRememberRequest(scope, "key-1",
+    [new MemoryItem("e1", MemoryKind.Entity, "Ada", observedAtMs, new MemorySource("s1", "caller"))]));
+var found = await memory.RecallAsync(new MemoryRecallRequest(scope, Text: "Ada", Limit: 5));
+var receipt = await memory.GetReceiptAsync(new MemoryReceiptRequest(scope, MemoryOperation.Remember, "key-1"));
+```
+
+The first server slice implements remember (kinds `entity` and `episodic`),
+recall, consolidate, forget (`ids` targets, logical delete) and receipt lookup.
+Facts, fact correction and erasure lookup/resume answer 409
+`memory_capability_unavailable` with `Details.Feature`; the client exposes all
+nine and never hides a refusal. Mutations carry an `idempotency_key` in the body.
+Request u64/i64 values are `ulong`/`long`, or canonical strings in `MemoryRef`,
+`MemoryInterval` and integer scalars, and go on the wire as decimal strings;
+response u64/i64 values stay canonical strings (`MemoryNumber.ParseU64` and
+`ParseI64` convert with checks). Unions are sealed record hierarchies:
+`MemoryTarget`, `MemoryExpected`, `MemoryScalar`, `MemoryConsolidateResponse`.
+
+Errors are `VLiteException` (`Status`, `Code`, `RequestId`, optional `Details`
+with `Field`, `Limit`, `Requested`, `Feature`, `Category`). HTTP 202 (a pending
+erasure) is a normal result. Only 404 `not_found` (unknown route) raises
+`UnsupportedException`. A timeout, cancellation or unreadable reply is a
+`TransportException`: a mutation may have committed, so reconcile it with
+`GetReceiptAsync` instead of retrying. Nothing is retried, paged, split or
+embedded for you, and `DeadlineMs` is the engine deadline, never the HTTP timeout.
+
 ### Optional live Go/.NET e2e
 
 Both suites run live checks only when `VLITE_URL` is set, using
