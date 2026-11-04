@@ -1,11 +1,13 @@
 # Gap 1: agent memory
 
 Status: the crate-private A1 core (remember, receipts and one graph batch), A2 (bounded
-exact-ID forget and graph-TTL expiry) and B (bounded recall and ranking) are integrated
-after independent acceptance; they are unreleased, not activated and have no public API.
-Consolidation, resumable erasure and serving are not implemented. Open decisions and serving approval
-were granted 2026-11-02 (section 9). Provisional Rust names only; no public memory API or wire
-approval is claimed.
+exact-ID forget and graph-TTL expiry), B (bounded recall and ranking) and C1 (one
+retained-source consolidation) are integrated after independent acceptance; they are
+unreleased, not activated and have no public API. The rest of slice C (stale-source
+reporting, resumable erasure, facts, corrections and contradictions) is scoped in the
+[C2 remainder contract](gap1-c2-remainder-contract.md) and is not implemented; serving is not
+implemented. Open decisions and serving approval were granted 2026-11-02 (section 9).
+Provisional Rust names only; no public memory API or wire approval is claimed.
 Scope: embedded remember, recall, consolidate and forget over existing storage.
 Dependencies: Gap 2 key-value, Gap 3 graph TTL and Gap 4 temporal validity.
 Evidence below refers to checkout base `c92c8c0`; proposed names are not existing APIs.
@@ -312,9 +314,11 @@ bounded source references; one receipt guards summary plus intended source chang
 Exact retry returns that summary, not another summary of the same inputs.
 
 The first bounded step, C1 (one retained-source Episodic summary, receipt and
-replay), has a [frozen private contract](gap1-c1-consolidation-contract.md).
-It is not implemented; its independent oracle and implementation need separate
-authorization and acceptance.
+replay), has a [frozen private contract](gap1-c1-consolidation-contract.md). It is
+implemented crate-private and inactive; its independent oracle and golden replay are
+accepted and integrated. The remainder of slice C is scoped in the
+[C2 remainder contract](gap1-c2-remainder-contract.md): sub-slices are authorized
+one at a time, and none of it is implemented.
 
 Correct facts through Gap 4 revision-checked replace/remove/close operations.
 Supersession closes the old series segment at c and creates/appends replacement at c
@@ -493,7 +497,7 @@ mode or family-wide exemption.
 | A1: crate-private core | Provisional graph binding, scope provisioning, entity/episodic remember, same-frame receipts, exact dedup, idempotency and budget/validation coverage; independently accepted and integrated, unreleased and not activated |
 | A2: accepted private slice | Crate-private small forget and graph-TTL expiry with atomic failure, evidence, budget-boundary, receipt-replay, reopen and mutation coverage; the three oversized A2 golden setups now use multi-step physical-cap writes; independently accepted and integrated, unreleased and not activated. No facts, recall, resumable erasure, serving, public API or format change |
 | B: accepted private recall | Crate-private exact eligible-evidence/BM25/RRF plus bounded gated temporal expansion, owner retention checks, ranking fixtures and vector-only exact/MMR; preflight/work/cancellation, reopen and mutation coverage; independently accepted and integrated, unreleased and inactive. Ready ANN/custom providers explicitly refused; no exhaustive-history claim |
-| C: consolidation | Caller summaries, slot-guarded corrections, contradictions, stale-source reporting and resumable erasure barriers/fencing; crash/retry and maintenance tests pass |
+| C: consolidation | Caller summaries, slot-guarded corrections, contradictions, stale-source reporting and resumable erasure barriers/fencing; crash/retry and maintenance tests pass. C1 (one retained-source summary) is independently accepted and integrated, unreleased and inactive; the remainder is scoped as sub-slices S1-S2, X1, E1-E4 and F1-F6 in the [C2 remainder contract](gap1-c2-remainder-contract.md) |
 | D: serving after approval | Explicit OpenAPI and wire approval before edits; REST/gRPC/MCP/CLI scope/authorization, limits, feed and unsupported-capability parity; no external provider enabled by default |
 
 Main risks: scope leakage through graph expansion, misleading as-of completeness,

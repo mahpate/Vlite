@@ -323,7 +323,12 @@ accepted and integrated, with no production caller. This decoded
   and first-party-reference review. Memory's private A1/A2/B slices and the
   crate-private C1 consolidation (exact golden replay, with its test-strength
   follow-up) are independently accepted and integrated, but remain unreleased
-  and inactive; resumable erasure and public serving remain outstanding.
+  and inactive. The remainder of slice C is scoped in the
+  [C2 remainder contract](gap1-c2-remainder-contract.md) as sub-slices S1-S2, X1,
+  E1-E4 and F1-F6 with provisional coordinator rulings: the scoping is accepted,
+  S1 and the E1 contract with its independent oracle are authorized, the fact
+  slices wait for the owner's slice D decisions, and public serving remains
+  outstanding.
   Scale-out is not implemented. Its order 11 → 10 → 9 was decided 2026-11-02; the track is
   backlogged until the owner revisits it. The
   [Cypher-style subset](gap6-cypher-subset.md) has ten owner-approved

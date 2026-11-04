@@ -1,9 +1,11 @@
 # Gap 1 C2: slice C remainder scoping contract (proposed)
 
-Status: **proposed design and scoping only; not approved, not frozen, not
-implemented.** Nothing here authorizes code, an oracle, a test or an edit to
-another document. Each sub-slice below needs its own authorization, and every
-numbered item in section 7 is a proposal awaiting an owner decision.
+Status: **scoping accepted by the coordinator on 2026-11-04; nothing here is
+frozen or implemented.** The numbered items in section 7 stay proposals except
+where section 9 records a provisional ruling. Nothing here authorizes code, an
+oracle, a test or an edit to another document by itself: each sub-slice needs its
+own authorization, and the E, F and X1 slices also need their own frozen contract
+and independent oracle first (section 5, rule 6).
 Base: every file:line reference was checked against commit
 `1acd3ba041b8e75e1388fcde701299b3899b10cb`; line numbers are anchors at that
 commit, not a promise about later rebases.
@@ -463,3 +465,22 @@ They are not effort, schedule, code-size or performance estimates.
 4. Which track should start first (decision 22)?
 
 No sub-slice is complete, approved, frozen or active because of this document.
+
+## 9. Coordinator rulings (provisional, 2026-11-04)
+
+The coordinator ruled on the open items below using best judgement that is long-term and
+backward compatible, while the owner is unavailable. Every ruling is PROVISIONAL, is
+logged in the decision ledger, and is revisited at the release go/no-go; none changes a
+release gate or the approved 0.6.2 scope.
+
+| Item | Ruling |
+|---|---|
+| Decisions 1-3, 4-12, 17, 19, 21-23 | Adopted as drafted |
+| Decisions 14-16, 18, 20 | Held with Gap 4 slice D: the fact model needs the owner's decisions, so F1-F6 are not authorized |
+| Question 1 (decision 5) | A completed erasure keeps its barrier permanently. A later explicit reactivation operation would be additive; a reusable scope could not later be made permanent without breaking callers |
+| Question 2 (decision 6) | Erasure stays single-process under `&mut Database`; the job revision and generation guard every chunk, and multi-worker claims are left to serving |
+| Question 3 (decision 13) | X1 is not dropped. The memory serving contract offers `logical_delete` as an input disposition (`docs/projects/roadmap/serving-memory-contract.md:338-339`, `:675`), so X1 stays in slice C, after the first S and E sub-slices and before Gap 1 slice D; its v2 schema and freeze are authored separately |
+| Question 4 (decision 22) | S1 starts now. The E1 contract and its independent oracle are written in parallel (documentation and Python only); E1 code starts after the oracle is accepted. F-track and X1 wait for their holds and freezes |
+
+Authorized now: S1 (implementation) and the E1 frozen contract with its independent
+oracle (no Rust). Every other sub-slice still needs its own authorization.
