@@ -1200,16 +1200,6 @@ fn ingestion_stored_base64_fragment_boundaries() {
             .collect();
         assert_eq!(stored::read_fragments(&map, "i"), Err("fragment_size"));
     }
-    for key in ["i01", "i000", "i0a"] {
-        assert_eq!(
-            stored::read_fragments(&BTreeMap::from([(key.into(), Value::Text("".into()))]), "i"),
-            Err("fragment_order")
-        );
-    }
-    assert_eq!(
-        stored::read_fragments(&BTreeMap::new(), "i"),
-        Err("fragment_order")
-    );
 }
 
 fn shard_header() -> Value {
@@ -1359,21 +1349,18 @@ fn ingestion_stored_entry_fields_and_order() {
         );
     }
     for length in [0, 72] {
-        let mut bad = vector.clone();
+        let mut valid = vector.clone();
         set(
-            &mut bad,
+            &mut valid,
             "attached_chunk_key",
             Value::Text("c".repeat(length)),
         );
-        assert_eq!(
-            canonical::encode(&Type::Record("entry"), &bad),
-            Err("entry_vector_fields")
-        );
+        assert!(canonical::encode(&Type::Record("entry"), &valid).is_ok());
         let mut graph = template("entry");
         set(&mut graph, "object_key", Value::Text("k".repeat(length)));
         assert_eq!(
-            canonical::encode(&Type::Record("entry"), &graph),
-            Err("entry_graph_fields")
+            canonical::encode(&Type::Record("entry"), &graph).is_ok(),
+            length != 0
         );
     }
     for key in ["record", "attached_chunk_key"] {
@@ -1869,6 +1856,107 @@ fn ingestion_stored_review_physical_roles() {
         );
         assert_eq!(stored::physical(&id, &map(&[])), Err("object_role"));
     }
+}
+
+#[test]
+fn ingestion_stored_strictness_ruling() {
+    for (name, key) in [
+        ("receipt_data", "plan_digest"),
+        ("batch_data", "batch_digest"),
+    ] {
+        let mut data = template(name);
+        set(
+            &mut data,
+            key,
+            map(&[
+                ("tag", Value::Unsigned(3)),
+                ("value", Value::Text("00".repeat(32))),
+            ]),
+        );
+        assert_eq!(
+            canonical::encode(&Type::Record(name), &data),
+            Err("reference_tag")
+        );
+    }
+    let mut revision = template("revision_projection_data");
+    let mut request = template("request");
+    // The request fixture's source bytes use the JSON hex representation.
+    let Value::Map(fields) = &mut request else {
+        panic!("request")
+    };
+    if let Value::Text(hex) = &fields["text"] {
+        fields.insert("text".into(), Value::Bytes(canonical::unhex(hex).unwrap()));
+    }
+    for (name, data) in [("revision_data", &mut revision), ("request", &mut request)] {
+        for uri in [
+            Value::Null,
+            Value::Text(String::new()),
+            Value::Text("é".repeat(1024)),
+        ] {
+            set(data, "uri", uri);
+            let bytes = canonical::encode(&Type::Record(name), data).unwrap();
+            assert_eq!(
+                canonical::decode(&Type::Record(name), &bytes).unwrap(),
+                *data
+            );
+        }
+        for uri in ["u".repeat(2049), "valid\0uri".into()] {
+            set(data, "uri", Value::Text(uri));
+            assert_eq!(
+                canonical::encode(&Type::Record(name), data),
+                Err("uri"),
+                "{name}"
+            );
+        }
+    }
+    for key in ["revision_key", "job_receipt_key"] {
+        let mut head = template("head_data_present");
+        set(&mut head, key, Value::Text("valid\0key".into()));
+        assert_eq!(
+            canonical::encode(&Type::Record("head_data"), &head),
+            Err(key)
+        );
+        set(&mut head, key, Value::Text(String::new()));
+        let bytes = canonical::encode(&Type::Record("head_data"), &head).unwrap();
+        assert_eq!(
+            canonical::decode(&Type::Record("head_data"), &bytes).unwrap(),
+            head
+        );
+        set(&mut head, key, Value::Null);
+        assert!(canonical::encode(&Type::Record("head_data"), &head).is_ok());
+    }
+    let mut vector = template("vector_projection_data");
+    vector_text(&mut vector).unwrap();
+    set(&mut vector, "text", Value::Bytes(b"a\0b".to_vec()));
+    assert!(canonical::stored::vector_record(&vector).is_ok());
+    for key in ["tenant", "source_key", "revision_key", "chunk_key"] {
+        let mut invalid = vector.clone();
+        set(&mut invalid, key, Value::Text("a\0b".into()));
+        assert_eq!(
+            canonical::encode(&Type::Record("vector_data"), &invalid),
+            Err("vector_metadata")
+        );
+        set(&mut invalid, key, Value::Text(String::new()));
+        let bytes = canonical::encode(&Type::Record("vector_data"), &invalid).unwrap();
+        assert_eq!(
+            canonical::decode(&Type::Record("vector_data"), &bytes).unwrap(),
+            invalid
+        );
+    }
+    set(&mut vector, "vector", Value::List(vec![]));
+    assert_eq!(
+        canonical::encode(&Type::Record("vector_data"), &vector),
+        Err("vector_dimensions")
+    );
+    set(
+        &mut vector,
+        "vector",
+        Value::List(vec![Value::Text("1".into())]),
+    );
+    assert_eq!(
+        canonical::encode(&Type::Record("vector_data"), &vector),
+        Err("float")
+    );
 }
 
 #[test]

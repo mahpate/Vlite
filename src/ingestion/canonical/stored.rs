@@ -122,15 +122,35 @@ fn validate(name: &str, value: &Value) -> Result<()> {
             .map_err(|_| error)
     };
     match name {
-        "head_data" => enumeration("status", 3, "enum")?,
+        "head_data" => {
+            enumeration("status", 3, "enum")?;
+            for key in ["revision_key", "job_receipt_key"] {
+                let value = field(value, key)?;
+                if *value != Value::Null && text(value)?.as_bytes().contains(&0) {
+                    return Err(key);
+                }
+            }
+        }
+        "revision_data" => {
+            let uri = field(value, "uri")?;
+            if *uri != Value::Null {
+                super::bounded_text(uri, 0, 2048, "uri")?;
+            }
+        }
         "receipt_data" => {
             enumeration("outcome", 3, "enum")?;
-            if unsigned(field(field(value, "plan_digest")?, "tag")?, 2)? != 1 {
+            if unsigned(field(field(value, "plan_digest")?, "tag")?, 2)
+                .map_err(|_| "reference_tag")?
+                != 1
+            {
                 return Err("plan_slot_kind");
             }
         }
         "batch_data" => {
-            if unsigned(field(field(value, "batch_digest")?, "tag")?, 2)? != 2 {
+            if unsigned(field(field(value, "batch_digest")?, "tag")?, 2)
+                .map_err(|_| "reference_tag")?
+                != 2
+            {
                 return Err("batch_slot_kind");
             }
         }
@@ -148,6 +168,14 @@ fn validate(name: &str, value: &Value) -> Result<()> {
             }
         }
         "vector_data" => {
+            for key in ["tenant", "source_key", "revision_key", "chunk_key"] {
+                if text(field(value, key)?)?.as_bytes().contains(&0) {
+                    return Err("vector_metadata");
+                }
+            }
+            if sequence(field(value, "vector")?)?.is_empty() {
+                return Err("vector_dimensions");
+            }
             let Value::Bytes(bytes) = field(value, "text")? else {
                 return Err("bytes");
             };
@@ -166,12 +194,7 @@ fn validate(name: &str, value: &Value) -> Result<()> {
                 if !present.iter().all(|v| *v) || !key.is_empty() {
                     return Err("entry_vector_fields");
                 }
-                if text(field(value, "attached_chunk_key")?)?.is_empty()
-                    || text(field(value, "attached_chunk_key")?)?.len() > 71
-                {
-                    return Err("entry_vector_fields");
-                }
-            } else if present.iter().any(|v| *v) || key.is_empty() || key.len() > 71 {
+            } else if present.iter().any(|v| *v) || key.is_empty() {
                 return Err("entry_graph_fields");
             }
         }
@@ -187,7 +210,7 @@ fn validate(name: &str, value: &Value) -> Result<()> {
                 }
             }
         }
-        "revision_data" | "chunk_data" | "entity_data" | "link_data" => {}
+        "chunk_data" | "entity_data" | "link_data" => {}
         _ => super::plan::validate(name, value)?,
     }
     Ok(())
@@ -404,10 +427,7 @@ pub(crate) fn read_fragments(map: &BTreeMap<String, Value>, prefix: &str) -> Res
     let mut bytes = Vec::new();
     let mut count = 0;
     let mut previous = 0;
-    for (key, value) in map.iter().filter(|(k, _)| k.starts_with(prefix)) {
-        if *key != format!("{prefix}{count:02}") || count >= 100 {
-            return Err("fragment_order");
-        }
+    while let Some(value) = map.get(&format!("{prefix}{count:02}")) {
         let part = unbase64(text(value)?)?;
         if part.len() > 3072 || (count > 0 && (previous != 3072 || part.is_empty())) {
             return Err("fragment_size");
@@ -415,9 +435,6 @@ pub(crate) fn read_fragments(map: &BTreeMap<String, Value>, prefix: &str) -> Res
         previous = part.len();
         bytes.extend_from_slice(&part);
         count += 1;
-    }
-    if count == 0 {
-        return Err("fragment_order");
     }
     Ok(bytes)
 }
