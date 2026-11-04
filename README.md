@@ -34,8 +34,8 @@ service to operate.
 - **Advanced retrieval.** Opt-in collections, record expiry, named and sparse
   vectors, hybrid search, facets, geo filters and recommendations.
 - **Server.** Authenticated REST with OpenAPI, optional gRPC and TLS,
-  opt-in managed embedding and ranking providers, Prometheus metrics, non-root
-  Docker images and a Helm chart.
+  key-value operations, opt-in managed embedding and ranking providers,
+  Prometheus metrics, non-root Docker images and a Helm chart.
 - **Dashboard.** Browse, search, write, import, index, monitor and query
   graphs, with user accounts, roles and tenants.
 - **Storage options.** Encryption at rest, point-in-time restore, a change

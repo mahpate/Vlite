@@ -4,9 +4,9 @@ VLite 0.7.0 adds a key-value store, an opt-in directory store, graph expiry, bou
 
 <!-- source: docs/STORAGE-FEATURES.md#key-value-store, docs/STORAGE-FEATURES.md#directory-store, docs/GRAPH.md#expiry-ttl, docs/GRPC.md, site/api.html -->
 
-It follows [0.6.1](RELEASE-0.6.1.md). Most additions are embedded Rust APIs. Existing files open as before, new files are written as before, and every new capability is opt-in. One Rust source-level change affects code that matches `GraphChange` exhaustively (see [Compatibility](#compatibility)). This release makes no new performance claims. <!-- source: docs/STORAGE-FEATURES.md, docs/GRAPH.md, docs/GRPC.md, tests/graph_regression.rs, src/property_graph/change.rs -->
+It follows [0.6.1](RELEASE-0.6.1.md). The additions are embedded Rust APIs, local shell and MCP tools, and REST and gRPC key-value and provider operations. Existing files open as before and new files are written as before. New stores and application-facing operations need explicit use or setup. Exact SIMD scoring, filter-summary pruning and the fixes below apply automatically, and search hits and distances stay unchanged. Rust code that matches `GraphChange` exhaustively needs a new arm, and code that uses the generated `grpc` types has further source changes (see [Compatibility](#compatibility)). This release makes no new performance claims. <!-- source: docs/STORAGE-FEATURES.md, docs/GRAPH.md, docs/GRPC.md, docs/API.md, src/exact_kernels.rs, tests/filter_summaries.rs, tests/graph_regression.rs, src/property_graph/change.rs, proto/vlite/v1/vlite.proto -->
 
-> **Draft for release-candidate review.** The version number is provisional. Resolve or delete every `[TO CONFIRM AT RC]`, `[TO FILL AT RC]` and `[VERIFY]` marker before publishing. A `<!-- source: ... -->` comment names the repository document or test that backs the statement before it.
+> **Draft for release-candidate review.** The version number is provisional. Resolve or delete every `[TO CONFIRM AT RC]`, `[TO FILL AT RC]`, `[TO FILL AT FREEZE]` and `[VERIFY]` marker before publishing. A `<!-- source: ... -->` comment names the repository document or test that backs the statement before it.
 
 ## What is new
 
@@ -14,15 +14,17 @@ It follows [0.6.1](RELEASE-0.6.1.md). Most additions are embedded Rust APIs. Exi
 
 Keep values under namespaced string keys, with no vector. <!-- source: docs/STORAGE-FEATURES.md#key-value-store -->
 
-- **Embedded Rust API.** `Database::kv_store` and `Database::kv_view` give you
+- **Embedded Rust API.** `Database::kv_store` and `Database::kv_view` (with
+  `KvStore`, `KvView`, `KvEntry` and `KvPut` in `vlite::kv`) give you
   namespaced string keys with byte values, ordered prefix listing, optional
-  expiry, compare-and-set and fencing tokens. An entry is an ordinary record in
-  a one-dimension collection, so the file format does not change. The store
-  needs a format 4 or newer file, and expiry needs format 5. Namespaces are up
-  to 255 bytes, keys up to 1,024 bytes and values just under 1 MiB, and a list
-  page holds up to 10,000 keys. A version is a commit sequence, so read an
-  entry again after compaction, upgrade or restore before you use its version.
-  See [Key-value store](STORAGE-FEATURES.md#key-value-store).
+  expiry and compare-and-set on versions. An entry is an ordinary record in
+  a one-dimension collection, so the file format does not change.
+  `kv_store` creates a missing one-dimension collection; `kv_view` and every
+  other surface need an existing one. The store needs a format 4 or newer
+  file, and expiry needs format 5. Namespaces are 1 to 255 bytes, keys 1 to
+  1,024 bytes and values up to 1,047,290 bytes, and one list call returns at
+  most 10,000 entries. See
+  [Key-value store](STORAGE-FEATURES.md#key-value-store).
   <!-- source: docs/STORAGE-FEATURES.md#key-value-store, src/kv.rs, tests/kv.rs -->
 - **Shell and MCP.** `vlite-shell --db PATH` accepts `kv-get`, `kv-put`,
   `kv-delete` and `kv-list`. `vlite-mcp` adds `vlite_kv_get` and
@@ -34,18 +36,64 @@ Keep values under namespaced string keys, with no vector. <!-- source: docs/STOR
   entries. See [shell commands](TOOLS.md#local-key-value-shell-commands) and
   [MCP tools](MCP.md#local-key-value-tools).
   <!-- source: docs/TOOLS.md#local-key-value-shell-commands, docs/MCP.md#local-key-value-tools, tests/kv_tools.rs, tests/fixtures/kv/mcp-tool-additions.json -->
-- **HTTP clients.** [VERIFY] The Python, JavaScript and .NET clients include
-  key-value methods (`kv_get`, `kv_put`, `kv_delete` and `kv_list`; `kvGet` and
-  so on; `KvGetAsync` and so on). They call routes under
-  `/v1/collections/{collection}/kv/`, and the `vlite-server` in this draft
-  serves none, so the methods cannot succeed against it yet. Keep this item
-  only if the REST routes below are confirmed.
-  <!-- source: clients/README.md, clients/python/README.md, clients/python/vlite_client/__init__.py (no kv route exists in src/openapi.json, src/server.rs or proto/vlite/v1/vlite.proto) -->
-- **REST.** [TO CONFIRM AT RC] `vlite-server` serves the key-value store over
-  REST under `/v1/collections/{collection}/kv/`.
-  <!-- source: docs/projects/roadmap/serving-kv-ttl-contract.md (proposed schema, section 4; not implemented at this draft) -->
-- **gRPC.** [TO CONFIRM AT RC] The gRPC service exposes the key-value store.
-  <!-- source: docs/projects/roadmap/serving-kv-ttl-contract.md (proposed proto additions, section 7; not implemented at this draft) -->
+- **REST.** `vlite-server` serves four operations: `GET`, `PUT` and `DELETE`
+  on `/v1/collections/{collection}/kv/entry`, and `GET` on
+  `/v1/collections/{collection}/kv/entries` for prefix listing. They need an
+  explicit, existing one-dimension collection and never create one. Get and
+  list need read scope; put and delete need write scope. Values are padded
+  standard base64, and versions and deadlines are uint64 decimal strings. Put
+  and delete take an expected version (`any`, `absent` or a revision), and a
+  put without `expires_at_ms` clears the entry's expiry. A list page defaults
+  to 100 entries and stops at 10,000 entries or 16 MiB of canonical JSON, with
+  `next_after` to continue and no snapshot across pages. The new error codes
+  are `kv_not_found` (404), `not_kv_collection` (409) and
+  `kv_slots_exhausted` (409). See [Key-value entries](API.md#key-value-entries)
+  for compare-and-set, expiry, quotas and errors.
+  [TO CONFIRM AT RC] Fixes to this adapter, and advertising the routes in
+  `GET /v1/capabilities`, are not merged in this candidate; re-read this item
+  when they land.
+  <!-- source: src/server/kv.rs, src/openapi.json, docs/API.md#key-value-entries, tests/server_kv.rs -->
+- **gRPC.** The new `vlite.v1.Kv` service has four unary RPCs: `GetKvEntry`,
+  `PutKvEntry`, `DeleteKvEntry` and `ListKvEntries`. They carry raw bytes and
+  uint64 versions and deadlines, and every address names its collection. The
+  collection requirements, authorization, compare-and-set, expiry, quotas,
+  audit and list page boundary (measured in canonical REST JSON) match REST.
+  The service has the same 8 MiB request and 16 MiB response limits as
+  `VLite` and is registered with the gRPC health service. Neither transport
+  provides leases. See [Key-value entries](GRPC.md#key-value-entries).
+  [TO CONFIRM AT RC] Fixes to this adapter are not merged in this candidate;
+  re-read this item when they land.
+  <!-- source: proto/vlite/v1/vlite.proto, src/server/grpc.rs, src/server/grpc/kv.rs, docs/GRPC.md#key-value-entries, tests/server_grpc_kv.rs -->
+- **HTTP clients.** The Python, JavaScript and .NET clients provide get, put
+  (with compare-and-set), delete and prefix-list methods (`kv_get`, `kv_put`,
+  `kv_delete` and `kv_list`; `kvGet` and so on; `KvGetAsync` and so on) for the
+  REST routes above. Values are bytes, and versions and deadlines are lossless
+  64-bit integers. Against a server without the routes, such as 0.6.1, the
+  methods raise the client's unsupported error and do not fall back. These are
+  HTTP clients, not the embedded bindings, and the Go client has no key-value
+  methods.
+  <!-- source: clients/README.md, clients/python/README.md, clients/javascript/README.md, clients/python/vlite_client/__init__.py, clients/javascript/index.js, clients/dotnet/VLite.Client/Client.cs -->
+- **Durability and fencing.** Ordinary key-value writes follow the database's
+  durability setting: `full` syncs before it acknowledges, `periodic` (the
+  default) can lose the last flush interval on an OS crash or power loss, and
+  `none` keeps nothing on disk. A version is a commit sequence, not a durable,
+  never-reused lease ledger: after such a loss a later write can receive a
+  revision that was already acknowledged, and compaction, upgrade and restore
+  renumber revisions. Use versions for compare-and-set on one open store, and
+  read an entry again after any of those events. A dropped connection or a
+  `commit_indeterminate` error does not prove that a write failed, so do not
+  retry blindly. There are no lease operations.
+  <!-- source: docs/API.md#key-value-entries, docs/STORAGE-FEATURES.md#key-value-store, docs/SECURITY.md, src/kv.rs -->
+
+### Agent memory
+
+[TO CONFIRM AT RC] Agent memory (remember, recall, consolidate and forget) is
+part of the 0.7.0 plan, and the release waits for it. Its REST adapter and
+client methods are not merged in this candidate, so this section stays a
+placeholder: describe the shipped surface, limits and defaults here after
+independent acceptance. Until then the memory code is crate-private and
+inactive, and nothing in this candidate exposes it.
+<!-- source: docs/projects/roadmap/next-major.md, docs/projects/roadmap/gap1-agent-memory.md, src/lib.rs -->
 
 ### Directory store (opt-in)
 
@@ -55,22 +103,26 @@ replays only the active log instead of the whole history.
 
 - **Create or convert.** `Database::create_directory(path, dimensions, options)`
   creates a format 5 database as a directory of write-ahead logs and an
-  optional checkpoint image, listed by an atomic manifest.
+  optional checkpoint image, listed by an atomic manifest, and
+  `Database::is_directory` tells a handle's kind.
   `maintenance::convert_to_directory` (and `convert_to_directory_with_key` for
-  an encrypted file) turns a closed format 5 file into one, and
-  `maintenance::backup` packs a directory back into one file. Creating a
-  directory store is a Rust API. `Database::open`, `open_read_only`, the server
-  and the maintenance tools accept the directory path unchanged. Commit
-  timestamps and formats 3 and 4 are not supported.
+  an encrypted file) turns a closed format 5 file into one without changing the
+  source. It writes a checkpoint image at once and keeps the lineage and every
+  revision, so only change-feed cursors at or after the source's last commit
+  stay valid. `maintenance::backup` packs a directory back into one file.
+  Creating or converting a directory store is a Rust API. `Database::open`,
+  `open_read_only`, the server and the maintenance tools accept the directory
+  path unchanged. Commit timestamps and formats 3 and 4 are not supported.
   See [Directory store](STORAGE-FEATURES.md#directory-store).
-  <!-- source: docs/STORAGE-FEATURES.md#directory-store, docs/projects/roadmap/p2-directory-store.md, tests/directory_store.rs -->
-- **Checkpoints.** Once the active log passes 64 MiB, a commit starts a
-  background checkpoint that folds the logs into one image.
-  `Database::set_checkpoint_threshold` changes or turns off that threshold, and
-  `Database::checkpoint` runs one and waits. The lineage, every record's
-  revision (so compare-and-set and fencing tokens keep matching), graphs and
-  encryption are kept.
-  <!-- source: docs/STORAGE-FEATURES.md#directory-store, tests/directory_store.rs, tests/directory_recovery_matrix.rs -->
+  <!-- source: docs/STORAGE-FEATURES.md#directory-store, docs/projects/roadmap/p2-directory-store.md, tests/directory_store.rs, src/maintenance.rs -->
+- **Checkpoints.** When the active log reaches the default 64 MiB
+  (`DEFAULT_CHECKPOINT_BYTES`), a commit starts a background checkpoint that
+  folds the logs into one image. `Database::set_checkpoint_threshold` changes
+  or turns off that threshold (a single file ignores it), and
+  `Database::checkpoint` runs one, waits and returns the floor sequence, or
+  `None` when there was nothing to fold. The lineage, every record's revision
+  (so compare-and-set versions keep matching), graphs and encryption are kept.
+  <!-- source: docs/STORAGE-FEATURES.md#directory-store, src/directory.rs, src/lib.rs, tests/directory_store.rs, tests/directory_recovery_matrix.rs -->
 - **History below a checkpoint is gone.** A change-feed or log-segment request
   from a cursor below the checkpoint floor returns `CursorBeforeHistory` (REST
   409 `cursor_before_history`). Take a snapshot and resume from the floor. A
@@ -85,20 +137,26 @@ replays only the active log instead of the whole history.
   hidden together with every edge of it, and an edge's own deadline hides only
   that edge, so no dangling edge is ever visible or stored. Reads hide what is
   due at the read clock (`GraphRef::with_clock` fixes it; it decides
-  visibility only and is not time travel). Each graph write first removes what
-  is due, in the same atomic frame and as one computed entry, so the
-  4,096-operation limit is unaffected. Compaction, `upgrade`, directory
-  checkpoints and `convert_to_directory` drop what is due, and deadlines
-  survive reopen and backup. Records attached to a node still cannot expire.
+  visibility only and is not time travel). Each graph write first reclaims
+  what is due in the same atomic frame, using computed reclaim entries that do
+  not count toward the 4,096-operation limit; a deadline that a batch sets at
+  or before the write's clock is reclaimed for the rest of that batch.
+  Compaction, `upgrade`, directory checkpoints and `convert_to_directory` drop
+  what is due, and deadlines survive reopen and backup. Records attached to a
+  node still cannot expire.
   See [Expiry](GRAPH.md#expiry-ttl).
   <!-- source: docs/GRAPH.md#expiry-ttl, docs/STORAGE-FEATURES.md#graph-enabled-files, tests/graph_ttl.rs -->
 - **Change feed.** `Database::graph_changes_after`,
   `changes::read_log_graph_changes` and `changes::GraphFeedCursor` read an
-  opt-in graph feed that reports deadline changes and expiry removals. The
-  default feed (`changes_after`) and its bytes are unchanged. A cursor is bound
-  to one event set (`Empty` or `Ttl`), and a page can end inside a large expiry
-  removal and resume there. A checkpoint or compaction image omits entities that
-  are already due without logging a delete, so the feed reports no removal for
+  opt-in graph feed that reports deadline changes and expiry removals. Each
+  operation carries a `GraphTtl` annotation: a deadline set or cleared, an
+  explicit removal, or an expiry removal of the entity's own deadline or of its
+  node. The default feed (`changes_after`) and its bytes are unchanged. A
+  cursor is bound to one event set (`Empty` or `Ttl`), and a page can end
+  inside a large expiry removal and resume there, so keep the whole cursor
+  token (`to_token` and `from_token`): `position()` alone drops the place
+  inside a commit. A checkpoint or compaction image omits entities that are
+  already due without logging a delete, so the feed reports no removal for
   them; reads already hide them.
   <!-- source: docs/projects/roadmap/gap3-ttl-feed.md, site/api.html, tests/graph_ttl_feed.rs, tests/graph_ttl_paths.rs -->
 - **Where it is available.** Rust only. REST, gRPC, MCP, the graph CLI and the
@@ -111,12 +169,14 @@ replays only the active log instead of the whole history.
 counts, hop-constrained weighted shortest paths, PageRank, label propagation
 or sampled betweenness. The scope is a bounded set of seed nodes with a
 direction, relationship types, labels and edge conditions. Work, scratch
-memory and iterations are capped (defaults 100,000 operations, 64 MiB, 20
-iterations and 16 sampled sources; ceilings 1,000,000, 256 MiB, 100 and 64),
-and expiry is read at one clock. Results describe the local scope, not the
-whole graph, report whether they are complete, and nothing is stored or
-written. REST, gRPC, MCP, query text, the graph CLI and the bindings do not
-expose algorithms. See [Property graphs](GRAPH.md).
+memory and iterations are capped (defaults 100,000 vertex operations, 64 MiB,
+20 iterations and 16 sampled sources; ceilings 1,000,000, 256 MiB, 100 and
+64), edge reads, the deadline and cancellation stay bound by the existing
+graph limits, and expiry is read at one clock. Results describe the local
+scope, not the whole graph, echo the view sequence, read clock and normalized
+request, report separately whether the scope and the computation completed,
+and nothing is stored or written. REST, gRPC, MCP, query text, the graph CLI
+and the bindings do not expose algorithms. See [Property graphs](GRAPH.md).
 <!-- source: docs/GRAPH.md, site/api.html, src/property_graph/algorithms/tests.rs, tests/graph_algorithm_oracle.py -->
 
 ### Managed embedding providers and custom ranking (REST and gRPC)
@@ -128,16 +188,23 @@ it up.
 - **Off by default.** Without provider configuration, the built-in hashing
   embedder, the existing opt-in HTTP embedder, and exact and MMR reranking
   behave as before, and the server makes no provider call.
+  [TO CONFIRM AT RC] Re-check this for unconfigured `embed` requests after the
+  pending embedding fixes land: the response numbers and the status for an
+  unknown provider name must match 0.6.1.
   <!-- source: docs/GRPC.md, src/openapi.json, docs/projects/roadmap/serving-contract.md -->
 - **Administrator setup.** An administrator defines providers (endpoint,
-  pinned model and version, dimensions, timeouts, concurrency, endpoint
-  allowlist, and a secret taken from an environment variable or a private
-  file) and binds them to collections in a startup file kept outside the
-  database. Callers cannot supply endpoints, models, headers or secrets.
+  pinned model and version, dimensions, connect and total timeouts,
+  concurrency, an endpoint allowlist, and an optional secret) and binds them
+  to collections in a startup file kept outside the database, with at most 64
+  aliases and 4,096 bindings in a file of at most 1 MiB. A secret is referenced
+  by an environment variable, or on Unix by an absolute private file; Windows
+  rejects file secret sources, so use an environment reference there. Callers
+  cannot supply endpoints, models, headers or secrets. The file schema is in
+  the [serving contract](projects/roadmap/serving-contract.md#gap-8-delivery-1-private-startup-registry-candidate).
   [TO CONFIRM AT RC] The startup names `--providers-file` and
-  `VLITE_PROVIDERS_FILE` await ratification. [VERIFY] The file format is
-  documented only in the serving contract so far.
-  <!-- source: docs/projects/roadmap/serving-contract.md, src/bin/vlite-server.rs, tests/server_cli.rs -->
+  `VLITE_PROVIDERS_FILE` are implemented and tested, but the owner has not
+  ratified them yet.
+  <!-- source: docs/projects/roadmap/serving-contract.md, src/server/providers.rs, src/bin/vlite-server.rs, tests/server_cli.rs -->
 - **REST.** `POST /v1/collections/{collection}/embed` takes `provider` as
   `hashing`, `http` or a bound alias and returns a typed
   `{vector, dimensions, provider}`. Search accepts
@@ -148,23 +215,30 @@ it up.
   Python client has typed shapes for these fields.
   <!-- source: src/openapi.json, clients/python/README.md, docs/projects/roadmap/serving-contract.md -->
 - **gRPC.** The `EmbedText` RPC returns the same shape, and `Search` accepts
-  `RERANK_MODE_CUSTOM` with `rerank_provider`. [TO CONFIRM AT RC] gRPC reports
-  `provider_snapshot_conflict` as `ABORTED`, a provisional mapping.
-  <!-- source: docs/GRPC.md, proto/vlite/v1/vlite.proto, tests/grpc_provider_wire.rs, docs/projects/roadmap/serving-contract.md -->
+  `RERANK_MODE_CUSTOM` with `rerank_provider`. A shorter client `grpc-timeout`
+  also bounds managed work, but a client that resets the stream does not cancel
+  a provider call that is already running; the call stays bound by its total
+  deadline and admission slot.
+  [TO CONFIRM AT RC] gRPC reports `provider_snapshot_conflict` as `ABORTED`.
+  The mapping is implemented and tested, but the owner has not ratified it yet.
+  <!-- source: docs/GRPC.md, proto/vlite/v1/vlite.proto, src/server/grpc.rs, src/server/providers/tests/grpc_serving.rs, tests/grpc_provider_wire.rs, docs/projects/roadmap/serving-contract.md -->
 - **Safety bounds.** The caller needs search authorization before an alias is
   resolved. One embedding input is at most 16,384 UTF-8 bytes. Provider
-  requests are at most 1 MiB and responses 4 MiB, with 2 s connect and 10 s
-  total deadlines and bounded per-provider and per-tenant admission. A provider
-  call is retried at most once, and only when the administrator declared the
-  alias replay-safe. A failed provider is never replaced by a fallback. The new
-  error codes are `provider_not_configured`, `invalid_provider_input`,
-  `provider_invalid_response`, `provider_unavailable`, `provider_timeout`,
-  `provider_busy` and `provider_snapshot_conflict`.
-  <!-- source: docs/GRPC.md, src/openapi.json, docs/projects/roadmap/serving-contract.md -->
+  requests are at most 1 MiB and responses 4 MiB, with administrator-configured
+  connect and total deadlines (at most 2 s and 10 s respectively) and bounded
+  per-provider and per-tenant admission. A provider call is retried at most
+  once, and only when the administrator declared the alias replay-safe. A
+  failed provider is never replaced by a fallback. Only the top-level JSON
+  payload fields that a binding names are sent to a provider, and metadata is
+  never sent implicitly. The new error codes are `provider_not_configured`,
+  `invalid_provider_input`, `provider_invalid_response`,
+  `provider_unavailable`, `provider_timeout`, `provider_busy` and
+  `provider_snapshot_conflict`.
+  <!-- source: docs/GRPC.md, src/openapi.json, src/server/providers.rs, docs/projects/roadmap/serving-contract.md -->
 - **Older peers.** The additions are optional, and existing messages keep their
   tags and meanings, so older clients keep working and ignore them. An older
-  server has no `EmbedText` RPC (`UNIMPLEMENTED`) and rejects custom rerank
-  mode.
+  server has no `EmbedText` RPC or `Kv` service (`UNIMPLEMENTED`) and rejects
+  custom rerank mode.
   <!-- source: docs/GRPC.md, tests/grpc_provider_wire.rs -->
 
 ### Exact search kernels (results unchanged)
@@ -182,24 +256,30 @@ it up.
   searcher's CPU re-score. The NEON kernel was validated on native aarch64 CI.
   No performance claim is made here (see [Benchmarks](#benchmarks)).
   <!-- source: docs/projects/roadmap/p3-compact-vectors.md#p3d-progress-exact-simd-kernels-reviewed-unreleased, src/exact_kernels.rs, .github/workflows/ci.yml -->
-- **[VERIFY] Filter block summaries.** Exact filtered search on a collection
+- **Filter block summaries.** Exact filtered search on a collection
   with declared metadata indexes keeps in-memory summaries of each block of
-  1,024 records and skips blocks that provably hold no match. Hits, distances
-  and order are unchanged, and only `SearchStats::records_scanned` can be
-  lower. Nothing is written to disk. Repository docs still call this
-  unreleased, so confirm that it belongs in these notes.
-  <!-- source: docs/STORAGE-FEATURES.md#filter-block-summaries-unreleased, tests/filter_summaries.rs -->
+  1,024 records and skips blocks that provably hold no match. This applies
+  automatically to eligible exact filtered scans, including the exact scan
+  inside `search_auto`. Hits, distances and order are unchanged, and only
+  `SearchStats::records_scanned` can be lower. Nothing is written to disk.
+  <!-- source: docs/STORAGE-FEATURES.md#filter-block-summaries-unreleased, tests/filter_summaries.rs, src/metadata_index.rs -->
 
 ### Approximate search: opt-in background rebuild (Rust)
 
 `Database::set_background_hnsw_rebuild`, and the same method on
 `CollectionMut`, lets a full mutation buffer start a background rebuild instead
 of blocking the next query: searches keep using the current index plus an exact
-scan of the changed records until the replacement is published. The option is
-off by default, applies to one handle and is not persisted, so set it again
-after reopening. No REST setting or request field was added. See
+scan of the changed records until the replacement is published. Before the
+first matching index exists, ordinary approximate queries scan exactly, while
+the ready-only APIs still return their missing-index error and never start
+work. A slow rebuild can let the set of changed records grow past the usual
+256-ID and 8 MiB limits, which costs memory and exact-scan time instead of
+discarding the ready index, and errors are returned, never hidden by an inline
+build. The option is off by default, applies to one handle and is not
+persisted, so set it again after reopening. No REST setting or request field
+was added. See
 [Background HNSW rebuilds](REFERENCE.md#background-hnsw-rebuilds-rust).
-<!-- source: docs/REFERENCE.md#background-hnsw-rebuilds-rust, site/api.html -->
+<!-- source: docs/REFERENCE.md#background-hnsw-rebuilds-rust, site/api.html, src/rebuild.rs -->
 
 ## Fixed
 
@@ -232,7 +312,7 @@ after reopening. No REST setting or request field was added. See
 
 ## Benchmarks
 
-[TO FILL AT RC] Link this release's results in the DO-005 record ([baseline](projects/feature-agent-graph/baseline.md), [results](../benchmarks/RESULTS.md)) or state that none were run; this draft quotes no benchmark numbers.
+[TO FILL AT RC] Link this release's results in the DO-005 record ([baseline](projects/feature-agent-graph/baseline.md), [results](../benchmarks/RESULTS.md)). No 0.7.0 result is linked in this draft, which quotes no benchmark numbers.
 <!-- source: docs/projects/feature-agent-graph/baseline.md, benchmarks/RESULTS.md, docs/projects/roadmap/next-major.md -->
 
 ## Upgrade
@@ -244,21 +324,26 @@ single-writer rule: stop the old process (or scale the old revision to zero
 replicas) before the new one opens the file.
 <!-- source: docs/RELEASE-0.6.1.md, docs/RELEASE-0.6.0.md, docs/STORAGE-FEATURES.md -->
 
-Every new capability is opt-in and changes nothing until you use it:
+These application-facing operations and storage modes need explicit use or
+setup, and change nothing until you use them:
 
-- the key-value store, when you call `kv_store` or the local key-value tools;
+- the key-value store, through the Rust API, the local shell and MCP tools, the
+  REST or gRPC operations, or the HTTP client methods;
 - the directory store, when you create or convert one;
 - graph expiry and the TTL-aware feed, when you set a deadline or read that
   feed;
 - graph algorithms, when you call `GraphRef::algorithm`;
 - managed providers, when an administrator supplies a startup file;
 - background index rebuilds, when you call `set_background_hnsw_rebuild`.
-<!-- source: docs/STORAGE-FEATURES.md#key-value-store, docs/STORAGE-FEATURES.md#directory-store, docs/GRAPH.md#expiry-ttl, docs/GRPC.md, docs/REFERENCE.md#background-hnsw-rebuilds-rust, tests/server_cli.rs -->
+<!-- source: docs/STORAGE-FEATURES.md#key-value-store, docs/STORAGE-FEATURES.md#directory-store, docs/GRAPH.md#expiry-ttl, docs/GRPC.md, docs/API.md#key-value-entries, docs/REFERENCE.md#background-hnsw-rebuilds-rust, tests/server_cli.rs -->
 
-Exact search uses the SIMD kernels automatically, with identical results.
-Rust code that matches `GraphChange` exhaustively needs one new arm (see
+Exact SIMD scoring and filter-summary pruning apply automatically and leave
+search hits and distances unchanged; summaries can lower
+`SearchStats::records_scanned`. The fixes above apply automatically too. Rust
+code that matches `GraphChange` exhaustively needs a new arm, and code that
+uses the generated `grpc` types has further source changes (see
 [Compatibility](#compatibility)).
-<!-- source: docs/projects/roadmap/p3-compact-vectors.md#p3d-progress-exact-simd-kernels-reviewed-unreleased, src/exact_kernels.rs, src/property_graph/change.rs -->
+<!-- source: src/exact_kernels.rs, src/metadata_index.rs, tests/filter_summaries.rs, src/property_graph/change.rs, proto/vlite/v1/vlite.proto -->
 
 ## Rollback
 
@@ -272,18 +357,27 @@ read unless you used one of these:
   DESTINATION --confirm-graph-data-loss`, which keeps the vectors and drops the
   graphs.
   <!-- source: docs/GRAPH.md#expiry-ttl, docs/GRAPH.md#compatibility-and-rollback -->
-- **Directory store checkpoints.** Older releases cannot open a directory that
-  has been checkpointed, or a backup packed from one. Keep the single file you
-  converted from. [VERIFY] To leave a checkpointed directory, pack it with
-  `backup` and compact the packed file (compaction drops the checkpoint flag
-  and renumbers from one), then open the result with the older binary before
-  you rely on it. No test covers this path.
-  <!-- source: docs/STORAGE-FEATURES.md#directory-store, docs/projects/roadmap/p2-directory-store.md -->
+- **Directory store.** 0.6.1 cannot open a directory path at all, even one
+  that has never been checkpointed, and a backup packed from a checkpointed
+  directory carries a history flag that 0.6.1 refuses. Keep the single file you
+  converted from; it excludes everything written to the directory since. To
+  copy the current state out, use 0.7.0 `backup` and then `compact` into a
+  separate file: compaction drops the history flag, starts a new lineage and
+  renumbers revisions from one. Compaction of such an image is tested for plain
+  and encrypted stores, but the whole chain from a checkpointed directory
+  through `backup` and `compact` to the 0.6.1 binary is not tested end to end,
+  so open the result with 0.6.1 before you rely on it. A copy that still holds
+  graph deadlines is refused as `Corrupt`; use `strip-graph` on it as described
+  above.
+  <!-- source: docs/STORAGE-FEATURES.md#directory-store, docs/projects/roadmap/p2-directory-store.md, src/maintenance.rs, src/format.rs -->
 
 If you configured managed providers, also remove `--providers-file` or
 `VLITE_PROVIDERS_FILE` from the startup arguments and environment, because
-0.6.1 has no providers file.
-<!-- source: src/bin/vlite-server.rs -->
+0.6.1 has no providers file. Stop clients from calling `EmbedText`, custom
+reranking and the key-value operations as well, because 0.6.1 does not serve
+them. Key-value entries are ordinary records, so 0.6.1 still opens the file and
+reads them as records of a one-dimension collection.
+<!-- source: src/bin/vlite-server.rs, src/kv.rs, proto/vlite/v1/vlite.proto -->
 
 ## Compatibility
 
@@ -294,31 +388,43 @@ If you configured managed providers, also remove `--providers-file` or
   <!-- source: tests/graph_regression.rs, docs/RELEASE-0.6.0.md, docs/STORAGE-FEATURES.md#periodic-lazy-durability, Cargo.toml -->
 - **Files.** The new stores and features add nothing to a file unless you use
   them, and key-value entries are ordinary records. A graph file that has used
-  expiry, and a checkpointed directory store or a backup packed from one,
-  cannot be opened by older releases (see [Rollback](#rollback)). A file that
-  never uses expiry is written exactly as before.
-  <!-- source: docs/GRAPH.md#expiry-ttl, docs/STORAGE-FEATURES.md#directory-store, tests/graph_ttl.rs, src/kv.rs -->
-- **Wire.** REST and gRPC changes are additive: optional fields, one new RPC
-  and one new rerank mode, with existing tags and meanings unchanged. The
-  `tools/list` of `vlite-mcp` lists four more tools: `vlite_kv_get` and
-  `vlite_kv_list` in read-only mode, plus `vlite_kv_put` and `vlite_kv_delete`
-  with `--writable`.
-  <!-- source: src/openapi.json, proto/vlite/v1/vlite.proto, tests/grpc_provider_wire.rs, tests/graph_surface_parity.rs, tests/fixtures/kv/mcp-tool-additions.json -->
+  expiry cannot be opened by older releases, and neither can a directory store
+  or a backup packed from a checkpointed one (see [Rollback](#rollback)). A
+  file that never uses expiry is written exactly as before. A file whose header
+  carries the history or compact flag without the matching structure is now
+  reported as `Corrupt`, where 0.6.1 reported `UnsupportedFeature`; no valid
+  file written by 0.6.1 is affected.
+  <!-- source: docs/GRAPH.md#expiry-ttl, docs/STORAGE-FEATURES.md#directory-store, tests/graph_ttl.rs, src/kv.rs, src/format.rs -->
+- **Wire.** REST and gRPC changes are additive: the four key-value REST
+  operations, five new RPCs (the four-RPC `vlite.v1.Kv` service and
+  `VLite.EmbedText`), optional provider and ranking fields, and one new rerank
+  mode, with existing tags and meanings unchanged. The `tools/list` of
+  `vlite-mcp` lists four more tools: `vlite_kv_get` and `vlite_kv_list` in
+  read-only mode, plus `vlite_kv_put` and `vlite_kv_delete` with `--writable`.
+  <!-- source: src/openapi.json, proto/vlite/v1/vlite.proto, tests/grpc_provider_wire.rs, tests/server_grpc_kv.rs, tests/graph_surface_parity.rs, tests/fixtures/kv/mcp-tool-additions.json -->
 - **Errors.** `cursor_before_history` (Rust `Error::CursorBeforeHistory`, REST
   409, a C ABI error string) applies to history below a directory store's
   checkpoint floor. The Rust `Error` enum, which is `#[non_exhaustive]`, also
-  gains `InvalidKvKey`, `KvSlotsExhausted` and `NotKvCollection`.
-  <!-- source: src/lib.rs, src/server.rs, bindings/c/src/lib.rs, docs/API.md -->
+  gains `InvalidKvKey`, `KvSlotsExhausted` and `NotKvCollection`. Over REST and
+  gRPC, `kv_not_found`, `not_kv_collection`, `kv_slots_exhausted` and the seven
+  provider codes are new.
+  <!-- source: src/lib.rs, src/server.rs, src/server/kv.rs, bindings/c/src/lib.rs, docs/API.md -->
 - **Rust source.** `GraphChange` (`vlite::property_graph::GraphChange`, also
   `vlite::changes::GraphChange`) gains a `Temporal(TemporalChange)` variant and
   is not `#[non_exhaustive]`, so a `match` that lists every variant stops
   compiling: add an arm or a wildcard. Production builds never produce the
   variant. `NodeView` and `EdgeView`, both `#[non_exhaustive]`, gain
-  `expires_at_ms`.
-  <!-- source: src/property_graph/change.rs, src/property_graph/read.rs, src/server/grpc.rs -->
-- **Build.** The library now depends on `log` and, outside WebAssembly, on
-  `memmap2`.
-  <!-- source: Cargo.toml -->
+  `expires_at_ms`. With the `grpc` feature, the generated public Rust types
+  change too: an exhaustive `match` on `RerankMode` needs the new `Custom` arm,
+  `SearchRequest`, `Hit` and `SearchResponse` gain fields (so a struct literal
+  needs `..Default::default()`), and code that implements the generated `VLite`
+  server trait must add `embed_text`. These are source changes, separate from
+  the additive wire changes above.
+  <!-- source: src/property_graph/change.rs, src/property_graph/read.rs, src/server/grpc.rs, build.rs, proto/vlite/v1/vlite.proto -->
+- **Build.** The library now depends on `log` 0.4 (one warning when a reader
+  skips derived blocks of a compact image) and, outside WebAssembly, on
+  `memmap2` 0.9.
+  <!-- source: Cargo.toml, src/compact/mod.rs -->
 
 ## Not included in this release
 
@@ -332,14 +438,11 @@ you should not rely on them:
 - **Compact graph storage.** It is test-only, and production graph storage is
   unchanged.
   <!-- source: docs/GRAPH.md, src/compact/mod.rs -->
-- **Agent memory** (remember, recall, consolidate, forget). The code is
-  crate-private and inactive.
-  <!-- source: docs/projects/roadmap/next-major.md, docs/projects/roadmap/gap1-agent-memory.md, src/lib.rs -->
 - **Temporal graph** (validity intervals and as-of reads). Production builds
   refuse temporal operations and temporal files with `UnsupportedFeature(64)`.
-  The public `GraphChange::Temporal`, `GraphOp::Temporal` and
-  `Database::temporal_changes_after` items exist, but never carry temporal
-  data in a production build.
+  The public `GraphChange::Temporal`, `GraphOp::Temporal`, `TemporalOp`,
+  `TemporalSegment`, `TemporalChange` and `Database::temporal_changes_after`
+  items exist, but never carry temporal data in a production build.
   <!-- source: docs/GRAPH.md, site/api.html, src/property_graph/change.rs -->
 - **Cypher-style query subset.** The parser, planner and read executor are
   crate-private, with no public surface.
@@ -348,7 +451,8 @@ you should not rely on them:
   references exist.
   <!-- source: docs/projects/roadmap/next-major.md, docs/projects/roadmap/gap7-graphrag-ingestion.md -->
 - **Leases and a fencing-token ledger.** This is a design only and is not
-  implemented.
+  implemented. Key-value versions are not such a ledger (see
+  [Key-value store](#key-value-store)).
   <!-- source: docs/projects/roadmap/next-major.md, docs/projects/roadmap/gap2-lease-ledger.md -->
 - **Filter-aware approximate search.** It is private and gated.
   <!-- source: docs/projects/roadmap/next-major.md, docs/projects/roadmap/p5-filters-and-serving.md -->

@@ -65,8 +65,8 @@
           <tr><th scope="row">Record expiry (TTL)</th><td>Absolute expiry timestamps, expiry-aware reads and compaction. Requires format 5.</td></tr>
           <tr><th scope="row">Metadata-only updates</th><td>Change metadata without rewriting the vector or payload; expiry is kept. Requires format 5.</td></tr>
           <tr><th scope="row">Resumable ingestion</th><td>Atomic chunks with durable checkpoints, replay detection, row validation and reject or skip-invalid policies. Requires format 4 or 5.</td></tr>
-          <tr><th scope="row">Key-value store</th><td>Namespaced string keys with byte values and no vector: ordered prefix listing, optional expiry, compare-and-set and fencing tokens. A Rust API plus local shell and MCP tools. Requires format 4 or 5; expiry needs 5.</td></tr>
-          <tr><th scope="row">Directory store (opt-in)</th><td>A format 5 database kept as a directory of write-ahead logs and a checkpoint image, so reopening replays only the active log. Created from Rust or converted from a file; older releases cannot open a checkpointed store.</td></tr>
+          <tr><th scope="row">Key-value store</th><td>Namespaced string keys with byte values and no vector: ordered prefix listing, optional expiry and compare-and-set on versions. Use it from Rust, REST, gRPC, the Python, JavaScript and .NET clients, and local shell and MCP tools. Requires format 4 or 5; expiry needs 5.</td></tr>
+          <tr><th scope="row">Directory store (opt-in)</th><td>A format 5 database kept as a directory of write-ahead logs and a checkpoint image, so reopening replays only the active log. Created from Rust or converted from a file; older releases cannot open a directory store.</td></tr>
           <tr><th scope="row">In-memory database</th><td>Create in memory, open from bytes and export bytes; the host handles persistence.</td></tr>
         </tbody></table></div>
         <p><a href="docs/REFERENCE.html">Storage contracts</a> &middot; <a href="docs/CAPABILITIES.html">Collections, revisions and ingestion</a> &middot; <a href="docs/STORAGE-FEATURES.html#periodic-lazy-durability">Periodic durability</a></p>

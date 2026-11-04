@@ -284,7 +284,10 @@ kv.delete("pool", "claim/42", Expected::Revision(token))?;
   existing one-dimension collections; see [REST KV](API.md#key-value-entries) for wire
   bounds and pagination. Unlike the Rust handle, neither transport creates a
   collection. gRPC uses `vlite.v1.Kv` and raw byte values with the same page
-  boundary. MCP, CLI, client helpers and leases are not yet exposed.
+  boundary. The Python, JavaScript and .NET clients call the REST routes; the
+  [shell](TOOLS.md#local-key-value-shell-commands) and
+  [MCP](MCP.md#local-key-value-tools) tools work on local files only. Leases
+  are not provided.
 - Ordinary KV follows configured durability: `full` syncs, `periodic` can lose
   a flush interval on OS crash/power loss, and `none` is memory-only. Entry
   revisions do not establish durable, never-reused lease fencing domains.
@@ -306,13 +309,14 @@ store/
 
 - **Checkpoints** fold the logs into one image on a background thread, so
   reopen loads the image plus a short log instead of the whole history.
-  One starts after a commit once the active log passes 64 MiB. Change it with
+  One starts after a commit once the active log reaches 64 MiB. Change it with
   `set_checkpoint_threshold(Some(bytes))`, turn it off with `None`, or run one
   and wait with `checkpoint()`, which returns the floor sequence.
 - **Reopen** maps the image and sealed logs read-only and loads the image's
   records and graphs in bulk, in parallel, instead of replaying them; only
-  the active log is replayed. Earlier releases cannot open a directory that
-  this release has checkpointed, or a backup packed from one.
+  the active log is replayed. Earlier releases cannot open a directory path at
+  all, even before its first checkpoint, nor a backup packed from a
+  checkpointed one.
 - **Kept across checkpoints:** the lineage, every record's revision
   (compare-and-set and fencing tokens still match), graphs and encryption.
 - **History below the floor is gone.** Change-feed and log-segment requests

@@ -182,7 +182,7 @@ test generates its stubs from the same proto. No generated stubs are checked in.
 ## Key-value entries
 
 `vlite.v1.Kv` provides `GetKvEntry`, `PutKvEntry`, `DeleteKvEntry` and
-`ListKvEntries`. The four ordinary KV RPCs join 34 `VLite` RPCs (38 total);
+`ListKvEntries`. The four ordinary KV RPCs join 35 `VLite` RPCs (39 total);
 there are no lease RPCs. Addresses require a nonempty collection name.
 Values are raw bytes, versions/deadlines are `uint64`, and optional expiry
 distinguishes an unset deadline from zero. Get/list require collection `read`;
