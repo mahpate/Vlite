@@ -274,6 +274,9 @@ impl MemoryRef<'_> {
                 limits,
                 request.cancel,
             )?;
+            if let Some(stop) = hard_stop(&reasons) {
+                return Err(stop);
+            }
             *edges_charged += examined;
             match counts {
                 Some(counts) => return Ok(Some(counts.stale)),
@@ -291,6 +294,18 @@ impl MemoryRef<'_> {
             }
         }
         Ok(None)
+    }
+}
+
+/// A label read stopped by cancellation or the deadline is a hard error,
+/// never budget exhaustion or a partial label.
+fn hard_stop(reasons: &[TruncationReason]) -> Option<RecallError> {
+    if reasons.contains(&TruncationReason::Cancelled) {
+        Some(RecallError::Cancelled)
+    } else if reasons.contains(&TruncationReason::Deadline) {
+        Some(RecallError::Deadline)
+    } else {
+        None
     }
 }
 

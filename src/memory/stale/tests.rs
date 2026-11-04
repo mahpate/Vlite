@@ -11,7 +11,7 @@ use super::super::{
     MemoryProperties, MemoryRef, MemoryScope, Provenance, RememberRequest, content_digest, hex,
     memory_key, memory_properties,
 };
-use super::{SummaryStatus, SummaryStatusRequest, derived_edge_key};
+use super::{SummaryStatus, SummaryStatusRequest, derived_edge_key, hard_stop};
 use crate::{
     Database, Expected, Metadata, MetadataValue,
     property_graph::{EdgeRef, GraphOp},
@@ -1174,12 +1174,41 @@ fn s2_cancellation_after_search_reaches_the_label_read() {
     // Search already finished; the flag is set before the label read. Recall's
     // own `work.check()` immediately precedes the label call, so only the
     // label read itself can observe a flag raised in between.
-    let mut cancelled = recall_request(at, 100, true);
-    cancelled.cancel = Some(&CANCELLED);
-    let (label, charged, truncation) = label_read(&db, &cancelled, "s");
-    assert_eq!(label.ok(), Some(None), "a cancelled label is not guessed");
-    assert_eq!(charged, 0);
-    assert_eq!(truncation, [TruncationReason::Cancelled]);
+    // Cancellation is a hard error, never budget exhaustion or a partial,
+    // under recall's own budget (100) and at the engine cap (256).
+    for remaining in [100, 256] {
+        for allow_partial in [false, true] {
+            let mut cancelled = recall_request(at, remaining, allow_partial);
+            cancelled.cancel = Some(&CANCELLED);
+            let (label, charged, truncation) = label_read(&db, &cancelled, "s");
+            assert!(
+                matches!(label, Err(RecallError::Cancelled)),
+                "{remaining} {allow_partial}: {label:?}"
+            );
+            assert_eq!(charged, 0, "{remaining} {allow_partial}");
+            assert!(truncation.is_empty(), "{remaining} {allow_partial}");
+        }
+    }
+}
+
+#[test]
+fn s2_label_deadline_and_cancellation_are_hard_stops_not_budget() {
+    use TruncationReason::*;
+    // The engine's deadline runs on a real monotonic clock with a 1 ms floor,
+    // so the label read's classification of its reasons is pinned directly.
+    let stop = |reasons: &[TruncationReason]| match hard_stop(reasons) {
+        Some(RecallError::Cancelled) => "cancelled",
+        Some(RecallError::Deadline) => "deadline",
+        Some(other) => panic!("{other:?}"),
+        None => "budget",
+    };
+    assert_eq!(stop(&[Deadline]), "deadline");
+    assert_eq!(stop(&[EdgeLimit, Deadline]), "deadline");
+    assert_eq!(stop(&[Cancelled]), "cancelled");
+    assert_eq!(stop(&[EdgeLimit, Deadline, Cancelled]), "cancelled");
+    assert_eq!(stop(&[EdgeLimit]), "budget");
+    assert_eq!(stop(&[OutputLimit]), "budget");
+    assert_eq!(stop(&[]), "budget");
 }
 
 #[test]
