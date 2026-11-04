@@ -914,3 +914,189 @@ fn s1_status_survives_reopen_on_every_backend() {
         assert_eq!(after, before, "{name}");
     }
 }
+
+// S2: staleness label in recall (Gap 1 C2 contract section 6 S2). Summaries
+// reach recall through a real entity whose REFERENCES edge targets them.
+
+use super::super::ranking::RankingPolicy;
+use super::super::recall::{
+    RecallError, RecallLimits, RecallOutput, RecallRequest, RecallSeed, Selection,
+};
+use crate::property_graph::{GraphLimits, TruncationReason};
+
+/// A real entity `root` in the base scope that references `targets`.
+fn root(db: &mut Database, targets: &[&str], now: u64) {
+    let request = RememberRequest {
+        scope: scope(),
+        idempotency_key: "root".into(),
+        receipt_window_ms: 1_000,
+        now_ms: now,
+        deadline_ms: None,
+        allow_future_observations: false,
+        items: vec![MemoryItem {
+            id: "root".into(),
+            kind: MemoryKind::Entity,
+            content: "content root".into(),
+            source: "origin".into(),
+            importance: None,
+            observed_at_ms: Some(now as i64),
+            provenance: Vec::new(),
+            references: ids(targets),
+            merge_into: None,
+            expected_revision: None,
+            expiry_ms: None,
+            expiry_valid: true,
+            evidence: Vec::new(),
+        }],
+    };
+    MemoryMut::bind(db, GRAPH, None)
+        .unwrap()
+        .remember(&request)
+        .unwrap();
+}
+
+/// Seeded expansion from `root` at C with `max_edges_examined = budget`.
+fn recall_request(now: u64, budget: u64, allow_partial: bool) -> RecallRequest<'static> {
+    RecallRequest {
+        scopes: vec![scope()],
+        kinds: vec![MemoryKind::Entity, MemoryKind::Episodic],
+        filter: Vec::new(),
+        query: None,
+        seeds: vec![RecallSeed {
+            scope: scope(),
+            id: "root".into(),
+        }],
+        as_of_ms: None,
+        clock_ms: now,
+        policy: RankingPolicy::default(),
+        selection: Selection::Ranked,
+        limits: RecallLimits {
+            graph: GraphLimits {
+                max_edges_examined: budget,
+                deadline_ms: 5_000,
+                ..GraphLimits::default()
+            },
+            ..RecallLimits::default()
+        },
+        expand: true,
+        allow_partial,
+        snippet_bytes: 64,
+        cancel: None,
+    }
+}
+
+fn recall(db: &Database, request: &RecallRequest<'_>) -> Result<RecallOutput, RecallError> {
+    let before = (db.sequence, db.end);
+    let result = MemoryRef::bind(db, GRAPH, None).unwrap().recall(request);
+    assert_eq!(before, (db.sequence, db.end), "recall appended");
+    result
+}
+
+/// `(id, stale)` of every hit in output order.
+fn labels(output: &RecallOutput) -> Vec<(&str, Option<bool>)> {
+    output
+        .hits
+        .iter()
+        .map(|hit| (hit.ranking.candidate.id.as_str(), hit.stale))
+        .collect()
+}
+
+/// Summary `s` over a, b, c referenced by `root`: expansion examines root's
+/// one REFERENCES edge, then the label examines three DERIVED_FROM edges.
+fn labelled(dir: &Path) -> (Database, u64) {
+    let (mut db, now) = three(dir);
+    root(&mut db, &["s"], now + 2);
+    (db, now)
+}
+
+const EXPANSION_EDGES: u64 = 1;
+const LABEL_EDGES: u64 = 3;
+
+#[test]
+fn s2_recall_labels_summaries_true_false_and_none() {
+    let dir = tempfile::tempdir().unwrap();
+    let (mut db, now) = labelled(dir.path());
+    let fresh = recall(&db, &recall_request(now + 3, 10_000, false)).unwrap();
+    assert!(fresh.complete);
+    let mut fresh_labels = labels(&fresh);
+    fresh_labels.sort();
+    assert_eq!(fresh_labels, [("root", None), ("s", Some(false))]);
+
+    forget(&mut db, "b", now + 4);
+    let forgotten = recall(&db, &recall_request(now + 5, 10_000, false)).unwrap();
+    assert!(forgotten.complete);
+    let mut stale = labels(&forgotten);
+    stale.sort();
+    assert_eq!(
+        stale,
+        [("root", None), ("s", Some(true))],
+        "an entity is never labelled; a forgotten source makes the summary stale"
+    );
+    // Labels never change eligibility or order.
+    assert_eq!(
+        forgotten
+            .hits
+            .iter()
+            .map(|hit| hit.ranking.candidate.id.clone())
+            .collect::<Vec<_>>(),
+        fresh
+            .hits
+            .iter()
+            .map(|hit| hit.ranking.candidate.id.clone())
+            .collect::<Vec<_>>()
+    );
+}
+
+#[test]
+fn s2_label_work_is_charged_to_the_graph_budget_at_the_exact_boundary() {
+    let dir = tempfile::tempdir().unwrap();
+    let (db, now) = labelled(dir.path());
+    let at = now + 3;
+    let total = EXPANSION_EDGES + LABEL_EDGES;
+    let exact = recall(&db, &recall_request(at, total, false)).unwrap();
+    assert!(exact.complete);
+    assert!(exact.truncation.is_empty());
+    assert_eq!(exact.stats.edges_charged, total, "label edges are charged");
+    let label = |output: &RecallOutput| {
+        output
+            .hits
+            .iter()
+            .find(|hit| hit.ranking.candidate.id == "s")
+            .map(|hit| hit.stale)
+    };
+    assert_eq!(label(&exact), Some(Some(false)));
+    assert_eq!(
+        recall(&db, &recall_request(at, 10_000, false))
+            .unwrap()
+            .stats
+            .edges_charged,
+        total
+    );
+
+    // One edge short: refused unless partial results were requested.
+    assert!(matches!(
+        recall(&db, &recall_request(at, total - 1, false)),
+        Err(RecallError::Budget("graph"))
+    ));
+    let partial = recall(&db, &recall_request(at, total - 1, true)).unwrap();
+    assert!(!partial.complete);
+    assert_eq!(partial.truncation, [TruncationReason::EdgeLimit]);
+    assert_eq!(partial.stats.edges_charged, total - 1);
+    assert_eq!(
+        label(&partial),
+        Some(None),
+        "an exhausted label is not guessed"
+    );
+    assert_eq!(labels(&partial).len(), labels(&exact).len());
+
+    // Nothing left after expansion: the label read is not attempted.
+    assert!(matches!(
+        recall(&db, &recall_request(at, EXPANSION_EDGES, false)),
+        Err(RecallError::Budget("graph"))
+    ));
+    let empty = recall(&db, &recall_request(at, EXPANSION_EDGES, true)).unwrap();
+    assert!(!empty.complete);
+    assert_eq!(empty.truncation, [TruncationReason::EdgeLimit]);
+    assert_eq!(empty.stats.edges_charged, EXPANSION_EDGES);
+    assert_eq!(label(&empty), Some(None));
+}

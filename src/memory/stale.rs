@@ -5,17 +5,21 @@
 //! DERIVED_FROM edges, source memory revisions and TTL at C; nothing is
 //! written, repaired, cascaded or persisted. Crate-private only.
 
-use std::collections::BTreeMap;
+use std::{collections::BTreeMap, sync::atomic::AtomicBool};
 
 use sha2::{Digest, Sha256};
 
+use super::recall::{RecallError, RecallRequest};
 use super::{
     LABEL_MEMORY, MemoryError, MemoryRef, MemoryResult, MemoryScope, existing_memory, hex,
     memory_key, opaque, string_property,
 };
 use crate::{
     MetadataValue,
-    property_graph::{Direction, GraphLimits, Neighbors, NodeSelector, NodeView, ReadOptions},
+    property_graph::{
+        Direction, GraphLimits, GraphRef, Neighbors, NodeSelector, NodeView, ReadOptions,
+        TruncationReason,
+    },
 };
 
 const SCHEMA: &str = "consolidate:v1";
@@ -191,77 +195,186 @@ impl MemoryRef<'_> {
         let view_sequence = summary.view_sequence;
         let summary = summary.output.ok_or(MemoryError::MissingMemory)?;
         let source_count = decode_summary(&summary, &scope_key, &request.summary_id)?;
-
-        // Retained edges, independent of TTL: clock 0 hides nothing that a
-        // deadline in the epoch could hide. Visibility is then decided at C.
         let limits = GraphLimits {
             max_edges_examined: MAX_EDGES,
-            max_edges_per_node: MAX_EDGES,
-            max_output_edges: MAX_EDGES,
-            max_output_nodes: MAX_EDGES,
             ..GraphLimits::DEFAULT
         };
-        let edges = graph.with_clock(0).neighbors(
-            &Neighbors {
-                node: NodeSelector::key(&summary_key),
-                direction: Direction::Out,
-                types: Some(vec![DERIVED_FROM.into()]),
-                edge_conditions: Vec::new(),
-                limit: Some(MAX_EDGES),
-                cursor: None,
-            },
-            &ReadOptions {
-                limits,
-                ..ReadOptions::default()
-            },
+        let (counts, _, _) = derive(
+            &graph,
+            &scope_key,
+            &summary_key,
+            source_count,
+            now,
+            limits,
+            None,
         )?;
-        if !edges.complete {
-            return Err(MemoryError::OperationLimit);
-        }
-        let retained = edges.output.edges.len() as u64;
-        if retained > source_count {
-            return Err(MemoryError::InvalidBundle);
-        }
-        let nodes: BTreeMap<u64, &NodeView> = edges
-            .output
-            .nodes
-            .iter()
-            .map(|node| (node.id, node))
-            .collect();
-        let (mut live, mut changed, mut expired) = (0, 0, 0);
-        for edge in &edges.output.edges {
-            let edge_revision = edge.properties.get("c1_source_memory_revision");
-            if edge.key.as_deref() != Some(&derived_edge_key(&summary_key, &edge.target_key)?)
-                || edge.expires_at_ms.is_some()
-                || edge.properties.len() != 2
-                || edge.properties.get("c1_schema") != Some(&MetadataValue::String(SCHEMA.into()))
-            {
-                return Err(MemoryError::InvalidBundle);
-            }
-            let edge_revision = edge_revision
-                .and_then(canonical_revision)
-                .ok_or(MemoryError::InvalidBundle)?;
-            let source = nodes.get(&edge.target).ok_or(MemoryError::InvalidBundle)?;
-            let source_revision = decode_source(source, &scope_key)?;
-            if source.expires_at_ms.is_some_and(|deadline| deadline <= now) {
-                expired += 1;
-            } else {
-                live += 1;
-                if source_revision != edge_revision {
-                    changed += 1;
-                }
-            }
-        }
+        let counts = counts.ok_or(MemoryError::OperationLimit)?;
         Ok(SummaryStatus {
             summary_id: request.summary_id.clone(),
             source_count: source_count as usize,
-            live_sources: live,
-            changed_sources: changed,
-            expired_sources: expired,
-            stale: retained < source_count || changed > 0 || expired > 0,
+            live_sources: counts.live,
+            changed_sources: counts.changed,
+            expired_sources: counts.expired,
+            stale: counts.stale,
             view_sequence,
         })
     }
+
+    /// S2: the stale label of one recall hit at the recall clock C. Examined
+    /// DERIVED_FROM edges are charged to the recall graph budget. `None` for
+    /// a non-summary; for a summary only when `allow_partial` accepted an
+    /// exhausted budget, which is then marked in `truncation`. Never guessed.
+    pub(super) fn recall_stale_label(
+        &self,
+        request: &RecallRequest<'_>,
+        scope: &MemoryScope,
+        id: &str,
+        deadline_ms: u64,
+        edges_charged: &mut u64,
+        truncation: &mut Vec<TruncationReason>,
+    ) -> Result<Option<bool>, RecallError> {
+        let now = request.clock_ms;
+        let scope_key = scope.key();
+        let summary_key = memory_key(&scope_key, id);
+        let graph = self.db.graph(&self.graph)?;
+        let read = graph.with_clock(now);
+        if read
+            .memory_string_property(&summary_key, "c1_schema")
+            .is_none()
+        {
+            return Ok(None);
+        }
+        let summary = read
+            .get_node(&summary_key)?
+            .output
+            .ok_or(MemoryError::InvalidBundle)?;
+        let source_count = decode_summary(&summary, &scope_key, id)?;
+        let remaining = request
+            .limits
+            .graph
+            .max_edges_examined
+            .saturating_sub(*edges_charged);
+        let reasons = if remaining == 0 {
+            vec![TruncationReason::EdgeLimit]
+        } else {
+            let limits = GraphLimits {
+                max_edges_examined: remaining.min(MAX_EDGES),
+                deadline_ms,
+                ..GraphLimits::DEFAULT
+            };
+            let (counts, examined, reasons) = derive(
+                &graph,
+                &scope_key,
+                &summary_key,
+                source_count,
+                now,
+                limits,
+                request.cancel,
+            )?;
+            *edges_charged += examined;
+            match counts {
+                Some(counts) => return Ok(Some(counts.stale)),
+                // S1's own 256-edge cap, not recall's budget, stopped the read.
+                None if remaining >= MAX_EDGES => return Err(MemoryError::OperationLimit.into()),
+                None => reasons,
+            }
+        };
+        if !request.allow_partial {
+            return Err(RecallError::Budget("graph"));
+        }
+        for reason in reasons {
+            if !truncation.contains(&reason) {
+                truncation.push(reason);
+            }
+        }
+        Ok(None)
+    }
+}
+
+/// Retained-edge counts of one decoded summary at C.
+struct Counts {
+    live: usize,
+    changed: usize,
+    expired: usize,
+    stale: bool,
+}
+
+/// Reads and checks a decoded summary's retained DERIVED_FROM edges within
+/// `limits.max_edges_examined`. Returns the counts (only for a complete
+/// read), the edges examined and the read's truncation reasons.
+fn derive(
+    graph: &GraphRef<'_>,
+    scope_key: &str,
+    summary_key: &str,
+    source_count: u64,
+    now: u64,
+    limits: GraphLimits,
+    cancel: Option<&AtomicBool>,
+) -> MemoryResult<(Option<Counts>, u64, Vec<TruncationReason>)> {
+    // Retained edges, independent of TTL: clock 0 hides nothing that a
+    // deadline in the epoch could hide. Visibility is then decided at C.
+    let limits = GraphLimits {
+        max_edges_per_node: MAX_EDGES,
+        max_output_edges: MAX_EDGES,
+        max_output_nodes: MAX_EDGES,
+        ..limits
+    };
+    let edges = graph.with_clock(0).neighbors(
+        &Neighbors {
+            node: NodeSelector::key(summary_key),
+            direction: Direction::Out,
+            types: Some(vec![DERIVED_FROM.into()]),
+            edge_conditions: Vec::new(),
+            limit: Some(MAX_EDGES),
+            cursor: None,
+        },
+        &ReadOptions {
+            limits,
+            cancel,
+            ..ReadOptions::default()
+        },
+    )?;
+    let examined = edges.stats.edges_examined;
+    if !edges.complete {
+        return Ok((None, examined, edges.truncation));
+    }
+    let output = edges.output;
+    let retained = output.edges.len() as u64;
+    if retained > source_count {
+        return Err(MemoryError::InvalidBundle);
+    }
+    let nodes: BTreeMap<u64, &NodeView> = output.nodes.iter().map(|node| (node.id, node)).collect();
+    let (mut live, mut changed, mut expired) = (0, 0, 0);
+    for edge in &output.edges {
+        let edge_revision = edge.properties.get("c1_source_memory_revision");
+        if edge.key.as_deref() != Some(&derived_edge_key(summary_key, &edge.target_key)?)
+            || edge.expires_at_ms.is_some()
+            || edge.properties.len() != 2
+            || edge.properties.get("c1_schema") != Some(&MetadataValue::String(SCHEMA.into()))
+        {
+            return Err(MemoryError::InvalidBundle);
+        }
+        let edge_revision = edge_revision
+            .and_then(canonical_revision)
+            .ok_or(MemoryError::InvalidBundle)?;
+        let source = nodes.get(&edge.target).ok_or(MemoryError::InvalidBundle)?;
+        let source_revision = decode_source(source, scope_key)?;
+        if source.expires_at_ms.is_some_and(|deadline| deadline <= now) {
+            expired += 1;
+        } else {
+            live += 1;
+            if source_revision != edge_revision {
+                changed += 1;
+            }
+        }
+    }
+    let counts = Counts {
+        live,
+        changed,
+        expired,
+        stale: retained < source_count || changed > 0 || expired > 0,
+    };
+    Ok((Some(counts), examined, Vec::new()))
 }
 
 #[cfg(test)]

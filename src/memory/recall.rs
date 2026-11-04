@@ -133,6 +133,8 @@ pub(super) struct RecallHit {
     pub bm25: Option<f64>,
     pub vector_rank: Option<u32>,
     pub text_rank: Option<u32>,
+    /// S2: the S1 stale label of a C1 summary hit; `None` otherwise.
+    pub stale: Option<bool>,
 }
 
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
@@ -667,6 +669,14 @@ impl MemoryRef<'_> {
             let (content, content_truncated) =
                 content_excerpt(&graph, node, request.snippet_bytes, &mut work)?;
             let candidate = &candidates[key];
+            let stale = self.recall_stale_label(
+                request,
+                &ranking.candidate.scope,
+                &ranking.candidate.id,
+                work.remaining_ms()?,
+                &mut work.stats.edges_charged,
+                &mut truncation,
+            )?;
             hits.push(RecallHit {
                 ranking,
                 memory_revision: memory.memory_revision,
@@ -680,6 +690,7 @@ impl MemoryRef<'_> {
                 bm25: candidate.bm25,
                 vector_rank: candidate.vector_rank,
                 text_rank: candidate.text_rank,
+                stale,
             });
         }
         work.check()?;
