@@ -1,6 +1,6 @@
 use super::{
     Reader, Result, Type, Value, Writer, encode, exact, field, fields, framed_hash, hex,
-    identity_key, put, read, role, sequence, text, unsigned,
+    identity_key, put, role, sequence, text, unsigned,
 };
 use std::collections::BTreeMap;
 
@@ -97,7 +97,7 @@ pub(crate) fn schema(name: &str) -> Result<Vec<(&'static str, Type)>> {
             ("index", U32),
             ("entries", List(Box::new(Record("entry")))),
         ],
-        _ => return Err("record"),
+        _ => return super::plan::schema(name),
     })
 }
 
@@ -187,7 +187,8 @@ fn validate(name: &str, value: &Value) -> Result<()> {
                 }
             }
         }
-        _ => {}
+        "revision_data" | "chunk_data" | "entity_data" | "link_data" => {}
+        _ => super::plan::validate(name, value)?,
     }
     Ok(())
 }
@@ -212,7 +213,7 @@ pub(super) fn put_record(w: &mut Writer, name: &str, value: &Value, depth: usize
                 inner.raw(&bytes[1..])?;
             }
         } else {
-            put(&mut inner, &kind, field(value, key)?, depth + 1)?;
+            super::plan::put_nested(&mut inner, &kind, field(value, key)?, depth + 1)?;
         }
     }
     if name == "shard" && inner.0.len() > 3072 {
@@ -245,7 +246,7 @@ fn read_fields(r: &mut Reader<'_>, name: &str, depth: usize) -> Result<Value> {
             }
             Value::List(entries)
         } else {
-            read(r, &kind, depth + 1)?
+            super::plan::read_nested(r, &kind, depth + 1)?
         };
         map.insert(key.into(), value);
     }

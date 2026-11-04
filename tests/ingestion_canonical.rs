@@ -92,6 +92,21 @@ fn kind(input: &Json) -> Type {
         "batch_data" => Type::Record("batch_data"),
         "vector_data" => Type::Record("vector_data"),
         "entry" => Type::Record("entry"),
+        "operation" => Type::Operation,
+        "policy" => Type::Record("policy"),
+        "pipeline" => Type::Record("pipeline"),
+        "request" => Type::Record("request"),
+        "entity_rule" => Type::Record("entity_rule"),
+        "relation_rule" => Type::Record("relation_rule"),
+        "entity_observation" => Type::Record("entity_observation"),
+        "relation_observation" => Type::Record("relation_observation"),
+        "accepted_chunk" => Type::Record("accepted_chunk"),
+        "captured" => Type::Record("captured"),
+        "group" => Type::Record("group"),
+        "batch" => Type::Record("batch"),
+        "plan" => Type::Record("plan"),
+        "delete_action" => Type::Record("delete_action"),
+        "abort_action" => Type::Record("abort_action"),
         other => panic!("unhandled type {other}"),
     }
 }
@@ -385,6 +400,146 @@ fn source() -> Value {
         &fixture()["templates"]["source"],
         &fixture()["templates"],
     ))
+}
+
+fn plan_value(input: &Json, templates: &Json) -> Value {
+    fn convert(value: &mut Value) {
+        match value {
+            Value::Map(map) => {
+                if map.contains_key("text")
+                    && let Some(Value::Text(s)) = map.get("text")
+                {
+                    map.insert("text".into(), Value::Bytes(canonical::unhex(s).unwrap()));
+                }
+                for v in map.values_mut() {
+                    convert(v);
+                }
+            }
+            Value::List(items) => {
+                for v in items {
+                    convert(v);
+                }
+            }
+            _ => {}
+        }
+    }
+    let mut v = value(&expand(input, templates));
+    convert(&mut v);
+    v
+}
+
+fn plan_selected(case: &Json) -> bool {
+    !selected(case) && !stored_selected(case)
+}
+
+fn remaining_case(case: &Json, templates: &Json) -> canonical::Result<(Vec<u8>, Type, Value)> {
+    let category = case["category"].as_str().unwrap_or("decode");
+    if category == "frame" {
+        let input = &case["input"];
+        return canonical::plan::frame_length(
+            input["body"].as_u64().unwrap(),
+            input["encrypted"].as_bool().unwrap(),
+        )
+        .map(|n| {
+            (
+                n.to_le_bytes().to_vec(),
+                Type::U32,
+                Value::Unsigned(n.into()),
+            )
+        });
+    }
+    let mut input = expand(&case["input"], templates);
+    let t = match category {
+        "operation" | "decode" => Type::Operation,
+        "plan_order" => Type::Record("plan"),
+        "pipeline_label" => {
+            let field = input["field"].as_str().unwrap().to_string();
+            input["pipeline"][&field] = input["value"].clone();
+            input = input["pipeline"].clone();
+            Type::Record("pipeline")
+        }
+        _ => kind(&case["type"]),
+    };
+    if let Some(hex) = case["decode_hex"].as_str() {
+        let bytes = canonical::unhex(hex)?;
+        return canonical::decode(&t, &bytes).map(|v| (bytes, t, v));
+    }
+    let v = plan_value(&input, templates);
+    canonical::encode(&t, &v).map(|bytes| (bytes, t, v))
+}
+
+#[test]
+fn ingestion_canonical_complete_plan_vectors() {
+    let fixture = fixture();
+    let mut counts = [0, 0];
+    for (index, group) in ["vectors", "negatives"].iter().enumerate() {
+        for case in fixture[*group]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter(|c| plan_selected(c))
+        {
+            let name = case["name"].as_str().unwrap();
+            let actual = remaining_case(case, &fixture["templates"]);
+            if index == 1 {
+                assert_eq!(
+                    actual.unwrap_err(),
+                    case["error"].as_str().unwrap(),
+                    "{name}"
+                );
+            } else {
+                let (bytes, t, v) = actual.unwrap_or_else(|e| panic!("{name}: {e}"));
+                if case["category"] == "plan_order" {
+                    let tags: Vec<_> = json(&v)["batches"]
+                        .as_array()
+                        .unwrap()
+                        .iter()
+                        .map(|b| {
+                            b["groups"]
+                                .as_array()
+                                .unwrap()
+                                .iter()
+                                .map(|g| {
+                                    g["operations"]
+                                        .as_array()
+                                        .unwrap()
+                                        .iter()
+                                        .map(|o| o["tag"].clone())
+                                        .collect::<Vec<_>>()
+                                })
+                                .collect::<Vec<_>>()
+                        })
+                        .collect();
+                    assert_eq!(serde_json::json!(tags), case["expected"], "{name}");
+                } else {
+                    assert_eq!(
+                        bytes,
+                        expected_hex(&case["hex"], &fixture["atoms"]),
+                        "{name}"
+                    );
+                }
+                let decoded =
+                    canonical::decode(&t, &bytes).unwrap_or_else(|e| panic!("{name} decode: {e}"));
+                assert_eq!(
+                    canonical::encode(&t, &decoded).unwrap(),
+                    bytes,
+                    "{name} roundtrip"
+                );
+                if let Some(expected) = case["framed_sha256"].as_str() {
+                    let Type::Record(record) = t else {
+                        panic!("digest fixture")
+                    };
+                    assert_eq!(
+                        canonical::hex(&canonical::plan::digest(record, &v).unwrap()),
+                        expected,
+                        "{name} digest"
+                    );
+                }
+            }
+            counts[index] += 1;
+        }
+    }
+    assert_eq!(counts, [41, 61]);
 }
 
 fn template(name: &str) -> Value {
