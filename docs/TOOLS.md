@@ -1,6 +1,6 @@
 # Offline command-line tools
 
-Work directly with database files, without a REST or gRPC server.
+Most tools work directly with database files. The memory client below requires a REST server.
 
 ## Choose a tool
 
@@ -10,8 +10,9 @@ Work directly with database files, without a REST or gRPC server.
 - [Index tuning](#index-tuning-advisor): find HNSW parameters for a target recall.
 - [MCP and agent skills](#mcp-server-and-agent-skills): connect an agent to a database through a separate stdio server.
 - [Graph operations](#graph-operations): typed reads and atomic writes on graph-enabled files.
+- [Remote agent memory](#remote-agent-memory): authenticated one-shot REST operations.
 
-**Stop the server first.** The shell, import and tuning tools take an exclusive
+**Stop the server first for offline tools.** The shell, import and tuning tools take an exclusive
 file lock, even with the shell's `--read-only` guard. MCP opens a shared-lock
 read-only snapshot by default, so it can run beside other readers but not
 beside a writer.
@@ -30,6 +31,58 @@ cargo build --locked --features import-formats --bins
 is in the default embedded build. Binaries are written to `target/debug/`.
 Each tool supports `--help` and exits nonzero on errors. For packaged binaries,
 see [installation](INSTALL.md).
+
+## Remote agent memory
+
+Build `vlite-memory-cli` with the existing HTTP proxy feature:
+`cargo build --locked --features mcp-proxy --bin vlite-memory-cli`.
+It requires an explicitly provisioned memory binding on a running server;
+it never opens a database or supplies a tenant/provider endpoint.
+
+```powershell
+# Set VLITE_TOKEN securely in the environment, not on the command line.
+vlite-memory-cli --url https://localhost:8443 --binding notes --token-env VLITE_TOKEN remember --request remember.json
+vlite-memory-cli --url https://localhost:8443 --binding notes --token-env VLITE_TOKEN recall --request recall.json
+```
+
+Required flags are `--url`, `--binding`, `--token-env` and `--request FILE|-`.
+Verbs: `remember`, `recall`, `facts`, `correct-facts`, `consolidate`, `forget`,
+`receipt`, `erasure`, `resume-erasure`. Supply the operation's JSON body,
+including scope, mutation idempotency key, revisions and policies; semantic
+validation and authorization belong to the server. Request files use native OS
+paths and preserve bytes; prefix a file name starting with `--` with `./`.
+Stdin must be piped as bytes, not through a text-decoding pipeline.
+Input must be a UTF-8 JSON object without duplicate keys. Request and received
+response limits are 8,388,608 bytes; compact stdout including its final LF
+must also fit that limit. Success validation is generic (a duplicate-free JSON
+object); the server is authoritative for operation schemas.
+Tokens must contain 1..4096 visible ASCII bytes (0x21..0x7e), without trimming.
+The credential is never written to stdout or stderr: credential-bearing
+successes are refused, not rewritten. Diagnostics are redacted and checked
+after JSON serialization; if even the fixed fallback contains the credential,
+stderr is empty. HTTPS is required except for loopback HTTP hosts (`localhost`,
+127.0.0.0/8, or `::1`); ambient proxies are explicitly disabled.
+Docker images intentionally do not ship this client.
+
+Success prints exactly one response JSON line; HTTP 202 pending is success.
+Errors print one coded JSON line `{"error":{"code":"<code>","message":"<message>"}}`
+to stderr, unless credential safety requires silence as above.
+Exit codes: 0 success; 2 usage/input
+(including exhausted work budgets); 3 authentication/authorization; 4 conflict/
+precondition; 5 server deadline/cancel; 6 transport/storage ambiguity or local
+response-integrity failure; 1 other. Malformed, duplicate-key, non-object,
+invalid UTF-8, truncated and oversized responses fail locally with empty stdout,
+including malformed error bodies; validated remote errors retain their mappings.
+`--timeout-ms` accepts 1..5000 (default 5000) and changes only the HTTP timeout,
+never JSON `deadline_ms`. There are no automatic retries, paging or job loops.
+After an ambiguous mutation, explicitly use `receipt` with the original scope,
+operation and idempotency key before considering resubmission. The first server
+slice will refuse a `receipt` lookup of a `remember` (409
+`memory_capability_unavailable`; its `details.feature` is
+`remember_receipt_lookup`, which the error line does not carry), and the original
+`remember` response carries the complete receipt. Pending erasure
+status and resumption are explicit `erasure` and `resume-erasure` calls.
+Logical deletion is not secure erasure of backups or external copies.
 
 ## Interactive or scripted shell
 

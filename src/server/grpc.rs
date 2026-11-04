@@ -1,4 +1,4 @@
-//! Opt-in gRPC transport (`vlite.v1.VLite`, Cargo feature `grpc`).
+//! Opt-in gRPC transport (`vlite.v1.VLite` and `vlite.v1.Kv`, Cargo feature `grpc`).
 //!
 //! A thin adapter: every RPC converts wire types into the same inputs REST
 //! uses and calls the same transport-neutral cores, so authentication
@@ -31,7 +31,7 @@ pub const SERVICE_NAME: &str = "vlite.v1.VLite";
 /// Trailer carrying the stable REST error code of a failed call.
 pub const ERROR_CODE_TRAILER: &str = "vlite-error-code";
 
-/// gRPC routes (the VLite service plus `grpc.health.v1.Health`) and their
+/// gRPC routes (VLite and Kv services plus `grpc.health.v1.Health`) and their
 /// health handle, built over one engine handle.
 pub struct GrpcServer {
     routes: tonic::service::Routes,

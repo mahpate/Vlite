@@ -1,0 +1,1 @@
+{"scope":{"agent":"a"},"idempotency_key":"k1","target":{"ids":[{"id":"m1","revision":"7"}]},"mode":"logical_delete"}

@@ -65,6 +65,8 @@
           <tr><th scope="row">Record expiry (TTL)</th><td>Absolute expiry timestamps, expiry-aware reads and compaction. Requires format 5.</td></tr>
           <tr><th scope="row">Metadata-only updates</th><td>Change metadata without rewriting the vector or payload; expiry is kept. Requires format 5.</td></tr>
           <tr><th scope="row">Resumable ingestion</th><td>Atomic chunks with durable checkpoints, replay detection, row validation and reject or skip-invalid policies. Requires format 4 or 5.</td></tr>
+          <tr><th scope="row">Key-value store</th><td>Namespaced string keys with byte values and no vector: ordered prefix listing, optional expiry and compare-and-set on versions. Use it from Rust, REST, gRPC, the Python, JavaScript and .NET clients, and local shell and MCP tools. Requires format 4 or 5; expiry needs 5.</td></tr>
+          <tr><th scope="row">Directory store (opt-in)</th><td>A format 5 database kept as a directory of write-ahead logs and a checkpoint image, so reopening replays only the active log. Created from Rust or converted from a file; older releases cannot open a directory store.</td></tr>
           <tr><th scope="row">In-memory database</th><td>Create in memory, open from bytes and export bytes; the host handles persistence.</td></tr>
         </tbody></table></div>
         <p><a href="docs/REFERENCE.html">Storage contracts</a> &middot; <a href="docs/CAPABILITIES.html">Collections, revisions and ingestion</a> &middot; <a href="docs/STORAGE-FEATURES.html#periodic-lazy-durability">Periodic durability</a></p>
@@ -72,7 +74,7 @@
       <section id="search">
         <h2>Search and retrieval</h2>
         <div class="table-scroll"><table><caption>Query modes and result shaping</caption><thead><tr><th scope="col">Feature</th><th scope="col">Support and requirements</th></tr></thead><tbody>
-          <tr><th scope="row">Exact vector search</th><td>Squared L2, cosine and negative inner product, with f64 accumulation, distance-then-ID ordering and bounded top-k memory.</td></tr>
+          <tr><th scope="row">Exact vector search</th><td>Squared L2, cosine and negative inner product, with f64 accumulation, distance-then-ID ordering and bounded top-k memory. AVX2, NEON or portable kernels give identical results.</td></tr>
           <tr><th scope="row">Approximate vector search</th><td>HNSW for squared L2 and cosine. Lazy mode may build the index synchronously; ready-only mode never builds.</td></tr>
           <tr><th scope="row">Typed metadata filters</th><td>Equality, ranges, membership, existence and geographic radius predicates. Numeric types stay distinct.</td></tr>
           <tr><th scope="row">Filtered ANN</th><td>Approximate retrieval with metadata eligibility checks; recall depends on the workload and search budget.</td></tr>
@@ -92,7 +94,7 @@
         <div class="table-scroll"><table><caption>Search acceleration and concurrent access</caption><thead><tr><th scope="col">Feature</th><th scope="col">Support and requirements</th></tr></thead><tbody>
           <tr><th scope="row">Rebuildable HNSW</th><td>Deterministic parallel construction that does not depend on thread count, vectorized distances, configurable graph and search budgets, and bounded mutation buffering.</td></tr>
           <tr><th scope="row">Scalar-u8 quantization</th><td>Compressed traversal codes with full-precision reranking of candidates. Original vectors stay in memory.</td></tr>
-          <tr><th scope="row">Metadata indexes</th><td>Equality and range indexes with full-filter rechecks; rebuilt on reopen and on settings changes. <a href="docs/STORAGE-FEATURES.html#filter-block-summaries-unreleased">Unreleased: reviewed in-memory filter summaries</a> preserve exact results with budget-triggered scan fallback.</td></tr>
+          <tr><th scope="row">Metadata indexes</th><td>Equality and range indexes with full-filter rechecks; rebuilt on reopen and on settings changes.</td></tr>
           <tr><th scope="row">ANN restart snapshots</th><td>An optional validated graph cache tied to the database state, from the server (<code>--ann-snapshot</code>), Rust, the C ABI and Python. Not available for encrypted databases.</td></tr>
           <tr><th scope="row">Disk ANN</th><td>An optional graph and vector sidecar with a bounded node cache. Builds still need in-memory HNSW capacity; no metadata or expiry filtering.</td></tr>
           <tr><th scope="row">Index quality and memory</th><td>Sampled recall against exact results, index identity and readiness, and component-level memory diagnostics.</td></tr>
@@ -100,7 +102,7 @@
           <tr><th scope="row">Concurrent server reads</th><td>Shared reads and exclusive writes; bounded committed snapshots for eligible exact queries.</td></tr>
           <tr><th scope="row">Shared embedded readers</th><td>Several read-only processes under shared file locks, excluding a writer. Reopen to see later commits.</td></tr>
           <tr><th scope="row">Committed read snapshots</th><td>Rust handles for bounded exact search, get and browse outside the owner lock.</td></tr>
-          <tr><th scope="row">Background rebuilds</th><td>Explicit start, poll, cancel and maintenance controls; optional server scheduling with retry backoff.</td></tr>
+          <tr><th scope="row">Background rebuilds</th><td>Explicit start, poll, cancel and maintenance controls; optional server scheduling with retry backoff. A Rust option lets approximate queries keep using the ready index while a rebuild runs.</td></tr>
           <tr><th scope="row">Durable group commit</th><td>An optional shared sync for bounded concurrent record writes; each write keeps its own atomic frame.</td></tr>
           <tr><th scope="row">Read-lock policy</th><td><code>--lock-held-reads</code> trades snapshot copying for holding the owner read lock during exact scans.</td></tr>
         </tbody></table></div>
@@ -113,8 +115,8 @@
           <tr><th scope="row">Sparse vectors</th><td>Sorted sparse values, derived inverted postings and negative-dot-product retrieval. Requires format 5.</td></tr>
           <tr><th scope="row">Model version history</th><td>Active and retained vector versions, explicit retention and pruning, and version-targeted search. Requires format 5.</td></tr>
           <tr><th scope="row">Resumable re-embedding</th><td>Durable job checkpoints, source-revision checks and atomic activation on completion. Your application schedules provider work.</td></tr>
-          <tr><th scope="row">Embedding providers</th><td>An application-owned <code>Embedder</code> registry; an optional OpenAI-compatible HTTP provider with <code>http-embedder</code>.</td></tr>
-          <tr><th scope="row">Reranking</th><td>Pluggable providers, exact metric rescoring and MMR diversity selection.</td></tr>
+          <tr><th scope="row">Embedding providers</th><td>An application-owned <code>Embedder</code> registry; an optional OpenAI-compatible HTTP provider with <code>http-embedder</code>. Servers can also offer administrator-managed provider aliases over REST and gRPC (opt-in, off by default).</td></tr>
+          <tr><th scope="row">Reranking</th><td>Pluggable providers, exact metric rescoring, MMR diversity selection and, over REST and gRPC, custom ranking through a managed provider alias.</td></tr>
           <tr><th scope="row">Typed float32 inputs</th><td>Python buffer methods (<code>search_f32</code>, <code>batch_put_f32</code>) and Node.js <code>Float32Array</code> methods (<code>searchF32</code>, <code>searchManyF32</code>, <code>batchPutF32</code>). Inputs are copied, not zero-copy.</td></tr>
           <tr><th scope="row">GPU exact search</th><td>An optional <code>gpu</code> build using wgpu: default-collection squared L2 with CPU reranking and fallback. No filtered or cosine GPU search.</td></tr>
         </tbody></table></div>
@@ -128,6 +130,8 @@
           <tr><th scope="row">Data model</th><td>Up to 64 named graphs per file. Nodes have a unique key, labels and typed properties; edges have a type, endpoints, an optional key and properties. Attachments link nodes to live vector records.</td></tr>
           <tr><th scope="row">Atomic graph batches</th><td>Up to 4,096 node, edge, attachment and vector operations, in any collection, commit atomically or not at all. <code>expected</code> makes an operation conditional.</td></tr>
           <tr><th scope="row">Bounded reads</th><td>Node and edge gets, paged find and neighbors, traversal and shortest path, each on one committed view. Hop, work, output and deadline limits apply; results report completeness and truncation.</td></tr>
+          <tr><th scope="row">Expiry (TTL)</th><td>Nodes and edges can carry deadlines; an expired node is hidden with all its edges. An opt-in Rust feed reports deadlines and removals. Rust API only.</td></tr>
+          <tr><th scope="row">Local algorithms</th><td>Degree, weighted shortest path, PageRank, label propagation and sampled betweenness on an explicit local scope, under work, memory and iteration limits. Rust API only.</td></tr>
           <tr><th scope="row">Schemas and property indexes</th><td>Label and relationship rules for required and unique properties, endpoints and multiplicity. Property indexes serve node lookups and are rebuilt on open.</td></tr>
           <tr><th scope="row">Hybrid retrieval</th><td>A vector, text or fused pivot search, mapped to nodes through attachments and expanded, returns nodes with their evidence records.</td></tr>
           <tr><th scope="row">Query text</th><td>A small read-only language that maps to one typed read.</td></tr>
@@ -135,7 +139,7 @@
           <tr><th scope="row">Access control</th><td>Graphs are tenant-owned. API keys need <code>graph_read</code> or <code>graph_write</code> and a <code>graphs</code> binding; accounts get role-based access, narrowed by <code>graphs</code> and <code>graph_access</code>. Collection scope never implies graph scope.</td></tr>
           <tr><th scope="row">Maintenance and rollback</th><td>Backup, restore, verify, compaction, format upgrade, re-encryption and read replicas keep graph state. <code>vlite-maintain strip-graph --confirm-graph-data-loss</code> copies the vectors to a plain format 5 file.</td></tr>
           <tr><th scope="row">Change feed and webhooks</th><td>Graph commits appear as <code>graph_created</code>, <code>graph_dropped</code> and <code>graph_batch</code> events. Webhooks can limit graph events to named graphs.</td></tr>
-          <tr><th scope="row">Not supported</th><td>gRPC has no graph service, and <code>vlite-graph-cli</code> cannot open encrypted files. Graph nodes and edges cannot expire, reads cannot ask for an earlier point in time, query text cannot write, and there are no weighted paths or graph algorithms such as PageRank.</td></tr>
+          <tr><th scope="row">Not supported</th><td>gRPC has no graph service, and <code>vlite-graph-cli</code> cannot open encrypted files. Reads cannot ask for an earlier point in time, query text cannot write, and REST, gRPC, MCP and the CLI do not expose expiry or algorithms.</td></tr>
         </tbody></table></div>
         <p><a href="docs/GRAPH.html">Graph guide</a> &middot; <a href="docs/GRAPH-QUERY.html">Graph query language</a> &middot; <a href="docs/TOOLS.html#graph-operations">Graph CLI</a> &middot; <a href="docs/MCP.html#property-graph-tools">MCP graph tools</a></p>
         <p>The <a href="docs/GRAPH.html#compact-graph-storage-unreleased">unreleased compact graph codec</a> is reviewed but test-only; production storage is unchanged.</p>
@@ -215,14 +219,14 @@
       <section id="tools">
         <h2>Command-line tools and agents</h2>
         <ul class="list">
-          <li><strong>Interactive or scripted shell:</strong> query records and collections; <code>--read-only</code> disables writes, but the shell still takes an exclusive file lock.</li>
+          <li><strong>Interactive or scripted shell:</strong> query records and collections, and run key-value commands; <code>--read-only</code> disables writes, but the shell still takes an exclusive file lock.</li>
           <li><strong>Offline maintenance:</strong> inspect, verify, back up, restore, compact, upgrade and re-encrypt, plus <code>enable-graph</code> and <code>strip-graph</code> to add or remove graph support.</li>
           <li><strong>Import:</strong> CSV, JSONL, pgvector text and supported FAISS input; optional Parquet and Arrow IPC with <code>import-formats</code>.</li>
           <li><strong>Search quality:</strong> exact-oracle recall, configuration and database comparison, and bounded index evaluation.</li>
           <li><strong>Index tuning:</strong> a workload-based configuration advisor with memory and recall trade-offs.</li>
           <li><strong>Benchmark harnesses:</strong> seeded or external vectors, mixed writes and deletes, and raw timing and memory reports.</li>
           <li><strong>Graph CLI:</strong> <code>vlite-graph-cli</code> creates files and runs graph reads and write batches as JSON.</li>
-          <li><strong>MCP server:</strong> stdio tools with shared-lock read-only access by default and an explicit <code>--writable</code> mode. Graph tools work on a file or through a server with <code>--server URL</code>.</li>
+          <li><strong>MCP server:</strong> stdio tools with shared-lock read-only access by default and an explicit <code>--writable</code> mode. Graph tools work on a file or through a server with <code>--server URL</code>. Four local key-value tools work on a file.</li>
           <li><strong>Agent skills:</strong> four skills for RAG, MCP, operations and index tuning.</li>
         </ul>
         <p><a href="docs/TOOLS.html">CLI guide</a> &middot; <a href="docs/MCP.html">MCP guide</a> &middot; <a href="docs/AGENT-SKILLS.html">Agent skills</a></p>

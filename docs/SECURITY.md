@@ -157,8 +157,9 @@ Read-only credentials cannot mutate. Tenant-local names and immutable
 lineage/collection bindings are checked before collection lookup;
 a binding for a dropped collection does not authorize its replacement.
 KV never implicitly creates a collection and shares ordinary record quotas.
-Mutation audit entries contain operation, principal, collection, request ID and
-outcome, never namespace, key or value.
+Mutation audit entries contain operation, principal, collection, request ID,
+outcome and, for a put, its expiry deadline, never namespace, key or value. A
+failed request records the collection as `(invalid)`.
 
 A namespace is an application partition **inside** an authorized collection,
 not an authorization boundary. Put sensitive KV data in dedicated collections

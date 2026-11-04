@@ -2,6 +2,7 @@
 
 Historical benchmark reports, release notes and compatibility specifications
 retain their original provenance and are intentionally outside this check.
+The release workflow must still ship the current version's notes, newest first.
 """
 
 from pathlib import Path
@@ -40,6 +41,12 @@ def check(root):
             if path.is_file():
                 paths.append(path)
     errors = []
+    notes = f"docs/RELEASE-{version}.md"
+    if (root / notes).is_file():
+        workflow = (root / ".github" / "workflows" / "release.yml").read_text(encoding="utf-8")
+        shipped = re.findall(r'"(docs/RELEASE-\d+\.\d+\.\d+\.md)"', workflow)
+        if not shipped or shipped[0] != notes:
+            errors.append(f".github/workflows/release.yml: the release bundle must list {notes} before older release notes")
     for path in paths:
         text = path.read_text(encoding="utf-8")
         if path.suffix == ".html":

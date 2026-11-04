@@ -7,6 +7,9 @@ mod graph_mcp;
 mod graph_proxy;
 #[path = "tool_support/kv_mcp.rs"]
 mod kv_mcp;
+#[cfg(feature = "mcp-proxy")]
+#[path = "tool_support/memory_mcp.rs"]
+mod memory_mcp;
 
 use std::{
     collections::BTreeMap,
@@ -25,7 +28,7 @@ const SUPPORTED_PROTOCOL_VERSIONS: &[&str] = &["2025-06-18", "2025-03-26", "2024
 const HELP: &str = "vlite-mcp --db PATH [--read-only | --writable] [--encryption-key-file PATH]\n\
        vlite-mcp --server URL [--token-env VAR] [--read-only | --writable]   (mcp-proxy builds)\n\
 Read-only is the default. VLITE_ENCRYPTION_KEY or VLITE_ENCRYPTION_KEY_HEX may supply an encryption key.\n\
---server forwards the graph tools to a running vlite-server instead of opening a file; the bearer token is read from the environment variable named by --token-env.\n\
+--server forwards graph and memory tools to a running vlite-server instead of opening a file; the bearer token is read from the environment variable named by --token-env.\n\
 MCP JSON-RPC messages are newline-delimited on stdin/stdout; diagnostics go to stderr.\n";
 
 type ToolResult = Result<Value, String>;
@@ -37,13 +40,15 @@ struct Config {
     /// `--server` proxy mode (ITEM-043): no file is opened.
     #[cfg(feature = "mcp-proxy")]
     remote: Option<graph_proxy::Remote>,
+    #[cfg(feature = "mcp-proxy")]
+    memory_remote: Option<memory_mcp::Remote>,
 }
 
 /// Where tool calls run: an opened file, or a server in proxy mode.
 enum Backend {
     Local(Box<Database>),
     #[cfg(feature = "mcp-proxy")]
-    Proxy(graph_proxy::Remote),
+    Proxy(graph_proxy::Remote, memory_mcp::Remote),
 }
 
 fn decode_hex_key(text: &str) -> Result<[u8; 32], Box<dyn Error>> {
@@ -169,6 +174,8 @@ fn config() -> Result<Option<Config>, Box<dyn Error>> {
         encryption_key,
         #[cfg(feature = "mcp-proxy")]
         remote: None,
+        #[cfg(feature = "mcp-proxy")]
+        memory_remote: None,
     }))
 }
 
@@ -195,7 +202,8 @@ fn proxy_config(
         path: PathBuf::new(),
         read_only,
         encryption_key: None,
-        remote: Some(graph_proxy::Remote::new(url, token)?),
+        remote: Some(graph_proxy::Remote::new(url, token.clone())?),
+        memory_remote: Some(memory_mcp::Remote::new(url, token)?),
     })
 }
 
@@ -676,8 +684,8 @@ fn dispatch(
                     "VLite vector database tools. Read-only is the default; write tools are exposed only with --writable."
                 }
                 #[cfg(feature = "mcp-proxy")]
-                Backend::Proxy(_) => {
-                    "VLite property-graph tools forwarded to a vlite-server; the server authorizes every call. Read-only is the default; write tools are exposed only with --writable."
+                Backend::Proxy(_, _) => {
+                    "VLite graph and memory tools forwarded to a vlite-server; the server authorizes every call. Read-only is the default; write tools are exposed only with --writable."
                 }
             };
             Some(
@@ -695,8 +703,11 @@ fn dispatch(
                 Some(json!({"tools":tools}))
             }
             #[cfg(feature = "mcp-proxy")]
-            Backend::Proxy(remote) => match remote.tool_definitions(config.read_only) {
-                Ok(tools) => Some(json!({"tools":tools})),
+            Backend::Proxy(remote, _) => match remote.tool_definitions(config.read_only) {
+                Ok(mut tools) => {
+                    tools.extend(memory_mcp::tool_definitions(config.read_only));
+                    Some(json!({"tools":tools}))
+                }
                 Err(message) => {
                     return has_id.then(|| protocol_error(response_id, -32603, &message));
                 }
@@ -708,6 +719,17 @@ fn dispatch(
                 .get("arguments")
                 .cloned()
                 .unwrap_or_else(|| json!({}));
+            #[cfg(feature = "mcp-proxy")]
+            if let Some(name) = name
+                && memory_mcp::is_tool(name)
+                && args.is_object()
+                && let Backend::Proxy(_, memory) = backend
+            {
+                let result = memory
+                    .call(config.read_only, name, &args, message_text)
+                    .expect("known memory tool");
+                return has_id.then(|| json!({"jsonrpc":"2.0","id":response_id,"result":result}));
+            }
             match (name, args.as_object()) {
                 (Some(name), Some(_)) => Some(tool_result(match backend {
                     Backend::Local(db) => {
@@ -721,7 +743,7 @@ fn dispatch(
                         })
                     }
                     #[cfg(feature = "mcp-proxy")]
-                    Backend::Proxy(remote) => remote
+                    Backend::Proxy(remote, _) => remote
                         .call(config.read_only, name, &args)
                         .unwrap_or_else(|| Err(format!("unknown tool: {name}"))),
                 })),
@@ -751,7 +773,10 @@ fn dispatch(
 fn open_backend(config: &mut Config) -> Result<Backend, Box<dyn Error>> {
     #[cfg(feature = "mcp-proxy")]
     if let Some(remote) = config.remote.take() {
-        return Ok(Backend::Proxy(remote));
+        return Ok(Backend::Proxy(
+            remote,
+            config.memory_remote.take().expect("proxy memory transport"),
+        ));
     }
     Ok(Backend::Local(Box::new(open_database(config)?)))
 }
@@ -781,7 +806,7 @@ fn run() -> Result<(), Box<dyn Error>> {
     match backend {
         Backend::Local(db) => db.close()?,
         #[cfg(feature = "mcp-proxy")]
-        Backend::Proxy(_) => {}
+        Backend::Proxy(_, _) => {}
     }
     Ok(())
 }

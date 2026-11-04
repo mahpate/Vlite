@@ -81,6 +81,10 @@ Same campaign, same VM, alternating order; medians.
 
 Binaries grew from 1,146,368 to 1,677,824 bytes (`vlite-bench`) and 2,829,824 to 4,531,200 bytes (`vlite-ffi`); graph support is compiled into every build since 0.5.1.
 
+## Release candidate 0.7.0 against v0.6.0
+
+The 0.7.0 release candidate `30901be1`, the integration head with a green full CI run, was measured against v0.6.0 and v0.6.1 with the same profile, workloads, arguments and gate as above: five runs per workload and revision on four identical Azure Standard_D16s_v5 VMs (one per large workload, the three small workloads one after another on the fourth), with a 1,200 s settle after the builds. All 90 slots passed the unchanged gate (background CPU mean ≤10%, no half-second sample above 50%); none was discarded or retried. At 100,000 × 384 against v0.6.0, query p50 is 42% lower on the exact workload, 23% lower on the filtered workload and 42% lower on the exact scan of the HNSW workload; recall and file bytes are identical; ingest, reopen and peak memory are within about 3%. The results compare the revisions on these same-SKU VMs only; the historical reference-host identity checks are intentionally not applied. Tables and per-run CPU: [`graph-reference-0.7.0-rc-vs-v0.6.0-azure.md`](../../../benchmarks/results/graph-reference-0.7.0-rc-vs-v0.6.0-azure.md); raw runs: [`graph-reference-0.7.0-rc-vs-v0.6.0-azure.json`](../../../benchmarks/results/graph-reference-0.7.0-rc-vs-v0.6.0-azure.json).
+
 ## Limitations
 
 - Peak working set is the whole benchmark child process (dataset, database, exact oracle, index and queries), not marginal index memory, and is comparable only on Windows.

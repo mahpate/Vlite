@@ -217,11 +217,194 @@ export interface Capabilities {
   [key: string]: unknown;
 }
 
+/** Canonical unsigned decimal string, 0..18446744073709551615, as returned by the server. */
+export type MemoryU64 = string;
+/** Canonical signed decimal string, -9223372036854775808..9223372036854775807, as returned by the server. */
+export type MemoryI64 = string;
+/**
+ * Accepted inputs for a u64: a canonical decimal string, a safe-integer number or a bigint. An unsafe
+ * number (beyond 2^53) is refused with a TypeError instead of being rounded; the client always sends a string.
+ */
+export type MemoryU64Input = MemoryU64 | number | bigint;
+/** Accepted inputs for an i64; the same rules as MemoryU64Input. */
+export type MemoryI64Input = MemoryI64 | number | bigint;
+/** An unqualified local name matching ^[a-z][a-z0-9_-]{0,62}$: a memory binding or an evidence collection alias. */
+export type MemoryBinding = string;
+/** 1..256 UTF-8 bytes; the server validates the bytes. */
+export type MemoryKey = string;
+export type MemoryKind = "entity" | "episodic" | "fact" | "relation";
+export type MemoryOperation = "remember" | "correct_facts" | "consolidate" | "forget" | "resume_erasure";
+/** Session requires user. There is no tenant: it is derived from the credential. */
+export interface MemoryScope { agent: MemoryKey; user?: MemoryKey; session?: MemoryKey }
+export interface MemoryEffectiveScope { tenant: MemoryKey; agent: MemoryKey; user?: MemoryKey; session?: MemoryKey }
+/** Exactly one variant: {absent: true} to create, or {revision} to guard an existing record. */
+export type MemoryExpected<U extends MemoryU64Input = MemoryU64Input> =
+  | { absent: true; revision?: never }
+  | { revision: U; absent?: never };
+/** Half-open validity window. Both members are required; null is an unbounded end, never a default. */
+export interface MemoryInterval<I extends MemoryI64Input = MemoryI64> { valid_from_ms: I | null; valid_to_ms: I | null }
+/** A retained revision, or revision 0 naming an ID created in the same bundle (request only). */
+export interface MemoryRef<U extends MemoryU64Input = MemoryU64> { id: MemoryKey; revision: U }
+export interface MemorySource { source_id: MemoryKey; source_kind: MemoryKey; uri?: string; transformation_id?: MemoryKey }
+export interface MemoryProvenance extends MemorySource { content_digest: string }
+/** Discriminated by `type`; an integer value is a decimal string (or an exact integer on input). */
+export type MemoryScalar<I extends MemoryI64Input = MemoryI64> =
+  | { type: "string"; value: string }
+  | { type: "integer"; value: I }
+  | { type: "float"; value: number }
+  | { type: "boolean"; value: boolean };
+export type MemoryProperties<I extends MemoryI64Input = MemoryI64> = Record<string, MemoryScalar<I>>;
+export interface MemoryCondition { field: MemoryKey; op: "eq" | "lt" | "lte" | "gt" | "gte" | "exists"; value?: MemoryScalar<MemoryI64Input> }
+/** AND of `all` and OR of `any`; the mandatory scope, kind and retention checks always apply as well. */
+export interface MemoryFilter { all?: MemoryCondition[]; any?: MemoryCondition[] }
+export interface MemoryEvidenceRef { collection: MemoryBinding; record: MemoryU64Input }
+export interface MemoryEvidence {
+  collection: MemoryBinding; record: MemoryU64Input; vector?: number[]; text?: string; payload_base64?: string;
+  metadata?: MemoryProperties<MemoryI64Input>;
+}
+export interface MemoryAssertion {
+  subject_id: MemoryKey; predicate: MemoryKey; slot_key: MemoryKey; destination_id: MemoryKey;
+  interval: MemoryInterval<MemoryI64Input>; slot_expected: MemoryExpected; disagreement?: "reject" | "disputed";
+}
+export interface MemoryItem {
+  id: MemoryKey; kind: MemoryKind; content: string; observed_at_ms: MemoryI64Input; importance?: number; confidence?: number;
+  expires_at_ms?: MemoryU64Input; source: MemorySource; provenance?: MemorySource[]; references?: MemoryRef<MemoryU64Input>[];
+  evidence?: MemoryEvidenceRef[]; metadata?: MemoryProperties<MemoryI64Input>; assertion?: MemoryAssertion;
+  expected?: MemoryExpected; merge?: "none" | "merge_provenance";
+}
+/** Fields common to every mutation. The idempotency key is required: the client never generates or reuses one. */
+export interface MemoryMutation {
+  scope: MemoryScope; idempotency_key: MemoryKey; max_references?: number;
+  /** The engine deadline in milliseconds. It is not the HTTP timeout, which is the client's timeoutMs. */
+  deadline_ms?: number;
+  require_complete_feed?: boolean;
+}
+export interface MemoryRememberRequest extends MemoryMutation { items: MemoryItem[]; evidence?: MemoryEvidence[] }
+export interface MemoryRanking {
+  selection?: "weighted" | "exact" | "mmr"; /** [wR, wD, wI] */ weights?: number[]; half_life_ms?: number;
+  future_observations?: "reject" | "clamp"; lambda?: number;
+}
+export interface MemoryLimits {
+  candidates?: number; vector_components?: number; evidence_bytes?: number; mmr_components?: number; deadline_ms?: number;
+  max_hops?: number; max_visited_nodes?: number; max_edges_examined?: number; max_edges_per_node?: number;
+  max_output_nodes?: number; max_output_edges?: number; max_output_paths?: number;
+}
+export interface MemoryProjection { snippets?: boolean; provenance?: boolean; paths?: boolean; metadata?: MemoryKey[] }
+/** At least one of vector, text or entity_seeds. Text is lexical; the client never embeds. */
+export interface MemoryRecallRequest {
+  scope: MemoryScope; scopes?: MemoryScope[]; vector?: number[]; text?: string; embedding_provider?: MemoryKey;
+  entity_seeds?: MemoryKey[]; kinds?: MemoryKind[]; filter?: MemoryFilter; as_of_ms?: MemoryI64Input; ranking?: MemoryRanking;
+  limits?: MemoryLimits; projection?: MemoryProjection; mode?: "exact" | "approximate"; limit?: number; allow_partial?: boolean;
+}
+export interface MemorySlot { subject_id: MemoryKey; predicate: MemoryKey; slot_key: MemoryKey }
+export interface MemoryFactsRequest {
+  scope: MemoryScope; slot: MemorySlot; as_of_ms?: MemoryI64Input; history?: boolean; limit?: number; limits?: MemoryLimits;
+  projection?: MemoryProjection; allow_partial?: boolean;
+}
+export interface MemoryCorrectionRequest extends MemoryMutation {
+  slot: MemorySlot; series: MemoryRef<MemoryU64Input>; slot_revision: MemoryU64Input; interval: MemoryInterval<MemoryI64Input>;
+  action: "close" | "replace" | "remove"; at_ms?: MemoryI64Input; correction_interval?: MemoryInterval<MemoryI64Input>;
+  replacement?: MemoryItem; evidence?: MemoryEvidence[];
+}
+export interface MemoryInput { id: MemoryKey; revision: MemoryU64Input; disposition?: "retain" | "logical_delete" }
+export interface MemoryConsolidateRequest extends MemoryMutation {
+  inputs: MemoryInput[]; output: MemoryItem; evidence?: MemoryEvidence[]; dry_run?: boolean;
+}
+/** Exactly one variant, selected by its key. */
+export type MemoryTarget<U extends MemoryU64Input = MemoryU64> =
+  | { ids: MemoryRef<U>[]; series?: never; entity?: never; session?: never; scope?: never }
+  | { series: MemoryRef<U>; ids?: never; entity?: never; session?: never; scope?: never }
+  | { entity: MemoryRef<U>; ids?: never; series?: never; session?: never; scope?: never }
+  | { session: true; ids?: never; series?: never; entity?: never; scope?: never }
+  | { scope: true; ids?: never; series?: never; entity?: never; session?: never };
+export interface MemoryForgetRequest extends MemoryMutation {
+  target: MemoryTarget<MemoryU64Input>; mode: "logical_delete" | "expire"; expires_at_ms?: MemoryU64Input; allow_job?: boolean;
+}
+export interface MemoryReceiptRequest { scope: MemoryScope; operation: MemoryOperation; idempotency_key: MemoryKey }
+export interface MemoryErasureRequest { scope: MemoryScope; job_id: MemoryKey }
+export interface MemoryResumeRequest extends MemoryMutation {
+  job_id: MemoryKey; revision: MemoryU64Input; generation: MemoryU64Input; resume_token: string;
+}
+export interface MemoryReceipt {
+  id: MemoryKey; operation: MemoryOperation; scope: MemoryEffectiveScope; sequence: MemoryU64; retry_until_ms?: MemoryU64;
+  digest_version: "memory-request-v1";
+}
+export interface MemoryOutcome {
+  id: MemoryKey; action: "created" | "merged" | "noop" | "corrected" | "deleted" | "expired" | "retained_shared";
+  revision: MemoryU64; expires_at_ms?: MemoryU64;
+}
+export interface MemoryFeed {
+  mode: "ordinary_changes"; temporal_complete: false; ttl_complete: false; consumer_purge_acknowledged: false;
+}
+export interface MemoryErasureNotice {
+  live_state_only: true; secure_erasure: false; external_copies: "operator_managed"; restore_requires_manifest: true;
+  backup_history_purge: "not_verified"; manifest_id?: MemoryKey;
+}
+export interface MemoryErasure {
+  id: MemoryKey; scope: MemoryEffectiveScope; target: MemoryTarget; revision: MemoryU64; generation: MemoryU64;
+  state: "pending" | "logical"; logical_visibility: "hidden"; deleted_count: MemoryU64; remaining_count: MemoryU64 | null;
+  resume_token?: string;
+}
+/** HTTP 200 or 202; a pending erasure is `state: "pending"` and is a normal result, never an error. */
+export interface MemoryMutationResponse {
+  receipt: MemoryReceipt; replayed: boolean; outcomes: MemoryOutcome[]; feed: MemoryFeed; remaining_work: MemoryU64 | null;
+  state?: "logical" | "pending" | "retention_set"; erasure?: MemoryErasure; erasure_notice?: MemoryErasureNotice;
+  /** Absent here; a dry-run plan carries `dry_run: true` (see MemoryConsolidateResponse). */
+  dry_run?: never;
+}
+export interface MemoryReceiptResponse { result: MemoryMutationResponse }
+export interface MemoryErasureResponse { erasure: MemoryErasure; erasure_notice: MemoryErasureNotice; feed: MemoryFeed }
+export interface MemoryCompeting { id: MemoryKey; interval: MemoryInterval; revision: MemoryU64 }
+export interface MemoryErrorDetail {
+  field?: MemoryKey; limit?: MemoryU64; requested?: MemoryU64; competing?: MemoryCompeting[]; receipt_lookup_required?: boolean; code?: string;
+}
+export interface MemoryPlanResponse {
+  dry_run: true; user_operations: MemoryU64; encoded_bytes: MemoryU64; conflicts: MemoryErrorDetail[]; remaining_work: MemoryU64 | null;
+}
+/** Discriminated by `dry_run`: true for a plan, absent for a committed mutation. */
+export type MemoryConsolidateResponse = MemoryMutationResponse | MemoryPlanResponse;
+export interface MemoryEvidenceView { collection: MemoryBinding; record: MemoryU64; snippet?: string }
+export interface MemoryPath { nodes: MemoryU64[]; edges: MemoryU64[] }
+export interface MemoryScores {
+  R: number; D: number | null; I: number; S: number; dense_rank?: number; sparse_rank?: number; text_rank?: number;
+  distance?: number; bm25?: number; sparse_score?: number; fused_rank?: number; fused_score?: number;
+}
+export interface MemoryView {
+  id: MemoryKey; revision: MemoryU64; scope: MemoryEffectiveScope; kind: MemoryKind; content: string; observed_at_ms: MemoryI64;
+  created_at_ms: MemoryU64; updated_at_ms: MemoryU64; importance: number; confidence?: number; expires_at_ms?: MemoryU64;
+  status: "accepted" | "disputed"; stale: boolean; segment: MemoryInterval | null; evidence: MemoryEvidenceView[];
+  scores: MemoryScores; provenance?: MemoryProvenance[]; references?: MemoryRef[]; paths?: MemoryPath[]; metadata?: MemoryProperties;
+}
+export interface MemoryReadMeta {
+  scopes: MemoryEffectiveScope[]; as_of_ms: MemoryI64; ttl_clock_ms: MemoryU64; sequence: MemoryU64; complete: boolean;
+  truncation: ("candidates" | "source_scan" | "vector_components" | "evidence_bytes" | "mmr_components" | "visited_nodes" | "edges"
+    | "degree" | "deadline" | "output" | "deletion_barrier")[];
+  limitations: ("historical_candidate_discovery_not_exhaustive" | "retained_state_only")[];
+  mode: "exact_enumeration" | "approximate" | "bounded_expansion"; candidates_examined: MemoryU64; edges_charged: MemoryU64;
+  vector_components: MemoryU64; mmr_components: MemoryU64; evidence_bytes: MemoryU64;
+}
+export interface MemoryRecallResponse {
+  memories: MemoryView[]; meta: MemoryReadMeta; ranking_version: "memory-ranking-v1"; selection: "weighted" | "exact" | "mmr";
+}
+export interface MemoryFactView {
+  series: MemoryRef; slot: MemorySlot; slot_revision: MemoryU64; destination_id: MemoryKey; interval: MemoryInterval;
+  status: "accepted" | "disputed"; stale: boolean; evidence: MemoryEvidenceView[]; provenance?: MemoryProvenance[];
+}
+export interface MemoryFactsResponse { facts: MemoryFactView[]; meta: MemoryReadMeta }
+/** The shared optional `error.details` object of a REST error; every member is optional. */
+export interface MemoryErrorContext { field?: string; limit?: MemoryU64; requested?: MemoryU64; feature?: string; category?: string }
+/** The JSON body of a failed response; the client surfaces it as a VLiteError. */
+export interface MemoryError { error: { code: string; message: string; details?: MemoryErrorContext } }
+/** Only an abort signal; cancellation or timeout is a TransportError and never a retry. */
+export interface MemoryCallOptions { signal?: AbortSignal }
+
 export class VLiteError extends Error {
   status: number; code: string; requestId: string | null;
+  /** The server's structured `error.details`, present only when it sent one. */
+  details?: MemoryErrorContext;
   /** Set by importNdjson when it fails after a job was reserved or resumed; the job is not aborted. */
   importJob?: string;
-  constructor(status: number, code: string, message: string, requestId: string | null);
+  constructor(status: number, code: string, message: string, requestId: string | null, details?: MemoryErrorContext);
 }
 /** HTTP 422 import_rows_invalid: nothing was written and the job did not advance. */
 export class ImportRejectedError extends VLiteError {
@@ -231,7 +414,7 @@ export class TransportError extends Error {
   /** Set by importNdjson when it fails after a job was reserved or resumed; the job is not aborted. */
   importJob?: string;
 }
-/** The server lacks conditional writes or KV routes; no fallback is performed. */
+/** The server lacks conditional writes, KV routes or memory routes (404 not_found); no fallback is performed. */
 export class UnsupportedError extends Error {}
 
 declare class Records {
@@ -273,6 +456,29 @@ export class Collection extends Records {
   annQuality(options?: QualityOptions): Promise<AnnQuality>;
 }
 
+/**
+ * Agent-memory operations of one binding (POST /v1/memory/{binding}/...); obtain with client.memory(binding).
+ * Each method takes one request object and resolves with the full response. A failed call rejects with
+ * VLiteError (code, status, requestId, details), UnsupportedError (404 not_found: the server has no memory
+ * routes), TransportError (timeout, abort or lost connection: a mutation may or may not have committed;
+ * reconcile with getReceipt) or TypeError (the request could not be represented; nothing was sent).
+ * Nothing is retried, embedded, split or paged, and the client never invents an idempotency key.
+ */
+export class Memory {
+  readonly binding: MemoryBinding;
+  remember(request: MemoryRememberRequest, options?: MemoryCallOptions): Promise<MemoryMutationResponse>;
+  recall(request: MemoryRecallRequest, options?: MemoryCallOptions): Promise<MemoryRecallResponse>;
+  findFacts(request: MemoryFactsRequest, options?: MemoryCallOptions): Promise<MemoryFactsResponse>;
+  correctFacts(request: MemoryCorrectionRequest, options?: MemoryCallOptions): Promise<MemoryMutationResponse>;
+  consolidate(request: MemoryConsolidateRequest, options?: MemoryCallOptions): Promise<MemoryConsolidateResponse>;
+  /** HTTP 202 resolves like 200: check `state` ("logical", "pending" or "retention_set"). */
+  forget(request: MemoryForgetRequest, options?: MemoryCallOptions): Promise<MemoryMutationResponse>;
+  getReceipt(request: MemoryReceiptRequest, options?: MemoryCallOptions): Promise<MemoryReceiptResponse>;
+  getErasure(request: MemoryErasureRequest, options?: MemoryCallOptions): Promise<MemoryErasureResponse>;
+  /** HTTP 202 resolves like 200: check `state`. */
+  resumeErasure(request: MemoryResumeRequest, options?: MemoryCallOptions): Promise<MemoryMutationResponse>;
+}
+
 /** Legacy /v1 record routes act on the "default" collection with historical defaults. */
 export class Client extends Records {
   constructor(baseUrl: string, token: string, options?: { timeoutMs?: number });
@@ -296,6 +502,8 @@ export class Client extends Records {
   buildIndex(options?: { metric?: "squared_l2" | "cosine"; quantization?: Quantization; rerankMultiplier?: number }): Promise<void>;
 
   collection(name: string): Collection;
+  /** Binding names match ^[a-z][a-z0-9_-]{0,62}$; a server without memory routes answers with UnsupportedError. */
+  memory(binding: MemoryBinding): Memory;
   listCollections(): Promise<CollectionList>;
   createCollection(name: string, dimensions: number, settings?: SettingsUpdate): Promise<CollectionInfo>;
   getCollection(name: string): Promise<CollectionDetail>;

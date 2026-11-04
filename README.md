@@ -25,24 +25,29 @@ service to operate.
   by default or before acknowledgment with full durability. Corruption fails
   closed and recovery is explicit.
 - **Exact and approximate search.** Exact search with squared L2, cosine or
-  inner product. HNSW for L2 and cosine. Typed metadata filters apply first.
+  inner product, scored with AVX2 or NEON kernels where available, with
+  identical results. HNSW for L2 and cosine. Typed metadata filters apply first.
 - **Property graphs.** Built in; every new file can hold them: nodes, typed edges and
-  links to vector records, with bounded traversal and graph retrieval.
+  links to vector records, with bounded traversal and graph retrieval. Rust adds
+  node and edge expiry and bounded local algorithms.
 - **Atomic batches.** Write or delete up to 4,096 records in one commit.
 - **Advanced retrieval.** Opt-in collections, record expiry, named and sparse
   vectors, hybrid search, facets, geo filters and recommendations.
 - **Server.** Authenticated REST with OpenAPI, optional gRPC and TLS,
+  key-value operations, opt-in managed embedding and ranking providers,
   Prometheus metrics, non-root Docker images and a Helm chart.
 - **Dashboard.** Browse, search, write, import, index, monitor and query
   graphs, with user accounts, roles and tenants.
 - **Storage options.** Encryption at rest, point-in-time restore, a change
-  feed, file-shipped read replicas and a disk-based ANN index.
+  feed, file-shipped read replicas, a disk-based ANN index, a key-value store
+  and an opt-in directory store with checkpoints (Rust).
 - **Tools.** Interactive shell, validated imports, offline maintenance, index
-  tuning, a graph CLI, an MCP server and agent skills.
-- **Performance.** At 100,000 × 384 dimensions, the 0.6 release ingests 5–6× faster,
-  reopens about 4× faster and builds HNSW 44× faster than the previous
-  baseline, with exact queries 4–6% slower. These results are now the
-  benchmark baseline.
+  tuning, a graph CLI, an MCP server and agent skills, with local key-value
+  commands in the shell and MCP.
+- **Performance.** At 100,000 × 384 dimensions, the last measured release
+  ingests 5–6× faster, reopens about 4× faster and builds HNSW 44× faster than
+  the previous baseline, with exact queries 4–6% slower. These results are the
+  benchmark baseline; later releases are not re-measured until the next run.
   [Results](benchmarks/RESULTS.md#release-060-against-81ff901-october-27-2026-utc)
 
 ## Key terms
@@ -180,13 +185,13 @@ Prebuilt packages: [PyPI](docs/INSTALL.md#pypi) and [release assets](docs/INSTAL
 | Contracts, limits and durability | [REFERENCE](docs/REFERENCE.md) |
 | Collections, hybrid search and imports | [CAPABILITIES](docs/CAPABILITIES.md) |
 | Named and sparse vectors | [VECTORS](docs/VECTORS.md) |
-| Encryption, restore, change feed and replicas | [STORAGE-FEATURES](docs/STORAGE-FEATURES.md) |
+| Encryption, restore, change feed, replicas, key-value and directory stores | [STORAGE-FEATURES](docs/STORAGE-FEATURES.md) |
 | Command-line tools and tests | [TOOLS](docs/TOOLS.md) |
 | gRPC, MCP and agent skills | [GRPC](docs/GRPC.md), [MCP](docs/MCP.md), [AGENT-SKILLS](docs/AGENT-SKILLS.md) |
 | Webhooks | [WEBHOOKS](docs/WEBHOOKS.md) |
-| Property graphs | [GRAPH](docs/GRAPH.md) |
+| Property graphs, expiry and algorithms | [GRAPH](docs/GRAPH.md) |
 | Benchmarks | [Methodology](benchmarks/README.md), [results](benchmarks/RESULTS.md) |
-| Upgrade notes | [Release notes](docs/RELEASE-0.6.1.md) |
+| Upgrade notes | [Release notes](docs/RELEASE-0.7.0.md) |
 
 ## Status and limitations
 
@@ -198,9 +203,9 @@ are on the [releases page](https://github.com/mahpate/Vlite/releases).
 - HNSW is approximate and supports L2 and cosine only.
 - Replicas are file-shipped. There is no networked replication.
 - Deleted records use disk space until you compact to a new file.
-- Released graph APIs: nodes and edges cannot expire, there are no point-in-time reads,
-  weighted paths or graph algorithms, query text is read-only, and gRPC has
-  no graph service. Traversal stops at 4 hops and 10,000 visited nodes.
+- Graphs: expiry and local algorithms are Rust-only, there are no
+  point-in-time reads, query text is read-only, and gRPC has no graph service.
+  Traversal stops at 4 hops and 10,000 visited nodes.
 - Durability depends on the OS and storage honoring sync. It is not a
   power-loss guarantee. The default [periodic durability](docs/REFERENCE.md#periodic-lazy-durability)
   syncs every 60 s, so an OS crash or power loss can lose up to about 60 s of
@@ -210,16 +215,9 @@ are on the [releases page](https://github.com/mahpate/Vlite/releases).
 
 ## What's next
 
-The [next-major roadmap](docs/projects/roadmap/next-major.md) tracks unreleased
-development. Its embedded Rust degree counts and bounded weighted paths are
-implemented and reviewed, as are PageRank, label propagation and sampled
-betweenness. These are not released capabilities or new
-REST/gRPC graph endpoints.
-
-The first [filter-summary slice](docs/projects/roadmap/p5-filters-and-serving.md)
-is also implemented and reviewed, but unreleased: conservative in-memory pruning
-preserves exact results and falls back to scanning at its retained-heap budget.
-Persisted summaries and further ANN/serving work remain outstanding.
+The [next-major roadmap](docs/projects/roadmap/next-major.md) tracks development
+that is not released yet, including REST and gRPC access to graph expiry and
+algorithms.
 
 Private [precision writes](docs/projects/roadmap/p3-compact-vectors.md) and the
 [temporal graph model and persistence](docs/projects/roadmap/gap4-temporal-graph.md)
@@ -234,9 +232,10 @@ remain outstanding.
 These plans are proposals under review, not commitments:
 
 - [Storage and speed goals](docs/projects/performance/storage-goals.md):
-  smaller files and faster search, with an optional directory-based store.
+  smaller files and faster search, building on the directory store.
 - [Product gaps](docs/projects/product-gaps/product-gaps.md): agent memory,
-  graph expiry and history, graph algorithms, replication and more.
+  graph history, graph query and ingestion, a gRPC graph service, replication
+  and more.
 
 ## License
 

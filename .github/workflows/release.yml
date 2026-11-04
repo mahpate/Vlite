@@ -142,13 +142,13 @@ jobs:
                   bundle.write("target/release/vlite_ffi.dll.lib", "vlite_ffi.dll.lib")
               for name in ["vlite-server", "vlite-maintain", "vlite-bench", "vlite-smoke",
                            "vlite-shell", "vlite-import", "vlite-tune", "vlite-quality",
-                           "vlite-mcp", "vlite-graph-cli"]:
+                           "vlite-mcp", "vlite-graph-cli", "vlite-memory-cli"]:
                   bundle.write(pathlib.Path("target/release") / (name + suffix), name + suffix)
               for name in ["README.md", "LICENSE", "Cargo.toml", "Cargo.lock", "src/openapi.json",
                            "compose.yaml", "compose.tls.yaml", "deploy/Caddyfile", "deploy/dashboard.conf", "Dockerfile",
                            "docs/REFERENCE.md", "docs/INSTALL.md", "docs/CONSOLE.md",
                            "docs/CONSOLE-ADMIN.md", "docs/DOCKER-OPERATIONS.md", "docs/CAPABILITIES.md",
-                           "docs/RELEASE-0.6.1.md", "docs/RELEASE-0.6.0.md", "docs/RELEASE-0.5.1.md", "docs/RELEASE-0.5.0.md", "docs/RELEASE-0.3.0.md", "docs/RELEASE-0.2.0.md",
+                           "docs/RELEASE-0.7.0.md", "docs/RELEASE-0.6.1.md", "docs/RELEASE-0.6.0.md", "docs/RELEASE-0.5.1.md", "docs/RELEASE-0.5.0.md", "docs/RELEASE-0.3.0.md", "docs/RELEASE-0.2.0.md",
                            "docs/GRAPH.md", "docs/GRAPH-QUERY.md", "docs/MCP.md", "src/openapi_graph.json",
                            "docs/API.md", "docs/STORAGE-FEATURES.md", "docs/VECTORS.md",
                            "docs/SECURITY.md", "docs/WEBHOOKS.md", "docs/TOOLS.md",
@@ -226,7 +226,7 @@ jobs:
           with zipfile.ZipFile(archive, "w", zipfile.ZIP_DEFLATED) as bundle:
               for name in ["vlite-server", "vlite-maintain", "vlite-bench", "vlite-smoke",
                            "vlite-shell", "vlite-import", "vlite-tune", "vlite-quality",
-                           "vlite-mcp", "vlite-graph-cli"]:
+                           "vlite-mcp", "vlite-graph-cli", "vlite-memory-cli"]:
                   bundle.write(pathlib.Path("target/release") / name, name)
               for name in ["README.md", "LICENSE", "Cargo.toml", "Cargo.lock", "src/openapi.json",
                            "src/openapi_graph.json", "proto/vlite/v1/vlite.proto"]:

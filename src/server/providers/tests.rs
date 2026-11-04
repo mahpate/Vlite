@@ -1177,6 +1177,7 @@ async fn zero_outbound_without_config_or_bindings_including_existing_handlers() 
         let fake = Arc::new(Fake::new(200, r#"{"data":[{"embedding":[1,2]}]}"#));
         let mut registry = registry(&value);
         registry.transport = fake.clone();
+        assert!(registry.configured());
         assert_eq!(
             registry
                 .embed_bound(&key(), TEXT, Instant::now())
@@ -1260,6 +1261,7 @@ async fn zero_outbound_without_config_or_bindings_including_existing_handlers() 
     }
     assert_eq!(fake.calls.load(Ordering::SeqCst), 0);
     assert!(ProviderRegistry::default().providers.is_empty());
+    assert!(!ProviderRegistry::default().configured());
 }
 
 #[tokio::test]

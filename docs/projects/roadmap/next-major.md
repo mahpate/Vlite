@@ -70,6 +70,17 @@ independent acceptance or the unchanged DO-005 quiet-host policy.
   until the owner revisits it. Synchronous acknowledgement needs its own
   approval.
 
+## Decided 2026-11-04
+
+- **Size work parked:** size-driven work (P3b engine integration, P3c, P4, P5
+  writers and compression) is parked for 0.7.0 as best effort. The release
+  does not wait for it; the DO-005 run reports measured values only; the work
+  is revisited if a size goal is required. Must-not-regress items still block
+  ([storage goals](../performance/storage-goals.md#decisions), decision 7).
+- **Memory track:** Key-value (Gap 2) and agent memory (Gap 1) are P0 for
+  0.7.0: the release waits for their independent acceptance and green CI;
+  leases stay design-only; publishing stays with the owner.
+
 ## Progress
 
 Local numbers below show direction only (see rules).
@@ -94,7 +105,10 @@ Local numbers below show direction only (see rules).
 - **Gap 2, key-value:** the embedded Rust API is done
   ([storage features](../../STORAGE-FEATURES.md#key-value-store)): namespaces,
   ordered prefix lists, expiry, compare-and-set and fencing tokens, with no
-  format change. REST and gRPC wait for the OpenAPI review. The
+  format change. The REST routes (with `features.kv` in
+  `GET /v1/capabilities`), the gRPC `vlite.v1.Kv` service, the local shell and
+  MCP tools and the Python, JavaScript and .NET client methods are integrated
+  in the 0.7.0 candidate, unreleased, and none of them offers leases. The
   [fenced-lease ledger design](gap2-lease-ledger.md) is a docs-only
   storage-format proposal for `gap2-rust-lease-ledger`, accepted 2026-11-02;
   it is not implemented or active, no existing file is opted in by default,
@@ -280,9 +294,13 @@ accepted and integrated, with no production caller. This decoded
   2026-11-02. Gap 8 step 2a, a private REST candidate for opt-in managed
   providers on the existing embed and search routes (with its OpenAPI parity
   allowlist and typed Python client shapes), is independently accepted and
-  integrated, but unreleased and not active in production; gRPC step 2b is not
-  started and the startup flag names await ratification. The rest of the
-  contract is not yet implemented. The
+  integrated, but unreleased and not active in production. gRPC step 2b
+  (`EmbedText` and custom rerank) is independently accepted (2026-11-04) and
+  integrated too, unreleased and inactive until a provider registry is
+  configured; the startup flag names and the gRPC `ABORTED` mapping of
+  `provider_snapshot_conflict` await ratification. Without a providers file,
+  REST `embed` keeps its 0.6.1 behavior. The rest of the contract is not yet
+  implemented. The
   [binary search results](serving-binary-results-contract.md) contract
   specifies an opt-in HTTP protobuf representation with its negotiation,
   bounds and independent oracle plan; it is a reviewed specification, not an
@@ -298,8 +316,10 @@ accepted and integrated, with no production caller. This decoded
   private memory core, A2 retention and accepted private B recall work, the second records today's
   gRPC behaviour apart from the proposed schema. Neither is implemented. The
   [KV and TTL serving](serving-kv-ttl-contract.md) contract specifies KV
-  routes, fenced leases, and TTL and change-feed events; its lease ledger is a
-  storage-format change that needs owner approval and P2. It is a reviewed
+  routes, fenced leases, and TTL and change-feed events. Its ordinary KV routes
+  over REST and gRPC are integrated in the 0.7.0 candidate, unreleased; its
+  lease ledger is a storage-format change that needs owner approval and P2, and
+  the lease, graph TTL and change-feed serving remain a reviewed
   specification, not an implemented capability. The
   [precision serving](serving-precision-contract.md) contract specifies the
   per-collection float16 create and inspection surfaces on REST, gRPC, MCP and
@@ -327,7 +347,11 @@ accepted and integrated, with no production caller. This decoded
   and first-party-reference review. Memory's private A1/A2/B slices and the
   crate-private C1 consolidation (exact golden replay, with its test-strength
   follow-up) are independently accepted and integrated, but remain unreleased
-  and inactive. The remainder of slice C is scoped in the
+  and inactive. The Python, JavaScript and .NET `client.memory(binding)`
+  facades and the `vlite-memory-cli` binary are integrated and tested against
+  fake HTTP servers; the server-side REST adapter and the memory MCP tools are
+  not merged, so no server answers them yet. The remainder of slice C is
+  scoped in the
   [C2 remainder contract](gap1-c2-remainder-contract.md) as sub-slices S1-S2, X1,
   E1-E4 and F1-F6 with provisional coordinator rulings: the scoping is accepted,
   S1 is implemented, independently accepted and integrated (crate-private,

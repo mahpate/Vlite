@@ -70,12 +70,14 @@ function indexBody(metric, quantization, rerankMultiplier) {
 }
 
 export class VLiteError extends Error {
-  constructor(status, code, message, requestId) {
+  constructor(status, code, message, requestId, details) {
     super(`HTTP ${status}: ${code}: ${message}`);
     this.name = "VLiteError";
     this.status = status;
     this.code = code;
     this.requestId = requestId;
+    // The optional structured `error.details` object; the property is absent when the server sent none.
+    if (details !== undefined) this.details = details;
   }
 }
 
@@ -183,6 +185,202 @@ async function kvRequest(t, method, path, body, signal) {
   }
 }
 
+function errorDetails(value) {
+  return typeof value === "object" && value !== null && !Array.isArray(value) ? value : undefined;
+}
+
+// Agent memory (serving contract section 8). A request is rebuilt field by field: u64/i64 integers are
+// always sent as canonical decimal strings, a Number is never rounded, and no unknown member is sent.
+// Only representation is checked here; bounds, counts and conditional rules belong to the server.
+const U64_TEXT = /^(0|[1-9][0-9]*)$/;
+const I64_TEXT = /^(0|-?[1-9][0-9]*)$/;
+const MEMORY_BINDING = /^[a-z][a-z0-9_-]{0,62}$/;
+
+const memoryRecord = (value) => typeof value === "object" && value !== null && !Array.isArray(value);
+
+function memoryBinding(value) {
+  if (typeof value !== "string" || !MEMORY_BINDING.test(value)) throw new TypeError("binding must match ^[a-z][a-z0-9_-]{0,62}$");
+  return value;
+}
+
+function memoryInteger(value, name, text, low, high, kind) {
+  let number;
+  if (typeof value === "bigint") {
+    number = value;
+  } else if (typeof value === "number") {
+    if (!Number.isSafeInteger(value)) throw new TypeError(`${name} is not a safe integer; pass a bigint or a decimal string`);
+    number = BigInt(value);
+  } else if (typeof value === "string") {
+    if (!text.test(value)) throw new TypeError(`${name} must be a canonical decimal string`);
+    if (value.length > 20) throw new TypeError(`${name} is outside the ${kind} 64-bit range`);
+    number = BigInt(value);
+  } else {
+    throw new TypeError(`${name} must be a decimal string, a safe integer or a bigint`);
+  }
+  if (number < low || number > high) throw new TypeError(`${name} is outside the ${kind} 64-bit range`);
+  return number.toString();
+}
+const memoryU64 = (value, name) => memoryInteger(value, name, U64_TEXT, 0n, 18446744073709551615n, "unsigned");
+const memoryI64 = (value, name) => memoryInteger(value, name, I64_TEXT, -9223372036854775808n, 9223372036854775807n, "signed");
+
+function memoryText(value, name) {
+  if (typeof value !== "string") throw new TypeError(`${name} must be a string`);
+  return value;
+}
+function memoryFlag(value, name) {
+  if (typeof value !== "boolean") throw new TypeError(`${name} must be a boolean`);
+  return value;
+}
+function memoryTrue(value, name) {
+  if (value !== true) throw new TypeError(`${name} must be true`);
+  return value;
+}
+function memoryFloat(value, name) {
+  if (typeof value !== "number" || !Number.isFinite(value)) throw new TypeError(`${name} must be a finite number`);
+  return value;
+}
+// Deadlines, limits and counts stay JSON integers; only a value that cannot be one is refused.
+function memoryBudget(value, name) {
+  if (!Number.isSafeInteger(value) || value < 0) throw new TypeError(`${name} must be a non-negative safe integer`);
+  return value;
+}
+const memoryNullable = (convert) => (value, name) => value === null ? null : convert(value, name);
+const memoryList = (convert) => (value, name) => {
+  if (!Array.isArray(value)) throw new TypeError(`${name} must be an array`);
+  const items = [];
+  for (let index = 0; index < value.length; index++) items.push(convert(value[index], `${name}[${index}]`));
+  return items;
+};
+// An open map; Object.fromEntries defines every key, including __proto__, as an own property.
+const memoryMap = (convert) => (value, name) => {
+  if (!memoryRecord(value)) throw new TypeError(`${name} must be an object`);
+  return Object.fromEntries(Object.entries(value).filter(([, member]) => member !== undefined)
+    .map(([key, member]) => [key, convert(member, `${name}.${key}`)]));
+};
+// A closed object: undefined means absent, null is never a stand-in for absence, unknown keys are refused.
+function memoryObject(required, optional = {}) {
+  return (value, name) => {
+    if (!memoryRecord(value)) throw new TypeError(`${name} must be an object`);
+    const body = {};
+    for (const key of Object.keys(value)) {
+      if (value[key] === undefined) continue;
+      const convert = Object.hasOwn(required, key) ? required[key] : Object.hasOwn(optional, key) ? optional[key] : undefined;
+      if (convert === undefined) throw new TypeError(`${name}.${key} is not a field of this request`);
+      body[key] = convert(value[key], `${name}.${key}`);
+    }
+    for (const key of Object.keys(required)) {
+      if (!Object.hasOwn(body, key)) throw new TypeError(`${name}.${key} is required`);
+    }
+    return body;
+  };
+}
+// A union whose variants are told apart by their single key.
+function memoryVariant(variants) {
+  return (value, name) => {
+    if (!memoryRecord(value)) throw new TypeError(`${name} must be an object`);
+    const keys = Object.keys(value).filter((key) => value[key] !== undefined);
+    if (keys.length !== 1 || !Object.hasOwn(variants, keys[0])) {
+      throw new TypeError(`${name} must have exactly one of ${Object.keys(variants).join(", ")}`);
+    }
+    return { [keys[0]]: variants[keys[0]](value[keys[0]], `${name}.${keys[0]}`) };
+  };
+}
+const SCALARS = { string: memoryText, integer: memoryI64, float: memoryFloat, boolean: memoryFlag };
+function memoryScalar(value, name) {
+  if (!memoryRecord(value)) throw new TypeError(`${name} must be an object`);
+  if (typeof value.type !== "string" || !Object.hasOwn(SCALARS, value.type)) {
+    throw new TypeError(`${name}.type must be string, integer, float or boolean`);
+  }
+  return memoryObject({ type: memoryText, value: SCALARS[value.type] })(value, name);
+}
+
+const memoryScope = memoryObject({ agent: memoryText }, { user: memoryText, session: memoryText });
+const memoryRef = memoryObject({ id: memoryText, revision: memoryU64 });
+const memoryExpected = memoryVariant({ absent: memoryTrue, revision: memoryU64 });
+const memoryTarget = memoryVariant({ ids: memoryList(memoryRef), series: memoryRef, entity: memoryRef, session: memoryTrue, scope: memoryTrue });
+const memoryInterval = memoryObject({ valid_from_ms: memoryNullable(memoryI64), valid_to_ms: memoryNullable(memoryI64) });
+const memorySource = memoryObject({ source_id: memoryText, source_kind: memoryText }, { uri: memoryText, transformation_id: memoryText });
+const memoryProperties = memoryMap(memoryScalar);
+const memoryCondition = memoryObject({ field: memoryText, op: memoryText }, { value: memoryScalar });
+const memoryFilter = memoryObject({}, { all: memoryList(memoryCondition), any: memoryList(memoryCondition) });
+const memoryEvidenceRef = memoryObject({ collection: memoryText, record: memoryU64 });
+const memoryEvidence = memoryObject({ collection: memoryText, record: memoryU64 },
+  { vector: memoryList(memoryFloat), text: memoryText, payload_base64: memoryText, metadata: memoryProperties });
+const memoryAssertion = memoryObject({ subject_id: memoryText, predicate: memoryText, slot_key: memoryText, destination_id: memoryText,
+  interval: memoryInterval, slot_expected: memoryExpected }, { disagreement: memoryText });
+const memoryItem = memoryObject({ id: memoryText, kind: memoryText, content: memoryText, observed_at_ms: memoryI64, source: memorySource },
+  { importance: memoryFloat, confidence: memoryFloat, expires_at_ms: memoryU64, provenance: memoryList(memorySource),
+    references: memoryList(memoryRef), evidence: memoryList(memoryEvidenceRef), metadata: memoryProperties,
+    assertion: memoryAssertion, expected: memoryExpected, merge: memoryText });
+const memoryRanking = memoryObject({}, { selection: memoryText, weights: memoryList(memoryFloat), half_life_ms: memoryFloat,
+  future_observations: memoryText, lambda: memoryFloat });
+const memoryLimits = memoryObject({}, Object.fromEntries(["candidates", "vector_components", "evidence_bytes", "mmr_components", "deadline_ms",
+  "max_hops", "max_visited_nodes", "max_edges_examined", "max_edges_per_node", "max_output_nodes", "max_output_edges",
+  "max_output_paths"].map((key) => [key, memoryBudget])));
+const memoryProjection = memoryObject({}, { snippets: memoryFlag, provenance: memoryFlag, paths: memoryFlag, metadata: memoryList(memoryText) });
+const memorySlot = memoryObject({ subject_id: memoryText, predicate: memoryText, slot_key: memoryText });
+const MUTATION = { scope: memoryScope, idempotency_key: memoryText };
+const MUTATION_OPTIONS = { max_references: memoryBudget, deadline_ms: memoryBudget, require_complete_feed: memoryFlag };
+
+const memoryRemember = memoryObject({ ...MUTATION, items: memoryList(memoryItem) },
+  { ...MUTATION_OPTIONS, evidence: memoryList(memoryEvidence) });
+const memoryRecall = memoryObject({ scope: memoryScope }, { scopes: memoryList(memoryScope), vector: memoryList(memoryFloat), text: memoryText,
+  embedding_provider: memoryText, entity_seeds: memoryList(memoryText), kinds: memoryList(memoryText), filter: memoryFilter,
+  as_of_ms: memoryI64, ranking: memoryRanking, limits: memoryLimits, projection: memoryProjection, mode: memoryText,
+  limit: memoryBudget, allow_partial: memoryFlag });
+const memoryFacts = memoryObject({ scope: memoryScope, slot: memorySlot }, { as_of_ms: memoryI64, history: memoryFlag, limit: memoryBudget,
+  limits: memoryLimits, projection: memoryProjection, allow_partial: memoryFlag });
+const memoryCorrection = memoryObject({ ...MUTATION, slot: memorySlot, series: memoryRef, slot_revision: memoryU64, interval: memoryInterval,
+  action: memoryText }, { ...MUTATION_OPTIONS, at_ms: memoryI64, correction_interval: memoryInterval, replacement: memoryItem,
+  evidence: memoryList(memoryEvidence) });
+const memoryConsolidate = memoryObject({ ...MUTATION, inputs: memoryList(memoryObject({ id: memoryText, revision: memoryU64 },
+  { disposition: memoryText })), output: memoryItem }, { ...MUTATION_OPTIONS, evidence: memoryList(memoryEvidence), dry_run: memoryFlag });
+const memoryForget = memoryObject({ ...MUTATION, target: memoryTarget, mode: memoryText },
+  { ...MUTATION_OPTIONS, expires_at_ms: memoryU64, allow_job: memoryFlag });
+const memoryReceiptLookup = memoryObject({ scope: memoryScope, operation: memoryText, idempotency_key: memoryText });
+const memoryErasureLookup = memoryObject({ scope: memoryScope, job_id: memoryText });
+const memoryResume = memoryObject({ ...MUTATION, job_id: memoryText, revision: memoryU64, generation: memoryU64, resume_token: memoryText },
+  MUTATION_OPTIONS);
+
+// Required top-level members of each success response. Unknown members are ignored and nested members are
+// returned as the server sent them (u64/i64 stay decimal strings); a body without its envelope is a transport error.
+const memoryIs = {
+  object: memoryRecord,
+  array: Array.isArray,
+  boolean: (value) => typeof value === "boolean",
+  string: (value) => typeof value === "string",
+  nullableString: (value) => value === null || typeof value === "string",
+  mutation: (value) => memoryConforms(MEMORY_RESPONSES.mutation, value),
+};
+const MEMORY_RESPONSES = {
+  mutation: { receipt: "object", replayed: "boolean", outcomes: "array", feed: "object", remaining_work: "nullableString" },
+  plan: { user_operations: "string", encoded_bytes: "string", conflicts: "array", remaining_work: "nullableString" },
+  recall: { memories: "array", meta: "object", ranking_version: "string", selection: "string" },
+  facts: { facts: "array", meta: "object" },
+  receipt: { result: "mutation" },
+  erasure: { erasure: "object", erasure_notice: "object", feed: "object" },
+};
+function memoryConforms(shape, value) {
+  return memoryRecord(value) && Object.entries(shape).every(([key, kind]) => Object.hasOwn(value, key) && memoryIs[kind](value[key]));
+}
+
+function memorySignal(options) {
+  if (options === undefined) return undefined;
+  if (!memoryRecord(options) || Object.keys(options).some((key) => key !== "signal")) throw new TypeError("options must be an object with only signal");
+  if (options.signal !== undefined && !(options.signal instanceof AbortSignal)) throw new TypeError("options.signal must be an AbortSignal");
+  return options.signal;
+}
+
+async function memoryRequest(t, path, body, signal) {
+  try { return await t.request("POST", path, body, { signal }); }
+  catch (error) {
+    if (error instanceof VLiteError && error.status === 404 && error.code === "not_found") {
+      throw new UnsupportedError("Server does not support memory routes; no fallback performed");
+    }
+    throw error;
+  }
+}
+
 // The transport closes over the token so it never appears on any object.
 function transport(base, token, timeout) {
   async function request(method, path, body, { ifMatch, etag = false, text = false, signal } = {}) {
@@ -214,7 +412,7 @@ function transport(base, token, timeout) {
         throw new ImportRejectedError(422, detail.code, detail.message ?? "", requestId, { ...report, outcome: "rejected" });
       }
       throw new VLiteError(response.status, detail?.code ?? "http_error",
-        detail?.message ?? "Server returned a nonstandard error response", requestId);
+        detail?.message ?? "Server returned a nonstandard error response", requestId, errorDetails(detail?.details));
     }
     if (text) {
       if (!(response.headers.get("content-type") ?? "").startsWith("text/plain")) throw new TransportError();
@@ -352,6 +550,36 @@ export class Collection extends Records {
   }
 }
 
+/** Operations scoped to one memory binding; obtain with client.memory(binding). */
+export class Memory {
+  #t;
+  #prefix;
+  constructor(t, binding) {
+    this.#t = t;
+    this.#prefix = `/v1/memory/${memoryBinding(binding)}`;
+    this.binding = binding;
+  }
+  remember(request, options) { return this.#post("/remember", memoryRemember, request, options, "mutation"); }
+  recall(request, options) { return this.#post("/recall", memoryRecall, request, options, "recall"); }
+  findFacts(request, options) { return this.#post("/facts/query", memoryFacts, request, options, "facts"); }
+  correctFacts(request, options) { return this.#post("/facts/correct", memoryCorrection, request, options, "mutation"); }
+  consolidate(request, options) { return this.#post("/consolidate", memoryConsolidate, request, options, "consolidate"); }
+  forget(request, options) { return this.#post("/forget", memoryForget, request, options, "mutation"); }
+  getReceipt(request, options) { return this.#post("/receipts/lookup", memoryReceiptLookup, request, options, "receipt"); }
+  getErasure(request, options) { return this.#post("/erasures/get", memoryErasureLookup, request, options, "erasure"); }
+  resumeErasure(request, options) { return this.#post("/erasures/resume", memoryResume, request, options, "mutation"); }
+  // The request and options are checked before anything is sent; every call is one POST and is never retried.
+  async #post(route, normalize, request, options, shape) {
+    const body = normalize(request, "request");
+    const signal = memorySignal(options);
+    const value = await memoryRequest(this.#t, this.#prefix + route, body, signal);
+    // A consolidation answers with a dry-run plan or a mutation response, told apart by dry_run.
+    const expected = shape === "consolidate" ? (memoryRecord(value) && value.dry_run === true ? "plan" : "mutation") : shape;
+    if (!memoryConforms(MEMORY_RESPONSES[expected], value)) throw new TransportError();
+    return value;
+  }
+}
+
 export class Client extends Records {
   #t;
   constructor(baseUrl, token, { timeoutMs = 30000 } = {}) {
@@ -375,6 +603,7 @@ export class Client extends Records {
   }
 
   collection(name) { return new Collection(this.#t, this, name); }
+  memory(binding) { return new Memory(this.#t, binding); }
   listCollections() { return this.#t.request("GET", "/v1/collections"); }
   createCollection(name, dimensions, settings) {
     const body = { name: collectionName(name), dimensions: integer(dimensions, 1, 4294967295, "dimensions") };

@@ -182,7 +182,7 @@ test generates its stubs from the same proto. No generated stubs are checked in.
 ## Key-value entries
 
 `vlite.v1.Kv` provides `GetKvEntry`, `PutKvEntry`, `DeleteKvEntry` and
-`ListKvEntries`. The four ordinary KV RPCs join 34 `VLite` RPCs (38 total);
+`ListKvEntries`. The four ordinary KV RPCs join 35 `VLite` RPCs (39 total);
 there are no lease RPCs. Addresses require a nonempty collection name.
 Values are raw bytes, versions/deadlines are `uint64`, and optional expiry
 distinguishes an unset deadline from zero. Get/list require collection `read`;
@@ -190,6 +190,9 @@ put/delete require collection `write`. Validation, CAS, tenant bindings,
 quotas, audit, durability and pagination match [the REST KV rules](API.md#key-value-entries).
 The list page boundary is measured using the canonical REST JSON encoding,
 including base64 values, not the smaller protobuf encoding.
+A client needs a receive limit of at least 16 MiB + 1 KiB for `ListKvEntries`
+(the canonical JSON page cap is 16,777,216 bytes; the protobuf page is not larger)
+and a send limit above 1 MiB.
 
 ## Streaming export and import
 

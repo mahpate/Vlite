@@ -1,0 +1,1 @@
+{"scope":{"agent":"a"},"idempotency_key":"k1","inputs":[{"id":"m1","revision":"7"}],"output":{"id":"summary1","kind":"episodic","content":"Caller summary","observed_at_ms":"90","source":{"source_id":"summary-source","source_kind":"caller","transformation_id":"summary-v1"}},"dry_run":true}

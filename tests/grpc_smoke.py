@@ -203,6 +203,28 @@ def check_additive_wire(pb):
     assert addition.output_type == ".vlite.v1.EmbedTextResponse", addition
     assert not addition.client_streaming and not addition.server_streaming, addition
     service.method.remove(addition)
+    # The ordinary key-value service is a separate additive service: its four RPCs
+    # and nine messages are named here and removed, so a changed or moved old tag
+    # can never hide behind them.
+    kv_messages = [
+        "KvAddress", "KvGetRequest", "KvEntry", "KvPutRequest", "KvPutResponse",
+        "KvDeleteRequest", "KvDeleteResponse", "KvListRequest", "KvListResponse",
+    ]
+    assert sorted(name for name in messages if name.startswith("Kv")) == sorted(kv_messages)
+    for name in kv_messages:
+        descriptor.message_type.remove(messages[name])
+    kv_service = next(item for item in descriptor.service if item.name == "Kv")
+    assert [
+        (method.name, method.input_type, method.output_type, method.client_streaming, method.server_streaming)
+        for method in kv_service.method
+    ] == [
+        ("GetKvEntry", ".vlite.v1.KvGetRequest", ".vlite.v1.KvEntry", False, False),
+        ("PutKvEntry", ".vlite.v1.KvPutRequest", ".vlite.v1.KvPutResponse", False, False),
+        ("DeleteKvEntry", ".vlite.v1.KvDeleteRequest", ".vlite.v1.KvDeleteResponse", False, False),
+        ("ListKvEntries", ".vlite.v1.KvListRequest", ".vlite.v1.KvListResponse", False, False),
+    ]
+    descriptor.service.remove(kv_service)
+    assert [item.name for item in descriptor.service] == ["VLite"]
     # Frozen descriptor of the approved pre-provider v1 schema. After removing
     # only the reviewed additions, every old tag, type, enum and RPC must match.
     assert wire_signature(descriptor) == "798ea524ec3d4aa48289f6e37e66836bb3a67cac9193a766c60d7b04036795fa"

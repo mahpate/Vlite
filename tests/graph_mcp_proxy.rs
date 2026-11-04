@@ -316,6 +316,50 @@ fn names(tools: &[Value]) -> Vec<&str> {
         .collect()
 }
 
+/// Remove only the contract's nine approved proxy-only memory additions.
+/// The graph definitions are still compared byte-for-byte below.
+fn graph_tools_after_memory_additions(tools: Vec<Value>, writable: bool) -> Vec<Value> {
+    let golden: Value =
+        serde_json::from_str(include_str!("fixtures/memory_tools/exchanges.json")).unwrap();
+    let definitions: Value =
+        serde_json::from_str(include_str!("fixtures/memory_tools/schemas.json")).unwrap();
+    let properties: Value =
+        serde_json::from_str(include_str!("fixtures/memory_tools/requests.json")).unwrap();
+    let expected: Vec<_> = golden["cases"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter(|case| writable || case["read_only"] == true)
+        .collect();
+    let (memory, graph): (Vec<_>, Vec<_>) = tools
+        .into_iter()
+        .partition(|tool| tool["name"].as_str().unwrap().starts_with("vlite_memory_"));
+    assert_eq!(memory.len(), expected.len());
+    for (tool, case) in memory.iter().zip(expected) {
+        assert_eq!(tool["name"], case["name"]);
+        let mut fields = properties[case["name"].as_str().unwrap()]
+            .as_object()
+            .unwrap()
+            .clone();
+        let mut annotations = json!({"readOnlyHint":case["read_only"]});
+        if case["read_only"] == false {
+            fields.extend(properties["mutation"].as_object().unwrap().clone());
+            annotations["idempotentHint"] = json!(false);
+        }
+        fields.insert("binding".into(), json!({"$ref":"#/$defs/MemoryBinding"}));
+        assert_eq!(
+            tool["inputSchema"],
+            json!({
+                "type":"object","additionalProperties":false,"required":case["required"],
+                "properties":fields,"$defs":definitions
+            })
+        );
+        assert_eq!(tool["annotations"], annotations);
+        assert!(tool.get("outputSchema").is_none());
+    }
+    graph
+}
+
 /// Read calls covering every read tool, in both local and proxied sessions.
 fn read_calls() -> Vec<(&'static str, Value)> {
     vec![
@@ -381,7 +425,7 @@ fn proxied_tools_match_local_mode_on_the_same_data() {
             .into_iter()
             .filter(|tool| tool["name"].as_str().unwrap().starts_with("vlite_graph_"))
             .collect();
-        let proxied = proxy.tools();
+        let proxied = graph_tools_after_memory_additions(proxy.tools(), writable);
         assert_eq!(proxied, local_graph_tools, "writable={writable}");
         assert_eq!(
             names(&proxied).contains(&"vlite_graph_put_schema"),
@@ -544,7 +588,7 @@ fn authorization_is_per_graph_and_the_token_is_never_echoed() {
     let vectors_only = server.credential(json!({"collections": ["*"],
         "operations": ["read", "search"]}));
     let mut proxy = Session::proxy(&server.url, Some(&vectors_only), false);
-    assert!(proxy.tools().is_empty());
+    assert!(graph_tools_after_memory_additions(proxy.tools(), false).is_empty());
     proxy.finish();
 
     // A wrong token fails the probe without echoing the token.
@@ -605,7 +649,7 @@ fn vector_only_servers_list_no_graph_tools() {
     db.close().unwrap();
     let server = Server::start(&path, &directory.path().join("admin"));
     let mut proxy = Session::proxy(&server.url, Some(ADMIN), true);
-    assert!(proxy.tools().is_empty());
+    assert!(graph_tools_after_memory_additions(proxy.tools(), true).is_empty());
     let error = proxy.err("vlite_graph_list", json!({}));
     assert!(error.starts_with("graphs_not_enabled: "), "{error}");
     proxy.finish();

@@ -8,11 +8,14 @@ using System.Text.RegularExpressions;
 
 namespace VLite;
 
-public sealed class VLiteException(int status, string code, string message, string? requestId) : Exception(message)
+public sealed class VLiteException(int status, string code, string message, string? requestId, MemoryErrorContext? details) : Exception(message)
 {
+    public VLiteException(int status, string code, string message, string? requestId) : this(status, code, message, requestId, null) { }
     public int Status { get; } = status;
     public string Code { get; } = code;
     public string? RequestId { get; } = requestId;
+    /// <summary>Structured <c>error.details</c> when the server sent any, e.g. <c>Feature</c> of a capability refusal.</summary>
+    public MemoryErrorContext? Details { get; } = details;
 }
 
 /// <summary>The mutation outcome may be unknown; no retry was performed.</summary>
@@ -22,7 +25,11 @@ public sealed class TransportException(Exception cause) : Exception(
     public string Code => "transport_error";
 }
 
-public sealed class UnsupportedException() : Exception("Server does not support KV routes; no fallback performed");
+public sealed class UnsupportedException : Exception
+{
+    public UnsupportedException() : base("Server does not support KV routes; no fallback performed") { }
+    internal UnsupportedException(string message) : base(message) { }
+}
 
 public abstract record Expected
 {
@@ -91,6 +98,7 @@ public sealed class Client : Records, IDisposable
             {
                 var code = "http_error";
                 var message = "Server returned a nonstandard error response";
+                MemoryErrorContext? details = null;
                 try
                 {
                     using var doc = JsonDocument.Parse(await response.Content.ReadAsStringAsync(cancellation).ConfigureAwait(false));
@@ -98,11 +106,11 @@ public sealed class Client : Records, IDisposable
                     var parsedCode = detail.GetProperty("code").GetString();
                     var parsedMessage = detail.GetProperty("message").GetString();
                     if (!string.IsNullOrEmpty(parsedCode) && parsedMessage is not null)
-                    { code = parsedCode; message = parsedMessage; }
+                    { code = parsedCode; message = parsedMessage; details = MemoryWire.ReadErrorContext(detail); }
                 }
                 catch (Exception e) when (e is JsonException or KeyNotFoundException or InvalidOperationException) { }
                 var id = response.Headers.TryGetValues("X-Request-ID", out var values) ? values.FirstOrDefault() : null;
-                throw new VLiteException((int)response.StatusCode, code, message, id);
+                throw new VLiteException((int)response.StatusCode, code, message, id, details);
             }
             if (response.StatusCode == HttpStatusCode.NoContent) return default;
             using var document = JsonDocument.Parse(await response.Content.ReadAsStringAsync(cancellation).ConfigureAwait(false));
@@ -250,6 +258,8 @@ public sealed class Client : Records, IDisposable
         return RequestAsync("POST", "/v1/collections", new { name, dimensions, settings }, cancellation);
     }
     public Records Collection(string name) { ValidateName(name); return new Records("/v1/collections/" + name) { Transport = this }; }
+    /// <summary>Agent-memory operations of one provisioned binding; see <see cref="MemoryClient"/>.</summary>
+    public MemoryClient Memory(string binding) => new(this, binding);
     private static void ValidateName(string name)
     {
         if (!Regex.IsMatch(name, @"\A[a-z][a-z0-9_-]{0,62}\z")) throw new ArgumentException("Invalid collection name", nameof(name));

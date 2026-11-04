@@ -8,7 +8,8 @@ assistant's MCP configuration.
 
 VLite provides **one local MCP server**, `vlite-mcp`. It lets an assistant search
 and inspect your database without a REST server, dashboard or bearer token.
-It is not a connector to an already-running VLite API.
+With the optional `mcp-proxy` feature, `--server URL` instead connects to a
+running VLite API without opening its database file.
 
 - **Read-only tools:** database information, collection listing, exact/ANN
   vector search, record fetch/pagination, index status and in-memory index builds.
@@ -130,6 +131,70 @@ If the file is missing, correct `--db`; if it is locked, stop its writer rather
 than deleting the file. A normal terminal launch waits for MCP protocol input,
 so it will not present a chat prompt. Read errors on stderr in the host's server logs.
 
+## Server-backed agent memory
+
+Memory tools require a build with `mcp-proxy` and `--server URL`; they are
+never listed or callable with `--db`. For example:
+
+```sh
+vlite-mcp --server https://vlite.example --token-env VLITE_TOKEN --read-only
+```
+
+The bearer token comes from the named environment variable, not a literal
+argument. Configure the memory binding and exact scope grants on the server;
+the proxy does not provision bindings or bypass server authorization. Tool
+discovery does not require raw graph access. Unavailable server capabilities
+return explicit errors.
+
+- `vlite_memory_remember`: remember caller-produced items and optional evidence.
+- `vlite_memory_recall`: bounded scoped recall; inspect completeness diagnostics.
+- `vlite_memory_facts`: query an exact subject/predicate/slot.
+- `vlite_memory_correct_facts`: guarded fact correction.
+- `vlite_memory_consolidate`: caller-produced consolidation, including dry runs.
+- `vlite_memory_forget`: logical deletion or retention expiry.
+- `vlite_memory_receipt`: reconcile a mutation by operation and idempotency key.
+- `vlite_memory_erasure`: inspect erasure job status without advancing it.
+- `vlite_memory_resume_erasure`: explicitly execute one bounded erasure chunk.
+
+Recall, facts, receipt and erasure are read-only tools. The other five are
+listed and callable only with `--writable`, including consolidation dry runs.
+Each takes flat arguments: required `binding` plus the operation's fields from
+the [memory serving contract](projects/roadmap/serving-memory-contract.md#8-exact-schema-and-adapter-inventory).
+There is no nested `request` wrapper or client-selected tenant. Unknown fields,
+missing required fields and wrong JSON types fail locally; semantic validation
+belongs to the server. No defaults, integer conversions or receipt keys are
+inserted into the forwarded body.
+
+Binding names must match `[a-z][a-z0-9_-]{0,62}`. Memory calls require HTTPS
+except for loopback HTTP (`localhost`, `127.0.0.0/8`, `::1`) and refuse tokens
+outside 1..4096 visible ASCII bytes (0x21..0x7e) locally. Ambient proxies are
+disabled for memory calls. Graph discovery and graph tools retain their
+pre-existing ambient-proxy behavior; graph/KV configuration is unchanged.
+
+Success preserves the exact JSON value of a valid server object in
+`structuredContent` and an identical JSON text block, including pending HTTP
+202 responses; whitespace, key order and escape spellings are not preserved.
+Credential-bearing responses (decoded keys/strings or serialized output),
+duplicate keys at any depth, non-objects, invalid UTF-8 and malformed or
+truncated responses are refused, never rewritten into successful data.
+Failures use
+`isError:true` and a string `structuredContent.error`, `"<code>: <message>"`.
+Diagnostics redact the credential and flatten control characters; serialization
+is checked again. A colliding diagnostic becomes `error: details withheld`,
+then the shortest safe text (empty). If fixed representation syntax still
+collides, that representation is omitted (no text blocks or structured content);
+`isError:true` remains, but such an extreme collision may prevent normal client
+error rendering.
+The stdio host is trusted: the 8 MiB request limit applies to compact arguments
+after parsing, not the incoming stdio line. HTTP response bodies and serialized
+tool results are also capped at 8 MiB; HTTP calls time out
+after five seconds. A mutation transport failure has **UNKNOWN** outcome:
+reconcile with `vlite_memory_receipt`, never blindly retry. Oversized or invalid
+success responses likewise cannot establish rollback. There are no automatic
+retries, polling, pagination, job loops, file reads or response-driven actions.
+Logical deletion is not secure erasure or backup purge; preserve the server's
+erasure notice and manage external copies separately.
+
 ## Tools
 
 | Tool | Arguments | Behavior |
@@ -244,8 +309,9 @@ VLITE_TOKEN=... vlite-mcp --server https://vlite.example:8080 --token-env VLITE_
 
 With `--server URL`, `vlite-mcp` opens no file. It forwards the graph tools to
 a `vlite-server` built with `graph`, through the REST graph routes, so several
-agents can share one database. Only graph tools are proxied; vector tools are
-not listed. `tools/list` probes `GET /v1/graphs` and lists graph tools only
+agents can share one database. It also exposes the server-backed memory tools
+described above; vector and local KV tools are not proxied. `tools/list`
+probes `GET /v1/graphs` and lists graph tools only
 when the server reports a graph-enabled database. The server's credential
 decides what each call may do (role, graph scope, and collection read access
 for retrieve evidence). Retrieve output adds `redacted` (`count` and

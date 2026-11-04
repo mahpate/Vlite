@@ -54,7 +54,9 @@ def check(root):
             expected = [
                 "choose-a-tool",
                 "build-and-install",
+                "remote-agent-memory",
                 "interactive-or-scripted-shell",
+                "local-key-value-shell-commands",
                 "validated-atomic-or-resumable-imports",
                 "search-quality-and-configurationdatabase-comparison",
                 "index-tuning-advisor",
@@ -63,7 +65,7 @@ def check(root):
                 "tests",
             ]
             if page.headings != expected:
-                errors.append("docs/TOOLS.html: expected chooser, setup, shell, import, quality, tuning, MCP, graph, then tests")
+                errors.append("docs/TOOLS.html: expected chooser, setup, remote memory, shell, key-value shell, import, quality, tuning, MCP, graph, then tests")
         for link in page.primary_links:
             if urlsplit(link).fragment in ("features", "products", "quickstart"):
                 errors.append(f"{path.relative_to(root)}: redundant homepage link in primary navigation: {link}")

@@ -611,7 +611,7 @@ sequenceDiagram
       <li>Opening a file replays the log, so open time and memory grow with data. Compaction reclaims space.</li>
       <li>HNSW and ScalarU8 are approximate. Inner product always searches exactly.</li>
       <li>Tenants are logical only. Webhooks are at-least-once, and streaming exports are not point-in-time snapshots.</li>
-      <li>No gRPC graph service, graph expiry or graph algorithms.</li>
+      <li>No gRPC graph service. Graph expiry and algorithms are Rust-only.</li>
     </ul>
     <p>More detail: <a href="docs/REFERENCE.html">Reference</a> &middot; <a href="docs/STORAGE-FEATURES.html">Storage features</a> &middot; <a href="docs/SECURITY.html">Security</a></p>
   </main>

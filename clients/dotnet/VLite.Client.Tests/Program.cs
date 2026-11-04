@@ -240,6 +240,7 @@ async Task KvCancellationTests()
     }
 }
 await KvCancellationTests();
+count += await MemoryTests.RunAsync(args);
 
 if (Environment.GetEnvironmentVariable("VLITE_URL") is { Length: > 0 } url)
 {

@@ -5,6 +5,42 @@ See [methodology and reproduction](README.md) before interpreting the numbers.
 
 No zvec, Milvus, Weaviate, FAISS or other unmeasured engine results are inferred.
 
+## Release candidate 0.7.0 against v0.6.0, November 4, 2026 UTC
+
+Release candidate `30901be1` (the integration head with a green full CI run),
+v0.6.0 (`6428b69`) and v0.6.1 (`fb46702`) were built from clean `git archive`
+copies (release, default features, Rust 1.99.1) and run with the
+`graph_baseline.py` reference profile, five runs per workload, on four identical
+Azure Standard_D16s_v5 VMs (16 vCPU Xeon Platinum 8370C, 64 GiB, Windows Server
+2022, Premium SSD data disk): one VM per large workload, and the three small
+workloads one after another on the fourth. The revision order rotated per run
+and the runner waited 1,200 s after the builds. All 90 slots passed the
+unchanged `graph_reference.py` gate (background CPU mean ≤10% and no
+half-second sample above 50%); none was discarded or retried.
+
+[Full tables, per-run CPU and method](results/graph-reference-0.7.0-rc-vs-v0.6.0-azure.md) ·
+[raw runs](results/graph-reference-0.7.0-rc-vs-v0.6.0-azure.json).
+
+100,000 × 384 dimensions, 10 queries per run (batch 1,000), k=10, medians (v0.6.0 → release candidate):
+
+| Workload | Ingest (vectors/s) | Reopen (ms) | Query p50 (ms) | HNSW build (s) | HNSW p50 (ms) | Peak working set (MiB) |
+|---|---:|---:|---:|---:|---:|---:|
+| Exact | 210,981 → 208,508 | 246 → 249 | 8.383 → 4.833 | – | – | 325 → 326 |
+| Filtered exact (1 in 10) | 167,202 → 165,459 | 295 → 297 | 3.631 → 2.782 | – | – | 382 → 382 |
+| HNSW m=16, ef=200/64 | 212,699 → 218,014 | 247 → 251 | 8.208 → 4.715 | 18.0 → 18.3 | 2.033 → 2.053 | 389 → 390 |
+
+- **Exact scans have 42% lower p50 latency** (on the exact workload and on the
+  exact scan of the HNSW workload) and **filtered queries 23% lower**, with
+  identical recall (1.0) and file bytes.
+- **Ingest, reopen and peak memory are within about 3%.**
+- **The approximate HNSW query and the index build are within 2%.** HNSW recall
+  is 0.26 in both builds at search ef=64 on uniform random 384-dimensional
+  data, a stress setting rather than a tuned configuration.
+- **Small workloads** (64–1,024 vectors) are listed in the full tables; their
+  sub-millisecond timings are noisy.
+- **The measured revision is `30901be1`.** The release notes name the final
+  release revision at freeze.
+
 ## Release 0.6.0 against 81ff901, October 27, 2026 UTC
 
 v0.6.0 (`6428b69`) and the earlier DO-005 baseline `81ff901` were built from

@@ -1,0 +1,11 @@
+{
+  "remember":["--url","{url}","--binding","notes","--token-env","VLITE_MEMORY_CLI_TEST_TOKEN","remember","--request","{request}"],
+  "recall":["--url","{url}","--binding","notes","--token-env","VLITE_MEMORY_CLI_TEST_TOKEN","recall","--request","{request}"],
+  "facts":["--url","{url}","--binding","notes","--token-env","VLITE_MEMORY_CLI_TEST_TOKEN","facts","--request","{request}"],
+  "correct-facts":["--url","{url}","--binding","notes","--token-env","VLITE_MEMORY_CLI_TEST_TOKEN","correct-facts","--request","{request}"],
+  "consolidate":["--url","{url}","--binding","notes","--token-env","VLITE_MEMORY_CLI_TEST_TOKEN","consolidate","--request","{request}"],
+  "forget":["--url","{url}","--binding","notes","--token-env","VLITE_MEMORY_CLI_TEST_TOKEN","forget","--request","{request}"],
+  "receipt":["--url","{url}","--binding","notes","--token-env","VLITE_MEMORY_CLI_TEST_TOKEN","receipt","--request","{request}"],
+  "erasure":["--url","{url}","--binding","notes","--token-env","VLITE_MEMORY_CLI_TEST_TOKEN","erasure","--request","{request}"],
+  "resume-erasure":["--url","{url}","--binding","notes","--token-env","VLITE_MEMORY_CLI_TEST_TOKEN","resume-erasure","--request","{request}"]
+}

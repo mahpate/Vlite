@@ -83,6 +83,26 @@ const APPROVED_OPENAPI_EDITS: &[(&str, &str)] = &[
         r##"events","secret"],"properties":{"url":{"type":"string","format":"uri"},"collections":{"type":"array","items":{"type":"string"}},"events":{"type":"array","items":{"type":"string"}},"secret":{"type":"string","minLength":16,"maxLength":256}}}}}},"responses":{"201":{"description":"Created subscription; secret is not returned"},"409":{"description":"VLITE_ADMIN_DIR is required"},"422":{"description":"Invalid URL, event"##,
         r##"secret"],"properties":{"url":{"type":"string","format":"uri"},"collections":{"type":"array","items":{"type":"string"},"description":"Optional filter for vector events; graph events ignore it"},"events":{"type":"array","minItems":1,"maxItems":10,"items":{"enum":["put","delete","metadata_update","collection_created","collection_dropped","settings_updated","vectors_updated","graph_created","graph_dropped","graph_batch"]},"description":"Optional event types to deliver; omitted means every vector and graph event"},"graphs":{"type":"array","maxItems":64,"items":{"type":"string","minLength":1,"maxLength":63},"description":"Optional filter for graph events; omitted means every graph"},"secret":{"type":"string","minLength":16,"maxLength":256}}}}}},"responses":{"201":{"description":"Created subscription; secret is not returned"},"409":{"description":"VLITE_ADMIN_DIR is required"},"422":{"description":"Invalid URL, event, graph filter"##,
     ),
+    (
+        "Successful ordinary KV writes follow configured durability: full syncs, periodic can lose one flush interval, and none is memory-only; they do not force a sync.",
+        "Successful ordinary KV writes follow configured durability: full syncs, periodic can lose one flush interval, and none is memory-only; they do not force a sync. Successful mutations are acknowledged after commit.",
+    ),
+];
+
+/// Short reviewed wording changes on the already-approved KV route additions.
+const APPROVED_OPENAPI_ADDITION_EDITS: &[(&str, &str)] = &[
+    (
+        "none is memory-only. Indeterminate outcomes must not be blindly retried.",
+        "none is memory-only. Successful mutations are acknowledged after commit. Indeterminate outcomes must not be blindly retried.",
+    ),
+    (
+        "Follows configured durability, not an unconditional sync.",
+        "Follows configured durability, not an unconditional sync. Successful mutations are acknowledged after commit.",
+    ),
+    (
+        "after is exclusive. One owner guard",
+        "after is exclusive. Query strings use form decoding: + is a space and literal plus must be encoded as %2B. One owner guard",
+    ),
 ];
 
 /// The baseline capture with every `APPROVED_OPENAPI_EDITS` entry applied.
@@ -309,10 +329,22 @@ fn openapi_matches_baseline(
 ) -> Result<String, String> {
     let mut remainder = served.to_string();
     for addition in additions {
-        match remainder.matches(addition).count() {
+        let mut addition = (*addition).to_owned();
+        for (baseline, reviewed) in APPROVED_OPENAPI_ADDITION_EDITS {
+            match addition.matches(baseline).count() {
+                0 => {}
+                1 => addition = addition.replacen(baseline, reviewed, 1),
+                count => {
+                    return Err(format!(
+                        "approved OpenAPI addition edit matched {count} times"
+                    ));
+                }
+            }
+        }
+        match remainder.matches(&addition).count() {
             0 => {}
             1 => {
-                let start = remainder.find(addition).unwrap();
+                let start = remainder.find(&addition).unwrap();
                 if start == 0 || !remainder[..start].ends_with('\n') {
                     return Err("approved OpenAPI addition is not on whole lines".to_string());
                 }

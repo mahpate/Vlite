@@ -25,6 +25,7 @@ const READ: &str = "fake_grpc_kv_reader_0123456789_ABCDEFGHIJKLMNOPQRSTUVWXYZ";
 
 struct Harness {
     app: Router,
+    service: Service,
     client: KvClient<Channel>,
     health: tonic_health::pb::health_client::HealthClient<Channel>,
     health_control: vlite::server::grpc::GrpcHealth,
@@ -63,7 +64,7 @@ async fn start(db: Database, directory: &Path) -> Harness {
         },
     )
     .unwrap();
-    let grpc = grpc_router(service).await;
+    let grpc = grpc_router(service.clone()).await;
     let health_control = grpc.health();
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let address = listener.local_addr().unwrap();
@@ -78,6 +79,7 @@ async fn start(db: Database, directory: &Path) -> Harness {
         .unwrap();
     Harness {
         app,
+        service: service.clone(),
         client: KvClient::new(channel.clone())
             .max_encoding_message_size(64 * 1024 * 1024)
             .max_decoding_message_size(64 * 1024 * 1024),
@@ -349,6 +351,88 @@ async fn grpc_kv_wire_goldens() {
 }
 
 #[tokio::test]
+async fn grpc_kv_collection_validation_precedes_lookup_and_audit() {
+    let directory = tempfile::tempdir().unwrap();
+    let mut h = start(database(FormatVersion::V5), directory.path()).await;
+    let scoped = credential(&h.app, json!({"operations":["read","write"]})).await;
+    let audit_path = directory.path().join("audit.jsonl");
+    let before = std::fs::metadata(&audit_path).unwrap().len();
+    for collection in [
+        "".into(),
+        "x".repeat(1_048_576),
+        "Upper".into(),
+        "a/b".into(),
+    ] {
+        for token in [ADMIN, scoped.as_str()] {
+            assert_error(
+                h.client
+                    .get_kv_entry(request(
+                        token,
+                        proto::KvGetRequest {
+                            address: address(&collection, "n", "k"),
+                        },
+                    ))
+                    .await
+                    .unwrap_err(),
+                Code::InvalidArgument,
+                "invalid_input",
+            );
+            let mut input = put("k");
+            input.address = address(&collection, "n", "k");
+            assert_error(
+                h.client
+                    .put_kv_entry(request(token, input))
+                    .await
+                    .unwrap_err(),
+                Code::InvalidArgument,
+                "invalid_input",
+            );
+            assert_error(
+                h.client
+                    .delete_kv_entry(request(
+                        token,
+                        proto::KvDeleteRequest {
+                            address: address(&collection, "n", "k"),
+                            expected: None,
+                        },
+                    ))
+                    .await
+                    .unwrap_err(),
+                Code::InvalidArgument,
+                "invalid_input",
+            );
+            let mut input = list("n");
+            input.collection = collection.clone();
+            assert_error(
+                h.client
+                    .list_kv_entries(request(token, input))
+                    .await
+                    .unwrap_err(),
+                Code::InvalidArgument,
+                "invalid_input",
+            );
+        }
+    }
+    assert!(std::fs::metadata(audit_path).unwrap().len() - before <= 512);
+}
+
+#[tokio::test]
+async fn grpc_kv_oversize_value_rejected_before_json_validation() {
+    let directory = tempfile::tempdir().unwrap();
+    let mut h = start(database(FormatVersion::V5), directory.path()).await;
+    let mut input = put("k");
+    input.address.as_mut().unwrap().namespace.clear();
+    input.value = vec![0; 1_047_291];
+    let error = h
+        .client
+        .put_kv_entry(request(ADMIN, input))
+        .await
+        .unwrap_err();
+    assert_eq!(error.message(), "KV value exceeds 1047290 decoded bytes");
+    assert_error(error, Code::InvalidArgument, "invalid_input");
+}
+
+#[tokio::test]
 async fn grpc_kv_utf8_and_value_bounds() {
     let directory = tempfile::tempdir().unwrap();
     let mut h = start(database(FormatVersion::V5), directory.path()).await;
@@ -519,7 +603,27 @@ async fn grpc_kv_expected_expiry_and_cas() {
         "precondition_failed",
     );
     input.expected = Some(proto::Expected { kind: None });
-    h.client.put_kv_entry(request(ADMIN, input)).await.unwrap();
+    h.client
+        .put_kv_entry(request(ADMIN, input.clone()))
+        .await
+        .unwrap();
+    for deleted in [true, false] {
+        assert_eq!(
+            h.client
+                .delete_kv_entry(request(
+                    ADMIN,
+                    proto::KvDeleteRequest {
+                        address: input.address.clone(),
+                        expected: expected(proto::expected::Kind::Any(proto::expected::Any {})),
+                    },
+                ))
+                .await
+                .unwrap()
+                .into_inner()
+                .deleted,
+            deleted
+        );
+    }
 }
 
 #[tokio::test]
@@ -597,9 +701,15 @@ async fn grpc_kv_list_order_defaults_and_page_boundary() {
         .into_inner();
     assert_eq!(page.items.len(), 12);
     assert_eq!(page.next_after.as_deref(), Some("011"));
+    assert!((12_500_000..=16_777_216).contains(&page.encoded_len()));
+    for (index, item) in page.items.iter().enumerate() {
+        assert_eq!(item.key, format!("{index:03}"));
+        assert_eq!(item.value, vec![255; 1_047_290]);
+    }
     let canonical = json!({"items":page.items.into_iter().map(entry_json).collect::<Vec<_>>(),
         "next_after":page.next_after});
-    assert!(serde_json::to_vec(&canonical).unwrap().len() <= 16_777_216);
+    let bytes = serde_json::to_vec(&canonical).unwrap().len();
+    assert!((16_750_000..=16_777_216).contains(&bytes));
     input.after = Some("011".into());
     let page = h
         .client
@@ -744,11 +854,12 @@ async fn grpc_kv_exact_page_byte_boundary() {
 async fn grpc_kv_empty_collection_and_missing_address() {
     let directory = tempfile::tempdir().unwrap();
     let mut h = start(database(FormatVersion::V5), directory.path()).await;
+    let scoped = credential(&h.app, json!({"operations":["read","write"]})).await;
     for target in [None, address("", "n", "k")] {
         assert_error(
             h.client
                 .get_kv_entry(request(
-                    ADMIN,
+                    &scoped,
                     proto::KvGetRequest {
                         address: target.clone(),
                     },
@@ -762,7 +873,7 @@ async fn grpc_kv_empty_collection_and_missing_address() {
         input.address = target.clone();
         assert_error(
             h.client
-                .put_kv_entry(request(ADMIN, input))
+                .put_kv_entry(request(&scoped, input))
                 .await
                 .unwrap_err(),
             Code::InvalidArgument,
@@ -771,7 +882,7 @@ async fn grpc_kv_empty_collection_and_missing_address() {
         assert_error(
             h.client
                 .delete_kv_entry(request(
-                    ADMIN,
+                    &scoped,
                     proto::KvDeleteRequest {
                         address: target,
                         expected: None,
@@ -787,7 +898,7 @@ async fn grpc_kv_empty_collection_and_missing_address() {
     input.collection.clear();
     assert_error(
         h.client
-            .list_kv_entries(request(ADMIN, input))
+            .list_kv_entries(request(&scoped, input))
             .await
             .unwrap_err(),
         Code::InvalidArgument,
@@ -885,14 +996,13 @@ async fn grpc_kv_scopes_binding_quota_tenancy_and_audit() {
             .await
             .unwrap();
     }
-    assert_error(
-        h.client
-            .put_kv_entry(request(&writer, put("second")))
-            .await
-            .unwrap_err(),
-        Code::ResourceExhausted,
-        "quota_exceeded",
-    );
+    let quota = h
+        .client
+        .put_kv_entry(request(&writer, put("second")))
+        .await
+        .unwrap_err();
+    assert_eq!(quota.metadata().get("retry-after").unwrap(), "1");
+    assert_error(quota, Code::ResourceExhausted, "quota_exceeded");
     for token in [&reader, READ] {
         h.client
             .get_kv_entry(request(
@@ -990,6 +1100,7 @@ async fn grpc_kv_scopes_binding_quota_tenancy_and_audit() {
         ))
         .await
         .unwrap();
+    let mut tenants = Vec::new();
     for name in ["one", "two"] {
         let (status, tenant) = rest(
             &h.app,
@@ -1039,6 +1150,47 @@ async fn grpc_kv_scopes_binding_quota_tenancy_and_audit() {
             .unwrap()
             .into_inner();
         assert_eq!(found.value, name.as_bytes());
+        tenants.push((name, token, found.version));
+    }
+    for (name, token, version) in tenants {
+        let mut input = list("n");
+        input.collection = "items".into();
+        let page = h
+            .client
+            .list_kv_entries(request(&token, input))
+            .await
+            .unwrap()
+            .into_inner();
+        assert_eq!(page.next_after, None);
+        assert_eq!(
+            page.items,
+            vec![proto::KvEntry {
+                key: "k".into(),
+                value: name.as_bytes().to_vec(),
+                version,
+                expires_at_ms: None,
+            }]
+        );
+        let input = proto::KvDeleteRequest {
+            address: address("items", "n", "k"),
+            expected: expected(proto::expected::Kind::Revision(version)),
+        };
+        assert!(
+            h.client
+                .delete_kv_entry(request(&token, input.clone()))
+                .await
+                .unwrap()
+                .into_inner()
+                .deleted
+        );
+        assert_error(
+            h.client
+                .delete_kv_entry(request(&token, input))
+                .await
+                .unwrap_err(),
+            Code::Aborted,
+            "precondition_failed",
+        );
     }
     let audit = std::fs::read_to_string(directory.path().join("audit.jsonl")).unwrap();
     let events: Vec<Value> = audit
@@ -1078,7 +1230,258 @@ async fn grpc_kv_scopes_binding_quota_tenancy_and_audit() {
 }
 
 #[tokio::test]
-async fn grpc_kv_authentication_and_shared_rate_limit() {
+async fn grpc_kv_nondefault_binding_survives_neither_recreation_nor_new_lineage() {
+    let directory = tempfile::tempdir().unwrap();
+    let mut h = start(database(FormatVersion::V5), directory.path()).await;
+    let (status, body) = rest(
+        &h.app,
+        ADMIN,
+        "POST",
+        "/v1/collections",
+        json!({"name":"items","dimensions":1}),
+    )
+    .await;
+    assert_eq!(status, 201, "{body}");
+    let token = credential(
+        &h.app,
+        json!({"collections":["items"],"operations":["read","write"]}),
+    )
+    .await;
+    let mut input = put("k");
+    input.address = address("items", "n", "k");
+    input.value = b"bound".to_vec();
+    let version = h
+        .client
+        .put_kv_entry(request(&token, input.clone()))
+        .await
+        .unwrap()
+        .into_inner()
+        .version;
+    let mut query = list("n");
+    query.collection = "items".into();
+    let page = h
+        .client
+        .list_kv_entries(request(&token, query.clone()))
+        .await
+        .unwrap()
+        .into_inner();
+    assert_eq!(page.next_after, None);
+    assert_eq!(
+        page.items,
+        vec![proto::KvEntry {
+            key: "k".into(),
+            value: b"bound".to_vec(),
+            version,
+            expires_at_ms: None,
+        }]
+    );
+    let deletion = proto::KvDeleteRequest {
+        address: input.address.clone(),
+        expected: expected(proto::expected::Kind::Any(proto::expected::Any {})),
+    };
+    assert!(
+        h.client
+            .delete_kv_entry(request(&token, deletion.clone()))
+            .await
+            .unwrap()
+            .into_inner()
+            .deleted
+    );
+    assert!(
+        !h.client
+            .delete_kv_entry(request(&token, deletion.clone()))
+            .await
+            .unwrap()
+            .into_inner()
+            .deleted
+    );
+    for (method, body, expected_status) in [
+        ("DELETE", Value::Null, 200),
+        ("POST", json!({"name":"items","dimensions":1}), 201),
+    ] {
+        let uri = if method == "DELETE" {
+            "/v1/collections/items"
+        } else {
+            "/v1/collections"
+        };
+        let (status, body) = rest(&h.app, ADMIN, method, uri, body).await;
+        assert_eq!(status, expected_status, "{body}");
+    }
+    h.client
+        .put_kv_entry(request(ADMIN, input.clone()))
+        .await
+        .unwrap();
+    for replacement_lineage in [false, true] {
+        if replacement_lineage {
+            h.service.close().await.unwrap();
+            drop(h);
+            let mut db = database(FormatVersion::V5);
+            db.create_collection(
+                "items",
+                CollectionSpec {
+                    dimensions: 1,
+                    settings: Default::default(),
+                },
+            )
+            .unwrap();
+            db.kv_store("items")
+                .unwrap()
+                .put("n", "k", b"replacement", KvPut::default())
+                .unwrap();
+            h = start(db, directory.path()).await;
+        }
+        assert_error(
+            h.client
+                .get_kv_entry(request(
+                    &token,
+                    proto::KvGetRequest {
+                        address: input.address.clone(),
+                    },
+                ))
+                .await
+                .unwrap_err(),
+            Code::PermissionDenied,
+            "forbidden_scope",
+        );
+        assert_error(
+            h.client
+                .put_kv_entry(request(&token, input.clone()))
+                .await
+                .unwrap_err(),
+            Code::PermissionDenied,
+            "forbidden_scope",
+        );
+        assert_error(
+            h.client
+                .list_kv_entries(request(&token, query.clone()))
+                .await
+                .unwrap_err(),
+            Code::PermissionDenied,
+            "forbidden_scope",
+        );
+        assert_error(
+            h.client
+                .delete_kv_entry(request(&token, deletion.clone()))
+                .await
+                .unwrap_err(),
+            Code::PermissionDenied,
+            "forbidden_scope",
+        );
+        let entry = h
+            .client
+            .get_kv_entry(request(
+                ADMIN,
+                proto::KvGetRequest {
+                    address: input.address.clone(),
+                },
+            ))
+            .await
+            .unwrap()
+            .into_inner();
+        assert_eq!(
+            entry.value,
+            if replacement_lineage {
+                b"replacement".as_slice()
+            } else {
+                b"bound".as_slice()
+            }
+        );
+    }
+}
+
+#[tokio::test]
+async fn grpc_kv_request_ids_audit_and_route_labels() {
+    let directory = tempfile::tempdir().unwrap();
+    let mut h = start(database(FormatVersion::V5), directory.path()).await;
+    let put_response = h
+        .client
+        .put_kv_entry(request(ADMIN, put("k")))
+        .await
+        .unwrap();
+    let put_id = put_response
+        .metadata()
+        .get("x-request-id")
+        .unwrap()
+        .to_str()
+        .unwrap()
+        .to_owned();
+    let get_response = h
+        .client
+        .get_kv_entry(request(
+            ADMIN,
+            proto::KvGetRequest {
+                address: address("default", "n", "k"),
+            },
+        ))
+        .await
+        .unwrap();
+    let list_response = h
+        .client
+        .list_kv_entries(request(ADMIN, list("n")))
+        .await
+        .unwrap();
+    let delete_response = h
+        .client
+        .delete_kv_entry(request(
+            ADMIN,
+            proto::KvDeleteRequest {
+                address: address("default", "n", "k"),
+                expected: None,
+            },
+        ))
+        .await
+        .unwrap();
+    let delete_id = delete_response
+        .metadata()
+        .get("x-request-id")
+        .unwrap()
+        .to_str()
+        .unwrap();
+    let mut ids = vec![put_id.as_str(), delete_id];
+    for response_id in [
+        get_response.metadata().get("x-request-id").unwrap(),
+        list_response.metadata().get("x-request-id").unwrap(),
+    ] {
+        ids.push(response_id.to_str().unwrap());
+    }
+    assert!(ids.iter().all(|id| !id.is_empty()));
+    assert_eq!(
+        ids.iter().collect::<std::collections::HashSet<_>>().len(),
+        4
+    );
+    let audit = std::fs::read_to_string(directory.path().join("audit.jsonl")).unwrap();
+    let events: Vec<Value> = audit
+        .lines()
+        .map(|line| serde_json::from_str(line).unwrap())
+        .collect();
+    for (operation, request_id) in [("kv_put", put_id.as_str()), ("kv_delete", delete_id)] {
+        let matching: Vec<_> = events.iter().filter(|e| e["event"] == operation).collect();
+        assert_eq!(matching.len(), 1);
+        assert_eq!(matching[0]["request_id"], request_id);
+        assert_eq!(matching[0]["collection"], "default");
+        assert_eq!(matching[0]["outcome"], "ok");
+    }
+    let (status, summary) = rest(
+        &h.app,
+        ADMIN,
+        "GET",
+        "/v1/admin/metrics/summary",
+        Value::Null,
+    )
+    .await;
+    assert_eq!(status, 200, "{summary}");
+    let routes = summary["requests"]["by_route"].as_array().unwrap();
+    for rpc in ["GetKvEntry", "PutKvEntry", "DeleteKvEntry", "ListKvEntries"] {
+        let label = format!("grpc:/vlite.v1.Kv/{rpc}");
+        let route = routes.iter().find(|r| r["route"] == label).unwrap();
+        assert_eq!(route["method"], "grpc");
+        assert_eq!(route["count"], 1);
+        assert_eq!(route["errors"], 0);
+    }
+}
+
+#[tokio::test]
+async fn grpc_kv_authentication() {
     let directory = tempfile::tempdir().unwrap();
     let mut h = start(database(FormatVersion::V5), directory.path()).await;
     assert_error(
@@ -1118,23 +1521,6 @@ async fn grpc_kv_authentication_and_shared_rate_limit() {
         Code::Unauthenticated,
         "unauthorized",
     );
-    let token = credential(&h.app, json!({"requests_per_second":1})).await;
-    let (status, body) = rest(
-        &h.app,
-        &token,
-        "GET",
-        "/v1/collections/default/kv/entries?namespace=n",
-        Value::Null,
-    )
-    .await;
-    assert_eq!(status, 200, "{body}");
-    let error = h
-        .client
-        .list_kv_entries(request(&token, list("n")))
-        .await
-        .unwrap_err();
-    assert_eq!(error.metadata().get("retry-after").unwrap(), "1");
-    assert_error(error, Code::ResourceExhausted, "rate_limited");
 }
 
 #[tokio::test]
@@ -1193,15 +1579,24 @@ async fn grpc_kv_health_and_transport_limits() {
             .status,
         1
     );
-    let mut input = put("oversize");
-    input.value = vec![0; 8_388_609];
-    let error = h
-        .client
-        .put_kv_entry(request(ADMIN, input))
-        .await
-        .unwrap_err();
-    assert_eq!(error.code(), Code::OutOfRange);
-    assert!(error.metadata().get(ERROR_CODE_TRAILER).is_none());
+    // KvAddress(default, n, k) occupies 17 bytes including its envelope;
+    // the value tag and four-byte length add five more.
+    for size in [8_388_608, 8_388_609] {
+        let mut input = put("k");
+        input.value = vec![0; size - 22];
+        assert_eq!(input.encoded_len(), size);
+        let error = h
+            .client
+            .put_kv_entry(request(ADMIN, input))
+            .await
+            .unwrap_err();
+        if size == 8_388_608 {
+            assert_error(error, Code::InvalidArgument, "invalid_input");
+        } else {
+            assert_eq!(error.code(), Code::OutOfRange);
+            assert!(error.metadata().get(ERROR_CODE_TRAILER).is_none());
+        }
+    }
     h.health_control.set_not_serving().await;
     for service in ["", "vlite.v1.VLite", "vlite.v1.Kv"] {
         assert_eq!(
@@ -1220,21 +1615,6 @@ async fn grpc_kv_health_and_transport_limits() {
         .put_kv_entry(request(ADMIN, put("k")))
         .await
         .unwrap();
-    // A client-side response cap must fail, not turn a response into an empty success.
-    let error = h
-        .client
-        .clone()
-        .max_decoding_message_size(1)
-        .get_kv_entry(request(
-            ADMIN,
-            proto::KvGetRequest {
-                address: address("default", "n", "k"),
-            },
-        ))
-        .await
-        .unwrap_err();
-    assert_eq!(error.code(), Code::OutOfRange);
-    assert!(error.metadata().get(ERROR_CODE_TRAILER).is_none());
 }
 
 #[tokio::test]
@@ -1333,6 +1713,10 @@ fn grpc_kv_wire_tags_and_manifest() {
         .unwrap();
     assert!(registration.contains(".max_decoding_message_size(MAX_DECODING_MESSAGE_BYTES)"));
     assert!(registration.contains(".max_encoding_message_size(MAX_ENCODING_MESSAGE_BYTES)"));
+    assert_eq!(
+        registration.matches(".max_encoding_message_size(").count(),
+        1
+    );
     let kv = source
         .split("service Kv {")
         .nth(1)

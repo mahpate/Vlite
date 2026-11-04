@@ -1,6 +1,6 @@
 [package]
 name = "vlite"
-version = "0.6.1"
+version = "0.7.0"
 edition = "2024"
 rust-version = "1.89"
 description = "A single-file vector database with embedded bindings and an optional REST service"
@@ -122,6 +122,10 @@ required-features = ["tools"]
 [[bin]]
 name = "vlite-mcp"
 required-features = ["mcp"]
+
+[[bin]]
+name = "vlite-memory-cli"
+required-features = ["mcp-proxy"]
 
 [[test]]
 name = "mcp"

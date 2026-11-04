@@ -8,7 +8,7 @@ for authentication, examples, supported operations and uncertain-write handling.
 This package does not automatically retry requests or follow redirects.
 ## Key-value operations
 
-The unreleased KV REST surface requires a server with KV routes and an existing,
+The KV REST surface (added in 0.7.0) requires a server with KV routes and an existing,
 dedicated one-dimensional `cache` collection. Namespaces are not authorization
 boundaries. Run as an ESM script with `VLITE_URL` and `VLITE_AUTH_TOKEN` set:
 
@@ -34,5 +34,42 @@ timeout may hide a committed mutation; neither triggers a retry.
 404 `kv_not_found` remains `VLiteError`; only 404 `not_found` becomes
 `UnsupportedError`, without fallback. Writes sync only with server
 `--durability full`.
+
+## Memory operations
+
+The unreleased agent-memory REST surface requires a server with a provisioned memory binding.
+`client.memory(binding)` returns a binding-local facade whose nine methods each POST one request
+object to `/v1/memory/{binding}/...` and resolve with the full response: `remember`, `recall`,
+`findFacts`, `correctFacts`, `consolidate`, `forget`, `getReceipt`, `getErasure` and `resumeErasure`.
+The first server slice supports remember (`entity` and `episodic` kinds), recall, consolidate
+(retain dispositions, commit only), forget (`ids` target, logical delete) and receipt lookup, except
+that it will refuse a lookup of a `remember` receipt (the original `remember` response carries the
+complete receipt). The other four methods, every request field beyond that slice and that lookup
+answer 409 `memory_capability_unavailable` with `details.feature` (`remember_receipt_lookup` for the
+lookup); the client never interprets, hides or works around a refusal.
+
+```javascript
+import { Client } from "@vlite/client";
+
+const memory = new Client(process.env.VLITE_URL, process.env.VLITE_AUTH_TOKEN).memory("notes");
+const scope = { agent: "assistant", user: "ada" };
+const saved = await memory.remember({ scope, idempotency_key: "remember-1",
+  items: [{ id: "ada", kind: "entity", content: "Ada", observed_at_ms: Date.now(),
+    source: { source_id: "chat", source_kind: "caller" } }] });
+console.log(saved.receipt.sequence, saved.outcomes);
+console.log((await memory.recall({ scope, text: "Ada" })).memories);
+```
+
+Requests use the wire (snake_case) names and are closed: an unknown member is a `TypeError` and is never
+sent, and a required member (including `idempotency_key`) is never invented. u64 and i64 inputs accept a
+canonical decimal string, a safe-integer `Number` or a `bigint`; an unsafe `Number` is a `TypeError`
+instead of being rounded, and the client always sends decimal strings. u64 and i64 outputs stay decimal
+strings. `deadline_ms` is the engine deadline, not the HTTP timeout (`timeoutMs`). Each method takes an
+optional `{ signal }`. HTTP 202 resolves like 200: check `state`. Failures are `VLiteError` (`code`,
+`status`, `requestId`, optional `details`), `UnsupportedError` for 404 `not_found` only, or
+`TransportError` for a timeout, cancellation or lost connection, after which a mutation may have
+committed: look it up with `getReceipt` using the same idempotency key (the first server slice will
+refuse a lookup of a `remember` receipt). Nothing is retried, embedded,
+split or paged.
 
 Licensed under MIT; see LICENSE.

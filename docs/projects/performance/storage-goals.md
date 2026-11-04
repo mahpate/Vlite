@@ -167,3 +167,7 @@ phases.
    fail qualification or block a release. Must-not-regress items still block,
    and the target numbers are unchanged. Which S-driven work ships in a given
    release is decided at that release's go/no-go.
+7. **Decided 2026-11-04:** size-driven work (P3b engine integration, P3c, P4,
+   P5 writers and compression) is parked for 0.7.0 as best effort. The release
+   does not wait for it; the DO-005 run reports measured values only; the work
+   is revisited if a size goal is required. Must-not-regress items still block.
