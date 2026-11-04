@@ -92,7 +92,9 @@ Values are canonical padded standard base64, at most **1,047,290 decoded bytes**
 (1,396,388 encoded characters); an empty value is valid. Unknown/duplicate JSON
 fields and wrong types are rejected with `invalid_json`; parsed bound or
 canonical-encoding violations return 422 `invalid_input`. Unknown/duplicate
-query parameters return 400 `invalid_query`. The existing 8 MiB body cap applies.
+query parameters return 400 `invalid_query`. Query decoding uses form
+semantics: `+` means a space, and a literal plus must be encoded as `%2B`. The
+existing 8 MiB body cap applies.
 
 List `prefix` defaults to empty (at most 1,024 UTF-8 bytes), `after` is omitted
 or a nonempty key, and `limit` is 1..10,000 (default 100). Keys sort by unsigned
@@ -112,8 +114,9 @@ keys, namespaces or values. Read-only handles refuse mutations.
 
 Ordinary KV follows configured durability: `full` syncs before acknowledgment,
 `periodic` can lose up to a flush interval on OS crash/power loss, and `none` is
-memory-only. There is no per-call forced sync, automatic retry or lease
-guarantee; disconnects and `commit_indeterminate` do not prove a write failed.
+memory-only. Successful mutations are acknowledged after commit. There is no
+per-call forced sync, automatic retry or lease guarantee; disconnects and
+`commit_indeterminate` do not prove a write failed.
 gRPC, MCP, CLI, client helpers and lease operations are not part of this REST
 surface.
 
