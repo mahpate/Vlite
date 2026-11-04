@@ -389,6 +389,15 @@ fn source() -> Value {
 
 fn template(name: &str) -> Value {
     let f = fixture();
+    if name == "relation" {
+        let case = f["vectors"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|c| c["name"] == "projection-relation")
+            .unwrap();
+        return value(&expand(&case["input"]["identity"], &f["templates"]));
+    }
     value(&expand(&f["templates"][name], &f["templates"]))
 }
 
@@ -1065,7 +1074,13 @@ fn ingestion_canonical_strict_identity_boundaries() {
     );
     let extra_field = map(&[
         ("kind", Value::Text("source".into())),
-        ("fields", Value::Map(BTreeMap::new())),
+        (
+            "fields",
+            match source() {
+                Value::Map(mut root) => root.remove("fields").unwrap(),
+                _ => unreachable!(),
+            },
+        ),
         ("lineage", Value::Unsigned(1)),
     ]);
     assert_eq!(
@@ -1276,6 +1291,7 @@ fn ingestion_canonical_attribute_fields_and_string_bounds() {
     for length in [0, 4096] {
         assert!(canonical::encode(&Type::Attribute, &attr("s".repeat(length))).is_ok());
     }
+
     assert_eq!(
         canonical::encode(&Type::Attribute, &attr("s".repeat(4097))).unwrap_err(),
         "attribute_string_limit"
@@ -1309,4 +1325,220 @@ fn ingestion_canonical_attribute_fields_and_string_bounds() {
         .unwrap_err(),
         "attribute_string"
     );
+}
+
+#[test]
+fn ingestion_foundation_review_decode_semantics() {
+    let encode_identity = |v: &Value| canonical::encode(&Type::Identity, v).unwrap();
+    let mut chunk = encode_identity(&template("chunk"));
+    let len = chunk.len();
+    chunk[len - 4..].copy_from_slice(&0u32.to_le_bytes());
+    assert_eq!(
+        canonical::decode(&Type::Identity, &chunk),
+        Err("chunk_span")
+    );
+    let mut entity = encode_identity(&template("entity"));
+    *entity.last_mut().unwrap() = b'N';
+    assert_eq!(
+        canonical::decode(&Type::Identity, &entity),
+        Err("entity_identity")
+    );
+    let mut wrong_role = vec![1, 2];
+    let entity = encode_identity(&template("entity"));
+    wrong_role.extend_from_slice(&(entity.len() as u32).to_le_bytes());
+    wrong_role.extend_from_slice(&entity);
+    wrong_role.extend_from_slice(&[0; 64]);
+    assert_eq!(
+        canonical::decode(&Type::Identity, &wrong_role),
+        Err("identity_role")
+    );
+    let outer = encode_identity(&template("abort_receipt"));
+    let prefix = outer.len() - encode_identity(&template("receipt")).len() - 4;
+    let mut recursive = outer[..prefix].to_vec();
+    recursive.extend_from_slice(&(outer.len() as u32).to_le_bytes());
+    recursive.extend_from_slice(&outer);
+    assert_eq!(
+        canonical::decode(&Type::Identity, &recursive),
+        Err("abort_of_abort")
+    );
+    let original = encode_identity(&source());
+    let mut mismatch = original.clone();
+    mismatch[53] = b'u';
+    assert_eq!(
+        canonical::decode(&Type::Identity, &mismatch),
+        Err("binding")
+    );
+    let mut trailing = original.clone();
+    trailing.push(0);
+    assert_eq!(
+        canonical::decode(&Type::Identity, &trailing),
+        Err("noncanonical")
+    );
+    // No trailing bytes: the reader succeeds, and canonical revalidation rejects the tenant mismatch.
+    assert_eq!(mismatch.len(), original.len());
+    let mut minus_zero = 0f64.to_le_bytes();
+    minus_zero[7] = 128;
+    assert_eq!(canonical::decode(&Type::F64, &minus_zero), Err("float"));
+    assert_eq!(
+        canonical::decode(
+            &Type::Map(Box::new(Type::U8)),
+            &[2, 0, 0, 0, 1, 0, 0, 0, b'b', 0, 1, 0, 0, 0, b'a', 0]
+        ),
+        Err("map_order")
+    );
+}
+
+#[test]
+fn ingestion_foundation_review_boundaries_and_refs() {
+    let null = Value::List(vec![Value::Unsigned(0), Value::Null]);
+    let attrs = map(&[(&"k".repeat(4096), null)]);
+    let encoded = canonical::encode(&Type::Attributes, &attrs).unwrap();
+    assert_eq!(encoded.len(), 4105);
+    assert_eq!(
+        canonical::decode(&Type::Attributes, &encoded).unwrap(),
+        attrs
+    );
+    for (length, expected) in [(0, "attribute_key"), (4097, "attribute_string")] {
+        let inner = 4 + length + 1;
+        let mut bytes = (inner as u32).to_le_bytes().to_vec();
+        bytes.extend_from_slice(&(length as u32).to_le_bytes());
+        bytes.extend_from_slice(&vec![b'k'; length]);
+        bytes.push(0);
+        assert_eq!(canonical::decode(&Type::Attributes, &bytes), Err(expected));
+    }
+    let mut binding = template("binding");
+    set(&mut binding, "graph", Value::Text("g".repeat(63)));
+    let bytes = canonical::encode(&Type::Binding, &binding).unwrap();
+    assert_eq!(canonical::decode(&Type::Binding, &bytes).unwrap(), binding);
+    for key in ["graph", "tenant"] {
+        let mut bad = template("binding");
+        set(&mut bad, key, Value::Text("x\0".into()));
+        assert_eq!(canonical::encode(&Type::Binding, &bad), Err("binding"));
+    }
+    assert_eq!(
+        canonical::encode(
+            &Type::Identity,
+            &change_identity(source(), "tenant", Value::Text("t\0".into()))
+        ),
+        Err("binding")
+    );
+    assert_eq!(
+        canonical::encode(
+            &Type::IdRef,
+            &map(&[("tag", Value::Unsigned(2)), ("value", Value::Unsigned(1))])
+        ),
+        Err("reference_tag")
+    );
+    let slot = map(&[
+        ("tag", Value::Unsigned(2)),
+        ("value", Value::Text("11".repeat(32))),
+    ]);
+    let mut expected = vec![2];
+    expected.extend_from_slice(&[17; 32]);
+    assert_eq!(canonical::encode(&Type::Slot, &slot).unwrap(), expected);
+    assert_eq!(canonical::decode(&Type::Slot, &expected).unwrap(), slot);
+    assert_eq!(
+        canonical::encode(
+            &Type::RevisionRef,
+            &map(&[("tag", Value::Unsigned(0)), ("value", Value::Unsigned(1))])
+        ),
+        Err("reference_tag")
+    );
+    let mut relation = template("relation");
+    for predicate in ["", "p\0", "p-"] {
+        relation = change_identity(relation, "predicate", Value::Text(predicate.into()));
+        assert_eq!(
+            canonical::encode(&Type::Identity, &relation),
+            Err("relation_identity")
+        );
+    }
+    let relation = change_identity(template("relation"), "end", Value::Unsigned(0));
+    assert_eq!(
+        canonical::encode(&Type::Identity, &relation),
+        Err("evidence_span")
+    );
+}
+
+#[test]
+fn ingestion_foundation_review_semantic_order() {
+    use std::cmp::Ordering;
+    let order = |a: &Value, b: &Value| {
+        assert_eq!(canonical::compare_identities(a, b).unwrap(), Ordering::Less);
+        assert_eq!(
+            canonical::compare_identities(b, a).unwrap(),
+            Ordering::Greater
+        );
+        assert_eq!(
+            canonical::compare_identities(a, a).unwrap(),
+            Ordering::Equal
+        );
+    };
+    order(&source(), &template("revision"));
+    order(
+        &change_identity(source(), "source_id", Value::Text("z".into())),
+        &change_identity(source(), "source_id", Value::Text("é".into())),
+    );
+    let mut binding = template("binding");
+    set(&mut binding, "graph", Value::Text("h".into()));
+    order(&source(), &change_identity(source(), "binding", binding));
+    let mut binding = template("binding");
+    set(&mut binding, "generation", Value::Text("01".repeat(32)));
+    order(&source(), &change_identity(source(), "binding", binding));
+    order(
+        &template("revision"),
+        &change_identity(
+            template("revision"),
+            "content",
+            Value::Text("01".repeat(32)),
+        ),
+    );
+    let attr = |n| {
+        map(&[(
+            "a",
+            Value::List(vec![Value::Unsigned(3), Value::Unsigned(n)]),
+        )])
+    };
+    // Attribute order uses canonical bytes, not numeric semantic order: U64 256 precedes U64 1.
+    order(
+        &change_identity(template("relation"), "attributes", attr(256)),
+        &change_identity(template("relation"), "attributes", attr(1)),
+    );
+}
+
+#[test]
+fn ingestion_foundation_review_domain_registry() {
+    assert_eq!(
+        canonical::framed_hash("vlite.g7.v1.not-registered", b"x"),
+        Err("hash_domain")
+    );
+    assert_eq!(
+        canonical::framed_hash("vlite.g7.v1.source\0", b"x"),
+        Err("hash_domain")
+    );
+    for domain in [
+        "source",
+        "revision",
+        "chunk",
+        "entity",
+        "has-revision",
+        "has-chunk",
+        "mention",
+        "relation",
+        "receipt",
+        "batch-receipt",
+        "result-shard",
+        "ownership-shard",
+        "delete-receipt",
+        "abort-receipt",
+        "pipeline",
+        "request",
+        "plan",
+        "batch",
+        "delete-action",
+        "abort-action",
+        "policy",
+        "properties",
+    ] {
+        assert!(canonical::framed_hash(&format!("vlite.g7.v1.{domain}"), b"x").is_ok());
+    }
 }

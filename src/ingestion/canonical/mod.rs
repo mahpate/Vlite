@@ -504,6 +504,22 @@ fn identity_schema(name: &str) -> Result<&'static [(&'static str, Type)]> {
 }
 
 pub(crate) fn framed_hash(domain: &str, payload: &[u8]) -> Result<[u8; 32]> {
+    let suffix = domain.strip_prefix("vlite.g7.v1.").ok_or("hash_domain")?;
+    if !REGISTRY.iter().any(|row| row.1 == suffix)
+        && ![
+            "pipeline",
+            "request",
+            "plan",
+            "batch",
+            "delete-action",
+            "abort-action",
+            "policy",
+            "properties",
+        ]
+        .contains(&suffix)
+    {
+        return Err("hash_domain");
+    }
     let mut w = Writer(vec![1]);
     w.bytes(domain.as_bytes())?;
     w.bytes(payload)?;
