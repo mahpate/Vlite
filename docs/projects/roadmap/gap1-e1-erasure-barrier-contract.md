@@ -218,10 +218,20 @@ lookups or fresh planning are allowed. Its existing decoder and retention
 semantics remain unchanged, including operation-specific expiry decoding:
 remember and forget parse a String `expires_at_ms` as u64 and treat missing,
 wrong-typed or unparsable expiry as **not expired**; their usual scope/digest/
-outcome decoder then decides replay or its existing error. Consolidate strictly
+outcome decoder then decides replay or its existing error. For a live receipt,
+verify scope first, then read the digest String property. A missing or
+wrong-typed digest property preserves that operation's decoder failure.
+Compare the decoded stored digest with the request digest next: any mismatch,
+whether from a changed request or an altered stored value, is DeletionPending
+behind the barrier, never IdempotencyConflict. Only a matching digest permits
+outcome decoding; its decoder failures are preserved. Consolidate strictly
 decodes its receipt before expiry classification, including on expired rows.
 Malformed receipt therefore means that operation's existing decoder result,
 not a blanket InvalidBundle.
+Oracle `decoder-fault:<op>:<stage>` results are abstract differential classes,
+not new Rust errors: a Rust replay compares the result with the same operation's
+pre-barrier result for the identical receipt state, requiring equality and
+requiring that the result is never DeletionPending.
 Expired, absent, nonmatching or non-pre-barrier receipts cannot authorize work:
 DeletionPending. Even a mismatching digest yields DeletionPending here; before
 a barrier it keeps its operation's usual IdempotencyConflict behavior.

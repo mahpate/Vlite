@@ -227,26 +227,32 @@
           "setup":{"ordinary_receipts":[{"op":"remember","malformed_outcome":true}]},
           "steps":[
             {"expect":{"replayed":false}},
-            {"op":"remember","expect":{"error":"InvalidBundle"},"defect":{"tag":"old-malformed-outcome","path":["setup","ordinary_receipts",0,"malformed_outcome"],"set":false}}
+            {"op":"remember","expect":{"error":"decoder-fault:remember:outcome"},"defect":{"tag":"old-malformed-outcome","path":["setup","ordinary_receipts",0,"malformed_outcome"],"set":false}}
           ]
         },
         {
           "name":"old-scope-decode-stage",
           "assumptions":["spec: live legacy receipt scope decoding precedes digest and outcome decoding."],
-          "setup":{"ordinary_receipts":[{"op":"remember","malformed_scope":true,"scope_error":"DigestCollision"}]},
-          "steps":[{"expect":{"replayed":false}},{"op":"remember","expect":{"error":"DigestCollision"},"defect":{"tag":"old-scope-decode","path":["setup","ordinary_receipts",0,"malformed_scope"],"set":false}}]
+          "setup":{"ordinary_receipts":[{"op":"remember","malformed_scope":true}]},
+          "steps":[{"expect":{"replayed":false}},{"op":"remember","expect":{"error":"decoder-fault:remember:scope"},"defect":{"tag":"old-scope-decode","path":["setup","ordinary_receipts",0,"malformed_scope"],"set":false}}]
         },
         {
-          "name":"old-digest-decode-stage",
-          "assumptions":["spec: after scope verification, a live changed stored digest preserves the operation's IdempotencyConflict."],
-          "setup":{"ordinary_receipts":[{"op":"remember","malformed_digest":true,"digest_error":"IdempotencyConflict"}]},
-          "steps":[{"expect":{"replayed":false}},{"op":"remember","expect":{"error":"IdempotencyConflict"},"defect":{"tag":"old-digest-decode","path":["setup","ordinary_receipts",0,"malformed_digest"],"set":false}}]
+          "name":"old-stored-digest-mismatch",
+          "assumptions":["spec: an altered stored digest with an unchanged request is DeletionPending behind a barrier."],
+          "setup":{"ordinary_receipts":[{"op":"remember","digest":"altered"}]},
+          "steps":[{"expect":{"replayed":false}},{"op":"remember","expect":{"error":"DeletionPending"},"defect":{"tag":"stored-digest-mismatch","path":["setup","ordinary_receipts",0,"digest"],"set":"same"}}]
+        },
+        {
+          "name":"old-digest-property-decode-stage",
+          "assumptions":["spec: a missing or wrong-typed digest property preserves the existing decoder failure, not DeletionPending.","fixture: digest_property abstracts either property-read fault; Rust replay compares the identical receipt state before and after the barrier."],
+          "setup":{"ordinary_receipts":[{"op":"remember","digest_property":true}]},
+          "steps":[{"expect":{"replayed":false}},{"op":"remember","expect":{"error":"decoder-fault:remember:digest_property"},"defect":{"tag":"digest-property-fault","path":["setup","ordinary_receipts",0,"digest_property"],"set":false}}]
         },
         {
           "name":"old-outcome-decode-stage",
           "assumptions":["spec: a live receipt's outcome is decoded after its scope and digest checks."],
-          "setup":{"ordinary_receipts":[{"op":"forget","malformed_outcome":true,"outcome_error":"fixture:ForgetOutcomeDecodeFailure"}]},
-          "steps":[{"expect":{"replayed":false}},{"op":"forget","expect":{"error":"fixture:ForgetOutcomeDecodeFailure"},"defect":{"tag":"old-outcome-decode","path":["setup","ordinary_receipts",0,"malformed_outcome"],"set":false}}]
+          "setup":{"ordinary_receipts":[{"op":"forget","malformed_outcome":true}]},
+          "steps":[{"expect":{"replayed":false}},{"op":"forget","expect":{"error":"decoder-fault:forget:outcome"},"defect":{"tag":"old-outcome-decode","path":["setup","ordinary_receipts",0,"malformed_outcome"],"set":false}}]
         },
         {
           "name":"different-operation-no-replay",
@@ -310,13 +316,13 @@
           "name":"old-consolidate-invalid-expiry-is-strict",
           "assumptions":["spec: consolidate strictly decodes receipt expiry even when the receipt would otherwise be expired."],
           "setup":{"ordinary_receipts":[{"op":"consolidate","expiry_valid":false}]},
-          "steps":[{"expect":{"replayed":false}},{"op":"consolidate","expect":{"error":"InvalidBundle"},"defect":{"tag":"strict-consolidate-expiry","path":["setup","ordinary_receipts",0,"expiry_valid"],"set":true}}]
+          "steps":[{"expect":{"replayed":false}},{"op":"consolidate","expect":{"error":"decoder-fault:consolidate:expiry"},"defect":{"tag":"strict-consolidate-expiry","path":["setup","ordinary_receipts",0,"expiry_valid"],"set":true}}]
         },
         {
           "name":"remember-preserves-its-existing-malformed-receipt-error",
-          "assumptions":["spec: malformed replay state returns remember's existing decoder error instead of a blanket E1 error.","fixture: decode_error supplies an opaque existing-operation result for this harness case."],
-          "setup":{"ordinary_receipts":[{"op":"remember","malformed_outcome":true,"outcome_error":"fixture:RememberDecodeFailure"}]},
-          "steps":[{"expect":{"replayed":false}},{"op":"remember","expect":{"error":"fixture:RememberDecodeFailure"},"defect":{"tag":"remember-decode-error","path":["setup","ordinary_receipts",0,"malformed_outcome"],"set":false}}]
+          "assumptions":["spec: malformed replay state returns remember's existing decoder error instead of a blanket E1 error.","fixture: decoder-fault classes require differential comparison with the identical receipt state before the barrier."],
+          "setup":{"ordinary_receipts":[{"op":"remember","malformed_outcome":true}]},
+          "steps":[{"expect":{"replayed":false}},{"op":"remember","expect":{"error":"decoder-fault:remember:outcome"},"defect":{"tag":"remember-decode-error","path":["setup","ordinary_receipts",0,"malformed_outcome"],"set":false}}]
         },
         {
           "name":"old-mismatch","ops":["remember","forget","consolidate"],
@@ -435,9 +441,13 @@
     ,{"name":"early_barred_seed","probe":"recall-barred-seed-after-scope-loop","reason":"InvalidScope"}
     ,{"name":"recall_before_scope","probe":"recall-missing-scope-before-barrier","reason":"InvalidScope"}
     ,{"name":"recall_before_tuple","probe":"recall-tuple-collision-before-barrier","reason":"DigestCollision"}
-    ,{"name":"decode_expired_old","probe":"expired-malformed-remember","reason":"DigestCollision"}
-    ,{"name":"decode_expired_old","probe":"expired-malformed-forget","reason":"DigestCollision"}
+    ,{"name":"decode_expired_old","probe":"expired-malformed-remember","reason":"decoder-fault:remember:scope"}
+    ,{"name":"decode_expired_old","probe":"expired-malformed-forget","reason":"decoder-fault:forget:scope"}
     ,{"name":"allow_empty_binding","case":"binding-name-empty","step":0,"reason":"error"}
     ,{"name":"omit_reclaim_bytes","case":"maximum-schema-body","step":0,"reason":"frame_bytes_with_reclaim"}
+    ,{"name":"mismatch_conflict","case":"old-stored-digest-mismatch","step":1,"reason":"IdempotencyConflict"}
+    ,{"name":"mask_digest_property","case":"old-digest-property-decode-stage","step":1,"reason":"DeletionPending"}
+    ,{"name":"outcome_before_digest_comparison","probe":"digest-before-outcome-remember","reason":"decoder-fault:remember:outcome"}
+    ,{"name":"outcome_before_digest_comparison","probe":"digest-before-outcome-forget","reason":"decoder-fault:forget:outcome"}
   ]
 }

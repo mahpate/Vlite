@@ -9,7 +9,7 @@ Without --self-test stdin is a fixture case; stdout is its projected results.
 fixture: scopes, items, ordinary receipts and injected faults are harness setup.
 Ordinary "allowed" results indicate only barrier permission, not execution of
 remember/forget/C1/S1. Those implementations retain their accepted own oracles.
-Seeded ordinary receipts abstract their unchanged decoder as malformed flag,
+Seeded ordinary receipts abstract their unchanged decoder as staged fault flags,
 live expiry, semantic digest and actual graph revision; no A/C1 bytes are invented.
 Snapshot reopen is logical JSON equality, NOT evidence for four real backends.
 Test graph revisions use the frame sequence; scopes/old receipts default to 1.
@@ -255,11 +255,8 @@ class Model:
         for receipt in setup.get("ordinary_receipts", []):
             self.old.append(merge({"scope": base_scope, "key": "old", "digest": "same",
                                    "expires": 100, "expiry_valid": True, "revision": 1,
-                                   "malformed_scope": False, "malformed_digest": False,
+                                   "malformed_scope": False, "digest_property": False,
                                    "malformed_outcome": False,
-                                   "scope_error": "InvalidBundle",
-                                   "digest_error": "InvalidBundle",
-                                   "outcome_error": "InvalidBundle",
                                    "result": "original"}, receipt))
 
     def lookup_scope(self, scope):
@@ -407,10 +404,17 @@ class Model:
                         continue_replay = True
                     if continue_replay:
                         if op == "consolidate":
-                            need(receipt["expiry_valid"], receipt.get("expiry_error", "InvalidBundle"))
-                        need(not receipt["malformed_scope"], receipt["scope_error"])
-                        need(not receipt["malformed_digest"], receipt["digest_error"])
-                        need(not receipt["malformed_outcome"], receipt["outcome_error"])
+                            need(receipt["expiry_valid"], f"decoder-fault:{op}:expiry")
+                        need(not receipt["malformed_scope"], f"decoder-fault:{op}:scope")
+                        need(not receipt["digest_property"],
+                             "DeletionPending" if MUTANT == "mask_digest_property" else
+                             f"decoder-fault:{op}:digest_property")
+                        if MUTANT == "outcome_before_digest_comparison":
+                            need(not receipt["malformed_outcome"], f"decoder-fault:{op}:outcome")
+                        matches = receipt["digest"] == request.get("digest", "same")
+                        need(matches, "IdempotencyConflict" if MUTANT == "mismatch_conflict"
+                             else "DeletionPending")
+                        need(not receipt["malformed_outcome"], f"decoder-fault:{op}:outcome")
                     older = receipt["revision"] < job["revision"]
                     matches = receipt["digest"] == request.get("digest", "same")
                     if MUTANT != "no_old_replay" and continue_replay and live and matches and (
@@ -654,6 +658,7 @@ def self_test(fixture):
                 "recall-barred-seed-after-scope-loop",
                 "expired-malformed-remember", "expired-malformed-forget",
                 "expired-malformed-consolidate",
+                "digest-before-outcome-remember", "digest-before-outcome-forget",
             }
             prefix = ((mutation["probe"] + ":" if mutation["probe"] in named_probes
                        else "expired precedence " + mutation["probe"])
@@ -695,9 +700,20 @@ def precedence_probes(fixture, only=None):
         "recall-barred-seed-after-scope-loop",
         "expired-malformed-remember", "expired-malformed-forget",
         "expired-malformed-consolidate",
+        "digest-before-outcome-remember", "digest-before-outcome-forget",
     )
     if only is None:
         count += sum(precedence_probes(fixture, name) for name in named)
+    if only in ("digest-before-outcome-remember", "digest-before-outcome-forget"):
+        operation = only.rsplit("-", 1)[-1]
+        model = Model({"ordinary_receipts": [{
+            "op": operation, "digest": "altered", "malformed_outcome": True,
+        }]}, base["scope"])
+        execute(model, {}, base)
+        actual = execute(model, {"op": operation}, base)
+        verify(actual == {"error": "DeletionPending"},
+               f"{only}: expected DeletionPending, got {actual}")
+        return 1
     if only in ("job-conflict-before-deadline", "revision-after-deadline"):
         model = Model({}, base["scope"])
         if only == "job-conflict-before-deadline":
@@ -753,13 +769,13 @@ def precedence_probes(fixture, only=None):
         operation = only.rsplit("-", 1)[-1]
         model = Model({"ordinary_receipts": [{
             "op": operation, "expires": 10, "malformed_scope": True,
-            "scope_error": "DigestCollision",
         }]}, base["scope"])
         execute(model, {}, base)
         actual = execute(model, {
             "op": operation, "request": {"now_ms": 10},
         }, base)
-        expected = "DigestCollision" if operation == "consolidate" else "DeletionPending"
+        expected = ("decoder-fault:consolidate:scope" if operation == "consolidate"
+                    else "DeletionPending")
         verify(actual == {"error": expected},
                f"{only}: expected {expected}, got {actual}")
         return 1
