@@ -3,6 +3,23 @@
 Status: WIP; no executable write reference, write fixtures, or qualification
 claim. The accepted read reference is unchanged.
 
+## Follow-up correction
+
+The initial stop below used an overly narrow interpretation of the handover's
+"Read first" list. The explicit independence exclusion covers the subset
+implementation, not the existing general graph storage codec.
+`src/property_graph/engine/codec.rs:1-14,38-41` does specify the body and
+entry envelopes (four-byte body header, eight-byte entry envelope).
+Accordingly, OPEN-W01 is not evidence that the repository lacks a byte
+contract or that extra source-access authorization is necessarily required.
+The operation payloads and adapter lowering still need independent
+enumeration before authoring exact boundary cases. No forbidden subset
+implementation was read.
+
+The statements below describe the initial investigation, not a confirmed
+repository defect or a reason to waive the package's byte-boundary coverage.
+All executable work remains unfinished.
+
 ## OPEN-W01: exact operation-body encoding is not specified in permitted inputs
 
 The design requires a limit of 16,777,216 **encoded body bytes**, including

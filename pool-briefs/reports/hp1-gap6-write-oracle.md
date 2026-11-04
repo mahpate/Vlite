@@ -1,5 +1,11 @@
 # HP-1: WIP, stopped at an undetermined byte rule
 
+Follow-up: the source-scope interpretation behind the original stop below
+was too narrow. The general graph codec is not the forbidden subset
+implementation and supplies body/entry framing. See the corrected candidate
+report and `hp1-gap6-write-oracle-status.md`. The initial candidate SHA below
+is historical, not a completed or accepted implementation.
+
 Candidate: `9f24d0217f46692f62a8dcd2adb31440f0cb4362`.
 Base: `136d72c5a94e1c0d1878f99c461a555a91b7c3f6`.
 Handover verified: `eb9c77b672320cf8b74711ac5aa6fa998adfc753`.
