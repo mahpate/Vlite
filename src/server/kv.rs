@@ -3,8 +3,14 @@ use super::*;
 use crate::kv::{
     KvEntry, KvPut, MAX_KV_KEY_BYTES, MAX_KV_LIST_LIMIT, MAX_KV_NAMESPACE_BYTES, MAX_KV_VALUE_BYTES,
 };
+use axum::extract::RawQuery;
 
 const PAGE_BYTES: usize = 16_777_216;
+
+struct AuditDetails<'a> {
+    operation: &'a str,
+    expires_at_ms: Option<u64>,
+}
 
 pub(super) fn routes() -> Router<Service> {
     Router::new()
@@ -28,11 +34,87 @@ struct Revision {
     revision: String,
 }
 
-#[derive(Deserialize)]
-#[serde(untagged)]
 enum Expectation {
     Name(String),
     Revision(Revision),
+    Other,
+}
+
+impl<'de> Deserialize<'de> for Expectation {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        struct ExpectationVisitor;
+
+        impl<'de> serde::de::Visitor<'de> for ExpectationVisitor {
+            type Value = Expectation;
+
+            fn expecting(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+                formatter.write_str("any, absent, or an object containing only revision")
+            }
+
+            fn visit_str<E>(self, value: &str) -> Result<Self::Value, E> {
+                Ok(Expectation::Name(value.to_owned()))
+            }
+
+            fn visit_string<E>(self, value: String) -> Result<Self::Value, E> {
+                Ok(Expectation::Name(value))
+            }
+
+            fn visit_bool<E>(self, _value: bool) -> Result<Self::Value, E> {
+                Ok(Expectation::Other)
+            }
+
+            fn visit_i64<E>(self, _value: i64) -> Result<Self::Value, E> {
+                Ok(Expectation::Other)
+            }
+
+            fn visit_u64<E>(self, _value: u64) -> Result<Self::Value, E> {
+                Ok(Expectation::Other)
+            }
+
+            fn visit_f64<E>(self, _value: f64) -> Result<Self::Value, E> {
+                Ok(Expectation::Other)
+            }
+
+            fn visit_unit<E>(self) -> Result<Self::Value, E> {
+                Ok(Expectation::Other)
+            }
+
+            fn visit_seq<A>(self, mut sequence: A) -> Result<Self::Value, A::Error>
+            where
+                A: serde::de::SeqAccess<'de>,
+            {
+                while sequence.next_element::<Value>()?.is_some() {}
+                Ok(Expectation::Other)
+            }
+
+            fn visit_map<A>(self, mut map: A) -> Result<Self::Value, A::Error>
+            where
+                A: serde::de::MapAccess<'de>,
+            {
+                let Some(field) = map.next_key::<String>()? else {
+                    return Ok(Expectation::Other);
+                };
+                if field != "revision" {
+                    return Err(serde::de::Error::unknown_field(&field, &["revision"]));
+                }
+                let value = map.next_value::<Value>()?;
+                if map.next_key::<String>()?.is_some() {
+                    return Err(serde::de::Error::duplicate_field("revision"));
+                }
+                match value {
+                    Value::String(revision) => Ok(Expectation::Revision(Revision { revision })),
+                    _ => Err(serde::de::Error::custom(
+                        "revision must be a canonical decimal string",
+                    )),
+                }
+            }
+        }
+
+        deserializer.deserialize_any(ExpectationVisitor)
+    }
 }
 
 impl Default for Expectation {
@@ -44,8 +126,14 @@ impl Default for Expectation {
 impl Expectation {
     fn parse(&self) -> Result<Expected, ApiError> {
         match self {
-            Self::Name(name) => expected(name),
+            Self::Name(name) if name == "any" || name == "absent" => expected(name),
+            Self::Name(_) => Err(unprocessable(
+                "expected must be any, absent, or a revision object",
+            )),
             Self::Revision(revision) => Ok(Expected::Revision(decimal(&revision.revision)?)),
+            Self::Other => Err(unprocessable(
+                "expected must be any, absent, or a revision object",
+            )),
         }
     }
 }
@@ -96,6 +184,57 @@ fn query<T>(input: Result<Query<T>, QueryRejection>) -> Result<T, ApiError> {
             "invalid query parameters",
         )
     })
+}
+
+fn strict_query_encoding(query: Option<&str>) -> Result<(), ApiError> {
+    let Some(query) = query else {
+        return Ok(());
+    };
+    for component in query.split('&') {
+        let (key, value) = component.split_once('=').unwrap_or((component, ""));
+        for field in [key, value] {
+            let bytes = field.as_bytes();
+            let mut decoded = Vec::with_capacity(bytes.len());
+            let mut index = 0;
+            while index < bytes.len() {
+                match bytes[index] {
+                    b'+' => {
+                        decoded.push(b' ');
+                        index += 1;
+                    }
+                    b'%' => {
+                        let hex = bytes.get(index + 1..index + 3).ok_or_else(invalid_query)?;
+                        let digit = |byte: u8| match byte {
+                            b'0'..=b'9' => Some(byte - b'0'),
+                            b'a'..=b'f' => Some(byte - b'a' + 10),
+                            b'A'..=b'F' => Some(byte - b'A' + 10),
+                            _ => None,
+                        };
+                        let high = digit(hex[0]).ok_or_else(invalid_query)?;
+                        let low = digit(hex[1]).ok_or_else(invalid_query)?;
+                        decoded.push(high << 4 | low);
+                        index += 3;
+                    }
+                    byte => {
+                        decoded.push(byte);
+                        index += 1;
+                    }
+                }
+            }
+            if std::str::from_utf8(&decoded).is_err() {
+                return Err(invalid_query());
+            }
+        }
+    }
+    Ok(())
+}
+
+fn invalid_query() -> ApiError {
+    ApiError::new(
+        StatusCode::BAD_REQUEST,
+        "invalid_query",
+        "query parameters must use valid UTF-8 percent encoding",
+    )
 }
 
 fn decimal(text: &str) -> Result<u64, ApiError> {
@@ -167,8 +306,10 @@ pub(super) async fn fetch(
     State(service): State<Service>,
     Extension(role): Extension<admin::Role>,
     target: Result<Path<String>, PathRejection>,
+    RawQuery(raw_query): RawQuery,
     input: Result<Query<Address>, QueryRejection>,
 ) -> Result<Json<Value>, ApiError> {
+    strict_query_encoding(raw_query.as_deref())?;
     let target = collection_path(target)?;
     let input = query(input)?;
     address(&input.namespace, &input.key)?;
@@ -192,9 +333,11 @@ pub(super) async fn save(
     Extension(role): Extension<admin::Role>,
     Extension(request_id): Extension<RequestId>,
     target: Result<Path<String>, PathRejection>,
+    RawQuery(raw_query): RawQuery,
     no_query: Result<Query<NoQuery>, QueryRejection>,
     input: Result<Json<PutInput>, JsonRejection>,
 ) -> Result<Json<Value>, ApiError> {
+    strict_query_encoding(raw_query.as_deref())?;
     let started = Instant::now();
     let target = collection_path(target)?;
     query(no_query)?;
@@ -241,7 +384,10 @@ pub(super) async fn save(
         &audit_role,
         &audit_target,
         &request_id,
-        "kv_put",
+        AuditDetails {
+            operation: "kv_put",
+            expires_at_ms: options.expires_at_ms,
+        },
         &result,
         started,
     );
@@ -253,8 +399,10 @@ pub(super) async fn remove(
     Extension(role): Extension<admin::Role>,
     Extension(request_id): Extension<RequestId>,
     target: Result<Path<String>, PathRejection>,
+    RawQuery(raw_query): RawQuery,
     input: Result<Query<DeleteQuery>, QueryRejection>,
 ) -> Result<Json<Value>, ApiError> {
+    strict_query_encoding(raw_query.as_deref())?;
     let started = Instant::now();
     let target = collection_path(target)?;
     let input = query(input)?;
@@ -283,7 +431,10 @@ pub(super) async fn remove(
         &audit_role,
         &audit_target,
         &request_id,
-        "kv_delete",
+        AuditDetails {
+            operation: "kv_delete",
+            expires_at_ms: None,
+        },
         &result,
         started,
     );
@@ -294,8 +445,10 @@ pub(super) async fn list(
     State(service): State<Service>,
     Extension(role): Extension<admin::Role>,
     target: Result<Path<String>, PathRejection>,
+    RawQuery(raw_query): RawQuery,
     input: Result<Query<ListQuery>, QueryRejection>,
 ) -> Result<Json<Value>, ApiError> {
+    strict_query_encoding(raw_query.as_deref())?;
     let target = collection_path(target)?;
     let input = query(input)?;
     bounded(&input.namespace, 1, MAX_KV_NAMESPACE_BYTES)?;
@@ -318,46 +471,64 @@ pub(super) async fn list(
             let name = tenants::qualify(&role, target.name());
             let view = db.kv_view(&name)?;
             let now = crate::current_time_ms();
-            let mut cursor = input.after;
-            let mut items = Vec::new();
-            let mut item_bytes = 0;
-            loop {
-                let entries =
-                    view.list_at(&input.namespace, &input.prefix, cursor.as_deref(), 16, now)?;
-                if entries.is_empty() {
-                    return Ok(Json(json!({"items":items,"next_after":null})));
-                }
-                let last = &entries.last().expect("nonempty chunk").key;
-                let more = !view
-                    .list_at(&input.namespace, &input.prefix, Some(last), 1, now)?
-                    .is_empty();
-                let length = entries.len();
-                for (index, entry) in entries.into_iter().enumerate() {
-                    let has_more = index + 1 < length || more;
-                    let key = entry.key.clone();
-                    let item = entry_json(entry);
-                    let size = serde_json::to_vec(&item).map_err(internal)?.len();
-                    let next = has_more.then_some(&key);
-                    let overhead = serde_json::to_vec(&json!({"items":[],"next_after":next}))
-                        .map_err(internal)?
-                        .len();
-                    let page_bytes = overhead + item_bytes + size + items.len();
-                    if items.len() == limit as usize || page_bytes > PAGE_BYTES {
-                        if items.is_empty() {
-                            return Err(internal("one KV entry exceeds the page boundary"));
-                        }
-                        return Ok(Json(json!({"items":items,"next_after":cursor})));
-                    }
-                    item_bytes += size;
-                    cursor = Some(key);
-                    items.push(item);
-                }
-                if !more {
-                    return Ok(Json(json!({"items":items,"next_after":null})));
-                }
-            }
+            let page = build_page(input, limit, now, |namespace, prefix, after, count, now| {
+                view.list_at(namespace, prefix, after, count, now)
+                    .map_err(ApiError::from)
+            })?;
+            Ok(Json(page))
         })
         .await
+}
+
+fn build_page(
+    input: ListQuery,
+    limit: u64,
+    now: u64,
+    mut list_at: impl FnMut(&str, &str, Option<&str>, usize, u64) -> Result<Vec<KvEntry>, ApiError>,
+) -> Result<Value, ApiError> {
+    let mut cursor = input.after;
+    let mut items = Vec::new();
+    let mut item_bytes = 0;
+    let mut chunk_size = 16;
+    loop {
+        let entries = list_at(
+            &input.namespace,
+            &input.prefix,
+            cursor.as_deref(),
+            chunk_size,
+            now,
+        )?;
+        if entries.is_empty() {
+            return Ok(json!({"items":items,"next_after":null}));
+        }
+        let last = &entries.last().expect("nonempty chunk").key;
+        let more = !list_at(&input.namespace, &input.prefix, Some(last), 1, now)?.is_empty();
+        let length = entries.len();
+        for (index, entry) in entries.into_iter().enumerate() {
+            let has_more = index + 1 < length || more;
+            let key = entry.key.clone();
+            let item = entry_json(entry);
+            let size = serde_json::to_vec(&item).map_err(internal)?.len();
+            let next = has_more.then_some(&key);
+            let overhead = serde_json::to_vec(&json!({"items":[],"next_after":next}))
+                .map_err(internal)?
+                .len();
+            let page_bytes = overhead + item_bytes + size + items.len();
+            if items.len() == limit as usize || page_bytes > PAGE_BYTES {
+                if items.is_empty() {
+                    return Err(internal("one KV entry exceeds the page boundary"));
+                }
+                return Ok(json!({"items":items,"next_after":cursor}));
+            }
+            item_bytes += size;
+            cursor = Some(key);
+            items.push(item);
+        }
+        if !more {
+            return Ok(json!({"items":items,"next_after":null}));
+        }
+        chunk_size = chunk_size.saturating_mul(2).min(MAX_KV_LIST_LIMIT);
+    }
 }
 
 fn audit<T>(
@@ -365,7 +536,7 @@ fn audit<T>(
     role: &admin::Role,
     target: &Target,
     request_id: &RequestId,
-    operation: &str,
+    details: AuditDetails<'_>,
     result: &Result<T, ApiError>,
     started: Instant,
 ) {
@@ -374,12 +545,18 @@ fn audit<T>(
         role => role.name(),
     };
     let outcome = result.as_ref().map_or_else(|error| error.code, |_| "ok");
+    let collection = if result.is_ok() && crate::format::valid_collection_name(target.name()) {
+        tenants::qualify(role, target.name())
+    } else {
+        "(invalid)".to_owned()
+    };
     if let Some(log) = &service.admin.audit_log
         && log
             .append(
                 json!({
-                    "event":operation,"request_id":request_id.0,"principal":principal,
-                    "collection":tenants::qualify(role,target.name()),"outcome":outcome,
+                    "event":details.operation,"request_id":request_id.0,"principal":principal,
+                    "collection":collection,"outcome":outcome,
+                    "expires_at_ms":details.expires_at_ms.map(|value|value.to_string()),
                     "duration_ns":started.elapsed().as_nanos().min(u64::MAX as u128) as u64
                 }),
                 false,
@@ -396,6 +573,7 @@ fn audit<T>(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::cell::Cell;
 
     #[test]
     fn engine_errors_have_explicit_client_mapping() {
@@ -412,6 +590,81 @@ mod tests {
             assert_eq!(mapped.status.as_u16(), status);
             assert_eq!(mapped.code, code);
         }
+    }
+
+    #[test]
+    fn large_page_uses_bounded_number_of_list_scans() {
+        let entries = (0..2_000)
+            .map(|index| KvEntry {
+                key: format!("{index:05}"),
+                value: b"x".to_vec(),
+                version: 1,
+                expires_at_ms: None,
+            })
+            .collect::<Vec<_>>();
+        let scans = Cell::new(0);
+        let page = build_page(
+            ListQuery {
+                namespace: "bulk".into(),
+                prefix: String::new(),
+                after: None,
+                limit: Some("10000".into()),
+            },
+            10_000,
+            0,
+            |_, _, after, count, _| {
+                scans.set(scans.get() + 1);
+                Ok(entries
+                    .iter()
+                    .filter(|entry| after.is_none_or(|after| entry.key.as_str() > after))
+                    .take(count)
+                    .cloned()
+                    .collect())
+            },
+        )
+        .unwrap();
+        assert_eq!(page["items"].as_array().unwrap().len(), 2_000);
+        assert!(
+            scans.get() <= 20,
+            "page required {} full-list scans",
+            scans.get()
+        );
+    }
+
+    #[tokio::test]
+    async fn audit_never_stores_unvalidated_collection_names() {
+        let directory = tempfile::tempdir().unwrap();
+        let mut service = Service::new(Database::create_in_memory(1, Default::default()).unwrap());
+        let mut admin_state = admin::AdminState::default();
+        admin_state.audit_log = Some(Arc::new(audit::Log::open(directory.path()).unwrap()));
+        service.admin = Arc::new(admin_state);
+        let target = Target::Named("a".repeat(1024 * 1024));
+        let request_id = RequestId("test".into());
+        let failure: Result<(), ApiError> = Err(ApiError::new(
+            StatusCode::NOT_FOUND,
+            "collection_not_found",
+            "missing",
+        ));
+        audit(
+            &service,
+            &admin::Role::Admin,
+            &target,
+            &request_id,
+            AuditDetails {
+                operation: "kv_put",
+                expires_at_ms: None,
+            },
+            &failure,
+            Instant::now(),
+        );
+        let contents = std::fs::read_to_string(directory.path().join("audit.jsonl")).unwrap();
+        assert!(
+            contents.len() < 4_096,
+            "audit log was {} bytes",
+            contents.len()
+        );
+        let event: Value = serde_json::from_str(contents.trim()).unwrap();
+        assert_eq!(event["collection"], "(invalid)");
     }
 
     #[test]
