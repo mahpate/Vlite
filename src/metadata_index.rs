@@ -535,10 +535,140 @@ mod tests {
         let disk = crate::disk_ann::DiskAnnIndex::open(&sidecar, Default::default()).unwrap();
         refused!(db.search_disk_ann(&disk, &[1.0, 2.0], 1, 1));
         #[cfg(feature = "gpu")]
-        if let Some(gpu) = crate::gpu::GpuExactSearcher::new() {
-            refused!(gpu.search(&db, &[1.0, 2.0], 1));
+        {
+            refused!(crate::gpu::resident_preflight(&db));
+            // Structural wiring covers the early gate even on adapter-free CI.
+            let source: String = include_str!("gpu.rs")
+                .chars()
+                .filter(|c| !c.is_whitespace())
+                .collect();
+            let search = source.split("pubfnsearch(").nth(1).unwrap();
+            let start = search.find('{').unwrap();
+            let mut depth = 0usize;
+            let end = search[start..]
+                .char_indices()
+                .find_map(|(offset, c)| {
+                    match c {
+                        '{' => depth += 1,
+                        '}' => depth -= 1,
+                        _ => {}
+                    }
+                    (depth == 0).then_some(start + offset)
+                })
+                .unwrap();
+            let body = &search[start..end];
+            assert!(body.contains("resident_preflight("));
+            assert!(
+                body.find("resident_preflight(").unwrap() < body.find("database.state(").unwrap()
+            );
+            if let Some(gpu) = crate::gpu::GpuExactSearcher::new() {
+                refused!(gpu.search(&db, &[1.0, 2.0], 1));
+            }
         }
         refused!(db.checkpoint());
+    }
+
+    #[test]
+    fn compact_settings_validate_and_persist_named_collection() {
+        let _precision = crate::compact::Activation::on();
+        let _records = crate::compact::catalog::payload::Activation::on();
+        let _source = crate::compact::source::Activation::on();
+        for encrypted in [false, true] {
+            let key = encrypted.then(|| crate::EncryptionKey::from_bytes([9; 32]));
+            let mut original = crate::Database::create_in_memory(
+                2,
+                crate::CreateOptions {
+                    encryption: key.clone(),
+                    ..Default::default()
+                },
+            )
+            .unwrap();
+            original
+                .create_collection(
+                    "indexed",
+                    crate::CollectionSpec {
+                        dimensions: 2,
+                        settings: Default::default(),
+                    },
+                )
+                .unwrap();
+            let old = crate::Metadata::from([("tag".into(), MetadataValue::String("old".into()))]);
+            original
+                .collection_mut("indexed")
+                .unwrap()
+                .put_with_metadata(1, &[1.0, 2.0], b"a", &old)
+                .unwrap();
+            let mut loaded = crate::format::load_with(
+                &mut std::io::Cursor::new(original.to_bytes().unwrap()),
+                key.as_ref(),
+            )
+            .unwrap();
+            loaded.flags |= crate::format::FLAG_PRECISION;
+            let id = *loaded.collections.keys().find(|&&id| id != 0).unwrap();
+            loaded.collections.get_mut(&0).unwrap().precision =
+                Some(crate::compact::catalog::Precision::Float32);
+            loaded.collections.get_mut(&id).unwrap().precision =
+                Some(crate::compact::catalog::Precision::Float16);
+            let mut image = Vec::new();
+            crate::maintenance::write_v5_image(
+                &mut image,
+                &loaded,
+                loaded.lineage.unwrap(),
+                None,
+                None,
+                loaded.cipher.as_ref(),
+                loaded.flags,
+                loaded.sequence,
+            )
+            .unwrap();
+            let directory = tempfile::tempdir().unwrap();
+            let path = directory.path().join("compact-settings.vlite");
+            std::fs::write(&path, image).unwrap();
+            let mut db = match key.as_ref() {
+                Some(key) => crate::Database::open_encrypted(&path, key).unwrap(),
+                None => crate::Database::open(&path).unwrap(),
+            };
+            assert!(db.state(id).records.is_compact());
+            let before = db.sequence;
+            let invalid = crate::CollectionSettings {
+                rerank_multiplier: 0,
+                ..Default::default()
+            };
+            assert!(matches!(
+                db.set_collection_settings("indexed", invalid),
+                Err(crate::Error::InvalidCollectionSettings(_))
+            ));
+            assert_eq!(db.sequence, before);
+            let settings = crate::CollectionSettings {
+                metadata_indexes: vec![spec("tag", MetadataIndexKind::Eq)],
+                text_fields: vec!["tag".into()],
+                ..Default::default()
+            };
+            db.set_collection_settings("indexed", settings.clone())
+                .unwrap();
+            let filter = [Condition::Eq {
+                field: "tag".into(),
+                value: MetadataValue::String("old".into()),
+            }];
+            assert_eq!(
+                db.state(id)
+                    .metadata_indexes
+                    .lookup(&filter, 10)
+                    .unwrap()
+                    .ids,
+                Some([1].into())
+            );
+            drop(db);
+            let reopened = match key.as_ref() {
+                Some(key) => crate::Database::open_encrypted(&path, key).unwrap(),
+                None => crate::Database::open(&path).unwrap(),
+            };
+            assert_eq!(reopened.state(id).settings, settings);
+            assert_eq!(
+                reopened.default_state().settings,
+                crate::CollectionSettings::default()
+            );
+        }
     }
 
     #[test]
@@ -571,6 +701,15 @@ mod tests {
                 .unwrap();
             original
                 .put_with_metadata(50, &[1.0, 2.0], b"e", &old)
+                .unwrap();
+            original
+                .put_with_expiry(
+                    60,
+                    &[3.0, 4.0],
+                    b"future",
+                    &crate::Metadata::new(),
+                    Some(u64::MAX),
+                )
                 .unwrap();
             let mut loaded = crate::format::load_with(
                 &mut std::io::Cursor::new(original.to_bytes().unwrap()),
@@ -634,6 +773,14 @@ mod tests {
                 indexes.lookup(&filter, 10).unwrap().ids.unwrap(),
                 [20, 30].into()
             );
+            let old_filter = [Condition::Eq {
+                field: "tag".into(),
+                value: MetadataValue::String("old".into()),
+            }];
+            assert_eq!(
+                indexes.lookup(&old_filter, 10).unwrap().ids.unwrap(),
+                [40, 50].into()
+            );
             let terms = crate::text_index::tokenize("new").into_iter().collect();
             assert_eq!(
                 text.search(&terms, 10, |_| true)
@@ -641,6 +788,14 @@ mod tests {
                     .map(|(id, _)| *id)
                     .collect::<Vec<_>>(),
                 vec![20, 30]
+            );
+            let old_terms = crate::text_index::tokenize("old").into_iter().collect();
+            assert_eq!(
+                text.search(&old_terms, 10, |_| true)
+                    .iter()
+                    .map(|(id, _)| *id)
+                    .collect::<Vec<_>>(),
+                vec![40, 50]
             );
             assert_eq!(
                 pin.effective_ids(),
@@ -668,13 +823,34 @@ mod tests {
             db.set_collection_settings("default", settings.clone())
                 .unwrap();
             oracle.set_collection_settings("default", settings).unwrap();
+            assert_eq!(
+                db.default_state()
+                    .metadata_indexes
+                    .lookup(&filter, 10)
+                    .unwrap()
+                    .ids,
+                Some([20, 30].into())
+            );
+            assert_eq!(
+                db.default_state()
+                    .text_index
+                    .search(&terms, 10, |_| true)
+                    .len(),
+                2
+            );
+            db.state_mut(0).metadata_indexes = MetadataIndexes::default();
+            db.state_mut(0).text_index = crate::text_index::TextIndex::default();
             db.state_mut(0).rebuild_derived().unwrap();
             let state = db.default_state();
             assert_eq!(
                 state.metadata_indexes.lookup(&filter, 10).unwrap().ids,
                 Some([20, 30].into())
             );
-            let hits = [20, 30, 40, 10, 50].map(|id| crate::SearchHit { id, distance: 0.0 });
+            assert_eq!(state.text_index.search(&terms, 10, |_| true).len(), 2);
+            let hits = [20, 30, 40, 10, 50, 60].map(|id| crate::SearchHit {
+                id,
+                distance: id as f64 / 10.0,
+            });
             let reranker = crate::rerank::ExactReranker {
                 metric: crate::DistanceMetric::SquaredL2,
             };
@@ -705,7 +881,7 @@ mod tests {
                                 .map(|value| value.to_bits())
                                 .collect::<Vec<_>>()
                         );
-                        assert_eq!(candidate.distance, 0.0);
+                        assert_eq!(candidate.distance, candidate.id as f64 / 10.0);
                     }
                     crate::rerank::Reranker::rerank(
                         &crate::rerank::ExactReranker {
@@ -726,6 +902,52 @@ mod tests {
                 .rerank(&[0.0, 0.0], &hits, 10, &verifier)
                 .unwrap();
             assert_eq!(actual, expected);
+            struct Count(usize);
+            impl crate::rerank::Reranker for Count {
+                fn rerank(
+                    &self,
+                    _: &[f32],
+                    candidates: &[crate::rerank::RerankCandidate],
+                    _: usize,
+                ) -> crate::Result<Vec<crate::SearchHit>> {
+                    assert_eq!(candidates.len(), self.0);
+                    Ok(Vec::new())
+                }
+            }
+            let boundary = vec![
+                crate::SearchHit {
+                    id: 50,
+                    distance: 5.0
+                };
+                crate::MAX_BATCH_OPERATIONS
+            ];
+            let oversized = vec![boundary[0].clone(); crate::MAX_BATCH_OPERATIONS + 1];
+            crate::CollectionRef { db: &db, id: 0 }
+                .rerank(
+                    &[0.0, 0.0],
+                    &boundary,
+                    1,
+                    &Count(crate::MAX_BATCH_OPERATIONS),
+                )
+                .unwrap();
+            db.poisoned = true;
+            {
+                let view = crate::CollectionRef { db: &db, id: 0 };
+                assert!(matches!(
+                    view.rerank(&[], &[], 0, &Count(0)),
+                    Err(crate::Error::Poisoned)
+                ));
+                assert!(matches!(
+                    view.rerank(&[0.0, 0.0], &oversized, 1, &Count(0)),
+                    Err(crate::Error::Poisoned)
+                ));
+            }
+            db.poisoned = false;
+            let view = crate::CollectionRef { db: &db, id: 0 };
+            assert!(matches!(
+                view.rerank(&[0.0, 0.0], &oversized, 1, &Count(0)),
+                Err(crate::Error::BatchTooLarge)
+            ));
             let memory = crate::quality::effective_memory(&pin, &mut workspace)
                 .unwrap()
                 .unwrap();
@@ -739,7 +961,7 @@ mod tests {
             let pinned = crate::rerank::rerank_effective(
                 &pin,
                 &Default::default(),
-                u64::MAX,
+                crate::current_time_ms(),
                 &[0.0, 0.0],
                 &hits,
                 10,
