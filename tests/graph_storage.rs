@@ -1158,8 +1158,8 @@ fn op12_and_graph_flag_are_rejected_outside_graph_enabled_v5_files() {
         "nonzero reserved database header bytes",
     );
 
-    // Unknown flags beside FLAG_GRAPH stay unsupported (16 is now
-    // FLAG_COMPACT, covered by tests/compact_storage.rs).
+    // Unknown bit 32 beside FLAG_GRAPH stays unsupported; bit 8 is now
+    // FLAG_HISTORY and needs an advance frame, so it is not an unknown flag.
     let mut bytes = base_graph_file();
     bytes[26..28].copy_from_slice(&(FLAG_GRAPH | 32).to_le_bytes());
     let checksum = crc32(&bytes[..28]);

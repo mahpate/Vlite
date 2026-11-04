@@ -725,10 +725,10 @@ pub(crate) fn publish_with(
 
 /// Publishes the complete, validated and synced output of `write` at
 /// `destination`, which must not exist, and returns it still holding the
-/// exclusive lock taken before its name became visible: nobody opens a
-/// store before its publisher is done with it. A failure before that leaves
-/// nothing behind; once the name is visible the file is never removed, and
-/// a failed directory sync (Unix; Windows offers none) is
+/// exclusive lock taken before its name became visible, where supported:
+/// nobody opens a store before its publisher is done with it. A failure
+/// before that leaves nothing behind; once the name is visible the file is
+/// never removed, and a failed directory sync (Unix; Windows offers none) is
 /// `PublicationIndeterminate`.
 pub(crate) fn publish_held(
     destination: &Path,
@@ -746,9 +746,15 @@ pub(crate) fn publish_held(
     require_complete(&loaded)?;
     let report = inspection(&loaded);
     staging.as_file().sync_all()?;
-    match staging.as_file().try_lock() {
+    #[cfg(not(test))]
+    let lock_result = staging.as_file().try_lock();
+    #[cfg(test)]
+    let lock_result = publication_lock::try_lock(staging.as_file());
+    match lock_result {
         Ok(()) => {}
         Err(std::fs::TryLockError::WouldBlock) => return Err(Error::Locked),
+        // Preserve publication on filesystems/platforms that do not support locking.
+        Err(std::fs::TryLockError::Error(error)) if error.kind() == io::ErrorKind::Unsupported => {}
         Err(std::fs::TryLockError::Error(error)) => return Err(Error::Io(error)),
     }
     #[cfg(test)]
@@ -774,6 +780,39 @@ pub(crate) fn publish_held(
             source,
         })?;
     Ok((report, held))
+}
+
+#[cfg(test)]
+mod publication_lock {
+    use std::{cell::RefCell, fs::File, fs::TryLockError};
+
+    type Hook = Box<dyn FnMut(&File) -> Result<(), TryLockError>>;
+
+    thread_local! {
+        static HOOK: RefCell<Option<Hook>> = const { RefCell::new(None) };
+    }
+
+    pub(super) fn arm(hook: impl FnMut(&File) -> Result<(), TryLockError> + 'static) -> Armed {
+        HOOK.with(|slot| {
+            assert!(slot.borrow_mut().replace(Box::new(hook)).is_none());
+        });
+        Armed
+    }
+
+    pub(super) struct Armed;
+
+    impl Drop for Armed {
+        fn drop(&mut self) {
+            HOOK.with(|slot| slot.borrow_mut().take());
+        }
+    }
+
+    pub(super) fn try_lock(file: &File) -> Result<(), TryLockError> {
+        HOOK.with(|slot| match slot.borrow_mut().as_mut() {
+            Some(hook) => hook(file),
+            None => file.try_lock(),
+        })
+    }
 }
 
 /// Test failpoints of a publication (P3a qualification), per thread:
@@ -1643,6 +1682,78 @@ mod tests {
     fn encrypted_history_image_uses_snapshot_frames() {
         let key = crate::EncryptionKey::from_bytes([9; 32]);
         snapshot_image_loads_like_replayed_image(Some(&key));
+    }
+
+    #[test]
+    fn publication_unsupported_lock_matches_unlocked_output() {
+        let directory = tempfile::tempdir().unwrap();
+        let original = format::header(1);
+        let unlocked = directory.path().join("unlocked.vlite");
+        let unsupported = directory.path().join("unsupported.vlite");
+        {
+            let _hook = publication_lock::arm(|_| Ok(()));
+            let (_report, _held) = publish_held(&unlocked, None, |file| {
+                file.write_all(&original)?;
+                Ok(())
+            })
+            .unwrap();
+            File::open(&unlocked).unwrap().try_lock().unwrap();
+        }
+        {
+            let _hook = publication_lock::arm(|_| {
+                Err(std::fs::TryLockError::Error(
+                    io::ErrorKind::Unsupported.into(),
+                ))
+            });
+            let (_report, _held) = publish_held(&unsupported, None, |file| {
+                file.write_all(&original)?;
+                Ok(())
+            })
+            .unwrap();
+            File::open(&unsupported).unwrap().try_lock().unwrap();
+            assert_eq!(
+                fs::read(&unsupported).unwrap(),
+                fs::read(&unlocked).unwrap()
+            );
+        }
+        assert_eq!(fs::read_dir(directory.path()).unwrap().count(), 2);
+    }
+
+    fn rejected_publication_lock(kind: Option<io::ErrorKind>) {
+        let directory = tempfile::tempdir().unwrap();
+        let source = directory.path().join("source.vlite");
+        let destination = directory.path().join("output.vlite");
+        let original = format::header(1);
+        fs::write(&source, &original).unwrap();
+        let _hook = publication_lock::arm(move |_| {
+            Err(match kind {
+                Some(kind) => std::fs::TryLockError::Error(kind.into()),
+                None => std::fs::TryLockError::WouldBlock,
+            })
+        });
+        let result = publish(&destination, |file| {
+            file.write_all(&fs::read(&source)?)?;
+            Ok(())
+        });
+        match kind {
+            Some(kind) => assert!(matches!(result, Err(Error::Io(error)) if error.kind() == kind)),
+            None => assert!(matches!(result, Err(Error::Locked))),
+        }
+        assert!(!destination.exists());
+        assert_eq!(fs::read_dir(directory.path()).unwrap().count(), 1);
+        assert_eq!(fs::read(&source).unwrap(), original);
+    }
+
+    #[test]
+    fn publication_would_block_never_publishes_or_changes_source() {
+        rejected_publication_lock(None);
+    }
+
+    #[test]
+    fn publication_lock_io_fault_never_publishes_or_changes_source() {
+        for kind in [io::ErrorKind::PermissionDenied, io::ErrorKind::Other] {
+            rejected_publication_lock(Some(kind));
+        }
     }
 
     #[test]

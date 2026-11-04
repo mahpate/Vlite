@@ -89,6 +89,8 @@ jobs:
         os: [ubuntu-latest, ubuntu-24.04-arm, windows-latest, macos-latest]
         toolchain: ["1.89.0", stable]
     runs-on: ${{ matrix.os }}
+    env:
+      VLITE_REQUIRE_AVX2: ${{ (matrix.os == 'ubuntu-latest' || matrix.os == 'windows-latest') && '1' || '0' }}
     steps:
       - uses: actions/checkout@v5
       - uses: dtolnay/rust-toolchain@master
