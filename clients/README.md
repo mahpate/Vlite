@@ -88,6 +88,24 @@ Node.js is the tested runtime; browser clients are not a separate supported SDK.
 
 ## Supported operations and wire contracts
 
+The Python, JavaScript and .NET clients also expose the unreleased KV REST
+candidate: `kv_get`, `kv_put`, `kv_delete`, `kv_list`; `kvGet`, `kvPut`,
+`kvDelete`, `kvList`; and `KvGetAsync`, `KvPutAsync`, `KvDeleteAsync`,
+`KvListAsync`, respectively. These flat methods require an explicit collection,
+namespace and (except list) key. Use a pre-existing, dedicated one-dimensional
+collection: namespaces are not authorization boundaries. Values are bytes,
+`Uint8Array` or `byte[]` (maximum 1,047,290 bytes); u64s are `int`, `bigint` or
+`ulong`, encoded losslessly as decimal strings. Get decodes the value, put
+returns version/expiry, delete returns a boolean, and list returns items and
+`next_after` (exclusive `after`, no cross-page snapshot). Omitted/null KV expiry
+clears TTL. Only 404 `not_found` maps to an explicit unsupported exception;
+404 `kv_not_found` and all other stable errors remain ordinary HTTP errors.
+No retry, fallback, collection creation or exactly-once promise is added.
+Disconnects, cancellations and timeouts may hide committed mutations.
+Ordinary KV acknowledgements sync only under server `--durability full`.
+See the [Python](python/README.md#key-value-operations) and
+[JavaScript](javascript/README.md#key-value-operations) examples and .NET below.
+
 Exact search accepts `metric: "squared_l2" | "cosine" | "inner_product"` in the
 request (Python uses a dictionary). Omission preserves squared L2.
 Cosine distance is 1 minus similarity; zero queries are rejected and zero-norm
@@ -533,6 +551,33 @@ optional `timeout` defaults to 30 seconds. `VLiteException` exposes `Status`,
 about unknown mutation outcomes. Redirects/proxies are disabled by default;
 custom `HttpMessageHandler` injection is for tests or explicitly controlled
 transports (the caller is responsible for equivalent transport safety).
+
+### .NET key-value operations
+
+For a server supporting the KV REST candidate and an existing dedicated
+one-dimensional `cache` collection, run in a .NET 8+ console application
+referencing `VLite.Client`:
+
+```csharp
+using VLite;
+
+using var client = new Client(Environment.GetEnvironmentVariable("VLITE_URL")!,
+                              Environment.GetEnvironmentVariable("VLITE_AUTH_TOKEN")!);
+var result = await client.KvPutAsync("cache", "app", "hello", new byte[] { 1, 2 }, new Expected.Any());
+var entry = await client.KvGetAsync("cache", "app", "hello");
+Console.WriteLine(entry.Version);
+var page = await client.KvListAsync("cache", "app");
+Console.WriteLine(page.Items.Length);
+Console.WriteLine(await client.KvDeleteAsync("cache", "app", "hello", new Expected.Revision(result.Version)));
+```
+
+Use `Expected.Any`, `Expected.Absent` or `Expected.Revision(ulong)`; omitted
+`expected` means any. `expiresAtMs` is nullable `ulong` in absolute Unix
+milliseconds; omission/null clears expiry. `KvEntry`, `KvPutResult` and
+`KvPage` expose PascalCase properties and snake_case JSON names.
+Pass `cancellation:` to any KV method; cancellation/timeout is a
+`TransportException` with an uncertain mutation outcome, never an automatic
+retry. Only an unknown KV route (404 `not_found`) raises `UnsupportedException`.
 
 The package-free test executable uses a fake HTTP handler and exits nonzero on
 failure. Run it rather than `dotnet test` (no test-runner package is needed):

@@ -222,7 +222,8 @@ async function scripted(run) {
     let body = "";
     for await (const chunk of req) body += chunk;
     calls.push({ method: req.method, path: req.url, body: body ? JSON.parse(body) : undefined,
-      accept: req.headers.accept, ifMatch: req.headers["if-match"], auth: req.headers.authorization });
+      accept: req.headers.accept, ifMatch: req.headers["if-match"], auth: req.headers.authorization,
+      contentType: req.headers["content-type"] });
     const reply = replies.shift() ?? { status: 599, body: { error: { code: "unscripted", message: req.url } } };
     const headers = { "Content-Type": reply.type ?? "application/json", ...(reply.headers ?? {}) };
     res.writeHead(reply.status ?? 200, headers);
@@ -234,6 +235,188 @@ async function scripted(run) {
   try { await run({ client, calls, reply }); } finally { server.close(); }
 }
 const err = (status, code) => ({ status, body: { error: { code, message: code } } });
+
+test("KV exact wire, Expected variants and lossless results", async () => {
+  await scripted(async ({ client, calls, reply }) => {
+    const entry = { key: "雪 /+?%", value_base64: "AP8=", version: "18446744073709551615", expires_at_ms: "0", future: true };
+    reply({ body: entry });
+    assert.deepEqual(await client.kvGet({ collection: "cache", namespace: "名 +", key: "雪 /+?%" }),
+      { key: "雪 /+?%", value: new Uint8Array([0, 255]), version: 18446744073709551615n, expires_at_ms: 0n });
+    assert.equal(calls.at(-1).path, "/v1/collections/cache/kv/entry?namespace=%E5%90%8D%20%2B&key=%E9%9B%AA%20%2F%2B%3F%25");
+    const cases = [["any", "any"], ["absent", "absent"], [{ revision: 0n }, { revision: "0" }],
+      [{ revision: 9007199254740993n }, { revision: "9007199254740993" }],
+      [{ revision: 18446744073709551615n }, { revision: "18446744073709551615" }]];
+    for (const [expected, wire] of cases) {
+      reply({ body: { version: "9007199254740993", expires_at_ms: "18446744073709551615" } });
+      assert.deepEqual(await client.kvPut({ collection: "cache", namespace: "n", key: "k", value: new Uint8Array([255]),
+        expected, expiresAtMs: 18446744073709551615n }), { version: 9007199254740993n, expires_at_ms: 18446744073709551615n });
+      assert.equal(calls.at(-1).method, "PUT");
+      assert.equal(calls.at(-1).path, "/v1/collections/cache/kv/entry");
+      assert.deepEqual(calls.at(-1).body, { namespace: "n", key: "k", value_base64: "/w==", expected: wire, expires_at_ms: "18446744073709551615" });
+      for (const deleted of [true, false]) {
+        reply({ body: { deleted } });
+        assert.equal(await client.kvDelete({ collection: "cache", namespace: "名 +", key: "雪 /+?%", expected }), deleted);
+        assert.equal(calls.at(-1).method, "DELETE");
+        assert.equal(calls.at(-1).path, "/v1/collections/cache/kv/entry?namespace=%E5%90%8D%20%2B&key=%E9%9B%AA%20%2F%2B%3F%25&expected="
+          + (typeof wire === "string" ? wire : wire.revision));
+        assert.equal(calls.at(-1).body, undefined);
+      }
+    }
+    reply({ body: { items: [entry], next_after: "雪 /+?%" } }, { body: { items: [], next_after: null } });
+    assert.deepEqual(await client.kvList({ collection: "cache", namespace: "名 +", prefix: "雪 ", after: "a/+", limit: 10000 }),
+      { items: [{ key: "雪 /+?%", value: new Uint8Array([0, 255]), version: 18446744073709551615n, expires_at_ms: 0n }], next_after: "雪 /+?%" });
+    assert.equal(calls.at(-1).path, "/v1/collections/cache/kv/entries?namespace=%E5%90%8D%20%2B&prefix=%E9%9B%AA%20&after=a%2F%2B&limit=10000");
+    assert.deepEqual(await client.kvList({ collection: "cache", namespace: "n" }), { items: [], next_after: null });
+    assert.equal(calls.at(-1).path, "/v1/collections/cache/kv/entries?namespace=n&prefix=&limit=100");
+    for (const call of calls) {
+      assert.equal(call.auth, `Bearer ${token}`);
+      assert.equal(call.accept, "application/json");
+      assert.equal(call.contentType, call.body === undefined ? undefined : "application/json");
+    }
+  });
+});
+
+test("KV value bounds and null expiry", async () => {
+  await scripted(async ({ client, calls, reply }) => {
+    for (const [value, encoded] of [[new Uint8Array(), ""], [new Uint8Array(1047290), "A".repeat(1396387) + "="]]) {
+      reply({ body: { version: "1", expires_at_ms: null } });
+      assert.deepEqual(await client.kvPut({ collection: "cache", namespace: "n", key: "k", value }),
+        { version: 1n, expires_at_ms: null });
+      assert.deepEqual(calls.at(-1).body, { namespace: "n", key: "k", value_base64: encoded, expected: "any", expires_at_ms: null });
+    }
+    await assert.rejects(async () => client.kvPut({ collection: "cache", namespace: "n", key: "k", value: new Uint8Array(1047291) }), TypeError);
+    assert.equal(calls.length, 2);
+  });
+});
+
+test("KV maximum entry and required response shapes", async () => {
+  await scripted(async ({ client, reply }) => {
+    const address = { collection: "cache", namespace: "n", key: "k" };
+    reply({ body: { key: "k", value_base64: "A".repeat(1396387) + "=", version: "1", expires_at_ms: null } });
+    assert.deepEqual((await client.kvGet(address)).value, new Uint8Array(1047290));
+    for (const [body, call] of [
+      [{ version: "1" }, () => client.kvPut({ ...address, value: new Uint8Array() })],
+      [{ deleted: 1 }, () => client.kvDelete(address)],
+      [{ items: [], next_after: 0 }, () => client.kvList(address)],
+      [{ items: {} }, () => client.kvList(address)],
+      [null, () => client.kvGet(address)]]) {
+      reply({ body });
+      await assert.rejects(call, TransportError);
+    }
+  });
+});
+
+test("KV stable errors and exact unsupported route mapping without retries", async () => {
+  await scripted(async ({ client, calls, reply }) => {
+    for (const [status, code] of [[404, "kv_not_found"], [412, "precondition_failed"], [409, "not_kv_collection"],
+      [409, "kv_slots_exhausted"], [422, "invalid_input"], [404, "collection_not_found"], [503, "commit_indeterminate"], [404, "not_found"],
+      [409, "not_found"]]) {
+      for (const call of [() => client.kvGet({ collection: "cache", namespace: "n", key: "k" }),
+        () => client.kvPut({ collection: "cache", namespace: "n", key: "k", value: new Uint8Array() }),
+        () => client.kvDelete({ collection: "cache", namespace: "n", key: "k" }),
+        () => client.kvList({ collection: "cache", namespace: "n" })]) {
+        const before = calls.length;
+        reply({ ...err(status, code), headers: { "X-Request-ID": "kv-error" } });
+        await assert.rejects(async () => call(), (e) => status === 404 && code === "not_found" ? e instanceof UnsupportedError
+          : e instanceof VLiteError && e.status === status && e.code === code && e.requestId === "kv-error");
+        assert.equal(calls.length, before + 1);
+      }
+    }
+  });
+});
+
+test("KV invalid inputs and noncanonical responses", async () => {
+  await scripted(async ({ client, calls, reply }) => {
+    const address = { collection: "cache", namespace: "n", key: "k" };
+    for (const patch of [{ namespace: "" }, { namespace: "é".repeat(128) }, { key: "" }, { key: "é".repeat(513) },
+      { key: "\ud800" }, { collection: "" }]) {
+      await assert.rejects(async () => client.kvGet({ ...address, ...patch }), TypeError);
+    }
+    for (const expected of [null, { revision: 0 }, { revision: -1n }, { revision: 18446744073709551616n },
+      { revision: "1" }, { revision: 1n, extra: true }, "wrong"]) {
+      await assert.rejects(async () => client.kvDelete({ ...address, expected }), TypeError);
+    }
+    for (const patch of [{ limit: 0 }, { limit: 10001 }, { limit: true }, { prefix: "é".repeat(513) }, { after: "" }]) {
+      await assert.rejects(async () => client.kvList({ ...address, ...patch }), TypeError);
+    }
+    for (const expiresAtMs of [0, -1n, 18446744073709551616n, "1"]) {
+      await assert.rejects(async () => client.kvPut({ ...address, value: new Uint8Array(), expiresAtMs }), TypeError);
+    }
+    await assert.rejects(async () => client.kvPut({ ...address, value: "not bytes" }), TypeError);
+    assert.equal(calls.length, 0);
+    const valid = { key: "k", value_base64: "", version: "1", expires_at_ms: null };
+    for (const patch of [{ version: "0" }, { version: 1 }, { version: "01" }, { version: "18446744073709551616" },
+      { expires_at_ms: 0 }, { expires_at_ms: "01" }, { value_base64: "/x==" }, { value_base64: "/w" },
+      { value_base64: "_w==" }, { value_base64: " /w==" }]) {
+      reply({ body: { ...valid, ...patch } });
+      await assert.rejects(async () => client.kvGet(address), TransportError);
+    }
+  });
+});
+
+test("KV text boundaries, empty entry and zero deadline", async () => {
+  await scripted(async ({ client, calls, reply }) => {
+    reply({ body: { key: "k", value_base64: "", version: "1", expires_at_ms: null } },
+      { body: { items: [], next_after: null } }, { body: { version: "1", expires_at_ms: "0" } });
+    assert.deepEqual((await client.kvGet({ collection: "cache", namespace: "n".repeat(255), key: "é".repeat(512) })).value, new Uint8Array());
+    await client.kvList({ collection: "cache", namespace: "n", prefix: "é".repeat(512), after: "é".repeat(512), limit: 1 });
+    assert.deepEqual(await client.kvPut({ collection: "cache", namespace: "n", key: "k", value: new Uint8Array(), expiresAtMs: 0n }),
+      { version: 1n, expires_at_ms: 0n });
+    assert.equal(calls.at(-1).body.expires_at_ms, "0");
+    assert.equal(calls.length, 3);
+  });
+});
+
+test("KV timeout still applies with a caller signal and never retries", async (t) => {
+  const timeout = new AbortController();
+  const caller = new AbortController();
+  let calls = 0;
+  const server = createServer(async (req, res) => {
+    for await (const _ of req);
+    calls++;
+    timeout.abort(new DOMException("Timed out", "TimeoutError"));
+    res.end('{"version":"1","expires_at_ms":null}');
+  });
+  await new Promise((resolve) => server.listen(0, "127.0.0.1", resolve));
+  t.mock.method(AbortSignal, "timeout", (milliseconds) => {
+    assert.equal(milliseconds, 100);
+    return timeout.signal;
+  });
+  try {
+    const client = new Client(`http://127.0.0.1:${server.address().port}`, token, { timeoutMs: 100 });
+    await assert.rejects(client.kvPut({ collection: "cache", namespace: "n", key: "k",
+      value: new Uint8Array(), signal: caller.signal }), TransportError);
+    assert.equal(calls, 1);
+    assert.equal(caller.signal.aborted, false);
+  } finally {
+    server.closeAllConnections();
+    await new Promise((resolve) => server.close(resolve));
+  }
+});
+
+test("KV cancellation after admission never retries a mutation", async () => {
+  const controller = new AbortController();
+  let calls = 0;
+  const server = createServer(async (req, res) => {
+    for await (const _ of req);
+    calls++;
+    controller.abort();
+    res.end('{"version":"1","expires_at_ms":null}');
+  });
+  await new Promise((resolve) => server.listen(0, "127.0.0.1", resolve));
+  try {
+    const client = new Client(`http://127.0.0.1:${server.address().port}`, token);
+    await assert.rejects(async () => client.kvPut({ collection: "cache", namespace: "n", key: "k",
+      value: new Uint8Array(), signal: controller.signal }), TransportError);
+    assert.equal(calls, 1);
+    await assert.rejects(async () => client.kvDelete({ collection: "cache", namespace: "n", key: "k",
+      signal: controller.signal }), TransportError);
+    assert.equal(calls, 1);
+  } finally {
+    server.closeAllConnections();
+    await new Promise((resolve) => server.close(resolve));
+  }
+});
 
 test("collection-scoped routes and legacy defaults", async () => {
   await scripted(async ({ client, calls, reply }) => {

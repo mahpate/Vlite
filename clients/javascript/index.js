@@ -96,8 +96,8 @@ export class TransportError extends Error {
 }
 
 export class UnsupportedError extends Error {
-  constructor() {
-    super("Server does not advertise conditional_writes (API version 1); no write was sent");
+  constructor(message = "Server does not advertise conditional_writes (API version 1); no write was sent") {
+    super(message);
     this.name = "UnsupportedError";
   }
 }
@@ -119,9 +119,73 @@ function exactCount(value) {
   throw new TransportError("import status has an invalid last_chunk");
 }
 
+function kvText(value, name, maximum, minimum = 1) {
+  if (typeof value !== "string" || /[\uD800-\uDBFF](?![\uDC00-\uDFFF])|(?<![\uD800-\uDBFF])[\uDC00-\uDFFF]/u.test(value)) {
+    throw new TypeError(`${name} must contain Unicode scalar values`);
+  }
+  const size = Buffer.byteLength(value, "utf8");
+  if (size < minimum || size > maximum) throw new TypeError(`${name} must be ${minimum}..${maximum} UTF-8 bytes`);
+  return value;
+}
+
+function kvDecimal(value) {
+  if (typeof value !== "bigint" || value < 0n || value > 18446744073709551615n) throw new TypeError("u64 must be a bigint in range");
+  return value.toString();
+}
+
+function kvExpected(value) {
+  if (value === "any" || value === "absent") return value;
+  if (value !== null && typeof value === "object" && !Array.isArray(value)
+    && Object.keys(value).length === 1 && Object.hasOwn(value, "revision")) {
+    return { revision: kvDecimal(value.revision) };
+  }
+  throw new TypeError("expected must be any, absent or {revision: bigint}");
+}
+
+function kvQuery(fields) {
+  return Object.entries(fields).map(([key, value]) => `${key}=${encodeURIComponent(value)}`).join("&");
+}
+
+function kvReadDecimal(value, nonzero = false) {
+  const result = BigInt(id(value));
+  if (nonzero && result === 0n) throw new TypeError("issued version must be nonzero");
+  return result;
+}
+
+function kvReadPut(value) {
+  return { version: kvReadDecimal(value.version, true),
+    expires_at_ms: value.expires_at_ms === null ? null : kvReadDecimal(value.expires_at_ms) };
+}
+
+function kvReadEntry(value) {
+  const encoded = value.value_base64;
+  if (typeof encoded !== "string" || encoded.length > 1396388) throw new TypeError("invalid KV base64");
+  const decoded = Buffer.from(encoded, "base64");
+  if (decoded.length > 1047290 || decoded.toString("base64") !== encoded) throw new TypeError("noncanonical KV base64");
+  return { key: kvText(value.key, "key", 1024), value: new Uint8Array(decoded), ...kvReadPut(value) };
+}
+
+function kvDecode(decode, value) {
+  try { return decode(value); }
+  catch (error) {
+    if (!(error instanceof TypeError || error instanceof RangeError)) throw error;
+    throw new TransportError("Invalid KV response; no retry performed");
+  }
+}
+
+async function kvRequest(t, method, path, body, signal) {
+  try { return await t.request(method, path, body, { signal }); }
+  catch (error) {
+    if (error instanceof VLiteError && error.status === 404 && error.code === "not_found") {
+      throw new UnsupportedError("Server does not support KV routes; no fallback performed");
+    }
+    throw error;
+  }
+}
+
 // The transport closes over the token so it never appears on any object.
 function transport(base, token, timeout) {
-  async function request(method, path, body, { ifMatch, etag = false, text = false } = {}) {
+  async function request(method, path, body, { ifMatch, etag = false, text = false, signal } = {}) {
     // Reject nonfinite numbers rather than JSON.stringify silently converting them to null.
     const encoded = body === undefined ? undefined : JSON.stringify(body, (_, value) => {
       if (typeof value === "number" && !Number.isFinite(value)) throw new TypeError("Numbers must be finite");
@@ -131,7 +195,7 @@ function transport(base, token, timeout) {
     try {
       response = await fetch(base + path, {
         method, body: encoded, redirect: "error", credentials: "omit", cache: "no-store",
-        signal: AbortSignal.timeout(timeout),
+        signal: signal === undefined ? AbortSignal.timeout(timeout) : AbortSignal.any([signal, AbortSignal.timeout(timeout)]),
         headers: { Authorization: `Bearer ${token}`, Accept: text ? "text/plain" : "application/json",
           ...(encoded === undefined ? {} : { "Content-Type": "application/json" }),
           ...(ifMatch === undefined ? {} : { "If-Match": ifMatch }) },
@@ -371,6 +435,38 @@ export class Client extends Records {
       if (typeof error === "object" && error !== null) error.importJob = current;
       throw error;
     }
+  }
+
+  async kvGet({ collection, namespace, key, signal }) {
+    const query = kvQuery({ namespace: kvText(namespace, "namespace", 255), key: kvText(key, "key", 1024) });
+    const value = await kvRequest(this.#t, "GET", `/v1/collections/${collectionName(collection)}/kv/entry?${query}`, undefined, signal);
+    return kvDecode(kvReadEntry, value);
+  }
+  async kvPut({ collection, namespace, key, value, expected = "any", expiresAtMs = null, signal }) {
+    if (!(value instanceof Uint8Array) || value.byteLength > 1047290) throw new TypeError("value must be Uint8Array of length at most 1047290");
+    const body = { namespace: kvText(namespace, "namespace", 255), key: kvText(key, "key", 1024),
+      value_base64: Buffer.from(value).toString("base64"), expected: kvExpected(expected),
+      expires_at_ms: expiresAtMs === null ? null : kvDecimal(expiresAtMs) };
+    const result = await kvRequest(this.#t, "PUT", `/v1/collections/${collectionName(collection)}/kv/entry`, body, signal);
+    return kvDecode(kvReadPut, result);
+  }
+  async kvDelete({ collection, namespace, key, expected = "any", signal }) {
+    const condition = kvExpected(expected);
+    const query = kvQuery({ namespace: kvText(namespace, "namespace", 255), key: kvText(key, "key", 1024),
+      expected: typeof condition === "string" ? condition : condition.revision });
+    const result = await kvRequest(this.#t, "DELETE", `/v1/collections/${collectionName(collection)}/kv/entry?${query}`, undefined, signal);
+    if (typeof result?.deleted !== "boolean") throw new TransportError("Invalid KV delete response; no retry performed");
+    return result.deleted;
+  }
+  async kvList({ collection, namespace, prefix = "", after, limit = 100, signal }) {
+    const query = kvQuery({ namespace: kvText(namespace, "namespace", 255), prefix: kvText(prefix, "prefix", 1024, 0),
+      ...(after === undefined ? {} : { after: kvText(after, "after", 1024) }), limit: String(integer(limit, 1, 10000, "limit")) });
+    const result = await kvRequest(this.#t, "GET", `/v1/collections/${collectionName(collection)}/kv/entries?${query}`, undefined, signal);
+    return kvDecode((page) => {
+      if (!Array.isArray(page.items)) throw new TypeError("items must be an array");
+      return { items: page.items.map(kvReadEntry),
+        next_after: page.next_after === null ? null : kvText(page.next_after, "next_after", 1024) };
+    }, result);
   }
 
   changes({ cursor, limit = 1000 } = {}) {

@@ -1,4 +1,5 @@
 using System.Net;
+using System.Globalization;
 using System.Net.Http.Headers;
 using System.Text;
 using System.Text.Json;
@@ -20,6 +21,28 @@ public sealed class TransportException(Exception cause) : Exception(
 {
     public string Code => "transport_error";
 }
+
+public sealed class UnsupportedException() : Exception("Server does not support KV routes; no fallback performed");
+
+public abstract record Expected
+{
+    private Expected() { }
+    public sealed record Any : Expected;
+    public sealed record Absent : Expected;
+    public sealed record Revision([property: JsonPropertyName("revision")] ulong Value) : Expected;
+}
+
+public sealed record KvEntry(
+    [property: JsonPropertyName("key")] string Key,
+    [property: JsonPropertyName("value")] byte[] Value,
+    [property: JsonPropertyName("version"), JsonNumberHandling(JsonNumberHandling.AllowReadingFromString | JsonNumberHandling.WriteAsString)] ulong Version,
+    [property: JsonPropertyName("expires_at_ms"), JsonNumberHandling(JsonNumberHandling.AllowReadingFromString | JsonNumberHandling.WriteAsString)] ulong? ExpiresAtMs);
+public sealed record KvPutResult(
+    [property: JsonPropertyName("version"), JsonNumberHandling(JsonNumberHandling.AllowReadingFromString | JsonNumberHandling.WriteAsString)] ulong Version,
+    [property: JsonPropertyName("expires_at_ms"), JsonNumberHandling(JsonNumberHandling.AllowReadingFromString | JsonNumberHandling.WriteAsString)] ulong? ExpiresAtMs);
+public sealed record KvPage(
+    [property: JsonPropertyName("items")] KvEntry[] Items,
+    [property: JsonPropertyName("next_after")] string? NextAfter);
 
 public sealed record MetadataValue(string Type, object Value);
 public sealed record PutRequest(float[] Vector, string PayloadBase64 = "", Dictionary<string, MetadataValue>? Metadata = null, ulong? ExpiresAtMs = null, ulong? TtlMs = null);
@@ -98,6 +121,109 @@ public sealed class Client : Records, IDisposable
     public Task<JsonElement> HealthAsync(CancellationToken cancellation = default) => RequestAsync("GET", "/health", null, cancellation);
     public Task<JsonElement> ReadyAsync(CancellationToken cancellation = default) => RequestAsync("GET", "/ready", null, cancellation);
     public Task<JsonElement> DatabaseAsync(CancellationToken cancellation = default) => RequestAsync("GET", "/v1/database", null, cancellation);
+    private static string KvText(string value, string name, int maximum, int minimum = 1)
+    {
+        ArgumentNullException.ThrowIfNull(value, name);
+        var size = new UTF8Encoding(false, true).GetByteCount(value);
+        if (size < minimum || size > maximum)
+            throw new ArgumentException($"{name} must be {minimum}..{maximum} UTF-8 bytes", name);
+        return value;
+    }
+    private static string KvPath(string collection)
+    {
+        ValidateName(collection);
+        return "/v1/collections/" + collection + "/kv";
+    }
+    private static string KvDecimal(ulong value) => value.ToString(CultureInfo.InvariantCulture);
+    private static object KvExpected(Expected? expected) => expected switch
+    {
+        null or Expected.Any => "any",
+        Expected.Absent => "absent",
+        Expected.Revision revision => new Dictionary<string, object> { ["revision"] = KvDecimal(revision.Value) },
+        _ => throw new ArgumentException("Invalid expected variant", nameof(expected))
+    };
+    private static string KvQuery(string name, string value) => name + "=" + Uri.EscapeDataString(value);
+    private async Task<JsonElement> KvRequestAsync(string method, string path, object? body, CancellationToken cancellation)
+    {
+        try { return await RequestAsync(method, path, body, cancellation).ConfigureAwait(false); }
+        catch (VLiteException error) when (error.Status == 404 && error.Code == "not_found")
+        { throw new UnsupportedException(); }
+    }
+    private static T KvDecode<T>(JsonElement value, Func<JsonElement, T> decode)
+    {
+        try { return decode(value); }
+        catch (Exception error) when (error is JsonException or InvalidOperationException or KeyNotFoundException or FormatException or ArgumentException)
+        { throw new TransportException(error); }
+    }
+    private static ulong KvReadDecimal(JsonElement value, bool nonzero = false)
+    {
+        var text = value.GetString();
+        if (text is null || !Regex.IsMatch(text, @"\A(0|[1-9][0-9]{0,19})\z") ||
+            !ulong.TryParse(text, NumberStyles.None, CultureInfo.InvariantCulture, out var result) || (nonzero && result == 0))
+            throw new JsonException("Invalid canonical decimal u64");
+        return result;
+    }
+    private static KvPutResult KvReadPut(JsonElement value)
+    {
+        var expiry = value.GetProperty("expires_at_ms");
+        return new(KvReadDecimal(value.GetProperty("version"), true),
+            expiry.ValueKind == JsonValueKind.Null ? null : KvReadDecimal(expiry));
+    }
+    private static KvEntry KvReadEntry(JsonElement value)
+    {
+        var encoded = value.GetProperty("value_base64").GetString();
+        if (encoded is null || encoded.Length > 1396388) throw new JsonException("Invalid KV base64");
+        var decoded = Convert.FromBase64String(encoded);
+        if (decoded.Length > 1047290 || Convert.ToBase64String(decoded) != encoded)
+            throw new JsonException("Noncanonical KV base64");
+        var result = KvReadPut(value);
+        return new(KvText(value.GetProperty("key").GetString()!, "key", 1024), decoded, result.Version, result.ExpiresAtMs);
+    }
+    public async Task<KvEntry> KvGetAsync(string collection, string @namespace, string key, CancellationToken cancellation = default)
+    {
+        var path = KvPath(collection) + "/entry?" + KvQuery("namespace", KvText(@namespace, "namespace", 255)) +
+            "&" + KvQuery("key", KvText(key, "key", 1024));
+        return KvDecode(await KvRequestAsync("GET", path, null, cancellation).ConfigureAwait(false), KvReadEntry);
+    }
+    public async Task<KvPutResult> KvPutAsync(string collection, string @namespace, string key, byte[] value,
+        Expected? expected = null, ulong? expiresAtMs = null, CancellationToken cancellation = default)
+    {
+        ArgumentNullException.ThrowIfNull(value);
+        if (value.Length > 1047290) throw new ArgumentException("value must be at most 1047290 bytes", nameof(value));
+        var path = KvPath(collection) + "/entry";
+        var body = new Dictionary<string, object?>
+        {
+            ["namespace"] = KvText(@namespace, "namespace", 255), ["key"] = KvText(key, "key", 1024),
+            ["value_base64"] = Convert.ToBase64String(value), ["expected"] = KvExpected(expected),
+            ["expires_at_ms"] = expiresAtMs is null ? null : KvDecimal(expiresAtMs.Value)
+        };
+        return KvDecode(await KvRequestAsync("PUT", path, body, cancellation).ConfigureAwait(false), KvReadPut);
+    }
+    public async Task<bool> KvDeleteAsync(string collection, string @namespace, string key,
+        Expected? expected = null, CancellationToken cancellation = default)
+    {
+        var condition = expected is Expected.Revision revision ? KvDecimal(revision.Value) : (string)KvExpected(expected);
+        var path = KvPath(collection) + "/entry?" + KvQuery("namespace", KvText(@namespace, "namespace", 255)) +
+            "&" + KvQuery("key", KvText(key, "key", 1024)) + "&" + KvQuery("expected", condition);
+        return KvDecode(await KvRequestAsync("DELETE", path, null, cancellation).ConfigureAwait(false),
+            value => value.GetProperty("deleted").GetBoolean());
+    }
+    public async Task<KvPage> KvListAsync(string collection, string @namespace, string prefix = "", string? after = null,
+        int limit = 100, CancellationToken cancellation = default)
+    {
+        if (limit is < 1 or > 10000) throw new ArgumentOutOfRangeException(nameof(limit));
+        var path = KvPath(collection) + "/entries?" + KvQuery("namespace", KvText(@namespace, "namespace", 255)) +
+            "&" + KvQuery("prefix", KvText(prefix, "prefix", 1024, 0)) +
+            (after is null ? "" : "&" + KvQuery("after", KvText(after, "after", 1024))) +
+            "&limit=" + limit.ToString(CultureInfo.InvariantCulture);
+        return KvDecode(await KvRequestAsync("GET", path, null, cancellation).ConfigureAwait(false), value =>
+        {
+            var next = value.GetProperty("next_after");
+            return new KvPage(value.GetProperty("items").EnumerateArray().Select(KvReadEntry).ToArray(),
+                next.ValueKind == JsonValueKind.Null ? null : KvText(next.GetString()!, "next_after", 1024));
+        });
+    }
+
     public Task<JsonElement> ChangesAsync(string? cursor = null, int limit = 1000, CancellationToken cancellation = default)
     {
         if (limit is < 1 or > 10000) throw new ArgumentOutOfRangeException(nameof(limit));

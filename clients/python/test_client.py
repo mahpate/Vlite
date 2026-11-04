@@ -893,5 +893,156 @@ class CapabilityTests(unittest.TestCase):
             self.client.prometheus_metrics()
 
 
+class KvTests(unittest.TestCase):
+    setUpClass = classmethod(CapabilityTests.setUpClass.__func__)
+    tearDownClass = classmethod(CapabilityTests.tearDownClass.__func__)
+    setUp = CapabilityTests.setUp
+    def test_kv_wire_and_results(self):
+        entry = {"key": "雪 /+?%", "value_base64": "AP8=", "version": MAX_ID,
+                 "expires_at_ms": "0", "future": True}
+        Scripted.respond = lambda *_: (200, entry, {})
+        self.assertEqual(self.client.kv_get(collection="cache", namespace="名 +", key="雪 /+?%"),
+                         {"key": "雪 /+?%", "value": b"\x00\xff", "version": 18446744073709551615,
+                          "expires_at_ms": 0})
+        self.assertEqual(Scripted.log[-1], ("GET",
+            "/v1/collections/cache/kv/entry?namespace=%E5%90%8D%20%2B&key=%E9%9B%AA%20%2F%2B%3F%25", None))
+        for expected, wire in [("any", "any"), ("absent", "absent"),
+                               ({"revision": 0}, {"revision": "0"}),
+                               ({"revision": 18446744073709551615}, {"revision": MAX_ID})]:
+            Scripted.respond = lambda *_: (200, {"version": MAX_ID, "expires_at_ms": None}, {})
+            self.assertEqual(self.client.kv_put(collection="cache", namespace="n", key="k",
+                value=b"\xff", expected=expected), {"version": 18446744073709551615, "expires_at_ms": None})
+            self.assertEqual(Scripted.log[-1], ("PUT", "/v1/collections/cache/kv/entry",
+                {"namespace": "n", "key": "k", "value_base64": "/w==", "expected": wire, "expires_at_ms": None}))
+        for expected, wire in [("any", "any"), ("absent", "absent"), ({"revision": 0}, "0"),
+                               ({"revision": 18446744073709551615}, MAX_ID)]:
+            for deleted in (True, False):
+                Scripted.respond = lambda *_, deleted=deleted: (200, {"deleted": deleted}, {})
+                self.assertIs(self.client.kv_delete(collection="cache", namespace="名 +", key="雪 /+?%",
+                    expected=expected), deleted)
+                self.assertEqual(Scripted.log[-1], ("DELETE",
+                    "/v1/collections/cache/kv/entry?namespace=%E5%90%8D%20%2B&key=%E9%9B%AA%20%2F%2B%3F%25&expected=" + wire, None))
+        Scripted.respond = lambda *_: (200, {"items": [entry], "next_after": "雪 /+?%"}, {})
+        page = self.client.kv_list(collection="cache", namespace="名 +", prefix="雪 ", after="a/+", limit=10000)
+        self.assertEqual(page, {"items": [{"key": "雪 /+?%", "value": b"\x00\xff",
+            "version": 18446744073709551615, "expires_at_ms": 0}], "next_after": "雪 /+?%"})
+        self.assertEqual(Scripted.log[-1], ("GET",
+            "/v1/collections/cache/kv/entries?namespace=%E5%90%8D%20%2B&prefix=%E9%9B%AA%20&after=a%2F%2B&limit=10000", None))
+        Scripted.respond = lambda *_: (200, {"items": [], "next_after": None}, {})
+        self.assertEqual(self.client.kv_list(collection="cache", namespace="n"), {"items": [], "next_after": None})
+        self.assertEqual(Scripted.log[-1][1], "/v1/collections/cache/kv/entries?namespace=n&prefix=&limit=100")
+        for (_, _, body), headers in zip(Scripted.log, Scripted.headers_seen):
+            self.assertEqual(headers["Authorization"], "Bearer " + TOKEN)
+            self.assertEqual(headers["Accept"], "application/json")
+            self.assertEqual(headers.get("Content-Type"), "application/json" if body is not None else None)
+
+    def test_kv_value_bounds_and_deadlines(self):
+        for value, encoded in [(b"", ""), (b"\x00" * 1047290, "A" * 1396386 + "A=")]:
+            Scripted.respond = lambda *_: (200, {"version": "1", "expires_at_ms": MAX_ID}, {})
+            self.assertEqual(self.client.kv_put(collection="cache", namespace="n", key="k", value=value,
+                expires_at_ms=18446744073709551615), {"version": 1, "expires_at_ms": 18446744073709551615})
+            self.assertEqual(Scripted.log[-1][2]["value_base64"], encoded)
+            self.assertEqual(Scripted.log[-1][2]["expires_at_ms"], MAX_ID)
+        before = len(Scripted.log)
+        with self.assertRaises(ValueError):
+            self.client.kv_put(collection="cache", namespace="n", key="k", value=b"\0" * 1047291)
+        self.assertEqual(len(Scripted.log), before)
+        self.client.kv_put(collection="cache", namespace="n", key="k", value=b"", expires_at_ms=0)
+        self.assertEqual(Scripted.log[-1][2]["expires_at_ms"], "0")
+
+    def test_kv_text_boundaries_and_empty_entry(self):
+        Scripted.respond = lambda *_: (200, {"key": "k", "value_base64": "", "version": "1", "expires_at_ms": None}, {})
+        self.assertEqual(self.client.kv_get(collection="cache", namespace="n" * 255, key="é" * 512)["value"], b"")
+        Scripted.respond = lambda *_: (200, {"items": [], "next_after": None}, {})
+        self.client.kv_list(collection="cache", namespace="n", prefix="é" * 512, after="é" * 512, limit=1)
+        self.assertEqual(len(Scripted.log), 2)
+
+    def test_kv_maximum_entry_and_required_response_shapes(self):
+        Scripted.respond = lambda *_: (200, {"key": "k", "value_base64": "A" * 1396387 + "=",
+            "version": "1", "expires_at_ms": None}, {})
+        self.assertEqual(self.client.kv_get(collection="cache", namespace="n", key="k")["value"], b"\0" * 1047290)
+        for response, call in [
+            ({"version": "1"}, lambda: self.client.kv_put(collection="cache", namespace="n", key="k", value=b"")),
+            ({"deleted": 1}, lambda: self.client.kv_delete(collection="cache", namespace="n", key="k")),
+            ({"items": [], "next_after": 0}, lambda: self.client.kv_list(collection="cache", namespace="n")),
+            ({"items": {}}, lambda: self.client.kv_list(collection="cache", namespace="n")),
+            (None, lambda: self.client.kv_get(collection="cache", namespace="n", key="k"))]:
+            Scripted.respond = lambda *_, response=response: (200, response, {})
+            with self.assertRaises(TransportError):
+                call()
+
+    def test_kv_errors_and_unsupported_are_not_retried(self):
+        for status, code in [(404, "kv_not_found"), (412, "precondition_failed"),
+            (409, "not_kv_collection"), (409, "kv_slots_exhausted"), (422, "invalid_input"),
+            (404, "collection_not_found"), (503, "commit_indeterminate"), (404, "not_found"), (409, "not_found")]:
+            Scripted.respond = lambda *_, status=status, code=code: error(status, code)
+            for call in [lambda: self.client.kv_get(collection="cache", namespace="n", key="k"),
+                         lambda: self.client.kv_put(collection="cache", namespace="n", key="k", value=b""),
+                         lambda: self.client.kv_delete(collection="cache", namespace="n", key="k"),
+                         lambda: self.client.kv_list(collection="cache", namespace="n")]:
+                before = len(Scripted.log)
+                unsupported = status == 404 and code == "not_found"
+                with self.assertRaises(UnsupportedError if unsupported else VLiteError) as raised:
+                    call()
+                if not unsupported:
+                    self.assertEqual((raised.exception.status, raised.exception.code, raised.exception.request_id),
+                                     (status, code, f"rid-{status}"))
+                self.assertEqual(len(Scripted.log), before + 1)
+
+    def test_kv_invalid_inputs_and_responses(self):
+        for kwargs in [{"namespace": ""}, {"namespace": "é" * 128}, {"key": ""},
+                       {"key": "é" * 513}, {"key": "\ud800"}, {"collection": ""}]:
+            with self.assertRaises(ValueError):
+                self.client.kv_get(**({"collection": "cache", "namespace": "n", "key": "k"} | kwargs))
+        for expected in [None, {"revision": True}, {"revision": -1}, {"revision": 2**64},
+                         {"revision": "1"}, {"revision": 1, "extra": 0}, "wrong"]:
+            with self.assertRaises(ValueError):
+                self.client.kv_delete(collection="cache", namespace="n", key="k", expected=expected)
+        for kwargs in [{"limit": 0}, {"limit": 10001}, {"limit": True}, {"prefix": "é" * 513}, {"after": ""}]:
+            with self.assertRaises(ValueError):
+                self.client.kv_list(collection="cache", namespace="n", **kwargs)
+        for expiry in [True, -1, 2**64, "1"]:
+            with self.assertRaises(ValueError):
+                self.client.kv_put(collection="cache", namespace="n", key="k", value=b"", expires_at_ms=expiry)
+        with self.assertRaises(ValueError):
+            self.client.kv_put(collection="cache", namespace="n", key="k", value="not bytes")
+        self.assertEqual(Scripted.log, [])
+        valid = {"key": "k", "value_base64": "", "version": "1", "expires_at_ms": None}
+        for patch in [{"version": "0"}, {"version": 1}, {"version": "01"}, {"version": str(2**64)},
+                      {"expires_at_ms": 0}, {"expires_at_ms": "01"}, {"value_base64": "/x=="},
+                      {"value_base64": "/w"}, {"value_base64": "_w=="}, {"value_base64": " /w=="}]:
+            Scripted.respond = lambda *_, patch=patch: (200, valid | patch, {})
+            with self.assertRaises(TransportError):
+                self.client.kv_get(collection="cache", namespace="n", key="k")
+
+    def test_kv_timeout_does_not_retry(self):
+        admitted, release = Event(), Event()
+        def respond(*_):
+            admitted.set()
+            release.wait(5)
+            return 200, None, {}
+        Scripted.respond = respond
+        try:
+            with self.assertRaises(TransportError):
+                Client(f"http://127.0.0.1:{self.server.server_port}", TOKEN, timeout=0.1).kv_put(
+                    collection="cache", namespace="n", key="k", value=b"")
+            self.assertTrue(admitted.is_set())
+            self.assertEqual(len(Scripted.log), 1)
+        finally:
+            release.set()
+
+    def test_kv_caller_interruption_does_not_retry(self):
+        from unittest.mock import patch
+        Scripted.respond = lambda *_: (200, {"version": "1", "expires_at_ms": None}, {})
+        original_open = self.client._opener.open
+        def interrupted(*args, **kwargs):
+            with original_open(*args, **kwargs):
+                raise KeyboardInterrupt("caller cancelled")
+        with patch.object(self.client._opener, "open", side_effect=interrupted):
+            with self.assertRaises(KeyboardInterrupt):
+                self.client.kv_put(collection="cache", namespace="n", key="k", value=b"")
+        self.assertEqual(len(Scripted.log), 1)
+
+
 if __name__ == "__main__":
     unittest.main()

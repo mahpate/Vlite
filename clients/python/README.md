@@ -39,4 +39,32 @@ Private/unreleased, owner-approved REST candidate: HTTP 409
 The client propagates it unchanged as `VLiteError`, without retry or fallback.
 If the caller elects to retry, it must retry the whole request.
 
+## Key-value operations
+
+The unreleased KV REST surface requires a server with KV routes and an existing,
+dedicated one-dimensional collection (`cache` below). Namespaces are application
+partitions, not authorization boundaries. Run with `VLITE_URL` and
+`VLITE_AUTH_TOKEN` set:
+
+```python
+import os
+from vlite_client import Client
+
+client = Client(os.environ["VLITE_URL"], os.environ["VLITE_AUTH_TOKEN"])
+result = client.kv_put(collection="cache", namespace="app", key="hello", value=b"world", expected="any")
+entry = client.kv_get(collection="cache", namespace="app", key="hello")
+print(entry["value"], result["version"])
+print(client.kv_list(collection="cache", namespace="app")["items"])
+print(client.kv_delete(collection="cache", namespace="app", key="hello", expected={"revision": result["version"]}))
+```
+
+`Expected` is `"any"`, `"absent"` or `{"revision": int}`. Values are `bytes`
+(at most 1,047,290 bytes); versions and `expires_at_ms` are lossless `int`s.
+Omitted/`None` expiry clears TTL; deadlines are absolute Unix milliseconds.
+List uses an exclusive `after` key and returns `next_after` (no snapshot across
+pages). Missing/due get raises `VLiteError` with `kv_not_found`; only an unknown
+route (404 `not_found`) raises `UnsupportedError`. No fallback or automatic retry
+occurs. A timeout may hide a committed mutation; re-read before deciding what
+to do. Acknowledgements sync only with server `--durability full`.
+
 Licensed under MIT; see LICENSE.

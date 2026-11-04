@@ -80,6 +80,15 @@ export interface SearchStats {
 /** `plan` is non-null only for mode "auto" with explain; `stats` is present only with explain. */
 export interface SearchResponse { hits: (Hit | HybridHit)[]; plan?: QueryPlan | null; stats?: SearchStats }
 export interface Page { items: { id: string; metadata: Metadata }[]; next_after: string | null }
+export type Expected = "any" | "absent" | { revision: bigint };
+export interface KvAddress { collection: string; namespace: string; key: string; signal?: AbortSignal }
+export interface KvPutOptions extends KvAddress { value: Uint8Array; expected?: Expected; expiresAtMs?: bigint | null }
+export interface KvListOptions {
+  collection: string; namespace: string; prefix?: string; after?: string; limit?: number; signal?: AbortSignal;
+}
+export interface KvPutResult { version: bigint; expires_at_ms: bigint | null }
+export interface KvEntry extends KvPutResult { key: string; value: Uint8Array }
+export interface KvPage { items: KvEntry[]; next_after: string | null }
 export interface DatabaseInfo { dimensions: number; format_version: number; records: number }
 export interface IndexStatus {
   metric?: "squared_l2" | "cosine" | null;
@@ -222,7 +231,7 @@ export class TransportError extends Error {
   /** Set by importNdjson when it fails after a job was reserved or resumed; the job is not aborted. */
   importJob?: string;
 }
-/** Conditional write refused because GET /v1/capabilities did not report api_version 1 with features.conditional_writes === true. Nothing was sent. */
+/** The server lacks conditional writes or KV routes; no fallback is performed. */
 export class UnsupportedError extends Error {}
 
 declare class Records {
@@ -270,6 +279,10 @@ export class Client extends Records {
   health(): Promise<{ status: "ok" }>;
   ready(): Promise<{ status: "ready" }>;
   database(): Promise<DatabaseInfo>;
+  kvGet(options: KvAddress): Promise<KvEntry>;
+  kvPut(options: KvPutOptions): Promise<KvPutResult>;
+  kvDelete(options: KvAddress & { expected?: Expected }): Promise<boolean>;
+  kvList(options: KvListOptions): Promise<KvPage>;
   changes(options?: { cursor?: string; limit?: number }): Promise<object>;
   listWebhooks(): Promise<object>;
   createWebhook(request: object): Promise<object>;
