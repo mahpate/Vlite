@@ -31,11 +31,12 @@ Keep values under namespaced string keys, with no vector. <!-- source: docs/STOR
   `vlite_kv_list`, and with `--writable` also `vlite_kv_put` and
   `vlite_kv_delete`. They work on a local file only (not through `--server`),
   need an existing one-dimension collection and never create one, and have no
-  lease commands. Use dedicated collections for key-value data, because vector,
-  import and graph operations on the same collection can overwrite its
+  lease commands. A list page stops at 10,000 entries or 16 MiB of canonical
+  JSON, as over REST. Use dedicated collections for key-value data, because
+  vector, import and graph operations on the same collection can overwrite its
   entries. See [shell commands](TOOLS.md#local-key-value-shell-commands) and
   [MCP tools](MCP.md#local-key-value-tools).
-  <!-- source: docs/TOOLS.md#local-key-value-shell-commands, docs/MCP.md#local-key-value-tools, tests/kv_tools.rs, tests/fixtures/kv/mcp-tool-additions.json -->
+  <!-- source: docs/TOOLS.md#local-key-value-shell-commands, docs/MCP.md#local-key-value-tools, tests/kv_tools.rs (list_page_exact_byte_cap_mcp_and_shell, list_limit_10000_peeks_for_continuation), tests/fixtures/kv/mcp-tool-additions.json; commit 689b04d8 -->
 - **REST.** `vlite-server` serves four operations: `GET`, `PUT` and `DELETE`
   on `/v1/collections/{collection}/kv/entry`, and `GET` on
   `/v1/collections/{collection}/kv/entries` for prefix listing. They need an
@@ -45,25 +46,35 @@ Keep values under namespaced string keys, with no vector. <!-- source: docs/STOR
   and delete take an expected version (`any`, `absent` or a revision), and a
   put without `expires_at_ms` clears the entry's expiry. A list page defaults
   to 100 entries and stops at 10,000 entries or 16 MiB of canonical JSON, with
-  `next_after` to continue and no snapshot across pages. The new error codes
-  are `kv_not_found` (404), `not_kv_collection` (409) and
-  `kv_slots_exhausted` (409). See [Key-value entries](API.md#key-value-entries)
-  for compare-and-set, expiry, quotas and errors.
-  [TO CONFIRM AT RC] Fixes to this adapter, and advertising the routes in
-  `GET /v1/capabilities`, are not merged in this candidate; re-read this item
-  when they land.
-  <!-- source: src/server/kv.rs, src/openapi.json, docs/API.md#key-value-entries, tests/server_kv.rs -->
+  `next_after` to continue and no snapshot across pages. Requests are strict:
+  put takes no query parameters, unknown or duplicate query parameters are
+  refused (400 `invalid_query`) as are unknown or duplicate JSON fields (422
+  `invalid_json`), and query strings must be valid UTF-8 percent-encoding with
+  form decoding, so `+` is a space and a literal plus is sent as `%2B`. The new
+  error codes are `kv_not_found` (404), `not_kv_collection` (409) and
+  `kv_slots_exhausted` (409). `GET /v1/capabilities` reports `features.kv`
+  (true on format 5 files) and lists both routes. Put and delete are audited
+  with the principal, collection, request id and outcome, and a put also with
+  its expiry deadline, never with a key, namespace or value; a failed request
+  records the collection as `(invalid)`. See
+  [Key-value entries](API.md#key-value-entries) for compare-and-set, expiry,
+  quotas and errors.
+  <!-- source: tests/server_kv.rs (kv_contract_wire_goldens against tests/fixtures/kv/wire/ordinary.json, kv_put_expected_and_query_encoding_are_strict, kv_capabilities_advertise_supported_routes_and_format, kv_large_list_limits_preserve_order_and_continuation, kv_put_audit_records_safe_identity_and_expiry), src/server/admin.rs, src/server/kv.rs, src/openapi.json, docs/API.md#key-value-entries; commits 459a2ada and 3203986e -->
 - **gRPC.** The new `vlite.v1.Kv` service has four unary RPCs: `GetKvEntry`,
   `PutKvEntry`, `DeleteKvEntry` and `ListKvEntries`. They carry raw bytes and
   uint64 versions and deadlines, and every address names its collection. The
   collection requirements, authorization, compare-and-set, expiry, quotas,
   audit and list page boundary (measured in canonical REST JSON) match REST.
-  The service has the same 8 MiB request and 16 MiB response limits as
-  `VLite` and is registered with the gRPC health service. Neither transport
-  provides leases. See [Key-value entries](GRPC.md#key-value-entries).
-  [TO CONFIRM AT RC] Fixes to this adapter are not merged in this candidate;
-  re-read this item when they land.
-  <!-- source: proto/vlite/v1/vlite.proto, src/server/grpc.rs, src/server/grpc/kv.rs, docs/GRPC.md#key-value-entries, tests/server_grpc_kv.rs -->
+  A collection name is checked against the 1 to 63 byte name grammar before any
+  lookup or audit entry, so a rejected name is never written to the audit log.
+  A value over 1,047,290 bytes is refused before it is converted, and a write
+  whose commit outcome is unknown answers `UNKNOWN` with
+  `commit_indeterminate`. The service has the same 8 MiB request and
+  16 MiB response limits as `VLite` and is registered with the gRPC health
+  service. A client needs a receive limit of at least 16 MiB + 1 KiB for
+  `ListKvEntries` and a send limit above 1 MiB. Neither transport provides
+  leases. See [Key-value entries](GRPC.md#key-value-entries).
+  <!-- source: tests/server_grpc_kv.rs (grpc_kv_collection_validation_precedes_lookup_and_audit, grpc_kv_oversize_value_rejected_before_json_validation, grpc_kv_exact_page_byte_boundary, grpc_kv_health_and_transport_limits, grpc_kv_rest_parity_trace), src/server/grpc/kv.rs (grpc_kv_commit_indeterminate_is_unknown_for_put_and_delete), docs/GRPC.md#key-value-entries, proto/vlite/v1/vlite.proto; commit 80a6baf9 -->
 - **HTTP clients.** The Python, JavaScript and .NET clients provide get, put
   (with compare-and-set), delete and prefix-list methods (`kv_get`, `kv_put`,
   `kv_delete` and `kv_list`; `kvGet` and so on; `KvGetAsync` and so on) for the
@@ -76,24 +87,52 @@ Keep values under namespaced string keys, with no vector. <!-- source: docs/STOR
 - **Durability and fencing.** Ordinary key-value writes follow the database's
   durability setting: `full` syncs before it acknowledges, `periodic` (the
   default) can lose the last flush interval on an OS crash or power loss, and
-  `none` keeps nothing on disk. A version is a commit sequence, not a durable,
-  never-reused lease ledger: after such a loss a later write can receive a
-  revision that was already acknowledged, and compaction, upgrade and restore
-  renumber revisions. Use versions for compare-and-set on one open store, and
-  read an entry again after any of those events. A dropped connection or a
-  `commit_indeterminate` error does not prove that a write failed, so do not
-  retry blindly. There are no lease operations.
-  <!-- source: docs/API.md#key-value-entries, docs/STORAGE-FEATURES.md#key-value-store, docs/SECURITY.md, src/kv.rs -->
+  `none` keeps nothing on disk. A successful write is acknowledged after
+  commit, and no call forces a sync. A version is a commit sequence, not a
+  durable, never-reused lease ledger: after such a loss a later write can
+  receive a revision that was already acknowledged, and compaction, upgrade and
+  restore renumber revisions. Use versions for compare-and-set on one open
+  store, and read an entry again after any of those events. A dropped
+  connection or a `commit_indeterminate` error does not prove that a write
+  failed, so do not retry blindly. There are no lease operations.
+  <!-- source: docs/API.md#key-value-entries, src/openapi.json, docs/STORAGE-FEATURES.md#key-value-store, docs/SECURITY.md, src/kv.rs; commit 3203986e -->
 
 ### Agent memory
 
-[TO CONFIRM AT RC] Agent memory (remember, recall, consolidate and forget) is
-part of the 0.7.0 plan, and the release waits for it. Its REST adapter and
-client methods are not merged in this candidate, so this section stays a
-placeholder: describe the shipped surface, limits and defaults here after
-independent acceptance. Until then the memory code is crate-private and
-inactive, and nothing in this candidate exposes it.
-<!-- source: docs/projects/roadmap/next-major.md, docs/projects/roadmap/gap1-agent-memory.md, src/lib.rs -->
+Agent memory (remember, recall, consolidate and forget) is part of the 0.7.0
+plan, and the release waits for it. The clients and the command line below are
+in this candidate; the server that answers them is not.
+<!-- source: docs/projects/roadmap/next-major.md#decided-2026-11-04, docs/projects/roadmap/gap1-agent-memory.md -->
+
+- **Clients.** The JavaScript, Python and .NET clients have a binding-local
+  facade, `client.memory(binding)` (`client.Memory(binding)` in .NET), with
+  nine operations: remember, recall, find facts, correct facts, consolidate,
+  forget, get receipt, get erasure and resume erasure. Each sends one POST under
+  `/v1/memory/{binding}/` and returns the full response; none retries, pages,
+  splits or embeds for you. They need a server with a provisioned memory
+  binding.
+  <!-- source: clients/README.md, clients/javascript/README.md, clients/python/README.md, clients/javascript/index.js, clients/python/vlite_client/__init__.py, clients/dotnet/VLite.Client/MemoryClient.cs; commits 52e17469, f32e9448 and fb23d09b -->
+- **Command line.** `vlite-memory-cli`, built with the `mcp-proxy` feature and
+  included in the release archives (not in the Docker images), sends one
+  request file to a binding with one of nine verbs: `remember`, `recall`,
+  `facts`, `correct-facts`, `consolidate`, `forget`, `receipt`, `erasure` and
+  `resume-erasure`. It prints one JSON line on success and one coded JSON error
+  line on stderr, and requires HTTPS except for loopback hosts. See
+  [Remote agent memory](TOOLS.md#remote-agent-memory).
+  <!-- source: docs/TOOLS.md#remote-agent-memory, tests/memory_cli.rs, tests/fixtures/memory_cli, .github/workflows/release.yml, Dockerfile; commits 4ba4e2bb and 02853281 -->
+- **Server.** [TO CONFIRM AT RC] The server-side REST adapter that the clients
+  and the command line call is not merged in this candidate, and neither are
+  the memory MCP tools, so nothing here answers a memory request yet; the
+  memory engine itself is crate-private and inactive. Describe the shipped
+  surface, limits and defaults here after independent acceptance.
+  <!-- source: src/lib.rs, src/server.rs, src/openapi.json, src/bin/vlite-memory-cli.rs (the only /v1/memory reference in src), docs/projects/roadmap/serving-memory-contract.md -->
+- **First-slice limitation.** [TO CONFIRM AT RC] The first server slice will
+  refuse receipt lookups (`GetReceipt`) of `remember` receipts with 409
+  `memory_capability_unavailable` and `details.feature`
+  `remember_receipt_lookup`. The original `remember` response carries the
+  complete receipt. The clients surface the refusal unchanged, including
+  `details.feature`; the command line prints its code and message.
+  <!-- source: first-slice scope stated for the unmerged memory adapter; no code or test pins the refusal yet. How refusals are reported: clients/javascript/README.md, clients/python/README.md, docs/TOOLS.md, src/bin/vlite-memory-cli.rs -->
 
 ### Directory store (opt-in)
 
@@ -185,13 +224,14 @@ Choose an embedding or ranking provider by alias, once an administrator has set
 it up.
 <!-- source: docs/GRPC.md, src/openapi.json -->
 
-- **Off by default.** Without provider configuration, the built-in hashing
+- **Off by default.** Without a providers file, the built-in hashing
   embedder, the existing opt-in HTTP embedder, and exact and MMR reranking
-  behave as before, and the server makes no provider call.
-  [TO CONFIRM AT RC] Re-check this for unconfigured `embed` requests after the
-  pending embedding fixes land: the response numbers and the status for an
-  unknown provider name must match 0.6.1.
-  <!-- source: docs/GRPC.md, src/openapi.json, docs/projects/roadmap/serving-contract.md -->
+  behave as before, and the server makes no provider call. `embed` then answers
+  as 0.6.1 did: the `hashing` provider returns the same response bytes, and an
+  unknown, empty or malformed `provider` is 422 `invalid_input`, not 409
+  `provider_not_configured`. A loaded providers file, even an empty one,
+  switches on the alias behavior described below.
+  <!-- source: tests/server_embed_legacy.rs (embed_matches_released_response_bytes against tests/fixtures/embed_legacy, raw bodies captured from the released 0.6.1 server; its README.md explains why the http provider has no success golden), src/server/providers/tests/serving.rs (rest_empty_registry_means_zero_egress), src/server/features.rs (embed_text, embed_builtin_in); commits c317aed1 and 48fa1307 -->
 - **Administrator setup.** An administrator defines providers (endpoint,
   pinned model and version, dimensions, connect and total timeouts,
   concurrency, an endpoint allowlist, and an optional secret) and binds them
@@ -326,8 +366,10 @@ dimensions, against v0.6.0:
 - Ingest, reopen and peak memory are within about 3%.
 
 The candidate commits after `30901be1` add server adapters, tools, clients and
-documentation only. [TO FILL AT FREEZE] State the final release revision and
-show that no measured path changed since `30901be1`.
+documentation, and restore two 0.6.1 default behaviors (the number text of
+`embed` responses, and `browse` observing flusher health once).
+[TO FILL AT FREEZE] State the final release revision and show that no measured
+path changed since `30901be1`.
 
 [Full tables, per-run CPU and method](../benchmarks/results/graph-reference-0.7.0-rc-vs-v0.6.0-azure.md) ·
 [raw runs](../benchmarks/results/graph-reference-0.7.0-rc-vs-v0.6.0-azure.json) ·
@@ -417,12 +459,13 @@ reads them as records of a one-dimension collection.
   file written by 0.6.1 is affected.
   <!-- source: docs/GRAPH.md#expiry-ttl, docs/STORAGE-FEATURES.md#directory-store, tests/graph_ttl.rs, src/kv.rs, src/format.rs -->
 - **Wire.** REST and gRPC changes are additive: the four key-value REST
-  operations, five new RPCs (the four-RPC `vlite.v1.Kv` service and
+  operations (`GET /v1/capabilities` lists their routes and reports
+  `features.kv`), five new RPCs (the four-RPC `vlite.v1.Kv` service and
   `VLite.EmbedText`), optional provider and ranking fields, and one new rerank
   mode, with existing tags and meanings unchanged. The `tools/list` of
   `vlite-mcp` lists four more tools: `vlite_kv_get` and `vlite_kv_list` in
   read-only mode, plus `vlite_kv_put` and `vlite_kv_delete` with `--writable`.
-  <!-- source: src/openapi.json, proto/vlite/v1/vlite.proto, tests/grpc_provider_wire.rs, tests/server_grpc_kv.rs, tests/graph_surface_parity.rs, tests/fixtures/kv/mcp-tool-additions.json -->
+  <!-- source: src/openapi.json, proto/vlite/v1/vlite.proto, tests/grpc_provider_wire.rs, tests/server_grpc_kv.rs, tests/server_kv.rs (kv_capabilities_advertise_supported_routes_and_format), tests/graph_surface_parity.rs, tests/fixtures/kv/mcp-tool-additions.json -->
 - **Errors.** `cursor_before_history` (Rust `Error::CursorBeforeHistory`, REST
   409, a C ABI error string) applies to history below a directory store's
   checkpoint floor. The Rust `Error` enum, which is `#[non_exhaustive]`, also
