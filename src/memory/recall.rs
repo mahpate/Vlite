@@ -311,6 +311,14 @@ fn validate(request: &RecallRequest<'_>) -> RecallResult<i64> {
             return Err(RecallError::UnsupportedPlan);
         }
     }
+    // A query vector without a direction cannot be ranked by cosine: refused in
+    // the request validation, before any record is read or any budget charged.
+    if let Some(query) = &request.query
+        && query.fusion.vector_weight > 0.0
+        && let Some(vector) = &query.vector
+    {
+        crate::validate_metric_query(vector, dense_metric(request.selection, query.metric))?;
+    }
     if let Selection::Mmr { lambda } = request.selection
         && (!lambda.is_finite() || !(0.0..=1.0).contains(&lambda))
     {
@@ -492,7 +500,6 @@ impl MemoryRef<'_> {
             {
                 crate::validate_vector(collection.dimensions(), vector)?;
                 let metric = dense_metric(request.selection, query.metric);
-                crate::validate_metric_query(vector, metric)?;
                 let components = owners
                     .len()
                     .checked_mul(collection.dimensions())
@@ -1701,6 +1708,23 @@ mod tests {
         let mut req = request(scope, now);
         req.query.as_mut().unwrap().vector = Some(vec![0.0, 0.0]);
         assert!(recall(&db, &req).is_ok(), "weighted recall accepts it");
+        // A vector that does not count in the fusion is not validated: with
+        // only the text leg weighing in, even a cosine query of zero length is
+        // accepted.
+        let query = req.query.as_mut().unwrap();
+        let (metric, weight, text) = (
+            query.metric,
+            query.fusion.vector_weight,
+            std::mem::replace(&mut query.text, "a".into()),
+        );
+        query.metric = crate::DistanceMetric::Cosine;
+        query.fusion.vector_weight = 0.0;
+        assert!(
+            recall(&db, &req).is_ok(),
+            "a text-only fusion needs no direction"
+        );
+        let query = req.query.as_mut().unwrap();
+        (query.metric, query.fusion.vector_weight, query.text) = (metric, weight, text);
         for selection in [Selection::Exact, Selection::Mmr { lambda: 0.5 }] {
             req.selection = selection;
             assert!(
@@ -1732,6 +1756,29 @@ mod tests {
             "the tight budget does bind weighted recall"
         );
         req.limits.vector_components = RecallLimits::default().vector_components;
+        // ... and before the records are counted: the source budget binds
+        // weighted recall first, while a query without a direction never gets
+        // as far as the budget.
+        req.limits.source_records = 1;
+        for selection in [Selection::Exact, Selection::Mmr { lambda: 0.5 }] {
+            req.selection = selection;
+            assert!(
+                matches!(
+                    recall(&db, &req),
+                    Err(RecallError::Storage(crate::Error::ZeroNormQuery))
+                ),
+                "{selection:?} with a tight source budget"
+            );
+        }
+        req.selection = Selection::Ranked;
+        assert!(
+            matches!(
+                recall(&db, &req),
+                Err(RecallError::Budget("source_records"))
+            ),
+            "the tight source budget binds weighted recall"
+        );
+        req.limits.source_records = RecallLimits::default().source_records;
         req.query.as_mut().unwrap().vector = Some(vec![1.0, 0.0]);
         req.selection = Selection::Ranked;
         assert_eq!(ids(&recall(&db, &req).unwrap()), ["a", "z"]);
