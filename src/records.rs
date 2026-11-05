@@ -343,6 +343,64 @@ impl<'a> Iterator for CompactRecordIter<'a> {
 
 pub(crate) struct RecordIter<'a>(std::collections::btree_map::Iter<'a, u64, Arc<Record>>);
 
+/// What the overlay of a compact collection holds for one ID.
+#[cfg(test)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum Affected {
+    Put { revision: u64, expiry: Option<u64> },
+    Delete { revision: u64 },
+}
+
+/// Effective IDs in ascending order, merged lazily; see `CollectionRecords::ordered_ids`.
+#[cfg(test)]
+pub(crate) struct OrderedIds<'a>(OrderedIdsState<'a>);
+
+#[cfg(test)]
+enum OrderedIdsState<'a> {
+    Resident(std::collections::btree_map::Keys<'a, u64, Arc<Record>>),
+    Compact {
+        base: std::iter::Peekable<crate::compact::source::BaseRows<'a>>,
+        overlay: std::iter::Peekable<std::collections::btree_map::Iter<'a, u64, OverlayEntry>>,
+    },
+}
+
+#[cfg(test)]
+impl Iterator for OrderedIds<'_> {
+    type Item = u64;
+
+    fn next(&mut self) -> Option<u64> {
+        let (base, overlay) = match &mut self.0 {
+            OrderedIdsState::Resident(ids) => return ids.next().copied(),
+            OrderedIdsState::Compact { base, overlay } => (base, overlay),
+        };
+        loop {
+            let base_id = base.peek().map(|row| row.id);
+            let overlay_id = overlay.peek().map(|(id, _)| **id);
+            match (base_id, overlay_id) {
+                (None, None) => return None,
+                (Some(id), None) => {
+                    base.next();
+                    return Some(id);
+                }
+                (Some(id), Some(overlay_id)) if id < overlay_id => {
+                    base.next();
+                    return Some(id);
+                }
+                (base_id, Some(overlay_id)) => {
+                    // The newest entry decides this ID, whether or not the base holds it.
+                    let (_, entry) = overlay.next().expect("peeked overlay entry");
+                    if base_id == Some(overlay_id) {
+                        base.next();
+                    }
+                    if matches!(entry, OverlayEntry::Put { .. }) {
+                        return Some(overlay_id);
+                    }
+                }
+            }
+        }
+    }
+}
+
 // Test-gated derived-index access: one clone pins the base and overlay root.
 #[cfg(test)]
 impl CollectionRecords {
@@ -369,6 +427,47 @@ impl CollectionRecords {
                 ids.into_iter().collect()
             }
         }
+    }
+
+    /// Overlay entries in ascending ID order, without allocating: every ID
+    /// whose effective state may differ from the pinned base. The overlay is a
+    /// state difference since the base's own floor, not a commit history: an
+    /// ID put and deleted again after an image that never held it leaves a
+    /// tombstone while the committing handle is open and no entry after a
+    /// reopen. A resident collection has no base, so it lists nothing.
+    pub(crate) fn affected_ids(&self) -> impl Iterator<Item = (u64, Affected)> + '_ {
+        let entries = match self {
+            Self::Resident(_) => None,
+            Self::Compact { overlay, .. } => Some(overlay.0.iter()),
+        };
+        entries.into_iter().flatten().map(|(&id, entry)| {
+            let affected = match entry {
+                OverlayEntry::Put {
+                    revision, expiry, ..
+                } => Affected::Put {
+                    revision: *revision,
+                    expiry: *expiry,
+                },
+                OverlayEntry::Delete { revision } => Affected::Delete {
+                    revision: *revision,
+                },
+            };
+            (id, affected)
+        })
+    }
+
+    /// Effective IDs in ascending order, without materializing them: a merge
+    /// of `CompactView::base_rows` and `affected_ids`. Deadlines are not
+    /// applied (like `effective_ids`), it reads no block and creates no cell.
+    /// A tombstone for an ID the base never held lists nothing.
+    pub(crate) fn ordered_ids(&self) -> OrderedIds<'_> {
+        OrderedIds(match self {
+            Self::Resident(records) => OrderedIdsState::Resident(records.0.keys()),
+            Self::Compact { view, overlay } => OrderedIdsState::Compact {
+                base: view.base_rows().peekable(),
+                overlay: overlay.0.iter().peekable(),
+            },
+        })
     }
 
     pub(crate) fn effective_vector<'a>(
