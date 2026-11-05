@@ -118,7 +118,7 @@ async fn changes(
                 None => FeedCursor::beginning(),
             };
             let mut batch = db.changes_after(&cursor, limit).map_err(ApiError::from)?;
-            batch.changes.retain(|change| {
+            batch.changes.retain_mut(|change| {
                 let graph_visible = graph::feed_graph(&change.kind).is_none_or(|name| {
                     graph::feed_visible(&role, name)
                         && bindings.reserved().raw_allowed(
@@ -132,7 +132,11 @@ async fn changes(
                     super::reserved::Resource::Collection,
                     &change.collection,
                 );
-                graph_visible && collection_visible
+                graph_visible
+                    && collection_visible
+                    && bindings
+                        .reserved()
+                        .retain_change_operations(&mut change.kind)
             });
             Ok::<_, ApiError>(batch)
         })

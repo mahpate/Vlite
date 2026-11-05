@@ -665,6 +665,17 @@ async fn retrieve(
     let (output, _) = guarded_read(
         &service,
         move |db| {
+            if let admin::Role::Scoped(grant) = &role
+                && grant.allows(credentials::Op::Read)
+                && grant.names(&request.retrieve.pivot.collection)
+                && !bindings.reserved().raw_allowed(
+                    super::raw_credential(&role),
+                    super::reserved::Resource::Collection,
+                    &request.retrieve.pivot.collection,
+                )
+            {
+                return Err(Error::CollectionNotFound.into());
+            }
             records_readable(db, &role, &request.retrieve.pivot.collection)?;
             let options = ReadOptions {
                 limits: request.limits,
@@ -672,30 +683,13 @@ async fn retrieve(
                 cancel: None,
             };
             let found = name.read(db)?;
-            for collection in std::iter::once(request.retrieve.pivot.collection.as_str())
-                .chain(
-                    request
-                        .retrieve
-                        .evidence
-                        .collections
-                        .iter()
-                        .map(String::as_str),
-                )
-                .filter(|_| !bindings.is_empty())
-            {
-                if matches!(&role, admin::Role::Scoped(grant) if !grant.names(collection)) {
-                    return Err(forbidden_scope());
-                }
-                if !bindings.reserved().raw_allowed(
+            let retrieval = found.retrieve_visible(&request.retrieve, &options, &|collection| {
+                bindings.reserved().raw_allowed(
                     super::raw_credential(&role),
                     super::reserved::Resource::Collection,
                     collection,
-                ) {
-                    return Err(Error::CollectionNotFound.into());
-                }
-                db.resolve(collection)?;
-            }
-            let retrieval = found.retrieve(&request.retrieve, &options)?;
+                )
+            })?;
             let mut readable: BTreeMap<&str, bool> = BTreeMap::new();
             let mut redacted: BTreeMap<&str, u64> = BTreeMap::new();
             let mut evidence = Vec::with_capacity(retrieval.evidence.len());
@@ -811,7 +805,13 @@ async fn batch(
     let owner = service.clone();
     let result = guarded_write(&service, move |db| {
         authorize_records(&owner, db, &role, &name, &ops)?;
-        Ok(name.write(db)?.write_batch(&ops)?)
+        Ok(name.write(db)?.write_batch_visible(&ops, &|collection| {
+            owner.memory_bindings.reserved().raw_allowed(
+                super::raw_credential(&role),
+                super::reserved::Resource::Collection,
+                collection,
+            )
+        })?)
     })
     .await?;
     batch_output(&graph, &result).map(Json)
@@ -869,15 +869,14 @@ fn authorize_records(
                 credential,
                 super::reserved::Resource::Collection,
                 collection,
-            ) {
+            ) && (matches!(role, admin::Role::Scoped(_))
+                || matches!(op, GraphOp::DeleteNode { .. }))
+            {
                 return Err(if matches!(op, GraphOp::DeleteNode { .. }) {
                     forbidden_scope()
                 } else {
                     Error::CollectionNotFound.into()
                 });
-            }
-            if !service.memory_bindings.is_empty() && !matches!(op, GraphOp::DeleteNode { .. }) {
-                db.resolve(collection)?;
             }
         }
         if let admin::Role::Scoped(grant) = role {
@@ -1905,6 +1904,26 @@ fn merge_openapi(base: &str, fragment: &str) -> Option<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn hidden_graph_write_preserves_read_only_error_priority() {
+        let mut db = Database::create_in_memory(2, crate::CreateOptions::default()).unwrap();
+        db.create_graph("notes_graph").unwrap();
+        db.read_only = true;
+        let hidden = ScopedGraph {
+            name: "notes_graph".into(),
+            hidden: true,
+        };
+        let missing = ScopedGraph {
+            name: "absent_graph".into(),
+            hidden: false,
+        };
+        let response = |error: ApiError| (error.status, error.code, error.message);
+        let hidden = response(hidden.write(&mut db).err().unwrap());
+        let missing = response(missing.write(&mut db).err().unwrap());
+        assert_eq!(hidden, missing);
+        assert_eq!(hidden, response(Error::ReadOnly.into()));
+    }
 
     #[test]
     fn merged_openapi_parses_and_keeps_base_lines() {

@@ -174,6 +174,8 @@ exact startup scope grants plus `graph_read`/`graph_write` and the required
 evidence-collection read/search/write permissions. Mutation dry runs still need
 write grants. Memory grants never confer raw graph or collection access.
 Unknown and ungranted bindings return the same 403 before existence lookup.
+Provision raw-holder credentials with `collections:["*"]`; named reserved
+collections return the same 404 as missing collections during credential creation.
 
 Requests are limited to 8 MiB; REST responses have no serving size cap.
 Mutations require a body-only `idempotency_key`. A retained matching retry

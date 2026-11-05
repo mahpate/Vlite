@@ -429,6 +429,16 @@ impl GraphMut<'_> {
         self.db.write_graph_batch(self.id, ops)
     }
 
+    #[cfg(feature = "server")]
+    pub(crate) fn write_batch_visible(
+        &mut self,
+        ops: &[GraphOp],
+        visible: &dyn Fn(&str) -> bool,
+    ) -> Result<GraphBatchResult> {
+        self.db
+            .write_graph_batch_visible_at(self.id, ops, None, visible)
+    }
+
     pub(crate) fn write_batch_at(
         &mut self,
         ops: &[GraphOp],
@@ -801,7 +811,13 @@ impl Database {
     }
 
     /// Resolves names and converts and validates the inputs of one operation.
-    fn plan_input(&self, op: &GraphOp) -> Result<Planned> {
+    fn plan_input(&self, op: &GraphOp, visible: &dyn Fn(&str) -> bool) -> Result<Planned> {
+        let resolve = |name: &str| {
+            if !visible(name) {
+                return Err(Error::CollectionNotFound);
+            }
+            self.resolve(name)
+        };
         let mutation = match op {
             GraphOp::CreateNode {
                 key,
@@ -891,18 +907,18 @@ impl Database {
                 record,
             } => GraphMutation::Attach {
                 node: node.clone(),
-                collection: self.resolve(collection)?,
+                collection: resolve(collection)?,
                 record: *record,
             },
             GraphOp::Detach { node, collection } => GraphMutation::Detach {
                 node: node.clone(),
-                collection: self.resolve(collection)?,
+                collection: resolve(collection)?,
             },
             GraphOp::Vector {
                 collection,
                 mutation,
             } => {
-                let collection = self.resolve(collection)?;
+                let collection = resolve(collection)?;
                 self.validate_batch(collection, std::slice::from_ref(mutation))?;
                 let mut mutation = mutation.clone();
                 if let Mutation::Put { vector, .. } | Mutation::PutWithMetadata { vector, .. } =
@@ -945,6 +961,16 @@ impl Database {
         ops: &[GraphOp],
         now_ms: Option<u64>,
     ) -> Result<GraphBatchResult> {
+        self.write_graph_batch_visible_at(graph_id, ops, now_ms, &|_| true)
+    }
+
+    fn write_graph_batch_visible_at(
+        &mut self,
+        graph_id: GraphId,
+        ops: &[GraphOp],
+        now_ms: Option<u64>,
+        visible: &dyn Fn(&str) -> bool,
+    ) -> Result<GraphBatchResult> {
         self.graphs()?;
         if self.read_only {
             return Err(Error::ReadOnly);
@@ -969,7 +995,7 @@ impl Database {
         }
         let planned = ops
             .iter()
-            .map(|op| self.plan_input(op))
+            .map(|op| self.plan_input(op, visible))
             .collect::<Result<Vec<_>>>()?;
         self.commit_planned(graph_id, planned, outcomes, now_ms)
     }

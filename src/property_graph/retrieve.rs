@@ -302,11 +302,31 @@ impl GraphRef<'_> {
         self.retrieve_with_clock(request, options, &read::clock())
     }
 
+    #[cfg(feature = "server")]
+    pub(crate) fn retrieve_visible(
+        &self,
+        request: &Retrieve,
+        options: &ReadOptions<'_>,
+        visible: &dyn Fn(&str) -> bool,
+    ) -> Result<Retrieval> {
+        self.retrieve_with_visibility(request, options, &read::clock(), visible)
+    }
+
     fn retrieve_with_clock(
         &self,
         request: &Retrieve,
         options: &ReadOptions<'_>,
         clock: &dyn Fn() -> u64,
+    ) -> Result<Retrieval> {
+        self.retrieve_with_visibility(request, options, clock, &|_| true)
+    }
+
+    fn retrieve_with_visibility(
+        &self,
+        request: &Retrieve,
+        options: &ReadOptions<'_>,
+        clock: &dyn Fn() -> u64,
+        visible: &dyn Fn(&str) -> bool,
     ) -> Result<Retrieval> {
         let db = self.db;
         let Retrieve {
@@ -331,10 +351,16 @@ impl GraphRef<'_> {
             evidence.max_items,
             EvidenceSpec::MAX_ITEMS,
         )?;
-        let pivot_collection = db.collection(&pivot.collection)?;
+        let collection = |name: &str| {
+            if !visible(name) {
+                return Err(Error::CollectionNotFound);
+            }
+            db.collection(name)
+        };
+        let pivot_collection = collection(&pivot.collection)?;
         let mut evidence_collections: Vec<(&str, u16)> = Vec::new();
         for name in &evidence.collections {
-            let id = db.collection(name)?.id;
+            let id = collection(name)?.id;
             if evidence_collections.iter().all(|(_, known)| *known != id) {
                 evidence_collections.push((name, id));
             }

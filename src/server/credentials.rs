@@ -731,6 +731,7 @@ async fn create(
         })
         .collect::<Vec<_>>();
     // Resolve names to IDs and capture the lineage under the database lock.
+    let bindings = service.memory_bindings.clone();
     let (lineage, scopes) = service
         .run(move |db| {
             db.ensure_healthy()?;
@@ -739,6 +740,13 @@ async fn create(
             if !all {
                 for name in &names {
                     if scopes.iter().all(|s| &s.name != name) {
+                        if !bindings.reserved().raw_allowed(
+                            None,
+                            super::reserved::Resource::Collection,
+                            name,
+                        ) {
+                            return Err(Error::CollectionNotFound.into());
+                        }
                         scopes.push(Scope {
                             name: name.clone(),
                             id: db.resolve(name)?,

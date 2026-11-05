@@ -925,8 +925,25 @@ async fn poll_changes(
     })?;
     rate_limit(service, &role)?;
     authorize_need(service, &role, Need::Admin, false, false)?;
+    let bindings = service.memory_bindings.clone();
     service
-        .run_read(move |db| Ok(db.changes_after(&cursor, limit)?))
+        .run_read(move |db| {
+            let mut batch = db.changes_after(&cursor, limit)?;
+            batch.changes.retain_mut(|change| {
+                bindings.reserved().raw_allowed(
+                    None,
+                    super::reserved::Resource::Collection,
+                    &change.collection,
+                ) && graph::feed_graph(&change.kind).is_none_or(|name| {
+                    bindings
+                        .reserved()
+                        .raw_allowed(None, super::reserved::Resource::Graph, name)
+                }) && bindings
+                    .reserved()
+                    .retain_change_operations(&mut change.kind)
+            });
+            Ok(batch)
+        })
         .await
 }
 

@@ -1017,5 +1017,505 @@
         "failure": "assertion `left == right` failed: raw//v1/collections deleted reservation"
       }
     ]
+  },
+  "b5_review_hardening_campaign": {
+    "scope": "D1-D5 and T1-T2 approved follow-ups; no new policy or activation",
+    "total": 22,
+    "killed": 22,
+    "survived": 0,
+    "equivalent": 0,
+    "command": "cargo test --locked --offline --features server (--test TARGET | --lib) TEST -- --test-threads=1",
+    "restore_policy": "Every mutated file restored byte-for-byte in finally; SHA-256 verified independently after every run.",
+    "fail_first": [
+      {
+        "finding": "D1",
+        "test": "retrieve_masks_collections_at_their_normal_resolution_stage",
+        "observed": "Scoped missing graph: reserved pivot 409 versus missing pivot 404."
+      },
+      {
+        "finding": "D2",
+        "test": "ordinary_missing_references_and_redaction_do_not_depend_on_bindings",
+        "observed": "Ordinary unreadable evidence returned 403 instead of 200 with redacted evidence."
+      },
+      {
+        "finding": "D2 batch-stage follow-through",
+        "test": "batch_masks_collections_at_their_normal_resolution_stage",
+        "observed": "Admin batch with an earlier invalid vector returned 404 for a reserved later attachment versus 422 for a missing later attachment."
+      },
+      {
+        "finding": "D3",
+        "test": "nested_reserved_changes_are_filtered_from_feed_and_webhooks",
+        "observed": "HTTP feed exposed root and tenant-qualified reserved collection names in nested attached/detached operations."
+      },
+      {
+        "finding": "D4",
+        "test": "credential_creation_masks_reserved_collection_names",
+        "observed": "Reserved named credential scope returned 201 while missing scope returned 404."
+      },
+      {
+        "finding": "T1",
+        "test": "tenant_named_and_sparse_search_use_the_guarded_collection",
+        "observed": "Tenant named search returned root record 111 instead of tenant record 222."
+      },
+      {
+        "finding": "T2",
+        "test": "reserved_graph_and_collection_are_denied_and_lists_filter_them",
+        "observed": "Startup accepted default evidence instead of returning the static invalid-bindings error."
+      }
+    ],
+    "inventory": {
+      "openapi_name_addressed_operations": 38,
+      "removed_case_self_checks": 38
+    },
+    "resolution_audit": [
+      {
+        "site": "src/server.rs:open_inner",
+        "justification": "Tenant-qualifies once; ordinary name grant first, reserved check before db.resolve."
+      },
+      {
+        "site": "src/server/features.rs:search_named/search_sparse",
+        "justification": "T1 fixed: both consume the guarded collection ID, never the unqualified target."
+      },
+      {
+        "site": "src/server/features.rs:query/index/embed",
+        "justification": "Other handlers retain guarded IDs; disk ANN recovers stored name by ID; provider capture/recheck uses CollectionRef IDs."
+      },
+      {
+        "site": "src/server/kv.rs:fetch/save/remove/list",
+        "justification": "Every KV lookup uses tenants::qualify after open_guarded, never an unqualified root name."
+      },
+      {
+        "site": "src/server/collections.rs:drop/settings",
+        "justification": "Both guard the target, then use the same tenant-qualified stored name."
+      },
+      {
+        "site": "src/server/collections.rs:reserve_core",
+        "justification": "Imports refuse any nonempty bindings set; otherwise guarded resolution and tenant-qualified re-resolution address the same identity."
+      },
+      {
+        "site": "src/server/credentials.rs:create",
+        "justification": "D4 fixed: qualify tenant scope, mask reserved named scopes before db.resolve; wildcard provisioning unchanged."
+      },
+      {
+        "site": "src/server/graph.rs:retrieve/cover",
+        "justification": "D1/D2 fixed: scoped pivot masking at cover's resolution stage; evidence masking at core retrieval resolution. Ordinary evidence redaction retained."
+      },
+      {
+        "site": "src/server/graph.rs:authorize_records quota resolution",
+        "justification": "Scoped body-name grant and reserved checks precede cover as ordinary grants require. Unscoped body names are masked at the core plan_input resolve stage; the remaining best-effort resolve only supplies quotas. F7 delete-node attachment refusal remains for every role."
+      },
+      {
+        "site": "src/property_graph/mod.rs:plan_input",
+        "justification": "Server-only visibility callback replaces only reserved-name resolution, at the same stage as missing ordinary collections; embedded and memory writes use the unchanged visible-all wrapper."
+      },
+      {
+        "site": "src/server/grpc.rs:collection handlers",
+        "justification": "All name-based collection lookups use tenants::qualify plus open_qualified. Configured bindings still refuse gRPC startup; change filtering additionally hardened."
+      },
+      {
+        "site": "src/server/memory.rs:validate_resources",
+        "justification": "Trusted startup binding provisioning resolves stored names after binding validation; not a raw request path."
+      },
+      {
+        "site": "src/server/memory/routes.rs:Bound::covers",
+        "justification": "Exact memory binding/scope authorization precedes ID revalidation; deliberately uses the authorized stored evidence name."
+      },
+      {
+        "site": "src/server/admin.rs:collection maintenance",
+        "justification": "All five named maintenance paths use the guarded ID; legacy paths guard only the default collection."
+      },
+      {
+        "site": "src/server/providers/tests/* and memory/tests.rs",
+        "justification": "Direct collection lookups are test fixtures/assertions, not live handler bypasses."
+      }
+    ],
+    "mutants": [
+      {
+        "id": "B5-01",
+        "description": "defer scoped hidden pivot masking until after graph lookup",
+        "file": "src/server/graph.rs",
+        "test": "retrieve_masks_collections_at_their_normal_resolution_stage",
+        "target": "server_memory_reserved_as_missing",
+        "offset_lf": 23897,
+        "before": "&& grant.names(&request.retrieve.pivot.collection)",
+        "after": "&& false && grant.names(&request.retrieve.pivot.collection)",
+        "original_sha256": "128dd8eda15f01e6dfebeb1c50b24c679aadbbeec82e0a69d76f7804fcb91b66",
+        "mutated_sha256": "8a41bf3c285e561612a71653ef7c71ecfc8bc24c1efc272de4f5e6ccb2ad86e3",
+        "restored_sha256": "128dd8eda15f01e6dfebeb1c50b24c679aadbbeec82e0a69d76f7804fcb91b66",
+        "result": "killed",
+        "restored_identically": true,
+        "failure": "thread 'retrieve_masks_collections_at_their_normal_resolution_stage' (93008) panicked at tests\\server_memory_reserved_as_missing.rs:496:17:"
+      },
+      {
+        "id": "B5-02",
+        "description": "omit exact-stage hidden evidence masking",
+        "file": "src/property_graph/retrieve.rs",
+        "test": "retrieve_masks_collections_at_their_normal_resolution_stage",
+        "target": "server_memory_reserved_as_missing",
+        "offset_lf": 11959,
+        "before": "if !visible(name) {",
+        "after": "if false && !visible(name) {",
+        "original_sha256": "2cae6ef27efc0fd947ee9a52abb9ca86f00f60de822d04556f3f1da2a91cff43",
+        "mutated_sha256": "1b41a3e62a0c5b151606523c8c34da23d5ab54a568d37ef5d0ef6e3bd2e3155f",
+        "restored_sha256": "2cae6ef27efc0fd947ee9a52abb9ca86f00f60de822d04556f3f1da2a91cff43",
+        "result": "killed",
+        "restored_identically": true,
+        "failure": "thread 'retrieve_masks_collections_at_their_normal_resolution_stage' (90892) panicked at tests\\server_memory_reserved_as_missing.rs:496:17:"
+      },
+      {
+        "id": "B5-03",
+        "description": "refuse ordinary unreadable evidence whenever bindings exist",
+        "file": "src/server/graph.rs",
+        "test": "ordinary_missing_references_and_redaction_do_not_depend_on_bindings",
+        "target": "server_memory_reserved_as_missing",
+        "offset_lf": 24286,
+        "before": "records_readable(db, &role, &request.retrieve.pivot.collection)?;",
+        "after": "records_readable(db, &role, &request.retrieve.pivot.collection)?;\n            if !bindings.is_empty() {\n                if let admin::Role::Scoped(grant) = &role {\n                    if request.retrieve.evidence.collections.iter().any(|name| !grant.names(name)) {\n                        return Err(forbidden_scope());\n                    }\n                }\n            }",
+        "original_sha256": "128dd8eda15f01e6dfebeb1c50b24c679aadbbeec82e0a69d76f7804fcb91b66",
+        "mutated_sha256": "2e94a35f60f7d6e38ebed9ef09923c173a51bc1b231404a094e78d922d583780",
+        "restored_sha256": "128dd8eda15f01e6dfebeb1c50b24c679aadbbeec82e0a69d76f7804fcb91b66",
+        "result": "killed",
+        "restored_identically": true,
+        "failure": "thread 'ordinary_missing_references_and_redaction_do_not_depend_on_bindings' (101236) panicked at tests\\server_memory_reserved_as_missing.rs:538:9:"
+      },
+      {
+        "id": "B5-04",
+        "description": "pre-resolve ordinary batch collections ahead of operation errors",
+        "file": "src/server/graph.rs",
+        "test": "ordinary_missing_references_and_redaction_do_not_depend_on_bindings",
+        "target": "server_memory_reserved_as_missing",
+        "offset_lf": 30111,
+        "before": "for op in ops {",
+        "after": "if !service.memory_bindings.is_empty() {\n        for op in ops {\n            if let GraphOp::Detach { collection, .. } = op { db.resolve(collection)?; }\n        }\n    }\n    for op in ops {",
+        "original_sha256": "128dd8eda15f01e6dfebeb1c50b24c679aadbbeec82e0a69d76f7804fcb91b66",
+        "mutated_sha256": "54560c24f013b89d8464dce34d832259a13328601084a80a58b70f4df9289323",
+        "restored_sha256": "128dd8eda15f01e6dfebeb1c50b24c679aadbbeec82e0a69d76f7804fcb91b66",
+        "result": "killed",
+        "restored_identically": true,
+        "failure": "thread 'ordinary_missing_references_and_redaction_do_not_depend_on_bindings' (38296) panicked at tests\\server_memory_reserved_as_missing.rs:568:17:"
+      },
+      {
+        "id": "B5-05",
+        "description": "inspect hidden graph node attachments",
+        "file": "src/server/graph.rs",
+        "test": "retrieve_masks_collections_at_their_normal_resolution_stage",
+        "target": "server_memory_reserved_as_missing",
+        "offset_lf": 30675,
+        "before": "if graph.hidden {",
+        "after": "if false && graph.hidden {",
+        "original_sha256": "128dd8eda15f01e6dfebeb1c50b24c679aadbbeec82e0a69d76f7804fcb91b66",
+        "mutated_sha256": "7edd19d5760f963f73d18602efc1e08b5febbde7be5aae7e257cc3bd9a492465",
+        "restored_sha256": "128dd8eda15f01e6dfebeb1c50b24c679aadbbeec82e0a69d76f7804fcb91b66",
+        "result": "killed",
+        "restored_identically": true,
+        "failure": "thread 'retrieve_masks_collections_at_their_normal_resolution_stage' (42960) panicked at tests\\server_memory_reserved_as_missing.rs:457:5:"
+      },
+      {
+        "id": "B5-06",
+        "description": "skip HTTP nested collection filtering",
+        "file": "src/server/features.rs",
+        "test": "nested_reserved_changes_are_filtered_from_feed_and_webhooks",
+        "target": "server_memory_reserved_as_missing",
+        "offset_lf": 5448,
+        "before": "&& bindings\n                        .reserved()\n                        .retain_change_operations(&mut change.kind)",
+        "after": "",
+        "original_sha256": "32e408f41f7f0532861edf879f9c18a3f869d5e666a680b52a8a278132eb8147",
+        "mutated_sha256": "725c13774b8d5d39354785a1f93f236155cf9082f19e03ebdd3b5a08840e1059",
+        "restored_sha256": "32e408f41f7f0532861edf879f9c18a3f869d5e666a680b52a8a278132eb8147",
+        "result": "killed",
+        "restored_identically": true,
+        "failure": "thread 'nested_reserved_changes_are_filtered_from_feed_and_webhooks' (69264) panicked at tests\\server_memory_reserved_as_missing.rs:726:5:"
+      },
+      {
+        "id": "B5-07",
+        "description": "skip webhook nested collection filtering",
+        "file": "src/server/webhooks.rs",
+        "test": "nested_reserved_changes_are_filtered_from_feed_and_webhooks",
+        "target": "server_memory_reserved_as_missing",
+        "offset_lf": 15131,
+        "before": "&& reserved.retain_change_operations(&mut change.kind)",
+        "after": "",
+        "original_sha256": "a40e911b88bc18537364068e4eae8474023a7ec1dbbdc33a3ada96532472d7e9",
+        "mutated_sha256": "a5d74f78a121bc801a175e9d191342cc163a30910005d635b52f1e791f821827",
+        "restored_sha256": "a40e911b88bc18537364068e4eae8474023a7ec1dbbdc33a3ada96532472d7e9",
+        "result": "killed",
+        "restored_identically": true,
+        "failure": "thread 'nested_reserved_changes_are_filtered_from_feed_and_webhooks' (89408) panicked at tests\\server_memory_reserved_as_missing.rs:756:9:"
+      },
+      {
+        "id": "B5-08",
+        "description": "allow reserved attached operations through shared filter",
+        "file": "src/server/reserved.rs",
+        "test": "nested_reserved_changes_are_filtered_from_feed_and_webhooks",
+        "target": "server_memory_reserved_as_missing",
+        "offset_lf": 4432,
+        "before": "self.raw_allowed(None, Resource::Collection, collection)",
+        "after": "matches!(operation, GraphChange::Attached { .. }) || self.raw_allowed(None, Resource::Collection, collection)",
+        "original_sha256": "4f4a3d2b3985d48b2cc6d4e60f6c8482edef2583cb947642e9107c4bd407bfa1",
+        "mutated_sha256": "cf4952b88fcf2d8c1ef4c17ddb9379f8b89ddfff7d367093666d21e37304202e",
+        "restored_sha256": "4f4a3d2b3985d48b2cc6d4e60f6c8482edef2583cb947642e9107c4bd407bfa1",
+        "result": "killed",
+        "restored_identically": true,
+        "failure": "thread 'nested_reserved_changes_are_filtered_from_feed_and_webhooks' (59000) panicked at tests\\server_memory_reserved_as_missing.rs:726:5:"
+      },
+      {
+        "id": "B5-09",
+        "description": "allow reserved detached operations through shared filter",
+        "file": "src/server/reserved.rs",
+        "test": "nested_reserved_changes_are_filtered_from_feed_and_webhooks",
+        "target": "server_memory_reserved_as_missing",
+        "offset_lf": 4432,
+        "before": "self.raw_allowed(None, Resource::Collection, collection)",
+        "after": "matches!(operation, GraphChange::Detached { .. }) || self.raw_allowed(None, Resource::Collection, collection)",
+        "original_sha256": "4f4a3d2b3985d48b2cc6d4e60f6c8482edef2583cb947642e9107c4bd407bfa1",
+        "mutated_sha256": "90734f2993a96d67a5af48fe9c2e239de461c09bf04f80f238306163d51d182d",
+        "restored_sha256": "4f4a3d2b3985d48b2cc6d4e60f6c8482edef2583cb947642e9107c4bd407bfa1",
+        "result": "killed",
+        "restored_identically": true,
+        "failure": "thread 'nested_reserved_changes_are_filtered_from_feed_and_webhooks' (36184) panicked at tests\\server_memory_reserved_as_missing.rs:726:5:"
+      },
+      {
+        "id": "B5-10",
+        "description": "allow empty sanitized graph events",
+        "file": "src/server/reserved.rs",
+        "test": "nested_reserved_changes_are_filtered_from_feed_and_webhooks",
+        "target": "server_memory_reserved_as_missing",
+        "offset_lf": 4562,
+        "before": "return !operations.is_empty();",
+        "after": "return true;",
+        "original_sha256": "4f4a3d2b3985d48b2cc6d4e60f6c8482edef2583cb947642e9107c4bd407bfa1",
+        "mutated_sha256": "74c8c91d5b5a2581dba57929381382afcecaf3a859b2030f480323b2aba2f5cc",
+        "restored_sha256": "4f4a3d2b3985d48b2cc6d4e60f6c8482edef2583cb947642e9107c4bd407bfa1",
+        "result": "killed",
+        "restored_identically": true,
+        "failure": "thread 'nested_reserved_changes_are_filtered_from_feed_and_webhooks' (19696) panicked at tests\\server_memory_reserved_as_missing.rs:731:13:"
+      },
+      {
+        "id": "B5-11",
+        "description": "allow named reserved credential scopes",
+        "file": "src/server/credentials.rs",
+        "test": "credential_creation_masks_reserved_collection_names",
+        "target": "server_memory_reserved_as_missing",
+        "offset_lf": 26827,
+        "before": "if !bindings.reserved().raw_allowed(",
+        "after": "if false && !bindings.reserved().raw_allowed(",
+        "original_sha256": "0b20f7d18e93bd9125cfa99669a529e36fe1eb38d020f3e7d4fe3b479b0bd5c6",
+        "mutated_sha256": "aa8dd8f71aa0de06c390ad4d3ae4d58672799cdf56da34194c97fb69df510474",
+        "restored_sha256": "0b20f7d18e93bd9125cfa99669a529e36fe1eb38d020f3e7d4fe3b479b0bd5c6",
+        "result": "killed",
+        "restored_identically": true,
+        "failure": "thread 'credential_creation_masks_reserved_collection_names' (102648) panicked at tests\\server_memory_reserved_as_missing.rs:797:9:"
+      },
+      {
+        "id": "B5-12",
+        "description": "ignore tenant-qualified reserved credential scopes",
+        "file": "src/server/credentials.rs",
+        "test": "credential_creation_masks_reserved_collection_names",
+        "target": "server_memory_reserved_as_missing",
+        "offset_lf": 26827,
+        "before": "if !bindings.reserved().raw_allowed(",
+        "after": "if !name.starts_with(\"t\") && !bindings.reserved().raw_allowed(",
+        "original_sha256": "0b20f7d18e93bd9125cfa99669a529e36fe1eb38d020f3e7d4fe3b479b0bd5c6",
+        "mutated_sha256": "8e919eab28d559bd90483fc44dc27a949a0b52c15160ca1417371be41d2d3ab6",
+        "restored_sha256": "0b20f7d18e93bd9125cfa99669a529e36fe1eb38d020f3e7d4fe3b479b0bd5c6",
+        "result": "killed",
+        "restored_identically": true,
+        "failure": "thread 'credential_creation_masks_reserved_collection_names' (75900) panicked at tests\\server_memory_reserved_as_missing.rs:797:9:"
+      },
+      {
+        "id": "B5-13",
+        "description": "search_named reads root instead of guarded tenant collection",
+        "file": "src/server/features.rs",
+        "test": "tenant_named_and_sparse_search_use_the_guarded_collection",
+        "target": "server_memory_reserved_as_missing",
+        "offset_lf": 16158,
+        "before": "collection_ref(db, cid)?",
+        "after": "{ let _ = cid; db.collection(target.name())? }",
+        "original_sha256": "32e408f41f7f0532861edf879f9c18a3f869d5e666a680b52a8a278132eb8147",
+        "mutated_sha256": "f8b0745cca4d4a7a40fb3f5e826264c565b25e1fc0078d4aad0fd7a7dafb90b6",
+        "restored_sha256": "32e408f41f7f0532861edf879f9c18a3f869d5e666a680b52a8a278132eb8147",
+        "result": "killed",
+        "restored_identically": true,
+        "failure": "thread 'tenant_named_and_sparse_search_use_the_guarded_collection' (105684) panicked at tests\\server_memory_reserved_as_missing.rs:1317:17:"
+      },
+      {
+        "id": "B5-14",
+        "description": "search_sparse reads root instead of guarded tenant collection",
+        "file": "src/server/features.rs",
+        "test": "tenant_named_and_sparse_search_use_the_guarded_collection",
+        "target": "server_memory_reserved_as_missing",
+        "offset_lf": 17150,
+        "before": "collection_ref(db, cid)?",
+        "after": "{ let _ = cid; db.collection(target.name())? }",
+        "original_sha256": "32e408f41f7f0532861edf879f9c18a3f869d5e666a680b52a8a278132eb8147",
+        "mutated_sha256": "b3271dfaa2419abc1630d25dcaa6d437762170c51ba35b0d98cbb1c5823232cd",
+        "restored_sha256": "32e408f41f7f0532861edf879f9c18a3f869d5e666a680b52a8a278132eb8147",
+        "result": "killed",
+        "restored_identically": true,
+        "failure": "thread 'tenant_named_and_sparse_search_use_the_guarded_collection' (23772) panicked at tests\\server_memory_reserved_as_missing.rs:1317:17:"
+      },
+      {
+        "id": "B5-15",
+        "description": "allow default evidence binding",
+        "file": "src/memory/binding.rs",
+        "test": "default_evidence_is_rejected_for_root_and_tenant_bindings",
+        "target": "lib",
+        "offset_lf": 4664,
+        "before": "name == \"default\" || ",
+        "after": "",
+        "original_sha256": "8309cc0de5a7469becc44c4bac2952fd04b7fd5783ae4c5acf688fcfce317d3a",
+        "mutated_sha256": "4744b8dafa26cd8663af3b475a0a1aa263767e0e7e1624db2e381f97129a3be3",
+        "restored_sha256": "8309cc0de5a7469becc44c4bac2952fd04b7fd5783ae4c5acf688fcfce317d3a",
+        "result": "killed",
+        "restored_identically": true,
+        "failure": "thread 'memory::binding::tests::default_evidence_is_rejected_for_root_and_tenant_bindings' (44280) panicked at src\\memory\\binding\\tests.rs:48:9:"
+      },
+      {
+        "id": "B5-16",
+        "description": "skip occupied collection resident/version validations",
+        "file": "src/lib.rs",
+        "test": "hidden_create_uses_the_ordinary_occupied_validation_order",
+        "target": "lib",
+        "offset_lf": 104288,
+        "before": "self.ensure_all_resident()?;",
+        "after": "if occupied { return Err(Error::CollectionExists); }\n        self.ensure_all_resident()?;",
+        "original_sha256": "950b46172a540902fb875a64e87600e1101ae303cc111a4a80ce01069433ed07",
+        "mutated_sha256": "bf11fa6a2121227075c68c7e49952145899cc3d8fa8d20342f3ec36cfa85ad80",
+        "restored_sha256": "950b46172a540902fb875a64e87600e1101ae303cc111a4a80ce01069433ed07",
+        "result": "killed",
+        "restored_identically": true,
+        "failure": "thread 'server::collections::tests::hidden_create_uses_the_ordinary_occupied_validation_order' (87232) panicked at src\\server\\collections.rs:355:13:"
+      },
+      {
+        "id": "B5-17",
+        "description": "pivot masking precedes ordinary name grants",
+        "file": "src/server/graph.rs",
+        "test": "body_named_reserved_evidence_matches_missing_with_grants_first",
+        "target": "server_memory_reserved_as_missing",
+        "offset_lf": 23897,
+        "before": "&& grant.names(&request.retrieve.pivot.collection)",
+        "after": "",
+        "original_sha256": "128dd8eda15f01e6dfebeb1c50b24c679aadbbeec82e0a69d76f7804fcb91b66",
+        "mutated_sha256": "f40831624bb8695e8deb8c1cb47c817424c6454ed88ce62a3b5eff42d8e9ecf4",
+        "restored_sha256": "128dd8eda15f01e6dfebeb1c50b24c679aadbbeec82e0a69d76f7804fcb91b66",
+        "result": "killed",
+        "restored_identically": true,
+        "failure": "thread 'body_named_reserved_evidence_matches_missing_with_grants_first' (54464) panicked at tests\\server_memory_reserved_as_missing.rs:1104:17:"
+      },
+      {
+        "id": "B5-18",
+        "description": "body collections skip grant-first check",
+        "file": "src/server/graph.rs",
+        "test": "body_named_reserved_evidence_matches_missing_with_grants_first",
+        "target": "server_memory_reserved_as_missing",
+        "offset_lf": 30949,
+        "before": "&& !collections.is_empty()",
+        "after": "&& false && !collections.is_empty()",
+        "original_sha256": "128dd8eda15f01e6dfebeb1c50b24c679aadbbeec82e0a69d76f7804fcb91b66",
+        "mutated_sha256": "b4f932c2545b63419c0a9eede999326c594d9081049789e572004e7811ea5d82",
+        "restored_sha256": "128dd8eda15f01e6dfebeb1c50b24c679aadbbeec82e0a69d76f7804fcb91b66",
+        "result": "killed",
+        "restored_identically": true,
+        "failure": "thread 'body_named_reserved_evidence_matches_missing_with_grants_first' (56732) panicked at tests\\server_memory_reserved_as_missing.rs:1104:17:"
+      },
+      {
+        "id": "B5-19",
+        "description": "hidden writes ignore read-only priority",
+        "file": "src/server/graph.rs",
+        "test": "hidden_graph_write_preserves_read_only_error_priority",
+        "target": "lib",
+        "offset_lf": 13148,
+        "before": "if db.read_only {",
+        "after": "if false && db.read_only {",
+        "original_sha256": "128dd8eda15f01e6dfebeb1c50b24c679aadbbeec82e0a69d76f7804fcb91b66",
+        "mutated_sha256": "63adc76b1efc1c44cb8ce715f4dba3b62e31356b2b9fcd4b28fae61bd29b3fc7",
+        "restored_sha256": "128dd8eda15f01e6dfebeb1c50b24c679aadbbeec82e0a69d76f7804fcb91b66",
+        "result": "killed",
+        "restored_identically": true,
+        "failure": "thread 'server::graph::tests::hidden_graph_write_preserves_read_only_error_priority' (73756) panicked at src\\server\\graph.rs:1924:9:"
+      },
+      {
+        "id": "B5-20",
+        "description": "webhook reserved graph filter bypassed",
+        "file": "src/server/webhooks.rs",
+        "test": "webhook_dispatcher_never_delivers_reserved_resource_events",
+        "target": "server_memory_guards",
+        "offset_lf": 15036,
+        "before": "reserved.raw_allowed(None, super::reserved::Resource::Graph, graph)",
+        "after": "{ let _ = graph; true }",
+        "original_sha256": "a40e911b88bc18537364068e4eae8474023a7ec1dbbdc33a3ada96532472d7e9",
+        "mutated_sha256": "f91755f4fd9bd246e0b77639b2046b18e1034e761c3f830cf0445bdc5abedc5d",
+        "restored_sha256": "a40e911b88bc18537364068e4eae8474023a7ec1dbbdc33a3ada96532472d7e9",
+        "result": "killed",
+        "restored_identically": true,
+        "failure": "thread 'webhook_dispatcher_never_delivers_reserved_resource_events' (64788) panicked at tests\\server_memory_guards.rs:1762:27:"
+      },
+      {
+        "id": "B5-21",
+        "description": "omit core-stage graph batch collection masking",
+        "file": "src/property_graph/mod.rs",
+        "test": "batch_masks_collections_at_their_normal_resolution_stage",
+        "target": "server_memory_reserved_as_missing",
+        "offset_lf": 35010,
+        "before": "self.plan_input(op, visible)",
+        "after": "self.plan_input(op, &|_| true)",
+        "original_sha256": "8a17d963f829353149bf726e7e2a47fe05830db88f44c468b40edc3b88e5eb51",
+        "mutated_sha256": "60b86ae0817a46cdb85a83da0166dc6c29545b0a55f3ab9278e24f6eb5cf751a",
+        "restored_sha256": "8a17d963f829353149bf726e7e2a47fe05830db88f44c468b40edc3b88e5eb51",
+        "result": "killed",
+        "restored_identically": true,
+        "failure": "thread 'batch_masks_collections_at_their_normal_resolution_stage' (90472) panicked at tests\\server_memory_reserved_as_missing.rs:614:21:"
+      },
+      {
+        "id": "B5-22",
+        "description": "eagerly mask unscoped batch references before normal errors",
+        "file": "src/server/graph.rs",
+        "test": "batch_masks_collections_at_their_normal_resolution_stage",
+        "target": "server_memory_reserved_as_missing",
+        "offset_lf": 31505,
+        "before": "matches!(role, admin::Role::Scoped(_))",
+        "after": "true",
+        "original_sha256": "128dd8eda15f01e6dfebeb1c50b24c679aadbbeec82e0a69d76f7804fcb91b66",
+        "mutated_sha256": "940b8617fad50de1d75b57267066a7594330c44739debf40b87504fad3dc9747",
+        "restored_sha256": "128dd8eda15f01e6dfebeb1c50b24c679aadbbeec82e0a69d76f7804fcb91b66",
+        "result": "killed",
+        "restored_identically": true,
+        "failure": "thread 'batch_masks_collections_at_their_normal_resolution_stage' (85740) panicked at tests\\server_memory_reserved_as_missing.rs:614:21:"
+      }
+    ],
+    "gates": {
+      "format": "cargo fmt --all; cargo fmt --all -- --check: passed",
+      "strict_clippy": "cargo clippy --locked --offline --workspace --all-targets --all-features -- -D warnings: passed",
+      "integration_features": "server,grpc,tools,mcp-proxy",
+      "integration": {
+        "passed": 134,
+        "ignored": 0,
+        "failed": 0
+      },
+      "library": {
+        "server--": {
+          "passed": 204,
+          "ignored": 2,
+          "failed": 0
+        },
+        "memory--binding--": {
+          "passed": 16,
+          "ignored": 0,
+          "failed": 0
+        },
+        "property_graph--retrieve--": {
+          "passed": 2,
+          "ignored": 0,
+          "failed": 0
+        },
+        "property_graph--tests--": {
+          "passed": 15,
+          "ignored": 0,
+          "failed": 0
+        }
+      },
+      "api_reference": "893 public items documented; passed",
+      "api_route_inventory": "10 tests passed"
+    }
   }
 }

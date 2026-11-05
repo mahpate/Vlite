@@ -111,6 +111,11 @@ fn fixture_with_bindings(enabled: bool) -> Fixture {
         json!({"version":"memory-bindings-v1","bindings":bindings}).to_string(),
     )
     .unwrap();
+    std::fs::write(
+        directory.path().join("webhooks.cursor"),
+        db.feed_cursor().unwrap().to_token(),
+    )
+    .unwrap();
     let app = configured_admin_router(
         Service::new(db),
         ServerOptions {
@@ -295,6 +300,11 @@ const CASES: &[(&str, &str, &str)] = &[
     (
         "POST",
         "/v1/graphs/$g/batch",
+        r#"{"ops":[{"op":"delete_node","key":"a"}]}"#,
+    ),
+    (
+        "POST",
+        "/v1/graphs/$g/batch",
         r#"{"ops":[{"op":"create_node","key":"n"}]}"#,
     ),
     ("POST", "/v1/graphs/$g/batch", "{}"),
@@ -420,6 +430,384 @@ async fn add_sessions(fixture: &mut Fixture) {
                 .to_owned();
             fixture.tokens.push((role, cookie, tenant));
         }
+    }
+}
+
+#[tokio::test]
+async fn retrieve_masks_collections_at_their_normal_resolution_stage() {
+    let mut fixture = fixture();
+    let raw = &fixture
+        .tokens
+        .iter()
+        .find(|(actor, _, _)| *actor == "raw")
+        .unwrap()
+        .1;
+    assert_eq!(request(&fixture.app, raw, "POST", "/v1/graphs/notes_graph/batch",
+        r#"{"ops":[{"op":"create_node","key":"a"},{"op":"put_vector","collection":"notes_ev","id":"1","vector":[0,1]},{"op":"attach","node":"a","collection":"notes_ev","record":"1"}]}"#).await.0, 200);
+    let wildcard = &fixture.tokens[0].1;
+    let deletion = r#"{"ops":[{"op":"delete_node","key":"a"}]}"#;
+    let hidden = request(
+        &fixture.app,
+        wildcard,
+        "POST",
+        "/v1/graphs/notes_graph/batch",
+        deletion,
+    )
+    .await;
+    assert_eq!(hidden.0, 409);
+    assert_eq!(
+        hidden,
+        request(
+            &fixture.app,
+            wildcard,
+            "POST",
+            "/v1/graphs/absent_graph/batch",
+            deletion
+        )
+        .await
+    );
+    fixture.tokens.extend([
+        ("admin", ADMIN.into(), false),
+        ("read_only", READ_ONLY.into(), false),
+    ]);
+    add_sessions(&mut fixture).await;
+    for (actor, token, tenant) in &fixture.tokens {
+        if matches!(*actor, "raw" | "tenant_raw" | "memory_only") {
+            continue;
+        }
+        let prefix = if *tenant {
+            format!("t{TENANT}__")
+        } else {
+            String::new()
+        };
+        for graph in ["absent_graph", "notes_graph", "ordinary_graph"] {
+            for evidence in [false, true] {
+                let body = |collection: &str| {
+                    if evidence {
+                    json!({"pivot":{"collection":format!("{prefix}ordinary"),"vector":[0,1],"k":1},
+                        "evidence":{"collections":[format!("{prefix}{collection}")]}})
+                } else {
+                    json!({"pivot":{"collection":format!("{prefix}{collection}"),"vector":[0,1],"k":1}})
+                }.to_string()
+                };
+                let path = format!("/v1/graphs/{graph}/retrieve");
+                let reserved = request(&fixture.app, token, "POST", &path, &body("notes_ev")).await;
+                let missing = request(&fixture.app, token, "POST", &path, &body("absent_ev")).await;
+                assert_eq!(reserved, missing, "{actor}/{graph}/evidence={evidence}");
+            }
+        }
+    }
+}
+
+#[tokio::test]
+async fn ordinary_missing_references_and_redaction_do_not_depend_on_bindings() {
+    let bound = fixture();
+    let unbound = fixture_with_bindings(false);
+    for fixture in [&bound, &unbound] {
+        assert_eq!(
+            request(
+                &fixture.app,
+                ADMIN,
+                "POST",
+                "/v1/collections",
+                r#"{"name":"secret","dimensions":2}"#
+            )
+            .await
+            .0,
+            201
+        );
+        assert_eq!(request(&fixture.app, ADMIN, "POST", "/v1/graphs/ordinary_graph/batch",
+            r#"{"ops":[{"op":"create_node","key":"n"},{"op":"put_vector","collection":"ordinary","id":"1","vector":[0,1]},{"op":"put_vector","collection":"secret","id":"1","vector":[0,1]},{"op":"attach","node":"n","collection":"ordinary","record":"1"},{"op":"attach","node":"n","collection":"secret","record":"1"}]}"#).await.0, 200);
+    }
+    let scoped = &bound
+        .tokens
+        .iter()
+        .find(|(actor, _, _)| *actor == "memory_only")
+        .unwrap()
+        .1;
+    let body = r#"{"pivot":{"collection":"ordinary","vector":[0,1],"k":1},"evidence":{"collections":["secret"]}}"#;
+    for fixture in [&bound, &unbound] {
+        let response = request(
+            &fixture.app,
+            scoped,
+            "POST",
+            "/v1/graphs/ordinary_graph/retrieve",
+            body,
+        )
+        .await;
+        assert_eq!(response.0, 200, "{response:?}");
+        let value: Value = serde_json::from_slice(&response.2).unwrap();
+        assert_eq!(
+            value["redacted"],
+            json!({"count":1,"collections":["secret"]})
+        );
+        assert_eq!(value["evidence"], json!([]));
+    }
+    for (actor, token, _) in
+        bound
+            .tokens
+            .iter()
+            .chain(std::iter::once(&("admin", ADMIN.into(), false)))
+    {
+        for graph in ["ordinary_graph", "absent_graph"] {
+            for body in [
+                r#"{"pivot":{"collection":"absent_ev","vector":[0,1],"k":1}}"#,
+                r#"{"pivot":{"collection":"ordinary","vector":[0,1],"k":1},"evidence":{"collections":["absent_ev"]}}"#,
+                r#"{"ops":[{"op":"attach","node":"missing","collection":"absent_ev","record":"1"}]}"#,
+                r#"{"ops":[{"op":"create_node","key":""},{"op":"detach","node":"missing","collection":"absent_ev"}]}"#,
+                r#"{"ops":[{"op":"put_vector","collection":"ordinary","id":"7","vector":[0]},{"op":"detach","node":"missing","collection":"absent_ev"}]}"#,
+            ] {
+                let path = format!(
+                    "/v1/graphs/{graph}/{}",
+                    if body.contains("\"ops\"") {
+                        "batch"
+                    } else {
+                        "retrieve"
+                    }
+                );
+                assert_eq!(
+                    request(&bound.app, token, "POST", &path, body).await,
+                    request(&unbound.app, token, "POST", &path, body).await,
+                    "{actor}/{path}/{body}"
+                );
+            }
+        }
+    }
+}
+
+#[tokio::test]
+async fn batch_masks_collections_at_their_normal_resolution_stage() {
+    let mut fixture = fixture();
+    fixture.tokens.push(("admin", ADMIN.into(), false));
+    add_sessions(&mut fixture).await;
+    for (actor, token, tenant) in &fixture.tokens {
+        if matches!(*actor, "raw" | "tenant_raw") {
+            continue;
+        }
+        let prefix = if *tenant {
+            format!("t{TENANT}__")
+        } else {
+            String::new()
+        };
+        for graph in ["ordinary_graph", "absent_graph", "notes_graph"] {
+            for operation in ["attach", "detach", "put_vector"] {
+                for invalid_first in [false, true] {
+                    let body = |name| {
+                        let collection = format!("{prefix}{name}");
+                        let op = match operation {
+                            "attach" => {
+                                json!({"op":"attach","node":"n","collection":collection,"record":"1"})
+                            }
+                            "detach" => json!({"op":"detach","node":"n","collection":collection}),
+                            _ => {
+                                json!({"op":"put_vector","collection":collection,"id":"1","vector":[0,1]})
+                            }
+                        };
+                        let mut ops = Vec::new();
+                        if invalid_first {
+                            ops.push(json!({"op":"put_vector","collection":format!("{prefix}ordinary"),"id":"7","vector":[0]}));
+                        }
+                        ops.push(op);
+                        json!({"ops":ops}).to_string()
+                    };
+                    let path = format!("/v1/graphs/{graph}/batch");
+                    assert_eq!(
+                        request(&fixture.app, token, "POST", &path, &body("notes_ev")).await,
+                        request(&fixture.app, token, "POST", &path, &body("absent_ev")).await,
+                        "{actor}/{graph}/{operation}/invalid_first={invalid_first}"
+                    );
+                }
+            }
+        }
+    }
+}
+
+#[tokio::test]
+async fn nested_reserved_changes_are_filtered_from_feed_and_webhooks() {
+    let fixture = fixture();
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let endpoint = format!("http://{}/hook", listener.local_addr().unwrap());
+    let (sender, mut receiver) = tokio::sync::mpsc::unbounded_channel::<Value>();
+    let app = Router::new().route(
+        "/hook",
+        axum::routing::post(move |axum::Json(value): axum::Json<Value>| {
+            let sender = sender.clone();
+            async move {
+                sender.send(value).unwrap();
+                axum::http::StatusCode::NO_CONTENT
+            }
+        }),
+    );
+    let listener_task = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+    let subscription = json!({"url":endpoint,"secret":"fake-secret-test-only"});
+    assert_eq!(
+        request(
+            &fixture.app,
+            ADMIN,
+            "POST",
+            "/v1/admin/webhooks",
+            &subscription.to_string()
+        )
+        .await
+        .0,
+        201
+    );
+    let before = request(&fixture.app, ADMIN, "GET", "/v1/changes?limit=1000", "").await;
+    let before: Value = serde_json::from_slice(&before.2).unwrap();
+    for (actor, _, tenant) in fixture
+        .tokens
+        .iter()
+        .filter(|(actor, _, _)| matches!(*actor, "raw" | "tenant_raw"))
+    {
+        let raw = &fixture
+            .tokens
+            .iter()
+            .find(|(name, _, _)| name == actor)
+            .unwrap()
+            .1;
+        let prefix = if *tenant {
+            format!("t{TENANT}__")
+        } else {
+            String::new()
+        };
+        let ops = json!({"ops":[{"op":"create_node","key":"hidden_ref"},
+            {"op":"put_vector","collection":format!("{prefix}notes_ev"),"id":"17","vector":[0,1]},
+            {"op":"attach","node":"hidden_ref","collection":format!("{prefix}notes_ev"),"record":"17"}]});
+        assert_eq!(
+            request(
+                &fixture.app,
+                raw,
+                "POST",
+                "/v1/graphs/ordinary_graph/batch",
+                &ops.to_string()
+            )
+            .await
+            .0,
+            200
+        );
+        for op in ["detach", "attach"] {
+            let ops = json!({"ops":[{"op":op,"node":"hidden_ref","collection":format!("{prefix}notes_ev"),"record":"17"}]});
+            let ops = if op == "detach" {
+                json!({"ops":[{"op":"detach","node":"hidden_ref","collection":format!("{prefix}notes_ev")}]})
+            } else {
+                ops
+            };
+            assert_eq!(
+                request(
+                    &fixture.app,
+                    raw,
+                    "POST",
+                    "/v1/graphs/ordinary_graph/batch",
+                    &ops.to_string()
+                )
+                .await
+                .0,
+                200
+            );
+        }
+    }
+    let after = request(
+        &fixture.app,
+        ADMIN,
+        "GET",
+        &format!(
+            "/v1/changes?limit=1000&cursor={}",
+            before["next_cursor"].as_str().unwrap()
+        ),
+        "",
+    )
+    .await;
+    assert_eq!(after.0, 200);
+    let after: Value = serde_json::from_slice(&after.2).unwrap();
+    assert_ne!(before["next_cursor"], after["next_cursor"]);
+    let cursor =
+        vlite::changes::FeedCursor::from_token(after["next_cursor"].as_str().unwrap()).unwrap();
+    assert_eq!(cursor.sequence.to_string(), after["head"].as_str().unwrap());
+    assert!(!after.to_string().contains("notes_ev"), "{after}");
+    let mut visible_graph_batches = 0;
+    for event in after["changes"].as_array().unwrap() {
+        if event["change"]["type"] == "graph_batch" {
+            visible_graph_batches += 1;
+            assert!(!event["change"]["operations"].as_array().unwrap().is_empty());
+        }
+    }
+    assert_eq!(visible_graph_batches, 2, "{after}");
+    assert_eq!(
+        request(
+            &fixture.app,
+            ADMIN,
+            "PUT",
+            "/v1/collections/ordinary/vectors/999",
+            r#"{"vector":[0,1]}"#
+        )
+        .await
+        .0,
+        204
+    );
+    let until = tokio::time::Instant::now() + std::time::Duration::from_secs(15);
+    let mut root_delivered = false;
+    let mut tenant_delivered = false;
+    loop {
+        let event = tokio::time::timeout_at(until, receiver.recv())
+            .await
+            .unwrap()
+            .unwrap();
+        let text = event.to_string();
+        assert!(!text.contains("notes_ev"), "{event}");
+        root_delivered |= text.contains("\"ordinary_graph\"");
+        tenant_delivered |= text.contains(&format!("\"t{TENANT}__ordinary_graph\""));
+        if text.contains("\"999\"") {
+            break;
+        }
+    }
+    assert!(root_delivered && tenant_delivered);
+    listener_task.abort();
+}
+
+#[tokio::test]
+async fn credential_creation_masks_reserved_collection_names() {
+    let fixture = fixture();
+    let expires = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_millis() as u64
+        + 3_600_000;
+    for tenant in [None, Some(TENANT)] {
+        let body = |name| {
+            json!({"name":"fake-probe","collections":[name],"operations":["read"],
+            "tenant_id":tenant,"expires_unix_ms":expires})
+            .to_string()
+        };
+        let reserved = request(
+            &fixture.app,
+            ADMIN,
+            "POST",
+            "/v1/admin/credentials",
+            &body("notes_ev"),
+        )
+        .await;
+        let missing = request(
+            &fixture.app,
+            ADMIN,
+            "POST",
+            "/v1/admin/credentials",
+            &body("absent_ev"),
+        )
+        .await;
+        assert_eq!(reserved, missing);
+        assert_eq!(reserved.0, 404);
+        assert_eq!(
+            request(
+                &fixture.app,
+                ADMIN,
+                "POST",
+                "/v1/admin/credentials",
+                &body("*")
+            )
+            .await
+            .0,
+            201
+        );
     }
 }
 
@@ -716,7 +1104,7 @@ async fn body_named_reserved_evidence_matches_missing_with_grants_first() {
                 assert_eq!(reserved, missing, "{actor}/{path}/{template}");
                 assert_eq!(
                     reserved.0,
-                    if *actor == "memory_only"
+                    if (*actor == "memory_only" && !template.contains("\"evidence\""))
                         || (template.contains("\"ops\"")
                             && matches!(*actor, "viewer" | "read_only"))
                     {

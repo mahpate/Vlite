@@ -426,14 +426,14 @@ fn run_dispatcher(dispatcher: Arc<Dispatcher>, service: Service, stopping: Arc<A
             match database.changes_after(&cursor, 1000) {
                 Ok(mut batch) => {
                     let reserved = service.memory_bindings.reserved();
-                    batch.changes.retain(|change| {
+                    batch.changes.retain_mut(|change| {
                         reserved.raw_allowed(
                             None,
                             super::reserved::Resource::Collection,
                             &change.collection,
                         ) && super::graph::feed_graph(&change.kind).is_none_or(|graph| {
                             reserved.raw_allowed(None, super::reserved::Resource::Graph, graph)
-                        })
+                        }) && reserved.retain_change_operations(&mut change.kind)
                     });
                     (cursor, batch)
                 }
