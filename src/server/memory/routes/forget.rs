@@ -53,14 +53,14 @@ pub(super) fn erasure_notice() -> Value {
 
 pub(super) async fn forget(
     State(service): State<Service>,
-    Extension(role): Extension<admin::Role>,
+    caller: Caller,
     Extension(request_id): Extension<RequestId>,
     clock: Option<Extension<Clock>>,
     name: Result<Path<String>, PathRejection>,
     headers: HeaderMap,
     bytes: Result<Bytes, BytesRejection>,
 ) -> Response {
-    let call = Call::new(service, role, request_id, clock, "forget");
+    let call = Call::new(service, caller, request_id, clock, "forget");
     // Forget deletes the owned evidence records of its targets.
     let ops = &[Op::Write];
     write(

@@ -309,20 +309,23 @@ name or request content. It has four forms:
 | `read_only_token` | The read-only token. It cannot perform the operations behind the events below, so none of them shows this form. |
 | The credential ID | A scoped API key. Its 12 characters from `a-z2-7` cannot equal another form. |
 
-These events carry an `actor`: `kv_put`, `kv_delete`, `collection_created`,
-`collection_dropped`, `collection_settings_changed`, `credential_denied`, and
-the account events `user_created`, `user_updated`, `user_deleted`,
-`user_password_reset` and `user_password_changed`. The account that the server
-creates at startup from `VLITE_ADMIN_USERNAME` is recorded with the actor
-`bootstrap`. Other audit events do not carry an `actor`.
+These events carry an `actor`: `kv_put`, `kv_delete`, `memory_request`,
+`collection_created`, `collection_dropped`, `collection_settings_changed`,
+`credential_denied`, and the account events `user_created`, `user_updated`,
+`user_deleted`, `user_password_reset` and `user_password_changed`. The account
+that the server creates at startup from `VLITE_ADMIN_USERNAME` is recorded with
+the actor `bootstrap`. Other audit events do not carry an `actor`.
 
-`kv_put` and `kv_delete` keep their `principal` field as it was: `admin` for
-the bootstrap token and for every super admin, so it cannot tell them apart,
-and the credential ID or `user:<account id>` for a scoped caller. `actor` is
-added beside it. `credential_denied` keeps `credential_id` and adds an `actor`
-that equals it. The collection events already had an `actor`, which read `admin`
-for the bootstrap token and for every super-admin session before 0.7.1; it now
-reads `admin_token` or `user:<account id>`, and the credential ID is as before.
+`kv_put`, `kv_delete` and `memory_request` keep their `principal` field as it
+was: `admin` for the bootstrap token and for every super admin, so it cannot
+tell them apart, and the credential ID or `user:<account id>` for a scoped
+caller. `actor` is added beside it. A memory route serves only a scoped
+credential that a binding grants, so a bootstrap-token or super-admin request to
+one is refused with 403 and audited with its own actor. `credential_denied`
+keeps `credential_id` and adds an `actor` that equals it. The collection events
+already had an `actor`, which read `admin` for the bootstrap token and for every
+super-admin session before 0.7.1; it now reads `admin_token` or
+`user:<account id>`, and the credential ID is as before.
 
 ## Key-value permissions
 

@@ -511,14 +511,15 @@ fn response(output: RecallOutput, binding: &str, parsed: &Parsed) -> Result<Valu
 
 pub(super) async fn recall(
     State(service): State<Service>,
-    Extension(role): Extension<admin::Role>,
+    caller: Caller,
     Extension(request_id): Extension<RequestId>,
     clock: Option<Extension<Clock>>,
     name: Result<Path<String>, PathRejection>,
     headers: HeaderMap,
     bytes: Result<Bytes, BytesRejection>,
 ) -> Response {
-    let mut call = Call::new(service.clone(), role.clone(), request_id, clock, "recall");
+    let role = caller.role.clone();
+    let mut call = Call::new(service.clone(), caller, request_id, clock, "recall");
     let evidence_ops: &[Op] = &[Op::Read, Op::Search];
     let (bound, name) = match resolve(&service, &role, name, WireOperation::Recall, evidence_ops) {
         Ok(found) => found,

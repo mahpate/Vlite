@@ -46,14 +46,14 @@ async fn refused(
 
 pub(super) async fn find_facts(
     State(service): State<Service>,
-    Extension(role): Extension<admin::Role>,
+    caller: Caller,
     Extension(request_id): Extension<RequestId>,
     clock: Option<Extension<Clock>>,
     name: Result<Path<String>, PathRejection>,
     headers: HeaderMap,
     bytes: Result<Bytes, BytesRejection>,
 ) -> Response {
-    let call = Call::new(service, role, request_id, clock, "find_facts");
+    let call = Call::new(service, caller, request_id, clock, "find_facts");
     let ops = &[Op::Read];
     refused(
         call,
@@ -69,14 +69,14 @@ pub(super) async fn find_facts(
 
 pub(super) async fn correct_facts(
     State(service): State<Service>,
-    Extension(role): Extension<admin::Role>,
+    caller: Caller,
     Extension(request_id): Extension<RequestId>,
     clock: Option<Extension<Clock>>,
     name: Result<Path<String>, PathRejection>,
     headers: HeaderMap,
     bytes: Result<Bytes, BytesRejection>,
 ) -> Response {
-    let call = Call::new(service, role, request_id, clock, "correct_facts");
+    let call = Call::new(service, caller, request_id, clock, "correct_facts");
     let ops = &[Op::Write];
     refused(
         call,
@@ -92,14 +92,14 @@ pub(super) async fn correct_facts(
 
 pub(super) async fn get_erasure(
     State(service): State<Service>,
-    Extension(role): Extension<admin::Role>,
+    caller: Caller,
     Extension(request_id): Extension<RequestId>,
     clock: Option<Extension<Clock>>,
     name: Result<Path<String>, PathRejection>,
     headers: HeaderMap,
     bytes: Result<Bytes, BytesRejection>,
 ) -> Response {
-    let call = Call::new(service, role, request_id, clock, "get_erasure");
+    let call = Call::new(service, caller, request_id, clock, "get_erasure");
     // Job status contains no evidence content: graph_read only.
     refused(
         call,
@@ -115,14 +115,14 @@ pub(super) async fn get_erasure(
 
 pub(super) async fn resume_erasure(
     State(service): State<Service>,
-    Extension(role): Extension<admin::Role>,
+    caller: Caller,
     Extension(request_id): Extension<RequestId>,
     clock: Option<Extension<Clock>>,
     name: Result<Path<String>, PathRejection>,
     headers: HeaderMap,
     bytes: Result<Bytes, BytesRejection>,
 ) -> Response {
-    let call = Call::new(service, role, request_id, clock, "resume_erasure");
+    let call = Call::new(service, caller, request_id, clock, "resume_erasure");
     let ops = &[Op::Write];
     refused(
         call,

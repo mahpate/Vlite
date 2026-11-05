@@ -110,14 +110,14 @@ fn output(value: Value, max_references: u64) -> Result<(ConsolidateSummary, Stri
 
 pub(super) async fn consolidate(
     State(service): State<Service>,
-    Extension(role): Extension<admin::Role>,
+    caller: Caller,
     Extension(request_id): Extension<RequestId>,
     clock: Option<Extension<Clock>>,
     name: Result<Path<String>, PathRejection>,
     headers: HeaderMap,
     bytes: Result<Bytes, BytesRejection>,
 ) -> Response {
-    let call = Call::new(service, role, request_id, clock, "consolidate");
+    let call = Call::new(service, caller, request_id, clock, "consolidate");
     // C1 writes the bound graph only; evidence attachment is refused.
     let ops = &[];
     let operation = WireOperation::Consolidate;

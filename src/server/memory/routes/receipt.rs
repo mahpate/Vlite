@@ -9,14 +9,15 @@ use super::*;
 
 pub(super) async fn receipt(
     State(service): State<Service>,
-    Extension(role): Extension<admin::Role>,
+    caller: Caller,
     Extension(request_id): Extension<RequestId>,
     clock: Option<Extension<Clock>>,
     name: Result<Path<String>, PathRejection>,
     headers: HeaderMap,
     bytes: Result<Bytes, BytesRejection>,
 ) -> Response {
-    let mut call = Call::new(service.clone(), role.clone(), request_id, clock, "receipt");
+    let role = caller.role.clone();
+    let mut call = Call::new(service.clone(), caller, request_id, clock, "receipt");
     // Receipts contain no evidence content: graph_read only.
     let (bound, name) = match resolve(&service, &role, name, WireOperation::GetReceipt, &[]) {
         Ok(found) => found,
