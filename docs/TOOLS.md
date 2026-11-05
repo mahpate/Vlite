@@ -123,7 +123,8 @@ quit
 - A command line may hold at most 16 MiB (16,777,216 bytes, excluding the line
   terminator). A longer line fails with `invalid_input: line exceeds 16777216 bytes`
   like any other command error: scripts and non-terminal stdin stop there, as
-  before.
+  before. `vlite-import` applies the same 16 MiB limit to JSONL and COPY lines
+  (see [Supported input schemas](#supported-input-schemas)).
 - Scripts and stdin stop at the first error; earlier writes stay committed.
   The interactive shell prints errors and continues.
 - `browse LIMIT [AFTER_ID]` returns 1–1,000 rows in ascending ID order and
@@ -220,6 +221,17 @@ first 20 syntax errors) or stable engine error codes.
   product at search time. IVF, PQ, HNSW, IDMap, GPU, transforms, endian
   conversion and 32-bit layouts are not supported. See
   [FAISS's serializer](https://github.com/facebookresearch/faiss/blob/main/faiss/impl/index_write.cpp).
+
+**Line limit.** A JSONL or COPY line may hold at most 16 MiB (16,777,216 bytes,
+excluding the line terminator), which fits the largest record the engine
+accepts. A longer line is rejected like any other bad row, as
+`rejected row N: line exceeds 16777216 bytes`, where N is its physical line
+number (blank and COPY header lines count). Reading goes on, so later bad lines
+are reported too (the first 20 rejected rows of any kind), and the import fails
+with `rejected_rows=N; no rows published`. CSV, pgvector, FAISS, Parquet and
+Arrow have no line limit, because their records are not lines: a quoted CSV
+cell can span lines, FAISS is binary, and Parquet and Arrow use their own
+readers. Only the engine's limits apply to them.
 
 ## Search quality and configuration/database comparison
 
