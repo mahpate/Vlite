@@ -85,8 +85,12 @@ and whether an evidence alias is the binding name or the collection name.
 
 Order and gates come from the storage readiness inventory. Defaults stay unchanged and nothing compact becomes active.
 
-1. **R0** baseline and seam freeze from the 0.7.0 tag; reconcile stale progress text.
-2. **B4** finish lane B (18 replay obligations, 10 still open); **A4** record consumers; both before **E4**, the bounded exact scan.
+1. **R0** baseline and seam freeze from the 0.7.0 tag, reconciled progress text and 86 hand mutants of the read seam, of
+   which 26 had no replay evidence on `v0.7.0` and are now killed by 17 added tests: [seam freeze](p3b-seam-freeze.md),
+   [survivor ledgers](p3b-survivor-ledgers.md) and [`tests/compact_seam_mutants.json`](../../../tests/compact_seam_mutants.json).
+2. **B4** finish lane B by cherry-picking `250a98bc` (never by merge): 18 replay obligations, seven of them mutations of
+   the read seam that R0 closed and eleven for B4 to replay; **A4** record consumers, 26 survivors to replay; both before
+   **E4**, the bounded exact scan.
 3. **C4** server and MCP consumers and accounting; **K71** bounded key-value, input and audit follow-ups (beside B4).
 4. **L5** effective-source lifecycle and generation retirement after A4, B4, E4 and C4.
 5. **P4-71** compact graph integration, **ANN71** compact approximate search, **P5-71** persisted summaries then compression.
