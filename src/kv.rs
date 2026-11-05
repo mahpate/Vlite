@@ -492,6 +492,8 @@ fn list_at(
 thread_local! {
     /// The largest candidate set one scan of this thread has held.
     static CANDIDATE_HIGH_WATER: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+    /// How many candidates the scans of this thread have probed.
+    static PROBES: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -544,6 +546,8 @@ where
         // holder of the key, never enter the set: they would otherwise use up
         // room that later real entries need, and the listing would come back
         // short although more entries exist.
+        #[cfg(test)]
+        PROBES.with(|probes| probes.set(probes.get() + 1));
         let resolved = probe(db, collection, namespace, key, now_ms)?.found;
         if !resolved.is_some_and(|found| found.slot == id) {
             continue;

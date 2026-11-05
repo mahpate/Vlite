@@ -47,6 +47,14 @@ fn mark() -> usize {
     CANDIDATE_HIGH_WATER.with(std::cell::Cell::get)
 }
 
+fn probes_reset() {
+    PROBES.with(|probes| probes.set(0));
+}
+
+fn probes() -> usize {
+    PROBES.with(std::cell::Cell::get)
+}
+
 fn keys(entries: &[KvEntry]) -> Vec<&str> {
     entries.iter().map(|entry| entry.key.as_str()).collect()
 }
@@ -391,6 +399,71 @@ fn keys_are_ordered_by_utf8_bytes_for_every_limit() {
         let entries = view.list_at("n", "", Some(key), 100, 0).unwrap();
         assert_eq!(keys(&entries), &sorted[index + 1..], "after {key:?}");
     }
+}
+
+// The work of a scan is bounded too: a candidate is probed only when it can
+// become an entry. Records of another namespace, keys that miss the prefix or
+// do not follow the cursor, entries that are due, and (once `limit + 1` keys are
+// held) keys that are not smaller than the largest one held cost no probe.
+#[test]
+fn only_candidates_that_can_be_entries_are_probed() {
+    let mut db = memory();
+    bulk(&mut db, "m", (0..400).map(|index| format!("a{index:04}")));
+    bulk(&mut db, "n", (0..300).map(|index| format!("b{index:04}")));
+    bulk(&mut db, "n", (0..50).map(|index| format!("a{index:04}")));
+    let view = db.kv_view("default").unwrap();
+
+    // 450 records carry an "a" key, 50 of them in namespace n.
+    probes_reset();
+    let entries = view.list_at("n", "a", None, 1_000, 0).unwrap();
+    assert_eq!(entries.len(), 50);
+    assert_eq!(probes(), 50, "another namespace and another prefix");
+
+    probes_reset();
+    let entries = view.list_at("n", "a", Some("a0009"), 1_000, 0).unwrap();
+    assert_eq!(entries.len(), 40);
+    assert_eq!(probes(), 40, "keys up to the cursor");
+
+    // Past the largest key of the prefix there is nothing to probe.
+    probes_reset();
+    assert!(
+        view.list_at("n", "a", Some("a0049"), 1_000, 0)
+            .unwrap()
+            .is_empty()
+    );
+    assert!(view.list_at("n", "zzz", None, 1_000, 0).unwrap().is_empty());
+    assert_eq!(probes(), 0);
+
+    // 300 candidates and room for two: the scan meets them in record ID order,
+    // which is unrelated to key order, so only the few that are smaller than
+    // the largest key held at the time are probed.
+    probes_reset();
+    let entries = view.list_at("n", "b", None, 1, 0).unwrap();
+    assert_eq!(keys(&entries), ["b0000"]);
+    assert!(
+        (2..=40).contains(&probes()),
+        "{} probes for 300 candidates",
+        probes()
+    );
+
+    // Due entries are not candidates.
+    let mut store = db.kv_store("default").unwrap();
+    for index in 0..30 {
+        let options = KvPut {
+            expected: Expected::Any,
+            expires_at_ms: Some(1_000),
+        };
+        store
+            .put_at("n", &format!("c{index:02}"), b"v", options, 0)
+            .unwrap();
+    }
+    let view = db.kv_view("default").unwrap();
+    probes_reset();
+    assert!(view.list_at("n", "c", None, 100, 1_000).unwrap().is_empty());
+    assert_eq!(probes(), 0, "due entries");
+    probes_reset();
+    assert_eq!(view.list_at("n", "c", None, 100, 999).unwrap().len(), 30);
+    assert_eq!(probes(), 30);
 }
 
 #[test]
