@@ -357,13 +357,14 @@ fn a_graph_with_ordinary_nodes_is_refused_even_beside_provisioned_scopes() {
 
 #[test]
 fn legacy_adoption_needs_each_node_to_pair_its_label_with_its_key_prefix() {
-    let wrong: [(&str, &[&str]); 9] = [
+    let wrong: [(&str, &[&str]); 10] = [
         ("mem:v1:x", &["VliteMemoryScope"]),
         ("scope:v1:x", &["VliteMemory"]),
         ("receipt:v1:x", &["VliteMemoryContent"]),
         ("receipt-outcome:v1:x", &["VliteMemoryReceipt"]),
         ("content:v1:x", &["VliteMemoryReceiptOutcome"]),
         ("scope:v1:x", &["VliteMemoryScope", "VliteMemory"]),
+        ("mem:v1:x", &["VliteMemory", "VliteMemoryScope"]),
         ("scope:v1:x", &[]),
         ("scope:v1:x", &["VliteMemoryFuture"]),
         ("other:v1:x", &["VliteMemoryScope"]),

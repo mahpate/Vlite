@@ -417,6 +417,42 @@ fn without_bindings_the_records_are_returned_and_nothing_is_written() {
 }
 
 #[test]
+fn a_read_only_replica_without_bindings_still_returns_the_orphans() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("replica-orphans.vlite");
+    let mut db = Database::create(&path, 2).unwrap();
+    db.create_graph("notes_graph").unwrap();
+    db.create_collection("notes_ev", spec()).unwrap();
+    assert_eq!(prepare(&mut db, &bindings(BINDINGS)), Ok(()));
+    drop(db);
+    let mut db = Database::open_read_only(&path).unwrap();
+    let orphans = super::prepare(&mut db, &reserved::Bindings::default(), NOW + DAY * 900).unwrap();
+    assert_eq!(orphans.len(), 1);
+    assert_eq!(orphans[0].binding, "notes");
+    assert_eq!(orphans[0].graph, "notes_graph");
+}
+
+#[test]
+fn a_record_that_cannot_be_written_refuses_startup_with_its_own_message() {
+    use crate::property_graph::{GraphSchema, LabelDefinition, PropertyDefinition, PropertyType};
+    let mut db = database("notes_graph", "notes_ev");
+    let mut schema = GraphSchema::default();
+    schema.labels.insert(
+        "VliteMemoryBinding".into(),
+        LabelDefinition::new("").property(
+            "never_written",
+            PropertyDefinition::new(PropertyType::String).required(),
+        ),
+    );
+    db.graph_mut("notes_graph")
+        .unwrap()
+        .put_schema(&schema)
+        .unwrap();
+    assert_eq!(prepare(&mut db, &bindings(BINDINGS)), Err(RECORD_FAILED));
+    assert!(record(&db, "notes_graph").is_none());
+}
+
+#[test]
 fn a_removed_entry_is_returned_as_an_orphan_after_its_window() {
     let retired = BINDINGS.replace(
         r#""state":"active""#,

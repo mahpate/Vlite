@@ -285,6 +285,22 @@ fn rotate(old: Vec<Binding>, new: Vec<Binding>, now_ms: u64) -> Result<(), Bindi
     set(new).validate_rotation(&set(old), now_ms)
 }
 
+/// The previous state of an entry is the one of its own tenant and name: a
+/// retirement first seen in a tenant is judged against that tenant's records,
+/// not against another tenant's entry of the same name.
+#[test]
+fn a_first_seen_retirement_is_judged_against_its_own_tenants_records() {
+    let root = entry("n", "g");
+    let mut tenant = entry("n", "g2");
+    tenant.tenant = HEX_TENANT.into();
+    tenant.grants[0].scopes = vec![scope(HEX_TENANT, "a")];
+    tenant.state = BindingState::Retired { at_ms: 5 };
+    assert_eq!(
+        rotate(vec![root.clone()], vec![root, tenant], 10),
+        Err(BindingError::BackdatedRetirement)
+    );
+}
+
 #[test]
 fn rotation_keeps_identity_and_advances_generation_only_on_change() {
     use BindingError::*;
