@@ -89,16 +89,16 @@ const MEMORY_PATHS: [&str; 3] = [
 ];
 
 /// Routes served in this slice; the rest are not mounted yet.
-const SERVED: [&str; 6] = [
+const SERVED: [&str; 7] = [
     "/v1/memory/notes/remember",
     "/v1/memory/notes/recall",
     "/v1/memory/notes/consolidate",
     "/v1/memory/notes/forget",
     "/v1/memory/notes/receipts/lookup",
     "/v1/memory/notes/facts/query",
-];
-const UNMOUNTED: [&str; 3] = [
     "/v1/memory/notes/facts/correct",
+];
+const UNMOUNTED: [&str; 2] = [
     "/v1/memory/notes/erasures/get",
     "/v1/memory/notes/erasures/resume",
 ];
@@ -529,6 +529,17 @@ async fn a_read_only_database_refuses_writes_before_validation() {
         (403, &json!("read_only")),
         "{error}"
     );
+    // The writable precheck precedes the capability refusal of a write
+    // route, but not of a read route.
+    let scope = json!({"scope": {"agent": "a"}});
+    let (status, error) = post(&app, "/v1/memory/notes/facts/correct", &token, &scope).await;
+    assert_eq!(
+        (status, &error["error"]["code"]),
+        (403, &json!("read_only"))
+    );
+    let (status, error) = post(&app, "/v1/memory/notes/facts/query", &token, &scope).await;
+    assert_eq!(status, 409, "{error}");
+    assert_eq!(error["error"]["details"]["feature"], "facts");
 }
 
 const RECALL_OPS: [&str; 5] = ["read", "search", "write", "graph_read", "graph_write"];

@@ -38,6 +38,8 @@ pub(super) const FORGET: &str =
 pub(super) const RECEIPT: &str =
     include_str!("../../../tests/fixtures/agent_memory/wire/receipt.json");
 pub(super) const FACTS: &str = include_str!("../../../tests/fixtures/agent_memory/wire/facts.json");
+pub(super) const CORRECT_FACTS: &str =
+    include_str!("../../../tests/fixtures/agent_memory/wire/correct_facts.json");
 
 const PRINCIPAL: &str = "abcdefghij27";
 const OTHER: &str = "bcdefghij234";
@@ -1415,5 +1417,10 @@ mod tests {
     #[tokio::test]
     async fn find_facts_is_refused_after_authorization() {
         refused_in_order(FACTS, "/v1/memory/notes/facts/query", "facts").await;
+    }
+
+    #[tokio::test]
+    async fn correct_facts_is_refused_after_authorization() {
+        refused_in_order(CORRECT_FACTS, "/v1/memory/notes/facts/correct", "facts").await;
     }
 }
