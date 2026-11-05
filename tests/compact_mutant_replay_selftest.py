@@ -173,6 +173,16 @@ class ReplayToolTest(unittest.TestCase):
             json.dumps({"mutants": [{"id": "R-1"}, {"id": "K-1"}]}), encoding="utf-8"
         )
         self.assertTrue(self.verdict(data)[0])
+        survived = {"status": "survived", "restored_identically": True}
+        unrestored = {"status": "killed", "restored_identically": False}
+        for final in (survived, unrestored):
+            (self.tree.root / "ledger.json").write_text(
+                json.dumps({"mutants": [{"id": "R-1", "final": final}, {"id": "K-1", "final": {"status": "killed", "restored_identically": True}}]}),
+                encoding="utf-8",
+            )
+            accepted, out = self.verdict(data)
+            self.assertFalse(accepted, final)
+            self.assertIn("R-1 has no restored kill in ledger.json", out)
 
     def test_check_wants_every_anchor_exactly_once(self):
         with contextlib.redirect_stdout(io.StringIO()):
