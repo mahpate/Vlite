@@ -26,6 +26,8 @@ unchanged and no size claim is made.
   (no High or Medium findings), a key-value live review (one wrong error code, fixed), and two rounds of differential reviews of the
   reserved-resource fix. The first round found five answers that differed from a missing resource and one older tenant search
   defect (fixed; see the release notes); the second round re-ran every principal against every route family on the fixed head.
+  A later inventory of every handler that resolves a collection name found a second, older tenant defect in the metadata update
+  route (also fixed; see the release notes).
 - **Live checks.** `scripts/memory_live_e2e.py` (98 checks over real HTTP, 3 documented skips), `scripts/kv_concurrency_check.py`
   (60 s on 8 threads, 0 violations) and `scripts/rest_differential_check.py` (931 requests per server against 0.6.1, 0 response
   differences, only the documented `rerank.lambda` tightening flagged).

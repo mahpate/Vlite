@@ -372,6 +372,19 @@ was added. See
   0.6.1 have the defect. It matters only on servers that have tenants; if you
   run tenants, upgrade.
   <!-- source: src/server/features.rs, tests/server_memory_reserved_as_missing.rs -->
+- **Tenant isolation in the metadata update route (security).**
+  `PATCH /v1/collections/{collection}/vectors/{id}/metadata` checked the
+  caller's own tenant-qualified collection, then wrote to the collection with
+  the same unqualified name instead. A tenant credential or signed-in tenant
+  account that owned a collection named like a root collection (a tenant can
+  create one itself) therefore replaced the metadata of the record with the
+  same ID in that root collection, when the root collection had one. The
+  response described the caller's own record, or was `500` when it had no such
+  record, and the root collection's record had already been changed. The route
+  now writes to the collection the access check resolved. Releases 0.3.0
+  through 0.6.1 have the defect. It matters only on servers that have tenants;
+  if you run tenants, upgrade.
+  <!-- source: src/server.rs, tests/tenants.rs -->
 - **Concurrent change-feed and replication reads.** Reads of the commit log
   that share one file cursor are now serialized, so a `GET /v1/changes`
   request, webhook delivery and a replication export that run at the same time
