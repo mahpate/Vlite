@@ -1,11 +1,19 @@
 //! Ordinary key-value operations on explicitly authorized collections.
 use super::*;
 use crate::kv::{
-    KvEntry, KvPut, MAX_KV_KEY_BYTES, MAX_KV_LIST_LIMIT, MAX_KV_NAMESPACE_BYTES, MAX_KV_VALUE_BYTES,
+    KvEntry, KvPut, KvRef, MAX_KV_KEY_BYTES, MAX_KV_LIST_LIMIT, MAX_KV_NAMESPACE_BYTES,
+    MAX_KV_VALUE_BYTES,
 };
 use axum::extract::RawQuery;
+use std::ops::ControlFlow;
 
 const PAGE_BYTES: usize = 16_777_216;
+
+#[cfg(test)]
+thread_local! {
+    /// Value bytes this thread has base64-encoded for a response.
+    static ENCODED_VALUE_BYTES: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+}
 
 struct AuditDetails<'a> {
     operation: &'a str,
@@ -267,11 +275,32 @@ fn value(text: &str) -> Result<Vec<u8>, ApiError> {
 }
 
 fn entry_json(entry: KvEntry) -> Value {
+    item_json(&entry.key, &entry.value, entry.version, entry.expires_at_ms)
+}
+
+/// One entry of a response: the key, the base64 value, and the decimal
+/// version and deadline.
+fn item_json(key: &str, value: &[u8], version: u64, expires_at_ms: Option<u64>) -> Value {
+    #[cfg(test)]
+    ENCODED_VALUE_BYTES.with(|bytes| bytes.set(bytes.get() + value.len()));
     json!({
-        "key":entry.key, "value_base64":BASE64_STANDARD.encode(entry.value),
+        "key":key, "value_base64":BASE64_STANDARD.encode(value),
+        "version":version.to_string(),
+        "expires_at_ms":expires_at_ms.map(|value|value.to_string())
+    })
+}
+
+/// The serialized size of `item_json` for `entry`, found without encoding its
+/// value: the item with an empty value plus four base64 characters for every
+/// started group of three value bytes.
+fn item_size(entry: &KvRef<'_>) -> Result<usize, ApiError> {
+    let shell = serde_json::to_vec(&json!({
+        "key":entry.key, "value_base64":"",
         "version":entry.version.to_string(),
         "expires_at_ms":entry.expires_at_ms.map(|value|value.to_string())
-    })
+    }))
+    .map_err(internal)?;
+    Ok(shell.len() + entry.value.len().div_ceil(3) * 4)
 }
 
 fn writable(db: &Database) -> Result<(), ApiError> {
@@ -476,64 +505,109 @@ pub(super) async fn list(
         .run_read(move |db| {
             let view = scope.collection(db, &target)?.kv_view(db)?;
             let now = crate::current_time_ms();
-            let page = build_page(input, limit, now, |namespace, prefix, after, count, now| {
-                view.list_at(namespace, prefix, after, count, now)
-                    .map_err(ApiError::from)
-            })?;
+            let page = build_page(
+                input,
+                limit,
+                now,
+                |namespace, prefix, after, count, now, visit| {
+                    view.visit_at(namespace, prefix, after, count, now, visit)
+                        .map_err(ApiError::from)
+                },
+            )?;
             Ok(Json(page))
         })
         .await
 }
 
+/// One list page: the entries of a single selection scan, in key order, that
+/// fit `limit` and `PAGE_BYTES` together with the response envelope.
+#[derive(Default)]
+struct PageBuilder {
+    items: Vec<Value>,
+    item_bytes: usize,
+    /// The last emitted key, and whether another live entry follows it.
+    last: Option<(String, bool)>,
+    /// An entry was refused because the page would pass `PAGE_BYTES`.
+    full: bool,
+}
+
+impl PageBuilder {
+    /// Adds `entry` unless the page, closed after it, would pass `PAGE_BYTES`.
+    /// The entry's value is measured from the borrow and only encoded when it
+    /// is added.
+    fn push(&mut self, entry: &KvRef<'_>) -> Result<bool, ApiError> {
+        let size = item_size(entry)?;
+        // As the last entry of the page it carries the cursor, when more follow.
+        let next = entry.has_next.then_some(entry.key);
+        let envelope = serde_json::to_vec(&json!({"items":[],"next_after":next}))
+            .map_err(internal)?
+            .len();
+        if envelope + self.item_bytes + size + self.items.len() > PAGE_BYTES {
+            return Ok(false);
+        }
+        self.item_bytes += size;
+        self.items.push(item_json(
+            entry.key,
+            entry.value,
+            entry.version,
+            entry.expires_at_ms,
+        ));
+        self.last = Some((entry.key.to_owned(), entry.has_next));
+        Ok(true)
+    }
+}
+
+/// Builds one page from a single selection scan. `scan` calls its visitor, in
+/// key order, for at most `limit` entries of the query; the visitor stops it
+/// at the first entry that does not fit. What is read is therefore the emitted
+/// entries and, at most, the one that did not fit, which is only measured.
 fn build_page(
     input: ListQuery,
     limit: u64,
     now: u64,
-    mut list_at: impl FnMut(&str, &str, Option<&str>, usize, u64) -> Result<Vec<KvEntry>, ApiError>,
+    scan: impl FnOnce(
+        &str,
+        &str,
+        Option<&str>,
+        usize,
+        u64,
+        &mut dyn FnMut(KvRef<'_>) -> ControlFlow<()>,
+    ) -> Result<(), ApiError>,
 ) -> Result<Value, ApiError> {
-    let mut cursor = input.after;
-    let mut items = Vec::new();
-    let mut item_bytes = 0;
-    let mut chunk_size = 16;
-    loop {
-        let entries = list_at(
-            &input.namespace,
-            &input.prefix,
-            cursor.as_deref(),
-            chunk_size,
-            now,
-        )?;
-        if entries.is_empty() {
-            return Ok(json!({"items":items,"next_after":null}));
-        }
-        let last = &entries.last().expect("nonempty chunk").key;
-        let more = !list_at(&input.namespace, &input.prefix, Some(last), 1, now)?.is_empty();
-        let length = entries.len();
-        for (index, entry) in entries.into_iter().enumerate() {
-            let has_more = index + 1 < length || more;
-            let key = entry.key.clone();
-            let item = entry_json(entry);
-            let size = serde_json::to_vec(&item).map_err(internal)?.len();
-            let next = has_more.then_some(&key);
-            let overhead = serde_json::to_vec(&json!({"items":[],"next_after":next}))
-                .map_err(internal)?
-                .len();
-            let page_bytes = overhead + item_bytes + size + items.len();
-            if items.len() == limit as usize || page_bytes > PAGE_BYTES {
-                if items.is_empty() {
-                    return Err(internal("one KV entry exceeds the page boundary"));
-                }
-                return Ok(json!({"items":items,"next_after":cursor}));
+    let mut page = PageBuilder::default();
+    let mut failure = None;
+    scan(
+        &input.namespace,
+        &input.prefix,
+        input.after.as_deref(),
+        limit as usize,
+        now,
+        &mut |entry| match page.push(&entry) {
+            Ok(true) => ControlFlow::Continue(()),
+            Ok(false) => {
+                page.full = true;
+                ControlFlow::Break(())
             }
-            item_bytes += size;
-            cursor = Some(key);
-            items.push(item);
-        }
-        if !more {
-            return Ok(json!({"items":items,"next_after":null}));
-        }
-        chunk_size = chunk_size.saturating_mul(2).min(MAX_KV_LIST_LIMIT);
+            Err(error) => {
+                failure = Some(error);
+                ControlFlow::Break(())
+            }
+        },
+    )?;
+    if let Some(error) = failure {
+        return Err(error);
     }
+    if page.full && page.items.is_empty() {
+        return Err(internal("one KV entry exceeds the page boundary"));
+    }
+    // The last emitted entry knows whether another live entry follows it: the
+    // one that did not fit, or one beyond `limit`.
+    let next_after = page
+        .last
+        .as_ref()
+        .filter(|(_, more)| *more)
+        .map(|(key, _)| key.as_str());
+    Ok(json!({"items":page.items,"next_after":next_after}))
 }
 
 fn audit<T>(
@@ -623,41 +697,225 @@ mod tests {
         );
     }
 
-    #[test]
-    fn large_page_uses_bounded_number_of_list_scans() {
-        let entries = (0..2_000)
+    /// `KvView::visit_at` as documented, over `entries` sorted by key: at most
+    /// `count` entries after `after`, each with `has_next` set when another
+    /// entry follows within `count + 1`. `scans` counts scans and `lent` the
+    /// entries handed to the visitor.
+    fn scan_of<'a>(
+        entries: &'a [KvEntry],
+        scans: &'a Cell<usize>,
+        lent: &'a Cell<usize>,
+    ) -> impl FnOnce(
+        &str,
+        &str,
+        Option<&str>,
+        usize,
+        u64,
+        &mut dyn FnMut(KvRef<'_>) -> ControlFlow<()>,
+    ) -> Result<(), ApiError>
+    + 'a {
+        move |_, _, after, count, _, visit| {
+            scans.set(scans.get() + 1);
+            let matching: Vec<&KvEntry> = entries
+                .iter()
+                .filter(|entry| after.is_none_or(|after| entry.key.as_str() > after))
+                .collect();
+            let total = matching.len().min(count + 1);
+            for (index, entry) in matching.iter().take(count).enumerate() {
+                lent.set(lent.get() + 1);
+                let borrowed = KvRef {
+                    key: &entry.key,
+                    value: &entry.value,
+                    version: entry.version,
+                    expires_at_ms: entry.expires_at_ms,
+                    has_next: index + 1 < total,
+                };
+                if visit(borrowed).is_break() {
+                    break;
+                }
+            }
+            Ok(())
+        }
+    }
+
+    fn query(after: Option<&str>) -> ListQuery {
+        ListQuery {
+            namespace: "bulk".into(),
+            prefix: String::new(),
+            after: after.map(str::to_owned),
+            limit: None,
+        }
+    }
+
+    fn numbered(count: usize, value: usize) -> Vec<KvEntry> {
+        (0..count)
             .map(|index| KvEntry {
                 key: format!("{index:05}"),
-                value: b"x".to_vec(),
+                value: vec![0; value],
                 version: 1,
                 expires_at_ms: None,
             })
-            .collect::<Vec<_>>();
-        let scans = Cell::new(0);
+            .collect()
+    }
+
+    #[test]
+    fn large_page_uses_bounded_number_of_list_scans() {
+        let entries = numbered(2_000, 1);
+        let (scans, lent) = (Cell::new(0), Cell::new(0));
+        let page = build_page(query(None), 10_000, 0, scan_of(&entries, &scans, &lent)).unwrap();
+        assert_eq!(page["items"].as_array().unwrap().len(), 2_000);
+        // One selection scan builds the page: no chunks, no lookahead scan.
+        assert_eq!(scans.get(), 1, "scans of the collection");
+        assert_eq!(lent.get(), 2_000);
+        assert_eq!(page["next_after"], Value::Null);
+    }
+
+    #[test]
+    fn a_page_asks_the_scan_for_exactly_the_query_and_limit() {
+        let asked = Cell::new(false);
         let page = build_page(
             ListQuery {
-                namespace: "bulk".into(),
-                prefix: String::new(),
-                after: None,
-                limit: Some("10000".into()),
+                namespace: "ns".into(),
+                prefix: "pre".into(),
+                after: Some("a".into()),
+                limit: Some("7".into()),
             },
-            10_000,
-            0,
-            |_, _, after, count, _| {
-                scans.set(scans.get() + 1);
-                Ok(entries
-                    .iter()
-                    .filter(|entry| after.is_none_or(|after| entry.key.as_str() > after))
-                    .take(count)
-                    .cloned()
-                    .collect())
+            7,
+            42,
+            |namespace, prefix, after, count, now, _| {
+                assert_eq!(
+                    (namespace, prefix, after, count, now),
+                    ("ns", "pre", Some("a"), 7, 42)
+                );
+                asked.set(true);
+                Ok(())
             },
         )
         .unwrap();
-        assert_eq!(page["items"].as_array().unwrap().len(), 2_000);
-        // Seven chunks (16+32+64+128+256+512+992), each with one lookahead.
-        assert_eq!(scans.get(), 14, "full-list scans");
+        assert!(asked.get());
+        assert_eq!(page, json!({"items":[],"next_after":null}));
+    }
+
+    // The cursor is the last emitted key, and only when another live entry follows it.
+    #[test]
+    fn the_cursor_is_the_last_emitted_key_only_when_another_entry_follows() {
+        let entries = numbered(5, 1);
+        for (limit, emitted, cursor) in [
+            (1, 1, Some("00000")),
+            (2, 2, Some("00001")),
+            (4, 4, Some("00003")),
+            (5, 5, None),
+            (6, 5, None),
+            (10_000, 5, None),
+        ] {
+            let (scans, lent) = (Cell::new(0), Cell::new(0));
+            let page = build_page(query(None), limit, 0, scan_of(&entries, &scans, &lent)).unwrap();
+            let keys: Vec<&str> = page["items"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .map(|item| item["key"].as_str().unwrap())
+                .collect();
+            let expected: Vec<String> = (0..emitted).map(|index| format!("{index:05}")).collect();
+            assert_eq!(keys, expected, "limit {limit}");
+            assert_eq!(page["next_after"], json!(cursor), "limit {limit}");
+        }
+        let (scans, lent) = (Cell::new(0), Cell::new(0));
+        let page = build_page(
+            query(Some("00002")),
+            10,
+            0,
+            scan_of(&entries, &scans, &lent),
+        )
+        .unwrap();
+        assert_eq!(page["items"].as_array().unwrap().len(), 2);
         assert_eq!(page["next_after"], Value::Null);
+        let page = build_page(
+            query(Some("00004")),
+            10,
+            0,
+            scan_of(&entries, &scans, &lent),
+        )
+        .unwrap();
+        assert_eq!(page, json!({"items":[],"next_after":null}));
+    }
+
+    // 16 MiB of response holds 12 values of the largest size. Reading is
+    // bounded by the page: the entry that does not fit is measured, never
+    // encoded, and nothing beyond it is touched.
+    #[test]
+    fn a_page_reads_only_what_it_emits() {
+        let entries = numbered(20, 1_047_290);
+        let (scans, lent) = (Cell::new(0), Cell::new(0));
+        ENCODED_VALUE_BYTES.with(|bytes| bytes.set(0));
+        let page = build_page(query(None), 10_000, 0, scan_of(&entries, &scans, &lent)).unwrap();
+        let emitted = page["items"].as_array().unwrap().len();
+        assert_eq!(emitted, 12);
+        assert_eq!(page["next_after"], "00011");
+        assert_eq!(
+            ENCODED_VALUE_BYTES.with(Cell::get),
+            emitted * 1_047_290,
+            "only emitted values are encoded"
+        );
+        assert_eq!(
+            lent.get(),
+            emitted + 1,
+            "emitted entries plus the one refused"
+        );
+        assert_eq!(scans.get(), 1);
+        assert!(serde_json::to_vec(&page).unwrap().len() <= PAGE_BYTES);
+    }
+
+    #[test]
+    fn item_size_is_the_serialized_size_of_the_item() {
+        let keys = ["k", "a/b", "\"quoted\\\u{1}\n", "\u{e9}\u{4e2d}\u{1f600}"];
+        let versions = [0, 9, 10, u64::MAX];
+        let expiries = [None, Some(0), Some(u64::MAX)];
+        for (round, key) in keys.iter().enumerate() {
+            for length in (0..=40usize).chain([1_000, 1_047_289, 1_047_290]) {
+                let value: Vec<u8> = (0..length).map(|index| (index * 7 + round) as u8).collect();
+                for (&version, &expires_at_ms) in versions.iter().zip(expiries.iter().cycle()) {
+                    let entry = KvRef {
+                        key,
+                        value: &value,
+                        version,
+                        expires_at_ms,
+                        has_next: false,
+                    };
+                    let item = item_json(key, &value, version, expires_at_ms);
+                    assert_eq!(
+                        item_size(&entry).unwrap(),
+                        serde_json::to_vec(&item).unwrap().len(),
+                        "key {key:?}, {length} value bytes, version {version}, expiry {expires_at_ms:?}"
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn an_entry_larger_than_a_page_is_an_internal_error() {
+        let entries = numbered(1, 13_000_000);
+        let (scans, lent) = (Cell::new(0), Cell::new(0));
+        let error = build_page(query(None), 10, 0, scan_of(&entries, &scans, &lent)).unwrap_err();
+        assert_eq!(error.status, StatusCode::INTERNAL_SERVER_ERROR);
+        assert_eq!(error.code, "internal_error");
+    }
+
+    #[test]
+    fn a_failed_scan_returns_its_error_and_no_page() {
+        let error = build_page(query(None), 10, 0, |_, _, _, _, _, _| {
+            Err(ApiError::new(
+                StatusCode::NOT_FOUND,
+                "collection_not_found",
+                "gone",
+            ))
+        })
+        .unwrap_err();
+        assert_eq!(
+            (error.status, error.code),
+            (StatusCode::NOT_FOUND, "collection_not_found")
+        );
     }
 
     fn boundary_fixture(
@@ -704,6 +962,7 @@ mod tests {
     }
 
     fn synthetic_page(entries: &[KvEntry]) -> Value {
+        let (scans, lent) = (Cell::new(0), Cell::new(0));
         build_page(
             ListQuery {
                 namespace: "boundary".into(),
@@ -713,20 +972,13 @@ mod tests {
             },
             10_000,
             0,
-            |_, _, after, count, _| {
-                Ok(entries
-                    .iter()
-                    .filter(|entry| after.is_none_or(|after| entry.key.as_str() > after))
-                    .take(count)
-                    .cloned()
-                    .collect())
-            },
+            scan_of(entries, &scans, &lent),
         )
         .unwrap()
     }
 
     #[test]
-    fn chunk_edge_page_uses_live_lookahead_at_exact_byte_boundary() {
+    fn exact_byte_boundary_page_decides_the_cursor_from_has_next() {
         for more in [false, true] {
             for bytes in [16_777_216, 16_777_217] {
                 let (mut entries, expected) = boundary_fixture(16, "zzz", bytes, more);
