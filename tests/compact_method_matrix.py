@@ -24,13 +24,7 @@ FACTORIES = {
     "Database::ann_snapshot_path",
 }
 items = {i["key"].removeprefix("rust:") for i in rust_items(ROOT) if i["owner"] in OWNERS}
-matrix = "\n".join(
-    path.read_text(encoding="utf-8")
-    for path in (
-        ROOT / "src/compact/source/method_tests.rs",
-        ROOT / "src/compact/source/overlay_tests.rs",
-    )
-)
+matrix = (ROOT / "src/compact/source/method_tests.rs").read_text(encoding="utf-8")
 covered = set(re.findall(r'"((?:Database|CollectionRef|CollectionMut|ReadSnapshot)::\w+)"', matrix))
 assert not (items - FACTORIES - covered), f"Missing compact method cases: {sorted(items - FACTORIES - covered)}"
 assert not ((covered | FACTORIES) - items), f"Stale compact method cases: {sorted((covered | FACTORIES) - items)}"

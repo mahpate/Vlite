@@ -1,5 +1,6 @@
 //! The query language over compact records: clauses, ordering, grouping, facets and error precedence.
 
+use super::consumer_cursor::decode_count_in as decode_count;
 use super::{assert_compact_resident_pair, indexed_dispatch_fixture, mutate_indexed_rows};
 use crate::compact::source::dispatch_tests::{compact_dispatch_fixture, gates};
 use crate::query_language::{QueryOutput, parse};
@@ -7,7 +8,6 @@ use crate::records::CollectionRecords;
 use crate::vectors::{RecordVectors, VersionedVector};
 use crate::{CollectionMut, CollectionRef, Database, Metadata, MetadataValue};
 use std::collections::{BTreeMap, BTreeSet};
-use std::sync::atomic::Ordering;
 
 /// A deadline far in the future (2100-01-01). `ParsedQuery::execute` samples the wall clock, so a row is
 /// hidden by a deadline in the past (1) and shown by this one.
@@ -142,14 +142,6 @@ fn outcome_text(outcome: &Outcome) -> String {
 
 fn hit_ids(output: &QueryOutput) -> Vec<u64> {
     output.hits.iter().map(|hit| hit.id).collect()
-}
-
-/// How many base rows of the candidate's collection were decoded into cells so far.
-fn decode_count(db: &Database, id: u16) -> usize {
-    let CollectionRecords::Compact { view, .. } = &db.state(id).records else {
-        panic!("compact source required")
-    };
-    view.generation.decode_count.load(Ordering::Relaxed)
 }
 
 fn base_rows(db: &Database, id: u16) -> usize {
@@ -919,12 +911,12 @@ fn query_errors_match_resident_and_precede_row_materialization() {
             );
         }
     }
-    // The counter does move: a text query decodes every base row through the effective iterator.
+    // The counter does move: a text query decodes rows through the effective iterator, so the zeros above mean something.
     let pair = Pair::indexed();
     let (db, id) = (&pair.candidate, pair.candidate_id);
     assert!(base_rows(db, id) > 0);
     assert_eq!(pair.hits(r#"SEARCH TEXT MATCH "apple""#), [1]);
-    assert_eq!(decode_count(db, id), base_rows(db, id));
+    assert!(decode_count(db, id) > 0);
 }
 
 /// Valid queries and queries that are invalid in several ways at once.

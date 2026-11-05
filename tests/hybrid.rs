@@ -230,7 +230,6 @@ fn hybrid_validation() {
         };
         invalid(query.clone());
     }
-
     let mut ok = HybridQuery::new(None, "rust", 1000);
     ok.fusion.candidates = Some(1000);
     assert!(db.search_hybrid(&ok).is_ok());

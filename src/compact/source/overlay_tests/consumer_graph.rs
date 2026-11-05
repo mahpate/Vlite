@@ -11,8 +11,8 @@ use super::super::dispatch_tests::{compact_dispatch_fixture, gates, point_parity
 use super::assert_compact_resident_pair;
 use super::consumer_vectors::{Tamper, is_corrupt, is_poisoned_cell, poison_cell, tamper_block};
 use crate::property_graph::{
-    EvidenceSpec, Expansion, GraphLimits, GraphRef, Pivot, PropertyProjection, ReadOptions,
-    Retrieval, Retrieve, TruncationReason,
+    EvidenceSpec, Expansion, GraphLimits, GraphOp, GraphRef, Pivot, PropertyProjection,
+    ReadOptions, Retrieval, Retrieve, TruncationReason,
 };
 use crate::records::CollectionRecords;
 use crate::{Condition, Database, Error, Expected, Metadata, MetadataValue, Mutation};
@@ -675,8 +675,9 @@ fn an_attached_record_never_carries_a_deadline_on_compact_or_resident_records() 
     let _gates = gates();
     let (mut candidate, mut oracle, _) = compact_dispatch_fixture(false);
 
-    // (a) The only API that sets a record's deadline, `put_with_expiry`, refuses every deadline for an attached
-    // record, and writes nothing. Records 0 of `half` and `full` are attached to node `n`.
+    // (a) `put_with_expiry` is the function that sets a record's deadline (the key-value store's `put` with a deadline and
+    // the REST and gRPC writers call it: `an_attached_key_value_entry_cannot_be_given_a_deadline`). It refuses every
+    // deadline for an attached record, and writes nothing. Records 0 of `half` and `full` are attached to node `n`.
     for db in [&mut candidate, &mut oracle] {
         for name in COLLECTIONS {
             let sequence = db.sequence;
@@ -944,4 +945,57 @@ fn graph_retrieve_validates_the_request_bounds_before_the_health_of_a_handle_tha
             );
         }
     }
+}
+
+/// A record that has a deadline cannot be attached, and a graph batch that writes it again without one and attaches it
+/// in the same frame leaves it without a deadline: the invariant behind `pa-graph-evidence-wall-clock` on the one public
+/// path where a put and an attach share a frame.
+#[test]
+fn a_graph_batch_that_puts_and_attaches_a_record_leaves_it_without_a_deadline() {
+    let mut db = Database::create_in_memory(2, crate::CreateOptions::default()).unwrap();
+    db.create_graph("g").unwrap();
+    db.put_with_expiry(7, &[1.0, 2.0], b"", &Metadata::new(), Some(5_000))
+        .unwrap();
+    assert_eq!(
+        db.collection("default").unwrap().expires_at(7).unwrap(),
+        Some(5_000)
+    );
+    {
+        let mut graph = db.graph_mut("g").unwrap();
+        graph.create_node("seven", &[], &Metadata::new()).unwrap();
+        assert!(matches!(
+            graph.attach("seven", "default", 7),
+            Err(Error::GraphRecordNotAttachable)
+        ));
+        graph
+            .write_batch(&[
+                GraphOp::Vector {
+                    collection: "default".into(),
+                    mutation: Mutation::Put {
+                        id: 7,
+                        vector: vec![1.0, 2.0],
+                        payload: b"again".to_vec(),
+                    },
+                },
+                GraphOp::Attach {
+                    node: "seven".into(),
+                    collection: "default".into(),
+                    record: 7,
+                },
+            ])
+            .unwrap();
+    }
+    assert_eq!(
+        db.collection("default").unwrap().expires_at(7).unwrap(),
+        None
+    );
+    let refused = db.put_with_expiry(7, &[1.0, 2.0], b"", &Metadata::new(), Some(u64::MAX));
+    assert!(
+        matches!(refused, Err(Error::GraphAttachedRecordExpiry)),
+        "{refused:?}"
+    );
+    assert_eq!(
+        db.collection("default").unwrap().expires_at(7).unwrap(),
+        None
+    );
 }

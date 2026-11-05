@@ -397,7 +397,11 @@ fn compact_installed_database_and_snapshot_method_matrix() {
         d!("Database::abort_import", db.abort_import(1));
         d!("Database::import_status", db.import_status(1));
         d!("Database::kv_store", db.kv_store("full"));
-        assert!(matches!(db.kv_view("full"), Err(Error::NotKvCollection)));
+        a!(
+            "Database::kv_view",
+            format!("{:?}", db.kv_view("full").err()),
+            "Some(NotKvCollection)"
+        );
         d!("Database::create_graph", db.create_graph("new"));
         d!("Database::drop_graph", db.drop_graph("g"));
         d!("Database::list_graphs", db.list_graphs());
@@ -831,13 +835,16 @@ fn compact_installed_collection_method_matrix() {
                 reference.record_vectors(0).unwrap()
             );
             assert_eq!(
-                view.search_named("n", None, query, 0).is_err(),
-                reference.search_named("n", None, query, 0).is_err(),
+                format!("{:?}", view.search_named("n", None, query, 0).err()),
+                format!("{:?}", reference.search_named("n", None, query, 0).err()),
                 "CollectionRef::search_named"
             );
             assert_eq!(
-                view.search_named_at("n", None, query, 0, 0).is_err(),
-                reference.search_named_at("n", None, query, 0, 0).is_err(),
+                format!("{:?}", view.search_named_at("n", None, query, 0, 0).err()),
+                format!(
+                    "{:?}",
+                    reference.search_named_at("n", None, query, 0, 0).err()
+                ),
                 "CollectionRef::search_named_at"
             );
             d!(
@@ -874,13 +881,13 @@ fn compact_installed_collection_method_matrix() {
             }
             d!("CollectionRef::reembed_status", view.reembed_status("n"));
             assert_eq!(
-                view.reembed_pending("n", 0).is_err(),
-                reference.reembed_pending("n", 0).is_err(),
+                format!("{:?}", view.reembed_pending("n", 0).err()),
+                format!("{:?}", reference.reembed_pending("n", 0).err()),
                 "CollectionRef::reembed_pending"
             );
             assert_eq!(
-                view.reembed_pending_checked("n", 0).is_err(),
-                reference.reembed_pending_checked("n", 0).is_err(),
+                format!("{:?}", view.reembed_pending_checked("n", 0).err()),
+                format!("{:?}", reference.reembed_pending_checked("n", 0).err()),
                 "CollectionRef::reembed_pending_checked"
             );
             a!(
