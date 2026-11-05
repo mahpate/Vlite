@@ -53,6 +53,14 @@ impl Default for Search {
         }
     }
 }
+// Read-only sessions hold the shared lock, so other readers can open the file.
+fn open(path: &str, readonly: bool) -> Result<Database> {
+    Ok(if readonly {
+        Database::open_read_only(path)?
+    } else {
+        Database::open(path)?
+    })
+}
 fn run() -> Result<()> {
     let args = tool_support::args()?;
     tool_support::check_args(
@@ -71,7 +79,7 @@ fn run() -> Result<()> {
     let mut db = Some(if let Some(d) = args.get("--create") {
         Database::create(path, d.parse()?)?
     } else {
-        Database::open(path)?
+        open(path, readonly)?
     });
     let interactive = !args.contains_key("--script") && io::stdin().is_terminal();
     let mut input: Box<dyn BufRead> = if let Some(p) = args.get("--script") {
@@ -129,7 +137,7 @@ fn run() -> Result<()> {
                     }
                     Ok(())
                 })();
-                db = Some(Database::open(path)?);
+                db = Some(open(path, readonly)?);
                 return maintenance;
             }
             let db = db.as_mut().ok_or("database unavailable")?;

@@ -220,7 +220,7 @@
       <section id="tools">
         <h2>Command-line tools and agents</h2>
         <ul class="list">
-          <li><strong>Interactive or scripted shell:</strong> query records and collections, and run key-value commands; <code>--read-only</code> disables writes, but the shell still takes an exclusive file lock.</li>
+          <li><strong>Interactive or scripted shell:</strong> query records and collections, and run key-value commands; <code>--read-only</code> disables writes and takes only a shared file lock.</li>
           <li><strong>Offline maintenance:</strong> inspect, verify, back up, restore, compact, upgrade and re-encrypt, plus <code>enable-graph</code> and <code>strip-graph</code> to add or remove graph support.</li>
           <li><strong>Import:</strong> CSV, JSONL, pgvector text and supported FAISS input; optional Parquet and Arrow IPC with <code>import-formats</code>.</li>
           <li><strong>Search quality:</strong> exact-oracle recall, configuration and database comparison, and bounded index evaluation.</li>

@@ -13,8 +13,8 @@ Most tools work directly with database files. The memory client below requires a
 - [Remote agent memory](#remote-agent-memory): authenticated one-shot REST operations.
 
 **Stop the server first for offline tools.** The shell, import and tuning tools take an exclusive
-file lock, even with the shell's `--read-only` guard. MCP opens a shared-lock
-read-only snapshot by default, so it can run beside other readers but not
+file lock, except `vlite-shell --read-only`. That and MCP (by default) open a
+shared-lock read-only snapshot, so they can run beside other readers but not
 beside a writer.
 
 ## Build and install
