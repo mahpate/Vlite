@@ -538,6 +538,15 @@ fn remember_item(
             .map(|value| self::source(value, "provenance"))
             .collect::<Result<_, _>>()?,
     };
+    // An explicit empty list names no source of its own and is the same as an
+    // absent one (contract section 8: sources default provenance to
+    // [source]). Left empty, the core would add its own kind-less entry,
+    // which Recall cannot present (`source_kind` is required).
+    let provenance = if provenance.is_empty() {
+        vec![source.clone()]
+    } else {
+        provenance
+    };
     let references = match fields.take("references")? {
         None => Vec::new(),
         Some(value) => wire::array(value, "references", 0, max_references as usize)?

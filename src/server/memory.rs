@@ -141,6 +141,8 @@ mod pins_forget;
 #[cfg(test)]
 mod pins_receipts;
 #[cfg(test)]
+mod pins_remember;
+#[cfg(test)]
 mod replay;
 mod routes;
 mod wire;
