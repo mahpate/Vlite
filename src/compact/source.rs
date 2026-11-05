@@ -739,6 +739,8 @@ mod tests;
 #[cfg(test)]
 mod dispatch_tests;
 #[cfg(test)]
+mod freeze_tests;
+#[cfg(test)]
 mod install_tests;
 #[cfg(test)]
 mod method_tests;
