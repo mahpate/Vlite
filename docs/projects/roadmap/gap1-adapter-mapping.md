@@ -107,7 +107,9 @@ preserve that collision rule. Webhook filters accept hidden names, with event
 delivery still suppressed. The `delete_node` attachment check remains unchanged.
 
 **Multi-refusal priority (PROVISIONAL).** When several refusals apply, the
-first in this list wins: `binding_retired`; the route refusal of section 1
+first in this list wins: `binding_generation` (the per-write recheck of
+section 4, on the mutation routes only); `binding_retired`; the route refusal
+of section 1
 (`facts`, `erasure_jobs`); `memory_feed_unsupported`
 (`require_complete_feed: true`); then field refusals in request field order
 (`details.feature` naming the first refused field). `UnsupportedPlan` and the
@@ -278,9 +280,14 @@ own `retry_until_ms`.
   the ordinary underlying grants, is never a memory scope grant, and memory
   grants never imply raw access. An empty registry is a no-op. Raw-route
   guards are implemented on the separate guards lane against this interface.
-- **Adoption.** Startup refuses to bind an in-use ordinary resource: the graph
-  must be empty or already carry a binding record for the same
-  `(tenant, binding)`.
+- **Adoption.** Startup refuses to bind an in-use ordinary resource. A graph is
+  adopted when (a) it has no live node and its evidence collection holds no
+  record, (b) it already carries a binding record for the same
+  `(tenant, binding)`, or (c) once, for a graph a 0.7.0 server adopted before
+  records existed: it has no record and holds only memory nodes (each with one
+  memory label and the key prefix that label's nodes carry; the evidence
+  collection is not inspected). One node with a memory label is not enough
+  ([0.7.1 design note](m71-memory-followups.md), section 1.3).
 - **Provisioning (B2).** On a writable primary, startup provisions every
   ACTIVE entry's granted scopes idempotently via the crate-private
   `provision_scope`, after the adoption check. Read-only nodes and replicas

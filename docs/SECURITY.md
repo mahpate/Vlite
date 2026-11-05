@@ -171,7 +171,9 @@ whose grant already names a reserved collection, answers 404 for that name while
 a missing name outside its grant answers 403, because the grant check runs
 first; create such credentials after the bindings file is in place. Webhook
 subscriptions and credential graph lists that name a reserved resource begin to
-match it if the binding is removed. Startup refuses `default` as an evidence
+match it once the reservation ends (the graph is dropped, or its record is
+deleted and the file no longer names it); removing the file alone does not end
+it. Startup refuses `default` as an evidence
 collection, so a binding never changes the legacy routes. Live vector quotas
 count reserved records, so a caller with a quota sees its headroom change when
 memory writes. The administrator's tenant list and usage report list and count

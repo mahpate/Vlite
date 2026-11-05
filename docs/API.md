@@ -321,6 +321,23 @@ ordinary again, keep the entry in the file as retired with a `raw_access` grant,
 delete the graph's nodes (the record node `binding:v1` included) with that
 credential, and drop the graph.
 
+**Upgrading from 0.7.0.** The first 0.7.1 start writes each binding's record (one
+node and one commit per bound graph) and applies the rules above to a file that
+was valid before. Three things can stop it or surprise you:
+
+- An entry that is already `retired` and has no record yet counts as retired by
+  this start, so a `retired_at_ms` in the past is refused (`a memory binding
+  retirement time precedes this start`): set it to the current time or later.
+- A bound graph that holds anything but memory nodes, for example ordinary nodes
+  that a `raw_access` holder wrote into it under 0.7.0, is refused as holding
+  ordinary data. Start once without the bindings file (the graph is then an
+  ordinary graph, because it holds no record yet), delete those nodes with the
+  raw routes, and start again with the file.
+- Going back to 0.7.0 after that is safe for every graph that holds a scope
+  node. A bound graph that never received a scope (a binding without grants)
+  holds only the record, and 0.7.0 refuses it as ordinary data: delete the record
+  node first.
+
 ## Collection retrieval
 
 * `POST /v1/collections/{collection}/search/grouped` takes `vector`, `field`,

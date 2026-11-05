@@ -127,11 +127,16 @@ A named binding adopts its graph in exactly three cases:
   `a_graph_adopted_before_records_existed_is_adopted_once_and_gets_its_record`
   (integration) pin it.
 
-Anything else is refused as holding ordinary data, as it was before.
+Anything else is refused as holding ordinary data. 0.7.0 adopted any graph that
+held one scope node, so a graph that a `raw_access` holder wrote ordinary nodes
+into stops the upgrade until those nodes are removed (1.6).
 
-**Residual risk.** A forgery that consists only of well-formed memory nodes is
-indistinguishable from memory. The raw-route guard (section 2 of this document,
-slice S3) stops new raw writers from planting such nodes.
+**Residual risk.** A forgery that consists only of well-formed memory nodes, or
+a graph that holds a forged record (a record is an ordinary node, and (b) does
+not scan the graph), is indistinguishable from memory. The raw-route guard
+(section 2 of this document, slice S3) stops new network writers from planting
+either; the slices ship together, and a writer that bypasses the route (the
+Rust API, the file tools) is the operator.
 
 ### 1.4 No bindings in the file (D1, approved)
 
@@ -174,7 +179,11 @@ move. Reads (recall, receipts) do not recheck.
   says, so move it to the current time. A file whose active entry changed its
   receipt window, names or grants (without a higher generation) since the record
   was written is refused. A removed active entry is refused until it is retired
-  and its window has ended.
+  and its window has ended. A bound graph that holds anything besides memory
+  nodes (ordinary nodes that a `raw_access` holder wrote under 0.7.0) is
+  refused as holding ordinary data: start once without the file, remove those
+  nodes through the raw routes, and start again. The operator text is in
+  API.md, "Upgrading from 0.7.0".
 - **Cost.** One point read per live graph at startup, one more commit per newly
   bound graph, one point read per memory write. A full scan only on the legacy
   path.
