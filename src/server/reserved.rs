@@ -98,6 +98,24 @@ impl Reserved {
         }
     }
 
+    pub(super) fn retain_change_operations(&self, kind: &mut crate::changes::ChangeKind) -> bool {
+        use crate::{changes::ChangeKind, property_graph::GraphChange};
+        if self.is_empty() {
+            return true;
+        }
+        if let ChangeKind::GraphBatch { operations, .. } = kind {
+            operations.retain(|operation| match operation {
+                GraphChange::Attached { collection, .. }
+                | GraphChange::Detached { collection, .. } => {
+                    self.raw_allowed(None, Resource::Collection, collection)
+                }
+                _ => true,
+            });
+            return !operations.is_empty();
+        }
+        true
+    }
+
     fn owner(&self, resource: Resource, stored: &str) -> Option<usize> {
         self.owners.get(&(resource, stored.to_owned())).copied()
     }

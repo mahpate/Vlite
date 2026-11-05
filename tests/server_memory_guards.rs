@@ -743,10 +743,11 @@ async fn reserved_graph_and_collection_are_denied_and_lists_filter_them() {
     assert_eq!(info["records"], 0);
     let default_bindings = BINDINGS.replace("\"notes_ev\"", "\"default\"");
     let default_directory = tempfile::tempdir().unwrap();
-    let default_app = start(&default_directory, Some(&default_bindings), false).unwrap();
-    let (status, error) = get(&default_app, "/v1/database").await;
-    assert_eq!(status, 403);
-    assert_eq!(error["error"]["code"], "forbidden_scope");
+    let error = match start(&default_directory, Some(&default_bindings), false) {
+        Ok(_) => panic!("default evidence collection must refuse startup"),
+        Err(error) => error,
+    };
+    assert_eq!(error.to_string(), "memory bindings file is invalid");
     for (method, path, body) in [
         ("GET", "/v1/imports/1", Body::empty()),
         ("GET", "/v1/admin/replication/export", Body::empty()),
@@ -1195,7 +1196,8 @@ async fn reserved_resource_routes_deny_before_resource_lookup_across_families() 
 
     let legacy_bindings = BINDINGS.replace("\"notes_ev\"", "\"default\"");
     let legacy_directory = tempfile::tempdir().unwrap();
-    let legacy_app = start(&legacy_directory, Some(&legacy_bindings), false).unwrap();
+    assert!(start(&legacy_directory, Some(&legacy_bindings), false).is_err());
+    let legacy_app = start(&legacy_directory, Some(BINDINGS), false).unwrap();
     for (method, path, body) in [
         ("GET", "/v1/vectors/7", ""),
         ("PUT", "/v1/vectors/7", r#"{"vector":[0,0]}"#),
@@ -1216,13 +1218,10 @@ async fn reserved_resource_routes_deny_before_resource_lookup_across_families() 
         ("POST", "/v1/index/hnsw/rebuild/poll", ""),
     ] {
         let (status, error) = call(&legacy_app, method, path, Body::from(body)).await;
-        if status != 403 {
-            assert_eq!(status, 404, "{method} {path}: {error}");
-            assert_eq!(
-                error["error"]["code"], "collection_not_found",
-                "{method} {path}"
-            );
-        }
+        assert_ne!(
+            error["error"]["code"], "collection_not_found",
+            "{method} {path}: {status}"
+        );
     }
 }
 

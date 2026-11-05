@@ -39,6 +39,19 @@ fn invalid(binding: Binding) -> Result<(), BindingError> {
 }
 
 #[test]
+fn default_evidence_is_rejected_for_root_and_tenant_bindings() {
+    for tenant in [ROOT_TENANT, HEX_TENANT] {
+        let mut binding = entry("notes", "g");
+        binding.tenant = tenant.into();
+        binding.grants[0].scopes = vec![scope(tenant, "a")];
+        binding.evidence_collection = Some("default".into());
+        assert_eq!(invalid(binding.clone()), Err(BindingError::InvalidName));
+        binding.evidence_collection = Some("default_notes".into());
+        assert_eq!(invalid(binding), Ok(()));
+    }
+}
+
+#[test]
 fn field_rules_accept_their_boundaries() {
     let mut longest = entry(&format!("a{}", "z".repeat(62)), "g");
     longest.tenant = HEX_TENANT.into();

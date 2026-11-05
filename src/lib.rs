@@ -2795,6 +2795,31 @@ impl Database {
         spec: CollectionSpec,
         precision: compact::catalog::Precision,
     ) -> Result<CollectionInfo> {
+        self.create_collection_as_occupied(name, spec, precision, false)
+    }
+
+    #[cfg(feature = "server")]
+    pub(crate) fn create_collection_occupied(
+        &mut self,
+        name: &str,
+        spec: CollectionSpec,
+        occupied: bool,
+    ) -> Result<CollectionInfo> {
+        self.create_collection_as_occupied(
+            name,
+            spec,
+            compact::catalog::Precision::Float32,
+            occupied,
+        )
+    }
+
+    fn create_collection_as_occupied(
+        &mut self,
+        name: &str,
+        spec: CollectionSpec,
+        precision: compact::catalog::Precision,
+        occupied: bool,
+    ) -> Result<CollectionInfo> {
         self.ensure_all_resident()?;
         if self.version < format::V4 {
             return Err(Error::CollectionsRequireUpgrade);
@@ -2811,7 +2836,7 @@ impl Database {
         }
         validate_dimensions(spec.dimensions)?;
         validate_settings(&spec.settings)?;
-        if self.collections.values().any(|c| c.name == name) {
+        if occupied || self.collections.values().any(|c| c.name == name) {
             return Err(Error::CollectionExists);
         }
         if self.collections.len() >= format::MAX_COLLECTIONS {

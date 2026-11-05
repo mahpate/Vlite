@@ -312,12 +312,7 @@ pub(super) async fn create_core(
                 dimensions: input.dimensions,
                 settings: input.settings.merge(CollectionSettings::default()),
             };
-            if hidden && matches!(db.resolve(&input.name), Err(Error::CollectionNotFound)) {
-                crate::validate_dimensions(spec.dimensions)?;
-                crate::validate_settings(&spec.settings)?;
-                return Err(Error::CollectionExists.into());
-            }
-            Ok(db.create_collection(&input.name, spec)?)
+            Ok(db.create_collection_occupied(&input.name, spec, hidden)?)
         })
         .await?;
     audit_event(
@@ -327,6 +322,39 @@ pub(super) async fn create_core(
     let mut info = info;
     info.name = tenants::unqualify(&role, &info.name);
     Ok(info)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn hidden_create_uses_the_ordinary_occupied_validation_order() {
+        let spec = |dimensions| CollectionSpec {
+            dimensions,
+            settings: CollectionSettings::default(),
+        };
+        let mut db = Database::create_in_memory(2, crate::CreateOptions::default()).unwrap();
+        db.create_collection("ordinary", spec(2)).unwrap();
+        for (version, poisoned, dimensions) in [
+            (5, false, 2),
+            (5, false, 0),
+            (3, false, 2),
+            (3, false, 0),
+            (5, true, 2),
+            (3, true, 0),
+        ] {
+            db.version = version;
+            db.poisoned = poisoned;
+            let ordinary = db
+                .create_collection("ordinary", spec(dimensions))
+                .unwrap_err();
+            let hidden = db
+                .create_collection_occupied("hidden", spec(dimensions), true)
+                .unwrap_err();
+            assert_eq!(format!("{hidden:?}"), format!("{ordinary:?}"));
+        }
+    }
 }
 
 async fn fetch(

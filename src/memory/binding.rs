@@ -135,10 +135,9 @@ impl Binding {
         }
         if validate_graph_name(&self.graph).is_err()
             || tenant_qualified(&self.graph)
-            || self
-                .evidence_collection
-                .as_deref()
-                .is_some_and(|name| !valid_collection_name(name) || tenant_qualified(name))
+            || self.evidence_collection.as_deref().is_some_and(|name| {
+                name == "default" || !valid_collection_name(name) || tenant_qualified(name)
+            })
         {
             return Err(BindingError::InvalidName);
         }
