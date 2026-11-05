@@ -45,6 +45,13 @@ const BUDGET_BYTES: usize = 64 << 20;
 /// overlaid IDs above `max(MIN_REBUILD_CHURN, rows / 4)`.
 const MIN_REBUILD_CHURN: usize = 4096;
 
+#[cfg(test)]
+thread_local! {
+    /// Candidate ID sets begun on this thread, so tests can show which
+    /// filters stop at the block statuses.
+    static BUILT: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+}
+
 fn threshold(rows: usize) -> usize {
     MIN_REBUILD_CHURN.max(rows / 4)
 }
@@ -455,6 +462,33 @@ pub(crate) struct View {
 }
 
 impl View {
+    /// From block statuses alone: whether any block is pruned, and how many
+    /// IDs `candidates` would collect (the visible rows of the blocks kept,
+    /// plus the overlay). A filter that prunes nothing, or leaves more than
+    /// the cap, then never builds an ID set that would only be dropped.
+    pub(crate) fn survivors(&self, conditions: &[Condition]) -> (bool, usize) {
+        let mut pruned = false;
+        let mut ids = self.overlay.len();
+        for segment in &self.segments {
+            for (index, block) in segment.blocks.iter().enumerate() {
+                if block.status(conditions) == Status::Prune {
+                    pruned = true;
+                    continue;
+                }
+                let start = index * BLOCK_ROWS;
+                let end = segment.ids.len().min(start + BLOCK_ROWS);
+                ids += if segment.superseded_rows == 0 {
+                    end - start
+                } else {
+                    (start..end)
+                        .filter(|&ordinal| !segment.superseded.contains(ordinal))
+                        .count()
+                };
+            }
+        }
+        (pruned, ids)
+    }
+
     /// The IDs of every visible row in a block that may match, plus the
     /// overlay, and whether any block was pruned; `None` once more than
     /// `cap` IDs are collected. Visibility here is generational only: the
@@ -465,6 +499,8 @@ impl View {
         conditions: &[Condition],
         cap: usize,
     ) -> Option<(BTreeSet<u64>, bool)> {
+        #[cfg(test)]
+        BUILT.with(|built| built.set(built.get() + 1));
         let mut ids = BTreeSet::new();
         let mut pruned = false;
         for segment in &self.segments {
@@ -581,9 +617,14 @@ impl Summaries {
             self.derive(records.len(), rows)
         };
         match self.state.get_or_init(derive) {
-            State::Ready(view) => view
-                .candidates(conditions, cap)
-                .and_then(|(ids, pruned)| pruned.then_some(ids)),
+            State::Ready(view) => {
+                let (pruned, ids) = view.survivors(conditions);
+                if !pruned || ids > cap {
+                    return None;
+                }
+                view.candidates(conditions, cap)
+                    .and_then(|(ids, pruned)| pruned.then_some(ids))
+            }
             State::OverBudget { .. } => None,
         }
     }

@@ -346,7 +346,12 @@ fn oracle_case(case: &Value) {
             .collect();
         let visible_ids: Vec<u64> = visible.keys().copied().collect();
         assert_eq!(json!(visible_ids), expected["visible_ids"], "{context}");
-        let (candidates, _) = view.candidates(&conditions, usize::MAX).unwrap();
+        let (candidates, pruned) = view.candidates(&conditions, usize::MAX).unwrap();
+        assert_eq!(
+            view.survivors(&conditions),
+            (pruned, candidates.len()),
+            "{context}"
+        );
         let candidates: Vec<u64> = candidates
             .into_iter()
             .filter(|id| visible.contains_key(id))
@@ -833,6 +838,102 @@ fn random_edits_keep_candidates_a_superset_of_matches() {
         }
     }
     assert!(narrowed > 100, "{narrowed}");
+}
+
+/// Candidate sets begun on this thread so far.
+fn sets_built() -> usize {
+    BUILT.with(std::cell::Cell::get)
+}
+
+#[test]
+fn only_filters_that_prune_and_fit_the_cap_build_a_candidate_set() {
+    let records: RecordMap = (0..4500u64)
+        .map(|id| {
+            let block = (id / BLOCK_ROWS as u64) as i64;
+            (id, record(&[("n", int(block))]))
+        })
+        .collect();
+    let summaries = Summaries::new(["n".to_owned()]);
+    let all = usize::MAX;
+    let ids = |conditions: &[Condition], cap| summaries.candidates(conditions, &records, cap);
+
+    // Nothing pruned: decided from the block statuses, after the derivation.
+    let everything = [range("n", Some(int(0)), None)];
+    assert_eq!(ids(&everything, all), None);
+    assert!(summaries.state.get().is_some());
+    assert_eq!(sets_built(), 0);
+    // Pruned and within the cap: the set is built, once.
+    assert_eq!(ids(&[eq("n", int(2))], all), Some((2048..3072).collect()));
+    assert_eq!(sets_built(), 1);
+    // Pruned but over the cap, by one ID: no set.
+    let tail = [range("n", Some(int(3)), None)];
+    assert_eq!(ids(&tail, 1427), None);
+    assert_eq!(sets_built(), 1);
+    assert_eq!(ids(&tail, 1428).map(|ids| ids.len()), Some(1428));
+    assert_eq!(sets_built(), 2);
+    // Every block pruned: an empty set within any cap.
+    assert_eq!(ids(&[eq("n", int(9))], 0), Some(BTreeSet::new()));
+    assert_eq!(sets_built(), 3);
+}
+
+#[test]
+fn survivors_count_what_candidates_collect_through_churn() {
+    let mut records: RecordMap = (0..4500u64)
+        .map(|id| {
+            let block = (id / BLOCK_ROWS as u64) as i64;
+            (id, record(&[("n", int(block))]))
+        })
+        .collect();
+    let mut summaries = Summaries::new(["n".to_owned()]);
+    let n = |value| Some(metadata(&[("n", value)]));
+    let filters = [
+        vec![eq("n", int(2))],
+        vec![range("n", Some(int(3)), None)],
+        vec![range("n", Some(int(0)), None)],
+        vec![eq("n", int(9))],
+        vec![eq("n", int(1)), range("n", None, Some(int(1)))],
+        vec![eq("n", int(2)), eq("free", int(1))],
+        vec![eq("free", int(1))],
+    ];
+    // `Summaries::candidates` must answer exactly as the set it replaces.
+    let check = |summaries: &Summaries, records: &RecordMap| {
+        for conditions in &filters {
+            let view = ready(summaries);
+            let (pruned, count) = view.survivors(conditions);
+            let (collected, collected_pruned) = view.candidates(conditions, usize::MAX).unwrap();
+            assert_eq!((pruned, count), (collected_pruned, collected.len()));
+            for cap in [0, count.saturating_sub(1), count, count + 1, usize::MAX] {
+                let expected = view
+                    .candidates(conditions, cap)
+                    .and_then(|(ids, pruned)| pruned.then_some(ids));
+                let ids = summaries.candidates(conditions, records, cap);
+                assert_eq!(ids, expected, "{conditions:?} cap {cap}");
+            }
+        }
+    };
+    assert!(
+        summaries
+            .candidates(&filters[0], &records, usize::MAX)
+            .is_some()
+    );
+    check(&summaries, &records);
+    // A superseded row and an overlaid ID.
+    apply(&mut summaries, &mut records, 10, n(int(5000)));
+    assert_eq!(churn(&summaries), (1, 1));
+    check(&summaries, &records);
+    // A deleted row, and one reinserted elsewhere.
+    apply(&mut summaries, &mut records, 2048, None);
+    check(&summaries, &records);
+    apply(&mut summaries, &mut records, 2048, n(int(7)));
+    apply(&mut summaries, &mut records, 9_000, n(int(2)));
+    assert_eq!(churn(&summaries), (2, 3));
+    check(&summaries, &records);
+    // Rows superseded in several blocks.
+    for id in [1500, 2500, 3500, 4400] {
+        apply(&mut summaries, &mut records, id, n(int(-1)));
+    }
+    assert_eq!(churn(&summaries), (6, 7));
+    check(&summaries, &records);
 }
 
 #[test]
