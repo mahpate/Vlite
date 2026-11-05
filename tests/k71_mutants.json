@@ -1,0 +1,1604 @@
+[
+ {
+  "id": "kv-list/K1",
+  "desc": "selection keeps the L largest keys instead of the smallest",
+  "file": "src/kv.rs",
+  "old": "selected.peek().is_some_and(|worst| candidate >= *worst)",
+  "new": "selected.peek().is_some_and(|worst| candidate <= *worst)",
+  "cmd": "cargo test --locked --offline --features server,mcp,tools --lib kv::bounded_tests"
+ },
+ {
+  "id": "kv-list/K2",
+  "desc": "probe result ignored at admission (look-alikes enter the set)",
+  "file": "src/kv.rs",
+  "old": "        if !resolved.is_some_and(|found| found.slot == id) {\n            continue;\n        }",
+  "new": "        if false && !resolved.is_some_and(|found| found.slot == id) {\n            continue;\n        }",
+  "cmd": "cargo test --locked --offline --features server,mcp,tools --lib kv::bounded_tests"
+ },
+ {
+  "id": "kv-list/K3",
+  "desc": "after is inclusive",
+  "file": "src/kv.rs",
+  "old": "after.is_some_and(|after| key <= after)",
+  "new": "after.is_some_and(|after| key < after)",
+  "cmd": "cargo test --locked --offline --features server,mcp,tools --lib kv::bounded_tests"
+ },
+ {
+  "id": "kv-list/K4",
+  "desc": "candidate capacity is limit, not limit + 1 (no lookahead key)",
+  "file": "src/kv.rs",
+  "old": "    let capacity = limit + 1;",
+  "new": "    let capacity = limit;",
+  "cmd": "cargo test --locked --offline --features server,mcp,tools --lib kv::bounded_tests"
+ },
+ {
+  "id": "kv-list/K5",
+  "desc": "expiry filter reads a fresh clock per candidate",
+  "file": "src/kv.rs",
+  "old": "            .get(&id)\n            .is_some_and(|expiry| *expiry <= now_ms)\n        {\n            continue;",
+  "new": "            .get(&id)\n            .is_some_and(|expiry| *expiry <= crate::current_time_ms())\n        {\n            continue;",
+  "cmd": "cargo test --locked --offline --features server,mcp,tools --lib kv::bounded_tests"
+ },
+ {
+  "id": "kv-list/K6",
+  "desc": "final order by UTF-16 code units instead of UTF-8 bytes",
+  "file": "src/kv.rs",
+  "old": "    let selected = selected.into_sorted_vec();",
+  "new": "    let mut selected = selected.into_sorted_vec();\n    selected.sort_by(|a, b| a.0.encode_utf16().cmp(b.0.encode_utf16()));",
+  "cmd": "cargo test --locked --offline --features server,mcp,tools --lib kv::bounded_tests"
+ },
+ {
+  "id": "kv-list/K7",
+  "desc": "prefix filter ignored",
+  "file": "src/kv.rs",
+  "old": "if ns != namespace || !key.starts_with(prefix) || after.is_some_and(",
+  "new": "if ns != namespace || false || after.is_some_and(",
+  "cmd": "cargo test --locked --offline --features server,mcp,tools --lib kv::bounded_tests"
+ },
+ {
+  "id": "kv-list-probe/K8",
+  "desc": "namespace filter ignored (only the amount of probe work changes)",
+  "file": "src/kv.rs",
+  "old": "if ns != namespace || !key.starts_with(prefix) || after.is_some_and(",
+  "new": "if false || !key.starts_with(prefix) || after.is_some_and(",
+  "cmd": "cargo test --locked --offline --features server,mcp,tools --lib kv::bounded_tests"
+ },
+ {
+  "id": "kv-list/K9",
+  "desc": "largest accepted limit is 9,999",
+  "file": "src/kv.rs",
+  "old": "    if limit == 0 || limit > MAX_KV_LIST_LIMIT {\n        return Err(Error::InvalidKvKey(\"limit must be between 1 and 10000\"));\n    }\n    let state = db.state(collection);\n    let records",
+  "new": "    if limit == 0 || limit >= MAX_KV_LIST_LIMIT {\n        return Err(Error::InvalidKvKey(\"limit must be between 1 and 10000\"));\n    }\n    let state = db.state(collection);\n    let records",
+  "cmd": "cargo test --locked --offline --features server,mcp,tools --lib kv::bounded_tests"
+ },
+ {
+  "id": "kv-list/K10",
+  "desc": "has_next true for the last entry",
+  "file": "src/kv.rs",
+  "old": "has_next: index + 1 < selected.len(),",
+  "new": "has_next: index + 1 <= selected.len(),",
+  "cmd": "cargo test --locked --offline --features server,mcp,tools --lib kv::bounded_tests"
+ },
+ {
+  "id": "kv-list/K11",
+  "desc": "visitor Break ignored",
+  "file": "src/kv.rs",
+  "old": "        if visitor(entry).is_break() {\n            break;\n        }",
+  "new": "        if visitor(entry).is_break() {}",
+  "cmd": "cargo test --locked --offline --features server,mcp,tools --lib kv::bounded_tests"
+ },
+ {
+  "id": "kv-list/K12",
+  "desc": "the lookahead key is visited too",
+  "file": "src/kv.rs",
+  "old": "selected.iter().take(limit).enumerate()",
+  "new": "selected.iter().enumerate()",
+  "cmd": "cargo test --locked --offline --features server,mcp,tools --lib kv::bounded_tests"
+ },
+ {
+  "id": "kv-list/K13",
+  "desc": "candidate set never pops when full (unbounded)",
+  "file": "src/kv.rs",
+  "old": "        if selected.len() == capacity {\n            selected.pop();\n        }\n        selected.push(candidate);",
+  "new": "        selected.push(candidate);",
+  "cmd": "cargo test --locked --offline --features server,mcp,tools --lib kv::bounded_tests"
+ },
+ {
+  "id": "kv-list/K14",
+  "desc": "expiry equal to now is still live",
+  "file": "src/kv.rs",
+  "old": "            .get(&id)\n            .is_some_and(|expiry| *expiry <= now_ms)\n        {\n            continue;",
+  "new": "            .get(&id)\n            .is_some_and(|expiry| *expiry < now_ms)\n        {\n            continue;",
+  "cmd": "cargo test --locked --offline --features server,mcp,tools --lib kv::bounded_tests"
+ },
+ {
+  "id": "kv-list/K15",
+  "desc": "entry expiry not reported",
+  "file": "src/kv.rs",
+  "old": "            expires_at_ms: state.expiries.get(&id).copied(),\n            has_next",
+  "new": "            expires_at_ms: None,\n            has_next",
+  "cmd": "cargo test --locked --offline --features server,mcp,tools --lib kv::bounded_tests"
+ },
+ {
+  "id": "kv-list/K16",
+  "desc": "list_at drops the value bytes",
+  "file": "src/kv.rs",
+  "old": "                value: entry.value.to_vec(),",
+  "new": "                value: Vec::new(),",
+  "cmd": "cargo test --locked --offline --features server,mcp,tools --lib kv::bounded_tests"
+ },
+ {
+  "id": "kv-list/K17",
+  "desc": "namespace validation removed from the scan",
+  "file": "src/kv.rs",
+  "old": "    db.ensure_resident_in(collection)?;\n    validate_namespace(namespace)?;\n    if limit == 0",
+  "new": "    db.ensure_resident_in(collection)?;\n    if limit == 0",
+  "cmd": "cargo test --locked --offline --features server,mcp,tools --lib kv::bounded_tests"
+ },
+ {
+  "id": "kv-list/K18",
+  "desc": "limit 0 accepted",
+  "file": "src/kv.rs",
+  "old": "    if limit == 0 || limit > MAX_KV_LIST_LIMIT {\n        return Err(Error::InvalidKvKey(\"limit must be between 1 and 10000\"));\n    }\n    let state = db.state(collection);\n    let records",
+  "new": "    if limit > MAX_KV_LIST_LIMIT {\n        return Err(Error::InvalidKvKey(\"limit must be between 1 and 10000\"));\n    }\n    let state = db.state(collection);\n    let records",
+  "cmd": "cargo test --locked --offline --features server,mcp,tools --lib kv::bounded_tests"
+ },
+ {
+  "id": "kv-list-probe/K19",
+  "desc": "candidate probed before the comparison with the largest key held",
+  "file": "src/kv.rs",
+  "old": "        if selected.len() == capacity && selected.peek().is_some_and(|worst| candidate >= *worst) {\n            continue;\n        }\n        // `probe` resolves a key only to a record of its own window, the\n        // `KV_PROBE_SLOTS` IDs from its first slot (wrapping), so a record\n        // outside that window is not an entry: it costs one hash, no lookup.\n        if id.wrapping_sub(slot_base(namespace, key)) >= KV_PROBE_SLOTS {\n            continue;\n        }\n        // A record inside the window is that key's entry only when `probe`, the\n        // lookup behind `get`, `put` and `delete`, resolves the key to it. A\n        // look-alike behind an earlier holder of the key never enters the set:\n        // it would otherwise use up room that later real entries need, and the\n        // listing would come back short although more entries exist.\n        #[cfg(test)]\n        PROBES.with(|probes| probes.set(probes.get() + 1));\n        let resolved = probe(db, collection, namespace, key, now_ms)?.found;\n        if !resolved.is_some_and(|found| found.slot == id) {\n            continue;\n        }\n",
+  "new": "        // `probe` resolves a key only to a record of its own window, the\n        // `KV_PROBE_SLOTS` IDs from its first slot (wrapping), so a record\n        // outside that window is not an entry: it costs one hash, no lookup.\n        if id.wrapping_sub(slot_base(namespace, key)) >= KV_PROBE_SLOTS {\n            continue;\n        }\n        // A record inside the window is that key's entry only when `probe`, the\n        // lookup behind `get`, `put` and `delete`, resolves the key to it. A\n        // look-alike behind an earlier holder of the key never enters the set:\n        // it would otherwise use up room that later real entries need, and the\n        // listing would come back short although more entries exist.\n        #[cfg(test)]\n        PROBES.with(|probes| probes.set(probes.get() + 1));\n        let resolved = probe(db, collection, namespace, key, now_ms)?.found;\n        if !resolved.is_some_and(|found| found.slot == id) {\n            continue;\n        }\n        if selected.len() == capacity && selected.peek().is_some_and(|worst| candidate >= *worst) {\n            continue;\n        }\n",
+  "cmd": "cargo test --locked --offline --features server,mcp,tools --lib kv::bounded_tests"
+ },
+ {
+  "id": "kv-page/R1",
+  "desc": "REST page boundary is exclusive (>= PAGE_BYTES)",
+  "file": "src/server/kv.rs",
+  "old": "if envelope + self.item_bytes + size + self.items.len() > PAGE_BYTES {",
+  "new": "if envelope + self.item_bytes + size + self.items.len() >= PAGE_BYTES {",
+  "cmd": "cargo test --locked --offline --features server,mcp,tools --lib server::kv::"
+ },
+ {
+  "id": "kv-page/R2",
+  "desc": "REST base64 size computed with floor(n/3)*4",
+  "file": "src/server/kv.rs",
+  "old": "Ok(shell.len() + value_len.div_ceil(3) * 4)",
+  "new": "Ok(shell.len() + value_len / 3 * 4)",
+  "cmd": "cargo test --locked --offline --features server,mcp,tools --lib server::kv::"
+ },
+ {
+  "id": "kv-page/R3",
+  "desc": "REST base64 size computed with ceil(n/3)*3",
+  "file": "src/server/kv.rs",
+  "old": "Ok(shell.len() + value_len.div_ceil(3) * 4)",
+  "new": "Ok(shell.len() + value_len.div_ceil(3) * 3)",
+  "cmd": "cargo test --locked --offline --features server,mcp,tools --lib server::kv::"
+ },
+ {
+  "id": "kv-page/R4",
+  "desc": "REST envelope never budgets a cursor",
+  "file": "src/server/kv.rs",
+  "old": "let next = entry.has_next.then_some(entry.key);\n        let envelope = serde_json::to_vec",
+  "new": "let next: Option<&str> = None;\n        let envelope = serde_json::to_vec",
+  "cmd": "cargo test --locked --offline --features server,mcp,tools --lib server::kv::"
+ },
+ {
+  "id": "kv-page/R5",
+  "desc": "REST commas between items not counted",
+  "file": "src/server/kv.rs",
+  "old": "if envelope + self.item_bytes + size + self.items.len() > PAGE_BYTES {",
+  "new": "if envelope + self.item_bytes + size > PAGE_BYTES {",
+  "cmd": "cargo test --locked --offline --features server,mcp,tools --lib server::kv::"
+ },
+ {
+  "id": "kv-page/R6",
+  "desc": "REST encodes the value before checking that it fits",
+  "file": "src/server/kv.rs",
+  "old": "        if envelope + self.item_bytes + size + self.items.len() > PAGE_BYTES {\n            return Ok(false);\n        }\n        self.item_bytes += size;\n        self.items.push(item_json(\n            entry.key,\n            entry.value,\n            entry.version,\n            entry.expires_at_ms,\n        ));",
+  "new": "        let item = item_json(\n            entry.key,\n            entry.value,\n            entry.version,\n            entry.expires_at_ms,\n        );\n        if envelope + self.item_bytes + size + self.items.len() > PAGE_BYTES {\n            return Ok(false);\n        }\n        self.item_bytes += size;\n        self.items.push(item);",
+  "cmd": "cargo test --locked --offline --features server,mcp,tools --lib server::kv::"
+ },
+ {
+  "id": "kv-page/R7",
+  "desc": "REST asks the scan for limit + 1 entries",
+  "file": "src/server/kv.rs",
+  "old": "        limit as usize,\n        now,\n        &mut |entry| match page.push(&entry) {",
+  "new": "        limit as usize + 1,\n        now,\n        &mut |entry| match page.push(&entry) {",
+  "cmd": "cargo test --locked --offline --features server,mcp,tools --lib server::kv::"
+ },
+ {
+  "id": "kv-page/R8",
+  "desc": "REST cursor emitted even when nothing follows",
+  "file": "src/server/kv.rs",
+  "old": "        .filter(|(_, more)| *more)\n        .map(|(key, _)| key.as_str());\n    // The items move into the response instead of being copied by `json!`.\n",
+  "new": "        .filter(|_| true)\n        .map(|(key, _)| key.as_str());\n    // The items move into the response instead of being copied by `json!`.\n",
+  "cmd": "cargo test --locked --offline --features server,mcp,tools --lib server::kv::"
+ },
+ {
+  "id": "kv-page/R9",
+  "desc": "REST: an entry larger than a page is not an error",
+  "file": "src/server/kv.rs",
+  "old": "if page.full && page.items.is_empty() {",
+  "new": "if false && page.full && page.items.is_empty() {",
+  "cmd": "cargo test --locked --offline --features server,mcp,tools --lib server::kv::"
+ },
+ {
+  "id": "kv-page/R10",
+  "desc": "REST swallows a scan error",
+  "file": "src/server/kv.rs",
+  "old": "    )?;\n    if let Some(error) = failure {",
+  "new": "    )\n    .ok();\n    if let Some(error) = failure {",
+  "cmd": "cargo test --locked --offline --features server,mcp,tools --lib server::kv::"
+ },
+ {
+  "id": "kv-page/R11",
+  "desc": "REST never records that the last entry has a follower",
+  "file": "src/server/kv.rs",
+  "old": "self.last = Some((entry.key.to_owned(), entry.has_next));",
+  "new": "self.last = Some((entry.key.to_owned(), false));",
+  "cmd": "cargo test --locked --offline --features server,mcp,tools --lib server::kv::"
+ },
+ {
+  "id": "kv-page/R12",
+  "desc": "REST page byte total never accumulates",
+  "file": "src/server/kv.rs",
+  "old": "        self.item_bytes += size;\n        self.items.push(item_json(",
+  "new": "        self.items.push(item_json(",
+  "cmd": "cargo test --locked --offline --features server,mcp,tools --lib server::kv::"
+ },
+ {
+  "id": "kv-page/M1",
+  "desc": "MCP page boundary is exclusive",
+  "file": "src/bin/tool_support/kv_mcp.rs",
+  "old": "        if size > PAGE_BYTES {",
+  "new": "        if size >= PAGE_BYTES {",
+  "cmd": "cargo test --locked --offline --features mcp,tools --bin vlite-mcp kv_mcp::tests::page_exact_encoded_boundary"
+ },
+ {
+  "id": "kv-page/M2",
+  "desc": "MCP base64 size computed with floor(n/3)*4",
+  "file": "src/bin/tool_support/kv_mcp.rs",
+  "old": "        + value_len.div_ceil(3) * 4\n}",
+  "new": "        + value_len / 3 * 4\n}",
+  "cmd": "cargo test --locked --offline --features mcp,tools --bin vlite-mcp kv_mcp::tests::item_size_is_the_compact_size_of_the_item"
+ },
+ {
+  "id": "kv-page/M3",
+  "desc": "MCP asks the scan for limit + 1 entries",
+  "file": "src/bin/tool_support/kv_mcp.rs",
+  "old": "        request.limit as usize,\n        |after, limit, visit| {",
+  "new": "        request.limit as usize + 1,\n        |after, limit, visit| {",
+  "cmd": "cargo test --locked --offline --features mcp,tools --test kv_tools pagination_order_prefix_exclusive_after_and_default_limit"
+ },
+ {
+  "id": "kv-page/M4",
+  "desc": "MCP encodes the value before checking that it fits",
+  "file": "src/bin/tool_support/kv_mcp.rs",
+  "old": "        if size > PAGE_BYTES {\n            return ControlFlow::Break(());\n        }\n        item_bytes += bytes;\n        items.push(item_json(\n            entry.key,\n            entry.value,\n            entry.version,\n            entry.expires_at_ms,\n        ));",
+  "new": "        let item = item_json(\n            entry.key,\n            entry.value,\n            entry.version,\n            entry.expires_at_ms,\n        );\n        if size > PAGE_BYTES {\n            return ControlFlow::Break(());\n        }\n        item_bytes += bytes;\n        items.push(item);",
+  "cmd": "cargo test --locked --offline --features mcp,tools --bin vlite-mcp kv_mcp::tests::a_page_reads_only_what_it_emits"
+ },
+ {
+  "id": "kv-page/M5",
+  "desc": "MCP cursor emitted even when nothing follows",
+  "file": "src/bin/tool_support/kv_mcp.rs",
+  "old": "        .filter(|(_, more)| *more)\n        .map(|(key, _)| key.as_str());\n    // The items move into the response instead of being copied by `json!`.\n",
+  "new": "        .filter(|_| true)\n        .map(|(key, _)| key.as_str());\n    // The items move into the response instead of being copied by `json!`.\n",
+  "cmd": "cargo test --locked --offline --features mcp,tools --bin vlite-mcp kv_mcp::tests::page_exact_encoded_boundary"
+ },
+ {
+  "id": "kv-page/M6",
+  "desc": "MCP envelope never budgets a cursor",
+  "file": "src/bin/tool_support/kv_mcp.rs",
+  "old": "let next = entry.has_next.then_some(entry.key);\n        let envelope = json!(",
+  "new": "let next: Option<&str> = None;\n        let envelope = json!(",
+  "cmd": "cargo test --locked --offline --features mcp,tools --bin vlite-mcp kv_mcp::tests::page_exact_encoded_boundary"
+ },
+ {
+  "id": "kv-page/M7",
+  "desc": "MCP commas between items not counted",
+  "file": "src/bin/tool_support/kv_mcp.rs",
+  "old": "let size = envelope + item_bytes + bytes + items.len();",
+  "new": "let size = envelope + item_bytes + bytes;",
+  "cmd": "cargo test --locked --offline --features mcp,tools --bin vlite-mcp kv_mcp::tests::page_exact_encoded_boundary"
+ },
+ {
+  "id": "fix3/kf2-window-check-removed",
+  "desc": "a record outside the key's 16-slot window is probed instead of skipped",
+  "file": "src/kv.rs",
+  "old": "        if id.wrapping_sub(slot_base(namespace, key)) >= KV_PROBE_SLOTS {\n            continue;\n        }\n",
+  "new": "",
+  "cmd": "cargo test --locked --offline --features server,mcp,tools --lib kv::bounded_tests"
+ },
+ {
+  "id": "kv-fix/kf-window-one-slot-too-long",
+  "desc": "the window check admits one slot past the window (offset 16) to the probe",
+  "file": "src/kv.rs",
+  "old": "if id.wrapping_sub(slot_base(namespace, key)) >= KV_PROBE_SLOTS {",
+  "new": "if id.wrapping_sub(slot_base(namespace, key)) > KV_PROBE_SLOTS {",
+  "cmd": "cargo test --locked --offline --lib kv::bounded_tests"
+ },
+ {
+  "id": "kv-fix/kf-window-one-slot-too-short",
+  "desc": "the window check drops the last slot (offset 15), so a real entry there is not listed",
+  "file": "src/kv.rs",
+  "old": "if id.wrapping_sub(slot_base(namespace, key)) >= KV_PROBE_SLOTS {",
+  "new": "if id.wrapping_sub(slot_base(namespace, key)) >= KV_PROBE_SLOTS - 1 {",
+  "cmd": "cargo test --locked --offline --lib kv::bounded_tests"
+ },
+ {
+  "id": "kv-fix/kf-candidate-set-sized-by-collection",
+  "desc": "the candidate set is allocated for every record of the collection instead of limit + 1",
+  "file": "src/kv.rs",
+  "old": "BinaryHeap::with_capacity(capacity.min(records.len()));",
+  "new": "BinaryHeap::with_capacity(records.len());",
+  "cmd": "cargo test --locked --offline --lib kv::bounded_tests"
+ },
+ {
+  "id": "kv-fix/kf-limit-checked-before-namespace",
+  "desc": "a request with a bad namespace and a bad limit is refused for its limit",
+  "file": "src/kv.rs",
+  "old": "    validate_namespace(namespace)?;\n    if limit == 0 || limit > MAX_KV_LIST_LIMIT {\n        return Err(Error::InvalidKvKey(\"limit must be between 1 and 10000\"));\n    }\n",
+  "new": "    if limit == 0 || limit > MAX_KV_LIST_LIMIT {\n        return Err(Error::InvalidKvKey(\"limit must be between 1 and 10000\"));\n    }\n    validate_namespace(namespace)?;\n",
+  "cmd": "cargo test --locked --offline --lib kv::bounded_tests"
+ },
+ {
+  "id": "kv-fix/kf-mcp-oversized-first-entry-emitted",
+  "desc": "the MCP page builder emits a first entry that alone exceeds the page",
+  "file": "src/bin/tool_support/kv_mcp.rs",
+  "old": "        if size > PAGE_BYTES {\n            return ControlFlow::Break(());\n        }\n",
+  "new": "        if size > PAGE_BYTES && !items.is_empty() {\n            return ControlFlow::Break(());\n        }\n",
+  "cmd": "cargo test --locked --offline --features mcp,tools --bin vlite-mcp a_first_entry_larger_than_a_page"
+ },
+ {
+  "id": "kv-fix/kf-memory-read-only-actor-dropped",
+  "desc": "the memory audit entry records the read-only token as the admin token",
+  "file": "src/server/audit.rs",
+  "old": "        (admin::Role::ReadOnly, _) => \"read_only_token\".to_owned(),\n",
+  "new": "        (admin::Role::ReadOnly, _) => \"admin_token\".to_owned(),\n",
+  "cmd": "cargo test --locked --offline --features server --test server_memory_actor"
+ },
+ {
+  "id": "lines/accepts-cap-plus-one",
+  "desc": "off by one: a line of cap + 1 content bytes is accepted",
+  "file": "src/bin/tool_support/line.rs",
+  "old": "    if bytes.len() > cap {",
+  "new": "    if bytes.len() > cap + 1 {",
+  "cmd": "cargo test --locked --offline --features mcp --bin vlite-mcp line::"
+ },
+ {
+  "id": "lines/drain-skipped",
+  "desc": "an overlong line is not drained to its newline; its tail is read as the next line",
+  "file": "src/bin/tool_support/line.rs",
+  "old": "        reader.consume(used);\n        if newline.is_some() {",
+  "new": "        reader.consume(used);\n        if line.overflowed {\n            return Ok(Line::TooLong);\n        }\n        if newline.is_some() {",
+  "cmd": "cargo test --locked --offline --features mcp --bin vlite-mcp line::"
+ },
+ {
+  "id": "lines/crlf-counted",
+  "desc": "the carriage return of a CRLF terminator counts against the cap",
+  "file": "src/bin/tool_support/line.rs",
+  "old": "        limit: cap.saturating_add(1),",
+  "new": "        limit: cap,",
+  "cmd": "cargo test --locked --offline --features mcp --bin vlite-mcp line::"
+ },
+ {
+  "id": "lines/cr-not-stripped",
+  "desc": "a carriage return before the newline is kept in the text",
+  "file": "src/bin/tool_support/line.rs",
+  "old": "    if terminated && bytes.last() == Some(&b'\\r') {\n        bytes.pop();\n    }",
+  "new": "    if false && terminated && bytes.last() == Some(&b'\\r') {\n        bytes.pop();\n    }",
+  "cmd": "cargo test --locked --offline --features mcp --bin vlite-mcp line::"
+ },
+ {
+  "id": "lines/cr-stripped-without-newline",
+  "desc": "a trailing carriage return is stripped from a final line that has no newline",
+  "file": "src/bin/tool_support/line.rs",
+  "old": "    if terminated && bytes.last() == Some(&b'\\r') {\n        bytes.pop();\n    }",
+  "new": "    if bytes.last() == Some(&b'\\r') {\n        bytes.pop();\n    }",
+  "cmd": "cargo test --locked --offline --features mcp --bin vlite-mcp line::"
+ },
+ {
+  "id": "lines/all-trailing-crs-stripped",
+  "desc": "every carriage return before the newline is stripped, not just one",
+  "file": "src/bin/tool_support/line.rs",
+  "old": "    if terminated && bytes.last() == Some(&b'\\r') {\n        bytes.pop();\n    }",
+  "new": "    while terminated && bytes.last() == Some(&b'\\r') {\n        bytes.pop();\n    }",
+  "cmd": "cargo test --locked --offline --features mcp --bin vlite-mcp line::"
+ },
+ {
+  "id": "lines/utf8-checked-per-chunk",
+  "desc": "UTF-8 is validated on each chunk instead of on the finished line",
+  "file": "src/bin/tool_support/line.rs",
+  "old": "        line.push(&chunk[..newline.unwrap_or(chunk.len())]);",
+  "new": "        let part = &chunk[..newline.unwrap_or(chunk.len())];\n        std::str::from_utf8(part).map_err(|_| {\n            io::Error::new(io::ErrorKind::InvalidData, \"stream did not contain valid UTF-8\")\n        })?;\n        line.push(part);",
+  "cmd": "cargo test --locked --offline --features mcp --bin vlite-mcp line::"
+ },
+ {
+  "id": "lines/utf8-checked-before-the-cap",
+  "desc": "UTF-8 is validated before the cap, so an overlong line of invalid bytes is an error",
+  "file": "src/bin/tool_support/line.rs",
+  "old": "    if bytes.len() > cap {\n        return Ok(Line::TooLong);\n    }\n    String::from_utf8(bytes).map(Line::Text).map_err(|_| {\n        io::Error::new(\n            io::ErrorKind::InvalidData,\n            \"stream did not contain valid UTF-8\",\n        )\n    })",
+  "new": "    let text = String::from_utf8(bytes).map_err(|_| {\n        io::Error::new(\n            io::ErrorKind::InvalidData,\n            \"stream did not contain valid UTF-8\",\n        )\n    })?;\n    if text.len() > cap {\n        return Ok(Line::TooLong);\n    }\n    Ok(Line::Text(text))",
+  "cmd": "cargo test --locked --offline --features mcp --bin vlite-mcp line::"
+ },
+ {
+  "id": "lines/utf8-lossy",
+  "desc": "invalid UTF-8 is replaced instead of reported",
+  "file": "src/bin/tool_support/line.rs",
+  "old": "    if bytes.len() > cap {\n        return Ok(Line::TooLong);\n    }\n    String::from_utf8(bytes).map(Line::Text).map_err(|_| {\n        io::Error::new(\n            io::ErrorKind::InvalidData,\n            \"stream did not contain valid UTF-8\",\n        )\n    })",
+  "new": "    if bytes.len() > cap {\n        return Ok(Line::TooLong);\n    }\n    Ok(Line::Text(String::from_utf8_lossy(&bytes).into_owned()))",
+  "cmd": "cargo test --locked --offline --features mcp --bin vlite-mcp line::"
+ },
+ {
+  "id": "lines/utf8-error-kind",
+  "desc": "invalid UTF-8 is reported with another error kind",
+  "file": "src/bin/tool_support/line.rs",
+  "old": "            io::ErrorKind::InvalidData,\n            \"stream did not",
+  "new": "            io::ErrorKind::Other,\n            \"stream did not",
+  "cmd": "cargo test --locked --offline --features mcp --bin vlite-mcp line::"
+ },
+ {
+  "id": "lines/unbounded-accumulation",
+  "desc": "the cap is applied only after the whole line was read (the buffer limit is removed)",
+  "file": "src/bin/tool_support/line.rs",
+  "old": "        limit: cap.saturating_add(1),",
+  "new": "        limit: usize::MAX,",
+  "cmd": "cargo test --locked --offline --features mcp --bin vlite-mcp line::"
+ },
+ {
+  "id": "lines/buffer-allowance-plus-one",
+  "desc": "the buffer may hold one byte more than a carriage return needs (cap + 2)",
+  "file": "src/bin/tool_support/line.rs",
+  "old": "        limit: cap.saturating_add(1),",
+  "new": "        limit: cap.saturating_add(2),",
+  "cmd": "cargo test --locked --offline --features mcp --bin vlite-mcp line::"
+ },
+ {
+  "id": "lines/limit-overflows",
+  "desc": "the buffer limit is a plain addition that overflows for the largest cap",
+  "file": "src/bin/tool_support/line.rs",
+  "old": "        limit: cap.saturating_add(1),",
+  "new": "        limit: cap + 1,",
+  "cmd": "cargo test --locked --offline --features mcp --bin vlite-mcp line::"
+ },
+ {
+  "id": "lines/limit-boundary-off-by-one",
+  "desc": "a line that fills the buffer exactly is treated as too long",
+  "file": "src/bin/tool_support/line.rs",
+  "old": "        if chunk.len() > self.limit - used {",
+  "new": "        if chunk.len() >= self.limit - used {",
+  "cmd": "cargo test --locked --offline --features mcp --bin vlite-mcp line::"
+ },
+ {
+  "id": "lines/limit-boundary-plus-one",
+  "desc": "the buffer may be filled one byte past its limit",
+  "file": "src/bin/tool_support/line.rs",
+  "old": "        if chunk.len() > self.limit - used {",
+  "new": "        if chunk.len() > self.limit - used + 1 {",
+  "cmd": "cargo test --locked --offline --features mcp --bin vlite-mcp line::"
+ },
+ {
+  "id": "lines/growth-not-clamped",
+  "desc": "geometric growth may overshoot the limit",
+  "file": "src/bin/tool_support/line.rs",
+  "old": "            self.bytes.reserve_exact(wanted.min(self.limit) - used);",
+  "new": "            self.bytes.reserve_exact(wanted - used);",
+  "cmd": "cargo test --locked --offline --features mcp --bin vlite-mcp line::"
+ },
+ {
+  "id": "lines/growth-clamped-one-high",
+  "desc": "geometric growth is clamped one byte above the limit",
+  "file": "src/bin/tool_support/line.rs",
+  "old": "            self.bytes.reserve_exact(wanted.min(self.limit) - used);",
+  "new": "            self.bytes.reserve_exact(wanted.min(self.limit + 1) - used);",
+  "cmd": "cargo test --locked --offline --features mcp --bin vlite-mcp line::"
+ },
+ {
+  "id": "lines/final-line-dropped",
+  "desc": "a final line without a newline is reported as the end of input",
+  "file": "src/bin/tool_support/line.rs",
+  "old": "    if !started {",
+  "new": "    if !started || !terminated {",
+  "cmd": "cargo test --locked --offline --features mcp --bin vlite-mcp line::"
+ },
+ {
+  "id": "lines/end-of-input-is-an-empty-line",
+  "desc": "the end of input is returned as an empty line",
+  "file": "src/bin/tool_support/line.rs",
+  "old": "    if !started {",
+  "new": "    if false {",
+  "cmd": "cargo test --locked --offline --features mcp --bin vlite-mcp line::"
+ },
+ {
+  "id": "lines/interrupted-not-retried",
+  "desc": "an interrupted read is returned as an error instead of retried",
+  "file": "src/bin/tool_support/line.rs",
+  "old": "            Err(error) if error.kind() == io::ErrorKind::Interrupted => continue,",
+  "new": "            Err(error) if false => continue,",
+  "cmd": "cargo test --locked --offline --features mcp --bin vlite-mcp line::"
+ },
+ {
+  "id": "lines/reads-past-the-newline",
+  "desc": "one more read is made after the newline, which blocks an interactive client",
+  "file": "src/bin/tool_support/line.rs",
+  "old": "        if newline.is_some() {\n            terminated = true;\n            break;\n        }",
+  "new": "        if newline.is_some() {\n            reader.fill_buf()?;\n            terminated = true;\n            break;\n        }",
+  "cmd": "cargo test --locked --offline --features mcp --bin vlite-mcp line::"
+ },
+ {
+  "id": "lines/newline-kept",
+  "desc": "the newline stays in the text",
+  "file": "src/bin/tool_support/line.rs",
+  "old": "        line.push(&chunk[..newline.unwrap_or(chunk.len())]);",
+  "new": "        line.push(&chunk[..newline.map_or(chunk.len(), |index| index + 1)]);",
+  "cmd": "cargo test --locked --offline --features mcp --bin vlite-mcp line::"
+ },
+ {
+  "id": "lines-fix/lf-mcp-parse-error-code",
+  "desc": "an overlong line is answered with -32700 instead of -32600",
+  "file": "src/bin/vlite-mcp.rs",
+  "old": "            Line::TooLong => Some(protocol_error(\n                Value::Null,\n                -32600,\n                &format!(\"request line exceeds {MAX_LINE_BYTES} bytes\"),\n            )),",
+  "new": "            Line::TooLong => Some(protocol_error(\n                Value::Null,\n                -32700,\n                &format!(\"request line exceeds {MAX_LINE_BYTES} bytes\"),\n            )),",
+  "cmd": "cargo test --locked --offline --features mcp,tools --test stdin_lines -- mcp_serves_a_line_of_exactly_the_cap_and_refuses_one_byte_more"
+ },
+ {
+  "id": "lines-fix/lf-mcp-error-id",
+  "desc": "the overlong-line error carries id 0 instead of null",
+  "file": "src/bin/vlite-mcp.rs",
+  "old": "            Line::TooLong => Some(protocol_error(\n                Value::Null,\n                -32600,\n                &format!(\"request line exceeds {MAX_LINE_BYTES} bytes\"),\n            )),",
+  "new": "            Line::TooLong => Some(protocol_error(\n                json!(0),\n                -32600,\n                &format!(\"request line exceeds {MAX_LINE_BYTES} bytes\"),\n            )),",
+  "cmd": "cargo test --locked --offline --features mcp,tools --test stdin_lines -- mcp_serves_a_line_of_exactly_the_cap_and_refuses_one_byte_more"
+ },
+ {
+  "id": "lines-fix/lf-mcp-stops-after-too-long",
+  "desc": "the session ends after the overlong-line error",
+  "file": "src/bin/vlite-mcp.rs",
+  "old": "            Line::TooLong => Some(protocol_error(\n                Value::Null,\n                -32600,\n                &format!(\"request line exceeds {MAX_LINE_BYTES} bytes\"),\n            )),",
+  "new": "            Line::TooLong => {\n                let error = protocol_error(\n                    Value::Null,\n                    -32600,\n                    &format!(\"request line exceeds {MAX_LINE_BYTES} bytes\"),\n                );\n                serde_json::to_writer(&mut stdout, &error)?;\n                stdout.write_all(b\"\\n\")?;\n                stdout.flush()?;\n                break;\n            }",
+  "cmd": "cargo test --locked --offline --features mcp,tools --test stdin_lines -- mcp_serves_a_line_of_exactly_the_cap_and_refuses_one_byte_more"
+ },
+ {
+  "id": "lines-fix/lf-mcp-blank-lines-answered",
+  "desc": "blank lines are parsed instead of skipped",
+  "file": "src/bin/vlite-mcp.rs",
+  "old": "            Line::Text(line) if line.trim().is_empty() => continue,",
+  "new": "            Line::Text(line) if false => continue,",
+  "cmd": "cargo test --locked --offline --features mcp,tools --test stdin_lines -- mcp_skips_blank_lines_and_answers_garbage_with_a_parse_error"
+ },
+ {
+  "id": "lines-fix/lf-mcp-garbage-code",
+  "desc": "unparseable JSON is answered with -32600 instead of -32700",
+  "file": "src/bin/vlite-mcp.rs",
+  "old": "Err(_) => Some(protocol_error(Value::Null, -32700, \"Parse error\")),",
+  "new": "Err(_) => Some(protocol_error(Value::Null, -32600, \"Parse error\")),",
+  "cmd": "cargo test --locked --offline --features mcp,tools --test stdin_lines -- mcp_skips_blank_lines_and_answers_garbage_with_a_parse_error"
+ },
+ {
+  "id": "lines-fix/lf-shell-cap-8-mib",
+  "desc": "the shell cap is 8 MiB instead of 16 MiB",
+  "file": "src/bin/vlite-shell.rs",
+  "old": "const MAX_LINE_BYTES: usize = 16 * 1024 * 1024;",
+  "new": "const MAX_LINE_BYTES: usize = 8 * 1024 * 1024;",
+  "cmd": "cargo test --locked --offline --features mcp,tools --test stdin_lines -- shell_ignores_a_comment_line_of_exactly_the_cap_in_a_script_and_on_stdin"
+ },
+ {
+  "id": "lines-fix/lf-shell-cap-minus-one",
+  "desc": "the shell cap is 16 MiB - 1",
+  "file": "src/bin/vlite-shell.rs",
+  "old": "const MAX_LINE_BYTES: usize = 16 * 1024 * 1024;",
+  "new": "const MAX_LINE_BYTES: usize = 16 * 1024 * 1024 - 1;",
+  "cmd": "cargo test --locked --offline --features mcp,tools --test stdin_lines -- shell_ignores_a_comment_line_of_exactly_the_cap_in_a_script_and_on_stdin"
+ },
+ {
+  "id": "lines-fix/lf-shell-cap-plus-one",
+  "desc": "the shell cap is 16 MiB + 1",
+  "file": "src/bin/vlite-shell.rs",
+  "old": "const MAX_LINE_BYTES: usize = 16 * 1024 * 1024;",
+  "new": "const MAX_LINE_BYTES: usize = 16 * 1024 * 1024 + 1;",
+  "cmd": "cargo test --locked --offline --features mcp,tools --test stdin_lines -- shell_fails_on_an_overlong_line_in_a_script_and_on_stdin"
+ },
+ {
+  "id": "lines/shell-report-never-stops",
+  "desc": "errors never stop a script",
+  "file": "src/bin/vlite-shell.rs",
+  "old": "fn report(interactive: bool, error: Box<dyn std::error::Error>) -> Result<()> {\n    if interactive {",
+  "new": "fn report(interactive: bool, error: Box<dyn std::error::Error>) -> Result<()> {\n    if true || interactive {",
+  "cmd": "cargo test --locked --offline --features mcp,tools --test stdin_lines -- shell_fails_on_an_overlong_line_in_a_script_and_on_stdin"
+ },
+ {
+  "id": "lines/shell-report-always-stops",
+  "desc": "a terminal session stops at its first error",
+  "file": "src/bin/vlite-shell.rs",
+  "old": "fn report(interactive: bool, error: Box<dyn std::error::Error>) -> Result<()> {\n    if interactive {",
+  "new": "fn report(interactive: bool, error: Box<dyn std::error::Error>) -> Result<()> {\n    if false && interactive {",
+  "cmd": "cargo test --locked --offline --features tools --bin vlite-shell tests::a_terminal_session_goes_on_after_an_error_and_a_script_stops"
+ },
+ {
+  "id": "lines-fix/lf-mcp-cap-64-mib",
+  "desc": "the MCP cap is 64 MiB, the value before the fix",
+  "file": "src/bin/vlite-mcp.rs",
+  "old": "const MAX_LINE_BYTES: usize = 128 * 1024 * 1024;",
+  "new": "const MAX_LINE_BYTES: usize = 64 * 1024 * 1024;",
+  "cmd": "cargo test --locked --offline --features mcp,tools --test stdin_lines -- mcp_serves_a_line_of_exactly_the_cap_and_refuses_one_byte_more"
+ },
+ {
+  "id": "lines-fix/lf-mcp-cap-minus-one",
+  "desc": "the MCP cap is 128 MiB - 1",
+  "file": "src/bin/vlite-mcp.rs",
+  "old": "const MAX_LINE_BYTES: usize = 128 * 1024 * 1024;",
+  "new": "const MAX_LINE_BYTES: usize = 128 * 1024 * 1024 - 1;",
+  "cmd": "cargo test --locked --offline --features mcp,tools --test stdin_lines -- mcp_serves_a_line_of_exactly_the_cap_and_refuses_one_byte_more"
+ },
+ {
+  "id": "lines-fix/lf-mcp-cap-plus-one",
+  "desc": "the MCP cap is 128 MiB + 1",
+  "file": "src/bin/vlite-mcp.rs",
+  "old": "const MAX_LINE_BYTES: usize = 128 * 1024 * 1024;",
+  "new": "const MAX_LINE_BYTES: usize = 128 * 1024 * 1024 + 1;",
+  "cmd": "cargo test --locked --offline --features mcp,tools --test stdin_lines -- mcp_serves_a_line_of_exactly_the_cap_and_refuses_one_byte_more"
+ },
+ {
+  "id": "lines-fix/lf-mcp-cap-unbounded",
+  "desc": "the MCP cap is usize::MAX",
+  "file": "src/bin/vlite-mcp.rs",
+  "old": "const MAX_LINE_BYTES: usize = 128 * 1024 * 1024;",
+  "new": "const MAX_LINE_BYTES: usize = usize::MAX;",
+  "cmd": "cargo test --locked --offline --features mcp,tools --test stdin_lines -- mcp_serves_a_line_of_exactly_the_cap_and_refuses_one_byte_more"
+ },
+ {
+  "id": "lines-fix/lf-mcp-too-long-unanswered",
+  "desc": "an overlong line is skipped without an answer",
+  "file": "src/bin/vlite-mcp.rs",
+  "old": "            Line::TooLong => Some(protocol_error(\n                Value::Null,\n                -32600,\n                &format!(\"request line exceeds {MAX_LINE_BYTES} bytes\"),\n            )),",
+  "new": "            Line::TooLong => None,",
+  "cmd": "cargo test --locked --offline --features mcp,tools --test stdin_lines -- mcp_serves_a_line_of_exactly_the_cap_and_refuses_one_byte_more"
+ },
+ {
+  "id": "lines-fix/lf-mcp-reader-error-as-too-long",
+  "desc": "vlite-mcp answers a read error as an overlong line",
+  "file": "src/bin/vlite-mcp.rs",
+  "old": "let response = match read_bounded_line(&mut input, MAX_LINE_BYTES)? {",
+  "new": "let response = match read_bounded_line(&mut input, MAX_LINE_BYTES).unwrap_or(Line::TooLong) {",
+  "cmd": "cargo test --locked --offline --features mcp,tools --test stdin_lines -- mcp_exits_with_the_utf8_error_of_a_line_that_fits_after_answering_earlier_requests"
+ },
+ {
+  "id": "lines-fix/lf-mcp-reader-error-ends-quietly",
+  "desc": "vlite-mcp treats a read error as the end of the input",
+  "file": "src/bin/vlite-mcp.rs",
+  "old": "let response = match read_bounded_line(&mut input, MAX_LINE_BYTES)? {",
+  "new": "let response = match read_bounded_line(&mut input, MAX_LINE_BYTES).unwrap_or(Line::Eof) {",
+  "cmd": "cargo test --locked --offline --features mcp,tools --test stdin_lines -- mcp_exits_with_the_utf8_error_of_a_line_that_fits_after_answering_earlier_requests"
+ },
+ {
+  "id": "lines-fix/lf-shell-reader-error-as-too-long",
+  "desc": "vlite-shell reports a read error as an overlong line",
+  "file": "src/bin/vlite-shell.rs",
+  "old": "let line = match read_bounded_line(input, cap)? {",
+  "new": "let line = match read_bounded_line(input, cap).unwrap_or(Line::TooLong) {",
+  "cmd": "cargo test --locked --offline --features mcp,tools --test stdin_lines -- shell_exits_with_the_utf8_error_of_a_line_that_fits_in_a_script_and_on_stdin"
+ },
+ {
+  "id": "lines-fix/lf-shell-reader-error-ends-quietly",
+  "desc": "vlite-shell treats a read error as the end of the input",
+  "file": "src/bin/vlite-shell.rs",
+  "old": "let line = match read_bounded_line(input, cap)? {",
+  "new": "let line = match read_bounded_line(input, cap).unwrap_or(Line::Eof) {",
+  "cmd": "cargo test --locked --offline --features mcp,tools --test stdin_lines -- shell_exits_with_the_utf8_error_of_a_line_that_fits_in_a_script_and_on_stdin"
+ },
+ {
+  "id": "lines-fix/lf-shell-interactive-too-long-stops",
+  "desc": "a terminal session stops after an overlong line (continue becomes break)",
+  "file": "src/bin/vlite-shell.rs",
+  "old": "            Line::TooLong => {\n                report(\n                    interactive,\n                    format!(\"invalid_input: line exceeds {cap} bytes\").into(),\n                )?;\n                continue;\n            }",
+  "new": "            Line::TooLong => {\n                report(\n                    interactive,\n                    format!(\"invalid_input: line exceeds {cap} bytes\").into(),\n                )?;\n                break;\n            }",
+  "cmd": "cargo test --locked --offline --features tools --bin vlite-shell tests::an_overlong_line_is_skipped_in_a_terminal_session_and_stops_a_script"
+ },
+ {
+  "id": "lines-fix/lf-shell-continues-after-too-long",
+  "desc": "a script goes on after an overlong line, as a terminal session does",
+  "file": "src/bin/vlite-shell.rs",
+  "old": "            Line::TooLong => {\n                report(\n                    interactive,\n                    format!(\"invalid_input: line exceeds {cap} bytes\").into(),\n                )?;\n                continue;\n            }",
+  "new": "            Line::TooLong => {\n                report(\n                    true,\n                    format!(\"invalid_input: line exceeds {cap} bytes\").into(),\n                )?;\n                continue;\n            }",
+  "cmd": "cargo test --locked --offline --features mcp,tools --test stdin_lines -- shell_fails_on_an_overlong_line_in_a_script_and_on_stdin"
+ },
+ {
+  "id": "lines-fix/lf-shell-too-long-ends-quietly",
+  "desc": "an overlong line ends the run with exit code 0 and no message",
+  "file": "src/bin/vlite-shell.rs",
+  "old": "            Line::TooLong => {\n                report(\n                    interactive,\n                    format!(\"invalid_input: line exceeds {cap} bytes\").into(),\n                )?;\n                continue;\n            }",
+  "new": "            Line::TooLong => break,",
+  "cmd": "cargo test --locked --offline --features mcp,tools --test stdin_lines -- shell_fails_on_an_overlong_line_in_a_script_and_on_stdin"
+ },
+ {
+  "id": "lines-fix/lf-shell-error-text",
+  "desc": "the error text lacks the invalid_input code",
+  "file": "src/bin/vlite-shell.rs",
+  "old": "format!(\"invalid_input: line exceeds {cap} bytes\")",
+  "new": "format!(\"line exceeds {cap} bytes\")",
+  "cmd": "cargo test --locked --offline --features tools --bin vlite-shell tests::an_overlong_line_is_skipped_in_a_terminal_session_and_stops_a_script"
+ },
+ {
+  "id": "lines-fix/lf-shell-session-unbounded",
+  "desc": "run() hands the session an unbounded cap",
+  "file": "src/bin/vlite-shell.rs",
+  "old": "        interactive,\n        MAX_LINE_BYTES,\n        readonly,",
+  "new": "        interactive,\n        usize::MAX,\n        readonly,",
+  "cmd": "cargo test --locked --offline --features mcp,tools --test stdin_lines -- shell_fails_on_an_overlong_line_in_a_script_and_on_stdin"
+ },
+ {
+  "id": "lines-fix/lf-line-growth-by-need",
+  "desc": "the buffer grows by what the chunk needs, one reallocation per byte",
+  "file": "src/bin/tool_support/line.rs",
+  "old": "let wanted = (used + chunk.len()).max(self.bytes.capacity().saturating_mul(2));",
+  "new": "let wanted = used + chunk.len();",
+  "cmd": "cargo test --locked --offline --features mcp --bin vlite-mcp line::"
+ },
+ {
+  "id": "lines-fix/lf-line-growth-plus-4k",
+  "desc": "the buffer grows 4 KiB at a time",
+  "file": "src/bin/tool_support/line.rs",
+  "old": "let wanted = (used + chunk.len()).max(self.bytes.capacity().saturating_mul(2));",
+  "new": "let wanted = (used + chunk.len()).max(self.bytes.capacity() + 4096);",
+  "cmd": "cargo test --locked --offline --features mcp --bin vlite-mcp line::"
+ },
+ {
+  "id": "lines-fix/lf-line-accumulates-after-overflow",
+  "desc": "bytes keep being accumulated after the line is known to be too long",
+  "file": "src/bin/tool_support/line.rs",
+  "old": "        if self.overflowed {\n            #[cfg(test)]\n            DISCARDING.with(|held| held.set(held.get().max(Some(self.bytes.capacity()))));\n            return;\n        }\n        let used = self.bytes.len();",
+  "new": "        let used = self.bytes.len();",
+  "cmd": "cargo test --locked --offline --features mcp --bin vlite-mcp line::"
+ },
+ {
+  "id": "lines-fix/lf-line-drain-keeps-capacity",
+  "desc": "an overlong line empties its buffer but keeps the capacity while it drains",
+  "file": "src/bin/tool_support/line.rs",
+  "old": "            self.bytes = Vec::new();",
+  "new": "            self.bytes.clear();",
+  "cmd": "cargo test --locked --offline --features mcp --bin vlite-mcp line::"
+ },
+ {
+  "id": "lines-fix/lf-line-drain-allocates",
+  "desc": "an overlong line reserves a full buffer while it drains",
+  "file": "src/bin/tool_support/line.rs",
+  "old": "            self.bytes = Vec::new();",
+  "new": "            self.bytes = Vec::with_capacity(self.limit);",
+  "cmd": "cargo test --locked --offline --features mcp --bin vlite-mcp line::"
+ },
+ {
+  "id": "lines-fix/lf-dispatch-invalid-id-accepted",
+  "desc": "any id is accepted as valid",
+  "file": "src/bin/vlite-mcp.rs",
+  "old": ".is_some_and(|id| id.is_string() || id.as_i64().is_some() || id.as_u64().is_some());",
+  "new": ".is_some_and(|_| true);",
+  "cmd": "cargo test --locked --offline --features mcp --test mcp -- protocol_edge_cases_keep_their_answers"
+ },
+ {
+  "id": "lines-fix/lf-dispatch-absent-arguments-null",
+  "desc": "absent tool arguments become null instead of an empty object",
+  "file": "src/bin/vlite-mcp.rs",
+  "old": "params.remove(\"arguments\").unwrap_or_else(|| json!({}))",
+  "new": "params.remove(\"arguments\").unwrap_or(Value::Null)",
+  "cmd": "cargo test --locked --offline --features mcp --test mcp -- protocol_edge_cases_keep_their_answers"
+ },
+ {
+  "id": "lines-fix/lf-dispatch-non-object-params-accepted",
+  "desc": "non-object params are treated as empty params",
+  "file": "src/bin/vlite-mcp.rs",
+  "old": "        Some(_) => {\n            return if has_id {\n                Some(protocol_error(response_id, -32602, \"Invalid params\"))\n            } else {\n                None\n            };\n        }",
+  "new": "        Some(_) => Map::new(),",
+  "cmd": "cargo test --locked --offline --features mcp --test mcp -- protocol_edge_cases_keep_their_answers"
+ },
+ {
+  "id": "lines-fix/lf-dispatch-bad-params-notification-answered",
+  "desc": "a notification with non-object params is answered",
+  "file": "src/bin/vlite-mcp.rs",
+  "old": "                Some(protocol_error(response_id, -32602, \"Invalid params\"))\n            } else {\n                None\n            };",
+  "new": "                Some(protocol_error(response_id, -32602, \"Invalid params\"))\n            } else {\n                Some(protocol_error(Value::Null, -32602, \"Invalid params\"))\n            };",
+  "cmd": "cargo test --locked --offline --features mcp --test mcp -- protocol_edge_cases_keep_their_answers"
+ },
+ {
+  "id": "lines-fix2/lf2-line-drain-skipped-binary",
+  "desc": "an overlong line is not drained to its newline (checked through the vlite-mcp binary)",
+  "file": "src/bin/tool_support/line.rs",
+  "old": "        reader.consume(used);\n        if newline.is_some() {",
+  "new": "        reader.consume(used);\n        if line.overflowed {\n            return Ok(Line::TooLong);\n        }\n        if newline.is_some() {",
+  "cmd": "cargo test --locked --offline --features mcp,tools --test stdin_lines -- mcp_drains_longer_lines_with_crlf_and_at_the_end_of_input",
+  "same_edit_as": "lines/drain-skipped"
+ },
+ {
+  "id": "lines-fix2/lf2-line-growth-fixed-step",
+  "desc": "the buffer grows by a fixed 64 KiB step instead of doubling",
+  "file": "src/bin/tool_support/line.rs",
+  "old": "let wanted = (used + chunk.len()).max(self.bytes.capacity().saturating_mul(2));",
+  "new": "let wanted = (used + chunk.len()).max(self.bytes.capacity() + (1 << 16));",
+  "cmd": "cargo test --locked --offline --features mcp --bin vlite-mcp line::"
+ },
+ {
+  "id": "lines-fix2/lf2-dispatch-params-cloned",
+  "desc": "dispatch copies the params of a request instead of taking them",
+  "file": "src/bin/vlite-mcp.rs",
+  "old": "match object.remove(\"params\") {",
+  "new": "match object.get(\"params\").cloned() {",
+  "cmd": "cargo test --locked --offline --features mcp --bin vlite-mcp tests::dispatch_"
+ },
+ {
+  "id": "lines-fix2/lf2-dispatch-arguments-cloned",
+  "desc": "dispatch copies the arguments of a tool call instead of taking them",
+  "file": "src/bin/vlite-mcp.rs",
+  "old": "params.remove(\"arguments\").unwrap_or_else(|| json!({}))",
+  "new": "params.get(\"arguments\").cloned().unwrap_or_else(|| json!({}))",
+  "cmd": "cargo test --locked --offline --features mcp --bin vlite-mcp tests::dispatch_"
+ },
+ {
+  "id": "lines-fix2/lf2-parse-vector-cloned",
+  "desc": "parse_vector copies the vector value before reading it",
+  "file": "src/bin/vlite-mcp.rs",
+  "old": "Vec::<f32>::deserialize(value)",
+  "new": "serde_json::from_value::<Vec<f32>>(value.clone())",
+  "cmd": "cargo test --locked --offline --features mcp --bin vlite-mcp tests::dispatch_"
+ },
+ {
+  "id": "lines-fix2/lf2-parse-conditions-cloned",
+  "desc": "parse_conditions copies the filter value before reading it",
+  "file": "src/bin/vlite-mcp.rs",
+  "old": "Vec::<Condition>::deserialize(value)",
+  "new": "serde_json::from_value::<Vec<Condition>>(value.clone())",
+  "cmd": "cargo test --locked --offline --features mcp --bin vlite-mcp tests::dispatch_"
+ },
+ {
+  "id": "lines-fix2/lf2-parse-metadata-cloned",
+  "desc": "parse_metadata copies the metadata value before reading it",
+  "file": "src/bin/vlite-mcp.rs",
+  "old": "Metadata::deserialize(value)",
+  "new": "serde_json::from_value::<Metadata>(value.clone())",
+  "cmd": "cargo test --locked --offline --features mcp --bin vlite-mcp tests::dispatch_"
+ },
+ {
+  "id": "import/cap-8-mib",
+  "desc": "the cap is 8 MiB instead of 16 MiB",
+  "file": "src/bin/vlite-import.rs",
+  "old": "const MAX_LINE_BYTES: usize = 16 * 1024 * 1024;",
+  "new": "const MAX_LINE_BYTES: usize = 8 * 1024 * 1024;",
+  "cmd": "cargo test --locked --offline --features tools --test import_lines -- jsonl_line_of_exactly_the_cap_is_imported_with_lf_and_crlf"
+ },
+ {
+  "id": "import/cap-minus-one",
+  "desc": "the cap is 16 MiB - 1",
+  "file": "src/bin/vlite-import.rs",
+  "old": "const MAX_LINE_BYTES: usize = 16 * 1024 * 1024;",
+  "new": "const MAX_LINE_BYTES: usize = 16 * 1024 * 1024 - 1;",
+  "cmd": "cargo test --locked --offline --features tools --test import_lines -- jsonl_line_of_exactly_the_cap_is_imported_with_lf_and_crlf"
+ },
+ {
+  "id": "import/cap-plus-one",
+  "desc": "the cap is 16 MiB + 1",
+  "file": "src/bin/vlite-import.rs",
+  "old": "const MAX_LINE_BYTES: usize = 16 * 1024 * 1024;",
+  "new": "const MAX_LINE_BYTES: usize = 16 * 1024 * 1024 + 1;",
+  "cmd": "cargo test --locked --offline --features tools --test import_lines -- jsonl_line_over_the_cap_is_rejected_with_its_number_and_nothing_is_published"
+ },
+ {
+  "id": "import/cap-unbounded",
+  "desc": "no cap: usize::MAX",
+  "file": "src/bin/vlite-import.rs",
+  "old": "const MAX_LINE_BYTES: usize = 16 * 1024 * 1024;",
+  "new": "const MAX_LINE_BYTES: usize = usize::MAX;",
+  "cmd": "cargo test --locked --offline --features tools --test import_lines -- jsonl_line_over_the_cap_is_rejected_with_its_number_and_nothing_is_published"
+ },
+ {
+  "id": "import/jsonl-unbounded",
+  "desc": "the jsonl path reads without a cap",
+  "file": "src/bin/vlite-import.rs",
+  "old": "let line = match read_bounded_line(&mut input, MAX_LINE_BYTES)? {",
+  "new": "let line = match read_bounded_line(&mut input, if format == \"jsonl\" { usize::MAX } else { MAX_LINE_BYTES })? {",
+  "cmd": "cargo test --locked --offline --features tools --test import_lines -- jsonl_line_over_the_cap_is_rejected_with_its_number_and_nothing_is_published"
+ },
+ {
+  "id": "import/copy-unbounded",
+  "desc": "the copy path reads without a cap",
+  "file": "src/bin/vlite-import.rs",
+  "old": "let line = match read_bounded_line(&mut input, MAX_LINE_BYTES)? {",
+  "new": "let line = match read_bounded_line(&mut input, if format == \"copy\" { usize::MAX } else { MAX_LINE_BYTES })? {",
+  "cmd": "cargo test --locked --offline --features tools --test import_lines -- copy_line_over_the_cap_is_rejected_with_its_number_and_nothing_is_published"
+ },
+ {
+  "id": "import/overlong-skipped",
+  "desc": "an overlong line is skipped silently instead of rejected",
+  "file": "src/bin/vlite-import.rs",
+  "old": "                Line::TooLong => {\n                    accept(Err(LineTooLong.into()), number);\n                    continue;\n                }",
+  "new": "                Line::TooLong => continue,",
+  "cmd": "cargo test --locked --offline --features tools --test import_lines -- jsonl_line_over_the_cap_is_rejected_with_its_number_and_nothing_is_published"
+ },
+ {
+  "id": "import/overlong-not-drained",
+  "desc": "the reader returns at once for an overlong line, leaving its tail to be read as the next line",
+  "file": "src/bin/tool_support/line.rs",
+  "old": "        reader.consume(used);\n        if newline.is_some() {",
+  "new": "        reader.consume(used);\n        if line.overflowed {\n            return Ok(Line::TooLong);\n        }\n        if newline.is_some() {",
+  "cmd": "cargo test --locked --offline --features tools --test import_lines -- jsonl_overlong_lines_are_numbered_like_every_line_and_reading_goes_on",
+  "same_edit_as": "lines/drain-skipped"
+ },
+ {
+  "id": "import/line-number-off-by-one",
+  "desc": "line numbers start at 2",
+  "file": "src/bin/vlite-import.rs",
+  "old": "        let mut number = 0;\n        loop {\n            number += 1;",
+  "new": "        let mut number = 1;\n        loop {\n            number += 1;",
+  "cmd": "cargo test --locked --offline --features tools --test import_lines -- jsonl_line_over_the_cap_is_rejected_with_its_number_and_nothing_is_published"
+ },
+ {
+  "id": "import/skipped-lines-not-counted",
+  "desc": "COPY header, blank and terminator lines are not counted in the line number",
+  "file": "src/bin/vlite-import.rs",
+  "old": "            if format == \"copy\" && (line.starts_with(\"COPY \") || line == \"\\\\.\" || line.is_empty()) {\n                continue;\n            }",
+  "new": "            if format == \"copy\" && (line.starts_with(\"COPY \") || line == \"\\\\.\" || line.is_empty()) {\n                number -= 1;\n                continue;\n            }",
+  "cmd": "cargo test --locked --offline --features tools --test import_lines -- copy_overlong_lines_are_numbered_like_every_line_and_reading_goes_on"
+ },
+ {
+  "id": "import/message-without-number",
+  "desc": "the rejection message does not name the line",
+  "file": "src/bin/vlite-import.rs",
+  "old": "Some(too_long) => eprintln!(\"rejected row {number}: {too_long}\"),",
+  "new": "Some(too_long) => eprintln!(\"rejected row: {too_long}\"),",
+  "cmd": "cargo test --locked --offline --features tools --test import_lines -- jsonl_line_over_the_cap_is_rejected_with_its_number_and_nothing_is_published"
+ },
+ {
+  "id": "import/overlong-not-counted",
+  "desc": "an overlong line is reported but does not count as a rejected row",
+  "file": "src/bin/vlite-import.rs",
+  "old": "        Err(error) => {\n            rejected += 1;\n            if rejected <= 20 {",
+  "new": "        Err(error) => {\n            if error.downcast_ref::<LineTooLong>().is_none() {\n                rejected += 1;\n            }\n            if rejected <= 20 {",
+  "cmd": "cargo test --locked --offline --features tools --test import_lines -- jsonl_line_over_the_cap_is_rejected_with_its_number_and_nothing_is_published"
+ },
+ {
+  "id": "import/twenty-one-messages",
+  "desc": "one message too many is reported",
+  "file": "src/bin/vlite-import.rs",
+  "old": "if rejected <= 20 {",
+  "new": "if rejected <= 21 {",
+  "cmd": "cargo test --locked --offline --features tools --test import_lines -- overlong_lines_count_toward_the_twenty_reported_rejections"
+ },
+ {
+  "id": "import/nineteen-messages",
+  "desc": "one message too few is reported",
+  "file": "src/bin/vlite-import.rs",
+  "old": "if rejected <= 20 {",
+  "new": "if rejected <= 19 {",
+  "cmd": "cargo test --locked --offline --features tools --test import_lines -- overlong_lines_count_toward_the_twenty_reported_rejections"
+ },
+ {
+  "id": "import/copy-header-not-skipped",
+  "desc": "a COPY header line is parsed as a row",
+  "file": "src/bin/vlite-import.rs",
+  "old": "line.starts_with(\"COPY \") || ",
+  "new": "",
+  "cmd": "cargo test --locked --offline --features tools --test import_lines -- copy_line_of_exactly_the_cap_is_imported_with_lf_and_crlf"
+ },
+ {
+  "id": "import/copy-terminator-not-skipped",
+  "desc": "the COPY terminator line is parsed as a row",
+  "file": "src/bin/vlite-import.rs",
+  "old": " || line == \"\\\\.\"",
+  "new": "",
+  "cmd": "cargo test --locked --offline --features tools --test import_lines -- copy_line_of_exactly_the_cap_is_imported_with_lf_and_crlf"
+ },
+ {
+  "id": "import/copy-blank-line-rejected",
+  "desc": "a blank COPY line is parsed as a row",
+  "file": "src/bin/vlite-import.rs",
+  "old": " || line.is_empty()",
+  "new": "",
+  "cmd": "cargo test --locked --offline --features tools --test import_lines -- copy_overlong_lines_are_numbered_like_every_line_and_reading_goes_on"
+ },
+ {
+  "id": "import/pgvector-read-as-lines",
+  "desc": "pgvector files are read by the line reader",
+  "file": "src/bin/vlite-import.rs",
+  "old": "if matches!(format, \"csv\" | \"pgvector\") {",
+  "new": "if matches!(format, \"csv\") {",
+  "cmd": "cargo test --locked --offline --features tools --test import_lines -- csv_and_pgvector_records_longer_than_the_cap_are_imported"
+ },
+ {
+  "id": "import/utf8-error-becomes-overlong",
+  "desc": "an I/O error such as invalid UTF-8 is reported as an overlong line",
+  "file": "src/bin/vlite-import.rs",
+  "old": "let line = match read_bounded_line(&mut input, MAX_LINE_BYTES)? {",
+  "new": "let line = match read_bounded_line(&mut input, MAX_LINE_BYTES).unwrap_or(Line::TooLong) {",
+  "cmd": "cargo test --locked --offline --features tools --test import_lines -- invalid_utf8_in_a_line_that_fits_is_still_the_io_error"
+ },
+ {
+  "id": "actor/m01-session-actor-is-admin-token",
+  "desc": "A super-admin dashboard session is logged as admin_token (the principal is ignored in the shared helper).",
+  "file": "src/server/audit.rs",
+  "old": "(admin::Role::Admin, Some(principal)) => format!(\"user:{}\", principal.user_id),",
+  "new": "(admin::Role::Admin, Some(_)) => \"admin_token\".to_owned(),",
+  "cmd": "cargo test --locked --offline --features server --test server_audit_actor"
+ },
+ {
+  "id": "actor/m02-actor-replaces-principal",
+  "desc": "The kv event's principal field takes the actor's value: actor replaces principal instead of adding to it.",
+  "file": "src/server/kv.rs",
+  "old": "\"request_id\":request_id.0,\"principal\":principal,",
+  "new": "\"request_id\":request_id.0,\"principal\":actor,",
+  "cmd": "cargo test --locked --offline --features server --test server_kv kv_put_audit_records_safe_identity_and_expiry"
+ },
+ {
+  "id": "actor/m03-username-in-actor",
+  "desc": "The signed-in user name is appended to the session actor.",
+  "file": "src/server/audit.rs",
+  "old": "(admin::Role::Admin, Some(principal)) => format!(\"user:{}\", principal.user_id),",
+  "new": "(admin::Role::Admin, Some(principal)) => format!(\"user:{}:{}\", principal.user_id, principal.username),",
+  "cmd": "cargo test --locked --offline --features server --test server_audit_actor"
+ },
+ {
+  "id": "actor/m04-session-key-in-principal-id",
+  "desc": "The secret session key is appended (hex) to the principal's user id, so it reaches every actor and event built from it.",
+  "file": "src/server/users.rs",
+  "old": "        principal: Principal {\n            user_id: account.id,",
+  "new": "        principal: Principal {\n            user_id: format!(\"{}:{}\", account.id, hex(&key)),",
+  "cmd": "cargo test --locked --offline --features server --test server_audit_actor"
+ },
+ {
+  "id": "actor/m05-read-only-as-admin-token",
+  "desc": "The read-only role is logged as admin_token.",
+  "file": "src/server/audit.rs",
+  "old": "(admin::Role::ReadOnly, _) => \"read_only_token\".to_owned(),",
+  "new": "(admin::Role::ReadOnly, _) => \"admin_token\".to_owned(),",
+  "cmd": "cargo test --locked --offline --features server --lib server::audit::tests::actor_names_every_role_and_principal_combination"
+ },
+ {
+  "id": "actor/m06-scoped-id-constant",
+  "desc": "A scoped grant's id is replaced by a constant.",
+  "file": "src/server/audit.rs",
+  "old": "(admin::Role::Scoped(grant), _) => grant.id.clone(),",
+  "new": "(admin::Role::Scoped(_), _) => \"scoped\".to_owned(),",
+  "cmd": "cargo test --locked --offline --features server --test server_audit_actor"
+ },
+ {
+  "id": "actor/m07-grpc-kv-adapter-wrong-identity",
+  "desc": "The gRPC PutKvEntry adapter hands the REST handler the read-only role instead of the authenticated caller, so the write is attributed to an identity that never made it.",
+  "file": "src/server/grpc/kv.rs",
+  "old": "rest::save(\n                    State(service),\n                    Extension(role),",
+  "new": "rest::save(\n                    State(service),\n                    Extension(admin::Role::ReadOnly),",
+  "cmd": "cargo test --locked --offline --features grpc --test server_audit_actor"
+ },
+ {
+  "id": "actor/m08-save-ignores-session",
+  "desc": "The REST kv put handler drops the session principal before auditing.",
+  "file": "src/server/kv.rs",
+  "old": "            expires_at_ms: options.expires_at_ms,\n            principal: principal.as_ref().map(|Extension(principal)| principal),",
+  "new": "            expires_at_ms: options.expires_at_ms,\n            principal: None,",
+  "cmd": "cargo test --locked --offline --features server --test server_audit_actor"
+ },
+ {
+  "id": "actor/m09-remove-ignores-session",
+  "desc": "The REST kv delete handler drops the session principal before auditing.",
+  "file": "src/server/kv.rs",
+  "old": "            operation: \"kv_delete\",\n            expires_at_ms: None,\n            principal: principal.as_ref().map(|Extension(principal)| principal),",
+  "new": "            operation: \"kv_delete\",\n            expires_at_ms: None,\n            principal: None,",
+  "cmd": "cargo test --locked --offline --features server --test server_audit_actor"
+ },
+ {
+  "id": "actor/m10-kv-audit-ignores-session",
+  "desc": "The kv audit function passes no principal to the helper (a session is treated like the bootstrap token).",
+  "file": "src/server/kv.rs",
+  "old": "let actor = audit::actor(role, details.principal);",
+  "new": "let actor = audit::actor(role, None);",
+  "cmd": "cargo test --locked --offline --features server --test server_audit_actor"
+ },
+ {
+  "id": "actor/m11-create-event-keeps-role-name",
+  "desc": "collection_created keeps the old role-name value instead of the shared actor.",
+  "file": "src/server/collections.rs",
+  "old": "    let actor = audit::actor(&role, principal);\n    let quota_service = service.clone();",
+  "new": "    let actor = role.name().to_owned();\n    let quota_service = service.clone();",
+  "cmd": "cargo test --locked --offline --features server --test server_audit_actor"
+ },
+ {
+  "id": "actor/m12-drop-event-keeps-role-name",
+  "desc": "collection_dropped keeps the old role-name value instead of the shared actor.",
+  "file": "src/server/collections.rs",
+  "old": "    let actor = audit::actor(&role, principal);\n    let bindings = service.memory_bindings.clone();",
+  "new": "    let actor = role.name().to_owned();\n    let bindings = service.memory_bindings.clone();",
+  "cmd": "cargo test --locked --offline --features server --test server_audit_actor"
+ },
+ {
+  "id": "actor/m13-settings-event-keeps-role-name",
+  "desc": "collection_settings_changed keeps the old role-name value instead of the shared actor.",
+  "file": "src/server/collections.rs",
+  "old": "    let actor = audit::actor(&role, session);",
+  "new": "    let actor = role.name().to_owned();",
+  "cmd": "cargo test --locked --offline --features server --test server_audit_actor"
+ },
+ {
+  "id": "actor/m14-create-handler-ignores-session",
+  "desc": "The REST create-collection handler passes no session principal to create_core.",
+  "file": "src/server/collections.rs",
+  "old": "    let info = create_core(&service, role, session, input).await?;",
+  "new": "    let info = create_core(&service, role, None, input).await?;",
+  "cmd": "cargo test --locked --offline --features server --test server_audit_actor"
+ },
+ {
+  "id": "actor/m15-drop-handler-ignores-session",
+  "desc": "The REST drop-collection handler passes no session principal to drop_core.",
+  "file": "src/server/collections.rs",
+  "old": "    drop_core(&service, role, session, target).await?;",
+  "new": "    drop_core(&service, role, None, target).await?;",
+  "cmd": "cargo test --locked --offline --features server --test server_audit_actor"
+ },
+ {
+  "id": "actor/m16-settings-handler-ignores-session",
+  "desc": "The REST settings handler passes no session principal to the helper.",
+  "file": "src/server/collections.rs",
+  "old": "    let actor = audit::actor(&role, session);",
+  "new": "    let actor = audit::actor(&role, None);",
+  "cmd": "cargo test --locked --offline --features server --test server_audit_actor"
+ },
+ {
+  "id": "actor/m17-credential-denied-loses-actor",
+  "desc": "The credential_denied event no longer carries an actor.",
+  "file": "src/server.rs",
+  "old": "                    \"actor\":audit::actor(role, None),\n                    \"method\":method,\"route\":route,\"request_id\":request_id}),",
+  "new": "                    \"method\":method,\"route\":route,\"request_id\":request_id}),",
+  "cmd": "cargo test --locked --offline --features server --test server_audit_actor"
+ },
+ {
+  "id": "actor/m18-account-wrapper-wrong-encoding",
+  "desc": "The users.rs wrapper calls the shared helper with the read-only role, so account events read read_only_token.",
+  "file": "src/server/users.rs",
+  "old": "        &admin::Role::Admin,\n        principal.as_ref().map(|Extension(principal)| principal),\n    )\n}",
+  "new": "        &admin::Role::ReadOnly,\n        principal.as_ref().map(|Extension(principal)| principal),\n    )\n}",
+  "cmd": "cargo test --locked --offline --features server --test server_audit_actor"
+ },
+ {
+  "id": "actor/m19-user-prefix-dropped",
+  "desc": "The user: prefix is dropped from a session actor.",
+  "file": "src/server/audit.rs",
+  "old": "(admin::Role::Admin, Some(principal)) => format!(\"user:{}\", principal.user_id),",
+  "new": "(admin::Role::Admin, Some(principal)) => principal.user_id.clone(),",
+  "cmd": "cargo test --locked --offline --features server --test server_audit_actor"
+ },
+ {
+  "id": "actor/m20-admin-token-reads-admin",
+  "desc": "A caller without a session (bootstrap token, insecure local mode) is logged with the old role label admin instead of admin_token.",
+  "file": "src/server/audit.rs",
+  "old": "(admin::Role::Admin, None) => \"admin_token\".to_owned(),",
+  "new": "(admin::Role::Admin, None) => \"admin\".to_owned(),",
+  "cmd": "cargo test --locked --offline --features server --test server_audit_actor"
+ },
+ {
+  "id": "actor/m21-credential-token-in-audit",
+  "desc": "The credential_created event leaks the credential's secret token (shows the whole-file secret scan has teeth).",
+  "file": "src/server/credentials.rs",
+  "old": "\"expires_unix_ms\":entry.expires_unix_ms});",
+  "new": "\"expires_unix_ms\":entry.expires_unix_ms,\"token\":token});",
+  "cmd": "cargo test --locked --offline --features server --test server_audit_actor"
+ },
+ {
+  "id": "actor/m22-grpc-create-collection-wrong-identity",
+  "desc": "The gRPC CreateCollection adapter hands create_core the read-only role instead of the authenticated caller.",
+  "file": "src/server/grpc.rs",
+  "old": "collections::create_core(&service, role, None, input).await?,",
+  "new": "collections::create_core(&service, admin::Role::ReadOnly, None, input).await?,",
+  "cmd": "cargo test --locked --offline --features grpc --test server_audit_actor"
+ },
+ {
+  "id": "slots/S5-M1",
+  "desc": "counter incremented for every 409 instead of only kv_slots_exhausted",
+  "file": "src/server.rs",
+  "old": "    if code == Some(\"kv_slots_exhausted\") {",
+  "new": "    if status == StatusCode::CONFLICT {",
+  "cmd": "cargo test --locked --offline --features server --test server_kv_slots"
+ },
+ {
+  "id": "slots/S5-M2",
+  "desc": "counter not incremented for gRPC requests",
+  "file": "src/server.rs",
+  "old": "    if code == Some(\"kv_slots_exhausted\") {",
+  "new": "    if code == Some(\"kv_slots_exhausted\") && method != \"grpc\" {",
+  "cmd": "cargo test --locked --offline --features grpc --test server_kv_slots grpc::"
+ },
+ {
+  "id": "slots/S5-M3",
+  "desc": "counter incremented twice per failed request",
+  "file": "src/server.rs",
+  "old": "            .kv_slots_exhausted\n            .fetch_add(1, Ordering::Relaxed);",
+  "new": "            .kv_slots_exhausted\n            .fetch_add(2, Ordering::Relaxed);",
+  "cmd": "cargo test --locked --offline --features server --test server_kv_slots"
+ },
+ {
+  "id": "slots/S5-M4",
+  "desc": "counter also incremented by successful requests",
+  "file": "src/server.rs",
+  "old": "    if code == Some(\"kv_slots_exhausted\") {",
+  "new": "    if code == Some(\"kv_slots_exhausted\") || status.is_success() {",
+  "cmd": "cargo test --locked --offline --features server --test server_kv_slots"
+ },
+ {
+  "id": "slots/S5-M5",
+  "desc": "slot reuse gate removed: the slot of an expired entry is never reused",
+  "file": "src/kv.rs",
+  "old": "            Some(_) if expired => {",
+  "new": "            Some(_) if false => {",
+  "cmd": "cargo test --locked --offline --test kv_slots"
+ },
+ {
+  "id": "slots/S5-M6",
+  "desc": "kv_slots_exhausted mapped to HTTP 500",
+  "file": "src/server.rs",
+  "old": "            Error::KvSlotsExhausted => Self::new(\n                StatusCode::CONFLICT,",
+  "new": "            Error::KvSlotsExhausted => Self::new(\n                StatusCode::INTERNAL_SERVER_ERROR,",
+  "cmd": "cargo test --locked --offline --features server --test server_kv_slots"
+ },
+ {
+  "id": "slots/S5-M7",
+  "desc": "metric key renamed in the JSON snapshot",
+  "file": "src/server/observability.rs",
+  "old": "value[\"kv_slots_exhausted_total\"]",
+  "new": "value[\"kv_slot_exhausted_total\"]",
+  "cmd": "cargo test --locked --offline --features server --test server_kv_slots"
+ },
+ {
+  "id": "slots/S5-M8",
+  "desc": "a record that is not an entry becomes reusable once it has expired",
+  "file": "src/kv.rs",
+  "old": "            Some(_) if expired => {",
+  "new": "            _ if expired => {",
+  "cmd": "cargo test --locked --offline --test kv_slots"
+ },
+ {
+  "id": "slots/S5-M9",
+  "desc": "a live entry of another key is reusable (overwritten by a new key)",
+  "file": "src/kv.rs",
+  "old": "            Some(_) if expired => {",
+  "new": "            Some(_) => {",
+  "cmd": "cargo test --locked --offline --test kv_slots"
+ },
+ {
+  "id": "slots/S5-M10",
+  "desc": "probe treats an entry as expired only after its deadline, not at it",
+  "file": "src/kv.rs",
+  "old": "            .is_some_and(|expiry| *expiry <= now_ms);",
+  "new": "            .is_some_and(|expiry| *expiry < now_ms);",
+  "cmd": "cargo test --locked --offline --test kv_slots"
+ },
+ {
+  "id": "slots/S5-M11",
+  "desc": "audit outcome of a failed put no longer names the error code",
+  "file": "src/server/kv.rs",
+  "old": "result.as_ref().map_or_else(|error| error.code, |_| \"ok\");",
+  "new": "result.as_ref().map_or_else(|_| \"error\", |_| \"ok\");",
+  "cmd": "cargo test --locked --offline --features server --test server_kv_slots"
+ },
+ {
+  "id": "expiry-fix/ef-s6-due-check-removed",
+  "desc": "S6-M1: the due check is removed; the put is written and the read-back fails",
+  "file": "src/server/record_put.rs",
+  "old": "    ensure_expiry_after(expires_at_ms, now_ms)\n}",
+  "new": "    let _ = (expires_at_ms, now_ms);\n    Ok(())\n}",
+  "cmd": "cargo test --locked --offline --features server --test server_record_expiry"
+ },
+ {
+  "id": "expiry-fix/ef-s6-boundary-lt",
+  "desc": "S6-M2: an expiry equal to the clock is accepted (<= changed to <)",
+  "file": "src/server/record_put.rs",
+  "old": "    if expires_at_ms <= now_ms {",
+  "new": "    if expires_at_ms < now_ms {",
+  "cmd": "cargo test --locked --offline --features server --lib server::record_put::"
+ },
+ {
+  "id": "expiry-fix/ef-s6-kv-route-refusal",
+  "desc": "S6-M3: the refusal is also applied to the key-value put route",
+  "file": "src/server/kv.rs",
+  "old": "            let now = crate::current_time_ms();\n            let slot = db",
+  "new": "            let now = crate::current_time_ms();\n            if let Some(expiry) = options.expires_at_ms {\n                super::record_put::ensure_expiry_after(expiry, now)?;\n            }\n            let slot = db",
+  "cmd": "cargo test --locked --offline --features server --test server_kv --test server_record_expiry"
+ },
+ {
+  "id": "expiry-fix/ef-s6-precedence-swapped",
+  "desc": "S6-M5: the due check runs before the format-version gate",
+  "file": "src/server/record_put.rs",
+  "old": "    db.ensure_mutable_in(collection)?;\n    if db.format_version() < crate::format::V5 {",
+  "new": "    db.ensure_mutable_in(collection)?;\n    ensure_expiry_after(expires_at_ms, now_ms)?;\n    if db.format_version() < crate::format::V5 {",
+  "cmd": "cargo test --locked --offline --features server --test server_record_expiry"
+ },
+ {
+  "id": "expiry-fix/ef-s6-readback-wall-clock",
+  "desc": "S6-M6: the ETag read-back uses the wall clock instead of the write's clock reading",
+  "file": "src/server/record_put.rs",
+  "old": "current_etag_at(db, ident, collection, id, now_ms)?",
+  "new": "current_etag(db, ident, collection, id)?",
+  "cmd": "cargo test --locked --offline --features server --lib server::record_put::"
+ },
+ {
+  "id": "expiry/S6-M7",
+  "desc": "ttl_ms 0 is treated as no expiry instead of already due",
+  "file": "src/server.rs",
+  "old": "    if let Some(ttl) = input.ttl_ms {",
+  "new": "    if let Some(ttl) = input.ttl_ms.filter(|ttl| *ttl > 0) {",
+  "cmd": "cargo test --locked --offline --features server --test server_record_expiry"
+ },
+ {
+  "id": "expiry-fix/ef-s6-precondition-dropped",
+  "desc": "S6-M9: a failed precondition no longer outranks the refusal",
+  "file": "src/server/record_put.rs",
+  "old": "    expected.check(db.revision_in(collection, id)?)?;\n",
+  "new": "    let _ = expected;\n",
+  "cmd": "cargo test --locked --offline --features grpc --test server_record_expiry grpc::"
+ },
+ {
+  "id": "expiry-fix/ef-s6-attached-dropped",
+  "desc": "S6-M10: a graph-attached record no longer keeps the engine's own refusal",
+  "file": "src/server/record_put.rs",
+  "old": "    if db.is_attached(collection, id) {\n        return Err(Error::GraphAttachedRecordExpiry.into());\n    }\n",
+  "new": "",
+  "cmd": "cargo test --locked --offline --features server --test server_record_expiry"
+ },
+ {
+  "id": "expiry-fix/ef-s6-read-only-dropped",
+  "desc": "S6-M11: a read-only handle no longer refuses ahead of the deadline",
+  "file": "src/server/record_put.rs",
+  "old": "    if db.is_read_only() {\n        return Err(Error::ReadOnly.into());\n    }\n",
+  "new": "",
+  "cmd": "cargo test --locked --offline --features server --test server_record_expiry"
+ },
+ {
+  "id": "expiry-fix/ef-early-return-removed",
+  "desc": "A: the helper no longer returns at once for a later deadline, so a put that is not due is judged here too",
+  "file": "src/server/record_put.rs",
+  "old": "    if expires_at_ms > now_ms {\n        return Ok(());\n    }\n    db.ensure_mutable_in(collection)?;",
+  "new": "    db.ensure_mutable_in(collection)?;",
+  "cmd": "cargo test --locked --offline --features server --lib server::record_put::"
+ },
+ {
+  "id": "expiry-fix/ef-boundary-ge",
+  "desc": "A: an expiry equal to the clock counts as later (> changed to >=) and is not refused",
+  "file": "src/server/record_put.rs",
+  "old": "    if expires_at_ms > now_ms {\n        return Ok(());",
+  "new": "    if expires_at_ms >= now_ms {\n        return Ok(());",
+  "cmd": "cargo test --locked --offline --features server --lib server::record_put::"
+ },
+ {
+  "id": "expiry-fix/ef-attached-before-expected",
+  "desc": "D1: the attachment is judged before the precondition (the engine judges the precondition first)",
+  "file": "src/server/record_put.rs",
+  "old": "    expected.check(db.revision_in(collection, id)?)?;\n    if db.is_attached(collection, id) {\n        return Err(Error::GraphAttachedRecordExpiry.into());\n    }",
+  "new": "    if db.is_attached(collection, id) {\n        return Err(Error::GraphAttachedRecordExpiry.into());\n    }\n    expected.check(db.revision_in(collection, id)?)?;",
+  "cmd": "cargo test --locked --offline --features server --lib server::record_put::"
+ },
+ {
+  "id": "expiry-fix/ef-read-only-first",
+  "desc": "A3: a read-only handle is refused before the precondition and the validation (the engine reads the mode at commit)",
+  "file": "src/server/record_put.rs",
+  "old": "    db.ensure_mutable_in(collection)?;\n    if db.format_version() < crate::format::V5 {",
+  "new": "    db.ensure_mutable_in(collection)?;\n    if db.is_read_only() {\n        return Err(Error::ReadOnly.into());\n    }\n    if db.format_version() < crate::format::V5 {",
+  "cmd": "cargo test --locked --offline --features server --lib server::record_put::"
+ },
+ {
+  "id": "expiry-fix/ef-old-helper-order",
+  "desc": "A: the helper of the first release of the fix (no early return, no validation, read-only before the precondition); only the REST and gRPC tests run",
+  "file": "src/server/record_put.rs",
+  "old": "    if expires_at_ms > now_ms {\n        return Ok(());\n    }\n    db.ensure_mutable_in(collection)?;\n    if db.format_version() < crate::format::V5 {\n        return Err(Error::ExpiryRequiresUpgrade.into());\n    }\n    let state = db.state(collection);\n    crate::validate_stored(state.dimensions, state.precision, vector)?;\n    if payload.len() > MAX_PAYLOAD_BYTES {\n        return Err(Error::PayloadTooLarge(payload.len()).into());\n    }\n    crate::metadata::validate(metadata)?;\n    expected.check(db.revision_in(collection, id)?)?;\n    if db.is_attached(collection, id) {\n        return Err(Error::GraphAttachedRecordExpiry.into());\n    }\n    if db.is_read_only() {\n        return Err(Error::ReadOnly.into());\n    }\n    ensure_expiry_after(expires_at_ms, now_ms)\n}",
+  "new": "    let _ = (vector, payload, metadata);\n    db.ensure_mutable_in(collection)?;\n    if db.format_version() < crate::format::V5 {\n        return Err(Error::ExpiryRequiresUpgrade.into());\n    }\n    if db.is_read_only() {\n        return Err(Error::ReadOnly.into());\n    }\n    expected.check(db.revision_in(collection, id)?)?;\n    if db.is_attached(collection, id) {\n        return Err(Error::GraphAttachedRecordExpiry.into());\n    }\n    ensure_expiry_after(expires_at_ms, now_ms)\n}",
+  "cmd": "cargo test --locked --offline --features grpc --test server_record_expiry"
+ },
+ {
+  "id": "expiry-fix/ef-vector-check-removed",
+  "desc": "D2: the helper does not validate the vector of a due put (differential helper drift)",
+  "file": "src/server/record_put.rs",
+  "old": "    let state = db.state(collection);\n    crate::validate_stored(state.dimensions, state.precision, vector)?;\n",
+  "new": "    let _ = vector;\n",
+  "cmd": "cargo test --locked --offline --features server --lib server::record_put::"
+ },
+ {
+  "id": "expiry-fix/ef-payload-check-removed",
+  "desc": "D2: the helper does not check the payload size of a due put (differential helper drift)",
+  "file": "src/server/record_put.rs",
+  "old": "    if payload.len() > MAX_PAYLOAD_BYTES {\n        return Err(Error::PayloadTooLarge(payload.len()).into());\n    }\n    crate::metadata::validate(metadata)?;",
+  "new": "    let _ = payload;\n    crate::metadata::validate(metadata)?;",
+  "cmd": "cargo test --locked --offline --features server --lib server::record_put::"
+ },
+ {
+  "id": "expiry-fix/ef-metadata-check-removed",
+  "desc": "D2: the helper does not validate the metadata of a due put (differential helper drift)",
+  "file": "src/server/record_put.rs",
+  "old": "    crate::metadata::validate(metadata)?;\n",
+  "new": "    let _ = metadata;\n",
+  "cmd": "cargo test --locked --offline --features server --lib server::record_put::"
+ },
+ {
+  "id": "expiry-fix/ef-ensure-mutable-removed",
+  "desc": "D3: the helper no longer asks the handle first (a poisoned handle with a v4 file answers upgrade_required)",
+  "file": "src/server/record_put.rs",
+  "old": "    db.ensure_mutable_in(collection)?;\n    if db.format_version() < crate::format::V5 {",
+  "new": "    if db.format_version() < crate::format::V5 {",
+  "cmd": "cargo test --locked --offline --features server --lib server::record_put::"
+ },
+ {
+  "id": "expiry-fix/ef-precondition-not-passed-to-engine",
+  "desc": "D2: the put does not hand its precondition to the engine on the expiring path",
+  "file": "src/server/record_put.rs",
+  "old": "            Some(expires_at_ms),\n            expected,\n        )?;",
+  "new": "            Some(expires_at_ms),\n            Expected::Any,\n        )?;",
+  "cmd": "cargo test --locked --offline --features server --lib server::record_put::"
+ },
+ {
+  "id": "expiry-fix/ef-message-ttl-clause",
+  "desc": "C: the refusal names ttl_ms again (wrong for gRPC) and drops the apply-time wording",
+  "file": "src/server/record_put.rs",
+  "old": "            \"expires_at_ms must be later than the server clock when the write is applied\",",
+  "new": "            \"expires_at_ms must be later than the server clock; ttl_ms must be at least 1\",",
+  "cmd": "cargo test --locked --offline --features server --lib server::record_put::"
+ },
+ {
+  "id": "expiry-fix/ef-ttl-resolved-at-parse",
+  "desc": "B: ttl_ms becomes a deadline at parse time again (a group commit refuses ttl_ms 50)",
+  "file": "src/server.rs",
+  "old": "        let now = u64::try_from(admin::now_ms())\n            .map_err(|_| unprocessable(\"server clock exceeds u64 milliseconds\"))?;\n        now.checked_add(ttl)\n            .ok_or_else(|| unprocessable(\"ttl_ms overflows Unix milliseconds\"))?;\n        return Ok(Some(record_put::Expiry::After(ttl)));",
+  "new": "        let now = u64::try_from(admin::now_ms())\n            .map_err(|_| unprocessable(\"server clock exceeds u64 milliseconds\"))?;\n        let deadline = now\n            .checked_add(ttl)\n            .ok_or_else(|| unprocessable(\"ttl_ms overflows Unix milliseconds\"))?;\n        return Ok(Some(record_put::Expiry::At(deadline)));",
+  "cmd": "cargo test --locked --offline --features server --test server_record_expiry"
+ },
+ {
+  "id": "expiry-fix/ef-ttl-zero-accepted",
+  "desc": "B: ttl_ms 0 is no longer a request error (it reaches the engine as a due deadline)",
+  "file": "src/server.rs",
+  "old": "        if ttl == 0 {\n            return Err(unprocessable(\"ttl_ms must be at least 1\"));\n        }\n",
+  "new": "",
+  "cmd": "cargo test --locked --offline --features server --test server_record_expiry"
+ },
+ {
+  "id": "expiry-fix/ef-parse-overflow-dropped",
+  "desc": "B: the parse-time overflow check is dropped (a huge ttl_ms on a missing collection answers 404 again)",
+  "file": "src/server.rs",
+  "old": "        let now = u64::try_from(admin::now_ms())\n            .map_err(|_| unprocessable(\"server clock exceeds u64 milliseconds\"))?;\n        now.checked_add(ttl)\n            .ok_or_else(|| unprocessable(\"ttl_ms overflows Unix milliseconds\"))?;\n        return Ok(Some(record_put::Expiry::After(ttl)));",
+  "new": "        return Ok(Some(record_put::Expiry::After(ttl)));",
+  "cmd": "cargo test --locked --offline --features server --test server_record_expiry"
+ },
+ {
+  "id": "expiry-fix/ef-apply-overflow-wraps",
+  "desc": "B: the deadline of a lifetime wraps around instead of refusing the overflow",
+  "file": "src/server/record_put.rs",
+  "old": "            Self::After(ttl_ms) => now_ms\n                .checked_add(ttl_ms)\n                .ok_or_else(|| unprocessable(\"ttl_ms overflows Unix milliseconds\")),",
+  "new": "            Self::After(ttl_ms) => Ok(now_ms.wrapping_add(ttl_ms)),",
+  "cmd": "cargo test --locked --offline --features server --lib server::record_put::"
+ },
+ {
+  "id": "expiry-fix/ef-ttl-deadline-off-by-one",
+  "desc": "B: the deadline of a lifetime is one millisecond too late",
+  "file": "src/server/record_put.rs",
+  "old": "            Self::After(ttl_ms) => now_ms\n                .checked_add(ttl_ms)\n                .ok_or_else(|| unprocessable(\"ttl_ms overflows Unix milliseconds\")),",
+  "new": "            Self::After(ttl_ms) => now_ms\n                .checked_add(ttl_ms)\n                .and_then(|deadline| deadline.checked_add(1))\n                .ok_or_else(|| unprocessable(\"ttl_ms overflows Unix milliseconds\")),",
+  "cmd": "cargo test --locked --offline --features server --lib server::record_put::"
+ },
+ {
+  "id": "expiry-fix/ef-clock-zero",
+  "desc": "B: the write is applied at clock zero (nothing is ever due)",
+  "file": "src/server.rs",
+  "old": "                &metadata,\n                expiry,\n                crate::current_time_ms(),",
+  "new": "                &metadata,\n                expiry,\n                0,",
+  "cmd": "cargo test --locked --offline --features server --test server_record_expiry"
+ },
+ {
+  "id": "expiry-fix/ef-s6-grpc-unchecked",
+  "desc": "S6-M4: gRPC PutVector does not apply the refusal",
+  "file": "src/server/grpc.rs",
+  "old": "                            record_put::refuse_due_expiry(\n                                db,\n                                collection,\n                                id,\n                                expected,\n                                &vector,\n                                &payload,\n                                &metadata,\n                                expiry,\n                                crate::current_time_ms(),\n                            )?;\n",
+  "new": "",
+  "cmd": "cargo test --locked --offline --features grpc --test server_record_expiry grpc::"
+ },
+ {
+  "id": "expiry-fix/ef-s6-422-as-500",
+  "desc": "S6-M8: the refusal is mapped to 500 instead of 422",
+  "file": "src/server/record_put.rs",
+  "old": "        return Err(unprocessable(\n            \"expires_at_ms must be later than the server clock when the write is applied\",\n        ));",
+  "new": "        return Err(internal(\"due\"));",
+  "cmd": "cargo test --locked --offline --features server --test server_record_expiry"
+ },
+ {
+  "id": "fix3/kf2-window-one-long",
+  "desc": "the window is 17 slots long (>= becomes >): the look-alike one slot past it is probed",
+  "file": "src/kv.rs",
+  "old": "        if id.wrapping_sub(slot_base(namespace, key)) >= KV_PROBE_SLOTS {\n            continue;\n        }\n",
+  "new": "        if id.wrapping_sub(slot_base(namespace, key)) > KV_PROBE_SLOTS {\n            continue;\n        }\n",
+  "cmd": "cargo test --locked --offline --features server,mcp,tools --lib kv::bounded_tests"
+ },
+ {
+  "id": "fix3/kf2-window-one-short",
+  "desc": "the window is 15 slots long: the last slot of a window is skipped",
+  "file": "src/kv.rs",
+  "old": "        if id.wrapping_sub(slot_base(namespace, key)) >= KV_PROBE_SLOTS {\n            continue;\n        }\n",
+  "new": "        if id.wrapping_sub(slot_base(namespace, key)) >= KV_PROBE_SLOTS - 1 {\n            continue;\n        }\n",
+  "cmd": "cargo test --locked --offline --features server,mcp,tools --lib kv::bounded_tests"
+ },
+ {
+  "id": "fix3/kf2-mcp-size-ignores-expiry",
+  "desc": "MCP/shell page: the size of an item is measured without its deadline",
+  "file": "src/bin/tool_support/kv_mcp.rs",
+  "old": "        let bytes = item_size(\n            entry.key,\n            entry.value.len(),\n            entry.version,\n            entry.expires_at_ms,\n        );\n",
+  "new": "        let bytes = item_size(\n            entry.key,\n            entry.value.len(),\n            entry.version,\n            None,\n        );\n",
+  "cmd": "cargo test --locked --offline --features mcp,tools --bin vlite-mcp kv_mcp::tests::page_exact_encoded_boundary"
+ },
+ {
+  "id": "fix3/kf2-rest-size-ignores-expiry",
+  "desc": "REST/gRPC page: the size of an item is measured without its deadline",
+  "file": "src/server/kv.rs",
+  "old": "        let size = item_size(\n            entry.key,\n            entry.value.len(),\n            entry.version,\n            entry.expires_at_ms,\n        )?;\n",
+  "new": "        let size = item_size(\n            entry.key,\n            entry.value.len(),\n            entry.version,\n            None,\n        )?;\n",
+  "cmd": "cargo test --locked --offline --features grpc --test server_grpc_kv grpc_kv_exact_page_byte_boundary"
+ },
+ {
+  "id": "fix3/ef2-metadata-before-vector",
+  "desc": "a due put judges the metadata before the vector and the payload size (the engine judges them last)",
+  "file": "src/server/record_put.rs",
+  "old": "    crate::validate_stored(state.dimensions, state.precision, vector)?;\n    if payload.len() > MAX_PAYLOAD_BYTES {\n        return Err(Error::PayloadTooLarge(payload.len()).into());\n    }\n    crate::metadata::validate(metadata)?;\n",
+  "new": "    crate::metadata::validate(metadata)?;\n    crate::validate_stored(state.dimensions, state.precision, vector)?;\n    if payload.len() > MAX_PAYLOAD_BYTES {\n        return Err(Error::PayloadTooLarge(payload.len()).into());\n    }\n",
+  "cmd": "cargo test --locked --offline --features server --lib server::record_put::"
+ },
+ {
+  "id": "fix3/ef2-payload-before-vector",
+  "desc": "a due put judges the payload size before the vector (the engine judges the vector first)",
+  "file": "src/server/record_put.rs",
+  "old": "    crate::validate_stored(state.dimensions, state.precision, vector)?;\n    if payload.len() > MAX_PAYLOAD_BYTES {\n        return Err(Error::PayloadTooLarge(payload.len()).into());\n    }\n    crate::metadata::validate(metadata)?;\n",
+  "new": "    if payload.len() > MAX_PAYLOAD_BYTES {\n        return Err(Error::PayloadTooLarge(payload.len()).into());\n    }\n    crate::validate_stored(state.dimensions, state.precision, vector)?;\n    crate::metadata::validate(metadata)?;\n",
+  "cmd": "cargo test --locked --offline --features server --lib server::record_put::"
+ },
+ {
+  "id": "fix3/ef2-metadata-before-payload",
+  "desc": "a due put judges the metadata before the payload size (the engine judges the payload first)",
+  "file": "src/server/record_put.rs",
+  "old": "    crate::validate_stored(state.dimensions, state.precision, vector)?;\n    if payload.len() > MAX_PAYLOAD_BYTES {\n        return Err(Error::PayloadTooLarge(payload.len()).into());\n    }\n    crate::metadata::validate(metadata)?;\n",
+  "new": "    crate::validate_stored(state.dimensions, state.precision, vector)?;\n    crate::metadata::validate(metadata)?;\n    if payload.len() > MAX_PAYLOAD_BYTES {\n        return Err(Error::PayloadTooLarge(payload.len()).into());\n    }\n",
+  "cmd": "cargo test --locked --offline --features server --lib server::record_put::"
+ },
+ {
+  "id": "memory/MA1",
+  "desc": "the extractor ignores the dashboard session: a super-admin session is audited as the bootstrap token",
+  "file": "src/server/memory/routes.rs",
+  "old": "        let actor = audit::actor(&role, parts.extensions.get::<users::Principal>());\n",
+  "new": "        let actor = audit::actor(&role, None);\n",
+  "cmd": "cargo test --locked --offline --features server --test server_memory_actor"
+ },
+ {
+  "id": "memory/MA2",
+  "desc": "the memory audit entry drops the actor",
+  "file": "src/server/memory/routes.rs",
+  "old": "            \"principal\": principal,\n            \"actor\": self.actor,\n",
+  "new": "            \"principal\": principal,\n",
+  "cmd": "cargo test --locked --offline --features server --test server_memory_actor"
+ },
+ {
+  "id": "memory/MA3",
+  "desc": "the audit entry records the role label as the actor",
+  "file": "src/server/memory/routes.rs",
+  "old": "            \"actor\": self.actor,\n",
+  "new": "            \"actor\": principal,\n",
+  "cmd": "cargo test --locked --offline --features server --test server_memory_actor"
+ },
+ {
+  "id": "memory/MA4",
+  "desc": "Call::new derives the actor from the role name instead of the caller",
+  "file": "src/server/memory/routes.rs",
+  "old": "            role: caller.role,\n            actor: caller.actor,\n",
+  "new": "            actor: caller.role.name().to_owned(),\n            role: caller.role,\n",
+  "cmd": "cargo test --locked --offline --features server --test server_memory_actor"
+ },
+ {
+  "id": "memory/MA5",
+  "desc": "the extractor encodes every caller as the admin role",
+  "file": "src/server/memory/routes.rs",
+  "old": "        let actor = audit::actor(&role, parts.extensions.get::<users::Principal>());\n",
+  "new": "        let actor = audit::actor(&admin::Role::Admin, parts.extensions.get::<users::Principal>());\n",
+  "cmd": "cargo test --locked --offline --features server --test server_memory_actor"
+ },
+ {
+  "id": "memory/MA6",
+  "desc": "only requests that resolved a binding carry the actor: refusals before the binding is known lose it",
+  "file": "src/server/memory/routes.rs",
+  "old": "            \"actor\": self.actor,\n",
+  "new": "            \"actor\": if self.binding.is_some() { json!(self.actor) } else { Value::Null },\n",
+  "cmd": "cargo test --locked --offline --features server --test server_memory_actor"
+ }
+]
