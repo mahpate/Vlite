@@ -206,6 +206,11 @@ fn patching_a_reserved_node_or_adding_a_reserved_label_is_refused() {
             }
         }
     }
+    // The key decides, whatever the patch does: a node with a reserved key is
+    // deleted, not patched.
+    for label in LABELS {
+        assert!(refuses_raw(&patch(RECORD, removing(&[label]))), "{label}");
+    }
     assert!(refuses_raw(&patch(RECORD, NodePatch::default())));
 }
 

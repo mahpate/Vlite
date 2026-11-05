@@ -369,6 +369,27 @@ async fn other_names_edges_and_cleanup_of_planted_nodes_stay_allowed() {
         )
         .await;
     assert_eq!(ordinary.0, 200, "{}", ordinary.1);
+    // The key decides: a node with a reserved key is deleted, not patched, even
+    // to take its label off. The guard reads the request only, so a patch that
+    // adds no label is allowed whatever labels the node already carries.
+    let refused = rig
+        .batch(
+            "plain_graph",
+            ADMIN,
+            json!([{"op": "patch_node", "key": "scope:v1:planted",
+                    "remove_labels": ["VliteMemoryScope"]}]),
+        )
+        .await;
+    assert_reserved(&refused, "a removal-only patch of a reserved key", &[]);
+    let touched = rig
+        .batch(
+            "plain_graph",
+            ADMIN,
+            json!([{"op": "patch_node", "key": "legacy",
+                    "set": {"p": {"type": "string", "value": "x"}}}]),
+        )
+        .await;
+    assert_eq!(touched.0, 200, "{}", touched.1);
     // A planted node can be cleaned up through the raw route.
     let cleaned = rig
         .batch(

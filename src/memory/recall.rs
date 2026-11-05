@@ -1723,6 +1723,16 @@ mod tests {
             recall(&db, &req).is_ok(),
             "a text-only fusion needs no direction"
         );
+        // ... while a cosine metric with a weighing vector is refused for every
+        // selection, the default one included.
+        req.query.as_mut().unwrap().fusion.vector_weight = weight;
+        assert!(
+            matches!(
+                recall(&db, &req),
+                Err(RecallError::Storage(crate::Error::ZeroNormQuery))
+            ),
+            "a cosine query of zero length is refused whatever the selection"
+        );
         let query = req.query.as_mut().unwrap();
         (query.metric, query.fusion.vector_weight, query.text) = (metric, weight, text);
         for selection in [Selection::Exact, Selection::Mmr { lambda: 0.5 }] {
