@@ -607,12 +607,13 @@ impl<'a> CollectionRef<'a> {
         let j = state.vectors.jobs.get(n).ok_or_else(invalid)?;
         let mut out = Vec::new();
         #[cfg(test)]
-        if let Some(scan) = state.records.compact_iter(None) {
+        if let Some(mut scan) = state.records.compact_iter(None) {
             let now_ms = crate::current_time_ms();
-            for row in scan {
-                if out.len() == limit {
+            // The limit is checked before the next row is read: a row that will not be returned is not decoded.
+            while out.len() < limit {
+                let Some(row) = scan.next() else {
                     break;
-                }
+                };
                 let (id, record) = row?;
                 if state
                     .expiries
