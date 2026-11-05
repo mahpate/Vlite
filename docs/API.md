@@ -228,18 +228,22 @@ answers 403 `read_only` first).
 | `receipts/lookup` | `remember_receipt_lookup` |
 | `facts/*`, `erasures/*` | `facts`, `erasure_jobs` |
 
-Recall serves exact, bounded retrieval. `ranking.selection` `exact` or `mmr`
-works on a vector alone; combined with text, entity seeds, other weights or a
-half-life it answers 422 `memory_unsupported_ranking`. `exact` and `mmr` measure
+Recall serves exact, bounded retrieval. `ranking.selection` `exact` works on a
+vector, alone or with `text`: the vector candidates are ordered by cosine
+distance, fused with the text candidates by reciprocal rank, and a candidate
+found only by text is kept without a `scores.distance`. `mmr` works on a vector
+alone. Entity seeds, other weights or a half-life, a missing vector, and text
+with `mmr`, answer 422 `memory_unsupported_ranking`. `exact` and `mmr` measure
 cosine distance, `1 - cos` (0 for the same direction, 1 for orthogonal and 2 for
 opposite vectors): `exact` orders candidates by it and both report it in
 `scores.distance`. A query vector of zero length has no direction and answers
-422 `invalid_input`; a stored zero vector is never one of their candidates. The
-default `weighted` selection keeps measuring squared Euclidean distance.
-Upgrading from 0.7.0: `exact` and `mmr` reported squared Euclidean distance
-(twice the cosine distance for unit vectors) and `exact` ordered by it, so
-vectors that are not unit length can change order and every `scores.distance`
-of those two selections changes; recalibrate any threshold on it.
+422 `invalid_input`; a stored zero vector is never one of their vector
+candidates. The default `weighted` selection keeps measuring squared Euclidean
+distance. Upgrading from 0.7.0: `exact` and `mmr` reported squared Euclidean
+distance (twice the cosine distance for unit vectors) and `exact` ordered by it,
+so vectors that are not unit length can change order and every `scores.distance`
+of those two selections changes; recalibrate any threshold on it. `exact` with
+`text` answered 422 in 0.7.0 and is now served.
 `mode: approximate`
 answers 422 `memory_bounded_plan_unsupported` because no approximate index is
 built for a binding, and so does `allow_partial: true` when a budget is

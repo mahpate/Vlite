@@ -339,10 +339,15 @@ A live conformance review of the release candidate raised the points below.
 Each is a first-slice restriction or a wording choice, recorded here so the
 code, goldens, OpenAPI text and user documentation agree.
 
-- **Recall ranking.** `exact` and `mmr` selections are vector-only and refuse
-  every blend, weights other than vector-only and a half-life, as 422
-  `memory_unsupported_ranking`. Contract section 4 lets `exact` keep text-only
-  candidates; serving that needs core work and is a later slice.
+- **Recall ranking.** `mmr` is vector-only: text, entity seeds, weights other
+  than vector-only and a half-life are refused as 422
+  `memory_unsupported_ranking`, as is a missing vector (contract section 4).
+  `exact` serves a vector with or without text (0.7.1; 0.7.0 refused the
+  text): its cosine dense leg and the text leg are fused as in weighted recall
+  and a candidate found only by text keeps no distance
+  ([0.7.1 design note](m71-memory-followups.md), section 4). `exact` still
+  refuses seeds, weights other than vector-only and a half-life; those are a
+  later slice, not a contract rule.
 - **Approximate mode.** `mode: approximate` is 422
   `memory_bounded_plan_unsupported` (golden `recall-unsupported-ann`): no
   binding owns an approximate index and none is built. `index_not_ready` stays

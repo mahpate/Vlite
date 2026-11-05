@@ -315,3 +315,62 @@ chosen by cosine when `depth` is smaller than the collection, and the three
 goldens replayed (the skip list shrinks by three). Mutants: at least 24 for the
 recall route family, covering the metric of each selection, the pool, the
 reported value, the zero-norm rules and the golden harness.
+
+## 4. `exact` with text: F-03 (slice S5)
+
+**Problem.** 0.7.0 refuses a request that carries `text` under `exact` or
+`mmr` (422 `memory_unsupported_ranking`, F-03). The serving contract (section 4)
+treats the two differently. `exact` "recomputes vector-candidate distances,
+reorders their dense leg before fusion/weighting, preserving text-only
+candidates", so a hybrid `exact` request is defined. `mmr` is "a separate
+vector-only cosine selection" that rejects text, so the `mmr` refusal is the
+contract and stays. Only the `exact` refusal is a gap.
+
+**Decision.** Lift the refusal for `exact`, for text only. `mmr` keeps refusing
+text. `exact` keeps refusing a missing vector, entity seeds, expansion, weights
+other than vector-only and a half-life: the contract does not forbid them for
+`exact`, but each needs its own tests, and the report of this lane keeps them
+for a later slice. Approximate mode is not part of this slice (section 4.3).
+
+### 4.1 The rule
+
+- `exact` with `vector` and `text`: the dense leg is the cosine enumeration of
+  section 3, the text leg is the BM25 leg of weighted recall, and the two are
+  fused by weighted reciprocal rank fusion exactly as in weighted recall
+  (`rrf_k` 60, weights 1 and 1 in the REST adapter). The fused order is the
+  selection order and `R` is `1 / position` as for every selection. In other
+  words `exact` is a weighted recall whose dense leg is measured by cosine.
+- A candidate found by the text leg alone (for example a record whose vector is
+  zero) is kept. It carries no `distance` and no `dense_rank`, its `text_rank`
+  and `bm25`. A vector candidate carries its cosine distance and its
+  `dense_rank`; a candidate of both legs carries both ranks.
+- The work is charged as in weighted recall: both legs charge the candidates
+  they examine, and `meta.mode` stays `exact_enumeration`.
+- `exact` without text is unchanged: the fused list of one dense leg is that
+  leg, so the candidates, ranks and distances are the ones of section 3.
+
+### 4.2 Compatibility
+
+A request 0.7.0 refused now succeeds, and no request that 0.7.0 served changes
+its answer because of this slice. Recall is a read: no receipt, record or
+format changes.
+
+### 4.3 Approximate mode
+
+`mode: approximate` keeps answering 422 `memory_bounded_plan_unsupported`. It
+needs an approximate index that a binding owns and that is ready, and a way to
+prefilter an approximate search by the visible owners (the reason the core
+refuses an approximate vector leg). Both are engine work outside this lane, so
+the refusal and the contract's "no lazy index build" rule stand.
+
+### 4.4 Tests and campaigns
+
+Contract first, with the reciprocal-rank arithmetic worked by hand and no
+ties: four memories (vectors [10, 0], [0.6, 0.6], [0, 1] and the zero vector)
+whose documents carry the term "lore" three, zero, two and one times answer
+pa, pc, pb, pz, the zero vector as the text-only hit without a distance; a
+probe in which a small text weight lets cosine and squared Euclidean order the
+fused list differently; the refusals that remain (`mmr` with text; a missing
+vector, seeds, expansion and other weights for both selections). Mutants: at
+least 24 for the recall route family, covering the validity rule for text, the
+selection block, the fusion of the two legs and the adapter's refusal.
