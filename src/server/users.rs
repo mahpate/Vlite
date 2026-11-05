@@ -284,6 +284,28 @@ pub(super) struct Principal {
     key: [u8; 32],
 }
 
+#[cfg(test)]
+impl Principal {
+    /// A signed-in principal for unit tests; `key` stands in for the secret
+    /// session key.
+    pub(super) fn for_test(
+        user_id: &str,
+        username: &str,
+        role: AccountRole,
+        key: [u8; 32],
+    ) -> Self {
+        Self {
+            user_id: user_id.to_owned(),
+            username: username.to_owned(),
+            role,
+            tenant_id: None,
+            must_change_password: false,
+            expires: u64::MAX,
+            key,
+        }
+    }
+}
+
 pub(super) struct SignedIn {
     pub role: admin::Role,
     pub principal: Principal,

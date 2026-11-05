@@ -165,6 +165,27 @@ impl Log {
     }
 }
 
+/// The stable, non-secret identity that audit events record as `actor`:
+///
+/// * `user:<account id>`: a super-admin dashboard session. A signed-in editor
+///   or viewer is a scoped grant whose id is already `user:<account id>`;
+/// * `admin_token`: the bootstrap admin token and, without a configured admin
+///   token, every caller of the local server (no session principal exists);
+/// * `read_only_token`: the read-only token;
+/// * the credential id: a scoped credential (12 characters of `a-z2-7`, so it
+///   never equals another encoding).
+///
+/// Only the account id is read from a session principal. Cookies, session
+/// keys, tokens, secrets, user names and request content never enter it.
+pub(super) fn actor(role: &admin::Role, principal: Option<&users::Principal>) -> String {
+    match (role, principal) {
+        (admin::Role::Admin, Some(principal)) => format!("user:{}", principal.user_id),
+        (admin::Role::Admin, None) => "admin_token".to_owned(),
+        (admin::Role::ReadOnly, _) => "read_only_token".to_owned(),
+        (admin::Role::Scoped(grant), _) => grant.id.clone(),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -233,5 +254,93 @@ mod tests {
         assert_eq!(std::fs::read(&target).unwrap(), b"keep");
         std::fs::remove_file(dir.path().join("audit.1.jsonl")).unwrap();
         log.append(json!({"event": "test", "n": 99}), true).unwrap();
+    }
+
+    const ACCOUNT: &str = "0123456789abcdef0123456789abcdef";
+    const OTHER_ACCOUNT: &str = "fedcba9876543210fedcba9876543210";
+    const SESSION_KEY: [u8; 32] = *b"SESSIONKEYSESSIONKEYSESSIONKEY12";
+
+    fn signed_in(account: &str, username: &str, role: users::AccountRole) -> users::Principal {
+        users::Principal::for_test(account, username, role, SESSION_KEY)
+    }
+
+    /// A grant built like a signed-in user's (`id` is `user:<account id>`) or,
+    /// with a 12-character `a-z2-7` id, like a stored credential's.
+    fn scoped(id: &str) -> admin::Role {
+        admin::Role::Scoped(Arc::new(credentials::Grant::for_user(
+            id.to_owned(),
+            "display name".to_owned(),
+            None,
+            &[credentials::Op::Read],
+            1,
+            u64::MAX,
+        )))
+    }
+
+    #[test]
+    fn actor_names_every_role_and_principal_combination() {
+        let (admin_token, read_only) = (admin::Role::Admin, admin::Role::ReadOnly);
+        let credential = scoped("abcdefghij27");
+        let editor = scoped(&format!("user:{OTHER_ACCOUNT}"));
+        let root = signed_in(ACCOUNT, "alice.smith", users::AccountRole::SuperAdmin);
+        let eddie = signed_in(OTHER_ACCOUNT, "eddie", users::AccountRole::Editor);
+        let cases = [
+            // The bootstrap admin token and insecure local mode: no session.
+            (&admin_token, None, "admin_token".to_owned()),
+            // A super-admin dashboard session.
+            (&admin_token, Some(&root), format!("user:{ACCOUNT}")),
+            (&read_only, None, "read_only_token".to_owned()),
+            // The read-only token has no session; a principal is ignored.
+            (&read_only, Some(&root), "read_only_token".to_owned()),
+            (&credential, None, "abcdefghij27".to_owned()),
+            (&credential, Some(&root), "abcdefghij27".to_owned()),
+            // A signed-in editor: its grant id is already the account encoding.
+            (&editor, None, format!("user:{OTHER_ACCOUNT}")),
+            (&editor, Some(&eddie), format!("user:{OTHER_ACCOUNT}")),
+            (&editor, Some(&root), format!("user:{OTHER_ACCOUNT}")),
+        ];
+        for (role, session, expected) in &cases {
+            assert_eq!(&actor(role, *session), expected, "{}", role.name());
+        }
+        // The encodings never collide: a credential id is 12 characters of
+        // `a-z2-7`, which none of the other three forms can be.
+        let credential_id = |text: &str| {
+            text.len() == 12 && text.bytes().all(|b| matches!(b, b'a'..=b'z' | b'2'..=b'7'))
+        };
+        for (_, _, expected) in &cases {
+            assert_eq!(credential_id(expected), expected == "abcdefghij27");
+        }
+    }
+
+    #[test]
+    fn a_session_actor_is_the_account_id_and_nothing_else() {
+        let first = signed_in(ACCOUNT, "alice.smith", users::AccountRole::SuperAdmin);
+        // The same account in a later session: another key, a renamed user, a
+        // different expiry and password state.
+        let mut later =
+            users::Principal::for_test(ACCOUNT, "renamed", users::AccountRole::SuperAdmin, [7; 32]);
+        later.expires = 1;
+        later.must_change_password = true;
+        let actor_of = |session: &users::Principal| actor(&admin::Role::Admin, Some(session));
+        assert_eq!(actor_of(&first), format!("user:{ACCOUNT}"));
+        assert_eq!(actor_of(&first), actor_of(&later));
+        let other = signed_in(OTHER_ACCOUNT, "alice.smith", users::AccountRole::SuperAdmin);
+        assert_eq!(actor_of(&other), format!("user:{OTHER_ACCOUNT}"));
+        assert_ne!(actor_of(&first), actor_of(&other));
+        // Neither the user name nor any rendering of the session key appears.
+        let hex: String = SESSION_KEY.iter().map(|b| format!("{b:02x}")).collect();
+        let standard = BASE64_STANDARD.encode(SESSION_KEY);
+        let url_safe = base64::prelude::BASE64_URL_SAFE_NO_PAD.encode(SESSION_KEY);
+        let text = actor_of(&first);
+        for secret in [
+            "alice.smith",
+            "alice",
+            "SESSIONKEY",
+            hex.as_str(),
+            standard.as_str(),
+            url_safe.as_str(),
+        ] {
+            assert!(!text.contains(secret), "{text} contains {secret}");
+        }
     }
 }
