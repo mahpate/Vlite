@@ -118,9 +118,12 @@ operation can create, verify and drill backups, and their database-wide counts
 of collections, records and commits include reserved resources; the backup
 files themselves hold reserved data and are operator-managed. A raw credential
 can attach reserved evidence records to nodes of an unreserved graph, and other
-users of that graph can then neither delete nor detach those nodes. Do not bind
-the `default` collection as an evidence collection: the legacy routes and
-`GET /v1/database` would then answer 403 to everyone without raw access. A
+users of that graph can then neither delete nor detach those nodes. Startup
+refuses `default` as an evidence collection, so a binding never changes the
+legacy routes. Live vector quotas count reserved records, so a caller with a
+quota sees its headroom change when memory writes. An attempt to use a reserved
+name answers like a missing resource, so it is not counted as a credential
+denial in the metrics or the audit log. A
 binding's receipt window, generation and names are read from the file at each
 start and are not checked against the database, so do not change them once
 memory has been written (see [Agent memory](API.md#start-the-server-with-memory)).
