@@ -60,7 +60,7 @@ fn read_only_database(directory: &TempDir) -> Database {
 /// The binding `notes`, granting the principal `scopes`.
 fn bindings(scopes: &str, retired: bool) -> String {
     let state = if retired {
-        r#""state":"retired","retired_at_ms":5"#
+        r#""state":"retired","retired_at_ms":4102444800000"#
     } else {
         r#""state":"active""#
     };

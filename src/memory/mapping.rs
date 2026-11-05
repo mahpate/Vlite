@@ -165,6 +165,8 @@ pub(crate) fn memory_error(error: &MemoryError) -> WireMapping {
         // PROVISIONAL: a second erasure begin is a job generation mismatch;
         // unreachable in the first slice, which refuses erasure jobs.
         JobConflict => code(412, "precondition_failed"),
+        // The graph's binding record no longer matches the binding served.
+        BindingGeneration => WireMapping::Code(unavailable("binding_generation")),
         Storage(error) => storage_error(error),
     }
 }

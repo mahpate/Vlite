@@ -242,7 +242,24 @@ pub fn configured_admin_router(
             "automatic index maintenance is disabled while memory bindings are configured",
         ));
     }
-    super::memory::startup(&service)?;
+    let orphans = super::memory::startup(&service)?;
+    if !orphans.is_empty() {
+        // The database holds memory that the file does not name: it stays
+        // reserved with no grants, and the refusals that protect a
+        // reservation apply (0.7.1 design note, section 1.4).
+        if options.grpc_enabled {
+            return Err(std::io::Error::other(
+                "gRPC listener is disabled while the database holds reserved memory resources",
+            ));
+        }
+        if options.auto_maintenance_interval.is_some() {
+            return Err(std::io::Error::other(
+                "automatic index maintenance is disabled while the database holds reserved memory resources",
+            ));
+        }
+        let reserved = service.memory_bindings.with_orphans(&orphans);
+        service = service.with_bindings(reserved);
+    }
     super::logs::configure(
         options
             .log_buffer_capacity

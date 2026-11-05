@@ -127,6 +127,10 @@ fn every_memory_error_has_its_pinned_wire_code() {
         (DuplicateTarget, invalid),
         (DeletionPending, wire(409, "memory_deletion_pending")),
         (JobConflict, wire(412, "precondition_failed")),
+        (
+            BindingGeneration,
+            WireMapping::Code(unavailable("binding_generation")),
+        ),
         (Storage(crate::Error::InvalidQuery("storage")), internal),
         (Storage(crate::Error::GraphNotFound), WireMapping::Delegate),
         (Storage(crate::Error::ReadOnly), WireMapping::Delegate),

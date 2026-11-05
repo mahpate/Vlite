@@ -198,7 +198,9 @@ impl Pins {
         let bindings = crate::memory::binding::parse(text.as_bytes()).unwrap();
         let service = Service::new(db).with_bindings(super::reserved::Bindings::new(bindings));
         if options.provision {
-            super::startup(&service).unwrap();
+            super::startup_at(&service, 0).unwrap();
+        } else {
+            super::write_records(&service);
         }
         let grant = credentials::Grant::for_user(
             PRINCIPAL.into(),

@@ -139,7 +139,7 @@ impl Rig {
         let document = json!({"version": "memory-bindings-v1", "bindings": bindings}).to_string();
         let set = parse_bindings(document.as_bytes()).expect("valid bindings");
         let service = Service::new(db).with_bindings(Bindings::new(set));
-        super::startup(&service).expect("startup");
+        super::startup_at(&service, 0).expect("startup");
         let grant = credentials::Grant::for_user(
             PRINCIPAL.into(),
             "pins".into(),

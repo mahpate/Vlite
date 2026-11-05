@@ -58,7 +58,7 @@ impl Rig {
         let evidence = db.resolve("notes_ev").unwrap();
         let bindings = crate::memory::binding::parse(BINDINGS.as_bytes()).unwrap();
         let service = Service::new(db).with_bindings(super::reserved::Bindings::new(bindings));
-        super::startup(&service).unwrap();
+        super::startup_at(&service, 0).unwrap();
         let mut grant = credentials::Grant::for_user(
             PRINCIPAL.into(),
             "pins".into(),

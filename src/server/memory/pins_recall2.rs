@@ -116,7 +116,7 @@ impl Env {
         let bindings = crate::memory::binding::parse(text.as_bytes()).unwrap();
         let service =
             Service::new(db).with_bindings(crate::server::reserved::Bindings::new(bindings));
-        crate::server::memory::startup(&service).unwrap();
+        crate::server::memory::startup_at(&service, 0).unwrap();
         let grant = Grant::for_user(
             PRINCIPAL.into(),
             "recall2".into(),

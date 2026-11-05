@@ -9,6 +9,11 @@ use super::MemoryScope;
 use crate::format::valid_collection_name;
 use crate::property_graph::engine::model::validate_graph_name;
 
+mod record;
+pub(crate) use record::{
+    Corrupt, KEY as RECORD_KEY, LABEL as RECORD_LABEL, Recorded, validate_all,
+};
+
 pub(crate) const ROOT_TENANT: &str = "@root";
 pub(crate) const VERSION: &str = "memory-bindings-v1";
 pub(crate) const SCHEMA_VERSION: &str = "memory-schema-v1";
@@ -231,19 +236,34 @@ impl BindingSet {
     /// validation clock `now_ms` (section 4 generation rotation rule).
     pub(crate) fn validate_rotation(&self, old: &Self, now_ms: u64) -> Result<(), BindingError> {
         old.validate()?;
+        let previous: Vec<Recorded> = old.bindings.iter().map(Recorded::of).collect();
+        self.validate_against(&previous, now_ms)
+    }
+
+    /// The rotation rules against a previous state read from binding records
+    /// instead of a previous set. `previous` must be self-consistent
+    /// ([`validate_all`]); a record holds a digest of its grants, so a grants
+    /// change is a different digest.
+    pub(crate) fn validate_against(
+        &self,
+        previous: &[Recorded],
+        now_ms: u64,
+    ) -> Result<(), BindingError> {
         self.validate()?;
+        let before_of =
+            |tenant: &str, binding: &str| previous.iter().find(|record| record.is(tenant, binding));
         let mut removed = BTreeSet::new();
         for after in &self.bindings {
             // Anti-backdating: an entry first seen already retired starts its
             // removal window no earlier than this change (PROVISIONAL).
             if let BindingState::Retired { at_ms } = after.state
-                && old.find(&after.tenant, &after.binding).is_none()
+                && before_of(&after.tenant, &after.binding).is_none()
                 && at_ms < now_ms
             {
                 return Err(BindingError::BackdatedRetirement);
             }
         }
-        for before in &old.bindings {
+        for before in previous {
             let Some(after) = self.find(&before.tenant, &before.binding) else {
                 // Rule 5.
                 let BindingState::Retired { at_ms } = before.state else {
@@ -277,7 +297,8 @@ impl BindingSet {
                 }
                 _ => {}
             }
-            let changed = after.state != before.state || after.grants != before.grants;
+            let changed = after.state != before.state
+                || record::grants_digest(&after.grants) != before.grants_digest;
             if changed && after.generation <= before.generation {
                 return Err(BindingError::GenerationNotAdvanced);
             }

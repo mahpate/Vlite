@@ -30,7 +30,7 @@ mod receipt;
 #[cfg(feature = "server")]
 pub(crate) use receipt::{ReceiptLookup, ReceiptOutcome};
 mod stale;
-mod startup;
+pub(crate) mod startup;
 #[cfg(test)]
 mod wire_verify;
 
@@ -57,6 +57,18 @@ const LABEL_RECEIPT: &str = "VliteMemoryReceipt";
 const LABEL_RECEIPT_OUTCOME: &str = "VliteMemoryReceiptOutcome";
 const LABEL_CONTENT: &str = "VliteMemoryContent";
 const LABEL_SCOPE: &str = "VliteMemoryScope";
+/// Every label the memory core gives a node, with the key prefix such a node
+/// carries (the binding record, `binding:v1`, is a node too and is handled by
+/// `binding::record`). A graph that holds only these pairs, one label per
+/// node, holds only memory.
+const MEMORY_NODE_KINDS: [(&str, &str); 6] = [
+    (LABEL_MEMORY, "mem:v1:"),
+    (LABEL_SCOPE, "scope:v1:"),
+    (LABEL_RECEIPT, "receipt:v1:"),
+    (erasure::LABEL_JOB, "receipt:v1:"),
+    (LABEL_RECEIPT_OUTCOME, "receipt-outcome:v1:"),
+    (LABEL_CONTENT, "content:v1:"),
+];
 const MAX_OPS: usize = 4_096;
 const MAX_BODY_BYTES: usize = 16 * 1024 * 1024;
 const MAX_PROVENANCE: usize = 64;
@@ -104,6 +116,9 @@ pub(crate) enum MemoryError {
     DeletionPending,
     /// E1: a different or expired begin cannot start a second job.
     JobConflict,
+    /// The graph's binding record is missing, corrupt or no longer the
+    /// binding this process serves (design note section 1.5).
+    BindingGeneration,
     Storage(Error),
 }
 
@@ -4623,6 +4638,7 @@ mod tests {
             MemoryError::DuplicateTarget => "DuplicateTarget",
             MemoryError::DeletionPending => "DeletionPending",
             MemoryError::JobConflict => "JobConflict",
+            MemoryError::BindingGeneration => "BindingGeneration",
             MemoryError::Storage(_) => "Storage",
         }
     }

@@ -17,7 +17,7 @@
     reason = "interface for the raw-route guards and memory routes, wired by later slices"
 )]
 
-use crate::memory::binding::{Binding, BindingSet, ROOT_TENANT};
+use crate::memory::binding::{Binding, BindingSet, ROOT_TENANT, Recorded};
 use std::collections::{BTreeMap, BTreeSet};
 
 /// The namespace of a stored name: graphs and collections are separate.
@@ -26,6 +26,11 @@ pub(super) enum Resource {
     Graph,
     Collection,
 }
+
+/// The owner of a reservation that no entry of the file owns: a record in the
+/// database that the file does not name (design note 1.4 of the 0.7.1 memory
+/// follow-ups). Nobody holds raw access to it.
+const UNOWNED: usize = usize::MAX;
 
 /// Resources reserved by memory bindings, and who may reach them raw.
 #[derive(Debug, Default)]
@@ -138,6 +143,11 @@ impl Reserved {
     fn owner(&self, resource: Resource, stored: &str) -> Option<usize> {
         self.owners.get(&(resource, stored.to_owned())).copied()
     }
+
+    /// Reserves `stored` with no owning entry; an entry's own reservation wins.
+    fn reserve_unowned(&mut self, resource: Resource, stored: String) {
+        self.owners.entry((resource, stored)).or_insert(UNOWNED);
+    }
 }
 
 /// The validated binding set read at startup and its reservations.
@@ -154,8 +164,40 @@ impl Bindings {
         Self { set, reserved }
     }
 
+    /// Whether nothing is reserved: no entry is configured and no record in
+    /// the database stays reserved without one (the aggregate guards ask this).
     pub(super) fn is_empty(&self) -> bool {
-        self.set.bindings.is_empty()
+        self.reserved.is_empty()
+    }
+
+    /// Whether the file names at least one binding: only then are the memory
+    /// routes served and the startup checks of the file run.
+    pub(super) fn is_configured(&self) -> bool {
+        !self.set.bindings.is_empty()
+    }
+
+    pub(super) fn set(&self) -> &BindingSet {
+        &self.set
+    }
+
+    /// The same bindings with the graphs and evidence collections of
+    /// `orphans` reserved as well, with no owner and so no raw access.
+    pub(super) fn with_orphans(&self, orphans: &[Recorded]) -> Self {
+        let mut reserved = Reserved::new(&self.set);
+        for record in orphans {
+            for (graph, stored) in record.storage() {
+                let resource = if graph {
+                    Resource::Graph
+                } else {
+                    Resource::Collection
+                };
+                reserved.reserve_unowned(resource, stored);
+            }
+        }
+        Self {
+            set: self.set.clone(),
+            reserved,
+        }
     }
 
     pub(super) fn reserved(&self) -> &Reserved {
@@ -355,5 +397,103 @@ mod tests {
         );
         assert!(bindings.resolve(Some(TENANT), "old").is_none());
         assert!(bindings.resolve(None, "missing").is_none());
+    }
+
+    fn recorded(tenant: &str, graph: &str, evidence: Option<&str>) -> Recorded {
+        Recorded::of(&binding(tenant, "gone", graph, evidence))
+    }
+
+    #[test]
+    fn an_orphan_reserves_its_graph_and_evidence_with_no_owner() {
+        let bindings = Bindings::new(BindingSet::default()).with_orphans(&[recorded(
+            ROOT_TENANT,
+            "old_graph",
+            Some("old_ev"),
+        )]);
+        assert!(!bindings.is_empty());
+        assert!(!bindings.is_configured());
+        assert_eq!(bindings.iter().count(), 0);
+        assert!(bindings.resolve(None, "gone").is_none());
+        let reserved = bindings.reserved();
+        assert!(!reserved.is_empty());
+        assert!(reserved.is_reserved(Resource::Graph, "old_graph"));
+        assert!(reserved.is_reserved(Resource::Collection, "old_ev"));
+        for credential in [None, Some(RAW), Some(PLAIN)] {
+            assert!(!reserved.raw_allowed(credential, Resource::Graph, "old_graph"));
+            assert!(!reserved.raw_allowed(credential, Resource::Collection, "old_ev"));
+        }
+        // The namespaces stay separate and unrelated names stay open.
+        assert!(!reserved.is_reserved(Resource::Collection, "old_graph"));
+        assert!(!reserved.is_reserved(Resource::Graph, "old_ev"));
+        assert!(reserved.raw_allowed(None, Resource::Graph, "other"));
+        let mut page = vec!["a", "old_graph", "b"];
+        reserved.retain_visible(Some(RAW), Resource::Graph, &mut page, |n| n);
+        assert_eq!(page, ["a", "b"]);
+    }
+
+    #[test]
+    fn an_orphan_without_evidence_reserves_only_its_graph() {
+        let bindings = Bindings::new(BindingSet::default()).with_orphans(&[recorded(
+            ROOT_TENANT,
+            "old_graph",
+            None,
+        )]);
+        assert!(
+            bindings
+                .reserved()
+                .is_reserved(Resource::Graph, "old_graph")
+        );
+        assert!(
+            !bindings
+                .reserved()
+                .is_reserved(Resource::Collection, "old_graph")
+        );
+    }
+
+    #[test]
+    fn an_orphan_follows_the_tenant_qualified_names() {
+        let bindings =
+            Bindings::new(BindingSet::default()).with_orphans(&[recorded(TENANT, "g", Some("ev"))]);
+        let reserved = bindings.reserved();
+        assert!(reserved.is_reserved(Resource::Graph, &format!("t{TENANT}__g")));
+        assert!(reserved.is_reserved(Resource::Collection, &format!("t{TENANT}__ev")));
+        assert!(!reserved.is_reserved(Resource::Graph, "g"));
+        assert!(!reserved.is_reserved(Resource::Collection, "ev"));
+    }
+
+    #[test]
+    fn an_entrys_own_reservation_wins_over_an_orphan_of_the_same_name() {
+        let bindings =
+            registry().with_orphans(&[recorded(ROOT_TENANT, "notes_graph", Some("notes_ev"))]);
+        assert!(bindings.is_configured());
+        assert_eq!(bindings.iter().count(), 3);
+        let reserved = bindings.reserved();
+        assert!(reserved.raw_allowed(Some(RAW), Resource::Graph, "notes_graph"));
+        assert!(reserved.raw_allowed(Some(RAW), Resource::Collection, "notes_ev"));
+        assert!(!reserved.raw_allowed(Some(PLAIN), Resource::Graph, "notes_graph"));
+    }
+
+    #[test]
+    fn no_orphans_leave_the_registry_as_it_was() {
+        assert!(
+            Bindings::new(BindingSet::default())
+                .with_orphans(&[])
+                .is_empty()
+        );
+        let before = registry();
+        let after = registry().with_orphans(&[]);
+        assert_eq!(after.iter().count(), before.iter().count());
+        assert!(after.is_configured());
+        for (resource, stored) in [
+            (Resource::Graph, "notes_graph"),
+            (Resource::Collection, "notes_ev"),
+            (Resource::Graph, "old_graph"),
+        ] {
+            assert_eq!(
+                after.reserved().is_reserved(resource, stored),
+                before.reserved().is_reserved(resource, stored),
+                "{stored}"
+            );
+        }
     }
 }

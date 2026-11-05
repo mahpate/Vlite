@@ -84,6 +84,7 @@ fn forget_in(
 ) -> Result<(Value, String, u64), Fail> {
     writable(db)?;
     bound.covers(db)?;
+    bound.recheck(db)?;
     refuse(bound, fields.raw(), forget_refusal)?;
     let common = mutation(&mut fields)?;
     let mut target_fields = Fields::new(fields.require("target")?, "target")?;

@@ -138,7 +138,7 @@ pub(super) fn harness(view: &Value) -> Option<Harness> {
     let text = json!({"version": "memory-bindings-v1", "bindings": [entry]}).to_string();
     let bindings = crate::memory::binding::parse(text.as_bytes()).ok()?;
     let service = Service::new(db).with_bindings(super::reserved::Bindings::new(bindings));
-    super::startup(&service).ok()?;
+    super::startup_at(&service, 0).ok()?;
     let mut grant = credentials::Grant::for_user(
         PRINCIPAL.into(),
         "replay".into(),

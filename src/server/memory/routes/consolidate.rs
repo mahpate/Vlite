@@ -133,6 +133,7 @@ fn consolidate_in(
 ) -> Result<(Value, String, u64), Fail> {
     writable(db)?;
     bound.covers(db)?;
+    bound.recheck(db)?;
     fields.drop_empty_evidence();
     refuse(bound, fields.raw(), consolidate_refusal)?;
     let common = mutation(&mut fields)?;

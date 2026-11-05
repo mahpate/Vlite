@@ -182,6 +182,8 @@ impl Call {
 #[derive(Clone)]
 struct Bound {
     tenant: String,
+    name: String,
+    generation: u64,
     graph: String,
     evidence: Option<String>,
     receipt_window_ms: u64,
@@ -229,6 +231,8 @@ fn resolve(
     Ok((
         Bound {
             tenant: binding.tenant.clone(),
+            name: binding.binding.clone(),
+            generation: binding.generation,
             graph,
             evidence,
             receipt_window_ms: binding.receipt_window_ms,
@@ -248,6 +252,16 @@ impl Bound {
         } else {
             Err(Fail::forbidden())
         }
+    }
+
+    /// Before a mutation, under the database write lock: the graph's binding
+    /// record must still be the binding and generation this process serves
+    /// (409 `binding_generation` otherwise, nothing written). A read, so no
+    /// operation is added to the batch that follows.
+    fn recheck(&self, db: &Database) -> Result<(), Fail> {
+        MemoryRef::bind(db, &self.graph, self.evidence.as_deref())
+            .and_then(|memory| memory.check_binding(&self.tenant, &self.name, self.generation))
+            .map_err(core_error)
     }
 
     /// The evidence collection must still be the one the grant covers (a
@@ -678,6 +692,7 @@ fn remember_in(
 ) -> Result<(Value, String, u64), Fail> {
     writable(db)?;
     bound.covers(db)?;
+    bound.recheck(db)?;
     fields.drop_empty_evidence();
     refuse(bound, fields.raw(), remember_refusal)?;
     let common = mutation(&mut fields)?;

@@ -18,7 +18,7 @@ use crate::{
 };
 
 const SCHEMA: &str = "erase-scope:v1";
-const LABEL_JOB: &str = "VliteMemoryErasureJob";
+pub(super) const LABEL_JOB: &str = "VliteMemoryErasureJob";
 const BEGIN_DOMAIN: &[u8] = b"vlite.memory.erasure.begin.v1\0";
 const MAX_COLLECTION_BYTES: usize = 63;
 

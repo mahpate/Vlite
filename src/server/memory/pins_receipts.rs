@@ -120,7 +120,7 @@ fn rig_for(
     let text = json!({"version": "memory-bindings-v1", "bindings": bindings}).to_string();
     let set = crate::memory::binding::parse(text.as_bytes()).unwrap();
     let service = Service::new(db).with_bindings(super::reserved::Bindings::new(set));
-    super::startup(&service).unwrap();
+    super::startup_at(&service, 0).unwrap();
     let mut grant = credentials::Grant::for_user(
         PRINCIPAL.into(),
         "pins".into(),

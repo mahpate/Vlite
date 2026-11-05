@@ -1598,6 +1598,21 @@ async fn deleted_reserved_resources_remain_indistinguishable_from_existing_resou
             "remove each provisioned scope node to make the reserved graph empty"
         );
     }
+    // The binding record is a node of the bound graph too: a graph that is
+    // being given up is emptied of it as well (design note 1.4).
+    assert_eq!(
+        call_token(
+            &app,
+            "POST",
+            "/v1/graphs/notes_graph/batch",
+            Body::from(r#"{"ops":[{"op":"delete_node","key":"binding:v1"}]}"#),
+            &raw_access,
+        )
+        .await
+        .0,
+        200,
+        "remove the binding record to make the reserved graph empty"
+    );
 
     let actors = [(no_raw_access.as_str(), false), (ADMIN, true)];
     let mut before = Vec::new();
