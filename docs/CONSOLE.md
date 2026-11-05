@@ -176,10 +176,10 @@ without entity seeds. Exact permits text; MMR does not. Inspect revisions and tr
 Remember supports entity/episodic memories; consolidation retains originals.
 Forget pins ID/revision pairs: **not secure erasure**. Confirm mutations with
 idempotency keys. Download requests after failures and responses before sign-out.
-Unchanged-draft replay preserves timestamps. Observation time uses the server's
-Date header or `meta.ttl_clock_ms`, not your device clock. For unavailable/future
-times, refresh and ask your operator to check server time and proxy Date headers.
-Consolidation permits at most 256 wire references; server budgets may be lower.
+Unchanged-draft replay preserves timestamps. Observation time uses server Date
+minus two seconds for proxy clock skew, never your device clock. If unavailable,
+refresh and ask your operator to check server/proxy time. Consolidation accepts
+at most 64 memories.
 Receipt lookup supports forget/consolidate only. Fact correction, erasure jobs
 and automatic chat import are unavailable. See [memory serving](API.md).
 

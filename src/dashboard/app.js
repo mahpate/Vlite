@@ -541,7 +541,7 @@
       const text = await response.text();
       if (!current()) throw staleRequest();
       value = options.text && response.ok ? text : text ? JSON.parse(text) : null;
-      serverClock = utils().serverTime(value, response.headers.get("date"));
+      serverClock = utils().serverTime(response.headers.get("date"));
     } catch (error) {
       if (!current() || error.stale) throw staleRequest();
       if (changesData) mutationChanged();

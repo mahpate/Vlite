@@ -982,7 +982,10 @@
   }
   function kvValue(value, format) {
     if (!["text", "json", "base64"].includes(format)) throw new Error("Unknown value format");
-    if (format === "json") JSON.parse(value);
+    if (format === "json") {
+      try { JSON.parse(value); }
+      catch { throw new Error("Enter valid JSON, such as null, a string, an array or an object."); }
+    }
     let bytes;
     if (format === "base64") {
       if (!/^(?:[A-Za-z0-9+/]{4})*(?:[A-Za-z0-9+/]{2}==|[A-Za-z0-9+/]{3}=)?$/.test(value) || btoa(atob(value)) !== value) throw new Error("Use canonical padded standard base64");
@@ -1012,14 +1015,17 @@
     }
     // Textareas normalize CR/CRLF; keep those bytes and BOMs out of text mode.
     if (/[\u0000-\u0008\u000b-\u001f\u007f\ufeff]/u.test(decoded) || kvValue(decoded, "text") !== encoded) throw new Error("Use base64 to preserve control characters, CR/CRLF or a BOM exactly.");
-    if (format === "json") JSON.parse(decoded);
+    if (format === "json") {
+      try { JSON.parse(decoded); }
+      catch { throw new Error("Enter valid JSON, such as null, a string, an array or an object."); }
+    }
     return { value: decoded, format };
   }
-  function serverTime(value, date) {
-    const clock = value?.meta?.ttl_clock_ms;
-    const milliseconds = typeof clock === "string" && /^(0|[1-9][0-9]*)$/.test(clock) ? Number(clock) : Date.parse(date);
+  function serverTime(date) {
+    const milliseconds = Date.parse(date) - 2000;
     return Number.isSafeInteger(milliseconds) && milliseconds >= 0 ? milliseconds : null;
   }
+  const displayKey = value => JSON.stringify(value).replaceAll(" ", "␠");
   function memoryRequest(action, input, now) {
     const required = (value, label) => {
       if (typeof value !== "string" || !value.trim()) throw new Error(`${label} is required`);
@@ -1058,8 +1064,8 @@
     body.deadline_ms = 5000;
     if (action === "consolidate" || action === "forget") {
       const refs = JSON.parse(input.references);
-      const cap = action === "consolidate" ? 256 : 4096;
-      if (!Array.isArray(refs) || !refs.length || refs.length > cap) throw new Error(`Provide 1..${cap} memory references`);
+      const cap = action === "consolidate" ? 64 : 4096;
+      if (!Array.isArray(refs) || !refs.length || refs.length > cap) throw new Error(`Enter 1..${cap} memory references.`);
       const seen = new Set();
       for (const ref of refs) {
         exactKeys(ref, ["id", "revision"], ["id", "revision"], "Memory reference");
@@ -1088,7 +1094,8 @@
     let cursor = null, pageContext = null, memoryResponse = null, memoryAttempt = null, kvDirty = false;
     let originalValue = null, loadedKey = null, valueFormat = $("kv-format").value;
     const advertised = route => ctx.capabilities()?.routes?.includes(route) === true;
-    const kvReady = () => ctx.connected() && ctx.feature("kv") && advertised("/v1/collections/{collection}/kv/entry") && ctx.dimensions() === 1;
+    const kvReady = () => ctx.connected() && advertised("/v1/collections/{collection}/kv/entry") && ctx.dimensions() === 1;
+    const kvExpiryReady = () => ctx.feature("record_expiry");
     const memoryRoute = action => {
       const routes = ctx.capabilities()?.routes;
       // Released servers mount memory routes without listing them in capabilities.
@@ -1121,11 +1128,12 @@
     };
     const gate = () => {
       text("kv-availability", !ctx.connected() ? "Sign in to check Key-value support."
-        : !ctx.feature("kv") || !advertised("/v1/collections/{collection}/kv/entry") ? "This server does not advertise Key-value support."
+        : !advertised("/v1/collections/{collection}/kv/entry") ? "This server does not advertise Key-value support."
         : ctx.dimensions() !== 1 ? "Select a one-dimensional collection to use Key-value. No collection is created automatically."
-        : `Collection: ${ctx.collection()}. Key-value support is available; your collection permissions still apply.`);
+        : `Collection: ${ctx.collection()}. Key-value support is available; your collection permissions still apply.${kvExpiryReady() ? "" : " Expiry is unavailable for this database format."}`);
       for (const name of ["kv-list", "kv-get"]) $(name).disabled = !kvReady() || !ctx.can("read");
       for (const name of ["kv-save", "kv-delete"]) $(name).disabled = !kvReady() || !ctx.can("write");
+      $("kv-expiry").disabled = !kvExpiryReady() || !ctx.can("write");
       $("kv-next").disabled = !kvReady() || !ctx.can("read") || cursor === null || pageContext !== listContext();
       const action = $("memory-action").value;
       text("memory-availability", !ctx.connected() ? "Sign in with a scoped API token to use MemoryAI."
@@ -1178,7 +1186,9 @@
       tbody.replaceChildren();
       for (const entry of result.items) {
         const row = document.createElement("tr"), key = document.createElement("td"), button = document.createElement("button");
-        button.type = "button"; button.className = "secondary"; button.textContent = entry.key;
+        button.type = "button"; button.className = "secondary"; button.textContent = displayKey(entry.key);
+        button.title = `Key ${displayKey(entry.key)}`;
+        button.setAttribute("aria-label", `Get key ${displayKey(entry.key)}`);
         button.addEventListener("click", () => ctx.run(async () => {
           if (context !== listContext()) throw new Error("Page is stale; list keys again");
           if (kvDirty && !await ctx.confirm("Discard the unsaved Key-value draft and load this key?")) return;
@@ -1197,6 +1207,12 @@
     on("kv-get", async () => {
       if (kvDirty && !await ctx.confirm("Discard the unsaved Key-value draft and load this key?")) return;
       await getValue();
+    });
+    $("kv-key").addEventListener("keydown", event => {
+      if (event.key === "Enter" && !event.shiftKey) {
+        event.preventDefault();
+        ctx.run(getValue);
+      }
     });
     for (const name of ["kv-namespace", "kv-prefix", "kv-limit"]) $(name).addEventListener("input", () => {
       clearPage();
@@ -1227,10 +1243,11 @@
       let body;
       if (deleting) query.set("expected", expected);
       else {
+        if ($("kv-expiry").value && !kvExpiryReady()) throw new Error("Expiry requires a format 5 database; the value was not saved.");
         body = { namespace: $("kv-namespace").value, key: keyValue(), value_base64: originalValue ?? kvValue($("kv-value").value, valueFormat), expected };
         if ($("kv-expiry").value) body.expires_at_ms = id($("kv-expiry").value);
       }
-      if (!await ctx.confirm(`${deleting ? "Delete" : "Save"} key ${JSON.stringify(keyValue())} in collection ${ctx.collection()}, namespace ${JSON.stringify($("kv-namespace").value)}? Condition: ${JSON.stringify(expected)}.${!deleting && !body.expires_at_ms ? " Any existing expiry will be cleared." : ""} No automatic retry.`)) return;
+      if (!await ctx.confirm(`${deleting ? "Delete" : "Save"} key ${displayKey(keyValue())} in collection ${ctx.collection()}, namespace ${displayKey($("kv-namespace").value)}? Condition: ${JSON.stringify(expected)}.${!deleting && !body.expires_at_ms ? " Any existing expiry will be cleared." : ""} No automatic retry.`)) return;
       text("kv-outcome", "Request submitted. If interrupted, the outcome may be unknown; get the key before retrying.");
       try {
         const result = await ctx.api(deleting ? "DELETE" : "PUT", `${base}/entry${deleting ? `?${query}` : ""}`, body);
@@ -2230,7 +2247,7 @@
     collectionName, collectionPath, settings, scoreDirection, redact, maskSecret, OPERATIONS, credentialRequest, credentialScope, graceSeconds,
     expiry, rerank, sparseVector, webhookRequest, WEBHOOK_EVENTS, feedRows, pitrRequest, feedPath,
     boundedInteger, importRows, chunk, resumePlan, savedQueryV2, autoMaintenance, autoMaintenanceForm, backupSchedule, memoryRows, requestAllowed, isSearch,
-    kvAddress, kvValue, kvPresentation, kvExpected, memoryRequest, providerAlias, serverTime,
+    kvAddress, kvValue, kvPresentation, kvExpected, memoryRequest, providerAlias, serverTime, displayKey,
     vectorDeclaration, namedVectorValues,
   } };
 })();

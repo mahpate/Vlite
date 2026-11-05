@@ -46,12 +46,13 @@ test("KV presentation refuses lossy textarea encodings and converts formats loss
   assert.equal(u.kvPresentation(encoded, "json").value, '{"hello":"世界"}');
   assert.equal(u.kvValue(u.kvPresentation(encoded).value, "text"), encoded);
   assert.throws(() => u.kvPresentation(u.kvValue("not json", "text"), "json"));
+  assert.throws(() => u.kvValue("", "json"), /Enter valid JSON, such as null/);
+  assert.match(u.displayKey("  line\nbreak  "), /␠␠line\\nbreak␠␠/);
 });
 
 test("Memory observation timestamps require server time, never the device clock", () => {
-  assert.equal(u.serverTime({ meta: { ttl_clock_ms: "123" } }, "Thu, 05 Nov 2026 22:00:00 GMT"), 123);
-  assert.equal(u.serverTime({}, "Thu, 05 Nov 2026 22:00:00 GMT"), 1793916000000);
-  assert.equal(u.serverTime({}, null), null);
+  assert.equal(u.serverTime("Thu, 05 Nov 2026 22:00:00 GMT"), 1793915998000);
+  assert.equal(u.serverTime(null), null);
 });
 
 const draft = {
@@ -102,8 +103,9 @@ test("Memory requests use exact scope, bounded reads and revision-pinned logical
   assert.equal(u.memoryRequest("recall", { ...draft, seeds: "", vector: "[2,0]", text: "query", ranking: "exact" }).text, "query");
   assert.throws(() => u.memoryRequest("remember", draft), /Server time is unavailable/);
   const refs = count => JSON.stringify(Array.from({ length: count }, (_, n) => ({ id: `m${n}`, revision: "1" })));
-  assert.equal(u.memoryRequest("consolidate", { ...draft, references: refs(256) }, 123).inputs.length, 256);
-  assert.throws(() => u.memoryRequest("consolidate", { ...draft, references: refs(257) }, 123), /1\.\.256/);
+  assert.equal(u.memoryRequest("consolidate", { ...draft, references: refs(64) }, 123).inputs.length, 64);
+  for (const count of [65, 256]) assert.throws(() =>
+    u.memoryRequest("consolidate", { ...draft, references: refs(count) }, 123), /1\.\.64/);
   assert.throws(() => u.memoryRequest("recall", { ...draft, vector: "[1]", ranking: "exact" }));
   assert.throws(() => u.memoryRequest("recall", { ...draft, seeds: "", text: "query", vector: "[1]", ranking: "mmr", lambda: .5 }));
   assert.throws(() => u.memoryRequest("recall", { ...draft, seeds: "", vector: "[1]", ranking: "mmr", lambda: "" }));

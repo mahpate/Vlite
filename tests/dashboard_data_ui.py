@@ -13,14 +13,14 @@ MAX_U64 = "18446744073709551615"
 
 
 class WorkspaceApi(FakeApi):
-    def __init__(self, role="scoped"):
-        super().__init__(role=role, format_version=5, scope={
+    def __init__(self, role="scoped", format_version=5):
+        super().__init__(role=role, format_version=format_version, scope={
             "collections": ["*"], "graphs": ["*"],
             "operations": ["read", "write", "search", "collections", "graph_read", "graph_write"],
             "expires_unix_ms": 2000000000000,
         } if role == "scoped" else None)
         self.collections["cache"] = {**self.collections["docs"], "id": 2, "name": "cache", "dimensions": 1}
-        self.caps["features"].update(named_vectors=True, sparse_vectors=True, kv=True)
+        self.caps["features"].update(named_vectors=True, sparse_vectors=True, kv=True, record_expiry=True)
         self.caps["routes"] = [
             "/v1/collections/{collection}/kv/entry", "/v1/collections/{collection}/kv/entries",
             "/v1/collections/{collection}/query",
@@ -83,7 +83,8 @@ class WorkspaceApi(FakeApi):
 
 def exercise_kv_bytes(browser):
     fake = WorkspaceApi()
-    fixtures = {"cr": b"a\rb", "crlf": b"a\r\nb", "bom": b"\xef\xbb\xbfhello", "line\nbreak": b'{"value":1}'}
+    fixtures = {"  padded\nkey  ": b"value", "cr": b"a\rb", "crlf": b"a\r\nb",
+                "bom": b"\xef\xbb\xbfhello", "line\nbreak": b'{"value":1}'}
     fake.values = {key: {"key": key, "version": "2", "expires_at_ms": None,
                          "value_base64": base64.b64encode(value).decode()}
                    for key, value in fixtures.items()}
@@ -92,18 +93,33 @@ def exercise_kv_bytes(browser):
     control(page, "#kv-list")
     for key, value in fixtures.items():
         page.locator("#kv-list").click()
-        page.locator("#kv-entries").get_by_role("button", name=key, exact=True).click()
+        page.locator("#kv-entries").get_by_role("button", name=f"Get key {json.dumps(key, ensure_ascii=False).replace(' ', '␠')}", exact=True).click()
         expect(page.locator("#kv-key")).to_have_value(key)
-        if key != "line\nbreak":
+        if key not in ("line\nbreak", "  padded\nkey  "):
             expect(page.locator("#kv-format")).to_have_value("base64")
+        list_button = page.locator("#kv-entries").get_by_role(
+            "button", name=f"Get key {json.dumps(key, ensure_ascii=False).replace(' ', '␠')}", exact=True)
+        expect(list_button).to_contain_text("␠" if key.startswith(" ") else "\\n" if "\n" in key else key)
         page.locator("#kv-expiry").fill(MAX_U64)
         page.locator("#kv-save").click()
+        if key == "  padded\nkey  ":
+            expect(page.locator("#confirmation-text")).to_contain_text(
+                json.dumps(key, ensure_ascii=False).replace(" ", "␠"))
         confirm(page, "Save key")
         expect(page.locator("#kv-outcome")).to_contain_text("Server confirmed")
         put = next(item for item in reversed(fake.log) if item["method"] == "PUT")
         assert put["body"]["key"] == key
         assert base64.b64decode(put["body"]["value_base64"]) == value
         expect(page.locator("#kv-version")).to_have_value("3")
+    page.locator("#kv-key").fill("  padded\nkey  ")
+    with page.expect_response(lambda response: response.request.method == "GET" and
+                              response.url.split("?")[0].endswith("/kv/entry")) as entered_key:
+        page.locator("#kv-key").press("Enter")
+    assert parse_qs(entered_key.value.request.url.split("?", 1)[1])["key"] == ["  padded\nkey  "]
+    expect(page.locator("#kv-key")).to_have_value("  padded\nkey  ")
+    page.locator("#kv-list").click()
+    page.locator("#kv-entries").get_by_role(
+        "button", name=f"Get key {json.dumps('line\nbreak', ensure_ascii=False)}", exact=True).click()
     # A display format change converts bytes; it never reinterprets base64 as text.
     page.locator("#kv-format").select_option("base64")
     expect(page.locator("#kv-value")).to_have_value(base64.b64encode(fixtures["line\nbreak"]).decode())
@@ -121,15 +137,27 @@ def exercise_kv_bytes(browser):
     put = next(item for item in reversed(fake.log) if item["method"] == "PUT")
     assert put["body"]["namespace"] == "another" and put["body"]["expected"] == "absent"
     assert base64.b64decode(put["body"]["value_base64"]) == b'{"value":2}'
+    page.locator("#kv-format").select_option("text")
+    page.locator("#kv-value").fill("")
+    page.locator("#kv-format").select_option("json")
+    expect(page.locator("#status")).to_contain_text("Enter valid JSON, such as null")
+    expect(page.locator("#kv-format")).to_have_value("text")
     assert not errors, errors
     context.close()
-    fake = WorkspaceApi()
+    fake = WorkspaceApi(format_version=4)
     fake.caps["features"]["kv"] = False
+    fake.caps["features"]["record_expiry"] = False
     context, page, errors = mocked_page(browser, fake)
     page.locator("#collection").select_option("cache")
     control(page, "#kv-list")
-    for name in ("list", "get", "save", "delete"):
-        expect(page.locator("#kv-" + name)).to_be_disabled()
+    expect(page.locator("#kv-list")).to_be_enabled()
+    expect(page.locator("#kv-expiry")).to_be_disabled()
+    page.locator("#kv-key").fill("format-four")
+    page.locator("#kv-value").fill("no-expiry")
+    page.locator("#kv-save").click()
+    confirm(page, "Save key")
+    expect(page.locator("#kv-outcome")).to_contain_text("Server confirmed")
+    assert fake.values["format-four"]["expires_at_ms"] is None
     assert not errors, errors
     context.close()
 
@@ -223,7 +251,7 @@ def exercise(browser):
     confirm(page, "Idempotency key: once")
     expect(page.locator("#memory-result")).to_contain_text('"operation": "remember"')
     remembered = next(item for item in reversed(fake.log) if item["path"].endswith("/remember"))
-    assert remembered["body"]["items"][0]["observed_at_ms"] == "1793916000000"
+    assert remembered["body"]["items"][0]["observed_at_ms"] == "1793915998000"
     page.evaluate("Date.now = window.originalDateNow")
     with page.expect_download() as downloaded:
         page.locator("#memory-download").click()
@@ -251,8 +279,14 @@ def exercise(browser):
     assert replay["body"] == original, "Explicit replay of an unchanged draft must preserve its timestamp"
     page.locator("#memory-action").select_option("consolidate")
     page.locator("#memory-transformation").fill("summary-v1")
-    page.locator("#memory-references").fill(json.dumps([{"id": "<entity>", "revision": MAX_U64}]))
+    page.locator("#memory-references").fill(json.dumps([{"id": f"m{n}", "revision": "1"} for n in range(65)]))
     page.locator("#memory-idempotency").fill("summary-once")
+    before = len(fake.log)
+    page.locator("#memory-run").click()
+    expect(page.locator("#status")).to_contain_text("1..64 memory references")
+    expect(page.locator("#confirmation")).to_be_hidden()
+    assert not any(item["path"].endswith("/consolidate") for item in fake.log[before:])
+    page.locator("#memory-references").fill(json.dumps([{"id": "<entity>", "revision": MAX_U64}]))
     page.locator("#memory-run").click()
     confirm(page, "retain originals")
     expect(page.locator("#memory-result")).to_contain_text('"operation": "consolidate"')

@@ -46,7 +46,7 @@ jobs:
         with:
           node-version: "22"
       - run: |
-          node --test tests/console_tools.test.cjs tests/admin_tools.test.cjs tests/navigation.test.cjs tests/dashboard_interactions.test.cjs
+          node --test tests/console_tools.test.cjs tests/admin_tools.test.cjs tests/navigation.test.cjs tests/dashboard_interactions.test.cjs tests/dashboard_data.test.cjs
           python tests/admin_route_coverage.py
           python tests/dashboard_feature_coverage.py
       - run: python -m unittest discover -s clients/python -p test_client.py

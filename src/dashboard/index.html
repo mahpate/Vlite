@@ -339,7 +339,7 @@
         <label>Keys per page<input id="kv-limit" type="number" min="1" max="10000" value="100"></label>
         <button id="kv-list" type="button">List keys</button>
         <button id="kv-next" type="button" class="secondary" disabled>Next page</button>
-        <p id="kv-page-status" role="status">Pages show live data, not a snapshot. Values and expiry may change between pages.</p>
+        <p id="kv-page-status" role="status">Pages show live data, not a snapshot. Spaces appear as ␠ and line breaks as escaped characters so exact keys are distinguishable.</p>
         <div class="table-scroll"><table id="kv-entries"><caption>Keys in this namespace</caption><thead><tr><th>Key</th><th>Version</th><th>Expiry (Unix ms)</th></tr></thead><tbody></tbody></table></div>
       </div>
       <div class="tool-group">
@@ -391,7 +391,7 @@
           <p>Observation time comes from the server, not your device clock. If time is unavailable or rejected as future-dated, refresh the connection and ask your operator to check the server clock and proxy Date header. This version does not support facts, relations, evidence attachment or arbitrary metadata.</p>
         </div>
         <div data-memory-action="forget consolidate" hidden>
-          <label>Memory references (JSON array of {"id":"…","revision":"1"}; at most 256 for consolidation)<textarea id="memory-references" rows="4">[]</textarea></label>
+          <label>Memory references (JSON array of {"id":"…","revision":"1"}; at most 64 for consolidation)<textarea id="memory-references" rows="4">[]</textarea></label>
           <p>Use revisions from a successful recall. Logical deletion is not secure erasure; backups and external copies remain operator-managed. Consolidation retains original memories.</p>
         </div>
         <div data-memory-action="remember consolidate forget receipts/lookup" hidden>
