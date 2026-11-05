@@ -87,7 +87,7 @@ fn output(value: Value, max_references: u64) -> Result<(ConsolidateSummary, Stri
         .get("source")
         .and_then(|source| source.get("transformation_id"))
         .cloned();
-    let item = remember_item(value, &Default::default(), max_references)?;
+    let item = remember_item(value, &Default::default(), max_references, None)?;
     let transformation = wire::key(
         transformation.ok_or_else(|| Fail::invalid("output"))?,
         "output",

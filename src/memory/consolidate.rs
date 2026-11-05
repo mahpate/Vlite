@@ -8,10 +8,10 @@ use sha2::{Digest, Sha256};
 use super::{
     LABEL_CONTENT, LABEL_MEMORY, LABEL_RECEIPT, LABEL_RECEIPT_OUTCOME, MAX_BODY_BYTES, MAX_OPS,
     MAX_PROVENANCE, MAX_STRING_VALUE_BYTES, MemoryError, MemoryEvidence, MemoryMut,
-    MemoryProperties, MemoryResult, MemoryScope, Provenance, content_chunks, content_digest,
-    content_edge_key, content_key, encode_provenance, evidence_record_id, existing_memory, hex,
-    memory_key, memory_properties, opaque, operation_receipt_key, receipt_outcome_key,
-    scan_memories, string_property, unhex,
+    MemoryProperties, MemoryResult, MemoryScope, Provenance, RECORD_EVIDENCE_PREFIX,
+    content_chunks, content_digest, content_edge_key, content_key, encode_provenance,
+    evidence_record_id, existing_memory, hex, memory_key, memory_properties, opaque,
+    operation_receipt_key, receipt_outcome_key, scan_memories, string_property, unhex,
 };
 use crate::{
     Error, Expected, Metadata, MetadataValue,
@@ -234,7 +234,7 @@ fn normalize(request: &ConsolidateRequest) -> MemoryResult<Normalized> {
         return Err(MemoryError::InvalidProvenance);
     }
     if let Some(evidence) = &request.evidence {
-        if !opaque(&evidence.id) {
+        if !opaque(&evidence.id) || evidence.id.starts_with(RECORD_EVIDENCE_PREFIX) {
             return Err(MemoryError::InvalidEvidence);
         }
         evidence.scope.validate()?;

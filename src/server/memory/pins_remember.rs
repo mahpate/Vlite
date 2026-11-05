@@ -1258,11 +1258,6 @@ async fn unmapped_item_fields_are_refused_by_name_before_their_values_are_read()
             json!({"references": [{"id": "elsewhere", "revision": "2"}]}),
             "reference_revision_pin",
         ),
-        (
-            "evidence",
-            json!({"evidence": [{"collection": "notes_ev", "record": "1"}]}),
-            "evidence",
-        ),
         ("metadata", json!({"metadata": {}}), "metadata"),
         (
             "metadata scalars",

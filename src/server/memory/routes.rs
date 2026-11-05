@@ -28,9 +28,9 @@ use super::wire::{self, Fail, Fields};
 use crate::Database;
 use crate::memory::binding::Binding;
 use crate::memory::{
-    MemoryError, MemoryItem, MemoryKind, MemoryMut, MemoryRef, MemoryScope, Provenance,
-    ReceiptOperation, RememberRequest, WireCode, WireMapping, WireOperation, memory_error,
-    receipt_id,
+    MemoryError, MemoryEvidence, MemoryItem, MemoryKind, MemoryMut, MemoryRef, MemoryScope,
+    Provenance, ReceiptOperation, RememberRequest, WireCode, WireMapping, WireOperation,
+    memory_error, receipt_id, record_evidence_id,
 };
 
 mod consolidate;
@@ -189,6 +189,8 @@ struct Bound {
     receipt_window_ms: u64,
     refusal: Option<WireCode>,
     scopes: Vec<MemoryScope>,
+    /// Whether the credential's grant carries `raw_access` on this binding.
+    raw_access: bool,
     grant: Arc<super::super::credentials::Grant>,
 }
 
@@ -213,11 +215,10 @@ fn resolve(
         .memory_bindings
         .resolve(grant.tenant_id.as_deref(), &name)
         .ok_or_else(Fail::forbidden)?;
-    let scopes = binding
+    let granted = binding
         .grants
         .iter()
         .find(|entry| entry.principal == grant.id)
-        .map(|entry| entry.scopes.clone())
         .ok_or_else(Fail::forbidden)?;
     let (graph, evidence) = super::resources(binding);
     if !grant.graph_allowed(&graph) {
@@ -237,7 +238,8 @@ fn resolve(
             evidence,
             receipt_window_ms: binding.receipt_window_ms,
             refusal: binding.refusal(operation),
-            scopes,
+            scopes: granted.scopes.clone(),
+            raw_access: granted.raw_access,
             grant: grant.clone(),
         },
         name,
@@ -487,8 +489,10 @@ fn content(value: Value) -> Result<String, Fail> {
 
 // ---------------------------------------------------------------- Remember
 
-/// Remember field refusals in request field order (mapping sections 1, 3).
-fn remember_refusal(body: &Map<String, Value>) -> Option<&'static str> {
+/// Remember field refusals in request field order (mapping sections 1, 3). An
+/// item's `evidence` is served for a binding with an evidence collection (design
+/// note section 5); the request's own `evidence` list never is.
+fn remember_refusal(body: &Map<String, Value>, evidence_collection: bool) -> Option<&'static str> {
     for item in body
         .get("items")
         .and_then(Value::as_array)
@@ -515,7 +519,7 @@ fn remember_refusal(body: &Map<String, Value>) -> Option<&'static str> {
             return Some("reference_revision_pin");
         }
         for field in ["evidence", "metadata", "assertion"] {
-            if present(item, field) {
+            if present(item, field) && (field != "evidence" || !evidence_collection) {
                 return Some(field);
             }
         }
@@ -526,10 +530,65 @@ fn remember_refusal(body: &Map<String, Value>) -> Option<&'static str> {
     body.contains_key("evidence").then_some("evidence")
 }
 
+/// Whether an item of the request carries an evidence reference.
+fn references_evidence(body: &Map<String, Value>) -> bool {
+    body.get("items")
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+        .any(|item| present(item, "evidence"))
+}
+
+/// What an item's evidence references resolve against: the binding's one
+/// evidence collection, by its alias (the binding's name), and the scope of
+/// the request.
+struct EvidenceTarget<'a> {
+    alias: &'a str,
+    scope: &'a MemoryScope,
+}
+
+/// The engine attaches at most one record to a memory.
+const MAX_EVIDENCE_REFERENCES: usize = 1;
+
+/// An item's `evidence`: `{collection, record}` references to existing
+/// records of the binding's evidence collection (design note section 5). A
+/// collection that is not this binding's alias is the single 403 body, as for
+/// an unknown binding; a `record` that is not a `u64` is 422.
+fn evidence_references(
+    value: Value,
+    target: Option<&EvidenceTarget<'_>>,
+) -> Result<Vec<MemoryEvidence>, Fail> {
+    let target = target.ok_or_else(|| Fail::invalid("evidence"))?;
+    wire::array(value, "evidence", 0, MAX_EVIDENCE_REFERENCES)?
+        .into_iter()
+        .map(|value| {
+            let mut reference = Fields::new(value, "evidence")?;
+            let mut field = |name: &'static str| {
+                reference
+                    .take(name)
+                    .ok()
+                    .flatten()
+                    .ok_or_else(|| Fail::invalid("evidence"))
+            };
+            let (collection, record) = (field("collection")?, field("record")?);
+            let record = wire::u64_value(record, "evidence")?;
+            reference.finish()?;
+            if collection.as_str() != Some(target.alias) {
+                return Err(Fail::forbidden());
+            }
+            Ok(MemoryEvidence {
+                id: record_evidence_id(record),
+                scope: target.scope.clone(),
+            })
+        })
+        .collect()
+}
+
 fn remember_item(
     value: Value,
     bundle: &std::collections::BTreeSet<String>,
     max_references: u64,
+    evidence_target: Option<&EvidenceTarget<'_>>,
 ) -> Result<MemoryItem, Fail> {
     let mut fields = Fields::new(value, "items")?;
     let id = wire::key(fields.require("id")?, "id")?;
@@ -579,6 +638,10 @@ fn remember_item(
             .collect::<Result<_, _>>()?,
     };
     let expected = fields.take("expected")?;
+    let evidence = match fields.take("evidence")? {
+        None => Vec::new(),
+        Some(value) => evidence_references(value, evidence_target)?,
+    };
     let merge = match fields.take("merge")? {
         None => false,
         Some(value) => match value.as_str() {
@@ -611,7 +674,7 @@ fn remember_item(
         expected_revision,
         expiry_ms,
         expiry_valid: true,
-        evidence: Vec::new(),
+        evidence,
     })
 }
 
@@ -694,16 +757,28 @@ fn remember_in(
     bound.covers(db)?;
     bound.recheck(db)?;
     fields.drop_empty_evidence();
-    refuse(bound, fields.raw(), remember_refusal)?;
+    refuse(bound, fields.raw(), |body| {
+        remember_refusal(body, bound.evidence.is_some())
+    })?;
+    // A reference claims a record the memory routes cannot otherwise reach, so
+    // it takes the capability that reads the record directly. The answer is
+    // the single 403 body, before any record is looked at.
+    if !bound.raw_access && references_evidence(fields.raw()) {
+        return Err(Fail::forbidden());
+    }
     let common = mutation(&mut fields)?;
     let items = wire::array(fields.require("items")?, "items", 1, MAX_ITEMS)?;
     let bundle = items
         .iter()
         .filter_map(|item| item.get("id").and_then(Value::as_str).map(str::to_owned))
         .collect();
+    let target = EvidenceTarget {
+        alias: &bound.name,
+        scope: &scope,
+    };
     let items = items
         .into_iter()
-        .map(|item| remember_item(item, &bundle, common.max_references))
+        .map(|item| remember_item(item, &bundle, common.max_references, Some(&target)))
         .collect::<Result<Vec<_>, _>>()?;
     fields.finish()?;
     let now = call.now();

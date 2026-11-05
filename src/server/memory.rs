@@ -216,6 +216,8 @@ mod pins_binding;
 #[cfg(test)]
 mod pins_consolidate;
 #[cfg(test)]
+mod pins_evidence;
+#[cfg(test)]
 mod pins_forget;
 #[cfg(test)]
 mod pins_receipts;

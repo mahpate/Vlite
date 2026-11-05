@@ -446,7 +446,13 @@ impl<'db> MemoryMut<'db> {
                     && owner.labels.contains(LABEL_MEMORY)
                     && string_property(&owner, "scope")? != scope_key
                 {
-                    return Err(MemoryError::CrossScope);
+                    // A record named by number answers like every other record
+                    // that cannot be attached, whoever owns it.
+                    return Err(if record_of(&evidence.id).is_some() {
+                        MemoryError::RecordAlreadyAttached
+                    } else {
+                        MemoryError::CrossScope
+                    });
                 }
             }
         }
@@ -1317,7 +1323,7 @@ fn validate_request(request: &RememberRequest) -> MemoryResult<Vec<NormalizedIte
             return Err(MemoryError::InvalidReference);
         }
         for evidence in &item.evidence {
-            if !opaque(&evidence.id) {
+            if !valid_evidence_id(&evidence.id) {
                 return Err(MemoryError::InvalidEvidence);
             }
             evidence.scope.validate()?;
@@ -1488,7 +1494,16 @@ fn encode_evidence(evidence: &[String]) -> String {
     ids.sort();
     ids.dedup();
     ids.iter()
-        .map(|id| hex(id.as_bytes()))
+        .map(|id| {
+            // A record-addressed ID is stored as itself, not as hex: a version
+            // that does not know it fails to read the memory instead of
+            // reading another record's evidence (design note section 5.4).
+            if record_of(id).is_some() {
+                id.clone()
+            } else {
+                hex(id.as_bytes())
+            }
+        })
         .collect::<Vec<_>>()
         .join(";")
 }
@@ -1499,12 +1514,46 @@ fn decode_evidence(value: &str) -> MemoryResult<Vec<String>> {
     }
     value
         .split(';')
-        .map(|id| String::from_utf8(unhex(id)?).map_err(|_| MemoryError::InvalidBundle))
+        .map(|token| {
+            if token.starts_with(RECORD_EVIDENCE_PREFIX) {
+                return record_of(token)
+                    .map(|_| token.to_owned())
+                    .ok_or(MemoryError::InvalidBundle);
+            }
+            String::from_utf8(unhex(token)?).map_err(|_| MemoryError::InvalidBundle)
+        })
         .collect()
 }
 
+/// The prefix of an evidence ID that names an existing record by its number
+/// (0.7.1 design note section 5). Only the canonical form is valid, and only
+/// `remember` accepts it.
+const RECORD_EVIDENCE_PREFIX: &str = "record:";
+
+/// The evidence ID that names `record`.
+pub(crate) fn record_evidence_id(record: u64) -> String {
+    format!("{RECORD_EVIDENCE_PREFIX}{record}")
+}
+
+/// The record a record-addressed ID names: the prefix and the canonical
+/// decimal of a `u64` (no sign, no leading zero, no overflow), so no two IDs
+/// name one record.
+fn record_of(id: &str) -> Option<u64> {
+    let digits = id.strip_prefix(RECORD_EVIDENCE_PREFIX)?;
+    let record = digits.parse::<u64>().ok()?;
+    (record.to_string() == digits).then_some(record)
+}
+
+/// An evidence ID of `remember`: opaque, and with the reserved prefix only in
+/// its canonical form.
+fn valid_evidence_id(id: &str) -> bool {
+    opaque(id) && (!id.starts_with(RECORD_EVIDENCE_PREFIX) || record_of(id).is_some())
+}
+
 fn evidence_record_id(id: &str) -> u64 {
-    u64::from_be_bytes(Sha256::digest(id.as_bytes())[..8].try_into().unwrap())
+    record_of(id).unwrap_or_else(|| {
+        u64::from_be_bytes(Sha256::digest(id.as_bytes())[..8].try_into().unwrap())
+    })
 }
 
 fn string_property<'a>(node: &'a NodeView, name: &str) -> MemoryResult<&'a str> {
@@ -5713,6 +5762,232 @@ mod tests {
     #[test]
     fn evidence_record_id_is_pinned() {
         assert_eq!(evidence_record_id("e"), 0x3f79bb7b435b0532);
+    }
+
+    /// Design note section 5: a record-addressed ID is the prefix and the
+    /// canonical decimal of a `u64`, so no two IDs name one record; every
+    /// other ID, including near misses of the prefix, still hashes.
+    #[test]
+    fn a_record_addressed_id_names_its_record_in_canonical_form_only() {
+        for (id, record) in [
+            ("record:0", 0),
+            ("record:7", 7),
+            ("record:18446744073709551615", u64::MAX),
+        ] {
+            assert_eq!(record_of(id), Some(record), "{id}");
+            assert_eq!(evidence_record_id(id), record, "{id}");
+            assert!(valid_evidence_id(id), "{id}");
+        }
+        assert_eq!(record_evidence_id(7), "record:7");
+        assert_eq!(record_evidence_id(u64::MAX), "record:18446744073709551615");
+        for id in [
+            "record:",
+            "record:07",
+            "record:00",
+            "record:+7",
+            "record:-7",
+            "record: 7",
+            "record:7 ",
+            "record:7x",
+            "record:0x7",
+            "record:\u{661}",
+            "record:18446744073709551616",
+        ] {
+            assert_eq!(record_of(id), None, "{id}");
+            assert!(!valid_evidence_id(id), "{id}");
+        }
+        for id in ["Record:7", "xrecord:7", "record", "e"] {
+            assert!(valid_evidence_id(id), "{id}");
+            assert_eq!(record_of(id), None, "{id}");
+        }
+        assert_eq!(evidence_record_id("Record:7"), {
+            let digest = Sha256::digest(b"Record:7");
+            u64::from_be_bytes(digest[..8].try_into().unwrap())
+        });
+    }
+
+    fn put_record(db: &mut Database, record: u64) {
+        db.graph_mut("memory")
+            .unwrap()
+            .write_batch(&[GraphOp::Vector {
+                collection: "default".into(),
+                mutation: crate::Mutation::Put {
+                    id: record,
+                    vector: vec![1.0, 0.0],
+                    payload: b"payload".to_vec(),
+                },
+            }])
+            .unwrap();
+    }
+
+    fn remember_with_evidence(
+        db: &mut Database,
+        request: &RememberRequest,
+    ) -> MemoryResult<RememberResult> {
+        MemoryMut::bind(db, "memory", Some("default"))
+            .unwrap()
+            .remember(request)
+    }
+
+    #[test]
+    fn remember_refuses_a_malformed_record_addressed_id_and_writes_nothing() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut db = database(&dir.path().join("malformed-record-id.vlite"));
+        let seed = request("m", "seed");
+        provision(&mut db, &seed.scope);
+        let sequence = db.sequence;
+        for id in [
+            "record:",
+            "record:07",
+            "record:+7",
+            "record:7x",
+            "record:18446744073709551616",
+        ] {
+            let mut invalid = seed.clone();
+            invalid.items[0]
+                .evidence
+                .push(memory_evidence(id, &seed.scope));
+            assert!(
+                matches!(
+                    remember_with_evidence(&mut db, &invalid),
+                    Err(MemoryError::InvalidEvidence)
+                ),
+                "{id}"
+            );
+            assert_eq!(db.sequence, sequence, "{id}");
+        }
+    }
+
+    /// A reference attaches an existing record by its number. The ID is stored
+    /// as itself, not as hex, so a version that does not know it fails to
+    /// read the memory instead of reading another record's evidence.
+    #[test]
+    fn a_record_addressed_reference_attaches_an_existing_record_and_is_stored_as_itself() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut db = database(&dir.path().join("record-reference.vlite"));
+        put_record(&mut db, 4242);
+        let mut req = request("m", "ref");
+        provision(&mut db, &req.scope);
+        req.items[0]
+            .evidence
+            .push(memory_evidence("record:4242", &req.scope));
+        let first = remember_with_evidence(&mut db, &req).unwrap();
+        assert!(!first.replayed);
+        let key = memory_key(&req.scope.key(), "m");
+        assert_eq!(
+            db.graph("memory")
+                .unwrap()
+                .memory_node_attachments(&key)
+                .unwrap(),
+            vec![(db.resolve("default").unwrap(), 4242)]
+        );
+        let stored = node(&db, &key);
+        assert_eq!(string_property(&stored, "evidence").unwrap(), "record:4242");
+        assert_eq!(existing_memory(&stored).unwrap().evidence, ["record:4242"]);
+        // A stored token that is not a canonical reference is corrupt, never a
+        // record: an earlier version cannot read the memory either.
+        for token in [
+            "record:04242",
+            "record:",
+            "record:+1",
+            "record:18446744073709551616",
+            "recordx",
+        ] {
+            let mut corrupt = stored.clone();
+            corrupt
+                .properties
+                .insert("evidence".into(), MetadataValue::String(token.into()));
+            assert!(
+                matches!(existing_memory(&corrupt), Err(MemoryError::InvalidBundle)),
+                "{token}"
+            );
+        }
+        let mixed = ["record:7".to_owned(), "e".to_owned(), "record:7".to_owned()];
+        assert_eq!(encode_evidence(&mixed), "65;record:7");
+        assert_eq!(decode_evidence("65;record:7").unwrap(), ["e", "record:7"]);
+        assert!(remember_with_evidence(&mut db, &req).unwrap().replayed);
+        let mut other = req.clone();
+        other.items[0].evidence = vec![memory_evidence("record:4243", &req.scope)];
+        assert!(matches!(
+            remember_with_evidence(&mut db, &other),
+            Err(MemoryError::IdempotencyConflict)
+        ));
+    }
+
+    /// The digest hashes the reference like any evidence ID: the canonical
+    /// text below is the contract's fixed-order JSON of the request, derived
+    /// by hand and hashed outside the engine.
+    #[test]
+    fn a_record_reference_is_hashed_into_the_v1_request_digest() {
+        let digest = |ids: &[&str]| {
+            let mut req = request("m", "k");
+            for id in ids {
+                req.items[0].evidence.push(memory_evidence(id, &req.scope));
+            }
+            request_digest(&req, &validate_request(&req).unwrap())
+        };
+        assert_eq!(
+            digest(&[]),
+            "v1:9cd3a85a3575cd662a13def9c0ee96cc79ed55e188c0a946df24ebbf040d3a6d"
+        );
+        assert_eq!(
+            digest(&["record:7"]),
+            "v1:046e8a5d2a66d59bce88c3045c6b0bb01a4e9d4975d0503d5addef45abf277fe"
+        );
+        assert_eq!(
+            digest(&["record:8"]),
+            "v1:2d3ec024980c09bc1a329af8eb3075d47c089153555c8e7bf17ea0108012eb7d"
+        );
+    }
+
+    /// A record that cannot be attached is refused the same way whoever owns
+    /// it or whether it exists, and nothing is written; an ordinary evidence
+    /// ID owned by another scope keeps its own answer.
+    #[test]
+    fn a_record_that_cannot_be_attached_is_refused_alike_without_a_write() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut db = database(&dir.path().join("record-refused.vlite"));
+        put_record(&mut db, 4242);
+        let first = request("m", "first");
+        provision(&mut db, &first.scope);
+        let mut other_scope = first.clone();
+        other_scope.scope.agent = "other".into();
+        provision(&mut db, &other_scope.scope);
+        let refer = |base: &RememberRequest, id: &str, record: &str, key: &str| {
+            let mut req = base.clone();
+            req.idempotency_key = key.into();
+            req.items[0].id = id.into();
+            req.items[0].content = format!("content {id}");
+            req.items[0].evidence = vec![memory_evidence(record, &req.scope)];
+            req
+        };
+        let sequence = db.sequence;
+        let missing = refer(&first, "a", "record:999", "k-missing");
+        assert!(matches!(
+            remember_with_evidence(&mut db, &missing),
+            Err(MemoryError::RecordAlreadyAttached)
+        ));
+        assert_eq!(db.sequence, sequence);
+        remember_with_evidence(&mut db, &refer(&first, "owner", "record:4242", "k-owner")).unwrap();
+        let sequence = db.sequence;
+        for (base, key) in [(&first, "k-same"), (&other_scope, "k-other")] {
+            let again = refer(base, "b", "record:4242", key);
+            assert!(
+                matches!(
+                    remember_with_evidence(&mut db, &again),
+                    Err(MemoryError::RecordAlreadyAttached)
+                ),
+                "{key}"
+            );
+            assert_eq!(db.sequence, sequence, "{key}");
+        }
+        let hashed = seed_vector(&mut db, "e");
+        remember_with_evidence(&mut db, &refer(&first, "c", "e", "k-hashed")).unwrap();
+        assert_eq!(hashed, evidence_record_id("e"));
+        assert!(matches!(
+            remember_with_evidence(&mut db, &refer(&other_scope, "d", "e", "k-hashed-other")),
+            Err(MemoryError::CrossScope)
+        ));
     }
 
     #[test]

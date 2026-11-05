@@ -2027,6 +2027,32 @@ fn direct_consolidate(
 }
 
 #[test]
+fn c1_refuses_a_record_addressed_evidence_id() {
+    // 0.7.1 design note section 5: only `remember` accepts the reserved
+    // prefix, canonical or not; every other evidence ID is unchanged.
+    for id in ["record:7", "record:0", "record:07", "record:"] {
+        let mut request = base_request();
+        request.evidence = Some(MemoryEvidence {
+            id: id.into(),
+            scope: request.scope.clone(),
+        });
+        assert_eq!(
+            normalize_error(&request).as_deref(),
+            Some("InvalidEvidence"),
+            "{id}"
+        );
+    }
+    for id in ["Record:7", "recorded", "e"] {
+        let mut request = base_request();
+        request.evidence = Some(MemoryEvidence {
+            id: id.into(),
+            scope: request.scope.clone(),
+        });
+        assert_eq!(normalize_error(&request), None, "{id}");
+    }
+}
+
+#[test]
 fn c1_receipt_window_overflow_boundary_is_exact() {
     // Section 2: C+window must not overflow u64. C = i64::MAX is the largest
     // valid clock; window 2^63 reaches u64::MAX exactly, 2^63+1 reaches 2^64.
