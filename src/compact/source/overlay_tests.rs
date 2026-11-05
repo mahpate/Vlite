@@ -7,6 +7,7 @@ mod consumer_exact;
 mod consumer_graph;
 mod consumer_group;
 mod consumer_hybrid;
+mod consumer_kv;
 mod consumer_query;
 mod consumer_vectors;
 
@@ -1141,6 +1142,7 @@ fn compact_kv_point_and_prefix_match_resident() {
     ));
     candidate.poisoned = true;
     assert!(matches!(candidate.kv_view("kv"), Err(Error::Poisoned)));
+    consumer_kv::point_and_prefix_phases();
 }
 
 #[test]
