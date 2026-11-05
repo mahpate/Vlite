@@ -287,13 +287,11 @@ pub(super) async fn create_core(
     mut input: Create,
 ) -> Result<CollectionInfo, ApiError> {
     input.name = tenants::qualify(&role, &input.name);
-    if !service.memory_bindings.reserved().raw_allowed(
+    let hidden = !service.memory_bindings.reserved().raw_allowed(
         super::raw_credential(&role),
         super::reserved::Resource::Collection,
         &input.name,
-    ) {
-        return Err(forbidden_scope());
-    }
+    );
     let actor = principal(&role);
     let quota_service = service.clone();
     let tenant_id = match &role {
@@ -310,13 +308,16 @@ pub(super) async fn create_core(
                     .ok_or_else(forbidden_scope)?
                     .get(id)?;
             }
-            Ok(db.create_collection(
-                &input.name,
-                CollectionSpec {
-                    dimensions: input.dimensions,
-                    settings: input.settings.merge(CollectionSettings::default()),
-                },
-            )?)
+            let spec = CollectionSpec {
+                dimensions: input.dimensions,
+                settings: input.settings.merge(CollectionSettings::default()),
+            };
+            if hidden && matches!(db.resolve(&input.name), Err(Error::CollectionNotFound)) {
+                crate::validate_dimensions(spec.dimensions)?;
+                crate::validate_settings(&spec.settings)?;
+                return Err(Error::CollectionExists.into());
+            }
+            Ok(db.create_collection(&input.name, spec)?)
         })
         .await?;
     audit_event(

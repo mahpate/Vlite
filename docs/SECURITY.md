@@ -79,16 +79,21 @@ without raw access. With any binding configured, global metrics, graph guard
 statistics, replication export, webhook list/status, all import operations,
 and automatic-maintenance routes return `403 forbidden_scope`, including for
 credentials with `raw_access`. Webhook
-subscriptions naming a reserved graph or collection are refused, and the
-dispatcher filters reserved events from existing subscriptions. The gRPC
+subscriptions accept reserved-name filters just as they accept missing-name
+filters; the dispatcher still filters reserved events from all subscriptions. The gRPC
 listener and scheduled automatic index maintenance also fail closed until those
 paths can enforce the same checks.
 
-**Known limits.** Reserving a resource does not hide that it exists. A credential
-whose ordinary scope covers a reserved name (the admin token, a wildcard key, a
-tenant-wide key or a signed-in session) gets `403 forbidden_scope` for it, where a
-name that does not exist gives `404`, `409 graph_not_found` or a successful
-create. The name is visible this way; the contents are not. Sequence numbers are
+Without raw access on the owning binding, a raw request naming its graph or
+collection answers as if that resource were missing, using the ordinary
+`404 collection_not_found` or `409 graph_not_found` response. Ordinary grant
+checks still run first: an out-of-scope name retains `403 forbidden_scope`.
+Creating a resource under a reserved name answers like an occupied ordinary
+name (`409 collection_exists` or `409 graph_exists`); that collision cannot be
+hidden. The per-node attachment check on `delete_node` still requires raw
+access to each reserved evidence collection attached to that node.
+
+**Known limits.** Sequence numbers are
 database-wide: graph `view_sequence` and `revision`, change-feed `head` and
 memory receipt `sequence` advance for hidden writes, so a caller can count the
 activity of other tenants and of memory, but not read it. Idempotency keys are

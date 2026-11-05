@@ -98,6 +98,14 @@ validation against contract bounds (422 `invalid_input`); (6) the core call.
 `memory_not_configured` is returned only for an authorized scope that is not
 provisioned in the bound graph.
 
+Raw adapters are distinct from memory binding authorization: after ordinary
+grant checks, a reserved resource without owning-binding raw access answers
+like a missing resource (`404 collection_not_found`, `409 graph_not_found`),
+not like an ungranted binding. Creating under its name answers like an occupied
+resource (`409 collection_exists`, `409 graph_exists`); future renames must
+preserve that collision rule. Webhook filters accept hidden names, with event
+delivery still suppressed. The `delete_node` attachment check remains unchanged.
+
 **Multi-refusal priority (PROVISIONAL).** When several refusals apply, the
 first in this list wins: `binding_retired`; the route refusal of section 1
 (`facts`, `erasure_jobs`); `memory_feed_unsupported`
