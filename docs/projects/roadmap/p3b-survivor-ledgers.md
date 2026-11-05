@@ -113,8 +113,9 @@ gives a graph-attached record a deadline, which A4 pinned with `an_attached_reco
 and three mutants of its guards; A4's page records that an independent review read the enumeration of the writers and
 found no counterexample. `pa-kv-view-health-removed` was dead code (`Database::resolve` checks health first), so A4
 removed the line and re-based the mutant onto `resolve`. A4 added 170 mutants to the 47: 217 in all, every one killed.
-`verify` of B4's tool accepts all 217 on A4's head, with none stale. The changes that a resident file can see (the hybrid
-search and `GraphRef::retrieve` read one clock, a named-vector search whose handle turns unhealthy answers `Poisoned`, the
+`verify` of B4's tool accepts all 217 on A4's head, with none stale. The changes that a resident file can see (the exact and
+text legs of the hybrid search and the pivot and evidence reads of `GraphRef::retrieve` read one clock, while the approximate
+leg still reads the wall clock; a named-vector search whose handle turns unhealthy answers `Poisoned`; the
 key-value read path and two guards) are listed on A4's page, with the script that checks the shipped code against
 `v0.7.0`, `python scripts/shadow_copy_check.py` (`--integration` with one `--lane` range per other lane, for a tree that
 holds other lanes). A ledger run is tied to the file it ran on, so on a tree that also holds
