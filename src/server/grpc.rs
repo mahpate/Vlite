@@ -1047,7 +1047,7 @@ impl VLite for Adapter {
                     request.settings_json.as_deref(),
                 )?;
                 Ok(collection_out(
-                    collections::create_core(&service, role, input).await?,
+                    collections::create_core(&service, role, None, input).await?,
                 ))
             },
         )
@@ -1067,7 +1067,7 @@ impl VLite for Adapter {
             false,
             |service, role, _, request| async move {
                 let target = Target::Named(request.name);
-                collections::drop_core(&service, role, target).await?;
+                collections::drop_core(&service, role, None, target).await?;
                 Ok(proto::DropCollectionResponse { deleted: true })
             },
         )
