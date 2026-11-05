@@ -8,8 +8,8 @@
 use super::gates;
 use crate::compact::catalog::Precision;
 use crate::compact::catalog::tests::kv_windows::{CLOCKS, KEYS, NS, kv_payload, open, raw, slot};
-use crate::kv::{KV_PROBE_SLOTS, KvEntry, first_slot, probe_for_test, view_for_test};
-use crate::{Database, Error, Result};
+use crate::kv::{KV_PROBE_SLOTS, KvEntry, KvPut, first_slot, probe_for_test, view_for_test};
+use crate::{CreateOptions, Database, Error, Metadata, Result};
 
 fn same<T: std::fmt::Debug + PartialEq>(candidate: &Result<T>, oracle: &Result<T>, what: &str) {
     assert_eq!(format!("{candidate:?}"), format!("{oracle:?}"), "{what}");
@@ -477,4 +477,45 @@ fn compact_views_check_health_before_anything_else() {
         ));
         assert!(matches!(view.get_at(NS, "apple", 0), Err(Error::Poisoned)));
     }
+}
+
+/// A key-value deadline is the second public way to give a record an expiry. Like `put_with_expiry` it is refused for an
+/// entry that a graph node attaches, and it writes nothing. This pins the invariant behind
+/// `pa-graph-evidence-wall-clock` (an attached record never carries a deadline) on the path that
+/// `an_attached_record_never_carries_a_deadline_on_compact_or_resident_records` does not enumerate.
+#[test]
+fn an_attached_key_value_entry_cannot_be_given_a_deadline() {
+    let mut db = Database::create_in_memory(1, CreateOptions::default()).unwrap();
+    let version = db
+        .kv_store("kv")
+        .unwrap()
+        .put_at("agent", "a", b"one", KvPut::default(), 0)
+        .unwrap();
+    // The collection was empty, so the entry holds the first slot of its window.
+    let slot = first_slot("agent", "a");
+    db.create_graph("g").unwrap();
+    {
+        let mut graph = db.graph_mut("g").unwrap();
+        graph.create_node("n", &[], &Metadata::new()).unwrap();
+        graph.attach("n", "kv", slot).unwrap();
+    }
+    let mut store = db.kv_store("kv").unwrap();
+    for deadline in [0, 1, 4_102_444_800_000, u64::MAX] {
+        let put = KvPut {
+            expires_at_ms: Some(deadline),
+            ..KvPut::default()
+        };
+        let refused = store.put_at("agent", "a", b"two", put, 0);
+        assert!(
+            matches!(refused, Err(Error::GraphAttachedRecordExpiry)),
+            "{deadline}: {refused:?}"
+        );
+    }
+    let entry = store.view().get_at("agent", "a", 0).unwrap().unwrap();
+    assert_eq!(
+        (entry.value.as_slice(), entry.version, entry.expires_at_ms),
+        (&b"one"[..], version, None)
+    );
+    drop(store);
+    assert_eq!(db.collection("kv").unwrap().expires_at(slot).unwrap(), None);
 }

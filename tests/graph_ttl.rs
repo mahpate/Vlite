@@ -16,6 +16,7 @@ use std::path::Path;
 
 use tempfile::tempdir;
 use vlite::changes::{Change, ChangeKind, FeedCursor, GraphChange, read_log_changes};
+use vlite::hybrid::VectorLeg;
 use vlite::maintenance;
 use vlite::property_graph::{
     Direction, EdgeRef, EvidenceSpec, Expansion, FindNodes, GraphOp, GraphOpOutcome, GraphRef,
@@ -24,8 +25,8 @@ use vlite::property_graph::{
     ShortestPath, Traverse, inspect_graph, verify_graph,
 };
 use vlite::{
-    CreateOptions, Database, EncryptionKey, Error, Expected, Metadata, MetadataValue, Mutation,
-    ReplicaFollower,
+    AnnOptions, CreateOptions, Database, EncryptionKey, Error, Expected, HnswConfig, Metadata,
+    MetadataValue, Mutation, ReplicaFollower,
 };
 
 /// Expired at any wall-clock time the tests run.
@@ -610,6 +611,67 @@ fn retrieve_reads_the_pivot_records_at_the_read_clock() {
         let evidence: Vec<u64> = result.evidence.iter().map(|item| item.record_id).collect();
         assert_eq!(evidence, [1], "evidence at {now_ms}");
     }
+}
+
+/// The approximate pivot leg is the exception. `search_ready_with_options_in` samples the wall clock itself, so under
+/// `with_clock` the leg returns the rows that are live at the wall clock, while the exact leg, the text leg, the
+/// re-validation and the evidence read at the clock of the handle. This pins that limit as it is (documented in
+/// `p3b-record-consumers.md`); the day the leg takes the clock, the approximate rows below become the exact ones.
+#[test]
+fn retrieve_reads_the_approximate_pivot_leg_at_the_wall_clock() {
+    const EARLY: u64 = 1_000;
+    const LATE: u64 = 4_000_000_000_000;
+    let mut db = memory();
+    for (id, x, deadline) in [
+        (1, 0.0, None),
+        (2, 0.1, Some(EARLY)),
+        (3, 0.2, Some(LATE)),
+        (4, 0.3, None),
+    ] {
+        db.put_with_expiry(id, &[x, 0.0], b"row", &Metadata::new(), deadline)
+            .unwrap();
+    }
+    build(&mut db, &["a"], &[]);
+    db.graph_mut("g")
+        .unwrap()
+        .attach("a", "default", 1)
+        .unwrap();
+    db.build_hnsw(HnswConfig::default()).unwrap();
+    let graph = db.graph("g").unwrap();
+    let approximate = VectorLeg::ApproximateReady {
+        config: HnswConfig::default(),
+        ef_search: 64,
+        options: AnnOptions::default(),
+    };
+    let seen = |leg: VectorLeg, now_ms: u64| {
+        let mut pivot = Pivot::new("default", 3);
+        pivot.vector = Some(vec![0.0, 0.0]);
+        pivot.vector_leg = leg;
+        let request = Retrieve {
+            pivot,
+            expansion: Expansion::default(),
+            evidence: EvidenceSpec::default(),
+        };
+        let result = graph
+            .with_clock(now_ms)
+            .retrieve(&request, &ReadOptions::default())
+            .unwrap();
+        let pivots: Vec<u64> = result.pivots.iter().map(|hit| hit.record_id).collect();
+        assert_eq!(pivots, [1], "the attached row is the only mapped pivot");
+        (
+            result.unmapped_pivots.record_ids,
+            result.stats.pivot_candidates,
+            result.stats.pivots_rejected,
+        )
+    };
+    // Clock 0: row 2 (deadline EARLY) is live. The exact leg reads it at the clock of the handle; the approximate leg
+    // filters at the wall clock, where it is due, and returns row 4 instead.
+    assert_eq!(seen(VectorLeg::Exact, 0), (vec![2, 3], 3, 0));
+    assert_eq!(seen(approximate, 0), (vec![3, 4], 3, 0));
+    // Clock LATE: row 3 is due. The exact leg skips it; the approximate leg returns it (live at the wall clock), the
+    // re-validation at the clock of the handle rejects it, and it used up one of the three candidates.
+    assert_eq!(seen(VectorLeg::Exact, LATE), (vec![4], 2, 0));
+    assert_eq!(seen(approximate, LATE), (vec![4], 3, 1));
 }
 
 #[test]

@@ -1,15 +1,14 @@
 //! Hybrid search over compact records: validation parity, one clock for both legs and fusion order.
 
+use super::consumer_cursor::decode_count_in as decode_count;
 use super::{assert_compact_resident_pair, indexed_dispatch_fixture};
 use crate::compact::source::dispatch_tests::{compact_dispatch_fixture, gates};
 use crate::hybrid::{FusionOptions, HybridHit, HybridQuery, VectorLeg};
-use crate::records::CollectionRecords;
 use crate::{
     AnnOptions, CollectionMut, CollectionRef, Condition, Database, DistanceMetric, Error,
     HnswConfig, Metadata, MetadataValue, SearchStats,
 };
 use std::collections::BTreeSet;
-use std::sync::atomic::Ordering;
 
 /// A deadline far in the future (2100-01-01).
 const FAR: u64 = 4_102_444_800_000;
@@ -175,13 +174,6 @@ fn assert_fusion(hits: &[HybridHit], fusion: FusionOptions, context: &str) {
 }
 
 /// How many base rows of the candidate's collection have been decoded into cells so far.
-fn decode_count(db: &Database, id: u16) -> usize {
-    let CollectionRecords::Compact { view, .. } = &db.state(id).records else {
-        panic!("compact source required")
-    };
-    view.generation.decode_count.load(Ordering::Relaxed)
-}
-
 fn titled(tag: &str, title: &str) -> Metadata {
     Metadata::from([
         ("tag".into(), MetadataValue::String(tag.into())),
@@ -1692,4 +1684,26 @@ fn hybrid_equal_fused_scores_of_rows_in_both_legs_break_ties_by_ascending_id() {
         let cut = pair.run(&HybridQuery { k, ..all.clone() }, 0).unwrap().0;
         assert_eq!(ids(&cut), [5, 8, 3][..k].to_vec(), "k {k}");
     }
+}
+
+/// A compile-time guard: `search_hybrid_compact` copies the validation and the fusion of the resident search, and
+/// nothing but the parity tables tells one copy from the other. A new field of `HybridQuery` or `FusionOptions` stops
+/// this from compiling until both arms (and the tables above) have been taught about it.
+#[test]
+fn every_field_of_the_hybrid_query_is_known_to_this_suite() {
+    let HybridQuery {
+        vector: _,
+        text: _,
+        k: _,
+        conditions: _,
+        metric: _,
+        vector_leg: _,
+        fusion,
+    } = HybridQuery::new(None, "a", 1);
+    let FusionOptions {
+        candidates: _,
+        rrf_k: _,
+        vector_weight: _,
+        text_weight: _,
+    } = fusion;
 }
