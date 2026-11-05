@@ -2,7 +2,7 @@
 
 Status: inventory for 0.7.1 lane R0, taken against `v0.7.0` (`02ef3e5f`). It records the evidence that exists for each
 lane at the tag; it does not accept, reject or integrate either one. Since then 0.7.1 has integrated lane B (see
-[Lane B](#lane-b)); lane A is still parked. Read it with the [seam freeze](p3b-seam-freeze.md) and
+[Lane B](#lane-b)) and lane A (see [Lane A](#lane-a), the work of A4). Read it with the [seam freeze](p3b-seam-freeze.md) and
 the slice 4 row of the [P3 design](p3-compact-vectors.md). Nothing here is active: both lanes are test-gated, and no
 size or speed claim follows from them.
 
@@ -99,9 +99,29 @@ The 21 killed mutants are `pa-iter-cursor-lt`, `pa-group-clock-zero`, `pa-group-
 `pa-exact-cap-quarter`, `pa-exact-compact-arm-off`, `pa-graph-revalidate-wall-clock` and
 `pa-graph-compact-pivot-state-off`. Their killing tests are the lane's parity tests against a resident oracle.
 
-Open for A4: replay each of the 26 individually (fail-first, byte-identical restore, restored selector green), rebase
-anchors onto the tree after the five commits, and give `pa-graph-evidence-wall-clock` an independent review of its
-equivalence argument. Run the combined declared-index scan differential with lane B after both are integrated.
+**Closed in 0.7.1 by A4** (the [record consumers of lane A4](p3b-record-consumers.md), accepted at `4670d858`). A4 cherry-picked
+lane A's four patches in order with `git cherry-pick -x`, never by merge: `02062058` and `834a0a6f` without their
+key-value hunks, `60d65f99` and those hunks as a last group on K71's bounded visitor, and `c859d2d5` unchanged, as a draft
+that E4 owns. It re-created lane A's 47 mutants from their recorded descriptions and anchored them on the tree after the
+cherry-picks (`tests/compact_a4_mutants.json`): 40 were killed there already and 7 survived. Three of the seven,
+`pa-group-clock-zero`, `pa-ql-clock-zero` and `pa-exact-cap-quarter`, are recorded as killed in lane A's ledger: their
+tests used far-future deadlines only, and a quarter of the rows as the index cap satisfied the same cases as half. All 47 are
+killed on the final tree, and the 26 survivors of lane A's ledger each have a kill on two machines (A4's page names the
+closing tests of each). The equivalence claim `pa-graph-evidence-wall-clock` is not an equivalence in the code: a test that
+injects the forbidden state through `Collection::apply_committed` kills it. It rests on an invariant, that no public path
+gives a graph-attached record a deadline, which A4 pinned with `an_attached_record_never_carries_a_deadline_on_compact_or_resident_records`
+and three mutants of its guards; A4's page records that an independent review read the enumeration of the writers and
+found no counterexample. `pa-kv-view-health-removed` was dead code (`Database::resolve` checks health first), so A4
+removed the line and re-based the mutant onto `resolve`. A4 added 170 mutants to the 47: 217 in all, every one killed.
+`verify` of B4's tool accepts all 217 on A4's head, with none stale. The changes that a resident file can see (the hybrid
+search and `GraphRef::retrieve` read one clock, a named-vector search whose handle turns unhealthy answers `Poisoned`, the
+key-value read path and two guards) are listed on A4's page, with the script that checks the shipped code against
+`v0.7.0`, `python scripts/shadow_copy_check.py` (`--integration` with one `--lane` range per other lane, for a tree that
+holds other lanes). A ledger run is tied to the file it ran on, so on a tree that also holds
+R0's slice 3, which edits `records.rs`, the 52 mutants of A4's ledger in that file are not accepted again until they are
+replayed there (checked on a merge of R0's and A4's heads: 165 accepted, 51 stale and 1 open of 217, the 52 all in
+`records.rs`). The combined declared-index scan differential, A's compact exact search against B's index rebuild, is B4's
+slice S3 and is not part of what is established here.
 
 ## Lane B
 
@@ -167,7 +187,8 @@ whole list on another machine. A mutant that needs an equivalence argument keeps
 it rests on pinned by a test where one can be written. Replays of several mutants in one build do not count.
 `tests/compact_mutant_replay.py` (B4) checks this form mechanically: `check` runs the anchor test, `run` replays one
 mutant per build, and `verify` re-checks the recorded evidence against the tree it runs in, calling a run that was made
-on an older tree stale and not failed. R0's ledgers record the same fields, and `check` accepts them.
+on an older tree stale and not failed. R0's ledgers record the same fields, and `check` accepts them; so does A4's ledger
+(`tests/compact_a4_mutants.json`).
 
 ## Not established here
 
@@ -178,4 +199,5 @@ The classification of the evidence comes from the lanes' own reports and commit 
 
 Since then B4 replayed lane B's eleven consumer survivors (see [Lane B](#lane-b)). It did not replay lane B's 18 killed
 mutants as such: eight of them (consumers, settings, rerank and quality) are re-derived in its list, and the other ten
-were not replayed as such. Lane A's 26 survivors are not replayed: A4 owns them.
+were not replayed as such. A4 replayed lane A's 26 survivors, the other 21 mutants of lane A's ledger and 170 of its own (see
+[Lane A](#lane-a)); R0 did not replay them, and checked A4's ledger with `check` and `verify` only.

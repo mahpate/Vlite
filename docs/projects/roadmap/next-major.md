@@ -196,7 +196,7 @@ Local numbers below show direction only (see rules).
   (a test-gated ordered browse and exact, filtered search over base plus
   overlay, identical to the resident path at the same clock) is accepted with
   notes and integrated on the same terms; hybrid, query-language, grouping and
-  facet reads still refuse compact records. Slice 4 is split into three lanes
+  facet reads refuse compact records at 0.7.0, and 0.7.1 serves them under the same test gate (lane A, below). Slice 4 is split into three lanes
   and only lane B is in 0.7.0: its crate-private read seam in
   `src/compact/source.rs` (opaque generation identity, bounded authenticated
   vector, metadata and payload reads, and separate source, mapped, vector,
@@ -204,8 +204,9 @@ Local numbers below show direction only (see rules).
   `src/records.rs` and the metadata, text-index and rerank consumers are
   integrated, test-gated and unreleased. Its fix-forward commit
   (`250a98b`) is not in the tag; 0.7.1 integrates it, with its 18 replay
-  obligations replayed in the mutation ledgers of R0 and B4. Lane A (record consumers and the bounded exact scan,
-  parked at `834a0a6`) and lane C (server and MCP consumers) are not
+  obligations replayed in the mutation ledgers of R0 and B4. 0.7.1 also integrates lane A (record consumers): A4 cherry-picked its
+  four patches, replayed its 26 recorded survivors and added mutants of its own, 217 in all and all killed; the bounded exact
+  scan of lane A stays a draft that lane E4 owns. Lane C (server and MCP consumers) is not
   integrated, and slice 5 (lifecycle) has not started. All of it compiles only
   under `cfg(test)`: release builds have no compact dispatch and no normal
   `Database` wiring. The 0.7.1 plan freezes the seam in
