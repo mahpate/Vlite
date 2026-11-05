@@ -319,7 +319,7 @@ store/
   all, even before its first checkpoint, nor a backup packed from a
   checkpointed one.
 - **Kept across checkpoints:** the lineage, every record's revision
-  (compare-and-set and fencing tokens still match), graphs and encryption.
+  (compare-and-set revisions still match), graphs and encryption.
 - **History below the floor is gone.** Change-feed and log-segment requests
   for an earlier cursor return `CursorBeforeHistory` (REST 409
   `cursor_before_history`). Take a snapshot, then resume from the floor. A

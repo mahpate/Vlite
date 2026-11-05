@@ -1070,7 +1070,7 @@ searchManyF32(vectors: Float32Array[], k: number, options?: Scope &amp; { filter
       </tbody>
     </table>
     <h3 id="rust-kv">Key-value store</h3>
-    <p>Namespaced string keys with byte values and no vector, stored in an ordinary one-dimension collection (format 4 or newer; expiry needs format 5). Versions are commit sequences: use them for compare-and-set and as fencing tokens. See <a href="docs/STORAGE-FEATURES.html#key-value-store">key-value store</a>.</p>
+    <p>Namespaced string keys with byte values and no vector, stored in an ordinary one-dimension collection (format 4 or newer; expiry needs format 5). Versions are commit sequences: use them for compare-and-set; they are not durable lease-fencing tokens. See <a href="docs/STORAGE-FEATURES.html#key-value-store">key-value store</a>.</p>
     <table class="api-table cols-2">
       <thead><tr><th>Signature</th><th>Description</th></tr></thead>
       <tbody>

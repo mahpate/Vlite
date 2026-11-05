@@ -7,12 +7,13 @@
 //! without tombstones (every slot stores its full key and is always compared).
 //!
 //! Versions are record revisions (commit sequences): strictly increasing per
-//! key within one file lineage, so they work as compare-and-set tokens and as
-//! fencing tokens. Compaction, upgrade and restore rewrite revisions, so a
-//! holder of a version from before such an operation must re-read first; its
-//! next conditional write fails with `RevisionMismatch` rather than succeeding
-//! wrongly. Directory-store checkpoints are not such an operation: they keep
-//! every live record's revision, so versions stay valid across them.
+//! key within one file lineage, so they work as compare-and-set tokens. They
+//! are not durable lease-fencing tokens. Compaction, upgrade and restore
+//! rewrite revisions, so a holder of a version from before such an operation
+//! must re-read first; its next conditional write fails with
+//! `RevisionMismatch` rather than succeeding wrongly. Directory-store
+//! checkpoints are not such an operation: they keep every live record's
+//! revision, so versions stay valid across them.
 //!
 //! Expiry needs a v5 file and returns `ExpiryRequiresUpgrade` otherwise.
 //! Listing scans the collection (O(entries)); keep large key spaces in
@@ -44,7 +45,7 @@ const PLACEHOLDER: [f32; 1] = [0.0];
 pub struct KvEntry {
     pub key: String,
     pub value: Vec<u8>,
-    /// Compare-and-set / fencing token; see the module documentation.
+    /// Compare-and-set token; see the module documentation.
     pub version: u64,
     pub expires_at_ms: Option<u64>,
 }
