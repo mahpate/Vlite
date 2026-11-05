@@ -108,7 +108,8 @@ UTF-8 bytes; `after` is exclusive. A page is the largest prefix fitting both
 `{"items":[...],"next_after":...}` envelope. `next_after` is the last returned
 key only when another live matching entry exists at that page's clock;
 otherwise it is null, including empty pages. One owner guard and expiry clock
-cover a page; no snapshot spans pages.
+cover a page; no snapshot spans pages. Each key appears once, as `GET` returns
+it; look-alike records that ordinary routes left elsewhere are ignored.
 
 Missing/due reads return 404 `kv_not_found`; a collection with other dimensions
 returns 409 `not_kv_collection`. Sixteen occupied collision-probe slots return

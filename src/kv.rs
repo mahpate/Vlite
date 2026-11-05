@@ -17,7 +17,9 @@
 //!
 //! Expiry needs a v5 file and returns `ExpiryRequiresUpgrade` otherwise.
 //! Listing scans the collection (O(entries)); keep large key spaces in
-//! separate collections.
+//! separate collections. It offers each key once, as the record `get`
+//! resolves it: a look-alike record outside the key's probe window, or behind
+//! an earlier holder of the key, is never listed.
 
 use crate::{
     CollectionSettings, CollectionSpec, Database, Error, Expected, MAX_PAYLOAD_BYTES, Metadata,
@@ -414,14 +416,22 @@ fn list_at(
         })
         .collect();
     matches.sort_unstable();
-    Ok(matches
-        .into_iter()
-        .take(limit)
-        .map(|(_, id)| entry(db, collection, id))
-        .collect::<Result<Vec<_>>>()?
-        .into_iter()
-        .flatten()
-        .collect())
+    // A record that merely decodes to a key is that key's entry only when
+    // `probe`, the lookup behind `get`, `put` and `delete`, resolves the key to
+    // it. Look-alikes outside the key's window, or behind an earlier holder of
+    // the key, are skipped, so list and get cannot disagree. Checked in key
+    // order, and only until `limit` entries are found.
+    let mut entries = Vec::new();
+    for (key, id) in matches {
+        if entries.len() == limit {
+            break;
+        }
+        let resolved = probe(db, collection, namespace, key, now_ms)?.found;
+        if resolved.is_some_and(|found| found.slot == id) {
+            entries.extend(entry(db, collection, id)?);
+        }
+    }
+    Ok(entries)
 }
 
 fn validate_namespace(namespace: &str) -> Result<()> {

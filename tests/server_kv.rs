@@ -1279,3 +1279,176 @@ async fn non_kv_routes_keep_their_precondition_messages() {
         precondition_body("revision precondition failed; record does not exist")
     );
 }
+
+/// The payload `kv` stores: "VKV1", namespace length, key length (u16 little
+/// endian), namespace, key, value. Anyone who may write ordinary records can
+/// forge one at any record ID.
+fn kv_shaped(namespace: &str, key: &str, value: &str) -> String {
+    let mut payload = b"VKV1".to_vec();
+    payload.push(namespace.len() as u8);
+    payload.extend_from_slice(&(key.len() as u16).to_le_bytes());
+    payload.extend_from_slice(namespace.as_bytes());
+    payload.extend_from_slice(key.as_bytes());
+    payload.extend_from_slice(value.as_bytes());
+    BASE64_STANDARD.encode(payload)
+}
+
+async fn forge(app: &Router, token: &str, id: u64, key: &str, value: &str) {
+    let uri = format!("/v1/collections/default/vectors/{id}");
+    let body = json!({"vector":[0.0],"payload_base64":kv_shaped("n", key, value)});
+    let (status, response) = call(app, token, "PUT", &uri, body).await;
+    assert_eq!(status, 204, "{response}");
+}
+
+fn items(page: &Value) -> Vec<(String, String)> {
+    page["items"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|item| {
+            (
+                item["key"].as_str().unwrap().to_owned(),
+                item["value_base64"].as_str().unwrap().to_owned(),
+            )
+        })
+        .collect()
+}
+
+fn pairs(items: &[(&str, &str)]) -> Vec<(String, String)> {
+    items
+        .iter()
+        .map(|(key, value)| ((*key).to_owned(), BASE64_STANDARD.encode(value)))
+        .collect()
+}
+
+async fn entries(app: &Router, query: &str) -> Value {
+    let uri = format!("/v1/collections/default/kv/entries?namespace=n{query}");
+    let (status, page) = call(app, ADMIN, "GET", &uri, Value::Null).await;
+    assert_eq!(status, 200, "{page}");
+    page
+}
+
+// A caller that may write ordinary records can forge an entry-shaped record at
+// any record ID. It must not change what the list route returns for a real key.
+#[tokio::test]
+async fn kv_list_ignores_look_alikes_planted_through_the_record_route() {
+    let directory = tempfile::tempdir().unwrap();
+    let app = start(database(FormatVersion::V5), directory.path());
+    let attacker = credential(&app, json!({"operations":["write"]})).await;
+    let path = "/v1/collections/default/kv/entry";
+    for (key, value) in [("g", "g"), ("h", "real"), ("i", "i")] {
+        let body = json!({"namespace":"n","key":key,"value_base64":BASE64_STANDARD.encode(value)});
+        let (status, response) = call(&app, ADMIN, "PUT", path, body).await;
+        assert_eq!(status, 200, "{response}");
+    }
+    let base = first_slot("n", "h");
+    // The report's record 7, one past the window of h and one before it.
+    let outside = [7, base.wrapping_add(16), base.wrapping_sub(1)];
+    for id in outside {
+        assert!(id.wrapping_sub(base) >= 16, "{id} is in the window");
+        forge(&app, &attacker, id, "h", "SPOOF").await;
+    }
+    let (status, entry_h) = call(&app, ADMIN, "GET", &entry("h"), Value::Null).await;
+    assert_eq!(status, 200, "{entry_h}");
+    assert_eq!(entry_h["value_base64"], BASE64_STANDARD.encode("real"));
+
+    let page = entries(&app, "").await;
+    assert_eq!(
+        items(&page),
+        pairs(&[("g", "g"), ("h", "real"), ("i", "i")])
+    );
+    assert_eq!(page["next_after"], Value::Null);
+    // One entry per page: the real h, and the next page starts after it.
+    let page = entries(&app, "&limit=1&after=g").await;
+    assert_eq!(items(&page), pairs(&[("h", "real")]));
+    assert_eq!(page["next_after"], "h");
+    let page = entries(&app, "&limit=1&after=h").await;
+    assert_eq!(items(&page), pairs(&[("i", "i")]));
+    assert_eq!(page["next_after"], Value::Null);
+
+    // Deleting the key leaves no phantom; the stray records are still there.
+    assert_eq!(
+        call(&app, ADMIN, "DELETE", &entry("h"), Value::Null).await,
+        (200, json!({"deleted":true}))
+    );
+    assert_eq!(
+        items(&entries(&app, "").await),
+        pairs(&[("g", "g"), ("i", "i")])
+    );
+    assert_eq!(
+        call(&app, ADMIN, "GET", &entry("h"), Value::Null).await.0,
+        404
+    );
+    for id in outside {
+        let uri = format!("/v1/collections/default/vectors/{id}");
+        assert_eq!(call(&app, ADMIN, "GET", &uri, Value::Null).await.0, 200);
+    }
+}
+
+// Namespace "n" keys whose first slot lies within 15 of u64::MAX, so the
+// 16-slot window wraps past the last record ID; all four share u64::MAX - 2.
+// Found offline by a meet-in-the-middle search over the public slot hash.
+const WRAPPED: [&str; 4] = [
+    "wrap-1e3h8xptc3rmwn",
+    "wrap-1mr1oejil0ss3d",
+    "wrap-rcxazt3ti43gt3",
+    "wrap-zh8a7z15oq0wpx",
+];
+
+#[tokio::test]
+async fn kv_list_handles_probe_windows_that_wrap_past_the_last_record_id() {
+    let directory = tempfile::tempdir().unwrap();
+    let app = start(database(FormatVersion::V5), directory.path());
+    let attacker = credential(&app, json!({"operations":["write"]})).await;
+    let path = "/v1/collections/default/kv/entry";
+    for key in WRAPPED {
+        assert_eq!(first_slot("n", key), u64::MAX - 2, "{key}");
+    }
+    // Put in this order, the keys fill u64::MAX - 2, u64::MAX - 1, u64::MAX
+    // and then ID 0, past the wrap.
+    let placed = [
+        (WRAPPED[3], u64::MAX - 2),
+        (WRAPPED[1], u64::MAX - 1),
+        (WRAPPED[2], u64::MAX),
+        (WRAPPED[0], 0),
+    ];
+    for (key, id) in placed {
+        let body = json!({"namespace":"n","key":key,"value_base64":BASE64_STANDARD.encode(key)});
+        let (status, response) = call(&app, ADMIN, "PUT", path, body).await;
+        assert_eq!(status, 200, "{response}");
+        let uri = format!("/v1/collections/default/vectors/{id}");
+        let (status, record) = call(&app, ADMIN, "GET", &uri, Value::Null).await;
+        assert_eq!(status, 200, "{key} at {id}: {record}");
+        assert_eq!(record["payload_base64"], kv_shaped("n", key, key), "{key}");
+    }
+    // Look-alikes just before the window, just past it, and one inside it.
+    forge(&app, &attacker, u64::MAX - 3, WRAPPED[1], "before").await;
+    forge(&app, &attacker, 13, WRAPPED[2], "after").await;
+    forge(&app, &attacker, 5, WRAPPED[0], "inside").await;
+
+    let mut sorted = WRAPPED;
+    sorted.sort_unstable();
+    let expected: Vec<(String, String)> = sorted
+        .iter()
+        .map(|key| ((*key).to_owned(), BASE64_STANDARD.encode(key)))
+        .collect();
+    let page = entries(&app, "").await;
+    assert_eq!(items(&page), expected);
+    assert_eq!(page["next_after"], Value::Null);
+    // Page through them one at a time.
+    let mut paged = Vec::new();
+    let mut after = String::new();
+    loop {
+        let query = format!("&limit=1{after}");
+        let page = entries(&app, &query).await;
+        let Some(item) = items(&page).pop() else {
+            break;
+        };
+        after = format!("&after={}", item.0);
+        paged.push(item);
+        if page["next_after"].is_null() {
+            break;
+        }
+    }
+    assert_eq!(paged, expected);
+}
