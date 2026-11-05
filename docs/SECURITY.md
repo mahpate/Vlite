@@ -117,10 +117,15 @@ wildcard stays inside its tenant.
 `409 tenant_not_empty` even when no visible collection remains. Sequence numbers are
 database-wide: graph `view_sequence` and `revision`, change-feed `head` and
 memory receipt `sequence` advance for hidden writes, so a caller can count the
-activity of other tenants and of memory, but not read it. Idempotency keys are
-scoped to the binding and the memory scope, not to the credential, so any
-credential that may write a scope can replay another credential's request by
-repeating its key and exact content. The bindings file is not stored in the
+activity of other tenants and of memory, but not read it. The sequence is the
+commit sequence of the one log that the memory contract defines the receipt
+`sequence` to be, so it has no per-binding form: use separate database files for
+tenants that must not observe each other's write volume. Idempotency keys are
+scoped to the binding and the memory scope, not to the credential. Credentials
+that may write the same scope are peers: one can replay another's request by
+repeating its key and exact content, and can read its receipt with the key
+alone. Give separate scopes to credentials that must not observe each other.
+The bindings file is not stored in the
 database: a restart without a binding ends its reservation at once. Keep a
 binding you no longer use as `"state": "retired"` instead of deleting it, and
 move or delete its data first if it must become raw-readable. Startup refuses a

@@ -184,6 +184,10 @@ collections return the same 404 as missing collections during credential creatio
 Requests are limited to 8 MiB; REST responses have no serving size cap.
 Mutations require a body-only `idempotency_key`. A retained matching retry
 returns the original result with `replayed:true`; a changed digest conflicts.
+A key is scoped to the binding and the memory scope, not to the credential:
+credentials granted the same scope are peers and can replay or look up each
+other's receipts with the key (see
+[Memory-bound resources](SECURITY.md#memory-bound-resources)).
 Bindings explicitly configure a receipt window; expiry ends replay guarantees,
 not memory retention. After an indeterminate commit, reopen and reconcile the
 receipt rather than blindly retrying. Full schemas retain future capabilities,
