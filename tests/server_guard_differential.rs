@@ -598,7 +598,9 @@ enum Effect {
 
 /// `$c` and `$g` are the names the request is about, `$o` and `$og` an
 /// ordinary collection and graph of the same namespace, `$n` a counter and
-/// `$expires` a future time.
+/// `$expires` a future time. A collection named in a request body takes `$C`
+/// and `$O` instead: the same collections by their stored names, which differ
+/// from `$c` and `$o` for a tenant only.
 struct Row {
     method: &'static str,
     path: &'static str,
@@ -837,7 +839,7 @@ const ROWS: &[Row] = &[
     row(
         "POST",
         "/v1/graphs/$g/retrieve",
-        r#"{"pivot":{"collection":"$o","vector":[0,1],"k":1}}"#,
+        r#"{"pivot":{"collection":"$O","vector":[0,1],"k":1}}"#,
     ),
     effective(
         "POST",
@@ -859,74 +861,74 @@ const ROWS: &[Row] = &[
     row(
         "POST",
         "/v1/graphs/$og/retrieve",
-        r#"{"pivot":{"collection":"$c","vector":[0,1],"k":1}}"#,
+        r#"{"pivot":{"collection":"$C","vector":[0,1],"k":1}}"#,
     ),
     row(
         "POST",
         "/v1/graphs/$og/retrieve",
-        r#"{"pivot":{"collection":"$o","vector":[0,1],"k":1},"evidence":{"collections":["$c"]}}"#,
+        r#"{"pivot":{"collection":"$O","vector":[0,1],"k":1},"evidence":{"collections":["$C"]}}"#,
     ),
     row(
         "POST",
         "/v1/graphs/$og/batch",
-        r#"{"ops":[{"op":"attach","node":"n","collection":"$c","record":"7"}]}"#,
+        r#"{"ops":[{"op":"attach","node":"n","collection":"$C","record":"7"}]}"#,
     ),
     row(
         "POST",
         "/v1/graphs/$og/batch",
-        r#"{"ops":[{"op":"detach","node":"n","collection":"$c"}]}"#,
+        r#"{"ops":[{"op":"detach","node":"n","collection":"$C"}]}"#,
     ),
     row(
         "POST",
         "/v1/graphs/$og/batch",
-        r#"{"ops":[{"op":"put_vector","collection":"$c","id":"11","vector":[0,1]}]}"#,
+        r#"{"ops":[{"op":"put_vector","collection":"$C","id":"11","vector":[0,1]}]}"#,
     ),
     row(
         "POST",
         "/v1/graphs/$og/batch",
-        r#"{"ops":[{"op":"delete_vector","collection":"$c","id":"7"}]}"#,
+        r#"{"ops":[{"op":"delete_vector","collection":"$C","id":"7"}]}"#,
     ),
     // The graph is the name that varies, the collection is ordinary.
     row(
         "POST",
         "/v1/graphs/$g/batch",
-        r#"{"ops":[{"op":"attach","node":"n","collection":"$o","record":"7"}]}"#,
+        r#"{"ops":[{"op":"attach","node":"n","collection":"$O","record":"7"}]}"#,
     ),
     row(
         "POST",
         "/v1/graphs/$g/batch",
-        r#"{"ops":[{"op":"detach","node":"n","collection":"$o"}]}"#,
+        r#"{"ops":[{"op":"detach","node":"n","collection":"$O"}]}"#,
     ),
     row(
         "POST",
         "/v1/graphs/$g/batch",
-        r#"{"ops":[{"op":"put_vector","collection":"$o","id":"12","vector":[0,1]}]}"#,
+        r#"{"ops":[{"op":"put_vector","collection":"$O","id":"12","vector":[0,1]}]}"#,
     ),
     row(
         "POST",
         "/v1/graphs/$g/batch",
-        r#"{"ops":[{"op":"delete_vector","collection":"$o","id":"8"}]}"#,
+        r#"{"ops":[{"op":"delete_vector","collection":"$O","id":"8"}]}"#,
     ),
     // Both vary together.
     row(
         "POST",
         "/v1/graphs/$g/batch",
-        r#"{"ops":[{"op":"attach","node":"n","collection":"$c","record":"7"}]}"#,
+        r#"{"ops":[{"op":"attach","node":"n","collection":"$C","record":"7"}]}"#,
     ),
     row(
         "POST",
         "/v1/graphs/$g/batch",
-        r#"{"ops":[{"op":"detach","node":"n","collection":"$c"}]}"#,
+        r#"{"ops":[{"op":"detach","node":"n","collection":"$C"}]}"#,
     ),
     row(
         "POST",
         "/v1/graphs/$g/batch",
-        r#"{"ops":[{"op":"put_vector","collection":"$c","id":"13","vector":[0,1]}]}"#,
+        r#"{"ops":[{"op":"put_vector","collection":"$C","id":"13","vector":[0,1]}]}"#,
     ),
     row(
         "POST",
         "/v1/graphs/$g/batch",
-        r#"{"ops":[{"op":"delete_vector","collection":"$c","id":"8"}]}"#,
+        r#"{"ops":[{"op":"delete_vector","collection":"$C","id":"8"}]}"#,
     ),
     // Names in bodies that create or grant.
     creating("POST", "/v1/collections", r#"{"name":"$c","dimensions":2}"#),
@@ -1011,15 +1013,33 @@ struct Names {
     g: String,
     o: String,
     og: String,
+    /// The stored names of `c` and `o`, which a request body must carry: a
+    /// tenant addresses its own collections by `t{tenant}__{name}` there,
+    /// while a path takes the name the tenant knows.
+    sc: String,
+    so: String,
 }
 
 fn names(prefix: &str, collection: &str, graph: &str) -> Names {
+    let c = format!("{prefix}{collection}");
+    let o = format!("{prefix}ordinary");
     Names {
-        c: format!("{prefix}{collection}"),
+        sc: c.clone(),
+        so: o.clone(),
+        c,
         g: format!("{prefix}{graph}"),
-        o: format!("{prefix}ordinary"),
+        o,
         og: format!("{prefix}ordinary_graph"),
     }
+}
+
+/// The names as a tenant's request body spells them: its collections by their
+/// stored names, so that a body-named collection reaches the guard rather than
+/// the grant check that refuses a name outside the tenant's namespace.
+fn stored(mut names: Names) -> Names {
+    names.sc = format!("t{TENANT}__{}", names.c);
+    names.so = format!("t{TENANT}__{}", names.o);
+    names
 }
 
 fn fill(text: &str, names: &Names) -> String {
@@ -1027,7 +1047,9 @@ fn fill(text: &str, names: &Names) -> String {
         .replace("$og", &names.og)
         .replace("$o", &names.o)
         .replace("$c", &names.c)
-        .replace("$g", &names.g);
+        .replace("$g", &names.g)
+        .replace("$C", &names.sc)
+        .replace("$O", &names.so);
     if out.contains("$expires") {
         out = out.replace("$expires", &expires().to_string());
     }
@@ -1052,16 +1074,19 @@ struct Variant {
     held: bool,
 }
 
-fn variant(prefix: &str, collection: &str, graph: &str, held: bool) -> Variant {
-    let reserved = names(prefix, collection, graph);
+fn variant(prefix: &str, collection: &str, graph: &str, held: bool, tenant: bool) -> Variant {
+    let spell = |names: Names| if tenant { stored(names) } else { names };
+    let reserved = spell(names(prefix, collection, graph));
     let occupied = Names {
         c: reserved.o.clone(),
         g: reserved.og.clone(),
         o: reserved.o.clone(),
         og: reserved.og.clone(),
+        sc: reserved.so.clone(),
+        so: reserved.so.clone(),
     };
     Variant {
-        missing: names(prefix, "absent_ev", "absent_graph"),
+        missing: spell(names(prefix, "absent_ev", "absent_graph")),
         occupied,
         reserved,
         held,
@@ -1076,12 +1101,31 @@ fn variants(principal: &Principal) -> Vec<Variant> {
             "notes_ev",
             "notes_graph",
             holds("reserved.tenant.notes"),
+            true,
         )]
     } else {
         vec![
-            variant("", "notes_ev", "notes_graph", holds("reserved.root.notes")),
-            variant("", "other_ev", "other_graph", holds("reserved.root.other")),
-            variant(&format!("t{TENANT}__"), "notes_ev", "notes_graph", false),
+            variant(
+                "",
+                "notes_ev",
+                "notes_graph",
+                holds("reserved.root.notes"),
+                false,
+            ),
+            variant(
+                "",
+                "other_ev",
+                "other_graph",
+                holds("reserved.root.other"),
+                false,
+            ),
+            variant(
+                &format!("t{TENANT}__"),
+                "notes_ev",
+                "notes_graph",
+                false,
+                false,
+            ),
         ]
     }
 }
@@ -1091,9 +1135,9 @@ fn variants(principal: &Principal) -> Vec<Variant> {
 fn namesakes(principal: &Principal) -> Vec<Names> {
     if principal.tenant {
         vec![
-            names("", "other_ev", "other_graph"),
-            names("", "ordinary", "ordinary_graph"),
-            names("", "kvstore", "absent_graph"),
+            stored(names("", "other_ev", "other_graph")),
+            stored(names("", "ordinary", "ordinary_graph")),
+            stored(names("", "kvstore", "absent_graph")),
         ]
     } else {
         Vec::new()
@@ -1106,10 +1150,10 @@ fn lockstep_names(principal: &Principal) -> Vec<(Names, bool)> {
     let tenant_prefix = format!("t{TENANT}__");
     if principal.tenant {
         vec![
-            (names("", "ordinary", "ordinary_graph"), true),
-            (names("", "other_ev", "other_graph"), true),
-            (names("", "kvstore", "absent_graph"), true),
-            (names("", "absent_ev", "absent_graph"), false),
+            (stored(names("", "ordinary", "ordinary_graph")), true),
+            (stored(names("", "other_ev", "other_graph")), true),
+            (stored(names("", "kvstore", "absent_graph")), true),
+            (stored(names("", "absent_ev", "absent_graph")), false),
         ]
     } else {
         vec![
@@ -1920,7 +1964,7 @@ async fn every_name_bearing_operation_has_generated_coverage() {
         );
     }
     for operation in &operations {
-        for (graph, collection) in [("$og", "$c"), ("$g", "$o"), ("$g", "$c")] {
+        for (graph, collection) in [("$og", "$C"), ("$g", "$O"), ("$g", "$C")] {
             let path = format!("/v1/graphs/{graph}/batch");
             let has_row = ROWS.iter().any(|row| {
                 row.method == "POST"
@@ -2204,9 +2248,96 @@ fn hidden_names(principal: &Principal) -> Vec<String> {
     out
 }
 
-/// Lists, the feed and the slow-query log carry no name in the request, so the
-/// matrix cannot send a reserved name to them; what it can check is that none
-/// comes back.
+/// A tenant spells the collections a request body names by their stored names,
+/// `t{tenant}__{name}`, which is what puts them in front of the guard instead of
+/// the grant check that refuses every other name. The matrix sends those names
+/// for every tenant principal; this test pins what they must do, so that the
+/// matrix cannot pass because a body name never got that far: the tenant's
+/// ordinary collection takes the write (and only the tenant's does), its
+/// reserved collection answers like a missing one, a root name is refused.
+#[tokio::test]
+async fn a_tenants_body_names_are_stored_names_that_reach_the_guard() {
+    let tenant = &PRINCIPALS[4];
+    let world = prepared(true, tenant).await;
+    let token = world.token(tenant.name);
+    let tenanted = |name: &str| format!("t{TENANT}__{name}");
+    let put = |collection: &str, id: u32| {
+        format!(
+            r#"{{"ops":[{{"op":"put_vector","collection":"{collection}","id":"{id}","vector":[0,1]}}]}}"#
+        )
+    };
+    let batch = "/v1/graphs/ordinary_graph/batch";
+    let send = |body: String| {
+        let world = &world;
+        async move { request(&world.app, token, "POST", batch, &body).await }
+    };
+    let own = send(put(&tenanted("ordinary"), 31)).await;
+    assert_eq!(
+        own.0,
+        200,
+        "its own collection by its stored name: {}",
+        describe(&own)
+    );
+    let hidden = send(put(&tenanted("notes_ev"), 32)).await;
+    let missing = send(put(&tenanted("absent_ev"), 32)).await;
+    assert_eq!(
+        hidden.0,
+        404,
+        "its reserved collection: {}",
+        describe(&hidden)
+    );
+    assert_eq!(
+        (hidden.0, error_of(&hidden)),
+        (missing.0, error_of(&missing)),
+        "a reserved collection must answer like a missing one"
+    );
+    let outside = send(put("ordinary", 33)).await;
+    assert_eq!(outside.0, 403, "a root name: {}", describe(&outside));
+    // The write landed in the tenant's collection and in no other.
+    let read = |actor: &'static str, id: u32| {
+        let world = &world;
+        async move {
+            request(
+                &world.app,
+                if actor == "admin" { ADMIN } else { token },
+                "GET",
+                &format!("/v1/collections/ordinary/vectors/{id}"),
+                "",
+            )
+            .await
+        }
+    };
+    let landed = read("tenant", 31).await;
+    assert_eq!(
+        landed.0,
+        200,
+        "the tenant reads it back: {}",
+        describe(&landed)
+    );
+    for id in [31, 32, 33] {
+        let root = read("admin", id).await;
+        assert_eq!(
+            root.0,
+            404,
+            "root `ordinary` must not hold {id}: {}",
+            describe(&root)
+        );
+    }
+    let reserved = request(
+        &world.app,
+        world.token("tenant_raw"),
+        "GET",
+        "/v1/collections/notes_ev/vectors/32",
+        "",
+    )
+    .await;
+    assert_eq!(
+        reserved.0,
+        404,
+        "the reserved collection took no write: {}",
+        describe(&reserved)
+    );
+}
 #[tokio::test]
 async fn lists_and_the_feed_never_name_a_reserved_resource_to_a_caller_that_may_not_reach_it() {
     let mut world = build(true);
