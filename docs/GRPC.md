@@ -65,8 +65,10 @@ reflection API.
 
 The additive RPCs expose the engine's V5 record and retrieval APIs. `PutVector`
 accepts optional absolute `expires_at_ms`, which must be later than the server
-clock: an expiry at or before it is refused with `INVALID_ARGUMENT`
-(`vlite-error-code: invalid_input`) and nothing is written. `UpdateMetadata`
+clock when the write is applied: an expiry at or before it is refused with
+`INVALID_ARGUMENT` (`vlite-error-code: invalid_input`) and nothing is written.
+A put that fails for another reason, such as a file older than V5, a failed
+precondition or an invalid vector, answers that error first. `UpdateMetadata`
 changes metadata without replacing the vector or payload. Both require a V5
 file. Grouped search,
 recommendations, facets, numeric statistics and geographic search preserve the

@@ -53,14 +53,15 @@ passwords and sessions.
 ## Record expiry and metadata
 
 `PUT /v1/vectors/{id}` and its collection-scoped equivalent accept optional
-`expires_at_ms` (absolute Unix milliseconds) or `ttl_ms`/`ttl` (relative
-milliseconds); the two forms are mutually exclusive and need format v5. An
-expiry that is not later than the server clock when the request is handled
-(`expires_at_ms` at or before it, `ttl_ms` 0, or a `ttl_ms` that has already
-run out when the write is applied) is refused with 422 `invalid_input` and
-nothing is written: a record already under that ID is unchanged. A file older
-than v5 answers 409 `upgrade_required` and a stale `If-Match` 412 first, and
-gRPC `PutVector` applies the same rule as `INVALID_ARGUMENT`. The
+`expires_at_ms` (absolute Unix milliseconds) or `ttl_ms`/`ttl` (a lifetime in
+milliseconds, at least 1, counted from the moment the write is applied); the
+two forms are mutually exclusive and need format v5. An `expires_at_ms` that is
+not later than the server clock when the write is applied is refused with 422
+`invalid_input`, and so is `ttl_ms` 0; nothing is written, and a record already
+under that ID is unchanged. A request that fails for another reason, such as a
+file older than v5 (409 `upgrade_required`), a stale `If-Match` (412) or an
+invalid vector, answers that error first. gRPC `PutVector` applies the same
+rule to `expires_at_ms` as `INVALID_ARGUMENT`. The
 [key-value routes](#key-value-entries) accept an already due deadline by
 contract. Expiry is checked at read/search time and does not create a separate
 feed event.

@@ -758,7 +758,7 @@ mod tests {
                     vec![1.0],
                     vec![],
                     crate::Metadata::new(),
-                    Some(expiry),
+                    Some(record_put::Expiry::At(expiry)),
                 )
                 .await
                 .map(|_| ())

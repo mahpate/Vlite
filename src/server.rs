@@ -2209,21 +2209,26 @@ struct Put {
     ttl_ms: Option<u64>,
 }
 
-fn expiry(input: &Put) -> Result<Option<u64>, ApiError> {
+fn expiry(input: &Put) -> Result<Option<record_put::Expiry>, ApiError> {
     if input.expires_at_ms.is_some() && input.ttl_ms.is_some() {
         return Err(unprocessable(
             "expires_at_ms and ttl_ms are mutually exclusive",
         ));
     }
     if let Some(ttl) = input.ttl_ms {
+        if ttl == 0 {
+            return Err(unprocessable("ttl_ms must be at least 1"));
+        }
+        // The deadline itself is dated when the write is applied, under the
+        // owner lock. This reading of the clock only keeps a lifetime that
+        // overflows Unix milliseconds a request error found up front.
         let now = u64::try_from(admin::now_ms())
             .map_err(|_| unprocessable("server clock exceeds u64 milliseconds"))?;
-        return now
-            .checked_add(ttl)
-            .map(Some)
-            .ok_or_else(|| unprocessable("ttl_ms overflows Unix milliseconds"));
+        now.checked_add(ttl)
+            .ok_or_else(|| unprocessable("ttl_ms overflows Unix milliseconds"))?;
+        return Ok(Some(record_put::Expiry::After(ttl)));
     }
-    Ok(input.expires_at_ms)
+    Ok(input.expires_at_ms.map(record_put::Expiry::At))
 }
 
 async fn put_vector(
@@ -2266,7 +2271,7 @@ async fn put_in(
     let expected = Guard::ETag(if_match(&headers)?);
     let input = body(input)?;
     let payload = payload(&input.payload_base64)?;
-    let expires_at_ms = expiry(&input)?;
+    let expires = expiry(&input)?;
     let written = put_core(
         &service,
         role,
@@ -2276,7 +2281,7 @@ async fn put_in(
         input.vector,
         payload,
         input.metadata,
-        expires_at_ms,
+        expires,
     )
     .await?;
     let mut response = StatusCode::NO_CONTENT.into_response();
@@ -2421,7 +2426,7 @@ async fn put_core(
     vector: Vec<f32>,
     payload: Vec<u8>,
     metadata: crate::Metadata,
-    expires_at_ms: Option<u64>,
+    expiry: Option<record_put::Expiry>,
 ) -> Result<Written, ApiError> {
     if payload.len() > MAX_PAYLOAD_BYTES {
         return Err(Error::PayloadTooLarge(payload.len()).into());
@@ -2446,7 +2451,7 @@ async fn put_core(
                 &vector,
                 &payload,
                 &metadata,
-                expires_at_ms,
+                expiry,
                 crate::current_time_ms(),
             )
         })

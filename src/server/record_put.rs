@@ -1,8 +1,32 @@
 //! Record puts under the owner lock: the refusal of an expiry that is already
-//! due, and the ETag read-back, both judged against the single clock reading
-//! of the request.
+//! due, and the ETag read-back. The clock reading at which the write is
+//! applied turns a relative lifetime into its deadline, judges that deadline
+//! and dates the read-back.
 
 use super::*;
+
+/// The expiry a record put asks for.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(super) enum Expiry {
+    /// An absolute deadline in Unix milliseconds (`expires_at_ms`).
+    At(u64),
+    /// A lifetime in milliseconds (`ttl_ms`), counted from the moment the
+    /// write is applied: a request that waits for its turn, for instance in a
+    /// group commit, keeps its whole lifetime.
+    After(u64),
+}
+
+impl Expiry {
+    /// The deadline in Unix milliseconds, as of the clock reading `now_ms`.
+    fn deadline(self, now_ms: u64) -> Result<u64, ApiError> {
+        match self {
+            Self::At(deadline) => Ok(deadline),
+            Self::After(ttl_ms) => now_ms
+                .checked_add(ttl_ms)
+                .ok_or_else(|| unprocessable("ttl_ms overflows Unix milliseconds")),
+        }
+    }
+}
 
 /// 422 unless `expires_at_ms` is strictly later than `now_ms`.
 pub(super) fn ensure_expiry_after(expires_at_ms: u64, now_ms: u64) -> Result<(), ApiError> {
@@ -59,9 +83,12 @@ pub(super) fn refuse_due_expiry(
     ensure_expiry_after(expires_at_ms, now_ms)
 }
 
-/// Puts one record and reads its ETag back. `now_ms` is the request's only
-/// clock reading: it judges the expiry and also dates the read-back, so a
-/// short lifetime cannot lapse between the commit and the read-back.
+/// Puts one record and reads its ETag back. `now_ms` is the clock reading of
+/// the write itself: it turns a `ttl_ms` lifetime into its deadline, judges
+/// that deadline and dates the read-back, so a short lifetime is neither spent
+/// before the write is applied nor lapses between the commit and the
+/// read-back. Resolving an `If-Match` tag, which the caller does first, reads
+/// the clock on its own.
 #[allow(clippy::too_many_arguments)]
 pub(super) fn put_record_at(
     db: &mut Database,
@@ -72,11 +99,12 @@ pub(super) fn put_record_at(
     vector: &[f32],
     payload: &[u8],
     metadata: &crate::Metadata,
-    expires_at_ms: Option<u64>,
+    expiry: Option<Expiry>,
     now_ms: u64,
 ) -> Result<Written, ApiError> {
     let created = db.revision_in(collection, id)?.is_none();
-    if let Some(expires_at_ms) = expires_at_ms {
+    if let Some(expiry) = expiry {
+        let expires_at_ms = expiry.deadline(now_ms)?;
         refuse_due_expiry(
             db,
             collection,
@@ -132,6 +160,14 @@ mod tests {
         expected: Expected,
         expires: Option<u64>,
     ) -> Result<Written, ApiError> {
+        put_expiring(db, expected, expires.map(Expiry::At))
+    }
+
+    fn put_expiring(
+        db: &mut Database,
+        expected: Expected,
+        expiry: Option<Expiry>,
+    ) -> Result<Written, ApiError> {
         put_record_at(
             db,
             "ident",
@@ -141,7 +177,7 @@ mod tests {
             &[1.0],
             b"payload",
             &Metadata::new(),
-            expires,
+            expiry,
             NOW,
         )
     }
@@ -279,7 +315,7 @@ mod tests {
                 &self.vector,
                 &self.payload,
                 &self.metadata,
-                expires_at_ms,
+                expires_at_ms.map(Expiry::At),
                 NOW,
             )
         }
@@ -347,6 +383,56 @@ mod tests {
             "{}",
             written.etag
         );
+    }
+
+    #[test]
+    fn a_lifetime_is_counted_from_the_clock_reading_of_the_write() {
+        let mut db = database(FormatVersion::V5);
+        let written = put_expiring(&mut db, Expected::Any, Some(Expiry::After(60))).unwrap();
+        assert_eq!(db.expires_at(1).unwrap(), Some(NOW + 60));
+        assert_eq!(db.revision(1).unwrap(), Some(written.revision));
+        assert_eq!(db.get_at(1, NOW).unwrap().unwrap().payload, b"payload");
+        assert!(db.get_at(1, NOW + 61).unwrap().is_none());
+    }
+
+    #[test]
+    fn the_shortest_lifetime_outlives_the_write_that_dates_it() {
+        let mut db = database(FormatVersion::V5);
+        let written = put_expiring(&mut db, Expected::Any, Some(Expiry::After(1))).unwrap();
+        assert_eq!(db.expires_at(1).unwrap(), Some(NOW + 1));
+        assert!(
+            written.etag.starts_with("\"r2-ident-0-1-"),
+            "{}",
+            written.etag
+        );
+    }
+
+    #[test]
+    fn a_lifetime_the_clock_cannot_add_is_refused_and_nothing_is_written() {
+        let mut db = database(FormatVersion::V5);
+        db.put(1, &[0.0], b"kept").unwrap();
+        let revision = db.revision(1).unwrap();
+        for ttl in [u64::MAX, u64::MAX - NOW + 1] {
+            let result = put_expiring(&mut db, Expected::Any, Some(Expiry::After(ttl)));
+            let error = result.err().expect("the lifetime must be refused");
+            assert_refusal(&error, StatusCode::UNPROCESSABLE_ENTITY, "invalid_input");
+            assert!(error.message.contains("overflows"), "{}", error.message);
+        }
+        assert_eq!(db.revision(1).unwrap(), revision);
+        // The longest lifetime that still adds up ends at the end of time.
+        put_expiring(&mut db, Expected::Any, Some(Expiry::After(u64::MAX - NOW))).unwrap();
+        assert_eq!(db.expires_at(1).unwrap(), Some(u64::MAX));
+    }
+
+    #[test]
+    fn a_lifetime_of_zero_is_a_due_deadline_at_this_level() {
+        // REST refuses it as a request error before it gets this far.
+        let mut db = database(FormatVersion::V5);
+        let result = put_expiring(&mut db, Expected::Any, Some(Expiry::After(0)));
+        let error = result.err().expect("the lifetime must be refused");
+        assert_refusal(&error, StatusCode::UNPROCESSABLE_ENTITY, "invalid_input");
+        assert!(error.message.contains("later than the server clock"));
+        assert_eq!(db.revision(1).unwrap(), None);
     }
 
     #[test]
