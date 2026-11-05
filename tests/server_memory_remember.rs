@@ -61,17 +61,37 @@ fn bindings(scopes: &str) -> String {
     )
 }
 
-/// A scoped `vlk_` credential with every memory operation, granted `scopes`
-/// (a JSON array) on the binding `notes`.
-fn start(directory: &TempDir, db: Database, scopes: &str) -> (Router, String) {
-    let secret = "A".repeat(43);
-    let evidence = db
+const ALL: [&str; 4] = ["read", "write", "graph_read", "graph_write"];
+
+/// The ID of the current incarnation of the evidence collection.
+fn evidence_id(db: &Database) -> Value {
+    let id = db
         .collections()
         .unwrap()
         .into_iter()
         .find(|info| info.name == "notes_ev")
         .unwrap()
         .id;
+    json!(id)
+}
+
+/// A scoped `vlk_` credential with every memory operation, granted `scopes`
+/// (a JSON array) on the binding `notes`.
+fn start(directory: &TempDir, db: Database, scopes: &str) -> (Router, String) {
+    start_with(directory, db, scopes, &ALL, None)
+}
+
+/// The same credential limited to `operations` and bound to the evidence
+/// collection incarnation `evidence` (the current one when `None`).
+fn start_with(
+    directory: &TempDir,
+    db: Database,
+    scopes: &str,
+    operations: &[&str],
+    evidence: Option<Value>,
+) -> (Router, String) {
+    let secret = "A".repeat(43);
+    let evidence = evidence.unwrap_or_else(|| evidence_id(&db));
     let lineage = db.lineage().unwrap();
     let credentials = json!({
         "schema": 1,
@@ -80,7 +100,7 @@ fn start(directory: &TempDir, db: Database, scopes: &str) -> (Router, String) {
             "name": "fake memory credential",
             "all": false,
             "collections": [{"name": "notes_ev", "id": evidence}],
-            "operations": ["read", "write", "graph_read", "graph_write"],
+            "operations": operations,
             "graphs": ["notes_graph"],
             "lineage": format!("{lineage:016x}"),
             "secret_sha256": format!("{:x}", Sha256::digest(secret.as_bytes())),
@@ -376,4 +396,93 @@ async fn body_failures_never_echo_the_request() {
     // The control: the request itself is served.
     let (status, answer) = send(&app, &token, "application/json", valid).await;
     assert_eq!(status, 200, "{answer}");
+}
+
+/// Contract section 6: Remember needs `graph_write` and, for the binding's
+/// evidence collection, `write`; a credential lacking either is refused with
+/// the one 403 body before any memory is written. Pins g1r-order-auth-write
+/// behind the real middleware.
+#[tokio::test]
+async fn remember_needs_graph_write_and_the_evidence_write_grant() {
+    let body = request("k", vec![item("e1", "x")]);
+    let cases: [(&[&str], bool); 4] = [
+        (&["read", "write", "graph_read", "graph_write"], true),
+        (&["read", "write", "graph_read"], false),
+        (&["read", "graph_read", "graph_write"], false),
+        (&["graph_read"], false),
+    ];
+    for (operations, served) in cases {
+        let directory = TempDir::new().unwrap();
+        let (app, token) = start_with(
+            &directory,
+            writable(),
+            r#"[{"agent":"a"}]"#,
+            operations,
+            None,
+        );
+        let (status, answer) = post(&app, &token, &body).await;
+        if served {
+            assert_eq!(status, 200, "{operations:?}: {answer}");
+        } else {
+            assert_eq!(
+                (status, code(&answer)),
+                (403, "forbidden_scope"),
+                "{operations:?}: {answer}"
+            );
+        }
+    }
+}
+
+/// Contract section 6 and mapping section 6: a dropped and recreated evidence
+/// collection has a new ID that the grant of the old one never covers; the
+/// authorization failure precedes every capability refusal and validation.
+#[tokio::test]
+async fn a_recreated_evidence_collection_does_not_inherit_the_grant() {
+    let directory = TempDir::new().unwrap();
+    let mut db = writable();
+    let stale = evidence_id(&db);
+    db.drop_collection("notes_ev").unwrap();
+    db.create_collection(
+        "notes_ev",
+        CollectionSpec {
+            dimensions: 2,
+            settings: Default::default(),
+        },
+    )
+    .unwrap();
+    assert_ne!(evidence_id(&db), stale);
+    let (app, token) = start_with(&directory, db, r#"[{"agent":"a"}]"#, &ALL, Some(stale));
+    let refused = request("k", vec![with(item("e1", "x"), json!({"kind": "fact"}))]);
+    for body in [
+        request("k", vec![item("e1", "x")]),
+        refused,
+        json!({"scope": {"agent": "a"}}),
+    ] {
+        let (status, answer) = post(&app, &token, &body).await;
+        assert_eq!(
+            (status, code(&answer)),
+            (403, "forbidden_scope"),
+            "{answer}"
+        );
+    }
+}
+
+/// Contract section 4 and wire section 2.2: the request body cap is
+/// 8,388,608 bytes, inclusive, and one more byte is 413 `invalid_json`. The
+/// served request carries its own generous budget.
+#[tokio::test]
+async fn the_request_body_cap_is_inclusive_at_8_mib() {
+    let directory = TempDir::new().unwrap();
+    let (app, token) = start(&directory, writable(), r#"[{"agent":"a"}]"#);
+    let valid = serde_json::to_vec(&request("k", vec![item("e1", "x")])).unwrap();
+    let mut exact = valid.clone();
+    exact.resize(8 * 1024 * 1024, b' ');
+    let (status, text) = send(&app, &token, "application/json", exact).await;
+    assert_eq!(status, 200, "{text}");
+    let mut over = valid;
+    over.resize(8 * 1024 * 1024 + 1, b' ');
+    let (status, text) = send(&app, &token, "application/json", over).await;
+    assert_eq!(status, 413, "{text}");
+    let answer: Value = serde_json::from_str(&text).unwrap();
+    assert_eq!(code(&answer), "invalid_json");
 }
