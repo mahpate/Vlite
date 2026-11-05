@@ -218,7 +218,7 @@ session continues with the next line. The limit is eight times the 16 MiB body
 of the largest request the engine accepts, a `vlite_graph_write` batch, because
 that body can take up to eight times as many bytes as JSON text (payload bytes
 written as `\u00XX` escapes take six, `float32` values written with 20 to 30
-characters take five to 7.5).
+characters and a comma take five to 7.75).
 Protocol messages alone are written to stdout; diagnostics are written to stderr.
 Tool failures return `isError: true` with a clear message; malformed JSON and protocol errors use JSON-RPC errors. `vlite_search` returns IDs and distances, not vectors. `vlite_get` and `vlite_list` omit vectors unless explicitly requested by `vlite_get`.
 

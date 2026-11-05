@@ -22,6 +22,7 @@ use std::{
 };
 
 use line::{Line, read_bounded_line};
+use serde::Deserialize;
 use serde_json::{Map, Value, json};
 use vlite::{Condition, Database, DistanceMetric, EncryptionKey, HnswMaintenancePolicy, Metadata};
 
@@ -32,10 +33,17 @@ const SUPPORTED_PROTOCOL_VERSIONS: &[&str] = &["2025-06-18", "2025-03-26", "2024
 /// is answered with a -32600 error. The largest supported request is a
 /// `vlite_graph_write` batch: its engine body is at most 16 MiB and can be eight
 /// times that as JSON text (payload bytes written as `\u00XX` escapes are six
-/// times larger, `float32` values written with 20 to 30 characters five to 7.5
-/// times), so the cap is 8 x 16 MiB. A memory tool's 8 MiB of compact arguments
-/// is about 48 MiB.
+/// times larger, `float32` values written with 20 to 30 characters and a comma
+/// five to 7.75 times), so the cap is 8 x 16 MiB. A memory tool's 8 MiB of
+/// compact arguments is about 48 MiB.
 const MAX_LINE_BYTES: usize = 128 * 1024 * 1024;
+// The 8 is that expansion of the engine's body limit as JSON text: 6 for a payload byte
+// written as a `\u00XX` escape, 5 to 7.75 for a `float32` written with 20 to 30 digits
+// and a comma.
+const _: () = assert!(
+    MAX_LINE_BYTES >= 8 * vlite::MAX_BATCH_BYTES,
+    "the line limit must hold the largest graph write body written as text"
+);
 const HELP: &str = "vlite-mcp --db PATH [--read-only | --writable] [--encryption-key-file PATH]\n\
        vlite-mcp --server URL [--token-env VAR] [--read-only | --writable]   (mcp-proxy builds)\n\
 Read-only is the default. VLITE_ENCRYPTION_KEY or VLITE_ENCRYPTION_KEY_HEX may supply an encryption key.\n\
@@ -271,7 +279,7 @@ fn id_arg(args: &Value) -> Result<u64, String> {
 }
 
 fn parse_vector(value: &Value, name: &str) -> Result<Vec<f32>, String> {
-    let vector: Vec<f32> = serde_json::from_value(value.clone())
+    let vector = Vec::<f32>::deserialize(value)
         .map_err(|_| format!("{name} must be an array of finite numbers"))?;
     if vector.is_empty() || vector.iter().any(|value| !value.is_finite()) {
         return Err(format!("{name} must contain at least one finite number"));
@@ -345,16 +353,18 @@ fn validate_tool_arguments(name: &str, args: &Value) -> Result<(), String> {
 fn parse_conditions(value: Option<&Value>) -> Result<Vec<Condition>, String> {
     match value {
         None => Ok(Vec::new()),
-        Some(value) => serde_json::from_value(value.clone())
-            .map_err(|error| format!("invalid filter: {error}")),
+        Some(value) => {
+            Vec::<Condition>::deserialize(value).map_err(|error| format!("invalid filter: {error}"))
+        }
     }
 }
 
 fn parse_metadata(value: Option<&Value>) -> Result<Metadata, String> {
     match value {
         None => Ok(BTreeMap::new()),
-        Some(value) => serde_json::from_value::<Metadata>(value.clone())
-            .map_err(|error| format!("invalid metadata: {error}")),
+        Some(value) => {
+            Metadata::deserialize(value).map_err(|error| format!("invalid metadata: {error}"))
+        }
     }
 }
 
@@ -840,6 +850,226 @@ fn main() -> ExitCode {
         Err(error) => {
             eprintln!("vlite-mcp: {error}");
             ExitCode::FAILURE
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde::de::DeserializeOwned;
+    use std::{
+        alloc::{GlobalAlloc, Layout, System},
+        cell::Cell,
+        fmt::Debug,
+    };
+
+    thread_local! {
+        static ALLOCATED: Cell<usize> = const { Cell::new(0) };
+    }
+
+    fn add(bytes: usize) {
+        ALLOCATED.with(|total| total.set(total.get() + bytes));
+    }
+
+    /// Counts the bytes each thread allocates, for `allocated_by`.
+    struct Counting;
+
+    // SAFETY: every method hands its arguments to `System` unchanged. The count is a
+    // const-initialized thread local without a destructor, which never allocates.
+    unsafe impl GlobalAlloc for Counting {
+        unsafe fn alloc(&self, layout: Layout) -> *mut u8 {
+            add(layout.size());
+            unsafe { System.alloc(layout) }
+        }
+
+        unsafe fn alloc_zeroed(&self, layout: Layout) -> *mut u8 {
+            add(layout.size());
+            unsafe { System.alloc_zeroed(layout) }
+        }
+
+        unsafe fn dealloc(&self, block: *mut u8, layout: Layout) {
+            unsafe { System.dealloc(block, layout) }
+        }
+
+        unsafe fn realloc(&self, block: *mut u8, layout: Layout, size: usize) -> *mut u8 {
+            add(size.saturating_sub(layout.size()));
+            unsafe { System.realloc(block, layout, size) }
+        }
+    }
+
+    #[global_allocator]
+    static COUNTING: Counting = Counting;
+
+    /// `work`'s value and the bytes it allocated on this thread, frees not subtracted.
+    fn allocated_by<T>(work: impl FnOnce() -> T) -> (T, usize) {
+        let before = ALLOCATED.with(Cell::get);
+        let value = work();
+        (value, ALLOCATED.with(Cell::get) - before)
+    }
+
+    /// Dispatches `message` on a fresh two-dimensional database and returns the answer and
+    /// the bytes `dispatch` allocated, not counting the request it was handed.
+    fn dispatched(message: Value) -> (Option<Value>, usize) {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("allocations.vlite");
+        let database = Database::create(&path, 2).unwrap();
+        let config = Config {
+            path,
+            read_only: false,
+            encryption_key: None,
+            #[cfg(feature = "mcp-proxy")]
+            remote: None,
+            #[cfg(feature = "mcp-proxy")]
+            memory_remote: None,
+        };
+        let mut backend = Backend::Local(Box::new(database));
+        allocated_by(|| dispatch(&mut backend, &config, message, "{}"))
+    }
+
+    // 1,000,000 numbers: 32 MB as a `Value`, so 32 MB more for each copy of it.
+    fn numbers() -> Value {
+        Value::Array((0..1_000_000).map(|number| json!(number)).collect())
+    }
+
+    // The same, led by a string that no list of numbers, filter or metadata can start with:
+    // reading it fails at once, before the rest of it is looked at.
+    fn unreadable() -> Value {
+        let mut list = numbers();
+        list[0] = json!("x");
+        list
+    }
+
+    // `{key: value}` with the value moved in, where `json!` would serialize, and so copy, it.
+    fn object(key: &str, value: Value) -> Value {
+        Value::Object(Map::from_iter([(key.to_string(), value)]))
+    }
+
+    fn call(name: &str, arguments: Value) -> Value {
+        let mut request =
+            json!({"jsonrpc":"2.0","id":7,"method":"tools/call","params":{"name":name}});
+        request["params"]["arguments"] = arguments;
+        request
+    }
+
+    // What reading a request in place allocates: its small answer, and for a list the 1 MiB
+    // that serde reserves up front. A copy of the numbers is 32 MB.
+    const ANSWER: usize = 64 << 10;
+    const LIST: usize = 2 << 20;
+
+    fn failed_with(answer: Option<Value>) -> String {
+        let answer = answer.expect("an answer");
+        assert_eq!(answer["result"]["isError"], true, "{answer}");
+        answer["result"]["structuredContent"]["error"]
+            .as_str()
+            .unwrap()
+            .to_string()
+    }
+
+    #[test]
+    fn dispatch_takes_the_params_of_a_request_without_copying_them() {
+        let mut request = json!({"jsonrpc":"2.0","id":7,"method":"ping"});
+        request["params"] = object("padding", numbers());
+        let (answer, bytes) = dispatched(request);
+        assert_eq!(answer, Some(json!({"jsonrpc":"2.0","id":7,"result":{}})));
+        assert!(bytes < ANSWER, "{bytes} bytes allocated");
+    }
+
+    #[test]
+    fn dispatch_takes_the_arguments_of_a_tool_call_without_copying_them() {
+        let (answer, bytes) = dispatched(call("vlite_info", object("padding", numbers())));
+        assert_eq!(failed_with(answer), "unexpected argument: padding");
+        assert!(bytes < ANSWER, "{bytes} bytes allocated");
+    }
+
+    #[test]
+    fn dispatch_reads_a_vector_a_filter_and_metadata_in_place() {
+        let (answer, bytes) = dispatched(call("vlite_search", object("vector", unreadable())));
+        assert_eq!(
+            failed_with(answer),
+            "vector must be an array of finite numbers"
+        );
+        assert!(bytes < LIST, "vector: {bytes} bytes allocated");
+
+        let mut arguments = json!({"vector": [1, 1]});
+        arguments["filter"] = unreadable();
+        let (answer, bytes) = dispatched(call("vlite_search", arguments));
+        assert!(failed_with(answer).starts_with("invalid filter: "));
+        assert!(bytes < LIST, "filter: {bytes} bytes allocated");
+
+        let mut metadata = json!({"a": "x"});
+        metadata["b"] = numbers();
+        let mut arguments = json!({"id": "1", "vector": [1, 1]});
+        arguments["metadata"] = metadata;
+        let (answer, bytes) = dispatched(call("vlite_upsert", arguments));
+        assert!(failed_with(answer).starts_with("invalid metadata: "));
+        assert!(bytes < ANSWER, "metadata: {bytes} bytes allocated");
+    }
+
+    // Reading a value in place has to report what reading a copy of it did, byte for byte, and
+    // read the same thing when it can.
+    fn same_either_way<T: DeserializeOwned + PartialEq + Debug>(value: &Value) {
+        let in_place = T::deserialize(value).map_err(|error| error.to_string());
+        let copied = serde_json::from_value::<T>(value.clone()).map_err(|error| error.to_string());
+        assert_eq!(in_place, copied, "{value}");
+    }
+
+    #[test]
+    fn reading_in_place_reports_the_errors_reading_a_copy_did() {
+        let string = json!({"type":"string","value":"x"});
+        for vector in [
+            json!([1, 2.5, -3, 1e39]),
+            json!([]),
+            json!("x"),
+            json!(null),
+            json!(7),
+            json!({"a": 1}),
+            json!([1, "x"]),
+            json!([1, null]),
+            json!([true]),
+            json!([[1]]),
+        ] {
+            same_either_way::<Vec<f32>>(&vector);
+        }
+        for filter in [
+            json!([]),
+            json!([{"op":"eq","field":"a","value":string}]),
+            json!([{"op":"range","field":"a","min":{"type":"integer","value":"1"}}]),
+            json!([{"op":"georadius","field":"g","latitude":1.0,"longitude":2.0,"radius_meters":5.0}]),
+            json!("x"),
+            json!({}),
+            json!([1]),
+            json!([{}]),
+            json!([{"op":"nope"}]),
+            json!([{"op":"eq"}]),
+            json!([{"op":"eq","field":"a"}]),
+            json!([{"op":"eq","field":"a","value":1}]),
+            json!([{"op":"range","field":"a"}]),
+            json!([{"op":"eq","field":"a","value":string,"extra":1}]),
+            json!([{"op":"georadius","field":"g"}]),
+        ] {
+            same_either_way::<Vec<Condition>>(&filter);
+        }
+        for metadata in [
+            json!({}),
+            json!({"a":string,"b":{"type":"integer","value":"5"},"c":{"type":"float","value":1.5},
+                   "d":{"type":"boolean","value":true},
+                   "e":{"type":"geopoint","value":{"latitude":1.0,"longitude":2.0}}}),
+            json!([]),
+            json!("x"),
+            json!({"a": 1}),
+            json!({"a": {}}),
+            json!({"a":{"type":"string"}}),
+            json!({"a":{"type":"string","value":1}}),
+            json!({"a":{"type":"integer","value":5}}),
+            json!({"a":{"type":"integer","value":"05"}}),
+            json!({"a":{"type":"nope","value":1}}),
+            json!({"a":{"type":"string","value":"x","extra":1}}),
+            json!({"a":{"type":"float","value":"x"}}),
+            json!({"a":{"type":"geopoint","value":{"latitude":1.0}}}),
+            json!({"a":{"type":"boolean","value":"yes"}}),
+        ] {
+            same_either_way::<Metadata>(&metadata);
         }
     }
 }
