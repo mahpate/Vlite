@@ -77,6 +77,8 @@ pub use records::{
     ReadSnapshot, RecommendationQuery, SearchGroup, SnapshotRetentionStats,
 };
 pub use stats::{PlanStrategy, QueryPlan, SearchStats};
+#[cfg(feature = "server")]
+mod by_id;
 pub mod maintenance;
 #[cfg(feature = "server")]
 pub mod server;
@@ -2736,6 +2738,20 @@ impl Database {
             .ok_or(Error::CollectionNotFound)
     }
 
+    /// `resolve` for a name a request supplies: a name `visible` hides
+    /// answers `CollectionNotFound` before any lookup, like a name that does
+    /// not exist. The server layer's guard supplies the predicate.
+    pub(crate) fn resolve_visible(
+        &self,
+        name: &str,
+        visible: &dyn Fn(&str) -> bool,
+    ) -> Result<u16> {
+        if !visible(name) {
+            return Err(Error::CollectionNotFound);
+        }
+        self.resolve(name)
+    }
+
     fn info(&self, id: u16) -> CollectionInfo {
         let state = self.state(id);
         CollectionInfo {
@@ -2886,6 +2902,11 @@ impl Database {
             return Err(Error::DefaultCollectionImmutable);
         }
         let id = self.resolve(name)?;
+        self.drop_live_collection(id)
+    }
+
+    /// The commit half of `drop_collection`, for a live non-default `id`.
+    fn drop_live_collection(&mut self, id: u16) -> Result<()> {
         if !self.state(id).records.is_empty() || self.imports.has_open_in(id) {
             return Err(Error::CollectionNotEmpty);
         }
@@ -2911,6 +2932,15 @@ impl Database {
         settings: CollectionSettings,
     ) -> Result<SettingsPersistence> {
         let id = self.resolve(name)?;
+        self.set_live_collection_settings(id, settings)
+    }
+
+    /// The commit half of `set_collection_settings`, for a live `id`.
+    fn set_live_collection_settings(
+        &mut self,
+        id: u16,
+        settings: CollectionSettings,
+    ) -> Result<SettingsPersistence> {
         #[cfg(test)]
         if self.state(id).records.is_compact() {
             self.ensure_healthy()?;

@@ -120,6 +120,24 @@ pub(crate) fn compact_view_for_test(db: &Database, id: u16) -> KvView<'_> {
     KvView { db, id }
 }
 
+#[cfg(feature = "server")]
+impl Database {
+    /// `kv_view` for a collection the server layer has already resolved.
+    pub(crate) fn kv_view_by_id(&self, id: u16) -> Result<KvView<'_>> {
+        self.live_collection(id)?;
+        check_kv_collection(self, id)?;
+        Ok(KvView { db: self, id })
+    }
+
+    /// `kv_store` for an existing collection the server layer has already
+    /// resolved. Unlike `kv_store` it never creates one.
+    pub(crate) fn kv_store_by_id(&mut self, id: u16) -> Result<KvStore<'_>> {
+        self.live_collection(id)?;
+        check_kv_collection(self, id)?;
+        Ok(KvStore { db: self, id })
+    }
+}
+
 fn check_kv_collection(db: &Database, id: u16) -> Result<()> {
     db.ensure_resident_in(id)?;
     if db.state(id).dimensions == 1 {

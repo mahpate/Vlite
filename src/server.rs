@@ -38,6 +38,7 @@ mod credentials;
 mod features;
 mod graph;
 mod group_commit;
+mod guard;
 mod kv;
 pub use group_commit::GroupCommitConfig;
 #[cfg(feature = "grpc")]
@@ -301,6 +302,16 @@ impl Service {
 
     fn has_bindings(&self) -> bool {
         !self.memory_bindings.is_empty()
+    }
+
+    /// The guard for one request made as `role`: the only way a handler
+    /// obtains a collection or graph it may use (see `guard::RequestScope`).
+    #[allow(
+        dead_code,
+        reason = "the REST and gRPC handlers move onto the scope slice by slice"
+    )]
+    fn scope(&self, role: admin::Role) -> guard::RequestScope {
+        guard::RequestScope::new(self, role)
     }
 
     /// Choose snapshot-based simple exact reads, or the original lock-held path.

@@ -149,6 +149,12 @@ impl Database {
         config: HnswConfig,
         metric: DistanceMetric,
     ) -> Result<DiskAnnSource> {
+        self.check_disk_ann_build(config, metric)?;
+        let id = self.resolve(collection)?;
+        self.build_live_disk_ann(id, path.as_ref(), config, metric)
+    }
+
+    fn check_disk_ann_build(&self, config: HnswConfig, metric: DistanceMetric) -> Result<()> {
         self.ensure_all_resident()?;
         if self.cipher.is_some() {
             return Err(Error::SidecarUnavailable(
@@ -156,8 +162,18 @@ impl Database {
             ));
         }
         config.validate()?;
-        validate_ann_metric(metric)?;
-        let id = self.resolve(collection)?;
+        validate_ann_metric(metric)
+    }
+
+    /// The build of `build_disk_ann` for a live collection `id` whose
+    /// preconditions `check_disk_ann_build` has accepted.
+    fn build_live_disk_ann(
+        &self,
+        id: u16,
+        path: &Path,
+        config: HnswConfig,
+        metric: DistanceMetric,
+    ) -> Result<DiskAnnSource> {
         self.ensure_resident_in(id)?;
         let state = self.state(id);
         let lineage = self.lineage.unwrap_or(0);
@@ -175,7 +191,7 @@ impl Database {
             live_records: state.records.len() as u64,
         };
         write_sidecar(
-            path.as_ref(),
+            path,
             &graph,
             state.records.resident()?,
             state.dimensions,
@@ -184,6 +200,20 @@ impl Database {
             source,
         )?;
         Ok(source)
+    }
+
+    /// `build_disk_ann` for a collection the server layer already resolved.
+    #[cfg(feature = "server")]
+    pub(crate) fn build_disk_ann_by_id(
+        &self,
+        id: u16,
+        path: impl AsRef<Path>,
+        config: HnswConfig,
+        metric: DistanceMetric,
+    ) -> Result<DiskAnnSource> {
+        self.check_disk_ann_build(config, metric)?;
+        self.live_collection(id)?;
+        self.build_live_disk_ann(id, path.as_ref(), config, metric)
     }
 
     /// Searches through `index` after checking it still matches this

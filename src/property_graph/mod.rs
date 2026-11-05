@@ -812,12 +812,7 @@ impl Database {
 
     /// Resolves names and converts and validates the inputs of one operation.
     fn plan_input(&self, op: &GraphOp, visible: &dyn Fn(&str) -> bool) -> Result<Planned> {
-        let resolve = |name: &str| {
-            if !visible(name) {
-                return Err(Error::CollectionNotFound);
-            }
-            self.resolve(name)
-        };
+        let resolve = |name: &str| self.resolve_visible(name, visible);
         let mutation = match op {
             GraphOp::CreateNode {
                 key,

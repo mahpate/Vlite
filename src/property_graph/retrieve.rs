@@ -352,10 +352,8 @@ impl GraphRef<'_> {
             EvidenceSpec::MAX_ITEMS,
         )?;
         let collection = |name: &str| {
-            if !visible(name) {
-                return Err(Error::CollectionNotFound);
-            }
-            db.collection(name)
+            db.resolve_visible(name, visible)
+                .map(|id| crate::CollectionRef { db, id })
         };
         let pivot_collection = collection(&pivot.collection)?;
         let mut evidence_collections: Vec<(&str, u16)> = Vec::new();
