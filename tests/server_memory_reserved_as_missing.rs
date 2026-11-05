@@ -303,6 +303,78 @@ const CASES: &[(&str, &str, &str)] = &[
     ("GET", "/v1/graphs/$g/schema?budget=bad", ""),
 ];
 
+#[test]
+fn every_name_addressed_openapi_operation_has_a_differential_case() {
+    use std::collections::BTreeSet;
+
+    fn normalize(method: &str, path: &str) -> (String, String) {
+        let path = path.split('?').next().unwrap();
+        let segments: Vec<_> = path
+            .split('/')
+            .map(|segment| match segment {
+                "$c" | "{c}" | "{collection}" => "{collection}",
+                "$g" | "{g}" | "{graph}" => "{graph}",
+                segment
+                    if (segment.starts_with('{') && segment.ends_with('}'))
+                        || (!segment.is_empty()
+                            && segment.bytes().all(|byte| byte.is_ascii_digit())) =>
+                {
+                    "{id}"
+                }
+                segment => segment,
+            })
+            .collect();
+        (method.to_ascii_uppercase(), segments.join("/"))
+    }
+
+    let spec: Value = serde_json::from_str(include_str!("../src/openapi.json")).unwrap();
+    let mut inventory = BTreeSet::new();
+    for (path, item) in spec["paths"].as_object().unwrap() {
+        if !path
+            .split('/')
+            .any(|segment| matches!(segment, "{c}" | "{collection}" | "{g}" | "{graph}"))
+        {
+            continue;
+        }
+        for method in item.as_object().unwrap().keys() {
+            if matches!(
+                method.as_str(),
+                "get" | "post" | "put" | "patch" | "delete" | "head" | "options" | "trace"
+            ) {
+                inventory.insert(normalize(method, path));
+            }
+        }
+    }
+    assert!(
+        !inventory.is_empty(),
+        "the raw route inventory must not be empty"
+    );
+    let cases: BTreeSet<_> = CASES
+        .iter()
+        .map(|(method, path, _)| normalize(method, path))
+        .collect();
+    let uncovered: Vec<_> = inventory.difference(&cases).collect();
+    assert!(
+        uncovered.is_empty(),
+        "a new raw route naming a collection or graph must be added to CASES \
+         (reserved-versus-missing differential) before it ships: {uncovered:?}"
+    );
+
+    // Removing coverage must fail even when several request bodies share a route.
+    for omitted in &inventory {
+        let mutant_cases: BTreeSet<_> = CASES
+            .iter()
+            .map(|(method, path, _)| normalize(method, path))
+            .filter(|operation| operation != omitted)
+            .collect();
+        assert_eq!(
+            inventory.difference(&mutant_cases).collect::<Vec<_>>(),
+            vec![omitted],
+            "inventory must detect removal of CASES coverage for {omitted:?}"
+        );
+    }
+}
+
 async fn add_sessions(fixture: &mut Fixture) {
     for tenant in [false, true] {
         for role in ["viewer", "editor"] {
