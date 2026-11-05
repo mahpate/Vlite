@@ -165,6 +165,8 @@ async fn snapshot(service: Service, role: admin::Role) -> Result<Value, ApiError
                 "collections": collections,
             });
             value["snapshot_reads_enabled"] = json!(snapshot_reads);
+            // Added outside the literal above, which is at the macro recursion limit.
+            value["kv_slots_exhausted_total"] = json!(load(&metrics.kv_slots_exhausted));
             let retention = db.snapshot_retention_stats();
             value["read_snapshot_active_captures"] = json!(retention.active_captures);
             value["read_snapshot_retained_logical_bytes"] = json!(retention.retained_logical_bytes);
