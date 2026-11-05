@@ -471,6 +471,17 @@ retroactive policy change for ordinary graphs/collections; refuse to adopt
 in-use ordinary resources without an independently approved migration. Embedded
 file access and operator backups remain outside server scope enforcement.
 
+For a caller without raw access on the owning binding, a name-addressed raw
+request uses the same response as a nonexistent resource in that namespace
+(collection: `404 collection_not_found`; graph: `409 graph_not_found`).
+Normal grant checks stay first and retain `403 forbidden_scope` for names
+outside the grant. Creates under a reserved name instead use the occupied-name
+response (`409 collection_exists` or `409 graph_exists`); a future rename must
+do the same. Webhook subscriptions accept reserved-name filters as they accept
+missing-name filters, but delivery still omits reserved events. Aggregate
+refusals, list/feed omission, gRPC refusal, memory binding authorization and
+the per-node attachment rule on `delete_node` are unchanged.
+
 REST errors retain `{error:{code,message}}`; the owner-selected optional `error.details`
 uses the shared context schema in
 [wire conventions section 3, decision 21](serving-wire-conventions.md#3-encoding-rules-c12),

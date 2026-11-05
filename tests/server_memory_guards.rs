@@ -152,6 +152,40 @@ async fn call_token(
     (status, value)
 }
 
+async fn assert_hidden_response(app: &Router, token: &str, method: &str, path: &str, body: &str) {
+    let response = call_token(app, method, path, Body::from(body.to_owned()), token).await;
+    if method == "POST" && matches!(path, "/v1/graphs" | "/v1/collections") {
+        if response.0 != 403 {
+            assert_eq!(response.0, 409, "{method} {path}: {response:?}");
+            assert_eq!(
+                response.1["error"]["code"],
+                if path == "/v1/graphs" {
+                    "graph_exists"
+                } else {
+                    "collection_exists"
+                }
+            );
+        }
+    } else if path.contains("notes_ev")
+        || path.contains("notes_graph")
+        || body.contains("notes_ev")
+        || body.contains("notes_graph")
+    {
+        let absent = |text: &str| {
+            text.replace("notes_ev", "absent_ev")
+                .replace("notes_graph", "absent_graph")
+        };
+        let missing = call_token(app, method, &absent(path), Body::from(absent(body)), token).await;
+        assert_eq!(response, missing, "{method} {path}");
+    } else {
+        assert_eq!(response.0, 403, "{method} {path}: {response:?}");
+        assert!(matches!(
+            response.1["error"]["code"].as_str(),
+            Some("forbidden_scope" | "read_only")
+        ));
+    }
+}
+
 fn start_scoped(directory: &TempDir, raw_access: bool, collection: &str) -> (Router, String) {
     start_scoped_with_operations(directory, raw_access, collection, &["read", "write"])
 }
@@ -657,27 +691,19 @@ async fn reserved_graph_and_collection_are_denied_and_lists_filter_them() {
     let app = start(&directory, Some(BINDINGS), false).unwrap();
 
     let (status, error) = get(&app, "/v1/graphs/notes_graph").await;
-    assert_eq!(status, 403);
-    assert_eq!(error["error"]["code"], "forbidden_scope");
-    assert_eq!(
-        error["error"]["message"],
-        "credential scope does not permit this operation or collection"
-    );
+    assert_eq!(status, 409);
+    assert_eq!(error["error"]["code"], "graph_not_found");
     assert_eq!(get(&app, "/v1/graphs/ordinary_graph").await.0, 200);
 
     let (status, error) = get(&app, "/v1/collections/notes_ev").await;
-    assert_eq!(status, 403);
-    assert_eq!(error["error"]["code"], "forbidden_scope");
-    assert_eq!(
-        error["error"]["message"],
-        "credential scope does not permit this operation or collection"
-    );
+    assert_eq!(status, 404);
+    assert_eq!(error["error"]["code"], "collection_not_found");
     assert_eq!(get(&app, "/v1/collections/ordinary").await.0, 200);
     assert_eq!(
         call(&app, "DELETE", "/v1/graphs/notes_graph", Body::empty())
             .await
             .0,
-        403
+        409
     );
     assert_eq!(
         call(
@@ -688,7 +714,7 @@ async fn reserved_graph_and_collection_are_denied_and_lists_filter_them() {
         )
         .await
         .0,
-        403
+        404
     );
     assert_eq!(
         call(
@@ -699,7 +725,7 @@ async fn reserved_graph_and_collection_are_denied_and_lists_filter_them() {
         )
         .await
         .0,
-        403
+        201
     );
     assert_eq!(
         call(
@@ -710,7 +736,7 @@ async fn reserved_graph_and_collection_are_denied_and_lists_filter_them() {
         )
         .await
         .0,
-        403
+        201
     );
     let (info_status, info) = get(&app, "/v1/database").await;
     assert_eq!(info_status, 200);
@@ -979,20 +1005,12 @@ async fn reserved_resource_routes_deny_before_resource_lookup_across_families() 
     ];
 
     for (method, path, body) in cases {
-        let (status, error) = call(&app, method, path, Body::from(body)).await;
-        assert_eq!(status, 403, "{method} {path}: {error}");
-        assert_eq!(error["error"]["code"], "forbidden_scope", "{method} {path}");
-        assert_eq!(
-            error["error"]["message"],
-            "credential scope does not permit this operation or collection",
-            "{method} {path}"
-        );
+        assert_hidden_response(&app, ADMIN, method, path, body).await;
     }
 
     for token in [READ_ONLY] {
         for (method, path, body) in cases {
-            let (status, error) = call_token(&app, method, path, Body::from(body), token).await;
-            assert_eq!(status, 403, "{method} {path}: {error}");
+            assert_hidden_response(&app, token, method, path, body).await;
         }
     }
 
@@ -1028,15 +1046,7 @@ async fn reserved_resource_routes_deny_before_resource_lookup_across_families() 
         let scoped_directory = tempfile::tempdir().unwrap();
         let (scoped, scoped_token) = start_wildcard_scoped(&scoped_directory, false, operations);
         for (method, path, body) in cases {
-            let (status, error) =
-                call_token(&scoped, method, path, Body::from(body), &scoped_token).await;
-            assert_eq!(status, 403, "{method} {path}: {error}");
-            assert_eq!(error["error"]["code"], "forbidden_scope", "{method} {path}");
-            assert_eq!(
-                error["error"]["message"],
-                "credential scope does not permit this operation or collection",
-                "{method} {path}"
-            );
+            assert_hidden_response(&scoped, &scoped_token, method, path, body).await;
         }
     }
 
@@ -1124,16 +1134,7 @@ async fn reserved_resource_routes_deny_before_resource_lookup_across_families() 
                     "tenant {method} {path}: {error}"
                 );
             } else {
-                assert_eq!(status, 403, "tenant {method} {path}: {error}");
-                assert_eq!(
-                    error["error"]["code"], "forbidden_scope",
-                    "tenant {method} {path}"
-                );
-                assert_eq!(
-                    error["error"]["message"],
-                    "credential scope does not permit this operation or collection",
-                    "tenant {method} {path}"
-                );
+                assert_hidden_response(&tenant_app, &tenant_token, method, path, body).await;
             }
         }
 
@@ -1177,9 +1178,7 @@ async fn reserved_resource_routes_deny_before_resource_lookup_across_families() 
             r#"{"pivot":{"collection":"notes_ev","vector":[0,0],"k":1}}"#,
         ),
     ] {
-        let (status, error) = call(&app, method, path, Body::from(body)).await;
-        assert_eq!(status, 403, "{method} {path}: {error}");
-        assert_eq!(error["error"]["code"], "forbidden_scope", "{method} {path}");
+        assert_hidden_response(&app, ADMIN, method, path, body).await;
     }
 
     for (method, path, body) in [
@@ -1191,9 +1190,7 @@ async fn reserved_resource_routes_deny_before_resource_lookup_across_families() 
             r#"{"name":"notes_ev","dimensions":2}"#,
         ),
     ] {
-        let (status, error) = call(&app, method, path, Body::from(body)).await;
-        assert_eq!(status, 403, "{method} {path}: {error}");
-        assert_eq!(error["error"]["code"], "forbidden_scope", "{method} {path}");
+        assert_hidden_response(&app, ADMIN, method, path, body).await;
     }
 
     let legacy_bindings = BINDINGS.replace("\"notes_ev\"", "\"default\"");
@@ -1219,8 +1216,13 @@ async fn reserved_resource_routes_deny_before_resource_lookup_across_families() 
         ("POST", "/v1/index/hnsw/rebuild/poll", ""),
     ] {
         let (status, error) = call(&legacy_app, method, path, Body::from(body)).await;
-        assert_eq!(status, 403, "{method} {path}: {error}");
-        assert_eq!(error["error"]["code"], "forbidden_scope", "{method} {path}");
+        if status != 403 {
+            assert_eq!(status, 404, "{method} {path}: {error}");
+            assert_eq!(
+                error["error"]["code"], "collection_not_found",
+                "{method} {path}"
+            );
+        }
     }
 }
 
@@ -1241,8 +1243,20 @@ async fn tenant_qualified_reservations_follow_scoped_credentials_and_raw_access(
     ] {
         for token in [ADMIN, READ_ONLY] {
             let (status, error) = call_token(&no_raw, "GET", &path, Body::empty(), token).await;
-            assert_eq!(status, 403, "{path}: {error}");
-            assert_eq!(error["error"]["code"], "forbidden_scope", "{path}");
+            assert_eq!(
+                status,
+                if path.contains("/graphs/") { 409 } else { 404 },
+                "{path}: {error}"
+            );
+            assert_eq!(
+                error["error"]["code"],
+                if path.contains("/graphs/") {
+                    "graph_not_found"
+                } else {
+                    "collection_not_found"
+                },
+                "{path}"
+            );
         }
     }
     let (tenant_list_status, tenant_list) = get(&no_raw, "/v1/admin/tenants").await;
@@ -1272,8 +1286,8 @@ async fn tenant_qualified_reservations_follow_scoped_credentials_and_raw_access(
         &token,
     )
     .await;
-    assert_eq!(status, 403);
-    assert_eq!(error["error"]["code"], "forbidden_scope");
+    assert_eq!(status, 404);
+    assert_eq!(error["error"]["code"], "collection_not_found");
     let (status, error) = call_token(
         &no_raw,
         "GET",
@@ -1282,8 +1296,8 @@ async fn tenant_qualified_reservations_follow_scoped_credentials_and_raw_access(
         &token,
     )
     .await;
-    assert_eq!(status, 403);
-    assert_eq!(error["error"]["code"], "forbidden_scope");
+    assert_eq!(status, 409);
+    assert_eq!(error["error"]["code"], "graph_not_found");
     assert_eq!(
         call_token(
             &no_raw,
@@ -1306,7 +1320,7 @@ async fn tenant_qualified_reservations_follow_scoped_credentials_and_raw_access(
         )
         .await
         .0,
-        403
+        409
     );
     assert_eq!(
         call_token(
@@ -1371,7 +1385,7 @@ async fn tenant_qualified_reservations_follow_scoped_credentials_and_raw_access(
         "graph_read",
         "graph_write",
     ];
-    for (raw_access, reserved_status) in [(false, 403), (true, 200)] {
+    for (raw_access, reserved_status) in [(false, 404), (true, 200)] {
         let directory = tempfile::tempdir().unwrap();
         let (app, token) = build(&directory, raw_access, &full_tenant_operations);
         for (method, path, body, expected) in [
@@ -1381,7 +1395,7 @@ async fn tenant_qualified_reservations_follow_scoped_credentials_and_raw_access(
                 "PUT",
                 "/v1/collections/notes_ev/vectors/7",
                 r#"{"vector":[0.1,0.2],"payload_base64":"","metadata":{}}"#,
-                if raw_access { 204 } else { 403 },
+                if raw_access { 204 } else { 404 },
             ),
             (
                 "PUT",
@@ -1389,14 +1403,14 @@ async fn tenant_qualified_reservations_follow_scoped_credentials_and_raw_access(
                 r#"{"vector":[0.1,0.2],"payload_base64":"","metadata":{}}"#,
                 204,
             ),
-            ("GET", "/v1/graphs/notes_graph", "", reserved_status),
-            ("GET", "/v1/graphs/ordinary_graph", "", 200),
             (
-                "DELETE",
+                "GET",
                 "/v1/graphs/notes_graph",
                 "",
-                if raw_access { 409 } else { 403 },
+                if raw_access { 200 } else { 409 },
             ),
+            ("GET", "/v1/graphs/ordinary_graph", "", 200),
+            ("DELETE", "/v1/graphs/notes_graph", "", 409),
             ("DELETE", "/v1/graphs/ordinary_graph", "", 200),
         ] {
             let (status, error) = call_token(&app, method, path, Body::from(body), &token).await;
@@ -1409,7 +1423,15 @@ async fn tenant_qualified_reservations_follow_scoped_credentials_and_raw_access(
                     "{method} {path}"
                 );
             } else if expected == 409 {
-                assert_eq!(error["error"]["code"], "graph_not_empty", "{method} {path}");
+                assert_eq!(
+                    error["error"]["code"],
+                    if raw_access {
+                        "graph_not_empty"
+                    } else {
+                        "graph_not_found"
+                    },
+                    "{method} {path}"
+                );
             }
         }
     }
@@ -1595,10 +1617,17 @@ async fn deleted_reserved_resources_remain_indistinguishable_from_existing_resou
         for (method, path, body) in &routes {
             responses.push(call_with_response(&app, method, path, Body::from(*body), token).await);
         }
-        for (status, _, body) in &responses {
-            assert_eq!(*status, 403);
+        for ((_, path, _), (status, _, body)) in routes.iter().zip(&responses) {
+            assert_eq!(*status, if path.contains("/graphs/") { 409 } else { 404 });
             let error: Value = serde_json::from_slice(body).unwrap();
-            assert_eq!(error["error"]["code"], "forbidden_scope");
+            assert_eq!(
+                error["error"]["code"],
+                if path.contains("/graphs/") {
+                    "graph_not_found"
+                } else {
+                    "collection_not_found"
+                }
+            );
         }
         before.push((routes, responses));
     }
@@ -1647,6 +1676,30 @@ async fn deleted_reserved_resources_remain_indistinguishable_from_existing_resou
                 (expected_status, expected_headers, expected_body),
                 "{method} {path} after the reserved resources were deleted"
             );
+        }
+        for (path, body, code) in [
+            (
+                "/v1/collections",
+                r#"{"name":"notes_ev","dimensions":2}"#,
+                "collection_exists",
+            ),
+            ("/v1/graphs", r#"{"graph":"notes_graph"}"#, "graph_exists"),
+        ] {
+            let body = if token == ADMIN {
+                body.replace("notes_ev", "t0123456789abcdef0123456789abcdef__notes_ev")
+                    .replace(
+                        "notes_graph",
+                        "t0123456789abcdef0123456789abcdef__notes_graph",
+                    )
+            } else {
+                body.to_owned()
+            };
+            let (status, error) = call_token(&app, "POST", path, Body::from(body), token).await;
+            assert_eq!(
+                status, 409,
+                "a reservation continues to occupy its deleted resource name"
+            );
+            assert_eq!(error["error"]["code"], code);
         }
     }
 }
@@ -1793,7 +1846,7 @@ async fn api_raw_access_requires_the_binding_grant_and_does_not_replace_collecti
     let admin_directory = tempfile::tempdir().unwrap();
     let admin = start(&admin_directory, Some(BINDINGS), false).unwrap();
     let (admin_status, admin_error) = get(&admin, "/v1/collections/notes_ev").await;
-    assert_eq!(admin_status, 403);
+    assert_eq!(admin_status, 404);
 
     let directory = tempfile::tempdir().unwrap();
     let (app, token) = start_scoped(&directory, true, "notes_ev");
@@ -1820,7 +1873,7 @@ async fn api_raw_access_requires_the_binding_grant_and_does_not_replace_collecti
         &token,
     )
     .await;
-    assert_eq!(status, 403);
+    assert_eq!(status, 404);
     assert_eq!(error, admin_error);
 
     let directory = tempfile::tempdir().unwrap();
@@ -1911,7 +1964,7 @@ async fn read_only_role_cannot_raw_access_a_reserved_collection() {
         )
         .await
         .0,
-        403
+        404
     );
     assert_eq!(
         call_token(

@@ -231,18 +231,6 @@ async fn create(
 ) -> Result<(StatusCode, Json<Value>), ApiError> {
     let input = body(input)?;
     validate(&input)?;
-    let reserved = service.memory_bindings.reserved();
-    if input.collections.as_ref().is_some_and(|names| {
-        names
-            .iter()
-            .any(|name| reserved.is_reserved(super::reserved::Resource::Collection, name))
-    }) || input.graphs.as_ref().is_some_and(|names| {
-        names
-            .iter()
-            .any(|name| reserved.is_reserved(super::reserved::Resource::Graph, name))
-    }) {
-        return Err(super::forbidden_scope());
-    }
     if service
         .webhooks
         .directory

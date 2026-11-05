@@ -61,6 +61,7 @@ impl Reserved {
     }
 
     /// Whether `stored` is reserved by a binding (active or retired).
+    #[cfg(test)]
     pub(super) fn is_reserved(&self, resource: Resource, stored: &str) -> bool {
         self.owner(resource, stored).is_some()
     }

@@ -1846,7 +1846,7 @@ fn open_inner(
             .reserved()
             .raw_allowed(credential, reserved::Resource::Collection, name)
     }) {
-        return Err(forbidden_scope());
+        return Err(Error::CollectionNotFound.into());
     }
     let collection = db.resolve(name)?;
     if let admin::Role::Scoped(grant) = role
@@ -1996,6 +1996,13 @@ async fn info(
     State(service): State<Service>,
     Extension(role): Extension<admin::Role>,
 ) -> Result<Json<Value>, ApiError> {
+    if !service.memory_bindings.reserved().raw_allowed(
+        raw_credential(&role),
+        reserved::Resource::Collection,
+        &tenants::qualify(&role, "default"),
+    ) {
+        return Err(forbidden_scope());
+    }
     let bindings = service.memory_bindings.clone();
     service
         .run_read(move |db| {
