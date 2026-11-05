@@ -1049,12 +1049,19 @@ fn mutate_indexed_rows(db: &mut crate::Database, expiry: u64) {
 
 #[test]
 fn compact_named_vector_visibility_matches_resident() {
+    for name in ["full", "half"] {
+        named_vector_visibility_matches_resident(name);
+    }
+}
+
+/// One collection of the fixture: `full` is float32 and `half` float16.
+fn named_vector_visibility_matches_resident(name: &str) {
     let _gates = gates();
     let (mut candidate, mut oracle, _) = compact_dispatch_fixture(false);
     for db in [&mut candidate, &mut oracle] {
-        let collection_id = db.collection("full").unwrap().id();
+        let collection_id = db.collection(name).unwrap().id();
         {
-            let mut collection = db.collection_mut("full").unwrap();
+            let mut collection = db.collection_mut(name).unwrap();
             collection.delete(10).unwrap();
             collection
                 .put_with_expiry(
@@ -1085,9 +1092,9 @@ fn compact_named_vector_visibility_matches_resident() {
         );
     }
 
-    assert_compact_resident_pair(&candidate, &oracle, "full");
-    let actual = candidate.collection("full").unwrap();
-    let expected = oracle.collection("full").unwrap();
+    assert_compact_resident_pair(&candidate, &oracle, name);
+    let actual = candidate.collection(name).unwrap();
+    let expected = oracle.collection(name).unwrap();
     for now_ms in [19, 20] {
         let hits = actual
             .search_named_at("n", None, &[0.3, -0.0], 10, now_ms)
