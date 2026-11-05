@@ -23,25 +23,45 @@ The key-value visitor (`visit_at`, `list_at`) is lane K71's code and has no `v0.
 with the revision given by --kv-base (default: the commit that carries K71's visitor, 75921271), and the edits listed are
 the part that lane A4 adds on top of it.
 
+On a tree that integrates other lanes (--integration) the other lanes' own changes show up in the same files. The default
+mode, which is the one for lane A4's branch, stays as strict as above. With --integration, and one --lane NAME=RANGE for
+each other lane:
+
+* a shipped function that no site covers is accepted when the range of a lane adds, changes or removes it; it is listed
+  as `owned by lane X, not checked here`. A function that differs from the baseline and that no site and no lane range
+  covers still fails;
+* the `cfg(not(test))` attribute count of a file may differ by what the lane ranges that change the file add or remove;
+* a site may carry named integration edits (Site.integration_edits): the change that another lane makes to a function
+  of a site. They are optional alternatives, so the mode also passes on a tree that does not hold that lane, and they
+  are applied only here.
+
+Lane A4's own range is never passed as a lane. A range is A..B (what B changes since A), A...B (since the merge base of A
+and B) or REV (what REV changes since --base).
+
 Standard library only. Run it from the repository root of the tree under test:
 
     python scripts/shadow_copy_check.py                  # exit 0 when every check holds
     python scripts/shadow_copy_check.py --base v0.7.0    # another baseline revision
     python scripts/shadow_copy_check.py --kv-base REV    # the revision that holds K71's visitor as K71 left it
+    python scripts/shadow_copy_check.py --integration --lane G71=v0.7.0..origin/BRANCH --lane K71=...
     python scripts/shadow_copy_check.py --dump NAME      # the shipped text and the baseline diff of one site
     python scripts/shadow_copy_check.py --self-test      # the checks of the checker
 
-The baseline revisions have to exist (`git fetch --tags` in a shallow clone). The script stops with exit code 2 when it
-cannot read a file at a baseline, and with 1 when a check fails.
+The baseline revisions (and the lane revisions) have to exist (`git fetch --tags` in a shallow clone). The script stops
+with exit code 2 when it cannot read a file at a baseline or a range of a lane, and with 1 when a check fails.
 """
 
 import argparse
 import collections
 import difflib
+import os
 import posixpath
 import re
+import shutil
+import stat
 import subprocess
 import sys
+import tempfile
 from dataclasses import dataclass, field
 
 OPEN = {"(": ")", "[": "]", "{": "}"}
@@ -648,6 +668,7 @@ class Site:
     base_fn: object = None  # the name at the baseline when it differs
     base_ref: str = "base"  # "base" (--base) or "kv" (--kv-base, K71's visitor)
     edits: tuple = ()  # named exceptions that turn the baseline text into the shipped text
+    integration_edits: tuple = ()  # what another lane changes in the function; optional, and only with --integration
     expect: object = None  # a new function: its exact shipped text
     test_only: bool = False  # must exist, and only under cfg(test)
     shadows: int = 0  # `#[cfg(not(test))]` attributes the function holds
@@ -657,6 +678,7 @@ KV_ACQUIRE = "the residency check is made by `acquire`, which is `ensure_residen
 KV_PHYSICAL = "a record is read through `get_physical`, whose resident arm is the map lookup it replaces"
 CLOCK = "retrieve.rs read clock: the pivot search, the pivot re-validation and the evidence read at the graph's clock"
 RESIDENT_AT = "the resident search takes the one clock that `search_hybrid` captures"
+G71_VISIBLE = "lane G71: the collection closure resolves the visible collection in one call (`Database::resolve_visible`)"
 
 SITES = [
     # key-value reads: kv.rs acquire / rows / get_physical
@@ -790,6 +812,13 @@ SITES = [
                 CLOCK,
             ),
         ),
+        integration_edits=(
+            Edit(
+                "if !visible(name) { return Err(Error::CollectionNotFound); } db.collection(name)",
+                "db.resolve_visible(name, visible).map(|id| crate::CollectionRef { db, id })",
+                G71_VISIBLE,
+            ),
+        ),
     ),
     # hybrid search
     Site(
@@ -899,15 +928,24 @@ OTHER_CHANGES = [
 ]
 
 
+@dataclass(frozen=True)
+class Lane:
+    """Another lane of an integrated tree: what its commits change is that lane's to check (see --integration)."""
+
+    name: str
+    start: str
+    end: str
+
+
 # ---------------------------------------------------------------------------------------------------- the checks
 
 
 class Repo:
-    """Reads the tree under test from disk and the baselines from git."""
+    """Reads the tree under test from disk and the baselines (and the ranges of other lanes) from git."""
 
-    def __init__(self, root, base, kv_base):
-        self.root, self.base, self.kv_base = root, base, kv_base
-        self.cache = {}
+    def __init__(self, root, base, kv_base, lanes=()):
+        self.root, self.base, self.kv_base, self.lanes = root, base, kv_base, tuple(lanes)
+        self.cache, self.lane_cache = {}, {}
 
     def git(self, *args):
         return subprocess.run(["git", *args], cwd=self.root, capture_output=True)
@@ -950,6 +988,69 @@ class Repo:
     def revision(self, ref):
         return self.kv_base if ref == "kv" else self.base
 
+    def lane(self, spec):
+        """A Lane from `NAME=A..B`, `NAME=A...B` (from the merge base of A and B) or `NAME=REV` (since the baseline)."""
+        name, eq, rng = spec.partition("=")
+        if not (eq and name and rng):
+            raise ValueError("a lane is NAME=RANGE, for example G71=v0.7.0..origin/BRANCH (got %r)" % spec)
+        start, dots, end = rng.partition("...") if "..." in rng else rng.partition("..")
+        if not dots:
+            start, end = self.base, rng
+        if not (start and end):
+            raise ValueError("the range of lane %s needs both ends (got %r)" % (name, rng))
+        if dots == "...":
+            proc = self.git("merge-base", start, end)
+            if proc.returncode:
+                raise Unreadable("cannot find the merge base of %s for lane %s: %s" % (rng, name, proc.stderr.decode(errors="replace").strip()))
+            start = proc.stdout.decode().strip()
+        return Lane(name, start, end)
+
+    def lane_files(self, lane):
+        """The Rust files of src that the range of a lane changes."""
+        key = (lane, None)
+        if key not in self.lane_cache:
+            proc = self.git("diff", "--name-only", "--no-renames", lane.start, lane.end, "--", "src")
+            if proc.returncode:
+                raise Unreadable(
+                    "cannot compare %s with %s for lane %s: %s (is the revision fetched?)"
+                    % (lane.start, lane.end, lane.name, proc.stderr.decode(errors="replace").strip())
+                )
+            self.lane_cache[key] = {p for p in proc.stdout.decode().split("\n") if p.endswith(".rs")}
+        return self.lane_cache[key]
+
+    def lane_keys(self, lane, path):
+        """The (impl header, name) of the shipped functions that the range of a lane adds, changes or removes in a file."""
+        key = (lane, path)
+        if key not in self.lane_cache:
+
+            def shipped(rev):
+                return shipped_map(self.tokens(rev, path)) if self.exists(rev, path) else {}
+
+            diffs = function_diffs(shipped(lane.start), shipped(lane.end))
+            self.lane_cache[key] = {(header, name) for (header, name, _), _kind in diffs}
+        return self.lane_cache[key]
+
+    def owners(self, path, header, name):
+        """The names of the lanes whose range adds, changes or removes this function."""
+        return [l.name for l in self.lanes if path in self.lane_files(l) and (header, name) in self.lane_keys(l, path)]
+
+    def not_test_count(self, rev, path):
+        """The cfg(not(test)) attributes of a file at a revision (None: the tree under test)."""
+        if rev is not None and not self.exists(rev, path):
+            return 0
+        text = self.read(path) if rev is None else self.show(rev, path)
+        return count_not_test(tokenize(text)) if NOT_TEST.search(text) else 0
+
+    def lane_count_deltas(self, path):
+        """[(lane name, change of the cfg(not(test)) attribute count)] of the lanes whose range changes a file."""
+        out = []
+        for lane in self.lanes:
+            if path in self.lane_files(lane):
+                delta = self.not_test_count(lane.end, path) - self.not_test_count(lane.start, path)
+                if delta:
+                    out.append((lane.name, delta))
+        return out
+
 
 def render(toks):
     lines, cur = [], []
@@ -982,8 +1083,8 @@ def apply_edits(toks, edits):
     return toks, problems
 
 
-def check_site(repo, site):
-    """(ok, report lines) for one site."""
+def check_site(repo, site, integration=False):
+    """(ok, report lines) for one site; integration=True also accepts the site's integration edits (another lane's change)."""
     label = "%s::%s" % (site.file, site.fn)
     head = repo.tokens(None, site.file)
     cands = pick(scan(head)[0], site.fn, site.impl)
@@ -1025,6 +1126,16 @@ def check_site(repo, site):
         want, edit_problems = apply_edits(shipped_text(base_toks, base_cands[0]), site.edits)
         problems += edit_problems
         note = "equals %s%s" % (rev, " with %d named edit(s)" % len(site.edits) if site.edits else "")
+        if integration:
+            used = [e for e in site.integration_edits if find_sub(got, normalize(tokenize(e.new)))]
+            if used:
+                want, more = apply_edits(want, used)
+                problems += more
+                note += " and %d integration edit(s) (%s)" % (len(used), "; ".join(e.why for e in used))
+            for edit in site.integration_edits:
+                # an edit that the tree does not use has to stay well formed, so that a stale one is found early
+                if edit not in used and len(find_sub(want, normalize(tokenize(edit.old)))) != 1:
+                    problems.append("the integration edit [%s] does not match once in the baseline text" % edit.why)
     if got != want:
         problems.append("the shipped text is not the expected one:")
         lines += ["    " + d for d in difflib.unified_diff(render(want), render(got), "expected", "shipped", lineterm="", n=2)]
@@ -1040,58 +1151,98 @@ def covers(site_file, site_impl, site_fn, path, header, name):
     return header is None if site_impl is None else header is not None and re.search(site_impl, header) is not None
 
 
-def check_coverage(repo, shipped):
-    """Every shipped function of a changed file that differs from the baseline is covered by a site or listed."""
-    problems, covered = [], 0
+def function_diffs(base, head):
+    """The functions that are new, changed or gone between two shipped maps: ((impl header, name, occurrence), kind)."""
+    diffs = [(k, "NEW" if k not in base else "CHANGED") for k, v in head.items() if base.get(k) != v]
+    diffs += [(k, "REMOVED") for k in base if k not in head]
+    return diffs
+
+
+def check_coverage(repo, shipped, integration=False, sites=None, other=None):
+    """Every shipped function of a changed file that differs from the baseline is covered by a site or listed.
+
+    With integration=True a function that no site covers is also accepted when the range of another lane changes it (and
+    a function that is gone, when the range of a lane removes it); it is listed as owned by that lane, not checked."""
+    sites = SITES if sites is None else sites
+    other = OTHER_CHANGES if other is None else other
+    problems, owned, covered = [], [], 0
+    per_lane = collections.Counter()
     for path in repo.changed(repo.base):
         if path not in shipped:
             continue
         head = shipped_map(repo.tokens(None, path))
         base = shipped_map(repo.tokens(repo.base, path)) if repo.exists(repo.base, path) else {}
-        diffs = [(k, "NEW" if k not in base else "CHANGED") for k, v in head.items() if base.get(k) != v]
-        diffs += [(k, "REMOVED") for k in base if k not in head]
-        for (header, name, _), kind in diffs:
-            by_site = any(covers(s.file, s.impl, s.fn, path, header, name) for s in SITES)
-            by_list = any(covers(f, i, n, path, header, name) for f, i, n, _ in OTHER_CHANGES)
-            if kind == "REMOVED" or not (by_site or by_list):
-                problems.append("FAIL %s: %s function %s%s is not covered by a site or by OTHER_CHANGES" % (path, kind, (header + " :: ") if header else "", name))
-            else:
+        for (header, name, _), kind in function_diffs(base, head):
+            by_site = any(covers(s.file, s.impl, s.fn, path, header, name) for s in sites)
+            by_list = any(covers(f, i, n, path, header, name) for f, i, n, _ in other)
+            label = "%s function %s%s" % (kind, (header + " :: ") if header else "", name)
+            if kind != "REMOVED" and (by_site or by_list):
                 covered += 1
+                continue
+            lanes = repo.owners(path, header, name) if integration else []
+            if lanes:
+                owned.append("own  %s: %s is owned by lane %s, not checked here" % (path, label, ", ".join(lanes)))
+                per_lane.update(lanes)
+            elif integration:
+                problems.append("FAIL %s: %s is not covered by a site, by OTHER_CHANGES or by the range of a lane" % (path, label))
+            else:
+                problems.append("FAIL %s: %s is not covered by a site or by OTHER_CHANGES" % (path, label))
     if problems:
-        return False, problems
+        return False, owned + problems
+    if integration:
+        by_lane = ", ".join("%s %d" % item for item in sorted(per_lane.items())) or "none"
+        return True, owned + [
+            "ok   coverage: %d shipped function(s) differ from %s; %d are covered by a site or a listed change and %d are owned by other lanes, not checked here (%s)"
+            % (covered + len(owned), repo.base, covered, len(owned), by_lane)
+        ]
     return True, ["ok   coverage: %d shipped function(s) differ from %s and every one is covered by a site or a listed change" % (covered, repo.base)]
 
 
-def check_shadow_counts(repo):
-    """Per file, the cfg(not(test)) attributes of the tree are the baseline's plus the shadow sites of the list."""
+def check_shadow_counts(repo, integration=False, sites=None):
+    """Per file, the cfg(not(test)) attributes of the tree are the baseline's plus the shadow sites of the list.
+
+    With integration=True the range of a lane that changes a file also accounts for what it adds or removes there."""
+    sites = SITES if sites is None else sites
     accounted = collections.Counter()
-    for site in SITES:
+    for site in sites:
         accounted[site.file] += site.shadows
-    problems = []
+    problems, owned = [], []
     head_files = {p for p in repo.files() if NOT_TEST.search(repo.read(p))}
     base_files = repo.files_with_not_test(repo.base)
     for path in sorted(head_files | base_files | set(accounted)):
         head = count_not_test(repo.tokens(None, path)) if path in head_files else 0
         before = count_not_test(repo.tokens(repo.base, path)) if path in base_files else 0
-        if head != before + accounted.get(path, 0):
+        want = before + accounted.get(path, 0)
+        deltas = repo.lane_count_deltas(path) if integration and head != want else []
+        if deltas:
+            owned.append(
+                "own  %s: the cfg(not(test)) attribute count changes in the range of %s, not checked here"
+                % (path, ", ".join("lane %s (%+d)" % item for item in deltas))
+            )
+        lanes = sum(d for _, d in deltas)
+        if head != want + lanes:
+            extra = " + %d of the lane ranges" % lanes if deltas else ""
             problems.append(
-                "FAIL %s: %d cfg(not(test)) attributes, expected %d (baseline %d + %d shadow site(s))"
-                % (path, head, before + accounted.get(path, 0), before, accounted.get(path, 0))
+                "FAIL %s: %d cfg(not(test)) attributes, expected %d (baseline %d + %d shadow site(s)%s)"
+                % (path, head, want + lanes, before, accounted.get(path, 0), extra)
             )
     if problems:
-        return False, problems
-    return True, ["ok   cfg(not(test)) attributes: the baseline's plus the %d shadow site(s) of the list" % sum(accounted.values())]
+        return False, owned + problems
+    return True, owned + ["ok   cfg(not(test)) attributes: the baseline's plus the %d shadow site(s) of the list" % sum(accounted.values())]
 
 
-def run(repo, only=None):
+def run(repo, only=None, integration=False):
     ok, report = True, []
+    if integration:
+        ranges = "; ".join("lane %s = %s..%s" % (l.name, l.start, l.end) for l in repo.lanes)
+        report.append("integration mode: " + (ranges or "no lane range given, so only the named integration edits apply"))
     for site in SITES:
         if only is None or only == site.name:
-            good, lines = check_site(repo, site)
+            good, lines = check_site(repo, site, integration)
             ok, report = ok and good, report + lines
     if only is None:
         shipped = shipped_files(repo.files(), repo.read)
-        for good, lines in (check_coverage(repo, shipped), check_shadow_counts(repo)):
+        for good, lines in (check_coverage(repo, shipped, integration), check_shadow_counts(repo, integration)):
             ok, report = ok and good, report + lines
     return ok, report
 
@@ -1161,6 +1312,235 @@ mod outer {
 }
 fn free(a: u8) -> u8 { a }
 '''
+
+
+class FakeRepo:
+    """Just enough of Repo for check_site: the text of one file in the tree and at the baseline, from memory."""
+
+    base, kv_base = "BASE", "KV"
+
+    def __init__(self, head, base):
+        self.texts = {None: head, "BASE": base}
+
+    def tokens(self, rev, path):
+        return tokenize(self.texts[rev])
+
+    def revision(self, ref):
+        return "BASE"
+
+
+def remove_tree(path):
+    """Delete a directory tree that holds a git repository (its objects are read-only on Windows)."""
+
+    def writable(func, target, _error):
+        os.chmod(target, stat.S_IWRITE)
+        func(target)
+
+    try:
+        shutil.rmtree(path, onexc=writable)
+    except TypeError:  # Python before 3.12
+        shutil.rmtree(path, onerror=writable)
+
+
+# One function of a site at the baseline, with another lane's change to it, and with a second change next to that one.
+LANE_OLD = "impl T { fn f(&self) { let c = |n: &str| { if !ok(n) { return Err(E::Gone); } db.get(n) }; run(c); } }"
+LANE_NEW = "impl T { fn f(&self) { let c = |n: &str| { db.resolve(n, ok).map(|id| R { db, id }) }; run(c); } }"
+LANE_MORE = "impl T { fn f(&self) { let c = |n: &str| { db.resolve(n, ok).map(|id| R { db, id }) }; run(c); more(); } }"
+LANE_EDIT = Edit(
+    "if !ok(n) { return Err(E::Gone); } db.get(n)",
+    "db.resolve(n, ok).map(|id| R { db, id })",
+    "lane Z: the closure resolves in one call",
+)
+LANE_STALE = Edit(
+    "if !ok(n) { return Err(E::Missing); } db.get(n)",
+    "db.resolve(n, ok).map(|id| R { db, id })",
+    "lane Z: an edit that no longer matches the baseline",
+)
+
+
+def self_test_sites(expect):
+    """The named integration edits: optional, applied only with --integration, and kept well formed."""
+    site = Site("t", "src/t.rs", "f", r"impl T", integration_edits=(LANE_EDIT,))
+    stale = Site("t", "src/t.rs", "f", r"impl T", integration_edits=(LANE_STALE,))
+
+    def check(head, which, integration):
+        return check_site(FakeRepo(head, LANE_OLD), which, integration)
+
+    expect("default mode: the baseline text passes", check(LANE_OLD, site, False)[0], True)
+    expect("default mode: another lane's change is refused", check(LANE_NEW, site, False)[0], False)
+    good, lines = check(LANE_NEW, site, True)
+    expect(
+        "integration mode: the named integration edit is accepted and reported with its reason",
+        (good, "1 integration edit(s)" in lines[0], "lane Z" in lines[0]),
+        (True, True, True),
+    )
+    expect("integration mode: the edit is optional, a tree without that lane passes", check(LANE_OLD, site, True)[0], True)
+    expect("integration mode: a second change next to the edit fails", check(LANE_MORE, site, True)[0], False)
+    good, lines = check(LANE_OLD, stale, True)
+    expect(
+        "integration mode: a stale edit is found even when the tree does not use it",
+        (good, any("does not match once" in line for line in lines)),
+        (False, True),
+    )
+    expect("default mode: a stale integration edit is not looked at", check(LANE_OLD, stale, False)[0], True)
+
+
+def self_test_lanes(expect, raises):
+    """Ownership of a function by the range of another lane, with a throwaway git repository."""
+    tmp = tempfile.mkdtemp(prefix="shadow-self-test-")
+    try:
+
+        def git(*args):
+            proc = subprocess.run(
+                ["git", "-c", "user.name=self-test", "-c", "user.email=self-test@example.invalid", "-c", "core.autocrlf=false", *args],
+                cwd=tmp,
+                capture_output=True,
+            )
+            if proc.returncode:
+                raise RuntimeError("git %s failed: %s" % (" ".join(args), proc.stderr.decode(errors="replace")))
+            return proc.stdout.decode().strip()
+
+        def commit(files, message):
+            for path, text in files.items():
+                full = os.path.join(tmp, *path.split("/"))
+                os.makedirs(os.path.dirname(full), exist_ok=True)
+                with open(full, "w", encoding="utf-8", newline="\n") as handle:
+                    handle.write(text)
+            git("add", "-A")
+            git("commit", "-q", "--no-verify", "-m", message)
+            return git("rev-parse", "HEAD")
+
+        git("init", "-q")
+        base = commit(
+            {
+                "src/lib.rs": "mod a;\nmod b;\npub fn keep() -> u8 { 1 }\n",
+                "src/a.rs": "pub fn f() -> u8 { 1 }\npub fn g() -> u8 { 2 }\n",
+                "src/b.rs": "pub fn h() -> u8 { 3 }\npub fn old() {}\n",
+            },
+            "base",
+        )
+        a_with_gated = "#[cfg(not(test))]\npub fn gated() {}\n"
+        lane_g = commit({"src/a.rs": "pub fn f() -> u8 { 10 }\npub fn g() -> u8 { 2 }\n" + a_with_gated}, "lane G: f and a gated function")
+        git("checkout", "-q", base)
+        lane_k = commit({"src/b.rs": "pub fn h() -> u8 { 30 }\npub fn extra() {}\n"}, "lane K: h, extra, and old is gone")
+        git("checkout", "-q", base)
+        # the tree: both lanes' changes, and a change to g that the range of no lane makes
+        commit(
+            {
+                "src/a.rs": "pub fn f() -> u8 { 10 }\npub fn g() -> u8 { 20 }\n" + a_with_gated,
+                "src/b.rs": "pub fn h() -> u8 { 30 }\npub fn extra() {}\n",
+            },
+            "tree",
+        )
+        tree = git("rev-parse", "HEAD")
+
+        def repo_with(*specs):
+            repo = Repo(tmp, base, base)
+            repo.lanes = tuple(repo.lane(spec) for spec in specs)
+            return repo
+
+        def coverage(repo, integration, sites=()):
+            return check_coverage(repo, shipped_files(repo.files(), repo.read), integration, sites=sites, other=())
+
+        both = ("G=%s..%s" % (base, lane_g), "K=%s...%s" % (base, lane_k))
+        every_function = [
+            "src/a.rs: CHANGED function f",
+            "src/a.rs: CHANGED function g",
+            "src/a.rs: NEW function gated",
+            "src/b.rs: CHANGED function h",
+            "src/b.rs: NEW function extra",
+            "src/b.rs: REMOVED function old",
+        ]
+        default_lines = ["FAIL %s is not covered by a site or by OTHER_CHANGES" % each for each in every_function]
+        good, lines = coverage(repo_with(), False)
+        expect("default mode: every changed function is uncovered, with the unchanged message", (good, lines), (False, default_lines))
+        good, lines = coverage(repo_with(*both), False)
+        expect("default mode: lane ranges are not looked at", (good, lines), (False, default_lines))
+        ranged = ["FAIL %s is not covered by a site, by OTHER_CHANGES or by the range of a lane" % each for each in every_function]
+        good, lines = coverage(repo_with(), True)
+        expect("integration mode without a lane range fails like the default mode", (good, lines), (False, ranged))
+        good, lines = coverage(repo_with(*both), True)
+        owned = [line for line in lines if line.startswith("own  ")]
+        expect(
+            "integration mode: only the function that no lane range changes fails",
+            (good, [line for line in lines if line.startswith("FAIL")]),
+            (False, [ranged[1]]),
+        )
+        expect(
+            "integration mode: the other functions are listed as owned by their lane, not checked (a removed one too)",
+            owned,
+            [
+                "own  src/a.rs: CHANGED function f is owned by lane G, not checked here",
+                "own  src/a.rs: NEW function gated is owned by lane G, not checked here",
+                "own  src/b.rs: CHANGED function h is owned by lane K, not checked here",
+                "own  src/b.rs: NEW function extra is owned by lane K, not checked here",
+                "own  src/b.rs: REMOVED function old is owned by lane K, not checked here",
+            ],
+        )
+        good, lines = coverage(repo_with(*both, "X=" + tree), True)
+        expect(
+            "integration mode: a lane whose range (REV, since the baseline) changes everything leaves nothing uncovered",
+            (good, len([line for line in lines if line.startswith("own  ")]), "6 are owned by other lanes" in lines[-1]),
+            (True, 6, True),
+        )
+        expect("a function is owned by every lane that changes it", "owned by lane G, X, not checked here" in "\n".join(lines), True)
+        good, lines = coverage(repo_with(), False, sites=(Site("s", "src/b.rs", "old"),))
+        expect(
+            "a function that is gone is never covered by a site",
+            "FAIL src/b.rs: REMOVED function old is not covered by a site or by OTHER_CHANGES" in lines,
+            True,
+        )
+        good, lines = coverage(repo_with("K=%s..%s" % (base, lane_k)), True, sites=(Site("s", "src/b.rs", "old"),))
+        expect(
+            "in the integration mode a function that is gone needs the lane that removes it, a site is not enough",
+            ("own  src/b.rs: REMOVED function old is owned by lane K, not checked here" in lines, good),
+            (True, False),
+        )
+        good, lines = coverage(repo_with("K=%s...%s" % (lane_g, lane_k)), True)
+        expect(
+            "A...B starts at the merge base of A and B: the lane owns what its own commits change, not what A has",
+            (good, [line.split(" is owned")[0] for line in lines if line.startswith("own  ")]),
+            (False, ["own  src/b.rs: CHANGED function h", "own  src/b.rs: NEW function extra", "own  src/b.rs: REMOVED function old"]),
+        )
+        raises_unreadable = False
+        try:
+            coverage(repo_with("Z=%s..no-such-revision" % base), True)
+        except Unreadable:
+            raises_unreadable = True
+        expect("a lane range that cannot be read stops the script", raises_unreadable, True)
+        for bad in ("nonsense", "N=", "N=%s.." % base, "N=..%s" % base, "=%s" % base):
+            try:
+                repo_with(bad)
+                expect("a malformed lane %r is refused" % bad, "accepted", "refused")
+            except ValueError:
+                pass
+        # the cfg(not(test)) attribute count: the lane that adds an attribute accounts for it
+        good, lines = check_shadow_counts(repo_with(), False, sites=())
+        expect(
+            "default mode: an added cfg(not(test)) attribute fails, with the unchanged message",
+            (good, lines),
+            (False, ["FAIL src/a.rs: 1 cfg(not(test)) attributes, expected 0 (baseline 0 + 0 shadow site(s))"]),
+        )
+        good, lines = check_shadow_counts(repo_with(*both), False, sites=())
+        expect(
+            "default mode: lane ranges do not account for an added attribute",
+            (good, lines),
+            (False, ["FAIL src/a.rs: 1 cfg(not(test)) attributes, expected 0 (baseline 0 + 0 shadow site(s))"]),
+        )
+        good, lines = check_shadow_counts(repo_with(*both), True, sites=())
+        expect(
+            "integration mode: the lane that adds the attribute accounts for it",
+            (good, lines[0]),
+            (True, "own  src/a.rs: the cfg(not(test)) attribute count changes in the range of lane G (+1), not checked here"),
+        )
+        good, lines = check_shadow_counts(repo_with("K=%s..%s" % (base, lane_k)), True, sites=())
+        expect(
+            "integration mode: a lane that does not change the file does not account for it",
+            (good, lines),
+            (False, ["FAIL src/a.rs: 1 cfg(not(test)) attributes, expected 0 (baseline 0 + 0 shadow site(s))"]),
+        )
+    finally:
+        remove_tree(tmp)
 
 
 def self_test():
@@ -1270,6 +1650,8 @@ def self_test():
         ["src/a.rs", "src/a/inner.rs", "src/bin/tool.rs", "src/c.rs", "src/lib.rs", "src/x/y.rs"],
     )
     raises("an unresolved module", lambda: shipped_files(["src/lib.rs"], {"src/lib.rs": "mod missing;"}.__getitem__))
+    self_test_sites(expect)
+    self_test_lanes(expect, raises)
     if failures:
         sys.stderr.write("self-test FAILED\n" + "\n".join(failures) + "\n")
         return 1
@@ -1282,17 +1664,40 @@ def main():
     parser.add_argument("--base", default="v0.7.0", help="baseline revision (default v0.7.0)")
     parser.add_argument("--kv-base", default="75921271", help="the revision that holds K71's key-value visitor")
     parser.add_argument("--root", default=".", help="repository root of the tree under test")
+    parser.add_argument(
+        "--integration",
+        action="store_true",
+        help="the tree integrates other lanes: accept the named integration edits and, for each --lane, the functions "
+        "its range changes (listed, not checked); the default mode stays as strict as for lane A4's own branch",
+    )
+    parser.add_argument(
+        "--lane",
+        action="append",
+        default=[],
+        metavar="NAME=RANGE",
+        help="with --integration, another lane: NAME=A..B (what B changes since A), NAME=A...B (since the merge base) "
+        "or NAME=REV (what REV changes since --base); repeat it for each lane; never pass lane A4's own range",
+    )
     parser.add_argument("--dump", metavar="SITE", help="print the shipped text and the baseline diff of one site")
     parser.add_argument("--self-test", action="store_true", help="run the checks of the checker")
     args = parser.parse_args()
     if args.self_test:
         return self_test()
+    if args.lane and not args.integration:
+        parser.error("--lane needs --integration")
     repo = Repo(args.root, args.base, args.kv_base)
     try:
         if args.dump:
             dump(repo, args.dump)
             return 0
-        ok, report = run(repo)
+        try:
+            lanes = [repo.lane(spec) for spec in args.lane]
+        except ValueError as error:
+            parser.error(str(error))
+        if len({l.name for l in lanes}) != len(lanes):
+            parser.error("a lane name is given twice")
+        repo.lanes = tuple(lanes)
+        ok, report = run(repo, integration=args.integration)
     except Unreadable as error:
         sys.stderr.write("%s\n" % error)
         return 2
