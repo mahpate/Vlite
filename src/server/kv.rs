@@ -18,6 +18,8 @@ thread_local! {
 struct AuditDetails<'a> {
     operation: &'a str,
     expires_at_ms: Option<u64>,
+    /// The dashboard session behind the request, when there is one.
+    principal: Option<&'a users::Principal>,
 }
 
 pub(super) fn routes() -> Router<Service> {
@@ -356,10 +358,12 @@ pub(super) async fn fetch(
         .await
 }
 
+#[allow(clippy::too_many_arguments)]
 pub(super) async fn save(
     State(service): State<Service>,
     Extension(role): Extension<admin::Role>,
     Extension(request_id): Extension<RequestId>,
+    principal: Option<Extension<users::Principal>>,
     target: Result<Path<String>, PathRejection>,
     RawQuery(raw_query): RawQuery,
     no_query: Result<Query<NoQuery>, QueryRejection>,
@@ -415,6 +419,7 @@ pub(super) async fn save(
         AuditDetails {
             operation: "kv_put",
             expires_at_ms: options.expires_at_ms,
+            principal: principal.as_ref().map(|Extension(principal)| principal),
         },
         &result,
         started,
@@ -426,6 +431,7 @@ pub(super) async fn remove(
     State(service): State<Service>,
     Extension(role): Extension<admin::Role>,
     Extension(request_id): Extension<RequestId>,
+    principal: Option<Extension<users::Principal>>,
     target: Result<Path<String>, PathRejection>,
     RawQuery(raw_query): RawQuery,
     input: Result<Query<DeleteQuery>, QueryRejection>,
@@ -466,6 +472,7 @@ pub(super) async fn remove(
         AuditDetails {
             operation: "kv_delete",
             expires_at_ms: None,
+            principal: principal.as_ref().map(|Extension(principal)| principal),
         },
         &result,
         started,
@@ -622,6 +629,7 @@ fn audit<T>(
         admin::Role::Scoped(grant) => grant.id.as_str(),
         role => role.name(),
     };
+    let actor = audit::actor(role, details.principal);
     let outcome = result.as_ref().map_or_else(|error| error.code, |_| "ok");
     // Success proves `open` accepted the collection and its binding.
     let collection = if result.is_ok() && crate::format::valid_collection_name(target.name()) {
@@ -634,6 +642,7 @@ fn audit<T>(
             .append(
                 json!({
                     "event":details.operation,"request_id":request_id.0,"principal":principal,
+                    "actor":actor,
                     "collection":collection,"outcome":outcome,
                     "expires_at_ms":details.expires_at_ms.map(|value|value.to_string()),
                     "duration_ns":started.elapsed().as_nanos().min(u64::MAX as u128) as u64
@@ -1040,6 +1049,7 @@ mod tests {
             AuditDetails {
                 operation: "kv_put",
                 expires_at_ms: None,
+                principal: None,
             },
             &failure,
             Instant::now(),
