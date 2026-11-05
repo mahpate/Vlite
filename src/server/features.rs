@@ -118,14 +118,9 @@ async fn changes(
                 None => FeedCursor::beginning(),
             };
             let mut batch = db.changes_after(&cursor, limit).map_err(ApiError::from)?;
-            batch.changes.retain_mut(|change| {
-                let graph_visible = graph::feed_graph(&change.kind).is_none_or(|name| {
-                    graph::feed_visible(scope.role(), name) && scope.graph_visible(name)
-                });
-                graph_visible
-                    && scope.collection_visible(&change.collection)
-                    && scope.retain_change_operations(&mut change.kind)
-            });
+            batch
+                .changes
+                .retain_mut(|change| scope.retain_feed_change(change));
             Ok::<_, ApiError>(batch)
         })
         .await?;

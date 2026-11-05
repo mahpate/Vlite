@@ -3750,6 +3750,93 @@ mod tests {
         assert_eq!(raw_credential(&admin::Role::ReadOnly), None);
     }
 
+    /// SECURITY.md: a tenant credential's wildcard "grants only that tenant's
+    /// namespace, not global administration, backups, default collection
+    /// access or other tenants". The route-level policy is what keeps a
+    /// tenanted principal away from every route that spans the database or
+    /// addresses `default`; it is pinned here without a request.
+    #[test]
+    fn a_tenanted_principal_is_refused_on_every_route_that_spans_the_database() {
+        use credentials::Op;
+
+        let service =
+            Service::new(Database::create_in_memory(1, crate::CreateOptions::default()).unwrap());
+        let lineage = service
+            .lineage
+            .expect("an in-memory database has a lineage");
+        let ops = [
+            Op::Read,
+            Op::Write,
+            Op::Search,
+            Op::Collections,
+            Op::Index,
+            Op::Import,
+            Op::Diagnostics,
+            Op::Backup,
+            Op::GraphRead,
+            Op::GraphWrite,
+        ];
+        let role = |tenant: Option<&str>| {
+            admin::Role::Scoped(Arc::new(credentials::Grant::for_user(
+                "abcdefghij27".to_owned(),
+                "probe".to_owned(),
+                tenant.map(str::to_owned),
+                &ops,
+                lineage,
+                u64::MAX,
+            )))
+        };
+        let tenant = role(Some("0123456789abcdef0123456789abcdef"));
+        let wide = role(None);
+        let spanning = [
+            (Method::GET, "/v1/changes"),
+            (Method::GET, "/v1/admin/replication/export"),
+            (Method::GET, "/v1/admin/backups"),
+            (Method::POST, "/v1/admin/backups"),
+            (Method::GET, "/v1/admin/backups/schedule"),
+            (Method::POST, "/v1/admin/backups/{name}/verify"),
+            (Method::POST, "/v1/admin/backups/{name}/drill"),
+            (Method::GET, "/v1/admin/maintenance/auto"),
+        ];
+        for (method, route) in &spanning {
+            let refused =
+                authorize_need(&service, &tenant, permission(method, route), false, false);
+            assert_eq!(
+                refused
+                    .err()
+                    .map(|error| (error.status.as_u16(), error.code)),
+                Some((403, "forbidden_scope")),
+                "{method} {route} for a tenant"
+            );
+            // The refusal is the tenant's, not the route's: a credential that
+            // spans the database with the same operations gets through.
+            assert!(
+                authorize_need(&service, &wide, permission(method, route), false, false).is_ok(),
+                "{method} {route} for a credential that spans the database"
+            );
+        }
+        // The legacy routes address `default`, which no tenant owns.
+        for (method, route) in [
+            (Method::GET, "/v1/vectors"),
+            (Method::PUT, "/v1/vectors/{id}"),
+            (Method::POST, "/v1/search"),
+            (Method::POST, "/v1/batches"),
+            (Method::GET, "/v1/database"),
+            (Method::GET, "/v1/index/hnsw"),
+        ] {
+            let refused =
+                authorize_need(&service, &tenant, permission(&method, route), false, true);
+            assert!(refused.is_err(), "{method} {route} for a tenant");
+            assert!(
+                authorize_need(&service, &wide, permission(&method, route), false, true).is_ok(),
+                "{method} {route} for a credential that spans the database"
+            );
+        }
+        // What a tenant may do beyond its own names: create collections.
+        let create = permission(&Method::POST, "/v1/collections");
+        assert!(authorize_need(&service, &tenant, create, false, false).is_ok());
+    }
+
     #[test]
     fn approximate_server_honors_background_option_and_preserves_legacy_builds() {
         for background in [false, true] {

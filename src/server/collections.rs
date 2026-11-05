@@ -528,14 +528,11 @@ enum Job {
 fn locate(
     db: &Database,
     reservations: &Reservations,
-    role: &admin::Role,
+    scope: &guard::RequestScope,
     job: u64,
 ) -> Result<Job, ApiError> {
     let lineage = db.lineage();
-    let allowed = |collection: u16, name: &str| match role {
-        admin::Role::Scoped(grant) => grant.covers(lineage, collection, name),
-        _ => true,
-    };
+    let allowed = |collection: u16, name: &str| scope.entry_visible(lineage, collection, name);
     if db.format_version() < 4 {
         return Err(Error::ImportsRequireUpgrade.into());
     }
@@ -606,10 +603,11 @@ pub(super) async fn status_core(
         return Err(forbidden_scope());
     }
     let reservations = service.imports.clone();
+    let scope = service.scope(role);
     service
         .run_read(move |db| {
             let reserved = reservations.lock().map_err(internal)?;
-            match locate(db, &reserved, &role, job) {
+            match locate(db, &reserved, &scope, job) {
                 Ok(Job::Durable(_)) => Ok(status_json(&db.import_status(job)?, true)),
                 // Dropped durable jobs remain observable (historical name).
                 Err(error) if error.code == "import_conflict" && db.imports.get(job).is_some() => {
@@ -693,10 +691,11 @@ pub(super) async fn import_chunk_core(
     let reservations = service.imports.clone();
     let quota_service = service.clone();
     let metrics = service.metrics.clone();
+    let scope = service.scope(role.clone());
     service
         .run(move |db| {
             let mut reserved = reservations.lock().map_err(internal)?;
-            let collection = match locate(db, &reserved, &role, job)? {
+            let collection = match locate(db, &reserved, &scope, job)? {
                 Job::Durable(collection) => collection,
                 Job::Reserved(collection) => {
                     // The engine's durable job high-water mark means a later
@@ -798,10 +797,11 @@ pub(super) async fn close_core(
         return Err(forbidden_scope());
     }
     let reservations = service.imports.clone();
+    let scope = service.scope(role);
     service
         .run(move |db| {
             let mut reserved = reservations.lock().map_err(internal)?;
-            let located = locate(db, &reserved, &role, job);
+            let located = locate(db, &reserved, &scope, job);
             match located {
                 Ok(Job::Durable(collection)) => {
                     let mut handle = db.collection_mut_in(collection)?;

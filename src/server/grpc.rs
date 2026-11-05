@@ -977,9 +977,9 @@ async fn poll_changes(
     service
         .run_read(move |db| {
             let mut batch = db.changes_after(&cursor, limit)?;
-            batch.changes.retain_mut(|change| {
-                scope.change_visible(change) && scope.retain_change_operations(&mut change.kind)
-            });
+            batch
+                .changes
+                .retain_mut(|change| scope.retain_feed_change(change));
             Ok(batch)
         })
         .await
@@ -2041,10 +2041,9 @@ impl VLite for Adapter {
                 service
                     .run_read(move |db| {
                         let mut batch = db.changes_after(&cursor, limit)?;
-                        batch.changes.retain_mut(|change| {
-                            scope.change_visible(change)
-                                && scope.retain_change_operations(&mut change.kind)
-                        });
+                        batch
+                            .changes
+                            .retain_mut(|change| scope.retain_feed_change(change));
                         Ok(proto::ChangesResponse {
                             cursor: batch.next.to_token(),
                             has_more: batch.has_more,

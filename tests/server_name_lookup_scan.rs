@@ -1,5 +1,5 @@
 //! Source check: no server code outside the guard module looks a collection
-//! or graph up by name.
+//! or graph up by name, or decides a reservation by itself.
 //!
 //! Every reservation, grant and tenant rule of the server is enforced by
 //! `server::guard::RequestScope`, which resolves a name once and hands the
@@ -7,14 +7,18 @@
 //! `resolve`, `kv_view` or a sibling by name bypasses all of it, and a handler
 //! that re-resolves a name after the guard can bind to a different collection
 //! (the tenant-qualified name was checked, the unqualified one was used; fixed
-//! in 0.7.0 for named search, sparse search and the metadata route).
+//! in 0.7.0 for named search, sparse search and the metadata route). A list, a
+//! log or a feed that asks `Reserved` directly instead of the scope can drift
+//! from the rule the lookups obey, so the reservation methods are banned
+//! outside the guard and the module that defines them, too.
 //!
 //! The scan reads `src/server.rs` and `src/server/**/*.rs`, blanks comments
 //! and string literals, drops `#[cfg(test)]` items (and every file only test
 //! code includes), and fails on any call or path that looks a collection or
-//! graph up by name, or enumerates collections, unless a justified entry of
-//! `ALLOWED` names its file, enclosing function and pattern. An entry that no
-//! longer matches fails too, so the list cannot go stale.
+//! graph up by name, or enumerates collections, or calls a reservation method,
+//! unless a justified entry of `ALLOWED` names its file, enclosing function
+//! and pattern. An entry that no longer matches fails too, so the list cannot
+//! go stale.
 //!
 //! The guard's own methods share names with the database's (`collection`,
 //! `kv_view`, `drop_collection`, ...). They are told apart by their first
@@ -63,6 +67,23 @@ const DATABASE_RECEIVERS: &[&str] = &["db", "database"];
 
 /// The only files exempt from the scan. The guard resolves names by design.
 const EXEMPT: &[&str] = &["src/server/guard.rs"];
+
+/// Methods that decide whether a reservation hides a resource. Every
+/// reservation decision of the server is the scope's
+/// (`server::guard::RequestScope`): lists, import jobs, metrics, the slow-query
+/// log and the change feed ask it, so none of them can drift from the rule a
+/// name lookup obeys. Banned outside the files that implement the reservation.
+const RESERVATION: &[&str] = &[
+    "raw_allowed",
+    "reserved",
+    "attachment_allowed",
+    "retain_visible",
+    "retain_change_operations",
+];
+
+/// The files that may call the reservation methods: the guard, and the module
+/// that defines them.
+const RESERVATION_OWNERS: &[&str] = &["src/server/guard.rs", "src/server/reserved.rs"];
 
 /// `(file, enclosing function, pattern, justification)`. A reviewer reads this
 /// list to see every place the server layer reaches the database by name
@@ -115,8 +136,8 @@ const ALLOWED: &[(&str, &str, &str, &str)] = &[
         "src/server/observability.rs",
         "collection_metrics",
         "db.collections",
-        "Walks every collection and keeps those the role's grant covers and the reservation \
-         predicate lets it see; it resolves no name.",
+        "Walks every collection and keeps those the request scope shows the role (grant binding \
+         and reservation, in one predicate); it resolves no name.",
     ),
     (
         "src/server/observability.rs",
@@ -511,6 +532,12 @@ fn scan_source(file: &str, source: &str) -> Vec<Finding> {
                         {
                             Some(format!(".{name}("))
                         }
+                        (true, _)
+                            if RESERVATION.contains(&name)
+                                && !RESERVATION_OWNERS.contains(&file) =>
+                        {
+                            Some(format!(".{name}("))
+                        }
                         (true, Some(receiver)) if name == "resolve" => {
                             Some(format!("{receiver}.resolve("))
                         }
@@ -703,8 +730,9 @@ fn judge(findings: &[Finding], allowed: &[(&str, &str, &str, &str)]) -> Vec<Stri
         match hit {
             Some(position) => used[position] = true,
             None => problems.push(format!(
-                "{}:{} in fn {}: `{}` looks a collection or graph up by name outside the guard; \
-                 use server::guard::RequestScope, or add a justified entry to ALLOWED",
+                "{}:{} in fn {}: `{}` looks a collection or graph up by name, or decides a \
+                 reservation, outside the guard; use server::guard::RequestScope, or add a \
+                 justified entry to ALLOWED",
                 finding.file, finding.line, finding.function, finding.pattern
             )),
         }
@@ -802,6 +830,12 @@ fn chained(db: &Database) {
     scope.graph(&name)?;
     scope.collection(&target, db)?;
 }
+fn reservations(bindings: &Bindings) {
+    bindings.reserved().raw_allowed(None, Resource::Collection, "a");
+    reserved.attachment_allowed("g", "c");
+    reserved.retain_visible(None, Resource::Graph, &mut items, name);
+    reserved.retain_change_operations(None, &mut kind);
+}
 "#;
     let patterns: Vec<_> = found(source)
         .into_iter()
@@ -835,6 +869,11 @@ fn chained(db: &Database) {
             "chained:database.resolve(",
             "chained:.graph(",
             "chained:.collection(",
+            "reservations:.reserved(",
+            "reservations:.raw_allowed(",
+            "reservations:.attachment_allowed(",
+            "reservations:.retain_visible(",
+            "reservations:.retain_change_operations(",
         ]
     );
     // Line numbers are those of the source, across multi-line chains.
@@ -908,6 +947,10 @@ fn after_the_test_items(db: &Database) {
                 + 1
         )]
     );
+    let owner = "fn decide(&self) { self.raw_allowed(None, r, n); bindings.reserved(); }";
+    assert!(scan_source("src/server/reserved.rs", owner).is_empty());
+    assert!(scan_source("src/server/guard.rs", owner).is_empty());
+    assert_eq!(scan_source("src/server/observability.rs", owner).len(), 2);
 }
 
 #[test]

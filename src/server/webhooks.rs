@@ -428,10 +428,9 @@ fn run_dispatcher(dispatcher: Arc<Dispatcher>, service: Service, stopping: Arc<A
             };
             match database.changes_after(&cursor, 1000) {
                 Ok(mut batch) => {
-                    batch.changes.retain_mut(|change| {
-                        scope.change_visible(change)
-                            && scope.retain_change_operations(&mut change.kind)
-                    });
+                    batch
+                        .changes
+                        .retain_mut(|change| scope.retain_feed_change(change));
                     (cursor, batch)
                 }
                 Err(_) => continue,

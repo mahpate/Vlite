@@ -174,6 +174,19 @@ impl RequestScope {
         move |stored| self.collection_visible(stored)
     }
 
+    /// Whether this principal may see an entry (a list item, an import job, a
+    /// metrics row, a slow-query record) about the collection `stored`, which
+    /// has ID `id` in the database of `lineage`: its grant binds that ID, name
+    /// and lineage, and no reservation hides the name. Every listing that is
+    /// not a name lookup decides with this one rule.
+    pub(super) fn entry_visible(&self, lineage: Option<u64>, id: u16, stored: &str) -> bool {
+        self.collection_visible(stored)
+            && match &self.role {
+                admin::Role::Scoped(grant) => grant.covers(lineage, id, stored),
+                admin::Role::Admin | admin::Role::ReadOnly => true,
+            }
+    }
+
     /// The attach rule the core planners take next to [`Self::visible`]:
     /// whether a record of a collection may be attached to a node of a graph.
     /// A reserved graph takes only its own binding's evidence collection, for
@@ -186,20 +199,6 @@ impl RequestScope {
         }
     }
 
-    /// Drops the collection entries of a list this principal may not reach.
-    pub(super) fn retain_visible_collections<T>(
-        &self,
-        items: &mut Vec<T>,
-        name: impl Fn(&T) -> &str,
-    ) {
-        self.bindings.reserved().retain_visible(
-            self.raw(),
-            reserved::Resource::Collection,
-            items,
-            name,
-        );
-    }
-
     /// Drops the graph entries of a list this principal may not reach.
     pub(super) fn retain_visible_graphs<T>(&self, items: &mut Vec<T>, name: impl Fn(&T) -> &str) {
         self.bindings
@@ -209,18 +208,29 @@ impl RequestScope {
 
     /// Drops the attach and detach operations of a change this principal may
     /// not reach, and reports whether the change still has anything to show.
-    pub(super) fn retain_change_operations(&self, kind: &mut crate::changes::ChangeKind) -> bool {
+    fn retain_change_operations(&self, kind: &mut crate::changes::ChangeKind) -> bool {
         self.bindings
             .reserved()
             .retain_change_operations(self.raw(), kind)
     }
 
-    /// Whether a change-feed event is visible: its collection, its graph and
-    /// (separately, see `retain_change_operations`) the collections its graph
-    /// batch attaches.
-    pub(super) fn change_visible(&self, change: &crate::changes::Change) -> bool {
-        self.collection_visible(&change.collection)
-            && graph::feed_graph(&change.kind).is_none_or(|graph| self.graph_visible(graph))
+    /// The one rule for an event of the change feed, whichever transport or
+    /// subscriber carries it. Its collection must be named by the grant and not
+    /// reserved, its graph (if any) must be covered by the grant and not
+    /// reserved, and the attach and detach operations of a reserved collection
+    /// are dropped from it. Reports whether anything is left to show. The REST
+    /// route, the gRPC streams and the webhook dispatcher all apply this rule,
+    /// so a route-level refusal is never the only thing between a tenanted
+    /// credential and another namespace's events.
+    pub(super) fn retain_feed_change(&self, change: &mut crate::changes::Change) -> bool {
+        // Graph lifecycle and batch events carry no collection name; their
+        // graph is checked against the graph grant below.
+        (change.collection.is_empty() || self.names_covered(&change.collection))
+            && self.collection_visible(&change.collection)
+            && graph::feed_graph(&change.kind).is_none_or(|name| {
+                graph::feed_visible(&self.role, name) && self.graph_visible(name)
+            })
+            && self.retain_change_operations(&mut change.kind)
     }
 
     /// The collection a request addresses by name, guarded in the order of
@@ -294,12 +304,8 @@ impl RequestScope {
         let mut items = db
             .collections()?
             .into_iter()
-            .filter(|info| match &self.role {
-                admin::Role::Scoped(grant) => grant.covers(lineage, info.id, &info.name),
-                admin::Role::Admin | admin::Role::ReadOnly => true,
-            })
+            .filter(|info| self.entry_visible(lineage, info.id, &info.name))
             .collect::<Vec<_>>();
-        self.retain_visible_collections(&mut items, |item| item.name.as_str());
         for item in &mut items {
             item.name = self.unqualify(&item.name);
         }
@@ -971,6 +977,195 @@ mod tests {
             ))
         );
         assert!(db.resolve_visible("notes_ev", &raw.visible()).is_ok());
+    }
+
+    #[test]
+    fn an_entry_needs_the_grants_binding_and_no_reservation() {
+        let db = database();
+        let bindings = bindings();
+        let lineage = db.lineage();
+        let tenanted = format!("t{TENANT}__ordinary");
+        let tenanted_reserved = format!("t{TENANT}__notes_ev");
+        let scope = |role| RequestScope::for_test(role, bindings.clone());
+        let admin = scope(admin::Role::Admin);
+        let read_only = scope(admin::Role::ReadOnly);
+        let raw = scope(grant(RAW, None, &[], &db));
+        let plain = scope(grant(PLAIN, None, &[], &db));
+        let tenant = scope(grant("tenanttenan", Some(TENANT), &[], &db));
+        let bound = scope(grant(PLAIN, None, &["ordinary"], &db));
+        let id = |name: &str| db.resolve(name).unwrap();
+        // (who, scope, stored name, expected)
+        let cases = [
+            ("admin, ordinary", &admin, "ordinary", true),
+            ("admin, reserved", &admin, "notes_ev", false),
+            ("read-only, ordinary", &read_only, "ordinary", true),
+            ("read-only, reserved", &read_only, "notes_ev", false),
+            ("raw holder, reserved", &raw, "notes_ev", true),
+            (
+                "raw holder, tenant reserved",
+                &raw,
+                tenanted_reserved.as_str(),
+                true,
+            ),
+            ("plain, ordinary", &plain, "ordinary", true),
+            ("plain, tenant ordinary", &plain, tenanted.as_str(), true),
+            ("plain, reserved", &plain, "notes_ev", false),
+            (
+                "plain, tenant reserved",
+                &plain,
+                tenanted_reserved.as_str(),
+                false,
+            ),
+            ("tenant, own", &tenant, tenanted.as_str(), true),
+            ("tenant, root name", &tenant, "ordinary", false),
+            (
+                "tenant, own reserved",
+                &tenant,
+                tenanted_reserved.as_str(),
+                false,
+            ),
+            ("bound, its collection", &bound, "ordinary", true),
+            ("bound, another", &bound, tenanted.as_str(), false),
+        ];
+        for (who, scope, name, expected) in cases {
+            assert_eq!(
+                scope.entry_visible(lineage, id(name), name),
+                expected,
+                "{who}"
+            );
+        }
+        // A grant binds the collection's ID and the database's lineage, not
+        // the name alone: a recreated collection or another database never
+        // matches.
+        let ordinary = id("ordinary");
+        assert!(!bound.entry_visible(lineage, ordinary + 1, "ordinary"));
+        assert!(!bound.entry_visible(None, ordinary, "ordinary"));
+        assert!(!bound.entry_visible(lineage.map(|l| l ^ 1), ordinary, "ordinary"));
+        assert!(!plain.entry_visible(lineage.map(|l| l ^ 1), ordinary, "ordinary"));
+        // The administrator is bound to nothing.
+        assert!(admin.entry_visible(None, ordinary, "ordinary"));
+    }
+
+    #[test]
+    fn a_feed_event_is_kept_only_inside_the_namespace_and_outside_reservations() {
+        use crate::changes::{Change, ChangeKind};
+
+        let db = database();
+        let bindings = bindings();
+        let event = |collection: &str, kind: ChangeKind| Change {
+            sequence: 1,
+            ordinal: 0,
+            collection: collection.to_owned(),
+            committed_at_ms: None,
+            kind,
+        };
+        let put = |collection: &str| event(collection, ChangeKind::Delete { id: 1 });
+        let graph = |name: &str| {
+            event(
+                "",
+                ChangeKind::GraphCreated {
+                    graph: name.to_owned(),
+                },
+            )
+        };
+        let tenanted = |name: &str| format!("t{TENANT}__{name}");
+        let kept = |scope: &RequestScope, mut change: Change| scope.retain_feed_change(&mut change);
+        let scope = |role| RequestScope::for_test(role, bindings.clone());
+        let admin = scope(admin::Role::Admin);
+        let raw = scope(grant(RAW, None, &[], &db));
+        let plain = scope(grant(PLAIN, None, &[], &db));
+        let tenant = scope(grant("tenanttenan", Some(TENANT), &[], &db));
+        // Reservations hide events from everyone but a raw holder, the
+        // administrator included.
+        for (who, scope, expected) in [("admin", &admin, false), ("plain", &plain, false)] {
+            assert_eq!(kept(scope, put("notes_ev")), expected, "{who} collection");
+            assert_eq!(kept(scope, graph("notes_graph")), expected, "{who} graph");
+        }
+        assert!(kept(&raw, put("notes_ev")) && kept(&raw, graph("notes_graph")));
+        for scope in [&admin, &plain, &raw] {
+            assert!(kept(scope, put("ordinary")) && kept(scope, graph("ordinary_graph")));
+        }
+        // A tenanted credential's wildcard stays inside its tenant even when
+        // nothing above the handler refused the route: no root collection and
+        // no root graph.
+        assert!(kept(&tenant, put(&tenanted("ordinary"))));
+        assert!(kept(&tenant, graph(&tenanted("ordinary_graph"))));
+        assert!(!kept(&tenant, put("ordinary")));
+        assert!(!kept(&tenant, graph("ordinary_graph")));
+        assert!(!kept(&tenant, put(&tenanted("notes_ev"))));
+        assert!(!kept(&tenant, graph(&tenanted("notes_graph"))));
+        // A grant limited to named collections sees only those.
+        let bound = scope(grant(PLAIN, None, &["ordinary"], &db));
+        assert!(kept(&bound, put("ordinary")));
+        assert!(!kept(&bound, put(&tenanted("ordinary"))));
+    }
+
+    #[test]
+    fn the_slow_query_log_and_the_metrics_show_what_the_scope_shows() {
+        let db = database();
+        let bindings = bindings();
+        let lineage = db.lineage().unwrap();
+        let tenant_ordinary = format!("t{TENANT}__ordinary");
+        let tenant_notes = format!("t{TENANT}__notes_ev");
+        let entry = |name: &str| {
+            json!({"lineage": format!("{lineage:016x}"),
+                "collection_id": db.resolve(name).unwrap(), "collection": name})
+        };
+        let scope = |role| RequestScope::for_test(role, bindings.clone());
+        let admin = scope(admin::Role::Admin);
+        let raw = scope(grant(RAW, None, &[], &db));
+        let plain = scope(grant(PLAIN, None, &[], &db));
+        let tenant = scope(grant("tenanttenan", Some(TENANT), &[], &db));
+        let bound = scope(grant(PLAIN, None, &["ordinary"], &db));
+        let names = [
+            "ordinary",
+            "notes_ev",
+            tenant_ordinary.as_str(),
+            tenant_notes.as_str(),
+        ];
+        // The slow-query log: root ordinary, root reserved, tenant ordinary,
+        // tenant reserved.
+        for (who, scope, expected) in [
+            ("admin", &admin, [true, false, true, false]),
+            ("raw holder", &raw, [true, true, true, true]),
+            ("plain", &plain, [true, false, true, false]),
+            ("tenant", &tenant, [false, false, true, false]),
+            ("bound", &bound, [true, false, false, false]),
+        ] {
+            let seen = names.map(|name| observability::slow_entry_visible(scope, &entry(name)));
+            assert_eq!(seen, expected, "{who}: slow-query entries");
+            // The metrics list the same collections.
+            let listed: std::collections::BTreeSet<String> =
+                observability::collection_metrics(&db, scope)
+                    .iter()
+                    .map(|row| row["name"].as_str().unwrap().to_owned())
+                    .collect();
+            for (name, shown) in names.iter().zip(expected) {
+                assert_eq!(listed.contains(*name), shown, "{who}: metrics for {name}");
+            }
+        }
+        // An entry that names no collection or no ID is shown to nobody, and
+        // a credential bound to an ID and a lineage never sees another's.
+        let ordinary = db.resolve("ordinary").unwrap();
+        for scope in [&admin, &raw, &plain, &tenant, &bound] {
+            for incomplete in [
+                json!({"lineage": format!("{lineage:016x}"), "collection": "ordinary"}),
+                json!({"lineage": format!("{lineage:016x}"), "collection_id": ordinary}),
+                json!({"lineage": format!("{lineage:016x}"), "collection_id": 70000, "collection": "ordinary"}),
+            ] {
+                assert!(!observability::slow_entry_visible(scope, &incomplete));
+            }
+        }
+        let stale = json!({"lineage": format!("{lineage:016x}"),
+            "collection_id": ordinary + 1, "collection": "ordinary"});
+        let foreign = json!({"lineage": format!("{:016x}", lineage ^ 1),
+            "collection_id": ordinary, "collection": "ordinary"});
+        let unlabelled = json!({"collection_id": ordinary, "collection": "ordinary"});
+        for scope in [&bound, &plain, &tenant] {
+            assert!(!observability::slow_entry_visible(scope, &foreign));
+            assert!(!observability::slow_entry_visible(scope, &unlabelled));
+        }
+        assert!(!observability::slow_entry_visible(&bound, &stale));
     }
 
     /// The collection guard exactly as 0.7.0 wrote it (`open`): qualify, name

@@ -1555,7 +1555,7 @@
   },
   "structural_guard_campaign": {
     "campaign": "Structural guard: hand mutants of the request scope, the guard residues and the generated differential",
-    "baseline_commit": "4204a9a28af46631bd12849d09be6a314ea182e2",
+    "baseline_commit": "PENDING-RERUN",
     "protocol": "Each mutant replaces exactly one occurrence of `old` by `new` in `file` of the baseline commit; `cmd` runs from the repository root. A mutant is killed when the build succeeds and at least one test the command ran fails because of it. A build error or a command that runs no test is not a kill. The file is restored before the next mutant.",
     "mutants": [
       {
@@ -1618,7 +1618,7 @@
         "file": "src/server/guard.rs",
         "old": "if let admin::Role::Scoped(grant) = &self.role",
         "new": "if let admin::Role::Scoped(grant) = &self.role && false",
-        "cmd": "cargo test --locked --offline --features server --no-fail-fast --test server_guard_differential --test server_memory_guards --test server_memory_reserved_as_missing --test tenants",
+        "cmd": "cargo test --locked --offline --features server --no-fail-fast --test server_guard_differential --test server_memory_guards --test server_memory_reserved_as_missing --test tenants --test server_ops",
         "result": "pending"
       },
       {
@@ -1866,10 +1866,10 @@
       },
       {
         "id": "G71-35",
-        "desc": "collection lists show the reserved collections",
+        "desc": "collection lists show every collection, reserved ones and other namespaces included",
         "file": "src/server/guard.rs",
-        "old": "self.retain_visible_collections(&mut items, |item| item.name.as_str());",
-        "new": "let _ = &mut items;",
+        "old": ".filter(|info| self.entry_visible(lineage, info.id, &info.name))",
+        "new": ".filter(|info| info.id != u16::MAX)",
         "cmd": "cargo test --locked --offline --features server --no-fail-fast --test server_guard_differential -- lists_and_the_feed_never_name_a_reserved_resource_to_a_caller_that_may_not_reach_it",
         "result": "pending"
       },
@@ -1885,19 +1885,19 @@
       {
         "id": "G71-37",
         "desc": "the change feed shows the events of a reserved graph",
-        "file": "src/server/features.rs",
-        "old": "graph::feed_visible(scope.role(), name) && scope.graph_visible(name)",
-        "new": "graph::feed_visible(scope.role(), name)",
+        "file": "src/server/guard.rs",
+        "old": "graph::feed_visible(&self.role, name) && self.graph_visible(name)",
+        "new": "graph::feed_visible(&self.role, name)",
         "cmd": "cargo test --locked --offline --features server --no-fail-fast --test server_guard_differential -- lists_and_the_feed_never_name_a_reserved_resource_to_a_caller_that_may_not_reach_it",
         "result": "pending"
       },
       {
         "id": "G71-38",
-        "desc": "the change feed shows the events of a reserved collection",
-        "file": "src/server/features.rs",
-        "old": "&& scope.collection_visible(&change.collection)",
-        "new": "&& true",
-        "cmd": "cargo test --locked --offline --features server --no-fail-fast --test server_guard_differential -- lists_and_the_feed_never_name_a_reserved_resource_to_a_caller_that_may_not_reach_it",
+        "desc": "the change feed shows events outside the credential's namespace",
+        "file": "src/server/guard.rs",
+        "old": "(change.collection.is_empty() || self.names_covered(&change.collection))",
+        "new": "true",
+        "cmd": "cargo test --locked --offline --features server --no-fail-fast --lib -- by_id:: server::guard:: server::reserved::",
         "result": "pending"
       }
     ]
