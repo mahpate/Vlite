@@ -25,7 +25,9 @@ This document proposes contracts only. It does not change the proto. Run benchma
 The [P3 design](p3-compact-vectors.md) specifies guarded vector-column blocks,
 a bounded vector accessor and lazy, generation-owned borrowed records.
 The [P4 design](p4-compact-graph.md) specifies CSR checkpoint blocks.
-These are not implemented. The [shared contract](compact-storage-contract.md) owns format, tags, and directory code.
+At `v0.7.0` these exist only as private, test-gated modules (`compact::vectors`, `compact::source` and
+`compact::graph`; see the [baseline of the seam freeze](p3b-seam-freeze.md#1-baseline)): no release build compiles them
+and no production path reads them. The [shared contract](compact-storage-contract.md) owns format, tags, and directory code.
 P5 requests interfaces from that contract; it allocates kinds only inside its own `0x0400-0x04FF` range and does not fork it.
 
 ## Today's filter path

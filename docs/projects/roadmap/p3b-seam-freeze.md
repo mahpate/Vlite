@@ -2,8 +2,9 @@
 
 Status: written at the start of 0.7.1 from `v0.7.0` (`02ef3e5f`) and approved on 2026-11-05 (OPEN-71-02 to OPEN-71-04 and
 OPEN-71-14 in the [0.7.1 plan](handover-0.7.0.md#071), decided by the coordinator under the owner's delegation).
-Sections 3 and 4 describe what the code does today and pin it with tests, so they are frozen for the lanes that follow:
-B4, A4, E4, C4, K71, L5 and the ANN, P4 and P5 lanes. Section 5 gives additive shapes, approved as additive: lane R0's
+Sections 3 and 4 describe what the code does today and pin it with tests. Section 3 is frozen for the lanes that follow:
+B4, A4, E4, C4, K71, L5 and the ANN, P4 and P5 lanes. Section 4 is the approved inventory of deviations and limits: it
+is not frozen, and a lane may remove any of them. Section 5 gives additive shapes, approved as additive: lane R0's
 slice 3 implements `base_rows`, `affected_ids` and `ordered_ids` (crate-private, under the seam's test gate), and
 `binding` and `for_each_vector_block` stay with the ANN lane. Nothing here changes behavior, a file format or the wire,
 activates a compact writer, float16 or temporal copy-out, or supports a size or speed claim. Companion pages: the
@@ -57,7 +58,7 @@ by reading the code at `v0.7.0` and has no test of its own.
 | CLK-3 | A row with no deadline is never hidden by the clock. | same |
 | CLK-4 | The newest overlay entry decides. An overlay put uses its own deadline, so an expired put hides the ID and never reveals the older base row; a tombstone hides the ID at every `T` and never falls through. | `freeze_deadline_hides_exactly_at_the_clock_in_every_arm`; `compact_expired_overlay_never_reveals_base`; `compact_delete_tombstone_shadows_base` |
 | CLK-5 | Every read that takes no clock is physical and ignores deadlines: `len`, `first_id`, `contains_id`, `row_of`, `id`, `revision`, `expiry`, `get_physical`, `effective_ids`, `effective_vector`, `effective_metadata`, `effective_payload` and the `read_*` methods. The point readers that take a clock are `get`, `get_at` and `effective_visible`; a caller that needs visibility asks one of them with its own `T` first. Counts (`len`) are physical and include hidden rows. | same; `freeze_accounting_reports_exact_values_and_keeps_peaks` |
-| CLK-6 | A compact collection holds two expiry (and revision) representations: the resident `Collection.expiries` and `Collection.revisions` maps, and the view and overlay columns. They agree by construction (replay builds the overlay from the replayed resident maps; `apply_committed` writes both). Exact scans, browse and `ReadSnapshot` read the resident expiry map; `get_at` and `effective_visible` (and so `rerank_effective`) read the columns. One operation reads one expiry representation and never combines the two. `revision_in`, which a conditional write checks, reads the overlay's revision when the overlay holds an entry for the ID and the resident map otherwise. | `freeze_resident_and_compact_expiry_sources_agree_after_mutations`; `compact_mutations_match_resident_put_delete_metadata_and_ttl` |
+| CLK-6 | The expiry and revision of a compact row exist in two places: the resident `Collection.expiries` and `Collection.revisions` maps, and the view and overlay columns. They agree at every replay and every commit (replay builds the overlay from the replayed resident maps; `apply_committed` writes both), and one operation reads one of them and never combines the two. `revision_in`, which a conditional write checks, reads the overlay's revision when the overlay holds an entry for the ID and the resident map otherwise. Which reader uses which representation is not frozen (section 4). | `freeze_resident_and_compact_expiry_sources_agree_after_mutations`; `compact_mutations_match_resident_put_delete_metadata_and_ttl` |
 | CLK-7 | A public call that takes no clock samples the wall clock once on entry and passes it down, and a `ReadSnapshot` uses the clock it captured. Four resident-only paths are known exceptions that sample per candidate or per call: the hybrid text leg, query-language execution, `ann_quality` and `search_ready_with_options_in` (section 4). Other callers that sample per candidate were not audited. | `compact_browse_cursor_skips_tombstones_and_expiry`; `compact_exact_scan_is_bit_identical_at_same_clock` |
 
 ### 3.2 Overlay precedence and affected IDs
@@ -124,6 +125,7 @@ These are true at `v0.7.0`. They are not statements to preserve; the lane named 
 | `hybrid.rs::search_hybrid`, `query_language.rs::execute`, `quality.rs::ann_quality`, `lib.rs::search_ready_with_options_in` | The resident vector leg samples its own clock, and the hybrid text leg (`hybrid.rs:197`) and query-language execution (`query_language.rs:422-452`) call `get` per candidate, so each candidate is judged at its own wall-clock sample and the legs can disagree at a deadline. `ann_quality` samples once per sampled query (`quality.rs:227`) and `search_ready_with_options_in` once per call (`lib.rs:3720`). All four read the resident map, so they refuse compact records today. | A4 (`search_hybrid_at` and the query-language edits in `02062058`); the ANN lane for the other two |
 | `records.rs::effective_ids` | Builds a full ID set and vector. The 4 MiB workspace bounds vector scratch only, not ID memory. | slice 3 adds `ordered_ids`; `effective_ids` stays until its last caller moves |
 | Exact scan, browse, snapshot search | The compact path walks `compact_iter`, materializes a cell per visited row and reads deadlines from the resident map (CLK-6). | E4 |
+| Expiry readers | Exact scans, browse and `ReadSnapshot` read the resident expiry map, and `get_at`, `effective_visible` (and so `rerank_effective`) read the view and overlay columns (CLK-6). A lane may move a reader to the other representation if it keeps one clock per operation and the agreement of the two. | E4, L5 |
 | `Database::open_backed` | The loader decodes every record into a resident map before the generation is installed. | L5 |
 | `CollectionRecords::len`, `first_id` | `len` walks the overlay on every call, and `first_id` scans the base from row 0 past tombstoned rows and then the overlay. | not scheduled |
 | Refused reads are not atomic | `read_vector` counts a miss, advances the logical clock and evicts to make room before it reads the frame, so a read that then fails can leave a block evicted. A read refused by the scratch budget keeps the previous plaintext, and an encrypted read that fails after authentication (an extent or decode error, or the shape refusal on a hit) keeps that frame's plaintext until the next read. A consumer must not rely on a rollback. | E4, L5 |
@@ -378,9 +380,14 @@ Decided on 2026-11-05 by the coordinator under the owner's delegation, as recomm
 
 - **OPEN-71-02, survivor evidence: approved.** The evidence form in the [ledgers](p3b-survivor-ledgers.md#evidence-that-would-settle-open-71-02)
   is the acceptance form: one record per mutant with before and after SHA-256, the failing test names and a restored-green
-  run, replayed independently. R0's ledger has that shape. An equivalence claim (`pa-graph-evidence-wall-clock`)
-  additionally needs an independent review and a pinning test wherever one can be written.
-- **OPEN-71-03, seam freeze: approved.** Sections 3 and 4 are frozen and section 5 holds the additive shapes. R0 implements
+  run, replayed independently. R0's ledger has that shape with one qualification, which the slice report asks the
+  coordinator to confirm: the restored-green run is recorded once per replay (before the first mutant and after the last)
+  and not after every mutant, because a byte-identical restore, which the ledger records per mutant, returns the tree
+  whose baseline run was green, and a run per mutant would double the number of builds. An equivalence claim
+  (`pa-graph-evidence-wall-clock`) additionally needs an independent review and a pinning test wherever one can be
+  written.
+- **OPEN-71-03, seam freeze: approved.** Section 3 is frozen, section 4 is the approved inventory of limits that need not
+  survive, and section 5 holds the additive shapes. R0 implements
   `base_rows`, `affected_ids` and `ordered_ids` as its slice 3, ahead of E4, because the exact scan needs an ID source that
   does not materialize: crate-private, under the seam's test gate, with `effective_ids` unchanged, the tests and mutants
   that section 5 lists, and an independent review. `binding` and `for_each_vector_block` stay with the ANN lane.
