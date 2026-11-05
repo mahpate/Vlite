@@ -61,9 +61,14 @@ impl Input {
     // A `ping` of exactly `size` bytes, padded with the insignificant whitespace JSON
     // allows after a value, and its line terminator.
     fn padded_ping(self, id: u64, size: usize, terminator: &str) -> Self {
+        self.padded_ping_with(id, size, b' ', terminator)
+    }
+
+    // As `padded_ping`, filled with `pad`: any byte but whitespace makes the line invalid JSON.
+    fn padded_ping_with(self, id: u64, size: usize, pad: u8, terminator: &str) -> Self {
         let request = plain_ping(id);
         let padding = size - request.len();
-        self.bytes(request).fill(b' ', padding).bytes(terminator)
+        self.bytes(request).fill(pad, padding).bytes(terminator)
     }
 
     fn write_to(&self, out: &mut impl Write) -> io::Result<()> {
@@ -177,16 +182,20 @@ fn mcp_serves_a_line_of_exactly_the_cap_and_refuses_one_byte_more() {
     );
 }
 
-// Lines that are longer than the cap by some distance, which have to be drained, with
-// CRLF terminators and as the last line without any terminator.
+// Lines that are longer than the cap by more than the 8 KiB that stdin hands over at a time,
+// which have to be drained, with CRLF terminators and as the last line without any terminator.
+// They are padded with `x`, not spaces: a tail that was left in the input would be read as a
+// line of its own and answered with a parse error, where a line of spaces is skipped without
+// an answer, and a tail within the chunk that crossed the cap would go unnoticed.
 #[test]
 fn mcp_drains_longer_lines_with_crlf_and_at_the_end_of_input() {
     let _serial = serial();
+    const BEYOND: usize = 100_000;
     let input = Input::default()
         .line(plain_ping(1), "\r\n")
-        .padded_ping(2, MCP_CAP + 4096, "\r\n")
+        .padded_ping_with(2, MCP_CAP + BEYOND, b'x', "\r\n")
         .line(plain_ping(3), "\r\n")
-        .padded_ping(4, MCP_CAP + 9000, "");
+        .padded_ping_with(4, MCP_CAP + BEYOND, b'x', "");
     assert_eq!(mcp(&input), [pong(1), too_long(), pong(3), too_long()]);
 }
 

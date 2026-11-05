@@ -442,24 +442,25 @@ mod tests {
     }
 
     #[test]
-    fn a_long_line_read_a_byte_at_a_time_grows_its_buffer_geometrically() {
-        // The cap is far above the line, so the limit never cuts a growth short.
-        let length = (1usize << 20) + 12_345;
-        let mut input = vec![b'a'; length];
-        input.push(b'\n');
-        GROWTHS.with(|growths| growths.set(0));
-        assert_eq!(
-            lines(&input, 1, usize::MAX / 2),
-            [Got::Text("a".repeat(length))]
-        );
-        let growths = GROWTHS.with(Cell::get);
-        // Doubling takes about log2(length) growths; adding the bytes as they come
-        // would take one per byte.
-        let bound = 2 * length.ilog2() as usize + 2;
-        assert!(
-            (1..=bound).contains(&growths),
-            "{growths} growths for {length} bytes, at most {bound} expected"
-        );
+    fn a_long_line_grows_its_buffer_geometrically_whatever_the_chunks() {
+        // The cap is far above each line, so the limit never cuts a growth short. Doubling takes
+        // about log2(length) growths. A step per byte takes one per byte; a fixed step of 64 KiB
+        // takes 17 for the first line, within the bound, but 64 for the second, which is not.
+        for (length, chunk) in [((1usize << 20) + 12_345, 1), (1 << 22, 8192)] {
+            let mut input = vec![b'a'; length];
+            input.push(b'\n');
+            GROWTHS.with(|growths| growths.set(0));
+            assert_eq!(
+                lines(&input, chunk, usize::MAX / 2),
+                [Got::Text("a".repeat(length))]
+            );
+            let growths = GROWTHS.with(Cell::get);
+            let bound = 2 * length.ilog2() as usize + 2;
+            assert!(
+                (1..=bound).contains(&growths),
+                "{growths} growths for {length} bytes in chunks of {chunk}, at most {bound} expected"
+            );
+        }
     }
 
     #[test]
