@@ -2237,33 +2237,75 @@ async fn a_credentials_attempt_on_a_reserved_name_is_audited_without_the_name() 
 }
 
 #[test]
-fn a_symlinked_bindings_file_is_refused() {
+fn a_symlinked_bindings_file_is_followed_and_must_reach_a_regular_file() {
     let directory = tempfile::tempdir().unwrap();
-    let real = directory.path().join("real-bindings.json");
-    std::fs::write(&real, BINDINGS).unwrap();
-    let link = directory.path().join("memory-bindings.json");
-    #[cfg(unix)]
-    std::os::unix::fs::symlink(&real, &link).unwrap();
-    #[cfg(windows)]
-    if let Err(error) = std::os::windows::fs::symlink_file(&real, &link) {
-        eprintln!("skipped: this account may not create symbolic links: {error}");
-        return;
-    }
-    let options = |path: std::path::PathBuf| ServerOptions {
-        admin_token: Some(BearerToken::new(ADMIN).unwrap()),
-        admin_directory: Some(directory.path().into()),
-        memory_bindings_file: Some(path),
-        ..Default::default()
+    let write = |name: &str, text: &str| {
+        let path = directory.path().join(name);
+        std::fs::write(&path, text).unwrap();
+        path
     };
-    let error = match configured_admin_router(Service::new(database()), options(link)) {
-        Ok(_) => panic!("a symlinked bindings file must be refused"),
-        Err(error) => error,
-    };
-    assert_eq!(
-        error.to_string(),
-        "memory bindings source must be a regular file"
+    let valid = write("valid-bindings.json", BINDINGS);
+    let missing_evidence = write(
+        "missing-bindings.json",
+        &BINDINGS.replace("\"notes_ev\"", "\"missing_ev\""),
     );
-    let _router = configured_admin_router(Service::new(database()), options(real)).unwrap();
+    let folder = directory.path().join("folder");
+    std::fs::create_dir(&folder).unwrap();
+    let link = |target: &std::path::Path, name: &str| {
+        let path = directory.path().join(name);
+        #[cfg(unix)]
+        let made = std::os::unix::fs::symlink(target, &path);
+        #[cfg(windows)]
+        let made = if target.is_dir() {
+            std::os::windows::fs::symlink_dir(target, &path)
+        } else {
+            std::os::windows::fs::symlink_file(target, &path)
+        };
+        made.map(|()| path)
+    };
+    let to_valid = match link(&valid, "link-to-valid.json") {
+        Ok(path) => path,
+        Err(error) => {
+            eprintln!("skipped: this account may not create symbolic links: {error}");
+            return;
+        }
+    };
+    let to_missing = link(&missing_evidence, "link-to-missing.json").unwrap();
+    let to_folder = link(&folder, "link-to-folder.json").unwrap();
+    let start = |path: std::path::PathBuf| {
+        configured_admin_router(
+            Service::new(database()),
+            ServerOptions {
+                admin_token: Some(BearerToken::new(ADMIN).unwrap()),
+                admin_directory: Some(directory.path().into()),
+                memory_bindings_file: Some(path),
+                ..Default::default()
+            },
+        )
+    };
+    // Kubernetes mounts Secret and ConfigMap keys as symbolic links: a link is
+    // followed, and the file it reaches is the one read and validated.
+    assert!(start(to_valid).is_ok());
+    let error = start(to_missing)
+        .err()
+        .expect("the file behind the link is validated");
+    assert!(
+        error
+            .to_string()
+            .contains("a memory binding evidence collection does not exist"),
+        "unexpected startup refusal: {error}"
+    );
+    // What the link reaches must still be a regular file.
+    let error = start(to_folder)
+        .err()
+        .expect("a link to a directory is refused");
+    assert!(
+        matches!(
+            error.to_string().as_str(),
+            "memory bindings source must be a regular file" | "memory bindings file is unavailable"
+        ),
+        "unexpected startup refusal: {error}"
+    );
 }
 
 #[test]

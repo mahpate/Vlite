@@ -206,9 +206,11 @@ evidence names never change once memory has been written, and its generation
 must rise whenever its grants or state change: the file is checked against the
 binding record at each start
 (see [Agent memory](API.md#start-the-server-with-memory)).
-A symbolic link as the bindings file is refused at startup (`memory bindings
-source must be a regular file`): copy the file instead of linking it, and keep
-its directory writable only by the operator.
+A symbolic link as the bindings file is followed, as for the token files
+(Kubernetes mounts Secret and ConfigMap keys that way), and what it reaches
+must be a regular file. The file decides which resources are reserved, so keep
+its directory, and the directory of the link's target, writable only by the
+operator.
 
 These checks apply only at the server boundary. Direct embedded/file access and
 operator-managed backups are outside this authorization policy and must be

@@ -362,20 +362,13 @@ pub fn configured_admin_router(
 fn read_memory_bindings(path: &FilePath) -> std::io::Result<super::reserved::Bindings> {
     use std::io::Read;
 
-    let unavailable = |_| std::io::Error::other("memory bindings file is unavailable");
-    // A symbolic link is refused: the file decides which resources are
-    // reserved, so it must be the file the operator placed there.
-    if std::fs::symlink_metadata(path)
-        .map_err(unavailable)?
-        .file_type()
-        .is_symlink()
+    let file = std::fs::File::open(path)
+        .map_err(|_| std::io::Error::other("memory bindings file is unavailable"))?;
+    if !file
+        .metadata()
+        .map_err(|_| std::io::Error::other("memory bindings file is unavailable"))?
+        .is_file()
     {
-        return Err(std::io::Error::other(
-            "memory bindings source must be a regular file",
-        ));
-    }
-    let file = std::fs::File::open(path).map_err(unavailable)?;
-    if !file.metadata().map_err(unavailable)?.is_file() {
         return Err(std::io::Error::other(
             "memory bindings source must be a regular file",
         ));
@@ -383,7 +376,7 @@ fn read_memory_bindings(path: &FilePath) -> std::io::Result<super::reserved::Bin
     let mut bytes = Vec::new();
     file.take((crate::memory::binding::MAX_FILE_BYTES + 1) as u64)
         .read_to_end(&mut bytes)
-        .map_err(unavailable)?;
+        .map_err(|_| std::io::Error::other("memory bindings file is unavailable"))?;
     let set = crate::memory::binding::parse(&bytes)
         .map_err(|_| std::io::Error::other("memory bindings file is invalid"))?;
     Ok(super::reserved::Bindings::new(set))
