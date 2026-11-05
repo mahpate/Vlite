@@ -86,6 +86,17 @@ resolve every name through the same per-request guard as the REST routes, but
 the gRPC listener and scheduled automatic index maintenance still fail closed
 at startup while a binding exists, until the release differential covers them.
 
+Each bound graph holds a binding record, the node `binding:v1`, with the
+binding's name, tenant, generation, state, receipt window, graph and evidence
+names and a digest of its grants. Every start checks the file against the
+records of all graphs (see [Agent memory](API.md#start-the-server-with-memory)),
+adopts a graph only when it is empty, holds the binding's record, or holds
+nothing but memory nodes, and writes the record on a writable primary. A
+database whose graphs hold records keeps those graphs and their evidence
+collections reserved, with no grants and no memory routes, even when the file
+names no binding or is gone, and the refusals above (gRPC, automatic
+maintenance, imports, replication export) then apply too.
+
 Without raw access on the owning binding, a raw request naming its graph or
 collection answers as if that resource were missing, using the ordinary
 `404 collection_not_found` or `409 graph_not_found` response. Ordinary grant
@@ -125,13 +136,21 @@ scoped to the binding and the memory scope, not to the credential. Credentials
 that may write the same scope are peers: one can replay another's request by
 repeating its key and exact content, and can read its receipt with the key
 alone. Give separate scopes to credentials that must not observe each other.
-The bindings file is not stored in the
-database: a restart without a binding ends its reservation at once. Keep a
-binding you no longer use as `"state": "retired"` instead of deleting it, and
-move or delete its data first if it must become raw-readable. Startup refuses a
-graph or collection that holds ordinary data, but one node with the
-`VliteMemoryScope` label satisfies that check, so bind only resources that were
-created for memory. The administrator's HTTP request log and persistent audit
+A reservation outlives the file: a graph that holds a binding record stays
+reserved when its entry is retired and removed (only after its receipt window
+has ended) and when the whole file is removed. To give such memory up, keep the
+entry retired with a `raw_access` grant, delete the graph's nodes (the record
+node `binding:v1` included) with that credential, and drop the graph. A raw
+credential can delete or rewrite the record at any time: every memory write then
+answers `409 memory_capability_unavailable` with feature `binding_generation`
+until the next start, and a start refuses a record that is not exactly a record
+(a corrupt record is never repaired). Startup refuses a graph or collection that
+holds ordinary data: a graph is adopted when it is empty and its evidence
+collection holds no records, when it holds the binding's record, or, once, when
+a 0.7.0 server adopted it and it holds nothing but memory nodes. One node with
+the `VliteMemoryScope` label no longer satisfies that check, but a forgery made
+only of well-formed memory nodes is still indistinguishable from memory, so bind
+only resources that were created for memory. The administrator's HTTP request log and persistent audit
 show reserved names and record IDs, and collection list `id` values have gaps
 where reserved collections sit; both are accepted: the administrator can see
 everything, so keep the log and audit directories private, and collection IDs
@@ -157,11 +176,11 @@ collection, so a binding never changes the legacy routes. Live vector quotas
 count reserved records, so a caller with a quota sees its headroom change when
 memory writes. The administrator's tenant list and usage report list and count
 the reserved collections too, so their headroom is what the quota enforces; no
-credential can read those reports. A binding's receipt window, generation and
-names are read from the
-file at each start and are not checked against the database, so do not change
-them once memory has been written (see
-[Agent memory](API.md#start-the-server-with-memory)).
+credential can read those reports. A binding's receipt window, graph and
+evidence names never change once memory has been written, and its generation
+must rise whenever its grants or state change: the file is checked against the
+binding record at each start
+(see [Agent memory](API.md#start-the-server-with-memory)).
 A symbolic link as the bindings file is refused at startup (`memory bindings
 source must be a regular file`): copy the file instead of linking it, and keep
 its directory writable only by the operator.

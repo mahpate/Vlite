@@ -121,6 +121,11 @@ A named binding adopts its graph in exactly three cases:
   through the whole graph at startup. A writable primary then writes the record.
   The evidence collection is not inspected: 0.7.0 let an operator load evidence
   before attaching it, and refusing that on upgrade would strand valid data.
+  This deliberately differs from the first design report, which also asked that
+  the collection hold only attached records (owner-approved). The tests
+  `raw_loaded_evidence_does_not_stop_a_legacy_upgrade` (core) and
+  `a_graph_adopted_before_records_existed_is_adopted_once_and_gets_its_record`
+  (integration) pin it.
 
 Anything else is refused as holding ordinary data, as it was before.
 

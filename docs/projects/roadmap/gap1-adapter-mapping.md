@@ -255,7 +255,7 @@ own `retry_until_ms`.
 | Prerequisite | Status | Remaining |
 |---|---|---|
 | 1. Final type/error names | Sections 1-3; receipt lookup for forget and consolidate | Remember receipt lookup needs a new receipt encoding (section 3) |
-| 2. Binding configuration and rotation | Section 4; crate-private `src/memory/binding.rs` (strict parser behind `json`, rotation validator), unwired | Startup wiring with the REST adapter |
+| 2. Binding configuration and rotation | Section 4; crate-private `src/memory/binding.rs` (strict parser behind `json`, rotation validator) | Wired in 0.7.1: stored binding records, the rotation rules at startup and the per-write recheck ([0.7.1 follow-ups](m71-memory-followups.md#1-binding-record-bindingv1-f-01-f5-f6-slice-s2)) |
 | 3. Digest byte goldens | A1/A2/C1 core goldens exist | Loader/verifier for the independent wire fixtures under `tests/fixtures/agent_memory/wire/` once published; existing goldens unchanged |
 | 4. Manifest cleanup and restore reconciliation | E4, after E2 | Deferred with E2-E4. The first slice writes no manifest, so `restore_requires_manifest` cannot be honoured for its Forget: a DISCLOSED **PROVISIONAL** gap (section 1), not a waiver of the prerequisite |
 
@@ -263,7 +263,9 @@ own `retry_until_ms`.
 
 - **Default off (B1a).** With no `--memory-bindings-file` /
   `VLITE_MEMORY_BINDINGS_FILE` (mirroring `--providers-file`), memory routes
-  are not mounted (plain 404) and no reservation guard runs; existing routes,
+  are not mounted (plain 404) and no reservation guard runs unless the database
+  holds binding records (0.7.1), whose graphs and collections then stay
+  reserved with no grants; existing routes,
   OpenAPI bytes and `permission()` defaults are unchanged. A configured file
   that is unreadable, over the cap or invalid fails startup with a nonzero
   exit and a redacted message (error class only, never file contents).
@@ -349,11 +351,13 @@ code, goldens, OpenAPI text and user documentation agree.
   (contract section 6 and the golden fixtures). The wire conventions' rule that
   a shape failure is `invalid_json` describes the legacy routes, whose
   extractor parses the body.
-- **Binding identity.** Rotation validation (section 4) is still unwired: the
-  bindings file is the only record of a binding's receipt window, generation
-  and names. After a restart with a changed window, a retry inside its original
-  window is 409 `idempotency_conflict`. Persisting binding records is the
-  prerequisite-2 startup wiring.
+- **Binding identity.** Wired in 0.7.1 (the 0.7.0 freeze left it unwired):
+  each bound graph holds a binding record, every start runs the rotation rules
+  against the stored records, and a write rechecks the record's generation. The
+  rules and the record are in
+  [the 0.7.1 follow-ups](m71-memory-followups.md#1-binding-record-bindingv1-f-01-f5-f6-slice-s2).
+  Under 0.7.0 a restart with a changed window made a retry inside its original
+  window 409 `idempotency_conflict`.
 - **Guard and dedup.** Exact deduplication is decided before the merge
   revision check: a merge that would change nothing answers 200 `noop` at the
   current revision even when its `expected` revision is stale.

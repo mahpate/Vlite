@@ -240,24 +240,41 @@ answers 422 `memory_bounded_plan_unsupported` because no approximate index is
 built for a binding, and so does `allow_partial: true` when a budget is
 exhausted: partial results are not served.
 
-A binding's identity is read from the bindings file at startup and is not
-stored in the database. Do not change a binding's receipt window, generation
-or stored names once memory has been written: after a restart with a changed
-window, a retry of a request that is still inside its original window answers
-409 `idempotency_conflict` instead of replaying.
+A binding's identity is stored in the database. Each bound graph holds a record
+(the node `binding:v1`) with the binding's name, tenant, generation, state,
+receipt window, graph and evidence names and a digest of its grants, and every
+start checks the file against the records. A binding's receipt window, graph and
+evidence collection never change (a new window needs a new binding name).
+Changing its grants or state needs a higher `generation`, and an unchanged entry
+keeps its generation. A retired binding does not become active again and keeps
+its `retired_at_ms`, which may not precede the start that retires it. An entry
+may leave the file only after it is retired and its receipt window has ended,
+and its graph and evidence collection are not reused by another binding. A start
+that breaks a rule is refused with a fixed message that names nothing, and
+writes nothing. Before every `remember`, `consolidate` and `forget` the server
+rereads the record under the write lock; a missing or corrupt record, or one that
+is no longer the binding and generation being served, answers 409
+`memory_capability_unavailable` with `details.feature` `binding_generation` and
+writes nothing.
 
 ### Start the server with memory
 
 Memory is off until the server reads a private bindings file
 (`--memory-bindings-file PATH` or `VLITE_MEMORY_BINDINGS_FILE`). Without it
-there are no memory routes and no reservation, and no other route changes.
+there are no memory routes, and no other route changes unless the database
+already holds binding records: their graphs and collections stay reserved.
 Create the graph (on a database with graph support) and the evidence
 collection first, through the ordinary admin routes. Startup refuses to run
 when either is missing, when the database has no graph support, or when a
-resource already holds ordinary data, so bind only resources made for memory.
-On a writable primary, startup then creates every active binding's granted
-scopes. A read-only node or replica checks the file, writes nothing and refuses
-memory writes with 403 `read_only`.
+resource already holds ordinary data. A graph is adopted only when it is empty
+and its evidence collection holds no records, when it already holds this
+binding's record, or, once, when a 0.7.0 server adopted it and it holds nothing
+but memory nodes; one node with a memory label is not enough, so bind only
+resources made for memory. On a writable primary, startup then writes each
+binding's record (an unchanged record is not rewritten, so a restart with the
+same file adds no commit) and creates every active binding's granted scopes. A
+read-only node or replica runs every check, writes nothing and refuses memory
+writes with 403 `read_only`.
 
 The file is strict JSON of at most 1 MiB. An unknown or duplicate key, a `null`
 or a missing field rejects the whole file, and the startup error never repeats
@@ -296,9 +313,13 @@ its content.
 While any binding is configured the gRPC listener, automatic index
 maintenance, imports, replication export and a few aggregate admin routes are
 disabled, and the bound resources are hidden from the raw routes; see
-[Memory-bound resources](SECURITY.md#memory-bound-resources). To roll back,
-restart without the file: the routes and the reservation end at once, and the
-data stays in the database as an ordinary graph and collection.
+[Memory-bound resources](SECURITY.md#memory-bound-resources). To stop serving
+memory, restart without the file: the routes end, but the bound graph and
+evidence collection stay reserved, with no grants, for as long as the graph
+holds its record, so a removed file never exposes the memory. To make them
+ordinary again, keep the entry in the file as retired with a `raw_access` grant,
+delete the graph's nodes (the record node `binding:v1` included) with that
+credential, and drop the graph.
 
 ## Collection retrieval
 
