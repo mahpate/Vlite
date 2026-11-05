@@ -5,11 +5,14 @@
 //! of the declared indexes), and after every operation the same battery of exact searches runs on both at explicit
 //! clocks. The answers must be equal: the hits, their order and every scan statistic.
 //!
-//! A third answer comes from a small model of the rows and of the declared-index rule. It is written from the
-//! contract, not from the code under test, so that two paths that share a bug cannot agree on a wrong answer:
+//! A third answer comes from a small model of the rows and of the declared-index rule. It is written from the design
+//! documents, not from the code under test, so that two paths that share a bug cannot agree on a wrong answer. The
+//! sources: the seam freeze (a deadline hides a row exactly at the clock), the exact-search contract (the nearest
+//! rows by squared L2 distance, ties by ascending ID, at most `k`), the metadata filter semantics, and the
+//! declared-index rule of `docs/projects/roadmap/p3b-record-consumers.md` (a declared posting narrows the scan only
+//! when it holds at most half of the rows) and `p5-filters-and-serving.md` (`index_candidates` counts postings only):
 //!
-//! - a row is visible at a clock when it has no deadline or the clock is before it (a deadline hides the row exactly
-//!   at the clock);
+//! - a row is visible at a clock when it has no deadline or the clock is before it;
 //! - a filter keeps a row when every condition holds (`Eq` is equality, `Range` is inclusive on integers);
 //! - the hits are the nearest rows by squared L2 distance, ties by ascending ID, at most `k`;
 //! - a declared index serves a condition when it was declared for its kind (`Eq` or `EqRange` serve `Eq`, `Range`
@@ -20,9 +23,10 @@
 //!
 //! The battery only filters on fields whose declared kind serves the condition's kind, or on fields that are not
 //! declared, so the resident block summaries (P5), which only the resident arm consults, never prune here and every
-//! statistic is equal. One difference is allowed and documented, and the last test pins it: above one block of rows,
-//! a filter that the summaries of a declared field can prune but no posting serves makes the resident scan examine
-//! only the blocks the summaries keep (`records_scanned`), while the compact scan, which has no summaries, examines
+//! statistic is equal. One difference is allowed and documented, and the last test pins it: P5 states that a
+//! resident exact scan with summaries can report a lower `records_scanned` (and that release notes must say so).
+//! Above one block of rows, a filter that the summaries of a declared field can prune but no posting serves makes the
+//! resident scan examine only the blocks the summaries keep, while the compact scan, which has no summaries, examines
 //! every row. The hits, their order, the distance evaluations and the index candidates stay equal.
 
 use crate::compact::source::dispatch_tests::gates;
