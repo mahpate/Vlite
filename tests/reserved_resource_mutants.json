@@ -1555,7 +1555,7 @@
   },
   "structural_guard_campaign": {
     "campaign": "Structural guard: hand mutants of the request scope, the guard residues and the generated differential",
-    "baseline_commit": "4774f5bb0c04168e573fce53ab1250779277ee6d",
+    "baseline_commit": "4204a9a28af46631bd12849d09be6a314ea182e2",
     "protocol": "Each mutant replaces exactly one occurrence of `old` by `new` in `file` of the baseline commit; `cmd` runs from the repository root. A mutant is killed when the build succeeds and at least one test the command ran fails because of it. A build error or a command that runs no test is not a kill. The file is restored before the next mutant.",
     "mutants": [
       {
@@ -1564,7 +1564,7 @@
         "file": "src/server/guard.rs",
         "old": "if !self.collection_visible(&stored) {",
         "new": "if false && !self.collection_visible(&stored) {",
-        "cmd": "cargo test --locked --offline --all-features --no-fail-fast --test server_guard_differential --test server_memory_guards --test server_memory_reserved_as_missing --test tenants",
+        "cmd": "cargo test --locked --offline --features server --no-fail-fast --test server_guard_differential --test server_memory_guards --test server_memory_reserved_as_missing --test tenants",
         "result": "pending"
       },
       {
@@ -1573,7 +1573,7 @@
         "file": "src/server/guard.rs",
         "old": "admin::Role::Scoped(grant) => grant.names(stored),",
         "new": "admin::Role::Scoped(_) => true,",
-        "cmd": "cargo test --locked --offline --all-features --no-fail-fast --test server_guard_differential --test server_memory_guards --test server_memory_reserved_as_missing --test tenants",
+        "cmd": "cargo test --locked --offline --features server --no-fail-fast --test server_guard_differential --test server_memory_guards --test server_memory_reserved_as_missing --test tenants",
         "result": "pending"
       },
       {
@@ -1582,7 +1582,7 @@
         "file": "src/server/guard.rs",
         "old": ".raw_allowed(self.raw(), reserved::Resource::Collection, stored)",
         "new": ".raw_allowed(None, reserved::Resource::Collection, stored)",
-        "cmd": "cargo test --locked --offline --all-features --no-fail-fast --test server_guard_differential --test server_memory_guards --test server_memory_reserved_as_missing --test tenants",
+        "cmd": "cargo test --locked --offline --features server --no-fail-fast --test server_guard_differential --test server_memory_guards --test server_memory_reserved_as_missing --test tenants",
         "result": "pending"
       },
       {
@@ -1591,7 +1591,7 @@
         "file": "src/server/guard.rs",
         "old": ".raw_allowed(self.raw(), reserved::Resource::Graph, stored)",
         "new": ".raw_allowed(None, reserved::Resource::Graph, stored)",
-        "cmd": "cargo test --locked --offline --all-features --no-fail-fast --test server_guard_differential --test server_memory_guards --test server_memory_reserved_as_missing --test tenants",
+        "cmd": "cargo test --locked --offline --features server --no-fail-fast --test server_guard_differential --test server_memory_guards --test server_memory_reserved_as_missing --test tenants",
         "result": "pending"
       },
       {
@@ -1600,7 +1600,7 @@
         "file": "src/server/guard.rs",
         "old": "move |stored| self.collection_visible(stored)",
         "new": "move |_stored| true",
-        "cmd": "cargo test --locked --offline --all-features --no-fail-fast --test server_guard_differential --test server_memory_guards --test server_memory_reserved_as_missing --test tenants",
+        "cmd": "cargo test --locked --offline --features server --no-fail-fast --test server_guard_differential --test server_memory_guards --test server_memory_reserved_as_missing --test tenants",
         "result": "pending"
       },
       {
@@ -1609,7 +1609,7 @@
         "file": "src/server/guard.rs",
         "old": "let hidden = !self.graph_visible(&stored);",
         "new": "let hidden = false;",
-        "cmd": "cargo test --locked --offline --all-features --no-fail-fast --test server_guard_differential --test server_memory_guards --test server_memory_reserved_as_missing --test tenants",
+        "cmd": "cargo test --locked --offline --features server --no-fail-fast --test server_guard_differential --test server_memory_guards --test server_memory_reserved_as_missing --test tenants",
         "result": "pending"
       },
       {
@@ -1618,7 +1618,7 @@
         "file": "src/server/guard.rs",
         "old": "if let admin::Role::Scoped(grant) = &self.role",
         "new": "if let admin::Role::Scoped(grant) = &self.role && false",
-        "cmd": "cargo test --locked --offline --all-features --no-fail-fast --test server_guard_differential --test server_memory_guards --test server_memory_reserved_as_missing --test tenants",
+        "cmd": "cargo test --locked --offline --features server --no-fail-fast --test server_guard_differential --test server_memory_guards --test server_memory_reserved_as_missing --test tenants",
         "result": "pending"
       },
       {
@@ -1627,7 +1627,7 @@
         "file": "src/server/guard.rs",
         "old": "tenants::qualify(&self.role, name)",
         "new": "name.to_owned()",
-        "cmd": "cargo test --locked --offline --all-features --no-fail-fast --test server_guard_differential --test server_memory_guards --test server_memory_reserved_as_missing --test tenants",
+        "cmd": "cargo test --locked --offline --features server --no-fail-fast --test server_guard_differential --test server_memory_guards --test server_memory_reserved_as_missing --test tenants",
         "result": "pending"
       },
       {
@@ -1636,7 +1636,7 @@
         "file": "src/server/guard.rs",
         "old": "self.guard_collection(db, stored.to_owned())",
         "new": "self.guard_collection(db, self.qualify(stored))",
-        "cmd": "cargo test --locked --offline --all-features --no-fail-fast --test server_guard_differential --test server_memory_guards --test server_memory_reserved_as_missing --test tenants",
+        "cmd": "cargo test --locked --offline --features server --no-fail-fast --test server_guard_differential --test server_memory_guards --test server_memory_reserved_as_missing --test tenants",
         "result": "pending"
       },
       {
@@ -1645,7 +1645,7 @@
         "file": "src/server/guard.rs",
         "old": "item.name = self.unqualify(&item.name);",
         "new": "item.name = item.name.clone();",
-        "cmd": "cargo test --locked --offline --all-features --no-fail-fast --test server_guard_differential --test server_memory_guards --test server_memory_reserved_as_missing --test tenants",
+        "cmd": "cargo test --locked --offline --features server --no-fail-fast --test server_guard_differential --test server_memory_guards --test server_memory_reserved_as_missing --test tenants",
         "result": "pending"
       },
       {
@@ -1654,7 +1654,7 @@
         "file": "src/server/guard.rs",
         "old": "self.collection_visible(&change.collection)",
         "new": "true",
-        "cmd": "cargo test --locked --offline --all-features --no-fail-fast --test server_guard_differential --test server_memory_guards --test server_memory_reserved_as_missing --test tenants",
+        "cmd": "cargo test --locked --offline --features server --no-fail-fast --test server_guard_differential --test server_memory_guards --test server_memory_reserved_as_missing --test tenants",
         "result": "pending"
       },
       {
@@ -1663,7 +1663,7 @@
         "file": "src/server/guard.rs",
         "old": "Ok(db.kv_store_by_id(self.id)?)",
         "new": "Ok(db.kv_store(self.stored.rsplit(\"__\").next().unwrap_or(&*self.stored))?)",
-        "cmd": "cargo test --locked --offline --all-features --no-fail-fast --test server_guard_differential --test server_memory_guards --test server_memory_reserved_as_missing --test tenants",
+        "cmd": "cargo test --locked --offline --features server --no-fail-fast --test server_guard_differential --test server_memory_guards --test server_memory_reserved_as_missing --test tenants",
         "result": "pending"
       },
       {
@@ -1672,7 +1672,7 @@
         "file": "src/server/guard.rs",
         "old": "Ok(db.kv_view_by_id(self.id)?)",
         "new": "Ok(db.kv_view(self.stored.rsplit(\"__\").next().unwrap_or(&*self.stored))?)",
-        "cmd": "cargo test --locked --offline --all-features --no-fail-fast --test server_guard_differential --test server_memory_guards --test server_memory_reserved_as_missing --test tenants",
+        "cmd": "cargo test --locked --offline --features server --no-fail-fast --test server_guard_differential --test server_memory_guards --test server_memory_reserved_as_missing --test tenants",
         "result": "pending"
       },
       {
@@ -1681,7 +1681,7 @@
         "file": "src/server/guard.rs",
         "old": "Ok(db.collection_mut_by_id(self.id)?)",
         "new": "Ok(db.collection_mut(self.stored.rsplit(\"__\").next().unwrap_or(&*self.stored))?)",
-        "cmd": "cargo test --locked --offline --all-features --no-fail-fast --test server_guard_differential --test server_memory_guards --test server_memory_reserved_as_missing --test tenants",
+        "cmd": "cargo test --locked --offline --features server --no-fail-fast --test server_guard_differential --test server_memory_guards --test server_memory_reserved_as_missing --test tenants",
         "result": "pending"
       },
       {
@@ -1690,7 +1690,7 @@
         "file": "src/server/reserved.rs",
         "old": "Some(index) => credential.is_some_and(|id| self.raw.contains(&(index, id.to_owned()))),",
         "new": "Some(_) => credential.is_some(),",
-        "cmd": "cargo test --locked --offline --all-features --no-fail-fast --test server_guard_differential --test server_memory_guards --test server_memory_reserved_as_missing --test tenants",
+        "cmd": "cargo test --locked --offline --features server --no-fail-fast --test server_guard_differential --test server_memory_guards --test server_memory_reserved_as_missing --test tenants",
         "result": "pending"
       },
       {
@@ -1699,7 +1699,7 @@
         "file": "src/server/reserved.rs",
         "old": "Some(owner) => self.owner(Resource::Collection, collection) == Some(owner),",
         "new": "Some(_) => true,",
-        "cmd": "cargo test --locked --offline --all-features --no-fail-fast --test server_guard_differential --test server_memory_guards --test server_memory_reserved_as_missing --test tenants",
+        "cmd": "cargo test --locked --offline --features server --no-fail-fast --test server_guard_differential --test server_memory_guards --test server_memory_reserved_as_missing --test tenants",
         "result": "pending"
       },
       {
@@ -1708,7 +1708,7 @@
         "file": "src/server.rs",
         "old": "|| (op == credentials::Op::Backup && service.has_bindings())",
         "new": "|| (op == credentials::Op::Backup && false)",
-        "cmd": "cargo test --locked --offline --all-features --no-fail-fast --test server_guard_differential --test server_memory_guards --test server_memory_reserved_as_missing --test tenants",
+        "cmd": "cargo test --locked --offline --features server --no-fail-fast --test server_guard_differential --test server_memory_guards --test server_memory_reserved_as_missing --test tenants",
         "result": "pending"
       },
       {
@@ -1717,7 +1717,7 @@
         "file": "src/server.rs",
         "old": "if let (Some(admin::Role::Scoped(grant)), true) = (role, hidden) {",
         "new": "if let (Some(admin::Role::Scoped(grant)), true) = (role, true) {",
-        "cmd": "cargo test --locked --offline --all-features --no-fail-fast --test server_guard_differential --test server_memory_guards --test server_memory_reserved_as_missing --test tenants",
+        "cmd": "cargo test --locked --offline --features server --no-fail-fast --test server_guard_differential --test server_memory_guards --test server_memory_reserved_as_missing --test tenants",
         "result": "pending"
       },
       {
@@ -1726,7 +1726,7 @@
         "file": "src/server/guard.rs",
         "old": "(output, flag.load(Ordering::Relaxed))",
         "new": "(output, false)",
-        "cmd": "cargo test --locked --offline --all-features --no-fail-fast --test server_guard_differential --test server_memory_guards --test server_memory_reserved_as_missing --test tenants",
+        "cmd": "cargo test --locked --offline --features server --no-fail-fast --test server_guard_differential --test server_memory_guards --test server_memory_reserved_as_missing --test tenants",
         "result": "pending"
       },
       {
@@ -1735,7 +1735,7 @@
         "file": "src/server/tenants.rs",
         "old": "state.name.strip_prefix(&prefix).map(|name| {",
         "new": "state.name.strip_prefix(&prefix).filter(|name| !name.ends_with(\"_ev\")).map(|name| {",
-        "cmd": "cargo test --locked --offline --all-features --no-fail-fast --test server_guard_differential --test server_memory_guards --test server_memory_reserved_as_missing --test tenants",
+        "cmd": "cargo test --locked --offline --features server --no-fail-fast --test server_guard_differential --test server_memory_guards --test server_memory_reserved_as_missing --test tenants",
         "result": "pending"
       },
       {
@@ -1744,7 +1744,7 @@
         "file": "src/server/admin.rs",
         "old": "if std::fs::symlink_metadata(path)",
         "new": "if std::fs::metadata(path)",
-        "cmd": "cargo test --locked --offline --all-features --no-fail-fast --test server_guard_differential --test server_memory_guards --test server_memory_reserved_as_missing --test tenants",
+        "cmd": "cargo test --locked --offline --features server --no-fail-fast --test server_guard_differential --test server_memory_guards --test server_memory_reserved_as_missing --test tenants",
         "result": "pending"
       },
       {
@@ -1771,7 +1771,7 @@
         "file": "src/server/webhooks.rs",
         "old": "    validate(&input)?;",
         "new": "    validate(&input)?; if input.collections.iter().flatten().any(|name| !service.memory_bindings.reserved().raw_allowed(None, super::reserved::Resource::Collection, name)) { return Err(ApiError::new(StatusCode::NOT_FOUND, \"collection_not_found\", \"collection not found\")); }",
-        "cmd": "cargo test --locked --offline --all-features --no-fail-fast --test server_guard_differential --test server_memory_guards --test server_memory_reserved_as_missing --test tenants",
+        "cmd": "cargo test --locked --offline --features server --no-fail-fast --test server_guard_differential --test server_memory_guards --test server_memory_reserved_as_missing --test tenants",
         "result": "pending"
       },
       {
@@ -1780,7 +1780,7 @@
         "file": "src/property_graph/mod.rs",
         "old": "if !attachable(graph, collection) {",
         "new": "if false && !attachable(graph, collection) {",
-        "cmd": "cargo test --locked --offline --all-features --no-fail-fast --test server_memory_guards -- an_ordinary_record_cannot_be_attached_to_a_reserved_graph_even_by_its_raw_holder",
+        "cmd": "cargo test --locked --offline --features server --no-fail-fast --test server_memory_guards -- an_ordinary_record_cannot_be_attached_to_a_reserved_graph_even_by_its_raw_holder",
         "result": "pending"
       },
       {
@@ -1789,7 +1789,7 @@
         "file": "src/by_id.rs",
         "old": "if self.collections.contains_key(&id) {",
         "new": "if true {",
-        "cmd": "cargo test --locked --offline --all-features --no-fail-fast --lib -- by_id:: server::guard:: server::reserved::",
+        "cmd": "cargo test --locked --offline --features server --no-fail-fast --lib -- by_id:: server::guard:: server::reserved::",
         "result": "pending"
       },
       {
@@ -1798,7 +1798,7 @@
         "file": "src/by_id.rs",
         "old": "if self.state(id).name == \"default\" {",
         "new": "if false {",
-        "cmd": "cargo test --locked --offline --all-features --no-fail-fast --lib -- by_id:: server::guard:: server::reserved::",
+        "cmd": "cargo test --locked --offline --features server --no-fail-fast --lib -- by_id:: server::guard:: server::reserved::",
         "result": "pending"
       },
       {
@@ -1807,7 +1807,7 @@
         "file": "src/server.rs",
         "old": "let revision = db.update_metadata_in(collection, id, &metadata, Expected::Any)?;",
         "new": "let revision = db.update_metadata_in(db.resolve(target.name())?, id, &metadata, Expected::Any)?;",
-        "cmd": "cargo test --locked --offline --all-features --no-fail-fast --test server_guard_differential --test server_memory_guards --test server_memory_reserved_as_missing --test tenants",
+        "cmd": "cargo test --locked --offline --features server --no-fail-fast --test server_guard_differential --test server_memory_guards --test server_memory_reserved_as_missing --test tenants",
         "result": "pending"
       },
       {
@@ -1816,7 +1816,7 @@
         "file": "tests/server_name_lookup_scan.rs",
         "old": "    \"kv_store\",",
         "new": "    \"kv_storex\",",
-        "cmd": "cargo test --locked --offline --all-features --no-fail-fast --test server_name_lookup_scan",
+        "cmd": "cargo test --locked --offline --features server --no-fail-fast --test server_name_lookup_scan",
         "result": "pending"
       },
       {
@@ -1825,7 +1825,7 @@
         "file": "tests/server_name_lookup_scan.rs",
         "old": "\"auto_tick\",",
         "new": "\"auto_tickx\",",
-        "cmd": "cargo test --locked --offline --all-features --no-fail-fast --test server_name_lookup_scan",
+        "cmd": "cargo test --locked --offline --features server --no-fail-fast --test server_name_lookup_scan",
         "result": "pending"
       },
       {
@@ -1834,7 +1834,7 @@
         "file": "tests/server_name_lookup_scan.rs",
         "old": "if BY_NAME.contains(&name) && !database_first(&tokens, index + 3)",
         "new": "if BY_NAME.contains(&name) && false && !database_first(&tokens, index + 3)",
-        "cmd": "cargo test --locked --offline --all-features --no-fail-fast --test server_name_lookup_scan",
+        "cmd": "cargo test --locked --offline --features server --no-fail-fast --test server_name_lookup_scan",
         "result": "pending"
       },
       {
@@ -1843,7 +1843,7 @@
         "file": "tests/server_guard_differential.rs",
         "old": "        \"/v1/admin/credentials\",",
         "new": "        \"/v1/admin/credentials-x\",",
-        "cmd": "cargo test --locked --offline --all-features --no-fail-fast --test server_guard_differential -- every_name_bearing_operation_has_generated_coverage the_digest_sees_a_write_to_every_protected_resource",
+        "cmd": "cargo test --locked --offline --features server --no-fail-fast --test server_guard_differential -- every_name_bearing_operation_has_generated_coverage the_digest_sees_a_write_to_every_protected_resource",
         "result": "pending"
       },
       {
@@ -1852,7 +1852,7 @@
         "file": "tests/server_guard_differential.rs",
         "old": "if let Some(content) = operation[\"requestBody\"][\"content\"].as_object() {",
         "new": "if let Some(content) = operation[\"requestBody\"][\"contentx\"].as_object() {",
-        "cmd": "cargo test --locked --offline --all-features --no-fail-fast --test server_guard_differential -- every_name_bearing_operation_has_generated_coverage the_digest_sees_a_write_to_every_protected_resource",
+        "cmd": "cargo test --locked --offline --features server --no-fail-fast --test server_guard_differential -- every_name_bearing_operation_has_generated_coverage the_digest_sees_a_write_to_every_protected_resource",
         "result": "pending"
       },
       {
@@ -1861,7 +1861,43 @@
         "file": "tests/server_guard_differential.rs",
         "old": "out.insert(\"root.kvstore\", read_kv(world, \"admin\", \"kvstore\").await);",
         "new": "let _ = read_kv(world, \"admin\", \"kvstore\").await;",
-        "cmd": "cargo test --locked --offline --all-features --no-fail-fast --test server_guard_differential -- every_name_bearing_operation_has_generated_coverage the_digest_sees_a_write_to_every_protected_resource",
+        "cmd": "cargo test --locked --offline --features server --no-fail-fast --test server_guard_differential -- every_name_bearing_operation_has_generated_coverage the_digest_sees_a_write_to_every_protected_resource",
+        "result": "pending"
+      },
+      {
+        "id": "G71-35",
+        "desc": "collection lists show the reserved collections",
+        "file": "src/server/guard.rs",
+        "old": "self.retain_visible_collections(&mut items, |item| item.name.as_str());",
+        "new": "let _ = &mut items;",
+        "cmd": "cargo test --locked --offline --features server --no-fail-fast --test server_guard_differential -- lists_and_the_feed_never_name_a_reserved_resource_to_a_caller_that_may_not_reach_it",
+        "result": "pending"
+      },
+      {
+        "id": "G71-36",
+        "desc": "graph lists show the reserved graphs",
+        "file": "src/server/guard.rs",
+        "old": "self.retain_visible_graphs(&mut graphs, |graph| graph.name.as_str());",
+        "new": "let _ = &mut graphs;",
+        "cmd": "cargo test --locked --offline --features server --no-fail-fast --test server_guard_differential -- lists_and_the_feed_never_name_a_reserved_resource_to_a_caller_that_may_not_reach_it",
+        "result": "pending"
+      },
+      {
+        "id": "G71-37",
+        "desc": "the change feed shows the events of a reserved graph",
+        "file": "src/server/features.rs",
+        "old": "graph::feed_visible(scope.role(), name) && scope.graph_visible(name)",
+        "new": "graph::feed_visible(scope.role(), name)",
+        "cmd": "cargo test --locked --offline --features server --no-fail-fast --test server_guard_differential -- lists_and_the_feed_never_name_a_reserved_resource_to_a_caller_that_may_not_reach_it",
+        "result": "pending"
+      },
+      {
+        "id": "G71-38",
+        "desc": "the change feed shows the events of a reserved collection",
+        "file": "src/server/features.rs",
+        "old": "&& scope.collection_visible(&change.collection)",
+        "new": "&& true",
+        "cmd": "cargo test --locked --offline --features server --no-fail-fast --test server_guard_differential -- lists_and_the_feed_never_name_a_reserved_resource_to_a_caller_that_may_not_reach_it",
         "result": "pending"
       }
     ]
