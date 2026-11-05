@@ -1275,8 +1275,8 @@ async fn tenant_qualified_reservations_follow_scoped_credentials_and_raw_access(
         ADMIN,
     )
     .await;
-    assert_eq!(delete_tenant_status, 403);
-    assert_eq!(delete_tenant_error["error"]["code"], "forbidden_scope");
+    assert_eq!(delete_tenant_status, 409);
+    assert_eq!(delete_tenant_error["error"]["code"], "tenant_not_empty");
     let (status, error) = call_token(
         &no_raw,
         "GET",

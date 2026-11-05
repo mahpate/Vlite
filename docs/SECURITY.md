@@ -98,7 +98,8 @@ Provision raw-holder credentials with `collections:["*"]` before granting raw
 access in the bindings file; credential creation treats a named reserved
 collection as missing.
 
-**Known limits.** Sequence numbers are
+**Known limits.** A tenant that owns a binding cannot be deleted and answers
+`409 tenant_not_empty` even when no visible collection remains. Sequence numbers are
 database-wide: graph `view_sequence` and `revision`, change-feed `head` and
 memory receipt `sequence` advance for hidden writes, so a caller can count the
 activity of other tenants and of memory, but not read it. Idempotency keys are

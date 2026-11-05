@@ -281,13 +281,6 @@ async fn delete(
     State(service): State<Service>,
     Path(id): Path<String>,
 ) -> Result<Json<Value>, ApiError> {
-    if service
-        .memory_bindings
-        .iter()
-        .any(|binding| binding.tenant == id)
-    {
-        return Err(forbidden_scope());
-    }
     let store = store(&service)?;
     let service_clone = service.clone();
     let users_removed = service
@@ -297,7 +290,11 @@ async fn delete(
                 .iter_mut()
                 .find(|t| t.id == id && !t.deleted)
                 .ok_or_else(not_found)?;
-            if db
+            if service_clone
+                .memory_bindings
+                .iter()
+                .any(|binding| binding.tenant == id)
+                || db
                 .collections()?
                 .iter()
                 .any(|c| c.name.starts_with(&format!("t{id}__")))

@@ -1517,5 +1517,40 @@
       "api_reference": "893 public items documented; passed",
       "api_route_inventory": "10 tests passed"
     }
+  },
+  "b5_tenant_delete_campaign": {
+    "total": 2,
+    "killed": 2,
+    "survived": 0,
+    "equivalent": 0,
+    "fail_first": "Bound tenant returned 403 forbidden_scope; ordinary nonempty tenant returned 409 tenant_not_empty. Status, headers and body differed.",
+    "mutants": [
+      {
+        "id": "F2-01",
+        "description": "bound tenant returns forbidden rather than ordinary occupied response",
+        "file": "src\\server\\tenants.rs",
+        "test": "bound_tenant_deletion_matches_an_ordinary_nonempty_tenant",
+        "before": "            if service_clone\n",
+        "after": "            if service_clone.memory_bindings.iter().any(|binding| binding.tenant == id) {\n                return Err(forbidden_scope());\n            }\n            if service_clone\n",
+        "result": "killed",
+        "original_sha256": "398d05c33146a5dddb27a642c4b28ab45367a32802347ac400a8ca926a05a120",
+        "mutated_sha256": "62d9a224e62e50d1c0206d057b96e7e294d60fa9cfbd3b8e78de0ddda4bc663c",
+        "restored_sha256": "398d05c33146a5dddb27a642c4b28ab45367a32802347ac400a8ca926a05a120",
+        "restored_identically": true
+      },
+      {
+        "id": "F2-02",
+        "description": "binding check omitted after tenant existence lookup",
+        "file": "src\\server\\tenants.rs",
+        "test": "bound_tenant_deletion_matches_an_ordinary_nonempty_tenant",
+        "before": ".any(|binding| binding.tenant == id)",
+        "after": ".any(|binding| false && binding.tenant == id)",
+        "result": "killed",
+        "original_sha256": "398d05c33146a5dddb27a642c4b28ab45367a32802347ac400a8ca926a05a120",
+        "mutated_sha256": "15f463839b373a88ad4f2552ec9e7cf74448fde99796ef485fc5fae0006e1e6d",
+        "restored_sha256": "398d05c33146a5dddb27a642c4b28ab45367a32802347ac400a8ca926a05a120",
+        "restored_identically": true
+      }
+    ]
   }
 }
