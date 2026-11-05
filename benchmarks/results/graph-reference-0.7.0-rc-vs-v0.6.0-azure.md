@@ -4,7 +4,7 @@
 
 Method: three revisions (`rc` = `30901be1732b94239e3b7fa1234593f26df63d49`, `v0.6.0` = `6428b693029abbb4483ff0e96b70248d8da4c312`, `v0.6.1` = `fb46702f6c14a6a2d9de750858cf1c14503fc563`) were built from clean `git archive` extractions with the same toolchain and measured with the `graph_baseline.py` reference profile, 5 runs per workload and revision, on four identical Azure Standard_D16s_v5 VMs (one per large workload; the three small workloads ran one after another on the fourth). The runner waited 1200 s after the builds before the first measurement. The gate, the workloads and the arguments are unchanged from the v0.6.0 baseline campaign ([baseline](../../docs/projects/feature-agent-graph/baseline.md)).
 
-`rc` is the integration head with a green full CI run at the time of the campaign. Later release-candidate commits add server adapters, tools, clients and documentation only; the freeze section of the release notes states the exact final revision and shows that no measured path changed.
+`rc` is the integration head with a green full CI run at the time of the campaign. Later release-candidate commits add server adapters, tools, clients and documentation, restore two 0.6.1 default behaviors and change only the filter-summaries path; the Benchmarks section of the release notes lists them.
 
 ## Machine
 

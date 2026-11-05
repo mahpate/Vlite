@@ -93,7 +93,7 @@ clears expiry. Already-due puts succeed, then read absent. Expiry needs v5.
 Namespaces are 1..255 UTF-8 bytes and keys 1..1,024; strings are not normalized.
 Values are canonical padded standard base64, at most **1,047,290 decoded bytes**
 (1,396,388 encoded characters); an empty value is valid. Unknown/duplicate JSON
-fields and wrong types are rejected with `invalid_json`; parsed bound or
+fields and wrong types are rejected with 422 `invalid_json`; parsed bound or
 canonical-encoding violations return 422 `invalid_input`, including a list
 `limit` that is empty, malformed or outside 1..10,000. Unknown/duplicate
 query parameters return 400 `invalid_query`. Query decoding uses form
