@@ -47,6 +47,21 @@ ALLOWLIST = {
                      "/v1/collections/{collection}/kv/entry")},
 }
 # Only the explicitly named additions are accepted, never removals/value changes.
+# OpenAPI schema tightenings reviewed and accepted for 0.7.0 (release notes,
+# Compatibility): rerank.lambda is valid only with mode "mmr", and a custom mode
+# needs a provider. The 0.6.1 server already refused every request these
+# conditions exclude with 422 invalid_input, which the differential's negative
+# case confirms. Matching is exact on the issue text; anything else still fails.
+ACCEPTED_ISSUES = {
+    f"{where} new constraint needs review":
+        "Conditional rerank constraints (lambda only with mmr, provider only with custom) restate runtime rules."
+    for where in (
+        "/paths/~1v1~1collections~1{c}~1search/post/requestBody/content/application~1json/schema/properties/rerank/allOf",
+        "/paths/~1v1~1search/post/requestBody/content/application~1json/schema/properties/rerank/allOf",
+        "/components/schemas/SearchRequest/properties/rerank/allOf",
+        "/components/schemas/RerankOptions/allOf",
+    )
+}
 VOLATILE = {
     "created_unix_ms", "updated_unix_ms", "last_login_unix_ms",
     "suspended_unix_ms", "expires_unix_ms", "timestamp_ms", "unix_ms",
@@ -534,7 +549,9 @@ def compatibility(base, candidate):
     expanded_base, expanded_candidate = expand(base, base), expand(candidate, candidate)
     walk(expanded_base["paths"], expanded_candidate["paths"], ("paths",))
     walk(expanded_base.get("components", {}), expanded_candidate.get("components", {}), ("components",))
-    return {"issues": issues, "additions": sorted(set(additions)),
+    accepted = sorted(issue for issue in set(issues) if issue in ACCEPTED_ISSUES)
+    issues = [issue for issue in issues if issue not in ACCEPTED_ISSUES]
+    return {"issues": issues, "accepted": accepted, "additions": sorted(set(additions)),
             "new_operations": sorted(f"{m} {p}" for m, p in
                                      operations(candidate).keys() - operations(base).keys())}
 
@@ -1165,6 +1182,8 @@ def markdown(report):
     contract = report.get("openapi", {})
     lines.extend(["", "## OpenAPI compatibility", "",
                   *["- " + issue for issue in contract.get("issues", [])],
+                  "Accepted tightenings (explicit, reviewed):",
+                  *[f"- {issue}: {ACCEPTED_ISSUES[issue]}" for issue in contract.get("accepted", [])],
                   "Additions:", *["- " + addition for addition in contract.get("additions", [])],
                   "New operations (not exercised):", *["- " + item for item in contract.get("new_operations", [])],
                   "", "## Self-test", "", *report.get("self_test", []),

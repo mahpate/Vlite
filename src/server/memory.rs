@@ -1,8 +1,9 @@
 //! Agent-memory REST adapter (serving contract section 3/8, mapping
-//! `docs/projects/roadmap/gap1-adapter-mapping.md`). This milestone is the
-//! startup skeleton: bound resources are checked and granted scopes
-//! provisioned before any listener serves. No memory route is mounted yet:
-//! every `/v1/memory/...` path is 404 with or without a bindings file.
+//! `docs/projects/roadmap/gap1-adapter-mapping.md`). Startup checks every
+//! bound resource and provisions the granted scopes before any listener
+//! serves, and the nine routes are mounted only when a bindings file names at
+//! least one binding: without a file every `/v1/memory/...` path is a plain
+//! 404.
 
 use std::collections::BTreeSet;
 

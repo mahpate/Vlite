@@ -235,6 +235,59 @@ or stored names once memory has been written: after a restart with a changed
 window, a retry of a request that is still inside its original window answers
 409 `idempotency_conflict` instead of replaying.
 
+### Start the server with memory
+
+Memory is off until the server reads a private bindings file
+(`--memory-bindings-file PATH` or `VLITE_MEMORY_BINDINGS_FILE`). Without it
+there are no memory routes and no reservation, and no other route changes.
+Create the graph (on a database with graph support) and the evidence
+collection first, through the ordinary admin routes. Startup refuses to run
+when either is missing, when the database has no graph support, or when a
+resource already holds ordinary data, so bind only resources made for memory.
+On a writable primary, startup then creates every active binding's granted
+scopes. A read-only node or replica checks the file, writes nothing and refuses
+memory writes with 403 `read_only`.
+
+The file is strict JSON of at most 1 MiB. An unknown or duplicate key, a `null`
+or a missing field rejects the whole file, and the startup error never repeats
+its content.
+
+```json
+{"version": "memory-bindings-v1", "bindings": [{
+  "binding": "notes", "tenant": "@root", "generation": 1, "state": "active",
+  "graph": "notes_graph", "evidence_collection": "notes_ev",
+  "schema_version": "memory-schema-v1", "ranking_version": "memory-ranking-v1",
+  "digest_version": "memory-request-v1", "receipt_window_ms": 86400000,
+  "grants": [{"principal": "abcdefghij27", "scopes": [{"agent": "a"}]}]
+}]}
+```
+
+- `binding` is the name in the URL (`^[a-z][a-z0-9_-]{0,62}$`). `tenant` is
+  `@root` or a tenant ID. `graph` and `evidence_collection` (one name, or
+  `null`) are stored names that one binding owns. Without an evidence
+  collection, text and vector recall answer 409 `memory_capability_unavailable`
+  with `details.feature` `evidence_recall`; with one, text recall also needs
+  that collection's text index to be ready (409 `index_not_ready` otherwise).
+- `receipt_window_ms` (1 to 2,592,000,000) is how long a retry returns its
+  original result.
+- A grant names a credential ID (12 characters, never a token) and the exact
+  scopes it may use: `agent`, optionally `user`, and `session` only with a
+  `user`. A credential without a grant has no scope, an administrator
+  included. `"raw_access": true` on a grant also lets that credential reach the
+  bound graph and collection through the raw routes, with its ordinary
+  permissions.
+- `"state": "retired"` with `retired_at_ms` keeps `receipts/lookup` working and
+  answers every other route 409 `memory_capability_unavailable` with
+  `details.feature` `binding_retired`.
+- At most 256 bindings, 1,024 grants per binding and 256 scopes per grant.
+
+While any binding is configured the gRPC listener, automatic index
+maintenance, imports, replication export and a few aggregate admin routes are
+disabled, and the bound resources are hidden from the raw routes; see
+[Memory-bound resources](SECURITY.md#memory-bound-resources). To roll back,
+restart without the file: the routes and the reservation end at once, and the
+data stays in the database as an ordinary graph and collection.
+
 ## Collection retrieval
 
 * `POST /v1/collections/{collection}/search/grouped` takes `vector`, `field`,

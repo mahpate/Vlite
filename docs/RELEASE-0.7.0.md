@@ -465,7 +465,8 @@ setup, and change nothing until you use them:
 - graph algorithms, when you call `GraphRef::algorithm`;
 - managed providers, when an administrator supplies a startup file;
 - agent memory, when an administrator supplies a bindings file
-  (`--memory-bindings-file`);
+  (`--memory-bindings-file`; see
+  [Start the server with memory](API.md#start-the-server-with-memory));
 - background index rebuilds, when you call `set_background_hnsw_rebuild`.
 <!-- source: docs/STORAGE-FEATURES.md#key-value-store, docs/STORAGE-FEATURES.md#directory-store, docs/GRAPH.md#expiry-ttl, docs/GRPC.md, docs/API.md#key-value-entries, docs/REFERENCE.md#background-hnsw-rebuilds-rust, tests/server_cli.rs -->
 
@@ -535,6 +536,23 @@ first if that matters.
   reported as `Corrupt`, where 0.6.1 reported `UnsupportedFeature`; no valid
   file written by 0.6.1 is affected.
   <!-- source: docs/GRAPH.md#expiry-ttl, docs/STORAGE-FEATURES.md#directory-store, tests/graph_ttl.rs, src/kv.rs, src/format.rs -->
+- **Invalid input is judged more strictly.** A file written by 0.6.1 is
+  unaffected. A damaged one differs in two places. Reading the change feed or
+  exporting the log now checks each graph frame in full, as inspection already
+  did, so a frame with an altered count, reserved ID or body whose checksum was
+  repaired is refused where 0.6.1's export (and sometimes its feed) accepted
+  it, and the reason can differ. A cursor whose version byte is 2, passed to
+  `GraphRef::find_nodes`, answers `InvalidQuery("malformed cursor")` where
+  0.6.1 answered `InvalidQuery("unsupported cursor version")`; the error kind is
+  the same.
+  <!-- source: src/property_graph/frame.rs, src/logops.rs, src/changes.rs, src/format.rs, src/property_graph/engine/cursor.rs -->
+- **Memory and logging.** A collection that declares a metadata index can log a
+  `vlite::filter` warning, event `filter_summary_budget`, when building its
+  block summaries exceeds a fixed budget; that scan is then exact without them.
+  Graph nodes keep their relationships and properties in sorted vectors
+  instead of per-property trees, which changes the memory use and speed of large
+  graphs; ordering, files and the wire are unchanged.
+  <!-- source: src/compact/stats.rs, src/property_graph/engine/state.rs, src/property_graph/engine/model.rs -->
 - **Wire.** REST and gRPC changes are additive: the four key-value REST
   operations (`GET /v1/capabilities` lists their routes and reports
   `features.kv`), five new RPCs (the four-RPC `vlite.v1.Kv` service and
