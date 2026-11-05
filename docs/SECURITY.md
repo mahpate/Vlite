@@ -84,6 +84,26 @@ dispatcher filters reserved events from existing subscriptions. The gRPC
 listener and scheduled automatic index maintenance also fail closed until those
 paths can enforce the same checks.
 
+**Known limits.** Reserving a resource does not hide that it exists. A credential
+whose ordinary scope covers a reserved name (the admin token, a wildcard key, a
+tenant-wide key or a signed-in session) gets `403 forbidden_scope` for it, where a
+name that does not exist gives `404`, `409 graph_not_found` or a successful
+create. The name is visible this way; the contents are not. Sequence numbers are
+database-wide: graph `view_sequence` and `revision`, change-feed `head` and
+memory receipt `sequence` advance for hidden writes, so a caller can count the
+activity of other tenants and of memory, but not read it. Idempotency keys are
+scoped to the binding and the memory scope, not to the credential, so any
+credential that may write a scope can replay another credential's request by
+repeating its key and exact content. The bindings file is not stored in the
+database: a restart without a binding ends its reservation at once. Keep a
+binding you no longer use as `"state": "retired"` instead of deleting it, and
+move or delete its data first if it must become raw-readable. Startup refuses a
+graph or collection that holds ordinary data, but one node with the
+`VliteMemoryScope` label satisfies that check, so bind only resources that were
+created for memory. The administrator's HTTP request log and persistent audit
+show reserved names and record IDs, and collection list `id` values have gaps
+where reserved collections sit.
+
 These checks apply only at the server boundary. Direct embedded/file access and
 operator-managed backups are outside this authorization policy and must be
 protected separately.
@@ -174,7 +194,11 @@ failed request records the collection as `(invalid)`.
 A namespace is an application partition **inside** an authorized collection,
 not an authorization boundary. Put sensitive KV data in dedicated collections
 and bind credentials narrowly: vector, graph-attachment and import permissions
-can also expose, overwrite, delete or expire ordinary KV records. CAS revisions
+can also expose, overwrite, delete or expire ordinary KV records. A principal
+that can write the collection can also fill a key's 16 record IDs with ordinary
+records, so that puts for that key fail with `kv_slots_exhausted`. A list call
+scans the whole collection, so its cost grows with the number of entries rather
+than with `limit`, and heavy listing can slow writers. CAS revisions
 are not a durable lease-fencing service. See [REST KV](API.md#key-value-entries).
 
 ## Tenants

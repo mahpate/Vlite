@@ -275,12 +275,16 @@ kv.delete("pool", "claim/42", Expected::Revision(token))?;
 - **Expiry** hides an entry at its deadline. `Expected::Absent` then
   succeeds. Expiry on a v4 file returns `ExpiryRequiresUpgrade`.
 - **Listing** with `view().list(namespace, prefix, after, limit)` returns keys
-  in order, up to 10,000 per page. It scans the whole collection.
+  in order, up to 10,000 per page. It scans the whole collection, so its cost
+  grows with the number of entries, not with `limit`: keep key-value data in
+  its own collection and list by prefix.
 - **Limits:** namespaces up to 255 bytes, keys up to 1,024 bytes, values just
   under 1 MiB.
 - **Hash collisions:** keys hash to 16 consecutive record IDs. If all 16 hold
-  other keys, `KvSlotsExhausted` is returned. Other records in the collection
-  are never overwritten.
+  other keys or other records, `KvSlotsExhausted` is returned. Other records
+  in the collection are never overwritten. Because anyone who can write the
+  collection can place ordinary records at those IDs, give write access to a
+  key-value collection only to principals you trust with its keys.
 - REST and gRPC provide ordinary get, put/CAS, delete and prefix listing on
   existing one-dimension collections; see [REST KV](API.md#key-value-entries) for wire
   bounds and pagination. Unlike the Rust handle, neither transport creates a
