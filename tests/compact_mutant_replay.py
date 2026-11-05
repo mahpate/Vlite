@@ -13,7 +13,9 @@ test gap (it survived there): `verify` then needs a run on that tree, kept under
 "invariant", "pinned_by", "pin_mutant", "review"}: a mutant that no test can tell from
 the original, with the invariant it rests on, the test that pins that invariant, a
 second mutant that this test kills, and the reviewer ("pending" until an independent
-review has read it).
+review has read it). A top-level `reused` names mutants that another ledger replays:
+{"ledger": a file of the tree, "obligations": {this list's ID: the ledger's ID}, "kit": [IDs the
+ledger carries under the same ID]}; `verify` checks that the ledger holds them.
 
   python tests/compact_mutant_replay.py check LIST.json [--ids a,b]
   python tests/compact_mutant_replay.py run LIST.json OUT.json [--machine NAME] [--ids a,b]
@@ -437,6 +439,19 @@ def verify(root, data, minimum):
             notes.append(f"survives on {gap}: {measured} run(s)")
         detail = "; ".join(notes)
         print(f"{mutant['id']}: {state} ({good} valid run(s){'; ' + detail if detail else ''})")
+    reused = data.get("reused")
+    if reused:
+        # The seam mutants that another ledger replays: this list names them and does not repeat them.
+        ids = sorted(set(reused.get("obligations", {}).values()) | set(reused.get("kit", [])))
+        ledger = root / reused["ledger"]
+        if not ledger.is_file():
+            print(f"reused: {len(ids)} seam mutants rest on {reused['ledger']}, which is not in this tree")
+        else:
+            held = json.loads(ledger.read_text(encoding="utf-8"))
+            known = {entry["id"] for entry in (held["mutants"] if isinstance(held, dict) else held)}
+            for missing in (i for i in ids if i not in known):
+                print(f"reused: {missing} is not in {reused['ledger']}")
+                counts["open"] += 1
     print(f"{counts['accepted']} accepted, {counts['stale']} stale, {counts['open']} open of {len(data['mutants'])}")
     return counts["stale"] == 0 and counts["open"] == 0
 
