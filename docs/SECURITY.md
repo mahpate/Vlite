@@ -73,9 +73,9 @@ even with it, the caller still needs the ordinary tenant, collection and
 operation permissions. Reserved resources are omitted from raw collection/graph
 lists, tenant usage, slow-query diagnostics, and change feeds; feed cursors
 still advance across the unfiltered page. `GET /v1/database` reports only the
-default collection and remains available when that collection is not reserved;
-it returns `403 forbidden_scope` when the default collection is reserved
-without raw access. With any binding configured, global metrics, graph guard
+default collection; startup rejects `default` as a binding's evidence collection,
+so bindings cannot reserve legacy default-collection routes. With any binding
+configured, global metrics, graph guard
 statistics, replication export, webhook list/status, all import operations,
 and automatic-maintenance routes return `403 forbidden_scope`, including for
 credentials with `raw_access`. Webhook

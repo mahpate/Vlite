@@ -24,6 +24,7 @@ pub(super) const PROVISION_FAILED: &str = "a memory binding scope could not be p
 /// granted scopes of active bindings (mapping section 6, B2). A read-only
 /// database is checked but never written: its memory writes are refused.
 /// Resources are created by the existing admin routes, never here.
+/// The bindings validator rejects the legacy `default` evidence collection.
 /// **PROVISIONAL**: no persisted binding record yet, so rotation rules are
 /// checked against the file alone (mapping section 4).
 pub(super) fn startup(service: &Service) -> std::io::Result<()> {
