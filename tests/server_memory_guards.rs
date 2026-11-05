@@ -356,16 +356,6 @@ async fn reserved_graph_and_collection_are_denied_and_lists_filter_them() {
         "credential scope does not permit this operation or collection"
     );
     assert_eq!(get(&app, "/v1/collections/ordinary").await.0, 200);
-    let missing_bindings = BINDINGS.replace("\"notes_ev\"", "\"missing_ev\"");
-    let missing_directory = tempfile::tempdir().unwrap();
-    let missing_app = start(&missing_directory, Some(&missing_bindings), false).unwrap();
-    let (missing_status, missing_error) = get(&missing_app, "/v1/collections/missing_ev").await;
-    assert_eq!(missing_status, 403);
-    assert_eq!(missing_error["error"]["code"], "forbidden_scope");
-    assert_eq!(
-        missing_error["error"]["message"],
-        "credential scope does not permit this operation or collection"
-    );
     assert_eq!(
         call(&app, "DELETE", "/v1/graphs/notes_graph", Body::empty())
             .await
@@ -485,6 +475,20 @@ async fn reserved_graph_and_collection_are_denied_and_lists_filter_them() {
         .collect::<Vec<_>>();
     assert!(names.contains(&"ordinary"));
     assert!(!names.contains(&"notes_ev"));
+}
+
+#[test]
+fn startup_refuses_bindings_with_a_missing_evidence_collection() {
+    let missing_bindings = BINDINGS.replace("\"notes_ev\"", "\"missing_ev\"");
+    let directory = tempfile::tempdir().unwrap();
+    let error = start(&directory, Some(&missing_bindings), false)
+        .expect_err("startup must refuse a binding with no evidence collection");
+    assert!(
+        error
+            .to_string()
+            .contains("a memory binding evidence collection does not exist"),
+        "unexpected startup refusal: {error}"
+    );
 }
 
 #[tokio::test]
@@ -1058,7 +1062,7 @@ async fn tenant_qualified_reservations_follow_scoped_credentials_and_raw_access(
                 "DELETE",
                 "/v1/graphs/notes_graph",
                 "",
-                if raw_access { 200 } else { 403 },
+                if raw_access { 409 } else { 403 },
             ),
             ("DELETE", "/v1/graphs/ordinary_graph", "", 200),
         ] {
@@ -1071,6 +1075,8 @@ async fn tenant_qualified_reservations_follow_scoped_credentials_and_raw_access(
                     "credential scope does not permit this operation or collection",
                     "{method} {path}"
                 );
+            } else if expected == 409 {
+                assert_eq!(error["error"]["code"], "graph_not_empty", "{method} {path}");
             }
         }
     }
@@ -1165,11 +1171,21 @@ async fn tenant_qualified_reservations_follow_scoped_credentials_and_raw_access(
         .0,
         204
     );
+    let (status, error) = call_token(
+        &raw_write,
+        "DELETE",
+        "/v1/graphs/notes_graph",
+        Body::empty(),
+        &token,
+    )
+    .await;
+    assert_eq!(status, 409);
+    assert_eq!(error["error"]["code"], "graph_not_empty");
     assert_eq!(
         call_token(
             &raw_write,
             "DELETE",
-            "/v1/graphs/notes_graph",
+            "/v1/graphs/ordinary_graph",
             Body::empty(),
             &token,
         )
