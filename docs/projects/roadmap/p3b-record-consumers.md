@@ -320,7 +320,8 @@ fact instead of a reading exercise. `scripts/shadow_copy_check.py` (standard lib
 0 when everything holds) is that check:
 
 ```text
-python scripts/shadow_copy_check.py                 # the gate
+python scripts/shadow_copy_check.py                 # the gate, for this lane's own branch
+python scripts/shadow_copy_check.py --integration --lane G71=v0.7.0..origin/BRANCH --lane K71=...   # a tree that integrates other lanes
 python scripts/shadow_copy_check.py --dump NAME     # the shipped text and the baseline diff of one site
 python scripts/shadow_copy_check.py --self-test     # the checks of the checker
 ```
@@ -358,3 +359,34 @@ What the gate does not check: the compact copies themselves against their reside
 tables are for), K71's visitor beyond the edits above, and anything outside the functions of the list that does not differ
 from `v0.7.0`. It is a gate for the release candidate, not a CI job: it needs the tag. The early-return dispatch that removes
 the ten pairs is a follow-up lane before L5, after which the gate shrinks to the equality with `v0.7.0` that remains.
+
+### The integration mode
+
+On a tree that integrates other lanes, their own changes sit in the same files, and the default mode, which is as strict as
+it is for this lane's branch and stays that way, lists every one of them as uncovered. `--integration` with one
+`--lane NAME=RANGE` for each other lane (never this lane's own range) is the mode for that tree. A range is `A..B` (what
+`B` changes since `A`), `A...B` (since the merge base of `A` and `B`) or `REV` (what `REV` changes since `--base`); a lane
+branch that is built on another lane's gives that lane's functions too, so name `A..B` when the owner matters.
+
+1. **Owned by another lane.** A shipped function that differs from the baseline and that no site and no listed change
+   covers is accepted when the range of a lane adds, changes or removes it. It is listed as `owned by lane X, not checked
+   here` (by every lane whose range changes it). A function that differs from the baseline and that no site and no lane
+   range covers still fails; so does a function that is gone unless the range of a lane removes it. The number of
+   `#[cfg(not(test))]` attributes of a file may differ from the baseline's plus the sites by what the lanes that change the
+   file add or remove, and says so.
+2. **Named integration edits.** A site can carry the change that another lane makes to one of its functions, as an edit
+   with a reason that names the lane. These edits are applied only in this mode, are optional alternatives (the mode also
+   passes on a tree that does not hold that lane, and then the baseline text is what has to match), and a stale one is
+   reported. There is one: lane G71 resolves the visible collection in one call in the closure of `retrieve_with_visibility`
+   (`Database::resolve_visible` instead of the visibility check and `db.collection(name)`). A second, unlisted change in
+   the same function fails as before; so does any other lane's change to a function of a site, until it has its own named
+   edit.
+
+What the mode does not check: the functions that a lane range owns (that lane's review does, and so does a conflict
+resolution that changed one of them), and it takes minutes, not seconds, because it reads the lane versions of every
+changed file that holds an uncovered function. The self-test covers it with a throwaway git repository (the default
+mode's messages unchanged, ownership by function and not by file, a removed function, `A...B`, the attribute count, the
+optional and the stale integration edit), and fifteen mutants of the new code all fail it. A dry run on a tree that
+integrates this lane with G71, K71 and M71 failed in the default mode, on the functions of the other lanes and on the one
+interplay (G71's closure in `retrieve_with_visibility`); in the integration mode it passes with the three ranges, fails
+when the range of one lane is left out, and on this lane's own branch both modes pass.
