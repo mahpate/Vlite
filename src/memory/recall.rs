@@ -1887,8 +1887,8 @@ mod tests {
     }
 
     /// `exact` takes text and nothing else of the weighted blends: it still
-    /// needs a vector and refuses seeds, expansion and other weights; `mmr`
-    /// refuses text (it is a vector-only selection).
+    /// needs a vector with a nonzero weight and refuses seeds, expansion and
+    /// other weights; `mmr` refuses text (it is a vector-only selection).
     #[test]
     fn exact_takes_text_but_no_other_blend_and_mmr_takes_none() {
         let dir = tempfile::tempdir().unwrap();
@@ -1945,6 +1945,12 @@ mod tests {
                 );
             }
         }
+        let mut weightless = build(Selection::Exact, "pa");
+        weightless.query.as_mut().unwrap().fusion.vector_weight = 0.0;
+        assert!(
+            matches!(recall(&db, &weightless), Err(RecallError::UnsupportedPlan)),
+            "exact with no vector weight"
+        );
     }
 
     #[test]
