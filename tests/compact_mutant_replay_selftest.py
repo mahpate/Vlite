@@ -132,6 +132,27 @@ class ReplayToolTest(unittest.TestCase):
         self.assertFalse(accepted)
         self.assertIn("disagree", out)
 
+    def test_runs_on_two_versions_of_the_file_are_judged_on_the_version_in_the_tree(self):
+        earlier = run_of(text=SOURCE + "// an earlier tree\n")
+        # The mutated file of the earlier tree is another file: that is no disagreement.
+        earlier["sha256_lf"]["mutated"] = "e" * 64
+        data = {"mutants": [mutant(runs={"local": run_of(), "earlier": earlier})]}
+        accepted, out = self.verdict(data)
+        self.assertTrue(accepted, out)
+        self.assertIn("stale on earlier", out)
+        # On the earlier tree the same ledger judges the other run, and the first one is stale.
+        (self.tree.root / "src" / "f.rs").write_text(SOURCE + "// an earlier tree\n", encoding="utf-8")
+        accepted, out = self.verdict(data)
+        self.assertTrue(accepted, out)
+        self.assertIn("stale on local", out)
+        # Two machines that disagree on the same version are still refused.
+        other = run_of(text=SOURCE + "// an earlier tree\n")
+        other["sha256_lf"]["mutated"] = "n" * 64
+        both = {"mutants": [mutant(runs={"earlier": earlier, "other": other})]}
+        accepted, out = self.verdict(both)
+        self.assertFalse(accepted)
+        self.assertIn("disagree", out)
+
     def test_a_gap_must_be_measured_as_a_survival_on_the_previous_tree(self):
         survived = run_of(status="survived", failed_tests=[])
         self.assertTrue(self.verdict({"mutants": [mutant(gap="v0", before={"local": survived})]})[0])
