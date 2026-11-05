@@ -200,6 +200,17 @@ file is ready. There is no automatic watcher. In-process users can construct
 Handshake concurrency and waiting queues are bounded to 64, with a ten-second
 handshake deadline. One silent peer cannot serialize acceptance of other peers.
 
+**gRPC disk ANN sidecar path.** `BuildDiskAnn` and `SearchDiskAnn` take a
+sidecar `path` from the administrator token only, an operator-only choice. Every
+other caller, a scoped credential or the read-only token, must leave `path`
+empty: the server then uses the file the REST routes use,
+`disk-ann-<collection id>.dann` in `VLITE_ADMIN_DIR`, and a non-empty `path` is
+refused with `INVALID_ARGUMENT` (`422 invalid_input`). Before 0.7.1 a credential
+scoped to one collection could name any path, so it could write or read any
+file the server process reaches. Clients that sent a path with a scoped
+credential must drop it. The sidecar holds plaintext vectors, so keep its
+directory private (see [gRPC](GRPC.md)).
+
 ## Credential request rates and live-vector quotas
 
 `POST /v1/admin/credentials` accepts these additional optional fields:
