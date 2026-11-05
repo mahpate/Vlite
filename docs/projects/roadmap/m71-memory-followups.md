@@ -199,3 +199,56 @@ adoption, forged marker, record-only graph, no-file reservation, corrupt record,
 and the recheck (including a change made while the request waits for the write
 lock, and the exact 4,096-operation frame boundary). Mutants: at least 24 per
 route family touched, killed by those tests.
+
+## 2. Raw reserved-name guard: F5, residual risk of 1.3 (slice S3)
+
+**Problem.** The adoption rule of 1.3 accepts a graph that holds only well-formed
+memory nodes. Any holder of the raw graph `write` grant can plant such nodes in
+a graph nobody has bound yet (a node labelled `VliteMemoryScope` under
+`scope:v1:...`, a forged `mem:v1:...` memory), and an operator who later binds
+that graph adopts the forgery as the agent's memory.
+
+**Decision (D2, approved): the guard covers every graph.** The raw write route
+refuses to create or change a node that looks like memory, on a bound graph and
+on an unbound one alike. The memory core writes through its own code, not
+through this route, so it is unaffected.
+
+### 2.1 The rule
+
+A raw graph write batch is refused as a whole, before any operation runs, when
+any of its operations is:
+
+- `create_node` or `upsert_node` with a reserved key or a reserved label;
+- `patch_node` of a node with a reserved key, or one that adds a reserved label.
+
+A **reserved label** is any label that starts with `VliteMemory` (case
+sensitive). A **reserved key** is a node key that starts with `scope:v1:`,
+`mem:v1:`, `receipt:v1:`, `receipt-outcome:v1:` or `content:v1:`, or is exactly
+`binding:v1`. Nothing else changes: `delete_node`, `set_node_expiry`, edges,
+attachments, vectors, schemas, and the removal of a reserved label with
+`patch_node` stay allowed, so a node that was planted before 0.7.1 can still be
+cleaned up through the raw route (a bound graph still needs a raw grant).
+
+The answer is 422 `invalid_input` with the fixed message "a node key or label is
+reserved for agent memory". It never echoes the key or the label, and the batch
+writes nothing. The check runs on the request alone, after the credential's
+graph scope and before the graph is looked up, so the answer is the same for a
+graph that does not exist, one that is reserved and one that is not: it reveals
+nothing about reservations. An ordinary batch to a reserved graph still answers
+409 `graph_not_found` as before.
+
+### 2.2 Scope and limits
+
+- The only network route that writes graph nodes is `POST
+  /v1/graphs/{graph}/batch` (REST). The gRPC service has no graph write. The
+  direct file tools (`vlite-graph-cli`, `vlite-mcp` graph tools) open the file as
+  its operator and are not guarded.
+- Edge keys (`content-edge:v1:`, `reference:v1:`) are not reserved: adoption
+  reads nodes only, and an edge needs its two nodes to exist already.
+- Nodes planted before 0.7.1 are not found by the guard. A planted node that is
+  not a well-formed memory node still stops adoption (1.3); a forgery made only
+  of well-formed memory nodes is indistinguishable from memory. Check a graph
+  before binding it.
+- **Upgrade note.** A raw caller that wrote a label starting with `VliteMemory`
+  or a key with one of these prefixes now gets 422. This is the one visible
+  change of the slice.

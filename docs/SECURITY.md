@@ -141,16 +141,24 @@ reserved when its entry is retired and removed (only after its receipt window
 has ended) and when the whole file is removed. To give such memory up, keep the
 entry retired with a `raw_access` grant, delete the graph's nodes (the record
 node `binding:v1` included) with that credential, and drop the graph. A raw
-credential can delete or rewrite the record at any time: every memory write then
-answers `409 memory_capability_unavailable` with feature `binding_generation`
-until the next start, and a start refuses a record that is not exactly a record
-(a corrupt record is never repaired). Startup refuses a graph or collection that
-holds ordinary data: a graph is adopted when it is empty and its evidence
-collection holds no records, when it holds the binding's record, or, once, when
-a 0.7.0 server adopted it and it holds nothing but memory nodes. One node with
-the `VliteMemoryScope` label no longer satisfies that check, but a forgery made
-only of well-formed memory nodes is still indistinguishable from memory, so bind
-only resources that were created for memory. The administrator's HTTP request log and persistent audit
+credential can delete the record at any time (the raw graph route refuses to
+create or change it): every memory write then answers `409
+memory_capability_unavailable` with feature `binding_generation` until the next
+start, which writes it again, and a start refuses a record that is not exactly a
+record (a corrupt record is never repaired). Startup refuses a graph or
+collection that holds ordinary data: a graph is adopted when it is empty and its
+evidence collection holds no records, when it holds the binding's record, or,
+once, when a 0.7.0 server adopted it and it holds nothing but memory nodes. One
+node with the `VliteMemoryScope` label no longer satisfies that check, and from
+0.7.1 the raw graph batch route refuses, on every graph and for every caller, to
+create or change a node whose label starts with `VliteMemory` or whose key
+starts with `scope:v1:`, `mem:v1:`, `receipt:v1:`, `receipt-outcome:v1:` or
+`content:v1:` or is exactly `binding:v1` (`422 invalid_input`, the whole batch;
+deleting such a node and removing such a label stay allowed). A raw caller that
+wrote those names under 0.7.0 now gets 422. Nodes planted by an earlier release
+are not detected, and a forgery made only of well-formed memory nodes is
+indistinguishable from memory, so bind only resources that were created for
+memory. The administrator's HTTP request log and persistent audit
 show reserved names and record IDs, and collection list `id` values have gaps
 where reserved collections sit; both are accepted: the administrator can see
 everything, so keep the log and audit directories private, and collection IDs

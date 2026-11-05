@@ -50,6 +50,13 @@ capabilities stay absent or report that graphs are not enabled.
 - A write batch of up to 4,096 node, edge, attachment and vector operations
   commits atomically or not at all. `expected` (`any`, `absent`,
   `{"revision": N}`) makes an operation conditional.
+- **Reserved names.** Agent memory owns the node labels that start with
+  `VliteMemory` and the node keys that start with `scope:v1:`, `mem:v1:`,
+  `receipt:v1:`, `receipt-outcome:v1:` or `content:v1:`, or are exactly
+  `binding:v1`. The REST batch route refuses a batch whole, with `422
+  invalid_input`, when one operation creates, replaces or patches such a node or
+  adds such a label; deleting such a node and removing such a label stay
+  allowed. The Rust API and the file tools are not guarded.
 - Each read sees one committed state, reported as `view_sequence`. A graph
   write between pages fails the next page with `graph_cursor_stale`.
 - One exclusive writer or several read-only handles per file. Graph writes
