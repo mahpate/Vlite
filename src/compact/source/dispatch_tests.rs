@@ -198,7 +198,18 @@ fn compact_dispatch_mutable_acquisition_keeps_other_refusals() {
                 assert_eq!(handle.view().len(), info.live_records);
             }
             refuse!("kv_store", candidate.kv_store(&info.name));
-            refuse!("kv_view", candidate.kv_view(&info.name));
+            match (candidate.kv_view(&info.name), oracle.kv_view(&info.name)) {
+                (Ok(actual), Ok(expected)) => {
+                    for now_ms in [0, u64::MAX] {
+                        assert_eq!(
+                            actual.list_at("fruit", "", None, 100, now_ms).unwrap(),
+                            expected.list_at("fruit", "", None, 100, now_ms).unwrap()
+                        );
+                    }
+                }
+                (Err(Error::NotKvCollection), Err(Error::NotKvCollection)) => {}
+                _ => panic!("kv_view result mismatch for {}", info.name),
+            }
             {
                 let (mut actual, mut expected, _) = compact_dispatch_fixture(encrypted);
                 assert_eq!(

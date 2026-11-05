@@ -132,6 +132,53 @@ pub(crate) fn source_indexed_fixture(key: Option<&EncryptionKey>) -> Vec<u8> {
     image_of(&before)
 }
 
+pub(crate) fn source_kv_fixture() -> Vec<u8> {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("source-kv");
+    let mut db = create_store(Backing::Memory, &path, None);
+    {
+        let mut kv = db.kv_store("kv").unwrap();
+        for (namespace, key, value, expiry) in [
+            ("fruit", "apple", b"red".as_slice(), None),
+            ("fruit", "apricot", b"orange".as_slice(), Some(20)),
+            ("fruit", "banana", b"yellow".as_slice(), None),
+            ("fruit", "apartment", b"home".as_slice(), None),
+            ("vegetable", "apricot", b"green".as_slice(), None),
+            ("fruit", "probe-window", b"displaced".as_slice(), None),
+        ] {
+            kv.put_at(
+                namespace,
+                key,
+                value,
+                crate::kv::KvPut {
+                    expected: crate::Expected::Any,
+                    expires_at_ms: expiry,
+                },
+                0,
+            )
+            .unwrap();
+        }
+    }
+    let collection_id = db.collection("kv").unwrap().id();
+    let slot = crate::kv::first_slot("fruit", "probe-window");
+    let displaced_slot = slot.wrapping_add(1);
+    let state = db.state_mut(collection_id);
+    let displaced = {
+        let records = state.records.resident_mut().unwrap();
+        assert!(!records.contains_key(&displaced_slot));
+        records.remove(&slot).expect("KV fixture slot is occupied")
+    };
+    state
+        .records
+        .resident_mut()
+        .unwrap()
+        .insert(displaced_slot, (*displaced).clone());
+    let revision = state.revisions.remove(&slot).expect("KV revision exists");
+    state.revisions.insert(displaced_slot, revision);
+    let before = payload::snapshot(&mut db, None);
+    image_of(&before)
+}
+
 pub(crate) fn source_empty_fixture(key: Option<&EncryptionKey>) -> (Vec<u8>, Loaded) {
     let before = initial(key);
     let image = image_of(&before);

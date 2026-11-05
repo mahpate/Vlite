@@ -1048,6 +1048,102 @@ fn mutate_indexed_rows(db: &mut crate::Database, expiry: u64) {
 }
 
 #[test]
+fn compact_kv_point_and_prefix_match_resident() {
+    let _gates = gates();
+    let image = crate::compact::catalog::tests::source_kv_fixture();
+    let oracle = {
+        let _source = super::Activation::set(false);
+        crate::Database::open_from_bytes(image.clone(), None).unwrap()
+    };
+    let mut candidate = crate::Database::open_from_bytes(image, None).unwrap();
+    assert_compact_resident_pair(&candidate, &oracle, "kv");
+    let actual = candidate.kv_view("kv").expect("Database::kv_view");
+    let expected = oracle.kv_view("kv").unwrap();
+
+    for now_ms in [19, 20] {
+        assert_eq!(
+            actual.get_at("fruit", "apricot", now_ms).unwrap(),
+            expected.get_at("fruit", "apricot", now_ms).unwrap()
+        );
+        assert_eq!(
+            actual.list_at("fruit", "ap", None, 10, now_ms).unwrap(),
+            expected.list_at("fruit", "ap", None, 10, now_ms).unwrap()
+        );
+    }
+    let first_page = actual.list_at("fruit", "ap", None, 1, 0).unwrap();
+    assert_eq!(first_page.len(), 1);
+    assert_eq!(first_page[0].key, "apartment");
+    assert_eq!(
+        actual.list_at("fruit", "ap", Some("apple"), 10, 0).unwrap(),
+        expected
+            .list_at("fruit", "ap", Some("apple"), 10, 0)
+            .unwrap()
+    );
+    assert_eq!(
+        actual
+            .list_at("fruit", "ap", Some("apple"), 10, 0)
+            .unwrap()
+            .iter()
+            .map(|entry| entry.key.as_str())
+            .collect::<Vec<_>>(),
+        vec!["apricot"]
+    );
+    assert_eq!(
+        actual.list_at("vegetable", "ap", None, 10, 0).unwrap(),
+        expected.list_at("vegetable", "ap", None, 10, 0).unwrap()
+    );
+    assert_eq!(
+        actual
+            .list_at("vegetable", "ap", None, 10, 0)
+            .unwrap()
+            .iter()
+            .map(|entry| entry.key.as_str())
+            .collect::<Vec<_>>(),
+        vec!["apricot"]
+    );
+    assert_eq!(
+        actual
+            .get_at("fruit", "probe-window", 0)
+            .unwrap()
+            .unwrap()
+            .value,
+        b"displaced"
+    );
+    assert!(matches!(
+        actual.get_at("", "apple", 0),
+        Err(Error::InvalidKvKey(_))
+    ));
+    assert!(matches!(
+        actual.get_at("fruit", "", 0),
+        Err(Error::InvalidKvKey(_))
+    ));
+    assert!(matches!(
+        actual.get_at("fruit", &"k".repeat(crate::kv::MAX_KV_KEY_BYTES + 1), 0),
+        Err(Error::InvalidKvKey(_))
+    ));
+    assert!(matches!(
+        actual.list_at("", "ap", None, 10, 0),
+        Err(Error::InvalidKvKey(_))
+    ));
+    assert!(matches!(
+        actual.list_at(
+            &"n".repeat(crate::kv::MAX_KV_NAMESPACE_BYTES + 1),
+            "ap",
+            None,
+            10,
+            0
+        ),
+        Err(Error::InvalidKvKey(_))
+    ));
+    assert!(matches!(
+        actual.list_at("fruit", "ap", None, 0, 0),
+        Err(Error::InvalidKvKey(_))
+    ));
+    candidate.poisoned = true;
+    assert!(matches!(candidate.kv_view("kv"), Err(Error::Poisoned)));
+}
+
+#[test]
 fn compact_named_vector_visibility_matches_resident() {
     for name in ["full", "half"] {
         named_vector_visibility_matches_resident(name);
