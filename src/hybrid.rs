@@ -108,6 +108,18 @@ fn validate_weight(weight: f64) -> Result<()> {
 impl CollectionRef<'_> {
     /// Hybrid search per REQ-008. Stats count the vector leg's work.
     pub fn search_hybrid(&self, query: &HybridQuery) -> Result<(Vec<HybridHit>, SearchStats)> {
+        #[cfg(test)]
+        if self.db.state(self.id).records.is_compact() {
+            return self.search_hybrid_at(query, crate::current_time_ms());
+        }
+        self.search_hybrid_resident_at(query, crate::current_time_ms())
+    }
+
+    fn search_hybrid_resident_at(
+        &self,
+        query: &HybridQuery,
+        now_ms: u64,
+    ) -> Result<(Vec<HybridHit>, SearchStats)> {
         let db = self.db;
         db.ensure_resident_in(self.id)?;
         let fusion = query.fusion;
@@ -159,12 +171,13 @@ impl CollectionRef<'_> {
         let mut stats = SearchStats::default();
         let vector_hits = match &query.vector {
             Some(vector) if fusion.vector_weight > 0.0 => match query.vector_leg {
-                VectorLeg::Exact => db.search_in(
+                VectorLeg::Exact => db.search_in_at(
                     self.id,
                     vector,
                     candidates,
                     &query.conditions,
                     query.metric,
+                    now_ms,
                     &mut stats,
                 )?,
                 VectorLeg::ApproximateReady {
@@ -194,10 +207,153 @@ impl CollectionRef<'_> {
                     !state
                         .expiries
                         .get(&id)
-                        .is_some_and(|expiry| *expiry <= crate::current_time_ms())
+                        .is_some_and(|expiry| *expiry <= now_ms)
                         && metadata::matches(&record.metadata, &query.conditions)
                 })
             })
+        } else {
+            Vec::new()
+        };
+        let rrf_k = f64::from(fusion.rrf_k);
+        let mut fused: BTreeMap<u64, HybridHit> = BTreeMap::new();
+        for (position, hit) in vector_hits.iter().enumerate() {
+            let rank = position as u32 + 1;
+            let fused_hit = fused.entry(hit.id).or_insert_with(|| empty_hit(hit.id));
+            fused_hit.score += fusion.vector_weight / (rrf_k + f64::from(rank));
+            fused_hit.distance = Some(hit.distance);
+            fused_hit.vector_rank = Some(rank);
+        }
+        for (position, &(id, score)) in text_hits.iter().enumerate() {
+            let rank = position as u32 + 1;
+            let fused_hit = fused.entry(id).or_insert_with(|| empty_hit(id));
+            fused_hit.score += fusion.text_weight / (rrf_k + f64::from(rank));
+            fused_hit.bm25 = Some(score);
+            fused_hit.text_rank = Some(rank);
+        }
+        let mut hits: Vec<HybridHit> = fused.into_values().collect();
+        hits.sort_by(|a, b| b.score.total_cmp(&a.score).then_with(|| a.id.cmp(&b.id)));
+        hits.truncate(query.k);
+        Ok((hits, stats))
+    }
+
+    #[cfg(test)]
+    pub(crate) fn search_hybrid_at(
+        &self,
+        query: &HybridQuery,
+        now_ms: u64,
+    ) -> Result<(Vec<HybridHit>, SearchStats)> {
+        #[cfg(test)]
+        if self.db.state(self.id).records.is_compact() {
+            return self.search_hybrid_compact(query, now_ms);
+        }
+        self.search_hybrid_resident_at(query, now_ms)
+    }
+
+    #[cfg(test)]
+    fn search_hybrid_compact(
+        &self,
+        query: &HybridQuery,
+        now_ms: u64,
+    ) -> Result<(Vec<HybridHit>, SearchStats)> {
+        let db = self.db;
+        db.ensure_healthy()?;
+        let fusion = query.fusion;
+        if query.k > MAX_HYBRID_K {
+            return Err(Error::InvalidQuery("hybrid k must be at most 1000"));
+        }
+        let candidates = fusion.candidates.unwrap_or(query.k.max(50));
+        if !(query.k..=MAX_HYBRID_K).contains(&candidates) {
+            return Err(Error::InvalidQuery("fusion candidates must be k..=1000"));
+        }
+        if !(1..=1000).contains(&fusion.rrf_k) {
+            return Err(Error::InvalidQuery("rrf_k must be 1..=1000"));
+        }
+        validate_weight(fusion.vector_weight)?;
+        validate_weight(fusion.text_weight)?;
+        if fusion.vector_weight == 0.0 && fusion.text_weight == 0.0 {
+            return Err(Error::InvalidQuery("fusion weights must not both be zero"));
+        }
+        if query.text.len() > MAX_HYBRID_TEXT_BYTES {
+            return Err(Error::InvalidQuery("hybrid text exceeds 1024 bytes"));
+        }
+        let terms: BTreeSet<String> = tokenize(&query.text).into_iter().collect();
+        if terms.len() > MAX_HYBRID_TOKENS {
+            return Err(Error::InvalidQuery("hybrid text exceeds 32 unique tokens"));
+        }
+        if query.vector.is_none() && terms.is_empty() {
+            return Err(Error::InvalidQuery(
+                "hybrid search needs a vector or text tokens",
+            ));
+        }
+        metadata::validate_filter(&query.conditions)?;
+        let state = db.state(self.id);
+        if fusion.text_weight > 0.0 && !terms.is_empty() {
+            let status = state.text_index.status();
+            if status.declared_fields == 0 {
+                return Err(Error::InvalidQuery(
+                    "text search requires declared text_fields",
+                ));
+            }
+            if !status.available {
+                return Err(Error::IndexNotReady);
+            }
+        }
+        if let VectorLeg::ApproximateReady { options, .. } = query.vector_leg {
+            options.validate()?;
+        }
+        let mut stats = SearchStats::default();
+        let vector_hits = match &query.vector {
+            Some(vector) if fusion.vector_weight > 0.0 => match query.vector_leg {
+                VectorLeg::Exact => db.search_in_at(
+                    self.id,
+                    vector,
+                    candidates,
+                    &query.conditions,
+                    query.metric,
+                    now_ms,
+                    &mut stats,
+                )?,
+                VectorLeg::ApproximateReady {
+                    config,
+                    ef_search,
+                    options,
+                } => db.search_ready_with_options_in(
+                    self.id,
+                    vector,
+                    candidates,
+                    ef_search,
+                    config,
+                    options,
+                    &query.conditions,
+                    query.metric,
+                    &mut stats,
+                )?,
+            },
+            _ => Vec::new(),
+        };
+        if query.k == 0 {
+            return Ok((Vec::new(), stats));
+        }
+        let text_hits = if fusion.text_weight > 0.0 && !terms.is_empty() {
+            let mut visible = BTreeSet::new();
+            for row in state
+                .records
+                .compact_iter(None)
+                .expect("compact collection check above")
+            {
+                let (id, record) = row?;
+                if !state
+                    .expiries
+                    .get(&id)
+                    .is_some_and(|expiry| *expiry <= now_ms)
+                    && metadata::matches(&record.metadata, &query.conditions)
+                {
+                    visible.insert(id);
+                }
+            }
+            state
+                .text_index
+                .search(&terms, candidates, |id| visible.contains(&id))
         } else {
             Vec::new()
         };

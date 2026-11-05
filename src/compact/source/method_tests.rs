@@ -546,9 +546,13 @@ fn compact_installed_database_and_snapshot_method_matrix() {
             "Database::search_auto",
             db.search_auto(query, 0, &[], metric, config, options, 1)
         );
-        d!(
+        a!(
             "Database::search_hybrid",
             db.search_hybrid(&hybrid::HybridQuery::new(Some(query.to_vec()), "", 0))
+                .unwrap(),
+            oracle
+                .search_hybrid(&hybrid::HybridQuery::new(Some(query.to_vec()), "", 0))
+                .unwrap()
         );
         a!(
             "Database::browse",
@@ -560,7 +564,11 @@ fn compact_installed_database_and_snapshot_method_matrix() {
             db.browse_at(None, 1, 0).unwrap(),
             oracle.browse_at(None, 1, 0).unwrap()
         );
-        d!("Database::facets", db.facets("x", &[]));
+        a!(
+            "Database::facets",
+            db.facets("x", &[]).unwrap(),
+            oracle.facets("x", &[]).unwrap()
+        );
         d!("Database::numeric_stats", db.numeric_stats("x", &[]));
         let recommendation = RecommendationQuery {
             positive_ids: vec![0],
@@ -584,9 +592,12 @@ fn compact_installed_database_and_snapshot_method_matrix() {
         };
         d!("Database::recommend", db.recommend(&recommendation));
         d!("Database::search_geo", db.search_geo(&geo));
-        d!(
+        a!(
             "Database::search_grouped",
-            db.search_grouped(query, 0, 0, "x", &[], metric)
+            db.search_grouped(query, 0, 0, "x", &[], metric).unwrap(),
+            oracle
+                .search_grouped(query, 0, 0, "x", &[], metric)
+                .unwrap()
         );
         point_parity(&db, &oracle);
         // Consuming D methods use fresh real-open handles.
@@ -610,11 +621,24 @@ fn compact_installed_database_and_snapshot_method_matrix() {
 fn compact_installed_collection_method_matrix() {
     let _gates = gates();
     for encrypted in [false, true] {
-        let (db, oracle, bytes) = compact_dispatch_fixture(encrypted);
+        let (mut db, oracle, bytes) = compact_dispatch_fixture(encrypted);
         let config = HnswConfig::default();
         let options = AnnOptions::default();
         let metric = DistanceMetric::SquaredL2;
         for info in oracle.collections().unwrap() {
+            let expected_browse = oracle
+                .collection(&info.name)
+                .unwrap()
+                .browse(None, 1)
+                .unwrap();
+            {
+                let mutable = db.collection_mut(&info.name).unwrap();
+                assert_eq!(
+                    mutable.browse(None, 1).unwrap(),
+                    expected_browse,
+                    "CollectionMut::browse"
+                );
+            }
             let view = db.collection(&info.name).unwrap();
             let reference = oracle.collection(&info.name).unwrap();
             let query = &[1.0, 2.0];
@@ -773,17 +797,27 @@ fn compact_installed_collection_method_matrix() {
                 view.browse_at(None, 1, 0).unwrap(),
                 reference.browse_at(None, 1, 0).unwrap()
             );
-            d!("CollectionRef::facets", view.facets("x", &[]));
+            a!(
+                "CollectionRef::facets",
+                view.facets("x", &[]).unwrap(),
+                reference.facets("x", &[]).unwrap()
+            );
             d!("CollectionRef::numeric_stats", view.numeric_stats("x", &[]));
             d!("CollectionRef::vector_specs", view.vector_specs());
-            d!("CollectionRef::record_vectors", view.record_vectors(0));
-            d!(
-                "CollectionRef::search_named",
-                view.search_named("n", None, query, 0)
+            a!(
+                "CollectionRef::record_vectors",
+                view.record_vectors(0).unwrap(),
+                reference.record_vectors(0).unwrap()
             );
-            d!(
-                "CollectionRef::search_named_at",
-                view.search_named_at("n", None, query, 0, 0)
+            assert_eq!(
+                view.search_named("n", None, query, 0).is_err(),
+                reference.search_named("n", None, query, 0).is_err(),
+                "CollectionRef::search_named"
+            );
+            assert_eq!(
+                view.search_named_at("n", None, query, 0, 0).is_err(),
+                reference.search_named_at("n", None, query, 0, 0).is_err(),
+                "CollectionRef::search_named_at"
             );
             d!(
                 "CollectionRef::search_named_ann",
@@ -797,26 +831,36 @@ fn compact_installed_collection_method_matrix() {
                 "CollectionRef::search_sparse",
                 view.search_sparse("s", &[], 0)
             );
-            d!(
-                "CollectionRef::search_dense_sparse",
-                view.search_dense_sparse(&vectors::DenseSparseQuery {
-                    dense_name: "n".into(),
-                    version: None,
-                    dense: query.to_vec(),
-                    sparse_name: "s".into(),
-                    sparse: vec![],
-                    k: 0,
-                    fusion: hybrid::FusionOptions::default()
-                })
-            );
+            let dense_sparse = vectors::DenseSparseQuery {
+                dense_name: "n".into(),
+                version: None,
+                dense: query.to_vec(),
+                sparse_name: "s".into(),
+                sparse: vec![],
+                k: 1,
+                fusion: hybrid::FusionOptions::default(),
+            };
+            if reference.vector_specs().unwrap().contains_key("n") {
+                d!(
+                    "CollectionRef::search_dense_sparse",
+                    view.search_dense_sparse(&dense_sparse)
+                );
+            } else {
+                assert!(matches!(
+                    view.search_dense_sparse(&dense_sparse),
+                    Err(Error::InvalidQuery(_))
+                ));
+            }
             d!("CollectionRef::reembed_status", view.reembed_status("n"));
-            d!(
-                "CollectionRef::reembed_pending",
-                view.reembed_pending("n", 0)
+            assert_eq!(
+                view.reembed_pending("n", 0).is_err(),
+                reference.reembed_pending("n", 0).is_err(),
+                "CollectionRef::reembed_pending"
             );
-            d!(
-                "CollectionRef::reembed_pending_checked",
-                view.reembed_pending_checked("n", 0)
+            assert_eq!(
+                view.reembed_pending_checked("n", 0).is_err(),
+                reference.reembed_pending_checked("n", 0).is_err(),
+                "CollectionRef::reembed_pending_checked"
             );
             a!(
                 "CollectionRef::rerank",
@@ -826,13 +870,20 @@ fn compact_installed_collection_method_matrix() {
                     .rerank(query, &[], 0, &rerank::ExactReranker { metric })
                     .unwrap()
             );
-            d!(
+            a!(
                 "CollectionRef::search_hybrid",
                 view.search_hybrid(&hybrid::HybridQuery::new(Some(query.to_vec()), "", 0))
+                    .unwrap(),
+                reference
+                    .search_hybrid(&hybrid::HybridQuery::new(Some(query.to_vec()), "", 0))
+                    .unwrap()
             );
-            d!(
+            a!(
                 "CollectionRef::search_grouped",
-                view.search_grouped(query, 0, 0, "x", &[], metric)
+                view.search_grouped(query, 0, 0, "x", &[], metric).unwrap(),
+                reference
+                    .search_grouped(query, 0, 0, "x", &[], metric)
+                    .unwrap()
             );
             d!(
                 "CollectionRef::recommend",
@@ -894,9 +945,9 @@ fn compact_installed_restricted_method_guards_refuse() {
         "P3B2-V8 rebuild_named_hnsw",
     );
     let view = db.collection(&name).unwrap();
-    unsupported(
-        view.search_grouped(query, 1, 1, "", &[], metric),
-        "P3B2-R2 search_grouped",
+    assert!(
+        view.search_grouped(query, 1, 1, "marker", &[], metric)
+            .is_ok()
     );
     unsupported(
         view.recommend(&RecommendationQuery {
@@ -910,22 +961,22 @@ fn compact_installed_restricted_method_guards_refuse() {
         }),
         "P3B2-R3 recommend",
     );
-    unsupported(view.facets("", &[]), "P3B2-R4 facets");
+    assert!(view.facets("marker", &[]).is_ok());
     unsupported(view.numeric_stats("", &[]), "P3B2-R5 numeric_stats");
-    unsupported(
+    assert!(!matches!(
         view.search_hybrid(&hybrid::HybridQuery::new(Some(query.to_vec()), "", 1_001)),
-        "P3B2-H1 search_hybrid",
-    );
+        Err(Error::UnsupportedFeature(crate::format::FLAG_COMPACT))
+    ));
     unsupported(
         view.search_auto(&[], 1, &[], metric, HnswConfig::default(), options, 1),
         "P3B2-P1 planner search",
     );
-    unsupported(
+    assert!(!matches!(
         crate::query_language::parse("SEARCH TEXT MATCH \"word\"")
             .unwrap()
             .execute(view, &std::collections::BTreeMap::new()),
-        "P3B2-QL1 query-language execute",
-    );
+        Err(Error::UnsupportedFeature(crate::format::FLAG_COMPACT))
+    ));
     let kv = crate::kv::compact_view_for_test(&db, id);
     unsupported(kv.get_at("", "", 0), "P3B2-K2 kv get_at");
     unsupported(kv.list_at("", "", None, 0, 0), "P3B2-K3 kv list_at");

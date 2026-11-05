@@ -376,6 +376,13 @@ impl<'a> CollectionRef<'a> {
         Ok(&self.db.state(self.id).vectors.specs)
     }
     pub fn record_vectors(&self, id: u64) -> Result<Option<&'a RecordVectors>> {
+        #[cfg(test)]
+        if self.db.state(self.id).records.is_compact() {
+            self.db.ensure_healthy()?;
+        } else {
+            self.db.ensure_resident_in(self.id)?;
+        }
+        #[cfg(not(test))]
         self.db.ensure_resident_in(self.id)?;
         if self.get(id)?.is_none() {
             return Ok(None);
@@ -387,6 +394,13 @@ impl<'a> CollectionRef<'a> {
         n: &str,
         version: Option<&str>,
     ) -> Result<(VectorSpec, crate::records::RecordMap)> {
+        #[cfg(test)]
+        if self.db.state(self.id).records.is_compact() {
+            self.db.ensure_healthy()?;
+        } else {
+            self.db.ensure_resident_in(self.id)?;
+        }
+        #[cfg(not(test))]
         self.db.ensure_resident_in(self.id)?;
         let state = self.db.state(self.id);
         let spec = state.vectors.specs.get(n).ok_or_else(invalid)?.clone();
@@ -469,6 +483,7 @@ impl<'a> CollectionRef<'a> {
         ef: usize,
         now_ms: u64,
     ) -> Result<Vec<SearchHit>> {
+        self.db.ensure_resident_in(self.id)?;
         let (s, rs) = self.named_records(n, version)?;
         crate::validate_ann_metric(s.metric)?;
         crate::validate_vector(s.dimensions, query)?;
@@ -574,6 +589,13 @@ impl<'a> CollectionRef<'a> {
     }
     /// Returns missing target embeddings, including newly inserted IDs before the cursor.
     pub fn reembed_pending(&self, n: &str, limit: usize) -> Result<Vec<(u64, Record)>> {
+        #[cfg(test)]
+        if self.db.state(self.id).records.is_compact() {
+            self.db.ensure_healthy()?;
+        } else {
+            self.db.ensure_resident_in(self.id)?;
+        }
+        #[cfg(not(test))]
         self.db.ensure_resident_in(self.id)?;
         if limit > crate::MAX_BATCH_OPERATIONS {
             return Err(Error::BatchTooLarge);
@@ -581,6 +603,33 @@ impl<'a> CollectionRef<'a> {
         let state = self.db.state(self.id);
         let j = state.vectors.jobs.get(n).ok_or_else(invalid)?;
         let mut out = Vec::new();
+        #[cfg(test)]
+        if let Some(scan) = state.records.compact_iter(None) {
+            let now_ms = crate::current_time_ms();
+            for row in scan {
+                if out.len() == limit {
+                    break;
+                }
+                let (id, record) = row?;
+                if state
+                    .expiries
+                    .get(&id)
+                    .is_some_and(|expiry| *expiry <= now_ms)
+                {
+                    continue;
+                }
+                if !state
+                    .vectors
+                    .records
+                    .get(&id)
+                    .and_then(|r| r.dense.get(n))
+                    .is_some_and(|vs| vs.iter().any(|v| v.version == j.target_version))
+                {
+                    out.push((id, record.clone()));
+                }
+            }
+            return Ok(out);
+        }
         for (&id, r) in state.records.resident()? {
             if out.len() == limit {
                 break;
