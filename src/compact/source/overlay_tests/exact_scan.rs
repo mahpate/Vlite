@@ -4,9 +4,10 @@
 //!
 //! - a row is visible at a clock when it has no deadline or the clock is before it;
 //! - a filter keeps a row when every condition holds;
-//! - squared L2 is the sum of squared differences, inner product the negated dot product and cosine
-//!   `1 - dot / (|row| * |query|)` (a row of norm zero has no cosine distance), each folded left to right over the
-//!   dimensions in `f64` from the widened `f32` components; the hits are the `k` nearest, ties by ascending ID;
+//! - squared L2 is the sum of squared differences, inner product the negated dot product (a zero dot product is
+//!   reported as `+0.0`) and cosine `1 - dot / (|row| * |query|)` with the ratio clamped to `[-1, 1]` (a row of norm
+//!   zero has no cosine distance), each folded left to right over the dimensions in `f64` from the widened `f32`
+//!   components; the hits are the `k` nearest, ties by ascending ID;
 //! - `records_scanned` counts the candidate rows the scan examines before its visibility check and
 //!   `distance_evaluations` the visible rows that match, counted when the scan commits to reading the vector;
 //! - the vector workspace holds at most 4 MiB of decoded blocks and a block is decoded whole: a block larger than the
@@ -467,18 +468,18 @@ fn compact_exact_scan_consumes_ordered_ids_across_base_and_overlay() {
                     for metric in [DistanceMetric::SquaredL2, DistanceMetric::InnerProduct] {
                         for k in [1, 2, 10] {
                             let expected = model(&effective, &query, metric, k, now, None);
+                            let label = format!(
+                                "{precision:?} {encrypted} {metric:?} {query:?} k={k} at {now}"
+                            );
+                            let (resident, _) = run_resident(&oracle, &query, metric, k, now);
+                            assert_eq!(bits(&resident), expected.hits, "{label}: oracle");
                             for path in PATHS {
                                 let (hits, stats) =
                                     run(&candidate, path, &query, metric, k, &[], now);
-                                let label = format!(
-                                    "{precision:?} {encrypted} {path:?} {metric:?} {query:?} k={k} at {now}"
-                                );
-                                assert_eq!(bits(&hits), expected.hits, "{label}");
+                                assert_eq!(bits(&hits), expected.hits, "{label} {path:?}");
                                 if let Some(stats) = stats {
-                                    assert_eq!(answer(&hits, &stats), expected, "{label}");
+                                    assert_eq!(answer(&hits, &stats), expected, "{label} {path:?}");
                                 }
-                                let (resident, _) = run_resident(&oracle, &query, metric, k, now);
-                                assert_eq!(bits(&resident), expected.hits, "{label}: oracle");
                             }
                         }
                     }
@@ -497,6 +498,42 @@ fn compact_exact_scan_consumes_ordered_ids_across_base_and_overlay() {
             assert_eq!(ids(&bits(&hits)), vec![20, 10, 5, 50, 60]);
             let stats = stats.unwrap();
             assert_eq!((stats.records_scanned, stats.distance_evaluations), (6, 5));
+
+            // No hit wanted: nothing is scanned or counted, as in the resident scan.
+            for path in PATHS {
+                let (hits, stats) = run(
+                    &candidate,
+                    path,
+                    &[21.0, 0.0],
+                    DistanceMetric::SquaredL2,
+                    0,
+                    &[],
+                    FAR - 1,
+                );
+                assert!(hits.is_empty(), "{path:?}");
+                if let Some(stats) = stats {
+                    assert_eq!(stats, SearchStats::default(), "{path:?}");
+                }
+            }
+            // The wall-clock form samples the clock once; every deadline here is in 2100, so it sees all six rows.
+            let (hits, stats) = candidate
+                .collection(NAME)
+                .unwrap()
+                .search_with_stats(&[21.0, 0.0], 10, &[], DistanceMetric::SquaredL2)
+                .unwrap();
+            assert_eq!(
+                bits(&hits),
+                model(
+                    &effective,
+                    &[21.0, 0.0],
+                    DistanceMetric::SquaredL2,
+                    10,
+                    0,
+                    None
+                )
+                .hits
+            );
+            assert_eq!((stats.records_scanned, stats.distance_evaluations), (6, 6));
         }
     }
 }
@@ -559,6 +596,8 @@ fn dataset_ops() -> Vec<Op> {
         Op::Retag(9, "b"),
         Op::Put(2, expiring(row(&[6.0, 8.0, 0.0, 0.0], "a"), FAR)),
         Op::Put(101, row(&[0.0, 0.0, 0.0, 0.0], "a")),
+        // A metadata-only change keeps the row's deadline.
+        Op::Retag(7, "a"),
     ]
 }
 
@@ -590,7 +629,7 @@ fn compact_exact_scan_scores_without_materializing_record_cells() {
                 for metric in METRICS {
                     for now in [FAR - 1, FAR] {
                         for (conditions, tag) in filters {
-                            for k in [1, 8] {
+                            for k in [1, 8, 64] {
                                 let expected = model(rows, &query, metric, k, now, tag);
                                 for path in PATHS {
                                     // A fresh database per measurement: an earlier read cannot mask a later one.
@@ -869,7 +908,10 @@ fn compact_exact_scan_workspace_boundaries_preserve_explicit_error_accounting() 
                 "{label}"
             );
             assert_eq!((a.vectors_live, a.vectors_peak), (HEAD, HEAD), "{label}");
-            // The same workspace refuses again the same way and counts only the attempted row.
+            // The metadata read of the refused row authenticated its frame, so encrypted plaintext was accounted.
+            assert_eq!(a.plaintext_live > 0, encrypted, "{label}");
+            // The same workspace refuses again the same way and counts only the attempted row (the one block before
+            // the refused one fits in the budget, so the second scan only hits the cache).
             let again = scan(&db, &mut workspace, &[], None, 5);
             expect_error(&again);
             assert_eq!(again.stats.records_scanned, HEAD_ROWS + 1);
@@ -910,7 +952,23 @@ fn compact_exact_scan_workspace_boundaries_preserve_explicit_error_accounting() 
             let mut workspace = ReadWorkspace::new(HEAD).unwrap();
             let cached = scan(&db, &mut workspace, &[], Some(&inside), 5);
             assert_eq!(cached.stats.records_scanned, HEAD_ROWS);
-            assert_eq!(cached.result.unwrap().len(), HEAD_ROWS as usize);
+            let head_rows: BTreeMap<u64, Row> = base
+                .iter()
+                .filter(|&(&id, _)| id < HEAD_ROWS)
+                .map(|(&id, row)| (id, row.clone()))
+                .collect();
+            assert_eq!(
+                bits(&cached.result.unwrap()),
+                model(
+                    &head_rows,
+                    &[3.0, 0.0],
+                    DistanceMetric::SquaredL2,
+                    5,
+                    0,
+                    None
+                )
+                .hits
+            );
 
             // A warmed workspace: the first block is cached, so the next scan hits it before the refusal.
             let mut workspace = ReadWorkspace::new(BODY - 1).unwrap();
@@ -1093,5 +1151,74 @@ fn compact_exact_scan_workspace_ceiling_and_the_largest_blocks() {
             .unwrap();
             assert_eq!(bits(&hits), expected.hits, "{label}");
         }
+    }
+}
+
+// ------------------------------------------------------------------------------------------- fold order
+
+/// The sums are folded in dimension order, one rounding per term. The rows are built so that a different order or a
+/// fused multiply-add changes the bits: `2^30` has a unit in the last place of `2^-22` and each small square is
+/// `9 * 2^-26`, more than half of one unit, so adding the two small squares first (or last) gives another sum than
+/// adding them one at a time to `2^30`.
+#[test]
+fn compact_exact_scan_folds_dimensions_left_to_right() {
+    let _gates = gates();
+    let big = 32768.0_f32;
+    let small = 3.0_f32 / 8192.0;
+    let square = |x: f32| f64::from(x) * f64::from(x);
+    let in_order = (square(big) + square(small)) + square(small);
+    let small_first = (square(small) + square(small)) + square(big);
+    assert_ne!(in_order, small_first, "the fixture tells the orders apart");
+    assert_ne!(
+        in_order,
+        square(big) + (square(small) + square(small)),
+        "the fixture tells a reassociated sum apart"
+    );
+    let a = [big, small, small, 0.0];
+    let b = [small, small, big, 0.0];
+    let rows: BTreeMap<u64, Row> = [(1, a), (2, b), (3, [1.0, 0.0, 0.0, 0.0])]
+        .into_iter()
+        .map(|(id, vector)| (id, row(&vector, "wide")))
+        .collect();
+    for precision in PRECISIONS {
+        let bytes = image(4, &rows, precision, false);
+        let (candidate, oracle) = open(&bytes, false);
+        for (query, metric) in [
+            ([0.0; 4], DistanceMetric::SquaredL2),
+            (a, DistanceMetric::SquaredL2),
+            (a, DistanceMetric::InnerProduct),
+            (b, DistanceMetric::InnerProduct),
+        ] {
+            let expected = model(&rows, &query, metric, 3, 0, None);
+            let label = format!("{precision:?} {metric:?} {query:?}");
+            let (resident, _) = run_resident(&oracle, &query, metric, 3, 0);
+            assert_eq!(bits(&resident), expected.hits, "{label}: oracle");
+            for path in PATHS {
+                let (hits, stats) = run(&candidate, path, &query, metric, 3, &[], 0);
+                assert_eq!(bits(&hits), expected.hits, "{label} {path:?}");
+                if let Some(stats) = stats {
+                    assert_eq!(answer(&hits, &stats), expected, "{label} {path:?}");
+                }
+            }
+        }
+        // The literal answer for the query at the origin: the sums in dimension order, nearest first.
+        let (hits, _) = run(
+            &candidate,
+            Path::Helper,
+            &[0.0; 4],
+            DistanceMetric::SquaredL2,
+            3,
+            &[],
+            0,
+        );
+        assert_eq!(
+            bits(&hits),
+            vec![
+                (3, 1.0_f64.to_bits()),
+                (2, small_first.to_bits()),
+                (1, in_order.to_bits())
+            ],
+            "{precision:?}"
+        );
     }
 }
