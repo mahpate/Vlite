@@ -121,13 +121,9 @@ impl Call {
         }
     }
 
+    /// The elapsed request budget; see `elapsed_ms`.
     fn elapsed_ms(&self) -> u64 {
-        let measured = u64::try_from(self.started.elapsed().as_millis()).unwrap_or(u64::MAX);
-        let injected = self
-            .clock
-            .as_ref()
-            .map_or(0, |clock| clock.elapsed_ms.load(Ordering::SeqCst));
-        measured.saturating_add(injected)
+        elapsed_ms(self.started, self.clock.as_ref())
     }
 
     /// The absolute core deadline for a relative budget.
@@ -673,6 +669,7 @@ fn remember_in(
 ) -> Result<(Value, String, u64), Fail> {
     writable(db)?;
     bound.covers(db)?;
+    fields.drop_empty_evidence();
     refuse(bound, fields.raw(), remember_refusal)?;
     let common = mutation(&mut fields)?;
     let items = wire::array(fields.require("items")?, "items", 1, MAX_ITEMS)?;
@@ -722,9 +719,33 @@ fn remember_in(
     Ok((body, id, result.receipt_revision))
 }
 
+/// The elapsed request budget in milliseconds. With the test seam only the
+/// injected value counts, so a replay never depends on how long the machine
+/// took; without it the time since the request started applies.
+fn elapsed_ms(started: Instant, clock: Option<&Clock>) -> u64 {
+    match clock {
+        Some(clock) => clock.elapsed_ms.load(Ordering::SeqCst),
+        None => u64::try_from(started.elapsed().as_millis()).unwrap_or(u64::MAX),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A replay must not depend on machine speed: under the test seam the
+    /// measured time is ignored, and in production (no seam) it is used.
+    #[test]
+    fn the_test_seam_replaces_the_measured_elapsed_time() {
+        let Some(started) = Instant::now().checked_sub(std::time::Duration::from_secs(5)) else {
+            return;
+        };
+        assert!(elapsed_ms(started, None) >= 5_000);
+        let clock = Clock::default();
+        assert_eq!(elapsed_ms(started, Some(&clock)), 0);
+        clock.elapsed_ms.store(7, Ordering::SeqCst);
+        assert_eq!(elapsed_ms(started, Some(&clock)), 7);
+    }
 
     /// Mapping section 2: a stored-property integrity fault is 500, never
     /// the 422 the shared mapper gives a caller's invalid query.

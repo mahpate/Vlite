@@ -479,6 +479,71 @@ async fn the_evidence_collection_needs_its_own_write_grant() {
 }
 
 #[tokio::test]
+async fn an_empty_evidence_list_is_the_same_as_none() {
+    let directory = TempDir::new().unwrap();
+    let (app, token) = start_scoped(&directory, &ALL_OPS, None);
+    let mut body = remember_body("k-empty");
+    body["evidence"] = json!([]);
+    body["items"][0]["evidence"] = json!([]);
+    let (status, first) = remember(&app, Some(&token), &body).await;
+    assert_eq!(status, 200, "{first}");
+    assert_eq!(first["replayed"], false);
+    // The same request without the empty lists is the same request.
+    let (status, again) = remember(&app, Some(&token), &remember_body("k-empty")).await;
+    assert_eq!(status, 200, "{again}");
+    assert_eq!(again["replayed"], true);
+    assert_eq!(again["receipt"], first["receipt"]);
+
+    let mut summary = consolidate_body("c-empty");
+    summary["evidence"] = json!([]);
+    summary["output"]["evidence"] = json!([]);
+    let (status, first) = post(&app, SERVED[2], &token, &summary).await;
+    assert_eq!(status, 200, "{first}");
+    let (status, again) = post(&app, SERVED[2], &token, &consolidate_body("c-empty")).await;
+    assert_eq!(status, 200, "{again}");
+    assert_eq!(again["replayed"], true);
+    assert_eq!(again["receipt"], first["receipt"]);
+}
+
+#[tokio::test]
+async fn evidence_that_names_something_is_still_refused() {
+    let directory = TempDir::new().unwrap();
+    let (app, token) = start_scoped(&directory, &ALL_OPS, None);
+    let named = json!([{"collection": "notes_ev", "record": "1"}]);
+    for evidence in [named, json!({}), json!("none"), json!([[]])] {
+        let mut requests = Vec::new();
+        for place in ["item", "request"] {
+            let mut body = remember_body("k-named");
+            match place {
+                "item" => body["items"][0]["evidence"] = evidence.clone(),
+                _ => body["evidence"] = evidence.clone(),
+            }
+            requests.push((MEMORY_PATHS[0], body));
+        }
+        for place in ["output", "request"] {
+            let mut body = consolidate_body("c-named");
+            match place {
+                "output" => body["output"]["evidence"] = evidence.clone(),
+                _ => body["evidence"] = evidence.clone(),
+            }
+            requests.push((SERVED[2], body));
+        }
+        for (path, body) in requests {
+            let (status, error) = post(&app, path, &token, &body).await;
+            assert_eq!(
+                (status, &error["error"]["code"], &error["error"]["details"]),
+                (
+                    409,
+                    &json!("memory_capability_unavailable"),
+                    &json!({"feature": "evidence"})
+                ),
+                "{path} {evidence}"
+            );
+        }
+    }
+}
+
+#[tokio::test]
 async fn a_new_reference_must_name_an_item_of_the_same_request() {
     let directory = TempDir::new().unwrap();
     let (app, token) = start_scoped(&directory, &ALL_OPS, None);

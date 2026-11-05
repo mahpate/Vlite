@@ -1033,7 +1033,11 @@ mod tests {
                 json!({}),
                 "references",
             ),
-            (json!({"evidence": []}), json!({}), "evidence"),
+            (
+                json!({"evidence": [{"collection": "notes_ev", "record": "1"}]}),
+                json!({}),
+                "evidence",
+            ),
             (json!({"metadata": {}}), json!({}), "metadata"),
             (json!({"assertion": {}}), json!({}), "assertion"),
             (
@@ -1042,7 +1046,11 @@ mod tests {
                 "expected",
             ),
             (json!({"merge": "merge_provenance"}), json!({}), "merge"),
-            (json!({}), json!({"evidence": []}), "evidence"),
+            (
+                json!({}),
+                json!({"evidence": [{"collection": "notes_ev", "record": "1"}]}),
+                "evidence",
+            ),
             (json!({}), json!({"dry_run": true}), "consolidate_plan"),
             (
                 json!({"kind": "fact"}),

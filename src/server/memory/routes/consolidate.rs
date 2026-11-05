@@ -133,6 +133,7 @@ fn consolidate_in(
 ) -> Result<(Value, String, u64), Fail> {
     writable(db)?;
     bound.covers(db)?;
+    fields.drop_empty_evidence();
     refuse(bound, fields.raw(), consolidate_refusal)?;
     let common = mutation(&mut fields)?;
     let inputs = wire::array(fields.require("inputs")?, "inputs", 1, MAX_WIRE_INPUTS)?;

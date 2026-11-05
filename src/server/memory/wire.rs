@@ -231,6 +231,31 @@ impl Fields {
         &self.map
     }
 
+    /// Removes an empty `evidence` list from the request, from each item and
+    /// from the output. It names no record, so it is the same as an absent
+    /// field; anything else stays for the refusal check.
+    pub(super) fn drop_empty_evidence(&mut self) {
+        fn empty(value: &Value) -> bool {
+            value.as_array().is_some_and(Vec::is_empty)
+        }
+        fn strip(value: &mut Value) {
+            if let Value::Object(map) = value
+                && map.get("evidence").is_some_and(empty)
+            {
+                map.remove("evidence");
+            }
+        }
+        if self.map.get("evidence").is_some_and(empty) {
+            self.map.remove("evidence");
+        }
+        if let Some(Value::Array(items)) = self.map.get_mut("items") {
+            items.iter_mut().for_each(strip);
+        }
+        if let Some(output) = self.map.get_mut("output") {
+            strip(output);
+        }
+    }
+
     pub(super) fn finish(self) -> Result<(), Fail> {
         if self.map.is_empty() {
             Ok(())
