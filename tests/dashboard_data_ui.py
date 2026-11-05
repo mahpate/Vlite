@@ -2,6 +2,7 @@
 
 Runs without Docker: python tests/dashboard_data_ui.py
 """
+import base64
 import json
 from urllib.parse import parse_qs
 
@@ -19,7 +20,7 @@ class WorkspaceApi(FakeApi):
             "expires_unix_ms": 2000000000000,
         } if role == "scoped" else None)
         self.collections["cache"] = {**self.collections["docs"], "id": 2, "name": "cache", "dimensions": 1}
-        self.caps["features"].update(named_vectors=True, sparse_vectors=True)
+        self.caps["features"].update(named_vectors=True, sparse_vectors=True, kv=True)
         self.caps["routes"] = [
             "/v1/collections/{collection}/kv/entry", "/v1/collections/{collection}/kv/entries",
             "/v1/collections/{collection}/query",
@@ -33,6 +34,9 @@ class WorkspaceApi(FakeApi):
         self.fail_vectors = False
 
     def api(self, method, path, query, body, headers):
+        if path == "/v1/capabilities":
+            status, value, response_headers = super().api(method, path, query, body, headers)
+            return status, value, {**response_headers, "Date": "Thu, 05 Nov 2026 22:00:00 GMT"}
         if "/kv/" in path:
             if self.fail_write and method != "GET":
                 return self.error(412, "precondition_failed")
@@ -77,6 +81,59 @@ class WorkspaceApi(FakeApi):
         return super().api(method, path, query, body, headers)
 
 
+def exercise_kv_bytes(browser):
+    fake = WorkspaceApi()
+    fixtures = {"cr": b"a\rb", "crlf": b"a\r\nb", "bom": b"\xef\xbb\xbfhello", "line\nbreak": b'{"value":1}'}
+    fake.values = {key: {"key": key, "version": "2", "expires_at_ms": None,
+                         "value_base64": base64.b64encode(value).decode()}
+                   for key, value in fixtures.items()}
+    context, page, errors = mocked_page(browser, fake)
+    page.locator("#collection").select_option("cache")
+    control(page, "#kv-list")
+    for key, value in fixtures.items():
+        page.locator("#kv-list").click()
+        page.locator("#kv-entries").get_by_role("button", name=key, exact=True).click()
+        expect(page.locator("#kv-key")).to_have_value(key)
+        if key != "line\nbreak":
+            expect(page.locator("#kv-format")).to_have_value("base64")
+        page.locator("#kv-expiry").fill(MAX_U64)
+        page.locator("#kv-save").click()
+        confirm(page, "Save key")
+        expect(page.locator("#kv-outcome")).to_contain_text("Server confirmed")
+        put = next(item for item in reversed(fake.log) if item["method"] == "PUT")
+        assert put["body"]["key"] == key
+        assert base64.b64decode(put["body"]["value_base64"]) == value
+        expect(page.locator("#kv-version")).to_have_value("3")
+    # A display format change converts bytes; it never reinterprets base64 as text.
+    page.locator("#kv-format").select_option("base64")
+    expect(page.locator("#kv-value")).to_have_value(base64.b64encode(fixtures["line\nbreak"]).decode())
+    page.locator("#kv-format").select_option("json")
+    expect(page.locator("#kv-value")).to_have_value('{"value":1}')
+    page.locator("#kv-value").fill('{"value":2}')
+    page.locator("#kv-namespace").fill("another")
+    expect(page.locator("#kv-value")).to_have_value('{"value":2}')
+    expect(page.locator("#kv-key")).to_have_value("line\nbreak")
+    expect(page.locator("#kv-version")).to_have_value("")
+    expect(page.locator("#kv-condition")).to_have_value("absent")
+    page.locator("#kv-save").click()
+    confirm(page, "Save key")
+    expect(page.locator("#kv-outcome")).to_contain_text("Server confirmed")
+    put = next(item for item in reversed(fake.log) if item["method"] == "PUT")
+    assert put["body"]["namespace"] == "another" and put["body"]["expected"] == "absent"
+    assert base64.b64decode(put["body"]["value_base64"]) == b'{"value":2}'
+    assert not errors, errors
+    context.close()
+    fake = WorkspaceApi()
+    fake.caps["features"]["kv"] = False
+    context, page, errors = mocked_page(browser, fake)
+    page.locator("#collection").select_option("cache")
+    control(page, "#kv-list")
+    for name in ("list", "get", "save", "delete"):
+        expect(page.locator("#kv-" + name)).to_be_disabled()
+    assert not errors, errors
+    context.close()
+
+
 def exercise(browser):
     fake = WorkspaceApi()
     context, page, errors = mocked_page(browser, fake)
@@ -103,6 +160,12 @@ def exercise(browser):
     assert request["body"]["expected"] == {"revision": MAX_U64}
     assert request["body"]["namespace"] == "n&space"
     assert "expires_at_ms" not in request["body"]
+    expect(page.locator("#kv-version")).to_have_value("3")
+    page.locator("#kv-save").click()
+    confirm(page, "Save key")
+    expect(page.locator("#kv-outcome")).to_contain_text("Server confirmed")
+    request = next(item for item in reversed(fake.log) if item["method"] == "PUT")
+    assert request["body"]["expected"] == {"revision": "3"}
     page.locator("#kv-list").click()
     expect(page.locator("#kv-next")).to_be_enabled()
     page.locator("#kv-next").click()
@@ -147,9 +210,13 @@ def exercise(browser):
     page.locator("#memory-action").select_option("remember")
     for name, value in [("id", "new-memory"), ("content", "Synthetic memory"), ("source", "test"), ("idempotency", "once")]:
         page.locator("#memory-" + name).fill(value)
+    page.evaluate("window.originalDateNow = Date.now; Date.now = () => 4102444800000")
     page.locator("#memory-run").click()
     confirm(page, "Idempotency key: once")
     expect(page.locator("#memory-result")).to_contain_text('"operation": "remember"')
+    remembered = next(item for item in reversed(fake.log) if item["path"].endswith("/remember"))
+    assert remembered["body"]["items"][0]["observed_at_ms"] == "1793916000000"
+    page.evaluate("Date.now = window.originalDateNow")
     with page.expect_download() as downloaded:
         page.locator("#memory-download").click()
     saved = json.loads(open(downloaded.value.path(), encoding="utf-8").read())
@@ -207,7 +274,7 @@ def exercise(browser):
     page.locator("#memory-run").click()
     expect(page.locator("#memory-outcome")).to_contain_text("forbidden_scope")
     control(page, "#embed-text").fill("Synthetic embedding input")
-    page.locator("#embed-provider").fill("bound:semantic")
+    page.locator("#embed-provider").fill("Managed.Semantic_V2-1")
     page.locator("#embed-generate").click()
     confirm(page, "Text may leave this server")
     expect(page.locator("#embed-result")).to_contain_text("Query vector ready")
@@ -216,7 +283,9 @@ def exercise(browser):
     page.locator("#rerank-provider").fill("my-ranker")
     page.locator("#search-form button[type=submit]").click()
     expect(page.locator("#search-summary")).to_contain_text("my-ranker")
-    expect(page.locator("#hits")).to_contain_text("rerank_score")
+    expect(page.locator("#hits")).to_contain_text("Provider score (higher is better)")
+    expect(page.locator("#hits caption")).to_contain_text("higher provider score")
+    assert ".." not in page.locator("#search-summary").inner_text()
     expect(page.locator("#hits")).to_contain_text("0.9")
     control(page, "#vector-spec-name").fill("text")
     page.locator("#vector-spec-version").fill("v1")
@@ -304,6 +373,7 @@ def exercise(browser):
 if __name__ == "__main__":
     with sync_playwright() as p:
         browser = p.chromium.launch()
+        exercise_kv_bytes(browser)
         exercise(browser)
         browser.close()
     print("PASS Key-value, MemoryAI and managed providers: contracts, exact revisions, conflict safety, scope gates, receipts, sign-out and responsive layout")

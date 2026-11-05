@@ -144,52 +144,55 @@ Saved queries and **Copy as code** never include credentials.
 
 ### Managed embeddings and ranking
 
-**Generate a query vector from text** confirms provider disclosure, then fills
-the vector without searching. Use `hashing` (nonsemantic test data), `http` or
-an authorized `bound:alias`. Operators configure models and secrets offline.
-**Managed ranking provider** takes an alias without `bound:`; vector-only
-results show provider scores separately from distances. Saved queries retain
-aliases, never secrets. Provider failures have no silent fallback.
+**Generate a query vector from text** confirms disclosure without searching.
+Use `hashing` (nonsemantic), `http` or an authorized alias.
+Aliases use 1–256 ASCII letters, digits, dots, underscores or hyphens.
+Operators configure models/secrets offline.
+**Managed ranking provider** separates higher-is-better scores from distances.
+Saved queries retain aliases, never secrets. Failures never fall back silently.
 
 ## Key-value
 
-Select an existing one-dimensional collection. Browse a namespace/prefix,
-then select a key to load text, JSON or base64 bytes. Namespaces are not
-authorization boundaries. Pages are live, not snapshots.
+Select a one-dimensional collection and browse keys by namespace/prefix.
+Namespaces are not authorization boundaries; pages are live.
 
-New keys default to create-only; fetched keys use exact version conditions.
-Versions and absolute expiry remain decimal strings. Blank expiry on
-replacement **clears TTL**. Confirm changes; after conflicts or timeouts, fetch
-the current value before retrying.
+New keys default to create-only; fetched/saved keys require the returned version.
+Versions/absolute expiry stay decimal strings. Blank expiry **clears TTL**.
+After conflicts/timeouts, fetch before retrying. Namespace changes retain drafts
+but reset to create-only. Keys retain line breaks. Expiry-only edits preserve
+bytes. CR/CRLF, BOM and binary values load as base64. Format switching converts
+values, refusing lossy text conversions.
 
 ![Key-value workspace browsing synthetic preference keys](../site/assets/dashboard/current-key-value.png?v=connected)
 
 ## MemoryAI
 
-Use an operator-provided binding and exact agent/user/session scope with a
-**scoped API token**; administrator sign-in alone grants no memory access.
-Recall accepts seeds, text or vectors; text needs indexed evidence. Set result
-limits and weighted, exact or MMR ranking. Exact/MMR require a vector alone and
-use cosine distance. Inspect provenance, revisions and truncation.
+MemoryAI serves agent memory through an operator-provided binding, exact
+agent/user/session scope and **scoped API token**, not administrator sign-in.
+Recall accepts seeds, indexed text or vectors. Weighted ranking combines squared
+Euclidean vector distance with other signals. From 0.7.1, exact/MMR use cosine distance
+without entity seeds. Exact permits text; MMR does not. Inspect revisions and truncation.
 
-Remember supports entity/episodic memories. Consolidation retains originals;
-Forget pins ID/revision pairs and is **not secure erasure**. Mutations require
-idempotency keys and confirmation. Download submitted requests after failures
-and responses before sign-out. Explicit unchanged-draft replay preserves the
-original timestamp. Receipt lookup supports forget/consolidate, not remember.
-Fact correction, erasure jobs and automatic chat import remain unavailable.
-See [memory serving](API.md) and Overview's **Feature availability** for backend-only limits.
+Remember supports entity/episodic memories; consolidation retains originals.
+Forget pins ID/revision pairs: **not secure erasure**. Confirm mutations with
+idempotency keys. Download requests after failures and responses before sign-out.
+Unchanged-draft replay preserves timestamps. Observation time uses the server's
+Date header or `meta.ttl_clock_ms`, not your device clock. For unavailable/future
+times, refresh and ask your operator to check server time and proxy Date headers.
+Consolidation permits at most 256 wire references; server budgets may be lower.
+Receipt lookup supports forget/consolidate only. Fact correction, erasure jobs
+and automatic chat import are unavailable. See [memory serving](API.md).
 
 ## Explore graphs
 
-**Graph** (source builds) explores [property graphs](GRAPH.md).
-Diagrams show up to 40 nodes and 400 edges in **2D** or force-directed **3D**;
-tables retain all results. Pick nodes or edges to edit or **Connect two nodes**.
-Writes require confirmation; edits require current revisions, rejecting conflicts.
-Only empty graphs can be deleted. Requery after writes.
-Drag nodes, pan/zoom in 2D or rotate/zoom in 3D. Selection highlights neighbors.
-Fit/reset and keyboard controls remain available. Bounded settling respects
-reduced motion and pauses offscreen.
+**Graph** explores [property graphs](GRAPH.md) in **2D** or force-directed **3D**:
+up to 40 nodes/400 edges; tables retain everything. Select nodes/edges to edit or
+**Connect two nodes**. Confirm writes; edits reject stale revisions. Only empty
+graphs can be deleted. Requery after writes.
+Drag nodes; pan/rotate in 2D/3D; Ctrl/Cmd + scroll zooms.
+Ordinary scrolling/vertical touch scrolls the page. Selection highlights neighbors,
+not dimming labels. Fit/reset and keyboard controls remain available.
+Settling respects reduced motion and pauses offscreen.
 
 ![Graph traversal drawn as a node-link view](../site/assets/dashboard/current-graph.png?v=connected)
 
@@ -197,10 +200,9 @@ reduced motion and pauses offscreen.
 
 ## Build an index
 
-**Collections → Index** shows HNSW readiness, memory and a sampled recall
-estimate. Build an index, or start a background rebuild that keeps the current
-index serving until the new one is published. Writes stay searchable while
-they wait for the next rebuild.
+**Collections → Index** shows HNSW readiness, memory and sampled recall.
+Build or rebuild in the background; the current index keeps serving and
+writes stay searchable until the replacement is published.
 
 ## Monitor the server
 

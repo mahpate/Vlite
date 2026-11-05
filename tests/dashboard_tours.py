@@ -40,6 +40,9 @@ def check(root):
     manifest = json.loads((assets / "connected-captures.json").read_text())
     assert manifest["connected"] and manifest["record_count"] >= 8
     assert manifest["format_version"] >= 5
+    assert isinstance(manifest["capabilities"]["version"], str) and manifest["capabilities"]["version"]
+    assert len(manifest["source_git_sha"]) == 40 and all(char in "0123456789abcdef" for char in manifest["source_git_sha"])
+    assert isinstance(manifest["source_git_dirty"], bool)
     assert manifest["theme_sha256"] == hashlib.sha256(
         (root / "assets" / "theme.css").read_text(encoding="utf-8").encode()).hexdigest(), "Recapture after changing the shared theme"
     assert set(manifest["shared_assets"]) == {

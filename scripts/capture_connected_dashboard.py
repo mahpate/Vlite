@@ -204,6 +204,9 @@ def dashboard_server(backend):
 
 
 def capture(output):
+    source_git_sha = subprocess.check_output(["git", "rev-parse", "HEAD"], cwd=ROOT, text=True).strip()
+    source_git_dirty = bool(subprocess.check_output(
+        ["git", "status", "--porcelain", "--untracked-files=normal"], cwd=ROOT, text=True).strip())
     output.mkdir(parents=True, exist_ok=True)
     token = secrets.token_urlsafe(32)
     name = "vlite-connected-tour-" + uuid.uuid4().hex[:10]
@@ -622,6 +625,9 @@ def capture(output):
             "data": "Synthetic demo records and an articles graph in one isolated disposable database",
             "record_count": len(ARTICLES), "connected": True,
             "backend_image": "native isolated server" if native else IMAGE,
+            "capabilities": {"version": capabilities["version"]},
+            "source_git_sha": source_git_sha,
+            "source_git_dirty": source_git_dirty,
             "format_version": capabilities["format_version"],
             # Text-mode hashes match tests/dashboard_tours.py on any checkout line ending.
             "source_assets": {file.name: hashlib.sha256(file.read_text(encoding="utf-8").encode()).hexdigest()

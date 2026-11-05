@@ -104,8 +104,18 @@ def check(browser):
     page.mouse.up()
     expect(scene).not_to_have_attribute("transform", pan_before)
     page.mouse.move(diagram_box["x"] + diagram_box["width"] / 2, diagram_box["y"] + diagram_box["height"] / 2)
+    before_wheel = scene.get_attribute("transform")
     page.mouse.wheel(0, -180)
+    page.wait_for_timeout(150)
+    expect(scene).to_have_attribute("transform", before_wheel)
+    diagram.scroll_into_view_if_needed()
+    diagram_box = diagram.bounding_box()
+    page.mouse.move(diagram_box["x"] + diagram_box["width"] / 2, diagram_box["y"] + diagram_box["height"] / 2)
+    page.keyboard.down("Control")
+    page.mouse.wheel(0, -180)
+    page.keyboard.up("Control")
     expect(page.locator("#graph-scene")).to_have_attribute("transform", re.compile(r"scale\(1\.[0-9]+\)"))
+    assert diagram.evaluate("el => getComputedStyle(el).touchAction") == "pan-y"
     page.get_by_role("button", name="Fit / reset view").click()
     expect(page.locator("#graph-scene")).to_have_attribute("transform", "translate(0 0) scale(1)")
     diagram.focus()
@@ -116,6 +126,12 @@ def check(browser):
     node.click()
     expect(node).to_have_class(re.compile(r"is-selected"))
     expect(diagram.locator('[data-pick-edge="1"]')).to_have_class(re.compile(r"is-neighbor"))
+    assert diagram.locator("text").evaluate_all("""labels => labels.every(label => {
+        for (let node = label; node && node !== label.ownerSVGElement; node = node.parentElement) {
+            if (getComputedStyle(node).opacity !== "1") return false;
+        }
+        return true;
+    })""")
     assert len(batches(fake)) == 1, "Graph gestures and selection must not write"
     page.locator("#graph-view-mode").select_option("3d")
     expect(page.locator("#graph-figure-caption")).to_contain_text("not an embedding")
@@ -176,12 +192,22 @@ def check(browser):
     page.wait_for_function("(before) => document.querySelector('[data-node-id=\"18446744073709551615\"]').getAttribute('style') !== before", arg=rotated_before)
     zoom_before = node_label.get_attribute("style")
     page.mouse.move(box["x"] + box["width"] / 2, box["y"] + box["height"] / 2)
+    assert canvas.evaluate("""el => {
+        const event = new WheelEvent("wheel", {deltaY: -150, cancelable: true});
+        el.dispatchEvent(event); return !event.defaultPrevented;
+    }""")
+    expect(node_label).to_have_attribute("style", zoom_before)
+    page.keyboard.down("Control")
     page.mouse.wheel(0, -150)
+    page.keyboard.up("Control")
     page.wait_for_function("(before) => document.querySelector('[data-node-id=\"18446744073709551615\"]').getAttribute('style') !== before", arg=zoom_before)
     assert len(batches(fake)) == 1, "3D gestures must not write"
     point = node_label.evaluate("node => ({x: Number(node.dataset.pickX), y: Number(node.dataset.pickY)})")
     canvas.click(position=point)
     expect(node_label).to_have_class(re.compile(r"is-selected"))
+    assert canvas.evaluate("el => getComputedStyle(el).touchAction") == "pan-y"
+    for label in stage.locator(".graph-three-node, .graph-three-edge").all():
+        assert label.evaluate("el => getComputedStyle(el).opacity") == "1"
     expect(stage.locator('[data-edge-id="1"]')).to_have_class(re.compile(r"is-neighbor"))
     expect(page.locator("#graph-edit-key")).to_have_value("n")
     expect(page.locator("#graph-edit-revision")).to_have_value("7")

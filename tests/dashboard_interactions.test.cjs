@@ -77,6 +77,7 @@ function dashboard(fetch = async () => { throw new Error("Unexpected request"); 
         redact: (value) => value,
         id() {}, rerank: () => ({}),
         scoreDirection: () => ({ label: "Distance; lower is better" }),
+        serverTime: () => null,
       },
       init: (value) => {
         context = value;

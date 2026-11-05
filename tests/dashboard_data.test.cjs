@@ -3,7 +3,7 @@ const assert = require("node:assert/strict");
 const fs = require("node:fs");
 const vm = require("node:vm");
 const test = require("node:test");
-const context = { window: {}, TextEncoder, atob, btoa, URLSearchParams };
+const context = { window: {}, TextEncoder, TextDecoder, atob, btoa, URLSearchParams };
 vm.runInNewContext(fs.readFileSync("src/dashboard/console-tools.js", "utf8"), context);
 const u = context.window.VLiteTools.utils;
 const plain = value => JSON.parse(JSON.stringify(value));
@@ -33,6 +33,27 @@ test("KV text, JSON and binary encodings are canonical, bounded and lossless", (
   assert.throws(() => u.kvValue("a".repeat(1047291), "text"));
 });
 
+test("KV presentation refuses lossy textarea encodings and converts formats losslessly", () => {
+  for (const value of ["a\rb", "a\r\nb", "\uFEFFhello", "\u0000", "é\r\n"]) {
+    const encoded = Buffer.from(value).toString("base64");
+    assert.throws(() => u.kvPresentation(encoded, "text"));
+    assert.deepEqual(plain(u.kvPresentation(encoded, "base64")), { value: encoded, format: "base64" });
+  }
+  assert.throws(() => u.kvPresentation("AP8="));
+  assert.equal(u.kvPresentation(u.kvValue("a\nb", "text")).value, "a\nb");
+  assert.equal(u.kvAddress("cache", "n", "line\nbreak"), "/v1/collections/cache/kv");
+  const encoded = u.kvValue('{"hello":"世界"}', "json");
+  assert.equal(u.kvPresentation(encoded, "json").value, '{"hello":"世界"}');
+  assert.equal(u.kvValue(u.kvPresentation(encoded).value, "text"), encoded);
+  assert.throws(() => u.kvPresentation(u.kvValue("not json", "text"), "json"));
+});
+
+test("Memory observation timestamps require server time, never the device clock", () => {
+  assert.equal(u.serverTime({ meta: { ttl_clock_ms: "123" } }, "Thu, 05 Nov 2026 22:00:00 GMT"), 123);
+  assert.equal(u.serverTime({}, "Thu, 05 Nov 2026 22:00:00 GMT"), 1793916000000);
+  assert.equal(u.serverTime({}, null), null);
+});
+
 const draft = {
   agent: "agent-a", user: "user-a", session: "session-a", seeds: "one\ntwo", text: "", vector: "",
   idempotency: "request-key", id: "summary", kind: "entity", content: "Remember this",
@@ -42,8 +63,10 @@ const draft = {
 test("MemoryAI ranking guidance matches the exact/MMR cosine contract", () => {
   const html = fs.readFileSync("src/dashboard/index.html", "utf8");
   const guide = fs.readFileSync("docs/CONSOLE.md", "utf8");
-  assert.match(html, /Exact and MMR ranking require a vector alone:[^<]*Both use cosine distance\./);
-  assert.match(guide, /Exact\/MMR require a vector alone and\s+use cosine distance\./);
+  assert.match(html, /Weighted ranking uses squared Euclidean vector distance/);
+  assert.match(html, /exact and MMR ranking use cosine distance/);
+  assert.match(guide, /exact\/MMR use cosine distance/);
+  assert.match(html, /Exact allows optional query text; MMR does not support text/);
   assert.doesNotMatch(html, /Distance is squared Euclidean, not cosine/);
 });
 
@@ -76,6 +99,11 @@ test("Memory requests use exact scope, bounded reads and revision-pinned logical
   assert.equal(mmr.limit, 50);
   const exact = u.memoryRequest("recall", { ...draft, seeds: "", vector: "[2,0]", ranking: "exact" });
   assert.equal(exact.ranking.selection, "exact");
+  assert.equal(u.memoryRequest("recall", { ...draft, seeds: "", vector: "[2,0]", text: "query", ranking: "exact" }).text, "query");
+  assert.throws(() => u.memoryRequest("remember", draft), /Server time is unavailable/);
+  const refs = count => JSON.stringify(Array.from({ length: count }, (_, n) => ({ id: `m${n}`, revision: "1" })));
+  assert.equal(u.memoryRequest("consolidate", { ...draft, references: refs(256) }, 123).inputs.length, 256);
+  assert.throws(() => u.memoryRequest("consolidate", { ...draft, references: refs(257) }, 123), /1\.\.256/);
   assert.throws(() => u.memoryRequest("recall", { ...draft, vector: "[1]", ranking: "exact" }));
   assert.throws(() => u.memoryRequest("recall", { ...draft, seeds: "", text: "query", vector: "[1]", ranking: "mmr", lambda: .5 }));
   assert.throws(() => u.memoryRequest("recall", { ...draft, seeds: "", vector: "[1]", ranking: "mmr", lambda: "" }));
@@ -107,8 +135,10 @@ test("custom reranking accepts only a provider alias and survives saved-query ro
     assert.ok(!u.isSearch(path), path);
   assert.deepEqual(plain(u.rerank("custom", 50, "", 10, "exact", "my-ranker")),
     { rerank: { mode: "custom", candidates: 50, provider: "my-ranker" } });
-  for (const provider of ["", "https://provider.test", "../alias", "bound:alias"])
+  for (const provider of ["", "https://provider.test", "../alias", "invalid:alias", "a".repeat(257)])
     assert.throws(() => u.rerank("custom", 50, "", 10, "exact", provider));
+  for (const provider of ["Managed.Ranker_V2-1", "0", "a".repeat(256)])
+    assert.equal(u.providerAlias(provider), u.rerank("custom", 50, "", 10, "exact", provider).rerank.provider);
   assert.throws(() => u.rerank("custom", 50, "", 10, "hybrid", "alias"));
   const saved = { version: 2, name: "ranked", collection: "docs", query: {
     vector: [1, 0], text: "", k: 10, mode: "exact", metric: "squared_l2", ef_search: 100,

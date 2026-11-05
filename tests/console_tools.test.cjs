@@ -202,7 +202,8 @@ assert.ok(u.isSearch("/v1/search") && u.isSearch("/v1/collections/a/search") && 
 console.log("PASS EPIC-015 console helpers: collection routing, settings bounds, score direction, secret redaction/masking, credential requests, import parsing/chunking/resume, saved query v2, scheduler bodies, memory rows, playground allowlist");
 // V5 request builders reject unsafe numbers, malformed vectors and secret-bearing URLs.
 assert.deepEqual(u.expiry(""), {});
-assert.deepEqual(u.expiry("0"), { ttl_ms: 0 });
+assert.throws(() => u.expiry("0"));
+assert.deepEqual(u.expiry("1"), { ttl_ms: 1 });
 assert.deepEqual(u.expiry("60000"), { ttl_ms: 60000 });
 for (const value of ["-1", "1.5", "9007199254740992", "NaN", " ", "01"]) assert.throws(() => u.expiry(value));
 assert.deepEqual(u.rerank("", "", "", 10, "exact"), {});

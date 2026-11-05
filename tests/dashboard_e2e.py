@@ -1228,7 +1228,7 @@ def exercise_collections_mocked(browser):
     control(page, "#explain").check()
     role(page, "button", name="Search", exact=True).click()
     expect(control(page, "#hits caption")).to_contain_text("hybrid score, higher is better")
-    expect(control(page, "#hits thead th")).to_have_text(["ID", "Score (higher is better)", "Distance (lower is better)", "bm25", "vector_rank", "text_rank", "Record preview"])
+    expect(control(page, "#hits thead th")).to_have_text(["ID", "Score (higher is better)", "Distance (lower is better)", "Text relevance", "Vector rank", "Text rank", "Record preview"])
     expect(control(page, "#hits tbody tr").nth(1)).to_contain_text("--")
     search = fake.log[-1]
     assert search["path"] == "/v1/collections/docs/search", search

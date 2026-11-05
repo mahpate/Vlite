@@ -32,6 +32,7 @@
   let authConfig = null; // GET /v1/auth/config; null for servers without password sign-in
   let changingPassword = false;
   let connected = false;
+  let serverClock = null;
   let busy = false;
   let nextAfter = null;
   let pageSize = 25;
@@ -540,6 +541,7 @@
       const text = await response.text();
       if (!current()) throw staleRequest();
       value = options.text && response.ok ? text : text ? JSON.parse(text) : null;
+      serverClock = utils().serverTime(value, response.headers.get("date"));
     } catch (error) {
       if (!current() || error.stale) throw staleRequest();
       if (changesData) mutationChanged();
@@ -1206,16 +1208,17 @@
       table.replaceChildren();
       $("search-plan").textContent = "";
       const direction = utils().scoreDirection(body.mode, body.metric);
-      $("search-summary").textContent = `${result.hits.length} neighbors returned in ${(performance.now() - started).toFixed(1)} ms (browser-observed); collection ${owner}; ${body.mode}, ${body.metric}. ${result.ranking ? `Provider ${result.ranking.provider}; order ${result.ranking.order}. Provider scores are not vector distances.` : direction.label}.${body.mode !== "exact" && body.filter.length ? " Filter-aware ANN may return fewer than k; no exact fallback. " : ""} Select an ID to inspect.`;
+      $("search-summary").textContent = `${result.hits.length} neighbors returned in ${(performance.now() - started).toFixed(1)} ms (browser-observed); collection ${owner}; ${body.mode}, ${body.metric}. ${result.ranking ? `Provider ${result.ranking.provider}; higher provider scores rank first (ID breaks ties). Provider scores are not vector distances` : direction.label}.${body.mode !== "exact" && body.filter.length ? " Filter-aware ANN may return fewer than k; no exact fallback. " : ""} Select an ID to inspect.`;
       $("hits").querySelector("caption").textContent = body.mode === "hybrid"
         ? `Search results (${body.metric}; hybrid score, higher is better)`
-        : `Search results (${body.metric ?? "squared_l2"}; lower distance is better)`;
+        : result.ranking ? `Search results (provider ${result.ranking.provider}; higher provider score is better)`
+          : `Search results (${body.metric ?? "squared_l2"}; lower distance is better)`;
       const columns = body.mode === "hybrid" ? ["score", "distance", "bm25", "vector_rank", "text_rank"] : result.ranking ? ["rerank_score", "distance"] : ["distance"];
       const header = $("hits").querySelector("thead tr");
       header.replaceChildren();
       for (const title of ["ID", ...columns, "Record preview"]) {
         const cell = document.createElement("th"); cell.scope = "col";
-        cell.textContent = title === "ID" ? "ID" : title === "score" ? "Score (higher is better)" : title === "distance" ? "Distance (lower is better)" : title;
+        cell.textContent = ({ score: "Score (higher is better)", distance: "Distance (lower is better)", rerank_score: "Provider score (higher is better)", bm25: "Text relevance", vector_rank: "Vector rank", text_rank: "Text rank" })[title] ?? title;
         cell.dataset.field = title === "ID" ? "id" : title;
         header.append(cell);
       }
@@ -1271,7 +1274,7 @@
   const toolsContext = {
     api, run, status, confirm: confirmOperation, inspect: inspectRecord, search, indexConfig, disconnect,
     dimensions: () => dimensions, busy: () => busy, connected: () => connected, tokenAuth: () => Boolean(token),
-    capabilities: () => capabilities, lastSearch: () => lastSearch,
+    capabilities: () => capabilities, lastSearch: () => lastSearch, serverNow: () => serverClock,
     collection: () => collection, path, settingsPath, feature, can, extended, annOptions, searchBody,
     collections: () => collectionItems,
     // Called by collection management after create/drop/settings so the selector stays truthful.

@@ -549,7 +549,7 @@
             h(doc, "button", { id: "graph-zoom-out", type: "button", class: "secondary", "aria-label": "Zoom out", text: "−" }),
             h(doc, "button", { id: "graph-zoom-in", type: "button", class: "secondary", "aria-label": "Zoom in", text: "+" }),
             h(doc, "button", { id: "graph-fit", type: "button", class: "secondary", text: "Fit / reset view" }),
-            h(doc, "span", { class: "graph-gesture-help", text: "Drag nodes · drag empty space to pan or rotate · scroll to zoom · use + / − and 0 when focused" }),
+            h(doc, "span", { class: "graph-gesture-help", text: "Drag nodes · drag empty space to pan or rotate · Ctrl/Cmd + scroll to zoom · use + / − and 0 when focused" }),
             h(doc, "button", { id: "graph-connect-nodes", type: "button", class: "secondary", hidden: true, "aria-pressed": "false", text: "Connect two nodes" }),
             h(doc, "label", { "data-graph-rotation": "", hidden: true }, "Turn", h(doc, "input", { id: "graph-yaw", type: "range", min: "-180", max: "180", value: "25" })),
             h(doc, "label", { "data-graph-rotation": "", hidden: true }, "Tilt", h(doc, "input", { id: "graph-pitch", type: "range", min: "-80", max: "80", value: "15" }))),
@@ -750,7 +750,7 @@
       const set = (element, attributes) => { for (const [name, value] of Object.entries(attributes)) element.setAttribute(name, String(value)); return element; };
       const make = (tag, attributes) => set(doc.createElementNS(SVG_NS, tag), attributes);
       set(svg, { id: "graph-view", viewBox: `0 0 ${view.width} ${view.height}`, role: "group", tabindex: "0",
-        "aria-label": `${view.nodes.length} nodes and ${view.edges.length} edges. Drag nodes to move them, drag the background to pan, scroll to zoom. Keyboard: plus and minus to zoom, arrows to pan, zero to reset.` });
+        "aria-label": `${view.nodes.length} nodes and ${view.edges.length} edges. Drag nodes to move them, drag the background to pan, Ctrl/Cmd + scroll to zoom. Keyboard: plus and minus to zoom, arrows to pan, zero to reset.` });
       const scene = make("g", { id: "graph-scene" });
       const defs = make("defs", {});
       const marker = make("marker", { id: "graph-arrow", viewBox: "0 0 8 8", refX: "8", refY: "4", markerWidth: "8", markerHeight: "8", orient: "auto-start-reverse" });
@@ -879,7 +879,11 @@
       svg.addEventListener("click", event => {
         if (suppressPick) { event.preventDefault(); event.stopPropagation(); suppressPick = false; }
       });
-      svg.addEventListener("wheel", event => { event.preventDefault(); zoomAt(event.deltaY < 0 ? 1.12 : 1 / 1.12, svgPoint(event)); }, { passive: false });
+      svg.addEventListener("wheel", event => {
+        if (!event.ctrlKey && !event.metaKey) return;
+        event.preventDefault();
+        zoomAt(event.deltaY < 0 ? 1.12 : 1 / 1.12, svgPoint(event));
+      }, { passive: false });
       svg.addEventListener("keydown", event => {
         if (event.key === "+" || event.key === "=") { event.preventDefault(); zoomAt(1.2); }
         else if (event.key === "-") { event.preventDefault(); zoomAt(1 / 1.2); }
@@ -899,7 +903,7 @@
       };
       $("graph-figure-caption").textContent = view.omitted > 0
         ? `Node-link view of the first ${view.nodes.length} nodes (${view.omitted} more listed in the table).`
-        : "Node-link view. Drag nodes to arrange them, drag the background to pan, and scroll to zoom. Select nodes or edges to edit.";
+        : "Node-link view. Drag nodes to arrange them, drag the background to pan, and Ctrl/Cmd + scroll to zoom. Select nodes or edges to edit.";
       if (view.omittedEdges) $("graph-figure-caption").textContent += ` ${view.omittedEdges} more edges are listed in the tables.`;
       updateGraphHighlight();
       if (mode === "3d") {
@@ -925,7 +929,7 @@
             threeView.rotate($("graph-yaw").value, $("graph-pitch").value);
             threeView.setSelection(state.focused);
             svg.style.display = "none";
-            $("graph-figure-caption").textContent = `Force-directed 3D layout of this query result, not an embedding. Drag nodes to move them; drag the background to rotate; scroll to zoom. Tables contain exact data.${view.omitted ? ` ${view.omitted} more nodes are listed in the tables.` : ""}${view.omittedEdges ? ` ${view.omittedEdges} more edges are listed in the tables.` : ""}`;
+            $("graph-figure-caption").textContent = `Force-directed 3D layout of this query result, not an embedding. Drag nodes to move them; drag the background to rotate; Ctrl/Cmd + scroll to zoom. Tables contain exact data.${view.omitted ? ` ${view.omitted} more nodes are listed in the tables.` : ""}${view.omittedEdges ? ` ${view.omittedEdges} more edges are listed in the tables.` : ""}`;
           } catch (error) { fallback(error.message); }
         }).catch(error => fallback(`The renderer could not load: ${error.message}`));
       }

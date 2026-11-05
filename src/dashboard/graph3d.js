@@ -440,6 +440,7 @@ export function createGraph(host, view, { onNode, onEdge, onFailure, onChange = 
   canvas.addEventListener("pointerup", pointerEnd);
   canvas.addEventListener("pointercancel", pointerEnd);
   canvas.addEventListener("wheel", event => {
+    if (!event.ctrlKey && !event.metaKey) return;
     event.preventDefault();
     userZoomed = true;
     camera.position.z = Math.max(180, Math.min(900, camera.position.z * (event.deltaY < 0 ? .9 : 1.1)));

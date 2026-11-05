@@ -86,6 +86,9 @@ jobs:
           python tests/compact_method_matrix.py
           python tests/api_route_inventory.py
 
+      - name: Verify dashboard REST coverage on documentation-only changes
+        run: python tests/dashboard_feature_coverage.py
+
   native:
     needs: changes
     if: needs.changes.outputs.full == 'true'
@@ -222,6 +225,7 @@ jobs:
         run: |
           node --test tests/console_tools.test.cjs tests/admin_tools.test.cjs tests/navigation.test.cjs tests/dashboard_interactions.test.cjs tests/dashboard_graph.test.cjs
           python tests/admin_route_coverage.py
+          python tests/dashboard_feature_coverage.py
       - name: Verify the website API reference documents every public API item
         if: matrix.os == 'ubuntu-latest'
         run: |

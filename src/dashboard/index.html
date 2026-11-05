@@ -138,7 +138,7 @@
     <details class="operation-view"><summary>Server compatibility</summary><pre id="compatibility" aria-label="Server compatibility"></pre></details>
     <details class="operation-view" id="feature-coverage"><summary>Feature availability and backend-only operations</summary>
       <p>Use Key-value for namespaced values, MemoryAI for granted agent memory, Search for provider inference and named/sparse retrieval, and Graph for interactive graph queries and edits. Server support and credential permissions still apply.</p>
-      <p>Directory-store conversion, checkpoint controls, graph expiry and bounded graph algorithms are embedded Rust operations with no dashboard REST API. Automatic exact-search kernels and filter pruning need no switches. Compact storage controls remain unavailable until qualified server APIs exist. Provider models/secrets and memory bindings are configured offline by the operator.</p>
+      <p>Directory-store conversion, checkpoint controls, graph expiry and graph algorithms are not available in the dashboard. Automatic search optimizations need no switches. Compact storage controls are not yet available here. Your operator configures provider models, secrets and memory bindings outside the dashboard.</p>
     </details>
     <details class="operation-view"><summary>Database details and metrics (JSON)</summary><pre id="overview" aria-label="Database overview"></pre></details>
   </section>
@@ -187,7 +187,7 @@
       <label>ID (decimal u64) <input id="id" value="1" required inputmode="numeric" spellcheck="false"></label>
       <label>Vector (JSON array) <textarea id="record-vector" rows="3">[1, 0, 0]</textarea></label>
       <label>Payload (standard base64) <textarea id="payload" rows="2"></textarea></label>
-      <label>TTL (milliseconds, optional; blank means no expiry on replacement)<input id="record-ttl" type="number" min="0" step="1" data-feature="record_expiry"></label>
+      <label>TTL (milliseconds, minimum 1; blank means no expiry on replacement)<input id="record-ttl" type="number" min="1" step="1" data-feature="record_expiry"></label>
       <label>Typed metadata (JSON object) <textarea id="metadata" rows="4">{}</textarea></label>
       <div class="tool-group">
         <h3>Visual metadata editor</h3>
@@ -204,7 +204,7 @@
     </form>
     <pre id="record" aria-label="Record result"></pre>
     <p id="vector-summary"></p>
-    <label>Vector slice start<input id="vector-slice-start" type="number" min="0" value="0"></label>
+    <label>Starting component<input id="vector-slice-start" type="number" min="0" value="0"></label>
     <button id="vector-slice" type="button" class="secondary">Inspect 32 components</button>
     <pre id="vector-slice-result"></pre>
     <h3>Safe payload preview</h3><p>UTF-8 / JSON text only. HTML is never rendered.</p><pre id="payload-preview"></pre>
@@ -344,7 +344,7 @@
       </div>
       <div class="tool-group">
         <h3>Inspect or edit a value</h3>
-        <label>Key<input id="kv-key" autocomplete="off"></label>
+        <label>Key (exact text, including line breaks)<textarea id="kv-key" rows="2" autocomplete="off"></textarea></label>
         <button id="kv-get" type="button" class="secondary">Get value</button>
         <label>Value format<select id="kv-format"><option value="text">UTF-8 text</option><option value="json">JSON (validated text)</option><option value="base64">Base64 bytes</option></select></label>
         <label>Value<textarea id="kv-value" rows="7"></textarea></label>
@@ -378,7 +378,7 @@
           <label>Ranking<select id="memory-ranking"><option value="weighted">Weighted (default)</option><option value="exact">Exact vector distance</option><option value="mmr">MMR vector diversity</option></select></label>
           <label>Result limit<input id="memory-limit" type="number" min="1" max="100" value="20"></label>
           <label>MMR relevance weight (0 diversity .. 1 relevance)<input id="memory-lambda" type="number" min="0" max="1" step="0.05" value="0.5"></label>
-          <p>Exact and MMR ranking require a vector alone: remove entity seeds and query text. Both use cosine distance.</p>
+          <p>Weighted ranking uses squared Euclidean vector distance alongside other signals. From 0.7.1, exact and MMR ranking use cosine distance and require a vector without entity seeds. Exact allows optional query text; MMR does not support text.</p>
           <p>Recall is bounded and may be truncated; inspect its reasons and work counters below. No automatic embedding or approximate memory search is requested.</p>
         </div>
         <div data-memory-action="remember consolidate" hidden>
@@ -388,10 +388,10 @@
           <label>Source ID<input id="memory-source" autocomplete="off"></label>
           <label>Source kind<input id="memory-source-kind" value="dashboard" autocomplete="off"></label>
           <label>Transformation ID (required for consolidation)<input id="memory-transformation" autocomplete="off"></label>
-          <p>The observation time is captured when submitting. This slice does not support facts, relations, evidence attachment or arbitrary metadata.</p>
+          <p>Observation time comes from the server, not your device clock. If time is unavailable or rejected as future-dated, refresh the connection and ask your operator to check the server clock and proxy Date header. This version does not support facts, relations, evidence attachment or arbitrary metadata.</p>
         </div>
         <div data-memory-action="forget consolidate" hidden>
-          <label>Memory references (JSON array of {"id":"…","revision":"1"})<textarea id="memory-references" rows="4">[]</textarea></label>
+          <label>Memory references (JSON array of {"id":"…","revision":"1"}; at most 256 for consolidation)<textarea id="memory-references" rows="4">[]</textarea></label>
           <p>Use revisions from a successful recall. Logical deletion is not secure erasure; backups and external copies remain operator-managed. Consolidation retains original memories.</p>
         </div>
         <div data-memory-action="remember consolidate forget receipts/lookup" hidden>
@@ -412,7 +412,7 @@
         <button id="memory-download" type="button" class="secondary" disabled>Download last response</button>
         <button id="memory-download-request" type="button" class="secondary" disabled>Download last submitted request</button>
         <pre id="memory-result" aria-label="Memory response and receipts"></pre>
-        <p>Unavailable in this backend slice: fact correction, broad scope deletion, secure erasure jobs, dry-run consolidation and remember receipt lookup. Unsupported server operations remain explicit errors.</p>
+        <p>Not available in this version: fact correction, broad scope deletion, secure erasure jobs, dry-run consolidation and remember receipt lookup. Unsupported server operations remain explicit errors.</p>
       </div>
     </div>
   </section>
@@ -450,7 +450,7 @@
         <p>Text may be sent to the configured external provider. Hashing is deterministic test data, not a semantic embedding model. Generating only fills the query vector; Search is a separate action.</p>
         <p>Some servers omit embedding from their capability list. Availability is checked when generating; unsupported routes return an explicit error.</p>
         <label>Text to embed<textarea id="embed-text" rows="3"></textarea></label>
-        <label>Embedding provider alias<input id="embed-provider" value="hashing" autocomplete="off" placeholder="hashing, http, or bound:alias"></label>
+        <label>Embedding provider alias<input id="embed-provider" value="hashing" autocomplete="off" placeholder="hashing, http, or your configured alias"></label>
         <button id="embed-generate" type="button">Generate query vector</button>
         <p id="embed-result" role="status"></p>
       </details>
