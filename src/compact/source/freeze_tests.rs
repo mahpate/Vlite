@@ -1,8 +1,10 @@
 //! Seam-freeze regressions (0.7.1 R0).
 //!
 //! Each test pins one statement of `docs/projects/roadmap/p3b-seam-freeze.md`.
-//! Expectations are literals, or come from the resident records of the same
-//! image, never from the code under test. Source and records are test-gated, so
+//! Expectations are literals, values read from the resident records or from
+//! the plain image of the same data, or a size that the statement itself
+//! defines (`source_live` is the length of the pinned backing, so a test
+//! compares it with that length). Source and records are test-gated, so
 //! nothing here touches a release build.
 
 use super::dispatch_tests::{compact_dispatch_fixture, gates};
