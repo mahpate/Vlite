@@ -972,3 +972,35 @@ fn freeze_named_collections_keep_one_overlay_each() {
         );
     }
 }
+
+#[test]
+fn freeze_frame_range_outside_the_backing_is_corrupt() {
+    let _gates = gates();
+    for encrypted in [false, true] {
+        let key = encrypted.then(source_key);
+        let mut loaded = loaded_with(&ROWS, key.as_ref());
+        let mut generation = loaded.compact_generation.take().unwrap();
+        let inner = Arc::get_mut(&mut generation).unwrap();
+        let end = inner.backing.as_slice().len();
+        inner.collections.get_mut(&0).unwrap().blocks[0].frame = end..end + 8;
+        let view = generation.view(0);
+        let mut workspace = ReadWorkspace::new(4 * 1024 * 1024).unwrap();
+        let reason = "compact source frame is out of bounds";
+        assert!(is_corrupt(view.read_vector(0, &mut workspace), reason));
+        assert!(is_corrupt(view.read_metadata(0, &mut workspace), reason));
+        assert!(is_corrupt(view.read_payload(0, &mut workspace), reason));
+        assert!(is_corrupt(view.get_physical(view.id(0).unwrap()), reason));
+    }
+}
+
+#[test]
+fn freeze_source_never_reads_the_wall_clock() {
+    // CLK-1: every deadline decision in the pinned source takes the caller's clock.
+    let source = include_str!("../source.rs");
+    for forbidden in ["current_time_ms", "SystemTime", "Instant::now"] {
+        assert!(
+            !source.contains(forbidden),
+            "source.rs must not read a clock: {forbidden}"
+        );
+    }
+}
