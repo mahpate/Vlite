@@ -8,6 +8,8 @@ use std::collections::{BTreeMap, BTreeSet};
 
 pub(crate) mod binding;
 mod consolidate;
+#[cfg(feature = "server")]
+pub(crate) use consolidate::{ConsolidateInput, ConsolidateRequest, ConsolidateSummary};
 mod erasure;
 mod mapping;
 #[cfg(feature = "server")]

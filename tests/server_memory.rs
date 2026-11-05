@@ -89,7 +89,11 @@ const MEMORY_PATHS: [&str; 3] = [
 ];
 
 /// Routes served in this slice; the rest are not mounted yet.
-const SERVED: [&str; 2] = ["/v1/memory/notes/remember", "/v1/memory/notes/recall"];
+const SERVED: [&str; 3] = [
+    "/v1/memory/notes/remember",
+    "/v1/memory/notes/recall",
+    "/v1/memory/notes/consolidate",
+];
 const UNMOUNTED: [&str; 1] = ["/v1/memory/notes/receipts/lookup"];
 
 #[tokio::test]
@@ -581,4 +585,66 @@ async fn recall_needs_read_and_search_on_the_evidence_collection() {
         (status, &error["error"]["code"]),
         (404, &json!("memory_not_found"))
     );
+}
+
+fn consolidate_body(key: &str) -> Value {
+    json!({
+        "scope": {"agent": "a"},
+        "idempotency_key": key,
+        "inputs": [{"id": "e1", "revision": "1"}],
+        "output": {
+            "id": "sum1",
+            "kind": "episodic",
+            "content": "secret summary text",
+            "observed_at_ms": "90",
+            "source": {"source_id": "s2", "source_kind": "caller", "transformation_id": "t1"}
+        }
+    })
+}
+
+#[tokio::test]
+async fn a_granted_scope_consolidates_and_replays_with_a_content_free_audit() {
+    let directory = TempDir::new().unwrap();
+    let (app, token) = start_scoped(&directory, &ALL_OPS, None);
+    let (status, _) = remember(&app, Some(&token), &remember_body("k")).await;
+    assert_eq!(status, 200);
+    let (status, first) = post(&app, SERVED[2], &token, &consolidate_body("c-1")).await;
+    assert_eq!(status, 200, "{first}");
+    assert_eq!(
+        first["outcomes"],
+        json!([{"id": "sum1", "action": "created", "revision": "1"}])
+    );
+    assert_eq!(first["receipt"]["operation"], "consolidate");
+    assert_eq!(first["replayed"], false);
+    let (status, again) = post(&app, SERVED[2], &token, &consolidate_body("c-1")).await;
+    assert_eq!(status, 200, "{again}");
+    assert_eq!(again["replayed"], true);
+    assert_eq!(again["receipt"], first["receipt"]);
+    let mut other = consolidate_body("c-2");
+    other["scope"] = json!({"agent": "b"});
+    let (status, error) = post(&app, SERVED[2], &token, &other).await;
+    assert_eq!(
+        (status, &error["error"]["code"]),
+        (403, &json!("forbidden_scope"))
+    );
+    let audit = std::fs::read_to_string(directory.path().join("audit.jsonl")).unwrap();
+    let events: Vec<Value> = audit
+        .lines()
+        .map(|line| serde_json::from_str::<Value>(line).unwrap())
+        .filter(|event| event["operation"] == "consolidate")
+        .collect();
+    assert_eq!(events.len(), 3);
+    assert_eq!(events[0]["receipt_id"], first["receipt"]["id"]);
+    assert_eq!(events[2]["outcome"], "forbidden_scope");
+    for secret in ["secret summary text", "c-1", "\"sum1\"", "\"t1\""] {
+        assert!(!audit.contains(secret), "audit leaks {secret}");
+    }
+}
+
+#[tokio::test]
+async fn consolidate_is_a_graph_write() {
+    let directory = TempDir::new().unwrap();
+    let (app, reader) = start_scoped(&directory, &["read", "search", "graph_read"], None);
+    let (status, error) = post(&app, SERVED[2], &reader, &consolidate_body("c")).await;
+    assert_eq!(status, 403, "{error}");
 }

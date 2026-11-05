@@ -33,6 +33,7 @@ use crate::memory::{
     receipt_id,
 };
 
+mod consolidate;
 mod recall;
 
 /// Mutation `deadline_ms` default and bound (contract `MemoryMutation`).
@@ -62,6 +63,7 @@ pub(super) fn routes() -> Router<Service> {
     Router::new()
         .route(REMEMBER, post(remember))
         .route(RECALL, post(recall::recall))
+        .route(CONSOLIDATE, post(consolidate::consolidate))
 }
 
 /// Test seam for the engine clock and the elapsed request budget. Absent in
@@ -585,19 +587,25 @@ fn remember_item(
     })
 }
 
-async fn remember(
-    State(service): State<Service>,
-    Extension(role): Extension<admin::Role>,
-    Extension(request_id): Extension<RequestId>,
-    clock: Option<Extension<Clock>>,
+/// A mutation handler body run inside the write closure: the committed or
+/// replayed response, its receipt ID and receipt revision for the audit.
+type WriteFn =
+    fn(&mut Database, &Call, &Bound, Fields, MemoryScope) -> Result<(Value, String, u64), Fail>;
+
+/// The shared mutation flow: binding resolution, body, exact-scope
+/// authorization, then `handler` under the write lock (which runs the
+/// writable precheck, refusals, validation and the core call in order).
+async fn write(
+    mut call: Call,
     name: Result<Path<String>, PathRejection>,
     headers: HeaderMap,
     bytes: Result<Bytes, BytesRejection>,
+    operation: WireOperation,
+    evidence_ops: &[Op],
+    handler: WriteFn,
 ) -> Response {
-    let mut call = Call::new(service.clone(), role.clone(), request_id, clock, "remember");
-    let evidence_ops: &[Op] = &[Op::Write];
-    let (bound, name) = match resolve(&service, &role, name, WireOperation::Remember, evidence_ops)
-    {
+    let service = call.service.clone();
+    let (bound, name) = match resolve(&service, &call.role, name, operation, evidence_ops) {
         Ok(found) => found,
         Err(fail) => return call.finish(Err(fail), None),
     };
@@ -614,9 +622,7 @@ async fn remember(
     let call = Arc::new(call);
     let inner = call.clone();
     let result = service
-        .run_mutation(0, move |db| {
-            Ok(remember_in(db, &inner, &bound, fields, scope))
-        })
+        .run_mutation(0, move |db| Ok(handler(db, &inner, &bound, fields, scope)))
         .await
         .map_err(Fail::from)
         .and_then(|result| result);
@@ -624,6 +630,29 @@ async fn remember(
         Ok((body, id, revision)) => call.finish(Ok(body), Some((&id, revision))),
         Err(fail) => call.finish(Err(fail), None),
     }
+}
+
+async fn remember(
+    State(service): State<Service>,
+    Extension(role): Extension<admin::Role>,
+    Extension(request_id): Extension<RequestId>,
+    clock: Option<Extension<Clock>>,
+    name: Result<Path<String>, PathRejection>,
+    headers: HeaderMap,
+    bytes: Result<Bytes, BytesRejection>,
+) -> Response {
+    let call = Call::new(service, role, request_id, clock, "remember");
+    let ops = &[Op::Write];
+    write(
+        call,
+        name,
+        headers,
+        bytes,
+        WireOperation::Remember,
+        ops,
+        remember_in,
+    )
+    .await
 }
 
 fn remember_in(

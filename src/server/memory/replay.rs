@@ -21,13 +21,18 @@ use tower::ServiceExt;
 
 use super::super::{MAX_JSON_BYTES, RequestId, Service, admin, credentials};
 use super::routes::Clock;
-use crate::memory::{MemoryItem, MemoryKind, MemoryMut, MemoryScope, Provenance, RememberRequest};
+use crate::memory::{
+    ForgetRequest, ForgetTarget, MemoryItem, MemoryKind, MemoryMut, MemoryScope, Provenance,
+    RememberRequest,
+};
 use crate::{CollectionSettings, CollectionSpec, CreateOptions, Database, FormatVersion};
 
 pub(super) const REMEMBER: &str =
     include_str!("../../../tests/fixtures/agent_memory/wire/remember.json");
 pub(super) const RECALL: &str =
     include_str!("../../../tests/fixtures/agent_memory/wire/recall.json");
+pub(super) const CONSOLIDATE: &str =
+    include_str!("../../../tests/fixtures/agent_memory/wire/consolidate.json");
 
 const PRINCIPAL: &str = "abcdefghij27";
 const OTHER: &str = "bcdefghij234";
@@ -160,12 +165,31 @@ pub(super) fn harness(view: &Value) -> Option<Harness> {
     })
 }
 
-/// `{"$text": s, "count": n}` is `s` repeated `n` times.
+/// `{"$text": s, "count": n}` is `s` repeated `n` times;
+/// `{"$repeat": v, "count": n, "enumerate": [k]}` is `n` copies of `v`
+/// with the index appended to each string field `k`.
 fn expand(value: &Value) -> Value {
     match value {
         Value::Object(map) if map.contains_key("$text") => {
             let count = map["count"].as_u64().unwrap() as usize;
             Value::String(map["$text"].as_str().unwrap().repeat(count))
+        }
+        Value::Object(map) if map.contains_key("$repeat") => {
+            let count = map["count"].as_u64().unwrap();
+            let fields = map.get("enumerate").cloned().unwrap_or(json!([]));
+            Value::Array(
+                (0..count)
+                    .map(|index| {
+                        let mut item = expand(&map["$repeat"]);
+                        for field in fields.as_array().unwrap() {
+                            let field = field.as_str().unwrap();
+                            let text = format!("{}{index}", item[field].as_str().unwrap());
+                            item[field] = json!(text);
+                        }
+                        item
+                    })
+                    .collect(),
+            )
         }
         Value::Object(map) => Value::Object(
             map.iter()
@@ -276,6 +300,119 @@ impl Harness {
             .unwrap();
     }
 
+    /// The C1 consolidation setup through the core at clock 1: the view's
+    /// `consolidation.sources` (default one entity `m`, as the C1
+    /// reference) plus every input a seeded receipt names. Each source gets
+    /// distinct content so exact dedup cannot fold them. Returns the
+    /// receipt-only IDs, forgotten once the receipts are seeded.
+    fn consolidation(&self, view: &Value) -> Vec<String> {
+        let sources = view
+            .get("consolidation")
+            .map(|setup| {
+                assert!(setup.as_object().unwrap().keys().all(|k| k == "sources"));
+                expand(&setup["sources"])
+            })
+            .unwrap_or(json!([{"id": "m"}]));
+        let mut seeds = Vec::new();
+        for source in sources.as_array().unwrap() {
+            let map = source.as_object().unwrap();
+            assert!(map.keys().all(|k| k == "id" || k == "expiry_ms"));
+            seeds.push((
+                source["id"].as_str().unwrap().to_owned(),
+                source["expiry_ms"].as_u64(),
+            ));
+        }
+        let mut lost = Vec::new();
+        for receipt in view["receipts"].as_array().into_iter().flatten() {
+            for input in expand(&receipt["request"]["inputs"]).as_array().unwrap() {
+                let id = input["id"].as_str().unwrap().to_owned();
+                if !seeds.iter().any(|(seed, _)| *seed == id) {
+                    seeds.push((id.clone(), None));
+                    lost.push(id);
+                }
+            }
+        }
+        if seeds.is_empty() {
+            return lost;
+        }
+        let items = seeds
+            .into_iter()
+            .map(|(id, expiry_ms)| MemoryItem {
+                content: format!("source {id}"),
+                id,
+                kind: MemoryKind::Entity,
+                source: "origin".into(),
+                importance: None,
+                observed_at_ms: Some(1),
+                provenance: vec![Provenance {
+                    source: "origin".into(),
+                    kind: Some("caller".into()),
+                    uri: None,
+                    transformation: None,
+                }],
+                references: Vec::new(),
+                merge_into: None,
+                expected_revision: None,
+                expiry_ms,
+                expiry_valid: true,
+                evidence: Vec::new(),
+            })
+            .collect();
+        let request = RememberRequest {
+            scope: self.scope(view),
+            idempotency_key: "c1-sources".into(),
+            receipt_window_ms: view["receipt_window_ms"].as_u64().unwrap(),
+            now_ms: 1,
+            deadline_ms: None,
+            allow_future_observations: false,
+            items,
+        };
+        let mut owner = self.service.database.write().unwrap();
+        let db = owner.as_mut().unwrap();
+        MemoryMut::bind(db, &self.graph, None)
+            .and_then(|mut memory| memory.remember(&request))
+            .unwrap();
+        lost
+    }
+
+    /// Forgets receipt-only sources at the view clock (source loss after
+    /// the receipt was written).
+    fn lose(&self, view: &Value, ids: Vec<String>) {
+        if ids.is_empty() {
+            return;
+        }
+        let request = ForgetRequest {
+            scope: self.scope(view),
+            idempotency_key: "c1-source-loss".into(),
+            receipt_window_ms: view["receipt_window_ms"].as_u64().unwrap(),
+            now_ms: view["clock_ms"].as_u64().unwrap(),
+            deadline_ms: None,
+            targets: ids
+                .into_iter()
+                .map(|id| ForgetTarget {
+                    id,
+                    expected_revision: 1,
+                })
+                .collect(),
+        };
+        let mut owner = self.service.database.write().unwrap();
+        let db = owner.as_mut().unwrap();
+        MemoryMut::bind(db, &self.graph, None)
+            .and_then(|mut memory| memory.forget(&request))
+            .unwrap();
+    }
+
+    /// The first granted scope, the one the C1 fixtures write.
+    fn scope(&self, view: &Value) -> MemoryScope {
+        let scope = &view["scope_grants"][0];
+        MemoryScope {
+            tenant: self.tenant.clone(),
+            agent: scope["agent"].as_str().unwrap().into(),
+            user: scope["user"].as_str().map(str::to_owned),
+            session: scope["session"].as_str().map(str::to_owned),
+        }
+    }
+
     /// A stored receipt: its original request is executed over HTTP at the
     /// clock that makes its window end at `retry_until_ms`. A merge item's
     /// target is first created at revision 1 from an unrelated source.
@@ -375,11 +512,18 @@ pub(super) async fn replay(text: &str, skip: &[(&str, &str)], deviations: &[Devi
         for step in view["pre_state"].as_array().into_iter().flatten() {
             harness.seed(step);
         }
+        let consolidate = case["operation"] == "consolidate";
+        let lost = if consolidate {
+            harness.consolidation(view)
+        } else {
+            Vec::new()
+        };
         let path = case["request"]["path"].as_str().unwrap();
         let mut seeded = None;
         for receipt in view["receipts"].as_array().into_iter().flatten() {
             seeded = Some(harness.receipt(view, receipt, path).await);
         }
+        harness.lose(view, lost);
         if let Some(elapsed) = view["elapsed_ms"].as_u64() {
             harness.clock.elapsed_ms.store(elapsed, Ordering::SeqCst);
         }
@@ -776,5 +920,119 @@ mod tests {
         .await;
         assert_eq!(status, 404, "{body}");
         assert_eq!(body["error"]["code"], "memory_not_found");
+    }
+
+    /// `target_kinds` injects fact/relation inputs, which the first-slice
+    /// core cannot store; its `UnsupportedKind` 409 is a mapping test.
+    const CONSOLIDATE_SKIP: [(&str, &str); 2] = [
+        (
+            "consolidate-input-fact-core-absent",
+            "injected target_kinds",
+        ),
+        (
+            "consolidate-input-relation-core-absent",
+            "injected target_kinds",
+        ),
+    ];
+
+    #[tokio::test]
+    async fn consolidate_fixture_cases_replay_over_http() {
+        let replayed = replay(CONSOLIDATE, &CONSOLIDATE_SKIP, &[]).await;
+        assert_eq!(replayed, 12 - CONSOLIDATE_SKIP.len());
+    }
+
+    fn consolidate_request(output: Value, extra: Value) -> Value {
+        let mut item = json!({
+            "id": "s1", "kind": "episodic", "content": "summary", "observed_at_ms": 1,
+            "source": {"source_id": "s", "source_kind": "caller", "transformation_id": "t"},
+        });
+        item.as_object_mut()
+            .unwrap()
+            .extend(output.as_object().unwrap().clone());
+        let mut body = json!({
+            "scope": {"agent": "a"}, "idempotency_key": "k",
+            "inputs": [{"id": "m", "revision": "1"}], "output": item,
+        });
+        body.as_object_mut()
+            .unwrap()
+            .extend(extra.as_object().unwrap().clone());
+        json!({"method": "POST", "path": "/v1/memory/notes/consolidate", "body": body})
+    }
+
+    /// Field refusals win over validation in schema field order, and every
+    /// refusal names its feature.
+    #[tokio::test]
+    async fn consolidate_refusals_precede_validation() {
+        for (output, extra, feature) in [
+            (
+                json!({"kind": "relation", "content": 7}),
+                json!({"dry_run": true}),
+                "fact_kinds",
+            ),
+            (json!({"confidence": 2}), json!({}), "confidence"),
+            (
+                json!({"references": [{"id": "m", "revision": "1"}]}),
+                json!({}),
+                "references",
+            ),
+            (json!({"evidence": []}), json!({}), "evidence"),
+            (json!({"metadata": {}}), json!({}), "metadata"),
+            (json!({"assertion": {}}), json!({}), "assertion"),
+            (
+                json!({"expected": {"revision": "1"}}),
+                json!({}),
+                "expected",
+            ),
+            (json!({"merge": "merge_provenance"}), json!({}), "merge"),
+            (json!({}), json!({"evidence": []}), "evidence"),
+            (json!({}), json!({"dry_run": true}), "consolidate_plan"),
+            (
+                json!({"kind": "fact"}),
+                json!({"inputs": [{"id": "m", "revision": "0", "disposition": "logical_delete"}]}),
+                "consolidate_delete",
+            ),
+        ] {
+            let (status, body) = served(&view(), &consolidate_request(output, extra)).await;
+            assert_eq!(status, 409, "{feature}: {body}");
+            assert_eq!(body["error"]["details"]["feature"], feature, "{body}");
+        }
+    }
+
+    /// Validation: inputs within `min(max_references, 64)`, nonzero
+    /// revisions, a known disposition, and an episodic output whose source
+    /// names its transformation.
+    #[tokio::test]
+    async fn consolidate_validates_inputs_and_output() {
+        let inputs = |n: usize| {
+            json!(
+                (0..n)
+                    .map(|i| json!({"id": format!("m{i}"), "revision": "1"}))
+                    .collect::<Vec<_>>()
+            )
+        };
+        for (output, extra) in [
+            (json!({}), json!({"inputs": []})),
+            (json!({}), json!({"inputs": inputs(3), "max_references": 2})),
+            (
+                json!({}),
+                json!({"inputs": inputs(65), "max_references": 256}),
+            ),
+            (json!({}), json!({"inputs": [{"id": "m", "revision": "0"}]})),
+            (
+                json!({}),
+                json!({"inputs": [{"id": "m", "revision": "1", "disposition": "keep"}]}),
+            ),
+            (
+                json!({"source": {"source_id": "s", "source_kind": "caller"}}),
+                json!({}),
+            ),
+            (json!({"kind": "entity"}), json!({})),
+            (json!({}), json!({"dry_run": "no"})),
+            (json!({}), json!({"extra": 1})),
+        ] {
+            let (status, body) = served(&view(), &consolidate_request(output, extra)).await;
+            assert_eq!(status, 422, "{body}");
+            assert_eq!(body["error"]["code"], "invalid_input");
+        }
     }
 }
