@@ -160,11 +160,15 @@ node with the `VliteMemoryScope` label no longer satisfies that check, and from
 create or change a node whose label starts with `VliteMemory` or whose key
 starts with `scope:v1:`, `mem:v1:`, `receipt:v1:`, `receipt-outcome:v1:` or
 `content:v1:` or is exactly `binding:v1` (`422 invalid_input`, the whole batch;
-deleting such a node and removing such a label stay allowed). A raw caller that
+deleting such a node and removing such a label from a node with an ordinary key
+stay allowed). A raw caller that
 wrote those names under 0.7.0 now gets 422. Nodes planted by an earlier release
 are not detected, and a forgery made only of well-formed memory nodes is
 indistinguishable from memory, so bind only resources that were created for
-memory. The administrator's HTTP request log and persistent audit
+memory. A graph's declared schema is not part of that check and survives
+adoption: a schema that requires a property of a memory label would make memory
+writes fail, so read `GET /v1/graphs/{graph}/schema` before binding a graph you
+did not create yourself. The administrator's HTTP request log and persistent audit
 show reserved names and record IDs, and collection list `id` values have gaps
 where reserved collections sit; both are accepted: the administrator can see
 everything, so keep the log and audit directories private, and collection IDs

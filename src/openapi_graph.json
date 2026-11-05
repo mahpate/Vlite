@@ -2257,7 +2257,7 @@
             }
           },
           "422": {
-            "description": "invalid_json, invalid_input (more than 4096 operations, invalid vector or metadata)",
+            "description": "invalid_json, invalid_input (more than 4096 operations, invalid vector or metadata, a node key or label reserved for agent memory)",
             "content": {
               "application/json": {
                 "schema": {

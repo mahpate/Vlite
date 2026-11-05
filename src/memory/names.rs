@@ -26,10 +26,11 @@ pub(crate) fn reserved_key(key: &str) -> bool {
 }
 
 /// Whether a raw graph write may not carry `op`: it creates or replaces a node
-/// with a reserved key or label, or patches such a node or gives a node a
-/// reserved label. Everything else, deleting a reserved node and removing a
-/// reserved label included, stays allowed so a node planted by an earlier
-/// release can still be cleaned up.
+/// with a reserved key or label, patches a node with a reserved key, or gives a
+/// node a reserved label. Everything else stays allowed so a node planted by an
+/// earlier release can still be cleaned up: deleting a reserved node, and
+/// removing a reserved label from a node that has an ordinary key (a node with
+/// a reserved key is deleted, not patched).
 pub(crate) fn refuses_raw(op: &GraphOp) -> bool {
     match op {
         GraphOp::CreateNode { key, labels, .. } | GraphOp::UpsertNode { key, labels, .. } => {

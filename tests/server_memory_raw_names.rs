@@ -22,6 +22,7 @@ const ADMIN: &str = "fake_raw_names_admin_token_0123456789_ABCDEFGHIJKLMNOPQRSTU
 const MEMORY_ID: &str = "abcdefghij27";
 const RAW_ID: &str = "abcdefghij22";
 const PLAIN_ID: &str = "abcdefghij23";
+const NARROW_ID: &str = "abcdefghij24";
 const SECRET: &str = "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA";
 const RESERVED: &str = "a node key or label is reserved for agent memory";
 
@@ -81,14 +82,14 @@ impl Rig {
             .unwrap()
             .id;
         let lineage = format!("{:016x}", db.lineage().unwrap());
-        let credential = |id: &str, operations: Value| {
+        let credential = |id: &str, operations: Value, graphs: Value| {
             json!({
                 "id": id,
                 "name": "fake raw names credential",
                 "all": false,
                 "collections": [{"name": "notes_ev", "id": evidence}],
                 "operations": operations,
-                "graphs": ["notes_graph", "plain_graph"],
+                "graphs": graphs,
                 "lineage": lineage,
                 "secret_sha256": format!("{:x}", Sha256::digest(SECRET.as_bytes())),
                 "created_unix_ms": 0,
@@ -98,12 +99,18 @@ impl Rig {
             })
         };
         let graph_operations = json!(["read", "write", "graph_read", "graph_write"]);
+        let both = json!(["notes_graph", "plain_graph"]);
         let document = json!({
             "schema": 1,
             "credentials": [
-                credential(MEMORY_ID, json!(["read", "search", "write", "graph_read", "graph_write"])),
-                credential(RAW_ID, graph_operations.clone()),
-                credential(PLAIN_ID, graph_operations),
+                credential(
+                    MEMORY_ID,
+                    json!(["read", "search", "write", "graph_read", "graph_write"]),
+                    both.clone(),
+                ),
+                credential(RAW_ID, graph_operations.clone(), both.clone()),
+                credential(PLAIN_ID, graph_operations.clone(), both),
+                credential(NARROW_ID, graph_operations, json!(["plain_graph"])),
             ]
         });
         std::fs::write(
@@ -434,6 +441,37 @@ async fn a_bound_graph_refuses_reserved_names_even_to_a_raw_access_credential() 
         assert_eq!(masked.0, 409, "{}", masked.1);
         assert_eq!(masked.1["error"]["code"], "graph_not_found");
     }
+    rig.close().await;
+}
+
+/// The documented order: the credential's graph scope is checked before the
+/// guard looks at the request, so a credential outside the graph meets the
+/// same 403 for a reserved and for an ordinary operation, and learns nothing.
+#[tokio::test]
+async fn a_credential_outside_the_graph_scope_meets_its_403_before_the_guard() {
+    let rig = Rig::new(false, |_| {}).await;
+    let narrow = token(NARROW_ID);
+    let inside = rig
+        .batch("plain_graph", &narrow, json!([create("scope:v1:x", &[])]))
+        .await;
+    assert_reserved(&inside, "inside the credential's graphs", &[]);
+    let reserved = rig
+        .batch("notes_graph", &narrow, json!([create("scope:v1:x", &[])]))
+        .await;
+    assert_eq!(reserved.0, 403, "{}", reserved.1);
+    assert_eq!(reserved.1["error"]["code"], "forbidden_scope");
+    let ordinary = rig
+        .batch(
+            "notes_graph",
+            &narrow,
+            json!([create("person:1", &["Person"])]),
+        )
+        .await;
+    assert_eq!(ordinary.0, 403, "{}", ordinary.1);
+    assert_eq!(
+        ordinary.1, reserved.1,
+        "the guard leaked through the scope check"
+    );
     rig.close().await;
 }
 

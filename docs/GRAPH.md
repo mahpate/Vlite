@@ -54,9 +54,11 @@ capabilities stay absent or report that graphs are not enabled.
   `VliteMemory` and the node keys that start with `scope:v1:`, `mem:v1:`,
   `receipt:v1:`, `receipt-outcome:v1:` or `content:v1:`, or are exactly
   `binding:v1`. The REST batch route refuses a batch whole, with `422
-  invalid_input`, when one operation creates, replaces or patches such a node or
-  adds such a label; deleting such a node and removing such a label stay
-  allowed. The Rust API and the file tools are not guarded.
+  invalid_input`, when one operation creates or replaces a node with such a key
+  or label, patches a node with such a key, or adds such a label to a node.
+  Deleting such a node and removing such a label from a node with an ordinary key
+  stay allowed (a node with a reserved key is deleted, not patched). The Rust API
+  and the file tools are not guarded.
 - Each read sees one committed state, reported as `view_sequence`. A graph
   write between pages fails the next page with `graph_cursor_stale`.
 - One exclusive writer or several read-only handles per file. Graph writes

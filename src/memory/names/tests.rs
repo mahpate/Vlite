@@ -199,6 +199,11 @@ fn patching_a_reserved_node_or_adding_a_reserved_label_is_refused() {
         for key in keys_with(prefix) {
             assert!(refuses_raw(&patch(&key, NodePatch::default())), "{key}");
             assert!(refuses_raw(&patch(&key, adding(&["Person"]))), "{key}");
+            // The key decides, whatever the patch does: a node with a reserved
+            // key is deleted, not patched.
+            for label in LABELS {
+                assert!(refuses_raw(&patch(&key, removing(&[label]))), "{key}");
+            }
         }
     }
     assert!(refuses_raw(&patch(RECORD, NodePatch::default())));
@@ -208,7 +213,9 @@ fn patching_a_reserved_node_or_adding_a_reserved_label_is_refused() {
 fn an_ordinary_patch_and_the_removal_of_a_reserved_label_are_allowed() {
     assert!(!refuses_raw(&patch("person:1", NodePatch::default())));
     assert!(!refuses_raw(&patch("person:1", adding(&["Person"]))));
-    // A node planted by an earlier release can be cleaned up.
+    // A node planted by an earlier release under an ordinary key can be
+    // cleaned up. The guard reads the request only, so a patch that adds no
+    // label is allowed whatever labels the node already carries.
     for label in LABELS {
         assert!(
             !refuses_raw(&patch("planted", removing(&[label]))),
