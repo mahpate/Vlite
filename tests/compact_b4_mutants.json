@@ -1,0 +1,56 @@
+{
+  "campaign": "B4: P3b lane B fix-forward (derived indexes, settings, rerank and the read seam they consume)",
+  "format": "Each mutant is one anchored replacement ({id, desc, file, old, new, cmd}); old must occur exactly once in file. Replay with tests/compact_mutant_replay.py. runs.<machine> holds the evidence of one replay: anchor_matches, compiled, failed_tests, sha256_lf and sha256_bytes (before, mutated, restored), restored_identically, and baseline_green (the unmodified selector, green before the first and after the last mutant of that replay).",
+  "mutants": [
+    {
+      "id": "x-rec-vector-error-swallowed",
+      "origin": "B4 report 5.2 survivor 1",
+      "desc": "effective_vector turns a base-row read error into an absent row",
+      "file": "src/records.rs",
+      "old": "Some(row) => view.read_vector(row, workspace),",
+      "new": "Some(row) => Ok(view.read_vector(row, workspace).ok().flatten()),",
+      "cmd": "test --locked --offline --lib -- compact::source::seam_tests",
+      "expect": ["compact::source::seam_tests::survivor_tests::compact_effective_reads_of_a_damaged_block_are_errors_never_absence"]
+    },
+    {
+      "id": "x-seam-frame-kind-check-removed-body",
+      "origin": "B4 report 5.2 survivor 2",
+      "desc": "the bounded body read no longer refuses a frame whose recorded kind changed",
+      "file": "src/compact/source.rs",
+      "old": "MAX_BODY + crate::crypto::SEAL_OVERHEAD\n            || block.kind != block.source.frame_id as u16",
+      "new": "MAX_BODY + crate::crypto::SEAL_OVERHEAD",
+      "cmd": "test --locked --offline --lib -- compact::source::seam_tests",
+      "expect": ["compact::source::seam_tests::survivor_tests::compact_wrong_block_kind_is_refused_before_authentication_on_every_read_path"]
+    },
+    {
+      "id": "x-seam-frame-kind-check-removed-decode",
+      "origin": "B4 report 5.2 survivor 2",
+      "desc": "record-cell materialization no longer refuses a frame whose recorded kind changed",
+      "file": "src/compact/source.rs",
+      "old": "if disk.len() < PREFIX_SIZE + FOOTER_SIZE\n            || block.kind != block.source.frame_id as u16",
+      "new": "if disk.len() < PREFIX_SIZE + FOOTER_SIZE",
+      "cmd": "test --locked --offline --lib -- compact::source::seam_tests",
+      "expect": ["compact::source::seam_tests::survivor_tests::compact_wrong_block_kind_is_refused_before_authentication_on_every_read_path"]
+    },
+    {
+      "id": "x-settings-health-removed",
+      "origin": "B4 report 5.2 survivor 3",
+      "desc": "the compact settings arm no longer checks the handle's health first",
+      "file": "src/lib.rs",
+      "old": "self.ensure_healthy()?;\n            validate_settings(&settings)?;",
+      "new": "validate_settings(&settings)?;",
+      "cmd": "test --locked --offline --lib -- compact::source::seam_tests",
+      "expect": ["compact::source::seam_tests::survivor_tests::compact_settings_check_the_handle_health_before_every_other_gate"]
+    },
+    {
+      "id": "x-text-break-on-unavailable-removed",
+      "origin": "B4 report 5.2 survivor 4",
+      "desc": "the text index rebuild keeps reading rows after a posting limit made the index unavailable",
+      "file": "src/text_index.rs",
+      "old": "if !rebuilt.available {\n                    break;\n                }",
+      "new": "",
+      "cmd": "test --locked --offline --lib -- compact::source::seam_tests",
+      "expect": ["compact::source::seam_tests::survivor_tests::compact_text_rebuild_stops_reading_rows_once_the_index_is_unavailable"]
+    }
+  ]
+}

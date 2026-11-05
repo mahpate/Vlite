@@ -88,6 +88,40 @@ fn first_view(generation: &Arc<CompactGeneration>) -> CompactView {
     generation.view(*generation.collections.keys().next().unwrap())
 }
 
+/// One way to damage the first block of the first collection. Each variant
+/// leaves every other byte alone, so exactly one check of
+/// `ReadWorkspace::body` can refuse the block.
+#[derive(Clone, Copy)]
+enum BlockTamper {
+    /// The generation records another kind for the frame; bytes and footer are intact.
+    Kind,
+    /// The generation records another footer checksum for the frame.
+    Checksum,
+    /// A ciphertext bit flips and the footer checksum is repaired, so only
+    /// authentication can refuse the frame (encrypted images only).
+    Ciphertext,
+}
+
+fn tamper_first_block(generation: &mut Arc<CompactGeneration>, how: BlockTamper) {
+    let inner = Arc::get_mut(generation).expect("the fixture owns its only handle");
+    let block = &mut inner.collections.values_mut().next().unwrap().blocks[0];
+    match how {
+        BlockTamper::Kind => block.kind ^= 1,
+        BlockTamper::Checksum => block.checksum ^= 1,
+        BlockTamper::Ciphertext => {
+            let mut bytes = inner.backing.as_slice().to_vec();
+            bytes[block.frame.end - FOOTER_SIZE - 1] ^= 0x80;
+            let checksum = format::crc32(&bytes[block.frame.start..block.frame.end - FOOTER_SIZE]);
+            bytes[block.frame.end - FOOTER_SIZE + 4..block.frame.end - FOOTER_SIZE + 8]
+                .copy_from_slice(&checksum.to_le_bytes());
+            block.checksum = checksum;
+            inner.backing = Backing::Owned(Arc::from(bytes));
+        }
+    }
+}
+
+mod survivor_tests;
+
 #[test]
 fn compact_seam_source_peak_survives_smaller_generation() {
     let _precision = PrecisionActivation::on();

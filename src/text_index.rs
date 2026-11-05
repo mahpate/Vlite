@@ -261,6 +261,17 @@ impl Database {
 }
 
 #[cfg(test)]
+impl TextIndex {
+    /// An empty index with a smaller posting limit than `MAX_TEXT_POSTINGS`.
+    pub(crate) fn with_posting_limit(limit: usize) -> Self {
+        Self {
+            limit,
+            ..Self::default()
+        }
+    }
+}
+
+#[cfg(test)]
 mod tests {
     use super::*;
 
