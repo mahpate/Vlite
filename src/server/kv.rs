@@ -12,8 +12,10 @@ const PAGE_BYTES: usize = 16_777_216;
 // An entry always fits a page together with the cursor that names it, so a page
 // is never empty for want of room: the largest value as base64, the key twice
 // (item and cursor) at six bytes per key byte when escaped, and the field names.
+// The key is bounded by the 16-bit length a stored record holds, not by
+// `MAX_KV_KEY_BYTES`: a record planted through another route need not keep to it.
 const _: () =
-    assert!(MAX_KV_VALUE_BYTES.div_ceil(3) * 4 + 2 * 6 * MAX_KV_KEY_BYTES + 512 < PAGE_BYTES);
+    assert!(MAX_KV_VALUE_BYTES.div_ceil(3) * 4 + 2 * 6 * (u16::MAX as usize) + 512 < PAGE_BYTES);
 
 #[cfg(test)]
 thread_local! {
@@ -630,8 +632,7 @@ fn build_page(
         .as_ref()
         .filter(|(_, more)| *more)
         .map(|(key, _)| key.as_str());
-    // The items move into the response: building it with `json!` would copy a
-    // full page and hold it twice.
+    // The items move into the response instead of being copied by `json!`.
     let mut body = serde_json::Map::with_capacity(2);
     body.insert("items".to_owned(), Value::Array(page.items));
     body.insert(
