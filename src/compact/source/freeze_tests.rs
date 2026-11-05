@@ -383,10 +383,8 @@ enum Tamper {
     Ciphertext,
 }
 
-fn tampered(loaded: &mut crate::format::Loaded, how: &Tamper) -> Arc<CompactGeneration> {
-    let mut generation = loaded.compact_generation.take().unwrap();
-    let inner = Arc::get_mut(&mut generation).expect("the fixture owns its only handle");
-    let block = &mut inner.collections.get_mut(&0).unwrap().blocks[0];
+fn tamper_in_place(inner: &mut CompactGeneration, collection: u16, how: &Tamper) {
+    let block = &mut inner.collections.get_mut(&collection).unwrap().blocks[0];
     match how {
         Tamper::Checksum => block.checksum ^= 1,
         Tamper::Kind => block.kind ^= 1,
@@ -400,6 +398,12 @@ fn tampered(loaded: &mut crate::format::Loaded, how: &Tamper) -> Arc<CompactGene
             inner.backing = Backing::Owned(Arc::from(bytes));
         }
     }
+}
+
+fn tampered(loaded: &mut crate::format::Loaded, how: &Tamper) -> Arc<CompactGeneration> {
+    let mut generation = loaded.compact_generation.take().unwrap();
+    let inner = Arc::get_mut(&mut generation).expect("the fixture owns its only handle");
+    tamper_in_place(inner, 0, how);
     generation
 }
 
@@ -558,13 +562,125 @@ fn freeze_cached_blocks_are_authenticated_again_and_shape_checked() {
         // A cache hit still touches the current frame: tampering after the
         // first read is detected on the next one.
         drop(view);
-        let inner = Arc::get_mut(&mut generation).unwrap();
-        inner.collections.get_mut(&0).unwrap().blocks[0].checksum ^= 1;
+        tamper_in_place(Arc::get_mut(&mut generation).unwrap(), 0, &Tamper::Checksum);
         let view = generation.view(0);
         assert!(is_corrupt(
             view.read_vector(0, &mut workspace),
             "compact source frame changed"
         ));
+
+        // An encrypted block is authenticated again on a hit: a flipped
+        // ciphertext bit under a consistent footer is caught by the AEAD.
+        if encrypted {
+            let mut again = loaded_with(&ROWS, key.as_ref());
+            let mut generation = again.compact_generation.take().unwrap();
+            let mut workspace = ReadWorkspace::new(4 * 1024 * 1024).unwrap();
+            let view = generation.view(0);
+            view.read_vector(0, &mut workspace).unwrap();
+            drop(view);
+            tamper_in_place(
+                Arc::get_mut(&mut generation).unwrap(),
+                0,
+                &Tamper::Ciphertext,
+            );
+            let view = generation.view(0);
+            assert!(is_corrupt(
+                view.read_vector(0, &mut workspace),
+                "frame authentication failed"
+            ));
+            assert_eq!(workspace.accounting(&view).unwrap().plaintext_live, 0);
+        }
+    }
+}
+
+#[test]
+fn freeze_a_refused_read_leaves_the_rest_of_the_workspace_as_it_was() {
+    let _gates = gates();
+    for encrypted in [false, true] {
+        let key = encrypted.then(source_key);
+        let mut db = crate::Database::create_in_memory(
+            2,
+            crate::CreateOptions {
+                encryption: key.clone(),
+                ..crate::CreateOptions::default()
+            },
+        )
+        .unwrap();
+        for (name, base) in [("a", 1.0), ("b", 2.0)] {
+            db.create_collection(
+                name,
+                CollectionSpec {
+                    dimensions: 2,
+                    settings: crate::CollectionSettings::default(),
+                },
+            )
+            .unwrap();
+            db.collection_mut(name)
+                .unwrap()
+                .put(1, &[base, base], name.as_bytes())
+                .unwrap();
+        }
+        let mut loaded = compact_image(db, key.as_ref());
+        let mut generation = loaded.compact_generation.take().unwrap();
+        let collection = |name: &str| {
+            *loaded
+                .collections
+                .iter()
+                .find(|(_, state)| state.name == name)
+                .unwrap()
+                .0
+        };
+        let (a, b) = (collection("a"), collection("b"));
+        let mut workspace = ReadWorkspace::new(4 * 1024 * 1024).unwrap();
+        let view = generation.view(a);
+        assert_eq!(
+            view.read_vector(0, &mut workspace).unwrap().unwrap(),
+            [1.0, 1.0]
+        );
+        let cached = workspace.accounting(&view).unwrap();
+        assert!(cached.vectors_live > 0);
+        drop(view);
+
+        // The block of `b` fails while its frame is read.
+        let (how, reason) = if encrypted {
+            (Tamper::Ciphertext, "frame authentication failed")
+        } else {
+            (Tamper::Checksum, "compact source frame changed")
+        };
+        tamper_in_place(Arc::get_mut(&mut generation).unwrap(), b, &how);
+        let view = generation.view(b);
+        assert!(is_corrupt(view.read_vector(0, &mut workspace), reason));
+        let refused = workspace.accounting(&view).unwrap();
+        assert_eq!(
+            workspace.vectors.len(),
+            1,
+            "the refused block is never cached and the cached one stays"
+        );
+        assert_eq!(refused.vectors_live, cached.vectors_live);
+        assert_eq!(refused.evictions, 0);
+        assert_eq!(refused.cells_live, 0, "a refused read publishes no cell");
+        assert_eq!(
+            refused.plaintext_live, 0,
+            "a read that fails while reading its frame leaves no plaintext"
+        );
+        assert!(is_corrupt(view.get_physical(1), reason));
+        assert_eq!(workspace.accounting(&view).unwrap().cells_live, 0);
+        let again = generation.view(a);
+        assert_eq!(
+            again.read_vector(0, &mut workspace).unwrap().unwrap(),
+            [1.0, 1.0]
+        );
+        assert_eq!(workspace.accounting(&again).unwrap().hits, 1);
+
+        // The scratch budget is checked before the frame is read at all.
+        let mut tiny = ReadWorkspace::new(0).unwrap();
+        assert!(matches!(
+            view.read_vector(0, &mut tiny),
+            Err(Error::InvalidQuery(
+                "compact scratch budget is smaller than one block"
+            ))
+        ));
+        assert_eq!(tiny.accounting(&view).unwrap().misses, 0);
     }
 }
 
@@ -685,20 +801,17 @@ fn freeze_accounting_reports_exact_values_and_keeps_peaks() {
     assert_eq!(busy.cells_peak, busy.cells_live);
 
     // Peaks survive a smaller generation.
-    let mut other = source_view_fixture(None).1;
-    let other = other.compact_generation.take().unwrap();
+    let mut smaller = loaded_with(&ROWS, None);
+    let other = smaller.compact_generation.take().unwrap();
+    assert!(
+        other.backing.as_slice().len() < generation.backing.as_slice().len(),
+        "the second generation is the smaller one"
+    );
     let after = workspace.accounting(&other.view(populated[0])).unwrap();
     assert_eq!(after.cells_live, 0);
     assert_eq!(after.cells_peak, busy.cells_live);
     assert_eq!(after.source_live, other.backing.as_slice().len());
-    assert_eq!(
-        after.source_peak,
-        generation
-            .backing
-            .as_slice()
-            .len()
-            .max(other.backing.as_slice().len())
-    );
+    assert_eq!(after.source_peak, generation.backing.as_slice().len());
 
     // Physical row observations come straight from the source columns.
     for &collection in &populated {
@@ -917,25 +1030,46 @@ fn freeze_resident_and_compact_expiry_sources_agree_after_mutations() {
         let state = db.state(0);
         let ids = state.records.effective_ids();
         assert_eq!(ids, [0, 1, 50, 60]);
+        // The deadline of each ID after the writes above, as literals: the
+        // expectation never comes from either representation.
+        let deadlines = BTreeMap::from([
+            (0, None),
+            (1, Some(500)),
+            (50, Some(900)),
+            (60, Some(1_235)),
+        ]);
+        assert_eq!(
+            state
+                .expiries
+                .iter()
+                .map(|(&id, &at)| (id, at))
+                .collect::<Vec<_>>(),
+            [(1, 500), (50, 900), (60, 1_235)],
+            "the resident map holds exactly the deadlines that were written"
+        );
         for id in ids.into_iter().chain([404]) {
             for now in clocks {
-                let by_columns = state.records.effective_visible(id, now, &state.expiries);
+                let expected = deadlines
+                    .get(&id)
+                    .is_some_and(|deadline| deadline.is_none_or(|deadline| deadline > now));
+                assert_eq!(
+                    state.records.effective_visible(id, now, &state.expiries),
+                    expected,
+                    "ID {id} at {now}: columns"
+                );
                 let by_map = state.records.contains_key(&id)
                     && state
                         .expiries
                         .get(&id)
                         .is_none_or(|deadline| *deadline > now);
-                assert_eq!(
-                    by_columns, by_map,
-                    "ID {id} at {now}: columns versus resident map"
-                );
+                assert_eq!(by_map, expected, "ID {id} at {now}: resident map");
                 assert_eq!(
                     db.collection("default")
                         .unwrap()
                         .get_at(id, now)
                         .unwrap()
                         .is_some(),
-                    by_map,
+                    expected,
                     "ID {id} at {now}: get_at"
                 );
             }
@@ -954,22 +1088,41 @@ fn freeze_named_collections_keep_one_overlay_each() {
         .map(|state| state.name.clone())
         .collect();
     assert!(names.len() >= 2);
+    let ids_of = |db: &crate::Database, name: &str| -> Vec<u64> {
+        db.collections
+            .values()
+            .find(|state| state.name == name)
+            .unwrap()
+            .records
+            .effective_ids()
+    };
+    // The resident oracle opened from the same bytes gives the expectation.
     let before: Vec<_> = names
         .iter()
-        .map(|name| oracle.collection(name).unwrap().len())
+        .map(|name| {
+            (
+                oracle.collection(name).unwrap().len(),
+                ids_of(&oracle, name),
+            )
+        })
         .collect();
     candidate
         .collection_mut(&names[0])
         .unwrap()
         .put(u64::MAX - 1, &[1.0, 1.0], b"only here")
         .unwrap();
-    for (name, len) in names.iter().zip(&before) {
-        let expected = len + usize::from(name == &names[0]);
+    for (name, (len, ids)) in names.iter().zip(&before) {
+        let mut expected_ids = ids.clone();
+        if name == &names[0] {
+            expected_ids.push(u64::MAX - 1);
+            expected_ids.sort_unstable();
+        }
         assert_eq!(
             candidate.collection(name).unwrap().len(),
-            expected,
+            len + usize::from(name == &names[0]),
             "{name}"
         );
+        assert_eq!(ids_of(&candidate, name), expected_ids, "{name}");
     }
 }
 
