@@ -940,7 +940,7 @@ async fn poll_changes(
                         .raw_allowed(None, super::reserved::Resource::Graph, name)
                 }) && bindings
                     .reserved()
-                    .retain_change_operations(&mut change.kind)
+                    .retain_change_operations(None, &mut change.kind)
             });
             Ok(batch)
         })

@@ -98,7 +98,14 @@ impl Reserved {
         }
     }
 
-    pub(super) fn retain_change_operations(&self, kind: &mut crate::changes::ChangeKind) -> bool {
+    /// Drops the attach and detach operations of a graph batch that name a
+    /// collection `credential` may not reach raw, and reports whether the
+    /// change still has anything to show.
+    pub(super) fn retain_change_operations(
+        &self,
+        credential: Option<&str>,
+        kind: &mut crate::changes::ChangeKind,
+    ) -> bool {
         use crate::{changes::ChangeKind, property_graph::GraphChange};
         if self.is_empty() {
             return true;
@@ -107,7 +114,7 @@ impl Reserved {
             operations.retain(|operation| match operation {
                 GraphChange::Attached { collection, .. }
                 | GraphChange::Detached { collection, .. } => {
-                    self.raw_allowed(None, Resource::Collection, collection)
+                    self.raw_allowed(credential, Resource::Collection, collection)
                 }
                 _ => true,
             });

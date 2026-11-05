@@ -433,7 +433,7 @@ fn run_dispatcher(dispatcher: Arc<Dispatcher>, service: Service, stopping: Arc<A
                             &change.collection,
                         ) && super::graph::feed_graph(&change.kind).is_none_or(|graph| {
                             reserved.raw_allowed(None, super::reserved::Resource::Graph, graph)
-                        }) && reserved.retain_change_operations(&mut change.kind)
+                        }) && reserved.retain_change_operations(None, &mut change.kind)
                     });
                     (cursor, batch)
                 }

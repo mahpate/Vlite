@@ -830,6 +830,7 @@ fn authorize_records(
     ops: &[GraphOp],
 ) -> Result<(), ApiError> {
     let mut mutations: BTreeMap<&str, Vec<Mutation>> = BTreeMap::new();
+    let credential = super::raw_credential(role);
     for op in ops {
         let collections = match op {
             GraphOp::Attach { collection, .. } | GraphOp::Detach { collection, .. } => {
@@ -863,7 +864,6 @@ fn authorize_records(
         {
             return Err(forbidden_scope());
         }
-        let credential = super::raw_credential(role);
         for collection in &collections {
             if !service.memory_bindings.reserved().raw_allowed(
                 credential,
@@ -892,6 +892,15 @@ fn authorize_records(
         }
     }
     for (collection, mutations) in mutations {
+        // A reserved collection this caller cannot reach raw is masked by the
+        // batch itself, so a quota answer must not reveal it first.
+        if !service.memory_bindings.reserved().raw_allowed(
+            credential,
+            super::reserved::Resource::Collection,
+            collection,
+        ) {
+            continue;
+        }
         // An unknown collection is reported by the batch itself.
         if let Ok(id) = db.resolve(collection) {
             enforce_quota(service, db, role, id, &quota_mutations(&mutations))?;

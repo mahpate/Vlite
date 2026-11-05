@@ -136,7 +136,7 @@ async fn changes(
                     && collection_visible
                     && bindings
                         .reserved()
-                        .retain_change_operations(&mut change.kind)
+                        .retain_change_operations(super::raw_credential(&role), &mut change.kind)
             });
             Ok::<_, ApiError>(batch)
         })

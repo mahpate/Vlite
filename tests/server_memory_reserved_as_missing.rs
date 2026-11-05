@@ -42,6 +42,10 @@ fn fixture() -> Fixture {
 }
 
 fn fixture_with_bindings(enabled: bool) -> Fixture {
+    fixture_with(enabled, Value::Null)
+}
+
+fn fixture_with(enabled: bool, max_vectors: Value) -> Fixture {
     let directory = tempfile::tempdir().unwrap();
     let mut db = Database::create_in_memory(2, CreateOptions::default()).unwrap();
     for prefix in ["".to_owned(), format!("t{TENANT}__")] {
@@ -85,7 +89,7 @@ fn fixture_with_bindings(enabled: bool) -> Fixture {
     .unwrap();
     std::fs::write(
         directory.path().join("tenants.json"),
-        json!([{"id":TENANT,"name":"fake tenant","max_vectors":null}]).to_string(),
+        json!([{"id":TENANT,"name":"fake tenant","max_vectors":max_vectors}]).to_string(),
     )
     .unwrap();
     let bindings: Vec<_> = [
@@ -764,6 +768,126 @@ async fn nested_reserved_changes_are_filtered_from_feed_and_webhooks() {
     listener_task.abort();
 }
 
+fn token<'a>(fixture: &'a Fixture, actor: &str) -> &'a str {
+    &fixture
+        .tokens
+        .iter()
+        .find(|(name, _, _)| *name == actor)
+        .unwrap()
+        .1
+}
+
+async fn feed(fixture: &Fixture, actor: &str, cursor: &str) -> Value {
+    let path = if cursor.is_empty() {
+        "/v1/changes?limit=1000".to_owned()
+    } else {
+        format!("/v1/changes?limit=1000&cursor={cursor}")
+    };
+    let page = request(&fixture.app, actor, "GET", &path, "").await;
+    assert_eq!(page.0, 200);
+    serde_json::from_slice(&page.2).unwrap()
+}
+
+/// Attach and detach operations that name `notes_ev`, per type, in every
+/// graph batch event of a feed page.
+fn evidence_operations(page: &Value) -> (usize, usize) {
+    let mut attached = 0;
+    let mut detached = 0;
+    for event in page["changes"].as_array().unwrap() {
+        if event["change"]["type"] != "graph_batch" {
+            continue;
+        }
+        for operation in event["change"]["operations"].as_array().unwrap() {
+            if operation["collection"] != "notes_ev" {
+                continue;
+            }
+            match operation["op"].as_str() {
+                Some("attached") => attached += 1,
+                Some("detached") => detached += 1,
+                _ => {}
+            }
+        }
+    }
+    (attached, detached)
+}
+
+#[tokio::test]
+async fn raw_holders_see_their_own_attach_and_detach_operations_in_the_feed() {
+    let fixture = fixture();
+    let raw = token(&fixture, "raw");
+    let start = feed(&fixture, ADMIN, "").await["next_cursor"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    let first = r#"{"ops":[{"op":"create_node","key":"n"},{"op":"put_vector","collection":"notes_ev","id":"17","vector":[0,1]},{"op":"attach","node":"n","collection":"notes_ev","record":"17"}]}"#;
+    let second = r#"{"ops":[{"op":"detach","node":"n","collection":"notes_ev"}]}"#;
+    for body in [first, second] {
+        assert_eq!(
+            request(
+                &fixture.app,
+                raw,
+                "POST",
+                "/v1/graphs/ordinary_graph/batch",
+                body
+            )
+            .await
+            .0,
+            200
+        );
+    }
+
+    let own = feed(&fixture, raw, &start).await;
+    assert_eq!(evidence_operations(&own), (1, 1), "{own}");
+    assert!(own.to_string().contains("notes_ev"));
+    for actor in ["raw_other", "wildcard"] {
+        let page = feed(&fixture, token(&fixture, actor), &start).await;
+        assert_eq!(evidence_operations(&page), (0, 0), "{actor}: {page}");
+        assert!(!page.to_string().contains("notes_ev"), "{actor}: {page}");
+    }
+    let admin = feed(&fixture, ADMIN, &start).await;
+    assert_eq!(evidence_operations(&admin), (0, 0), "{admin}");
+    assert!(!admin.to_string().contains("notes_ev"), "{admin}");
+}
+
+async fn admin_batch(app: &Router, operation: &str, name: &str) -> (u16, String) {
+    let body = format!(r#"{{"ops":[{}]}}"#, operation.replace("$c", name));
+    let answer = request(app, ADMIN, "POST", "/v1/graphs/ordinary_graph/batch", &body).await;
+    (
+        answer.0,
+        String::from_utf8(answer.2).unwrap().replace(name, "$c"),
+    )
+}
+
+#[tokio::test]
+async fn graph_batch_quota_answers_do_not_reveal_a_reserved_tenant_collection() {
+    // A tenant at its vector quota: the quota check must not run before the
+    // reserved collection is masked, or the administrator can tell it from a
+    // missing one by the 429.
+    let fixture = fixture_with(true, json!(0));
+    let reserved = format!("t{TENANT}__notes_ev");
+    let missing = format!("t{TENANT}__absent_ev");
+    let ordinary = format!("t{TENANT}__ordinary");
+    for (operation, over_quota) in [
+        (
+            r#"{"op":"put_vector","collection":"$c","id":"6","vector":[0,1]}"#,
+            true,
+        ),
+        (
+            r#"{"op":"delete_vector","collection":"$c","id":"6"}"#,
+            false,
+        ),
+    ] {
+        let control = admin_batch(&fixture.app, operation, &ordinary).await;
+        if over_quota {
+            assert_eq!(control.0, 429, "the quota path must be live: {control:?}");
+        }
+        let hidden = admin_batch(&fixture.app, operation, &reserved).await;
+        let absent = admin_batch(&fixture.app, operation, &missing).await;
+        assert_ne!(absent.0, 429, "{absent:?}");
+        assert_eq!(hidden, absent, "{operation}");
+    }
+}
+
 #[tokio::test]
 async fn credential_creation_masks_reserved_collection_names() {
     let fixture = fixture();
@@ -809,11 +933,52 @@ async fn credential_creation_masks_reserved_collection_names() {
             201
         );
     }
+    // A name reserved only at root is an ordinary name for a tenant, and the
+    // other way round: the check runs on the qualified name.
+    let credential = |tenant: Option<&str>, name: &str| {
+        json!({"name":"fake-probe","collections":[name],"operations":["read"],
+            "tenant_id":tenant,"expires_unix_ms":expires})
+        .to_string()
+    };
+    for (tenant, name, status) in [
+        (Some(TENANT), "other_ev", 201),
+        (None, "other_ev", 404),
+        (Some(TENANT), "notes_ev", 404),
+    ] {
+        assert_eq!(
+            request(
+                &fixture.app,
+                ADMIN,
+                "POST",
+                "/v1/admin/credentials",
+                &credential(tenant, name)
+            )
+            .await
+            .0,
+            status,
+            "{tenant:?} {name}"
+        );
+    }
 }
 
 #[tokio::test]
 async fn bound_tenant_deletion_matches_an_ordinary_nonempty_tenant() {
     let fixture = fixture();
+    let unknown = request(
+        &fixture.app,
+        ADMIN,
+        "DELETE",
+        "/v1/admin/tenants/ffffffffffffffffffffffffffffffff",
+        "",
+    )
+    .await;
+    assert_eq!(unknown.0, 404);
+    // Existence is checked before bindings: the untenanted root is not a
+    // tenant, whatever bindings it holds.
+    assert_eq!(
+        request(&fixture.app, ADMIN, "DELETE", "/v1/admin/tenants/@root", "").await,
+        unknown
+    );
     let created = request(
         &fixture.app,
         ADMIN,
