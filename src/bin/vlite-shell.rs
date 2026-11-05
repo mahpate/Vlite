@@ -6,8 +6,16 @@ use std::{
     io::{self, BufRead, IsTerminal, Write},
     process::ExitCode,
 };
-use tool_support::{Result, main_result};
+use tool_support::{
+    Result,
+    line::{Line, read_bounded_line},
+    main_result,
+};
 use vlite::{Condition, Database, DistanceMetric, HnswConfig, Metadata};
+/// Longest command line, excluding its terminator; a longer line fails like any
+/// other command error. The largest supported command, a put or a KV request,
+/// is well below it.
+const MAX_LINE_BYTES: usize = 16 * 1024 * 1024;
 const HELP: &str = r#"vlite-shell --db PATH [--read-only] [--create DIMENSIONS] [--script FILE]
 Without --script reads stdin; prompts only on a terminal. One command per line.
 Commands: help | header | format | collections | stats | use NAME | browse [LIMIT] [AFTER_ID]
@@ -88,16 +96,22 @@ fn run() -> Result<()> {
         Box::new(io::BufReader::new(io::stdin()))
     };
     let mut collection = "default".to_string();
-    let mut line = String::new();
     loop {
         if interactive {
             print!("vlite[{collection}]> ");
             io::stdout().flush()?;
         }
-        line.clear();
-        if input.read_line(&mut line)? == 0 {
-            break;
-        }
+        let line = match read_bounded_line(&mut input, MAX_LINE_BYTES)? {
+            Line::Text(line) => line,
+            Line::TooLong => {
+                report(
+                    interactive,
+                    format!("invalid_input: line exceeds {MAX_LINE_BYTES} bytes").into(),
+                )?;
+                continue;
+            }
+            Line::Eof => break,
+        };
         let text = line.trim();
         if text.is_empty() || text.starts_with('#') {
             continue;
@@ -239,11 +253,7 @@ fn run() -> Result<()> {
             Ok(())
         })();
         if let Err(e) = result {
-            if interactive {
-                eprintln!("error: {e}");
-            } else {
-                return Err(e);
-            }
+            report(interactive, e)?;
         }
     }
     if let Some(db) = db {
@@ -251,6 +261,28 @@ fn run() -> Result<()> {
     }
     Ok(())
 }
+// A terminal session prints the error and goes on; a script or piped input stops.
+fn report(interactive: bool, error: Box<dyn std::error::Error>) -> Result<()> {
+    if interactive {
+        eprintln!("error: {error}");
+        Ok(())
+    } else {
+        Err(error)
+    }
+}
 fn main() -> ExitCode {
     main_result(run())
+}
+#[cfg(test)]
+mod tests {
+    use super::report;
+
+    #[test]
+    fn a_terminal_session_goes_on_after_an_error_and_a_script_stops() {
+        assert!(report(true, "failed".into()).is_ok());
+        assert_eq!(
+            report(false, "failed".into()).unwrap_err().to_string(),
+            "failed"
+        );
+    }
 }
