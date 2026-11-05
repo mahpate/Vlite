@@ -10,10 +10,11 @@ that `verify` requires for this mutant above its default; a top-level `two_machi
 list does the same for many IDs at once. `gap` names the tree on which the mutant was a
 test gap (it survived there): `verify` then needs a run on that tree, kept under
 `before`, that survived with the whole evidence. `equivalent` is {"argument",
-"invariant", "pinned_by", "pin_mutant", "review"}: a mutant that no test can tell from
-the original, with the invariant it rests on, the test that pins that invariant, a
-second mutant that this test kills, and the reviewer ("pending" until an independent
-review has read it). A top-level `reused` names mutants that another ledger replays:
+"invariant", "pinned_by", "pin_mutant", "caveat"?, "review"}: a mutant that no test can
+tell from the original, with the invariant it rests on, the test that pins that invariant,
+a second mutant that this test kills, what the argument does not cover (`caveat`), and the
+reviewer ("pending" until an independent review has read it). A top-level `reused` names
+mutants that another ledger replays:
 {"ledger": a file of the tree, "obligations": {this list's ID: the ledger's ID}, "kit": [IDs the
 ledger carries under the same ID]}; `verify` checks that the ledger holds them.
 
