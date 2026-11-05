@@ -287,8 +287,10 @@ changes.
   `candidates` by dense distance) is therefore a cosine pool, and `mmr` reports
   the value its own selection uses.
 - A query vector with zero norm has no direction: 422 `invalid_input`, in the
-  request validation, before any record is read or any budget is charged. A
-  stored vector with zero norm has no cosine distance and is never a vector
+  request validation, before any record is read or any budget is charged. It
+  applies to `exact`, `mmr` and any query whose metric is cosine, whenever the
+  vector weighs in the fusion (a leg with weight 0 is not evaluated). A stored
+  vector with zero norm has no cosine distance and is never a vector
   candidate of `exact` or `mmr` (with text it can still be found as a text-only
   hit, 4.1). (0.7.0 accepted a zero query under `exact`; `mmr` already refused
   it.) The oracle leaves this convention open (OPEN-G1W-10); the rule above is

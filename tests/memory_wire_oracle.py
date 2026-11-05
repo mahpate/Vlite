@@ -871,7 +871,9 @@ def recalled(body, view, mutant=None):
         if selection == "exact" and ("text" in body or body.get("entity_seeds")
                                     or policy.get("weights", [1, 0, 0]) != [1, 0, 0]
                                     or "half_life_ms" in policy):
-            raise Unmodeled("OPEN-G1W-07: exact hybrid policy conflicts with accepted B")
+            raise Unmodeled("OPEN-G1W-07: exact with text, seeds, expansion or other weights is "
+                            "not modelled (text is served since 0.7.1, design note section 4; "
+                            "BM25/RRF cannot be modelled, OPEN-G1W-08)")
         need("vector" in body and "text" not in body and not body.get("entity_seeds")
              and policy.get("weights", [1, 0, 0]) == [1, 0, 0]
              and "half_life_ms" not in policy

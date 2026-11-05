@@ -157,11 +157,12 @@ evidence collection holds no records, when it holds the binding's record, or,
 once, when a 0.7.0 server adopted it and it holds nothing but memory nodes. One
 node with the `VliteMemoryScope` label no longer satisfies that check, and from
 0.7.1 the raw graph batch route refuses, on every graph and for every caller, to
-create or change a node whose label starts with `VliteMemory` or whose key
+create or replace a node whose label starts with `VliteMemory` or whose key
 starts with `scope:v1:`, `mem:v1:`, `receipt:v1:`, `receipt-outcome:v1:` or
-`content:v1:` or is exactly `binding:v1` (`422 invalid_input`, the whole batch;
-deleting such a node and removing such a label from a node with an ordinary key
-stay allowed). A raw caller that
+`content:v1:` or is exactly `binding:v1`, to patch a node with such a key, or to
+add such a label to a node (`422 invalid_input`, the whole batch; deleting such a
+node and removing such a label from a node with an ordinary key stay allowed). A
+raw caller that
 wrote those names under 0.7.0 now gets 422. Nodes planted by an earlier release
 are not detected, and a forgery made only of well-formed memory nodes is
 indistinguishable from memory, so bind only resources that were created for

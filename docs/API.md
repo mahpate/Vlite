@@ -269,7 +269,8 @@ names another record is 409 `idempotency_conflict`. An item that repeats an
 existing memory (same scope, kind, content and source) keeps the evidence that
 memory holds: a reference to another record is the same 409, never ignored. To
 attach a record to a memory that already exists, merge a new source into it
-(`merge: merge_provenance` with the `expected` revision). Naming a record makes the
+(`merge: merge_provenance` with the `expected` revision); that attaches the record
+only when the memory holds none yet. Naming a record makes the
 file one-way: after the first reference do not downgrade to 0.7.0, which answers
 500 for every memory operation of that scope (see Upgrading from 0.7.0 below).
 
