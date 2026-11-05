@@ -7,6 +7,8 @@ mod graph_mcp;
 mod graph_proxy;
 #[path = "tool_support/kv_mcp.rs"]
 mod kv_mcp;
+#[path = "tool_support/line.rs"]
+mod line;
 #[cfg(feature = "mcp-proxy")]
 #[path = "tool_support/memory_mcp.rs"]
 mod memory_mcp;
@@ -14,17 +16,23 @@ mod memory_mcp;
 use std::{
     collections::BTreeMap,
     error::Error,
-    io::{self, BufRead, Write},
+    io::{self, Write},
     path::PathBuf,
     process::ExitCode,
 };
 
+use line::{Line, read_bounded_line};
 use serde_json::{Value, json};
 use vlite::{Condition, Database, DistanceMetric, EncryptionKey, HnswMaintenancePolicy, Metadata};
 
 const VERSION: &str = env!("CARGO_PKG_VERSION");
 const DEFAULT_PROTOCOL_VERSION: &str = "2025-06-18";
 const SUPPORTED_PROTOCOL_VERSIONS: &[&str] = &["2025-06-18", "2025-03-26", "2024-11-05"];
+/// Longest request line read from stdin, excluding its terminator; a longer line
+/// is answered with a -32600 error. Every supported request fits: the largest, a
+/// memory tool call with 8 MiB of compact JSON arguments, is about 48 MiB when
+/// written with `\u` escapes.
+const MAX_LINE_BYTES: usize = 64 * 1024 * 1024;
 const HELP: &str = "vlite-mcp --db PATH [--read-only | --writable] [--encryption-key-file PATH]\n\
        vlite-mcp --server URL [--token-env VAR] [--read-only | --writable]   (mcp-proxy builds)\n\
 Read-only is the default. VLITE_ENCRYPTION_KEY or VLITE_ENCRYPTION_KEY_HEX may supply an encryption key.\n\
@@ -787,15 +795,21 @@ fn run() -> Result<(), Box<dyn Error>> {
     };
     let mut backend = open_backend(&mut config)?;
     let stdin = io::stdin();
+    let mut input = stdin.lock();
     let mut stdout = io::BufWriter::new(io::stdout().lock());
-    for line in stdin.lock().lines() {
-        let line = line?;
-        if line.trim().is_empty() {
-            continue;
-        }
-        let response = match serde_json::from_str::<Value>(&line) {
-            Ok(message) => dispatch(&mut backend, &config, message, &line),
-            Err(_) => Some(protocol_error(Value::Null, -32700, "Parse error")),
+    loop {
+        let response = match read_bounded_line(&mut input, MAX_LINE_BYTES)? {
+            Line::Eof => break,
+            Line::TooLong => Some(protocol_error(
+                Value::Null,
+                -32600,
+                &format!("request line exceeds {MAX_LINE_BYTES} bytes"),
+            )),
+            Line::Text(line) if line.trim().is_empty() => continue,
+            Line::Text(line) => match serde_json::from_str::<Value>(&line) {
+                Ok(message) => dispatch(&mut backend, &config, message, &line),
+                Err(_) => Some(protocol_error(Value::Null, -32700, "Parse error")),
+            },
         };
         if let Some(response) = response {
             serde_json::to_writer(&mut stdout, &response)?;

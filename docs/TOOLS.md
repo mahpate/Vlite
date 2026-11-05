@@ -120,6 +120,10 @@ quit
   and `inner_product`. ANN supports L2 and cosine.
 - JSON arguments run to the end of the line, so strings need no shell quoting.
   Lines starting with `#` are comments.
+- A command line may hold at most 16 MiB (16,777,216 bytes, excluding the line
+  terminator). A longer line fails with `invalid_input: line exceeds 16777216 bytes`
+  like any other command error: scripts and non-terminal stdin stop there, as
+  before.
 - Scripts and stdin stop at the first error; earlier writes stay committed.
   The interactive shell prints errors and continues.
 - `browse LIMIT [AFTER_ID]` returns 1–1,000 rows in ascending ID order and
