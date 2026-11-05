@@ -679,3 +679,20 @@ fn remember_in(
     )?;
     Ok((body, id, result.receipt_revision))
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Mapping section 2: a stored-property integrity fault is 500, never
+    /// the 422 the shared mapper gives a caller's invalid query.
+    #[test]
+    fn storage_invalid_query_is_an_internal_error() {
+        let fail = core_error(MemoryError::Storage(crate::Error::InvalidQuery("stored")));
+        assert_eq!(fail.status, StatusCode::INTERNAL_SERVER_ERROR);
+        assert_eq!(fail.code, "internal_error");
+        let fail = core_error(MemoryError::Storage(crate::Error::GraphNotFound));
+        assert_eq!(fail.status, StatusCode::CONFLICT);
+        assert_eq!(fail.code, "graph_not_found");
+    }
+}

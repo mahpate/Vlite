@@ -94,23 +94,25 @@ pub(super) fn harness(view: &Value) -> Option<Harness> {
     } else {
         "notes"
     };
-    let text = json!({
-        "version": "memory-bindings-v1",
-        "bindings": [{
-            "binding": binding,
-            "tenant": tenant,
-            "generation": 1,
-            "state": "active",
-            "graph": "notes_graph",
-            "evidence_collection": "notes_ev",
-            "schema_version": "memory-schema-v1",
-            "ranking_version": "memory-ranking-v1",
-            "digest_version": "memory-request-v1",
-            "receipt_window_ms": view["receipt_window_ms"],
-            "grants": grants,
-        }],
-    })
-    .to_string();
+    let mut entry = json!({
+        "binding": binding,
+        "tenant": tenant,
+        "generation": 1,
+        "state": "active",
+        "graph": "notes_graph",
+        "evidence_collection": "notes_ev",
+        "schema_version": "memory-schema-v1",
+        "ranking_version": "memory-ranking-v1",
+        "digest_version": "memory-request-v1",
+        "receipt_window_ms": view["receipt_window_ms"],
+        "grants": grants,
+    });
+    // Not a fixture field: server tests retire the binding.
+    if let Some(at) = view.get("retired_at_ms") {
+        entry["state"] = json!("retired");
+        entry["retired_at_ms"] = at.clone();
+    }
+    let text = json!({"version": "memory-bindings-v1", "bindings": [entry]}).to_string();
     let bindings = crate::memory::binding::parse(text.as_bytes()).ok()?;
     let service = Service::new(db).with_bindings(super::reserved::Bindings::new(bindings));
     super::startup(&service).ok()?;
@@ -464,6 +466,65 @@ mod tests {
         // Binding existence is never disclosed.
         ("remember-missing-binding", 403, "forbidden_scope", None),
     ];
+
+    fn view() -> Value {
+        json!({
+            "tenant": "@root",
+            "scope_grants": [{"tenant": "@root", "agent": "a"}],
+            "receipt_window_ms": 60_000,
+        })
+    }
+
+    fn remember_request(item: Value) -> Value {
+        let mut base = json!({
+            "id": "m1", "kind": "entity", "content": "x", "observed_at_ms": 1,
+            "source": {"source_id": "s", "source_kind": "caller"},
+        });
+        base.as_object_mut()
+            .unwrap()
+            .extend(item.as_object().unwrap().clone());
+        json!({"method": "POST", "path": "/v1/memory/notes/remember", "body": {
+            "scope": {"agent": "a"}, "idempotency_key": "k", "items": [base],
+        }})
+    }
+
+    async fn served(view: &Value, request: &Value) -> (u16, Value) {
+        let harness = harness(view).expect("startup");
+        harness.at(1_000);
+        harness.send(request).await
+    }
+
+    /// Relation items are refused with the fact kinds, before validation.
+    #[tokio::test]
+    async fn remember_relation_kind_is_refused_as_fact_kinds() {
+        let (status, body) = served(&view(), &remember_request(json!({"kind": "relation"}))).await;
+        assert_eq!(status, 409, "{body}");
+        assert_eq!(body["error"]["details"]["feature"], "fact_kinds");
+    }
+
+    /// A retired binding refuses Remember before the body is validated.
+    #[tokio::test]
+    async fn retired_binding_refuses_remember() {
+        let mut view = view();
+        view["retired_at_ms"] = json!(500);
+        let (status, body) = served(&view, &remember_request(json!({}))).await;
+        assert_eq!(status, 409, "{body}");
+        assert_eq!(body["error"]["code"], "memory_capability_unavailable");
+        assert_eq!(body["error"]["details"]["feature"], "binding_retired");
+    }
+
+    /// An ungranted evidence collection is the binding 403 before the body
+    /// is read, even when the body is malformed.
+    #[tokio::test]
+    async fn ungranted_evidence_is_refused_before_the_body() {
+        let mut view = view();
+        view["collection_grants"] = json!(false);
+        let mut request = remember_request(json!({}));
+        request["body"] = json!("{");
+        let (status, body) = served(&view, &request).await;
+        assert_eq!(status, 403, "{body}");
+        assert_eq!(body["error"]["code"], "forbidden_scope");
+    }
 
     #[tokio::test]
     async fn remember_fixture_cases_replay_over_http() {
