@@ -42,6 +42,8 @@ pub(super) const CORRECT_FACTS: &str =
     include_str!("../../../tests/fixtures/agent_memory/wire/correct_facts.json");
 pub(super) const ERASURE: &str =
     include_str!("../../../tests/fixtures/agent_memory/wire/erasure.json");
+pub(super) const RESUME_ERASURE: &str =
+    include_str!("../../../tests/fixtures/agent_memory/wire/resume_erasure.json");
 
 const PRINCIPAL: &str = "abcdefghij27";
 const OTHER: &str = "bcdefghij234";
@@ -1446,6 +1448,17 @@ mod tests {
             "/v1/memory/notes/erasures/get",
             "erasure_jobs",
             "erasure_jobs",
+        )
+        .await;
+    }
+
+    #[tokio::test]
+    async fn resume_erasure_is_refused_after_authorization() {
+        refused_in_order(
+            RESUME_ERASURE,
+            "/v1/memory/notes/erasures/resume",
+            "erasure_jobs",
+            "binding_retired",
         )
         .await;
     }

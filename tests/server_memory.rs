@@ -88,8 +88,8 @@ const MEMORY_PATHS: [&str; 3] = [
     "/v1/memory/notes/receipts/lookup",
 ];
 
-/// Routes served in this slice; the rest are not mounted yet.
-const SERVED: [&str; 8] = [
+/// Every route of the first slice is served.
+const SERVED: [&str; 9] = [
     "/v1/memory/notes/remember",
     "/v1/memory/notes/recall",
     "/v1/memory/notes/consolidate",
@@ -98,14 +98,14 @@ const SERVED: [&str; 8] = [
     "/v1/memory/notes/facts/query",
     "/v1/memory/notes/facts/correct",
     "/v1/memory/notes/erasures/get",
+    "/v1/memory/notes/erasures/resume",
 ];
-const UNMOUNTED: [&str; 1] = ["/v1/memory/notes/erasures/resume"];
 
 #[tokio::test]
 async fn without_a_bindings_file_memory_routes_are_not_mounted() {
     let directory = TempDir::new().unwrap();
     let app = start(&directory, database("notes_graph"), None).unwrap();
-    for path in MEMORY_PATHS {
+    for path in MEMORY_PATHS.iter().chain(&SERVED) {
         assert_eq!(status(&app, "POST", path).await, 404, "{path}");
     }
     assert_eq!(status(&app, "GET", "/v1/graphs/notes_graph").await, 200);
@@ -124,9 +124,7 @@ async fn a_valid_bindings_file_mounts_only_the_served_routes() {
     for path in SERVED {
         assert_eq!(status(&app, "POST", path).await, 403, "{path}");
     }
-    for path in UNMOUNTED {
-        assert_eq!(status(&app, "POST", path).await, 404, "{path}");
-    }
+    assert_eq!(status(&app, "POST", "/v1/memory/notes/facts").await, 404);
 }
 
 #[test]
@@ -541,6 +539,11 @@ async fn a_read_only_database_refuses_writes_before_validation() {
     let (status, error) = post(&app, "/v1/memory/notes/erasures/get", &token, &scope).await;
     assert_eq!(status, 409, "{error}");
     assert_eq!(error["error"]["details"]["feature"], "erasure_jobs");
+    let (status, error) = post(&app, "/v1/memory/notes/erasures/resume", &token, &scope).await;
+    assert_eq!(
+        (status, &error["error"]["code"]),
+        (403, &json!("read_only"))
+    );
 }
 
 const RECALL_OPS: [&str; 5] = ["read", "search", "write", "graph_read", "graph_write"];

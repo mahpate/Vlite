@@ -72,6 +72,7 @@ pub(super) fn routes() -> Router<Service> {
         .route(FIND_FACTS, post(refused::find_facts))
         .route(CORRECT_FACTS, post(refused::correct_facts))
         .route(GET_ERASURE, post(refused::get_erasure))
+        .route(RESUME_ERASURE, post(refused::resume_erasure))
 }
 
 /// Test seam for the engine clock and the elapsed request budget. Absent in

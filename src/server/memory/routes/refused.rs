@@ -112,3 +112,26 @@ pub(super) async fn get_erasure(
     )
     .await
 }
+
+pub(super) async fn resume_erasure(
+    State(service): State<Service>,
+    Extension(role): Extension<admin::Role>,
+    Extension(request_id): Extension<RequestId>,
+    clock: Option<Extension<Clock>>,
+    name: Result<Path<String>, PathRejection>,
+    headers: HeaderMap,
+    bytes: Result<Bytes, BytesRejection>,
+) -> Response {
+    let call = Call::new(service, role, request_id, clock, "resume_erasure");
+    let ops = &[Op::Write];
+    refused(
+        call,
+        name,
+        headers,
+        bytes,
+        WireOperation::ResumeErasure,
+        ops,
+        true,
+    )
+    .await
+}
