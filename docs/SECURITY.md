@@ -107,7 +107,20 @@ graph or collection that holds ordinary data, but one node with the
 `VliteMemoryScope` label satisfies that check, so bind only resources that were
 created for memory. The administrator's HTTP request log and persistent audit
 show reserved names and record IDs, and collection list `id` values have gaps
-where reserved collections sit.
+where reserved collections sit. `raw_access` covers every scope of its
+binding's resources, not one memory scope. A credential that holds the `backup`
+operation can create, verify and drill backups, and their database-wide counts
+of collections, records and commits include reserved resources; the backup
+files themselves hold reserved data and are operator-managed. A raw credential
+can attach reserved evidence records to nodes of an unreserved graph, and other
+users of that graph can then neither delete nor detach those nodes. Do not bind
+the `default` collection as an evidence collection: the legacy routes and
+`GET /v1/database` would then answer 403 to everyone without raw access. A
+binding's receipt window, generation and names are read from the file at each
+start and are not checked against the database, so do not change them once
+memory has been written (see [Agent memory](API.md#start-the-server-with-memory)).
+The bindings file is read through symbolic links; keep it in a directory that
+only the operator can write.
 
 These checks apply only at the server boundary. Direct embedded/file access and
 operator-managed backups are outside this authorization policy and must be
