@@ -132,14 +132,27 @@ impl Database {
     /// Read-only view of an existing key-value collection.
     pub fn kv_view(&self, collection: &str) -> Result<KvView<'_>> {
         let id = self.resolve(collection)?;
+        // `resolve` has checked the health of the handle; a compact collection needs no residency.
+        #[cfg(test)]
+        if self.state(id).records.is_compact() {
+            check_kv_dimension(self, id)?;
+        } else {
+            check_kv_collection(self, id)?;
+        }
+        #[cfg(not(test))]
         check_kv_collection(self, id)?;
         Ok(KvView { db: self, id })
     }
 }
 
-#[cfg(test)]
-pub(crate) fn compact_view_for_test(db: &Database, id: u16) -> KvView<'_> {
-    KvView { db, id }
+/// Health, and for ordinary (resident) records their residency. A compact collection is read through the same
+/// code: its records come from `CollectionRecords::get_physical` and `compact_iter`, never from a resident map.
+fn acquire(db: &Database, collection: u16) -> Result<()> {
+    #[cfg(test)]
+    if db.state(collection).records.is_compact() {
+        return db.ensure_healthy();
+    }
+    db.ensure_resident_in(collection)
 }
 
 #[cfg(feature = "server")]
@@ -162,6 +175,10 @@ impl Database {
 
 fn check_kv_collection(db: &Database, id: u16) -> Result<()> {
     db.ensure_resident_in(id)?;
+    check_kv_dimension(db, id)
+}
+
+fn check_kv_dimension(db: &Database, id: u16) -> Result<()> {
     if db.state(id).dimensions == 1 {
         Ok(())
     } else {
@@ -392,12 +409,11 @@ impl Probe {
 
 fn probe(db: &Database, collection: u16, namespace: &str, key: &str, now_ms: u64) -> Result<Probe> {
     let state = db.state(collection);
-    let records = state.records.resident()?;
     let base = slot_base(namespace, key);
     let mut free = None;
     for offset in 0..KV_PROBE_SLOTS {
         let slot = base.wrapping_add(offset);
-        let Some(record) = records.get(&slot) else {
+        let Some(record) = state.records.get_physical(slot)? else {
             free.get_or_insert((slot, None));
             continue;
         };
@@ -434,7 +450,7 @@ fn get_at(
     key: &str,
     now_ms: u64,
 ) -> Result<Option<KvEntry>> {
-    db.ensure_resident_in(collection)?;
+    acquire(db, collection)?;
     validate(namespace, key)?;
     let probe = probe(db, collection, namespace, key, now_ms)?;
     let Some(found) = probe.found.filter(|found| !found.expired) else {
@@ -445,8 +461,7 @@ fn get_at(
 
 fn entry(db: &Database, collection: u16, slot: u64) -> Result<Option<KvEntry>> {
     let state = db.state(collection);
-    let records = state.records.resident()?;
-    let Some(record) = records.get(&slot) else {
+    let Some(record) = state.records.get_physical(slot)? else {
         return Ok(None);
     };
     let Some((_, key, value)) = decode(&record.payload) else {
@@ -513,19 +528,19 @@ fn visit_at<F>(
 where
     F: FnMut(KvRef<'_>) -> ControlFlow<()>,
 {
-    db.ensure_resident_in(collection)?;
+    acquire(db, collection)?;
     validate_namespace(namespace)?;
     if limit == 0 || limit > MAX_KV_LIST_LIMIT {
         return Err(Error::InvalidKvKey("limit must be between 1 and 10000"));
     }
     let state = db.state(collection);
-    let records = state.records.resident()?;
     // `limit` entries plus one more, so the last visited entry can say whether
     // the listing continues without anything being read for the extra key.
     let capacity = limit + 1;
     let mut selected: BinaryHeap<(&str, u64)> =
-        BinaryHeap::with_capacity(capacity.min(records.len()));
-    for (&id, record) in records.iter() {
+        BinaryHeap::with_capacity(capacity.min(state.records.len()));
+    for row in rows(state)? {
+        let (id, record) = row?;
         if state
             .expiries
             .get(&id)
@@ -569,7 +584,10 @@ where
     }
     let selected = selected.into_sorted_vec();
     for (index, &(key, id)) in selected.iter().take(limit).enumerate() {
-        let Some((_, _, value)) = records.get(&id).and_then(|record| decode(&record.payload))
+        let Some((_, _, value)) = state
+            .records
+            .get_physical(id)?
+            .and_then(|record| decode(&record.payload))
         else {
             continue;
         };
@@ -585,6 +603,33 @@ where
         }
     }
     Ok(())
+}
+
+/// The rows a listing scans, whichever form the collection keeps its records in.
+enum Rows<'a> {
+    Resident(crate::records::RecordIter<'a>),
+    #[cfg(test)]
+    Compact(crate::records::CompactRecordIter<'a>),
+}
+
+impl<'a> Iterator for Rows<'a> {
+    type Item = Result<(u64, &'a crate::Record)>;
+
+    fn next(&mut self) -> Option<Self::Item> {
+        match self {
+            Self::Resident(rows) => rows.next().map(|(&id, record)| Ok((id, record))),
+            #[cfg(test)]
+            Self::Compact(rows) => rows.next(),
+        }
+    }
+}
+
+fn rows(state: &crate::collection::Collection) -> Result<Rows<'_>> {
+    #[cfg(test)]
+    if let Some(rows) = state.records.compact_iter(None) {
+        return Ok(Rows::Compact(rows));
+    }
+    Ok(Rows::Resident(state.records.resident()?.iter()))
 }
 
 fn validate_namespace(namespace: &str) -> Result<()> {
