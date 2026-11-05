@@ -364,3 +364,16 @@ code, goldens, OpenAPI text and user documentation agree.
 - **Default off.** With no bindings file the nine routes are unmounted: the
   administrator sees 404, and a scoped credential sees 403 `forbidden_scope`
   because unmapped routes keep their admin-only `permission()` default.
+- **Integers.** An integer input is a canonical decimal string or an exact JSON
+  integer. `90.0`, `1e3`, padded strings and strings with leading zeros are
+  refused as 422 `invalid_input`.
+- **Default provenance.** An explicit empty `provenance` list is the same as an
+  absent one and defaults to `[source]`: the core cannot present a memory
+  whose source has no kind. Consolidate's output shares this parser. A source
+  `uri` follows the opaque-key rules (nonempty, no control character) as well
+  as the schema's 256-byte bound.
+- **Forget reporting.** Forget reports the deleted memory ids and writes no
+  manifest. An evidence record that another memory still uses is retained and
+  not reported; contract section 5 expects a report, which is a later slice. A
+  missing or null `mode` and a bad `target` entry name `mode` and `target` in
+  `details.field`.
