@@ -15,10 +15,11 @@ class WorkspaceApi(FakeApi):
     def __init__(self, role="scoped"):
         super().__init__(role=role, format_version=5, scope={
             "collections": ["*"], "graphs": ["*"],
-            "operations": ["read", "write", "search", "graph_read", "graph_write"],
+            "operations": ["read", "write", "search", "collections", "graph_read", "graph_write"],
             "expires_unix_ms": 2000000000000,
         } if role == "scoped" else None)
         self.collections["cache"] = {**self.collections["docs"], "id": 2, "name": "cache", "dimensions": 1}
+        self.caps["features"].update(named_vectors=True, sparse_vectors=True)
         self.caps["routes"] = [
             "/v1/collections/{collection}/kv/entry", "/v1/collections/{collection}/kv/entries",
             "/v1/collections/{collection}/query",
@@ -29,6 +30,7 @@ class WorkspaceApi(FakeApi):
         }
         self.fail_write = False
         self.fail_memory = False
+        self.fail_vectors = False
 
     def api(self, method, path, query, body, headers):
         if "/kv/" in path:
@@ -61,6 +63,14 @@ class WorkspaceApi(FakeApi):
             return 200, {"receipt": {"operation": path.rsplit("/", 1)[1], "revision": MAX_U64, "retry_until_ms": MAX_U64}, "outcomes": []}, {}
         if path.endswith("/embed"):
             return 200, {"vector": [1, 0, 0], "dimensions": 3, "provider": body["provider"]}, {}
+        if path.endswith("/vectors/configure"):
+            return 200, {"configured": body["name"], **body}, {}
+        if path.endswith("/named") and method == "PUT":
+            if self.fail_vectors:
+                return self.error(409, "vector_conflict")
+            return 200, {"updated": True}, {}
+        if path.endswith("/search/sparse"):
+            return 200, {"hits": [{"id": "1", "distance": -.5}]}, {}
         if path.endswith("/search") and body.get("rerank", {}).get("mode") == "custom":
             return 200, {"hits": [{"id": "1", "distance": .5, "rerank_score": .9}],
                          "ranking": {"provider": body["rerank"]["provider"], "order": "score_desc_id_asc"}}, {}
@@ -120,6 +130,20 @@ def exercise(browser):
     expect(page.locator("#memory-results")).to_contain_text("<script>private memory</script>")
     assert page.locator("#memory-results script").count() == 0
     expect(page.locator("#memory-result")).to_contain_text("candidate_limit")
+    page.locator("#memory-ranking").select_option("mmr")
+    page.locator("#memory-vector").fill("[2,0,0]")
+    before = len(fake.log)
+    page.locator("#memory-run").click()
+    expect(page.locator("#status")).to_contain_text("vector alone")
+    assert not any(item["path"].endswith("/recall") for item in fake.log[before:])
+    page.locator("#memory-seeds").fill("")
+    page.locator("#memory-limit").fill("7")
+    page.locator("#memory-lambda").fill("0.25")
+    page.locator("#memory-run").click()
+    expect(page.locator("#memory-outcome")).to_contain_text("server confirmed")
+    recalled = next(item for item in reversed(fake.log) if item["path"].endswith("/recall"))
+    assert recalled["body"]["ranking"] == {"selection": "mmr", "weights": [1, 0, 0], "lambda": .25}
+    assert recalled["body"]["limit"] == 7
     page.locator("#memory-action").select_option("remember")
     for name, value in [("id", "new-memory"), ("content", "Synthetic memory"), ("source", "test"), ("idempotency", "once")]:
         page.locator("#memory-" + name).fill(value)
@@ -179,6 +203,7 @@ def exercise(browser):
     expect(page.locator("#memory-result")).to_have_text("")
     expect(page.locator("#memory-download")).to_be_disabled()
     page.locator("#memory-action").select_option("recall")
+    page.locator("#memory-ranking").select_option("weighted")
     page.locator("#memory-run").click()
     expect(page.locator("#memory-outcome")).to_contain_text("forbidden_scope")
     control(page, "#embed-text").fill("Synthetic embedding input")
@@ -193,6 +218,54 @@ def exercise(browser):
     expect(page.locator("#search-summary")).to_contain_text("my-ranker")
     expect(page.locator("#hits")).to_contain_text("rerank_score")
     expect(page.locator("#hits")).to_contain_text("0.9")
+    control(page, "#vector-spec-name").fill("text")
+    page.locator("#vector-spec-version").fill("v1")
+    page.locator("#vector-configure").click()
+    confirm(page, "Declare named vector", accept=False)
+    assert not any(item["path"].endswith("/vectors/configure") for item in fake.log)
+    page.locator("#vector-configure").click()
+    confirm(page, "Declare named vector")
+    expect(page.locator("#vector-write-result")).to_contain_text('"configured": "text"')
+    page.locator("#vector-values-id").fill(MAX_U64)
+    values = {"dense": {"text": [{"version": "v1", "vector": [1, 0, 0]}]}, "sparse": {"terms": [[1, .5]]}}
+    page.locator("#vector-values").fill('{"dense":[]}')
+    before = len(fake.log)
+    page.locator("#vector-values-save").click()
+    expect(page.locator("#status")).to_contain_text("dense must be a map")
+    assert len(fake.log) == before
+    page.locator("#vector-values").fill(json.dumps(values))
+    page.locator("#vector-values-save").click()
+    confirm(page, "Replace ALL named and sparse values", accept=False)
+    assert len(fake.log) == before
+    page.locator("#vector-values-save").click()
+    confirm(page, "Replace ALL named and sparse values")
+    expect(page.locator("#vector-write-result")).to_contain_text('"updated": true')
+    request = next(item for item in reversed(fake.log) if item["method"] == "PUT" and item["path"].endswith("/named"))
+    assert request["path"] == f"/v1/collections/default/vectors/{MAX_U64}/named"
+    assert request["body"] == values
+    fake.fail_vectors = True
+    before = len(fake.log)
+    page.locator("#vector-values-save").click()
+    confirm(page, "Replace ALL named and sparse values")
+    expect(page.locator("#vector-write-result")).to_contain_text("vector_conflict")
+    expect(page.locator("#vector-write-result")).to_contain_text("do not retry blindly")
+    assert sum(item["method"] == "PUT" for item in fake.log[before:]) == 1
+    expect(page.locator("#vector-values")).to_have_value(json.dumps(values))
+    fake.fail_vectors = False
+    page.locator("#sparse-query").fill("[[1,0.5]]")
+    page.locator("#sparse-search").click()
+    expect(page.locator("#named-result")).to_contain_text('"distance": -0.5')
+    request = next(item for item in reversed(fake.log) if item["path"].endswith("/search/sparse"))
+    assert request["body"] == {"name": "terms", "vector": [[1, .5]], "k": 10}
+    page.locator("#collection").select_option("cache")
+    confirm(page, "advanced retrieval draft", accept=False)
+    expect(page.locator("#collection")).to_have_value("default")
+    expect(page.locator("#vector-values")).to_have_value(json.dumps(values))
+    page.locator("#collection").select_option("cache")
+    confirm(page, "advanced retrieval draft")
+    expect(page.locator("#vector-values")).to_have_value('{"dense":{},"sparse":{}}')
+    expect(page.locator("#vector-write-result")).to_have_text("")
+    control(page, "#vector-values").fill(json.dumps(values))
     for width in (1280, 768, 390):
         page.set_viewport_size({"width": width, "height": 900})
         for target in ("key-value", "memory"):
@@ -201,6 +274,7 @@ def exercise(browser):
     sign_out(page)
     expect(page.locator("#memory-content")).to_have_value("")
     expect(page.locator("#kv-value")).to_have_value("")
+    expect(page.locator("#vector-values")).to_have_value('{"dense":{},"sparse":{}}')
     assert_no_stored_credentials(page, "admin-" + "t" * 32)
     assert not errors, errors
     context.close()
@@ -214,6 +288,10 @@ def exercise(browser):
             control(page, "#kv-save")
             expect(page.locator("#kv-save")).to_be_disabled()
             expect(page.locator("#kv-get")).to_be_enabled()
+            control(page, "#vector-configure")
+            expect(page.locator("#vector-configure")).to_be_disabled()
+            expect(page.locator("#vector-values-save")).to_be_disabled()
+            expect(page.locator("#sparse-search")).to_be_enabled()
             page.locator("#collection").select_option("default")
             control(page, "#embed-text").fill("Read-only query")
             page.locator("#embed-generate").click()

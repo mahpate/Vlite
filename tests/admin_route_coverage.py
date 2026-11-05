@@ -7,9 +7,9 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[1]
 
 
-def admin_routes(source):
+def admin_routes(source, prefix="/v1/admin/"):
     """Read balanced .route calls, including chained .get/.post method routers."""
-    for match in re.finditer(r'\.route\(\s*"(/v1/admin/[^"]+)"\s*,', source):
+    for match in re.finditer(r'\.route\(\s*"(' + re.escape(prefix) + r'[^"]+)"\s*,', source):
         start, depth = match.end(), 1
         quoted = escaped = False
         end = start

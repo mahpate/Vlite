@@ -132,15 +132,13 @@ The filter builder joins equality and numeric range conditions with AND.
 | Auto | Lets the server pick a plan. Never builds an index. |
 | Hybrid | Fuses vector results with text matches. Higher scores are better. |
 
-Distances are lower-is-better. **Explain** shows the chosen plan. **Compare**
-runs exact and ready approximate search side by side. **Analyze & compare**
-samples up to 32 records for duplicates and metadata types, plots them in 2-D
-and compares two records. **Advanced retrieval**
-adds reranking, grouping, geo radius, named and sparse vectors, recommend,
-facets and the [query language](VECTORS.md). Save a query to a file and load it
-later. **Copy as code** turns the form into curl, Python or JavaScript with
-placeholders for the server address and token; it never includes your
-credentials.
+Distances are lower-is-better. **Explain** shows plans; **Compare** compares exact
+and ANN. **Analyze & compare** samples records and plots PCA. **Advanced retrieval**
+offers grouping, geo, recommendations, facets and [query text](VECTORS.md).
+Declare named vectors, replace complete named/sparse maps for existing records,
+and search named, sparse-only or fused vectors. Replacement clears omitted maps;
+there is no compare-and-set/readback. Retain an authoritative copy.
+Saved queries and **Copy as code** never include credentials.
 
 ![Search workspace with a vector query and ranked neighbors](../site/assets/dashboard/current-search.png?v=connected)
 
@@ -170,8 +168,9 @@ the current value before retrying.
 
 Use an operator-provided binding and exact agent/user/session scope with a
 **scoped API token**; administrator sign-in alone grants no memory access.
-Recall accepts entity seeds, text or vectors. Text/vector recall needs evidence;
-text needs a ready index. Inspect provenance, revisions and truncation below.
+Recall accepts seeds, text or vectors; text needs indexed evidence. Set result
+limits and weighted, exact or MMR ranking. Exact/MMR require a vector alone and
+measure squared Euclidean distance. Inspect provenance, revisions and truncation.
 
 Remember supports entity/episodic memories. Consolidation retains originals;
 Forget pins ID/revision pairs and is **not secure erasure**. Mutations require
@@ -179,7 +178,7 @@ idempotency keys and confirmation. Download submitted requests after failures
 and responses before sign-out. Explicit unchanged-draft replay preserves the
 original timestamp. Receipt lookup supports forget/consolidate, not remember.
 Fact correction, erasure jobs and automatic chat import remain unavailable.
-See [memory serving](API.md) for backend limits.
+See [memory serving](API.md) and Overview's **Feature availability** for backend-only limits.
 
 ## Explore graphs
 

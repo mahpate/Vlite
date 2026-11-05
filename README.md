@@ -39,7 +39,7 @@ service to operate.
 - **Dashboard.** Browse, search, write, import, index, monitor and query
   graphs, with user accounts, roles and tenants. The 0.7.1 source dashboard adds
   dedicated Key-value and MemoryAI workspaces, interactive graph navigation and
-  authorized embedding/ranking provider controls; see the [dashboard guide](docs/CONSOLE.md).
+  authorized provider controls and named/sparse vector management; see the [dashboard guide](docs/CONSOLE.md).
 - **Storage options.** Encryption at rest, point-in-time restore, a change
   feed, file-shipped read replicas, a disk-based ANN index, a key-value store
   and an opt-in directory store with checkpoints (Rust).

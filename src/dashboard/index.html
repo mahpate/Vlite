@@ -136,6 +136,10 @@
       <a class="action-card" href="#operations"><svg class="icon" viewBox="0 0 24 24" aria-hidden="true"><path d="m12 3 8 3v6c0 5-8 9-8 9s-8-4-8-9V6z"/><path d="m8 12 3 3 5-6"/></svg><strong>Manage the server</strong><span>Check health and manage users, backups and settings.</span></a>
     </div>
     <details class="operation-view"><summary>Server compatibility</summary><pre id="compatibility" aria-label="Server compatibility"></pre></details>
+    <details class="operation-view" id="feature-coverage"><summary>Feature availability and backend-only operations</summary>
+      <p>Use Key-value for namespaced values, MemoryAI for granted agent memory, Search for provider inference and named/sparse retrieval, and Graph for interactive graph queries and edits. Server support and credential permissions still apply.</p>
+      <p>Directory-store conversion, checkpoint controls, graph expiry and bounded graph algorithms are embedded Rust operations with no dashboard REST API. Automatic exact-search kernels and filter pruning need no switches. Compact storage controls remain unavailable until qualified server APIs exist. Provider models/secrets and memory bindings are configured offline by the operator.</p>
+    </details>
     <details class="operation-view"><summary>Database details and metrics (JSON)</summary><pre id="overview" aria-label="Database overview"></pre></details>
   </section>
   <section id="browse">
@@ -371,6 +375,10 @@
           <label>Entity seed IDs (one per line)<textarea id="memory-seeds" rows="3"></textarea></label>
           <label>Query text (optional; needs a ready evidence text index)<textarea id="memory-text" rows="3"></textarea></label>
           <label>Query vector (optional JSON array; evidence dimensions)<textarea id="memory-vector" rows="2"></textarea></label>
+          <label>Ranking<select id="memory-ranking"><option value="weighted">Weighted (default)</option><option value="exact">Exact vector distance</option><option value="mmr">MMR vector diversity</option></select></label>
+          <label>Result limit<input id="memory-limit" type="number" min="1" max="100" value="20"></label>
+          <label>MMR relevance weight (0 diversity .. 1 relevance)<input id="memory-lambda" type="number" min="0" max="1" step="0.05" value="0.5"></label>
+          <p>Exact and MMR ranking require a vector alone: remove entity seeds and query text. Distance is squared Euclidean, not cosine.</p>
           <p>Recall is bounded and may be truncated; inspect its reasons and work counters below. No automatic embedding or approximate memory search is requested.</p>
         </div>
         <div data-memory-action="remember consolidate" hidden>
@@ -496,7 +504,22 @@
       <label>Sparse query (sorted unique [index, value] pairs)<textarea id="sparse-query" rows="2">[[1,1]]</textarea></label>
       <p>Dense+sparse uses equal-weight RRF (k=60) with 100 candidates per leg. Higher scores are better; named search returns distances (lower is better).</p>
       <button id="dense-sparse-search" type="button" data-feature="named_vectors sparse_vectors" data-op="search">Search dense + sparse</button>
+      <button id="sparse-search" type="button" data-feature="sparse_vectors" data-op="search">Search sparse only</button>
       <pre id="named-result" aria-live="polite"></pre>
+      <details class="advanced-settings"><summary>Configure and write named or sparse vectors</summary>
+        <p>Declare a dense vector name before writing it. This adds a new declaration, not a model-version migration. The operator must supply matching dimensions and versions; embeddings are not generated here.</p>
+        <label>New dense vector name<input id="vector-spec-name" autocomplete="off"></label>
+        <label>Dimensions<input id="vector-spec-dimensions" type="number" min="1" max="65536" value="3"></label>
+        <label>Metric<select id="vector-spec-metric"><option value="squared_l2">Squared L2</option><option value="cosine">Cosine distance</option><option value="inner_product">Negative inner product</option></select></label>
+        <label>Active model version<input id="vector-spec-version" autocomplete="off"></label>
+        <label>Previous versions retained<input id="vector-spec-history" type="number" min="0" max="64" value="0"></label>
+        <button id="vector-configure" type="button" data-feature="named_vectors" data-op="collections">Declare named vector</button>
+        <label>Existing record ID (exact decimal string)<input id="vector-values-id" inputmode="numeric" autocomplete="off"></label>
+        <label>All named dense versions and sparse values (JSON)<textarea id="vector-values" rows="7">{"dense":{},"sparse":{}}</textarea></label>
+        <p>Dense example: {"text":[{"version":"v1","vector":[1,0,0]}]}; sparse example: {"terms":[[1,0.5]]}. Saving replaces ALL named and sparse values for this record. Omitted maps are cleared. This route has no compare-and-set or readback API; retain a complete authoritative copy before replacing. The base vector and payload are unchanged.</p>
+        <button id="vector-values-save" type="button" data-feature="named_vectors sparse_vectors" data-op="write">Replace named and sparse values</button>
+        <pre id="vector-write-result" aria-live="polite"></pre>
+      </details>
     </div>
     <div class="tool-group"><h3>Geo radius filter</h3>
       <label>Location field<input id="geo-field" value="location" maxlength="256"></label>

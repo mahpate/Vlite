@@ -63,6 +63,33 @@ test("Memory requests use exact scope, bounded reads and revision-pinned logical
   assert.throws(() => u.memoryRequest("forget", { ...draft, references: '[{"id":"one","revision":"1","disposition":"logical_delete"}]' }));
   assert.throws(() => u.memoryRequest("recall", { ...draft, seeds: "" }));
   assert.throws(() => u.memoryRequest("receipts/lookup", { ...draft, operation: "remember" }));
+  const mmr = plain(u.memoryRequest("recall", { ...draft, seeds: "", vector: "[2,0]", ranking: "mmr", limit: "50", lambda: "0.25" }));
+  assert.deepEqual(mmr.ranking, { selection: "mmr", weights: [1, 0, 0], lambda: .25 });
+  assert.equal(mmr.limit, 50);
+  const exact = u.memoryRequest("recall", { ...draft, seeds: "", vector: "[2,0]", ranking: "exact" });
+  assert.equal(exact.ranking.selection, "exact");
+  assert.throws(() => u.memoryRequest("recall", { ...draft, vector: "[1]", ranking: "exact" }));
+  assert.throws(() => u.memoryRequest("recall", { ...draft, seeds: "", text: "query", vector: "[1]", ranking: "mmr", lambda: .5 }));
+  assert.throws(() => u.memoryRequest("recall", { ...draft, seeds: "", vector: "[1]", ranking: "mmr", lambda: "" }));
+  assert.throws(() => u.memoryRequest("recall", { ...draft, seeds: "", vector: "[1]", ranking: "mmr", lambda: 1.1 }));
+  assert.throws(() => u.memoryRequest("recall", { ...draft, limit: "101" }));
+});
+
+test("named vector declarations and replacements validate complete wire shapes", () => {
+  const declaration = { name: "text", dimensions: 65536, metric: "cosine", active_version: "v1", history: 64 };
+  assert.deepEqual(plain(u.vectorDeclaration(declaration)), declaration);
+  for (const change of [{ dimensions: 0 }, { dimensions: 65537 }, { history: 65 }, { metric: "dot" },
+    { name: "" }, { active_version: "" }, { name: "é".repeat(129) }, { secret: "no" }])
+    assert.throws(() => u.vectorDeclaration({ ...declaration, ...change }));
+  const values = { dense: { text: [{ version: "v1", vector: [1, 0] }] }, sparse: { terms: [[1, .5], [4294967295, 1]] } };
+  assert.deepEqual(plain(u.namedVectorValues(values)), values);
+  assert.deepEqual(plain(u.namedVectorValues({ dense: {}, sparse: {} })), { dense: {}, sparse: {} });
+  for (const invalid of [{}, { dense: [] }, { dense: { text: [{ version: "v1", vector: [Infinity] }] } },
+    { dense: { text: [{ version: "v1", vector: [] }] } }, { dense: { text: [{ version: "v1", vector: [1], dimensions: 1 }] } },
+    { dense: { text: [{ version: "v1", vector: [1] }, { version: "v1", vector: [2] }] } },
+    { sparse: { terms: [[2, 1], [1, 1]] } }, { sparse: { terms: [[0, 1e39]] } },
+    { dense: Object.fromEntries(Array.from({ length: 33 }, (_, i) => ["name" + i, []])) }, { token: "secret" }])
+    assert.throws(() => u.namedVectorValues(invalid));
 });
 
 test("custom reranking accepts only a provider alias and survives saved-query round trips", () => {

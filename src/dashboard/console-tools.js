@@ -589,6 +589,44 @@
     }
     return value;
   }
+  function vectorDeclaration(value) {
+    exactKeys(value, ["name", "dimensions", "metric", "active_version", "history"], ["name", "dimensions", "metric", "active_version", "history"], "Vector declaration");
+    vectorName(value.name);
+    vectorName(value.active_version);
+    boundedInteger(value.dimensions, 1, 65536, "Dimensions");
+    boundedInteger(value.history, 0, 64, "Previous versions retained");
+    if (!["squared_l2", "cosine", "inner_product"].includes(value.metric)) throw new Error("Unknown vector metric");
+    return value;
+  }
+  function vectorName(value) {
+    if (typeof value !== "string" || !value.length || new TextEncoder().encode(value).length > 256) throw new Error("Vector names and versions must contain 1..256 UTF-8 bytes");
+    return value;
+  }
+  function namedVectorValues(value) {
+    exactKeys(value, ["dense", "sparse"], [], "Named vector values");
+    if (!Object.keys(value).length) throw new Error("Provide dense or sparse maps explicitly (empty maps clear values)");
+    for (const kind of ["dense", "sparse"]) {
+      if (!(kind in value)) continue;
+      const entries = value[kind];
+      if (!object(entries) || Object.keys(entries).length > 32) throw new Error(`${kind} must be a map of at most 32 names`);
+      for (const [name, values] of Object.entries(entries)) {
+        vectorName(name);
+        if (kind === "sparse") { sparseVector(values); continue; }
+        if (!Array.isArray(values) || values.length > 66) throw new Error("Provide at most 66 versions per dense name; the configured retention limit still applies");
+        const versions = new Set();
+        for (const item of values) {
+          exactKeys(item, ["version", "vector"], ["version", "vector"], "Dense version");
+          vectorName(item.version);
+          if (versions.has(item.version)) throw new Error("Duplicate dense model version");
+          versions.add(item.version);
+          vector(item.vector);
+          if (item.vector.length > 65536) throw new Error("Dense vectors support at most 65536 dimensions");
+        }
+      }
+    }
+    if (new TextEncoder().encode(JSON.stringify(value)).length > 8 * 1024 * 1024) throw new Error("Named vector request exceeds 8 MiB");
+    return value;
+  }
   const WEBHOOK_EVENTS = ["put", "delete", "metadata_update", "collection_created", "collection_dropped", "settings_updated", "vectors_updated", "graph_created", "graph_dropped", "graph_batch"];
   const GRAPH_NAME = /^[a-z][a-z0-9_-]{0,62}$/;
   const commaList = (value) => (value ?? "").split(",").map((v) => v.trim()).filter(Boolean);
@@ -673,6 +711,27 @@
     on("group-search", () => read("/search/grouped", { ...base(), field: field("group-field"), groups: boundedInteger($("group-count").value, 1, 1000, "Groups"), hits_per_group: boundedInteger($("group-hits").value, 1, 1000, "Hits per group") }, "group-result"));
     const named = () => ({ name: field("named-name"), vector: vector(get("named-query"), null), k: boundedInteger($("named-k").value, 0, 1000, "Result limit"), ...($("named-version").value ? { version: field("named-version") } : {}) });
     on("named-search", () => read("/search/named", named(), "named-result"));
+    on("sparse-search", () => read("/search/sparse", { name: field("sparse-name"), vector: sparseVector(get("sparse-query")), k: boundedInteger($("named-k").value, 0, 1000, "Result limit") }, "named-result"));
+    on("vector-configure", async () => {
+      if (!ctx.can("collections") || !ctx.feature("named_vectors")) throw new Error("Named vector declarations require collections permission and server support");
+      const body = vectorDeclaration({
+        name: $("vector-spec-name").value, dimensions: boundedInteger($("vector-spec-dimensions").value, 1, 65536, "Dimensions"),
+        metric: $("vector-spec-metric").value, active_version: $("vector-spec-version").value,
+        history: boundedInteger($("vector-spec-history").value, 0, 64, "Previous versions retained"),
+      });
+      if (!await ctx.confirm(`Declare named vector ${JSON.stringify(body.name)} in collection ${ctx.collection()} with ${body.dimensions} dimensions and active version ${JSON.stringify(body.active_version)}? Existing declarations cannot be replaced here.`)) return;
+      text("vector-write-result", "Declaration submitted; no automatic retry. A lost response may have an unknown outcome.");
+      try { display("vector-write-result", await ctx.api("POST", route("/vectors/configure"), body)); }
+      catch (error) { text("vector-write-result", `${error.message} No automatic retry; retain the declaration request.`); throw error; }
+    });
+    on("vector-values-save", async () => {
+      if (!ctx.can("write") || !ctx.feature("named_vectors") || !ctx.feature("sparse_vectors")) throw new Error("Replacing named and sparse vectors requires write permission and server support");
+      const recordId = id($("vector-values-id").value), body = namedVectorValues(get("vector-values"));
+      if (!await ctx.confirm(`Replace ALL named and sparse values for record ${recordId} in collection ${ctx.collection()}? Omitted maps are cleared. There is no compare-and-set or readback on this route. Keep a complete authoritative copy; this cannot be undone by the dashboard.`)) return;
+      text("vector-write-result", "Replacement submitted; no automatic retry. A lost response may have an unknown outcome.");
+      try { display("vector-write-result", await ctx.api("PUT", route(`/vectors/${recordId}/named`), body)); }
+      catch (error) { text("vector-write-result", `${error.message} Outcome may be unknown after a transport or server failure; do not retry blindly.`); throw error; }
+    });
     on("dense-sparse-search", () => {
       const q = named();
       return read("/search/dense-sparse", { dense_name: q.name, dense: q.vector, k: q.k, ...(q.version ? { version: q.version } : {}), sparse_name: field("sparse-name"), sparse: sparseVector(get("sparse-query")), fusion: { candidates: 100, rrf_k: 60, vector_weight: 1, text_weight: 1 } }, "named-result");
@@ -768,7 +827,7 @@
       admin("backup_restore"); const body = pitrRequest($("pitr-backup").value.trim(), $("pitr-kind").value, $("pitr-target").value.trim());
       if (await ctx.confirm(`Restore backup ${body.backup} at ${$("pitr-kind").value} ${$("pitr-target").value} into a new copy? The live database is unchanged; no startup selection is made.`)) display("pitr-result", await ctx.api("POST", "/v1/admin/restores", body, { data: false }));
     });
-    const results = ["group-result", "named-result", "geo-result", "recommend-result", "facets-result", "stats-result", "language-result", "disk-result"];
+    const results = ["group-result", "named-result", "vector-write-result", "geo-result", "recommend-result", "facets-result", "stats-result", "language-result", "disk-result"];
     return {
       dirty: () => draftDirty ? ["advanced retrieval draft"] : [],
       reset(all = false) {
@@ -777,6 +836,8 @@
         for (const name of ["record-ttl", "named-version", "recommend-positive", "recommend-negative"]) $(name).value = "";
         $("named-query").value = "[]"; $("language-vectors").value = "{}";
         $("sparse-query").value = "[]";
+        for (const name of ["vector-spec-name", "vector-spec-version", "vector-values-id"]) $(name).value = "";
+        $("vector-values").value = '{"dense":{},"sparse":{}}';
         $("language-query").value = "SEARCH default NEAR $q K 10";
         $("recommend-vectors").value = $("recommend-negative-vectors").value = "[]";
         if (all) {
@@ -951,6 +1012,18 @@
       if (input.vector.trim()) body.vector = vector(JSON.parse(input.vector));
       if (!seeds.length && !body.text && !body.vector) throw new Error("Recall needs an entity seed, query text or vector");
       body.limits = { deadline_ms: 5000 };
+      if (input.limit !== undefined) body.limit = boundedInteger(input.limit, 1, 100, "Memory result limit");
+      const selection = input.ranking ?? "weighted";
+      if (!["weighted", "exact", "mmr"].includes(selection)) throw new Error("Unsupported memory ranking");
+      if (selection !== "weighted") {
+        if (!body.vector || body.text || seeds.length) throw new Error("Exact and MMR memory ranking require a vector alone, without entity seeds or text");
+        body.ranking = { selection, weights: [1, 0, 0] };
+        if (selection === "mmr") {
+          const lambda = Number(input.lambda);
+          if (input.lambda === "" || !Number.isFinite(lambda) || lambda < 0 || lambda > 1) throw new Error("MMR relevance weight must be 0..1");
+          body.ranking.lambda = lambda;
+        }
+      }
       return body;
     }
     if (!["remember", "consolidate", "forget", "receipts/lookup"].includes(action)) throw new Error("Unsupported memory action");
@@ -1140,6 +1213,7 @@
       const input = {
         agent: $("memory-agent").value, user: $("memory-user").value, session: $("memory-session").value,
         seeds: $("memory-seeds").value, text: $("memory-text").value, vector: $("memory-vector").value,
+        ranking: $("memory-ranking").value, limit: $("memory-limit").value, lambda: $("memory-lambda").value,
         id: $("memory-id").value, kind: $("memory-kind").value, content: $("memory-content").value,
         source: $("memory-source").value, sourceKind: $("memory-source-kind").value, transformation: $("memory-transformation").value,
         references: $("memory-references").value, idempotency: $("memory-idempotency").value, operation: $("memory-receipt-operation").value,
@@ -1199,6 +1273,7 @@
         clearKV(); clearMemory();
         for (const name of ["kv-namespace", "kv-prefix", "memory-binding", "memory-agent", "memory-user", "memory-session", "memory-id", "memory-content", "memory-source", "memory-transformation", "memory-seeds", "memory-text", "memory-vector", "memory-idempotency", "embed-text", "rerank-provider"]) $(name).value = "";
         $("kv-namespace").value = "default"; $("memory-references").value = "[]";
+        $("memory-ranking").value = "weighted"; $("memory-limit").value = "20"; $("memory-lambda").value = "0.5";
         text("embed-result", "");
       },
     };
@@ -2104,5 +2179,6 @@
     expiry, rerank, sparseVector, webhookRequest, WEBHOOK_EVENTS, feedRows, pitrRequest, feedPath,
     boundedInteger, importRows, chunk, resumePlan, savedQueryV2, autoMaintenance, autoMaintenanceForm, backupSchedule, memoryRows, requestAllowed, isSearch,
     kvAddress, kvValue, kvExpected, memoryRequest,
+    vectorDeclaration, namedVectorValues,
   } };
 })();
