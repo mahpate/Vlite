@@ -132,6 +132,35 @@
      },
      "baseline_green": true
     }
+   },
+   "before": {
+    "local": {
+     "file": "src/records.rs",
+     "anchor_matches": 1,
+     "sha256_lf": {
+      "before": "ce0191438b44c6ac27b12082865f12c9e097c37a8682f06425b45bc4a92f3387",
+      "mutated": "078a16bb59bf261cb24f87ea082928b803508115d70d6cdf83f0c58d97e352aa",
+      "restored": "ce0191438b44c6ac27b12082865f12c9e097c37a8682f06425b45bc4a92f3387"
+     },
+     "sha256_bytes": {
+      "before": "d567951920defa8cecfbd51bf4ce225975de274da09309f3db9e1bc4428200d2",
+      "restored": "d567951920defa8cecfbd51bf4ce225975de274da09309f3db9e1bc4428200d2"
+     },
+     "build_attempts": 1,
+     "compiled": true,
+     "tests": 11,
+     "passed": 11,
+     "failed_tests": [],
+     "status": "survived",
+     "restored_identically": true,
+     "seconds": 311,
+     "environment": {
+      "os": "Windows-11-10.0.26300-SP0",
+      "rustc": "rustc 1.99.1 (58cf8f9c3 2026-10-13)",
+      "head": "8e63e0492e1e6970e6df75c000e911f2fe140e5f"
+     },
+     "baseline_green": true
+    }
    }
   },
   {
@@ -208,6 +237,35 @@
      },
      "baseline_green": true
     }
+   },
+   "before": {
+    "local": {
+     "file": "src/compact/source.rs",
+     "anchor_matches": 1,
+     "sha256_lf": {
+      "before": "94e80326e9b12facbabd720c196f950fb569a0a8df02eb8a68221155a5226f59",
+      "mutated": "a4450b289b5995cce94fb98f866716e72cc8b8cc5f54ec5580b347c6dadc633a",
+      "restored": "94e80326e9b12facbabd720c196f950fb569a0a8df02eb8a68221155a5226f59"
+     },
+     "sha256_bytes": {
+      "before": "2d51ae403b1c9fb25dce8d37e88b4f8824b3f521c4595eb232124e2d3a83c95d",
+      "restored": "2d51ae403b1c9fb25dce8d37e88b4f8824b3f521c4595eb232124e2d3a83c95d"
+     },
+     "build_attempts": 1,
+     "compiled": true,
+     "tests": 11,
+     "passed": 11,
+     "failed_tests": [],
+     "status": "survived",
+     "restored_identically": true,
+     "seconds": 266,
+     "environment": {
+      "os": "Windows-11-10.0.26300-SP0",
+      "rustc": "rustc 1.99.1 (58cf8f9c3 2026-10-13)",
+      "head": "8e63e0492e1e6970e6df75c000e911f2fe140e5f"
+     },
+     "baseline_green": true
+    }
    }
   },
   {
@@ -279,6 +337,35 @@
       "os": "Windows-11-10.0.26200-SP0",
       "rustc": "rustc 1.99.1 (58cf8f9c3 2026-10-13)",
       "head": "b8a1e67c89e52a92af97a9f768053286585733ab"
+     },
+     "baseline_green": true
+    }
+   },
+   "before": {
+    "local": {
+     "file": "src/compact/source.rs",
+     "anchor_matches": 1,
+     "sha256_lf": {
+      "before": "94e80326e9b12facbabd720c196f950fb569a0a8df02eb8a68221155a5226f59",
+      "mutated": "01f05b81bf1fb9acd3379d0d65108602634bdf117b517098bdeeb72532d3a41d",
+      "restored": "94e80326e9b12facbabd720c196f950fb569a0a8df02eb8a68221155a5226f59"
+     },
+     "sha256_bytes": {
+      "before": "2d51ae403b1c9fb25dce8d37e88b4f8824b3f521c4595eb232124e2d3a83c95d",
+      "restored": "2d51ae403b1c9fb25dce8d37e88b4f8824b3f521c4595eb232124e2d3a83c95d"
+     },
+     "build_attempts": 1,
+     "compiled": true,
+     "tests": 11,
+     "passed": 11,
+     "failed_tests": [],
+     "status": "survived",
+     "restored_identically": true,
+     "seconds": 218,
+     "environment": {
+      "os": "Windows-11-10.0.26300-SP0",
+      "rustc": "rustc 1.99.1 (58cf8f9c3 2026-10-13)",
+      "head": "8e63e0492e1e6970e6df75c000e911f2fe140e5f"
      },
      "baseline_green": true
     }
@@ -429,6 +516,35 @@
      },
      "baseline_green": true
     }
+   },
+   "before": {
+    "local": {
+     "file": "src/lib.rs",
+     "anchor_matches": 1,
+     "sha256_lf": {
+      "before": "d38563fbfc5393444e9508ac449be5f9e63974b6baaa46a395b545ea4e4808e5",
+      "mutated": "6366ba91ae5f56e982e1af629080988f2e99cb2d671432808f1ea760800d3cf3",
+      "restored": "d38563fbfc5393444e9508ac449be5f9e63974b6baaa46a395b545ea4e4808e5"
+     },
+     "sha256_bytes": {
+      "before": "9139eca3f4eb345deacc6637cf549900bf4314d4a22239236362d55e0780a660",
+      "restored": "9139eca3f4eb345deacc6637cf549900bf4314d4a22239236362d55e0780a660"
+     },
+     "build_attempts": 1,
+     "compiled": true,
+     "tests": 11,
+     "passed": 11,
+     "failed_tests": [],
+     "status": "survived",
+     "restored_identically": true,
+     "seconds": 254,
+     "environment": {
+      "os": "Windows-11-10.0.26300-SP0",
+      "rustc": "rustc 1.99.1 (58cf8f9c3 2026-10-13)",
+      "head": "8e63e0492e1e6970e6df75c000e911f2fe140e5f"
+     },
+     "baseline_green": true
+    }
    }
   },
   {
@@ -500,6 +616,35 @@
       "os": "Windows-11-10.0.26200-SP0",
       "rustc": "rustc 1.99.1 (58cf8f9c3 2026-10-13)",
       "head": "b8a1e67c89e52a92af97a9f768053286585733ab"
+     },
+     "baseline_green": true
+    }
+   },
+   "before": {
+    "local": {
+     "file": "src/text_index.rs",
+     "anchor_matches": 1,
+     "sha256_lf": {
+      "before": "2fec85f69f149bcda60488f26299fb9e14d1dacd79f6ab77db0cbf6278761c77",
+      "mutated": "d70851cc3234b088ebfbc460b2ea79bf3a01ab2fee1a601636edc2c0e4ecf73b",
+      "restored": "2fec85f69f149bcda60488f26299fb9e14d1dacd79f6ab77db0cbf6278761c77"
+     },
+     "sha256_bytes": {
+      "before": "b9020f3a47946d22e2e9d69022b48ef2be3d02065930901dfbeea13f2c76ec60",
+      "restored": "b9020f3a47946d22e2e9d69022b48ef2be3d02065930901dfbeea13f2c76ec60"
+     },
+     "build_attempts": 1,
+     "compiled": true,
+     "tests": 11,
+     "passed": 11,
+     "failed_tests": [],
+     "status": "survived",
+     "restored_identically": true,
+     "seconds": 237,
+     "environment": {
+      "os": "Windows-11-10.0.26300-SP0",
+      "rustc": "rustc 1.99.1 (58cf8f9c3 2026-10-13)",
+      "head": "8e63e0492e1e6970e6df75c000e911f2fe140e5f"
      },
      "baseline_green": true
     }
