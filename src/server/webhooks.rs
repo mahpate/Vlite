@@ -395,6 +395,9 @@ fn event_json(change: &Change) -> Value {
     json!({"sequence":change.sequence.to_string(),"ordinal":change.ordinal,"collection":change.collection,"committed_at_ms":change.committed_at_ms,"change":body})
 }
 fn run_dispatcher(dispatcher: Arc<Dispatcher>, service: Service, stopping: Arc<AtomicBool>) {
+    // Events are delivered as the administrator would see them: a reserved
+    // resource is never delivered, whoever subscribed.
+    let scope = service.scope(admin::Role::Admin);
     let client = match reqwest::blocking::Client::builder()
         .redirect(reqwest::redirect::Policy::none())
         .timeout(Duration::from_secs(10))
@@ -425,15 +428,9 @@ fn run_dispatcher(dispatcher: Arc<Dispatcher>, service: Service, stopping: Arc<A
             };
             match database.changes_after(&cursor, 1000) {
                 Ok(mut batch) => {
-                    let reserved = service.memory_bindings.reserved();
                     batch.changes.retain_mut(|change| {
-                        reserved.raw_allowed(
-                            None,
-                            super::reserved::Resource::Collection,
-                            &change.collection,
-                        ) && super::graph::feed_graph(&change.kind).is_none_or(|graph| {
-                            reserved.raw_allowed(None, super::reserved::Resource::Graph, graph)
-                        }) && reserved.retain_change_operations(None, &mut change.kind)
+                        scope.change_visible(change)
+                            && scope.retain_change_operations(&mut change.kind)
                     });
                     (cursor, batch)
                 }

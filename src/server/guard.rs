@@ -387,6 +387,18 @@ impl GuardedGraph {
         }
         Ok(db.drop_graph(&self.stored)?)
     }
+
+    /// The names of the collections with a record attached to the live node
+    /// `key`, which deleting the node removes; empty for a graph that is
+    /// hidden or has no such node. The caller checks each name itself: it
+    /// needs the reserved ones too, to refuse the deletion.
+    pub(super) fn attachment_collections(&self, db: &Database, key: &str) -> Vec<String> {
+        if self.hidden {
+            Vec::new()
+        } else {
+            db.node_attachment_collections(&self.stored, key)
+        }
+    }
 }
 
 #[cfg(test)]
@@ -496,6 +508,11 @@ mod tests {
         (error.status.as_u16(), error.code)
     }
 
+    /// Everything a client sees of an error, message included.
+    fn answer(error: ApiError) -> (StatusCode, &'static str, String) {
+        (error.status, error.code, error.message)
+    }
+
     #[test]
     fn a_reserved_name_answers_like_a_missing_one_unless_the_credential_holds_it_raw() {
         let db = database();
@@ -519,8 +536,8 @@ mod tests {
                 assert_eq!(reserved.unwrap().stored(), "notes_ev", "{actor}");
             } else {
                 assert_eq!(
-                    summary(reserved.err().unwrap()),
-                    summary(missing.err().unwrap()),
+                    answer(reserved.err().unwrap()),
+                    answer(missing.err().unwrap()),
                     "{actor}"
                 );
             }
@@ -637,8 +654,8 @@ mod tests {
         let reserved = scope.create_collection(&mut db, "notes_ev", spec());
         let occupied = scope.create_collection(&mut db, "ordinary", spec());
         assert_eq!(
-            summary(reserved.err().unwrap()),
-            summary(occupied.err().unwrap())
+            answer(reserved.err().unwrap()),
+            answer(occupied.err().unwrap())
         );
         let raw = RequestScope::for_test(grant(RAW, None, &[], &db), bindings);
         assert_eq!(
@@ -707,32 +724,33 @@ mod tests {
         let missing = scope.graph("absent_graph").unwrap();
         assert!(hidden.is_hidden() && !missing.is_hidden());
         assert_eq!(
-            summary(hidden.read(&db).err().unwrap()),
-            summary(missing.read(&db).err().unwrap())
+            answer(hidden.read(&db).err().unwrap()),
+            answer(missing.read(&db).err().unwrap())
         );
         assert_eq!(
-            summary(hidden.drop_graph(&mut db).err().unwrap()),
-            summary(missing.drop_graph(&mut db).err().unwrap())
+            answer(hidden.drop_graph(&mut db).err().unwrap()),
+            answer(missing.drop_graph(&mut db).err().unwrap())
         );
         assert_eq!(
-            summary(hidden.write(&mut db).err().unwrap()),
-            summary(missing.write(&mut db).err().unwrap())
+            answer(hidden.write(&mut db).err().unwrap()),
+            answer(missing.write(&mut db).err().unwrap())
         );
         // A hidden name answers like an occupied name on create.
         let occupied = scope.graph("ordinary_graph").unwrap();
         assert_eq!(
-            summary(hidden.create(&mut db).err().unwrap()),
-            summary(occupied.create(&mut db).err().unwrap())
+            answer(hidden.create(&mut db).err().unwrap()),
+            answer(occupied.create(&mut db).err().unwrap())
         );
-        // A read-only database refuses a write before it looks for the graph.
+        // A read-only database refuses a write before it looks for the graph,
+        // with the same answer for a hidden and a missing graph.
         db.read_only = true;
         assert_eq!(
-            summary(hidden.write(&mut db).err().unwrap()),
-            summary(missing.write(&mut db).err().unwrap())
+            answer(hidden.write(&mut db).err().unwrap()),
+            answer(missing.write(&mut db).err().unwrap())
         );
         assert_eq!(
-            summary(hidden.write(&mut db).err().unwrap()),
-            summary(ApiError::from(Error::ReadOnly))
+            answer(hidden.write(&mut db).err().unwrap()),
+            answer(ApiError::from(Error::ReadOnly))
         );
         let raw = RequestScope::for_test(grant(RAW, None, &[], &db), bindings);
         let own = raw.graph("notes_graph").unwrap();
