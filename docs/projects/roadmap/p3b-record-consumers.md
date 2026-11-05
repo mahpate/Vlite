@@ -6,6 +6,7 @@
 | Scope | Key-value reads, hybrid search, the query language, grouped search and facets, the record iterator and browse, named vectors and re-embedding, graph evidence, and the exact-scan draft |
 | Out of scope | Named ANN and every other HNSW, snapshot, rebuild or disk-ANN path (they stay refused on compact and belong to [P3c](p3c-compact-ann.md)); the exact scan beyond the lane A draft (lane E4 owns it); the seam itself (`src/compact/source.rs`, lane R0) |
 | Reads with | The [seam freeze](p3b-seam-freeze.md) (the frozen semantics CLK, PRE, ERR, ACC and IDN are cited below), the [survivor ledgers](p3b-survivor-ledgers.md#lane-a) and the [P3 design](p3-compact-vectors.md), slice 4 and table J |
+| Release gate | `python scripts/shadow_copy_check.py` (section 9): the shipped resident code is the code of `v0.7.0`, apart from the named exceptions of this page |
 
 ## 1. What was integrated, and how
 
@@ -24,19 +25,58 @@ K71's two `src/kv.rs` commits (`6167835`, `7592127`) are cherry-picked first, so
 can skip them, then one commit adds the compact arm as a single dispatch point in that visitor and one commit adds the
 tests. There is no second list implementation.
 
-A4 changes two things in production code, both of them in the test-gated compact path:
+The `IndexNotReady` arms of the hybrid search and of `execute_compact` need a text index that a posting limit has made
+unavailable. `TextIndex::with_posting_limit` (a `cfg(test)` constructor) is lane B4's `b42dd99`, cherry-picked with `-x`
+(it also brings the replay tool and ledger of that commit; the commands of section 8 need the final tool of lane B4, which
+lands first, and the commit is skipped when B4 is integrated first).
 
-1. `src/kv.rs`: one `acquire` (health for a compact collection, residency for a resident one), one `Rows` iterator
-   (`compact_iter` or the resident map) and one `probe`/`entry` through `CollectionRecords::get_physical`. Lane A's
-   separate compact `probe_compact`, `entry_compact` and `list_at` are gone, and with them lane A's compact list, which
-   lacked the `v0.7.0` rule "a key is listed only through the record that `get` resolves for it". The redundant health
-   check in `Database::kv_view` is gone: `Database::resolve` already makes it.
+A4's own changes to shipped code (the code a release build compiles) are listed here; every other shipped function is the
+one of `v0.7.0`, or lane B4's, or K71's, and `scripts/shadow_copy_check.py` (section 9) checks that.
+
+1. `src/kv.rs`, the read path that every resident key-value read and write also runs: one `acquire` (health for a compact
+   collection, residency for a resident one), one `Rows` iterator (`compact_iter` or the resident map) and one
+   `probe`/`entry` through `CollectionRecords::get_physical`. For a resident collection `acquire` is
+   `ensure_resident_in`, `rows` is the resident map iterator and `get_physical` is the map lookup, so the behaviour is
+   unchanged; the gate pins the text of each of them and of the functions that call them, and `tests/kv.rs` and the
+   server key-value suites cover the behaviour. Lane A's separate compact `probe_compact`, `entry_compact` and `list_at`
+   are gone, and with them lane A's compact list, which lacked the `v0.7.0` rule "a key is listed only through the record
+   that `get` resolves for it". The redundant health check in `Database::kv_view` is gone: `Database::resolve` already
+   makes it.
 2. `src/vectors.rs`: the compact arm of `reembed_pending` checked its limit after it had read the next row. A call with
-   limit `n` decoded the row after the `n`th hit and a call with limit 0 decoded the first row. It now checks first.
+   limit `n` decoded the row after the `n`th hit and a call with limit 0 decoded the first row. It now checks first
+   (test-gated). `search_named_at` and `search_named_ann_at` carry lane A's two resident changes, below.
+3. `src/property_graph/retrieve.rs`, `src/hybrid.rs`, `src/records.rs`: lane A's clock corrections and one skipped-hit
+   guard, below, and one line of this lane: the evidence read by collection id (`db.get_at_in`) instead of by name.
 
-All other production code is lane A's, byte for byte. A4 adds 62 tests in eight sibling modules under
-`src/compact/source/overlay_tests/` (`consumer_{cursor,group,exact,hybrid,query,vectors,graph,kv}.rs`) and the key-value
-fixture `src/compact/catalog/tests/kv_windows.rs`.
+Apart from these and K71's two commits (and the `visit_at` rows they add to `docs/STORAGE-FEATURES.md` and
+`site/api.html`), the shipped code is lane A's, byte for byte. A4 adds 68 tests in nine sibling modules under
+`src/compact/source/overlay_tests/` (`consumer_{cursor,group,exact,hybrid,query,text,vectors,graph,kv}.rs`), the key-value
+fixture `src/compact/catalog/tests/kv_windows.rs` and two resident tests in `tests/graph_ttl.rs`
+(`retrieve_reads_the_pivot_records_at_the_read_clock`, `retrieve_reads_the_approximate_pivot_leg_at_the_wall_clock`).
+
+### Changes a resident file can see
+
+These are the only differences a resident file can observe. The independent review compared the hybrid, named-vector,
+graph and key-value reads of a build of this lane with a build of the base on thousands of generated cases (every clock
+around the deadlines, every error order it could name) and ran the resident integration suites and the server
+key-value suites; everything away from the changes below was identical.
+
+| Where | What changes | Pinned by |
+|---|---|---|
+| `GraphRef::retrieve` (`retrieve.rs`) | The pivot search (its exact and text legs), the pivot re-validation and the evidence read at the read clock of the handle (`GraphRef::with_clock`), or at one sample of the current time per call. Before, each leg and each record sampled the wall clock on its own. Without `with_clock` a result can differ only for a record whose deadline passes during the call. An approximate pivot leg still reads the current time (section 6) | `retrieve_reads_the_pivot_records_at_the_read_clock`, `retrieve_reads_the_approximate_pivot_leg_at_the_wall_clock` |
+| `CollectionRef::search_hybrid` (`hybrid.rs`) | The exact vector leg and the text leg read at one clock. The text leg sampled the wall clock again for every candidate, so the two legs could disagree at a deadline | `hybrid_resident_default_clock_honors_ttl` (`tests/hybrid.rs`) |
+| `CollectionRef::search_named_at` (`vectors.rs`) | A read error of a primary record is returned. Before, the row was dropped and the call answered `Ok`. On a resident file only `Poisoned` can occur, when the flusher thread fails during the scan | `compact_named_vector_search_propagates_primary_read_error` (compact arm of the same code); resident: a race only |
+| `CollectionRef::search_named_ann_at` (`vectors.rs`) | A residency check first; `named_records` makes the same check next, so no visible change | the gate |
+| key-value reads and writes (`kv.rs`) | `acquire`, `rows` and `get_physical` replace the inline residency check and map lookups; the same checks, the same lookups | the gate, `tests/kv.rs`, the server key-value suites |
+| `CollectionRef::search_grouped` (`records.rs`) | A hit without a record is skipped instead of indexing the map; it cannot happen for a resident file, whose hits come from the same map under the same borrow | the gate |
+
+Proposed release-note sentence: *Hybrid search and graph retrieval now check record deadlines against one clock per call
+instead of re-reading the wall clock for each leg and row: `search_hybrid` samples the wall clock once for its text leg
+and its exact vector leg, and `GraphRef::retrieve` reads its pivot and evidence records at the graph read clock (the
+value of `GraphRef::with_clock` when one is set), so results differ only for records whose deadline lies between that
+clock and the wall clock or passes during the call; the approximate (HNSW) vector leg still checks deadlines at the wall
+clock. A named-vector search whose handle turns unhealthy during the scan now answers `Poisoned` instead of dropping the
+remaining rows.* `GraphRef::with_clock` says so in its rustdoc, in `docs/GRAPH.md` and in the API reference.
 
 ## 2. The rules the tests check
 
@@ -47,13 +87,13 @@ counter of the generation or the materialized cells of a row.
 
 | Consumer | Rules (frozen semantics in brackets) | Tests |
 |---|---|---|
-| `KvView::{get_at, list_at, visit_at}`, the probe behind `KvStore` (`src/kv.rs`) | Health, then dimension, then arguments, then reads (ERR-8). The probe window is exactly `KV_PROBE_SLOTS` (16) slots; the first slot that decodes to the key in its namespace wins, so look-alikes inside the window, behind a holder or in another namespace are passed over and those outside it are not found. A listing offers a key only through the record `get` resolves, is in key order, strictly after the cursor, and its limit counts offered entries only. A deadline equal to the clock hides an entry (CLK-2). A damaged base row is an error, never an absent key (ERR-4) | `compact_kv_point_and_prefix_match_resident` (table J, both source precisions), `consumer_kv` (6) |
-| `search_hybrid_at`, `search_hybrid_compact`, `search_hybrid` (`src/hybrid.rs`) | One captured clock for both legs (CLK-1, CLK-7); `search_hybrid` samples the wall clock once (the resident correction). Health, then validation in the resident order, with the declared text fields. The vector leg keeps the full candidate depth; the visible set of the text leg is the effective rows that pass the deadline and the filter; fusion scores, distances and BM25 equal the resident values bit for bit; equal fused scores break by ascending ID; the fused list is cut to `k`. The approximate leg stays refused (`UnsupportedFeature(FLAG_COMPACT)`) | `consumer_hybrid` (15) and the lane A tests in `overlay_tests.rs` |
-| `execute`, `execute_compact` (`src/query_language.rs`) | Health first, and an invalid query is refused before any row is decoded. The vector leg has the full candidate depth, `ORDER BY` compares each row with the other, `LIMIT` is applied, groups and facets count the effective rows | `consumer_query` (5) |
-| `CollectionRef::{search_grouped, facets}` (`src/collection.rs`, `src/records.rs`) | The nearest hit leads each group, group and per-group limits, typed value counting, the AND filter over overlay rows, validation before any row is decoded, health first, base-row read errors returned | `consumer_group` (7) |
+| `KvView::{get_at, list_at, visit_at}`, the probe behind `KvStore` (`src/kv.rs`) | Health, then dimension, then arguments, then reads (ERR-8). The probe window is exactly `KV_PROBE_SLOTS` (16) slots; the first slot that decodes to the key in its namespace wins, so look-alikes inside the window, behind a holder or in another namespace are passed over and those outside it are not found. A listing offers a key only through the record `get` resolves, is in key order, strictly after the cursor, and its limit counts offered entries only. A deadline equal to the clock hides an entry (CLK-2). A damaged base row is an error, never an absent key (ERR-4) | `compact_kv_point_and_prefix_match_resident` (table J, both source precisions), `consumer_kv` (7) |
+| `search_hybrid_at`, `search_hybrid_compact`, `search_hybrid` (`src/hybrid.rs`) | One captured clock for both legs (CLK-1, CLK-7); `search_hybrid` samples the wall clock once (the resident correction). Health, then validation in the resident order, with the declared text fields, then `IndexNotReady` for a text leg (a positive weight and at least one token) while the text index is unavailable, also for `k = 0` and with the vector leg off; a query without a text leg is not affected. The vector leg keeps the full candidate depth; the visible set of the text leg is the effective rows that pass the deadline and the filter; fusion scores, distances and BM25 equal the resident values bit for bit; equal fused scores break by ascending ID; the fused list is cut to `k`. The approximate leg stays refused (`UnsupportedFeature(FLAG_COMPACT)`) | `consumer_hybrid` (16), `consumer_text` (2) and the lane A tests in `overlay_tests.rs` |
+| `execute`, `execute_compact` (`src/query_language.rs`) | Health first, and an invalid query is refused before any row is decoded. The vector leg has the full candidate depth, `ORDER BY` compares the field of one row with the field of the other, `LIMIT` is applied, groups and facets count the effective rows; any `TEXT` clause, with or without a token, answers `IndexNotReady` while the text index is unavailable | `consumer_query` (5), `consumer_text` (2) |
+| `CollectionRef::{search_grouped, facets}` (`src/records.rs`; the exact hook they call is in `src/collection.rs`) | The nearest hit leads each group, group and per-group limits, typed value counting, the AND filter over overlay rows, validation before any row is decoded, health first, base-row read errors returned | `consumer_group` (7) |
 | `compact_iter`, `CompactRecordIter`, `compact_browse` (`src/records.rs`) | A cursor seeks by binary search over the base rows and merges the overlay in ascending ID order; a tombstone or an expired winner is skipped and never falls through (CLK-4, PRE-1); pages chain like the resident ones at every clock; a snapshot keeps the state it captured; read errors are items, never skipped rows | `consumer_cursor` (8) |
 | `record_vectors`, `search_named_at`, `reembed_pending(_checked)` (`src/vectors.rs`) | A named vector is visible only while its primary row is visible at the one clock; a poisoned cell or a tampered block is an error; no base row that the overlay shadows is read; re-embedding lists the effective rows without the target version in ascending order, within its limit and without decoding a row beyond it; named ANN stays refused with nothing built | `compact_named_vector_visibility_matches_resident` (table J, `full` and `half`), `compact_named_vector_search_propagates_primary_read_error`, `consumer_vectors` (11) |
-| `GraphRef::retrieve` evidence reads (`src/property_graph/retrieve.rs`) | Pivots and evidence are read at the one retrieval clock; only the requested evidence collections are read and only the attached rows that are projected are decoded; errors propagate; at most 64 unmapped pivots are listed and all are counted | `consumer_graph` (9) |
+| `GraphRef::retrieve` evidence reads (`src/property_graph/retrieve.rs`) | Pivots and evidence are read at the one retrieval clock; only the requested evidence collections are read and only the attached rows that are projected are decoded; errors propagate; at most 64 unmapped pivots are listed and all are counted; the pivot records are read at the clock of the graph handle on resident files too; the bounds of a request are validated before the health of the handle (a known order after acquisition, section 6) | `consumer_graph` (11) and, for resident files, `retrieve_reads_the_pivot_records_at_the_read_clock` in `tests/graph_ttl.rs` |
 | `Database::search_in_at`, compact arm; `exact_search_compact` (`src/lib.rs`) | Draft. Hits, order and statistics equal the resident ones; a declared posting narrows the scan only when it holds at most half of the rows | `consumer_exact` (1) and the lane A tests |
 
 ## 3. Table J obligations that exist only on lane A
@@ -101,8 +141,8 @@ before the A4 tests). On that tree 40 of the 47 were already killed and 7 surviv
 | `pa-ann-resident-guard-removed` | `vectors.rs` | recorded as killed | killed by `compact_installed_collection_method_matrix` | killed | `compact_named_ann_stays_refused_and_leaves_the_state_unchanged`, `compact_named_vector_consumers_check_health_before_anything_else` |
 | `pa-exact-cap-quarter` | `lib.rs` | recorded as killed | survived | killed | `compact_exact_search_uses_declared_postings_up_to_half_of_the_rows`, `hybrid_filter_applies_to_both_legs_and_the_vector_leg_reports_its_work`, `hybrid_validation_matches_resident_in_check_order` |
 | `pa-exact-compact-arm-off` | `collection.rs` | recorded as killed | killed by `compact_dispatch_grouped_facets_match_nonempty_resident_rows`, `compact_dispatch_unqualified_scans_and_derived_reads_refuse` and 11 more | killed | `compact_exact_search_uses_declared_postings_up_to_half_of_the_rows`, `an_attached_record_never_carries_a_deadline_on_compact_or_resident_records`, `compact_graph_access_and_retrieval_answer_poisoned_on_an_unhealthy_handle` |
-| `pa-graph-compact-pivot-state-off` | `property_graph/retrieve.rs` | recorded as killed | killed by `compact_graph_retrieve_projects_effective_row_at_one_clock` | killed | `an_attached_record_never_carries_a_deadline_on_compact_or_resident_records`, `compact_graph_access_and_retrieval_answer_poisoned_on_an_unhealthy_handle`, `compact_graph_evidence_decodes_only_the_attached_rows_it_projects` |
-| `pa-graph-revalidate-wall-clock` | `property_graph/retrieve.rs` | recorded as killed | killed by `compact_graph_retrieve_projects_effective_row_at_one_clock` | killed | `compact_graph_evidence_is_read_at_the_retrieval_clock_even_if_an_attached_row_had_a_deadline`, `compact_graph_retrieval_uses_one_explicit_clock_for_pivots_and_evidence` |
+| `pa-graph-compact-pivot-state-off` | `property_graph/retrieve.rs` | recorded as killed | killed by `compact_graph_retrieve_projects_effective_row_at_one_clock` | killed on both machines | `an_attached_record_never_carries_a_deadline_on_compact_or_resident_records`, `compact_graph_access_and_retrieval_answer_poisoned_on_an_unhealthy_handle`, `compact_graph_evidence_decodes_only_the_attached_rows_it_projects` |
+| `pa-graph-revalidate-wall-clock` | `property_graph/retrieve.rs` | recorded as killed | killed by `compact_graph_retrieve_projects_effective_row_at_one_clock` | killed on both machines | `compact_graph_evidence_is_read_at_the_retrieval_clock_even_if_an_attached_row_had_a_deadline`, `compact_graph_retrieval_uses_one_explicit_clock_for_pivots_and_evidence` |
 | `pa-group-clock-zero` | `records.rs` | recorded as killed | survived | killed | `compact_grouped_search_and_facets_apply_the_and_filter_to_overlay_rows`, `compact_grouped_search_follows_the_nearest_hit_and_the_group_limits` |
 | `pa-group-record-arm-off` | `records.rs` | recorded as killed | killed by `compact_dispatch_grouped_facets_match_nonempty_resident_rows`, `compact_dispatch_unqualified_scans_and_derived_reads_refuse` and 2 more | killed | `compact_grouped_search_and_facets_apply_the_and_filter_to_overlay_rows`, `compact_grouped_search_and_facets_return_base_read_errors`, `compact_grouped_search_and_facets_validate_before_materializing_rows` |
 | `pa-hybrid-compact-dispatch-off` | `hybrid.rs` | recorded as killed | killed by `compact_graph_retrieve_projects_effective_row_at_one_clock`, `compact_hybrid_requires_declared_text_fields` and 5 more | killed | `an_attached_record_never_carries_a_deadline_on_compact_or_resident_records`, `compact_graph_access_and_retrieval_answer_poisoned_on_an_unhealthy_handle`, `compact_graph_evidence_decodes_only_the_attached_rows_it_projects` |
@@ -122,13 +162,19 @@ before the A4 tests). On that tree 40 of the 47 were already killed and 7 surviv
 
 ## 5. The A4 mutants
 
-A4 adds 66 mutants to the 47 of lane A, 113 in all. Every record in `tests/compact_a4_mutants.json` is one anchored replacement that was replayed with the tool of section 8: 70 on the machine that wrote the tests and 71 on a second machine, all killed, with the evidence of the 0.7.1 acceptance form (the anchor matched once, the mutated tree compiled, the named tests failed, the SHA-256 of the file before, mutated and restored, the unmodified selectors green before the first and after the last mutant of the replay, one mutant per build). `expect` names tests that failed on every replay.
+A4 adds 170 mutants to the 47 of lane A, 217 in all. Every record in `tests/compact_a4_mutants.json` is one anchored replacement that was replayed with the tool of section 8: 164 on the machine that wrote the tests and 176 on a second machine, all killed, with the evidence of the 0.7.1 acceptance form (the anchor matched once, the mutated tree compiled, the named tests failed, the SHA-256 of the file before, mutated and restored, the unmodified selectors green before the first and after the last mutant of the replay, one mutant per build). `expect` names tests that failed on every replay.
 
 | Group | Mutants | Files | Killed here | Killed on a second machine |
 |---|---|---|---|---|
 | A4 key-value tests | 13 | `kv.rs` | 13 | 0 |
-| A4 exact scan and hybrid lead tests | 10 | `hybrid.rs`, `lib.rs`, `vectors.rs` | 10 | 2 |
-| A4 hybrid and query-language tests | 43 | `hybrid.rs`, `query_language.rs` | 0 | 43 |
+| A4 exact scan and hybrid lead tests | 10 | `hybrid.rs`, `lib.rs`, `vectors.rs` | 10 | 10 |
+| A4 cursor, browse, group and facet tests | 44 | `records.rs` | 22 | 44 |
+| A4 hybrid and query-language tests | 43 | `hybrid.rs`, `query_language.rs` | 23 | 43 |
+| A4 named-vector and graph evidence tests | 45 | `property_graph/retrieve.rs`, `vectors.rs` | 34 | 45 |
+| A4 unavailable-text-index tests | 9 | `hybrid.rs`, `query_language.rs` | 9 | 0 |
+| A4 retrieve order after acquisition | 1 | `property_graph/retrieve.rs` | 1 | 1 |
+| A4 resident read clock | 2 | `property_graph/retrieve.rs` | 2 | 2 |
+| A4 attached-record invariant tests | 3 | `collection.rs`, `lib.rs`, `property_graph/mod.rs` | 3 | 3 |
 
 ## 6. Findings and limits that remain
 
@@ -146,6 +192,9 @@ Gaps in lane A's own evidence, now closed:
   cherry-picks they survived: their tests used far-future deadlines only, and an index cap of a quarter of the rows
   satisfied the same cases as half of them. They are killed by the new tests: `pa-group-clock-zero` by `compact_grouped_search_and_facets_apply_the_and_filter_to_overlay_rows`, `compact_grouped_search_follows_the_nearest_hit_and_the_group_limits`; `pa-ql-clock-zero` by `query_clauses_match_resident_before_and_after_overlay_mutations`, `query_hides_expired_and_deleted_rows_in_every_output_and_shows_the_rest`; `pa-exact-cap-quarter` by `compact_exact_search_uses_declared_postings_up_to_half_of_the_rows`, `hybrid_filter_applies_to_both_legs_and_the_vector_leg_reports_its_work`.
 - The compact `reembed_pending` decoded one row beyond its limit (fixed, section 1).
+- The `IndexNotReady` arms of the compact hybrid search and of `execute_compact` had no test (`TextIndex.limit` and
+  `available` are private). `consumer_text` exhausts the text index through lane B4's test constructor and the rebuild
+  that a reopen runs, and kills the mutants that drop, invert or narrow either check.
 - `pa-ql-order-key-reads-b` (`ORDER BY` compares a row with itself) survived the test that lane A names for it. The clause
   table of `consumer_query` sorts by metadata fields, with rows that lack the field, and kills it.
 
@@ -156,23 +205,44 @@ injects the forbidden state through `Collection::apply_committed` kills it
 no public path gives an attached record a deadline. `an_attached_record_never_carries_a_deadline_on_compact_or_resident_records`
 pins it (`put_with_expiry` of an attached record is refused with `GraphAttachedRecordExpiry` and writes nothing; every
 other write path leaves no deadline, enumerated with an exhaustive match on `Mutation` so a new variant fails the
-test; attaching a record that has a deadline is `GraphRecordNotAttachable`). The independent review should read that
-enumeration. `pa-kv-view-health-removed` was the other equivalent mutant: the check it removed was dead code, because
-`Database::resolve` checks health first, so A4 removed the line and the mutant is re-based onto `resolve`.
+test; attaching a record that has a deadline is `GraphRecordNotAttachable`). The independent review read that
+enumeration and the argument below and found no counterexample; it added the two writers the enumeration did not walk,
+which are pinned now: `an_attached_key_value_entry_cannot_be_given_a_deadline` (the key-value store's `put` with a
+deadline, which the REST, gRPC and MCP writers call, goes through the same guarded function) and
+`a_graph_batch_that_puts_and_attaches_a_record_leaves_it_without_a_deadline`. Three mutants remove the three guards of the
+invariant (`a4-graph-attached-expiry-guard-removed`, `a4-graph-attach-with-deadline-allowed` and
+`a4-graph-overwrite-keeps-deadline`) and are killed. `pa-kv-view-health-removed` was the other equivalent mutant: the
+check it removed was dead code, because `Database::resolve` checks health first, so A4 removed the line and the mutant is
+re-based onto `resolve`.
 
 Limits that A4 leaves as they are, each with the owner that can change it:
 
-- The approximate leg of hybrid search samples its own wall clock (`search_ready_with_options_in`); compact hybrid
-  refuses that leg, so only the resident path is affected (freeze note, section 4).
-- `GraphRef::retrieve` validates its limits and ceilings before it checks health, so a handle that becomes unhealthy
-  after `graph()` (a failed flusher) answers `GraphLimitExceedsCeiling` for an oversize request, not `Poisoned` (ERR-8).
-  It is the resident behaviour too and a fix changes the default error precedence, so it is not made here.
+- The approximate leg of hybrid search samples its own wall clock (`search_ready_with_options_in`). Compact hybrid refuses
+  that leg, so on the compact path nothing is affected; on a resident file `GraphRef::retrieve` with an approximate pivot
+  leg under `with_clock` returns the rows that are live at the wall clock while the re-validation reads at the clock of
+  the handle. `retrieve_reads_the_approximate_pivot_leg_at_the_wall_clock` pins that, and the fix, a clock parameter of
+  `search_ready_with_options_in`, is left to 0.7.2 (it changes the answer of a request, so the pin flips with it).
+- The resident `ParsedQuery::execute` and `reembed_pending` read the wall clock for every row (through `collection.search`
+  and `collection.get`, and `self.get(id)?`). A4 did not change them; a clock-taking `execute_at` is the fix. The freeze
+  note (CLK-7, section 4) names the hybrid search as the one exception to "one clock per call"; with this lane the
+  exceptions are these two consumers and the approximate leg, and the wording belongs to R0.
+- The resident arms of seven functions are written twice (a `cfg(test)` branch and a `#[cfg(not(test))]` statement, ten
+  pairs in all), and the compact copies `search_hybrid_compact` and `execute_compact` copy the validation and the fusion
+  of the resident ones. That is accepted for 0.7.1 on the condition of section 9: a script makes the shipped copies a
+  checked fact. An early-return dispatch (as `execute` and `search_hybrid_at` already have), which writes each resident
+  body once and removes the ten attributes, is a follow-up lane before L5. A new field of `HybridQuery` or
+  `FusionOptions` fails to compile until `every_field_of_the_hybrid_query_is_known_to_this_suite` and both arms are taught
+  about it; `ParsedQuery` has private fields and no such guard yet.
+- `GraphRef::retrieve` validates the bounds of a request (read limits, `pivot_k`, the exact-scan record cap, the excerpt
+  size and the evidence item cap) before it looks anything up, and the first lookup is the first health check. A handle
+  that turns unhealthy after `graph()` (a failed flusher) therefore answers `GraphLimitExceedsCeiling` for a request over
+  a ceiling and `Poisoned` for every other request. This is the resident behaviour, the compact arm shares the code, and
+  the freeze note (ERR-8) asks for health first. It is a known order after acquisition: it is pinned as it is, on both
+  arms, by `graph_retrieve_validates_the_request_bounds_before_the_health_of_a_handle_that_turned_unhealthy`, and
+  changing it changes the default error precedence, so it is left to 0.7.2.
 - `compact_browse` and facets read one base row before they check the deadline or the filter, and `CompactRecordIter`
   decodes a row before its caller can look at it (E4, with the exact scan).
 - `search_grouped` runs the exact search before its zero-limit shortcut, as the resident path does.
-- The arm of the compact hybrid search and of `execute_compact` that answers `IndexNotReady` for an unavailable text
-  index has no test: `TextIndex.limit` and `available` are private. It needs the test constructor
-  `TextIndex::with_posting_limit` that lane B4 adds in `b42dd99`.
 - A compact collection can only lose named vectors (every put or delete drops the cell and `put_vectors` is refused), so
   the tests install cells directly through `state_mut`.
 - The guard that bounds a re-embedding job counts `len()`, which includes hidden rows; the resident path does the same.
@@ -182,15 +252,44 @@ Limits that A4 leaves as they are, each with the owner that can change it:
 - **E4** owns the exact scan from here: the draft reads visibility from the columns (CLK-6), materializes a cell per
   visited row and ignores summary candidates, so its statistics can differ from the resident ones once summaries exist.
   `consumer_exact` and the lane A tests are its parity harness.
-- **K71**: the first two commits of the key-value group are K71's `src/kv.rs` commits. If K71 is integrated first, skip
-  them; the dispatch commit applies on K71's tip. The rule "list only the record `get` resolves" is pinned by
-  `compact_kv_list_offers_only_the_record_get_resolves` and by K71's `only_candidates_that_can_be_entries_are_probed`.
+- **K71**: the first two commits of the key-value group are K71's `src/kv.rs` commits (`6167835`, `7592127`). If K71 is
+  integrated first (the order is R0, B4, K71, A4, G71), skip them: the dispatch commit applies on K71's tip. K71's later
+  `src/kv.rs` commit `ce3616a` (look-alikes outside their window are skipped without a probe) applies cleanly on this
+  lane's tip, and the key-value selector (`kv::`, `consumer_kv`, `compact_kv`, the dispatch and method tests) passes on
+  the result. A4 edits functions that the freeze note reserves for K71 in `src/kv.rs` (`probe`, `entry`, `get_at`,
+  `visit_at`, `kv_view`); the edits are the named exceptions of the gate, which takes K71's visitor as the baseline of
+  `visit_at` (`--kv-base`; pass K71's accepted head when it is not `7592127`). The rule "list only the record `get`
+  resolves" is pinned by `compact_kv_list_offers_only_the_record_get_resolves` and by K71's
+  `only_candidates_that_can_be_entries_are_probed`. The server's key-value PUT computes the slot through
+  `kv_view(..).put_slot_at` before it takes the writable store (`src/server/kv.rs`): with the compact `kv_view` arm a
+  compact collection would be read and quota-checked before it is refused, so take the store first when that code is
+  touched.
 - **R0** (slice 3: `base_rows`, `affected_ids`, `ordered_ids`) changes `src/compact/source.rs` and the effective block of
-  `src/records.rs`. The mutants on `src/records.rs` are replayed on the tree they were written on; after R0 lands,
-  `verify` reports them stale and they are replayed again.
-- **B4, slice S3** (the declared-index differential) runs the compact exact search of A against B's index rebuild; the
-  unavailable-index arm above needs B4's test constructor.
+  `src/records.rs`. The recorded replays are checked against the SHA-256 of the file they mutated, so a lane that edits one
+  of the mutated files makes every mutant of that file stale until it is replayed again; the table after this list shows
+  who edits which file next.
+- **L5** removes the test gates and with them the ten shadow copies (section 9). `retrieve.rs` decides "compact or not" from
+  the pivot collection alone while `db.graphs()` still requires every collection to be resident, and
+  `compact_graph_for_test` bypasses `Database::graph()`, so that public entry point is never exercised for compact
+  records.
+- **B4, slice S3** (the declared-index differential) runs the compact exact search of A against B's index rebuild;
+  `consumer_text` shows how to leave a text index unavailable on both forms (`TextIndex::with_posting_limit`, then the
+  rebuild that a reopen runs). B4's `b42dd99` is in this lane's history and is skipped when B4 is integrated first.
 - **P3c**: named ANN and the approximate hybrid leg stay refused on compact records.
+
+The files that carry mutants, with the lane that edits each next (freeze note, section 6):
+
+| File | Mutants | Edited next by |
+|---|---|---|
+| `collection.rs` | 2 | E4 and B4 (`exact_search_candidates`, `rebuild_derived`) |
+| `hybrid.rs` | 37 | the ANN lanes (the approximate leg) |
+| `kv.rs` | 26 | K71 (bounded paging) |
+| `lib.rs` | 11 | E4 (`search_in_at`, `exact_search_compact`), L5 |
+| `property_graph/mod.rs` | 1 | L5 (removes the test gates) |
+| `property_graph/retrieve.rs` | 28 | L5 (removes the test gates) |
+| `query_language.rs` | 31 | L5 (removes the test gates) |
+| `records.rs` | 52 | R0 (the effective block, slice 3), E4 (the snapshot exact path), the ANN lanes |
+| `vectors.rs` | 29 | the ANN lanes (named ANN) |
 
 ## 8. Replaying the evidence
 
@@ -205,8 +304,57 @@ run that executes no test never counts.
 python tests/compact_mutant_replay.py check tests/compact_a4_mutants.json
 python tests/compact_mutant_replay.py run tests/compact_a4_mutants.json OUT.json --machine NAME --ids ID,ID
 python tests/compact_mutant_replay.py merge tests/compact_a4_mutants.json OUT.json
-python tests/compact_mutant_replay.py verify tests/compact_a4_mutants.json --min-machines 2
+python tests/compact_mutant_replay.py verify tests/compact_a4_mutants.json
 ```
 
 `verify` re-checks every recorded run against the file in the tree: a run replayed on an older file is stale and must be
-replayed again. Tests must not sleep or read the wall clock; every test here passes an explicit clock.
+replayed again. It needs one machine for a mutant, and two for the ids of the ledger's `two_machines` list, which are the 26
+survivors of lane A: 26 of the 26 have a kill on two machines. 97 of the other 191 mutants have one as well, and the rest one machine. Tests must not sleep or read the wall clock; every test here passes an explicit clock.
+
+## 9. The shadow-copy gate
+
+Where a function has a compact arm, its resident arm is written twice: once for test builds (the `else` of
+`if compact`) and once for release builds (`#[cfg(not(test))]`), and `cargo test --lib` compiles only the first. This lane
+adds ten such pairs in seven functions, and the independent review (ARCH-2, ARCH-3) asked that the release arm be a checked
+fact instead of a reading exercise. `scripts/shadow_copy_check.py` (standard library only, about half a minute, exit code
+0 when everything holds) is that check:
+
+```text
+python scripts/shadow_copy_check.py                 # the gate
+python scripts/shadow_copy_check.py --dump NAME     # the shipped text and the baseline diff of one site
+python scripts/shadow_copy_check.py --self-test     # the checks of the checker
+```
+
+1. **Shipped equals the baseline.** For each of the 27 sites of the list it takes the shipped variant of the function
+   (statements, arms and items under `#[cfg(test)]` removed, `#[cfg(not(test))]` dropped from the ones that stay,
+   `cfg(any(x, test))` read as `cfg(x)`), normalizes it (comments, whitespace and trailing commas do not count) and compares
+   it with the same function at `v0.7.0` (`git show`). The differences are named edits, each with its reason and each
+   matching exactly once in the baseline, so a second, unlisted change to the same function fails: the retrieve clock (four
+   edits), the hybrid search clock (three), `search_named_at` (`Poisoned`), `search_named_ann_at`, `search_grouped`, and the
+   key-value path (`acquire`, `rows`, `get_physical`). New functions are compared with their exact expected text.
+   The key-value visitor is lane K71's code: `visit_at` and `list_at` are compared with the revision `--kv-base` names
+   (default `7592127`, the commit that carries K71's visitor), and the five edits listed are the part A4 adds to it.
+2. **The two copies of each pair agree.** For each of the ten pairs the resident arm of the test build (the `else` of
+   `if compact`) has to equal the shipped statement next to it, so the parity tests of the lib suite compare the compact
+   path with the code that ships.
+3. **Whole-function copies are test-only.** `search_hybrid_compact` and `execute_compact` have to exist, and only under
+   `cfg(test)`; what ships is `search_hybrid_resident_at` (`v0.7.0`'s `search_hybrid` with the clock parameter) and
+   `execute` (unchanged).
+4. **Coverage.** Every shipped function of a changed source file that differs from `v0.7.0` is covered by a site or by the
+   list of other lanes' changes (twenty today; the two in `src/gpu.rs` are lane B4's), so a resident-visible change cannot
+   appear next to the listed ones.
+5. **Counting.** The number of `#[cfg(not(test))]` attributes of each source file is the baseline's plus the shadow sites
+   of the list (ten in all), so an eleventh shadow copy cannot appear unnoticed.
+
+The script needs the `v0.7.0` tag (`git fetch --tags` in a shallow clone) and K71's commit, or `--kv-base REV`; it stops
+with exit code 2 when it cannot read a file at a baseline and with 1 when a check fails. It was run against eleven harmful
+and two harmless edits of a copy of the tree, and each gave the expected answer. A changed shipped arm, a test-build twin
+that drifts from its shipped statement, an eleventh `cfg(not(test))`, an unlisted shipped change, a second change inside a
+listed function, a compact copy that ships, a changed resident `execute`, a changed wrapper clock, a changed K71 function, a
+changed `get_physical` and a vanished shadow statement all fail for the stated reason; comments, formatting and a trailing
+comma, and edits of test-only code, pass.
+
+What the gate does not check: the compact copies themselves against their resident counterparts (that is what the parity
+tables are for), K71's visitor beyond the edits above, and anything outside the functions of the list that does not differ
+from `v0.7.0`. It is a gate for the release candidate, not a CI job: it needs the tag. The early-return dispatch that removes
+the ten pairs is a follow-up lane before L5, after which the gate shrinks to the equality with `v0.7.0` that remains.
