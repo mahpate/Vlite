@@ -1,13 +1,15 @@
 #![cfg(feature = "tools")]
 mod cli_support;
-use cli_support::{Fixture, database};
+use cli_support::{
+    Fixture, LONG_FLOAT, METADATA_FIELDS, STRING_VALUE_BYTES, database, largest_record_json,
+};
 use serde_json::Value;
 use std::{
     path::Path,
     process::{Command, Output},
     sync::{Mutex, MutexGuard, PoisonError},
 };
-use vlite::{Database, MetadataValue};
+use vlite::{Database, MAX_DIMENSIONS, MAX_PAYLOAD_BYTES, MetadataValue};
 
 // The documented limit, written out so that a change of the constant fails here.
 const CAP: usize = 16 * 1024 * 1024;
@@ -15,8 +17,6 @@ const CAP: usize = 16 * 1024 * 1024;
 const LONGER: usize = CAP + 100_000;
 const TOO_LONG: &str = "line exceeds 16777216 bytes";
 const COPY_HEADER: &str = "COPY public.items (id, vector, payload) FROM stdin;";
-// Thirty characters, as a float written out at length.
-const LONG_FLOAT: &str = "0.1234567890123456789012345678";
 
 // The inputs here are tens of MiB. Holding this lock from before a file is built until the
 // import has ended runs one at a time, which bounds the memory a loaded runner needs.
@@ -345,53 +345,37 @@ fn invalid_utf8_beyond_the_cap_is_never_checked() {
     );
 }
 
-// The largest record the engine accepts, written as one jsonl line: a 1 MiB payload of U+0001
-// (six characters each as a JSON escape), 65,536 floats of thirty characters and fifteen
-// metadata fields with 256-byte names and 4,096-byte values, 65,389 of the 65,536 encoded
-// bytes allowed.
-fn largest_jsonl_record() -> String {
-    let vector = vec![LONG_FLOAT; 65_536].join(",");
-    let payload = "\\u0001".repeat(1 << 20);
-    let metadata = (0..15)
-        .map(|index| {
-            format!(
-                r#""{}{index:x}":{{"type":"string","value":"{}"}}"#,
-                "k".repeat(255),
-                "\\u0001".repeat(4096)
-            )
-        })
-        .collect::<Vec<_>>()
-        .join(",");
-    format!(r#"{{"id":1,"vector":[{vector}],"payload":"{payload}","metadata":{{{metadata}}}}}"#)
-}
-
 #[test]
 fn the_largest_jsonl_record_fits_the_line_cap_and_is_imported() {
     let _serial = serial();
     let f = Fixture::new();
     let (db, input) = (f.path("db"), f.path("rows"));
-    let line = largest_jsonl_record();
+    let line = largest_record_json(1);
     assert!(
-        (8_000_000..CAP).contains(&line.len()),
+        (MAX_PAYLOAD_BYTES * 6 + MAX_DIMENSIONS * 30..CAP).contains(&line.len()),
         "{} bytes",
         line.len()
     );
     std::fs::write(&input, line + "\n").unwrap();
-    let summary = imported(&db, &input, "jsonl", &["--create", "65536"]);
+    let dimensions = MAX_DIMENSIONS.to_string();
+    let summary = imported(&db, &input, "jsonl", &["--create", &dimensions]);
     assert_eq!(summary["rows_committed"], 1);
     let opened = Database::open(&db).unwrap();
     let record = opened.get(1).unwrap().unwrap();
-    assert_eq!(record.vector.len(), 65_536);
+    assert_eq!(record.vector.len(), MAX_DIMENSIONS);
     assert!(
         record
             .vector
             .iter()
             .all(|v| (v - 0.123_456_79).abs() < 1e-7)
     );
-    assert_eq!(record.payload, vec![1u8; 1 << 20]);
-    assert_eq!(record.metadata.len(), 15);
+    assert_eq!(record.payload, vec![1u8; MAX_PAYLOAD_BYTES]);
+    assert_eq!(record.metadata.len(), METADATA_FIELDS);
     for value in record.metadata.values() {
-        assert_eq!(value, &MetadataValue::String("\u{1}".repeat(4096)));
+        assert_eq!(
+            value,
+            &MetadataValue::String("\u{1}".repeat(STRING_VALUE_BYTES))
+        );
     }
 }
 
@@ -400,20 +384,21 @@ fn the_largest_copy_record_is_imported() {
     let _serial = serial();
     let f = Fixture::new();
     let (db, input) = (f.path("db"), f.path("rows"));
-    // The payload is 1 MiB of tabs, two characters each as COPY text.
+    // The payload is tabs, two characters each as COPY text.
     let line = format!(
         "1\t[{}]\t{}",
-        vec![LONG_FLOAT; 65_536].join(","),
-        "\\t".repeat(1 << 20)
+        vec![LONG_FLOAT; MAX_DIMENSIONS].join(","),
+        "\\t".repeat(MAX_PAYLOAD_BYTES)
     );
     assert!(line.len() < CAP);
     std::fs::write(&input, line + "\n").unwrap();
-    let summary = imported(&db, &input, "copy", &["--create", "65536"]);
+    let dimensions = MAX_DIMENSIONS.to_string();
+    let summary = imported(&db, &input, "copy", &["--create", &dimensions]);
     assert_eq!(summary["rows_committed"], 1);
     let opened = Database::open(&db).unwrap();
     let record = opened.get(1).unwrap().unwrap();
-    assert_eq!(record.vector.len(), 65_536);
-    assert_eq!(record.payload, vec![b'\t'; 1 << 20]);
+    assert_eq!(record.vector.len(), MAX_DIMENSIONS);
+    assert_eq!(record.payload, vec![b'\t'; MAX_PAYLOAD_BYTES]);
 }
 
 // Records that are not lines have no line limit. A quoted csv cell may hold newlines, so one
@@ -465,9 +450,9 @@ fn a_csv_payload_over_the_engine_limit_is_an_engine_rejection_not_a_line_rejecti
     }
 }
 
-// 65 flat vectors of 65,536 dimensions, all 1.0: a 17 MB file without a newline byte.
+// 65 flat vectors of the most dimensions, all 1.0: a 17 MB file without a newline byte.
 fn faiss_file() -> Vec<u8> {
-    let (dimensions, count) = (65_536i32, 65i64);
+    let (dimensions, count) = (MAX_DIMENSIONS as i32, 65i64);
     let mut bytes = b"IxF2".to_vec();
     bytes.extend_from_slice(&dimensions.to_le_bytes());
     bytes.extend_from_slice(&count.to_le_bytes());
@@ -490,11 +475,12 @@ fn a_faiss_file_longer_than_the_cap_is_imported() {
     let bytes = faiss_file();
     assert!(bytes.len() > CAP && !bytes.contains(&b'\n'));
     std::fs::write(&input, bytes).unwrap();
+    let dimensions = MAX_DIMENSIONS.to_string();
     let summary = imported(
         &db,
         &input,
         "faiss",
-        &["--create", "65536", "--chunk-size", "8"],
+        &["--create", &dimensions, "--chunk-size", "8"],
     );
     assert_eq!(summary["rows_committed"], 65);
     assert_eq!(Database::open(&db).unwrap().len(), 65);

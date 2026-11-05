@@ -10,12 +10,17 @@ use tool_support::{
     main_result,
 };
 use vlite::{Database, ImportChunkOutcome, InvalidRowPolicy, Metadata, Mutation};
-/// Longest jsonl or copy line, excluding its terminator. The largest record the engine supports
-/// fits when written as text: a 1 MiB payload of JSON `\u00XX` escapes is 6 MiB, 65,536 floats
-/// of about 30 characters are 2 MB and 64 KiB of metadata with its escapes and typed wrappers
-/// is under 0.5 MB, about 8.7 MB in all (1.9 times below the limit); COPY text is smaller. The
-/// csv, pgvector, faiss, parquet and arrow readers have no line limit.
+/// Longest jsonl or copy line, excluding its terminator. It exceeds the largest record the engine
+/// supports written as JSON text: a payload byte takes at most 6 characters (a `\u00XX` escape), a
+/// vector component at most 32 and an encoded metadata byte at most 8 (escapes and the typed-value
+/// wrappers), which is 8,912,896 bytes for the largest sizes; the limit is 1.9 times that. COPY
+/// text is smaller. The csv, pgvector, faiss, parquet and arrow readers have no line limit.
 const MAX_LINE_BYTES: usize = 16 * 1024 * 1024;
+const _: () = assert!(
+    MAX_LINE_BYTES
+        > vlite::MAX_PAYLOAD_BYTES * 6 + vlite::MAX_DIMENSIONS * 32 + vlite::MAX_METADATA_BYTES * 8,
+    "the line limit must exceed the largest supported record written as text"
+);
 const HELP: &str = r#"vlite-import --db PATH --input FILE --format csv|jsonl|pgvector|copy|faiss|parquet|arrow
  [--create DIMENSIONS] [--collection NAME] [--job ID] [--chunk-size N]
 CSV: header id,vector[,payload,metadata]; vector is a quoted JSON array.

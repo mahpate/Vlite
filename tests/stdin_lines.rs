@@ -1,5 +1,8 @@
 #![cfg(all(feature = "mcp", feature = "tools"))]
 
+mod cli_support;
+
+use cli_support::largest_record_json;
 use serde_json::{Value, json};
 use std::{
     fs::File,
@@ -9,7 +12,7 @@ use std::{
     sync::{Mutex, MutexGuard, PoisonError},
     thread,
 };
-use vlite::Database;
+use vlite::{Database, MAX_DIMENSIONS, MAX_PAYLOAD_BYTES};
 
 // The documented limits, written out so that a change of either constant fails here.
 const MCP_CAP: usize = 128 * 1024 * 1024;
@@ -306,6 +309,39 @@ fn shell_fails_on_an_overlong_line_in_a_script_and_on_stdin() {
         assert!(ran.first_put, "the command before the line ran");
         assert!(!ran.second_put, "the command after the line did not");
     }
+}
+
+// The largest command is a `put` of the largest record, about 8.7 MB as text (6,291,456
+// characters for a payload of escapes, 2,031,615 for the vector and about 373,000 for the
+// metadata), so the cap of 16 MiB covers every command with room to spare.
+#[test]
+fn shell_runs_a_put_of_the_largest_record_far_below_its_cap() {
+    let _serial = serial();
+    let directory = tempfile::tempdir_in(".").unwrap();
+    let path = directory.path().join("lines.vlite");
+    Database::create(&path, MAX_DIMENSIONS)
+        .unwrap()
+        .close()
+        .unwrap();
+    let command = format!("put {}\n", largest_record_json(7));
+    assert!(
+        (8_650_000..8_750_000).contains(&command.len()),
+        "{} bytes",
+        command.len()
+    );
+    assert!(command.len() < SHELL_CAP);
+    let (output, _) = run(
+        env!("CARGO_BIN_EXE_vlite-shell"),
+        &["--db", path.to_str().unwrap()],
+        &Input::default().bytes(command),
+    );
+    assert_eq!(output.status.code(), Some(0), "{}", describe(&output));
+    assert_eq!(output.stdout, b"ok\n");
+    assert!(output.stderr.is_empty(), "{}", describe(&output));
+    let database = Database::open(&path).unwrap();
+    let record = database.get(7).unwrap().unwrap();
+    assert_eq!(record.vector.len(), MAX_DIMENSIONS);
+    assert_eq!(record.payload, vec![1u8; MAX_PAYLOAD_BYTES]);
 }
 
 // A line that fits but is not UTF-8 is a read error, as it was when std read the line: the run
