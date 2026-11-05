@@ -293,11 +293,11 @@ fn parse(mut fields: Fields, scope: MemoryScope, scopes: Vec<MemoryScope>) -> Re
     if vector.is_none() && text.is_none() && seeds.is_empty() {
         return Err(Fail::invalid("body"));
     }
-    // Exact and MMR selections are vector-only and refuse every blend
-    // (contract section 4).
+    // `mmr` is vector-only (contract section 4); `exact` may add text, and
+    // takes no seeds, other weights or half-life.
     if selection != Selection::Ranked
         && (vector.is_none()
-            || text.is_some()
+            || (text.is_some() && matches!(selection, Selection::Mmr { .. }))
             || !seeds.is_empty()
             || policy.weights != [1.0, 0.0, 0.0]
             || policy.half_life_ms.is_some())

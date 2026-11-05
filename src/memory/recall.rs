@@ -298,9 +298,12 @@ fn validate(request: &RecallRequest<'_>) -> RecallResult<i64> {
         let Some(query) = &request.query else {
             return Err(RecallError::UnsupportedPlan);
         };
+        // `exact` may add a text leg (contract section 4: it keeps text-only
+        // candidates); `mmr` is a vector-only selection.
+        let blended = !query.text.is_empty() && matches!(request.selection, Selection::Mmr { .. });
         if query.vector.is_none()
             || query.fusion.vector_weight == 0.0
-            || !query.text.is_empty()
+            || blended
             || !request.seeds.is_empty()
             || request.expand
             || request.policy.weights != [1.0, 0.0, 0.0]
@@ -567,34 +570,32 @@ impl MemoryRef<'_> {
                     },
                 );
             }
-            if request.selection != Selection::Ranked {
+            // `exact` keeps the fused candidates above: its dense leg is already
+            // the cosine enumeration (`dense_metric`) and its text leg, when
+            // there is one, adds candidates without a distance. `mmr` replaces
+            // them with its own vector-only selection.
+            if let Selection::Mmr { lambda } = request.selection {
                 let selected_ids = dense.iter().map(|hit| hit.id).collect::<BTreeSet<_>>();
                 vectors.retain(|candidate| selected_ids.contains(&candidate.id));
-                let selected = match request.selection {
-                    Selection::Exact => dense.iter().take(query.k).cloned().collect(),
-                    Selection::Mmr { lambda } => {
-                        // Existing MMR recomputes redundancy for every prior selection.
-                        // n^3*d is a conservative bound on its total component work.
-                        let n = vectors.len();
-                        let cost = n
-                            .checked_mul(n)
-                            .and_then(|n2| n2.checked_mul(n))
-                            .and_then(|n3| n3.checked_mul(collection.dimensions()))
-                            .ok_or(RecallError::Budget("mmr_components"))?;
-                        charge(
-                            &mut work.stats.mmr_components,
-                            cost,
-                            request.limits.mmr_components,
-                            "mmr_components",
-                        )?;
-                        MmrReranker { lambda }.rerank(
-                            query.vector.as_ref().unwrap(),
-                            &vectors,
-                            request.policy.limit.min(query.k),
-                        )?
-                    }
-                    Selection::Ranked => unreachable!(),
-                };
+                // Existing MMR recomputes redundancy for every prior selection.
+                // n^3*d is a conservative bound on its total component work.
+                let n = vectors.len();
+                let cost = n
+                    .checked_mul(n)
+                    .and_then(|n2| n2.checked_mul(n))
+                    .and_then(|n3| n3.checked_mul(collection.dimensions()))
+                    .ok_or(RecallError::Budget("mmr_components"))?;
+                charge(
+                    &mut work.stats.mmr_components,
+                    cost,
+                    request.limits.mmr_components,
+                    "mmr_components",
+                )?;
+                let selected = MmrReranker { lambda }.rerank(
+                    query.vector.as_ref().unwrap(),
+                    &vectors,
+                    request.policy.limit.min(query.k),
+                )?;
                 candidates.clear();
                 for (index, hit) in selected.into_iter().enumerate() {
                     let key = owners.get(&hit.id).ok_or(MemoryError::InvalidBundle)?;
@@ -990,6 +991,26 @@ mod tests {
         importance: f64,
         references: Vec<String>,
     ) -> RememberRequest {
+        let text = format!("memory {id}");
+        remember_text(
+            db, scope, id, vector, &text, now, expiry, importance, references,
+        )
+    }
+
+    /// `remember` with the indexed text of the evidence record chosen by the
+    /// caller (the default is `memory {id}`).
+    #[allow(clippy::too_many_arguments)]
+    fn remember_text(
+        db: &mut Database,
+        scope: &MemoryScope,
+        id: &str,
+        vector: Option<Vec<f32>>,
+        text: &str,
+        now: u64,
+        expiry: Option<u64>,
+        importance: f64,
+        references: Vec<String>,
+    ) -> RememberRequest {
         MemoryMut::bind(db, "memory", None)
             .unwrap()
             .provision_scope(scope)
@@ -997,7 +1018,7 @@ mod tests {
         let evidence = if let Some(vector) = vector {
             let record = evidence_record_id(id);
             let mut metadata = Metadata::new();
-            metadata.insert("text".into(), MetadataValue::String(format!("memory {id}")));
+            metadata.insert("text".into(), MetadataValue::String(text.into()));
             db.graph_mut("memory")
                 .unwrap()
                 .write_batch(&[crate::property_graph::GraphOp::Vector {
@@ -1782,6 +1803,146 @@ mod tests {
             assert_eq!(ids(&out), ["x2", "x1"], "{selection:?}");
             for hit in &out.hits {
                 close(hit.distance.unwrap(), 0.0);
+            }
+        }
+    }
+
+    /// Contract section 4: `exact` "recomputes vector-candidate distances,
+    /// reorders their dense leg before fusion/weighting, preserving text-only
+    /// candidates". For the query [1, 0] and the text "lore", by hand with
+    /// reciprocal rank fusion (k = 60, equal weights):
+    ///
+    /// - the dense leg by cosine distance is pa (0), pb (1 - 1/sqrt(2)) and pc
+    ///   (1); the zero vector pz has no cosine distance and is not in it;
+    /// - the text leg ranks pa, pc, pz by BM25 (the documents have the same
+    ///   length, so by term frequency 3, 2 and 1); pb lacks the term;
+    /// - the fused scores are pa 1/61 + 1/61, pc 1/63 + 1/62, pb 1/62 and
+    ///   pz 1/63, with no ties, so the order is pa, pc, pb, pz.
+    #[test]
+    fn exact_with_text_fuses_the_cosine_leg_with_the_text_leg_and_keeps_text_only_hits() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut db = database(&dir.path().join("hybrid-exact.vlite"));
+        let now = crate::current_time_ms() + 30_000;
+        let scope = scope("tenant");
+        for (id, vector, text) in [
+            ("pa", [10.0, 0.0], "lore lore lore"),
+            ("pb", [0.6, 0.6], "other other other"),
+            ("pc", [0.0, 1.0], "lore lore other"),
+            ("pz", [0.0, 0.0], "lore other other"),
+        ] {
+            let vector = Some(vector.to_vec());
+            remember_text(&mut db, &scope, id, vector, text, now, None, 0.5, vec![]);
+        }
+        let mut req = request(scope, now);
+        req.query.as_mut().unwrap().text = "lore".into();
+        req.selection = Selection::Exact;
+        let out = recall(&db, &req).unwrap();
+        assert_eq!(ids(&out), ["pa", "pc", "pb", "pz"]);
+        let [pa, pc, pb, pz] = &out.hits[..] else {
+            panic!("four hits")
+        };
+        close(pa.distance.unwrap(), 0.0);
+        assert_eq!((pa.vector_rank, pa.text_rank), (Some(1), Some(1)));
+        close(pc.distance.unwrap(), 1.0);
+        assert_eq!((pc.vector_rank, pc.text_rank), (Some(3), Some(2)));
+        close(pb.distance.unwrap(), 1.0 - 1.0 / 2f64.sqrt());
+        assert_eq!(
+            (pb.vector_rank, pb.text_rank, pb.bm25),
+            (Some(2), None, None)
+        );
+        assert_eq!(pz.distance, None, "a text-only hit has no distance");
+        assert_eq!((pz.vector_rank, pz.text_rank), (None, Some(3)));
+        assert!(pz.bm25.unwrap() > 0.0);
+        for (hit, relevance) in out.hits.iter().zip([1.0, 0.5, 1.0 / 3.0, 0.25]) {
+            close(hit.ranking.relevance, relevance);
+        }
+    }
+
+    /// With text, `exact` still measures its dense leg by cosine while a
+    /// weighted recall keeps squared Euclidean. For the query [1, 0], pa =
+    /// [10, 0] and pb = [0.6, 0.6], with a text leg of pb alone that weighs
+    /// 0.001: exact orders the dense leg pa, pb, so pa scores 1/61 against
+    /// 1/62 + 0.001/61 for pb; weighted orders it pb, pa, so pb scores
+    /// 1/61 + 0.001/61 against 1/62 for pa.
+    #[test]
+    fn exact_with_text_orders_the_dense_leg_by_cosine_where_weighted_keeps_squared_euclid() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut db = database(&dir.path().join("hybrid-metric.vlite"));
+        let now = crate::current_time_ms() + 30_000;
+        let scope = scope("tenant");
+        for (id, vector) in [("pa", vec![10.0, 0.0]), ("pb", vec![0.6, 0.6])] {
+            remember(&mut db, &scope, id, Some(vector), now, None, 0.5, vec![]);
+        }
+        let mut req = request(scope, now);
+        let query = req.query.as_mut().unwrap();
+        query.text = "pb".into();
+        query.fusion.text_weight = 0.001;
+        assert_eq!(ids(&recall(&db, &req).unwrap()), ["pb", "pa"]);
+        req.selection = Selection::Exact;
+        let out = recall(&db, &req).unwrap();
+        assert_eq!(ids(&out), ["pa", "pb"]);
+        close(out.hits[1].distance.unwrap(), 1.0 - 1.0 / 2f64.sqrt());
+        assert_eq!(out.hits[1].vector_rank, Some(2));
+        assert_eq!(out.hits[1].text_rank, Some(1));
+    }
+
+    /// `exact` takes text and nothing else of the weighted blends: it still
+    /// needs a vector and refuses seeds, expansion and other weights; `mmr`
+    /// refuses text (it is a vector-only selection).
+    #[test]
+    fn exact_takes_text_but_no_other_blend_and_mmr_takes_none() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut db = database(&dir.path().join("blends.vlite"));
+        let now = crate::current_time_ms() + 30_000;
+        let scope = scope("tenant");
+        remember(
+            &mut db,
+            &scope,
+            "pa",
+            Some(vec![1.0, 0.0]),
+            now,
+            None,
+            0.5,
+            vec![],
+        );
+        let build = |selection: Selection, text: &str| {
+            let mut req = request(scope.clone(), now);
+            req.selection = selection;
+            req.query.as_mut().unwrap().text = text.into();
+            req
+        };
+        assert!(recall(&db, &build(Selection::Exact, "pa")).is_ok());
+        assert!(matches!(
+            recall(&db, &build(Selection::Mmr { lambda: 0.5 }, "pa")),
+            Err(RecallError::UnsupportedPlan)
+        ));
+        for selection in [Selection::Exact, Selection::Mmr { lambda: 0.5 }] {
+            let text = if selection == Selection::Exact {
+                "pa"
+            } else {
+                ""
+            };
+            let mut req = build(selection, "pa");
+            req.query.as_mut().unwrap().vector = None;
+            let mut seeded = build(selection, text);
+            seeded.seeds = vec![RecallSeed {
+                scope: scope.clone(),
+                id: "pa".into(),
+            }];
+            let mut expanding = build(selection, text);
+            expanding.expand = true;
+            let mut weighted = build(selection, text);
+            weighted.policy.weights = [0.5, 0.0, 0.5];
+            for (blend, req) in [
+                ("no vector", req),
+                ("seeds", seeded),
+                ("expansion", expanding),
+                ("other weights", weighted),
+            ] {
+                assert!(
+                    matches!(recall(&db, &req), Err(RecallError::UnsupportedPlan)),
+                    "{selection:?} with {blend}"
+                );
             }
         }
     }

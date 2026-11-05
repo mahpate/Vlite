@@ -752,10 +752,11 @@ async fn evidence_views_follow_the_snippet_projection() {
 
 // ----------------------------------------------------------------- ranking
 
-/// Contract section 4: `exact` and `mmr` are vector-only selections; text,
-/// entity seeds, other weights or a half-life are refused as
-/// `memory_unsupported_ranking` (`docs/API.md` first-slice limits). A
-/// weighted selection keeps accepting a half-life.
+/// Contract section 4: `mmr` is a vector-only selection, and `exact` takes
+/// no seeds, other weights or half-life: each is refused as
+/// `memory_unsupported_ranking` (`docs/API.md` first-slice limits). `exact`
+/// alone takes text (it keeps text-only candidates). A weighted selection
+/// keeps accepting a half-life.
 #[tokio::test]
 async fn vector_selections_refuse_every_blend() {
     let env = Env::new();
@@ -768,7 +769,7 @@ async fn vector_selections_refuse_every_blend() {
                 .extend(extra.as_object().unwrap().clone());
             ranking
         };
-        for (blend, mut body) in [
+        let mut blends = vec![
             (
                 "a half-life",
                 json!({"vector": [1, 0], "ranking": ranking(json!({"half_life_ms": 1000}))}),
@@ -778,10 +779,6 @@ async fn vector_selections_refuse_every_blend() {
                 json!({"vector": [1, 0], "ranking": ranking(json!({"weights": [0, 0, 1]}))}),
             ),
             (
-                "text",
-                json!({"vector": [1, 0], "text": "Ada", "ranking": ranking(json!({}))}),
-            ),
-            (
                 "entity seeds",
                 json!({"vector": [1, 0], "entity_seeds": ["e1"], "ranking": ranking(json!({}))}),
             ),
@@ -789,7 +786,16 @@ async fn vector_selections_refuse_every_blend() {
                 "no vector",
                 json!({"entity_seeds": ["e1"], "ranking": ranking(json!({}))}),
             ),
-        ] {
+            (
+                "text without a vector",
+                json!({"text": "Ada", "ranking": ranking(json!({}))}),
+            ),
+        ];
+        let text = json!({"vector": [1, 0], "text": "Ada", "ranking": ranking(json!({}))});
+        if selection == "mmr" {
+            blends.push(("text", text.clone()));
+        }
+        for (blend, mut body) in blends {
             body["scope"] = json!({"agent": "a"});
             let (status, response) = env.recalled(body).await;
             assert_eq!(
@@ -797,6 +803,13 @@ async fn vector_selections_refuse_every_blend() {
                 (422, Some("memory_unsupported_ranking")),
                 "{selection} with {blend}: {response}"
             );
+        }
+        let mut hybrid = text;
+        hybrid["scope"] = json!({"agent": "a"});
+        let (status, response) = env.recalled(hybrid).await;
+        if selection == "exact" {
+            assert_eq!(status, 200, "exact with text: {response}");
+            assert_eq!(response["selection"], "exact");
         }
         let bare =
             json!({"scope": {"agent": "a"}, "vector": [1, 0], "ranking": ranking(json!({}))});

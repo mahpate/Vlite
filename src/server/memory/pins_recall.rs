@@ -1122,8 +1122,8 @@ async fn ranking_future_observations_reject_by_default_and_clamp_on_request() {
     assert_eq!(number(&body["memories"][0]["scores"]["D"]), 1.0);
 }
 
-/// Contract 4: `exact` and `mmr` are vector-only and refuse a decay
-/// half-life (and every other blend) as `memory_unsupported_ranking`.
+/// Contract 4: `exact` and `mmr` refuse a decay half-life as
+/// `memory_unsupported_ranking`.
 #[tokio::test]
 async fn ranking_exact_and_mmr_refuse_a_half_life() {
     let rig = rig(&Setup::default());
@@ -1224,6 +1224,80 @@ async fn exact_and_mmr_report_cosine_distance_and_weighted_keeps_squared_euclid(
     }
     let (status, body) = rig.recall(scope_body(json!({"vector": [0, 0]}))).await;
     assert_eq!(status, 200, "{body}");
+}
+
+/// Contract 4, over the wire: `exact` with `text` fuses its cosine-ordered
+/// dense leg with the BM25 leg by reciprocal rank fusion (k = 60, equal
+/// weights) and keeps a text-only candidate, which has no distance. For the
+/// query `[1, 0]` and the text `lore`, by hand: the dense leg is `pa` (cosine
+/// distance 0), `pb` (1 - 1/sqrt(2)), `pc` (1); the zero vector `pz` has none.
+/// The text leg ranks `pa`, `pc`, `pz` (frequency 3, 2, 1 in documents of the
+/// same length); `pb` lacks the term. The fused scores are `pa` 1/61 + 1/61,
+/// `pc` 1/63 + 1/62, `pb` 1/62 and `pz` 1/63, so the order is `pa`, `pc`,
+/// `pb`, `pz` with `R` 1, 1/2, 1/3 and 1/4. `mmr` still refuses text.
+#[tokio::test]
+async fn exact_with_text_keeps_text_only_hits_without_a_distance() {
+    let rig = rig(&Setup::default());
+    let lore = |id: &str, vector: [f32; 2], text: &str| Evidenced {
+        text: text.into(),
+        ..evidenced(id, vector, id.as_bytes())
+    };
+    rig.evidence(
+        &scope("a"),
+        100,
+        vec![
+            lore("pa", [10.0, 0.0], "lore lore lore"),
+            lore("pb", [0.6, 0.6], "other other other"),
+            lore("pc", [0.0, 1.0], "lore lore other"),
+            lore("pz", [0.0, 0.0], "lore other other"),
+        ],
+    );
+    let request = |selection: &str| {
+        scope_body(json!({
+            "vector": [1, 0], "text": "lore", "ranking": {"selection": selection},
+        }))
+    };
+    let (status, body) = rig.recall(request("exact")).await;
+    assert_eq!(status, 200, "{body}");
+    assert_eq!(body["selection"], "exact");
+    assert_eq!(ids(&body), ["pa", "pc", "pb", "pz"]);
+    let hit = |index: usize| &body["memories"][index]["scores"];
+    let near = |actual: &Value, expected: f64| (number(actual) - expected).abs() < 1e-9;
+    for (index, relevance) in [1.0, 0.5, 1.0 / 3.0, 0.25].into_iter().enumerate() {
+        assert!(near(&hit(index)["R"], relevance), "R of hit {index}");
+        assert_eq!(hit(index)["fused_rank"], index + 1);
+    }
+    assert!(near(&hit(0)["distance"], 0.0));
+    assert!(near(&hit(1)["distance"], 1.0));
+    assert!(near(&hit(2)["distance"], 1.0 - 1.0 / 2f64.sqrt()));
+    for (index, dense, text) in [
+        (0, Some(1), Some(1)),
+        (1, Some(3), Some(2)),
+        (2, Some(2), None),
+    ] {
+        assert_eq!(
+            hit(index).get("dense_rank"),
+            dense.map(|rank| json!(rank)).as_ref()
+        );
+        assert_eq!(
+            hit(index).get("text_rank"),
+            text.map(|rank| json!(rank)).as_ref()
+        );
+    }
+    let lone = hit(3).as_object().unwrap();
+    assert!(
+        !lone.contains_key("distance"),
+        "a text-only hit has no distance"
+    );
+    assert!(!lone.contains_key("dense_rank"));
+    assert_eq!(lone["text_rank"], 3);
+    assert!(number(&lone["bm25"]) > 0.0);
+    assert_eq!(body["meta"]["mode"], "exact_enumeration");
+    assert_eq!(body["meta"]["vector_components"], "8");
+    assert_eq!(body["meta"]["candidates_examined"], "8");
+    let (status, body) = rig.recall(request("mmr")).await;
+    assert_eq!(status, 422, "{body}");
+    assert_eq!(error(&body).0, "memory_unsupported_ranking");
 }
 
 // -------------------------------------------------------------------- Budgets
