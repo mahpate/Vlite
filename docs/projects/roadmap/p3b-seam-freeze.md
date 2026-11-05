@@ -1,7 +1,8 @@
 # P3b read seam freeze for 0.7.1 (lane R0)
 
-Status: written at the start of 0.7.1 from `v0.7.0` (`02ef3e5f`) and approved on 2026-11-05 (OPEN-71-02 to OPEN-71-04 and
-OPEN-71-14 in the [0.7.1 plan](handover-0.7.0.md#071), decided by the coordinator under the owner's delegation).
+Status: written at the start of 0.7.1 from `v0.7.0` (`02ef3e5f`) and approved on 2026-11-05 (the decisions OPEN-71-01 to OPEN-71-04
+and OPEN-71-14, stated in section 8, were taken by the coordinator under the owner's delegation; the OPEN-71 identifiers are
+those of the storage readiness inventory behind the [0.7.1 plan](handover-0.7.0.md#071)).
 Sections 3 and 4 describe what the code does today and pin it with tests. Section 3 is frozen for the lanes that follow:
 B4, A4, E4, C4, K71, L5 and the ANN, P4 and P5 lanes. Section 4 is the approved inventory of deviations and limits: it
 is not frozen, and a lane may remove any of them. Section 5 gives additive shapes, approved as additive: lane R0's
@@ -58,8 +59,8 @@ by reading the code at `v0.7.0` and has no test of its own.
 | CLK-3 | A row with no deadline is never hidden by the clock. | same |
 | CLK-4 | The newest overlay entry decides. An overlay put uses its own deadline, so an expired put hides the ID and never reveals the older base row; a tombstone hides the ID at every `T` and never falls through. | `freeze_deadline_hides_exactly_at_the_clock_in_every_arm`; `compact_expired_overlay_never_reveals_base`; `compact_delete_tombstone_shadows_base` |
 | CLK-5 | Every read that takes no clock is physical and ignores deadlines: `len`, `first_id`, `contains_id`, `row_of`, `id`, `revision`, `expiry`, `get_physical`, `effective_ids`, `effective_vector`, `effective_metadata`, `effective_payload` and the `read_*` methods. The point readers that take a clock are `get`, `get_at` and `effective_visible`; a caller that needs visibility asks one of them with its own `T` first. Counts (`len`) are physical and include hidden rows. | same; `freeze_accounting_reports_exact_values_and_keeps_peaks` |
-| CLK-6 | The expiry and revision of a compact row exist in two places: the resident `Collection.expiries` and `Collection.revisions` maps, and the view and overlay columns. They agree at every replay and every commit (replay builds the overlay from the replayed resident maps; `apply_committed` writes both), and one operation reads one of them and never combines the two. `revision_in`, which a conditional write checks, reads the overlay's revision when the overlay holds an entry for the ID and the resident map otherwise. Which reader uses which representation is not frozen (section 4). | `freeze_resident_and_compact_expiry_sources_agree_after_mutations`; `compact_mutations_match_resident_put_delete_metadata_and_ttl` |
-| CLK-7 | A public call that takes no clock samples the wall clock once on entry and passes it down, and a `ReadSnapshot` uses the clock it captured. Four resident-only paths are known exceptions that sample per candidate or per call: the hybrid text leg, query-language execution, `ann_quality` and `search_ready_with_options_in` (section 4). Other callers that sample per candidate were not audited. | `compact_browse_cursor_skips_tombstones_and_expiry`; `compact_exact_scan_is_bit_identical_at_same_clock` |
+| CLK-6 | The expiry and revision of a compact row exist in two places: the resident `Collection.expiries` and `Collection.revisions` maps, and the view and overlay columns. They agree at every replay and every commit (replay builds the overlay from the replayed resident maps; `apply_committed` writes both). Which reader uses which representation is not frozen (section 4). | `freeze_resident_and_compact_expiry_sources_agree_after_mutations`; `compact_mutations_match_resident_put_delete_metadata_and_ttl` |
+| CLK-7 | A public call that takes no clock samples the wall clock once on entry and passes it down, and a `ReadSnapshot` uses the clock it captured.† Four resident-only paths are known exceptions that sample per candidate or per call: the hybrid text leg, query-language execution, `ann_quality` and `search_ready_with_options_in` (section 4). Other callers that sample per candidate were not audited. The tests pin the explicit-clock half only: one clock passed down gives one answer. | `compact_browse_cursor_skips_tombstones_and_expiry`; `compact_exact_scan_is_bit_identical_at_same_clock` |
 
 ### 3.2 Overlay precedence and affected IDs
 
@@ -70,16 +71,16 @@ by reading the code at `v0.7.0` and has no test of its own.
 | PRE-3 | The overlay is the complete difference between the pinned base and the effective state. Replay records an overlay put for every ID whose revision or deadline differs from its base row (a metadata-only write, a deadline-only change, a rewrite), a put for every ID absent from the base, and a tombstone, at the replay sequence, for every base ID that is gone. An unchanged ID has no entry. | `freeze_replay_overlay_covers_every_kind_of_change`; `compact_install_real_committed_suffix_replays_into_overlay` |
 | PRE-4 | A pinned clone of the enum keeps the overlay root it was cloned with; later commits do not reach it. | `compact_effective_accessor_pins_overlay_without_materializing_cells`; `compact_overlay_snapshot_and_revision_condition_are_immutable` |
 | PRE-5 | `overlay_logical_bytes` counts `record_body_len` for a put and 0 for a tombstone. | `freeze_effective_rows_follow_overlay_precedence_in_ascending_order` |
-| PRE-6 | Each compact collection has its own view and overlay: a commit to one collection changes the length, the IDs and the visibility of that collection only. | `freeze_named_collections_keep_one_overlay_each` |
+| PRE-6 | Each compact collection has its own view and overlay: a commit to one collection changes the length and the effective IDs of that collection only. | `freeze_named_collections_keep_one_overlay_each` |
 
 ### 3.3 Errors
 
 | ID | Statement | Pinned by |
 |---|---|---|
-| ERR-1 | A workspace read (`read_vector`, `read_metadata`, `read_payload`) runs in this order. An absent row answers `Ok(None)`. A vector read then checks sizes and refuses a block that exceeds the scratch budget, before any frame is read, and on a cache miss evicts to make room. The frame read follows: the previous plaintext is released, the frame range, size, kind and footer-checksum checks run, an encrypted frame is authenticated and the body bound is checked. The extents come next and exposure last. A vector cache hit repeats the frame read, authentication included, and then checks the cached block's shape; it does not decode again. A record cell (`get`, `get_at`, `get_physical`) runs the range, kind and checksum checks and the authentication once, when it first decodes its row, and is served from memory afterwards. | `compact_seam_authenticates_cached_vectors`; `freeze_cached_blocks_are_authenticated_again_and_shape_checked`; `freeze_a_refused_read_leaves_the_rest_of_the_workspace_as_it_was` |
-| ERR-2 | A frame whose recorded kind or footer checksum changed, or whose range is outside the backing, is `Corrupt` with reason `compact source frame changed` or `compact source frame is out of bounds`, before any authentication, on the workspace reads and on cell decoding alike. On the workspace reads a frame body over `MAX_BODY + SEAL_OVERHEAD` is the first reason, and a plain body over `MAX_BODY` is `compact source body exceeds limit`; cell decoding applies neither bound. A failed authentication is `Corrupt` with reason `frame authentication failed`, and an authenticated frame whose footer, sequence or checksum does not match is `Corrupt` with reason `commit footer or record checksum mismatch`.† | `freeze_frame_tampering_is_an_error_on_every_read_path`; `freeze_frame_range_outside_the_backing_is_corrupt`; `freeze_frame_size_bound_is_exact` |
+| ERR-1 | A workspace read (`read_vector`, `read_metadata`, `read_payload`) runs in this order. An absent row answers `Ok(None)`. A vector read then checks sizes and refuses a block that exceeds the scratch budget, before any frame is read. The frame read follows: the previous plaintext is released, the frame range, size, kind and footer-checksum checks run, an encrypted frame is authenticated and the body bound is checked. The extents come next and exposure last. A vector cache hit repeats the frame read, authentication included, and then checks the cached block's shape; it does not decode again. A record cell (`get`, `get_at`, `get_physical`) runs the range, kind and checksum checks and the authentication once, when it first decodes its row, and is served from memory afterwards. What a refused read leaves behind is section 4's limit, not a frozen order. | `compact_seam_authenticates_cached_vectors`; `freeze_cached_blocks_are_authenticated_again_and_shape_checked`; `freeze_a_refused_read_leaves_the_rest_of_the_workspace_as_it_was` |
+| ERR-2 | A frame whose recorded kind or footer checksum changed, or whose range is outside the backing, is `Corrupt` with reason `compact source frame changed` or `compact source frame is out of bounds`, before any authentication, on the workspace reads and on cell decoding alike. On the workspace reads a frame body over `MAX_BODY + SEAL_OVERHEAD` is the first reason, and a plain body over `MAX_BODY` is `compact source body exceeds limit`; cell decoding applies neither bound. An encrypted frame is then checked for its footer magic, its sequence and a CRC over the stored bytes (`Corrupt` with reason `commit footer or record checksum mismatch`),† and only then opened: a failed authentication is `Corrupt` with reason `frame authentication failed`. | `freeze_frame_tampering_is_an_error_on_every_read_path`; `freeze_frame_range_outside_the_backing_is_corrupt`; `freeze_frame_size_bound_is_exact` |
 | ERR-3 | An extent outside the body is `Corrupt`: `compact payload extent is out of bounds`, `compact metadata extent is out of bounds`, `invalid compact vector extent` (a vector read) or `compact vector extent is out of bounds` (a cell), and undecodable metadata is `invalid compact record metadata`.† | `freeze_extents_outside_the_body_are_corrupt_on_every_read_path`; `compact_seam_rejects_bad_extents_and_accounting_overflow` |
-| ERR-4 | Errors are never converted into absence or a cache miss. `Ok(None)` means there is no such row, and every effective accessor propagates the error of a base read. | `freeze_frame_tampering_is_an_error_on_every_read_path` |
+| ERR-4 | Errors are never converted into absence or a cache miss. `Ok(None)` means there is no such row, and every effective accessor propagates the error of a base read. | `freeze_frame_tampering_is_an_error_on_every_read_path`; `freeze_budget_and_exact_fit_boundaries` (the budget refusal of `effective_vector`) |
 | ERR-5 | A refused read caches no vector block and publishes no cell. When it fails while reading its frame (range, size, kind, checksum or authentication) it leaves no plaintext (`plaintext_live` is 0), and the blocks cached before it stay when no eviction was needed. A refused read is not atomic in other respects (section 4). | `freeze_a_refused_read_leaves_the_rest_of_the_workspace_as_it_was`; `freeze_frame_tampering_is_an_error_on_every_read_path`; `freeze_extents_outside_the_body_are_corrupt_on_every_read_path` |
 | ERR-6 | A budget problem is `InvalidQuery` with a fixed reason: `compact workspace exceeds 4 MiB`, `compact scratch budget is smaller than one block` and `compact cached block shape changed` (pinned), and `compact workspace counter exhausted`, the vector-size, accounting overflow and underflow reasons and `compact cache accounting mismatch`.† A counter that would pass `u64::MAX` fails; it never wraps.† | `freeze_budget_and_exact_fit_boundaries`; `freeze_cached_blocks_are_authenticated_again_and_shape_checked`; `compact_seam_lru_budget_and_accounting` |
 | ERR-7 | A commit that succeeds but cannot be applied to the compact state poisons the handle and returns the error; the next operation answers `Poisoned`. | `committed_apply_errors_poison_compact_handle` |
@@ -95,10 +96,10 @@ claim.
 | ACC-2 | `mapped_live` is the backing length of a mapped generation and 0 for an owned one; `mapped_peak` is kept like `source_peak`. | `compact_seam_mapped_source_accounting`; `freeze_mapped_accounting_keeps_its_own_peak` |
 | ACC-3 | `cells_live` is the sum of `record_body_len` over the materialized cells of every collection of the generation, and `cells_peak` is kept like `source_peak`. Cells are never evicted. `read_vector`, `read_metadata`, `read_payload` and the effective accessors never create one. | `compact_seam_vector_metadata_leave_cells_empty`; `freeze_accounting_reports_exact_values_and_keeps_peaks` |
 | ACC-4 | `vectors_live` is the decoded `f32` byte size of the cached blocks (`rows * dimensions * 4`, also for float16†) and never exceeds the budget; `vectors_peak` is a running maximum updated at every insertion, so it survives an eviction. | `compact_seam_lru_budget_and_accounting`; `freeze_vector_peak_survives_eviction_by_a_smaller_block` |
-| ACC-5 | `plaintext_live` is the length of the latest authenticated plaintext frame and 0 for plain generations; `plaintext_peak` is a running maximum. A read releases the previous plaintext when it starts reading its frame, so a read that fails while reading its frame leaves 0 (the two other refusals are in section 4). | `compact_seam_vector_metadata_leave_cells_empty`; `compact_seam_authenticates_cached_vectors`; `freeze_a_refused_read_leaves_the_rest_of_the_workspace_as_it_was`; `freeze_frame_tampering_is_an_error_on_every_read_path` |
+| ACC-5 | `plaintext_live` is the length of the latest authenticated plaintext frame and 0 for plain generations; `plaintext_peak` is a running maximum. A read releases the previous plaintext when it starts reading its frame, so a read that fails while reading its frame leaves 0 (the two other refusals are in section 4). | `compact_seam_vector_metadata_leave_cells_empty`; `compact_seam_authenticates_cached_vectors`; `freeze_plaintext_peak_survives_a_smaller_frame`; `freeze_a_refused_read_leaves_the_rest_of_the_workspace_as_it_was`; `freeze_frame_tampering_is_an_error_on_every_read_path` |
 | ACC-6 | `hits`, `misses` and `evictions` count per workspace. | `compact_seam_lru_budget_and_accounting` |
-| ACC-7 | The budget is at most 4 MiB (exactly 4 MiB is allowed) and must hold one whole decoded block (a block of exactly the budget is read). A block that fits next to the live ones, exactly or with room to spare, evicts nothing. Eviction takes the least recently used block by a logical counter that advances on every read, and ties are broken by the cache key.† | `freeze_budget_and_exact_fit_boundaries`; `compact_seam_lru_budget_and_accounting` |
-| ACC-8 | `source_*`, `mapped_*` and `cells_*` peaks are sampled when `accounting` is called; `vectors_*` and `plaintext_*` peaks are maintained on every read. | `freeze_accounting_reports_exact_values_and_keeps_peaks`; `freeze_vector_peak_survives_eviction_by_a_smaller_block` |
+| ACC-7 | The budget is at most 4 MiB (exactly 4 MiB is allowed) and must hold one whole decoded block (a block of exactly the budget is read). A block that fits next to the live ones, exactly or with room to spare, evicts nothing. Eviction takes the least recently used block: the one with the smallest value of a logical counter that advances on every vector read that passes the budget check and is stamped on the block that read touches. The values are distinct, so the code's cache-key tie-break is never reached.† | `freeze_budget_and_exact_fit_boundaries`; `compact_seam_lru_budget_and_accounting` (the one that tells least recently used from first in, first out) |
+| ACC-8 | `source_*`, `mapped_*` and `cells_*` peaks are sampled when `accounting` is called; `vectors_*` and `plaintext_*` peaks are maintained on every read. | `freeze_accounting_reports_exact_values_and_keeps_peaks`; `freeze_vector_peak_survives_eviction_by_a_smaller_block`; `freeze_plaintext_peak_survives_a_smaller_frame` |
 
 ### 3.5 Identity
 
@@ -125,7 +126,7 @@ These are true at `v0.7.0`. They are not statements to preserve; the lane named 
 | `hybrid.rs::search_hybrid`, `query_language.rs::execute`, `quality.rs::ann_quality`, `lib.rs::search_ready_with_options_in` | The resident vector leg samples its own clock, and the hybrid text leg (`hybrid.rs:197`) and query-language execution (`query_language.rs:422-452`) call `get` per candidate, so each candidate is judged at its own wall-clock sample and the legs can disagree at a deadline. `ann_quality` samples once per sampled query (`quality.rs:227`) and `search_ready_with_options_in` once per call (`lib.rs:3720`). All four read the resident map, so they refuse compact records today. | A4 (`search_hybrid_at` and the query-language edits in `02062058`); the ANN lane for the other two |
 | `records.rs::effective_ids` | Builds a full ID set and vector. The 4 MiB workspace bounds vector scratch only, not ID memory. | slice 3 adds `ordered_ids`; `effective_ids` stays until its last caller moves |
 | Exact scan, browse, snapshot search | The compact path walks `compact_iter`, materializes a cell per visited row and reads deadlines from the resident map (CLK-6). | E4 |
-| Expiry readers | Exact scans, browse and `ReadSnapshot` read the resident expiry map, and `get_at`, `effective_visible` (and so `rerank_effective`) read the view and overlay columns (CLK-6). A lane may move a reader to the other representation if it keeps one clock per operation and the agreement of the two. | E4, L5 |
+| Expiry and revision readers | Exact scans, browse and `ReadSnapshot` read the resident expiry map, and `get_at`, `effective_visible` (and so `rerank_effective`) read the view and overlay columns (CLK-6). `revision_in`, which serves `revision()`, the server and graph retrieve, answers from the overlay when it holds an entry for the ID and from the resident map otherwise, and a conditional write (`put_with_expiry_in`, `put_in`, `delete_in`, `update_metadata_in`) checks the resident map alone.† A lane may move a reader to the other representation if it keeps one clock per operation and the agreement of the two. | E4, L5 |
 | `Database::open_backed` | The loader decodes every record into a resident map before the generation is installed. | L5 |
 | `CollectionRecords::len`, `first_id` | `len` walks the overlay on every call, and `first_id` scans the base from row 0 past tombstoned rows and then the overlay. | not scheduled |
 | Refused reads are not atomic | `read_vector` counts a miss, advances the logical clock and evicts to make room before it reads the frame, so a read that then fails can leave a block evicted. A read refused by the scratch budget keeps the previous plaintext, and an encrypted read that fails after authentication (an extent or decode error, or the shape refusal on a hit) keeps that frame's plaintext until the next read. A consumer must not rely on a rollback. | E4, L5 |
@@ -285,66 +286,73 @@ storage owner).
 
 ### 7.1 Slice 2: the freeze tests
 
-Slice 2 adds tests only. To show that they are effective, and to give the next lanes a replayable record, it ran 87
-hand mutants of the seam: the 17 of the earlier seam campaign, rebased onto `v0.7.0`, and 70 new ones in five classes
+Slice 2 adds tests only. To show that they are effective, and to give the next lanes a replayable record, it ran 91
+hand mutants of the seam: the 17 of the earlier seam campaign, rebased onto `v0.7.0`, and 74 new ones in five classes
 (identity, authentication and bounded extents, expiry and overlay precedence, budget, and accounting, which here covers
 the counters, the peaks and the physical row columns). Each mutant is one anchored replacement in
-`src/compact/source.rs` (57), `src/records.rs` (29) or `src/quality.rs` (1). The list, with each anchor and
-replacement, and the result of every run are in
+`src/compact/source.rs` (59), `src/records.rs` (29), `src/lib.rs` (2) or `src/quality.rs` (1). The list,
+with each anchor and replacement, and the result of every run are in
 [`tests/compact_seam_mutants.json`](../../../tests/compact_seam_mutants.json).
 
 A mutant counts only when its anchor matches exactly once, the tree compiles, the selector executes, at least one named
-test fails and the file is restored byte-identically (SHA-256 before and after). A compile error, a crash, a timeout or
-a run that executes no test is recorded as such and never counts as a kill. A build holds exactly one mutant.
+test fails and the file is restored byte-identically (SHA-256 before and after). A compile error, a crash (a linker
+crash included), a timeout or a run that executes no test is recorded as such, never counts as a kill and is repeated.
+A build holds exactly one mutant. The builds ran on CRLF checkouts, without `-D warnings`, so an unused binding that a
+mutant leaves behind is not an error.
 
 | Class | Mutants | Earlier campaign | New | Survive on `v0.7.0` | Killed on the final tree (replayed) |
 |---|---|---|---|---|---|
-| identity | 21 | 6 | 15 | 1 | 1 |
-| authentication | 19 | 2 | 17 | 12 | 12 |
-| expiry | 14 | 2 | 12 | 5 | 5 |
+| identity | 22 | 6 | 16 | 1 | 5 |
+| authentication | 20 | 2 | 18 | 12 | 13 |
+| expiry | 15 | 2 | 13 | 5 | 6 |
 | budget | 11 | 1 | 10 | 4 | 4 |
-| accounting | 22 | 6 | 16 | 5 | 5 |
-| **Total** | **87** | **17** | **70** | **27** | **27** |
+| accounting | 23 | 6 | 17 | 6 | 6 |
+| **Total** | **91** | **17** | **74** | **28** | **34** |
 
 Replays, all with `cargo test --locked --offline --lib -- compact::source records:: metadata_index::tests::compact rerank::`:
 
-- **Baseline**, `v0.7.0` (`02ef3e5f`), 75 tests, green before the first mutant. The whole list was replayed twice: on
-  three other machines (all 87 mutants) and on the lane's machine (86, because `R0-AU-17` was added after that pass).
-  The two replays agree on every mutant: 60 mutants fail an existing test and 27 survive, so those are the places where
-  replay evidence was missing.
-- **Final**, `e9a95366` (`v0.7.0` plus the R0 tests, 93 selected). The 27 gaps were replayed on the lane's machine, with
-  the selector green before the first mutant and again after the last: 27 of 27 killed by the tests named below. Three
-  first attempts (`R0-AU-16`, `R0-BU-07` and `R0-ID-04`) ended in a linker crash (`0xc0000409`) and are not kills; their
-  reruns are the ones counted. The whole list was not replayed on separate machines on the final tree, because no machine
-  was available to run it in time: the baseline replay on separate machines is the independent replay of the list. The
-  60 mutants that an existing test kills on `v0.7.0` were not replayed on the final tree. R0 changes no existing test:
-  the only non-documentation changes since `v0.7.0` are the new `freeze_tests.rs` and its two-line module declaration,
-  so each of those mutants still fails the test that killed it. Replaying them on separate machines remains open.
+- **Baseline**, `v0.7.0` (`02ef3e5f`), 75 tests, green before the first mutant. Of the 91 mutants, 87 were replayed on
+  three other machines, and 86 of those also on the lane's machine (`R0-AU-17` was added after that pass); the two
+  replays agree on every mutant they share. The other four (`R0-AC-17`, `R0-EX-11`, `R0-ID-11` and `R0-AU-18`) were added
+  after the review of the first final tree and ran on the lane's machine only. Together they give 63 mutants that fail
+  an existing test and 28 that survive, so those 28 are the places where replay evidence was missing.
+- **Final**, `5c982e99` (`v0.7.0` plus the R0 tests, 94 selected). The lane's machine replayed 34 mutants
+  there, in three shards, each with the selector green before its first mutant and again after its last: the 28 gaps,
+  the three statement mutants (`R0-EX-11`, `R0-ID-11` and `R0-AU-18`) and three identity mutants that an existing test
+  kills on `v0.7.0` (`R0-ID-01` to `R0-ID-03`), which measure `freeze_cache_entries_belong_to_one_collection_of_one_generation`,
+  the one freeze test that kills no gap. All 34 are killed. Five first attempts (`R0-AC-04`, `R0-AU-09`,
+  `R0-AU-12`, `R0-BU-08` and `R0-BU-10`) ended in a toolchain or linker failure and are not kills; their reruns are the
+  ones counted. No replay of a final tree ran on a separate machine, because none was available in time, so that
+  replay is open (section 8, OPEN-71-02). The other 57 mutants, which an existing test kills on `v0.7.0`,
+  were not replayed on the final tree. R0 changes no existing test (the only non-documentation changes since `v0.7.0`
+  are the new `freeze_tests.rs` and its two-line module declaration), so each of them still fails the test that killed
+  it; replaying them is open.
 
-The 27 gaps, with how each is reached and what closes it:
+The 28 gaps, with how each is reached and what closes it:
 
 | Mutant | Reach | What it does | Killed by |
 |---|---|---|---|
-| `R0-AC-02` | api | mapped_peak is overwritten instead of kept as a maximum | `freeze_mapped_accounting_keeps_its_own_peak` |
+| `R0-AC-02` | mapped | mapped_peak is overwritten instead of kept as a maximum | `freeze_mapped_accounting_keeps_its_own_peak` |
 | `R0-AC-03` | api | each materialized cell is counted as one byte | `freeze_accounting_reports_exact_values_and_keeps_peaks` |
 | `R0-AC-04` | api | cells_peak is overwritten instead of kept as a maximum | `freeze_accounting_reports_exact_values_and_keeps_peaks` |
 | `R0-AC-05` | api | cell accounting covers only the view's own collection instead of the whole generation | `freeze_accounting_reports_exact_values_and_keeps_peaks` |
 | `R0-AC-08` | api | vectors_peak is overwritten instead of kept as a maximum | `freeze_vector_peak_survives_eviction_by_a_smaller_block` |
-| `R0-AF-02` | guard | replay misses an ID whose deadline changed (TTL-only write) when its revision did not | `freeze_replay_overlay_covers_every_kind_of_change` |
+| `R0-AC-17` | api | plaintext_peak is overwritten instead of kept as a maximum | `freeze_plaintext_peak_survives_a_smaller_frame` |
+| `R0-AF-02` | input | replay misses an ID whose deadline changed (TTL-only write) when its revision did not | `freeze_replay_overlay_covers_every_kind_of_change` |
 | `R0-AU-01` | guard | the frame-kind guard is dropped from the bounded body read | `freeze_frame_tampering_is_an_error_on_every_read_path` |
 | `R0-AU-02` | guard | the frame-kind guard is dropped from record-cell materialization | `freeze_frame_tampering_is_an_error_on_every_read_path` |
-| `R0-AU-03` | file | the footer checksum guard is dropped from the bounded body read | `freeze_a_refused_read_leaves_the_rest_of_the_workspace_as_it_was`, `freeze_cached_blocks_are_authenticated_again_and_shape_checked`, `freeze_frame_tampering_is_an_error_on_every_read_path` |
+| `R0-AU-03` | tamper | the footer checksum guard is dropped from the bounded body read | `freeze_a_refused_read_leaves_the_rest_of_the_workspace_as_it_was`, `freeze_cached_blocks_are_authenticated_again_and_shape_checked`, `freeze_frame_tampering_is_an_error_on_every_read_path` |
 | `R0-AU-08` | guard | read_payload treats an out-of-bounds extent as an empty payload | `freeze_extents_outside_the_body_are_corrupt_on_every_read_path` |
 | `R0-AU-09` | guard | read_metadata treats an out-of-bounds extent as empty metadata | `freeze_extents_outside_the_body_are_corrupt_on_every_read_path` |
 | `R0-AU-11` | guard | the cached-block shape guard is removed | `freeze_cached_blocks_are_authenticated_again_and_shape_checked` |
-| `R0-AU-12` | file | effective_vector turns a base-row read or authentication error into no row | `freeze_frame_tampering_is_an_error_on_every_read_path` |
-| `R0-AU-13` | file | effective_metadata turns a base-row read or authentication error into no row | `freeze_frame_tampering_is_an_error_on_every_read_path` |
-| `R0-AU-14` | file | effective_payload turns a base-row read or authentication error into no row | `freeze_frame_tampering_is_an_error_on_every_read_path` |
-| `R0-AU-15` | guard | the bounded body read treats a frame range outside the backing as an empty frame | `freeze_frame_range_outside_the_backing_is_corrupt` |
-| `R0-AU-16` | guard | record-cell materialization treats a frame range outside the backing as an empty frame | `freeze_frame_range_outside_the_backing_is_corrupt` |
-| `R0-AU-17` | file | a block whose frame read fails is cached anyway, as an empty unaccounted entry | `freeze_a_refused_read_leaves_the_rest_of_the_workspace_as_it_was` |
-| `R0-BU-07` | guard | the frame-size bound of a bounded body read is inclusive | `freeze_frame_size_bound_is_exact` |
-| `R0-BU-08` | guard | the frame-size bound of a bounded body read is dropped | `freeze_frame_size_bound_is_exact` |
+| `R0-AU-12` | api | effective_vector turns a base-row read or authentication error into no row | `freeze_budget_and_exact_fit_boundaries`, `freeze_frame_tampering_is_an_error_on_every_read_path` |
+| `R0-AU-13` | tamper | effective_metadata turns a base-row read or authentication error into no row | `freeze_frame_tampering_is_an_error_on_every_read_path` |
+| `R0-AU-14` | tamper | effective_payload turns a base-row read or authentication error into no row | `freeze_frame_tampering_is_an_error_on_every_read_path` |
+| `R0-AU-15` | guard | the bounded body read reports a frame range outside the backing as a changed frame (the read is still refused, only its reason changes) | `freeze_frame_range_outside_the_backing_is_corrupt` |
+| `R0-AU-16` | guard | record-cell materialization reports a frame range outside the backing as a changed frame (the read is still refused, only its reason changes) | `freeze_frame_range_outside_the_backing_is_corrupt` |
+| `R0-AU-17` | tamper | a block whose frame read fails is cached anyway, as an empty unaccounted entry | `freeze_a_refused_read_leaves_the_rest_of_the_workspace_as_it_was` |
+| `R0-BU-07` | guard | a frame body of exactly MAX_BODY plus the seal overhead is refused as a changed frame (the size bound is inclusive) instead of as over the body limit | `freeze_frame_size_bound_is_exact` |
+| `R0-BU-08` | guard | the frame-size bound is dropped, so an oversize plain frame is refused as over the body limit instead of as a changed frame | `freeze_frame_size_bound_is_exact` |
 | `R0-BU-09` | guard | the decoded-body bound after authentication is dropped | `freeze_frame_size_bound_is_exact` |
 | `R0-BU-10` | guard | the decoded-body bound after authentication is inclusive | `freeze_frame_size_bound_is_exact` |
 | `R0-EF-02` | api | effective_payload lets an overlay tombstone fall through to the base payload | `freeze_effective_rows_follow_overlay_precedence_in_ascending_order` |
@@ -357,33 +365,55 @@ Seven of lane B's 18 open obligations are mutations of this seam (the [ledgers](
 re-created each one as `R0-AU-08`, `R0-AU-13`, `R0-AU-14`, `R0-EF-02`, `R0-EX-05`, `R0-EX-06` and `R0-EX-07`; all seven
 survive on `v0.7.0` and all seven are killed with the freeze tests.
 
-**Reach and equivalents.** No mutant is equivalent in the formal sense: every one changes behavior for some state, and
-a test kills it. They differ in how that state arises. Of the 27 gaps, 14 are observable through the seam's
-API or by corrupting the stored file after install (`api`: the effective-read, replay and accounting semantics; `file`:
-a base-row read that fails because stored bytes changed). The other 13 (`guard`) check internal consistency that
-no writer or committing handle can break: the recorded kind and frame ID come from one value at capture, a frame is
-always a range of the backing it was appended to, installation refuses an oversize body and validates every extent
-before capture, a cache key has one block, every deadline write also writes a revision, and the only block kind is
-`0x0101` (IDN-5). A test kills them only by editing the in-memory directory that a load derives, as lane B's own seam
-tests do. They are kept because the guards are the error contract of section 3, but they do not count toward the
-minimum of 12 gaps closed; the 14 that do count meet it on their own. `R0-BU-09` and `R0-BU-10` are reachable
-only for a plain frame whose body lies between `MAX_BODY` and `MAX_BODY + SEAL_OVERHEAD` bytes, which
+**Reach.** No mutant is claimed equivalent: every one changes the outcome of a state that a test builds, and a test
+kills it. The states differ in how they arise, which the `Reach` column records:
+
+- `api`: a call of the seam on a valid generation with valid inputs, such as the effective-read, expiry, replay and
+  accounting semantics, or a budget refusal of an effective read.
+- `mapped`: needs the test-only mapped copy of the backing, a state that no open path creates at `v0.7.0` and that L5
+  will.
+- `input`: calls a function with an input that no writer produces but that its contract covers, here
+  `compact_from_replay` with a deadline that changed under an unchanged revision (every deadline write also writes a
+  revision).
+- `tamper`: changes the stored bytes of an installed generation in place.
+- `guard`: checks internal consistency that no writer or committing handle can break. The recorded kind and frame ID
+  come from one value at capture, a frame is always a range of the backing it was appended to, installation refuses an
+  oversize body and validates every extent before capture, a cache key has one block, and the only block kind is
+  `0x0101` (IDN-5). A test kills these only by editing the in-memory directory that a load derives, as lane B's own seam
+  tests do.
+
+Of the 28 gaps, 10 are `api`, 1 is `mapped`, 1 is `input`, 4 are `tamper` and 12 are `guard`. By the approved definition of an effective mutant, all 28 count. On the strictest reading, which
+counts only the 12 that need neither stored bytes nor the directory to be edited, the minimum of 12 is met as
+well. A reader who counts over the states the product can produce may call the `tamper` and `guard` mutants
+equivalent; they are kept because the guards are the error contract of section 3. `R0-BU-09` and `R0-BU-10` are
+reachable only for a plain frame whose body lies between `MAX_BODY` and `MAX_BODY + SEAL_OVERHEAD` bytes, which
 `freeze_frame_size_bound_is_exact` builds by hand.
 
-**What the campaign does not show.** It shows that the tests pin the statements in section 3, not that the statements
-are complete, and it supports no size or speed claim. Anchors are valid on the trees named above; a lane that changes
-the lines around one re-bases it and replays the mutant, and does not trust the recorded result.
+**What the campaign does and does not measure.** All 19 freeze tests fail at least one of the replayed mutants, so each new test has a measured kill, and existing tests fail
+many of the same mutants, so the freeze tests are not the only pins of the seam. It applies no mutant to CLK-7 (section 3.1 marks it as
+not pinned), PRE-4, IDN-3 or CON-1, whose tests existed at `v0.7.0`: a lane that changes one of those four statements
+adds its mutant first. `R0-EX-11` (CLK-1), `R0-ID-11` (PRE-6) and `R0-AU-18` (ERR-7) were added after the reviews,
+because the tests of those statements had no mutant. The campaign shows that the tests pin the statements in section 3,
+not that the statements are complete, and it supports no size or speed claim. Anchors are valid on the trees named
+above; a lane that changes the lines around one re-bases it and replays the mutant, and does not trust the recorded
+result.
 
 ## 8. Decisions
 
 Decided on 2026-11-05 by the coordinator under the owner's delegation, as recommended.
 
+- **OPEN-71-01, activation: private integration only.** Nothing in 0.7.1 turns the compact seam on. The production compact
+  writer, float16 and temporal copy-out stay opt-in and closed, no setting, option or file content enables a gate, and every
+  statement on this page describes private, test-gated code (section 1).
 - **OPEN-71-02, survivor evidence: approved.** The evidence form in the [ledgers](p3b-survivor-ledgers.md#evidence-that-would-settle-open-71-02)
   is the acceptance form: one record per mutant with before and after SHA-256, the failing test names and a restored-green
-  run, replayed independently. R0's ledger has that shape with one qualification, which the slice report asks the
-  coordinator to confirm: the restored-green run is recorded once per replay (before the first mutant and after the last)
-  and not after every mutant, because a byte-identical restore, which the ledger records per mutant, returns the tree
-  whose baseline run was green, and a run per mutant would double the number of builds. An equivalence claim
+  run, replayed independently. R0's ledgers have that shape with two qualifications, which the slice reports ask the
+  coordinator to confirm. First, the restored-green run is recorded once per replay (before the first mutant and after the
+  last) and not after every mutant, because a byte-identical restore, which the ledger records per mutant, returns the tree
+  whose baseline run was green, and a run per mutant would double the number of builds. Second, the independent replay
+  exists for the baseline on `v0.7.0` (87 of the 91 mutants of slice 2 ran on three other machines as well as on the
+  lane's); every replay of a final tree, in slice 2 and in slice 3, ran on the lane's machine only, because no other machine
+  was available in time, and an independent replay of the final trees is open. An equivalence claim
   (`pa-graph-evidence-wall-clock`) additionally needs an independent review and a pinning test wherever one can be
   written.
 - **OPEN-71-03, seam freeze: approved.** Section 3 is frozen, section 4 is the approved inventory of limits that need not
@@ -399,7 +429,7 @@ Decided on 2026-11-05 by the coordinator under the owner's delegation, as recomm
   `compact_server_materializes_only_results` stays with C4.
 - **OPEN-71-14, campaign sizes: approved.** Keep the inventory's minima and every historical survivor, count a mutant only
   when it compiles, runs, fails a named test and restores byte-identically, and take a baseline run on the previous tag so
-  that a gap closed is measured and not claimed. R0 shows that 70 new mutants over one seam are practical.
+  that a gap closed is measured and not claimed. R0 shows that 74 new mutants over one seam are practical.
 
 ## 9. Verification
 
