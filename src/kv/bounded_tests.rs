@@ -403,8 +403,10 @@ fn keys_are_ordered_by_utf8_bytes_for_every_limit() {
 
 // The work of a scan is bounded too: a candidate is probed only when it can
 // become an entry. Records of another namespace, keys that miss the prefix or
-// do not follow the cursor, entries that are due, and (once `limit + 1` keys are
-// held) keys that are not smaller than the largest one held cost no probe.
+// do not follow the cursor, entries that are due, records outside their key's
+// window (`look_alikes_outside_their_window_are_never_probed`), and (once
+// `limit + 1` keys are held) keys that are not smaller than the largest one
+// held cost no probe.
 #[test]
 fn only_candidates_that_can_be_entries_are_probed() {
     let mut db = memory();
@@ -490,6 +492,112 @@ fn limit_and_namespace_are_validated_before_any_scan() {
         ));
     }
     assert_eq!(mark(), 0, "an invalid request must not scan");
+}
+
+// A request with both a bad namespace and a bad limit is refused for its
+// namespace, as in v0.7.0: the namespace is checked first.
+#[test]
+fn a_bad_namespace_is_reported_before_a_bad_limit() {
+    let mut db = memory();
+    bulk(&mut db, "n", ["a".to_owned()]);
+    let view = db.kv_view("default").unwrap();
+    let namespace = Error::InvalidKvKey("namespace must be 1 to 255 bytes").to_string();
+    let limit = Error::InvalidKvKey("limit must be between 1 and 10000").to_string();
+    assert_ne!(namespace, limit);
+    for bad_limit in [0, MAX_KV_LIST_LIMIT + 1] {
+        for result in [
+            view.list_at("", "", None, bad_limit, 0).map(|_| ()),
+            view.visit_at("", "", None, bad_limit, 0, |_| ControlFlow::Continue(())),
+        ] {
+            assert_eq!(result.unwrap_err().to_string(), namespace, "{bad_limit}");
+        }
+        let result = view.list_at("n", "", None, bad_limit, 0);
+        assert_eq!(result.unwrap_err().to_string(), limit, "{bad_limit}");
+    }
+}
+
+// What a scan holds is bounded by the limit, not by the collection: the
+// candidate set is allocated for `limit + 1` keys, however many records the
+// collection has. Measured as the heap the scan holds while it visits.
+#[test]
+fn a_scan_allocates_for_the_limit_not_for_the_collection() {
+    use crate::test_globals::{counted, live};
+    let mut db = memory();
+    bulk(
+        &mut db,
+        "n",
+        (0..MAX_KV_LIST_LIMIT + 300).map(|index| format!("{index:06}")),
+    );
+    let view = db.kv_view("default").unwrap();
+    for limit in [1, 2, 10] {
+        let (held, _) = counted(|| {
+            let mut held = 0;
+            view.visit_at("n", "", None, limit, 0, |_| {
+                held = held.max(live());
+                ControlFlow::Continue(())
+            })
+            .unwrap();
+            held
+        });
+        // 24 bytes per candidate key and nothing else: a few hundred bytes,
+        // where one slot per record would be 240 KB.
+        assert!(held > 0 && held < 4_096, "limit {limit}: {held} bytes held");
+    }
+}
+
+// A record that decodes to a key but lies outside the key's window can never be
+// that key's entry: it costs no probe, however many there are and whenever the
+// scan meets them. Here 1,000 of them are met first, while the candidate set is
+// still empty, and every one sorts after both real keys.
+#[test]
+fn look_alikes_outside_their_window_are_never_probed() {
+    let mut db = memory();
+    bulk(&mut db, "n", ["a", "b"].map(str::to_owned));
+    for id in 1..=1_000u64 {
+        let key = format!("z{id:04}");
+        assert!(
+            id.wrapping_sub(first_slot("n", &key)) >= KV_PROBE_SLOTS,
+            "{key}: inside the window"
+        );
+        plant(&mut db, id, "n", &key, "spoof");
+    }
+    // One slot past the window of each real key.
+    for key in ["a", "b"] {
+        let id = first_slot("n", key).wrapping_add(KV_PROBE_SLOTS);
+        plant(&mut db, id, "n", key, "spoof");
+    }
+    let view = db.kv_view("default").unwrap();
+    probes_reset();
+    let entries = view.list_at("n", "", None, 1, 0).unwrap();
+    assert_eq!(keys(&entries), ["a"]);
+    assert_eq!(entries[0].value, b"a");
+    assert_eq!(probes(), 2, "only the two real keys can be entries");
+    probes_reset();
+    let entries = view.list_at("n", "", None, 10, 0).unwrap();
+    assert_eq!(keys(&entries), ["a", "b"]);
+    assert_eq!(probes(), 2);
+}
+
+// The window is exactly `KV_PROBE_SLOTS` long: the last slot resolves, as `get`
+// shows, and the one after it does not.
+#[test]
+fn the_last_slot_of_a_window_is_an_entry_and_the_next_one_is_not() {
+    let mut db = memory();
+    let inside = first_slot("n", "edge").wrapping_add(KV_PROBE_SLOTS - 1);
+    let outside = first_slot("n", "over").wrapping_add(KV_PROBE_SLOTS);
+    plant(&mut db, inside, "n", "edge", "in");
+    plant(&mut db, outside, "n", "over", "out");
+    let view = db.kv_view("default").unwrap();
+    assert_eq!(
+        view.get_at("n", "edge", 0)
+            .unwrap()
+            .map(|entry| entry.value),
+        Some(b"in".to_vec())
+    );
+    assert_eq!(view.get_at("n", "over", 0).unwrap(), None);
+    let entries = view.list_at("n", "", None, 10, 0).unwrap();
+    assert_eq!(keys(&entries), ["edge"]);
+    assert_eq!(entries[0].value, b"in");
 }
 
 // The universe is small so that the generated state is dense with look-alikes.

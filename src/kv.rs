@@ -65,9 +65,9 @@ pub struct KvRef<'a> {
     /// Compare-and-set token; see the module documentation.
     pub version: u64,
     pub expires_at_ms: Option<u64>,
-    /// Another live entry follows this one in the listing (after the visit's
-    /// `limit` is applied, so the last visited entry reports whether the
-    /// listing continues). Decided from keys alone: no value is read for it.
+    /// Another live entry follows this one in the listing: this entry is not
+    /// the last of the `limit` visited, or it is and a further live entry lies
+    /// beyond the limit. Decided from keys alone: no value is read for it.
     pub has_next: bool,
 }
 
@@ -522,12 +522,17 @@ where
         if selected.len() == capacity && selected.peek().is_some_and(|worst| candidate >= *worst) {
             continue;
         }
-        // A record that merely decodes to a key is that key's entry only when
-        // `probe`, the lookup behind `get`, `put` and `delete`, resolves the key
-        // to it. Look-alikes outside the key's window, or behind an earlier
-        // holder of the key, never enter the set: they would otherwise use up
-        // room that later real entries need, and the listing would come back
-        // short although more entries exist.
+        // `probe` resolves a key only to a record of its own window, the
+        // `KV_PROBE_SLOTS` IDs from its first slot (wrapping), so a record
+        // outside that window is not an entry: it costs one hash, no lookup.
+        if id.wrapping_sub(slot_base(namespace, key)) >= KV_PROBE_SLOTS {
+            continue;
+        }
+        // A record inside the window is that key's entry only when `probe`, the
+        // lookup behind `get`, `put` and `delete`, resolves the key to it. A
+        // look-alike behind an earlier holder of the key never enters the set:
+        // it would otherwise use up room that later real entries need, and the
+        // listing would come back short although more entries exist.
         #[cfg(test)]
         PROBES.with(|probes| probes.set(probes.get() + 1));
         let resolved = probe(db, collection, namespace, key, now_ms)?.found;
