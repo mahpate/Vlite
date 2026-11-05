@@ -1515,6 +1515,202 @@ async fn deleted_reserved_names_stay_occupied_until_recreated_by_raw_holder() {
     }
 }
 
+/// Requests whose bodies change state, beside the empty-bodied ones in CASES.
+const EXTRA_CASES: &[(&str, &str, &str)] = &[
+    (
+        "POST",
+        "/v1/collections/$c/batches",
+        r#"{"operations":[{"op":"put","id":"9","vector":[0,1]}]}"#,
+    ),
+    (
+        "PATCH",
+        "/v1/collections/$c/settings",
+        r#"{"hnsw":{"ef_construction":123}}"#,
+    ),
+    (
+        "PUT",
+        "/v1/collections/$c/settings",
+        r#"{"hnsw":{"ef_construction":124}}"#,
+    ),
+];
+
+fn scrub(value: &mut Value) {
+    match value {
+        Value::Object(map) => {
+            map.remove("view_sequence");
+            map.remove("elapsed_ms");
+            for inner in map.values_mut() {
+                scrub(inner);
+            }
+        }
+        Value::Array(items) => {
+            for inner in items {
+                scrub(inner);
+            }
+        }
+        _ => {}
+    }
+}
+
+/// Everything a root principal can read about the root namesakes of the
+/// names a tenant uses, including the reserved ones through their raw
+/// holders. Database-wide counters are left out: a tenant's own writes move
+/// them.
+async fn root_digest(fixture: &Fixture, raw: &str, raw_other: &str) -> String {
+    let mut out = String::new();
+    for (actor, name) in [
+        (ADMIN, "ordinary"),
+        (raw_other, "other_ev"),
+        (raw, "notes_ev"),
+        (ADMIN, "scratch"),
+    ] {
+        for path in [
+            format!("/v1/collections/{name}"),
+            format!("/v1/collections/{name}/vectors?limit=100"),
+            format!("/v1/collections/{name}/vectors/7"),
+            format!("/v1/collections/{name}/vectors/8"),
+        ] {
+            let answer = request(&fixture.app, actor, "GET", &path, "").await;
+            let mut body: Value = serde_json::from_slice(&answer.2).unwrap_or(Value::Null);
+            scrub(&mut body);
+            out += &format!("{path} {} {body}\n", answer.0);
+        }
+    }
+    for (actor, name) in [
+        (ADMIN, "ordinary_graph"),
+        (raw_other, "other_graph"),
+        (raw, "notes_graph"),
+        (ADMIN, "scratch_graph"),
+    ] {
+        for (method, path, body) in [
+            ("GET", format!("/v1/graphs/{name}"), ""),
+            ("GET", format!("/v1/graphs/{name}/schema"), ""),
+            ("POST", format!("/v1/graphs/{name}/nodes/find"), "{}"),
+        ] {
+            let answer = request(&fixture.app, actor, method, &path, body).await;
+            let mut body: Value = serde_json::from_slice(&answer.2).unwrap_or(Value::Null);
+            scrub(&mut body);
+            out += &format!("{path} {} {body}\n", answer.0);
+        }
+    }
+    out
+}
+
+/// Every name-addressed operation, run by a tenant credential against names
+/// that also exist at root (two of them reserved there), must leave every root
+/// namesake byte-identical and return none of its data. Comparing status
+/// codes alone cannot see a write that lands in the wrong collection.
+#[tokio::test]
+async fn tenant_requests_never_change_or_read_a_root_namesake() {
+    for actor in ["tenant", "tenant_raw"] {
+        let fixture = fixture();
+        let raw = token(&fixture, "raw").to_owned();
+        let raw_other = token(&fixture, "raw_other").to_owned();
+        let credential = token(&fixture, actor).to_owned();
+        let record = r#"{"vector":[1,0],"payload_base64":"Uk9PVFNFQ1JFVA==","metadata":{"owner":{"type":"string","value":"rootsecret"}}}"#;
+        for (who, name) in [
+            (ADMIN.to_owned(), "ordinary"),
+            (raw_other.clone(), "other_ev"),
+            (raw.clone(), "notes_ev"),
+        ] {
+            for id in [7, 8] {
+                let put = request(
+                    &fixture.app,
+                    &who,
+                    "PUT",
+                    &format!("/v1/collections/{name}/vectors/{id}"),
+                    record,
+                )
+                .await;
+                assert_eq!(put.0, 204, "seed {name}/{id}");
+            }
+        }
+        for (who, name) in [
+            (ADMIN.to_owned(), "ordinary_graph"),
+            (raw_other.clone(), "other_graph"),
+            (raw.clone(), "notes_graph"),
+        ] {
+            let seeded = request(
+                &fixture.app,
+                &who,
+                "POST",
+                &format!("/v1/graphs/{name}/batch"),
+                r#"{"ops":[{"op":"create_node","key":"a"},{"op":"create_node","key":"n"},{"op":"create_node","key":"m"}]}"#,
+            )
+            .await;
+            assert_eq!(seeded.0, 200, "seed {name}");
+        }
+        // The tenant's own namesakes, so that its writes can succeed.
+        for name in ["ordinary", "other_ev", "notes_ev"] {
+            for id in [7, 8] {
+                request(
+                    &fixture.app,
+                    &credential,
+                    "PUT",
+                    &format!("/v1/collections/{name}/vectors/{id}"),
+                    r#"{"vector":[0,1],"payload_base64":"VEVOQU5U"}"#,
+                )
+                .await;
+            }
+        }
+        // Empty namesakes the tenant may drop and a root principal could lose.
+        for who in [ADMIN.to_owned(), credential.clone()] {
+            for (path, body) in [
+                ("/v1/collections", r#"{"name":"scratch","dimensions":2}"#),
+                ("/v1/graphs", r#"{"graph":"scratch_graph"}"#),
+            ] {
+                let created = request(&fixture.app, &who, "POST", path, body).await;
+                assert_eq!(created.0, 201, "{path} for {who}");
+            }
+        }
+        let baseline = root_digest(&fixture, &raw, &raw_other).await;
+        for path in ["/v1/collections/scratch", "/v1/graphs/scratch_graph"] {
+            let dropped = request(&fixture.app, &credential, "DELETE", path, "").await;
+            assert_eq!(dropped.0, 200, "{actor} DELETE {path}");
+            assert_eq!(
+                root_digest(&fixture, &raw, &raw_other).await,
+                baseline,
+                "{actor} DELETE {path} changed a root namesake"
+            );
+        }
+        // Dropping the tenant's own collection or graph goes last, so every
+        // other route still has a namesake to act on.
+        let mut cases: Vec<&(&str, &str, &str)> = CASES.iter().chain(EXTRA_CASES).collect();
+        cases.sort_by_key(|(method, path, _)| {
+            *method == "DELETE" && !path.contains("/vectors/") && !path.contains("/kv/")
+        });
+        let mut executed = 0;
+        for (method, path, body) in cases {
+            let names: Vec<&str> = if path.contains("$c") {
+                vec!["ordinary", "other_ev", "notes_ev"]
+            } else if path.contains("$g") {
+                vec!["ordinary_graph", "other_graph", "notes_graph"]
+            } else {
+                vec![""]
+            };
+            for name in names {
+                let concrete = path.replace("$c", name).replace("$g", name);
+                let answer = request(&fixture.app, &credential, method, &concrete, body).await;
+                let text = String::from_utf8_lossy(&answer.2).to_string();
+                assert!(
+                    !text.contains("ROOTSECRET")
+                        && !text.contains("Uk9PVFNFQ1JFVA")
+                        && !text.contains("rootsecret"),
+                    "{actor} {method} {concrete} returned root data: {text}"
+                );
+                assert_eq!(
+                    root_digest(&fixture, &raw, &raw_other).await,
+                    baseline,
+                    "{actor} {method} {concrete} ({}) changed a root namesake",
+                    answer.0
+                );
+                executed += 1;
+            }
+        }
+        assert!(executed >= 150, "{actor}: only {executed} requests ran");
+    }
+}
+
 #[tokio::test]
 async fn tenant_named_and_sparse_search_use_the_guarded_collection() {
     let fixture = fixture();
