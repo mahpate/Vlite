@@ -96,6 +96,32 @@ async fn call(app: &Router, method: &str, path: &str, body: Body) -> (u16, Value
     (status, value)
 }
 
+async fn call_with_response(
+    app: &Router,
+    method: &str,
+    path: &str,
+    body: Body,
+    token: &str,
+) -> (u16, axum::http::HeaderMap, Vec<u8>) {
+    let response = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method(method)
+                .uri(path)
+                .header("authorization", format!("Bearer {token}"))
+                .header("content-type", "application/json")
+                .body(body)
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    let status = response.status().as_u16();
+    let headers = response.headers().clone();
+    let body = response.into_body().collect().await.unwrap().to_bytes();
+    (status, headers, body.to_vec())
+}
+
 async fn call_token(
     app: &Router,
     method: &str,
@@ -334,6 +360,102 @@ fn start_tenant_scoped(
     (app, format!("vlk_{ID}_{secret}"))
 }
 
+fn start_tenant_scoped_empty_memory_graph(directory: &TempDir) -> (Router, String, String) {
+    const TENANT: &str = "0123456789abcdef0123456789abcdef";
+    const RAW_ID: &str = "abcdefghij27";
+    const NO_RAW_ID: &str = "abcdefghij26";
+    let raw_secret = "A".repeat(43);
+    let no_raw_secret = "B".repeat(43);
+    let mut db = Database::create_in_memory(
+        2,
+        CreateOptions {
+            format: Some(FormatVersion::V5),
+            ..Default::default()
+        },
+    )
+    .unwrap();
+    for name in ["notes_ev", "ordinary"] {
+        db.create_collection(
+            &format!("t{TENANT}__{name}"),
+            CollectionSpec {
+                dimensions: 2,
+                settings: Default::default(),
+            },
+        )
+        .unwrap();
+    }
+    db.create_graph(&format!("t{TENANT}__notes_graph")).unwrap();
+    db.create_graph(&format!("t{TENANT}__ordinary_graph"))
+        .unwrap();
+    let lineage = db.lineage().unwrap();
+    let credential = |id: &str, name: &str, secret: &str| {
+        serde_json::json!({
+            "id": id,
+            "name": name,
+            "all": true,
+            "collections": [],
+            "graphs": ["*"],
+            "operations": ["read", "search", "collections", "graph_read", "graph_write"],
+            "lineage": format!("{lineage:016x}"),
+            "secret_sha256": format!("{:x}", Sha256::digest(secret.as_bytes())),
+            "created_unix_ms": 0,
+            "expires_unix_ms": 9_999_999_999_999u64,
+            "revoked_unix_ms": null,
+            "rotated_from": null,
+            "tenant_id": TENANT
+        })
+    };
+    let credentials = serde_json::json!({
+        "schema": 1,
+        "credentials": [
+            credential(RAW_ID, "fake raw-access test credential", &raw_secret),
+            credential(NO_RAW_ID, "fake no-raw-access test credential", &no_raw_secret)
+        ]
+    });
+    std::fs::write(
+        directory.path().join("credentials.json"),
+        serde_json::to_vec(&credentials).unwrap(),
+    )
+    .unwrap();
+    std::fs::write(
+        directory.path().join("tenants.json"),
+        serde_json::to_vec(&serde_json::json!([{
+            "id": TENANT,
+            "name": "test tenant",
+            "max_vectors": null
+        }]))
+        .unwrap(),
+    )
+    .unwrap();
+    let mut bindings: Value = serde_json::from_str(BINDINGS).unwrap();
+    let binding = &mut bindings["bindings"][0];
+    binding["tenant"] = serde_json::json!(TENANT);
+    binding["graph"] = serde_json::json!("notes_graph");
+    binding["evidence_collection"] = serde_json::json!("notes_ev");
+    binding["grants"] = serde_json::json!([
+        {"principal": RAW_ID, "scopes": [{"agent": "a"}], "raw_access": true},
+        {"principal": NO_RAW_ID, "scopes": [{"agent": "b"}], "raw_access": false}
+    ]);
+    let path = directory.path().join("memory-bindings.json");
+    std::fs::write(&path, serde_json::to_vec(&bindings).unwrap()).unwrap();
+    let app = configured_admin_router(
+        Service::new(db),
+        ServerOptions {
+            admin_token: Some(BearerToken::new(ADMIN).unwrap()),
+            read_only_token: Some(BearerToken::new(READ_ONLY).unwrap()),
+            admin_directory: Some(directory.path().into()),
+            memory_bindings_file: Some(path),
+            ..Default::default()
+        },
+    )
+    .unwrap();
+    (
+        app,
+        format!("vlk_{RAW_ID}_{raw_secret}"),
+        format!("vlk_{NO_RAW_ID}_{no_raw_secret}"),
+    )
+}
+
 #[tokio::test]
 async fn reserved_graph_and_collection_are_denied_and_lists_filter_them() {
     let directory = tempfile::tempdir().unwrap();
@@ -356,16 +478,6 @@ async fn reserved_graph_and_collection_are_denied_and_lists_filter_them() {
         "credential scope does not permit this operation or collection"
     );
     assert_eq!(get(&app, "/v1/collections/ordinary").await.0, 200);
-    let missing_bindings = BINDINGS.replace("\"notes_ev\"", "\"missing_ev\"");
-    let missing_directory = tempfile::tempdir().unwrap();
-    let missing_app = start(&missing_directory, Some(&missing_bindings), false).unwrap();
-    let (missing_status, missing_error) = get(&missing_app, "/v1/collections/missing_ev").await;
-    assert_eq!(missing_status, 403);
-    assert_eq!(missing_error["error"]["code"], "forbidden_scope");
-    assert_eq!(
-        missing_error["error"]["message"],
-        "credential scope does not permit this operation or collection"
-    );
     assert_eq!(
         call(&app, "DELETE", "/v1/graphs/notes_graph", Body::empty())
             .await
@@ -485,6 +597,20 @@ async fn reserved_graph_and_collection_are_denied_and_lists_filter_them() {
         .collect::<Vec<_>>();
     assert!(names.contains(&"ordinary"));
     assert!(!names.contains(&"notes_ev"));
+}
+
+#[test]
+fn startup_refuses_bindings_with_a_missing_evidence_collection() {
+    let missing_bindings = BINDINGS.replace("\"notes_ev\"", "\"missing_ev\"");
+    let directory = tempfile::tempdir().unwrap();
+    let error = start(&directory, Some(&missing_bindings), false)
+        .expect_err("startup must refuse a binding with no evidence collection");
+    assert!(
+        error
+            .to_string()
+            .contains("a memory binding evidence collection does not exist"),
+        "unexpected startup refusal: {error}"
+    );
 }
 
 #[tokio::test]
@@ -1058,7 +1184,7 @@ async fn tenant_qualified_reservations_follow_scoped_credentials_and_raw_access(
                 "DELETE",
                 "/v1/graphs/notes_graph",
                 "",
-                if raw_access { 200 } else { 403 },
+                if raw_access { 409 } else { 403 },
             ),
             ("DELETE", "/v1/graphs/ordinary_graph", "", 200),
         ] {
@@ -1071,6 +1197,8 @@ async fn tenant_qualified_reservations_follow_scoped_credentials_and_raw_access(
                     "credential scope does not permit this operation or collection",
                     "{method} {path}"
                 );
+            } else if expected == 409 {
+                assert_eq!(error["error"]["code"], "graph_not_empty", "{method} {path}");
             }
         }
     }
@@ -1165,11 +1293,21 @@ async fn tenant_qualified_reservations_follow_scoped_credentials_and_raw_access(
         .0,
         204
     );
+    let (status, error) = call_token(
+        &raw_write,
+        "DELETE",
+        "/v1/graphs/notes_graph",
+        Body::empty(),
+        &token,
+    )
+    .await;
+    assert_eq!(status, 409);
+    assert_eq!(error["error"]["code"], "graph_not_empty");
     assert_eq!(
         call_token(
             &raw_write,
             "DELETE",
-            "/v1/graphs/notes_graph",
+            "/v1/graphs/ordinary_graph",
             Body::empty(),
             &token,
         )
@@ -1177,6 +1315,129 @@ async fn tenant_qualified_reservations_follow_scoped_credentials_and_raw_access(
         .0,
         200
     );
+}
+
+#[tokio::test]
+async fn deleted_reserved_resources_remain_indistinguishable_from_existing_resources() {
+    let directory = tempfile::tempdir().unwrap();
+    let (app, raw_access, no_raw_access) = start_tenant_scoped_empty_memory_graph(&directory);
+    for agent in ["a", "b"] {
+        let mut scope_key = b"scope:v1".to_vec();
+        for value in [
+            Some("0123456789abcdef0123456789abcdef"),
+            Some(agent),
+            None,
+            None,
+        ] {
+            match value {
+                None => scope_key.push(0),
+                Some(value) => {
+                    scope_key.push(1);
+                    scope_key.extend_from_slice(&(value.len() as u32).to_be_bytes());
+                    scope_key.extend_from_slice(value.as_bytes());
+                }
+            }
+        }
+        let scope_key = format!("scope:v1:{:x}", Sha256::digest(scope_key));
+        assert_eq!(
+            call_token(
+                &app,
+                "POST",
+                "/v1/graphs/notes_graph/batch",
+                Body::from(format!(
+                    r#"{{"ops":[{{"op":"delete_node","key":"{scope_key}"}}]}}"#
+                )),
+                &raw_access,
+            )
+            .await
+            .0,
+            200,
+            "remove each provisioned scope node to make the reserved graph empty"
+        );
+    }
+
+    let actors = [(no_raw_access.as_str(), false), (ADMIN, true)];
+    let mut before = Vec::new();
+    for (token, admin) in actors {
+        let collection = if admin {
+            "t0123456789abcdef0123456789abcdef__notes_ev"
+        } else {
+            "notes_ev"
+        };
+        let graph = if admin {
+            "t0123456789abcdef0123456789abcdef__notes_graph"
+        } else {
+            "notes_graph"
+        };
+        let routes = [
+            ("GET", format!("/v1/collections/{collection}"), ""),
+            (
+                "POST",
+                format!("/v1/collections/{collection}/search"),
+                r#"{"vector":[0,0],"k":1}"#,
+            ),
+            ("DELETE", format!("/v1/collections/{collection}"), ""),
+            ("GET", format!("/v1/graphs/{graph}"), ""),
+            ("DELETE", format!("/v1/graphs/{graph}"), ""),
+        ];
+        let mut responses = Vec::new();
+        for (method, path, body) in &routes {
+            responses.push(call_with_response(&app, method, path, Body::from(*body), token).await);
+        }
+        for (status, _, body) in &responses {
+            assert_eq!(*status, 403);
+            let error: Value = serde_json::from_slice(body).unwrap();
+            assert_eq!(error["error"]["code"], "forbidden_scope");
+        }
+        before.push((routes, responses));
+    }
+
+    assert_eq!(
+        call_token(
+            &app,
+            "DELETE",
+            "/v1/graphs/notes_graph",
+            Body::empty(),
+            &raw_access,
+        )
+        .await
+        .0,
+        200,
+        "raw_access must permit dropping an empty reserved graph"
+    );
+    assert_eq!(
+        call_token(
+            &app,
+            "DELETE",
+            "/v1/collections/notes_ev",
+            Body::empty(),
+            &raw_access,
+        )
+        .await
+        .0,
+        200,
+        "raw_access must permit dropping an empty reserved collection"
+    );
+
+    for ((token, _), (routes, responses)) in actors.into_iter().zip(before) {
+        for ((method, path, body), (expected_status, expected_headers, expected_body)) in
+            routes.iter().zip(responses)
+        {
+            let (actual_status, mut actual_headers, actual_body) =
+                call_with_response(&app, method, path, Body::from(*body), token).await;
+            let mut expected_headers = expected_headers;
+            assert!(actual_headers.contains_key("x-request-id"));
+            assert!(expected_headers.contains_key("x-request-id"));
+            // The middleware assigns a unique request ID; all other headers must match.
+            actual_headers.remove("x-request-id");
+            expected_headers.remove("x-request-id");
+            assert_eq!(
+                (actual_status, actual_headers, actual_body),
+                (expected_status, expected_headers, expected_body),
+                "{method} {path} after the reserved resources were deleted"
+            );
+        }
+    }
 }
 
 #[tokio::test]
