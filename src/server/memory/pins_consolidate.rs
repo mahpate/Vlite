@@ -186,6 +186,24 @@ async fn a_spent_budget_is_a_504_and_writes_nothing() {
     }
 }
 
+/// C1 sections 2 and 6 and mapping section 2: an observation later than the
+/// execution clock is 422 `invalid_input` (`FutureObservation`), one at the
+/// clock is served, and the refused request wrote nothing.
+#[tokio::test]
+async fn an_observation_after_the_clock_is_refused() {
+    let rig = Rig::new(false);
+    rig.seed().await;
+    let mut body = consolidate("future");
+    for (observed, expected) in [("101", 422), ("100", 200)] {
+        body["output"]["observed_at_ms"] = json!(observed);
+        let (status, answer) = rig.post(CONSOLIDATE, &body).await;
+        assert_eq!(status, expected, "observed {observed}: {answer}");
+        if status == 422 {
+            assert_eq!(answer["error"]["code"], "invalid_input", "{answer}");
+        }
+    }
+}
+
 /// Serving section 6: access needs the credential's grant on the collection
 /// as it is now. A dropped and recreated evidence collection has a new ID, so
 /// the stale grant is refused with the one uniform 403 before any refusal,

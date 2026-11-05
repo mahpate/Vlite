@@ -289,6 +289,50 @@ async fn field_refusals_follow_the_contract_field_order() {
     }
 }
 
+/// Mapping section 1: a `logical_delete` disposition is the
+/// `consolidate_delete` refusal on whichever input carries it.
+#[tokio::test]
+async fn a_logical_delete_is_refused_on_any_input() {
+    let rig = rig();
+    for position in 0..3 {
+        let mut inputs: Vec<Value> = (0..3)
+            .map(|i| json!({"id": format!("m{i}"), "revision": "1"}))
+            .collect();
+        inputs[position]["disposition"] = json!("logical_delete");
+        let body = consolidate_n(position, Value::Array(inputs));
+        let context = format!("input {position}");
+        refused(
+            &rig.post(CONSOLIDATE, &body).await,
+            "consolidate_delete",
+            &context,
+        );
+    }
+}
+
+/// Serving sections 4 and 8: `dry_run: false`, `merge: none`, `disposition:
+/// retain` and an empty `references` or `evidence` list are the defaults or
+/// absent, so they are served and are the same request as one without them.
+#[tokio::test]
+async fn default_valued_fields_are_served_not_refused() {
+    let rig = rig();
+    rig.seed(&json!({"agent": "a"}), &ids(&["m1"])).await;
+    let mut body = consolidate_n(0, one("m1"));
+    body["dry_run"] = json!(false);
+    body["require_complete_feed"] = json!(false);
+    body["evidence"] = json!([]);
+    body["inputs"][0]["disposition"] = json!("retain");
+    body["output"]["merge"] = json!("none");
+    body["output"]["references"] = json!([]);
+    body["output"]["evidence"] = json!([]);
+    let (status, first) = rig.post(CONSOLIDATE, &body).await;
+    assert_eq!(status, 200, "{first}");
+    assert_eq!(first["replayed"], false);
+    let (status, again) = rig.post(CONSOLIDATE, &consolidate_n(0, one("m1"))).await;
+    assert_eq!(status, 200, "{again}");
+    assert_eq!(again["replayed"], true);
+    assert_eq!(again["receipt"], first["receipt"]);
+}
+
 /// Mapping section 2 check order: capability refusals (4) precede request
 /// validation (5), so a refused request needs no valid key, inputs or output.
 #[tokio::test]
