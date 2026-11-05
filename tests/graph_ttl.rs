@@ -547,6 +547,71 @@ fn every_read_honours_the_clock() {
     assert_eq!(evidence, [2]);
 }
 
+/// A pivot record with a deadline is read at the clock of the graph handle, never at the wall clock: the pivot search
+/// shows it before its deadline and hides it from `T >= deadline`. `EARLY` is long past on the wall clock and `LATE`
+/// is not reached by it, so a search that sampled the wall clock would hide the first at every `T` and show the
+/// second at every `T`.
+#[test]
+fn retrieve_reads_the_pivot_records_at_the_read_clock() {
+    const EARLY: u64 = 1_000;
+    const LATE: u64 = 4_102_444_800_000;
+    let mut db = memory();
+    db.put(1, &[1.0, 0.0], b"attached").unwrap();
+    db.put_with_expiry(2, &[1.0, 0.1], b"early", &Metadata::new(), Some(EARLY))
+        .unwrap();
+    db.put_with_expiry(3, &[1.0, 0.2], b"late", &Metadata::new(), Some(LATE))
+        .unwrap();
+    build(&mut db, &["a"], &[]);
+    db.graph_mut("g")
+        .unwrap()
+        .attach("a", "default", 1)
+        .unwrap();
+    let graph = db.graph("g").unwrap();
+    let mut pivot = Pivot::new("default", 10);
+    pivot.vector = Some(vec![1.0, 0.0]);
+    let request = Retrieve {
+        pivot,
+        expansion: Expansion::default(),
+        evidence: EvidenceSpec {
+            collections: vec!["default".into()],
+            ..EvidenceSpec::default()
+        },
+    };
+    // The attached record is the pivot at every clock; the others are unmapped pivots while they are visible.
+    let table: [(u64, &[u64]); 6] = [
+        (0, &[2, 3]),
+        (EARLY - 1, &[2, 3]),
+        (EARLY, &[3]),
+        (LATE - 1, &[3]),
+        (LATE, &[]),
+        (u64::MAX, &[]),
+    ];
+    for (now_ms, unmapped) in table {
+        let result = graph
+            .with_clock(now_ms)
+            .retrieve(&request, &ReadOptions::default())
+            .unwrap();
+        let pivots: Vec<&str> = result
+            .pivots
+            .iter()
+            .map(|hit| hit.node_key.as_str())
+            .collect();
+        assert_eq!(pivots, ["a"], "pivots at {now_ms}");
+        assert_eq!(
+            result.unmapped_pivots.record_ids, unmapped,
+            "unmapped pivots at {now_ms}"
+        );
+        assert_eq!(result.unmapped_pivots.count, unmapped.len() as u64);
+        assert_eq!(
+            result.stats.pivot_candidates,
+            1 + unmapped.len() as u64,
+            "candidates at {now_ms}"
+        );
+        let evidence: Vec<u64> = result.evidence.iter().map(|item| item.record_id).collect();
+        assert_eq!(evidence, [1], "evidence at {now_ms}");
+    }
+}
+
 #[test]
 fn expired_entities_are_absent_for_writes() {
     let mut db = memory();

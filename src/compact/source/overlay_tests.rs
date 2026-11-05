@@ -9,6 +9,7 @@ mod consumer_group;
 mod consumer_hybrid;
 mod consumer_kv;
 mod consumer_query;
+mod consumer_text;
 mod consumer_vectors;
 
 fn compact_collection(db: &crate::Database) -> (String, Vec<u64>) {
