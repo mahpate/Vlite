@@ -149,6 +149,8 @@ fn assert_refused_as_due(reply: &Reply, context: &str) {
     assert_eq!(reply.body["error"]["code"], "invalid_input", "{context}");
     let message = reply.body["error"]["message"].as_str().unwrap();
     assert!(message.contains("later than the server clock"), "{message}");
+    assert!(message.contains("when the write is applied"), "{message}");
+    assert!(!message.contains("ttl_ms"), "{message}");
     assert_eq!(reply.etag, None, "{context}");
 }
 
@@ -363,10 +365,10 @@ async fn a_read_only_handle_answers_a_due_put_like_any_other_put() {
     assert_eq!(kept.body["payload_base64"], BASE64_STANDARD.encode("kept"));
 }
 
-#[tokio::test]
-async fn a_record_attached_to_a_graph_keeps_its_own_refusal() {
-    let mut db = database(2, FormatVersion::V5);
-    db.put(1, &[1.0, 1.0], b"attached").unwrap();
+/// A database of `dimensions` whose record 1 is attached to a graph node.
+fn attached_database(dimensions: usize) -> Database {
+    let mut db = database(dimensions, FormatVersion::V5);
+    db.put(1, &vec![1.0; dimensions], b"attached").unwrap();
     db.create_graph("g").unwrap();
     db.graph_mut("g")
         .unwrap()
@@ -383,7 +385,38 @@ async fn a_record_attached_to_a_graph_keeps_its_own_refusal() {
             },
         ])
         .unwrap();
-    let app = start(db);
+    db
+}
+
+/// A read-only handle on a file of `dimensions` that holds record 1.
+fn read_only_database(dimensions: usize) -> (tempfile::TempDir, Database) {
+    let directory = tempfile::tempdir().unwrap();
+    let path = directory.path().join("read-only.vlite");
+    let mut db = Database::create_with_format(&path, dimensions, FormatVersion::V5).unwrap();
+    db.put(1, &vec![1.0; dimensions], b"kept").unwrap();
+    db.close().unwrap();
+    (directory, Database::open_read_only(&path).unwrap())
+}
+
+/// Deadlines that are due, and deadlines that are not, in every spelling the
+/// engine judges as given (`ttl_ms` 0 is refused earlier, as its own shape).
+fn judged_forms() -> Vec<(&'static str, Value)> {
+    let now = now_ms();
+    vec![
+        ("no expiry", json!({})),
+        ("expires_at_ms 0", json!({"expires_at_ms": 0})),
+        ("expires_at_ms 1", json!({"expires_at_ms": 1})),
+        ("one second ago", json!({"expires_at_ms": now - 1_000})),
+        ("this instant", json!({"expires_at_ms": now})),
+        ("a minute ahead", json!({"expires_at_ms": now + 60_000})),
+        ("ttl_ms 60000", json!({"ttl_ms": 60_000})),
+        ("ttl 60000", json!({"ttl": 60_000})),
+    ]
+}
+
+#[tokio::test]
+async fn a_record_attached_to_a_graph_keeps_its_own_refusal() {
+    let app = start(attached_database(2));
     let committed = head(&app).await;
     let mut forms = due_forms();
     forms.push(("ttl_ms 60000", json!({"ttl_ms": 60_000})));
@@ -399,6 +432,47 @@ async fn a_record_attached_to_a_graph_keeps_its_own_refusal() {
         }
     }
     assert_eq!(head(&app).await, committed);
+}
+
+#[tokio::test]
+async fn a_request_with_two_faults_keeps_the_answer_it_always_had_whatever_the_expiry() {
+    // Record 1 is attached to a graph and the vector has the wrong number of
+    // dimensions: the engine reads the vector before the attachment, with or
+    // without an expiry, due or not.
+    let app = start(attached_database(2));
+    let kept = get(&app, 1).await;
+    let committed = head(&app).await;
+    for route in ROUTES {
+        for (name, fields) in judged_forms() {
+            let body = with(json!({"vector": [9.0, 9.0, 9.0]}), &fields);
+            let reply = put(&app, &format!("{route}/1"), body).await;
+            assert_eq!(reply.status, 422, "{route} {name}: {}", reply.body);
+            assert_eq!(reply.body["error"]["code"], "invalid_input", "{name}");
+            let message = reply.body["error"]["message"].as_str().unwrap();
+            assert!(message.contains("vector dimensions"), "{name}: {message}");
+        }
+    }
+    let after = get(&app, 1).await;
+    assert_eq!((after.etag, after.body), (kept.etag, kept.body));
+    assert_eq!(head(&app).await, committed);
+}
+
+#[tokio::test]
+async fn a_read_only_handle_judges_a_wrong_vector_before_its_mode_whatever_the_expiry() {
+    let (_directory, db) = read_only_database(2);
+    let app = start(db);
+    for route in ROUTES {
+        for (name, fields) in judged_forms() {
+            let body = with(json!({"vector": [9.0, 9.0, 9.0]}), &fields);
+            let reply = put(&app, &format!("{route}/1"), body).await;
+            assert_eq!(reply.status, 422, "{route} {name}: {}", reply.body);
+            assert_eq!(reply.body["error"]["code"], "invalid_input", "{name}");
+            let message = reply.body["error"]["message"].as_str().unwrap();
+            assert!(message.contains("vector dimensions"), "{name}: {message}");
+        }
+    }
+    let kept = get(&app, 1).await;
+    assert_eq!(kept.body["payload_base64"], BASE64_STANDARD.encode("kept"));
 }
 
 #[tokio::test]
@@ -518,6 +592,7 @@ mod grpc {
                     .unwrap_err();
                 assert_error(&status, Code::InvalidArgument, "invalid_input");
                 assert!(status.message().contains("later than the server clock"));
+                assert!(!status.message().contains("ttl_ms"), "{status:?}");
             }
             let after = h
                 .client
@@ -611,5 +686,117 @@ mod grpc {
             assert_error(&status, Code::FailedPrecondition, "upgrade_required");
         }
         assert_eq!(head(&h.app).await, committed);
+    }
+
+    fn expiries() -> Vec<Option<u64>> {
+        let now = now_ms();
+        vec![None, Some(now + 60_000), Some(0), Some(1), Some(now)]
+    }
+
+    fn stale(revision: u64) -> Option<proto::Expected> {
+        Some(proto::Expected {
+            kind: Some(proto::expected::Kind::Revision(revision + 100)),
+        })
+    }
+
+    #[tokio::test]
+    async fn one_rpc_has_one_precedence_whatever_the_expiry() {
+        // A vector of the wrong size and a stale revision: the engine reads
+        // the vector first, with an expiry or without, due or not.
+        let mut h = start_grpc(database(2, FormatVersion::V5)).await;
+        let seeded = h
+            .client
+            .put_vector(request(put_vector(7, "kept", None)))
+            .await
+            .unwrap()
+            .into_inner();
+        let committed = head(&h.app).await;
+        for expiry in expiries() {
+            let mut message = put_vector(7, "replaced", expiry);
+            message.vector = vec![1.0];
+            message.expected = stale(seeded.revision);
+            let status = h.client.put_vector(request(message)).await.unwrap_err();
+            assert_error(&status, Code::InvalidArgument, "invalid_input");
+            assert!(
+                status.message().contains("vector dimensions"),
+                "{expiry:?}: {}",
+                status.message()
+            );
+        }
+        assert_eq!(head(&h.app).await, committed);
+    }
+
+    #[tokio::test]
+    async fn an_attached_record_judges_a_stale_precondition_before_its_attachment() {
+        let mut h = start_grpc(attached_database(2)).await;
+        let seeded = h
+            .client
+            .get_vector(request(get_vector(1)))
+            .await
+            .unwrap()
+            .into_inner();
+        let committed = head(&h.app).await;
+        for expiry in expiries().into_iter().flatten() {
+            let mut message = put_vector(1, "replaced", Some(expiry));
+            message.expected = stale(seeded.revision);
+            let status = h.client.put_vector(request(message)).await.unwrap_err();
+            assert_error(&status, Code::Aborted, "precondition_failed");
+
+            // The attachment refuses what the precondition lets through.
+            let mut message = put_vector(1, "replaced", Some(expiry));
+            message.expected = Some(proto::Expected {
+                kind: Some(proto::expected::Kind::Revision(seeded.revision)),
+            });
+            let status = h.client.put_vector(request(message)).await.unwrap_err();
+            assert_error(
+                &status,
+                Code::FailedPrecondition,
+                "graph_attached_record_expiry",
+            );
+        }
+        assert_eq!(head(&h.app).await, committed);
+    }
+
+    #[tokio::test]
+    async fn a_read_only_handle_judges_a_stale_precondition_before_its_mode() {
+        let (_directory, db) = read_only_database(2);
+        let mut h = start_grpc(db).await;
+        let seeded = h
+            .client
+            .get_vector(request(get_vector(1)))
+            .await
+            .unwrap()
+            .into_inner();
+        let mut answers = Vec::new();
+        for expiry in expiries() {
+            let mut message = put_vector(1, "replaced", expiry);
+            message.expected = stale(seeded.revision);
+            let status = h.client.put_vector(request(message)).await.unwrap_err();
+            assert_error(&status, Code::Aborted, "precondition_failed");
+
+            // What the precondition lets through meets the handle's own
+            // refusal, which no expiry changes.
+            let mut message = put_vector(1, "replaced", expiry);
+            message.expected = Some(proto::Expected {
+                kind: Some(proto::expected::Kind::Revision(seeded.revision)),
+            });
+            let status = h.client.put_vector(request(message)).await.unwrap_err();
+            answers.push((
+                status.code(),
+                status.metadata().get(ERROR_CODE_TRAILER).cloned(),
+            ));
+        }
+        assert!(
+            answers.iter().all(|answer| *answer == answers[0]),
+            "{answers:?}"
+        );
+        assert_ne!(answers[0].0, Code::InvalidArgument);
+        let read = h
+            .client
+            .get_vector(request(get_vector(1)))
+            .await
+            .unwrap()
+            .into_inner();
+        assert_eq!(read.revision, seeded.revision);
     }
 }
