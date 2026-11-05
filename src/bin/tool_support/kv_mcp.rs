@@ -668,6 +668,16 @@ mod tests {
         }
     }
 
+    /// A scan shaped like the `scan` argument of `visit_page`.
+    type Scan<'a> = Box<
+        dyn FnOnce(
+                Option<&str>,
+                usize,
+                &mut dyn FnMut(KvRef<'_>) -> ControlFlow<()>,
+            ) -> Result<(), String>
+            + 'a,
+    >;
+
     /// `KvView::visit_at` as documented, over `entries` sorted by key: the
     /// entries that start with `prefix` and follow `after`, at most `count`,
     /// each with `has_next` set when another matching entry follows within
@@ -676,13 +686,8 @@ mod tests {
         entries: &'a [KvEntry],
         prefix: &'a str,
         lent: &'a std::cell::Cell<usize>,
-    ) -> impl FnOnce(
-        Option<&str>,
-        usize,
-        &mut dyn FnMut(KvRef<'_>) -> ControlFlow<()>,
-    ) -> Result<(), String>
-    + 'a {
-        move |after, count, visit| {
+    ) -> Scan<'a> {
+        Box::new(move |after, count, visit| {
             let matching: Vec<&KvEntry> = entries
                 .iter()
                 .filter(|entry| {
@@ -705,7 +710,7 @@ mod tests {
                 }
             }
             Ok(())
-        }
+        })
     }
 
     // 16 MiB of response holds 12 values of the largest size. Reading is

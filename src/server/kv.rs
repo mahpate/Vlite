@@ -697,6 +697,19 @@ mod tests {
         );
     }
 
+    /// A scan shaped like the `scan` argument of `build_page`.
+    type Scan<'a> = Box<
+        dyn FnOnce(
+                &str,
+                &str,
+                Option<&str>,
+                usize,
+                u64,
+                &mut dyn FnMut(KvRef<'_>) -> ControlFlow<()>,
+            ) -> Result<(), ApiError>
+            + 'a,
+    >;
+
     /// `KvView::visit_at` as documented, over `entries` sorted by key: at most
     /// `count` entries after `after`, each with `has_next` set when another
     /// entry follows within `count + 1`. `scans` counts scans and `lent` the
@@ -705,16 +718,8 @@ mod tests {
         entries: &'a [KvEntry],
         scans: &'a Cell<usize>,
         lent: &'a Cell<usize>,
-    ) -> impl FnOnce(
-        &str,
-        &str,
-        Option<&str>,
-        usize,
-        u64,
-        &mut dyn FnMut(KvRef<'_>) -> ControlFlow<()>,
-    ) -> Result<(), ApiError>
-    + 'a {
-        move |_, _, after, count, _, visit| {
+    ) -> Scan<'a> {
+        Box::new(move |_, _, after, count, _, visit| {
             scans.set(scans.get() + 1);
             let matching: Vec<&KvEntry> = entries
                 .iter()
@@ -735,7 +740,7 @@ mod tests {
                 }
             }
             Ok(())
-        }
+        })
     }
 
     fn query(after: Option<&str>) -> ListQuery {
