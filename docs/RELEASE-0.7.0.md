@@ -1,10 +1,10 @@
 # VLite 0.7.0 upgrade and rollback
 
-VLite 0.7.0 adds a key-value store, an opt-in directory store, graph expiry, bounded graph algorithms and optional managed embedding and ranking providers.
+VLite 0.7.0 adds a key-value store, agent memory, an opt-in directory store, graph expiry, bounded graph algorithms and optional managed embedding and ranking providers.
 
-<!-- source: docs/STORAGE-FEATURES.md#key-value-store, docs/STORAGE-FEATURES.md#directory-store, docs/GRAPH.md#expiry-ttl, docs/GRPC.md, site/api.html -->
+<!-- source: docs/STORAGE-FEATURES.md#key-value-store, docs/STORAGE-FEATURES.md#directory-store, docs/GRAPH.md#expiry-ttl, docs/GRPC.md, docs/API.md#agent-memory-rest, site/api.html -->
 
-It follows [0.6.1](RELEASE-0.6.1.md). The additions are embedded Rust APIs, local shell and MCP tools, and REST and gRPC key-value and provider operations. Existing files open as before and new files are written as before. New stores and application-facing operations need explicit use or setup. Exact SIMD scoring, filter-summary pruning and the fixes below apply automatically, and search hits and distances stay unchanged. Rust code that matches `GraphChange` exhaustively needs a new arm, and code that uses the generated `grpc` types has further source changes (see [Compatibility](#compatibility)). Measured speed results are in [Benchmarks](#benchmarks); this release makes no size claims. <!-- source: docs/STORAGE-FEATURES.md, docs/GRAPH.md, docs/GRPC.md, docs/API.md, src/exact_kernels.rs, tests/filter_summaries.rs, tests/graph_regression.rs, src/property_graph/change.rs, proto/vlite/v1/vlite.proto, benchmarks/RESULTS.md -->
+It follows [0.6.1](RELEASE-0.6.1.md). The additions are embedded Rust APIs, local shell and MCP tools, and REST and gRPC key-value and provider operations, plus agent memory over REST with clients, a command line and MCP tools. Existing files open as before and new files are written as before. New stores and application-facing operations need explicit use or setup. Exact SIMD scoring, filter-summary pruning and the fixes below apply automatically, and search hits and distances stay unchanged. Rust code that matches `GraphChange` exhaustively needs a new arm, and code that uses the generated `grpc` types has further source changes (see [Compatibility](#compatibility)). Measured speed results are in [Benchmarks](#benchmarks); this release makes no size claims. <!-- source: docs/STORAGE-FEATURES.md, docs/GRAPH.md, docs/GRPC.md, docs/API.md, src/exact_kernels.rs, tests/filter_summaries.rs, tests/graph_regression.rs, src/property_graph/change.rs, proto/vlite/v1/vlite.proto, benchmarks/RESULTS.md -->
 
 > **Draft for release-candidate review.** The version number is provisional. Resolve or delete every `[TO CONFIRM AT RC]`, `[TO FILL AT RC]`, `[TO FILL AT FREEZE]` and `[VERIFY]` marker before publishing. A `<!-- source: ... -->` comment names the repository document or test that backs the statement before it.
 
@@ -99,10 +99,8 @@ Keep values under namespaced string keys, with no vector. <!-- source: docs/STOR
 
 ### Agent memory
 
-Agent memory (remember, recall, consolidate and forget) is part of the 0.7.0
-plan, and the release waits for it. The clients, the command line and the MCP
-tools below are in this candidate; the server that answers them is not.
-<!-- source: docs/projects/roadmap/next-major.md#decided-2026-11-04, docs/projects/roadmap/gap1-agent-memory.md -->
+Agent memory stores remembered entities and episodes in a graph and recalls them with bounded, ranked retrieval. It is off by default: the server needs a private bindings file, and the clients, the command line and the MCP tools below call it.
+<!-- source: docs/projects/roadmap/next-major.md#decided-2026-11-04, docs/projects/roadmap/gap1-agent-memory.md, docs/API.md#agent-memory-rest -->
 
 - **Clients.** The JavaScript, Python and .NET clients have a binding-local
   facade, `client.memory(binding)` (`client.Memory(binding)` in .NET), with
@@ -130,19 +128,40 @@ tools below are in this candidate; the server that answers them is not.
   repeats a key. See
   [Server-backed agent memory](MCP.md#server-backed-agent-memory).
   <!-- source: docs/MCP.md#server-backed-agent-memory, tests/memory_mcp.rs, tests/fixtures/memory_tools; commits 2bf3ff0a and 4b9af2dc -->
-- **Server.** [TO CONFIRM AT RC] The server-side REST adapter that the clients
-  and the command line call is not merged in this candidate, so nothing here
-  answers a memory request yet; the memory engine itself is crate-private and
-  inactive. Describe the shipped surface, limits and defaults here after
-  independent acceptance.
-  <!-- source: src/lib.rs, src/server.rs, src/openapi.json, src/bin/vlite-memory-cli.rs (the only /v1/memory reference in src), docs/projects/roadmap/serving-memory-contract.md -->
-- **First-slice limitation.** [TO CONFIRM AT RC] The first server slice will
-  refuse receipt lookups (`GetReceipt`) of `remember` receipts with 409
-  `memory_capability_unavailable` and `details.feature`
-  `remember_receipt_lookup`. The original `remember` response carries the
-  complete receipt. The clients surface the refusal unchanged, including
-  `details.feature`; the command line prints its code and message.
-  <!-- source: first-slice scope stated for the unmerged memory adapter; no code or test pins the refusal yet. How refusals are reported: clients/javascript/README.md, clients/python/README.md, docs/TOOLS.md, src/bin/vlite-memory-cli.rs -->
+- **Server.** Start `vlite-server` with `--memory-bindings-file PATH` (or
+  `VLITE_MEMORY_BINDINGS_FILE`) to serve nine `POST` routes under
+  `/v1/memory/{binding}/`. A binding names one graph and one evidence
+  collection, the scopes (agent, user, session) each credential may use and a
+  receipt window. `remember`, `recall`, `consolidate`, `forget` and
+  `receipts/lookup` are served. `facts/query`, `facts/correct`,
+  `erasures/get` and `erasures/resume` answer 409
+  `memory_capability_unavailable` with `details.feature`. A mutation needs a
+  body `idempotency_key`; a matching retry returns the original result with
+  `replayed: true`. A request is limited to 8 MiB and a response has no server
+  cap. Without the file there are no memory routes and the server behaves as in
+  0.6.1. See [Agent memory (REST)](API.md#agent-memory-rest).
+  <!-- source: docs/API.md#agent-memory-rest, docs/projects/roadmap/gap1-adapter-mapping.md, src/bin/vlite-server.rs, src/server/memory.rs, src/server/memory/routes.rs, tests/server_memory.rs -->
+- **Reserved resources.** A binding's graph and evidence collection are
+  reserved: the raw collection, record, search, graph, feed, export and
+  attachment routes treat them as if they did not exist, unless the credential
+  holds `raw_access` on that binding and the ordinary permissions. A create
+  under a reserved name answers as for an occupied name. While any binding is
+  configured, the gRPC listener, automatic index maintenance, imports,
+  replication export and a few aggregate admin routes are disabled. See
+  [Memory-bound resources](SECURITY.md#memory-bound-resources), including its
+  known limits.
+  <!-- source: docs/SECURITY.md#memory-bound-resources, tests/server_memory_guards.rs, src/server/reserved.rs -->
+- **First-slice limits.** Facts, fact correction, erasure jobs and `forget` by
+  series, entity, session or scope are not served yet. `consolidate` is C1 only
+  (retain, commit only). `forget` deletes by ID and logically; it writes no
+  deletion manifest, so its `erasure_notice` omits `manifest_id`, and it is not
+  secure erasure. A receipt lookup of a `remember` receipt answers 409
+  `memory_capability_unavailable` with `details.feature`
+  `remember_receipt_lookup`; the original `remember` response carries the
+  complete receipt. A 412 `precondition_failed` carries the code and message
+  only. The clients surface a refusal unchanged, including `details.feature`;
+  the command line prints its code and message.
+  <!-- source: docs/projects/roadmap/gap1-adapter-mapping.md#1-first-rest-slice-inventory, tests/server_memory.rs, tests/fixtures/agent_memory/wire, clients/javascript/README.md, clients/python/README.md, docs/TOOLS.md -->
 
 ### Directory store (opt-in)
 
@@ -251,9 +270,7 @@ it up.
   rejects file secret sources, so use an environment reference there. Callers
   cannot supply endpoints, models, headers or secrets. The file schema is in
   the [serving contract](projects/roadmap/serving-contract.md#gap-8-delivery-1-private-startup-registry-candidate).
-  [TO CONFIRM AT RC] The startup names `--providers-file` and
-  `VLITE_PROVIDERS_FILE` are implemented and tested, but the owner has not
-  ratified them yet.
+  The startup file is named by `--providers-file` or `VLITE_PROVIDERS_FILE`.
   <!-- source: docs/projects/roadmap/serving-contract.md, src/server/providers.rs, src/bin/vlite-server.rs, tests/server_cli.rs -->
 - **REST.** `POST /v1/collections/{collection}/embed` takes `provider` as
   `hashing`, `http` or a bound alias and returns a typed
@@ -268,9 +285,8 @@ it up.
   `RERANK_MODE_CUSTOM` with `rerank_provider`. A shorter client `grpc-timeout`
   also bounds managed work, but a client that resets the stream does not cancel
   a provider call that is already running; the call stays bound by its total
-  deadline and admission slot.
-  [TO CONFIRM AT RC] gRPC reports `provider_snapshot_conflict` as `ABORTED`.
-  The mapping is implemented and tested, but the owner has not ratified it yet.
+  deadline and admission slot. gRPC reports `provider_snapshot_conflict` as
+  `ABORTED`.
   <!-- source: docs/GRPC.md, proto/vlite/v1/vlite.proto, src/server/grpc.rs, src/server/providers/tests/grpc_serving.rs, tests/grpc_provider_wire.rs, docs/projects/roadmap/serving-contract.md -->
 - **Safety bounds.** The caller needs search authorization before an alias is
   resolved. One embedding input is at most 16,384 UTF-8 bytes. Provider
@@ -438,6 +454,8 @@ setup, and change nothing until you use them:
   feed;
 - graph algorithms, when you call `GraphRef::algorithm`;
 - managed providers, when an administrator supplies a startup file;
+- agent memory, when an administrator supplies a bindings file
+  (`--memory-bindings-file`);
 - background index rebuilds, when you call `set_background_hnsw_rebuild`.
 <!-- source: docs/STORAGE-FEATURES.md#key-value-store, docs/STORAGE-FEATURES.md#directory-store, docs/GRAPH.md#expiry-ttl, docs/GRPC.md, docs/API.md#key-value-entries, docs/REFERENCE.md#background-hnsw-rebuilds-rust, tests/server_cli.rs -->
 
@@ -483,6 +501,14 @@ them. Key-value entries are ordinary records, so 0.6.1 still opens the file and
 reads them as records of a one-dimension collection.
 <!-- source: src/bin/vlite-server.rs, src/kv.rs, proto/vlite/v1/vlite.proto -->
 
+If you configured agent memory, also remove `--memory-bindings-file` or
+`VLITE_MEMORY_BINDINGS_FILE` and stop clients from calling the memory routes,
+because 0.6.1 does not serve them. Memory data is an ordinary graph and
+evidence collection, which 0.6.1 opens without any reservation: every
+credential with ordinary access can then read them. Move or delete that data
+first if that matters.
+<!-- source: docs/SECURITY.md#memory-bound-resources, src/server/memory.rs -->
+
 ## Compatibility
 
 - **Defaults are unchanged.** A file created with default options is written as
@@ -503,19 +529,23 @@ reads them as records of a one-dimension collection.
   operations (`GET /v1/capabilities` lists their routes and reports
   `features.kv`), five new RPCs (the four-RPC `vlite.v1.Kv` service and
   `VLite.EmbedText`), optional provider and ranking fields, and one new rerank
-  mode, with existing tags and meanings unchanged. The OpenAPI document now
+  mode, with existing tags and meanings unchanged. With a bindings file, nine
+  `POST` routes under `/v1/memory/{binding}/` are also served; without one they
+  do not exist. The OpenAPI document now
   also says that `rerank.lambda` is allowed only with `mode` `mmr`; the server
   already refused any other combination with 422 `invalid_input` in 0.6.1, so
   no request changes meaning. The `tools/list` of
   `vlite-mcp` lists four more tools: `vlite_kv_get` and `vlite_kv_list` in
-  read-only mode, plus `vlite_kv_put` and `vlite_kv_delete` with `--writable`.
+  read-only mode, plus `vlite_kv_put` and `vlite_kv_delete` with `--writable`;
+  with `--server URL` it also lists nine `vlite_memory_*` tools.
   <!-- source: src/openapi.json, proto/vlite/v1/vlite.proto, tests/grpc_provider_wire.rs, tests/server_grpc_kv.rs, tests/server_kv.rs (kv_capabilities_advertise_supported_routes_and_format), tests/graph_surface_parity.rs, tests/fixtures/kv/mcp-tool-additions.json, src/server.rs -->
 - **Errors.** `cursor_before_history` (Rust `Error::CursorBeforeHistory`, REST
   409, a C ABI error string) applies to history below a directory store's
   checkpoint floor. The Rust `Error` enum, which is `#[non_exhaustive]`, also
   gains `InvalidKvKey`, `KvSlotsExhausted` and `NotKvCollection`. Over REST and
   gRPC, `kv_not_found`, `not_kv_collection`, `kv_slots_exhausted` and the seven
-  provider codes are new.
+  provider codes are new. The agent-memory routes add their own codes, listed
+  in [Agent memory (REST)](API.md#agent-memory-rest).
   <!-- source: src/lib.rs, src/server.rs, src/server/kv.rs, bindings/c/src/lib.rs, docs/API.md -->
 - **Rust source.** `GraphChange` (`vlite::property_graph::GraphChange`, also
   `vlite::changes::GraphChange`) gains a `Temporal(TemporalChange)` variant and
