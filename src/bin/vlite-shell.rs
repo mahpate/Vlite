@@ -13,8 +13,9 @@ use tool_support::{
 };
 use vlite::{Condition, Database, DistanceMetric, HnswConfig, Metadata};
 /// Longest command line, excluding its terminator; a longer line fails like any
-/// other command error. The largest supported command, a put or a KV request,
-/// is well below it.
+/// other command error. The largest command is a put of a record with 65,536
+/// dimensions, a 1 MiB payload and 64 KiB of metadata, about 8.7 MB as text (a
+/// search or a KV request is smaller), so the limit is nearly twice that.
 const MAX_LINE_BYTES: usize = 16 * 1024 * 1024;
 const HELP: &str = r#"vlite-shell --db PATH [--read-only] [--create DIMENSIONS] [--script FILE]
 Without --script reads stdin; prompts only on a terminal. One command per line.

@@ -45,6 +45,35 @@ pub fn database(path: &Path) {
     }
     db.close().unwrap();
 }
+// Thirty characters, as a float written out at length.
+pub const LONG_FLOAT: &str = "0.1234567890123456789012345678";
+// The limits on one metadata field, which the crate does not export: a field name of at most
+// 256 bytes and a string value of at most 4,096.
+pub const FIELD_NAME_BYTES: usize = 256;
+pub const STRING_VALUE_BYTES: usize = 4096;
+// The most fields of that size that fit the encoded metadata limit: after a 4-byte header, a
+// string field takes 2 + name + 1 + 4 + value bytes.
+pub const METADATA_FIELDS: usize =
+    (vlite::MAX_METADATA_BYTES - 4) / (2 + FIELD_NAME_BYTES + 1 + 4 + STRING_VALUE_BYTES);
+// The largest record the engine accepts, written as one JSON object: a payload of U+0001 (six
+// characters each as a JSON escape), the most dimensions as floats of thirty characters and the
+// most metadata fields of the largest size, 65,389 of the 65,536 encoded bytes allowed. It is
+// about 8.7 MB.
+pub fn largest_record_json(id: u64) -> String {
+    let vector = vec![LONG_FLOAT; vlite::MAX_DIMENSIONS].join(",");
+    let payload = "\\u0001".repeat(vlite::MAX_PAYLOAD_BYTES);
+    let metadata = (0..METADATA_FIELDS)
+        .map(|index| {
+            format!(
+                r#""{}{index:x}":{{"type":"string","value":"{}"}}"#,
+                "k".repeat(FIELD_NAME_BYTES - 1),
+                "\\u0001".repeat(STRING_VALUE_BYTES)
+            )
+        })
+        .collect::<Vec<_>>()
+        .join(",");
+    format!(r#"{{"id":{id},"vector":[{vector}],"payload":"{payload}","metadata":{{{metadata}}}}}"#)
+}
 pub fn command(binary: &str) -> Command {
     Command::new(binary)
 }

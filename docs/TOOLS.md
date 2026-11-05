@@ -121,10 +121,13 @@ quit
 - JSON arguments run to the end of the line, so strings need no shell quoting.
   Lines starting with `#` are comments.
 - A command line may hold at most 16 MiB (16,777,216 bytes, excluding the line
-  terminator). A longer line fails with `invalid_input: line exceeds 16777216 bytes`
-  like any other command error: scripts and non-terminal stdin stop there, as
-  before. `vlite-import` applies the same 16 MiB limit to JSONL and COPY lines
-  (see [Supported input schemas](#supported-input-schemas)).
+  terminator). That covers the largest command, a `put` with 65,536 dimensions
+  of 30 characters each, a 1 MiB payload that needs the most escaping and
+  64 KiB of metadata, which is about 8.7 MB. A longer line fails with
+  `invalid_input: line exceeds 16777216 bytes` like any other command error:
+  scripts and non-terminal stdin stop there, as before. `vlite-import` applies
+  the same 16 MiB limit to JSONL and COPY lines (see
+  [Supported input schemas](#supported-input-schemas)).
 - Scripts and stdin stop at the first error; earlier writes stay committed.
   The interactive shell prints errors and continues.
 - `browse LIMIT [AFTER_ID]` returns 1–1,000 rows in ascending ID order and
@@ -229,9 +232,11 @@ accepts. A longer line is rejected like any other bad row, as
 number (blank and COPY header lines count). Reading goes on, so later bad lines
 are reported too (the first 20 rejected rows of any kind), and the import fails
 with `rejected_rows=N; no rows published`. CSV, pgvector, FAISS, Parquet and
-Arrow have no line limit, because their records are not lines: a quoted CSV
-cell can span lines, FAISS is binary, and Parquet and Arrow use their own
-readers. Only the engine's limits apply to them.
+Arrow have no line limit and this cap does not apply to them, because their
+records are not lines: a quoted CSV cell can span lines, FAISS is binary, and
+Parquet and Arrow use their own readers. Their records are limited only by the
+engine, which checks them after the record has been read, and a CSV quote that
+is never closed makes the rest of the file one record, which is read in full.
 
 ## Search quality and configuration/database comparison
 
