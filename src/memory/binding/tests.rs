@@ -68,6 +68,52 @@ fn field_rules_accept_their_boundaries() {
 }
 
 #[test]
+fn storage_names_are_local_for_root_and_tenant_bindings() {
+    let qualified = format!("t{HEX_TENANT}__spoof");
+    for tenant in [ROOT_TENANT, HEX_TENANT] {
+        for evidence in [false, true] {
+            let mut binding = entry("notes", "notes_graph");
+            binding.tenant = tenant.into();
+            binding.grants[0].scopes = vec![scope(tenant, "a")];
+            if evidence {
+                binding.evidence_collection = Some(qualified.clone());
+            } else {
+                binding.graph = qualified.clone();
+            }
+            assert_eq!(
+                invalid(binding),
+                Err(BindingError::InvalidName),
+                "tenant={tenant}, evidence={evidence}"
+            );
+        }
+        for local in [
+            format!("t{}__local", "0".repeat(32)),
+            format!("t{}__local", "f".repeat(32)),
+        ] {
+            let mut binding = entry("notes", &local);
+            binding.tenant = tenant.into();
+            binding.grants[0].scopes = vec![scope(tenant, "a")];
+            assert_eq!(invalid(binding), Err(BindingError::InvalidName));
+        }
+        for local in [
+            format!("x{HEX_TENANT}__local"),
+            format!("t{}__local", "0".repeat(31)),
+            format!("t{}__local", "0".repeat(33)),
+            format!("t{}g__local", "0".repeat(31)),
+            format!("t{HEX_TENANT}_local"),
+            format!("t{HEX_TENANT}__"),
+            "notes_graph".into(),
+        ] {
+            let mut binding = entry("notes", &local);
+            binding.tenant = tenant.into();
+            binding.grants[0].scopes = vec![scope(tenant, "a")];
+            binding.evidence_collection = Some(local.clone());
+            assert_eq!(invalid(binding), Ok(()), "{local}");
+        }
+    }
+}
+
+#[test]
 fn field_rules_reject_each_bad_field() {
     use BindingError::*;
     let mut cases: Vec<(Binding, BindingError)> = Vec::new();

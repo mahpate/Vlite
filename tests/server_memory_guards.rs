@@ -1,14 +1,14 @@
 #![cfg(feature = "server")]
 
-use axum::{Router, body::Body, http::Request};
+use axum::{body::Body, http::Request, Router};
 use http_body_util::BodyExt;
 use serde_json::Value;
 use sha2::{Digest, Sha256};
 use tempfile::TempDir;
 use tower::ServiceExt;
 use vlite::{
+    server::{configured_admin_router, BearerToken, ServerOptions, Service},
     CollectionSpec, CreateOptions, Database, FormatVersion,
-    server::{BearerToken, ServerOptions, Service, configured_admin_router},
 };
 
 const ADMIN: &str = "fake_memory_guard_admin_token_0123456789_ABCDEFGHIJKLMNOPQRSTUVWXYZ";
@@ -553,13 +553,11 @@ async fn reserved_graph_and_collection_are_denied_and_lists_filter_them() {
     assert_eq!(missing_webhook_error["error"]["code"], "webhook_not_found");
 
     let (_, diagnostics) = get(&app, "/v1/admin/diagnostics/slow-queries").await;
-    assert!(
-        diagnostics["items"]
-            .as_array()
-            .unwrap()
-            .iter()
-            .all(|item| { item.to_string().find("notes_ev").is_none() })
-    );
+    assert!(diagnostics["items"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .all(|item| { item.to_string().find("notes_ev").is_none() }));
 
     let (_, first_page) = get(&app, "/v1/changes?limit=1").await;
     assert!(first_page["changes"].as_array().unwrap().is_empty());
@@ -574,15 +572,13 @@ async fn reserved_graph_and_collection_are_denied_and_lists_filter_them() {
         &format!("/v1/changes?limit=1000&cursor={second_cursor}"),
     )
     .await;
-    assert!(
-        remaining_pages["changes"]
-            .as_array()
-            .unwrap()
-            .iter()
-            .all(|change| {
-                change["collection"] != "notes_ev" && change["change"]["graph"] != "notes_graph"
-            })
-    );
+    assert!(remaining_pages["changes"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .all(|change| {
+            change["collection"] != "notes_ev" && change["change"]["graph"] != "notes_graph"
+        }));
     assert!(remaining_pages["next_cursor"].as_str().is_some());
 
     let (_, graphs) = get(&app, "/v1/graphs").await;
@@ -611,6 +607,22 @@ fn startup_refuses_bindings_with_a_missing_evidence_collection() {
             .contains("a memory binding evidence collection does not exist"),
         "unexpected startup refusal: {error}"
     );
+}
+
+#[test]
+fn startup_rejects_tenant_qualified_binding_resources_without_echoing_names() {
+    const TENANT: &str = "0123456789abcdef0123456789abcdef";
+    for tenant in ["@root", TENANT] {
+        for field in ["graph", "evidence_collection"] {
+            let directory = tempfile::tempdir().unwrap();
+            let mut bindings: Value = serde_json::from_str(BINDINGS).unwrap();
+            bindings["bindings"][0]["tenant"] = serde_json::json!(tenant);
+            bindings["bindings"][0][field] = serde_json::json!(format!("t{TENANT}__private_spoof"));
+            let error = start(&directory, Some(&bindings.to_string()), false)
+                .expect_err("stored tenant names must not be accepted as binding-local names");
+            assert_eq!(error.to_string(), "memory bindings file is invalid");
+        }
+    }
 }
 
 #[tokio::test]
@@ -1036,13 +1048,11 @@ async fn tenant_qualified_reservations_follow_scoped_credentials_and_raw_access(
     }
     let (tenant_list_status, tenant_list) = get(&no_raw, "/v1/admin/tenants").await;
     assert_eq!(tenant_list_status, 200);
-    assert!(
-        tenant_list["items"]
-            .as_array()
-            .unwrap()
-            .iter()
-            .all(|item| item["id"] != TENANT || item["collections"] == 1)
-    );
+    assert!(tenant_list["items"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .all(|item| item["id"] != TENANT || item["collections"] == 1));
     let (delete_tenant_status, delete_tenant_error) = call_token(
         &no_raw,
         "DELETE",
@@ -1121,13 +1131,11 @@ async fn tenant_qualified_reservations_follow_scoped_credentials_and_raw_access(
         ADMIN,
     )
     .await;
-    assert!(
-        feed["changes"]
-            .as_array()
-            .unwrap()
-            .iter()
-            .all(|change| { change["collection"] != format!("t{TENANT}__notes_ev") })
-    );
+    assert!(feed["changes"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .all(|change| { change["collection"] != format!("t{TENANT}__notes_ev") }));
     let (_, usage) = call_token(
         &no_raw,
         "GET",
@@ -1139,13 +1147,11 @@ async fn tenant_qualified_reservations_follow_scoped_credentials_and_raw_access(
     assert!(usage["collections"].as_array().unwrap().iter().all(|item| {
         item["name"] != "notes_ev" && item["physical_name"] != format!("t{TENANT}__notes_ev")
     }));
-    assert!(
-        usage["collections"]
-            .as_array()
-            .unwrap()
-            .iter()
-            .any(|item| item["name"] == "ordinary")
-    );
+    assert!(usage["collections"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|item| item["name"] == "ordinary"));
 
     let full_tenant_operations = [
         "read",
@@ -1223,13 +1229,11 @@ async fn tenant_qualified_reservations_follow_scoped_credentials_and_raw_access(
     );
     let (_, raw_collections) =
         call_token(&raw_read, "GET", "/v1/collections", Body::empty(), &token).await;
-    assert!(
-        raw_collections["items"]
-            .as_array()
-            .unwrap()
-            .iter()
-            .any(|item| item["name"] == "notes_ev")
-    );
+    assert!(raw_collections["items"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|item| item["name"] == "notes_ev"));
     assert_eq!(
         call_token(
             &raw_read,
@@ -1243,13 +1247,11 @@ async fn tenant_qualified_reservations_follow_scoped_credentials_and_raw_access(
         200
     );
     let (_, raw_graphs) = call_token(&raw_read, "GET", "/v1/graphs", Body::empty(), &token).await;
-    assert!(
-        raw_graphs["graphs"]
-            .as_array()
-            .unwrap()
-            .iter()
-            .any(|graph| graph["name"] == "notes_graph")
-    );
+    assert!(raw_graphs["graphs"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|graph| graph["name"] == "notes_graph"));
     assert_eq!(
         call_token(
             &raw_read,
@@ -1569,11 +1571,9 @@ async fn empty_bindings_are_noop_and_invalid_files_fail_without_echoing_content(
         Ok(_) => panic!("unknown binding fields must reject startup"),
         Err(error) => error,
     };
-    assert!(
-        error
-            .to_string()
-            .contains("memory bindings file is invalid")
-    );
+    assert!(error
+        .to_string()
+        .contains("memory bindings file is invalid"));
     assert!(!error.to_string().contains(marker));
 }
 

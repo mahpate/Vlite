@@ -96,6 +96,18 @@ fn valid_tenant(tenant: &str) -> bool {
                 .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b)))
 }
 
+fn tenant_qualified(name: &str) -> bool {
+    name.strip_prefix('t')
+        .and_then(|name| name.split_once("__"))
+        .is_some_and(|(tenant, local)| {
+            tenant.len() == 32
+                && tenant
+                    .bytes()
+                    .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
+                && !local.is_empty()
+        })
+}
+
 impl Binding {
     fn validate(&self) -> Result<(), BindingError> {
         if !valid_collection_name(&self.binding) {
@@ -122,10 +134,11 @@ impl Binding {
             return Err(BindingError::TooLarge);
         }
         if validate_graph_name(&self.graph).is_err()
+            || tenant_qualified(&self.graph)
             || self
                 .evidence_collection
                 .as_deref()
-                .is_some_and(|name| !valid_collection_name(name))
+                .is_some_and(|name| !valid_collection_name(name) || tenant_qualified(name))
         {
             return Err(BindingError::InvalidName);
         }
