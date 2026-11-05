@@ -157,8 +157,8 @@ const ALLOWED: &[(&str, &str, &str, &str)] = &[
         "src/server/tenants.rs",
         "usage",
         "db.collections",
-        "The administrator's tenant usage report filters by the tenant prefix and the reservation \
-         predicate; it resolves no name.",
+        "The administrator's tenant usage report lists every collection with the tenant's prefix, \
+         reserved ones included because their records count toward its quota; it resolves no name.",
     ),
 ];
 
@@ -503,7 +503,7 @@ fn scan_source(file: &str, source: &str) -> Vec<Finding> {
                     let call = punct(index + 2, '(');
                     let receiver = index
                         .checked_sub(1)
-                        .and_then(&ident)
+                        .and_then(ident)
                         .filter(|receiver| DATABASE_RECEIVERS.contains(receiver));
                     let pattern = match (call, receiver) {
                         (true, _)
