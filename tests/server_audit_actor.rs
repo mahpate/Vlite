@@ -24,6 +24,7 @@ use vlite::{
 
 const ADMIN: &str = "fake_actor_admin_token_0123456789_ABCDEFGHIJKLMNOPQRSTUVWXYZ";
 const PASSWORD: &str = "correct-horse-battery-staple";
+const NEW_PASSWORD: &str = "maple-orbit-violet-canyon-42";
 // Request content that must never reach the audit log.
 const NAMESPACE: &str = "ns-private-4f1c";
 const KEY: &str = "key-private-9b3d";
@@ -239,6 +240,37 @@ fn event_of<'a>(events: &'a [Value], name: &str, request_id: &str) -> &'a Value 
     matching[0]
 }
 
+/// The single `name` event about `collection`.
+fn collection_event<'a>(events: &'a [Value], name: &str, collection: &str) -> &'a Value {
+    let matching: Vec<_> = events
+        .iter()
+        .filter(|event| event["event"] == name && event["collection"] == collection)
+        .collect();
+    assert_eq!(matching.len(), 1, "one {name} event for {collection}");
+    matching[0]
+}
+
+/// The single `name` event about the account `user_id`.
+fn user_event<'a>(events: &'a [Value], name: &str, user_id: &str) -> &'a Value {
+    let matching: Vec<_> = events
+        .iter()
+        .filter(|event| event["event"] == name && event["user_id"] == user_id)
+        .collect();
+    assert_eq!(matching.len(), 1, "one {name} event for account {user_id}");
+    matching[0]
+}
+
+fn sorted_keys(event: &Value) -> Vec<&str> {
+    let mut keys: Vec<_> = event
+        .as_object()
+        .unwrap()
+        .keys()
+        .map(String::as_str)
+        .collect();
+    keys.sort_unstable();
+    keys
+}
+
 fn hex(bytes: &[u8]) -> String {
     bytes.iter().map(|byte| format!("{byte:02x}")).collect()
 }
@@ -414,15 +446,8 @@ async fn kv_events_carry_one_stable_actor_per_caller_identity() {
         assert_eq!(event["outcome"], sent.outcome.as_str(), "{label}");
         assert_eq!(event["collection"], sent.collection, "{label}");
         // Only the actor is new: every other field is as it was.
-        let mut keys: Vec<_> = event
-            .as_object()
-            .unwrap()
-            .keys()
-            .map(String::as_str)
-            .collect();
-        keys.sort_unstable();
         assert_eq!(
-            keys,
+            sorted_keys(event),
             [
                 "actor",
                 "collection",
@@ -486,13 +511,207 @@ async fn insecure_local_mode_records_the_admin_token_actor() {
     assert_no_secrets(&log, &[]);
 }
 
+#[tokio::test]
+async fn collection_events_carry_the_shared_actor() {
+    let directory = tempfile::tempdir().unwrap();
+    let app = start(directory.path(), true);
+    let root_a = create_account(&app, &admin(), "root.a", "super_admin").await;
+    let root_b = create_account(&app, &admin(), "root.b", "super_admin").await;
+    let editor = create_account(&app, &admin(), "eddie", "editor").await;
+    let (credential_id, credential_token) =
+        create_credential(&app, json!(["*"]), json!(["collections"])).await;
+    let a = sign_in(&app, "root.a").await;
+    let b = sign_in(&app, "root.b").await;
+    let eddie = sign_in(&app, "eddie").await;
+
+    // Each identity creates, changes and drops a collection of its own.
+    let callers = [
+        ("by-token", admin(), "admin_token".to_owned()),
+        ("by-a", Caller::Session(a.clone()), format!("user:{root_a}")),
+        ("by-b", Caller::Session(b.clone()), format!("user:{root_b}")),
+        (
+            "by-credential",
+            Caller::Bearer(credential_token.clone()),
+            credential_id.clone(),
+        ),
+        (
+            "by-editor",
+            Caller::Session(eddie.clone()),
+            format!("user:{editor}"),
+        ),
+    ];
+    let mut persisted = Vec::new();
+    for (name, caller, _) in &callers {
+        let input = json!({"name": name, "dimensions": 1});
+        let created = send(&app, caller, "POST", "/v1/collections", input).await;
+        assert_eq!(
+            created.status,
+            StatusCode::CREATED,
+            "{name}: {}",
+            created.body
+        );
+        let path = format!("/v1/collections/{name}");
+        let changed = send(&app, caller, "PUT", &format!("{path}/settings"), json!({})).await;
+        assert_eq!(changed.status, StatusCode::OK, "{name}: {}", changed.body);
+        persisted.push(changed.body["persisted"].clone());
+        let dropped = send(&app, caller, "DELETE", &path, Value::Null).await;
+        assert_eq!(dropped.status, StatusCode::OK, "{name}: {}", dropped.body);
+    }
+
+    let log = audit_log(directory.path());
+    let events = events(&log);
+    let lifecycle = events
+        .iter()
+        .filter(|event| event["event"].as_str().unwrap().starts_with("collection_"))
+        .count();
+    assert_eq!(lifecycle, 3 * callers.len(), "three events per identity");
+    for ((name, _, actor), persisted) in callers.iter().zip(&persisted) {
+        let created = collection_event(&events, "collection_created", name);
+        let changed = collection_event(&events, "collection_settings_changed", name);
+        let dropped = collection_event(&events, "collection_dropped", name);
+        for event in [created, changed, dropped] {
+            assert_eq!(event["actor"], actor.as_str(), "{name}");
+        }
+        assert_eq!(changed["persisted"], *persisted, "{name}");
+        // Only the value of the existing `actor` field changed.
+        let lifecycle = ["actor", "collection", "collection_id", "event", "unix_ms"];
+        assert_eq!(sorted_keys(created), lifecycle, "{name}");
+        assert_eq!(sorted_keys(dropped), lifecycle, "{name}");
+        assert_eq!(
+            sorted_keys(changed),
+            [
+                "actor",
+                "collection",
+                "collection_id",
+                "event",
+                "persisted",
+                "unix_ms"
+            ],
+            "{name}"
+        );
+    }
+
+    let mut secrets = vec![credential_token.clone()];
+    secrets.push(credential_token[credential_token.len() - 43..].to_owned());
+    for session in [&a, &b, &eddie] {
+        secrets.extend(renderings(session));
+    }
+    assert_no_secrets(&log, &secrets);
+}
+
+#[tokio::test]
+async fn denied_requests_record_the_actor_beside_the_credential_id() {
+    let directory = tempfile::tempdir().unwrap();
+    let app = start(directory.path(), true);
+    let viewer = create_account(&app, &admin(), "vera", "viewer").await;
+    let (credential_id, credential_token) =
+        create_credential(&app, json!(["default"]), json!(["read"])).await;
+    let vera = sign_in(&app, "vera").await;
+
+    // Neither holds `write`, so the request is refused before any handler
+    // runs. A signed-in viewer's grant id is `user:<account id>`.
+    let callers = [
+        (
+            "read-only credential",
+            Caller::Bearer(credential_token.clone()),
+            credential_id.clone(),
+        ),
+        (
+            "signed-in viewer",
+            Caller::Session(vera.clone()),
+            format!("user:{viewer}"),
+        ),
+    ];
+    let mut denied = Vec::new();
+    for (label, caller, actor) in &callers {
+        let reply = kv_put(&app, caller, "default").await;
+        let status = (reply.status.as_u16(), reply.code());
+        assert_eq!(status, (403, "forbidden_scope"), "{label}: {}", reply.body);
+        denied.push((label, actor, reply));
+    }
+    // The bootstrap token is never denied.
+    assert_eq!(
+        kv_put(&app, &admin(), "default").await.status,
+        StatusCode::OK
+    );
+
+    let log = audit_log(directory.path());
+    let events = events(&log);
+    for (label, actor, reply) in &denied {
+        let event = event_of(&events, "credential_denied", &reply.request_id);
+        assert_eq!(event["credential_id"], actor.as_str(), "{label}");
+        assert_eq!(event["actor"], actor.as_str(), "{label}");
+        assert_eq!(event["method"], "PUT", "{label}");
+        assert_eq!(event["route"], "/v1/collections/{collection}/kv/entry");
+        assert_eq!(
+            sorted_keys(event),
+            [
+                "actor",
+                "credential_id",
+                "event",
+                "method",
+                "request_id",
+                "route",
+                "unix_ms"
+            ],
+            "{label}"
+        );
+    }
+    // Only the bootstrap token's put reached the key-value audit.
+    assert_eq!(kv_events(&events).len(), 1);
+
+    let mut secrets = renderings(&vera);
+    secrets.push(credential_token);
+    assert_no_secrets(&log, &secrets);
+}
+
+#[tokio::test]
+async fn account_events_use_the_shared_encoding() {
+    let directory = tempfile::tempdir().unwrap();
+    let app = start(directory.path(), true);
+    let root_a = create_account(&app, &admin(), "root.a", "super_admin").await;
+    let root_b = create_account(&app, &admin(), "root.b", "super_admin").await;
+    let a = sign_in(&app, "root.a").await;
+    let b = sign_in(&app, "root.b").await;
+    let (by_a, by_b) = (Caller::Session(a.clone()), Caller::Session(b.clone()));
+
+    // Super admin A creates an account, B changes it, the bootstrap token
+    // resets its password, and A deletes it.
+    let pat = create_account(&app, &by_a, "pat", "viewer").await;
+    let path = format!("/v1/admin/users/{pat}");
+    let updated = send(&app, &by_b, "PUT", &path, json!({"role": "editor"})).await;
+    assert_eq!(updated.status, StatusCode::OK, "{}", updated.body);
+    let input = json!({"password": NEW_PASSWORD, "must_change_password": false});
+    let reset = send(&app, &admin(), "POST", &format!("{path}/password"), input).await;
+    assert_eq!(reset.status, StatusCode::OK, "{}", reset.body);
+    let removed = send(&app, &by_a, "DELETE", &path, Value::Null).await;
+    assert_eq!(removed.status, StatusCode::OK, "{}", removed.body);
+
+    let log = audit_log(directory.path());
+    let events = events(&log);
+    for (name, account, actor) in [
+        ("user_created", &root_a, "admin_token".to_owned()),
+        ("user_created", &root_b, "admin_token".to_owned()),
+        ("user_created", &pat, format!("user:{root_a}")),
+        ("user_updated", &pat, format!("user:{root_b}")),
+        ("user_password_reset", &pat, "admin_token".to_owned()),
+        ("user_deleted", &pat, format!("user:{root_a}")),
+    ] {
+        let event = user_event(&events, name, account);
+        assert_eq!(event["actor"], actor.as_str(), "{name} {account}");
+    }
+    let mut secrets = [renderings(&a), renderings(&b)].concat();
+    secrets.push(NEW_PASSWORD.to_owned());
+    assert_no_secrets(&log, &secrets);
+}
+
 #[cfg(feature = "grpc")]
 mod grpc {
     use super::*;
     use tonic::{Code, Request as GrpcRequest, transport::Channel};
     use vlite::server::grpc::{
         grpc_router,
-        proto::{self, kv_client::KvClient},
+        proto::{self, kv_client::KvClient, v_lite_client::VLiteClient},
     };
 
     fn address() -> Option<proto::KvAddress> {
@@ -551,18 +770,10 @@ mod grpc {
             .to_owned()
     }
 
-    #[tokio::test]
-    async fn grpc_kv_events_record_the_token_actor_and_never_a_session() {
-        let directory = tempfile::tempdir().unwrap();
-        let service = Service::new(database());
-        let app =
-            configured_admin_router(service.clone(), options(directory.path(), true)).unwrap();
-        create_account(&app, &admin(), "root.a", "super_admin").await;
-        let session = sign_in(&app, "root.a").await;
-        let (credential_id, credential_token) =
-            create_credential(&app, json!(["default"]), json!(["read", "write"])).await;
-
-        let grpc = grpc_router(service.clone()).await;
+    /// Serves gRPC for `service` on a loopback port; dropping the returned
+    /// sender stops the server.
+    async fn connect(service: Service) -> (Channel, tokio::sync::oneshot::Sender<()>) {
+        let grpc = grpc_router(service).await;
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let bound = listener.local_addr().unwrap();
         let (stop, stopped) = tokio::sync::oneshot::channel::<()>();
@@ -574,6 +785,21 @@ mod grpc {
             .connect()
             .await
             .unwrap();
+        (channel, stop)
+    }
+
+    #[tokio::test]
+    async fn grpc_kv_events_record_the_token_actor_and_never_a_session() {
+        let directory = tempfile::tempdir().unwrap();
+        let service = Service::new(database());
+        let app =
+            configured_admin_router(service.clone(), options(directory.path(), true)).unwrap();
+        create_account(&app, &admin(), "root.a", "super_admin").await;
+        let session = sign_in(&app, "root.a").await;
+        let (credential_id, credential_token) =
+            create_credential(&app, json!(["default"]), json!(["read", "write"])).await;
+
+        let (channel, _stop) = connect(service).await;
         let mut client = KvClient::new(channel);
 
         // The bootstrap token, once alone and once beside the live session
@@ -620,6 +846,67 @@ mod grpc {
         let mut secrets = renderings(&session);
         secrets.push(credential_token);
         assert_no_secrets(&log, &secrets);
-        drop(stop);
+    }
+
+    #[tokio::test]
+    async fn grpc_collection_and_denial_events_record_the_actor() {
+        let directory = tempfile::tempdir().unwrap();
+        let service = Service::new(database());
+        let app =
+            configured_admin_router(service.clone(), options(directory.path(), true)).unwrap();
+        create_account(&app, &admin(), "root.a", "super_admin").await;
+        let session = sign_in(&app, "root.a").await;
+        let (wide_id, wide_token) =
+            create_credential(&app, json!(["*"]), json!(["collections"])).await;
+        let (read_id, read_token) =
+            create_credential(&app, json!(["default"]), json!(["read"])).await;
+
+        let (channel, _stop) = connect(service).await;
+        let mut collections = VLiteClient::new(channel.clone());
+        let mut client = KvClient::new(channel);
+
+        // The bootstrap token, once alone and once beside a live session
+        // cookie, and a wildcard credential each create and drop a collection.
+        let attempts = [
+            ("by-token", ADMIN, None, "admin_token"),
+            ("by-cookie", ADMIN, Some(session.as_str()), "admin_token"),
+            ("by-credential", wide_token.as_str(), None, wide_id.as_str()),
+        ];
+        for (name, token, cookie, _) in attempts {
+            let create = proto::CreateCollectionRequest {
+                name: name.into(),
+                dimensions: 1,
+                settings_json: None,
+            };
+            let created = with_credentials(create, Some(token), cookie);
+            collections.create_collection(created).await.unwrap();
+            let removal = proto::DropCollectionRequest { name: name.into() };
+            let dropped = with_credentials(removal, Some(token), cookie);
+            collections.drop_collection(dropped).await.unwrap();
+        }
+        // A credential without `write` is refused, and the refusal names it.
+        let denied = client
+            .put_kv_entry(put(Some(&read_token), None))
+            .await
+            .unwrap_err();
+        assert_eq!(denied.code(), Code::PermissionDenied);
+        let denied_id = denied.metadata().get("x-request-id").unwrap();
+
+        let log = audit_log(directory.path());
+        let events = events(&log);
+        for (name, _, _, actor) in attempts {
+            for event in ["collection_created", "collection_dropped"] {
+                let found = collection_event(&events, event, name);
+                assert_eq!(found["actor"], actor, "{event} {name}");
+            }
+        }
+        let event = event_of(&events, "credential_denied", denied_id.to_str().unwrap());
+        assert_eq!(event["credential_id"], read_id.as_str());
+        assert_eq!(event["actor"], read_id.as_str());
+        assert_eq!(event["method"], "grpc");
+        assert_eq!(event["route"], "grpc:/vlite.v1.Kv/PutKvEntry");
+        let mut secrets = renderings(&session);
+        secrets.extend([wide_token, read_token]);
+        assert_no_secrets(&log, &secrets);
     }
 }

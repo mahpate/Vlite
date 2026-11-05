@@ -181,13 +181,6 @@ fn audit_event(service: &Service, event: Value) {
     }
 }
 
-fn principal(role: &admin::Role) -> Value {
-    match role {
-        admin::Role::Scoped(grant) => json!(grant.id),
-        other => json!(other.name()),
-    }
-}
-
 async fn list(
     State(service): State<Service>,
     Extension(role): Extension<admin::Role>,
@@ -273,17 +266,21 @@ impl Create {
 async fn create(
     State(service): State<Service>,
     Extension(role): Extension<admin::Role>,
+    principal: Option<Extension<users::Principal>>,
     input: Result<Json<Create>, JsonRejection>,
 ) -> Result<(StatusCode, Json<Value>), ApiError> {
     let input = body(input)?;
-    let info = create_core(&service, role, input).await?;
+    let session = principal.as_ref().map(|Extension(principal)| principal);
+    let info = create_core(&service, role, session, input).await?;
     Ok((StatusCode::CREATED, Json(info_json(&info))))
 }
 
-/// Transport-neutral collection creation with lifecycle audit.
+/// Transport-neutral collection creation with lifecycle audit. `principal` is
+/// the dashboard session behind the request, which gRPC never has.
 pub(super) async fn create_core(
     service: &Service,
     role: admin::Role,
+    principal: Option<&users::Principal>,
     mut input: Create,
 ) -> Result<CollectionInfo, ApiError> {
     input.name = tenants::qualify(&role, &input.name);
@@ -292,7 +289,7 @@ pub(super) async fn create_core(
         super::reserved::Resource::Collection,
         &input.name,
     );
-    let actor = principal(&role);
+    let actor = audit::actor(&role, principal);
     let quota_service = service.clone();
     let tenant_id = match &role {
         admin::Role::Scoped(g) => g.tenant_id.clone(),
@@ -392,20 +389,25 @@ pub(super) async fn fetch_core(
 async fn drop(
     State(service): State<Service>,
     Extension(role): Extension<admin::Role>,
+    principal: Option<Extension<users::Principal>>,
     target: Result<Path<String>, PathRejection>,
 ) -> Result<Json<Value>, ApiError> {
     let target = collection_path(target)?;
-    drop_core(&service, role, target).await?;
+    let session = principal.as_ref().map(|Extension(principal)| principal);
+    drop_core(&service, role, session, target).await?;
     Ok(Json(json!({"deleted": true})))
 }
 
 /// Transport-neutral collection drop with scope enforcement and audit.
+/// `principal` is the dashboard session behind the request, which gRPC never
+/// has.
 pub(super) async fn drop_core(
     service: &Service,
     role: admin::Role,
+    principal: Option<&users::Principal>,
     target: Target,
 ) -> Result<(), ApiError> {
-    let actor = principal(&role);
+    let actor = audit::actor(&role, principal);
     let bindings = service.memory_bindings.clone();
     let (name, id) = service
         .run(move |db| {
@@ -424,12 +426,14 @@ pub(super) async fn drop_core(
 async fn settings(
     State(service): State<Service>,
     Extension(role): Extension<admin::Role>,
+    principal: Option<Extension<users::Principal>>,
     target: Result<Path<String>, PathRejection>,
     input: Result<Json<SettingsInput>, JsonRejection>,
 ) -> Result<Json<Value>, ApiError> {
     let target = collection_path(target)?;
     let input = body(input)?;
-    let actor = principal(&role);
+    let session = principal.as_ref().map(|Extension(principal)| principal);
+    let actor = audit::actor(&role, session);
     let bindings = service.memory_bindings.clone();
     let (info, persisted) = service
         .run(move |db| {

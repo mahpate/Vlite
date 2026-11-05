@@ -1564,10 +1564,12 @@ async fn change_password(
     signed_in_response(&service, &accounts, &headers, &updated, &token, expires)
 }
 
+/// The actor of an account event. The account routes need the admin role, so
+/// the caller is a super-admin session or the admin token.
 fn actor(principal: &Option<Extension<Principal>>) -> String {
-    principal.as_ref().map_or_else(
-        || "admin_token".to_owned(),
-        |Extension(p)| format!("user:{}", p.user_id),
+    audit::actor(
+        &admin::Role::Admin,
+        principal.as_ref().map(|Extension(principal)| principal),
     )
 }
 
