@@ -89,3 +89,26 @@ pub(super) async fn correct_facts(
     )
     .await
 }
+
+pub(super) async fn get_erasure(
+    State(service): State<Service>,
+    Extension(role): Extension<admin::Role>,
+    Extension(request_id): Extension<RequestId>,
+    clock: Option<Extension<Clock>>,
+    name: Result<Path<String>, PathRejection>,
+    headers: HeaderMap,
+    bytes: Result<Bytes, BytesRejection>,
+) -> Response {
+    let call = Call::new(service, role, request_id, clock, "get_erasure");
+    // Job status contains no evidence content: graph_read only.
+    refused(
+        call,
+        name,
+        headers,
+        bytes,
+        WireOperation::GetErasure,
+        &[],
+        false,
+    )
+    .await
+}

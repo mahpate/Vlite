@@ -89,7 +89,7 @@ const MEMORY_PATHS: [&str; 3] = [
 ];
 
 /// Routes served in this slice; the rest are not mounted yet.
-const SERVED: [&str; 7] = [
+const SERVED: [&str; 8] = [
     "/v1/memory/notes/remember",
     "/v1/memory/notes/recall",
     "/v1/memory/notes/consolidate",
@@ -97,11 +97,9 @@ const SERVED: [&str; 7] = [
     "/v1/memory/notes/receipts/lookup",
     "/v1/memory/notes/facts/query",
     "/v1/memory/notes/facts/correct",
-];
-const UNMOUNTED: [&str; 2] = [
     "/v1/memory/notes/erasures/get",
-    "/v1/memory/notes/erasures/resume",
 ];
+const UNMOUNTED: [&str; 1] = ["/v1/memory/notes/erasures/resume"];
 
 #[tokio::test]
 async fn without_a_bindings_file_memory_routes_are_not_mounted() {
@@ -540,6 +538,9 @@ async fn a_read_only_database_refuses_writes_before_validation() {
     let (status, error) = post(&app, "/v1/memory/notes/facts/query", &token, &scope).await;
     assert_eq!(status, 409, "{error}");
     assert_eq!(error["error"]["details"]["feature"], "facts");
+    let (status, error) = post(&app, "/v1/memory/notes/erasures/get", &token, &scope).await;
+    assert_eq!(status, 409, "{error}");
+    assert_eq!(error["error"]["details"]["feature"], "erasure_jobs");
 }
 
 const RECALL_OPS: [&str; 5] = ["read", "search", "write", "graph_read", "graph_write"];
