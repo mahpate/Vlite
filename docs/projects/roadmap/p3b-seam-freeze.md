@@ -592,3 +592,9 @@ endings preserved on write), runs `cmd`, classifies the outcome and restores the
 selector, the failing tests and the SHA-256 of the file before, during and after. Its records have the shape
 `{id, desc, file, old, new, cmd}` plus the evidence, so B4's `tests/compact_mutant_replay.py` reads them: its `check`
 mode (the two commands above) confirms that every anchor matches once.
+
+B4's `verify` mode does not read the evidence of these two ledgers: it judges the `runs` records that the lists of B4 and
+A4 keep, so on these ledgers it reports every mutant open, with no valid run. It reads the seam ledger for one purpose, to
+check that it holds the 24 mutants that B4's list reuses: the seven obligations, each with a final-tree run that must be a
+restored kill, and the 17 mutants of the earlier seam campaign, which carry their baseline kill on `v0.7.0` and no
+final-tree run.

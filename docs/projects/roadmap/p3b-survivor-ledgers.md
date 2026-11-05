@@ -180,14 +180,18 @@ and each kill records the failing tests, the SHA-256 of the file before, during 
 the first and after the last mutant of its replay. B4's ledger, `tests/compact_b4_mutants.json`, holds 48 mutants: lane
 B's 11 own obligations; six from lane B's report, which are its five survivors (four are killed by new tests, and
 `x-settings-health-removed` is accepted as an equivalent mutant, because the compact settings arm repeats the health
-check that `resolve` has just made) and the pin mutant that a test kills to hold the invariant that equivalence rests
+check that `resolve` has just made, with the caveat that a failure of the background flusher between the two checks would
+tell them apart, a case no contract orders and no deterministic test can observe) and the pin mutant that a test kills to
+hold the invariant that equivalence rests
 on; three gaps that B4's wider campaign found in the lane's consumer tests (the persisted flag and the returned
 persistence of a settings change, and the limit that reaches the reranking provider); three mutants of the read-only
 gate; and 25 neighbors of the consumers. They are replayed and checked with `tests/compact_mutant_replay.py`. Three of the
 five report survivors (the frame-kind guard of the body read and of the record cell, and the error of `effective_vector`)
 are the same replacements as `R0-AU-01`, `R0-AU-02` and `R0-AU-12`, which B4 re-derived from lane B's report, so those
 three are killed in both ledgers. B4's ledger lists the seven seam obligations and the 17 mutants of the earlier seam
-campaign as `reused`, and its `verify` mode reads R0's ledger to check that it holds each of those 24 as a restored kill.
+campaign as `reused`, and its `verify` mode reads R0's ledger to check that it holds each of those 24, and that the
+final-tree run of each obligation is a kill that restored the file byte-identically (the 17 mutants carry only their
+baseline kill on `v0.7.0`).
 
 ## Evidence that would settle OPEN-71-02
 
@@ -200,8 +204,9 @@ it rests on pinned by a test where one can be written. Replays of several mutant
 `tests/compact_mutant_replay.py` (B4) checks this form mechanically: `check` runs the anchor test, `run` replays one
 mutant per build, and `verify` re-checks the recorded evidence against the tree it runs in, calling a run that was made
 on an older tree stale and not failed. `verify` is in B4's final tool; the copy of the tool that A4's branch carries has
-`check`, `run` and `merge` only. R0's ledgers record the same fields, and `check` accepts them, on R0's head and on a merge
-with A4's. A4's ledger (`tests/compact_a4_mutants.json`) passes `check` on A4's head; on a tree that also holds R0's slice 3
+`check`, `run` and `merge` only. R0's ledgers record the fields of this form in their own shape (`final` and `independent`
+records), and `check` accepts them, on R0's head and on a merge with A4's; `verify` reads the `runs` shape of B4's and A4's
+lists, so it reports every mutant of R0's ledgers open (see [the seam freeze](p3b-seam-freeze.md#9-verification)). A4's ledger (`tests/compact_a4_mutants.json`) passes `check` on A4's head; on a tree that also holds R0's slice 3
 one of its anchors matches twice (see [Lane A](#lane-a)).
 
 ## Not established here
