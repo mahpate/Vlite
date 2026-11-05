@@ -88,10 +88,13 @@ Order and gates come from the storage readiness inventory. Defaults stay unchang
 1. **R0** baseline and seam freeze from the 0.7.0 tag, reconciled progress text and 91 hand mutants of the read seam, of
    which 28 had no replay evidence on `v0.7.0` (12 are reached through the seam's calls, the test-only mapped copy or an
    input that no writer produces; 16 need stored bytes or the in-memory directory to be edited) and are now killed by 16
-   of the 19 added tests (each of the other three kills a mutant of its own statement); the final-tree replays ran on the
-   lane's machine only, and an independent replay of them is open:
-   [seam freeze](p3b-seam-freeze.md), [survivor ledgers](p3b-survivor-ledgers.md) and
-   [`tests/compact_seam_mutants.json`](../../../tests/compact_seam_mutants.json).
+   of the 19 added tests (each of the other three kills a mutant of its own statement): [seam
+   freeze](p3b-seam-freeze.md), [survivor ledgers](p3b-survivor-ledgers.md) and
+   [`tests/compact_seam_mutants.json`](../../../tests/compact_seam_mutants.json). Slice 3 adds the ordered cursors that the
+   bounded exact scan needs (`base_rows`, `affected_ids` and `ordered_ids`, crate-private and test-gated, `effective_ids`
+   unchanged) with 7 tests and 34 more hand mutants, all killed
+   ([`tests/compact_ordered_cursors_mutants.json`](../../../tests/compact_ordered_cursors_mutants.json)). The final-tree
+   replays ran on the lane's machine only; an independent replay of them is open.
 2. **B4** finish lane B by cherry-picking `250a98bc` (never by merge): 18 replay obligations, seven of them mutations of
    the read seam that R0 closed and eleven for B4 to replay; **A4** record consumers, 26 survivors to replay; both before
    **E4**, the bounded exact scan.

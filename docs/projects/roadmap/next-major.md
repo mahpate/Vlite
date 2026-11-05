@@ -209,7 +209,8 @@ Local numbers below show direction only (see rules).
   under `cfg(test)`: release builds have no compact dispatch and no normal
   `Database` wiring. The 0.7.1 plan freezes the seam in
   [p3b-seam-freeze.md](p3b-seam-freeze.md) and records both parked lanes'
-  survivor ledgers in [p3b-survivor-ledgers.md](p3b-survivor-ledgers.md).
+  survivor ledgers in [p3b-survivor-ledgers.md](p3b-survivor-ledgers.md). The plan's first lane, R0, also adds the ordered
+  cursors that the bounded exact scan needs (`base_rows`, `affected_ids` and `ordered_ids`), under the same test gate.
   The [P3c compact-ANN design](p3c-compact-ann.md) (source-bound flat
   topology, persisted scalar-u8 codes, background rebuild and a separately
   opted-in rotated one-bit candidate) is independently reviewed; its nine
