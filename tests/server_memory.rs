@@ -263,6 +263,7 @@ fn remember_body(key: &str) -> Value {
     json!({
         "scope": {"agent": "a"},
         "idempotency_key": key,
+        "deadline_ms": 5000,
         "items": [{
             "id": "e1",
             "kind": "entity",
@@ -631,7 +632,11 @@ async fn a_granted_scope_recalls_what_it_remembered() {
     let (app, token) = start_scoped(&directory, &RECALL_OPS, None);
     let (status, _) = remember(&app, Some(&token), &remember_body("k")).await;
     assert_eq!(status, 200);
-    let body = json!({"scope": {"agent": "a"}, "entity_seeds": ["e1"]});
+    let body = json!({
+        "scope": {"agent": "a"},
+        "entity_seeds": ["e1"],
+        "limits": {"deadline_ms": 5000}
+    });
     let (status, recalled) = post(&app, SERVED[1], &token, &body).await;
     assert_eq!(status, 200, "{recalled}");
     assert_eq!(recalled["memories"][0]["id"], "e1");
@@ -656,7 +661,11 @@ async fn a_granted_scope_recalls_what_it_remembered() {
 
 #[tokio::test]
 async fn recall_needs_read_and_search_on_the_evidence_collection() {
-    let body = json!({"scope": {"agent": "a"}, "entity_seeds": ["e1"]});
+    let body = json!({
+        "scope": {"agent": "a"},
+        "entity_seeds": ["e1"],
+        "limits": {"deadline_ms": 5000}
+    });
     let directory = TempDir::new().unwrap();
     let (app, token) = start_scoped(&directory, &ALL_OPS, None);
     let (status, error) = post(&app, SERVED[1], &token, &body).await;
@@ -678,6 +687,7 @@ fn consolidate_body(key: &str) -> Value {
     json!({
         "scope": {"agent": "a"},
         "idempotency_key": key,
+        "deadline_ms": 5000,
         "inputs": [{"id": "e1", "revision": "1"}],
         "output": {
             "id": "sum1",
@@ -745,6 +755,7 @@ async fn a_granted_scope_forgets_with_a_content_free_audit() {
     let body = json!({
         "scope": {"agent": "a"},
         "idempotency_key": "f-1",
+        "deadline_ms": 5000,
         "target": {"ids": [{"id": "e1", "revision": "1"}]},
         "mode": "logical_delete"
     });
@@ -791,6 +802,7 @@ async fn a_forget_receipt_is_looked_up_with_a_content_free_audit() {
     let body = json!({
         "scope": {"agent": "a"},
         "idempotency_key": "f-1",
+        "deadline_ms": 5000,
         "target": {"ids": [{"id": "e1", "revision": "1"}]},
         "mode": "logical_delete"
     });
