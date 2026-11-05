@@ -30,8 +30,11 @@ unchanged and no size claim is made.
   A later inventory of every handler that resolves a collection name found a second, older tenant defect in the metadata update
   route (also fixed; see the release notes).
 - **Live checks.** `scripts/memory_live_e2e.py` (98 checks over real HTTP, 3 documented skips), `scripts/kv_concurrency_check.py`
-  (60 s on 8 threads, 0 violations) and `scripts/rest_differential_check.py` (931 requests per server against 0.6.1, 0 response
-  differences, only the documented `rerank.lambda` tightening flagged).
+  (60 s on 8 threads, 0 violations) and `scripts/rest_differential_check.py` (931 requests per server against 0.6.1). The one
+  response difference with a cause is the tenant metadata update fix: for a tenant whose own collection has no such record, 0.6.1
+  answered `500` after it had written to the root collection of the same name, and this release answers `412`. That extra write
+  leaves every later revision, ETag and sequence number on the 0.6.1 server one higher and its file 144 bytes larger, which the
+  check reports as 32 follow-on differences. The only OpenAPI difference flagged is the documented `rerank.lambda` tightening.
 - **CI.** The full workflow, the release workflow as a dry run and the Pages checks ran on the exact head that was published.
 - **Benchmarks.** One DO-005 campaign ran for this major release (see [RESULTS.md](../../../benchmarks/RESULTS.md)). Benchmarks run
   for major releases only; the quiet-host criteria (background CPU mean at most 10%, at most 50% per half-second sample) are
