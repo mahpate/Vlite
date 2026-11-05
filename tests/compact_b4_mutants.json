@@ -6,6 +6,28 @@
   "consumers": "test --locked --offline --lib -- compact::source::seam_tests records::effective_rows_tests metadata_index::tests::compact text_index::tests::compact rerank::",
   "gpu": "test --locked --offline --features gpu --lib -- metadata_index::tests::compact_ann_paths_remain_refused_with_unchanged_state"
  },
+ "two_machines": [
+  "x-rec-vector-error-swallowed",
+  "x-seam-frame-kind-check-removed-body",
+  "x-seam-frame-kind-check-removed-decode",
+  "x-settings-health-removed",
+  "x-health-gate-inert",
+  "x-text-break-on-unavailable-removed",
+  "pb-settings-validate-removed",
+  "pb-collection-text-assign-dropped",
+  "pb-meta-overlay-rows-only",
+  "pb-text-overlay-rows-only",
+  "pb-rerank-batch-bound-inclusive",
+  "pb-rerank-clock-max",
+  "pb-rerank-distance-dropped",
+  "pb-rerank-health-check-removed",
+  "pb-settings-frame-wrong-collection",
+  "pb-settings-metadata-assign-dropped",
+  "pb-text-limit-reset",
+  "b4-settings-readonly-gate-removed",
+  "b4-settings-readonly-gate-inverted",
+  "b4-settings-readonly-before-validation"
+ ],
  "mutants": [
   {
    "id": "x-rec-vector-error-swallowed",
@@ -442,7 +464,10 @@
    "file": "src/lib.rs",
    "old": "state.settings_persisted = true;\n            state.metadata_indexes = metadata;",
    "new": "state.settings_persisted = false;\n            state.metadata_indexes = metadata;",
-   "cmd": "test --locked --offline --lib -- compact::source::seam_tests records::effective_rows_tests metadata_index::tests::compact text_index::tests::compact rerank::"
+   "cmd": "test --locked --offline --lib -- compact::source::seam_tests records::effective_rows_tests metadata_index::tests::compact text_index::tests::compact rerank::",
+   "found_surviving": {"tree": "bddb632d", "machine": "peer-d", "note": "lane B's tests never read the persisted flag of a compact collection"},
+   "expect": ["compact::source::seam_tests::consumer_tests::compact_settings_report_and_record_what_the_resident_path_does"],
+   "min_machines": 2
   },
   {
    "id": "b4-settings-text-assign-dropped",
@@ -460,7 +485,10 @@
    "file": "src/lib.rs",
    "old": "return Ok(SettingsPersistence::Persisted);\n        }\n        self.ensure_resident_in(id)?;",
    "new": "return Ok(SettingsPersistence::MemoryOnly);\n        }\n        self.ensure_resident_in(id)?;",
-   "cmd": "test --locked --offline --lib -- compact::source::seam_tests records::effective_rows_tests metadata_index::tests::compact text_index::tests::compact rerank::"
+   "cmd": "test --locked --offline --lib -- compact::source::seam_tests records::effective_rows_tests metadata_index::tests::compact text_index::tests::compact rerank::",
+   "found_surviving": {"tree": "bddb632d", "machine": "peer-d", "note": "lane B's tests ignore the value the compact settings arm returns"},
+   "expect": ["compact::source::seam_tests::consumer_tests::compact_settings_report_and_record_what_the_resident_path_does"],
+   "min_machines": 2
   },
   {
    "id": "b4-rebuild-metadata-assign-dropped",
@@ -622,7 +650,10 @@
    "file": "src/rerank.rs",
    "old": "distance: hit.distance,\n        });\n    }\n    reranker.rerank(query, &candidates, limit)",
    "new": "distance: hit.distance,\n        });\n    }\n    reranker.rerank(query, &candidates, limit + 1)",
-   "cmd": "test --locked --offline --lib -- compact::source::seam_tests records::effective_rows_tests metadata_index::tests::compact text_index::tests::compact rerank::"
+   "cmd": "test --locked --offline --lib -- compact::source::seam_tests records::effective_rows_tests metadata_index::tests::compact text_index::tests::compact rerank::",
+   "found_surviving": {"tree": "f018a0b7", "machine": "peer-h", "note": "lane B's rerank tests never use a limit that cuts the candidates"},
+   "expect": ["compact::source::seam_tests::consumer_tests::compact_rerank_hands_the_provider_what_the_resident_path_does"],
+   "min_machines": 2
   },
   {
    "id": "b4-quality-overlay-bytes-zero",

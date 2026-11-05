@@ -2,13 +2,16 @@
 """Replay hand-written mutants one build at a time and keep their evidence.
 
 A list is JSON: {"campaign", "base", "mutants": [{"id", "desc", "file", "old",
-"new", "cmd", "expect"?, "equivalent"?}]}. Each mutant is one anchored replacement:
-`old` must occur exactly once in `file`. `cmd` is the argument list of one cargo test
-command (for example "test --locked --offline --lib -- compact::source"). `expect`
-names the tests that must fail. `equivalent` is {"argument", "invariant", "pinned_by",
-"pin_mutant", "review"}: a mutant that no test can tell from the original, with the
-invariant it rests on, the test that pins that invariant, a second mutant that this
-test kills, and the reviewer ("pending" until an independent review has read it).
+"new", "cmd", "expect"?, "min_machines"?, "equivalent"?}]}. Each mutant is one anchored
+replacement: `old` must occur exactly once in `file`. `cmd` is the argument list of one
+cargo test command (for example "test --locked --offline --lib -- compact::source").
+`expect` names the tests that must fail. `min_machines` raises the number of machines
+that `verify` requires for this mutant above its default; a top-level `two_machines`
+list does the same for many IDs at once. `equivalent` is {"argument",
+"invariant", "pinned_by", "pin_mutant", "review"}: a mutant that no test can tell from
+the original, with the invariant it rests on, the test that pins that invariant, a
+second mutant that this test kills, and the reviewer ("pending" until an independent
+review has read it).
 
   python tests/compact_mutant_replay.py check LIST.json
   python tests/compact_mutant_replay.py run LIST.json OUT.json [--machine NAME] [--ids a,b]
@@ -153,6 +156,12 @@ def baseline(root, commands, timeout):
     return results
 
 
+def crashed(output):
+    """A toolchain crash (a killed or aborted compiler), not a compile error."""
+    markers = re.search(r"\(exit code: 0x[0-9a-fA-F]+|\(signal: \d+|SIGSEGV|SIGKILL|out of memory", output)
+    return markers is not None and "error[E" not in output
+
+
 def replay(root, mutant, timeout):
     path = root / mutant["file"]
     original = path.read_bytes()
@@ -175,12 +184,16 @@ def replay(root, mutant, timeout):
     started = time.time()
     try:
         path.write_bytes(mutated.replace("\n", newline).encode("utf-8"))
-        code, output, _ = cargo(root, mutant["cmd"], timeout, build_only=True)
+        for attempt in (1, 2):
+            code, output, _ = cargo(root, mutant["cmd"], timeout, build_only=True)
+            record["build_attempts"] = attempt
+            if code in (0, None) or not crashed(output):
+                break
         record["compiled"] = code == 0
         if code is None:
             record["status"] = "timeout"
         elif code != 0:
-            record["status"] = "compile-error"
+            record["status"] = "crash" if crashed(output) else "compile-error"
             record["detail"] = output[-1500:]
         else:
             code, output, _ = cargo(root, mutant["cmd"], timeout)
@@ -213,7 +226,9 @@ def run(root, data, out_path, machine, only, timeout, resume):
     mutants = [m for m in data["mutants"] if not only or m["id"] in only]
     done = {}
     if resume and Path(out_path).is_file():
-        done = {r["id"]: r for r in json.loads(Path(out_path).read_text("utf-8"))["results"]}
+        # Only a kill or a survival is final; a crash, a timeout or an unexecuted run is replayed.
+        earlier = json.loads(Path(out_path).read_text("utf-8"))["results"]
+        done = {r["id"]: r for r in earlier if r["status"] in ("killed", "survived")}
     commands = sorted({m["cmd"] for m in mutants})
     summary = {
         "machine": machine,
@@ -283,10 +298,10 @@ def merge(list_path, out_paths):
 def verify(root, data, minimum):
     """Re-check the recorded evidence against the tree under `root`.
 
-    A mutant is accepted when it has runs on at least `minimum` machines and every
-    run is a kill with the whole evidence, and the file it was replayed on is the
-    file in this tree. A run replayed on an older tree is stale, never a failure
-    of the mutant: replay it again on this tree.
+    A mutant is accepted when it has runs on at least `minimum` machines (or its own
+    `min_machines`) and every run is a kill with the whole evidence, and the file it
+    was replayed on is the file in this tree. A run replayed on an older tree is
+    stale, never a failure of the mutant: replay it again on this tree.
 
     A mutant with an `equivalent` record is accepted only when every run survived
     with the same evidence (compiled, restored, green baseline) and the record names
@@ -296,6 +311,9 @@ def verify(root, data, minimum):
     names = {m["id"]: m for m in data["mutants"]}
     counts = {"accepted": 0, "stale": 0, "open": 0}
     for mutant in data["mutants"]:
+        needed = mutant.get(
+            "min_machines", 2 if mutant["id"] in data.get("two_machines", ()) else minimum
+        )
         path = root / mutant["file"]
         text = lf(path.read_text(encoding="utf-8"))
         here = sha256(text.encode("utf-8"))
@@ -342,7 +360,7 @@ def verify(root, data, minimum):
             state = "OPEN"
         elif stale and not good:
             state = "STALE"
-        elif good < minimum or pending:
+        elif good < needed or pending:
             state = "OPEN"
         else:
             state = "ok"
