@@ -148,8 +148,12 @@ fn compact_wrong_block_kind_is_refused_before_authentication_on_every_read_path(
     }
 }
 
-/// Kills `x-settings-health-removed`: a poisoned handle answers `Poisoned`
-/// before validation, before the read-only gate and before any scan of the base.
+/// Pins the first gate of the compact settings path: a poisoned handle answers
+/// `Poisoned` before validation, before the read-only gate and before any scan of
+/// the base. The arm's own `ensure_healthy` repeats the check that `resolve` makes
+/// first, so deleting that one call is not observable (`x-settings-health-removed`
+/// is an equivalent mutant, see its record in `tests/compact_b4_mutants.json`);
+/// making the health check inert (`x-health-gate-inert`) is, and this test kills it.
 #[test]
 fn compact_settings_check_the_handle_health_before_every_other_gate() {
     let _precision = PrecisionActivation::on();
