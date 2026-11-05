@@ -1160,6 +1160,14 @@ impl VLite for Adapter {
                             )?;
                             let expected = guard.resolve(db, &ident, collection, id)?;
                             let created = db.revision_in(collection, id)?.is_none();
+                            record_put::refuse_due_expiry(
+                                db,
+                                collection,
+                                id,
+                                expected,
+                                expiry,
+                                crate::current_time_ms(),
+                            )?;
                             let revision = db.put_with_expiry_in(
                                 collection,
                                 id,

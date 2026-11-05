@@ -49,6 +49,7 @@ mod observability;
 mod ops;
 mod provider_serving;
 pub mod providers;
+mod record_put;
 mod reserved;
 #[cfg(feature = "otel")]
 pub mod telemetry;
@@ -2051,7 +2052,21 @@ fn current_etag(
     collection: u16,
     id: u64,
 ) -> Result<Option<(String, u64)>, ApiError> {
-    match (db.get_in(collection, id)?, db.revision_in(collection, id)?) {
+    current_etag_at(db, ident, collection, id, crate::current_time_ms())
+}
+
+/// `current_etag` as of the Unix-millisecond clock `now_ms`.
+fn current_etag_at(
+    db: &Database,
+    ident: &str,
+    collection: u16,
+    id: u64,
+    now_ms: u64,
+) -> Result<Option<(String, u64)>, ApiError> {
+    match (
+        db.get_at_in(collection, id, now_ms)?,
+        db.revision_in(collection, id)?,
+    ) {
         (Some(record), Some(revision)) => Ok(Some((
             etag(ident, collection, id, revision, record),
             revision,
@@ -2425,25 +2440,18 @@ async fn put_core(
             let collection = scope.collection(db, &target)?.id();
             enforce_quota(&quota_service, db, scope.role(), collection, &[(id, true)])?;
             let expected = guard.resolve(db, &ident, collection, id)?;
-            let created = db.revision_in(collection, id)?.is_none();
-            if let Some(expires_at_ms) = expires_at_ms {
-                db.collection_mut_in(collection)?.put_with_expiry(
-                    id,
-                    &vector,
-                    &payload,
-                    &metadata,
-                    Some(expires_at_ms),
-                )?;
-            } else {
-                db.put_in(collection, id, &vector, &payload, &metadata, expected)?;
-            }
-            let (etag, revision) = current_etag(db, &ident, collection, id)?
-                .ok_or_else(|| internal("acknowledged put is not readable under the same lock"))?;
-            Ok(Written {
-                revision,
-                created,
-                etag,
-            })
+            record_put::put_record_at(
+                db,
+                &ident,
+                collection,
+                id,
+                expected,
+                &vector,
+                &payload,
+                &metadata,
+                expires_at_ms,
+                crate::current_time_ms(),
+            )
         })
         .await
 }

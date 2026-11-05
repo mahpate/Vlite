@@ -54,8 +54,16 @@ passwords and sessions.
 
 `PUT /v1/vectors/{id}` and its collection-scoped equivalent accept optional
 `expires_at_ms` (absolute Unix milliseconds) or `ttl_ms`/`ttl` (relative
-milliseconds); the two forms are mutually exclusive and need format v5.
-Expiry is checked at read/search time and does not create a separate feed event.
+milliseconds); the two forms are mutually exclusive and need format v5. An
+expiry that is not later than the server clock when the request is handled
+(`expires_at_ms` at or before it, `ttl_ms` 0, or a `ttl_ms` that has already
+run out when the write is applied) is refused with 422 `invalid_input` and
+nothing is written: a record already under that ID is unchanged. A file older
+than v5 answers 409 `upgrade_required` and a stale `If-Match` 412 first, and
+gRPC `PutVector` applies the same rule as `INVALID_ARGUMENT`. The
+[key-value routes](#key-value-entries) accept an already due deadline by
+contract. Expiry is checked at read/search time and does not create a separate
+feed event.
 `PATCH /v1/vectors/{id}/metadata` and
 `PATCH /v1/collections/{collection}/vectors/{id}/metadata` accept
 `{"metadata":{...}}` and leave vector/payload bytes unchanged. An optional
