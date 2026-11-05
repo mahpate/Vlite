@@ -43,10 +43,12 @@ pub use group_commit::GroupCommitConfig;
 #[cfg(feature = "grpc")]
 pub mod grpc;
 mod logs;
+mod memory;
 mod observability;
 mod ops;
 mod provider_serving;
 pub mod providers;
+mod reserved;
 #[cfg(feature = "otel")]
 pub mod telemetry;
 mod tenants;
@@ -188,6 +190,7 @@ pub struct Service {
     /// EPIC-011: graph read/write guard hold times.
     graph_stats: Arc<graph::GuardStats>,
     providers: Arc<providers::ProviderRegistry>,
+    memory_bindings: Arc<reserved::Bindings>,
 }
 
 impl Service {
@@ -277,6 +280,7 @@ impl Service {
             graph_enabled,
             graph_stats: Arc::default(),
             providers: Arc::default(),
+            memory_bindings: Arc::new(reserved::Bindings::default()),
         })
     }
 
@@ -288,6 +292,15 @@ impl Service {
 
     pub(crate) fn providers(&self) -> &providers::ProviderRegistry {
         &self.providers
+    }
+
+    fn with_bindings(mut self, bindings: reserved::Bindings) -> Self {
+        self.memory_bindings = Arc::new(bindings);
+        self
+    }
+
+    fn has_bindings(&self) -> bool {
+        !self.memory_bindings.is_empty()
     }
 
     /// Choose snapshot-based simple exact reads, or the original lock-held path.
@@ -558,6 +571,7 @@ fn configured_routes(service: Service) -> Router {
         .merge(data_routes())
         .merge(features::routes())
         .merge(kv::routes())
+        .merge(memory::routes(&service))
         .merge(
             Router::new()
                 .route("/health", get(|| async { Json(json!({"status": "ok"})) }))
@@ -952,6 +966,15 @@ fn permission(method: &Method, route: &str) -> Need {
             | "/v1/admin/backups/{name}/drill",
         ) => Need::Op(Op::Backup, Reach::All),
         ("GET" | "HEAD", "/v1/admin/maintenance/auto") => Need::Op(Op::Index, Reach::All),
+        // Memory routes exist only with a bindings file; binding and scope
+        // grants are checked by the handler (mapping section 6). Any method
+        // reaches the router's 405 only after the same route permission.
+        (_, memory_route) if memory::read_route(memory_route) => {
+            Need::Op(Op::GraphRead, Reach::Filtered)
+        }
+        (_, memory_route) if memory::write_route(memory_route) => {
+            Need::Op(Op::GraphWrite, Reach::Filtered)
+        }
         _ => Need::Admin,
     }
 }
@@ -962,6 +985,13 @@ fn forbidden_scope() -> ApiError {
         "forbidden_scope",
         "credential scope does not permit this operation or collection",
     )
+}
+
+pub(in crate::server) fn raw_credential(role: &admin::Role) -> Option<&str> {
+    match role {
+        admin::Role::Scoped(grant) if grant.api_credential => Some(grant.id.as_str()),
+        admin::Role::Admin | admin::Role::ReadOnly | admin::Role::Scoped(_) => None,
+    }
 }
 
 /// REST adapter for `authorize_need`: derives the scope requirement, the
@@ -984,7 +1014,9 @@ fn authorize(
             || route == "/v1/collections/{collection}/query"
             || route == "/v1/collections/{collection}/embed"
             || route == "/v1/collections/{collection}/search/disk-ann");
-    let search = search || graph::read_post(method, route);
+    let search = search
+        || graph::read_post(method, route)
+        || (method == Method::POST && memory::read_route(route));
     let read_only_allowed =
         path.starts_with("/v1/auth/") || (!path.starts_with("/v1/admin/") && (read || search));
     // Legacy routes address `default` (ID 0); their handlers may not resolve
@@ -1780,13 +1812,40 @@ fn record_path(
 /// Resolves a target under the database lock and enforces scoped bindings:
 /// collection ID and database lineage must both match the grant. The name
 /// is checked first so out-of-scope callers cannot probe existence.
+#[cfg(feature = "grpc")]
 fn open(db: &Database, role: &admin::Role, target: &Target) -> Result<u16, ApiError> {
+    open_inner(db, role, target, None)
+}
+
+fn open_guarded(
+    db: &Database,
+    role: &admin::Role,
+    target: &Target,
+    bindings: &reserved::Bindings,
+) -> Result<u16, ApiError> {
+    open_inner(db, role, target, Some(bindings))
+}
+
+fn open_inner(
+    db: &Database,
+    role: &admin::Role,
+    target: &Target,
+    bindings: Option<&reserved::Bindings>,
+) -> Result<u16, ApiError> {
     db.ensure_healthy()?;
     let qualified = tenants::qualify(role, target.name());
     let name = qualified.as_str();
     if let admin::Role::Scoped(grant) = role
         && !grant.names(name)
     {
+        return Err(forbidden_scope());
+    }
+    let credential = raw_credential(role);
+    if bindings.is_some_and(|bindings| {
+        !bindings
+            .reserved()
+            .raw_allowed(credential, reserved::Resource::Collection, name)
+    }) {
         return Err(forbidden_scope());
     }
     let collection = db.resolve(name)?;
@@ -1861,9 +1920,10 @@ async fn list_in(
     if !(1..=100).contains(&limit) {
         return Err(unprocessable("limit must be 1..100"));
     }
+    let bindings = service.memory_bindings.clone();
     service
         .run_read(move |db| {
-            let collection = open(db, &role, &target)?;
+            let collection = open_guarded(db, &role, &target, &bindings)?;
             use std::ops::Bound::{Excluded, Unbounded};
             let mut records = db
                 .state(collection)
@@ -1936,9 +1996,10 @@ async fn info(
     State(service): State<Service>,
     Extension(role): Extension<admin::Role>,
 ) -> Result<Json<Value>, ApiError> {
+    let bindings = service.memory_bindings.clone();
     service
         .run_read(move |db| {
-            open(db, &role, &Target::Legacy)?;
+            open_guarded(db, &role, &Target::Legacy, &bindings)?;
             Ok(Json(json!({
                 "dimensions": db.dimensions(),
                 "format_version": db.format_version(),
@@ -2088,9 +2149,10 @@ async fn fetch_core(
     target: Target,
     id: u64,
 ) -> Result<Fetched, ApiError> {
+    let bindings = service.memory_bindings.clone();
     service
         .run_read(move |db| {
-            let collection = open(db, &role, &target)?;
+            let collection = open_guarded(db, &role, &target, &bindings)?;
             let not_found =
                 || ApiError::new(StatusCode::NOT_FOUND, "not_found", "vector not found");
             let record = db.get_in(collection, id)?.ok_or_else(not_found)?.clone();
@@ -2240,12 +2302,13 @@ async fn update_metadata_in(
     let expected = if_match(&headers)?;
     let MetadataPatch { metadata } = body(payload)?;
     let ident = service.etag_ident.clone();
+    let bindings = service.memory_bindings.clone();
     let bytes = group_commit::record_bytes(0, 0, &metadata)
         .saturating_add(target.retained_bytes())
         .saturating_add(expected.as_ref().map_or(0, String::capacity));
     service
         .run_mutation(bytes, move |db| {
-            let collection = open(db, &role, &target)?;
+            let collection = open_guarded(db, &role, &target, &bindings)?;
             if let Some(expected) = expected.as_deref() {
                 let Some((current, _)) = current_etag(db, &ident, collection, id)? else {
                     return Err(ApiError::new(
@@ -2337,12 +2400,13 @@ async fn put_core(
     }
     let ident = service.etag_ident.clone();
     let quota_service = service.clone();
+    let bindings = service.memory_bindings.clone();
     let bytes = group_commit::record_bytes(vector.capacity(), payload.capacity(), &metadata)
         .saturating_add(target.retained_bytes())
         .saturating_add(guard.retained_bytes());
     service
         .run_mutation(bytes, move |db| {
-            let collection = open(db, &role, &target)?;
+            let collection = open_guarded(db, &role, &target, &bindings)?;
             enforce_quota(&quota_service, db, &role, collection, &[(id, true)])?;
             let expected = guard.resolve(db, &ident, collection, id)?;
             let created = db.revision_in(collection, id)?.is_none();
@@ -2408,12 +2472,13 @@ async fn delete_core(
     guard: Guard,
 ) -> Result<bool, ApiError> {
     let ident = service.etag_ident.clone();
+    let bindings = service.memory_bindings.clone();
     let bytes = 1024usize
         .saturating_add(target.retained_bytes())
         .saturating_add(guard.retained_bytes());
     service
         .run_mutation(bytes, move |db| {
-            let collection = open(db, &role, &target)?;
+            let collection = open_guarded(db, &role, &target, &bindings)?;
             let expected = guard.resolve(db, &ident, collection, id)?;
             Ok(db.delete_in(collection, id, expected)?)
         })
@@ -2530,6 +2595,7 @@ async fn batch_core(
         }
     }
     let quota_service = service.clone();
+    let bindings = service.memory_bindings.clone();
     let bytes = operations
         .iter()
         .fold(
@@ -2560,7 +2626,7 @@ async fn batch_core(
         .saturating_add(target.retained_bytes());
     service
         .run_mutation(bytes, move |db| {
-            let collection = open(db, &role, &target)?;
+            let collection = open_guarded(db, &role, &target, &bindings)?;
             enforce_quota(
                 &quota_service,
                 db,
@@ -3161,12 +3227,14 @@ async fn search_core(
     input.validate(&role)?;
     let metrics = service.metrics.clone();
     let started = Instant::now();
+    let bindings = service.memory_bindings.clone();
     let attempt = move |db: &Database,
                         role: admin::Role,
                         target: Target,
                         input: Search,
-                        allow_maintenance: bool| {
-        let collection = open(db, &role, &target)?;
+                        allow_maintenance: bool,
+                        bindings: &reserved::Bindings| {
+        let collection = open_guarded(db, &role, &target, bindings)?;
         let executed = execute(db, collection, &target, &input, allow_maintenance)?;
         let binding = (
             tenants::qualify(&role, target.name()),
@@ -3176,10 +3244,11 @@ async fn search_core(
         Ok::<_, ApiError>((executed, binding, role, target, input))
     };
     let snapshot_reads = service.snapshot_reads;
+    let rebuild_bindings = bindings.clone();
     let (executed, collection, role, target, input) = service
         .run_read_then(
             move |db| {
-                let collection = open(db, &role, &target)?;
+                let collection = open_guarded(db, &role, &target, &bindings)?;
                 if snapshot_reads
                     && input.mode == SearchMode::Exact
                     && input.rerank.is_none()
@@ -3213,7 +3282,7 @@ async fn search_core(
                     }
                 }
                 let (executed, binding, role, target, input) =
-                    attempt(db, role, target, input, true)?;
+                    attempt(db, role, target, input, true, &bindings)?;
                 Ok((None, executed, binding, role, target, input))
             },
             |(snapshot, mut executed, binding, role, target, input)| {
@@ -3245,10 +3314,10 @@ async fn search_core(
             // Opted-in collections never construct an index under this guard.
             service
                 .run(move |db| {
-                    let collection = open(db, &role, &target)?;
+                    let collection = open_guarded(db, &role, &target, &rebuild_bindings)?;
                     rebuild_stale(db, collection, &target, &input, &metrics)?;
                     let (executed, binding, _, _, input) =
-                        attempt(&*db, role, target, input, false)?;
+                        attempt(&*db, role, target, input, false, &rebuild_bindings)?;
                     let executed = executed.ok_or_else(|| internal("index stale after rebuild"))?;
                     Ok((input, binding, executed))
                 })
@@ -3348,9 +3417,10 @@ async fn index_status_in(
     role: admin::Role,
     target: Target,
 ) -> Result<Json<Value>, ApiError> {
+    let bindings = service.memory_bindings.clone();
     service
         .run_read(move |db| {
-            let collection = open(db, &role, &target)?;
+            let collection = open_guarded(db, &role, &target, &bindings)?;
             Ok(Json(index_json(db, collection, &target)))
         })
         .await
@@ -3420,9 +3490,10 @@ async fn build_index_in(
     let input: IdentityInput =
         serde_json::from_value(input).map_err(|error| unprocessable(error.to_string()))?;
     let metrics = service.metrics.clone();
+    let bindings = service.memory_bindings.clone();
     service
         .run(move |db| {
-            let collection = open(db, &role, &target)?;
+            let collection = open_guarded(db, &role, &target, &bindings)?;
             let (metric, config, options) = input.resolve(db, collection, &target)?;
             let started = Instant::now();
             db.build_hnsw_with_options_in(collection, config, metric, options)?;
@@ -3494,9 +3565,10 @@ async fn quality_in(
 ) -> Result<Json<Value>, ApiError> {
     let input: Quality = optional(input)?;
     let metrics = service.metrics.clone();
+    let bindings = service.memory_bindings.clone();
     service
         .run(move |db| {
-            let collection = open(db, &role, &target)?;
+            let collection = open_guarded(db, &role, &target, &bindings)?;
             let identity = IdentityInput {
                 metric: input.metric,
                 config: input.config,
@@ -3658,6 +3730,22 @@ mod tests {
     use axum::{body::Body, http::Request};
     use std::time::Duration;
     use tower::ServiceExt;
+
+    #[test]
+    fn signed_in_user_grants_are_not_api_raw_access_credentials() {
+        let grant = credentials::Grant::for_user(
+            "abcdefghij27".to_owned(),
+            "viewer".to_owned(),
+            None,
+            &[credentials::Op::Read],
+            1,
+            1,
+        );
+        let role = admin::Role::Scoped(Arc::new(grant));
+        assert_eq!(raw_credential(&role), None);
+        assert_eq!(raw_credential(&admin::Role::Admin), None);
+        assert_eq!(raw_credential(&admin::Role::ReadOnly), None);
+    }
 
     #[test]
     fn approximate_server_honors_background_option_and_preserves_legacy_builds() {

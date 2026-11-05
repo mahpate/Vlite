@@ -257,6 +257,9 @@ fn reason_name(reason: &TruncationReason) -> &'static str {
 }
 
 async fn guard_stats(State(service): State<Service>) -> Result<Json<Value>, ApiError> {
+    if !service.memory_bindings.is_empty() {
+        return Err(forbidden_scope());
+    }
     let inner = service.graph_stats.inner.lock().map_err(internal)?;
     Ok(Json(json!({
         "read_guard": inner.read.json(),
@@ -318,12 +321,20 @@ fn untruncated<T>(_: &T) -> &[TruncationReason] {
 /// Name binding check, before any lookup (no existence probing). Returns
 /// the stored name: a tenanted principal's `g` is the graph `t{tenant}__g`,
 /// as for collections. Responses keep the name the caller used.
-fn scope(role: &admin::Role, graph: &str) -> Result<String, ApiError> {
+fn scope(service: &Service, role: &admin::Role, graph: &str) -> Result<String, ApiError> {
     let stored = tenants::qualify(role, graph);
-    match role {
-        admin::Role::Scoped(grant) if !grant.graph_allowed(&stored) => Err(forbidden_scope()),
-        _ => Ok(stored),
+    if matches!(role, admin::Role::Scoped(grant) if !grant.graph_allowed(&stored)) {
+        return Err(forbidden_scope());
     }
+    let credential = super::raw_credential(role);
+    if !service.memory_bindings.reserved().raw_allowed(
+        credential,
+        super::reserved::Resource::Graph,
+        &stored,
+    ) {
+        return Err(forbidden_scope());
+    }
+    Ok(stored)
 }
 
 /// Vector-only files refuse every graph route before the lock is taken.
@@ -372,12 +383,21 @@ async fn list(
 ) -> Result<Json<Value>, ApiError> {
     enabled(&service)?;
     let graphs = guarded_read(&service, |db| Ok(db.list_graphs()?), untruncated).await?;
-    let graphs: Value = graphs
+    let mut visible: Vec<_> = graphs
         .iter()
         .filter(|graph| match &role {
             admin::Role::Scoped(grant) => grant.graph_allowed(&graph.name),
             _ => true,
         })
+        .collect();
+    service.memory_bindings.reserved().retain_visible(
+        super::raw_credential(&role),
+        super::reserved::Resource::Graph,
+        &mut visible,
+        |graph| graph.name.as_str(),
+    );
+    let graphs: Value = visible
+        .into_iter()
         .map(|graph| info(&role, graph))
         .collect();
     Ok(Json(json!({"graphs": graphs})))
@@ -395,7 +415,7 @@ async fn create(
     input: Result<Bytes, BytesRejection>,
 ) -> Result<(StatusCode, Json<Value>), ApiError> {
     let Named { graph } = parse(input)?;
-    let name = scope(&role, &graph)?;
+    let name = scope(&service, &role, &graph)?;
     enabled(&service)?;
     let created = guarded_write(&service, move |db| Ok(db.create_graph(&name)?)).await?;
     Ok((
@@ -410,7 +430,7 @@ async fn info_route(
     graph: Result<Path<String>, PathRejection>,
 ) -> Result<Json<Value>, ApiError> {
     let graph = graph_path(graph)?;
-    let name = scope(&role, &graph)?;
+    let name = scope(&service, &role, &graph)?;
     enabled(&service)?;
     let found = guarded_read(&service, move |db| Ok(db.graph(&name)?.info()), untruncated).await?;
     Ok(Json(json!({"graph": info(&role, &found)})))
@@ -422,7 +442,7 @@ async fn drop_route(
     graph: Result<Path<String>, PathRejection>,
 ) -> Result<Json<Value>, ApiError> {
     let graph = graph_path(graph)?;
-    let name = scope(&role, &graph)?;
+    let name = scope(&service, &role, &graph)?;
     enabled(&service)?;
     guarded_write(&service, move |db| Ok(db.drop_graph(&name)?)).await?;
     Ok(Json(json!({"dropped": graph})))
@@ -435,7 +455,7 @@ fn query_route(kind: Kind) -> MethodRouter<Service> {
               graph: Result<Path<String>, PathRejection>,
               input: Result<Bytes, BytesRejection>| async move {
             let graph = graph_path(graph)?;
-            let name = scope(&role, &graph)?;
+            let name = scope(&service, &role, &graph)?;
             enabled(&service)?;
             let request = read_request(kind, parse(input)?)?;
             run_query(&service, graph, name, request).await
@@ -472,7 +492,7 @@ async fn explain(
     input: Result<Bytes, BytesRejection>,
 ) -> Result<Json<Value>, ApiError> {
     let graph = graph_path(graph)?;
-    let stored = scope(&role, &graph)?;
+    let stored = scope(&service, &role, &graph)?;
     enabled(&service)?;
     let mut body: Map<String, Value> = parse(input)?;
     let operation = body.remove("operation");
@@ -518,7 +538,7 @@ async fn schema(
     params: Result<Query<SchemaParams>, QueryRejection>,
 ) -> Result<Json<Value>, ApiError> {
     let graph = graph_path(graph)?;
-    let stored = scope(&role, &graph)?;
+    let stored = scope(&service, &role, &graph)?;
     enabled(&service)?;
     let Query(params) = params.map_err(|error| {
         ApiError::new(StatusCode::BAD_REQUEST, "invalid_query", error.body_text())
@@ -558,7 +578,7 @@ async fn put_schema(
     input: Result<Bytes, BytesRejection>,
 ) -> Result<Json<Value>, ApiError> {
     let graph = graph_path(graph)?;
-    let stored = scope(&role, &graph)?;
+    let stored = scope(&service, &role, &graph)?;
     enabled(&service)?;
     let SchemaBody { schema } = parse(input)?;
     let name = stored;
@@ -593,10 +613,28 @@ async fn retrieve(
     input: Result<Bytes, BytesRejection>,
 ) -> Result<Json<Value>, ApiError> {
     let graph = graph_path(graph)?;
-    let stored = scope(&role, &graph)?;
+    let stored = scope(&service, &role, &graph)?;
     enabled(&service)?;
     let request = graph_json::retrieve_request(parse(input)?)
         .map_err(|error| ApiError::new(StatusCode::UNPROCESSABLE_ENTITY, "invalid_json", error))?;
+    let credential = super::raw_credential(&role);
+    let reserved = service.memory_bindings.reserved();
+    for collection in std::iter::once(request.retrieve.pivot.collection.as_str()).chain(
+        request
+            .retrieve
+            .evidence
+            .collections
+            .iter()
+            .map(String::as_str),
+    ) {
+        if !reserved.raw_allowed(
+            credential,
+            super::reserved::Resource::Collection,
+            collection,
+        ) {
+            return Err(forbidden_scope());
+        }
+    }
     let name = stored;
     let display = graph.clone();
     let (output, _) = guarded_read(
@@ -649,7 +687,7 @@ async fn query_text(
     input: Result<Bytes, BytesRejection>,
 ) -> Result<Json<Value>, ApiError> {
     let graph = graph_path(graph)?;
-    let stored = scope(&role, &graph)?;
+    let stored = scope(&service, &role, &graph)?;
     enabled(&service)?;
     let request: graph_json::QueryTextIn = parse(input)?;
     // Text errors are reported before the graph is looked up.
@@ -711,7 +749,7 @@ async fn batch(
     input: Result<Bytes, BytesRejection>,
 ) -> Result<Json<Value>, ApiError> {
     let graph = graph_path(graph)?;
-    let stored = scope(&role, &graph)?;
+    let stored = scope(&service, &role, &graph)?;
     enabled(&service)?;
     let BatchIn { ops } = parse(input)?;
     if ops.len() > MAX_BATCH_OPS {
@@ -744,6 +782,22 @@ fn authorize_records(
 ) -> Result<(), ApiError> {
     let mut mutations: BTreeMap<&str, Vec<Mutation>> = BTreeMap::new();
     for op in ops {
+        if matches!(op, GraphOp::DeleteNode { .. })
+            && !service.memory_bindings.iter().all(|binding| {
+                binding
+                    .storage()
+                    .filter(|(graph, _)| !graph)
+                    .all(|(_, name)| {
+                        service.memory_bindings.reserved().raw_allowed(
+                            super::raw_credential(role),
+                            super::reserved::Resource::Collection,
+                            &name,
+                        )
+                    })
+            })
+        {
+            return Err(forbidden_scope());
+        }
         let collections = match op {
             GraphOp::Attach { collection, .. } | GraphOp::Detach { collection, .. } => {
                 vec![collection.clone()]
@@ -763,6 +817,16 @@ fn authorize_records(
             }
             _ => continue,
         };
+        let credential = super::raw_credential(role);
+        for collection in &collections {
+            if !service.memory_bindings.reserved().raw_allowed(
+                credential,
+                super::reserved::Resource::Collection,
+                collection,
+            ) {
+                return Err(forbidden_scope());
+            }
+        }
         if let admin::Role::Scoped(grant) = role {
             if collections.is_empty() {
                 continue;

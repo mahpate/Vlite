@@ -24,7 +24,7 @@ use crate::{
 type RecallResult<T> = Result<T, RecallError>;
 
 #[derive(Debug)]
-pub(super) enum RecallError {
+pub(crate) enum RecallError {
     Memory(MemoryError),
     Storage(crate::Error),
     Ranking(ranking::RankingError),
@@ -56,7 +56,7 @@ impl From<ranking::RankingError> for RecallError {
 }
 
 #[derive(Clone, Debug)]
-pub(super) struct RecallLimits {
+pub(crate) struct RecallLimits {
     pub candidates: usize,
     pub source_records: usize,
     pub vector_components: usize,
@@ -79,20 +79,20 @@ impl Default for RecallLimits {
 }
 
 #[derive(Clone, Copy, Debug, PartialEq)]
-pub(super) enum Selection {
+pub(crate) enum Selection {
     Ranked,
     Exact,
     Mmr { lambda: f64 },
 }
 
 #[derive(Clone, Debug)]
-pub(super) struct RecallSeed {
+pub(crate) struct RecallSeed {
     pub scope: MemoryScope,
     pub id: String,
 }
 
 #[derive(Clone, Debug)]
-pub(super) struct RecallRequest<'a> {
+pub(crate) struct RecallRequest<'a> {
     pub scopes: Vec<MemoryScope>,
     pub kinds: Vec<MemoryKind>,
     /// Conjoined with mandatory scope, kind and owner-retention checks.
@@ -111,7 +111,7 @@ pub(super) struct RecallRequest<'a> {
 }
 
 #[derive(Clone, Debug, PartialEq)]
-pub(super) struct RecallEvidence {
+pub(crate) struct RecallEvidence {
     pub id: String,
     pub record_id: u64,
     pub revision: u64,
@@ -120,7 +120,7 @@ pub(super) struct RecallEvidence {
 }
 
 #[derive(Clone, Debug, PartialEq)]
-pub(super) struct RecallHit {
+pub(crate) struct RecallHit {
     pub ranking: ScoredCandidate,
     pub memory_revision: u64,
     pub graph_revision: u64,
@@ -135,10 +135,17 @@ pub(super) struct RecallHit {
     pub text_rank: Option<u32>,
     /// S2: the S1 stale label of a C1 summary hit; `None` otherwise.
     pub stale: Option<bool>,
+    /// Stored view fields the REST adapter reports (mapping section 1).
+    pub kind: String,
+    pub content_digest: String,
+    pub created_at_ms: i64,
+    pub updated_at_ms: i64,
+    pub expiry_ms: Option<u64>,
+    pub reference_count: u64,
 }
 
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
-pub(super) struct RecallStats {
+pub(crate) struct RecallStats {
     pub source_records_charged: usize,
     pub candidates_examined: usize,
     pub edges_charged: u64,
@@ -148,7 +155,7 @@ pub(super) struct RecallStats {
 }
 
 #[derive(Clone, Debug, PartialEq)]
-pub(super) struct RecallOutput {
+pub(crate) struct RecallOutput {
     pub hits: Vec<RecallHit>,
     pub scopes: Vec<MemoryScope>,
     pub as_of_ms: i64,
@@ -331,7 +338,7 @@ impl MemoryRef<'_> {
         Ok(collection)
     }
 
-    pub(super) fn recall(&self, request: &RecallRequest<'_>) -> RecallResult<RecallOutput> {
+    pub(crate) fn recall(&self, request: &RecallRequest<'_>) -> RecallResult<RecallOutput> {
         let mut work = Work {
             request,
             started: Instant::now(),
@@ -398,6 +405,7 @@ impl MemoryRef<'_> {
                                 "memory_revision",
                                 "importance",
                                 "created_at_ms",
+                                "updated_at_ms",
                                 "observed_at_ms",
                                 "reference_count",
                                 "evidence",
@@ -648,6 +656,7 @@ impl MemoryRef<'_> {
                 .ok_or(MemoryError::InvalidBundle)?;
             let (_, node) = &eligible[key];
             let memory = existing_memory(node)?;
+            let updated_at_ms = super::integer_property(node, "updated_at_ms")?;
             let mut provenance = memory.provenance;
             provenance.sort_by(|a, b| {
                 (&a.source, &a.kind, &a.uri, &a.transformation).cmp(&(
@@ -706,6 +715,12 @@ impl MemoryRef<'_> {
                 vector_rank: candidate.vector_rank,
                 text_rank: candidate.text_rank,
                 stale,
+                kind: memory.kind,
+                content_digest: memory.digest,
+                created_at_ms: memory.created_at_ms,
+                updated_at_ms,
+                expiry_ms: memory.expiry_ms,
+                reference_count: memory.reference_count,
             });
         }
         work.check()?;

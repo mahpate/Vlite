@@ -109,16 +109,30 @@ async fn changes(
     if !(1..=10_000).contains(&limit) {
         return Err(unprocessable("limit must be 1..=10000"));
     }
+    let bindings = service.memory_bindings.clone();
     let result = service
         .run_read(move |db| {
-            open(db, &role, &Target::Legacy)?;
+            super::open_guarded(db, &role, &Target::Legacy, &bindings)?;
             let cursor = match cursor {
                 Some(cursor) => cursor,
                 None => FeedCursor::beginning(),
             };
             let mut batch = db.changes_after(&cursor, limit).map_err(ApiError::from)?;
             batch.changes.retain(|change| {
-                graph::feed_graph(&change.kind).is_none_or(|name| graph::feed_visible(&role, name))
+                let graph_visible = graph::feed_graph(&change.kind).is_none_or(|name| {
+                    graph::feed_visible(&role, name)
+                        && bindings.reserved().raw_allowed(
+                            super::raw_credential(&role),
+                            super::reserved::Resource::Graph,
+                            name,
+                        )
+                });
+                let collection_visible = bindings.reserved().raw_allowed(
+                    super::raw_credential(&role),
+                    super::reserved::Resource::Collection,
+                    &change.collection,
+                );
+                graph_visible && collection_visible
             });
             Ok::<_, ApiError>(batch)
         })
@@ -147,9 +161,10 @@ async fn grouped(
 ) -> Result<Json<Value>, ApiError> {
     let target = collection_path(target)?;
     let request = body(input)?;
+    let bindings = service.memory_bindings.clone();
     let result = service
         .run_read(move |db| {
-            let id = open(db, &role, &target)?;
+            let id = super::open_guarded(db, &role, &target, &bindings)?;
             let r = collection_ref(db, id)?;
             let metric = request.metric.unwrap_or(identity(db, id, &target).0);
             let groups = r.search_grouped(
@@ -201,9 +216,10 @@ async fn recommend(
         .iter()
         .map(|s| id(s))
         .collect::<Result<Vec<_>, _>>()?;
+    let bindings = service.memory_bindings.clone();
     let result = service
         .run_read(move |db| {
-            let cid = open(db, &role, &target)?;
+            let cid = super::open_guarded(db, &role, &target, &bindings)?;
             let metric = request.metric.unwrap_or(identity(db, cid, &target).0);
             let query = RecommendationQuery {
                 positive_ids,
@@ -237,9 +253,10 @@ async fn facets(
 ) -> Result<Json<Value>, ApiError> {
     let target = collection_path(target)?;
     let request = body(input)?;
+    let bindings = service.memory_bindings.clone();
     let result = service
         .run_read(move |db| {
-            let cid = open(db, &role, &target)?;
+            let cid = super::open_guarded(db, &role, &target, &bindings)?;
             collection_ref(db, cid)?
                 .facets(&request.field, &request.filter)
                 .map_err(ApiError::from)
@@ -257,9 +274,10 @@ async fn numeric_stats(
 ) -> Result<Json<Value>, ApiError> {
     let target = collection_path(target)?;
     let request = body(input)?;
+    let bindings = service.memory_bindings.clone();
     let result = service
         .run_read(move |db| {
-            let cid = open(db, &role, &target)?;
+            let cid = super::open_guarded(db, &role, &target, &bindings)?;
             collection_ref(db, cid)?
                 .numeric_stats(&request.field, &request.filter)
                 .map_err(ApiError::from)
@@ -300,9 +318,10 @@ async fn geo_search(
 ) -> Result<Json<Value>, ApiError> {
     let target = collection_path(target)?;
     let request = body(input)?;
+    let bindings = service.memory_bindings.clone();
     let result = service
         .run_read(move |db| {
-            let cid = open(db, &role, &target)?;
+            let cid = super::open_guarded(db, &role, &target, &bindings)?;
             let metric = request.metric.unwrap_or(identity(db, cid, &target).0);
             let query = GeoSearchQuery {
                 vector: request.vector,
@@ -353,9 +372,10 @@ async fn configure_vector(
         history: request.history,
     };
     let name = request.name.clone();
+    let bindings = service.memory_bindings.clone();
     service
         .run(move |db| {
-            let cid = open(db, &role, &target)?;
+            let cid = super::open_guarded(db, &role, &target, &bindings)?;
             db.collection_mut_in(cid)?.configure_vector(&name, spec)?;
             Ok(())
         })
@@ -406,9 +426,10 @@ async fn put_named_vectors(
         dense,
         sparse: request.sparse.unwrap_or_default(),
     };
+    let bindings = service.memory_bindings.clone();
     service
         .run(move |db| {
-            let cid = open(db, &role, &target)?;
+            let cid = super::open_guarded(db, &role, &target, &bindings)?;
             db.collection_mut_in(cid)?.put_vectors(record_id, vectors)?;
             Ok(())
         })
@@ -431,9 +452,10 @@ async fn search_named(
 ) -> Result<Json<Value>, ApiError> {
     let target = collection_path(target)?;
     let request = body(input)?;
+    let bindings = service.memory_bindings.clone();
     let hits = service
         .run_read(move |db| {
-            let _cid = open(db, &role, &target)?;
+            let _cid = super::open_guarded(db, &role, &target, &bindings)?;
             db.collection(target.name())?
                 .search_named(
                     &request.name,
@@ -461,9 +483,10 @@ async fn search_sparse(
 ) -> Result<Json<Value>, ApiError> {
     let target = collection_path(target)?;
     let request = body(input)?;
+    let bindings = service.memory_bindings.clone();
     let hits = service
         .run_read(move |db| {
-            let _cid = open(db, &role, &target)?;
+            let _cid = super::open_guarded(db, &role, &target, &bindings)?;
             db.collection(target.name())?
                 .search_sparse(&request.name, &request.vector, request.k)
                 .map_err(ApiError::from)
@@ -498,9 +521,10 @@ async fn search_dense_sparse(
 ) -> Result<Json<Value>, ApiError> {
     let target = collection_path(target)?;
     let request = body(input)?;
+    let bindings = service.memory_bindings.clone();
     let hits = service
         .run_read(move |db| {
-            let cid = open(db, &role, &target)?;
+            let cid = super::open_guarded(db, &role, &target, &bindings)?;
             let defaults = crate::hybrid::FusionOptions::default();
             let supplied = request.fusion;
             let fusion = crate::hybrid::FusionOptions {
@@ -551,9 +575,10 @@ async fn query_language(
 ) -> Result<Json<Value>, ApiError> {
     let target = collection_path(target)?;
     let request = body(input)?;
+    let bindings = service.memory_bindings.clone();
     let (hits, groups, facets) = service
         .run_read(move |db| {
-            let cid = open(db, &role, &target)?;
+            let cid = super::open_guarded(db, &role, &target, &bindings)?;
             let parsed = crate::query_language::parse(&request.query)
                 .map_err(|e| unprocessable(e.to_string()))?;
             let output = parsed
@@ -634,9 +659,10 @@ async fn embed_builtin_in(
     }
     let provider = provider.as_deref().unwrap_or("hashing").to_owned();
     let target_for_dimensions = target.clone();
+    let bindings = service.memory_bindings.clone();
     let dimensions = service
         .run(move |db| {
-            let collection = open(db, &role, &target_for_dimensions)?;
+            let collection = super::open_guarded(db, &role, &target_for_dimensions, &bindings)?;
             db.collections()?
                 .into_iter()
                 .find(|info| info.id == collection)
@@ -702,7 +728,27 @@ async fn build_disk_ann(
             "disk ANN requires VLITE_ADMIN_DIR",
         )
     })?;
-    let result=service.run(move|db|{let cid=open(db,&role,&target)?;let name=db.collections()?.into_iter().find(|c|c.id==cid).map(|c|c.name).ok_or(Error::CollectionNotFound)?;let path=dir.join(format!("disk-ann-{cid}.dann"));let source=db.build_disk_ann(&name,&path,config,request.metric)?;Ok(json!({"lineage":source.lineage.to_string(),"sequence":source.sequence.to_string(),"collection_id":source.collection_id,"live_records":source.live_records,"path_name":path.file_name().and_then(|n|n.to_str()).unwrap_or_default()}))}).await?;
+    let bindings = service.memory_bindings.clone();
+    let result = service
+        .run(move |db| {
+            let cid = super::open_guarded(db, &role, &target, &bindings)?;
+            let name = db
+                .collections()?
+                .into_iter()
+                .find(|collection| collection.id == cid)
+                .map(|collection| collection.name)
+                .ok_or(Error::CollectionNotFound)?;
+            let path = dir.join(format!("disk-ann-{cid}.dann"));
+            let source = db.build_disk_ann(&name, &path, config, request.metric)?;
+            Ok(json!({
+                "lineage": source.lineage.to_string(),
+                "sequence": source.sequence.to_string(),
+                "collection_id": source.collection_id,
+                "live_records": source.live_records,
+                "path_name": path.file_name().and_then(|name| name.to_str()).unwrap_or_default()
+            }))
+        })
+        .await?;
     Ok(Json(result))
 }
 #[derive(Deserialize)]
@@ -727,9 +773,10 @@ async fn search_disk_ann(
             "disk ANN requires VLITE_ADMIN_DIR",
         )
     })?;
+    let bindings = service.memory_bindings.clone();
     let hits = service
         .run_read(move |db| {
-            let cid = open(db, &role, &target)?;
+            let cid = super::open_guarded(db, &role, &target, &bindings)?;
             let path = dir.join(format!("disk-ann-{cid}.dann"));
             let index = match crate::DiskAnnIndex::open(path, crate::DiskAnnOptions::default()) {
                 Err(Error::Io(error)) if error.kind() == std::io::ErrorKind::NotFound => {
@@ -758,6 +805,9 @@ async fn replication_export(
     Extension(role): Extension<admin::Role>,
     query: Result<Query<ExportQuery>, QueryRejection>,
 ) -> Result<Json<Value>, ApiError> {
+    if !service.memory_bindings.is_empty() {
+        return Err(forbidden_scope());
+    }
     let Query(query) = query
         .map_err(|e| ApiError::new(StatusCode::BAD_REQUEST, "invalid_query", e.body_text()))?;
     let after = query
@@ -770,9 +820,10 @@ async fn replication_export(
     if !(1..=16 * 1024 * 1024).contains(&max) {
         return Err(unprocessable("max_bytes must be 1..=16777216"));
     }
+    let bindings = service.memory_bindings.clone();
     let segment = service
         .run(move |db| {
-            open(db, &role, &Target::Legacy)?;
+            super::open_guarded(db, &role, &Target::Legacy, &bindings)?;
             db.export_log(after, max).map_err(ApiError::from)
         })
         .await?;

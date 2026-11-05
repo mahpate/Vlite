@@ -205,6 +205,7 @@ pub(super) async fn list_core(
     service: &Service,
     role: admin::Role,
 ) -> Result<(Vec<CollectionInfo>, u32), ApiError> {
+    let bindings = service.memory_bindings.clone();
     service
         .run_read(move |db| {
             let lineage = db.lineage();
@@ -216,6 +217,12 @@ pub(super) async fn list_core(
                     _ => true,
                 })
                 .collect::<Vec<_>>();
+            bindings.reserved().retain_visible(
+                super::raw_credential(&role),
+                super::reserved::Resource::Collection,
+                &mut items,
+                |item| item.name.as_str(),
+            );
             for item in &mut items {
                 item.name = tenants::unqualify(&role, &item.name);
             }
@@ -280,6 +287,13 @@ pub(super) async fn create_core(
     mut input: Create,
 ) -> Result<CollectionInfo, ApiError> {
     input.name = tenants::qualify(&role, &input.name);
+    if !service.memory_bindings.reserved().raw_allowed(
+        super::raw_credential(&role),
+        super::reserved::Resource::Collection,
+        &input.name,
+    ) {
+        return Err(forbidden_scope());
+    }
     let actor = principal(&role);
     let quota_service = service.clone();
     let tenant_id = match &role {
@@ -334,9 +348,10 @@ pub(super) async fn fetch_core(
     role: admin::Role,
     target: Target,
 ) -> Result<(CollectionInfo, crate::text_index::TextIndexStatus), ApiError> {
+    let bindings = service.memory_bindings.clone();
     service
         .run_read(move |db| {
-            let collection = open(db, &role, &target)?;
+            let collection = super::open_guarded(db, &role, &target, &bindings)?;
             let mut info = db.info(collection);
             info.name = tenants::unqualify(&role, &info.name);
             let text = CollectionRef { db, id: collection }.text_index_status();
@@ -362,9 +377,10 @@ pub(super) async fn drop_core(
     target: Target,
 ) -> Result<(), ApiError> {
     let actor = principal(&role);
+    let bindings = service.memory_bindings.clone();
     let (name, id) = service
         .run(move |db| {
-            let collection = open(db, &role, &target)?;
+            let collection = super::open_guarded(db, &role, &target, &bindings)?;
             db.drop_collection(&tenants::qualify(&role, target.name()))?;
             Ok((target.name().to_owned(), collection))
         })
@@ -385,9 +401,10 @@ async fn settings(
     let target = collection_path(target)?;
     let input = body(input)?;
     let actor = principal(&role);
+    let bindings = service.memory_bindings.clone();
     let (info, persisted) = service
         .run(move |db| {
-            let collection = open(db, &role, &target)?;
+            let collection = super::open_guarded(db, &role, &target, &bindings)?;
             let merged = input.merge(db.state(collection).settings.clone());
             let persistence =
                 db.set_collection_settings(&tenants::qualify(&role, target.name()), merged)?;
@@ -469,10 +486,14 @@ pub(super) async fn reserve_core(
     role: admin::Role,
     target: Target,
 ) -> Result<Value, ApiError> {
+    if !service.memory_bindings.is_empty() {
+        return Err(forbidden_scope());
+    }
     let reservations = service.imports.clone();
+    let bindings = service.memory_bindings.clone();
     service
         .run(move |db| {
-            open(db, &role, &target)?;
+            super::open_guarded(db, &role, &target, &bindings)?;
             let next = db.next_import_job_id()?;
             let physical_name = tenants::qualify(&role, target.name());
             let collection = db.resolve(&physical_name)?;
@@ -566,6 +587,9 @@ async fn status(
     Extension(role): Extension<admin::Role>,
     job: Result<Path<String>, PathRejection>,
 ) -> Result<Json<Value>, ApiError> {
+    if !service.memory_bindings.is_empty() {
+        return Err(forbidden_scope());
+    }
     let job = job_path(job)?;
     Ok(Json(status_core(&service, role, job).await?))
 }
@@ -575,6 +599,9 @@ pub(super) async fn status_core(
     role: admin::Role,
     job: u64,
 ) -> Result<Value, ApiError> {
+    if !service.memory_bindings.is_empty() {
+        return Err(forbidden_scope());
+    }
     let reservations = service.imports.clone();
     service
         .run_read(move |db| {
@@ -623,6 +650,9 @@ async fn chunk(
     params: Result<Path<(String, String)>, PathRejection>,
     input: Result<Json<Chunk>, JsonRejection>,
 ) -> Result<Response, ApiError> {
+    if !service.memory_bindings.is_empty() {
+        return Err(forbidden_scope());
+    }
     let Path((job, number)) = params.map_err(|error| {
         ApiError::new(StatusCode::BAD_REQUEST, "invalid_path", error.body_text())
     })?;
@@ -654,6 +684,9 @@ pub(super) async fn import_chunk_core(
     operations: Vec<Mutation>,
     policy: InvalidRowPolicy,
 ) -> Result<Value, ApiError> {
+    if !service.memory_bindings.is_empty() {
+        return Err(forbidden_scope());
+    }
     let reservations = service.imports.clone();
     let quota_service = service.clone();
     let metrics = service.metrics.clone();
@@ -745,6 +778,9 @@ async fn close(
     job: Result<Path<String>, PathRejection>,
     abort: bool,
 ) -> Result<Json<Value>, ApiError> {
+    if !service.memory_bindings.is_empty() {
+        return Err(forbidden_scope());
+    }
     let job = job_path(job)?;
     Ok(Json(close_core(&service, role, job, abort).await?))
 }
@@ -755,6 +791,9 @@ pub(super) async fn close_core(
     job: u64,
     abort: bool,
 ) -> Result<Value, ApiError> {
+    if !service.memory_bindings.is_empty() {
+        return Err(forbidden_scope());
+    }
     let reservations = service.imports.clone();
     service
         .run(move |db| {

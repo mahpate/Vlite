@@ -296,9 +296,10 @@ pub(super) async fn fetch(
     let target = collection_path(target)?;
     let input = query(input)?;
     address(&input.namespace, &input.key)?;
+    let bindings = service.memory_bindings.clone();
     service
         .run_read(move |db| {
-            open(db, &role, &target)?;
+            super::open_guarded(db, &role, &target, &bindings)?;
             let name = tenants::qualify(&role, target.name());
             let entry = db
                 .kv_view(&name)?
@@ -338,11 +339,12 @@ pub(super) async fn save(
         .saturating_add(target.retained_bytes())
         .saturating_add(4096);
     let quota_service = service.clone();
+    let bindings = service.memory_bindings.clone();
     let audit_role = role.clone();
     let audit_target = target.clone();
     let result = service
         .run_mutation(retained, move |db| {
-            let collection = open(db, &role, &target)?;
+            let collection = super::open_guarded(db, &role, &target, &bindings)?;
             writable(db)?;
             let name = tenants::qualify(&role, target.name());
             let now = crate::current_time_ms();
@@ -393,11 +395,12 @@ pub(super) async fn remove(
     let expected = expected(&input.expected)?;
     let audit_role = role.clone();
     let audit_target = target.clone();
+    let bindings = service.memory_bindings.clone();
     let retained =
         4096 + input.namespace.capacity() + input.key.capacity() + target.retained_bytes();
     let result = service
         .run_mutation(retained, move |db| {
-            open(db, &role, &target)?;
+            super::open_guarded(db, &role, &target, &bindings)?;
             writable(db)?;
             let name = tenants::qualify(&role, target.name());
             let deleted = db.kv_store(&name)?.delete_at(
@@ -448,9 +451,10 @@ pub(super) async fn list(
     if limit == 0 || limit > MAX_KV_LIST_LIMIT as u64 {
         return Err(unprocessable("KV list limit must be 1..10000"));
     }
+    let bindings = service.memory_bindings.clone();
     service
         .run_read(move |db| {
-            open(db, &role, &target)?;
+            super::open_guarded(db, &role, &target, &bindings)?;
             let name = tenants::qualify(&role, target.name());
             let view = db.kv_view(&name)?;
             let now = crate::current_time_ms();

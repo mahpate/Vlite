@@ -86,6 +86,7 @@ fn op_names(mask: u16) -> Vec<&'static str> {
 /// An authenticated scoped principal. Contains no secret.
 pub(super) struct Grant {
     pub id: String,
+    pub api_credential: bool,
     /// Display name chosen at issue time; not a secret and not unique.
     pub name: String,
     pub tenant_id: Option<String>,
@@ -121,6 +122,7 @@ impl Grant {
         let ops = ops.iter().fold(0, |mask, op| mask | bit(*op));
         Self {
             id,
+            api_credential: false,
             name,
             tenant_id,
             requests_per_second: None,
@@ -474,6 +476,7 @@ impl Store {
         }
         Ok(Arc::new(Grant {
             id: entry.id.clone(),
+            api_credential: true,
             name: entry.name.clone(),
             tenant_id: entry.tenant_id.clone(),
             requests_per_second: entry.requests_per_second,

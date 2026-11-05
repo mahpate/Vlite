@@ -6,11 +6,33 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 
+pub(crate) mod binding;
 mod consolidate;
+#[cfg(feature = "server")]
+pub(crate) use consolidate::{ConsolidateInput, ConsolidateRequest, ConsolidateSummary};
 mod erasure;
+mod mapping;
+#[cfg(feature = "server")]
+pub(crate) use mapping::recall_error;
+#[cfg(feature = "server")]
+pub(crate) use mapping::{
+    ReceiptOperation, WireCode, WireMapping, WireOperation, memory_error, receipt_id, unavailable,
+};
+#[cfg(feature = "server")]
+pub(crate) use ranking::{FutureObservations, RankingPolicy};
+#[cfg(feature = "server")]
+pub(crate) use recall::{
+    RecallError, RecallHit, RecallLimits, RecallOutput, RecallRequest, RecallSeed, Selection,
+};
 mod ranking;
 mod recall;
+mod receipt;
+#[cfg(feature = "server")]
+pub(crate) use receipt::{ReceiptLookup, ReceiptOutcome};
 mod stale;
+mod startup;
+#[cfg(test)]
+mod wire_verify;
 
 use sha2::{Digest, Sha256};
 

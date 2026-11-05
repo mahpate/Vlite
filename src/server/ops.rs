@@ -903,6 +903,9 @@ pub(super) fn routes() -> Router<Service> {
 }
 
 async fn auto_get(State(service): State<Service>) -> Result<Json<Value>, ApiError> {
+    if !service.memory_bindings.is_empty() {
+        return Err(forbidden_scope());
+    }
     Ok(Json(Ops::auto_json(&*lock(&service.ops.inner)?)))
 }
 
@@ -924,6 +927,9 @@ async fn auto_put(
     State(service): State<Service>,
     input: Result<Json<AutoInput>, JsonRejection>,
 ) -> Result<Json<Value>, ApiError> {
+    if !service.memory_bindings.is_empty() {
+        return Err(forbidden_scope());
+    }
     let input = body(input)?;
     if input
         .interval_secs
@@ -1017,6 +1023,9 @@ async fn auto_put(
 }
 
 async fn auto_tick_now(State(service): State<Service>) -> Result<Json<Value>, ApiError> {
+    if !service.memory_bindings.is_empty() {
+        return Err(forbidden_scope());
+    }
     let ops = service.ops.clone();
     let result = service.run(move |db| Ok(ops.auto_tick(db))).await?;
     let state = Ops::auto_json(&*lock(&service.ops.inner)?);

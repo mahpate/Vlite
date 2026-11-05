@@ -1,0 +1,531 @@
+{
+  "campaign": "Gap 1 reserved-resource guards hand mutants",
+  "baseline_commit": "5617a4961e6d4252ad9dbbf3f300bd6537e668c2",
+  "total": 40,
+  "killed": 40,
+  "survived": 0,
+  "equivalent": 0,
+  "restored_identically": true,
+  "mutants": [
+    {
+      "id": "M01",
+      "description": "collection guard skipped",
+      "test": "reserved_resource_routes_deny_before_resource_lookup_across_families",
+      "result": "killed",
+      "mutated_sha256": {
+        "src\\server.rs": "d17e0cdc791620f05eb727c06cc375b2b23845433bb5e0c4c0f9685ba7cf5432"
+      },
+      "restored_sha256": {
+        "src\\server.rs": "e9dd1c7dc9a18cb1b030256181d189e18290a4c5ecde239256705fa18c89356e"
+      },
+      "restored_identically": true
+    },
+    {
+      "id": "M02",
+      "description": "collection namespace confused",
+      "test": "reserved_resource_routes_deny_before_resource_lookup_across_families",
+      "result": "killed",
+      "mutated_sha256": {
+        "src\\server.rs": "9e035e9a23cdf1b641652ab568a53ccbf05e3ccada45151eb2511ce7a63a2118"
+      },
+      "restored_sha256": {
+        "src\\server.rs": "e9dd1c7dc9a18cb1b030256181d189e18290a4c5ecde239256705fa18c89356e"
+      },
+      "restored_identically": true
+    },
+    {
+      "id": "M03",
+      "description": "raw credential discarded",
+      "test": "tenant_qualified_reservations_follow_scoped_credentials_and_raw_access",
+      "result": "killed",
+      "mutated_sha256": {
+        "src\\server.rs": "3e1ac531b35fed23930d665ca746e430d829e305eb920675a30361742d4fef5c"
+      },
+      "restored_sha256": {
+        "src\\server.rs": "e9dd1c7dc9a18cb1b030256181d189e18290a4c5ecde239256705fa18c89356e"
+      },
+      "restored_identically": true
+    },
+    {
+      "id": "M04",
+      "description": "tenant collection qualification omitted",
+      "test": "tenant_qualified_reservations_follow_scoped_credentials_and_raw_access",
+      "result": "killed",
+      "mutated_sha256": {
+        "src\\server.rs": "60d3f0e6f61e6324ccf44840267e9bd6853a2a9a23ebb48af4b84d6dcb451b19"
+      },
+      "restored_sha256": {
+        "src\\server.rs": "e9dd1c7dc9a18cb1b030256181d189e18290a4c5ecde239256705fa18c89356e"
+      },
+      "restored_identically": true
+    },
+    {
+      "id": "M05",
+      "description": "admin raw bypass",
+      "test": "reserved_resource_routes_deny_before_resource_lookup_across_families",
+      "result": "killed",
+      "mutated_sha256": {
+        "src\\server.rs": "2747d0a858e425c65b49438b829f67b6b6393c409be8632df8517bd1a01e51fb"
+      },
+      "restored_sha256": {
+        "src\\server.rs": "e9dd1c7dc9a18cb1b030256181d189e18290a4c5ecde239256705fa18c89356e"
+      },
+      "restored_identically": true
+    },
+    {
+      "id": "M06",
+      "description": "collection permission inverted",
+      "test": "reserved_resource_routes_deny_before_resource_lookup_across_families",
+      "result": "killed",
+      "mutated_sha256": {
+        "src\\server.rs": "2edb8e70f9261e8242c67c28b907d307f868ff4aa098cc073d1d63646135e1ea"
+      },
+      "restored_sha256": {
+        "src\\server.rs": "e9dd1c7dc9a18cb1b030256181d189e18290a4c5ecde239256705fa18c89356e"
+      },
+      "restored_identically": true
+    },
+    {
+      "id": "M07",
+      "description": "lookup before reservation check",
+      "test": "reserved_graph_and_collection_are_denied_and_lists_filter_them",
+      "result": "killed",
+      "mutated_sha256": {
+        "src\\server.rs": "6d4ac12bc16f3e8e612c78c9e5ded450bbcd38a1d17ac0eb4eff18d6cbb5513b"
+      },
+      "restored_sha256": {
+        "src\\server.rs": "e9dd1c7dc9a18cb1b030256181d189e18290a4c5ecde239256705fa18c89356e"
+      },
+      "restored_identically": true
+    },
+    {
+      "id": "M08",
+      "description": "legacy default target bypass",
+      "test": "reserved_resource_routes_deny_before_resource_lookup_across_families",
+      "result": "killed",
+      "mutated_sha256": {
+        "src\\server.rs": "4b5cd2181efc0f4971953e23a8bd2e150ae0664b13b05f7a963febbedc868f3c"
+      },
+      "restored_sha256": {
+        "src\\server.rs": "e9dd1c7dc9a18cb1b030256181d189e18290a4c5ecde239256705fa18c89356e"
+      },
+      "restored_identically": true
+    },
+    {
+      "id": "M09",
+      "description": "graph guard skipped",
+      "test": "reserved_resource_routes_deny_before_resource_lookup_across_families",
+      "result": "killed",
+      "mutated_sha256": {
+        "src\\server\\graph.rs": "8951618a8bfd2c61092e0f3c9874e911f276434a8bf8429c0d2092499dd1ac90"
+      },
+      "restored_sha256": {
+        "src\\server\\graph.rs": "2797f0123798c08efdd0613d0645d98be104480b3388876ad740d4432456a8a5"
+      },
+      "restored_identically": true
+    },
+    {
+      "id": "M10",
+      "description": "graph/collection namespace confused",
+      "test": "reserved_resource_routes_deny_before_resource_lookup_across_families",
+      "result": "killed",
+      "mutated_sha256": {
+        "src\\server\\graph.rs": "06bcc7c90b818a645c8568fd9227db11beb21765e98f5516df3528c5c84f22d3"
+      },
+      "restored_sha256": {
+        "src\\server\\graph.rs": "2797f0123798c08efdd0613d0645d98be104480b3388876ad740d4432456a8a5"
+      },
+      "restored_identically": true
+    },
+    {
+      "id": "M11",
+      "description": "graph raw credential discarded",
+      "test": "tenant_qualified_reservations_follow_scoped_credentials_and_raw_access",
+      "result": "killed",
+      "mutated_sha256": {
+        "src\\server\\graph.rs": "c9e4129db627f5357f3d737772ca93c633b770b5afa51d30973105f653abcad8"
+      },
+      "restored_sha256": {
+        "src\\server\\graph.rs": "2797f0123798c08efdd0613d0645d98be104480b3388876ad740d4432456a8a5"
+      },
+      "restored_identically": true
+    },
+    {
+      "id": "M12",
+      "description": "tenant graph qualification omitted",
+      "test": "tenant_qualified_reservations_follow_scoped_credentials_and_raw_access",
+      "result": "killed",
+      "mutated_sha256": {
+        "src\\server\\graph.rs": "dbe5a818c3dec15ab785271576859ea8617e7da4640cfc171152929e0d5c5e54"
+      },
+      "restored_sha256": {
+        "src\\server\\graph.rs": "2797f0123798c08efdd0613d0645d98be104480b3388876ad740d4432456a8a5"
+      },
+      "restored_identically": true
+    },
+    {
+      "id": "M13",
+      "description": "graph admin raw bypass",
+      "test": "reserved_resource_routes_deny_before_resource_lookup_across_families",
+      "result": "killed",
+      "mutated_sha256": {
+        "src\\server\\graph.rs": "6431f348b40b169348388dd348e49f1008402b7b862b4c9fabd34dac2e0b0de4"
+      },
+      "restored_sha256": {
+        "src\\server\\graph.rs": "2797f0123798c08efdd0613d0645d98be104480b3388876ad740d4432456a8a5"
+      },
+      "restored_identically": true
+    },
+    {
+      "id": "M14",
+      "description": "graph permission inverted",
+      "test": "reserved_resource_routes_deny_before_resource_lookup_across_families",
+      "result": "killed",
+      "mutated_sha256": {
+        "src\\server\\graph.rs": "398e29e2149b3b3540e9e72ef7838e64afa5c242b79131df48b14020ce6e5d4d"
+      },
+      "restored_sha256": {
+        "src\\server\\graph.rs": "2797f0123798c08efdd0613d0645d98be104480b3388876ad740d4432456a8a5"
+      },
+      "restored_identically": true
+    },
+    {
+      "id": "M15",
+      "description": "graph list uses collection namespace",
+      "test": "reserved_graph_and_collection_are_denied_and_lists_filter_them",
+      "result": "killed",
+      "mutated_sha256": {
+        "src\\server\\graph.rs": "b20cd8f60287f62818cc714cb3e6a458974175962733d1ac7d00d92e928720bf"
+      },
+      "restored_sha256": {
+        "src\\server\\graph.rs": "2797f0123798c08efdd0613d0645d98be104480b3388876ad740d4432456a8a5"
+      },
+      "restored_identically": true
+    },
+    {
+      "id": "M16",
+      "description": "graph list drops raw principal",
+      "test": "tenant_qualified_reservations_follow_scoped_credentials_and_raw_access",
+      "result": "killed",
+      "mutated_sha256": {
+        "src\\server\\graph.rs": "61c98f7a75e526ef80708fa9f9c6c3ce103b314011e2c4b3c153f3011081e3a7"
+      },
+      "restored_sha256": {
+        "src\\server\\graph.rs": "2797f0123798c08efdd0613d0645d98be104480b3388876ad740d4432456a8a5"
+      },
+      "restored_identically": true
+    },
+    {
+      "id": "M17",
+      "description": "graph retrieval ignores reserved evidence",
+      "test": "reserved_resource_routes_deny_before_resource_lookup_across_families",
+      "result": "killed",
+      "mutated_sha256": {
+        "src\\server\\graph.rs": "523f73e9723f05bf9dafdd0e9381b851d4240bb886b8d9c2a84b93660d615727"
+      },
+      "restored_sha256": {
+        "src\\server\\graph.rs": "2797f0123798c08efdd0613d0645d98be104480b3388876ad740d4432456a8a5"
+      },
+      "restored_identically": true
+    },
+    {
+      "id": "M18",
+      "description": "graph batch ignores reserved collection",
+      "test": "reserved_resource_routes_deny_before_resource_lookup_across_families",
+      "result": "killed",
+      "mutated_sha256": {
+        "src\\server\\graph.rs": "dfce346eba1626a1c7a92b10c59ed81ca2de028387cbc7cf384181c5c348d42b"
+      },
+      "restored_sha256": {
+        "src\\server\\graph.rs": "2797f0123798c08efdd0613d0645d98be104480b3388876ad740d4432456a8a5"
+      },
+      "restored_identically": true
+    },
+    {
+      "id": "M19",
+      "description": "graph stats aggregate exposed",
+      "test": "reserved_graph_and_collection_are_denied_and_lists_filter_them",
+      "result": "killed",
+      "mutated_sha256": {
+        "src\\server\\graph.rs": "c79db7865e2d47e830539ea57f12c6c9e188841b18d20065038b731d01f63757"
+      },
+      "restored_sha256": {
+        "src\\server\\graph.rs": "2797f0123798c08efdd0613d0645d98be104480b3388876ad740d4432456a8a5"
+      },
+      "restored_identically": true
+    },
+    {
+      "id": "M20",
+      "description": "collection list uses graph namespace",
+      "test": "reserved_graph_and_collection_are_denied_and_lists_filter_them",
+      "result": "killed",
+      "mutated_sha256": {
+        "src\\server\\collections.rs": "ed42769e9fa18cace72d0a18688853d55081d7f5e9869997ad91e955be3d1be2"
+      },
+      "restored_sha256": {
+        "src\\server\\collections.rs": "38368a7958b836e89ec9ecf96aa25cf0c2a1fd47ba6e9950f1940d34385685c9"
+      },
+      "restored_identically": true
+    },
+    {
+      "id": "M21",
+      "description": "collection list drops raw principal",
+      "test": "tenant_qualified_reservations_follow_scoped_credentials_and_raw_access",
+      "result": "killed",
+      "mutated_sha256": {
+        "src\\server\\collections.rs": "9ff262b2beb48b6c60a7058a49eac4bf084c875c6db4ee8d272376d893a275c8"
+      },
+      "restored_sha256": {
+        "src\\server\\collections.rs": "38368a7958b836e89ec9ecf96aa25cf0c2a1fd47ba6e9950f1940d34385685c9"
+      },
+      "restored_identically": true
+    },
+    {
+      "id": "M22",
+      "description": "collection creation ignores reservation",
+      "test": "reserved_resource_routes_deny_before_resource_lookup_across_families",
+      "result": "killed",
+      "mutated_sha256": {
+        "src\\server\\collections.rs": "7a5fc6a50ac75215045cfdbb9c34377d2e06691bb505d809d36dcf81b77f97e5"
+      },
+      "restored_sha256": {
+        "src\\server\\collections.rs": "38368a7958b836e89ec9ecf96aa25cf0c2a1fd47ba6e9950f1940d34385685c9"
+      },
+      "restored_identically": true
+    },
+    {
+      "id": "M23",
+      "description": "collection creation uses graph namespace",
+      "test": "reserved_resource_routes_deny_before_resource_lookup_across_families",
+      "result": "killed",
+      "mutated_sha256": {
+        "src\\server\\collections.rs": "bfa3819655c1c7d6a13e5b5062dc080b3a1c30dd28e4ee13a750d380eb1ffb4c"
+      },
+      "restored_sha256": {
+        "src\\server\\collections.rs": "38368a7958b836e89ec9ecf96aa25cf0c2a1fd47ba6e9950f1940d34385685c9"
+      },
+      "restored_identically": true
+    },
+    {
+      "id": "M24",
+      "description": "import reservation ignores bindings",
+      "test": "reserved_resource_routes_deny_before_resource_lookup_across_families",
+      "result": "killed",
+      "mutated_sha256": {
+        "src\\server\\collections.rs": "59cd54afdd7b3010761ac222c6133fb5f734da9ff99535140aaada00b7931ca4"
+      },
+      "restored_sha256": {
+        "src\\server\\collections.rs": "38368a7958b836e89ec9ecf96aa25cf0c2a1fd47ba6e9950f1940d34385685c9"
+      },
+      "restored_identically": true
+    },
+    {
+      "id": "M25",
+      "description": "import status ignores bindings",
+      "test": "reserved_resource_routes_deny_before_resource_lookup_across_families",
+      "result": "killed",
+      "mutated_sha256": {
+        "src\\server\\collections.rs": "5916589cbcd65c14bd2c5acc7ee30ba00db7a6e12a3402e914eac2efd5ca014a"
+      },
+      "restored_sha256": {
+        "src\\server\\collections.rs": "38368a7958b836e89ec9ecf96aa25cf0c2a1fd47ba6e9950f1940d34385685c9"
+      },
+      "restored_identically": true
+    },
+    {
+      "id": "M26",
+      "description": "import chunk ignores bindings",
+      "test": "reserved_resource_routes_deny_before_resource_lookup_across_families",
+      "result": "killed",
+      "mutated_sha256": {
+        "src\\server\\collections.rs": "66b6dad5877ae49322e4f0c534ce6f6165a4c7e7fd5b9aaaf73aacb62feb263d"
+      },
+      "restored_sha256": {
+        "src\\server\\collections.rs": "38368a7958b836e89ec9ecf96aa25cf0c2a1fd47ba6e9950f1940d34385685c9"
+      },
+      "restored_identically": true
+    },
+    {
+      "id": "M27",
+      "description": "import finish bypass",
+      "test": "reserved_resource_routes_deny_before_resource_lookup_across_families",
+      "result": "killed",
+      "mutated_sha256": {
+        "src\\server\\collections.rs": "3800a92e9eb14dde07b124ff920839e8b27d73024e73a59909672a2a44596cfb"
+      },
+      "restored_sha256": {
+        "src\\server\\collections.rs": "38368a7958b836e89ec9ecf96aa25cf0c2a1fd47ba6e9950f1940d34385685c9"
+      },
+      "restored_identically": true
+    },
+    {
+      "id": "M28",
+      "description": "import abort bypass",
+      "test": "reserved_resource_routes_deny_before_resource_lookup_across_families",
+      "result": "killed",
+      "mutated_sha256": {
+        "src\\server\\collections.rs": "88bbd78dacfda1f0ab540f6245ad01d40fb0b706810f7b750596fac8484b10d8"
+      },
+      "restored_sha256": {
+        "src\\server\\collections.rs": "38368a7958b836e89ec9ecf96aa25cf0c2a1fd47ba6e9950f1940d34385685c9"
+      },
+      "restored_identically": true
+    },
+    {
+      "id": "M29",
+      "description": "Prometheus metrics aggregate exposed",
+      "test": "reserved_graph_and_collection_are_denied_and_lists_filter_them",
+      "result": "killed",
+      "mutated_sha256": {
+        "src\\server\\observability.rs": "50c24653937714961592646e02dd6be1a9d8096a33ff2a49aa93e90a8ea24e9d"
+      },
+      "restored_sha256": {
+        "src\\server\\observability.rs": "1ff6903f85097c676f99477ea147263861841f944225d95926e4f05e0c33b37a"
+      },
+      "restored_identically": true
+    },
+    {
+      "id": "M30",
+      "description": "metrics summary aggregate exposed",
+      "test": "reserved_graph_and_collection_are_denied_and_lists_filter_them",
+      "result": "killed",
+      "mutated_sha256": {
+        "src\\server\\observability.rs": "05392944e1be4a6c6d2105b0e529462d38ce2141d16dc3a95fe810a86ddbaf9d"
+      },
+      "restored_sha256": {
+        "src\\server\\observability.rs": "1ff6903f85097c676f99477ea147263861841f944225d95926e4f05e0c33b37a"
+      },
+      "restored_identically": true
+    },
+    {
+      "id": "M31",
+      "description": "replication export exposed",
+      "test": "reserved_graph_and_collection_are_denied_and_lists_filter_them",
+      "result": "killed",
+      "mutated_sha256": {
+        "src\\server\\features.rs": "dbbc2dbd0bc3a01d6a1b962a9c2f7de9ae8c9dac119bd2e7c2fbce530d0dccde"
+      },
+      "restored_sha256": {
+        "src\\server\\features.rs": "14c7f8cf1dba7e87543d5a1007da30b71910aa237ae299a4d10c00a57792e72d"
+      },
+      "restored_identically": true
+    },
+    {
+      "id": "M32",
+      "description": "automatic maintenance read exposed",
+      "test": "reserved_graph_and_collection_are_denied_and_lists_filter_them",
+      "result": "killed",
+      "mutated_sha256": {
+        "src\\server\\ops.rs": "91708173fef9ffd6c2898484293ea29c6157ec773da27d8db7c43ada15010703"
+      },
+      "restored_sha256": {
+        "src\\server\\ops.rs": "9748964a5b11a31fc544615012704e2dc507b033679cbec8db0c5c5fec896f81"
+      },
+      "restored_identically": true
+    },
+    {
+      "id": "M33",
+      "description": "automatic maintenance update exposed",
+      "test": "reserved_graph_and_collection_are_denied_and_lists_filter_them",
+      "result": "killed",
+      "mutated_sha256": {
+        "src\\server\\ops.rs": "b4a97bc459013a89a790062caf805b29127aef35e21f1a11a8dc172b08968df5"
+      },
+      "restored_sha256": {
+        "src\\server\\ops.rs": "9748964a5b11a31fc544615012704e2dc507b033679cbec8db0c5c5fec896f81"
+      },
+      "restored_identically": true
+    },
+    {
+      "id": "M34",
+      "description": "automatic maintenance tick exposed",
+      "test": "reserved_graph_and_collection_are_denied_and_lists_filter_them",
+      "result": "killed",
+      "mutated_sha256": {
+        "src\\server\\ops.rs": "2551f4beb1b279ffc5bff81ab73b24f864627eb869a158ba4a312375d5753bf4"
+      },
+      "restored_sha256": {
+        "src\\server\\ops.rs": "9748964a5b11a31fc544615012704e2dc507b033679cbec8db0c5c5fec896f81"
+      },
+      "restored_identically": true
+    },
+    {
+      "id": "M35",
+      "description": "reserved webhook subscription accepted",
+      "test": "reserved_graph_and_collection_are_denied_and_lists_filter_them",
+      "result": "killed",
+      "mutated_sha256": {
+        "src\\server\\webhooks.rs": "5d60417f1ddaf037b26b4615ba61af74360f0d1666b1c9a8295f1930a8577d00"
+      },
+      "restored_sha256": {
+        "src\\server\\webhooks.rs": "0531e019d2a4d641f0834a28430445c45fbabb402fe25d53317314a2e5eb23a1"
+      },
+      "restored_identically": true
+    },
+    {
+      "id": "M36",
+      "description": "webhook list metadata exposed",
+      "test": "reserved_graph_and_collection_are_denied_and_lists_filter_them",
+      "result": "killed",
+      "mutated_sha256": {
+        "src\\server\\webhooks.rs": "d6632d17c52ce20dc9286005db5c83fedbcc83d47066f7f443cd608e3ad83870"
+      },
+      "restored_sha256": {
+        "src\\server\\webhooks.rs": "0531e019d2a4d641f0834a28430445c45fbabb402fe25d53317314a2e5eb23a1"
+      },
+      "restored_identically": true
+    },
+    {
+      "id": "M37",
+      "description": "webhook status metadata exposed",
+      "test": "reserved_graph_and_collection_are_denied_and_lists_filter_them",
+      "result": "killed",
+      "mutated_sha256": {
+        "src\\server\\webhooks.rs": "c3488b2485b26d132920bfdf6ebac2c43f0fa73373b08c4e0de034c8e569771e"
+      },
+      "restored_sha256": {
+        "src\\server\\webhooks.rs": "0531e019d2a4d641f0834a28430445c45fbabb402fe25d53317314a2e5eb23a1"
+      },
+      "restored_identically": true
+    },
+    {
+      "id": "M38",
+      "description": "webhook reserved collection event delivered",
+      "test": "webhook_dispatcher_never_delivers_reserved_resource_events",
+      "result": "killed",
+      "mutated_sha256": {
+        "src\\server\\webhooks.rs": "f9d9c3e2a991c7641944418eb8a5a5e894d666a4c4f256b4c1cb89039cadc396"
+      },
+      "restored_sha256": {
+        "src\\server\\webhooks.rs": "0531e019d2a4d641f0834a28430445c45fbabb402fe25d53317314a2e5eb23a1"
+      },
+      "restored_identically": true
+    },
+    {
+      "id": "M39",
+      "description": "webhook reserved graph event delivered",
+      "test": "webhook_dispatcher_never_delivers_reserved_resource_events",
+      "result": "killed",
+      "mutated_sha256": {
+        "src\\server\\webhooks.rs": "46a10f21c553b89364dd8dd74412c287d61ec94c8436ee3764250a213fd5f8da"
+      },
+      "restored_sha256": {
+        "src\\server\\webhooks.rs": "0531e019d2a4d641f0834a28430445c45fbabb402fe25d53317314a2e5eb23a1"
+      },
+      "restored_identically": true
+    },
+    {
+      "id": "M40",
+      "description": "tenant usage includes reserved collection",
+      "test": "tenant_qualified_reservations_follow_scoped_credentials_and_raw_access",
+      "result": "killed",
+      "mutated_sha256": {
+        "src\\server\\tenants.rs": "426cd73f29143d874bd8955c7721599fca76f0ae9f6cb2a6681d21a04e342502"
+      },
+      "restored_sha256": {
+        "src\\server\\tenants.rs": "6aa86323f451b814e51ba72369ed2da7fc426ef94bf8b3d8e96e90f592a19b7c"
+      },
+      "restored_identically": true
+    }
+  ]
+}

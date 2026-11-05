@@ -231,6 +231,18 @@ async fn create(
 ) -> Result<(StatusCode, Json<Value>), ApiError> {
     let input = body(input)?;
     validate(&input)?;
+    let reserved = service.memory_bindings.reserved();
+    if input.collections.as_ref().is_some_and(|names| {
+        names
+            .iter()
+            .any(|name| reserved.is_reserved(super::reserved::Resource::Collection, name))
+    }) || input.graphs.as_ref().is_some_and(|names| {
+        names
+            .iter()
+            .any(|name| reserved.is_reserved(super::reserved::Resource::Graph, name))
+    }) {
+        return Err(super::forbidden_scope());
+    }
     if service
         .webhooks
         .directory
@@ -266,6 +278,9 @@ async fn create(
     Ok((StatusCode::CREATED, Json(output)))
 }
 async fn list(State(service): State<Service>) -> Result<Json<Value>, ApiError> {
+    if !service.memory_bindings.is_empty() {
+        return Err(super::forbidden_scope());
+    }
     let d = service.webhooks.clone();
     let values = tokio::task::spawn_blocking(move || {
         let s = d.state.lock().map_err(internal)?;
@@ -289,6 +304,9 @@ async fn status(
     State(service): State<Service>,
     Path(id): Path<String>,
 ) -> Result<Json<Value>, ApiError> {
+    if !service.memory_bindings.is_empty() {
+        return Err(super::forbidden_scope());
+    }
     let d = service.webhooks.clone();
     let value = tokio::task::spawn_blocking(move || {
         let s = d.state.lock().map_err(internal)?;
@@ -418,7 +436,19 @@ fn run_dispatcher(dispatcher: Arc<Dispatcher>, service: Service, stopping: Arc<A
                 },
             };
             match database.changes_after(&cursor, 1000) {
-                Ok(batch) => (cursor, batch),
+                Ok(mut batch) => {
+                    let reserved = service.memory_bindings.reserved();
+                    batch.changes.retain(|change| {
+                        reserved.raw_allowed(
+                            None,
+                            super::reserved::Resource::Collection,
+                            &change.collection,
+                        ) && super::graph::feed_graph(&change.kind).is_none_or(|graph| {
+                            reserved.raw_allowed(None, super::reserved::Resource::Graph, graph)
+                        })
+                    });
+                    (cursor, batch)
+                }
                 Err(_) => continue,
             }
         };
