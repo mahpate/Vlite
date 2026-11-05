@@ -136,6 +136,7 @@ structs vlite::import::ImportStatus
 structs vlite::import::InvalidRow
 structs vlite::kv::KvEntry
 structs vlite::kv::KvPut
+structs vlite::kv::KvRef
 structs vlite::kv::KvStore
 structs vlite::kv::KvView
 structs vlite::maintenance::CompactionReport
