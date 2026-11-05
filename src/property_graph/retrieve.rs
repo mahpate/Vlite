@@ -408,10 +408,7 @@ impl GraphRef<'_> {
             vector_leg: pivot.vector_leg,
             fusion: pivot.fusion,
         };
-        #[cfg(test)]
         let (hits, search) = pivot_collection.search_hybrid_at(&query, row_now_ms)?;
-        #[cfg(not(test))]
-        let (hits, search) = pivot_collection.search_hybrid(&query)?;
         #[cfg(test)]
         let graph_state = if compact_pivot {
             db.graph.as_ref().ok_or(Error::GraphsNotEnabled)?
@@ -428,13 +425,8 @@ impl GraphRef<'_> {
         let mut pivots = Vec::new();
         let mut unmapped = UnmappedPivots::default();
         for hit in hits {
-            #[cfg(test)]
             let live = pivot_collection
                 .get_at(hit.id, row_now_ms)?
-                .is_some_and(|record| metadata::matches(&record.metadata, &pivot.filter));
-            #[cfg(not(test))]
-            let live = db
-                .get_in(pivot_collection.id, hit.id)?
                 .is_some_and(|record| metadata::matches(&record.metadata, &pivot.filter));
             if !live {
                 stats.pivots_rejected += 1;
@@ -501,10 +493,7 @@ impl GraphRef<'_> {
                     self.graph.attachments(NodeId(node.node.id)).collect();
                 for &(name, collection) in &evidence_collections {
                     for &(_, record_id) in attached.iter().filter(|(c, _)| *c == collection) {
-                        #[cfg(test)]
                         let record = db.collection(name)?.get_at(record_id, row_now_ms)?;
-                        #[cfg(not(test))]
-                        let record = db.get_in(collection, record_id)?;
                         let Some(record) = record else {
                             continue;
                         };

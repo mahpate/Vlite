@@ -108,11 +108,7 @@ fn validate_weight(weight: f64) -> Result<()> {
 impl CollectionRef<'_> {
     /// Hybrid search per REQ-008. Stats count the vector leg's work.
     pub fn search_hybrid(&self, query: &HybridQuery) -> Result<(Vec<HybridHit>, SearchStats)> {
-        #[cfg(test)]
-        if self.db.state(self.id).records.is_compact() {
-            return self.search_hybrid_at(query, crate::current_time_ms());
-        }
-        self.search_hybrid_resident_at(query, crate::current_time_ms())
+        self.search_hybrid_at(query, crate::current_time_ms())
     }
 
     fn search_hybrid_resident_at(
@@ -236,7 +232,6 @@ impl CollectionRef<'_> {
         Ok((hits, stats))
     }
 
-    #[cfg(test)]
     pub(crate) fn search_hybrid_at(
         &self,
         query: &HybridQuery,

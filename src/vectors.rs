@@ -447,11 +447,14 @@ impl<'a> CollectionRef<'a> {
         let (s, rs) = self.named_records(n, version)?;
         crate::validate_vector(s.dimensions, query)?;
         let norm = crate::validate_metric_query(query, s.metric)?;
-        let (ids, rows): (Vec<u64>, Vec<&[f32]>) = rs
-            .iter()
-            .filter(|(id, _)| self.get_at(**id, now_ms).ok().flatten().is_some())
-            .map(|(&id, r)| (id, &r.vector[..]))
-            .unzip();
+        let mut ids = Vec::new();
+        let mut rows = Vec::new();
+        for (&id, record) in rs.iter() {
+            if self.get_at(id, now_ms)?.is_some() {
+                ids.push(id);
+                rows.push(&record.vector[..]);
+            }
+        }
         // Stored vectors are finite, so row-first scoring matches query-first.
         let distances = crate::exact_kernels::Scorer::new(query, s.metric, norm).score(&rows, None);
         Ok(rank(

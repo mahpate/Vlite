@@ -23,7 +23,6 @@ const COMPACT_REFUSALS: &[&str] = &[
     "CollectionMut::poll_hnsw_rebuild",
     "CollectionMut::hnsw_maintenance_status",
     "CollectionMut::maintain_hnsw",
-    "CollectionMut::search_hybrid",
     "CollectionMut::import_chunk",
     "CollectionMut::finish_import",
     "CollectionMut::abort_import",
@@ -37,9 +36,7 @@ const COMPACT_REFUSALS: &[&str] = &[
     "CollectionMut::hnsw_health",
     "CollectionMut::ann_quality",
     "CollectionMut::search_approximate_ready_with_options",
-    "CollectionMut::search_grouped",
     "CollectionMut::recommend",
-    "CollectionMut::facets",
     "CollectionMut::numeric_stats",
     "CollectionMut::search_geo",
     "CollectionMut::configure_vector",
@@ -621,7 +618,7 @@ fn compact_installed_database_and_snapshot_method_matrix() {
 fn compact_installed_collection_method_matrix() {
     let _gates = gates();
     for encrypted in [false, true] {
-        let (mut db, oracle, bytes) = compact_dispatch_fixture(encrypted);
+        let (mut db, mut oracle, bytes) = compact_dispatch_fixture(encrypted);
         let config = HnswConfig::default();
         let options = AnnOptions::default();
         let metric = DistanceMetric::SquaredL2;
@@ -633,10 +630,34 @@ fn compact_installed_collection_method_matrix() {
                 .unwrap();
             {
                 let mutable = db.collection_mut(&info.name).unwrap();
+                let expected_mutable = oracle.collection_mut(&info.name).unwrap();
                 assert_eq!(
                     mutable.browse(None, 1).unwrap(),
                     expected_browse,
                     "CollectionMut::browse"
+                );
+                assert_eq!(
+                    mutable
+                        .search_hybrid(&hybrid::HybridQuery::new(Some(vec![1.0, 2.0]), "", 0))
+                        .unwrap(),
+                    expected_mutable
+                        .search_hybrid(&hybrid::HybridQuery::new(Some(vec![1.0, 2.0]), "", 0))
+                        .unwrap(),
+                    "CollectionMut::search_hybrid"
+                );
+                assert_eq!(
+                    mutable
+                        .search_grouped(&[1.0, 2.0], 0, 0, "x", &[], DistanceMetric::SquaredL2)
+                        .unwrap(),
+                    expected_mutable
+                        .search_grouped(&[1.0, 2.0], 0, 0, "x", &[], DistanceMetric::SquaredL2)
+                        .unwrap(),
+                    "CollectionMut::search_grouped"
+                );
+                assert_eq!(
+                    mutable.facets("x", &[]).unwrap(),
+                    expected_mutable.facets("x", &[]).unwrap(),
+                    "CollectionMut::facets"
                 );
             }
             let view = db.collection(&info.name).unwrap();
@@ -963,19 +984,19 @@ fn compact_installed_restricted_method_guards_refuse() {
     );
     assert!(view.facets("marker", &[]).is_ok());
     unsupported(view.numeric_stats("", &[]), "P3B2-R5 numeric_stats");
-    assert!(!matches!(
+    assert!(matches!(
         view.search_hybrid(&hybrid::HybridQuery::new(Some(query.to_vec()), "", 1_001)),
-        Err(Error::UnsupportedFeature(crate::format::FLAG_COMPACT))
+        Err(Error::InvalidQuery("hybrid k must be at most 1000"))
     ));
     unsupported(
         view.search_auto(&[], 1, &[], metric, HnswConfig::default(), options, 1),
         "P3B2-P1 planner search",
     );
-    assert!(!matches!(
+    assert!(matches!(
         crate::query_language::parse("SEARCH TEXT MATCH \"word\"")
             .unwrap()
             .execute(view, &std::collections::BTreeMap::new()),
-        Err(Error::UnsupportedFeature(crate::format::FLAG_COMPACT))
+        Err(Error::InvalidQuery("text fields must be declared"))
     ));
     let kv = crate::kv::compact_view_for_test(&db, id);
     unsupported(kv.get_at("", "", 0), "P3B2-K2 kv get_at");
