@@ -407,6 +407,41 @@ fn compact_dispatch_enum_clone_pins_source_and_refuses_resident_access() {
 }
 
 #[test]
+fn compact_dispatch_grouped_facets_match_nonempty_resident_rows() {
+    let _gates = gates();
+    let image = crate::compact::catalog::tests::source_indexed_fixture(None);
+    let oracle = {
+        let _source = super::Activation::set(false);
+        Database::open_from_bytes(image.clone(), None).unwrap()
+    };
+    let candidate = Database::open_from_bytes(image, None).unwrap();
+    let candidate_id = candidate.collection("indexed").unwrap().id();
+    let oracle_id = oracle.collection("indexed").unwrap().id();
+    assert!(candidate.state(candidate_id).records.is_compact());
+    assert!(!oracle.state(oracle_id).records.is_compact());
+
+    let actual = candidate.collection("indexed").unwrap();
+    let expected = oracle.collection("indexed").unwrap();
+    let groups = actual
+        .search_grouped(&[1.0, 1.0], 10, 10, "tag", &[], DistanceMetric::SquaredL2)
+        .unwrap();
+    assert_eq!(
+        groups,
+        expected
+            .search_grouped(&[1.0, 1.0], 10, 10, "tag", &[], DistanceMetric::SquaredL2)
+            .unwrap()
+    );
+    assert_eq!(
+        groups.iter().map(|group| group.hits.len()).sum::<usize>(),
+        2
+    );
+
+    let facets = actual.facets("tag", &[]).unwrap();
+    assert_eq!(facets, expected.facets("tag", &[]).unwrap());
+    assert_eq!(facets.iter().map(|facet| facet.count).sum::<u64>(), 2);
+}
+
+#[test]
 fn compact_dispatch_snapshot_fixture_pins_generation_after_database_drop() {
     let _gates = gates();
     for encrypted in [false, true] {

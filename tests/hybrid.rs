@@ -230,6 +230,7 @@ fn hybrid_validation() {
         };
         invalid(query.clone());
     }
+
     let mut ok = HybridQuery::new(None, "rust", 1000);
     ok.fusion.candidates = Some(1000);
     assert!(db.search_hybrid(&ok).is_ok());
@@ -286,4 +287,18 @@ fn hybrid_validation() {
             postings: 0,
         }
     );
+}
+
+#[test]
+fn hybrid_resident_default_clock_honors_ttl() {
+    let directory = tempfile::tempdir().unwrap();
+    let mut db = Database::create(directory.path().join("ttl.vlite"), 2).unwrap();
+    db.set_collection_settings("default", text_settings())
+        .unwrap();
+    db.put_with_expiry(1, &[0.0, 0.0], b"", &doc("expiredtoken", "", 1), Some(1))
+        .unwrap();
+    let (hits, _) = db
+        .search_hybrid(&HybridQuery::new(None, "expiredtoken", 10))
+        .unwrap();
+    assert!(hits.is_empty());
 }
