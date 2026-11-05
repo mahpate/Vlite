@@ -863,15 +863,23 @@ def run_rest(http: HTTP, env: Environment, report: Report) -> None:
     check("replay-after-delete", replay_after_delete)
 
     def raw_denials() -> None:
-        for method, path, body in (
-            ("GET", "/v1/graphs/notes_graph/nodes/1", None),
-            ("POST", "/v1/graphs/notes_graph/batch", {"ops": []}),
-            ("GET", "/v1/collections/evidence/vectors/1", None),
-            ("PUT", "/v1/collections/evidence/vectors/1", {"vector": [1, 0, 0]}),
-            ("POST", "/v1/collections/evidence/search", {"vector": [1, 0, 0], "k": 1}),
+        # Without raw_access a reserved resource answers exactly like a missing one,
+        # even for the administrator token (docs/SECURITY.md Memory-bound resources).
+        for method, path, body, status, code in (
+            ("GET", "/v1/graphs/notes_graph/nodes/1", None, 409, "graph_not_found"),
+            ("POST", "/v1/graphs/notes_graph/batch", {"ops": [{"op": "create_node", "key": "x"}]},
+             409, "graph_not_found"),
+            ("GET", "/v1/collections/evidence/vectors/1", None, 404, "collection_not_found"),
+            ("PUT", "/v1/collections/evidence/vectors/1", {"vector": [1, 0, 0]}, 404, "collection_not_found"),
+            ("POST", "/v1/collections/evidence/search", {"vector": [1, 0, 0], "k": 1}, 404, "collection_not_found"),
         ):
-            error(http.request(method, path, body), 403, "forbidden_scope")
-    check("raw-reserved-read-write-search-denied", raw_denials, "docs/SECURITY.md Memory-bound resources")
+            reserved = http.request(method, path, body)
+            error(reserved, status, code)
+            absent = path.replace("notes_graph", "absent_graph").replace("evidence", "absent_evidence")
+            missing = http.request(method, absent, body)
+            require(reserved.status == missing.status and reserved.json() == missing.json(),
+                    f"{method} {path}: a reserved resource answered differently from a missing one")
+    check("raw-reserved-answers-like-missing", raw_denials, "docs/SECURITY.md Memory-bound resources")
     check("raw-access-still-needs-normal-grants", lambda: require(
         http.request("GET", "/v1/collections/evidence/vectors", token=env.keys["raw"]).status == 200,
         "explicit raw_access with ordinary read permission should permit access"),
