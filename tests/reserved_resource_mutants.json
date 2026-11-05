@@ -1552,5 +1552,318 @@
         "restored_identically": true
       }
     ]
+  },
+  "structural_guard_campaign": {
+    "campaign": "Structural guard: hand mutants of the request scope, the guard residues and the generated differential",
+    "baseline_commit": "4774f5bb0c04168e573fce53ab1250779277ee6d",
+    "protocol": "Each mutant replaces exactly one occurrence of `old` by `new` in `file` of the baseline commit; `cmd` runs from the repository root. A mutant is killed when the build succeeds and at least one test the command ran fails because of it. A build error or a command that runs no test is not a kill. The file is restored before the next mutant.",
+    "mutants": [
+      {
+        "id": "G71-01",
+        "desc": "the guard skips the reservation of a named collection",
+        "file": "src/server/guard.rs",
+        "old": "if !self.collection_visible(&stored) {",
+        "new": "if false && !self.collection_visible(&stored) {",
+        "cmd": "cargo test --locked --offline --all-features --no-fail-fast --test server_guard_differential --test server_memory_guards --test server_memory_reserved_as_missing --test tenants",
+        "result": "pending"
+      },
+      {
+        "id": "G71-02",
+        "desc": "the guard skips the credential's name grant",
+        "file": "src/server/guard.rs",
+        "old": "admin::Role::Scoped(grant) => grant.names(stored),",
+        "new": "admin::Role::Scoped(_) => true,",
+        "cmd": "cargo test --locked --offline --all-features --no-fail-fast --test server_guard_differential --test server_memory_guards --test server_memory_reserved_as_missing --test tenants",
+        "result": "pending"
+      },
+      {
+        "id": "G71-03",
+        "desc": "raw holders lose the reserved collection (the credential is dropped)",
+        "file": "src/server/guard.rs",
+        "old": ".raw_allowed(self.raw(), reserved::Resource::Collection, stored)",
+        "new": ".raw_allowed(None, reserved::Resource::Collection, stored)",
+        "cmd": "cargo test --locked --offline --all-features --no-fail-fast --test server_guard_differential --test server_memory_guards --test server_memory_reserved_as_missing --test tenants",
+        "result": "pending"
+      },
+      {
+        "id": "G71-04",
+        "desc": "raw holders lose the reserved graph (the credential is dropped)",
+        "file": "src/server/guard.rs",
+        "old": ".raw_allowed(self.raw(), reserved::Resource::Graph, stored)",
+        "new": ".raw_allowed(None, reserved::Resource::Graph, stored)",
+        "cmd": "cargo test --locked --offline --all-features --no-fail-fast --test server_guard_differential --test server_memory_guards --test server_memory_reserved_as_missing --test tenants",
+        "result": "pending"
+      },
+      {
+        "id": "G71-05",
+        "desc": "the visible predicate of the core planners lets every collection through",
+        "file": "src/server/guard.rs",
+        "old": "move |stored| self.collection_visible(stored)",
+        "new": "move |_stored| true",
+        "cmd": "cargo test --locked --offline --all-features --no-fail-fast --test server_guard_differential --test server_memory_guards --test server_memory_reserved_as_missing --test tenants",
+        "result": "pending"
+      },
+      {
+        "id": "G71-06",
+        "desc": "a reserved graph is never hidden",
+        "file": "src/server/guard.rs",
+        "old": "let hidden = !self.graph_visible(&stored);",
+        "new": "let hidden = false;",
+        "cmd": "cargo test --locked --offline --all-features --no-fail-fast --test server_guard_differential --test server_memory_guards --test server_memory_reserved_as_missing --test tenants",
+        "result": "pending"
+      },
+      {
+        "id": "G71-07",
+        "desc": "the credential's collection binding is not checked after the lookup",
+        "file": "src/server/guard.rs",
+        "old": "if let admin::Role::Scoped(grant) = &self.role",
+        "new": "if let admin::Role::Scoped(grant) = &self.role && false",
+        "cmd": "cargo test --locked --offline --all-features --no-fail-fast --test server_guard_differential --test server_memory_guards --test server_memory_reserved_as_missing --test tenants",
+        "result": "pending"
+      },
+      {
+        "id": "G71-08",
+        "desc": "a tenant's names are not qualified",
+        "file": "src/server/guard.rs",
+        "old": "tenants::qualify(&self.role, name)",
+        "new": "name.to_owned()",
+        "cmd": "cargo test --locked --offline --all-features --no-fail-fast --test server_guard_differential --test server_memory_guards --test server_memory_reserved_as_missing --test tenants",
+        "result": "pending"
+      },
+      {
+        "id": "G71-09",
+        "desc": "a collection named in a body is tenant-qualified",
+        "file": "src/server/guard.rs",
+        "old": "self.guard_collection(db, stored.to_owned())",
+        "new": "self.guard_collection(db, self.qualify(stored))",
+        "cmd": "cargo test --locked --offline --all-features --no-fail-fast --test server_guard_differential --test server_memory_guards --test server_memory_reserved_as_missing --test tenants",
+        "result": "pending"
+      },
+      {
+        "id": "G71-10",
+        "desc": "collection lists show the stored (qualified) names",
+        "file": "src/server/guard.rs",
+        "old": "item.name = self.unqualify(&item.name);",
+        "new": "item.name = item.name.clone();",
+        "cmd": "cargo test --locked --offline --all-features --no-fail-fast --test server_guard_differential --test server_memory_guards --test server_memory_reserved_as_missing --test tenants",
+        "result": "pending"
+      },
+      {
+        "id": "G71-11",
+        "desc": "the change feed ignores the reservation of an event's collection",
+        "file": "src/server/guard.rs",
+        "old": "self.collection_visible(&change.collection)",
+        "new": "true",
+        "cmd": "cargo test --locked --offline --all-features --no-fail-fast --test server_guard_differential --test server_memory_guards --test server_memory_reserved_as_missing --test tenants",
+        "result": "pending"
+      },
+      {
+        "id": "G71-12",
+        "desc": "a guarded handle opens the key-value store of the unqualified name",
+        "file": "src/server/guard.rs",
+        "old": "Ok(db.kv_store_by_id(self.id)?)",
+        "new": "Ok(db.kv_store(self.stored.rsplit(\"__\").next().unwrap_or(&*self.stored))?)",
+        "cmd": "cargo test --locked --offline --all-features --no-fail-fast --test server_guard_differential --test server_memory_guards --test server_memory_reserved_as_missing --test tenants",
+        "result": "pending"
+      },
+      {
+        "id": "G71-13",
+        "desc": "a guarded handle reads the key-value view of the unqualified name",
+        "file": "src/server/guard.rs",
+        "old": "Ok(db.kv_view_by_id(self.id)?)",
+        "new": "Ok(db.kv_view(self.stored.rsplit(\"__\").next().unwrap_or(&*self.stored))?)",
+        "cmd": "cargo test --locked --offline --all-features --no-fail-fast --test server_guard_differential --test server_memory_guards --test server_memory_reserved_as_missing --test tenants",
+        "result": "pending"
+      },
+      {
+        "id": "G71-14",
+        "desc": "a guarded handle writes to the collection of the unqualified name",
+        "file": "src/server/guard.rs",
+        "old": "Ok(db.collection_mut_by_id(self.id)?)",
+        "new": "Ok(db.collection_mut(self.stored.rsplit(\"__\").next().unwrap_or(&*self.stored))?)",
+        "cmd": "cargo test --locked --offline --all-features --no-fail-fast --test server_guard_differential --test server_memory_guards --test server_memory_reserved_as_missing --test tenants",
+        "result": "pending"
+      },
+      {
+        "id": "G71-15",
+        "desc": "any credential is a raw holder",
+        "file": "src/server/reserved.rs",
+        "old": "Some(index) => credential.is_some_and(|id| self.raw.contains(&(index, id.to_owned()))),",
+        "new": "Some(_) => credential.is_some(),",
+        "cmd": "cargo test --locked --offline --all-features --no-fail-fast --test server_guard_differential --test server_memory_guards --test server_memory_reserved_as_missing --test tenants",
+        "result": "pending"
+      },
+      {
+        "id": "G71-16",
+        "desc": "a reserved graph takes any collection through the public routes",
+        "file": "src/server/reserved.rs",
+        "old": "Some(owner) => self.owner(Resource::Collection, collection) == Some(owner),",
+        "new": "Some(_) => true,",
+        "cmd": "cargo test --locked --offline --all-features --no-fail-fast --test server_guard_differential --test server_memory_guards --test server_memory_reserved_as_missing --test tenants",
+        "result": "pending"
+      },
+      {
+        "id": "G71-17",
+        "desc": "backups stay open to credentials while resources are reserved",
+        "file": "src/server.rs",
+        "old": "|| (op == credentials::Op::Backup && service.has_bindings())",
+        "new": "|| (op == credentials::Op::Backup && false)",
+        "cmd": "cargo test --locked --offline --all-features --no-fail-fast --test server_guard_differential --test server_memory_guards --test server_memory_reserved_as_missing --test tenants",
+        "result": "pending"
+      },
+      {
+        "id": "G71-18",
+        "desc": "every request of a credential is audited as a hidden attempt",
+        "file": "src/server.rs",
+        "old": "if let (Some(admin::Role::Scoped(grant)), true) = (role, hidden) {",
+        "new": "if let (Some(admin::Role::Scoped(grant)), true) = (role, true) {",
+        "cmd": "cargo test --locked --offline --all-features --no-fail-fast --test server_guard_differential --test server_memory_guards --test server_memory_reserved_as_missing --test tenants",
+        "result": "pending"
+      },
+      {
+        "id": "G71-19",
+        "desc": "the pipeline never learns that the guard hid a resource",
+        "file": "src/server/guard.rs",
+        "old": "(output, flag.load(Ordering::Relaxed))",
+        "new": "(output, false)",
+        "cmd": "cargo test --locked --offline --all-features --no-fail-fast --test server_guard_differential --test server_memory_guards --test server_memory_reserved_as_missing --test tenants",
+        "result": "pending"
+      },
+      {
+        "id": "G71-20",
+        "desc": "the administrator's tenant usage leaves out the reserved collections",
+        "file": "src/server/tenants.rs",
+        "old": "state.name.strip_prefix(&prefix).map(|name| {",
+        "new": "state.name.strip_prefix(&prefix).filter(|name| !name.ends_with(\"_ev\")).map(|name| {",
+        "cmd": "cargo test --locked --offline --all-features --no-fail-fast --test server_guard_differential --test server_memory_guards --test server_memory_reserved_as_missing --test tenants",
+        "result": "pending"
+      },
+      {
+        "id": "G71-21",
+        "desc": "a symbolic link is accepted as the bindings file",
+        "file": "src/server/admin.rs",
+        "old": "if std::fs::symlink_metadata(path)",
+        "new": "if std::fs::metadata(path)",
+        "cmd": "cargo test --locked --offline --all-features --no-fail-fast --test server_guard_differential --test server_memory_guards --test server_memory_reserved_as_missing --test tenants",
+        "result": "pending"
+      },
+      {
+        "id": "G71-22",
+        "desc": "a scoped credential may name the gRPC disk ANN sidecar path",
+        "file": "src/server/grpc.rs",
+        "old": "if matches!(role, admin::Role::Admin) {",
+        "new": "if !matches!(role, admin::Role::ReadOnly) {",
+        "cmd": "cargo test --locked --offline --all-features --no-fail-fast --test grpc",
+        "result": "pending"
+      },
+      {
+        "id": "G71-23",
+        "desc": "the derived gRPC disk ANN sidecar ignores the collection",
+        "file": "src/server/grpc.rs",
+        "old": "Self::Derived(directory) => features::disk_ann_sidecar(directory, collection),",
+        "new": "Self::Derived(directory) => features::disk_ann_sidecar(directory, 0),",
+        "cmd": "cargo test --locked --offline --all-features --no-fail-fast --test grpc",
+        "result": "pending"
+      },
+      {
+        "id": "G71-24",
+        "desc": "webhook creation rejects a filter that names a reserved collection",
+        "file": "src/server/webhooks.rs",
+        "old": "    validate(&input)?;",
+        "new": "    validate(&input)?; if input.collections.iter().flatten().any(|name| !service.memory_bindings.reserved().raw_allowed(None, super::reserved::Resource::Collection, name)) { return Err(ApiError::new(StatusCode::NOT_FOUND, \"collection_not_found\", \"collection not found\")); }",
+        "cmd": "cargo test --locked --offline --all-features --no-fail-fast --test server_guard_differential --test server_memory_guards --test server_memory_reserved_as_missing --test tenants",
+        "result": "pending"
+      },
+      {
+        "id": "G71-25",
+        "desc": "the core planner attaches any record to a reserved graph",
+        "file": "src/property_graph/mod.rs",
+        "old": "if !attachable(graph, collection) {",
+        "new": "if false && !attachable(graph, collection) {",
+        "cmd": "cargo test --locked --offline --all-features --no-fail-fast --test server_guard_differential --test server_memory_guards --test server_memory_reserved_as_missing --test tenants --lib",
+        "result": "pending"
+      },
+      {
+        "id": "G71-26",
+        "desc": "an ID that names no live collection is accepted",
+        "file": "src/by_id.rs",
+        "old": "if self.collections.contains_key(&id) {",
+        "new": "if true {",
+        "cmd": "cargo test --locked --offline --all-features --no-fail-fast --lib -- by_id:: server::guard:: server::reserved::",
+        "result": "pending"
+      },
+      {
+        "id": "G71-27",
+        "desc": "the default collection can be dropped by ID",
+        "file": "src/by_id.rs",
+        "old": "if self.state(id).name == \"default\" {",
+        "new": "if false {",
+        "cmd": "cargo test --locked --offline --all-features --no-fail-fast --lib -- by_id:: server::guard:: server::reserved::",
+        "result": "pending"
+      },
+      {
+        "id": "G71-28",
+        "desc": "the 0.7.0 defect: the metadata route writes to the unqualified name",
+        "file": "src/server.rs",
+        "old": "let revision = db.update_metadata_in(collection, id, &metadata, Expected::Any)?;",
+        "new": "let revision = db.update_metadata_in(db.resolve(target.name())?, id, &metadata, Expected::Any)?;",
+        "cmd": "cargo test --locked --offline --all-features --no-fail-fast --test server_guard_differential --test server_memory_guards --test server_memory_reserved_as_missing --test tenants",
+        "result": "pending"
+      },
+      {
+        "id": "G71-29",
+        "desc": "the scan stops banning kv_store by name",
+        "file": "tests/server_name_lookup_scan.rs",
+        "old": "    \"kv_store\",",
+        "new": "    \"kv_storex\",",
+        "cmd": "cargo test --locked --offline --all-features --no-fail-fast --test server_name_lookup_scan",
+        "result": "pending"
+      },
+      {
+        "id": "G71-30",
+        "desc": "an allowlist entry no longer matches a finding",
+        "file": "tests/server_name_lookup_scan.rs",
+        "old": "\"auto_tick\",",
+        "new": "\"auto_tickx\",",
+        "cmd": "cargo test --locked --offline --all-features --no-fail-fast --test server_name_lookup_scan",
+        "result": "pending"
+      },
+      {
+        "id": "G71-31",
+        "desc": "the scan reports no by-name method call",
+        "file": "tests/server_name_lookup_scan.rs",
+        "old": "if BY_NAME.contains(&name) && !database_first(&tokens, index + 3)",
+        "new": "if BY_NAME.contains(&name) && false && !database_first(&tokens, index + 3)",
+        "cmd": "cargo test --locked --offline --all-features --no-fail-fast --test server_name_lookup_scan",
+        "result": "pending"
+      },
+      {
+        "id": "G71-32",
+        "desc": "the inventory loses the row of the credential grants",
+        "file": "tests/server_guard_differential.rs",
+        "old": "        \"/v1/admin/credentials\",",
+        "new": "        \"/v1/admin/credentials-x\",",
+        "cmd": "cargo test --locked --offline --all-features --no-fail-fast --test server_guard_differential -- every_name_bearing_operation_has_generated_coverage the_digest_sees_a_write_to_every_protected_resource",
+        "result": "pending"
+      },
+      {
+        "id": "G71-33",
+        "desc": "the inventory walker no longer reads request bodies",
+        "file": "tests/server_guard_differential.rs",
+        "old": "if let Some(content) = operation[\"requestBody\"][\"content\"].as_object() {",
+        "new": "if let Some(content) = operation[\"requestBody\"][\"contentx\"].as_object() {",
+        "cmd": "cargo test --locked --offline --all-features --no-fail-fast --test server_guard_differential -- every_name_bearing_operation_has_generated_coverage the_digest_sees_a_write_to_every_protected_resource",
+        "result": "pending"
+      },
+      {
+        "id": "G71-34",
+        "desc": "the digest no longer reads the root key-value collection",
+        "file": "tests/server_guard_differential.rs",
+        "old": "out.insert(\"root.kvstore\", read_kv(world, \"admin\", \"kvstore\").await);",
+        "new": "let _ = read_kv(world, \"admin\", \"kvstore\").await;",
+        "cmd": "cargo test --locked --offline --all-features --no-fail-fast --test server_guard_differential -- every_name_bearing_operation_has_generated_coverage the_digest_sees_a_write_to_every_protected_resource",
+        "result": "pending"
+      }
+    ]
   }
 }
