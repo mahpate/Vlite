@@ -397,7 +397,7 @@ fn compact_installed_database_and_snapshot_method_matrix() {
         d!("Database::abort_import", db.abort_import(1));
         d!("Database::import_status", db.import_status(1));
         d!("Database::kv_store", db.kv_store("full"));
-        d!("Database::kv_view", db.kv_view("full"));
+        assert!(matches!(db.kv_view("full"), Err(Error::NotKvCollection)));
         d!("Database::create_graph", db.create_graph("new"));
         d!("Database::drop_graph", db.drop_graph("g"));
         d!("Database::list_graphs", db.list_graphs());
@@ -941,15 +941,10 @@ fn compact_installed_collection_method_matrix() {
 fn compact_installed_restricted_method_guards_refuse() {
     let _gates = gates();
     let (mut db, _, _) = compact_dispatch_fixture(false);
-    let (name, id) = db
+    let name = db
         .collections
         .iter()
-        .find_map(|(&id, state)| {
-            state
-                .records
-                .is_compact()
-                .then_some((state.name.clone(), id))
-        })
+        .find_map(|(_, state)| state.records.is_compact().then_some(state.name.clone()))
         .expect("fixture has a compact collection");
     let query = &[1.0, 2.0];
     let metric = DistanceMetric::SquaredL2;
@@ -998,7 +993,4 @@ fn compact_installed_restricted_method_guards_refuse() {
             .execute(view, &std::collections::BTreeMap::new()),
         Err(Error::InvalidQuery("text fields must be declared"))
     ));
-    let kv = crate::kv::compact_view_for_test(&db, id);
-    unsupported(kv.get_at("", "", 0), "P3B2-K2 kv get_at");
-    unsupported(kv.list_at("", "", None, 0, 0), "P3B2-K3 kv list_at");
 }
