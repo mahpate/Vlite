@@ -9,100 +9,487 @@
    "id": "s3-compact-visibility-skipped",
    "origin": "S3: compact scan",
    "desc": "the compact exact scan scores rows that are expired at the clock",
+   "expect": [
+    "compact::source::seam_tests::index_differential::compact_declared_index_scans_match_the_resident_oracle_and_the_contract_across_changes"
+   ],
    "file": "src/lib.rs",
    "old": "if !records.effective_visible(id, now_ms, expiries) {\n            continue;\n        }",
    "new": "",
-   "cmd": "test --locked --offline --lib -- compact::source::seam_tests::index_differential"
+   "cmd": "test --locked --offline --lib -- compact::source::seam_tests::index_differential",
+   "runs": {
+    "local": {
+     "file": "src/lib.rs",
+     "anchor_matches": 1,
+     "sha256_lf": {
+      "before": "d925f255eb3fb9512af7786cd416b7cbdd67ef0fa373a0d7a146820b24110a0a",
+      "mutated": "17e7a233c03782acb7fc9975f4d3ea1cf2241aff1ed707ae7c78a529fe2fc406",
+      "restored": "d925f255eb3fb9512af7786cd416b7cbdd67ef0fa373a0d7a146820b24110a0a"
+     },
+     "sha256_bytes": {
+      "before": "1b9b00cbfb1ed5ab42e066d32919a88a15f8c9fc3a823c69d493116c8440eda7",
+      "restored": "1b9b00cbfb1ed5ab42e066d32919a88a15f8c9fc3a823c69d493116c8440eda7"
+     },
+     "build_attempts": 1,
+     "compiled": true,
+     "tests": 2,
+     "passed": 1,
+     "failed_tests": [
+      "compact::source::seam_tests::index_differential::compact_declared_index_scans_match_the_resident_oracle_and_the_contract_across_changes"
+     ],
+     "status": "killed",
+     "expect_met": true,
+     "restored_identically": true,
+     "seconds": 246,
+     "environment": {
+      "os": "Windows-11-10.0.26300-SP0",
+      "rustc": "rustc 1.99.1 (58cf8f9c3 2026-10-13)",
+      "head": "a15e75b59f9c4bf6f50e84a9dfe03674f68737c0"
+     },
+     "baseline_green": true
+    }
+   }
   },
   {
    "id": "s3-compact-scanned-after-visibility",
    "origin": "S3: compact scan",
    "desc": "the compact exact scan counts a row as examined only when it is visible",
+   "expect": [
+    "compact::source::seam_tests::index_differential::compact_declared_index_scans_match_the_resident_oracle_and_the_contract_across_changes"
+   ],
    "file": "src/lib.rs",
    "old": "stats.records_scanned += 1;\n        if !records.effective_visible(id, now_ms, expiries) {\n            continue;\n        }",
    "new": "if !records.effective_visible(id, now_ms, expiries) {\n            continue;\n        }\n        stats.records_scanned += 1;",
-   "cmd": "test --locked --offline --lib -- compact::source::seam_tests::index_differential"
+   "cmd": "test --locked --offline --lib -- compact::source::seam_tests::index_differential",
+   "runs": {
+    "local": {
+     "file": "src/lib.rs",
+     "anchor_matches": 1,
+     "sha256_lf": {
+      "before": "d925f255eb3fb9512af7786cd416b7cbdd67ef0fa373a0d7a146820b24110a0a",
+      "mutated": "1ae3a74d9403ed58b6fd6b530dbacff689d2379cb8af5a6bb7726ae9df7428af",
+      "restored": "d925f255eb3fb9512af7786cd416b7cbdd67ef0fa373a0d7a146820b24110a0a"
+     },
+     "sha256_bytes": {
+      "before": "1b9b00cbfb1ed5ab42e066d32919a88a15f8c9fc3a823c69d493116c8440eda7",
+      "restored": "1b9b00cbfb1ed5ab42e066d32919a88a15f8c9fc3a823c69d493116c8440eda7"
+     },
+     "build_attempts": 1,
+     "compiled": true,
+     "tests": 2,
+     "passed": 1,
+     "failed_tests": [
+      "compact::source::seam_tests::index_differential::compact_declared_index_scans_match_the_resident_oracle_and_the_contract_across_changes"
+     ],
+     "status": "killed",
+     "expect_met": true,
+     "restored_identically": true,
+     "seconds": 276,
+     "environment": {
+      "os": "Windows-11-10.0.26300-SP0",
+      "rustc": "rustc 1.99.1 (58cf8f9c3 2026-10-13)",
+      "head": "a15e75b59f9c4bf6f50e84a9dfe03674f68737c0"
+     },
+     "baseline_green": true
+    }
+   }
   },
   {
    "id": "s3-compact-evaluated-before-filter",
    "origin": "S3: compact scan",
    "desc": "the compact exact scan counts a distance evaluation before the filter has kept the row",
+   "expect": [
+    "compact::source::seam_tests::index_differential::compact_declared_index_scans_match_the_resident_oracle_and_the_contract_across_changes",
+    "compact::source::seam_tests::index_differential::compact_scan_examines_every_row_where_the_resident_block_summaries_prune"
+   ],
    "file": "src/lib.rs",
    "old": "if !metadata::matches(&metadata, conditions) {\n            continue;\n        }\n        stats.distance_evaluations += 1;",
    "new": "stats.distance_evaluations += 1;\n        if !metadata::matches(&metadata, conditions) {\n            continue;\n        }",
-   "cmd": "test --locked --offline --lib -- compact::source::seam_tests::index_differential"
+   "cmd": "test --locked --offline --lib -- compact::source::seam_tests::index_differential",
+   "runs": {
+    "local": {
+     "file": "src/lib.rs",
+     "anchor_matches": 1,
+     "sha256_lf": {
+      "before": "d925f255eb3fb9512af7786cd416b7cbdd67ef0fa373a0d7a146820b24110a0a",
+      "mutated": "446a78148e105b3aa2f46ed60a71aa5c4ef7be706e947b2f0d9aca11c00be842",
+      "restored": "d925f255eb3fb9512af7786cd416b7cbdd67ef0fa373a0d7a146820b24110a0a"
+     },
+     "sha256_bytes": {
+      "before": "1b9b00cbfb1ed5ab42e066d32919a88a15f8c9fc3a823c69d493116c8440eda7",
+      "restored": "1b9b00cbfb1ed5ab42e066d32919a88a15f8c9fc3a823c69d493116c8440eda7"
+     },
+     "build_attempts": 1,
+     "compiled": true,
+     "tests": 2,
+     "passed": 0,
+     "failed_tests": [
+      "compact::source::seam_tests::index_differential::compact_declared_index_scans_match_the_resident_oracle_and_the_contract_across_changes",
+      "compact::source::seam_tests::index_differential::compact_scan_examines_every_row_where_the_resident_block_summaries_prune"
+     ],
+     "status": "killed",
+     "expect_met": true,
+     "restored_identically": true,
+     "seconds": 329,
+     "environment": {
+      "os": "Windows-11-10.0.26300-SP0",
+      "rustc": "rustc 1.99.1 (58cf8f9c3 2026-10-13)",
+      "head": "a15e75b59f9c4bf6f50e84a9dfe03674f68737c0"
+     },
+     "baseline_green": true
+    }
+   }
   },
   {
    "id": "s3-compact-arm-cap-whole",
    "origin": "S3: compact search arm",
    "desc": "the compact arm lets a declared posting narrow the scan up to the whole row count, not half of it",
+   "expect": [
+    "compact::source::seam_tests::index_differential::compact_declared_index_scans_match_the_resident_oracle_and_the_contract_across_changes"
+   ],
    "file": "src/lib.rs",
    "old": "let query_norm = validate_metric_query(query, metric)?;\n            let cap = state.records.len() / 2;",
    "new": "let query_norm = validate_metric_query(query, metric)?;\n            let cap = state.records.len();",
-   "cmd": "test --locked --offline --lib -- compact::source::seam_tests::index_differential"
+   "cmd": "test --locked --offline --lib -- compact::source::seam_tests::index_differential",
+   "runs": {
+    "local": {
+     "file": "src/lib.rs",
+     "anchor_matches": 1,
+     "sha256_lf": {
+      "before": "d925f255eb3fb9512af7786cd416b7cbdd67ef0fa373a0d7a146820b24110a0a",
+      "mutated": "bbd4a967547b648c6de89a4c52067c09b86d050940c8ed2414df9cfc4ffab215",
+      "restored": "d925f255eb3fb9512af7786cd416b7cbdd67ef0fa373a0d7a146820b24110a0a"
+     },
+     "sha256_bytes": {
+      "before": "1b9b00cbfb1ed5ab42e066d32919a88a15f8c9fc3a823c69d493116c8440eda7",
+      "restored": "1b9b00cbfb1ed5ab42e066d32919a88a15f8c9fc3a823c69d493116c8440eda7"
+     },
+     "build_attempts": 1,
+     "compiled": true,
+     "tests": 2,
+     "passed": 1,
+     "failed_tests": [
+      "compact::source::seam_tests::index_differential::compact_declared_index_scans_match_the_resident_oracle_and_the_contract_across_changes"
+     ],
+     "status": "killed",
+     "expect_met": true,
+     "restored_identically": true,
+     "seconds": 211,
+     "environment": {
+      "os": "Windows-11-10.0.26300-SP0",
+      "rustc": "rustc 1.99.1 (58cf8f9c3 2026-10-13)",
+      "head": "a15e75b59f9c4bf6f50e84a9dfe03674f68737c0"
+     },
+     "baseline_green": true
+    }
+   }
   },
   {
    "id": "s3-compact-arm-candidates-dropped",
    "origin": "S3: compact search arm",
    "desc": "the compact arm looks the declared postings up and counts them, then scans every row",
+   "expect": [
+    "compact::source::seam_tests::index_differential::compact_declared_index_scans_match_the_resident_oracle_and_the_contract_across_changes"
+   ],
    "file": "src/lib.rs",
    "old": "                candidates.as_ref(),\n                now_ms,\n                stats,\n            );\n        }\n        self.ensure_resident_in(collection)?;",
    "new": "                None,\n                now_ms,\n                stats,\n            );\n        }\n        self.ensure_resident_in(collection)?;",
-   "cmd": "test --locked --offline --lib -- compact::source::seam_tests::index_differential"
+   "cmd": "test --locked --offline --lib -- compact::source::seam_tests::index_differential",
+   "runs": {
+    "local": {
+     "file": "src/lib.rs",
+     "anchor_matches": 1,
+     "sha256_lf": {
+      "before": "d925f255eb3fb9512af7786cd416b7cbdd67ef0fa373a0d7a146820b24110a0a",
+      "mutated": "027edb74f73b1797be1a814ef97adf8fd082b9ed21e1b386bac4539dfe573c8b",
+      "restored": "d925f255eb3fb9512af7786cd416b7cbdd67ef0fa373a0d7a146820b24110a0a"
+     },
+     "sha256_bytes": {
+      "before": "1b9b00cbfb1ed5ab42e066d32919a88a15f8c9fc3a823c69d493116c8440eda7",
+      "restored": "1b9b00cbfb1ed5ab42e066d32919a88a15f8c9fc3a823c69d493116c8440eda7"
+     },
+     "build_attempts": 1,
+     "compiled": true,
+     "tests": 2,
+     "passed": 1,
+     "failed_tests": [
+      "compact::source::seam_tests::index_differential::compact_declared_index_scans_match_the_resident_oracle_and_the_contract_across_changes"
+     ],
+     "status": "killed",
+     "expect_met": true,
+     "restored_identically": true,
+     "seconds": 207,
+     "environment": {
+      "os": "Windows-11-10.0.26300-SP0",
+      "rustc": "rustc 1.99.1 (58cf8f9c3 2026-10-13)",
+      "head": "a15e75b59f9c4bf6f50e84a9dfe03674f68737c0"
+     },
+     "baseline_green": true
+    }
+   }
   },
   {
    "id": "s3-compact-arm-index-candidates-unrecorded",
    "origin": "S3: compact search arm",
    "desc": "the compact arm does not report the number of declared-index candidates",
+   "expect": [
+    "compact::source::seam_tests::index_differential::compact_declared_index_scans_match_the_resident_oracle_and_the_contract_across_changes"
+   ],
    "file": "src/lib.rs",
    "old": "stats.index_candidates = stats.index_candidates.saturating_add(ids.len() as u64);\n            }\n            return state.exact_search_candidates(",
    "new": "let _ = ids;\n            }\n            return state.exact_search_candidates(",
-   "cmd": "test --locked --offline --lib -- compact::source::seam_tests::index_differential"
+   "cmd": "test --locked --offline --lib -- compact::source::seam_tests::index_differential",
+   "runs": {
+    "local": {
+     "file": "src/lib.rs",
+     "anchor_matches": 1,
+     "sha256_lf": {
+      "before": "d925f255eb3fb9512af7786cd416b7cbdd67ef0fa373a0d7a146820b24110a0a",
+      "mutated": "aff7f2adc640172e325a002859662cb961db98bc4e899316f0ba0894af32de81",
+      "restored": "d925f255eb3fb9512af7786cd416b7cbdd67ef0fa373a0d7a146820b24110a0a"
+     },
+     "sha256_bytes": {
+      "before": "1b9b00cbfb1ed5ab42e066d32919a88a15f8c9fc3a823c69d493116c8440eda7",
+      "restored": "1b9b00cbfb1ed5ab42e066d32919a88a15f8c9fc3a823c69d493116c8440eda7"
+     },
+     "build_attempts": 1,
+     "compiled": true,
+     "tests": 2,
+     "passed": 1,
+     "failed_tests": [
+      "compact::source::seam_tests::index_differential::compact_declared_index_scans_match_the_resident_oracle_and_the_contract_across_changes"
+     ],
+     "status": "killed",
+     "expect_met": true,
+     "restored_identically": true,
+     "seconds": 263,
+     "environment": {
+      "os": "Windows-11-10.0.26300-SP0",
+      "rustc": "rustc 1.99.1 (58cf8f9c3 2026-10-13)",
+      "head": "a15e75b59f9c4bf6f50e84a9dfe03674f68737c0"
+     },
+     "baseline_green": true
+    }
+   }
   },
   {
    "id": "s3-ranked-tie-id-descending",
    "origin": "S3: code both arms share",
    "desc": "equal distances rank by descending ID (the same on the resident and the compact path)",
+   "expect": [
+    "compact::source::seam_tests::index_differential::compact_declared_index_scans_match_the_resident_oracle_and_the_contract_across_changes"
+   ],
    "file": "src/lib.rs",
    "old": ".then_with(|| self.0.id.cmp(&other.0.id))",
    "new": ".then_with(|| other.0.id.cmp(&self.0.id))",
-   "cmd": "test --locked --offline --lib -- compact::source::seam_tests::index_differential"
+   "cmd": "test --locked --offline --lib -- compact::source::seam_tests::index_differential",
+   "runs": {
+    "local": {
+     "file": "src/lib.rs",
+     "anchor_matches": 1,
+     "sha256_lf": {
+      "before": "d925f255eb3fb9512af7786cd416b7cbdd67ef0fa373a0d7a146820b24110a0a",
+      "mutated": "c1b6fb2834375d0c762334a281463c64163b54dff071c12fa774c07922574455",
+      "restored": "d925f255eb3fb9512af7786cd416b7cbdd67ef0fa373a0d7a146820b24110a0a"
+     },
+     "sha256_bytes": {
+      "before": "1b9b00cbfb1ed5ab42e066d32919a88a15f8c9fc3a823c69d493116c8440eda7",
+      "restored": "1b9b00cbfb1ed5ab42e066d32919a88a15f8c9fc3a823c69d493116c8440eda7"
+     },
+     "build_attempts": 1,
+     "compiled": true,
+     "tests": 2,
+     "passed": 1,
+     "failed_tests": [
+      "compact::source::seam_tests::index_differential::compact_declared_index_scans_match_the_resident_oracle_and_the_contract_across_changes"
+     ],
+     "status": "killed",
+     "expect_met": true,
+     "restored_identically": true,
+     "seconds": 208,
+     "environment": {
+      "os": "Windows-11-10.0.26300-SP0",
+      "rustc": "rustc 1.99.1 (58cf8f9c3 2026-10-13)",
+      "head": "a15e75b59f9c4bf6f50e84a9dfe03674f68737c0"
+     },
+     "baseline_green": true
+    }
+   }
   },
   {
    "id": "s3-lookup-intersection-dropped",
    "origin": "S3: code both arms share",
    "desc": "a second served condition no longer narrows the candidates of the most selective one",
+   "expect": [
+    "compact::source::seam_tests::index_differential::compact_declared_index_scans_match_the_resident_oracle_and_the_contract_across_changes"
+   ],
    "file": "src/metadata_index.rs",
    "old": "ids.retain(|id| other_ids.contains(id));",
    "new": "let _ = &other_ids;",
-   "cmd": "test --locked --offline --lib -- compact::source::seam_tests::index_differential"
+   "cmd": "test --locked --offline --lib -- compact::source::seam_tests::index_differential",
+   "runs": {
+    "local": {
+     "file": "src/metadata_index.rs",
+     "anchor_matches": 1,
+     "sha256_lf": {
+      "before": "27340111382bf89ce1f6cb6b535d0ccd8fd4aa697f69247fe8fa26bce8b4d09f",
+      "mutated": "8e296ae2fb0cdc44e3aeaa200102f0c5563cc920dc06021962eb60317b6f3b73",
+      "restored": "27340111382bf89ce1f6cb6b535d0ccd8fd4aa697f69247fe8fa26bce8b4d09f"
+     },
+     "sha256_bytes": {
+      "before": "ddeff620a4f89c2497ef28245b473d0c8aabfccfcea4c305e6b9501b2ccf1fd5",
+      "restored": "ddeff620a4f89c2497ef28245b473d0c8aabfccfcea4c305e6b9501b2ccf1fd5"
+     },
+     "build_attempts": 1,
+     "compiled": true,
+     "tests": 2,
+     "passed": 1,
+     "failed_tests": [
+      "compact::source::seam_tests::index_differential::compact_declared_index_scans_match_the_resident_oracle_and_the_contract_across_changes"
+     ],
+     "status": "killed",
+     "expect_met": true,
+     "restored_identically": true,
+     "seconds": 195,
+     "environment": {
+      "os": "Windows-11-10.0.26300-SP0",
+      "rustc": "rustc 1.99.1 (58cf8f9c3 2026-10-13)",
+      "head": "a15e75b59f9c4bf6f50e84a9dfe03674f68737c0"
+     },
+     "baseline_green": true
+    }
+   }
   },
   {
    "id": "s3-lookup-cap-exclusive",
    "origin": "S3: code both arms share",
    "desc": "a posting of exactly half of the rows no longer narrows the scan",
+   "expect": [
+    "compact::source::seam_tests::index_differential::compact_declared_index_scans_match_the_resident_oracle_and_the_contract_across_changes"
+   ],
    "file": "src/metadata_index.rs",
    "old": "if count > cap {\n            return Some(IndexLookup {",
    "new": "if count >= cap {\n            return Some(IndexLookup {",
-   "cmd": "test --locked --offline --lib -- compact::source::seam_tests::index_differential"
+   "cmd": "test --locked --offline --lib -- compact::source::seam_tests::index_differential",
+   "runs": {
+    "local": {
+     "file": "src/metadata_index.rs",
+     "anchor_matches": 1,
+     "sha256_lf": {
+      "before": "27340111382bf89ce1f6cb6b535d0ccd8fd4aa697f69247fe8fa26bce8b4d09f",
+      "mutated": "b8b37b3de191dee8d6cf5d8187d8d3c5e3ba351e40aabe99ede71b8c855ff732",
+      "restored": "27340111382bf89ce1f6cb6b535d0ccd8fd4aa697f69247fe8fa26bce8b4d09f"
+     },
+     "sha256_bytes": {
+      "before": "ddeff620a4f89c2497ef28245b473d0c8aabfccfcea4c305e6b9501b2ccf1fd5",
+      "restored": "ddeff620a4f89c2497ef28245b473d0c8aabfccfcea4c305e6b9501b2ccf1fd5"
+     },
+     "build_attempts": 1,
+     "compiled": true,
+     "tests": 2,
+     "passed": 1,
+     "failed_tests": [
+      "compact::source::seam_tests::index_differential::compact_declared_index_scans_match_the_resident_oracle_and_the_contract_across_changes"
+     ],
+     "status": "killed",
+     "expect_met": true,
+     "restored_identically": true,
+     "seconds": 189,
+     "environment": {
+      "os": "Windows-11-10.0.26300-SP0",
+      "rustc": "rustc 1.99.1 (58cf8f9c3 2026-10-13)",
+      "head": "a15e75b59f9c4bf6f50e84a9dfe03674f68737c0"
+     },
+     "baseline_green": true
+    }
+   }
   },
   {
    "id": "s3-lookup-widest-served-condition",
    "origin": "S3: code both arms share",
    "desc": "the index lookup starts from the least selective served condition",
+   "expect": [
+    "compact::source::seam_tests::index_differential::compact_declared_index_scans_match_the_resident_oracle_and_the_contract_across_changes"
+   ],
    "file": "src/metadata_index.rs",
    "old": ".min_by_key(|(_, (count, ..))| *count)?",
    "new": ".max_by_key(|(_, (count, ..))| *count)?",
-   "cmd": "test --locked --offline --lib -- compact::source::seam_tests::index_differential"
+   "cmd": "test --locked --offline --lib -- compact::source::seam_tests::index_differential",
+   "runs": {
+    "local": {
+     "file": "src/metadata_index.rs",
+     "anchor_matches": 1,
+     "sha256_lf": {
+      "before": "27340111382bf89ce1f6cb6b535d0ccd8fd4aa697f69247fe8fa26bce8b4d09f",
+      "mutated": "c8c81ec22c62155f7e10ab359982aa86c1ffab532c7e9bfa0b1c0c661a0916c0",
+      "restored": "27340111382bf89ce1f6cb6b535d0ccd8fd4aa697f69247fe8fa26bce8b4d09f"
+     },
+     "sha256_bytes": {
+      "before": "ddeff620a4f89c2497ef28245b473d0c8aabfccfcea4c305e6b9501b2ccf1fd5",
+      "restored": "ddeff620a4f89c2497ef28245b473d0c8aabfccfcea4c305e6b9501b2ccf1fd5"
+     },
+     "build_attempts": 1,
+     "compiled": true,
+     "tests": 2,
+     "passed": 1,
+     "failed_tests": [
+      "compact::source::seam_tests::index_differential::compact_declared_index_scans_match_the_resident_oracle_and_the_contract_across_changes"
+     ],
+     "status": "killed",
+     "expect_met": true,
+     "restored_identically": true,
+     "seconds": 155,
+     "environment": {
+      "os": "Windows-11-10.0.26300-SP0",
+      "rustc": "rustc 1.99.1 (58cf8f9c3 2026-10-13)",
+      "head": "a15e75b59f9c4bf6f50e84a9dfe03674f68737c0"
+     },
+     "baseline_green": true
+    }
+   }
   },
   {
    "id": "s3-update-metadata-untracked",
    "origin": "S3: code both arms share",
    "desc": "a metadata update does not move the row between declared postings",
+   "expect": [
+    "compact::source::seam_tests::index_differential::compact_declared_index_scans_match_the_resident_oracle_and_the_contract_across_changes"
+   ],
    "file": "src/collection.rs",
    "old": "self.metadata_indexes\n                .track(id, Some(&previous.metadata), Some(&metadata));\n            self.text_index",
    "new": "self.text_index",
-   "cmd": "test --locked --offline --lib -- compact::source::seam_tests::index_differential"
+   "cmd": "test --locked --offline --lib -- compact::source::seam_tests::index_differential",
+   "runs": {
+    "local": {
+     "file": "src/collection.rs",
+     "anchor_matches": 1,
+     "sha256_lf": {
+      "before": "c6868ca284516a9b815504a64ad681acceaeb6d2678b78ec19766c62cbf794f6",
+      "mutated": "ef8281dfe8bbf5b5dfae7be6bcad16a04da1c350348c491e01682e7c7100eaf4",
+      "restored": "c6868ca284516a9b815504a64ad681acceaeb6d2678b78ec19766c62cbf794f6"
+     },
+     "sha256_bytes": {
+      "before": "d502d514609997f05f374085dfd14ed65f814f3a8de6f0cb737e6ba1afeb0bca",
+      "restored": "d502d514609997f05f374085dfd14ed65f814f3a8de6f0cb737e6ba1afeb0bca"
+     },
+     "build_attempts": 1,
+     "compiled": true,
+     "tests": 2,
+     "passed": 1,
+     "failed_tests": [
+      "compact::source::seam_tests::index_differential::compact_declared_index_scans_match_the_resident_oracle_and_the_contract_across_changes"
+     ],
+     "status": "killed",
+     "expect_met": true,
+     "restored_identically": true,
+     "seconds": 144,
+     "environment": {
+      "os": "Windows-11-10.0.26300-SP0",
+      "rustc": "rustc 1.99.1 (58cf8f9c3 2026-10-13)",
+      "head": "a15e75b59f9c4bf6f50e84a9dfe03674f68737c0"
+     },
+     "baseline_green": true
+    }
+   }
   }
  ]
 }
