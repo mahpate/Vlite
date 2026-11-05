@@ -362,12 +362,12 @@ was added. See
   `POST /v1/collections/{collection}/search/sparse` checked the caller's own
   tenant-qualified collection, then searched the collection with the same
   unqualified name instead. A tenant credential or signed-in tenant account
-  therefore got hits from a root collection that shared a name with one of its
-  own, and got `404 collection_not_found` when no such root collection existed.
-  Both routes now search the collection the access check resolved. Releases
-  0.4.0 through 0.6.1 have the defect. It matters only when tenants exist and a
-  collection outside the tenant has the same name as one inside it; if you run
-  tenants, upgrade.
+  that owned a collection named like a root collection (a tenant can create
+  one itself) therefore got hits from that root collection, and got
+  `404 collection_not_found` when no such root collection existed. Both routes
+  now search the collection the access check resolved. Releases 0.4.0 through
+  0.6.1 have the defect. It matters only on servers that have tenants; if you
+  run tenants, upgrade.
   <!-- source: src/server/features.rs, tests/server_memory_reserved_as_missing.rs -->
 - **Concurrent change-feed and replication reads.** Reads of the commit log
   that share one file cursor are now serialized, so a `GET /v1/changes`
