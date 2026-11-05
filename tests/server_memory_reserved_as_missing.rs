@@ -840,3 +840,94 @@ async fn deleted_reserved_names_stay_occupied_until_recreated_by_raw_holder() {
         );
     }
 }
+
+#[tokio::test]
+async fn tenant_named_and_sparse_search_use_the_guarded_collection() {
+    let fixture = fixture();
+    assert_eq!(
+        request(
+            &fixture.app,
+            ADMIN,
+            "POST",
+            "/v1/collections",
+            r#"{"name":"root_only","dimensions":2}"#
+        )
+        .await
+        .0,
+        201
+    );
+    let raw_other = &fixture
+        .tokens
+        .iter()
+        .find(|(actor, _, _)| *actor == "raw_other")
+        .unwrap()
+        .1;
+    for (name, token, id) in [
+        ("ordinary".to_owned(), ADMIN, 111),
+        ("other_ev".to_owned(), raw_other.as_str(), 111),
+        ("root_only".to_owned(), ADMIN, 111),
+        (format!("t{TENANT}__ordinary"), ADMIN, 222),
+        (format!("t{TENANT}__other_ev"), ADMIN, 222),
+    ] {
+        for (method, path, body) in [
+            (
+                "POST",
+                format!("/v1/collections/{name}/vectors/configure"),
+                r#"{"name":"v","dimensions":2,"metric":"cosine","active_version":"v1"}"#.to_owned(),
+            ),
+            (
+                "PUT",
+                format!("/v1/collections/{name}/vectors/{id}"),
+                r#"{"vector":[0,1]}"#.to_owned(),
+            ),
+            (
+                "PUT",
+                format!("/v1/collections/{name}/vectors/{id}/named"),
+                r#"{"dense":{"v":[{"version":"v1","vector":[0,1]}]},"sparse":{"s":[[1,1]]}}"#
+                    .to_owned(),
+            ),
+        ] {
+            let result = request(&fixture.app, token, method, &path, &body).await;
+            assert!(result.0 < 300, "{path}: {result:?}");
+        }
+    }
+    let tenant = &fixture
+        .tokens
+        .iter()
+        .find(|(actor, _, _)| *actor == "tenant")
+        .unwrap()
+        .1;
+    for (suffix, body) in [
+        ("named", r#"{"name":"v","vector":[0,1],"k":1}"#),
+        ("sparse", r#"{"name":"s","vector":[[1,1]],"k":1}"#),
+    ] {
+        for name in ["ordinary", "other_ev", "root_only"] {
+            let result = request(
+                &fixture.app,
+                tenant,
+                "POST",
+                &format!("/v1/collections/{name}/search/{suffix}"),
+                body,
+            )
+            .await;
+            if name == "root_only" {
+                assert_eq!(
+                    result,
+                    request(
+                        &fixture.app,
+                        tenant,
+                        "POST",
+                        &format!("/v1/collections/absent_ev/search/{suffix}"),
+                        body
+                    )
+                    .await
+                );
+                assert_eq!(result.0, 404);
+            } else {
+                assert_eq!(result.0, 200, "{result:?}");
+                let value: Value = serde_json::from_slice(&result.2).unwrap();
+                assert_eq!(value["hits"][0]["id"], "222", "{name}/{suffix}: {value}");
+            }
+        }
+    }
+}

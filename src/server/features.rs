@@ -455,8 +455,8 @@ async fn search_named(
     let bindings = service.memory_bindings.clone();
     let hits = service
         .run_read(move |db| {
-            let _cid = super::open_guarded(db, &role, &target, &bindings)?;
-            db.collection(target.name())?
+            let cid = super::open_guarded(db, &role, &target, &bindings)?;
+            collection_ref(db, cid)?
                 .search_named(
                     &request.name,
                     request.version.as_deref(),
@@ -486,8 +486,8 @@ async fn search_sparse(
     let bindings = service.memory_bindings.clone();
     let hits = service
         .run_read(move |db| {
-            let _cid = super::open_guarded(db, &role, &target, &bindings)?;
-            db.collection(target.name())?
+            let cid = super::open_guarded(db, &role, &target, &bindings)?;
+            collection_ref(db, cid)?
                 .search_sparse(&request.name, &request.vector, request.k)
                 .map_err(ApiError::from)
         })
