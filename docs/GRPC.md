@@ -64,8 +64,11 @@ reflection API.
 ## Extended engine RPCs
 
 The additive RPCs expose the engine's V5 record and retrieval APIs. `PutVector`
-accepts optional absolute `expires_at_ms`; `UpdateMetadata` changes metadata
-without replacing the vector or payload. Both require a V5 file. Grouped search,
+accepts optional absolute `expires_at_ms`, which must be later than the server
+clock: an expiry at or before it is refused with `INVALID_ARGUMENT`
+(`vlite-error-code: invalid_input`) and nothing is written. `UpdateMetadata`
+changes metadata without replacing the vector or payload. Both require a V5
+file. Grouped search,
 recommendations, facets, numeric statistics and geographic search preserve the
 engine's typed metadata, filters, metrics and stable ID tie-breaking.
 
