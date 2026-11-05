@@ -170,6 +170,25 @@ async fn request(
     (status, headers, bytes.to_vec())
 }
 
+/// Polls the rebuild of `collection` until no worker is left running. The
+/// rebuild slot belongs to the whole database and a finished worker keeps it
+/// until it is polled, so a cancelled worker that has not been joined makes
+/// the next request for any other collection answer `rebuild_busy`, or not,
+/// depending only on how fast the worker exited.
+async fn join_rebuild_worker(app: &Router, collection: &str) {
+    let poll = format!("/v1/collections/{collection}/index/hnsw/rebuild/poll");
+    for _ in 0..100_000 {
+        let polled = request(app, ADMIN, "POST", &poll, "{}").await;
+        assert_eq!(polled.0, 200, "{polled:?}");
+        let outcome = serde_json::from_slice::<Value>(&polled.2).unwrap()["outcome"].clone();
+        if !matches!(outcome.as_str(), Some("running" | "cancelling")) {
+            return;
+        }
+        tokio::task::yield_now().await;
+    }
+    panic!("the cancelled rebuild worker of {collection} never finished");
+}
+
 const CASES: &[(&str, &str, &str)] = &[
     ("GET", "/v1/collections/$c", ""),
     ("DELETE", "/v1/collections/$c", ""),
@@ -1233,6 +1252,9 @@ async fn ordinary_neighbours_preserve_raw_route_outcomes_with_bindings() {
                     )
                     .await;
                     assert!(matches!(cancelled.0, 200 | 404), "{cancelled:?}");
+                    if cancelled.0 == 200 {
+                        join_rebuild_worker(app, &stored_collection).await;
+                    }
                 }
                 let actual = request(&bound.app, token, method, &render(path), &render(body)).await;
                 let reference = request(
