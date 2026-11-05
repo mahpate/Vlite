@@ -311,13 +311,12 @@ pub(super) async fn fetch(
     let target = collection_path(target)?;
     let input = query(input)?;
     address(&input.namespace, &input.key)?;
-    let bindings = service.memory_bindings.clone();
+    let scope = service.scope(role);
     service
         .run_read(move |db| {
-            super::open_guarded(db, &role, &target, &bindings)?;
-            let name = tenants::qualify(&role, target.name());
-            let entry = db
-                .kv_view(&name)?
+            let entry = scope
+                .collection(db, &target)?
+                .kv_view(db)?
                 .get_at(&input.namespace, &input.key, crate::current_time_ms())?
                 .ok_or_else(|| {
                     ApiError::new(StatusCode::NOT_FOUND, "kv_not_found", "KV entry not found")
@@ -354,22 +353,27 @@ pub(super) async fn save(
         .saturating_add(target.retained_bytes())
         .saturating_add(4096);
     let quota_service = service.clone();
-    let bindings = service.memory_bindings.clone();
     let audit_role = role.clone();
     let audit_target = target.clone();
+    let scope = service.scope(role);
     let result = service
         .run_mutation(retained, move |db| {
-            let collection = super::open_guarded(db, &role, &target, &bindings)?;
+            let collection = scope.collection(db, &target)?;
             writable(db)?;
-            let name = tenants::qualify(&role, target.name());
             let now = crate::current_time_ms();
-            let slot = db
-                .kv_view(&name)?
+            let slot = collection
+                .kv_view(db)?
                 .put_slot_at(&input.namespace, &input.key, options.expected, now)
                 .map_err(kv_failure)?;
-            enforce_quota(&quota_service, db, &role, collection, &[(slot, true)])?;
-            let version = db
-                .kv_store(&name)?
+            enforce_quota(
+                &quota_service,
+                db,
+                scope.role(),
+                collection.id(),
+                &[(slot, true)],
+            )?;
+            let version = collection
+                .kv_store(db)?
                 .put_at(&input.namespace, &input.key, &bytes, options, now)
                 .map_err(kv_failure)?;
             Ok(Json(json!({
@@ -409,16 +413,15 @@ pub(super) async fn remove(
     let expected = expected(&input.expected)?;
     let audit_role = role.clone();
     let audit_target = target.clone();
-    let bindings = service.memory_bindings.clone();
+    let scope = service.scope(role);
     let retained =
         4096 + input.namespace.capacity() + input.key.capacity() + target.retained_bytes();
     let result = service
         .run_mutation(retained, move |db| {
-            super::open_guarded(db, &role, &target, &bindings)?;
+            let collection = scope.collection(db, &target)?;
             writable(db)?;
-            let name = tenants::qualify(&role, target.name());
-            let deleted = db
-                .kv_store(&name)?
+            let deleted = collection
+                .kv_store(db)?
                 .delete_at(
                     &input.namespace,
                     &input.key,
@@ -468,12 +471,10 @@ pub(super) async fn list(
     if limit == 0 || limit > MAX_KV_LIST_LIMIT as u64 {
         return Err(unprocessable("KV list limit must be 1..10000"));
     }
-    let bindings = service.memory_bindings.clone();
+    let scope = service.scope(role);
     service
         .run_read(move |db| {
-            super::open_guarded(db, &role, &target, &bindings)?;
-            let name = tenants::qualify(&role, target.name());
-            let view = db.kv_view(&name)?;
+            let view = scope.collection(db, &target)?.kv_view(db)?;
             let now = crate::current_time_ms();
             let page = build_page(input, limit, now, |namespace, prefix, after, count, now| {
                 view.list_at(namespace, prefix, after, count, now)

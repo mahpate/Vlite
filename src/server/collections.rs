@@ -205,29 +205,9 @@ pub(super) async fn list_core(
     service: &Service,
     role: admin::Role,
 ) -> Result<(Vec<CollectionInfo>, u32), ApiError> {
-    let bindings = service.memory_bindings.clone();
+    let scope = service.scope(role);
     service
-        .run_read(move |db| {
-            let lineage = db.lineage();
-            let mut items = db
-                .collections()?
-                .into_iter()
-                .filter(|info| match &role {
-                    admin::Role::Scoped(grant) => grant.covers(lineage, info.id, &info.name),
-                    _ => true,
-                })
-                .collect::<Vec<_>>();
-            bindings.reserved().retain_visible(
-                super::raw_credential(&role),
-                super::reserved::Resource::Collection,
-                &mut items,
-                |item| item.name.as_str(),
-            );
-            for item in &mut items {
-                item.name = tenants::unqualify(&role, &item.name);
-            }
-            Ok((items, db.format_version()))
-        })
+        .run_read(move |db| Ok((scope.list_collections(db)?, db.format_version())))
         .await
 }
 
@@ -284,20 +264,16 @@ async fn create(
 pub(super) async fn create_core(
     service: &Service,
     role: admin::Role,
-    mut input: Create,
+    input: Create,
 ) -> Result<CollectionInfo, ApiError> {
-    input.name = tenants::qualify(&role, &input.name);
-    let hidden = !service.memory_bindings.reserved().raw_allowed(
-        super::raw_credential(&role),
-        super::reserved::Resource::Collection,
-        &input.name,
-    );
     let actor = principal(&role);
     let quota_service = service.clone();
     let tenant_id = match &role {
         admin::Role::Scoped(g) => g.tenant_id.clone(),
         _ => None,
     };
+    let scope = service.scope(role);
+    let caller = scope.clone();
     let info = service
         .run(move |db| {
             if let Some(id) = &tenant_id {
@@ -312,7 +288,7 @@ pub(super) async fn create_core(
                 dimensions: input.dimensions,
                 settings: input.settings.merge(CollectionSettings::default()),
             };
-            Ok(db.create_collection_occupied(&input.name, spec, hidden)?)
+            scope.create_collection(db, &input.name, spec)
         })
         .await?;
     audit_event(
@@ -320,7 +296,7 @@ pub(super) async fn create_core(
         json!({"event":"collection_created","collection":info.name,"collection_id":info.id,"actor":actor}),
     );
     let mut info = info;
-    info.name = tenants::unqualify(&role, &info.name);
+    info.name = caller.unqualify(&info.name);
     Ok(info)
 }
 
@@ -377,13 +353,13 @@ pub(super) async fn fetch_core(
     role: admin::Role,
     target: Target,
 ) -> Result<(CollectionInfo, crate::text_index::TextIndexStatus), ApiError> {
-    let bindings = service.memory_bindings.clone();
+    let scope = service.scope(role);
     service
         .run_read(move |db| {
-            let collection = super::open_guarded(db, &role, &target, &bindings)?;
-            let mut info = db.info(collection);
-            info.name = tenants::unqualify(&role, &info.name);
-            let text = CollectionRef { db, id: collection }.text_index_status();
+            let collection = scope.collection(db, &target)?;
+            let mut info = collection.info(db)?;
+            info.name = scope.unqualify(&info.name);
+            let text = collection.read(db)?.text_index_status();
             Ok((info, text))
         })
         .await
@@ -406,12 +382,12 @@ pub(super) async fn drop_core(
     target: Target,
 ) -> Result<(), ApiError> {
     let actor = principal(&role);
-    let bindings = service.memory_bindings.clone();
+    let scope = service.scope(role);
     let (name, id) = service
         .run(move |db| {
-            let collection = super::open_guarded(db, &role, &target, &bindings)?;
-            db.drop_collection(&tenants::qualify(&role, target.name()))?;
-            Ok((target.name().to_owned(), collection))
+            let collection = scope.collection(db, &target)?;
+            collection.drop_collection(db)?;
+            Ok((target.name().to_owned(), collection.id()))
         })
         .await?;
     audit_event(
@@ -430,15 +406,14 @@ async fn settings(
     let target = collection_path(target)?;
     let input = body(input)?;
     let actor = principal(&role);
-    let bindings = service.memory_bindings.clone();
+    let scope = service.scope(role);
     let (info, persisted) = service
         .run(move |db| {
-            let collection = super::open_guarded(db, &role, &target, &bindings)?;
-            let merged = input.merge(db.state(collection).settings.clone());
-            let persistence =
-                db.set_collection_settings(&tenants::qualify(&role, target.name()), merged)?;
+            let collection = scope.collection(db, &target)?;
+            let merged = input.merge(db.state(collection.id()).settings.clone());
+            let persistence = collection.set_settings(db, merged)?;
             Ok((
-                db.info(collection),
+                collection.info(db)?,
                 persistence == SettingsPersistence::Persisted,
             ))
         })
@@ -519,13 +494,12 @@ pub(super) async fn reserve_core(
         return Err(forbidden_scope());
     }
     let reservations = service.imports.clone();
-    let bindings = service.memory_bindings.clone();
+    let scope = service.scope(role);
     service
         .run(move |db| {
-            super::open_guarded(db, &role, &target, &bindings)?;
+            let collection = scope.collection(db, &target)?;
             let next = db.next_import_job_id()?;
-            let physical_name = tenants::qualify(&role, target.name());
-            let collection = db.resolve(&physical_name)?;
+            let physical_name = collection.stored().to_owned();
             let mut reserved = reservations.lock().map_err(internal)?;
             if db.imports.open_jobs().count() + reserved.jobs.len() >= MAX_ACTIVE_IMPORTS {
                 return Err(Error::TooManyImports.into());
@@ -536,7 +510,7 @@ pub(super) async fn reserve_core(
                 .next_back()
                 .map_or(Some(next), |&last| last.checked_add(1).map(|n| n.max(next)))
                 .ok_or(Error::ImportConflict("import job IDs are exhausted"))?;
-            reserved.jobs.insert(job, (collection, physical_name));
+            reserved.jobs.insert(job, (collection.id(), physical_name));
             Ok(reserved_json(job, target.name(), "open"))
         })
         .await

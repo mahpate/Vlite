@@ -790,9 +790,9 @@ fn current(s: &Service) -> Result<Maintenance, ApiError> {
 }
 async fn maintenance_get(State(s): State<Service>) -> Result<Json<Value>, ApiError> {
     let p = current(&s)?;
-    let bindings = s.memory_bindings.clone();
+    let scope = s.scope(Role::Admin);
     s.run(move |db| {
-        super::open_guarded(db, &Role::Admin, &Target::Legacy, &bindings)?;
+        scope.collection(db, &Target::Legacy)?;
         Ok(Json(json!({"policy":p.json(),"status":status(db.hnsw_maintenance_status(p.config.validated()?,p.metric,p.policy())?)})))
     }).await
 }
@@ -802,9 +802,9 @@ async fn maintenance_put(
 ) -> Result<Json<Value>, ApiError> {
     let p = body(input)?;
     let admin = s.admin.clone();
-    let bindings = s.memory_bindings.clone();
+    let scope = s.scope(Role::Admin);
     s.run(move |db| {
-        super::open_guarded(db, &Role::Admin, &Target::Legacy, &bindings)?;
+        scope.collection(db, &Target::Legacy)?;
         let result = db.hnsw_maintenance_status(p.config.validated()?, p.metric, p.policy())?;
         *admin.maintenance.lock().map_err(internal)? = p;
         Ok(Json(json!({"policy":p.json(),"status":status(result)})))
@@ -814,9 +814,9 @@ async fn maintenance_put(
 async fn maintenance_tick(State(s): State<Service>) -> Result<Json<Value>, ApiError> {
     let p = current(&s)?;
     let metrics = s.metrics.clone();
-    let bindings = s.memory_bindings.clone();
+    let scope = s.scope(Role::Admin);
     s.run(move |db| {
-        super::open_guarded(db, &Role::Admin, &Target::Legacy, &bindings)?;
+        scope.collection(db, &Target::Legacy)?;
         let r = db.maintain_hnsw(p.config.validated()?, p.metric, p.policy())?;
         if r.started {
             metrics.background_started.fetch_add(1, Ordering::Relaxed);
@@ -846,9 +846,9 @@ async fn rebuild_start(
 ) -> Result<(StatusCode, Json<Value>), ApiError> {
     let p = body(input)?;
     let metrics = s.metrics.clone();
-    let bindings = s.memory_bindings.clone();
+    let scope = s.scope(Role::Admin);
     s.run(move |db| {
-        super::open_guarded(db, &Role::Admin, &Target::Legacy, &bindings)?;
+        scope.collection(db, &Target::Legacy)?;
         db.start_hnsw_rebuild(p.config.validated()?, p.metric, p.limits.core())?;
         metrics.background_started.fetch_add(1, Ordering::Relaxed);
         Ok((StatusCode::ACCEPTED, Json(json!({"outcome":"running"}))))
@@ -857,9 +857,9 @@ async fn rebuild_start(
 }
 async fn rebuild_poll(State(s): State<Service>) -> Result<Json<Value>, ApiError> {
     let metrics = s.metrics.clone();
-    let bindings = s.memory_bindings.clone();
+    let scope = s.scope(Role::Admin);
     s.run(move |db| {
-        super::open_guarded(db, &Role::Admin, &Target::Legacy, &bindings)?;
+        scope.collection(db, &Target::Legacy)?;
         let status = db.poll_hnsw_rebuild()?;
         if status == crate::HnswRebuildStatus::Published {
             metrics.background_published.fetch_add(1, Ordering::Relaxed);
@@ -869,9 +869,9 @@ async fn rebuild_poll(State(s): State<Service>) -> Result<Json<Value>, ApiError>
     .await
 }
 async fn rebuild_cancel(State(s): State<Service>) -> Result<Json<Value>, ApiError> {
-    let bindings = s.memory_bindings.clone();
+    let scope = s.scope(Role::Admin);
     s.run(move |db| {
-        super::open_guarded(db, &Role::Admin, &Target::Legacy, &bindings)?;
+        scope.collection(db, &Target::Legacy)?;
         db.ensure_healthy()?;
         Ok(Json(json!({"cancelled":db.cancel_hnsw_rebuild()})))
     })
@@ -908,9 +908,9 @@ async fn collection_rebuild_status(
 ) -> Result<Json<Value>, ApiError> {
     let target = super::collection_path(target)?;
     let p = current(&s)?;
-    let bindings = s.memory_bindings.clone();
+    let scope = s.scope(role);
     s.run(move |db| {
-        let id = super::open_guarded(db, &role, &target, &bindings)?;
+        let id = scope.collection(db, &target)?.id();
         let (metric, config, options) = super::identity(db, id, &target);
         let report =
             db.maintenance_status_with_options_in(id, config, metric, options, p.policy())?;
@@ -933,9 +933,9 @@ async fn collection_rebuild_start(
     let target = super::collection_path(target)?;
     let input: CollectionStart = super::optional(&input)?;
     let metrics = s.metrics.clone();
-    let bindings = s.memory_bindings.clone();
+    let scope = s.scope(role);
     s.run(move |db| {
-        let id = super::open_guarded(db, &role, &target, &bindings)?;
+        let id = scope.collection(db, &target)?.id();
         let identity = super::IdentityInput {
             metric: input.metric,
             config: input.config,
@@ -957,9 +957,9 @@ async fn collection_rebuild_poll(
 ) -> Result<Json<Value>, ApiError> {
     let target = super::collection_path(target)?;
     let metrics = s.metrics.clone();
-    let bindings = s.memory_bindings.clone();
+    let scope = s.scope(role);
     s.run(move |db| {
-        let id = super::open_guarded(db, &role, &target, &bindings)?;
+        let id = scope.collection(db, &target)?.id();
         let status = db.poll_rebuild_in(id)?;
         if status == crate::HnswRebuildStatus::Published {
             metrics.background_published.fetch_add(1, Ordering::Relaxed);
@@ -975,9 +975,9 @@ async fn collection_rebuild_cancel(
     target: Result<Path<String>, PathRejection>,
 ) -> Result<Json<Value>, ApiError> {
     let target = super::collection_path(target)?;
-    let bindings = s.memory_bindings.clone();
+    let scope = s.scope(role);
     s.run(move |db| {
-        let id = super::open_guarded(db, &role, &target, &bindings)?;
+        let id = scope.collection(db, &target)?.id();
         Ok(Json(json!({"cancelled":db.cancel_rebuild_in(id)})))
     })
     .await
@@ -991,9 +991,9 @@ async fn collection_maintenance_tick(
     let target = super::collection_path(target)?;
     let p = current(&s)?;
     let metrics = s.metrics.clone();
-    let bindings = s.memory_bindings.clone();
+    let scope = s.scope(role);
     s.run(move |db| {
-        let id = super::open_guarded(db, &role, &target, &bindings)?;
+        let id = scope.collection(db, &target)?.id();
         let (metric, config, options) = super::identity(db, id, &target);
         let r = db.maintain_with_options_in(id, config, metric, options, p.policy())?;
         if r.started {

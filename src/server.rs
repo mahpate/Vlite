@@ -1823,11 +1823,16 @@ fn record_path(
 /// Resolves a target under the database lock and enforces scoped bindings:
 /// collection ID and database lineage must both match the grant. The name
 /// is checked first so out-of-scope callers cannot probe existence.
+///
+/// The REST handlers use `guard::RequestScope`. This free function remains
+/// only for the gRPC adapter, which moves onto the scope in a later slice, and
+/// `open_guarded` is the reference the guard's tests compare the scope with.
 #[cfg(feature = "grpc")]
 fn open(db: &Database, role: &admin::Role, target: &Target) -> Result<u16, ApiError> {
     open_inner(db, role, target, None)
 }
 
+#[cfg(test)]
 fn open_guarded(
     db: &Database,
     role: &admin::Role,
@@ -1837,6 +1842,7 @@ fn open_guarded(
     open_inner(db, role, target, Some(bindings))
 }
 
+#[cfg(any(feature = "grpc", test))]
 fn open_inner(
     db: &Database,
     role: &admin::Role,
@@ -1931,13 +1937,13 @@ async fn list_in(
     if !(1..=100).contains(&limit) {
         return Err(unprocessable("limit must be 1..100"));
     }
-    let bindings = service.memory_bindings.clone();
+    let scope = service.scope(role);
     service
         .run_read(move |db| {
-            let collection = open_guarded(db, &role, &target, &bindings)?;
+            let collection = scope.collection(db, &target)?;
             use std::ops::Bound::{Excluded, Unbounded};
             let mut records = db
-                .state(collection)
+                .state(collection.id())
                 .records
                 .resident()?
                 .range((after.map_or(Unbounded, Excluded), Unbounded))
@@ -2007,17 +2013,13 @@ async fn info(
     State(service): State<Service>,
     Extension(role): Extension<admin::Role>,
 ) -> Result<Json<Value>, ApiError> {
-    if !service.memory_bindings.reserved().raw_allowed(
-        raw_credential(&role),
-        reserved::Resource::Collection,
-        &tenants::qualify(&role, "default"),
-    ) {
+    let scope = service.scope(role);
+    if !scope.collection_visible(&scope.qualify("default")) {
         return Err(forbidden_scope());
     }
-    let bindings = service.memory_bindings.clone();
     service
         .run_read(move |db| {
-            open_guarded(db, &role, &Target::Legacy, &bindings)?;
+            scope.collection(db, &Target::Legacy)?;
             Ok(Json(json!({
                 "dimensions": db.dimensions(),
                 "format_version": db.format_version(),
@@ -2167,10 +2169,10 @@ async fn fetch_core(
     target: Target,
     id: u64,
 ) -> Result<Fetched, ApiError> {
-    let bindings = service.memory_bindings.clone();
+    let scope = service.scope(role);
     service
         .run_read(move |db| {
-            let collection = open_guarded(db, &role, &target, &bindings)?;
+            let collection = scope.collection(db, &target)?.id();
             let not_found =
                 || ApiError::new(StatusCode::NOT_FOUND, "not_found", "vector not found");
             let record = db.get_in(collection, id)?.ok_or_else(not_found)?.clone();
@@ -2320,13 +2322,13 @@ async fn update_metadata_in(
     let expected = if_match(&headers)?;
     let MetadataPatch { metadata } = body(payload)?;
     let ident = service.etag_ident.clone();
-    let bindings = service.memory_bindings.clone();
+    let scope = service.scope(role);
     let bytes = group_commit::record_bytes(0, 0, &metadata)
         .saturating_add(target.retained_bytes())
         .saturating_add(expected.as_ref().map_or(0, String::capacity));
     service
         .run_mutation(bytes, move |db| {
-            let collection = open_guarded(db, &role, &target, &bindings)?;
+            let collection = scope.collection(db, &target)?.id();
             if let Some(expected) = expected.as_deref() {
                 let Some((current, _)) = current_etag(db, &ident, collection, id)? else {
                     return Err(ApiError::new(
@@ -2416,14 +2418,14 @@ async fn put_core(
     }
     let ident = service.etag_ident.clone();
     let quota_service = service.clone();
-    let bindings = service.memory_bindings.clone();
+    let scope = service.scope(role);
     let bytes = group_commit::record_bytes(vector.capacity(), payload.capacity(), &metadata)
         .saturating_add(target.retained_bytes())
         .saturating_add(guard.retained_bytes());
     service
         .run_mutation(bytes, move |db| {
-            let collection = open_guarded(db, &role, &target, &bindings)?;
-            enforce_quota(&quota_service, db, &role, collection, &[(id, true)])?;
+            let collection = scope.collection(db, &target)?.id();
+            enforce_quota(&quota_service, db, scope.role(), collection, &[(id, true)])?;
             let expected = guard.resolve(db, &ident, collection, id)?;
             let created = db.revision_in(collection, id)?.is_none();
             if let Some(expires_at_ms) = expires_at_ms {
@@ -2488,13 +2490,13 @@ async fn delete_core(
     guard: Guard,
 ) -> Result<bool, ApiError> {
     let ident = service.etag_ident.clone();
-    let bindings = service.memory_bindings.clone();
+    let scope = service.scope(role);
     let bytes = 1024usize
         .saturating_add(target.retained_bytes())
         .saturating_add(guard.retained_bytes());
     service
         .run_mutation(bytes, move |db| {
-            let collection = open_guarded(db, &role, &target, &bindings)?;
+            let collection = scope.collection(db, &target)?.id();
             let expected = guard.resolve(db, &ident, collection, id)?;
             Ok(db.delete_in(collection, id, expected)?)
         })
@@ -2611,7 +2613,7 @@ async fn batch_core(
         }
     }
     let quota_service = service.clone();
-    let bindings = service.memory_bindings.clone();
+    let scope = service.scope(role);
     let bytes = operations
         .iter()
         .fold(
@@ -2642,11 +2644,11 @@ async fn batch_core(
         .saturating_add(target.retained_bytes());
     service
         .run_mutation(bytes, move |db| {
-            let collection = open_guarded(db, &role, &target, &bindings)?;
+            let collection = scope.collection(db, &target)?.id();
             enforce_quota(
                 &quota_service,
                 db,
-                &role,
+                scope.role(),
                 collection,
                 &quota_mutations(&operations),
             )?;
@@ -3240,31 +3242,30 @@ async fn search_core(
     target: Target,
     input: Search,
 ) -> Result<(Search, Executed), ApiError> {
-    input.validate(&role)?;
+    let scope = service.scope(role);
+    input.validate(scope.role())?;
     let metrics = service.metrics.clone();
     let started = Instant::now();
-    let bindings = service.memory_bindings.clone();
     let attempt = move |db: &Database,
-                        role: admin::Role,
+                        scope: guard::RequestScope,
                         target: Target,
                         input: Search,
-                        allow_maintenance: bool,
-                        bindings: &reserved::Bindings| {
-        let collection = open_guarded(db, &role, &target, bindings)?;
-        let executed = execute(db, collection, &target, &input, allow_maintenance)?;
+                        allow_maintenance: bool| {
+        let collection = scope.collection(db, &target)?;
+        let executed = execute(db, collection.id(), &target, &input, allow_maintenance)?;
         let binding = (
-            tenants::qualify(&role, target.name()),
-            collection,
+            collection.stored().to_owned(),
+            collection.id(),
             db.lineage(),
         );
-        Ok::<_, ApiError>((executed, binding, role, target, input))
+        Ok::<_, ApiError>((executed, binding, scope, target, input))
     };
     let snapshot_reads = service.snapshot_reads;
-    let rebuild_bindings = bindings.clone();
-    let (executed, collection, role, target, input) = service
+    let (executed, collection, scope, target, input) = service
         .run_read_then(
             move |db| {
-                let collection = open_guarded(db, &role, &target, &bindings)?;
+                let guarded = scope.collection(db, &target)?;
+                let collection = guarded.id();
                 if snapshot_reads
                     && input.mode == SearchMode::Exact
                     && input.rerank.is_none()
@@ -3272,18 +3273,14 @@ async fn search_core(
                         || db.state(collection).settings.metadata_indexes.is_empty())
                 {
                     let (metric, _, _) = search_identity(db, collection, &target, &input)?;
-                    match (CollectionRef { db, id: collection }).read_snapshot() {
+                    match guarded.read(db)?.read_snapshot() {
                         Ok(snapshot) => {
-                            let binding = (
-                                tenants::qualify(&role, target.name()),
-                                collection,
-                                db.lineage(),
-                            );
+                            let binding = (guarded.stored().to_owned(), collection, db.lineage());
                             return Ok((
                                 Some((snapshot, metric, crate::current_time_ms())),
                                 None,
                                 binding,
-                                role,
+                                scope,
                                 target,
                                 input,
                             ));
@@ -3297,11 +3294,11 @@ async fn search_core(
                         Err(error) => return Err(error.into()),
                     }
                 }
-                let (executed, binding, role, target, input) =
-                    attempt(db, role, target, input, true, &bindings)?;
-                Ok((None, executed, binding, role, target, input))
+                let (executed, binding, scope, target, input) =
+                    attempt(db, scope, target, input, true)?;
+                Ok((None, executed, binding, scope, target, input))
             },
-            |(snapshot, mut executed, binding, role, target, input)| {
+            |(snapshot, mut executed, binding, scope, target, input)| {
                 if let Some((snapshot, metric, now_ms)) = snapshot {
                     let mut stats = SearchStats::default();
                     let hits = snapshot.search_with_stats_at(
@@ -3319,7 +3316,7 @@ async fn search_core(
                         ef_search: None,
                     });
                 }
-                Ok((executed, binding, role, target, input))
+                Ok((executed, binding, scope, target, input))
             },
         )
         .await?;
@@ -3330,10 +3327,10 @@ async fn search_core(
             // Opted-in collections never construct an index under this guard.
             service
                 .run(move |db| {
-                    let collection = open_guarded(db, &role, &target, &rebuild_bindings)?;
+                    let collection = scope.collection(db, &target)?.id();
                     rebuild_stale(db, collection, &target, &input, &metrics)?;
                     let (executed, binding, _, _, input) =
-                        attempt(&*db, role, target, input, false, &rebuild_bindings)?;
+                        attempt(&*db, scope, target, input, false)?;
                     let executed = executed.ok_or_else(|| internal("index stale after rebuild"))?;
                     Ok((input, binding, executed))
                 })
@@ -3433,10 +3430,10 @@ async fn index_status_in(
     role: admin::Role,
     target: Target,
 ) -> Result<Json<Value>, ApiError> {
-    let bindings = service.memory_bindings.clone();
+    let scope = service.scope(role);
     service
         .run_read(move |db| {
-            let collection = open_guarded(db, &role, &target, &bindings)?;
+            let collection = scope.collection(db, &target)?.id();
             Ok(Json(index_json(db, collection, &target)))
         })
         .await
@@ -3506,10 +3503,10 @@ async fn build_index_in(
     let input: IdentityInput =
         serde_json::from_value(input).map_err(|error| unprocessable(error.to_string()))?;
     let metrics = service.metrics.clone();
-    let bindings = service.memory_bindings.clone();
+    let scope = service.scope(role);
     service
         .run(move |db| {
-            let collection = open_guarded(db, &role, &target, &bindings)?;
+            let collection = scope.collection(db, &target)?.id();
             let (metric, config, options) = input.resolve(db, collection, &target)?;
             let started = Instant::now();
             db.build_hnsw_with_options_in(collection, config, metric, options)?;
@@ -3581,10 +3578,10 @@ async fn quality_in(
 ) -> Result<Json<Value>, ApiError> {
     let input: Quality = optional(input)?;
     let metrics = service.metrics.clone();
-    let bindings = service.memory_bindings.clone();
+    let scope = service.scope(role);
     service
         .run(move |db| {
-            let collection = open_guarded(db, &role, &target, &bindings)?;
+            let collection = scope.collection(db, &target)?.id();
             let identity = IdentityInput {
                 metric: input.metric,
                 config: input.config,
