@@ -2332,9 +2332,7 @@ async fn update_metadata_in(
                     ));
                 }
             }
-            let revision = db
-                .collection_mut(target.name())?
-                .update_metadata(id, &metadata)?;
+            let revision = db.update_metadata_in(collection, id, &metadata, Expected::Any)?;
             let (tag, _) = current_etag(db, &ident, collection, id)?
                 .ok_or_else(|| internal("metadata update record missing"))?;
             Ok((revision, tag))

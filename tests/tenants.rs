@@ -758,3 +758,92 @@ async fn tenant_lifecycle_usage_settings_suspend_resume_and_delete() {
     drop(app);
     service.close().await.unwrap();
 }
+
+fn owner(who: &str) -> Value {
+    json!({"vector":[1.0,0.0],"metadata":{"owner":{"type":"string","value":who}}})
+}
+
+async fn owner_of(app: &Router, token: &str, id: u64) -> Value {
+    let (status, value, _) = call(
+        app,
+        token,
+        "GET",
+        &format!("/v1/collections/docs/vectors/{id}"),
+        Value::Null,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{value}");
+    value["metadata"]["owner"]["value"].clone()
+}
+
+/// A tenant name `docs` is stored as `t{tenant}__docs`; the metadata write must
+/// land there and never in the root collection that is literally named `docs`.
+#[tokio::test]
+async fn tenant_metadata_patch_never_reaches_a_root_namesake() {
+    let dir = tempfile::tempdir_in(".").unwrap();
+    let path = dir.path().join("data.vlite");
+    let service = Service::new(Database::create_with_format(&path, 2, FormatVersion::V5).unwrap());
+    let app = configured_admin_router(service.clone(), options(dir.path())).unwrap();
+    let (_, tenant, _) = call(
+        &app,
+        ADMIN,
+        "POST",
+        "/v1/admin/tenants",
+        json!({"name":"a"}),
+    )
+    .await;
+    let at = credential(&app, json!({"tenant_id":tenant["tenant"]["id"]})).await;
+    for token in [ADMIN, at.as_str()] {
+        let (status, value, _) = call(
+            &app,
+            token,
+            "POST",
+            "/v1/collections",
+            json!({"name":"docs","dimensions":2}),
+        )
+        .await;
+        assert_eq!(status, StatusCode::CREATED, "{value}");
+    }
+    for (token, id, who) in [
+        (ADMIN, 1, "root"),
+        (ADMIN, 9, "root"),
+        (at.as_str(), 1, "a"),
+    ] {
+        let (status, value, _) = call(
+            &app,
+            token,
+            "PUT",
+            &format!("/v1/collections/docs/vectors/{id}"),
+            owner(who),
+        )
+        .await;
+        assert_eq!(status, StatusCode::NO_CONTENT, "{value}");
+    }
+    let patch = json!({"metadata":{"owner":{"type":"string","value":"changed"}}});
+
+    let (status, value, _) = call(
+        &app,
+        &at,
+        "PATCH",
+        "/v1/collections/docs/vectors/1/metadata",
+        patch.clone(),
+    )
+    .await;
+    assert_eq!(status, StatusCode::NO_CONTENT, "{value}");
+    assert_eq!(owner_of(&app, &at, 1).await, "changed");
+    assert_eq!(owner_of(&app, ADMIN, 1).await, "root");
+
+    let (status, value, _) = call(
+        &app,
+        &at,
+        "PATCH",
+        "/v1/collections/docs/vectors/9/metadata",
+        patch,
+    )
+    .await;
+    assert_eq!(status, StatusCode::PRECONDITION_FAILED, "{value}");
+    assert_eq!(value["error"]["code"], "precondition_failed");
+    assert_eq!(owner_of(&app, ADMIN, 9).await, "root");
+    drop(app);
+    service.close().await.unwrap();
+}
