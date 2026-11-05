@@ -812,6 +812,127 @@ async fn credential_creation_masks_reserved_collection_names() {
 }
 
 #[tokio::test]
+async fn bound_tenant_deletion_matches_an_ordinary_nonempty_tenant() {
+    let fixture = fixture();
+    let created = request(
+        &fixture.app,
+        ADMIN,
+        "POST",
+        "/v1/admin/tenants",
+        r#"{"name":"ordinary deletion comparison"}"#,
+    )
+    .await;
+    assert_eq!(created.0, 201);
+    let created: Value = serde_json::from_slice(&created.2).unwrap();
+    let ordinary = created["tenant"]["id"].as_str().unwrap();
+    assert_eq!(
+        request(
+            &fixture.app,
+            ADMIN,
+            "POST",
+            "/v1/collections",
+            &json!({"name":format!("t{ordinary}__ordinary"),"dimensions":2}).to_string()
+        )
+        .await
+        .0,
+        201
+    );
+    let expected = request(
+        &fixture.app,
+        ADMIN,
+        "DELETE",
+        &format!("/v1/admin/tenants/{ordinary}"),
+        "",
+    )
+    .await;
+    assert_eq!(expected.0, 409);
+    let error: Value = serde_json::from_slice(&expected.2).unwrap();
+    assert_eq!(error["error"]["code"], "tenant_not_empty");
+    assert_eq!(
+        error["error"]["message"],
+        "drop tenant collections before deleting the tenant"
+    );
+    let bound_path = format!("/v1/admin/tenants/{TENANT}");
+    assert_eq!(
+        request(&fixture.app, ADMIN, "DELETE", &bound_path, "").await,
+        expected
+    );
+    let raw = &fixture
+        .tokens
+        .iter()
+        .find(|(actor, _, _)| *actor == "tenant_raw")
+        .unwrap()
+        .1;
+    for (kind, names) in [
+        ("collections", ["notes_ev", "other_ev", "ordinary"]),
+        ("graphs", ["notes_graph", "other_graph", "ordinary_graph"]),
+    ] {
+        for name in names {
+            if kind == "graphs" {
+                let nodes = request(
+                    &fixture.app,
+                    raw,
+                    "POST",
+                    &format!("/v1/graphs/{name}/nodes/find"),
+                    "{}",
+                )
+                .await;
+                assert_eq!(nodes.0, 200);
+                let nodes: Value = serde_json::from_slice(&nodes.2).unwrap();
+                for node in nodes["nodes"].as_array().unwrap() {
+                    let deletion = json!({"ops":[{"op":"delete_node","key":node["key"]}]});
+                    assert_eq!(
+                        request(
+                            &fixture.app,
+                            raw,
+                            "POST",
+                            &format!("/v1/graphs/{name}/batch"),
+                            &deletion.to_string()
+                        )
+                        .await
+                        .0,
+                        200
+                    );
+                }
+            }
+            let response = request(
+                &fixture.app,
+                raw,
+                "DELETE",
+                &format!("/v1/{kind}/{name}"),
+                "",
+            )
+            .await;
+            assert!(response.0 < 300, "{kind}/{name}: {response:?}");
+        }
+    }
+    let usage = request(
+        &fixture.app,
+        ADMIN,
+        "GET",
+        &format!("{bound_path}/usage"),
+        "",
+    )
+    .await;
+    assert_eq!(usage.0, 200);
+    let usage: Value = serde_json::from_slice(&usage.2).unwrap();
+    assert_eq!(usage["collections"], json!([]));
+    assert_eq!(
+        request(&fixture.app, ADMIN, "DELETE", &bound_path, "").await,
+        expected
+    );
+    let missing = request(
+        &fixture.app,
+        ADMIN,
+        "DELETE",
+        "/v1/admin/tenants/ffffffffffffffffffffffffffffffff",
+        "",
+    )
+    .await;
+    assert_eq!(missing.0, 404);
+}
+
+#[tokio::test]
 async fn reserved_names_match_missing_names_for_raw_routes() {
     let mut fixture = fixture();
     fixture.tokens.extend([
