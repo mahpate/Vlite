@@ -635,10 +635,14 @@ not a second public trait. `base_rows` iterates physical source rows;
 `affected_since(S)` must cover every commit S..T or fail explicitly.
 The 0.7.1 [seam freeze](p3b-seam-freeze.md#5-additions-for-p3c) states these as
 concrete signatures, and the owner approved them as additive shapes on
-2026-11-05 (OPEN-71-03). Lane R0's slice 3 implements `base_rows`,
-`affected_ids` (for `affected_since`) and `ordered_ids`; `binding` (for
-`source_identity`) and `for_each_vector_block` (for `score_batch`) stay with the
-ANN lane, and `base_vector_at` is the existing `CompactView::read_vector`. Metadata
+2026-11-05 (OPEN-71-03). Lane R0's slice 3 implemented `base_rows`,
+`affected_ids` (for `affected_since`) and `ordered_ids` (crate-private, under the
+seam's test gate). `affected_ids` takes no `S` and cannot fail: it lists the whole
+overlay, which is the delta since the base's own floor, so gap (3) is only partly
+closed. The check that the `S` and lineage of the ANN's graph equal the base's moves
+to `binding` (for
+`source_identity`), which with `for_each_vector_block` (for `score_batch`) stays with the
+ANN lane. `base_vector_at` is the existing `CompactView::read_vector`. Metadata
 decode/auth failure remains an error, never predicate false.
 
 P3d supplies exact kernels over canonical expanded stored values with f64
@@ -817,14 +821,16 @@ wire/binding fields remain frozen for this slice.
   (`CompactGeneration`, `CompactView`), a base-plus-overlay `CollectionRecords`,
   an ordered base-plus-overlay cursor (`compact_iter`) and a bounded read
   workspace (`ReadWorkspace`) exist; there is no `ReadAccess` trait, and the
-  seam compiles only under `cfg(test)`. Still absent: a physical-base cursor, a
-  portable binding, an affected-ID cursor and a fallible bounded batch scorer
-  (base-only vectors exist as `CompactView::read_vector`). G's assumptions are
-  restated with concrete shapes in the
-  [seam freeze](p3b-seam-freeze.md#5-additions-for-p3c), which the owner
-  approved as additive shapes on 2026-11-05. The physical-base and affected-ID
-  cursors are scheduled for 0.7.1 (lane R0, slice 3); the binding and the batch
-  scorer stay with the ANN lane.
+  seam compiles only under `cfg(test)`. Added in 0.7.1 (lane R0, slice 3): the
+  physical-base cursor `CompactView::base_rows`, the affected-ID cursor
+  `CollectionRecords::affected_ids` (the whole overlay, without an `S`: the floor
+  and lineage check waits for the binding) and the non-materializing
+  `CollectionRecords::ordered_ids`. Still absent: a portable binding and a
+  fallible bounded batch scorer (base-only vectors exist as
+  `CompactView::read_vector`). G's assumptions are restated with concrete shapes
+  in the [seam freeze](p3b-seam-freeze.md#5-additions-for-p3c), which the owner
+  approved as additive shapes on 2026-11-05. The binding and the batch scorer
+  stay with the ANN lane.
 - Current `ImageCheck` retains some validation state and current loader
   materializes sources. Eager full ANN source/code checks must not force a
   resident record map. Peak validation, rebuild arena and aggregate concurrent
