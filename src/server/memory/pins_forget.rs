@@ -492,6 +492,20 @@ async fn a_live_matching_replay_precedes_the_deadline_check() {
     assert!(!pins.has_receipt(&a, "k2"));
 }
 
+/// Mapping section 2: an engine clock beyond `i64::MAX` is an integrity fault
+/// (500 `internal_error`), never a client error, and writes nothing.
+#[tokio::test]
+async fn an_unrepresentable_engine_clock_is_an_internal_error() {
+    let pins = Pins::new();
+    pins.seed(&scope("a", None), &["m1"]);
+    pins.at(i64::MAX as u64 + 1);
+    let before = pins.sequence();
+    let result = pins.post("forget", &forget_body("k", &[("m1", 1)])).await;
+    assert_error(&result, 500, "internal_error");
+    assert_eq!(pins.sequence(), before);
+    assert_eq!(pins.live(), ["m1"]);
+}
+
 /// Contract section 4: `deadline_ms` is a relative budget of 1..=5,000 ms.
 #[tokio::test]
 async fn the_deadline_budget_is_relative_and_bounded() {

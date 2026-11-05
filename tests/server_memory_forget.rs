@@ -562,7 +562,7 @@ async fn a_forget_identity_is_exact_in_key_scope_and_request() {
             json!([grant(&BOTH, &[a(), au()])]),
         )],
     );
-    for id in ["p1", "p2", "p3", "s1"] {
+    for id in ["p1", "p2", "p3", "p4", "s1"] {
         remember(&app, &BOTH, "notes", &a(), id).await;
     }
     remember(&app, &BOTH, "notes", &au(), "s1").await;
@@ -602,6 +602,12 @@ async fn a_forget_identity_is_exact_in_key_scope_and_request() {
     assert_eq!(upper["replayed"], false);
     assert_eq!(upper["outcomes"][0]["id"], "p2");
     assert_ne!(upper["receipt"]["id"], lower["receipt"]["id"]);
+    // The operation is part of the identity: Remember already used the key
+    // `seed-p4` for this ID in this scope, and Forget still executes.
+    let (status, other) = forget(&app, &BOTH, "notes", &a(), "seed-p4", &[("p4", 1)]).await;
+    assert_eq!(status, 200, "{other}");
+    assert_eq!(other["replayed"], false);
+    assert_eq!(other["outcomes"][0]["id"], "p4");
 
     // A retained matching retry returns the original result, with
     // `replayed:true` only in the envelope; an exact JSON integer revision is
