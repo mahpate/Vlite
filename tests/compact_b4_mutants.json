@@ -467,7 +467,8 @@
      "compact::source::seam_tests::survivor_tests::compact_settings_check_the_handle_health_before_every_other_gate"
     ],
     "pin_mutant": "x-health-gate-inert",
-    "review": "accepted by the coordinator's independent review, 2026-11-05 PT: resolve() begins with ensure_healthy and the compact arm repeats it right after, so the repeat cannot fire; the same window reopens before commit_frame; the pin test and the pin mutant stand"
+    "caveat": "Flusher::failed() is an atomic that the background flusher can set, and ensure_healthy reads it together with the poisoned flag. The call in resolve and the call in the compact arm of set_collection_settings therefore differ only if the flusher fails in the few instructions between them: the second call would then answer Poisoned instead of continuing to a later error (the validation) or to the commit. No contract orders that case and no deterministic test can observe it. The call stays in the code.",
+    "review": "accepted by the coordinator, 2026-11-05 PT. Checked on b8a1e67c: set_collection_settings takes &mut self and calls self.resolve(name)? first (lib.rs 2913); resolve begins with self.ensure_healthy()? (lib.rs 2727-2728); the compact arm's own self.ensure_healthy()? (lib.rs 2916) re-reads the same poisoned flag and the Flusher::failed() atomic, so no deterministic schedule can tell the two apart. The pin test and the pin mutant x-health-gate-inert show that the unhealthy-database error is pinned through resolve."
    },
    "runs": {
     "local": {
