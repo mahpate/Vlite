@@ -1102,6 +1102,7 @@ async fn kv_precondition_failures_reveal_neither_existence_nor_revision() {
     let directory = tempfile::tempdir().unwrap();
     let app = start(database(FormatVersion::V5), directory.path());
     let writer = credential(&app, json!({"operations":["write"]})).await;
+    let readwrite = credential(&app, json!({"operations":["read","write"]})).await;
     let path = "/v1/collections/default/kv/entry";
     let (status, first) = call(&app, ADMIN, "PUT", path, put("exists")).await;
     assert_eq!(status, 200, "{first}");
@@ -1116,12 +1117,19 @@ async fn kv_precondition_failures_reveal_neither_existence_nor_revision() {
         call(&app, ADMIN, "DELETE", &entry("gone"), Value::Null).await,
         (200, json!({"deleted":true}))
     );
-    // The premise: this credential cannot read.
+    // The premise: one credential cannot read, the other can. The message is
+    // fixed for every caller (docs/API.md), so both must see the same text.
     assert_eq!(
         call(&app, &writer, "GET", &entry("exists"), Value::Null)
             .await
             .0,
         403
+    );
+    assert_eq!(
+        call(&app, &readwrite, "GET", &entry("exists"), Value::Null)
+            .await
+            .0,
+        200
     );
 
     let cases = [
@@ -1129,7 +1137,7 @@ async fn kv_precondition_failures_reveal_neither_existence_nor_revision() {
         ("never-written", vec!["0", "1"]),
         ("gone", vec!["0", deleted.as_str()]),
     ];
-    for token in [ADMIN, writer.as_str()] {
+    for token in [ADMIN, writer.as_str(), readwrite.as_str()] {
         for (key, expectations) in &cases {
             for text in expectations {
                 let mut input = put(key);

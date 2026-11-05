@@ -640,6 +640,7 @@ async fn grpc_kv_precondition_failures_reveal_neither_existence_nor_revision() {
     let directory = tempfile::tempdir().unwrap();
     let mut h = start(database(FormatVersion::V5), directory.path()).await;
     let writer = credential(&h.app, json!({"operations":["write"]})).await;
+    let readwrite = credential(&h.app, json!({"operations":["read","write"]})).await;
     let first = h
         .client
         .put_kv_entry(request(ADMIN, put("exists")))
@@ -671,7 +672,8 @@ async fn grpc_kv_precondition_failures_reveal_neither_existence_nor_revision() {
             .into_inner()
             .deleted
     );
-    // The premise: this credential cannot read.
+    // The premise: one credential cannot read, the other can. The message is
+    // fixed for every caller (docs/API.md), so both must see the same text.
     assert_error(
         h.client
             .get_kv_entry(request(
@@ -685,6 +687,18 @@ async fn grpc_kv_precondition_failures_reveal_neither_existence_nor_revision() {
         Code::PermissionDenied,
         "forbidden_scope",
     );
+    let seen = h
+        .client
+        .get_kv_entry(request(
+            &readwrite,
+            proto::KvGetRequest {
+                address: address("default", "n", "exists"),
+            },
+        ))
+        .await
+        .unwrap()
+        .into_inner();
+    assert_eq!(seen.version, current.version);
 
     let revision = |version| expected(proto::expected::Kind::Revision(version));
     let cases = [
@@ -695,7 +709,7 @@ async fn grpc_kv_precondition_failures_reveal_neither_existence_nor_revision() {
         ("never-written", vec![revision(0), revision(1)]),
         ("gone", vec![revision(0), revision(gone.version)]),
     ];
-    for token in [ADMIN, writer.as_str()] {
+    for token in [ADMIN, writer.as_str(), readwrite.as_str()] {
         for (key, guards) in &cases {
             for guard in guards {
                 let mut input = put(key);

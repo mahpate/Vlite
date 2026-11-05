@@ -750,3 +750,126 @@ fn list_and_get_agree_on_a_collection_full_of_look_alikes() {
         }
     }
 }
+
+fn view_keys(db: &Database, collection: &str, namespace: &str, prefix: &str) -> Vec<String> {
+    db.kv_view(collection)
+        .unwrap()
+        .list_at(namespace, prefix, None, 10_000, 0)
+        .unwrap()
+        .into_iter()
+        .map(|entry| entry.key)
+        .collect()
+}
+
+fn put_keys(db: &mut Database, collection: &str, namespace: &str, keys: &[&str]) {
+    let mut kv = db.kv_store(collection).unwrap();
+    for key in keys {
+        kv.put(namespace, key, key.as_bytes(), KvPut::default())
+            .unwrap();
+    }
+}
+
+// docs/API.md: strings are not normalized and a prefix selects the keys that
+// start with exactly those bytes.
+#[test]
+fn a_list_prefix_is_literal_and_whitespace_is_not_trimmed() {
+    let mut db = memory();
+    put_keys(&mut db, "literal", "n", &["a2", " a1", "a 3", "a "]);
+    let keys = |prefix: &str| view_keys(&db, "literal", "n", prefix);
+    assert_eq!(keys(" a"), [" a1"]);
+    assert_eq!(keys("a "), ["a ", "a 3"]);
+    assert_eq!(keys(" "), [" a1"]);
+    assert_eq!(keys("a"), ["a ", "a 3", "a2"]);
+    assert_eq!(keys(""), [" a1", "a ", "a 3", "a2"]);
+}
+
+// docs/API.md: keys sort by unsigned UTF-8 bytes. U+E000 is EE 80 80 and the
+// one UTF-16 unit E000; U+10000 is F0 90 80 80 and the pair D800 DC00, so the
+// two orders differ for exactly this pair.
+#[test]
+fn keys_sort_by_utf8_bytes_not_utf16_units() {
+    let mut db = memory();
+    put_keys(
+        &mut db,
+        "order",
+        "n",
+        &["k\u{10000}", "k\u{e000}", "k\u{80}", "k\u{7f}"],
+    );
+    let expected = ["k\u{7f}", "k\u{80}", "k\u{e000}", "k\u{10000}"];
+    assert_eq!(view_keys(&db, "order", "n", ""), expected);
+    let after = db
+        .kv_view("order")
+        .unwrap()
+        .list_at("n", "", Some("k\u{80}"), 10, 0)
+        .unwrap();
+    let after: Vec<_> = after.iter().map(|entry| entry.key.as_str()).collect();
+    assert_eq!(after, ["k\u{e000}", "k\u{10000}"]);
+}
+
+// Byte order puts every upper-case letter before every lower-case one.
+#[test]
+fn keys_sort_case_sensitively_without_folding() {
+    let mut db = memory();
+    put_keys(&mut db, "case", "n", &["a", "Z", "B", "c"]);
+    assert_eq!(view_keys(&db, "case", "n", ""), ["B", "Z", "a", "c"]);
+}
+
+// docs/API.md: namespaces are not normalized, so " n " and "n" are two partitions.
+#[test]
+fn namespace_whitespace_is_significant_when_listing() {
+    let mut db = memory();
+    db.kv_store("spaces")
+        .unwrap()
+        .put("n", "k", b"plain", KvPut::default())
+        .unwrap();
+    for namespace in [" n ", " n", "n "] {
+        assert!(view_keys(&db, "spaces", namespace, "").is_empty());
+    }
+    db.kv_store("spaces")
+        .unwrap()
+        .put(" n ", "k", b"spaced", KvPut::default())
+        .unwrap();
+    let list = |namespace: &str| -> Vec<(String, Vec<u8>)> {
+        db.kv_view("spaces")
+            .unwrap()
+            .list_at(namespace, "", None, 100, 0)
+            .unwrap()
+            .into_iter()
+            .map(|entry| (entry.key, entry.value))
+            .collect()
+    };
+    assert_eq!(list(" n "), pairs(&[("k", "spaced")]));
+    assert_eq!(list("n"), pairs(&[("k", "plain")]));
+}
+
+// A non-empty prefix filters before the limit counts: a look-alike with a lower
+// record id sorts ahead of its key's real entry among the candidates, and it
+// must not use up the limit.
+#[test]
+fn a_prefixed_limit_is_filled_by_real_entries_not_look_alikes() {
+    let mut db = memory();
+    for (key, value) in [("g", "g"), ("h", "real"), ("hb", "hb"), ("i", "i")] {
+        db.kv_store("prefixed")
+            .unwrap()
+            .put("n", key, value.as_bytes(), KvPut::default())
+            .unwrap();
+    }
+    for (id, key) in [(7, "h"), (8, "hb")] {
+        assert!(
+            id < first_slot("n", key),
+            "{key}: the look-alike sorts first"
+        );
+        plant(&mut db, "prefixed", id, "n", key, "SPOOF");
+    }
+    let view = db.kv_view("prefixed").unwrap();
+    let page = |after: Option<&str>, limit: usize| -> Vec<(String, Vec<u8>)> {
+        view.list_at("n", "h", after, limit, 0)
+            .unwrap()
+            .into_iter()
+            .map(|entry| (entry.key, entry.value))
+            .collect()
+    };
+    assert_eq!(page(None, 1), pairs(&[("h", "real")]));
+    assert_eq!(page(None, 2), pairs(&[("h", "real"), ("hb", "hb")]));
+    assert_eq!(page(Some("h"), 1), pairs(&[("hb", "hb")]));
+}

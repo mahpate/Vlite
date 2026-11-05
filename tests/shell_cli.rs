@@ -175,3 +175,112 @@ fn readonly_shell_holds_a_shared_lock_so_other_readers_still_open() {
     drop(stdin);
     assert!(shell.0.wait().unwrap().success());
 }
+
+/// A shell kept at its prompt. Each command is answered with one line, so once
+/// `ask` returns the shell holds the file (or has opened it again).
+struct Session {
+    shell: Shell,
+    stdin: std::process::ChildStdin,
+    stdout: BufReader<std::process::ChildStdout>,
+}
+
+impl Session {
+    fn start(args: &[&str]) -> Self {
+        let mut shell = Shell(
+            Command::new(env!("CARGO_BIN_EXE_vlite-shell"))
+                .args(args)
+                .stdin(Stdio::piped())
+                .stdout(Stdio::piped())
+                .stderr(Stdio::piped())
+                .spawn()
+                .unwrap(),
+        );
+        let stdin = shell.0.stdin.take().unwrap();
+        let stdout = BufReader::new(shell.0.stdout.take().unwrap());
+        Self {
+            shell,
+            stdin,
+            stdout,
+        }
+    }
+
+    fn ask(&mut self, command: &str) -> String {
+        writeln!(self.stdin, "{command}").unwrap();
+        self.stdin.flush().unwrap();
+        let mut answer = String::new();
+        self.stdout.read_line(&mut answer).unwrap();
+        assert!(
+            !answer.is_empty(),
+            "the shell ended before it answered {command}"
+        );
+        answer.trim().to_owned()
+    }
+
+    fn finish(mut self) -> std::process::ExitStatus {
+        drop(self.stdin);
+        self.shell.0.wait().unwrap()
+    }
+}
+
+fn readers_are_refused(db: &std::path::Path) -> bool {
+    matches!(
+        vlite::Database::open_read_only(db),
+        Err(vlite::Error::Locked)
+    )
+}
+
+const WRITE: &str = r#"put {"id":90,"vector":[1,1],"payload":"written"}"#;
+
+// docs/TOOLS.md: the shell takes an exclusive file lock except with
+// --read-only, so an existing file opened without --create is the writer.
+#[test]
+fn an_unflagged_shell_opens_writable_and_holds_the_exclusive_lock() {
+    let f = Fixture::new();
+    let db = f.path("db");
+    cli_support::database(&db);
+    let mut shell = Session::start(&["--db", db.to_str().unwrap()]);
+    shell.ask("header");
+    assert!(readers_are_refused(&db), "the writer lock must be held");
+    assert_eq!(shell.ask(WRITE), "ok");
+    assert!(shell.finish().success());
+    let reopened = vlite::Database::open(&db).unwrap();
+    assert_eq!(reopened.get(90).unwrap().unwrap().payload, b"written");
+}
+
+// `verify` closes the file and opens it again; without --read-only that
+// handle is the writer too.
+#[test]
+fn an_unflagged_shell_stays_writable_and_exclusive_after_verify() {
+    let f = Fixture::new();
+    let db = f.path("db");
+    cli_support::database(&db);
+    let mut shell = Session::start(&["--db", db.to_str().unwrap()]);
+    shell.ask("verify");
+    // Answered only once the file is open again.
+    shell.ask("header");
+    assert!(
+        readers_are_refused(&db),
+        "the writer lock must be held again"
+    );
+    assert_eq!(shell.ask(WRITE), "ok");
+    assert!(shell.finish().success());
+    let reopened = vlite::Database::open(&db).unwrap();
+    assert_eq!(reopened.get(90).unwrap().unwrap().payload, b"written");
+}
+
+// Creating a database is a write, so --read-only cannot be combined with it.
+#[test]
+fn read_only_with_create_is_refused_and_creates_nothing() {
+    let f = Fixture::new();
+    let db = f.path("never-created");
+    let output = Command::new(env!("CARGO_BIN_EXE_vlite-shell"))
+        .args(["--db", db.to_str().unwrap(), "--read-only", "--create", "2"])
+        .stdin(Stdio::null())
+        .output()
+        .unwrap();
+    assert!(!output.status.success());
+    assert!(
+        String::from_utf8_lossy(&output.stderr).contains("--read-only conflicts with --create")
+    );
+    assert!(!db.exists(), "a refused --create must not leave a file");
+}
