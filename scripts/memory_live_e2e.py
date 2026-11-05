@@ -863,20 +863,30 @@ def run_rest(http: HTTP, env: Environment, report: Report) -> None:
     check("replay-after-delete", replay_after_delete)
 
     def raw_denials() -> None:
-        # Without raw_access a reserved resource answers exactly like a missing one,
-        # even for the administrator token (docs/SECURITY.md Memory-bound resources).
-        for method, path, body, status, code in (
-            ("GET", "/v1/graphs/notes_graph/nodes/1", None, 409, "graph_not_found"),
-            ("POST", "/v1/graphs/notes_graph/batch", {"ops": [{"op": "create_node", "key": "x"}]},
+        # Without raw_access a reserved resource answers exactly like a missing one, even for
+        # the administrator token and a credential that names every collection
+        # (docs/SECURITY.md Memory-bound resources). The grant check still runs first, so a
+        # graph-scoped credential is not compared on graphs outside its binding.
+        graph = "/v1/graphs/notes_graph"
+        for token, method, path, body, status, code in (
+            (env.token, "POST", graph + "/nodes/get", {"node": {"key": "x"}}, 409, "graph_not_found"),
+            (env.token, "POST", graph + "/batch", {"ops": [{"op": "create_node", "key": "x"}]},
              409, "graph_not_found"),
-            ("GET", "/v1/collections/evidence/vectors/1", None, 404, "collection_not_found"),
-            ("PUT", "/v1/collections/evidence/vectors/1", {"vector": [1, 0, 0]}, 404, "collection_not_found"),
-            ("POST", "/v1/collections/evidence/search", {"vector": [1, 0, 0], "k": 1}, 404, "collection_not_found"),
+            (env.token, "GET", "/v1/collections/evidence/vectors/1", None, 404, "collection_not_found"),
+            (env.keys["memory"], "GET", "/v1/collections/evidence/vectors/1", None, 404, "collection_not_found"),
+            (env.token, "PUT", "/v1/collections/evidence/vectors/1", {"vector": [1, 0, 0]},
+             404, "collection_not_found"),
+            (env.keys["memory"], "PUT", "/v1/collections/evidence/vectors/1", {"vector": [1, 0, 0]},
+             404, "collection_not_found"),
+            (env.token, "POST", "/v1/collections/evidence/search", {"vector": [1, 0, 0], "k": 1},
+             404, "collection_not_found"),
+            (env.keys["memory"], "POST", "/v1/collections/evidence/search", {"vector": [1, 0, 0], "k": 1},
+             404, "collection_not_found"),
         ):
-            reserved = http.request(method, path, body)
+            reserved = http.request(method, path, body, token=token)
             error(reserved, status, code)
             absent = path.replace("notes_graph", "absent_graph").replace("evidence", "absent_evidence")
-            missing = http.request(method, absent, body)
+            missing = http.request(method, absent, body, token=token)
             require(reserved.status == missing.status and reserved.json() == missing.json(),
                     f"{method} {path}: a reserved resource answered differently from a missing one")
     check("raw-reserved-answers-like-missing", raw_denials, "docs/SECURITY.md Memory-bound resources")
