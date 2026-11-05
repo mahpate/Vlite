@@ -14,16 +14,16 @@ use axum::{
     Extension, Router,
     body::Bytes,
     extract::{
-        Path, State,
-        rejection::{BytesRejection, PathRejection},
+        FromRequestParts, Path, State,
+        rejection::{BytesRejection, ExtensionRejection, PathRejection},
     },
-    http::{HeaderMap, StatusCode, header},
+    http::{HeaderMap, StatusCode, header, request::Parts},
     response::{IntoResponse, Response},
     routing::post,
 };
 use serde_json::{Map, Value, json};
 
-use super::super::{ApiError, RequestId, Service, admin, credentials::Op};
+use super::super::{ApiError, RequestId, Service, admin, audit, credentials::Op, users};
 use super::wire::{self, Fail, Fields};
 use crate::Database;
 use crate::memory::binding::Binding;
@@ -83,10 +83,29 @@ pub(in crate::server) struct Clock {
     pub elapsed_ms: Arc<AtomicU64>,
 }
 
+/// The authenticated caller of a memory route: its role and its audit
+/// `actor` (`audit::actor`), which also names the dashboard session behind the
+/// request. Extracted in place of the bare role extension.
+struct Caller {
+    role: admin::Role,
+    actor: String,
+}
+
+impl<S: Send + Sync> FromRequestParts<S> for Caller {
+    type Rejection = ExtensionRejection;
+
+    async fn from_request_parts(parts: &mut Parts, state: &S) -> Result<Self, Self::Rejection> {
+        let Extension(role) = Extension::<admin::Role>::from_request_parts(parts, state).await?;
+        let actor = audit::actor(&role, parts.extensions.get::<users::Principal>());
+        Ok(Self { role, actor })
+    }
+}
+
 /// One request's captured context, carried into the database closure.
 struct Call {
     service: Service,
     role: admin::Role,
+    actor: String,
     request_id: String,
     operation: &'static str,
     binding: Option<String>,
@@ -97,14 +116,15 @@ struct Call {
 impl Call {
     fn new(
         service: Service,
-        role: admin::Role,
+        caller: Caller,
         request_id: RequestId,
         clock: Option<Extension<Clock>>,
         operation: &'static str,
     ) -> Self {
         Self {
             service,
-            role,
+            role: caller.role,
+            actor: caller.actor,
             request_id: request_id.0,
             operation,
             binding: None,
@@ -131,8 +151,8 @@ impl Call {
         now.saturating_add(budget_ms.saturating_sub(self.elapsed_ms()))
     }
 
-    /// One audit entry per memory request: operation, binding, principal and
-    /// outcome only, never memory text, keys or identifiers.
+    /// One audit entry per memory request: operation, binding, principal,
+    /// actor and outcome only, never memory text, keys or identifiers.
     fn audit(&self, outcome: &str, receipt: Option<(&str, u64)>) {
         let Some(log) = &self.service.admin.audit_log else {
             return;
@@ -145,6 +165,7 @@ impl Call {
             "event": "memory_request",
             "request_id": self.request_id,
             "principal": principal,
+            "actor": self.actor,
             "operation": self.operation,
             "outcome": outcome,
             "duration_ns": self.started.elapsed().as_nanos().min(u64::MAX as u128) as u64,
@@ -648,14 +669,14 @@ async fn write(
 
 async fn remember(
     State(service): State<Service>,
-    Extension(role): Extension<admin::Role>,
+    caller: Caller,
     Extension(request_id): Extension<RequestId>,
     clock: Option<Extension<Clock>>,
     name: Result<Path<String>, PathRejection>,
     headers: HeaderMap,
     bytes: Result<Bytes, BytesRejection>,
 ) -> Response {
-    let call = Call::new(service, role, request_id, clock, "remember");
+    let call = Call::new(service, caller, request_id, clock, "remember");
     let ops = &[Op::Write];
     write(
         call,
