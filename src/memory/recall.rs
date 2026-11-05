@@ -1733,6 +1733,16 @@ mod tests {
             ),
             "a cosine query of zero length is refused whatever the selection"
         );
+        // ... in the request validation, ahead of every budget.
+        req.limits.source_records = 1;
+        assert!(
+            matches!(
+                recall(&db, &req),
+                Err(RecallError::Storage(crate::Error::ZeroNormQuery))
+            ),
+            "the default selection refuses it before the source budget"
+        );
+        req.limits.source_records = RecallLimits::default().source_records;
         let query = req.query.as_mut().unwrap();
         (query.metric, query.fusion.vector_weight, query.text) = (metric, weight, text);
         for selection in [Selection::Exact, Selection::Mmr { lambda: 0.5 }] {

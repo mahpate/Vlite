@@ -6047,6 +6047,20 @@ mod tests {
         let noop = remember_with_evidence(&mut db, &again).unwrap();
         assert_eq!(noop.actions[0].action, "noop");
         assert_eq!(noop.actions[0].id, "h");
+        // Every reference counts, not only the first: one the memory holds and
+        // one it does not is refused.
+        let mut both = again.clone();
+        both.idempotency_key = "holder-both".into();
+        both.items[0].evidence = vec![
+            memory_evidence("record:4242", &both.scope),
+            memory_evidence("record:4243", &both.scope),
+        ];
+        let sequence = db.sequence;
+        assert!(matches!(
+            remember_with_evidence(&mut db, &both),
+            Err(MemoryError::RecordAlreadyAttached)
+        ));
+        assert_eq!(db.sequence, sequence);
         let sequence = db.sequence;
         let mut other = again.clone();
         other.idempotency_key = "holder-other".into();
