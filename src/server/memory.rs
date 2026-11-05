@@ -143,3 +143,6 @@ mod wire;
 
 #[cfg(test)]
 mod tests;
+
+#[cfg(test)]
+mod pins_recall;
