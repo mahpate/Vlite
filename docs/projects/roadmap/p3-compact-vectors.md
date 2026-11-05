@@ -5,7 +5,10 @@ the primary dense rows codec, descriptor publication and commit-time
 canonicalization are implemented, independently reviewed and integrated behind
 a test-only gate ([P3a progress](#p3a-progress-private-dense-rows-codec)), as is
 the private P3b column accessor; no production setting, writer or reader
-enables them. Builds on
+enables them. The P3b engine seam (pinned generation, base-plus-overlay view,
+effective rows and the bounded read workspace) is integrated through slice 3
+and lane B, test-gated and compiled only under `cfg(test)`; its 0.7.1 freeze
+is in [p3b-seam-freeze.md](p3b-seam-freeze.md). Builds on
 [P2](p2-directory-store.md); goals are
 [F1/F3/S1/S2](../performance/storage-goals.md). The precision choice is resolved
 below; S1's conflicting default-size acceptance criterion is not waived.
@@ -224,17 +227,22 @@ without their corresponding contract approval; `src/openapi.json` is frozen.
 1. **P3a, precision and codec:** float32-default/float16-opt-in settings,
    canonicalization, guarded vector blocks and explicit conversion. Keep the
    existing eager path as a compatibility oracle; do not claim S2 yet.
-2. **P3b, bounded source access:** the private column accessor and slice 0's
-   test-gated pinned point-read source are integrated (see their status
-   above). Engine integration slices 1–5 remain: overlay integration,
-   lazy borrowed-record compatibility, snapshot/file lifetime handling and
-   encrypted reads. Exercise exact/filtered/hybrid and graph-attached record paths.
+2. **P3b, bounded source access:** the private column accessor, slice 0's
+   test-gated pinned point-read source and slices 1a, 1b, 2 and 3 (resident and
+   compact record dispatch, installation, the committed-mutation overlay,
+   ordered browse and exact search) are integrated, as is lane B's part of
+   slice 4 (see the progress notes and the [0.7.1 seam freeze](p3b-seam-freeze.md)).
+   Remaining: lane A's record consumers and the bounded exact scan, lane C's
+   server and MCP consumers, and slice 5 (snapshot and file lifetime across
+   checkpoint, maintenance, replica and encrypted lifecycle). Exercise
+   exact/filtered/hybrid and graph-attached record paths.
 3. **P3c, persisted compact ANN:** flattened topology, source-bound codes,
    background rebuild integration and the opt-in rotated-code prototype.
    Reuse existing scalar-u8 and index-cache behavior rather than duplicate it.
-   The [detailed design](p3c-compact-ann.md) is independently reviewed with
-   its owner decisions pending; no ANN code is integrated, and code starts
-   only after P3b engine integration is accepted.
+   The [detailed design](p3c-compact-ann.md) is independently reviewed and its
+   owner decisions were approved 2026-11-02; no Rust ANN code is integrated
+   (only the independent Python reference), and code starts only after P3b
+   engine integration is accepted.
 4. **P3d, dispatch and qualification:** verified SIMD kernels, complete
    conversion/backup/restore/key-rotation coverage and major-release acceptance.
 
@@ -1003,7 +1011,10 @@ or let derived indexes become source-of-truth.
 The extra crate-private operations P3c needs (physical base rows, source
 identity, an affected-ID cursor and batched vector scoring) are proposed in
 [P3c section G](p3c-compact-ann.md#g-integration-seams-and-consumers). They
-are assumptions, not part of this contract, until the P3b seam is frozen.
+remain assumptions, not part of this contract, until the owner approves the
+[seam freeze](p3b-seam-freeze.md#5-additions-for-p3c-proposed), which gives
+them concrete shapes and maps today's `CompactView`, `CollectionRecords` and
+`ReadWorkspace` onto the section G names.
 
 ### J. Ordered code sub-slices and shared-file touch map
 
@@ -1021,7 +1032,7 @@ not performance/size claims.
 | 1b. Database installation and point-read acceptance | **Implemented, independently accepted and integrated (private, unreleased).** Owned verified generation installation after full-image validation; directory/segment refusal. Real-open A-D method matrix, late-image failure atomicity, explicit expiry, encrypted reads and snapshot/accounting lifetime. Slice 2 now covers the post-image WAL suffix path (tracked separately in row 2). | Depends on independently accepted 1a; minimal loader hooks only. No partial or mapped installation. |
 | 2. WAL overlay and committed mutation semantics | **Implemented, independently accepted with notes and integrated (private, test-gated, unreleased).** Reconcile committed put/batch/delete/metadata/TTL suffixes over the immutable compact base, retaining tombstones and WAL durability-before-apply, CAS/revision, graph-attachment and COW snapshot behavior. Files: `src/records.rs`, `src/collection.rs`, `src/format.rs` (image-floor row capture), `src/lib.rs`, and `src/vectors.rs` (retain later-slice refusals). Tests: `compact_overlay_ordered_batch_matches_replay`, `compact_delete_tombstone_shadows_base`, `compact_expired_overlay_never_reveals_base`, `compact_metadata_update_preserves_vector_payload`, `compact_overlay_snapshot_and_revision_condition_are_immutable`, `compact_graph_attachment_tracks_effective_row`, and `compact_install_real_committed_suffix_replays_into_overlay`. No public surface, production activation or later-slice capability. | Depends on 1a/1b; selected row only; serialize with 1 and 5. |
 | 3. Ordered public reads and exact/filter paths | **Implemented, independently accepted with notes and integrated (private, test-gated, unreleased).** Browse and exact/filtered search over base plus overlay match the resident path at the same clock (order, distance bits, scan statistics, tombstones, expiry at the clock boundary and the poisoned-handle text-only query). Hybrid, query-language ordering, grouping and facets still refuse compact records and move to slice 4. Scans still materialize record cells: the bounded 4 MiB vector workspace of K.3 arrives with slice 4's read seam, which re-points the exact scan. Merge base/overlay IDs, unify TTL/filter/clock semantics and bounded vector access. Files: `src/records.rs` (`browse_at`, `search_with_stats_at`), `src/collection.rs` (browse/group/exact), `src/lib.rs` (`search_in_at`, `exact_search*`), `src/hybrid.rs`, `src/query_language.rs`. Tests: `compact_ordered_merge_matches_resident_with_gaps`, `compact_exact_scan_is_bit_identical_at_same_clock`, `compact_search_filters_after_overlay_resolution`, `compact_browse_cursor_skips_tombstones_and_expiry`. Accept exact order/stat semantics and bounded scratch. Also add the slice 2 acceptance note: one poisoned-handle execute test for a text-only query (mutation QL1). | ~300-500 LOC; depends 1-2; can split API/search tests after interface freeze, but shared `records.rs`/`lib.rs` edits serialize. |
-| 4. Record consumers and derived indexes | **In progress as three lanes (2026-11-04):** A record consumers and the slice 3 remainder; B derived indexes plus the crate-private read seam in `src/compact/source.rs` (opaque generation identity, bounded authenticated vector and metadata reads, source/cell/scratch accounting; the P3c section G operations stay later; coordinator-authorized because the generation, view and cell fields are private to that module); HNSW, rebuild, poll, `search_ready`, snapshots, disk ANN and GPU stay refused on compact and move to P3c (2026-11-04 ruling: the resident hot loop is not rewritten; lane B delivers the seam, an effective-row accessor and the metadata, text and rerank consumers); C server and MCP consumers, only after Gap 8 step 2b is integrated. A follow-up commit, after the seam and lane A are integrated (the shared `records.rs`/`lib.rs` hunks serialize), re-points the slice 3 exact scan to the K.3 workspace so scans stop materializing cells. `compact_rebuild_snapshot_survives_checkpoint` moves to slice 5 (compact checkpoint stays refused until then); slice 4 proves the rebuild pin across a Database drop and a refused checkpoint attempt. Port payload APIs, named vectors, summary indexes, HNSW/rebuild/sidecars, metrics and record serializers. Files: `src/vectors.rs`, `src/kv.rs`, `src/server.rs`, `src/server/grpc.rs`, `src/server/features.rs`, `src/server/webhooks.rs`, `src/bin/vlite-mcp.rs`, `src/rerank.rs`, `src/property_graph/retrieve.rs`, `src/server/observability.rs`, `src/server/tenants.rs`, `src/hnsw.rs`, `src/rebuild.rs`, `src/metadata_index.rs`, `src/text_index.rs`, `src/ann_snapshot.rs`, `src/disk_ann.rs`, `src/gpu.rs`, `src/quality.rs`, `src/planner.rs`, `src/compact/stats.rs`. Tests: `compact_kv_point_and_prefix_match_resident`, `compact_named_vector_visibility_matches_resident`, `compact_hnsw_rerank_uses_pinned_generation`, `compact_rebuild_snapshot_survives_drop_and_refused_checkpoint`, `compact_metadata_text_indexes_verify_overlay`, `compact_ann_snapshot_rejects_other_generation`, `compact_server_materializes_only_results`. Accept no stale index result and accurate cache/source accounting. | ~600-1,000 LOC; depends 1-3; file-disjoint vector/KV/server and index groups can run in parallel after seam freeze; `hnsw.rs`/`lib.rs` hooks serialize. |
+| 4. Record consumers and derived indexes | **Partly integrated, three lanes (status at v0.7.0, reconciled for 0.7.1):** A record consumers and the slice 3 remainder (not integrated: parked at `834a0a6` with four patches and 26 recorded survivors, see [the ledgers](p3b-survivor-ledgers.md#lane-a)); B derived indexes plus the crate-private read seam in `src/compact/source.rs` (integrated and test-gated: opaque generation identity, bounded authenticated vector, metadata and payload reads, source/cell/scratch accounting; its fix-forward commit `250a98b` is parked with 18 open replay obligations, see [the ledgers](p3b-survivor-ledgers.md#lane-b); the P3c section G operations stay later and are proposed in the [seam freeze](p3b-seam-freeze.md); coordinator-authorized because the generation, view and cell fields are private to that module); HNSW, rebuild, poll, `search_ready`, snapshots, disk ANN and GPU stay refused on compact and move to P3c (2026-11-04 ruling: the resident hot loop is not rewritten; lane B delivers the seam, an effective-row accessor and the metadata, text and rerank consumers); C server and MCP consumers (not started; its Gap 8 step 2b prerequisite is integrated). A follow-up commit, after the seam and lane A are integrated (the shared `records.rs`/`lib.rs` hunks serialize), re-points the slice 3 exact scan to the K.3 workspace so scans stop materializing cells; its first draft is parked as `c859d2d` on lane A. `compact_rebuild_snapshot_survives_checkpoint` moves to slice 5 (compact checkpoint stays refused until then); slice 4 proves the rebuild pin across a Database drop and a refused checkpoint attempt. Port payload APIs, named vectors, summary indexes, HNSW/rebuild/sidecars, metrics and record serializers. Files: `src/vectors.rs`, `src/kv.rs`, `src/server.rs`, `src/server/grpc.rs`, `src/server/features.rs`, `src/server/webhooks.rs`, `src/bin/vlite-mcp.rs`, `src/rerank.rs`, `src/property_graph/retrieve.rs`, `src/server/observability.rs`, `src/server/tenants.rs`, `src/hnsw.rs`, `src/rebuild.rs`, `src/metadata_index.rs`, `src/text_index.rs`, `src/ann_snapshot.rs`, `src/disk_ann.rs`, `src/gpu.rs`, `src/quality.rs`, `src/planner.rs`, `src/compact/stats.rs`. Tests: `compact_kv_point_and_prefix_match_resident`, `compact_named_vector_visibility_matches_resident`, `compact_hnsw_rerank_uses_pinned_generation`, `compact_rebuild_snapshot_survives_drop_and_refused_checkpoint`, `compact_metadata_text_indexes_verify_overlay`, `compact_ann_snapshot_rejects_other_generation`, `compact_server_materializes_only_results`. Accept no stale index result and accurate cache/source accounting. | ~600-1,000 LOC; depends 1-3; file-disjoint vector/KV/server and index groups can run in parallel after seam freeze; `hnsw.rs`/`lib.rs` hooks serialize. |
 | 5. Checkpoint, maintenance, feed and replica lifecycle | Stream complete output, pin/retire images and preserve byte-copy/copy-out/error behavior. Files: `src/format.rs` (`write_v5_image`, `BlockRun`, `apply_supplement`, `verified_frame`), `src/compact/mod.rs` (`ImageCheck::{frame,block}`), `src/directory.rs` (`build_image`, `Chain::{install,open}`), `src/lib.rs` (`start_checkpoint`, `finish_checkpoint`, `replica_extend`, feed/export hooks), `src/maintenance.rs` (`backup_inner`, `restore_inner`, `compact_inner`, `write_v5`, `write_v5_image`, `convert_precision`), `src/changes.rs` (`scan`), `src/logops.rs` (`restore_to`, `reencrypt`), `src/property_graph/{frame.rs,maintain.rs}`. Tests: `compact_overlay_checkpoint_reopen_is_identical`, `compact_checkpoint_keeps_old_snapshot_mapped`, `compact_rebuild_snapshot_survives_checkpoint` (moved here from slice 4), `compact_backup_restore_reencrypt_authenticate_all_blocks`, `compact_change_feed_starts_after_image_floor`, `compact_replica_failure_keeps_old_generation`, `compact_graph_copyout_keeps_attachment_rules`. Accept full lifecycle matrix before any writer is production-enabled. | ~700-1,100 LOC; depends 1-4; serialize with P4 checkpoint/read work. |
 
 **Shared-file touch map for P4 checkpoint/read integration.** P4 independently
@@ -1071,11 +1082,14 @@ alternative to choice 2 would require a separately approved public API change.
 
 ### L. Risks and unverified items
 
-- **Unverified:** no production compact `RecordMap` replacement, generation
-  owner, compact `ReadSnapshot`, overlay merge, or compact writer is present
-  at setup head. The exact production image directory and whether it can
-  retain a single block without retaining a larger map are implementation
-  questions, not established behavior.
+- **Reconciled at v0.7.0:** the setup-head absences this bullet listed are
+  resolved only under `cfg(test)`. A generation owner (`CompactGeneration`), a
+  compact `ReadSnapshot`, the base-plus-overlay merge, the effective-row
+  accessors and the bounded read workspace exist and are accepted, but no
+  release build compiles them and no compact writer is enabled. Still
+  unverified: whether the production image directory can retain a single block
+  without retaining a larger map, because the loader still builds the resident
+  `RecordMap` first and installs the generation over it.
 - **Unverified:** the 4 MiB scratch budget is a conservative choice (room for
   two of the largest decoded blocks, each at most 2 MiB), not a derived maximum;
   aggregate memory accounting with concurrent
