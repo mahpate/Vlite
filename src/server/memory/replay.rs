@@ -40,6 +40,8 @@ pub(super) const RECEIPT: &str =
 pub(super) const FACTS: &str = include_str!("../../../tests/fixtures/agent_memory/wire/facts.json");
 pub(super) const CORRECT_FACTS: &str =
     include_str!("../../../tests/fixtures/agent_memory/wire/correct_facts.json");
+pub(super) const ERASURE: &str =
+    include_str!("../../../tests/fixtures/agent_memory/wire/erasure.json");
 
 const PRINCIPAL: &str = "abcdefghij27";
 const OTHER: &str = "bcdefghij234";
@@ -1387,7 +1389,7 @@ mod tests {
 
     /// The refusal routes: binding and scope authorization first, then the
     /// refusal before any other field is read; `feature` names the gap.
-    async fn refused_in_order(fixture: &str, path: &str, feature: &str) {
+    async fn refused_in_order(fixture: &str, path: &str, feature: &str, retired_feature: &str) {
         assert_eq!(replay(fixture, &[], &[]).await, 1);
         let request = |body: Value| json!({"method": "POST", "path": path, "body": body});
         let malformed = request(json!({"scope": {"agent": "a"}, "x": [1], "deadline_ms": -1}));
@@ -1404,7 +1406,7 @@ mod tests {
         retired["retired_at_ms"] = json!(500);
         let (status, body) = served(&retired, &malformed).await;
         assert_eq!(status, 409, "{body}");
-        assert_eq!(body["error"]["details"]["feature"], "binding_retired");
+        assert_eq!(body["error"]["details"]["feature"], retired_feature);
         let mut ungranted = view();
         ungranted["graph_grant"] = json!(false);
         let (status, body) = served(&ungranted, &malformed).await;
@@ -1416,11 +1418,35 @@ mod tests {
 
     #[tokio::test]
     async fn find_facts_is_refused_after_authorization() {
-        refused_in_order(FACTS, "/v1/memory/notes/facts/query", "facts").await;
+        refused_in_order(
+            FACTS,
+            "/v1/memory/notes/facts/query",
+            "facts",
+            "binding_retired",
+        )
+        .await;
     }
 
     #[tokio::test]
     async fn correct_facts_is_refused_after_authorization() {
-        refused_in_order(CORRECT_FACTS, "/v1/memory/notes/facts/correct", "facts").await;
+        refused_in_order(
+            CORRECT_FACTS,
+            "/v1/memory/notes/facts/correct",
+            "facts",
+            "binding_retired",
+        )
+        .await;
+    }
+
+    /// A retired binding keeps serving GetErasure, so it refuses as active.
+    #[tokio::test]
+    async fn get_erasure_is_refused_after_authorization() {
+        refused_in_order(
+            ERASURE,
+            "/v1/memory/notes/erasures/get",
+            "erasure_jobs",
+            "erasure_jobs",
+        )
+        .await;
     }
 }
