@@ -1,0 +1,1747 @@
+{
+  "schema": "memory-binding-record-golden-v1",
+  "source": "docs/projects/roadmap/m71-memory-followups.md section 1.1",
+  "key": "binding:v1",
+  "label": "VliteMemoryBinding",
+  "records": [
+    {
+      "name": "active-root-single-grant",
+      "entry": {
+        "binding": "notes",
+        "tenant": "@root",
+        "generation": 1,
+        "state": "active",
+        "graph": "notes_graph",
+        "evidence_collection": null,
+        "schema_version": "memory-schema-v1",
+        "ranking_version": "memory-ranking-v1",
+        "digest_version": "memory-request-v1",
+        "receipt_window_ms": 86400000,
+        "grants": [
+          {
+            "principal": "abcdefghij27",
+            "scopes": [
+              {
+                "agent": "a"
+              }
+            ]
+          }
+        ]
+      },
+      "expected": {
+        "holder": "notes_graph",
+        "properties": {
+          "record_schema": "memory-binding-record:v1",
+          "tenant": "@root",
+          "binding": "notes",
+          "generation": "1",
+          "state": "active",
+          "graph": "notes_graph",
+          "memory_schema": "memory-schema-v1",
+          "ranking_version": "memory-ranking-v1",
+          "request_digest_version": "memory-request-v1",
+          "receipt_window_ms": "86400000",
+          "grants_digest": "v1:711ff607769b98fd25dcad02900f30f2af7a40b581888c616536c84f529dd2aa"
+        }
+      }
+    },
+    {
+      "name": "scope-agent-only",
+      "entry": {
+        "binding": "notes",
+        "tenant": "@root",
+        "generation": 1,
+        "state": "active",
+        "graph": "notes_graph",
+        "evidence_collection": null,
+        "schema_version": "memory-schema-v1",
+        "ranking_version": "memory-ranking-v1",
+        "digest_version": "memory-request-v1",
+        "receipt_window_ms": 86400000,
+        "grants": [
+          {
+            "principal": "abcdefghij27",
+            "scopes": [
+              {
+                "agent": "z"
+              }
+            ]
+          }
+        ]
+      },
+      "expected": {
+        "holder": "notes_graph",
+        "properties": {
+          "record_schema": "memory-binding-record:v1",
+          "tenant": "@root",
+          "binding": "notes",
+          "generation": "1",
+          "state": "active",
+          "graph": "notes_graph",
+          "memory_schema": "memory-schema-v1",
+          "ranking_version": "memory-ranking-v1",
+          "request_digest_version": "memory-request-v1",
+          "receipt_window_ms": "86400000",
+          "grants_digest": "v1:ba9042158a8a38f4d2d29798add57418b3eaf7a89b3877b95ba991273333b4cf"
+        }
+      }
+    },
+    {
+      "name": "scope-with-session",
+      "entry": {
+        "binding": "notes",
+        "tenant": "@root",
+        "generation": 1,
+        "state": "active",
+        "graph": "notes_graph",
+        "evidence_collection": null,
+        "schema_version": "memory-schema-v1",
+        "ranking_version": "memory-ranking-v1",
+        "digest_version": "memory-request-v1",
+        "receipt_window_ms": 86400000,
+        "grants": [
+          {
+            "principal": "abcdefghij27",
+            "scopes": [
+              {
+                "agent": "a",
+                "user": "u",
+                "session": "s"
+              }
+            ]
+          }
+        ]
+      },
+      "expected": {
+        "holder": "notes_graph",
+        "properties": {
+          "record_schema": "memory-binding-record:v1",
+          "tenant": "@root",
+          "binding": "notes",
+          "generation": "1",
+          "state": "active",
+          "graph": "notes_graph",
+          "memory_schema": "memory-schema-v1",
+          "ranking_version": "memory-ranking-v1",
+          "request_digest_version": "memory-request-v1",
+          "receipt_window_ms": "86400000",
+          "grants_digest": "v1:5eab0af80dbb1bd63205aed7729281ec327869f76c88ec7a58d17b172ab03966"
+        }
+      }
+    },
+    {
+      "name": "grants-plain",
+      "entry": {
+        "binding": "notes",
+        "tenant": "@root",
+        "generation": 1,
+        "state": "active",
+        "graph": "notes_graph",
+        "evidence_collection": null,
+        "schema_version": "memory-schema-v1",
+        "ranking_version": "memory-ranking-v1",
+        "digest_version": "memory-request-v1",
+        "receipt_window_ms": 86400000,
+        "grants": [
+          {
+            "principal": "abcdefghij27",
+            "scopes": [
+              {
+                "agent": "c"
+              }
+            ]
+          }
+        ]
+      },
+      "expected": {
+        "holder": "notes_graph",
+        "properties": {
+          "record_schema": "memory-binding-record:v1",
+          "tenant": "@root",
+          "binding": "notes",
+          "generation": "1",
+          "state": "active",
+          "graph": "notes_graph",
+          "memory_schema": "memory-schema-v1",
+          "ranking_version": "memory-ranking-v1",
+          "request_digest_version": "memory-request-v1",
+          "receipt_window_ms": "86400000",
+          "grants_digest": "v1:f567d9dd44e7c3eb2027f756c63e94a174eddf15ad38822df9931d28f11e1ee7"
+        }
+      }
+    },
+    {
+      "name": "grants-raw-access",
+      "entry": {
+        "binding": "notes",
+        "tenant": "@root",
+        "generation": 1,
+        "state": "active",
+        "graph": "notes_graph",
+        "evidence_collection": null,
+        "schema_version": "memory-schema-v1",
+        "ranking_version": "memory-ranking-v1",
+        "digest_version": "memory-request-v1",
+        "receipt_window_ms": 86400000,
+        "grants": [
+          {
+            "principal": "abcdefghij27",
+            "scopes": [
+              {
+                "agent": "c"
+              }
+            ],
+            "raw_access": true
+          }
+        ]
+      },
+      "expected": {
+        "holder": "notes_graph",
+        "properties": {
+          "record_schema": "memory-binding-record:v1",
+          "tenant": "@root",
+          "binding": "notes",
+          "generation": "1",
+          "state": "active",
+          "graph": "notes_graph",
+          "memory_schema": "memory-schema-v1",
+          "ranking_version": "memory-ranking-v1",
+          "request_digest_version": "memory-request-v1",
+          "receipt_window_ms": "86400000",
+          "grants_digest": "v1:89ba61b0c04ec12fe02d41a0386719a66a82a0eeadcc230175aa7128f721c761"
+        }
+      }
+    },
+    {
+      "name": "two-grants-in-order",
+      "entry": {
+        "binding": "notes",
+        "tenant": "@root",
+        "generation": 1,
+        "state": "active",
+        "graph": "notes_graph",
+        "evidence_collection": null,
+        "schema_version": "memory-schema-v1",
+        "ranking_version": "memory-ranking-v1",
+        "digest_version": "memory-request-v1",
+        "receipt_window_ms": 86400000,
+        "grants": [
+          {
+            "principal": "abcdefghij27",
+            "scopes": [
+              {
+                "agent": "a"
+              }
+            ]
+          },
+          {
+            "principal": "bcdefghij234",
+            "scopes": [
+              {
+                "agent": "b"
+              }
+            ]
+          }
+        ]
+      },
+      "expected": {
+        "holder": "notes_graph",
+        "properties": {
+          "record_schema": "memory-binding-record:v1",
+          "tenant": "@root",
+          "binding": "notes",
+          "generation": "1",
+          "state": "active",
+          "graph": "notes_graph",
+          "memory_schema": "memory-schema-v1",
+          "ranking_version": "memory-ranking-v1",
+          "request_digest_version": "memory-request-v1",
+          "receipt_window_ms": "86400000",
+          "grants_digest": "v1:58f793533054ea86708210f03b6b0e441b8d48f7a9111bfea640ef1bfa47c075"
+        }
+      }
+    },
+    {
+      "name": "two-grants-reordered",
+      "entry": {
+        "binding": "notes",
+        "tenant": "@root",
+        "generation": 1,
+        "state": "active",
+        "graph": "notes_graph",
+        "evidence_collection": null,
+        "schema_version": "memory-schema-v1",
+        "ranking_version": "memory-ranking-v1",
+        "digest_version": "memory-request-v1",
+        "receipt_window_ms": 86400000,
+        "grants": [
+          {
+            "principal": "bcdefghij234",
+            "scopes": [
+              {
+                "agent": "b"
+              }
+            ]
+          },
+          {
+            "principal": "abcdefghij27",
+            "scopes": [
+              {
+                "agent": "a"
+              }
+            ]
+          }
+        ]
+      },
+      "expected": {
+        "holder": "notes_graph",
+        "properties": {
+          "record_schema": "memory-binding-record:v1",
+          "tenant": "@root",
+          "binding": "notes",
+          "generation": "1",
+          "state": "active",
+          "graph": "notes_graph",
+          "memory_schema": "memory-schema-v1",
+          "ranking_version": "memory-ranking-v1",
+          "request_digest_version": "memory-request-v1",
+          "receipt_window_ms": "86400000",
+          "grants_digest": "v1:254dd4c98a6d8ce78b26f110c54999783c10ce388294c037836f8b75887ea946"
+        }
+      }
+    },
+    {
+      "name": "retired-no-grants",
+      "entry": {
+        "binding": "notes",
+        "tenant": "@root",
+        "generation": 3,
+        "state": "retired",
+        "graph": "notes_graph",
+        "evidence_collection": null,
+        "schema_version": "memory-schema-v1",
+        "ranking_version": "memory-ranking-v1",
+        "digest_version": "memory-request-v1",
+        "receipt_window_ms": 86400000,
+        "grants": [],
+        "retired_at_ms": 1730000000000
+      },
+      "expected": {
+        "holder": "notes_graph",
+        "properties": {
+          "record_schema": "memory-binding-record:v1",
+          "tenant": "@root",
+          "binding": "notes",
+          "generation": "3",
+          "state": "retired",
+          "graph": "notes_graph",
+          "memory_schema": "memory-schema-v1",
+          "ranking_version": "memory-ranking-v1",
+          "request_digest_version": "memory-request-v1",
+          "receipt_window_ms": "86400000",
+          "grants_digest": "v1:94c287f855405a8ba5cbb357529deb0b1bfeb17a3af994d23adafeb849c11272",
+          "retired_at_ms": "1730000000000"
+        }
+      }
+    },
+    {
+      "name": "tenant-evidence-two-scopes",
+      "entry": {
+        "binding": "team_notes",
+        "tenant": "0123456789abcdef0123456789abcdef",
+        "generation": 7,
+        "state": "active",
+        "graph": "team_graph",
+        "evidence_collection": "team_ev",
+        "schema_version": "memory-schema-v1",
+        "ranking_version": "memory-ranking-v1",
+        "digest_version": "memory-request-v1",
+        "receipt_window_ms": 2592000000,
+        "grants": [
+          {
+            "principal": "cdefghij2345",
+            "scopes": [
+              {
+                "agent": "a",
+                "user": "u"
+              },
+              {
+                "agent": "a",
+                "user": "v",
+                "session": "s"
+              }
+            ]
+          }
+        ]
+      },
+      "expected": {
+        "holder": "t0123456789abcdef0123456789abcdef__team_graph",
+        "properties": {
+          "record_schema": "memory-binding-record:v1",
+          "tenant": "0123456789abcdef0123456789abcdef",
+          "binding": "team_notes",
+          "generation": "7",
+          "state": "active",
+          "graph": "team_graph",
+          "memory_schema": "memory-schema-v1",
+          "ranking_version": "memory-ranking-v1",
+          "request_digest_version": "memory-request-v1",
+          "receipt_window_ms": "2592000000",
+          "grants_digest": "v1:e243afc79c7261294127eed7459531ea0a1f542e32fe30ef07028512d4abc97d",
+          "evidence": "team_ev"
+        }
+      }
+    },
+    {
+      "name": "generation-and-window-boundaries",
+      "entry": {
+        "binding": "notes",
+        "tenant": "@root",
+        "generation": 9223372036854775807,
+        "state": "active",
+        "graph": "notes_graph",
+        "evidence_collection": null,
+        "schema_version": "memory-schema-v1",
+        "ranking_version": "memory-ranking-v1",
+        "digest_version": "memory-request-v1",
+        "receipt_window_ms": 1,
+        "grants": [
+          {
+            "principal": "cdefghij2345",
+            "scopes": [
+              {
+                "agent": "edge"
+              }
+            ]
+          }
+        ]
+      },
+      "expected": {
+        "holder": "notes_graph",
+        "properties": {
+          "record_schema": "memory-binding-record:v1",
+          "tenant": "@root",
+          "binding": "notes",
+          "generation": "9223372036854775807",
+          "state": "active",
+          "graph": "notes_graph",
+          "memory_schema": "memory-schema-v1",
+          "ranking_version": "memory-ranking-v1",
+          "request_digest_version": "memory-request-v1",
+          "receipt_window_ms": "1",
+          "grants_digest": "v1:0a56c4cdd8bfb82bc54899a07061bc56b9257cca02005ef907b3e55d48a01770"
+        }
+      }
+    }
+  ],
+  "malformed": [
+    {
+      "name": "no-label",
+      "holder": "notes_graph",
+      "node": {
+        "labels": [],
+        "properties": {
+          "record_schema": "memory-binding-record:v1",
+          "tenant": "@root",
+          "binding": "notes",
+          "generation": "1",
+          "state": "active",
+          "graph": "notes_graph",
+          "memory_schema": "memory-schema-v1",
+          "ranking_version": "memory-ranking-v1",
+          "request_digest_version": "memory-request-v1",
+          "receipt_window_ms": "86400000",
+          "grants_digest": "v1:711ff607769b98fd25dcad02900f30f2af7a40b581888c616536c84f529dd2aa"
+        },
+        "expires_at_ms": null
+      }
+    },
+    {
+      "name": "extra-label",
+      "holder": "notes_graph",
+      "node": {
+        "labels": [
+          "VliteMemoryBinding",
+          "VliteMemory"
+        ],
+        "properties": {
+          "record_schema": "memory-binding-record:v1",
+          "tenant": "@root",
+          "binding": "notes",
+          "generation": "1",
+          "state": "active",
+          "graph": "notes_graph",
+          "memory_schema": "memory-schema-v1",
+          "ranking_version": "memory-ranking-v1",
+          "request_digest_version": "memory-request-v1",
+          "receipt_window_ms": "86400000",
+          "grants_digest": "v1:711ff607769b98fd25dcad02900f30f2af7a40b581888c616536c84f529dd2aa"
+        },
+        "expires_at_ms": null
+      }
+    },
+    {
+      "name": "wrong-label",
+      "holder": "notes_graph",
+      "node": {
+        "labels": [
+          "VliteMemoryScope"
+        ],
+        "properties": {
+          "record_schema": "memory-binding-record:v1",
+          "tenant": "@root",
+          "binding": "notes",
+          "generation": "1",
+          "state": "active",
+          "graph": "notes_graph",
+          "memory_schema": "memory-schema-v1",
+          "ranking_version": "memory-ranking-v1",
+          "request_digest_version": "memory-request-v1",
+          "receipt_window_ms": "86400000",
+          "grants_digest": "v1:711ff607769b98fd25dcad02900f30f2af7a40b581888c616536c84f529dd2aa"
+        },
+        "expires_at_ms": null
+      }
+    },
+    {
+      "name": "expiry-present",
+      "holder": "notes_graph",
+      "node": {
+        "labels": [
+          "VliteMemoryBinding"
+        ],
+        "properties": {
+          "record_schema": "memory-binding-record:v1",
+          "tenant": "@root",
+          "binding": "notes",
+          "generation": "1",
+          "state": "active",
+          "graph": "notes_graph",
+          "memory_schema": "memory-schema-v1",
+          "ranking_version": "memory-ranking-v1",
+          "request_digest_version": "memory-request-v1",
+          "receipt_window_ms": "86400000",
+          "grants_digest": "v1:711ff607769b98fd25dcad02900f30f2af7a40b581888c616536c84f529dd2aa"
+        },
+        "expires_at_ms": 4102444800000
+      }
+    },
+    {
+      "name": "holder-other-graph",
+      "holder": "other_graph",
+      "node": {
+        "labels": [
+          "VliteMemoryBinding"
+        ],
+        "properties": {
+          "record_schema": "memory-binding-record:v1",
+          "tenant": "@root",
+          "binding": "notes",
+          "generation": "1",
+          "state": "active",
+          "graph": "notes_graph",
+          "memory_schema": "memory-schema-v1",
+          "ranking_version": "memory-ranking-v1",
+          "request_digest_version": "memory-request-v1",
+          "receipt_window_ms": "86400000",
+          "grants_digest": "v1:711ff607769b98fd25dcad02900f30f2af7a40b581888c616536c84f529dd2aa"
+        },
+        "expires_at_ms": null
+      }
+    },
+    {
+      "name": "tenant-record-in-unqualified-graph",
+      "holder": "team_graph",
+      "node": {
+        "labels": [
+          "VliteMemoryBinding"
+        ],
+        "properties": {
+          "record_schema": "memory-binding-record:v1",
+          "tenant": "0123456789abcdef0123456789abcdef",
+          "binding": "team_notes",
+          "generation": "7",
+          "state": "active",
+          "graph": "team_graph",
+          "memory_schema": "memory-schema-v1",
+          "ranking_version": "memory-ranking-v1",
+          "request_digest_version": "memory-request-v1",
+          "receipt_window_ms": "2592000000",
+          "grants_digest": "v1:e243afc79c7261294127eed7459531ea0a1f542e32fe30ef07028512d4abc97d",
+          "evidence": "team_ev"
+        },
+        "expires_at_ms": null
+      }
+    },
+    {
+      "name": "extra-property",
+      "holder": "notes_graph",
+      "node": {
+        "labels": [
+          "VliteMemoryBinding"
+        ],
+        "properties": {
+          "record_schema": "memory-binding-record:v1",
+          "tenant": "@root",
+          "binding": "notes",
+          "generation": "1",
+          "state": "active",
+          "graph": "notes_graph",
+          "memory_schema": "memory-schema-v1",
+          "ranking_version": "memory-ranking-v1",
+          "request_digest_version": "memory-request-v1",
+          "receipt_window_ms": "86400000",
+          "grants_digest": "v1:711ff607769b98fd25dcad02900f30f2af7a40b581888c616536c84f529dd2aa",
+          "extra": "x"
+        },
+        "expires_at_ms": null
+      }
+    },
+    {
+      "name": "missing-record-schema",
+      "holder": "notes_graph",
+      "node": {
+        "labels": [
+          "VliteMemoryBinding"
+        ],
+        "properties": {
+          "tenant": "@root",
+          "binding": "notes",
+          "generation": "1",
+          "state": "active",
+          "graph": "notes_graph",
+          "memory_schema": "memory-schema-v1",
+          "ranking_version": "memory-ranking-v1",
+          "request_digest_version": "memory-request-v1",
+          "receipt_window_ms": "86400000",
+          "grants_digest": "v1:711ff607769b98fd25dcad02900f30f2af7a40b581888c616536c84f529dd2aa"
+        },
+        "expires_at_ms": null
+      }
+    },
+    {
+      "name": "missing-tenant",
+      "holder": "notes_graph",
+      "node": {
+        "labels": [
+          "VliteMemoryBinding"
+        ],
+        "properties": {
+          "record_schema": "memory-binding-record:v1",
+          "binding": "notes",
+          "generation": "1",
+          "state": "active",
+          "graph": "notes_graph",
+          "memory_schema": "memory-schema-v1",
+          "ranking_version": "memory-ranking-v1",
+          "request_digest_version": "memory-request-v1",
+          "receipt_window_ms": "86400000",
+          "grants_digest": "v1:711ff607769b98fd25dcad02900f30f2af7a40b581888c616536c84f529dd2aa"
+        },
+        "expires_at_ms": null
+      }
+    },
+    {
+      "name": "missing-binding",
+      "holder": "notes_graph",
+      "node": {
+        "labels": [
+          "VliteMemoryBinding"
+        ],
+        "properties": {
+          "record_schema": "memory-binding-record:v1",
+          "tenant": "@root",
+          "generation": "1",
+          "state": "active",
+          "graph": "notes_graph",
+          "memory_schema": "memory-schema-v1",
+          "ranking_version": "memory-ranking-v1",
+          "request_digest_version": "memory-request-v1",
+          "receipt_window_ms": "86400000",
+          "grants_digest": "v1:711ff607769b98fd25dcad02900f30f2af7a40b581888c616536c84f529dd2aa"
+        },
+        "expires_at_ms": null
+      }
+    },
+    {
+      "name": "missing-generation",
+      "holder": "notes_graph",
+      "node": {
+        "labels": [
+          "VliteMemoryBinding"
+        ],
+        "properties": {
+          "record_schema": "memory-binding-record:v1",
+          "tenant": "@root",
+          "binding": "notes",
+          "state": "active",
+          "graph": "notes_graph",
+          "memory_schema": "memory-schema-v1",
+          "ranking_version": "memory-ranking-v1",
+          "request_digest_version": "memory-request-v1",
+          "receipt_window_ms": "86400000",
+          "grants_digest": "v1:711ff607769b98fd25dcad02900f30f2af7a40b581888c616536c84f529dd2aa"
+        },
+        "expires_at_ms": null
+      }
+    },
+    {
+      "name": "missing-state",
+      "holder": "notes_graph",
+      "node": {
+        "labels": [
+          "VliteMemoryBinding"
+        ],
+        "properties": {
+          "record_schema": "memory-binding-record:v1",
+          "tenant": "@root",
+          "binding": "notes",
+          "generation": "1",
+          "graph": "notes_graph",
+          "memory_schema": "memory-schema-v1",
+          "ranking_version": "memory-ranking-v1",
+          "request_digest_version": "memory-request-v1",
+          "receipt_window_ms": "86400000",
+          "grants_digest": "v1:711ff607769b98fd25dcad02900f30f2af7a40b581888c616536c84f529dd2aa"
+        },
+        "expires_at_ms": null
+      }
+    },
+    {
+      "name": "missing-graph",
+      "holder": "notes_graph",
+      "node": {
+        "labels": [
+          "VliteMemoryBinding"
+        ],
+        "properties": {
+          "record_schema": "memory-binding-record:v1",
+          "tenant": "@root",
+          "binding": "notes",
+          "generation": "1",
+          "state": "active",
+          "memory_schema": "memory-schema-v1",
+          "ranking_version": "memory-ranking-v1",
+          "request_digest_version": "memory-request-v1",
+          "receipt_window_ms": "86400000",
+          "grants_digest": "v1:711ff607769b98fd25dcad02900f30f2af7a40b581888c616536c84f529dd2aa"
+        },
+        "expires_at_ms": null
+      }
+    },
+    {
+      "name": "missing-memory-schema",
+      "holder": "notes_graph",
+      "node": {
+        "labels": [
+          "VliteMemoryBinding"
+        ],
+        "properties": {
+          "record_schema": "memory-binding-record:v1",
+          "tenant": "@root",
+          "binding": "notes",
+          "generation": "1",
+          "state": "active",
+          "graph": "notes_graph",
+          "ranking_version": "memory-ranking-v1",
+          "request_digest_version": "memory-request-v1",
+          "receipt_window_ms": "86400000",
+          "grants_digest": "v1:711ff607769b98fd25dcad02900f30f2af7a40b581888c616536c84f529dd2aa"
+        },
+        "expires_at_ms": null
+      }
+    },
+    {
+      "name": "missing-ranking-version",
+      "holder": "notes_graph",
+      "node": {
+        "labels": [
+          "VliteMemoryBinding"
+        ],
+        "properties": {
+          "record_schema": "memory-binding-record:v1",
+          "tenant": "@root",
+          "binding": "notes",
+          "generation": "1",
+          "state": "active",
+          "graph": "notes_graph",
+          "memory_schema": "memory-schema-v1",
+          "request_digest_version": "memory-request-v1",
+          "receipt_window_ms": "86400000",
+          "grants_digest": "v1:711ff607769b98fd25dcad02900f30f2af7a40b581888c616536c84f529dd2aa"
+        },
+        "expires_at_ms": null
+      }
+    },
+    {
+      "name": "missing-request-digest-version",
+      "holder": "notes_graph",
+      "node": {
+        "labels": [
+          "VliteMemoryBinding"
+        ],
+        "properties": {
+          "record_schema": "memory-binding-record:v1",
+          "tenant": "@root",
+          "binding": "notes",
+          "generation": "1",
+          "state": "active",
+          "graph": "notes_graph",
+          "memory_schema": "memory-schema-v1",
+          "ranking_version": "memory-ranking-v1",
+          "receipt_window_ms": "86400000",
+          "grants_digest": "v1:711ff607769b98fd25dcad02900f30f2af7a40b581888c616536c84f529dd2aa"
+        },
+        "expires_at_ms": null
+      }
+    },
+    {
+      "name": "missing-receipt-window-ms",
+      "holder": "notes_graph",
+      "node": {
+        "labels": [
+          "VliteMemoryBinding"
+        ],
+        "properties": {
+          "record_schema": "memory-binding-record:v1",
+          "tenant": "@root",
+          "binding": "notes",
+          "generation": "1",
+          "state": "active",
+          "graph": "notes_graph",
+          "memory_schema": "memory-schema-v1",
+          "ranking_version": "memory-ranking-v1",
+          "request_digest_version": "memory-request-v1",
+          "grants_digest": "v1:711ff607769b98fd25dcad02900f30f2af7a40b581888c616536c84f529dd2aa"
+        },
+        "expires_at_ms": null
+      }
+    },
+    {
+      "name": "missing-grants-digest",
+      "holder": "notes_graph",
+      "node": {
+        "labels": [
+          "VliteMemoryBinding"
+        ],
+        "properties": {
+          "record_schema": "memory-binding-record:v1",
+          "tenant": "@root",
+          "binding": "notes",
+          "generation": "1",
+          "state": "active",
+          "graph": "notes_graph",
+          "memory_schema": "memory-schema-v1",
+          "ranking_version": "memory-ranking-v1",
+          "request_digest_version": "memory-request-v1",
+          "receipt_window_ms": "86400000"
+        },
+        "expires_at_ms": null
+      }
+    },
+    {
+      "name": "integer-generation",
+      "holder": "notes_graph",
+      "node": {
+        "labels": [
+          "VliteMemoryBinding"
+        ],
+        "properties": {
+          "record_schema": "memory-binding-record:v1",
+          "tenant": "@root",
+          "binding": "notes",
+          "generation": 1,
+          "state": "active",
+          "graph": "notes_graph",
+          "memory_schema": "memory-schema-v1",
+          "ranking_version": "memory-ranking-v1",
+          "request_digest_version": "memory-request-v1",
+          "receipt_window_ms": "86400000",
+          "grants_digest": "v1:711ff607769b98fd25dcad02900f30f2af7a40b581888c616536c84f529dd2aa"
+        },
+        "expires_at_ms": null
+      }
+    },
+    {
+      "name": "integer-window",
+      "holder": "notes_graph",
+      "node": {
+        "labels": [
+          "VliteMemoryBinding"
+        ],
+        "properties": {
+          "record_schema": "memory-binding-record:v1",
+          "tenant": "@root",
+          "binding": "notes",
+          "generation": "1",
+          "state": "active",
+          "graph": "notes_graph",
+          "memory_schema": "memory-schema-v1",
+          "ranking_version": "memory-ranking-v1",
+          "request_digest_version": "memory-request-v1",
+          "receipt_window_ms": 86400000,
+          "grants_digest": "v1:711ff607769b98fd25dcad02900f30f2af7a40b581888c616536c84f529dd2aa"
+        },
+        "expires_at_ms": null
+      }
+    },
+    {
+      "name": "boolean-state",
+      "holder": "notes_graph",
+      "node": {
+        "labels": [
+          "VliteMemoryBinding"
+        ],
+        "properties": {
+          "record_schema": "memory-binding-record:v1",
+          "tenant": "@root",
+          "binding": "notes",
+          "generation": "1",
+          "state": true,
+          "graph": "notes_graph",
+          "memory_schema": "memory-schema-v1",
+          "ranking_version": "memory-ranking-v1",
+          "request_digest_version": "memory-request-v1",
+          "receipt_window_ms": "86400000",
+          "grants_digest": "v1:711ff607769b98fd25dcad02900f30f2af7a40b581888c616536c84f529dd2aa"
+        },
+        "expires_at_ms": null
+      }
+    },
+    {
+      "name": "wrong-record-schema",
+      "holder": "notes_graph",
+      "node": {
+        "labels": [
+          "VliteMemoryBinding"
+        ],
+        "properties": {
+          "record_schema": "memory-binding-record:v2",
+          "tenant": "@root",
+          "binding": "notes",
+          "generation": "1",
+          "state": "active",
+          "graph": "notes_graph",
+          "memory_schema": "memory-schema-v1",
+          "ranking_version": "memory-ranking-v1",
+          "request_digest_version": "memory-request-v1",
+          "receipt_window_ms": "86400000",
+          "grants_digest": "v1:711ff607769b98fd25dcad02900f30f2af7a40b581888c616536c84f529dd2aa"
+        },
+        "expires_at_ms": null
+      }
+    },
+    {
+      "name": "wrong-memory-schema",
+      "holder": "notes_graph",
+      "node": {
+        "labels": [
+          "VliteMemoryBinding"
+        ],
+        "properties": {
+          "record_schema": "memory-binding-record:v1",
+          "tenant": "@root",
+          "binding": "notes",
+          "generation": "1",
+          "state": "active",
+          "graph": "notes_graph",
+          "memory_schema": "memory-schema-v2",
+          "ranking_version": "memory-ranking-v1",
+          "request_digest_version": "memory-request-v1",
+          "receipt_window_ms": "86400000",
+          "grants_digest": "v1:711ff607769b98fd25dcad02900f30f2af7a40b581888c616536c84f529dd2aa"
+        },
+        "expires_at_ms": null
+      }
+    },
+    {
+      "name": "wrong-ranking-version",
+      "holder": "notes_graph",
+      "node": {
+        "labels": [
+          "VliteMemoryBinding"
+        ],
+        "properties": {
+          "record_schema": "memory-binding-record:v1",
+          "tenant": "@root",
+          "binding": "notes",
+          "generation": "1",
+          "state": "active",
+          "graph": "notes_graph",
+          "memory_schema": "memory-schema-v1",
+          "ranking_version": "memory-ranking-v2",
+          "request_digest_version": "memory-request-v1",
+          "receipt_window_ms": "86400000",
+          "grants_digest": "v1:711ff607769b98fd25dcad02900f30f2af7a40b581888c616536c84f529dd2aa"
+        },
+        "expires_at_ms": null
+      }
+    },
+    {
+      "name": "wrong-digest-version",
+      "holder": "notes_graph",
+      "node": {
+        "labels": [
+          "VliteMemoryBinding"
+        ],
+        "properties": {
+          "record_schema": "memory-binding-record:v1",
+          "tenant": "@root",
+          "binding": "notes",
+          "generation": "1",
+          "state": "active",
+          "graph": "notes_graph",
+          "memory_schema": "memory-schema-v1",
+          "ranking_version": "memory-ranking-v1",
+          "request_digest_version": "memory-request-v2",
+          "receipt_window_ms": "86400000",
+          "grants_digest": "v1:711ff607769b98fd25dcad02900f30f2af7a40b581888c616536c84f529dd2aa"
+        },
+        "expires_at_ms": null
+      }
+    },
+    {
+      "name": "tenant-uppercase-hex",
+      "holder": "t0123456789abcdef0123456789abcdef__team_graph",
+      "node": {
+        "labels": [
+          "VliteMemoryBinding"
+        ],
+        "properties": {
+          "record_schema": "memory-binding-record:v1",
+          "tenant": "0123456789ABCDEF0123456789ABCDEF",
+          "binding": "team_notes",
+          "generation": "7",
+          "state": "active",
+          "graph": "team_graph",
+          "memory_schema": "memory-schema-v1",
+          "ranking_version": "memory-ranking-v1",
+          "request_digest_version": "memory-request-v1",
+          "receipt_window_ms": "2592000000",
+          "grants_digest": "v1:e243afc79c7261294127eed7459531ea0a1f542e32fe30ef07028512d4abc97d",
+          "evidence": "team_ev"
+        },
+        "expires_at_ms": null
+      }
+    },
+    {
+      "name": "tenant-short",
+      "holder": "notes_graph",
+      "node": {
+        "labels": [
+          "VliteMemoryBinding"
+        ],
+        "properties": {
+          "record_schema": "memory-binding-record:v1",
+          "tenant": "0123456789abcdef0123456789abcde",
+          "binding": "notes",
+          "generation": "1",
+          "state": "active",
+          "graph": "notes_graph",
+          "memory_schema": "memory-schema-v1",
+          "ranking_version": "memory-ranking-v1",
+          "request_digest_version": "memory-request-v1",
+          "receipt_window_ms": "86400000",
+          "grants_digest": "v1:711ff607769b98fd25dcad02900f30f2af7a40b581888c616536c84f529dd2aa"
+        },
+        "expires_at_ms": null
+      }
+    },
+    {
+      "name": "tenant-uppercase-root",
+      "holder": "notes_graph",
+      "node": {
+        "labels": [
+          "VliteMemoryBinding"
+        ],
+        "properties": {
+          "record_schema": "memory-binding-record:v1",
+          "tenant": "@ROOT",
+          "binding": "notes",
+          "generation": "1",
+          "state": "active",
+          "graph": "notes_graph",
+          "memory_schema": "memory-schema-v1",
+          "ranking_version": "memory-ranking-v1",
+          "request_digest_version": "memory-request-v1",
+          "receipt_window_ms": "86400000",
+          "grants_digest": "v1:711ff607769b98fd25dcad02900f30f2af7a40b581888c616536c84f529dd2aa"
+        },
+        "expires_at_ms": null
+      }
+    },
+    {
+      "name": "binding-uppercase",
+      "holder": "notes_graph",
+      "node": {
+        "labels": [
+          "VliteMemoryBinding"
+        ],
+        "properties": {
+          "record_schema": "memory-binding-record:v1",
+          "tenant": "@root",
+          "binding": "Notes",
+          "generation": "1",
+          "state": "active",
+          "graph": "notes_graph",
+          "memory_schema": "memory-schema-v1",
+          "ranking_version": "memory-ranking-v1",
+          "request_digest_version": "memory-request-v1",
+          "receipt_window_ms": "86400000",
+          "grants_digest": "v1:711ff607769b98fd25dcad02900f30f2af7a40b581888c616536c84f529dd2aa"
+        },
+        "expires_at_ms": null
+      }
+    },
+    {
+      "name": "binding-empty",
+      "holder": "notes_graph",
+      "node": {
+        "labels": [
+          "VliteMemoryBinding"
+        ],
+        "properties": {
+          "record_schema": "memory-binding-record:v1",
+          "tenant": "@root",
+          "binding": "",
+          "generation": "1",
+          "state": "active",
+          "graph": "notes_graph",
+          "memory_schema": "memory-schema-v1",
+          "ranking_version": "memory-ranking-v1",
+          "request_digest_version": "memory-request-v1",
+          "receipt_window_ms": "86400000",
+          "grants_digest": "v1:711ff607769b98fd25dcad02900f30f2af7a40b581888c616536c84f529dd2aa"
+        },
+        "expires_at_ms": null
+      }
+    },
+    {
+      "name": "binding-too-long",
+      "holder": "notes_graph",
+      "node": {
+        "labels": [
+          "VliteMemoryBinding"
+        ],
+        "properties": {
+          "record_schema": "memory-binding-record:v1",
+          "tenant": "@root",
+          "binding": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+          "generation": "1",
+          "state": "active",
+          "graph": "notes_graph",
+          "memory_schema": "memory-schema-v1",
+          "ranking_version": "memory-ranking-v1",
+          "request_digest_version": "memory-request-v1",
+          "receipt_window_ms": "86400000",
+          "grants_digest": "v1:711ff607769b98fd25dcad02900f30f2af7a40b581888c616536c84f529dd2aa"
+        },
+        "expires_at_ms": null
+      }
+    },
+    {
+      "name": "graph-invalid",
+      "holder": "notes_graph",
+      "node": {
+        "labels": [
+          "VliteMemoryBinding"
+        ],
+        "properties": {
+          "record_schema": "memory-binding-record:v1",
+          "tenant": "@root",
+          "binding": "notes",
+          "generation": "1",
+          "state": "active",
+          "graph": "1graph",
+          "memory_schema": "memory-schema-v1",
+          "ranking_version": "memory-ranking-v1",
+          "request_digest_version": "memory-request-v1",
+          "receipt_window_ms": "86400000",
+          "grants_digest": "v1:711ff607769b98fd25dcad02900f30f2af7a40b581888c616536c84f529dd2aa"
+        },
+        "expires_at_ms": null
+      }
+    },
+    {
+      "name": "graph-tenant-qualified",
+      "holder": "notes_graph",
+      "node": {
+        "labels": [
+          "VliteMemoryBinding"
+        ],
+        "properties": {
+          "record_schema": "memory-binding-record:v1",
+          "tenant": "@root",
+          "binding": "notes",
+          "generation": "1",
+          "state": "active",
+          "graph": "t0123456789abcdef0123456789abcdef__g",
+          "memory_schema": "memory-schema-v1",
+          "ranking_version": "memory-ranking-v1",
+          "request_digest_version": "memory-request-v1",
+          "receipt_window_ms": "86400000",
+          "grants_digest": "v1:711ff607769b98fd25dcad02900f30f2af7a40b581888c616536c84f529dd2aa"
+        },
+        "expires_at_ms": null
+      }
+    },
+    {
+      "name": "evidence-default",
+      "holder": "notes_graph",
+      "node": {
+        "labels": [
+          "VliteMemoryBinding"
+        ],
+        "properties": {
+          "record_schema": "memory-binding-record:v1",
+          "tenant": "@root",
+          "binding": "notes",
+          "generation": "1",
+          "state": "active",
+          "graph": "notes_graph",
+          "memory_schema": "memory-schema-v1",
+          "ranking_version": "memory-ranking-v1",
+          "request_digest_version": "memory-request-v1",
+          "receipt_window_ms": "86400000",
+          "grants_digest": "v1:711ff607769b98fd25dcad02900f30f2af7a40b581888c616536c84f529dd2aa",
+          "evidence": "default"
+        },
+        "expires_at_ms": null
+      }
+    },
+    {
+      "name": "evidence-invalid",
+      "holder": "notes_graph",
+      "node": {
+        "labels": [
+          "VliteMemoryBinding"
+        ],
+        "properties": {
+          "record_schema": "memory-binding-record:v1",
+          "tenant": "@root",
+          "binding": "notes",
+          "generation": "1",
+          "state": "active",
+          "graph": "notes_graph",
+          "memory_schema": "memory-schema-v1",
+          "ranking_version": "memory-ranking-v1",
+          "request_digest_version": "memory-request-v1",
+          "receipt_window_ms": "86400000",
+          "grants_digest": "v1:711ff607769b98fd25dcad02900f30f2af7a40b581888c616536c84f529dd2aa",
+          "evidence": "Evidence"
+        },
+        "expires_at_ms": null
+      }
+    },
+    {
+      "name": "evidence-tenant-qualified",
+      "holder": "notes_graph",
+      "node": {
+        "labels": [
+          "VliteMemoryBinding"
+        ],
+        "properties": {
+          "record_schema": "memory-binding-record:v1",
+          "tenant": "@root",
+          "binding": "notes",
+          "generation": "1",
+          "state": "active",
+          "graph": "notes_graph",
+          "memory_schema": "memory-schema-v1",
+          "ranking_version": "memory-ranking-v1",
+          "request_digest_version": "memory-request-v1",
+          "receipt_window_ms": "86400000",
+          "grants_digest": "v1:711ff607769b98fd25dcad02900f30f2af7a40b581888c616536c84f529dd2aa",
+          "evidence": "t0123456789abcdef0123456789abcdef__ev"
+        },
+        "expires_at_ms": null
+      }
+    },
+    {
+      "name": "generation-zero",
+      "holder": "notes_graph",
+      "node": {
+        "labels": [
+          "VliteMemoryBinding"
+        ],
+        "properties": {
+          "record_schema": "memory-binding-record:v1",
+          "tenant": "@root",
+          "binding": "notes",
+          "generation": "0",
+          "state": "active",
+          "graph": "notes_graph",
+          "memory_schema": "memory-schema-v1",
+          "ranking_version": "memory-ranking-v1",
+          "request_digest_version": "memory-request-v1",
+          "receipt_window_ms": "86400000",
+          "grants_digest": "v1:711ff607769b98fd25dcad02900f30f2af7a40b581888c616536c84f529dd2aa"
+        },
+        "expires_at_ms": null
+      }
+    },
+    {
+      "name": "generation-leading-zero",
+      "holder": "notes_graph",
+      "node": {
+        "labels": [
+          "VliteMemoryBinding"
+        ],
+        "properties": {
+          "record_schema": "memory-binding-record:v1",
+          "tenant": "@root",
+          "binding": "notes",
+          "generation": "01",
+          "state": "active",
+          "graph": "notes_graph",
+          "memory_schema": "memory-schema-v1",
+          "ranking_version": "memory-ranking-v1",
+          "request_digest_version": "memory-request-v1",
+          "receipt_window_ms": "86400000",
+          "grants_digest": "v1:711ff607769b98fd25dcad02900f30f2af7a40b581888c616536c84f529dd2aa"
+        },
+        "expires_at_ms": null
+      }
+    },
+    {
+      "name": "generation-plus-sign",
+      "holder": "notes_graph",
+      "node": {
+        "labels": [
+          "VliteMemoryBinding"
+        ],
+        "properties": {
+          "record_schema": "memory-binding-record:v1",
+          "tenant": "@root",
+          "binding": "notes",
+          "generation": "+1",
+          "state": "active",
+          "graph": "notes_graph",
+          "memory_schema": "memory-schema-v1",
+          "ranking_version": "memory-ranking-v1",
+          "request_digest_version": "memory-request-v1",
+          "receipt_window_ms": "86400000",
+          "grants_digest": "v1:711ff607769b98fd25dcad02900f30f2af7a40b581888c616536c84f529dd2aa"
+        },
+        "expires_at_ms": null
+      }
+    },
+    {
+      "name": "generation-space",
+      "holder": "notes_graph",
+      "node": {
+        "labels": [
+          "VliteMemoryBinding"
+        ],
+        "properties": {
+          "record_schema": "memory-binding-record:v1",
+          "tenant": "@root",
+          "binding": "notes",
+          "generation": " 1",
+          "state": "active",
+          "graph": "notes_graph",
+          "memory_schema": "memory-schema-v1",
+          "ranking_version": "memory-ranking-v1",
+          "request_digest_version": "memory-request-v1",
+          "receipt_window_ms": "86400000",
+          "grants_digest": "v1:711ff607769b98fd25dcad02900f30f2af7a40b581888c616536c84f529dd2aa"
+        },
+        "expires_at_ms": null
+      }
+    },
+    {
+      "name": "generation-over-max",
+      "holder": "notes_graph",
+      "node": {
+        "labels": [
+          "VliteMemoryBinding"
+        ],
+        "properties": {
+          "record_schema": "memory-binding-record:v1",
+          "tenant": "@root",
+          "binding": "notes",
+          "generation": "9223372036854775808",
+          "state": "active",
+          "graph": "notes_graph",
+          "memory_schema": "memory-schema-v1",
+          "ranking_version": "memory-ranking-v1",
+          "request_digest_version": "memory-request-v1",
+          "receipt_window_ms": "86400000",
+          "grants_digest": "v1:711ff607769b98fd25dcad02900f30f2af7a40b581888c616536c84f529dd2aa"
+        },
+        "expires_at_ms": null
+      }
+    },
+    {
+      "name": "generation-too-long",
+      "holder": "notes_graph",
+      "node": {
+        "labels": [
+          "VliteMemoryBinding"
+        ],
+        "properties": {
+          "record_schema": "memory-binding-record:v1",
+          "tenant": "@root",
+          "binding": "notes",
+          "generation": "100000000000000000000",
+          "state": "active",
+          "graph": "notes_graph",
+          "memory_schema": "memory-schema-v1",
+          "ranking_version": "memory-ranking-v1",
+          "request_digest_version": "memory-request-v1",
+          "receipt_window_ms": "86400000",
+          "grants_digest": "v1:711ff607769b98fd25dcad02900f30f2af7a40b581888c616536c84f529dd2aa"
+        },
+        "expires_at_ms": null
+      }
+    },
+    {
+      "name": "window-zero",
+      "holder": "notes_graph",
+      "node": {
+        "labels": [
+          "VliteMemoryBinding"
+        ],
+        "properties": {
+          "record_schema": "memory-binding-record:v1",
+          "tenant": "@root",
+          "binding": "notes",
+          "generation": "1",
+          "state": "active",
+          "graph": "notes_graph",
+          "memory_schema": "memory-schema-v1",
+          "ranking_version": "memory-ranking-v1",
+          "request_digest_version": "memory-request-v1",
+          "receipt_window_ms": "0",
+          "grants_digest": "v1:711ff607769b98fd25dcad02900f30f2af7a40b581888c616536c84f529dd2aa"
+        },
+        "expires_at_ms": null
+      }
+    },
+    {
+      "name": "window-over-max",
+      "holder": "notes_graph",
+      "node": {
+        "labels": [
+          "VliteMemoryBinding"
+        ],
+        "properties": {
+          "record_schema": "memory-binding-record:v1",
+          "tenant": "@root",
+          "binding": "notes",
+          "generation": "1",
+          "state": "active",
+          "graph": "notes_graph",
+          "memory_schema": "memory-schema-v1",
+          "ranking_version": "memory-ranking-v1",
+          "request_digest_version": "memory-request-v1",
+          "receipt_window_ms": "2592000001",
+          "grants_digest": "v1:711ff607769b98fd25dcad02900f30f2af7a40b581888c616536c84f529dd2aa"
+        },
+        "expires_at_ms": null
+      }
+    },
+    {
+      "name": "window-negative",
+      "holder": "notes_graph",
+      "node": {
+        "labels": [
+          "VliteMemoryBinding"
+        ],
+        "properties": {
+          "record_schema": "memory-binding-record:v1",
+          "tenant": "@root",
+          "binding": "notes",
+          "generation": "1",
+          "state": "active",
+          "graph": "notes_graph",
+          "memory_schema": "memory-schema-v1",
+          "ranking_version": "memory-ranking-v1",
+          "request_digest_version": "memory-request-v1",
+          "receipt_window_ms": "-1",
+          "grants_digest": "v1:711ff607769b98fd25dcad02900f30f2af7a40b581888c616536c84f529dd2aa"
+        },
+        "expires_at_ms": null
+      }
+    },
+    {
+      "name": "window-empty",
+      "holder": "notes_graph",
+      "node": {
+        "labels": [
+          "VliteMemoryBinding"
+        ],
+        "properties": {
+          "record_schema": "memory-binding-record:v1",
+          "tenant": "@root",
+          "binding": "notes",
+          "generation": "1",
+          "state": "active",
+          "graph": "notes_graph",
+          "memory_schema": "memory-schema-v1",
+          "ranking_version": "memory-ranking-v1",
+          "request_digest_version": "memory-request-v1",
+          "receipt_window_ms": "",
+          "grants_digest": "v1:711ff607769b98fd25dcad02900f30f2af7a40b581888c616536c84f529dd2aa"
+        },
+        "expires_at_ms": null
+      }
+    },
+    {
+      "name": "state-unknown",
+      "holder": "notes_graph",
+      "node": {
+        "labels": [
+          "VliteMemoryBinding"
+        ],
+        "properties": {
+          "record_schema": "memory-binding-record:v1",
+          "tenant": "@root",
+          "binding": "notes",
+          "generation": "1",
+          "state": "paused",
+          "graph": "notes_graph",
+          "memory_schema": "memory-schema-v1",
+          "ranking_version": "memory-ranking-v1",
+          "request_digest_version": "memory-request-v1",
+          "receipt_window_ms": "86400000",
+          "grants_digest": "v1:711ff607769b98fd25dcad02900f30f2af7a40b581888c616536c84f529dd2aa"
+        },
+        "expires_at_ms": null
+      }
+    },
+    {
+      "name": "state-capitalised",
+      "holder": "notes_graph",
+      "node": {
+        "labels": [
+          "VliteMemoryBinding"
+        ],
+        "properties": {
+          "record_schema": "memory-binding-record:v1",
+          "tenant": "@root",
+          "binding": "notes",
+          "generation": "1",
+          "state": "Active",
+          "graph": "notes_graph",
+          "memory_schema": "memory-schema-v1",
+          "ranking_version": "memory-ranking-v1",
+          "request_digest_version": "memory-request-v1",
+          "receipt_window_ms": "86400000",
+          "grants_digest": "v1:711ff607769b98fd25dcad02900f30f2af7a40b581888c616536c84f529dd2aa"
+        },
+        "expires_at_ms": null
+      }
+    },
+    {
+      "name": "active-with-retired-at",
+      "holder": "notes_graph",
+      "node": {
+        "labels": [
+          "VliteMemoryBinding"
+        ],
+        "properties": {
+          "record_schema": "memory-binding-record:v1",
+          "tenant": "@root",
+          "binding": "notes",
+          "generation": "1",
+          "state": "active",
+          "graph": "notes_graph",
+          "memory_schema": "memory-schema-v1",
+          "ranking_version": "memory-ranking-v1",
+          "request_digest_version": "memory-request-v1",
+          "receipt_window_ms": "86400000",
+          "grants_digest": "v1:711ff607769b98fd25dcad02900f30f2af7a40b581888c616536c84f529dd2aa",
+          "retired_at_ms": "1730000000000"
+        },
+        "expires_at_ms": null
+      }
+    },
+    {
+      "name": "retired-without-retired-at",
+      "holder": "notes_graph",
+      "node": {
+        "labels": [
+          "VliteMemoryBinding"
+        ],
+        "properties": {
+          "record_schema": "memory-binding-record:v1",
+          "tenant": "@root",
+          "binding": "notes",
+          "generation": "3",
+          "state": "retired",
+          "graph": "notes_graph",
+          "memory_schema": "memory-schema-v1",
+          "ranking_version": "memory-ranking-v1",
+          "request_digest_version": "memory-request-v1",
+          "receipt_window_ms": "86400000",
+          "grants_digest": "v1:94c287f855405a8ba5cbb357529deb0b1bfeb17a3af994d23adafeb849c11272"
+        },
+        "expires_at_ms": null
+      }
+    },
+    {
+      "name": "retired-at-zero",
+      "holder": "notes_graph",
+      "node": {
+        "labels": [
+          "VliteMemoryBinding"
+        ],
+        "properties": {
+          "record_schema": "memory-binding-record:v1",
+          "tenant": "@root",
+          "binding": "notes",
+          "generation": "3",
+          "state": "retired",
+          "graph": "notes_graph",
+          "memory_schema": "memory-schema-v1",
+          "ranking_version": "memory-ranking-v1",
+          "request_digest_version": "memory-request-v1",
+          "receipt_window_ms": "86400000",
+          "grants_digest": "v1:94c287f855405a8ba5cbb357529deb0b1bfeb17a3af994d23adafeb849c11272",
+          "retired_at_ms": "0"
+        },
+        "expires_at_ms": null
+      }
+    },
+    {
+      "name": "retired-at-leading-zero",
+      "holder": "notes_graph",
+      "node": {
+        "labels": [
+          "VliteMemoryBinding"
+        ],
+        "properties": {
+          "record_schema": "memory-binding-record:v1",
+          "tenant": "@root",
+          "binding": "notes",
+          "generation": "3",
+          "state": "retired",
+          "graph": "notes_graph",
+          "memory_schema": "memory-schema-v1",
+          "ranking_version": "memory-ranking-v1",
+          "request_digest_version": "memory-request-v1",
+          "receipt_window_ms": "86400000",
+          "grants_digest": "v1:94c287f855405a8ba5cbb357529deb0b1bfeb17a3af994d23adafeb849c11272",
+          "retired_at_ms": "0010"
+        },
+        "expires_at_ms": null
+      }
+    },
+    {
+      "name": "digest-without-prefix",
+      "holder": "notes_graph",
+      "node": {
+        "labels": [
+          "VliteMemoryBinding"
+        ],
+        "properties": {
+          "record_schema": "memory-binding-record:v1",
+          "tenant": "@root",
+          "binding": "notes",
+          "generation": "1",
+          "state": "active",
+          "graph": "notes_graph",
+          "memory_schema": "memory-schema-v1",
+          "ranking_version": "memory-ranking-v1",
+          "request_digest_version": "memory-request-v1",
+          "receipt_window_ms": "86400000",
+          "grants_digest": "711ff607769b98fd25dcad02900f30f2af7a40b581888c616536c84f529dd2aa"
+        },
+        "expires_at_ms": null
+      }
+    },
+    {
+      "name": "digest-uppercase",
+      "holder": "notes_graph",
+      "node": {
+        "labels": [
+          "VliteMemoryBinding"
+        ],
+        "properties": {
+          "record_schema": "memory-binding-record:v1",
+          "tenant": "@root",
+          "binding": "notes",
+          "generation": "1",
+          "state": "active",
+          "graph": "notes_graph",
+          "memory_schema": "memory-schema-v1",
+          "ranking_version": "memory-ranking-v1",
+          "request_digest_version": "memory-request-v1",
+          "receipt_window_ms": "86400000",
+          "grants_digest": "v1:711FF607769B98FD25DCAD02900F30F2AF7A40B581888C616536C84F529DD2AA"
+        },
+        "expires_at_ms": null
+      }
+    },
+    {
+      "name": "digest-short",
+      "holder": "notes_graph",
+      "node": {
+        "labels": [
+          "VliteMemoryBinding"
+        ],
+        "properties": {
+          "record_schema": "memory-binding-record:v1",
+          "tenant": "@root",
+          "binding": "notes",
+          "generation": "1",
+          "state": "active",
+          "graph": "notes_graph",
+          "memory_schema": "memory-schema-v1",
+          "ranking_version": "memory-ranking-v1",
+          "request_digest_version": "memory-request-v1",
+          "receipt_window_ms": "86400000",
+          "grants_digest": "v1:711ff607769b98fd25dcad02900f30f2af7a40b581888c616536c84f529dd2a"
+        },
+        "expires_at_ms": null
+      }
+    },
+    {
+      "name": "digest-long",
+      "holder": "notes_graph",
+      "node": {
+        "labels": [
+          "VliteMemoryBinding"
+        ],
+        "properties": {
+          "record_schema": "memory-binding-record:v1",
+          "tenant": "@root",
+          "binding": "notes",
+          "generation": "1",
+          "state": "active",
+          "graph": "notes_graph",
+          "memory_schema": "memory-schema-v1",
+          "ranking_version": "memory-ranking-v1",
+          "request_digest_version": "memory-request-v1",
+          "receipt_window_ms": "86400000",
+          "grants_digest": "v1:711ff607769b98fd25dcad02900f30f2af7a40b581888c616536c84f529dd2aa0"
+        },
+        "expires_at_ms": null
+      }
+    },
+    {
+      "name": "digest-other-version",
+      "holder": "notes_graph",
+      "node": {
+        "labels": [
+          "VliteMemoryBinding"
+        ],
+        "properties": {
+          "record_schema": "memory-binding-record:v1",
+          "tenant": "@root",
+          "binding": "notes",
+          "generation": "1",
+          "state": "active",
+          "graph": "notes_graph",
+          "memory_schema": "memory-schema-v1",
+          "ranking_version": "memory-ranking-v1",
+          "request_digest_version": "memory-request-v1",
+          "receipt_window_ms": "86400000",
+          "grants_digest": "v2:711ff607769b98fd25dcad02900f30f2af7a40b581888c616536c84f529dd2aa"
+        },
+        "expires_at_ms": null
+      }
+    }
+  ]
+}
