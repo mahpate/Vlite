@@ -1165,6 +1165,9 @@ impl VLite for Adapter {
                                 collection,
                                 id,
                                 expected,
+                                &vector,
+                                &payload,
+                                &metadata,
                                 expiry,
                                 crate::current_time_ms(),
                             )?;
