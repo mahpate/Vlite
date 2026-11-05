@@ -1982,3 +1982,72 @@ async fn markers_reach_their_holders_so_a_leak_would_show() {
         );
     }
 }
+
+/// The reserved names a principal that does not hold them must never find
+/// in a list or in the change feed.
+fn hidden_names(principal: &Principal) -> Vec<String> {
+    let holds = |label: &str| principal.held.contains(&label);
+    let mut out = Vec::new();
+    if principal.tenant {
+        if !holds("reserved.tenant.notes") {
+            out.extend(["notes_ev".to_owned(), "notes_graph".to_owned()]);
+        }
+    } else {
+        if !holds("reserved.root.notes") {
+            out.extend(["notes_ev".to_owned(), "notes_graph".to_owned()]);
+        }
+        if !holds("reserved.root.other") {
+            out.extend(["other_ev".to_owned(), "other_graph".to_owned()]);
+        }
+        out.extend([
+            format!("t{TENANT}__notes_ev"),
+            format!("t{TENANT}__notes_graph"),
+        ]);
+    }
+    out
+}
+
+/// Lists and the feed carry no name in the request, so the matrix cannot send
+/// a reserved name to them; what it can check is that none comes back.
+#[tokio::test]
+async fn lists_and_the_feed_never_name_a_reserved_resource_to_a_caller_that_may_not_reach_it() {
+    let mut world = build(true);
+    for principal in &PRINCIPALS {
+        if let Some(role) = principal.session {
+            sign_in(&mut world, principal.name, role, principal.tenant).await;
+        }
+    }
+    seed(&world).await;
+    let mut failures = Vec::new();
+    for principal in &PRINCIPALS {
+        let token = world.token(principal.name);
+        let hidden = hidden_names(principal);
+        for path in ["/v1/collections", "/v1/graphs", "/v1/changes?limit=1000"] {
+            let answer = request(&world.app, token, "GET", path, "").await;
+            let text = String::from_utf8_lossy(&answer.2).into_owned();
+            for name in &hidden {
+                if text.contains(&format!("\"{name}\"")) {
+                    failures.push(format!(
+                        "{}: GET {path} names the reserved {name}: {text}",
+                        principal.name
+                    ));
+                }
+            }
+        }
+    }
+    // The check is able to fail: a holder's lists do carry its own names.
+    for (holder, collection, graph) in [
+        ("raw", "notes_ev", "notes_graph"),
+        ("raw_other", "other_ev", "other_graph"),
+        ("tenant_raw", "notes_ev", "notes_graph"),
+    ] {
+        for (path, name) in [("/v1/collections", collection), ("/v1/graphs", graph)] {
+            let answer = request(&world.app, world.token(holder), "GET", path, "").await;
+            let text = String::from_utf8_lossy(&answer.2).into_owned();
+            if !text.contains(&format!("\"{name}\"")) {
+                failures.push(format!("{holder}: GET {path} must list {name}: {text}"));
+            }
+        }
+    }
+    assert!(failures.is_empty(), "{}", failures.join("\n"));
+}
