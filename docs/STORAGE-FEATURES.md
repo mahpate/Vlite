@@ -263,14 +263,15 @@ use vlite::{Expected, kv::KvPut};
 let mut kv = db.kv_store("agent-memory")?;
 let token = kv.put("pool", "claim/42", b"worker-a", KvPut {
     expected: Expected::Absent,        // create only
-    expires_at_ms: Some(lease_end_ms), // v5 files only
+    expires_at_ms: Some(deadline_ms),  // v5 files only
 })?;
 kv.delete("pool", "claim/42", Expected::Revision(token))?;
 ```
 
 - **Versions** are commit sequences. Use them for compare-and-set
-  (`Expected::Revision`) and as fencing tokens. They change after compaction,
-  upgrade or restore, so re-read the entry after any of those.
+  (`Expected::Revision`). They are revisions within one file lineage, not
+  durable lease-fencing tokens: they change after compaction, upgrade or
+  restore, so re-read the entry after any of those.
 - **Expiry** hides an entry at its deadline. `Expected::Absent` then
   succeeds. Expiry on a v4 file returns `ExpiryRequiresUpgrade`.
 - **Listing** with `view().list(namespace, prefix, after, limit)` returns keys

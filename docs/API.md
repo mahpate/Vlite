@@ -91,10 +91,12 @@ Namespaces are 1..255 UTF-8 bytes and keys 1..1,024; strings are not normalized.
 Values are canonical padded standard base64, at most **1,047,290 decoded bytes**
 (1,396,388 encoded characters); an empty value is valid. Unknown/duplicate JSON
 fields and wrong types are rejected with `invalid_json`; parsed bound or
-canonical-encoding violations return 422 `invalid_input`. Unknown/duplicate
+canonical-encoding violations return 422 `invalid_input`, including a list
+`limit` that is empty, malformed or outside 1..10,000. Unknown/duplicate
 query parameters return 400 `invalid_query`. Query decoding uses form
 semantics: `+` means a space, and a literal plus must be encoded as `%2B`. The
-existing 8 MiB body cap applies.
+existing 8 MiB body cap applies. `HEAD` on the two GET routes behaves like `GET`
+without a body and needs `read`.
 
 List `prefix` defaults to empty (at most 1,024 UTF-8 bytes), `after` is omitted
 or a nonempty key, and `limit` is 1..10,000 (default 100). Keys sort by unsigned
@@ -110,7 +112,12 @@ returns 409 `not_kv_collection`. Sixteen occupied collision-probe slots return
 409 `kv_slots_exhausted`; expiry before v5 returns 409 `upgrade_required`.
 Operation scope, tenant and immutable collection bindings apply before lookup.
 Ordinary record quotas also count KV entries. Mutations are audited without
-keys, namespaces or values. Read-only handles refuse mutations.
+keys, namespaces or values. The audit covers requests that reach the store,
+including a failed compare-and-set and a missing or non-KV collection (logged
+as `(invalid)`); a request rejected while parsing is not audited, only logged
+without its address or content. Read-only handles refuse mutations.
+`GET /v1/capabilities` reports `features.kv: true` for format 5 files; a
+format 4 file still serves ordinary KV without expiry although the flag is false.
 
 Ordinary KV follows configured durability: `full` syncs before acknowledgment,
 `periodic` can lose up to a flush interval on OS crash/power loss, and `none` is

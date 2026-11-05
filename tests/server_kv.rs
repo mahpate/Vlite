@@ -189,8 +189,11 @@ async fn kv_put_expected_and_query_encoding_are_strict() {
     for (expected, code) in [
         (json!("5"), "invalid_input"),
         (json!(""), "invalid_input"),
-        (Value::Null, "invalid_input"),
-        (json!(5), "invalid_input"),
+        (Value::Null, "invalid_json"),
+        (json!(5), "invalid_json"),
+        (json!(false), "invalid_json"),
+        (json!([]), "invalid_json"),
+        (json!({}), "invalid_json"),
         (json!({"revision":"1","extra":2}), "invalid_json"),
     ] {
         let mut input = put("expected");

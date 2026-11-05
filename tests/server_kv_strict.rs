@@ -114,26 +114,44 @@ async fn reject_expected(code: &str, cases: &[&str]) {
     }
 }
 
-// A wrong kind of value (not "any", "absent" or a revision object) is invalid input,
-// like the string "5", the empty string, null and a positive integer in server_kv.rs.
+// A wrong JSON type for `expected` (not a string or an object) is a shape failure and
+// therefore `invalid_json`, like the wrong-typed revision in the wire goldens. A string
+// that is not "any" or "absent" has the right type and is invalid input (server_kv.rs).
 #[tokio::test]
-async fn expected_negative_integer_is_invalid_input() {
-    reject_expected("invalid_input", &["-1"]).await;
+async fn expected_integers_and_floats_are_invalid_json() {
+    reject_expected("invalid_json", &["-1", "0", "42", "0.5", "1e300"]).await;
 }
 
 #[tokio::test]
-async fn expected_arrays_are_invalid_input() {
-    reject_expected("invalid_input", &["[]", r#"["any"]"#]).await;
+async fn expected_arrays_are_invalid_json() {
+    reject_expected(
+        "invalid_json",
+        &["[]", r#"["any"]"#, r#"[{"revision":"1"}]"#],
+    )
+    .await;
 }
 
 #[tokio::test]
-async fn expected_empty_object_is_invalid_input() {
-    reject_expected("invalid_input", &["{}"]).await;
+async fn expected_empty_object_is_invalid_json() {
+    reject_expected("invalid_json", &["{}"]).await;
 }
 
 #[tokio::test]
-async fn expected_booleans_are_invalid_input() {
-    reject_expected("invalid_input", &["true", "false"]).await;
+async fn expected_booleans_and_null_are_invalid_json() {
+    reject_expected("invalid_json", &["true", "false", "null"]).await;
+}
+
+// A syntax error inside a rejected array keeps the extractor's 400 syntax status.
+#[tokio::test]
+async fn expected_array_with_a_syntax_error_is_a_syntax_failure() {
+    let directory = tempfile::tempdir().unwrap();
+    let app = start(directory.path(), &[("n", "sentinel")]);
+    let before = previous(&app, "n", "sentinel").await;
+    let input = r#"{"namespace":"n","key":"sentinel","value_base64":"bmV3","expected":[1,,2]}"#;
+    let (status, body) = raw(&app, "PUT", ENTRY, input.to_owned()).await;
+    assert_eq!(status, 400, "{body}");
+    assert_eq!(body["error"]["code"], "invalid_json", "{body}");
+    assert_eq!(previous(&app, "n", "sentinel").await, before);
 }
 
 // An object with an unknown member is an unknown JSON field.

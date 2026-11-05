@@ -37,7 +37,6 @@ struct Revision {
 enum Expectation {
     Name(String),
     Revision(Revision),
-    Other,
 }
 
 impl<'de> Deserialize<'de> for Expectation {
@@ -47,6 +46,9 @@ impl<'de> Deserialize<'de> for Expectation {
     {
         struct ExpectationVisitor;
 
+        // Any other JSON type (number, boolean, null, array) falls through to the
+        // visitor's default `invalid_type` error, which the extractor reports as
+        // `invalid_json`: a wrong type is a shape failure, not invalid input.
         impl<'de> serde::de::Visitor<'de> for ExpectationVisitor {
             type Value = Expectation;
 
@@ -62,32 +64,16 @@ impl<'de> Deserialize<'de> for Expectation {
                 Ok(Expectation::Name(value))
             }
 
-            fn visit_bool<E>(self, _value: bool) -> Result<Self::Value, E> {
-                Ok(Expectation::Other)
-            }
-
-            fn visit_i64<E>(self, _value: i64) -> Result<Self::Value, E> {
-                Ok(Expectation::Other)
-            }
-
-            fn visit_u64<E>(self, _value: u64) -> Result<Self::Value, E> {
-                Ok(Expectation::Other)
-            }
-
-            fn visit_f64<E>(self, _value: f64) -> Result<Self::Value, E> {
-                Ok(Expectation::Other)
-            }
-
-            fn visit_unit<E>(self) -> Result<Self::Value, E> {
-                Ok(Expectation::Other)
-            }
-
             fn visit_seq<A>(self, mut sequence: A) -> Result<Self::Value, A::Error>
             where
                 A: serde::de::SeqAccess<'de>,
             {
+                // Read the whole array first so a syntax error inside it keeps its 400.
                 while sequence.next_element::<Value>()?.is_some() {}
-                Ok(Expectation::Other)
+                Err(serde::de::Error::invalid_type(
+                    serde::de::Unexpected::Seq,
+                    &self,
+                ))
             }
 
             fn visit_map<A>(self, mut map: A) -> Result<Self::Value, A::Error>
@@ -95,7 +81,7 @@ impl<'de> Deserialize<'de> for Expectation {
                 A: serde::de::MapAccess<'de>,
             {
                 let Some(field) = map.next_key::<String>()? else {
-                    return Ok(Expectation::Other);
+                    return Err(serde::de::Error::missing_field("revision"));
                 };
                 if field != "revision" {
                     return Err(serde::de::Error::unknown_field(&field, &["revision"]));
@@ -131,9 +117,6 @@ impl Expectation {
                 "expected must be any, absent, or a revision object",
             )),
             Self::Revision(revision) => Ok(Expected::Revision(decimal(&revision.revision)?)),
-            Self::Other => Err(unprocessable(
-                "expected must be any, absent, or a revision object",
-            )),
         }
     }
 }
