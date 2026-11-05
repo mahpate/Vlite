@@ -2,9 +2,10 @@
 
 use serde::{Deserialize, Deserializer, de};
 use serde_json::{Value, json};
+use std::ops::ControlFlow;
 use vlite::{
     Database, Error, Expected,
-    kv::{KvEntry, KvPut, MAX_KV_VALUE_BYTES},
+    kv::{KvEntry, KvPut, KvRef, MAX_KV_VALUE_BYTES},
 };
 
 const GET: &str = "vlite_kv_get";
@@ -12,6 +13,12 @@ const PUT: &str = "vlite_kv_put";
 const DELETE: &str = "vlite_kv_delete";
 const LIST: &str = "vlite_kv_list";
 const PAGE_BYTES: usize = 16 * 1024 * 1024;
+
+#[cfg(test)]
+thread_local! {
+    /// Value bytes this thread has base64-encoded for a response.
+    static ENCODED_VALUE_BYTES: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+}
 
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -280,8 +287,27 @@ pub(crate) fn run(
 }
 
 fn entry_json(entry: &KvEntry) -> Value {
-    json!({"key":entry.key,"value_base64":encode_base64(&entry.value),
-        "version":entry.version.to_string(),"expires_at_ms":entry.expires_at_ms.map(|n|n.to_string())})
+    item_json(&entry.key, &entry.value, entry.version, entry.expires_at_ms)
+}
+
+/// One entry of a response: the key, the base64 value, and the decimal
+/// version and deadline.
+fn item_json(key: &str, value: &[u8], version: u64, expires_at_ms: Option<u64>) -> Value {
+    #[cfg(test)]
+    ENCODED_VALUE_BYTES.with(|bytes| bytes.set(bytes.get() + value.len()));
+    json!({"key":key,"value_base64":encode_base64(value),
+        "version":version.to_string(),"expires_at_ms":expires_at_ms.map(|n|n.to_string())})
+}
+
+/// The compact JSON size of `item_json` for `entry`, found without encoding
+/// its value: the item with an empty value plus four base64 characters for
+/// every started group of three value bytes.
+fn item_size(entry: &KvRef<'_>) -> usize {
+    json!({"key":entry.key,"value_base64":"","version":entry.version.to_string(),
+        "expires_at_ms":entry.expires_at_ms.map(|n|n.to_string())})
+    .to_string()
+    .len()
+        + entry.value.len().div_ceil(3) * 4
 }
 
 fn page(db: &Database, request: &List) -> Result<Value, String> {
@@ -292,74 +318,67 @@ fn page(db: &Database, request: &List) -> Result<Value, String> {
         .as_millis()
         .try_into()
         .map_err(|_| "internal_error: system clock exceeds u64 milliseconds")?;
-    batched_page(
+    visit_page(
         request.after.as_deref(),
         request.limit as usize,
-        |after, limit| {
-            view.list_at(&request.namespace, &request.prefix, after, limit, now)
-                .map_err(failure)
+        |after, limit, visit| {
+            view.visit_at(
+                &request.namespace,
+                &request.prefix,
+                after,
+                limit,
+                now,
+                visit,
+            )
+            .map_err(failure)
         },
     )
 }
 
-fn batched_page(
+/// One page of at most `limit` entries and `PAGE_BYTES` of compact JSON, built
+/// from a single scan. `scan` calls its visitor, in key order, for at most
+/// `limit` entries; the visitor stops it at the first entry that does not fit.
+/// An entry's value is measured from the borrow and only encoded when the
+/// entry is added, so what is read is the emitted entries and, at most, the one
+/// that did not fit.
+fn visit_page(
     after: Option<&str>,
     limit: usize,
-    mut fetch: impl FnMut(Option<&str>, usize) -> Result<Vec<KvEntry>, String>,
+    scan: impl FnOnce(
+        Option<&str>,
+        usize,
+        &mut dyn FnMut(KvRef<'_>) -> ControlFlow<()>,
+    ) -> Result<(), String>,
 ) -> Result<Value, String> {
-    let mut entries = Vec::<KvEntry>::new();
-    let mut encoded_bytes = 0;
-    // An empty cursor is a lower bound on every possible page envelope.
-    let envelope = json!({"items":[],"next_after":""}).to_string().len();
-    let target = (limit + 1).min(10_000);
-    while entries.len() < target {
-        let after = entries.last().map(|entry| entry.key.as_str()).or(after);
-        let batch_limit = (target - entries.len()).min(8);
-        let batch = fetch(after, batch_limit)?;
-        let exhausted = batch.len() < batch_limit;
-        for entry in batch {
-            encoded_bytes +=
-                entry_json(&entry).to_string().len() + usize::from(!entries.is_empty());
-            entries.push(entry);
-            if envelope + encoded_bytes > PAGE_BYTES {
-                // This entry cannot fit even without a cursor, and proves continuation.
-                return pack_page(&entries, limit, false);
-            }
-        }
-        if exhausted {
-            break;
-        }
-    }
-    let beyond = if entries.len() == 10_000 {
-        !fetch(entries.last().map(|entry| entry.key.as_str()), 1)?.is_empty()
-    } else {
-        false
-    };
-    pack_page(&entries, limit, beyond)
-}
-
-fn pack_page(entries: &[KvEntry], limit: usize, beyond: bool) -> Result<Value, String> {
     let mut items = Vec::new();
-    let mut encoded_bytes = 0;
-    for (index, entry) in entries.iter().take(limit).enumerate() {
-        let item = entry_json(entry);
-        let item_bytes = item.to_string().len();
-        let more = index + 1 < entries.len() || beyond;
-        let next = more.then_some(entry.key.as_str());
+    let mut item_bytes = 0;
+    // The last emitted key, and whether another live entry follows it.
+    let mut last: Option<(String, bool)> = None;
+    scan(after, limit, &mut |entry| {
+        let bytes = item_size(&entry);
+        // As the last entry of the page it carries the cursor, when more follow.
+        let next = entry.has_next.then_some(entry.key);
         let envelope = json!({"items":[],"next_after":next}).to_string().len();
-        let size = envelope + encoded_bytes + item_bytes + items.len();
+        let size = envelope + item_bytes + bytes + items.len();
         if size > PAGE_BYTES {
-            break;
+            return ControlFlow::Break(());
         }
-        encoded_bytes += item_bytes;
-        items.push(item);
-    }
-    let more = items.len() < entries.len() || beyond;
-    let next = if more {
-        items.last().and_then(|item| item["key"].as_str())
-    } else {
-        None
-    };
+        item_bytes += bytes;
+        items.push(item_json(
+            entry.key,
+            entry.value,
+            entry.version,
+            entry.expires_at_ms,
+        ));
+        last = Some((entry.key.to_owned(), entry.has_next));
+        ControlFlow::Continue(())
+    })?;
+    // The last emitted entry knows whether another live entry follows it: the
+    // one that did not fit, or one beyond `limit`.
+    let next = last
+        .as_ref()
+        .filter(|(_, more)| *more)
+        .map(|(key, _)| key.as_str());
     Ok(json!({"items":items,"next_after":next}))
 }
 
@@ -587,7 +606,7 @@ mod tests {
     }
 
     #[test]
-    fn batched_pages_match_whole_fetch_model() {
+    fn pages_match_whole_fetch_model() {
         for (count, large) in [
             (0, false),
             (1, false),
@@ -636,16 +655,9 @@ mod tests {
                     .collect();
                 for limit in [1, 7, 8, 9, 100, 9_999, 10_000] {
                     let expected = whole_fetch_model(&matching, limit);
-                    let actual = batched_page(after, limit, |after, batch_limit| {
-                        assert!(batch_limit <= 8);
-                        Ok(matching
-                            .iter()
-                            .filter(|entry| after.is_none_or(|after| entry.key.as_str() > after))
-                            .take(batch_limit)
-                            .cloned()
-                            .collect())
-                    })
-                    .unwrap();
+                    let lent = std::cell::Cell::new(0);
+                    let actual =
+                        visit_page(after, limit, scan_over(&entries, prefix, &lent)).unwrap();
                     assert_eq!(
                         actual.to_string(),
                         expected.to_string(),
@@ -656,49 +668,111 @@ mod tests {
         }
     }
 
-    #[test]
-    fn batched_page_stops_cloning_at_the_byte_cut() {
-        let mut fetched = 0;
-        let actual = batched_page(None, 10_000, |after, limit| {
-            assert!(limit <= 8);
-            let start = after.map_or(0, |key| key.parse::<usize>().unwrap() + 1);
-            fetched += limit;
-            Ok((start..start + limit)
-                .map(|index| KvEntry {
-                    key: format!("{index:05}"),
-                    value: vec![0; 1_047_290],
-                    version: 1,
-                    expires_at_ms: None,
+    /// `KvView::visit_at` as documented, over `entries` sorted by key: the
+    /// entries that start with `prefix` and follow `after`, at most `count`,
+    /// each with `has_next` set when another matching entry follows within
+    /// `count + 1`. `lent` counts the entries handed to the visitor.
+    fn scan_over<'a>(
+        entries: &'a [KvEntry],
+        prefix: &'a str,
+        lent: &'a std::cell::Cell<usize>,
+    ) -> impl FnOnce(
+        Option<&str>,
+        usize,
+        &mut dyn FnMut(KvRef<'_>) -> ControlFlow<()>,
+    ) -> Result<(), String>
+    + 'a {
+        move |after, count, visit| {
+            let matching: Vec<&KvEntry> = entries
+                .iter()
+                .filter(|entry| {
+                    entry.key.starts_with(prefix)
+                        && after.is_none_or(|after| entry.key.as_str() > after)
                 })
-                .collect())
-        })
-        .unwrap();
-        assert_eq!(fetched, 16);
-        assert_eq!(actual["items"].as_array().unwrap().len(), 12);
+                .collect();
+            let total = matching.len().min(count + 1);
+            for (index, entry) in matching.iter().take(count).enumerate() {
+                lent.set(lent.get() + 1);
+                let borrowed = KvRef {
+                    key: &entry.key,
+                    value: &entry.value,
+                    version: entry.version,
+                    expires_at_ms: entry.expires_at_ms,
+                    has_next: index + 1 < total,
+                };
+                if visit(borrowed).is_break() {
+                    break;
+                }
+            }
+            Ok(())
+        }
+    }
+
+    // 16 MiB of response holds 12 values of the largest size. Reading is
+    // bounded by the page: the entry that does not fit is measured, never
+    // encoded, and nothing beyond it is touched.
+    #[test]
+    fn a_page_reads_only_what_it_emits() {
+        let entries: Vec<_> = (0..20)
+            .map(|index| KvEntry {
+                key: format!("{index:05}"),
+                value: vec![0; 1_047_290],
+                version: 1,
+                expires_at_ms: None,
+            })
+            .collect();
+        let lent = std::cell::Cell::new(0);
+        ENCODED_VALUE_BYTES.with(|bytes| bytes.set(0));
+        let actual = visit_page(None, 10_000, scan_over(&entries, "", &lent)).unwrap();
+        let emitted = actual["items"].as_array().unwrap().len();
+        assert_eq!(emitted, 12);
         assert_eq!(actual["next_after"], "00011");
+        assert_eq!(
+            ENCODED_VALUE_BYTES.with(std::cell::Cell::get),
+            emitted * 1_047_290,
+            "only emitted values are encoded"
+        );
+        assert_eq!(
+            lent.get(),
+            emitted + 1,
+            "emitted entries plus the one refused"
+        );
         assert!(actual.to_string().len() <= 16_777_216);
     }
 
     #[test]
-    fn batched_page_propagates_fetch_and_peek_errors() {
-        for fail_at in [0, 8, 10_000] {
-            let mut fetched = 0;
-            let result = batched_page(None, 10_000, |_, limit| {
-                if fetched == fail_at {
-                    return Err("io_error: injected list failure".into());
+    fn a_failed_scan_returns_its_error_and_no_page() {
+        let result = visit_page(None, 10_000, |_, _, _| {
+            Err("io_error: injected list failure".into())
+        });
+        assert_eq!(result.unwrap_err(), "io_error: injected list failure");
+    }
+
+    #[test]
+    fn item_size_is_the_compact_size_of_the_item() {
+        let keys = ["k", "a/b", "\"quoted\\\u{1}\n", "\u{e9}\u{4e2d}\u{1f600}"];
+        let versions = [0, 9, 10, u64::MAX];
+        let expiries = [None, Some(0), Some(u64::MAX)];
+        for (round, key) in keys.iter().enumerate() {
+            for length in (0..=40usize).chain([1_000, 1_047_289, 1_047_290]) {
+                let value: Vec<u8> = (0..length).map(|index| (index * 7 + round) as u8).collect();
+                for (&version, &expires_at_ms) in versions.iter().zip(expiries.iter().cycle()) {
+                    let entry = KvRef {
+                        key,
+                        value: &value,
+                        version,
+                        expires_at_ms,
+                        has_next: false,
+                    };
+                    assert_eq!(
+                        item_size(&entry),
+                        item_json(key, &value, version, expires_at_ms)
+                            .to_string()
+                            .len(),
+                        "key {key:?}, {length} value bytes, version {version}, expiry {expires_at_ms:?}"
+                    );
                 }
-                let entries = (fetched..fetched + limit)
-                    .map(|index| KvEntry {
-                        key: format!("{index:05}"),
-                        value: Vec::new(),
-                        version: 1,
-                        expires_at_ms: None,
-                    })
-                    .collect();
-                fetched += limit;
-                Ok(entries)
-            });
-            assert_eq!(result.unwrap_err(), "io_error: injected list failure");
+            }
         }
     }
 
@@ -801,6 +875,10 @@ mod tests {
 
     #[test]
     fn page_exact_encoded_boundary() {
+        let page = |entries: &[KvEntry], limit: usize| {
+            let lent = std::cell::Cell::new(0);
+            visit_page(None, limit, scan_over(entries, "", &lent)).unwrap()
+        };
         // Each entry has 63 fixed JSON bytes plus its key and encoded value.
         // Empty-page envelope is 30 bytes with null, 29 with a one-byte cursor.
         let mut entries: Vec<_> = (0..13)
@@ -811,37 +889,42 @@ mod tests {
                 expires_at_ms: None,
             })
             .collect();
-        let full = pack_page(&entries, 13, false).unwrap();
+        let full = page(&entries, 13);
         assert_eq!(full["items"].as_array().unwrap().len(), 12);
         assert_eq!(full["next_after"], "l");
         // A three-byte final key makes the remaining base64 budget divisible by 4:
         // 30 + 12*(64+1396388) + 12 commas + 66 + 19684 = 16777216.
         entries[12].key = "mmm".into();
         entries[12].value = vec![0; 14_763];
-        let exact = pack_page(&entries, 13, false).unwrap();
+        let exact = page(&entries, 13);
         assert_eq!(exact["items"].as_array().unwrap().len(), 13);
         assert_eq!(exact.to_string().len(), 16_777_216);
         assert_eq!(exact["next_after"], Value::Null);
         // A one-byte key extension crosses the cap by exactly one byte;
         // adding one decoded byte instead grows base64 by four bytes.
         entries[12].key.push('m');
-        let over = pack_page(&entries, 13, false).unwrap();
+        let over = page(&entries, 13);
         assert_eq!(over["items"].as_array().unwrap().len(), 12);
         assert_eq!(over["next_after"], "l");
         entries[12].key.pop();
 
-        // The three-byte cursor replaces null (4 bytes) with "mmm" (5 bytes).
-        let beyond = pack_page(&entries, 13, true).unwrap();
+        // A further entry after the thirteenth makes it carry a cursor: the
+        // three-byte cursor replaces null (4 bytes) with "mmm" (5 bytes).
+        let mut beyond_entries = entries.clone();
+        beyond_entries.push(KvEntry {
+            key: "n".into(),
+            value: Vec::new(),
+            version: 1,
+            expires_at_ms: None,
+        });
+        let beyond = page(&beyond_entries, 13);
         assert_eq!(beyond["items"].as_array().unwrap().len(), 12);
         assert_eq!(beyond["next_after"], "l");
 
         entries[12].value.push(0);
-        let over = pack_page(&entries, 13, false).unwrap();
+        let over = page(&entries, 13);
         assert_eq!(over["items"].as_array().unwrap().len(), 12);
         assert_eq!(over["next_after"], "l");
-        assert_eq!(
-            pack_page(&[], 100, false).unwrap(),
-            json!({"items":[],"next_after":null})
-        );
+        assert_eq!(page(&[], 100), json!({"items":[],"next_after":null}));
     }
 }
