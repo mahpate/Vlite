@@ -1,0 +1,108 @@
+{
+ "campaign": "B4-S3: the declared-index scan differential (compact indexed scan against the resident oracle and the contract model)",
+ "format": "Same form as tests/compact_b4_mutants.json. These mutants sit in code that lane A4 adds (the compact arm of Database::search_in_at and the compact exact scan) or that the differential shares between the two arms, so the list applies to a tree that carries A4's patches. Replay with tests/compact_mutant_replay.py.",
+ "selectors": {
+  "differential": "test --locked --offline --lib -- compact::source::seam_tests::index_differential"
+ },
+ "mutants": [
+  {
+   "id": "s3-compact-visibility-skipped",
+   "origin": "S3: compact scan",
+   "desc": "the compact exact scan scores rows that are expired at the clock",
+   "file": "src/lib.rs",
+   "old": "if !records.effective_visible(id, now_ms, expiries) {\n            continue;\n        }",
+   "new": "",
+   "cmd": "test --locked --offline --lib -- compact::source::seam_tests::index_differential"
+  },
+  {
+   "id": "s3-compact-scanned-after-visibility",
+   "origin": "S3: compact scan",
+   "desc": "the compact exact scan counts a row as examined only when it is visible",
+   "file": "src/lib.rs",
+   "old": "stats.records_scanned += 1;\n        if !records.effective_visible(id, now_ms, expiries) {\n            continue;\n        }",
+   "new": "if !records.effective_visible(id, now_ms, expiries) {\n            continue;\n        }\n        stats.records_scanned += 1;",
+   "cmd": "test --locked --offline --lib -- compact::source::seam_tests::index_differential"
+  },
+  {
+   "id": "s3-compact-evaluated-before-filter",
+   "origin": "S3: compact scan",
+   "desc": "the compact exact scan counts a distance evaluation before the filter has kept the row",
+   "file": "src/lib.rs",
+   "old": "if !metadata::matches(&metadata, conditions) {\n            continue;\n        }\n        stats.distance_evaluations += 1;",
+   "new": "stats.distance_evaluations += 1;\n        if !metadata::matches(&metadata, conditions) {\n            continue;\n        }",
+   "cmd": "test --locked --offline --lib -- compact::source::seam_tests::index_differential"
+  },
+  {
+   "id": "s3-compact-arm-cap-whole",
+   "origin": "S3: compact search arm",
+   "desc": "the compact arm lets a declared posting narrow the scan up to the whole row count, not half of it",
+   "file": "src/lib.rs",
+   "old": "let query_norm = validate_metric_query(query, metric)?;\n            let cap = state.records.len() / 2;",
+   "new": "let query_norm = validate_metric_query(query, metric)?;\n            let cap = state.records.len();",
+   "cmd": "test --locked --offline --lib -- compact::source::seam_tests::index_differential"
+  },
+  {
+   "id": "s3-compact-arm-candidates-dropped",
+   "origin": "S3: compact search arm",
+   "desc": "the compact arm looks the declared postings up and counts them, then scans every row",
+   "file": "src/lib.rs",
+   "old": "                candidates.as_ref(),\n                now_ms,\n                stats,\n            );\n        }\n        self.ensure_resident_in(collection)?;",
+   "new": "                None,\n                now_ms,\n                stats,\n            );\n        }\n        self.ensure_resident_in(collection)?;",
+   "cmd": "test --locked --offline --lib -- compact::source::seam_tests::index_differential"
+  },
+  {
+   "id": "s3-compact-arm-index-candidates-unrecorded",
+   "origin": "S3: compact search arm",
+   "desc": "the compact arm does not report the number of declared-index candidates",
+   "file": "src/lib.rs",
+   "old": "stats.index_candidates = stats.index_candidates.saturating_add(ids.len() as u64);\n            }\n            return state.exact_search_candidates(",
+   "new": "let _ = ids;\n            }\n            return state.exact_search_candidates(",
+   "cmd": "test --locked --offline --lib -- compact::source::seam_tests::index_differential"
+  },
+  {
+   "id": "s3-ranked-tie-id-descending",
+   "origin": "S3: code both arms share",
+   "desc": "equal distances rank by descending ID (the same on the resident and the compact path)",
+   "file": "src/lib.rs",
+   "old": ".then_with(|| self.0.id.cmp(&other.0.id))",
+   "new": ".then_with(|| other.0.id.cmp(&self.0.id))",
+   "cmd": "test --locked --offline --lib -- compact::source::seam_tests::index_differential"
+  },
+  {
+   "id": "s3-lookup-intersection-dropped",
+   "origin": "S3: code both arms share",
+   "desc": "a second served condition no longer narrows the candidates of the most selective one",
+   "file": "src/metadata_index.rs",
+   "old": "ids.retain(|id| other_ids.contains(id));",
+   "new": "let _ = &other_ids;",
+   "cmd": "test --locked --offline --lib -- compact::source::seam_tests::index_differential"
+  },
+  {
+   "id": "s3-lookup-cap-exclusive",
+   "origin": "S3: code both arms share",
+   "desc": "a posting of exactly half of the rows no longer narrows the scan",
+   "file": "src/metadata_index.rs",
+   "old": "if count > cap {\n            return Some(IndexLookup {",
+   "new": "if count >= cap {\n            return Some(IndexLookup {",
+   "cmd": "test --locked --offline --lib -- compact::source::seam_tests::index_differential"
+  },
+  {
+   "id": "s3-lookup-widest-served-condition",
+   "origin": "S3: code both arms share",
+   "desc": "the index lookup starts from the least selective served condition",
+   "file": "src/metadata_index.rs",
+   "old": ".min_by_key(|(_, (count, ..))| *count)?",
+   "new": ".max_by_key(|(_, (count, ..))| *count)?",
+   "cmd": "test --locked --offline --lib -- compact::source::seam_tests::index_differential"
+  },
+  {
+   "id": "s3-update-metadata-untracked",
+   "origin": "S3: code both arms share",
+   "desc": "a metadata update does not move the row between declared postings",
+   "file": "src/collection.rs",
+   "old": "self.metadata_indexes\n                .track(id, Some(&previous.metadata), Some(&metadata));\n            self.text_index",
+   "new": "self.text_index",
+   "cmd": "test --locked --offline --lib -- compact::source::seam_tests::index_differential"
+  }
+ ]
+}
