@@ -1699,6 +1699,53 @@ async fn core_failures_reach_the_wire_with_their_mapped_codes() {
     );
 }
 
+/// Contract section 8: `MemoryItem.provenance` has no minimum length and
+/// "sources default provenance to [source]". Whatever an explicit empty list
+/// means, an accepted write must stay readable: the Recall of the memory never
+/// answers 500 and presents every provenance entry with its required
+/// `source_kind` (the core's own default entry for an empty list has none).
+#[tokio::test]
+async fn an_explicit_empty_provenance_list_never_makes_the_memory_unreadable() {
+    let rig = Rig::new(&Spec::default());
+    let member = with(item("e1", "Ada"), json!({"provenance": []}));
+    let (status, answer) = rig.post(&request("k", vec![member])).await;
+    if status != 200 {
+        assert_invalid(status, &answer, "provenance", "refused empty list");
+        return;
+    }
+    let (status, recalled) = rig.recall("e1").await;
+    assert_eq!(status, 200, "{recalled}");
+    let memory = recalled["memories"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|memory| memory["id"] == "e1")
+        .unwrap();
+    for entry in memory["provenance"].as_array().unwrap() {
+        let kind = entry["source_kind"].as_str();
+        assert!(kind.is_some_and(|kind| !kind.is_empty()), "{entry}");
+    }
+}
+
+/// Contract section 3: hostile nesting is a 400 (the parser's depth limit),
+/// never an exhausted stack; nesting inside the limit is an ordinary shape
+/// error of its member.
+#[tokio::test]
+async fn deeply_nested_bodies_are_refused_without_exhausting_the_stack() {
+    let rig = Rig::new(&Spec::default());
+    for depth in [200_usize, 100_000] {
+        let (status, text) = rig.send(REMEMBER, "[".repeat(depth).into_bytes()).await;
+        assert_eq!(status, 400, "{depth}: {text}");
+        assert_eq!(parse(&text)["error"]["code"], "invalid_json", "{depth}");
+    }
+    let nested = format!("{}1{}", "[".repeat(100), "]".repeat(100));
+    let body = format!(
+        r#"{{"scope":{{"agent":"a"}},"idempotency_key":"k","items":[{{"id":"e1","kind":"entity","content":{nested},"observed_at_ms":"90","source":{{"source_id":"s","source_kind":"c"}}}}]}}"#
+    );
+    let (status, answer) = rig.post_text(&body).await;
+    assert_invalid(status, &answer, "content", "nested content");
+}
+
 // ---------------------------------------------------- binding configuration
 
 const BINDINGS: &str = r#"{"version":"memory-bindings-v1","bindings":[{"binding":"notes","tenant":"@root","generation":1,"state":"active","graph":"notes_graph","evidence_collection":"notes_ev","schema_version":"memory-schema-v1","ranking_version":"memory-ranking-v1","digest_version":"memory-request-v1","receipt_window_ms":86400000,"grants":[{"principal":"abcdefghij27","scopes":[{"agent":"a"}]}]}]}"#;
