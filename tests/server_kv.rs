@@ -1090,3 +1090,192 @@ async fn kv_slots_exhaustion_and_upgrade_errors() {
     assert_eq!(status, 409);
     assert_eq!(body["error"]["code"], "upgrade_required");
 }
+
+fn precondition_body(message: &str) -> Value {
+    json!({"error":{"code":"precondition_failed","message":message}})
+}
+
+// A caller with `write` but not `read` must not learn from a failed
+// compare-and-set whether a key exists, or its revision.
+#[tokio::test]
+async fn kv_precondition_failures_reveal_neither_existence_nor_revision() {
+    let directory = tempfile::tempdir().unwrap();
+    let app = start(database(FormatVersion::V5), directory.path());
+    let writer = credential(&app, json!({"operations":["write"]})).await;
+    let path = "/v1/collections/default/kv/entry";
+    let (status, first) = call(&app, ADMIN, "PUT", path, put("exists")).await;
+    assert_eq!(status, 200, "{first}");
+    let (status, current) = call(&app, ADMIN, "PUT", path, put("exists")).await;
+    assert_eq!(status, 200, "{current}");
+    let stale = first["version"].as_str().unwrap().to_owned();
+    assert_ne!(stale, current["version"].as_str().unwrap());
+    // The old revision of a deleted key is stale for a missing key.
+    let (_, gone) = call(&app, ADMIN, "PUT", path, put("gone")).await;
+    let deleted = gone["version"].as_str().unwrap().to_owned();
+    assert_eq!(
+        call(&app, ADMIN, "DELETE", &entry("gone"), Value::Null).await,
+        (200, json!({"deleted":true}))
+    );
+    // The premise: this credential cannot read.
+    assert_eq!(
+        call(&app, &writer, "GET", &entry("exists"), Value::Null)
+            .await
+            .0,
+        403
+    );
+
+    let cases = [
+        ("exists", vec!["0", stale.as_str(), "absent"]),
+        ("never-written", vec!["0", "1"]),
+        ("gone", vec!["0", deleted.as_str()]),
+    ];
+    for token in [ADMIN, writer.as_str()] {
+        for (key, expectations) in &cases {
+            for text in expectations {
+                let mut input = put(key);
+                input["expected"] = if *text == "absent" {
+                    json!("absent")
+                } else {
+                    json!({"revision":text})
+                };
+                let (status, body) = call(&app, token, "PUT", path, input).await;
+                assert_eq!(status, 412, "PUT {key} expected={text}: {body}");
+                assert_eq!(
+                    body,
+                    precondition_body("revision precondition failed"),
+                    "PUT {key} expected={text}"
+                );
+                let uri = format!("{}&expected={text}", entry(key));
+                let (status, body) = call(&app, token, "DELETE", &uri, Value::Null).await;
+                assert_eq!(status, 412, "DELETE {key} expected={text}: {body}");
+                assert_eq!(
+                    body,
+                    precondition_body("revision precondition failed"),
+                    "DELETE {key} expected={text}"
+                );
+            }
+        }
+    }
+    // The failed requests wrote and removed nothing.
+    let (status, kept) = call(&app, ADMIN, "GET", &entry("exists"), Value::Null).await;
+    assert_eq!(status, 200, "{kept}");
+    assert_eq!(kept["version"], current["version"]);
+    for key in ["never-written", "gone"] {
+        let (status, _) = call(&app, ADMIN, "GET", &entry(key), Value::Null).await;
+        assert_eq!(status, 404, "{key}");
+    }
+}
+
+async fn ordinary(
+    app: &Router,
+    method: &str,
+    uri: &str,
+    if_match: Option<&str>,
+    body: Value,
+) -> (u16, Option<String>, Value) {
+    let mut request = Request::builder()
+        .method(method)
+        .uri(uri)
+        .header("authorization", format!("Bearer {ADMIN}"))
+        .header("content-type", "application/json");
+    if let Some(tag) = if_match {
+        request = request.header("if-match", tag);
+    }
+    let response = app
+        .clone()
+        .oneshot(request.body(Body::from(body.to_string())).unwrap())
+        .await
+        .unwrap();
+    let status = response.status().as_u16();
+    let etag = response
+        .headers()
+        .get("etag")
+        .map(|value| value.to_str().unwrap().to_owned());
+    let bytes = response.into_body().collect().await.unwrap().to_bytes();
+    let value = if bytes.is_empty() {
+        Value::Null
+    } else {
+        serde_json::from_slice(&bytes).unwrap()
+    };
+    (status, etag, value)
+}
+
+// Only the KV routes use the constant message. Ordinary record routes and graph
+// routes keep the 412 text they had in 0.6.1.
+#[tokio::test]
+async fn non_kv_routes_keep_their_precondition_messages() {
+    let directory = tempfile::tempdir().unwrap();
+    let app = start(database(FormatVersion::V5), directory.path());
+
+    let record = "/v1/collections/default/vectors/1";
+    let (status, stale, _) = ordinary(&app, "PUT", record, None, json!({"vector":[0.0]})).await;
+    assert_eq!(status, 204);
+    let (status, _, _) = ordinary(&app, "PUT", record, None, json!({"vector":[1.0]})).await;
+    assert_eq!(status, 204);
+    let (status, _, body) = ordinary(
+        &app,
+        "PUT",
+        record,
+        stale.as_deref(),
+        json!({"vector":[2.0]}),
+    )
+    .await;
+    assert_eq!(status, 412, "{body}");
+    assert_eq!(
+        body,
+        precondition_body(
+            "record changed, was removed, or the tag is from another database or service instance; GET it again"
+        )
+    );
+
+    let (status, body) = call(&app, ADMIN, "POST", "/v1/graphs", json!({"graph":"g"})).await;
+    assert_eq!(status, 201, "{body}");
+    let batch = "/v1/graphs/g/batch";
+    let (status, body) = call(
+        &app,
+        ADMIN,
+        "POST",
+        batch,
+        json!({"ops":[{"op":"create_node","key":"n1"}]}),
+    )
+    .await;
+    assert_eq!(status, 200, "{body}");
+    let (status, node) = call(
+        &app,
+        ADMIN,
+        "POST",
+        "/v1/graphs/g/nodes/get",
+        json!({"node":{"key":"n1"}}),
+    )
+    .await;
+    assert_eq!(status, 200, "{node}");
+    let revision = node["node"]["revision"].as_str().unwrap();
+    let (status, body) = call(
+        &app,
+        ADMIN,
+        "POST",
+        batch,
+        json!({"ops":[{"op":"upsert_node","key":"n1","expected":"absent"}]}),
+    )
+    .await;
+    assert_eq!(status, 412, "{body}");
+    assert_eq!(
+        body,
+        precondition_body(&format!(
+            "revision precondition failed; current revision is {revision}"
+        ))
+    );
+    let (status, body) = call(
+        &app,
+        ADMIN,
+        "POST",
+        batch,
+        json!({"ops":[{"op":"delete_node","key":"missing","expected":{"revision":"1"}}]}),
+    )
+    .await;
+    assert_eq!(status, 412, "{body}");
+    assert_eq!(
+        body,
+        precondition_body("revision precondition failed; record does not exist")
+    );
+}

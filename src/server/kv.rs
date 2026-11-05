@@ -285,6 +285,21 @@ fn writable(db: &Database) -> Result<(), ApiError> {
     Ok(())
 }
 
+/// Engine errors of the write routes. A failed precondition carries no detail:
+/// the shared mapping names the live revision, or that the key is absent, and a
+/// caller that may write need not be allowed to read. Only the KV routes use
+/// this; every other route keeps the shared mapping.
+fn kv_failure(error: Error) -> ApiError {
+    match error {
+        Error::RevisionMismatch { .. } => ApiError::new(
+            StatusCode::PRECONDITION_FAILED,
+            "precondition_failed",
+            "revision precondition failed",
+        ),
+        error => error.into(),
+    }
+}
+
 pub(super) async fn fetch(
     State(service): State<Service>,
     Extension(role): Extension<admin::Role>,
@@ -348,16 +363,15 @@ pub(super) async fn save(
             writable(db)?;
             let name = tenants::qualify(&role, target.name());
             let now = crate::current_time_ms();
-            let slot = db.kv_view(&name)?.put_slot_at(
-                &input.namespace,
-                &input.key,
-                options.expected,
-                now,
-            )?;
+            let slot = db
+                .kv_view(&name)?
+                .put_slot_at(&input.namespace, &input.key, options.expected, now)
+                .map_err(kv_failure)?;
             enforce_quota(&quota_service, db, &role, collection, &[(slot, true)])?;
-            let version =
-                db.kv_store(&name)?
-                    .put_at(&input.namespace, &input.key, &bytes, options, now)?;
+            let version = db
+                .kv_store(&name)?
+                .put_at(&input.namespace, &input.key, &bytes, options, now)
+                .map_err(kv_failure)?;
             Ok(Json(json!({
                 "version":version.to_string(),
                 "expires_at_ms":options.expires_at_ms.map(|value|value.to_string())
@@ -403,12 +417,15 @@ pub(super) async fn remove(
             super::open_guarded(db, &role, &target, &bindings)?;
             writable(db)?;
             let name = tenants::qualify(&role, target.name());
-            let deleted = db.kv_store(&name)?.delete_at(
-                &input.namespace,
-                &input.key,
-                expected,
-                crate::current_time_ms(),
-            )?;
+            let deleted = db
+                .kv_store(&name)?
+                .delete_at(
+                    &input.namespace,
+                    &input.key,
+                    expected,
+                    crate::current_time_ms(),
+                )
+                .map_err(kv_failure)?;
             Ok(Json(json!({"deleted":deleted})))
         })
         .await;
@@ -578,6 +595,31 @@ mod tests {
             assert_eq!(mapped.status.as_u16(), status);
             assert_eq!(mapped.code, code);
         }
+    }
+
+    #[test]
+    fn kv_write_failures_hide_the_revision_and_other_routes_keep_it() {
+        for current in [None, Some(7)] {
+            let mapped = kv_failure(Error::RevisionMismatch { current });
+            assert_eq!(mapped.status, StatusCode::PRECONDITION_FAILED);
+            assert_eq!(mapped.code, "precondition_failed");
+            assert_eq!(mapped.message, "revision precondition failed");
+        }
+        let shared = ApiError::from(Error::KvSlotsExhausted);
+        let mapped = kv_failure(Error::KvSlotsExhausted);
+        assert_eq!(
+            (mapped.status, mapped.code, mapped.message),
+            (shared.status, shared.code, shared.message)
+        );
+        // The shared mapping, used by every other route, is unchanged since 0.6.1.
+        assert_eq!(
+            ApiError::from(Error::RevisionMismatch { current: Some(7) }).message,
+            "revision precondition failed; current revision is 7"
+        );
+        assert_eq!(
+            ApiError::from(Error::RevisionMismatch { current: None }).message,
+            "revision precondition failed; record does not exist"
+        );
     }
 
     #[test]

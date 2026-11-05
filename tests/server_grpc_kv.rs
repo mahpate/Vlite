@@ -633,6 +633,128 @@ async fn grpc_kv_expected_expiry_and_cas() {
     }
 }
 
+// A caller with `write` but not `read` must not learn from a failed
+// compare-and-set whether a key exists, or its revision.
+#[tokio::test]
+async fn grpc_kv_precondition_failures_reveal_neither_existence_nor_revision() {
+    let directory = tempfile::tempdir().unwrap();
+    let mut h = start(database(FormatVersion::V5), directory.path()).await;
+    let writer = credential(&h.app, json!({"operations":["write"]})).await;
+    let first = h
+        .client
+        .put_kv_entry(request(ADMIN, put("exists")))
+        .await
+        .unwrap()
+        .into_inner();
+    let current = h
+        .client
+        .put_kv_entry(request(ADMIN, put("exists")))
+        .await
+        .unwrap()
+        .into_inner();
+    assert_ne!(first.version, current.version);
+    let gone = h
+        .client
+        .put_kv_entry(request(ADMIN, put("gone")))
+        .await
+        .unwrap()
+        .into_inner();
+    let delete = |key: &str, guard| proto::KvDeleteRequest {
+        address: address("default", "n", key),
+        expected: guard,
+    };
+    assert!(
+        h.client
+            .delete_kv_entry(request(ADMIN, delete("gone", None)))
+            .await
+            .unwrap()
+            .into_inner()
+            .deleted
+    );
+    // The premise: this credential cannot read.
+    assert_error(
+        h.client
+            .get_kv_entry(request(
+                &writer,
+                proto::KvGetRequest {
+                    address: address("default", "n", "exists"),
+                },
+            ))
+            .await
+            .unwrap_err(),
+        Code::PermissionDenied,
+        "forbidden_scope",
+    );
+
+    let revision = |version| expected(proto::expected::Kind::Revision(version));
+    let cases = [
+        (
+            "exists",
+            vec![revision(0), revision(first.version), absent()],
+        ),
+        ("never-written", vec![revision(0), revision(1)]),
+        ("gone", vec![revision(0), revision(gone.version)]),
+    ];
+    for token in [ADMIN, writer.as_str()] {
+        for (key, guards) in &cases {
+            for guard in guards {
+                let mut input = put(key);
+                input.expected = guard.clone();
+                let error = h
+                    .client
+                    .put_kv_entry(request(token, input))
+                    .await
+                    .unwrap_err();
+                assert_eq!(
+                    error.message(),
+                    "revision precondition failed",
+                    "put {key} {guard:?}"
+                );
+                assert_error(error, Code::Aborted, "precondition_failed");
+                let error = h
+                    .client
+                    .delete_kv_entry(request(token, delete(key, guard.clone())))
+                    .await
+                    .unwrap_err();
+                assert_eq!(
+                    error.message(),
+                    "revision precondition failed",
+                    "delete {key} {guard:?}"
+                );
+                assert_error(error, Code::Aborted, "precondition_failed");
+            }
+        }
+    }
+    // The failed requests wrote and removed nothing.
+    let kept = h
+        .client
+        .get_kv_entry(request(
+            ADMIN,
+            proto::KvGetRequest {
+                address: address("default", "n", "exists"),
+            },
+        ))
+        .await
+        .unwrap()
+        .into_inner();
+    assert_eq!(kept.version, current.version);
+    for key in ["never-written", "gone"] {
+        assert_error(
+            h.client
+                .get_kv_entry(request(
+                    ADMIN,
+                    proto::KvGetRequest {
+                        address: address("default", "n", key),
+                    },
+                ))
+                .await
+                .unwrap_err(),
+            Code::NotFound,
+            "kv_not_found",
+        );
+    }
+}
+
 #[tokio::test]
 async fn grpc_kv_list_order_defaults_and_page_boundary() {
     let directory = tempfile::tempdir().unwrap();

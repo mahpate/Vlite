@@ -1136,6 +1136,59 @@ async fn expected_preconditions_are_atomic_and_scoped_to_the_collection() {
     assert_eq!(wins, 1);
 }
 
+// The key-value routes answer one constant precondition message; the ordinary
+// vector routes keep the text of the shared mapper, unchanged since 0.6.1.
+#[tokio::test]
+async fn ordinary_vector_preconditions_keep_the_revision_message() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut h = start(v4(&dir.path().join("db.vlite")), None).await;
+    h.client
+        .create_collection(admin(create("a", None)))
+        .await
+        .unwrap();
+    let first = h
+        .client
+        .put_vector(admin(put("a", 1, vec![1., 0.])))
+        .await
+        .unwrap()
+        .into_inner();
+    let live = format!(
+        "revision precondition failed; current revision is {}",
+        first.revision
+    );
+
+    let mut request = put("a", 1, vec![5., 5.]);
+    request.expected = Some(absent());
+    let error = h.client.put_vector(admin(request)).await.unwrap_err();
+    assert_error(&error, Code::Aborted, "precondition_failed");
+    assert_eq!(error.message(), live);
+
+    let mut request = put("a", 1, vec![5., 5.]);
+    request.expected = Some(revision(first.revision.wrapping_add(1000)));
+    let error = h.client.put_vector(admin(request)).await.unwrap_err();
+    assert_error(&error, Code::Aborted, "precondition_failed");
+    assert_eq!(error.message(), live);
+
+    // A revision guard on a record that does not exist.
+    let mut request = put("a", 2, vec![5., 5.]);
+    request.expected = Some(revision(first.revision));
+    let error = h.client.put_vector(admin(request)).await.unwrap_err();
+    assert_error(&error, Code::Aborted, "precondition_failed");
+    assert_eq!(
+        error.message(),
+        "revision precondition failed; record does not exist"
+    );
+
+    let stale = Some(revision(first.revision.wrapping_add(1000)));
+    let error = h
+        .client
+        .delete_vector(admin(delete("a", 1, stale)))
+        .await
+        .unwrap_err();
+    assert_error(&error, Code::Aborted, "precondition_failed");
+    assert_eq!(error.message(), live);
+}
+
 #[tokio::test]
 async fn authentication_roles_and_scoped_credentials_match_rest() {
     let dir = tempfile::tempdir().unwrap();

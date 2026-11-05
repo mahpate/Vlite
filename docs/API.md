@@ -79,8 +79,11 @@ A put body is `{"namespace":"n","key":"k","value_base64":"YQ=="}`.
 Optional `expected` is `"any"` (default), `"absent"`, or
 `{"revision":"42"}`; it is checked atomically with the write. DELETE takes
 `expected=any|absent|<revision>` in the query. A revision mismatch returns
-412 `precondition_failed`, including a missing/due key. An unconditional or
-absence-conditional delete of a missing key succeeds with `deleted:false`.
+412 `precondition_failed`, including a missing/due key. On REST and gRPC its
+message is always `revision precondition failed`, so a caller with `write` but
+not `read` cannot learn whether a key exists or what its revision is. An
+unconditional or absence-conditional delete of a missing key succeeds with
+`deleted:false`.
 
 Versions and deadlines are canonical uint64 **decimal strings**, without signs
 or leading zeroes except `"0"` (maximum `"18446744073709551615"`). Expected
