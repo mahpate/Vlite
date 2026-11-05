@@ -159,8 +159,18 @@ Agent memory stores remembered entities and episodes in a graph and recalls them
   `memory_capability_unavailable` with `details.feature`
   `remember_receipt_lookup`; the original `remember` response carries the
   complete receipt. A 412 `precondition_failed` carries the code and message
-  only. The clients surface a refusal unchanged, including `details.feature`;
-  the command line prints its code and message.
+  only. Recall is exact and bounded: `exact` and `mmr` selection work on a
+  vector alone, and `mode: approximate` answers 422
+  `memory_bounded_plan_unsupported`. Items cannot yet carry evidence
+  references, metadata, assertions or a `confidence`. A binding's identity (its
+  receipt window, generation and names) is read from the file at each start and
+  is not stored in the database; do not change it once memory has been written,
+  because after a restart with a changed receipt window a retry that is still
+  inside its original window answers 409 `idempotency_conflict`. Every refusal
+  and its `details.feature` is listed in
+  [Agent memory (REST)](API.md#first-slice-limits). The clients surface a
+  refusal unchanged, including `details.feature`; the command line prints its
+  code and message.
   <!-- source: docs/projects/roadmap/gap1-adapter-mapping.md#1-first-rest-slice-inventory, tests/server_memory.rs, tests/fixtures/agent_memory/wire, clients/javascript/README.md, clients/python/README.md, docs/TOOLS.md -->
 
 ### Directory store (opt-in)

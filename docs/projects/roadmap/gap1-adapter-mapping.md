@@ -315,3 +315,44 @@ own `retry_until_ms`.
   `transformation_id` is the C1 `transformation`.
 - **Remember receipt lookup** stays refused (section 3) and is reported as a
   persisted-format blocker.
+
+### Confirmed at the 0.7.0 freeze (PROVISIONAL)
+
+A live conformance review of the release candidate raised the points below.
+Each is a first-slice restriction or a wording choice, recorded here so the
+code, goldens, OpenAPI text and user documentation agree.
+
+- **Recall ranking.** `exact` and `mmr` selections are vector-only and refuse
+  every blend, weights other than vector-only and a half-life, as 422
+  `memory_unsupported_ranking`. Contract section 4 lets `exact` keep text-only
+  candidates; serving that needs core work and is a later slice.
+- **Approximate mode.** `mode: approximate` is 422
+  `memory_bounded_plan_unsupported` (golden `recall-unsupported-ann`): no
+  binding owns an approximate index and none is built. `index_not_ready` stays
+  for a text index that is not ready.
+- **Item evidence.** An `evidence` value that is not an empty list (on the
+  request, an item or the consolidate output) is refused as `evidence`; an empty
+  list is the same as none. Nonempty references need alias validation,
+  ownership, replay hashing and attachment checks together, and are a later
+  slice.
+- **Body errors.** JSON syntax, duplicate keys, size and media type are
+  400/413/415 `invalid_json`. A wrong type or shape, an unknown or missing
+  field and an out-of-range value are 422 `invalid_input` with `details.field`
+  (contract section 6 and the golden fixtures). The wire conventions' rule that
+  a shape failure is `invalid_json` describes the legacy routes, whose
+  extractor parses the body.
+- **Binding identity.** Rotation validation (section 4) is still unwired: the
+  bindings file is the only record of a binding's receipt window, generation
+  and names. After a restart with a changed window, a retry inside its original
+  window is 409 `idempotency_conflict`. Persisting binding records is the
+  prerequisite-2 startup wiring.
+- **Guard and dedup.** Exact deduplication is decided before the merge
+  revision check: a merge that would change nothing answers 200 `noop` at the
+  current revision even when its `expected` revision is stale.
+- **Expected absent.** `expected` without `merge: merge_provenance`, including
+  `{"absent": true}`, is refused as `expected`.
+- **Entity seeds.** `entity_seeds` must name entities. A retained episodic
+  summary is recalled through text, a vector or a reference from an entity.
+- **Default off.** With no bindings file the nine routes are unmounted: the
+  administrator sees 404, and a scoped credential sees 403 `forbidden_scope`
+  because unmapped routes keep their admin-only `permission()` default.

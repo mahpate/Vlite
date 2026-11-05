@@ -114,7 +114,7 @@ The gRPC column is what the shared mapper returns (`grpc.rs:181-196`). It keeps 
 | HTTP | Code | gRPC | Owner doc | existing/new |
 |---|---|---|---|---|
 | 400 | `invalid_query`, `invalid_id` | INVALID_ARGUMENT (generic 4xx, `grpc.rs:194`) | src `server.rs:1664,1825` | existing |
-| 400, 413, 422 | `invalid_json` (extractor status: syntax, oversize, shape) | INVALID_ARGUMENT | src `server.rs:1658-1662`; `graph.rs:344-365` | existing; the only malformed or oversize REST body code |
+| 400, 413, 422 | `invalid_json` (extractor status: syntax, oversize, shape) | INVALID_ARGUMENT | src `server.rs:1658-1662`; `graph.rs:344-365` | existing; the only malformed or oversize REST body code; the memory routes parse their own body, so there a wrong type or shape is 422 `invalid_input` (mapping section 6) |
 | 401 | existing codes | UNAUTHENTICATED (`grpc.rs:185`) | src | existing |
 | 403 | `forbidden_scope`, `read_only` | PERMISSION_DENIED (`grpc.rs:186`) | src `server.rs:939,993` | existing |
 | 404 | `collection_not_found`, `import_not_found`; KV `kv_not_found`; MEM `memory_not_found`, `receipt_not_found`, `erasure_not_found` | NOT_FOUND (`grpc.rs:187`) | src `server.rs:1488,1492`; KV ~846; MEM ~467 | existing, new |

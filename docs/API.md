@@ -186,21 +186,53 @@ not memory retention. After an indeterminate commit, reopen and reconcile the
 receipt rather than blindly retrying. Full schemas retain future capabilities,
 including 202 pending forget/resume results; these do not imply secure erasure.
 
-Stable errors use `{error:{code,message,details?}}`: 400/413/415/422
-`invalid_json` follow extractor failures; 401 `unauthorized`; 403
+Stable errors use `{error:{code,message,details?}}`: 400/413/415 `invalid_json`
+(malformed JSON, duplicate keys, an oversize body or the wrong media type); 401
+`unauthorized`; 403
 `forbidden_scope`/`read_only`/`tenant_suspended`/`tenant_unavailable`; 404
 `memory_not_found`/`receipt_not_found`/`erasure_not_found`; 409
 `memory_not_configured`/`memory_capability_unavailable`/`memory_feed_unsupported`/
 `idempotency_conflict`/`memory_slot_conflict`/`memory_attachment_conflict`/
 `memory_deletion_pending`/`memory_job_reconciliation_required`/`index_not_ready`;
-412 `precondition_failed`; 422 `invalid_input`/`memory_unsupported_ranking`/
-`memory_bounded_plan_unsupported`; 429 `rate_limited`/`quota_exceeded`
+412 `precondition_failed`; 422 `invalid_input` (a wrong type or shape, an
+unknown or missing field, or an out-of-range value; `details.field` names it)/
+`memory_unsupported_ranking`/`memory_bounded_plan_unsupported`; 429
+`rate_limited`/`quota_exceeded`
 (`Retry-After: 1`); 503 `busy`/`unavailable`/`poisoned`/`commit_indeterminate`;
 504 `deadline_exceeded`; 500 `internal_error`. Missing capabilities name
 `details.feature`. `response_too_large` (413) applies to gRPC preflight and
 MCP/CLI response bounds, not a REST response cap. See the
 [memory contract](projects/roadmap/serving-memory-contract.md#6-authorization-errors-and-observability)
 for authorization, limits and complete semantics.
+
+### First-slice limits
+
+A request that uses something this release does not serve is refused, never
+ignored or partly applied: 409 `memory_capability_unavailable` with
+`details.feature`, after authorization and before validation (a read-only node
+answers 403 `read_only` first).
+
+| Route | Refused (`details.feature`) |
+|---|---|
+| `remember` | `fact_kinds` (fact and relation items), `confidence`, `metadata`, `assertion`, `evidence` (a nonempty list), `reference_revision_pin` (a pinned reference revision), `expected` (unless `merge` is `merge_provenance`) |
+| `recall` | `embedding_provider`, `fact_kinds`, `filter`, `temporal_read` (`as_of_ms`), `paths`, `metadata` (projections), `evidence_recall` (text or vector without an evidence collection), `query_text_length`; `require_complete_feed: true` answers 409 `memory_feed_unsupported` |
+| `consolidate` | `consolidate_plan` (`dry_run`), `consolidate_delete` (`logical_delete`), `fact_kinds`, `confidence`, `references`, `evidence`, `metadata`, `assertion`, `expected`, `merge` |
+| `forget` | `forget_target` (series or entity), `erasure_jobs` (session or scope target, `allow_job`), `forget_expire` (`mode: expire`) |
+| `receipts/lookup` | `remember_receipt_lookup` |
+| `facts/*`, `erasures/*` | `facts`, `erasure_jobs` |
+
+Recall serves exact, bounded retrieval. `ranking.selection` `exact` or `mmr`
+works on a vector alone; combined with text, entity seeds, other weights or a
+half-life it answers 422 `memory_unsupported_ranking`. `mode: approximate`
+answers 422 `memory_bounded_plan_unsupported` because no approximate index is
+built for a binding, and so does `allow_partial: true` when a budget is
+exhausted: partial results are not served.
+
+A binding's identity is read from the bindings file at startup and is not
+stored in the database. Do not change a binding's receipt window, generation
+or stored names once memory has been written: after a restart with a changed
+window, a retry of a request that is still inside its original window answers
+409 `idempotency_conflict` instead of replaying.
 
 ## Collection retrieval
 
