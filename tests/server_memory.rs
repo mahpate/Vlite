@@ -89,13 +89,19 @@ const MEMORY_PATHS: [&str; 3] = [
 ];
 
 /// Routes served in this slice; the rest are not mounted yet.
-const SERVED: [&str; 4] = [
+const SERVED: [&str; 5] = [
     "/v1/memory/notes/remember",
     "/v1/memory/notes/recall",
     "/v1/memory/notes/consolidate",
     "/v1/memory/notes/forget",
+    "/v1/memory/notes/receipts/lookup",
 ];
-const UNMOUNTED: [&str; 1] = ["/v1/memory/notes/receipts/lookup"];
+const UNMOUNTED: [&str; 4] = [
+    "/v1/memory/notes/facts/query",
+    "/v1/memory/notes/facts/correct",
+    "/v1/memory/notes/erasures/get",
+    "/v1/memory/notes/erasures/resume",
+];
 
 #[tokio::test]
 async fn without_a_bindings_file_memory_routes_are_not_mounted() {
@@ -694,4 +700,61 @@ async fn forget_needs_the_evidence_write_grant() {
         (status, &error["error"]["code"]),
         (403, &json!("forbidden_scope"))
     );
+}
+
+#[tokio::test]
+async fn a_forget_receipt_is_looked_up_with_a_content_free_audit() {
+    let directory = TempDir::new().unwrap();
+    let (app, token) = start_scoped(&directory, &ALL_OPS, None);
+    let (status, _) = remember(&app, Some(&token), &remember_body("k")).await;
+    assert_eq!(status, 200);
+    let body = json!({
+        "scope": {"agent": "a"},
+        "idempotency_key": "f-1",
+        "target": {"ids": [{"id": "e1", "revision": "1"}]},
+        "mode": "logical_delete"
+    });
+    let (status, forgot) = post(&app, SERVED[3], &token, &body).await;
+    assert_eq!(status, 200, "{forgot}");
+    let lookup = json!({"scope": {"agent": "a"}, "operation": "forget", "idempotency_key": "f-1"});
+    let (status, found) = post(&app, SERVED[4], &token, &lookup).await;
+    assert_eq!(status, 200, "{found}");
+    assert_eq!(found["result"]["receipt"], forgot["receipt"]);
+    assert_eq!(found["result"]["outcomes"], forgot["outcomes"]);
+    assert_eq!(found["result"]["replayed"], true);
+    let remembered =
+        json!({"scope": {"agent": "a"}, "operation": "remember", "idempotency_key": "k"});
+    let (status, error) = post(&app, SERVED[4], &token, &remembered).await;
+    assert_eq!(status, 409, "{error}");
+    assert_eq!(
+        error["error"]["details"]["feature"],
+        "remember_receipt_lookup"
+    );
+    let audit = std::fs::read_to_string(directory.path().join("audit.jsonl")).unwrap();
+    let outcomes: Vec<Value> = audit
+        .lines()
+        .map(|line| serde_json::from_str::<Value>(line).unwrap())
+        .filter(|event| event["operation"] == "receipt")
+        .map(|event| event["outcome"].clone())
+        .collect();
+    assert_eq!(
+        outcomes,
+        [json!("ok"), json!("memory_capability_unavailable")]
+    );
+    assert!(!audit.contains("f-1"));
+}
+
+#[tokio::test]
+async fn receipt_lookup_is_a_graph_read() {
+    let directory = TempDir::new().unwrap();
+    let lookup = json!({"scope": {"agent": "a"}, "operation": "forget", "idempotency_key": "f"});
+    let (app, reader) = start_scoped(&directory, &["graph_read"], None);
+    let (status, error) = post(&app, SERVED[4], &reader, &lookup).await;
+    // Authorized: no receipt was written under the key.
+    assert_eq!(status, 404, "{error}");
+    assert_eq!(error["error"]["code"], "receipt_not_found");
+    let directory = TempDir::new().unwrap();
+    let (app, writer) = start_scoped(&directory, &["read", "write", "graph_write"], None);
+    let (status, error) = post(&app, SERVED[4], &writer, &lookup).await;
+    assert_eq!(status, 403, "{error}");
 }

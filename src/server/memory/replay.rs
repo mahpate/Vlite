@@ -35,6 +35,8 @@ pub(super) const CONSOLIDATE: &str =
     include_str!("../../../tests/fixtures/agent_memory/wire/consolidate.json");
 pub(super) const FORGET: &str =
     include_str!("../../../tests/fixtures/agent_memory/wire/forget.json");
+pub(super) const RECEIPT: &str =
+    include_str!("../../../tests/fixtures/agent_memory/wire/receipt.json");
 
 const PRINCIPAL: &str = "abcdefghij27";
 const OTHER: &str = "bcdefghij234";
@@ -423,7 +425,8 @@ impl Harness {
         let clock = receipt["retry_until_ms"].as_u64().unwrap() - window;
         let request = &receipt["request"];
         let operation = receipt["operation"].as_str().unwrap();
-        let path = format!("{}/{operation}", path.rsplit_once('/').unwrap().0);
+        let prefix = path.splitn(5, '/').take(4).collect::<Vec<_>>().join("/");
+        let path = format!("{prefix}/{operation}");
         for item in request["items"].as_array().into_iter().flatten() {
             if item["merge"] == "merge_provenance" {
                 let mut base = item.clone();
@@ -455,7 +458,7 @@ impl Harness {
                         "observed_at_ms": 0, "source": {"source_id": "base", "source_kind": "caller"}})
                 })
                 .collect();
-            let remember = format!("{}/remember", path.rsplit_once('/').unwrap().0);
+            let remember = format!("{prefix}/remember");
             let (status, body) = self
                 .send(&json!({"method": "POST", "path": remember, "body": {
                     "scope": request["scope"], "idempotency_key": "replay-targets", "items": items,
@@ -489,6 +492,10 @@ fn is_sequence(value: &Value) -> bool {
 /// oracle's injected `manifest_id` is copied like a receipt ID after
 /// checking the served notice omits it (the disclosed E4 gap).
 fn normalize(name: &str, actual: &mut Value, expected: &Value, seeded: Option<&Value>) {
+    // A receipt lookup wraps the mutation response in `result`.
+    if let (Some(inner), Some(expected)) = (actual.get_mut("result"), expected.get("result")) {
+        return normalize(name, inner, expected, seeded);
+    }
     if let Some(receipt) = actual.get("receipt") {
         let sequence = receipt["sequence"].clone();
         for outcome in actual["outcomes"].as_array_mut().into_iter().flatten() {
@@ -559,8 +566,13 @@ pub(super) async fn replay(text: &str, skip: &[(&str, &str)], deviations: &[Devi
         };
         let path = case["request"]["path"].as_str().unwrap();
         let mut seeded = None;
+        // A view granting no scope cannot write its receipts over HTTP;
+        // its request is refused before any lookup.
+        let granted = view["scope_grants"] != json!([]);
         for receipt in view["receipts"].as_array().into_iter().flatten() {
-            seeded = Some(harness.receipt(view, receipt, path).await);
+            if granted {
+                seeded = Some(harness.receipt(view, receipt, path).await);
+            }
         }
         harness.lose(view, lost);
         if let Some(elapsed) = view["elapsed_ms"].as_u64() {
@@ -1192,5 +1204,181 @@ mod tests {
         assert_eq!(status, 200, "{again}");
         assert_eq!(again["replayed"], true);
         assert_eq!(again["outcomes"], body["outcomes"]);
+    }
+
+    /// Remember lookup is the persisted-format blocker and correct_facts /
+    /// resume_erasure have no first-slice receipts: each is refused (mapping
+    /// section 3) where the oracle answers from its own store.
+    const RECEIPT_DEVIATIONS: [Deviation; 6] = [
+        (
+            "receipt-live-before-expiry",
+            409,
+            "memory_capability_unavailable",
+            Some("remember_receipt_lookup"),
+        ),
+        (
+            "receipt-expiry-equality",
+            409,
+            "memory_capability_unavailable",
+            Some("remember_receipt_lookup"),
+        ),
+        (
+            "receipt-absent",
+            409,
+            "memory_capability_unavailable",
+            Some("remember_receipt_lookup"),
+        ),
+        (
+            "receipt-read-only",
+            409,
+            "memory_capability_unavailable",
+            Some("remember_receipt_lookup"),
+        ),
+        (
+            "receipt-absent-correct_facts-identity",
+            409,
+            "memory_capability_unavailable",
+            Some("facts"),
+        ),
+        (
+            "receipt-absent-resume_erasure-identity",
+            409,
+            "memory_capability_unavailable",
+            Some("erasure_jobs"),
+        ),
+    ];
+
+    #[tokio::test]
+    async fn receipt_fixture_cases_replay_over_http() {
+        assert_eq!(replay(RECEIPT, &[], &RECEIPT_DEVIATIONS).await, 9);
+    }
+
+    fn receipt_request(operation: Value, key: Value) -> Value {
+        json!({"method": "POST", "path": "/v1/memory/notes/receipts/lookup", "body": {
+            "scope": {"agent": "a"}, "operation": operation, "idempotency_key": key,
+        }})
+    }
+
+    fn seed_request(id: &str) -> Value {
+        json!({"method": "POST", "path": "/v1/memory/notes/remember", "body": {
+            "scope": {"agent": "a"}, "idempotency_key": format!("seed-{id}"), "items": [
+                {"id": id, "kind": "entity", "content": id, "observed_at_ms": 1,
+                 "source": {"source_id": "s", "source_kind": "caller"}}]}})
+    }
+
+    /// A forget receipt reads back as the replay of the original response,
+    /// until its window ends.
+    #[tokio::test]
+    async fn forget_receipt_lookup_replays_until_expiry() {
+        let harness = harness(&view()).unwrap();
+        harness.at(100);
+        for id in ["b", "a"] {
+            assert_eq!(harness.send(&seed_request(id)).await.0, 200);
+        }
+        let forget = forget_request(json!({"target": {"ids": [
+            {"id": "b", "revision": "1"}, {"id": "a", "revision": "1"}]}}));
+        let (status, forgot) = harness.send(&forget).await;
+        assert_eq!(status, 200, "{forgot}");
+        harness.at(200);
+        let (status, body) = harness
+            .send(&receipt_request(json!("forget"), json!("k")))
+            .await;
+        assert_eq!(status, 200, "{body}");
+        let mut expected = forgot.clone();
+        expected["replayed"] = json!(true);
+        assert_eq!(body, json!({"result": expected}));
+        harness.at(100 + 60_000 - 1);
+        assert_eq!(
+            harness
+                .send(&receipt_request(json!("forget"), json!("k")))
+                .await
+                .0,
+            200
+        );
+        harness.at(100 + 60_000);
+        let (status, body) = harness
+            .send(&receipt_request(json!("forget"), json!("k")))
+            .await;
+        assert_eq!(status, 404, "{body}");
+        assert_eq!(body["error"]["code"], "receipt_not_found");
+        // Operation is part of the identity.
+        harness.at(200);
+        let (status, _) = harness
+            .send(&receipt_request(json!("consolidate"), json!("k")))
+            .await;
+        assert_eq!(status, 404);
+    }
+
+    #[tokio::test]
+    async fn consolidate_receipt_lookup_replays_the_summary() {
+        let harness = harness(&view()).unwrap();
+        harness.at(100);
+        assert_eq!(harness.send(&seed_request("m")).await.0, 200);
+        let (status, created) = harness
+            .send(&consolidate_request(json!({}), json!({})))
+            .await;
+        assert_eq!(status, 200, "{created}");
+        let (status, body) = harness
+            .send(&receipt_request(json!("consolidate"), json!("k")))
+            .await;
+        assert_eq!(status, 200, "{body}");
+        let mut expected = created.clone();
+        expected["replayed"] = json!(true);
+        assert_eq!(body, json!({"result": expected}));
+    }
+
+    /// Scope authorization, then refusals, then validation; an authorized
+    /// lookup without a receipt is 404.
+    #[tokio::test]
+    async fn receipt_lookup_checks_in_order() {
+        let mut other = receipt_request(json!("forget"), json!("k"));
+        other["body"]["scope"] = json!({"agent": "b"});
+        let (status, body) = served(&view(), &other).await;
+        assert_eq!(
+            (status, &body["error"]["code"]),
+            (403, &json!("forbidden_scope"))
+        );
+        for (operation, feature) in [
+            ("remember", "remember_receipt_lookup"),
+            ("correct_facts", "facts"),
+            ("resume_erasure", "erasure_jobs"),
+        ] {
+            let (status, body) =
+                served(&view(), &receipt_request(json!(operation), json!(""))).await;
+            assert_eq!(status, 409, "{body}");
+            assert_eq!(body["error"]["details"]["feature"], feature);
+        }
+        let mut extra = receipt_request(json!("forget"), json!("k"));
+        extra["body"]["x"] = json!(1);
+        for request in [
+            receipt_request(json!("recall"), json!("k")),
+            receipt_request(json!(1), json!("k")),
+            receipt_request(json!("forget"), json!("")),
+            receipt_request(json!("forget"), json!(7)),
+            extra,
+        ] {
+            let (status, body) = served(&view(), &request).await;
+            assert_eq!(status, 422, "{body}");
+            assert_eq!(body["error"]["code"], "invalid_input");
+        }
+        let (status, body) = served(&view(), &receipt_request(json!("forget"), json!("k"))).await;
+        assert_eq!(status, 404, "{body}");
+        assert_eq!(body["error"]["code"], "receipt_not_found");
+    }
+
+    /// A retired binding keeps serving its receipts (mapping section 4).
+    #[tokio::test]
+    async fn retired_binding_serves_receipts() {
+        let mut view = view();
+        view["retired_at_ms"] = json!(500);
+        let (status, body) = served(&view, &receipt_request(json!("forget"), json!("k"))).await;
+        assert_eq!(status, 409, "{body}");
+        assert_eq!(body["error"]["code"], "memory_not_configured");
+        let (status, body) = served(&view, &receipt_request(json!("remember"), json!("k"))).await;
+        assert_eq!(status, 409, "{body}");
+        assert_eq!(
+            body["error"]["details"]["feature"],
+            "remember_receipt_lookup"
+        );
     }
 }

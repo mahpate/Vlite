@@ -27,6 +27,8 @@ pub(crate) use recall::{
 mod ranking;
 mod recall;
 mod receipt;
+#[cfg(feature = "server")]
+pub(crate) use receipt::{ReceiptLookup, ReceiptOutcome};
 mod stale;
 mod startup;
 #[cfg(test)]

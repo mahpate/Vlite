@@ -41,7 +41,7 @@ fn target(value: Value) -> Result<ForgetTarget, Fail> {
 
 /// The disclosed first-slice notice: `manifest_id` is omitted until the
 /// core writes deletion manifests (mapping section 1, E4).
-fn erasure_notice() -> Value {
+pub(super) fn erasure_notice() -> Value {
     json!({
         "live_state_only": true,
         "secure_erasure": false,
