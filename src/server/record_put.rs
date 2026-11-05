@@ -582,11 +582,16 @@ mod tests {
             let expected = Some(engine_answer(first));
             assert_eq!(answer(&later), expected, "{faults:?}: later deadline");
             assert_eq!(answer(&due), expected, "{faults:?}: due deadline");
-            let error = due.err().unwrap();
+            // The same fault, not merely the same kind of answer: two faults
+            // that share a status and a code (the vector, the payload size and
+            // the metadata all answer 422 `invalid_input`) differ in their text.
+            let due_error = due.err().unwrap();
+            let later_error = later.err().unwrap();
+            assert_eq!(due_error.message, later_error.message, "{faults:?}");
             assert!(
-                !error.message.contains("later than the server clock"),
+                !due_error.message.contains("later than the server clock"),
                 "{faults:?}: {}",
-                error.message
+                due_error.message
             );
         }
         assert_eq!(states, 96 + 8);

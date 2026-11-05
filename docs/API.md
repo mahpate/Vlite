@@ -60,7 +60,8 @@ not later than the server clock when the write is applied is refused with 422
 `invalid_input`, and so is `ttl_ms` 0; nothing is written, and a record already
 under that ID is unchanged. A request that fails for another reason, such as a
 file older than v5 (409 `upgrade_required`), a stale `If-Match` (412) or an
-invalid vector, answers that error first. gRPC `PutVector` applies the same
+invalid vector, answers that error first, except `ttl_ms` 0, a request error
+refused before any of these. gRPC `PutVector` applies the same
 rule to `expires_at_ms` as `INVALID_ARGUMENT`. The
 [key-value routes](#key-value-entries) accept an already due deadline by
 contract. Expiry is checked at read/search time and does not create a separate
