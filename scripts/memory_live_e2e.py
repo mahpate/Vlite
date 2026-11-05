@@ -11,7 +11,9 @@ databases live in a private temporary child of --work (or the system temp dir).
 No mutations are retried, no existing database is opened, and no server source or
 server tests supply expectations. Authority is serving-memory-contract sections
 3-6/8, serving-wire-conventions sections 2-3, gap1-adapter-mapping sections 1/2/4/6,
-SECURITY's Memory-bound resources, the client/tool guides, and independent wire
+SECURITY's Memory-bound resources, the 0.7.1 follow-up design note (binding records,
+the raw reserved-name guard, cosine recall, exact with text, evidence references),
+the client/tool guides, and independent wire
 fixtures. First-slice mapping rulings take precedence over illustrative future
 capabilities. OPEN-LE identifiers denote missing example prerequisites, not passes.
 """
@@ -45,10 +47,14 @@ from urllib.parse import urlsplit
 
 
 ROOT = Path(__file__).resolve().parents[1]
-SECTIONS = ("rest", "default", "python", "javascript", "dotnet", "cli", "mcp", "docs")
+SECTIONS = ("rest", "default", "python", "javascript", "dotnet", "cli", "mcp", "docs", "lifecycle")
 CAP = 8 * 1024 * 1024
 SCOPE = {"agent": "live-e2e"}
 OTHER_SCOPE = {"agent": "live-e2e-other"}
+EVIDENCE_SCOPE = {"agent": "live-e2e-evidence"}
+M71 = "docs/projects/roadmap/m71-memory-followups.md"
+# The binding whose file entry the lifecycle section rotates, and its graph.
+CYCLE, CYCLE_GRAPH = "zetabind", "zetabind_graph"
 FEED = {"mode": "ordinary_changes", "temporal_complete": False,
         "ttl_complete": False, "consumer_purge_acknowledged": False}
 NOTICE = {"live_state_only": True, "secure_erasure": False,
@@ -626,9 +632,21 @@ class Environment:
         return Server(self.binary, self.work, self.env, self.report, self.token,
                       self.binding_file if configured else None, create)
 
+    def refused_start(self) -> str:
+        """Starts the server over the current bindings file and returns what it printed when it
+        refused to run; a server that stays up is a failure of the caller's expectation."""
+        argv = [str(self.binary), str(self.work / "memory.vlite"), "--token-file", str(self.work / "admin.token"),
+                "--bind", "127.0.0.1:0", "--durability", "full", "--memory-bindings-file", str(self.binding_file)]
+        try:
+            done = command(argv, self.work, self.env, self.report, timeout=30)
+        except subprocess.TimeoutExpired:
+            raise AssertionError("the server started although the file breaks a rule") from None
+        require(done.returncode != 0, "the server exited cleanly although the file breaks a rule")
+        return (done.stdout + done.stderr).decode("utf-8", errors="replace")
+
     def provision(self, http: HTTP) -> None:
         # Existing administrative REST APIs; no direct edits of persisted stores.
-        for graph in ("notes_graph", "other_graph"):
+        for graph in ("notes_graph", "other_graph", CYCLE_GRAPH):
             reply = http.request("POST", "/v1/graphs", {"graph": graph})
             require(reply.status in (200, 201), f"graph setup failed: {reply.status} {reply.raw!r}")
         reply = http.request("POST", "/v1/collections",
@@ -649,12 +667,12 @@ class Environment:
             require(re.fullmatch(r"[a-z2-7]{12}", identity), "credential API did not return a binding principal ID")
             self.ids[name] = identity
 
-        credential("memory", operations, ["notes_graph", "other_graph"])
+        credential("memory", operations, ["notes_graph", "other_graph", CYCLE_GRAPH])
         credential("no-grants", operations, ["notes_graph"])
         credential("other-binding", operations, ["other_graph"])
         credential("read-only", ["graph_read", "read", "search"], ["notes_graph"])
-        credential("raw", operations, ["notes_graph"])
-        scopes = [SCOPE, OTHER_SCOPE, {"agent": "a"},
+        credential("raw", operations, ["notes_graph", CYCLE_GRAPH])
+        scopes = [SCOPE, OTHER_SCOPE, EVIDENCE_SCOPE, {"agent": "a"},
                   {"agent": "assistant", "user": "ada"}, {"agent": "agent-1"},
                   *({"agent": language} for language in ("python", "javascript", "dotnet", "cli", "mcp"))]
 
@@ -670,7 +688,8 @@ class Environment:
 
         bindings = [binding("notes", "@root", "notes_graph",
                             [grant("memory"), grant("read-only"), grant("raw", True)], "evidence"),
-                    binding("other", "@root", "other_graph", [grant("memory"), grant("other-binding")])]
+                    binding("other", "@root", "other_graph", [grant("memory"), grant("other-binding")]),
+                    binding(CYCLE, "@root", CYCLE_GRAPH, [grant("memory"), grant("raw", True)])]
         for number in (1, 2):
             response = http.request("POST", "/v1/admin/tenants", {"name": f"live-{number}"})
             require(response.status in (200, 201), f"tenant setup failed: {response.raw!r}")
@@ -912,6 +931,304 @@ def run_rest(http: HTTP, env: Environment, report: Report) -> None:
     check("complete-feed-refusal", lambda: error(http.memory("remember",
           {**remember("complete-feed", item("never-created")), "require_complete_feed": True}),
           409, "memory_feed_unsupported"), MAPPING + " section 6")
+    run_followups(http, env, report)
+
+
+def run_followups(http: HTTP, env: Environment, report: Report) -> None:
+    """The 0.7.1 follow-ups that a running server can show: the raw reserved-name guard,
+    evidence references on items, the cosine distance of exact and mmr recall, and exact
+    recall with text. Expectations come from the design note, derived by hand."""
+    check = lambda name, fn, clause=M71: report.check("rest", name, clause, fn)
+    admin = lambda method, path, body=None: http.request(method, path, body, token=env.token)
+    raw = env.keys["raw"]
+
+    def raw_guard() -> None:
+        reply = admin("POST", "/v1/graphs", {"graph": "plain_graph"})
+        require(reply.status in (200, 201, 409), f"graph setup failed: {reply.status} {reply.raw!r}")
+        ordinary = {"op": "create_node", "key": "ordinary", "labels": ["Person"]}
+        refused = ({"op": "create_node", "key": "forged-marker", "labels": ["VliteMemoryScope"]},
+                   {"op": "create_node", "key": "scope:v1:forged", "labels": ["Person"]},
+                   {"op": "upsert_node", "key": "mem:v1:forged", "labels": ["Person"]},
+                   {"op": "create_node", "key": "binding:v1", "labels": ["Person"]})
+        for op in refused:
+            reply = admin("POST", "/v1/graphs/plain_graph/batch", {"ops": [ordinary, op]})
+            error(reply, 422, "invalid_input")
+            for name in (op["key"], *op["labels"]):
+                require(name == "Person" or name.encode() not in reply.raw, f"the refusal echoes {name}")
+        found = success(admin("POST", "/v1/graphs/plain_graph/nodes/get", {"node": {"key": "ordinary"}}))
+        require(found["node"] is None, "a refused batch left its ordinary node behind")
+        success(admin("POST", "/v1/graphs/plain_graph/batch", {"ops": [ordinary]}))
+        found = success(admin("POST", "/v1/graphs/plain_graph/nodes/get", {"node": {"key": "ordinary"}}))
+        require(found["node"] is not None, "an ordinary node was refused")
+    check("raw-batch-refuses-reserved-memory-names", raw_guard, M71 + " section 2")
+
+    records = {7001: ([10, 0, 0], "lore lore lore"), 7002: ([0.6, 0.6, 0], "other other other"),
+               7003: ([0, 1, 0], "lore lore other"), 7004: ([0, 0, 0], "lore other other")}
+
+    def write_records() -> bool:
+        for number, (vector, text) in records.items():
+            reply = http.request("PUT", f"/v1/collections/evidence/vectors/{number}",
+                                 {"vector": vector,
+                                  "payload_base64": base64.b64encode(text.encode()).decode("ascii"),
+                                  "metadata": {"text": {"type": "string", "value": text}}}, token=raw)
+            require(reply.status in (200, 201, 204), f"evidence record {number}: {reply.status} {reply.raw!r}")
+        return True
+    written = check("evidence-records-written-with-raw-access", write_records, "docs/SECURITY.md Memory-bound resources")
+
+    def reference(record: Any, collection: str = "notes") -> list[dict[str, Any]]:
+        return [{"collection": collection, "record": record}]
+
+    def holding(identifier: str, record: Any, collection: str = "notes") -> dict[str, Any]:
+        return {**item(identifier), "evidence": reference(record, collection)}
+
+    def attach() -> dict[str, Any]:
+        prerequisite(written, "evidence-records-written-with-raw-access")
+        items = [holding("ev-a", 7001), holding("ev-b", "7002"), holding("ev-c", 7003), holding("ev-z", "7004")]
+        return mutation(success(http.memory("remember", remember("evidence-seed", *items, scope=EVIDENCE_SCOPE),
+                                            token=raw)), "remember", EVIDENCE_SCOPE)
+    attached = check("evidence-reference-attaches-existing-records", attach, M71 + " section 5")
+
+    def reported() -> None:
+        prerequisite(attached, "evidence-reference-attaches-existing-records")
+        views = recalled(success(http.memory("recall", recall("ev-a", scope=EVIDENCE_SCOPE))), scope=EVIDENCE_SCOPE)
+        found = {view["id"]: view for view in views}
+        require(found["ev-a"]["evidence"] == [{"collection": "notes", "record": "7001",
+                                              "snippet": "lore lore lore"}],
+                "recall does not report the attached record")
+    check("evidence-reference-is-reported-by-recall", reported, M71 + " section 5")
+
+    def forbidden() -> None:
+        prerequisite(attached, "evidence-reference-attaches-existing-records")
+        unknown = http.memory("recall", recall("absent"), binding="unknown")
+        error(unknown, 403, "forbidden_scope")
+        replies = [http.memory("remember", remember(f"evidence-denied-{n}",
+                                                    holding(f"ev-d{n}", record), scope=EVIDENCE_SCOPE))
+                   for n, record in enumerate((7001, 7999, "not-a-record"))]
+        replies.append(http.memory("remember", remember("evidence-alias", holding("ev-w", 7001, "other"),
+                                                        scope=EVIDENCE_SCOPE), token=raw))
+        for reply in replies:
+            error(reply, 403, "forbidden_scope")
+            require(reply.raw == unknown.raw, "a reference without access or alias answers unlike an unknown binding")
+    check("evidence-reference-needs-raw-access-and-the-binding-alias", forbidden, M71 + " section 5.2")
+
+    def conflicts() -> None:
+        prerequisite(attached, "evidence-reference-attaches-existing-records")
+        replies = [http.memory("remember", remember(f"evidence-conflict-{n}", holding(f"ev-x{n}", record),
+                                                    scope=scope), token=raw)
+                   for n, (record, scope) in enumerate(((7001, EVIDENCE_SCOPE), (7001, OTHER_SCOPE),
+                                                        (7999, EVIDENCE_SCOPE)))]
+        for reply in replies:
+            error(reply, 409, "memory_attachment_conflict")
+        require(len({reply.raw for reply in replies}) == 1,
+                "an unattachable record discloses whether it exists or who holds it")
+    check("evidence-reference-to-a-held-or-missing-record-is-one-conflict", conflicts, M71 + " section 5.2")
+
+    def shapes() -> None:
+        prerequisite(attached, "evidence-reference-attaches-existing-records")
+        two = reference(7002) + reference(7003)
+        for number, evidence in enumerate((reference("0042"), reference("-1"), reference("record:42"), two,
+                                           [{"collection": "notes"}], "7002")):
+            reply = http.memory("remember", remember(f"evidence-shape-{number}",
+                                                     {**item(f"ev-s{number}"), "evidence": evidence}),
+                                token=raw)
+            body = error(reply, 422, "invalid_input")
+            require(body.get("details") == {"field": "evidence"}, f"shape {number} does not name evidence")
+        error(http.memory("remember", {**remember("evidence-request-level", item("ev-r")),
+                                       "evidence": reference(7002)}, token=raw),
+              409, "memory_capability_unavailable", feature="evidence")
+    check("evidence-reference-shapes-name-the-field", shapes, M71 + " section 5.1")
+
+    def replay() -> None:
+        prerequisite(attached, "evidence-reference-attaches-existing-records")
+        items = [holding("ev-a", 7001), holding("ev-b", "7002"), holding("ev-c", 7003), holding("ev-z", "7004")]
+        again = mutation(success(http.memory("remember", remember("evidence-seed", *items, scope=EVIDENCE_SCOPE),
+                                             token=raw)), "remember", EVIDENCE_SCOPE, replayed=True)
+        require(again == {**attached, "replayed": True}, "the replay changed the receipt")
+        items[0] = holding("ev-a", 7002)
+        error(http.memory("remember", remember("evidence-seed", *items, scope=EVIDENCE_SCOPE), token=raw),
+              409, "idempotency_conflict")
+    check("evidence-reference-replays-and-another-record-conflicts", replay, M71 + " section 5.4")
+
+    def repeated() -> None:
+        prerequisite(attached, "evidence-reference-attaches-existing-records")
+        reply = http.request("PUT", "/v1/collections/evidence/vectors/7005",
+                             {"vector": [0, 0, 1], "payload_base64": "c3BhcmU="}, token=raw)
+        require(reply.status in (200, 201, 204), f"spare evidence record: {reply.status} {reply.raw!r}")
+        error(http.memory("remember", remember("evidence-repeat-new", holding("ev-a", 7005), scope=EVIDENCE_SCOPE),
+                          token=raw), 409, "memory_attachment_conflict")
+        again = mutation(success(http.memory("remember", remember("evidence-repeat-same", holding("ev-a", 7001),
+                                                                  scope=EVIDENCE_SCOPE), token=raw)),
+                         "remember", EVIDENCE_SCOPE)
+        require(again["outcomes"] == [{"id": "ev-a", "action": "noop", "revision": "1"}],
+                "a repeated item with the reference its memory holds is not a no-op")
+    check("evidence-reference-on-a-repeated-item-never-goes-unnoticed", repeated, M71 + " section 5.3")
+
+    def query(selection: str, text: str | None = None) -> dict[str, Any]:
+        body: dict[str, Any] = {"scope": EVIDENCE_SCOPE, "vector": [2, 0, 0], "limit": 20,
+                                "ranking": {"selection": selection}}
+        if text:
+            body["text"] = text
+        return body
+
+    def hits(body: dict[str, Any], selection: str) -> list[tuple[str, dict[str, Any]]]:
+        value = success(http.memory("recall", body))
+        require(value.get("selection") == selection and value["meta"]["complete"] is True,
+                f"the answer is not a complete {selection} recall")
+        return [(view["id"], view["scores"]) for view in value["memories"]]
+
+    def near(actual: Any, expected: float) -> None:
+        require(isinstance(actual, (int, float)) and abs(actual - expected) < 1e-4,
+                f"distance {actual!r}, expected {expected}")
+
+    # The query [2, 0, 0] is not a unit vector. Cosine distances 1 - cos: ev-a 0, ev-b
+    # 1 - 0.6 / sqrt(0.72), ev-c 1; the zero vector ev-z has no direction. Squared Euclidean
+    # distances: ev-a 64, ev-b 2.32, ev-c 5, ev-z 4.
+    cosine = {"ev-a": 0.0, "ev-b": 1 - 0.6 / 0.72 ** 0.5, "ev-c": 1.0}
+
+    def exact_cosine() -> None:
+        prerequisite(attached, "evidence-reference-attaches-existing-records")
+        found = hits(query("exact"), "exact")
+        require([name for name, _ in found] == ["ev-a", "ev-b", "ev-c"],
+                f"exact orders by cosine distance and drops the zero vector: {found}")
+        for name, scores in found:
+            near(scores["distance"], cosine[name])
+    check("recall-exact-orders-and-reports-cosine-distance", exact_cosine, M71 + " section 3")
+
+    def mmr_cosine() -> None:
+        prerequisite(attached, "evidence-reference-attaches-existing-records")
+        found = dict(hits(query("mmr"), "mmr"))
+        require(found.keys() == cosine.keys(), f"mmr selected {sorted(found)}")
+        for name, scores in found.items():
+            near(scores["distance"], cosine[name])
+    check("recall-mmr-reports-cosine-distance", mmr_cosine, M71 + " section 3")
+
+    def weighted_distance() -> None:
+        prerequisite(attached, "evidence-reference-attaches-existing-records")
+        body = query("weighted")
+        del body["ranking"]
+        found = dict(hits(body, "weighted"))
+        require(found.keys() == {"ev-a", "ev-b", "ev-c", "ev-z"}, f"weighted selected {sorted(found)}")
+        for name, expected in {"ev-a": 64.0, "ev-b": 2.32, "ev-c": 5.0, "ev-z": 4.0}.items():
+            near(found[name]["distance"], expected)
+    check("recall-weighted-keeps-squared-euclidean-distance", weighted_distance, M71 + " section 3.2")
+
+    def exact_text() -> None:
+        prerequisite(attached, "evidence-reference-attaches-existing-records")
+        found = hits(query("exact", "lore"), "exact")
+        # Dense leg ev-a, ev-b, ev-c; text leg ev-a, ev-c, ev-z (term frequencies 3, 2, 1 in
+        # documents of equal length); reciprocal rank fusion at k = 60 gives the order below.
+        require([name for name, _ in found] == ["ev-a", "ev-c", "ev-b", "ev-z"],
+                f"exact with text fused the legs wrongly: {found}")
+        for name, scores in found:
+            if name == "ev-z":
+                require("distance" not in scores, "a text-only hit must not carry a distance")
+            else:
+                near(scores["distance"], cosine[name])
+        error(http.memory("recall", query("mmr", "lore")), 422, "memory_unsupported_ranking")
+    check("recall-exact-with-text-keeps-text-only-hits", exact_text, M71 + " section 4")
+
+
+def run_lifecycle(env: Environment, report: Report) -> None:
+    """Restarts of one database over a changing bindings file: what a start checks against
+    the binding records the database holds, and what stays reserved (design note sections
+    1 and 2). Runs after the other sections: it rotates the file."""
+    check = lambda name, fn, clause=M71 + " section 1": report.check("lifecycle", name, clause, fn)
+    accepted = [strict_json(env.binding_file.read_bytes())]
+    memory = lambda server: HTTP(server.url, env.keys["memory"], report)
+
+    def entry(file: dict[str, Any]) -> dict[str, Any]:
+        return next(b for b in file["bindings"] if b["binding"] == CYCLE and b["tenant"] == "@root")
+
+    def refuses(edit: Callable[[dict[str, Any]], None], message: str, hidden: tuple[str, ...]) -> None:
+        file = copy.deepcopy(accepted[0])
+        edit(file)
+        env.binding_file.write_bytes(encode(file))
+        try:
+            text = env.refused_start()
+        finally:
+            env.binding_file.write_bytes(encode(accepted[0]))
+        require(message in text, f"the refusal does not say {message!r}: {text[-600:]!r}")
+        for name in hidden:
+            require(name not in text, f"the refusal names {name}")
+
+    def window() -> None:
+        refuses(lambda file: entry(file).update(receipt_window_ms=86400001),
+                "a memory binding changed its graph, evidence collection or receipt window",
+                (CYCLE, CYCLE_GRAPH))
+    check("binding-window-change-is-refused-at-start", window)
+
+    def recheck() -> None:
+        with env.server() as server:
+            http = memory(server)
+            mutation(success(http.memory("remember", remember("cycle-1", item("cycle-item")),
+                                         binding=CYCLE)), "remember")
+            success(server.http.request("POST", f"/v1/graphs/{CYCLE_GRAPH}/batch",
+                                        {"ops": [{"op": "delete_node", "key": "binding:v1"}]},
+                                        token=env.keys["raw"]))
+            error(http.memory("remember", remember("cycle-2", item("cycle-two")), binding=CYCLE), 409,
+                  "memory_capability_unavailable", feature="binding_generation")
+            recalled(success(http.memory("recall", recall("cycle-item"), binding=CYCLE)))
+        with env.server() as server:
+            mutation(success(memory(server).memory("remember", remember("cycle-3", item("cycle-three")),
+                                                   binding=CYCLE)), "remember")
+    check("write-after-the-record-is-deleted-fails-until-the-next-start", recheck, M71 + " section 1.5")
+
+    def retired() -> None:
+        file = copy.deepcopy(accepted[0])
+        entry(file).update(state="retired", generation=2, retired_at_ms=int(time.time() * 1000) + 3_600_000)
+        env.binding_file.write_bytes(encode(file))
+        accepted[0] = file
+        with env.server() as server:
+            http = memory(server)
+            error(http.memory("remember", remember("cycle-4", item("cycle-late")), binding=CYCLE), 409,
+                  "memory_capability_unavailable", feature="binding_retired")
+            error(http.memory("receipt", {"scope": SCOPE, "operation": "forget", "idempotency_key": "absent"},
+                              binding=CYCLE), 404, "receipt_not_found")
+            node = {"node": {"key": "binding:v1"}}
+            error(server.http.request("POST", f"/v1/graphs/{CYCLE_GRAPH}/nodes/get", node),
+                  409, "graph_not_found")
+            found = success(server.http.request("POST", f"/v1/graphs/{CYCLE_GRAPH}/nodes/get", node,
+                                                token=env.keys["raw"]))
+            require(found["node"] is not None, "a retired binding's raw_access grant no longer reaches its graph")
+    check("a-retired-binding-stays-reserved-and-keeps-raw-access", retired)
+
+    def removed() -> None:
+        refuses(lambda file: file["bindings"].remove(entry(file)),
+                "a memory binding was removed before it was retired and its receipt window ended",
+                (CYCLE, CYCLE_GRAPH))
+    check("an-entry-removed-inside-its-window-is-refused", removed)
+
+    def no_file() -> None:
+        with env.server(configured=False) as server:
+            require(server.http.memory("recall", recall("cycle-item"), binding=CYCLE).status == 404,
+                    "memory routes are mounted without a bindings file")
+            error(server.http.request("POST", f"/v1/graphs/{CYCLE_GRAPH}/nodes/get",
+                                      {"node": {"key": "binding:v1"}}), 409, "graph_not_found")
+            listing = server.http.request("GET", "/v1/graphs")
+            require(listing.status == 200 and CYCLE_GRAPH.encode() not in listing.raw,
+                    "a reserved graph is listed without its file")
+    check("removing-the-file-keeps-the-memory-reserved", no_file, M71 + " section 1.4")
+
+    def ordinary() -> None:
+        with env.server(configured=False) as server:
+            created = server.http.request("POST", "/v1/graphs", {"graph": "plain_graph"})
+            require(created.status in (200, 201, 409), f"graph setup failed: {created.status} {created.raw!r}")
+            success(server.http.request("POST", "/v1/graphs/plain_graph/batch", {"ops": [
+                {"op": "upsert_node", "key": "ordinary", "labels": ["Person"]}]}))
+
+        def bind(file: dict[str, Any]) -> None:
+            plain = copy.deepcopy(entry(file))
+            plain.update(binding="plainbind", graph="plain_graph", state="active", generation=1)
+            plain.pop("retired_at_ms", None)
+            file["bindings"].append(plain)
+        refuses(bind, "a memory binding resource already holds ordinary data", ("plainbind", "plain_graph"))
+    check("a-graph-with-ordinary-data-is-never-adopted", ordinary, M71 + " section 1.3")
+
+    def intact() -> None:
+        with env.server() as server:
+            mutation(success(memory(server).memory("remember", remember("cycle-5", item("cycle-home")))),
+                     "remember")
+    check("the-file-that-matches-the-records-starts-again", intact)
 
 
 def run_default(http: HTTP, report: Report) -> None:
@@ -1431,6 +1748,9 @@ def run(args: argparse.Namespace) -> int:
                                     raise exc
                                 report.check(section, "section-setup", "documented adapter setup", failed)
                             report.section_summary(section)
+            if "lifecycle" in selected:
+                run_lifecycle(environment, report)
+                report.section_summary("lifecycle")
         return int(report.failed)
     except (Exception, KeyboardInterrupt) as exc:
         def failed() -> None:
