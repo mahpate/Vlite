@@ -699,7 +699,7 @@ async fn grpc_kv_precondition_failures_reveal_neither_existence_nor_revision() {
         for (key, guards) in &cases {
             for guard in guards {
                 let mut input = put(key);
-                input.expected = guard.clone();
+                input.expected = *guard;
                 let error = h
                     .client
                     .put_kv_entry(request(token, input))
@@ -713,7 +713,7 @@ async fn grpc_kv_precondition_failures_reveal_neither_existence_nor_revision() {
                 assert_error(error, Code::Aborted, "precondition_failed");
                 let error = h
                     .client
-                    .delete_kv_entry(request(token, delete(key, guard.clone())))
+                    .delete_kv_entry(request(token, delete(key, *guard)))
                     .await
                     .unwrap_err();
                 assert_eq!(
