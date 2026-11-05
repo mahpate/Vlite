@@ -120,6 +120,7 @@ fn tamper_first_block(generation: &mut Arc<CompactGeneration>, how: BlockTamper)
     }
 }
 
+mod consumer_tests;
 mod survivor_tests;
 
 #[test]
