@@ -103,7 +103,10 @@ then uses the file the REST routes use for the collection,
 admin_directory_disabled` without one), and a `path` from such a caller is
 refused with `422 invalid_input`, so a credential scoped to one collection
 can no longer write or read an arbitrary file. Clients that sent a path with a
-scoped credential must drop it. The RPCs
+scoped credential must drop it. The administrator's `SearchDiskAnn` now opens
+the sidecar after the collection check, while it holds the database read lock,
+so a bad `path` for a collection that does not exist answers `NOT_FOUND` for
+the collection instead of the I/O error for the path. The RPCs
 are not available for encrypted databases; the sidecar contains plaintext
 vectors, so callers must protect its directory and restrict these admin/index
 operations. `Info` reports format, sequence, lineage, timestamp support, and

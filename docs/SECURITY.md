@@ -112,11 +112,17 @@ named reserved evidence collection instead answers like a missing collection.
 Creating a resource under a reserved name answers like an occupied ordinary
 name (`409 collection_exists` or `409 graph_exists`); that collision cannot be
 hidden. A credential's attempt on a reserved name is the one thing its holder
-cannot see: the server counts it and, at most once a minute for each
-credential and route, appends a `reserved_hidden_attempt` entry (credential ID,
-method, route template and request ID, never the name) to the persistent audit
-log, which only the administrator reads. The per-node attachment check on
-`delete_node` still requires raw
+cannot see. The server audits it but exports no count of it: at most once a
+minute for each credential and route it appends a `reserved_hidden_attempt`
+entry (credential ID, method, route template and request ID, never the name)
+to the persistent audit log, which only the administrator reads. The limiter
+that spaces the entries is shared with credential denials and tracks at most
+4,096 credential and route pairs within a minute, and an attempt that finds it
+full leaves no entry. The append is synchronous, so
+the first attempt per credential, route and minute can answer slightly slower
+than a request for a missing name. A reserved name in a retrieve request's
+`evidence.collections` is hidden the same way but is not audited. The per-node
+attachment check on `delete_node` still requires raw
 access to each reserved evidence collection attached to that node.
 Provision raw-holder credentials with `collections:["*"]` before granting raw
 access in the bindings file; credential creation treats a named reserved
@@ -134,7 +140,9 @@ wildcard stays inside its tenant.
 `409 tenant_not_empty` even when no visible collection remains. Sequence numbers are
 database-wide: graph `view_sequence` and `revision`, change-feed `head` and
 memory receipt `sequence` advance for hidden writes, so a caller can count the
-activity of other tenants and of memory, but not read it. The sequence is the
+activity of other tenants and of memory, but not read it. In a filtered change
+feed, `has_more`, `next_cursor`, `head` and gaps in the `sequence` and
+`ordinal` of the remaining events show the same thing. The sequence is the
 commit sequence of the one log that the memory contract defines the receipt
 `sequence` to be, so it has no per-binding form: use separate database files for
 tenants that must not observe each other's write volume. Idempotency keys are
