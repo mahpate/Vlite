@@ -94,7 +94,8 @@ Order and gates come from the storage readiness inventory. Defaults stay unchang
    bounded exact scan needs (`base_rows`, `affected_ids` and `ordered_ids`, crate-private and test-gated, `effective_ids`
    unchanged) with 7 tests and 34 more hand mutants, all killed
    ([`tests/compact_ordered_cursors_mutants.json`](../../../tests/compact_ordered_cursors_mutants.json)). The final-tree
-   replays ran on the lane's machine only; an independent replay of them is open.
+   replays ran on the lane's machine; a sample (16 of the 91 and 16 of the 34 mutants) was replayed again on a separate
+   machine on the integrated tree, all killed, and a complete independent replay of them is open.
 2. **B4** finished lane B by cherry-picking `250a98bc` (never by merge). Its 18 replay obligations are replayed: the seven
    that mutate the read seam are in R0's ledger and the eleven for consumers, settings and rerank are in B4's, each gap
    measured on `v0.7.0` before the tests that kill it. B4 added the five survivors that lane B's own report names (four
