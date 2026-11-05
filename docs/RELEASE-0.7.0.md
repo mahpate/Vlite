@@ -417,12 +417,15 @@ The commits after `30901be1` add server adapters, tools, clients and
 documentation, restore two 0.6.1 default behaviors (the number text of
 `embed` responses, and `browse` observing flusher health once), and change
 only the filter-summaries path of collections that declare a metadata index.
-No other file on the paths the campaign measured changed: the single-file
-store, exact and HNSW search, ingest and reopen. The additions are outside
-those embedded workloads. The supplemental figures for indexed filters below
+Nothing else on the paths the campaign measured changed: the single-file
+store, exact and HNSW search, ingest and reopen. Two functions outside those
+workloads gained a hook for the server's reserved-resource checks:
+collection creation takes a flag that is false everywhere else, and graph
+batch planning and retrieval take a visibility test that always answers yes
+everywhere else. The supplemental figures for indexed filters below
 come from revision `58b18194`, which contains the filter-summary change. This
 is not a new benchmark of the release revision.
-<!-- source: git diff 30901be1..HEAD over src and crates (only src/compact/stats.rs, src/records.rs, the key-value and memory modules and src/openapi.json differ outside the server and tools), src/compact/stats.rs, src/records.rs; commits c317aed and 58b1819 -->
+<!-- source: git diff 30901be1..HEAD over src and crates (only src/compact/stats.rs, src/records.rs, the key-value and memory modules, src/openapi.json and the server hooks in src/lib.rs and src/property_graph differ outside the server and tools), src/compact/stats.rs, src/records.rs, src/lib.rs (create_collection_as_occupied), src/property_graph/mod.rs and retrieve.rs; commits c317aed and 58b1819 -->
 
 A supplemental run on the same VM configuration measured what that profile
 does not exercise (435 measured slots; 432 passed the same unchanged gate and
