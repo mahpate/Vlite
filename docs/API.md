@@ -265,7 +265,11 @@ whichever it is. A longer list, an unknown field and a `record` that is not a
 `u64` answer 422 `invalid_input` with `details.field` `evidence`; the request's
 own `evidence` list and the `evidence` of a `consolidate` output stay refused,
 and an empty list is the same as none. An exact retry replays, and a retry that
-names another record is 409 `idempotency_conflict`. Naming a record makes the
+names another record is 409 `idempotency_conflict`. An item that repeats an
+existing memory (same scope, kind, content and source) keeps the evidence that
+memory holds: a reference to another record is the same 409, never ignored. To
+attach a record to a memory that already exists, merge a new source into it
+(`merge: merge_provenance` with the `expected` revision). Naming a record makes the
 file one-way: after the first reference do not downgrade to 0.7.0, which answers
 500 for every memory operation of that scope (see Upgrading from 0.7.0 below).
 
@@ -367,7 +371,8 @@ was valid before. Four things can stop it or surprise you:
   ordinary graph, because it holds no record yet), delete those nodes with the
   raw routes, and start again with the file.
 - Going back to 0.7.0 after that is safe for every graph that holds a scope
-  node. A bound graph that never received a scope (a binding without grants)
+  node, unless a memory in it holds an evidence reference (the next point). A
+  bound graph that never received a scope (a binding without grants)
   holds only the record, and 0.7.0 refuses it as ordinary data: delete the record
   node first.
 - Item evidence references are a one-way change. A `remember` item that names an

@@ -412,7 +412,7 @@ code, goldens, OpenAPI text and user documentation agree.
   measured squared Euclidean for all three, so `exact` ordered by it and `mmr`
   selected by cosine but reported the squared value): `exact` orders by it,
   both report it, and the `mmr` candidate pool follows it. A zero query vector
-  is refused as 422 `invalid_input` and a stored zero vector is never a
+  is refused as 422 `invalid_input` and a stored zero vector is never a vector
   candidate (the oracle leaves the zero-norm convention open, OPEN-G1W-10). The
   goldens `recall-vector-exact`, `recall-vector-mmr` and
   `recall-mmr-diversity-not-weighted-score-order`, which expect cosine values

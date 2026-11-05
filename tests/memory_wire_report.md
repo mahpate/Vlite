@@ -175,6 +175,9 @@ selection preserves "text-only candidates"; accepted private B says:
 "Vector-only exact/MMR rejects text, seeds, expansion and non-relevance ranking
 weights". Successful and refused exact-hybrid executions are excluded pending
 alignment. Vector-only exact and explicitly refused hybrid MMR remain covered.
+Settled for 0.7.1 by design (design note section 4): `exact` serves a vector with
+optional text, keeps text-only candidates without a distance, and `mmr` refuses
+text. Hand-derived Rust tests cover it; no golden exists while OPEN-G1W-08 stands.
 
 **OPEN-G1W-08 - BM25/RRF discovery math.** The memory model says "existing indexed
 BM25 and RRF"; the ranking reference explicitly models "an already-bounded
@@ -196,7 +199,10 @@ inherited `provider_not_configured` row in serving-contract.md's Gap 8 table.
 selection" and existing reranker ties but specifies no zero-norm convention;
 the existing ranking Python reference excludes MMR/distance recomputation.
 No zero-norm vector result or refusal is guessed. Nonzero unit-vector exact/
-MMR fixtures use hand-checkable distances and diversity selection.
+MMR fixtures use hand-checkable distances and diversity selection. Settled for
+0.7.1 by design (design note section 3): a zero-norm query vector of `exact` or
+`mmr` is 422 `invalid_input`, and a stored zero vector is never one of their
+vector candidates.
 
 ## Checks and proposed CI
 

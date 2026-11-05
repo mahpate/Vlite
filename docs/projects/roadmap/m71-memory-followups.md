@@ -225,9 +225,12 @@ A **reserved label** is any label that starts with `VliteMemory` (case
 sensitive). A **reserved key** is a node key that starts with `scope:v1:`,
 `mem:v1:`, `receipt:v1:`, `receipt-outcome:v1:` or `content:v1:`, or is exactly
 `binding:v1`. Nothing else changes: `delete_node`, `set_node_expiry`, edges,
-attachments, vectors, schemas, and the removal of a reserved label with
-`patch_node` stay allowed, so a node that was planted before 0.7.1 can still be
-cleaned up through the raw route (a bound graph still needs a raw grant).
+attachments, vectors and schemas stay allowed, and so does a `patch_node` of a
+node with an ordinary key that adds no reserved label, the removal of a reserved
+label included. A node with a reserved key is cleaned up with `delete_node`: the
+key decides, so a `patch_node` of it is refused whatever it does. A node that was
+planted before 0.7.1 can therefore still be cleaned up through the raw route (a
+bound graph still needs a raw grant).
 
 The answer is 422 `invalid_input` with the fixed message "a node key or label is
 reserved for agent memory". It never echoes the key or the label, and the batch
@@ -249,6 +252,12 @@ nothing about reservations. An ordinary batch to a reserved graph still answers
   not a well-formed memory node still stops adoption (1.3); a forgery made only
   of well-formed memory nodes is indistinguishable from memory. Check a graph
   before binding it.
+- A declared schema is not examined. `PUT /v1/graphs/{graph}/schema` stays
+  allowed on every graph and a graph keeps its schema when it is adopted; a
+  schema that requires a property of a memory label (for example `VliteMemory`)
+  makes memory writes fail with an engine error until a raw credential replaces
+  the schema. It forges nothing and has been possible since 0.7.0. Read
+  `GET /v1/graphs/{graph}/schema` before binding a graph that you did not create.
 - **Upgrade note.** A raw caller that wrote a label starting with `VliteMemory`
   or a key with one of these prefixes now gets 422. This is the one visible
   change of the slice.
@@ -277,12 +286,13 @@ changes.
   order: distance, then record ID. The `mmr` candidate pool (the best
   `candidates` by dense distance) is therefore a cosine pool, and `mmr` reports
   the value its own selection uses.
-- A query vector with zero norm has no direction: 422 `invalid_input`, before
-  any record is read. A stored vector with zero norm has no cosine distance and
-  is never a candidate of `exact` or `mmr`. (0.7.0 accepted a zero query under
-  `exact`; `mmr` already refused it.) The oracle leaves this convention open
-  (OPEN-G1W-10); the rule above is the one the engine's cosine metric already
-  has.
+- A query vector with zero norm has no direction: 422 `invalid_input`, in the
+  request validation, before any record is read or any budget is charged. A
+  stored vector with zero norm has no cosine distance and is never a vector
+  candidate of `exact` or `mmr` (with text it can still be found as a text-only
+  hit, 4.1). (0.7.0 accepted a zero query under `exact`; `mmr` already refused
+  it.) The oracle leaves this convention open (OPEN-G1W-10); the rule above is
+  the one the engine's cosine metric already has.
 - Nothing else changes: selection names, refusals, work charges (`meta`), ranks.
 
 ### 3.2 Compatibility
@@ -449,6 +459,12 @@ collection that `remember` requires and the exact scope grant.
   keeps its checks: a record held in another scope is `CrossScope` (422
   `invalid_input`). Only an ID that names a number is a claim whose owner must
   not be disclosed.
+- An item that repeats an existing memory (same scope, kind, content and
+  source) is a no-op that keeps the evidence the memory holds: an ID it does not
+  hold is `RecordAlreadyAttached` too, so a reference is never ignored, and the
+  reference it does hold repeats as a no-op. A record is added to an existing
+  memory by merging a new source into it (`merge_provenance` with the expected
+  revision), which attaches it when the memory holds none.
 - Recall already reports `{collection, record, snippet}` for an attached
   record. Forget detaches the record and deletes it unless another retained
   memory uses it, as for every evidence record, so a referenced record belongs
