@@ -11,6 +11,7 @@ mod consumer_kv;
 mod consumer_query;
 mod consumer_text;
 mod consumer_vectors;
+mod exact_scan;
 
 fn compact_collection(db: &crate::Database) -> (String, Vec<u64>) {
     let (_, state) = db
