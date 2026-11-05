@@ -516,6 +516,5 @@ fn an_attached_key_value_entry_cannot_be_given_a_deadline() {
         (entry.value.as_slice(), entry.version, entry.expires_at_ms),
         (&b"one"[..], version, None)
     );
-    drop(store);
     assert_eq!(db.collection("kv").unwrap().expires_at(slot).unwrap(), None);
 }
