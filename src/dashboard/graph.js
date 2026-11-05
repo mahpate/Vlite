@@ -544,8 +544,12 @@
         h(doc, "div", { class: "tool-group", id: "graph-results" },
           h(doc, "h3", { text: "Result" }),
           h(doc, "p", { id: "graph-summary", "aria-live": "polite", text: "Run a query to see nodes, edges and paths." }),
-          h(doc, "div", { class: "graph-actions" },
+          h(doc, "div", { class: "graph-actions graph-view-actions" },
             h(doc, "label", {}, "Result view", options(doc, "graph-view-mode", ["2d", "3d"], ["2D diagram", "3D graph"])),
+            h(doc, "button", { id: "graph-zoom-out", type: "button", class: "secondary", "aria-label": "Zoom out", text: "−" }),
+            h(doc, "button", { id: "graph-zoom-in", type: "button", class: "secondary", "aria-label": "Zoom in", text: "+" }),
+            h(doc, "button", { id: "graph-fit", type: "button", class: "secondary", text: "Fit / reset view" }),
+            h(doc, "span", { class: "graph-gesture-help", text: "Drag nodes · drag empty space to pan or rotate · scroll to zoom · use + / − and 0 when focused" }),
             h(doc, "button", { id: "graph-connect-nodes", type: "button", class: "secondary", hidden: true, "aria-pressed": "false", text: "Connect two nodes" }),
             h(doc, "label", { "data-graph-rotation": "", hidden: true }, "Turn", h(doc, "input", { id: "graph-yaw", type: "range", min: "-180", max: "180", value: "25" })),
             h(doc, "label", { "data-graph-rotation": "", hidden: true }, "Tilt", h(doc, "input", { id: "graph-pitch", type: "range", min: "-80", max: "80", value: "15" }))),
@@ -601,7 +605,7 @@
     section.replaceChildren(...markup(doc));
     const $ = (id) => doc.getElementById(id);
     const state = { status: "unknown", generation: 0, last: null, caps: null, selected: null, linking: null, result: { nodes: [], edges: [] } };
-    let threeView = null, threeGeneration = 0;
+    let threeView = null, threeGeneration = 0, twoView = null;
     const graphScript = doc.querySelector('script[src$="/graph.js"]');
     const threeModule = new URL("graph3d.js", graphScript ? graphScript.src : new URL("/dashboard/graph.js", win.location.href)).href;
 
@@ -694,11 +698,42 @@
       disabled: !canWrite(state.caps, $("graph-name").value) || (kind === "node" && item.key == null),
     }));
 
+    const updateGraphHighlight = () => {
+      const selection = state.focused;
+      const neighbors = new Set();
+      if (selection?.kind === "node") {
+        for (const edge of state.result.edges) {
+          if (text(edge.source) === selection.id) neighbors.add(text(edge.target));
+          if (text(edge.target) === selection.id) neighbors.add(text(edge.source));
+        }
+      } else if (selection?.kind === "edge") {
+        const edge = state.result.edges.find(item => text(item.id) === selection.id);
+        if (edge) { neighbors.add(text(edge.source)); neighbors.add(text(edge.target)); }
+      }
+      for (const element of section.querySelectorAll("#graph-view [data-pick-node], #graph-view [data-pick-edge]")) {
+        const isNode = element.hasAttribute("data-pick-node");
+        const id = isNode ? element.getAttribute("data-pick-node") : element.getAttribute("data-pick-edge");
+        const selected = selection?.kind === (isNode ? "node" : "edge") && selection.id === id;
+        let neighbor = false;
+        if (isNode) neighbor = neighbors.has(id) && !selected;
+        else if (selection?.kind === "node") {
+          const edge = state.result.edges.find(item => text(item.id) === id);
+          neighbor = !!edge && (text(edge.source) === selection.id || text(edge.target) === selection.id);
+        } else if (selection?.kind === "edge") neighbor = selected;
+        element.classList.toggle("is-selected", !!selected);
+        element.classList.toggle("is-neighbor", neighbor && !selected);
+        element.classList.toggle("is-dimmed", !!selection && !selected && !neighbor);
+      }
+      threeView?.setSelection(selection);
+    };
+
     const draw = (result) => {
       state.result = result;
+      state.focused = null;
       const version = ++threeGeneration;
       threeView?.dispose();
       threeView = null;
+      twoView = null;
       state.linking = null;
       $("graph-connect-nodes").setAttribute("aria-pressed", "false");
       $("graph-pick-note").textContent = "";
@@ -714,38 +749,50 @@
       const svg = doc.createElementNS(SVG_NS, "svg");
       const set = (element, attributes) => { for (const [name, value] of Object.entries(attributes)) element.setAttribute(name, String(value)); return element; };
       const make = (tag, attributes) => set(doc.createElementNS(SVG_NS, tag), attributes);
-      set(svg, { id: "graph-view", viewBox: `0 0 ${view.width} ${view.height}`, role: "group", "aria-label": `${view.nodes.length} nodes and ${view.edges.length} edges` });
+      set(svg, { id: "graph-view", viewBox: `0 0 ${view.width} ${view.height}`, role: "group", tabindex: "0",
+        "aria-label": `${view.nodes.length} nodes and ${view.edges.length} edges. Drag nodes to move them, drag the background to pan, scroll to zoom. Keyboard: plus and minus to zoom, arrows to pan, zero to reset.` });
+      const scene = make("g", { id: "graph-scene" });
       const defs = make("defs", {});
       const marker = make("marker", { id: "graph-arrow", viewBox: "0 0 8 8", refX: "8", refY: "4", markerWidth: "8", markerHeight: "8", orient: "auto-start-reverse" });
       marker.append(make("path", { d: "M0,0 L8,4 L0,8 z", class: "graph-arrow" }));
       defs.append(marker);
-      svg.append(defs);
+      scene.append(defs);
       const at = new Map(view.nodes.map((node) => [node.id, node]));
+      const nodeGroups = new Map();
+      const edgeEntries = [];
       const radius = 14;
-      for (const edge of view.edges) {
-        const from = at.get(edge.source);
-        const to = at.get(edge.target);
+      const paintEdge = ({ edge, group, from, to }) => {
+        const label = group.querySelector("text");
         if (edge.source === edge.target) {
           const side = from.x > view.width / 2 ? -1 : 1;
           const x = from.x + side * radius * (from.scale || 1);
-          const group = make("g", { class: "graph-edge", "data-pick-edge": edge.id, tabindex: "0", role: "button", "aria-label": `Select edge ${edge.label} (ID ${edge.id})` });
-          group.append(make("path", { d: `M${x},${from.y - 4} C${from.x + side * 55},${from.y - 35} ${from.x + side * 55},${from.y + 35} ${x},${from.y + 4}`, "marker-end": "url(#graph-arrow)" }));
-          const label = make("text", { x: from.x + side * 48, y: from.y + 4, "text-anchor": side > 0 ? "start" : "end" });
-          label.textContent = edge.label;
-          group.append(label);
-          svg.append(group);
-          continue;
+          group.querySelector("path").setAttribute("d", `M${x},${from.y - 4} C${from.x + side * 55},${from.y - 35} ${from.x + side * 55},${from.y + 35} ${x},${from.y + 4}`);
+          label.setAttribute("x", String(from.x + side * 48));
+          label.setAttribute("y", String(from.y + 4));
+          label.setAttribute("text-anchor", side > 0 ? "start" : "end");
+          return;
         }
-        const dx = to.x - from.x;
-        const dy = to.y - from.y;
+        const dx = to.x - from.x, dy = to.y - from.y;
         const length = Math.hypot(dx, dy) || 1;
+        group.querySelector("line").setAttribute("x1", String(from.x + (dx / length) * radius));
+        group.querySelector("line").setAttribute("y1", String(from.y + (dy / length) * radius));
+        group.querySelector("line").setAttribute("x2", String(to.x - (dx / length) * (radius + 2)));
+        group.querySelector("line").setAttribute("y2", String(to.y - (dy / length) * (radius + 2)));
+        label.setAttribute("x", String((from.x + to.x) / 2));
+        label.setAttribute("y", String((from.y + to.y) / 2 - 4));
+      };
+      for (const edge of view.edges) {
+        const from = at.get(edge.source), to = at.get(edge.target);
         const group = make("g", { class: "graph-edge", "data-pick-edge": edge.id, tabindex: "0", role: "button", "aria-label": `Select edge ${edge.label} (ID ${edge.id})` });
-        group.append(make("line", { x1: from.x + (dx / length) * radius, y1: from.y + (dy / length) * radius,
-          x2: to.x - (dx / length) * (radius + 2), y2: to.y - (dy / length) * (radius + 2), "marker-end": "url(#graph-arrow)" }));
-        const label = make("text", { x: (from.x + to.x) / 2, y: (from.y + to.y) / 2 - 4, "text-anchor": "middle" });
+        if (edge.source === edge.target) group.append(make("path", {}));
+        else group.append(make("line", { "marker-end": "url(#graph-arrow)" }));
+        const label = make("text", {});
         label.textContent = edge.label;
         group.append(label);
-        svg.append(group);
+        scene.append(group);
+        const entry = { edge, group, from, to };
+        edgeEntries.push(entry);
+        paintEdge(entry);
       }
       for (const node of view.nodes) {
         const group = make("g", { class: "graph-node", "data-pick-node": node.id, tabindex: "0", role: "button", "aria-label": `Select node ${node.text}` });
@@ -755,13 +802,106 @@
         const label = make("text", { x: node.x, y: node.y + radius + 14, "text-anchor": "middle" });
         label.textContent = node.text.length > 16 ? `${node.text.slice(0, 15)}…` : node.text;
         group.append(label);
-        svg.append(group);
+        scene.append(group);
+        nodeGroups.set(node.id, group);
       }
+      svg.append(scene);
       figure.prepend(svg);
+      const transform = { x: 0, y: 0, scale: 1 };
+      const setTransform = () => scene.setAttribute("transform", `translate(${transform.x} ${transform.y}) scale(${transform.scale})`);
+      const svgPoint = event => {
+        const point = svg.createSVGPoint();
+        point.x = event.clientX; point.y = event.clientY;
+        return point.matrixTransform(svg.getScreenCTM().inverse());
+      };
+      const scenePoint = event => {
+        const point = svgPoint(event);
+        return { x: (point.x - transform.x) / transform.scale, y: (point.y - transform.y) / transform.scale };
+      };
+      const zoomAt = (factor, point = { x: view.width / 2, y: view.height / 2 }) => {
+        const next = Math.max(.45, Math.min(3.2, transform.scale * factor));
+        const worldX = (point.x - transform.x) / transform.scale, worldY = (point.y - transform.y) / transform.scale;
+        transform.scale = next;
+        transform.x = point.x - worldX * next;
+        transform.y = point.y - worldY * next;
+        setTransform();
+      };
+      let gesture = null, suppressPick = false;
+      const updatePositions = () => {
+        for (const node of view.nodes) {
+          const group = nodeGroups.get(node.id);
+          group.querySelector("circle").setAttribute("cx", String(node.x));
+          group.querySelector("circle").setAttribute("cy", String(node.y));
+          group.querySelector("text").setAttribute("x", String(node.x));
+          group.querySelector("text").setAttribute("y", String(node.y + radius + 14));
+        }
+        for (const edge of edgeEntries) paintEdge(edge);
+      };
+      svg.addEventListener("pointerdown", event => {
+        if (event.button !== 0) return;
+        const target = event.target.closest?.("[data-pick-node], [data-pick-edge]");
+        if (target?.hasAttribute("data-pick-edge")) return;
+        const point = svgPoint(event);
+        const nodeGroup = target?.closest?.("[data-pick-node]");
+        const nodeId = nodeGroup?.getAttribute("data-pick-node");
+        gesture = nodeId ? { kind: "node", id: nodeId, start: scenePoint(event), moved: false }
+          : { kind: "pan", start: point, x: transform.x, y: transform.y, moved: false };
+        gesture.capture = nodeGroup || svg;
+        gesture.capture.setPointerCapture(event.pointerId);
+        svg.classList.add("is-gesturing");
+      });
+      svg.addEventListener("pointermove", event => {
+        if (!gesture) return;
+        const point = svgPoint(event);
+        if (gesture.kind === "node") {
+          const node = at.get(gesture.id), next = scenePoint(event);
+          if (Math.hypot(point.x - (gesture.start.x * transform.scale + transform.x), point.y - (gesture.start.y * transform.scale + transform.y)) > 2) gesture.moved = true;
+          node.x = next.x; node.y = next.y;
+          updatePositions();
+        } else {
+          const dx = point.x - gesture.start.x, dy = point.y - gesture.start.y;
+          if (Math.hypot(dx, dy) > 2) gesture.moved = true;
+          transform.x = gesture.x + dx; transform.y = gesture.y + dy;
+          setTransform();
+        }
+      });
+      const endGesture = event => {
+        if (!gesture) return;
+        suppressPick = gesture.moved;
+        if (suppressPick) requestAnimationFrame(() => { suppressPick = false; });
+        const capture = gesture.capture;
+        gesture = null;
+        svg.classList.remove("is-gesturing");
+        if (capture.hasPointerCapture(event.pointerId)) capture.releasePointerCapture(event.pointerId);
+      };
+      svg.addEventListener("pointerup", endGesture);
+      svg.addEventListener("pointercancel", endGesture);
+      svg.addEventListener("click", event => {
+        if (suppressPick) { event.preventDefault(); event.stopPropagation(); suppressPick = false; }
+      });
+      svg.addEventListener("wheel", event => { event.preventDefault(); zoomAt(event.deltaY < 0 ? 1.12 : 1 / 1.12, svgPoint(event)); }, { passive: false });
+      svg.addEventListener("keydown", event => {
+        if (event.key === "+" || event.key === "=") { event.preventDefault(); zoomAt(1.2); }
+        else if (event.key === "-") { event.preventDefault(); zoomAt(1 / 1.2); }
+        else if (event.key === "0") { event.preventDefault(); transform.x = 0; transform.y = 0; transform.scale = 1; setTransform(); }
+        else if (event.key.startsWith("Arrow")) {
+          event.preventDefault();
+          const delta = event.shiftKey ? 60 : 30;
+          transform.x += event.key === "ArrowLeft" ? delta : event.key === "ArrowRight" ? -delta : 0;
+          transform.y += event.key === "ArrowUp" ? delta : event.key === "ArrowDown" ? -delta : 0;
+          setTransform();
+        }
+      });
+      setTransform();
+      twoView = {
+        zoom: factor => zoomAt(factor),
+        fit: () => { transform.x = 0; transform.y = 0; transform.scale = 1; setTransform(); },
+      };
       $("graph-figure-caption").textContent = view.omitted > 0
         ? `Node-link view of the first ${view.nodes.length} nodes (${view.omitted} more listed in the table).`
-        : "Node-link view of the result. Select nodes or edges to edit.";
+        : "Node-link view. Drag nodes to arrange them, drag the background to pan, and scroll to zoom. Select nodes or edges to edit.";
       if (view.omittedEdges) $("graph-figure-caption").textContent += ` ${view.omittedEdges} more edges are listed in the tables.`;
+      updateGraphHighlight();
       if (mode === "3d") {
         $("graph-figure-caption").textContent = "Loading 3D graph; the 2D diagram and exact tables remain available.";
         const fallback = reason => {
@@ -780,10 +920,12 @@
           try {
             threeView = module.createGraph($("graph-three-stage"), view, {
               onNode: pickNode, onEdge: id => selectItem("edge", id), onFailure: fallback,
+              onChange: (yaw, pitch) => { $("graph-yaw").value = String(yaw); $("graph-pitch").value = String(pitch); },
             });
             threeView.rotate($("graph-yaw").value, $("graph-pitch").value);
+            threeView.setSelection(state.focused);
             svg.style.display = "none";
-            $("graph-figure-caption").textContent = `Force-directed 3D layout of this query result, not an embedding. Select nodes or edges to edit; Turn and Tilt rotate. Tables contain exact data.${view.omitted ? ` ${view.omitted} more nodes are listed in the tables.` : ""}${view.omittedEdges ? ` ${view.omittedEdges} more edges are listed in the tables.` : ""}`;
+            $("graph-figure-caption").textContent = `Force-directed 3D layout of this query result, not an embedding. Drag nodes to move them; drag the background to rotate; scroll to zoom. Tables contain exact data.${view.omitted ? ` ${view.omitted} more nodes are listed in the tables.` : ""}${view.omittedEdges ? ` ${view.omittedEdges} more edges are listed in the tables.` : ""}`;
           } catch (error) { fallback(error.message); }
         }).catch(error => fallback(`The renderer could not load: ${error.message}`));
       }
@@ -904,6 +1046,8 @@
     };
     const selectItem = (kind, id) => {
       if (writing) return;
+      state.focused = { kind, id };
+      updateGraphHighlight();
       const item = state.result[kind === "node" ? "nodes" : "edges"].find(item => text(item.id) === id);
       if (kind === "node") useNode(id);
       if (!item || !canWrite(state.caps, $("graph-name").value) || (kind === "node" && item.key == null)) {
@@ -928,6 +1072,8 @@
     };
     const pickNode = id => {
       if (writing) return;
+      state.focused = { kind: "node", id };
+      updateGraphHighlight();
       if (state.linking === null) { selectItem("node", id); return; }
       const item = state.result.nodes.find(node => text(node.id) === id);
       if (item?.key == null) { $("graph-pick-note").textContent = "Query this node's key before connecting it."; return; }
@@ -1071,6 +1217,9 @@
       for (const control of section.querySelectorAll("[data-graph-rotation]")) control.hidden = $("graph-view-mode").value !== "3d";
       draw(state.result);
     });
+    $("graph-zoom-in").addEventListener("click", () => threeView ? threeView.zoomBy(1.2) : twoView?.zoom(1.2));
+    $("graph-zoom-out").addEventListener("click", () => threeView ? threeView.zoomBy(1 / 1.2) : twoView?.zoom(1 / 1.2));
+    $("graph-fit").addEventListener("click", () => threeView ? threeView.fit() : twoView?.fit());
     for (const id of ["graph-yaw", "graph-pitch"]) $(id).addEventListener("input", () => threeView?.rotate($("graph-yaw").value, $("graph-pitch").value));
     $("graph-drop").addEventListener("click", async () => {
       if (writing) return;

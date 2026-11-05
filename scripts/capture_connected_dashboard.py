@@ -1,6 +1,8 @@
 """Capture current-source dashboard workflows against an isolated real API.
 
-Run on a disposable Linux Docker host with tests/requirements-dashboard.txt.
+Run with Docker and tests/requirements-dashboard.txt, or set
+VLITE_CAPTURE_SERVER to a native vlite-server executable. Both modes use
+isolated disposable data; the dashboard assets always come from this checkout.
 Only synthetic demo records are written; no existing server or volume is used.
 One new database holds the records, the extra collections and an `articles`
 graph, because every new file is graph-enabled.
@@ -15,8 +17,10 @@ import os
 from pathlib import Path
 import re
 import secrets
+import socket
 import subprocess
 import sys
+import tempfile
 from threading import Thread
 import time
 import urllib.error
@@ -50,6 +54,20 @@ def docker(*args, **kwargs):
 
 def start(name, token):
     """Run a disposable server that creates a new graph-enabled file on empty tmpfs volumes."""
+    executable = os.environ.get("VLITE_CAPTURE_SERVER")
+    if executable:
+        directory = tempfile.TemporaryDirectory(prefix="dashboard-capture-", dir=ROOT / "target")
+        with socket.socket() as listener:
+            listener.bind(("127.0.0.1", 0))
+            port = listener.getsockname()[1]
+        log = open(Path(directory.name) / "server.log", "w", encoding="utf-8")
+        process = subprocess.Popen(
+            [executable, str(Path(directory.name) / "demo.vlite"), "--create-if-missing", "3",
+             "--bind", f"127.0.0.1:{port}"],
+            env={**os.environ, "VLITE_AUTH_TOKEN": token,
+                 "VLITE_ADMIN_DIR": directory.name, "VLITE_TRUSTED_PROXY": "1"},
+            stdout=log, stderr=subprocess.STDOUT)
+        return {"process": process, "directory": directory, "port": port, "log": log}
     # VLITE_TRUSTED_PROXY lets the sign-in screen offer passwords, as it does behind an HTTPS proxy.
     docker("run", "-d", "--name", name,
            "--mount", "type=tmpfs,target=/data,tmpfs-mode=1777",
@@ -60,9 +78,9 @@ def start(name, token):
            env={**os.environ, "VLITE_AUTH_TOKEN": token})
 
 
-def connect(name, token):
+def connect(name, token, native=None):
     """Wait for the server's health route; return its address and an authenticated JSON helper."""
-    backend = "http://127.0.0.1:" + docker("port", name, "8080/tcp").rsplit(":", 1)[1]
+    backend = "http://127.0.0.1:" + (str(native["port"]) if native else docker("port", name, "8080/tcp").rsplit(":", 1)[1])
 
     def api(path, body=None, method=None):
         request = urllib.request.Request(
@@ -80,7 +98,11 @@ def connect(name, token):
             return backend, api
         except (OSError, urllib.error.URLError):
             if time.monotonic() > deadline:
-                subprocess.run(["docker", "logs", name], check=False)
+                if native:
+                    native["log"].flush()
+                    print((Path(native["directory"].name) / "server.log").read_text())
+                else:
+                    subprocess.run(["docker", "logs", name], check=False)
                 raise
             time.sleep(.5)
 
@@ -99,6 +121,12 @@ def seed(api):
     api("/v1/collections/default/settings", settings, "PUT")
     api("/v1/collections", {"name": "support", "dimensions": 3}, "POST")
     api("/v1/collections", {"name": "products", "dimensions": 3}, "POST")
+    api("/v1/collections", {"name": "cache", "dimensions": 1}, "POST")
+    for key, value in (("app:language", "English"), ("app:theme", "System")):
+        api("/v1/collections/cache/kv/entry", {
+            "namespace": "preferences", "key": key,
+            "value_base64": base64.b64encode(value.encode()).decode(), "expected": "absent",
+        }, "PUT")
 
 
 def seed_graph(api):
@@ -180,9 +208,10 @@ def capture(output):
     token = secrets.token_urlsafe(32)
     name = "vlite-connected-tour-" + uuid.uuid4().hex[:10]
     dashboard = None
+    native = None
     try:
-        start(name, token)
-        backend, api = connect(name, token)
+        native = start(name, token)
+        backend, api = connect(name, token, native)
         capabilities = api("/v1/capabilities")
         required = ("recommendations", "facets", "change_feed", "tenants",
                     "scoped_credentials", "auto_maintenance", "backup_restore", "webhooks")
@@ -293,6 +322,13 @@ def capture(output):
             page.locator("#search-form button[type=submit]").click()
             expect(page.locator("#hits tbody tr")).to_have_count(len(ARTICLES))
             save("current-search.png", "#search-summary")
+            show("#embed-text").fill("Synthetic support article query")
+            page.locator("#embed-generate").click()
+            expect(page.locator("#confirmation-text")).to_contain_text("Text may leave this server")
+            page.locator("#confirmation button[value=confirm]").click()
+            expect(page.locator("#embed-result")).to_contain_text("Query vector ready")
+            assert len(json.loads(page.locator("#query").input_value())) == 3
+            page.locator("#query").fill("[0.9, 0.1, 0]")
             page.locator("#mode").select_option("hybrid")
             show("#search-text").fill("vector search")
             page.locator("#search-form button[type=submit]").click()
@@ -317,6 +353,23 @@ def capture(output):
             page.locator("#import-preview").click()
             expect(page.locator("#import-commit")).to_be_enabled()
             save("current-import.png")
+
+            nav.get_by_role("link", name="Key-value", exact=True).click()
+            page.locator("#collection").select_option("cache")
+            expect(page.locator("#confirmation")).to_be_visible()
+            page.locator("#confirmation button[value=confirm]").click()
+            expect(page.locator("#kv-list")).to_be_enabled()
+            page.locator("#kv-namespace").fill("preferences")
+            page.locator("#kv-list").click()
+            expect(page.locator("#kv-entries tbody tr")).to_have_count(2)
+            page.locator("#kv-entries button").first.click()
+            expect(page.locator("#kv-value")).to_have_value("English")
+            save("current-key-value.png")
+            nav.get_by_role("link", name="MemoryAI", exact=True).click()
+            expect(page.locator("#memory-availability")).to_contain_text("scoped API token")
+            save("current-memory.png")
+            page.locator("#collection").select_option("default")
+            expect(page.locator("#stat-dimensions")).to_have_text("3")
 
             nav.get_by_role("link", name="Graph", exact=True).click()
             expect(page.locator("#graph-controls")).to_be_visible()
@@ -543,7 +596,8 @@ def capture(output):
         assert len({item["sha256"] for item in captures}) == len(captures)
         manifest = {
             "data": "Synthetic demo records and an articles graph in one isolated disposable database",
-            "record_count": len(ARTICLES), "connected": True, "backend_image": IMAGE,
+            "record_count": len(ARTICLES), "connected": True,
+            "backend_image": "native isolated server" if native else IMAGE,
             "format_version": capabilities["format_version"],
             # Text-mode hashes match tests/dashboard_tours.py on any checkout line ending.
             "source_assets": {file.name: hashlib.sha256(file.read_text(encoding="utf-8").encode()).hexdigest()
@@ -558,13 +612,19 @@ def capture(output):
             "captures": captures,
         }
         (output / "connected-captures.json").write_text(json.dumps(manifest, indent=2) + "\n")
-        print(f"Captured {len(captures)} distinct connected views: the sign-in screen and all seven workspaces.")
+        print(f"Captured {len(captures)} distinct connected views: the sign-in screen and all nine workspaces.")
     finally:
         if dashboard:
             dashboard.shutdown()
             dashboard.server_close()
-        subprocess.run(["docker", "rm", "-f", name], check=False,
-                       stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        if native:
+            native["process"].terminate()
+            native["process"].wait(timeout=30)
+            native["log"].close()
+            native["directory"].cleanup()
+        elif not os.environ.get("VLITE_CAPTURE_SERVER"):
+            subprocess.run(["docker", "rm", "-f", name], check=False,
+                           stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
 
 
 if __name__ == "__main__":

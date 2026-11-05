@@ -325,3 +325,8 @@ footer { margin-top: 28px; padding: 16px 0 8px; border-top: 1px solid var(--stud
   #observability .obs-log-row .obs-message { grid-column: 1 / -1; }
   #observability .obs-metrics { grid-template-columns: repeat(2, minmax(0, 1fr)); }
 }
+.data-workspace-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 1.25rem; }
+.data-workspace-grid > *, .data-workspace-grid label { min-width: 0; }
+.data-workspace-grid pre { max-height: 34rem; overflow: auto; }
+.data-workspace-grid td { overflow-wrap: anywhere; }
+@media (max-width: 1000px) { .data-workspace-grid { grid-template-columns: minmax(0, 1fr); } }

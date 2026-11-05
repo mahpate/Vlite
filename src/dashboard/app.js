@@ -369,6 +369,9 @@
     $("metadata").value = "{}";
     $("record-ttl").value = "";
     $("rerank-mode").value = "";
+    $("rerank-provider").value = "";
+    $("embed-text").value = "";
+    $("embed-result").textContent = "";
     $("query").value = "";
     $("filter").value = "[]";
     $("search-text").value = "";
@@ -1177,7 +1180,7 @@
       Object.assign(body, annOptions());
     }
     if ($("explain").checked && feature("search_explain")) body.explain = true;
-    Object.assign(body, utils().rerank($("rerank-mode").value, $("rerank-candidates").value, $("mmr-lambda").value, body.k, mode));
+    Object.assign(body, utils().rerank($("rerank-mode").value, $("rerank-candidates").value, $("mmr-lambda").value, body.k, mode, $("rerank-provider").value.trim()));
     return body;
   }
   async function search() {
@@ -1203,11 +1206,11 @@
       table.replaceChildren();
       $("search-plan").textContent = "";
       const direction = utils().scoreDirection(body.mode, body.metric);
-      $("search-summary").textContent = `${result.hits.length} neighbors returned in ${(performance.now() - started).toFixed(1)} ms (browser-observed); collection ${owner}; ${body.mode}, ${body.metric}. ${direction.label}. ${body.mode !== "exact" && body.filter.length ? "Filter-aware ANN may return fewer than k; no exact fallback. " : ""}Select an ID to inspect.`;
+      $("search-summary").textContent = `${result.hits.length} neighbors returned in ${(performance.now() - started).toFixed(1)} ms (browser-observed); collection ${owner}; ${body.mode}, ${body.metric}. ${result.ranking ? `Provider ${result.ranking.provider}; order ${result.ranking.order}. Provider scores are not vector distances.` : direction.label}.${body.mode !== "exact" && body.filter.length ? " Filter-aware ANN may return fewer than k; no exact fallback. " : ""} Select an ID to inspect.`;
       $("hits").querySelector("caption").textContent = body.mode === "hybrid"
         ? `Search results (${body.metric}; hybrid score, higher is better)`
         : `Search results (${body.metric ?? "squared_l2"}; lower distance is better)`;
-      const columns = body.mode === "hybrid" ? ["score", "distance", "bm25", "vector_rank", "text_rank"] : ["distance"];
+      const columns = body.mode === "hybrid" ? ["score", "distance", "bm25", "vector_rank", "text_rank"] : result.ranking ? ["rerank_score", "distance"] : ["distance"];
       const header = $("hits").querySelector("thead tr");
       header.replaceChildren();
       for (const title of ["ID", ...columns, "Record preview"]) {
@@ -1267,7 +1270,7 @@
   try {
   const toolsContext = {
     api, run, status, confirm: confirmOperation, inspect: inspectRecord, search, indexConfig, disconnect,
-    dimensions: () => dimensions, busy: () => busy, connected: () => connected,
+    dimensions: () => dimensions, busy: () => busy, connected: () => connected, tokenAuth: () => Boolean(token),
     capabilities: () => capabilities, lastSearch: () => lastSearch,
     collection: () => collection, path, settingsPath, feature, can, extended, annOptions, searchBody,
     collections: () => collectionItems,

@@ -484,9 +484,9 @@
     const keys = ["config", "ef_search", "explain", "filter", "fusion", "k", "metric", "mode", "quantization", "rerank_multiplier", "text", "vector", "vector_leg"];
     if (!object(q) || Object.keys(q).some((key) => ![...keys, "rerank"].includes(key)) || keys.some((key) => !(key in q))) throw new Error("Unknown or missing query fields; credentials are not accepted");
     if (q.rerank !== undefined) {
-      exactKeys(q.rerank, ["mode", "candidates", "lambda"], ["mode", "candidates"], "Reranking");
-      if (!["exact", "mmr"].includes(q.rerank.mode) || typeof q.rerank.candidates !== "number" || ("lambda" in q.rerank && (q.rerank.mode !== "mmr" || typeof q.rerank.lambda !== "number"))) throw new Error("Invalid rerank candidate count or lambda");
-      rerank(q.rerank.mode, q.rerank.candidates, q.rerank.lambda ?? 0.5, q.k, q.mode);
+      exactKeys(q.rerank, ["mode", "candidates", "lambda", "provider"], ["mode", "candidates"], "Reranking");
+      if (!["exact", "mmr", "custom"].includes(q.rerank.mode) || typeof q.rerank.candidates !== "number" || ("lambda" in q.rerank && (q.rerank.mode !== "mmr" || typeof q.rerank.lambda !== "number")) || ("provider" in q.rerank && q.rerank.mode !== "custom")) throw new Error("Invalid rerank candidate count, lambda or provider");
+      rerank(q.rerank.mode, q.rerank.candidates, q.rerank.lambda ?? 0.5, q.k, q.mode, q.rerank.provider);
     }
     if (!["exact", "approximate", "approximate_ready", "auto", "hybrid"].includes(q.mode)) throw new Error("Invalid query mode");
     if (!["exact", "approximate_ready"].includes(q.vector_leg) || !Number.isInteger(q.rerank_multiplier) || q.rerank_multiplier < 1 || q.rerank_multiplier > 16) throw new Error("Invalid vector_leg or rerank_multiplier");
@@ -556,21 +556,27 @@
     }[method] || [];
     return patterns.some((pattern) => new RegExp(pattern).test(path));
   }
-  const isSearch = (path) => new RegExp(`^/v1${SCOPED}/(?:search(?:/(?:grouped|geo|named|sparse|dense-sparse|disk-ann))?|recommend|facets|stats/numeric|query)$`).test(path);
+  const isSearch = (path) => new RegExp(`^/v1${SCOPED}/(?:search(?:/(?:grouped|geo|named|sparse|dense-sparse|disk-ann))?|recommend|facets|stats/numeric|query)$`).test(path)
+    || new RegExp(`^/v1/collections/${NAME}/embed$`).test(path)
+    || new RegExp(`^/v1/memory/${NAME}/(?:recall|receipts/lookup)$`).test(path);
   function expiry(value) {
     if (value === "") return {};
     if (!/^(0|[1-9][0-9]*)$/.test(String(value))) throw new Error("TTL must be a nonnegative integer in milliseconds");
     return { ttl_ms: boundedInteger(value, 0, Number.MAX_SAFE_INTEGER, "TTL milliseconds") };
   }
-  function rerank(mode, candidates, lambda, k, searchMode) {
+  function rerank(mode, candidates, lambda, k, searchMode, provider) {
     if (!mode) return {};
-    if (!["exact", "mmr"].includes(mode) || searchMode === "hybrid") throw new Error("Reranking requires vector search and an exact or MMR mode");
+    if (!["exact", "mmr", "custom"].includes(mode) || searchMode === "hybrid") throw new Error("Reranking requires vector search and an exact, MMR or custom mode");
     if (String(candidates).trim() === "") throw new Error("Rerank candidates are required");
     const result = { mode, candidates: boundedInteger(candidates, Math.max(k, 1), 1000, "Rerank candidates") };
     if (mode === "mmr") {
       const value = Number(lambda);
       if (lambda === "" || !Number.isFinite(value) || value < 0 || value > 1) throw new Error("MMR lambda must be 0..1");
       result.lambda = value;
+    }
+    if (mode === "custom") {
+      if (typeof provider !== "string" || !/^[a-z][a-z0-9_-]{0,62}$/.test(provider)) throw new Error("Enter an authorized ranking provider alias");
+      result.provider = provider;
     }
     return { rerank: result };
   }
@@ -903,6 +909,300 @@
       gate() { $("write-stop").disabled = !writing || stop; $("write-commit").disabled = !ctx.connected() || !ctx.can("write") || !validated; },
     };
   }
+  function kvAddress(collection, namespace, key) {
+    collectionName(collection);
+    const bytes = new TextEncoder();
+    if (!namespace || bytes.encode(namespace).length > 255) throw new Error("Namespace must contain 1..255 UTF-8 bytes");
+    if (key !== undefined && (!key || bytes.encode(key).length > 1024)) throw new Error("Key must contain 1..1024 UTF-8 bytes");
+    return `/v1/collections/${collection}/kv`;
+  }
+  function kvValue(value, format) {
+    if (!["text", "json", "base64"].includes(format)) throw new Error("Unknown value format");
+    if (format === "json") JSON.parse(value);
+    let bytes;
+    if (format === "base64") {
+      if (!/^(?:[A-Za-z0-9+/]{4})*(?:[A-Za-z0-9+/]{2}==|[A-Za-z0-9+/]{3}=)?$/.test(value) || btoa(atob(value)) !== value) throw new Error("Use canonical padded standard base64");
+      bytes = Uint8Array.from(atob(value), char => char.charCodeAt(0));
+    } else bytes = new TextEncoder().encode(value);
+    if (bytes.length > 1047290) throw new Error("Value exceeds 1047290 decoded bytes");
+    if (format === "base64") return value;
+    let binary = "";
+    for (let offset = 0; offset < bytes.length; offset += 8192) binary += String.fromCharCode(...bytes.subarray(offset, offset + 8192));
+    return btoa(binary);
+  }
+  function kvExpected(condition, version, deleting = false) {
+    if (condition === "any" || condition === "absent") return condition;
+    if (condition !== "revision") throw new Error("Unknown write condition");
+    const revision = id(version);
+    return deleting ? revision : { revision };
+  }
+  function memoryRequest(action, input, now = Date.now()) {
+    const required = (value, label) => {
+      if (typeof value !== "string" || !value.trim()) throw new Error(`${label} is required`);
+      return value;
+    };
+    const scope = { agent: required(input.agent, "Agent") };
+    for (const name of ["user", "session"]) if (input[name]) scope[name] = input[name];
+    const body = { scope };
+    if (action === "recall") {
+      const seeds = input.seeds.split(/\r?\n/).map(value => value.trim()).filter(Boolean);
+      if (seeds.length) body.entity_seeds = seeds;
+      if (input.text.trim()) body.text = input.text;
+      if (input.vector.trim()) body.vector = vector(JSON.parse(input.vector));
+      if (!seeds.length && !body.text && !body.vector) throw new Error("Recall needs an entity seed, query text or vector");
+      body.limits = { deadline_ms: 5000 };
+      return body;
+    }
+    if (!["remember", "consolidate", "forget", "receipts/lookup"].includes(action)) throw new Error("Unsupported memory action");
+    body.idempotency_key = required(input.idempotency, "Idempotency key");
+    if (action === "receipts/lookup") {
+      if (!["forget", "consolidate"].includes(input.operation)) throw new Error("Receipt lookup supports forget and consolidate only");
+      return { ...body, operation: input.operation };
+    }
+    body.deadline_ms = 5000;
+    if (action === "consolidate" || action === "forget") {
+      const refs = JSON.parse(input.references);
+      if (!Array.isArray(refs) || !refs.length || refs.length > 4096) throw new Error("Provide 1..4096 memory references");
+      const seen = new Set();
+      for (const ref of refs) {
+        exactKeys(ref, ["id", "revision"], ["id", "revision"], "Memory reference");
+        required(ref.id, "Reference ID");
+        if (id(ref.revision) === "0") throw new Error("Memory revisions must be positive decimal strings");
+        if (seen.has(ref.id)) throw new Error("Duplicate memory reference");
+        seen.add(ref.id);
+      }
+      if (action === "forget") return { ...body, target: { ids: refs }, mode: "logical_delete" };
+      body.inputs = refs;
+    }
+    const item = {
+      id: required(input.id, "Memory ID"), kind: action === "consolidate" ? "episodic" : input.kind,
+      content: required(input.content, "Content"), observed_at_ms: String(now),
+      source: { source_id: required(input.source, "Source ID"), source_kind: required(input.sourceKind, "Source kind") },
+    };
+    if (!["entity", "episodic"].includes(item.kind)) throw new Error("Only entity and episodic memories are supported");
+    if (action === "consolidate") {
+      item.source.transformation_id = required(input.transformation, "Transformation ID");
+      body.output = item;
+    } else body.items = [item];
+    return body;
+  }
+  function dataWorkspaces(ctx, on) {
+    let cursor = null, pageContext = null, memoryResponse = null, memoryAttempt = null, kvDirty = false;
+    const advertised = route => ctx.capabilities()?.routes?.includes(route) === true;
+    const kvReady = () => ctx.connected() && advertised("/v1/collections/{collection}/kv/entry") && ctx.dimensions() === 1;
+    const memoryRoute = action => {
+      const routes = ctx.capabilities()?.routes;
+      // Released servers mount memory routes without listing them in capabilities.
+      // Only an explicit memory inventory can establish that an action is absent.
+      return routes?.some(route => route.startsWith("/v1/memory/"))
+        ? routes.includes(`/v1/memory/{binding}/${action}`) : null;
+    };
+    const memoryReady = action => ctx.connected() && ctx.tokenAuth() && ctx.capabilities()?.role === "scoped"
+      && memoryRoute(action) !== false;
+    const memoryAllowed = action => memoryReady(action) && ctx.capabilities().scope?.operations?.includes(["recall", "receipts/lookup"].includes(action) ? "graph_read" : "graph_write");
+    const listContext = () => JSON.stringify([ctx.collection(), $("kv-namespace").value, $("kv-prefix").value, $("kv-limit").value]);
+    const clearPage = () => {
+      cursor = null; pageContext = null;
+      $("kv-entries").querySelector("tbody").replaceChildren();
+      $("kv-next").disabled = true;
+    };
+    const clearMemory = () => {
+      memoryResponse = null;
+      memoryAttempt = null;
+      text("memory-result", ""); text("memory-outcome", "Scope changed or signed out. Displayed memories and receipts were cleared.");
+      $("memory-results").querySelector("tbody").replaceChildren();
+      $("memory-download").disabled = true;
+      $("memory-download-request").disabled = true;
+    };
+    const clearKV = () => {
+      clearPage(); kvDirty = false;
+      for (const name of ["kv-key", "kv-value", "kv-version", "kv-expiry"]) $(name).value = "";
+      $("kv-condition").value = "absent";
+      text("kv-result", ""); text("kv-outcome", "");
+    };
+    const gate = () => {
+      text("kv-availability", !ctx.connected() ? "Sign in to check Key-value support."
+        : !advertised("/v1/collections/{collection}/kv/entry") ? "This server does not advertise Key-value routes."
+        : ctx.dimensions() !== 1 ? "Select a one-dimensional collection to use Key-value. No collection is created automatically."
+        : `Collection: ${ctx.collection()}. Key-value support is available; your collection permissions still apply.`);
+      for (const name of ["kv-list", "kv-get"]) $(name).disabled = !kvReady() || !ctx.can("read");
+      for (const name of ["kv-save", "kv-delete"]) $(name).disabled = !kvReady() || !ctx.can("write");
+      $("kv-next").disabled = !kvReady() || !ctx.can("read") || cursor === null || pageContext !== listContext();
+      const action = $("memory-action").value;
+      text("memory-availability", !ctx.connected() ? "Sign in with a scoped API token to use MemoryAI."
+        : !ctx.tokenAuth() || ctx.capabilities()?.role !== "scoped" ? "MemoryAI needs a scoped API token with a binding grant; this sign-in does not provide one."
+        : !memoryReady(action) ? "This server does not advertise this memory action."
+        : !memoryAllowed(action) ? `This action needs ${["recall", "receipts/lookup"].includes(action) ? "graph_read" : "graph_write"} permission and a binding-specific scope grant.`
+        : memoryRoute(action) === null ? "Memory routes are not listed in this server's capabilities. Submit only an operator-configured binding; a 404 means the route is unavailable. The server verifies exact scope."
+        : "Configured route available. The server verifies the binding and exact scope for every request.");
+      $("memory-run").disabled = !memoryAllowed(action);
+      $("memory-download").disabled = memoryResponse === null || !ctx.connected();
+      $("memory-download-request").disabled = memoryAttempt === null || !ctx.connected();
+      $("embed-generate").disabled = !ctx.connected() || !ctx.can("search") || !ctx.extended();
+    };
+    const checkKV = operation => {
+      if (!kvReady() || !ctx.can(operation)) throw new Error("Key-value needs a supported server, a one-dimensional collection and the appropriate permission");
+      return kvAddress(ctx.collection(), $("kv-namespace").value);
+    };
+    const address = () => {
+      kvAddress(ctx.collection(), $("kv-namespace").value, $("kv-key").value);
+      return new URLSearchParams({ namespace: $("kv-namespace").value, key: $("kv-key").value });
+    };
+    async function getValue() {
+      const base = checkKV("read"), query = address();
+      const result = await ctx.api("GET", `${base}/entry?${query}`);
+      text("kv-result", result);
+      const entry = result;
+      $("kv-version").value = entry.version; $("kv-expiry").value = entry.expires_at_ms ?? "";
+      $("kv-condition").value = "revision";
+      const bytes = Uint8Array.from(atob(entry.value_base64), char => char.charCodeAt(0));
+      try {
+        const decoded = new TextDecoder("utf-8", { fatal: true }).decode(bytes);
+        if (/[\u0000-\u0008\u000b\u000c\u000e-\u001f\u007f]/u.test(decoded)) throw new Error("Binary value");
+        $("kv-value").value = decoded; $("kv-format").value = "text";
+      } catch {
+        $("kv-value").value = entry.value_base64; $("kv-format").value = "base64";
+      }
+      kvDirty = false;
+      text("kv-outcome", `Loaded version ${entry.version}. Save and delete now require this exact version.`);
+    }
+    async function list(next) {
+      const base = checkKV("read");
+      const context = listContext();
+      if (next && (cursor === null || context !== pageContext)) throw new Error("List keys again after changing the collection, namespace, prefix or page size");
+      const query = new URLSearchParams({ namespace: $("kv-namespace").value, prefix: $("kv-prefix").value, limit: String(boundedInteger($("kv-limit").value, 1, 10000, "Page size")) });
+      if (next) query.set("after", cursor);
+      const result = await ctx.api("GET", `${base}/entries?${query}`);
+      const tbody = $("kv-entries").querySelector("tbody");
+      tbody.replaceChildren();
+      for (const entry of result.items) {
+        const row = document.createElement("tr"), key = document.createElement("td"), button = document.createElement("button");
+        button.type = "button"; button.className = "secondary"; button.textContent = entry.key;
+        button.addEventListener("click", () => ctx.run(async () => {
+          if (context !== listContext()) throw new Error("Page is stale; list keys again");
+          if (kvDirty && !await ctx.confirm("Discard the unsaved Key-value draft and load this key?")) return;
+          $("kv-key").value = entry.key; await getValue();
+        }));
+        key.append(button); row.append(key);
+        for (const value of [entry.version, entry.expires_at_ms ?? "No expiry"]) {
+          const cell = document.createElement("td"); cell.textContent = value; row.append(cell);
+        }
+        tbody.append(row);
+      }
+      cursor = result.next_after; pageContext = context;
+      text("kv-page-status", `${result.items.length} keys on this live page.${cursor === null ? " End of current results." : " More keys available."} Values may change between pages.`);
+    }
+    on("kv-list", () => list(false)); on("kv-next", () => list(true)); on("kv-get", getValue);
+    for (const name of ["kv-namespace", "kv-prefix", "kv-limit"]) $(name).addEventListener("input", () => {
+      clearPage();
+      if (name === "kv-namespace") clearKV();
+    });
+    for (const name of ["kv-key", "kv-value", "kv-format", "kv-condition", "kv-version", "kv-expiry"]) $(name).addEventListener("input", () => { kvDirty = true; });
+    $("kv-key").addEventListener("input", () => { $("kv-version").value = ""; $("kv-condition").value = "absent"; });
+    for (const action of ["save", "delete"]) on(`kv-${action}`, async () => {
+      const base = checkKV("write"), query = address(), deleting = action === "delete";
+      const expected = kvExpected($("kv-condition").value, $("kv-version").value, deleting);
+      let body;
+      if (deleting) query.set("expected", expected);
+      else {
+        body = { namespace: $("kv-namespace").value, key: $("kv-key").value, value_base64: kvValue($("kv-value").value, $("kv-format").value), expected };
+        if ($("kv-expiry").value) body.expires_at_ms = id($("kv-expiry").value);
+      }
+      if (!await ctx.confirm(`${deleting ? "Delete" : "Save"} key ${JSON.stringify($("kv-key").value)} in collection ${ctx.collection()}, namespace ${JSON.stringify($("kv-namespace").value)}? Condition: ${JSON.stringify(expected)}.${!deleting && !body.expires_at_ms ? " Any existing expiry will be cleared." : ""} No automatic retry.`)) return;
+      text("kv-outcome", "Request submitted. If interrupted, the outcome may be unknown; get the key before retrying.");
+      try {
+        const result = await ctx.api(deleting ? "DELETE" : "PUT", `${base}/entry${deleting ? `?${query}` : ""}`, body);
+        clearPage(); text("kv-result", result); kvDirty = false;
+        $("kv-version").value = ""; $("kv-condition").value = "revision";
+        text("kv-outcome", "Server confirmed the operation. Get the value again before another conditional change.");
+      } catch (error) {
+        clearPage();
+        text("kv-outcome", `${error.message} Get the current value before any manual retry; the draft was retained.`);
+        throw error;
+      }
+    });
+    const actionLabels = { recall: "Recall memories", remember: "Remember", consolidate: "Consolidate and retain originals", forget: "Logically delete selected memories", "receipts/lookup": "Look up receipt" };
+    const actionChanged = () => {
+      const action = $("memory-action").value;
+      document.querySelectorAll("[data-memory-action]").forEach(element => { element.hidden = !element.dataset.memoryAction.split(" ").includes(action); });
+      $("memory-run").textContent = actionLabels[action];
+      $("memory-kind").disabled = action === "consolidate";
+      if (action === "consolidate") $("memory-kind").value = "episodic";
+      gate();
+    };
+    $("memory-action").addEventListener("change", actionChanged);
+    for (const name of ["memory-binding", "memory-agent", "memory-user", "memory-session"]) $(name).addEventListener("input", clearMemory);
+    on("memory-run", async () => {
+      const action = $("memory-action").value;
+      if (!memoryAllowed(action)) throw new Error("MemoryAI needs a supported action and a scoped token with the required graph permission");
+      const binding = $("memory-binding").value;
+      if (!/^[a-z][a-z0-9_-]{0,62}$/.test(binding)) throw new Error("Enter the operator-provided binding name (lowercase letters, digits, underscore or hyphen)");
+      const input = {
+        agent: $("memory-agent").value, user: $("memory-user").value, session: $("memory-session").value,
+        seeds: $("memory-seeds").value, text: $("memory-text").value, vector: $("memory-vector").value,
+        id: $("memory-id").value, kind: $("memory-kind").value, content: $("memory-content").value,
+        source: $("memory-source").value, sourceKind: $("memory-source-kind").value, transformation: $("memory-transformation").value,
+        references: $("memory-references").value, idempotency: $("memory-idempotency").value, operation: $("memory-receipt-operation").value,
+      };
+      const signature = JSON.stringify({ binding, action, input });
+      // Reusing an unchanged draft must preserve its observation timestamp and idempotent body.
+      const body = memoryAttempt?.signature === signature ? memoryAttempt.request : memoryRequest(action, input);
+      const read = ["recall", "receipts/lookup"].includes(action);
+      if (!read && !await ctx.confirm(`${actionLabels[action]} in binding ${binding}, exact scope ${JSON.stringify(body.scope)}?${action === "forget" ? " This is NOT secure erasure." : ""} Idempotency key: ${body.idempotency_key}. No automatic retry.`)) return;
+      memoryAttempt = { signature, binding, operation: action, request: body };
+      text("memory-outcome", read ? "Reading memories..." : "Mutation submitted. Retain the idempotency key; if interrupted, verify the outcome before retrying.");
+      try {
+        const result = await ctx.api("POST", `/v1/memory/${encodeURIComponent(binding)}/${action}`, body, { data: read ? false : undefined });
+        memoryResponse = { binding, operation: action, request: body, response: result };
+        text("memory-result", result);
+        const tbody = $("memory-results").querySelector("tbody"); tbody.replaceChildren();
+        for (const memory of result.memories || []) {
+          const row = document.createElement("tr");
+          for (const value of [`${memory.id} / ${memory.revision}`, memory.kind, memory.content]) {
+            const cell = document.createElement("td"); cell.textContent = value; row.append(cell);
+          }
+          tbody.append(row);
+        }
+        text("memory-outcome", `${actionLabels[action]}: server confirmed. ${action === "recall" ? "Inspect truncation and ranking details in the response." : "Retain the response and receipt before signing out."}`);
+      } catch (error) {
+        text("memory-outcome", `${error.message} ${read ? "Read failed." : "Outcome may be unknown after a transport or server failure. Retain the original key and request; do not generate a new key to retry."} The last successful response, if any, remains below.`);
+        throw error;
+      }
+    });
+    on("memory-download", async () => {
+      if (!memoryResponse) throw new Error("No successful memory response to download");
+      download("vlite-memory-response.json", memoryResponse);
+    });
+    on("memory-download-request", async () => {
+      if (!memoryAttempt) throw new Error("No submitted memory request to download");
+      const { signature, ...attempt } = memoryAttempt;
+      download("vlite-memory-request.json", attempt);
+    });
+    on("embed-generate", async () => {
+      if (!ctx.extended() || !ctx.can("search")) throw new Error("Embedding needs a collection-capable server and search permission");
+      const provider = $("embed-provider").value.trim(), value = $("embed-text").value;
+      if (!provider || !value.trim()) throw new Error("Enter embedding text and a provider alias");
+      if (!await ctx.confirm(`Generate a query vector with provider ${provider}? Text may leave this server for the configured provider. Nothing will be indexed or searched.`)) return;
+      text("embed-result", "Generating; the previous query vector is retained until this succeeds.");
+      try {
+        const result = await ctx.api("POST", `/v1/collections/${collectionName(ctx.collection())}/embed`, { text: value, provider }, { data: false });
+        $("query").value = JSON.stringify(vector(result.vector, ctx.dimensions()));
+        $("query").dispatchEvent(new Event("input", { bubbles: true }));
+        text("embed-result", `Query vector ready (${result.vector.length} dimensions, provider ${result.provider}). Select Search to use it.`);
+      } catch (error) { text("embed-result", `Embedding failed: ${error.message}`); throw error; }
+    });
+    return {
+      gate,
+      dirty: () => kvDirty ? ["Key-value value draft"] : [],
+      collectionChanged: clearKV,
+      clear() {
+        clearKV(); clearMemory();
+        for (const name of ["kv-namespace", "kv-prefix", "memory-binding", "memory-agent", "memory-user", "memory-session", "memory-id", "memory-content", "memory-source", "memory-transformation", "memory-seeds", "memory-text", "memory-vector", "memory-idempotency", "embed-text", "rerank-provider"]) $(name).value = "";
+        $("kv-namespace").value = "default"; $("memory-references").value = "[]";
+        text("embed-result", "");
+      },
+    };
+  }
   function init(ctx) {
     let preview = [], previewCollection = null, sample = [], refreshing = false;
     // Resumable import state: prepared file chunks and the job being driven (never persisted).
@@ -919,6 +1219,7 @@
     const get = (name) => JSON.parse($(name).value);
     const advanced = advancedTools(ctx, on, get);
     const studio = studioTools(ctx, on, get);
+    const data = dataWorkspaces(ctx, on);
     // Record fields only: newer servers add server-owned fields (e.g. `revision`) that are not writable and would make
     // exports non-importable and read-then-rewrite batches fail validation.
     const fetchRecord = async (value) => {
@@ -975,7 +1276,7 @@
       if (ctx.extended()) {
         const query = $("query").value.trim();
         value = savedQueryV2({ version: 2, name: $("query-name").value, collection: ctx.collection(), query: { ...base,
-          ...rerank($("rerank-mode").value, $("rerank-candidates").value, $("mmr-lambda").value, base.k, base.mode),
+          ...rerank($("rerank-mode").value, $("rerank-candidates").value, $("mmr-lambda").value, base.k, base.mode, $("rerank-provider").value.trim()),
           vector: query ? get("query") : null, text: $("search-text").value, explain: $("explain").checked,
           quantization: $("quantization").value, rerank_multiplier: Number($("rerank-multiplier").value), vector_leg: $("vector-leg").value,
           fusion: { rrf_k: Number($("rrf-k").value), vector_weight: Number($("vector-weight").value), text_weight: Number($("text-weight").value), candidates: Number($("fusion-candidates").value) },
@@ -995,6 +1296,7 @@
       $("rerank-mode").value = q.rerank?.mode ?? "";
       $("rerank-candidates").value = q.rerank?.candidates ?? 50;
       $("mmr-lambda").value = q.rerank?.lambda ?? 0.5;
+      $("rerank-provider").value = q.rerank?.provider ?? "";
       $("metric").value = q.metric; $("k").value = q.k; $("ef").value = q.ef_search;
       $("filter").value = JSON.stringify(q.filter, null, 2);
       $("hnsw-m").value = q.config.m; $("hnsw-ef").value = q.config.ef_construction; $("hnsw-seed").value = q.config.seed;
@@ -1710,6 +2012,7 @@
     applyAppearance();
     return {
       clear() {
+        data.clear();
         advanced.reset(true);
         studio.clear();
         $("metadata-fields").replaceChildren();
@@ -1752,7 +2055,7 @@
       },
       // Collection-bound pending work that a collection switch would discard.
       dirty() {
-        const lost = [...advanced.dirty(), ...studio.dirty()];
+        const lost = [...advanced.dirty(), ...studio.dirty(), ...data.dirty()];
         if (preview.length) lost.push(`validated import preview (${preview.length} records)`);
         if (prepared) lost.push(`prepared resumable import file ${prepared.file} (${prepared.chunks.length} chunks)`);
         if (job) lost.push(`progress view of import job ${job.id} (the job stays open on the server)`);
@@ -1761,6 +2064,7 @@
         return lost;
       },
       collectionChanged(info) {
+        data.collectionChanged();
         advanced.reset();
         studio.clear();
         preview = []; previewCollection = null; sample = []; prepared = null; stopRequested = true;
@@ -1781,6 +2085,7 @@
       gate() {
         advanced.gate();
         studio.gate();
+        data.gate();
         document.querySelectorAll("[data-extended]").forEach((element) => { element.disabled = !ctx.connected() || !ctx.extended(); });
         $("cred-copy").disabled = $("cred-clear").disabled = !ctx.connected() || secret === null;
         $("job-stop").disabled = true;
@@ -1798,5 +2103,6 @@
     collectionName, collectionPath, settings, scoreDirection, redact, maskSecret, OPERATIONS, credentialRequest, credentialScope, graceSeconds,
     expiry, rerank, sparseVector, webhookRequest, WEBHOOK_EVENTS, feedRows, pitrRequest, feedPath,
     boundedInteger, importRows, chunk, resumePlan, savedQueryV2, autoMaintenance, autoMaintenanceForm, backupSchedule, memoryRows, requestAllowed, isSearch,
+    kvAddress, kvValue, kvExpected, memoryRequest,
   } };
 })();

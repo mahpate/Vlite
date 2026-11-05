@@ -39,3 +39,41 @@
   #graph .graph-equality { grid-template-columns: minmax(0, 1fr); }
   #graph .graph-property-row { grid-template-columns: minmax(0, 1fr); }
 }
+
+#graph .graph-view-actions { align-items: center; gap: 8px; }
+#graph .graph-view-actions label { margin: 0; }
+#graph .graph-view-actions button { min-width: 40px; min-height: 40px; }
+#graph .graph-gesture-help { flex: 1 1 280px; color: var(--studio-muted); font-size: 12px; }
+#graph #graph-view { max-height: none; height: clamp(280px, 42vw, 460px); touch-action: none; outline-offset: 3px; }
+#graph #graph-scene { transform-origin: 0 0; }
+#graph #graph-view.is-gesturing { cursor: grabbing; }
+#graph #graph-view:not(.is-gesturing) { cursor: grab; }
+#graph #graph-view .graph-node { cursor: grab; transition: opacity 140ms ease; }
+#graph #graph-view .graph-node:active { cursor: grabbing; }
+#graph #graph-view .graph-node circle { filter: drop-shadow(0 3px 7px color-mix(in srgb, var(--studio-accent) 26%, transparent)); transition: r 140ms ease, stroke-width 140ms ease, fill 140ms ease; }
+#graph #graph-view .graph-node text { font-weight: 600; paint-order: stroke; stroke: var(--studio-subtle); stroke-width: 4px; stroke-linejoin: round; pointer-events: none; }
+#graph #graph-view .graph-edge { transition: opacity 140ms ease; }
+#graph #graph-view .graph-edge line, #graph #graph-view .graph-edge path { stroke-linecap: round; transition: stroke-width 140ms ease; }
+#graph #graph-view .graph-edge text { font-weight: 600; paint-order: stroke; stroke: var(--studio-subtle); stroke-width: 5px; stroke-linejoin: round; pointer-events: none; }
+#graph #graph-view [data-pick-node]:focus-visible, #graph #graph-view [data-pick-edge]:focus-visible { outline: none; filter: drop-shadow(0 0 5px var(--studio-accent)); }
+#graph #graph-view .graph-edge.is-dimmed, #graph #graph-view .graph-node.is-dimmed { opacity: .18; }
+#graph #graph-view .graph-edge.is-neighbor { opacity: .95; }
+#graph #graph-view .graph-edge.is-neighbor line, #graph #graph-view .graph-edge.is-neighbor path { stroke: var(--studio-accent); stroke-width: 2.8; }
+#graph #graph-view .graph-edge.is-selected line, #graph #graph-view .graph-edge.is-selected path { stroke: var(--studio-search); stroke-width: 3.2; }
+#graph #graph-view .graph-edge.is-selected text { fill: var(--studio-search); }
+#graph #graph-view .graph-node.is-neighbor circle { fill: var(--studio-accent); stroke-width: 3; }
+#graph #graph-view .graph-node.is-selected circle { fill: var(--studio-search); stroke: var(--studio-surface); stroke-width: 3; }
+#graph #graph-view .graph-node.is-selected text { fill: var(--studio-search); }
+#graph .graph-three-stage { touch-action: none; }
+#graph .graph-three-stage canvas { cursor: grab; }
+#graph .graph-three-stage canvas.is-gesturing { cursor: grabbing; }
+#graph .graph-three-node { transition: opacity 140ms ease, border-color 140ms ease, background-color 140ms ease, box-shadow 140ms ease; }
+#graph .graph-three-node.is-selected { border-color: var(--studio-search); background: var(--studio-search); color: var(--studio-surface); box-shadow: 0 0 0 3px var(--studio-accent-soft), var(--studio-shadow); }
+#graph .graph-three-node.is-neighbor, #graph .graph-three-edge.is-neighbor { border-color: var(--studio-accent); background: var(--studio-accent-soft); color: var(--studio-text); }
+#graph .graph-three-node.is-dimmed, #graph .graph-three-edge.is-dimmed { opacity: .3; }
+#graph .graph-three-edge.is-selected { border: 1px solid var(--studio-search); color: var(--studio-search); }
+#graph .graph-three-node:focus-visible, #graph .graph-three-edge:focus-visible { outline: 2px solid var(--studio-accent); outline-offset: 2px; z-index: 1; }
+@media (prefers-reduced-motion: reduce) {
+  #graph #graph-view .graph-node, #graph #graph-view .graph-edge,
+  #graph #graph-view .graph-node circle, #graph .graph-three-node, #graph .graph-three-edge { transition: none; }
+}

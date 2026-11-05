@@ -1,28 +1,23 @@
 # Dashboard guide
 
-The dashboard is VLite's browser console for one database. Use it to sign in,
-browse records, write data, search, build indexes and run the server. The
-server serves it at `/dashboard`, and Docker Compose also serves it on port 8081.
+VLite's browser console serves one database at `/dashboard`; Docker Compose
+also serves it on port 8081.
 
 <picture>
   <source media="(prefers-color-scheme: dark)" srcset="../site/assets/dashboard/current-overview-dark.png?v=connected">
   <img src="../site/assets/dashboard/current-overview-light.png?v=connected" data-light="../site/assets/dashboard/current-overview-light.png?v=connected" data-dark="../site/assets/dashboard/current-overview-dark.png?v=connected" alt="Connected dashboard with sample records, navigation and database snapshot cards." width="1440" height="1100">
 </picture>
 
-The [dashboard tour](https://mahpate.github.io/Vlite/dashboard.html#screenshots)
-walks through every workspace with sample data.
+[Dashboard tour](https://mahpate.github.io/Vlite/dashboard.html#screenshots)
 
 ## Sign in
 
-The dashboard opens on a sign-in screen and shows the rest after you sign in.
-Use your username and password; a session cookie keeps you signed in.
+Sign in with a username and password; a session cookie keeps you signed in.
 
 ![Sign-in screen with username and password fields and the access token option](../site/assets/dashboard/current-sign-in.png?v=connected)
 
-- **First account:** a new server has no accounts and no default password, so
-  the sign-in screen asks for the admin token. Sign in with it, open
-  **Administration → Users & access** and create your own super admin account
-  first.
+- **First account:** there is no default password. Use the admin token, then
+  create a super admin in **Administration → Users & access**.
 - **Temporary password:** a password set by an admin must be changed at first
   sign-in. Passwords are 15–128 characters.
 - **Forgot your password:** ask a super admin to reset it.
@@ -45,15 +40,10 @@ What you can do depends on your role:
 | Editor | Read, search, write, import, index and manage collections. |
 | Viewer | Read and search. |
 
-Editors and viewers see either one tenant's collections and graphs, or all
-of them. Viewers read graphs and editors also write them; a super admin can
-narrow graph access per account.
-
 ### Use an access token
 
-The admin token is for automation and recovery. Choose **Use an access token
-instead** and paste the value only, without the `Bearer` prefix. **Where do I
-get a token?** below the field explains where to find it:
+Choose **Use an access token instead** and paste the value without `Bearer`.
+Find the admin token here:
 
 - **Docker Compose:** `.secrets/api-token` in the checkout that started the
   server. PowerShell: `Get-Content .secrets\api-token -Raw`.
@@ -65,36 +55,33 @@ Treat tokens as secrets. Keep them out of screenshots and logs.
 
 ## Find your way around
 
-The sidebar groups seven workspaces. Tabs inside each workspace hold its views:
+The sidebar groups nine workspaces in 0.7.1 source builds. Tabs inside each
+workspace hold its views:
 
 | Group | Workspace | Inside |
 |---|---|---|
 | | **Overview** | Database size, health and shortcuts |
 | Data | **Collections** | Records, Add & edit, Import & export, Index, Manage |
 | Data | **Search** | Vector search, Advanced retrieval, Analyze & compare |
+| Data | **Key-value** | Namespaced keys, text/JSON/bytes, conditional writes and expiry |
+| Data | **MemoryAI** | Scoped remember, recall, consolidation, logical deletion and receipts |
 | Data | **Graph** | Query, edit and rotate graphs in 2D or 3D |
 | Server | **Observability** | Live monitor, Diagnostics, Change feed |
 | Server | **Administration** | Health, Users & access, Backup & recovery, Server settings |
 | Tools | **Developer Console** | Requests and responses this dashboard sends |
 
-Some tabs split into tools, such as **Users & access → API keys**. Everyone
-sees every workspace; a control your role cannot use is disabled and says why.
-On a narrow screen, open the sidebar from the **Menu** button.
+Everyone sees every workspace; unavailable controls explain why. On narrow
+screens, open the sidebar with **Menu**.
 
-The top bar shows the active collection and the account menu. Open the account
-menu to see who you are signed in as, change your password, pick a Light, Dark
-or System theme and a density, reopen the **Quick tour** or **Sign out**.
-**Remember theme and density on this device** saves just those choices in the
-browser.
+The account menu shows your identity, password, theme, density, **Quick tour**
+and **Sign out**. Appearance persists only when you opt in.
 
 ![Account menu with the signed-in identity, appearance controls and sign out](../site/assets/dashboard/current-preferences.png?v=connected)
 
 ## Create a collection and add records
 
-1. **Create.** In **Collections → Manage**, enter a name, dimensions, a
-   metric and optional metadata indexes, such as
-   `[{"field":"category","kind":"eq"}]` (kinds: `eq`, `range`, `eq_range`).
-   **Review collection** shows the request before you confirm.
+1. **Create.** In **Collections → Manage**, enter name, dimensions, metric and
+   optional metadata indexes (`eq`, `range`, `eq_range`). Review before confirming.
 2. **Select.** Choose the collection in the sidebar picker. Every browse,
    write, search and index action uses the active collection. Switching lists
    any unsaved work it will discard and asks first.
@@ -157,6 +144,43 @@ credentials.
 
 ![Search workspace with a vector query and ranked neighbors](../site/assets/dashboard/current-search.png?v=connected)
 
+### Managed embeddings and ranking
+
+**Generate a query vector from text** confirms provider disclosure, then fills
+the vector without searching. Use `hashing` (nonsemantic test data), `http` or
+an authorized `bound:alias`. Operators configure models and secrets offline.
+**Managed ranking provider** takes an alias without `bound:`; vector-only
+results show provider scores separately from distances. Saved queries retain
+aliases, never secrets. Provider failures have no silent fallback.
+
+## Key-value
+
+Select an existing one-dimensional collection. Browse a namespace/prefix,
+then select a key to load text, JSON or base64 bytes. Namespaces are not
+authorization boundaries. Pages are live, not snapshots.
+
+New keys default to create-only; fetched keys use exact version conditions.
+Versions and absolute expiry remain decimal strings. Blank expiry on
+replacement **clears TTL**. Confirm changes; after conflicts or timeouts, fetch
+the current value before retrying.
+
+![Key-value workspace browsing synthetic preference keys](../site/assets/dashboard/current-key-value.png?v=connected)
+
+## MemoryAI
+
+Use an operator-provided binding and exact agent/user/session scope with a
+**scoped API token**; administrator sign-in alone grants no memory access.
+Recall accepts entity seeds, text or vectors. Text/vector recall needs evidence;
+text needs a ready index. Inspect provenance, revisions and truncation below.
+
+Remember supports entity/episodic memories. Consolidation retains originals;
+Forget pins ID/revision pairs and is **not secure erasure**. Mutations require
+idempotency keys and confirmation. Download submitted requests after failures
+and responses before sign-out. Explicit unchanged-draft replay preserves the
+original timestamp. Receipt lookup supports forget/consolidate, not remember.
+Fact correction, erasure jobs and automatic chat import remain unavailable.
+See [memory serving](API.md) for backend limits.
+
 ## Explore graphs
 
 **Graph** (source builds) explores [property graphs](GRAPH.md).
@@ -164,6 +188,9 @@ Diagrams show up to 40 nodes and 400 edges in **2D** or force-directed **3D**;
 tables retain all results. Pick nodes or edges to edit or **Connect two nodes**.
 Writes require confirmation; edits require current revisions, rejecting conflicts.
 Only empty graphs can be deleted. Requery after writes.
+Drag nodes, pan/zoom in 2D or rotate/zoom in 3D. Selection highlights neighbors.
+Fit/reset and keyboard controls remain available. Bounded settling respects
+reduced motion and pauses offscreen.
 
 ![Graph traversal drawn as a node-link view](../site/assets/dashboard/current-graph.png?v=connected)
 
@@ -185,28 +212,14 @@ restart. **Diagnostics** lists slow queries. **Change feed** lists committed
 events across the database and needs read access to all collections. Server
 health is under **Administration → Health**.
 
-The **Developer Console** holds the request inspector, a REST playground and
-read-only test scenarios.
-
 ## Administer users and tenants
 
-Super admins use **Administration → Users & access**, with tabs for
-**Users**, **API keys**, **Tenants**, **Admin tokens** and the **Audit log**.
+Super admins manage users, API keys, tenants and audit logs in **Administration**.
 
-- **Add a user:** in **Users**, choose a role, bind an editor or viewer to a
-  tenant or to all collections, set a temporary password and select
-  **Add user**.
-- **Reset a password:** set a new temporary password. The user must change it
-  at next sign-in.
-- **Create a tenant:** in **Tenants**, enter a name and an optional vector
-  limit. Then add its users or API keys.
-- **Rename or change limits:** use **Save name and limit**.
-- **Suspend a tenant:** this blocks its sign-ins and API keys and ends its
-  sessions. Its data stays. **Resume** restores access.
-- **Delete a tenant:** drop its collections and graphs first. Deleting also
-  removes its user accounts.
-- **Issue an API key:** in **API keys**, pick collections, operations and an
-  expiry of 1–365 days. The secret appears once.
+Create users with temporary passwords and tenant/graph access. Issue scoped
+API keys with 1–365 day expiry; secrets appear once. Tenant suspension blocks
+sign-ins and keys but retains data. Drop collections and graphs before deleting
+a tenant; deletion also removes its accounts.
 
 The [administration walkthrough](CONSOLE-ADMIN.md#dashboard-administration-walkthrough)
 covers every view, including backups, webhooks, TLS and replication.

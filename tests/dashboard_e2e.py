@@ -112,7 +112,7 @@ def exercise_layout(page, url, token):
     expect(page.locator("#search")).to_be_hidden()
     nav = page.get_by_role("navigation", name="Dashboard navigation")
     expect(nav.get_by_role("link")).to_have_text([
-        "Overview", "Collections", "Search", "Graph", "Observability", "Administration", "Developer Console",
+        "Overview", "Collections", "Search", "Key-value", "MemoryAI", "Graph", "Observability", "Administration", "Developer Console",
     ])
     for width in [1280, 768, 390]:
         page.set_viewport_size({"width": width, "height": 844})

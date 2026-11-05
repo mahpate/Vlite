@@ -53,18 +53,18 @@
       <div class="section-head">
         <div class="kicker">Inside the dashboard</div>
         <h2>One tour. Every workspace.</h2>
-        <p>Follow a connected example database from sign-in through collections, records, search, graphs, monitoring and administration.</p>
+        <p>Explore every workspace with a connected database.</p>
       </div>
       <figure class="dashboard-tour dashboard-guided-tour" data-guided-tour>
         <a href="assets/dashboard/current-overview-light.png?v=connected" data-tour-full>
           <img id="dashboard-guided-tour" src="assets/dashboard/current-overview-light.png?v=connected" alt="Connected VLite overview showing sample records and database status." width="1440" height="1100" decoding="async">
         </a>
-        <figcaption><h3>From your first connection to daily operations</h3><p data-tour-caption>Overview: see a connected database, record count and index readiness.</p><p>Sample data in a real API-backed workspace. Pause to inspect a view or jump to a workflow.</p></figcaption>
+        <figcaption><h3>From sign-in to daily operations</h3><p data-tour-caption>Overview: see a connected database, record count and index readiness.</p><p>Real API, synthetic data. Pause or choose a workflow.</p></figcaption>
         <div class="tour-controls" hidden>
           <button class="btn" type="button" data-tour-toggle aria-controls="dashboard-guided-tour" aria-pressed="false">Play tour</button>
           <button class="btn" type="button" data-tour-next aria-controls="dashboard-guided-tour">Next view</button>
           <label>Choose a step <select data-tour-step aria-controls="dashboard-guided-tour"></select></label>
-          <span data-tour-position>1 / 29</span>
+          <span data-tour-position>1 / 31</span>
         </div>
       </figure>
     </div>
@@ -90,16 +90,18 @@
     <div class="wrap">
       <div class="section-head">
         <h2>What you can do</h2>
-        <p>The sidebar groups seven workspaces: Overview; Collections, Search and Graph under Data;
-          Observability and Administration under Server; and the Developer Console under Tools.
-          Graph says what is missing when graphs are not enabled.
-          Tabs inside each workspace hold its views. Controls your role cannot use explain why.</p>
+        <p>Source builds add Key-value, MemoryAI and fluid graph interactions.
+          Nine workspaces group your data, search and server tools; unavailable controls explain why.</p>
       </div>
       <div class="grid cols-2">
         <div class="card"><h3>Collections and records</h3>
           <p>Create collections, write or import records, and inspect each record's payload, metadata and vector.</p></div>
         <div class="card"><h3>Search and indexes</h3>
-          <p>Run exact, approximate and hybrid searches with typed filters. Build HNSW indexes and copy any query as code.</p></div>
+          <p>Run vector and hybrid searches, use authorized embedding/ranking providers, build indexes and copy queries as code.</p></div>
+        <div class="card"><h3>Key-value</h3>
+          <p>Browse keys in one-dimensional collections. Edit text, JSON or bytes with exact version and expiry conditions.</p></div>
+        <div class="card"><h3>MemoryAI</h3>
+          <p>Use a configured binding and scoped token to remember, recall, consolidate and logically delete memories. Logical deletion is not secure erasure.</p></div>
         <div class="card"><h3>Users and tenants</h3>
           <p>Super admins add users and tenants and issue API keys in Administration. Editors read, search and write; viewers read and search.
             Each account sees one tenant or all collections.</p></div>
@@ -112,7 +114,8 @@
         <p><a href="assets/dashboard-flow.svg">Animated flow</a>; respects reduced motion.</p>
       </details>
       <h3>Limits</h3>
-      <p>The dashboard does not generate embeddings. Writes replace records and require confirmation.
+      <p>Operators configure provider models and secrets. No automatic chat import.
+        MemoryAI needs binding-specific authorization; writes require confirmation.
         For offline work, use the <a href="docs/TOOLS.html">CLI tools</a>.</p>
     </div>
   </section>

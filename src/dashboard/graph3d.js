@@ -89,7 +89,7 @@ export function placeLabels(items, width, height) {
   });
 }
 
-export function createGraph(host, view, { onNode, onEdge, onFailure }) {
+export function createGraph(host, view, { onNode, onEdge, onFailure, onChange = () => {} }) {
   if (navigator.connection?.saveData) throw new Error("Data-saving mode is on");
   const canvas = document.createElement("canvas");
   canvas.setAttribute("aria-hidden", "true");
@@ -101,8 +101,18 @@ export function createGraph(host, view, { onNode, onEdge, onFailure }) {
   scene.add(group);
   const camera = new THREE.PerspectiveCamera(42, 1, 1, 2000);
   camera.position.z = 440;
-  const nodes = forceLayout(view.nodes, view.edges);
+  const motion = matchMedia("(prefers-reduced-motion: reduce)");
+  const nodes = forceLayout(view.nodes, view.edges).map((node, index, all) => {
+    const y = all.length === 1 ? 0 : 1 - 2 * (index + .5) / all.length;
+    const ring = Math.sqrt(1 - y * y), angle = index * Math.PI * (3 - Math.sqrt(5));
+    const target = { x: node.x, y: node.y, z: node.z };
+    const start = { x: Math.cos(angle) * ring * 100, y: y * 100, z: Math.sin(angle) * ring * 100 };
+    return { ...node, startX: start.x, startY: start.y, startZ: start.z,
+      targetX: target.x, targetY: target.y, targetZ: target.z,
+      x: motion.matches ? target.x : start.x, y: motion.matches ? target.y : start.y, z: motion.matches ? target.z : start.z };
+  });
   const byId = new Map(nodes.map(node => [node.id, node]));
+  const nodeMeshes = new Map();
   const labels = document.createElement("div");
   labels.className = "graph-three-labels";
   labels.style.visibility = "hidden";
@@ -116,6 +126,7 @@ export function createGraph(host, view, { onNode, onEdge, onFailure }) {
     const mesh = new THREE.Mesh(nodeGeometry, nodeMaterial);
     mesh.position.set(node.x, node.y, node.z);
     group.add(mesh);
+    nodeMeshes.set(node.id, mesh);
     const button = document.createElement("button");
     button.type = "button";
     button.className = "graph-three-node";
@@ -125,7 +136,7 @@ export function createGraph(host, view, { onNode, onEdge, onFailure }) {
     button.title = `${node.text} (ID ${node.id})`;
     button.addEventListener("click", () => onNode(node.id));
     labels.append(button);
-    return { node, button };
+    return { node, mesh, button };
   });
   const edgePaths = view.edges.map(edge => {
     const from = byId.get(edge.source), to = byId.get(edge.target);
@@ -148,31 +159,14 @@ export function createGraph(host, view, { onNode, onEdge, onFailure }) {
     labels.prepend(button);
     const middle = Math.floor(points.length / 2);
     const a = points[middle - 1], b = points[middle];
-    return { button, point: points.length > 2 ? b : { x: (a.x + b.x) / 2, y: (a.y + b.y) / 2, z: (a.z + b.z) / 2 } };
+    return { edge, button, point: points.length > 2 ? b : { x: (a.x + b.x) / 2, y: (a.y + b.y) / 2, z: (a.z + b.z) / 2 } };
   });
-  const positions = [];
-  for (const { points } of edgePaths) {
-    for (let i = 1; i < points.length; i++) {
-      for (const point of [points[i - 1], points[i]]) positions.push(point.x, point.y, point.z);
-    }
-    const from = points[points.length - 2], to = points[points.length - 1];
-    const delta = new THREE.Vector3(to.x - from.x, to.y - from.y, to.z - from.z).normalize();
-    const end = new THREE.Vector3(to.x, to.y, to.z).addScaledVector(delta, -9);
-    let side = new THREE.Vector3(-delta.y, delta.x, 0);
-    if (side.lengthSq() < .01) side = new THREE.Vector3(1, 0, 0);
-    side.normalize();
-    for (const sign of [-1, 1]) {
-      const tail = end.clone().addScaledVector(delta, -8).addScaledVector(side, sign * 4);
-      positions.push(end.x, end.y, end.z, tail.x, tail.y, tail.z);
-    }
-  }
   const edgeGeometry = new THREE.BufferGeometry();
-  edgeGeometry.setAttribute("position", new THREE.BufferAttribute(new Float32Array(positions), 3));
   const edgeMaterial = new THREE.ShaderMaterial({
     transparent: true,
-    uniforms: { tint: { value: [1, 1, 1] } },
-    vertexShader: "void main(){gl_Position=projectionMatrix*modelViewMatrix*vec4(position,1.);}",
-    fragmentShader: "uniform vec3 tint;void main(){gl_FragColor=vec4(tint,.65);}",
+    vertexColors: true,
+    vertexShader: "varying vec3 vColor;void main(){vColor=color;gl_Position=projectionMatrix*modelViewMatrix*vec4(position,1.);}",
+    fragmentShader: "varying vec3 vColor;void main(){gl_FragColor=vec4(vColor,.8);}",
   });
   group.add(new THREE.LineSegments(edgeGeometry, edgeMaterial));
   const pulseGeometry = new THREE.BufferGeometry();
@@ -192,19 +186,112 @@ export function createGraph(host, view, { onNode, onEdge, onFailure }) {
   host.dataset.renderer = "three";
   host.dataset.frames = "0";
   host.dataset.paused = "true";
-  const motion = matchMedia("(prefers-reduced-motion: reduce)");
+  host.dataset.settled = "false";
   let visible = false, disposed = false, frame = 0, last = 0, renders = 0;
-  let width = 1, height = 1, labelsDirty = true;
+  let animationStarted = null;
+  const settleDuration = 900, animationDuration = 3000;
+  let width = 1, height = 1, labelsDirty = true, userZoomed = false, suppressPick = false;
+  let selection = null, pointer = null;
   const vector = new THREE.Vector3();
+  const intersectionPoint = new THREE.Vector3();
   const project = point => {
     vector.set(point.x, point.y, point.z).applyMatrix4(group.matrixWorld).project(camera);
     return { x: (vector.x + 1) * width / 2, y: (1 - vector.y) * height / 2 };
   };
+  const updateEdgeGeometry = () => {
+    const positions = [], colors = [];
+    const style = getComputedStyle(document.documentElement);
+    const muted = color(style.getPropertyValue("--vlite-muted"));
+    const accent = color(style.getPropertyValue("--vlite-accent"));
+    const search = color(style.getPropertyValue("--vlite-search"));
+    for (const { edge, points } of edgePaths) {
+      const active = selection?.kind === "edge" && selection.id === edge.id;
+      const adjacent = selection?.kind === "node" && (edge.source === selection.id || edge.target === selection.id);
+      const tint = active ? search : adjacent ? accent : selection ? muted.map(channel => channel * .38) : muted;
+      for (let i = 1; i < points.length; i++) {
+        for (const point of [points[i - 1], points[i]]) { positions.push(point.x, point.y, point.z); colors.push(...tint); }
+      }
+      const from = points[points.length - 2], to = points[points.length - 1];
+      const delta = new THREE.Vector3(to.x - from.x, to.y - from.y, to.z - from.z).normalize();
+      const end = new THREE.Vector3(to.x, to.y, to.z).addScaledVector(delta, -9);
+      let side = new THREE.Vector3(-delta.y, delta.x, 0);
+      if (side.lengthSq() < .01) side = new THREE.Vector3(1, 0, 0);
+      side.normalize();
+      for (const sign of [-1, 1]) {
+        const tail = end.clone().addScaledVector(delta, -8).addScaledVector(side, sign * 4);
+        for (const point of [end, tail]) { positions.push(point.x, point.y, point.z); colors.push(...tint); }
+      }
+    }
+    edgeGeometry.setAttribute("position", new THREE.BufferAttribute(new Float32Array(positions), 3));
+    edgeGeometry.setAttribute("color", new THREE.BufferAttribute(new Float32Array(colors), 3));
+    if (positions.length) edgeGeometry.computeBoundingSphere();
+    labels.querySelectorAll(".graph-three-edge").forEach(button => {
+      const selected = selection?.kind === "edge" && selection.id === button.dataset.edgeId;
+      button.classList.toggle("is-selected", !!selected);
+      button.classList.toggle("is-neighbor", selection?.kind === "node" && edgePaths.some(({ edge }) => edge.id === button.dataset.edgeId && (edge.source === selection.id || edge.target === selection.id)));
+      button.classList.toggle("is-dimmed", !!selection && !selected && !button.classList.contains("is-neighbor"));
+    });
+  };
+  const updateNodeHighlight = () => {
+    const neighbors = new Set();
+    if (selection?.kind === "node") {
+      for (const { edge } of edgePaths) {
+        if (edge.source === selection.id) neighbors.add(edge.target);
+        if (edge.target === selection.id) neighbors.add(edge.source);
+      }
+    } else if (selection?.kind === "edge") {
+      const edge = edgePaths.find(item => item.edge.id === selection.id)?.edge;
+      if (edge) { neighbors.add(edge.source); neighbors.add(edge.target); }
+    }
+    for (const { node, mesh, button } of labelNodes) {
+      const selected = selection?.kind === "node" && selection.id === node.id;
+      const neighbor = neighbors.has(node.id) && !selected;
+      const dimmed = !!selection && !selected && !neighbor;
+      mesh.scale.setScalar(selected ? 1.55 : neighbor ? 1.25 : dimmed ? .82 : 1);
+      button.classList.toggle("is-selected", !!selected);
+      button.classList.toggle("is-neighbor", neighbor);
+      button.classList.toggle("is-dimmed", dimmed);
+    }
+    updateEdgeGeometry();
+    requestPaint();
+  };
   const paint = (time = 0) => {
     frame = 0;
     if (disposed || !visible || document.hidden) return;
+    host.dataset.settled = String(motion.matches || (animationStarted !== null && time - animationStarted >= animationDuration));
     if (time - last >= 1000 / 24 || !last) {
       last = time;
+      const elapsed = animationStarted === null ? 0 : time - animationStarted;
+      const progress = motion.matches ? 1 : Math.min(1, Math.max(0, elapsed / settleDuration));
+      const eased = 1 - (1 - progress) ** 3;
+      if (progress < 1 || nodes.some(node => !node.settled)) {
+        for (const node of nodes) {
+          if (node.dragged) continue;
+          node.x = node.startX + (node.targetX - node.startX) * eased;
+          node.y = node.startY + (node.targetY - node.startY) * eased;
+          node.z = node.startZ + (node.targetZ - node.startZ) * eased;
+          node.settled = progress >= 1;
+          nodeMeshes.get(node.id).position.set(node.x, node.y, node.z);
+        }
+        for (const { edge, points } of edgePaths) {
+          if (edge.source !== edge.target) continue;
+          const node = byId.get(edge.source);
+          points.forEach((point, index) => {
+            const angle = index * Math.PI * 2 / 24;
+            point.x = node.x + 18 * (1 - Math.cos(angle));
+            point.y = node.y + 18 * Math.sin(angle);
+            point.z = node.z;
+          });
+        }
+        for (const label of edgeLabels) {
+          const points = edgePaths.find(path => path.edge.id === label.edge.id)?.points;
+          if (!points) continue;
+          const middle = Math.floor(points.length / 2), a = points[middle - 1], b = points[middle];
+          label.point = points.length > 2 ? b : { x: (a.x + b.x) / 2, y: (a.y + b.y) / 2, z: (a.z + b.z) / 2 };
+        }
+        updateEdgeGeometry();
+        labelsDirty = true;
+      }
       const buffer = pulseGeometry.attributes.position;
       edgePaths.forEach(({ points }, index) => {
         const t = (motion.matches ? .35 : (time / 3500 + index * .17) % 1) * (points.length - 1);
@@ -219,7 +306,7 @@ export function createGraph(host, view, { onNode, onEdge, onFailure }) {
           ...project(node), width: button.offsetWidth, height: button.offsetHeight,
         }));
         const placed = placeLabels(projected, width, height);
-        labelNodes.forEach(({ button }, index) => {
+        labelNodes.forEach(({ node, button }, index) => {
           button.style.left = `${placed[index].left + placed[index].width / 2}px`;
           button.style.top = `${placed[index].top}px`;
           button.dataset.pickX = String(projected[index].x);
@@ -235,7 +322,7 @@ export function createGraph(host, view, { onNode, onEdge, onFailure }) {
       }
       host.dataset.frames = String(++renders);
     }
-    if (!motion.matches && edgePaths.length) frame = requestAnimationFrame(paint);
+    if (!motion.matches && (edgePaths.length || nodes.length) && animationStarted !== null && time - animationStarted < animationDuration) frame = requestAnimationFrame(paint);
   };
   const requestPaint = () => {
     last = 0;
@@ -244,8 +331,8 @@ export function createGraph(host, view, { onNode, onEdge, onFailure }) {
   const recolor = () => {
     const style = getComputedStyle(document.documentElement);
     nodeMaterial.uniforms.tint.value = color(style.getPropertyValue("--vlite-accent"));
-    edgeMaterial.uniforms.tint.value = color(style.getPropertyValue("--vlite-muted"));
     pulseMaterial.uniforms.tint.value = color(style.getPropertyValue("--vlite-search"));
+    updateEdgeGeometry();
     requestPaint();
   };
   const resize = () => {
@@ -255,7 +342,7 @@ export function createGraph(host, view, { onNode, onEdge, onFailure }) {
     renderer.setSize(width, height, false);
     pulseMaterial.uniforms.ratio.value = ratio;
     camera.aspect = width / height;
-    camera.position.z = Math.max(440, 350 / camera.aspect);
+    if (!userZoomed) camera.position.z = Math.max(440, 350 / camera.aspect);
     camera.updateProjectionMatrix();
     labelsDirty = true;
     requestPaint();
@@ -267,10 +354,100 @@ export function createGraph(host, view, { onNode, onEdge, onFailure }) {
   const intersection = new IntersectionObserver(entries => {
     visible = entries[0].isIntersecting;
     host.dataset.paused = String(!visible);
-    if (!visible) { cancelAnimationFrame(frame); frame = 0; } else { resize(); requestPaint(); }
+    if (!visible) { cancelAnimationFrame(frame); frame = 0; }
+    else { if (animationStarted === null) animationStarted = performance.now(); resize(); requestPaint(); }
   });
   intersection.observe(host);
+  const nodeFromEvent = event => {
+    const rect = canvas.getBoundingClientRect();
+    const x = event.clientX - rect.left, y = event.clientY - rect.top;
+    let hit = null, nearest = 16;
+    for (const node of nodes) {
+      const at = project(node), distance = Math.hypot(x - at.x, y - at.y);
+      if (distance < nearest) { hit = node; nearest = distance; }
+    }
+    return hit;
+  };
+  const pointerDown = event => {
+    if (event.button !== 0 || event.target !== canvas) return;
+    const node = nodeFromEvent(event);
+    if (node) {
+      node.dragged = true;
+      node.targetX = node.x; node.targetY = node.y; node.targetZ = node.z;
+      group.updateMatrixWorld(true);
+      const world = new THREE.Vector3(node.x, node.y, node.z).applyMatrix4(group.matrixWorld);
+      pointer = { kind: "node", id: node.id, depth: world.z, startX: event.clientX, startY: event.clientY, moved: false };
+    } else {
+      pointer = { kind: "rotate", startX: event.clientX, startY: event.clientY, lastX: event.clientX, lastY: event.clientY, moved: false };
+    }
+    canvas.setPointerCapture(event.pointerId);
+    canvas.classList.add("is-gesturing");
+  };
+  const pointerMove = event => {
+    if (!pointer) return;
+    const dx = event.clientX - pointer.lastX, dy = event.clientY - pointer.lastY;
+    if (Math.hypot(event.clientX - pointer.startX, event.clientY - pointer.startY) > 3) pointer.moved = true;
+    if (pointer.kind === "rotate") {
+      group.rotation.y += dx * .008;
+      group.rotation.x = Math.max(-1.35, Math.min(1.35, group.rotation.x + dy * .008));
+      onChange(Math.round(group.rotation.y * 180 / Math.PI), Math.round(group.rotation.x * 180 / Math.PI));
+    } else {
+      const rect = canvas.getBoundingClientRect();
+      intersectionPoint.set(((event.clientX - rect.left) / rect.width) * 2 - 1,
+        -((event.clientY - rect.top) / rect.height) * 2 + 1, .5).unproject(camera).sub(camera.position).normalize();
+      if (Math.abs(intersectionPoint.z) > .0001) {
+        intersectionPoint.multiplyScalar((pointer.depth - camera.position.z) / intersectionPoint.z).add(camera.position);
+        const local = group.worldToLocal(intersectionPoint.clone());
+        const node = byId.get(pointer.id);
+        node.x = local.x; node.y = local.y; node.z = local.z;
+        nodeMeshes.get(pointer.id).position.copy(local);
+        edgePaths.forEach(path => {
+          if (path.edge.source !== pointer.id && path.edge.target !== pointer.id) return;
+          if (path.edge.source === path.edge.target) {
+            path.points.forEach((point, index) => {
+              const angle = index * Math.PI * 2 / 24;
+              point.x = node.x + 18 * (1 - Math.cos(angle));
+              point.y = node.y + 18 * Math.sin(angle);
+              point.z = node.z;
+            });
+          } else path.points = [byId.get(path.edge.source), byId.get(path.edge.target)];
+        });
+        edgeLabels.forEach(label => {
+          const path = edgePaths.find(item => item.edge.id === label.edge.id);
+          if (path && (path.edge.source === pointer.id || path.edge.target === pointer.id)) {
+            const middle = Math.floor(path.points.length / 2), a = path.points[middle - 1], b = path.points[middle];
+            label.point = path.points.length > 2 ? b : { x: (a.x + b.x) / 2, y: (a.y + b.y) / 2, z: (a.z + b.z) / 2 };
+          }
+        });
+        updateEdgeGeometry();
+        labelsDirty = true;
+      }
+    }
+    pointer.lastX = event.clientX; pointer.lastY = event.clientY;
+    labelsDirty = true;
+    requestPaint();
+  };
+  const pointerEnd = event => {
+    if (!pointer) return;
+    suppressPick = pointer.moved;
+    if (suppressPick) requestAnimationFrame(() => { suppressPick = false; });
+    pointer = null;
+    canvas.classList.remove("is-gesturing");
+    if (canvas.hasPointerCapture(event.pointerId)) canvas.releasePointerCapture(event.pointerId);
+  };
+  canvas.addEventListener("pointerdown", pointerDown);
+  canvas.addEventListener("pointermove", pointerMove);
+  canvas.addEventListener("pointerup", pointerEnd);
+  canvas.addEventListener("pointercancel", pointerEnd);
+  canvas.addEventListener("wheel", event => {
+    event.preventDefault();
+    userZoomed = true;
+    camera.position.z = Math.max(180, Math.min(900, camera.position.z * (event.deltaY < 0 ? .9 : 1.1)));
+    labelsDirty = true;
+    requestPaint();
+  }, { passive: false });
   canvas.addEventListener("click", event => {
+    if (suppressPick) { event.preventDefault(); suppressPick = false; return; }
     const rect = canvas.getBoundingClientRect();
     const x = event.clientX - rect.left, y = event.clientY - rect.top;
     let bestNode, bestDistance = 16;
@@ -289,6 +466,10 @@ export function createGraph(host, view, { onNode, onEdge, onFailure }) {
     }
     if (bestEdge) onEdge(bestEdge.id);
   });
+  canvas.addEventListener("webglcontextlost", event => {
+    event.preventDefault();
+    if (!disposed) onFailure("The graphics context was lost");
+  });
   const visibility = () => {
     if (document.hidden) { cancelAnimationFrame(frame); frame = 0; } else requestPaint();
   };
@@ -296,10 +477,6 @@ export function createGraph(host, view, { onNode, onEdge, onFailure }) {
   motion.addEventListener("change", requestPaint);
   document.fonts.addEventListener("loadingdone", fonts);
   document.addEventListener("visibilitychange", visibility);
-  canvas.addEventListener("webglcontextlost", event => {
-    event.preventDefault();
-    if (!disposed) onFailure("The graphics context was lost");
-  });
   recolor();
   resize();
   return {
@@ -307,6 +484,24 @@ export function createGraph(host, view, { onNode, onEdge, onFailure }) {
       group.rotation.set(Number(pitch) * Math.PI / 180, Number(yaw) * Math.PI / 180, 0);
       labelsDirty = true;
       requestPaint();
+    },
+    zoomBy(factor) {
+      userZoomed = true;
+      camera.position.z = Math.max(180, Math.min(900, camera.position.z / factor));
+      labelsDirty = true;
+      requestPaint();
+    },
+    fit() {
+      const extent = Math.max(1, ...nodes.map(node => Math.hypot(node.targetX, node.targetY, node.targetZ))) + 24;
+      const vertical = Math.tan(camera.fov * Math.PI / 360);
+      camera.position.z = Math.max(220, extent / Math.min(vertical, vertical * camera.aspect) * 1.12);
+      userZoomed = true;
+      labelsDirty = true;
+      requestPaint();
+    },
+    setSelection(value) {
+      selection = value && { kind: value.kind, id: String(value.id) };
+      updateNodeHighlight();
     },
     dispose() {
       if (disposed) return;
@@ -316,6 +511,10 @@ export function createGraph(host, view, { onNode, onEdge, onFailure }) {
       motion.removeEventListener("change", requestPaint);
       document.fonts.removeEventListener("loadingdone", fonts);
       document.removeEventListener("visibilitychange", visibility);
+      canvas.removeEventListener("pointerdown", pointerDown);
+      canvas.removeEventListener("pointermove", pointerMove);
+      canvas.removeEventListener("pointerup", pointerEnd);
+      canvas.removeEventListener("pointercancel", pointerEnd);
       nodeGeometry.dispose(); nodeMaterial.dispose(); edgeGeometry.dispose(); edgeMaterial.dispose();
       pulseGeometry.dispose(); pulseMaterial.dispose();
       renderer.dispose();
@@ -325,6 +524,7 @@ export function createGraph(host, view, { onNode, onEdge, onFailure }) {
       delete host.dataset.renderer;
       delete host.dataset.frames;
       delete host.dataset.paused;
+      delete host.dataset.settled;
     },
   };
 }

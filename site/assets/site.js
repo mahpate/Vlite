@@ -104,6 +104,8 @@
         ["current-hybrid.png", "Hybrid search: combine vector similarity with text matches."],
         ["current-retrieval.png", "Advanced retrieval: recommend neighbors and count metadata facets."],
         ["current-explore.png", "Analyze & compare: compare records and inspect a sampled vector projection."],
+        ["current-key-value.png", "Key-value: browse namespaced keys and inspect version-checked values."],
+        ["current-memory.png", "MemoryAI: check configured-binding and scoped-token requirements."],
         ["current-graph.png", "Graph: traverse linked data, rotate the 3D result, or make confirmed edits with write access."],
         ["current-graph-edit.png", "Graph editor: select a node or edge, check its current revision, then review and confirm changes."],
         ["current-observability.png", "Observability: inspect real request metrics, routes and server logs."],

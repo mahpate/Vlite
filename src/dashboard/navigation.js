@@ -9,10 +9,12 @@
       tabs: [["browse", "Records"], ["editor", "Add & edit"], ["data-tools", "Import & export"], ["index", "Index"], ["collections", "Manage"]]
     },
     search: {
-      title: "Search", description: "Find similar records with your own query vectors. VLite does not create embeddings.",
+      title: "Search", description: "Search vectors or use an authorized embedding provider, then compare and rank results.",
       tabs: [["search", "Vector search"], ["retrieval", "Advanced retrieval"], ["explore", "Analyze & compare"]]
     },
     graph: { title: "Graph", description: "Explore graphs in 2D or 3D and make confirmed edits with graph write access.", tabs: [] },
+    "key-value": { title: "Key-value", description: "Browse namespaced keys and safely edit values in a one-dimensional collection.", tabs: [] },
+    memory: { title: "MemoryAI", description: "Remember, recall and manage scoped agent memories through a configured binding.", tabs: [] },
     observability: {
       title: "Observability", description: "Live server activity, diagnostics and the change feed.",
       tabs: [["observability", "Live monitor"], ["diagnostics", "Diagnostics"], ["change-feed", "Change feed"]]
@@ -37,7 +39,7 @@
     "admin-health": "operations", "admin-credential-form": "credentials", "admin-webhooks": "webhooks"
   };
   // Each route is [workspace, section, tab]; every section has exactly one route.
-  const routes = { database: ["overview", "database", "database"], graph: ["graph", "graph", "graph"], requests: ["developer", "requests", "requests"] };
+  const routes = { database: ["overview", "database", "database"], graph: ["graph", "graph", "graph"], "key-value": ["key-value", "key-value", "key-value"], memory: ["memory", "memory", "memory"], requests: ["developer", "requests", "requests"] };
   for (const [workspace, { tabs }] of Object.entries(workspaces)) {
     for (const [tab] of tabs) {
       for (const [section] of viewTools[tab] || [[tab]]) routes[section] = [workspace, section, tab];

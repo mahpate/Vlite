@@ -16,6 +16,7 @@ const layout = {
   index: ["collections", "index"], collections: ["collections", "collections"],
   search: ["search", "search"], retrieval: ["search", "retrieval"], explore: ["search", "explore"],
   graph: ["graph", "graph"],
+  "key-value": ["key-value", "key-value"], memory: ["memory", "memory"],
   observability: ["observability", "observability"], diagnostics: ["observability", "diagnostics"],
   "change-feed": ["observability", "change-feed"],
   operations: ["administration", "operations"],
@@ -257,7 +258,7 @@ test("sign-in gate comes first and the grouped shell stays hidden until sign-in"
   assert.match(html, /id="token-sign-in" class="token-sign-in" open>/);
   assert.match(html, /<a class="skip-link" href="#workspace-content">/);
   assert.match(html, /<main id="workspace-content">/);
-  assert.equal((html.match(/data-workspace="/g) || []).length, 7);
+  assert.equal((html.match(/data-workspace="/g) || []).length, 9);
   assert.deepEqual(Array.from(html.matchAll(/class="nav-caption">([^<]+)</g), match => match[1]), ["Data", "Server", "Tools"]);
   assert.match(html, /id="navigation-toggle"[^>]*aria-expanded="false"/);
   assert.equal((html.match(/class="action-card" href="#/g) || []).length, 6);

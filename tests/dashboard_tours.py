@@ -29,6 +29,7 @@ def check(root):
         "current-payload.png", "current-metadata.png", "current-vector.png",
         "current-write.png", "current-import.png", "current-index.png", "current-collections.png",
         "current-search.png", "current-hybrid.png", "current-retrieval.png", "current-explore.png",
+        "current-key-value.png", "current-memory.png",
         "current-graph.png", "current-graph-edit.png", "current-observability.png", "current-feed.png", "current-administration.png",
         "current-users.png", "current-credentials.png", "current-tenants.png",
         "current-backups.png", "current-replication.png", "current-automation.png",
@@ -51,7 +52,7 @@ def check(root):
         assert hashlib.sha256(content).hexdigest() == checksum, (
             f"Recapture after changing shared dashboard asset {name}")
     assert {capture["workspace"] for capture in manifest["captures"]} == {
-        "Sign in", "Overview", "Collections", "Search", "Graph", "Observability", "Administration", "Developer Console",
+        "Sign in", "Overview", "Collections", "Search", "Key-value", "MemoryAI", "Graph", "Observability", "Administration", "Developer Console",
     }
     source = Path(__file__).resolve().parents[1] / "src" / "dashboard"
     for filename, checksum in manifest["source_assets"].items():
@@ -164,7 +165,7 @@ def check(root):
         server.shutdown()
         server.server_close()
         thread.join()
-    print(f"Connected {len(frames)}-step tour: sign-in screen, seven workspaces, unique verified captures, autoplay, step selection, pause, motion, offscreen, no-JS and guide images passed.")
+    print(f"Connected {len(frames)}-step tour: sign-in screen, nine workspaces, unique verified captures, autoplay, step selection, pause, motion, offscreen, no-JS and guide images passed.")
 
 
 if __name__ == "__main__":
