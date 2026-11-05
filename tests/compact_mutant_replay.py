@@ -15,10 +15,14 @@ review has read it).
 
   python tests/compact_mutant_replay.py check LIST.json
   python tests/compact_mutant_replay.py run LIST.json OUT.json [--machine NAME] [--ids a,b]
+  python tests/compact_mutant_replay.py finish LIST.json OUT.json
   python tests/compact_mutant_replay.py merge LIST.json OUT.json [OUT.json ...]
   python tests/compact_mutant_replay.py verify LIST.json [--min-machines N]
 
+`check`, `run`, `finish` and `verify` take `--root DIR` to work in another checkout.
 `check` needs no build: it proves that every anchor matches exactly once in the tree.
+`finish` closes a batch that was stopped between two mutants (it runs the unmodified
+selectors once more and records them as the baseline after the last mutant).
 `verify` re-checks the recorded runs against the tree it runs in (a run replayed on an
 older tree is stale: replay it again) and exits non-zero unless every mutant has runs
 on at least N machines, each a kill with the whole evidence below.
@@ -277,6 +281,30 @@ def write(path, summary):
         handle.write(json.dumps(summary, indent=1) + "\n")
 
 
+def finish(root, data, out_path, timeout):
+    """Close a batch that was stopped between two mutants.
+
+    Runs the unmodified selectors of the mutants that were recorded again and keeps
+    that as the baseline after the last mutant. Refuses to run on a modified tree.
+    """
+    summary = json.loads(Path(out_path).read_text("utf-8"))
+    if "baseline_after" in summary:
+        print("the batch is already finished")
+        return True
+    if not environment(root)["tree_clean"]:
+        raise SystemExit("the tree is modified: restore it before finishing the batch")
+    command_of = {m["id"]: m["cmd"] for m in data["mutants"]}
+    commands = sorted({command_of[r["id"]] for r in summary["results"] if r["id"] in command_of})
+    summary["baseline_after"] = baseline(root, commands, timeout)
+    summary["killed"] = sum(r["status"] == "killed" for r in summary["results"])
+    summary["total"] = len(summary["results"])
+    summary["tree_clean_after"] = True
+    summary["stopped_early"] = True
+    write(out_path, summary)
+    print(f"{summary['killed']} of {summary['total']} killed; stopped early, baseline after recorded")
+    return all(b["green"] for b in summary["baseline_after"].values())
+
+
 def merge(list_path, out_paths):
     data = read_list(list_path)
     index = {m["id"]: m for m in data["mutants"]}
@@ -288,9 +316,12 @@ def merge(list_path, out_paths):
             kept["environment"] = {
                 k: summary["environment"][k] for k in ("os", "rustc", "head")
             }
-            kept["baseline_green"] = all(
-                b["green"] for b in summary["baseline_before"].values()
-            ) and all(b["green"] for b in summary.get("baseline_after", {}).values())
+            # Green before the first and again after the last mutant of the batch.
+            kept["baseline_green"] = (
+                bool(summary.get("baseline_after"))
+                and all(b["green"] for b in summary["baseline_before"].values())
+                and all(b["green"] for b in summary["baseline_after"].values())
+            )
             index[record["id"]].setdefault("runs", {})[machine] = kept
     write(list_path, data)
 
@@ -373,10 +404,12 @@ def verify(root, data, minimum):
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawTextHelpFormatter)
+    common = argparse.ArgumentParser(add_help=False)
+    common.add_argument("--root", default=str(ROOT), help="the checkout to use (default: this one)")
     sub = parser.add_subparsers(dest="mode", required=True)
-    one = sub.add_parser("check")
+    one = sub.add_parser("check", parents=[common])
     one.add_argument("list")
-    two = sub.add_parser("run")
+    two = sub.add_parser("run", parents=[common])
     two.add_argument("list")
     two.add_argument("out")
     two.add_argument("--machine", default="local")
@@ -386,23 +419,30 @@ def main():
     three = sub.add_parser("merge")
     three.add_argument("list")
     three.add_argument("out", nargs="+")
-    four = sub.add_parser("verify")
+    four = sub.add_parser("verify", parents=[common])
     four.add_argument("list")
     four.add_argument("--min-machines", type=int, default=1)
+    five = sub.add_parser("finish", parents=[common])
+    five.add_argument("list")
+    five.add_argument("out")
+    five.add_argument("--timeout", type=int, default=TIMEOUT)
     args = parser.parse_args()
     os.environ.setdefault("CARGO_INCREMENTAL", "0")
     if args.mode == "merge":
         merge(args.list, args.out)
         return 0
+    root = Path(args.root).resolve()
     data = read_list(args.list)
+    if args.mode == "finish":
+        return 0 if finish(root, data, args.out, args.timeout) else 1
     if args.mode == "check":
-        return 0 if check(ROOT, data) else 1
+        return 0 if check(root, data) else 1
     if args.mode == "verify":
-        return 0 if verify(ROOT, data, args.min_machines) else 1
-    if not check(ROOT, data):
+        return 0 if verify(root, data, args.min_machines) else 1
+    if not check(root, data):
         return 1
     only = set(filter(None, args.ids.split(",")))
-    return 0 if run(ROOT, data, args.out, args.machine, only, args.timeout, args.resume) else 1
+    return 0 if run(root, data, args.out, args.machine, only, args.timeout, args.resume) else 1
 
 
 if __name__ == "__main__":
