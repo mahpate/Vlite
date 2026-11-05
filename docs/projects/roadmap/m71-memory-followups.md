@@ -402,9 +402,10 @@ short-circuits. Creating records inside a remember request (the request-level
   name, as `recall` already reports it. `record` is a canonical decimal string
   or an exact JSON integer in the `u64` range.
 - At most one reference per item: the engine attaches at most one record to a
-  memory. A longer list, an unknown or missing field, another collection name
-  and a record that is not a `u64` are 422 `invalid_input` with
-  `details.field` `evidence`. An empty list is the same as none (unchanged).
+  memory. A longer list, an unknown or missing field and a record that is not a
+  `u64` are 422 `invalid_input` with `details.field` `evidence`; a collection
+  that is not the binding's name is the single 403 of 5.2. An empty list is the
+  same as none (unchanged).
 - A binding without an evidence collection keeps refusing a nonempty list
   (409 `memory_capability_unavailable`, feature `evidence`), and so does the
   request-level `evidence` list on every binding. The `evidence` of a
@@ -420,25 +421,38 @@ guessing its number. The route therefore requires that the principal's binding
 grant carries `raw_access`, the capability that already reads and writes the
 collection directly; the reference then adds no read access. Without it the
 answer is the single 403 body, before the record is looked at, so the answer
-does not tell whether a record exists. The credential still needs the write
-grant on the evidence collection that `remember` requires and the exact scope
-grant.
+does not tell whether a record exists. A `collection` that is not the binding's
+name gets that same body (it is compared before any record is looked at). A
+record that is missing, hidden, or already held by a memory of any scope is one
+409 `memory_attachment_conflict` with one body, so a refusal does not say which
+or who holds it. The credential still needs the write grant on the evidence
+collection that `remember` requires and the exact scope grant.
 
 ### 5.3 The core
 
 - `evidence_record_id` returns the number of a reserved ID and hashes every
   other ID, as before. A reserved ID is `record:` and the canonical decimal of a
-  `u64` (no sign, no leading zero, no overflow); anything else with the prefix
-  is `InvalidEvidence` (422 `invalid_input`). The adapter is the only caller
-  that builds a reserved ID.
-- The existing checks apply unchanged: a record owned by a memory of another
-  scope is `CrossScope` (422 `invalid_input`), a record that is missing, has an
-  expiry or is owned by another memory of the same scope is
-  `RecordAlreadyAttached` (409 `memory_attachment_conflict`), and nothing is
-  written in either case.
+  `u64` (no sign, no leading zero, no overflow): `record:7` and `record:07`
+  cannot name one record. Anything else with the prefix is `InvalidEvidence`
+  (422 `invalid_input`), and so is a consolidate output whose evidence ID starts
+  with it. The REST remember adapter, from an item's wire reference, is the only
+  producer of a reserved ID: the request-level `evidence` list stays refused and
+  no other path writes one.
+- The node keeps its evidence IDs in the existing `evidence` property, one
+  token per ID. An ordinary ID is stored as hex, as before; a reserved ID is
+  stored as itself, `record:7`, never as hex. A stored token that starts with the
+  prefix and is not canonical is `InvalidBundle`, as a token that is not hex is.
+- The attachment checks answer once for an ID that names a record: a record
+  that is missing, has an expiry, is held by another memory of the same scope or
+  is held by a memory of another scope is `RecordAlreadyAttached` (409
+  `memory_attachment_conflict`), and nothing is written. An ordinary (hashed) ID
+  keeps its checks: a record held in another scope is `CrossScope` (422
+  `invalid_input`). Only an ID that names a number is a claim whose owner must
+  not be disclosed.
 - Recall already reports `{collection, record, snippet}` for an attached
   record. Forget detaches the record and deletes it unless another retained
-  memory uses it, as for every evidence record; consolidate is unchanged.
+  memory uses it, as for every evidence record, so a referenced record belongs
+  to the memory from the attachment on; consolidate is unchanged.
 
 ### 5.4 Replay and compatibility
 
@@ -446,10 +460,37 @@ The digest of a request that carries a reference hashes the reserved ID, so an
 exact retry replays, a retry that names another record is 409
 `idempotency_conflict`, and a request without references hashes as before. The
 stored memory keeps its ID in the existing `evidence` property: no file format
-changes for files that never use a reference. A 0.7.0 server derives the record
-of a reserved ID by hashing it and so does not find it: it omits the evidence of
-such a memory from recall and cannot forget the memory. Do not downgrade a file
-after the first reference.
+changes for files that never use a reference, and nothing writes a reserved ID
+until a client sends an item reference.
+
+**Downgrade.** A file that holds such a memory is a one-way change, and the
+encoding in 5.3 is chosen so that 0.7.0 refuses it loudly. A 0.7.0 server
+decodes the `evidence` tokens of every memory node of a scope as hex, so it
+cannot read the literal token. Hex-encoding the reserved ID like the others
+would be worse: 0.7.0 would read it as an ordinary ID, hash it to a record that
+does not exist and silently report the memory without its evidence, and its
+forget would refuse with 409. Measured with the real binaries (a 0.7.1 build
+wrote one memory with a reference, a v0.7.0 server then opened the same file and
+bindings file):
+
+| 0.7.0 operation | Answer |
+|---|---|
+| recall by seed, recall by vector, new `remember`, `forget`, `consolidate`, in the scope holding the memory | 500 `internal_error` |
+| exact replay of a `remember` that carried no reference | 200 `replayed` |
+| replay of the request that carried the reference | 409 `memory_capability_unavailable`, feature `evidence` |
+| recall and `remember` in any other scope | 200 |
+| raw read of the evidence record | 200, intact |
+| recall by seed, recall by vector and new `remember` in the scope, after a 0.7.1 server forgot the memory | 200 |
+
+The server stays up and writes nothing wrong; the failure is explicit but it
+covers every memory operation of that one scope, not only the memory with the
+reference. To recover, run 0.7.1 or later and `forget` the memory: that deletes
+the node and the referenced record (no token is left behind), and 0.7.0 then
+serves the scope again. The documents say so next to the `raw_access`
+definition, which is the explicit opt-in for a reference, and in the upgrade
+notes (API.md, SECURITY.md). `scripts/memory_evidence_downgrade_check.py
+--new-bin PATH --old-bin PATH` repeats the measurement with two server binaries,
+asserts every row above and exits 1 on a difference.
 
 ### 5.5 Tests and campaigns
 

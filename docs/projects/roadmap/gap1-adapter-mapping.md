@@ -352,11 +352,24 @@ code, goldens, OpenAPI text and user documentation agree.
   `memory_bounded_plan_unsupported` (golden `recall-unsupported-ann`): no
   binding owns an approximate index and none is built. `index_not_ready` stays
   for a text index that is not ready.
-- **Item evidence.** An `evidence` value that is not an empty list (on the
-  request, an item or the consolidate output) is refused as `evidence`; an empty
-  list is the same as none. Nonempty references need alias validation,
-  ownership, replay hashing and attachment checks together, and are a later
-  slice.
+- **Item evidence.** An item of `remember` may carry one reference,
+  `evidence: [{collection, record}]`, to an existing record of the binding's
+  evidence collection (0.7.1; 0.7.0 refused every nonempty list). `collection`
+  is the binding's name, as recall reports it; `record` is a `u64` (an integer
+  or its decimal string). The reference is hashed into the request digest as the
+  reserved evidence ID `record:<decimal>`, so the digest version does not change,
+  and the core refuses that prefix from every other source (a client's own
+  evidence ID, a consolidate output). It takes the grant's `raw_access`, checked
+  before any lookup with the single 403 body of an unknown binding, because
+  attaching claims a record the memory routes cannot otherwise reach; a record
+  that is missing, hidden or already held by a memory is one 409
+  `memory_attachment_conflict`. A longer list, another field or a record that is
+  not a `u64` is 422 `invalid_input` (`details.field` `evidence`); the request's
+  own `evidence` and the consolidate output's stay refused as `evidence`, and an
+  empty list is the same as none. A file that holds such a memory is one-way: a
+  0.7.0 server answers 500 for every memory operation of its scope until the
+  memory is forgotten. Design and compatibility:
+  [the 0.7.1 design note](m71-memory-followups.md#5-evidence-references-on-items-slice-s6).
 - **Body errors.** JSON syntax, duplicate keys, size and media type are
   400/413/415 `invalid_json`. A wrong type or shape, an unknown or missing
   field and an out-of-range value are 422 `invalid_input` with `details.field`

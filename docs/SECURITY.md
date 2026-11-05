@@ -70,7 +70,13 @@ stored graph and evidence collection from raw server routes. Memory operation
 grants do not grant raw graph, record, search, feed or attachment access.
 `raw_access` is false unless explicitly granted in the private bindings file;
 even with it, the caller still needs the ordinary tenant, collection and
-operation permissions. Reserved resources are omitted from raw collection/graph
+operation permissions. It is also the opt-in for naming an existing evidence
+record in a `remember` item. That transfers the record to the memory, so
+forgetting the memory deletes the record too, and it is a one-way change to the
+file: a 0.7.0
+server answers 500 for every memory operation of a scope that holds such a
+memory, and other scopes and the evidence record are unaffected (see
+[Upgrading from 0.7.0](API.md#start-the-server-with-memory)). Reserved resources are omitted from raw collection/graph
 lists, slow-query diagnostics, and change feeds; feed cursors
 still advance across the unfiltered page. `GET /v1/database` reports only the
 default collection; startup rejects `default` as a binding's evidence collection,
@@ -163,8 +169,12 @@ show reserved names and record IDs, and collection list `id` values have gaps
 where reserved collections sit; both are accepted: the administrator can see
 everything, so keep the log and audit directories private, and collection IDs
 are never renumbered, because clients cache them. `raw_access` covers every
-scope of its binding's resources, not one memory scope. While any resource is
-reserved, the backup routes (list, create, verify, drill and schedule status)
+scope of its binding's resources, not one memory scope. It is also what lets a
+`remember` item name an existing evidence record (an evidence reference, which
+claims a record no memory owns): without it that request answers 403 before any
+record is looked at, so a credential that holds only memory grants cannot claim
+records by guessing their IDs. While any resource is reserved, the backup routes
+(list, create, verify, drill and schedule status)
 answer `403 forbidden_scope` to every credential, whatever its operations:
 backups hold reserved data, and so do their database-wide counts, so they are
 the administrator's alone. A raw credential

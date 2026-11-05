@@ -221,7 +221,7 @@ answers 403 `read_only` first).
 
 | Route | Refused (`details.feature`) |
 |---|---|
-| `remember` | `fact_kinds` (fact and relation items), `confidence`, `metadata`, `assertion`, `evidence` (a nonempty list), `reference_revision_pin` (a pinned reference revision), `expected` (unless `merge` is `merge_provenance`) |
+| `remember` | `fact_kinds` (fact and relation items), `confidence`, `metadata`, `assertion`, `evidence` (the request's own list, or an item's list on a binding without an evidence collection), `reference_revision_pin` (a pinned reference revision), `expected` (unless `merge` is `merge_provenance`) |
 | `recall` | `embedding_provider`, `fact_kinds`, `filter`, `temporal_read` (`as_of_ms`), `paths`, `metadata` (projections), `evidence_recall` (text or vector without an evidence collection), `query_text_length`; `require_complete_feed: true` answers 409 `memory_feed_unsupported` |
 | `consolidate` | `consolidate_plan` (`dry_run`), `consolidate_delete` (`logical_delete`), `fact_kinds`, `confidence`, `references`, `evidence`, `metadata`, `assertion`, `expected`, `merge` |
 | `forget` | `forget_target` (series or entity), `erasure_jobs` (session or scope target, `allow_job`), `forget_expire` (`mode: expire`) |
@@ -248,6 +248,26 @@ of those two selections changes; recalibrate any threshold on it. `exact` with
 answers 422 `memory_bounded_plan_unsupported` because no approximate index is
 built for a binding, and so does `allow_partial: true` when a budget is
 exhausted: partial results are not served.
+
+On a binding with an evidence collection, an item of `remember` may carry one
+evidence reference: `"evidence": [{"collection": "notes", "record": 7}]`, the
+binding's name and the numeric ID of an existing record of its evidence
+collection (an integer, or its decimal string). The memory then holds the record
+as its evidence, `recall` returns it, and `forget` deletes it with the memory:
+attaching transfers the record to the memory, so attach only a record you do not
+need on its own.
+Attaching claims a record that the memory routes cannot otherwise reach, so the
+grant needs `raw_access`: a request with an item reference and without it
+answers the same 403 as an unknown binding before any record is looked at, as
+does a `collection` that is not the binding's name. A record that is missing,
+hidden, or already held by a memory answers one 409 `memory_attachment_conflict`
+whichever it is. A longer list, an unknown field and a `record` that is not a
+`u64` answer 422 `invalid_input` with `details.field` `evidence`; the request's
+own `evidence` list and the `evidence` of a `consolidate` output stay refused,
+and an empty list is the same as none. An exact retry replays, and a retry that
+names another record is 409 `idempotency_conflict`. Naming a record makes the
+file one-way: after the first reference do not downgrade to 0.7.0, which answers
+500 for every memory operation of that scope (see Upgrading from 0.7.0 below).
 
 A binding's identity is stored in the database. Each bound graph holds a record
 (the node `binding:v1`) with the binding's name, tenant, generation, state,
@@ -313,7 +333,11 @@ its content.
   `user`. A credential without a grant has no scope, an administrator
   included. `"raw_access": true` on a grant also lets that credential reach the
   bound graph and collection through the raw routes, with its ordinary
-  permissions.
+  permissions, and is the opt-in for naming an existing evidence record in a
+  `remember` item. That use transfers the record to the memory (forgetting the
+  memory deletes the record too) and is a one-way change to the file: a 0.7.0
+  server answers 500 for every memory operation of a scope that holds such a
+  memory (see Upgrading from 0.7.0).
 - `"state": "retired"` with `retired_at_ms` keeps `receipts/lookup` working and
   answers every other route 409 `memory_capability_unavailable` with
   `details.feature` `binding_retired`.
@@ -332,7 +356,7 @@ credential, and drop the graph.
 
 **Upgrading from 0.7.0.** The first 0.7.1 start writes each binding's record (one
 node and one commit per bound graph) and applies the rules above to a file that
-was valid before. Three things can stop it or surprise you:
+was valid before. Four things can stop it or surprise you:
 
 - An entry that is already `retired` and has no record yet counts as retired by
   this start, so a `retired_at_ms` in the past is refused (`a memory binding
@@ -346,6 +370,19 @@ was valid before. Three things can stop it or surprise you:
   node. A bound graph that never received a scope (a binding without grants)
   holds only the record, and 0.7.0 refuses it as ordinary data: delete the record
   node first.
+- Item evidence references are a one-way change. A `remember` item that names an
+  evidence record (a `raw_access` grant is the explicit opt-in) stores it in the
+  memory node as the token `record:<number>`, which a 0.7.0 server cannot read.
+  Under 0.7.0 every memory operation of the scope that holds such a memory
+  answers 500 `internal_error`: recall by seed or by vector, a new `remember`,
+  `forget` and `consolidate`. Only an exact replay of an earlier `remember` that
+  carried no reference (200) and the replay of the one that carried it (409,
+  feature `evidence`) still answer. Other scopes, other bindings and the evidence
+  record are unaffected, and the server stays up. Do not downgrade after the
+  first reference. To recover, run 0.7.1 or later and `forget` the memory, which
+  also deletes the record; 0.7.0 then serves the scope again.
+  `scripts/memory_evidence_downgrade_check.py` shows this against two server
+  binaries.
 
 ## Collection retrieval
 
