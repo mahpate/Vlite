@@ -712,6 +712,17 @@ fn freeze_budget_and_exact_fit_boundaries() {
             "compact scratch budget is smaller than one block"
         ))
     ));
+    // The effective accessor reports the refusal; it never turns it into an
+    // absent row.
+    let fresh = loaded_with(&ROWS, None);
+    let rows = replayed(&fresh);
+    assert!(matches!(
+        rows.effective_vector(1, &mut short),
+        Err(Error::InvalidQuery(
+            "compact scratch budget is smaller than one block"
+        ))
+    ));
+    assert!(rows.effective_vector(1, &mut exact).unwrap().is_some());
     // Exactly two blocks fit: no eviction until a third needs room.
     let mut pair = ReadWorkspace::new(2 * bytes).unwrap();
     views[0].read_vector(0, &mut pair).unwrap();
@@ -850,13 +861,32 @@ fn freeze_mapped_accounting_keeps_its_own_peak() {
 #[test]
 fn freeze_vector_peak_survives_eviction_by_a_smaller_block() {
     let _gates = gates();
-    let mut loaded = loaded_with(&[(0, 0.0, "template", None)], None);
+    let generation = many_rows(8_200, None).compact_generation.unwrap();
+    let view = generation.view(0);
+    let blocks = &view.source().unwrap().blocks;
+    let (big, small) = (blocks.first().unwrap(), blocks.last().unwrap());
+    let big_bytes = big.source.rows.len() * 2 * 4;
+    let small_bytes = small.source.rows.len() * 2 * 4;
+    assert!(small_bytes < big_bytes, "the last block is the smaller one");
+    let mut workspace = ReadWorkspace::new(big_bytes).unwrap();
+    view.read_vector(0, &mut workspace).unwrap();
+    view.read_vector(view.len() - 1, &mut workspace).unwrap();
+    let accounting = workspace.accounting(&view).unwrap();
+    assert_eq!(accounting.evictions, 1);
+    assert_eq!(accounting.vectors_live, small_bytes);
+    assert_eq!(accounting.vectors_peak, big_bytes);
+}
+
+/// Collection 0 with the IDs `0..count`, one vector each, loaded back from a
+/// compact image (sealed when `key` is given).
+fn many_rows(count: u64, key: Option<&EncryptionKey>) -> crate::format::Loaded {
+    let mut loaded = loaded_with(&[(0, 0.0, "template", None)], key);
     let template = loaded.collections[&0].records[&0].clone();
     let state = loaded.collections.get_mut(&0).unwrap();
     state.records = RecordMap::default();
     state.revisions.clear();
     state.expiries.clear();
-    for id in 0..8_200u64 {
+    for id in 0..count {
         let mut record = template.clone();
         record.vector = vec![id as f32, 0.0];
         state.records.insert(id, record);
@@ -874,21 +904,38 @@ fn freeze_vector_peak_survives_eviction_by_a_smaller_block() {
         loaded.sequence,
     )
     .unwrap();
-    let checked = crate::format::load_with(&mut Cursor::new(image), None).unwrap();
-    let generation = checked.compact_generation.unwrap();
-    let view = generation.view(0);
-    let blocks = &view.source().unwrap().blocks;
-    let (big, small) = (blocks.first().unwrap(), blocks.last().unwrap());
-    let big_bytes = big.source.rows.len() * 2 * 4;
-    let small_bytes = small.source.rows.len() * 2 * 4;
-    assert!(small_bytes < big_bytes, "the last block is the smaller one");
-    let mut workspace = ReadWorkspace::new(big_bytes).unwrap();
+    crate::format::load_with(&mut Cursor::new(image), key).unwrap()
+}
+
+#[test]
+fn freeze_plaintext_peak_survives_a_smaller_frame() {
+    let _gates = gates();
+    // The plaintext frame of a block is the frame that the plain image of the
+    // same rows stores for it, so the plain image is the oracle of the sizes.
+    let plain = many_rows(8_200, None).compact_generation.unwrap();
+    let plain_view = plain.view(0);
+    let plain_blocks = &plain_view.source().unwrap().blocks;
+    let (big, small) = (
+        plain_blocks.first().unwrap().frame.len(),
+        plain_blocks.last().unwrap().frame.len(),
+    );
+    assert!(small < big, "the last block is the smaller one");
+    let mut plain_workspace = ReadWorkspace::new(4 * 1024 * 1024).unwrap();
+    plain_view.read_vector(0, &mut plain_workspace).unwrap();
+    let unsealed = plain_workspace.accounting(&plain_view).unwrap();
+    assert_eq!((unsealed.plaintext_live, unsealed.plaintext_peak), (0, 0));
+
+    let key = source_key();
+    let sealed = many_rows(8_200, Some(&key)).compact_generation.unwrap();
+    let view = sealed.view(0);
+    let mut workspace = ReadWorkspace::new(4 * 1024 * 1024).unwrap();
     view.read_vector(0, &mut workspace).unwrap();
+    let first = workspace.accounting(&view).unwrap();
+    assert_eq!((first.plaintext_live, first.plaintext_peak), (big, big));
     view.read_vector(view.len() - 1, &mut workspace).unwrap();
-    let accounting = workspace.accounting(&view).unwrap();
-    assert_eq!(accounting.evictions, 1);
-    assert_eq!(accounting.vectors_live, small_bytes);
-    assert_eq!(accounting.vectors_peak, big_bytes);
+    let second = workspace.accounting(&view).unwrap();
+    assert_eq!(second.plaintext_live, small);
+    assert_eq!(second.plaintext_peak, big, "the peak is a maximum");
 }
 
 #[test]
