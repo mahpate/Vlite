@@ -280,9 +280,10 @@ that can write the collection can also fill a key's 16 record IDs with ordinary
 records, so that puts for that key fail with `kv_slots_exhausted` (409 on REST,
 `FAILED_PRECONDITION` on gRPC). Use dedicated collections for key-value data,
 grant `write` on them only to principals you trust with their keys, and watch
-`kv_slots_exhausted_total`: it counts each REST or gRPC request that failed
-this way, across all credentials, and a rise nobody expects points at records
-planted over a key's IDs. The failed `kv_put` audit event names the caller
+`kv_slots_exhausted_total`: it counts each REST or gRPC request answered this
+way, across all credentials (a request whose client left before the answer was
+produced is not counted, as with every request counter), and a rise nobody
+expects points at records planted over a key's IDs. The failed `kv_put` audit event names the caller
 (`actor`) and the request ID, not the collection, and global metrics are
 unavailable while memory bindings are configured (see above). A list call
 scans the whole collection, so its cost grows with the number of entries rather
