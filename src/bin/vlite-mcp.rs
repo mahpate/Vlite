@@ -22,17 +22,20 @@ use std::{
 };
 
 use line::{Line, read_bounded_line};
-use serde_json::{Value, json};
+use serde_json::{Map, Value, json};
 use vlite::{Condition, Database, DistanceMetric, EncryptionKey, HnswMaintenancePolicy, Metadata};
 
 const VERSION: &str = env!("CARGO_PKG_VERSION");
 const DEFAULT_PROTOCOL_VERSION: &str = "2025-06-18";
 const SUPPORTED_PROTOCOL_VERSIONS: &[&str] = &["2025-06-18", "2025-03-26", "2024-11-05"];
 /// Longest request line read from stdin, excluding its terminator; a longer line
-/// is answered with a -32600 error. Every supported request fits: the largest, a
-/// memory tool call with 8 MiB of compact JSON arguments, is about 48 MiB when
-/// written with `\u` escapes.
-const MAX_LINE_BYTES: usize = 64 * 1024 * 1024;
+/// is answered with a -32600 error. The largest supported request is a
+/// `vlite_graph_write` batch: its engine body is at most 16 MiB and can be eight
+/// times that as JSON text (payload bytes written as `\u00XX` escapes are six
+/// times larger, `float32` values written with 20 to 30 characters five to 7.5
+/// times), so the cap is 8 x 16 MiB. A memory tool's 8 MiB of compact arguments
+/// is about 48 MiB.
+const MAX_LINE_BYTES: usize = 128 * 1024 * 1024;
 const HELP: &str = "vlite-mcp --db PATH [--read-only | --writable] [--encryption-key-file PATH]\n\
        vlite-mcp --server URL [--token-env VAR] [--read-only | --writable]   (mcp-proxy builds)\n\
 Read-only is the default. VLITE_ENCRYPTION_KEY or VLITE_ENCRYPTION_KEY_HEX may supply an encryption key.\n\
@@ -646,36 +649,44 @@ fn tool_result(result: ToolResult) -> Value {
     }
 }
 
+// The request is parsed once and its fields are moved out of it, never cloned: a
+// request line can be 128 MiB.
 fn dispatch(
     backend: &mut Backend,
     config: &Config,
     message: Value,
     message_text: &str,
 ) -> Option<Value> {
-    let Some(object) = message.as_object() else {
+    let Value::Object(mut object) = message else {
         return Some(protocol_error(Value::Null, -32600, "Invalid Request"));
     };
-    let id = object.get("id");
+    let id = object.remove("id");
     let has_id = id.is_some();
-    let response_id = id.cloned().unwrap_or(Value::Null);
-    let valid_id =
-        id.is_some_and(|id| id.is_string() || id.as_i64().is_some() || id.as_u64().is_some());
-    let method = object.get("method").and_then(Value::as_str);
-    if object.get("jsonrpc").and_then(Value::as_str) != Some("2.0")
+    let valid_id = id
+        .as_ref()
+        .is_some_and(|id| id.is_string() || id.as_i64().is_some() || id.as_u64().is_some());
+    let response_id = id.unwrap_or(Value::Null);
+    let jsonrpc = object.remove("jsonrpc");
+    let method = object.remove("method");
+    let method = method.as_ref().and_then(Value::as_str);
+    if jsonrpc.as_ref().and_then(Value::as_str) != Some("2.0")
         || method.is_none()
         || (has_id && !valid_id)
     {
         return Some(protocol_error(response_id, -32600, "Invalid Request"));
     }
     let method = method.unwrap_or_default();
-    let params = object.get("params").cloned().unwrap_or_else(|| json!({}));
-    if !params.is_object() {
-        return if has_id {
-            Some(protocol_error(response_id, -32602, "Invalid params"))
-        } else {
-            None
-        };
-    }
+    let mut params = match object.remove("params") {
+        None => Map::new(),
+        Some(Value::Object(params)) => params,
+        Some(_) => {
+            return if has_id {
+                Some(protocol_error(response_id, -32602, "Invalid params"))
+            } else {
+                None
+            };
+        }
+    };
     let result = match method {
         "initialize" => {
             let version = params
@@ -722,11 +733,9 @@ fn dispatch(
             },
         },
         "tools/call" => {
-            let name = params.get("name").and_then(Value::as_str);
-            let args = params
-                .get("arguments")
-                .cloned()
-                .unwrap_or_else(|| json!({}));
+            let name = params.remove("name");
+            let name = name.as_ref().and_then(Value::as_str);
+            let args = params.remove("arguments").unwrap_or_else(|| json!({}));
             #[cfg(feature = "mcp-proxy")]
             if let Some(name) = name
                 && memory_mcp::is_tool(name)

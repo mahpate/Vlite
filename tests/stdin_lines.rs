@@ -2,7 +2,8 @@
 
 use serde_json::{Value, json};
 use std::{
-    io::Write,
+    fs::File,
+    io::{self, Write},
     path::Path,
     process::{Command, Output, Stdio},
     sync::{Mutex, MutexGuard, PoisonError},
@@ -11,14 +12,14 @@ use std::{
 use vlite::Database;
 
 // The documented limits, written out so that a change of either constant fails here.
-const MCP_CAP: usize = 64 * 1024 * 1024;
+const MCP_CAP: usize = 128 * 1024 * 1024;
 const SHELL_CAP: usize = 16 * 1024 * 1024;
-const MCP_TOO_LONG: &str = "request line exceeds 67108864 bytes";
+const MCP_TOO_LONG: &str = "request line exceeds 134217728 bytes";
 const SHELL_TOO_LONG: &str = "error: invalid_input: line exceeds 16777216 bytes\n";
 
-// Every payload here is tens of MiB. Holding this lock from before a payload is
-// built until its process has ended runs one at a time, which bounds the memory
-// a loaded runner needs.
+// Some inputs here are hundreds of MiB long. Holding this lock from before an input is
+// described until its process has ended runs one at a time, which bounds what a loaded
+// runner needs.
 static HEAVY: Mutex<()> = Mutex::new(());
 
 fn serial() -> MutexGuard<'static, ()> {
@@ -29,10 +30,63 @@ fn fixture(path: &Path) {
     Database::create(path, 2).unwrap().close().unwrap();
 }
 
-// Feeds `input` from a thread while the output is drained, so that neither side
-// can stall on a full pipe. The write result is returned too: it fails when the
-// process stops reading before the end of its input.
-fn run(binary: &str, args: &[&str], input: &[&[u8]]) -> (Output, std::io::Result<()>) {
+// A piece of what a process reads. A `Fill` is streamed from a small buffer, so that a
+// line as long as the cap is never held in memory.
+enum Part {
+    Bytes(Vec<u8>),
+    Fill(u8, usize),
+}
+
+#[derive(Default)]
+struct Input(Vec<Part>);
+
+impl Input {
+    fn bytes(mut self, bytes: impl Into<Vec<u8>>) -> Self {
+        self.0.push(Part::Bytes(bytes.into()));
+        self
+    }
+
+    fn fill(mut self, byte: u8, count: usize) -> Self {
+        self.0.push(Part::Fill(byte, count));
+        self
+    }
+
+    // A request and its line terminator.
+    fn line(self, request: Vec<u8>, terminator: &str) -> Self {
+        self.bytes(request).bytes(terminator)
+    }
+
+    // A `ping` of exactly `size` bytes, padded with the insignificant whitespace JSON
+    // allows after a value, and its line terminator.
+    fn padded_ping(self, id: u64, size: usize, terminator: &str) -> Self {
+        let request = plain_ping(id);
+        let padding = size - request.len();
+        self.bytes(request).fill(b' ', padding).bytes(terminator)
+    }
+
+    fn write_to(&self, out: &mut impl Write) -> io::Result<()> {
+        for part in &self.0 {
+            match part {
+                Part::Bytes(bytes) => out.write_all(bytes)?,
+                Part::Fill(byte, count) => {
+                    let chunk = vec![*byte; (*count).min(1 << 20)];
+                    let mut left = *count;
+                    while left > 0 {
+                        let size = left.min(chunk.len());
+                        out.write_all(&chunk[..size])?;
+                        left -= size;
+                    }
+                }
+            }
+        }
+        Ok(())
+    }
+}
+
+// Feeds `input` from a thread while the output is drained, so that neither side can
+// stall on a full pipe. The write result is returned too: it fails when the process
+// stops reading before the end of its input.
+fn run(binary: &str, args: &[&str], input: &Input) -> (Output, io::Result<()>) {
     let mut child = Command::new(binary)
         .args(args)
         .stdin(Stdio::piped())
@@ -42,7 +96,7 @@ fn run(binary: &str, args: &[&str], input: &[&[u8]]) -> (Output, std::io::Result
         .unwrap();
     let mut stdin = child.stdin.take().unwrap();
     thread::scope(|scope| {
-        let writer = scope.spawn(move || input.iter().try_for_each(|part| stdin.write_all(part)));
+        let writer = scope.spawn(move || input.write_to(&mut stdin));
         let output = child.wait_with_output().unwrap();
         (output, writer.join().unwrap())
     })
@@ -55,18 +109,6 @@ fn describe(output: &Output) -> String {
         String::from_utf8_lossy(&output.stdout),
         String::from_utf8_lossy(&output.stderr)
     )
-}
-
-// A `ping` request of exactly `size` bytes, padded inside a `params` string.
-fn ping(id: u64, size: usize) -> Vec<u8> {
-    let mut line =
-        format!(r#"{{"jsonrpc":"2.0","id":{id},"method":"ping","params":{{"pad":""#).into_bytes();
-    let tail = br#""}}"#;
-    let padding = size - line.len() - tail.len();
-    line.resize(line.len() + padding, b'x');
-    line.extend_from_slice(tail);
-    assert_eq!(line.len(), size);
-    line
 }
 
 fn plain_ping(id: u64) -> Vec<u8> {
@@ -83,10 +125,9 @@ fn too_long() -> Value {
     json!({"jsonrpc":"2.0","id":null,"error":{"code":-32600,"message":MCP_TOO_LONG}})
 }
 
-// Runs `vlite-mcp` over `input` and returns what it wrote to stdout, one JSON
-// value per line. The run must end normally with nothing on stderr, having read
-// all of its input.
-fn mcp(input: &[&[u8]]) -> Vec<Value> {
+// Runs `vlite-mcp` over `input` and returns what it wrote to stdout, one JSON value per
+// line. The run must end normally with nothing on stderr, having read all of its input.
+fn mcp(input: &Input) -> Vec<Value> {
     let directory = tempfile::tempdir_in(".").unwrap();
     let path = directory.path().join("lines.vlite");
     fixture(&path);
@@ -105,73 +146,48 @@ fn mcp(input: &[&[u8]]) -> Vec<Value> {
         .collect()
 }
 
+// The one test at the real cap. About 256 MiB are streamed and none is held in memory:
+// the lines of 128 MiB are mostly whitespace written from a small buffer.
 #[test]
-fn mcp_answers_a_request_line_of_exactly_the_cap() {
+fn mcp_serves_a_line_of_exactly_the_cap_and_refuses_one_byte_more() {
     let _serial = serial();
-    let responses = mcp(&[&ping(1, MCP_CAP), b"\n", &plain_ping(2), b"\n"]);
-    assert_eq!(responses, [pong(1), pong(2)]);
+    let input = Input::default()
+        .line(plain_ping(1), "\n")
+        // The CR of a CRLF is not content, so this line is exactly the cap.
+        .padded_ping(2, MCP_CAP, "\r\n")
+        .padded_ping(3, MCP_CAP + 1, "\n")
+        .line(plain_ping(4), "\n")
+        // The last line needs no newline.
+        .bytes(plain_ping(5));
+    assert_eq!(
+        mcp(&input),
+        [pong(1), pong(2), too_long(), pong(4), pong(5)]
+    );
 }
 
+// Lines that are longer than the cap by some distance, which have to be drained, with
+// CRLF terminators and as the last line without any terminator.
 #[test]
-fn mcp_answers_a_crlf_request_line_of_exactly_the_cap() {
+fn mcp_drains_longer_lines_with_crlf_and_at_the_end_of_input() {
     let _serial = serial();
-    let responses = mcp(&[&ping(1, MCP_CAP), b"\r\n", &plain_ping(2), b"\r\n"]);
-    assert_eq!(responses, [pong(1), pong(2)]);
-}
-
-#[test]
-fn mcp_refuses_an_overlong_line_and_serves_the_next_one() {
-    let _serial = serial();
-    let responses = mcp(&[
-        &plain_ping(1),
-        b"\n",
-        &ping(2, MCP_CAP + 1),
-        b"\n",
-        &plain_ping(3),
-        b"\n",
-    ]);
-    assert_eq!(responses, [pong(1), too_long(), pong(3)]);
-}
-
-#[test]
-fn mcp_refuses_an_overlong_crlf_line_and_serves_the_next_one() {
-    let _serial = serial();
-    let responses = mcp(&[
-        &plain_ping(1),
-        b"\r\n",
-        &ping(2, MCP_CAP + 1),
-        b"\r\n",
-        &plain_ping(3),
-        b"\r\n",
-    ]);
-    assert_eq!(responses, [pong(1), too_long(), pong(3)]);
-}
-
-#[test]
-fn mcp_serves_an_unterminated_last_line_after_an_overlong_one() {
-    let _serial = serial();
-    let responses = mcp(&[&ping(1, MCP_CAP + 1), b"\n", &plain_ping(2)]);
-    assert_eq!(responses, [too_long(), pong(2)]);
-}
-
-#[test]
-fn mcp_refuses_an_overlong_last_line_without_a_newline_and_exits_cleanly() {
-    let _serial = serial();
-    let responses = mcp(&[&plain_ping(1), b"\n", &ping(2, MCP_CAP + 1)]);
-    assert_eq!(responses, [pong(1), too_long()]);
+    let input = Input::default()
+        .line(plain_ping(1), "\r\n")
+        .padded_ping(2, MCP_CAP + 4096, "\r\n")
+        .line(plain_ping(3), "\r\n")
+        .padded_ping(4, MCP_CAP + 9000, "");
+    assert_eq!(mcp(&input), [pong(1), too_long(), pong(3), too_long()]);
 }
 
 #[test]
 fn mcp_skips_blank_lines_and_answers_garbage_with_a_parse_error() {
-    let responses = mcp(&[
-        b"\n   \r\n\t\n",
-        b"not json\n",
-        &plain_ping(1),
-        b"\r\n\n",
-        &plain_ping(2),
-    ]);
+    let input = Input::default()
+        .bytes("\n   \r\n\t\n")
+        .bytes("not json\n")
+        .line(plain_ping(1), "\n")
+        .bytes("\r\n\n")
+        .line(plain_ping(2), "\n");
     assert_eq!(
-        responses,
+        mcp(&input),
         [
             json!({"jsonrpc":"2.0","id":null,"error":{"code":-32700,"message":"Parse error"}}),
             pong(1),
@@ -180,16 +196,8 @@ fn mcp_skips_blank_lines_and_answers_garbage_with_a_parse_error() {
     );
 }
 
-fn put(id: u64) -> Vec<u8> {
-    format!("put {{\"id\":{id},\"vector\":[{id},1]}}\n").into_bytes()
-}
-
-// A comment line of `size` bytes, not counting its newline.
-fn comment(size: usize) -> Vec<u8> {
-    let mut line = vec![b'x'; size];
-    line[0] = b'#';
-    line.push(b'\n');
-    line
+fn put(id: u64) -> String {
+    format!("put {{\"id\":{id},\"vector\":[{id},1]}}\n")
 }
 
 struct Ran {
@@ -198,25 +206,32 @@ struct Ran {
     second_put: bool,
 }
 
-// Runs `vlite-shell` on `put 1`, a comment of `size` bytes and `put 2`, given
-// as a script file or on stdin.
+// Runs `vlite-shell` on `put 1`, a comment line of `size` bytes and `put 2`, given as a
+// script file or on stdin.
 fn shell(from_script: bool, size: usize) -> Ran {
     let _serial = serial();
     let directory = tempfile::tempdir_in(".").unwrap();
     let path = directory.path().join("lines.vlite");
     fixture(&path);
-    let script = [put(1), comment(size), put(2)];
+    let script = Input::default()
+        .bytes(put(1))
+        .bytes("#")
+        .fill(b'x', size - 1)
+        .bytes("\n")
+        .bytes(put(2));
     let script_path = directory.path().join("script.txt");
     let mut args = vec!["--db", path.to_str().unwrap()];
-    let input: Vec<&[u8]> = if from_script {
-        std::fs::write(&script_path, script.concat()).unwrap();
+    let input = if from_script {
+        script
+            .write_to(&mut File::create(&script_path).unwrap())
+            .unwrap();
         args.extend(["--script", script_path.to_str().unwrap()]);
-        Vec::new()
+        Input::default()
     } else {
-        script.iter().map(Vec::as_slice).collect()
+        script
     };
-    // On stdin the shell may stop before the end of the input, so the write
-    // result is not checked.
+    // On stdin the shell may stop before the end of the input, so the write result is
+    // not checked.
     let (output, _) = run(env!("CARGO_BIN_EXE_vlite-shell"), &args, &input);
     let database = Database::open(&path).unwrap();
     Ran {
