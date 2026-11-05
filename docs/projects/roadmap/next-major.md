@@ -83,6 +83,12 @@ independent acceptance or the unchanged DO-005 quiet-host policy.
 
 ## Progress
 
+Status at the 0.7.0 freeze: entries below that say "unreleased" for a feature
+listed in [RELEASE-0.7.0](../../RELEASE-0.7.0.md) shipped in 0.7.0, and the
+parked size work stays private and inactive. [The handover](handover-0.7.0.md)
+lists the limits 0.7.0 ships with and the 0.7.1 lanes; its first lane, R0,
+reconciles this ledger with the released code.
+
 Local numbers below show direction only (see rules).
 
 - **Shared compact storage:** the [interface contract](compact-storage-contract.md)
