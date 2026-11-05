@@ -2,13 +2,23 @@
 """Replay hand-written mutants one build at a time and keep their evidence.
 
 A list is JSON: {"campaign", "base", "mutants": [{"id", "desc", "file", "old",
-"new", "cmd", "expect"?}]}. Each mutant is one anchored replacement: `old` must
-occur exactly once in `file`. `cmd` is the argument list of one cargo test
-command (for example "test --locked --offline --lib -- compact::source").
+"new", "cmd", "expect"?, "equivalent"?}]}. Each mutant is one anchored replacement:
+`old` must occur exactly once in `file`. `cmd` is the argument list of one cargo test
+command (for example "test --locked --offline --lib -- compact::source"). `expect`
+names the tests that must fail. `equivalent` is {"argument", "invariant", "pinned_by",
+"pin_mutant", "review"}: a mutant that no test can tell from the original, with the
+invariant it rests on, the test that pins that invariant, a second mutant that this
+test kills, and the reviewer ("pending" until an independent review has read it).
 
   python tests/compact_mutant_replay.py check LIST.json
   python tests/compact_mutant_replay.py run LIST.json OUT.json [--machine NAME] [--ids a,b]
   python tests/compact_mutant_replay.py merge LIST.json OUT.json [OUT.json ...]
+  python tests/compact_mutant_replay.py verify LIST.json [--min-machines N]
+
+`check` needs no build: it proves that every anchor matches exactly once in the tree.
+`verify` re-checks the recorded runs against the tree it runs in (a run replayed on an
+older tree is stale: replay it again) and exits non-zero unless every mutant has runs
+on at least N machines, each a kill with the whole evidence below.
 
 `run` records, for every mutant, the evidence of the 0.7.1 acceptance form:
 
@@ -212,7 +222,9 @@ def run(root, data, out_path, machine, only, timeout, resume):
         "baseline_before": baseline(root, commands, timeout),
         "results": list(done.values()),
     }
-    if not all(b["green"] for b in summary["baseline_before"].values()):
+    # A red selector never produces a kill, but it must not hide the other selectors.
+    red = {cmd for cmd, result in summary["baseline_before"].items() if not result["green"]}
+    if len(red) == len(commands):
         write(out_path, summary)
         raise SystemExit("the unmodified selector is not green; no mutant was run")
 
@@ -223,7 +235,10 @@ def run(root, data, out_path, machine, only, timeout, resume):
     for mutant in mutants:
         if mutant["id"] in done:
             continue
-        record = replay(root, mutant, timeout)
+        if mutant["cmd"] in red:
+            record = {"id": mutant["id"], "file": mutant["file"], "status": "baseline-red"}
+        else:
+            record = replay(root, mutant, timeout)
         summary["results"].append(record)
         save()
         print(
@@ -265,6 +280,79 @@ def merge(list_path, out_paths):
     write(list_path, data)
 
 
+def verify(root, data, minimum):
+    """Re-check the recorded evidence against the tree under `root`.
+
+    A mutant is accepted when it has runs on at least `minimum` machines and every
+    run is a kill with the whole evidence, and the file it was replayed on is the
+    file in this tree. A run replayed on an older tree is stale, never a failure
+    of the mutant: replay it again on this tree.
+
+    A mutant with an `equivalent` record is accepted only when every run survived
+    with the same evidence (compiled, restored, green baseline) and the record names
+    its reviewer; until then it waits for review. It must also name the test that
+    pins the invariant it rests on and a pin mutant that this test kills.
+    """
+    names = {m["id"]: m for m in data["mutants"]}
+    counts = {"accepted": 0, "stale": 0, "open": 0}
+    for mutant in data["mutants"]:
+        path = root / mutant["file"]
+        text = lf(path.read_text(encoding="utf-8"))
+        here = sha256(text.encode("utf-8"))
+        runs = mutant.get("runs", {})
+        equivalent = mutant.get("equivalent")
+        wanted = "survived" if equivalent else "killed"
+        problems, stale, good = [], [], 0
+        if text.count(lf(mutant["old"])) != 1:
+            problems.append(f"anchor matches {text.count(lf(mutant['old']))}")
+        for machine, run_ in sorted(runs.items()):
+            fails = []
+            if run_.get("status") != wanted:
+                fails.append(run_.get("status"))
+            if run_.get("anchor_matches") != 1 or run_.get("compiled") is not True:
+                fails.append("anchor or compile")
+            expected = mutant.get("expect", [])
+            if not equivalent and not all(n in run_.get("failed_tests", []) for n in expected):
+                fails.append("named test did not fail")
+            sums, raw = run_.get("sha256_lf", {}), run_.get("sha256_bytes", {})
+            if not (sums.get("before") == sums.get("restored") and raw.get("before") == raw.get("restored")):
+                fails.append("restore")
+            if run_.get("restored_identically") is not True or run_.get("baseline_green") is not True:
+                fails.append("restore or baseline")
+            if sums.get("before") != here:
+                stale.append(machine)
+            elif not fails:
+                good += 1
+            else:
+                problems.append(f"{machine}: {', '.join(map(str, fails))}")
+        shapes = {
+            (r.get("sha256_lf", {}).get("before"), r.get("sha256_lf", {}).get("mutated"))
+            for r in runs.values()
+        }
+        if len(shapes) > 1:
+            problems.append("machines disagree on the file or the mutant")
+        pending = ""
+        if equivalent:
+            pin = names.get(equivalent.get("pin_mutant", ""))
+            if not equivalent.get("pinned_by") or pin is None or not pin.get("expect"):
+                problems.append("an equivalence needs pinned_by and a pin_mutant with expect")
+            if str(equivalent.get("review", "pending")).strip().lower() in ("", "pending"):
+                pending = "equivalence awaits independent review"
+        if problems:
+            state = "OPEN"
+        elif stale and not good:
+            state = "STALE"
+        elif good < minimum or pending:
+            state = "OPEN"
+        else:
+            state = "ok"
+        counts["accepted" if state == "ok" else ("stale" if state == "STALE" else "open")] += 1
+        detail = "; ".join(problems + ([pending] if pending else []) + ([f"stale on {', '.join(stale)}"] if stale else []))
+        print(f"{mutant['id']}: {state} ({good} valid run(s){'; ' + detail if detail else ''})")
+    print(f"{counts['accepted']} accepted, {counts['stale']} stale, {counts['open']} open of {len(data['mutants'])}")
+    return counts["stale"] == 0 and counts["open"] == 0
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawTextHelpFormatter)
     sub = parser.add_subparsers(dest="mode", required=True)
@@ -280,6 +368,9 @@ def main():
     three = sub.add_parser("merge")
     three.add_argument("list")
     three.add_argument("out", nargs="+")
+    four = sub.add_parser("verify")
+    four.add_argument("list")
+    four.add_argument("--min-machines", type=int, default=1)
     args = parser.parse_args()
     os.environ.setdefault("CARGO_INCREMENTAL", "0")
     if args.mode == "merge":
@@ -288,6 +379,8 @@ def main():
     data = read_list(args.list)
     if args.mode == "check":
         return 0 if check(ROOT, data) else 1
+    if args.mode == "verify":
+        return 0 if verify(ROOT, data, args.min_machines) else 1
     if not check(ROOT, data):
         return 1
     only = set(filter(None, args.ids.split(",")))
