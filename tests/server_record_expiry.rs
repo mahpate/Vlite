@@ -8,11 +8,12 @@ use axum::{Router, body::Body, http::Request};
 use base64::{Engine, prelude::BASE64_STANDARD};
 use http_body_util::BodyExt;
 use serde_json::{Value, json};
+use std::time::Duration;
 use tower::ServiceExt;
 use vlite::{
     CreateOptions, Database, FormatVersion, Metadata,
     property_graph::GraphOp,
-    server::{BearerToken, ServerOptions, Service, configured_admin_router},
+    server::{BearerToken, GroupCommitConfig, ServerOptions, Service, configured_admin_router},
 };
 
 const ADMIN: &str = "fake_record_expiry_admin_token_0123456789_ABCDEFGHIJKLMNOPQRSTUVWXYZ";
@@ -138,6 +139,13 @@ fn due_forms() -> Vec<(&'static str, Value)> {
         ("expires_at_ms 1", json!({"expires_at_ms": 1})),
         ("one second ago", json!({"expires_at_ms": now - 1_000})),
         ("this instant", json!({"expires_at_ms": now})),
+    ]
+}
+
+/// A lifetime of nothing is a request error of its own, found before the
+/// database is looked at.
+fn zero_lifetime_forms() -> Vec<(&'static str, Value)> {
+    vec![
         ("ttl_ms 0", json!({"ttl_ms": 0})),
         ("ttl 0", json!({"ttl": 0})),
     ]
@@ -180,6 +188,123 @@ async fn a_due_expiry_is_refused_before_anything_is_written() {
                 head(&app).await,
                 committed,
                 "{route} {name}: nothing committed"
+            );
+        }
+    }
+}
+
+#[tokio::test]
+async fn a_zero_lifetime_is_a_request_error_found_before_the_database_is_looked_at() {
+    #[track_caller]
+    fn assert_refused(reply: &Reply, context: &str) {
+        assert_eq!(reply.status, 422, "{context}: {}", reply.body);
+        assert_eq!(reply.body["error"]["code"], "invalid_input", "{context}");
+        let message = reply.body["error"]["message"].as_str().unwrap();
+        assert!(message.contains("ttl_ms must be at least 1"), "{message}");
+        assert!(!message.contains("server clock"), "{message}");
+        assert_eq!(reply.etag, None, "{context}");
+    }
+
+    let app = start(database(2, FormatVersion::V5));
+    let seeded = put(&app, "/v1/vectors/7", record([1.0, 2.0], "kept")).await;
+    assert_eq!(seeded.status, 204);
+    let kept = get(&app, 7).await;
+    let committed = head(&app).await;
+    for route in ROUTES {
+        for (name, fields) in zero_lifetime_forms() {
+            for id in [7, 8] {
+                let body = with(record([9.0, 9.0], "replaced"), &fields);
+                let reply = put(&app, &format!("{route}/{id}"), body).await;
+                assert_refused(&reply, &format!("{route}/{id} {name}"));
+            }
+        }
+    }
+    let after = get(&app, 7).await;
+    assert_eq!((after.etag, after.body), (kept.etag, kept.body));
+    assert_eq!(get(&app, 8).await.status, 404);
+    assert_eq!(head(&app).await, committed);
+
+    // Whatever else is wrong with the request or the database, the lifetime is
+    // what the answer says: a collection that does not exist (which any other
+    // put answers with 404), a file older than v5 and an attached record.
+    let zero = || with(record([9.0, 9.0], "x"), &json!({"ttl_ms": 0}));
+    let missing = "/v1/collections/missing/vectors/1";
+    assert_eq!(
+        put(&app, missing, record([9.0, 9.0], "x")).await.status,
+        404
+    );
+    assert_refused(&put(&app, missing, zero()).await, "missing collection");
+    let old = start(database(2, FormatVersion::V4));
+    assert_refused(&put(&old, "/v1/vectors/1", zero()).await, "v4 file");
+    let attached = start(attached_database(2));
+    assert_refused(&put(&attached, "/v1/vectors/1", zero()).await, "attached");
+}
+
+#[tokio::test]
+async fn a_lifetime_the_clock_cannot_add_is_a_request_error() {
+    let app = start(database(2, FormatVersion::V5));
+    let committed = head(&app).await;
+    let huge = [json!({"ttl_ms": u64::MAX}), json!({"ttl": u64::MAX})];
+    for route in ROUTES {
+        for fields in &huge {
+            let body = with(record([9.0, 9.0], "x"), fields);
+            let reply = put(&app, &format!("{route}/8"), body).await;
+            assert_eq!(reply.status, 422, "{route} {fields}: {}", reply.body);
+            assert_eq!(reply.body["error"]["code"], "invalid_input", "{fields}");
+            let message = reply.body["error"]["message"].as_str().unwrap();
+            assert!(message.contains("overflows Unix milliseconds"), "{message}");
+        }
+    }
+    // Found before the collection is looked up, as it always was.
+    let body = with(record([9.0, 9.0], "x"), &huge[0]);
+    let reply = put(&app, "/v1/collections/missing/vectors/1", body).await;
+    assert_eq!(reply.status, 422, "{}", reply.body);
+    assert_eq!(get(&app, 8).await.status, 404);
+    assert_eq!(head(&app).await, committed);
+
+    // Three hundred years short of the end of time still adds up.
+    let ttl = u64::MAX - 10_000_000_000_000;
+    let before = now_ms();
+    let reply = put(
+        &app,
+        "/v1/vectors/8",
+        with(record([9.0, 9.0], "long"), &json!({"ttl_ms": ttl})),
+    )
+    .await;
+    let after = now_ms();
+    assert_eq!(reply.status, 204, "{}", reply.body);
+    assert_eq!(get(&app, 8).await.status, 200);
+    let expiry = last_put(&app, 8).await["expires_at_ms"].as_u64().unwrap();
+    assert!((before + ttl..=after + ttl).contains(&expiry), "{expiry}");
+}
+
+#[tokio::test]
+async fn a_short_lifetime_is_counted_from_the_moment_the_write_is_applied() {
+    // The coordinator holds a lone write for the whole delay before it applies
+    // it, which is longer than the lifetimes asked for here.
+    let directory = tempfile::tempdir().unwrap();
+    let path = directory.path().join("group.vlite");
+    let db = Database::create_with_format(&path, 2, FormatVersion::V5).unwrap();
+    let service = Service::new(db)
+        .with_group_commit(GroupCommitConfig {
+            max_requests: 2,
+            max_delay: Duration::from_millis(100),
+            ..Default::default()
+        })
+        .unwrap();
+    let app = configured_admin_router(service, options()).unwrap();
+    for route in ROUTES {
+        for ttl in [1_u64, 50] {
+            let before = now_ms();
+            let body = with(record([3.0, 4.0], "short"), &json!({"ttl_ms": ttl}));
+            let reply = put(&app, &format!("{route}/5"), body).await;
+            let after = now_ms();
+            assert_eq!(reply.status, 204, "{route} ttl {ttl}: {}", reply.body);
+            assert!(reply.etag.is_some(), "{route} ttl {ttl}");
+            let expiry = last_put(&app, 5).await["expires_at_ms"].as_u64().unwrap();
+            assert!(
+                (before + ttl..=after + ttl).contains(&expiry),
+                "{route} ttl {ttl}: {expiry}"
             );
         }
     }
@@ -327,6 +452,7 @@ async fn the_read_only_token_is_refused_before_the_expiry_is_judged() {
     let app = start(database(2, FormatVersion::V5));
     let committed = head(&app).await;
     let mut forms = due_forms();
+    forms.extend(zero_lifetime_forms());
     forms.push(("ttl_ms 60000", json!({"ttl_ms": 60_000})));
     for route in ROUTES {
         for (name, fields) in &forms {

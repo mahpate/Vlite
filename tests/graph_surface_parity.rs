@@ -95,7 +95,7 @@ const APPROVED_OPENAPI_EDITS: &[(&str, &str)] = &[
     // Record puts refuse an expiry that is not later than the server clock.
     (
         r##""expires_at_ms": {"type": ["integer", "null"], "minimum": 0}, "ttl_ms": {"type": "integer", "minimum": 0, "description": "Relative lifetime in milliseconds; mutually exclusive with expires_at_ms"}"##,
-        r##""expires_at_ms": {"type": ["integer", "null"], "minimum": 0, "description": "Absolute Unix milliseconds; needs format v5. Must be later than the server clock when the request is handled: an equal or earlier value is refused with 422 invalid_input and nothing is written"}, "ttl_ms": {"type": "integer", "minimum": 1, "description": "Relative lifetime in milliseconds, at least 1; mutually exclusive with expires_at_ms. 0, or a lifetime that has already run out when the write is applied, is refused like an already due expires_at_ms"}"##,
+        r##""expires_at_ms": {"type": ["integer", "null"], "minimum": 0, "description": "Absolute Unix milliseconds; needs format v5. Must be later than the server clock when the write is applied: an equal or earlier value is refused with 422 invalid_input and nothing is written"}, "ttl_ms": {"type": "integer", "minimum": 1, "description": "Lifetime in milliseconds, at least 1, counted from the moment the write is applied; needs format v5; mutually exclusive with expires_at_ms. 0 is refused with 422 invalid_input and nothing is written"}"##,
     ),
 ];
 
