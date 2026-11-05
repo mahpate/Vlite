@@ -106,6 +106,7 @@ struct Metrics {
     audit_failures: AtomicU64,
     rate_limited: AtomicU64,
     quota_exceeded: AtomicU64,
+    kv_slots_exhausted: AtomicU64,
     /// f64 bits of the last sampled recall plus a presence flag.
     ann_quality_last_recall: Mutex<Option<f64>>,
 }
@@ -1306,6 +1307,12 @@ fn record_request(service: &Service, record: &RequestRecord<'_>) {
         service
             .metrics
             .quota_exceeded
+            .fetch_add(1, Ordering::Relaxed);
+    }
+    if code == Some("kv_slots_exhausted") {
+        service
+            .metrics
+            .kv_slots_exhausted
             .fetch_add(1, Ordering::Relaxed);
     }
     if status == StatusCode::UNAUTHORIZED {

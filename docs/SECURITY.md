@@ -283,7 +283,9 @@ privileged writes into tenant collections too. REST replies with 429 and
 `RESOURCE_EXHAUSTED`, the same stable code and `retry-after: 1` metadata.
 Quota failures require deleting records, raising a tenant limit or issuing a
 higher-limit credential; waiting alone does not resolve them. JSON/Prometheus metrics include
-`rate_limited_total` and `quota_exceeded_total`.
+`rate_limited_total`, `quota_exceeded_total` and `kv_slots_exhausted_total`
+(key-value puts refused because all 16 of a key's record IDs were taken; see
+[Key-value permissions](#key-value-permissions)).
 
 Put, batch and import-chunk projections run under the database owner lock before
 commit, preventing concurrent requests from overfilling a quota. Counts concern
@@ -342,7 +344,12 @@ not an authorization boundary. Put sensitive KV data in dedicated collections
 and bind credentials narrowly: vector, graph-attachment and import permissions
 can also expose, overwrite, delete or expire ordinary KV records. A principal
 that can write the collection can also fill a key's 16 record IDs with ordinary
-records, so that puts for that key fail with `kv_slots_exhausted`. A list call
+records, so that puts for that key fail with `kv_slots_exhausted` (409 on REST,
+`FAILED_PRECONDITION` on gRPC). Use dedicated collections for key-value data,
+grant `write` on them only to principals you trust with their keys, and watch
+`kv_slots_exhausted_total`: it counts every REST or gRPC request that failed
+this way, across all credentials, and a rise nobody expects points at records
+planted over a key's IDs. A list call
 scans the whole collection, so its cost grows with the number of entries rather
 than with `limit`, and heavy listing can slow writers. CAS revisions
 are not a durable lease-fencing service. See [REST KV](API.md#key-value-entries).

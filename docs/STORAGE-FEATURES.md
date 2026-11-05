@@ -289,10 +289,13 @@ kv.delete("pool", "claim/42", Expected::Revision(token))?;
 - **Limits:** namespaces up to 255 bytes, keys up to 1,024 bytes, values just
   under 1 MiB.
 - **Hash collisions:** keys hash to 16 consecutive record IDs. If all 16 hold
-  other keys or other records, `KvSlotsExhausted` is returned. Other records
-  in the collection are never overwritten. Because anyone who can write the
-  collection can place ordinary records at those IDs, give write access to a
-  key-value collection only to principals you trust with its keys.
+  other keys or other records, `KvSlotsExhausted` is returned (REST and gRPC:
+  409 / `FAILED_PRECONDITION` `kv_slots_exhausted`, counted by the
+  `kv_slots_exhausted_total` metric). A slot holding an expired entry of
+  another key is reused; other records are never overwritten. Because anyone
+  who can write the collection can place ordinary records at those IDs, give
+  write access to a key-value collection only to principals you trust with its
+  keys and keep it separate from other data ([SECURITY](SECURITY.md#key-value-permissions)).
 - REST and gRPC provide ordinary get, put/CAS, delete and prefix listing on
   existing one-dimension collections; see [REST KV](API.md#key-value-entries) for wire
   bounds and pagination. Unlike the Rust handle, neither transport creates a

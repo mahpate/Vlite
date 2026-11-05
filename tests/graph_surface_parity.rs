@@ -87,6 +87,11 @@ const APPROVED_OPENAPI_EDITS: &[(&str, &str)] = &[
         "Successful ordinary KV writes follow configured durability: full syncs, periodic can lose one flush interval, and none is memory-only; they do not force a sync.",
         "Successful ordinary KV writes follow configured durability: full syncs, periodic can lose one flush interval, and none is memory-only; they do not force a sync. Successful mutations are acknowledged after commit.",
     ),
+    // Metrics counter for KV puts that found all 16 probe slots occupied.
+    (
+        r##""quota_exceeded_total":{"type":"integer","minimum":0}}},"##,
+        r##""quota_exceeded_total":{"type":"integer","minimum":0},"kv_slots_exhausted_total":{"type":"integer","minimum":0,"description":"Requests, REST or gRPC, that failed with kv_slots_exhausted: all 16 probe slots of the key held live entries or other records"}}},"##,
+    ),
 ];
 
 /// Short reviewed wording changes on the already-approved KV route additions.
