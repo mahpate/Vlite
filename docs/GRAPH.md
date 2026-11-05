@@ -82,8 +82,10 @@ bindings do not expose it yet.
   the current time, or a fixed time from `GraphRef::with_clock(ms)`. Gets,
   `find_nodes`, `neighbors`, `traverse`, `shortest_path`, `retrieve`, `info`,
   `list_graphs` and `observed_schema` all honour it, and a hidden start node
-  fails like a missing one. The clock only decides visibility; it is not
-  time travel.
+  fails like a missing one. `retrieve` also reads the records of its pivot
+  search (exact and text legs) and its evidence at that clock; an approximate
+  pivot leg still reads the current time. The clock only decides visibility;
+  it is not time travel.
 - **Writes.** Each graph write takes the current time once as its clock and
   first removes what is due at it, in the same atomic frame, so due entities
   are absent for it: `Expected::Absent` succeeds (the key gets a new ID),

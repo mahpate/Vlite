@@ -153,7 +153,9 @@ pub struct GraphRef<'db> {
 impl<'db> GraphRef<'db> {
     /// The same view read at `now_ms` (ms since the Unix epoch)
     /// instead of the current time. Nodes and edges whose deadline is at or
-    /// before it are hidden, and so is every edge of a hidden node. The
+    /// before it are hidden, and so is every edge of a hidden node.
+    /// `retrieve` also reads its pivot and evidence records at this clock
+    /// (an approximate pivot leg still uses the current time). The
     /// clock decides visibility only; it is not time travel, so entities a
     /// write, compaction or checkpoint already removed do not come back.
     pub fn with_clock(&self, now_ms: u64) -> GraphRef<'db> {
