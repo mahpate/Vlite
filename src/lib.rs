@@ -4073,7 +4073,7 @@ pub(crate) fn exact_search_compact_with_workspace(
     }
     let scorer = exact_kernels::Scorer::new(query, metric, query_norm);
     let mut hits: BinaryHeap<RankedHit> = BinaryHeap::with_capacity(limit);
-    for id in records.effective_ids() {
+    for id in records.ordered_ids() {
         if candidates.is_some_and(|ids| !ids.contains(&id)) {
             continue;
         }
