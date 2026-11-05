@@ -53,7 +53,7 @@ unchanged and no size claim is made.
 | F-01 | Binding identity and receipt window are read from the bindings file at each start and not checked against the database |
 | F-03 | Recall with `exact` or `mmr` is vector only; hybrid is refused |
 | F-04 | Recall in approximate mode answers 422 `memory_bounded_plan_unsupported` |
-| Recall distance | `scores.distance` is the squared Euclidean distance of the vector search for every selection; the contract describes cosine distance for `mmr` and three goldens that the replay cannot seed expect it |
+| Recall distance | Vector recall measures squared Euclidean distance, not cosine: `exact` orders by it and every selection reports it as `scores.distance`; the contract describes cosine distance for `mmr`, and three goldens that the replay cannot seed expect it |
 | F2 | Database-wide sequence counters reveal hidden write activity |
 | F3 | Idempotency keys are scoped to binding and memory scope, not to the credential |
 | F5 | One node with the `VliteMemoryScope` label satisfies the startup adoption check |

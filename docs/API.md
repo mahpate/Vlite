@@ -226,10 +226,12 @@ answers 403 `read_only` first).
 
 Recall serves exact, bounded retrieval. `ranking.selection` `exact` or `mmr`
 works on a vector alone; combined with text, entity seeds, other weights or a
-half-life it answers 422 `memory_unsupported_ranking`. A hit's
-`scores.distance` is the squared Euclidean distance of the vector search for
-every selection, not the cosine distance the memory contract describes for
-`mmr`; ranks and order are unaffected. `mode: approximate`
+half-life it answers 422 `memory_unsupported_ranking`. Vector recall measures
+squared Euclidean distance, not cosine: `exact` orders candidates by it, and
+every selection reports it in `scores.distance`, including `mmr`, which selects
+by cosine and which the memory contract says retains cosine distance. Vectors
+that are not unit length can therefore rank differently from a cosine ranking.
+`mode: approximate`
 answers 422 `memory_bounded_plan_unsupported` because no approximate index is
 built for a binding, and so does `allow_partial: true` when a budget is
 exhausted: partial results are not served.
