@@ -491,7 +491,7 @@ impl GraphRef<'_> {
                     self.graph.attachments(NodeId(node.node.id)).collect();
                 for &(name, collection) in &evidence_collections {
                     for &(_, record_id) in attached.iter().filter(|(c, _)| *c == collection) {
-                        let record = db.collection(name)?.get_at(record_id, row_now_ms)?;
+                        let record = db.get_at_in(collection, record_id, row_now_ms)?;
                         let Some(record) = record else {
                             continue;
                         };
