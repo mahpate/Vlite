@@ -399,6 +399,19 @@ async fn sign_in(world: &mut World, name: &'static str, role: &str, tenant: bool
     world.tokens.insert(name, cookie);
 }
 
+/// What every seeded record carries: the marker as text in the fields the
+/// facet and group routes read, its id as the number the statistics read, and
+/// a point every geo search finds.
+fn seed_metadata(marker: &str) -> Value {
+    let text = marker.to_ascii_lowercase();
+    json!({
+        "owner": {"type": "string", "value": text},
+        "tag": {"type": "string", "value": text},
+        "score": {"type": "float", "value": marker_id(marker) as f64},
+        "location": {"type": "geopoint", "value": {"latitude": 0.0, "longitude": 0.0}},
+    })
+}
+
 async fn seed(world: &World) {
     for (bound_writer, unbound_writer, collection, graph, marker) in SEEDS {
         let writer = world.token(if world.bound {
@@ -406,19 +419,50 @@ async fn seed(world: &World) {
         } else {
             unbound_writer
         });
-        for id in [7, 8] {
+        for id in [7, 8, marker_id(marker)] {
             let put = request(
                 &world.app,
                 writer,
                 "PUT",
                 &format!("/v1/collections/{collection}/vectors/{id}"),
                 &json!({"vector":[1,0],"payload_base64":STANDARD.encode(marker),
-                    "metadata":{"owner":{"type":"string","value":marker.to_ascii_lowercase()}}})
+                    "metadata":seed_metadata(marker)})
                 .to_string(),
             )
             .await;
             assert_eq!(put.0, 204, "seed {collection}/{id}: {}", describe(&put));
         }
+        let space = request(
+            &world.app,
+            writer,
+            "POST",
+            &format!("/v1/collections/{collection}/vectors/configure"),
+            SEED_SPACE,
+        )
+        .await;
+        assert_eq!(
+            space.0,
+            200,
+            "seed {collection} space: {}",
+            describe(&space)
+        );
+        let named = request(
+            &world.app,
+            writer,
+            "PUT",
+            &format!(
+                "/v1/collections/{collection}/vectors/{}/named",
+                marker_id(marker)
+            ),
+            SEED_NAMED,
+        )
+        .await;
+        assert_eq!(
+            named.0,
+            200,
+            "seed {collection} named: {}",
+            describe(&named)
+        );
         let nodes = request(
             &world.app,
             writer,
@@ -447,6 +491,40 @@ async fn seed(world: &World) {
             describe(&entry)
         );
     }
+    // The legacy routes address the root `default` collection. A tenant that
+    // creates its own `default` gets a qualified one, so a legacy route that
+    // reached a tenant would resolve and answer instead of failing early.
+    let root_default = request(
+        &world.app,
+        ADMIN,
+        "PUT",
+        "/v1/vectors/7",
+        &json!({"vector":[1,0],"payload_base64":STANDARD.encode("ROOTORDINARY"),
+            "metadata":seed_metadata("ROOTORDINARY")})
+        .to_string(),
+    )
+    .await;
+    assert_eq!(root_default.0, 204, "{}", describe(&root_default));
+    let tenant_default = request(
+        &world.app,
+        world.token("tenant"),
+        "POST",
+        "/v1/collections",
+        r#"{"name":"default","dimensions":2}"#,
+    )
+    .await;
+    assert_eq!(tenant_default.0, 201, "{}", describe(&tenant_default));
+    let tenant_record = request(
+        &world.app,
+        world.token("tenant"),
+        "PUT",
+        "/v1/collections/default/vectors/7",
+        &json!({"vector":[1,0],"payload_base64":STANDARD.encode("TENANTORDINARY"),
+            "metadata":seed_metadata("TENANTORDINARY")})
+        .to_string(),
+    )
+    .await;
+    assert_eq!(tenant_record.0, 204, "{}", describe(&tenant_record));
 }
 
 async fn prepared(bound: bool, principal: &Principal) -> World {
@@ -512,6 +590,10 @@ enum Effect {
     /// The request must succeed when nothing is hidden, or its digest checks
     /// prove nothing.
     Succeeds,
+    /// The request must succeed and its answer must carry something only the
+    /// resource it names holds (a marker or the id of its marker record), or a
+    /// read of the wrong namespace would look like any other answer.
+    Carries,
 }
 
 /// `$c` and `$g` are the names the request is about, `$o` and `$og` an
@@ -544,6 +626,19 @@ const fn effective(method: &'static str, path: &'static str, body: &'static str)
         body,
         kind: Kind::Reference,
         effect: Effect::Succeeds,
+        lockstep: true,
+    }
+}
+
+/// A read whose answer carries the marker or the marker record's id of the
+/// resource it names.
+const fn carrying(method: &'static str, path: &'static str, body: &'static str) -> Row {
+    Row {
+        method,
+        path,
+        body,
+        kind: Kind::Reference,
+        effect: Effect::Carries,
         lockstep: true,
     }
 }
@@ -585,6 +680,15 @@ const fn refused_while_bound(method: &'static str, path: &'static str, body: &'s
 
 const RECORD: &str = r#"{"vector":[0,1],"payload_base64":"UFJPQkU=","metadata":{"probe":{"type":"string","value":"touched"}}}"#;
 const PATCH: &str = r#"{"metadata":{"probe":{"type":"string","value":"patched"}}}"#;
+const CONFIGURE: &str = r#"{"name":"w","dimensions":2,"metric":"cosine","active_version":"v1"}"#;
+/// The vector space every seeded collection already has, so a named write has
+/// something to fill.
+const SEED_SPACE: &str = r#"{"name":"v","dimensions":2,"metric":"cosine","active_version":"v1"}"#;
+/// The marker record's named vectors: the only record the named, sparse and
+/// fused searches can answer with before a request writes another.
+const SEED_NAMED: &str =
+    r#"{"dense":{"v":[{"version":"v1","vector":[1,0]}]},"sparse":{"s":[[1,1]]}}"#;
+const NAMED: &str = r#"{"dense":{"v":[{"version":"v1","vector":[0,1]}]},"sparse":{"s":[[1,1]]}}"#;
 /// Key-value writes only succeed on a collection of one dimension (`kvstore`).
 const KV_PUT: &str = r#"{"namespace":"n","key":"k","value_base64":"UFJPQkU="}"#;
 
@@ -593,71 +697,67 @@ const KV_PUT: &str = r#"{"namespace":"n","key":"k","value_base64":"UFJPQkU="}"#;
 const ROWS: &[Row] = &[
     // Collections, named in the path.
     effective("GET", "/v1/collections/$c", ""),
-    row("GET", "/v1/collections/$c/vectors", ""),
+    carrying("GET", "/v1/collections/$c/vectors", ""),
     row("GET", "/v1/collections/$c/vectors/7", ""),
     effective("PUT", "/v1/collections/$c/vectors/7", RECORD),
     effective("PATCH", "/v1/collections/$c/vectors/7/metadata", PATCH),
-    row(
-        "POST",
-        "/v1/collections/$c/vectors/configure",
-        r#"{"name":"v","dimensions":2,"metric":"cosine","active_version":"v1"}"#,
-    ),
-    row(
-        "PUT",
-        "/v1/collections/$c/vectors/7/named",
-        r#"{"dense":{"v":[{"version":"v1","vector":[0,1]}]},"sparse":{"s":[[1,1]]}}"#,
-    ),
+    effective("POST", "/v1/collections/$c/vectors/configure", CONFIGURE),
+    effective("PUT", "/v1/collections/$c/vectors/7/named", NAMED),
     effective(
         "POST",
         "/v1/collections/$c/batches",
         r#"{"operations":[{"op":"put","id":"9","vector":[0,1]}]}"#,
     ),
-    row(
+    carrying(
         "POST",
         "/v1/collections/$c/search",
-        r#"{"vector":[0,1],"k":1}"#,
+        r#"{"vector":[1,0],"k":5}"#,
     ),
-    row(
+    carrying(
         "POST",
         "/v1/collections/$c/search/grouped",
-        r#"{"vector":[0,1],"field":"tag","groups":1,"hits_per_group":1}"#,
+        r#"{"vector":[1,0],"field":"tag","groups":3,"hits_per_group":3}"#,
     ),
-    row(
+    carrying(
         "POST",
         "/v1/collections/$c/search/geo",
-        r#"{"vector":[0,1],"k":1,"field":"location","latitude":0,"longitude":0,"radius_meters":1}"#,
+        r#"{"vector":[1,0],"k":5,"field":"location","latitude":0,"longitude":0,"radius_meters":1}"#,
     ),
-    row(
+    carrying(
         "POST",
         "/v1/collections/$c/recommend",
-        r#"{"positive_ids":[],"k":1}"#,
+        r#"{"positive_ids":["8"],"k":5}"#,
     ),
-    row("POST", "/v1/collections/$c/facets", r#"{"field":"tag"}"#),
-    row(
+    carrying("POST", "/v1/collections/$c/facets", r#"{"field":"tag"}"#),
+    carrying(
         "POST",
         "/v1/collections/$c/stats/numeric",
         r#"{"field":"score"}"#,
     ),
-    row("POST", "/v1/collections/$c/query", r#"{"query":"*"}"#),
+    carrying(
+        "POST",
+        "/v1/collections/$c/query",
+        r#"{"query":"SEARCH default NEAR $q K 5","vectors":{"q":[1,0]}}"#,
+    ),
     row(
         "POST",
         "/v1/collections/$c/embed",
         r#"{"text":"fake text"}"#,
     ),
-    row(
+    carrying(
         "POST",
         "/v1/collections/$c/search/named",
-        r#"{"name":"v","vector":[0,1],"k":1}"#,
+        r#"{"name":"v","vector":[1,0],"k":5}"#,
     ),
-    row(
+    carrying(
         "POST",
         "/v1/collections/$c/search/sparse",
-        r#"{"name":"v","vector":[],"k":1}"#,
+        r#"{"name":"s","vector":[[1,1]],"k":5}"#,
     ),
-    row(
+    carrying(
         "POST",
         "/v1/collections/$c/search/dense-sparse",
-        r#"{"dense_name":"v","dense":[0,1],"sparse_name":"s","sparse":[],"k":1}"#,
+        r#"{"dense_name":"v","dense":[1,0],"sparse_name":"s","sparse":[[1,1]],"k":5}"#,
     ),
     effective(
         "PUT",
@@ -1088,8 +1188,25 @@ async fn read_resource(world: &World, reader: &str, collection: &str, graph: &st
         format!("/v1/collections/{collection}/vectors/7"),
         format!("/v1/collections/{collection}/vectors/8"),
         format!("/v1/collections/{collection}/kv/entries?namespace=n"),
+        format!("/v1/collections/{collection}/index/hnsw"),
     ] {
         out += &rendered(&path, &request(&world.app, token, "GET", &path, "").await);
+    }
+    // The named vector spaces a write may have configured and filled: `v` is
+    // seeded and filled by a named put, `w` is the one a configure adds.
+    for space in ["v", "w"] {
+        let named = format!("/v1/collections/{collection}/search/named");
+        out += &rendered(
+            &format!("{named} {space}"),
+            &request(
+                &world.app,
+                token,
+                "POST",
+                &named,
+                &json!({"name":space,"vector":[1,0],"k":5}).to_string(),
+            )
+            .await,
+        );
     }
     for (method, path, body) in [
         ("GET", format!("/v1/graphs/{graph}"), ""),
@@ -1174,12 +1291,13 @@ async fn snapshot(world: &World) -> BTreeMap<&'static str, String> {
 }
 
 /// A principal may change what it holds, and a root principal may change the
-/// root namespace; nothing else.
-fn protected(principal: &Principal, label: &str) -> bool {
+/// root namespace; nothing else. Without bindings nothing is reserved, so only
+/// a tenant has anything to stay out of.
+fn protected(principal: &Principal, label: &str, bound: bool) -> bool {
     if principal.held.contains(&label) {
         return false;
     }
-    label.starts_with("reserved.") || principal.tenant
+    (bound && label.starts_with("reserved.")) || principal.tenant
 }
 
 fn forms(marker: &str) -> Vec<String> {
@@ -1190,15 +1308,45 @@ fn forms(marker: &str) -> Vec<String> {
     ]
 }
 
-fn forbidden_markers(principal: &Principal) -> Vec<String> {
+/// The id of the record a resource keeps for nothing but being recognised:
+/// search routes answer with ids and distances only, so an id is how a read
+/// of the wrong namespace shows.
+fn marker_id(marker: &str) -> u64 {
+    match marker {
+        "ROOTORDINARY" => 7_770_001,
+        "RSVROOTNOTES" => 7_770_002,
+        "RSVROOTOTHER" => 7_770_003,
+        "RSVTENANTNOTES" => 7_770_004,
+        "TENANTORDINARY" => 7_770_005,
+        other => panic!("no marker id for {other}"),
+    }
+}
+
+/// Everything in an answer that shows a read of the resource behind `marker`.
+fn identities(marker: &str) -> Vec<String> {
+    let mut out = forms(marker);
+    out.push(marker_id(marker).to_string());
+    out
+}
+
+/// What a principal must never read back: the markers of reserved resources
+/// it does not hold (only while they are reserved), and, for a tenant, the
+/// markers of everything in the root namespace.
+fn forbidden_markers(principal: &Principal, bound: bool) -> Vec<String> {
     let mut out = Vec::new();
     for (label, _, _, _, marker) in RESERVED {
-        if !principal.held.contains(&label) {
-            out.extend(forms(marker));
+        let root = label.starts_with("reserved.root.");
+        let forbidden = if bound {
+            !principal.held.contains(&label)
+        } else {
+            principal.tenant && root
+        };
+        if forbidden {
+            out.extend(identities(marker));
         }
     }
     if principal.tenant {
-        out.extend(forms("ROOTORDINARY"));
+        out.extend(identities("ROOTORDINARY"));
     }
     out
 }
@@ -1221,7 +1369,7 @@ impl<'a> Run<'a> {
             world,
             principal,
             token: world.token(principal.name).to_owned(),
-            markers: forbidden_markers(principal),
+            markers: forbidden_markers(principal, world.bound),
             last: snapshot(world).await,
             report: Vec::new(),
             executed: 0,
@@ -1244,7 +1392,7 @@ impl<'a> Run<'a> {
         if row.method != "GET" {
             let after = snapshot(self.world).await;
             for (label, now) in &after {
-                if protected(self.principal, label) && self.last[label] != *now {
+                if protected(self.principal, label, self.world.bound) && self.last[label] != *now {
                     self.report.push(format!(
                         "{}: {} {path} (answered {}) changed {label}",
                         self.principal.name, row.method, answer.0
@@ -1799,7 +1947,7 @@ async fn generated_requests_take_effect_when_nothing_is_hidden() {
     let mut failures = Vec::new();
     let mut checked = 0;
     for row in ordered() {
-        if row.effect != Effect::Succeeds {
+        if row.effect == Effect::Unchecked {
             continue;
         }
         let names = if row.kind == Kind::Reference {
@@ -1812,6 +1960,18 @@ async fn generated_requests_take_effect_when_nothing_is_hidden() {
         checked += 1;
         if !(200..300).contains(&answer.0) {
             failures.push(format!("{} {path}: {}", row.method, describe(&answer)));
+        } else if row.effect == Effect::Carries {
+            let text = String::from_utf8_lossy(&answer.2);
+            if !identities("ROOTORDINARY")
+                .iter()
+                .any(|form| text.contains(form.as_str()))
+            {
+                failures.push(format!(
+                    "{} {path} carries nothing of the resource it names: {}",
+                    row.method,
+                    describe(&answer)
+                ));
+            }
         }
     }
     assert!(
@@ -1868,6 +2028,21 @@ async fn the_digest_sees_a_write_to_every_protected_resource() {
                 "POST",
                 format!("/v1/graphs/{graph}/batch"),
                 r#"{"ops":[{"op":"create_node","key":"digest_probe"}]}"#.to_owned(),
+            ),
+            (
+                "POST",
+                format!("/v1/collections/{collection}/vectors/configure"),
+                CONFIGURE.to_owned(),
+            ),
+            (
+                "PUT",
+                format!("/v1/collections/{collection}/vectors/7/named"),
+                NAMED.to_owned(),
+            ),
+            (
+                "POST",
+                format!("/v1/collections/{collection}/index/hnsw"),
+                "{}".to_owned(),
             ),
         ] {
             let before = snapshot(&world).await;
@@ -1962,6 +2137,22 @@ async fn markers_reach_their_holders_so_a_leak_would_show() {
                 describe(&answer)
             );
         }
+        for (what, path, body) in [
+            ("list", format!("/v1/collections/{collection}/vectors"), ""),
+            (
+                "named search",
+                format!("/v1/collections/{collection}/search/named"),
+                r#"{"name":"v","vector":[1,0],"k":5}"#,
+            ),
+        ] {
+            let method = if body.is_empty() { "GET" } else { "POST" };
+            let answer = request(&world.app, world.token(holder), method, &path, body).await;
+            assert!(
+                String::from_utf8_lossy(&answer.2).contains(&marker_id(marker).to_string()),
+                "{holder} must read back the id of {marker} in the {what} of {collection}: {}",
+                describe(&answer)
+            );
+        }
     }
     for (reader, marker) in [("admin", "ROOTORDINARY"), ("tenant", "TENANTORDINARY")] {
         let entry = request(
@@ -1984,13 +2175,19 @@ async fn markers_reach_their_holders_so_a_leak_would_show() {
 }
 
 /// The reserved names a principal that does not hold them must never find
-/// in a list or in the change feed.
+/// in a list, in the change feed or in the slow-query log. Logs and the feed
+/// carry stored names, so a tenant's own reserved names appear qualified.
 fn hidden_names(principal: &Principal) -> Vec<String> {
     let holds = |label: &str| principal.held.contains(&label);
     let mut out = Vec::new();
     if principal.tenant {
         if !holds("reserved.tenant.notes") {
-            out.extend(["notes_ev".to_owned(), "notes_graph".to_owned()]);
+            out.extend([
+                "notes_ev".to_owned(),
+                "notes_graph".to_owned(),
+                format!("t{TENANT}__notes_ev"),
+                format!("t{TENANT}__notes_graph"),
+            ]);
         }
     } else {
         if !holds("reserved.root.notes") {
@@ -2007,8 +2204,9 @@ fn hidden_names(principal: &Principal) -> Vec<String> {
     out
 }
 
-/// Lists and the feed carry no name in the request, so the matrix cannot send
-/// a reserved name to them; what it can check is that none comes back.
+/// Lists, the feed and the slow-query log carry no name in the request, so the
+/// matrix cannot send a reserved name to them; what it can check is that none
+/// comes back.
 #[tokio::test]
 async fn lists_and_the_feed_never_name_a_reserved_resource_to_a_caller_that_may_not_reach_it() {
     let mut world = build(true);
@@ -2018,24 +2216,62 @@ async fn lists_and_the_feed_never_name_a_reserved_resource_to_a_caller_that_may_
         }
     }
     seed(&world).await;
+    // A root-only collection and graph no tenant has, so a tenant's list that
+    // fell back to the whole database would show them.
+    let root_only = request(
+        &world.app,
+        ADMIN,
+        "POST",
+        "/v1/collections",
+        r#"{"name":"rootonly_ev","dimensions":2}"#,
+    )
+    .await;
+    assert_eq!(root_only.0, 201, "{}", describe(&root_only));
+    let root_only = request(
+        &world.app,
+        ADMIN,
+        "POST",
+        "/v1/graphs",
+        r#"{"graph":"rootonly_graph"}"#,
+    )
+    .await;
+    assert_eq!(root_only.0, 201, "{}", describe(&root_only));
     let mut failures = Vec::new();
     for principal in &PRINCIPALS {
         let token = world.token(principal.name);
-        let hidden = hidden_names(principal);
-        for path in ["/v1/collections", "/v1/graphs", "/v1/changes?limit=1000"] {
+        let mut hidden = hidden_names(principal);
+        if principal.tenant {
+            hidden.extend(["rootonly_ev".to_owned(), "rootonly_graph".to_owned()]);
+        }
+        let forbidden = forbidden_markers(principal, true);
+        for path in [
+            "/v1/collections",
+            "/v1/graphs",
+            "/v1/changes?limit=1000",
+            "/v1/admin/diagnostics/slow-queries",
+        ] {
             let answer = request(&world.app, token, "GET", path, "").await;
             let text = String::from_utf8_lossy(&answer.2).into_owned();
             for name in &hidden {
                 if text.contains(&format!("\"{name}\"")) {
                     failures.push(format!(
-                        "{}: GET {path} names the reserved {name}: {text}",
+                        "{}: GET {path} names the hidden {name}: {text}",
+                        principal.name
+                    ));
+                }
+            }
+            for marker in &forbidden {
+                if text.contains(marker.as_str()) {
+                    failures.push(format!(
+                        "{}: GET {path} carries {marker}: {text}",
                         principal.name
                     ));
                 }
             }
         }
     }
-    // The check is able to fail: a holder's lists do carry its own names.
+    // The checks are able to fail: a holder's lists do carry its own names, and
+    // a tenant's carry its own collections.
     for (holder, collection, graph) in [
         ("raw", "notes_ev", "notes_graph"),
         ("raw_other", "other_ev", "other_graph"),
@@ -2047,6 +2283,255 @@ async fn lists_and_the_feed_never_name_a_reserved_resource_to_a_caller_that_may_
             if !text.contains(&format!("\"{name}\"")) {
                 failures.push(format!("{holder}: GET {path} must list {name}: {text}"));
             }
+        }
+    }
+    let list = request(
+        &world.app,
+        world.token("tenant"),
+        "GET",
+        "/v1/collections",
+        "",
+    )
+    .await;
+    let text = String::from_utf8_lossy(&list.2).into_owned();
+    if !text.contains("\"ordinary\"") || !text.contains("\"default\"") {
+        failures.push(format!(
+            "tenant: its own collections must be listed: {}",
+            describe(&list)
+        ));
+    }
+    assert!(failures.is_empty(), "{}", failures.join("\n"));
+}
+
+// ------------------------------------------- routes that name no resource
+
+/// Routes that span the database or address `default` without naming it.
+/// SECURITY.md: a tenant credential's wildcard "grants only that tenant's
+/// namespace, not global administration, backups, default collection access or
+/// other tenants". Nothing in these paths names a collection, so the matrix
+/// above cannot probe them with a reserved name; they are run by every
+/// principal instead, under the marker scan and the digest.
+const SPANNING: &[Row] = &[
+    row("GET", "/v1/changes?limit=1000", ""),
+    row("GET", "/v1/admin/replication/export", ""),
+    row("GET", "/v1/admin/backups", ""),
+    row("GET", "/v1/admin/backups/schedule", ""),
+    row("GET", "/v1/admin/maintenance/auto", ""),
+    row("GET", "/v1/database", ""),
+    row("GET", "/v1/vectors", ""),
+    row("GET", "/v1/vectors/7", ""),
+    row("PUT", "/v1/vectors/7", RECORD),
+    row("PATCH", "/v1/vectors/7/metadata", PATCH),
+    row("POST", "/v1/search", r#"{"vector":[1,0],"k":5}"#),
+    row(
+        "POST",
+        "/v1/batches",
+        r#"{"operations":[{"op":"put","id":"9","vector":[0,1]}]}"#,
+    ),
+    row("GET", "/v1/index/hnsw", ""),
+    row("POST", "/v1/index/hnsw", "{}"),
+    row("DELETE", "/v1/vectors/7", ""),
+];
+
+/// What the spanning routes share with the rest of the server's global routes
+/// that any principal may call: lists, the slow-query log and the reports of
+/// the administrator.
+const GLOBAL: &[Row] = &[
+    row("GET", "/v1/collections", ""),
+    row("GET", "/v1/graphs", ""),
+    row("GET", "/v1/capabilities", ""),
+    row("GET", "/v1/admin/diagnostics/slow-queries", ""),
+    row("GET", "/v1/admin/tenants", ""),
+    row("GET", "/v1/admin/audit", ""),
+    row("GET", "/v1/admin/audit/persistent", ""),
+    row("GET", "/v1/admin/credentials", ""),
+    row("GET", "/v1/admin/webhooks", ""),
+];
+
+#[tokio::test]
+async fn a_tenant_is_refused_every_route_that_spans_the_database() {
+    let outside = names("", "ordinary", "ordinary_graph");
+    let mut failures = Vec::new();
+    for bound in [false, true] {
+        for principal in PRINCIPALS.iter().filter(|principal| principal.tenant) {
+            let world = prepared(bound, principal).await;
+            let token = world.token(principal.name);
+            let backup = Row {
+                method: "POST",
+                path: "/v1/admin/backups",
+                body: "{}",
+                kind: Kind::Reference,
+                effect: Effect::Unchecked,
+                lockstep: false,
+            };
+            for row in SPANNING.iter().chain([&backup]) {
+                let (path, body) = row.fill(&outside);
+                let answer = request(&world.app, token, row.method, &path, &body).await;
+                let code = error_of(&answer)["code"].as_str().map(str::to_owned);
+                if answer.0 != 403 || code.as_deref() != Some("forbidden_scope") {
+                    failures.push(format!(
+                        "{} (bindings {bound}): {} {path} must be refused with forbidden_scope: {}",
+                        principal.name,
+                        row.method,
+                        describe(&answer)
+                    ));
+                }
+            }
+        }
+    }
+    assert!(failures.is_empty(), "{}", failures.join("\n"));
+}
+
+#[tokio::test]
+async fn routes_that_name_no_resource_leak_nothing_and_change_nothing() {
+    let outside = names("", "ordinary", "ordinary_graph");
+    let mut failures = Vec::new();
+    let mut sent = 0;
+    for bound in [true, false] {
+        for principal in &PRINCIPALS {
+            let world = prepared(bound, principal).await;
+            let mut run = Run::new(&world, principal).await;
+            for row in SPANNING.iter().chain(GLOBAL) {
+                let answer = run.send(row, &outside).await;
+                sent += 1;
+                if answer.0 >= 500 {
+                    failures.push(format!(
+                        "{} (bindings {bound}): {} {} answered a server error: {}",
+                        principal.name,
+                        row.method,
+                        row.path,
+                        describe(&answer)
+                    ));
+                }
+            }
+            failures.append(&mut run.report);
+        }
+    }
+    assert!(
+        sent >= 2 * PRINCIPALS.len() * (SPANNING.len() + GLOBAL.len()),
+        "only {sent} requests ran"
+    );
+    assert!(failures.is_empty(), "{}", failures.join("\n"));
+}
+
+/// An import job names a collection through its ID, so the job routes carry
+/// no name the matrix could probe. SECURITY.md: "Import job IDs are allocated
+/// for the whole file, so a request about another tenant's job answers `403`
+/// while an unused ID answers `404`". Imports are refused wholesale while
+/// bindings exist, so this runs without them.
+#[tokio::test]
+async fn import_jobs_answer_only_to_the_credentials_that_reach_their_collection() {
+    let world = prepared(false, &PRINCIPALS[6]).await;
+    let reserve = |actor: &'static str, collection: &'static str| {
+        let world = &world;
+        async move {
+            let answer = request(
+                &world.app,
+                world.token(actor),
+                "POST",
+                &format!("/v1/collections/{collection}/imports"),
+                "",
+            )
+            .await;
+            assert_eq!(
+                answer.0,
+                201,
+                "{actor} reserves on {collection}: {}",
+                describe(&answer)
+            );
+            serde_json::from_slice::<Value>(&answer.2).unwrap()["job"]
+                .as_str()
+                .unwrap()
+                .parse::<u64>()
+                .unwrap()
+        }
+    };
+    let root_job = reserve("admin", "ordinary").await;
+    let tenant_job = reserve("tenant", "ordinary").await;
+    let unused = root_job.max(tenant_job) + 1_000;
+    // The root job turns durable with a first chunk, so both the reserved and
+    // the durable path of a job are probed.
+    let chunk = request(
+        &world.app,
+        ADMIN,
+        "PUT",
+        &format!("/v1/imports/{root_job}/chunks/1"),
+        r#"{"operations":[{"op":"put","id":"41","vector":[0,1]}]}"#,
+    )
+    .await;
+    assert_eq!(chunk.0, 200, "{}", describe(&chunk));
+    let second = reserve("admin", "ordinary").await;
+    let before = snapshot(&world).await;
+    let mut failures = Vec::new();
+    // (who, job, status of a read of the job)
+    for (who, job, expected) in [
+        ("tenant", root_job, 403),
+        ("tenant", second, 403),
+        ("tenant", tenant_job, 200),
+        ("tenant", unused, 404),
+        ("tenant_raw", root_job, 403),
+        ("tenant_raw", tenant_job, 200),
+        ("memory_only", root_job, 200),
+        ("memory_only", tenant_job, 403),
+        ("wildcard", root_job, 200),
+        ("admin", root_job, 200),
+        ("admin", tenant_job, 200),
+        ("admin", unused, 404),
+    ] {
+        let answer = request(
+            &world.app,
+            world.token(who),
+            "GET",
+            &format!("/v1/imports/{job}"),
+            "",
+        )
+        .await;
+        if answer.0 != expected {
+            failures.push(format!(
+                "{who} reading job {job}: expected {expected}: {}",
+                describe(&answer)
+            ));
+        }
+    }
+    // Acting on a job of another namespace is refused as well and changes
+    // nothing: not the job, and not the collection it would have written to.
+    for who in ["tenant", "tenant_raw"] {
+        for job in [root_job, second] {
+            for (method, path, body) in [
+                (
+                    "PUT",
+                    format!("/v1/imports/{job}/chunks/2"),
+                    r#"{"operations":[{"op":"put","id":"42","vector":[0,1]}]}"#,
+                ),
+                ("POST", format!("/v1/imports/{job}/finish"), ""),
+                ("POST", format!("/v1/imports/{job}/abort"), ""),
+            ] {
+                let answer = request(&world.app, world.token(who), method, &path, body).await;
+                if answer.0 != 403 {
+                    failures.push(format!(
+                        "{who}: {method} {path} must be refused: {}",
+                        describe(&answer)
+                    ));
+                }
+            }
+        }
+    }
+    let after = snapshot(&world).await;
+    for (label, text) in &before {
+        if after[label] != *text {
+            failures.push(format!("{label} changed under a foreign job"));
+        }
+    }
+    for job in [root_job, second] {
+        let answer = request(&world.app, ADMIN, "GET", &format!("/v1/imports/{job}"), "").await;
+        let state = serde_json::from_slice::<Value>(&answer.2)
+            .map(|value| value["state"].clone())
+            .unwrap_or(Value::Null);
+        if state != "open" {
+            failures.push(format!(
+                "job {job} must still be open: {}",
+                describe(&answer)
+            ));
         }
     }
     assert!(failures.is_empty(), "{}", failures.join("\n"));
