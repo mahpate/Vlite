@@ -250,9 +250,7 @@ fn parse(mut fields: Fields, scope: MemoryScope, scopes: Vec<MemoryScope>) -> Re
         .transpose()?;
     let text = match fields.take("text")? {
         None => None,
-        Some(Value::String(text)) if !text.is_empty() && text.len() <= MAX_TEXT_BYTES => {
-            Some(text)
-        }
+        Some(Value::String(text)) if !text.is_empty() && text.len() <= MAX_TEXT_BYTES => Some(text),
         Some(_) => return Err(Fail::invalid("text")),
     };
     let seeds = match fields.take("entity_seeds")? {
@@ -475,6 +473,14 @@ fn response(output: RecallOutput, binding: &str, parsed: &Parsed) -> Result<Valu
         truncation.push("deletion_barrier");
     }
     let stats = &output.stats;
+    // The core charges returned content to the same byte budget; the wire
+    // reports evidence snippet bytes only (contract section 8 examples).
+    let evidence_bytes: usize = output
+        .hits
+        .iter()
+        .flat_map(|hit| &hit.evidence)
+        .map(|evidence| evidence.snippet.len())
+        .sum();
     let meta = json!({
         "scopes": output.scopes.iter().map(wire::effective).collect::<Vec<_>>(),
         "as_of_ms": output.as_of_ms.to_string(),
@@ -488,7 +494,7 @@ fn response(output: RecallOutput, binding: &str, parsed: &Parsed) -> Result<Valu
         "edges_charged": stats.edges_charged.to_string(),
         "vector_components": stats.vector_components.to_string(),
         "mmr_components": stats.mmr_components.to_string(),
-        "evidence_bytes": stats.evidence_bytes.to_string(),
+        "evidence_bytes": evidence_bytes.to_string(),
     });
     let memories = output
         .hits

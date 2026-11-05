@@ -11,15 +11,17 @@ mod consolidate;
 mod erasure;
 mod mapping;
 #[cfg(feature = "server")]
+pub(crate) use mapping::recall_error;
+#[cfg(feature = "server")]
 pub(crate) use mapping::{
     ReceiptOperation, WireCode, WireMapping, WireOperation, memory_error, receipt_id, unavailable,
 };
 #[cfg(feature = "server")]
-pub(crate) use mapping::recall_error;
-#[cfg(feature = "server")]
 pub(crate) use ranking::{FutureObservations, RankingPolicy};
 #[cfg(feature = "server")]
-pub(crate) use recall::{RecallError, RecallHit, RecallLimits, RecallOutput, RecallRequest, RecallSeed, Selection};
+pub(crate) use recall::{
+    RecallError, RecallHit, RecallLimits, RecallOutput, RecallRequest, RecallSeed, Selection,
+};
 mod ranking;
 mod recall;
 mod receipt;

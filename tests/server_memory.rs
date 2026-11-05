@@ -88,11 +88,9 @@ const MEMORY_PATHS: [&str; 3] = [
     "/v1/memory/notes/receipts/lookup",
 ];
 
-/// Routes not mounted yet in this slice.
-const UNMOUNTED: [&str; 2] = [
-    "/v1/memory/notes/recall",
-    "/v1/memory/notes/receipts/lookup",
-];
+/// Routes served in this slice; the rest are not mounted yet.
+const SERVED: [&str; 2] = ["/v1/memory/notes/remember", "/v1/memory/notes/recall"];
+const UNMOUNTED: [&str; 1] = ["/v1/memory/notes/receipts/lookup"];
 
 #[tokio::test]
 async fn without_a_bindings_file_memory_routes_are_not_mounted() {
@@ -114,7 +112,9 @@ async fn a_valid_bindings_file_mounts_only_the_served_routes() {
     )
     .unwrap();
     // The admin role holds no memory grant: mounted, then refused.
-    assert_eq!(status(&app, "POST", MEMORY_PATHS[0]).await, 403);
+    for path in SERVED {
+        assert_eq!(status(&app, "POST", path).await, 403, "{path}");
+    }
     for path in UNMOUNTED {
         assert_eq!(status(&app, "POST", path).await, 404, "{path}");
     }
@@ -517,5 +517,68 @@ async fn a_read_only_database_refuses_writes_before_validation() {
         (status, &error["error"]["code"]),
         (403, &json!("read_only")),
         "{error}"
+    );
+}
+
+const RECALL_OPS: [&str; 5] = ["read", "search", "write", "graph_read", "graph_write"];
+
+async fn post(app: &Router, path: &str, token: &str, body: &Value) -> (u16, Value) {
+    call(
+        app,
+        "POST",
+        path,
+        Some(token),
+        "application/json",
+        serde_json::to_vec(body).unwrap(),
+    )
+    .await
+}
+
+#[tokio::test]
+async fn a_granted_scope_recalls_what_it_remembered() {
+    let directory = TempDir::new().unwrap();
+    let (app, token) = start_scoped(&directory, &RECALL_OPS, None);
+    let (status, _) = remember(&app, Some(&token), &remember_body("k")).await;
+    assert_eq!(status, 200);
+    let body = json!({"scope": {"agent": "a"}, "entity_seeds": ["e1"]});
+    let (status, recalled) = post(&app, SERVED[1], &token, &body).await;
+    assert_eq!(status, 200, "{recalled}");
+    assert_eq!(recalled["memories"][0]["id"], "e1");
+    assert_eq!(recalled["memories"][0]["content"], "secret memory text");
+    let audit = std::fs::read_to_string(directory.path().join("audit.jsonl")).unwrap();
+    let event = audit
+        .lines()
+        .map(|line| serde_json::from_str::<Value>(line).unwrap())
+        .rfind(|event| event["event"] == "memory_request")
+        .unwrap();
+    assert_eq!(event["operation"], "recall");
+    assert_eq!(event["outcome"], "ok");
+    assert!(!audit.contains("secret memory text"));
+    let mut other = body.clone();
+    other["scope"] = json!({"agent": "b"});
+    let (status, error) = post(&app, SERVED[1], &token, &other).await;
+    assert_eq!(
+        (status, &error["error"]["code"]),
+        (403, &json!("forbidden_scope"))
+    );
+}
+
+#[tokio::test]
+async fn recall_needs_read_and_search_on_the_evidence_collection() {
+    let body = json!({"scope": {"agent": "a"}, "entity_seeds": ["e1"]});
+    let directory = TempDir::new().unwrap();
+    let (app, token) = start_scoped(&directory, &ALL_OPS, None);
+    let (status, error) = post(&app, SERVED[1], &token, &body).await;
+    assert_eq!(
+        (status, &error["error"]["code"]),
+        (403, &json!("forbidden_scope"))
+    );
+    // A reader needs no write grant; the seed is simply absent.
+    let directory = TempDir::new().unwrap();
+    let (app, reader) = start_scoped(&directory, &["read", "search", "graph_read"], None);
+    let (status, error) = post(&app, SERVED[1], &reader, &body).await;
+    assert_eq!(
+        (status, &error["error"]["code"]),
+        (404, &json!("memory_not_found"))
     );
 }

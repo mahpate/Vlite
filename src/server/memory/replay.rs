@@ -22,7 +22,7 @@ use tower::ServiceExt;
 use super::super::{MAX_JSON_BYTES, RequestId, Service, admin, credentials};
 use super::routes::Clock;
 use crate::memory::{MemoryItem, MemoryKind, MemoryMut, MemoryScope, Provenance, RememberRequest};
-use crate::{CollectionSpec, CreateOptions, Database, FormatVersion};
+use crate::{CollectionSettings, CollectionSpec, CreateOptions, Database, FormatVersion};
 
 pub(super) const REMEMBER: &str =
     include_str!("../../../tests/fixtures/agent_memory/wire/remember.json");
@@ -71,7 +71,12 @@ pub(super) fn harness(view: &Value) -> Option<Harness> {
         &evidence,
         CollectionSpec {
             dimensions: 2,
-            settings: Default::default(),
+            // The fixture views assume a ready lexical index (`text_index_ready`
+            // defaults true); an operator declares it with the collection.
+            settings: CollectionSettings {
+                text_fields: vec!["text".into()],
+                ..Default::default()
+            },
         },
     )
     .unwrap();
@@ -542,28 +547,73 @@ mod tests {
     /// cannot be seeded with (the fixture README: not discovery parity).
     /// Ranking arithmetic is covered by the core ranking tests.
     const RECALL_SKIP: [(&str, &str); 22] = [
-        ("recall-default-candidates-200-is-charged", "injected candidate_units"),
-        ("recall-default-candidates-inclusive-200", "injected candidate_units"),
+        (
+            "recall-default-candidates-200-is-charged",
+            "injected candidate_units",
+        ),
+        (
+            "recall-default-candidates-inclusive-200",
+            "injected candidate_units",
+        ),
         ("recall-source-scan-100001", "injected source_count"),
         ("recall-unbounded-plan-refused", "injected bounded_plan"),
         ("recall-no-lazy-text-index", "injected text_index_ready"),
         ("recall-ranking-golden-default", "injected candidate ranks"),
-        ("recall-ranking-golden-id-tie-expanded-R-zero", "injected candidate ranks"),
-        ("recall-ranking-golden-weighted-tie", "injected candidate ranks"),
-        ("recall-owner-ttl-equality-and-foreign-scope-hidden", "injected candidate ranks"),
+        (
+            "recall-ranking-golden-id-tie-expanded-R-zero",
+            "injected candidate ranks",
+        ),
+        (
+            "recall-ranking-golden-weighted-tie",
+            "injected candidate ranks",
+        ),
+        (
+            "recall-owner-ttl-equality-and-foreign-scope-hidden",
+            "injected candidate ranks",
+        ),
         ("recall-vector-exact", "injected candidate ranks"),
         ("recall-vector-mmr", "injected candidate ranks"),
-        ("recall-bm25-rrf-preeligible-leg-diagnostics", "injected candidate ranks"),
-        ("recall-caller-OR-cannot-replace-mandatory-scope", "injected candidate ranks"),
-        ("recall-future-observation-default-refused", "injected candidate ranks"),
+        (
+            "recall-bm25-rrf-preeligible-leg-diagnostics",
+            "injected candidate ranks",
+        ),
+        (
+            "recall-caller-OR-cannot-replace-mandatory-scope",
+            "injected candidate ranks",
+        ),
+        (
+            "recall-future-observation-default-refused",
+            "injected candidate ranks",
+        ),
         ("recall-future-clamp-explicit", "injected candidate ranks"),
-        ("recall-exact-distance-tie-record-before-memory-id", "injected candidate ranks"),
-        ("recall-mmr-diversity-not-weighted-score-order", "injected candidate ranks"),
-        ("recall-vector-component-budget-before-fetch", "injected candidate ranks"),
-        ("recall-mmr-component-budget-before-selection", "injected candidate ranks"),
-        ("recall-ranking-golden-scope-before-memory-id", "injected candidate ranks"),
-        ("recall-temporal-expansion-gated", "injected temporal_enabled"),
-        ("recall-provider-off-even-with-ambient-credential", "injected ambient_credentials"),
+        (
+            "recall-exact-distance-tie-record-before-memory-id",
+            "injected candidate ranks",
+        ),
+        (
+            "recall-mmr-diversity-not-weighted-score-order",
+            "injected candidate ranks",
+        ),
+        (
+            "recall-vector-component-budget-before-fetch",
+            "injected candidate ranks",
+        ),
+        (
+            "recall-mmr-component-budget-before-selection",
+            "injected candidate ranks",
+        ),
+        (
+            "recall-ranking-golden-scope-before-memory-id",
+            "injected candidate ranks",
+        ),
+        (
+            "recall-temporal-expansion-gated",
+            "injected temporal_enabled",
+        ),
+        (
+            "recall-provider-off-even-with-ambient-credential",
+            "injected ambient_credentials",
+        ),
     ];
 
     /// Recorded first-slice deviations (mapping sections 1 and 6).
@@ -576,7 +626,12 @@ mod tests {
             Some("temporal_read"),
         ),
         // An exhausted budget is never a partial answer.
-        ("recall-marked-deadline-partial", 504, "deadline_exceeded", None),
+        (
+            "recall-marked-deadline-partial",
+            504,
+            "deadline_exceeded",
+            None,
+        ),
     ];
 
     #[tokio::test]
@@ -595,12 +650,14 @@ mod tests {
         let harness = harness(&view()).unwrap();
         harness.at(100);
         let (status, body) = harness
-            .send(&json!({"method": "POST", "path": "/v1/memory/notes/remember", "body": {
-                "scope": {"agent": "a"}, "idempotency_key": "k1", "items": [{
-                    "id": "e1", "kind": "entity", "content": "Ada", "observed_at_ms": "90",
-                    "source": {"source_id": "s1", "source_kind": "caller"},
-                }],
-            }}))
+            .send(
+                &json!({"method": "POST", "path": "/v1/memory/notes/remember", "body": {
+                    "scope": {"agent": "a"}, "idempotency_key": "k1", "items": [{
+                        "id": "e1", "kind": "entity", "content": "Ada", "observed_at_ms": "90",
+                        "source": {"source_id": "s1", "source_kind": "caller"},
+                    }],
+                }}),
+            )
             .await;
         assert_eq!(status, 200, "{body}");
         let (status, mut body) = harness
@@ -651,13 +708,28 @@ mod tests {
     #[tokio::test]
     async fn recall_refusals_precede_validation() {
         for (body, feature) in [
-            (json!({"embedding_provider": "x", "kinds": ["fact"]}), "embedding_provider"),
+            (
+                json!({"embedding_provider": "x", "kinds": ["fact"]}),
+                "embedding_provider",
+            ),
             (json!({"kinds": ["relation"], "filter": {}}), "fact_kinds"),
             (json!({"filter": {}, "as_of_ms": "1"}), "filter"),
-            (json!({"as_of_ms": "1", "projection": {"paths": true}}), "temporal_read"),
-            (json!({"projection": {"paths": true, "metadata": ["k"]}}), "paths"),
-            (json!({"projection": {"metadata": ["k"]}, "limit": 0}), "metadata"),
-            (json!({"text": "x".repeat(1025), "limit": 0}), "query_text_length"),
+            (
+                json!({"as_of_ms": "1", "projection": {"paths": true}}),
+                "temporal_read",
+            ),
+            (
+                json!({"projection": {"paths": true, "metadata": ["k"]}}),
+                "paths",
+            ),
+            (
+                json!({"projection": {"metadata": ["k"]}, "limit": 0}),
+                "metadata",
+            ),
+            (
+                json!({"text": "x".repeat(1025), "limit": 0}),
+                "query_text_length",
+            ),
         ] {
             let mut request = body.clone();
             request["scope"] = json!({"agent": "a"});
@@ -665,13 +737,17 @@ mod tests {
             assert_eq!(status, 409, "{body}: {served}");
             assert_eq!(served["error"]["details"]["feature"], feature, "{body}");
         }
-        let (status, served) =
-            recall_served(&view(), json!({"scope": {"agent": "a"}, "text": "x".repeat(1024)}))
-                .await;
+        let (status, served) = recall_served(
+            &view(),
+            json!({"scope": {"agent": "a"}, "text": "ada ".repeat(256)}),
+        )
+        .await;
         assert_eq!(status, 200, "{served}");
-        let (status, served) =
-            recall_served(&view(), json!({"scope": {"agent": "a"}, "text": "x".repeat(16_385)}))
-                .await;
+        let (status, served) = recall_served(
+            &view(),
+            json!({"scope": {"agent": "a"}, "text": "x".repeat(16_385)}),
+        )
+        .await;
         assert_eq!(status, 422, "{served}");
         let mut retired = view();
         retired["retired_at_ms"] = json!(500);
@@ -693,8 +769,11 @@ mod tests {
     /// database is served.
     #[tokio::test]
     async fn recall_missing_seed_is_not_found() {
-        let (status, body) =
-            recall_served(&view(), json!({"scope": {"agent": "a"}, "entity_seeds": ["zz"]})).await;
+        let (status, body) = recall_served(
+            &view(),
+            json!({"scope": {"agent": "a"}, "entity_seeds": ["zz"]}),
+        )
+        .await;
         assert_eq!(status, 404, "{body}");
         assert_eq!(body["error"]["code"], "memory_not_found");
     }
