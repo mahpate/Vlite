@@ -2894,15 +2894,23 @@ impl Database {
     /// Durably drops an empty named collection (v4 only). A collection with
     /// live records or open import jobs returns `CollectionNotEmpty`.
     pub fn drop_collection(&mut self, name: &str) -> Result<()> {
-        self.ensure_all_resident()?;
-        if self.version < format::V4 {
-            return Err(Error::CollectionsRequireUpgrade);
-        }
+        self.ensure_collections_droppable()?;
         if name == "default" {
             return Err(Error::DefaultCollectionImmutable);
         }
         let id = self.resolve(name)?;
         self.drop_live_collection(id)
+    }
+
+    /// What every collection drop checks first, by name or by ID: the
+    /// database's state, then its format. One function, so the two entry
+    /// points refuse in the same order.
+    fn ensure_collections_droppable(&self) -> Result<()> {
+        self.ensure_all_resident()?;
+        if self.version < format::V4 {
+            return Err(Error::CollectionsRequireUpgrade);
+        }
+        Ok(())
     }
 
     /// The commit half of `drop_collection`, for a live non-default `id`.

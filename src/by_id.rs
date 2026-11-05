@@ -11,7 +11,6 @@
 
 use crate::{
     CollectionMut, CollectionRef, CollectionSettings, Database, Error, Result, SettingsPersistence,
-    format,
 };
 
 impl Database {
@@ -37,16 +36,19 @@ impl Database {
         self.collection_mut_in(id)
     }
 
-    /// `drop_collection` for an ID the server layer has already resolved.
+    /// `drop_collection` for an ID the server layer has already resolved. It
+    /// refuses in the order `drop_collection` does: the database's state and
+    /// format, the default collection, then the lookup.
     pub(crate) fn drop_collection_by_id(&mut self, id: u16) -> Result<()> {
-        self.ensure_all_resident()?;
-        if self.version < format::V4 {
-            return Err(Error::CollectionsRequireUpgrade);
-        }
-        self.live_collection(id)?;
-        if self.state(id).name == "default" {
+        self.ensure_collections_droppable()?;
+        let default = self
+            .collections
+            .get(&id)
+            .is_some_and(|state| state.name == "default");
+        if default {
             return Err(Error::DefaultCollectionImmutable);
         }
+        self.live_collection(id)?;
         self.drop_live_collection(id)
     }
 
@@ -65,7 +67,7 @@ impl Database {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{CollectionSpec, CreateOptions};
+    use crate::{CollectionSpec, CreateOptions, FormatVersion};
 
     fn database() -> Database {
         let mut db = Database::create_in_memory(2, CreateOptions::default()).unwrap();
@@ -146,6 +148,70 @@ mod tests {
             db.drop_collection("default"),
             Err(Error::DefaultCollectionImmutable)
         ));
+    }
+
+    /// A drop by name and a drop by ID make the same checks in the same
+    /// order, so a caller gets one answer for either.
+    #[test]
+    fn a_drop_by_id_refuses_in_the_order_a_drop_by_name_does() {
+        fn refusal(db: &mut Database, name: &str, id: u16) -> Error {
+            let by_name = db.drop_collection(name).expect_err("a drop by name");
+            let by_id = db.drop_collection_by_id(id).expect_err("a drop by ID");
+            assert_eq!(
+                std::mem::discriminant(&by_name),
+                std::mem::discriminant(&by_id),
+                "{name}: by name `{by_name}`, by ID `{by_id}`"
+            );
+            by_name
+        }
+        let mut db = database();
+        let alpha = db.resolve("alpha").unwrap();
+        db.collection_mut_by_id(alpha)
+            .unwrap()
+            .put(1, &[1.0, 0.0], b"a")
+            .unwrap();
+        // The default collection, a collection that holds a record, and none.
+        let targets = [("default", 0), ("alpha", alpha), ("absent", 999)];
+        assert!(matches!(
+            refusal(&mut db, "default", 0),
+            Error::DefaultCollectionImmutable
+        ));
+        assert!(matches!(
+            refusal(&mut db, "alpha", alpha),
+            Error::CollectionNotEmpty
+        ));
+        assert!(matches!(
+            refusal(&mut db, "absent", 999),
+            Error::CollectionNotFound
+        ));
+        // A database that refuses everything answers before the default
+        // collection and the lookup are looked at.
+        db.poisoned = true;
+        for (name, id) in targets {
+            assert!(
+                matches!(refusal(&mut db, name, id), Error::Poisoned),
+                "{name}"
+            );
+        }
+        // A format without collections answers there too, after the health
+        // check.
+        let directory = tempfile::tempdir().unwrap();
+        let mut v3 =
+            Database::create_with_format(directory.path().join("v3.vlite"), 2, FormatVersion::V3)
+                .unwrap();
+        for (name, id) in targets {
+            assert!(
+                matches!(refusal(&mut v3, name, id), Error::CollectionsRequireUpgrade),
+                "{name}"
+            );
+        }
+        v3.poisoned = true;
+        for (name, id) in targets {
+            assert!(
+                matches!(refusal(&mut v3, name, id), Error::Poisoned),
+                "{name}"
+            );
+        }
     }
 
     #[test]
