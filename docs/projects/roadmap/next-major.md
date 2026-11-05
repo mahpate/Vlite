@@ -196,8 +196,20 @@ Local numbers below show direction only (see rules).
   (a test-gated ordered browse and exact, filtered search over base plus
   overlay, identical to the resident path at the same clock) is accepted with
   notes and integrated on the same terms; hybrid, query-language, grouping and
-  facet reads still refuse compact records. Slices 4–5 and all normal
-  `Database` wiring remain; slice 4 is next.
+  facet reads still refuse compact records. Slice 4 is split into three lanes
+  and only lane B is in 0.7.0: its crate-private read seam in
+  `src/compact/source.rs` (opaque generation identity, bounded authenticated
+  vector, metadata and payload reads, and separate source, mapped, vector,
+  plaintext and cell accounting), the effective-row accessors in
+  `src/records.rs` and the metadata, text-index and rerank consumers are
+  integrated, test-gated and unreleased, while its fix-forward commit
+  (`250a98b`) is parked. Lane A (record consumers and the bounded exact scan,
+  parked at `834a0a6`) and lane C (server and MCP consumers) are not
+  integrated, and slice 5 (lifecycle) has not started. All of it compiles only
+  under `cfg(test)`: release builds have no compact dispatch and no normal
+  `Database` wiring. The 0.7.1 plan freezes the seam in
+  [p3b-seam-freeze.md](p3b-seam-freeze.md) and records both parked lanes'
+  survivor ledgers in [p3b-survivor-ledgers.md](p3b-survivor-ledgers.md).
   The [P3c compact-ANN design](p3c-compact-ann.md) (source-bound flat
   topology, persisted scalar-u8 codes, background rebuild and a separately
   opted-in rotated one-bit candidate) is independently reviewed; its nine

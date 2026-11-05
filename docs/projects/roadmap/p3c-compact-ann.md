@@ -6,9 +6,13 @@ Inventory head: `2b045b63ac598b0cce8e27f061b6a87f3b9b455f`.
 All code anchors below were checked at that head, not copied from the older
 P3b inventory. This document changes no API, code, default, gate or release
 criterion. The owner explicitly approved J.1-J.9 individually on 2026-11-02,
-subject to the independent acceptance and dependencies below. P3b slice 0
-is now independently accepted and integrated; that does not satisfy the
-remaining engine-integration, source-interface or lifecycle prerequisites.
+subject to the independent acceptance and dependencies below. P3b slices 0, 1a,
+1b, 2 and 3 are independently accepted and integrated behind test gates, and
+lane B's read seam is integrated with its mutation ledger still open; that does
+not satisfy the remaining engine-integration, source-interface or lifecycle
+prerequisites. The 0.7.1 [seam freeze](p3b-seam-freeze.md) records what the
+code at v0.7.0 provides and states the section G additions as concrete shapes;
+the paragraphs below keep their setup-head wording unless marked reconciled.
 
 The governing documents are [P3](p3-compact-vectors.md),
 the [storage contract](compact-storage-contract.md), the
@@ -630,7 +634,9 @@ affected_since, score_batch}` with explicit lifetimes/error propagation,
 not a second public trait. `base_rows` iterates physical source rows;
 `affected_since(S)` must cover every commit S..T or fail explicitly.
 These names/shapes remain proposals until reviewed and frozen with P3b;
-slice-0 acceptance alone does not freeze these additions. Metadata
+slice-0 acceptance alone does not freeze these additions. The 0.7.1
+[seam freeze](p3b-seam-freeze.md#5-additions-for-p3c-proposed) states them as
+concrete signatures, and they stay proposals until the owner approves it. Metadata
 decode/auth failure remains an error, never predicate false.
 
 P3d supplies exact kernels over canonical expanded stored values with f64
@@ -803,11 +809,17 @@ wire/binding fields remain frozen for this slice.
 
 ## K. Risks and unverified items
 
-- **P3b slice 0 is an unaccepted candidate.** No production
-  `CollectionRecords`/`ReadAccess`, generation pin, complete base/overlay
-  cursor or fallible batch scorer was found at the setup head. The accepted
-  test-only column accessor is not that engine seam. G lists the exact
-  assumptions; freeze them before code, revise this candidate if they differ.
+- **Reconciled at v0.7.0.** P3b slice 0 is accepted and integrated, with
+  slices 1a, 1b, 2 and 3 and lane B's seam. A test-gated generation pin
+  (`CompactGeneration`, `CompactView`), a base-plus-overlay `CollectionRecords`,
+  an ordered base-plus-overlay cursor (`compact_iter`) and a bounded read
+  workspace (`ReadWorkspace`) exist; there is no `ReadAccess` trait, and the
+  seam compiles only under `cfg(test)`. Still absent: a physical-base cursor, a
+  portable binding, an affected-ID cursor and a fallible bounded batch scorer
+  (base-only vectors exist as `CompactView::read_vector`). G's assumptions are
+  restated with concrete shapes in the
+  [seam freeze](p3b-seam-freeze.md#5-additions-for-p3c-proposed); revise this
+  candidate if the owner changes them.
 - Current `ImageCheck` retains some validation state and current loader
   materializes sources. Eager full ANN source/code checks must not force a
   resident record map. Peak validation, rebuild arena and aggregate concurrent

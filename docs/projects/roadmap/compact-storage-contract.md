@@ -2,9 +2,9 @@
 
 | Field | Value |
 |---|---|
-| Status | Interface decisions accepted 2026-10-30. Slice 0 checks implemented and independently accepted at `da92617` (`src/compact/mod.rs`, `tests/compact_storage.rs`); its block directory and codec dispatch are deferred by coordinator decision (section 7); slices 1-3 pending. Defines what [P3](p3-compact-vectors.md), [P4](p4-compact-graph.md) and P5 share on top of [P2](p2-directory-store.md) |
+| Status | Interface decisions accepted 2026-10-30. Slice 0 checks are implemented, independently accepted at `da92617` (`src/compact/mod.rs`, `tests/compact_storage.rs`) and in release builds. The block directory (deferred from slice 0 by coordinator decision, section 7), the P3a dense-rows codec, the P3b source seam, the P4 graph codec and the `0x0400` summary codec are integrated behind test-only gates (slices 1a to 3 and their private follow-ups; see section 7 and the [0.7.1 seam freeze](p3b-seam-freeze.md)); none is enabled, no production compact writer exists and shared wiring (slice 2) is pending. Defines what [P3](p3-compact-vectors.md), [P4](p4-compact-graph.md) and P5 share on top of [P2](p2-directory-store.md) |
 | Roadmap | [`next-major.md`](next-major.md); goals in [`storage-goals.md`](../performance/storage-goals.md) |
-| Validation | Slice 0 correctness, refusal, completeness and bounded-diagnostic tests passed; independent review accepted `da92617`. No production source codecs or size/performance qualification. Citations are `path:line` on this branch and may drift |
+| Validation | Slice 0 correctness, refusal, completeness and bounded-diagnostic tests passed; independent review accepted `da92617`. The later private slices carry their own acceptance records in the P3, P4 and P5 designs. No production source codecs or size/performance qualification. Citations are `path:line` on this branch and may drift |
 
 P3 and P4 were designed separately, and P5 adds statistics to the same
 checkpoint images. This contract fixes one header flag, one frame operation,
