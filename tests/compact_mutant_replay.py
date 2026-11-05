@@ -2,25 +2,30 @@
 """Replay hand-written mutants one build at a time and keep their evidence.
 
 A list is JSON: {"campaign", "base", "mutants": [{"id", "desc", "file", "old",
-"new", "cmd", "expect"?, "min_machines"?, "equivalent"?}]}. Each mutant is one anchored
+"new", "cmd", "expect"?, "min_machines"?, "gap"?, "equivalent"?}]}. Each mutant is one anchored
 replacement: `old` must occur exactly once in `file`. `cmd` is the argument list of one
 cargo test command (for example "test --locked --offline --lib -- compact::source").
 `expect` names the tests that must fail. `min_machines` raises the number of machines
 that `verify` requires for this mutant above its default; a top-level `two_machines`
-list does the same for many IDs at once. `equivalent` is {"argument",
+list does the same for many IDs at once. `gap` names the tree on which the mutant was a
+test gap (it survived there): `verify` then needs a run on that tree, kept under
+`before`, that survived with the whole evidence. `equivalent` is {"argument",
 "invariant", "pinned_by", "pin_mutant", "review"}: a mutant that no test can tell from
 the original, with the invariant it rests on, the test that pins that invariant, a
 second mutant that this test kills, and the reviewer ("pending" until an independent
 review has read it).
 
-  python tests/compact_mutant_replay.py check LIST.json
+  python tests/compact_mutant_replay.py check LIST.json [--ids a,b]
   python tests/compact_mutant_replay.py run LIST.json OUT.json [--machine NAME] [--ids a,b]
   python tests/compact_mutant_replay.py finish LIST.json OUT.json
-  python tests/compact_mutant_replay.py merge LIST.json OUT.json [OUT.json ...]
+  python tests/compact_mutant_replay.py merge LIST.json OUT.json [OUT.json ...] [--before] [--ids a,b]
   python tests/compact_mutant_replay.py verify LIST.json [--min-machines N]
 
 `check`, `run`, `finish` and `verify` take `--root DIR` to work in another checkout.
 `check` needs no build: it proves that every anchor matches exactly once in the tree.
+`run` checks only the mutants it is about to run, so a list can be replayed on an older
+tree that lacks some anchors. `merge --before` keeps the runs as the state before the
+lane (the previous tag, or the tree before a lane's tests), not as another machine.
 `finish` closes a batch that was stopped between two mutants (it runs the unmodified
 selectors once more and records them as the baseline after the last mutant).
 `verify` re-checks the recorded runs against the tree it runs in (a run replayed on an
@@ -305,13 +310,26 @@ def finish(root, data, out_path, timeout):
     return all(b["green"] for b in summary["baseline_after"].values())
 
 
-def merge(list_path, out_paths):
+def select(data, ids):
+    """The list narrowed to the comma-separated IDs (all of it when there are none)."""
+    only = set(filter(None, ids.split(",")))
+    unknown = only - {m["id"] for m in data["mutants"]}
+    if unknown:
+        raise SystemExit("unknown mutant IDs: " + ", ".join(sorted(unknown)))
+    return {**data, "mutants": [m for m in data["mutants"] if not only or m["id"] in only]}
+
+
+def merge(list_path, out_paths, before=False, ids=""):
     data = read_list(list_path)
     index = {m["id"]: m for m in data["mutants"]}
+    only = {m["id"] for m in select(data, ids)["mutants"]}
+    section = "before" if before else "runs"
     for out_path in out_paths:
         summary = json.loads(Path(out_path).read_text(encoding="utf-8"))
         machine = summary["machine"]
         for record in summary["results"]:
+            if record["id"] not in only:
+                continue
             kept = {k: v for k, v in record.items() if k not in ("detail", "id")}
             kept["environment"] = {
                 k: summary["environment"][k] for k in ("os", "rustc", "head")
@@ -322,7 +340,7 @@ def merge(list_path, out_paths):
                 and all(b["green"] for b in summary["baseline_before"].values())
                 and all(b["green"] for b in summary["baseline_after"].values())
             )
-            index[record["id"]].setdefault("runs", {})[machine] = kept
+            index[record["id"]].setdefault(section, {})[machine] = kept
     write(list_path, data)
 
 
@@ -387,6 +405,23 @@ def verify(root, data, minimum):
                 problems.append("an equivalence needs pinned_by and a pin_mutant with expect")
             if str(equivalent.get("review", "pending")).strip().lower() in ("", "pending"):
                 pending = "equivalence awaits independent review"
+        gap, measured = mutant.get("gap"), 0
+        if gap:
+            # The tree before the lane's tests must not kill it: that is what makes the gap measured.
+            for machine, run_ in sorted(mutant.get("before", {}).items()):
+                if run_.get("status") != "survived":
+                    problems.append(f"{machine}: not a gap on {gap} ({run_.get('status')})")
+                elif (
+                    run_.get("anchor_matches") == 1
+                    and run_.get("compiled") is True
+                    and run_.get("restored_identically") is True
+                    and run_.get("baseline_green") is True
+                ):
+                    measured += 1
+                else:
+                    problems.append(f"{machine}: the run on {gap} lacks evidence")
+            if not measured:
+                problems.append(f"the gap on {gap} is not measured")
         if problems:
             state = "OPEN"
         elif stale and not good:
@@ -396,7 +431,10 @@ def verify(root, data, minimum):
         else:
             state = "ok"
         counts["accepted" if state == "ok" else ("stale" if state == "STALE" else "open")] += 1
-        detail = "; ".join(problems + ([pending] if pending else []) + ([f"stale on {', '.join(stale)}"] if stale else []))
+        notes = problems + ([pending] if pending else []) + ([f"stale on {', '.join(stale)}"] if stale else [])
+        if gap and measured:
+            notes.append(f"survives on {gap}: {measured} run(s)")
+        detail = "; ".join(notes)
         print(f"{mutant['id']}: {state} ({good} valid run(s){'; ' + detail if detail else ''})")
     print(f"{counts['accepted']} accepted, {counts['stale']} stale, {counts['open']} open of {len(data['mutants'])}")
     return counts["stale"] == 0 and counts["open"] == 0
@@ -409,6 +447,7 @@ def main():
     sub = parser.add_subparsers(dest="mode", required=True)
     one = sub.add_parser("check", parents=[common])
     one.add_argument("list")
+    one.add_argument("--ids", default="")
     two = sub.add_parser("run", parents=[common])
     two.add_argument("list")
     two.add_argument("out")
@@ -419,6 +458,8 @@ def main():
     three = sub.add_parser("merge")
     three.add_argument("list")
     three.add_argument("out", nargs="+")
+    three.add_argument("--before", action="store_true", help="keep the runs as the state before the lane (the gap)")
+    three.add_argument("--ids", default="", help="keep only these mutants of the runs")
     four = sub.add_parser("verify", parents=[common])
     four.add_argument("list")
     four.add_argument("--min-machines", type=int, default=1)
@@ -429,20 +470,19 @@ def main():
     args = parser.parse_args()
     os.environ.setdefault("CARGO_INCREMENTAL", "0")
     if args.mode == "merge":
-        merge(args.list, args.out)
+        merge(args.list, args.out, args.before, args.ids)
         return 0
     root = Path(args.root).resolve()
     data = read_list(args.list)
     if args.mode == "finish":
         return 0 if finish(root, data, args.out, args.timeout) else 1
-    if args.mode == "check":
-        return 0 if check(root, data) else 1
     if args.mode == "verify":
         return 0 if verify(root, data, args.min_machines) else 1
-    if not check(root, data):
-        return 1
-    only = set(filter(None, args.ids.split(",")))
-    return 0 if run(root, data, args.out, args.machine, only, args.timeout, args.resume) else 1
+    chosen = select(data, args.ids)
+    anchored = check(root, chosen)
+    if args.mode == "check" or not anchored:
+        return 0 if anchored else 1
+    return 0 if run(root, chosen, args.out, args.machine, set(), args.timeout, args.resume) else 1
 
 
 if __name__ == "__main__":

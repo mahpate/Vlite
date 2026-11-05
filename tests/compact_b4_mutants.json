@@ -31,6 +31,7 @@
  "mutants": [
   {
    "id": "x-rec-vector-error-swallowed",
+   "gap": "S0 (8e63e049)",
    "origin": "B4 report 5.2 survivor 1",
    "desc": "effective_vector turns a base-row read error into an absent row",
    "file": "src/records.rs",
@@ -74,6 +75,7 @@
   },
   {
    "id": "x-seam-frame-kind-check-removed-body",
+   "gap": "S0 (8e63e049)",
    "origin": "B4 report 5.2 survivor 2",
    "desc": "the bounded body read no longer refuses a frame whose recorded kind changed",
    "file": "src/compact/source.rs",
@@ -118,6 +120,7 @@
   },
   {
    "id": "x-seam-frame-kind-check-removed-decode",
+   "gap": "S0 (8e63e049)",
    "origin": "B4 report 5.2 survivor 2",
    "desc": "record-cell materialization no longer refuses a frame whose recorded kind changed",
    "file": "src/compact/source.rs",
@@ -207,6 +210,7 @@
   },
   {
    "id": "x-health-gate-inert",
+   "gap": "S0 (8e63e049)",
    "origin": "pin for x-settings-health-removed",
    "desc": "ensure_healthy ignores the poisoned flag, so no gate of the handle refuses a poisoned handle",
    "file": "src/lib.rs",
@@ -219,6 +223,7 @@
   },
   {
    "id": "x-text-break-on-unavailable-removed",
+   "gap": "S0 (8e63e049)",
    "origin": "B4 report 5.2 survivor 4",
    "desc": "the text index rebuild keeps reading rows after a posting limit made the index unavailable",
    "file": "src/text_index.rs",
@@ -262,11 +267,12 @@
   },
   {
    "id": "pb-settings-validate-removed",
+   "gap": "v0.7.0 (02ef3e5f)",
    "origin": "lane B 250a98bc, claimed (1 of 8)",
    "desc": "the compact settings arm does not validate the settings",
    "file": "src/lib.rs",
-   "old": "self.ensure_healthy()?;\n            validate_settings(&settings)?;\n            if self.read_only {",
-   "new": "self.ensure_healthy()?;\n            if self.read_only {",
+   "old": "self.ensure_healthy()?;\n            validate_settings(&settings)?;",
+   "new": "self.ensure_healthy()?;",
    "cmd": "test --locked --offline --lib -- compact::source::seam_tests records::effective_rows_tests metadata_index::tests::compact text_index::tests::compact rerank::",
    "expect": [
     "compact::source::seam_tests::compact_read_only_settings_preserve_error_precedence",
@@ -275,6 +281,7 @@
   },
   {
    "id": "pb-collection-text-assign-dropped",
+   "gap": "v0.7.0 (02ef3e5f)",
    "origin": "lane B 250a98bc, deferred (1 of 10)",
    "desc": "Collection::rebuild_derived discards the rebuilt text index",
    "file": "src/collection.rs",
@@ -287,6 +294,7 @@
   },
   {
    "id": "pb-meta-overlay-rows-only",
+   "gap": "v0.7.0 (02ef3e5f)",
    "origin": "lane B 250a98bc, deferred (2 of 10)",
    "desc": "the metadata index rebuild indexes only the rows that have an overlay entry",
    "file": "src/metadata_index.rs",
@@ -299,6 +307,7 @@
   },
   {
    "id": "pb-text-overlay-rows-only",
+   "gap": "v0.7.0 (02ef3e5f)",
    "origin": "lane B 250a98bc, deferred (3 of 10)",
    "desc": "the text index rebuild indexes only the rows that have an overlay entry",
    "file": "src/text_index.rs",
@@ -311,6 +320,7 @@
   },
   {
    "id": "pb-rerank-batch-bound-inclusive",
+   "gap": "v0.7.0 (02ef3e5f)",
    "origin": "lane B 250a98bc, deferred (4 of 10)",
    "desc": "a batch of exactly MAX_BATCH_OPERATIONS hits is refused",
    "file": "src/rerank.rs",
@@ -323,6 +333,7 @@
   },
   {
    "id": "pb-rerank-clock-max",
+   "gap": "v0.7.0 (02ef3e5f)",
    "origin": "lane B 250a98bc, deferred (5 of 10)",
    "desc": "rerank samples the largest possible clock, so every deadline has passed",
    "file": "src/rerank.rs",
@@ -335,6 +346,7 @@
   },
   {
    "id": "pb-rerank-distance-dropped",
+   "gap": "v0.7.0 (02ef3e5f)",
    "origin": "lane B 250a98bc, deferred (6 of 10)",
    "desc": "rerank candidates lose the incoming hit distance",
    "file": "src/rerank.rs",
@@ -347,6 +359,7 @@
   },
   {
    "id": "pb-rerank-health-check-removed",
+   "gap": "v0.7.0 (02ef3e5f)",
    "origin": "lane B 250a98bc, deferred (7 of 10)",
    "desc": "a poisoned handle is still reranked",
    "file": "src/rerank.rs",
@@ -359,6 +372,7 @@
   },
   {
    "id": "pb-settings-frame-wrong-collection",
+   "gap": "v0.7.0 (02ef3e5f)",
    "origin": "lane B 250a98bc, deferred (8 of 10)",
    "desc": "the settings frame is written for collection 0",
    "file": "src/lib.rs",
@@ -371,6 +385,7 @@
   },
   {
    "id": "pb-settings-metadata-assign-dropped",
+   "gap": "v0.7.0 (02ef3e5f)",
    "origin": "lane B 250a98bc, deferred (9 of 10)",
    "desc": "the settings arm discards the rebuilt metadata index",
    "file": "src/lib.rs",
@@ -384,6 +399,7 @@
   },
   {
    "id": "pb-text-limit-reset",
+   "gap": "v0.7.0 (02ef3e5f)",
    "origin": "lane B 250a98bc, deferred (10 of 10)",
    "desc": "the text index rebuild resets the posting limit to its default",
    "file": "src/text_index.rs",
@@ -459,6 +475,7 @@
   },
   {
    "id": "b4-settings-persisted-false",
+   "gap": "before S1c (f018a0b7)",
    "origin": "lane B killed set (pb-settings-persisted-false)",
    "desc": "the settings arm records the settings as not persisted",
    "file": "src/lib.rs",
@@ -480,6 +497,7 @@
   },
   {
    "id": "b4-settings-reports-memory-only",
+   "gap": "before S1c (f018a0b7)",
    "origin": "B4 neighbor: the returned persistence",
    "desc": "the settings arm reports MemoryOnly although it committed a frame",
    "file": "src/lib.rs",
@@ -645,6 +663,7 @@
   },
   {
    "id": "b4-rerank-limit-plus-one",
+   "gap": "before S1c (f018a0b7)",
    "origin": "B4 consumer: rerank_effective",
    "desc": "rerank asks the provider for one hit more than the caller's limit",
    "file": "src/rerank.rs",
