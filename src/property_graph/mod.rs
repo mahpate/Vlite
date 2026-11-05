@@ -753,6 +753,31 @@ impl Database {
         })
     }
 
+    #[cfg(test)]
+    pub(crate) fn compact_graph_for_test(
+        &self,
+        graph_name: &str,
+        collection: &str,
+    ) -> Result<GraphRef<'_>> {
+        let id = self.resolve(collection)?;
+        if !self.state(id).records.is_compact() {
+            return Err(Error::UnsupportedFeature(format::FLAG_COMPACT));
+        }
+        self.ensure_healthy()?;
+        let state = self.graph.as_ref().ok_or(Error::GraphsNotEnabled)?;
+        engine::model::validate_graph_name(graph_name).map_err(graph_error)?;
+        let graph = state
+            .graph_by_name(graph_name)
+            .ok_or(Error::GraphNotFound)?;
+        Ok(GraphRef {
+            db: self,
+            graph,
+            view_sequence: self.sequence,
+            now_ms: None,
+            as_of_ms: None,
+        })
+    }
+
     /// Write handle to a live graph. Read-only handles return `ReadOnly`.
     pub fn graph_mut(&mut self, name: &str) -> Result<GraphMut<'_>> {
         self.graphs()?;

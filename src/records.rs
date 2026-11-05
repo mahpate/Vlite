@@ -215,9 +215,16 @@ impl CollectionRecords {
         };
         use std::ops::Bound::{Excluded, Unbounded};
         let base_row = after.map_or(0, |after| {
-            (0..view.len())
-                .take_while(|&row| view.id(row).is_some_and(|id| id <= after))
-                .count()
+            let (mut low, mut high) = (0, view.len());
+            while low < high {
+                let middle = low + (high - low) / 2;
+                if view.id(middle).is_some_and(|id| id <= after) {
+                    low = middle + 1;
+                } else {
+                    high = middle;
+                }
+            }
+            low
         });
         let bounds = match after {
             Some(id) => (Excluded(id), Unbounded),
@@ -1738,11 +1745,44 @@ impl CollectionRef<'_> {
         conditions: &[Condition],
         metric: DistanceMetric,
     ) -> Result<Vec<SearchGroup>> {
+        #[cfg(test)]
+        let compact = self.db.state(self.id).records.is_compact();
+        #[cfg(test)]
+        if compact {
+            self.db.ensure_healthy()?;
+        } else {
+            self.db.ensure_resident_in(self.id)?;
+        }
+        #[cfg(not(test))]
         self.db.ensure_resident_in(self.id)?;
         if !valid_field(field) {
             return Err(Error::InvalidQuery("group field must be 1..=256 bytes"));
         }
         let state = self.db.state(self.id);
+        #[cfg(test)]
+        let now_ms = current_time_ms();
+        #[cfg(test)]
+        let hits = if compact {
+            self.db.search_in_at(
+                self.id,
+                query,
+                state.records.len(),
+                conditions,
+                metric,
+                now_ms,
+                &mut crate::SearchStats::default(),
+            )?
+        } else {
+            self.db.search_in(
+                self.id,
+                query,
+                state.records.len(),
+                conditions,
+                metric,
+                &mut crate::SearchStats::default(),
+            )?
+        };
+        #[cfg(not(test))]
         let hits = self.db.search_in(
             self.id,
             query,
@@ -1757,7 +1797,15 @@ impl CollectionRef<'_> {
         let mut output: Vec<SearchGroup> = Vec::new();
         let mut positions: HashMap<ValueKey, usize> = HashMap::new();
         for hit in hits {
-            let Some(value) = state.records.resident()?[&hit.id].metadata.get(field) else {
+            #[cfg(test)]
+            let record = if compact {
+                state.records.get_at(hit.id, now_ms, &state.expiries)?
+            } else {
+                state.records.resident()?.get(&hit.id)
+            };
+            #[cfg(not(test))]
+            let record = state.records.resident()?.get(&hit.id);
+            let Some(value) = record.and_then(|record| record.metadata.get(field)) else {
                 continue;
             };
             let key = value_key(value);
@@ -1876,6 +1924,15 @@ impl CollectionRef<'_> {
 
     /// Counts typed values for one metadata field under an optional AND filter.
     pub fn facets(&self, field: &str, conditions: &[Condition]) -> Result<Vec<FacetCount>> {
+        #[cfg(test)]
+        let compact = self.db.state(self.id).records.is_compact();
+        #[cfg(test)]
+        if compact {
+            self.db.ensure_healthy()?;
+        } else {
+            self.db.ensure_resident_in(self.id)?;
+        }
+        #[cfg(not(test))]
         self.db.ensure_resident_in(self.id)?;
         if !valid_field(field) {
             return Err(Error::InvalidQuery("facet field must be 1..=256 bytes"));
@@ -1884,6 +1941,48 @@ impl CollectionRef<'_> {
         let now_ms = current_time_ms();
         let state = self.db.state(self.id);
         let mut counts: HashMap<ValueKey, (MetadataValue, u64)> = HashMap::new();
+        #[cfg(test)]
+        if compact {
+            for row in state
+                .records
+                .compact_iter(None)
+                .expect("compact collection check above")
+            {
+                let (id, record) = row?;
+                if state
+                    .expiries
+                    .get(&id)
+                    .is_some_and(|expiry| *expiry <= now_ms)
+                    || !metadata::matches(&record.metadata, conditions)
+                {
+                    continue;
+                }
+                if let Some(value) = record.metadata.get(field) {
+                    let entry = counts
+                        .entry(value_key(value))
+                        .or_insert_with(|| (value.clone(), 0));
+                    entry.1 += 1;
+                }
+            }
+        } else {
+            for (&id, record) in state.records.resident()? {
+                if state
+                    .expiries
+                    .get(&id)
+                    .is_some_and(|expiry| *expiry <= now_ms)
+                    || !metadata::matches(&record.metadata, conditions)
+                {
+                    continue;
+                }
+                if let Some(value) = record.metadata.get(field) {
+                    let entry = counts
+                        .entry(value_key(value))
+                        .or_insert_with(|| (value.clone(), 0));
+                    entry.1 += 1;
+                }
+            }
+        }
+        #[cfg(not(test))]
         for (&id, record) in state.records.resident()? {
             if state
                 .expiries

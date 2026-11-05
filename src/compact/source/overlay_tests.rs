@@ -845,12 +845,12 @@ fn compact_browse_cursor_skips_tombstones_and_expiry() {
     let actual = candidate
         .collection("full")
         .unwrap()
-        .browse_at(Some(10), 1, 20)
+        .browse_at(Some(3), 1, 20)
         .unwrap();
     let expected = oracle
         .collection("full")
         .unwrap()
-        .browse_at(Some(10), 1, 20)
+        .browse_at(Some(3), 1, 20)
         .unwrap();
     assert_eq!(actual, expected);
     assert_eq!(
@@ -872,4 +872,450 @@ fn compact_poisoned_text_only_query_preserves_health_error() {
         query.execute(collection, &std::collections::BTreeMap::new()),
         Err(Error::Poisoned)
     ));
+}
+
+fn indexed_dispatch_fixture() -> (crate::Database, crate::Database) {
+    let image = crate::compact::catalog::tests::source_indexed_fixture(None);
+    let oracle = {
+        let _source = super::Activation::set(false);
+        crate::Database::open_from_bytes(image.clone(), None).unwrap()
+    };
+    let candidate = crate::Database::open_from_bytes(image, None).unwrap();
+    (candidate, oracle)
+}
+
+fn mutate_indexed_rows(db: &mut crate::Database, expiry: u64) {
+    let mut collection = db.collection_mut("indexed").unwrap();
+    collection
+        .put_with_metadata(
+            1,
+            &[1.0, 1.0],
+            b"green apple",
+            &Metadata::from([
+                ("tag".into(), MetadataValue::String("gamma".into())),
+                ("title".into(), MetadataValue::String("green apple".into())),
+            ]),
+        )
+        .unwrap();
+    collection.delete(2).unwrap();
+    collection
+        .put_with_expiry(
+            7,
+            &[1.0, 1.0],
+            b"red apple",
+            &Metadata::from([
+                ("tag".into(), MetadataValue::String("alpha".into())),
+                ("title".into(), MetadataValue::String("red apple".into())),
+            ]),
+            Some(expiry),
+        )
+        .unwrap();
+}
+
+#[test]
+fn compact_named_vector_visibility_matches_resident() {
+    let _gates = gates();
+    let (mut candidate, mut oracle, _) = compact_dispatch_fixture(false);
+    for db in [&mut candidate, &mut oracle] {
+        let collection_id = db.collection("full").unwrap().id();
+        {
+            let mut collection = db.collection_mut("full").unwrap();
+            collection.delete(10).unwrap();
+            collection
+                .put_with_expiry(
+                    3,
+                    &[2.0, 3.0],
+                    b"expired at boundary",
+                    &Metadata::new(),
+                    Some(20),
+                )
+                .unwrap();
+            collection
+                .put(7, &[4.0, 5.0], b"gap without named vector")
+                .unwrap();
+        }
+        // The named-vector store is independent; keep a vector cell while its primary expires.
+        db.state_mut(collection_id).vectors.records.insert(
+            3,
+            crate::vectors::RecordVectors {
+                dense: std::collections::BTreeMap::from([(
+                    "n".into(),
+                    vec![crate::vectors::VersionedVector {
+                        version: "v1".into(),
+                        vector: vec![0.3, -0.0],
+                    }],
+                )]),
+                sparse: std::collections::BTreeMap::new(),
+            },
+        );
+    }
+
+    let actual = candidate.collection("full").unwrap();
+    let expected = oracle.collection("full").unwrap();
+    assert_eq!(
+        actual
+            .search_named_at("n", None, &[0.3, -0.0], 10, 20)
+            .unwrap(),
+        expected
+            .search_named_at("n", None, &[0.3, -0.0], 10, 20)
+            .unwrap()
+    );
+    assert_eq!(
+        actual.record_vectors(10).unwrap(),
+        expected.record_vectors(10).unwrap()
+    );
+    assert_eq!(
+        actual.reembed_pending("n", 100).unwrap(),
+        expected.reembed_pending("n", 100).unwrap()
+    );
+}
+
+#[test]
+fn compact_hybrid_text_leg_matches_resident_after_overlay_resolution() {
+    let _gates = gates();
+    let (mut candidate, mut oracle) = indexed_dispatch_fixture();
+    let expiry = crate::current_time_ms().saturating_add(60_000);
+    mutate_indexed_rows(&mut candidate, expiry);
+    mutate_indexed_rows(&mut oracle, expiry);
+    let query = crate::hybrid::HybridQuery::new(None, "apple", 10);
+    assert_eq!(
+        candidate
+            .collection("indexed")
+            .unwrap()
+            .search_hybrid_at(&query, expiry)
+            .unwrap(),
+        oracle
+            .collection("indexed")
+            .unwrap()
+            .search_hybrid_at(&query, expiry)
+            .unwrap()
+    );
+}
+
+#[test]
+fn compact_grouped_search_and_facets_match_resident() {
+    let _gates = gates();
+    let (mut candidate, mut oracle) = indexed_dispatch_fixture();
+    let expiry = crate::current_time_ms();
+    mutate_indexed_rows(&mut candidate, expiry);
+    mutate_indexed_rows(&mut oracle, expiry);
+    let conditions = [];
+    assert_eq!(
+        candidate
+            .collection("indexed")
+            .unwrap()
+            .search_grouped(
+                &[1.0, 1.0],
+                10,
+                10,
+                "tag",
+                &conditions,
+                crate::DistanceMetric::SquaredL2
+            )
+            .unwrap(),
+        oracle
+            .collection("indexed")
+            .unwrap()
+            .search_grouped(
+                &[1.0, 1.0],
+                10,
+                10,
+                "tag",
+                &conditions,
+                crate::DistanceMetric::SquaredL2
+            )
+            .unwrap()
+    );
+    assert_eq!(
+        candidate
+            .collection("indexed")
+            .unwrap()
+            .facets("tag", &[])
+            .unwrap(),
+        oracle
+            .collection("indexed")
+            .unwrap()
+            .facets("tag", &[])
+            .unwrap()
+    );
+}
+
+#[test]
+fn compact_query_language_matches_resident_after_overlay_resolution() {
+    let _gates = gates();
+    let (mut candidate, mut oracle) = indexed_dispatch_fixture();
+    let expiry = crate::current_time_ms();
+    mutate_indexed_rows(&mut candidate, expiry);
+    mutate_indexed_rows(&mut oracle, expiry);
+    let query = crate::query_language::parse(
+        "SEARCH default NEAR $q TEXT \"apple\" WHERE tag EXISTS GROUP BY tag FACET BY tag ORDER BY tag LIMIT 10",
+    )
+    .unwrap();
+    let parameters = std::collections::BTreeMap::from([("q".into(), vec![1.0, 1.0])]);
+    let actual = query
+        .execute(candidate.collection("indexed").unwrap(), &parameters)
+        .unwrap();
+    let expected = query
+        .execute(oracle.collection("indexed").unwrap(), &parameters)
+        .unwrap();
+    assert_eq!(actual.hits, expected.hits);
+    assert_eq!(actual.groups, expected.groups);
+    assert_eq!(actual.facets, expected.facets);
+}
+
+#[test]
+fn compact_exact_search_candidate_and_stats_match_declared_index() {
+    let _gates = gates();
+    let (candidate, oracle) = indexed_dispatch_fixture();
+    let condition = [crate::Condition::Eq {
+        field: "tag".into(),
+        value: MetadataValue::String("alpha".into()),
+    }];
+    let actual = candidate
+        .collection("indexed")
+        .unwrap()
+        .search_with_stats(
+            &[1.0, 1.0],
+            10,
+            &condition,
+            crate::DistanceMetric::SquaredL2,
+        )
+        .unwrap();
+    let expected = oracle
+        .collection("indexed")
+        .unwrap()
+        .search_with_stats(
+            &[1.0, 1.0],
+            10,
+            &condition,
+            crate::DistanceMetric::SquaredL2,
+        )
+        .unwrap();
+    assert_eq!(actual, expected);
+    assert_eq!(actual.1.index_candidates, 1);
+}
+
+#[test]
+fn compact_exact_search_validation_and_health_match_resident() {
+    let _gates = gates();
+    let (mut candidate, mut oracle) = indexed_dispatch_fixture();
+    let condition = [crate::Condition::Eq {
+        field: String::new(),
+        value: MetadataValue::String("alpha".into()),
+    }];
+    let candidate_id = candidate.collection("indexed").unwrap().id();
+    let oracle_id = oracle.collection("indexed").unwrap().id();
+    for db in [&candidate, &oracle] {
+        let collection = db.collection("indexed").unwrap();
+        let wrong_dimension = collection.search_filtered_with_metric_at(
+            &[1.0],
+            10,
+            &[],
+            crate::DistanceMetric::SquaredL2,
+            0,
+        );
+        let invalid_filter = collection.search_filtered_with_metric_at(
+            &[1.0, 1.0],
+            10,
+            &condition,
+            crate::DistanceMetric::SquaredL2,
+            0,
+        );
+        let invalid_dimension_and_filter = collection.search_filtered_with_metric_at(
+            &[1.0],
+            10,
+            &condition,
+            crate::DistanceMetric::SquaredL2,
+            0,
+        );
+        assert!(matches!(
+            wrong_dimension,
+            Err(Error::DimensionMismatch { .. })
+        ));
+        assert!(matches!(invalid_filter, Err(Error::InvalidFilter(_))));
+        assert!(matches!(
+            invalid_dimension_and_filter,
+            Err(Error::DimensionMismatch { .. })
+        ));
+    }
+    candidate.poisoned = true;
+    oracle.poisoned = true;
+    for (db, id) in [(&candidate, candidate_id), (&oracle, oracle_id)] {
+        assert!(matches!(
+            crate::CollectionRef { db, id }.search_filtered_with_metric_at(
+                &[1.0, 1.0],
+                10,
+                &[],
+                crate::DistanceMetric::SquaredL2,
+                0
+            ),
+            Err(Error::Poisoned)
+        ));
+    }
+}
+
+#[test]
+fn compact_snapshot_search_preserves_validation_and_pinned_health() {
+    let _gates = gates();
+    let (mut candidate, mut oracle) = indexed_dispatch_fixture();
+    let actual = candidate
+        .collection("indexed")
+        .unwrap()
+        .read_snapshot()
+        .unwrap();
+    let expected = oracle
+        .collection("indexed")
+        .unwrap()
+        .read_snapshot()
+        .unwrap();
+    let invalid_filter = [crate::Condition::Eq {
+        field: String::new(),
+        value: MetadataValue::String("alpha".into()),
+    }];
+    assert!(matches!(
+        actual.search_filtered_with_metric_at(&[1.0], 10, &[], crate::DistanceMetric::SquaredL2, 0),
+        Err(Error::DimensionMismatch { .. })
+    ));
+    assert!(matches!(
+        actual.search_filtered_with_metric_at(
+            &[1.0, 1.0],
+            10,
+            &invalid_filter,
+            crate::DistanceMetric::SquaredL2,
+            0
+        ),
+        Err(Error::InvalidFilter(_))
+    ));
+    candidate.poisoned = true;
+    oracle.poisoned = true;
+    assert_eq!(
+        actual
+            .search_filtered_with_metric_at(
+                &[1.0, 1.0],
+                10,
+                &[],
+                crate::DistanceMetric::SquaredL2,
+                0
+            )
+            .unwrap(),
+        expected
+            .search_filtered_with_metric_at(
+                &[1.0, 1.0],
+                10,
+                &[],
+                crate::DistanceMetric::SquaredL2,
+                0
+            )
+            .unwrap()
+    );
+}
+
+#[test]
+fn compact_graph_retrieve_projects_effective_row_at_one_clock() {
+    let _gates = gates();
+    let (mut candidate, mut oracle, _) = compact_dispatch_fixture(false);
+    let expires_at = crate::current_time_ms().saturating_sub(1);
+    assert!(matches!(
+        candidate.graph("g"),
+        Err(crate::Error::UnsupportedFeature(
+            crate::format::FLAG_COMPACT
+        ))
+    ));
+    for db in [&mut candidate, &mut oracle] {
+        let mut collection = db.collection_mut("full").unwrap();
+        collection
+            .put_with_metadata(
+                0,
+                &[0.1, -0.0],
+                b"replacement evidence",
+                &Metadata::from([("marker".into(), MetadataValue::String("overlay".into()))]),
+            )
+            .unwrap();
+        collection
+            .put_with_expiry(
+                7,
+                &[0.1, -0.0],
+                b"temporary pivot",
+                &Metadata::from([("marker".into(), MetadataValue::String("temporary".into()))]),
+                Some(expires_at),
+            )
+            .unwrap();
+    }
+
+    let mut pivot = crate::property_graph::Pivot::new("full", 10);
+    pivot.vector = Some(vec![0.1, -0.0]);
+    let request = crate::property_graph::Retrieve {
+        pivot,
+        expansion: crate::property_graph::Expansion::default(),
+        evidence: crate::property_graph::EvidenceSpec {
+            collections: vec!["full".into()],
+            fields: crate::property_graph::PropertyProjection::All,
+            ..Default::default()
+        },
+    };
+    for now_ms in [expires_at - 1, expires_at] {
+        let actual = candidate
+            .compact_graph_for_test("g", "full")
+            .unwrap()
+            .with_clock(now_ms)
+            .retrieve(&request, &crate::property_graph::ReadOptions::default())
+            .unwrap();
+        let expected = oracle
+            .graph("g")
+            .unwrap()
+            .with_clock(now_ms)
+            .retrieve(&request, &crate::property_graph::ReadOptions::default())
+            .unwrap();
+        let mut actual = actual;
+        let mut expected = expected;
+        actual.stats.pivot_ms = 0;
+        actual.stats.expand_ms = 0;
+        actual.stats.expansion.elapsed_ms = 0;
+        expected.stats.pivot_ms = 0;
+        expected.stats.expand_ms = 0;
+        expected.stats.expansion.elapsed_ms = 0;
+        assert_eq!(actual, expected);
+        assert_eq!(actual.evidence.len(), 1);
+        assert_eq!(actual.evidence[0].payload_excerpt, b"replacement evidence");
+        assert_eq!(
+            actual.evidence[0].metadata.get("marker"),
+            Some(&MetadataValue::String("overlay".into()))
+        );
+    }
+
+    let mut expiring_pivot = crate::property_graph::Pivot::new("full", 10);
+    expiring_pivot.vector = Some(vec![0.1, -0.0]);
+    expiring_pivot.filter = vec![crate::Condition::Eq {
+        field: "marker".into(),
+        value: MetadataValue::String("temporary".into()),
+    }];
+    let request = crate::property_graph::Retrieve {
+        pivot: expiring_pivot,
+        expansion: crate::property_graph::Expansion::default(),
+        evidence: crate::property_graph::EvidenceSpec::default(),
+    };
+    for now_ms in [expires_at - 1, expires_at] {
+        let actual = candidate
+            .compact_graph_for_test("g", "full")
+            .unwrap()
+            .with_clock(now_ms)
+            .retrieve(&request, &crate::property_graph::ReadOptions::default())
+            .unwrap();
+        let expected = oracle
+            .graph("g")
+            .unwrap()
+            .with_clock(now_ms)
+            .retrieve(&request, &crate::property_graph::ReadOptions::default())
+            .unwrap();
+        let mut actual = actual;
+        let mut expected = expected;
+        actual.stats.pivot_ms = 0;
+        actual.stats.expand_ms = 0;
+        actual.stats.expansion.elapsed_ms = 0;
+        expected.stats.pivot_ms = 0;
+        expected.stats.expand_ms = 0;
+        expected.stats.expansion.elapsed_ms = 0;
+        assert_eq!(actual, expected);
+        assert_eq!(actual.unmapped_pivots.count, u64::from(now_ms < expires_at));
+    }
 }

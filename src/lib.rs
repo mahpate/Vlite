@@ -3844,8 +3844,21 @@ impl Database {
             validate_vector(state.dimensions, query)?;
             metadata::validate_filter(conditions)?;
             let query_norm = validate_metric_query(query, metric)?;
+            let cap = state.records.len() / 2;
+            let lookup = state.metadata_indexes.lookup(conditions, cap);
+            let candidates = lookup.and_then(|lookup| lookup.ids);
+            if let Some(ids) = &candidates {
+                stats.index_candidates = stats.index_candidates.saturating_add(ids.len() as u64);
+            }
             return state.exact_search_candidates(
-                query, query_norm, k, conditions, metric, None, now_ms, stats,
+                query,
+                query_norm,
+                k,
+                conditions,
+                metric,
+                candidates.as_ref(),
+                now_ms,
+                stats,
             );
         }
         self.ensure_resident_in(collection)?;
