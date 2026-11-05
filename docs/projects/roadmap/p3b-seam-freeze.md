@@ -126,7 +126,7 @@ These are true at `v0.7.0`. They are not statements to preserve; the lane named 
 | `hybrid.rs::search_hybrid`, `query_language.rs::execute`, `quality.rs::ann_quality`, `lib.rs::search_ready_with_options_in` | The resident vector leg samples its own clock, and the hybrid text leg (`hybrid.rs:197`) and query-language execution (`query_language.rs:422-452`) call `get` per candidate, so each candidate is judged at its own wall-clock sample and the legs can disagree at a deadline. `ann_quality` samples once per sampled query (`quality.rs:227`) and `search_ready_with_options_in` once per call (`lib.rs:3720`). All four read the resident map, so they refuse compact records today. | A4 (`search_hybrid_at` and the query-language edits in `02062058`); the ANN lane for the other two |
 | `records.rs::effective_ids` | Builds a full ID set and vector. The 4 MiB workspace bounds vector scratch only, not ID memory. | slice 3 adds `ordered_ids`; `effective_ids` stays until its last caller moves |
 | Exact scan, browse, snapshot search | The compact path walks `compact_iter`, materializes a cell per visited row and reads deadlines from the resident map (CLK-6). | E4 |
-| Expiry and revision readers | Exact scans, browse and `ReadSnapshot` read the resident expiry map, and `get_at`, `effective_visible` (and so `rerank_effective`) read the view and overlay columns (CLK-6). `revision_in`, which serves `revision()`, the server and graph retrieve, answers from the overlay when it holds an entry for the ID and from the resident map otherwise, and a conditional write (`put_with_expiry_in`, `put_in`, `delete_in`, `update_metadata_in`) checks the resident map alone.† A lane may move a reader to the other representation if it keeps one clock per operation and the agreement of the two. | E4, L5 |
+| Expiry and revision readers | Exact scans, browse and `ReadSnapshot` read the resident expiry map, and `get_at`, `effective_visible` (and so `rerank_effective`) read the view and overlay columns (CLK-6). `revision_in`, which serves `revision()`, the server and graph retrieve, answers from the overlay when it holds an entry for the ID and from the resident map otherwise, and a conditional write (`put_with_expiry_in`, `put_in`, `delete_in`, `update_metadata_in` and `apply_reembed_batch_checked`) checks the resident map alone.† A lane may move a reader to the other representation if it keeps one clock per operation and the agreement of the two. | E4, L5 |
 | `Database::open_backed` | The loader decodes every record into a resident map before the generation is installed. | L5 |
 | `CollectionRecords::len`, `first_id` | `len` walks the overlay on every call, and `first_id` scans the base from row 0 past tombstoned rows and then the overlay. | not scheduled |
 | Refused reads are not atomic | `read_vector` counts a miss, advances the logical clock and evicts to make room before it reads the frame, so a read that then fails can leave a block evicted. A read refused by the scratch budget keeps the previous plaintext, and an encrypted read that fails after authentication (an extent or decode error, or the shape refusal on a hit) keeps that frame's plaintext until the next read. A consumer must not rely on a rollback. | E4, L5 |
@@ -319,8 +319,7 @@ Replays, all with `cargo test --locked --offline --lib -- compact::source record
 - **Final**, `5c982e99` (`v0.7.0` plus the R0 tests, 94 selected). The lane's machine replayed 34 mutants
   there, in three shards, each with the selector green before its first mutant and again after its last: the 28 gaps,
   the three statement mutants (`R0-EX-11`, `R0-ID-11` and `R0-AU-18`) and three identity mutants that an existing test
-  kills on `v0.7.0` (`R0-ID-01` to `R0-ID-03`), which measure `freeze_cache_entries_belong_to_one_collection_of_one_generation`,
-  the one freeze test that kills no gap. All 34 are killed. Five first attempts (`R0-AC-04`, `R0-AU-09`,
+  kills on `v0.7.0` (`R0-ID-01` to `R0-ID-03`). All 34 are killed. Five first attempts (`R0-AC-04`, `R0-AU-09`,
   `R0-AU-12`, `R0-BU-08` and `R0-BU-10`) ended in a toolchain or linker failure and are not kills; their reruns are the
   ones counted. No replay of a final tree ran on a separate machine, because none was available in time, so that
   replay is open (section 8, OPEN-71-02). The other 57 mutants, which an existing test kills on `v0.7.0`,
@@ -382,15 +381,19 @@ kills it. The states differ in how they arise, which the `Reach` column records:
   `0x0101` (IDN-5). A test kills these only by editing the in-memory directory that a load derives, as lane B's own seam
   tests do.
 
-Of the 28 gaps, 10 are `api`, 1 is `mapped`, 1 is `input`, 4 are `tamper` and 12 are `guard`. By the approved definition of an effective mutant, all 28 count. On the strictest reading, which
-counts only the 12 that need neither stored bytes nor the directory to be edited, the minimum of 12 is met as
-well. A reader who counts over the states the product can produce may call the `tamper` and `guard` mutants
-equivalent; they are kept because the guards are the error contract of section 3. `R0-BU-09` and `R0-BU-10` are
+Of the 28 gaps, 10 are `api`, 1 is `mapped`, 1 is `input`, 4 are `tamper` and 12 are `guard`. By the approved definition of an effective mutant, all 28 count. Two stricter readings are
+possible. Counting only the 12 that need neither stored bytes nor the directory to be edited (`api`, `mapped` and
+`input`) meets the minimum of 12 as well. Counting only the 10 `api` mutants, the ones that arise from states the
+product can produce at `v0.7.0`, does not. A reader who counts over those states may call the `tamper` and `guard`
+mutants equivalent; they are kept because the guards are the error contract of section 3. `R0-BU-09` and `R0-BU-10` are
 reachable only for a plain frame whose body lies between `MAX_BODY` and `MAX_BODY + SEAL_OVERHEAD` bytes, which
 `freeze_frame_size_bound_is_exact` builds by hand.
 
 **What the campaign does and does not measure.** All 19 freeze tests fail at least one of the replayed mutants, so each new test has a measured kill, and existing tests fail
-many of the same mutants, so the freeze tests are not the only pins of the seam. It applies no mutant to CLK-7 (section 3.1 marks it as
+many of the same mutants, so the freeze tests are not the only pins of the seam. Sixteen of the 19 kill a gap. The other
+three kill the mutants of their own statements: `freeze_source_never_reads_the_wall_clock` kills `R0-EX-11`,
+`freeze_named_collections_keep_one_overlay_each` kills `R0-ID-11`, and
+`freeze_cache_entries_belong_to_one_collection_of_one_generation` kills `R0-ID-01` and `R0-ID-02`. It applies no mutant to CLK-7 (section 3.1 marks it as
 not pinned), PRE-4, IDN-3 or CON-1, whose tests existed at `v0.7.0`: a lane that changes one of those four statements
 adds its mutant first. `R0-EX-11` (CLK-1), `R0-ID-11` (PRE-6) and `R0-AU-18` (ERR-7) were added after the reviews,
 because the tests of those statements had no mutant. The campaign shows that the tests pin the statements in section 3,
@@ -411,9 +414,9 @@ Decided on 2026-11-05 by the coordinator under the owner's delegation, as recomm
   coordinator to confirm. First, the restored-green run is recorded once per replay (before the first mutant and after the
   last) and not after every mutant, because a byte-identical restore, which the ledger records per mutant, returns the tree
   whose baseline run was green, and a run per mutant would double the number of builds. Second, the independent replay
-  exists for the baseline on `v0.7.0` (87 of the 91 mutants of slice 2 ran on three other machines as well as on the
-  lane's); every replay of a final tree, in slice 2 and in slice 3, ran on the lane's machine only, because no other machine
-  was available in time, and an independent replay of the final trees is open. An equivalence claim
+  exists for the baseline on `v0.7.0` (87 of the 91 mutants of slice 2 ran on three other machines, and 86 of those also on
+  the lane's); every replay of a final tree, in slice 2 and in slice 3, ran on the lane's machine only, because no other
+  machine was available in time, and an independent replay of the final trees is open. An equivalence claim
   (`pa-graph-evidence-wall-clock`) additionally needs an independent review and a pinning test wherever one can be
   written.
 - **OPEN-71-03, seam freeze: approved.** Section 3 is frozen, section 4 is the approved inventory of limits that need not
