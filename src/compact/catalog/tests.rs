@@ -33,6 +33,7 @@ use std::rc::Rc;
 mod canonical;
 mod convert;
 mod goldens;
+pub(crate) mod kv_windows;
 mod limits;
 mod parity;
 mod payload;
@@ -175,6 +176,16 @@ pub(crate) fn source_kv_fixture() -> Vec<u8> {
         .insert(displaced_slot, (*displaced).clone());
     let revision = state.revisions.remove(&slot).expect("KV revision exists");
     state.revisions.insert(displaced_slot, revision);
+    let before = payload::snapshot(&mut db, None);
+    image_of(&before)
+}
+
+/// An image of a store that `build` filled: whatever it committed is part of the image, nothing else is.
+pub(crate) fn source_fixture_with(build: impl FnOnce(&mut Database)) -> Vec<u8> {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("source-with");
+    let mut db = create_store(Backing::Memory, &path, None);
+    build(&mut db);
     let before = payload::snapshot(&mut db, None);
     image_of(&before)
 }

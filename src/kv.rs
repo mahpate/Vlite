@@ -668,6 +668,37 @@ fn decode(payload: &[u8]) -> Option<(&str, &str, &[u8])> {
     ))
 }
 
+/// A probe as plain values for the tests of other modules: `found` as `(slot, revision, due)`, `free`, and the
+/// compare-and-set token that `Expected::check` would see.
+#[cfg(test)]
+pub(crate) type ProbeSeen = (
+    Option<(u64, u64, bool)>,
+    Option<(u64, Option<u64>)>,
+    Option<u64>,
+);
+
+#[cfg(test)]
+pub(crate) fn probe_for_test(
+    db: &Database,
+    collection: u16,
+    namespace: &str,
+    key: &str,
+    now_ms: u64,
+) -> Result<ProbeSeen> {
+    let probe = probe(db, collection, namespace, key, now_ms)?;
+    let live_version = probe.live_version();
+    let found = probe
+        .found
+        .map(|found| (found.slot, found.revision, found.expired));
+    Ok((found, probe.free, live_version))
+}
+
+/// A view without the checks of `Database::kv_view`, for the tests that poison the handle behind it.
+#[cfg(test)]
+pub(crate) fn view_for_test(db: &Database, id: u16) -> KvView<'_> {
+    KvView { db, id }
+}
+
 #[cfg(test)]
 mod bounded_tests;
 
