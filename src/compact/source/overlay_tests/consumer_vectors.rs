@@ -524,6 +524,58 @@ fn compact_reembed_pending_validates_in_the_resident_order() {
     }
 }
 
+/// The IDs of the base rows of `collection` whose record cell has been decoded.
+fn decoded_rows(db: &Database, collection: &str) -> Vec<u64> {
+    let id = db.collection(collection).unwrap().id();
+    let CollectionRecords::Compact { view, .. } = &db.state(id).records else {
+        panic!("compact source required")
+    };
+    let source = view.source().unwrap();
+    (0..view.len())
+        .filter(|&row| source.cells[row].record.get().is_some())
+        .filter_map(|row| view.id(row))
+        .collect()
+}
+
+#[test]
+fn compact_reembed_pending_decodes_no_row_beyond_its_limit() {
+    let _gates = gates();
+    // The fixture's rows without a v2, in ID order (see the test above).
+    let pending = [3, 10, 20, u64::MAX];
+    for name in COLLECTIONS {
+        for limit in 0..=3 {
+            // One fresh candidate per limit: a decoded cell stays decoded.
+            let (candidate, oracle, _) = compact_dispatch_fixture(false);
+            let rows = candidate
+                .collection(name)
+                .unwrap()
+                .reembed_pending("n", limit)
+                .unwrap();
+            assert_eq!(
+                rows.iter().map(|(id, _)| *id).collect::<Vec<_>>(),
+                pending[..limit],
+                "{name} limit {limit}"
+            );
+            // The scan has to read every base row up to the last one it returns, and no row after it.
+            let oracle_id = oracle.collection(name).unwrap().id();
+            let expected = oracle
+                .state(oracle_id)
+                .records
+                .resident()
+                .unwrap()
+                .keys()
+                .copied()
+                .filter(|&id| limit > 0 && id <= pending[limit - 1])
+                .collect::<Vec<_>>();
+            assert_eq!(
+                decoded_rows(&candidate, name),
+                expected,
+                "{name} limit {limit}: the rows the scan decoded"
+            );
+        }
+    }
+}
+
 /// Poisons the lock of the record cell of one base row, as
 /// `compact_named_vector_search_propagates_primary_read_error` does. The row must not have been read yet: a cell that
 /// is already materialized is served without taking the lock.
