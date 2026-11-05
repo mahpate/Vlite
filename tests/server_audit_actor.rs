@@ -600,6 +600,72 @@ async fn collection_events_carry_the_shared_actor() {
 }
 
 #[tokio::test]
+async fn denied_requests_record_the_actor_beside_the_credential_id() {
+    let directory = tempfile::tempdir().unwrap();
+    let app = start(directory.path(), true);
+    let viewer = create_account(&app, &admin(), "vera", "viewer").await;
+    let (credential_id, credential_token) =
+        create_credential(&app, json!(["default"]), json!(["read"])).await;
+    let vera = sign_in(&app, "vera").await;
+
+    // Neither holds `write`, so the request is refused before any handler
+    // runs. A signed-in viewer's grant id is `user:<account id>`.
+    let callers = [
+        (
+            "read-only credential",
+            Caller::Bearer(credential_token.clone()),
+            credential_id.clone(),
+        ),
+        (
+            "signed-in viewer",
+            Caller::Session(vera.clone()),
+            format!("user:{viewer}"),
+        ),
+    ];
+    let mut denied = Vec::new();
+    for (label, caller, actor) in &callers {
+        let reply = kv_put(&app, caller, "default").await;
+        let status = (reply.status.as_u16(), reply.code());
+        assert_eq!(status, (403, "forbidden_scope"), "{label}: {}", reply.body);
+        denied.push((label, actor, reply));
+    }
+    // The bootstrap token is never denied.
+    assert_eq!(
+        kv_put(&app, &admin(), "default").await.status,
+        StatusCode::OK
+    );
+
+    let log = audit_log(directory.path());
+    let events = events(&log);
+    for (label, actor, reply) in &denied {
+        let event = event_of(&events, "credential_denied", &reply.request_id);
+        assert_eq!(event["credential_id"], actor.as_str(), "{label}");
+        assert_eq!(event["actor"], actor.as_str(), "{label}");
+        assert_eq!(event["method"], "PUT", "{label}");
+        assert_eq!(event["route"], "/v1/collections/{collection}/kv/entry");
+        assert_eq!(
+            sorted_keys(event),
+            [
+                "actor",
+                "credential_id",
+                "event",
+                "method",
+                "request_id",
+                "route",
+                "unix_ms"
+            ],
+            "{label}"
+        );
+    }
+    // Only the bootstrap token's put reached the key-value audit.
+    assert_eq!(kv_events(&events).len(), 1);
+
+    let mut secrets = renderings(&vera);
+    secrets.push(credential_token);
+    assert_no_secrets(&log, &secrets);
+}
+
+#[tokio::test]
 async fn account_events_use_the_shared_encoding() {
     let directory = tempfile::tempdir().unwrap();
     let app = start(directory.path(), true);
@@ -783,7 +849,7 @@ mod grpc {
     }
 
     #[tokio::test]
-    async fn grpc_collection_events_record_the_actor() {
+    async fn grpc_collection_and_denial_events_record_the_actor() {
         let directory = tempfile::tempdir().unwrap();
         let service = Service::new(database());
         let app =
@@ -792,9 +858,12 @@ mod grpc {
         let session = sign_in(&app, "root.a").await;
         let (wide_id, wide_token) =
             create_credential(&app, json!(["*"]), json!(["collections"])).await;
+        let (read_id, read_token) =
+            create_credential(&app, json!(["default"]), json!(["read"])).await;
 
         let (channel, _stop) = connect(service).await;
-        let mut collections = VLiteClient::new(channel);
+        let mut collections = VLiteClient::new(channel.clone());
+        let mut client = KvClient::new(channel);
 
         // The bootstrap token, once alone and once beside a live session
         // cookie, and a wildcard credential each create and drop a collection.
@@ -815,6 +884,13 @@ mod grpc {
             let dropped = with_credentials(removal, Some(token), cookie);
             collections.drop_collection(dropped).await.unwrap();
         }
+        // A credential without `write` is refused, and the refusal names it.
+        let denied = client
+            .put_kv_entry(put(Some(&read_token), None))
+            .await
+            .unwrap_err();
+        assert_eq!(denied.code(), Code::PermissionDenied);
+        let denied_id = denied.metadata().get("x-request-id").unwrap();
 
         let log = audit_log(directory.path());
         let events = events(&log);
@@ -824,8 +900,13 @@ mod grpc {
                 assert_eq!(found["actor"], actor, "{event} {name}");
             }
         }
+        let event = event_of(&events, "credential_denied", denied_id.to_str().unwrap());
+        assert_eq!(event["credential_id"], read_id.as_str());
+        assert_eq!(event["actor"], read_id.as_str());
+        assert_eq!(event["method"], "grpc");
+        assert_eq!(event["route"], "grpc:/vlite.v1.Kv/PutKvEntry");
         let mut secrets = renderings(&session);
-        secrets.push(wide_token);
+        secrets.extend([wide_token, read_token]);
         assert_no_secrets(&log, &secrets);
     }
 }

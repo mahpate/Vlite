@@ -1311,7 +1311,7 @@ fn record_request(service: &Service, record: &RequestRecord<'_>) {
     if status == StatusCode::UNAUTHORIZED {
         service.metrics.unauthorized.fetch_add(1, Ordering::Relaxed);
     }
-    if let (Some(admin::Role::Scoped(grant)), Some("forbidden_scope")) = (role, code) {
+    if let (Some(role @ admin::Role::Scoped(grant)), Some("forbidden_scope")) = (role, code) {
         service
             .metrics
             .credential_denials
@@ -1321,6 +1321,7 @@ fn record_request(service: &Service, record: &RequestRecord<'_>) {
             && log
                 .append(
                     json!({"event":"credential_denied","credential_id":grant.id,
+                    "actor":audit::actor(role, None),
                     "method":method,"route":route,"request_id":request_id}),
                     false,
                 )
