@@ -282,6 +282,7 @@ def run(root, data, out_path, machine, only, timeout, resume):
 
 
 def write(path, summary):
+    Path(path).parent.mkdir(parents=True, exist_ok=True)
     with open(path, "w", encoding="utf-8", newline="\n") as handle:
         handle.write(json.dumps(summary, indent=1) + "\n")
 
