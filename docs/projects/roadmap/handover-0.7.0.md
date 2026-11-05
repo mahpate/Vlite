@@ -101,16 +101,18 @@ Order and gates come from the storage readiness inventory. Defaults stay unchang
    measured on `v0.7.0` before the tests that kill it. B4 added the five survivors that lane B's own report names (four
    are killed by new tests, one is accepted as an equivalent mutant whose invariant a test pins) and three gaps that its
    wider campaign found in the lane's consumer tests, all closed by tests: 48 mutants in `tests/compact_b4_mutants.json`,
-   replayed and checked with `tests/compact_mutant_replay.py`. **A4** finished lane A: it cherry-picked lane A's four patches in
-   order (never by merge), rebuilt the key-value group on K71's bounded visitor and added 68 tests, so that key-value reads,
+   replayed and checked with `tests/compact_mutant_replay.py`. **A4** finished lane A: it cherry-picked lane A's four patches
+   (never by merge, the key-value hunks last), rebuilt the key-value group on K71's bounded visitor and added 68 consumer
+   tests in nine modules and two resident graph tests, so that key-value reads,
    hybrid search, the query language, grouped search and facets, the record iterator and browse, named vectors and
    re-embedding and graph evidence read compact records under the test gate. Lane A's 47 mutants, 26 of them survivors, are
-   replayed and 170 more added: 217 in `tests/compact_a4_mutants.json`, all killed and all accepted by `verify` on A4's head
-   ([lane A4](p3b-record-consumers.md)). A few changes are visible to a resident file (one clock for the exact and text legs of
-   the hybrid search and for the pivot and evidence reads of graph retrieval, among them; the approximate leg still reads the
-   wall clock), and `scripts/shadow_copy_check.py` checks that the shipped code is that of `v0.7.0` apart from
-   the named exceptions. The recorded replays of `records.rs` go stale on a tree that also holds R0's slice 3, until they are
-   replayed there. **E4**, the bounded exact scan, follows.
+   replayed and 170 more added: 217 in `tests/compact_a4_mutants.json`, all killed and all accepted by `verify` of B4's final
+   tool on A4's head ([lane A4](p3b-record-consumers.md)). A few changes are visible to a resident file and ship in a release
+   build (one clock for the exact and text legs of the hybrid search and for the pivot and evidence reads of graph retrieval,
+   among them; the approximate leg still reads the wall clock), and `scripts/shadow_copy_check.py` checks that the shipped
+   code is that of `v0.7.0` apart from the named exceptions. The recorded replays of `records.rs` go stale on a tree that also
+   holds R0's slice 3, until they are replayed there, and one of its anchors, `a4-cursorgroup-07`, matches twice there and
+   needs more context first. **E4**, the bounded exact scan, follows.
 3. **C4** server and MCP consumers and accounting; **K71** bounded key-value, input and audit follow-ups (beside B4).
 4. **L5** effective-source lifecycle and generation retirement after A4, B4, E4 and C4.
 5. **P4-71** compact graph integration, **ANN71** compact approximate search, **P5-71** persisted summaries then compression.

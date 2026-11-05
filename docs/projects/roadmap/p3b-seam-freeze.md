@@ -3,13 +3,14 @@
 Status: written at the start of 0.7.1 from `v0.7.0` (`02ef3e5f`) and approved on 2026-11-05 (the decisions OPEN-71-01 to OPEN-71-04
 and OPEN-71-14, stated in section 8, were taken by the coordinator under the owner's delegation; the OPEN-71 identifiers are
 those of the storage readiness inventory behind the [0.7.1 plan](handover-0.7.0.md#071)).
-Sections 3 and 4 describe what the code does today and pin it with tests. Section 3 is frozen for the lanes that follow:
-B4, A4, E4, C4, K71, L5 and the ANN, P4 and P5 lanes. Section 4 is the approved inventory of deviations and limits: it
+Sections 3 and 4 describe what the code does today and pin it with tests. Section 3 is frozen for the lanes that follow it:
+B4 and A4, which worked from it, and E4, C4, K71, L5 and the ANN, P4 and P5 lanes. Section 4 is the approved inventory of deviations and limits: it
 is not frozen, and a lane may remove any of them. Section 5 gives additive shapes, approved as additive: lane R0's
 slice 3 implemented `base_rows`, `affected_ids` and `ordered_ids` (crate-private, under the seam's test gate; statements
-BAS, AFF and ORD in section 3.7), and `binding` and `for_each_vector_block` stay with the ANN lane. Nothing here changes
-behavior, a file format or the wire, activates a compact writer, float16 or temporal copy-out, or supports a size or
-speed claim. Companion pages: the [survivor ledgers](p3b-survivor-ledgers.md) of lanes A and B, the [record
+BAS, AFF and ORD in section 3.7), and `binding` and `for_each_vector_block` stay with the ANN lane. R0's own work changes
+no behavior, file format or wire, activates no compact writer, float16 or temporal copy-out, and supports no size or
+speed claim; the few changes that lane A4 makes to resident behavior, which a release build compiles, are named in CLK-7
+and section 4 and listed on A4's page. Companion pages: the [survivor ledgers](p3b-survivor-ledgers.md) of lanes A and B, the [record
 consumers of lane A4](p3b-record-consumers.md), the [P3 design](p3-compact-vectors.md) and the [P3c
 design](p3c-compact-ann.md).
 
@@ -23,7 +24,7 @@ design](p3c-compact-ann.md).
 | Opening a compact image | `format::load_with` still builds the resident `RecordMap`; `Database::open_backed` then installs the generation and an overlay over it (`compact_from_replay`). The seam does not bound memory at open. |
 | Production compact writer | None. Compact images exist only as test fixtures written by `maintenance::write_v5_image`. |
 | Lane B (derived indexes, read seam) | Integrated: seam, effective rows, metadata, text and rerank consumers. Its fix-forward `250a98bc` is not in the tag; 0.7.1 integrates it (B4: cherry-picked, with its 18 replay obligations replayed in the ledgers of R0 and B4). |
-| Lane A (record consumers) | Not in the tag: four patches parked at `834a0a6f`. 0.7.1 integrates them (A4, accepted at `4670d858`): cherry-picked in order, never merged, with the key-value group rebuilt on K71's bounded visitor, 68 new tests and 217 mutants killed ([lane A4](p3b-record-consumers.md)). The exact-scan patch `c859d2d5` stays a draft that E4 owns. |
+| Lane A (record consumers) | Not in the tag: four patches parked at `834a0a6f`. 0.7.1 integrates them (A4, accepted at `4670d858`): cherry-picked, never merged, with the key-value hunks and `60d65f99` rebuilt last on K71's bounded visitor, 68 consumer tests in nine modules and two resident graph tests, and 217 mutants killed ([lane A4](p3b-record-consumers.md)). The compact arms are test-gated, but A4 also makes a few changes to resident code that a release build compiles (CLK-7, section 4). The exact-scan patch `c859d2d5` stays a draft that E4 owns. |
 | Lane C (server and MCP consumers), slice 5 (lifecycle) | Not started. |
 
 The table is the state of the tag, except for the lane A and lane B rows, which say what 0.7.1 added to it. Between the 0.7.0
@@ -64,7 +65,7 @@ by reading the code (at `v0.7.0`, and for section 3.7 at the head of slice 3) an
 | CLK-4 | The newest overlay entry decides. An overlay put uses its own deadline, so an expired put hides the ID and never reveals the older base row; a tombstone hides the ID at every `T` and never falls through. | `freeze_deadline_hides_exactly_at_the_clock_in_every_arm`; `compact_expired_overlay_never_reveals_base`; `compact_delete_tombstone_shadows_base` |
 | CLK-5 | Every read that takes no clock is physical and ignores deadlines: `len`, `first_id`, `contains_id`, `row_of`, `id`, `revision`, `expiry`, `base_rows`, `get_physical`, `effective_ids`, `ordered_ids`, `effective_vector`, `effective_metadata`, `effective_payload` and the `read_*` methods. The point readers that take a clock are `get`, `get_at` and `effective_visible`; a caller that needs visibility asks one of them with its own `T` first. Counts (`len`) are physical and include hidden rows. | same; `freeze_accounting_reports_exact_values_and_keeps_peaks`; section 3.7 for `base_rows` and `ordered_ids` |
 | CLK-6 | The expiry and revision of a compact row exist in two places: the resident `Collection.expiries` and `Collection.revisions` maps, and the view and overlay columns. They agree at every replay and every commit (replay builds the overlay from the replayed resident maps; `apply_committed` writes both). Which reader uses which representation is not frozen (section 4). | `freeze_resident_and_compact_expiry_sources_agree_after_mutations`; `compact_mutations_match_resident_put_delete_metadata_and_ttl` |
-| CLK-7 | A public call that takes no clock samples the wall clock once on entry and passes it down, and a `ReadSnapshot` uses the clock it captured.† Since A4 the hybrid search follows the rule for its text leg and its exact vector leg, and `GraphRef::retrieve` reads its pivot and evidence records at one clock, the one that `with_clock` set or else one sample of the wall clock. Four resident-only paths are known exceptions that sample per candidate or per call: query-language execution, `reembed_pending`, `ann_quality` and `search_ready_with_options_in`, which serves the approximate leg of the hybrid search and of the pivot of `GraphRef::retrieve` (section 4). Other callers that sample per candidate were not audited. The tests pin the explicit-clock half only: one clock passed down gives one answer. | `compact_browse_cursor_skips_tombstones_and_expiry`; `compact_exact_scan_is_bit_identical_at_same_clock`; `hybrid_resident_default_clock_honors_ttl` and `retrieve_reads_the_pivot_records_at_the_read_clock` (A4) |
+| CLK-7 | A public call that takes no clock samples the wall clock once on entry and passes it down, and a `ReadSnapshot` uses the clock it captured.† Since A4 the hybrid search follows the rule for its text leg and its exact vector leg, and `GraphRef::retrieve` reads its pivot and evidence records at one clock, the one that `with_clock` set or else one sample of the wall clock. Four resident arms are known exceptions that sample per candidate or per call: query-language execution, `reembed_pending`, `ann_quality` and `search_ready_with_options_in`, which serves the approximate leg of the hybrid search and of the pivot of `GraphRef::retrieve` (section 4). Other callers that sample per candidate were not audited. The tests pin the explicit-clock half only: one clock passed down gives one answer. | `compact_browse_cursor_skips_tombstones_and_expiry`; `compact_exact_scan_is_bit_identical_at_same_clock`; `hybrid_resident_default_clock_honors_ttl` and `retrieve_reads_the_pivot_records_at_the_read_clock` (A4), with A4's mutants `a4-retrieve-resident-pivot-search-wall-clock` and `a4-retrieve-resident-revalidation-wall-clock` |
 
 ### 3.2 Overlay precedence and affected IDs
 
@@ -151,12 +152,12 @@ head). They are not statements to preserve; the lane named in each row is expect
 
 | Where | What | Lane |
 |---|---|---|
-| `query_language.rs::execute`, `vectors.rs::reembed_pending`, `quality.rs::ann_quality`, `lib.rs::search_ready_with_options_in` | The resident arms of query-language execution (`collection.search`, then `get` per hit and per text candidate) and of `reembed_pending` (`self.get(id)` per row) sample the wall clock for every row, so each row is judged at its own sample. `ann_quality` samples once per sampled query (`quality.rs:227`). `search_ready_with_options_in` takes no clock and samples its own: it is the approximate vector leg of the hybrid search and of the pivot of `GraphRef::retrieve`, which therefore still judges that leg at the wall clock while the rest of the call reads at the handle's clock. A4 moved the other readers that this row listed at `v0.7.0`, the text leg and the exact vector leg of `search_hybrid` and the pivot and evidence reads of `GraphRef::retrieve`, to one clock, and the compact arms of `execute` and `reembed_pending` read one clock. `ann_quality` and `search_ready_with_options_in` read the resident map, so they refuse compact records. | a clock-taking `execute_at` and `reembed_pending` (not scheduled); the ANN lane for the other two |
+| `query_language.rs::execute`, `vectors.rs::reembed_pending`, `quality.rs::ann_quality`, `lib.rs::search_ready_with_options_in` | The resident arms of query-language execution (`collection.search`, then `get` per hit and per text candidate) and of `reembed_pending` (`self.get(id)` per row) sample the wall clock for every row, so each row is judged at its own sample. `ann_quality` samples once per sampled query (`quality.rs:227`). `search_ready_with_options_in` takes no clock and samples its own: it is the approximate vector leg of the hybrid search and of the pivot of `GraphRef::retrieve`, which therefore still judges that leg at the wall clock while the rest of the call reads at the handle's clock. A4 moved the text leg and the exact vector leg of `search_hybrid`, which this row listed at `v0.7.0`, and the pivot and evidence reads of `GraphRef::retrieve`, which it did not list, to one clock, and the compact arms of `execute` and `reembed_pending` read one clock. `ann_quality` and `search_ready_with_options_in` read the resident map, so they refuse compact records. | a clock-taking `execute_at` and `reembed_pending` (not scheduled); the ANN lane for the other two, which flips `retrieve_reads_the_approximate_pivot_leg_at_the_wall_clock` when it gives `search_ready_with_options_in` a clock |
 | `CompactView::base_rows` and `CollectionRecords::ordered_ids` (slice 3) | Neither seeks: both start at the first row, so a walk that resumes after an ID pays for every row before it. `compact_iter(after)` does seek, by a binary search over the base IDs (lane A's patch, in `records.rs`). `Affected` carries the overlay's revision and deadline, not its metadata or payload. | E4 (a seek in the new cursors, if its scan needs one: an additive edit of `base_rows` and `ordered_ids`, section 6) |
 | `records.rs::effective_ids` | Builds a full ID set and vector. The 4 MiB workspace bounds vector scratch only, not ID memory. `ordered_ids` (slice 3) lists the same IDs lazily. Lane A's exact-scan draft still calls `effective_ids`. | its callers move to `ordered_ids` one by one; `effective_ids` stays until the last one has moved |
-| Exact scan, browse, snapshot search | Browse (`compact_browse`, also on a `ReadSnapshot`) walks `compact_iter`, which decodes a row and materializes a cell for it before the deadline is checked, and reads deadlines from the resident map (CLK-6). The exact scan is lane A's draft (`c859d2d5`, last row of this table): it takes visibility from the view and overlay columns and creates no cell. | E4 |
+| Record walks and the exact scan | Browse (`compact_browse`, also on a `ReadSnapshot`), facets, the text leg of the hybrid search, query-language execution, the key-value listing and `reembed_pending` walk `compact_iter`. It decodes each row it visits into a cell, which is never evicted (record cells, below), before the caller looks at the deadline, and each caller reads deadlines from the resident map (CLK-6). Browse stops after one page and `reembed_pending` at its limit; the others visit every row. The exact scan is lane A's draft (`c859d2d5`, last row of this table): it takes visibility from the view and overlay columns and creates no cell (read from the code, which uses only the `effective_*` accessors of PRE-1; no test of the scan pins it). | E4 |
 | Scan statistics of a filtered exact search (`Database::search_in_at`) | The resident arm narrows its scan to the IDs that a declared posting leaves (counted in `index_candidates`) or, when no posting serves the filter, that the block summaries of a declared field leave (P5: blocks of 1,024 live rows, used when a block is pruned and at most half the rows remain). The compact arm takes the declared postings in the same way (up to half of the rows, counted in `index_candidates`) and passes them to `exact_search_compact`, but it has no block summaries, so when no posting serves the filter it scans every effective row and lets the filter decide. The hits, their order, `distance_evaluations` and `index_candidates` are equal on the two paths. `records_scanned` is equal too, except for a filter that block summaries could prune and no posting serves. The resident arm uses the summaries when at least one block is pruned and at most half the rows remain, and a block is pruned when its summary proves that no row of it can match: per covered field a block keeps the distinct string and point values (up to 32 values and 1,024 bytes, past which it can no longer prune an equality), the interval of its integers and of its floats and the booleans seen, so an equality value that is not among them or outside the interval, or a range that misses the interval, prunes the block. That happens in several blocks when a filter matches rows of only a few of them, and in a single block when its summary shows that no row matches. A probe over 1,200 rows of which 100 match an equality filter counted 100 scanned rows through a posting on both paths (`index_candidates` 100, and none for an absent value). With a range summary instead of a posting the resident path scanned 176 rows and the compact path 1,200, and an absent value, which the summaries answer without a scan, scanned all 1,200 rows on the compact path. Over a single block of 1,000 rows a filter that some rows match prunes nothing and the statistics agree (probed); for a single block whose summary shows that no row matches, the code (`Summaries::candidates`, `View::survivors`) leaves no candidate, so the resident arm scans no row where the compact arm scans all of them (not probed). A snapshot search (`ReadSnapshot::search_with_stats_at`) passes no candidates on either path and reports equal statistics.† No result changes, so the difference is not a 0.7.1 defect. P3's claim of equal scan statistics holds for a filter that a declared posting serves and for one that nothing serves. No test pins the difference, and the probe is not part of the tree. | not scheduled |
-| Expiry and revision readers | Browse (`compact_browse`, also on a `ReadSnapshot`) reads the resident expiry map, and the exact scan, `get_at` and `effective_visible` (and so `rerank_effective`) read the view and overlay columns (CLK-6). `revision_in`, which serves `revision()`, the server and graph retrieve, answers from the overlay when it holds an entry for the ID and from the resident map otherwise, and a conditional write (`put_with_expiry_in`, `put_in`, `delete_in`, `update_metadata_in` and `apply_reembed_batch_checked`) checks the resident map alone.† A lane may move a reader to the other representation if it keeps one clock per operation and the agreement of the two. | E4, L5 |
+| Expiry and revision readers | The record walks above read the resident expiry map (the key-value listing also reads the revisions of its entries from the resident map), and the exact scan, `get_at` and `effective_visible` (and so `rerank_effective`) read the view and overlay columns (CLK-6). `revision_in`, which serves `revision()`, the server and graph retrieve, answers from the overlay when it holds an entry for the ID and from the resident map otherwise, and a conditional write (`put_with_expiry_in`, `put_in`, `delete_in`, `update_metadata_in` and `apply_reembed_batch_checked`) checks the resident map alone.† A lane may move a reader to the other representation if it keeps one clock per operation and the agreement of the two. | E4, L5 |
 | `Database::open_backed` | The loader decodes every record into a resident map before the generation is installed. | L5 |
 | `CollectionRecords::len`, `first_id` | `len` walks the overlay on every call, and `first_id` scans the base from row 0 past tombstoned rows and then the overlay. | not scheduled |
 | Refused reads are not atomic | `read_vector` counts a miss, advances the logical clock and evicts to make room before it reads the frame, so a read that then fails can leave a block evicted. A read refused by the scratch budget keeps the previous plaintext, and an encrypted read that fails after authentication (an extent or decode error, or the shape refusal on a hit) keeps that frame's plaintext until the next read. A consumer must not rely on a rollback. | E4, L5 |
@@ -239,7 +240,8 @@ impl CollectionRecords {
   skipped.
 - **`ordered_ids`.** Replaces the materializing `effective_ids` on the scan and ANN paths; `effective_ids` stays for
   derived-index rebuild and resident parity until its last caller moves. It is an ID-only merge beside `compact_iter`,
-  which stays the record cursor of browse and of E4. The slice 3 tests pin the two against each other (the IDs of
+  which stays the record cursor of browse, facets, the hybrid text leg, query-language execution, the key-value listing,
+  `reembed_pending` and E4 (section 4). The slice 3 tests pin the two against each other (the IDs of
   `compact_iter` equal `ordered_ids`, at sampled seek points too), so that scan and browse cannot drift apart, and
   E4 may later rebuild `compact_iter` on `ordered_ids` and point reads. It returns a named cursor (`OrderedIds`)
   and, like `base_rows`, starts at the first row.
@@ -294,10 +296,10 @@ Methods first, then files; never add a second effective-record iterator.
 | Region | R0 | B4 | A4 | E4 | C4 | L5 | ANN |
 |---|---|---|---|---|---|---|---|
 | `CollectionRecords`, `OverlayEntry`, `RecordOverlay` (types) | frozen | | | | | | |
-| Effective block: `pin_effective`, `effective_*`, `source_identity`, `source_accounting`, `overlay_logical_bytes` | frozen; `affected_ids`, `ordered_ids` added in slice 3 (additive) | done: tests only (`effective_rows_tests`, 28 lines of `250a98bc`) | | consumes; a seek in `ordered_ids`, if the scan needs one (additive) | consumes | | consumes; `effective_ids` retired last |
+| Effective block: `pin_effective`, `effective_*`, `source_identity`, `source_accounting`, `overlay_logical_bytes` | frozen; `affected_ids`, `ordered_ids` added in slice 3 (additive) | done: tests only (`effective_rows_tests`, 28 lines of `250a98bc`) | | consumes; a seek in `ordered_ids`, if the scan needs one (additive; asked for through the coordinator, section 8) | consumes | | consumes; `effective_ids` retired last |
 | `len`, `is_empty`, `first_id`, `contains_key`, `get_at`, `get_physical`, `apply_committed`, `compact_overlay_revision`, `compact_from_replay` | frozen | | | | | | |
 | `compact_iter`, `CompactRecordIter` | frozen | | done: the seek, a binary search over the base IDs (lane A's patches) | consumes | | | |
-| `ReadSnapshot::{browse_at, search_with_stats_at}`, `compact_browse` | frozen | | the call into the draft scan (`c859d2d5`: `search_with_stats_at` passes the records instead of an iterator) | the call into the exact scan | | | |
+| `ReadSnapshot::{browse_at, search_with_stats_at}`, `compact_browse` | frozen | | done: the call into the draft scan (`c859d2d5`: `search_with_stats_at` passes the records instead of an iterator) | the call into the exact scan | | | |
 | `CollectionRef::{search_grouped, facets}` compact arms | | | done: consumer arms (`02062058`, with A4's tests) | | | | |
 
 ### `src/lib.rs`
@@ -315,13 +317,27 @@ One integrator owns the `Database` fields and constructors, `open_backed`, compa
 | `start_rebuild_with_options_in`, `poll_rebuild_in`, `maintain_background_hnsw_in`, `search_ready_with_options_in`, `build_hnsw*`, the snapshot and disk entry points | the compact arms refuse with unchanged state (frozen) | | | reserved | reserved for the ANN and F5 lanes |
 
 Other shared surfaces, reserved by function as in the inventory: `collection.rs::{exact_search_candidates,
-rebuild_derived}` (E4 and B4), `rerank.rs`, `metadata_index.rs`, `text_index.rs`, `quality.rs` (B4, then C4 consumes),
+rebuild_derived}` (E4 and B4; A4's `c859d2d5` cherry-pick changed the compact call in `exact_search_candidates`, which now
+passes the records to `exact_search_compact` instead of an iterator), `rerank.rs`, `metadata_index.rs`, `text_index.rs`, `quality.rs` (B4, then C4 consumes),
 `kv.rs`, `hybrid.rs`, `query_language.rs`, `vectors.rs`, `property_graph/retrieve.rs` (A4, done in 0.7.1: its shipped changes are
 named on [A4's page](p3b-record-consumers.md) and checked by `scripts/shadow_copy_check.py`; K71 reserves the `kv.rs` and
 `server/kv.rs` functions), `hnsw.rs`, `rebuild.rs`, `ann_snapshot.rs`, `disk_ann.rs`, `gpu.rs` (the ANN and F5 lanes;
 their compact refusal arms are pinned by `compact_ann_paths_remain_refused_with_unchanged_state`),
 `compact/mod.rs::ImageCheck`, `format.rs`, `maintenance.rs`, `directory.rs`, `changes.rs`, `logops.rs` (L5 and the
 storage owner).
+
+Lane A4's edits of reserved regions, and what it hands on (A4's page, sections 6, 7 and 9, has the detail):
+
+- In `src/kv.rs` A4 changed functions that the map reserves for K71 (`probe`, `entry`, `get_at`, `visit_at` and `kv_view`) to
+  one `acquire`, one `Rows` iterator and one `get_physical`; its branch carries K71's first two `kv.rs` commits, which are
+  skipped when K71 integrates first, and the shadow-copy gate takes K71's visitor as the baseline of `visit_at`.
+- The server's key-value PUT computes its slot through `kv_view(..).put_slot_at` before it takes the writable store, so
+  with the compact `kv_view` arm a compact collection would be read and quota-checked before it is refused: take the
+  store first when `src/server/kv.rs` is touched (C4 and K71).
+- The resident arms of seven functions exist twice, a `cfg(test)` branch and a `#[cfg(not(test))]` statement (ten pairs),
+  and the compact copies `search_hybrid_compact` and `execute_compact` repeat the validation and fusion of the resident
+  ones. `scripts/shadow_copy_check.py` makes the shipped copies a checked fact; an early-return dispatch that writes each
+  body once is a follow-up lane before L5.
 
 ## 7. The R0 mutation campaign
 
@@ -506,7 +522,8 @@ Decided on 2026-11-05 by the coordinator under the owner's delegation, as recomm
 
 - **OPEN-71-01, activation: private integration only.** Nothing in 0.7.1 turns the compact seam on. The production compact
   writer, float16 and temporal copy-out stay opt-in and closed, no setting, option or file content enables a gate, and every
-  statement on this page describes private, test-gated code (section 1).
+  statement on this page describes private, test-gated code (section 1), except the few resident-visible changes of lane A4
+  that CLK-7 and section 4 name.
 - **OPEN-71-02, survivor evidence: approved.** The evidence form in the [ledgers](p3b-survivor-ledgers.md#evidence-that-would-settle-open-71-02)
   is the acceptance form: one record per mutant with before and after SHA-256, the failing test names and a restored-green
   run, replayed independently. R0's ledgers have that shape with one qualification, which the coordinator accepted on
@@ -540,6 +557,13 @@ Decided on 2026-11-05 by the coordinator under the owner's delegation, as recomm
 - **Scan statistics: a known difference, not a defect.** The difference in `records_scanned` between the compact and the
   resident filtered exact search for a filter that block summaries could prune and no declared posting serves, which section 4
   describes, is not a 0.7.1 defect.
+- **Amendment of CLK-7 after the freeze.** A4 changed the one statement of section 3 that its work touches. CLK-7 now says
+  that the exact vector leg and the text leg of the hybrid search and the pivot and evidence reads of `GraphRef::retrieve`
+  read at one clock, and its list of resident arms that sample per candidate or per call changed: the hybrid text leg left
+  it, and `reembed_pending`, which a reading of the resident arms found to sample per row (A4's page reports it too), joined
+  it. The first sentence of CLK-7 and every other statement of section 3 are unchanged. The rule of section 3 is met: this
+  amendment, the tests that CLK-7 now names and A4's mutants of the new behavior (`pa-hybrid-resident-default-clock-zero`,
+  `a4-retrieve-resident-pivot-search-wall-clock` and `a4-retrieve-resident-revalidation-wall-clock`).
 
 R0's own choices in slice 3 were not coordinator decisions. The coordinator accepted them on 2026-11-05 as coded and
 reviewed, by three independent reviewers:

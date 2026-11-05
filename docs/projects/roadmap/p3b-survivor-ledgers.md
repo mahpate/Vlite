@@ -3,8 +3,9 @@
 Status: inventory for 0.7.1 lane R0, taken against `v0.7.0` (`02ef3e5f`). It records the evidence that exists for each
 lane at the tag; it does not accept, reject or integrate either one. Since then 0.7.1 has integrated lane B (see
 [Lane B](#lane-b)) and lane A (see [Lane A](#lane-a), the work of A4). Read it with the [seam freeze](p3b-seam-freeze.md) and
-the slice 4 row of the [P3 design](p3-compact-vectors.md). Nothing here is active: both lanes are test-gated, and no
-size or speed claim follows from them.
+the slice 4 row of the [P3 design](p3-compact-vectors.md). Nothing compact is active: the compact arms of both lanes are
+test-gated (the few changes that lane A4 makes to resident code are listed on A4's page), and no size or speed claim follows
+from them.
 
 ## How the ledgers were kept
 
@@ -35,14 +36,17 @@ this:
 | B, `mahpate-p3b-indexes` | `250a98bc` | `250a98bc` review gaps (six files, tests plus one three-line production gate and a GPU preflight extraction) |
 
 A merge of either branch conflicts only because the identical equivalent patches sit next to the new hunks. Reconcile
-by `git cherry-pick` of these five commits in order, never by merge. The two lanes do not conflict with each other.
+by `git cherry-pick` of these five commits, never by merge. B4 and A4 did so in 0.7.1, and A4 put the key-value hunks last.
+The two lanes do not conflict with each other.
 
-Three 0.7.0 changes land in functions that lane A also edits and need a read, not just a textual merge:
+Three 0.7.0 changes land in functions that lane A also edits and needed a read, not just a textual merge, which A4 made:
 
 - `src/kv.rs::list_at` now skips a record that merely decodes to a key unless `probe` resolves the key to that slot.
-  Lane A's compact KV listing must keep that rule.
+  Lane A's compact KV listing must keep that rule; A4's does, and `compact_kv_list_offers_only_the_record_get_resolves`
+  pins it.
 - `src/property_graph/retrieve.rs` gained `retrieve_visible` and `retrieve_with_visibility`; lane A's
-  `compact_graph_retrieve_projects_effective_row_at_one_clock` edits the same function.
+  `compact_graph_retrieve_projects_effective_row_at_one_clock` edits the same function, and A4's own edits of it are the
+  ones its page lists.
 - `src/lib.rs::create_collection_as_occupied` is new; it does not touch the seam.
 
 ## Lane A
@@ -100,9 +104,9 @@ The 21 killed mutants are `pa-iter-cursor-lt`, `pa-group-clock-zero`, `pa-group-
 `pa-graph-compact-pivot-state-off`. Their killing tests are the lane's parity tests against a resident oracle.
 
 **Closed in 0.7.1 by A4** (the [record consumers of lane A4](p3b-record-consumers.md), accepted at `4670d858`). A4 cherry-picked
-lane A's four patches in order with `git cherry-pick -x`, never by merge: `02062058` and `834a0a6f` without their
-key-value hunks, `60d65f99` and those hunks as a last group on K71's bounded visitor, and `c859d2d5` unchanged, as a draft
-that E4 owns. It re-created lane A's 47 mutants from their recorded descriptions and anchored them on the tree after the
+lane A's four patches with `git cherry-pick -x`, never by merge: `02062058` and `834a0a6f` without their key-value hunks,
+`c859d2d5` unchanged, as a draft that E4 owns, and `60d65f99` with those hunks last, as a group on K71's bounded visitor.
+It re-created lane A's 47 mutants from their recorded descriptions and anchored them on the tree after the
 cherry-picks (`tests/compact_a4_mutants.json`): 40 were killed there already and 7 survived. Three of the seven,
 `pa-group-clock-zero`, `pa-ql-clock-zero` and `pa-exact-cap-quarter`, are recorded as killed in lane A's ledger: their
 tests used far-future deadlines only, and a quarter of the rows as the index cap satisfied the same cases as half. All 47 are
@@ -113,15 +117,22 @@ gives a graph-attached record a deadline, which A4 pinned with `an_attached_reco
 and three mutants of its guards; A4's page records that an independent review read the enumeration of the writers and
 found no counterexample. `pa-kv-view-health-removed` was dead code (`Database::resolve` checks health first), so A4
 removed the line and re-based the mutant onto `resolve`. A4 added 170 mutants to the 47: 217 in all, every one killed.
-`verify` of B4's tool accepts all 217 on A4's head, with none stale. The changes that a resident file can see (the exact and
+`verify` of B4's final tool accepts all 217 on A4's head, with none stale (the copy of the tool that A4's branch carries has
+`check`, `run` and `merge` only). The changes that a resident file can see (the exact and
 text legs of the hybrid search and the pivot and evidence reads of `GraphRef::retrieve` read one clock, while the approximate
 leg still reads the wall clock; a named-vector search whose handle turns unhealthy answers `Poisoned`; the
 key-value read path and two guards) are listed on A4's page, with the script that checks the shipped code against
 `v0.7.0`, `python scripts/shadow_copy_check.py` (`--integration` with one `--lane` range per other lane, for a tree that
 holds other lanes). A ledger run is tied to the file it ran on, so on a tree that also holds
 R0's slice 3, which edits `records.rs`, the 52 mutants of A4's ledger in that file are not accepted again until they are
-replayed there (checked on a merge of R0's and A4's heads: 165 accepted, 51 stale and 1 open of 217, the 52 all in
-`records.rs`). The combined declared-index scan differential, A's compact exact search against B's index rebuild, is B4's
+replayed there (checked on a merge of R0's and A4's heads with B4's final tool: 165 accepted, 51 stale and 1 open of 217, the
+52 all in `records.rs`). The open one, `a4-cursorgroup-07`, needs more than a replay: its anchor, the merge of a base row
+and an overlay entry in `CompactRecordIter::next`, appears a second time in R0's `OrderedIds::next`, so `check` reports
+`matches 2` and the anchor needs more context. The same holds the other way round: R0's 50 mutants in `records.rs` and
+2 in `lib.rs` were replayed on R0's version of those files, which A4 and B4 also edit, so a file-hash check of their runs
+would call them stale on the integrated tree; their anchors still match once there (`check` accepts both R0 ledgers on the
+merge of R0's and A4's heads). R0's 72 mutants in `source.rs` and its one in `quality.rs` are in files that neither lane
+edits. The combined declared-index scan differential, A's compact exact search against B's index rebuild, is B4's
 slice S3 and is not part of what is established here.
 
 ## Lane B
@@ -188,8 +199,10 @@ whole list on another machine. A mutant that needs an equivalence argument keeps
 it rests on pinned by a test where one can be written. Replays of several mutants in one build do not count.
 `tests/compact_mutant_replay.py` (B4) checks this form mechanically: `check` runs the anchor test, `run` replays one
 mutant per build, and `verify` re-checks the recorded evidence against the tree it runs in, calling a run that was made
-on an older tree stale and not failed. R0's ledgers record the same fields, and `check` accepts them; so does A4's ledger
-(`tests/compact_a4_mutants.json`).
+on an older tree stale and not failed. `verify` is in B4's final tool; the copy of the tool that A4's branch carries has
+`check`, `run` and `merge` only. R0's ledgers record the same fields, and `check` accepts them, on R0's head and on a merge
+with A4's. A4's ledger (`tests/compact_a4_mutants.json`) passes `check` on A4's head; on a tree that also holds R0's slice 3
+one of its anchors matches twice (see [Lane A](#lane-a)).
 
 ## Not established here
 
@@ -201,4 +214,7 @@ The classification of the evidence comes from the lanes' own reports and commit 
 Since then B4 replayed lane B's eleven consumer survivors (see [Lane B](#lane-b)). It did not replay lane B's 18 killed
 mutants as such: eight of them (consumers, settings, rerank and quality) are re-derived in its list, and the other ten
 were not replayed as such. A4 replayed lane A's 26 survivors, the other 21 mutants of lane A's ledger and 170 of its own (see
-[Lane A](#lane-a)); R0 did not replay them, and checked A4's ledger with `check` and `verify` only.
+[Lane A](#lane-a)); R0 did not replay them. R0 checked A4's ledger with `check` and `verify` only, and ran the default and
+all-features library suites on a scratch merge of its head with A4's head `1db6a43a` (A4's final head `4670d858` adds only a
+script and one docs page to it): 1,138 and 1,510 tests passed and none failed. It ran no clippy and no other test target
+on that merge.
