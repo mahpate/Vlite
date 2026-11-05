@@ -2286,9 +2286,7 @@ fn a_symlinked_bindings_file_is_followed_and_must_reach_a_regular_file() {
     // Kubernetes mounts Secret and ConfigMap keys as symbolic links: a link is
     // followed, and the file it reaches is the one read and validated.
     assert!(start(to_valid).is_ok());
-    let error = start(to_missing)
-        .err()
-        .expect("the file behind the link is validated");
+    let error = start(to_missing).expect_err("the file behind the link is validated");
     assert!(
         error
             .to_string()
@@ -2296,9 +2294,7 @@ fn a_symlinked_bindings_file_is_followed_and_must_reach_a_regular_file() {
         "unexpected startup refusal: {error}"
     );
     // What the link reaches must still be a regular file.
-    let error = start(to_folder)
-        .err()
-        .expect("a link to a directory is refused");
+    let error = start(to_folder).expect_err("a link to a directory is refused");
     assert!(
         matches!(
             error.to_string().as_str(),
