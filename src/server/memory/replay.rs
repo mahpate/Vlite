@@ -37,6 +37,7 @@ pub(super) const FORGET: &str =
     include_str!("../../../tests/fixtures/agent_memory/wire/forget.json");
 pub(super) const RECEIPT: &str =
     include_str!("../../../tests/fixtures/agent_memory/wire/receipt.json");
+pub(super) const FACTS: &str = include_str!("../../../tests/fixtures/agent_memory/wire/facts.json");
 
 const PRINCIPAL: &str = "abcdefghij27";
 const OTHER: &str = "bcdefghij234";
@@ -1380,5 +1381,39 @@ mod tests {
             body["error"]["details"]["feature"],
             "remember_receipt_lookup"
         );
+    }
+
+    /// The refusal routes: binding and scope authorization first, then the
+    /// refusal before any other field is read; `feature` names the gap.
+    async fn refused_in_order(fixture: &str, path: &str, feature: &str) {
+        assert_eq!(replay(fixture, &[], &[]).await, 1);
+        let request = |body: Value| json!({"method": "POST", "path": path, "body": body});
+        let malformed = request(json!({"scope": {"agent": "a"}, "x": [1], "deadline_ms": -1}));
+        let (status, body) = served(&view(), &malformed).await;
+        assert_eq!(status, 409, "{body}");
+        assert_eq!(body["error"]["code"], "memory_capability_unavailable");
+        assert_eq!(body["error"]["details"]["feature"], feature);
+        let (status, body) = served(&view(), &request(json!({"scope": {"agent": "b"}}))).await;
+        assert_eq!(
+            (status, &body["error"]["code"]),
+            (403, &json!("forbidden_scope"))
+        );
+        let mut retired = view();
+        retired["retired_at_ms"] = json!(500);
+        let (status, body) = served(&retired, &malformed).await;
+        assert_eq!(status, 409, "{body}");
+        assert_eq!(body["error"]["details"]["feature"], "binding_retired");
+        let mut ungranted = view();
+        ungranted["graph_grant"] = json!(false);
+        let (status, body) = served(&ungranted, &malformed).await;
+        assert_eq!(
+            (status, &body["error"]["code"]),
+            (403, &json!("forbidden_scope"))
+        );
+    }
+
+    #[tokio::test]
+    async fn find_facts_is_refused_after_authorization() {
+        refused_in_order(FACTS, "/v1/memory/notes/facts/query", "facts").await;
     }
 }

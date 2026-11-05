@@ -89,15 +89,15 @@ const MEMORY_PATHS: [&str; 3] = [
 ];
 
 /// Routes served in this slice; the rest are not mounted yet.
-const SERVED: [&str; 5] = [
+const SERVED: [&str; 6] = [
     "/v1/memory/notes/remember",
     "/v1/memory/notes/recall",
     "/v1/memory/notes/consolidate",
     "/v1/memory/notes/forget",
     "/v1/memory/notes/receipts/lookup",
-];
-const UNMOUNTED: [&str; 4] = [
     "/v1/memory/notes/facts/query",
+];
+const UNMOUNTED: [&str; 3] = [
     "/v1/memory/notes/facts/correct",
     "/v1/memory/notes/erasures/get",
     "/v1/memory/notes/erasures/resume",

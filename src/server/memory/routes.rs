@@ -37,6 +37,7 @@ mod consolidate;
 mod forget;
 mod recall;
 mod receipt;
+mod refused;
 
 /// Mutation `deadline_ms` default and bound (contract `MemoryMutation`).
 const DEFAULT_DEADLINE_MS: u64 = 250;
@@ -68,6 +69,7 @@ pub(super) fn routes() -> Router<Service> {
         .route(CONSOLIDATE, post(consolidate::consolidate))
         .route(FORGET, post(forget::forget))
         .route(RECEIPT, post(receipt::receipt))
+        .route(FIND_FACTS, post(refused::find_facts))
 }
 
 /// Test seam for the engine clock and the elapsed request budget. Absent in
