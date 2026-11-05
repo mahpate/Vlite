@@ -17,14 +17,18 @@
 //!
 //! Expiry needs a v5 file and returns `ExpiryRequiresUpgrade` otherwise.
 //! Listing scans the collection (O(entries)); keep large key spaces in
-//! separate collections. It offers each key once, as the record `get`
-//! resolves it: a look-alike record outside the key's probe window, or behind
-//! an earlier holder of the key, is never listed.
+//! separate collections. A scan keeps only the `limit + 1` smallest candidate
+//! keys it has found so far, so its working memory is O(`limit`) however many
+//! entries match. It offers each key once, as the record `get` resolves it: a
+//! look-alike record outside the key's probe window, or behind an earlier
+//! holder of the key, is never listed. [`KvView::list_at`] copies every value
+//! it returns; [`KvView::visit_at`] lends each value instead.
 
 use crate::{
     CollectionSettings, CollectionSpec, Database, Error, Expected, MAX_PAYLOAD_BYTES, Metadata,
     Result, current_time_ms,
 };
+use std::{collections::BinaryHeap, ops::ControlFlow};
 
 /// Consecutive record IDs probed per key.
 pub const KV_PROBE_SLOTS: u64 = 16;
@@ -50,6 +54,21 @@ pub struct KvEntry {
     /// Compare-and-set token; see the module documentation.
     pub version: u64,
     pub expires_at_ms: Option<u64>,
+}
+
+/// One live entry lent to the visitor of [`KvView::visit_at`]: the key and
+/// value borrow the store and are valid only for that call.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct KvRef<'a> {
+    pub key: &'a str,
+    pub value: &'a [u8],
+    /// Compare-and-set token; see the module documentation.
+    pub version: u64,
+    pub expires_at_ms: Option<u64>,
+    /// Another live entry follows this one in the listing (after the visit's
+    /// `limit` is applied, so the last visited entry reports whether the
+    /// listing continues). Decided from keys alone: no value is read for it.
+    pub has_next: bool,
 }
 
 /// Options for `KvStore::put`.
@@ -167,7 +186,8 @@ impl KvView<'_> {
 
     /// Live entries of `namespace` whose key starts with `prefix`, in key
     /// order, strictly after `after` when given, at most `limit`
-    /// (`1..=MAX_KV_LIST_LIMIT`).
+    /// (`1..=MAX_KV_LIST_LIMIT`). Every value is copied; see
+    /// [`KvView::list_at`] for what that can cost.
     pub fn list(
         &self,
         namespace: &str,
@@ -187,6 +207,12 @@ impl KvView<'_> {
     }
 
     /// `list` with a caller-supplied Unix-millisecond clock.
+    ///
+    /// Every returned value is copied, so a result of `limit` entries can
+    /// hold `limit` values of up to [`MAX_KV_VALUE_BYTES`] at once: roughly
+    /// 10 GB at the largest limit and value size. Use [`KvView::visit_at`]
+    /// to read values without copying them, or a smaller `limit`, when values
+    /// can be large.
     pub fn list_at(
         &self,
         namespace: &str,
@@ -196,6 +222,35 @@ impl KvView<'_> {
         now_ms: u64,
     ) -> Result<Vec<KvEntry>> {
         list_at(self.db, self.id, namespace, prefix, after, limit, now_ms)
+    }
+
+    /// Visits the live entries of `namespace` whose key starts with `prefix`,
+    /// in key order, strictly after `after` when given, at most `limit`
+    /// (`1..=MAX_KV_LIST_LIMIT`), as of the Unix-millisecond clock `now_ms`.
+    /// The entries are the ones [`KvView::list_at`] returns for the same
+    /// arguments, but each value is lent to `visitor` instead of copied: the
+    /// call allocates only what the visitor copies, plus O(`limit`) candidate
+    /// keys, whatever the number of matching entries.
+    ///
+    /// The scan reads the collection once, then calls `visitor` in key order.
+    /// The visitor returns [`ControlFlow::Break`] to stop early and
+    /// [`ControlFlow::Continue`] to go on; [`KvRef::has_next`] says whether
+    /// another live entry follows the one it is given.
+    pub fn visit_at<F>(
+        &self,
+        namespace: &str,
+        prefix: &str,
+        after: Option<&str>,
+        limit: usize,
+        now_ms: u64,
+        visitor: F,
+    ) -> Result<()>
+    where
+        F: FnMut(KvRef<'_>) -> ControlFlow<()>,
+    {
+        visit_at(
+            self.db, self.id, namespace, prefix, after, limit, now_ms, visitor,
+        )
     }
 }
 
@@ -393,45 +448,113 @@ fn list_at(
     limit: usize,
     now_ms: u64,
 ) -> Result<Vec<KvEntry>> {
+    let mut entries = Vec::new();
+    visit_at(
+        db,
+        collection,
+        namespace,
+        prefix,
+        after,
+        limit,
+        now_ms,
+        |entry| {
+            entries.push(KvEntry {
+                key: entry.key.to_owned(),
+                value: entry.value.to_vec(),
+                version: entry.version,
+                expires_at_ms: entry.expires_at_ms,
+            });
+            ControlFlow::Continue(())
+        },
+    )?;
+    Ok(entries)
+}
+
+#[cfg(test)]
+thread_local! {
+    /// The largest candidate set one scan of this thread has held.
+    static CANDIDATE_HIGH_WATER: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+}
+
+#[allow(clippy::too_many_arguments)]
+fn visit_at<F>(
+    db: &Database,
+    collection: u16,
+    namespace: &str,
+    prefix: &str,
+    after: Option<&str>,
+    limit: usize,
+    now_ms: u64,
+    mut visitor: F,
+) -> Result<()>
+where
+    F: FnMut(KvRef<'_>) -> ControlFlow<()>,
+{
     db.ensure_resident_in(collection)?;
     validate_namespace(namespace)?;
     if limit == 0 || limit > MAX_KV_LIST_LIMIT {
         return Err(Error::InvalidKvKey("limit must be between 1 and 10000"));
     }
     let state = db.state(collection);
-    let mut matches: Vec<(&str, u64)> = state
-        .records
-        .resident()?
-        .iter()
-        .filter(|(id, _)| {
-            !state
-                .expiries
-                .get(id)
-                .is_some_and(|expiry| *expiry <= now_ms)
-        })
-        .filter_map(|(&id, record)| {
-            let (ns, key, _) = decode(&record.payload)?;
-            (ns == namespace && key.starts_with(prefix) && after.is_none_or(|after| key > after))
-                .then_some((key, id))
-        })
-        .collect();
-    matches.sort_unstable();
-    // A record that merely decodes to a key is that key's entry only when
-    // `probe`, the lookup behind `get`, `put` and `delete`, resolves the key to
-    // it. Look-alikes outside the key's window, or behind an earlier holder of
-    // the key, are skipped, so list and get cannot disagree. Checked in key
-    // order, and only until `limit` entries are found.
-    let mut entries = Vec::new();
-    for (key, id) in matches {
-        if entries.len() == limit {
+    let records = state.records.resident()?;
+    // `limit` entries plus one more, so the last visited entry can say whether
+    // the listing continues without anything being read for the extra key.
+    let capacity = limit + 1;
+    let mut selected: BinaryHeap<(&str, u64)> =
+        BinaryHeap::with_capacity(capacity.min(records.len()));
+    for (&id, record) in records.iter() {
+        if state
+            .expiries
+            .get(&id)
+            .is_some_and(|expiry| *expiry <= now_ms)
+        {
+            continue;
+        }
+        let Some((ns, key, _)) = decode(&record.payload) else {
+            continue;
+        };
+        if ns != namespace || !key.starts_with(prefix) || after.is_some_and(|after| key <= after) {
+            continue;
+        }
+        let candidate = (key, id);
+        if selected.len() == capacity && selected.peek().is_some_and(|worst| candidate >= *worst) {
+            continue;
+        }
+        // A record that merely decodes to a key is that key's entry only when
+        // `probe`, the lookup behind `get`, `put` and `delete`, resolves the key
+        // to it. Look-alikes outside the key's window, or behind an earlier
+        // holder of the key, never enter the set: they would otherwise use up
+        // room that later real entries need, and the listing would come back
+        // short although more entries exist.
+        let resolved = probe(db, collection, namespace, key, now_ms)?.found;
+        if !resolved.is_some_and(|found| found.slot == id) {
+            continue;
+        }
+        if selected.len() == capacity {
+            selected.pop();
+        }
+        selected.push(candidate);
+        #[cfg(test)]
+        CANDIDATE_HIGH_WATER.with(|mark| mark.set(mark.get().max(selected.len())));
+    }
+    let selected = selected.into_sorted_vec();
+    for (index, &(key, id)) in selected.iter().take(limit).enumerate() {
+        let Some((_, _, value)) = records.get(&id).and_then(|record| decode(&record.payload))
+        else {
+            continue;
+        };
+        let entry = KvRef {
+            key,
+            value,
+            version: state.revisions.get(&id).copied().unwrap_or_default(),
+            expires_at_ms: state.expiries.get(&id).copied(),
+            has_next: index + 1 < selected.len(),
+        };
+        if visitor(entry).is_break() {
             break;
         }
-        let resolved = probe(db, collection, namespace, key, now_ms)?.found;
-        if resolved.is_some_and(|found| found.slot == id) {
-            entries.extend(entry(db, collection, id)?);
-        }
     }
-    Ok(entries)
+    Ok(())
 }
 
 fn validate_namespace(namespace: &str) -> Result<()> {
@@ -495,6 +618,9 @@ fn decode(payload: &[u8]) -> Option<(&str, &str, &[u8])> {
         value,
     ))
 }
+
+#[cfg(test)]
+mod bounded_tests;
 
 #[cfg(test)]
 mod tests {

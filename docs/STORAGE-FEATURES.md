@@ -277,7 +277,15 @@ kv.delete("pool", "claim/42", Expected::Revision(token))?;
 - **Listing** with `view().list(namespace, prefix, after, limit)` returns keys
   in order, up to 10,000 per page. It scans the whole collection, so its cost
   grows with the number of entries, not with `limit`: keep key-value data in
-  its own collection and list by prefix.
+  its own collection and list by prefix. The scan keeps only the `limit + 1`
+  smallest candidate keys, so its working memory does not grow with the number
+  of matching entries. `list` copies every value it returns (10,000 values of
+  just under 1 MiB are roughly 10 GB), so use a smaller `limit` when values can
+  be large, or `view().visit_at(namespace, prefix, after, limit, now_ms,
+  visitor)`: it lends each value to a callback as a `KvRef` (with `has_next`,
+  which says whether the listing continues) and stops when the callback returns
+  `ControlFlow::Break(())`, so a caller can build a page of a fixed byte size
+  without copying the entries it leaves out.
 - **Limits:** namespaces up to 255 bytes, keys up to 1,024 bytes, values just
   under 1 MiB.
 - **Hash collisions:** keys hash to 16 consecutive record IDs. If all 16 hold
