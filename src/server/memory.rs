@@ -139,6 +139,8 @@ fn scope_tuple(scope: &MemoryScope) -> ScopeTuple {
 #[cfg(test)]
 mod pins_forget;
 #[cfg(test)]
+mod pins_receipts;
+#[cfg(test)]
 mod replay;
 mod routes;
 mod wire;
