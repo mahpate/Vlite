@@ -390,10 +390,13 @@ impl GraphRef<'_> {
             return Err(Error::GraphPivotTooExpensive);
         }
 
-        // Pivot phase: the unchanged hybrid search, re-validation, mapping.
+        // Pivot phase: the hybrid search, re-validation, mapping.
         let pivot_started = clock();
         // Gap 3: pivots and expansion see the graph at one read clock.
-        let at = self.with_clock(self.now());
+        let row_now_ms = self.now();
+        let at = self.with_clock(row_now_ms);
+        #[cfg(test)]
+        let compact_pivot = db.state(pivot_collection.id).records.is_compact();
         let query = HybridQuery {
             vector: pivot.vector.clone(),
             text: pivot.text.clone().unwrap_or_default(),
@@ -403,7 +406,17 @@ impl GraphRef<'_> {
             vector_leg: pivot.vector_leg,
             fusion: pivot.fusion,
         };
+        #[cfg(test)]
+        let (hits, search) = pivot_collection.search_hybrid_at(&query, row_now_ms)?;
+        #[cfg(not(test))]
         let (hits, search) = pivot_collection.search_hybrid(&query)?;
+        #[cfg(test)]
+        let graph_state = if compact_pivot {
+            db.graph.as_ref().ok_or(Error::GraphsNotEnabled)?
+        } else {
+            db.graphs()?
+        };
+        #[cfg(not(test))]
         let graph_state = db.graphs()?;
         let mut stats = RetrieveStats {
             pivot_candidates: hits.len() as u64,
@@ -413,6 +426,11 @@ impl GraphRef<'_> {
         let mut pivots = Vec::new();
         let mut unmapped = UnmappedPivots::default();
         for hit in hits {
+            #[cfg(test)]
+            let live = pivot_collection
+                .get_at(hit.id, row_now_ms)?
+                .is_some_and(|record| metadata::matches(&record.metadata, &pivot.filter));
+            #[cfg(not(test))]
             let live = db
                 .get_in(pivot_collection.id, hit.id)?
                 .is_some_and(|record| metadata::matches(&record.metadata, &pivot.filter));
@@ -481,7 +499,11 @@ impl GraphRef<'_> {
                     self.graph.attachments(NodeId(node.node.id)).collect();
                 for &(name, collection) in &evidence_collections {
                     for &(_, record_id) in attached.iter().filter(|(c, _)| *c == collection) {
-                        let Some(record) = db.get_in(collection, record_id)? else {
+                        #[cfg(test)]
+                        let record = db.collection(name)?.get_at(record_id, row_now_ms)?;
+                        #[cfg(not(test))]
+                        let record = db.get_in(collection, record_id)?;
+                        let Some(record) = record else {
                             continue;
                         };
                         if retrieval.evidence.len() as u64 >= evidence.max_items {

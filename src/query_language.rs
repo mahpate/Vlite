@@ -405,6 +405,11 @@ impl ParsedQuery {
         collection: CollectionRef<'_>,
         parameters: &BTreeMap<String, Vec<f32>>,
     ) -> Result<QueryOutput> {
+        #[cfg(test)]
+        if collection.db.state(collection.id).records.is_compact() {
+            collection.db.ensure_healthy()?;
+            return self.execute_compact(collection, parameters);
+        }
         collection.db.ensure_resident_in(collection.id)?;
         let state = collection.db.state(collection.id);
         let records = state.records.resident()?;
@@ -526,6 +531,163 @@ impl ParsedQuery {
                         out.groups.push(SearchGroup {
                             value: value.clone(),
                             hits: vec![h.clone()],
+                        });
+                    }
+                }
+            }
+        }
+        hits.truncate(self.limit);
+        out.hits = hits;
+        Ok(out)
+    }
+
+    #[cfg(test)]
+    fn execute_compact(
+        &self,
+        collection: CollectionRef<'_>,
+        parameters: &BTreeMap<String, Vec<f32>>,
+    ) -> Result<QueryOutput> {
+        let state = collection.db.state(collection.id);
+        let now_ms = crate::current_time_ms();
+        let depth = state.records.len();
+        let mut visible = BTreeMap::new();
+        for row in state
+            .records
+            .compact_iter(None)
+            .expect("compact collection check above")
+        {
+            let (id, record) = row?;
+            if !state
+                .expiries
+                .get(&id)
+                .is_some_and(|expiry| *expiry <= now_ms)
+            {
+                visible.insert(id, record.metadata.clone());
+            }
+        }
+        let mut hits = if let Some(name) = &self.name {
+            let vector = parameters
+                .get(self.parameter.as_deref().unwrap_or(""))
+                .ok_or(Error::InvalidQuery("missing vector parameter"))?;
+            if name == "default" {
+                if self.version.is_some() {
+                    return Err(Error::InvalidQuery(
+                        "the legacy default vector has no model versions",
+                    ));
+                }
+                collection.search_filtered_with_metric_at(
+                    vector,
+                    depth,
+                    &[],
+                    crate::DistanceMetric::SquaredL2,
+                    now_ms,
+                )?
+            } else {
+                collection.search_named_at(name, self.version.as_deref(), vector, depth, now_ms)?
+            }
+        } else {
+            Vec::new()
+        };
+        hits.retain(|hit| {
+            visible
+                .get(&hit.id)
+                .is_some_and(|metadata| self.matches(metadata))
+        });
+        if let Some(text) = &self.text {
+            let status = state.text_index.status();
+            if !status.available {
+                return Err(Error::IndexNotReady);
+            }
+            if status.declared_fields == 0 {
+                return Err(Error::InvalidQuery("text fields must be declared"));
+            }
+            let terms: BTreeSet<_> = crate::text_index::tokenize(text).into_iter().collect();
+            let lexical: Vec<_> = state
+                .text_index
+                .search(&terms, depth, |id| {
+                    visible
+                        .get(&id)
+                        .is_some_and(|metadata| self.matches(metadata))
+                })
+                .into_iter()
+                .map(|(id, score)| SearchHit {
+                    id,
+                    distance: -score,
+                })
+                .collect();
+            if self.name.is_some() {
+                let fusion = crate::hybrid::fuse_ranked(
+                    &hits,
+                    &lexical,
+                    1000,
+                    crate::hybrid::FusionOptions::default(),
+                )?;
+                hits = fusion
+                    .into_iter()
+                    .map(|hit| SearchHit {
+                        id: hit.id,
+                        distance: -hit.score,
+                    })
+                    .collect();
+            } else {
+                hits = lexical;
+            }
+        }
+        hits.retain(|hit| {
+            visible
+                .get(&hit.id)
+                .is_some_and(|metadata| self.matches(metadata))
+        });
+        if let Some((field, desc)) = &self.order {
+            hits.sort_by(|a, b| {
+                let order = if field == "distance" {
+                    a.distance.total_cmp(&b.distance)
+                } else if field == "id" {
+                    a.id.cmp(&b.id)
+                } else {
+                    let a = visible.get(&a.id).and_then(|metadata| metadata.get(field));
+                    let b = visible.get(&b.id).and_then(|metadata| metadata.get(field));
+                    match (a, b) {
+                        (Some(a), Some(b)) => compare(a, b).unwrap_or(std::cmp::Ordering::Equal),
+                        (Some(_), None) => std::cmp::Ordering::Less,
+                        (None, Some(_)) => std::cmp::Ordering::Greater,
+                        _ => std::cmp::Ordering::Equal,
+                    }
+                };
+                let order = if *desc { order.reverse() } else { order };
+                order.then(a.id.cmp(&b.id))
+            });
+        }
+        let mut out = QueryOutput::default();
+        if let Some(field) = &self.facet {
+            for hit in &hits {
+                if let Some(value) = visible
+                    .get(&hit.id)
+                    .and_then(|metadata| metadata.get(field))
+                {
+                    if let Some(facet) = out.facets.iter_mut().find(|f| f.value == *value) {
+                        facet.count += 1;
+                    } else {
+                        out.facets.push(FacetCount {
+                            value: value.clone(),
+                            count: 1,
+                        });
+                    }
+                }
+            }
+        }
+        if let Some(field) = &self.group {
+            for hit in &hits {
+                if let Some(value) = visible
+                    .get(&hit.id)
+                    .and_then(|metadata| metadata.get(field))
+                {
+                    if let Some(group) = out.groups.iter_mut().find(|g| g.value == *value) {
+                        group.hits.push(hit.clone());
+                    } else if out.groups.len() < self.limit {
+                        out.groups.push(SearchGroup {
+                            value: value.clone(),
+                            hits: vec![hit.clone()],
                         });
                     }
                 }

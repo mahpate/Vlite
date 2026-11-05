@@ -311,15 +311,32 @@ fn compact_dispatch_unqualified_scans_and_derived_reads_refuse() {
                     .search_filtered_with_metric_at(&query, 1, &[], DistanceMetric::SquaredL2, 0)
                     .unwrap()
             );
-            unsupported(view.facets("tag", &[]), "facets");
+            let resident_view = oracle.collection(&info.name).unwrap();
+            assert_eq!(
+                view.facets("tag", &[]).unwrap(),
+                resident_view.facets("tag", &[]).unwrap()
+            );
+            assert_eq!(
+                view.search_grouped(&query, 10, 10, "tag", &[], DistanceMetric::SquaredL2)
+                    .unwrap(),
+                resident_view
+                    .search_grouped(&query, 10, 10, "tag", &[], DistanceMetric::SquaredL2)
+                    .unwrap()
+            );
             unsupported(view.numeric_stats("number", &[]), "numeric_stats");
             unsupported(view.vector_specs(), "vector_specs");
-            unsupported(view.record_vectors(0), "record_vectors");
+            let resident_view = oracle.collection(&info.name).unwrap();
+            assert_eq!(
+                view.record_vectors(0).unwrap(),
+                resident_view.record_vectors(0).unwrap()
+            );
             unsupported(view.reembed_status("missing"), "reembed_status");
             unsupported(view.search_sparse("missing", &[], 0), "search_sparse");
-            unsupported(
-                view.search_named("missing", None, &query, 0),
-                "search_named",
+            assert_eq!(
+                view.search_named("missing", None, &query, 0).is_err(),
+                resident_view
+                    .search_named("missing", None, &query, 0)
+                    .is_err()
             );
             let snapshot = view.read_snapshot().unwrap();
             let resident_snapshot = oracle
