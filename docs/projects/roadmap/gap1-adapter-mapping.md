@@ -388,13 +388,16 @@ code, goldens, OpenAPI text and user documentation agree.
   not reported; contract section 5 expects a report, which is a later slice. A
   missing or null `mode` and a bad `target` entry name `mode` and `target` in
   `details.field`.
-- **Recall distance.** Vector recall measures squared Euclidean distance (the
-  core's query metric) for `weighted`, `exact` and `mmr`. `exact` orders by it
-  and every selection reports it as `scores.distance`; `mmr` selects by cosine
-  but reports the squared value. Contract section 4 says `mmr` retains cosine
-  distance, and the unreplayed goldens `recall-vector-exact`,
-  `recall-vector-mmr` and `recall-mmr-diversity-not-weighted-score-order`
-  expect cosine values (1 for orthogonal vectors, where the server reports 2).
-  For vectors that are not unit length the order differs from a cosine
-  ranking: against the query [1,0], `exact` returns [0.6,0.6] before [10,0].
-  Choosing the metric (and replaying those three goldens) is a later slice.
+- **Recall distance.** `weighted` recall measures squared Euclidean distance
+  (the core's query metric) and reports it as `scores.distance`. `exact` and
+  `mmr` measure cosine distance `1 - cos` (0.7.1; the 0.7.0 first slice
+  measured squared Euclidean for all three, so `exact` ordered by it and `mmr`
+  selected by cosine but reported the squared value): `exact` orders by it,
+  both report it, and the `mmr` candidate pool follows it. A zero query vector
+  is refused as 422 `invalid_input` and a stored zero vector is never a
+  candidate (the oracle leaves the zero-norm convention open, OPEN-G1W-10). The
+  goldens `recall-vector-exact`, `recall-vector-mmr` and
+  `recall-mmr-diversity-not-weighted-score-order`, which expect cosine values
+  (1 for orthogonal vectors), are regenerated with evidence IDs the server can
+  be seeded with and replayed ([0.7.1 design note](m71-memory-followups.md),
+  section 3).

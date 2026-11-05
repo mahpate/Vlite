@@ -252,3 +252,66 @@ nothing about reservations. An ordinary batch to a reserved graph still answers
 - **Upgrade note.** A raw caller that wrote a label starting with `VliteMemory`
   or a key with one of these prefixes now gets 422. This is the one visible
   change of the slice.
+
+## 3. Recall distance: cosine for `exact` and `mmr` (slice S4)
+
+**Problem.** 0.7.0 measures every recall with the squared Euclidean distance of
+the query, the default metric of the hybrid query. `exact` orders its candidates
+by it, and every selection reports it as `scores.distance`, including `mmr`,
+which selects by cosine internally and which the serving contract (section 4)
+says retains cosine distance. For vectors that are not unit length the order
+differs from a cosine ranking. Three wire goldens that expect cosine values were
+left unreplayed: `recall-vector-exact`, `recall-vector-mmr` and
+`recall-mmr-diversity-not-weighted-score-order`.
+
+**Decision (D4, approved).** `exact` and `mmr` use the cosine distance, and
+report it as `scores.distance`. `weighted`, the default selection, is unchanged:
+it keeps the query's own metric (squared Euclidean), so no existing ranking
+changes.
+
+### 3.1 The rule
+
+- The dense leg of an `exact` or `mmr` recall is enumerated by cosine distance
+  `1 - cos(q, v)`, computed in f64 from the f32 operands (0 for the same
+  direction, 1 for orthogonal, 2 for opposite). Ties keep the exact reranker's
+  order: distance, then record ID. The `mmr` candidate pool (the best
+  `candidates` by dense distance) is therefore a cosine pool, and `mmr` reports
+  the value its own selection uses.
+- A query vector with zero norm has no direction: 422 `invalid_input`, before
+  any record is read. A stored vector with zero norm has no cosine distance and
+  is never a candidate of `exact` or `mmr`. (0.7.0 accepted a zero query under
+  `exact`; `mmr` already refused it.) The oracle leaves this convention open
+  (OPEN-G1W-10); the rule above is the one the engine's cosine metric already
+  has.
+- Nothing else changes: selection names, refusals, work charges (`meta`), ranks.
+
+### 3.2 Compatibility
+
+A visible change for `exact` and `mmr` callers whose vectors are not unit
+length: the order of `exact` hits and every `scores.distance` of both selections
+change. For unit-length vectors the order is the same and the new distance is
+half the old one. A caller that keeps a threshold on `scores.distance` must
+recalibrate. API.md carries the upgrade note; the release notes repeat it.
+
+### 3.3 Goldens (D5)
+
+The three goldens describe their candidates by numeric record IDs and vectors
+the server cannot be seeded with: the ID of an evidence record is derived from
+its evidence ID (the first 8 bytes of the SHA-256 of the ID, big-endian). They
+are regenerated: each candidate names its `evidence_id` and the record ID that
+follows from it, and the independent oracle (`tests/memory_wire_oracle.py`)
+emits the evidence list and the raw scores. The replay harness seeds each such
+candidate as a memory with an attached evidence record carrying the vector, and
+checks that the record ID it got is the one the golden names. Cosine values,
+orders and the MMR objective stay the oracle's, not the server's.
+
+### 3.4 Tests and campaigns
+
+Contract first: the probe of the first design report (A = [10, 0],
+B = [0.6, 0.6], query [1, 0]: `exact` answers A, B with distances 0 and
+1 - 1/sqrt(2); `mmr` with lambda 1 answers A, B), cosine values for orthogonal
+and opposite vectors, the zero-norm query, a stored zero vector, the MMR pool
+chosen by cosine when `depth` is smaller than the collection, and the three
+goldens replayed (the skip list shrinks by three). Mutants: at least 24 for the
+recall route family, covering the metric of each selection, the pool, the
+reported value, the zero-norm rules and the golden harness.
