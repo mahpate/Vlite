@@ -16,8 +16,9 @@ unchanged and no size claim is made.
 - **Candidate discipline.** One candidate branch received only accepted work. Each lane branch was integrated after its own diff
   review, gates and hand-mutation campaign, then the whole candidate was reviewed again by independent reviewers.
 - **Hand-mutation campaigns.** Every behavior the contract states had to be killed by a test that derives its expectation from
-  the contract, not from the code. Counts at the freeze: key-value 82 of 82 non-equivalent mutants killed plus 10 follow-up
-  mutants; reserved-resource guards 135 hand mutants over five rounds, all killed; agent-memory routes 352 independent mutants, of
+  the contract, not from the code. Counts recorded by the lanes at the freeze: key-value 82 of 82 non-equivalent mutants killed
+  plus 10 follow-up mutants; reserved-resource guards 117 hand mutants over the rounds (40, 34, 19, 22 and 2), all killed, with
+  the lists in `tests/reserved_resource_mutants.json` and the commit messages; agent-memory routes 352 independent mutants, of
   which 202 were killed on the first run and the other 150 were closed with new tests. A survivors-only rerun on the release head
   confirmed it: 149 of the 150 are killed and one is proven equivalent (the adapter captures the clock once per request, and
   receipt nodes carry no deadline, so recapturing it cannot change a response). Mutant lists with their anchors, the runner and the
@@ -90,7 +91,9 @@ Structural fix for the reserved-resource class: one guard type per request that 
 (collection, graph, graph for write, create), delete the free `open()` and its optional bindings argument, filter reserved names
 in the core `resolve`, generate the differential test from the OpenAPI route inventory including body-named collections, make the
 `GraphOp` match exhaustive and ban `db.resolve`, `db.collection` and `db.graph` calls in `src/server` outside the guard module
-with a source check.
+with a source check. Also assert after every mutating request that the reserved resources and the root namesakes of a tenant's
+collection names are unchanged: comparing status codes alone missed the metadata update route, which answered normally while it
+wrote to the wrong collection.
 
 ## Habits that paid off
 
