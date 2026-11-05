@@ -374,3 +374,91 @@ fused list differently; the refusals that remain (`mmr` with text; a missing
 vector, seeds, expansion and other weights for both selections). Mutants: at
 least 24 for the recall route family, covering the validity rule for text, the
 selection block, the fusion of the two legs and the adapter's refusal.
+
+## 5. Evidence references on items (slice S6)
+
+**Problem.** The REST adapter refuses every nonempty `evidence` list of an item
+(409 `memory_capability_unavailable`, feature `evidence`). The contract
+(`MemoryItem.evidence`, a list of `MemoryEvidenceRef`) names a record of the
+binding's evidence collection by `{collection, record}`. The core already
+attaches a record to a memory, but it names the record by an evidence ID string
+whose SHA-256 gives the record number, so a number from the wire has no ID.
+
+**Decision (D6, with one deviation).** Accept an item's references to a record
+that already exists in the binding's evidence collection. The deviation from
+D6: no new digest version. The core's request digest, `memory-request-v1`,
+already hashes each evidence ID and its scope. A reference becomes the reserved
+evidence ID `record:<decimal>`; the digest hashes it like any other ID, so no
+existing digest changes and no receipt carries a second version. The rest of
+the core (ownership checks, attachment, recall, forget) keeps working on IDs
+and derives the record number through one function, which the reserved form
+short-circuits. Creating records inside a remember request (the request-level
+`evidence` list) is a different feature and stays refused.
+
+### 5.1 The wire form
+
+- `evidence: [{"collection": "<binding name>", "record": <MemoryU64>}]` on an
+  item of `remember`. The collection is the alias of the binding, which is its
+  name, as `recall` already reports it. `record` is a canonical decimal string
+  or an exact JSON integer in the `u64` range.
+- At most one reference per item: the engine attaches at most one record to a
+  memory. A longer list, an unknown or missing field, another collection name
+  and a record that is not a `u64` are 422 `invalid_input` with
+  `details.field` `evidence`. An empty list is the same as none (unchanged).
+- A binding without an evidence collection keeps refusing a nonempty list
+  (409 `memory_capability_unavailable`, feature `evidence`), and so does the
+  request-level `evidence` list on every binding. The `evidence` of a
+  consolidate output stays refused.
+
+### 5.2 Authorization
+
+A reference claims a record: the record exists, no memory owns it, and the
+attachment makes it the memory's evidence, which recall then returns. A record
+that no memory owns belongs to no scope, so a principal that reaches the
+collection only through memory routes must not be able to claim a record by
+guessing its number. The route therefore requires that the principal's binding
+grant carries `raw_access`, the capability that already reads and writes the
+collection directly; the reference then adds no read access. Without it the
+answer is the single 403 body, before the record is looked at, so the answer
+does not tell whether a record exists. The credential still needs the write
+grant on the evidence collection that `remember` requires and the exact scope
+grant.
+
+### 5.3 The core
+
+- `evidence_record_id` returns the number of a reserved ID and hashes every
+  other ID, as before. A reserved ID is `record:` and the canonical decimal of a
+  `u64` (no sign, no leading zero, no overflow); anything else with the prefix
+  is `InvalidEvidence` (422 `invalid_input`). The adapter is the only caller
+  that builds a reserved ID.
+- The existing checks apply unchanged: a record owned by a memory of another
+  scope is `CrossScope` (422 `invalid_input`), a record that is missing, has an
+  expiry or is owned by another memory of the same scope is
+  `RecordAlreadyAttached` (409 `memory_attachment_conflict`), and nothing is
+  written in either case.
+- Recall already reports `{collection, record, snippet}` for an attached
+  record. Forget detaches the record and deletes it unless another retained
+  memory uses it, as for every evidence record; consolidate is unchanged.
+
+### 5.4 Replay and compatibility
+
+The digest of a request that carries a reference hashes the reserved ID, so an
+exact retry replays, a retry that names another record is 409
+`idempotency_conflict`, and a request without references hashes as before. The
+stored memory keeps its ID in the existing `evidence` property: no file format
+changes for files that never use a reference. A 0.7.0 server derives the record
+of a reserved ID by hashing it and so does not find it: it omits the evidence of
+such a memory from recall and cannot forget the memory. Do not downgrade a file
+after the first reference.
+
+### 5.5 Tests and campaigns
+
+Contract first: the reserved-ID rules (canonical forms only, no overflow, the
+ordinary IDs still hash to their pinned values); a reference attaches an
+existing record and recall reports it; a missing record, a record of another
+memory and a record of another scope are refused without a write; the digest of
+a request with a reference derived independently (the contract's canonical JSON
+text, hashed outside the engine); an exact replay and a changed record; the
+wire refusals of 5.1 and the 403 of 5.2. Mutants: at least 24 for the remember
+route family, covering the alias, the record form, the limit of one, the
+authorization, the refusals that remain and the core rules.
