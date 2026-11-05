@@ -378,7 +378,7 @@
           <label>Ranking<select id="memory-ranking"><option value="weighted">Weighted (default)</option><option value="exact">Exact vector distance</option><option value="mmr">MMR vector diversity</option></select></label>
           <label>Result limit<input id="memory-limit" type="number" min="1" max="100" value="20"></label>
           <label>MMR relevance weight (0 diversity .. 1 relevance)<input id="memory-lambda" type="number" min="0" max="1" step="0.05" value="0.5"></label>
-          <p>Exact and MMR ranking require a vector alone: remove entity seeds and query text. Distance is squared Euclidean, not cosine.</p>
+          <p>Exact and MMR ranking require a vector alone: remove entity seeds and query text. Both use cosine distance.</p>
           <p>Recall is bounded and may be truncated; inspect its reasons and work counters below. No automatic embedding or approximate memory search is requested.</p>
         </div>
         <div data-memory-action="remember consolidate" hidden>

@@ -39,6 +39,14 @@ const draft = {
   source: "manual", sourceKind: "dashboard", transformation: "summary-v1",
   references: '[{"id":"one","revision":"18446744073709551615"}]', operation: "forget",
 };
+test("MemoryAI ranking guidance matches the exact/MMR cosine contract", () => {
+  const html = fs.readFileSync("src/dashboard/index.html", "utf8");
+  const guide = fs.readFileSync("docs/CONSOLE.md", "utf8");
+  assert.match(html, /Exact and MMR ranking require a vector alone:[^<]*Both use cosine distance\./);
+  assert.match(guide, /Exact\/MMR require a vector alone and\s+use cosine distance\./);
+  assert.doesNotMatch(html, /Distance is squared Euclidean, not cosine/);
+});
+
 test("Memory requests use exact scope, bounded reads and revision-pinned logical deletion", () => {
   const recall = plain(u.memoryRequest("recall", draft, 123));
   assert.deepEqual(recall, { scope: { agent: "agent-a", user: "user-a", session: "session-a" }, entity_seeds: ["one", "two"], limits: { deadline_ms: 5000 } });

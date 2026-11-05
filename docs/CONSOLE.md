@@ -170,7 +170,7 @@ Use an operator-provided binding and exact agent/user/session scope with a
 **scoped API token**; administrator sign-in alone grants no memory access.
 Recall accepts seeds, text or vectors; text needs indexed evidence. Set result
 limits and weighted, exact or MMR ranking. Exact/MMR require a vector alone and
-measure squared Euclidean distance. Inspect provenance, revisions and truncation.
+use cosine distance. Inspect provenance, revisions and truncation.
 
 Remember supports entity/episodic memories. Consolidation retains originals;
 Forget pins ID/revision pairs and is **not secure erasure**. Mutations require
