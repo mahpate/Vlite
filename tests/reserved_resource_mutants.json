@@ -1780,7 +1780,7 @@
         "file": "src/property_graph/mod.rs",
         "old": "if !attachable(graph, collection) {",
         "new": "if false && !attachable(graph, collection) {",
-        "cmd": "cargo test --locked --offline --all-features --no-fail-fast --test server_guard_differential --test server_memory_guards --test server_memory_reserved_as_missing --test tenants --lib",
+        "cmd": "cargo test --locked --offline --all-features --no-fail-fast --test server_memory_guards -- an_ordinary_record_cannot_be_attached_to_a_reserved_graph_even_by_its_raw_holder",
         "result": "pending"
       },
       {
