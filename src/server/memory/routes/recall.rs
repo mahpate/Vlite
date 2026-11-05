@@ -590,3 +590,7 @@ fn recall_in(
         .map_err(|error| recall_fail(error, parsed.allow_partial))?;
     response(output, binding, parsed)
 }
+
+#[cfg(test)]
+#[path = "../pins_recall2.rs"]
+mod pins_recall2;
