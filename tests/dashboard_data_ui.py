@@ -152,20 +152,28 @@ def exercise(browser):
     expect(page.locator("#kv-expiry")).to_have_value(MAX_U64)
     page.locator("#kv-value").fill("aGVsbG8=")
     page.locator("#kv-expiry").fill("")
-    page.locator("#kv-save").click()
-    confirm(page, "Save key")
+    with page.expect_response(lambda response: response.request.method == "PUT" and
+                              response.url.endswith("/kv/entry")) as saved:
+        page.locator("#kv-save").click()
+        confirm(page, "Save key")
+    returned_revision = saved.value.json()["version"]
     expect(page.locator("#kv-outcome")).to_contain_text("Server confirmed")
     request = next(item for item in reversed(fake.log) if item["method"] == "PUT")
     assert request["query"] == ""
     assert request["body"]["expected"] == {"revision": MAX_U64}
     assert request["body"]["namespace"] == "n&space"
     assert "expires_at_ms" not in request["body"]
-    expect(page.locator("#kv-version")).to_have_value("3")
-    page.locator("#kv-save").click()
-    confirm(page, "Save key")
+    expect(page.locator("#kv-version")).to_have_value(returned_revision)
+    # The confirmation closes before the PUT completes; the previous success
+    # message alone cannot prove that the second request reached the server.
+    with page.expect_response(lambda response: response.request.method == "PUT" and
+                              response.url.endswith("/kv/entry")) as saved_again:
+        page.locator("#kv-save").click()
+        confirm(page, "Save key")
+    assert saved_again.value.request.post_data_json["expected"] == {"revision": returned_revision}
     expect(page.locator("#kv-outcome")).to_contain_text("Server confirmed")
     request = next(item for item in reversed(fake.log) if item["method"] == "PUT")
-    assert request["body"]["expected"] == {"revision": "3"}
+    assert request["body"]["expected"] == {"revision": returned_revision}
     page.locator("#kv-list").click()
     expect(page.locator("#kv-next")).to_be_enabled()
     page.locator("#kv-next").click()
