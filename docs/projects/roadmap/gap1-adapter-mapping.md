@@ -377,3 +377,11 @@ code, goldens, OpenAPI text and user documentation agree.
   not reported; contract section 5 expects a report, which is a later slice. A
   missing or null `mode` and a bad `target` entry name `mode` and `target` in
   `details.field`.
+- **Recall distance.** `scores.distance` is the squared Euclidean distance of the
+  vector leg for `weighted`, `exact` and `mmr` (the core's query metric).
+  Contract section 4 says `mmr` retains cosine distance, and the unreplayed
+  goldens `recall-vector-exact`, `recall-vector-mmr` and
+  `recall-mmr-diversity-not-weighted-score-order` expect cosine values (1 for
+  orthogonal vectors, where the server reports 2). Ranks, order and scores
+  other than `distance` do not depend on the reported value. Choosing the
+  metric (and replaying those three goldens) is a later slice.

@@ -158,7 +158,9 @@ Agent memory stores remembered entities and episodes in a graph and recalls them
   `remember_receipt_lookup`; the original `remember` response carries the
   complete receipt. A 412 `precondition_failed` carries the code and message
   only. Recall is exact and bounded: `exact` and `mmr` selection work on a
-  vector alone, and `mode: approximate` answers 422
+  vector alone, a hit's `scores.distance` is the squared Euclidean distance of
+  the vector search (the contract describes cosine distance for `mmr`; ranks
+  and order are unaffected), and `mode: approximate` answers 422
   `memory_bounded_plan_unsupported`. Items cannot yet carry evidence
   references, metadata, assertions or a `confidence`. A binding's identity (its
   receipt window, generation and names) is read from the file at each start and
