@@ -550,21 +550,6 @@ impl ParsedQuery {
         let state = collection.db.state(collection.id);
         let now_ms = crate::current_time_ms();
         let depth = state.records.len();
-        let mut visible = BTreeMap::new();
-        for row in state
-            .records
-            .compact_iter(None)
-            .expect("compact collection check above")
-        {
-            let (id, record) = row?;
-            if !state
-                .expiries
-                .get(&id)
-                .is_some_and(|expiry| *expiry <= now_ms)
-            {
-                visible.insert(id, record.metadata.clone());
-            }
-        }
         let mut hits = if let Some(name) = &self.name {
             let vector = parameters
                 .get(self.parameter.as_deref().unwrap_or(""))
@@ -588,12 +573,7 @@ impl ParsedQuery {
         } else {
             Vec::new()
         };
-        hits.retain(|hit| {
-            visible
-                .get(&hit.id)
-                .is_some_and(|metadata| self.matches(metadata))
-        });
-        if let Some(text) = &self.text {
+        if self.text.is_some() {
             let status = state.text_index.status();
             if !status.available {
                 return Err(Error::IndexNotReady);
@@ -601,6 +581,28 @@ impl ParsedQuery {
             if status.declared_fields == 0 {
                 return Err(Error::InvalidQuery("text fields must be declared"));
             }
+        }
+        let mut visible = BTreeMap::new();
+        for row in state
+            .records
+            .compact_iter(None)
+            .expect("compact collection check above")
+        {
+            let (id, record) = row?;
+            if !state
+                .expiries
+                .get(&id)
+                .is_some_and(|expiry| *expiry <= now_ms)
+            {
+                visible.insert(id, record.metadata.clone());
+            }
+        }
+        hits.retain(|hit| {
+            visible
+                .get(&hit.id)
+                .is_some_and(|metadata| self.matches(metadata))
+        });
+        if let Some(text) = &self.text {
             let terms: BTreeSet<_> = crate::text_index::tokenize(text).into_iter().collect();
             let lexical: Vec<_> = state
                 .text_index
