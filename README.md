@@ -34,8 +34,8 @@ service to operate.
 - **Advanced retrieval.** Opt-in collections, record expiry, named and sparse
   vectors, hybrid search, facets, geo filters and recommendations.
 - **Server.** Authenticated REST with OpenAPI, optional gRPC and TLS,
-  key-value operations, opt-in managed embedding and ranking providers,
-  Prometheus metrics, non-root Docker images and a Helm chart.
+  key-value operations, opt-in agent memory and managed embedding and ranking
+  providers, Prometheus metrics, non-root Docker images and a Helm chart.
 - **Dashboard.** Browse, search, write, import, index, monitor and query
   graphs, with user accounts, roles and tenants.
 - **Storage options.** Encryption at rest, point-in-time restore, a change
@@ -43,7 +43,7 @@ service to operate.
   and an opt-in directory store with checkpoints (Rust).
 - **Tools.** Interactive shell, validated imports, offline maintenance, index
   tuning, a graph CLI, an MCP server and agent skills, with local key-value
-  commands in the shell and MCP.
+  commands in the shell and MCP, and agent-memory tools and a CLI client.
 - **Performance.** At 100,000 × 384 dimensions, this release has about 42% lower
   exact query latency and 23% lower filtered query latency than the previous
   one (p50), with identical recall and file size. Ingest, reopen and memory
@@ -233,9 +233,8 @@ These plans are proposals under review, not commitments:
 
 - [Storage and speed goals](docs/projects/performance/storage-goals.md):
   smaller files and faster search, building on the directory store.
-- [Product gaps](docs/projects/product-gaps/product-gaps.md): agent memory,
-  graph history, graph query and ingestion, a gRPC graph service, replication
-  and more.
+- [Product gaps](docs/projects/product-gaps/product-gaps.md): graph history,
+  graph query and ingestion, a gRPC graph service, replication and more.
 
 ## License
 
