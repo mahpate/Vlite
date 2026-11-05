@@ -33,6 +33,8 @@ pub(super) const RECALL: &str =
     include_str!("../../../tests/fixtures/agent_memory/wire/recall.json");
 pub(super) const CONSOLIDATE: &str =
     include_str!("../../../tests/fixtures/agent_memory/wire/consolidate.json");
+pub(super) const FORGET: &str =
+    include_str!("../../../tests/fixtures/agent_memory/wire/forget.json");
 
 const PRINCIPAL: &str = "abcdefghij27";
 const OTHER: &str = "bcdefghij234";
@@ -442,6 +444,25 @@ impl Harness {
             }
         }
         self.at(clock);
+        if operation == "forget" {
+            // The forgotten targets existed when the receipt was written.
+            let items: Vec<Value> = request["target"]["ids"]
+                .as_array()
+                .into_iter()
+                .flatten()
+                .map(|target| {
+                    json!({"id": target["id"], "kind": "entity", "content": target["id"],
+                        "observed_at_ms": 0, "source": {"source_id": "base", "source_kind": "caller"}})
+                })
+                .collect();
+            let remember = format!("{}/remember", path.rsplit_once('/').unwrap().0);
+            let (status, body) = self
+                .send(&json!({"method": "POST", "path": remember, "body": {
+                    "scope": request["scope"], "idempotency_key": "replay-targets", "items": items,
+                }}))
+                .await;
+            assert_eq!(status, 200, "receipt targets: {body}");
+        }
         let (status, body) = self
             .send(&json!({"method": "POST", "path": path, "body": request}))
             .await;
@@ -464,7 +485,25 @@ fn is_sequence(value: &Value) -> bool {
 }
 
 /// Brings a served body into the oracle's normal form (module docs).
+/// Forget outcomes are at the receipt sequence, so they follow it. The
+/// oracle's injected `manifest_id` is copied like a receipt ID after
+/// checking the served notice omits it (the disclosed E4 gap).
 fn normalize(name: &str, actual: &mut Value, expected: &Value, seeded: Option<&Value>) {
+    if let Some(receipt) = actual.get("receipt") {
+        let sequence = receipt["sequence"].clone();
+        for outcome in actual["outcomes"].as_array_mut().into_iter().flatten() {
+            if outcome["action"] == "deleted" {
+                assert_eq!(outcome["revision"], sequence, "{name}: deleted revision");
+                outcome["revision"] = expected["receipt"]["sequence"].clone();
+            }
+        }
+    }
+    if let Some(notice) = actual.get_mut("erasure_notice") {
+        assert!(notice.get("manifest_id").is_none(), "{name}: manifest");
+        if let Some(manifest) = expected["erasure_notice"].get("manifest_id") {
+            notice["manifest_id"] = manifest.clone();
+        }
+    }
     if let Some(receipt) = actual.get_mut("receipt") {
         assert!(is_receipt_id(&receipt["id"]), "{name}: receipt id");
         assert!(is_sequence(&receipt["sequence"]), "{name}: sequence");
@@ -1034,5 +1073,124 @@ mod tests {
             assert_eq!(status, 422, "{body}");
             assert_eq!(body["error"]["code"], "invalid_input");
         }
+    }
+
+    /// Injected `target_kinds` and `attach` pre-state steps describe state
+    /// the first-slice core cannot create; their 409s are mapping tests.
+    const FORGET_SKIP: [(&str, &str); 3] = [
+        (
+            "forget-external-attachment-atomic-refusal",
+            "injected attach pre_state",
+        ),
+        ("forget-id-fact-core-absent", "injected target_kinds"),
+        ("forget-id-relation-core-absent", "injected target_kinds"),
+    ];
+
+    /// Refusals precede validation (mapping section 2): `expire` without
+    /// `expires_at_ms` is refused, not rejected as malformed.
+    const FORGET_DEVIATIONS: [Deviation; 1] = [(
+        "forget-expire-requires-deadline",
+        409,
+        "memory_capability_unavailable",
+        Some("forget_expire"),
+    )];
+
+    #[tokio::test]
+    async fn forget_fixture_cases_replay_over_http() {
+        let replayed = replay(FORGET, &FORGET_SKIP, &FORGET_DEVIATIONS).await;
+        assert_eq!(replayed, 16 - FORGET_SKIP.len());
+    }
+
+    fn forget_request(body: Value) -> Value {
+        let mut base = json!({
+            "scope": {"agent": "a"}, "idempotency_key": "k",
+            "target": {"ids": [{"id": "m", "revision": "1"}]}, "mode": "logical_delete",
+        });
+        base.as_object_mut()
+            .unwrap()
+            .extend(body.as_object().unwrap().clone());
+        json!({"method": "POST", "path": "/v1/memory/notes/forget", "body": base})
+    }
+
+    #[tokio::test]
+    async fn forget_refusals_precede_validation() {
+        for (body, feature) in [
+            (
+                json!({"target": {"series": {"id": "x"}}, "mode": "expire"}),
+                "forget_target",
+            ),
+            (json!({"target": {"entity": 1}}), "forget_target"),
+            (json!({"target": {"session": true}}), "erasure_jobs"),
+            (
+                json!({"target": {"scope": "bad"}, "allow_job": 3}),
+                "erasure_jobs",
+            ),
+            (
+                json!({"mode": "expire", "allow_job": true}),
+                "forget_expire",
+            ),
+            (json!({"allow_job": true, "mode": 1}), "erasure_jobs"),
+        ] {
+            let (status, body) = served(&view(), &forget_request(body)).await;
+            assert_eq!(status, 409, "{feature}: {body}");
+            assert_eq!(body["error"]["details"]["feature"], feature, "{body}");
+        }
+    }
+
+    #[tokio::test]
+    async fn forget_validates_targets_and_mode() {
+        for body in [
+            json!({"target": {"ids": []}}),
+            json!({"target": {"ids": [{"id": "m", "revision": "0"}]}}),
+            json!({"target": {"ids": [{"id": "m", "revision": "1", "x": 1}]}}),
+            json!({"target": {"ids": [{"id": "m", "revision": "1"}], "x": 1}}),
+            json!({"target": {}}),
+            json!({"mode": "purge"}),
+            json!({"expires_at_ms": "5"}),
+            json!({"allow_job": "no"}),
+            json!({"extra": 1}),
+            json!({"target": {"ids": [{"id": "m", "revision": "1"}, {"id": "m", "revision": "1"}]}}),
+        ] {
+            let (status, body) = served(&view(), &forget_request(body)).await;
+            assert_eq!(status, 422, "{body}");
+            assert_eq!(body["error"]["code"], "invalid_input");
+        }
+    }
+
+    /// Outcomes are sorted by ID, each at the receipt revision, with the
+    /// logical state and the manifest-less notice.
+    #[tokio::test]
+    async fn forget_reports_sorted_deletions_at_the_receipt_revision() {
+        let harness = harness(&view()).unwrap();
+        harness.at(100);
+        let remember = json!({"method": "POST", "path": "/v1/memory/notes/remember", "body": {
+            "scope": {"agent": "a"}, "idempotency_key": "seed", "items": [
+                {"id": "b", "kind": "entity", "content": "B", "observed_at_ms": 1,
+                 "source": {"source_id": "s", "source_kind": "caller"}},
+                {"id": "a", "kind": "entity", "content": "A", "observed_at_ms": 1,
+                 "source": {"source_id": "s", "source_kind": "caller"}}]}});
+        assert_eq!(harness.send(&remember).await.0, 200);
+        let request = forget_request(json!({"target": {"ids": [
+            {"id": "b", "revision": "1"}, {"id": "a", "revision": "1"}]}}));
+        let (status, body) = harness.send(&request).await;
+        assert_eq!(status, 200, "{body}");
+        let sequence = body["receipt"]["sequence"].clone();
+        assert_eq!(
+            body["outcomes"],
+            json!([{"id": "a", "action": "deleted", "revision": sequence},
+                   {"id": "b", "action": "deleted", "revision": sequence}])
+        );
+        assert_eq!(body["state"], "logical");
+        assert_eq!(body["receipt"]["operation"], "forget");
+        assert_eq!(
+            body["erasure_notice"],
+            json!({"live_state_only": true, "secure_erasure": false,
+                   "external_copies": "operator_managed", "restore_requires_manifest": true,
+                   "backup_history_purge": "not_verified"})
+        );
+        let (status, again) = harness.send(&request).await;
+        assert_eq!(status, 200, "{again}");
+        assert_eq!(again["replayed"], true);
+        assert_eq!(again["outcomes"], body["outcomes"]);
     }
 }

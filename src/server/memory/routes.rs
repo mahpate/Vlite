@@ -34,6 +34,7 @@ use crate::memory::{
 };
 
 mod consolidate;
+mod forget;
 mod recall;
 
 /// Mutation `deadline_ms` default and bound (contract `MemoryMutation`).
@@ -64,6 +65,7 @@ pub(super) fn routes() -> Router<Service> {
         .route(REMEMBER, post(remember))
         .route(RECALL, post(recall::recall))
         .route(CONSOLIDATE, post(consolidate::consolidate))
+        .route(FORGET, post(forget::forget))
 }
 
 /// Test seam for the engine clock and the elapsed request budget. Absent in

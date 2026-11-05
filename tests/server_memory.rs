@@ -89,10 +89,11 @@ const MEMORY_PATHS: [&str; 3] = [
 ];
 
 /// Routes served in this slice; the rest are not mounted yet.
-const SERVED: [&str; 3] = [
+const SERVED: [&str; 4] = [
     "/v1/memory/notes/remember",
     "/v1/memory/notes/recall",
     "/v1/memory/notes/consolidate",
+    "/v1/memory/notes/forget",
 ];
 const UNMOUNTED: [&str; 1] = ["/v1/memory/notes/receipts/lookup"];
 
@@ -647,4 +648,50 @@ async fn consolidate_is_a_graph_write() {
     let (app, reader) = start_scoped(&directory, &["read", "search", "graph_read"], None);
     let (status, error) = post(&app, SERVED[2], &reader, &consolidate_body("c")).await;
     assert_eq!(status, 403, "{error}");
+}
+
+#[tokio::test]
+async fn a_granted_scope_forgets_with_a_content_free_audit() {
+    let directory = TempDir::new().unwrap();
+    let (app, token) = start_scoped(&directory, &ALL_OPS, None);
+    let (status, _) = remember(&app, Some(&token), &remember_body("k")).await;
+    assert_eq!(status, 200);
+    let body = json!({
+        "scope": {"agent": "a"},
+        "idempotency_key": "f-1",
+        "target": {"ids": [{"id": "e1", "revision": "1"}]},
+        "mode": "logical_delete"
+    });
+    let (status, forgot) = post(&app, SERVED[3], &token, &body).await;
+    assert_eq!(status, 200, "{forgot}");
+    assert_eq!(forgot["outcomes"][0]["id"], "e1");
+    assert_eq!(forgot["outcomes"][0]["action"], "deleted");
+    assert_eq!(forgot["state"], "logical");
+    assert!(forgot["erasure_notice"].get("manifest_id").is_none());
+    let audit = std::fs::read_to_string(directory.path().join("audit.jsonl")).unwrap();
+    let event = audit
+        .lines()
+        .map(|line| serde_json::from_str::<Value>(line).unwrap())
+        .find(|event| event["operation"] == "forget")
+        .unwrap();
+    assert_eq!(event["outcome"], "ok");
+    assert_eq!(event["receipt_id"], forgot["receipt"]["id"]);
+    assert!(!audit.contains("f-1"));
+}
+
+#[tokio::test]
+async fn forget_needs_the_evidence_write_grant() {
+    let directory = TempDir::new().unwrap();
+    let (app, token) = start_scoped(&directory, &["read", "graph_read", "graph_write"], None);
+    let body = json!({
+        "scope": {"agent": "a"},
+        "idempotency_key": "f",
+        "target": {"ids": [{"id": "e1", "revision": "1"}]},
+        "mode": "logical_delete"
+    });
+    let (status, error) = post(&app, SERVED[3], &token, &body).await;
+    assert_eq!(
+        (status, &error["error"]["code"]),
+        (403, &json!("forbidden_scope"))
+    );
 }
