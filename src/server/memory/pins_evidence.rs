@@ -533,6 +533,70 @@ async fn a_reference_replays_exactly_and_another_record_conflicts() {
     assert_eq!(code(&answer), "idempotency_conflict");
 }
 
+/// An item that repeats an existing memory keeps the evidence that memory
+/// holds: a reference to a record it does not hold is the one 409 of every
+/// record that cannot be attached (never a quiet no-op that ignores it), and
+/// the reference it does hold repeats as a no-op.
+#[tokio::test]
+async fn a_repeated_item_cannot_attach_a_new_record() {
+    let rig = Rig::new(true);
+    rig.record(4242, [1.0, 0.0], b"proof");
+    rig.record(4243, [0.0, 1.0], b"other");
+    let plain = remember("a", "plain", vec![item("e1", None)]);
+    let (status, answer) = rig.post("notes/remember", &plain).await;
+    assert_eq!(status, 200, "{answer}");
+    let sequence = rig.sequence();
+    for (case, record) in [("a free record", "4242"), ("a missing record", "999")] {
+        let body = remember("a", case, vec![item("e1", Some(reference(record)))]);
+        let (status, answer) = rig.post("notes/remember", &body).await;
+        assert_conflict(status, &answer, case);
+        assert_eq!(rig.sequence(), sequence, "{case}: nothing was written");
+    }
+    assert!(rig.has_record(4242), "the free record was not claimed");
+    let held = remember("a", "held", vec![item("e2", Some(reference("4243")))]);
+    let (status, answer) = rig.post("notes/remember", &held).await;
+    assert_eq!(status, 200, "{answer}");
+    let again = remember("a", "held-again", vec![item("e2", Some(reference("4243")))]);
+    let (status, answer) = rig.post("notes/remember", &again).await;
+    assert_eq!(status, 200, "{answer}");
+    assert_eq!(
+        answer["outcomes"],
+        json!([{"id": "e2", "action": "noop", "revision": "1"}])
+    );
+}
+
+/// The way to attach a record to a memory that already exists is to merge a
+/// new source into it with the revision it expects; the reference is then
+/// checked and attached like any other.
+#[tokio::test]
+async fn merging_a_new_source_attaches_a_record_to_an_existing_memory() {
+    let rig = Rig::new(true);
+    rig.record(4242, [1.0, 0.0], b"proof");
+    let plain = remember("a", "plain", vec![item("e1", None)]);
+    let (status, answer) = rig.post("notes/remember", &plain).await;
+    assert_eq!(status, 200, "{answer}");
+    let mut merge = item("e1", Some(reference("4242")));
+    merge["source"] = json!({"source_id": "s2", "source_kind": "caller"});
+    merge["provenance"] = json!([{"source_id": "s2", "source_kind": "caller"}]);
+    merge["merge"] = json!("merge_provenance");
+    merge["expected"] = json!({"revision": "1"});
+    let (status, answer) = rig
+        .post("notes/remember", &remember("a", "merge", vec![merge]))
+        .await;
+    assert_eq!(status, 200, "{answer}");
+    assert_eq!(
+        answer["outcomes"],
+        json!([{"id": "e1", "action": "merged", "revision": "2"}])
+    );
+    let seeded = json!({"scope": {"agent": "a"}, "entity_seeds": ["e1"]});
+    let (status, recalled) = rig.post("notes/recall", &seeded).await;
+    assert_eq!(status, 200, "{recalled}");
+    assert_eq!(
+        recalled["memories"][0]["evidence"],
+        json!([{"collection": "notes", "record": "4242", "snippet": "proof"}])
+    );
+}
+
 /// Design note 5.3: forgetting a memory deletes the record it referenced, as
 /// it does for every evidence record that no other retained memory uses.
 #[tokio::test]

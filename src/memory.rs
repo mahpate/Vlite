@@ -919,6 +919,16 @@ fn plan(
             {
                 return Err(MemoryError::IdentityConflict);
             }
+            // A repeated item holds the evidence its memory already has: a
+            // record it does not hold is refused like any record that cannot
+            // be attached, never ignored.
+            if item
+                .evidence
+                .iter()
+                .any(|record| !memory.evidence.contains(&record.id))
+            {
+                return Err(MemoryError::RecordAlreadyAttached);
+            }
             actions.push(MemoryAction {
                 action: "noop",
                 id: memory.id.clone(),
@@ -5914,9 +5924,15 @@ mod tests {
         ));
     }
 
-    /// The digest hashes the reference like any evidence ID: the canonical
-    /// text below is the contract's fixed-order JSON of the request, derived
-    /// by hand and hashed outside the engine.
+    /// The digest hashes the reference like any evidence ID. The goldens are
+    /// `v1:` and the SHA-256 of the contract's fixed-order JSON of the request,
+    /// written out by hand and hashed outside the engine (any SHA-256 tool
+    /// reproduces them). For `request("m", "k")` without evidence the text is
+    ///
+    /// `{"allow_future":false,"items":[{"content":"hello","evidence":[],"expiry":null,"id":"m","importance":0.5,"kind":"episodic","observed_at":10,"provenance":[{"source":"source"}],"references":[],"source":"source"}],"key":"k","receipt_window":100,"scope":{"agent":"agent","session":null,"tenant":"tenant","user":"user"}}`
+    ///
+    /// and with one reference the empty `evidence` list is replaced by
+    /// `[{"id":"record:7","scope":{"agent":"agent","session":null,"tenant":"tenant","user":"user"}}]`.
     #[test]
     fn a_record_reference_is_hashed_into_the_v1_request_digest() {
         let digest = |ids: &[&str]| {
@@ -5988,6 +6004,58 @@ mod tests {
             remember_with_evidence(&mut db, &refer(&other_scope, "d", "e", "k-hashed-other")),
             Err(MemoryError::CrossScope)
         ));
+    }
+
+    /// An item that repeats an existing memory (same scope, kind, content and
+    /// source) is a no-op that keeps the evidence its memory already holds: a
+    /// record it does not hold is refused the same way as any record that
+    /// cannot be attached, never ignored, and a reference the memory already
+    /// holds repeats as a no-op.
+    #[test]
+    fn a_repeated_item_cannot_attach_a_record_its_memory_does_not_hold() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut db = database(&dir.path().join("repeat-reference.vlite"));
+        put_record(&mut db, 4242);
+        put_record(&mut db, 4243);
+        let plain = request("m", "plain");
+        provision(&mut db, &plain.scope);
+        remember_with_evidence(&mut db, &plain).unwrap();
+        let sequence = db.sequence;
+        for (record, key) in [("record:4242", "k-existing"), ("record:999", "k-missing")] {
+            let mut repeat = plain.clone();
+            repeat.idempotency_key = key.into();
+            repeat.items[0].id = "alias".into();
+            repeat.items[0].evidence = vec![memory_evidence(record, &repeat.scope)];
+            assert!(
+                matches!(
+                    remember_with_evidence(&mut db, &repeat),
+                    Err(MemoryError::RecordAlreadyAttached)
+                ),
+                "{record}"
+            );
+            assert_eq!(db.sequence, sequence, "{record}");
+        }
+        let mut holder = plain.clone();
+        holder.idempotency_key = "holder".into();
+        holder.items[0].id = "h".into();
+        holder.items[0].content = "held".into();
+        holder.items[0].evidence = vec![memory_evidence("record:4242", &holder.scope)];
+        remember_with_evidence(&mut db, &holder).unwrap();
+        let mut again = holder.clone();
+        again.idempotency_key = "holder-again".into();
+        again.items[0].id = "alias".into();
+        let noop = remember_with_evidence(&mut db, &again).unwrap();
+        assert_eq!(noop.actions[0].action, "noop");
+        assert_eq!(noop.actions[0].id, "h");
+        let sequence = db.sequence;
+        let mut other = again.clone();
+        other.idempotency_key = "holder-other".into();
+        other.items[0].evidence = vec![memory_evidence("record:4243", &other.scope)];
+        assert!(matches!(
+            remember_with_evidence(&mut db, &other),
+            Err(MemoryError::RecordAlreadyAttached)
+        ));
+        assert_eq!(db.sequence, sequence);
     }
 
     #[test]
