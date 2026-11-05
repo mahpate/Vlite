@@ -401,12 +401,16 @@ dimensions, against v0.6.0:
 - Recall and file bytes are identical.
 - Ingest, reopen and peak memory are within about 3%.
 
-The candidate commits after `30901be1` add server adapters, tools, clients and
+The commits after `30901be1` add server adapters, tools, clients and
 documentation, restore two 0.6.1 default behaviors (the number text of
 `embed` responses, and `browse` observing flusher health once), and change
 only the filter-summaries path of collections that declare a metadata index.
-[TO FILL AT FREEZE] State the final release revision and show that no measured
-path changed since `30901be1`.
+No other file on the paths the campaign measured changed: the single-file
+store, exact and HNSW search, ingest and reopen. The additions are outside
+those embedded workloads. The supplemental figures for indexed filters below
+come from revision `58b18194`, which contains the filter-summary change. This
+is not a new benchmark of the release revision.
+<!-- source: git diff 30901be1..HEAD over src and crates (only src/compact/stats.rs, src/records.rs, the key-value and memory modules and src/openapi.json differ outside the server and tools), src/compact/stats.rs, src/records.rs; commits c317aed and 58b1819 -->
 
 A supplemental run on the same VM configuration measured what that profile
 does not exercise (435 measured slots; 432 passed the same unchanged gate and
