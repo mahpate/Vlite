@@ -5,7 +5,7 @@ use serde_json::{Value, json};
 use std::ops::ControlFlow;
 use vlite::{
     Database, Error, Expected,
-    kv::{KvEntry, KvPut, KvRef, MAX_KV_VALUE_BYTES},
+    kv::{KvEntry, KvPut, KvRef, MAX_KV_KEY_BYTES, MAX_KV_VALUE_BYTES},
 };
 
 const GET: &str = "vlite_kv_get";
@@ -13,6 +13,12 @@ const PUT: &str = "vlite_kv_put";
 const DELETE: &str = "vlite_kv_delete";
 const LIST: &str = "vlite_kv_list";
 const PAGE_BYTES: usize = 16 * 1024 * 1024;
+
+// An entry always fits a page together with the cursor that names it, so a page
+// is never empty for want of room: the largest value as base64, the key twice
+// (item and cursor) at six bytes per key byte when escaped, and the field names.
+const _: () =
+    assert!(MAX_KV_VALUE_BYTES.div_ceil(3) * 4 + 2 * 6 * MAX_KV_KEY_BYTES + 512 < PAGE_BYTES);
 
 #[cfg(test)]
 thread_local! {
@@ -299,15 +305,16 @@ fn item_json(key: &str, value: &[u8], version: u64, expires_at_ms: Option<u64>) 
         "version":version.to_string(),"expires_at_ms":expires_at_ms.map(|n|n.to_string())})
 }
 
-/// The compact JSON size of `item_json` for `entry`, found without encoding
-/// its value: the item with an empty value plus four base64 characters for
-/// every started group of three value bytes.
-fn item_size(entry: &KvRef<'_>) -> usize {
-    json!({"key":entry.key,"value_base64":"","version":entry.version.to_string(),
-        "expires_at_ms":entry.expires_at_ms.map(|n|n.to_string())})
+/// The compact JSON size of `item_json`, found from the length of the value alone
+/// so that a value is never encoded just to be measured: the item with an empty
+/// value plus four base64 characters for every started group of three value
+/// bytes.
+fn item_size(key: &str, value_len: usize, version: u64, expires_at_ms: Option<u64>) -> usize {
+    json!({"key":key,"value_base64":"","version":version.to_string(),
+        "expires_at_ms":expires_at_ms.map(|n|n.to_string())})
     .to_string()
     .len()
-        + entry.value.len().div_ceil(3) * 4
+        + value_len.div_ceil(3) * 4
 }
 
 fn page(db: &Database, request: &List) -> Result<Value, String> {
@@ -355,7 +362,12 @@ fn visit_page(
     // The last emitted key, and whether another live entry follows it.
     let mut last: Option<(String, bool)> = None;
     scan(after, limit, &mut |entry| {
-        let bytes = item_size(&entry);
+        let bytes = item_size(
+            entry.key,
+            entry.value.len(),
+            entry.version,
+            entry.expires_at_ms,
+        );
         // As the last entry of the page it carries the cursor, when more follow.
         let next = entry.has_next.then_some(entry.key);
         let envelope = json!({"items":[],"next_after":next}).to_string().len();
@@ -379,7 +391,15 @@ fn visit_page(
         .as_ref()
         .filter(|(_, more)| *more)
         .map(|(key, _)| key.as_str());
-    Ok(json!({"items":items,"next_after":next}))
+    // The items move into the response: building it with `json!` would copy a
+    // full page and hold it twice.
+    let mut body = serde_json::Map::with_capacity(2);
+    body.insert("items".to_owned(), Value::Array(items));
+    body.insert(
+        "next_after".to_owned(),
+        next.map_or(Value::Null, |key| Value::String(key.to_owned())),
+    );
+    Ok(Value::Object(body))
 }
 
 pub(crate) fn tool_definitions(read_only: bool) -> Vec<Value> {
@@ -754,6 +774,25 @@ mod tests {
     }
 
     #[test]
+    fn a_first_entry_larger_than_a_page_ends_the_page_empty() {
+        // No stored entry is this large (the largest item is about 1.4 MB), so
+        // this pins the documented result rather than a reachable one: an empty
+        // page without a cursor, and the oversized value measured, never encoded.
+        let entries = [KvEntry {
+            key: "k".into(),
+            value: vec![0; 13_000_000],
+            version: 1,
+            expires_at_ms: None,
+        }];
+        let lent = std::cell::Cell::new(0);
+        ENCODED_VALUE_BYTES.with(|bytes| bytes.set(0));
+        let page = visit_page(None, 10, scan_over(&entries, "", &lent)).unwrap();
+        assert_eq!(page, json!({"items":[],"next_after":null}));
+        assert_eq!(lent.get(), 1);
+        assert_eq!(ENCODED_VALUE_BYTES.with(std::cell::Cell::get), 0);
+    }
+
+    #[test]
     fn item_size_is_the_compact_size_of_the_item() {
         let keys = ["k", "a/b", "\"quoted\\\u{1}\n", "\u{e9}\u{4e2d}\u{1f600}"];
         let versions = [0, 9, 10, u64::MAX];
@@ -762,15 +801,8 @@ mod tests {
             for length in (0..=40usize).chain([1_000, 1_047_289, 1_047_290]) {
                 let value: Vec<u8> = (0..length).map(|index| (index * 7 + round) as u8).collect();
                 for (&version, &expires_at_ms) in versions.iter().zip(expiries.iter().cycle()) {
-                    let entry = KvRef {
-                        key,
-                        value: &value,
-                        version,
-                        expires_at_ms,
-                        has_next: false,
-                    };
                     assert_eq!(
-                        item_size(&entry),
+                        item_size(key, length, version, expires_at_ms),
                         item_json(key, &value, version, expires_at_ms)
                             .to_string()
                             .len(),

@@ -9,6 +9,12 @@ use std::ops::ControlFlow;
 
 const PAGE_BYTES: usize = 16_777_216;
 
+// An entry always fits a page together with the cursor that names it, so a page
+// is never empty for want of room: the largest value as base64, the key twice
+// (item and cursor) at six bytes per key byte when escaped, and the field names.
+const _: () =
+    assert!(MAX_KV_VALUE_BYTES.div_ceil(3) * 4 + 2 * 6 * MAX_KV_KEY_BYTES + 512 < PAGE_BYTES);
+
 #[cfg(test)]
 thread_local! {
     /// Value bytes this thread has base64-encoded for a response.
@@ -292,17 +298,23 @@ fn item_json(key: &str, value: &[u8], version: u64, expires_at_ms: Option<u64>) 
     })
 }
 
-/// The serialized size of `item_json` for `entry`, found without encoding its
-/// value: the item with an empty value plus four base64 characters for every
-/// started group of three value bytes.
-fn item_size(entry: &KvRef<'_>) -> Result<usize, ApiError> {
+/// The serialized size of `item_json`, found from the length of the value alone
+/// so that a value is never encoded just to be measured: the item with an empty
+/// value plus four base64 characters for every started group of three value
+/// bytes.
+fn item_size(
+    key: &str,
+    value_len: usize,
+    version: u64,
+    expires_at_ms: Option<u64>,
+) -> Result<usize, ApiError> {
     let shell = serde_json::to_vec(&json!({
-        "key":entry.key, "value_base64":"",
-        "version":entry.version.to_string(),
-        "expires_at_ms":entry.expires_at_ms.map(|value|value.to_string())
+        "key":key, "value_base64":"",
+        "version":version.to_string(),
+        "expires_at_ms":expires_at_ms.map(|value|value.to_string())
     }))
     .map_err(internal)?;
-    Ok(shell.len() + entry.value.len().div_ceil(3) * 4)
+    Ok(shell.len() + value_len.div_ceil(3) * 4)
 }
 
 fn writable(db: &Database) -> Result<(), ApiError> {
@@ -542,7 +554,12 @@ impl PageBuilder {
     /// The entry's value is measured from the borrow and only encoded when it
     /// is added.
     fn push(&mut self, entry: &KvRef<'_>) -> Result<bool, ApiError> {
-        let size = item_size(entry)?;
+        let size = item_size(
+            entry.key,
+            entry.value.len(),
+            entry.version,
+            entry.expires_at_ms,
+        )?;
         // As the last entry of the page it carries the cursor, when more follow.
         let next = entry.has_next.then_some(entry.key);
         let envelope = serde_json::to_vec(&json!({"items":[],"next_after":next}))
@@ -613,7 +630,15 @@ fn build_page(
         .as_ref()
         .filter(|(_, more)| *more)
         .map(|(key, _)| key.as_str());
-    Ok(json!({"items":page.items,"next_after":next_after}))
+    // The items move into the response: building it with `json!` would copy a
+    // full page and hold it twice.
+    let mut body = serde_json::Map::with_capacity(2);
+    body.insert("items".to_owned(), Value::Array(page.items));
+    body.insert(
+        "next_after".to_owned(),
+        next_after.map_or(Value::Null, |key| Value::String(key.to_owned())),
+    );
+    Ok(Value::Object(body))
 }
 
 fn audit<T>(
@@ -888,16 +913,9 @@ mod tests {
             for length in (0..=40usize).chain([1_000, 1_047_289, 1_047_290]) {
                 let value: Vec<u8> = (0..length).map(|index| (index * 7 + round) as u8).collect();
                 for (&version, &expires_at_ms) in versions.iter().zip(expiries.iter().cycle()) {
-                    let entry = KvRef {
-                        key,
-                        value: &value,
-                        version,
-                        expires_at_ms,
-                        has_next: false,
-                    };
                     let item = item_json(key, &value, version, expires_at_ms);
                     assert_eq!(
-                        item_size(&entry).unwrap(),
+                        item_size(key, length, version, expires_at_ms).unwrap(),
                         serde_json::to_vec(&item).unwrap().len(),
                         "key {key:?}, {length} value bytes, version {version}, expiry {expires_at_ms:?}"
                     );
