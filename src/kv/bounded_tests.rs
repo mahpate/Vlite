@@ -579,7 +579,8 @@ fn look_alikes_outside_their_window_are_never_probed() {
 }
 
 // The window is exactly `KV_PROBE_SLOTS` long: the last slot resolves, as `get`
-// shows, and the one after it does not.
+// shows, and the one after it does not, and costs no probe either. A lookup
+// alone could not tell the two apart: `probe` rejects the look-alike too.
 #[test]
 fn the_last_slot_of_a_window_is_an_entry_and_the_next_one_is_not() {
     let mut db = memory();
@@ -595,9 +596,11 @@ fn the_last_slot_of_a_window_is_an_entry_and_the_next_one_is_not() {
         Some(b"in".to_vec())
     );
     assert_eq!(view.get_at("n", "over", 0).unwrap(), None);
+    probes_reset();
     let entries = view.list_at("n", "", None, 10, 0).unwrap();
     assert_eq!(keys(&entries), ["edge"]);
     assert_eq!(entries[0].value, b"in");
+    assert_eq!(probes(), 1, "only the key inside its window is probed");
 }
 
 // The universe is small so that the generated state is dense with look-alikes.

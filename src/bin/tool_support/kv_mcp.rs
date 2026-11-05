@@ -5,7 +5,7 @@ use serde_json::{Value, json};
 use std::ops::ControlFlow;
 use vlite::{
     Database, Error, Expected,
-    kv::{KvEntry, KvPut, KvRef, MAX_KV_KEY_BYTES, MAX_KV_VALUE_BYTES},
+    kv::{KvEntry, KvPut, KvRef, MAX_KV_VALUE_BYTES},
 };
 
 const GET: &str = "vlite_kv_get";
@@ -17,8 +17,10 @@ const PAGE_BYTES: usize = 16 * 1024 * 1024;
 // An entry always fits a page together with the cursor that names it, so a page
 // is never empty for want of room: the largest value as base64, the key twice
 // (item and cursor) at six bytes per key byte when escaped, and the field names.
+// The key is bounded by the 16-bit length a stored record holds, not by
+// `MAX_KV_KEY_BYTES`: a record planted through another route need not keep to it.
 const _: () =
-    assert!(MAX_KV_VALUE_BYTES.div_ceil(3) * 4 + 2 * 6 * MAX_KV_KEY_BYTES + 512 < PAGE_BYTES);
+    assert!(MAX_KV_VALUE_BYTES.div_ceil(3) * 4 + 2 * 6 * (u16::MAX as usize) + 512 < PAGE_BYTES);
 
 #[cfg(test)]
 thread_local! {
@@ -391,8 +393,7 @@ fn visit_page(
         .as_ref()
         .filter(|(_, more)| *more)
         .map(|(key, _)| key.as_str());
-    // The items move into the response: building it with `json!` would copy a
-    // full page and hold it twice.
+    // The items move into the response instead of being copied by `json!`.
     let mut body = serde_json::Map::with_capacity(2);
     body.insert("items".to_owned(), Value::Array(items));
     body.insert(
@@ -945,6 +946,12 @@ mod tests {
         assert_eq!(over["next_after"], "l");
         entries[12].key.pop();
 
+        // A deadline is part of the item: it no longer fits by the bytes it adds.
+        entries[12].expires_at_ms = Some(u64::MAX);
+        let timed = page(&entries, 13);
+        assert_eq!(timed["items"].as_array().unwrap().len(), 12);
+        assert_eq!(timed["next_after"], "l");
+        entries[12].expires_at_ms = None;
         // A further entry after the thirteenth makes it carry a cursor: the
         // three-byte cursor replaces null (4 bytes) with "mmm" (5 bytes).
         let mut beyond_entries = entries.clone();
