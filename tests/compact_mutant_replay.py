@@ -22,7 +22,8 @@ ledger carries under the same ID]}; `verify` checks that the ledger holds them.
   python tests/compact_mutant_replay.py run LIST.json OUT.json [--machine NAME] [--ids a,b]
   python tests/compact_mutant_replay.py finish LIST.json OUT.json
   python tests/compact_mutant_replay.py merge LIST.json OUT.json [OUT.json ...] [--before] [--ids a,b]
-  python tests/compact_mutant_replay.py verify LIST.json [--min-machines N]
+  python tests/compact_mutant_replay.py verify LIST.json [--min-machines N] [--strict]
+  python tests/compact_mutant_replay.py sources [--root DIR]
 
 `check`, `run`, `finish` and `verify` take `--root DIR` to work in another checkout.
 `check` needs no build: it proves that every anchor matches exactly once in the tree.
@@ -31,9 +32,17 @@ tree that lacks some anchors. `merge --before` keeps the runs as the state befor
 lane (the previous tag, or the tree before a lane's tests), not as another machine.
 `finish` closes a batch that was stopped between two mutants (it runs the unmodified
 selectors once more and records them as the baseline after the last mutant).
-`verify` re-checks the recorded runs against the tree it runs in (a run replayed on an
-older tree is stale: replay it again) and exits non-zero unless every mutant has runs
-on at least N machines, each a kill with the whole evidence below.
+`verify` re-checks the recorded runs against the tree it runs in (a run replayed on
+another version of the mutated file is stale: replay it again) and exits non-zero unless
+every mutant has runs on at least N machines, each a kill with the whole evidence below.
+A kill also depends on the tests and the helpers that sit in other files, so every run
+records a fingerprint of the sources it was replayed on, and `verify --strict` counts only
+the runs whose fingerprint is the one of the tree under test (a run made before the
+fingerprint existed has none, and is stale under `--strict`). The fingerprint covers what
+`cargo test` builds and reads: the Cargo files and `build.rs`, everything under `src/`,
+`crates/`, `proto/` and `examples/`, the Rust files and the fixtures of `tests/`, and every
+file that an `include_str!` or `include_bytes!` names, with the line endings normalized.
+`sources` prints it.
 
 `run` records, for every mutant, the evidence of the 0.7.1 acceptance form:
 
@@ -70,6 +79,8 @@ FAILED = re.compile(r"^test (\S+) \.\.\. FAILED", re.M)
 RUNNING = re.compile(r"^running (\d+) tests?$", re.M)
 RESULT = re.compile(r"^test result: (?:ok|FAILED)\. (\d+) passed; (\d+) failed", re.M)
 TIMEOUT = 3 * 3600
+SOURCE_ROOTS = ("src", "crates", "proto", "examples", "tests")
+INCLUDED = re.compile(r'include_(?:str|bytes)!\(\s*"([^"]+)"\s*\)')
 
 
 def sha256(data):
@@ -105,6 +116,56 @@ def environment(root):
         "head": tool(root, "git", "rev-parse", "HEAD"),
         "tree_clean": tool(root, "git", "status", "--porcelain", "--untracked-files=no") == "",
     }
+
+
+def build_directory(path):
+    """A cargo target directory (it carries a CACHEDIR.TAG) or a Python cache: never a source."""
+    return path.name == "__pycache__" or (path / "CACHEDIR.TAG").is_file()
+
+
+def source_files(root):
+    """The files that `cargo test` builds and reads, as (path relative to `root`, path)."""
+    root = Path(os.path.abspath(root))
+    found = {}
+
+    def add(path):
+        try:
+            if path.is_file():
+                found[path.relative_to(root).as_posix()] = path
+        except ValueError:
+            pass
+
+    for name in ("Cargo.toml", "Cargo.lock", "build.rs"):
+        add(root / name)
+    for top in SOURCE_ROOTS:
+        for directory, names, files in os.walk(root / top):
+            names[:] = [n for n in names if not build_directory(Path(directory) / n)]
+            for name in files:
+                path = Path(directory) / name
+                # Under tests/ only the Rust files and the fixtures are inputs; the rest is tooling and evidence.
+                if top == "tests" and not (name.endswith(".rs") or "fixtures" in path.relative_to(root).parts):
+                    continue
+                add(path)
+    for path in [p for p in found.values() if p.suffix == ".rs"]:
+        for target in INCLUDED.findall(path.read_text(encoding="utf-8", errors="replace")):
+            add(Path(os.path.normpath(path.parent / target)))
+    return [(name, found[name]) for name in sorted(found)]
+
+
+def fingerprint(root):
+    """SHA-256 over the sources that `cargo test` builds, and how many files that is.
+
+    The line endings are normalized, so a Windows and a Linux checkout of one tree agree.
+    """
+    digest, files = hashlib.sha256(), source_files(root)
+    for name, path in files:
+        content = path.read_bytes()
+        try:
+            content = lf(content.decode("utf-8")).encode("utf-8")
+        except UnicodeDecodeError:
+            pass
+        digest.update(name.encode("utf-8") + b"\0" + sha256(content).encode("ascii") + b"\n")
+    return {"sha256": digest.hexdigest(), "files": len(files)}
 
 
 def check(root, data):
@@ -245,6 +306,7 @@ def run(root, data, out_path, machine, only, timeout, resume):
     summary = {
         "machine": machine,
         "environment": environment(root),
+        "sources": fingerprint(root),
         "list_base": data.get("base"),
         "baseline_before": baseline(root, commands, timeout),
         "results": list(done.values()),
@@ -338,6 +400,9 @@ def merge(list_path, out_paths, before=False, ids=""):
             kept["environment"] = {
                 k: summary["environment"][k] for k in ("os", "rustc", "head")
             }
+            sources = summary.get("sources", {}).get("sha256")
+            if sources:
+                kept["sources_sha256"] = sources
             # Green before the first and again after the last mutant of the batch.
             kept["baseline_green"] = (
                 bool(summary.get("baseline_after"))
@@ -348,13 +413,17 @@ def merge(list_path, out_paths, before=False, ids=""):
     write(list_path, data)
 
 
-def verify(root, data, minimum):
+def verify(root, data, minimum, strict=False):
     """Re-check the recorded evidence against the tree under `root`.
 
     A mutant is accepted when it has runs on at least `minimum` machines (or its own
     `min_machines`) and every run is a kill with the whole evidence, and the file it
-    was replayed on is the file in this tree. A run replayed on an older tree is
-    stale, never a failure of the mutant: replay it again on this tree.
+    was replayed on is the file in this tree. A run replayed on another version of that
+    file is stale, never a failure of the mutant: replay it again on this tree.
+
+    With `strict`, a run is valid only when the fingerprint of the sources it was
+    replayed on is the one of this tree, because the tests that kill a mutant sit in
+    other files; a run without a fingerprint is stale then.
 
     A mutant with an `equivalent` record is accepted only when every run survived
     with the same evidence (compiled, restored, green baseline) and the record names
@@ -363,6 +432,7 @@ def verify(root, data, minimum):
     """
     names = {m["id"]: m for m in data["mutants"]}
     counts = {"accepted": 0, "stale": 0, "open": 0}
+    sources, bound, valid = fingerprint(root)["sha256"], 0, 0
     for mutant in data["mutants"]:
         needed = mutant.get(
             "min_machines", 2 if mutant["id"] in data.get("two_machines", ()) else minimum
@@ -390,10 +460,12 @@ def verify(root, data, minimum):
                 fails.append("restore")
             if run_.get("restored_identically") is not True or run_.get("baseline_green") is not True:
                 fails.append("restore or baseline")
-            if sums.get("before") != here:
+            if sums.get("before") != here or (strict and run_.get("sources_sha256") != sources):
                 stale.append(machine)
             elif not fails:
                 good += 1
+                valid += 1
+                bound += run_.get("sources_sha256") == sources
             else:
                 problems.append(f"{machine}: {', '.join(map(str, fails))}")
         # Runs on one version of the file replace the same text by the same text, so they agree on the
@@ -466,6 +538,10 @@ def verify(root, data, minimum):
                     continue
                 print(f"reused: {wanted_id} {note} {reused['ledger']}")
                 counts["open"] += 1
+    print(
+        f"sources {sources[:12]}: {bound} of {valid} valid run(s) were replayed on exactly this source tree"
+        + ("" if strict else " (--strict counts only those)")
+    )
     print(f"{counts['accepted']} accepted, {counts['stale']} stale, {counts['open']} open of {len(data['mutants'])}")
     return counts["stale"] == 0 and counts["open"] == 0
 
@@ -493,21 +569,27 @@ def main():
     four = sub.add_parser("verify", parents=[common])
     four.add_argument("list")
     four.add_argument("--min-machines", type=int, default=1)
+    four.add_argument("--strict", action="store_true", help="count only runs replayed on exactly this source tree")
     five = sub.add_parser("finish", parents=[common])
     five.add_argument("list")
     five.add_argument("out")
     five.add_argument("--timeout", type=int, default=TIMEOUT)
+    sub.add_parser("sources", parents=[common])
     args = parser.parse_args()
     os.environ.setdefault("CARGO_INCREMENTAL", "0")
     if args.mode == "merge":
         merge(args.list, args.out, args.before, args.ids)
         return 0
     root = Path(args.root).resolve()
+    if args.mode == "sources":
+        found = fingerprint(root)
+        print(f"{found['sha256']}  {found['files']} files")
+        return 0
     data = read_list(args.list)
     if args.mode == "finish":
         return 0 if finish(root, data, args.out, args.timeout) else 1
     if args.mode == "verify":
-        return 0 if verify(root, data, args.min_machines) else 1
+        return 0 if verify(root, data, args.min_machines, args.strict) else 1
     chosen = select(data, args.ids)
     anchored = check(root, chosen)
     if args.mode == "check" or not anchored:

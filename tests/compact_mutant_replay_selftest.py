@@ -2,9 +2,10 @@
 """Self-test of the replay tool: what `verify`, `merge`, `check` and `select` accept and refuse.
 
 The acceptance of a mutant rests on `verify`, so the properties it relies on are pinned here with
-synthetic evidence: a kill needs the whole evidence, a run on another tree is stale, a gap needs a
-survival on the previous tree, an equivalence needs a pin and a reviewer, and a batch that was never
-closed by a green baseline is no evidence. No cargo command runs.
+synthetic evidence: a kill needs the whole evidence, a run on another version of the file is stale (and,
+with --strict, so is a run on other sources), a gap needs a survival on the previous tree, an equivalence
+needs a pin and a reviewer, and a batch that was never closed by a green baseline is no evidence. The
+fingerprint of the sources is pinned too. No cargo command runs.
 
     python -m unittest tests/compact_mutant_replay_selftest.py
 """
@@ -79,9 +80,9 @@ class ReplayToolTest(unittest.TestCase):
         self.tree = Tree()
         self.addCleanup(self.tree.close)
 
-    def verdict(self, data, minimum=1):
+    def verdict(self, data, minimum=1, strict=False):
         with contextlib.redirect_stdout(io.StringIO()) as out:
-            accepted = tool.verify(self.tree.root, data, minimum)
+            accepted = tool.verify(self.tree.root, data, minimum, strict)
         return accepted, out.getvalue()
 
     def test_a_kill_with_the_whole_evidence_is_accepted(self):
@@ -109,6 +110,32 @@ class ReplayToolTest(unittest.TestCase):
     def test_a_run_on_another_version_of_the_file_is_stale_not_accepted(self):
         stale = run_of(text=SOURCE + "// changed\n")
         accepted, out = self.verdict({"mutants": [mutant(runs={"local": stale})]})
+        self.assertFalse(accepted)
+        self.assertIn("STALE", out)
+
+    def test_strict_counts_only_runs_replayed_on_the_sources_of_this_tree(self):
+        here = tool.fingerprint(self.tree.root)["sha256"]
+        bound = run_of(sources_sha256=here)
+        for name, run, expected in (
+            ("bound to this tree", bound, True),
+            ("bound to another tree", run_of(sources_sha256="o" * 64), False),
+            ("no fingerprint", run_of(), False),
+        ):
+            with self.subTest(name):
+                data = {"mutants": [mutant(runs={"local": run})]}
+                self.assertTrue(self.verdict(data)[0], "the mutated file is the same: the default accepts it")
+                accepted, out = self.verdict(data, strict=True)
+                self.assertEqual(accepted, expected, out)
+                if not expected:
+                    self.assertIn("STALE", out)
+        # A test or a helper that changes in another file stales the bound run; the mutated file is untouched.
+        data = {"mutants": [mutant(runs={"local": bound})]}
+        self.assertIn("1 of 1 valid run(s) were replayed on exactly this source tree", self.verdict(data)[1])
+        (self.tree.root / "src" / "g.rs").write_text("#[test]\nfn named() {}\n", encoding="utf-8")
+        accepted, out = self.verdict(data)
+        self.assertTrue(accepted, out)
+        self.assertIn("0 of 1 valid run(s) were replayed on exactly this source tree", out)
+        accepted, out = self.verdict(data, strict=True)
         self.assertFalse(accepted)
         self.assertIn("STALE", out)
 
@@ -220,6 +247,71 @@ class ReplayToolTest(unittest.TestCase):
             tool.select(data, "m1,nope")
 
 
+class FingerprintTest(unittest.TestCase):
+    TREE = {
+        "Cargo.toml": "[package]\n",
+        "src/lib.rs": 'fn a() { include_str!("../site/asset.txt"); include_bytes!(\n    "../site/other.bin"\n); }\n',
+        "tests/t.rs": "#[test]\nfn t() {}\n",
+        "tests/fixtures/f.json": "{}\n",
+        "site/asset.txt": "asset\n",
+        "site/other.bin": "bin\n",
+    }
+
+    def setUp(self):
+        self._directory = tempfile.TemporaryDirectory()
+        self.addCleanup(self._directory.cleanup)
+        self.root = Path(self._directory.name)
+        for name, text in self.TREE.items():
+            self.put(name, text)
+
+    def put(self, name, text):
+        path = self.root / name
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_bytes(text.encode("utf-8"))
+
+    def read(self, name):
+        return (self.root / name).read_bytes().decode("utf-8")
+
+    def sources(self):
+        return tool.fingerprint(self.root)["sha256"]
+
+    def test_the_fingerprint_follows_what_cargo_builds_and_reads(self):
+        before = self.sources()
+        self.assertEqual(tool.fingerprint(self.root)["files"], len(self.TREE))
+        for name in self.TREE:
+            with self.subTest(f"changing {name}"):
+                original = self.read(name)
+                self.put(name, original + "// changed\n")
+                self.assertNotEqual(self.sources(), before)
+                self.put(name, original)
+                self.assertEqual(self.sources(), before)
+        for name in ("docs/note.md", "site/unrelated.txt", "tests/ledger_mutants.json", "tests/tool.py", "pool-results/r.json"):
+            with self.subTest(f"adding {name}"):
+                self.put(name, "not a source\n")
+                self.assertEqual(self.sources(), before)
+
+    def test_a_directory_named_target_is_a_module_but_a_cargo_target_directory_is_not(self):
+        before = self.sources()
+        self.put("src/target/mod.rs", "fn module() {}\n")
+        self.assertNotEqual(self.sources(), before)
+        build = self.sources()
+        self.put("src/out/CACHEDIR.TAG", "Signature: 8a477f597d28d172789f06886806bc55\n")
+        self.put("src/out/debug.rs", "fn built() {}\n")
+        self.assertEqual(self.sources(), build, "a build directory is not a source")
+
+    def test_line_endings_do_not_change_the_fingerprint(self):
+        before = self.sources()
+        for name in ("src/lib.rs", "tests/fixtures/f.json"):
+            self.put(name, self.read(name).replace("\n", "\r\n"))
+        self.assertEqual(self.sources(), before)
+
+    def test_a_file_that_is_included_but_not_there_is_ignored(self):
+        before = self.sources()
+        self.put("src/more.rs", 'fn m() { include_str!("../nowhere.txt"); }\n')
+        self.assertNotEqual(self.sources(), before, "the new Rust file itself counts")
+        self.assertEqual(tool.fingerprint(self.root)["files"], len(self.TREE) + 1)
+
+
 class MergeTest(unittest.TestCase):
     def setUp(self):
         self._directory = tempfile.TemporaryDirectory()
@@ -258,6 +350,16 @@ class MergeTest(unittest.TestCase):
     def test_a_red_baseline_before_the_first_mutant_is_not_green(self):
         tool.merge(self.list, [self.batch("red", green=False)])
         self.assertFalse(self.merged()["m1"]["runs"]["red"]["baseline_green"])
+
+    def test_the_fingerprint_of_a_batch_is_kept_with_each_run(self):
+        path = self.batch("fingerprinted")
+        summary = json.loads(path.read_text(encoding="utf-8"))
+        summary["sources"] = {"sha256": "s" * 64, "files": 3}
+        tool.write(path, summary)
+        tool.merge(self.list, [path, self.batch("old")])
+        runs = self.merged()["m1"]["runs"]
+        self.assertEqual(runs["fingerprinted"]["sources_sha256"], "s" * 64)
+        self.assertNotIn("sources_sha256", runs["old"], "a batch from before the fingerprint has none")
 
     def test_before_runs_and_filters_go_where_they_belong(self):
         tool.merge(self.list, [self.batch("earlier")], before=True, ids="m2")
