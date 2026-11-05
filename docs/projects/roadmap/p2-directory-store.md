@@ -2,7 +2,7 @@
 
 | Field | Value |
 |---|---|
-| Status | P2a done: directory layout, background checkpoints and converters have landed. P2b implemented: mapped immutable segments, and images whose records and graphs load in bulk instead of by replay. F4 is not yet measured; it is qualified in the major-release DO-005 run |
+| Status | P2a done: directory layout, background checkpoints and converters have landed. P2b implemented: mapped immutable segments, and images whose records and graphs load in bulk instead of by replay. F4 was measured in the 0.7.0 supplemental run and is not met: reopening 100,000 × 384 vectors takes 170 ms from a checkpointed directory against 238 ms from one file ([results](../../../benchmarks/RESULTS.md)) |
 | Goals | F4 (reopen time), S6 (no unbounded log growth), no regressions ([`storage-goals.md`](../performance/storage-goals.md)) |
 | Roadmap | [`next-major.md`](next-major.md) |
 
@@ -187,7 +187,7 @@ not listed, so they are ignored.
 | Stage | Contents | Exit |
 |---|---|---|
 | P2a (done) | Checkpoint image, directory layout, `create_directory`, checkpoint, background merge at a WAL threshold (64 MiB default), converters | S6. Reopen replays one image plus a bounded WAL. Revisions, cursors at or above the floor, and lineage survive checkpoints |
-| P2b (implemented; F4 not yet measured) | Memory-mapped immutable segments; the index and graph are loaded from the image instead of replayed (record blocks and graph snapshots, loaded in parallel and in bulk) | F4 (reopen in 50 ms or less), qualified in the major-release DO-005 run |
+| P2b (implemented; F4 measured, not met) | Memory-mapped immutable segments; the index and graph are loaded from the image instead of replayed (record blocks and graph snapshots, loaded in parallel and in bulk) | F4 (reopen in 50 ms or less). Measured for 0.7.0: 170 ms at 100,000 × 384, 243 ms at 400,000 × 96 and 512 ms at 1,000,000 × 32, so reopen still grows with the data |
 
 P3 to P5 build on these segments: compact vectors, CSR graph adjacency, and
 per-segment statistics.

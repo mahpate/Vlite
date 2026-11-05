@@ -340,6 +340,14 @@ so hits, distances and order are unchanged; only `SearchStats::records_scanned`
 can be lower. Geo radius and undeclared fields never skip. Nothing is written
 to disk: summaries are derived again on first use after open.
 
+Choose the index kind by the filter. `Eq` and `EqRange` keep equality postings
+for any value type, which narrow an equality filter to its matches wherever
+they lie. `Range` and `EqRange` order integers and floats, which serves numeric
+ranges. On any other type a `Range` index adds only these summaries: they help
+when the matching records sit together in ID order, and a filter whose matches
+are spread over every block runs at the speed of no index. Measured gains are
+in [the supplemental results](../benchmarks/RESULTS.md#supplemental-070-measurements-november-4-2026-utc).
+
 ## Limitations
 
 - A passphrase is only as strong as its entropy; tune `KdfParams` for your

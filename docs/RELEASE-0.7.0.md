@@ -376,17 +376,48 @@ dimensions, against v0.6.0:
 - Ingest, reopen and peak memory are within about 3%.
 
 The candidate commits after `30901be1` add server adapters, tools, clients and
-documentation, and restore two 0.6.1 default behaviors (the number text of
-`embed` responses, and `browse` observing flusher health once).
+documentation, restore two 0.6.1 default behaviors (the number text of
+`embed` responses, and `browse` observing flusher health once), and change
+only the filter-summaries path of collections that declare a metadata index.
 [TO FILL AT FREEZE] State the final release revision and show that no measured
 path changed since `30901be1`.
 
+A supplemental run on the same VM configuration measured what that profile
+does not exercise (435 measured slots; 432 passed the same unchanged gate and
+3 failed it, so they are kept out of the medians). Medians of five runs, on the
+release candidate:
+
+- **Directory store.** Reopening 100,000 × 384 vectors takes 170 ms from a
+  checkpointed directory against 238 ms from one file (−28.5%); at
+  400,000 × 96 it takes 243 ms against 341 ms and at 1,000,000 × 32 it takes
+  512 ms against 576 ms. Reopen still grows with the data, so the 50 ms goal is
+  not met. An explicit checkpoint takes 2.7–4.0 s. A directory that checkpoints
+  during ingest ingests at about half the single-file rate (117,000 against
+  223,000 vectors/s); the log-only layout ingests and reopens like one file.
+- **Exact search at 768 dimensions** (80,000 vectors): p50 4.9 ms against
+  10.6 ms in 0.6.0 and 10.5 ms in 0.6.1, with the same ingest and reopen.
+- **Declared metadata indexes** (100,000 × 384, equality filter on a boolean
+  field): an `eq` or `eq-range` index
+  cuts the p50 of a filter that matches 1% of the records by 87–89% and of one
+  that matches 10% in whole 1,024-record blocks by 39–52%; with the 10% spread
+  over all blocks the gain is 13–27%. A `range` index orders integers and
+  floats only; on a boolean field it adds just the block summaries, which help
+  when the matches fill whole blocks (24–44% at 10%, 85–88% at 1%) and
+  otherwise cost the same as no index.
+- **Queries during writes** (20,000 × 384, 16 writes and 4 deletes before each
+  query): a lazy rebuild blocks one query for about 1.65 s, twice per run. The
+  background rebuild keeps requests short, but queries sent back to back find a
+  ready index only 40% of the time, and paced 250 ms apart the worst request is
+  14.6 ms. The 10 ms goal is not met.
+
 [Full tables, per-run CPU and method](../benchmarks/results/graph-reference-0.7.0-rc-vs-v0.6.0-azure.md) ·
 [raw runs](../benchmarks/results/graph-reference-0.7.0-rc-vs-v0.6.0-azure.json) ·
+[supplemental tables](../benchmarks/results/supplement-0.7.0-azure.md) ·
+[supplemental raw slots](../benchmarks/results/supplement-0.7.0-azure.json) ·
 [DO-005 baseline](projects/feature-agent-graph/baseline.md) ·
 [published results](../benchmarks/RESULTS.md). These are measured values on one
 host type, not performance guarantees.
-<!-- source: benchmarks/results/graph-reference-0.7.0-rc-vs-v0.6.0-azure.md, benchmarks/results/graph-reference-0.7.0-rc-vs-v0.6.0-azure.json, docs/projects/feature-agent-graph/baseline.md, benchmarks/RESULTS.md, docs/projects/roadmap/next-major.md -->
+<!-- source: benchmarks/results/graph-reference-0.7.0-rc-vs-v0.6.0-azure.md, benchmarks/results/graph-reference-0.7.0-rc-vs-v0.6.0-azure.json, benchmarks/results/supplement-0.7.0-azure.md, benchmarks/results/supplement-0.7.0-azure.json, docs/projects/feature-agent-graph/baseline.md, benchmarks/RESULTS.md, docs/projects/roadmap/next-major.md, src/compact/stats.rs -->
 
 ## Upgrade
 
@@ -472,10 +503,13 @@ reads them as records of a one-dimension collection.
   operations (`GET /v1/capabilities` lists their routes and reports
   `features.kv`), five new RPCs (the four-RPC `vlite.v1.Kv` service and
   `VLite.EmbedText`), optional provider and ranking fields, and one new rerank
-  mode, with existing tags and meanings unchanged. The `tools/list` of
+  mode, with existing tags and meanings unchanged. The OpenAPI document now
+  also says that `rerank.lambda` is allowed only with `mode` `mmr`; the server
+  already refused any other combination with 422 `invalid_input` in 0.6.1, so
+  no request changes meaning. The `tools/list` of
   `vlite-mcp` lists four more tools: `vlite_kv_get` and `vlite_kv_list` in
   read-only mode, plus `vlite_kv_put` and `vlite_kv_delete` with `--writable`.
-  <!-- source: src/openapi.json, proto/vlite/v1/vlite.proto, tests/grpc_provider_wire.rs, tests/server_grpc_kv.rs, tests/server_kv.rs (kv_capabilities_advertise_supported_routes_and_format), tests/graph_surface_parity.rs, tests/fixtures/kv/mcp-tool-additions.json -->
+  <!-- source: src/openapi.json, proto/vlite/v1/vlite.proto, tests/grpc_provider_wire.rs, tests/server_grpc_kv.rs, tests/server_kv.rs (kv_capabilities_advertise_supported_routes_and_format), tests/graph_surface_parity.rs, tests/fixtures/kv/mcp-tool-additions.json, src/server.rs -->
 - **Errors.** `cursor_before_history` (Rust `Error::CursorBeforeHistory`, REST
   409, a C ABI error string) applies to history below a directory store's
   checkpoint floor. The Rust `Error` enum, which is `#[non_exhaustive]`, also

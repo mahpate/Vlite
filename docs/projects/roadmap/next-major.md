@@ -92,10 +92,16 @@ Local numbers below show direction only (see rules).
   closed. This is not completion of the size, residency or reopen targets.
 - **Speed P1, exact search (F2):** the boxed iterator is gone. At 100k×384,
   k=10 and 16 threads, p50 went from 8.2–8.3 ms to 7.1–7.9 ms, with identical
-  results.
+  results. The exact SIMD kernels in 0.7.0 then took it to 4.8 ms, and 80,000
+  × 768 exact search from 10.6 ms to 4.9 ms ([results](../../../benchmarks/RESULTS.md)).
 - **Speed P1, background rebuilds (F5):** opt-in
   `set_background_hnsw_rebuild` keeps serving the ready index while a buffer
-  overflow rebuilds in the background. The stall has not been measured yet.
+  overflow rebuilds in the background. Measured for 0.7.0 on 20,000 × 384
+  vectors with 16 writes and 4 deletes before each query: a lazy rebuild
+  blocks one query for about 1.65 s, twice per run. With the background
+  rebuild, queries sent back to back stay under 5 ms but only 40% are served;
+  paced at 250 ms every query is served and the worst request is 14.6 ms.
+  F5's 10 ms target is not met.
 - **Speed P1, compact graph (S4):** partly done. Sorted adjacency with shared
   relationship names cut adjacency from 146 to 54 B/edge. A compact sorted
   property map (a B-tree allocated a ~630 B node even for one property) cut
@@ -121,9 +127,10 @@ Local numbers below show direction only (see rules).
   Cursors below the floor return `cursor_before_history`. Converters go both
   ways. P2b is implemented: the image and sealed logs are memory-mapped, and
   an image stores records as blocks and graphs as snapshots that load in
-  parallel and in bulk instead of by replay. F4 is not measured yet; the
-  DO-005 run qualifies it. Loading is still linear in the image size (see
-  the plan's limits).
+  parallel and in bulk instead of by replay. F4 is measured and not met:
+  reopening 100,000 × 384 vectors takes 170 ms from a checkpointed directory
+  against 238 ms from one file (0.7.0 supplemental run). Loading is still
+  linear in the image size (see the plan's limits).
 - **Gap 3, graph TTL:** the embedded Rust API is done
   ([property graphs](../../GRAPH.md#expiry-ttl)). Nodes and edges take
   deadlines; an expired node is hidden with all its edges (cascade), and an

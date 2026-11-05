@@ -41,6 +41,83 @@ half-second sample above 50%); none was discarded or retried.
 - **The measured revision is `30901be1`.** The release notes name the final
   release revision at freeze.
 
+## Supplemental 0.7.0 measurements, November 4, 2026 UTC
+
+The profile above does not exercise the opt-in directory store, declared
+metadata indexes, 768-dimensional exact search or queries during writes. A
+supplemental run measured them on the same VM configuration, method and
+unchanged CPU gate. 435 slots produced a measurement; 432 passed the gate and
+3 failed it, so they are kept out of the medians and were not retried. Five
+runs per workload and revision. Absolute times differ between VMs by up to
+70%, so every comparison below is made within one VM and one campaign.
+
+[Full tables, slot accounting and method](results/supplement-0.7.0-azure.md) ·
+[raw slots](results/supplement-0.7.0-azure.json).
+
+Directory store, 100,000 × 384 (medians; the directory rows are against the single file):
+
+| Layout | Reopen (ms) | First query (ms) | Ingest (vectors/s) |
+|---|---:|---:|---:|
+| Single file | 238 | 4.8 | 223,061 |
+| Directory, explicit checkpoint (2.7 s) | 170 (−28.5%) | 3.6 | 116,527 |
+| Directory, automatic checkpoints | 206 (−13.4%) | 3.9 | 108,665 |
+| Directory, log only | 239 (+0.3%) | 4.8 | 222,961 |
+
+At 400,000 × 96 the checkpointed directory reopens in 243 ms against 341 ms
+(−28.8%) and at 1,000,000 × 32 in 512 ms against 576 ms (−11.0%). Reopen still
+grows with the data, so the 50 ms reopen goal is not met.
+
+Exact search at 768 dimensions, 80,000 vectors (100,000 × 768 exceeds the
+benchmark tool's 256 MiB data-set cap):
+
+| Revision | Query p50 (ms) | Query p99 (ms) | Reopen (ms) |
+|---|---:|---:|---:|
+| v0.6.0 | 10.62 | 10.75 | 365 |
+| v0.6.1 | 10.50 | 11.12 | 362 |
+| Release candidate | 4.90 (−53.9%) | 5.05 | 370 |
+
+Declared metadata indexes, 100,000 × 384, filtered exact query p50 in ms
+(change against no index; one VM, the final build):
+
+| Matching records | None | `eq` | `range` | `eq-range` |
+|---|---:|---:|---:|---:|
+| 10%, spread over all blocks | 2.97 | 2.52 (−15%) | 3.00 (+1%) | 2.58 (−13%) |
+| 10%, in whole 1,024-record blocks | 3.00 | 1.73 (−42%) | 2.22 (−26%) | 1.77 (−41%) |
+| 1%, in whole blocks | 2.65 | 0.34 (−87%) | 0.39 (−85%) | 0.34 (−87%) |
+
+A second VM shows the same order of gains (−25% to −27% on spread matches with
+`eq` or `eq-range`, −44% to −52% and −88% to −89% on whole blocks). Before the last candidate
+commit, a `range` index on spread matches cost 87–138% more than no index,
+because its summaries could prune no block and the search first built a
+candidate set it then dropped; the tables in the full results show both
+builds side by side. The benchmark filter is an equality on a boolean field.
+`eq` and `eq-range` keep equality postings for any value type, so they narrow
+it wherever its matches lie. A `range` index orders integers and floats only;
+on a boolean field it adds just the block summaries, which help when the
+matches fill whole blocks.
+
+Queries during writes, 20,000 × 384, 16 writes and 4 deletes before each of 30
+queries (synthetic data; recall 0.53–0.57 for all modes):
+
+| Rebuild | Query pacing | Queries served | Worst request (ms) |
+|---|---:|---:|---:|
+| Lazy | none | 150 of 150 | 1,650 |
+| Lazy | 250 ms | 150 of 150 | 1,657 |
+| Background | none | 60 of 150 | 4.3 |
+| Background | 250 ms | 150 of 150 | 14.6 |
+
+- **Directory store:** faster reopen (−11% to −29%) at the price of an
+  explicit checkpoint (2.7–4.0 s) and, when it checkpoints during ingest,
+  about half the single-file ingest rate. The log-only layout ingests and
+  reopens like one file.
+- **Queries during writes:** a lazy rebuild blocks one query for about 1.65 s,
+  twice per run. The background rebuild keeps requests short, but queries sent
+  back to back find a ready index only 40% of the time; paced 250 ms apart, the
+  worst request is 14.6 ms, above the 10 ms goal.
+- **Not measured here:** ANN at 768 dimensions, graph bulk load and the REST
+  comparison with other engines. The size goals S1–S6 are best effort and
+  unchanged: file bytes match 0.6.1.
+
 ## Release 0.6.0 against 81ff901, October 27, 2026 UTC
 
 v0.6.0 (`6428b69`) and the earlier DO-005 baseline `81ff901` were built from

@@ -58,6 +58,20 @@ unchanged and still unqualified until the major-release measurement.
 | F7 | REST query latency | About 1.5× slower than Qdrant, unfiltered | At or below Qdrant on the same harness |
 | F8 | Filtered search | Faster than Qdrant on exact | Keep the lead, and add filter-aware ANN |
 
+### Measured for 0.7.0
+
+The [supplemental run](../../../benchmarks/RESULTS.md#supplemental-070-measurements-november-4-2026-utc)
+measured the speed goals that the 0.7.0 code can reach, on the DO-005 VM
+configuration under the unchanged quiet gate. Per decision 3, F1–F3 and F7 are
+tracked goals; F1, F3, F6 and F7 were not measured in this run.
+
+| ID | Measured (medians of five runs) | Status |
+|---|---|---|
+| F2 | 80,000 × 768 exact p50 4.9 ms against 10.6 ms in 0.6.0 and 10.5 ms in 0.6.1 (−54%). The 100,000 × 768 case exceeds the benchmark tool's 256 MiB data-set cap | Regression removed; the 100,000-vector figure is not measured |
+| F4 | Checkpointed directory: 170 ms at 100,000 × 384 (one file 238 ms), 243 ms at 400,000 × 96 (341 ms), 512 ms at 1,000,000 × 32 (576 ms) | **Not met**: reopen still grows with the data |
+| F5 | A lazy rebuild blocks one query for about 1.65 s. With the background rebuild, queries sent back to back find a ready index 40% of the time; paced 250 ms apart, the worst request is 14.6 ms | **Not met** (no query over 10 ms) |
+| F8 | On 100,000 × 384 with an equality filter on a boolean field, a declared `eq` index cuts the p50 of a filter matching 1% of the records by 87–89% and 10% by 13–52%; a `range` index (summaries only on that field) helps when the matches fill whole blocks | Measured; filter-aware ANN is not part of this run |
+
 ### Must not regress
 
 - Crash safety: every acknowledged write survives a process crash; durability
