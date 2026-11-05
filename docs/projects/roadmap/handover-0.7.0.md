@@ -61,7 +61,7 @@ unchanged and no size claim is made.
 | F8, F9 | Collection list ids show gaps where reserved collections sit; the administrator log shows reserved names |
 | Quotas and audit | Live vector quotas count reserved records; an attempt on a reserved name is not counted as a credential denial |
 | Attachments | A raw credential can attach ordinary records to nodes of its reserved graph (and reserved records to an ordinary graph); nobody without raw access can then delete or detach them until the holder does |
-| KV-3, KV-4, KV-5 | Key-value list sorts every matching key before the limit; a writer can fill a key's 16 slots; a put with an already expired `expires_at_ms` answers 500 (present since 0.6.1) |
+| KV-3, KV-4, KV-5 | Key-value list sorts every matching key before the limit; a writer can fill a key's 16 slots; the ordinary record route `PUT /v1/collections/{collection}/vectors/{id}` answers 500 to an already due `expires_at_ms` or a zero `ttl_ms` (present since 0.6.1; the key-value route accepts a due expiry by contract) |
 | Guards | A request guard type that makes a raw lookup without the reservation check impossible to write (see below) |
 
 Open readings recorded by the mutation work, none pinned by a test: whether consolidate needs the evidence-collection grant
