@@ -1704,3 +1704,201 @@ async fn tenant_namespace_and_resource_exhausted_are_shared_with_rest() {
         .unwrap_err();
     assert_error(&error, Code::ResourceExhausted, "rate_limited");
 }
+
+fn build_disk_ann(collection: &str, path: &Path) -> proto::BuildDiskAnnRequest {
+    proto::BuildDiskAnnRequest {
+        collection: collection.into(),
+        path: path.to_string_lossy().into_owned(),
+        metric: proto::Metric::SquaredL2 as i32,
+        ..Default::default()
+    }
+}
+
+fn search_disk_ann(collection: &str, path: &Path) -> proto::SearchDiskAnnRequest {
+    proto::SearchDiskAnnRequest {
+        collection: collection.into(),
+        path: path.to_string_lossy().into_owned(),
+        vector: vec![3.0, 1.0],
+        k: 2,
+        ef_search: 8,
+        ..Default::default()
+    }
+}
+
+async fn indexer_credential(h: &Harness, collections: &[&str]) -> String {
+    let issued = rest_ok(
+        &h.app,
+        "POST",
+        "/v1/admin/credentials",
+        Some(json!({
+            "name":"indexer","collections":collections,"operations":["index","search"],
+            "expires_unix_ms":now_ms()+3600000
+        })),
+    )
+    .await;
+    issued["token"].as_str().unwrap().to_owned()
+}
+
+#[tokio::test]
+async fn disk_ann_sidecars_are_placed_by_the_server_for_every_caller_but_the_administrator() {
+    let directory = tempfile::tempdir().unwrap();
+    let admin_directory = tempfile::tempdir().unwrap();
+    let mut h = start(
+        v4(&directory.path().join("sidecar.vlite")),
+        Some(admin_directory.path()),
+    )
+    .await;
+    for name in ["docs", "other"] {
+        h.client
+            .create_collection(admin(create(name, None)))
+            .await
+            .unwrap();
+        h.client
+            .write_batch(admin(batch(
+                name,
+                (0..8).map(|id| put_op(id, vec![id as f32, 1.0])).collect(),
+            )))
+            .await
+            .unwrap();
+    }
+    let id_of = |name: &'static str| {
+        let app = h.app.clone();
+        async move {
+            rest_ok(&app, "GET", &format!("/v1/collections/{name}"), None).await["id"]
+                .as_u64()
+                .unwrap()
+        }
+    };
+    let docs = id_of("docs").await;
+    let other = id_of("other").await;
+    let sidecar = |id: u64| admin_directory.path().join(format!("disk-ann-{id}.dann"));
+    let token = indexer_credential(&h, &["docs"]).await;
+    let scoped = Some(token.as_str());
+    let nothing = Path::new("");
+
+    // A path the caller chose is refused, and nothing is written or read there.
+    let chosen = directory.path().join("chosen.dann");
+    let refused = [
+        h.client
+            .build_disk_ann(req(scoped, build_disk_ann("docs", &chosen)))
+            .await
+            .unwrap_err(),
+        h.client
+            .search_disk_ann(req(scoped, search_disk_ann("docs", &chosen)))
+            .await
+            .unwrap_err(),
+        h.client
+            .search_disk_ann(req(Some(READER), search_disk_ann("docs", &chosen)))
+            .await
+            .unwrap_err(),
+    ];
+    for error in &refused {
+        assert_error(error, Code::InvalidArgument, "invalid_input");
+    }
+    assert!(!chosen.exists());
+
+    // Without a path the sidecar is the one the REST routes use, derived from
+    // the collection the guard accepted: a name outside the grant is refused
+    // before any file is chosen.
+    let error = h
+        .client
+        .build_disk_ann(req(scoped, build_disk_ann("other", nothing)))
+        .await
+        .unwrap_err();
+    assert_error(&error, Code::PermissionDenied, "forbidden_scope");
+    assert!(!sidecar(other).exists());
+    assert!(!sidecar(docs).exists());
+    let built = h
+        .client
+        .build_disk_ann(req(scoped, build_disk_ann("docs", nothing)))
+        .await
+        .unwrap()
+        .into_inner();
+    assert_eq!(u64::from(built.collection_id), docs);
+    assert!(sidecar(docs).exists());
+    assert!(!sidecar(other).exists());
+    let derived = h
+        .client
+        .search_disk_ann(req(scoped, search_disk_ann("docs", nothing)))
+        .await
+        .unwrap()
+        .into_inner();
+    let rest_derived = rest_ok(
+        &h.app,
+        "POST",
+        "/v1/collections/docs/search/disk-ann",
+        Some(json!({"vector":[3.0,1.0],"k":2,"ef_search":8})),
+    )
+    .await;
+    assert_eq!(grpc_hits(&derived), rest_hits(&rest_derived));
+    assert_eq!(derived.hits[0].id, 3);
+    let error = h
+        .client
+        .search_disk_ann(req(scoped, search_disk_ann("other", nothing)))
+        .await
+        .unwrap_err();
+    assert_error(&error, Code::PermissionDenied, "forbidden_scope");
+    let read_only = h
+        .client
+        .search_disk_ann(req(Some(READER), search_disk_ann("docs", nothing)))
+        .await
+        .unwrap()
+        .into_inner();
+    assert_eq!(grpc_hits(&read_only), grpc_hits(&derived));
+
+    // The administrator still names the path, and still has to.
+    let named = directory.path().join("named.dann");
+    h.client
+        .build_disk_ann(admin(build_disk_ann("docs", &named)))
+        .await
+        .unwrap();
+    assert!(named.exists());
+    let operator = h
+        .client
+        .search_disk_ann(admin(search_disk_ann("docs", &named)))
+        .await
+        .unwrap()
+        .into_inner();
+    assert_eq!(grpc_hits(&operator), grpc_hits(&derived));
+    for error in [
+        h.client
+            .build_disk_ann(admin(build_disk_ann("docs", nothing)))
+            .await
+            .unwrap_err(),
+        h.client
+            .search_disk_ann(admin(search_disk_ann("docs", nothing)))
+            .await
+            .unwrap_err(),
+    ] {
+        assert_error(&error, Code::InvalidArgument, "invalid_input");
+    }
+}
+
+#[tokio::test]
+async fn disk_ann_for_a_read_only_caller_needs_the_admin_directory() {
+    let directory = tempfile::tempdir().unwrap();
+    let mut h = start(v4(&directory.path().join("sidecar.vlite")), None).await;
+    h.client
+        .create_collection(admin(create("docs", None)))
+        .await
+        .unwrap();
+    let nothing = Path::new("");
+    let error = h
+        .client
+        .search_disk_ann(req(Some(READER), search_disk_ann("docs", nothing)))
+        .await
+        .unwrap_err();
+    assert_error(&error, Code::FailedPrecondition, "admin_directory_disabled");
+    let error = h
+        .client
+        .build_disk_ann(req(Some(READER), build_disk_ann("docs", nothing)))
+        .await
+        .unwrap_err();
+    assert_error(&error, Code::PermissionDenied, "read_only");
+    let named = directory.path().join("named.dann");
+    h.client
+        .build_disk_ann(admin(build_disk_ann("docs", &named)))
+        .await
+        .unwrap();
+    assert!(named.exists());
+}

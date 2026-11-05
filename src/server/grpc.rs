@@ -349,11 +349,49 @@ fn target(collection: String) -> Target {
     }
 }
 
-/// Opens a collection name already qualified for a scoped tenant, without
-/// applying tenant qualification twice.
-fn open_qualified(db: &Database, role: &admin::Role, name: &str) -> Result<u16, ApiError> {
-    let raw = tenants::unqualify(role, name);
-    open(db, role, &Target::Named(raw))
+/// Where a disk ANN call finds its sidecar. The administrator names the path
+/// itself, an operator-only choice. Every other caller gets the file the REST
+/// routes use for the collection (`disk-ann-<collection id>.dann` in the
+/// administrator's directory) and may not name one: a client-chosen path would
+/// let a credential scoped to one collection write, or read, any file.
+enum Sidecar {
+    Named(std::path::PathBuf),
+    Derived(std::path::PathBuf),
+}
+
+impl Sidecar {
+    fn choose(service: &Service, role: &admin::Role, requested: &str) -> Result<Self, ApiError> {
+        if matches!(role, admin::Role::Admin) {
+            if requested.is_empty() {
+                return Err(unprocessable("disk ANN path is required"));
+            }
+            return Ok(Self::Named(requested.into()));
+        }
+        if !requested.is_empty() {
+            return Err(unprocessable(
+                "the disk ANN sidecar path is chosen by the server for this credential; omit path",
+            ));
+        }
+        features::disk_ann_directory(service).map(Self::Derived)
+    }
+
+    fn path(&self, collection: u16) -> std::path::PathBuf {
+        match self {
+            Self::Named(path) => path.clone(),
+            Self::Derived(directory) => features::disk_ann_sidecar(directory, collection),
+        }
+    }
+
+    fn open(
+        &self,
+        collection: u16,
+        options: crate::DiskAnnOptions,
+    ) -> Result<crate::DiskAnnIndex, ApiError> {
+        match self {
+            Self::Named(path) => Ok(crate::DiskAnnIndex::open(path, options)?),
+            Self::Derived(directory) => features::open_disk_ann(directory, collection, options),
+        }
+    }
 }
 
 fn value_in(value: Option<proto::MetadataValue>) -> Result<crate::MetadataValue, ApiError> {
@@ -925,22 +963,12 @@ async fn poll_changes(
     })?;
     rate_limit(service, &role)?;
     authorize_need(service, &role, Need::Admin, false, false)?;
-    let bindings = service.memory_bindings.clone();
+    let scope = service.scope(role);
     service
         .run_read(move |db| {
             let mut batch = db.changes_after(&cursor, limit)?;
             batch.changes.retain_mut(|change| {
-                bindings.reserved().raw_allowed(
-                    None,
-                    super::reserved::Resource::Collection,
-                    &change.collection,
-                ) && graph::feed_graph(&change.kind).is_none_or(|name| {
-                    bindings
-                        .reserved()
-                        .raw_allowed(None, super::reserved::Resource::Graph, name)
-                }) && bindings
-                    .reserved()
-                    .retain_change_operations(None, &mut change.kind)
+                scope.change_visible(change) && scope.retain_change_operations(&mut change.kind)
             });
             Ok(batch)
         })
@@ -1051,9 +1079,10 @@ impl VLite for Adapter {
             |service, role, _, request| async move {
                 let id = request.id;
                 let addressed = target(request.collection);
+                let scope = service.scope(role);
                 service
                     .run_read(move |db| {
-                        let collection = open(db, &role, &addressed)?;
+                        let collection = scope.collection(db, &addressed)?.id();
                         let not_found = || {
                             ApiError::new(StatusCode::NOT_FOUND, "not_found", "vector not found")
                         };
@@ -1108,10 +1137,17 @@ impl VLite for Adapter {
                     )
                     .saturating_add(expiry_target.retained_bytes())
                     .saturating_add(guard.retained_bytes());
+                    let scope = service.scope(role);
                     service
                         .run_mutation(bytes, move |db| {
-                            let collection = open(db, &role, &expiry_target)?;
-                            enforce_quota(&quota_service, db, &role, collection, &[(id, true)])?;
+                            let collection = scope.collection(db, &expiry_target)?.id();
+                            enforce_quota(
+                                &quota_service,
+                                db,
+                                scope.role(),
+                                collection,
+                                &[(id, true)],
+                            )?;
                             let expected = guard.resolve(db, &ident, collection, id)?;
                             let created = db.revision_in(collection, id)?.is_none();
                             let revision = db.put_with_expiry_in(
@@ -1300,14 +1336,14 @@ impl VLite for Adapter {
                         let hits = if rerank_mode == proto::RerankMode::None {
                             hits
                         } else {
-                            let name = tenants::qualify(&rerank_role, rerank_target.name());
+                            let scope = service.scope(rerank_role);
                             service
                                 .run(move |db| {
-                                    let collection = open(db, &rerank_role, &rerank_target)?;
+                                    let collection = scope.collection(db, &rerank_target)?;
                                     let metric = if rerank_metric_explicit {
                                         rerank_metric
                                     } else {
-                                        identity(db, collection, &rerank_target).0
+                                        identity(db, collection.id(), &rerank_target).0
                                     };
                                     let reranker: Box<dyn crate::rerank::Reranker> =
                                         match rerank_mode {
@@ -1323,7 +1359,7 @@ impl VLite for Adapter {
                                                 unreachable!()
                                             }
                                         };
-                                    Ok(db.collection(&name)?.rerank(
+                                    Ok(collection.read(db)?.rerank(
                                         &query,
                                         &hits,
                                         requested_k,
@@ -1426,15 +1462,18 @@ impl VLite for Adapter {
             false,
             legacy,
             |service, role, _, request| async move {
-                let name = tenants::qualify(&role, target(request.collection).name());
+                let addressed = target(request.collection);
                 let id = request.id;
                 let metadata = metadata_in(request.metadata)?;
-                let bytes =
-                    group_commit::record_bytes(0, 0, &metadata).saturating_add(name.capacity());
+                let bytes = group_commit::record_bytes(0, 0, &metadata)
+                    .saturating_add(addressed.retained_bytes());
+                let scope = service.scope(role);
                 service
                     .run_mutation(bytes, move |db| {
-                        open_qualified(db, &role, &name)?;
-                        let revision = db.collection_mut(&name)?.update_metadata(id, &metadata)?;
+                        let revision = scope
+                            .collection(db, &addressed)?
+                            .write(db)?
+                            .update_metadata(id, &metadata)?;
                         Ok(proto::UpdateMetadataResponse { revision })
                     })
                     .await
@@ -1455,13 +1494,13 @@ impl VLite for Adapter {
             true,
             legacy,
             |service, role, _, request| async move {
-                let name = tenants::qualify(&role, target(request.collection).name());
+                let addressed = target(request.collection);
                 let filters = conditions_in(request.filter)?;
                 let metric = metric_in(request.metric)?;
+                let scope = service.scope(role);
                 service
                     .run_read(move |db| {
-                        open_qualified(db, &role, &name)?;
-                        let groups = db.collection(&name)?.search_grouped(
+                        let groups = scope.collection(db, &addressed)?.read(db)?.search_grouped(
                             &request.vector,
                             request.groups as usize,
                             request.hits_per_group as usize,
@@ -1505,7 +1544,7 @@ impl VLite for Adapter {
             true,
             legacy,
             |service, role, _, request| async move {
-                let name = tenants::qualify(&role, target(request.collection).name());
+                let addressed = target(request.collection);
                 let conditions = conditions_in(request.filter)?;
                 let metric = metric_in(request.metric)?;
                 let query = crate::RecommendationQuery {
@@ -1525,10 +1564,11 @@ impl VLite for Adapter {
                     conditions,
                     metric,
                 };
+                let scope = service.scope(role);
                 service
                     .run_read(move |db| {
-                        open_qualified(db, &role, &name)?;
-                        Ok(hits_out(db.collection(&name)?.recommend(&query)?))
+                        let collection = scope.collection(db, &addressed)?;
+                        Ok(hits_out(collection.read(db)?.recommend(&query)?))
                     })
                     .await
             },
@@ -1548,12 +1588,13 @@ impl VLite for Adapter {
             true,
             legacy,
             |service, role, _, request| async move {
-                let name = tenants::qualify(&role, target(request.collection).name());
+                let addressed = target(request.collection);
                 let filters = conditions_in(request.filter)?;
+                let scope = service.scope(role);
                 service
                     .run_read(move |db| {
-                        open_qualified(db, &role, &name)?;
-                        let facets = db.collection(&name)?.facets(&request.field, &filters)?;
+                        let collection = scope.collection(db, &addressed)?;
+                        let facets = collection.read(db)?.facets(&request.field, &filters)?;
                         Ok(proto::FacetsResponse {
                             facets: facets
                                 .into_iter()
@@ -1582,13 +1623,14 @@ impl VLite for Adapter {
             true,
             legacy,
             |service, role, _, request| async move {
-                let name = tenants::qualify(&role, target(request.collection).name());
+                let addressed = target(request.collection);
                 let filters = conditions_in(request.filter)?;
+                let scope = service.scope(role);
                 service
                     .run_read(move |db| {
-                        open_qualified(db, &role, &name)?;
-                        let stats = db
-                            .collection(&name)?
+                        let collection = scope.collection(db, &addressed)?;
+                        let stats = collection
+                            .read(db)?
                             .numeric_stats(&request.field, &filters)?;
                         Ok(proto::NumericStatsResponse {
                             count: stats.count,
@@ -1616,7 +1658,7 @@ impl VLite for Adapter {
             true,
             legacy,
             |service, role, _, request| async move {
-                let name = tenants::qualify(&role, target(request.collection).name());
+                let addressed = target(request.collection);
                 let conditions = conditions_in(request.filter)?;
                 let metric = metric_in(request.metric)?;
                 let sort = match proto::GeoSort::try_from(request.sort) {
@@ -1635,10 +1677,11 @@ impl VLite for Adapter {
                     metric,
                     sort,
                 };
+                let scope = service.scope(role);
                 service
                     .run_read(move |db| {
-                        open_qualified(db, &role, &name)?;
-                        let hits = db.collection(&name)?.search_geo(&query)?;
+                        let collection = scope.collection(db, &addressed)?;
+                        let hits = collection.read(db)?.search_geo(&query)?;
                         Ok(proto::GeoSearchResponse {
                             hits: hits
                                 .into_iter()
@@ -1671,20 +1714,23 @@ impl VLite for Adapter {
                 let spec = request
                     .spec
                     .ok_or_else(|| unprocessable("named vector spec is required"))?;
-                let name = tenants::qualify(&role, target(request.collection).name());
+                let addressed = target(request.collection);
                 let vector_metric = metric_in(spec.metric)?;
+                let scope = service.scope(role);
                 service
                     .run(move |db| {
-                        open_qualified(db, &role, &name)?;
-                        db.collection_mut(&name)?.configure_vector(
-                            &spec.name,
-                            crate::vectors::VectorSpec {
-                                dimensions: spec.dimensions as usize,
-                                metric: vector_metric,
-                                active_version: spec.active_version,
-                                history: spec.history as usize,
-                            },
-                        )?;
+                        scope
+                            .collection(db, &addressed)?
+                            .write(db)?
+                            .configure_vector(
+                                &spec.name,
+                                crate::vectors::VectorSpec {
+                                    dimensions: spec.dimensions as usize,
+                                    metric: vector_metric,
+                                    active_version: spec.active_version,
+                                    history: spec.history as usize,
+                                },
+                            )?;
                         Ok(proto::Empty {})
                     })
                     .await
@@ -1705,7 +1751,7 @@ impl VLite for Adapter {
             false,
             legacy,
             |service, role, _, request| async move {
-                let name = tenants::qualify(&role, target(request.collection).name());
+                let addressed = target(request.collection);
                 let mut vectors = crate::vectors::RecordVectors::default();
                 for vector in request.dense {
                     vectors.dense.entry(vector.name).or_default().push(
@@ -1721,10 +1767,13 @@ impl VLite for Adapter {
                         return Err(unprocessable("duplicate sparse vector name"));
                     }
                 }
+                let scope = service.scope(role);
                 service
                     .run(move |db| {
-                        open_qualified(db, &role, &name)?;
-                        db.collection_mut(&name)?.put_vectors(request.id, vectors)?;
+                        scope
+                            .collection(db, &addressed)?
+                            .write(db)?
+                            .put_vectors(request.id, vectors)?;
                         Ok(proto::Empty {})
                     })
                     .await
@@ -1745,16 +1794,19 @@ impl VLite for Adapter {
             false,
             legacy,
             |service, role, _, request| async move {
-                let name = tenants::qualify(&role, target(request.collection).name());
+                let addressed = target(request.collection);
+                let scope = service.scope(role);
                 service
                     .run(move |db| {
-                        open_qualified(db, &role, &name)?;
-                        db.collection_mut(&name)?.put_vector_version(
-                            request.id,
-                            &request.name,
-                            &request.version,
-                            request.vector,
-                        )?;
+                        scope
+                            .collection(db, &addressed)?
+                            .write(db)?
+                            .put_vector_version(
+                                request.id,
+                                &request.name,
+                                &request.version,
+                                request.vector,
+                            )?;
                         Ok(proto::Empty {})
                     })
                     .await
@@ -1775,11 +1827,12 @@ impl VLite for Adapter {
             true,
             legacy,
             |service, role, _, request| async move {
-                let name = tenants::qualify(&role, target(request.collection).name());
+                let addressed = target(request.collection);
+                let scope = service.scope(role);
                 service
                     .run_read(move |db| {
-                        open_qualified(db, &role, &name)?;
-                        Ok(hits_out(db.collection(&name)?.search_named(
+                        let collection = scope.collection(db, &addressed)?;
+                        Ok(hits_out(collection.read(db)?.search_named(
                             &request.name,
                             request.version.as_deref(),
                             &request.vector,
@@ -1804,12 +1857,13 @@ impl VLite for Adapter {
             true,
             legacy,
             |service, role, _, request| async move {
-                let name = tenants::qualify(&role, target(request.collection).name());
+                let addressed = target(request.collection);
                 let query = sparse_in(request.indices, request.values)?;
+                let scope = service.scope(role);
                 service
                     .run_read(move |db| {
-                        open_qualified(db, &role, &name)?;
-                        Ok(hits_out(db.collection(&name)?.search_sparse(
+                        let collection = scope.collection(db, &addressed)?;
+                        Ok(hits_out(collection.read(db)?.search_sparse(
                             &request.name,
                             &query,
                             request.k as usize,
@@ -1833,7 +1887,7 @@ impl VLite for Adapter {
             true,
             legacy,
             |service, role, _, request| async move {
-                let name = tenants::qualify(&role, target(request.collection).name());
+                let addressed = target(request.collection);
                 let sparse = sparse_in(request.sparse_indices, request.sparse_values)?;
                 let fusion =
                     request
@@ -1855,10 +1909,11 @@ impl VLite for Adapter {
                     k: request.k as usize,
                     fusion,
                 };
+                let scope = service.scope(role);
                 service
                     .run_read(move |db| {
-                        open_qualified(db, &role, &name)?;
-                        let hits = db.collection(&name)?.search_dense_sparse(&query)?;
+                        let collection = scope.collection(db, &addressed)?;
+                        let hits = collection.read(db)?.search_dense_sparse(&query)?;
                         Ok(proto::SearchResponse {
                             hits: Vec::new(),
                             ranking: None,
@@ -1893,7 +1948,7 @@ impl VLite for Adapter {
             true,
             legacy,
             |service, role, _, request| async move {
-                let name = tenants::qualify(&role, target(request.collection).name());
+                let addressed = target(request.collection);
                 let parsed = crate::query_language::parse(&request.query)
                     .map_err(|e| unprocessable(e.to_string()))?;
                 let parameters = request
@@ -1901,10 +1956,11 @@ impl VLite for Adapter {
                     .into_iter()
                     .map(|(name, vector)| (name, vector.vector))
                     .collect();
+                let scope = service.scope(role);
                 service
                     .run_read(move |db| {
-                        open_qualified(db, &role, &name)?;
-                        let output = parsed.execute(db.collection(&name)?, &parameters)?;
+                        let collection = scope.collection(db, &addressed)?;
+                        let output = parsed.execute(collection.read(db)?, &parameters)?;
                         Ok(proto::QueryResponse {
                             hits: output
                                 .hits
@@ -1957,7 +2013,7 @@ impl VLite for Adapter {
             Need::Admin,
             false,
             false,
-            |service, _, _, request| async move {
+            |service, role, _, request| async move {
                 let cursor = if request.cursor.is_empty() {
                     crate::changes::FeedCursor::beginning()
                 } else {
@@ -1971,9 +2027,14 @@ impl VLite for Adapter {
                 if limit > crate::changes::MAX_FEED_BATCH {
                     return Err(unprocessable("change limit exceeds 10000"));
                 }
+                let scope = service.scope(role);
                 service
                     .run_read(move |db| {
-                        let batch = db.changes_after(&cursor, limit)?;
+                        let mut batch = db.changes_after(&cursor, limit)?;
+                        batch.changes.retain_mut(|change| {
+                            scope.change_visible(change)
+                                && scope.retain_change_operations(&mut change.kind)
+                        });
                         Ok(proto::ChangesResponse {
                             cursor: batch.next.to_token(),
                             has_more: batch.has_more,
@@ -2093,10 +2154,8 @@ impl VLite for Adapter {
             false,
             false,
             |service, role, _, request| async move {
-                if request.path.is_empty() {
-                    return Err(unprocessable("disk ANN path is required"));
-                }
-                let name = tenants::qualify(&role, target(request.collection).name());
+                let sidecar = Sidecar::choose(&service, &role, &request.path)?;
+                let addressed = target(request.collection);
                 let metric = metric_in(request.metric)?;
                 let config = request
                     .config
@@ -2106,14 +2165,16 @@ impl VLite for Adapter {
                         seed: c.seed.unwrap_or(42),
                     })
                     .unwrap_or_default();
+                let scope = service.scope(role);
                 service
                     .run(move |db| {
-                        let collection_id = open_qualified(db, &role, &name)?;
-                        let source = db.build_disk_ann(&name, &request.path, config, metric)?;
+                        let collection = scope.collection(db, &addressed)?;
+                        let path = sidecar.path(collection.id());
+                        let source = collection.build_disk_ann(db, &path, config, metric)?;
                         Ok(proto::DiskAnnBuildResponse {
                             lineage: source.lineage,
                             sequence: source.sequence,
-                            collection_id: u32::from(collection_id),
+                            collection_id: u32::from(collection.id()),
                             live_records: source.live_records,
                         })
                     })
@@ -2135,10 +2196,8 @@ impl VLite for Adapter {
             true,
             legacy,
             |service, role, _, request| async move {
-                if request.path.is_empty() {
-                    return Err(unprocessable("disk ANN path is required"));
-                }
-                let name = tenants::qualify(&role, target(request.collection).name());
+                let sidecar = Sidecar::choose(&service, &role, &request.path)?;
+                let addressed = target(request.collection);
                 let options = crate::DiskAnnOptions {
                     cache_bytes: if request.cache_bytes == 0 {
                         crate::disk_ann::DEFAULT_CACHE_BYTES
@@ -2146,10 +2205,11 @@ impl VLite for Adapter {
                         request.cache_bytes as usize
                     },
                 };
-                let index = crate::DiskAnnIndex::open(&request.path, options)?;
+                let scope = service.scope(role);
                 service
                     .run_read(move |db| {
-                        open_qualified(db, &role, &name)?;
+                        let collection = scope.collection(db, &addressed)?.id();
+                        let index = sidecar.open(collection, options)?;
                         Ok(hits_out(db.search_disk_ann(
                             &index,
                             &request.vector,
@@ -2298,8 +2358,9 @@ impl VLite for Adapter {
                     };
                     let target = target(request.collection);
                     let check = target.clone();
+                    let scope = service.scope(role);
                     service
-                        .run_read(move |db| open(db, &role, &check).map(|_| ()))
+                        .run_read(move |db| scope.collection(db, &check).map(|_| ()))
                         .await?;
                     Ok((request_id, target, request.after, page))
                 },
@@ -2430,10 +2491,11 @@ async fn export_page(
         )
     })?;
     let target = target.clone();
+    let scope = service.scope(role);
     service
         .run_read(move |db| {
             use std::ops::Bound::{Excluded, Unbounded};
-            let collection = open(db, &role, &target)?;
+            let collection = scope.collection(db, &target)?.id();
             let state = db.state(collection);
             let mut records = state
                 .records

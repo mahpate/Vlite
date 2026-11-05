@@ -386,7 +386,7 @@ async fn create(
 ) -> Result<(StatusCode, Json<Value>), ApiError> {
     let Named { graph } = parse(input)?;
     let scope = service.scope(role);
-    let name = scope.graph(&graph)?;
+    let name = scope.guarded_graph(&graph)?;
     enabled(&service)?;
     let created = guarded_write(&service, move |db| name.create(db)).await?;
     Ok((
@@ -402,7 +402,7 @@ async fn info_route(
 ) -> Result<Json<Value>, ApiError> {
     let graph = graph_path(graph)?;
     let scope = service.scope(role);
-    let name = scope.graph(&graph)?;
+    let name = scope.guarded_graph(&graph)?;
     enabled(&service)?;
     let found = guarded_read(&service, move |db| Ok(name.read(db)?.info()), untruncated).await?;
     Ok(Json(json!({"graph": info(scope.role(), &found)})))
@@ -414,7 +414,7 @@ async fn drop_route(
     graph: Result<Path<String>, PathRejection>,
 ) -> Result<Json<Value>, ApiError> {
     let graph = graph_path(graph)?;
-    let name = service.scope(role).graph(&graph)?;
+    let name = service.scope(role).guarded_graph(&graph)?;
     enabled(&service)?;
     guarded_write(&service, move |db| name.drop_graph(db)).await?;
     Ok(Json(json!({"dropped": graph})))
@@ -427,7 +427,7 @@ fn query_route(kind: Kind) -> MethodRouter<Service> {
               graph: Result<Path<String>, PathRejection>,
               input: Result<Bytes, BytesRejection>| async move {
             let graph = graph_path(graph)?;
-            let name = service.scope(role).graph(&graph)?;
+            let name = service.scope(role).guarded_graph(&graph)?;
             enabled(&service)?;
             let request = read_request(kind, parse(input)?)?;
             run_query(&service, graph, name, request).await
@@ -464,7 +464,7 @@ async fn explain(
     input: Result<Bytes, BytesRejection>,
 ) -> Result<Json<Value>, ApiError> {
     let graph = graph_path(graph)?;
-    let name = service.scope(role).graph(&graph)?;
+    let name = service.scope(role).guarded_graph(&graph)?;
     enabled(&service)?;
     let mut body: Map<String, Value> = parse(input)?;
     let operation = body.remove("operation");
@@ -509,7 +509,7 @@ async fn schema(
     params: Result<Query<SchemaParams>, QueryRejection>,
 ) -> Result<Json<Value>, ApiError> {
     let graph = graph_path(graph)?;
-    let name = service.scope(role).graph(&graph)?;
+    let name = service.scope(role).guarded_graph(&graph)?;
     enabled(&service)?;
     let Query(params) = params.map_err(|error| {
         ApiError::new(StatusCode::BAD_REQUEST, "invalid_query", error.body_text())
@@ -548,7 +548,7 @@ async fn put_schema(
     input: Result<Bytes, BytesRejection>,
 ) -> Result<Json<Value>, ApiError> {
     let graph = graph_path(graph)?;
-    let name = service.scope(role).graph(&graph)?;
+    let name = service.scope(role).guarded_graph(&graph)?;
     enabled(&service)?;
     let SchemaBody { schema } = parse(input)?;
     let revision = guarded_write(&service, move |db| {
@@ -585,7 +585,7 @@ async fn retrieve(
 ) -> Result<Json<Value>, ApiError> {
     let graph = graph_path(graph)?;
     let scope = service.scope(role);
-    let name = scope.graph(&graph)?;
+    let name = scope.guarded_graph(&graph)?;
     enabled(&service)?;
     let request = graph_json::retrieve_request(parse(input)?)
         .map_err(|error| ApiError::new(StatusCode::UNPROCESSABLE_ENTITY, "invalid_json", error))?;
@@ -645,7 +645,7 @@ async fn query_text(
     input: Result<Bytes, BytesRejection>,
 ) -> Result<Json<Value>, ApiError> {
     let graph = graph_path(graph)?;
-    let name = service.scope(role).graph(&graph)?;
+    let name = service.scope(role).guarded_graph(&graph)?;
     enabled(&service)?;
     let request: graph_json::QueryTextIn = parse(input)?;
     // Text errors are reported before the graph is looked up.
@@ -707,7 +707,7 @@ async fn batch(
 ) -> Result<Json<Value>, ApiError> {
     let graph = graph_path(graph)?;
     let scope = service.scope(role);
-    let name = scope.graph(&graph)?;
+    let name = scope.guarded_graph(&graph)?;
     enabled(&service)?;
     let BatchIn { ops } = parse(input)?;
     if ops.len() > MAX_BATCH_OPS {

@@ -27,10 +27,6 @@
 //! `write_batch_visible`, `retrieve_visible`) is also this scope's
 //! ([`RequestScope::visible`]), so a collection named in a request body is
 //! masked by the same rule as one named in the path.
-#![allow(
-    dead_code,
-    reason = "the REST and gRPC handlers move onto the scope slice by slice"
-)]
 
 use super::*;
 use crate::{
@@ -244,7 +240,7 @@ impl RequestScope {
     /// grant); a reserved graph this principal may not reach yields a handle
     /// that behaves like a graph that does not exist, at the stage the route
     /// would have found it missing.
-    pub(super) fn graph(&self, name: &str) -> Result<GuardedGraph, ApiError> {
+    pub(super) fn guarded_graph(&self, name: &str) -> Result<GuardedGraph, ApiError> {
         let stored = self.qualify(name);
         if matches!(&self.role, admin::Role::Scoped(grant) if !grant.graph_allowed(&stored)) {
             return Err(forbidden_scope());
@@ -343,11 +339,7 @@ pub(super) struct GuardedGraph {
 }
 
 impl GuardedGraph {
-    /// The stored (tenant-qualified) name.
-    pub(super) fn stored(&self) -> &str {
-        &self.stored
-    }
-
+    #[cfg(test)]
     pub(super) fn is_hidden(&self) -> bool {
         self.hidden
     }
@@ -720,8 +712,8 @@ mod tests {
         let mut db = database();
         let bindings = bindings();
         let scope = RequestScope::for_test(admin::Role::Admin, bindings.clone());
-        let hidden = scope.graph("notes_graph").unwrap();
-        let missing = scope.graph("absent_graph").unwrap();
+        let hidden = scope.guarded_graph("notes_graph").unwrap();
+        let missing = scope.guarded_graph("absent_graph").unwrap();
         assert!(hidden.is_hidden() && !missing.is_hidden());
         assert_eq!(
             answer(hidden.read(&db).err().unwrap()),
@@ -736,7 +728,7 @@ mod tests {
             answer(missing.write(&mut db).err().unwrap())
         );
         // A hidden name answers like an occupied name on create.
-        let occupied = scope.graph("ordinary_graph").unwrap();
+        let occupied = scope.guarded_graph("ordinary_graph").unwrap();
         assert_eq!(
             answer(hidden.create(&mut db).err().unwrap()),
             answer(occupied.create(&mut db).err().unwrap())
@@ -753,7 +745,7 @@ mod tests {
             answer(ApiError::from(Error::ReadOnly))
         );
         let raw = RequestScope::for_test(grant(RAW, None, &[], &db), bindings);
-        let own = raw.graph("notes_graph").unwrap();
+        let own = raw.guarded_graph("notes_graph").unwrap();
         assert!(!own.is_hidden());
         assert!(own.read(&db).is_ok());
     }
@@ -769,11 +761,11 @@ mod tests {
         let scope = RequestScope::for_test(role, bindings());
         for name in ["notes_graph", "absent_graph"] {
             assert_eq!(
-                summary(scope.graph(name).err().unwrap()),
+                summary(scope.guarded_graph(name).err().unwrap()),
                 (403, "forbidden_scope")
             );
         }
-        assert!(scope.graph("ordinary_graph").is_ok());
+        assert!(scope.guarded_graph("ordinary_graph").is_ok());
     }
 
     #[test]
@@ -800,10 +792,40 @@ mod tests {
         assert!(db.resolve_visible("notes_ev", &raw.visible()).is_ok());
     }
 
-    /// The transitional free function and the scope must agree until the
-    /// handlers have moved onto the scope and `open_guarded` is deleted.
+    /// The collection guard exactly as 0.7.0 wrote it (`open`): qualify, name
+    /// grant, reservation, lookup, then the grant's ID and lineage binding.
+    /// It is the reference the scope is compared with.
+    fn reference_open(
+        db: &Database,
+        role: &admin::Role,
+        target: &Target,
+        bindings: &reserved::Bindings,
+    ) -> Result<u16, ApiError> {
+        db.ensure_healthy()?;
+        let stored = tenants::qualify(role, target.name());
+        if let admin::Role::Scoped(grant) = role
+            && !grant.names(&stored)
+        {
+            return Err(forbidden_scope());
+        }
+        if !bindings.reserved().raw_allowed(
+            raw_credential(role),
+            reserved::Resource::Collection,
+            &stored,
+        ) {
+            return Err(Error::CollectionNotFound.into());
+        }
+        let id = db.resolve(&stored)?;
+        if let admin::Role::Scoped(grant) = role
+            && !grant.covers(db.lineage(), id, &stored)
+        {
+            return Err(forbidden_scope());
+        }
+        Ok(id)
+    }
+
     #[test]
-    fn the_scope_agrees_with_the_free_guard_for_every_principal_and_name() {
+    fn the_scope_agrees_with_the_0_7_0_guard_for_every_principal_and_name() {
         let db = database();
         let bindings = bindings();
         let principals = [
@@ -825,7 +847,7 @@ mod tests {
                 Target::Named("Not A Name".into()),
                 Target::Named(format!("t{TENANT}__notes_ev")),
             ] {
-                let free = open_guarded(&db, &role, &target, &bindings);
+                let free = reference_open(&db, &role, &target, &bindings);
                 let guarded = scope.collection(&db, &target);
                 match (free, guarded) {
                     (Ok(id), Ok(handle)) => assert_eq!(id, handle.id()),

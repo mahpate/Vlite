@@ -306,10 +306,6 @@ impl Service {
 
     /// The guard for one request made as `role`: the only way a handler
     /// obtains a collection or graph it may use (see `guard::RequestScope`).
-    #[allow(
-        dead_code,
-        reason = "the REST and gRPC handlers move onto the scope slice by slice"
-    )]
     fn scope(&self, role: admin::Role) -> guard::RequestScope {
         guard::RequestScope::new(self, role)
     }
@@ -1818,60 +1814,6 @@ fn record_path(
         ApiError::new(StatusCode::BAD_REQUEST, "invalid_path", error.body_text())
     })?;
     Ok((Target::Named(name), id(&text)?))
-}
-
-/// Resolves a target under the database lock and enforces scoped bindings:
-/// collection ID and database lineage must both match the grant. The name
-/// is checked first so out-of-scope callers cannot probe existence.
-///
-/// The REST handlers use `guard::RequestScope`. This free function remains
-/// only for the gRPC adapter, which moves onto the scope in a later slice, and
-/// `open_guarded` is the reference the guard's tests compare the scope with.
-#[cfg(feature = "grpc")]
-fn open(db: &Database, role: &admin::Role, target: &Target) -> Result<u16, ApiError> {
-    open_inner(db, role, target, None)
-}
-
-#[cfg(test)]
-fn open_guarded(
-    db: &Database,
-    role: &admin::Role,
-    target: &Target,
-    bindings: &reserved::Bindings,
-) -> Result<u16, ApiError> {
-    open_inner(db, role, target, Some(bindings))
-}
-
-#[cfg(any(feature = "grpc", test))]
-fn open_inner(
-    db: &Database,
-    role: &admin::Role,
-    target: &Target,
-    bindings: Option<&reserved::Bindings>,
-) -> Result<u16, ApiError> {
-    db.ensure_healthy()?;
-    let qualified = tenants::qualify(role, target.name());
-    let name = qualified.as_str();
-    if let admin::Role::Scoped(grant) = role
-        && !grant.names(name)
-    {
-        return Err(forbidden_scope());
-    }
-    let credential = raw_credential(role);
-    if bindings.is_some_and(|bindings| {
-        !bindings
-            .reserved()
-            .raw_allowed(credential, reserved::Resource::Collection, name)
-    }) {
-        return Err(Error::CollectionNotFound.into());
-    }
-    let collection = db.resolve(name)?;
-    if let admin::Role::Scoped(grant) = role
-        && !grant.covers(db.lineage(), collection, name)
-    {
-        return Err(forbidden_scope());
-    }
-    Ok(collection)
 }
 
 /// Identity defaults: hard legacy defaults, or the collection's settings.

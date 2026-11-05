@@ -700,6 +700,44 @@ struct DiskBuildRequest {
     metric: DistanceMetric,
     config: admin::IndexConfig,
 }
+
+/// The administrator's directory, where every disk ANN sidecar a caller does
+/// not place itself lives.
+pub(super) fn disk_ann_directory(service: &Service) -> Result<std::path::PathBuf, ApiError> {
+    service.admin.directory.clone().ok_or_else(|| {
+        ApiError::new(
+            StatusCode::CONFLICT,
+            "admin_directory_disabled",
+            "disk ANN requires VLITE_ADMIN_DIR",
+        )
+    })
+}
+
+/// The sidecar of one collection: the file the REST routes and every
+/// non-administrator gRPC call use, so the caller never names a path.
+pub(super) fn disk_ann_sidecar(directory: &std::path::Path, collection: u16) -> std::path::PathBuf {
+    directory.join(format!("disk-ann-{collection}.dann"))
+}
+
+/// Opens the sidecar of `collection` under `directory`; `409 disk_ann_not_built`
+/// when none exists yet.
+pub(super) fn open_disk_ann(
+    directory: &std::path::Path,
+    collection: u16,
+    options: crate::DiskAnnOptions,
+) -> Result<crate::DiskAnnIndex, ApiError> {
+    match crate::DiskAnnIndex::open(disk_ann_sidecar(directory, collection), options) {
+        Err(Error::Io(error)) if error.kind() == std::io::ErrorKind::NotFound => {
+            Err(ApiError::new(
+                StatusCode::CONFLICT,
+                "disk_ann_not_built",
+                "no disk ANN sidecar exists for this collection; build it first",
+            ))
+        }
+        other => Ok(other?),
+    }
+}
+
 async fn build_disk_ann(
     State(service): State<Service>,
     Extension(role): Extension<admin::Role>,
@@ -709,18 +747,12 @@ async fn build_disk_ann(
     let target = collection_path(target)?;
     let request = body(input)?;
     let config = request.config.validated()?;
-    let dir = service.admin.directory.clone().ok_or_else(|| {
-        ApiError::new(
-            StatusCode::CONFLICT,
-            "admin_directory_disabled",
-            "disk ANN requires VLITE_ADMIN_DIR",
-        )
-    })?;
+    let dir = disk_ann_directory(&service)?;
     let scope = service.scope(role);
     let result = service
         .run(move |db| {
             let collection = scope.collection(db, &target)?;
-            let path = dir.join(format!("disk-ann-{}.dann", collection.id()));
+            let path = disk_ann_sidecar(&dir, collection.id());
             let source = collection.build_disk_ann(db, &path, config, request.metric)?;
             Ok(json!({
                 "lineage": source.lineage.to_string(),
@@ -748,28 +780,12 @@ async fn search_disk_ann(
 ) -> Result<Json<Value>, ApiError> {
     let target = collection_path(target)?;
     let request = body(input)?;
-    let dir = service.admin.directory.clone().ok_or_else(|| {
-        ApiError::new(
-            StatusCode::CONFLICT,
-            "admin_directory_disabled",
-            "disk ANN requires VLITE_ADMIN_DIR",
-        )
-    })?;
+    let dir = disk_ann_directory(&service)?;
     let scope = service.scope(role);
     let hits = service
         .run_read(move |db| {
             let cid = scope.collection(db, &target)?.id();
-            let path = dir.join(format!("disk-ann-{cid}.dann"));
-            let index = match crate::DiskAnnIndex::open(path, crate::DiskAnnOptions::default()) {
-                Err(Error::Io(error)) if error.kind() == std::io::ErrorKind::NotFound => {
-                    return Err(ApiError::new(
-                        StatusCode::CONFLICT,
-                        "disk_ann_not_built",
-                        "no disk ANN sidecar exists for this collection; build it first",
-                    ));
-                }
-                other => other?,
-            };
+            let index = open_disk_ann(&dir, cid, crate::DiskAnnOptions::default())?;
             db.search_disk_ann(&index, &request.vector, request.k, request.ef_search)
                 .map_err(ApiError::from)
         })
