@@ -17,15 +17,17 @@ use axum::{
 };
 use http_body_util::BodyExt;
 use serde_json::{Value, json};
+use sha2::{Digest, Sha256};
 use tower::ServiceExt;
 
 use super::super::{MAX_JSON_BYTES, RequestId, Service, admin, credentials};
 use super::routes::Clock;
 use crate::memory::{
-    ForgetRequest, ForgetTarget, MemoryItem, MemoryKind, MemoryMut, MemoryScope, Provenance,
-    RememberRequest,
+    ForgetRequest, ForgetTarget, MemoryEvidence, MemoryItem, MemoryKind, MemoryMut, MemoryScope,
+    Provenance, RememberRequest,
 };
-use crate::{CollectionSettings, CollectionSpec, CreateOptions, Database, FormatVersion};
+use crate::property_graph::GraphOp;
+use crate::{CollectionSettings, CollectionSpec, CreateOptions, Database, FormatVersion, Mutation};
 
 pub(super) const REMEMBER: &str =
     include_str!("../../../tests/fixtures/agent_memory/wire/remember.json");
@@ -57,6 +59,7 @@ pub(super) struct Harness {
     clock: Clock,
     service: Service,
     graph: String,
+    evidence: String,
     tenant: String,
 }
 
@@ -172,6 +175,7 @@ pub(super) fn harness(view: &Value) -> Option<Harness> {
         clock,
         service,
         graph,
+        evidence,
         tenant,
     })
 }
@@ -309,6 +313,97 @@ impl Harness {
         MemoryMut::bind(db, &self.graph, None)
             .and_then(|mut memory| memory.remember(&request))
             .unwrap();
+    }
+
+    /// The vector candidates of a view that name an `evidence_id`: each is a
+    /// memory with one attached evidence record carrying the candidate's
+    /// vector, written through the core at the view's clock. The record number
+    /// the fixture names must be the one the evidence ID gives (the first eight
+    /// bytes of its SHA-256, big-endian), computed here independently of the
+    /// core.
+    fn seed_candidates(&self, view: &Value) {
+        for candidate in view["candidates"].as_array().into_iter().flatten() {
+            let Some(evidence_id) = candidate["evidence_id"].as_str() else {
+                continue;
+            };
+            let record = u64::from_be_bytes(
+                Sha256::digest(evidence_id.as_bytes())[..8]
+                    .try_into()
+                    .unwrap(),
+            );
+            assert_eq!(
+                candidate["record"],
+                json!(record.to_string()),
+                "{evidence_id}: record number"
+            );
+            let parts = candidate["scope"].as_array().unwrap();
+            assert_eq!(parts[0], json!(self.tenant));
+            let scope = MemoryScope {
+                tenant: self.tenant.clone(),
+                agent: parts[1].as_str().unwrap().into(),
+                user: parts[2].as_str().map(str::to_owned),
+                session: parts[3].as_str().map(str::to_owned),
+            };
+            let id = candidate["id"].as_str().unwrap();
+            let vector = candidate["vector"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .map(|component| component.as_f64().unwrap() as f32)
+                .collect();
+            let payload = candidate["evidence"][0]["snippet"]
+                .as_str()
+                .unwrap()
+                .as_bytes()
+                .to_vec();
+            let request = RememberRequest {
+                scope: scope.clone(),
+                idempotency_key: format!("candidate-{id}"),
+                receipt_window_ms: view["receipt_window_ms"].as_u64().unwrap(),
+                now_ms: view["clock_ms"].as_u64().unwrap(),
+                deadline_ms: None,
+                allow_future_observations: false,
+                items: vec![MemoryItem {
+                    id: id.into(),
+                    kind: MemoryKind::Entity,
+                    content: id.into(),
+                    source: "s1".into(),
+                    importance: None,
+                    observed_at_ms: candidate["O"].as_i64(),
+                    provenance: vec![Provenance {
+                        source: "s1".into(),
+                        kind: Some("caller".into()),
+                        uri: None,
+                        transformation: None,
+                    }],
+                    references: Vec::new(),
+                    merge_into: None,
+                    expected_revision: None,
+                    expiry_ms: None,
+                    expiry_valid: true,
+                    evidence: vec![MemoryEvidence {
+                        id: evidence_id.into(),
+                        scope,
+                    }],
+                }],
+            };
+            let mut owner = self.service.database.write().unwrap();
+            let db = owner.as_mut().unwrap();
+            db.graph_mut(&self.graph)
+                .unwrap()
+                .write_batch(&[GraphOp::Vector {
+                    collection: self.evidence.clone(),
+                    mutation: Mutation::Put {
+                        id: record,
+                        vector,
+                        payload,
+                    },
+                }])
+                .unwrap();
+            MemoryMut::bind(db, &self.graph, Some(&self.evidence))
+                .and_then(|mut memory| memory.remember(&request))
+                .unwrap();
+        }
     }
 
     /// The C1 consolidation setup through the core at clock 1: the view's
@@ -565,6 +660,7 @@ pub(super) async fn replay(text: &str, skip: &[(&str, &str)], deviations: &[Devi
         for step in view["pre_state"].as_array().into_iter().flatten() {
             harness.seed(step);
         }
+        harness.seed_candidates(view);
         let consolidate = case["operation"] == "consolidate";
         let lost = if consolidate {
             harness.consolidation(view)
@@ -748,7 +844,7 @@ mod tests {
     /// Recall views that inject planner state or candidate ranks the server
     /// cannot be seeded with (the fixture README: not discovery parity).
     /// Ranking arithmetic is covered by the core ranking tests.
-    const RECALL_SKIP: [(&str, &str); 22] = [
+    const RECALL_SKIP: [(&str, &str); 19] = [
         (
             "recall-default-candidates-200-is-charged",
             "injected candidate_units",
@@ -773,8 +869,6 @@ mod tests {
             "recall-owner-ttl-equality-and-foreign-scope-hidden",
             "injected candidate ranks",
         ),
-        ("recall-vector-exact", "injected candidate ranks"),
-        ("recall-vector-mmr", "injected candidate ranks"),
         (
             "recall-bm25-rrf-preeligible-leg-diagnostics",
             "injected candidate ranks",
@@ -790,10 +884,6 @@ mod tests {
         ("recall-future-clamp-explicit", "injected candidate ranks"),
         (
             "recall-exact-distance-tie-record-before-memory-id",
-            "injected candidate ranks",
-        ),
-        (
-            "recall-mmr-diversity-not-weighted-score-order",
             "injected candidate ranks",
         ),
         (

@@ -896,7 +896,7 @@ def recalled(body, view, mutant=None):
             candidate["distance"] = 1 - cosine(query, candidate["vector"])
         components = len(candidates) * len(query)
         need(components <= limits.get("vector_components", 1000000), "vector_components")
-        tie = lambda c: (c.get("record", 0), c.get("collection", ""), c["id"])
+        tie = lambda c: (int(c.get("record", 0)), c.get("collection", ""), c["id"])
         candidates.sort(key=lambda c: (c["distance"], tie(c)))
         if selection == "mmr":
             mmr_work = len(candidates)**3 * len(query)

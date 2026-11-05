@@ -1877,11 +1877,30 @@
               null
             ],
             "O": 90,
-            "record": 2,
+            "record": "11370972926361198332",
             "vector": [
               0,
               1
-            ]
+            ],
+            "evidence_id": "ev-b",
+            "evidence": [
+              {
+                "collection": "notes",
+                "record": "11370972926361198332",
+                "snippet": "b"
+              }
+            ],
+            "provenance": [
+              {
+                "source_id": "s1",
+                "source_kind": "caller",
+                "content_digest": "v1:c100f95c1913f9c72fc1f4ef0847e1e723ffe0bde0b36e5f36c13f81fe8c26ed"
+              }
+            ],
+            "raw_scores": {
+              "dense_rank": 2,
+              "fused_rank": 2
+            }
           },
           {
             "id": "a",
@@ -1892,13 +1911,33 @@
               null
             ],
             "O": 90,
-            "record": 1,
+            "record": "1168962963564408392",
             "vector": [
               1,
               0
-            ]
+            ],
+            "evidence_id": "ev-a",
+            "evidence": [
+              {
+                "collection": "notes",
+                "record": "1168962963564408392",
+                "snippet": "a"
+              }
+            ],
+            "provenance": [
+              {
+                "source_id": "s1",
+                "source_kind": "caller",
+                "content_digest": "v1:ac8d8342bbb2362d13f0a559a3621bb407011368895164b628a54f7fc33fc43c"
+              }
+            ],
+            "raw_scores": {
+              "dense_rank": 1,
+              "fused_rank": 1
+            }
           }
-        ]
+        ],
+        "evidence_bytes": 2
       },
       "expected": {
         "status": 200,
@@ -1920,15 +1959,29 @@
               "status": "accepted",
               "stale": false,
               "segment": null,
-              "evidence": [],
+              "evidence": [
+                {
+                  "collection": "notes",
+                  "record": "1168962963564408392",
+                  "snippet": "a"
+                }
+              ],
               "scores": {
-                "R": 1,
+                "R": 1.0,
                 "D": null,
                 "I": 0.5,
-                "S": 1,
-                "distance": 0
+                "S": 1.0,
+                "distance": 0.0,
+                "dense_rank": 1,
+                "fused_rank": 1
               },
-              "provenance": [],
+              "provenance": [
+                {
+                  "source_id": "s1",
+                  "source_kind": "caller",
+                  "content_digest": "v1:ac8d8342bbb2362d13f0a559a3621bb407011368895164b628a54f7fc33fc43c"
+                }
+              ],
               "references": [],
               "metadata": {}
             },
@@ -1948,15 +2001,29 @@
               "status": "accepted",
               "stale": false,
               "segment": null,
-              "evidence": [],
+              "evidence": [
+                {
+                  "collection": "notes",
+                  "record": "11370972926361198332",
+                  "snippet": "b"
+                }
+              ],
               "scores": {
                 "R": 0.5,
                 "D": null,
                 "I": 0.5,
                 "S": 0.5,
-                "distance": 1
+                "distance": 1.0,
+                "dense_rank": 2,
+                "fused_rank": 2
               },
-              "provenance": [],
+              "provenance": [
+                {
+                  "source_id": "s1",
+                  "source_kind": "caller",
+                  "content_digest": "v1:c100f95c1913f9c72fc1f4ef0847e1e723ffe0bde0b36e5f36c13f81fe8c26ed"
+                }
+              ],
               "references": [],
               "metadata": {}
             }
@@ -1981,7 +2048,7 @@
             "edges_charged": "0",
             "vector_components": "4",
             "mmr_components": "0",
-            "evidence_bytes": "0"
+            "evidence_bytes": "2"
           },
           "ranking_version": "memory-ranking-v1",
           "selection": "exact"
@@ -2032,11 +2099,30 @@
               null
             ],
             "O": 90,
-            "record": 2,
+            "record": "11370972926361198332",
             "vector": [
               0,
               1
-            ]
+            ],
+            "evidence_id": "ev-b",
+            "evidence": [
+              {
+                "collection": "notes",
+                "record": "11370972926361198332",
+                "snippet": "b"
+              }
+            ],
+            "provenance": [
+              {
+                "source_id": "s1",
+                "source_kind": "caller",
+                "content_digest": "v1:c100f95c1913f9c72fc1f4ef0847e1e723ffe0bde0b36e5f36c13f81fe8c26ed"
+              }
+            ],
+            "raw_scores": {
+              "dense_rank": 2,
+              "fused_rank": 2
+            }
           },
           {
             "id": "a",
@@ -2047,13 +2133,33 @@
               null
             ],
             "O": 90,
-            "record": 1,
+            "record": "1168962963564408392",
             "vector": [
               1,
               0
-            ]
+            ],
+            "evidence_id": "ev-a",
+            "evidence": [
+              {
+                "collection": "notes",
+                "record": "1168962963564408392",
+                "snippet": "a"
+              }
+            ],
+            "provenance": [
+              {
+                "source_id": "s1",
+                "source_kind": "caller",
+                "content_digest": "v1:ac8d8342bbb2362d13f0a559a3621bb407011368895164b628a54f7fc33fc43c"
+              }
+            ],
+            "raw_scores": {
+              "dense_rank": 1,
+              "fused_rank": 1
+            }
           }
-        ]
+        ],
+        "evidence_bytes": 2
       },
       "expected": {
         "status": 200,
@@ -2075,15 +2181,29 @@
               "status": "accepted",
               "stale": false,
               "segment": null,
-              "evidence": [],
+              "evidence": [
+                {
+                  "collection": "notes",
+                  "record": "1168962963564408392",
+                  "snippet": "a"
+                }
+              ],
               "scores": {
-                "R": 1,
+                "R": 1.0,
                 "D": null,
                 "I": 0.5,
-                "S": 1,
-                "distance": 0
+                "S": 1.0,
+                "distance": 0.0,
+                "dense_rank": 1,
+                "fused_rank": 1
               },
-              "provenance": [],
+              "provenance": [
+                {
+                  "source_id": "s1",
+                  "source_kind": "caller",
+                  "content_digest": "v1:ac8d8342bbb2362d13f0a559a3621bb407011368895164b628a54f7fc33fc43c"
+                }
+              ],
               "references": [],
               "metadata": {}
             },
@@ -2103,15 +2223,29 @@
               "status": "accepted",
               "stale": false,
               "segment": null,
-              "evidence": [],
+              "evidence": [
+                {
+                  "collection": "notes",
+                  "record": "11370972926361198332",
+                  "snippet": "b"
+                }
+              ],
               "scores": {
                 "R": 0.5,
                 "D": null,
                 "I": 0.5,
                 "S": 0.5,
-                "distance": 1
+                "distance": 1.0,
+                "dense_rank": 2,
+                "fused_rank": 2
               },
-              "provenance": [],
+              "provenance": [
+                {
+                  "source_id": "s1",
+                  "source_kind": "caller",
+                  "content_digest": "v1:c100f95c1913f9c72fc1f4ef0847e1e723ffe0bde0b36e5f36c13f81fe8c26ed"
+                }
+              ],
               "references": [],
               "metadata": {}
             }
@@ -2136,7 +2270,7 @@
             "edges_charged": "0",
             "vector_components": "4",
             "mmr_components": "16",
-            "evidence_bytes": "0"
+            "evidence_bytes": "2"
           },
           "ranking_version": "memory-ranking-v1",
           "selection": "mmr"
@@ -3068,14 +3202,30 @@
               null
             ],
             "O": 90,
-            "record": 2,
+            "record": "11370972926361198332",
             "vector": [
               1,
               0
             ],
             "raw_scores": {
-              "dense_rank": 2
-            }
+              "dense_rank": 2,
+              "fused_rank": 3
+            },
+            "evidence_id": "ev-b",
+            "evidence": [
+              {
+                "collection": "notes",
+                "record": "11370972926361198332",
+                "snippet": "b"
+              }
+            ],
+            "provenance": [
+              {
+                "source_id": "s1",
+                "source_kind": "caller",
+                "content_digest": "v1:c100f95c1913f9c72fc1f4ef0847e1e723ffe0bde0b36e5f36c13f81fe8c26ed"
+              }
+            ]
           },
           {
             "id": "a",
@@ -3086,14 +3236,30 @@
               null
             ],
             "O": 90,
-            "record": 1,
+            "record": "1168962963564408392",
             "vector": [
               1,
               0
             ],
             "raw_scores": {
-              "dense_rank": 1
-            }
+              "dense_rank": 1,
+              "fused_rank": 1
+            },
+            "evidence_id": "ev-a",
+            "evidence": [
+              {
+                "collection": "notes",
+                "record": "1168962963564408392",
+                "snippet": "a"
+              }
+            ],
+            "provenance": [
+              {
+                "source_id": "s1",
+                "source_kind": "caller",
+                "content_digest": "v1:ac8d8342bbb2362d13f0a559a3621bb407011368895164b628a54f7fc33fc43c"
+              }
+            ]
           },
           {
             "id": "c",
@@ -3104,16 +3270,33 @@
               null
             ],
             "O": 90,
-            "record": 3,
+            "record": "17455984334758599098",
             "vector": [
               0,
               1
             ],
             "raw_scores": {
-              "dense_rank": 3
-            }
+              "dense_rank": 3,
+              "fused_rank": 2
+            },
+            "evidence_id": "ev-c",
+            "evidence": [
+              {
+                "collection": "notes",
+                "record": "17455984334758599098",
+                "snippet": "c"
+              }
+            ],
+            "provenance": [
+              {
+                "source_id": "s1",
+                "source_kind": "caller",
+                "content_digest": "v1:879923da020d1533f4d8e921ea7bac61e8ba41d3c89d17a4d14e3a89c6780d5d"
+              }
+            ]
           }
-        ]
+        ],
+        "evidence_bytes": 3
       },
       "expected": {
         "status": 200,
@@ -3135,16 +3318,29 @@
               "status": "accepted",
               "stale": false,
               "segment": null,
-              "evidence": [],
+              "evidence": [
+                {
+                  "collection": "notes",
+                  "record": "1168962963564408392",
+                  "snippet": "a"
+                }
+              ],
               "scores": {
-                "R": 1,
+                "R": 1.0,
                 "D": null,
                 "I": 0.5,
-                "S": 1,
-                "distance": 0,
-                "dense_rank": 1
+                "S": 1.0,
+                "distance": 0.0,
+                "dense_rank": 1,
+                "fused_rank": 1
               },
-              "provenance": [],
+              "provenance": [
+                {
+                  "source_id": "s1",
+                  "source_kind": "caller",
+                  "content_digest": "v1:ac8d8342bbb2362d13f0a559a3621bb407011368895164b628a54f7fc33fc43c"
+                }
+              ],
               "references": [],
               "metadata": {}
             },
@@ -3164,16 +3360,29 @@
               "status": "accepted",
               "stale": false,
               "segment": null,
-              "evidence": [],
+              "evidence": [
+                {
+                  "collection": "notes",
+                  "record": "17455984334758599098",
+                  "snippet": "c"
+                }
+              ],
               "scores": {
                 "R": 0.5,
                 "D": null,
                 "I": 0.5,
                 "S": 0.5,
-                "distance": 1,
-                "dense_rank": 3
+                "distance": 1.0,
+                "dense_rank": 3,
+                "fused_rank": 2
               },
-              "provenance": [],
+              "provenance": [
+                {
+                  "source_id": "s1",
+                  "source_kind": "caller",
+                  "content_digest": "v1:879923da020d1533f4d8e921ea7bac61e8ba41d3c89d17a4d14e3a89c6780d5d"
+                }
+              ],
               "references": [],
               "metadata": {}
             },
@@ -3193,16 +3402,29 @@
               "status": "accepted",
               "stale": false,
               "segment": null,
-              "evidence": [],
+              "evidence": [
+                {
+                  "collection": "notes",
+                  "record": "11370972926361198332",
+                  "snippet": "b"
+                }
+              ],
               "scores": {
                 "R": 0.3333333333333333,
                 "D": null,
                 "I": 0.5,
                 "S": 0.3333333333333333,
-                "distance": 0,
-                "dense_rank": 2
+                "distance": 0.0,
+                "dense_rank": 2,
+                "fused_rank": 3
               },
-              "provenance": [],
+              "provenance": [
+                {
+                  "source_id": "s1",
+                  "source_kind": "caller",
+                  "content_digest": "v1:c100f95c1913f9c72fc1f4ef0847e1e723ffe0bde0b36e5f36c13f81fe8c26ed"
+                }
+              ],
               "references": [],
               "metadata": {}
             }
@@ -3227,7 +3449,7 @@
             "edges_charged": "0",
             "vector_components": "6",
             "mmr_components": "54",
-            "evidence_bytes": "0"
+            "evidence_bytes": "3"
           },
           "ranking_version": "memory-ranking-v1",
           "selection": "mmr"

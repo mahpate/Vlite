@@ -1179,6 +1179,53 @@ async fn ranking_mmr_lambda_defaults_to_one_half() {
     }
 }
 
+/// Design note 3, over the wire: for the query `[1, 0]`, `pa = [10, 0]` and
+/// `pb = [0.6, 0.6]`, the weighted selection measures squared Euclidean
+/// distance (`pb` at 0.52 before `pa` at 81), while `exact` and `mmr` answer
+/// `pa` (cosine distance 0) before `pb` (1 - 1/sqrt(2)). A zero query vector has
+/// no direction: 422 `invalid_input` for those two, still served by weighted.
+#[tokio::test]
+async fn exact_and_mmr_report_cosine_distance_and_weighted_keeps_squared_euclid() {
+    let rig = rig(&Setup::default());
+    rig.evidence(
+        &scope("a"),
+        100,
+        vec![
+            evidenced("pa", [10.0, 0.0], b"a"),
+            evidenced("pb", [0.6, 0.6], b"b"),
+        ],
+    );
+    let (status, weighted) = rig.recall(scope_body(json!({"vector": [1, 0]}))).await;
+    assert_eq!(status, 200, "{weighted}");
+    assert_eq!(ids(&weighted), ["pb", "pa"]);
+    let scores =
+        |body: &Value, index: usize| number(&body["memories"][index]["scores"]["distance"]);
+    assert!((scores(&weighted, 0) - 0.52).abs() < 1e-6);
+    assert_eq!(scores(&weighted, 1), 81.0);
+    for ranking in [
+        json!({"selection": "exact"}),
+        json!({"selection": "mmr", "lambda": 1}),
+    ] {
+        let request = scope_body(json!({"vector": [1, 0], "ranking": ranking}));
+        let (status, body) = rig.recall(request).await;
+        assert_eq!(status, 200, "{ranking}: {body}");
+        assert_eq!(ids(&body), ["pa", "pb"], "{ranking}");
+        assert!(scores(&body, 0).abs() < 1e-9, "{ranking}");
+        assert!(
+            (scores(&body, 1) - (1.0 - 1.0 / 2f64.sqrt())).abs() < 1e-9,
+            "{ranking}"
+        );
+    }
+    for selection in ["exact", "mmr"] {
+        let request = scope_body(json!({"vector": [0, 0], "ranking": {"selection": selection}}));
+        let (status, body) = rig.recall(request).await;
+        assert_eq!(status, 422, "{selection}: {body}");
+        assert_eq!(error(&body).0, "invalid_input", "{selection}");
+    }
+    let (status, body) = rig.recall(scope_body(json!({"vector": [0, 0]}))).await;
+    assert_eq!(status, 200, "{body}");
+}
+
 // -------------------------------------------------------------------- Budgets
 
 /// Contract 4/6, mapping 2: an exhausted graph budget is 422 `invalid_input`

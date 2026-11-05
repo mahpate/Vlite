@@ -12,7 +12,7 @@ use super::{
     content_key, evidence_record_id, existing_memory, hex, memory_key, opaque, string_property,
 };
 use crate::{
-    Condition, MetadataValue, SearchHit,
+    Condition, DistanceMetric, MetadataValue, SearchHit,
     hybrid::{HybridQuery, MAX_HYBRID_TEXT_BYTES, MAX_HYBRID_TOKENS, VectorLeg, fuse_ranked},
     property_graph::{
         FindNodes, GraphLimits, GraphPath, NodeFilter, NodeSelector, NodeView, PropertyProjection,
@@ -325,6 +325,16 @@ fn scope_cmp(a: &MemoryScope, b: &MemoryScope) -> std::cmp::Ordering {
     (&a.tenant, &a.agent, &a.user, &a.session).cmp(&(&b.tenant, &b.agent, &b.user, &b.session))
 }
 
+/// The metric of the dense leg: the query's own for weighted recall, cosine for
+/// `exact` and `mmr` (0.7.1 design note, section 3). The `mmr` candidate pool
+/// and the distance it reports follow the leg.
+fn dense_metric(selection: Selection, query: DistanceMetric) -> DistanceMetric {
+    match selection {
+        Selection::Ranked => query,
+        Selection::Exact | Selection::Mmr { .. } => DistanceMetric::Cosine,
+    }
+}
+
 impl MemoryRef<'_> {
     fn recall_collection(&self) -> crate::Result<Option<crate::CollectionRef<'_>>> {
         let collection = self
@@ -478,7 +488,8 @@ impl MemoryRef<'_> {
                 .filter(|_| query.fusion.vector_weight > 0.0)
             {
                 crate::validate_vector(collection.dimensions(), vector)?;
-                crate::validate_metric_query(vector, query.metric)?;
+                let metric = dense_metric(request.selection, query.metric);
+                crate::validate_metric_query(vector, metric)?;
                 let components = owners
                     .len()
                     .checked_mul(collection.dimensions())
@@ -506,10 +517,7 @@ impl MemoryRef<'_> {
                         distance: 0.0,
                     });
                 }
-                ExactReranker {
-                    metric: query.metric,
-                }
-                .rerank(vector, &vectors, depth)?
+                ExactReranker { metric }.rerank(vector, &vectors, depth)?
             } else {
                 Vec::new()
             };
@@ -1578,9 +1586,204 @@ mod tests {
         );
         assert_eq!(
             out.hits[1].distance,
-            Some(2.0),
-            "raw squared-L2 distance is retained"
+            Some(1.0),
+            "exact and mmr report the cosine distance (design note 3)"
         );
+    }
+
+    fn close(actual: f64, expected: f64) {
+        assert!(
+            (actual - expected).abs() < 1e-6,
+            "{actual} is not {expected}"
+        );
+    }
+
+    /// Design note 3: A lies far along the query direction and B is near it in
+    /// the Euclidean sense but 45 degrees off, so squared Euclidean prefers B
+    /// and cosine prefers A. By hand, for the query [1, 0]: B is at squared
+    /// distance 0.52 and at cosine distance 1 - 1/sqrt(2); A is at 81 and 0.
+    #[test]
+    fn exact_and_mmr_order_and_report_by_cosine_while_weighted_keeps_squared_euclid() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut db = database(&dir.path().join("probe.vlite"));
+        let now = crate::current_time_ms() + 30_000;
+        let scope = scope("tenant");
+        for (id, vector) in [("a", vec![10.0, 0.0]), ("b", vec![0.6, 0.6])] {
+            remember(&mut db, &scope, id, Some(vector), now, None, 0.5, vec![]);
+        }
+        let mut req = request(scope, now);
+        let weighted = recall(&db, &req).unwrap();
+        assert_eq!(ids(&weighted), ["b", "a"]);
+        close(weighted.hits[0].distance.unwrap(), 0.52);
+        close(weighted.hits[1].distance.unwrap(), 81.0);
+        for selection in [Selection::Exact, Selection::Mmr { lambda: 1.0 }] {
+            req.selection = selection;
+            let out = recall(&db, &req).unwrap();
+            assert_eq!(ids(&out), ["a", "b"], "{selection:?}");
+            close(out.hits[0].distance.unwrap(), 0.0);
+            close(out.hits[1].distance.unwrap(), 1.0 - 1.0 / 2f64.sqrt());
+        }
+        req.selection = Selection::Ranked;
+        req.query.as_mut().unwrap().metric = DistanceMetric::Cosine;
+        let own = recall(&db, &req).unwrap();
+        assert_eq!(
+            ids(&own),
+            ["a", "b"],
+            "weighted recall keeps the metric the query names"
+        );
+        close(own.hits[1].distance.unwrap(), 1.0 - 1.0 / 2f64.sqrt());
+    }
+
+    /// Cosine distance is 0 for the same direction (whatever the length), 1
+    /// for orthogonal and 2 for opposite vectors.
+    #[test]
+    fn the_cosine_distance_is_zero_one_and_two_for_same_orthogonal_and_opposite() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut db = database(&dir.path().join("angles.vlite"));
+        let now = crate::current_time_ms() + 30_000;
+        let scope = scope("tenant");
+        for (id, vector) in [
+            ("same", vec![3.0, 0.0]),
+            ("orthogonal", vec![0.0, 5.0]),
+            ("opposite", vec![-2.0, 0.0]),
+        ] {
+            remember(&mut db, &scope, id, Some(vector), now, None, 0.5, vec![]);
+        }
+        let mut req = request(scope, now);
+        for selection in [Selection::Exact, Selection::Mmr { lambda: 1.0 }] {
+            req.selection = selection;
+            let out = recall(&db, &req).unwrap();
+            assert_eq!(
+                ids(&out),
+                ["same", "orthogonal", "opposite"],
+                "{selection:?}"
+            );
+            for (hit, distance) in out.hits.iter().zip([0.0, 1.0, 2.0]) {
+                close(hit.distance.unwrap(), distance);
+            }
+        }
+    }
+
+    /// A zero vector has no direction: a zero query is refused by `exact` and
+    /// `mmr` (weighted recall still measures its squared distance to the
+    /// origin) and a stored zero vector has no cosine distance, so it is never
+    /// one of their candidates.
+    #[test]
+    fn a_zero_norm_query_is_refused_by_exact_and_mmr_and_a_zero_stored_vector_never_matches() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut db = database(&dir.path().join("zero.vlite"));
+        let now = crate::current_time_ms() + 30_000;
+        let scope = scope("tenant");
+        for (id, vector) in [("a", vec![1.0, 0.0]), ("z", vec![0.0, 0.0])] {
+            remember(&mut db, &scope, id, Some(vector), now, None, 0.5, vec![]);
+        }
+        let mut req = request(scope, now);
+        req.query.as_mut().unwrap().vector = Some(vec![0.0, 0.0]);
+        assert!(recall(&db, &req).is_ok(), "weighted recall accepts it");
+        for selection in [Selection::Exact, Selection::Mmr { lambda: 0.5 }] {
+            req.selection = selection;
+            assert!(
+                matches!(
+                    recall(&db, &req),
+                    Err(RecallError::Storage(crate::Error::ZeroNormQuery))
+                ),
+                "{selection:?}"
+            );
+        }
+        // A query without a direction is refused before any work is charged.
+        req.limits.vector_components = 1;
+        for selection in [Selection::Exact, Selection::Mmr { lambda: 0.5 }] {
+            req.selection = selection;
+            assert!(
+                matches!(
+                    recall(&db, &req),
+                    Err(RecallError::Storage(crate::Error::ZeroNormQuery))
+                ),
+                "{selection:?} with a tight budget"
+            );
+        }
+        req.selection = Selection::Ranked;
+        assert!(
+            matches!(
+                recall(&db, &req),
+                Err(RecallError::Budget("vector_components"))
+            ),
+            "the tight budget does bind weighted recall"
+        );
+        req.limits.vector_components = RecallLimits::default().vector_components;
+        req.query.as_mut().unwrap().vector = Some(vec![1.0, 0.0]);
+        req.selection = Selection::Ranked;
+        assert_eq!(ids(&recall(&db, &req).unwrap()), ["a", "z"]);
+        for selection in [Selection::Exact, Selection::Mmr { lambda: 0.5 }] {
+            req.selection = selection;
+            assert_eq!(ids(&recall(&db, &req).unwrap()), ["a"], "{selection:?}");
+        }
+    }
+
+    /// The candidate pool (the best `candidates` of the dense leg) follows the
+    /// metric of the selection: for the query [1, 0] and a pool of two,
+    /// squared Euclidean keeps q and r, cosine keeps p and q.
+    #[test]
+    fn the_candidate_pool_of_exact_and_mmr_is_chosen_by_cosine() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut db = database(&dir.path().join("pool.vlite"));
+        let now = crate::current_time_ms() + 30_000;
+        let scope = scope("tenant");
+        for (id, vector) in [
+            ("p", vec![100.0, 0.0]),
+            ("q", vec![0.9, 0.1]),
+            ("r", vec![0.5, 0.5]),
+            ("s", vec![0.0, 1.0]),
+        ] {
+            remember(&mut db, &scope, id, Some(vector), now, None, 0.5, vec![]);
+        }
+        let mut req = request(scope, now);
+        let query = req.query.as_mut().unwrap();
+        query.k = 2;
+        query.fusion.candidates = Some(2);
+        assert_eq!(ids(&recall(&db, &req).unwrap()), ["q", "r"]);
+        for selection in [
+            Selection::Exact,
+            Selection::Mmr { lambda: 1.0 },
+            Selection::Mmr { lambda: 0.25 },
+        ] {
+            req.selection = selection;
+            assert_eq!(
+                ids(&recall(&db, &req).unwrap()),
+                ["p", "q"],
+                "{selection:?}"
+            );
+        }
+    }
+
+    /// Under cosine the length of a vector does not matter, so [1, 0] and
+    /// [2, 0] tie at distance 0 for the query [1, 0] while squared Euclidean
+    /// tells them apart. Ties break by ascending record id (contract section
+    /// 4), and a record id is the first 8 bytes of the SHA-256 of the evidence
+    /// id read big-endian, so x2 precedes x1 although "x1" sorts first.
+    #[test]
+    fn exact_and_mmr_ties_break_by_record_id_where_weighted_distances_differ() {
+        assert_eq!(evidence_record_id("x1"), 17_019_499_021_612_751_127);
+        assert_eq!(evidence_record_id("x2"), 9_533_781_796_295_945_899);
+        let dir = tempfile::tempdir().unwrap();
+        let mut db = database(&dir.path().join("ties.vlite"));
+        let now = crate::current_time_ms() + 30_000;
+        let scope = scope("tenant");
+        for (id, vector) in [("x1", vec![1.0, 0.0]), ("x2", vec![2.0, 0.0])] {
+            remember(&mut db, &scope, id, Some(vector), now, None, 0.5, vec![]);
+        }
+        let mut req = request(scope, now);
+        let weighted = recall(&db, &req).unwrap();
+        assert_eq!(ids(&weighted), ["x1", "x2"]);
+        close(weighted.hits[1].distance.unwrap(), 1.0);
+        for selection in [Selection::Exact, Selection::Mmr { lambda: 1.0 }] {
+            req.selection = selection;
+            let out = recall(&db, &req).unwrap();
+            assert_eq!(ids(&out), ["x2", "x1"], "{selection:?}");
+            for hit in &out.hits {
+                close(hit.distance.unwrap(), 0.0);
+            }
+        }
     }
 
     #[test]
