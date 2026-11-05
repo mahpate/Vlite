@@ -386,7 +386,7 @@
      "compact::source::seam_tests::survivor_tests::compact_settings_check_the_handle_health_before_every_other_gate"
     ],
     "pin_mutant": "x-health-gate-inert",
-    "review": "pending"
+    "review": "accepted by the coordinator's independent review, 2026-11-05 PT: resolve() begins with ensure_healthy and the compact arm repeats it right after, so the repeat cannot fire; the same window reopens before commit_frame; the pin test and the pin mutant stand"
    },
    "runs": {
     "local": {
