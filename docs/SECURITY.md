@@ -118,15 +118,24 @@ operation can create, verify and drill backups, and their database-wide counts
 of collections, records and commits include reserved resources; the backup
 files themselves hold reserved data and are operator-managed. A raw credential
 can attach reserved evidence records to nodes of an unreserved graph, and other
-users of that graph can then neither delete nor detach those nodes. Startup
-refuses `default` as an evidence collection, so a binding never changes the
-legacy routes. Live vector quotas count reserved records, so a caller with a
-quota sees its headroom change when memory writes. An attempt to use a reserved
-name answers like a missing resource, so it is not counted as a credential
-denial in the metrics or the audit log. A
-binding's receipt window, generation and names are read from the file at each
-start and are not checked against the database, so do not change them once
-memory has been written (see [Agent memory](API.md#start-the-server-with-memory)).
+users of that graph can then neither delete nor detach those nodes. The same
+holds the other way: a raw credential can attach an ordinary record to a node of
+its reserved graph, and nobody without raw access can then delete, expire or
+re-attach that record or drop its collection until the holder detaches it; the
+refusals show that something holds it. A credential created before a binding,
+whose grant already names a reserved collection, answers 404 for that name while
+a missing name outside its grant answers 403, because the grant check runs
+first; create such credentials after the bindings file is in place. Webhook
+subscriptions and credential graph lists that name a reserved resource begin to
+match it if the binding is removed. Startup refuses `default` as an evidence
+collection, so a binding never changes the legacy routes. Live vector quotas
+count reserved records, so a caller with a quota sees its headroom change when
+memory writes. An attempt to use a reserved name answers like a missing
+resource, so it is not counted as a credential denial in the metrics or the
+audit log. A binding's receipt window, generation and names are read from the
+file at each start and are not checked against the database, so do not change
+them once memory has been written (see
+[Agent memory](API.md#start-the-server-with-memory)).
 The bindings file is read through symbolic links; keep it in a directory that
 only the operator can write.
 
