@@ -269,7 +269,8 @@ its content.
 
 - `binding` is the name in the URL (`^[a-z][a-z0-9_-]{0,62}$`). `tenant` is
   `@root` or a tenant ID. `graph` and `evidence_collection` (one name, or
-  `null`) are stored names that one binding owns. Without an evidence
+  `null`) are stored names that one binding owns; `default`, the collection of
+  the legacy routes, cannot be an evidence collection. Without an evidence
   collection, text and vector recall answer 409 `memory_capability_unavailable`
   with `details.feature` `evidence_recall`; with one, text recall also needs
   that collection's text index to be ready (409 `index_not_ready` otherwise).
