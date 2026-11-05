@@ -396,12 +396,15 @@ def verify(root, data, minimum):
                 good += 1
             else:
                 problems.append(f"{machine}: {', '.join(map(str, fails))}")
+        # Runs on one version of the file replace the same text by the same text, so they agree on the
+        # mutated file; runs on another version (an earlier tree) are stale and legitimately differ.
         shapes = {
-            (r.get("sha256_lf", {}).get("before"), r.get("sha256_lf", {}).get("mutated"))
+            r.get("sha256_lf", {}).get("mutated")
             for r in runs.values()
+            if r.get("sha256_lf", {}).get("before") == here
         }
         if len(shapes) > 1:
-            problems.append("machines disagree on the file or the mutant")
+            problems.append("machines disagree on the mutant")
         pending = ""
         if equivalent:
             pin = names.get(equivalent.get("pin_mutant", ""))
