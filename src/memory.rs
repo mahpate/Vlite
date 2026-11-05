@@ -13,6 +13,8 @@ pub(crate) use consolidate::{ConsolidateInput, ConsolidateRequest, ConsolidateSu
 mod erasure;
 mod mapping;
 #[cfg(feature = "server")]
+pub(crate) mod names;
+#[cfg(feature = "server")]
 pub(crate) use mapping::recall_error;
 #[cfg(feature = "server")]
 pub(crate) use mapping::{

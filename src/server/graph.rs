@@ -693,6 +693,10 @@ fn text_error(error: GraphTextError) -> ApiError {
     }
 }
 
+/// The fixed answer to a batch that creates or changes a node the memory core
+/// reserves; it never echoes the key or the label.
+const RESERVED_NAME: &str = "a node key or label is reserved for agent memory";
+
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
 struct BatchIn {
@@ -716,6 +720,9 @@ async fn batch(
         )));
     }
     let ops: Vec<GraphOp> = ops.into_iter().map(Into::into).collect();
+    if crate::memory::names::refuses_raw_batch(&ops) {
+        return Err(unprocessable(RESERVED_NAME));
+    }
     let owner = service.clone();
     let result = guarded_write(&service, move |db| {
         authorize_records(&owner, &scope, db, &name, &ops)?;
