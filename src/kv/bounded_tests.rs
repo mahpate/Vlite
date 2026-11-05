@@ -603,6 +603,30 @@ fn the_last_slot_of_a_window_is_an_entry_and_the_next_one_is_not() {
     assert_eq!(probes(), 1, "only the key inside its window is probed");
 }
 
+// A record of another namespace is never an entry of this one, so it costs no
+// probe: not even when its ID lies in the window of one of this namespace's
+// keys, where the window check cannot tell it apart and only the namespace
+// can. (The key is the same, the namespace is not.)
+#[test]
+fn a_record_of_another_namespace_inside_a_keys_window_costs_no_probe() {
+    let mut db = memory();
+    let names = ["a", "b", "c"];
+    bulk(&mut db, "n", names.map(str::to_owned));
+    for (index, key) in names.into_iter().enumerate() {
+        let inside = first_slot("n", key).wrapping_add(1 + index as u64);
+        assert!(inside.wrapping_sub(first_slot("n", key)) < KV_PROBE_SLOTS);
+        plant(&mut db, inside, "m", key, "foreign");
+    }
+    let view = db.kv_view("default").unwrap();
+    probes_reset();
+    let entries = view.list_at("n", "", None, 10, 0).unwrap();
+    assert_eq!(keys(&entries), names);
+    assert!(entries.iter().all(|entry| entry.value != b"foreign"));
+    assert_eq!(probes(), 3, "one probe per record of the namespace");
+    // Nor are they entries of their own namespace: they lie outside the windows of their keys.
+    assert!(view.list_at("m", "", None, 10, 0).unwrap().is_empty());
+}
+
 // The universe is small so that the generated state is dense with look-alikes.
 #[test]
 fn bounded_listing_equals_a_get_derived_oracle_for_every_limit_prefix_after_and_clock() {
