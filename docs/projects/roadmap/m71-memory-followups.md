@@ -200,6 +200,16 @@ and the recheck (including a change made while the request waits for the write
 lock, and the exact 4,096-operation frame boundary). Mutants: at least 24 per
 route family touched, killed by those tests.
 
+**Result.** 123 hand mutants over the record codec and its grants digest, the
+identity rule, the six rotation rules, the startup plan and adoption, the record
+write, the server start and the reservations, and the recheck of each mutation:
+117 killed and 6 equivalent. The equivalents are B07 to B10 and B12 (the decoder's
+range checks for the generation, the receipt window and `retired_at_ms` repeat
+checks that `Binding::validate` makes on the decoded record, so no input is
+accepted that was refused before) and B21 (an oversized string is refused by the
+per-property validation as well). C13 (the served tenant is another tenant) is
+counted as killed: 153 tests fail, and one more never finishes.
+
 ## 2. Raw reserved-name guard: F5, residual risk of 1.3 (slice S3)
 
 **Problem.** The adoption rule of 1.3 accepts a graph that holds only well-formed
@@ -261,6 +271,10 @@ nothing about reservations. An ordinary batch to a reserved graph still answers
 - **Upgrade note.** A raw caller that wrote a label starting with `VliteMemory`
   or a key with one of these prefixes now gets 422. This is the one visible
   change of the slice.
+
+**Result.** 42 hand mutants over the label and key predicates, each operation
+variant, the batch rule and the route (placement, status, message, scope and
+configuration): 42 killed.
 
 ## 3. Recall distance: cosine for `exact` and `mmr` (slice S4)
 
@@ -328,6 +342,10 @@ goldens replayed (the skip list shrinks by three). Mutants: at least 24 for the
 recall route family, covering the metric of each selection, the pool, the
 reported value, the zero-norm rules and the golden harness.
 
+**Result.** 32 hand mutants (the metric of each selection, the pool, the reported
+value, tie order, the zero-norm refusal and where it runs, and the adapter's
+selection, lambda and reported fields): 32 killed.
+
 ## 4. `exact` with text: F-03 (slice S5)
 
 **Problem.** 0.7.0 refuses a request that carries `text` under `exact` or
@@ -386,6 +404,9 @@ fused list differently; the refusals that remain (`mmr` with text; a missing
 vector, seeds, expansion and other weights for both selections). Mutants: at
 least 24 for the recall route family, covering the validity rule for text, the
 selection block, the fusion of the two legs and the adapter's refusal.
+
+**Result.** 26 hand mutants (the validity rule, the fused candidates and their
+ranks, the text leg, and the adapter's guard): 26 killed.
 
 ## 5. Evidence references on items (slice S6)
 
@@ -521,3 +542,9 @@ text, hashed outside the engine); an exact replay and a changed record; the
 wire refusals of 5.1 and the 403 of 5.2. Mutants: at least 24 for the remember
 route family, covering the alias, the record form, the limit of one, the
 authorization, the refusals that remain and the core rules.
+
+**Result.** 42 hand mutants: 36 over the reserved-ID rules, the storage token, the
+attachment checks, the alias, the record form, the limit of one, the authorization
+and its order, and the refusals that remain, and 6 over the repeated-item rule of
+5.3: 42 killed. The independent review found that the first rule left a repeated
+item unchecked (a reference on it was ignored); 5.3 now refuses it.
