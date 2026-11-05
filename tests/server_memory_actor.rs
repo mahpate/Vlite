@@ -25,6 +25,7 @@ use vlite::{
 };
 
 const ADMIN: &str = "fake_memory_actor_admin_token_0123456789_ABCDEFGHIJKLMNOPQRSTUV";
+const READ_ONLY: &str = "fake_memory_actor_readonly_token_0123456789_ABCDEFGHIJKLMNOP";
 const ID: &str = "abcdefghij27";
 const SECRET: &str = "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA";
 const PASSWORD: &str = "correct-horse-battery-staple";
@@ -119,6 +120,7 @@ fn start(directory: &TempDir) -> Router {
         Service::new(db),
         ServerOptions {
             admin_token: Some(BearerToken::new(ADMIN).unwrap()),
+            read_only_token: Some(BearerToken::new(READ_ONLY).unwrap()),
             admin_directory: Some(directory.path().into()),
             memory_bindings_file: Some(bindings),
             loopback_only: true,
@@ -378,6 +380,40 @@ async fn a_signed_in_editor_is_audited_by_its_account() {
         // role-derived `principal` and the `actor` agree.
         assert_eq!(event["principal"], actor.as_str(), "{path}");
         assert_eq!(event["actor"], actor.as_str(), "{path}");
+    }
+}
+
+#[tokio::test]
+async fn the_read_only_token_is_audited_on_the_memory_read_routes_it_can_reach() {
+    let directory = TempDir::new().unwrap();
+    let app = start(&directory);
+    let read_only = Auth::Bearer(READ_ONLY.to_owned());
+    // The read-only role may POST the four memory read routes; the handler
+    // refuses it like every caller that is not a granted credential.
+    let reachable = ["recall", "receipt", "find_facts", "get_erasure"];
+    let mut sent = Vec::new();
+    for (path, operation) in ROUTES {
+        let reply = send(&app, &read_only, path, &body_for(operation)).await;
+        assert_eq!(reply.status, 403, "{path}: {}", reply.body);
+        sent.push((path, operation, reply));
+    }
+    let log = audit_log(&directory);
+    for (path, operation, reply) in &sent {
+        if reachable.contains(operation) {
+            let event = memory_event(&log, &reply.request_id);
+            assert_eq!(event["operation"], *operation, "{path}");
+            assert_eq!(event["outcome"], "forbidden_scope", "{path}");
+            assert_eq!(event["principal"], "read_only", "{path}");
+            assert_eq!(event["actor"], "read_only_token", "{path}");
+        } else {
+            // Refused before any memory handler runs, so there is no memory event.
+            assert_eq!(reply.body["error"]["code"], "read_only", "{path}");
+            let events = log
+                .lines()
+                .filter(|line| line.contains(&reply.request_id) && line.contains("memory_request"))
+                .count();
+            assert_eq!(events, 0, "{path}");
+        }
     }
 }
 

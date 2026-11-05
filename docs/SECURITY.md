@@ -235,7 +235,7 @@ name or request content. It has four forms:
 |---|---|
 | `admin_token` | The bootstrap admin token, or any caller of a server with no admin token (open local mode). |
 | `user:<account id>` | A signed-in dashboard account of any role. An account has the same actor in every one of its sessions. |
-| `read_only_token` | The read-only token. It cannot perform the operations behind the events below, so none of them shows this form. |
+| `read_only_token` | The read-only token. It can reach only the four memory read routes (recall, receipt lookup, facts query, erasure get), where the handler refuses it and audits the refusal as a `memory_request`; none of the other events below shows this form. |
 | The credential ID | A scoped API key. Its 12 characters from `a-z2-7` cannot equal another form. |
 
 These events carry an `actor`: `kv_put`, `kv_delete`, `memory_request`,
@@ -243,7 +243,8 @@ These events carry an `actor`: `kv_put`, `kv_delete`, `memory_request`,
 `credential_denied`, and the account events `user_created`, `user_updated`,
 `user_deleted`, `user_password_reset` and `user_password_changed`. The account
 that the server creates at startup from `VLITE_ADMIN_USERNAME` is recorded with
-the actor `bootstrap`. Other audit events do not carry an `actor`.
+the actor `bootstrap`, the one value outside the four forms. Other audit events
+do not carry an `actor`.
 
 `kv_put`, `kv_delete` and `memory_request` keep their `principal` field as it
 was: `admin` for the bootstrap token and for every super admin, so it cannot
@@ -279,11 +280,14 @@ that can write the collection can also fill a key's 16 record IDs with ordinary
 records, so that puts for that key fail with `kv_slots_exhausted` (409 on REST,
 `FAILED_PRECONDITION` on gRPC). Use dedicated collections for key-value data,
 grant `write` on them only to principals you trust with their keys, and watch
-`kv_slots_exhausted_total`: it counts every REST or gRPC request that failed
+`kv_slots_exhausted_total`: it counts each REST or gRPC request that failed
 this way, across all credentials, and a rise nobody expects points at records
-planted over a key's IDs. A list call
+planted over a key's IDs. The failed `kv_put` audit event names the caller
+(`actor`) and the request ID, not the collection, and global metrics are
+unavailable while memory bindings are configured (see above). A list call
 scans the whole collection, so its cost grows with the number of entries rather
-than with `limit`, and heavy listing can slow writers. CAS revisions
+than with `limit`, and heavy listing can slow writers; the memory it holds is
+bounded by `limit` and the 16 MiB page, not by the number of entries. CAS revisions
 are not a durable lease-fencing service. See [REST KV](API.md#key-value-entries).
 
 ## Tenants
