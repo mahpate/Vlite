@@ -96,7 +96,15 @@ hidden. The per-node attachment check on `delete_node` still requires raw
 access to each reserved evidence collection attached to that node.
 Provision raw-holder credentials with `collections:["*"]` before granting raw
 access in the bindings file; credential creation treats a named reserved
-collection as missing.
+collection as missing. A memory agent's credential needs the same care: every
+memory route requires the credential to name the binding's evidence collection
+(or hold `["*"]`) as well as the `memory` operation, and once the bindings file
+is in place a request to create a credential that names that collection answers
+`404`. Create such credentials before you configure the binding (they keep
+working, with the early-grant limit below), or give them `["*"]`. A root
+credential with `["*"]` and `read` also reaches every other collection and the
+global change feed, so keep it for trusted agents; a tenant credential's
+wildcard stays inside its tenant.
 
 **Known limits.** A tenant that owns a binding cannot be deleted and answers
 `409 tenant_not_empty` even when no visible collection remains. Sequence numbers are
@@ -131,7 +139,9 @@ subscriptions and credential graph lists that name a reserved resource begin to
 match it if the binding is removed. Startup refuses `default` as an evidence
 collection, so a binding never changes the legacy routes. Live vector quotas
 count reserved records, so a caller with a quota sees its headroom change when
-memory writes. An attempt to use a reserved name answers like a missing
+memory writes, while tenant usage reports leave reserved collections out and
+can show more headroom than the quota allows. An attempt to use a reserved name
+answers like a missing
 resource, so it is not counted as a credential denial in the metrics or the
 audit log. A binding's receipt window, generation and names are read from the
 file at each start and are not checked against the database, so do not change
@@ -288,7 +298,14 @@ Physical names are `t<32-hex-tenant-id>__<local-name>`; global admins can inspec
 these names. The engine's 63-character name bound leaves 28 characters for a
 tenant-local name. Tenants are grouping/isolation policy over the same database,
 not separate files, cryptographic isolation or independent processes. All tenants
-share the server admission limits and storage failure domain. The private
+share the server admission limits and storage failure domain, and one commit
+sequence: graph `view_sequence` and the change-feed `head` advance for other
+tenants' writes. Import job IDs are allocated for the whole file, so a request
+about another tenant's job answers `403` while an unused ID answers `404`, and a
+tenant's first chunk waits behind earlier reserved jobs of any tenant (the
+`409 import_conflict` names the earlier job). Scoped metrics and import
+responses show a tenant's own collections by their stored names
+(`t<id>__name`). The private
 `tenants.json` uses bounded validated loading and synced atomic replacement;
 1024 lifetime tenant IDs (including tombstones) are supported. Invalid stores
 fail startup instead of silently removing isolation. A post-replacement directory

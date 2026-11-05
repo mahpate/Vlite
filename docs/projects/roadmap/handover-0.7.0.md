@@ -52,7 +52,10 @@ unchanged and no size claim is made.
 - Size goals S1 to S6 are best effort; the release reports them and never waits for them. Must-not-regress items still block.
 - The Azure Container App stays on 0.6.1 until the owner asks for a deployment.
 
-## Limits shipped in 0.7.0 and fixed in 0.7.1
+## Limits shipped in 0.7.0
+
+0.7.1 takes these up in the order given below. The shared commit sequence (F2 and the tenants row) and the import job
+numbering describe design properties, so they need an owner decision before anything changes.
 
 | Item | What it is |
 |---|---|
@@ -67,6 +70,9 @@ unchanged and no size claim is made.
 | F8, F9 | Collection list ids show gaps where reserved collections sit; the administrator log shows reserved names |
 | Quotas and audit | Live vector quotas count reserved records; an attempt on a reserved name is not counted as a credential denial |
 | Attachments | A raw credential can attach ordinary records to nodes of its reserved graph (and reserved records to an ordinary graph); nobody without raw access can then delete or detach them until the holder does |
+| Provisioning and lifecycle | A tenant that owns a binding cannot be deleted (409 `tenant_not_empty`); a credential created before a binding whose grant names a reserved collection answers 404 where a missing name answers 403; subscriptions and credential graph lists that name a reserved resource begin to match it when the binding is removed; backup counts include reserved resources; a memory agent credential created after the bindings file is in place needs `["*"]` because naming the evidence collection answers 404 |
+| Tenants | Import job IDs are allocated for the whole file (another tenant's job answers 403, an unused ID 404) and a first chunk waits behind earlier reserved jobs of any tenant; scoped metrics and import responses show stored names (`t<id>__name`); the commit sequence is shared by all tenants |
+| gRPC disk ANN | `BuildDiskAnn` and `SearchDiskAnn` take a client-chosen sidecar path, so a credential that holds the `index` or `search` operation can write or read a sidecar anywhere the server process can; [GRPC.md](../../GRPC.md) already says to restrict these operations to administrators, and the REST routes derive the path on the server. 0.7.1 confines scoped credentials to the admin directory |
 | KV-3, KV-4, KV-5 | Key-value list sorts every matching key before the limit; a writer can fill a key's 16 slots; the ordinary record route `PUT /v1/collections/{collection}/vectors/{id}` answers 500 to an already due `expires_at_ms` or a zero `ttl_ms` (present since 0.6.1; the key-value route accepts a due expiry by contract) |
 | Guards | A request guard type that makes a raw lookup without the reservation check impossible to write (see below) |
 
