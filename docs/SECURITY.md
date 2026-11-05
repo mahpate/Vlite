@@ -294,6 +294,34 @@ whose valid subset would fit. Already-expired records still occupying engine
 storage can consume quota until physically removed. Streaming quotas apply to
 each committed chunk; a request rate is charged once per RPC, not per message.
 
+## Audit actors
+
+Audit events that record who acted carry an `actor`: a stable identity that
+holds no secret. It is never built from a cookie, token, session key, user
+name or request content. It has four forms:
+
+| `actor` | Who acted |
+|---|---|
+| `admin_token` | The bootstrap admin token, or any caller of a server with no admin token (open local mode). |
+| `user:<account id>` | A signed-in dashboard account of any role. An account has the same actor in every one of its sessions. |
+| `read_only_token` | The read-only token. It cannot perform the operations behind the events below, so none of them shows this form. |
+| The credential ID | A scoped API key. Its 12 characters from `a-z2-7` cannot equal another form. |
+
+These events carry an `actor`: `kv_put`, `kv_delete`, `collection_created`,
+`collection_dropped`, `collection_settings_changed`, `credential_denied`, and
+the account events `user_created`, `user_updated`, `user_deleted`,
+`user_password_reset` and `user_password_changed`. The account that the server
+creates at startup from `VLITE_ADMIN_USERNAME` is recorded with the actor
+`bootstrap`. Other audit events do not carry an `actor`.
+
+`kv_put` and `kv_delete` keep their `principal` field as it was: `admin` for
+the bootstrap token and for every super admin, so it cannot tell them apart,
+and the credential ID or `user:<account id>` for a scoped caller. `actor` is
+added beside it. `credential_denied` keeps `credential_id` and adds an `actor`
+that equals it. The collection events already had an `actor`, which read `admin`
+for the bootstrap token and for every super-admin session before 0.7.1; it now
+reads `admin_token` or `user:<account id>`, and the credential ID is as before.
+
 ## Key-value permissions
 
 Collection KV GET/HEAD and list need the collection's `read` scope; PUT and
@@ -304,9 +332,10 @@ Read-only credentials cannot mutate. Tenant-local names and immutable
 lineage/collection bindings are checked before collection lookup;
 a binding for a dropped collection does not authorize its replacement.
 KV never implicitly creates a collection and shares ordinary record quotas.
-Mutation audit entries contain operation, principal, collection, request ID,
-outcome and, for a put, its expiry deadline, never namespace, key or value. A
-failed request records the collection as `(invalid)`.
+Mutation audit entries contain operation, principal, [actor](#audit-actors),
+collection, request ID, outcome and, for a put, its expiry deadline, never
+namespace, key or value. A failed request records the collection as `(invalid)`
+and still records the actor.
 
 A namespace is an application partition **inside** an authorized collection,
 not an authorization boundary. Put sensitive KV data in dedicated collections
