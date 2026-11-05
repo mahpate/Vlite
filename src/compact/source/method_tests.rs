@@ -948,10 +948,15 @@ fn compact_installed_collection_method_matrix() {
 fn compact_installed_restricted_method_guards_refuse() {
     let _gates = gates();
     let (mut db, _, _) = compact_dispatch_fixture(false);
-    let name = db
+    let (name, id) = db
         .collections
         .iter()
-        .find_map(|(_, state)| state.records.is_compact().then_some(state.name.clone()))
+        .find_map(|(&id, state)| {
+            state
+                .records
+                .is_compact()
+                .then_some((state.name.clone(), id))
+        })
         .expect("fixture has a compact collection");
     let query = &[1.0, 2.0];
     let metric = DistanceMetric::SquaredL2;
@@ -1000,4 +1005,27 @@ fn compact_installed_restricted_method_guards_refuse() {
             .execute(view, &std::collections::BTreeMap::new()),
         Err(Error::InvalidQuery("text fields must be declared"))
     ));
+    // P3B2-K2 `get_at`, P3B2-K3 `list_at` and `visit_at` take the compact arm of the key-value visitor. A view built
+    // around this collection skips the dimension check of `Database::kv_view` (two dimensions, not a key-value
+    // collection), so they check health, then their arguments, and then read rows that are no entries: the reads
+    // against real entries are compared with the resident store in `compact_kv_point_and_prefix_match_resident`.
+    let kv = crate::kv::view_for_test(&db, id);
+    assert!(matches!(kv.get_at("", "", 0), Err(Error::InvalidKvKey(_))));
+    assert!(matches!(
+        kv.list_at("", "", None, 0, 0),
+        Err(Error::InvalidKvKey(_))
+    ));
+    assert!(matches!(
+        kv.visit_at("", "", None, 0, 0, |_| std::ops::ControlFlow::Break(())),
+        Err(Error::InvalidKvKey(_))
+    ));
+    assert_eq!(kv.get_at("ns", "key", 0).unwrap(), None);
+    assert!(kv.list_at("ns", "", None, 1, 0).unwrap().is_empty());
+    let mut visited = 0;
+    kv.visit_at("ns", "", None, 1, 0, |_| {
+        visited += 1;
+        std::ops::ControlFlow::Break(())
+    })
+    .unwrap();
+    assert_eq!(visited, 0);
 }
