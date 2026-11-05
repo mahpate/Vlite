@@ -80,6 +80,15 @@ fn check(
     );
 }
 
+/// One case of the table: its label, the conditions, the expected ids at each of two clocks and the expected number of
+/// index candidates.
+type Case = (
+    &'static str,
+    Vec<Condition>,
+    [(u64, &'static [u64]); 2],
+    u64,
+);
+
 #[test]
 fn compact_exact_search_uses_declared_postings_up_to_half_of_the_rows() {
     let _gates = gates();
@@ -99,7 +108,7 @@ fn compact_exact_search_uses_declared_postings_up_to_half_of_the_rows() {
     // alpha {1, 3..=8} has seven, beta {2, 9, 10} three, gamma {11} one; `other` is not declared.
     let before = DEADLINE - 1;
     let at = DEADLINE;
-    let cases: [(&str, Vec<Condition>, [(u64, &[u64]); 2], u64); 7] = [
+    let cases: [Case; 7] = [
         (
             "gamma",
             vec![eq("tag", "gamma")],
