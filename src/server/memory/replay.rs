@@ -130,6 +130,10 @@ pub(super) fn harness(view: &Value) -> Option<Harness> {
         "receipt_window_ms": view["receipt_window_ms"],
         "grants": grants,
     });
+    // Not a fixture field: server tests drop the evidence collection.
+    if view.get("evidence_collection") == Some(&json!(false)) {
+        entry["evidence_collection"] = Value::Null;
+    }
     // Not a fixture field: server tests retire the binding.
     if let Some(at) = view.get("retired_at_ms") {
         entry["state"] = json!("retired");
@@ -715,6 +719,48 @@ mod tests {
         assert_eq!(body["error"]["details"]["feature"], "fact_kinds");
     }
 
+    /// Unsupported item and body fields are refused by feature, not
+    /// rejected as unknown fields; `expected` is accepted with a merge.
+    #[tokio::test]
+    async fn remember_field_refusals_precede_validation() {
+        for (item, feature) in [
+            (json!({"assertion": {}}), "assertion"),
+            (json!({"expected": {"revision": "1"}}), "expected"),
+            (
+                json!({"expected": {"revision": "1"}, "merge": "none"}),
+                "expected",
+            ),
+        ] {
+            let (status, body) = served(&view(), &remember_request(item)).await;
+            assert_eq!(status, 409, "{feature}: {body}");
+            assert_eq!(body["error"]["details"]["feature"], feature, "{body}");
+        }
+        let mut request = remember_request(json!({}));
+        request["body"]["evidence"] = json!([]);
+        let (status, body) = served(&view(), &request).await;
+        assert_eq!(status, 409, "{body}");
+        assert_eq!(body["error"]["details"]["feature"], "evidence");
+        let (status, body) = served(
+            &view(),
+            &remember_request(json!({"expected": {"revision": "1"}, "merge": "merge_provenance"})),
+        )
+        .await;
+        assert_ne!(status, 409, "{body}");
+    }
+
+    /// `max_references` accepts its contract bound and rejects one past it.
+    #[tokio::test]
+    async fn remember_max_references_bound_is_inclusive() {
+        let mut request = remember_request(json!({}));
+        request["body"]["max_references"] = json!(256);
+        let (status, body) = served(&view(), &request).await;
+        assert_eq!(status, 200, "{body}");
+        request["body"]["max_references"] = json!(257);
+        let (status, body) = served(&view(), &request).await;
+        assert_eq!(status, 422, "{body}");
+        assert_eq!(body["error"]["details"]["field"], "max_references");
+    }
+
     /// A retired binding refuses Remember before the body is validated.
     #[tokio::test]
     async fn retired_binding_refuses_remember() {
@@ -959,6 +1005,35 @@ mod tests {
         assert_eq!(served["error"]["details"]["feature"], "binding_retired");
     }
 
+    /// Text or vector recall needs the binding's evidence collection.
+    #[tokio::test]
+    async fn recall_without_evidence_refuses_text_and_vector() {
+        let mut view = view();
+        view["evidence_collection"] = json!(false);
+        for query in [json!({"text": "ada"}), json!({"vector": [1.0, 0.0]})] {
+            let mut body = query.clone();
+            body["scope"] = json!({"agent": "a"});
+            let (status, served) = recall_served(&view, body).await;
+            assert_eq!(status, 409, "{query}: {served}");
+            assert_eq!(served["error"]["details"]["feature"], "evidence_recall");
+        }
+    }
+
+    /// A budget already spent before the core runs is the route's 504.
+    #[tokio::test]
+    async fn recall_spent_deadline_is_exceeded() {
+        let harness = harness(&view()).expect("startup");
+        harness.at(1_000);
+        harness.clock.elapsed_ms.store(10_000, Ordering::SeqCst);
+        let (status, body) = harness
+            .send(&recall_request(
+                json!({"scope": {"agent": "a"}, "entity_seeds": ["e1"]}),
+            ))
+            .await;
+        assert_eq!(status, 504, "{body}");
+        assert_eq!(body["error"]["code"], "deadline_exceeded");
+    }
+
     /// Without seeds, text or vector there is nothing to recall.
     #[tokio::test]
     async fn recall_requires_a_query() {
@@ -1173,6 +1248,14 @@ mod tests {
             let (status, body) = served(&view(), &forget_request(body)).await;
             assert_eq!(status, 422, "{body}");
             assert_eq!(body["error"]["code"], "invalid_input");
+        }
+        // The route rejects empty targets and revision 0 itself, naming the
+        // field, rather than leaving them to the core.
+        for ids in [json!([]), json!([{"id": "m", "revision": "0"}])] {
+            let (status, body) =
+                served(&view(), &forget_request(json!({"target": {"ids": ids}}))).await;
+            assert_eq!(status, 422, "{body}");
+            assert_eq!(body["error"]["details"]["field"], "target", "{body}");
         }
     }
 

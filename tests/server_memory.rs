@@ -169,6 +169,17 @@ fn an_ordinary_bound_graph_refuses_startup() {
     );
 }
 
+fn evidence_id(db: &Database) -> Value {
+    json!(
+        db.collections()
+            .unwrap()
+            .into_iter()
+            .find(|info| info.name == "notes_ev")
+            .unwrap()
+            .id
+    )
+}
+
 /// A scoped `vlk_` credential bound to the evidence collection and graph.
 fn start_scoped(
     directory: &TempDir,
@@ -184,14 +195,19 @@ fn start_scoped_db(
     operations: &[&str],
     lineage: Option<u64>,
 ) -> (Router, String) {
+    start_scoped_as(directory, db, operations, lineage, None)
+}
+
+/// `evidence` overrides the granted collection ID (a stale grant).
+fn start_scoped_as(
+    directory: &TempDir,
+    db: Database,
+    operations: &[&str],
+    lineage: Option<u64>,
+    evidence: Option<Value>,
+) -> (Router, String) {
     let secret = "A".repeat(43);
-    let evidence = db
-        .collections()
-        .unwrap()
-        .into_iter()
-        .find(|info| info.name == "notes_ev")
-        .unwrap()
-        .id;
+    let evidence = evidence.unwrap_or_else(|| evidence_id(&db));
     let lineage = lineage.unwrap_or_else(|| db.lineage().unwrap());
     let credentials = json!({
         "schema": 1,
@@ -587,6 +603,42 @@ async fn a_granted_scope_recalls_what_it_remembered() {
         (status, &error["error"]["code"]),
         (403, &json!("forbidden_scope"))
     );
+}
+
+#[tokio::test]
+async fn a_recreated_evidence_collection_is_not_covered_by_the_old_grant() {
+    let mut db = database("notes_graph");
+    let stale = evidence_id(&db);
+    db.drop_collection("notes_ev").unwrap();
+    db.create_collection(
+        "notes_ev",
+        CollectionSpec {
+            dimensions: 2,
+            settings: Default::default(),
+        },
+    )
+    .unwrap();
+    assert_ne!(stale, evidence_id(&db));
+    let directory = TempDir::new().unwrap();
+    let (app, token) = start_scoped_as(&directory, db, &RECALL_OPS, None, Some(stale));
+    let recall = json!({"scope": {"agent": "a"}, "entity_seeds": ["e1"]});
+    let forget = json!({
+        "scope": {"agent": "a"}, "idempotency_key": "f",
+        "target": {"ids": [{"id": "e1", "revision": "1"}]}, "mode": "logical_delete",
+    });
+    for (path, body) in [
+        (SERVED[0], remember_body("k")),
+        (SERVED[1], recall),
+        (SERVED[2], consolidate_body("c")),
+        (SERVED[3], forget),
+    ] {
+        let (status, error) = post(&app, path, &token, &body).await;
+        assert_eq!(
+            (status, &error["error"]["code"]),
+            (403, &json!("forbidden_scope")),
+            "{path}"
+        );
+    }
 }
 
 #[tokio::test]
