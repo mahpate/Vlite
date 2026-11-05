@@ -47,7 +47,13 @@ impl Pending {
         }
         self.bytes.extend_from_slice(chunk);
         #[cfg(test)]
-        PEAK.with(|peak| peak.set(peak.get().max(self.bytes.capacity())));
+        {
+            assert!(
+                !self.overflowed,
+                "kept bytes of a line that is already too long"
+            );
+            PEAK.with(|peak| peak.set(peak.get().max(self.bytes.capacity())));
+        }
     }
 }
 
@@ -225,6 +231,16 @@ mod tests {
             assert_eq!(lines(b"\r", chunk, 1), [text("\r")]);
             assert_eq!(lines(b"\r", chunk, 0), [Got::TooLong]);
             assert_eq!(lines(b"a\r\nb\r", chunk, 8), [text("a"), text("b\r")]);
+        }
+    }
+
+    #[test]
+    fn the_largest_cap_accepts_every_line_without_overflowing() {
+        for chunk in CHUNKS {
+            assert_eq!(
+                lines(b"abc\r\nd", chunk, usize::MAX),
+                [text("abc"), text("d")]
+            );
         }
     }
 
