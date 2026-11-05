@@ -364,16 +364,17 @@ Replays, all with `cargo test --locked --offline --lib -- compact::source record
   `R0-AU-12`, `R0-BU-08` and `R0-BU-10`) ended in a toolchain or linker failure and are not kills; their reruns are the
   ones counted.
 - **Independent**, `faa3b32e`, the integrated tree of slices 2 and 3 (101 selected). The replayed checkout
-  is that commit plus the replay tool and its mutant lists; no other file differs. A separate machine replayed a sample
-  of 16 mutants from all 5 classes: 12 gaps (6 api, 1 mapped, 1 input, 1 tamper, 3 guard), the three statement
-  mutants and one mutant that an existing test kills on `v0.7.0` (`R0-EF-03`). The selector was green before the first
-  mutant and again after the last. All 16 are killed and every file restored byte-identically.
-  15 of them are among the 34 that the lane's machine replayed on `5c982e99`, and every killer
-  that the ledger names for them there fails again here, so slice 3's additions to `source.rs` and `records.rs` did
-  not weaken them. This is a sample, not the whole list. The other 56 mutants, which an existing test
-  kills on `v0.7.0`, were not replayed on a final tree. No existing test changed since `v0.7.0` (the changes are the
-  new `freeze_tests.rs` and `ordered_tests.rs`, their module declarations and the test-gated cursors of 7.2), so the
-  test that killed each of them on `v0.7.0` is still there; replaying them is open.
+  is that commit plus the replay tool and its mutant lists; no other file differs. Separate machines, 3 of
+  them and none the lane's, replayed 35 mutants: all 34 that the lane's machine replayed on
+  `5c982e99`, and `R0-EF-03`, which an existing test kills on `v0.7.0` and which the lane did not replay on a final
+  tree. The selector was green before the first mutant and again after the last of every shard. All 35 are
+  killed and every file restored byte-identically, and every killer that the ledger names for the 34
+  fails again, so slice 3's additions to `source.rs` and `records.rs` did not weaken them. A mutant that counts on a
+  final tree therefore has a kill on a machine that is not the lane's (the coordinator's rule, section 8). The other
+  56 mutants, which an existing test kills on `v0.7.0` and which three other machines replayed there, are
+  not replayed on a final tree. No existing test changed since `v0.7.0` (the changes are the new `freeze_tests.rs` and
+  `ordered_tests.rs`, their module declarations and the test-gated cursors of 7.2), so the test that killed each of them
+  on `v0.7.0` is still there; replaying them on a final tree is open.
 
 The 28 gaps, with how each is reached and what closes it:
 
@@ -477,13 +478,12 @@ mutates new code, and the replay below is the evidence.
 
 The replay ran on `f167cf3d` (the tests of 7.1 and of section 3.7, 101 selected with the selector of 7.1, green
 before the first mutant and again after the last of each of three shards) on the lane's machine: 34 of 34
-killed, every file restored byte-identically. A separate machine then replayed a sample of 16 of them
-(coverage 4, identity 2, expiry 2, accounting 4, overlay 2, ordering 2) on
-`faa3b32e`, the integrated tree, whose source files are those of `f167cf3d` (101 selected, green
-before the first mutant and again after the last): all 16 are killed, every file restored byte-identically,
-and every killer that the ledger names for them in the lane's replay fails again. The other 18 have no
-replay on a separate machine, so the independent replay of slice 3 is a sample, and a complete one is open (section 8,
-OPEN-71-02). The independent reviews of the first version of the tests
+killed, every file restored byte-identically. Separate machines, 3 of them and none the lane's, then
+replayed all 34 on `faa3b32e`, the integrated tree, whose source files are those of `f167cf3d`
+(101 selected, green before the first mutant and again after the last of every shard): all 34 are
+killed, every file restored byte-identically, and every killer that the ledger names for them in the lane's replay
+fails again. Every mutant of slice 3 therefore has a kill on a machine that is not the lane's (the coordinator's rule,
+section 8). The independent reviews of the first version of the tests
 found four mutants that survived it: `S3-OR-12`, `S3-OR-14` and `S3-BR-13`, which decode and cache record cells that no
 cursor may touch, and `S3-OR-13`, which lists the ID of a tombstone while a larger base row is pending. They are in the
 list, the tests were strengthened until each is killed, and the whole list was replayed again on the final tests.
@@ -509,14 +509,15 @@ Decided on 2026-11-05 by the coordinator under the owner's delegation, as recomm
   statement on this page describes private, test-gated code (section 1).
 - **OPEN-71-02, survivor evidence: approved.** The evidence form in the [ledgers](p3b-survivor-ledgers.md#evidence-that-would-settle-open-71-02)
   is the acceptance form: one record per mutant with before and after SHA-256, the failing test names and a restored-green
-  run, replayed independently. R0's ledgers have that shape with two qualifications, which the slice reports ask the
-  coordinator to confirm. First, the restored-green run is recorded once per replay (before the first mutant and after the
-  last) and not after every mutant, because a byte-identical restore, which the ledger records per mutant, returns the tree
-  whose baseline run was green, and a run per mutant would double the number of builds. Second, the independent replay
-  exists for the baseline on `v0.7.0` (87 of the 91 mutants of slice 2 ran on three other machines, and 86 of those also on
-  the lane's) and, for the final trees, as a sample on the integrated tree (7.1 and 7.2): 16 of the 91 mutants of slice 2
-  and 16 of the 34 of slice 3 ran on a separate machine, and all 32 are killed. The other replays of the final trees ran
-  on the lane's machine only, so a complete independent replay of the final trees is open. An equivalence claim
+  run, replayed independently. R0's ledgers have that shape with one qualification, which the coordinator accepted on
+  2026-11-05: the restored-green run is recorded once per replay (before the first mutant and after the last) and not
+  after every mutant, because a byte-identical restore, which the ledger records per mutant, returns the tree whose
+  baseline run was green, and a run per mutant would double the number of builds. The coordinator did not accept a final-tree
+  replay on the lane's machine alone: a mutant that counts on a final tree needs a kill on a machine that is not the lane's.
+  R0's ledgers meet that rule. The baseline on `v0.7.0` ran on three other machines for 87 of the 91 mutants of slice 2
+  (86 of those also on the lane's), and every mutant that counts on a final tree, the 34 of slice 2 that the lane's machine
+  replayed, `R0-EF-03` and all 34 of slice 3, was replayed again on separate machines on the integrated tree (7.1 and
+  7.2): 69 mutants, all killed. An equivalence claim
   (`pa-graph-evidence-wall-clock`) additionally needs an independent review and a pinning test wherever one can be
   written.
 - **OPEN-71-03, seam freeze: approved.** Section 3 is frozen, section 4 is the approved inventory of limits that need not

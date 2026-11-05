@@ -3,7 +3,7 @@
  "baseline_commit": "02ef3e5f3e37965bbea43aaf01cce47288d6a82a",
  "final_commit": "5c982e992cfc4e60c973e7acd93125df6ff1cb9f",
  "toolchain": "rustc 1.99.1 (58cf8f9c3 2026-10-13)",
- "counting": "A mutant is effective when its anchor matches once, the tree compiles, the selector executes, a named test fails and the file restores byte-identically. Compile errors, crashes (a linker crash included), timeouts and runs that execute no test never count; such a run is repeated and only the repeat is recorded. failing_tests lists at most the first 12 failing tests of a run. baseline is the previous tag, replayed on separate machines where baseline_machine says so and on the lane's machine otherwise; baseline_lane, where present, is the same tag on the lane's machine, so that the two replays can be compared. final is a replay on final_commit on the lane's machine. independent is a replay of a sample of the mutants on a separate machine on independent_commit (the integrated tree of slices 2 and 3; the checkout is that commit with the replay tool and its mutant lists added, and no other file differs); a mutant without an independent record has no replay of a final tree on a separate machine. reach says how the state that kills a gap arises: api (the seam's calls on a valid generation and valid inputs), mapped (the test-only mapped copy of the backing), input (a function called with an input that no writer produces but that its contract covers), tamper (the stored bytes of an installed generation changed in place) or guard (internal consistency that only an edit of the in-memory directory can break). The checkouts use CRLF line endings: the runner matches on LF-normalized text and writes the file back with its own line endings. The mutated builds ran without -D warnings, so an unused binding that a mutant leaves behind is not an error. Every restore is verified per mutant by SHA-256 equality (sha256_original equals sha256_restored). The selector is run green before the first mutant and after the last of each replay, not after every mutant.",
+ "counting": "A mutant is effective when its anchor matches once, the tree compiles, the selector executes, a named test fails and the file restores byte-identically. Compile errors, crashes (a linker crash included), timeouts and runs that execute no test never count; such a run is repeated and only the repeat is recorded. failing_tests lists at most the first 12 failing tests of a run. baseline is the previous tag, replayed on separate machines where baseline_machine says so and on the lane's machine otherwise; baseline_lane, where present, is the same tag on the lane's machine, so that the two replays can be compared. final is a replay on final_commit on the lane's machine. independent is a replay on separate machines, none of them the lane's (independent_machines counts them), on independent_commit (the integrated tree of slices 2 and 3; the checkout is that commit with the replay tool and its mutant lists added, and no other file differs); a mutant without an independent record has no replay of a final tree on a separate machine. reach says how the state that kills a gap arises: api (the seam's calls on a valid generation and valid inputs), mapped (the test-only mapped copy of the backing), input (a function called with an input that no writer produces but that its contract covers), tamper (the stored bytes of an installed generation changed in place) or guard (internal consistency that only an edit of the in-memory directory can break). The checkouts use CRLF line endings: the runner matches on LF-normalized text and writes the file back with its own line endings. The mutated builds ran without -D warnings, so an unused binding that a mutant leaves behind is not an error. Every restore is verified per mutant by SHA-256 equality (sha256_original equals sha256_restored). The selector is run green before the first mutant and after the last of each replay, not after every mutant.",
  "classes": [
   "accounting",
   "authentication",
@@ -22,10 +22,13 @@
  "final_replay_total": 34,
  "final_replay_killed": 34,
  "independent_commit": "faa3b32e6c048ea8ed13781c1f73b342794c5c2e",
- "independent_replay_total": 16,
- "independent_replay_killed": 16,
- "independent_machines": 1,
+ "independent_replay_total": 35,
+ "independent_replay_killed": 35,
+ "independent_machines": 3,
  "independent_selector_after": [
+  "test result: ok. 101 passed; 0 failed; 0 ignored; 0 measured; 933 filtered out; finished in 2.66s",
+  "test result: ok. 101 passed; 0 failed; 0 ignored; 0 measured; 933 filtered out; finished in 2.71s",
+  "test result: ok. 101 passed; 0 failed; 0 ignored; 0 measured; 933 filtered out; finished in 2.56s",
   "test result: ok. 101 passed; 0 failed; 0 ignored; 0 measured; 933 filtered out; finished in 2.66s"
  ],
  "gaps_by_reach": {
@@ -678,6 +681,20 @@
     "sha256_mutated": "908daa0f8bc1a68ed311e1af63c53b71550f0d4e8aa78b082f6be4e65c08b3e3",
     "sha256_restored": "2d51ae403b1c9fb25dce8d37e88b4f8824b3f521c4595eb232124e2d3a83c95d",
     "restored_identically": true
+   },
+   "independent": {
+    "status": "killed",
+    "tests_run": 101,
+    "failing_tests": [
+     "compact::source::freeze_tests::freeze_budget_and_exact_fit_boundaries",
+     "compact::source::freeze_tests::freeze_cache_entries_belong_to_one_collection_of_one_generation",
+     "compact::source::seam_tests::compact_seam_generation_pin_and_cache_identity",
+     "compact::source::seam_tests::compact_seam_lru_budget_and_accounting"
+    ],
+    "sha256_original": "0a53f446137cbe99db47c5193a553cb8255e4e7d6349ed5828fe42fb124f5b6a",
+    "sha256_mutated": "47591928b9e337b828633d15e3a1659026cc7537bc10255bdb5eebefb022990a",
+    "sha256_restored": "0a53f446137cbe99db47c5193a553cb8255e4e7d6349ed5828fe42fb124f5b6a",
+    "restored_identically": true
    }
   },
   {
@@ -722,6 +739,18 @@
     "sha256_original": "2d51ae403b1c9fb25dce8d37e88b4f8824b3f521c4595eb232124e2d3a83c95d",
     "sha256_mutated": "3c4c16fecc3dfc6edffd102191552d3444b93ca649cb2533a1ec8e27133df615",
     "sha256_restored": "2d51ae403b1c9fb25dce8d37e88b4f8824b3f521c4595eb232124e2d3a83c95d",
+    "restored_identically": true
+   },
+   "independent": {
+    "status": "killed",
+    "tests_run": 101,
+    "failing_tests": [
+     "compact::source::freeze_tests::freeze_cache_entries_belong_to_one_collection_of_one_generation",
+     "compact::source::seam_tests::compact_seam_vector_metadata_leave_cells_empty"
+    ],
+    "sha256_original": "0a53f446137cbe99db47c5193a553cb8255e4e7d6349ed5828fe42fb124f5b6a",
+    "sha256_mutated": "49e420c67b0016b953b3ebf62acde06106f0ec039ee56994fdef7af2b06b18b3",
+    "sha256_restored": "0a53f446137cbe99db47c5193a553cb8255e4e7d6349ed5828fe42fb124f5b6a",
     "restored_identically": true
    }
   },
@@ -770,6 +799,19 @@
     "sha256_original": "2d51ae403b1c9fb25dce8d37e88b4f8824b3f521c4595eb232124e2d3a83c95d",
     "sha256_mutated": "33440214e39ae984178dc75c21bd6ece5c7cba97392a6e2ba2a419e66d47ebb4",
     "sha256_restored": "2d51ae403b1c9fb25dce8d37e88b4f8824b3f521c4595eb232124e2d3a83c95d",
+    "restored_identically": true
+   },
+   "independent": {
+    "status": "killed",
+    "tests_run": 101,
+    "failing_tests": [
+     "compact::source::freeze_tests::freeze_budget_and_exact_fit_boundaries",
+     "compact::source::seam_tests::compact_seam_generation_pin_and_cache_identity",
+     "compact::source::seam_tests::compact_seam_lru_budget_and_accounting"
+    ],
+    "sha256_original": "0a53f446137cbe99db47c5193a553cb8255e4e7d6349ed5828fe42fb124f5b6a",
+    "sha256_mutated": "3257a78f360d679993a9c34b30f2b3cbf7943026ce3635e4a55d0abbe274b092",
+    "sha256_restored": "0a53f446137cbe99db47c5193a553cb8255e4e7d6349ed5828fe42fb124f5b6a",
     "restored_identically": true
    }
   },
@@ -1039,6 +1081,17 @@
     "sha256_restored": "2d51ae403b1c9fb25dce8d37e88b4f8824b3f521c4595eb232124e2d3a83c95d",
     "restored_identically": true
    },
+   "independent": {
+    "status": "killed",
+    "tests_run": 101,
+    "failing_tests": [
+     "compact::source::freeze_tests::freeze_frame_tampering_is_an_error_on_every_read_path"
+    ],
+    "sha256_original": "0a53f446137cbe99db47c5193a553cb8255e4e7d6349ed5828fe42fb124f5b6a",
+    "sha256_mutated": "61200896cea47d1fd9445aeed64920bdced7779a93503aedb4e3176fc7df0b18",
+    "sha256_restored": "0a53f446137cbe99db47c5193a553cb8255e4e7d6349ed5828fe42fb124f5b6a",
+    "restored_identically": true
+   },
    "reach": "guard"
   },
   {
@@ -1298,6 +1351,17 @@
     "sha256_restored": "2d51ae403b1c9fb25dce8d37e88b4f8824b3f521c4595eb232124e2d3a83c95d",
     "restored_identically": true
    },
+   "independent": {
+    "status": "killed",
+    "tests_run": 101,
+    "failing_tests": [
+     "compact::source::freeze_tests::freeze_extents_outside_the_body_are_corrupt_on_every_read_path"
+    ],
+    "sha256_original": "0a53f446137cbe99db47c5193a553cb8255e4e7d6349ed5828fe42fb124f5b6a",
+    "sha256_mutated": "d32f9f73c34e6d56caf08b6869970f50f644f9f1104dade1290f0a83374bd2aa",
+    "sha256_restored": "0a53f446137cbe99db47c5193a553cb8255e4e7d6349ed5828fe42fb124f5b6a",
+    "restored_identically": true
+   },
    "reach": "guard"
   },
   {
@@ -1337,6 +1401,17 @@
     "sha256_original": "2d51ae403b1c9fb25dce8d37e88b4f8824b3f521c4595eb232124e2d3a83c95d",
     "sha256_mutated": "80c871ea881d1463a9d4c4b24c9378d1362a0cc7eb95927b5cc46e20c41bdcc9",
     "sha256_restored": "2d51ae403b1c9fb25dce8d37e88b4f8824b3f521c4595eb232124e2d3a83c95d",
+    "restored_identically": true
+   },
+   "independent": {
+    "status": "killed",
+    "tests_run": 101,
+    "failing_tests": [
+     "compact::source::freeze_tests::freeze_extents_outside_the_body_are_corrupt_on_every_read_path"
+    ],
+    "sha256_original": "0a53f446137cbe99db47c5193a553cb8255e4e7d6349ed5828fe42fb124f5b6a",
+    "sha256_mutated": "11ffeb91bda87b63c68b2f8cc0b0b7e85ce804f5990c917bef0485f81ec0079d",
+    "sha256_restored": "0a53f446137cbe99db47c5193a553cb8255e4e7d6349ed5828fe42fb124f5b6a",
     "restored_identically": true
    },
    "reach": "guard",
@@ -1412,6 +1487,17 @@
     "sha256_original": "2d51ae403b1c9fb25dce8d37e88b4f8824b3f521c4595eb232124e2d3a83c95d",
     "sha256_mutated": "f03283a52c132b0ff7dcef5fb49c6a0044159a9f159170dd28c28d8cf1929def",
     "sha256_restored": "2d51ae403b1c9fb25dce8d37e88b4f8824b3f521c4595eb232124e2d3a83c95d",
+    "restored_identically": true
+   },
+   "independent": {
+    "status": "killed",
+    "tests_run": 101,
+    "failing_tests": [
+     "compact::source::freeze_tests::freeze_cached_blocks_are_authenticated_again_and_shape_checked"
+    ],
+    "sha256_original": "0a53f446137cbe99db47c5193a553cb8255e4e7d6349ed5828fe42fb124f5b6a",
+    "sha256_mutated": "c060eb391b0bc1dae467f80d3f79468d67eaf69f42d1975a4e36e6e9b4bee445",
+    "sha256_restored": "0a53f446137cbe99db47c5193a553cb8255e4e7d6349ed5828fe42fb124f5b6a",
     "restored_identically": true
    },
    "reach": "guard"
@@ -1511,6 +1597,17 @@
     "sha256_restored": "615411fd8d93681161d56f1eafac6fe1edefb15dd4824e451406476b15fd25ec",
     "restored_identically": true
    },
+   "independent": {
+    "status": "killed",
+    "tests_run": 101,
+    "failing_tests": [
+     "compact::source::freeze_tests::freeze_frame_tampering_is_an_error_on_every_read_path"
+    ],
+    "sha256_original": "103831ad3bf7f194e835d52e4d6ffa43ffc71d04cc7a315d56c883ecc62bc86d",
+    "sha256_mutated": "5e82d1815f376c223e6438631e2215f823e7db8d9b98b4be714b3bdc10f4c9ce",
+    "sha256_restored": "103831ad3bf7f194e835d52e4d6ffa43ffc71d04cc7a315d56c883ecc62bc86d",
+    "restored_identically": true
+   },
    "reach": "tamper"
   },
   {
@@ -1550,6 +1647,17 @@
     "sha256_original": "615411fd8d93681161d56f1eafac6fe1edefb15dd4824e451406476b15fd25ec",
     "sha256_mutated": "b980cc6d504ee60839e23634501aef6d9302df33b2bad1899aed15563a73bbbc",
     "sha256_restored": "615411fd8d93681161d56f1eafac6fe1edefb15dd4824e451406476b15fd25ec",
+    "restored_identically": true
+   },
+   "independent": {
+    "status": "killed",
+    "tests_run": 101,
+    "failing_tests": [
+     "compact::source::freeze_tests::freeze_frame_tampering_is_an_error_on_every_read_path"
+    ],
+    "sha256_original": "103831ad3bf7f194e835d52e4d6ffa43ffc71d04cc7a315d56c883ecc62bc86d",
+    "sha256_mutated": "1ac25d5272de1665044d077ee63d69d43fc0040ad1b7d52594f80eb6ff11e09c",
+    "sha256_restored": "103831ad3bf7f194e835d52e4d6ffa43ffc71d04cc7a315d56c883ecc62bc86d",
     "restored_identically": true
    },
    "reach": "tamper"
@@ -1593,6 +1701,18 @@
     "sha256_restored": "2d51ae403b1c9fb25dce8d37e88b4f8824b3f521c4595eb232124e2d3a83c95d",
     "restored_identically": true
    },
+   "independent": {
+    "status": "killed",
+    "tests_run": 101,
+    "failing_tests": [
+     "compact::source::freeze_tests::freeze_frame_range_outside_the_backing_is_corrupt",
+     "compact::source::ordered_tests::ordered_base_rows_cross_every_block_and_read_nothing"
+    ],
+    "sha256_original": "0a53f446137cbe99db47c5193a553cb8255e4e7d6349ed5828fe42fb124f5b6a",
+    "sha256_mutated": "45cbf8d36865892228741d0d7f61d53c3b2ab7e7b58423dad9ab1872aabf76fc",
+    "sha256_restored": "0a53f446137cbe99db47c5193a553cb8255e4e7d6349ed5828fe42fb124f5b6a",
+    "restored_identically": true
+   },
    "reach": "guard"
   },
   {
@@ -1634,6 +1754,17 @@
     "sha256_restored": "2d51ae403b1c9fb25dce8d37e88b4f8824b3f521c4595eb232124e2d3a83c95d",
     "restored_identically": true
    },
+   "independent": {
+    "status": "killed",
+    "tests_run": 101,
+    "failing_tests": [
+     "compact::source::freeze_tests::freeze_frame_range_outside_the_backing_is_corrupt"
+    ],
+    "sha256_original": "0a53f446137cbe99db47c5193a553cb8255e4e7d6349ed5828fe42fb124f5b6a",
+    "sha256_mutated": "d449725c66a5dc0cdbe9795334810425ee8e61afbe614bbf532e49ff9bb42f5b",
+    "sha256_restored": "0a53f446137cbe99db47c5193a553cb8255e4e7d6349ed5828fe42fb124f5b6a",
+    "restored_identically": true
+   },
    "reach": "guard"
   },
   {
@@ -1664,6 +1795,17 @@
     "sha256_original": "2d51ae403b1c9fb25dce8d37e88b4f8824b3f521c4595eb232124e2d3a83c95d",
     "sha256_mutated": "5c5176289529ddf3980071c727dab1e9e21017e2f526ed4903fe2171ef5eac28",
     "sha256_restored": "2d51ae403b1c9fb25dce8d37e88b4f8824b3f521c4595eb232124e2d3a83c95d",
+    "restored_identically": true
+   },
+   "independent": {
+    "status": "killed",
+    "tests_run": 101,
+    "failing_tests": [
+     "compact::source::freeze_tests::freeze_a_refused_read_leaves_the_rest_of_the_workspace_as_it_was"
+    ],
+    "sha256_original": "0a53f446137cbe99db47c5193a553cb8255e4e7d6349ed5828fe42fb124f5b6a",
+    "sha256_mutated": "c8eb60659f2d29fc99a921d3d412c6b5b454f7ebc7225c6f4ac1e002567d48c2",
+    "sha256_restored": "0a53f446137cbe99db47c5193a553cb8255e4e7d6349ed5828fe42fb124f5b6a",
     "restored_identically": true
    },
    "reach": "tamper"
@@ -1948,6 +2090,17 @@
     "sha256_restored": "615411fd8d93681161d56f1eafac6fe1edefb15dd4824e451406476b15fd25ec",
     "restored_identically": true
    },
+   "independent": {
+    "status": "killed",
+    "tests_run": 101,
+    "failing_tests": [
+     "compact::source::freeze_tests::freeze_deadline_hides_exactly_at_the_clock_in_every_arm"
+    ],
+    "sha256_original": "103831ad3bf7f194e835d52e4d6ffa43ffc71d04cc7a315d56c883ecc62bc86d",
+    "sha256_mutated": "cd0b67f5d9a524ccd21db925bc67d7bf707e20b2293394863dbfe8649b036427",
+    "sha256_restored": "103831ad3bf7f194e835d52e4d6ffa43ffc71d04cc7a315d56c883ecc62bc86d",
+    "restored_identically": true
+   },
    "reach": "api"
   },
   {
@@ -1987,6 +2140,17 @@
     "sha256_original": "615411fd8d93681161d56f1eafac6fe1edefb15dd4824e451406476b15fd25ec",
     "sha256_mutated": "f096d29fd75f7e809a90a394e00d168e1f32cdf8809f9508aecce1bcabbbf5e2",
     "sha256_restored": "615411fd8d93681161d56f1eafac6fe1edefb15dd4824e451406476b15fd25ec",
+    "restored_identically": true
+   },
+   "independent": {
+    "status": "killed",
+    "tests_run": 101,
+    "failing_tests": [
+     "compact::source::freeze_tests::freeze_deadline_hides_exactly_at_the_clock_in_every_arm"
+    ],
+    "sha256_original": "103831ad3bf7f194e835d52e4d6ffa43ffc71d04cc7a315d56c883ecc62bc86d",
+    "sha256_mutated": "16938e4b9349a16b9a8dbae4ff32b695e29f78b680f5f26c88d12c5acdbe47ae",
+    "sha256_restored": "103831ad3bf7f194e835d52e4d6ffa43ffc71d04cc7a315d56c883ecc62bc86d",
     "restored_identically": true
    },
    "reach": "api"
@@ -2648,6 +2812,17 @@
     "sha256_restored": "2d51ae403b1c9fb25dce8d37e88b4f8824b3f521c4595eb232124e2d3a83c95d",
     "restored_identically": true
    },
+   "independent": {
+    "status": "killed",
+    "tests_run": 101,
+    "failing_tests": [
+     "compact::source::freeze_tests::freeze_frame_size_bound_is_exact"
+    ],
+    "sha256_original": "0a53f446137cbe99db47c5193a553cb8255e4e7d6349ed5828fe42fb124f5b6a",
+    "sha256_mutated": "a4d7027cd26e75c4a6a930d31ad32df46f4e6aa9837ad603260c6b32da80b74e",
+    "sha256_restored": "0a53f446137cbe99db47c5193a553cb8255e4e7d6349ed5828fe42fb124f5b6a",
+    "restored_identically": true
+   },
    "reach": "guard"
   },
   {
@@ -2742,6 +2917,17 @@
     "sha256_restored": "2d51ae403b1c9fb25dce8d37e88b4f8824b3f521c4595eb232124e2d3a83c95d",
     "restored_identically": true
    },
+   "independent": {
+    "status": "killed",
+    "tests_run": 101,
+    "failing_tests": [
+     "compact::source::freeze_tests::freeze_frame_size_bound_is_exact"
+    ],
+    "sha256_original": "0a53f446137cbe99db47c5193a553cb8255e4e7d6349ed5828fe42fb124f5b6a",
+    "sha256_mutated": "a0524511b96ed2a067e84790925456841e1c85bafb9adab6d2f5be53871b9fdc",
+    "sha256_restored": "0a53f446137cbe99db47c5193a553cb8255e4e7d6349ed5828fe42fb124f5b6a",
+    "restored_identically": true
+   },
    "reach": "guard"
   },
   {
@@ -2781,6 +2967,17 @@
     "sha256_original": "2d51ae403b1c9fb25dce8d37e88b4f8824b3f521c4595eb232124e2d3a83c95d",
     "sha256_mutated": "570b7b9dc66bcb901e117e7979fbfd29142888367bb6cae250de0e8d6a7754b1",
     "sha256_restored": "2d51ae403b1c9fb25dce8d37e88b4f8824b3f521c4595eb232124e2d3a83c95d",
+    "restored_identically": true
+   },
+   "independent": {
+    "status": "killed",
+    "tests_run": 101,
+    "failing_tests": [
+     "compact::source::freeze_tests::freeze_frame_size_bound_is_exact"
+    ],
+    "sha256_original": "0a53f446137cbe99db47c5193a553cb8255e4e7d6349ed5828fe42fb124f5b6a",
+    "sha256_mutated": "390e43f1f795f847417539e8c38339f5288d147fcb386574742a765ba8553ac1",
+    "sha256_restored": "0a53f446137cbe99db47c5193a553cb8255e4e7d6349ed5828fe42fb124f5b6a",
     "restored_identically": true
    },
    "reach": "guard",
@@ -3033,6 +3230,17 @@
     "sha256_restored": "2d51ae403b1c9fb25dce8d37e88b4f8824b3f521c4595eb232124e2d3a83c95d",
     "restored_identically": true
    },
+   "independent": {
+    "status": "killed",
+    "tests_run": 101,
+    "failing_tests": [
+     "compact::source::freeze_tests::freeze_accounting_reports_exact_values_and_keeps_peaks"
+    ],
+    "sha256_original": "0a53f446137cbe99db47c5193a553cb8255e4e7d6349ed5828fe42fb124f5b6a",
+    "sha256_mutated": "71867d24942b78f8a6a6732d607c5bda8d881081e990fbecb621e8fc8dc17ef6",
+    "sha256_restored": "0a53f446137cbe99db47c5193a553cb8255e4e7d6349ed5828fe42fb124f5b6a",
+    "restored_identically": true
+   },
    "reach": "api"
   },
   {
@@ -3072,6 +3280,17 @@
     "sha256_original": "2d51ae403b1c9fb25dce8d37e88b4f8824b3f521c4595eb232124e2d3a83c95d",
     "sha256_mutated": "dcfe7703207b05921c13d323ec5f8a40e92ae82c300dfa88746b8b9bfefc57b2",
     "sha256_restored": "2d51ae403b1c9fb25dce8d37e88b4f8824b3f521c4595eb232124e2d3a83c95d",
+    "restored_identically": true
+   },
+   "independent": {
+    "status": "killed",
+    "tests_run": 101,
+    "failing_tests": [
+     "compact::source::freeze_tests::freeze_accounting_reports_exact_values_and_keeps_peaks"
+    ],
+    "sha256_original": "0a53f446137cbe99db47c5193a553cb8255e4e7d6349ed5828fe42fb124f5b6a",
+    "sha256_mutated": "1a14ea151867444c0eb5022ce733573fdfd7a780b84d9fb6e2ab82c182b86ff1",
+    "sha256_restored": "0a53f446137cbe99db47c5193a553cb8255e4e7d6349ed5828fe42fb124f5b6a",
     "restored_identically": true
    },
    "reach": "api",

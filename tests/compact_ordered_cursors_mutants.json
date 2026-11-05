@@ -3,7 +3,7 @@
  "commit": "f167cf3d30e33f88c9869a1bf22f6556e8895654",
  "replay_commit": "f167cf3d30e33f88c9869a1bf22f6556e8895654",
  "toolchain": "rustc 1.99.1 (58cf8f9c3 2026-10-13)",
- "counting": "A mutant is effective when its anchor matches once, the tree compiles, the selector executes, a named test fails and the file restores byte-identically. Compile errors, crashes (a linker crash included), timeouts and runs that execute no test never count; such a run is repeated and only the repeat is recorded. The three functions do not exist on v0.7.0, so there is no baseline on the previous tag: every mutant is a mutation of new code. failing_tests lists the failing tests of a run (at most the first 12). result is the whole list replayed on the lane's machine on replay_commit. independent is a replay of a sample of the list on a separate machine on independent_commit (the checkout is that commit with the replay tool and its mutant lists added, and no other file differs; its source files are those of replay_commit); a mutant without an independent record has no replay on a separate machine. The checkouts use CRLF line endings: the runner matches on LF-normalized text and writes the file back with its own line endings. The mutated builds ran without -D warnings. Every restore is verified per mutant by SHA-256 equality (sha256_original equals sha256_restored). The selector is run green before the first mutant and after the last of each of the three shards, not after every mutant.",
+ "counting": "A mutant is effective when its anchor matches once, the tree compiles, the selector executes, a named test fails and the file restores byte-identically. Compile errors, crashes (a linker crash included), timeouts and runs that execute no test never count; such a run is repeated and only the repeat is recorded. The three functions do not exist on v0.7.0, so there is no baseline on the previous tag: every mutant is a mutation of new code. failing_tests lists the failing tests of a run (at most the first 12). result is the whole list replayed on the lane's machine on replay_commit. independent is a replay on separate machines, none of them the lane's (independent_machines counts them), on independent_commit (the checkout is that commit with the replay tool and its mutant lists added, and no other file differs; its source files are those of replay_commit); a mutant without an independent record has no replay on a separate machine. The checkouts use CRLF line endings: the runner matches on LF-normalized text and writes the file back with its own line endings. The mutated builds ran without -D warnings. Every restore is verified per mutant by SHA-256 equality (sha256_original equals sha256_restored). The selector is run green before the first mutant and after the last of each of the three shards, not after every mutant.",
  "classes": {
   "accounting": 6,
   "coverage": 7,
@@ -17,14 +17,17 @@
  "survived": 0,
  "other": 0,
  "independent_commit": "faa3b32e6c048ea8ed13781c1f73b342794c5c2e",
- "independent_replay_total": 16,
- "independent_replay_killed": 16,
- "independent_machines": 1,
+ "independent_replay_total": 34,
+ "independent_replay_killed": 34,
+ "independent_machines": 3,
  "independent_tests_selected": [
   101
  ],
  "independent_selector_after": [
-  "test result: ok. 101 passed; 0 failed; 0 ignored; 0 measured; 933 filtered out; finished in 2.71s"
+  "test result: ok. 101 passed; 0 failed; 0 ignored; 0 measured; 933 filtered out; finished in 2.71s",
+  "test result: ok. 101 passed; 0 failed; 0 ignored; 0 measured; 933 filtered out; finished in 2.71s",
+  "test result: ok. 101 passed; 0 failed; 0 ignored; 0 measured; 933 filtered out; finished in 2.56s",
+  "test result: ok. 101 passed; 0 failed; 0 ignored; 0 measured; 933 filtered out; finished in 2.66s"
  ],
  "restored_identically": true,
  "tests_selected": [
@@ -79,6 +82,21 @@
    "new": "            next: 1,\n            end: self.len(),",
    "cmd": "test --locked --offline --lib -- compact::source records:: metadata_index::tests::compact rerank::",
    "result": {
+    "status": "killed",
+    "tests_run": 101,
+    "failing_tests": [
+     "compact::source::ordered_tests::ordered_base_rows_cross_every_block_and_read_nothing",
+     "compact::source::ordered_tests::ordered_base_rows_list_every_physical_row_in_ascending_id_order",
+     "compact::source::ordered_tests::ordered_ids_and_affected_ids_follow_every_kind_of_change",
+     "compact::source::ordered_tests::ordered_ids_ignore_deadlines_and_read_no_block",
+     "compact::source::ordered_tests::ordered_ids_match_a_seeded_model_over_random_commits"
+    ],
+    "sha256_original": "0a53f446137cbe99db47c5193a553cb8255e4e7d6349ed5828fe42fb124f5b6a",
+    "sha256_mutated": "2b922386b9e1fd5045769f595dd39abc5a5ce0bf557b0c3a2cd5868ec1084f74",
+    "sha256_restored": "0a53f446137cbe99db47c5193a553cb8255e4e7d6349ed5828fe42fb124f5b6a",
+    "restored_identically": true
+   },
+   "independent": {
     "status": "killed",
     "tests_run": 101,
     "failing_tests": [
@@ -185,6 +203,18 @@
     "sha256_mutated": "5941e19c1543586cfe43c2126cb3932fd4905e63f7ed910dfae4e2af6e8fcfcd",
     "sha256_restored": "0a53f446137cbe99db47c5193a553cb8255e4e7d6349ed5828fe42fb124f5b6a",
     "restored_identically": true
+   },
+   "independent": {
+    "status": "killed",
+    "tests_run": 101,
+    "failing_tests": [
+     "compact::source::ordered_tests::ordered_base_rows_cross_every_block_and_read_nothing",
+     "compact::source::ordered_tests::ordered_base_rows_list_every_physical_row_in_ascending_id_order"
+    ],
+    "sha256_original": "0a53f446137cbe99db47c5193a553cb8255e4e7d6349ed5828fe42fb124f5b6a",
+    "sha256_mutated": "5941e19c1543586cfe43c2126cb3932fd4905e63f7ed910dfae4e2af6e8fcfcd",
+    "sha256_restored": "0a53f446137cbe99db47c5193a553cb8255e4e7d6349ed5828fe42fb124f5b6a",
+    "restored_identically": true
    }
   },
   {
@@ -242,6 +272,21 @@
     "sha256_mutated": "34635e6bd9501dc185c64c61af16cdf70d0bbd08d9b306669297530d9eaf99c0",
     "sha256_restored": "0a53f446137cbe99db47c5193a553cb8255e4e7d6349ed5828fe42fb124f5b6a",
     "restored_identically": true
+   },
+   "independent": {
+    "status": "killed",
+    "tests_run": 101,
+    "failing_tests": [
+     "compact::source::ordered_tests::ordered_base_rows_cross_every_block_and_read_nothing",
+     "compact::source::ordered_tests::ordered_base_rows_list_every_physical_row_in_ascending_id_order",
+     "compact::source::ordered_tests::ordered_ids_and_affected_ids_follow_every_kind_of_change",
+     "compact::source::ordered_tests::ordered_ids_ignore_deadlines_and_read_no_block",
+     "compact::source::ordered_tests::ordered_ids_match_a_seeded_model_over_random_commits"
+    ],
+    "sha256_original": "0a53f446137cbe99db47c5193a553cb8255e4e7d6349ed5828fe42fb124f5b6a",
+    "sha256_mutated": "34635e6bd9501dc185c64c61af16cdf70d0bbd08d9b306669297530d9eaf99c0",
+    "sha256_restored": "0a53f446137cbe99db47c5193a553cb8255e4e7d6349ed5828fe42fb124f5b6a",
+    "restored_identically": true
    }
   },
   {
@@ -253,6 +298,18 @@
    "new": "        let remaining = self.end - self.next + 1;",
    "cmd": "test --locked --offline --lib -- compact::source records:: metadata_index::tests::compact rerank::",
    "result": {
+    "status": "killed",
+    "tests_run": 101,
+    "failing_tests": [
+     "compact::source::ordered_tests::ordered_base_rows_cross_every_block_and_read_nothing",
+     "compact::source::ordered_tests::ordered_base_rows_list_every_physical_row_in_ascending_id_order"
+    ],
+    "sha256_original": "0a53f446137cbe99db47c5193a553cb8255e4e7d6349ed5828fe42fb124f5b6a",
+    "sha256_mutated": "3bf128dd1be249755115e7b785e112399419a848bd88b0755928f771c13e5ce7",
+    "sha256_restored": "0a53f446137cbe99db47c5193a553cb8255e4e7d6349ed5828fe42fb124f5b6a",
+    "restored_identically": true
+   },
+   "independent": {
     "status": "killed",
     "tests_run": 101,
     "failing_tests": [
@@ -316,6 +373,17 @@
     "sha256_mutated": "e052081c930f8ce199376313a82e58f04f27569d06727569bee849d20a16a33c",
     "sha256_restored": "0a53f446137cbe99db47c5193a553cb8255e4e7d6349ed5828fe42fb124f5b6a",
     "restored_identically": true
+   },
+   "independent": {
+    "status": "killed",
+    "tests_run": 101,
+    "failing_tests": [
+     "compact::source::ordered_tests::ordered_base_rows_cross_every_block_and_read_nothing"
+    ],
+    "sha256_original": "0a53f446137cbe99db47c5193a553cb8255e4e7d6349ed5828fe42fb124f5b6a",
+    "sha256_mutated": "e052081c930f8ce199376313a82e58f04f27569d06727569bee849d20a16a33c",
+    "sha256_restored": "0a53f446137cbe99db47c5193a553cb8255e4e7d6349ed5828fe42fb124f5b6a",
+    "restored_identically": true
    }
   },
   {
@@ -366,6 +434,21 @@
    "new": "        self.next += 2;\n        Some(row)",
    "cmd": "test --locked --offline --lib -- compact::source records:: metadata_index::tests::compact rerank::",
    "result": {
+    "status": "killed",
+    "tests_run": 101,
+    "failing_tests": [
+     "compact::source::ordered_tests::ordered_base_rows_cross_every_block_and_read_nothing",
+     "compact::source::ordered_tests::ordered_base_rows_list_every_physical_row_in_ascending_id_order",
+     "compact::source::ordered_tests::ordered_ids_and_affected_ids_follow_every_kind_of_change",
+     "compact::source::ordered_tests::ordered_ids_ignore_deadlines_and_read_no_block",
+     "compact::source::ordered_tests::ordered_ids_match_a_seeded_model_over_random_commits"
+    ],
+    "sha256_original": "0a53f446137cbe99db47c5193a553cb8255e4e7d6349ed5828fe42fb124f5b6a",
+    "sha256_mutated": "132e9e4680801549022bfe9bcd17d7b86cf50fcd8a0dbe5ecaf2dc0be9ffe486",
+    "sha256_restored": "0a53f446137cbe99db47c5193a553cb8255e4e7d6349ed5828fe42fb124f5b6a",
+    "restored_identically": true
+   },
+   "independent": {
     "status": "killed",
     "tests_run": 101,
     "failing_tests": [
@@ -439,6 +522,20 @@
     "sha256_mutated": "098f144c7f7bc68512418aebc01d54bd86f64555161871bc330bbaf7347bbd9e",
     "sha256_restored": "103831ad3bf7f194e835d52e4d6ffa43ffc71d04cc7a315d56c883ecc62bc86d",
     "restored_identically": true
+   },
+   "independent": {
+    "status": "killed",
+    "tests_run": 101,
+    "failing_tests": [
+     "compact::source::ordered_tests::ordered_ids_and_affected_ids_follow_every_kind_of_change",
+     "compact::source::ordered_tests::ordered_ids_ignore_deadlines_and_read_no_block",
+     "compact::source::ordered_tests::ordered_ids_match_a_seeded_model_over_random_commits",
+     "compact::source::ordered_tests::ordered_ids_over_a_collection_without_base_rows"
+    ],
+    "sha256_original": "103831ad3bf7f194e835d52e4d6ffa43ffc71d04cc7a315d56c883ecc62bc86d",
+    "sha256_mutated": "098f144c7f7bc68512418aebc01d54bd86f64555161871bc330bbaf7347bbd9e",
+    "sha256_restored": "103831ad3bf7f194e835d52e4d6ffa43ffc71d04cc7a315d56c883ecc62bc86d",
+    "restored_identically": true
    }
   },
   {
@@ -462,6 +559,20 @@
     "sha256_mutated": "39b6d5555d25f62357fd71cec8574a351dd6ee0bf7baa1736040b00c6ac3ef5f",
     "sha256_restored": "103831ad3bf7f194e835d52e4d6ffa43ffc71d04cc7a315d56c883ecc62bc86d",
     "restored_identically": true
+   },
+   "independent": {
+    "status": "killed",
+    "tests_run": 101,
+    "failing_tests": [
+     "compact::source::ordered_tests::ordered_ids_and_affected_ids_follow_every_kind_of_change",
+     "compact::source::ordered_tests::ordered_ids_ignore_deadlines_and_read_no_block",
+     "compact::source::ordered_tests::ordered_ids_match_a_seeded_model_over_random_commits",
+     "compact::source::ordered_tests::ordered_ids_over_a_collection_without_base_rows"
+    ],
+    "sha256_original": "103831ad3bf7f194e835d52e4d6ffa43ffc71d04cc7a315d56c883ecc62bc86d",
+    "sha256_mutated": "39b6d5555d25f62357fd71cec8574a351dd6ee0bf7baa1736040b00c6ac3ef5f",
+    "sha256_restored": "103831ad3bf7f194e835d52e4d6ffa43ffc71d04cc7a315d56c883ecc62bc86d",
+    "restored_identically": true
    }
   },
   {
@@ -473,6 +584,20 @@
    "new": "                    revision: 0,\n                    expiry: *expiry,",
    "cmd": "test --locked --offline --lib -- compact::source records:: metadata_index::tests::compact rerank::",
    "result": {
+    "status": "killed",
+    "tests_run": 101,
+    "failing_tests": [
+     "compact::source::ordered_tests::ordered_ids_and_affected_ids_follow_every_kind_of_change",
+     "compact::source::ordered_tests::ordered_ids_ignore_deadlines_and_read_no_block",
+     "compact::source::ordered_tests::ordered_ids_match_a_seeded_model_over_random_commits",
+     "compact::source::ordered_tests::ordered_ids_over_a_collection_without_base_rows"
+    ],
+    "sha256_original": "103831ad3bf7f194e835d52e4d6ffa43ffc71d04cc7a315d56c883ecc62bc86d",
+    "sha256_mutated": "0b4854fbc11cffd41ad5c863944109f918ae49b18e7dd0629762ac659d676a64",
+    "sha256_restored": "103831ad3bf7f194e835d52e4d6ffa43ffc71d04cc7a315d56c883ecc62bc86d",
+    "restored_identically": true
+   },
+   "independent": {
     "status": "killed",
     "tests_run": 101,
     "failing_tests": [
@@ -545,6 +670,20 @@
     "sha256_mutated": "e6d919ab657de5a2e758ec2806a1c36ed0800458ae2f9c902fbac4836612d53d",
     "sha256_restored": "103831ad3bf7f194e835d52e4d6ffa43ffc71d04cc7a315d56c883ecc62bc86d",
     "restored_identically": true
+   },
+   "independent": {
+    "status": "killed",
+    "tests_run": 101,
+    "failing_tests": [
+     "compact::source::ordered_tests::ordered_ids_and_affected_ids_follow_every_kind_of_change",
+     "compact::source::ordered_tests::ordered_ids_ignore_deadlines_and_read_no_block",
+     "compact::source::ordered_tests::ordered_ids_match_a_seeded_model_over_random_commits",
+     "compact::source::ordered_tests::ordered_ids_over_a_collection_without_base_rows"
+    ],
+    "sha256_original": "103831ad3bf7f194e835d52e4d6ffa43ffc71d04cc7a315d56c883ecc62bc86d",
+    "sha256_mutated": "e6d919ab657de5a2e758ec2806a1c36ed0800458ae2f9c902fbac4836612d53d",
+    "sha256_restored": "103831ad3bf7f194e835d52e4d6ffa43ffc71d04cc7a315d56c883ecc62bc86d",
+    "restored_identically": true
    }
   },
   {
@@ -556,6 +695,20 @@
    "new": "                } => Affected::Delete {\n                    revision: *revision + *expiry.as_ref().unwrap_or(&0) * 0,\n                },",
    "cmd": "test --locked --offline --lib -- compact::source records:: metadata_index::tests::compact rerank::",
    "result": {
+    "status": "killed",
+    "tests_run": 101,
+    "failing_tests": [
+     "compact::source::ordered_tests::ordered_ids_and_affected_ids_follow_every_kind_of_change",
+     "compact::source::ordered_tests::ordered_ids_ignore_deadlines_and_read_no_block",
+     "compact::source::ordered_tests::ordered_ids_match_a_seeded_model_over_random_commits",
+     "compact::source::ordered_tests::ordered_ids_over_a_collection_without_base_rows"
+    ],
+    "sha256_original": "103831ad3bf7f194e835d52e4d6ffa43ffc71d04cc7a315d56c883ecc62bc86d",
+    "sha256_mutated": "55e6e1c4da47030bf4fa2d852e794bf1bdff9f159a5ac3c10d87523c8aee3f59",
+    "sha256_restored": "103831ad3bf7f194e835d52e4d6ffa43ffc71d04cc7a315d56c883ecc62bc86d",
+    "restored_identically": true
+   },
+   "independent": {
     "status": "killed",
     "tests_run": 101,
     "failing_tests": [
@@ -625,6 +778,19 @@
     "sha256_mutated": "9711f270d4946c733deed499c29d7e9d8c2f1c6cc224cb83715c25ab01b26c4e",
     "sha256_restored": "103831ad3bf7f194e835d52e4d6ffa43ffc71d04cc7a315d56c883ecc62bc86d",
     "restored_identically": true
+   },
+   "independent": {
+    "status": "killed",
+    "tests_run": 101,
+    "failing_tests": [
+     "compact::source::ordered_tests::ordered_ids_and_affected_ids_follow_every_kind_of_change",
+     "compact::source::ordered_tests::ordered_ids_ignore_deadlines_and_read_no_block",
+     "compact::source::ordered_tests::ordered_ids_match_a_seeded_model_over_random_commits"
+    ],
+    "sha256_original": "103831ad3bf7f194e835d52e4d6ffa43ffc71d04cc7a315d56c883ecc62bc86d",
+    "sha256_mutated": "9711f270d4946c733deed499c29d7e9d8c2f1c6cc224cb83715c25ab01b26c4e",
+    "sha256_restored": "103831ad3bf7f194e835d52e4d6ffa43ffc71d04cc7a315d56c883ecc62bc86d",
+    "restored_identically": true
    }
   },
   {
@@ -681,6 +847,20 @@
     "sha256_mutated": "c5707ec83b1da0d387825ce357b1605784531d413877439733b0c28d8c92753b",
     "sha256_restored": "103831ad3bf7f194e835d52e4d6ffa43ffc71d04cc7a315d56c883ecc62bc86d",
     "restored_identically": true
+   },
+   "independent": {
+    "status": "killed",
+    "tests_run": 101,
+    "failing_tests": [
+     "compact::source::ordered_tests::ordered_ids_and_affected_ids_follow_every_kind_of_change",
+     "compact::source::ordered_tests::ordered_ids_ignore_deadlines_and_read_no_block",
+     "compact::source::ordered_tests::ordered_ids_match_a_seeded_model_over_random_commits",
+     "compact::source::ordered_tests::ordered_ids_over_a_collection_without_base_rows"
+    ],
+    "sha256_original": "103831ad3bf7f194e835d52e4d6ffa43ffc71d04cc7a315d56c883ecc62bc86d",
+    "sha256_mutated": "c5707ec83b1da0d387825ce357b1605784531d413877439733b0c28d8c92753b",
+    "sha256_restored": "103831ad3bf7f194e835d52e4d6ffa43ffc71d04cc7a315d56c883ecc62bc86d",
+    "restored_identically": true
    }
   },
   {
@@ -692,6 +872,20 @@
    "new": "                    if !matches!(entry, OverlayEntry::Put { .. }) {\n                        return Some(overlay_id);",
    "cmd": "test --locked --offline --lib -- compact::source records:: metadata_index::tests::compact rerank::",
    "result": {
+    "status": "killed",
+    "tests_run": 101,
+    "failing_tests": [
+     "compact::source::ordered_tests::ordered_ids_and_affected_ids_follow_every_kind_of_change",
+     "compact::source::ordered_tests::ordered_ids_ignore_deadlines_and_read_no_block",
+     "compact::source::ordered_tests::ordered_ids_match_a_seeded_model_over_random_commits",
+     "compact::source::ordered_tests::ordered_ids_over_a_collection_without_base_rows"
+    ],
+    "sha256_original": "103831ad3bf7f194e835d52e4d6ffa43ffc71d04cc7a315d56c883ecc62bc86d",
+    "sha256_mutated": "0f14312692e244f685ae5e7477ae7f23c25afa61b0c3f278cbd3b2cee991b9a2",
+    "sha256_restored": "103831ad3bf7f194e835d52e4d6ffa43ffc71d04cc7a315d56c883ecc62bc86d",
+    "restored_identically": true
+   },
+   "independent": {
     "status": "killed",
     "tests_run": 101,
     "failing_tests": [
@@ -726,6 +920,19 @@
     "sha256_mutated": "e8cf34b5d74da62ff6e139d5237c7687c165dc71bfe7c98420a005858c39c2c0",
     "sha256_restored": "103831ad3bf7f194e835d52e4d6ffa43ffc71d04cc7a315d56c883ecc62bc86d",
     "restored_identically": true
+   },
+   "independent": {
+    "status": "killed",
+    "tests_run": 101,
+    "failing_tests": [
+     "compact::source::ordered_tests::ordered_ids_and_affected_ids_follow_every_kind_of_change",
+     "compact::source::ordered_tests::ordered_ids_ignore_deadlines_and_read_no_block",
+     "compact::source::ordered_tests::ordered_ids_match_a_seeded_model_over_random_commits"
+    ],
+    "sha256_original": "103831ad3bf7f194e835d52e4d6ffa43ffc71d04cc7a315d56c883ecc62bc86d",
+    "sha256_mutated": "e8cf34b5d74da62ff6e139d5237c7687c165dc71bfe7c98420a005858c39c2c0",
+    "sha256_restored": "103831ad3bf7f194e835d52e4d6ffa43ffc71d04cc7a315d56c883ecc62bc86d",
+    "restored_identically": true
    }
   },
   {
@@ -737,6 +944,18 @@
    "new": "                    if base_id.is_some() {",
    "cmd": "test --locked --offline --lib -- compact::source records:: metadata_index::tests::compact rerank::",
    "result": {
+    "status": "killed",
+    "tests_run": 101,
+    "failing_tests": [
+     "compact::source::ordered_tests::ordered_ids_and_affected_ids_follow_every_kind_of_change",
+     "compact::source::ordered_tests::ordered_ids_match_a_seeded_model_over_random_commits"
+    ],
+    "sha256_original": "103831ad3bf7f194e835d52e4d6ffa43ffc71d04cc7a315d56c883ecc62bc86d",
+    "sha256_mutated": "88b603a6bb9964bbc53d0f11cfd54c5591f9ee99b6eefc098acbc75160924aba",
+    "sha256_restored": "103831ad3bf7f194e835d52e4d6ffa43ffc71d04cc7a315d56c883ecc62bc86d",
+    "restored_identically": true
+   },
+   "independent": {
     "status": "killed",
     "tests_run": 101,
     "failing_tests": [
@@ -804,6 +1023,19 @@
     "sha256_mutated": "23c8446ede35514822cc82a1e0c94bc1f32c7885ab2daf18c77d194e3e092a1a",
     "sha256_restored": "103831ad3bf7f194e835d52e4d6ffa43ffc71d04cc7a315d56c883ecc62bc86d",
     "restored_identically": true
+   },
+   "independent": {
+    "status": "killed",
+    "tests_run": 101,
+    "failing_tests": [
+     "compact::source::ordered_tests::ordered_ids_and_affected_ids_follow_every_kind_of_change",
+     "compact::source::ordered_tests::ordered_ids_ignore_deadlines_and_read_no_block",
+     "compact::source::ordered_tests::ordered_ids_match_a_seeded_model_over_random_commits"
+    ],
+    "sha256_original": "103831ad3bf7f194e835d52e4d6ffa43ffc71d04cc7a315d56c883ecc62bc86d",
+    "sha256_mutated": "23c8446ede35514822cc82a1e0c94bc1f32c7885ab2daf18c77d194e3e092a1a",
+    "sha256_restored": "103831ad3bf7f194e835d52e4d6ffa43ffc71d04cc7a315d56c883ecc62bc86d",
+    "restored_identically": true
    }
   },
   {
@@ -852,6 +1084,19 @@
    "new": "            let base_id = base.peek().filter(|row| row.expiry.is_none()).map(|row| row.id);",
    "cmd": "test --locked --offline --lib -- compact::source records:: metadata_index::tests::compact rerank::",
    "result": {
+    "status": "killed",
+    "tests_run": 101,
+    "failing_tests": [
+     "compact::source::ordered_tests::ordered_ids_and_affected_ids_follow_every_kind_of_change",
+     "compact::source::ordered_tests::ordered_ids_ignore_deadlines_and_read_no_block",
+     "compact::source::ordered_tests::ordered_ids_match_a_seeded_model_over_random_commits"
+    ],
+    "sha256_original": "103831ad3bf7f194e835d52e4d6ffa43ffc71d04cc7a315d56c883ecc62bc86d",
+    "sha256_mutated": "da783f447d2ccd470dae068155a2987ff3cf2571713bb634cf66733d2631e98d",
+    "sha256_restored": "103831ad3bf7f194e835d52e4d6ffa43ffc71d04cc7a315d56c883ecc62bc86d",
+    "restored_identically": true
+   },
+   "independent": {
     "status": "killed",
     "tests_run": 101,
     "failing_tests": [
