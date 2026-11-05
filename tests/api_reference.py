@@ -431,7 +431,12 @@ def canonical_rest_key(key: str) -> str:
 
 
 def rest_keys(root: Path) -> set[str]:
-    sources = [root / "src/server.rs", *sorted((root / "src/server").glob("*.rs"))]
+    sources = [
+        root / "src/server.rs",
+        *sorted((root / "src/server").glob("*.rs")),
+        # The agent-memory routes register through path constants in one module.
+        root / "src/server/memory/routes.rs",
+    ]
     keys = set().union(*(route_keys(path.read_text(encoding="utf-8")) for path in sources))
     declared = set()
     for spec in ("src/openapi.json", "src/openapi_graph.json"):
