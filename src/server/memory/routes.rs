@@ -33,6 +33,8 @@ use crate::memory::{
     receipt_id,
 };
 
+mod recall;
+
 /// Mutation `deadline_ms` default and bound (contract `MemoryMutation`).
 const DEFAULT_DEADLINE_MS: u64 = 250;
 const MAX_DEADLINE_MS: u64 = 5_000;
@@ -57,7 +59,9 @@ pub(super) const RESUME_ERASURE: &str = "/v1/memory/{binding}/erasures/resume";
 
 /// The routes served for a non-empty binding set.
 pub(super) fn routes() -> Router<Service> {
-    Router::new().route(REMEMBER, post(remember))
+    Router::new()
+        .route(REMEMBER, post(remember))
+        .route(RECALL, post(recall::recall))
 }
 
 /// Test seam for the engine clock and the elapsed request budget. Absent in
