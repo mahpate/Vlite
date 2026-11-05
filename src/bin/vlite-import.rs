@@ -3,13 +3,19 @@ use serde::Deserialize;
 use serde_json::json;
 #[cfg(feature = "import-formats")]
 use std::io::Read;
-use std::{
-    fs::File,
-    io::{BufRead, BufReader},
-    process::ExitCode,
+use std::{fs::File, io::BufReader, process::ExitCode};
+use tool_support::{
+    Result,
+    line::{Line, read_bounded_line},
+    main_result,
 };
-use tool_support::{Result, main_result};
 use vlite::{Database, ImportChunkOutcome, InvalidRowPolicy, Metadata, Mutation};
+/// Longest jsonl or copy line, excluding its terminator. The largest record the engine supports
+/// fits when written as text: a 1 MiB payload of JSON `\u00XX` escapes is 6 MiB, 65,536 floats
+/// of about 30 characters are 2 MB and 64 KiB of metadata with its escapes and typed wrappers
+/// is under 0.5 MB, about 8.7 MB in all (1.9 times below the limit); COPY text is smaller. The
+/// csv, pgvector, faiss, parquet and arrow readers have no line limit.
+const MAX_LINE_BYTES: usize = 16 * 1024 * 1024;
 const HELP: &str = r#"vlite-import --db PATH --input FILE --format csv|jsonl|pgvector|copy|faiss|parquet|arrow
  [--create DIMENSIONS] [--collection NAME] [--job ID] [--chunk-size N]
 CSV: header id,vector[,payload,metadata]; vector is a quoted JSON array.
@@ -54,15 +60,27 @@ fn columns(id: &str, vector: &str, payload: &str, metadata: &str) -> Result<Row>
         },
     })
 }
+// A jsonl or copy line over MAX_LINE_BYTES is rejected like any other bad row.
+#[derive(Debug)]
+struct LineTooLong;
+impl std::fmt::Display for LineTooLong {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "line exceeds {MAX_LINE_BYTES} bytes")
+    }
+}
+impl std::error::Error for LineTooLong {}
 fn text_rows(path: &str, format: &str) -> Result<Vec<Row>> {
     let mut rows = Vec::new();
     let mut rejected = 0;
     let mut accept = |row: Result<Row>, number: usize| match row {
         Ok(r) => rows.push(r),
-        Err(_) => {
+        Err(error) => {
             rejected += 1;
             if rejected <= 20 {
-                eprintln!("rejected row {number}: invalid {format} record");
+                match error.downcast_ref::<LineTooLong>() {
+                    Some(too_long) => eprintln!("rejected row {number}: {too_long}"),
+                    None => eprintln!("rejected row {number}: invalid {format} record"),
+                }
             }
         }
     };
@@ -94,8 +112,18 @@ fn text_rows(path: &str, format: &str) -> Result<Vec<Row>> {
             );
         }
     } else {
-        for (i, line) in BufReader::new(File::open(path)?).lines().enumerate() {
-            let line = line?;
+        let mut input = BufReader::new(File::open(path)?);
+        let mut number = 0;
+        loop {
+            number += 1;
+            let line = match read_bounded_line(&mut input, MAX_LINE_BYTES)? {
+                Line::Text(line) => line,
+                Line::TooLong => {
+                    accept(Err(LineTooLong.into()), number);
+                    continue;
+                }
+                Line::Eof => break,
+            };
             if format == "copy" && (line.starts_with("COPY ") || line == "\\." || line.is_empty()) {
                 continue;
             }
@@ -112,7 +140,7 @@ fn text_rows(path: &str, format: &str) -> Result<Vec<Row>> {
                         columns(fields[0], fields[1], &copy_unescape(payload)?, "")
                     })()
                 },
-                i + 1,
+                number,
             );
         }
     }
