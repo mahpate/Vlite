@@ -503,7 +503,7 @@ fn scan_source(file: &str, source: &str) -> Vec<Finding> {
                     let call = punct(index + 2, '(');
                     let receiver = index
                         .checked_sub(1)
-                        .and_then(|at| ident(at))
+                        .and_then(&ident)
                         .filter(|receiver| DATABASE_RECEIVERS.contains(receiver));
                     let pattern = match (call, receiver) {
                         (true, _)
