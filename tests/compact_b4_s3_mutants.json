@@ -4,6 +4,19 @@
  "selectors": {
   "differential": "test --locked --offline --lib -- compact::source::seam_tests::index_differential"
  },
+ "two_machines": [
+  "s3-compact-visibility-skipped",
+  "s3-compact-scanned-after-visibility",
+  "s3-compact-evaluated-before-filter",
+  "s3-compact-arm-cap-whole",
+  "s3-compact-arm-candidates-dropped",
+  "s3-compact-arm-index-candidates-unrecorded",
+  "s3-ranked-tie-id-descending",
+  "s3-lookup-intersection-dropped",
+  "s3-lookup-cap-exclusive",
+  "s3-lookup-widest-served-condition",
+  "s3-update-metadata-untracked"
+ ],
  "mutants": [
   {
    "id": "s3-compact-visibility-skipped",
