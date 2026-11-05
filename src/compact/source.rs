@@ -689,6 +689,18 @@ impl CompactView {
             .map(|(_, record, _)| record.expiry)
     }
 
+    /// Physical rows in ascending ID order. Deadlines are not applied, so a row
+    /// hidden by expiry is listed. It reads only the resident directory: it
+    /// cannot fail, allocates nothing and never touches a block, the
+    /// workspace or a record cell.
+    pub(crate) fn base_rows(&self) -> BaseRows<'_> {
+        BaseRows {
+            source: self.source(),
+            next: 0,
+            end: self.len(),
+        }
+    }
+
     pub(crate) fn get(&self, id: u64, now_ms: u64) -> Result<Option<&Record>> {
         self.get_at(id, now_ms)
     }
@@ -733,6 +745,51 @@ impl CompactView {
     }
 }
 
+/// One physical row of a pinned base, as listed by `CompactView::base_rows`.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) struct BaseRow {
+    pub(crate) row: usize,
+    pub(crate) id: u64,
+    pub(crate) revision: u64,
+    pub(crate) expiry: Option<u64>,
+}
+
+/// Cursor over the physical rows of one collection; see `CompactView::base_rows`.
+#[derive(Clone)]
+pub(crate) struct BaseRows<'a> {
+    source: Option<&'a CollectionSource>,
+    next: usize,
+    end: usize,
+}
+
+impl Iterator for BaseRows<'_> {
+    type Item = BaseRow;
+
+    fn next(&mut self) -> Option<BaseRow> {
+        if self.next >= self.end {
+            return None;
+        }
+        let (_, record, _) = self.source?.row_at(self.next)?;
+        let row = BaseRow {
+            row: self.next,
+            id: record.id,
+            revision: record.revision,
+            expiry: record.expiry,
+        };
+        self.next += 1;
+        Some(row)
+    }
+
+    fn size_hint(&self) -> (usize, Option<usize>) {
+        let remaining = self.end - self.next;
+        (remaining, Some(remaining))
+    }
+}
+
+impl ExactSizeIterator for BaseRows<'_> {}
+
+impl std::iter::FusedIterator for BaseRows<'_> {}
+
 #[cfg(test)]
 mod tests;
 
@@ -744,6 +801,8 @@ mod freeze_tests;
 mod install_tests;
 #[cfg(test)]
 mod method_tests;
+#[cfg(test)]
+mod ordered_tests;
 #[cfg(test)]
 mod overlay_tests;
 #[cfg(test)]
