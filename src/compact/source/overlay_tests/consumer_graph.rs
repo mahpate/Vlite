@@ -11,8 +11,8 @@ use super::super::dispatch_tests::{compact_dispatch_fixture, gates, point_parity
 use super::assert_compact_resident_pair;
 use super::consumer_vectors::{Tamper, is_corrupt, is_poisoned_cell, poison_cell, tamper_block};
 use crate::property_graph::{
-    EvidenceSpec, Expansion, GraphLimits, Pivot, PropertyProjection, ReadOptions, Retrieval,
-    Retrieve, TruncationReason,
+    EvidenceSpec, Expansion, GraphLimits, GraphRef, Pivot, PropertyProjection, ReadOptions,
+    Retrieval, Retrieve, TruncationReason,
 };
 use crate::records::CollectionRecords;
 use crate::{Condition, Database, Error, Expected, Metadata, MetadataValue, Mutation};
@@ -844,4 +844,104 @@ fn compact_graph_access_and_retrieval_answer_poisoned_on_an_unhealthy_handle() {
     assert!(flusher.failed());
     let result = graph.retrieve(&request, &options());
     assert!(matches!(result, Err(Error::Poisoned)), "{result:?}");
+}
+
+/// Gives `db` the flusher whose failed sync turns a handle unhealthy.
+fn with_flusher(mut db: Database) -> Database {
+    db.flusher = Some(
+        crate::durability::Flusher::start(
+            tempfile::tempfile().unwrap(),
+            std::time::Duration::from_secs(3_600),
+        )
+        .unwrap(),
+    );
+    db
+}
+
+fn fail_the_periodic_sync(db: &Database) {
+    let flusher = db.flusher.as_ref().unwrap();
+    flusher.mark_written();
+    flusher.inject_sync_failure();
+    assert!(flusher.sync_now().is_err());
+    assert!(flusher.failed());
+}
+
+/// `retrieve` validates the bounds of the request before it looks anything up, and the first lookup is the first
+/// health check, so a handle that turned unhealthy after `graph()` answers a request over a ceiling with its
+/// `GraphLimitExceedsCeiling` and every other request with `Poisoned`. The freeze note (ERR-8) puts the health check
+/// first; this is the order the resident code has, the compact arm shares it, and the test pins it as it is (a known
+/// order after acquisition, to be settled in 0.7.2) on both arms.
+#[test]
+fn graph_retrieve_validates_the_request_bounds_before_the_health_of_a_handle_that_turned_unhealthy()
+{
+    let _gates = gates();
+    let (candidate, oracle, _) = compact_dispatch_fixture(false);
+    let (candidate, oracle) = (with_flusher(candidate), with_flusher(oracle));
+    let answer = |graph: &GraphRef<'_>, request: &Retrieve, options: &ReadOptions<'_>| {
+        format!("{:?}", graph.retrieve(request, options).map(|_| ()))
+    };
+    let valid = || request("full", [0.1, -0.0], &["half"]);
+    let over_pivot_k = {
+        let mut request = valid();
+        request.pivot.k = Pivot::MAX_K + 1;
+        request
+    };
+    let over_evidence_items = {
+        let mut request = valid();
+        request.evidence.max_items = EvidenceSpec::MAX_ITEMS + 1;
+        request
+    };
+    let over_read_limit = {
+        let mut options = options();
+        options.limits.max_hops = GraphLimits::CEILING.max_hops + 1;
+        options
+    };
+    let over_a_ceiling = [
+        (
+            "pivot k",
+            over_pivot_k,
+            options(),
+            r#"Err(GraphLimitExceedsCeiling { limit: "pivot_k", requested: 101, ceiling: 100 })"#,
+        ),
+        (
+            "evidence items",
+            over_evidence_items,
+            options(),
+            r#"Err(GraphLimitExceedsCeiling { limit: "max_evidence_items", requested: 1001, ceiling: 1000 })"#,
+        ),
+        (
+            "read limit",
+            valid(),
+            over_read_limit,
+            r#"Err(GraphLimitExceedsCeiling { limit: "max_hops", requested: 5, ceiling: 4 })"#,
+        ),
+    ];
+    let arms = [
+        (
+            "compact",
+            &candidate,
+            candidate.compact_graph_for_test("g", "full").unwrap(),
+        ),
+        ("resident", &oracle, oracle.graph("g").unwrap()),
+    ];
+    for (arm, db, graph) in arms {
+        let graph = graph.with_clock(NOW);
+        assert_eq!(answer(&graph, &valid(), &options()), "Ok(())", "{arm}");
+        for (what, request, options, error) in &over_a_ceiling {
+            assert_eq!(answer(&graph, request, options), *error, "{arm}: {what}");
+        }
+        fail_the_periodic_sync(db);
+        assert_eq!(
+            answer(&graph, &valid(), &options()),
+            "Err(Poisoned)",
+            "{arm}"
+        );
+        for (what, request, options, error) in &over_a_ceiling {
+            assert_eq!(
+                answer(&graph, request, options),
+                *error,
+                "{arm}: {what} after the failed sync"
+            );
+        }
+    }
 }
