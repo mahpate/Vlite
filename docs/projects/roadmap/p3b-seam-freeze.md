@@ -36,51 +36,52 @@ pinned generation. `CollectionRecords::Compact` answers effective questions by p
 | Piece | Functions at `v0.7.0` | Meaning |
 |---|---|---|
 | `CompactGeneration` (`compact/source.rs`) | `Capture::{push, finish}`, `new`, `view`, `has_collection`, `decode` | One immutable, authenticated image: owned or mapped bytes, the block directory, one lazy `Record` cell per row, the cipher context. Built once, after the whole image validated. |
-| `CompactView` | `generation_id`, `len`, `first_id`, `contains_id`, `row_of`, `id`, `revision`, `expiry`, `get`, `get_at`, `get_physical`, `read_vector`, `read_metadata`, `read_payload` | Physical rows of one collection, in ascending ID order. `get_at` applies a deadline; every other accessor is physical. The `read_*` methods copy out of one authenticated frame and never create a cell. |
+| `CompactView` | `generation_id`, `len`, `first_id`, `contains_id`, `row_of`, `id`, `revision`, `expiry`, `get`, `get_at`, `get_physical`, `read_vector`, `read_metadata`, `read_payload` | Physical rows of one collection, in ascending ID order. `get` and `get_at` apply a deadline, every other accessor is physical. `get`, `get_at` and `get_physical` decode a row into its cell once and serve the cell afterwards. The `read_*` methods copy out of one authenticated frame on every call and never create a cell. |
 | `ReadWorkspace` | `new`, `accounting`, `body` (private) | At most 4 MiB of decoded vectors, the latest authenticated plaintext frame and the counters. One per operation, serial, never shared and never persisted. |
-| `CollectionRecords` (`records.rs`) | `len`, `is_empty`, `first_id`, `contains_key`, `get_at`, `get_physical`, `apply_committed`, `compact_iter`, `compact_overlay_revision`, `compact_from_replay`, `pin_effective`, `effective_ids`, `effective_vector`, `effective_metadata`, `effective_payload`, `effective_visible`, `source_identity`, `source_accounting`, `overlay_logical_bytes` | The effective view: overlay first, then the base. `pin_effective` clones the enum, which pins the generation and the overlay root together. |
+| `CollectionRecords` (`records.rs`) | `len`, `is_empty`, `first_id`, `contains_key`, `get_at`, `get_physical`, `apply_committed`, `compact_iter`, `compact_overlay_revision`, `compact_from_replay`, `pin_effective`, `effective_ids`, `effective_vector`, `effective_metadata`, `effective_payload`, `effective_visible`, `source_identity`, `source_accounting`, `overlay_logical_bytes` | The effective view: overlay first, then the base. `pin_effective` clones the enum, which pins the generation and the overlay root together. `get_at`, `get_physical` and `compact_iter` hand out records, so they materialize base rows into cells; the `effective_*` accessors never do. |
 | Consumers (test-gated) | `Collection::rebuild_derived`, `MetadataIndexes::rebuilt_effective`, `TextIndex::rebuilt_effective`, `rerank_effective`, `quality::effective_memory`, the compact arm of `Database::set_collection_settings` | Read through the effective view with a 4 MiB workspace and, where they test visibility, an explicit clock. |
 
 ## 3. Frozen semantics
 
 Each statement has an ID so that a test, a mutant and a later change can cite it. A change to a statement needs an
 amendment to this page, a test that cites the new text and an updated mutant ledger. The tests named here are the
-pinning ones; `freeze_*` tests live in `src/compact/source/freeze_tests.rs`.
+pinning ones; `freeze_*` tests live in `src/compact/source/freeze_tests.rs`. A dagger marks a detail that was verified
+by reading the code at `v0.7.0` and has no test of its own.
 
 ### 3.1 The effective-read clock
 
 | ID | Statement | Pinned by |
 |---|---|---|
-| CLK-1 | An operation captures one clock `T` (milliseconds since the Unix epoch) and passes it to every effective read, including each leg of a multi-leg operation. Seam code never reads the wall clock itself. | `freeze_source_never_reads_the_wall_clock`; the consumers' explicit `now_ms` arguments |
+| CLK-1 | Every deadline decision in the seam takes the caller's clock `T` (milliseconds since the Unix epoch): `src/compact/source.rs` never reads a clock of its own, and the effective accessors and consumers receive `T` as an argument and pass the one clock to every read of the operation. | `freeze_source_never_reads_the_wall_clock` (source.rs only); the explicit `now_ms` arguments of `get_at`, `effective_visible`, `rerank_effective` and the `*_at` scans |
 | CLK-2 | A row is hidden when its deadline `<= T`, so a deadline equal to `T` hides it and `T = deadline - 1` shows it. | `freeze_deadline_hides_exactly_at_the_clock_in_every_arm`; `compact_view_get_matches_resident_after_source_drop` |
 | CLK-3 | A row with no deadline is never hidden by the clock. | same |
 | CLK-4 | The newest overlay entry decides. An overlay put uses its own deadline, so an expired put hides the ID and never reveals the older base row; a tombstone hides the ID at every `T` and never falls through. | `freeze_deadline_hides_exactly_at_the_clock_in_every_arm`; `compact_expired_overlay_never_reveals_base`; `compact_delete_tombstone_shadows_base` |
-| CLK-5 | Every other read is physical and ignores deadlines: `len`, `first_id`, `contains_id`, `row_of`, `id`, `revision`, `expiry`, `get_physical`, `effective_ids`, `effective_vector`, `effective_metadata`, `effective_payload` and the `read_*` methods. A caller that needs visibility asks `get_at` or `effective_visible` with its own `T` first. Counts (`len`) are physical and include hidden rows. | same; `freeze_accounting_reports_exact_values_and_keeps_peaks` |
-| CLK-6 | A compact collection holds two expiry (and revision) representations: the resident `Collection.expiries` and `Collection.revisions` maps, and the view and overlay columns. They agree by construction (replay builds the overlay from the replayed resident maps; `apply_committed` writes both). Exact scans, browse and `ReadSnapshot` read the resident map; `get_at` and `effective_visible` (and so `rerank_effective`) read the columns. One operation reads one representation and never mixes them. | `freeze_resident_and_compact_expiry_sources_agree_after_mutations`; `compact_mutations_match_resident_put_delete_metadata_and_ttl` |
-| CLK-7 | A public call that takes no clock samples the wall clock once and passes it down; a `ReadSnapshot` uses the clock it captured. The resident hybrid search is the one known exception (section 4). | `compact_browse_cursor_skips_tombstones_and_expiry`; `compact_exact_scan_is_bit_identical_at_same_clock` |
+| CLK-5 | Every read that takes no clock is physical and ignores deadlines: `len`, `first_id`, `contains_id`, `row_of`, `id`, `revision`, `expiry`, `get_physical`, `effective_ids`, `effective_vector`, `effective_metadata`, `effective_payload` and the `read_*` methods. The point readers that take a clock are `get`, `get_at` and `effective_visible`; a caller that needs visibility asks one of them with its own `T` first. Counts (`len`) are physical and include hidden rows. | same; `freeze_accounting_reports_exact_values_and_keeps_peaks` |
+| CLK-6 | A compact collection holds two expiry (and revision) representations: the resident `Collection.expiries` and `Collection.revisions` maps, and the view and overlay columns. They agree by construction (replay builds the overlay from the replayed resident maps; `apply_committed` writes both). Exact scans, browse and `ReadSnapshot` read the resident expiry map; `get_at` and `effective_visible` (and so `rerank_effective`) read the columns. One operation reads one expiry representation and never combines the two. `revision_in`, which a conditional write checks, reads the overlay's revision when the overlay holds an entry for the ID and the resident map otherwise. | `freeze_resident_and_compact_expiry_sources_agree_after_mutations`; `compact_mutations_match_resident_put_delete_metadata_and_ttl` |
+| CLK-7 | A public call that takes no clock samples the wall clock once on entry and passes it down, and a `ReadSnapshot` uses the clock it captured. Four resident-only paths are known exceptions that sample per candidate or per call: the hybrid text leg, query-language execution, `ann_quality` and `search_ready_with_options_in` (section 4). Other callers that sample per candidate were not audited. | `compact_browse_cursor_skips_tombstones_and_expiry`; `compact_exact_scan_is_bit_identical_at_same_clock` |
 
 ### 3.2 Overlay precedence and affected IDs
 
 | ID | Statement | Pinned by |
 |---|---|---|
-| PRE-1 | The effective row of an ID is the overlay put if there is one, nothing if there is a tombstone, and the base row otherwise. A base row without an overlay entry is served from the pinned source, never from a cell. | `freeze_effective_rows_follow_overlay_precedence_in_ascending_order`; `compact_effective_accessor_pins_overlay_without_materializing_cells` |
+| PRE-1 | The effective row of an ID is the overlay put if there is one, nothing if there is a tombstone, and the base row otherwise. The `effective_*` accessors serve a base row without an overlay entry from the pinned source and never create a cell; `get_at`, `get_physical` and `compact_iter` return records and so materialize base rows into cells (ACC-3). | `freeze_effective_rows_follow_overlay_precedence_in_ascending_order`; `compact_effective_accessor_pins_overlay_without_materializing_cells` |
 | PRE-2 | `effective_ids` is ascending, has no duplicates and equals the base IDs, plus overlay puts, minus tombstones. | same |
 | PRE-3 | The overlay is the complete difference between the pinned base and the effective state. Replay records an overlay put for every ID whose revision or deadline differs from its base row (a metadata-only write, a deadline-only change, a rewrite), a put for every ID absent from the base, and a tombstone, at the replay sequence, for every base ID that is gone. An unchanged ID has no entry. | `freeze_replay_overlay_covers_every_kind_of_change`; `compact_install_real_committed_suffix_replays_into_overlay` |
 | PRE-4 | A pinned clone of the enum keeps the overlay root it was cloned with; later commits do not reach it. | `compact_effective_accessor_pins_overlay_without_materializing_cells`; `compact_overlay_snapshot_and_revision_condition_are_immutable` |
 | PRE-5 | `overlay_logical_bytes` counts `record_body_len` for a put and 0 for a tombstone. | `freeze_effective_rows_follow_overlay_precedence_in_ascending_order` |
+| PRE-6 | Each compact collection has its own view and overlay: a commit to one collection changes the length, the IDs and the visibility of that collection only. | `freeze_named_collections_keep_one_overlay_each` |
 
 ### 3.3 Errors
 
 | ID | Statement | Pinned by |
 |---|---|---|
-| ERR-1 | Order of a read: bounded bytes, footer and checksum, authentication, envelope and extents, then exposure. A cache hit repeats the first three steps. | `compact_seam_authenticates_cached_vectors`; `freeze_cached_blocks_are_authenticated_again_and_shape_checked` |
-| ERR-2 | A frame whose recorded kind or footer checksum changed, or whose range is outside the backing, is `Corrupt` with reason `compact source frame changed` or `compact source frame is out of bounds`, before any authentication. A frame body over `MAX_BODY + SEAL_OVERHEAD` is the first reason; a plain body over `MAX_BODY` is `compact source body exceeds limit`. A failed authentication is `Corrupt` with reason `frame authentication failed`. | `freeze_frame_tampering_is_an_error_on_every_read_path`; `freeze_frame_size_bound_is_exact` |
-| ERR-3 | An extent outside the body is `Corrupt`: `compact payload extent is out of bounds`, `compact metadata extent is out of bounds`, `invalid compact vector extent` (a vector read) or `compact vector extent is out of bounds` (a cell), and undecodable metadata is `invalid compact record metadata`. | `freeze_extents_outside_the_body_are_corrupt_on_every_read_path`; `compact_seam_rejects_bad_extents_and_accounting_overflow` |
+| ERR-1 | A workspace read (`read_vector`, `read_metadata`, `read_payload`) runs in this order. An absent row answers `Ok(None)`. A vector read then checks sizes and refuses a block that exceeds the scratch budget, before any frame is read, and on a cache miss evicts to make room. The frame read follows: the previous plaintext is released, the frame range, size, kind and footer-checksum checks run, an encrypted frame is authenticated and the body bound is checked. The extents come next and exposure last. A vector cache hit repeats the frame read, authentication included, and then checks the cached block's shape; it does not decode again. A record cell (`get`, `get_at`, `get_physical`) runs the range, kind and checksum checks and the authentication once, when it first decodes its row, and is served from memory afterwards. | `compact_seam_authenticates_cached_vectors`; `freeze_cached_blocks_are_authenticated_again_and_shape_checked`; `freeze_a_refused_read_leaves_the_rest_of_the_workspace_as_it_was` |
+| ERR-2 | A frame whose recorded kind or footer checksum changed, or whose range is outside the backing, is `Corrupt` with reason `compact source frame changed` or `compact source frame is out of bounds`, before any authentication, on the workspace reads and on cell decoding alike. On the workspace reads a frame body over `MAX_BODY + SEAL_OVERHEAD` is the first reason, and a plain body over `MAX_BODY` is `compact source body exceeds limit`; cell decoding applies neither bound. A failed authentication is `Corrupt` with reason `frame authentication failed`, and an authenticated frame whose footer, sequence or checksum does not match is `Corrupt` with reason `commit footer or record checksum mismatch`.† | `freeze_frame_tampering_is_an_error_on_every_read_path`; `freeze_frame_range_outside_the_backing_is_corrupt`; `freeze_frame_size_bound_is_exact` |
+| ERR-3 | An extent outside the body is `Corrupt`: `compact payload extent is out of bounds`, `compact metadata extent is out of bounds`, `invalid compact vector extent` (a vector read) or `compact vector extent is out of bounds` (a cell), and undecodable metadata is `invalid compact record metadata`.† | `freeze_extents_outside_the_body_are_corrupt_on_every_read_path`; `compact_seam_rejects_bad_extents_and_accounting_overflow` |
 | ERR-4 | Errors are never converted into absence or a cache miss. `Ok(None)` means there is no such row, and every effective accessor propagates the error of a base read. | `freeze_frame_tampering_is_an_error_on_every_read_path` |
-| ERR-5 | A refused read leaves the workspace unchanged: no block is accounted, no cell is published and the plaintext is released. | same |
-| ERR-6 | A budget problem is `InvalidQuery` with a fixed reason: `compact workspace exceeds 4 MiB`, `compact scratch budget is smaller than one block`, `compact workspace counter exhausted`, `compact cached block shape changed` and the overflow, underflow and `cache accounting mismatch` reasons. A counter that would pass `u64::MAX` fails; it never wraps. | `freeze_budget_and_exact_fit_boundaries`; `freeze_cached_blocks_are_authenticated_again_and_shape_checked`; `compact_seam_lru_budget_and_accounting` |
+| ERR-5 | A refused read caches no vector block and publishes no cell. When it fails while reading its frame (range, size, kind, checksum or authentication) it leaves no plaintext (`plaintext_live` is 0), and the blocks cached before it stay when no eviction was needed. A refused read is not atomic in other respects (section 4). | `freeze_a_refused_read_leaves_the_rest_of_the_workspace_as_it_was`; `freeze_frame_tampering_is_an_error_on_every_read_path`; `freeze_extents_outside_the_body_are_corrupt_on_every_read_path` |
+| ERR-6 | A budget problem is `InvalidQuery` with a fixed reason: `compact workspace exceeds 4 MiB`, `compact scratch budget is smaller than one block` and `compact cached block shape changed` (pinned), and `compact workspace counter exhausted`, the vector-size, accounting overflow and underflow reasons and `compact cache accounting mismatch`.† A counter that would pass `u64::MAX` fails; it never wraps.† | `freeze_budget_and_exact_fit_boundaries`; `freeze_cached_blocks_are_authenticated_again_and_shape_checked`; `compact_seam_lru_budget_and_accounting` |
 | ERR-7 | A commit that succeeds but cannot be applied to the compact state poisons the handle and returns the error; the next operation answers `Poisoned`. | `committed_apply_errors_poison_compact_handle` |
-| ERR-8 | A consumer checks the handle's health first, then (for a write) read-only, then validates its arguments, then reads. Lane B's `250a98bc` adds the read-only gate to the compact settings arm. | `compact_dispatch_*`; `250a98bc` (parked) |
 
 ### 3.4 Accounting
 
@@ -92,21 +93,27 @@ claim.
 | ACC-1 | `source_live` is the byte length of the pinned backing and `source_peak` the largest value `accounting` has seen in this workspace, across generations. Both are generation-wide. | `compact_seam_source_peak_survives_smaller_generation`; `freeze_accounting_reports_exact_values_and_keeps_peaks` |
 | ACC-2 | `mapped_live` is the backing length of a mapped generation and 0 for an owned one; `mapped_peak` is kept like `source_peak`. | `compact_seam_mapped_source_accounting`; `freeze_mapped_accounting_keeps_its_own_peak` |
 | ACC-3 | `cells_live` is the sum of `record_body_len` over the materialized cells of every collection of the generation, and `cells_peak` is kept like `source_peak`. Cells are never evicted. `read_vector`, `read_metadata`, `read_payload` and the effective accessors never create one. | `compact_seam_vector_metadata_leave_cells_empty`; `freeze_accounting_reports_exact_values_and_keeps_peaks` |
-| ACC-4 | `vectors_live` is the decoded `f32` byte size of the cached blocks (`rows * dimensions * 4`, also for float16) and never exceeds the budget; `vectors_peak` is a running maximum updated at every insertion, so it survives an eviction. | `compact_seam_lru_budget_and_accounting`; `freeze_vector_peak_survives_eviction_by_a_smaller_block` |
-| ACC-5 | `plaintext_live` is the length of the latest authenticated plaintext frame, 0 for plain generations, and 0 again after any failed read; `plaintext_peak` is a running maximum. | `compact_seam_vector_metadata_leave_cells_empty`; `compact_seam_authenticates_cached_vectors` |
+| ACC-4 | `vectors_live` is the decoded `f32` byte size of the cached blocks (`rows * dimensions * 4`, also for float16†) and never exceeds the budget; `vectors_peak` is a running maximum updated at every insertion, so it survives an eviction. | `compact_seam_lru_budget_and_accounting`; `freeze_vector_peak_survives_eviction_by_a_smaller_block` |
+| ACC-5 | `plaintext_live` is the length of the latest authenticated plaintext frame and 0 for plain generations; `plaintext_peak` is a running maximum. A read releases the previous plaintext when it starts reading its frame, so a read that fails while reading its frame leaves 0 (the two other refusals are in section 4). | `compact_seam_vector_metadata_leave_cells_empty`; `compact_seam_authenticates_cached_vectors`; `freeze_a_refused_read_leaves_the_rest_of_the_workspace_as_it_was`; `freeze_frame_tampering_is_an_error_on_every_read_path` |
 | ACC-6 | `hits`, `misses` and `evictions` count per workspace. | `compact_seam_lru_budget_and_accounting` |
-| ACC-7 | The budget is at most 4 MiB (exactly 4 MiB is allowed) and must hold one whole decoded block (a block of exactly the budget is read). A block that fits next to the live ones, exactly or with room to spare, evicts nothing. Eviction takes the least recently used block by a logical counter, ties broken by the cache key. | `freeze_budget_and_exact_fit_boundaries`; `compact_seam_lru_budget_and_accounting` |
+| ACC-7 | The budget is at most 4 MiB (exactly 4 MiB is allowed) and must hold one whole decoded block (a block of exactly the budget is read). A block that fits next to the live ones, exactly or with room to spare, evicts nothing. Eviction takes the least recently used block by a logical counter that advances on every read, and ties are broken by the cache key.† | `freeze_budget_and_exact_fit_boundaries`; `compact_seam_lru_budget_and_accounting` |
 | ACC-8 | `source_*`, `mapped_*` and `cells_*` peaks are sampled when `accounting` is called; `vectors_*` and `plaintext_*` peaks are maintained on every read. | `freeze_accounting_reports_exact_values_and_keeps_peaks`; `freeze_vector_peak_survives_eviction_by_a_smaller_block` |
 
 ### 3.5 Identity
 
 | ID | Statement | Pinned by |
 |---|---|---|
-| IDN-1 | A `GenerationId` is a process-local counter value, minted once per `CompactGeneration` from a counter that starts at 1 and fails explicitly on exhaustion. It is never persisted, never compared across processes and never stands in for a lineage, a sequence or a digest. A reopen mints a new one. | `compact_seam_generation_pin_and_cache_identity`; `freeze_cache_entries_belong_to_one_collection_of_one_generation` |
+| IDN-1 | A `GenerationId` is a process-local counter value, minted once per `CompactGeneration` from a counter that starts at 1 and fails explicitly on exhaustion.† It is never persisted, never compared across processes and never stands in for a lineage, a sequence or a digest. A reopen mints a new one. | `compact_seam_generation_pin_and_cache_identity`; `freeze_cache_entries_belong_to_one_collection_of_one_generation` |
 | IDN-2 | A cached block is identified by `(generation, collection, kind, partition)`, where `kind` is the low 16 bits and `partition` the rest of the block's frame ID. Its shape (element count, dimensions, precision) is checked as well but is not an identity. | `compact_seam_partitions_have_distinct_cache_entries`; `freeze_cache_entries_belong_to_one_collection_of_one_generation`; `freeze_cache_key_separates_block_kinds` |
 | IDN-3 | A view pins its generation until it is dropped; the workspace cache never does. | `compact_seam_generation_pin_and_cache_identity` |
 | IDN-4 | A row ordinal is the position in ascending ID order across all blocks of the collection (`block start + row in block`), and IDs ascend strictly across blocks. | `compact_multiblock_point_view_matches_resident`; `freeze_accounting_reports_exact_values_and_keeps_peaks` |
 | IDN-5 | At `v0.7.0` every block of every collection source is a complete-record block of kind `0x0101`. A second kind needs a review of `CacheKey` before it is admitted. | `freeze_cache_entries_belong_to_one_collection_of_one_generation` |
+
+### 3.6 Concurrency
+
+| ID | Statement | Pinned by |
+|---|---|---|
+| CON-1 | A `CompactView` moves to other threads and its pinned `CompactGeneration` is shared by them: the first access to a record cell decodes it once under the cell's lock, and every reader shares that cell. A `ReadWorkspace` is plain owned scratch of one operation, used through `&mut self`: it is never shared between operations and never used by two threads at once. | `compact_concurrent_first_access_decodes_once_under_lock` |
 
 ## 4. Deviations and limits that are not frozen
 
@@ -114,11 +121,15 @@ These are true at `v0.7.0`. They are not statements to preserve; the lane named 
 
 | Where | What | Lane |
 |---|---|---|
-| `hybrid.rs::search_hybrid` | The vector leg samples its own clock and the text leg samples the wall clock again for every candidate, so the legs can disagree at a deadline. Compact hybrid refuses, so only the resident path is affected. | A4 (`search_hybrid_at` in `02062058`) |
-| `records.rs::effective_ids` | Builds a full ID set and vector. The 4 MiB workspace bounds vector scratch only, not ID memory. | ANN lane, via section 5 |
+| `hybrid.rs::search_hybrid`, `query_language.rs::execute`, `quality.rs::ann_quality`, `lib.rs::search_ready_with_options_in` | The resident vector leg samples its own clock, and the hybrid text leg (`hybrid.rs:197`) and query-language execution (`query_language.rs:422-452`) call `get` per candidate, so each candidate is judged at its own wall-clock sample and the legs can disagree at a deadline. `ann_quality` samples once per sampled query (`quality.rs:227`) and `search_ready_with_options_in` once per call (`lib.rs:3720`). All four read the resident map, so they refuse compact records today. | A4 (`search_hybrid_at` and the query-language edits in `02062058`); the ANN lane for the other two |
+| `records.rs::effective_ids` | Builds a full ID set and vector. The 4 MiB workspace bounds vector scratch only, not ID memory. | slice 3 adds `ordered_ids`; `effective_ids` stays until its last caller moves |
 | Exact scan, browse, snapshot search | The compact path walks `compact_iter`, materializes a cell per visited row and reads deadlines from the resident map (CLK-6). | E4 |
 | `Database::open_backed` | The loader decodes every record into a resident map before the generation is installed. | L5 |
-| `CollectionRecords::len`, `first_id` | Walk the base rows and the overlay on every call. | not scheduled |
+| `CollectionRecords::len`, `first_id` | `len` walks the overlay on every call, and `first_id` scans the base from row 0 past tombstoned rows and then the overlay. | not scheduled |
+| Refused reads are not atomic | `read_vector` counts a miss, advances the logical clock and evicts to make room before it reads the frame, so a read that then fails can leave a block evicted. A read refused by the scratch budget keeps the previous plaintext, and an encrypted read that fails after authentication (an extent or decode error, or the shape refusal on a hit) keeps that frame's plaintext until the next read. A consumer must not rely on a rollback. | E4, L5 |
+| Plain frames | A read of a plain generation compares only the footer's stored checksum field with the one recorded at capture. It does not recompute the checksum over the body, so a mapped plain frame whose bytes change under an unchanged footer is served as it is. An encrypted frame is authenticated in full on every workspace read and on the first decode of a cell. | L5 |
+| Record cells | A materialized cell is never read or authenticated again and never evicted, and every committed write to a base ID creates that row's cell, because `Collection::apply_committed` reads the previous record through `get_physical`. Cell decoding has no frame-size or body bound and does not check a vector extent's width. | L5, E4 |
+| Compact settings arm | `Database::set_collection_settings` checks the handle's health, validates its arguments, scans the effective rows and only then reaches the commit that refuses a read-only handle. Lane B's parked `250a98bc` adds a read-only gate after validation, which matches the resident order (an invalid setting is reported before `ReadOnly`); its regression `compact_read_only_settings_preserve_error_precedence` pins that order. | B4 |
 | Compact scan draft in `c859d2d5` (lane A) | Decodes metadata for every row even without a filter, and takes visibility from the columns. | E4 |
 
 ## 5. Additions for P3c
@@ -171,21 +182,32 @@ impl CollectionRecords {
   listed. It is the source for the ANN's content digest and for training.
 - **`binding` (portable binding).** `lineage` and `floor` (the checkpoint sequence `S`) come from the file header and
   the image; `dimensions` and `precision` from the block layout. `digest` is `B` of P3c section D, a SHA-256 over the
-  complete-record blocks in partition order. It is computed incrementally while `ImageCheck::block` holds each verified
-  plaintext body, so it costs no extra authenticated read. `G` and `C` of section D derive from it, the physical rows
-  and the vector bits. `GenerationId` stays the process-local pin (IDN-1) and is never part of a digest.
+  complete-record blocks in partition order. It needs the verified plaintext body of each block, which only
+  `ImageCheck::block` holds: `Capture::push` receives the on-disk frame, which is ciphertext for an encrypted image. The
+  storage owner (L5) therefore adds the running digest to `ImageCheck` and hands the finished value to `Capture`, so it
+  costs no extra authenticated read, and the ANN lane specifies and tests it. `G` and `C` of section D derive from it,
+  the physical rows and the vector bits. `GenerationId` stays the process-local pin (IDN-1) and is never part of a digest.
 - **`affected_ids` (affected-ID cursor).** By PRE-3 the overlay is the complete difference between the base and the
-  effective state, so for the ANN, which covers the base only, "affected since `S`" is the whole overlay. The entries
-  keep the latest revision, which is enough: an ID changed twice appears once. Tombstones for IDs that the base never
-  held are harmless and can be skipped. P3c's 256-ID, 8 MiB readiness bound is the ANN's, not the storage's: the ANN
-  stops counting entries and invalidates readiness when it crosses.
-- **`ordered_ids`.** Replaces the materializing `effective_ids` on the scan and ANN paths. `effective_ids` stays for
-  derived-index rebuild and resident parity until its last caller moves.
+  effective state, so for the ANN, which covers the base only, the whole overlay is the delta since the base's floor.
+  It is a state difference, not a commit history: an ID put and deleted again after an image that never held it is a
+  tombstone while that handle is open and has no entry after a reopen, so the ANN's 256-ID, 8 MiB readiness bound, which
+  counts deletes, is a bound on the entries the overlay holds. The cursor takes no `S`, because the overlay cannot
+  answer for any floor but its own base's. P3c section G's "cover every commit S..T or fail explicitly" is therefore a
+  check of the ANN: before it reads the cursor it compares the `S` and the lineage of its persisted graph with
+  `binding().floor` and `binding().lineage`, and treats a mismatch as stale. The entries keep the latest revision, which
+  is enough: an ID changed twice appears once. Tombstones for IDs that the base never held are harmless and can be
+  skipped.
+- **`ordered_ids`.** Replaces the materializing `effective_ids` on the scan and ANN paths; `effective_ids` stays for
+  derived-index rebuild and resident parity until its last caller moves. It is an ID-only merge beside `compact_iter`,
+  which stays the record cursor of A4 and E4. The slice 3 tests pin the two against each other (the IDs of
+  `compact_iter` equal `ordered_ids`, after every seek point too), so that scan and browse cannot drift apart, and A4
+  or E4 may later rebuild `compact_iter` on `ordered_ids` and point reads.
 - **`for_each_vector_block` (bounded batch).** Decodes one block through the same path as `read_vector`: it
   authenticates every visit, accounts the block under ACC-4, evicts under ACC-7 and never creates a cell. The visitor
   borrows one block at a time, so the live decoded bytes stay within the workspace budget. An error from the visitor or
-  from a read stops the walk and is returned unchanged. Exact scans (E4) and the ANN's two-pass training and batch
-  scoring through `exact_kernels::Scorer` use it instead of one `read_vector` call per row.
+  from a read stops the walk and is returned unchanged. The ANN's two-pass training and batch scoring through
+  `exact_kernels::Scorer` use it instead of one `read_vector` call per row. E4's exact scan keeps one `read_vector` per
+  row through the workspace cache, as `c859d2d5` does, and can adopt the walker later.
 
 Tests and mutants required of whoever implements them, in addition to the statements above: an independent oracle for
 the digest (P3c oracle fixtures), `base_rows` equal to the resident rows including an expired one, `affected_ids` and
@@ -214,7 +236,7 @@ One source owner at a time; nobody edits authentication or accounting in paralle
 | Region | R0 | B4 | A4 | E4 | C4 | L5 | ANN |
 |---|---|---|---|---|---|---|---|
 | Gate: `enabled`, `Activation` | frozen | | | | | un-gates | |
-| `Capture`, `CompactGeneration::{new, decode, mapped_copy, view, has_collection}`, `GenerationId` | frozen | | | | | pin and retirement fields in a separate struct | computes `SourceBinding` while capturing |
+| `Capture`, `CompactGeneration::{new, decode, mapped_copy, view, has_collection}`, `GenerationId` | frozen | | | | | pin and retirement fields in a separate struct; `ImageCheck` (storage owner) computes the digest | adds the `SourceBinding` field and accessor |
 | `ReadWorkspace`, `SeamAccounting`, `body` | frozen | | | | consumes `accounting` | separate counters struct | `for_each_vector_block` (additive) |
 | `CompactView` read and physical methods | frozen; slice 3 adds `base_rows` (additive) | | | | | | `binding` (additive) |
 | Test module declarations at the end of the file | adds `freeze_tests`; slice 3 adds its test module | | | | | | |
@@ -247,12 +269,15 @@ One integrator owns the `Database` fields and constructors, `open_backed`, compa
 | `search_in_at` compact arm | frozen | | draft (`02062058`) | finalizes | |
 | `exact_search_compact` (`c859d2d5` adds `exact_search_compact_with_workspace`) | frozen | | draft (`c859d2d5`) | sole owner | |
 | `create_collection_as_occupied` and every non-compact function | out of scope | | | | |
+| `start_rebuild_with_options_in`, `poll_rebuild_in`, `maintain_background_hnsw_in`, `search_ready_with_options_in`, `build_hnsw*`, the snapshot and disk entry points | the compact arms refuse with unchanged state (frozen) | | | reserved | reserved for the ANN and F5 lanes |
 
 Other shared surfaces, reserved by function as in the inventory: `collection.rs::{exact_search_candidates,
 rebuild_derived}` (E4 and B4), `rerank.rs`, `metadata_index.rs`, `text_index.rs`, `quality.rs` (B4, then C4 consumes),
 `kv.rs`, `hybrid.rs`, `query_language.rs`, `vectors.rs`, `property_graph/retrieve.rs` (A4, with K71 reserving `kv.rs`
-and `server/kv.rs` functions), `compact/mod.rs::ImageCheck`, `format.rs`, `maintenance.rs`, `directory.rs`,
-`changes.rs`, `logops.rs` (L5 and the storage owner).
+and `server/kv.rs` functions), `hnsw.rs`, `rebuild.rs`, `ann_snapshot.rs`, `disk_ann.rs`, `gpu.rs` (the ANN and F5 lanes;
+their compact refusal arms are pinned by `compact_ann_paths_remain_refused_with_unchanged_state`),
+`compact/mod.rs::ImageCheck`, `format.rs`, `maintenance.rs`, `directory.rs`, `changes.rs`, `logops.rs` (L5 and the
+storage owner).
 
 ## 7. The R0 mutation campaign
 
