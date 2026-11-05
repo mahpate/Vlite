@@ -598,6 +598,78 @@
       }
     },
     {
+      "name": "extra-integer-property",
+      "holder": "notes_graph",
+      "node": {
+        "labels": [
+          "VliteMemoryBinding"
+        ],
+        "properties": {
+          "record_schema": "memory-binding-record:v1",
+          "tenant": "@root",
+          "binding": "notes",
+          "generation": "1",
+          "state": "active",
+          "graph": "notes_graph",
+          "memory_schema": "memory-schema-v1",
+          "ranking_version": "memory-ranking-v1",
+          "request_digest_version": "memory-request-v1",
+          "receipt_window_ms": "86400000",
+          "grants_digest": "v1:711ff607769b98fd25dcad02900f30f2af7a40b581888c616536c84f529dd2aa",
+          "extra": 1
+        },
+        "expires_at_ms": null
+      }
+    },
+    {
+      "name": "extra-boolean-property",
+      "holder": "notes_graph",
+      "node": {
+        "labels": [
+          "VliteMemoryBinding"
+        ],
+        "properties": {
+          "record_schema": "memory-binding-record:v1",
+          "tenant": "@root",
+          "binding": "notes",
+          "generation": "1",
+          "state": "active",
+          "graph": "notes_graph",
+          "memory_schema": "memory-schema-v1",
+          "ranking_version": "memory-ranking-v1",
+          "request_digest_version": "memory-request-v1",
+          "receipt_window_ms": "86400000",
+          "grants_digest": "v1:711ff607769b98fd25dcad02900f30f2af7a40b581888c616536c84f529dd2aa",
+          "extra": true
+        },
+        "expires_at_ms": null
+      }
+    },
+    {
+      "name": "evidence-integer",
+      "holder": "notes_graph",
+      "node": {
+        "labels": [
+          "VliteMemoryBinding"
+        ],
+        "properties": {
+          "record_schema": "memory-binding-record:v1",
+          "tenant": "@root",
+          "binding": "notes",
+          "generation": "1",
+          "state": "active",
+          "graph": "notes_graph",
+          "memory_schema": "memory-schema-v1",
+          "ranking_version": "memory-ranking-v1",
+          "request_digest_version": "memory-request-v1",
+          "receipt_window_ms": "86400000",
+          "grants_digest": "v1:711ff607769b98fd25dcad02900f30f2af7a40b581888c616536c84f529dd2aa",
+          "evidence": 5
+        },
+        "expires_at_ms": null
+      }
+    },
+    {
       "name": "missing-record-schema",
       "holder": "notes_graph",
       "node": {
