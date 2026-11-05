@@ -30,6 +30,7 @@ import tarfile
 import tempfile
 import threading
 import time
+import traceback
 import urllib.parse
 import zlib
 
@@ -912,7 +913,7 @@ class Exchange:
                               ("/v1/admin/webhooks", "webhook")):
             if template.startswith(prefix):
                 identifier = str(self.state.get(f"{group}_id", "0" * 32))
-        values = {"id": identifier, "c": "fixed", "collection": "fixed",
+        values = {"id": identifier, "c": "fixed", "collection": "fixed", "binding": "agent",
                   "graph": "fixedgraph", "job": str(self.state.get("import_job", "1")),
                   "n": "1", "name": self.state.get("backup_name", "missing.vlite")}
         if method == "DELETE":
@@ -1264,7 +1265,7 @@ def main():
         except (OSError, ValueError, RuntimeError, subprocess.SubprocessError,
                 http.client.HTTPException, KeyError) as error:
             report["harness_issues"].append(str(error))
-            print(f"Harness failure: {error}", file=sys.stderr)
+            print(f"Harness failure: {error!r}\n{traceback.format_exc()}", file=sys.stderr)
         if args.json:
             write_json(args.json, report)
         if args.md:
