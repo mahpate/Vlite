@@ -8,7 +8,8 @@ P3b inventory. This document changes no API, code, default, gate or release
 criterion. The owner explicitly approved J.1-J.9 individually on 2026-11-02,
 subject to the independent acceptance and dependencies below. P3b slices 0, 1a,
 1b, 2 and 3 are independently accepted and integrated behind test gates, and
-lane B's read seam is integrated with its mutation ledger partly open (the 0.7.1 freeze tests close seven of its 18 replay obligations and eleven remain); that does
+lane B's read seam is integrated with its fix-forward and the replayed mutation
+ledgers of 0.7.1 (all 18 of its replay obligations: seven in R0's ledger, eleven in B4's); that does
 not satisfy the remaining engine-integration, source-interface or lifecycle
 prerequisites. The 0.7.1 [seam freeze](p3b-seam-freeze.md) records what the
 code at v0.7.0 provides and states the section G additions as concrete shapes;

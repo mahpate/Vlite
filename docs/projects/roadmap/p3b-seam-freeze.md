@@ -21,11 +21,12 @@ speed claim. Companion pages: the [survivor ledgers](p3b-survivor-ledgers.md) of
 | Gates | Three thread-local test switches (`compact::Activation`, `catalog::payload::Activation`, `compact::source::Activation`), all off by default. No setting, option or file content turns them on. |
 | Opening a compact image | `format::load_with` still builds the resident `RecordMap`; `Database::open_backed` then installs the generation and an overlay over it (`compact_from_replay`). The seam does not bound memory at open. |
 | Production compact writer | None. Compact images exist only as test fixtures written by `maintenance::write_v5_image`. |
-| Lane B (derived indexes, read seam) | Integrated: seam, effective rows, metadata, text and rerank consumers. Its fix-forward `250a98bc` is not. |
+| Lane B (derived indexes, read seam) | Integrated: seam, effective rows, metadata, text and rerank consumers. Its fix-forward `250a98bc` is not in the tag; 0.7.1 integrates it (B4: cherry-picked, with its 18 replay obligations replayed in the ledgers of R0 and B4). |
 | Lane A (record consumers) | Not integrated; four patches parked at `834a0a6f`. |
 | Lane C (server and MCP consumers), slice 5 (lifecycle) | Not started. |
 
-Between the 0.7.0 candidate that the readiness inventory used (`5cc496d4`) and the tag, only `src/kv.rs`,
+The table is the state of the tag, except for the lane B row, which says what 0.7.1 added to it. Between the 0.7.0
+candidate that the readiness inventory used (`5cc496d4`) and the tag, only `src/kv.rs`,
 `src/lib.rs` and `src/property_graph/retrieve.rs` changed among the seam's files, and none of those changes is in
 `src/compact`, `src/records.rs` or `src/collection.rs`. The seam code is therefore identical in the two.
 
@@ -48,7 +49,8 @@ marked new were added by slice 3 of 0.7.1; every other function is the one at `v
 
 Each statement has an ID so that a test, a mutant and a later change can cite it. A change to a statement needs an
 amendment to this page, a test that cites the new text and an updated mutant ledger. The tests named here are the
-pinning ones; `freeze_*` tests live in `src/compact/source/freeze_tests.rs`. A dagger marks a detail that was verified
+pinning ones; `freeze_*` tests live in `src/compact/source/freeze_tests.rs`, and the two tests of ERR-8 are lane B's, in
+`src/compact/source/seam_tests.rs` and its `seam_tests/survivor_tests.rs`. A dagger marks a detail that was verified
 by reading the code (at `v0.7.0`, and for section 3.7 at the head of slice 3) and has no test of its own.
 
 ### 3.1 The effective-read clock
@@ -85,6 +87,7 @@ by reading the code (at `v0.7.0`, and for section 3.7 at the head of slice 3) an
 | ERR-5 | A refused read caches no vector block and publishes no cell. When it fails while reading its frame (range, size, kind, checksum or authentication) it leaves no plaintext (`plaintext_live` is 0), and the blocks cached before it stay when no eviction was needed. A refused read is not atomic in other respects (section 4). | `freeze_a_refused_read_leaves_the_rest_of_the_workspace_as_it_was`; `freeze_frame_tampering_is_an_error_on_every_read_path`; `freeze_extents_outside_the_body_are_corrupt_on_every_read_path` |
 | ERR-6 | A budget problem is `InvalidQuery` with a fixed reason: `compact workspace exceeds 4 MiB`, `compact scratch budget is smaller than one block` and `compact cached block shape changed` (pinned), and `compact workspace counter exhausted`, the vector-size, accounting overflow and underflow reasons and `compact cache accounting mismatch`.† A counter that would pass `u64::MAX` fails; it never wraps.† | `freeze_budget_and_exact_fit_boundaries`; `freeze_cached_blocks_are_authenticated_again_and_shape_checked`; `compact_seam_lru_budget_and_accounting` |
 | ERR-7 | A commit that succeeds but cannot be applied to the compact state poisons the handle and returns the error; the next operation answers `Poisoned`. | `committed_apply_errors_poison_compact_handle` |
+| ERR-8 | The compact arm of `Database::set_collection_settings` refuses in this order: the handle's health (`Poisoned`), the collection name,† the settings (`InvalidCollectionSettings`), a read-only handle (`ReadOnly`), and only then it reads the effective rows. A call that validation or the read-only check refuses writes nothing and changes no setting. This is the order of the resident arm, which refuses a read-only handle at its commit.† At `v0.7.0` the compact arm had no read-only check of its own and refused a read-only handle only at the commit, after its scan; lane B's `250a98bc` adds the check between validation and the scan. | `compact_settings_check_the_handle_health_before_every_other_gate`; `compact_read_only_settings_preserve_error_precedence` |
 
 ### 3.4 Accounting
 
@@ -151,13 +154,13 @@ to preserve; the lane named in each row is expected to change them.
 | `records.rs::effective_ids` | Builds a full ID set and vector. The 4 MiB workspace bounds vector scratch only, not ID memory. `ordered_ids` (slice 3) lists the same IDs lazily. | its callers move to `ordered_ids` one by one; `effective_ids` stays until the last one has moved |
 | `CompactView::base_rows` and `CollectionRecords::ordered_ids` (slice 3), `compact_iter(after)` | None of the three seeks. `base_rows` and `ordered_ids` start at the first row, and `compact_iter(after)` finds its start by counting the base rows up to `after` (`records.rs`), so a walk that resumes after an ID pays for every row before it. `Affected` carries the overlay's revision and deadline, not its metadata or payload. | A4 (`compact_iter(after)`); E4 (a seek in the new cursors, if its scan needs one: an additive edit of `base_rows` and `ordered_ids`, section 6) |
 | Exact scan, browse, snapshot search | The compact path walks `compact_iter`, materializes a cell per visited row and reads deadlines from the resident map (CLK-6). | E4 |
+| Scan statistics of a filtered exact search (`Database::search_in_at`) | The resident arm narrows its scan to the IDs that a declared posting leaves (counted in `index_candidates`) or, when no posting serves the filter, that the block summaries of a declared field leave (P5: blocks of 1,024 live rows, used when a block is pruned and at most half the rows remain). The compact arm passes no candidate set to `exact_search_compact`: it scans every effective row and lets the filter decide. The hits, their order and `distance_evaluations` are equal on the two paths. `records_scanned` is not, and neither is `index_candidates` when a posting serves the filter. A probe over 1,200 rows of which 100 match an equality filter counted 1,200 scanned rows on the compact path, against 100 through a posting (`index_candidates` 100) and 176 through summaries on the resident path, and an absent value, which the resident path answers without a scan, scanned all 1,200 rows. Over a single block of 1,000 rows the summaries of a filter that some rows match prune nothing and the statistics agree, but a posting still narrows the resident scan. A snapshot search (`ReadSnapshot::search_with_stats_at`) passes no candidates on either path and reports equal statistics.† No result changes, so the difference is not a 0.7.1 defect. P3's claim of equal scan statistics holds for a filter that no posting and no summary serves. No test pins the difference, and the probe is not part of the tree. | not scheduled |
 | Expiry and revision readers | Exact scans, browse and `ReadSnapshot` read the resident expiry map, and `get_at`, `effective_visible` (and so `rerank_effective`) read the view and overlay columns (CLK-6). `revision_in`, which serves `revision()`, the server and graph retrieve, answers from the overlay when it holds an entry for the ID and from the resident map otherwise, and a conditional write (`put_with_expiry_in`, `put_in`, `delete_in`, `update_metadata_in` and `apply_reembed_batch_checked`) checks the resident map alone.† A lane may move a reader to the other representation if it keeps one clock per operation and the agreement of the two. | E4, L5 |
 | `Database::open_backed` | The loader decodes every record into a resident map before the generation is installed. | L5 |
 | `CollectionRecords::len`, `first_id` | `len` walks the overlay on every call, and `first_id` scans the base from row 0 past tombstoned rows and then the overlay. | not scheduled |
 | Refused reads are not atomic | `read_vector` counts a miss, advances the logical clock and evicts to make room before it reads the frame, so a read that then fails can leave a block evicted. A read refused by the scratch budget keeps the previous plaintext, and an encrypted read that fails after authentication (an extent or decode error, or the shape refusal on a hit) keeps that frame's plaintext until the next read. A consumer must not rely on a rollback. | E4, L5 |
 | Plain frames | A read of a plain generation compares only the footer's stored checksum field with the one recorded at capture. It does not recompute the checksum over the body, so a mapped plain frame whose bytes change under an unchanged footer is served as it is. An encrypted frame is authenticated in full on every workspace read and on the first decode of a cell. | L5 |
 | Record cells | A materialized cell is never read or authenticated again and never evicted, and every committed write to a base ID creates that row's cell, because `Collection::apply_committed` reads the previous record through `get_physical`. Cell decoding has no frame-size or body bound and does not check a vector extent's width. | L5, E4 |
-| Compact settings arm | The two arms of `Database::set_collection_settings` check in different orders at `v0.7.0`.† The compact arm checks the handle's health and the collection name (`resolve`), validates its arguments, scans the effective rows and only then reaches `commit_frame`, the one place that refuses a read-only handle, so an error of the scan is reported before `ReadOnly`. The resident arm checks health and name, validates, commits (so `ReadOnly` comes here, for a file of version 4 or later; an older file keeps its settings in memory and is never refused) and rebuilds its derived state last. Lane B's parked `250a98bc` adds a read-only check to the compact arm between validation and the scan, so both arms then answer in the order health, name, validation, `ReadOnly`, read. Its regression `compact_read_only_settings_preserve_error_precedence` pins that an invalid setting is reported before `ReadOnly` and that `ReadOnly` is reported before an error of the read; no test on this branch pins either order. | B4 |
 | Compact scan draft in `c859d2d5` (lane A) | Decodes metadata for every row even without a filter, and takes visibility from the columns. | E4 |
 
 ## 5. Additions for P3c
@@ -280,8 +283,8 @@ One source owner at a time; nobody edits authentication or accounting in paralle
 | `CompactView` read and physical methods | frozen; `base_rows` added in slice 3 (additive) | | | a seek in `base_rows`, if the scan needs one (additive) | | | `binding` (additive) |
 | Test module declarations at the end of the file | adds `freeze_tests` and `ordered_tests` | | | | | | |
 
-B4 and A4 make no production edit here: B4's only production hunks are three lines in `Database::set_collection_settings`
-and a GPU preflight extraction.
+B4 made no production edit here, and A4 makes none: B4's only production hunks (in `250a98bc`, cherry-picked) are three lines in
+`Database::set_collection_settings` and a GPU preflight extraction.
 
 ### `src/records.rs`
 
@@ -290,7 +293,7 @@ Methods first, then files; never add a second effective-record iterator.
 | Region | R0 | B4 | A4 | E4 | C4 | L5 | ANN |
 |---|---|---|---|---|---|---|---|
 | `CollectionRecords`, `OverlayEntry`, `RecordOverlay` (types) | frozen | | | | | | |
-| Effective block: `pin_effective`, `effective_*`, `source_identity`, `source_accounting`, `overlay_logical_bytes` | frozen; `affected_ids`, `ordered_ids` added in slice 3 (additive) | tests only (`effective_rows_tests`, 28 lines in `250a98bc`) | | consumes; a seek in `ordered_ids`, if the scan needs one (additive) | consumes | | consumes; `effective_ids` retired last |
+| Effective block: `pin_effective`, `effective_*`, `source_identity`, `source_accounting`, `overlay_logical_bytes` | frozen; `affected_ids`, `ordered_ids` added in slice 3 (additive) | done: tests only (`effective_rows_tests`, 28 lines of `250a98bc`) | | consumes; a seek in `ordered_ids`, if the scan needs one (additive) | consumes | | consumes; `effective_ids` retired last |
 | `len`, `is_empty`, `first_id`, `contains_key`, `get_at`, `get_physical`, `apply_committed`, `compact_overlay_revision`, `compact_from_replay` | frozen | | | | | | |
 | `compact_iter`, `CompactRecordIter` | frozen | | cursor and seek | consumes | | | |
 | `ReadSnapshot::{browse_at, search_with_stats_at}`, `compact_browse` | frozen | | | the call into the exact scan | | | |
@@ -304,7 +307,7 @@ One integrator owns the `Database` fields and constructors, `open_backed`, compa
 | Function | R0 | B4 | A4 | E4 | L5 |
 |---|---|---|---|---|---|
 | `Database` fields, `open_backed`, `compact_base_matches`, `discard_tail_inner`, `ensure_resident_in`, `ensure_mutable_in`, `ensure_all_resident`, `revision_in`, `apply` | frozen | | | | the one integrator |
-| `set_collection_settings` compact arm | frozen | the read-only gate (`250a98bc`) | | | |
+| `set_collection_settings` compact arm | frozen (ERR-8) | done: the read-only gate (`250a98bc`) | | | |
 | `search_in_at` compact arm | frozen | | draft (`02062058`) | finalizes | |
 | `exact_search_compact` (`c859d2d5` adds `exact_search_compact_with_workspace`) | frozen | | draft (`c859d2d5`) | sole owner | |
 | `create_collection_as_occupied` and every non-compact function | out of scope | | | | |
@@ -396,9 +399,13 @@ The 28 gaps, with how each is reached and what closes it:
 | `R0-EX-07` | api | the resident arm of effective_visible hides one tick late | `freeze_deadline_hides_exactly_at_the_clock_in_every_arm` |
 | `R0-ID-04` | guard | cache key ignores the block kind | `freeze_cache_key_separates_block_kinds` |
 
-Seven of lane B's 18 open obligations are mutations of this seam (the [ledgers](p3b-survivor-ledgers.md#lane-b)). R0
+Seven of lane B's 18 replay obligations are mutations of this seam (the [ledgers](p3b-survivor-ledgers.md#lane-b)). R0
 re-created each one as `R0-AU-08`, `R0-AU-13`, `R0-AU-14`, `R0-EF-02`, `R0-EX-05`, `R0-EX-06` and `R0-EX-07`; all seven
-survive on `v0.7.0` and all seven are killed with the freeze tests.
+survive on `v0.7.0` and all seven are killed with the freeze tests. B4's ledger names them, with the 17 mutants of the
+earlier seam campaign, as `reused`, and its `verify` mode checks that this ledger holds each of the 24 as a restored kill.
+B4 also re-derived `R0-AU-01`, `R0-AU-02` and `R0-AU-12` from lane B's report (as `x-seam-frame-kind-check-removed-body`,
+`x-seam-frame-kind-check-removed-decode` and `x-rec-vector-error-swallowed`, with the same replacements), so those three
+are killed in both ledgers.
 
 **Reach.** No mutant is claimed equivalent: every one changes the outcome of a state that a test builds, and a test
 kills it. The states differ in how they arise, which the `Reach` column records:
@@ -433,9 +440,11 @@ three kill the mutants of their own statements: `freeze_source_never_reads_the_w
 not pinned), PRE-4, IDN-3 or CON-1, whose tests existed at `v0.7.0`: a lane that changes one of those four statements
 adds its mutant first. `R0-EX-11` (CLK-1), `R0-ID-11` (PRE-6) and `R0-AU-18` (ERR-7) were added after the reviews,
 because the tests of those statements had no mutant. The campaign shows that the tests pin the statements in section 3,
-not that the statements are complete, and it supports no size or speed claim. Anchors are valid on the trees named
-above; a lane that changes the lines around one re-bases it and replays the mutant, and does not trust the recorded
-result.
+not that the statements are complete, and it supports no size or speed claim. When R0 and B4 were put together, every
+anchor of the ledgers of 7.1 and 7.2 matched exactly once (B4's `python tests/compact_mutant_replay.py check <ledger>`
+accepts both). A lane that changes the lines around one re-bases it and replays the mutant, and does not trust the
+recorded result. `R0-EF-03` was re-based once, when slice 3 inserted the ordered cursors next to its old anchor: the
+replacement is the same and gives the recorded mutated bytes, so its recorded hashes hold.
 
 ### 7.2 Slice 3: the ordered cursors
 
@@ -510,6 +519,8 @@ Decided on 2026-11-05 by the coordinator under the owner's delegation, as recomm
   when it compiles, runs, fails a named test and restores byte-identically, and take a baseline run on the previous tag so
   that a gap closed is measured and not claimed. R0 shows that 74 new mutants over one seam, and 34 more over its
   cursors, are practical.
+- **Scan statistics: a known difference, not a defect.** The difference in `records_scanned` (and `index_candidates`)
+  between the compact and the resident filtered exact search, which section 4 describes, is not a 0.7.1 defect.
 
 R0's own choices in slice 3 are not coordinator decisions. The slice report asks the coordinator to confirm them:
 
@@ -527,8 +538,12 @@ cargo test --locked --offline --all-features --lib -- compact
 cargo fmt --all -- --check
 cargo clippy --locked --offline --workspace --all-targets --all-features -- -D warnings
 python tests/compact_method_matrix.py
+python tests/compact_mutant_replay.py check tests/compact_seam_mutants.json
+python tests/compact_mutant_replay.py check tests/compact_ordered_cursors_mutants.json
 ```
 
 The mutant list replays with any runner that applies one anchored replacement at a time (LF-normalized match, line
-endings preserved on write), runs `command`, classifies the outcome and restores the file; the ledger records the
-selector, the failing tests and the SHA-256 of the file before, during and after.
+endings preserved on write), runs `cmd`, classifies the outcome and restores the file; the ledger records the
+selector, the failing tests and the SHA-256 of the file before, during and after. Its records have the shape
+`{id, desc, file, old, new, cmd}` plus the evidence, so B4's `tests/compact_mutant_replay.py` reads them: its `check`
+mode (the two commands above) confirms that every anchor matches once.

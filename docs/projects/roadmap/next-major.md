@@ -202,14 +202,15 @@ Local numbers below show direction only (see rules).
   vector, metadata and payload reads, and separate source, mapped, vector,
   plaintext and cell accounting), the effective-row accessors in
   `src/records.rs` and the metadata, text-index and rerank consumers are
-  integrated, test-gated and unreleased, while its fix-forward commit
-  (`250a98b`) is parked. Lane A (record consumers and the bounded exact scan,
+  integrated, test-gated and unreleased. Its fix-forward commit
+  (`250a98b`) is not in the tag; 0.7.1 integrates it, with its 18 replay
+  obligations replayed in the mutation ledgers of R0 and B4. Lane A (record consumers and the bounded exact scan,
   parked at `834a0a6`) and lane C (server and MCP consumers) are not
   integrated, and slice 5 (lifecycle) has not started. All of it compiles only
   under `cfg(test)`: release builds have no compact dispatch and no normal
   `Database` wiring. The 0.7.1 plan freezes the seam in
-  [p3b-seam-freeze.md](p3b-seam-freeze.md) and records both parked lanes'
-  survivor ledgers in [p3b-survivor-ledgers.md](p3b-survivor-ledgers.md). The plan's first lane, R0, also adds the ordered
+  [p3b-seam-freeze.md](p3b-seam-freeze.md) and records the survivor ledgers of
+  lanes A and B in [p3b-survivor-ledgers.md](p3b-survivor-ledgers.md). The plan's first lane, R0, also adds the ordered
   cursors that the bounded exact scan needs (`base_rows`, `affected_ids` and `ordered_ids`), under the same test gate.
   The [P3c compact-ANN design](p3c-compact-ann.md) (source-bound flat
   topology, persisted scalar-u8 codes, background rebuild and a separately

@@ -24,11 +24,11 @@
   {
    "id": "S3-BR-01",
    "class": "coverage",
-   "description": "base_rows skips the last physical row",
+   "desc": "base_rows skips the last physical row",
    "file": "src/compact/source.rs",
    "old": "        if self.next >= self.end {",
    "new": "        if self.next + 1 >= self.end {",
-   "command": "test --locked --offline --lib -- compact::source records:: metadata_index::tests::compact rerank::",
+   "cmd": "test --locked --offline --lib -- compact::source records:: metadata_index::tests::compact rerank::",
    "result": {
     "status": "killed",
     "tests_run": 101,
@@ -48,11 +48,11 @@
   {
    "id": "S3-BR-02",
    "class": "coverage",
-   "description": "base_rows skips the first physical row",
+   "desc": "base_rows skips the first physical row",
    "file": "src/compact/source.rs",
    "old": "            next: 0,\n            end: self.len(),",
    "new": "            next: 1,\n            end: self.len(),",
-   "command": "test --locked --offline --lib -- compact::source records:: metadata_index::tests::compact rerank::",
+   "cmd": "test --locked --offline --lib -- compact::source records:: metadata_index::tests::compact rerank::",
    "result": {
     "status": "killed",
     "tests_run": 101,
@@ -72,11 +72,11 @@
   {
    "id": "S3-BR-03",
    "class": "identity",
-   "description": "base_rows reports the next ordinal instead of the row's own",
+   "desc": "base_rows reports the next ordinal instead of the row's own",
    "file": "src/compact/source.rs",
    "old": "            row: self.next,",
    "new": "            row: self.next + 1,",
-   "command": "test --locked --offline --lib -- compact::source records:: metadata_index::tests::compact rerank::",
+   "cmd": "test --locked --offline --lib -- compact::source records:: metadata_index::tests::compact rerank::",
    "result": {
     "status": "killed",
     "tests_run": 101,
@@ -93,11 +93,11 @@
   {
    "id": "S3-BR-04",
    "class": "identity",
-   "description": "base_rows reports the ordinal as the ID",
+   "desc": "base_rows reports the ordinal as the ID",
    "file": "src/compact/source.rs",
    "old": "            id: record.id,",
    "new": "            id: self.next as u64,",
-   "command": "test --locked --offline --lib -- compact::source records:: metadata_index::tests::compact rerank::",
+   "cmd": "test --locked --offline --lib -- compact::source records:: metadata_index::tests::compact rerank::",
    "result": {
     "status": "killed",
     "tests_run": 101,
@@ -117,11 +117,11 @@
   {
    "id": "S3-BR-05",
    "class": "identity",
-   "description": "base_rows reports every revision as 0",
+   "desc": "base_rows reports every revision as 0",
    "file": "src/compact/source.rs",
    "old": "            revision: record.revision,",
    "new": "            revision: 0,",
-   "command": "test --locked --offline --lib -- compact::source records:: metadata_index::tests::compact rerank::",
+   "cmd": "test --locked --offline --lib -- compact::source records:: metadata_index::tests::compact rerank::",
    "result": {
     "status": "killed",
     "tests_run": 101,
@@ -138,11 +138,11 @@
   {
    "id": "S3-BR-06",
    "class": "expiry",
-   "description": "base_rows reports every deadline as absent",
+   "desc": "base_rows reports every deadline as absent",
    "file": "src/compact/source.rs",
    "old": "            expiry: record.expiry,",
    "new": "            expiry: None,",
-   "command": "test --locked --offline --lib -- compact::source records:: metadata_index::tests::compact rerank::",
+   "cmd": "test --locked --offline --lib -- compact::source records:: metadata_index::tests::compact rerank::",
    "result": {
     "status": "killed",
     "tests_run": 101,
@@ -159,11 +159,11 @@
   {
    "id": "S3-BR-07",
    "class": "expiry",
-   "description": "base_rows leaves out the rows that carry a deadline",
+   "desc": "base_rows leaves out the rows that carry a deadline",
    "file": "src/compact/source.rs",
    "old": "        let (_, record, _) = self.source?.row_at(self.next)?;",
    "new": "        let (_, record, _) = self.source?.row_at(self.next)?;\n        if record.expiry.is_some() {\n            self.next += 1;\n            return self.next();\n        }",
-   "command": "test --locked --offline --lib -- compact::source records:: metadata_index::tests::compact rerank::",
+   "cmd": "test --locked --offline --lib -- compact::source records:: metadata_index::tests::compact rerank::",
    "result": {
     "status": "killed",
     "tests_run": 101,
@@ -183,11 +183,11 @@
   {
    "id": "S3-BR-08",
    "class": "accounting",
-   "description": "the remaining count of base_rows is one too high",
+   "desc": "the remaining count of base_rows is one too high",
    "file": "src/compact/source.rs",
    "old": "        let remaining = self.end - self.next;",
    "new": "        let remaining = self.end - self.next + 1;",
-   "command": "test --locked --offline --lib -- compact::source records:: metadata_index::tests::compact rerank::",
+   "cmd": "test --locked --offline --lib -- compact::source records:: metadata_index::tests::compact rerank::",
    "result": {
     "status": "killed",
     "tests_run": 101,
@@ -204,11 +204,11 @@
   {
    "id": "S3-BR-09",
    "class": "accounting",
-   "description": "base_rows announces one row more than the collection holds",
+   "desc": "base_rows announces one row more than the collection holds",
    "file": "src/compact/source.rs",
    "old": "            end: self.len(),",
    "new": "            end: self.len() + 1,",
-   "command": "test --locked --offline --lib -- compact::source records:: metadata_index::tests::compact rerank::",
+   "cmd": "test --locked --offline --lib -- compact::source records:: metadata_index::tests::compact rerank::",
    "result": {
     "status": "killed",
     "tests_run": 101,
@@ -225,11 +225,11 @@
   {
    "id": "S3-BR-10",
    "class": "identity",
-   "description": "base_rows of a collection lists the first collection's rows",
+   "desc": "base_rows of a collection lists the first collection's rows",
    "file": "src/compact/source.rs",
    "old": "            source: self.source(),",
    "new": "            source: self.generation.collections.values().next(),",
-   "command": "test --locked --offline --lib -- compact::source records:: metadata_index::tests::compact rerank::",
+   "cmd": "test --locked --offline --lib -- compact::source records:: metadata_index::tests::compact rerank::",
    "result": {
     "status": "killed",
     "tests_run": 101,
@@ -245,11 +245,11 @@
   {
    "id": "S3-BR-11",
    "class": "coverage",
-   "description": "base_rows lists the rows in descending order under ascending ordinals",
+   "desc": "base_rows lists the rows in descending order under ascending ordinals",
    "file": "src/compact/source.rs",
    "old": "        let (_, record, _) = self.source?.row_at(self.next)?;",
    "new": "        let (_, record, _) = self.source?.row_at(self.end - 1 - self.next)?;",
-   "command": "test --locked --offline --lib -- compact::source records:: metadata_index::tests::compact rerank::",
+   "cmd": "test --locked --offline --lib -- compact::source records:: metadata_index::tests::compact rerank::",
    "result": {
     "status": "killed",
     "tests_run": 101,
@@ -269,11 +269,11 @@
   {
    "id": "S3-BR-12",
    "class": "accounting",
-   "description": "base_rows advances by two rows per step",
+   "desc": "base_rows advances by two rows per step",
    "file": "src/compact/source.rs",
    "old": "        self.next += 1;\n        Some(row)",
    "new": "        self.next += 2;\n        Some(row)",
-   "command": "test --locked --offline --lib -- compact::source records:: metadata_index::tests::compact rerank::",
+   "cmd": "test --locked --offline --lib -- compact::source records:: metadata_index::tests::compact rerank::",
    "result": {
     "status": "killed",
     "tests_run": 101,
@@ -293,11 +293,11 @@
   {
    "id": "S3-AF-01",
    "class": "overlay",
-   "description": "affected_ids leaves out the tombstones",
+   "desc": "affected_ids leaves out the tombstones",
    "file": "src/records.rs",
    "old": "        entries.into_iter().flatten().map(|(&id, entry)| {",
    "new": "        entries\n            .into_iter()\n            .flatten()\n            .filter(|(_, entry)| matches!(entry, OverlayEntry::Put { .. }))\n            .map(|(&id, entry)| {",
-   "command": "test --locked --offline --lib -- compact::source records:: metadata_index::tests::compact rerank::",
+   "cmd": "test --locked --offline --lib -- compact::source records:: metadata_index::tests::compact rerank::",
    "result": {
     "status": "killed",
     "tests_run": 101,
@@ -316,11 +316,11 @@
   {
    "id": "S3-AF-02",
    "class": "overlay",
-   "description": "affected_ids leaves out the puts",
+   "desc": "affected_ids leaves out the puts",
    "file": "src/records.rs",
    "old": "        entries.into_iter().flatten().map(|(&id, entry)| {",
    "new": "        entries\n            .into_iter()\n            .flatten()\n            .filter(|(_, entry)| matches!(entry, OverlayEntry::Delete { .. }))\n            .map(|(&id, entry)| {",
-   "command": "test --locked --offline --lib -- compact::source records:: metadata_index::tests::compact rerank::",
+   "cmd": "test --locked --offline --lib -- compact::source records:: metadata_index::tests::compact rerank::",
    "result": {
     "status": "killed",
     "tests_run": 101,
@@ -339,11 +339,11 @@
   {
    "id": "S3-AF-03",
    "class": "overlay",
-   "description": "affected_ids lists the entries in descending ID order",
+   "desc": "affected_ids lists the entries in descending ID order",
    "file": "src/records.rs",
    "old": "        entries.into_iter().flatten().map(|(&id, entry)| {",
    "new": "        entries.into_iter().flatten().rev().map(|(&id, entry)| {",
-   "command": "test --locked --offline --lib -- compact::source records:: metadata_index::tests::compact rerank::",
+   "cmd": "test --locked --offline --lib -- compact::source records:: metadata_index::tests::compact rerank::",
    "result": {
     "status": "killed",
     "tests_run": 101,
@@ -362,11 +362,11 @@
   {
    "id": "S3-AF-04",
    "class": "overlay",
-   "description": "affected_ids reports every put with revision 0",
+   "desc": "affected_ids reports every put with revision 0",
    "file": "src/records.rs",
    "old": "                    revision: *revision,\n                    expiry: *expiry,",
    "new": "                    revision: 0,\n                    expiry: *expiry,",
-   "command": "test --locked --offline --lib -- compact::source records:: metadata_index::tests::compact rerank::",
+   "cmd": "test --locked --offline --lib -- compact::source records:: metadata_index::tests::compact rerank::",
    "result": {
     "status": "killed",
     "tests_run": 101,
@@ -385,11 +385,11 @@
   {
    "id": "S3-AF-05",
    "class": "expiry",
-   "description": "affected_ids reports every put without its deadline",
+   "desc": "affected_ids reports every put without its deadline",
    "file": "src/records.rs",
    "old": "                    revision: *revision,\n                    expiry: *expiry,",
    "new": "                    revision: *revision,\n                    expiry: None,",
-   "command": "test --locked --offline --lib -- compact::source records:: metadata_index::tests::compact rerank::",
+   "cmd": "test --locked --offline --lib -- compact::source records:: metadata_index::tests::compact rerank::",
    "result": {
     "status": "killed",
     "tests_run": 101,
@@ -408,11 +408,11 @@
   {
    "id": "S3-AF-06",
    "class": "overlay",
-   "description": "affected_ids reports every tombstone with revision 0",
+   "desc": "affected_ids reports every tombstone with revision 0",
    "file": "src/records.rs",
    "old": "                OverlayEntry::Delete { revision } => Affected::Delete {\n                    revision: *revision,\n                },",
    "new": "                OverlayEntry::Delete { revision } => Affected::Delete {\n                    revision: *revision * 0,\n                },",
-   "command": "test --locked --offline --lib -- compact::source records:: metadata_index::tests::compact rerank::",
+   "cmd": "test --locked --offline --lib -- compact::source records:: metadata_index::tests::compact rerank::",
    "result": {
     "status": "killed",
     "tests_run": 101,
@@ -431,11 +431,11 @@
   {
    "id": "S3-AF-07",
    "class": "overlay",
-   "description": "affected_ids reports a put as a tombstone",
+   "desc": "affected_ids reports a put as a tombstone",
    "file": "src/records.rs",
    "old": "                } => Affected::Put {\n                    revision: *revision,\n                    expiry: *expiry,\n                },",
    "new": "                } => Affected::Delete {\n                    revision: *revision + *expiry.as_ref().unwrap_or(&0) * 0,\n                },",
-   "command": "test --locked --offline --lib -- compact::source records:: metadata_index::tests::compact rerank::",
+   "cmd": "test --locked --offline --lib -- compact::source records:: metadata_index::tests::compact rerank::",
    "result": {
     "status": "killed",
     "tests_run": 101,
@@ -454,11 +454,11 @@
   {
    "id": "S3-OR-01",
    "class": "ordering",
-   "description": "the merge lists a base ID before a smaller overlay ID",
+   "desc": "the merge lists a base ID before a smaller overlay ID",
    "file": "src/records.rs",
    "old": "                (Some(id), Some(overlay_id)) if id < overlay_id => {\n                    base.next();",
    "new": "                (Some(id), Some(overlay_id)) if id > overlay_id => {\n                    base.next();",
-   "command": "test --locked --offline --lib -- compact::source records:: metadata_index::tests::compact rerank::",
+   "cmd": "test --locked --offline --lib -- compact::source records:: metadata_index::tests::compact rerank::",
    "result": {
     "status": "killed",
     "tests_run": 101,
@@ -476,11 +476,11 @@
   {
    "id": "S3-OR-02",
    "class": "ordering",
-   "description": "the merge lists the base row first when both hold the same ID",
+   "desc": "the merge lists the base row first when both hold the same ID",
    "file": "src/records.rs",
    "old": "                (Some(id), Some(overlay_id)) if id < overlay_id => {\n                    base.next();",
    "new": "                (Some(id), Some(overlay_id)) if id <= overlay_id => {\n                    base.next();",
-   "command": "test --locked --offline --lib -- compact::source records:: metadata_index::tests::compact rerank::",
+   "cmd": "test --locked --offline --lib -- compact::source records:: metadata_index::tests::compact rerank::",
    "result": {
     "status": "killed",
     "tests_run": 101,
@@ -498,11 +498,11 @@
   {
    "id": "S3-OR-03",
    "class": "coverage",
-   "description": "the merge drops the base rows left when the overlay is exhausted",
+   "desc": "the merge drops the base rows left when the overlay is exhausted",
    "file": "src/records.rs",
    "old": "                (Some(id), None) => {\n                    base.next();\n                    return Some(id);\n                }",
    "new": "                (Some(_), None) => return None,",
-   "command": "test --locked --offline --lib -- compact::source records:: metadata_index::tests::compact rerank::",
+   "cmd": "test --locked --offline --lib -- compact::source records:: metadata_index::tests::compact rerank::",
    "result": {
     "status": "killed",
     "tests_run": 101,
@@ -519,11 +519,11 @@
   {
    "id": "S3-OR-04",
    "class": "overlay",
-   "description": "the merge lists the ID of a tombstone",
+   "desc": "the merge lists the ID of a tombstone",
    "file": "src/records.rs",
    "old": "                    if matches!(entry, OverlayEntry::Put { .. }) {\n                        return Some(overlay_id);",
    "new": "                    if matches!(entry, OverlayEntry::Put { .. } | OverlayEntry::Delete { .. }) {\n                        return Some(overlay_id);",
-   "command": "test --locked --offline --lib -- compact::source records:: metadata_index::tests::compact rerank::",
+   "cmd": "test --locked --offline --lib -- compact::source records:: metadata_index::tests::compact rerank::",
    "result": {
     "status": "killed",
     "tests_run": 101,
@@ -542,11 +542,11 @@
   {
    "id": "S3-OR-05",
    "class": "overlay",
-   "description": "the merge lists tombstones and hides puts",
+   "desc": "the merge lists tombstones and hides puts",
    "file": "src/records.rs",
    "old": "                    if matches!(entry, OverlayEntry::Put { .. }) {\n                        return Some(overlay_id);",
    "new": "                    if !matches!(entry, OverlayEntry::Put { .. }) {\n                        return Some(overlay_id);",
-   "command": "test --locked --offline --lib -- compact::source records:: metadata_index::tests::compact rerank::",
+   "cmd": "test --locked --offline --lib -- compact::source records:: metadata_index::tests::compact rerank::",
    "result": {
     "status": "killed",
     "tests_run": 101,
@@ -565,11 +565,11 @@
   {
    "id": "S3-OR-06",
    "class": "overlay",
-   "description": "an overlay entry does not consume the base row of the same ID",
+   "desc": "an overlay entry does not consume the base row of the same ID",
    "file": "src/records.rs",
    "old": "                    if base_id == Some(overlay_id) {",
    "new": "                    if base_id != base_id {",
-   "command": "test --locked --offline --lib -- compact::source records:: metadata_index::tests::compact rerank::",
+   "cmd": "test --locked --offline --lib -- compact::source records:: metadata_index::tests::compact rerank::",
    "result": {
     "status": "killed",
     "tests_run": 101,
@@ -587,11 +587,11 @@
   {
    "id": "S3-OR-07",
    "class": "coverage",
-   "description": "an overlay entry consumes the next base row even when the IDs differ",
+   "desc": "an overlay entry consumes the next base row even when the IDs differ",
    "file": "src/records.rs",
    "old": "                    if base_id == Some(overlay_id) {",
    "new": "                    if base_id.is_some() {",
-   "command": "test --locked --offline --lib -- compact::source records:: metadata_index::tests::compact rerank::",
+   "cmd": "test --locked --offline --lib -- compact::source records:: metadata_index::tests::compact rerank::",
    "result": {
     "status": "killed",
     "tests_run": 101,
@@ -608,11 +608,11 @@
   {
    "id": "S3-OR-08",
    "class": "coverage",
-   "description": "the merge never sees the first overlay entry",
+   "desc": "the merge never sees the first overlay entry",
    "file": "src/records.rs",
    "old": "                overlay: overlay.0.iter().peekable(),",
    "new": "                overlay: {\n                    let mut entries = overlay.0.iter().peekable();\n                    entries.next();\n                    entries\n                },",
-   "command": "test --locked --offline --lib -- compact::source records:: metadata_index::tests::compact rerank::",
+   "cmd": "test --locked --offline --lib -- compact::source records:: metadata_index::tests::compact rerank::",
    "result": {
     "status": "killed",
     "tests_run": 101,
@@ -630,11 +630,11 @@
   {
    "id": "S3-OR-09",
    "class": "coverage",
-   "description": "the merge never sees the first base row",
+   "desc": "the merge never sees the first base row",
    "file": "src/records.rs",
    "old": "                base: view.base_rows().peekable(),",
    "new": "                base: {\n                    let mut rows = view.base_rows().peekable();\n                    rows.next();\n                    rows\n                },",
-   "command": "test --locked --offline --lib -- compact::source records:: metadata_index::tests::compact rerank::",
+   "cmd": "test --locked --offline --lib -- compact::source records:: metadata_index::tests::compact rerank::",
    "result": {
     "status": "killed",
     "tests_run": 101,
@@ -652,11 +652,11 @@
   {
    "id": "S3-OR-10",
    "class": "ordering",
-   "description": "the resident variant lists its IDs in descending order",
+   "desc": "the resident variant lists its IDs in descending order",
    "file": "src/records.rs",
    "old": "            OrderedIdsState::Resident(ids) => return ids.next().copied(),",
    "new": "            OrderedIdsState::Resident(ids) => return ids.next_back().copied(),",
-   "command": "test --locked --offline --lib -- compact::source records:: metadata_index::tests::compact rerank::",
+   "cmd": "test --locked --offline --lib -- compact::source records:: metadata_index::tests::compact rerank::",
    "result": {
     "status": "killed",
     "tests_run": 101,
@@ -675,11 +675,11 @@
   {
    "id": "S3-OR-11",
    "class": "expiry",
-   "description": "the merge treats a base row with a deadline as absent",
+   "desc": "the merge treats a base row with a deadline as absent",
    "file": "src/records.rs",
    "old": "            let base_id = base.peek().map(|row| row.id);",
    "new": "            let base_id = base.peek().filter(|row| row.expiry.is_none()).map(|row| row.id);",
-   "command": "test --locked --offline --lib -- compact::source records:: metadata_index::tests::compact rerank::",
+   "cmd": "test --locked --offline --lib -- compact::source records:: metadata_index::tests::compact rerank::",
    "result": {
     "status": "killed",
     "tests_run": 101,
@@ -697,11 +697,11 @@
   {
    "id": "S3-BR-13",
    "class": "accounting",
-   "description": "base_rows decodes and caches the record cell of every row",
+   "desc": "base_rows decodes and caches the record cell of every row",
    "file": "src/compact/source.rs",
    "old": "    pub(crate) fn base_rows(&self) -> BaseRows<'_> {\n        BaseRows {",
    "new": "    pub(crate) fn base_rows(&self) -> BaseRows<'_> {\n        for row in 0..self.len() {\n            if let Some(id) = self.id(row) {\n                let _ = self.get_physical(id);\n            }\n        }\n        BaseRows {",
-   "command": "test --locked --offline --lib -- compact::source records:: metadata_index::tests::compact rerank::",
+   "cmd": "test --locked --offline --lib -- compact::source records:: metadata_index::tests::compact rerank::",
    "result": {
     "status": "killed",
     "tests_run": 101,
@@ -719,11 +719,11 @@
   {
    "id": "S3-OR-12",
    "class": "accounting",
-   "description": "the merge decodes and caches the record cell of every base row",
+   "desc": "the merge decodes and caches the record cell of every base row",
    "file": "src/records.rs",
    "old": "                base: view.base_rows().peekable(),",
    "new": "                base: {\n                    for row in view.base_rows() {\n                        let _ = view.get_physical(row.id);\n                    }\n                    view.base_rows().peekable()\n                },",
-   "command": "test --locked --offline --lib -- compact::source records:: metadata_index::tests::compact rerank::",
+   "cmd": "test --locked --offline --lib -- compact::source records:: metadata_index::tests::compact rerank::",
    "result": {
     "status": "killed",
     "tests_run": 101,
@@ -740,11 +740,11 @@
   {
    "id": "S3-OR-13",
    "class": "overlay",
-   "description": "the merge lists the ID of a tombstone while a larger base row is pending",
+   "desc": "the merge lists the ID of a tombstone while a larger base row is pending",
    "file": "src/records.rs",
    "old": "                    if matches!(entry, OverlayEntry::Put { .. }) {\n                        return Some(overlay_id);",
    "new": "                    if matches!(entry, OverlayEntry::Put { .. })\n                        || base_id.is_some_and(|id| id > overlay_id)\n                    {\n                        return Some(overlay_id);",
-   "command": "test --locked --offline --lib -- compact::source records:: metadata_index::tests::compact rerank::",
+   "cmd": "test --locked --offline --lib -- compact::source records:: metadata_index::tests::compact rerank::",
    "result": {
     "status": "killed",
     "tests_run": 101,
@@ -761,11 +761,11 @@
   {
    "id": "S3-OR-14",
    "class": "accounting",
-   "description": "the merge decodes and caches the record cell of every base row that has an overlay entry",
+   "desc": "the merge decodes and caches the record cell of every base row that has an overlay entry",
    "file": "src/records.rs",
    "old": "                base: view.base_rows().peekable(),",
    "new": "                base: {\n                    for &id in overlay.0.keys() {\n                        let _ = view.get_physical(id);\n                    }\n                    view.base_rows().peekable()\n                },",
-   "command": "test --locked --offline --lib -- compact::source records:: metadata_index::tests::compact rerank::",
+   "cmd": "test --locked --offline --lib -- compact::source records:: metadata_index::tests::compact rerank::",
    "result": {
     "status": "killed",
     "tests_run": 101,

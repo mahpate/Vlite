@@ -95,8 +95,12 @@ Order and gates come from the storage readiness inventory. Defaults stay unchang
    unchanged) with 7 tests and 34 more hand mutants, all killed
    ([`tests/compact_ordered_cursors_mutants.json`](../../../tests/compact_ordered_cursors_mutants.json)). The final-tree
    replays ran on the lane's machine only; an independent replay of them is open.
-2. **B4** finish lane B by cherry-picking `250a98bc` (never by merge): 18 replay obligations, seven of them mutations of
-   the read seam that R0 closed and eleven for B4 to replay; **A4** record consumers, 26 survivors to replay; both before
+2. **B4** finished lane B by cherry-picking `250a98bc` (never by merge). Its 18 replay obligations are replayed: the seven
+   that mutate the read seam are in R0's ledger and the eleven for consumers, settings and rerank are in B4's, each gap
+   measured on `v0.7.0` before the tests that kill it. B4 added the five survivors that lane B's own report names (four
+   are killed by new tests, one is accepted as an equivalent mutant whose invariant a test pins) and three gaps that its
+   wider campaign found in the lane's consumer tests, all closed by tests: 48 mutants in `tests/compact_b4_mutants.json`,
+   replayed and checked with `tests/compact_mutant_replay.py`. **A4** record consumers, 26 survivors to replay, before
    **E4**, the bounded exact scan.
 3. **C4** server and MCP consumers and accounting; **K71** bounded key-value, input and audit follow-ups (beside B4).
 4. **L5** effective-source lifecycle and generation retirement after A4, B4, E4 and C4.

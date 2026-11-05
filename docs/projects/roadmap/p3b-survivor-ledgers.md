@@ -1,7 +1,8 @@
-# P3b slice 4: survivor ledgers of the parked lanes A and B
+# P3b slice 4: survivor ledgers of lanes A and B
 
 Status: inventory for 0.7.1 lane R0, taken against `v0.7.0` (`02ef3e5f`). It records the evidence that exists for each
-parked lane; it does not accept, reject or integrate either one. Read it with the [seam freeze](p3b-seam-freeze.md) and
+lane at the tag; it does not accept, reject or integrate either one. Since then 0.7.1 has integrated lane B (see
+[Lane B](#lane-b)); lane A is still parked. Read it with the [seam freeze](p3b-seam-freeze.md) and
 the slice 4 row of the [P3 design](p3-compact-vectors.md). Nothing here is active: both lanes are test-gated, and no
 size or speed claim follows from them.
 
@@ -137,13 +138,24 @@ The 18 killed mutants are `pb-rec-ids-reversed`, `pb-rec-payload-put-ignored`, `
 `pb-settings-state-dropped` and `pb-settings-workspace-over-4mib`. By the lane's own record their killers are tests of
 the integrated lane B part, which `v0.7.0` carries.
 
-At `v0.7.0` all 18 survivors are still test gaps, because the closing tests are in the parked patch. Seven of them
-are in the read seam itself (`compact/source.rs` and `records.rs`): lane R0 replays each of those on the 0.7.0 tree and
-closes them with its own tests; see [the seam freeze](p3b-seam-freeze.md#7-the-r0-mutation-campaign).
+At `v0.7.0` all 18 survivors were test gaps, because the closing tests are in the patch that the tag lacks. Seven of them
+are in the read seam itself (`compact/source.rs` and `records.rs`): lane R0 replayed each of those on the 0.7.0 tree, found
+all seven alive and closed them with its own tests; see [the seam freeze](p3b-seam-freeze.md#7-the-r0-mutation-campaign).
 
-Open for B4: cherry-pick `250a98bc` and replay the other eleven (consumers, settings and rerank). The lane's mutant list
-has no mutant for the frame-kind guard or for the vector error path of the read seam; the freeze tests pin both
-(`R0-AU-01` and `R0-AU-12` in the R0 ledger).
+**Closed in 0.7.1 by B4.** B4 cherry-picked `250a98bc` (never merged it) and replayed the other eleven (consumers,
+settings and rerank) in the evidence form below: each gap is measured alive on `v0.7.0` before the tests that kill it,
+and each kill records the failing tests, the SHA-256 of the file before, during and after, and a green selector before
+the first and after the last mutant of its replay. B4's ledger, `tests/compact_b4_mutants.json`, holds 48 mutants: lane
+B's 11 own obligations; six from lane B's report, which are its five survivors (four are killed by new tests, and
+`x-settings-health-removed` is accepted as an equivalent mutant, because the compact settings arm repeats the health
+check that `resolve` has just made) and the pin mutant that a test kills to hold the invariant that equivalence rests
+on; three gaps that B4's wider campaign found in the lane's consumer tests (the persisted flag and the returned
+persistence of a settings change, and the limit that reaches the reranking provider); three mutants of the read-only
+gate; and 25 neighbors of the consumers. They are replayed and checked with `tests/compact_mutant_replay.py`. Three of the
+five report survivors (the frame-kind guard of the body read and of the record cell, and the error of `effective_vector`)
+are the same replacements as `R0-AU-01`, `R0-AU-02` and `R0-AU-12`, which B4 re-derived from lane B's report, so those
+three are killed in both ledgers. B4's ledger lists the seven seam obligations and the 17 mutants of the earlier seam
+campaign as `reused`, and its `verify` mode reads R0's ledger to check that it holds each of those 24 as a restored kill.
 
 ## Evidence that would settle OPEN-71-02
 
@@ -153,10 +165,17 @@ exactly the named test (or tests) fail, with the failing test names recorded; th
 (SHA-256 before and after); the restored selector is green; and an independent reviewer has replayed a sample or the
 whole list on another machine. A mutant that needs an equivalence argument keeps it in the ledger, with the invariant
 it rests on pinned by a test where one can be written. Replays of several mutants in one build do not count.
+`tests/compact_mutant_replay.py` (B4) checks this form mechanically: `check` runs the anchor test, `run` replays one
+mutant per build, and `verify` re-checks the recorded evidence against the tree it runs in, calling a run that was made
+on an older tree stale and not failed. R0's ledgers record the same fields, and `check` accepts them.
 
 ## Not established here
 
-R0 did not replay lane A's 26 survivors, lane B's eleven consumer survivors or lane B's 18 killed mutants, and did not
-build either lane's branch.
+This page is the inventory that R0 took, so it states what R0 did not do. R0 did not replay lane A's 26 survivors, lane
+B's eleven consumer survivors or lane B's 18 killed mutants, and did not build either lane's branch.
 The classification of the evidence comes from the lanes' own reports and commit messages, the mutant lists and a
 `git cherry` of each branch against `v0.7.0`.
+
+Since then B4 replayed lane B's eleven consumer survivors (see [Lane B](#lane-b)). It did not replay lane B's 18 killed
+mutants as such: eight of them (consumers, settings, rerank and quality) are re-derived in its list, and the other ten
+were not replayed as such. Lane A's 26 survivors are not replayed: A4 owns them.
