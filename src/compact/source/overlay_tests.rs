@@ -2,6 +2,12 @@ use super::dispatch_tests::{compact_dispatch_fixture, gates, point_parity};
 use crate::records::CollectionRecords;
 use crate::{Error, Expected, Metadata, MetadataValue, Mutation};
 
+mod consumer_cursor;
+mod consumer_graph;
+mod consumer_hybrid;
+mod consumer_query;
+mod consumer_vectors;
+
 fn compact_collection(db: &crate::Database) -> (String, Vec<u64>) {
     let (_, state) = db
         .collections
