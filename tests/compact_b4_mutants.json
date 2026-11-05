@@ -1,6 +1,11 @@
 {
   "campaign": "B4: P3b lane B fix-forward (derived indexes, settings, rerank and the read seam they consume)",
   "format": "Each mutant is one anchored replacement ({id, desc, file, old, new, cmd}); old must occur exactly once in file. Replay with tests/compact_mutant_replay.py. runs.<machine> holds the evidence of one replay: anchor_matches, compiled, failed_tests, sha256_lf and sha256_bytes (before, mutated, restored), restored_identically, and baseline_green (the unmodified selector, green before the first and after the last mutant of that replay).",
+  "selectors": {
+    "survivors": "test --locked --offline --lib -- compact::source::seam_tests",
+    "consumers": "test --locked --offline --lib -- compact::source::seam_tests records::effective_rows_tests metadata_index::tests::compact text_index::tests::compact rerank::",
+    "gpu": "test --locked --offline --features gpu --lib -- metadata_index::tests::compact_ann_paths_remain_refused_with_unchanged_state"
+  },
   "mutants": [
     {
       "id": "x-rec-vector-error-swallowed",
@@ -51,6 +56,406 @@
       "new": "",
       "cmd": "test --locked --offline --lib -- compact::source::seam_tests",
       "expect": ["compact::source::seam_tests::survivor_tests::compact_text_rebuild_stops_reading_rows_once_the_index_is_unavailable"]
+    },
+    {
+      "id": "pb-settings-validate-removed",
+      "origin": "lane B 250a98bc, claimed (1 of 8)",
+      "desc": "the compact settings arm does not validate the settings",
+      "file": "src/lib.rs",
+      "old": "self.ensure_healthy()?;\n            validate_settings(&settings)?;\n            if self.read_only {",
+      "new": "self.ensure_healthy()?;\n            if self.read_only {",
+      "cmd": "test --locked --offline --lib -- compact::source::seam_tests records::effective_rows_tests metadata_index::tests::compact text_index::tests::compact rerank::",
+      "expect": [
+        "compact::source::seam_tests::compact_read_only_settings_preserve_error_precedence",
+        "metadata_index::tests::compact_settings_validate_and_persist_named_collection"
+      ]
+    },
+    {
+      "id": "pb-collection-text-assign-dropped",
+      "origin": "lane B 250a98bc, deferred (1 of 10)",
+      "desc": "Collection::rebuild_derived discards the rebuilt text index",
+      "file": "src/collection.rs",
+      "old": "self.metadata_indexes = metadata;\n            self.text_index = text;\n            return Ok(());",
+      "new": "self.metadata_indexes = metadata;\n            return Ok(());",
+      "cmd": "test --locked --offline --lib -- compact::source::seam_tests records::effective_rows_tests metadata_index::tests::compact text_index::tests::compact rerank::",
+      "expect": ["metadata_index::tests::compact_metadata_text_indexes_verify_overlay"]
+    },
+    {
+      "id": "pb-meta-overlay-rows-only",
+      "origin": "lane B 250a98bc, deferred (2 of 10)",
+      "desc": "the metadata index rebuild indexes only the rows that have an overlay entry",
+      "file": "src/metadata_index.rs",
+      "old": "for id in records.effective_ids() {\n                if let Some(metadata) = records.effective_metadata(id, workspace)? {",
+      "new": "for id in records.effective_ids() {\n                if records.compact_overlay_revision(id).is_none() {\n                    continue;\n                }\n                if let Some(metadata) = records.effective_metadata(id, workspace)? {",
+      "cmd": "test --locked --offline --lib -- compact::source::seam_tests records::effective_rows_tests metadata_index::tests::compact text_index::tests::compact rerank::",
+      "expect": ["metadata_index::tests::compact_metadata_text_indexes_verify_overlay"]
+    },
+    {
+      "id": "pb-text-overlay-rows-only",
+      "origin": "lane B 250a98bc, deferred (3 of 10)",
+      "desc": "the text index rebuild indexes only the rows that have an overlay entry",
+      "file": "src/text_index.rs",
+      "old": "for id in records.effective_ids() {\n                if let Some(metadata) = records.effective_metadata(id, workspace)? {",
+      "new": "for id in records.effective_ids() {\n                if records.compact_overlay_revision(id).is_none() {\n                    continue;\n                }\n                if let Some(metadata) = records.effective_metadata(id, workspace)? {",
+      "cmd": "test --locked --offline --lib -- compact::source::seam_tests records::effective_rows_tests metadata_index::tests::compact text_index::tests::compact rerank::",
+      "expect": ["metadata_index::tests::compact_metadata_text_indexes_verify_overlay"]
+    },
+    {
+      "id": "pb-rerank-batch-bound-inclusive",
+      "origin": "lane B 250a98bc, deferred (4 of 10)",
+      "desc": "a batch of exactly MAX_BATCH_OPERATIONS hits is refused",
+      "file": "src/rerank.rs",
+      "old": "if hits.len() > crate::MAX_BATCH_OPERATIONS {\n        return Err(Error::BatchTooLarge);\n    }\n    let mut workspace",
+      "new": "if hits.len() >= crate::MAX_BATCH_OPERATIONS {\n        return Err(Error::BatchTooLarge);\n    }\n    let mut workspace",
+      "cmd": "test --locked --offline --lib -- compact::source::seam_tests records::effective_rows_tests metadata_index::tests::compact text_index::tests::compact rerank::",
+      "expect": ["metadata_index::tests::compact_metadata_text_indexes_verify_overlay"]
+    },
+    {
+      "id": "pb-rerank-clock-max",
+      "origin": "lane B 250a98bc, deferred (5 of 10)",
+      "desc": "rerank samples the largest possible clock, so every deadline has passed",
+      "file": "src/rerank.rs",
+      "old": "crate::current_time_ms(),\n                query,",
+      "new": "u64::MAX,\n                query,",
+      "cmd": "test --locked --offline --lib -- compact::source::seam_tests records::effective_rows_tests metadata_index::tests::compact text_index::tests::compact rerank::",
+      "expect": ["metadata_index::tests::compact_metadata_text_indexes_verify_overlay"]
+    },
+    {
+      "id": "pb-rerank-distance-dropped",
+      "origin": "lane B 250a98bc, deferred (6 of 10)",
+      "desc": "rerank candidates lose the incoming hit distance",
+      "file": "src/rerank.rs",
+      "old": "payload,\n            distance: hit.distance,",
+      "new": "payload,\n            distance: 0.0,",
+      "cmd": "test --locked --offline --lib -- compact::source::seam_tests records::effective_rows_tests metadata_index::tests::compact text_index::tests::compact rerank::",
+      "expect": ["metadata_index::tests::compact_metadata_text_indexes_verify_overlay"]
+    },
+    {
+      "id": "pb-rerank-health-check-removed",
+      "origin": "lane B 250a98bc, deferred (7 of 10)",
+      "desc": "a poisoned handle is still reranked",
+      "file": "src/rerank.rs",
+      "old": "self.db.ensure_healthy()?;\n            let state = self.db.state(self.id);",
+      "new": "let state = self.db.state(self.id);",
+      "cmd": "test --locked --offline --lib -- compact::source::seam_tests records::effective_rows_tests metadata_index::tests::compact text_index::tests::compact rerank::",
+      "expect": ["metadata_index::tests::compact_metadata_text_indexes_verify_overlay"]
+    },
+    {
+      "id": "pb-settings-frame-wrong-collection",
+      "origin": "lane B 250a98bc, deferred (8 of 10)",
+      "desc": "the settings frame is written for collection 0",
+      "file": "src/lib.rs",
+      "old": "&format::settings_frame(sequence, id, &settings))?;\n            let state = self.state_mut(id);",
+      "new": "&format::settings_frame(sequence, 0, &settings))?;\n            let state = self.state_mut(id);",
+      "cmd": "test --locked --offline --lib -- compact::source::seam_tests records::effective_rows_tests metadata_index::tests::compact text_index::tests::compact rerank::",
+      "expect": ["metadata_index::tests::compact_settings_validate_and_persist_named_collection"]
+    },
+    {
+      "id": "pb-settings-metadata-assign-dropped",
+      "origin": "lane B 250a98bc, deferred (9 of 10)",
+      "desc": "the settings arm discards the rebuilt metadata index",
+      "file": "src/lib.rs",
+      "old": "state.metadata_indexes = metadata;\n            state.text_index = text;\n            return Ok(SettingsPersistence::Persisted);",
+      "new": "state.text_index = text;\n            return Ok(SettingsPersistence::Persisted);",
+      "cmd": "test --locked --offline --lib -- compact::source::seam_tests records::effective_rows_tests metadata_index::tests::compact text_index::tests::compact rerank::",
+      "expect": [
+        "metadata_index::tests::compact_settings_validate_and_persist_named_collection",
+        "metadata_index::tests::compact_metadata_text_indexes_verify_overlay"
+      ]
+    },
+    {
+      "id": "pb-text-limit-reset",
+      "origin": "lane B 250a98bc, deferred (10 of 10)",
+      "desc": "the text index rebuild resets the posting limit to its default",
+      "file": "src/text_index.rs",
+      "old": "let mut rebuilt = Self {\n            limit: self.limit,\n            ..Self::default()\n        };\n        rebuilt.rebuild(fields,",
+      "new": "let mut rebuilt = Self::default();\n        rebuilt.rebuild(fields,",
+      "cmd": "test --locked --offline --lib -- compact::source::seam_tests records::effective_rows_tests metadata_index::tests::compact text_index::tests::compact rerank::",
+      "expect": ["text_index::tests::compact_text_rebuild_preserves_posting_limit"]
+    },
+    {
+      "id": "b4-settings-readonly-gate-removed",
+      "origin": "B4 production hunk of 250a98bc",
+      "desc": "the compact settings arm no longer refuses a read-only handle before scanning",
+      "file": "src/lib.rs",
+      "old": "if self.read_only {\n                return Err(Error::ReadOnly);\n            }\n            let state = self.state(id);",
+      "new": "let state = self.state(id);",
+      "cmd": "test --locked --offline --lib -- compact::source::seam_tests records::effective_rows_tests metadata_index::tests::compact text_index::tests::compact rerank::",
+      "expect": ["compact::source::seam_tests::compact_read_only_settings_preserve_error_precedence"]
+    },
+    {
+      "id": "b4-settings-readonly-gate-inverted",
+      "origin": "B4 production hunk of 250a98bc",
+      "desc": "the compact settings arm refuses a writable handle instead of a read-only one",
+      "file": "src/lib.rs",
+      "old": "if self.read_only {\n                return Err(Error::ReadOnly);\n            }\n            let state = self.state(id);",
+      "new": "if !self.read_only {\n                return Err(Error::ReadOnly);\n            }\n            let state = self.state(id);",
+      "cmd": "test --locked --offline --lib -- compact::source::seam_tests records::effective_rows_tests metadata_index::tests::compact text_index::tests::compact rerank::",
+      "expect": ["metadata_index::tests::compact_settings_validate_and_persist_named_collection"]
+    },
+    {
+      "id": "b4-settings-readonly-before-validation",
+      "origin": "B4 production hunk of 250a98bc",
+      "desc": "the read-only gate runs before settings validation (the resident order is validation first)",
+      "file": "src/lib.rs",
+      "old": "validate_settings(&settings)?;\n            if self.read_only {\n                return Err(Error::ReadOnly);\n            }",
+      "new": "if self.read_only {\n                return Err(Error::ReadOnly);\n            }\n            validate_settings(&settings)?;",
+      "cmd": "test --locked --offline --lib -- compact::source::seam_tests records::effective_rows_tests metadata_index::tests::compact text_index::tests::compact rerank::",
+      "expect": ["compact::source::seam_tests::compact_read_only_settings_preserve_error_precedence"]
+    },
+    {
+      "id": "b4-settings-workspace-over-4mib",
+      "origin": "lane B killed set (pb-settings-workspace-over-4mib)",
+      "desc": "the settings rebuild asks for a workspace one byte over 4 MiB",
+      "file": "src/lib.rs",
+      "old": "compact::source::ReadWorkspace::new(4 << 20)?;\n            let metadata = state.metadata_indexes.rebuilt_effective(",
+      "new": "compact::source::ReadWorkspace::new((4 << 20) + 1)?;\n            let metadata = state.metadata_indexes.rebuilt_effective(",
+      "cmd": "test --locked --offline --lib -- compact::source::seam_tests records::effective_rows_tests metadata_index::tests::compact text_index::tests::compact rerank::"
+    },
+    {
+      "id": "b4-settings-commit-removed",
+      "origin": "lane B killed set (pb-settings-commit-removed)",
+      "desc": "the settings arm applies the settings without committing a frame",
+      "file": "src/lib.rs",
+      "old": "self.commit_frame(sequence, &format::settings_frame(sequence, id, &settings))?;\n            let state = self.state_mut(id);\n            state.settings = settings;",
+      "new": "let _ = sequence;\n            let state = self.state_mut(id);\n            state.settings = settings;",
+      "cmd": "test --locked --offline --lib -- compact::source::seam_tests records::effective_rows_tests metadata_index::tests::compact text_index::tests::compact rerank::"
+    },
+    {
+      "id": "b4-settings-state-dropped",
+      "origin": "lane B killed set (pb-settings-state-dropped)",
+      "desc": "the settings arm does not keep the new settings in memory",
+      "file": "src/lib.rs",
+      "old": "state.settings = settings;\n            state.settings_persisted = true;",
+      "new": "state.settings_persisted = true;",
+      "cmd": "test --locked --offline --lib -- compact::source::seam_tests records::effective_rows_tests metadata_index::tests::compact text_index::tests::compact rerank::"
+    },
+    {
+      "id": "b4-settings-persisted-false",
+      "origin": "lane B killed set (pb-settings-persisted-false)",
+      "desc": "the settings arm records the settings as not persisted",
+      "file": "src/lib.rs",
+      "old": "state.settings_persisted = true;\n            state.metadata_indexes = metadata;",
+      "new": "state.settings_persisted = false;\n            state.metadata_indexes = metadata;",
+      "cmd": "test --locked --offline --lib -- compact::source::seam_tests records::effective_rows_tests metadata_index::tests::compact text_index::tests::compact rerank::"
+    },
+    {
+      "id": "b4-settings-text-assign-dropped",
+      "origin": "B4 neighbor of pb-settings-metadata-assign-dropped",
+      "desc": "the settings arm discards the rebuilt text index",
+      "file": "src/lib.rs",
+      "old": "state.text_index = text;\n            return Ok(SettingsPersistence::Persisted);",
+      "new": "return Ok(SettingsPersistence::Persisted);",
+      "cmd": "test --locked --offline --lib -- compact::source::seam_tests records::effective_rows_tests metadata_index::tests::compact text_index::tests::compact rerank::"
+    },
+    {
+      "id": "b4-settings-reports-memory-only",
+      "origin": "B4 neighbor: the returned persistence",
+      "desc": "the settings arm reports MemoryOnly although it committed a frame",
+      "file": "src/lib.rs",
+      "old": "return Ok(SettingsPersistence::Persisted);\n        }\n        self.ensure_resident_in(id)?;",
+      "new": "return Ok(SettingsPersistence::MemoryOnly);\n        }\n        self.ensure_resident_in(id)?;",
+      "cmd": "test --locked --offline --lib -- compact::source::seam_tests records::effective_rows_tests metadata_index::tests::compact text_index::tests::compact rerank::"
+    },
+    {
+      "id": "b4-rebuild-metadata-assign-dropped",
+      "origin": "B4 neighbor of pb-collection-text-assign-dropped",
+      "desc": "Collection::rebuild_derived discards the rebuilt metadata index",
+      "file": "src/collection.rs",
+      "old": "self.metadata_indexes = metadata;\n            self.text_index = text;",
+      "new": "self.text_index = text;",
+      "cmd": "test --locked --offline --lib -- compact::source::seam_tests records::effective_rows_tests metadata_index::tests::compact text_index::tests::compact rerank::"
+    },
+    {
+      "id": "b4-rebuild-compact-arm-off",
+      "origin": "B4 neighbor: rebuild_derived dispatch",
+      "desc": "Collection::rebuild_derived never takes the compact arm",
+      "file": "src/collection.rs",
+      "old": "if self.records.is_compact() {\n            let records = self.records.pin_effective();",
+      "new": "if false && self.records.is_compact() {\n            let records = self.records.pin_effective();",
+      "cmd": "test --locked --offline --lib -- compact::source::seam_tests records::effective_rows_tests metadata_index::tests::compact text_index::tests::compact rerank::"
+    },
+    {
+      "id": "b4-rebuild-workspace-over-4mib",
+      "origin": "B4 neighbor of pb-settings-workspace-over-4mib",
+      "desc": "Collection::rebuild_derived asks for a workspace one byte over 4 MiB",
+      "file": "src/collection.rs",
+      "old": "crate::compact::source::ReadWorkspace::new(4 << 20)?;\n            let metadata = self.metadata_indexes.rebuilt_effective(",
+      "new": "crate::compact::source::ReadWorkspace::new((4 << 20) + 1)?;\n            let metadata = self.metadata_indexes.rebuilt_effective(",
+      "cmd": "test --locked --offline --lib -- compact::source::seam_tests records::effective_rows_tests metadata_index::tests::compact text_index::tests::compact rerank::"
+    },
+    {
+      "id": "b4-rebuild-text-fields-ignored",
+      "origin": "B4 neighbor: rebuild_derived arguments",
+      "desc": "Collection::rebuild_derived rebuilds the text index with no declared fields",
+      "file": "src/collection.rs",
+      "old": "let text = self.text_index.rebuilt_effective(\n                &self.settings.text_fields,",
+      "new": "let text = self.text_index.rebuilt_effective(\n                &[],",
+      "cmd": "test --locked --offline --lib -- compact::source::seam_tests records::effective_rows_tests metadata_index::tests::compact text_index::tests::compact rerank::"
+    },
+    {
+      "id": "b4-rebuild-metadata-specs-ignored",
+      "origin": "B4 neighbor: rebuild_derived arguments",
+      "desc": "Collection::rebuild_derived rebuilds the metadata index with no declared indexes",
+      "file": "src/collection.rs",
+      "old": "&self.settings.metadata_indexes,\n                &records,",
+      "new": "&[],\n                &records,",
+      "cmd": "test --locked --offline --lib -- compact::source::seam_tests records::effective_rows_tests metadata_index::tests::compact text_index::tests::compact rerank::"
+    },
+    {
+      "id": "b4-meta-rebuild-skips-when-declared",
+      "origin": "B4 consumer: MetadataIndexes::rebuilt_effective",
+      "desc": "the metadata index rebuild reads rows only when no index is declared",
+      "file": "src/metadata_index.rs",
+      "old": "if !rebuilt.fields.is_empty() {\n            for id in records.effective_ids() {",
+      "new": "if rebuilt.fields.is_empty() {\n            for id in records.effective_ids() {",
+      "cmd": "test --locked --offline --lib -- compact::source::seam_tests records::effective_rows_tests metadata_index::tests::compact text_index::tests::compact rerank::"
+    },
+    {
+      "id": "b4-meta-rebuild-tracks-nothing",
+      "origin": "B4 consumer: MetadataIndexes::rebuilt_effective",
+      "desc": "the metadata index rebuild reads each row but indexes none of its metadata",
+      "file": "src/metadata_index.rs",
+      "old": "rebuilt.track(id, None, Some(&metadata));",
+      "new": "rebuilt.track(id, None, None);",
+      "cmd": "test --locked --offline --lib -- compact::source::seam_tests records::effective_rows_tests metadata_index::tests::compact text_index::tests::compact rerank::"
+    },
+    {
+      "id": "b4-meta-rebuild-specs-ignored",
+      "origin": "B4 consumer: MetadataIndexes::rebuilt_effective",
+      "desc": "the metadata index rebuild starts from no declared indexes",
+      "file": "src/metadata_index.rs",
+      "old": "rebuilt.rebuild(specs, &crate::records::RecordMap::default());",
+      "new": "rebuilt.rebuild(&[], &crate::records::RecordMap::default());",
+      "cmd": "test --locked --offline --lib -- compact::source::seam_tests records::effective_rows_tests metadata_index::tests::compact text_index::tests::compact rerank::"
+    },
+    {
+      "id": "b4-text-rebuild-skips-when-declared",
+      "origin": "B4 consumer: TextIndex::rebuilt_effective",
+      "desc": "the text index rebuild reads rows only when no field is declared",
+      "file": "src/text_index.rs",
+      "old": "if !rebuilt.fields.is_empty() {\n            for id in records.effective_ids() {",
+      "new": "if rebuilt.fields.is_empty() {\n            for id in records.effective_ids() {",
+      "cmd": "test --locked --offline --lib -- compact::source::seam_tests records::effective_rows_tests metadata_index::tests::compact text_index::tests::compact rerank::"
+    },
+    {
+      "id": "b4-text-rebuild-tracks-nothing",
+      "origin": "B4 consumer: TextIndex::rebuilt_effective",
+      "desc": "the text index rebuild reads each row but indexes none of its text",
+      "file": "src/text_index.rs",
+      "old": "rebuilt.track(id, None, Some(&metadata));",
+      "new": "rebuilt.track(id, None, None);",
+      "cmd": "test --locked --offline --lib -- compact::source::seam_tests records::effective_rows_tests metadata_index::tests::compact text_index::tests::compact rerank::"
+    },
+    {
+      "id": "b4-text-rebuild-fields-ignored",
+      "origin": "B4 consumer: TextIndex::rebuilt_effective",
+      "desc": "the text index rebuild starts from no declared fields",
+      "file": "src/text_index.rs",
+      "old": "rebuilt.rebuild(fields, &crate::records::RecordMap::default());",
+      "new": "rebuilt.rebuild(&[], &crate::records::RecordMap::default());",
+      "cmd": "test --locked --offline --lib -- compact::source::seam_tests records::effective_rows_tests metadata_index::tests::compact text_index::tests::compact rerank::"
+    },
+    {
+      "id": "b4-rerank-clock-zero",
+      "origin": "lane B killed set (pb-rerank-clock-zero)",
+      "desc": "rerank samples clock 0, so no deadline has passed",
+      "file": "src/rerank.rs",
+      "old": "crate::current_time_ms(),\n                query,",
+      "new": "0,\n                query,",
+      "cmd": "test --locked --offline --lib -- compact::source::seam_tests records::effective_rows_tests metadata_index::tests::compact text_index::tests::compact rerank::"
+    },
+    {
+      "id": "b4-rerank-visibility-inverted",
+      "origin": "lane B killed set (pb-rerank-visibility-inverted)",
+      "desc": "rerank keeps the hidden hits and drops the visible ones",
+      "file": "src/rerank.rs",
+      "old": "if !records.effective_visible(hit.id, now_ms, expiries) {",
+      "new": "if records.effective_visible(hit.id, now_ms, expiries) {",
+      "cmd": "test --locked --offline --lib -- compact::source::seam_tests records::effective_rows_tests metadata_index::tests::compact text_index::tests::compact rerank::"
+    },
+    {
+      "id": "b4-rerank-visibility-skipped",
+      "origin": "B4 consumer: rerank_effective",
+      "desc": "rerank does not test visibility before it reads a hit",
+      "file": "src/rerank.rs",
+      "old": "if !records.effective_visible(hit.id, now_ms, expiries) {\n            continue;\n        }\n",
+      "new": "",
+      "cmd": "test --locked --offline --lib -- compact::source::seam_tests records::effective_rows_tests metadata_index::tests::compact text_index::tests::compact rerank::"
+    },
+    {
+      "id": "b4-rerank-workspace-over-4mib",
+      "origin": "lane B killed set (pb-rerank-workspace-over-4mib)",
+      "desc": "rerank asks for a workspace one byte over 4 MiB",
+      "file": "src/rerank.rs",
+      "old": "crate::compact::source::ReadWorkspace::new(4 << 20)?;\n    let mut candidates = Vec::new();",
+      "new": "crate::compact::source::ReadWorkspace::new((4 << 20) + 1)?;\n    let mut candidates = Vec::new();",
+      "cmd": "test --locked --offline --lib -- compact::source::seam_tests records::effective_rows_tests metadata_index::tests::compact text_index::tests::compact rerank::"
+    },
+    {
+      "id": "b4-rerank-payload-dropped",
+      "origin": "B4 consumer: rerank_effective",
+      "desc": "rerank candidates carry an empty payload",
+      "file": "src/rerank.rs",
+      "old": ".ok_or(Error::InvalidQuery(\"compact rerank payload disappeared\"))?\n            .into_owned();",
+      "new": ".ok_or(Error::InvalidQuery(\"compact rerank payload disappeared\"))?\n            .into_owned();\n        let payload = Vec::new();",
+      "cmd": "test --locked --offline --lib -- compact::source::seam_tests records::effective_rows_tests metadata_index::tests::compact text_index::tests::compact rerank::"
+    },
+    {
+      "id": "b4-rerank-vector-zeroed",
+      "origin": "B4 consumer: rerank_effective",
+      "desc": "rerank candidates carry an all-zero vector",
+      "file": "src/rerank.rs",
+      "old": ".ok_or(Error::InvalidQuery(\"compact rerank vector disappeared\"))?\n            .to_vec();",
+      "new": ".ok_or(Error::InvalidQuery(\"compact rerank vector disappeared\"))?\n            .iter()\n            .map(|_| 0.0f32)\n            .collect::<Vec<f32>>();",
+      "cmd": "test --locked --offline --lib -- compact::source::seam_tests records::effective_rows_tests metadata_index::tests::compact text_index::tests::compact rerank::"
+    },
+    {
+      "id": "b4-rerank-limit-plus-one",
+      "origin": "B4 consumer: rerank_effective",
+      "desc": "rerank asks the provider for one hit more than the caller's limit",
+      "file": "src/rerank.rs",
+      "old": "distance: hit.distance,\n        });\n    }\n    reranker.rerank(query, &candidates, limit)",
+      "new": "distance: hit.distance,\n        });\n    }\n    reranker.rerank(query, &candidates, limit + 1)",
+      "cmd": "test --locked --offline --lib -- compact::source::seam_tests records::effective_rows_tests metadata_index::tests::compact text_index::tests::compact rerank::"
+    },
+    {
+      "id": "b4-quality-overlay-bytes-zero",
+      "origin": "lane B killed set (pb-quality-overlay-bytes-zero)",
+      "desc": "effective_memory reports no overlay bytes",
+      "file": "src/quality.rs",
+      "old": "overlay_bytes: records.overlay_logical_bytes()?,",
+      "new": "overlay_bytes: 0,",
+      "cmd": "test --locked --offline --lib -- compact::source::seam_tests records::effective_rows_tests metadata_index::tests::compact text_index::tests::compact rerank::"
+    },
+    {
+      "id": "b4-quality-source-dropped",
+      "origin": "B4 consumer: effective_memory",
+      "desc": "effective_memory reports an empty source accounting",
+      "file": "src/quality.rs",
+      "old": "Ok(EffectiveMemory {\n                source,",
+      "new": "Ok(EffectiveMemory {\n                source: Default::default(),",
+      "cmd": "test --locked --offline --lib -- compact::source::seam_tests records::effective_rows_tests metadata_index::tests::compact text_index::tests::compact rerank::"
+    },
+    {
+      "id": "b4-gpu-preflight-removed",
+      "origin": "B4 production hunk of 250a98bc (gpu feature)",
+      "desc": "resident_preflight no longer refuses a compact collection",
+      "file": "src/gpu.rs",
+      "old": "database.ensure_resident_in(0)\n}",
+      "new": "let _ = database;\n    Ok(())\n}",
+      "cmd": "test --locked --offline --features gpu --lib -- metadata_index::tests::compact_ann_paths_remain_refused_with_unchanged_state",
+      "expect": ["metadata_index::tests::compact_ann_paths_remain_refused_with_unchanged_state"]
+    },
+    {
+      "id": "b4-gpu-search-preflight-skipped",
+      "origin": "B4 production hunk of 250a98bc (gpu feature)",
+      "desc": "GpuExactSearcher::search no longer runs the resident preflight first",
+      "file": "src/gpu.rs",
+      "old": "resident_preflight(database)?;\n        let state = database.state(0);",
+      "new": "let state = database.state(0);",
+      "cmd": "test --locked --offline --features gpu --lib -- metadata_index::tests::compact_ann_paths_remain_refused_with_unchanged_state",
+      "expect": ["metadata_index::tests::compact_ann_paths_remain_refused_with_unchanged_state"]
     }
   ]
 }
