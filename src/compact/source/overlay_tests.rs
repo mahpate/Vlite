@@ -3,6 +3,7 @@ use crate::records::CollectionRecords;
 use crate::{Error, Expected, Metadata, MetadataValue, Mutation};
 
 mod consumer_cursor;
+mod consumer_exact;
 mod consumer_graph;
 mod consumer_group;
 mod consumer_hybrid;
