@@ -151,6 +151,54 @@ collection/probe/upgrade conflicts `FAILED_PRECONDITION`, permission failures
 8 MiB request and 16 MiB response caps; tonic size errors are `OUT_OF_RANGE`
 without an application error trailer. No lease RPCs are provided.
 
+## Agent memory (REST)
+
+A binding is an explicitly provisioned local name for scoped memory, not a
+graph or collection path. All nine routes are unary `POST` requests beneath
+`/v1/memory/{binding}`; no GET, HEAD or DELETE aliases are provided.
+
+| Suffix | First-slice status |
+|---|---|
+| `/remember` | Entity and episodic items; 200 |
+| `/recall` | Bounded retained-memory recall; 200 |
+| `/facts/query` | 409 `memory_capability_unavailable` |
+| `/facts/correct` | 409 `memory_capability_unavailable` |
+| `/consolidate` | C1: one retained source summary; 200 |
+| `/forget` | IDs with `logical_delete`; 200, not secure erasure |
+| `/receipts/lookup` | Retained receipts; remember lookup returns 409 `memory_capability_unavailable`, `details.feature=remember_receipt_lookup` |
+| `/erasures/get` | 409 `memory_capability_unavailable` |
+| `/erasures/resume` | 409 `memory_capability_unavailable` |
+
+Authenticate with a bearer credential authorized for the operation and binding:
+exact startup scope grants plus `graph_read`/`graph_write` and the required
+evidence-collection read/search/write permissions. Mutation dry runs still need
+write grants. Memory grants never confer raw graph or collection access.
+Unknown and ungranted bindings return the same 403 before existence lookup.
+
+Requests are limited to 8 MiB; REST responses have no serving size cap.
+Mutations require a body-only `idempotency_key`. A retained matching retry
+returns the original result with `replayed:true`; a changed digest conflicts.
+Bindings explicitly configure a receipt window; expiry ends replay guarantees,
+not memory retention. After an indeterminate commit, reopen and reconcile the
+receipt rather than blindly retrying. Full schemas retain future capabilities,
+including 202 pending forget/resume results; these do not imply secure erasure.
+
+Stable errors use `{error:{code,message,details?}}`: 400/413/415/422
+`invalid_json` follow extractor failures; 401 `unauthorized`; 403
+`forbidden_scope`/`read_only`/`tenant_suspended`/`tenant_unavailable`; 404
+`memory_not_found`/`receipt_not_found`/`erasure_not_found`; 409
+`memory_not_configured`/`memory_capability_unavailable`/`memory_feed_unsupported`/
+`idempotency_conflict`/`memory_slot_conflict`/`memory_attachment_conflict`/
+`memory_deletion_pending`/`memory_job_reconciliation_required`/`index_not_ready`;
+412 `precondition_failed`; 422 `invalid_input`/`memory_unsupported_ranking`/
+`memory_bounded_plan_unsupported`; 429 `rate_limited`/`quota_exceeded`
+(`Retry-After: 1`); 503 `busy`/`unavailable`/`poisoned`/`commit_indeterminate`;
+504 `deadline_exceeded`; 500 `internal_error`. Missing capabilities name
+`details.feature`. `response_too_large` (413) applies to gRPC preflight and
+MCP/CLI response bounds, not a REST response cap. See the
+[memory contract](projects/roadmap/serving-memory-contract.md#6-authorization-errors-and-observability)
+for authorization, limits and complete semantics.
+
 ## Collection retrieval
 
 * `POST /v1/collections/{collection}/search/grouped` takes `vector`, `field`,
