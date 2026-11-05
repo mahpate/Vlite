@@ -220,6 +220,24 @@ fn text(value: &str) -> MetadataValue {
     MetadataValue::String(value.into())
 }
 
+/// The routes that answer 403 `forbidden_scope` while anything is reserved
+/// (SECURITY.md, Memory-bound resources): global metrics, graph guard
+/// statistics, replication export, webhook list and status, imports and the
+/// automatic-maintenance routes.
+const AGGREGATE_ROUTES: [(&str, &str, Option<&str>); 11] = [
+    ("GET", "/v1/imports/1", None),
+    ("GET", "/v1/admin/replication/export", None),
+    ("GET", "/v1/admin/maintenance/auto", None),
+    ("GET", "/v1/admin/webhooks", None),
+    ("GET", "/v1/admin/webhooks/not-a-real-id", None),
+    ("GET", "/v1/admin/metrics/summary", None),
+    ("GET", "/metrics", None),
+    ("GET", "/v1/admin/graph/stats", None),
+    ("PUT", "/v1/admin/maintenance/auto", Some("{}")),
+    ("POST", "/v1/admin/maintenance/auto/tick", None),
+    ("POST", "/v1/collections/notes_ev/imports", None),
+];
+
 #[tokio::test]
 async fn the_first_start_records_the_binding_and_a_restart_changes_nothing() {
     let rig = Rig::new();
@@ -360,6 +378,14 @@ async fn removing_the_bindings_file_keeps_the_memory_reserved() {
         let recall = json!({"scope": {"agent": "a"}, "entity_seeds": ["e1"]});
         let (status, _) = call(app, "POST", "/v1/memory/notes/recall", ADMIN, Some(&recall)).await;
         assert_eq!(status, 404, "memory routes are not mounted without a file");
+        // The refusals that protect a reservation apply to a reservation that
+        // only the database holds (SECURITY.md, Memory-bound resources).
+        for (method, path, body) in AGGREGATE_ROUTES {
+            let body = body.map(|text| serde_json::from_str::<Value>(text).unwrap());
+            let (status, error) = call(app, method, path, ADMIN, body.as_ref()).await;
+            assert_eq!(status, 403, "{method} {path}");
+            assert_eq!(error["error"]["code"], "forbidden_scope", "{method} {path}");
+        }
     })
     .await;
     // The listeners that cannot enforce the reservation refuse to start.
@@ -405,6 +431,16 @@ async fn a_database_that_never_held_memory_starts_as_before_with_any_listener() 
         .expect("no records, no reservation");
     let (status, _) = call(&router, "GET", "/v1/graphs/notes_graph", ADMIN, None).await;
     assert_eq!(status, 200);
+    // Nothing is reserved, so the aggregate routes are served as before.
+    for path in [
+        "/metrics",
+        "/v1/admin/metrics/summary",
+        "/v1/admin/graph/stats",
+        "/v1/admin/webhooks",
+    ] {
+        let (status, body) = call(&router, "GET", path, ADMIN, None).await;
+        assert_eq!(status, 200, "{path}: {body}");
+    }
     service.close().await.unwrap();
     let (router, service) = rig
         .start(None, |options| options.grpc_enabled = true)
@@ -497,4 +533,101 @@ async fn a_graph_adopted_before_records_existed_is_adopted_once_and_gets_its_rec
     assert_eq!(recorded.properties["binding"], text("notes"));
     assert_eq!(recorded.properties["generation"], text("1"));
     db.close().unwrap();
+}
+
+/// A record as design note 1.1 spells it, for a binding that was retired long
+/// ago with a short receipt window.
+fn retired_record(binding: &str, graph: &str, evidence: &str) -> Metadata {
+    let mut properties = Metadata::new();
+    for (name, value) in [
+        ("record_schema", "memory-binding-record:v1"),
+        ("tenant", "@root"),
+        ("binding", binding),
+        ("generation", "3"),
+        ("state", "retired"),
+        ("retired_at_ms", "1000"),
+        ("graph", graph),
+        ("evidence", evidence),
+        ("memory_schema", "memory-schema-v1"),
+        ("ranking_version", "memory-ranking-v1"),
+        ("request_digest_version", "memory-request-v1"),
+        ("receipt_window_ms", "1000"),
+    ] {
+        properties.insert(name.into(), text(value));
+    }
+    properties.insert(
+        "grants_digest".into(),
+        text(&format!("v1:{}", "0".repeat(64))),
+    );
+    properties
+}
+
+#[tokio::test]
+async fn a_valid_removal_leaves_the_removed_entrys_resources_reserved() {
+    let rig = Rig::new();
+    let mut db = rig.open();
+    db.create_graph("gone_graph").unwrap();
+    db.create_collection(
+        "gone_ev",
+        CollectionSpec {
+            dimensions: 2,
+            settings: Default::default(),
+        },
+    )
+    .unwrap();
+    let planted = retired_record("gone", "gone_graph", "gone_ev");
+    db.graph_mut("gone_graph")
+        .unwrap()
+        .write_batch(&[GraphOp::CreateNode {
+            key: "binding:v1".into(),
+            labels: vec!["VliteMemoryBinding".into()],
+            properties: planted.clone(),
+        }])
+        .unwrap();
+    db.close().unwrap();
+    // The file does not name `gone`: it was retired at 1000 and its window of
+    // 1000 ms ended long ago, so dropping it is allowed (mapping rule 5).
+    rig.run(Some(&bindings(1, WINDOW, "a")), async |app| {
+        let (status, body) = memory(app, "remember", &remember_body("a", "k1")).await;
+        assert_eq!(status, 200, "{body}");
+        let (status, body) = call(app, "GET", "/v1/graphs/gone_graph", ADMIN, None).await;
+        assert_eq!(
+            (status, &body["error"]["code"]),
+            (409, &json!("graph_not_found")),
+            "{body}"
+        );
+        let (status, body) = call(app, "GET", "/v1/collections/gone_ev", ADMIN, None).await;
+        assert_eq!(
+            (status, &body["error"]["code"]),
+            (404, &json!("collection_not_found")),
+            "{body}"
+        );
+        let (status, body) = call(app, "GET", "/v1/graphs", ADMIN, None).await;
+        assert_eq!(status, 200, "{body}");
+        let names: Vec<&str> = body["graphs"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter_map(|graph| graph["name"].as_str())
+            .collect();
+        assert!(!names.contains(&"gone_graph"), "{names:?}");
+        assert!(names.contains(&"plain_graph"), "{names:?}");
+    })
+    .await;
+    // Its record is never touched, and the reservation outlives the next start.
+    let db = rig.open();
+    let kept = db
+        .graph("gone_graph")
+        .unwrap()
+        .get_node("binding:v1")
+        .unwrap()
+        .output
+        .expect("the removed entry's record is still there");
+    assert_eq!(kept.properties, planted);
+    db.close().unwrap();
+    rig.run(Some(&bindings(1, WINDOW, "a")), async |app| {
+        let (status, _) = call(app, "GET", "/v1/graphs/gone_graph", ADMIN, None).await;
+        assert_eq!(status, 409);
+    })
+    .await;
 }

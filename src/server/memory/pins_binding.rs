@@ -19,7 +19,7 @@ use http_body_util::BodyExt;
 use serde_json::{Value, json};
 use tower::ServiceExt;
 
-use super::super::{MAX_JSON_BYTES, RequestId, Service, admin, credentials};
+use super::super::{GroupCommitConfig, MAX_JSON_BYTES, RequestId, Service, admin, credentials};
 use super::routes::Clock;
 use crate::memory::binding::{RECORD_KEY, RECORD_LABEL};
 use crate::property_graph::{GraphOp, NodeView};
@@ -146,9 +146,19 @@ impl Pins {
         Self::with(retired, 1)
     }
 
+    fn with(retired: bool, generation: u64) -> Self {
+        Self::build(retired, generation, false)
+    }
+
+    /// The same server with group commit on: the recheck and the write must
+    /// still run in one closure under one database write guard.
+    fn grouped() -> Self {
+        Self::build(false, 1, true)
+    }
+
     /// A started server at validation clock 0 (so a retired entry at 500 is
     /// "first seen" in the future), with the engine clock at 100.
-    fn with(retired: bool, generation: u64) -> Self {
+    fn build(retired: bool, generation: u64, group_commit: bool) -> Self {
         let mut db = Database::create_in_memory(
             2,
             CreateOptions {
@@ -180,7 +190,14 @@ impl Pins {
         }
         let text = json!({"version": "memory-bindings-v1", "bindings": [entry]}).to_string();
         let set = crate::memory::binding::parse(text.as_bytes()).unwrap();
-        let service = Service::new(db).with_bindings(super::reserved::Bindings::new(set));
+        let service = if group_commit {
+            Service::new(db)
+                .with_group_commit(GroupCommitConfig::default())
+                .unwrap()
+        } else {
+            Service::new(db)
+        };
+        let service = service.with_bindings(super::reserved::Bindings::new(set));
         super::startup_at(&service, 0).unwrap();
         let grant = credentials::Grant::for_user(
             PRINCIPAL.into(),
@@ -270,11 +287,10 @@ async fn a_started_server_holds_the_record_of_its_binding() {
     assert_eq!(node.properties["retired_at_ms"], text("500"));
 }
 
-#[tokio::test]
-async fn mutations_refuse_a_lower_or_higher_recorded_generation_and_write_nothing() {
+async fn stale_generations_write_nothing(group_commit: bool) {
     for operation in OPERATIONS {
         for recorded in ["2", "4"] {
-            let pins = Pins::with(false, 3);
+            let pins = Pins::build(false, 3, group_commit);
             pins.seed().await;
             pins.change_record(|properties| {
                 properties.insert("generation".into(), text(recorded));
@@ -289,6 +305,22 @@ async fn mutations_refuse_a_lower_or_higher_recorded_generation_and_write_nothin
             assert_eq!(served.0, 200, "{operation}: {}", served.1);
         }
     }
+}
+
+#[tokio::test]
+async fn mutations_refuse_a_lower_or_higher_recorded_generation_and_write_nothing() {
+    stale_generations_write_nothing(false).await;
+}
+
+#[tokio::test]
+async fn the_recheck_holds_under_group_commit_too() {
+    stale_generations_write_nothing(true).await;
+    // And with an intact record a grouped mutation is still one commit.
+    let pins = Pins::grouped();
+    let before = pins.sequence();
+    let served = pins.post("remember", &remember_body("k")).await;
+    assert_eq!(served.0, 200, "{}", served.1);
+    assert_eq!(pins.sequence(), before + 1);
 }
 
 #[tokio::test]
@@ -342,32 +374,80 @@ async fn reads_do_not_recheck() {
     }
 }
 
+/// A refusal the operation's own field rules would answer, an invalid body and
+/// an unknown field, each as that operation's request.
+fn refused_bodies(operation: &str) -> Vec<(&'static str, Value)> {
+    let mut refused = body_of(operation, "k");
+    let required = match operation {
+        "remember" => {
+            refused["items"][0]["confidence"] = json!(0.5);
+            "items"
+        }
+        "forget" => {
+            refused["mode"] = json!("expire");
+            "target"
+        }
+        "consolidate" => {
+            refused["inputs"][0]["disposition"] = json!("logical_delete");
+            "inputs"
+        }
+        other => panic!("unknown operation {other}"),
+    };
+    let mut invalid = body_of(operation, "k");
+    invalid.as_object_mut().unwrap().remove(required);
+    let mut unknown = body_of(operation, "k");
+    unknown["unknown_field"] = json!(1);
+    vec![
+        ("a refused field", refused),
+        ("an invalid body", invalid),
+        ("an unknown field", unknown),
+    ]
+}
+
 #[tokio::test]
 async fn the_recheck_precedes_field_refusals_and_validation() {
-    let pins = Pins::new(false);
-    pins.change_record(|properties| {
-        properties.insert("generation".into(), text("2"));
-    });
-    let mut refused = remember_body("k");
-    refused["items"][0]["confidence"] = json!(0.5);
-    assert_stale(&pins.post("remember", &refused).await, "a refused field");
-    let invalid = json!({"scope": {"agent": "a"}, "idempotency_key": "k", "items": []});
-    assert_stale(&pins.post("remember", &invalid).await, "an invalid body");
-    let mut unknown = remember_body("k");
-    unknown["unknown_field"] = json!(1);
-    assert_stale(&pins.post("remember", &unknown).await, "an unknown field");
+    for operation in OPERATIONS {
+        let pins = Pins::new(false);
+        pins.change_record(|properties| {
+            properties.insert("generation".into(), text("2"));
+        });
+        for (what, body) in refused_bodies(operation) {
+            let stale = pins.post(operation, &body).await;
+            assert_stale(&stale, &format!("{operation} with {what}"));
+        }
+        // Without the stale record the same bodies are the refusals they are.
+        pins.restore_record();
+        for (what, body) in refused_bodies(operation) {
+            let answered = pins.post(operation, &body).await;
+            assert!(
+                answered.0 == 409 || answered.0 == 422,
+                "{operation} with {what}: {}",
+                answered.1
+            );
+            assert_ne!(
+                answered.1["error"]["details"]["feature"], "binding_generation",
+                "{operation} with {what}"
+            );
+        }
+    }
 }
 
 #[tokio::test]
 async fn a_retired_binding_with_a_changed_record_answers_the_generation_first() {
-    let pins = Pins::new(true);
-    let intact = pins.post("remember", &remember_body("k")).await;
-    assert_eq!(intact.0, 409, "{}", intact.1);
-    assert_eq!(intact.1["error"]["details"]["feature"], "binding_retired");
-    pins.change_record(|properties| {
-        properties.insert("generation".into(), text("2"));
-    });
-    assert_stale(&pins.post("remember", &remember_body("k")).await, "retired");
+    for operation in OPERATIONS {
+        let pins = Pins::new(true);
+        let intact = pins.post(operation, &body_of(operation, "k")).await;
+        assert_eq!(intact.0, 409, "{operation}: {}", intact.1);
+        assert_eq!(
+            intact.1["error"]["details"]["feature"], "binding_retired",
+            "{operation}"
+        );
+        pins.change_record(|properties| {
+            properties.insert("generation".into(), text("2"));
+        });
+        let stale = pins.post(operation, &body_of(operation, "k")).await;
+        assert_stale(&stale, &format!("{operation} on a retired binding"));
+    }
 }
 
 #[tokio::test]
