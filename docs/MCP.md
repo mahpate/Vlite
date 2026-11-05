@@ -186,7 +186,7 @@ collides, that representation is omitted (no text blocks or structured content);
 `isError:true` remains, but such an extreme collision may prevent normal client
 error rendering.
 The stdio host is trusted: the 8 MiB request limit applies to compact arguments
-after parsing, not to the incoming stdio line, which is limited to 64 MiB (see
+after parsing, not to the incoming stdio line, which is limited to 128 MiB (see
 [Tools](#tools)). HTTP response bodies and serialized
 tool results are also capped at 8 MiB; HTTP calls time out
 after five seconds. A mutation transport failure has **UNKNOWN** outcome:
@@ -212,9 +212,13 @@ erasure notice and manage external copies separately.
 
 All tool inputs are JSON-schema-described. The server speaks newline-delimited
 JSON-RPC 2.0, including the MCP lifecycle, `ping` and tool discovery/calls.
-Each request is one line; a line longer than 64 MiB (67,108,864 bytes, excluding
+Each request is one line; a line longer than 128 MiB (134,217,728 bytes, excluding
 the line terminator) is answered with JSON-RPC error -32600 (`id` null) and the
-session continues with the next line.
+session continues with the next line. The limit is eight times the 16 MiB body
+of the largest request the engine accepts, a `vlite_graph_write` batch, because
+that body can take up to eight times as many bytes as JSON text (payload bytes
+written as `\u00XX` escapes take six, `float32` values written with 20 to 30
+characters take five to 7.5).
 Protocol messages alone are written to stdout; diagnostics are written to stderr.
 Tool failures return `isError: true` with a clear message; malformed JSON and protocol errors use JSON-RPC errors. `vlite_search` returns IDs and distances, not vectors. `vlite_get` and `vlite_list` omit vectors unless explicitly requested by `vlite_get`.
 

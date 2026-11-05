@@ -297,3 +297,175 @@ fn read_only_mutation_fails_and_writable_changes_persist() {
     assert_eq!(db.get(6).unwrap().unwrap().payload, [0, 255, 254, 128]);
     assert!(db.get(1).unwrap().is_none());
 }
+
+// What `dispatch` answers before any tool runs: the error codes, the id each error echoes
+// (even an invalid one), the defaults for absent params and arguments, and the silence of
+// notifications.
+#[test]
+fn protocol_edge_cases_keep_their_answers() {
+    const INVALID: &str = "Invalid Request";
+    let error = |id: Value, code: i32, message: &str| {
+        Some(json!({"jsonrpc":"2.0","id":id,"error":{"code":code,"message":message}}))
+    };
+    let result = |id: Value, result: Value| Some(json!({"jsonrpc":"2.0","id":id,"result":result}));
+    let call_error = "tools/call requires a tool name and object arguments";
+    // Each request with its answer; `None` is a request that must stay unanswered.
+    let cases: Vec<(&str, Option<Value>)> = vec![
+        // The message itself.
+        ("[1,2]", error(Value::Null, -32600, INVALID)),
+        ("7", error(Value::Null, -32600, INVALID)),
+        ("null", error(Value::Null, -32600, INVALID)),
+        // jsonrpc and method.
+        (
+            r#"{"id":1,"method":"ping"}"#,
+            error(json!(1), -32600, INVALID),
+        ),
+        (
+            r#"{"jsonrpc":"1.0","id":"a","method":"ping"}"#,
+            error(json!("a"), -32600, INVALID),
+        ),
+        (
+            r#"{"jsonrpc":"2.0","id":2}"#,
+            error(json!(2), -32600, INVALID),
+        ),
+        (
+            r#"{"jsonrpc":"2.0","id":3,"method":5}"#,
+            error(json!(3), -32600, INVALID),
+        ),
+        (r#"{"jsonrpc":"2.0","method":"ping","params":[1]}"#, None),
+        // An invalid id is refused and echoed.
+        (
+            r#"{"jsonrpc":"2.0","id":1.5,"method":"ping"}"#,
+            error(json!(1.5), -32600, INVALID),
+        ),
+        (
+            r#"{"jsonrpc":"2.0","id":null,"method":"ping"}"#,
+            error(Value::Null, -32600, INVALID),
+        ),
+        (
+            r#"{"jsonrpc":"2.0","id":true,"method":"ping"}"#,
+            error(json!(true), -32600, INVALID),
+        ),
+        (
+            r#"{"jsonrpc":"2.0","id":[1,"x"],"method":"ping"}"#,
+            error(json!([1, "x"]), -32600, INVALID),
+        ),
+        (
+            r#"{"jsonrpc":"2.0","id":{"a":1},"method":"ping"}"#,
+            error(json!({"a": 1}), -32600, INVALID),
+        ),
+        // Valid ids: strings, negative and the largest unsigned integers.
+        (
+            r#"{"jsonrpc":"2.0","id":"s","method":"ping"}"#,
+            result(json!("s"), json!({})),
+        ),
+        (
+            r#"{"jsonrpc":"2.0","id":-5,"method":"ping"}"#,
+            result(json!(-5), json!({})),
+        ),
+        (
+            r#"{"jsonrpc":"2.0","id":18446744073709551615,"method":"ping"}"#,
+            result(json!(18446744073709551615u64), json!({})),
+        ),
+        // Params must be an object when present, and default to one when absent.
+        (
+            r#"{"jsonrpc":"2.0","id":4,"method":"ping","params":[1]}"#,
+            error(json!(4), -32602, "Invalid params"),
+        ),
+        (
+            r#"{"jsonrpc":"2.0","id":5,"method":"ping","params":null}"#,
+            error(json!(5), -32602, "Invalid params"),
+        ),
+        (
+            r#"{"jsonrpc":"2.0","id":6,"method":"ping","params":"text"}"#,
+            error(json!(6), -32602, "Invalid params"),
+        ),
+        (
+            r#"{"jsonrpc":"2.0","id":7,"method":"ping"}"#,
+            result(json!(7), json!({})),
+        ),
+        // tools/call needs a name and object arguments.
+        (
+            r#"{"jsonrpc":"2.0","id":8,"method":"tools/call","params":{"arguments":{}}}"#,
+            error(json!(8), -32602, call_error),
+        ),
+        (
+            r#"{"jsonrpc":"2.0","id":9,"method":"tools/call","params":{"name":5,"arguments":{}}}"#,
+            error(json!(9), -32602, call_error),
+        ),
+        (
+            r#"{"jsonrpc":"2.0","id":10,"method":"tools/call","params":{"name":"vlite_info","arguments":null}}"#,
+            error(json!(10), -32602, call_error),
+        ),
+        (
+            r#"{"jsonrpc":"2.0","id":11,"method":"tools/call","params":{"name":"vlite_info","arguments":[1]}}"#,
+            error(json!(11), -32602, call_error),
+        ),
+        (
+            r#"{"jsonrpc":"2.0","id":12,"method":"tools/call","params":{"name":"vlite_info","arguments":"x"}}"#,
+            error(json!(12), -32602, call_error),
+        ),
+        // Methods that are unknown, and notifications.
+        (
+            r#"{"jsonrpc":"2.0","id":13,"method":"nothing/here"}"#,
+            error(json!(13), -32601, "Method not found"),
+        ),
+        (r#"{"jsonrpc":"2.0","method":"nothing/here"}"#, None),
+        (
+            r#"{"jsonrpc":"2.0","method":"notifications/initialized"}"#,
+            None,
+        ),
+        (
+            r#"{"jsonrpc":"2.0","method":"notifications/cancelled","params":{"requestId":1}}"#,
+            None,
+        ),
+        (
+            r#"{"jsonrpc":"2.0","method":"notifications/progress"}"#,
+            None,
+        ),
+        (
+            r#"{"jsonrpc":"2.0","id":14,"method":"notifications/initialized"}"#,
+            result(json!(14), Value::Null),
+        ),
+        // A ping that is answered last proves that nothing above ended the session.
+        (
+            r#"{"jsonrpc":"2.0","id":15,"method":"ping"}"#,
+            result(json!(15), json!({})),
+        ),
+    ];
+    let directory = tempfile::tempdir().unwrap();
+    let path = directory.path().join("edges.vlite");
+    fixture(&path);
+    let lines: Vec<&str> = cases.iter().map(|(line, _)| *line).collect();
+    let responses = run(&path, false, &lines);
+    let answered: Vec<_> = cases
+        .iter()
+        .filter_map(|(line, expected)| expected.as_ref().map(|expected| (*line, expected)))
+        .collect();
+    assert_eq!(responses.len(), answered.len(), "{responses:#?}");
+    for (response, (line, expected)) in responses.iter().zip(answered) {
+        assert_eq!(response, expected, "{line}");
+    }
+
+    // Absent arguments are an empty object; the version is negotiated from params if any.
+    let responses = run(
+        &path,
+        false,
+        &[
+            r#"{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"vlite_info"}}"#,
+            r#"{"jsonrpc":"2.0","id":2,"method":"initialize"}"#,
+            r#"{"jsonrpc":"2.0","id":3,"method":"initialize","params":{"protocolVersion":"1999-01-01"}}"#,
+            r#"{"jsonrpc":"2.0","id":4,"method":"initialize","params":{"protocolVersion":"2024-11-05"}}"#,
+        ],
+    );
+    let info = &response(&responses, 1)["result"];
+    assert_eq!(info["isError"], false);
+    assert_eq!(info["structuredContent"]["read_only"], true);
+    assert_eq!(info["structuredContent"]["count"], 3);
+    for (id, version) in [(2, "2025-06-18"), (3, "2025-06-18"), (4, "2024-11-05")] {
+        assert_eq!(
+            response(&responses, id)["result"]["protocolVersion"],
+            version
+        );
+    }
+}
