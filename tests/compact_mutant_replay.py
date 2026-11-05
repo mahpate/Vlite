@@ -448,9 +448,19 @@ def verify(root, data, minimum):
             print(f"reused: {len(ids)} seam mutants rest on {reused['ledger']}, which is not in this tree")
         else:
             held = json.loads(ledger.read_text(encoding="utf-8"))
-            known = {entry["id"] for entry in (held["mutants"] if isinstance(held, dict) else held)}
-            for missing in (i for i in ids if i not in known):
-                print(f"reused: {missing} is not in {reused['ledger']}")
+            entries = {entry["id"]: entry for entry in (held["mutants"] if isinstance(held, dict) else held)}
+            for wanted_id in ids:
+                entry = entries.get(wanted_id)
+                final = (entry or {}).get("final")
+                if entry is None:
+                    note = "is not in"
+                elif isinstance(final, dict) and (
+                    final.get("status") != "killed" or final.get("restored_identically") is not True
+                ):
+                    note = "has no restored kill in"
+                else:
+                    continue
+                print(f"reused: {wanted_id} {note} {reused['ledger']}")
                 counts["open"] += 1
     print(f"{counts['accepted']} accepted, {counts['stale']} stale, {counts['open']} open of {len(data['mutants'])}")
     return counts["stale"] == 0 and counts["open"] == 0
