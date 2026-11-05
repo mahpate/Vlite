@@ -1101,8 +1101,8 @@
   "id": "actor/m12-drop-event-keeps-role-name",
   "desc": "collection_dropped keeps the old role-name value instead of the shared actor.",
   "file": "src/server/collections.rs",
-  "old": "    let actor = audit::actor(&role, principal);\n    let bindings = service.memory_bindings.clone();",
-  "new": "    let actor = role.name().to_owned();\n    let bindings = service.memory_bindings.clone();",
+  "old": "    let actor = audit::actor(&role, principal);\n    let scope = service.scope(role);",
+  "new": "    let actor = role.name().to_owned();\n    let scope = service.scope(role);",
   "cmd": "cargo test --locked --offline --features server --test server_audit_actor"
  },
  {
@@ -1293,8 +1293,8 @@
   "id": "expiry-fix/ef-s6-kv-route-refusal",
   "desc": "S6-M3: the refusal is also applied to the key-value put route",
   "file": "src/server/kv.rs",
-  "old": "            let now = crate::current_time_ms();\n            let slot = db",
-  "new": "            let now = crate::current_time_ms();\n            if let Some(expiry) = options.expires_at_ms {\n                super::record_put::ensure_expiry_after(expiry, now)?;\n            }\n            let slot = db",
+  "old": "            let now = crate::current_time_ms();\n            let slot = collection",
+  "new": "            let now = crate::current_time_ms();\n            if let Some(expiry) = options.expires_at_ms {\n                super::record_put::ensure_expiry_after(expiry, now)?;\n            }\n            let slot = collection",
   "cmd": "cargo test --locked --offline --features server --test server_kv --test server_record_expiry"
  },
  {
