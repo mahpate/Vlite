@@ -1,10 +1,12 @@
 # P3b read seam freeze for 0.7.1 (lane R0)
 
-Status: written at the start of 0.7.1 from `v0.7.0` (`02ef3e5f`). Sections 3 and 4 describe what the code does today and
-pin it with tests, so they are frozen for the lanes that follow: B4, A4, E4, C4, K71, L5 and the ANN, P4 and P5 lanes.
-Section 5 is a proposal that waits for owner approval (OPEN-71-02 to OPEN-71-04 in the
-[0.7.1 plan](handover-0.7.0.md#071)). Nothing here changes behavior, a file format or the wire, activates a compact
-writer, float16 or temporal copy-out, or supports a size or speed claim. Companion pages: the
+Status: written at the start of 0.7.1 from `v0.7.0` (`02ef3e5f`) and approved on 2026-11-05 (OPEN-71-02 to OPEN-71-04 and
+OPEN-71-14 in the [0.7.1 plan](handover-0.7.0.md#071), decided by the coordinator under the owner's delegation).
+Sections 3 and 4 describe what the code does today and pin it with tests, so they are frozen for the lanes that follow:
+B4, A4, E4, C4, K71, L5 and the ANN, P4 and P5 lanes. Section 5 gives additive shapes, approved as additive: lane R0's
+slice 3 implements `base_rows`, `affected_ids` and `ordered_ids` (crate-private, under the seam's test gate), and
+`binding` and `for_each_vector_block` stay with the ANN lane. Nothing here changes behavior, a file format or the wire,
+activates a compact writer, float16 or temporal copy-out, or supports a size or speed claim. Companion pages: the
 [survivor ledgers](p3b-survivor-ledgers.md) of the parked lanes, the [P3 design](p3-compact-vectors.md) and the
 [P3c design](p3c-compact-ann.md).
 
@@ -119,22 +121,24 @@ These are true at `v0.7.0`. They are not statements to preserve; the lane named 
 | `CollectionRecords::len`, `first_id` | Walk the base rows and the overlay on every call. | not scheduled |
 | Compact scan draft in `c859d2d5` (lane A) | Decodes metadata for every row even without a filter, and takes visibility from the columns. | E4 |
 
-## 5. Additions for P3c (proposed)
+## 5. Additions for P3c
 
 [P3c section G](p3c-compact-ann.md#g-integration-seams-and-consumers) lists five things the ANN needs that the seam
-lacks. This section gives them concrete, additive shapes. Existing signatures do not change. Nothing is implemented in
-0.7.1 by R0.
+lacks. This section gives them concrete, additive shapes, which the owner approved as additive on 2026-11-05
+(OPEN-71-03). Existing signatures do not change. Lane R0's slice 3 implements `base_rows`, `affected_ids` and
+`ordered_ids`, crate-private and under the seam's test gate; `binding` and `for_each_vector_block` stay with the ANN
+lane, which has not started in 0.7.1.
 
-| P3c name | At `v0.7.0` | Proposed |
+| P3c name | At `v0.7.0` | Shape |
 |---|---|---|
 | `len`, `contains_id`, `row_of`, `id_at`, `revision_at`, `expiry_at` | `CompactView::{len, contains_id, row_of, id, revision, expiry}` | Frozen as they are. |
 | `vector_at`, `metadata_at` | `CompactView::{read_vector, read_metadata}` and the effective accessors | Frozen as they are. |
 | `base_vector_at` | `CompactView::read_vector` already ignores the overlay and deadlines and returns the base row's canonical `f32` values | Frozen as it is; no new code. |
 | `ordered_visible` | `compact_iter` | A4 may fix the cursor; the signature stays. |
-| `base_rows` | A loop over `0..len()` | New, below. |
-| `source_identity` | `CollectionRecords::source_identity` (process-local) | New portable binding, below. |
-| `affected_since` | None (the overlay is private) | New, below. |
-| `score_batch` | None | New, below. |
+| `base_rows` | A loop over `0..len()` | New, below (R0, slice 3). |
+| `source_identity` | `CollectionRecords::source_identity` (process-local) | New portable binding, below (ANN lane). |
+| `affected_since` | None (the overlay is private) | New, below (R0, slice 3). |
+| `score_batch` | None | New, below (ANN lane). |
 
 ```rust
 // src/compact/source.rs (source owner)
@@ -199,6 +203,10 @@ sibling files, not to the end of a test module that another lane's patch also ex
 Order of integration follows the readiness inventory: R0, then B4 and A4 (file-disjoint except where marked), then E4,
 then C4, then L5, then the ANN lanes.
 
+Decision of 2026-11-05 (OPEN-71-03): lane R0 stays the single writer of `src/compact/source.rs` and of the effective
+block of `src/records.rs` until its slice 3 lands, so B4 and A4 make no production edit in either. B4's optional
+ordered-cursor slice is dropped, because `ordered_ids` belongs to R0's slice 3.
+
 ### `src/compact/source.rs`
 
 One source owner at a time; nobody edits authentication or accounting in parallel.
@@ -208,8 +216,8 @@ One source owner at a time; nobody edits authentication or accounting in paralle
 | Gate: `enabled`, `Activation` | frozen | | | | | un-gates | |
 | `Capture`, `CompactGeneration::{new, decode, mapped_copy, view, has_collection}`, `GenerationId` | frozen | | | | | pin and retirement fields in a separate struct | computes `SourceBinding` while capturing |
 | `ReadWorkspace`, `SeamAccounting`, `body` | frozen | | | | consumes `accounting` | separate counters struct | `for_each_vector_block` (additive) |
-| `CompactView` read and physical methods | frozen | | | | | | `base_rows`, `binding` (additive) |
-| Test module declarations at the end of the file | adds `freeze_tests` | | | | | | |
+| `CompactView` read and physical methods | frozen; slice 3 adds `base_rows` (additive) | | | | | | `binding` (additive) |
+| Test module declarations at the end of the file | adds `freeze_tests`; slice 3 adds its test module | | | | | | |
 
 B4 and A4 make no production edit here: B4's only production hunks are three lines in `Database::set_collection_settings`
 and a GPU preflight extraction.
@@ -221,7 +229,7 @@ Methods first, then files; never add a second effective-record iterator.
 | Region | R0 | B4 | A4 | E4 | C4 | L5 | ANN |
 |---|---|---|---|---|---|---|---|
 | `CollectionRecords`, `OverlayEntry`, `RecordOverlay` (types) | frozen | | | | | | |
-| Effective block: `pin_effective`, `effective_*`, `source_identity`, `source_accounting`, `overlay_logical_bytes` | frozen | tests only (`effective_rows_tests`, 28 lines in `250a98bc`) | | consumes | consumes | | `affected_ids`, `ordered_ids` (additive); `effective_ids` retired last |
+| Effective block: `pin_effective`, `effective_*`, `source_identity`, `source_accounting`, `overlay_logical_bytes` | frozen; slice 3 adds `affected_ids`, `ordered_ids` (additive) | tests only (`effective_rows_tests`, 28 lines in `250a98bc`) | | consumes | consumes | | consumes; `effective_ids` retired last |
 | `len`, `is_empty`, `first_id`, `contains_key`, `get_at`, `get_physical`, `apply_committed`, `compact_overlay_revision`, `compact_from_replay` | frozen | | | | | | |
 | `compact_iter`, `CompactRecordIter` | frozen | | cursor and seek | consumes | | | |
 | `ReadSnapshot::{browse_at, search_with_stats_at}`, `compact_browse` | frozen | | | the call into the exact scan | | | |
@@ -325,22 +333,27 @@ builds.
 are complete, and it supports no size or speed claim. Anchors are valid on the trees named above; a lane that changes
 the lines around one re-bases it and replays the mutant, and does not trust the recorded result.
 
-## 8. Decisions requested
+## 8. Decisions
 
-- **OPEN-71-02, survivor evidence.** Accept the evidence form in the [ledgers](p3b-survivor-ledgers.md#evidence-that-would-settle-open-71-02):
-  one record per mutant with before and after SHA-256, the failing test names and a restored-green run, replayed
-  independently. R0's ledger has that shape.
-- **OPEN-71-03, seam freeze.** Approve sections 3 and 4 as frozen, and section 5 as the additive shapes of the five
-  ANN operations. Recommended order: land `base_rows`, `affected_ids` and `ordered_ids` before E4, because the exact scan
-  needs an ID source that does not materialize; leave `binding` and `for_each_vector_block` to the ANN lane.
-- **OPEN-71-04, J's moved tests.** Ratify that the HNSW and snapshot names (`compact_hnsw_rerank_uses_pinned_generation`,
+Decided on 2026-11-05 by the coordinator under the owner's delegation, as recommended.
+
+- **OPEN-71-02, survivor evidence: approved.** The evidence form in the [ledgers](p3b-survivor-ledgers.md#evidence-that-would-settle-open-71-02)
+  is the acceptance form: one record per mutant with before and after SHA-256, the failing test names and a restored-green
+  run, replayed independently. R0's ledger has that shape. An equivalence claim (`pa-graph-evidence-wall-clock`)
+  additionally needs an independent review and a pinning test wherever one can be written.
+- **OPEN-71-03, seam freeze: approved.** Sections 3 and 4 are frozen and section 5 holds the additive shapes. R0 implements
+  `base_rows`, `affected_ids` and `ordered_ids` as its slice 3, ahead of E4, because the exact scan needs an ID source that
+  does not materialize: crate-private, under the seam's test gate, with `effective_ids` unchanged, the tests and mutants
+  that section 5 lists, and an independent review. `binding` and `for_each_vector_block` stay with the ANN lane.
+- **OPEN-71-04, J's moved tests: ratified.** The HNSW and snapshot names (`compact_hnsw_rerank_uses_pinned_generation`,
   `compact_ann_snapshot_rejects_other_generation`, `compact_rebuild_snapshot_survives_drop_and_refused_checkpoint`) move
-  to P3c, that slice 4 proves the generic pin and the refusal with the tests that exist
-  (`compact_metadata_text_indexes_verify_overlay`, `compact_ann_paths_remain_refused_with_unchanged_state`), and that
+  to P3c and read "moved to P3c, required before any compact ANN activation" in the J row of the P3 design and in the
+  P3c test plan, so that no gate disappears. Slice 4 proves the generic pin and the refusal with the tests that exist
+  (`compact_metadata_text_indexes_verify_overlay`, `compact_ann_paths_remain_refused_with_unchanged_state`), and
   `compact_server_materializes_only_results` stays with C4.
-- **OPEN-71-14, campaign sizes.** Keep the inventory's minima and every historical survivor, and count a mutant only
-  when it compiles, runs, fails a named test and restores byte-identically. R0 shows that 69 new mutants over one seam
-  are practical.
+- **OPEN-71-14, campaign sizes: approved.** Keep the inventory's minima and every historical survivor, count a mutant only
+  when it compiles, runs, fails a named test and restores byte-identically, and take a baseline run on the previous tag so
+  that a gap closed is measured and not claimed. R0 shows that 69 new mutants over one seam are practical.
 
 ## 9. Verification
 
