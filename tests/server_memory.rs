@@ -519,7 +519,7 @@ async fn evidence_that_names_something_is_still_refused() {
                 "item" => body["items"][0]["evidence"] = evidence.clone(),
                 _ => body["evidence"] = evidence.clone(),
             }
-            requests.push((MEMORY_PATHS[0], body));
+            requests.push((MEMORY_PATHS[0], body, place == "item"));
         }
         for place in ["output", "request"] {
             let mut body = consolidate_body("c-named");
@@ -527,17 +527,30 @@ async fn evidence_that_names_something_is_still_refused() {
                 "output" => body["output"]["evidence"] = evidence.clone(),
                 _ => body["evidence"] = evidence.clone(),
             }
-            requests.push((SERVED[2], body));
+            requests.push((SERVED[2], body, false));
         }
-        for (path, body) in requests {
+        for (path, body, item_reference) in requests {
             let (status, error) = post(&app, path, &token, &body).await;
-            assert_eq!(
-                (status, &error["error"]["code"], &error["error"]["details"]),
+            // An item of `remember` may name a record of the evidence collection
+            // (0.7.1), which takes the grant's raw access: this credential has
+            // none, so it meets the single 403 body, whatever the value is.
+            // Every other place keeps the 409 refusal.
+            let expected = if item_reference {
+                (403, json!("forbidden_scope"), Value::Null)
+            } else {
                 (
                     409,
-                    &json!("memory_capability_unavailable"),
-                    &json!({"feature": "evidence"})
+                    json!("memory_capability_unavailable"),
+                    json!({"feature": "evidence"}),
+                )
+            };
+            assert_eq!(
+                (
+                    status,
+                    error["error"]["code"].clone(),
+                    error["error"]["details"].clone()
                 ),
+                expected,
                 "{path} {evidence}"
             );
         }
