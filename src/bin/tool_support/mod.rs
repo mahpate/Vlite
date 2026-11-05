@@ -1,6 +1,7 @@
 #![allow(dead_code)]
 #[cfg(feature = "json")]
 pub(crate) mod kv_mcp;
+pub(crate) mod line;
 #[cfg(feature = "mcp-proxy")]
 pub(crate) mod memory_mcp;
 use std::{collections::BTreeMap, error::Error, process::ExitCode};
