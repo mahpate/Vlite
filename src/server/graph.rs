@@ -782,22 +782,6 @@ fn authorize_records(
 ) -> Result<(), ApiError> {
     let mut mutations: BTreeMap<&str, Vec<Mutation>> = BTreeMap::new();
     for op in ops {
-        if matches!(op, GraphOp::DeleteNode { .. })
-            && !service.memory_bindings.iter().all(|binding| {
-                binding
-                    .storage()
-                    .filter(|(graph, _)| !graph)
-                    .all(|(_, name)| {
-                        service.memory_bindings.reserved().raw_allowed(
-                            super::raw_credential(role),
-                            super::reserved::Resource::Collection,
-                            &name,
-                        )
-                    })
-            })
-        {
-            return Err(forbidden_scope());
-        }
         let collections = match op {
             GraphOp::Attach { collection, .. } | GraphOp::Detach { collection, .. } => {
                 vec![collection.clone()]
@@ -812,9 +796,7 @@ fn authorize_records(
                     .push(mutation.clone());
                 vec![collection.clone()]
             }
-            GraphOp::DeleteNode { key, .. } if matches!(role, admin::Role::Scoped(_)) => {
-                db.node_attachment_collections(graph, key)
-            }
+            GraphOp::DeleteNode { key, .. } => db.node_attachment_collections(graph, key),
             _ => continue,
         };
         let credential = super::raw_credential(role);

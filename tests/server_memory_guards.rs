@@ -1,14 +1,14 @@
 #![cfg(feature = "server")]
 
-use axum::{body::Body, http::Request, Router};
+use axum::{Router, body::Body, http::Request};
 use http_body_util::BodyExt;
 use serde_json::Value;
 use sha2::{Digest, Sha256};
 use tempfile::TempDir;
 use tower::ServiceExt;
 use vlite::{
-    server::{configured_admin_router, BearerToken, ServerOptions, Service},
     CollectionSpec, CreateOptions, Database, FormatVersion,
+    server::{BearerToken, ServerOptions, Service, configured_admin_router},
 };
 
 const ADMIN: &str = "fake_memory_guard_admin_token_0123456789_ABCDEFGHIJKLMNOPQRSTUVWXYZ";
@@ -263,6 +263,7 @@ fn start_wildcard_scoped(
     let app = configured_admin_router(
         Service::new(db),
         ServerOptions {
+            loopback_only: true,
             admin_token: Some(BearerToken::new(ADMIN).unwrap()),
             read_only_token: Some(BearerToken::new(READ_ONLY).unwrap()),
             admin_directory: Some(directory.path().into()),
@@ -272,6 +273,200 @@ fn start_wildcard_scoped(
     )
     .unwrap();
     (app, format!("vlk_{ID}_{secret}"))
+}
+
+#[tokio::test]
+async fn node_deletion_checks_only_its_own_attachments_for_every_role() {
+    const TENANT: &str = "0123456789abcdef0123456789abcdef";
+    let operations = ["read", "write", "collections", "graph_read", "graph_write"];
+    for tenanted in [false, true] {
+        let directory = tempfile::tempdir().unwrap();
+        let (app, raw) = if tenanted {
+            start_tenant_scoped(&directory, true, &operations)
+        } else {
+            start_wildcard_scoped(&directory, true, &operations)
+        };
+        let (status, issued) = call(
+            &app,
+            "POST",
+            "/v1/admin/credentials",
+            Body::from(
+                serde_json::json!({
+                    "name": "fake deletion test key",
+                    "collections": ["*"],
+                    "graphs": ["*"],
+                    "operations": operations,
+                    "tenant_id": tenanted.then_some(TENANT),
+                    "expires_unix_ms": u64::try_from(std::time::SystemTime::now()
+                        .duration_since(std::time::UNIX_EPOCH).unwrap().as_millis()).unwrap()
+                        + 60_000
+                })
+                .to_string(),
+            ),
+        )
+        .await;
+        assert_eq!(status, 201, "{issued}");
+        let no_raw = issued["token"].as_str().unwrap();
+        let mut actors = vec![
+            ("wildcard", no_raw.to_owned(), false, false, false),
+            ("raw_access", raw.clone(), false, true, false),
+        ];
+        if !tenanted {
+            let password = "fake-correct-horse-battery-staple";
+            let (status, body) = call(
+                &app,
+                "POST",
+                "/v1/admin/users",
+                Body::from(
+                    serde_json::json!({
+                        "username": "node-editor", "password": password, "role": "editor",
+                        "must_change_password": false
+                    })
+                    .to_string(),
+                ),
+            )
+            .await;
+            assert_eq!(status, 201, "{body}");
+            let response = app
+                .clone()
+                .oneshot(
+                    Request::builder()
+                        .method("POST")
+                        .uri("/v1/auth/login")
+                        .header("content-type", "application/json")
+                        .header("sec-fetch-site", "same-origin")
+                        .header("x-vlite-request", "1")
+                        .body(Body::from(
+                            serde_json::json!({"username": "node-editor", "password": password})
+                                .to_string(),
+                        ))
+                        .unwrap(),
+                )
+                .await
+                .unwrap();
+            assert_eq!(response.status(), 200);
+            let cookie = response.headers()["set-cookie"]
+                .to_str()
+                .unwrap()
+                .split(';')
+                .next()
+                .unwrap()
+                .to_owned();
+            actors.extend([
+                ("admin", ADMIN.to_owned(), false, false, false),
+                ("session_editor", cookie, true, false, false),
+                ("read_only", READ_ONLY.to_owned(), false, false, true),
+            ]);
+        }
+        let evidence = if tenanted {
+            format!("t{TENANT}__notes_ev")
+        } else {
+            "notes_ev".into()
+        };
+        let ordinary = if tenanted {
+            format!("t{TENANT}__ordinary")
+        } else {
+            "ordinary".into()
+        };
+        for (index, (role, token, session, raw_access, read_only)) in actors.into_iter().enumerate()
+        {
+            let mut setup = Vec::new();
+            for kind in ["plain", "ordinary", "reserved", "mixed"] {
+                let key = format!("{role}-{kind}");
+                setup.push(serde_json::json!({"op": "create_node", "key": key}));
+                for (offset, collection) in [(0, &ordinary), (1, &evidence)] {
+                    if kind == "plain"
+                        || (kind == "ordinary" && offset == 1)
+                        || (kind == "reserved" && offset == 0)
+                    {
+                        continue;
+                    }
+                    let id = (index * 10 + setup.len() * 2 + offset + 1).to_string();
+                    let (status, body) = call_token(
+                        &app,
+                        "PUT",
+                        &format!(
+                            "/v1/collections/{}/vectors/{id}",
+                            if offset == 0 { "ordinary" } else { "notes_ev" }
+                        ),
+                        Body::from(r#"{"vector":[0,1]}"#),
+                        &raw,
+                    )
+                    .await;
+                    assert_eq!(status, 204, "{body}");
+                    setup.push(serde_json::json!({
+                        "op": "attach", "node": key, "collection": collection, "record": id
+                    }));
+                }
+            }
+            let (status, body) = call_token(
+                &app,
+                "POST",
+                "/v1/graphs/ordinary_graph/batch",
+                Body::from(serde_json::json!({"ops": setup}).to_string()),
+                &raw,
+            )
+            .await;
+            assert_eq!(status, 200, "{body}");
+            let mut denied = Vec::new();
+            for kind in ["plain", "ordinary", "reserved", "mixed"] {
+                let key = format!("{role}-{kind}");
+                let request = Request::builder()
+                    .method("POST")
+                    .uri("/v1/graphs/ordinary_graph/batch")
+                    .header("content-type", "application/json")
+                    .header("sec-fetch-site", "same-origin")
+                    .header("x-vlite-request", "1");
+                let request = if session {
+                    request.header("cookie", &token)
+                } else {
+                    request.header("authorization", format!("Bearer {token}"))
+                };
+                let response = app
+                    .clone()
+                    .oneshot(
+                        request
+                            .body(Body::from(
+                                serde_json::json!({"ops": [{"op": "delete_node", "key": key}]})
+                                    .to_string(),
+                            ))
+                            .unwrap(),
+                    )
+                    .await
+                    .unwrap();
+                let status = response.status().as_u16();
+                let mut headers = response.headers().clone();
+                assert!(headers.remove("x-request-id").is_some());
+                let bytes = response.into_body().collect().await.unwrap().to_bytes();
+                let allowed = !read_only && (raw_access || matches!(kind, "plain" | "ordinary"));
+                assert_eq!(
+                    status,
+                    if allowed { 200 } else { 403 },
+                    "{role}/{kind}: {bytes:?}"
+                );
+                if !allowed {
+                    let error: Value = serde_json::from_slice(&bytes).unwrap();
+                    if !read_only {
+                        assert_eq!(error["error"]["code"], "forbidden_scope");
+                    }
+                    denied.push((headers, bytes));
+                }
+                let (status, result) = call_token(
+                    &app,
+                    "POST",
+                    "/v1/graphs/ordinary_graph/nodes/get",
+                    Body::from(serde_json::json!({"node": {"key": key}}).to_string()),
+                    &raw,
+                )
+                .await;
+                assert_eq!(status, 200, "{result}");
+                assert_eq!(result["node"].is_null(), allowed, "{role}/{kind}: {result}");
+            }
+            for pair in denied.windows(2) {
+                assert_eq!(pair[0], pair[1], "{role}: denials differ by attachments");
+            }
+        }
+    }
 }
 
 fn start_tenant_scoped(
@@ -553,11 +748,13 @@ async fn reserved_graph_and_collection_are_denied_and_lists_filter_them() {
     assert_eq!(missing_webhook_error["error"]["code"], "webhook_not_found");
 
     let (_, diagnostics) = get(&app, "/v1/admin/diagnostics/slow-queries").await;
-    assert!(diagnostics["items"]
-        .as_array()
-        .unwrap()
-        .iter()
-        .all(|item| { item.to_string().find("notes_ev").is_none() }));
+    assert!(
+        diagnostics["items"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .all(|item| { item.to_string().find("notes_ev").is_none() })
+    );
 
     let (_, first_page) = get(&app, "/v1/changes?limit=1").await;
     assert!(first_page["changes"].as_array().unwrap().is_empty());
@@ -572,13 +769,15 @@ async fn reserved_graph_and_collection_are_denied_and_lists_filter_them() {
         &format!("/v1/changes?limit=1000&cursor={second_cursor}"),
     )
     .await;
-    assert!(remaining_pages["changes"]
-        .as_array()
-        .unwrap()
-        .iter()
-        .all(|change| {
-            change["collection"] != "notes_ev" && change["change"]["graph"] != "notes_graph"
-        }));
+    assert!(
+        remaining_pages["changes"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .all(|change| {
+                change["collection"] != "notes_ev" && change["change"]["graph"] != "notes_graph"
+            })
+    );
     assert!(remaining_pages["next_cursor"].as_str().is_some());
 
     let (_, graphs) = get(&app, "/v1/graphs").await;
@@ -1048,11 +1247,13 @@ async fn tenant_qualified_reservations_follow_scoped_credentials_and_raw_access(
     }
     let (tenant_list_status, tenant_list) = get(&no_raw, "/v1/admin/tenants").await;
     assert_eq!(tenant_list_status, 200);
-    assert!(tenant_list["items"]
-        .as_array()
-        .unwrap()
-        .iter()
-        .all(|item| item["id"] != TENANT || item["collections"] == 1));
+    assert!(
+        tenant_list["items"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .all(|item| item["id"] != TENANT || item["collections"] == 1)
+    );
     let (delete_tenant_status, delete_tenant_error) = call_token(
         &no_raw,
         "DELETE",
@@ -1131,11 +1332,13 @@ async fn tenant_qualified_reservations_follow_scoped_credentials_and_raw_access(
         ADMIN,
     )
     .await;
-    assert!(feed["changes"]
-        .as_array()
-        .unwrap()
-        .iter()
-        .all(|change| { change["collection"] != format!("t{TENANT}__notes_ev") }));
+    assert!(
+        feed["changes"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .all(|change| { change["collection"] != format!("t{TENANT}__notes_ev") })
+    );
     let (_, usage) = call_token(
         &no_raw,
         "GET",
@@ -1147,11 +1350,13 @@ async fn tenant_qualified_reservations_follow_scoped_credentials_and_raw_access(
     assert!(usage["collections"].as_array().unwrap().iter().all(|item| {
         item["name"] != "notes_ev" && item["physical_name"] != format!("t{TENANT}__notes_ev")
     }));
-    assert!(usage["collections"]
-        .as_array()
-        .unwrap()
-        .iter()
-        .any(|item| item["name"] == "ordinary"));
+    assert!(
+        usage["collections"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|item| item["name"] == "ordinary")
+    );
 
     let full_tenant_operations = [
         "read",
@@ -1229,11 +1434,13 @@ async fn tenant_qualified_reservations_follow_scoped_credentials_and_raw_access(
     );
     let (_, raw_collections) =
         call_token(&raw_read, "GET", "/v1/collections", Body::empty(), &token).await;
-    assert!(raw_collections["items"]
-        .as_array()
-        .unwrap()
-        .iter()
-        .any(|item| item["name"] == "notes_ev"));
+    assert!(
+        raw_collections["items"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|item| item["name"] == "notes_ev")
+    );
     assert_eq!(
         call_token(
             &raw_read,
@@ -1247,11 +1454,13 @@ async fn tenant_qualified_reservations_follow_scoped_credentials_and_raw_access(
         200
     );
     let (_, raw_graphs) = call_token(&raw_read, "GET", "/v1/graphs", Body::empty(), &token).await;
-    assert!(raw_graphs["graphs"]
-        .as_array()
-        .unwrap()
-        .iter()
-        .any(|graph| graph["name"] == "notes_graph"));
+    assert!(
+        raw_graphs["graphs"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|graph| graph["name"] == "notes_graph")
+    );
     assert_eq!(
         call_token(
             &raw_read,
@@ -1571,9 +1780,11 @@ async fn empty_bindings_are_noop_and_invalid_files_fail_without_echoing_content(
         Ok(_) => panic!("unknown binding fields must reject startup"),
         Err(error) => error,
     };
-    assert!(error
-        .to_string()
-        .contains("memory bindings file is invalid"));
+    assert!(
+        error
+            .to_string()
+            .contains("memory bindings file is invalid")
+    );
     assert!(!error.to_string().contains(marker));
 }
 
