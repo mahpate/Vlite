@@ -721,7 +721,7 @@ async fn batch(
         authorize_records(&owner, &scope, db, &name, &ops)?;
         Ok(name
             .write(db)?
-            .write_batch_visible(&ops, &scope.visible())?)
+            .write_batch_visible(&ops, &scope.visible(), &scope.attachable())?)
     })
     .await?;
     batch_output(&graph, &result).map(Json)
@@ -787,7 +787,7 @@ fn authorize_records(
                 return Err(if delete_node {
                     forbidden_scope()
                 } else {
-                    Error::CollectionNotFound.into()
+                    scope.hidden_collection()
                 });
             }
         }

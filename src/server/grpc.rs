@@ -280,6 +280,7 @@ impl Adapter {
             #[cfg(feature = "otel")]
             let trace = super::telemetry::request(&request_id, route, &trace_collection);
             let mut role = None;
+            let mut hidden = false;
             let result = match service.requests.clone().try_acquire_owned() {
                 Err(_) => Err(ApiError::new(
                     StatusCode::SERVICE_UNAVAILABLE,
@@ -300,7 +301,15 @@ impl Adapter {
                         }) {
                             Err(error) => Err(error),
                             Ok(()) => {
-                                core(service.clone(), caller, request_id.clone(), message).await
+                                let (result, noted) = guard::track_hidden(core(
+                                    service.clone(),
+                                    caller,
+                                    request_id.clone(),
+                                    message,
+                                ))
+                                .await;
+                                hidden = noted;
+                                result
                             }
                         }
                     }
@@ -322,6 +331,7 @@ impl Adapter {
                     role: role.as_ref(),
                     request_id: &request_id,
                     started,
+                    hidden,
                 },
             );
             (request_id, result)

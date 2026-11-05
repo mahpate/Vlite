@@ -71,18 +71,20 @@ grants do not grant raw graph, record, search, feed or attachment access.
 `raw_access` is false unless explicitly granted in the private bindings file;
 even with it, the caller still needs the ordinary tenant, collection and
 operation permissions. Reserved resources are omitted from raw collection/graph
-lists, tenant usage, slow-query diagnostics, and change feeds; feed cursors
+lists, slow-query diagnostics, and change feeds; feed cursors
 still advance across the unfiltered page. `GET /v1/database` reports only the
 default collection; startup rejects `default` as a binding's evidence collection,
 so bindings cannot reserve legacy default-collection routes. With any binding
 configured, global metrics, graph guard
 statistics, replication export, webhook list/status, all import operations,
 and automatic-maintenance routes return `403 forbidden_scope`, including for
-credentials with `raw_access`. Webhook
-subscriptions accept reserved-name filters just as they accept missing-name
-filters; the dispatcher still filters reserved events from all subscriptions. The gRPC
-listener and scheduled automatic index maintenance also fail closed until those
-paths can enforce the same checks.
+credentials with `raw_access`. Webhook creation answers a reserved-name filter
+exactly as it answers a missing-name filter (both are accepted with `201`), so
+a subscription cannot be used to find out what is reserved; the dispatcher
+still filters reserved events from all subscriptions. The gRPC handlers
+resolve every name through the same per-request guard as the REST routes, but
+the gRPC listener and scheduled automatic index maintenance still fail closed
+at startup while a binding exists, until the release differential covers them.
 
 Without raw access on the owning binding, a raw request naming its graph or
 collection answers as if that resource were missing, using the ordinary
@@ -92,7 +94,12 @@ Retrieve evidence remains redacted when outside ordinary grants; an explicitly
 named reserved evidence collection instead answers like a missing collection.
 Creating a resource under a reserved name answers like an occupied ordinary
 name (`409 collection_exists` or `409 graph_exists`); that collision cannot be
-hidden. The per-node attachment check on `delete_node` still requires raw
+hidden. A credential's attempt on a reserved name is the one thing its holder
+cannot see: the server counts it and, at most once a minute for each
+credential and route, appends a `reserved_hidden_attempt` entry (credential ID,
+method, route template and request ID, never the name) to the persistent audit
+log, which only the administrator reads. The per-node attachment check on
+`delete_node` still requires raw
 access to each reserved evidence collection attached to that node.
 Provision raw-holder credentials with `collections:["*"]` before granting raw
 access in the bindings file; credential creation treats a named reserved
@@ -121,17 +128,21 @@ graph or collection that holds ordinary data, but one node with the
 `VliteMemoryScope` label satisfies that check, so bind only resources that were
 created for memory. The administrator's HTTP request log and persistent audit
 show reserved names and record IDs, and collection list `id` values have gaps
-where reserved collections sit. `raw_access` covers every scope of its
-binding's resources, not one memory scope. A credential that holds the `backup`
-operation can create, verify and drill backups, and their database-wide counts
-of collections, records and commits include reserved resources; the backup
-files themselves hold reserved data and are operator-managed. A raw credential
+where reserved collections sit; both are accepted: the administrator can see
+everything, so keep the log and audit directories private, and collection IDs
+are never renumbered, because clients cache them. `raw_access` covers every
+scope of its binding's resources, not one memory scope. While any resource is
+reserved, the backup routes (list, create, verify, drill and schedule status)
+answer `403 forbidden_scope` to every credential, whatever its operations:
+backups hold reserved data, and so do their database-wide counts, so they are
+the administrator's alone. A raw credential
 can attach reserved evidence records to nodes of an unreserved graph, and other
-users of that graph can then neither delete nor detach those nodes. The same
-holds the other way: a raw credential can attach an ordinary record to a node of
-its reserved graph, and nobody without raw access can then delete, expire or
-re-attach that record or drop its collection until the holder detaches it; the
-refusals show that something holds it. A credential created before a binding,
+users of that graph can then neither delete nor detach those nodes. A reserved
+graph takes only its own binding's evidence collection through the public
+routes: attaching any other record answers `409 graph_record_not_attachable`,
+raw holders included, so an ordinary record cannot be pinned by a reserved
+graph (records attached by an earlier version stay attached until the holder
+detaches them). A credential created before a binding,
 whose grant already names a reserved collection, answers 404 for that name while
 a missing name outside its grant answers 403, because the grant check runs
 first; create such credentials after the bindings file is in place. Webhook
@@ -139,16 +150,16 @@ subscriptions and credential graph lists that name a reserved resource begin to
 match it if the binding is removed. Startup refuses `default` as an evidence
 collection, so a binding never changes the legacy routes. Live vector quotas
 count reserved records, so a caller with a quota sees its headroom change when
-memory writes, while tenant usage reports leave reserved collections out and
-can show more headroom than the quota allows. An attempt to use a reserved name
-answers like a missing
-resource, so it is not counted as a credential denial in the metrics or the
-audit log. A binding's receipt window, generation and names are read from the
+memory writes. The administrator's tenant list and usage report list and count
+the reserved collections too, so their headroom is what the quota enforces; no
+credential can read those reports. A binding's receipt window, generation and
+names are read from the
 file at each start and are not checked against the database, so do not change
 them once memory has been written (see
 [Agent memory](API.md#start-the-server-with-memory)).
-The bindings file is read through symbolic links; keep it in a directory that
-only the operator can write.
+A symbolic link as the bindings file is refused at startup (`memory bindings
+source must be a regular file`): copy the file instead of linking it, and keep
+its directory writable only by the operator.
 
 These checks apply only at the server boundary. Direct embedded/file access and
 operator-managed backups are outside this authorization policy and must be

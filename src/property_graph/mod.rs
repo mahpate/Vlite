@@ -434,9 +434,10 @@ impl GraphMut<'_> {
         &mut self,
         ops: &[GraphOp],
         visible: &dyn Fn(&str) -> bool,
+        attachable: &dyn Fn(&str, &str) -> bool,
     ) -> Result<GraphBatchResult> {
         self.db
-            .write_graph_batch_visible_at(self.id, ops, None, visible)
+            .write_graph_batch_visible_at(self.id, ops, None, visible, attachable)
     }
 
     pub(crate) fn write_batch_at(
@@ -811,7 +812,16 @@ impl Database {
     }
 
     /// Resolves names and converts and validates the inputs of one operation.
-    fn plan_input(&self, op: &GraphOp, visible: &dyn Fn(&str) -> bool) -> Result<Planned> {
+    /// `visible` answers whether a named collection exists for the caller, and
+    /// `attachable(graph, collection)` whether a record of it may be attached to
+    /// a node of `graph`; both are `true` for every embedded and memory write.
+    fn plan_input(
+        &self,
+        op: &GraphOp,
+        graph: &str,
+        visible: &dyn Fn(&str) -> bool,
+        attachable: &dyn Fn(&str, &str) -> bool,
+    ) -> Result<Planned> {
         let resolve = |name: &str| self.resolve_visible(name, visible);
         let mutation = match op {
             GraphOp::CreateNode {
@@ -900,11 +910,17 @@ impl Database {
                 node,
                 collection,
                 record,
-            } => GraphMutation::Attach {
-                node: node.clone(),
-                collection: resolve(collection)?,
-                record: *record,
-            },
+            } => {
+                let resolved = resolve(collection)?;
+                if !attachable(graph, collection) {
+                    return Err(Error::GraphRecordNotAttachable);
+                }
+                GraphMutation::Attach {
+                    node: node.clone(),
+                    collection: resolved,
+                    record: *record,
+                }
+            }
             GraphOp::Detach { node, collection } => GraphMutation::Detach {
                 node: node.clone(),
                 collection: resolve(collection)?,
@@ -956,7 +972,7 @@ impl Database {
         ops: &[GraphOp],
         now_ms: Option<u64>,
     ) -> Result<GraphBatchResult> {
-        self.write_graph_batch_visible_at(graph_id, ops, now_ms, &|_| true)
+        self.write_graph_batch_visible_at(graph_id, ops, now_ms, &|_| true, &|_, _| true)
     }
 
     fn write_graph_batch_visible_at(
@@ -965,6 +981,7 @@ impl Database {
         ops: &[GraphOp],
         now_ms: Option<u64>,
         visible: &dyn Fn(&str) -> bool,
+        attachable: &dyn Fn(&str, &str) -> bool,
     ) -> Result<GraphBatchResult> {
         self.graphs()?;
         if self.read_only {
@@ -988,10 +1005,17 @@ impl Database {
         {
             return Err(Error::UnsupportedFeature(format::FLAG_TEMPORAL));
         }
-        let planned = ops
-            .iter()
-            .map(|op| self.plan_input(op, visible))
-            .collect::<Result<Vec<_>>>()?;
+        let planned = {
+            let graph_name = self
+                .graph
+                .as_ref()
+                .and_then(|state| state.graph(graph_id))
+                .map(|graph| graph.name())
+                .ok_or(Error::GraphNotFound)?;
+            ops.iter()
+                .map(|op| self.plan_input(op, graph_name, visible, attachable))
+                .collect::<Result<Vec<_>>>()?
+        };
         self.commit_planned(graph_id, planned, outcomes, now_ms)
     }
 

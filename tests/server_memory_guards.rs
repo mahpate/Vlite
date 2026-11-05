@@ -258,6 +258,16 @@ fn start_wildcard_scoped(
     raw_access: bool,
     operations: &[&str],
 ) -> (Router, String) {
+    start_wildcard(directory, Some(raw_access), operations)
+}
+
+/// A root credential holding `["*"]`, with the memory bindings file (and its
+/// `raw_access` grant) or, given `None`, without any reservation.
+fn start_wildcard(
+    directory: &TempDir,
+    raw_access: Option<bool>,
+    operations: &[&str],
+) -> (Router, String) {
     const ID: &str = "abcdefghij27";
     let secret = "A".repeat(43);
     let db = database();
@@ -284,16 +294,19 @@ fn start_wildcard_scoped(
         serde_json::to_vec(&credentials).unwrap(),
     )
     .unwrap();
-    let path = directory.path().join("memory-bindings.json");
-    let bindings = BINDINGS.replace(
-        "\"raw_access\":false",
-        if raw_access {
-            "\"raw_access\":true"
-        } else {
-            "\"raw_access\":false"
-        },
-    );
-    std::fs::write(&path, bindings).unwrap();
+    let memory_bindings_file = raw_access.map(|raw_access| {
+        let path = directory.path().join("memory-bindings.json");
+        let bindings = BINDINGS.replace(
+            "\"raw_access\":false",
+            if raw_access {
+                "\"raw_access\":true"
+            } else {
+                "\"raw_access\":false"
+            },
+        );
+        std::fs::write(&path, bindings).unwrap();
+        path
+    });
     let app = configured_admin_router(
         Service::new(db),
         ServerOptions {
@@ -301,7 +314,7 @@ fn start_wildcard_scoped(
             admin_token: Some(BearerToken::new(ADMIN).unwrap()),
             read_only_token: Some(BearerToken::new(READ_ONLY).unwrap()),
             admin_directory: Some(directory.path().into()),
-            memory_bindings_file: Some(path),
+            memory_bindings_file,
             ..Default::default()
         },
     )
@@ -1260,12 +1273,13 @@ async fn tenant_qualified_reservations_follow_scoped_credentials_and_raw_access(
     }
     let (tenant_list_status, tenant_list) = get(&no_raw, "/v1/admin/tenants").await;
     assert_eq!(tenant_list_status, 200);
+    // The administrator's tenant report counts the reserved collection too.
     assert!(
         tenant_list["items"]
             .as_array()
             .unwrap()
             .iter()
-            .all(|item| item["id"] != TENANT || item["collections"] == 1)
+            .all(|item| item["id"] != TENANT || item["collections"] == 2)
     );
     let (delete_tenant_status, delete_tenant_error) = call_token(
         &no_raw,
@@ -1360,16 +1374,13 @@ async fn tenant_qualified_reservations_follow_scoped_credentials_and_raw_access(
         ADMIN,
     )
     .await;
-    assert!(usage["collections"].as_array().unwrap().iter().all(|item| {
-        item["name"] != "notes_ev" && item["physical_name"] != format!("t{TENANT}__notes_ev")
-    }));
-    assert!(
-        usage["collections"]
-            .as_array()
-            .unwrap()
-            .iter()
-            .any(|item| item["name"] == "ordinary")
-    );
+    let usage_names = usage["collections"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|item| item["name"].as_str().unwrap())
+        .collect::<Vec<_>>();
+    assert_eq!(usage_names, ["notes_ev", "ordinary"]);
 
     let full_tenant_operations = [
         "read",
@@ -1989,6 +2000,255 @@ async fn read_only_role_cannot_raw_access_a_reserved_collection() {
         .0,
         403
     );
+}
+
+#[tokio::test]
+async fn tenant_usage_and_headroom_count_reserved_records_for_the_administrator() {
+    const TENANT: &str = "0123456789abcdef0123456789abcdef";
+    let directory = tempfile::tempdir().unwrap();
+    let (app, raw) = start_tenant_scoped(
+        &directory,
+        true,
+        &["read", "write", "collections", "graph_read"],
+    );
+    let put = call_token(
+        &app,
+        "PUT",
+        "/v1/collections/notes_ev/vectors/7",
+        Body::from(r#"{"vector":[0.1,0.2],"payload_base64":"","metadata":{}}"#),
+        &raw,
+    )
+    .await;
+    assert_eq!(put.0, 204, "{put:?}");
+    let (status, _) = call_token(
+        &app,
+        "PUT",
+        &format!("/v1/admin/tenants/{TENANT}/settings"),
+        Body::from(r#"{"max_vectors":5}"#),
+        ADMIN,
+    )
+    .await;
+    assert_eq!(status, 200);
+    let (status, usage) = call_token(
+        &app,
+        "GET",
+        &format!("/v1/admin/tenants/{TENANT}/usage"),
+        Body::empty(),
+        ADMIN,
+    )
+    .await;
+    assert_eq!(status, 200);
+    let reserved = usage["collections"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|item| item["name"] == "notes_ev")
+        .expect("the administrator's report lists the reserved collection");
+    assert_eq!(reserved["vectors"], 1);
+    assert_eq!(usage["vectors"], 1);
+    assert_eq!(usage["remaining_vectors"], 4);
+    assert_eq!(usage["over_quota"], false);
+    let (_, tenants) = call_token(&app, "GET", "/v1/admin/tenants", Body::empty(), ADMIN).await;
+    let item = tenants["items"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|item| item["id"] == TENANT)
+        .unwrap();
+    assert_eq!(
+        (item["collections"].as_u64(), item["vectors"].as_u64()),
+        (Some(2), Some(1))
+    );
+}
+
+#[tokio::test]
+async fn backups_belong_to_the_administrator_while_resources_are_reserved() {
+    let operations = ["read", "backup", "graph_read"];
+    let routes = [
+        ("GET", "/v1/admin/backups"),
+        ("POST", "/v1/admin/backups"),
+        ("GET", "/v1/admin/backups/schedule"),
+        ("POST", "/v1/admin/backups/backup-1-1-1.vlite/verify"),
+        ("POST", "/v1/admin/backups/backup-1-1-1.vlite/drill"),
+    ];
+    let directory = tempfile::tempdir().unwrap();
+    let (app, token) = start_wildcard_scoped(&directory, true, &operations);
+    for (method, path) in routes {
+        let (status, error) = call_token(&app, method, path, Body::empty(), &token).await;
+        assert_eq!(status, 403, "{method} {path}");
+        assert_eq!(error["error"]["code"], "forbidden_scope", "{method} {path}");
+    }
+    assert_eq!(
+        call_token(&app, "GET", "/v1/admin/backups", Body::empty(), ADMIN)
+            .await
+            .0,
+        200
+    );
+
+    // With nothing reserved the same credential keeps the operation.
+    let directory = tempfile::tempdir().unwrap();
+    let (app, token) = start_wildcard(&directory, None, &operations);
+    let (status, _) = call_token(&app, "GET", "/v1/admin/backups", Body::empty(), &token).await;
+    assert_eq!(status, 200);
+}
+
+#[tokio::test]
+async fn an_ordinary_record_cannot_be_attached_to_a_reserved_graph_even_by_its_raw_holder() {
+    let directory = tempfile::tempdir().unwrap();
+    let operations = ["read", "write", "graph_read", "graph_write"];
+    let (app, raw) = start_wildcard(&directory, Some(true), &operations);
+    let (app, raw) = (&app, &raw);
+    let put = |collection: &'static str, id: u64| async move {
+        call_token(
+            app,
+            "PUT",
+            &format!("/v1/collections/{collection}/vectors/{id}"),
+            Body::from(r#"{"vector":[0,1]}"#),
+            raw,
+        )
+        .await
+    };
+    let batch = |graph: &'static str, ops: Value| async move {
+        call_token(
+            app,
+            "POST",
+            &format!("/v1/graphs/{graph}/batch"),
+            Body::from(serde_json::json!({ "ops": ops }).to_string()),
+            raw,
+        )
+        .await
+    };
+    let attach = |graph: &'static str, node: &'static str, collection: &'static str, id: u64| {
+        batch(
+            graph,
+            serde_json::json!([{
+                "op": "attach", "node": node, "collection": collection, "record": id.to_string()
+            }]),
+        )
+    };
+    for (collection, id) in [("ordinary", 7), ("notes_ev", 8), ("notes_ev", 9)] {
+        assert_eq!(put(collection, id).await.0, 204);
+    }
+    for (graph, key) in [("notes_graph", "n"), ("ordinary_graph", "m")] {
+        let created = batch(
+            graph,
+            serde_json::json!([{"op": "create_node", "key": key}]),
+        )
+        .await;
+        assert_eq!(created.0, 200, "{created:?}");
+    }
+    // The raw holder reaches the graph and the collection, yet an ordinary
+    // record does not belong on a reserved graph.
+    let (status, error) = attach("notes_graph", "n", "ordinary", 7).await;
+    assert_eq!(status, 409, "{error}");
+    assert_eq!(error["error"]["code"], "graph_record_not_attachable");
+    // The binding's own evidence does.
+    assert_eq!(attach("notes_graph", "n", "notes_ev", 8).await.0, 200);
+    // A graph nobody reserved takes ordinary records, and a raw holder's
+    // reserved evidence, as before.
+    assert_eq!(attach("ordinary_graph", "m", "ordinary", 7).await.0, 200);
+    assert_eq!(attach("ordinary_graph", "m", "notes_ev", 9).await.0, 200);
+}
+
+#[tokio::test]
+async fn a_credentials_attempt_on_a_reserved_name_is_audited_without_the_name() {
+    let directory = tempfile::tempdir().unwrap();
+    let (app, token) = start_wildcard(&directory, Some(false), &["read", "write", "graph_read"]);
+    let audit = || async {
+        call_token(
+            &app,
+            "GET",
+            "/v1/admin/audit/persistent?limit=1000",
+            Body::empty(),
+            ADMIN,
+        )
+        .await
+        .1
+    };
+    let attempts = |audit: &Value| {
+        audit["items"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter(|event| event["event"] == "reserved_hidden_attempt")
+            .cloned()
+            .collect::<Vec<_>>()
+    };
+    // Missing and ordinary names, and the administrator's own request for the
+    // reserved one, leave no entry.
+    for path in [
+        "/v1/collections/absent_ev",
+        "/v1/collections/ordinary",
+        "/v1/graphs/absent_graph",
+    ] {
+        call_token(&app, "GET", path, Body::empty(), &token).await;
+    }
+    call_token(
+        &app,
+        "GET",
+        "/v1/collections/notes_ev",
+        Body::empty(),
+        ADMIN,
+    )
+    .await;
+    assert!(attempts(&audit().await).is_empty());
+    // The credential cannot tell its attempt from a missing name...
+    let hidden = call_token(
+        &app,
+        "GET",
+        "/v1/collections/notes_ev",
+        Body::empty(),
+        &token,
+    )
+    .await;
+    let missing = call_token(
+        &app,
+        "GET",
+        "/v1/collections/absent_ev",
+        Body::empty(),
+        &token,
+    )
+    .await;
+    assert_eq!(hidden.0, 404);
+    assert_eq!(hidden.1["error"]["code"], missing.1["error"]["code"]);
+    // ...and the operator can: the credential and the route template, never
+    // the name.
+    let audit = audit().await;
+    let noted = attempts(&audit);
+    assert_eq!(noted.len(), 1, "{audit}");
+    assert_eq!(noted[0]["credential_id"], "abcdefghij27");
+    assert_eq!(noted[0]["route"], "/v1/collections/{collection}");
+    assert!(!audit.to_string().contains("notes_ev"));
+}
+
+#[test]
+fn a_symlinked_bindings_file_is_refused() {
+    let directory = tempfile::tempdir().unwrap();
+    let real = directory.path().join("real-bindings.json");
+    std::fs::write(&real, BINDINGS).unwrap();
+    let link = directory.path().join("memory-bindings.json");
+    #[cfg(unix)]
+    std::os::unix::fs::symlink(&real, &link).unwrap();
+    #[cfg(windows)]
+    if let Err(error) = std::os::windows::fs::symlink_file(&real, &link) {
+        eprintln!("skipped: this account may not create symbolic links: {error}");
+        return;
+    }
+    let options = |path: std::path::PathBuf| ServerOptions {
+        admin_token: Some(BearerToken::new(ADMIN).unwrap()),
+        admin_directory: Some(directory.path().into()),
+        memory_bindings_file: Some(path),
+        ..Default::default()
+    };
+    let error = match configured_admin_router(Service::new(database()), options(link)) {
+        Ok(_) => panic!("a symlinked bindings file must be refused"),
+        Err(error) => error,
+    };
+    assert_eq!(
+        error.to_string(),
+        "memory bindings source must be a regular file"
+    );
+    let _router = configured_admin_router(Service::new(database()), options(real)).unwrap();
 }
 
 #[test]

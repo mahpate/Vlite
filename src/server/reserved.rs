@@ -123,6 +123,18 @@ impl Reserved {
         true
     }
 
+    /// Whether a record of `collection` may be attached to a node of `graph`
+    /// through a public route. A reserved graph takes only records of the
+    /// collection its own binding reserves; any other graph takes any
+    /// collection (a reserved collection is masked by [`Self::raw_allowed`]).
+    /// Memory writes do not go through this rule.
+    pub(super) fn attachment_allowed(&self, graph: &str, collection: &str) -> bool {
+        match self.owner(Resource::Graph, graph) {
+            None => true,
+            Some(owner) => self.owner(Resource::Collection, collection) == Some(owner),
+        }
+    }
+
     fn owner(&self, resource: Resource, stored: &str) -> Option<usize> {
         self.owners.get(&(resource, stored.to_owned())).copied()
     }
@@ -287,6 +299,30 @@ mod tests {
         // Unreserved resources are untouched by this check.
         assert!(reserved.raw_allowed(None, Resource::Graph, "g"));
         assert!(reserved.raw_allowed(Some(PLAIN), Resource::Collection, "other"));
+    }
+
+    #[test]
+    fn a_reserved_graph_takes_only_its_own_bindings_collection() {
+        let bindings = registry();
+        let reserved = bindings.reserved();
+        let tenant_graph = format!("t{TENANT}__g");
+        let tenant_evidence = format!("t{TENANT}__ev");
+        // The binding's own evidence collection, and nothing else, may be
+        // attached to its graph.
+        assert!(reserved.attachment_allowed("notes_graph", "notes_ev"));
+        assert!(reserved.attachment_allowed(&tenant_graph, &tenant_evidence));
+        assert!(!reserved.attachment_allowed("notes_graph", "ordinary"));
+        assert!(!reserved.attachment_allowed("notes_graph", &tenant_evidence));
+        assert!(!reserved.attachment_allowed(&tenant_graph, "notes_ev"));
+        assert!(!reserved.attachment_allowed("old_graph", "notes_ev"));
+        // A graph that is not reserved takes any collection.
+        assert!(reserved.attachment_allowed("ordinary_graph", "ordinary"));
+        assert!(reserved.attachment_allowed("ordinary_graph", "notes_ev"));
+        assert!(
+            Bindings::new(BindingSet::default())
+                .reserved()
+                .attachment_allowed("notes_graph", "ordinary")
+        );
     }
 
     #[test]

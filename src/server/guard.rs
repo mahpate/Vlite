@@ -35,6 +35,38 @@ use crate::{
     kv::{KvStore, KvView},
     property_graph::{GraphInfo, GraphMut, GraphRef},
 };
+use std::sync::atomic::AtomicBool;
+
+tokio::task_local! {
+    /// Set by the request pipeline for the handler it runs, so that the guard
+    /// can tell the pipeline when it hid a reserved resource from a credential.
+    static HIDDEN: Arc<AtomicBool>;
+}
+
+/// Runs the handler of one request and reports, next to its output, whether
+/// the guard answered a credential's request for a reserved resource it may
+/// not reach like a request for a missing one (a hidden attempt). The pipeline
+/// counts and audits it, without the name, once the request is done.
+pub(super) async fn track_hidden<F: std::future::Future>(future: F) -> (F::Output, bool) {
+    let flag = Arc::new(AtomicBool::new(false));
+    let output = HIDDEN.scope(flag.clone(), future).await;
+    (output, flag.load(Ordering::Relaxed))
+}
+
+/// The flag of the request running on this task, to be carried into the
+/// blocking worker that runs a database closure for it.
+pub(super) fn current() -> Option<Arc<AtomicBool>> {
+    HIDDEN.try_with(Arc::clone).ok()
+}
+
+/// Runs `operation` as part of the request that owns `flag`, so a guard built
+/// inside a blocking worker notes into the same request.
+pub(super) fn within<T>(flag: Option<Arc<AtomicBool>>, operation: impl FnOnce() -> T) -> T {
+    match flag {
+        Some(flag) => HIDDEN.sync_scope(flag, operation),
+        None => operation(),
+    }
+}
 
 /// What one request may reach: the authenticated role and the reservations of
 /// the service it was made to.
@@ -42,6 +74,8 @@ use crate::{
 pub(super) struct RequestScope {
     role: admin::Role,
     bindings: Arc<reserved::Bindings>,
+    /// The pipeline's hidden-attempt flag, when the request runs under it.
+    hidden: Option<Arc<AtomicBool>>,
 }
 
 impl RequestScope {
@@ -51,12 +85,34 @@ impl RequestScope {
         Self {
             role,
             bindings: service.memory_bindings.clone(),
+            hidden: HIDDEN.try_with(Arc::clone).ok(),
         }
     }
 
     #[cfg(test)]
     pub(super) fn for_test(role: admin::Role, bindings: Arc<reserved::Bindings>) -> Self {
-        Self { role, bindings }
+        Self {
+            role,
+            bindings,
+            hidden: HIDDEN.try_with(Arc::clone).ok(),
+        }
+    }
+
+    /// The answer for a reserved collection the caller may not reach: the one
+    /// for a missing collection. A credential that asked is noted.
+    pub(super) fn hidden_collection(&self) -> ApiError {
+        self.note_hidden();
+        Error::CollectionNotFound.into()
+    }
+
+    /// Only credentials are noted: the administrator and the read-only token
+    /// are not probing. The note carries no name.
+    fn note_hidden(&self) {
+        if matches!(self.role, admin::Role::Scoped(_))
+            && let Some(flag) = &self.hidden
+        {
+            flag.store(true, Ordering::Relaxed);
+        }
     }
 
     pub(super) fn role(&self) -> &admin::Role {
@@ -116,6 +172,18 @@ impl RequestScope {
     /// [`Self::collection_visible`] as the predicate the core planners take.
     pub(super) fn visible(&self) -> impl Fn(&str) -> bool + '_ {
         move |stored| self.collection_visible(stored)
+    }
+
+    /// The attach rule the core planners take next to [`Self::visible`]:
+    /// whether a record of a collection may be attached to a node of a graph.
+    /// A reserved graph takes only its own binding's evidence collection, for
+    /// every principal, raw holders included.
+    pub(super) fn attachable(&self) -> impl Fn(&str, &str) -> bool + '_ {
+        move |graph, collection| {
+            self.bindings
+                .reserved()
+                .attachment_allowed(graph, collection)
+        }
     }
 
     /// Drops the collection entries of a list this principal may not reach.
@@ -189,7 +257,7 @@ impl RequestScope {
             return Err(forbidden_scope());
         }
         if !self.collection_visible(&stored) {
-            return Err(Error::CollectionNotFound.into());
+            return Err(self.hidden_collection());
         }
         let id = db.resolve(&stored)?;
         if let admin::Role::Scoped(grant) = &self.role
@@ -214,6 +282,9 @@ impl RequestScope {
     ) -> Result<CollectionInfo, ApiError> {
         let stored = self.qualify(name);
         let hidden = !self.collection_visible(&stored);
+        if hidden {
+            self.note_hidden();
+        }
         Ok(db.create_collection_occupied(&stored, spec, hidden)?)
     }
 
@@ -246,6 +317,9 @@ impl RequestScope {
             return Err(forbidden_scope());
         }
         let hidden = !self.graph_visible(&stored);
+        if hidden {
+            self.note_hidden();
+        }
         Ok(GuardedGraph {
             stored: stored.into_boxed_str(),
             hidden,
@@ -768,6 +842,113 @@ mod tests {
         assert!(scope.guarded_graph("ordinary_graph").is_ok());
     }
 
+    #[tokio::test]
+    async fn a_credentials_hidden_attempt_is_noted_and_nothing_else_is() {
+        let mut db = database();
+        let bindings = bindings();
+        let plain = grant(PLAIN, None, &[], &db);
+        let raw = grant(RAW, None, &[], &db);
+        let spec = || CollectionSpec {
+            dimensions: 2,
+            settings: CollectionSettings::default(),
+        };
+        // (who, what is named, whether the request is noted as hidden)
+        let cases = [
+            (
+                "plain, reserved collection",
+                plain.clone(),
+                "notes_ev",
+                true,
+            ),
+            (
+                "plain, missing collection",
+                plain.clone(),
+                "absent_ev",
+                false,
+            ),
+            (
+                "plain, ordinary collection",
+                plain.clone(),
+                "ordinary",
+                false,
+            ),
+            (
+                "raw holder, reserved collection",
+                raw.clone(),
+                "notes_ev",
+                false,
+            ),
+            (
+                "administrator, reserved collection",
+                admin::Role::Admin,
+                "notes_ev",
+                false,
+            ),
+            (
+                "read-only token, reserved collection",
+                admin::Role::ReadOnly,
+                "notes_ev",
+                false,
+            ),
+        ];
+        for (who, role, name, expected) in cases {
+            let (_, hidden) = track_hidden(async {
+                let scope = RequestScope::for_test(role.clone(), bindings.clone());
+                let _ = scope.collection(&db, &Target::Named(name.into()));
+            })
+            .await;
+            assert_eq!(hidden, expected, "{who}");
+        }
+        // Creating under a reserved name and naming a reserved graph count too.
+        let (_, hidden) = track_hidden(async {
+            let scope = RequestScope::for_test(plain.clone(), bindings.clone());
+            let _ = scope.create_collection(&mut db, "notes_ev", spec());
+        })
+        .await;
+        assert!(hidden, "create under a reserved name");
+        for (name, expected) in [("notes_graph", true), ("absent_graph", false)] {
+            let (_, hidden) = track_hidden(async {
+                let scope = RequestScope::for_test(plain.clone(), bindings.clone());
+                let _ = scope.guarded_graph(name);
+            })
+            .await;
+            assert_eq!(hidden, expected, "{name}");
+        }
+        // A listing that drops reserved entries is not an attempt.
+        let (_, hidden) = track_hidden(async {
+            let scope = RequestScope::for_test(plain.clone(), bindings.clone());
+            let _ = scope.list_collections(&db);
+            let _ = scope.list_graphs(&db);
+        })
+        .await;
+        assert!(!hidden, "lists");
+        // A scope built inside the blocking worker that runs a database
+        // closure notes into the request that started the worker.
+        let (_, hidden) = track_hidden(async {
+            let flag = current();
+            let plain = plain.clone();
+            let bindings = bindings.clone();
+            tokio::task::spawn_blocking(move || {
+                within(flag, || {
+                    let db = database();
+                    let scope = RequestScope::for_test(plain, bindings);
+                    let _ = scope.collection(&db, &Target::Named("notes_ev".into()));
+                })
+            })
+            .await
+            .unwrap();
+        })
+        .await;
+        assert!(hidden, "blocking worker");
+        // Outside any request there is nothing to note into.
+        let scope = RequestScope::for_test(plain, bindings);
+        assert!(
+            scope
+                .collection(&db, &Target::Named("notes_ev".into()))
+                .is_err()
+        );
+    }
+
     #[test]
     fn the_visible_predicate_is_the_collection_rule() {
         let db = database();
@@ -822,6 +1003,61 @@ mod tests {
             return Err(forbidden_scope());
         }
         Ok(id)
+    }
+
+    #[test]
+    fn the_core_planners_refuse_an_ordinary_record_on_a_reserved_graph() {
+        use crate::{Metadata, Mutation, property_graph::GraphOp};
+
+        let ops = |collection: &str| {
+            vec![
+                GraphOp::CreateNode {
+                    key: "n".into(),
+                    labels: vec!["Doc".into()],
+                    properties: Metadata::new(),
+                },
+                GraphOp::Vector {
+                    collection: collection.into(),
+                    mutation: Mutation::Put {
+                        id: 1,
+                        vector: vec![1.0, 0.0],
+                        payload: Vec::new(),
+                    },
+                },
+                GraphOp::Attach {
+                    node: "n".into(),
+                    collection: collection.into(),
+                    record: 1,
+                },
+            ]
+        };
+        let mut db = database();
+        let bindings = bindings();
+        let raw = RequestScope::for_test(grant(RAW, None, &[], &db), bindings.clone());
+        let plain = RequestScope::for_test(grant(PLAIN, None, &[], &db), bindings);
+        let write = |db: &mut Database, scope: &RequestScope, graph: &str, collection: &str| {
+            db.graph_mut(graph).unwrap().write_batch_visible(
+                &ops(collection),
+                &scope.visible(),
+                &scope.attachable(),
+            )
+        };
+        // The raw holder reaches both the graph and the collection, yet an
+        // ordinary record does not belong on a reserved graph.
+        let error = write(&mut db, &raw, "notes_graph", "ordinary").unwrap_err();
+        assert!(
+            matches!(error, Error::GraphRecordNotAttachable),
+            "{error:?}"
+        );
+        assert_eq!(db.graph("notes_graph").unwrap().info().node_count, 0);
+        write(&mut db, &raw, "notes_graph", "notes_ev").unwrap();
+        // A graph nobody reserved takes ordinary records for every principal,
+        // and the reserved evidence only for the raw holder.
+        write(&mut db, &plain, "ordinary_graph", "ordinary").unwrap();
+        let error = write(&mut db, &plain, "ordinary_graph", "notes_ev").unwrap_err();
+        assert!(matches!(error, Error::CollectionNotFound), "{error:?}");
+        let mut other = database();
+        write(&mut other, &raw, "ordinary_graph", "notes_ev").unwrap();
     }
 
     #[test]

@@ -51,19 +51,15 @@ fn valid_name(name: &str) -> Result<(), ApiError> {
     Ok(())
 }
 /// Live vectors per collection owned by `id` (`t<id>__*`), unqualified.
-fn usage(
-    db: &Database,
-    id: &str,
-    reserved: &super::reserved::Reserved,
-) -> Vec<(String, String, u64)> {
+/// Reserved collections are listed and counted: the report is the
+/// administrator's, and their records count toward the tenant's quota like any
+/// other record, so leaving them out would show more headroom than there is.
+fn usage(db: &Database, id: &str) -> Vec<(String, String, u64)> {
     let prefix = format!("t{id}__");
     let mut items: Vec<_> = db
         .collections
         .values()
         .filter_map(|state| {
-            if !reserved.raw_allowed(None, super::reserved::Resource::Collection, &state.name) {
-                return None;
-            }
             state.name.strip_prefix(&prefix).map(|name| {
                 (
                     name.to_owned(),
@@ -215,13 +211,12 @@ async fn list(State(service): State<Service>) -> Result<Json<Value>, ApiError> {
         .as_ref()
         .map(|users| users.count_by_tenant())
         .unwrap_or_default();
-    let bindings = service.memory_bindings.clone();
     let items = service
         .run_read(move |db| {
             Ok(tenants
                 .iter()
                 .map(|tenant| {
-                    let collections = usage(db, &tenant.id, bindings.reserved());
+                    let collections = usage(db, &tenant.id);
                     let mut view = tenant.view();
                     view["collections"] = json!(collections.len());
                     view["vectors"] = json!(collections.iter().map(|c| c.2).sum::<u64>());
@@ -387,10 +382,7 @@ async fn usage_report(
         Some(credentials) => credentials.tenant_states(&id, admin::now_ms() as u64)?,
         None => [0; 3],
     };
-    let bindings = service.memory_bindings.clone();
-    let collections = service
-        .run_read(move |db| Ok(usage(db, &id, bindings.reserved())))
-        .await?;
+    let collections = service.run_read(move |db| Ok(usage(db, &id))).await?;
     let vectors: u64 = collections.iter().map(|c| c.2).sum();
     Ok(Json(json!({
         "tenant": tenant.view(),

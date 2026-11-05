@@ -99,6 +99,10 @@ struct Metrics {
     import_chunks: AtomicU64,
     import_rows_skipped: AtomicU64,
     credential_denials: AtomicU64,
+    /// Requests of credentials that named a reserved resource they may not
+    /// reach. Never exposed per name, credential or tenant, and never to a
+    /// scoped caller: an unlabelled count the operator reads as probing.
+    reserved_hidden_attempts: AtomicU64,
     audit_failures: AtomicU64,
     rate_limited: AtomicU64,
     quota_exceeded: AtomicU64,
@@ -353,7 +357,12 @@ impl Service {
                 "database queue is full",
             )
         })?;
-        group.submit(bytes, permit, operation).await
+        let hidden = guard::current();
+        group
+            .submit(bytes, permit, move |db| {
+                guard::within(hidden, || operation(db))
+            })
+            .await
     }
 
     async fn run<T: Send + 'static>(
@@ -369,12 +378,13 @@ impl Service {
         })?;
         let database = self.database.clone();
         let metrics = self.metrics.clone();
+        let hidden = guard::current();
         tokio::task::spawn_blocking(move || {
             // The permit stays with the worker even if the HTTP client disconnects.
             let _permit = permit;
             let mut owner = database.write().map_err(internal)?;
             let db = owner.as_mut().ok_or_else(unavailable)?;
-            let result = operation(db);
+            let result = guard::within(hidden, || operation(db));
             if result
                 .as_ref()
                 .is_err_and(|error| error.code == "commit_indeterminate")
@@ -413,13 +423,16 @@ impl Service {
             )
         })?;
         let database = self.database.clone();
+        let hidden = guard::current();
         tokio::task::spawn_blocking(move || {
             let _permit = permit;
             let prepared = {
                 let owner = database.read().map_err(internal)?;
-                prepare(owner.as_ref().ok_or_else(unavailable)?)?
+                guard::within(hidden.clone(), || {
+                    prepare(owner.as_ref().ok_or_else(unavailable)?)
+                })?
             };
-            complete(prepared)
+            guard::within(hidden, || complete(prepared))
         })
         .await
         .map_err(internal)?
@@ -1064,7 +1077,11 @@ fn authorize_need(
                 Need::Admin => Err(forbidden_scope()),
                 Need::Op(op, reach) => {
                     let legacy = legacy && reach == Reach::Collection;
+                    // A backup holds every collection and graph, reserved ones
+                    // included, so it is the administrator's alone while any
+                    // resource is reserved.
                     if !grant.allows(op)
+                        || (op == credentials::Op::Backup && service.has_bindings())
                         || (reach == Reach::All
                             && (!grant.all
                                 || (grant.tenant_id.is_some()
@@ -1167,6 +1184,7 @@ async fn observe(
     if let Some(principal) = principal {
         request.extensions_mut().insert(principal);
     }
+    let mut hidden = false;
     let mut response = if public {
         if let Some(role) = role.clone() {
             request.extensions_mut().insert(role);
@@ -1205,7 +1223,9 @@ async fn observe(
                     Err(error) => error.into_response(),
                     Ok(()) => {
                         request.extensions_mut().insert(role.clone());
-                        next.run(request).await
+                        let (response, noted) = guard::track_hidden(next.run(request)).await;
+                        hidden = noted;
+                        response
                     }
                 }
             }
@@ -1230,6 +1250,7 @@ async fn observe(
             role: role.as_ref(),
             request_id: &request_id,
             started,
+            hidden,
         },
     );
     record_http_access(&request_path, method, response.status(), started);
@@ -1260,6 +1281,8 @@ struct RequestRecord<'a> {
     role: Option<&'a admin::Role>,
     request_id: &'a str,
     started: Instant,
+    /// The guard hid a reserved resource from a credential during the request.
+    hidden: bool,
 }
 
 /// Transport-neutral observation: metrics, scoped-denial audit, the request
@@ -1274,6 +1297,7 @@ fn record_request(service: &Service, record: &RequestRecord<'_>) {
         role,
         request_id,
         started,
+        hidden,
     } = *record;
     if code == Some("rate_limited") {
         service.metrics.rate_limited.fetch_add(1, Ordering::Relaxed);
@@ -1297,6 +1321,30 @@ fn record_request(service: &Service, record: &RequestRecord<'_>) {
             && log
                 .append(
                     json!({"event":"credential_denied","credential_id":grant.id,
+                    "method":method,"route":route,"request_id":request_id}),
+                    false,
+                )
+                .is_err()
+        {
+            service
+                .metrics
+                .audit_failures
+                .fetch_add(1, Ordering::Relaxed);
+        }
+    }
+    if let (Some(admin::Role::Scoped(grant)), true) = (role, hidden) {
+        // The request is answered like one for a missing resource, so the
+        // caller cannot tell; the operator can, through the audit log, which
+        // names the credential and the route but never the resource.
+        service
+            .metrics
+            .reserved_hidden_attempts
+            .fetch_add(1, Ordering::Relaxed);
+        if let Some(log) = &service.admin.audit_log
+            && log.should_record_denial(&grant.id, &format!("reserved_hidden {route}"))
+            && log
+                .append(
+                    json!({"event":"reserved_hidden_attempt","credential_id":grant.id,
                     "method":method,"route":route,"request_id":request_id}),
                     false,
                 )

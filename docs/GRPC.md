@@ -90,7 +90,15 @@ rechecked while polling. Since v0.6.0 both also serve graph-enabled files:
 (`GraphChangeOperation`); see
 [Change feed and webhooks](GRAPH.md#change-feed-and-webhooks).
 
-`BuildDiskAnn` and `SearchDiskAnn` use an operator-specified sidecar path. They
+`BuildDiskAnn` and `SearchDiskAnn` use an operator-specified sidecar path for
+the administrator token, which must always send `path`. Every other caller (a
+scoped credential or the read-only token) must leave `path` empty: the server
+then uses the file the REST routes use for the collection,
+`disk-ann-<collection id>.dann` in `VLITE_ADMIN_DIR` (`409
+admin_directory_disabled` without one), and a `path` from such a caller is
+refused with `422 invalid_input`, so a credential scoped to one collection
+can no longer write or read an arbitrary file. Clients that sent a path with a
+scoped credential must drop it. The RPCs
 are not available for encrypted databases; the sidecar contains plaintext
 vectors, so callers must protect its directory and restrict these admin/index
 operations. `Info` reports format, sequence, lineage, timestamp support, and
