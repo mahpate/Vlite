@@ -1,9 +1,9 @@
 {
  "campaign": "P3b read seam hand mutants (0.7.1 R0, slice 2)",
  "baseline_commit": "02ef3e5f3e37965bbea43aaf01cce47288d6a82a",
- "final_commit": "e9a953663b954b2b1cf20465276e1dbba79121aa",
+ "final_commit": "5c982e992cfc4e60c973e7acd93125df6ff1cb9f",
  "toolchain": "rustc 1.99.1 (58cf8f9c3 2026-10-13)",
- "counting": "A mutant is effective when its anchor matches once, the tree compiles, the selector executes, a named test fails and the file restores byte-identically. Compile errors, crashes, timeouts and runs that execute no test never count. failing_tests lists at most the first 12 failing tests of a run. baseline is the previous tag replayed on separate machines, baseline_lane is the same tag on the lane's machine, final is the whole list on final_commit on separate machines where present, and lane_replay is the baseline survivors on final_commit on the lane's machine. reach says how a gap is observable: api (the seam's API), file (a stored file that changed after install) or guard (internal consistency that only an edit of the in-memory directory can break); guard gaps do not count toward the minimum. Every restore is verified per mutant by SHA-256 equality (sha256_original equals sha256_restored). The selector is run green before the first mutant and after the last of each replay, not after every mutant.",
+ "counting": "A mutant is effective when its anchor matches once, the tree compiles, the selector executes, a named test fails and the file restores byte-identically. Compile errors, crashes (a linker crash included), timeouts and runs that execute no test never count; such a run is repeated and only the repeat is recorded. failing_tests lists at most the first 12 failing tests of a run. baseline is the previous tag, replayed on separate machines where baseline_machine says so and on the lane's machine otherwise; baseline_lane, where present, is the same tag on the lane's machine, so that the two replays can be compared. final is a replay on final_commit on the lane's machine; no replay of final_commit ran on a separate machine. reach says how the state that kills a gap arises: api (the seam's calls on a valid generation and valid inputs), mapped (the test-only mapped copy of the backing), input (a function called with an input that no writer produces but that its contract covers), tamper (the stored bytes of an installed generation changed in place) or guard (internal consistency that only an edit of the in-memory directory can break). The checkouts use CRLF line endings: the runner matches on LF-normalized text and writes the file back with its own line endings. The mutated builds ran without -D warnings, so an unused binding that a mutant leaves behind is not an error. Every restore is verified per mutant by SHA-256 equality (sha256_original equals sha256_restored). The selector is run green before the first mutant and after the last of each replay, not after every mutant.",
  "classes": [
   "accounting",
   "authentication",
@@ -11,27 +11,30 @@
   "expiry",
   "identity"
  ],
- "total": 87,
+ "total": 91,
  "prior_campaign": 17,
- "new": 70,
- "baseline_killed": 60,
- "baseline_survived": 27,
- "baseline_lane_total": 86,
- "baseline_lane_agrees": 86,
- "final_pool_total": 0,
- "final_pool_killed": 0,
- "lane_replay_total": 27,
- "lane_replay_killed": 27,
- "killed_on_final_tree": 27,
- "gaps_reachable": 14,
- "gaps_guard_only": 13,
+ "new": 74,
+ "baseline_killed": 63,
+ "baseline_survived": 28,
+ "baseline_separate_total": 87,
+ "baseline_both_total": 86,
+ "baseline_both_agree": 86,
+ "final_replay_total": 34,
+ "final_replay_killed": 34,
+ "gaps_by_reach": {
+  "api": 10,
+  "guard": 12,
+  "input": 1,
+  "mapped": 1,
+  "tamper": 4
+ },
  "restored_identically": true,
  "tests_selected": {
   "baseline": [
    75
   ],
   "final": [
-   93
+   94
   ]
  },
  "mutants": [
@@ -55,6 +58,7 @@
     "sha256_restored": "53a142d1f7611bac1f63968f3a09df9aa0fcf6fc76ac96db27e5ca1831d4ccf9",
     "restored_identically": true
    },
+   "baseline_machine": "separate",
    "baseline_lane": {
     "status": "killed",
     "tests_run": 75,
@@ -87,6 +91,7 @@
     "sha256_restored": "53a142d1f7611bac1f63968f3a09df9aa0fcf6fc76ac96db27e5ca1831d4ccf9",
     "restored_identically": true
    },
+   "baseline_machine": "separate",
    "baseline_lane": {
     "status": "killed",
     "tests_run": 75,
@@ -119,6 +124,7 @@
     "sha256_restored": "53a142d1f7611bac1f63968f3a09df9aa0fcf6fc76ac96db27e5ca1831d4ccf9",
     "restored_identically": true
    },
+   "baseline_machine": "separate",
    "baseline_lane": {
     "status": "killed",
     "tests_run": 75,
@@ -154,6 +160,7 @@
     "sha256_restored": "53a142d1f7611bac1f63968f3a09df9aa0fcf6fc76ac96db27e5ca1831d4ccf9",
     "restored_identically": true
    },
+   "baseline_machine": "separate",
    "baseline_lane": {
     "status": "killed",
     "tests_run": 75,
@@ -189,6 +196,7 @@
     "sha256_restored": "53a142d1f7611bac1f63968f3a09df9aa0fcf6fc76ac96db27e5ca1831d4ccf9",
     "restored_identically": true
    },
+   "baseline_machine": "separate",
    "baseline_lane": {
     "status": "killed",
     "tests_run": 75,
@@ -222,6 +230,7 @@
     "sha256_restored": "53a142d1f7611bac1f63968f3a09df9aa0fcf6fc76ac96db27e5ca1831d4ccf9",
     "restored_identically": true
    },
+   "baseline_machine": "separate",
    "baseline_lane": {
     "status": "killed",
     "tests_run": 75,
@@ -256,6 +265,7 @@
     "sha256_restored": "53a142d1f7611bac1f63968f3a09df9aa0fcf6fc76ac96db27e5ca1831d4ccf9",
     "restored_identically": true
    },
+   "baseline_machine": "separate",
    "baseline_lane": {
     "status": "killed",
     "tests_run": 75,
@@ -290,6 +300,7 @@
     "sha256_restored": "615411fd8d93681161d56f1eafac6fe1edefb15dd4824e451406476b15fd25ec",
     "restored_identically": true
    },
+   "baseline_machine": "separate",
    "baseline_lane": {
     "status": "killed",
     "tests_run": 75,
@@ -324,6 +335,7 @@
     "sha256_restored": "615411fd8d93681161d56f1eafac6fe1edefb15dd4824e451406476b15fd25ec",
     "restored_identically": true
    },
+   "baseline_machine": "separate",
    "baseline_lane": {
     "status": "killed",
     "tests_run": 75,
@@ -357,6 +369,7 @@
     "sha256_restored": "615411fd8d93681161d56f1eafac6fe1edefb15dd4824e451406476b15fd25ec",
     "restored_identically": true
    },
+   "baseline_machine": "separate",
    "baseline_lane": {
     "status": "killed",
     "tests_run": 75,
@@ -390,6 +403,7 @@
     "sha256_restored": "615411fd8d93681161d56f1eafac6fe1edefb15dd4824e451406476b15fd25ec",
     "restored_identically": true
    },
+   "baseline_machine": "separate",
    "baseline_lane": {
     "status": "killed",
     "tests_run": 75,
@@ -424,6 +438,7 @@
     "sha256_restored": "615411fd8d93681161d56f1eafac6fe1edefb15dd4824e451406476b15fd25ec",
     "restored_identically": true
    },
+   "baseline_machine": "separate",
    "baseline_lane": {
     "status": "killed",
     "tests_run": 75,
@@ -457,6 +472,7 @@
     "sha256_restored": "615411fd8d93681161d56f1eafac6fe1edefb15dd4824e451406476b15fd25ec",
     "restored_identically": true
    },
+   "baseline_machine": "separate",
    "baseline_lane": {
     "status": "killed",
     "tests_run": 75,
@@ -489,6 +505,7 @@
     "sha256_restored": "615411fd8d93681161d56f1eafac6fe1edefb15dd4824e451406476b15fd25ec",
     "restored_identically": true
    },
+   "baseline_machine": "separate",
    "baseline_lane": {
     "status": "killed",
     "tests_run": 75,
@@ -521,6 +538,7 @@
     "sha256_restored": "615411fd8d93681161d56f1eafac6fe1edefb15dd4824e451406476b15fd25ec",
     "restored_identically": true
    },
+   "baseline_machine": "separate",
    "baseline_lane": {
     "status": "killed",
     "tests_run": 75,
@@ -554,6 +572,7 @@
     "sha256_restored": "615411fd8d93681161d56f1eafac6fe1edefb15dd4824e451406476b15fd25ec",
     "restored_identically": true
    },
+   "baseline_machine": "separate",
    "baseline_lane": {
     "status": "killed",
     "tests_run": 75,
@@ -588,6 +607,7 @@
     "sha256_restored": "615411fd8d93681161d56f1eafac6fe1edefb15dd4824e451406476b15fd25ec",
     "restored_identically": true
    },
+   "baseline_machine": "separate",
    "baseline_lane": {
     "status": "killed",
     "tests_run": 75,
@@ -622,6 +642,7 @@
     "sha256_restored": "53a142d1f7611bac1f63968f3a09df9aa0fcf6fc76ac96db27e5ca1831d4ccf9",
     "restored_identically": true
    },
+   "baseline_machine": "separate",
    "baseline_lane": {
     "status": "killed",
     "tests_run": 75,
@@ -632,6 +653,20 @@
     "sha256_original": "53a142d1f7611bac1f63968f3a09df9aa0fcf6fc76ac96db27e5ca1831d4ccf9",
     "sha256_mutated": "1f538a410e49727e9c613c989ecb17b2664e2423a2cc1940adcb1564fb9a3098",
     "sha256_restored": "53a142d1f7611bac1f63968f3a09df9aa0fcf6fc76ac96db27e5ca1831d4ccf9",
+    "restored_identically": true
+   },
+   "final": {
+    "status": "killed",
+    "tests_run": 94,
+    "failing_tests": [
+     "compact::source::freeze_tests::freeze_budget_and_exact_fit_boundaries",
+     "compact::source::freeze_tests::freeze_cache_entries_belong_to_one_collection_of_one_generation",
+     "compact::source::seam_tests::compact_seam_generation_pin_and_cache_identity",
+     "compact::source::seam_tests::compact_seam_lru_budget_and_accounting"
+    ],
+    "sha256_original": "2d51ae403b1c9fb25dce8d37e88b4f8824b3f521c4595eb232124e2d3a83c95d",
+    "sha256_mutated": "908daa0f8bc1a68ed311e1af63c53b71550f0d4e8aa78b082f6be4e65c08b3e3",
+    "sha256_restored": "2d51ae403b1c9fb25dce8d37e88b4f8824b3f521c4595eb232124e2d3a83c95d",
     "restored_identically": true
    }
   },
@@ -655,6 +690,7 @@
     "sha256_restored": "53a142d1f7611bac1f63968f3a09df9aa0fcf6fc76ac96db27e5ca1831d4ccf9",
     "restored_identically": true
    },
+   "baseline_machine": "separate",
    "baseline_lane": {
     "status": "killed",
     "tests_run": 75,
@@ -664,6 +700,18 @@
     "sha256_original": "53a142d1f7611bac1f63968f3a09df9aa0fcf6fc76ac96db27e5ca1831d4ccf9",
     "sha256_mutated": "73db4ae233dfa149a74223dc513fc9aa435b0828d558eae18da5c387999253c3",
     "sha256_restored": "53a142d1f7611bac1f63968f3a09df9aa0fcf6fc76ac96db27e5ca1831d4ccf9",
+    "restored_identically": true
+   },
+   "final": {
+    "status": "killed",
+    "tests_run": 94,
+    "failing_tests": [
+     "compact::source::freeze_tests::freeze_cache_entries_belong_to_one_collection_of_one_generation",
+     "compact::source::seam_tests::compact_seam_vector_metadata_leave_cells_empty"
+    ],
+    "sha256_original": "2d51ae403b1c9fb25dce8d37e88b4f8824b3f521c4595eb232124e2d3a83c95d",
+    "sha256_mutated": "3c4c16fecc3dfc6edffd102191552d3444b93ca649cb2533a1ec8e27133df615",
+    "sha256_restored": "2d51ae403b1c9fb25dce8d37e88b4f8824b3f521c4595eb232124e2d3a83c95d",
     "restored_identically": true
    }
   },
@@ -688,6 +736,7 @@
     "sha256_restored": "53a142d1f7611bac1f63968f3a09df9aa0fcf6fc76ac96db27e5ca1831d4ccf9",
     "restored_identically": true
    },
+   "baseline_machine": "separate",
    "baseline_lane": {
     "status": "killed",
     "tests_run": 75,
@@ -698,6 +747,19 @@
     "sha256_original": "53a142d1f7611bac1f63968f3a09df9aa0fcf6fc76ac96db27e5ca1831d4ccf9",
     "sha256_mutated": "3396e357dbc6d9ce7589cdb37250e0d0a796ebb27b823727715fad18e1520ba9",
     "sha256_restored": "53a142d1f7611bac1f63968f3a09df9aa0fcf6fc76ac96db27e5ca1831d4ccf9",
+    "restored_identically": true
+   },
+   "final": {
+    "status": "killed",
+    "tests_run": 94,
+    "failing_tests": [
+     "compact::source::freeze_tests::freeze_budget_and_exact_fit_boundaries",
+     "compact::source::seam_tests::compact_seam_generation_pin_and_cache_identity",
+     "compact::source::seam_tests::compact_seam_lru_budget_and_accounting"
+    ],
+    "sha256_original": "2d51ae403b1c9fb25dce8d37e88b4f8824b3f521c4595eb232124e2d3a83c95d",
+    "sha256_mutated": "33440214e39ae984178dc75c21bd6ece5c7cba97392a6e2ba2a419e66d47ebb4",
+    "sha256_restored": "2d51ae403b1c9fb25dce8d37e88b4f8824b3f521c4595eb232124e2d3a83c95d",
     "restored_identically": true
    }
   },
@@ -719,6 +781,7 @@
     "sha256_restored": "53a142d1f7611bac1f63968f3a09df9aa0fcf6fc76ac96db27e5ca1831d4ccf9",
     "restored_identically": true
    },
+   "baseline_machine": "separate",
    "baseline_lane": {
     "status": "survived",
     "tests_run": 75,
@@ -728,9 +791,9 @@
     "sha256_restored": "53a142d1f7611bac1f63968f3a09df9aa0fcf6fc76ac96db27e5ca1831d4ccf9",
     "restored_identically": true
    },
-   "lane_replay": {
+   "final": {
     "status": "killed",
-    "tests_run": 93,
+    "tests_run": 94,
     "failing_tests": [
      "compact::source::freeze_tests::freeze_cache_key_separates_block_kinds"
     ],
@@ -739,8 +802,7 @@
     "sha256_restored": "2d51ae403b1c9fb25dce8d37e88b4f8824b3f521c4595eb232124e2d3a83c95d",
     "restored_identically": true
    },
-   "reach": "guard",
-   "note": "The first attempt on the final tree ended in a linker crash (exit 0xc0000409) and does not count, so this is the rerun."
+   "reach": "guard"
   },
   {
    "id": "R0-ID-05",
@@ -763,6 +825,7 @@
     "sha256_restored": "53a142d1f7611bac1f63968f3a09df9aa0fcf6fc76ac96db27e5ca1831d4ccf9",
     "restored_identically": true
    },
+   "baseline_machine": "separate",
    "baseline_lane": {
     "status": "killed",
     "tests_run": 75,
@@ -807,6 +870,7 @@
     "sha256_restored": "53a142d1f7611bac1f63968f3a09df9aa0fcf6fc76ac96db27e5ca1831d4ccf9",
     "restored_identically": true
    },
+   "baseline_machine": "separate",
    "baseline_lane": {
     "status": "killed",
     "tests_run": 75,
@@ -850,6 +914,7 @@
     "sha256_restored": "615411fd8d93681161d56f1eafac6fe1edefb15dd4824e451406476b15fd25ec",
     "restored_identically": true
    },
+   "baseline_machine": "separate",
    "baseline_lane": {
     "status": "killed",
     "tests_run": 75,
@@ -880,6 +945,7 @@
     "sha256_restored": "53a142d1f7611bac1f63968f3a09df9aa0fcf6fc76ac96db27e5ca1831d4ccf9",
     "restored_identically": true
    },
+   "baseline_machine": "separate",
    "baseline_lane": {
     "status": "survived",
     "tests_run": 75,
@@ -889,9 +955,9 @@
     "sha256_restored": "53a142d1f7611bac1f63968f3a09df9aa0fcf6fc76ac96db27e5ca1831d4ccf9",
     "restored_identically": true
    },
-   "lane_replay": {
+   "final": {
     "status": "killed",
-    "tests_run": 93,
+    "tests_run": 94,
     "failing_tests": [
      "compact::source::freeze_tests::freeze_frame_tampering_is_an_error_on_every_read_path"
     ],
@@ -920,6 +986,7 @@
     "sha256_restored": "53a142d1f7611bac1f63968f3a09df9aa0fcf6fc76ac96db27e5ca1831d4ccf9",
     "restored_identically": true
    },
+   "baseline_machine": "separate",
    "baseline_lane": {
     "status": "survived",
     "tests_run": 75,
@@ -929,9 +996,9 @@
     "sha256_restored": "53a142d1f7611bac1f63968f3a09df9aa0fcf6fc76ac96db27e5ca1831d4ccf9",
     "restored_identically": true
    },
-   "lane_replay": {
+   "final": {
     "status": "killed",
-    "tests_run": 93,
+    "tests_run": 94,
     "failing_tests": [
      "compact::source::freeze_tests::freeze_frame_tampering_is_an_error_on_every_read_path"
     ],
@@ -960,6 +1027,7 @@
     "sha256_restored": "53a142d1f7611bac1f63968f3a09df9aa0fcf6fc76ac96db27e5ca1831d4ccf9",
     "restored_identically": true
    },
+   "baseline_machine": "separate",
    "baseline_lane": {
     "status": "survived",
     "tests_run": 75,
@@ -969,9 +1037,9 @@
     "sha256_restored": "53a142d1f7611bac1f63968f3a09df9aa0fcf6fc76ac96db27e5ca1831d4ccf9",
     "restored_identically": true
    },
-   "lane_replay": {
+   "final": {
     "status": "killed",
-    "tests_run": 93,
+    "tests_run": 94,
     "failing_tests": [
      "compact::source::freeze_tests::freeze_a_refused_read_leaves_the_rest_of_the_workspace_as_it_was",
      "compact::source::freeze_tests::freeze_cached_blocks_are_authenticated_again_and_shape_checked",
@@ -982,7 +1050,7 @@
     "sha256_restored": "2d51ae403b1c9fb25dce8d37e88b4f8824b3f521c4595eb232124e2d3a83c95d",
     "restored_identically": true
    },
-   "reach": "file"
+   "reach": "tamper"
   },
   {
    "id": "R0-AU-04",
@@ -1004,6 +1072,7 @@
     "sha256_restored": "53a142d1f7611bac1f63968f3a09df9aa0fcf6fc76ac96db27e5ca1831d4ccf9",
     "restored_identically": true
    },
+   "baseline_machine": "separate",
    "baseline_lane": {
     "status": "killed",
     "tests_run": 75,
@@ -1036,6 +1105,7 @@
     "sha256_restored": "53a142d1f7611bac1f63968f3a09df9aa0fcf6fc76ac96db27e5ca1831d4ccf9",
     "restored_identically": true
    },
+   "baseline_machine": "separate",
    "baseline_lane": {
     "status": "killed",
     "tests_run": 75,
@@ -1072,6 +1142,7 @@
     "sha256_restored": "53a142d1f7611bac1f63968f3a09df9aa0fcf6fc76ac96db27e5ca1831d4ccf9",
     "restored_identically": true
    },
+   "baseline_machine": "separate",
    "baseline_lane": {
     "status": "killed",
     "tests_run": 75,
@@ -1119,6 +1190,7 @@
     "sha256_restored": "53a142d1f7611bac1f63968f3a09df9aa0fcf6fc76ac96db27e5ca1831d4ccf9",
     "restored_identically": true
    },
+   "baseline_machine": "separate",
    "baseline_lane": {
     "status": "killed",
     "tests_run": 75,
@@ -1160,6 +1232,7 @@
     "sha256_restored": "53a142d1f7611bac1f63968f3a09df9aa0fcf6fc76ac96db27e5ca1831d4ccf9",
     "restored_identically": true
    },
+   "baseline_machine": "separate",
    "baseline_lane": {
     "status": "survived",
     "tests_run": 75,
@@ -1169,9 +1242,9 @@
     "sha256_restored": "53a142d1f7611bac1f63968f3a09df9aa0fcf6fc76ac96db27e5ca1831d4ccf9",
     "restored_identically": true
    },
-   "lane_replay": {
+   "final": {
     "status": "killed",
-    "tests_run": 93,
+    "tests_run": 94,
     "failing_tests": [
      "compact::source::freeze_tests::freeze_extents_outside_the_body_are_corrupt_on_every_read_path"
     ],
@@ -1200,6 +1273,7 @@
     "sha256_restored": "53a142d1f7611bac1f63968f3a09df9aa0fcf6fc76ac96db27e5ca1831d4ccf9",
     "restored_identically": true
    },
+   "baseline_machine": "separate",
    "baseline_lane": {
     "status": "survived",
     "tests_run": 75,
@@ -1209,9 +1283,9 @@
     "sha256_restored": "53a142d1f7611bac1f63968f3a09df9aa0fcf6fc76ac96db27e5ca1831d4ccf9",
     "restored_identically": true
    },
-   "lane_replay": {
+   "final": {
     "status": "killed",
-    "tests_run": 93,
+    "tests_run": 94,
     "failing_tests": [
      "compact::source::freeze_tests::freeze_extents_outside_the_body_are_corrupt_on_every_read_path"
     ],
@@ -1220,7 +1294,8 @@
     "sha256_restored": "2d51ae403b1c9fb25dce8d37e88b4f8824b3f521c4595eb232124e2d3a83c95d",
     "restored_identically": true
    },
-   "reach": "guard"
+   "reach": "guard",
+   "note": "The first attempt on the final tree ended in a toolchain or linker failure and does not count, so this is the rerun."
   },
   {
    "id": "R0-AU-10",
@@ -1242,6 +1317,7 @@
     "sha256_restored": "53a142d1f7611bac1f63968f3a09df9aa0fcf6fc76ac96db27e5ca1831d4ccf9",
     "restored_identically": true
    },
+   "baseline_machine": "separate",
    "baseline_lane": {
     "status": "killed",
     "tests_run": 75,
@@ -1272,6 +1348,7 @@
     "sha256_restored": "53a142d1f7611bac1f63968f3a09df9aa0fcf6fc76ac96db27e5ca1831d4ccf9",
     "restored_identically": true
    },
+   "baseline_machine": "separate",
    "baseline_lane": {
     "status": "survived",
     "tests_run": 75,
@@ -1281,9 +1358,9 @@
     "sha256_restored": "53a142d1f7611bac1f63968f3a09df9aa0fcf6fc76ac96db27e5ca1831d4ccf9",
     "restored_identically": true
    },
-   "lane_replay": {
+   "final": {
     "status": "killed",
-    "tests_run": 93,
+    "tests_run": 94,
     "failing_tests": [
      "compact::source::freeze_tests::freeze_cached_blocks_are_authenticated_again_and_shape_checked"
     ],
@@ -1312,6 +1389,7 @@
     "sha256_restored": "615411fd8d93681161d56f1eafac6fe1edefb15dd4824e451406476b15fd25ec",
     "restored_identically": true
    },
+   "baseline_machine": "separate",
    "baseline_lane": {
     "status": "survived",
     "tests_run": 75,
@@ -1321,10 +1399,11 @@
     "sha256_restored": "615411fd8d93681161d56f1eafac6fe1edefb15dd4824e451406476b15fd25ec",
     "restored_identically": true
    },
-   "lane_replay": {
+   "final": {
     "status": "killed",
-    "tests_run": 93,
+    "tests_run": 94,
     "failing_tests": [
+     "compact::source::freeze_tests::freeze_budget_and_exact_fit_boundaries",
      "compact::source::freeze_tests::freeze_frame_tampering_is_an_error_on_every_read_path"
     ],
     "sha256_original": "615411fd8d93681161d56f1eafac6fe1edefb15dd4824e451406476b15fd25ec",
@@ -1332,7 +1411,8 @@
     "sha256_restored": "615411fd8d93681161d56f1eafac6fe1edefb15dd4824e451406476b15fd25ec",
     "restored_identically": true
    },
-   "reach": "file"
+   "reach": "api",
+   "note": "The first attempt on the final tree ended in a toolchain or linker failure and does not count, so this is the rerun. Also killed through the API: a budget refusal of an effective read must reach the caller, not turn into an absent row."
   },
   {
    "id": "R0-AU-13",
@@ -1352,6 +1432,7 @@
     "sha256_restored": "615411fd8d93681161d56f1eafac6fe1edefb15dd4824e451406476b15fd25ec",
     "restored_identically": true
    },
+   "baseline_machine": "separate",
    "baseline_lane": {
     "status": "survived",
     "tests_run": 75,
@@ -1361,9 +1442,9 @@
     "sha256_restored": "615411fd8d93681161d56f1eafac6fe1edefb15dd4824e451406476b15fd25ec",
     "restored_identically": true
    },
-   "lane_replay": {
+   "final": {
     "status": "killed",
-    "tests_run": 93,
+    "tests_run": 94,
     "failing_tests": [
      "compact::source::freeze_tests::freeze_frame_tampering_is_an_error_on_every_read_path"
     ],
@@ -1372,7 +1453,7 @@
     "sha256_restored": "615411fd8d93681161d56f1eafac6fe1edefb15dd4824e451406476b15fd25ec",
     "restored_identically": true
    },
-   "reach": "file"
+   "reach": "tamper"
   },
   {
    "id": "R0-AU-14",
@@ -1392,6 +1473,7 @@
     "sha256_restored": "615411fd8d93681161d56f1eafac6fe1edefb15dd4824e451406476b15fd25ec",
     "restored_identically": true
    },
+   "baseline_machine": "separate",
    "baseline_lane": {
     "status": "survived",
     "tests_run": 75,
@@ -1401,9 +1483,9 @@
     "sha256_restored": "615411fd8d93681161d56f1eafac6fe1edefb15dd4824e451406476b15fd25ec",
     "restored_identically": true
    },
-   "lane_replay": {
+   "final": {
     "status": "killed",
-    "tests_run": 93,
+    "tests_run": 94,
     "failing_tests": [
      "compact::source::freeze_tests::freeze_frame_tampering_is_an_error_on_every_read_path"
     ],
@@ -1412,13 +1494,13 @@
     "sha256_restored": "615411fd8d93681161d56f1eafac6fe1edefb15dd4824e451406476b15fd25ec",
     "restored_identically": true
    },
-   "reach": "file"
+   "reach": "tamper"
   },
   {
    "id": "R0-AU-15",
    "class": "authentication",
    "origin": "new",
-   "description": "the bounded body read treats a frame range outside the backing as an empty frame",
+   "description": "the bounded body read reports a frame range outside the backing as a changed frame (the read is still refused, only its reason changes)",
    "file": "src/compact/source.rs",
    "old": "            .generation\n            .backing\n            .as_slice()\n            .get(block.frame.clone())\n            .ok_or_else(|| corrupt(block.offset, \"compact source frame is out of bounds\"))?;",
    "new": "            .generation\n            .backing\n            .as_slice()\n            .get(block.frame.clone())\n            .unwrap_or(&[]);",
@@ -1432,6 +1514,7 @@
     "sha256_restored": "53a142d1f7611bac1f63968f3a09df9aa0fcf6fc76ac96db27e5ca1831d4ccf9",
     "restored_identically": true
    },
+   "baseline_machine": "separate",
    "baseline_lane": {
     "status": "survived",
     "tests_run": 75,
@@ -1441,9 +1524,9 @@
     "sha256_restored": "53a142d1f7611bac1f63968f3a09df9aa0fcf6fc76ac96db27e5ca1831d4ccf9",
     "restored_identically": true
    },
-   "lane_replay": {
+   "final": {
     "status": "killed",
-    "tests_run": 93,
+    "tests_run": 94,
     "failing_tests": [
      "compact::source::freeze_tests::freeze_frame_range_outside_the_backing_is_corrupt"
     ],
@@ -1458,7 +1541,7 @@
    "id": "R0-AU-16",
    "class": "authentication",
    "origin": "new",
-   "description": "record-cell materialization treats a frame range outside the backing as an empty frame",
+   "description": "record-cell materialization reports a frame range outside the backing as a changed frame (the read is still refused, only its reason changes)",
    "file": "src/compact/source.rs",
    "old": "        let disk = self\n            .backing\n            .as_slice()\n            .get(block.frame.clone())\n            .ok_or_else(|| corrupt(block.offset, \"compact source frame is out of bounds\"))?;",
    "new": "        let disk = self\n            .backing\n            .as_slice()\n            .get(block.frame.clone())\n            .unwrap_or(&[]);",
@@ -1472,6 +1555,7 @@
     "sha256_restored": "53a142d1f7611bac1f63968f3a09df9aa0fcf6fc76ac96db27e5ca1831d4ccf9",
     "restored_identically": true
    },
+   "baseline_machine": "separate",
    "baseline_lane": {
     "status": "survived",
     "tests_run": 75,
@@ -1481,9 +1565,9 @@
     "sha256_restored": "53a142d1f7611bac1f63968f3a09df9aa0fcf6fc76ac96db27e5ca1831d4ccf9",
     "restored_identically": true
    },
-   "lane_replay": {
+   "final": {
     "status": "killed",
-    "tests_run": 93,
+    "tests_run": 94,
     "failing_tests": [
      "compact::source::freeze_tests::freeze_frame_range_outside_the_backing_is_corrupt"
     ],
@@ -1492,8 +1576,7 @@
     "sha256_restored": "2d51ae403b1c9fb25dce8d37e88b4f8824b3f521c4595eb232124e2d3a83c95d",
     "restored_identically": true
    },
-   "reach": "guard",
-   "note": "The first attempt on the final tree ended in a linker crash (exit 0xc0000409) and does not count, so this is the rerun."
+   "reach": "guard"
   },
   {
    "id": "R0-AU-17",
@@ -1513,9 +1596,10 @@
     "sha256_restored": "53a142d1f7611bac1f63968f3a09df9aa0fcf6fc76ac96db27e5ca1831d4ccf9",
     "restored_identically": true
    },
-   "lane_replay": {
+   "baseline_machine": "separate",
+   "final": {
     "status": "killed",
-    "tests_run": 93,
+    "tests_run": 94,
     "failing_tests": [
      "compact::source::freeze_tests::freeze_a_refused_read_leaves_the_rest_of_the_workspace_as_it_was"
     ],
@@ -1524,7 +1608,7 @@
     "sha256_restored": "2d51ae403b1c9fb25dce8d37e88b4f8824b3f521c4595eb232124e2d3a83c95d",
     "restored_identically": true
    },
-   "reach": "file"
+   "reach": "tamper"
   },
   {
    "id": "R0-EX-01",
@@ -1557,6 +1641,7 @@
     "sha256_restored": "53a142d1f7611bac1f63968f3a09df9aa0fcf6fc76ac96db27e5ca1831d4ccf9",
     "restored_identically": true
    },
+   "baseline_machine": "separate",
    "baseline_lane": {
     "status": "killed",
     "tests_run": 75,
@@ -1611,6 +1696,7 @@
     "sha256_restored": "53a142d1f7611bac1f63968f3a09df9aa0fcf6fc76ac96db27e5ca1831d4ccf9",
     "restored_identically": true
    },
+   "baseline_machine": "separate",
    "baseline_lane": {
     "status": "killed",
     "tests_run": 75,
@@ -1658,6 +1744,7 @@
     "sha256_restored": "615411fd8d93681161d56f1eafac6fe1edefb15dd4824e451406476b15fd25ec",
     "restored_identically": true
    },
+   "baseline_machine": "separate",
    "baseline_lane": {
     "status": "killed",
     "tests_run": 75,
@@ -1695,6 +1782,7 @@
     "sha256_restored": "615411fd8d93681161d56f1eafac6fe1edefb15dd4824e451406476b15fd25ec",
     "restored_identically": true
    },
+   "baseline_machine": "separate",
    "baseline_lane": {
     "status": "killed",
     "tests_run": 75,
@@ -1726,6 +1814,7 @@
     "sha256_restored": "615411fd8d93681161d56f1eafac6fe1edefb15dd4824e451406476b15fd25ec",
     "restored_identically": true
    },
+   "baseline_machine": "separate",
    "baseline_lane": {
     "status": "survived",
     "tests_run": 75,
@@ -1735,9 +1824,9 @@
     "sha256_restored": "615411fd8d93681161d56f1eafac6fe1edefb15dd4824e451406476b15fd25ec",
     "restored_identically": true
    },
-   "lane_replay": {
+   "final": {
     "status": "killed",
-    "tests_run": 93,
+    "tests_run": 94,
     "failing_tests": [
      "compact::source::freeze_tests::freeze_deadline_hides_exactly_at_the_clock_in_every_arm",
      "compact::source::freeze_tests::freeze_resident_and_compact_expiry_sources_agree_after_mutations"
@@ -1767,6 +1856,7 @@
     "sha256_restored": "615411fd8d93681161d56f1eafac6fe1edefb15dd4824e451406476b15fd25ec",
     "restored_identically": true
    },
+   "baseline_machine": "separate",
    "baseline_lane": {
     "status": "survived",
     "tests_run": 75,
@@ -1776,9 +1866,9 @@
     "sha256_restored": "615411fd8d93681161d56f1eafac6fe1edefb15dd4824e451406476b15fd25ec",
     "restored_identically": true
    },
-   "lane_replay": {
+   "final": {
     "status": "killed",
-    "tests_run": 93,
+    "tests_run": 94,
     "failing_tests": [
      "compact::source::freeze_tests::freeze_deadline_hides_exactly_at_the_clock_in_every_arm"
     ],
@@ -1807,6 +1897,7 @@
     "sha256_restored": "615411fd8d93681161d56f1eafac6fe1edefb15dd4824e451406476b15fd25ec",
     "restored_identically": true
    },
+   "baseline_machine": "separate",
    "baseline_lane": {
     "status": "survived",
     "tests_run": 75,
@@ -1816,9 +1907,9 @@
     "sha256_restored": "615411fd8d93681161d56f1eafac6fe1edefb15dd4824e451406476b15fd25ec",
     "restored_identically": true
    },
-   "lane_replay": {
+   "final": {
     "status": "killed",
-    "tests_run": 93,
+    "tests_run": 94,
     "failing_tests": [
      "compact::source::freeze_tests::freeze_deadline_hides_exactly_at_the_clock_in_every_arm"
     ],
@@ -1849,6 +1940,7 @@
     "sha256_restored": "615411fd8d93681161d56f1eafac6fe1edefb15dd4824e451406476b15fd25ec",
     "restored_identically": true
    },
+   "baseline_machine": "separate",
    "baseline_lane": {
     "status": "killed",
     "tests_run": 75,
@@ -1881,6 +1973,7 @@
     "sha256_restored": "615411fd8d93681161d56f1eafac6fe1edefb15dd4824e451406476b15fd25ec",
     "restored_identically": true
    },
+   "baseline_machine": "separate",
    "baseline_lane": {
     "status": "killed",
     "tests_run": 75,
@@ -1913,6 +2006,7 @@
     "sha256_restored": "615411fd8d93681161d56f1eafac6fe1edefb15dd4824e451406476b15fd25ec",
     "restored_identically": true
    },
+   "baseline_machine": "separate",
    "baseline_lane": {
     "status": "killed",
     "tests_run": 75,
@@ -1946,6 +2040,7 @@
     "sha256_restored": "615411fd8d93681161d56f1eafac6fe1edefb15dd4824e451406476b15fd25ec",
     "restored_identically": true
    },
+   "baseline_machine": "separate",
    "baseline_lane": {
     "status": "killed",
     "tests_run": 75,
@@ -1977,6 +2072,7 @@
     "sha256_restored": "615411fd8d93681161d56f1eafac6fe1edefb15dd4824e451406476b15fd25ec",
     "restored_identically": true
    },
+   "baseline_machine": "separate",
    "baseline_lane": {
     "status": "survived",
     "tests_run": 75,
@@ -1986,9 +2082,9 @@
     "sha256_restored": "615411fd8d93681161d56f1eafac6fe1edefb15dd4824e451406476b15fd25ec",
     "restored_identically": true
    },
-   "lane_replay": {
+   "final": {
     "status": "killed",
-    "tests_run": 93,
+    "tests_run": 94,
     "failing_tests": [
      "compact::source::freeze_tests::freeze_replay_overlay_covers_every_kind_of_change"
     ],
@@ -1997,7 +2093,8 @@
     "sha256_restored": "615411fd8d93681161d56f1eafac6fe1edefb15dd4824e451406476b15fd25ec",
     "restored_identically": true
    },
-   "reach": "guard"
+   "reach": "input",
+   "note": "Killed through the inputs of compact_from_replay, not through an edit of the directory."
   },
   {
    "id": "R0-AF-03",
@@ -2019,6 +2116,7 @@
     "sha256_restored": "615411fd8d93681161d56f1eafac6fe1edefb15dd4824e451406476b15fd25ec",
     "restored_identically": true
    },
+   "baseline_machine": "separate",
    "baseline_lane": {
     "status": "killed",
     "tests_run": 75,
@@ -2051,6 +2149,7 @@
     "sha256_restored": "615411fd8d93681161d56f1eafac6fe1edefb15dd4824e451406476b15fd25ec",
     "restored_identically": true
    },
+   "baseline_machine": "separate",
    "baseline_lane": {
     "status": "killed",
     "tests_run": 75,
@@ -2084,6 +2183,7 @@
     "sha256_restored": "615411fd8d93681161d56f1eafac6fe1edefb15dd4824e451406476b15fd25ec",
     "restored_identically": true
    },
+   "baseline_machine": "separate",
    "baseline_lane": {
     "status": "killed",
     "tests_run": 75,
@@ -2115,6 +2215,7 @@
     "sha256_restored": "615411fd8d93681161d56f1eafac6fe1edefb15dd4824e451406476b15fd25ec",
     "restored_identically": true
    },
+   "baseline_machine": "separate",
    "baseline_lane": {
     "status": "survived",
     "tests_run": 75,
@@ -2124,9 +2225,9 @@
     "sha256_restored": "615411fd8d93681161d56f1eafac6fe1edefb15dd4824e451406476b15fd25ec",
     "restored_identically": true
    },
-   "lane_replay": {
+   "final": {
     "status": "killed",
-    "tests_run": 93,
+    "tests_run": 94,
     "failing_tests": [
      "compact::source::freeze_tests::freeze_effective_rows_follow_overlay_precedence_in_ascending_order"
     ],
@@ -2158,6 +2259,7 @@
     "sha256_restored": "615411fd8d93681161d56f1eafac6fe1edefb15dd4824e451406476b15fd25ec",
     "restored_identically": true
    },
+   "baseline_machine": "separate",
    "baseline_lane": {
     "status": "killed",
     "tests_run": 75,
@@ -2202,6 +2304,7 @@
     "sha256_restored": "53a142d1f7611bac1f63968f3a09df9aa0fcf6fc76ac96db27e5ca1831d4ccf9",
     "restored_identically": true
    },
+   "baseline_machine": "separate",
    "baseline_lane": {
     "status": "killed",
     "tests_run": 75,
@@ -2245,6 +2348,7 @@
     "sha256_restored": "53a142d1f7611bac1f63968f3a09df9aa0fcf6fc76ac96db27e5ca1831d4ccf9",
     "restored_identically": true
    },
+   "baseline_machine": "separate",
    "baseline_lane": {
     "status": "killed",
     "tests_run": 75,
@@ -2277,6 +2381,7 @@
     "sha256_restored": "53a142d1f7611bac1f63968f3a09df9aa0fcf6fc76ac96db27e5ca1831d4ccf9",
     "restored_identically": true
    },
+   "baseline_machine": "separate",
    "baseline_lane": {
     "status": "killed",
     "tests_run": 75,
@@ -2309,6 +2414,7 @@
     "sha256_restored": "53a142d1f7611bac1f63968f3a09df9aa0fcf6fc76ac96db27e5ca1831d4ccf9",
     "restored_identically": true
    },
+   "baseline_machine": "separate",
    "baseline_lane": {
     "status": "killed",
     "tests_run": 75,
@@ -2341,6 +2447,7 @@
     "sha256_restored": "53a142d1f7611bac1f63968f3a09df9aa0fcf6fc76ac96db27e5ca1831d4ccf9",
     "restored_identically": true
    },
+   "baseline_machine": "separate",
    "baseline_lane": {
     "status": "killed",
     "tests_run": 75,
@@ -2374,6 +2481,7 @@
     "sha256_restored": "53a142d1f7611bac1f63968f3a09df9aa0fcf6fc76ac96db27e5ca1831d4ccf9",
     "restored_identically": true
    },
+   "baseline_machine": "separate",
    "baseline_lane": {
     "status": "killed",
     "tests_run": 75,
@@ -2391,7 +2499,7 @@
    "id": "R0-BU-07",
    "class": "budget",
    "origin": "new",
-   "description": "the frame-size bound of a bounded body read is inclusive",
+   "description": "a frame body of exactly MAX_BODY plus the seal overhead is refused as a changed frame (the size bound is inclusive) instead of as over the body limit",
    "file": "src/compact/source.rs",
    "old": "                > super::catalog::payload::MAX_BODY + crate::crypto::SEAL_OVERHEAD",
    "new": "                >= super::catalog::payload::MAX_BODY + crate::crypto::SEAL_OVERHEAD",
@@ -2405,6 +2513,7 @@
     "sha256_restored": "53a142d1f7611bac1f63968f3a09df9aa0fcf6fc76ac96db27e5ca1831d4ccf9",
     "restored_identically": true
    },
+   "baseline_machine": "separate",
    "baseline_lane": {
     "status": "survived",
     "tests_run": 75,
@@ -2414,9 +2523,9 @@
     "sha256_restored": "53a142d1f7611bac1f63968f3a09df9aa0fcf6fc76ac96db27e5ca1831d4ccf9",
     "restored_identically": true
    },
-   "lane_replay": {
+   "final": {
     "status": "killed",
-    "tests_run": 93,
+    "tests_run": 94,
     "failing_tests": [
      "compact::source::freeze_tests::freeze_frame_size_bound_is_exact"
     ],
@@ -2425,14 +2534,13 @@
     "sha256_restored": "2d51ae403b1c9fb25dce8d37e88b4f8824b3f521c4595eb232124e2d3a83c95d",
     "restored_identically": true
    },
-   "reach": "guard",
-   "note": "The first attempt on the final tree ended in a linker crash (exit 0xc0000409) and does not count, so this is the rerun."
+   "reach": "guard"
   },
   {
    "id": "R0-BU-08",
    "class": "budget",
    "origin": "new",
-   "description": "the frame-size bound of a bounded body read is dropped",
+   "description": "the frame-size bound is dropped, so an oversize plain frame is refused as over the body limit instead of as a changed frame",
    "file": "src/compact/source.rs",
    "old": "            || disk.len() - PREFIX_SIZE - FOOTER_SIZE\n                > super::catalog::payload::MAX_BODY + crate::crypto::SEAL_OVERHEAD\n",
    "new": "",
@@ -2446,6 +2554,7 @@
     "sha256_restored": "53a142d1f7611bac1f63968f3a09df9aa0fcf6fc76ac96db27e5ca1831d4ccf9",
     "restored_identically": true
    },
+   "baseline_machine": "separate",
    "baseline_lane": {
     "status": "survived",
     "tests_run": 75,
@@ -2455,9 +2564,9 @@
     "sha256_restored": "53a142d1f7611bac1f63968f3a09df9aa0fcf6fc76ac96db27e5ca1831d4ccf9",
     "restored_identically": true
    },
-   "lane_replay": {
+   "final": {
     "status": "killed",
-    "tests_run": 93,
+    "tests_run": 94,
     "failing_tests": [
      "compact::source::freeze_tests::freeze_frame_size_bound_is_exact"
     ],
@@ -2466,7 +2575,8 @@
     "sha256_restored": "2d51ae403b1c9fb25dce8d37e88b4f8824b3f521c4595eb232124e2d3a83c95d",
     "restored_identically": true
    },
-   "reach": "guard"
+   "reach": "guard",
+   "note": "The first attempt on the final tree ended in a toolchain or linker failure and does not count, so this is the rerun."
   },
   {
    "id": "R0-BU-09",
@@ -2486,6 +2596,7 @@
     "sha256_restored": "53a142d1f7611bac1f63968f3a09df9aa0fcf6fc76ac96db27e5ca1831d4ccf9",
     "restored_identically": true
    },
+   "baseline_machine": "separate",
    "baseline_lane": {
     "status": "survived",
     "tests_run": 75,
@@ -2495,9 +2606,9 @@
     "sha256_restored": "53a142d1f7611bac1f63968f3a09df9aa0fcf6fc76ac96db27e5ca1831d4ccf9",
     "restored_identically": true
    },
-   "lane_replay": {
+   "final": {
     "status": "killed",
-    "tests_run": 93,
+    "tests_run": 94,
     "failing_tests": [
      "compact::source::freeze_tests::freeze_frame_size_bound_is_exact"
     ],
@@ -2526,6 +2637,7 @@
     "sha256_restored": "53a142d1f7611bac1f63968f3a09df9aa0fcf6fc76ac96db27e5ca1831d4ccf9",
     "restored_identically": true
    },
+   "baseline_machine": "separate",
    "baseline_lane": {
     "status": "survived",
     "tests_run": 75,
@@ -2535,9 +2647,9 @@
     "sha256_restored": "53a142d1f7611bac1f63968f3a09df9aa0fcf6fc76ac96db27e5ca1831d4ccf9",
     "restored_identically": true
    },
-   "lane_replay": {
+   "final": {
     "status": "killed",
-    "tests_run": 93,
+    "tests_run": 94,
     "failing_tests": [
      "compact::source::freeze_tests::freeze_frame_size_bound_is_exact"
     ],
@@ -2546,7 +2658,8 @@
     "sha256_restored": "2d51ae403b1c9fb25dce8d37e88b4f8824b3f521c4595eb232124e2d3a83c95d",
     "restored_identically": true
    },
-   "reach": "guard"
+   "reach": "guard",
+   "note": "The first attempt on the final tree ended in a toolchain or linker failure and does not count, so this is the rerun."
   },
   {
    "id": "R0-ID-08",
@@ -2579,6 +2692,7 @@
     "sha256_restored": "53a142d1f7611bac1f63968f3a09df9aa0fcf6fc76ac96db27e5ca1831d4ccf9",
     "restored_identically": true
    },
+   "baseline_machine": "separate",
    "baseline_lane": {
     "status": "killed",
     "tests_run": 75,
@@ -2622,6 +2736,7 @@
     "sha256_restored": "53a142d1f7611bac1f63968f3a09df9aa0fcf6fc76ac96db27e5ca1831d4ccf9",
     "restored_identically": true
    },
+   "baseline_machine": "separate",
    "baseline_lane": {
     "status": "killed",
     "tests_run": 75,
@@ -2655,6 +2770,7 @@
     "sha256_restored": "53a142d1f7611bac1f63968f3a09df9aa0fcf6fc76ac96db27e5ca1831d4ccf9",
     "restored_identically": true
    },
+   "baseline_machine": "separate",
    "baseline_lane": {
     "status": "killed",
     "tests_run": 75,
@@ -2688,6 +2804,7 @@
     "sha256_restored": "53a142d1f7611bac1f63968f3a09df9aa0fcf6fc76ac96db27e5ca1831d4ccf9",
     "restored_identically": true
    },
+   "baseline_machine": "separate",
    "baseline_lane": {
     "status": "killed",
     "tests_run": 75,
@@ -2718,6 +2835,7 @@
     "sha256_restored": "53a142d1f7611bac1f63968f3a09df9aa0fcf6fc76ac96db27e5ca1831d4ccf9",
     "restored_identically": true
    },
+   "baseline_machine": "separate",
    "baseline_lane": {
     "status": "survived",
     "tests_run": 75,
@@ -2727,9 +2845,9 @@
     "sha256_restored": "53a142d1f7611bac1f63968f3a09df9aa0fcf6fc76ac96db27e5ca1831d4ccf9",
     "restored_identically": true
    },
-   "lane_replay": {
+   "final": {
     "status": "killed",
-    "tests_run": 93,
+    "tests_run": 94,
     "failing_tests": [
      "compact::source::freeze_tests::freeze_mapped_accounting_keeps_its_own_peak"
     ],
@@ -2738,7 +2856,7 @@
     "sha256_restored": "2d51ae403b1c9fb25dce8d37e88b4f8824b3f521c4595eb232124e2d3a83c95d",
     "restored_identically": true
    },
-   "reach": "api"
+   "reach": "mapped"
   },
   {
    "id": "R0-AC-03",
@@ -2758,6 +2876,7 @@
     "sha256_restored": "53a142d1f7611bac1f63968f3a09df9aa0fcf6fc76ac96db27e5ca1831d4ccf9",
     "restored_identically": true
    },
+   "baseline_machine": "separate",
    "baseline_lane": {
     "status": "survived",
     "tests_run": 75,
@@ -2767,9 +2886,9 @@
     "sha256_restored": "53a142d1f7611bac1f63968f3a09df9aa0fcf6fc76ac96db27e5ca1831d4ccf9",
     "restored_identically": true
    },
-   "lane_replay": {
+   "final": {
     "status": "killed",
-    "tests_run": 93,
+    "tests_run": 94,
     "failing_tests": [
      "compact::source::freeze_tests::freeze_accounting_reports_exact_values_and_keeps_peaks"
     ],
@@ -2798,6 +2917,7 @@
     "sha256_restored": "53a142d1f7611bac1f63968f3a09df9aa0fcf6fc76ac96db27e5ca1831d4ccf9",
     "restored_identically": true
    },
+   "baseline_machine": "separate",
    "baseline_lane": {
     "status": "survived",
     "tests_run": 75,
@@ -2807,9 +2927,9 @@
     "sha256_restored": "53a142d1f7611bac1f63968f3a09df9aa0fcf6fc76ac96db27e5ca1831d4ccf9",
     "restored_identically": true
    },
-   "lane_replay": {
+   "final": {
     "status": "killed",
-    "tests_run": 93,
+    "tests_run": 94,
     "failing_tests": [
      "compact::source::freeze_tests::freeze_accounting_reports_exact_values_and_keeps_peaks"
     ],
@@ -2818,7 +2938,8 @@
     "sha256_restored": "2d51ae403b1c9fb25dce8d37e88b4f8824b3f521c4595eb232124e2d3a83c95d",
     "restored_identically": true
    },
-   "reach": "api"
+   "reach": "api",
+   "note": "The first attempt on the final tree ended in a toolchain or linker failure and does not count, so this is the rerun."
   },
   {
    "id": "R0-AC-05",
@@ -2838,6 +2959,7 @@
     "sha256_restored": "53a142d1f7611bac1f63968f3a09df9aa0fcf6fc76ac96db27e5ca1831d4ccf9",
     "restored_identically": true
    },
+   "baseline_machine": "separate",
    "baseline_lane": {
     "status": "survived",
     "tests_run": 75,
@@ -2847,9 +2969,9 @@
     "sha256_restored": "53a142d1f7611bac1f63968f3a09df9aa0fcf6fc76ac96db27e5ca1831d4ccf9",
     "restored_identically": true
    },
-   "lane_replay": {
+   "final": {
     "status": "killed",
-    "tests_run": 93,
+    "tests_run": 94,
     "failing_tests": [
      "compact::source::freeze_tests::freeze_accounting_reports_exact_values_and_keeps_peaks"
     ],
@@ -2880,6 +3002,7 @@
     "sha256_restored": "53a142d1f7611bac1f63968f3a09df9aa0fcf6fc76ac96db27e5ca1831d4ccf9",
     "restored_identically": true
    },
+   "baseline_machine": "separate",
    "baseline_lane": {
     "status": "killed",
     "tests_run": 75,
@@ -2912,6 +3035,7 @@
     "sha256_restored": "53a142d1f7611bac1f63968f3a09df9aa0fcf6fc76ac96db27e5ca1831d4ccf9",
     "restored_identically": true
    },
+   "baseline_machine": "separate",
    "baseline_lane": {
     "status": "killed",
     "tests_run": 75,
@@ -2942,6 +3066,7 @@
     "sha256_restored": "53a142d1f7611bac1f63968f3a09df9aa0fcf6fc76ac96db27e5ca1831d4ccf9",
     "restored_identically": true
    },
+   "baseline_machine": "separate",
    "baseline_lane": {
     "status": "survived",
     "tests_run": 75,
@@ -2951,9 +3076,9 @@
     "sha256_restored": "53a142d1f7611bac1f63968f3a09df9aa0fcf6fc76ac96db27e5ca1831d4ccf9",
     "restored_identically": true
    },
-   "lane_replay": {
+   "final": {
     "status": "killed",
-    "tests_run": 93,
+    "tests_run": 94,
     "failing_tests": [
      "compact::source::freeze_tests::freeze_vector_peak_survives_eviction_by_a_smaller_block"
     ],
@@ -2985,6 +3110,7 @@
     "sha256_restored": "53a142d1f7611bac1f63968f3a09df9aa0fcf6fc76ac96db27e5ca1831d4ccf9",
     "restored_identically": true
    },
+   "baseline_machine": "separate",
    "baseline_lane": {
     "status": "killed",
     "tests_run": 75,
@@ -3021,6 +3147,7 @@
     "sha256_restored": "53a142d1f7611bac1f63968f3a09df9aa0fcf6fc76ac96db27e5ca1831d4ccf9",
     "restored_identically": true
    },
+   "baseline_machine": "separate",
    "baseline_lane": {
     "status": "killed",
     "tests_run": 75,
@@ -3056,6 +3183,7 @@
     "sha256_restored": "53a142d1f7611bac1f63968f3a09df9aa0fcf6fc76ac96db27e5ca1831d4ccf9",
     "restored_identically": true
    },
+   "baseline_machine": "separate",
    "baseline_lane": {
     "status": "killed",
     "tests_run": 75,
@@ -3088,6 +3216,7 @@
     "sha256_restored": "53a142d1f7611bac1f63968f3a09df9aa0fcf6fc76ac96db27e5ca1831d4ccf9",
     "restored_identically": true
    },
+   "baseline_machine": "separate",
    "baseline_lane": {
     "status": "killed",
     "tests_run": 75,
@@ -3121,6 +3250,7 @@
     "sha256_restored": "53a142d1f7611bac1f63968f3a09df9aa0fcf6fc76ac96db27e5ca1831d4ccf9",
     "restored_identically": true
    },
+   "baseline_machine": "separate",
    "baseline_lane": {
     "status": "killed",
     "tests_run": 75,
@@ -3154,6 +3284,7 @@
     "sha256_restored": "3e956e2bc8e4652987af53c8461c642564d5fe4293891a547133e9fa27c8fc94",
     "restored_identically": true
    },
+   "baseline_machine": "separate",
    "baseline_lane": {
     "status": "killed",
     "tests_run": 75,
@@ -3197,6 +3328,7 @@
     "sha256_restored": "53a142d1f7611bac1f63968f3a09df9aa0fcf6fc76ac96db27e5ca1831d4ccf9",
     "restored_identically": true
    },
+   "baseline_machine": "separate",
    "baseline_lane": {
     "status": "killed",
     "tests_run": 75,
@@ -3251,6 +3383,7 @@
     "sha256_restored": "53a142d1f7611bac1f63968f3a09df9aa0fcf6fc76ac96db27e5ca1831d4ccf9",
     "restored_identically": true
    },
+   "baseline_machine": "separate",
    "baseline_lane": {
     "status": "killed",
     "tests_run": 75,
@@ -3273,6 +3406,185 @@
     "sha256_restored": "53a142d1f7611bac1f63968f3a09df9aa0fcf6fc76ac96db27e5ca1831d4ccf9",
     "restored_identically": true
    }
+  },
+  {
+   "id": "R0-AC-17",
+   "class": "accounting",
+   "origin": "new",
+   "description": "plaintext_peak is overwritten instead of kept as a maximum",
+   "file": "src/compact/source.rs",
+   "old": "            self.accounting.plaintext_peak = self\n                .accounting\n                .plaintext_peak\n                .max(self.accounting.plaintext_live);",
+   "new": "            self.accounting.plaintext_peak = self.accounting.plaintext_live;",
+   "command": "test --locked --offline --lib -- compact::source records:: metadata_index::tests::compact rerank::",
+   "baseline": {
+    "status": "survived",
+    "tests_run": 75,
+    "failing_tests": [],
+    "sha256_original": "53a142d1f7611bac1f63968f3a09df9aa0fcf6fc76ac96db27e5ca1831d4ccf9",
+    "sha256_mutated": "c4fbd2855ad320e594a56072650691505b360777bbe6461161716dc0ac5def18",
+    "sha256_restored": "53a142d1f7611bac1f63968f3a09df9aa0fcf6fc76ac96db27e5ca1831d4ccf9",
+    "restored_identically": true
+   },
+   "baseline_machine": "lane",
+   "final": {
+    "status": "killed",
+    "tests_run": 94,
+    "failing_tests": [
+     "compact::source::freeze_tests::freeze_plaintext_peak_survives_a_smaller_frame"
+    ],
+    "sha256_original": "2d51ae403b1c9fb25dce8d37e88b4f8824b3f521c4595eb232124e2d3a83c95d",
+    "sha256_mutated": "efe635262cf485733242319be0d59fc7a4fc772a3ba848c4c8012fd68b421bd9",
+    "sha256_restored": "2d51ae403b1c9fb25dce8d37e88b4f8824b3f521c4595eb232124e2d3a83c95d",
+    "restored_identically": true
+   },
+   "reach": "api",
+   "note": "Added after the review of the first final tree. Its baseline ran on the lane's machine only."
+  },
+  {
+   "id": "R0-EX-11",
+   "class": "expiry",
+   "origin": "new",
+   "description": "get_at judges the deadline by the wall clock instead of the caller's clock",
+   "file": "src/compact/source.rs",
+   "old": "        if row.expiry.is_some_and(|expiry| expiry <= now_ms) {",
+   "new": "        if row.expiry.is_some_and(|expiry| {\n            expiry\n                <= std::time::SystemTime::now()\n                    .duration_since(std::time::UNIX_EPOCH)\n                    .map_or(0, |elapsed| elapsed.as_millis() as u64)\n        }) {",
+   "command": "test --locked --offline --lib -- compact::source records:: metadata_index::tests::compact rerank::",
+   "baseline": {
+    "status": "killed",
+    "tests_run": 75,
+    "failing_tests": [
+     "compact::source::dispatch_tests::compact_dispatch_mutable_acquisition_keeps_other_refusals",
+     "compact::source::dispatch_tests::compact_dispatch_point_observations_and_raw_image_match_resident",
+     "compact::source::dispatch_tests::compact_dispatch_unqualified_scans_and_derived_reads_refuse",
+     "compact::source::install_tests::compact_install_late_image_failure_never_publishes_or_changes_file",
+     "compact::source::install_tests::compact_install_real_committed_suffix_replays_into_overlay",
+     "compact::source::method_tests::compact_installed_collection_method_matrix",
+     "compact::source::method_tests::compact_installed_database_and_snapshot_method_matrix",
+     "compact::source::overlay_tests::compact_delete_tombstone_shadows_base",
+     "compact::source::overlay_tests::compact_expired_overlay_never_reveals_base",
+     "compact::source::overlay_tests::compact_graph_attachment_tracks_effective_row",
+     "compact::source::overlay_tests::compact_metadata_update_preserves_vector_payload",
+     "compact::source::overlay_tests::compact_mutations_match_resident_put_delete_metadata_and_ttl"
+    ],
+    "sha256_original": "53a142d1f7611bac1f63968f3a09df9aa0fcf6fc76ac96db27e5ca1831d4ccf9",
+    "sha256_mutated": "35a5b1a3dcbd35bb5c4d8840842f5b7cf0ec0d05ef2a17dbe8fb7e13b007e637",
+    "sha256_restored": "53a142d1f7611bac1f63968f3a09df9aa0fcf6fc76ac96db27e5ca1831d4ccf9",
+    "restored_identically": true
+   },
+   "baseline_machine": "lane",
+   "final": {
+    "status": "killed",
+    "tests_run": 94,
+    "failing_tests": [
+     "compact::source::dispatch_tests::compact_dispatch_mutable_acquisition_keeps_other_refusals",
+     "compact::source::dispatch_tests::compact_dispatch_point_observations_and_raw_image_match_resident",
+     "compact::source::dispatch_tests::compact_dispatch_unqualified_scans_and_derived_reads_refuse",
+     "compact::source::freeze_tests::freeze_deadline_hides_exactly_at_the_clock_in_every_arm",
+     "compact::source::freeze_tests::freeze_source_never_reads_the_wall_clock",
+     "compact::source::install_tests::compact_install_late_image_failure_never_publishes_or_changes_file",
+     "compact::source::install_tests::compact_install_real_committed_suffix_replays_into_overlay",
+     "compact::source::method_tests::compact_installed_collection_method_matrix",
+     "compact::source::method_tests::compact_installed_database_and_snapshot_method_matrix",
+     "compact::source::overlay_tests::compact_delete_tombstone_shadows_base",
+     "compact::source::overlay_tests::compact_expired_overlay_never_reveals_base",
+     "compact::source::overlay_tests::compact_graph_attachment_tracks_effective_row"
+    ],
+    "sha256_original": "2d51ae403b1c9fb25dce8d37e88b4f8824b3f521c4595eb232124e2d3a83c95d",
+    "sha256_mutated": "6e0817d8927c4ff08d96c4cf4ed6b0a6a7daafb1ae9a7327a636d7146d3695b1",
+    "sha256_restored": "2d51ae403b1c9fb25dce8d37e88b4f8824b3f521c4595eb232124e2d3a83c95d",
+    "restored_identically": true
+   },
+   "note": "Added after review, for CLK-1. Its baseline ran on the lane's machine only."
+  },
+  {
+   "id": "R0-ID-11",
+   "class": "identity",
+   "origin": "new",
+   "description": "a commit to a compact collection is applied to another collection",
+   "file": "src/lib.rs",
+   "old": "            let state = self\n                .collections\n                .get_mut(&collection)\n                .expect(\"committed collection is live\");\n            if let Some((owner, job)) = &mut self.rebuild",
+   "new": "            let state = self\n                .collections\n                .get_mut(&if collection == 0 { 1 } else { 0 })\n                .expect(\"committed collection is live\");\n            if let Some((owner, job)) = &mut self.rebuild",
+   "command": "test --locked --offline --lib -- compact::source records:: metadata_index::tests::compact rerank::",
+   "baseline": {
+    "status": "killed",
+    "tests_run": 75,
+    "failing_tests": [
+     "compact::source::overlay_tests::committed_apply_errors_poison_compact_handle",
+     "compact::source::overlay_tests::compact_browse_cursor_skips_tombstones_and_expiry",
+     "compact::source::overlay_tests::compact_delete_tombstone_shadows_base",
+     "compact::source::overlay_tests::compact_exact_scan_is_bit_identical_at_same_clock",
+     "compact::source::overlay_tests::compact_expired_overlay_never_reveals_base",
+     "compact::source::overlay_tests::compact_mutations_match_resident_put_delete_metadata_and_ttl",
+     "compact::source::overlay_tests::compact_ordered_merge_matches_resident_with_gaps",
+     "compact::source::overlay_tests::compact_overlay_ordered_batch_matches_replay",
+     "compact::source::overlay_tests::compact_overlay_snapshot_and_revision_condition_are_immutable",
+     "compact::source::overlay_tests::compact_overlays_are_isolated_across_collections",
+     "compact::source::overlay_tests::compact_reinsert_and_replacement_keep_derived_indexes_and_body_accounting",
+     "compact::source::overlay_tests::compact_search_filters_after_overlay_resolution"
+    ],
+    "sha256_original": "4499e6f970a4e522ddd08d35ff319b25c740090f6f1b7802e2558304603cf70a",
+    "sha256_mutated": "046575aae65408b306f99ce03e878652a1ef3319c3e6fc51ac58f018416bced6",
+    "sha256_restored": "4499e6f970a4e522ddd08d35ff319b25c740090f6f1b7802e2558304603cf70a",
+    "restored_identically": true
+   },
+   "baseline_machine": "lane",
+   "final": {
+    "status": "killed",
+    "tests_run": 94,
+    "failing_tests": [
+     "compact::source::freeze_tests::freeze_named_collections_keep_one_overlay_each",
+     "compact::source::freeze_tests::freeze_resident_and_compact_expiry_sources_agree_after_mutations",
+     "compact::source::overlay_tests::committed_apply_errors_poison_compact_handle",
+     "compact::source::overlay_tests::compact_browse_cursor_skips_tombstones_and_expiry",
+     "compact::source::overlay_tests::compact_delete_tombstone_shadows_base",
+     "compact::source::overlay_tests::compact_exact_scan_is_bit_identical_at_same_clock",
+     "compact::source::overlay_tests::compact_expired_overlay_never_reveals_base",
+     "compact::source::overlay_tests::compact_mutations_match_resident_put_delete_metadata_and_ttl",
+     "compact::source::overlay_tests::compact_ordered_merge_matches_resident_with_gaps",
+     "compact::source::overlay_tests::compact_overlay_ordered_batch_matches_replay",
+     "compact::source::overlay_tests::compact_overlay_snapshot_and_revision_condition_are_immutable",
+     "compact::source::overlay_tests::compact_overlays_are_isolated_across_collections"
+    ],
+    "sha256_original": "4499e6f970a4e522ddd08d35ff319b25c740090f6f1b7802e2558304603cf70a",
+    "sha256_mutated": "046575aae65408b306f99ce03e878652a1ef3319c3e6fc51ac58f018416bced6",
+    "sha256_restored": "4499e6f970a4e522ddd08d35ff319b25c740090f6f1b7802e2558304603cf70a",
+    "restored_identically": true
+   },
+   "note": "Added after review, for PRE-6. Its baseline ran on the lane's machine only."
+  },
+  {
+   "id": "R0-AU-18",
+   "class": "authentication",
+   "origin": "new",
+   "description": "a commit that cannot be applied to the compact state returns its error without poisoning the handle",
+   "file": "src/lib.rs",
+   "old": "        if let Err(error) = applied {\n            self.poisoned = true;\n            return Err(error);\n        }\n        Ok(())\n    }\n\n    fn apply_resident(",
+   "new": "        if let Err(error) = applied {\n            return Err(error);\n        }\n        Ok(())\n    }\n\n    fn apply_resident(",
+   "command": "test --locked --offline --lib -- compact::source records:: metadata_index::tests::compact rerank::",
+   "baseline": {
+    "status": "killed",
+    "tests_run": 75,
+    "failing_tests": [
+     "compact::source::overlay_tests::committed_apply_errors_poison_compact_handle"
+    ],
+    "sha256_original": "4499e6f970a4e522ddd08d35ff319b25c740090f6f1b7802e2558304603cf70a",
+    "sha256_mutated": "52dbebc5145096c0b6c6cdca87b21dd6fc799cefe8d640de45b1efa6a8ca1f71",
+    "sha256_restored": "4499e6f970a4e522ddd08d35ff319b25c740090f6f1b7802e2558304603cf70a",
+    "restored_identically": true
+   },
+   "baseline_machine": "lane",
+   "final": {
+    "status": "killed",
+    "tests_run": 94,
+    "failing_tests": [
+     "compact::source::overlay_tests::committed_apply_errors_poison_compact_handle"
+    ],
+    "sha256_original": "4499e6f970a4e522ddd08d35ff319b25c740090f6f1b7802e2558304603cf70a",
+    "sha256_mutated": "52dbebc5145096c0b6c6cdca87b21dd6fc799cefe8d640de45b1efa6a8ca1f71",
+    "sha256_restored": "4499e6f970a4e522ddd08d35ff319b25c740090f6f1b7802e2558304603cf70a",
+    "restored_identically": true
+   },
+   "note": "Added after review, for ERR-7. Its baseline ran on the lane's machine only."
   }
  ]
 }
