@@ -17,9 +17,8 @@ const SHELL_CAP: usize = 16 * 1024 * 1024;
 const MCP_TOO_LONG: &str = "request line exceeds 134217728 bytes";
 const SHELL_TOO_LONG: &str = "error: invalid_input: line exceeds 16777216 bytes\n";
 
-// Some inputs here are hundreds of MiB long. Holding this lock from before an input is
-// described until its process has ended runs one at a time, which bounds what a loaded
-// runner needs.
+// Some inputs here are hundreds of MiB long. Holding this lock while one is written and its
+// process runs makes them run one at a time, which bounds what a loaded runner needs.
 static HEAVY: Mutex<()> = Mutex::new(());
 
 fn serial() -> MutexGuard<'static, ()> {
@@ -125,25 +124,35 @@ fn too_long() -> Value {
     json!({"jsonrpc":"2.0","id":null,"error":{"code":-32600,"message":MCP_TOO_LONG}})
 }
 
-// Runs `vlite-mcp` over `input` and returns what it wrote to stdout, one JSON value per
-// line. The run must end normally with nothing on stderr, having read all of its input.
-fn mcp(input: &Input) -> Vec<Value> {
+// Runs `vlite-mcp` over `input`, which it may leave unread, and returns the process output.
+fn mcp_run(input: &Input) -> (Output, io::Result<()>) {
     let directory = tempfile::tempdir_in(".").unwrap();
     let path = directory.path().join("lines.vlite");
     fixture(&path);
-    let (output, written) = run(
+    run(
         env!("CARGO_BIN_EXE_vlite-mcp"),
         &["--db", path.to_str().unwrap(), "--read-only"],
         input,
-    );
-    assert_eq!(output.status.code(), Some(0), "{}", describe(&output));
-    assert!(output.stderr.is_empty(), "{}", describe(&output));
-    written.unwrap();
-    String::from_utf8(output.stdout)
+    )
+}
+
+// What `vlite-mcp` wrote to stdout, one JSON value per line.
+fn answers(output: &Output) -> Vec<Value> {
+    String::from_utf8(output.stdout.clone())
         .unwrap()
         .lines()
         .map(|line| serde_json::from_str(line).unwrap())
         .collect()
+}
+
+// Runs `vlite-mcp` over `input` and returns what it wrote to stdout. The run must end
+// normally with nothing on stderr, having read all of its input.
+fn mcp(input: &Input) -> Vec<Value> {
+    let (output, written) = mcp_run(input);
+    assert_eq!(output.status.code(), Some(0), "{}", describe(&output));
+    assert!(output.stderr.is_empty(), "{}", describe(&output));
+    written.unwrap();
+    answers(&output)
 }
 
 // The one test at the real cap. About 256 MiB are streamed and none is held in memory:
@@ -196,6 +205,32 @@ fn mcp_skips_blank_lines_and_answers_garbage_with_a_parse_error() {
     );
 }
 
+// A line that fits but is not UTF-8 is a read error, as it was when std read the lines: the
+// run ends with exit code 1 and that error, after the requests before the line were answered.
+#[test]
+fn mcp_exits_with_the_utf8_error_of_a_line_that_fits_after_answering_earlier_requests() {
+    let inputs = [
+        // Invalid bytes alone on a line, between two requests.
+        Input::default()
+            .line(plain_ping(1), "\n")
+            .bytes(b"\xff\xfe\n".to_vec())
+            .line(plain_ping(3), "\n"),
+        // A cut-off character inside a request, which ends the input without a newline.
+        Input::default()
+            .line(plain_ping(1), "\r\n")
+            .bytes(b"{\"jsonrpc\":\"2.0\",\"id\":2,\"method\":\"ping\"}\xc3".to_vec()),
+    ];
+    for input in inputs {
+        let (output, _) = mcp_run(&input);
+        assert_eq!(output.status.code(), Some(1), "{}", describe(&output));
+        assert_eq!(answers(&output), [pong(1)], "{}", describe(&output));
+        assert_eq!(
+            String::from_utf8_lossy(&output.stderr),
+            "vlite-mcp: stream did not contain valid UTF-8\n"
+        );
+    }
+}
+
 fn put(id: u64) -> String {
     format!("put {{\"id\":{id},\"vector\":[{id},1]}}\n")
 }
@@ -206,19 +241,13 @@ struct Ran {
     second_put: bool,
 }
 
-// Runs `vlite-shell` on `put 1`, a comment line of `size` bytes and `put 2`, given as a
-// script file or on stdin.
-fn shell(from_script: bool, size: usize) -> Ran {
+// Runs `vlite-shell` on `script`, given as a script file or on stdin, against a database in
+// which the script may store the ids 1 and 2.
+fn shell(from_script: bool, script: Input) -> Ran {
     let _serial = serial();
     let directory = tempfile::tempdir_in(".").unwrap();
     let path = directory.path().join("lines.vlite");
     fixture(&path);
-    let script = Input::default()
-        .bytes(put(1))
-        .bytes("#")
-        .fill(b'x', size - 1)
-        .bytes("\n")
-        .bytes(put(2));
     let script_path = directory.path().join("script.txt");
     let mut args = vec!["--db", path.to_str().unwrap()];
     let input = if from_script {
@@ -241,10 +270,23 @@ fn shell(from_script: bool, size: usize) -> Ran {
     }
 }
 
+// `put 1`, a comment line of `size` bytes and `put 2`.
+fn around_a_comment(from_script: bool, size: usize) -> Ran {
+    shell(
+        from_script,
+        Input::default()
+            .bytes(put(1))
+            .bytes("#")
+            .fill(b'x', size - 1)
+            .bytes("\n")
+            .bytes(put(2)),
+    )
+}
+
 #[test]
 fn shell_ignores_a_comment_line_of_exactly_the_cap_in_a_script_and_on_stdin() {
     for from_script in [true, false] {
-        let ran = shell(from_script, SHELL_CAP);
+        let ran = around_a_comment(from_script, SHELL_CAP);
         let output = &ran.output;
         assert_eq!(output.status.code(), Some(0), "{}", describe(output));
         assert_eq!(output.stdout, b"ok\nok\n");
@@ -256,12 +298,39 @@ fn shell_ignores_a_comment_line_of_exactly_the_cap_in_a_script_and_on_stdin() {
 #[test]
 fn shell_fails_on_an_overlong_line_in_a_script_and_on_stdin() {
     for from_script in [true, false] {
-        let ran = shell(from_script, SHELL_CAP + 1);
+        let ran = around_a_comment(from_script, SHELL_CAP + 1);
         let output = &ran.output;
         assert_eq!(output.status.code(), Some(1), "{}", describe(output));
         assert_eq!(output.stdout, b"ok\n");
         assert_eq!(String::from_utf8_lossy(&output.stderr), SHELL_TOO_LONG);
         assert!(ran.first_put, "the command before the line ran");
         assert!(!ran.second_put, "the command after the line did not");
+    }
+}
+
+// A line that fits but is not UTF-8 is a read error, as it was when std read the line: the run
+// ends with exit code 1 and that error, the commands before the line having run. A comment is
+// read, and so checked, like any other line.
+#[test]
+fn shell_exits_with_the_utf8_error_of_a_line_that_fits_in_a_script_and_on_stdin() {
+    for from_script in [true, false] {
+        for bad in [&b"put \xff\n"[..], &b"# \xff\n"[..]] {
+            let ran = shell(
+                from_script,
+                Input::default()
+                    .bytes(put(1))
+                    .bytes(bad.to_vec())
+                    .bytes(put(2)),
+            );
+            let output = &ran.output;
+            assert_eq!(output.status.code(), Some(1), "{}", describe(output));
+            assert_eq!(output.stdout, b"ok\n");
+            assert_eq!(
+                String::from_utf8_lossy(&output.stderr),
+                "error: stream did not contain valid UTF-8\n"
+            );
+            assert!(ran.first_put, "the command before the line ran");
+            assert!(!ran.second_put, "the command after the line did not");
+        }
     }
 }

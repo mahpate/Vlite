@@ -1,4 +1,4 @@
-//! Bounded line reading for the tools that take requests or commands on stdin.
+//! Reads lines from any [`BufRead`] without ever keeping more of a line than a cap allows.
 
 use std::io::{self, BufRead};
 
@@ -19,6 +19,11 @@ pub(crate) enum Line {
 thread_local! {
     /// Largest capacity the in-progress line has had on this thread.
     static PEAK: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+    /// How often the in-progress line has had to grow its buffer on this thread.
+    static GROWTHS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+    /// Largest capacity the buffer had on this thread while a line already known
+    /// to be too long was being discarded; `None` if no line was.
+    static DISCARDING: std::cell::Cell<Option<usize>> = const { std::cell::Cell::new(None) };
 }
 
 /// The bytes of the line being read. They, and the capacity that holds them,
@@ -32,6 +37,8 @@ struct Pending {
 impl Pending {
     fn push(&mut self, chunk: &[u8]) {
         if self.overflowed {
+            #[cfg(test)]
+            DISCARDING.with(|held| held.set(held.get().max(Some(self.bytes.capacity()))));
             return;
         }
         let used = self.bytes.len();
@@ -43,6 +50,8 @@ impl Pending {
         if self.bytes.capacity() - used < chunk.len() {
             // Grow geometrically, but never past the limit.
             let wanted = (used + chunk.len()).max(self.bytes.capacity().saturating_mul(2));
+            #[cfg(test)]
+            GROWTHS.with(|growths| growths.set(growths.get() + 1));
             self.bytes.reserve_exact(wanted.min(self.limit) - used);
         }
         self.bytes.extend_from_slice(chunk);
@@ -429,6 +438,44 @@ mod tests {
                     );
                 }
             }
+        }
+    }
+
+    #[test]
+    fn a_long_line_read_a_byte_at_a_time_grows_its_buffer_geometrically() {
+        // The cap is far above the line, so the limit never cuts a growth short.
+        let length = (1usize << 20) + 12_345;
+        let mut input = vec![b'a'; length];
+        input.push(b'\n');
+        GROWTHS.with(|growths| growths.set(0));
+        assert_eq!(
+            lines(&input, 1, usize::MAX / 2),
+            [Got::Text("a".repeat(length))]
+        );
+        let growths = GROWTHS.with(Cell::get);
+        // Doubling takes about log2(length) growths; adding the bytes as they come
+        // would take one per byte.
+        let bound = 2 * length.ilog2() as usize + 2;
+        assert!(
+            (1..=bound).contains(&growths),
+            "{growths} growths for {length} bytes, at most {bound} expected"
+        );
+    }
+
+    #[test]
+    fn an_overlong_line_holds_no_buffer_while_it_is_discarded() {
+        let long = "a".repeat(20_000);
+        let input = format!("x\n{long}\nok\n");
+        for chunk in CHUNKS {
+            DISCARDING.with(|held| held.set(None));
+            assert_eq!(
+                lines(input.as_bytes(), chunk, 16),
+                [text("x"), Got::TooLong, text("ok")],
+                "chunk {chunk}"
+            );
+            // Whatever was kept before the line was known to be too long has been
+            // freed, not just emptied.
+            assert_eq!(DISCARDING.with(Cell::get), Some(0), "chunk {chunk}");
         }
     }
 

@@ -95,18 +95,41 @@ fn run() -> Result<()> {
     } else {
         Box::new(io::BufReader::new(io::stdin()))
     };
+    session(
+        &mut input,
+        interactive,
+        MAX_LINE_BYTES,
+        readonly,
+        path,
+        &mut db,
+    )?;
+    if let Some(db) = db {
+        db.close()?;
+    }
+    Ok(())
+}
+// Runs the commands in `input` until `quit` or its end. An error stops the run, except in a
+// terminal session, which prints it and goes on; a line of more than `cap` bytes is such an error.
+fn session(
+    input: &mut impl BufRead,
+    interactive: bool,
+    cap: usize,
+    readonly: bool,
+    path: &str,
+    db: &mut Option<Database>,
+) -> Result<()> {
     let mut collection = "default".to_string();
     loop {
         if interactive {
             print!("vlite[{collection}]> ");
             io::stdout().flush()?;
         }
-        let line = match read_bounded_line(&mut input, MAX_LINE_BYTES)? {
+        let line = match read_bounded_line(input, cap)? {
             Line::Text(line) => line,
             Line::TooLong => {
                 report(
                     interactive,
-                    format!("invalid_input: line exceeds {MAX_LINE_BYTES} bytes").into(),
+                    format!("invalid_input: line exceeds {cap} bytes").into(),
                 )?;
                 continue;
             }
@@ -151,7 +174,7 @@ fn run() -> Result<()> {
                     }
                     Ok(())
                 })();
-                db = Some(open(path, readonly)?);
+                *db = Some(open(path, readonly)?);
                 return maintenance;
             }
             let db = db.as_mut().ok_or("database unavailable")?;
@@ -256,9 +279,6 @@ fn run() -> Result<()> {
             report(interactive, e)?;
         }
     }
-    if let Some(db) = db {
-        db.close()?;
-    }
     Ok(())
 }
 // A terminal session prints the error and goes on; a script or piped input stops.
@@ -275,7 +295,9 @@ fn main() -> ExitCode {
 }
 #[cfg(test)]
 mod tests {
-    use super::report;
+    use super::{report, session};
+    use std::io::Cursor;
+    use vlite::Database;
 
     #[test]
     fn a_terminal_session_goes_on_after_an_error_and_a_script_stops() {
@@ -283,6 +305,44 @@ mod tests {
         assert_eq!(
             report(false, "failed".into()).unwrap_err().to_string(),
             "failed"
+        );
+    }
+
+    // Runs `put 1`, a comment line of 65 bytes under a cap of 64, and `put 2`. Returns
+    // the error that ended the session, if any, and whether each put was stored.
+    fn put_around_an_overlong_line(interactive: bool) -> (Option<String>, [bool; 2]) {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("lines.vlite");
+        let path = path.to_str().unwrap();
+        let mut db = Some(Database::create(path, 2).unwrap());
+        let script = format!(
+            "put {{\"id\":1,\"vector\":[1,2]}}\n#{}\nput {{\"id\":2,\"vector\":[3,4]}}\n",
+            "x".repeat(64)
+        );
+        let result = session(
+            &mut Cursor::new(script),
+            interactive,
+            64,
+            false,
+            path,
+            &mut db,
+        );
+        let db = db.unwrap();
+        (
+            result.err().map(|error| error.to_string()),
+            [1, 2].map(|id| db.get(id).unwrap().is_some()),
+        )
+    }
+
+    #[test]
+    fn an_overlong_line_is_skipped_in_a_terminal_session_and_stops_a_script() {
+        assert_eq!(put_around_an_overlong_line(true), (None, [true, true]));
+        assert_eq!(
+            put_around_an_overlong_line(false),
+            (
+                Some("invalid_input: line exceeds 64 bytes".to_string()),
+                [true, false]
+            )
         );
     }
 }
