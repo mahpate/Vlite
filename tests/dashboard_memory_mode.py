@@ -17,6 +17,8 @@ This script starts disposable servers on loopback and drives Chromium against th
      signs in with a password and, again, with the admin token. Overview, Observability and Health say
      plainly that server metrics are off, and every other refused panel explains itself in its own
      result area instead of failing in the status bar. A tenant editor is unaffected.
+  C. The same database restarted WITHOUT the bindings file: the binding records it still holds keep the
+     reservation, so the refusals stay and the dashboard keeps explaining them (docs/SECURITY.md).
 
 Secrets are random per run and never printed. Servers, browser and the temporary directory are
 removed at the end.
@@ -48,6 +50,7 @@ WIDTHS = (1280, 768, 390)
 GRAPH_STATS_ROUTE = "/v1/admin/graph/stats"
 NOT_EXERCISED = []
 SECRETS = []
+PHASE = ""  # prefixes the label of a failing step, so a red run names its phase
 
 
 def secret(value):
@@ -254,7 +257,7 @@ def step(page, label, extra=()):
     try:
         yield
     except (AssertionError, PlaywrightError) as error:
-        raise AssertionError(f"FAILED {label}\n  {summarize(error)}\n{screen(page, extra)}") from None
+        raise AssertionError(f"FAILED {PHASE}{label}\n  {summarize(error)}\n{screen(page, extra)}") from None
 
 
 def open_page(browser):
@@ -423,11 +426,13 @@ def graph_statistics(page, advertised):
         if button.is_disabled() and GRAPH_STATS_ROUTE not in advertised:
             # Not specific to agent memory: console-tools.js disables every [data-route] control the server does not
             # advertise, and /v1/capabilities never lists this route, so the button is dead on any real server.
-            NOT_EXERCISED.append("graph engine statistics (#graph-stats is disabled: /v1/capabilities does not advertise "
-                                 + GRAPH_STATS_ROUTE + ")")
-            print("NOTE graph engine statistics were NOT exercised: #graph-stats is disabled because /v1/capabilities does "
-                  "not advertise " + GRAPH_STATS_ROUTE + " (true with or without agent memory). Enable the button and this "
-                  "check enforces itself.", file=sys.stderr)
+            skipped = ("graph engine statistics (#graph-stats is disabled: /v1/capabilities does not advertise "
+                       + GRAPH_STATS_ROUTE + ")")
+            if skipped not in NOT_EXERCISED:
+                NOT_EXERCISED.append(skipped)
+                print("NOTE graph engine statistics were NOT exercised: #graph-stats is disabled because /v1/capabilities does "
+                      "not advertise " + GRAPH_STATS_ROUTE + " (true with or without agent memory). Enable the button and this "
+                      "check enforces itself.", file=sys.stderr)
             return
     refused_panel(page, advertised, "graph engine statistics", "#graph-stats", "#graph-stats-result", extra=("#graph-note",))
 
@@ -493,6 +498,39 @@ def memory_phase(browser, url, token, username, password, editor, editor_passwor
         context.close()
 
 
+# ----------------------------------------------------------------------------------------------
+# C. The bindings file is gone, the binding records remain
+# ----------------------------------------------------------------------------------------------
+def leftover_phase(browser, url, token, username, password):
+    """The memory database restarted without its bindings file. The binding records keep the reservation, so the
+    server still refuses the database-wide routes (docs/SECURITY.md, Memory-bound resources) and the dashboard
+    must keep signing in and explaining them. The wording stays "agent memory is enabled" (a known limit)."""
+    global PHASE
+    status, value = rest(url, "GET", "/metrics", token=token)
+    code = ((value or {}).get("error") or {}).get("code")
+    require((status, code) == (403, "forbidden_scope"),
+            f"leftover records: /metrics answered HTTP {status} ({code}); the binding records should keep it refused")
+    status = rest(url, "POST", "/v1/memory/notes/recall", {"scope": {"agent": "a"}, "entity_seeds": []}, token)[0]
+    require(status == 404, f"leftover records: a memory route answered HTTP {status}; none is mounted without the file")
+    PHASE = "leftover records, no bindings file: "
+    context, page, errors = open_page(browser)
+    try:
+        page.goto(url + "/dashboard")
+        with step(page, "step 1: the super admin still signs in with a password"):
+            expect_signed_out(page)
+            sign_in_with_password(page, username, password)
+            expect_signed_in_as(page, username)
+            expect_no_refusal(page)
+        overview(page)
+        observability(page)
+        administration(page)
+        refused_panels(page, accepted("capabilities", rest(url, "GET", "/v1/capabilities", token=token), 200)["routes"])
+        require(not errors, f"browser errors while only the binding records remained: {errors}")
+    finally:
+        PHASE = ""
+        context.close()
+
+
 def main():
     binary = server_binary()
     token = secret(secrets.token_urlsafe(40))
@@ -511,9 +549,14 @@ def main():
                 try:
                     control_phase(browser, control_server.url, token)
                     control_server.stop()
-                    memory_server = start_memory_server(binary, Home(work, "memory", token, (username, password)), token)
+                    memory_home = Home(work, "memory", token, (username, password))
+                    memory_server = start_memory_server(binary, memory_home, token)
                     servers.append(memory_server)
                     memory_phase(browser, memory_server.url, token, username, password, editor, editor_password)
+                    memory_server.stop()
+                    leftover_server = Server(binary, memory_home, "leftover")
+                    servers.append(leftover_server)
+                    leftover_phase(browser, leftover_server.url, token, username, password)
                 finally:
                     browser.close()
         except BaseException:
@@ -527,7 +570,9 @@ def main():
     print("PASS dashboard memory mode: with agent memory enabled the super admin signs in with a password and with the "
           "token; Overview, Observability and Health say server metrics are off; webhooks, automatic maintenance, "
           "replication, Prometheus text and import status explain themselves in their own panels; "
-          "logs, slow queries, audit and backups keep working; a tenant editor is unaffected; no overflow at "
+          "logs, slow queries, audit and backups keep working; a tenant editor is unaffected; with the bindings file "
+          "removed and only the binding records left, the refusals stay and the dashboard keeps explaining them; "
+          "no overflow at "
           + "/".join(str(width) for width in WIDTHS) + " px"
           + ("; NOT EXERCISED: " + "; ".join(NOT_EXERCISED) if NOT_EXERCISED else "; graph engine statistics explain themselves too"))
 
