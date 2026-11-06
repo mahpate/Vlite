@@ -48,11 +48,15 @@ function rgb(value, fallback) {
   return fallback ? rgb(fallback) : [1, 1, 1];
 }
 
+const KINDS = ["collections", "dense", "sparse", "meta", "payload", "graph", "kv", "memory"];
+const DUST_KIND = KINDS.length;
+const HI_KIND = DUST_KIND + 1;
+const PALETTE_SIZE = HI_KIND + 1;
 const PALETTES = {
-  light: { collections: "#059669", dense: "#0891b2", sparse: "#4f46e5", meta: "#8b5cf6", payload: "#d97706", graph: "#db2777", hi: "#312e81", star: "#4f46e5", accent: "#4f46e5", accent2: "#0891b2", good: "#059669" },
-  dark: { collections: "#34d399", dense: "#22d3ee", sparse: "#818cf8", meta: "#a78bfa", payload: "#fbbf24", graph: "#f472b6", hi: "#e0f2fe", star: "#c7d2fe", accent: "#818cf8", accent2: "#22d3ee", good: "#34d399" },
+  light: { collections: "#059669", dense: "#0891b2", sparse: "#4f46e5", meta: "#8b5cf6", payload: "#d97706", graph: "#db2777", kv: "#0f766e", memory: "#c2410c", hi: "#312e81", star: "#4f46e5", accent: "#4f46e5", accent2: "#0891b2", good: "#059669" },
+  dark: { collections: "#34d399", dense: "#22d3ee", sparse: "#818cf8", meta: "#a78bfa", payload: "#fbbf24", graph: "#f472b6", kv: "#5eead4", memory: "#fb923c", hi: "#e0f2fe", star: "#c7d2fe", accent: "#818cf8", accent2: "#22d3ee", good: "#34d399" },
 };
-const VARS = { collections: "--k-collections", dense: "--k-dense", sparse: "--k-sparse", meta: "--k-meta", payload: "--k-payload", graph: "--k-graph", accent: "--accent", accent2: "--accent-2", good: "--good" };
+const VARS = { ...Object.fromEntries(KINDS.map(k => [k, "--k-" + k])), accent: "--accent", accent2: "--accent-2", good: "--good" };
 function palette() {
   const dark = isDark();
   const base = dark ? PALETTES.dark : PALETTES.light;
@@ -258,7 +262,7 @@ uniform float uScan;
 uniform float uScanY;
 uniform float uHiMix;
 uniform float uBoost;
-uniform vec4 uPal[8];
+uniform vec4 uPal[${PALETTE_SIZE}];
 varying vec4 vColor;
 ${DRIFT_GLSL}
 void main() {
@@ -268,7 +272,7 @@ void main() {
   vec4 base = uPal[int(aKind + 0.5)];
   float tw = 0.75 + 0.25 * sin(uTime * (0.7 + aSeed * 1.3) + aSeed * 60.0);
   float size = aSize * uBoost * (1.0 + 0.9 * aHi + 0.6 * scan) * uPx * uScale / -mv.z;
-  vColor = vec4(mix(base.rgb, uPal[7].rgb, clamp(aHi * uHiMix + scan * 0.6, 0.0, 1.0)),
+  vColor = vec4(mix(base.rgb, uPal[${HI_KIND}].rgb, clamp(aHi * uHiMix + scan * 0.6, 0.0, 1.0)),
     mix(base.a * tw, 1.0, max(aHi, scan * 0.8)) * clamp(size / 1.5, 0.0, 1.0));
   gl_PointSize = max(size, 1.5);
   gl_Position = projectionMatrix * mv;
@@ -278,7 +282,7 @@ const LINK_VERT = `
 attribute float aKind;
 attribute float aA;
 attribute float aSeed;
-uniform vec4 uPal[8];
+uniform vec4 uPal[${PALETTE_SIZE}];
 varying vec4 vColor;
 ${DRIFT_GLSL}
 void main() {
@@ -505,8 +509,7 @@ const D = 900;
 const CYCLE = 9;
 const STILL_T = 5.75;
 const DRIFT = 0.9;
-const KINDS = ["collections", "dense", "sparse", "meta", "payload", "graph"];
-const ANCHORS = { collections: [0, 62, 0], dense: [-42, 34, 0], sparse: [42, 34, 0], meta: [-42, -32, 0], payload: [42, -32, 0], graph: [0, -63, 0] };
+const ANCHORS = { collections: [0, 62, 0], dense: [-42, 34, 0], sparse: [42, 34, 0], meta: [-42, -32, 0], payload: [42, -32, 0], graph: [0, -63, 0], kv: [0, 34, 0], memory: [0, -32, 0] };
 const QUERIES = [
   { kind: 1, q: [-50, 30, 3], from: [-150, 170, 60] },
   { kind: 2, q: [52, 30, -2], from: [150, 170, 60] },
@@ -540,8 +543,13 @@ function buildClusters() {
   const kind = [];
   const size = [];
   const seed = [];
-  const groups = [[], [], [], [], [], [], []];
-  const push = (x, y, z, k, s) => { groups[k].push(kind.length); pos.push(x, y, z); kind.push(k); size.push(s); seed.push(r()); };
+  const groups = Array.from({ length: DUST_KIND + 1 }, () => []);
+  const links = [];
+  const push = (x, y, z, k, s) => {
+    const index = kind.length;
+    groups[k].push(index); pos.push(x, y, z); kind.push(k); size.push(s); seed.push(r());
+    return index;
+  };
   for (const cx of [-33, -11, 11, 33]) {
     for (let i = 0; i < 3; i++) for (let j = 0; j < 3; j++) for (let k = 0; k < 2; k++) push(cx + (i - 1) * 4.5, 62 + (j - 1) * 4.5, (k - 0.5) * 4.5, 0, 2.3);
   }
@@ -582,13 +590,33 @@ function buildClusters() {
     if (inside(p[0], p[1], p[2]) && nodes.every((n) => dist3(n, p) >= 11)) nodes.push(p);
   }
   for (const [x, y, z] of nodes) push(x, y, z, 5, 3.6);
+  // Three explicit key-to-value pairs; a recall hub links a ring of remembered episodes.
+  for (const y of [27, 34, 41]) {
+    const key = push(-10, y, 0, 6, 3.2);
+    const value = push(5, y, 0, 6, 2.4);
+    links.push([key, value]);
+    let previous = value;
+    for (const [x, dy] of [[5, 3], [13, 3], [13, -3], [5, -3], [5, 0]]) {
+      const next = push(x, y + dy, 0, 6, 1.8);
+      links.push([previous, next]);
+      previous = next;
+    }
+  }
+  const hub = push(0, -32, 0, 7, 3.8);
+  const episodes = Array.from({ length: 6 }, (_, i) => {
+    const angle = i * Math.PI / 3;
+    return push(Math.cos(angle) * 12, -32 + Math.sin(angle) * 9, 0, 7, 2.8);
+  });
+  episodes.forEach((episode, i) => {
+    links.push([episode, episodes[(i + 1) % episodes.length]], [hub, episode]);
+  });
   for (let n = 0, tries = 0; n < 300 && tries < 4000; tries++) {
     const x = (r() * 2 - 1) * W2;
     const y = (r() * 2 - 1) * H2;
     const z = (r() * 2 - 1) * 14;
-    if (inside(x, y, z, 3)) { push(x, y, z, 6, 1.0); n++; }
+    if (inside(x, y, z, 3)) { push(x, y, z, DUST_KIND, 1.0); n++; }
   }
-  return { pos, kind, size, seed, groups };
+  return { pos, kind, size, seed, groups, links };
 }
 
 function buildStory(data) {
@@ -684,7 +712,7 @@ function createHero(renderer) {
   const U = {
     uTime: { value: 0 }, uDrift: { value: DRIFT }, uIntro: { value: 0 }, uPx: { value: 1 }, uScale: { value: D },
     uScan: { value: 0 }, uScanY: { value: 0 }, uHiMix: { value: 0.45 }, uSharp: { value: 0 }, uBoost: { value: 1 },
-    uPal: { value: new Float32Array(32) }, uGlint: { value: 0 }, uGlintAt: { value: -200 },
+    uPal: { value: new Float32Array(PALETTE_SIZE * 4) }, uGlint: { value: 0 }, uGlintAt: { value: -200 },
   };
   const drift = { uTime: U.uTime, uDrift: U.uDrift, uIntro: U.uIntro };
 
@@ -747,12 +775,13 @@ function createHero(renderer) {
   };
   for (const [a, b] of story.edges) pushLink(story.gi[a], story.gi[b], 5, 5, 0.38);
   for (const [i, node] of story.attachments) pushLink(i, story.gi[node], data.kind[i], 5, 0.18);
+  for (const [a, b] of data.links) pushLink(a, b, data.kind[a], data.kind[b], 0.6);
   const linkGeo = geometry([["position", linkPos, 3], ["aKind", linkKind, 1], ["aA", linkA, 1], ["aSeed", linkSeed, 1]]);
   const linkMat = track(material(LINK_VERT, COLOR_FRAG, { ...drift, uPal: U.uPal }));
   add(crystal, new THREE.LineSegments(linkGeo, linkMat), 4.2);
 
   // Query effects, rewritten every frame.
-  const MAX_LINES = 32;
+  const MAX_LINES = 64;
   const MAX_POINTS = 48;
   const fxLineGeo = geometry([["position", new Float32Array(MAX_LINES * 6), 3, true], ["aCol", new Float32Array(MAX_LINES * 8), 4, true]]);
   const fxPointGeo = geometry([["position", new Float32Array(MAX_POINTS * 3), 3, true], ["aCol", new Float32Array(MAX_POINTS * 4), 4, true], ["aSize", new Float32Array(MAX_POINTS), 1, true]]);
@@ -836,8 +865,8 @@ function createHero(renderer) {
     P = palette();
     const dark = P.dark;
     const dust = P.accent.map((c, i) => (c + P.accent2[i]) / 2);
-    const colors = [P.collections, P.dense, P.sparse, P.meta, P.payload, P.graph, dust, P.hi];
-    const alphas = [0.9, 0.7, 0.85, 0.85, 0.85, 1, dark ? 0.35 : 0.3, 1];
+    const colors = [...KINDS.map(k => P[k]), dust, P.hi];
+    const alphas = [0.9, 0.7, 0.85, 0.85, 0.85, 1, 0.95, 0.95, dark ? 0.35 : 0.3, 1];
     colors.forEach((c, i) => U.uPal.value.set([c[0], c[1], c[2], alphas[i]], i * 4));
     for (const m of materials) m.blending = dark ? THREE.AdditiveBlending : THREE.NormalBlending;
     U.uHiMix.value = dark ? 0.45 : 0;
@@ -947,6 +976,23 @@ function createHero(renderer) {
           }
         }
       }
+    }
+    // Lookup a key/value row, then recall episodes, after the vector-to-graph story.
+    for (const [k, start, duration] of [[6, 6.2, 1.1], [7, 7.4, 1.4]]) {
+      const phase = still ? 0.65 : (T - start) / duration;
+      if (phase < 0 || phase > 1) continue;
+      const alpha = still ? 0.7 : Math.sin(Math.PI * phase);
+      const indices = data.groups[k];
+      const reached = Math.floor(phase * (indices.length - 1));
+      indices.forEach((i, j) => light(i, j <= reached ? alpha : 0));
+      for (const [a, b] of data.links) {
+        if (data.kind[a] !== k) continue;
+        const from = drifted(a, t, tmp[0]);
+        const to = drifted(b, t, tmp[1]);
+        fxLine(from, to, P[KINDS[k]], alpha * 0.8);
+      }
+      const head = drifted(indices[reached], t, tmp[0]);
+      fxPoint(head, P[KINDS[k]], alpha, 4.5);
     }
     if (lit.length || litBefore) pointGeo.attributes.aHi.needsUpdate = true;
     litBefore = lit.length;

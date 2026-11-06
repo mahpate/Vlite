@@ -21,6 +21,11 @@ ROOT = Path(__file__).resolve().parents[1]
 SWIFTSHADER = ["--use-angle=swiftshader", "--enable-unsafe-swiftshader", "--ignore-gpu-blocklist"]
 HERO_SETTLED = "['ready', 'off'].includes(document.querySelector('.hero-split').getAttribute('data-3d'))"
 HERO_STATE = "(h => [h.getAttribute('data-3d'), h.getAttribute('data-3d-reason')])(document.querySelector('.hero-split'))"
+HERO_KINDS = {
+    "collections": "Collections", "dense": "Dense vectors", "sparse": "Sparse vectors",
+    "meta": "Typed metadata", "payload": "Payloads", "graph": "Property graphs",
+    "kv": "Key-value", "memory": "MemoryAI",
+}
 RENDERER = """(() => {
     const gl = document.createElement('canvas').getContext('webgl2');
     const info = gl && gl.getExtension('WEBGL_debug_renderer_info');
@@ -91,6 +96,183 @@ def drawn(page, element, canvases, minimum, attempts=10):
     return covered
 
 
+def check_hero_labels(page, animated=False):
+    """Every category remains readable and tethered, even without the canvas."""
+    svg = page.locator("svg.file-map")
+    assert svg.is_visible()
+    assert svg.locator(".fm-node").count() == len(HERO_KINDS)
+    assert svg.locator(".fm-edge").count() == len(HERO_KINDS)
+    for kind, label in HERO_KINDS.items():
+        node = svg.locator(f".fm-node.fm-{kind}")
+        assert node.locator("text").text_content() == label
+        assert label in svg.get_attribute("aria-label")
+        assert node.locator("text").is_visible()
+        assert node.evaluate("""node => {
+            const r = node.querySelector('rect').getBBox(), t = node.querySelector('text').getBBox();
+            return t.x >= r.x && t.x + t.width <= r.x + r.width
+                && t.y >= r.y && t.y + t.height <= r.y + r.height;
+        }"""), (kind, "label spills outside chip")
+    assert svg.evaluate("""svg => {
+        const nodes = [...svg.querySelectorAll('.fm-node rect')].map(r => r.getBBox());
+        return nodes.every((a, i) => nodes.every((b, j) => i === j
+            || a.x + a.width <= b.x || b.x + b.width <= a.x
+            || a.y + a.height <= b.y || b.y + b.height <= a.y));
+    }"""), "overlapping hero labels"
+    assert svg.evaluate("""(svg, animated) => {
+        const nodes = [...svg.querySelectorAll('.fm-node')];
+        const core = svg.querySelector('.fm-core rect').getBBox();
+        const contains = (r, p) => p.x >= r.x && p.x <= r.x + r.width
+            && p.y >= r.y && p.y <= r.y + r.height;
+        const owners = new Set();
+        return [...svg.querySelectorAll('.fm-edge')].every(edge => {
+            const start = edge.getPointAtLength(0), end = edge.getPointAtLength(edge.getTotalLength());
+            const owner = nodes.find(n => contains(n.querySelector('rect').getBBox(), start));
+            if (!owner || owners.has(owner)) return false;
+            owners.add(owner);
+            if (!animated) return contains(core, end);
+            const kind = [...owner.classList].find(c => c !== 'fm-node');
+            const anchor = svg.querySelector('.fm-anchor.' + kind);
+            return edge.classList.contains(kind) && anchor
+                && Math.hypot(end.x - Number(anchor.getAttribute('cx')),
+                    end.y - Number(anchor.getAttribute('cy'))) < 0.2;
+        });
+    }""", animated), "a category lost its connection"
+
+
+def check_landing_buffers(p, url):
+    """Inspect actual hero geometry, shader palettes and key/value/recall choreography."""
+    module = (ROOT / "site" / "assets" / "landing3d.js").read_text(encoding="utf-8")
+    marker = "const view = { fps: 60, optional: false, observers: [], render, dispose() {} };"
+    assert module.count(marker) == 1
+    module = module.replace(marker, marker + """
+    view.inspect = () => ({ data, pointGeo, linkGeo, fxLineGeo, fxPointGeo, U });
+    """) + "\nexport { views, KINDS, ANCHORS, palette, PALETTE_SIZE, HI_KIND, CLUSTER_VERT, LINK_VERT };\n"
+    browser = p.chromium.launch(args=SWIFTSHADER)
+    try:
+        context = browser.new_context(reduced_motion="reduce", viewport={"width": 1440, "height": 1050})
+        context.route("**/assets/landing3d.js", lambda route: route.fulfill(
+            content_type="text/javascript", body=module))
+        page = context.new_page()
+        errors = []
+        track_errors(page, errors)
+        page.goto(f"{url}/index.html?force3d")
+        assert hero_state(page)[0] == "ready"
+        for theme in ("light", "dark"):
+            page.evaluate("theme => document.documentElement.dataset.theme = theme", theme)
+            page.wait_for_timeout(150)
+            result = page.evaluate("""async () => {
+                const m = await import('./assets/landing3d.js');
+                const view = m.views.find(v => !v.optional);
+                const {data, pointGeo, linkGeo, fxLineGeo, fxPointGeo, U} = view.inspect();
+                const P = m.palette();
+                const colorMatches = (a, b) => a.every((v, i) => Math.abs(v - b[i]) < 0.00001);
+                const counts = data.groups.map(g => g.length);
+                const links = m.KINDS.map((_, k) => data.links.filter(([a, b]) =>
+                    data.kind[a] === k && data.kind[b] === k).length);
+                const indices = [...pointGeo.attributes.aKind.array, ...linkGeo.attributes.aKind.array];
+                const choreography = [[6, 6.7], [7, 8.0]].map(([k, t]) => {
+                    view.render(t);
+                    return data.groups[k].some(i => pointGeo.attributes.aHi.array[i] > 0.1)
+                        && fxLineGeo.drawRange.count > 0 && fxPointGeo.drawRange.count > 0
+                        && colorMatches([...fxPointGeo.attributes.aCol.array].slice(
+                            (fxPointGeo.drawRange.count - 1) * 4,
+                            (fxPointGeo.drawRange.count - 1) * 4 + 3), P[m.KINDS[k]]);
+                });
+                view.render(null);
+                const still = [...pointGeo.attributes.aHi.array];
+                view.render(null);
+                return {
+                    kinds: m.KINDS, anchors: Object.keys(m.ANCHORS),
+                    counts, links, choreography,
+                    stable: still.every((v, i) => v === pointGeo.attributes.aHi.array[i]),
+                    valid: indices.every(i => Number.isInteger(i) && i >= 0 && i < m.PALETTE_SIZE),
+                    palette: m.KINDS.every((k, i) => colorMatches(
+                        [...U.uPal.value].slice(i * 4, i * 4 + 3), P[k])),
+                    size: U.uPal.value.length,
+                    shaders: [m.CLUSTER_VERT, m.LINK_VERT].every(s => s.includes('uPal[10]'))
+                        && m.CLUSTER_VERT.includes(`uPal[${m.HI_KIND}].rgb`),
+                    stillKinds: [6, 7].every(k => data.groups[k].some(i => still[i] > 0.1)),
+                };
+            }""")
+            assert result["kinds"] == result["anchors"] == list(HERO_KINDS), result
+            assert all(result["counts"]) and len(result["counts"]) == 9, result
+            assert result["counts"][6:8] == [21, 7] and result["links"][6:8] == [18, 12], result
+            assert result["size"] == 40 and all(result["choreography"]), result
+            assert all(result[k] for k in ("stable", "valid", "palette", "shaders", "stillKinds")), result
+        assert not errors, errors
+        context.close()
+    finally:
+        browser.close()
+
+
+def check_landing_previews(p, url, screenshots=None):
+    """Reuse the verified workspace captures through existing accessible tabs."""
+    browser = p.chromium.launch()
+    try:
+        for theme in ("light", "dark"):
+            context = browser.new_context(color_scheme=theme, reduced_motion="reduce")
+            page = context.new_page()
+            errors = []
+            track_errors(page, errors)
+            page.goto(f"{url}/index.html")
+            for width in (1440, 390, 320):
+                page.set_viewport_size({"width": width, "height": 1050})
+                for kind, image in (("overview", f"overview-{'dark' if theme == 'dark' else 'light'}"),
+                                    ("kv", "key-value"), ("memory", "memory"), ("graph", "graph")):
+                    tab = page.locator(f"#t-{kind}")
+                    tab.click()
+                    assert tab.get_attribute("aria-selected") == "true"
+                    panel = page.locator(f"#p-{kind}")
+                    assert panel.is_visible()
+                    capture = panel.locator("img")
+                    capture.evaluate("img => img.decode()")
+                    assert capture.evaluate("img => img.currentSrc").endswith(f"current-{image}.png?v=connected")
+                    assert page.locator("#dashboard-preview [role=tabpanel]:visible").count() == 1
+                    assert page.evaluate("document.documentElement.scrollWidth <= innerWidth"), (theme, width)
+                    if screenshots and width in (1440, 390):
+                        screenshots.mkdir(parents=True, exist_ok=True)
+                        page.locator(".landing-shot").screenshot(
+                            path=str(screenshots / f"preview-{kind}-{theme}-{width}.png"))
+                page.locator("#t-overview").focus()
+                page.keyboard.press("ArrowRight")
+                assert page.locator("#t-kv").evaluate("e => e === document.activeElement")
+                page.keyboard.press("ArrowLeft")
+                assert page.locator("#t-overview").get_attribute("aria-selected") == "true"
+                for name in ("py", "node", "rust", "docker", "devbox"):
+                    page.locator(f"#t-{name}").click()
+                    assert page.locator(f"#p-{name}").is_visible()
+            assert not errors, errors
+            context.close()
+        for theme in ("light", "dark"):
+            context = browser.new_context(color_scheme=theme, reduced_motion="reduce")
+            context.add_init_script("""(() => {
+                const get = HTMLCanvasElement.prototype.getContext;
+                HTMLCanvasElement.prototype.getContext = function(type, ...args) {
+                    return /^webgl/.test(type) ? null : get.call(this, type, ...args);
+                };
+            })()""")
+            page = context.new_page()
+            page.goto(f"{url}/index.html")
+            assert hero_state(page) == ["off", "no-webgl2"]
+            assert page.locator("html").get_attribute("data-theme") == theme
+            for width in (1440, 580):
+                page.set_viewport_size({"width": width, "height": 1050})
+                check_hero_labels(page)
+                assert page.locator("#p-overview img").is_visible()
+                if screenshots:
+                    page.locator(".hero-split").screenshot(
+                        path=str(screenshots / f"hero-fallback-{theme}-{width}.png"))
+            page.set_viewport_size({"width": 390, "height": 1050})
+            assert not page.locator(".hero-art").is_visible(), "preserve the compact mobile hero"
+            assert "key-value" in page.locator(".hero-copy").inner_text()
+            assert page.evaluate("document.documentElement.scrollWidth <= innerWidth")
+            if screenshots:
+                page.screenshot(path=str(screenshots / f"index-fallback-{theme}-390.png"))
+            context.close()
+    finally:
+        browser.close()
+
+
 def check_three_exports(site):
     bundle = (site / "assets" / "vendor" / "three" / "three.min.js").read_text(encoding="utf-8")
     exported = {name.split(" as ")[-1].strip()
@@ -122,16 +304,19 @@ def check_forced_3d(p, url, screenshots=None):
                 assert state[0] == "ready", (theme, motion, state, errors)
                 assert page.evaluate("document.querySelector('.hero-split').classList.contains('has-3d')")
                 assert page.evaluate("(c => c.width > 0 && c.height > 0)(document.querySelector('.hero-canvas'))")
-                assert page.locator("svg.file-map .fm-anchor").count() == 6
+                assert page.locator("svg.file-map .fm-anchor").count() == len(HERO_KINDS)
+                check_hero_labels(page, animated=True)
                 if motion == "reduce":
                     hero = drawn(page, page.locator(".hero-art"), ".hero-canvas", 0.02)
                     assert hero > 0.02, (theme, "hero canvas drew too little", hero)
                 else:
                     page.wait_for_selector("svg.file-map .fm-status.fm-commit", state="attached", timeout=20000)
-                    assert page.evaluate(EDGES) == [6, 6, 6]
+                    assert page.evaluate(EDGES) == [8, 8, 8]
                     if screenshots:
                         screenshots.mkdir(parents=True, exist_ok=True)
                         page.screenshot(path=str(screenshots / f"index-3d-{theme}-1440.png"))
+                        page.locator(".hero-split").screenshot(
+                            path=str(screenshots / f"hero-3d-{theme}-1440.png"))
                 core = page.locator(".product-map-core")
                 core.scroll_into_view_if_needed()
                 page.wait_for_selector(".product-map-core.lanes-3d .lane-canvas", state="attached", timeout=20000)
@@ -150,6 +335,8 @@ def check_forced_3d(p, url, screenshots=None):
                         page.wait_for_timeout(400)
                         assert page.evaluate("document.documentElement.scrollWidth <= innerWidth"), (theme, width)
                         assert page.evaluate(HERO_STATE)[0] == "ready", (theme, width)
+                        if width > 560:
+                            check_hero_labels(page, animated=True)
                 assert not errors, errors
                 context.close()
         # Without ?force3d, software WebGL must keep the SVG illustration and skip the 3D bundle.
@@ -162,6 +349,7 @@ def check_forced_3d(p, url, screenshots=None):
             assert state == ["off", "software-gl"], state
             assert page.locator(".hero-canvas").count() == 0
             assert page.locator("svg.file-map").is_visible()
+            check_hero_labels(page)
         assert not errors, errors
         page.close()
     finally:
@@ -422,6 +610,7 @@ def check(site, screenshots=None):
                                 width, state, errors)
                             if width > 560:
                                 assert page.locator("svg.file-map").is_visible()
+                                check_hero_labels(page, animated=state[0] == "ready")
                         assert page.evaluate("document.documentElement.scrollWidth <= innerWidth"), (
                             path, width, page.evaluate("""[...document.querySelectorAll('body *')]
                               .filter(e => e.getBoundingClientRect().right > innerWidth + 1)
@@ -480,9 +669,18 @@ def check(site, screenshots=None):
             page.goto(f"{url}/index.html")
             assert page.locator("svg.file-map").is_visible()
             assert page.locator(".hero-split").get_attribute("data-3d") is None
+            for width in (1440, 580):
+                page.set_viewport_size({"width": width, "height": 1050})
+                check_hero_labels(page)
+                if screenshots:
+                    page.locator(".hero-split").screenshot(
+                        path=str(screenshots / f"hero-no-js-{width}.png"))
             context.close()
             browser.close()
             forced = check_forced_3d(p, url, screenshots)
+            if forced:
+                check_landing_buffers(p, url)
+            check_landing_previews(p, url, screenshots)
             check_diagram_scenes(p, url, screenshots)
             check_diagram_palette(p, url)
     finally:
@@ -491,6 +689,8 @@ def check(site, screenshots=None):
     print("Checked 32 standalone SVGs, shared palette, themes, no-JS, feature navigation and responsive pages.")
     print("Checked forced WebGL2 hero and toolkit scenes." if forced else
           "Skipped forced 3D checks: this Chromium has no WebGL2, even through SwiftShader.")
+    print("Checked eight hero labels/connections, key-value and memory geometry/choreography, "
+          "shader palettes, reduced motion and four keyboard-accessible dashboard previews.")
     print("Checked shared WebGL pixels on both deployment diagrams and all 14 architecture figures, "
           "light/dark, four widths, motion, ordered sequences, offscreen pause, context count and fallbacks.")
 

@@ -3,10 +3,10 @@
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
-  <title>VLite | Single-file vector and graph database, embedded or self-hosted</title>
-  <meta name="description" content="VLite is a single-file vector and graph database written in Rust. Embed it in your application, or run a self-hosted server with REST, gRPC and a web dashboard.">
-  <meta property="og:title" content="VLite | Single-file vector and graph database">
-  <meta property="og:description" content="Vectors and graphs in one durable file. Embedded or self-hosted, with exact and HNSW search, typed filters, property graphs and a dashboard.">
+  <title>VLite | Vectors, graphs, key-value and agent memory</title>
+  <meta name="description" content="VLite stores vectors, graphs and key-value data in one file, with opt-in agent memory. Embed Rust, Python or Node.js, or self-host REST, gRPC and a nine-workspace dashboard.">
+  <meta property="og:title" content="VLite | Vectors, graphs, key-value and agent memory">
+  <meta property="og:description" content="One engine for vector search, property graphs, key-value data and opt-in MemoryAI. Embedded or self-hosted, with a web dashboard.">
   <meta property="og:type" content="website">
   <link rel="icon" href="assets/logo.svg" type="image/svg+xml">
   <link rel="stylesheet" href="assets/style.css">
@@ -48,7 +48,7 @@
       <div class="hero-copy">
         <span class="eyebrow">MIT licensed &middot; written in Rust</span>
         <h1>Vectors and graphs in <span class="grad">one durable file</span>.</h1>
-        <p class="lead">Embed vector search and graph queries in your app, or self-host them behind an API.</p>
+        <p class="lead">Vector search, graphs, key-value data and opt-in agent memory. Embed it, or self-host an API.</p>
         <div class="cta">
           <a class="btn primary" href="#quickstart">Get started</a>
           <a class="btn" href="dashboard.html">View dashboard</a>
@@ -56,7 +56,7 @@
         <p class="note"><a href="https://github.com/mahpate/Vlite/releases">Downloads</a> &middot; <a href="docs/INSTALL.html">Packages &amp; platform requirements</a></p>
       </div>
       <div class="hero-art">
-        <svg class="file-map" viewBox="0 0 480 420" role="img" aria-label="Illustration: one VLite database file, data.vlite, holds collections, dense and sparse vectors, typed metadata, payloads and property graphs.">
+        <svg class="file-map" viewBox="0 0 480 420" role="img" aria-label="One VLite file holds Collections, Dense vectors, Sparse vectors, Typed metadata, Payloads, Property graphs, Key-value data and opt-in MemoryAI agent memory.">
           <defs><radialGradient id="fm-halo"><stop offset="0" class="fm-halo-in"/><stop offset="1" class="fm-halo-out"/></radialGradient></defs>
           <rect class="fm-card" x="1" y="1" width="478" height="418" rx="20"/>
           <circle class="fm-dot" cx="26" cy="26" r="5"/><circle class="fm-dot" cx="44" cy="26" r="5"/><circle class="fm-dot" cx="62" cy="26" r="5"/>
@@ -70,15 +70,19 @@
           <path class="fm-edge" d="M96 288C170 288 200 244 240 212"/>
           <path class="fm-edge" d="M360 288C300 288 280 244 240 212"/>
           <path class="fm-edge" d="M240 336V212"/>
+          <path class="fm-edge" d="M84 212H240"/>
+          <path class="fm-edge" d="M396 212H240"/>
           <g class="fm-node fm-collections"><rect x="174" y="72" width="132" height="32" rx="16"/><circle class="fm-pip-glow" cx="192" cy="88" r="8"/><circle class="fm-pip" cx="192" cy="88" r="4.5"/><text x="206" y="92.5">Collections</text></g>
           <g class="fm-node fm-dense"><rect x="26" y="120" width="148" height="32" rx="16"/><circle class="fm-pip-glow" cx="44" cy="136" r="8"/><circle class="fm-pip" cx="44" cy="136" r="4.5"/><text x="58" y="140.5">Dense vectors</text></g>
           <g class="fm-node fm-sparse"><rect x="306" y="120" width="156" height="32" rx="16"/><circle class="fm-pip-glow" cx="324" cy="136" r="8"/><circle class="fm-pip" cx="324" cy="136" r="4.5"/><text x="338" y="140.5">Sparse vectors</text></g>
           <g class="fm-node fm-meta"><rect x="18" y="272" width="156" height="32" rx="16"/><circle class="fm-pip-glow" cx="36" cy="288" r="8"/><circle class="fm-pip" cx="36" cy="288" r="4.5"/><text x="50" y="292.5">Typed metadata</text></g>
           <g class="fm-node fm-payload"><rect x="306" y="272" width="108" height="32" rx="16"/><circle class="fm-pip-glow" cx="324" cy="288" r="8"/><circle class="fm-pip" cx="324" cy="288" r="4.5"/><text x="338" y="292.5">Payloads</text></g>
           <g class="fm-node fm-graph"><rect x="158" y="320" width="164" height="32" rx="16"/><circle class="fm-pip-glow" cx="176" cy="336" r="8"/><circle class="fm-pip" cx="176" cy="336" r="4.5"/><text x="190" y="340.5">Property graphs</text></g>
+          <g class="fm-node fm-kv"><rect x="18" y="196" width="132" height="32" rx="16"/><path class="fm-glyph" d="M35 212a3 3 0 1 1-6 0a3 3 0 1 1 6 0h8m-3 0v3m3-3v2"/><text x="50" y="216.5">Key-value</text></g>
+          <g class="fm-node fm-memory"><rect x="330" y="196" width="132" height="32" rx="16"/><path class="fm-glyph" d="M344 207h8l4 5-4 5h-8l-4-5zM344 207l8 10m0-10-8 10"/><text x="362" y="216.5">MemoryAI</text></g>
           <g class="fm-core"><rect x="160" y="186" width="160" height="52" rx="14"/><text class="fm-name" x="240" y="209" text-anchor="middle">data.vlite</text><text class="fm-sub" x="240" y="227" text-anchor="middle">one durable file</text></g>
           <path class="fm-rule" d="M1 372H479"/>
-          <text class="fm-foot" x="240" y="399" text-anchor="middle">checksummed &middot; synced writes &middot; rebuildable indexes</text>
+          <text class="fm-foot" x="240" y="399" text-anchor="middle">checksummed &middot; explicit durability &middot; rebuildable indexes</text>
         </svg>
       </div>
     </div>
@@ -168,10 +172,29 @@ powershell -NoProfile -ExecutionPolicy Bypass -File .\devbox.ps1 -Token
       <div class="section-head">
         <div class="kicker">Dashboard</div>
         <h2>Your data, in view</h2>
-        <p>Source builds: Key-value, MemoryAI and interactive Graph workspaces alongside records, search and API keys.</p>
+        <p>Nine workspaces: records, search, Key-value, MemoryAI, interactive graphs and server tools. MemoryAI requires configured bindings and a scoped token.</p>
       </div>
       <figure class="landing-shot">
-        <a href="dashboard.html#screenshots"><picture><source media="(prefers-color-scheme: dark)" srcset="assets/dashboard/current-overview-dark.png?v=connected"><img src="assets/dashboard/current-overview-light.png?v=connected" data-light="assets/dashboard/current-overview-light.png?v=connected" data-dark="assets/dashboard/current-overview-dark.png?v=connected" alt="Connected VLite dashboard with sample records, database snapshot cards and index readiness." width="1440" height="1100" loading="lazy" decoding="async"></picture></a>
+        <div class="tabs">
+          <div class="tablist" role="tablist" aria-label="Dashboard workspace preview">
+            <button role="tab" id="t-overview" aria-controls="p-overview" aria-selected="true">Overview</button>
+            <button role="tab" id="t-kv" aria-controls="p-kv" aria-selected="false" tabindex="-1">Key-value</button>
+            <button role="tab" id="t-memory" aria-controls="p-memory" aria-selected="false" tabindex="-1">MemoryAI</button>
+            <button role="tab" id="t-graph" aria-controls="p-graph" aria-selected="false" tabindex="-1">Graph</button>
+          </div>
+          <div class="tabpanel" role="tabpanel" id="p-overview" aria-labelledby="t-overview" tabindex="0">
+            <a href="dashboard.html#screenshots"><picture><source media="(prefers-color-scheme: dark)" srcset="assets/dashboard/current-overview-dark.png?v=connected"><img src="assets/dashboard/current-overview-light.png?v=connected" data-light="assets/dashboard/current-overview-light.png?v=connected" data-dark="assets/dashboard/current-overview-dark.png?v=connected" alt="Connected VLite dashboard with sample records, database snapshot cards and index readiness." width="1440" height="1100" loading="lazy" decoding="async"></picture></a>
+          </div>
+          <div class="tabpanel" role="tabpanel" id="p-kv" aria-labelledby="t-kv" tabindex="0" hidden>
+            <a href="docs/CONSOLE.html#key-value"><img src="assets/dashboard/current-key-value.png?v=connected" alt="Key-value workspace browsing namespaced keys with version-checked values." width="1440" height="1100" loading="lazy" decoding="async"></a>
+          </div>
+          <div class="tabpanel" role="tabpanel" id="p-memory" aria-labelledby="t-memory" tabindex="0" hidden>
+            <a href="docs/CONSOLE.html#memoryai"><img src="assets/dashboard/current-memory.png?v=connected" alt="MemoryAI workspace explaining configured bindings and scoped-token requirements; this view does not show a live memory recall." width="1440" height="1100" loading="lazy" decoding="async"></a>
+          </div>
+          <div class="tabpanel" role="tabpanel" id="p-graph" aria-labelledby="t-graph" tabindex="0" hidden>
+            <a href="docs/CONSOLE.html#explore-graphs"><img src="assets/dashboard/current-graph.png?v=connected" alt="Graph workspace with linked sample records and interactive 3D traversal results." width="1440" height="1100" loading="lazy" decoding="async"></a>
+          </div>
+        </div>
         <figcaption><a href="dashboard.html">Take the dashboard tour &#8594;</a></figcaption>
       </figure>
     </div>
@@ -185,28 +208,28 @@ powershell -NoProfile -ExecutionPolicy Bypass -File .\devbox.ps1 -Token
           <img src="assets/logo.svg" alt="" width="44" height="44">
           <div class="label">Single-file vector and graph database</div>
           <h3>VLite</h3>
-          <p>Vector search and property graphs with durable commits.</p>
+          <p>Vectors, graphs, key-value data and agent memory.</p>
           <a class="more" href="architecture.html">Explore the engine &#8594;</a>
         </div>
         <div class="product-map-core">
           <div class="product-map-row product-connect"><div class="lane-art" aria-hidden="true"></div><h3><span class="product-symbol" aria-hidden="true">{ }</span> SDKs &amp; APIs</h3><div class="product-chips"><a href="#quickstart">Rust</a><a href="#quickstart">Python</a><a href="#quickstart">Node.js</a><a href="https://github.com/mahpate/Vlite/blob/main/clients/README.md#go">Go</a><a href="https://github.com/mahpate/Vlite/blob/main/clients/README.md#net">.NET</a><a href="docs/INSTALL.html">C ABI</a><a href="api.html">REST</a><a href="docs/GRPC.html">gRPC</a></div></div>
           <div class="product-map-row product-retrieve"><div class="lane-art" aria-hidden="true"></div><h3><span class="product-symbol" aria-hidden="true">&#8981;</span> Search &amp; indexes</h3><div class="product-chips"><span>Exact search</span><span>Dense &amp; sparse</span><span>BM25 hybrid</span><span>Typed filters</span><span>HNSW</span><span>Scalar u8</span></div></div>
-          <div class="product-map-row product-store"><div class="lane-art" aria-hidden="true"></div><h3><span class="product-symbol" aria-hidden="true">&#9636;</span> Runtime &amp; storage</h3><div class="product-chips"><span>Embedded</span><a href="docs/DOCKER-OPERATIONS.html">Docker</a><span>Collections</span><span>Atomic batches</span><span>Key-value store</span><span>Agent memory</span><a href="docs/INSTALL.html">Linux</a><a href="docs/INSTALL.html">macOS</a><a href="docs/INSTALL.html">Windows</a></div></div>
+          <div class="product-map-row product-store"><div class="lane-art" aria-hidden="true"></div><h3><span class="product-symbol" aria-hidden="true">&#9636;</span> Runtime &amp; storage</h3><div class="product-chips"><span>Embedded</span><a href="docs/DOCKER-OPERATIONS.html">Docker</a><span>Collections</span><span>Atomic batches</span><a href="docs/KEY-VALUE.html">Key-value store</a><a href="docs/MEMORY.html">MemoryAI (opt-in)</a><a href="docs/INSTALL.html">Linux</a><a href="docs/INSTALL.html">macOS</a><a href="docs/INSTALL.html">Windows</a></div></div>
           <div class="product-map-row product-graph"><div class="lane-art" aria-hidden="true"></div><h3><span class="product-symbol" aria-hidden="true">&#9741;</span> Property graphs</h3><div class="product-chips"><span>Nodes &amp; typed edges</span><span>Vector attachments</span><span>Traversal &amp; paths</span><span>Graph retrieval</span><span>Expiry &amp; algorithms</span><a href="docs/GRAPH.html">Graph guide</a></div></div>
         </div>
         <aside class="product-map-tools" aria-label="Tools and agents">
           <h3>Tools &amp; agents</h3>
-          <a href="dashboard.html"><strong>Dashboard</strong><span>Browse, search, edit graphs and administer</span></a>
-          <a href="docs/TOOLS.html"><strong>CLI tools</strong><span>Shell, imports, tuning and graphs</span></a>
-          <a href="docs/MCP.html"><strong>MCP server</strong><span>Connect agents to vectors and graphs</span></a>
+          <a href="dashboard.html"><strong>Dashboard</strong><span>Data, MemoryAI and administration</span></a>
+          <a href="docs/TOOLS.html"><strong>CLI tools</strong><span>Shell, imports, tuning, graphs and memory</span></a>
+          <a href="docs/MCP.html"><strong>MCP server</strong><span>Vectors, graphs, key-value and memory tools</span></a>
           <a href="docs/AGENT-SKILLS.html"><strong>Agent skills</strong><span>RAG, operations and tuning</span></a>
         </aside>
       </div>
-      <div class="section-head" id="deployment-options"><h3>Where does VLite run?</h3><p>In your app, or as a server you run. Either way, the data stays in your file.</p></div>
+      <div class="section-head" id="deployment-options"><h3>Where does VLite run?</h3><p>In your app or self-hosted. Your data, your file.</p></div>
       <div class="grid cols-2 deployment-options">
         <article class="card"><div class="label">Embedded</div><h3>Your app opens the file</h3>
           <picture><source media="(prefers-color-scheme: dark)" srcset="assets/diagrams/deployment-embedded-dark.svg"><img src="assets/diagrams/deployment-embedded-light.svg" data-light="assets/diagrams/deployment-embedded-light.svg" data-dark="assets/diagrams/deployment-embedded-dark.svg" alt="Embedded: your application calls the VLite library in the same process; the library owns a local database file. No API service or dashboard is required." width="520" height="690" loading="lazy"></picture>
-          <p>Add the library to your app. There is no separate service.</p><a class="more" href="#quickstart">Embedded example &#8594;</a></article>
+          <p>Add the library; no separate service.</p><a class="more" href="#quickstart">Embedded example &#8594;</a></article>
         <article class="card"><div class="label">Self-hosted</div><h3>You run the server</h3>
           <picture><source media="(prefers-color-scheme: dark)" srcset="assets/diagrams/deployment-self-hosted-dark.svg"><img src="assets/diagrams/deployment-self-hosted-light.svg" data-light="assets/diagrams/deployment-self-hosted-light.svg" data-dark="assets/diagrams/deployment-self-hosted-dark.svg" alt="Self-hosted: clients and an optional browser dashboard call vlite-server. Its embedded engine owns the database file on your server's persistent storage." width="520" height="690" loading="lazy"></picture>
           <p><code>vlite-server</code> serves REST, gRPC and the dashboard. You manage access, HTTPS, backups and upgrades.</p><a class="more" href="docs/DOCKER-OPERATIONS.html">Deployment guide &#8594;</a></article>
@@ -226,7 +249,7 @@ powershell -NoProfile -ExecutionPolicy Bypass -File .\devbox.ps1 -Token
     <div class="wrap">
       <div class="section-head"><div class="kicker">Features</div><h2>Start simple. Go deeper when needed.</h2><p><a href="features.html">See all features</a></p></div>
       <div class="grid cols-3" id="capabilities">
-        <article class="card"><div class="card-top"><span class="icon" aria-hidden="true"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><ellipse cx="12" cy="5" rx="8" ry="3"/><path d="M4 5v14c0 1.7 3.6 3 8 3s8-1.3 8-3V5"/><path d="M4 12c0 1.7 3.6 3 8 3s8-1.3 8-3"/></svg></span><div class="label">Storage</div></div><h3>Durable, explicit commits</h3><p>Checksummed, synced writes. Atomic batches of up to 4,096 operations.</p><a class="more" href="docs/REFERENCE.html">Storage contract &#8594;</a></article>
+        <article class="card"><div class="card-top"><span class="icon" aria-hidden="true"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><ellipse cx="12" cy="5" rx="8" ry="3"/><path d="M4 5v14c0 1.7 3.6 3 8 3s8-1.3 8-3V5"/><path d="M4 12c0 1.7 3.6 3 8 3s8-1.3 8-3"/></svg></span><div class="label">Storage</div></div><h3>Durable, explicit commits</h3><p>Checksummed writes; periodic or full durability. Batches up to 4,096 operations.</p><a class="more" href="docs/REFERENCE.html">Storage contract &#8594;</a></article>
         <article class="card"><div class="card-top"><span class="icon" aria-hidden="true"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><circle cx="11" cy="11" r="7"/><path d="m20 20-4-4"/></svg></span><div class="label">Retrieval</div></div><h3>Exact to hybrid search</h3><p>Dense and sparse vectors, HNSW, typed filters and BM25 hybrid ranking.</p><a class="more" href="docs/VECTORS.html">Retrieval guide &#8594;</a></article>
         <article class="card"><div class="card-top"><span class="icon" aria-hidden="true"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><circle cx="5" cy="6" r="2"/><circle cx="19" cy="6" r="2"/><circle cx="12" cy="18" r="2"/><path d="M7 6h10M6 8l5 8.5M18 8l-5 8.5"/></svg></span><div class="label">Graphs</div></div><h3>Connected data</h3><p>Nodes and typed edges linked to your records, with traversal.</p><a class="more" href="docs/GRAPH.html">Graph guide &#8594;</a></article>
         <article class="card"><div class="card-top"><span class="icon" aria-hidden="true"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M20 12a8 8 0 0 1-14 5.3M4 12a8 8 0 0 1 14-5.3"/><path d="M18 3v4h-4M6 21v-4h4"/></svg></span><div class="label">Data lifecycle</div></div><h3>Collections to recovery</h3><p>Collections, expiry, resumable imports, point-in-time restore and change feeds.</p><a class="more" href="docs/STORAGE-FEATURES.html">Storage features &#8594;</a></article>
@@ -239,8 +262,8 @@ powershell -NoProfile -ExecutionPolicy Bypass -File .\devbox.ps1 -Token
   <section id="data-safety" class="alt">
     <div class="wrap">
       <div class="glow-panel">
-        <div class="section-head"><div class="kicker">Know the boundaries</div><h2>Data safety you can reason about</h2><p>Corruption fails closed. Committed data is never silently discarded. Indexes rebuild from stored records.</p></div>
-        <p class="callout">Limits: the live dataset is held in memory, so size machines for it. A file has one writer or several read-only readers. Durability depends on your filesystem.</p>
+        <div class="section-head"><div class="kicker">Know the boundaries</div><h2>Data safety you can reason about</h2><p>Corruption fails closed. Indexes rebuild from records. Default periodic durability can lose the last flush interval on power loss; full syncs every commit.</p></div>
+        <p class="callout">Limits: the live dataset fits in RAM. One writer or several read-only owners per file. Durability depends on your filesystem.</p>
         <nav class="landing-evidence" aria-label="Technical evidence"><a href="architecture.html">Architecture &#8594;</a><a href="docs/REFERENCE.html">Data-safety contracts &#8594;</a><a href="compare.html">Benchmarks &#8594;</a><a href="docs/RELEASE-0.7.1.html">Release notes &#8594;</a></nav>
       </div>
     </div>
