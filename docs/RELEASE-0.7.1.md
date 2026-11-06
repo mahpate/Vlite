@@ -131,11 +131,10 @@ Restart with the 0.7.0 binary or image. 0.7.1 writes nothing that 0.7.0 cannot r
 - **Rust.** `KvView::visit_at` and `KvRef` are new public items in `vlite::kv`. `KvRef` is `#[non_exhaustive]`: read its fields; only the library builds one, and a later release may add fields. `KvView::list` and `list_at` return the same entries as before.
   <!-- source: src/kv.rs, site/api.html -->
 - **Memory limits.** The first-slice refusals and error codes are unchanged except for the ones listed above; every refusal and its `details.feature` is in [Agent memory (REST)](API.md#first-slice-limits).
-- **Checks run.** The integrated tree passed the agent-memory live end-to-end run (119 checks, 0 failures) and the memory downgrade check, a key-value concurrency oracle (118,240 operations, 0 violations) and a REST differential between v0.7.0 and the tree, which found only the intended differences: the dashboard assets, the new metric, the audit actor and the `ttl_ms` minimum of 1.
-  <!-- TODO (coordinator): after BUMP NOW confirms it, add the sentence "A rollback from 0.7.1 to 0.7.0 was tested on live-like data." here. -->
+- **Checks run.** The integrated tree passed the agent-memory live end-to-end run (no failures), the memory downgrade check, a key-value concurrency oracle (more than 100,000 operations, no violations) and a REST differential between v0.7.0 and the tree, which found only the intended differences: the dashboard assets, the new metric, the audit actor and the `ttl_ms` minimum of 1. A rollback from 0.7.1 to 0.7.0 on the same database file and admin directory was tested on live-like data (tenants, credentials, accounts, graphs, key-value entries and the audit log): the 0.7.0 server started, served everything 0.7.1 had written and showed no error beyond the behaviors listed in this document.
   <!-- source: coordinator's verification report of 2026-11-05 (independent review); scripts/memory_live_e2e.py, scripts/memory_evidence_downgrade_check.py -->
 
-## Not included in this release
+  ## Not included in this release
 
 These are not available, and you should not rely on them.
 <!-- source: docs/projects/roadmap/next-major.md, docs/API.md#first-slice-limits, docs/RELEASE-0.7.0.md#not-included-in-this-release -->
