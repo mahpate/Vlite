@@ -38,6 +38,15 @@ API keys bound to a suspended tenant get `PERMISSION_DENIED` with
 `vlite-error-code: tenant_suspended`; tenant lifecycle administration and the
 signed-in `identity` are REST-only.
 
+When the REST router was configured with memory bindings, the gRPC adapter built
+after it applies the same reservations: a reserved collection or graph answers
+like a missing one on every RPC, and a generated differential compares the two
+transports for every RPC. `vlite-server` still refuses `--grpc-bind` while a
+memory binding is configured or reserved records remain. A program that builds
+the routers itself must build the REST router first (`configured_admin_router`,
+then `grpc_router`); `configured_admin_router` refuses the opposite order, and
+`router` and `authenticated_router` log a warning for it.
+
 ## Scope
 
 The protobuf service covers listing, inspecting, creating and dropping

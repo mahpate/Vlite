@@ -16,9 +16,14 @@
 //! gRPC authenticates bearer tokens only, so the eight token principals run
 //! here; `checks` shows that a console session is no credential.
 //!
-//! The inventory is read from the proto: an RPC without a row (or an `EXEMPT`
-//! entry with its reason) fails `every_rpc_has_a_row`, so a new RPC cannot ship
-//! unchecked.
+//! The inventory is read from the proto: every RPC needs a row in `rows()` (it
+//! names a collection or a graph) or in `global_rows()` (it names none), so a
+//! new RPC cannot ship unchecked. `EXEMPT` is the home of the RPCs that are
+//! addressed by a memory binding instead of a collection or graph name, each
+//! with its reason, and each is covered by `tests/grpc_memory.rs`. A request
+//! field that looks like a name must be varied by a row or be classified in
+//! `NOT_A_NAME` (see `checks`), so that a field not called `collection` cannot
+//! escape the inventory.
 
 use std::collections::HashMap;
 use std::future::Future;
@@ -41,8 +46,12 @@ const CALL_TIMEOUT: Duration = Duration::from_secs(60);
 /// A stream is read to its end, to the message that says it is complete, or to
 /// this many messages: a feed never ends by itself.
 const STREAM_LIMIT: usize = 64;
-/// How long a feed may stay silent before it counts as complete. Everything a
-/// feed can show is committed before it opens, and it polls at once.
+/// How long a feed that has shown something may stay silent before it counts as
+/// complete. Everything a feed can show is committed before it opens, and it
+/// polls at once, so only the gaps after a first frame are bounded this
+/// tightly; the first frame is waited for as long as any call
+/// (`CALL_TIMEOUT`), because a slow machine must not turn a feed that would
+/// have answered into an empty one.
 const FEED_SILENCE: Duration = Duration::from_secs(2);
 
 // ---------------------------------------------------------------- the world
@@ -210,7 +219,7 @@ fn answer<T: prost::Message + std::fmt::Debug>(
 }
 
 /// Reads a server stream: to its end, to the frame `last` calls complete, or
-/// until a feed that has nothing more to say stays silent.
+/// until a feed that has shown a frame and has nothing more to say stays silent.
 async fn frames<T: prost::Message + std::fmt::Debug>(
     opened: Result<tonic::Response<tonic::Streaming<T>>, Status>,
     last: impl Fn(&T) -> bool,
@@ -219,12 +228,38 @@ async fn frames<T: prost::Message + std::fmt::Debug>(
         Ok(response) => response.into_inner(),
         Err(status) => return GAnswer::failed(&status, String::new()),
     };
+    read_frames(
+        async || stream.message().await,
+        CALL_TIMEOUT,
+        FEED_SILENCE,
+        last,
+    )
+    .await
+}
+
+/// The reading of `frames`, over whatever yields the next message. A stream
+/// that has shown nothing is waited for up to `first` and is hung, not empty,
+/// after that: a feed that answers late must not look like a feed that has
+/// nothing to say. Once it has shown a frame it counts as complete when it
+/// stays silent for `silence`.
+async fn read_frames<T: prost::Message + std::fmt::Debug>(
+    mut next: impl AsyncFnMut() -> Result<Option<T>, Status>,
+    first: Duration,
+    silence: Duration,
+    last: impl Fn(&T) -> bool,
+) -> GAnswer {
     let mut seen = Vec::new();
     while seen.len() < STREAM_LIMIT {
-        let Ok(next) = tokio::time::timeout(FEED_SILENCE, stream.message()).await else {
+        let wait = if seen.is_empty() { first } else { silence };
+        let Ok(message) = tokio::time::timeout(wait, next()).await else {
+            assert!(
+                !seen.is_empty(),
+                "the stream showed nothing within {first:?}: it is hung, or it is a feed with \
+                 nothing to show, which needs a probe that makes it show something"
+            );
             break;
         };
-        match next {
+        match message {
             Ok(Some(frame)) => {
                 let done = last(&frame);
                 seen.push(frame);
@@ -784,8 +819,10 @@ const LEGACY: &[&str] = &[
     "VLite/ExportVectors",
 ];
 
-/// RPCs the proto declares that stay out of the matrix on purpose, each with
-/// the reason; none today.
+/// The RPCs that stay out of the matrix because a memory binding addresses them
+/// instead of a collection or graph name (their requests may carry several
+/// collection paths, which one row cannot vary), each with its reason. Every
+/// one of them is covered by `tests/grpc_memory.rs`. None today.
 const EXEMPT: &[(&str, &str)] = &[];
 
 fn ordered_rows(rows: &[GRow]) -> impl Iterator<Item = &GRow> {

@@ -740,7 +740,8 @@ async fn run() -> Result<(), Box<dyn Error>> {
 
     #[cfg(feature = "grpc")]
     let grpc = match grpc_listener {
-        // Built after the REST router so it shares its tokens and audit log.
+        // Built after the REST router so it shares its tokens, audit log and
+        // memory reservations (configured_admin_router refuses to follow it).
         Some(listener) => {
             let server = vlite::server::grpc::grpc_router(service.clone()).await;
             let server = match config.grpc_tls.clone() {
