@@ -80,9 +80,13 @@ export interface SearchStats {
 /** `plan` is non-null only for mode "auto" with explain; `stats` is present only with explain. */
 export interface SearchResponse { hits: (Hit | HybridHit)[]; plan?: QueryPlan | null; stats?: SearchStats }
 export interface Page { items: { id: string; metadata: Metadata }[]; next_after: string | null }
+/** Compare-and-set condition: "any" (the default), "absent" (create only) or the exact version you read, as a bigint. */
 export type Expected = "any" | "absent" | { revision: bigint };
+/** `namespace` is 1 to 255 bytes and `key` 1 to 1,024 bytes of UTF-8. `signal` aborts the call; cancellation is never retried. */
 export interface KvAddress { collection: string; namespace: string; key: string; signal?: AbortSignal }
+/** `value` is at most 1,047,290 bytes. `expiresAtMs` is an absolute Unix-millisecond deadline (u64); omitted or null clears any TTL. */
 export interface KvPutOptions extends KvAddress { value: Uint8Array; expected?: Expected; expiresAtMs?: bigint | null }
+/** `after` is exclusive, `limit` is 1 to 10,000 (default 100) and the page's `next_after` is null after the last page. */
 export interface KvListOptions {
   collection: string; namespace: string; prefix?: string; after?: string; limit?: number; signal?: AbortSignal;
 }
@@ -320,6 +324,7 @@ export type MemoryTarget<U extends MemoryU64Input = MemoryU64> =
 export interface MemoryForgetRequest extends MemoryMutation {
   target: MemoryTarget<MemoryU64Input>; mode: "logical_delete" | "expire"; expires_at_ms?: MemoryU64Input; allow_job?: boolean;
 }
+/** The first server slice refuses `operation: "remember"` (409 `remember_receipt_lookup`): repeat the remember, with the same key and body, instead. */
 export interface MemoryReceiptRequest { scope: MemoryScope; operation: MemoryOperation; idempotency_key: MemoryKey }
 export interface MemoryErasureRequest { scope: MemoryScope; job_id: MemoryKey }
 export interface MemoryResumeRequest extends MemoryMutation {
@@ -460,8 +465,9 @@ export class Collection extends Records {
  * Agent-memory operations of one binding (POST /v1/memory/{binding}/...); obtain with client.memory(binding).
  * Each method takes one request object and resolves with the full response. A failed call rejects with
  * VLiteError (code, status, requestId, details), UnsupportedError (404 not_found: the server has no memory
- * routes), TransportError (timeout, abort or lost connection: a mutation may or may not have committed;
- * reconcile with getReceipt) or TypeError (the request could not be represented; nothing was sent).
+ * routes), TransportError (timeout, abort or lost connection: a mutation may or may not have committed; look up a
+ * forget or consolidate with getReceipt, or repeat a remember with the same key and body inside the receipt window,
+ * because the server refuses a remember receipt lookup) or TypeError (the request could not be represented; nothing was sent).
  * Nothing is retried, embedded, split or paged, and the client never invents an idempotency key.
  */
 export class Memory {
@@ -485,9 +491,13 @@ export class Client extends Records {
   health(): Promise<{ status: "ok" }>;
   ready(): Promise<{ status: "ready" }>;
   database(): Promise<DatabaseInfo>;
+  /** Rejects with VLiteError 404 kv_not_found for a missing or expired entry. */
   kvGet(options: KvAddress): Promise<KvEntry>;
+  /** `expected` defaults to "any"; a failed condition is VLiteError 412 precondition_failed. */
   kvPut(options: KvPutOptions): Promise<KvPutResult>;
+  /** Resolves with whether an entry was deleted; a failed condition is VLiteError 412 precondition_failed. */
   kvDelete(options: KvAddress & { expected?: Expected }): Promise<boolean>;
+  /** One page in key order, without a snapshot across pages. */
   kvList(options: KvListOptions): Promise<KvPage>;
   changes(options?: { cursor?: string; limit?: number }): Promise<object>;
   listWebhooks(): Promise<object>;

@@ -1497,8 +1497,11 @@ class Memory:
     VLiteError (``code``, ``status``, ``request_id`` and ``details``; for example 409
     memory_capability_unavailable with ``details["feature"]``). A server without
     memory routes (404 not_found) raises UnsupportedError. A mutation that ends in
-    TransportError may have committed: reconcile with ``get_receipt`` before
-    retrying with the same idempotency key.
+    TransportError may have committed: look up a forget or consolidate with
+    ``get_receipt``. The server refuses a lookup of a remember receipt (409
+    memory_capability_unavailable, ``details["feature"]`` remember_receipt_lookup),
+    so repeat the same remember request, with the same idempotency key and body,
+    inside the receipt window.
 
     ``deadline_ms`` in a body is the engine deadline, not the HTTP timeout
     (``Client(timeout=...)``)."""
@@ -1538,7 +1541,8 @@ class Memory:
         return self._post("/forget", _MEMORY_FORGET, request)
 
     def get_receipt(self, request: MemoryReceiptRequest) -> MemoryReceiptResponse:
-        """Look up a retained receipt by scope, operation and idempotency key."""
+        """Look up a retained receipt by scope, operation and idempotency key (the
+        first server slice refuses operation remember: 409 remember_receipt_lookup)."""
         return self._post("/receipts/lookup", _MEMORY_RECEIPT, request)
 
     def get_erasure(self, request: MemoryErasureRequest) -> MemoryErasureResponse:

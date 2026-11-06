@@ -1035,6 +1035,27 @@ class KvTests(unittest.TestCase):
         finally:
             release.set()
 
+    def test_kv_delete_and_reads_do_not_retry_after_timeout(self):
+        admitted, release = Event(), Event()
+        def respond(*_):
+            admitted.set()
+            release.wait(5)
+            return 200, None, {}
+        Scripted.respond = respond
+        slow = Client(f"http://127.0.0.1:{self.server.server_port}", TOKEN, timeout=0.1)
+        try:
+            for call in [lambda: slow.kv_delete(collection="cache", namespace="n", key="k"),
+                         lambda: slow.kv_get(collection="cache", namespace="n", key="k"),
+                         lambda: slow.kv_list(collection="cache", namespace="n")]:
+                admitted.clear()
+                before = len(Scripted.log)
+                with self.assertRaises(TransportError):
+                    call()
+                self.assertTrue(admitted.is_set())
+                self.assertEqual(len(Scripted.log), before + 1)
+        finally:
+            release.set()
+
     def test_kv_caller_interruption_does_not_retry(self):
         from unittest.mock import patch
         Scripted.respond = lambda *_: (200, {"version": "1", "expires_at_ms": None}, {})

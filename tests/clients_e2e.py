@@ -87,6 +87,7 @@ def python_test(base, token):
         assert error.status == 404
     conditional_test(client)
     filtered_ann_test(client)
+    kv_test(client)
     print("PASS Python live REST client")
 
 
@@ -161,6 +162,35 @@ def filtered_ann_test(client):
                      + [{"op": "delete", "id": "305"}])
         assert client.database()["records"] == before
     print("PASS Python live filtered ANN")
+
+
+def kv_test(client):
+    """Key-value entries against a real server; a dedicated one-dimensional collection holds them."""
+    if client.capabilities()["features"].get("kv") is not True:
+        print("SKIP Python live key-value entries (the server has no key-value routes)")
+        return
+    client.create_collection("cache", 1)
+    entry = {"collection": "cache", "namespace": "app", "key": "k/é"}
+    first = client.kv_put(**entry, value=b"\x00\xff", expected="absent")
+    assert first["expires_at_ms"] is None and first["version"] > 0, first
+    assert client.kv_get(**entry) == {"key": "k/é", "value": b"\x00\xff", **first}
+    expect_error(lambda: client.kv_put(**entry, value=b"", expected="absent"), 412, "precondition_failed")
+    expect_error(lambda: client.kv_put(**entry, value=b"", expected={"revision": first["version"] + 1}),
+                 412, "precondition_failed")
+    second = client.kv_put(**entry, value=b"two", expected={"revision": first["version"]})
+    assert second["version"] > first["version"], (first, second)
+    assert client.kv_list(collection="cache", namespace="app", prefix="k/") == {
+        "items": [{"key": "k/é", "value": b"two", **second}], "next_after": None}
+    expect_error(lambda: client.kv_delete(**entry, expected={"revision": first["version"]}), 412, "precondition_failed")
+    assert client.kv_delete(**entry, expected={"revision": second["version"]}) is True
+    assert client.kv_delete(**entry) is False
+    expect_error(lambda: client.kv_get(**entry), 404, "kv_not_found")
+    # A deadline that is already due is accepted and the entry is immediately absent.
+    assert client.kv_put(**entry, value=b"x", expires_at_ms=0)["expires_at_ms"] == 0
+    expect_error(lambda: client.kv_get(**entry), 404, "kv_not_found")
+    # The default collection is not a key-value collection.
+    expect_error(lambda: client.kv_get(collection="default", namespace="app", key="k"), 409, "not_kv_collection")
+    print("PASS Python live key-value entries")
 
 
 def expect_412(action):
