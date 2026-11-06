@@ -62,7 +62,7 @@ function dashboard(fetch = async () => { throw new Error("Unexpected request"); 
   };
   let context;
   let adminContext;
-  const tools = { gate() {}, clear() {}, loaded() {} };
+  const tools = { gate() {}, clear() {}, loaded() {}, connected() {} };
   const adminTools = { gate() {}, disconnect() {}, capabilities() {} };
   const window = {
     addEventListener() {},
@@ -93,7 +93,7 @@ function dashboard(fetch = async () => { throw new Error("Unexpected request"); 
         capabilities = { role: "admin", features: { collections: true }, format_version: 4 };
       },
       setCapabilities(value) { capabilities = value; },
-      clearRecordInspector, advanceWorkflowContext
+      clearRecordInspector, advanceWorkflowContext, connect, memoryOff
     };
   })();`);
   vm.runInNewContext(source, {
@@ -307,4 +307,158 @@ test("successful searches clearly label cosine and squared L2 as distance, never
     assert.match(ui.get("hits").querySelector("caption").textContent, /lower distance is better/);
     assert.equal(ui.get("hits").querySelector("tbody").children.length, 1);
   }
+});
+
+const refusal = () => response({ error: { code: "forbidden_scope", message: "credential scope does not permit this operation or collection" } }, 403);
+const MEMORY_OFF_METRICS = "Server metrics are off while agent memory is enabled.";
+
+// The 403 forbidden_scope that agent memory (docs/SECURITY.md, Memory-bound resources) makes the server answer to /metrics.
+function signInServer(role, overrides = {}, scope = undefined) {
+  const calls = [];
+  const routes = {
+    "/v1/capabilities": () => response({ api_version: 1, role, format_version: 5, features: {}, ...(scope ? { scope } : {}), identity: { kind: "super_admin" } }),
+    "/v1/collections": () => response({ items: [], format_version: 5 }),
+    "/v1/database": () => response({ dimensions: 3, records: 0, format_version: 5, is_encrypted: false }),
+    "/metrics": refusal,
+    ...overrides,
+  };
+  return { calls, fetch: async (url) => { const route = url.split("?")[0]; calls.push(route); if (!routes[route]) throw new Error(`Unexpected ${route}`); return routes[route](); } };
+}
+
+test("sign-in survives a refused /metrics while agent memory is enabled and the overview says so", async () => {
+  for (const role of ["admin", "read_only"]) {
+    const server = signInServer(role);
+    const ui = dashboard(server.fetch);
+    await ui.context.run(ui.connect);
+    assert.match(ui.get("status").textContent, /^Connected; overview refreshed$/);
+    assert.equal(ui.get("status").dataset.error, "false");
+    assert.equal(ui.get("gate-message").dataset.error, "false");
+    assert.equal(ui.get("metrics-note").hidden, false);
+    assert.equal(ui.get("metrics-note").textContent, `${MEMORY_OFF_METRICS} Database size shows Unavailable.`);
+    assert.equal(ui.get("stat-bytes").textContent, "Unavailable");
+    assert.match(ui.get("overview").textContent, /"metrics": "Unavailable: server metrics are off while agent memory is enabled\."/);
+    assert.doesNotMatch(`${ui.get("status").textContent}${ui.get("gate-message").textContent}${ui.get("error-help").textContent}`, /403|forbidden_scope/);
+    assert.deepEqual(server.calls.slice(0, 4), ["/v1/capabilities", "/v1/collections", "/v1/database", "/metrics"]);
+  }
+});
+
+test("a server without agent memory keeps showing the metrics figures and no note", async () => {
+  const server = signInServer("admin", { "/metrics": () => response({ database_bytes: 4096 }) });
+  const ui = dashboard(server.fetch);
+  await ui.context.run(ui.connect);
+  assert.equal(ui.get("stat-bytes").textContent, "4096");
+  assert.equal(ui.get("metrics-note").hidden, true);
+  assert.equal(ui.get("metrics-note").textContent, "");
+});
+
+test("a scoped credential with diagnostics signs in through a refused /metrics, one without never asks", async () => {
+  const scope = (operations) => ({ operations, collections: ["*"], graphs: [], expires_unix_ms: 1 });
+  const allowed = signInServer("scoped", {}, scope(["read", "diagnostics"]));
+  const ui = dashboard(allowed.fetch);
+  await ui.context.run(ui.connect);
+  assert.equal(ui.get("status").dataset.error, "false");
+  assert.equal(ui.get("metrics-note").hidden, false);
+  const without = signInServer("scoped", {}, scope(["read"]));
+  const other = dashboard(without.fetch);
+  await other.context.run(other.connect);
+  assert.equal(other.get("status").dataset.error, "false");
+  assert.equal(other.get("metrics-note").hidden, true);
+  assert.ok(!without.calls.includes("/metrics"));
+});
+
+test("sign-in still fails for every other refusal or failure", async () => {
+  const failures = [
+    ["/metrics", () => response({ error: { code: "internal_error", message: "boom" } }, 500), /HTTP 500: internal_error: boom/],
+    ["/metrics", () => response({ error: { code: "busy", message: "server busy" } }, 503), /HTTP 503: busy/],
+    ["/metrics", () => response({ error: { code: "unauthorized", message: "bad token" } }, 401), /HTTP 401: unauthorized/],
+    ["/metrics", () => response({ error: { code: "read_only", message: "admin access required" } }, 403), /HTTP 403: read_only/],
+    ["/v1/database", refusal, /HTTP 403: forbidden_scope/],
+  ];
+  for (const [route, answer, message] of failures) {
+    const ui = dashboard(signInServer("admin", { [route]: answer }).fetch);
+    await ui.context.run(ui.connect);
+    assert.equal(ui.get("status").dataset.error, "true", route);
+    assert.match(ui.get("status").textContent, message);
+    assert.equal(ui.get("metrics-note").hidden, true);
+  }
+  const offline = dashboard(signInServer("admin", { "/metrics": () => { throw new Error("socket closed"); } }).fetch);
+  await offline.context.run(offline.connect);
+  assert.equal(offline.get("status").dataset.error, "true");
+  assert.match(offline.get("status").textContent, /GET \/metrics failed/);
+});
+
+test("only the routes agent memory switches off, and only for credentials that can use them, read as the memory refusal", () => {
+  const ui = dashboard();
+  const admin = (method, route) => ui.memoryOff(method, route, 403, "forbidden_scope");
+  assert.equal(admin("GET", "/metrics?format=prometheus"), MEMORY_OFF_METRICS);
+  assert.equal(admin("GET", "/v1/admin/metrics/summary"), MEMORY_OFF_METRICS);
+  assert.equal(admin("GET", "/v1/admin/graph/stats"), "Graph engine statistics are off while agent memory is enabled.");
+  assert.equal(admin("GET", "/v1/admin/replication/export?max_bytes=1"), "Replication export is off while agent memory is enabled.");
+  for (const route of ["/v1/admin/webhooks", "/v1/admin/webhooks/0123456789abcdef01234567"]) assert.equal(admin("GET", route), "Webhook lists and delivery status are off while agent memory is enabled.");
+  for (const [method, route] of [["POST", "/v1/collections/docs/imports"], ["GET", "/v1/imports/7"], ["PUT", "/v1/imports/7/chunks/2"], ["POST", "/v1/imports/7/finish"], ["POST", "/v1/imports/7/abort"]]) assert.equal(admin(method, route), "Resumable imports are off while agent memory is enabled.");
+  for (const [method, route] of [["GET", "/v1/admin/maintenance/auto"], ["PUT", "/v1/admin/maintenance/auto"], ["POST", "/v1/admin/maintenance/auto/tick"]]) assert.equal(admin(method, route), "Automatic index maintenance is off while agent memory is enabled.");
+  // Creating and deleting subscriptions, and every other route, are not refused for this reason.
+  for (const [method, route] of [["POST", "/v1/admin/webhooks"], ["DELETE", "/v1/admin/webhooks/0123456789abcdef01234567"], ["GET", "/v1/admin/logs"], ["GET", "/v1/admin/backups"], ["GET", "/v1/vectors/1"], ["GET", "/v1/collections"]]) assert.equal(admin(method, route), "", `${method} ${route}`);
+  // Any other status or code is an ordinary failure.
+  assert.equal(ui.memoryOff("GET", "/metrics", 403, "read_only"), "");
+  assert.equal(ui.memoryOff("GET", "/metrics", 401, "forbidden_scope"), "");
+  assert.equal(ui.memoryOff("GET", "/metrics", 500, undefined), "");
+  // A read-only token reaches /metrics only; scoped credentials need the operation the route asks for.
+  ui.setCapabilities({ role: "read_only", features: {} });
+  assert.equal(admin("GET", "/metrics"), MEMORY_OFF_METRICS);
+  assert.equal(admin("GET", "/v1/admin/webhooks"), "");
+  assert.equal(admin("GET", "/v1/admin/metrics/summary"), "");
+  const scoped = (operations, collections = ["*"]) => ui.setCapabilities({ role: "scoped", features: {}, scope: { operations, collections } });
+  scoped(["read"]);
+  assert.equal(admin("GET", "/metrics"), "");
+  assert.equal(admin("POST", "/v1/collections/docs/imports"), "");
+  scoped(["read", "diagnostics", "import"]);
+  assert.equal(admin("GET", "/metrics"), MEMORY_OFF_METRICS);
+  assert.equal(admin("POST", "/v1/collections/docs/imports"), "Resumable imports are off while agent memory is enabled.");
+  assert.equal(admin("GET", "/v1/admin/webhooks"), "");
+  assert.equal(admin("GET", "/v1/admin/maintenance/auto"), "");
+});
+
+test("api() reports a memory refusal in plain words and keeps every other 403 as it was", async () => {
+  const ui = dashboard(async (url) => url.startsWith("/v1/vectors/") ? refusal() : response({ error: { code: "forbidden_scope", message: "credential scope does not permit this operation or collection" } }, 403));
+  await assert.rejects(ui.context.api("GET", "/v1/admin/webhooks"), (error) => {
+    assert.equal(error.memoryMode, true);
+    assert.equal(error.message, "Webhook lists and delivery status are off while agent memory is enabled.");
+    assert.equal(error.unavailable, "Unavailable: webhook lists and delivery status are off while agent memory is enabled.");
+    assert.match(error.help, /expected, not a sign-in or permission problem/);
+    assert.equal(error.status, 403);
+    assert.equal(error.code, "forbidden_scope");
+    return true;
+  });
+  await assert.rejects(ui.context.api("GET", "/v1/vectors/1"), (error) => {
+    assert.equal(error.memoryMode, undefined);
+    assert.match(error.message, /^HTTP 403: forbidden_scope: /);
+    return true;
+  });
+  // Unhandled, a refusal reads as one plain sentence with its explanation, never as a raw HTTP error.
+  await ui.context.run(() => ui.context.api("GET", "/metrics"));
+  assert.equal(ui.get("status").textContent, MEMORY_OFF_METRICS);
+  assert.match(ui.get("error-help").textContent, /not a sign-in or permission problem/);
+});
+
+test("independent observability reads tell the memory refusal from any other 403", async () => {
+  let answer = refusal;
+  const ui = dashboard(async () => answer());
+  await assert.rejects(ui.window.VLiteObservabilityConnection.request("/v1/admin/metrics/summary"), (error) => error.memoryMode === true && error.message === MEMORY_OFF_METRICS && error.status === 403);
+  await assert.rejects(ui.window.VLiteObservabilityConnection.request("/metrics", { text: true }), (error) => error.memoryMode === true);
+  await assert.rejects(ui.window.VLiteObservabilityConnection.request("/v1/admin/logs"), (error) => error.memoryMode === undefined && error.status === 403 && error.message === "HTTP 403");
+  answer = () => response({ error: { code: "read_only", message: "admin access required" } }, 403);
+  await assert.rejects(ui.window.VLiteObservabilityConnection.request("/v1/admin/metrics/summary"), (error) => error.memoryMode === undefined && error.status === 403 && error.code === "read_only");
+  answer = () => ({ ok: false, status: 403 });
+  await assert.rejects(ui.window.VLiteObservabilityConnection.request("/v1/admin/metrics/summary"), (error) => error.memoryMode === undefined && error.status === 403);
+});
+
+test("the graph explorer's statistics refusal carries the memory message and nothing else changes", async () => {
+  const ui = dashboard(async (url) => url === "/v1/admin/graph/stats" ? refusal() : response({ graphs: [] }));
+  const stats = await ui.window.VLiteGraphConnection.request("GET", "/v1/admin/graph/stats");
+  assert.equal(stats.status, 403);
+  assert.equal(stats.memoryMode, "Graph engine statistics are off while agent memory is enabled.");
+  const list = await ui.window.VLiteGraphConnection.request("GET", "/v1/graphs");
+  assert.equal(list.status, 200);
+  assert.equal(list.memoryMode, undefined);
 });

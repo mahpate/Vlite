@@ -1025,7 +1025,7 @@
 
     const loadStats = async () => {
       const response = await send("GET", STATS_ROUTE);
-      $("graph-stats-result").textContent = response.status === 200 ? JSON.stringify(response.value, null, 2) : errorText(response.status, response.value);
+      $("graph-stats-result").textContent = response.status === 200 ? JSON.stringify(response.value, null, 2) : response.memoryMode || errorText(response.status, response.value);
       const grid = $("graph-stats-grid");
       if (response.status !== 200) { grid.hidden = true; showTable("graph-truncations", []); return; }
       grid.replaceChildren(...statsCards(response.value).map(([name, value]) => h(doc, "div", {}, h(doc, "span", { text: name }), h(doc, "strong", { text: value }))));

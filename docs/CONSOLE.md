@@ -21,8 +21,8 @@ Sign in with a username and password; a session cookie keeps you signed in.
 - **Temporary password:** a password set by an admin must be changed at first
   sign-in. Passwords are 15–128 characters.
 - **Forgot your password:** ask a super admin to reset it.
-- **Sessions** end when you sign out, when they expire and when the server
-  restarts. Sign in again to continue.
+- **Sessions** end when you sign out, when they expire or when the server
+  restarts. Sign in again.
 - **HTTPS or a loopback-only server:** sign-in is accepted only over HTTPS or
   when the server listens on loopback only. When a TLS-terminating or local
   reverse proxy fronts the API, the operator sets `VLITE_TRUSTED_PROXY=1`.
@@ -51,7 +51,7 @@ Find the admin token here:
 - **Direct server:** the file passed with `--token-file`.
 - **Shared server:** ask its administrator for an account.
 
-Treat tokens as secrets. Keep them out of screenshots and logs.
+Keep tokens out of screenshots and logs.
 
 ## Find your way around
 
@@ -207,11 +207,14 @@ writes stay searchable until the replacement is published.
 ## Monitor the server
 
 Super admins open **Observability → Live monitor** for request rates, errors,
-latency, a per-route table and a live log tail with level and text filters and
-JSONL export. The server keeps the log in memory only, so it clears on
-restart. **Diagnostics** lists slow queries. **Change feed** lists committed
+latency, a per-route table and a live log tail with level/text filters and
+JSONL export. The log is memory-only and clears on restart. **Diagnostics**
+lists slow queries. **Change feed** lists committed
 events across the database and needs read access to all collections. Server
 health is under **Administration → Health**.
+
+With [agent memory](MEMORY.md) on, server-wide metrics are unavailable. Sign-in
+still works, and the overview, Observability and Health say so.
 
 ## Administer users and tenants
 
