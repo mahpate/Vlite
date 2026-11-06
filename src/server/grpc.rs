@@ -83,18 +83,13 @@ impl GrpcHealth {
 ///
 /// Call it with a clone of the `Service` after building the REST router
 /// (`configured_admin_router` or `authenticated_router`): gRPC then shares
-/// that router's tokens, credential store, token reloads and audit log.
+/// that router's tokens, credential store, token reloads, audit log and memory
+/// reservations, so a reserved resource answers the same on both transports.
 /// Without a configured REST router it uses the service's own state, which,
-/// like `router`, has no admin token (local development only).
+/// like `router`, has no admin token and no reservations (local development
+/// only).
 pub async fn grpc_router(mut service: Service) -> GrpcServer {
-    if let Some(admin) = service
-        .published_admin
-        .lock()
-        .ok()
-        .and_then(|published| published.clone())
-    {
-        service.admin = admin;
-    }
+    service.adopt_published();
     let (reporter, health_service) = tonic_health::server::health_reporter();
     let health = GrpcHealth(reporter);
     health.set(tonic_health::ServingStatus::Serving).await;

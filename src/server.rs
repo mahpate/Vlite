@@ -185,6 +185,10 @@ pub struct Service {
     /// any clone of this service; other transports share it (same tokens,
     /// credential store, audit log and reloads).
     published_admin: Arc<Mutex<Option<Arc<admin::AdminState>>>>,
+    /// The memory reservations of that same router. They are published and
+    /// adopted together with `published_admin` (see `publish`), so that every
+    /// transport of one engine applies the reservations its router applies.
+    published_bindings: Arc<Mutex<Option<Arc<reserved::Bindings>>>>,
     tls: Arc<Mutex<Vec<tls::TlsIdentity>>>,
     rate_limits: Arc<Mutex<BTreeMap<String, (f64, Instant)>>>,
     webhooks: Arc<webhooks::Dispatcher>,
@@ -277,6 +281,7 @@ impl Service {
             lineage,
             imports: Arc::new(Mutex::new(collections::Reservations::default())),
             published_admin: Arc::default(),
+            published_bindings: Arc::default(),
             tls: Arc::default(),
             rate_limits: Arc::default(),
             webhooks: Arc::default(),
@@ -308,6 +313,46 @@ impl Service {
 
     fn has_bindings(&self) -> bool {
         !self.memory_bindings.is_empty()
+    }
+
+    /// Makes this service's authentication state and memory reservations the
+    /// ones every other transport of the same engine adopts. Both change under
+    /// one lock order (administration first), so a reader never pairs the
+    /// state of one router with the reservations of another. A lock that a
+    /// panic poisoned is recovered, never skipped: both guarded values are
+    /// replaced whole, so a skipped publication would leave a transport
+    /// without the reservations it must apply.
+    fn publish(&self) {
+        let mut admin = self
+            .published_admin
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let mut bindings = self
+            .published_bindings
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        *admin = Some(self.admin.clone());
+        *bindings = Some(self.memory_bindings.clone());
+    }
+
+    /// Adopts what a REST router published, authentication state and
+    /// reservations together or neither. A service that no router configured
+    /// keeps its own, which is the unauthenticated development mode that
+    /// `grpc_router` documents.
+    #[cfg(feature = "grpc")]
+    fn adopt_published(&mut self) {
+        let admin = self
+            .published_admin
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let bindings = self
+            .published_bindings
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if let (Some(admin), Some(bindings)) = (admin.as_ref(), bindings.as_ref()) {
+            self.admin = admin.clone();
+            self.memory_bindings = bindings.clone();
+        }
     }
 
     /// The guard for one request made as `role`: the only way a handler
@@ -576,9 +621,7 @@ fn data_routes() -> Router<Service> {
 }
 
 fn configured_routes(service: Service) -> Router {
-    if let Ok(mut published) = service.published_admin.lock() {
-        *published = Some(service.admin.clone());
-    }
+    service.publish();
     let observation = service.clone();
     let graph_routes = graph::routes();
     admin::routes()

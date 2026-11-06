@@ -56,6 +56,11 @@ const OPS: &[&str] = &[
 
 type Answer = (u16, HeaderMap, Vec<u8>);
 
+/// The same properties over gRPC (lane F3, slice S1), in a module of its own.
+#[cfg(feature = "grpc")]
+#[path = "server_guard_differential/grpc_leg.rs"]
+mod grpc_leg;
+
 struct Principal {
     name: &'static str,
     tenant: bool,
@@ -213,6 +218,9 @@ struct World {
     bound: bool,
     tokens: BTreeMap<&'static str, String>,
     _directory: tempfile::TempDir,
+    /// The service the router was built over, for the gRPC leg.
+    #[cfg(feature = "grpc")]
+    service: Service,
 }
 
 impl World {
@@ -313,8 +321,9 @@ fn build(bound: bool) -> World {
         db.feed_cursor().unwrap().to_token(),
     )
     .unwrap();
+    let service = Service::new(db);
     let app = configured_admin_router(
-        Service::new(db),
+        service.clone(),
         ServerOptions {
             loopback_only: true,
             admin_token: Some(BearerToken::new(ADMIN).unwrap()),
@@ -330,6 +339,8 @@ fn build(bound: bool) -> World {
         bound,
         tokens,
         _directory: directory,
+        #[cfg(feature = "grpc")]
+        service,
     }
 }
 
