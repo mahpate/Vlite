@@ -133,7 +133,10 @@ fn code(body: &Value) -> &str {
 /// seed is the authorized 404).
 #[tokio::test]
 async fn recall_authorization_is_the_intersection_of_every_grant() {
-    let body = json!({"scope": {"agent": "a"}, "entity_seeds": ["absent"]});
+    // The 250 ms default budget is real time: a cold or loaded runner can spend it
+    // before the handler plans, and the authorized request then answers 504.
+    let limits = json!({"deadline_ms": 5000});
+    let body = json!({"scope": {"agent": "a"}, "entity_seeds": ["absent"], "limits": limits});
     let directory = TempDir::new().unwrap();
     let (app, token) = start(
         &directory,
@@ -185,7 +188,7 @@ async fn recall_authorization_is_the_intersection_of_every_grant() {
         &app,
         RECALL,
         &token,
-        &json!({"scope": {"agent": "b"}, "entity_seeds": ["absent"]}),
+        &json!({"scope": {"agent": "b"}, "entity_seeds": ["absent"], "limits": limits}),
     )
     .await;
     assert_eq!(status, 403);
