@@ -890,12 +890,16 @@ fn item(key: &str, value: &[u8], version: u64) -> Value {
 
 #[tokio::test]
 async fn a_get_many_response_is_inclusive_at_sixteen_mebibytes() {
-    // The same boundary with and without an absent key among the twelve: it
-    // stays in the response as `null`, which has bytes of its own.
-    for (with_null, boundary) in [false, true]
-        .into_iter()
-        .flat_map(|with_null| [PAGE - 1, PAGE, PAGE + 1].map(|boundary| (with_null, boundary)))
-    {
+    // The same boundary with and without an absent key among the twelve (it
+    // stays in the response as `null`, which has bytes of its own), and with
+    // and without one more key after the entry at the boundary: that entry
+    // then ends the response with the index of the key that follows, which
+    // has fewer bytes than `null`.
+    for (with_null, trailing, boundary) in [false, true].into_iter().flat_map(|with_null| {
+        [false, true].into_iter().flat_map(move |trailing| {
+            [PAGE - 1, PAGE, PAGE + 1].map(move |boundary| (with_null, trailing, boundary))
+        })
+    }) {
         let directory = tempfile::tempdir().unwrap();
         let mut db = database();
         let mut store = db.kv_store("default").unwrap();
@@ -916,7 +920,8 @@ async fn a_get_many_response_is_inclusive_at_sixteen_mebibytes() {
         }
         // The thirteenth entry brings the whole response to `boundary` bytes:
         // the twelve items and their envelope, a comma, then its own item.
-        let head_bytes = serde_json::to_vec(&json!({"items":expected,"next_index":null}))
+        let next = trailing.then_some(count + 1);
+        let head_bytes = serde_json::to_vec(&json!({"items":expected,"next_index":next}))
             .unwrap()
             .len();
         let version = last + 1;
@@ -931,7 +936,7 @@ async fn a_get_many_response_is_inclusive_at_sixteen_mebibytes() {
             version
         );
         expected.push(item(&key, &value, version));
-        let oracle = json!({"items":expected,"next_index":null});
+        let oracle = json!({"items":expected,"next_index":next});
         assert_eq!(
             serde_json::to_vec(&oracle).unwrap().len(),
             boundary,
@@ -943,6 +948,9 @@ async fn a_get_many_response_is_inclusive_at_sixteen_mebibytes() {
             .map(|i| json!({"namespace":"edge","key":format!("{i:02}")}))
             .collect();
         keys.push(json!({"namespace":"edge","key":key}));
+        if trailing {
+            keys.push(json!({"namespace":"edge","key":"zz"}));
+        }
         let (status, page, size) = raw(
             &app,
             ADMIN,
@@ -953,11 +961,11 @@ async fn a_get_many_response_is_inclusive_at_sixteen_mebibytes() {
         .await;
         assert_eq!(status, 200);
         if boundary <= PAGE {
-            assert_eq!(size, boundary);
-            assert_eq!(page, oracle);
+            assert_eq!(size, boundary, "{with_null} {trailing}");
+            assert_eq!(page, oracle, "{with_null} {trailing}");
         } else {
             // One byte over: the last key is left for the next call.
-            assert!(size <= PAGE, "{with_null}: {size} bytes");
+            assert!(size <= PAGE, "{with_null} {trailing}: {size} bytes");
             assert_eq!(page["items"].as_array().unwrap().len(), count);
             assert_eq!(page["next_index"], count);
             assert_eq!(page["items"], json!(&expected[..count]));
@@ -970,7 +978,12 @@ async fn a_get_many_response_is_inclusive_at_sixteen_mebibytes() {
             )
             .await;
             assert_eq!(status, 200);
-            assert_eq!(tail, json!({"items":[expected[count]],"next_index":null}));
+            let rest = if trailing {
+                json!([expected[count], null])
+            } else {
+                json!([expected[count]])
+            };
+            assert_eq!(tail, json!({"items":rest,"next_index":null}));
         }
     }
 }

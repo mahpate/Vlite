@@ -1480,9 +1480,12 @@ mod tests {
     #[test]
     fn many_page_exact_encoded_boundary() {
         let fixed = item_json("", &[], 1, None).to_string().len();
-        // The same boundary with and without an absent key among the entries:
-        // it stays in the response as `null`, which has bytes of its own.
-        for with_null in [false, true] {
+        // The same boundary with and without an absent key among the entries
+        // (it stays in the response as `null`, which has bytes of its own), and
+        // with and without one more key after the entry at the boundary: that
+        // entry then ends the response with the index of the key that follows,
+        // which has fewer bytes than `null`.
+        for (with_null, trailing) in [(false, false), (false, true), (true, false), (true, true)] {
             let mut entries: Vec<Option<KvEntry>> = (0..12)
                 .map(|index| {
                     Some(KvEntry {
@@ -1497,12 +1500,13 @@ mod tests {
                 entries.insert(0, None);
             }
             let count = entries.len();
+            let next = trailing.then_some(count + 1);
             let head = json!({
                 "items":entries
                     .iter()
                     .map(|entry| entry.as_ref().map_or(Value::Null, entry_json))
                     .collect::<Vec<_>>(),
-                "next_index":null
+                "next_index":next
             })
             .to_string()
             .len();
@@ -1520,12 +1524,19 @@ mod tests {
                     version: 1,
                     expires_at_ms: None,
                 }));
+                if trailing {
+                    entries.push(None);
+                }
                 let response = many_of(&entries);
-                entries.pop();
+                entries.truncate(count);
                 if boundary <= PAGE_BYTES {
-                    assert_eq!(response.to_string().len(), boundary, "{with_null}");
+                    assert_eq!(
+                        response.to_string().len(),
+                        boundary,
+                        "{with_null} {trailing}"
+                    );
                     assert_eq!(response["items"].as_array().unwrap().len(), count + 1);
-                    assert_eq!(response["next_index"], Value::Null);
+                    assert_eq!(response["next_index"], json!(next));
                 } else {
                     assert_eq!(response["items"].as_array().unwrap().len(), count);
                     assert_eq!(response["next_index"], count);

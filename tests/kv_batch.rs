@@ -270,6 +270,15 @@ fn a_read_only_handle_refuses_a_batch_and_still_reads_many() {
             .write_batch(&[put("n", "new", b"x")]),
         Err(Error::ReadOnly)
     ));
+    // A batch that changes no record attempts no write, so the mode of the
+    // handle does not matter, as for a single delete of an absent key.
+    let mut kv = db.kv_store("default").unwrap();
+    assert!(kv.write_batch(&[]).unwrap().is_empty());
+    assert_eq!(
+        kv.write_batch(&[delete("n", "absent")]).unwrap(),
+        [KvOutcome::Deleted(false)]
+    );
+    assert!(!kv.delete("n", "absent", Expected::Any).unwrap());
     let entries = db
         .kv_view("default")
         .unwrap()

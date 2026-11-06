@@ -161,7 +161,7 @@
  },
  {
   "id": "kvb/K01-empty-plan-writes-a-frame",
-  "desc": "A batch that changes no record still commits a frame. Killed by tests/kv_batch.rs a_batch_that_changes_no_record_writes_no_frame.",
+  "desc": "A batch that changes no record still calls the engine, which refuses a read-only handle (the engine returns early for an empty batch, so no file tells it apart). Killed by tests/kv_batch.rs a_read_only_handle_refuses_a_batch_and_still_reads_many.",
   "file": "src/kv.rs",
   "old": "        if !plan.mutations.is_empty() {\n            self.db.write_batch_in(self.id, &plan.mutations)?;\n        }",
   "new": "        self.db.write_batch_in(self.id, &plan.mutations)?;",
@@ -542,5 +542,13 @@
   "old": "if plan.sequence != self.db.sequence {",
   "new": "if false && plan.sequence != self.db.sequence {",
   "cmd": "cargo test --locked --offline --features server,mcp,tools --lib kv::batch_tests"
+ },
+ {
+  "id": "kvb/M13-mcp-many-envelope-ignores-next-index",
+  "desc": "The MCP get-many page measures its envelope without a next_index. Killed by kv_mcp::tests::many_page_exact_encoded_boundary.",
+  "file": "src/bin/tool_support/kv_mcp.rs",
+  "old": "let next = (index + 1 < total).then_some(index + 1);",
+  "new": "let next: Option<usize> = (index + 1 < total).then_some(index + 1).and(None);",
+  "cmd": "cargo test --locked --offline --features mcp,tools --bin vlite-mcp kv_mcp::tests::"
  }
 ]
