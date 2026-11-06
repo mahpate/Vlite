@@ -2,7 +2,7 @@
 # Bootstrap Docker and run published VLite images on Ubuntu or an existing Docker host.
 set -eu
 
-VERSION=v0.7.0
+VERSION=v0.7.1
 DEPLOY_DIR=${HOME}/vlite-deploy
 API_PORT=18084
 DASHBOARD_PORT=8081
