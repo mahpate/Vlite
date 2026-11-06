@@ -53,10 +53,32 @@ test("KV presentation refuses lossy textarea encodings and converts formats loss
 test("Memory observation timestamps require server time, never the device clock", () => {
   assert.equal(u.serverTime("Thu, 05 Nov 2026 22:00:00 GMT"), 1793915998000);
   assert.equal(u.serverTime(null), null);
+});
+
+// The server refuses an observation later than its clock as a core error: 422 invalid_input, the generic
+// message and no details. Every field-level refusal names its field in details.field.
+const refused = (details, status = 422, code = "invalid_input", message = "memory request field is invalid") =>
+  Object.assign(new Error(`HTTP ${status}: ${code}: ${message}`), { status, code, body: { error: { code, message, ...(details && { details }) } } });
+
+test("The clock hint appears only for the observed_at_ms / server-clock problem", () => {
   const guidance = "Your computer or proxy clock may be ahead of the VLite server.";
+  const timestamped = ["remember", "consolidate"];
   assert.ok(u.memoryClockGuidance("Server time is unavailable").includes(guidance));
-  assert.ok(u.memoryClockGuidance("HTTP 400: invalid_input: memory request field is invalid").includes(guidance));
-  assert.equal(u.memoryClockGuidance("HTTP 403: forbidden_scope"), "");
+  assert.ok(u.memoryClockGuidance(new Error("Server time is unavailable. Refresh the connection."), "remember").includes(guidance));
+  for (const action of timestamped) {
+    assert.ok(u.memoryClockGuidance(refused(), action).includes(guidance), `${action}: observation after the server clock`);
+    assert.ok(u.memoryClockGuidance(refused({ field: "observed_at_ms" }), action).includes(guidance), `${action}: observed_at_ms`);
+    for (const field of ["scope", "items", "id", "kind", "content", "source", "importance", "idempotency_key", "deadline_ms", "inputs", "output", "references", "body"])
+      assert.equal(u.memoryClockGuidance(refused({ field }), action), "", `${action}: invalid ${field} is not a clock problem`);
+  }
+  for (const action of ["recall", "forget", "receipts/lookup"])
+    for (const details of [undefined, { field: "observed_at_ms" }, { field: "limit" }, { field: "vector" }])
+      assert.equal(u.memoryClockGuidance(refused(details), action), "", `${action} sends no observation time`);
+  for (const [status, code, message] of [[403, "forbidden_scope", "forbidden scope"], [400, "invalid_json", "request body is not one JSON object with unique keys"], [503, "busy", "busy"], [409, "memory_capability_unavailable", "memory capability is not available in this version"], [422, "invalid_input", "future clock observed_at"]])
+    assert.equal(u.memoryClockGuidance(refused(undefined, status, code, message), "remember"), "", `${status} ${code}`);
+  // Text alone cannot tell a refused field from a refused time, and clock-like words elsewhere are not a clock problem.
+  for (const message of ["HTTP 403: forbidden_scope", "HTTP 422: invalid_input: memory request field is invalid", "HTTP 409: requires future clock observed_at"])
+    assert.equal(u.memoryClockGuidance(message, "remember"), "", message);
 });
 
 const draft = {

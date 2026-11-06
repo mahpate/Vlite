@@ -808,8 +808,8 @@
       return value;
     };
     const list = async () => { admin("webhooks"); display("webhook-result", await ctx.api("GET", "/v1/admin/webhooks")); };
-    on("webhook-list", list);
-    on("webhook-status", async () => { admin("webhooks"); display("webhook-result", await ctx.api("GET", `/v1/admin/webhooks/${webhookId()}`)); });
+    on("webhook-list", list, "webhook-result");
+    on("webhook-status", async () => { admin("webhooks"); display("webhook-result", await ctx.api("GET", `/v1/admin/webhooks/${webhookId()}`)); }, "webhook-result");
     on("webhook-create", async () => {
       admin("webhooks");
       let body;
@@ -823,7 +823,13 @@
       admin("webhooks"); const value = webhookId();
       if (await ctx.confirm(`Delete webhook subscription ${value}? Delivery to this subscription stops.`)) {
         await ctx.api("DELETE", `/v1/admin/webhooks/${value}`, undefined, { data: false });
-        await list();
+        // The list may be off while agent memory is enabled; the deletion itself still happened.
+        try { await list(); }
+        catch (error) {
+          if (!error?.memoryMode) throw error;
+          display("webhook-result", `Subscription ${value} was deleted. ${error.message}`);
+          ctx.status(`Subscription ${value} deleted`);
+        }
       }
     });
     on("pitr-run", async () => {
@@ -1025,9 +1031,15 @@
     const milliseconds = Date.parse(date) - 2000;
     return Number.isSafeInteger(milliseconds) && milliseconds >= 0 ? milliseconds : null;
   }
-  function memoryClockGuidance(message) {
-    if (!/observed_at|future|clock|server time is unavailable|memory request field is invalid/i.test(String(message))) return "";
-    return "Your computer or proxy clock may be ahead of the VLite server. Check both clocks before retrying; retain the same idempotency key and request.";
+  // Only remember and consolidate send an observation time. The server refuses one later than its clock like any
+  // core error: 422 invalid_input, the generic message and no details. A refused request field is named in details.field.
+  function memoryClockGuidance(error, action) {
+    const guidance = "Your computer or proxy clock may be ahead of the VLite server. Check both clocks before retrying; retain the same idempotency key and request.";
+    if (/^server time is unavailable/i.test(String(error?.message ?? error))) return guidance;
+    const refusal = error?.body?.error;
+    if (!["remember", "consolidate"].includes(action) || error?.status !== 422 || refusal?.code !== "invalid_input" || refusal.message !== "memory request field is invalid") return "";
+    const field = refusal.details?.field;
+    return field === undefined || field === "observed_at_ms" ? guidance : "";
   }
   const displayKey = value => JSON.stringify(value).replaceAll(" ", "␠");
   function memoryRequest(action, input, now) {
@@ -1297,7 +1309,7 @@
       try {
         body = memoryAttempt?.signature === signature ? memoryAttempt.request : memoryRequest(action, input, ctx.serverNow());
       } catch (error) {
-        const guidance = memoryClockGuidance(error.message);
+        const guidance = memoryClockGuidance(error, action);
         if (guidance) text("memory-outcome", `${error.message} ${guidance}`);
         throw error;
       }
@@ -1319,7 +1331,7 @@
         }
         text("memory-outcome", `${actionLabels[action]}: server confirmed. ${action === "recall" ? "Inspect truncation and ranking details in the response." : "Retain the response and receipt before signing out."}`);
       } catch (error) {
-        const guidance = memoryClockGuidance(error.message);
+        const guidance = memoryClockGuidance(error, action);
         text("memory-outcome", `${error.message} ${guidance ? `${guidance} ` : ""}${read ? "Read failed." : "Outcome may be unknown after a transport or server failure. Retain the original key and request; do not generate a new key to retry."} The last successful response, if any, remains below.`);
         throw error;
       }
@@ -1367,10 +1379,19 @@
     let stopRequested = false;
     // One-time credential secret: closure memory only; never logged, inspected or stored.
     let secret = null;
-    const on = (name, action) => {
+    // A view the server keeps off while agent memory is enabled says so in its own result area, not as a failure.
+    const memoryAware = (output, action) => async () => {
+      try { return await action(); }
+      catch (error) {
+        if (!error?.memoryMode) throw error;
+        text(output, error.message);
+        ctx.status(error.message);
+      }
+    };
+    const on = (name, action, output) => {
       const element = $(name);
       if (!element) throw new Error(`console markup is missing control #${name}`);
-      element.addEventListener("click", () => ctx.run(action));
+      element.addEventListener("click", () => ctx.run(output ? memoryAware(output, action) : action));
     };
     const get = (name) => JSON.parse($(name).value);
     const advanced = advancedTools(ctx, on, get);
@@ -1668,7 +1689,14 @@
     });
     async function health() {
       const caps = ctx.capabilities();
-      const metrics = caps?.role !== "scoped" || ctx.can("diagnostics") ? await ctx.api("GET", "/metrics") : "Unavailable: scoped credential lacks the diagnostics operation";
+      let metrics = "Unavailable: scoped credential lacks the diagnostics operation";
+      if (caps?.role !== "scoped" || ctx.can("diagnostics")) {
+        try { metrics = await ctx.api("GET", "/metrics"); }
+        catch (error) {
+          if (!error?.memoryMode) throw error;
+          metrics = error.unavailable;
+        }
+      }
       const index = await ctx.api("GET", indexPath("/index/hnsw"));
       text("health-result", { observed_at: new Date().toISOString(), metrics, index, queue_note: "Request admission is bounded; this is a snapshot, not live telemetry" });
     }
@@ -1925,7 +1953,7 @@
       $("job-id").value = created.job;
       text("job-invalid", "");
       await sendChunks(1);
-    });
+    }, "job-result");
     async function readJob() {
       const value = $("job-id").value.trim();
       id(value);
@@ -1934,7 +1962,7 @@
     on("job-status", async () => {
       const status = await readJob();
       jobText({ ...status, note: status.collection_dropped ? "The target collection was dropped." : status.durable ? "Durable checkpoint." : "Not yet durable: a job with no committed chunk does not survive a restart." });
-    });
+    }, "job-result");
     on("job-resume", async () => {
       ensurePrepared();
       const status = await readJob();
@@ -1950,7 +1978,7 @@
         if (check.outcome !== "already_committed") throw new Error(`Chunk ${plan.verify} replay reported ${check.outcome}; stopping. Inspect the job status before continuing.`);
       }
       await sendChunks(plan.next);
-    });
+    }, "job-result");
     $("job-stop").addEventListener("click", () => { stopRequested = true; ctx.status("Stop requested; the chunk in flight completes, then the import pauses"); });
     for (const [name, verb] of [["job-finish", "finish"], ["job-abort", "abort"]]) on(name, async () => {
       const status = await readJob();
@@ -1961,26 +1989,26 @@
       const result = await ctx.api("POST", `/v1/imports/${status.job}/${verb}`, {});
       if (job?.id === status.job) job = null;
       jobText(result);
-    });
+    }, "job-result");
     // Schedulers.
     on("auto-maintenance-read", async () => {
       admin("auto_maintenance");
       const result = await ctx.api("GET", "/v1/admin/maintenance/auto");
       $("auto-maintenance").value = JSON.stringify(autoMaintenanceForm(result.config || {}), null, 2);
       text("auto-maintenance-result", result);
-    });
+    }, "auto-maintenance-result");
     on("auto-maintenance-save", async () => {
       admin("auto_maintenance");
       const policy = autoMaintenance(get("auto-maintenance"));
       const changes = Object.entries(policy).map(([key, value]) => `${key}=${JSON.stringify(value)}`).join(", ");
       if (!await ctx.confirm(`${policy.enabled === true ? "ENABLE automatic maintenance for all collections: it may start background rebuilds (at most one at a time). " : policy.enabled === false ? "Disable automatic maintenance. " : ""}Merge ${changes} into the automatic maintenance policy (omitted fields keep their current values)? Memory-only: restart restores the environment configuration.`)) return;
       text("auto-maintenance-result", await ctx.api("PUT", "/v1/admin/maintenance/auto", policy, { data: false }));
-    });
+    }, "auto-maintenance-result");
     on("auto-maintenance-tick", async () => {
       admin("auto_maintenance");
       if (!await ctx.confirm("Run exactly one bounded automatic-maintenance tick now? It may act on one collection (round-robin) and may start one background rebuild. It runs even if the timer is disabled.")) return;
       text("auto-maintenance-result", await ctx.api("POST", "/v1/admin/maintenance/auto/tick", undefined, { data: false }));
-    });
+    }, "auto-maintenance-result");
     on("backup-schedule-run", async () => {
       admin("backup_schedule");
       if (!await ctx.confirm("Run one scheduled backup cycle now? It writes a backup to the admin directory (disk and I/O) and, per the current schedule, may run a restore drill and apply retention (retention deletes only when enabled).")) return;
@@ -2031,7 +2059,7 @@
     on("prometheus", async () => {
       const body = await ctx.api("GET", "/metrics?format=prometheus", undefined, { text: true });
       text("prometheus-result", body.length > 65536 ? `${body.slice(0, 65536)}\n... (${body.length - 65536} more characters not shown)` : body);
-    });
+    }, "prometheus-result");
     // Scoped credentials: the token is held only in `secret` and rendered masked.
     function showSecret(value, credential) {
       secret = value;

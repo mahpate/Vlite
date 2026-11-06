@@ -128,7 +128,7 @@
   if (!section) return;
   let previous = null, source = null, entries = [], since = 0, target = "", paused = false, tailPaused = false;
   let inView = false, loading = false, generation = 0, timer = null, dropped = 0;
-  let sortKey = "count", sortAscending = false, routeRows = [], endpointSupported = true;
+  let sortKey = "count", sortAscending = false, routeRows = [], endpointSupported = true, metricsOff = false;
   const history = new Map();
   const connection = () => window.VLiteObservabilityConnection;
   const connected = () => connection()?.connected();
@@ -206,6 +206,8 @@
     }
   }
   async function metrics(epoch) {
+    // The server refuses metrics while agent memory is enabled; ask again only after Refresh now or a new sign-in.
+    if (metricsOff) return;
     try {
       let data, nextSource = source;
       if (source !== "prometheus") {
@@ -219,7 +221,13 @@
       data.ts_ms = finite(data.ts_ms) ?? Date.now();
       const rates = deriveRates(data, previous); previous = data;
       renderMetrics(data, rates);
-    } catch (error) { if (epoch === generation) message("obs-metrics-status", failure(error)); }
+    } catch (error) {
+      if (epoch !== generation) return;
+      if (error.memoryMode) {
+        metricsOff = true;
+        message("obs-metrics-status", `${error.message} The cards and route table stay empty. Logs, slow queries and recent audit below still update; select Refresh now to ask again.`);
+      } else message("obs-metrics-status", failure(error));
+    }
   }
   async function logs(epoch) {
     if (tailPaused || !endpointSupported) return;
@@ -269,7 +277,7 @@
     loading = false; schedule();
   }
   function reset() {
-    generation++; previous = null; source = null; entries = []; since = 0; target = ""; dropped = 0; routeRows = []; endpointSupported = true; history.clear();
+    generation++; previous = null; source = null; entries = []; since = 0; target = ""; dropped = 0; routeRows = []; endpointSupported = true; metricsOff = false; history.clear();
     for (const value of section.querySelectorAll(".obs-card-value")) value.textContent = "—";
     for (const svg of section.querySelectorAll(".obs-spark")) svg.replaceChildren();
     for (const id of ["obs-routes", "obs-log-view", "obs-targets", "obs-slow-rows", "obs-audit-rows"]) $(id).replaceChildren();
@@ -285,7 +293,7 @@
     tailPaused = !tailPaused; $("obs-tail-pause").textContent = tailPaused ? "Resume tail" : "Pause tail"; $("obs-tail-pause").setAttribute("aria-pressed", String(tailPaused));
     if (!tailPaused) refresh(true);
   });
-  $("obs-refresh").addEventListener("click", () => { endpointSupported = true; refresh(true); });
+  $("obs-refresh").addEventListener("click", () => { endpointSupported = true; metricsOff = false; refresh(true); });
   $("obs-interval").addEventListener("change", () => { schedule(); if (Number($("obs-interval").value)) refresh(); });
   for (const id of ["obs-level", "obs-log-search"]) $(id).addEventListener("input", () => {
     // Start a new bounded tail on filter change so previously excluded entries can be fetched.

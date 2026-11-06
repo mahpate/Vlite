@@ -397,6 +397,8 @@
     $("stat-index").textContent = "Not checked";
     $("encryption-badge").textContent = "Encryption: not checked";
     $("snapshot-note").textContent = "No snapshot loaded yet. Select Refresh to load one.";
+    $("metrics-note").textContent = "";
+    $("metrics-note").hidden = true;
   }
   function disconnect(options = {}) {
     // Sign out ends a password session; leaving the page (endSession: false) keeps it for a reload.
@@ -510,6 +512,39 @@
     error.stale = true;
     return error;
   }
+  // While agent memory is enabled the server refuses a few database-wide routes with 403 forbidden_scope, even to the
+  // super admin (docs/SECURITY.md, Memory-bound resources). That is expected, so each view says so in plain words
+  // instead of failing. Only a refusal that cannot be an ordinary scope denial reads as the memory one: always for the
+  // super admin; for a read-only token on `readOnly` rows; for a scoped credential when it holds the `scoped`
+  // operation, or the `everywhere` operation on every collection with no tenant (the server checks that first).
+  const MEMORY_OFF = [
+    { route: /^\/metrics$/, readOnly: true, scoped: "diagnostics", subject: "Server metrics are" },
+    { route: /^\/v1\/admin\/metrics\/summary$/, subject: "Server metrics are" },
+    { route: /^\/v1\/admin\/graph\/stats$/, subject: "Graph engine statistics are" },
+    { route: /^\/v1\/admin\/replication\/export$/, everywhere: "read", subject: "Replication export is" },
+    { methods: ["GET"], route: /^\/v1\/admin\/webhooks(?:\/[^/]+)?$/, subject: "Webhook lists and delivery status are" },
+    { methods: ["GET"], route: /^\/v1\/imports\/[^/]+$/, readOnly: true, subject: "Resumable imports are" },
+    { route: /^\/v1\/(?:collections\/[^/]+\/imports|imports\/[^/]+(?:\/(?:chunks\/[^/]+|finish|abort))?)$/, subject: "Resumable imports are" },
+    { route: /^\/v1\/admin\/maintenance\/auto(?:\/tick)?$/, subject: "Automatic index maintenance is" },
+  ];
+  const MEMORY_HELP = "This is expected, not a sign-in or permission problem: while agent memory is enabled, or a database still holds its memory records after memory was turned off, the server keeps these database-wide routes off so private memory data cannot be reached through them.";
+  // The plain-language message when this refusal is the memory one, else "".
+  function memoryOff(method, route, status, code) {
+    if (status !== 403 || code !== "forbidden_scope" || !capabilities) return "";
+    const found = MEMORY_OFF.find((item) => item.route.test(String(route).split("?")[0]) && (!item.methods || item.methods.includes(method)));
+    if (!found) return "";
+    const role = capabilities.role;
+    const scope = capabilities.scope;
+    const everywhere = (operation) => Array.isArray(scope?.operations) && scope.operations.includes(operation)
+      && Array.isArray(scope.collections) && scope.collections.includes("*") && !scope.tenant_id;
+    const memory = role === "admin" || (role === "read_only" && found.readOnly === true)
+      || (role === "scoped" && ((found.scoped !== undefined && can(found.scoped)) || (found.everywhere !== undefined && everywhere(found.everywhere))));
+    return memory ? `${found.subject} off while agent memory is enabled.` : "";
+  }
+  // `unavailable` is the same sentence as a JSON placeholder ("Unavailable: ...").
+  function memoryFailure(error, message) {
+    return Object.assign(error, { message, unavailable: `Unavailable: ${message[0].toLowerCase()}${message.slice(1)}`, help: MEMORY_HELP, memoryMode: true });
+  }
   // options: { headers, withHeaders (returns { value, etag, status }), data: false for
   // requests that never change records, sensitive (response holds a one-time secret) }.
   async function api(method, path, body, options = {}) {
@@ -584,6 +619,8 @@
       failure.status = response.status;
       failure.code = detail?.code;
       failure.body = options.sensitive ? null : value;
+      const off = memoryOff(method, path, response.status, detail?.code);
+      if (off) memoryFailure(failure, off);
       if (response.status === 401) status(ended ? "Your session ended. Sign in again." : failure.message, true);
       throw failure;
     }
@@ -911,7 +948,16 @@
     collectionState();
     const overview = {};
     if (capabilities.role !== "scoped") overview.database = await api("GET", "/v1/database");
-    if (capabilities.role !== "scoped" || can("diagnostics")) overview.metrics = await api("GET", "/metrics");
+    let metricsOff = "";
+    if (capabilities.role !== "scoped" || can("diagnostics")) {
+      // A refused /metrics is not a failed sign-in: the overview says so and the other views load as usual.
+      try { overview.metrics = await api("GET", "/metrics"); }
+      catch (error) {
+        if (!error.memoryMode) throw error;
+        overview.metrics = error.unavailable;
+        metricsOff = error.message;
+      }
+    }
     if (info) overview.collection = info;
     show("overview", overview);
     $("encryption-badge").textContent = overview.database?.is_encrypted === true
@@ -919,6 +965,8 @@
       : overview.database?.is_encrypted === false ? "Encryption: off" : "Encryption: unavailable to this credential/server";
     showCollectionStats(collection === "default" && overview.database ? overview.database : info);
     $("stat-bytes").textContent = String(overview.metrics?.database_bytes ?? "Unavailable");
+    $("metrics-note").textContent = metricsOff ? `${metricsOff} Database size shows Unavailable.` : "";
+    $("metrics-note").hidden = !metricsOff;
     $("snapshot-note").textContent = vectorless
       ? `${NO_COLLECTIONS} Select Refresh after creating one.`
       : "Snapshot from when you signed in or last refreshed. Select Refresh to see newer changes.";
@@ -1332,7 +1380,11 @@
           if (!response.ok) {
             const error = new Error(`HTTP ${response.status}`);
             error.status = response.status;
-            throw error;
+            let code;
+            try { code = JSON.parse(await response.text())?.error?.code; } catch { /* the body is only needed to tell why */ }
+            error.code = code;
+            const off = memoryOff("GET", endpoint, response.status, code);
+            throw off ? memoryFailure(error, off) : error;
           }
           const result = options.text ? await response.text() : await response.json();
           if (snapshot !== generation) throw new Error("Connection or collection changed; response discarded");
@@ -1375,7 +1427,8 @@
         let value = null;
         try { value = raw ? JSON.parse(raw) : null; } catch { value = raw; }
         if (snapshot !== generation) return failure(0, "connection_changed", "Connection changed; response discarded");
-        return { status: response.status, value };
+        const off = memoryOff(verb, route, response.status, value?.error?.code);
+        return off ? { status: response.status, value, memoryMode: off } : { status: response.status, value };
       } catch (error) {
         return failure(0, controller.signal.aborted ? "aborted" : "network_error", error?.message || "Request failed");
       } finally { clearTimeout(timeout); controllers.delete(controller); }
