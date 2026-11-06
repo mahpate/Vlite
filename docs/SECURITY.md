@@ -92,9 +92,12 @@ resolve every name through the same per-request guard as the REST routes, but
 the gRPC listener and scheduled automatic index maintenance still fail closed
 at startup while a binding exists, until the release differential covers them.
 The [dashboard](CONSOLE.md#monitor-the-server) shows the refused views above as
-unavailable while agent memory is enabled, or while the database still holds
-memory binding records after the bindings file is removed; sign-in still works
-and each affected view says so in plain words.
+unavailable, and sign-in still works, while agent memory is enabled or the
+database still holds memory binding records after the bindings file is removed.
+It does so for the super admin, for a read-only token on the routes its role
+may call and for a scoped credential only where the refusal cannot be an
+ordinary scope denial; a tenant editor's refusal on the import routes looks like
+any other `403` and shows the server's own message.
 
 Each bound graph holds a binding record, the node `binding:v1`, with the
 binding's name, tenant, generation, state, receipt window, graph and evidence

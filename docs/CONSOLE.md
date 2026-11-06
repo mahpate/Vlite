@@ -22,7 +22,7 @@ Sign in with a username and password; a session cookie keeps you signed in.
   sign-in. Passwords are 15–128 characters.
 - **Forgot your password:** ask a super admin to reset it.
 - **Sessions** end when you sign out, when they expire or when the server
-  restarts. Sign in again.
+  restarts.
 - **HTTPS or a loopback-only server:** sign-in is accepted only over HTTPS or
   when the server listens on loopback only. When a TLS-terminating or local
   reverse proxy fronts the API, the operator sets `VLITE_TRUSTED_PROXY=1`.
@@ -51,7 +51,7 @@ Find the admin token here:
 - **Direct server:** the file passed with `--token-file`.
 - **Shared server:** ask its administrator for an account.
 
-Keep tokens out of screenshots and logs.
+Treat tokens as secrets. Keep them out of screenshots and logs.
 
 ## Find your way around
 
@@ -214,7 +214,8 @@ events across the database and needs read access to all collections. Server
 health is under **Administration → Health**.
 
 With [agent memory](MEMORY.md) on, server-wide metrics are unavailable. Sign-in
-still works, and the overview, Observability and Health say so.
+still works and each affected view says so; see
+[SECURITY.md](SECURITY.md#memory-bound-resources).
 
 ## Administer users and tenants
 
