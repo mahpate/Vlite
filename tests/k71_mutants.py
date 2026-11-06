@@ -22,6 +22,13 @@ Usage:
 
 The anchors match the sources at the commit that added the list; run it on a tree where the
 mutated functions are unchanged. Use a private --target-dir: every mutant rebuilds.
+
+Target-dir reuse: the target dir is only a build cache, so keep it between runs. A second replay
+of the same checkout then starts warm (dependencies and unchanged test binaries are not built
+again), while a fresh directory pays a cold start (every dependency, once). Cargo embeds the
+absolute workspace path in its fingerprints, so a kept directory is warm only for the path it was
+built in. `tests/mutant_replay.py run` keeps one target dir per worker under its work dir (default
+target/mutant-replay) and, with --jobs N, replays in N isolated worktrees at once.
 """
 import argparse
 import hashlib

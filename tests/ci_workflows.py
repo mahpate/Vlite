@@ -463,7 +463,7 @@ class MutantsWorkflow(unittest.TestCase):
         self.assertEqual(set(re.findall(r"runs-on: (\S+)", self.text)), {"ubuntu-latest"})
 
     def test_inputs_cover_the_ledger_the_tree_the_shards_and_an_id_filter(self):
-        for name in ("ledger", "ref", "shards", "ids", "survivors_ok"):
+        for name in ("ledger", "ref", "shards", "ids", "survivors_ok", "jobs"):
             self.assertIn(f"\n      {name}:\n", self.header)
         self.assertIn("default: tests/k71_mutants.json", self.header)
         self.assertIn("ref: ${{ inputs.ref || github.sha }}", self.text)

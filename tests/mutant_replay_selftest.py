@@ -48,6 +48,20 @@ def note(**fields):
         Path(folder, name).write_text(json.dumps(fields), encoding="utf-8")
 
 
+def rendezvous():
+    folder = os.environ.get("STUB_RENDEZVOUS_DIR")
+    count = int(os.environ.get("STUB_RENDEZVOUS_COUNT", "0"))
+    if not folder or not count:
+        return None
+    Path(folder, str(os.getpid())).write_text("here", encoding="utf-8")
+    deadline = time.time() + 10
+    while time.time() < deadline:
+        if len(os.listdir(folder)) >= count:
+            return True
+        time.sleep(0.02)
+    return False
+
+
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--list", required=True)
@@ -66,9 +80,11 @@ def main():
         cwd=os.getcwd(),
         root=str(ROOT),
         target=os.environ.get("CARGO_TARGET_DIR"),
+        build_jobs=os.environ.get("CARGO_BUILD_JOBS"),
         incremental=os.environ.get("CARGO_INCREMENTAL"),
         ids=[m["id"] for m in mutants],
         keys=sorted(mutants[0]) if mutants else [],
+        rendezvous=rendezvous(),
     )
     results = {}
     for mutant in mutants:
@@ -242,7 +258,7 @@ KILLS = " // MUTANT_KILLS"
 GIT_IDENTITY = ["-c", "user.name=Selftest", "-c", "user.email=selftest@example.invalid"]
 GIT_VARIABLES = ("GIT_DIR", "GIT_WORK_TREE", "GIT_INDEX_FILE", "GIT_COMMON_DIR", "GIT_PREFIX")
 TEMPLATE_FILES = {
-    ".gitignore": "/target/\n",
+    ".gitignore": "/target/\n*.keep\n",
     "Cargo.toml": '[package]\nname = "demo"\nversion = "0.0.0"\n',
     "Cargo.lock": "# lock\n",
     "src/a.rs": SRC_A,
@@ -354,7 +370,7 @@ class ToolTest(unittest.TestCase):
             if name.startswith("STUB_") or name in GIT_VARIABLES:
                 del os.environ[name]
         for name in (
-            "GITHUB_OUTPUT", "GITHUB_STEP_SUMMARY", "CARGO_TARGET_DIR"
+            "GITHUB_OUTPUT", "GITHUB_STEP_SUMMARY", "CARGO_BUILD_JOBS", "CARGO_TARGET_DIR"
         ):
             os.environ.pop(name, None)
         self.logs = self.base / "stub-logs"
@@ -709,6 +725,47 @@ class NormalizeTests(ToolTest):
             )
             self.assertEqual(found.missing, ["a"])
 
+    def test_the_native_compact_file_is_the_union_of_the_workers(self):
+        green, red = {"green": True}, {"green": False}
+        first = {
+            "machine": "box",
+            "environment": {"os": "x"},
+            "sources": {"sha256": "s"},
+            "list_base": "base",
+            "baseline_before": {"c1": green, "c2": green},
+            "baseline_after": {"c1": green, "c2": green},
+            "results": [{"id": "b", "status": "survived"}, {"id": "a", "status": "killed"}],
+            "killed": 1,
+            "total": 2,
+            "tree_clean_after": True,
+        }
+        second = {
+            "machine": "box",
+            "environment": {"os": "y"},
+            "sources": {"sha256": "t"},
+            "list_base": "base",
+            "baseline_before": {"c1": red, "c3": green},
+            "baseline_after": {"c1": green, "c3": green},
+            "results": [{"id": "c", "status": "killed"}],
+            "killed": 1,
+            "total": 1,
+            "tree_clean_after": False,
+        }
+        union = tool.union_native([first, second, None], ["a", "b", "c"])
+        self.assertEqual([r["id"] for r in union["results"]], ["a", "b", "c"])
+        self.assertEqual((union["killed"], union["total"]), (2, 3))
+        self.assertEqual(
+            (union["machine"], union["environment"], union["sources"], union["list_base"]),
+            ("box", {"os": "x"}, {"sha256": "s"}, "base"),
+        )
+        self.assertEqual(union["baseline_before"], {"c1": red, "c2": green, "c3": green})
+        self.assertEqual(sorted(union["baseline_after"]), ["c1", "c2", "c3"])
+        self.assertFalse(union["tree_clean_after"])
+        unfinished = dict(second)
+        del unfinished["baseline_after"]
+        self.assertNotIn("baseline_after", tool.union_native([first, unfinished], ["a"]))
+        self.assertIsNone(tool.union_native([None], []))
+
 
 class RunTests(ToolTest):
     def results(self, out=None):
@@ -732,8 +789,8 @@ class RunTests(ToolTest):
         self.assertEqual(code, 0, text + err)
         document = self.results()
         self.assertEqual(
-            (document["tool"], document["kind"], document["shard"]),
-            ("k71_mutants.py", "list", None),
+            (document["tool"], document["kind"], document["shard"], document["jobs"]),
+            ("k71_mutants.py", "list", None, 1),
         )
         self.assertEqual(document["head"], git(repo, "rev-parse", "HEAD"))
         self.assertEqual(document["ledger"], str(ledger))
@@ -778,12 +835,152 @@ class RunTests(ToolTest):
         self.assertFalse(Path(argv[argv.index("--out") + 1]).exists())
         self.assertEqual(sorted(p.name for p in work.iterdir()), ["target-0"])
         self.assertEqual(git(repo, "status", "--porcelain"), "")
+        self.assertNotIn("[job", text)
         self.assertIn("m1: KILLED", text)
         self.assertFalse(native.exists())
         self.assertIn("--native-out is only used for compact ledgers", err)
 
+    def test_three_jobs_use_three_kept_worktrees_at_once(self):
+        repo, work = self.make_repo(), self.base / "work"
+        ledger = self.ledger_file(standard_ledger()[:3])
+        # A user setting that changes the patch format must not break the copy of local edits.
+        git(repo, "config", "diff.noprefix", "true")
+        with open(str(repo / "src" / "a.rs"), "ab") as handle:
+            handle.write(b"// local edit\n")
+        (self.base / "rendezvous").mkdir()
+        os.environ.update(
+            STUB_RENDEZVOUS_DIR=str(self.base / "rendezvous"), STUB_RENDEZVOUS_COUNT="3"
+        )
+        code, text, err = self.invoke(*self.run_args(repo, ledger, "--jobs", "3"))
+        self.assertEqual(code, 0, text + err)
+        trees = {norm(work / ("tree-%d" % index)): index for index in range(3)}
+        logs = self.stub_logs()
+        self.assertEqual(sorted(trees[norm(log["cwd"])] for log in logs), [0, 1, 2])
+        for log in logs:
+            index = trees[norm(log["cwd"])]
+            self.assertEqual(norm(log["target"]), norm(work / ("target-%d" % index)))
+            self.assertEqual(norm(log["root"]), norm(log["cwd"]))
+            self.assertEqual(log["ids"], ["m%d" % (index + 1)])
+            self.assertTrue(log["rendezvous"], "the three jobs did not run at the same time")
+        for index, line in enumerate(("m1: KILLED", "m2: SURVIVED", "m3: KILLED")):
+            self.assertIn("[job %d] %s" % (index, line), text.splitlines())
+        document = self.results()
+        self.assertEqual(document["jobs"], 3)
+        self.assertEqual(list(document["results"]), ["m1", "m2", "m3"])
+        self.assertEqual(
+            [r["status"] for r in document["results"].values()], ["killed", "survived", "killed"]
+        )
+        listed = git(repo, "worktree", "list", "--porcelain")
+        rows = [row for row in listed.splitlines() if row.startswith("worktree ")]
+        registered = [norm(row[len("worktree ") :]) for row in rows]
+        for index in range(3):
+            self.assertIn(norm(work / ("tree-%d" % index)), registered)
+        for index in range(3):
+            self.assertIn(
+                "// local edit",
+                (work / ("tree-%d" % index) / "src" / "a.rs").read_text(encoding="utf-8"),
+            )
+        self.assertIn("// local edit", (repo / "src" / "a.rs").read_text(encoding="utf-8"))
+
+        # A second run keeps the trees and the target directories and starts from HEAD again.
+        (work / "target-0" / "warm.txt").write_text("cache", encoding="utf-8")
+        (work / "tree-0" / "built.keep").write_text("ignored build output", encoding="utf-8")
+        (work / "tree-1" / "stray.txt").write_text("untracked", encoding="utf-8")
+        for stale in self.logs.glob("*.json"):
+            stale.unlink()
+        del os.environ["STUB_RENDEZVOUS_COUNT"]
+        code, text, err = self.invoke(*self.run_args(repo, ledger, "--jobs", "3"))
+        self.assertEqual(code, 0, text + err)
+        self.assertEqual(sorted(trees[norm(log["cwd"])] for log in self.stub_logs()), [0, 1, 2])
+        self.assertTrue((work / "target-0" / "warm.txt").is_file())
+        self.assertTrue((work / "tree-0" / "built.keep").is_file())
+        self.assertFalse((work / "tree-1" / "stray.txt").exists())
+        self.assertEqual(
+            (work / "tree-2" / "src" / "a.rs").read_text(encoding="utf-8").count("// local edit"), 1
+        )
+        self.assertEqual(listed, git(repo, "worktree", "list", "--porcelain"))
+
+    def test_job_trees_follow_the_root_and_are_repaired(self):
+        """Two mutants but four jobs asked, a CRLF checkout, a deleted and an untracked file."""
+        repo = self.make_repo()
+        ledger, work = self.ledger_file(standard_ledger()[:2]), repo / "target" / "mutant-replay"
+        git(repo, "config", "core.autocrlf", "true")
+        for relative in ("src/a.rs", "src/b.rs"):
+            (repo / relative).unlink()
+        git(repo, "checkout", "--", "src")
+        self.assertIn(b"\r\n", (repo / "src" / "a.rs").read_bytes())
+        with open(str(repo / "src" / "a.rs"), "ab") as handle:
+            handle.write(b"// precious\r\n")
+        (repo / "tests" / "t2.rs").unlink()
+        put(repo / "src" / "new.rs", "fn n() {}\n")
+        self.assertEqual(
+            git(repo, "diff", "--numstat", "HEAD"), "1\t0\tsrc/a.rs\n0\t1\ttests/t2.rs"
+        )
+        argv = [
+            "run",
+            "--root",
+            repo,
+            "--ledger",
+            ledger,
+            "--out",
+            self.base / "out.json",
+            "--jobs",
+            "4",
+        ]
+        code, text, err = self.invoke(*argv)
+        self.assertEqual(code, 0, text + err)
+        # Never more jobs than mutants, and the CPUs are shared between the jobs that run.
+        self.assertEqual(sorted(p.name for p in work.glob("tree-*")), ["tree-0", "tree-1"])
+        self.assertEqual(sorted(p.name for p in work.glob("target-*")), ["target-0", "target-1"])
+        self.assertEqual(self.results()["jobs"], 4)
+        self.assertEqual(
+            [r["status"] for r in self.results()["results"].values()], ["killed", "survived"]
+        )
+        for log in self.stub_logs():
+            self.assertEqual(log["build_jobs"], str(max(1, (os.cpu_count() or 1) // 2)))
+        # A tree gets the uncommitted changes of tracked files, line endings kept, and nothing else.
+        copied = (work / "tree-1" / "src" / "a.rs").read_bytes()
+        self.assertEqual(copied.count(b"// precious"), 1)
+        self.assertEqual(copied.count(b"\n"), copied.count(b"\r\n"))
+        self.assertFalse((work / "tree-0" / "tests" / "t2.rs").exists())
+        self.assertFalse((work / "tree-0" / "src" / "new.rs").exists())
+        self.assertIn("warning: 1 untracked source file(s) are not copied", err)
+        self.assertNotIn("warning", text)
+        # A tree without its own .git must not make git fall back to the enclosing root.
+        (work / "tree-0" / ".git").unlink()
+        code, text, err = self.invoke(*argv)
+        self.assertEqual(code, 0, text + err)
+        self.assertTrue((work / "tree-0" / ".git").exists())
+        self.assertEqual((work / "tree-0" / "src" / "a.rs").read_bytes().count(b"// precious"), 1)
+        self.assertEqual((repo / "src" / "a.rs").read_bytes().count(b"// precious"), 1)
+        self.assertFalse((repo / "tests" / "t2.rs").exists())
+        self.assertTrue((repo / "src" / "new.rs").exists())
+        # A tool that the root deleted without committing is missing in the trees too.
+        (repo / "tests" / "compact_mutant_replay.py").unlink()
+        compact = self.ledger_file(
+            compact_ledger([mutant("c1", cmd="test --lib"), mutant("c2", cmd="test --lib")]),
+            "compact.json",
+        )
+        with self.assertRaises(SystemExit) as caught:
+            self.invoke(
+                "run",
+                "--root",
+                repo,
+                "--ledger",
+                compact,
+                "--out",
+                self.base / "c.json",
+                "--jobs",
+                "2",
+            )
+        self.assertIn(
+            "this ledger needs tests/compact_mutant_replay.py in the tree under test",
+            str(caught.exception),
+        )
+
     def test_ids_shard_and_tool_options(self):
         repo, ledger = self.make_repo(), self.ledger_file(standard_ledger())
+        os.environ["CARGO_BUILD_JOBS"] = "7"
         code, text, err = self.invoke(
             *self.run_args(repo, ledger, "--shard", "1/2", "--timeout", "17", "--no-offline")
         )
@@ -794,6 +991,7 @@ class RunTests(ToolTest):
         argv = log["argv"]
         self.assertEqual(argv[argv.index("--timeout") + 1], "17")
         self.assertIn("--no-offline", argv)
+        self.assertEqual(log["build_jobs"], "7")
         for stale in self.logs.glob("*.json"):
             stale.unlink()
         code, text, err = self.invoke(
@@ -861,6 +1059,7 @@ class RunTests(ToolTest):
         repo, ledger = self.make_repo(), self.ledger_file(standard_ledger()[:1])
         for argv in (
             ["run", "--root", repo, "--ledger", ledger],
+            ["run", "--root", repo, "--ledger", ledger, "--out", "o", "--jobs", "0"],
             ["run", "--root", repo, "--ledger", ledger, "--out", "o", "--shard", "5/2"],
             ["run", "--root", self.base / "none", "--ledger", ledger, "--out", "o"],
             ["frobnicate"],
@@ -948,6 +1147,24 @@ class RunTests(ToolTest):
         self.assertEqual([r["id"] for r in union["results"]], ["c1", "c2"])
         self.assertEqual(sorted(union["baseline_after"]), ["test --locked --lib"])
 
+    def test_compact_jobs_write_one_native_file(self):
+        repo, native = self.make_repo(), self.base / "native.json"
+        entries = [mutant("c%d" % n, new="let x = 2;" + KILLS, cmd="test --lib") for n in range(3)]
+        entries[1]["cmd"] = "test --lib --features x"
+        ledger = self.ledger_file(compact_ledger(entries))
+        code, text, err = self.invoke(
+            *self.run_args(repo, ledger, "--jobs", "2", "--machine", "box", "--native-out", native)
+        )
+        self.assertEqual(code, 0, text + err)
+        union = json.loads(native.read_text(encoding="utf-8"))
+        self.assertEqual([r["id"] for r in union["results"]], ["c0", "c1", "c2"])
+        self.assertEqual((union["killed"], union["total"]), (3, 3))
+        self.assertEqual(
+            sorted(union["baseline_before"]), ["test --lib", "test --lib --features x"]
+        )
+        self.assertEqual(sorted(log["ids"] for log in self.stub_logs()), [["c0", "c2"], ["c1"]])
+        self.assertIn("[job 0] c0: killed (1 s)", text)
+
     def test_a_compact_ledger_without_its_tool_names_the_ref_requirement(self):
         repo = self.make_repo()
         (repo / "tests" / "compact_mutant_replay.py").unlink()
@@ -999,6 +1216,7 @@ class MergeTests(ToolTest):
             "kind": "list",
             "ledger": "ledger.json",
             "shard": None,
+            "jobs": 1,
             "machine": "box",
             "head": self.HEAD,
             "started_at": "2026-01-01T00:00:00Z",

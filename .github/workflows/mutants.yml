@@ -35,6 +35,11 @@ on:
         description: "Optional comma-separated ids that may survive (proven equivalent mutants)"
         type: string
         default: ""
+      jobs:
+        description: "Isolated worktrees per shard (1 or 2; two need roughly twice the disk of one)"
+        type: choice
+        options: ["1", "2"]
+        default: "1"
 
 permissions:
   contents: read
@@ -109,9 +114,10 @@ jobs:
           LEDGER: ${{ inputs.ledger }}
           COUNT: ${{ steps.plan.outputs.count }}
           TOTAL: ${{ steps.plan.outputs.total_shards }}
+          JOBS: ${{ inputs.jobs }}
         run: |
           {
-            echo "Replaying $COUNT mutants of \`$LEDGER\` in $TOTAL shards."
+            echo "Replaying $COUNT mutants of \`$LEDGER\` in $TOTAL shards ($JOBS worktree(s) each)."
             echo "Tree: \`$(git -C tree rev-parse HEAD)\`. Driver: \`$(git -C tools rev-parse HEAD)\`."
           } >> "$GITHUB_STEP_SUMMARY"
 
@@ -143,7 +149,9 @@ jobs:
       - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2
         with:
           shared-key: mutants
-          workspaces: tree -> target/mutant-replay/target-0
+          workspaces: |
+            tree -> target/mutant-replay/target-0
+            tree -> target/mutant-replay/target-1
           save-if: ${{ matrix.shard == 0 }}
       - name: Fetch the locked dependencies (the replay tool builds offline)
         working-directory: tree
@@ -153,11 +161,12 @@ jobs:
           LEDGER: ${{ inputs.ledger }}
           IDS: ${{ inputs.ids }}
           SURVIVORS_OK: ${{ inputs.survivors_ok }}
+          JOBS: ${{ inputs.jobs }}
           SHARD: ${{ matrix.shard }}
           TOTAL: ${{ needs.plan.outputs.total_shards }}
         run: >-
           python3 tools/tests/mutant_replay.py run --root tree --ledger "$LEDGER"
-          --shard "$SHARD/$TOTAL" --ids "$IDS" --survivors-ok "$SURVIVORS_OK"
+          --shard "$SHARD/$TOTAL" --jobs "$JOBS" --ids "$IDS" --survivors-ok "$SURVIVORS_OK"
           --out "results/shard-$SHARD.json"
       - uses: actions/upload-artifact@v4
         if: ${{ !cancelled() }}

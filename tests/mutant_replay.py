@@ -4,9 +4,10 @@
 Why: tests/k71_mutants.py and tests/compact_mutant_replay.py replay a ledger one mutant at a time
 in one tree, and every mutant is a cargo build, so a whole ledger takes hours. This front end only
 changes how that work is scheduled, never what is measured. It splits a ledger over CI jobs
-(`plan`, `run --shard`) and merges the shard results into one verdict table (`merge`). Anchors,
-restores and verdicts stay in the two existing tools: they are called as black boxes, from the copy
-inside the tree under test, and are never edited.
+(`plan`, `run --shard`), runs several isolated git worktrees at once (`run --jobs`) and merges the
+shard results into one verdict table (`merge`). Anchors, restores and verdicts stay in the two
+existing tools: they are called as black boxes, from the copy inside the tree under test, and are
+never edited.
 
 Supported ledgers (`load_ledger` detects the kind):
   list     a JSON list of {id, desc, file, old, new, cmd}, or a dict {"mutants": [...]} of such
@@ -27,20 +28,31 @@ build, so interleaving spreads that cost over every shard. A CI job runs `run --
 fresh runner with the default work dir (mutants.yml saves and restores its target dir with
 rust-cache), uploads its --out file, and one `merge` job combines the files.
 
-Kept target dir: the worker replays in --root itself with CARGO_TARGET_DIR <work-dir>/target-0.
-The default work dir is <root>/target/mutant-replay, so `cargo clean` removes it too. The target
-dir stays after the run, so the next run on the same checkout starts warm: only the crate and the
-tests that the changed sources affect are rebuilt, not every dependency. Use one run per work dir
-at a time. A restore that fails leaves a mutated file in --root (exit 2): fix it with
-`git checkout`.
+Isolated trees and warm starts (--jobs N with N > 1): worker i replays in the git worktree
+<work-dir>/tree-i with CARGO_TARGET_DIR <work-dir>/target-i. The worktree is detached at HEAD of
+--root and receives the uncommitted changes of tracked files (`git diff --binary HEAD`); untracked
+files are not copied and a warning says so. Both paths stay after the run and are reused as they
+are: cargo fingerprints and the metadata hashes of a build embed the absolute path of the
+workspace, so a target directory is only warm for the path it was built in. Move or recreate the
+tree and cargo rebuilds everything. The first run with N jobs is a cold start: every dependency
+and the crate are compiled once in each job's target directory, which is the slow part of a
+replay. A later run that finds the same paths is a warm start: only the crate and the tests that
+the changed sources affect are rebuilt. No timings are given because they depend on the machine,
+the crate and N; compare a first and a second run on your own. With --jobs 1 the tool replays in
+--root itself and uses <work-dir>/target-0. The default work dir is <root>/target/mutant-replay,
+so `cargo clean` removes it too (then run `git worktree prune`). To delete the state by hand, run
+`git worktree remove --force <work-dir>/tree-I` for every I and then remove the work dir. Use one
+run per work dir at a time. A restore that fails leaves a mutated file in the tree it happened in
+(exit 2): in --root fix it with `git checkout`; the job trees are reset at the start of the next
+run.
 
-Results: `run --out` writes one normalized document {tool, kind, ledger, shard, machine,
+Results: `run --out` writes one normalized document {tool, kind, ledger, shard, jobs, machine,
 head, started_at, finished_at, wall_seconds, results, unsupported}. `results` maps each
 replayed id to {status (killed, survived or invalid), tool_status (the word of the tool itself),
 failed_tests (at most 5), seconds, restored, expected}. A selected mutant that its
 tool never reported (the tool died, or the whole job timed out) is invalid with tool_status
-"no-result". For a compact ledger `--native-out FILE` also writes the OUT file of the compact
-tool, which its own `merge` reads.
+"no-result". For a compact ledger `--native-out FILE` also writes the union of the workers' own
+OUT files, which the compact tool's own `merge` reads.
 
 Exit codes of `run`: 0 when the replay completed (survivors and invalid verdicts are data), 1 for
 tool, ledger or usage errors and for a tool that died before every selected mutant had a result,
@@ -51,18 +63,24 @@ Usage:
   python tests/mutant_replay.py plan --root . --ledger tests/k71_mutants.json --shards 20
   python tests/mutant_replay.py run --root . --ledger tests/k71_mutants.json --shard 3/20 \\
       --out results/shard-3.json
+  python tests/mutant_replay.py run --root . --ledger tests/k71_mutants.json --jobs 4 \\
+      --out results.json
   python tests/mutant_replay.py merge --root . --ledger tests/k71_mutants.json --results results/ \\
       --summary summary.md
 """
 import argparse
 import collections
+import concurrent.futures
 import datetime
 import json
 import os
 import platform
+import shutil
+import stat
 import subprocess
 import sys
 import tempfile
+import threading
 import time
 from pathlib import Path
 
@@ -76,6 +94,7 @@ SHAPES = (
     '  - a dict {"mutants": [...]} of such entries whose cmd starts with "cargo "\n'
     '  - a dict {"campaign", "base", "mutants": [...]} whose cmd is the argument list after cargo'
 )
+UNTRACKED_DIRS = ("src", "crates", "tests", "proto", "examples", "bindings")
 TOTAL_COLUMNS = (
     "mutants",
     "killed",
@@ -85,17 +104,19 @@ TOTAL_COLUMNS = (
     "unsupported",
     "unexpected",
 )
+PRINT_LOCK = threading.Lock()
 
 
 def say(text="", stream=None):
-    """Print one line."""
+    """Print one line; the lock keeps the lines of concurrent workers whole."""
     stream = stream or sys.stdout
-    try:
-        print(text, file=stream, flush=True)
-    except UnicodeEncodeError:
-        # A console that cannot show a character must not stop a replay that runs for hours.
-        encoding = getattr(stream, "encoding", None) or "ascii"
-        print(text.encode(encoding, "replace").decode(encoding), file=stream, flush=True)
+    with PRINT_LOCK:
+        try:
+            print(text, file=stream, flush=True)
+        except UnicodeEncodeError:
+            # A console that cannot show a character must not stop a replay that runs for hours.
+            encoding = getattr(stream, "encoding", None) or "ascii"
+            print(text.encode(encoding, "replace").decode(encoding), file=stream, flush=True)
 
 
 def posix(path):
@@ -154,6 +175,19 @@ def read_json(path, default=None):
         return json.loads(Path(path).read_text(encoding="utf-8-sig"))
     except (OSError, ValueError):
         return default
+
+
+def remove_tree(path):
+    """rmtree that also removes the read-only files git creates on Windows."""
+
+    def clear(function, target, _error):
+        os.chmod(target, stat.S_IWRITE)
+        function(target)
+
+    if sys.version_info >= (3, 12):
+        shutil.rmtree(str(path), onexc=clear)
+    else:
+        shutil.rmtree(str(path), onerror=clear)
 
 
 # --- ledgers -------------------------------------------------------------------------------
@@ -305,14 +339,15 @@ def unsupported_of(ledger, ids=()):
     return [name for name in ledger.unsupported if not wanted or name in wanted]
 
 
-# --- git and the replay tool ----------------------------------------------------------------
+# --- git and worktrees ----------------------------------------------------------------------
 
 
-def git(cwd, *args):
+def git(cwd, *args, **options):
     try:
         return subprocess.run(
             ["git"] + list(args),
             cwd=str(cwd),
+            input=options.get("input"),
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
         )
@@ -320,9 +355,66 @@ def git(cwd, *args):
         raise SystemExit("cannot run git: %s" % error)
 
 
+def git_failure(done, what):
+    detail = shorten(done.stderr.decode("utf-8", "replace"), 80)
+    return SystemExit("%s: %s" % (what, detail or "git exited with %d" % done.returncode))
+
+
 def head_of(root):
     done = git(root, "rev-parse", "HEAD")
     return done.stdout.decode("utf-8", "replace").strip() if done.returncode == 0 else ""
+
+
+def same_path(first, second):
+    first, second = (os.path.normcase(os.path.realpath(str(p))) for p in (first, second))
+    return first == second
+
+
+def inside(path, folder):
+    path, folder = (os.path.normcase(os.path.realpath(str(p))) for p in (path, folder))
+    return path != folder and os.path.commonpath([path, folder]) == folder
+
+
+def common_dir(cwd):
+    done = git(cwd, "rev-parse", "--git-common-dir")
+    if done.returncode != 0:
+        return None
+    return os.path.join(str(cwd), done.stdout.decode("utf-8", "replace").strip())
+
+
+def is_worktree_of(common, tree):
+    """True when `tree` is a worktree of the repository whose git directory is `common`.
+
+    The check comes first because git walks up to an enclosing repository: a tree without its own
+    .git inside <root>/target would otherwise make `checkout --force` hit the root itself.
+    """
+    if not (tree / ".git").exists():
+        return False
+    done = git(tree, "rev-parse", "--show-toplevel", "--git-common-dir")
+    lines = done.stdout.decode("utf-8", "replace").splitlines()
+    return (
+        done.returncode == 0
+        and len(lines) == 2
+        and same_path(lines[0], tree)
+        and same_path(os.path.join(str(tree), lines[1]), common)
+    )
+
+
+def prepare_tree(root, common, tree, work, head):
+    """Make `tree` a clean detached worktree of `head`, keeping it if it is already one."""
+    if tree.exists():
+        if is_worktree_of(common, tree):
+            moved = git(tree, "checkout", "--detach", "--force", head)
+            if moved.returncode == 0:
+                git(tree, "clean", "-fdq")
+                return "reused"
+        if not inside(tree, work) or not tree.name.startswith("tree-"):
+            raise SystemExit("refusing to replace %s: it is not a job tree of %s" % (tree, work))
+        remove_tree(tree)
+    added = git(root, "worktree", "add", "--detach", "--force", str(tree), head)
+    if added.returncode != 0:
+        raise git_failure(added, "cannot add the worktree %s" % tree)
+    return "added"
 
 
 def require_tool(kind, tree):
@@ -332,9 +424,58 @@ def require_tool(kind, tree):
     if kind == "compact":
         raise SystemExit(
             "this ledger needs tests/compact_mutant_replay.py in the tree under test\n"
-            "(%s)\nrun from a ref that has it" % tree
+            "(%s)\nrun from a ref that has it, committed if --jobs is above 1" % tree
         )
     raise SystemExit("tests/k71_mutants.py is missing in the tree under test (%s)" % tree)
+
+
+def uncommitted_patch(root):
+    """The uncommitted changes of tracked files as a patch that `git apply` reads back.
+
+    The options pin the format: a user's diff.noprefix or external diff driver would otherwise
+    produce a patch that does not apply at the other end.
+    """
+    done = git(
+        root,
+        "diff",
+        "--binary",
+        "--no-color",
+        "--no-ext-diff",
+        "--no-textconv",
+        "--src-prefix=a/",
+        "--dst-prefix=b/",
+        "HEAD",
+    )
+    if done.returncode != 0:
+        raise git_failure(done, "cannot read the uncommitted changes of %s" % root)
+    return done.stdout
+
+
+def prepare_trees(root, work, count, head, kind):
+    """Create or refresh the job trees tree-0..tree-(count-1) and copy the uncommitted changes."""
+    if not head:
+        raise SystemExit("--jobs above 1 needs --root to be a git checkout with a commit")
+    common = common_dir(root)
+    patch = uncommitted_patch(root)
+    others = git(root, "ls-files", "--others", "--exclude-standard", "-z", "--", *UNTRACKED_DIRS)
+    untracked = len([name for name in others.stdout.split(b"\0") if name])
+    if untracked:
+        say(
+            "warning: %d untracked source file(s) are not copied to the job trees" % untracked,
+            sys.stderr,
+        )
+    trees = []
+    for index in range(count):
+        tree = work / ("tree-%d" % index)
+        prepare_tree(root, common, tree, work, head)
+        if patch.strip():
+            applied = git(tree, "apply", "--binary", "--whitespace=nowarn", "-", input=patch)
+            if applied.returncode != 0:
+                raise git_failure(applied, "cannot copy the uncommitted changes to %s" % tree)
+        # After the patch: a tool that the root deleted without committing is missing here too.
+        require_tool(kind, tree)
+        trees.append(tree)
+    return trees
 
 
 # --- running the tools ----------------------------------------------------------------------
@@ -362,10 +503,11 @@ class Outcome(object):
         self.missing = []
 
 
-def job_environment(target):
+def job_environment(target, workers):
     env = dict(os.environ)
     env["CARGO_TARGET_DIR"] = str(target)
     env["CARGO_INCREMENTAL"] = "0"
+    env.setdefault("CARGO_BUILD_JOBS", str(max(1, (os.cpu_count() or 1) // workers)))
     env.setdefault("PYTHONIOENCODING", "utf-8")
     return env
 
@@ -392,6 +534,7 @@ def tool_command(config, job, list_file, out_file):
 def run_job(config, job, scratch):
     """Run the tool once in `job.tree`, forwarding its output; never raises."""
     outcome = Outcome(job)
+    prefix = "[job %d] " % job.index if config["prefixed"] else ""
     try:
         list_file = scratch / ("ledger-%d.json" % job.index)
         out_file = scratch / ("out-%d.json" % job.index)
@@ -399,7 +542,7 @@ def run_job(config, job, scratch):
         process = subprocess.Popen(
             command,
             cwd=str(job.tree),
-            env=job_environment(job.target),
+            env=job_environment(job.target, config["workers"]),
             stdout=subprocess.PIPE,
             stderr=subprocess.STDOUT,
             universal_newlines=True,
@@ -411,13 +554,13 @@ def run_job(config, job, scratch):
             line = line.rstrip("\r\n")
             if "RESTORE FAILED" in line or "not restored byte-identically" in line:
                 outcome.restore_failed = True
-            say(line)
+            say(prefix + line)
         outcome.code = process.wait()
         if out_file.is_file():
             outcome.raw = read_json(out_file)
         else:
             outcome.error = "the tool wrote no results file (exit %s)" % outcome.code
-    except Exception as error:  # a failure is reported as the outcome, not as a traceback
+    except Exception as error:  # a worker must not take the others down
         outcome.error = "%s: %s" % (type(error).__name__, shorten(error, 80))
     return outcome
 
@@ -480,6 +623,48 @@ def normalize_outcome(config, outcome, expected):
     return records
 
 
+def merge_baselines(documents, key):
+    """Union of the baselines; a red selector of any worker is never hidden by a green one."""
+    merged = {}
+    for document in documents:
+        for command, result in (document.get(key) or {}).items():
+            if command not in merged or (merged[command].get("green") and not result.get("green")):
+                merged[command] = result
+    return merged
+
+
+def union_native(documents, order):
+    """One compact-native OUT file from the OUT files of the workers (for its own `merge`)."""
+    documents = [d for d in documents if isinstance(d, dict)]
+    if not documents:
+        return None
+    first = documents[0]
+    position = {name: index for index, name in enumerate(order)}
+    results = {}
+    for document in documents:
+        for record in document.get("results") or []:
+            if isinstance(record, dict) and "id" in record:
+                results.setdefault(record["id"], record)
+    ordered = sorted(results.values(), key=lambda r: position.get(r["id"], len(position)))
+    union = {
+        "machine": first.get("machine"),
+        "environment": first.get("environment"),
+        "sources": first.get("sources"),
+        "list_base": first.get("list_base"),
+        "baseline_before": merge_baselines(documents, "baseline_before"),
+        "results": ordered,
+    }
+    # Evidence that a batch finished: one unfinished worker must not borrow the others' proof.
+    if all("baseline_after" in d for d in documents):
+        union["baseline_after"] = merge_baselines(documents, "baseline_after")
+    union["killed"] = sum(r.get("status") == "killed" for r in ordered)
+    union["total"] = len(ordered)
+    clean = [d["tree_clean_after"] for d in documents if "tree_clean_after" in d]
+    if clean:
+        union["tree_clean_after"] = all(value is True for value in clean)
+    return union
+
+
 # --- commands -------------------------------------------------------------------------------
 
 
@@ -528,6 +713,8 @@ def cmd_run(args):
     started_at, began = utc_now(), time.monotonic()
     root = existing_dir(args.root)
     ledger = load_ledger(resolve_ledger(root, args.ledger))
+    if args.jobs < 1:
+        raise SystemExit("--jobs must be at least 1")
     expected = ledger.expected_map(parse_ids(args.survivors_ok))
     ids = parse_ids(args.ids)
     shard = parse_shard(args.shard) if args.shard else None
@@ -542,6 +729,7 @@ def cmd_run(args):
         "kind": ledger.kind,
         "ledger": args.ledger,
         "shard": "%d/%d" % shard if shard else None,
+        "jobs": args.jobs,
         "machine": args.machine or platform.node() or "local",
         "head": head or None,
         "started_at": started_at,
@@ -560,33 +748,43 @@ def cmd_run(args):
 
     outcomes = []
     if todo:
-        require_tool(ledger.kind, root)
+        if args.jobs == 1:
+            require_tool(ledger.kind, root)
         work.mkdir(parents=True, exist_ok=True)
-        target = work / "target-0"
-        target.mkdir(parents=True, exist_ok=True)
-        job = Job(0, root, target, todo)
+        workers = min(args.jobs, len(todo))
+        trees = [root] if args.jobs == 1 else prepare_trees(root, work, workers, head, ledger.kind)
+        jobs = []
+        for index in range(workers):
+            target = work / ("target-%d" % index)
+            target.mkdir(parents=True, exist_ok=True)
+            jobs.append(Job(index, trees[index], target, todo[index::workers]))
         config = {
             "kind": ledger.kind,
             "ledger": ledger,
             "timeout": args.timeout,
             "no_offline": args.no_offline,
             "machine": document["machine"],
+            "workers": workers,
+            "prefixed": args.jobs > 1,
         }
-        say("replaying %d mutants: %s" % (len(todo), TOOLS[ledger.kind]))
+        say("replaying %d mutants with %d job(s): %s" % (len(todo), workers, TOOLS[ledger.kind]))
         # The scratch files (ledger subsets and raw tool output) never outlive the run.
         with tempfile.TemporaryDirectory(prefix="mutant-replay-") as scratch:
-            outcome = run_job(config, job, Path(scratch))
-        outcomes.append(outcome)
-        normal = normalize_outcome(config, outcome, expected)
-        results.update(normal)
-        flush()
+            with concurrent.futures.ThreadPoolExecutor(max_workers=workers) as executor:
+                futures = [executor.submit(run_job, config, job, Path(scratch)) for job in jobs]
+                for future in concurrent.futures.as_completed(futures):
+                    outcome = future.result()
+                    outcomes.append(outcome)
+                    normal = normalize_outcome(config, outcome, expected)
+                    results.update(normal)
+                    flush()
     flush()
     if args.native_out and ledger.kind == "compact":
-        raw = outcomes[0].raw if outcomes else None
-        if not isinstance(raw, dict):
+        union = union_native([o.raw for o in outcomes], order)
+        if union is None:
             say("warning: nothing was replayed, --native-out is not written", sys.stderr)
         else:
-            write_json(args.native_out, raw)
+            write_json(args.native_out, union)
     return report_run(args, results, outcomes)
 
 
@@ -623,7 +821,7 @@ def report_run(args, results, outcomes):
     for outcome in incomplete:
         reason = outcome.error or "exit %s" % outcome.code
         names = listing(outcome.missing, 3)
-        say("no result for %s (%s)" % (names, reason), sys.stderr)
+        say("job %d: no result for %s (%s)" % (outcome.job.index, names, reason), sys.stderr)
     return 1 if incomplete else 0
 
 
@@ -886,8 +1084,9 @@ def build_parser():
     run.add_argument("--out", required=True, help="normalized results file")
     run.add_argument("--shard", help="I/N: the mutants at the positions p with p %% N == I")
     run.add_argument("--ids", default="", help="comma-separated ids to replay")
+    run.add_argument("--jobs", type=int, default=1, help="isolated worktrees to run at once")
     run.add_argument(
-        "--work-dir", help="holds the kept target dir (default <root>/target/mutant-replay)"
+        "--work-dir", help="trees and target dirs (default <root>/target/mutant-replay)"
     )
     run.add_argument("--timeout", type=int, default=3600, help="seconds per mutant (default 3600)")
     run.add_argument("--machine", help="machine label of the compact tool (default: the host name)")
