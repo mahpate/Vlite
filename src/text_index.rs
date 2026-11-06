@@ -261,8 +261,75 @@ impl Database {
 }
 
 #[cfg(test)]
+impl TextIndex {
+    /// An empty index with a smaller posting limit than `MAX_TEXT_POSTINGS`.
+    pub(crate) fn with_posting_limit(limit: usize) -> Self {
+        Self {
+            limit,
+            ..Self::default()
+        }
+    }
+}
+
+#[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn compact_text_rebuild_preserves_posting_limit() {
+        let _precision = crate::compact::Activation::on();
+        let _records = crate::compact::catalog::payload::Activation::on();
+        let _source = crate::compact::source::Activation::on();
+        for encrypted in [false, true] {
+            let key = encrypted.then(|| crate::EncryptionKey::from_bytes([7; 32]));
+            let mut db = crate::Database::create_in_memory(
+                1,
+                crate::CreateOptions {
+                    encryption: key.clone(),
+                    ..Default::default()
+                },
+            )
+            .unwrap();
+            for (&id, record) in &records(&[(1, "a b"), (2, "c d")]) {
+                db.put_with_metadata(id, &record.vector, &record.payload, &record.metadata)
+                    .unwrap();
+            }
+            let mut loaded = crate::format::load_with(
+                &mut std::io::Cursor::new(db.to_bytes().unwrap()),
+                key.as_ref(),
+            )
+            .unwrap();
+            loaded.flags |= crate::format::FLAG_PRECISION;
+            loaded.collections.get_mut(&0).unwrap().precision =
+                Some(crate::compact::catalog::Precision::Float32);
+            let mut image = Vec::new();
+            crate::maintenance::write_v5_image(
+                &mut image,
+                &loaded,
+                loaded.lineage.unwrap(),
+                None,
+                None,
+                loaded.cipher.as_ref(),
+                loaded.flags,
+                loaded.sequence,
+            )
+            .unwrap();
+            let db = crate::Database::open_from_bytes(image, key.as_ref()).unwrap();
+            let pin = db.default_state().records.pin_effective();
+            assert!(pin.is_compact());
+            let index = TextIndex {
+                limit: 3,
+                ..Default::default()
+            };
+            let mut workspace = crate::compact::source::ReadWorkspace::new(4 << 20).unwrap();
+            let rebuilt = index
+                .rebuilt_effective(&["body".into()], &pin, &mut workspace)
+                .unwrap();
+            assert_eq!(rebuilt.limit, 3);
+            assert!(!rebuilt.status().available);
+            assert_eq!(rebuilt.status().postings, 0);
+        }
+    }
 
     fn records(texts: &[(u64, &str)]) -> crate::records::RecordMap {
         texts

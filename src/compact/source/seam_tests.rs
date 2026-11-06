@@ -1,5 +1,5 @@
 use super::*;
-use crate::compact::catalog::tests::{source_key, source_view_fixture};
+use crate::compact::catalog::tests::{source_default_fixture, source_key, source_view_fixture};
 use crate::compact::{
     Activation as PrecisionActivation, catalog::payload::Activation as RecordsActivation,
 };
@@ -88,6 +88,41 @@ fn first_view(generation: &Arc<CompactGeneration>) -> CompactView {
     generation.view(*generation.collections.keys().next().unwrap())
 }
 
+/// One way to damage the first block of the first collection. Each variant
+/// leaves every other byte alone, so exactly one check of
+/// `ReadWorkspace::body` can refuse the block.
+#[derive(Clone, Copy)]
+enum BlockTamper {
+    /// The generation records another kind for the frame; bytes and footer are intact.
+    Kind,
+    /// The generation records another footer checksum for the frame.
+    Checksum,
+    /// A ciphertext bit flips and the footer checksum is repaired, so only
+    /// authentication can refuse the frame (encrypted images only).
+    Ciphertext,
+}
+
+fn tamper_first_block(generation: &mut Arc<CompactGeneration>, how: BlockTamper) {
+    let inner = Arc::get_mut(generation).expect("the fixture owns its only handle");
+    let block = &mut inner.collections.values_mut().next().unwrap().blocks[0];
+    match how {
+        BlockTamper::Kind => block.kind ^= 1,
+        BlockTamper::Checksum => block.checksum ^= 1,
+        BlockTamper::Ciphertext => {
+            let mut bytes = inner.backing.as_slice().to_vec();
+            bytes[block.frame.end - FOOTER_SIZE - 1] ^= 0x80;
+            let checksum = format::crc32(&bytes[block.frame.start..block.frame.end - FOOTER_SIZE]);
+            bytes[block.frame.end - FOOTER_SIZE + 4..block.frame.end - FOOTER_SIZE + 8]
+                .copy_from_slice(&checksum.to_le_bytes());
+            block.checksum = checksum;
+            inner.backing = Backing::Owned(Arc::from(bytes));
+        }
+    }
+}
+
+mod consumer_tests;
+mod survivor_tests;
+
 #[test]
 fn compact_seam_source_peak_survives_smaller_generation() {
     let _precision = PrecisionActivation::on();
@@ -111,6 +146,26 @@ fn compact_seam_source_peak_survives_smaller_generation() {
     );
     assert_eq!(second.source_peak, first.source_live);
     assert_eq!(second.source_live, generations[1].backing.as_slice().len());
+}
+
+#[test]
+fn compact_effective_visibility_matches_exact_expiry_for_base_and_resident() {
+    let _precision = PrecisionActivation::on();
+    let _records = RecordsActivation::on();
+    let _source = Activation::on();
+    let image = source_default_fixture(None);
+    let loaded = format::load_with(&mut std::io::Cursor::new(image), None).unwrap();
+    let state = &loaded.collections[&0];
+    let view = loaded.compact_generation.as_ref().unwrap().view(0);
+    let base = crate::records::CollectionRecords::Compact {
+        view,
+        overlay: Default::default(),
+    };
+    assert!(base.effective_visible(0, 1233, &Default::default()));
+    assert!(!base.effective_visible(0, 1234, &Default::default()));
+    let resident = crate::records::CollectionRecords::Resident(state.records.clone());
+    assert!(resident.effective_visible(0, 1233, &state.expiries));
+    assert!(!resident.effective_visible(0, 1234, &state.expiries));
 }
 
 #[test]
@@ -326,6 +381,94 @@ fn compact_seam_authenticates_cached_vectors() {
 }
 
 #[test]
+fn compact_effective_reads_propagate_tampered_block_errors() {
+    let _precision = PrecisionActivation::on();
+    let _records = RecordsActivation::on();
+    let _source = Activation::on();
+    for encrypted in [false, true] {
+        let key = encrypted.then(source_key);
+        let (_, mut loaded) = source_view_fixture(key.as_ref());
+        let mut generation = loaded.compact_generation.take().unwrap();
+        drop(loaded);
+        let inner = Arc::get_mut(&mut generation).unwrap();
+        let block = &mut inner.collections.values_mut().next().unwrap().blocks[0];
+        let mut bytes = inner.backing.as_slice().to_vec();
+        if encrypted {
+            bytes[block.frame.end - FOOTER_SIZE - 1] ^= 0x80;
+            let checksum = format::crc32(&bytes[block.frame.start..block.frame.end - FOOTER_SIZE]);
+            bytes[block.frame.end - FOOTER_SIZE + 4..block.frame.end - FOOTER_SIZE + 8]
+                .copy_from_slice(&checksum.to_le_bytes());
+            block.checksum = checksum;
+        } else {
+            bytes[block.frame.end - FOOTER_SIZE + 4] ^= 0x80;
+        }
+        inner.backing = Backing::Owned(Arc::from(bytes));
+        let view = first_view(&generation);
+        let id = view.id(0).unwrap();
+        let rows = crate::records::CollectionRecords::Compact {
+            view,
+            overlay: Default::default(),
+        };
+        let mut workspace = ReadWorkspace::new(4 << 20).unwrap();
+        assert!(matches!(
+            rows.effective_metadata(id, &mut workspace),
+            Err(Error::Corrupt { .. })
+        ));
+        assert!(matches!(
+            rows.effective_payload(id, &mut workspace),
+            Err(Error::Corrupt { .. })
+        ));
+        assert_eq!(
+            rows.source_accounting(&mut workspace)
+                .unwrap()
+                .unwrap()
+                .cells_live,
+            0
+        );
+    }
+}
+
+#[test]
+fn compact_read_only_settings_preserve_error_precedence() {
+    let _precision = PrecisionActivation::on();
+    let _records = RecordsActivation::on();
+    let _source = Activation::on();
+    let mut generation = generation();
+    let inner = Arc::get_mut(&mut generation).unwrap();
+    inner.collections.values_mut().next().unwrap().blocks[0]
+        .source
+        .rows[0]
+        .metadata
+        .end = usize::MAX;
+    let view = first_view(&generation);
+    let mut db = crate::Database::create_in_memory(2, Default::default()).unwrap();
+    db.state_mut(0).records = crate::records::CollectionRecords::Compact {
+        view,
+        overlay: Default::default(),
+    };
+    db.read_only = true;
+    let mut settings = crate::CollectionSettings {
+        text_fields: vec!["tag".into()],
+        ..Default::default()
+    };
+    let sequence = db.sequence;
+    assert!(matches!(
+        db.set_collection_settings("default", settings.clone()),
+        Err(Error::ReadOnly)
+    ));
+    settings.rerank_multiplier = 0;
+    assert!(matches!(
+        db.set_collection_settings("default", settings),
+        Err(Error::InvalidCollectionSettings(_))
+    ));
+    assert_eq!(db.sequence, sequence);
+    assert_eq!(
+        db.default_state().settings,
+        crate::CollectionSettings::default()
+    );
+}
+
+#[test]
 fn compact_seam_rejects_bad_extents_and_accounting_overflow() {
     let _precision = PrecisionActivation::on();
     let _records = RecordsActivation::on();
@@ -337,6 +480,7 @@ fn compact_seam_rejects_bad_extents_and_accounting_overflow() {
         .rows[0];
     row.vector.end += 1;
     row.metadata.end = usize::MAX;
+    row.payload.end = usize::MAX;
     let view = first_view(&generation);
     let mut workspace = ReadWorkspace::new(4 * 1024 * 1024).unwrap();
     assert!(matches!(
@@ -345,6 +489,10 @@ fn compact_seam_rejects_bad_extents_and_accounting_overflow() {
     ));
     assert!(matches!(
         view.read_metadata(0, &mut workspace),
+        Err(Error::Corrupt { .. })
+    ));
+    assert!(matches!(
+        view.read_payload(0, &mut workspace),
         Err(Error::Corrupt { .. })
     ));
     assert_eq!(workspace.accounting(&view).unwrap().cells_live, 0);
