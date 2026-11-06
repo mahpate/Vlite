@@ -1,6 +1,6 @@
 # Key-value batch and get-many: atomicity review and contract
 
-| Status | Proposed for owner review on 2026-11-05. Nothing in this document is implemented, activated or released. |
+| Status | Decisions D1 to D5 approved on 2026-11-05 (the owner's delegate). Implementation is in progress; nothing is activated or released. |
 |---|---|
 | Slice | F2 phase 1, key-value v2 |
 | Amends | Decision (p) of the [KV and TTL serving contract](serving-kv-ttl-contract.md#12-delivery-slices-ledger-and-owner-decisions) ("omit; a future batch needs independent atomicity and schema review"). This document is that review. |
@@ -123,9 +123,9 @@ updates and deletes batch-written entries. A 0.7.1 server answers 404
 `not_found` to the two new routes, which the clients report as an unsupported
 operation. Nothing about a batch is one-way.
 
-## 3. Proposed surfaces
+## 3. Surfaces
 
-All names are proposals until the owner approves them.
+The names and shapes below are approved (D2). Any addition is a new decision.
 
 **Rust.**
 
@@ -169,6 +169,38 @@ A put in a batch whose `options.expires_at_ms` is set is refused with
   serve the whole call. The graph routes use the same `POST …/get` shape.
 - `GET /v1/capabilities` gains `features.kv_batch` and the two routes.
 
+Wire details that every client and tool follows:
+
+- **Batch request.** `operations` is required and holds 0 to 1,000 objects.
+  A `put` takes `namespace` (1 to 255 UTF-8 bytes), `key` (1 to 1,024 bytes),
+  `value_base64` (canonical padded standard base64 of at most 1,047,290
+  bytes) and an optional `expected`: `"any"` (the default), `"absent"` or
+  `{"revision":"<u64 decimal>"}`. A `delete` takes `namespace`, `key` and the
+  same `expected`. A put has no `expires_at_ms`: the field is unknown, so 422
+  `invalid_json`. The decoded values of all puts total at most 4,194,304
+  bytes, and no two operations name the same `(namespace, key)`; either
+  violation is 422 `invalid_input`.
+- **Batch result.** `results[i]` answers `operations[i]`: a put gives
+  `{"version":"<nonzero u64 decimal>"}` (every put of one batch gives the same
+  version) and a delete gives `{"deleted":<bool>}`. An empty batch answers
+  `{"results":[]}`.
+- **Get-many request.** `keys` is required and holds 0 to 1,000
+  `{"namespace","key"}` objects with the bounds above. The same key may
+  appear more than once; each position is answered.
+- **Get-many result.** `items` has one element for each of the first
+  `len(items)` keys, in order: the entry object that `GET …/kv/entry` returns
+  (`key`, `value_base64`, `version`, `expires_at_ms`), or `null` for a key that
+  is absent or due. `next_index` is `null` when every key was read; otherwise
+  it is the index of the first key not read, equal to `len(items)` and at
+  least 1. Calls share no snapshot: a later call for the remaining keys sees
+  the state at its own time.
+- **Errors** are the single-operation errors (`precondition_failed` 412,
+  `kv_slots_exhausted`, `not_kv_collection`, `upgrade_required`,
+  `graph_attached_record` 409, `invalid_input` and `invalid_json` 422,
+  `collection_not_found` 404, 403, 429 and 503 `commit_indeterminate`). A
+  server without the routes answers 404 `not_found`; a client reports that as
+  an unsupported operation and never falls back to single calls.
+
 **gRPC** (`vlite.v1.Kv`, new RPCs and messages, no tag reused):
 `rpc GetKvEntries(KvGetManyRequest) returns (KvGetManyResponse)` and
 `rpc WriteKvBatch(KvBatchRequest) returns (KvBatchResponse)`, with
@@ -183,8 +215,13 @@ fields plus `collection`.
 
 **Clients.** Python `kv_get_many` and `kv_batch`, JavaScript `kvGetMany` and
 `kvBatch`, .NET `KvGetManyAsync` and `KvBatchAsync`, Go `KvGetMany` and
-`KvBatch`. The Go client has no key-value methods today; D5 asks whether to
-add the whole set.
+`KvBatch`. Each client follows its existing key-value style: it validates the
+bounds before sending, returns `bytes`, `Uint8Array` or `byte[]` values and
+64-bit versions as `int`, `bigint` or `ulong`, hands the caller the server's
+result unchanged (a partial get-many result carries `next_index`; the client
+does not continue it for the caller), never retries and never falls back to
+single calls. The Go client has no key-value methods today, so it gains the
+whole set (get, put, delete, list, get-many and batch).
 
 **Audit and metrics.** A `kv_batch` audit event carries the principal, actor,
 collection, outcome and the counts of puts and deletes, never a namespace, key
@@ -192,12 +229,12 @@ or value. The metrics are unchanged.
 
 ## 4. Decisions
 
-| # | Decision | Options | Recommendation |
+| # | Decision | Options | Recorded choice (2026-11-05) |
 |---|---|---|---|
-| D1 | A deadline on a batch put | Defer: no `expires_at_ms` in a batch / add a batch entry kind behind a new header flag (a format change: every decoder of batch frames, the change feed, replicas, PITR, maintenance and compaction learn it, and builds before it refuse the file) | Defer. It needs the format work that the lease ledger also needs, and it can arrive additively. |
+| D1 | A deadline on a batch put | Defer: no `expires_at_ms` in a batch / add a batch entry kind behind a new header flag (a format change: every decoder of batch frames, the change feed, replicas, PITR, maintenance and compaction learn it, and builds before it refuse the file) | Defer. A batch put clears the deadline like a put without `expires_at_ms`; there is no format change. A deadline can arrive additively with the format work that the lease ledger also needs. |
 | D2 | The names and shapes in section 3 | As proposed / other | As proposed. |
 | D3 | Refuse duplicate keys; bounds of 1,000 operations and 4 MiB of values | Refuse or apply in order / other bounds | Refuse; these bounds. |
-| D4 | A get-many that reaches the page cap | Partial result with `next_index` / refuse the request / a smaller key count that always fits | Partial result with `next_index`; the DynamoDB `UnprocessedKeys` precedent. |
+| D4 | A get-many that reaches the page cap | Partial result with `next_index` / refuse the request / a smaller key count that always fits | Partial result with `next_index` (the DynamoDB `UnprocessedKeys` precedent); no snapshot across calls. |
 | D5 | The Go client | Add get, put, delete, list and the two new calls / the two new calls only | Add the whole set; there is no base to extend. |
 
 ## 5. Evidence to be produced
