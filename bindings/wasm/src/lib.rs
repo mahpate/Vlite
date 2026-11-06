@@ -1,7 +1,7 @@
 //! WebAssembly bindings: an in-memory VLite database persisted by the host as
 //! a byte image (`toBytes` / `fromBytes`). No files, locks or threads.
 
-use js_sys::{JsString, Uint8Array};
+use js_sys::{Function, JsString, Reflect, Symbol, Uint8Array};
 use std::ops::ControlFlow;
 use std::sync::atomic::{AtomicU64, Ordering};
 use vlite::changes::{Change, ChangeKind, FeedCursor};
@@ -28,9 +28,10 @@ pub fn set_clock(now_ms: f64) {
 }
 
 // JS built-ins that build key-value results and errors. They are not exported.
-// The ones that read the caller's `expected` object or `value` can run the
-// caller's code (a getter, a proxy), so they are `catch`: a JavaScript exception
-// that unwound through this frame would leave the database borrowed for good.
+// The ones that read the caller's `expected` object can run the caller's code (a
+// getter, a proxy), so they are `catch`: a JavaScript exception that unwound
+// through this frame would leave the database borrowed for good. A value is
+// read only through the intrinsics of `value_of`, which run none of it.
 #[wasm_bindgen]
 extern "C" {
     type Object;
@@ -49,10 +50,6 @@ extern "C" {
     fn reflect_get(target: &JsValue, key: &str) -> Result<JsValue, JsValue>;
     #[wasm_bindgen(catch, static_method_of = Object)]
     fn keys(target: &JsValue) -> Result<Array, JsValue>;
-    #[wasm_bindgen(js_name = Uint8Array)]
-    type Bytes;
-    #[wasm_bindgen(method, catch, js_name = slice)]
-    fn bytes_slice(this: &Bytes, begin: u32, end: u32) -> Result<JsValue, JsValue>;
 }
 
 #[wasm_bindgen(typescript_custom_section)]
@@ -504,28 +501,78 @@ fn key_of(key: &JsValue) -> Result<String, JsValue> {
     text(key, "key", 1, 1024)
 }
 
+/// The intrinsics of `%TypedArray%.prototype` that read the internal slots of a
+/// typed array and nothing else: the `@@toStringTag` and `length` getters and
+/// `set`. They are taken once, the first time a value is read.
+struct Intrinsics {
+    name: Function,
+    length: Function,
+    set: Function,
+}
+
+fn capture_intrinsics() -> Result<Intrinsics, JsValue> {
+    let sample = Uint8Array::new_with_length(0);
+    let uint8_array = Reflect::get_prototype_of(&sample)?;
+    let typed_array = Reflect::get_prototype_of(&uint8_array)?;
+    let function = |value: JsValue| value.dyn_into::<Function>();
+    let getter = |key: &JsValue| -> Result<Function, JsValue> {
+        let descriptor = Reflect::get_own_property_descriptor(&typed_array, key)?;
+        function(Reflect::get(&descriptor, &JsValue::from_str("get"))?)
+    };
+    Ok(Intrinsics {
+        name: getter(&Symbol::to_string_tag().into())?,
+        length: getter(&JsValue::from_str("length"))?,
+        set: function(Reflect::get(&typed_array, &JsValue::from_str("set"))?)?,
+    })
+}
+
+thread_local! {
+    static INTRINSICS: Option<Intrinsics> = capture_intrinsics().ok();
+}
+
 /// The bytes of a `Uint8Array`, checked before they are copied. A `Vec<u8>`
 /// parameter would copy any array-like: a string as zero bytes, an `ArrayBuffer`
 /// as nothing, numbers modulo 256.
+///
+/// The check and the copy call the intrinsics of `%TypedArray%.prototype`
+/// themselves. Nothing of the caller's value is looked up (`slice`, `length`,
+/// `constructor`, `Symbol.species`), so no code of the value's own runs: a proxy
+/// or an object that merely inherits from `Uint8Array.prototype` is refused, a
+/// subclass that overrides those members is copied as the array it is, a
+/// detached or out-of-bounds array is refused, and nothing larger than a value
+/// may be is allocated. The intrinsics come from the page's realm: code that
+/// replaces a built-in runs as the caller and is outside this guard, and the
+/// allocations (the probe that captures the intrinsics, the copy) and `copy_to`
+/// are not `catch`, so an exception that such code throws passes through the
+/// wasm frame and leaves the database borrowed: every later call then fails.
 fn value_of(value: &JsValue) -> Result<Vec<u8>, JsValue> {
     let malformed = || reject("invalid_request", "value must be a Uint8Array");
-    // `Uint8Array.prototype.slice` reads only the internal slots of a typed array,
-    // so a proxy, an object that merely inherits from `Uint8Array.prototype` or
-    // anything else that is not one throws before any code of the caller's runs,
-    // and the call is `catch`: nothing unwinds through this frame while the
-    // database is borrowed. It copies at most one byte more than a value may hold.
-    let copy = value
-        .unchecked_ref::<Bytes>()
-        .bytes_slice(0, MAX_KV_VALUE_BYTES as u32 + 1)
-        .map_err(|_| malformed())?;
-    // A `Float64Array` copies as a `Float64Array`.
-    let copy = copy.dyn_ref::<Uint8Array>().ok_or_else(malformed)?;
-    // A subclass can override `length`: the bytes are read through a plain array.
-    let bytes = Uint8Array::new(copy);
-    if bytes.length() as usize > MAX_KV_VALUE_BYTES {
-        return Err(invalid(format!("value exceeds {MAX_KV_VALUE_BYTES} bytes")));
-    }
-    Ok(bytes.to_vec())
+    INTRINSICS.with(|intrinsics| {
+        let intrinsics = intrinsics.as_ref().ok_or_else(malformed)?;
+        // `Float64Array`, `DataView`, a proxy and a plain object have another
+        // tag or none.
+        let name = intrinsics.name.call0(value).map_err(|_| malformed())?;
+        if name.as_string().as_deref() != Some("Uint8Array") {
+            return Err(malformed());
+        }
+        let length = intrinsics
+            .length
+            .call0(value)
+            .ok()
+            .and_then(|length| length.as_f64())
+            .ok_or_else(malformed)?;
+        if length > MAX_KV_VALUE_BYTES as f64 {
+            return Err(invalid(format!("value exceeds {MAX_KV_VALUE_BYTES} bytes")));
+        }
+        let copy = Uint8Array::new_with_length(length as u32);
+        intrinsics
+            .set
+            .call1(&copy, value)
+            .map_err(|_| malformed())?;
+        let mut bytes = vec![0; length as usize];
+        copy.copy_to(&mut bytes);
+        Ok(bytes)
+    })
 }
 
 fn safe_integer(value: f64) -> bool {

@@ -44,16 +44,46 @@ like a missing one on every RPC. A generated differential runs the checks of the
 REST differential on every RPC (with and without bindings, reserved as missing,
 the digest read back over REST); it never compares a REST answer with a gRPC
 answer. `vlite-server` still refuses `--grpc-bind` while a memory binding is
-configured or reserved records remain. A program that builds the routers itself
-must build every REST router first (`configured_admin_router`, then
-`grpc_router`): the listener applies the tokens and reservations that the REST
-routers had published when it was built, and a router that protects less (no
-admin token, or no reservations where an earlier one has them) does not replace
-them, so rotating a token means restarting the program, not building another
-router. `configured_admin_router` refuses to follow a `grpc_router` that adopted
-nothing, and refuses a router that reserves memory resources once any
-`grpc_router` exists; `router` and `authenticated_router` cannot refuse and log a
-warning for the first order.
+configured or reserved records remain.
+
+A program that builds the routers itself must build every REST router first
+(`configured_admin_router`, then `grpc_router`) over one `Service`. The listener
+adopts, once, when it is built, the tokens, credential store and reservations
+that the REST routers had published: normally those of the last one. A router
+that protects less (no admin token where the published one has one, or
+reservations that do not cover the ones already published) does not replace
+them. Only those two things are compared: the token values, the credential
+store and the raw-access grants of the bindings are those of the router that
+last replaced the publication. What the listener adopted changes in place:
+token files are reloaded (`POST /v1/admin/tokens/reload`), credentials are
+revoked and tenants suspended through the router whose state it adopted, and
+the listener follows; the same calls made through any other router reach that
+router's REST only. Any other change of tokens or reservations needs a new
+`Service` and new routers, because a router built after the listener changes
+what REST applies and not what the listener applies. `configured_admin_router`
+returns an error when
+
+- a `grpc_router` was built from the service before any REST router, or after
+  one that has no admin token, so that the listener serves every caller as the
+  administrator;
+- the router reserves memory resources (a bindings file, or records that remain
+  in the database) and a `grpc_router` has been built from the service;
+- in a build with the `grpc` feature, the published tokens and reservations and
+  the router's own cannot be ordered: each protects something the other does
+  not (the router has no admin token where they have one but reserves a
+  resource they do not; it has a token where they have none but leaves one of
+  their resources unreserved; or each reserves a resource the other does not),
+  because a listener could adopt only one of them.
+
+After any error the program closes the service (`Service::close().await` stops
+the scheduler and the webhook dispatcher that a refused router may have
+started) and drops it with every router built from it. What the refused router
+already did stays: records written, the admin directory created and the first
+account seeded, and the setting of the process-wide log buffer.
+`router` and `authenticated_router` cannot refuse: they log a warning for the
+first order, and keep the published tokens and reservations, with a warning, for
+the last. These are the rules of the library routers in this release and may
+change when gRPC serves memory.
 
 ## Scope
 

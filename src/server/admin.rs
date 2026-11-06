@@ -49,6 +49,17 @@ pub(super) struct AdminState {
     pub users: Option<Arc<super::users::Accounts>>,
 }
 impl AdminState {
+    /// Whether no administration token is configured. A transport that
+    /// authenticates from this state then serves every caller as the
+    /// administrator (the development mode).
+    pub fn is_open(&self) -> bool {
+        self.auth
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .admin
+            .is_none()
+    }
+
     pub fn record(&self, event: Value) {
         let mut audit = match self.audit.lock() {
             Ok(audit) => audit,
@@ -224,16 +235,23 @@ impl ServerOptions {
     }
 }
 
+/// A configured REST router publishes its tokens and its memory reservations
+/// for the gRPC router that is built after it to adopt, so every REST router is
+/// built first and the gRPC router last; `docs/GRPC.md` lists what it refuses,
+/// the rules of this release, which may change when gRPC serves memory. A
+/// refusal before startup writes anything changes nothing. A refusal at
+/// publication may come after the engine was set up (for example records
+/// written, the admin directory created and the first account seeded, the
+/// process-wide log buffer, and the slow-query threshold, schedules and
+/// webhooks that the routers of a service share), so the caller closes the
+/// service (`Service::close`, which stops the scheduler and the webhook
+/// dispatcher) and drops it with every router built from it after any `Err`.
 pub fn configured_admin_router(
     mut service: Service,
     options: ServerOptions,
 ) -> std::io::Result<Router> {
     options.validate()?;
-    if service.grpc_runs_unconfigured() {
-        return Err(std::io::Error::other(
-            "a gRPC router was already built from this service and applies none of this router's tokens or memory reservations; build the REST router first",
-        ));
-    }
+    service.refuse_after_unconfigured_grpc()?;
     if let Some(path) = &options.memory_bindings_file {
         service = service.with_bindings(read_memory_bindings(path)?);
     }
