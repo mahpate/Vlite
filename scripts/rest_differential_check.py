@@ -42,10 +42,13 @@ PASSWORD = "Rest-diff-password-0123456789!"
 VECTOR = [1.0, 0.0, 0.0, 0.0]
 ALLOWLIST = {
     "GET /v1/capabilities /body/features/kv": "New optional KV capability; no legacy capability changes.",
+    "GET /v1/capabilities /body/features/kv_batch": "New optional KV batch capability; no legacy capability changes.",
     **{f"GET /v1/capabilities /body/routes +{route}":
        "New KV route advertised in addition to the unchanged ordered legacy routes."
        for route in ("/v1/collections/{collection}/kv/entries",
-                     "/v1/collections/{collection}/kv/entry")},
+                     "/v1/collections/{collection}/kv/entry",
+                     "/v1/collections/{collection}/kv/batch",
+                     "/v1/collections/{collection}/kv/entries/get")},
 }
 # Only the explicitly named additions are accepted, never removals/value changes.
 # OpenAPI schema tightenings reviewed and accepted for 0.7.0 (release notes,
@@ -1145,6 +1148,10 @@ def compare_exchanges(left, right):
                     and "kv" not in old.get("features", {})
                     and new.get("features", {}).get("kv") is True):
                 del new["features"]["kv"]
+            if ("GET /v1/capabilities /body/features/kv_batch" in ALLOWLIST
+                    and "kv_batch" not in old.get("features", {})
+                    and isinstance(new.get("features", {}).get("kv_batch"), bool)):
+                del new["features"]["kv_batch"]
             if isinstance(old.get("routes"), list) and isinstance(new.get("routes"), list):
                 new["routes"] = [
                     route for route in new["routes"]

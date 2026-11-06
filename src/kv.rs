@@ -28,7 +28,12 @@ use crate::{
     CollectionSettings, CollectionSpec, Database, Error, Expected, MAX_PAYLOAD_BYTES, Metadata,
     Result, current_time_ms,
 };
-use std::{collections::BinaryHeap, ops::ControlFlow};
+use std::{
+    collections::{BinaryHeap, HashMap},
+    ops::ControlFlow,
+};
+
+mod batch;
 
 /// Consecutive record IDs probed per key.
 pub const KV_PROBE_SLOTS: u64 = 16;
@@ -41,10 +46,27 @@ pub const MAX_KV_VALUE_BYTES: usize =
     MAX_PAYLOAD_BYTES - HEADER_BYTES - MAX_KV_NAMESPACE_BYTES - MAX_KV_KEY_BYTES;
 /// Maximum entries returned by one `list` call.
 pub const MAX_KV_LIST_LIMIT: usize = 10_000;
+/// Maximum operations in one [`KvStore::write_batch`].
+pub const MAX_KV_BATCH_OPERATIONS: usize = 1_000;
+/// Maximum total value bytes of the puts in one [`KvStore::write_batch`].
+pub const MAX_KV_BATCH_VALUE_BYTES: usize = 4_194_304;
+/// Maximum keys named by one [`KvView::get_many`].
+pub const MAX_KV_GET_MANY_KEYS: usize = 1_000;
 
 const MAGIC: &[u8; 4] = b"VKV1";
 const HEADER_BYTES: usize = 4 + 1 + 2;
 const PLACEHOLDER: [f32; 1] = [0.0];
+
+// A full batch is one engine batch frame: its values plus, for each operation,
+// the 16-byte entry header, the placeholder vector and the largest payload
+// header, namespace and key.
+const _: () = assert!(
+    MAX_KV_BATCH_OPERATIONS <= crate::MAX_BATCH_OPERATIONS
+        && MAX_KV_BATCH_VALUE_BYTES
+            + MAX_KV_BATCH_OPERATIONS
+                * (16 + 4 + HEADER_BYTES + MAX_KV_NAMESPACE_BYTES + MAX_KV_KEY_BYTES)
+            <= crate::MAX_BATCH_BYTES
+);
 
 /// One live entry.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -70,7 +92,8 @@ pub struct KvRef<'a> {
     pub expires_at_ms: Option<u64>,
     /// Another live entry follows this one in the listing: this entry is not
     /// the last of the `limit` visited, or it is and a further live entry lies
-    /// beyond the limit. Decided from keys alone: no value is read for it.
+    /// beyond the limit. Decided from keys alone: no value is read for it. For
+    /// [`KvView::visit_many_at`]: a later requested key follows this one.
     pub has_next: bool,
 }
 
@@ -91,6 +114,42 @@ impl Default for KvPut {
             expires_at_ms: None,
         }
     }
+}
+
+/// One operation of [`KvStore::write_batch`]. Marked `#[non_exhaustive]`: a
+/// later release can add kinds of operation.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum KvOp<'a> {
+    /// Writes `value` under the key, like [`KvStore::put`]. A batch put has no
+    /// deadline in this release: `options.expires_at_ms` must be `None`, and
+    /// like any put without one it clears the deadline of the entry it
+    /// replaces.
+    Put {
+        namespace: &'a str,
+        key: &'a str,
+        value: &'a [u8],
+        options: KvPut,
+    },
+    /// Deletes the entry, like [`KvStore::delete`].
+    Delete {
+        namespace: &'a str,
+        key: &'a str,
+        expected: Expected,
+    },
+}
+
+/// The result of one operation of [`KvStore::write_batch`]. Marked
+/// `#[non_exhaustive]`: a later release can add results.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum KvOutcome {
+    /// The version of the written entry: the commit's sequence, the same for
+    /// every put of the batch.
+    Put { version: u64 },
+    /// Whether a live entry was deleted. A key that is absent or due gives
+    /// `false`.
+    Deleted(bool),
 }
 
 /// Read-only key-value view. Obtain with `Database::kv_view`.
@@ -196,6 +255,20 @@ impl KvView<'_> {
         }
     }
 
+    /// The record slots `operations` would write or delete, in order, each
+    /// with whether a record is there afterwards: what the live-record quota
+    /// is judged on before the batch commits. Fails as `write_batch_at` does
+    /// for the same arguments.
+    #[cfg(feature = "server")]
+    pub(crate) fn batch_changes_at(
+        &self,
+        operations: &[KvOp<'_>],
+        now_ms: u64,
+    ) -> Result<Vec<(u64, bool)>> {
+        let plan = batch::plan(self.db, self.id, operations, now_ms)?;
+        Ok(batch::changes(&plan.mutations))
+    }
+
     pub fn get(&self, namespace: &str, key: &str) -> Result<Option<KvEntry>> {
         get_at(self.db, self.id, namespace, key, current_time_ms())
     }
@@ -272,6 +345,53 @@ impl KvView<'_> {
         visit_at(
             self.db, self.id, namespace, prefix, after, limit, now_ms, visitor,
         )
+    }
+
+    /// The entries of `keys`, `(namespace, key)` pairs of any namespaces, in
+    /// the order given: `None` for a key that is absent or due. A key may
+    /// appear more than once. One expiry clock and one view of the store serve
+    /// the whole call, so the result is consistent across the keys; nothing is
+    /// consistent between two calls.
+    ///
+    /// At most [`MAX_KV_GET_MANY_KEYS`] keys, each with a namespace and a key
+    /// of the sizes [`KvView::get`] takes; otherwise `InvalidKvKey` and
+    /// nothing is read. Every returned value is copied, so a result can hold
+    /// that many values of up to [`MAX_KV_VALUE_BYTES`] at once: use
+    /// [`KvView::visit_many_at`] to read without copying.
+    pub fn get_many(&self, keys: &[(&str, &str)]) -> Result<Vec<Option<KvEntry>>> {
+        self.get_many_at(keys, current_time_ms())
+    }
+
+    /// `get_many` with a caller-supplied Unix-millisecond clock.
+    pub fn get_many_at(&self, keys: &[(&str, &str)], now_ms: u64) -> Result<Vec<Option<KvEntry>>> {
+        let mut entries = Vec::with_capacity(keys.len());
+        batch::visit_many(self.db, self.id, keys, now_ms, |_, entry| {
+            entries.push(entry.map(|entry| KvEntry {
+                key: entry.key.to_owned(),
+                value: entry.value.to_vec(),
+                version: entry.version,
+                expires_at_ms: entry.expires_at_ms,
+            }));
+            ControlFlow::Continue(())
+        })?;
+        Ok(entries)
+    }
+
+    /// Visits the keys of `keys` in the order given as of the Unix-millisecond
+    /// clock `now_ms`, with each key's position and its live entry, or `None`
+    /// when the key is absent or due. The entries are the ones
+    /// [`KvView::get_many_at`] returns, but each value is lent to `visitor`
+    /// instead of copied, so a caller can build a response of a fixed size.
+    /// The visitor returns [`ControlFlow::Break`] to stop early; the keys after
+    /// it are not read. [`KvRef::has_next`] says whether a later requested key
+    /// follows this one.
+    ///
+    /// The keys are checked as for [`KvView::get_many`] before the first visit.
+    pub fn visit_many_at<F>(&self, keys: &[(&str, &str)], now_ms: u64, visitor: F) -> Result<()>
+    where
+        F: FnMut(usize, Option<KvRef<'_>>) -> ControlFlow<()>,
+    {
+        batch::visit_many(self.db, self.id, keys, now_ms, visitor)
     }
 }
 
@@ -367,6 +487,61 @@ impl KvStore<'_> {
             None => Ok(false),
         }
     }
+
+    /// Commits `operations`, puts and deletes of any namespaces of this
+    /// collection, all or none, and returns one [`KvOutcome`] for each in the
+    /// order given.
+    ///
+    /// The batch behaves as if its operations ran one at a time in the order
+    /// given, each against the live state the earlier ones left, on one expiry
+    /// clock, and the result were then committed as a single engine batch
+    /// frame: a crash leaves all of it or none of it, and a reader sees the
+    /// state before the batch or the state after it. The first operation that
+    /// cannot run fails the batch with the error its single call would give
+    /// (`RevisionMismatch` for a failed condition, `KvSlotsExhausted`,
+    /// `GraphAttachedRecord`) and nothing is written. A batch that changes no
+    /// record writes no frame.
+    ///
+    /// The operations are checked first, as a whole: at most
+    /// [`MAX_KV_BATCH_OPERATIONS`] of them, each with a namespace, key and
+    /// value of the sizes a single call takes, the values of the puts totaling
+    /// at most [`MAX_KV_BATCH_VALUE_BYTES`], no put with a deadline, and no two
+    /// operations naming the same `(namespace, key)`; otherwise `InvalidKvKey`
+    /// (`PayloadTooLarge` for one value) and nothing is written. An empty batch
+    /// is a no-op.
+    ///
+    /// Every put of the batch gets the same version, the commit's sequence. A
+    /// put clears the deadline of the entry it replaces. As for a single write,
+    /// a failed write or sync is `CommitIndeterminate`: the batch is then all
+    /// or nothing, but which is not known. Read the keys back with
+    /// [`KvView::get_many`] before deciding anything.
+    pub fn write_batch(&mut self, operations: &[KvOp<'_>]) -> Result<Vec<KvOutcome>> {
+        self.write_batch_at(operations, current_time_ms())
+    }
+
+    /// `write_batch` with a caller-supplied Unix-millisecond clock for expiry
+    /// checks.
+    pub fn write_batch_at(
+        &mut self,
+        operations: &[KvOp<'_>],
+        now_ms: u64,
+    ) -> Result<Vec<KvOutcome>> {
+        let plan = batch::plan(self.db, self.id, operations, now_ms)?;
+        if !plan.mutations.is_empty() {
+            self.db.write_batch_in(self.id, &plan.mutations)?;
+        }
+        // `write_batch_in` commits one frame, and every record of a frame
+        // takes its sequence as its revision.
+        let version = self.db.sequence;
+        Ok(plan
+            .outcomes
+            .into_iter()
+            .map(|planned| match planned {
+                batch::Planned::Put => KvOutcome::Put { version },
+                batch::Planned::Deleted(deleted) => KvOutcome::Deleted(deleted),
+            })
+            .collect())
+    }
 }
 
 struct Found {
@@ -390,13 +565,46 @@ impl Probe {
     }
 }
 
+/// What an earlier operation of the same batch has decided for a slot.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Slot {
+    /// Written: it holds another key, whatever the stored record says.
+    Taken,
+    /// Deleted: it is free, whatever the stored record says.
+    Freed,
+}
+
 fn probe(db: &Database, collection: u16, namespace: &str, key: &str, now_ms: u64) -> Result<Probe> {
+    probe_pending(db, collection, namespace, key, now_ms, None)
+}
+
+/// `probe` as an earlier operation of the same batch leaves the collection.
+/// `pending` holds the slots it wrote or freed and takes precedence over the
+/// stored records, so a key looks at the collection as if the earlier writes
+/// had been applied. It can never name the key's own slot: a batch names each
+/// key once.
+fn probe_pending(
+    db: &Database,
+    collection: u16,
+    namespace: &str,
+    key: &str,
+    now_ms: u64,
+    pending: Option<&HashMap<u64, Slot>>,
+) -> Result<Probe> {
     let state = db.state(collection);
     let records = state.records.resident()?;
     let base = slot_base(namespace, key);
     let mut free = None;
     for offset in 0..KV_PROBE_SLOTS {
         let slot = base.wrapping_add(offset);
+        match pending.and_then(|pending| pending.get(&slot)) {
+            Some(Slot::Taken) => continue,
+            Some(Slot::Freed) => {
+                free.get_or_insert((slot, None));
+                continue;
+            }
+            None => {}
+        }
         let Some(record) = records.get(&slot) else {
             free.get_or_insert((slot, None));
             continue;
@@ -649,6 +857,8 @@ fn decode(payload: &[u8]) -> Option<(&str, &str, &[u8])> {
     ))
 }
 
+#[cfg(test)]
+mod batch_tests;
 #[cfg(test)]
 mod bounded_tests;
 

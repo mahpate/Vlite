@@ -203,12 +203,15 @@ def check_additive_wire(pb):
     assert addition.output_type == ".vlite.v1.EmbedTextResponse", addition
     assert not addition.client_streaming and not addition.server_streaming, addition
     service.method.remove(addition)
-    # The ordinary key-value service is a separate additive service: its four RPCs
-    # and nine messages are named here and removed, so a changed or moved old tag
+    # The ordinary key-value service is a separate additive service: its six RPCs
+    # and nineteen messages are named here and removed, so a changed or moved old tag
     # can never hide behind them.
     kv_messages = [
         "KvAddress", "KvGetRequest", "KvEntry", "KvPutRequest", "KvPutResponse",
         "KvDeleteRequest", "KvDeleteResponse", "KvListRequest", "KvListResponse",
+        "KvKeyRef", "KvGetManyRequest", "KvGetManyItem", "KvGetManyResponse",
+        "KvBatchPut", "KvBatchDelete", "KvBatchOperation", "KvBatchRequest",
+        "KvBatchResult", "KvBatchResponse",
     ]
     assert sorted(name for name in messages if name.startswith("Kv")) == sorted(kv_messages)
     for name in kv_messages:
@@ -222,6 +225,8 @@ def check_additive_wire(pb):
         ("PutKvEntry", ".vlite.v1.KvPutRequest", ".vlite.v1.KvPutResponse", False, False),
         ("DeleteKvEntry", ".vlite.v1.KvDeleteRequest", ".vlite.v1.KvDeleteResponse", False, False),
         ("ListKvEntries", ".vlite.v1.KvListRequest", ".vlite.v1.KvListResponse", False, False),
+        ("GetKvEntries", ".vlite.v1.KvGetManyRequest", ".vlite.v1.KvGetManyResponse", False, False),
+        ("WriteKvBatch", ".vlite.v1.KvBatchRequest", ".vlite.v1.KvBatchResponse", False, False),
     ]
     descriptor.service.remove(kv_service)
     assert [item.name for item in descriptor.service] == ["VLite"]

@@ -432,6 +432,8 @@ EXCLUDED = {
     "rest:PUT " + GRAPH + "/schema": "SDK schema administration; no dedicated dashboard schema editor.",
     "rest:POST " + GRAPH + "/query": "Tagged graph-query multiplexor; UI uses explicit operation routes.",
     "rest:POST " + GRAPH + "/retrieve": "Composite SDK retrieval pipeline; not a dedicated dashboard operation.",
+    "rest:POST " + COLLECTION + "/kv/batch": "Atomic multi-key SDK write; the Key-value workspace edits one key at a time.",
+    "rest:POST " + COLLECTION + "/kv/entries/get": "Multi-key SDK read; the Key-value workspace reads one key or one listed page at a time.",
 }
 for asset in (
     "", "/admin-tools.js", "/ambience.js", "/app.js", "/console-tools.js",

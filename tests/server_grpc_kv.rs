@@ -121,6 +121,54 @@ fn list(namespace: &str) -> proto::KvListRequest {
     }
 }
 
+fn many(collection: &str, keys: &[(&str, &str)]) -> proto::KvGetManyRequest {
+    proto::KvGetManyRequest {
+        collection: collection.into(),
+        keys: keys
+            .iter()
+            .map(|(namespace, key)| proto::KvKeyRef {
+                namespace: (*namespace).into(),
+                key: (*key).into(),
+            })
+            .collect(),
+    }
+}
+
+fn batch(collection: &str, operations: Vec<proto::KvBatchOperation>) -> proto::KvBatchRequest {
+    proto::KvBatchRequest {
+        collection: collection.into(),
+        operations,
+    }
+}
+
+fn batch_put(
+    namespace: &str,
+    key: &str,
+    value: &[u8],
+    expected: Option<proto::Expected>,
+) -> proto::KvBatchOperation {
+    proto::KvBatchOperation {
+        kind: Some(proto::kv_batch_operation::Kind::Put(proto::KvBatchPut {
+            namespace: namespace.into(),
+            key: key.into(),
+            value: value.to_vec(),
+            expected,
+        })),
+    }
+}
+
+fn batch_delete(key: &str, expected: Option<proto::Expected>) -> proto::KvBatchOperation {
+    proto::KvBatchOperation {
+        kind: Some(proto::kv_batch_operation::Kind::Delete(
+            proto::KvBatchDelete {
+                namespace: "n".into(),
+                key: key.into(),
+                expected,
+            },
+        )),
+    }
+}
+
 fn expected(kind: proto::expected::Kind) -> Option<proto::Expected> {
     Some(proto::Expected { kind: Some(kind) })
 }
@@ -413,6 +461,25 @@ async fn grpc_kv_collection_validation_precedes_lookup_and_audit() {
             assert_error(
                 h.client
                     .list_kv_entries(request(token, input))
+                    .await
+                    .unwrap_err(),
+                Code::InvalidArgument,
+                "invalid_input",
+            );
+            assert_error(
+                h.client
+                    .get_kv_entries(request(token, many(&collection, &[("n", "k")])))
+                    .await
+                    .unwrap_err(),
+                Code::InvalidArgument,
+                "invalid_input",
+            );
+            assert_error(
+                h.client
+                    .write_kv_batch(request(
+                        token,
+                        batch(&collection, vec![batch_delete("k", None)]),
+                    ))
                     .await
                     .unwrap_err(),
                 Code::InvalidArgument,
@@ -1047,6 +1114,34 @@ async fn grpc_kv_empty_collection_and_missing_address() {
         Code::InvalidArgument,
         "invalid_input",
     );
+    assert_error(
+        h.client
+            .get_kv_entries(request(&scoped, many("", &[("n", "k")])))
+            .await
+            .unwrap_err(),
+        Code::InvalidArgument,
+        "invalid_input",
+    );
+    assert_error(
+        h.client
+            .write_kv_batch(request(&scoped, batch("", vec![batch_delete("k", None)])))
+            .await
+            .unwrap_err(),
+        Code::InvalidArgument,
+        "invalid_input",
+    );
+    // A batch operation with neither a put nor a delete names no work.
+    assert_error(
+        h.client
+            .write_kv_batch(request(
+                &scoped,
+                batch("default", vec![proto::KvBatchOperation { kind: None }]),
+            ))
+            .await
+            .unwrap_err(),
+        Code::InvalidArgument,
+        "invalid_input",
+    );
 }
 
 #[tokio::test]
@@ -1563,6 +1658,26 @@ async fn grpc_kv_request_ids_audit_and_route_labels() {
         .list_kv_entries(request(ADMIN, list("n")))
         .await
         .unwrap();
+    let many_response = h
+        .client
+        .get_kv_entries(request(ADMIN, many("default", &[("n", "k")])))
+        .await
+        .unwrap();
+    let batch_response = h
+        .client
+        .write_kv_batch(request(
+            ADMIN,
+            batch("default", vec![batch_put("n", "b", b"v", None)]),
+        ))
+        .await
+        .unwrap();
+    let batch_id = batch_response
+        .metadata()
+        .get("x-request-id")
+        .unwrap()
+        .to_str()
+        .unwrap()
+        .to_owned();
     let delete_response = h
         .client
         .delete_kv_entry(request(
@@ -1580,24 +1695,29 @@ async fn grpc_kv_request_ids_audit_and_route_labels() {
         .unwrap()
         .to_str()
         .unwrap();
-    let mut ids = vec![put_id.as_str(), delete_id];
+    let mut ids = vec![put_id.as_str(), delete_id, batch_id.as_str()];
     for response_id in [
         get_response.metadata().get("x-request-id").unwrap(),
         list_response.metadata().get("x-request-id").unwrap(),
+        many_response.metadata().get("x-request-id").unwrap(),
     ] {
         ids.push(response_id.to_str().unwrap());
     }
     assert!(ids.iter().all(|id| !id.is_empty()));
     assert_eq!(
         ids.iter().collect::<std::collections::HashSet<_>>().len(),
-        4
+        6
     );
     let audit = std::fs::read_to_string(directory.path().join("audit.jsonl")).unwrap();
     let events: Vec<Value> = audit
         .lines()
         .map(|line| serde_json::from_str(line).unwrap())
         .collect();
-    for (operation, request_id) in [("kv_put", put_id.as_str()), ("kv_delete", delete_id)] {
+    for (operation, request_id) in [
+        ("kv_put", put_id.as_str()),
+        ("kv_delete", delete_id),
+        ("kv_batch", batch_id.as_str()),
+    ] {
         let matching: Vec<_> = events.iter().filter(|e| e["event"] == operation).collect();
         assert_eq!(matching.len(), 1);
         assert_eq!(matching[0]["request_id"], request_id);
@@ -1614,7 +1734,14 @@ async fn grpc_kv_request_ids_audit_and_route_labels() {
     .await;
     assert_eq!(status, 200, "{summary}");
     let routes = summary["requests"]["by_route"].as_array().unwrap();
-    for rpc in ["GetKvEntry", "PutKvEntry", "DeleteKvEntry", "ListKvEntries"] {
+    for rpc in [
+        "GetKvEntry",
+        "PutKvEntry",
+        "DeleteKvEntry",
+        "ListKvEntries",
+        "GetKvEntries",
+        "WriteKvBatch",
+    ] {
         let label = format!("grpc:/vlite.v1.Kv/{rpc}");
         let route = routes.iter().find(|r| r["route"] == label).unwrap();
         assert_eq!(route["method"], "grpc");
@@ -1664,6 +1791,22 @@ async fn grpc_kv_authentication() {
         Code::Unauthenticated,
         "unauthorized",
     );
+    assert_error(
+        h.client
+            .get_kv_entries(Request::new(many("default", &[("n", "k")])))
+            .await
+            .unwrap_err(),
+        Code::Unauthenticated,
+        "unauthorized",
+    );
+    assert_error(
+        h.client
+            .write_kv_batch(Request::new(batch("default", vec![])))
+            .await
+            .unwrap_err(),
+        Code::Unauthenticated,
+        "unauthorized",
+    );
 }
 
 #[tokio::test]
@@ -1701,6 +1844,29 @@ async fn grpc_kv_read_only_handle() {
         Code::PermissionDenied,
         "read_only",
     );
+    for operations in [
+        vec![batch_put("n", "k", b"v", None)],
+        vec![],
+        vec![batch_delete("missing", None)],
+    ] {
+        assert_error(
+            h.client
+                .write_kv_batch(request(ADMIN, batch("default", operations)))
+                .await
+                .unwrap_err(),
+            Code::PermissionDenied,
+            "read_only",
+        );
+    }
+    let read = h
+        .client
+        .get_kv_entries(request(ADMIN, many("default", &[("n", "k")])))
+        .await
+        .unwrap()
+        .into_inner();
+    assert_eq!(read.items.len(), 1);
+    assert_eq!(read.items[0].entry, None);
+    assert_eq!(read.next_index, None);
     h.client
         .list_kv_entries(request(ADMIN, list("n")))
         .await
@@ -1867,8 +2033,15 @@ fn grpc_kv_wire_tags_and_manifest() {
         .split('}')
         .next()
         .unwrap();
-    assert_eq!(kv.matches("rpc ").count(), 4);
-    for rpc in ["GetKvEntry", "PutKvEntry", "DeleteKvEntry", "ListKvEntries"] {
+    assert_eq!(kv.matches("rpc ").count(), 6);
+    for rpc in [
+        "GetKvEntry",
+        "PutKvEntry",
+        "DeleteKvEntry",
+        "ListKvEntries",
+        "GetKvEntries",
+        "WriteKvBatch",
+    ] {
         assert_eq!(source.matches(&format!("rpc {rpc}(")).count(), 1);
     }
     let names: Vec<_> = source
@@ -1890,6 +2063,16 @@ fn grpc_kv_wire_tags_and_manifest() {
         "KvDeleteResponse",
         "KvListRequest",
         "KvListResponse",
+        "KvKeyRef",
+        "KvGetManyRequest",
+        "KvGetManyItem",
+        "KvGetManyResponse",
+        "KvBatchPut",
+        "KvBatchDelete",
+        "KvBatchOperation",
+        "KvBatchRequest",
+        "KvBatchResult",
+        "KvBatchResponse",
     ] {
         let body = source
             .split(&format!("message {name} {{"))
@@ -1994,4 +2177,541 @@ fn grpc_kv_wire_tags_and_manifest() {
         .encode_to_vec(),
         [10, 3, 10, 1, b'k', 18, 1, b'k']
     );
+
+    // Get-many: a key is a namespace and a key, an item is the entry or empty,
+    // and `next_index` is present even when it is 0.
+    let key = proto::KvKeyRef {
+        namespace: "n".into(),
+        key: "k".into(),
+    };
+    assert_eq!(key.encode_to_vec(), [10, 1, b'n', 18, 1, b'k']);
+    assert_eq!(
+        proto::KvGetManyRequest {
+            collection: "c".into(),
+            keys: vec![key.clone(), key],
+        }
+        .encode_to_vec(),
+        [
+            10, 1, b'c', 18, 6, 10, 1, b'n', 18, 1, b'k', 18, 6, 10, 1, b'n', 18, 1, b'k'
+        ]
+    );
+    let entry = proto::KvEntry {
+        key: "k".into(),
+        value: b"v".to_vec(),
+        version: 7,
+        expires_at_ms: Some(0),
+    };
+    let with_entry = proto::KvGetManyItem {
+        entry: Some(entry.clone()),
+    };
+    assert_eq!(
+        with_entry.encode_to_vec(),
+        [10, 10, 10, 1, b'k', 18, 1, b'v', 24, 7, 32, 0]
+    );
+    assert_eq!(
+        proto::KvGetManyItem { entry: None }.encode_to_vec(),
+        Vec::<u8>::new()
+    );
+    assert_eq!(
+        proto::KvGetManyResponse {
+            items: vec![with_entry, proto::KvGetManyItem { entry: None }],
+            next_index: Some(2),
+        }
+        .encode_to_vec(),
+        [
+            10, 12, 10, 10, 10, 1, b'k', 18, 1, b'v', 24, 7, 32, 0, 10, 0, 16, 2
+        ]
+    );
+    assert_eq!(
+        proto::KvGetManyResponse {
+            items: vec![],
+            next_index: Some(0),
+        }
+        .encode_to_vec(),
+        [16, 0]
+    );
+    assert_eq!(
+        proto::KvGetManyResponse::default().encode_to_vec(),
+        Vec::<u8>::new()
+    );
+
+    // Batch: an operation is a put (field 1) or a delete (field 2), a result a
+    // version (field 1) or a deletion flag (field 2) that is always written.
+    let put = proto::KvBatchPut {
+        namespace: "n".into(),
+        key: "k".into(),
+        value: b"v".to_vec(),
+        expected: expected(proto::expected::Kind::Revision(7)),
+    };
+    let put_bytes = [10, 1, b'n', 18, 1, b'k', 26, 1, b'v', 34, 2, 24, 7];
+    assert_eq!(put.encode_to_vec(), put_bytes);
+    let delete = proto::KvBatchDelete {
+        namespace: "n".into(),
+        key: "k".into(),
+        expected: expected(proto::expected::Kind::Revision(7)),
+    };
+    let delete_bytes = [10, 1, b'n', 18, 1, b'k', 26, 2, 24, 7];
+    assert_eq!(delete.encode_to_vec(), delete_bytes);
+    let put_operation = proto::KvBatchOperation {
+        kind: Some(proto::kv_batch_operation::Kind::Put(put)),
+    };
+    let delete_operation = proto::KvBatchOperation {
+        kind: Some(proto::kv_batch_operation::Kind::Delete(delete)),
+    };
+    let mut put_operation_bytes = vec![10, 13];
+    put_operation_bytes.extend(put_bytes);
+    assert_eq!(put_operation.encode_to_vec(), put_operation_bytes);
+    let mut delete_operation_bytes = vec![18, 10];
+    delete_operation_bytes.extend(delete_bytes);
+    assert_eq!(delete_operation.encode_to_vec(), delete_operation_bytes);
+    let mut request_bytes = vec![10, 1, b'c', 18, 15];
+    request_bytes.extend(&put_operation_bytes);
+    request_bytes.extend([18, 12]);
+    request_bytes.extend(&delete_operation_bytes);
+    assert_eq!(
+        proto::KvBatchRequest {
+            collection: "c".into(),
+            operations: vec![put_operation, delete_operation],
+        }
+        .encode_to_vec(),
+        request_bytes
+    );
+    let version = proto::KvBatchResult {
+        kind: Some(proto::kv_batch_result::Kind::Version(7)),
+    };
+    let deleted = proto::KvBatchResult {
+        kind: Some(proto::kv_batch_result::Kind::Deleted(true)),
+    };
+    let not_deleted = proto::KvBatchResult {
+        kind: Some(proto::kv_batch_result::Kind::Deleted(false)),
+    };
+    assert_eq!(version.encode_to_vec(), [8, 7]);
+    assert_eq!(deleted.encode_to_vec(), [16, 1]);
+    assert_eq!(not_deleted.encode_to_vec(), [16, 0]);
+    assert_eq!(
+        proto::KvBatchResponse {
+            results: vec![version, deleted, not_deleted],
+        }
+        .encode_to_vec(),
+        [10, 2, 8, 7, 10, 2, 16, 1, 10, 2, 16, 0]
+    );
+}
+
+#[tokio::test]
+async fn grpc_batch_and_get_many_commit_and_read_like_rest() {
+    use proto::kv_batch_result::Kind;
+    let directory = tempfile::tempdir().unwrap();
+    let mut h = start(database(FormatVersion::V5), directory.path()).await;
+    let mut expiring = put("old");
+    expiring.expires_at_ms = Some(u64::MAX);
+    h.client
+        .put_kv_entry(request(ADMIN, expiring))
+        .await
+        .unwrap();
+    let seeded = h
+        .client
+        .put_kv_entry(request(ADMIN, put("gone")))
+        .await
+        .unwrap()
+        .into_inner();
+
+    let response = h
+        .client
+        .write_kv_batch(request(
+            ADMIN,
+            batch(
+                "default",
+                vec![
+                    batch_put("n", "a", &[1, 2, 3], absent()),
+                    batch_put("n", "old", b"a", None),
+                    batch_delete("gone", None),
+                    batch_delete("never", None),
+                    batch_put(
+                        "m",
+                        "a",
+                        b"",
+                        expected(proto::expected::Kind::Any(proto::expected::Any {})),
+                    ),
+                ],
+            ),
+        ))
+        .await
+        .unwrap()
+        .into_inner();
+    // One commit: its sequence is the one after the last write.
+    let version = seeded.version + 1;
+    let kinds: Vec<Kind> = response
+        .results
+        .into_iter()
+        .map(|result| result.kind.unwrap())
+        .collect();
+    assert_eq!(
+        kinds,
+        [
+            Kind::Version(version),
+            Kind::Version(version),
+            Kind::Deleted(true),
+            Kind::Deleted(false),
+            Kind::Version(version)
+        ]
+    );
+
+    let wanted = [
+        ("n", "a"),
+        ("n", "gone"),
+        ("m", "a"),
+        ("n", "old"),
+        ("n", "a"),
+    ];
+    let read = h
+        .client
+        .get_kv_entries(request(ADMIN, many("default", &wanted)))
+        .await
+        .unwrap()
+        .into_inner();
+    assert_eq!(read.next_index, None);
+    let entries: Vec<Option<proto::KvEntry>> =
+        read.items.into_iter().map(|item| item.entry).collect();
+    let entry_of = |key: &str, value: &[u8]| {
+        Some(proto::KvEntry {
+            key: key.into(),
+            value: value.to_vec(),
+            version,
+            // The batch put cleared the deadline `old` had.
+            expires_at_ms: None,
+        })
+    };
+    assert_eq!(
+        entries,
+        [
+            entry_of("a", &[1, 2, 3]),
+            None,
+            entry_of("a", b""),
+            entry_of("old", b"a"),
+            entry_of("a", &[1, 2, 3])
+        ]
+    );
+    // REST answers the same keys the same way.
+    let keys: Vec<Value> = wanted
+        .iter()
+        .map(|(namespace, key)| json!({"namespace":namespace,"key":key}))
+        .collect();
+    let (status, over_rest) = rest(
+        &h.app,
+        ADMIN,
+        "POST",
+        "/v1/collections/default/kv/entries/get",
+        json!({"keys":keys}),
+    )
+    .await;
+    assert_eq!(status, 200, "{over_rest}");
+    let converted: Vec<Value> = entries
+        .into_iter()
+        .map(|entry| entry.map_or(Value::Null, entry_json))
+        .collect();
+    assert_eq!(over_rest, json!({"items":converted,"next_index":null}));
+
+    // A failed condition: nothing is written, and the error does not say which.
+    let stale = expected(proto::expected::Kind::Revision(version + 1000));
+    assert_error(
+        h.client
+            .write_kv_batch(request(
+                ADMIN,
+                batch(
+                    "default",
+                    vec![
+                        batch_put("n", "first", b"x", None),
+                        batch_put("n", "old", b"x", stale),
+                    ],
+                ),
+            ))
+            .await
+            .unwrap_err(),
+        Code::Aborted,
+        "precondition_failed",
+    );
+    assert_error(
+        h.client
+            .get_kv_entry(request(
+                ADMIN,
+                proto::KvGetRequest {
+                    address: address("default", "n", "first"),
+                },
+            ))
+            .await
+            .unwrap_err(),
+        Code::NotFound,
+        "kv_not_found",
+    );
+
+    // Refused as a whole, naming the operation, before any lookup.
+    let error = h
+        .client
+        .write_kv_batch(request(
+            ADMIN,
+            batch(
+                "default",
+                vec![
+                    batch_put("n", "x", b"1", None),
+                    batch_put("n", "x", b"2", None),
+                ],
+            ),
+        ))
+        .await
+        .unwrap_err();
+    assert!(error.message().starts_with("operations[1]: "), "{error:?}");
+    assert_error(error, Code::InvalidArgument, "invalid_input");
+    let mut too_large = batch("default", vec![batch_put("n", "x", b"1", None)]);
+    if let Some(proto::kv_batch_operation::Kind::Put(put)) = &mut too_large.operations[0].kind {
+        put.value = vec![0; 1_047_291];
+    }
+    assert_error(
+        h.client
+            .write_kv_batch(request(ADMIN, too_large))
+            .await
+            .unwrap_err(),
+        Code::InvalidArgument,
+        "invalid_input",
+    );
+
+    // The counts: 1,000 operations and 1,000 keys are the most.
+    let operations: Vec<_> = (0..1001)
+        .map(|index| batch_delete(&format!("k{index}"), None))
+        .collect();
+    let error = h
+        .client
+        .write_kv_batch(request(ADMIN, batch("default", operations.clone())))
+        .await
+        .unwrap_err();
+    assert_eq!(error.message(), "a batch takes at most 1000 operations");
+    assert_error(error, Code::InvalidArgument, "invalid_input");
+    let done = h
+        .client
+        .write_kv_batch(request(
+            ADMIN,
+            batch("default", operations[..1000].to_vec()),
+        ))
+        .await
+        .unwrap()
+        .into_inner();
+    assert_eq!(done.results.len(), 1000);
+    let names: Vec<String> = (0..1001).map(|index| format!("k{index}")).collect();
+    let pairs: Vec<(&str, &str)> = names.iter().map(|key| ("n", key.as_str())).collect();
+    let error = h
+        .client
+        .get_kv_entries(request(ADMIN, many("default", &pairs)))
+        .await
+        .unwrap_err();
+    assert_eq!(error.message(), "a get-many takes at most 1000 keys");
+    assert_error(error, Code::InvalidArgument, "invalid_input");
+    let all = h
+        .client
+        .get_kv_entries(request(ADMIN, many("default", &pairs[..1000])))
+        .await
+        .unwrap()
+        .into_inner();
+    assert_eq!((all.items.len(), all.next_index), (1000, None));
+
+    // The collection errors are the ones of the single-key calls.
+    assert_error(
+        h.client
+            .write_kv_batch(request(ADMIN, batch("missing", vec![])))
+            .await
+            .unwrap_err(),
+        Code::NotFound,
+        "collection_not_found",
+    );
+    assert_error(
+        h.client
+            .get_kv_entries(request(ADMIN, many("wide", &[])))
+            .await
+            .unwrap_err(),
+        Code::FailedPrecondition,
+        "not_kv_collection",
+    );
+}
+
+#[tokio::test]
+async fn grpc_get_many_stops_at_the_page_bound_where_rest_does() {
+    let directory = tempfile::tempdir().unwrap();
+    let mut db = database(FormatVersion::V5);
+    let big = vec![200u8; 1_047_290];
+    {
+        let mut store = db.kv_store("default").unwrap();
+        for index in 0..14 {
+            store
+                .put("big", &format!("{index:02}"), &big, KvPut::default())
+                .unwrap();
+        }
+    }
+    let mut h = start(db, directory.path()).await;
+    let names: Vec<String> = (0..14).map(|index| format!("{index:02}")).collect();
+    let pairs = |from: usize| -> Vec<(&str, &str)> {
+        names[from..]
+            .iter()
+            .map(|key| ("big", key.as_str()))
+            .collect()
+    };
+    let first = h
+        .client
+        .get_kv_entries(request(ADMIN, many("default", &pairs(0))))
+        .await
+        .unwrap()
+        .into_inner();
+    assert_eq!(first.items.len(), 12);
+    assert_eq!(first.next_index, Some(12));
+    assert!(first.items.iter().all(|item| item.entry.is_some()));
+    let second = h
+        .client
+        .get_kv_entries(request(ADMIN, many("default", &pairs(12))))
+        .await
+        .unwrap()
+        .into_inner();
+    assert_eq!(second.items.len(), 2);
+    assert_eq!(second.next_index, None);
+    let keys: Vec<Value> = pairs(0)
+        .iter()
+        .map(|(namespace, key)| json!({"namespace":namespace,"key":key}))
+        .collect();
+    let (status, page) = rest(
+        &h.app,
+        ADMIN,
+        "POST",
+        "/v1/collections/default/kv/entries/get",
+        json!({"keys":keys}),
+    )
+    .await;
+    assert_eq!(status, 200);
+    assert_eq!(page["items"].as_array().unwrap().len(), 12);
+    assert_eq!(page["next_index"], 12);
+}
+
+#[tokio::test]
+async fn grpc_batch_and_get_many_scopes_quota_and_audit() {
+    let directory = tempfile::tempdir().unwrap();
+    let mut h = start(database(FormatVersion::V5), directory.path()).await;
+    let reader = credential(&h.app, json!({})).await;
+    let writer = credential(&h.app, json!({"operations":["write"],"max_vectors":1})).await;
+    let graph = credential(&h.app, json!({"operations":["graph_read"],"graphs":["*"]})).await;
+    let one = || batch("default", vec![batch_put("n", "k", b"v", None)]);
+    for token in [&reader, READ, &graph] {
+        assert_error(
+            h.client
+                .write_kv_batch(request(token, one()))
+                .await
+                .unwrap_err(),
+            Code::PermissionDenied,
+            if token == READ {
+                "read_only"
+            } else {
+                "forbidden_scope"
+            },
+        );
+    }
+    h.client
+        .write_kv_batch(request(&writer, one()))
+        .await
+        .unwrap();
+    let quota = h
+        .client
+        .write_kv_batch(request(
+            &writer,
+            batch("default", vec![batch_put("n", "second", b"v", None)]),
+        ))
+        .await
+        .unwrap_err();
+    assert_eq!(quota.metadata().get("retry-after").unwrap(), "1");
+    assert_error(quota, Code::ResourceExhausted, "quota_exceeded");
+    // One in and one out leaves the count where it was.
+    h.client
+        .write_kv_batch(request(
+            &writer,
+            batch(
+                "default",
+                vec![
+                    batch_put("n", "second", b"v", None),
+                    batch_delete("k", None),
+                ],
+            ),
+        ))
+        .await
+        .unwrap();
+    for token in [&reader, READ] {
+        let read = h
+            .client
+            .get_kv_entries(request(
+                token,
+                many("default", &[("n", "second"), ("n", "k")]),
+            ))
+            .await
+            .unwrap()
+            .into_inner();
+        assert!(read.items[0].entry.is_some());
+        assert!(read.items[1].entry.is_none());
+    }
+    for token in [&writer, &graph] {
+        assert_error(
+            h.client
+                .get_kv_entries(request(token, many("default", &[("n", "k")])))
+                .await
+                .unwrap_err(),
+            Code::PermissionDenied,
+            "forbidden_scope",
+        );
+    }
+    for collection in ["wide", "missing"] {
+        assert_error(
+            h.client
+                .get_kv_entries(request(&reader, many(collection, &[("n", "k")])))
+                .await
+                .unwrap_err(),
+            Code::PermissionDenied,
+            "forbidden_scope",
+        );
+        assert_error(
+            h.client
+                .write_kv_batch(request(
+                    &writer,
+                    batch(collection, vec![batch_delete("k", None)]),
+                ))
+                .await
+                .unwrap_err(),
+            Code::PermissionDenied,
+            "forbidden_scope",
+        );
+    }
+    let audit = std::fs::read_to_string(directory.path().join("audit.jsonl")).unwrap();
+    let events: Vec<Value> = audit
+        .lines()
+        .map(|line| serde_json::from_str::<Value>(line).unwrap())
+        .filter(|event| event["event"] == "kv_batch")
+        .collect();
+    let outcomes: Vec<&Value> = events.iter().map(|event| &event["outcome"]).collect();
+    // The two refusals at the end name a collection the writer may not use:
+    // they reach the handler, so they are audited like any other refused call.
+    assert_eq!(
+        outcomes,
+        [
+            &json!("ok"),
+            &json!("quota_exceeded"),
+            &json!("ok"),
+            &json!("forbidden_scope"),
+            &json!("forbidden_scope")
+        ]
+    );
+    for event in &events {
+        assert!(event.get("request_id").is_some());
+        assert!(event.get("puts").is_some() && event.get("deletes").is_some());
+        for forbidden in [
+            "namespace",
+            "key",
+            "value",
+            "value_base64",
+            "token",
+            "payload",
+            "expires_at_ms",
+        ] {
+            assert!(event.get(forbidden).is_none(), "{forbidden}");
+        }
+    }
 }

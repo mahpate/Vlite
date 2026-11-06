@@ -860,3 +860,410 @@ fn shell_script_uses_explicit_collection_and_stops() {
         [0, 1, 2]
     );
 }
+
+/// The payload of each reply to `cases`, run in order by one process.
+fn payloads(path: &Path, mcp: bool, readonly: bool, cases: &[Value]) -> Vec<Value> {
+    let lines: Vec<_> = cases
+        .iter()
+        .enumerate()
+        .map(|(id, case)| line(case, mcp, id))
+        .collect();
+    let output = process(path, mcp, readonly, &lines);
+    assert!(output.status.success(), "{output:?}");
+    values(&output)
+        .into_iter()
+        .map(|reply| {
+            if mcp {
+                assert_eq!(reply["result"]["isError"], false, "{reply}");
+                reply["result"]["structuredContent"].clone()
+            } else {
+                reply
+            }
+        })
+        .collect()
+}
+
+/// The message a request is refused with, after its `code`.
+fn refusal(path: &Path, mcp: bool, readonly: bool, case: &Value) -> String {
+    let output = process(path, mcp, readonly, &[line(case, mcp, 1)]);
+    let code = case["code"].as_str().unwrap();
+    let message = if mcp {
+        assert!(output.status.success(), "{output:?}");
+        let reply = values(&output).remove(0);
+        assert_eq!(reply["result"]["isError"], true, "{case}: {reply}");
+        reply["result"]["structuredContent"]["error"]
+            .as_str()
+            .unwrap()
+            .to_owned()
+    } else {
+        assert_eq!(output.status.code(), Some(1), "{case}: {output:?}");
+        assert!(output.stdout.is_empty(), "{output:?}");
+        String::from_utf8_lossy(&output.stderr)
+            .strip_prefix("error: ")
+            .unwrap_or_else(|| panic!("{case}: {output:?}"))
+            .trim_end()
+            .to_owned()
+    };
+    message
+        .strip_prefix(&format!("{code}: "))
+        .unwrap_or_else(|| panic!("{case}: {message}"))
+        .to_owned()
+}
+
+fn key(namespace: &str, key: &str) -> Value {
+    json!({"namespace":namespace,"key":key})
+}
+
+fn batch_case(operations: Value) -> Value {
+    json!({"command":"kv-batch","request":{"collection":"default","operations":operations}})
+}
+
+fn many_case(keys: Value) -> Value {
+    json!({"command":"kv-get-many","request":{"collection":"default","keys":keys}})
+}
+
+#[test]
+fn batch_commits_with_one_version_and_get_many_reads_it_back() {
+    for mcp in [true, false] {
+        let temp = tempfile::tempdir_in(".").unwrap();
+        let path = temp.path().join("batch.vlite");
+        fixture(&path);
+        let replies = payloads(
+            &path,
+            mcp,
+            false,
+            &[
+                json!({"command":"kv-put","request":{"collection":"default","namespace":"n",
+                    "key":"old","value_base64":"AAEC"}}),
+                json!({"command":"kv-put","request":{"collection":"default","namespace":"n",
+                    "key":"ttl","value_base64":"AAEC","expires_at_ms":"18446744073709551615"}}),
+                batch_case(json!([
+                    {"op":"put","namespace":"n","key":"a","value_base64":"AQ==","expected":"absent"},
+                    {"op":"put","namespace":"m","key":"a","value_base64":""},
+                    {"op":"delete","namespace":"n","key":"old","expected":"any"},
+                    {"op":"delete","namespace":"n","key":"never","expected":"absent"},
+                    {"op":"put","namespace":"n","key":"ttl","value_base64":"AQ=="}
+                ])),
+                many_case(json!([
+                    key("n", "a"),
+                    key("n", "old"),
+                    key("m", "a"),
+                    key("n", "never"),
+                    key("n", "ttl")
+                ])),
+            ],
+        );
+        let seeded: u64 = replies[1]["version"].as_str().unwrap().parse().unwrap();
+        let committed = replies[2]["results"][0]["version"].as_str().unwrap();
+        assert!(!committed.starts_with('0'));
+        assert!(committed.parse::<u64>().unwrap() > seeded);
+        assert_eq!(
+            replies[2],
+            json!({"results":[
+                {"version":committed},
+                {"version":committed},
+                {"deleted":true},
+                {"deleted":false},
+                {"version":committed}
+            ]})
+        );
+        // A batch put has no deadline: it clears the one it replaces.
+        assert_eq!(
+            replies[3],
+            json!({"items":[
+                {"key":"a","value_base64":"AQ==","version":committed,"expires_at_ms":null},
+                null,
+                {"key":"a","value_base64":"","version":committed,"expires_at_ms":null},
+                null,
+                {"key":"ttl","value_base64":"AQ==","version":committed,"expires_at_ms":null}
+            ],"next_index":null})
+        );
+        let db = Database::open(&path).unwrap();
+        let view = db.kv_view("default").unwrap();
+        assert!(view.get("n", "old").unwrap().is_none());
+        assert_eq!(
+            view.get("n", "ttl").unwrap().unwrap().version.to_string(),
+            committed
+        );
+    }
+}
+
+#[test]
+fn a_refused_batch_writes_nothing_and_names_its_operation() {
+    let temp = tempfile::tempdir_in(".").unwrap();
+    let path = temp.path().join("refused.vlite");
+    fixture(&path);
+    let first = json!({"op":"put","namespace":"n","key":"first","value_base64":"AQ=="});
+    let refusals = [
+        (
+            "a key named twice",
+            json!([first, {"op":"delete","namespace":"n","key":"first"}]),
+            "invalid_input",
+            "operations[1]: names the same namespace and key as operations[0]",
+        ),
+        (
+            "a failed condition after a valid put",
+            json!([first, {"op":"delete","namespace":"n","key":"gone","expected":{"revision":"999"}}]),
+            "precondition_failed",
+            "",
+        ),
+        (
+            "a deadline",
+            json!([{"op":"put","namespace":"n","key":"first","value_base64":"","expires_at_ms":"1"}]),
+            "invalid_request",
+            "",
+        ),
+        (
+            "an unknown operation",
+            json!([{"op":"swap","namespace":"n","key":"first"}]),
+            "invalid_request",
+            "",
+        ),
+        (
+            "an empty key after a valid put",
+            json!([first, {"op":"delete","namespace":"n","key":""}]),
+            "invalid_input",
+            "operations[1]: ",
+        ),
+        (
+            "unpadded base64",
+            json!([{"op":"put","namespace":"n","key":"x","value_base64":"AA"}]),
+            "invalid_input",
+            "operations[0]: ",
+        ),
+        (
+            "more operations than a batch takes",
+            json!(
+                (0..=1_000)
+                    .map(|index| json!({"op":"delete","namespace":"n","key":format!("k{index}")}))
+                    .collect::<Vec<_>>()
+            ),
+            "invalid_input",
+            "a batch takes at most 1000 operations",
+        ),
+    ];
+    let before = std::fs::read(&path).unwrap();
+    for mcp in [true, false] {
+        for (name, operations, code, expected) in &refusals {
+            let mut case = batch_case(operations.clone());
+            case["code"] = json!(code);
+            let message = refusal(&path, mcp, false, &case);
+            assert!(message.starts_with(expected), "{name}: {message}");
+        }
+        for (request, code) in [
+            (
+                json!({"collection":"missing","operations":[]}),
+                "collection_not_found",
+            ),
+            (
+                json!({"collection":"vectors","operations":[]}),
+                "not_kv_collection",
+            ),
+            (
+                json!({"collection":"UPPER","operations":[]}),
+                "invalid_input",
+            ),
+            (json!({"collection":"","operations":[]}), "invalid_input"),
+            (json!({"operations":[]}), "invalid_request"),
+            (json!({"collection":"default"}), "invalid_request"),
+            (
+                json!({"collection":"default","operations":[],"atomic":true}),
+                "invalid_request",
+            ),
+        ] {
+            let case = json!({"command":"kv-batch","request":request,"code":code});
+            check_error(&path, mcp, false, &case);
+        }
+        // None of it wrote a frame.
+        assert_eq!(std::fs::read(&path).unwrap(), before, "mcp={mcp}");
+    }
+    let db = Database::open(&path).unwrap();
+    assert!(
+        db.collection("missing").is_err(),
+        "no refused batch created a collection"
+    );
+}
+
+#[test]
+fn get_many_checks_its_keys_and_its_collection() {
+    let temp = tempfile::tempdir_in(".").unwrap();
+    let path = temp.path().join("many.vlite");
+    fixture(&path);
+    let mut db = Database::open(&path).unwrap();
+    db.kv_store("default")
+        .unwrap()
+        .put("n", "a", b"x", Default::default())
+        .unwrap();
+    db.close().unwrap();
+    let before = std::fs::read(&path).unwrap();
+    let thousand_and_one: Vec<Value> = (0..=1_000)
+        .map(|index| key("n", &format!("k{index}")))
+        .collect();
+    for mcp in [true, false] {
+        let case = json!({"command":"kv-get-many","code":"invalid_input",
+            "request":{"collection":"default","keys":[key("n","a"),key("","b"),key("n","c")]}});
+        let message = refusal(&path, mcp, false, &case);
+        assert!(message.starts_with("keys[1]: "), "{message}");
+        let case = json!({"command":"kv-get-many","code":"invalid_input",
+            "request":{"collection":"default","keys":thousand_and_one}});
+        assert_eq!(
+            refusal(&path, mcp, false, &case),
+            "a get-many takes at most 1000 keys"
+        );
+        for (request, code) in [
+            (
+                json!({"collection":"missing","keys":[]}),
+                "collection_not_found",
+            ),
+            (
+                json!({"collection":"vectors","keys":[]}),
+                "not_kv_collection",
+            ),
+            (json!({"collection":"UPPER","keys":[]}), "invalid_input"),
+            (json!({"collection":"","keys":[]}), "invalid_input"),
+            (json!({"keys":[]}), "invalid_request"),
+            (json!({"collection":"default"}), "invalid_request"),
+            (
+                json!({"collection":"default","keys":[],"limit":1}),
+                "invalid_request",
+            ),
+            (
+                json!({"collection":"default","keys":[{"namespace":"n","key":"a","extra":0}]}),
+                "invalid_request",
+            ),
+            (
+                json!({"collection":"default","keys":[{"namespace":"n"}]}),
+                "invalid_request",
+            ),
+        ] {
+            check_error(
+                &path,
+                mcp,
+                false,
+                &json!({"command":"kv-get-many","request":request,"code":code}),
+            );
+        }
+        let replies = payloads(
+            &path,
+            mcp,
+            false,
+            &[
+                many_case(json!([])),
+                many_case(json!([key("n", "a"), key("n", "a"), key("n", "b")])),
+            ],
+        );
+        assert_eq!(replies[0], json!({"items":[],"next_index":null}));
+        // A key may be read more than once, unlike in a batch.
+        assert_eq!(replies[1]["items"][0], replies[1]["items"][1]);
+        assert_eq!(replies[1]["items"][0]["value_base64"], "eA==");
+        assert_eq!(replies[1]["items"][2], Value::Null);
+    }
+    assert_eq!(std::fs::read(&path).unwrap(), before);
+}
+
+#[test]
+fn a_read_only_server_serves_get_many_and_refuses_batch() {
+    let temp = tempfile::tempdir_in(".").unwrap();
+    let path = temp.path().join("readonly.vlite");
+    fixture(&path);
+    let mut db = Database::open(&path).unwrap();
+    db.kv_store("default")
+        .unwrap()
+        .put("n", "a", b"x", Default::default())
+        .unwrap();
+    db.close().unwrap();
+    let before = std::fs::read(&path).unwrap();
+    for mcp in [true, false] {
+        let case = json!({"command":"kv-batch","code":"read_only",
+            "request":{"collection":"default","operations":[
+                {"op":"put","namespace":"n","key":"b","value_base64":""}]}});
+        let message = refusal(&path, mcp, true, &case);
+        assert!(message.contains("vlite_kv_batch"), "{message}");
+        let replies = payloads(
+            &path,
+            mcp,
+            true,
+            &[many_case(json!([key("n", "a"), key("n", "b")]))],
+        );
+        assert_eq!(replies[0]["items"][0]["value_base64"], "eA==");
+        assert_eq!(replies[0]["items"][1], Value::Null);
+        assert_eq!(std::fs::read(&path).unwrap(), before);
+    }
+}
+
+#[test]
+fn tool_listing_offers_get_many_always_and_batch_when_writable() {
+    let temp = tempfile::tempdir_in(".").unwrap();
+    let path = temp.path().join("listing.vlite");
+    fixture(&path);
+    for readonly in [true, false] {
+        let output = process(
+            &path,
+            true,
+            readonly,
+            &[json!({"jsonrpc":"2.0","id":1,"method":"tools/list"}).to_string()],
+        );
+        let responses = values(&output);
+        let tools = responses[0]["result"]["tools"].as_array().unwrap();
+        let find = |name: &str| tools.iter().find(|tool| tool["name"] == name);
+        let many = find("vlite_kv_get_many").expect("get-many is listed on every server");
+        assert_eq!(many["annotations"]["readOnlyHint"], true);
+        assert_eq!(many["inputSchema"]["additionalProperties"], false);
+        assert_eq!(
+            many["inputSchema"]["required"],
+            json!(["collection", "keys"])
+        );
+        assert_eq!(many["inputSchema"]["properties"]["keys"]["maxItems"], 1000);
+        assert_eq!(find("vlite_kv_batch").is_some(), !readonly);
+        if let Some(batch) = find("vlite_kv_batch") {
+            assert_eq!(batch["annotations"]["readOnlyHint"], false);
+            assert_eq!(batch["annotations"]["destructiveHint"], true);
+            assert_eq!(batch["inputSchema"]["additionalProperties"], false);
+            assert_eq!(
+                batch["inputSchema"]["required"],
+                json!(["collection", "operations"])
+            );
+            assert_eq!(
+                batch["inputSchema"]["properties"]["operations"]["maxItems"],
+                1000
+            );
+        }
+    }
+}
+
+#[test]
+fn get_many_stops_at_the_page_cap_and_the_rest_follows() {
+    let temp = tempfile::tempdir_in(".").unwrap();
+    let path = temp.path().join("cap.vlite");
+    let mut db = Database::create(&path, 1).unwrap();
+    // 16 MiB of response holds twelve values of the largest size.
+    for index in 0..13 {
+        db.kv_store("default")
+            .unwrap()
+            .put(
+                "n",
+                &format!("k{index:02}"),
+                &vec![7; 1_047_290],
+                Default::default(),
+            )
+            .unwrap();
+    }
+    db.close().unwrap();
+    let keys: Vec<Value> = (0..13)
+        .map(|index| key("n", &format!("k{index:02}")))
+        .collect();
+    for mcp in [true, false] {
+        let replies = payloads(
+            &path,
+            mcp,
+            false,
+            &[many_case(json!(keys)), many_case(json!(&keys[12..]))],
+        );
+        assert_eq!(replies[0]["items"].as_array().unwrap().len(), 12);
+        assert_eq!(replies[0]["next_index"], 12);
+        assert!(replies[0].to_string().len() <= 16_777_216);
+        assert_eq!(replies[1]["items"].as_array().unwrap().len(), 1);
+        assert_eq!(replies[1]["items"][0]["key"], "k12");
+        assert_eq!(replies[1]["next_index"], Value::Null);
+    }
+}

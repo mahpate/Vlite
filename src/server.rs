@@ -946,6 +946,11 @@ fn permission(method: &Method, route: &str) -> Need {
         | ("POST", "/v1/batches" | "/v1/collections/{collection}/batches") => {
             Need::Op(Op::Write, Reach::Collection)
         }
+        ("POST", "/v1/collections/{collection}/kv/batch") => Need::Op(Op::Write, Reach::Collection),
+        // A read by POST (the key list is a body): the read-only credential may use it.
+        ("POST", "/v1/collections/{collection}/kv/entries/get") => {
+            Need::Op(Op::Read, Reach::Collection)
+        }
         (
             "POST",
             "/v1/search"
@@ -1038,7 +1043,8 @@ fn authorize(
             || route == "/v1/collections/{collection}/search/disk-ann");
     let search = search
         || graph::read_post(method, route)
-        || (method == Method::POST && memory::read_route(route));
+        || (method == Method::POST && memory::read_route(route))
+        || (method == Method::POST && route == "/v1/collections/{collection}/kv/entries/get");
     let read_only_allowed =
         path.starts_with("/v1/auth/") || (!path.starts_with("/v1/admin/") && (read || search));
     // Legacy routes address `default` (ID 0); their handlers may not resolve
