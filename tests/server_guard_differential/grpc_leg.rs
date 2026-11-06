@@ -309,13 +309,18 @@ macro_rules! row {
     };
 }
 
-/// A unary row: `|names| client.method(request)`.
+/// A unary row: `|names| client.method(request)`, with or without braces around
+/// the call (the formatter adds them to a call that spans lines).
 macro_rules! unary {
     ($rpc:literal, $kind:ident, $effect:ident, $flags:expr, |$names:ident| $client:ident . $method:ident ($request:expr)) => {
         row!($rpc, $kind, $effect, $flags, |clients, token, $names| {
             let mut client = clients.$client.clone();
             answer(client.$method(authorized(token, $request)).await)
         })
+    };
+    ($rpc:literal, $kind:ident, $effect:ident, $flags:expr, |$names:ident| { $client:ident . $method:ident ($request:expr) }) => {
+        unary!($rpc, $kind, $effect, $flags, |$names| $client
+            .$method($request))
     };
 }
 
