@@ -62,7 +62,10 @@ under that ID is unchanged. A request that fails for another reason, such as a
 file older than v5 (409 `upgrade_required`), a stale `If-Match` (412) or an
 invalid vector, answers that error first, except `ttl_ms` 0, a request error
 refused before any of these. gRPC `PutVector` applies the same
-rule to `expires_at_ms` as `INVALID_ARGUMENT`. The
+rule to `expires_at_ms` as `INVALID_ARGUMENT`. Before 0.7.1 the REST refusals
+answered 500 `internal_error`, and gRPC answered `OK` and stored a record that
+was already expired and could not be read; a client that sent an already due
+deadline must now send a later one. The
 [key-value routes](#key-value-entries) accept an already due deadline by
 contract. Expiry is checked at read/search time and does not create a separate
 feed event.

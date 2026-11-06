@@ -215,10 +215,10 @@ JSON-RPC 2.0, including the MCP lifecycle, `ping` and tool discovery/calls.
 Each request is one line; a line longer than 128 MiB (134,217,728 bytes, excluding
 the line terminator) is answered with JSON-RPC error -32600 (`id` null) and the
 session continues with the next line. The limit is eight times the 16 MiB body
-of the largest request the engine accepts, a `vlite_graph_write` batch, because
-that body can take up to eight times as many bytes as JSON text (payload bytes
-written as `\u00XX` escapes take six, `float32` values written with 20 to 30
-characters and a comma take five to 7.75).
+of the largest request the engine accepts, a `vlite_graph_write` batch: written
+as JSON text, that body can take up to eight times as many bytes (a payload byte
+written as a `\u00XX` escape takes six, and a 4-byte `float32` written with 20 to
+30 characters and a comma takes 21 to 31, which is 5.25 to 7.75 times as many).
 Protocol messages alone are written to stdout; diagnostics are written to stderr.
 Tool failures return `isError: true` with a clear message; malformed JSON and protocol errors use JSON-RPC errors. `vlite_search` returns IDs and distances, not vectors. `vlite_get` and `vlite_list` omit vectors unless explicitly requested by `vlite_get`.
 

@@ -67,6 +67,9 @@ The additive RPCs expose the engine's V5 record and retrieval APIs. `PutVector`
 accepts optional absolute `expires_at_ms`, which must be later than the server
 clock when the write is applied: an expiry at or before it is refused with
 `INVALID_ARGUMENT` (`vlite-error-code: invalid_input`) and nothing is written.
+**Changed in 0.7.1:** 0.7.0 answered `OK` to such a put and stored a record that
+was already expired, so no read returned it; a client that sent an already due
+deadline now gets this error and must send a later one.
 A put that fails for another reason, such as a file older than V5, a failed
 precondition or an invalid vector, answers that error first. `UpdateMetadata`
 changes metadata without replacing the vector or payload. Both require a V5

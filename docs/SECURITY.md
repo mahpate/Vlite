@@ -316,7 +316,7 @@ name or request content. It has four forms:
 |---|---|
 | `admin_token` | The bootstrap admin token, or any caller of a server with no admin token (open local mode). |
 | `user:<account id>` | A signed-in dashboard account of any role. An account has the same actor in every one of its sessions. |
-| `read_only_token` | The read-only token. It can reach only the four memory read routes (recall, receipt lookup, facts query, erasure get), where the handler refuses it and audits the refusal as a `memory_request`; none of the other events below shows this form. |
+| `read_only_token` | The read-only token. Of the routes that write these events, it reaches only the four memory read routes (recall, receipt lookup, facts query, erasure get), where the handler refuses it and audits the refusal as a `memory_request`; none of the other events below shows this form. |
 | The credential ID | A scoped API key. Its 12 characters from `a-z2-7` cannot equal another form. |
 
 These events carry an `actor`: `kv_put`, `kv_delete`, `memory_request`,
@@ -333,10 +333,19 @@ tell them apart, and the credential ID or `user:<account id>` for a scoped
 caller. `actor` is added beside it. A memory route serves only a scoped
 credential that a binding grants, so a bootstrap-token or super-admin request to
 one is refused with 403 and audited with its own actor. `credential_denied`
-keeps `credential_id` and adds an `actor` that equals it. The collection events
-already had an `actor`, which read `admin` for the bootstrap token and for every
-super-admin session before 0.7.1; it now reads `admin_token` or
-`user:<account id>`, and the credential ID is as before.
+keeps `credential_id` and adds an `actor` that equals it.
+
+**Changed in 0.7.1.** The `actor` of `collection_created`, `collection_dropped`
+and `collection_settings_changed` was `admin` for the bootstrap token and for
+every super-admin session; it is now `admin_token` or `user:<account id>`, and
+the credential ID is as before. A query, alert or export that matches these
+events with `actor` equal to `admin` must also match the two new forms.
+`kv_put`, `kv_delete`, `memory_request` and `credential_denied` gain an `actor`;
+their `principal` and `credential_id` are unchanged. The audit log is only
+appended to, so lines written by an earlier version keep their form: collection
+events with `actor` `admin`, the others with no `actor`. After a rollback to
+0.7.0 both forms sit in one log, and the 0.7.0 server reads such a log without
+error. Read both forms of a log that spans an upgrade or a rollback.
 
 ## Key-value permissions
 
@@ -362,8 +371,9 @@ records, so that puts for that key fail with `kv_slots_exhausted` (409 on REST,
 `FAILED_PRECONDITION` on gRPC). Use dedicated collections for key-value data,
 grant `write` on them only to principals you trust with their keys, and watch
 `kv_slots_exhausted_total`: it counts each REST or gRPC request answered this
-way, across all credentials (a request whose client left before the answer was
-produced is not counted, as with every request counter), and a rise nobody
+way, across all credentials (a REST request whose client disconnected before the
+answer was produced is not counted, as with every REST counter; a gRPC call is
+counted even if its client cancels), and a rise nobody
 expects points at records planted over a key's IDs. The failed `kv_put` audit event names the caller
 (`actor`) and the request ID, not the collection, and global metrics are
 unavailable while memory bindings are configured (see above). A list call
