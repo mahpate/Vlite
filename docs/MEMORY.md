@@ -35,7 +35,7 @@ An operator sets memory up once. The steps use the ordinary admin routes, so run
 export VLITE_URL=http://127.0.0.1:8080 VLITE_ADMIN_DIR=./admin
 python3 -c "import secrets; print(secrets.token_urlsafe(32))" > admin.token
 export VLITE_ADMIN_TOKEN=$(cat admin.token)
-vlite-server data.vlite --bind 127.0.0.1:8080 --create-if-missing 3 --create-format 5 --token-file admin.token &
+vlite-server data.vlite --bind 127.0.0.1:8080 --create-if-missing 3 --create-format 5 --token-file admin.token & SERVER_PID=$!
 ```
 
 1. **Create the graph and the evidence collection.** Memory needs a database with graph support (every new file has it). The evidence collection must be a new collection, not `default`. Its dimension is the length of the vectors you will store, and `text_fields` names the metadata fields that text recall searches.
@@ -50,13 +50,13 @@ vlite-server data.vlite --bind 127.0.0.1:8080 --create-if-missing 3 --create-for
      -d '{"name":"notes_ev","dimensions":3,"settings":{"text_fields":["text"]}}'
    ```
 
-2. **Create two scoped credentials: one for the agent and one for the raw holder that the evidence example needs.** Run this step twice, with the names `notes-agent` and `notes-raw`. A memory credential needs `graph_read` and `graph_write` for the graph, and `read`, `search` and `write` on the evidence collection. Name the collection or use `["*"]`. Once a bindings file reserves the collection, a request that names it answers 404, so create the credential first or give it `["*"]`. The response carries the `token`, which is shown once: set `VLITE_TOKEN` to the token of `notes-agent` and `VLITE_RAW_TOKEN` to the token of `notes-raw`. Each `credential.id` (12 characters) is a grant's principal in step 3. The client examples below read `VLITE_AUTH_TOKEN`: give it the same token as `VLITE_TOKEN`, never the admin token.
+2. **Create two scoped credentials: one for the agent and one for the raw holder that the evidence example needs.** Run this step twice, with the names `notes-agent` and `notes-raw`: run the command as it is for `notes-agent`, then set `NAME=notes-raw` and run it again. A memory credential needs `graph_read` and `graph_write` for the graph, and `read`, `search` and `write` on the evidence collection. Name the collection or use `["*"]`. Once a bindings file reserves the collection, a request that names it answers 404, so create the credential first or give it `["*"]`. The response carries the `token`, which is shown once: set `VLITE_TOKEN` to the token of `notes-agent` and `VLITE_RAW_TOKEN` to the token of `notes-raw`. Each `credential.id` (12 characters) is a grant's principal in step 3. The client examples below read `VLITE_AUTH_TOKEN`: give it the same token as `VLITE_TOKEN`, never the admin token.
 
    ```sh
    EXPIRES=$(( ($(date +%s) + 30 * 86400) * 1000 ))
    curl -sS -X POST "$VLITE_URL/v1/admin/credentials" \
      -H "Authorization: Bearer $VLITE_ADMIN_TOKEN" -H "Content-Type: application/json" \
-     -d "{\"name\":\"notes-agent\",\"collections\":[\"*\"],\"graphs\":[\"notes_graph\"],\"operations\":[\"graph_read\",\"graph_write\",\"read\",\"search\",\"write\"],\"expires_unix_ms\":$EXPIRES}"
+     -d "{\"name\":\"${NAME:-notes-agent}\",\"collections\":[\"*\"],\"graphs\":[\"notes_graph\"],\"operations\":[\"graph_read\",\"graph_write\",\"read\",\"search\",\"write\"],\"expires_unix_ms\":$EXPIRES}"
    ```
 
    Each route asks for less than that, but every route requires the credential to name the evidence collection (or hold `["*"]`) and the graph:
@@ -83,10 +83,10 @@ vlite-server data.vlite --bind 127.0.0.1:8080 --create-if-missing 3 --create-for
 
    A grant lists the exact scopes that credential may use; the scopes above are the ones the examples in this guide use. `"raw_access": true` on a grant lets that credential also reach the graph and the collection through the raw routes: the `notes-raw` credential needs it for the evidence example. `receipt_window_ms` runs from 1 to 2,592,000,000 (30 days). A file holds at most 256 bindings, 1,024 grants per binding and 256 scopes per grant. After the first start with the file, a binding's receipt window, graph and evidence names never change. Raise `generation` when grants or state change and keep it otherwise; startup refuses both mistakes. Editing the file after the first start, for example to add a grant, without a higher `generation` makes startup exit with `a memory binding changed without a higher generation`. [Start the server with memory](API.md#start-the-server-with-memory) lists every rule, including retiring a binding.
 
-4. **Stop that server and restart it with the file.**
+4. **Stop that server (`kill $SERVER_PID`) and restart it with the file.**
 
    ```sh
-   vlite-server data.vlite --bind 127.0.0.1:8080 --create-if-missing 3 --create-format 5 --token-file admin.token --memory-bindings-file bindings.json
+   vlite-server data.vlite --bind 127.0.0.1:8080 --create-if-missing 3 --create-format 5 --token-file admin.token --memory-bindings-file bindings.json & SERVER_PID=$!
    ```
 
    `VLITE_MEMORY_BINDINGS_FILE` does the same. Restart with the same `VLITE_ADMIN_DIR` and token file as before: the credentials live in the admin directory, so without it the credential from step 2 no longer exists. Startup refuses to run when the graph or the collection is missing, when a resource already holds ordinary data, or when the file breaks a rule, and its message never names the binding. While a binding is configured, the server refuses `--grpc-bind` and automatic index maintenance, and imports, replication export and some aggregate admin routes answer 403. Without the file there are no memory routes, but a graph-enabled database still has its binding records read at startup: the server refuses to start if they cannot be read or are not valid, and if binding records remain after the file is removed, `--grpc-bind` and automatic index maintenance stop the start.
