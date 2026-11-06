@@ -496,6 +496,51 @@ if (Environment.GetEnvironmentVariable("VLITE_URL") is { Length: > 0 } url)
         }
     }
     finally { await scoped.DeleteAsync("1"); await scoped.DropAsync(); }
+    var kvName = "dotnet_kv_e2e_" + Guid.NewGuid().ToString("N");
+    await client.CreateCollectionAsync(kvName, 1);
+    try
+    {
+        var first = await client.KvBatchAsync(kvName, [
+            new KvBatchOperation.Put("a", "one", [49]), new KvBatchOperation.Put("a", "two", [0, 255]),
+            new KvBatchOperation.Put("b", "one", []), new KvBatchOperation.Delete("a", "nothing")]);
+        var version = ((KvBatchResult.Put)first[0]).Version;
+        Check(version > 0 && first.Length == 4 && first[1] == new KvBatchResult.Put(version) &&
+            first[2] == new KvBatchResult.Put(version) && first[3] == new KvBatchResult.Delete(false));
+        var found = await client.KvGetManyAsync(kvName, [new("a", "two"), new("a", "missing"), new("b", "one"), new("a", "one")]);
+        Check(found.NextIndex is null && found.Items.Length == 4 && found.Items[1] is null);
+        Check(found.Items[0]!.Key == "two" && found.Items[0]!.Version == version &&
+            found.Items[0]!.Value.SequenceEqual(new byte[] { 0, 255 }));
+        Check(found.Items[2]!.Key == "one" && found.Items[2]!.Value.Length == 0 &&
+            found.Items[3]!.Value.SequenceEqual(new byte[] { 49 }));
+        Check((await client.KvGetAsync(kvName, "a", "one")).Value.SequenceEqual(new byte[] { 49 }));
+        // A condition that fails anywhere in the batch writes nothing.
+        await Fails<VLiteException>(() => client.KvBatchAsync(kvName, [
+            new KvBatchOperation.Put("a", "new", [120]),
+            new KvBatchOperation.Delete("a", "one", new Expected.Revision(version + 1000))]),
+            e => Check(e.Status == 412 && e.Code == "precondition_failed" && e.RequestId is not null));
+        var after = await client.KvGetManyAsync(kvName, [new("a", "new"), new("a", "one")]);
+        Check(after.Items[0] is null && after.Items[1]!.Value.SequenceEqual(new byte[] { 49 }));
+        // Conditions that hold; a replaced entry gets a larger version, and one batch shares one version.
+        var again = await client.KvBatchAsync(kvName, [
+            new KvBatchOperation.Put("a", "one", [49, 49], new Expected.Revision(version)),
+            new KvBatchOperation.Put("a", "new", [120], new Expected.Absent()),
+            new KvBatchOperation.Delete("b", "one", new Expected.Revision(version))]);
+        var shared = ((KvBatchResult.Put)again[0]).Version;
+        Check(shared > version && again[1] == new KvBatchResult.Put(shared) && again[2] == new KvBatchResult.Delete(true));
+        await Fails<VLiteException>(() => client.KvBatchAsync(kvName, [new KvBatchOperation.Put("a", "new", [121], new Expected.Absent())]),
+            e => Check(e.Status == 412 && e.Code == "precondition_failed"));
+        var listed = (await client.KvListAsync(kvName, "a")).Items;
+        Check(listed.Select(entry => entry.Key).SequenceEqual(new[] { "new", "one", "two" }) &&
+            listed[1].Value.SequenceEqual(new byte[] { 49, 49 }));
+        Check((await client.KvBatchAsync(kvName, [])).Length == 0);
+        var removed = await client.KvBatchAsync(kvName, [new KvBatchOperation.Delete("a", "new"),
+            new KvBatchOperation.Delete("a", "one"), new KvBatchOperation.Delete("a", "two")]);
+        Check(removed.All(result => result == new KvBatchResult.Delete(true)));
+        Check((await client.KvListAsync(kvName, "a")).Items.Length == 0);
+        await Fails<VLiteException>(() => client.KvGetManyAsync("kvmissing", [new("a", "k")]),
+            e => Check(e.Status == 404 && e.Code == "collection_not_found"));
+    }
+    finally { await client.Collection(kvName).DropAsync(); }
     Console.WriteLine("Live e2e passed");
 }
 else Console.WriteLine("Live e2e skipped (VLITE_URL is unset)");
