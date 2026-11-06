@@ -2,12 +2,12 @@
 
 Agent memory lets an AI agent keep what it learns between sessions. A caller remembers items in an exact scope, recalls them later with bounded, ranked retrieval, consolidates them into summaries and forgets them. It is built from a property graph and an optional evidence collection in the same database file, and it is off unless an operator provides a bindings file.
 
-This guide covers VLite 0.7.1: what the server serves, how to use it from each interface and what it refuses. The reference text is in [Agent memory (REST)](API.md#agent-memory-rest), [Memory-bound resources](SECURITY.md#memory-bound-resources) and the [serving contract](projects/roadmap/serving-memory-contract.md).
+This guide covers VLite 0.7.1: what the server serves, how to use it from each interface and what it refuses. The reference text is in [Agent memory (REST)](API.md#agent-memory-rest), [Memory-bound resources](SECURITY.md#memory-bound-resources) and the [serving contract](projects/roadmap/serving-memory-contract.md). The shell examples are POSIX `sh` (bash, zsh, Git Bash or WSL): in PowerShell `$VLITE_URL` is empty, a backslash does not continue a line and `EXPIRES=$((...))` is not valid.
 
 ## Concepts
 
 - **Binding.** A name that an operator provisions for one graph and at most one evidence collection, together with the scopes each credential may use and a receipt window. Callers use only the name, in `POST /v1/memory/{binding}/...`; they never name the graph or the collection. A binding name matches `^[a-z][a-z0-9_-]{0,62}$` and belongs to one tenant (`@root` or a tenant ID) that the caller never sends.
-- **Scope.** `{"agent": "a"}`, optionally with a `user`, and with a `session` only when there is a `user`. Each part is 1 to 256 UTF-8 bytes without control characters. Matching is exact: a memory in `{"agent":"a","user":"u"}` is not visible in `{"agent":"a"}`, and the reverse. A mutation names one scope. Recall names one scope and may add up to 16 `scopes`; the credential must be granted every one.
+- **Scope.** `{"agent": "a"}`, optionally with a `user`, and with a `session` only when there is a `user`. Each part is 1 to 256 UTF-8 bytes without control characters. Matching is exact: a memory in `{"agent":"a","user":"u"}` is not visible in `{"agent":"a"}`, and the reverse. A mutation names one scope. Recall names one scope and may list `scopes` (at most 16 in total, `scope` included); the credential must be granted every one.
 - **Memory item.** An `entity` (a thing, a person, a place) or an `episodic` memory (something that happened). It has an ID that you choose, text content of at most 4,096 bytes, an observation time, a source, an importance from 0 to 1 and an optional expiry. Facts and relations are not served.
 - **Evidence.** Records in the binding's evidence collection that a memory holds. They carry the vectors and text that recall searches, and recall returns their snippets. Memory routes cannot create evidence records: a holder of `raw_access` writes them (see [Evidence references](#evidence-references-and-raw-access)).
 - **Revision.** Each memory has a revision: 1 when it is created and one more for each merge. Forget and consolidate name the revision they expect.
@@ -29,7 +29,14 @@ There are no `GET`, `HEAD` or `DELETE` aliases. A request must use `Content-Type
 
 ## Set up a binding
 
-An operator sets memory up once. The steps use the ordinary admin routes, so run them against a server that is already in protected mode with an admin token and an admin directory (see [server setup](REFERENCE.md#rest-service-optional)); scoped credentials need both.
+An operator sets memory up once. The steps use the ordinary admin routes, so run them against a server that is already in protected mode with an admin token and an admin directory (see [server setup](REFERENCE.md#rest-service-optional)); scoped credentials need both. Start one first, without the bindings file, and use the same `VLITE_ADMIN_DIR` for every later start, because the credentials live in the admin directory. This runs the server in the background of one shell; run the steps in that shell:
+
+```sh
+export VLITE_URL=http://127.0.0.1:8080 VLITE_ADMIN_DIR=./admin
+python3 -c "import secrets; print(secrets.token_urlsafe(32))" > admin.token
+export VLITE_ADMIN_TOKEN=$(cat admin.token)
+vlite-server data.vlite --bind 127.0.0.1:8080 --create-if-missing 3 --create-format 5 --token-file admin.token &
+```
 
 1. **Create the graph and the evidence collection.** Memory needs a database with graph support (every new file has it). The evidence collection must be a new collection, not `default`. Its dimension is the length of the vectors you will store, and `text_fields` names the metadata fields that text recall searches.
 
@@ -43,7 +50,7 @@ An operator sets memory up once. The steps use the ordinary admin routes, so run
      -d '{"name":"notes_ev","dimensions":3,"settings":{"text_fields":["text"]}}'
    ```
 
-2. **Create a scoped credential for the agent, and one for a raw holder if you need one.** A memory credential needs `graph_read` and `graph_write` for the graph, and `read`, `search` and `write` on the evidence collection. Name the collection or use `["*"]`. Once a bindings file reserves the collection, a request that names it answers 404, so create the credential first or give it `["*"]`. The response carries the token, which is shown once, and the credential's 12-character ID.
+2. **Create two scoped credentials: one for the agent and one for the raw holder that the evidence example needs.** Run this step twice, with the names `notes-agent` and `notes-raw`. A memory credential needs `graph_read` and `graph_write` for the graph, and `read`, `search` and `write` on the evidence collection. Name the collection or use `["*"]`. Once a bindings file reserves the collection, a request that names it answers 404, so create the credential first or give it `["*"]`. The response carries the `token`, which is shown once: set `VLITE_TOKEN` to the token of `notes-agent` and `VLITE_RAW_TOKEN` to the token of `notes-raw`. Each `credential.id` (12 characters) is a grant's principal in step 3. The client examples below read `VLITE_AUTH_TOKEN`: give it the same token as `VLITE_TOKEN`, never the admin token.
 
    ```sh
    EXPIRES=$(( ($(date +%s) + 30 * 86400) * 1000 ))
@@ -61,7 +68,7 @@ An operator sets memory up once. The steps use the ordinary admin routes, so run
    | `remember`, `forget` | `graph_write` | `write` |
    | `consolidate` | `graph_write` | none |
 
-3. **Write the bindings file.** Replace `abcdefghij27` with the credential ID. The file is strict JSON of at most 1 MiB; keep it in a directory that only the operator can write.
+3. **Write the bindings file.** Replace `abcdefghij27` with the ID of the `notes-agent` credential and `klmnopqrst27` with the ID of `notes-raw`. The file is strict JSON of at most 1 MiB; keep it in a directory that only the operator can write.
 
    ```json
    {"version": "memory-bindings-v1", "bindings": [{
@@ -69,21 +76,21 @@ An operator sets memory up once. The steps use the ordinary admin routes, so run
      "graph": "notes_graph", "evidence_collection": "notes_ev",
      "schema_version": "memory-schema-v1", "ranking_version": "memory-ranking-v1",
      "digest_version": "memory-request-v1", "receipt_window_ms": 86400000,
-     "grants": [{"principal": "abcdefghij27", "scopes": [{"agent": "assistant", "user": "ada"}]}]
+     "grants": [{"principal": "abcdefghij27", "scopes": [{"agent": "a"}, {"agent": "agent-1"}, {"agent": "assistant", "user": "ada"}]},
+                {"principal": "klmnopqrst27", "scopes": [{"agent": "a"}], "raw_access": true}]
    }]}
    ```
 
-   A grant lists the exact scopes that credential may use. `"raw_access": true` on a grant lets that credential also reach the graph and the collection through the raw routes. `receipt_window_ms` runs from 1 to 2,592,000,000 (30 days). A file holds at most 256 bindings, 1,024 grants per binding and 256 scopes per grant. Once memory has been written, a binding's receipt window, graph and evidence names never change, and its `generation` must rise whenever its grants or state change. [Start the server with memory](API.md#start-the-server-with-memory) lists every rule, including retiring a binding.
+   A grant lists the exact scopes that credential may use; the scopes above are the ones the examples in this guide use. `"raw_access": true` on a grant lets that credential also reach the graph and the collection through the raw routes: the `notes-raw` credential needs it for the evidence example. `receipt_window_ms` runs from 1 to 2,592,000,000 (30 days). A file holds at most 256 bindings, 1,024 grants per binding and 256 scopes per grant. After the first start with the file, a binding's receipt window, graph and evidence names never change. Raise `generation` when grants or state change and keep it otherwise; startup refuses both mistakes. Editing the file after the first start, for example to add a grant, without a higher `generation` makes startup exit with `a memory binding changed without a higher generation`. [Start the server with memory](API.md#start-the-server-with-memory) lists every rule, including retiring a binding.
 
-4. **Restart with the file.**
+4. **Stop that server and restart it with the file.**
 
    ```sh
-   vlite-server data.vlite --token-file admin.token --memory-bindings-file bindings.json
+   vlite-server data.vlite --bind 127.0.0.1:8080 --create-if-missing 3 --create-format 5 --token-file admin.token --memory-bindings-file bindings.json
    ```
 
-   `VLITE_MEMORY_BINDINGS_FILE` does the same. Startup refuses to run when the graph or the collection is missing, when a resource already holds ordinary data, or when the file breaks a rule, and its message never names the binding. While a binding is configured, the server refuses `--grpc-bind` and automatic index maintenance, and imports, replication export and some aggregate admin routes answer 403. Without the file there are no memory routes.
+   `VLITE_MEMORY_BINDINGS_FILE` does the same. Restart with the same `VLITE_ADMIN_DIR` and token file as before: the credentials live in the admin directory, so without it the credential from step 2 no longer exists. Startup refuses to run when the graph or the collection is missing, when a resource already holds ordinary data, or when the file breaks a rule, and its message never names the binding. While a binding is configured, the server refuses `--grpc-bind` and automatic index maintenance, and imports, replication export and some aggregate admin routes answer 403. Without the file there are no memory routes, but a graph-enabled database still has its binding records read at startup: the server refuses to start if they cannot be read or are not valid, and if binding records remain after the file is removed, `--grpc-bind` and automatic index maintenance stop the start.
 
-<!-- TODO-VERIFY: the setup commands were not run as written (shell quoting, `$EXPIRES`); their JSON bodies match the requests that scripts/memory_live_e2e.py sends to /v1/graphs, /v1/collections and /v1/admin/credentials. -->
 
 Neither the admin token nor the read-only token can use the memory routes: a binding grants a credential, and only scoped credentials are granted.
 
@@ -123,7 +130,7 @@ The request also takes `deadline_ms` (1 to 5,000, default 250), the time budget 
 
 Remember never overwrites a memory. A request is one commit, so it succeeds or fails as a whole, and no item is reported separately.
 
-- An item that repeats an existing memory (same scope, kind, content and a source that memory already lists) changes nothing: its outcome is `noop` with the memory's current revision.
+- An item that repeats an existing memory (same scope, kind, content and a source that memory already lists) changes nothing: its outcome is `noop` with the memory's current revision. The match is by scope, kind, content and source, not by id: a repeat under another id answers `noop` with the `id` and `revision` of the memory that exists.
 - An item whose `id` already exists with other content, kind or source is refused with 412 `precondition_failed`.
 - To add another source to an existing memory, send an item with the same `id`, kind and content, `"merge": "merge_provenance"` and `"expected": {"revision": N}` for its current revision. The outcome is `merged` with revision N + 1. A wrong revision answers 412, an unknown memory 404 `memory_not_found`.
 - Two items with the same `id` in one request answer 422 `invalid_input`.
@@ -145,7 +152,7 @@ A request needs at least one of `vector`, `text` and `entity_seeds`. A binding w
 
 | Field | Meaning |
 |---|---|
-| `scope` | Required. `scopes` optionally lists up to 16 more, and must contain `scope`. |
+| `scope` | Required. `scopes` optionally lists at most 16 scopes in total, `scope` included. |
 | `entity_seeds`, `vector`, `text` | The query, as above. `vector` has at least one finite number. |
 | `kinds` | Up to 4 distinct kinds. Default: `entity` and `episodic`. |
 | `limit` | 1 to 100 results (default 20). It cannot exceed `limits.candidates`. |
@@ -209,10 +216,10 @@ Vector and text recall find a memory through the evidence record that it holds, 
      -d '{"vector":[10,0,0],"payload_base64":"bG9yZSBsb3JlIGxvcmU=","metadata":{"text":{"type":"string","value":"lore lore lore"}}}'
    ```
 
-2. The same credential remembers an item that references the record. `collection` is the binding's name, and `record` is a `u64` as an integer or a decimal string:
+2. The same credential remembers an item that references the record. Give the item content that no other memory of the scope has: a repeat is matched to the memory that exists (see [Remember](#remember)), and a record that memory does not hold is refused. `collection` is the binding's name, and `record` is a `u64` as an integer or a decimal string:
 
    ```json
-   {"scope":{"agent":"a"},"idempotency_key":"k2","items":[{"id":"ev-a","kind":"entity","content":"Ada","observed_at_ms":"90","source":{"source_id":"s1","source_kind":"caller"},"evidence":[{"collection":"notes","record":7001}]}]}
+   {"scope":{"agent":"a"},"idempotency_key":"k2","items":[{"id":"ev-a","kind":"entity","content":"Ada's notebook","observed_at_ms":"90","source":{"source_id":"s1","source_kind":"caller"},"evidence":[{"collection":"notes","record":7001}]}]}
    ```
 
 The rules:
@@ -267,7 +274,7 @@ These examples are the ones that ship with the repository. Each assumes a server
 
 ### REST
 
-The `curl` examples above are the REST examples. The wire fixtures in `tests/fixtures/agent_memory/wire/` hold more requests and answers for every route.
+The `curl` examples above are the REST examples. The wire fixtures in `tests/fixtures/agent_memory/wire/` hold more requests and answers for every route. The dashboard's MemoryAI workspace uses the same routes (see the [dashboard guide](CONSOLE.md#memoryai)).
 
 ### Python
 
@@ -297,6 +304,8 @@ except UnsupportedError:  # 404 not_found: the server has no memory routes
     pass
 ```
 
+Text and vector recall find only memories that hold an evidence record, so the text recall above returns nothing on a new binding. Recall with `"entity_seeds": ["e1"]` to see what you saved.
+
 ### JavaScript
 
 From the [JavaScript client guide](../clients/javascript/README.md#memory-operations):
@@ -312,6 +321,8 @@ const saved = await memory.remember({ scope, idempotency_key: "remember-1",
 console.log(saved.receipt.sequence, saved.outcomes);
 console.log((await memory.recall({ scope, text: "Ada" })).memories);
 ```
+
+Text and vector recall find only memories that hold an evidence record, so this recall returns nothing on a new binding. Recall with `entity_seeds: ["ada"]` to see what you saved.
 
 ### .NET
 
@@ -331,19 +342,20 @@ var found = await memory.RecallAsync(new MemoryRecallRequest(scope, Text: "Ada",
 Console.WriteLine(saved.Receipt.Sequence);
 ```
 
-<!-- TODO-VERIFY: the .NET example is the clients README example completed with `observedAtMs`; it was not compiled here (no .NET build was run for this docs work). -->
+
+Text and vector recall find only memories that hold an evidence record, so this recall returns nothing on a new binding. Recall with `EntitySeeds: ["e1"]` to see what you saved.
 
 All three clients have nine methods, one `POST` each, and return the full response. They never retry, split, page, embed or invent an idempotency key, and they surface a refusal with its `details.feature` unchanged. A timeout or lost connection throws a transport error: the mutation may have committed.
 
 ### MCP
 
-Build `vlite-mcp` with `mcp-proxy` (the release archives include it) and point it at the server. The memory tools exist only with `--server`:
+Build `vlite-mcp` with `mcp-proxy` (the release archives include it) and point it at the server. The memory tools exist only with `--server`. Read-only is the default; the example below uses `--writable`, because it calls a write tool:
 
 ```sh
-vlite-mcp --server https://vlite.example --token-env VLITE_TOKEN --read-only
+vlite-mcp --server "$VLITE_URL" --token-env VLITE_TOKEN --writable
 ```
 
-Read-only mode lists `vlite_memory_recall`, `vlite_memory_facts`, `vlite_memory_receipt` and `vlite_memory_erasure`. With `--writable` it also lists `vlite_memory_remember`, `vlite_memory_correct_facts`, `vlite_memory_consolidate`, `vlite_memory_forget` and `vlite_memory_resume_erasure`. Each tool takes flat arguments plus a required `binding`:
+Without `--writable` the server lists `vlite_memory_recall`, `vlite_memory_facts`, `vlite_memory_receipt` and `vlite_memory_erasure`; with it, it also lists `vlite_memory_remember`, `vlite_memory_correct_facts`, `vlite_memory_consolidate`, `vlite_memory_forget` and `vlite_memory_resume_erasure`. Each tool takes flat arguments plus a required `binding`:
 
 ```json
 {"jsonrpc":"2.0","id":3,"method":"tools/call","params":{"name":"vlite_memory_remember","arguments":{"binding":"notes","scope":{"agent":"a"},"idempotency_key":"k1","items":[{"id":"e1","kind":"entity","content":"Ada","observed_at_ms":"90","source":{"source_id":"s1","source_kind":"caller"}}]}}}
@@ -356,11 +368,11 @@ The token comes from the environment variable that `--token-env` names. Memory c
 `vlite-memory-cli` sends one request file to a binding with one verb: `remember`, `recall`, `facts`, `correct-facts`, `consolidate`, `forget`, `receipt`, `erasure` or `resume-erasure`. It is built with the `mcp-proxy` feature and is in the release archives, not in the Docker images.
 
 ```sh
-vlite-memory-cli --url https://localhost:8443 --binding notes --token-env VLITE_TOKEN remember --request remember.json
-vlite-memory-cli --url https://localhost:8443 --binding notes --token-env VLITE_TOKEN recall --request recall.json
+vlite-memory-cli --url "$VLITE_URL" --binding notes --token-env VLITE_TOKEN remember --request remember.json
+vlite-memory-cli --url "$VLITE_URL" --binding notes --token-env VLITE_TOKEN recall --request recall.json
 ```
 
-The request files hold the JSON bodies. These are the CLI test fixtures:
+Save the two bodies below as `remember.json` and `recall.json`. They are the CLI test fixtures:
 
 ```json
 {"scope":{"agent":"a"},"idempotency_key":"k1","items":[{"id":"e1","kind":"entity","content":"Ada","observed_at_ms":"90","source":{"source_id":"s1","source_kind":"caller"}}]}
@@ -394,7 +406,7 @@ A refusal is `{"error":{"code":"…","message":"…","details":{…}}}`. `detail
 
 | Status | Code | Meaning here |
 |---|---|---|
-| 400, 413, 415 | `invalid_json` | Not one JSON object with unique keys, too large, or the wrong media type. |
+| 400, 413, 415 | `invalid_json` | Not JSON, duplicate keys, too large, or the wrong media type. A JSON value that is not an object answers 422 `invalid_input` (`details.field` `body`). |
 | 401 | `unauthorized` | No or an invalid credential. |
 | 403 | `forbidden_scope` | No grant for the binding, the scope, the graph or the evidence collection, or a credential that is not scoped. An unknown binding gives the same answer. |
 | 403 | `read_only`, `tenant_suspended`, `tenant_unavailable` | The node is read-only, or the tenant is not available. |
@@ -418,7 +430,7 @@ The OpenAPI document also names codes for capabilities that are not served (`mem
 
 ## What is unavailable
 
-These are refused, never ignored or partly applied: 409 `memory_capability_unavailable` with `details.feature`, after authorization and before validation (a read-only node answers 403 `read_only` first).
+These are refused, never ignored or partly applied: 409 `memory_capability_unavailable` with `details.feature`, after authorization and before the rest of validation: a request whose `scope` is missing, invalid or not granted is refused first (422 or 403), and so is a write to a read-only node (403 `read_only`).
 
 | Route | Refused (`details.feature`) |
 |---|---|
@@ -430,7 +442,9 @@ These are refused, never ignored or partly applied: 409 `memory_capability_unava
 | `forget` | `forget_target` (series or entity), `erasure_jobs` (session or scope target, `allow_job`), `forget_expire` (`mode: expire`) |
 | `receipts/lookup` | `remember_receipt_lookup` |
 
-Approximate recall answers 422 `memory_bounded_plan_unsupported`: no approximate index is built for a binding, and none is built on demand. Memory has no provider that turns text into vectors; send the vector yourself. ## Security model
+Approximate recall answers 422 `memory_bounded_plan_unsupported`: no approximate index is built for a binding, and none is built on demand. Memory has no provider that turns text into vectors; send the vector yourself.
+
+## Security model
 
 - **Only scoped credentials.** A binding grants credential IDs exact scopes. The admin token and the read-only token hold no grant and are refused (403), and so is a credential without a grant for the binding or scope: the answer is the same 403 as for an unknown binding, so a caller cannot probe which bindings exist. There is no parent, child or sibling fallback between scopes.
 - **Memory grants are not raw access.** A credential also needs `graph_read` or `graph_write` for the graph and the evidence permissions its route uses. Memory grants never confer access to the graph or the collection through the raw routes.
