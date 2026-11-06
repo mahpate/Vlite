@@ -225,7 +225,7 @@
   },
   {
     "id": "f3-kv-abi/K9",
-    "desc": "a namespace of 256 bytes is accepted",
+    "desc": "a namespace of 256 bytes is not refused before the collection is looked up",
     "file": "bindings/c/src/kv.rs",
     "old": "bounded(namespace, \"namespace\", 1, 255)?;",
     "new": "bounded(namespace, \"namespace\", 1, 256)?;",
@@ -233,7 +233,7 @@
   },
   {
     "id": "f3-kv-abi/K10",
-    "desc": "a key of 1025 bytes is accepted",
+    "desc": "a key of 1025 bytes is not refused before the collection is looked up",
     "file": "bindings/c/src/kv.rs",
     "old": "bounded(key, \"key\", 1, 1024)?;",
     "new": "bounded(key, \"key\", 1, 1025)?;",
@@ -241,7 +241,7 @@
   },
   {
     "id": "f3-kv-abi/K11",
-    "desc": "a list limit of 10001 is accepted",
+    "desc": "a list limit of 10001 is not refused before the collection is looked up",
     "file": "bindings/c/src/kv.rs",
     "old": "if !(1..=10_000).contains(&limit) {",
     "new": "if !(1..=10_001).contains(&limit) {",
@@ -337,7 +337,7 @@
   },
   {
     "id": "f3-kv-abi/K23",
-    "desc": "the measured size of an entry undercounts the base64 value",
+    "desc": "the measured size of an entry undercounts the base64 of a partial group of three bytes",
     "file": "bindings/c/src/kv.rs",
     "old": "+ value_len.div_ceil(3) * 4",
     "new": "+ value_len * 4 / 3",
@@ -345,7 +345,7 @@
   },
   {
     "id": "f3-kv-abi/K24",
-    "desc": "a page never carries the cursor of the entry that follows it",
+    "desc": "the cursor that follows a page is left out of the measured page size",
     "file": "bindings/c/src/kv.rs",
     "old": "let next = entry.has_next.then_some(entry.key);",
     "new": "let next: Option<&str> = None;",

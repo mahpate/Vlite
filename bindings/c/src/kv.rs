@@ -793,6 +793,10 @@ mod tests {
             r#"{"op":"kv","request":{"op":"get","collection":"default","collection":"default","namespace":"n","key":"a"}}"#,
             r#"{"op":"kv","request":{"op":"get","op":"get","collection":"default","namespace":"n","key":"a"}}"#,
             r#"{"op":"kv","request":{"op":"delete","collection":"default","namespace":"n","key":"a","expected":{"revision":"1","revision":"1"}}}"#,
+            // Inside an array, which no field of the dialect holds: the repeat is
+            // still found before the request is read, not reported as another error.
+            r#"{"op":"kv","request":[{"a":1,"a":2}]}"#,
+            r#"{"op":"kv","request":{"op":"get","collection":"default","namespace":"n","key":"a","other":[[{"b":1,"b":1}]]}}"#,
         ] {
             let response = call_text(db, request);
             assert_eq!(response["ok"], false, "{request}");
@@ -870,6 +874,32 @@ mod tests {
             .map(|collection| collection["name"].as_str().unwrap())
             .collect();
         assert_eq!(names, ["default"]);
+        close(db);
+    }
+
+    #[test]
+    fn an_address_or_limit_out_of_bounds_is_refused_before_the_collection_is_looked_up() {
+        // The core refuses these too, after it has looked the collection up.
+        let db = memory(1);
+        for request in [
+            json!({"op": "get", "collection": "absent", "namespace": "n".repeat(256), "key": "k"}),
+            json!({"op": "get", "collection": "absent", "namespace": "n", "key": "k".repeat(1025)}),
+            json!({"op": "list", "collection": "absent", "namespace": "n", "limit": 10001}),
+        ] {
+            assert_eq!(code(db, request.clone()), "invalid_input", "{request}");
+        }
+        // The largest of each is within bounds and reaches the lookup.
+        for request in [
+            json!({"op": "get", "collection": "absent", "namespace": "n".repeat(255), "key": "k"}),
+            json!({"op": "get", "collection": "absent", "namespace": "n", "key": "k".repeat(1024)}),
+            json!({"op": "list", "collection": "absent", "namespace": "n", "limit": 10000}),
+        ] {
+            assert_eq!(
+                code(db, request.clone()),
+                "collection_not_found",
+                "{request}"
+            );
+        }
         close(db);
     }
 
@@ -1144,8 +1174,9 @@ mod tests {
         assert_eq!(all["next_after"], Value::Null);
     }
 
-    /// The compact JSON a page of `specs` has when every entry fits.
-    fn json_len(specs: &[Spec]) -> usize {
+    /// The compact JSON a page of `specs` has when every entry fits and
+    /// `next_after` is its cursor.
+    fn json_len_after(specs: &[Spec], next_after: Value) -> usize {
         let items: Vec<Value> = specs
             .iter()
             .map(|spec| {
@@ -1157,9 +1188,14 @@ mod tests {
                 )
             })
             .collect();
-        json!({"items": items, "next_after": null})
+        json!({"items": items, "next_after": next_after})
             .to_string()
             .len()
+    }
+
+    /// The same without a cursor.
+    fn json_len(specs: &[Spec]) -> usize {
+        json_len_after(specs, Value::Null)
     }
 
     #[test]
@@ -1167,23 +1203,56 @@ mod tests {
         let pair = |value_len: usize, key_len: usize| {
             vec![spec("a", value_len), spec(&"z".repeat(key_len), value_len)]
         };
-        // Each 3 value bytes add 4 characters to both items; the second key's
-        // length then tunes the page to the byte.
-        let value_len = (PAGE_BYTES - json_len(&pair(0, 1)) - 100) / 8 * 3;
-        let base = json_len(&pair(value_len, 1));
-        let key_len = 1 + PAGE_BYTES - base;
-        let exact = pair(value_len, key_len);
-        assert_eq!(json_len(&exact), PAGE_BYTES);
+        // One or two value bytes more than a whole number of groups of three
+        // still take four more characters in each item.
+        for extra in 0..3 {
+            // Each 3 value bytes add 4 characters to both items; the second key's
+            // length then tunes the page to the byte.
+            let value_len = (PAGE_BYTES - json_len(&pair(0, 1)) - 100) / 8 * 3 + extra;
+            let base = json_len(&pair(value_len, 1));
+            let key_len = 1 + PAGE_BYTES - base;
+            let exact = pair(value_len, key_len);
+            assert_eq!(json_len(&exact), PAGE_BYTES, "{extra}");
+            let page = page_of(&exact, 2);
+            assert_eq!(page["items"].as_array().unwrap().len(), 2, "{extra}");
+            assert_eq!(page["next_after"], Value::Null, "{extra}");
+            assert_eq!(page.to_string().len(), PAGE_BYTES, "{extra}");
+            // One byte more and the second entry moves to the next page.
+            let over = pair(value_len, key_len + 1);
+            assert_eq!(json_len(&over), PAGE_BYTES + 1, "{extra}");
+            let page = page_of(&over, 2);
+            assert_eq!(page["items"].as_array().unwrap().len(), 1, "{extra}");
+            assert_eq!(page["next_after"], "a", "{extra}");
+        }
+    }
+
+    #[test]
+    fn the_cursor_that_follows_a_page_counts_toward_its_size() {
+        // Three entries and a limit of two: the page ends at the second entry,
+        // which also names the cursor.
+        let cursor = "z".repeat(40);
+        let trio = |value_len: usize, key_len: usize| {
+            vec![
+                spec(&"a".repeat(key_len), value_len),
+                spec(&cursor, value_len),
+                spec("zz", 0),
+            ]
+        };
+        let page_len = |specs: &[Spec]| json_len_after(&specs[..2], Value::from(cursor.as_str()));
+        let value_len = (PAGE_BYTES - page_len(&trio(0, 1)) - 100) / 8 * 3;
+        let key_len = 1 + PAGE_BYTES - page_len(&trio(value_len, 1));
+        let exact = trio(value_len, key_len);
+        assert_eq!(page_len(&exact), PAGE_BYTES);
         let page = page_of(&exact, 2);
         assert_eq!(page["items"].as_array().unwrap().len(), 2);
-        assert_eq!(page["next_after"], Value::Null);
+        assert_eq!(page["next_after"], cursor.as_str());
         assert_eq!(page.to_string().len(), PAGE_BYTES);
-        // One byte more and the second entry moves to the next page.
-        let over = pair(value_len, key_len + 1);
-        assert_eq!(json_len(&over), PAGE_BYTES + 1);
+        // One byte more and the second entry no longer fits with its cursor.
+        let over = trio(value_len, key_len + 1);
+        assert_eq!(page_len(&over), PAGE_BYTES + 1);
         let page = page_of(&over, 2);
         assert_eq!(page["items"].as_array().unwrap().len(), 1);
-        assert_eq!(page["next_after"], "a");
+        assert_eq!(page["next_after"], over[0].key.as_str());
     }
 
     #[test]
