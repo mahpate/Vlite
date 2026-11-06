@@ -83,6 +83,8 @@ An operator sets memory up once. The steps use the ordinary admin routes, so run
 
    `VLITE_MEMORY_BINDINGS_FILE` does the same. Startup refuses to run when the graph or the collection is missing, when a resource already holds ordinary data, or when the file breaks a rule, and its message never names the binding. While a binding is configured, the server refuses `--grpc-bind` and automatic index maintenance, and imports, replication export and some aggregate admin routes answer 403. Without the file there are no memory routes.
 
+<!-- TODO-VERIFY: the setup commands were not run as written (shell quoting, `$EXPIRES`); their JSON bodies match the requests that scripts/memory_live_e2e.py sends to /v1/graphs, /v1/collections and /v1/admin/credentials. -->
+
 Neither the admin token nor the read-only token can use the memory routes: a binding grants a credential, and only scoped credentials are granted.
 
 ## Remember
@@ -328,6 +330,8 @@ var saved = await memory.RememberAsync(new MemoryRememberRequest(scope, "key-1",
 var found = await memory.RecallAsync(new MemoryRecallRequest(scope, Text: "Ada", Limit: 5));
 Console.WriteLine(saved.Receipt.Sequence);
 ```
+
+<!-- TODO-VERIFY: the .NET example is the clients README example completed with `observedAtMs`; it was not compiled here (no .NET build was run for this docs work). -->
 
 All three clients have nine methods, one `POST` each, and return the full response. They never retry, split, page, embed or invent an idempotency key, and they surface a refusal with its `details.feature` unchanged. A timeout or lost connection throws a transport error: the mutation may have committed.
 
