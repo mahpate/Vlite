@@ -150,7 +150,9 @@ message PutVectorRequest {
   bytes payload = 4;
   map<string, MetadataValue> metadata = 5;
   Expected expected = 6;
-  // Optional absolute Unix-millisecond expiry; requires format V5.
+  // Optional absolute Unix-millisecond expiry; requires format V5. A deadline
+  // at or before the server clock when the write is applied is refused with
+  // INVALID_ARGUMENT and nothing is written.
   optional uint64 expires_at_ms = 7;
 }
 
