@@ -167,7 +167,67 @@ powershell -NoProfile -ExecutionPolicy Bypass -File .\devbox.ps1 -Token
     </div>
   </section>
 
-  <section id="dashboard-preview">
+  <section id="products">
+    <div class="wrap">
+      <div class="section-head"><div class="kicker">Toolkit</div><h2>One engine, many ways in</h2></div>
+      <div class="product-map" aria-label="VLite product and capability overview">
+        <div class="product-map-intro">
+          <img src="assets/logo.svg" alt="" width="44" height="44">
+          <div class="label">Single-file vector and graph database</div>
+          <h3>VLite</h3>
+          <p>Vectors, graphs, key-value data and agent memory.</p>
+          <a class="more" href="architecture.html">Explore the engine &#8594;</a>
+        </div>
+        <div class="product-map-core">
+          <div class="product-map-row product-connect"><div class="lane-art" aria-hidden="true"></div><h3><span class="product-symbol" aria-hidden="true">{ }</span> SDKs &amp; APIs</h3><div class="product-chips"><a href="#quickstart">Rust</a><a href="#quickstart">Python</a><a href="#quickstart">Node.js</a><a href="https://github.com/mahpate/Vlite/blob/main/clients/README.md#go">Go</a><a href="https://github.com/mahpate/Vlite/blob/main/clients/README.md#net">.NET</a><a href="docs/INSTALL.html">C ABI</a><a href="api.html">REST</a><a href="docs/GRPC.html">gRPC</a></div></div>
+          <div class="product-map-row product-retrieve"><div class="lane-art" aria-hidden="true"></div><h3><span class="product-symbol" aria-hidden="true">&#8981;</span> Search &amp; indexes</h3><div class="product-chips"><span>Exact search</span><span>Dense &amp; sparse</span><span>BM25 hybrid</span><span>Typed filters</span><span>HNSW</span><span>Scalar u8</span></div></div>
+          <div class="product-map-row product-store"><div class="lane-art" aria-hidden="true"></div><h3><span class="product-symbol" aria-hidden="true">&#9636;</span> Runtime &amp; storage</h3><div class="product-chips"><span>Embedded</span><a href="docs/DOCKER-OPERATIONS.html">Docker</a><span>Collections</span><span>Atomic batches</span><a href="docs/INSTALL.html">Linux</a><a href="docs/INSTALL.html">macOS</a><a href="docs/INSTALL.html">Windows</a></div></div>
+          <div class="product-map-row product-graph"><div class="lane-art" aria-hidden="true"></div><h3><span class="product-symbol" aria-hidden="true">&#9741;</span> Property graphs</h3><div class="product-chips"><span>Nodes &amp; typed edges</span><span>Vector attachments</span><span>Traversal &amp; paths</span><span>Graph retrieval</span><span>Expiry &amp; algorithms</span><a href="docs/GRAPH.html">Graph guide</a></div></div>
+          <div class="product-map-row product-memory">
+            <div class="lane-art">
+              <svg class="lane-fallback" viewBox="0 0 240 200" role="img" aria-label="Key-value lookup connects a key to its value. MemoryAI recall connects a query to remembered episodes.">
+                <g class="lane-kv"><text x="12" y="20">Key-value lookup</text><g class="lane-diagram">
+                  <circle cx="58" cy="58" r="9"/><path d="M67 58H154m-7-5 7 5-7 5"/><rect x="154" y="43" width="36" height="30" rx="4"/><path d="M162 53h20m-20 10h14"/>
+                </g></g>
+                <g class="lane-memory"><text x="12" y="112">MemoryAI recall</text><g class="lane-diagram">
+                  <path d="M76 154 128 132 172 158 128 182ZM128 132v50M76 154l96 4"/>
+                  <circle cx="76" cy="154" r="8"/><circle cx="128" cy="132" r="6"/><circle cx="172" cy="158" r="6"/><circle cx="128" cy="182" r="6"/>
+                </g></g>
+              </svg>
+            </div>
+            <h3><span class="product-symbol" aria-hidden="true">&#9906;</span> Key-value &amp; MemoryAI</h3>
+            <div class="product-chips"><a href="docs/KEY-VALUE.html">Keys, values, versions</a><a href="docs/MEMORY.html">Agent memory (opt-in)</a></div>
+          </div>
+        </div>
+        <aside class="product-map-tools" aria-label="Tools and agents">
+          <h3>Tools &amp; agents</h3>
+          <a href="dashboard.html"><strong>Dashboard</strong><span>Data, MemoryAI and administration</span></a>
+          <a href="docs/TOOLS.html"><strong>CLI tools</strong><span>Shell, imports, tuning, graphs and memory</span></a>
+          <a href="docs/MCP.html"><strong>MCP server</strong><span>Vectors, graphs, key-value and memory tools</span></a>
+          <a href="docs/AGENT-SKILLS.html"><strong>Agent skills</strong><span>RAG, operations and tuning</span></a>
+        </aside>
+      </div>
+      <div class="section-head" id="deployment-options"><h3>Where does VLite run?</h3><p>In your app or self-hosted. Your data, your file.</p></div>
+      <div class="grid cols-2 deployment-options">
+        <article class="card"><div class="label">Embedded</div><h3>Your app opens the file</h3>
+          <picture><source media="(prefers-color-scheme: dark)" srcset="assets/diagrams/deployment-embedded-dark.svg"><img src="assets/diagrams/deployment-embedded-light.svg" data-light="assets/diagrams/deployment-embedded-light.svg" data-dark="assets/diagrams/deployment-embedded-dark.svg" alt="Embedded: your application calls the VLite library in the same process; the library owns a local database file. No API service or dashboard is required." width="520" height="690" loading="lazy"></picture>
+          <p>Add the library; no separate service.</p><a class="more" href="#quickstart">Embedded example &#8594;</a></article>
+        <article class="card"><div class="label">Self-hosted</div><h3>You run the server</h3>
+          <picture><source media="(prefers-color-scheme: dark)" srcset="assets/diagrams/deployment-self-hosted-dark.svg"><img src="assets/diagrams/deployment-self-hosted-light.svg" data-light="assets/diagrams/deployment-self-hosted-light.svg" data-dark="assets/diagrams/deployment-self-hosted-dark.svg" alt="Self-hosted: clients and an optional browser dashboard call vlite-server. Its embedded engine owns the database file on your server's persistent storage." width="520" height="690" loading="lazy"></picture>
+          <p><code>vlite-server</code> serves REST, gRPC and the dashboard. You manage access, HTTPS, backups and upgrades.</p><a class="more" href="docs/DOCKER-OPERATIONS.html">Deployment guide &#8594;</a></article>
+      </div>
+      <aside class="product-adoption" aria-label="Applications using VLite">
+        <div><div class="label">Real applications</div><h3>Powered by VLite</h3>
+          <ul class="adoption-apps">
+            <li><span class="icon" aria-hidden="true"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="9"/><path d="M3 12h18"/><path d="M12 3a14 14 0 0 1 0 18a14 14 0 0 1 0-18z"/></svg></span><a href="https://asendme.com">ASENDME.com</a></li>
+            <li><span class="icon" aria-hidden="true"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="9"/><path d="M3 12h18"/><path d="M12 3a14 14 0 0 1 0 18a14 14 0 0 1 0-18z"/></svg></span><a href="https://pools.asendme.com">Peer Pool</a></li>
+          </ul></div>
+        <a class="btn" href="asendme.html">Explore ASENDME &#8594;</a>
+      </aside>
+    </div>
+  </section>
+
+  <section id="dashboard-preview" class="alt">
     <div class="wrap">
       <div class="section-head">
         <div class="kicker">Dashboard</div>
@@ -197,51 +257,6 @@ powershell -NoProfile -ExecutionPolicy Bypass -File .\devbox.ps1 -Token
         </div>
         <figcaption><a href="dashboard.html">Take the dashboard tour &#8594;</a></figcaption>
       </figure>
-    </div>
-  </section>
-
-  <section id="products" class="alt">
-    <div class="wrap">
-      <div class="section-head"><div class="kicker">Toolkit</div><h2>One engine, many ways in</h2></div>
-      <div class="product-map" aria-label="VLite product and capability overview">
-        <div class="product-map-intro">
-          <img src="assets/logo.svg" alt="" width="44" height="44">
-          <div class="label">Single-file vector and graph database</div>
-          <h3>VLite</h3>
-          <p>Vectors, graphs, key-value data and agent memory.</p>
-          <a class="more" href="architecture.html">Explore the engine &#8594;</a>
-        </div>
-        <div class="product-map-core">
-          <div class="product-map-row product-connect"><div class="lane-art" aria-hidden="true"></div><h3><span class="product-symbol" aria-hidden="true">{ }</span> SDKs &amp; APIs</h3><div class="product-chips"><a href="#quickstart">Rust</a><a href="#quickstart">Python</a><a href="#quickstart">Node.js</a><a href="https://github.com/mahpate/Vlite/blob/main/clients/README.md#go">Go</a><a href="https://github.com/mahpate/Vlite/blob/main/clients/README.md#net">.NET</a><a href="docs/INSTALL.html">C ABI</a><a href="api.html">REST</a><a href="docs/GRPC.html">gRPC</a></div></div>
-          <div class="product-map-row product-retrieve"><div class="lane-art" aria-hidden="true"></div><h3><span class="product-symbol" aria-hidden="true">&#8981;</span> Search &amp; indexes</h3><div class="product-chips"><span>Exact search</span><span>Dense &amp; sparse</span><span>BM25 hybrid</span><span>Typed filters</span><span>HNSW</span><span>Scalar u8</span></div></div>
-          <div class="product-map-row product-store"><div class="lane-art" aria-hidden="true"></div><h3><span class="product-symbol" aria-hidden="true">&#9636;</span> Runtime &amp; storage</h3><div class="product-chips"><span>Embedded</span><a href="docs/DOCKER-OPERATIONS.html">Docker</a><span>Collections</span><span>Atomic batches</span><a href="docs/KEY-VALUE.html">Key-value store</a><a href="docs/MEMORY.html">MemoryAI (opt-in)</a><a href="docs/INSTALL.html">Linux</a><a href="docs/INSTALL.html">macOS</a><a href="docs/INSTALL.html">Windows</a></div></div>
-          <div class="product-map-row product-graph"><div class="lane-art" aria-hidden="true"></div><h3><span class="product-symbol" aria-hidden="true">&#9741;</span> Property graphs</h3><div class="product-chips"><span>Nodes &amp; typed edges</span><span>Vector attachments</span><span>Traversal &amp; paths</span><span>Graph retrieval</span><span>Expiry &amp; algorithms</span><a href="docs/GRAPH.html">Graph guide</a></div></div>
-        </div>
-        <aside class="product-map-tools" aria-label="Tools and agents">
-          <h3>Tools &amp; agents</h3>
-          <a href="dashboard.html"><strong>Dashboard</strong><span>Data, MemoryAI and administration</span></a>
-          <a href="docs/TOOLS.html"><strong>CLI tools</strong><span>Shell, imports, tuning, graphs and memory</span></a>
-          <a href="docs/MCP.html"><strong>MCP server</strong><span>Vectors, graphs, key-value and memory tools</span></a>
-          <a href="docs/AGENT-SKILLS.html"><strong>Agent skills</strong><span>RAG, operations and tuning</span></a>
-        </aside>
-      </div>
-      <div class="section-head" id="deployment-options"><h3>Where does VLite run?</h3><p>In your app or self-hosted. Your data, your file.</p></div>
-      <div class="grid cols-2 deployment-options">
-        <article class="card"><div class="label">Embedded</div><h3>Your app opens the file</h3>
-          <picture><source media="(prefers-color-scheme: dark)" srcset="assets/diagrams/deployment-embedded-dark.svg"><img src="assets/diagrams/deployment-embedded-light.svg" data-light="assets/diagrams/deployment-embedded-light.svg" data-dark="assets/diagrams/deployment-embedded-dark.svg" alt="Embedded: your application calls the VLite library in the same process; the library owns a local database file. No API service or dashboard is required." width="520" height="690" loading="lazy"></picture>
-          <p>Add the library; no separate service.</p><a class="more" href="#quickstart">Embedded example &#8594;</a></article>
-        <article class="card"><div class="label">Self-hosted</div><h3>You run the server</h3>
-          <picture><source media="(prefers-color-scheme: dark)" srcset="assets/diagrams/deployment-self-hosted-dark.svg"><img src="assets/diagrams/deployment-self-hosted-light.svg" data-light="assets/diagrams/deployment-self-hosted-light.svg" data-dark="assets/diagrams/deployment-self-hosted-dark.svg" alt="Self-hosted: clients and an optional browser dashboard call vlite-server. Its embedded engine owns the database file on your server's persistent storage." width="520" height="690" loading="lazy"></picture>
-          <p><code>vlite-server</code> serves REST, gRPC and the dashboard. You manage access, HTTPS, backups and upgrades.</p><a class="more" href="docs/DOCKER-OPERATIONS.html">Deployment guide &#8594;</a></article>
-      </div>
-      <aside class="product-adoption" aria-label="Applications using VLite">
-        <div><div class="label">Real applications</div><h3>Powered by VLite</h3>
-          <ul class="adoption-apps">
-            <li><span class="icon" aria-hidden="true"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="9"/><path d="M3 12h18"/><path d="M12 3a14 14 0 0 1 0 18a14 14 0 0 1 0-18z"/></svg></span><a href="https://asendme.com">ASENDME.com</a></li>
-            <li><span class="icon" aria-hidden="true"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="9"/><path d="M3 12h18"/><path d="M12 3a14 14 0 0 1 0 18a14 14 0 0 1 0-18z"/></svg></span><a href="https://pools.asendme.com">Peer Pool</a></li>
-          </ul></div>
-        <a class="btn" href="asendme.html">Explore ASENDME &#8594;</a>
-      </aside>
     </div>
   </section>
 

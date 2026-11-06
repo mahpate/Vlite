@@ -119,6 +119,9 @@ def check(root):
             if all(name in page.sections for name in ("quickstart", "features")):
                 if page.sections.index("quickstart") > page.sections.index("features"):
                     errors.append("index.html: quickstart must precede the feature inventory")
+            if all(name in page.sections for name in ("products", "dashboard-preview")):
+                if page.sections.index("products") > page.sections.index("dashboard-preview"):
+                    errors.append("index.html: Toolkit must precede Dashboard")
             for anchor in ("products", "features", "capabilities", "quickstart"):
                 if anchor not in page.ids:
                     errors.append(f"index.html: missing legacy anchor {anchor}")

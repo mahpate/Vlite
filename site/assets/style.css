@@ -206,13 +206,22 @@ h3 { font-weight: 600; letter-spacing: -.01em; }
 .product-map-intro > .more { grid-area: more; font-weight: 600; white-space: nowrap; }
 .product-map-intro .label, .product-map-tools h3 { margin: 0; font: 600 11.5px/1.5 var(--mono); letter-spacing: .12em; text-transform: uppercase; color: var(--accent); }
 /* Lane cards: assets/landing3d.js draws into each .lane-art from one canvas, so rows must not be transformed. */
-.product-map-core { position: relative; display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 20px; min-width: 0; }
+.product-map-core { position: relative; display: grid; grid-template-columns: repeat(5, minmax(0, 1fr)); gap: 20px; min-width: 0; }
 .product-map-row { --lane: var(--k-meta); --spot: var(--lane); position: relative; overflow: hidden; display: flex; flex-direction: column; min-width: 0; padding: 20px; border: 1px solid color-mix(in srgb, var(--lane) 38%, var(--border)); border-radius: 16px; background: linear-gradient(180deg, color-mix(in srgb, var(--lane) 7%, var(--card)), var(--card) 62%); box-shadow: var(--shadow); transition: border-color .25s ease, box-shadow .25s ease; }
 .product-map-row:hover, .product-map-row:focus-within { border-color: color-mix(in srgb, var(--lane) 70%, var(--border)); box-shadow: var(--shadow), 0 22px 50px -28px color-mix(in srgb, var(--lane) 75%, transparent); }
 .product-retrieve { --lane: var(--k-dense); }
 .product-store { --lane: var(--k-collections); }
 .product-graph { --lane: var(--k-graph); }
-.lane-art { flex: none; height: 150px; margin: -20px -20px 18px; border-bottom: 1px solid color-mix(in srgb, var(--lane) 22%, var(--border)); background: radial-gradient(60% 75% at 50% 55%, color-mix(in srgb, var(--lane) 20%, transparent), transparent 72%), radial-gradient(circle, color-mix(in srgb, var(--lane) 35%, transparent) 1px, transparent 1.6px) 0 0 / 16px 16px; }
+.product-memory { --lane: var(--k-kv); }
+.product-memory .lane-art { height: 200px; }
+.lane-fallback { position: relative; z-index: 3; display: block; width: 100%; height: 100%; pointer-events: none; }
+.lane-fallback text { fill: var(--text); font: 14px var(--mono); }
+.lane-kv { color: var(--k-kv); }
+.lane-memory { color: var(--k-memory); }
+.lane-diagram { fill: var(--card); stroke: currentColor; stroke-width: 2; stroke-linecap: round; stroke-linejoin: round; }
+.lane-diagram path { fill: none; }
+.lanes-3d .lane-diagram { visibility: hidden; }
+.lane-art { flex: none; height: 200px; margin: -20px -20px 18px; border-bottom: 1px solid color-mix(in srgb, var(--lane) 22%, var(--border)); background: radial-gradient(60% 75% at 50% 55%, color-mix(in srgb, var(--lane) 20%, transparent), transparent 72%), radial-gradient(circle, color-mix(in srgb, var(--lane) 35%, transparent) 1px, transparent 1.6px) 0 0 / 16px 16px; }
 .lanes-3d .lane-art { background: radial-gradient(60% 75% at 50% 55%, color-mix(in srgb, var(--lane) 16%, transparent), transparent 72%); }
 .lane-canvas { position: absolute; inset: 0; z-index: 2; display: block; width: 100%; height: 100%; pointer-events: none; }
 .product-map-row h3 .badge { display: inline-block; margin-left: 6px; padding: 1px 8px; font-size: 11px; vertical-align: 2px; white-space: nowrap; }
@@ -238,6 +247,7 @@ h3 { font-weight: 600; letter-spacing: -.01em; }
 .adoption-apps li { display: flex; align-items: center; gap: 10px; min-width: 0; font-weight: 600; }
 .adoption-apps .icon { width: 32px; height: 32px; border-radius: 10px; }
 .adoption-apps .icon svg { width: 17px; height: 17px; }
+@media (max-width: 1200px) { .product-map-core { grid-template-columns: repeat(3, minmax(0, 1fr)); } }
 @media (max-width: 1080px) { .product-map-core, .product-map-tools { grid-template-columns: repeat(2, minmax(0, 1fr)); } }
 @media (max-width: 640px) {
   .product-map-intro { grid-template-columns: auto minmax(0, 1fr); grid-template-areas: "logo label" "logo title" "text text" "more more"; gap: 2px 16px; padding: 22px; }
@@ -365,7 +375,10 @@ h3 { font-weight: 600; letter-spacing: -.01em; }
   .hero-canvas, .landing .eyebrow::before, .landing .hero .grad, .fm-status.fm-commit, .fm-status.fm-commit rect { animation: none; }
   .landing .hero .btn.primary::after { transition: none; }
 }
-@media print { .hero-canvas, .lane-canvas { display: none; } }
+@media print {
+  .hero-canvas, .lane-canvas { display: none; }
+  .lanes-3d .lane-diagram { visibility: visible; }
+}
 
 /* sections */
 .dashboard-gallery { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 28px; }

@@ -1396,7 +1396,58 @@ function graphLane() {
   return { U, scene, materials, update, still: 1.1, ex: 2.2, ey: 2.0, ez: 0.4, dir: [0, 0.3, 1] };
 }
 
-const LANES = { "product-connect": sdkLane, "product-retrieve": searchLane, "product-store": storageLane, "product-graph": graphLane };
+function memoryLane() {
+  const U = laneUniforms();
+  const scene = new THREE.Scene();
+  const materials = [];
+  const layers = ["kv", "memory"].map((kind) => {
+    const uniforms = { ...U, uCol: { value: [1, 1, 1] } };
+    const group = add(scene, new THREE.Group(), 0);
+    const nodes = kind === "kv"
+      ? [[-1.6, 1.1, 0], [1.1, 1.1, 0], [1.1, 1.5, 0], [1.8, 1.5, 0], [1.8, 0.7, 0], [1.1, 0.7, 0]]
+      : [[-1.6, -1.3, 0], [0, -0.75, 0], [1.55, -1.35, 0], [0, -1.95, 0]];
+    const edges = kind === "kv"
+      ? [[0, 1], [1, 2], [2, 3], [3, 4], [4, 5], [5, 1]]
+      : [[0, 1], [1, 2], [2, 3], [3, 0], [1, 3], [0, 2]];
+    const positions = edges.flatMap(([a, b]) => [...nodes[a], ...nodes[b]]);
+    const lines = laneLines(uniforms, geometry([["position", positions, 3]]), 0.75, 1, group);
+    const points = lanePoints(uniforms, [
+      ["position", nodes.flat(), 3], ["aSize", nodes.map((_, i) => i ? 0.18 : 0.3), 1],
+      ["aA", nodes.map(() => 0.85), 1], ["aB", nodes.map(() => 0), 1, true],
+    ], 2, group);
+    const pulse = lanePoints(uniforms, [
+      ["position", [0, 0, 0], 3, true], ["aSize", [0.26], 1],
+      ["aA", [1], 1], ["aB", [1], 1],
+    ], 3, group);
+    materials.push(lines.mat, points.mat, pulse.mat);
+    return { kind, uniforms, nodes, edges, lines, points, pulse };
+  });
+  const update = (t) => {
+    for (const layer of layers) {
+      const { kind, nodes, edges, points, pulse, lines } = layer;
+      const phase = (t / 2.4) % 1;
+      const segment = kind === "kv" ? 0 : Math.min(2, Math.floor(phase * 3));
+      const [a, b] = edges[segment];
+      mix3(nodes[a], nodes[b], kind === "kv" ? smooth(phase) : (phase * 3) % 1,
+        pulse.geo.attributes.position.array);
+      pulse.geo.attributes.position.needsUpdate = true;
+      const bright = points.geo.attributes.aB.array;
+      bright.fill(0);
+      bright[a] = 0.6;
+      bright[b] = 0.3 + 0.7 * Math.sin(Math.PI * phase);
+      points.geo.attributes.aB.needsUpdate = true;
+      lines.geo.attributes.aB.array.fill(0);
+      lines.geo.attributes.aB.array.fill(1, segment * 2, segment * 2 + 2);
+      lines.geo.attributes.aB.needsUpdate = true;
+    }
+  };
+  const theme = (P) => {
+    for (const layer of layers) layer.uniforms.uCol.value = P[layer.kind];
+  };
+  return { U, scene, materials, update, theme, still: 1.2, ex: 2.5, ey: 2.5, ez: 0, dir: [0, 0, 1] };
+}
+
+const LANES = { "product-connect": sdkLane, "product-retrieve": searchLane, "product-store": storageLane, "product-graph": graphLane, "product-memory": memoryLane };
 
 function watchLanes() {
   const core = document.querySelector("body.landing .product-map-core");

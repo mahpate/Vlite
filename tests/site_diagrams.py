@@ -255,6 +255,17 @@ def check_landing_previews(p, url, screenshots=None):
             page.goto(f"{url}/index.html")
             assert hero_state(page) == ["off", "no-webgl2"]
             assert page.locator("html").get_attribute("data-theme") == theme
+            for width in (1440, 900, 390, 320):
+                page.set_viewport_size({"width": width, "height": 1050})
+                check_toolkit(page)
+                if screenshots and width in (1440, 390):
+                    page.locator(".product-map-core").screenshot(
+                        path=str(screenshots / f"toolkit-fallback-{theme}-{width}.png"),
+                        style="header { visibility: hidden !important; }")
+            if screenshots:
+                page.set_viewport_size({"width": 390, "height": 1050})
+                page.evaluate("scrollTo(0, 0)")
+                page.screenshot(path=str(screenshots / f"homepage-{theme}-390.png"), full_page=True)
             for width in (1440, 580):
                 page.set_viewport_size({"width": width, "height": 1050})
                 check_hero_labels(page)
@@ -283,6 +294,111 @@ def check_three_exports(site):
     for module in ("graph3d.js", "ambience.js"):
         used.update(re.findall(r"\bTHREE\.(\w+)", (ROOT / "src" / "dashboard" / module).read_text(encoding="utf-8")))
     assert used and used <= exported, sorted(used - exported)
+
+
+def check_toolkit(page, animated=False):
+    assert page.locator("main > section[id]").evaluate_all(
+        "sections => sections.map(s => s.id)") == [
+            "quickstart", "products", "dashboard-preview", "features", "data-safety"]
+    core = page.locator(".product-map-core")
+    assert core.locator(".product-map-row").count() == 5
+    assert core.locator(".product-map-row").evaluate_all(
+        "rows => rows.map(r => [...r.classList].find(c => c !== 'product-map-row'))") == [
+            "product-connect", "product-retrieve", "product-store", "product-graph", "product-memory"]
+    card = page.locator(".product-memory")
+    assert "Key-value & MemoryAI" in card.locator("h3").inner_text()
+    assert card.locator('a[href="docs/KEY-VALUE.html"]').inner_text() == "Keys, values, versions"
+    assert card.locator('a[href="docs/MEMORY.html"]').inner_text() == "Agent memory (opt-in)"
+    assert page.locator('.product-store a[href="docs/MEMORY.html"]').count() == 0
+    for kind, label in (("kv", "Key-value lookup"), ("memory", "MemoryAI recall")):
+        group = card.locator(f".lane-{kind}")
+        assert group.locator("text").text_content() == label
+        assert group.locator("text").is_visible()
+        assert group.locator(".lane-diagram").is_visible() != animated
+        assert group.locator(".lane-diagram path").count() > 0
+    assert card.locator(".lane-memory circle").count() == 4
+    assert card.locator(".lane-kv rect").count() == 1
+    assert card.locator(".lane-fallback").get_attribute("aria-label") == (
+        "Key-value lookup connects a key to its value. MemoryAI recall connects a query to remembered episodes.")
+    assert card.evaluate("""card => [...card.querySelectorAll('h3, a')].every(e =>
+        e.scrollWidth <= e.clientWidth + 1)"""), "fifth card text clips"
+    assert card.locator(".lane-fallback text").evaluate_all("""labels => labels.every(label => {
+        const m = label.getScreenCTM();
+        return parseFloat(getComputedStyle(label).fontSize) * Math.hypot(m.a, m.b) >= 12;
+    })"""), "diagram labels must remain readable"
+    assert core.locator(".product-map-row").evaluate_all("""rows => rows.every(row =>
+        rows.filter(peer => peer.offsetTop === row.offsetTop).every(peer =>
+            peer.querySelector('.lane-art').offsetHeight === row.querySelector('.lane-art').offsetHeight))
+    """), "illustration dividers must align across each row"
+    width = page.viewport_size["width"]
+    columns = 5 if width > 1200 else 3 if width > 1080 else 2 if width > 640 else 1
+    assert core.evaluate("e => getComputedStyle(e).gridTemplateColumns.split(' ').length") == columns
+    assert page.evaluate("document.documentElement.scrollWidth <= innerWidth")
+    if animated:
+        assert core.locator(".lane-canvas").count() == 1, "all five scenes share one renderer"
+
+
+def check_toolkit_buffers(p, url):
+    module = (ROOT / "site" / "assets" / "landing3d.js").read_text(encoding="utf-8")
+    marker = "const lanes = [];"
+    assert module.count(marker) == 1
+    module = module.replace(marker, marker + "\n  view.inspect = () => lanes;\n")
+    marker = "return { U, scene, materials, update, theme, still: 1.2, ex: 2.5, ey: 2.5, ez: 0, dir: [0, 0, 1] };"
+    assert module.count(marker) == 1
+    module = module.replace(marker, marker.replace("return {", "return { layers,"))
+    module += "\nexport { views, palette };\n"
+    browser = p.chromium.launch(args=SWIFTSHADER)
+    try:
+        context = browser.new_context(reduced_motion="reduce", viewport={"width": 1440, "height": 1050})
+        context.route("**/assets/landing3d.js", lambda route: route.fulfill(
+            content_type="text/javascript", body=module))
+        page = context.new_page()
+        errors = []
+        track_errors(page, errors)
+        page.goto(f"{url}/index.html?force3d")
+        hero_state(page)
+        page.locator(".product-map-core").scroll_into_view_if_needed()
+        page.wait_for_selector(".lanes-3d .lane-canvas", state="attached")
+        for theme in ("light", "dark"):
+            page.evaluate("theme => document.documentElement.dataset.theme = theme", theme)
+            page.wait_for_timeout(200)
+            result = page.evaluate("""async () => {
+                const { views, palette } = await import('./assets/landing3d.js');
+                const lanes = views.find(v => v.optional).inspect();
+                const lane = lanes.find(l => l.row.classList.contains('product-memory'));
+                const P = palette();
+                return { count: lanes.length, layers: lane.layers.map(layer => {
+                    const {kind, uniforms, nodes, edges, points, lines, pulse} = layer;
+                    lane.update(0.3);
+                    const before = [...pulse.geo.attributes.position.array];
+                    lane.update(1.7);
+                    const moving = before.some((v, i) => v !== pulse.geo.attributes.position.array[i]);
+                    lane.update(lane.still);
+                    const still = [...pulse.geo.attributes.position.array];
+                    lane.update(lane.still);
+                    return { kind, nodes: points.geo.attributes.position.count,
+                        lines: lines.geo.attributes.position.count,
+                        connected: edges.every(([a, b]) => a !== b && nodes[a] && nodes[b]),
+                        moving, still: still.every((v, i) => v === pulse.geo.attributes.position.array[i]),
+                        colored: uniforms.uCol.value.every((v, i) => Math.abs(v - P[kind][i]) < 0.00001),
+                        shared: uniforms.uPx === lane.U.uPx && uniforms.uScale === lane.U.uScale,
+                        highlight: [...points.geo.attributes.aB.array].some(v => v > 0)
+                    };
+                }) };
+            }""")
+            assert result["count"] == 5, result
+            assert [v["kind"] for v in result["layers"]] == ["kv", "memory"], result
+            assert [(v["nodes"], v["lines"]) for v in result["layers"]] == [(6, 12), (4, 12)], result
+            assert all(v[k] for v in result["layers"] for k in (
+                "connected", "moving", "still", "colored", "shared", "highlight")), result
+        page.emulate_media(media="print")
+        assert not page.locator(".lane-canvas").is_visible()
+        assert page.locator(".product-memory .lane-kv .lane-diagram").is_visible()
+        assert page.locator(".product-memory .lane-memory .lane-diagram").is_visible()
+        assert not errors, errors
+        context.close()
+    finally:
+        browser.close()
 
 
 def check_forced_3d(p, url, screenshots=None):
@@ -323,6 +439,14 @@ def check_forced_3d(p, url, screenshots=None):
                 if motion == "reduce":
                     lanes = drawn(page, core, ".lane-canvas", 0.01)
                     assert lanes > 0.01, (theme, "toolkit canvas drew too little", lanes)
+                    check_toolkit(page, animated=True)
+                    for kind in ("kv", "memory"):
+                        coverage = drawn(page, page.locator(f".product-memory .lane-{kind}"), ".lane-canvas", 0.005)
+                        assert coverage > 0.005, (theme, kind, "no actual canvas pixels", coverage)
+                    if screenshots:
+                        core.screenshot(path=str(screenshots / f"toolkit-{theme}-1440.png"))
+                        page.evaluate("scrollTo(0, 0)")
+                        page.screenshot(path=str(screenshots / f"homepage-{theme}-1440.png"), full_page=True)
                 else:
                     page.wait_for_timeout(1500)
                 page.locator("#theme-toggle").click()
@@ -330,9 +454,15 @@ def check_forced_3d(p, url, screenshots=None):
                 assert page.evaluate(HERO_STATE)[0] == "ready"
                 if motion == "no-preference":
                     # The canvases follow layout changes without widening the page.
-                    for width in (900, 390, 320):
+                    for width in (1150, 900, 640, 390, 320):
                         page.set_viewport_size({"width": width, "height": 1050})
+                        core.scroll_into_view_if_needed()
                         page.wait_for_timeout(400)
+                        check_toolkit(page, animated=True)
+                        if screenshots and width in (900, 390):
+                            current_theme = page.locator("html").get_attribute("data-theme")
+                            core.screenshot(path=str(screenshots / f"toolkit-{current_theme}-{width}.png"),
+                                            style="header { visibility: hidden !important; }")
                         assert page.evaluate("document.documentElement.scrollWidth <= innerWidth"), (theme, width)
                         assert page.evaluate(HERO_STATE)[0] == "ready", (theme, width)
                         if width > 560:
@@ -672,6 +802,7 @@ def check(site, screenshots=None):
             for width in (1440, 580):
                 page.set_viewport_size({"width": width, "height": 1050})
                 check_hero_labels(page)
+                check_toolkit(page)
                 if screenshots:
                     page.locator(".hero-split").screenshot(
                         path=str(screenshots / f"hero-no-js-{width}.png"))
@@ -680,6 +811,7 @@ def check(site, screenshots=None):
             forced = check_forced_3d(p, url, screenshots)
             if forced:
                 check_landing_buffers(p, url)
+                check_toolkit_buffers(p, url)
             check_landing_previews(p, url, screenshots)
             check_diagram_scenes(p, url, screenshots)
             check_diagram_palette(p, url)
@@ -691,6 +823,8 @@ def check(site, screenshots=None):
           "Skipped forced 3D checks: this Chromium has no WebGL2, even through SwiftShader.")
     print("Checked eight hero labels/connections, key-value and memory geometry/choreography, "
           "shader palettes, reduced motion and four keyboard-accessible dashboard previews.")
+    print("Checked Toolkit before Dashboard, five responsive cards, separate lookup/recall geometry, "
+          "shared renderer, actual canvas pixels, themes and SVG fallbacks.")
     print("Checked shared WebGL pixels on both deployment diagrams and all 14 architecture figures, "
           "light/dark, four widths, motion, ordered sequences, offscreen pause, context count and fallbacks.")
 
