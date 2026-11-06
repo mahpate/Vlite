@@ -1,16 +1,16 @@
 # Key-value store
 
-The key-value store keeps byte values under namespaced string keys, with no vector, inside an ordinary one-dimension collection. It offers compare-and-set on revisions, optional expiry and ordered prefix listing from Rust, REST, gRPC, the Python, JavaScript and .NET clients, and a local shell and MCP server.
+The key-value store saves byte values under text keys. It needs no vectors: each entry is a record in a collection whose vectors have one dimension. It offers compare-and-set on revisions, optional expiry and ordered prefix listing from Rust, REST, gRPC, the Python, JavaScript and .NET clients, and a local shell and MCP server.
 
-This guide explains how to use it and what it does not do. The reference text of each surface stays in [REST](API.md#key-value-entries), [gRPC](GRPC.md#key-value-entries), [storage features](STORAGE-FEATURES.md#key-value-store), the [MCP tools](MCP.md#local-key-value-tools), the [shell commands](TOOLS.md#local-key-value-shell-commands) and [Key-value permissions](SECURITY.md#key-value-permissions).
+This guide explains how to use it and what it does not do. The shell examples are POSIX `sh` (bash, zsh, Git Bash or WSL): in PowerShell `$VLITE_URL` is empty and a backslash does not continue a line. The reference text of each surface stays in [REST](API.md#key-value-entries), [gRPC](GRPC.md#key-value-entries), [storage features](STORAGE-FEATURES.md#key-value-store), the [MCP tools](MCP.md#local-key-value-tools), the [shell commands](TOOLS.md#local-key-value-shell-commands) and [Key-value permissions](SECURITY.md#key-value-permissions).
 
 ## Concepts
 
-- **Collection.** An entry is stored in an ordinary collection with one dimension. Use a dedicated collection for key-value data: vector, import and graph operations on the same collection can overwrite entries. The Rust `Database::kv_store` creates a missing one-dimension collection (format 4 or newer). Every other surface needs an existing collection, never creates one and answers 409 `not_kv_collection` for a collection with another dimension.
+- **Collection.** An entry is stored in an ordinary collection with one dimension. Use a dedicated collection for key-value data: vector, import and graph operations on the same collection can overwrite entries. The Rust `Database::kv_store` creates a missing one-dimension collection (format 4 or newer; new files are format 5). Every other surface needs an existing collection, never creates one and answers 409 `not_kv_collection` for a collection with another dimension.
 - **Namespace and key.** UTF-8 strings that are not normalized: a namespace is 1 to 255 bytes and a key 1 to 1,024 bytes. Keys sort by unsigned UTF-8 bytes. A namespace partitions keys inside one collection. It is not an authorization boundary: anyone who can read or write the collection can read or write every namespace in it.
 - **Value.** Bytes, from 0 to 1,047,290. Over JSON they travel as canonical padded standard base64.
 - **Version.** Each entry has a version, which is the commit sequence of its record. It is a decimal string over REST, MCP and the shell, and a `uint64` in gRPC and Rust. A put or delete can require the entry's current version (compare-and-set).
-- **Expiry.** An entry can carry an absolute deadline in Unix milliseconds (`expires_at_ms`). A due entry reads as absent. Expiry needs a format 5 file.
+- **Expiry.** An entry can carry an absolute deadline in Unix milliseconds (`expires_at_ms`). A due entry reads as absent. Expiry needs a format 5 file (new files are format 5).
 - **Storage.** There is no file format change. An entry is an ordinary record. Its record ID comes from a stable hash of the namespace and key, and the key may occupy any of 16 consecutive IDs (its *slots*). Ordinary record quotas count entries.
 
 ## Choose a surface
@@ -29,25 +29,25 @@ The shell and MCP tools open the file themselves, so stop `vlite-server` first, 
 
 ## Start with REST
 
-Create a one-dimension collection once (this needs the admin token or a credential that holds the `collections` operation on `*`), then write, read, list and delete. Put the server address and a token in `VLITE_URL` and `VLITE_TOKEN`.
+Create a one-dimension collection once (this needs the admin token or a credential that holds the `collections` operation on `*`), then write, read, list and delete. Put the server address and a token in `VLITE_URL` and `VLITE_AUTH_TOKEN`; the client examples read the same two.
 
 ```sh
 curl -sS -X POST "$VLITE_URL/v1/collections" \
-  -H "Authorization: Bearer $VLITE_TOKEN" -H "Content-Type: application/json" \
+  -H "Authorization: Bearer $VLITE_AUTH_TOKEN" -H "Content-Type: application/json" \
   -d '{"name":"cache","dimensions":1}'
 
 curl -sS -X PUT "$VLITE_URL/v1/collections/cache/kv/entry" \
-  -H "Authorization: Bearer $VLITE_TOKEN" -H "Content-Type: application/json" \
+  -H "Authorization: Bearer $VLITE_AUTH_TOKEN" -H "Content-Type: application/json" \
   -d '{"namespace":"app","key":"greeting","value_base64":"aGVsbG8=","expected":"absent"}'
 
 curl -sS "$VLITE_URL/v1/collections/cache/kv/entry?namespace=app&key=greeting" \
-  -H "Authorization: Bearer $VLITE_TOKEN"
+  -H "Authorization: Bearer $VLITE_AUTH_TOKEN"
 
 curl -sS "$VLITE_URL/v1/collections/cache/kv/entries?namespace=app&prefix=gre&limit=100" \
-  -H "Authorization: Bearer $VLITE_TOKEN"
+  -H "Authorization: Bearer $VLITE_AUTH_TOKEN"
 
 curl -sS -X DELETE "$VLITE_URL/v1/collections/cache/kv/entry?namespace=app&key=greeting&expected=any" \
-  -H "Authorization: Bearer $VLITE_TOKEN"
+  -H "Authorization: Bearer $VLITE_AUTH_TOKEN"
 ```
 
 The put answers `{"version":"…","expires_at_ms":null}`, the get `{"key":"greeting","value_base64":"aGVsbG8=","version":"…","expires_at_ms":null}`, the list `{"items":[…],"next_after":null}` and the delete `{"deleted":true}`. The put with `"expected":"absent"` creates the key and fails with 412 if it already exists.
@@ -81,7 +81,7 @@ A put returns the new version, so a read-modify-write loop does not need a secon
 
 A transport error is different from a 412: the write may have committed. Read the entry to find out before you decide anything (see [Durability](#durability)).
 
-Versions are commit sequences. They increase for a key within one file lineage, so they work as compare-and-set tokens, but compaction, upgrade and restore rewrite revisions. Read an entry again after any of those before you use an old version. A directory store checkpoint keeps every live record's revision, so versions stay valid across it.
+Versions are commit sequences. They increase for a key within one file lineage, so they work as compare-and-set tokens, but compaction, format upgrade and restore rewrite revisions. Read an entry again after any of those before you use an old version. A directory store checkpoint keeps every live record's revision, so versions stay valid across it.
 
 ## Expiry
 
@@ -113,7 +113,6 @@ fn print_keys(db: &Database) -> vlite::Result<()> {
     })
 }
 ```
-<!-- TODO-VERIFY: the Rust example above is written from the `visit_at` signature in src/kv.rs and site/api.html and was not compiled (cargo is not run for this docs work). -->
 
 ## Limits
 
@@ -137,8 +136,7 @@ A line over the shell or MCP limit is refused (`invalid_input: line exceeds 1677
 
 A key hashes to 16 consecutive record IDs. If all 16 hold live entries of other keys or other records, a put for that key answers 409 `kv_slots_exhausted` (gRPC `FAILED_PRECONDITION`; the shell and MCP prefix `kv_slots_exhausted:`). A slot that holds an expired entry of another key is reused, and a record that is not a key-value entry is never overwritten. Anyone who can write the collection can place ordinary records at a key's IDs, so give `write` on a key-value collection only to principals you trust with its keys.
 
-The JSON metrics carry `kv_slots_exhausted_total` and Prometheus carries `vlite_kv_slots_exhausted_total`: the number of key-value puts refused this way, across all credentials (a REST request whose client disconnected before the answer was produced is not counted; a gRPC call is counted even if its client cancels). A rise that nobody expects points at records planted over a key's IDs. The slots are the record IDs from `vlite::kv::first_slot(namespace, key)` (Rust), wrapping, so freeing a key means removing the other records at those IDs. Using another key also works.
-<!-- TODO-VERIFY: "freeing a key means removing the other records at those IDs" is derived from the slot probe in src/kv.rs, not from a documented procedure. -->
+The JSON metrics carry `kv_slots_exhausted_total` and Prometheus carries `vlite_kv_slots_exhausted_total`: the number of key-value puts refused this way, across all credentials (a REST request whose client disconnected before the answer was produced is not counted; a gRPC call is counted even if its client cancels). A rise that nobody expects points at records planted over a key's IDs. The slots are the record IDs from `vlite::kv::first_slot(namespace, key)` (Rust), wrapping. To free the key, delete any one of the other records at those IDs, or use another key.
 
 ## Durability
 
@@ -146,7 +144,7 @@ Key-value writes follow the server's configured durability. With `full`, a put o
 
 ## Revisions are not fencing tokens
 
-A version is a commit sequence inside one file lineage. It rises with every write to the file, and it changes after compaction, upgrade and restore. It is a compare-and-set token, not a durable lease-fencing token: entry revisions do not establish durable, never-reused fencing domains, so a version cannot stop a slow holder's later side effects. Leases and a fencing-token ledger are not implemented; they are a design only (see [Not included in 0.7.1](RELEASE-0.7.1.md#not-included-in-this-release)). A recipe that needs mutual exclusion must stay safe when two workers briefly believe they hold the same claim.
+A version is a commit sequence inside one file lineage. It rises with every write to the file, and it changes after compaction, format upgrade and restore. It is a compare-and-set token, not a durable lease-fencing token: entry revisions do not establish durable, never-reused fencing domains, so a version cannot stop a slow holder's later side effects. Leases and a fencing-token ledger are not implemented; they are a design only (see [Not included in 0.7.1](RELEASE-0.7.1.md#not-included-in-this-release)). A recipe that needs mutual exclusion must stay safe when two workers briefly believe they hold the same claim.
 
 ## Use it from a client
 
@@ -208,7 +206,7 @@ kv-list {"collection":"default","namespace":"cache","prefix":"","limit":100}
 kv-delete {"collection":"default","namespace":"cache","key":"a","expected":"any"}
 ```
 
-The example uses the `default` collection, which therefore has to be a one-dimension database; use the name of your own key-value collection otherwise. `vlite-mcp` lists `vlite_kv_get` and `vlite_kv_list`, and with `--writable` also `vlite_kv_put` and `vlite_kv_delete`; a `tools/call` takes the same fields as the shell command:
+The example uses the `default` collection. To try the shell commands on a new file, run `vlite-shell --db kv.vlite --create 1`; its default collection has one dimension. Otherwise use the name of your own key-value collection. `vlite-mcp` lists `vlite_kv_get` and `vlite_kv_list`, and with `--writable` also `vlite_kv_put` and `vlite_kv_delete`; a `tools/call` takes the same fields as the shell command:
 
 ```json
 {"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"vlite_kv_put","arguments":{"collection":"cache","namespace":"app","key":"a","value_base64":"AAEC","expected":"absent"}}}
@@ -299,7 +297,7 @@ The server's clock judges the deadline, so keep client clocks in step with it. E
 
 ### A claim without leases, and its caveats
 
-An absent-only put with a deadline is a time-limited claim on a key: exactly one of several workers succeeds, and the others get 412.
+An absent-only put with a deadline is a time-limited claim on a key: exactly one of several workers succeeds, and the others get 412. The code below uses its own one-dimension collection, `pool`, created like `cache`.
 
 ```python
 import os
@@ -326,7 +324,7 @@ def release(job: str, version: int) -> bool:
                                 expected={"revision": version})
     except VLiteError as error:
         if error.code == "precondition_failed":
-            return False  # the claim expired and someone else took it
+            return False  # the claim expired, or another worker holds it
         raise
 ```
 
