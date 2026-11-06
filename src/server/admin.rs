@@ -49,6 +49,17 @@ pub(super) struct AdminState {
     pub users: Option<Arc<super::users::Accounts>>,
 }
 impl AdminState {
+    /// Whether no administration token is configured. A transport that
+    /// authenticates from this state then serves every caller as the
+    /// administrator (the development mode).
+    pub fn is_open(&self) -> bool {
+        self.auth
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .admin
+            .is_none()
+    }
+
     pub fn record(&self, event: Value) {
         let mut audit = match self.audit.lock() {
             Ok(audit) => audit,
@@ -224,16 +235,19 @@ impl ServerOptions {
     }
 }
 
+/// A configured REST router and a gRPC router of one engine share its tokens
+/// and memory reservations through `Service::publish_reserving` and
+/// `Service::adopt_published`, which fixes the order they are built in: every
+/// REST router first, the gRPC router last. A router built in another order is
+/// refused here, before it changes anything, or at publication; either way an
+/// `Err` may leave the engine partly set up (records written, the admin
+/// directory created), so the caller discards the service.
 pub fn configured_admin_router(
     mut service: Service,
     options: ServerOptions,
 ) -> std::io::Result<Router> {
     options.validate()?;
-    if service.grpc_runs_unconfigured() {
-        return Err(std::io::Error::other(
-            "a gRPC router was already built from this service and applies none of this router's tokens or memory reservations; build the REST router first",
-        ));
-    }
+    service.refuse_after_unconfigured_grpc()?;
     if let Some(path) = &options.memory_bindings_file {
         service = service.with_bindings(read_memory_bindings(path)?);
     }

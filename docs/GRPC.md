@@ -47,13 +47,17 @@ answer. `vlite-server` still refuses `--grpc-bind` while a memory binding is
 configured or reserved records remain. A program that builds the routers itself
 must build every REST router first (`configured_admin_router`, then
 `grpc_router`): the listener applies the tokens and reservations that the REST
-routers had published when it was built, and a router that protects less (no
-admin token, or no reservations where an earlier one has them) does not replace
-them, so rotating a token means restarting the program, not building another
-router. `configured_admin_router` refuses to follow a `grpc_router` that adopted
-nothing, and refuses a router that reserves memory resources once any
-`grpc_router` exists; `router` and `authenticated_router` cannot refuse and log a
-warning for the first order.
+routers had published when it was built. A router that protects less (no admin
+token, or no reservations where an earlier one has them) does not replace them.
+Token files are reloaded in place (`POST /v1/admin/tokens/reload`) and the
+listener follows; any other change of tokens or reservations means building the
+routers again, not adding another. `configured_admin_router` refuses to follow a
+`grpc_router` that adopted nothing or an open router (no admin token), refuses a
+router that reserves memory resources once any `grpc_router` exists, and refuses
+a router that reserves and has no admin token while an earlier router has one and
+reserves nothing; after any refusal the program discards the service, because a
+router refused late may already have set the engine up. `router` and
+`authenticated_router` cannot refuse and log a warning for the first order.
 
 ## Scope
 

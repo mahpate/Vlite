@@ -51,21 +51,21 @@
     "id": "f3-s1/P7",
     "desc": "a gRPC router that adopted nothing does not record that it runs without a REST configuration",
     "file": "src/server.rs",
-    "old": "self.grpc_before_rest.store(true, Ordering::SeqCst);",
-    "new": "self.grpc_before_rest.store(false, Ordering::SeqCst);",
+    "old": "self.grpc_before_rest.store(true, Ordering::SeqCst);\n        false",
+    "new": "self.grpc_before_rest.store(false, Ordering::SeqCst);\n        false",
     "cmd": "cargo test --locked --offline --features grpc --lib server::published"
   },
   {
     "id": "f3-s1/P8",
     "desc": "configured_admin_router no longer refuses to follow a gRPC router that adopted nothing",
     "file": "src/server/admin.rs",
-    "old": "if service.grpc_runs_unconfigured() {",
-    "new": "if false && service.grpc_runs_unconfigured() {",
+    "old": "service.refuse_after_unconfigured_grpc()?;",
+    "new": "",
     "cmd": "cargo test --locked --offline --features grpc --lib server::published"
   },
   {
     "id": "f3-s1/P9",
-    "desc": "a configured REST router no longer publishes its configuration",
+    "desc": "router and authenticated_router no longer publish their configuration",
     "file": "src/server.rs",
     "old": "    service.publish();\n    routes(service)",
     "new": "    routes(service)",
@@ -115,8 +115,8 @@
     "id": "f3-s1/P14",
     "desc": "a router with an admin token never replaces the publication of one that has one",
     "file": "src/server.rs",
-    "old": "let protects_less = open(&self.admin) && admin",
-    "new": "let protects_less = true && admin",
+    "old": "self.admin.is_open() && admin.as_ref()",
+    "new": "true && admin.as_ref()",
     "cmd": "cargo test --locked --offline --features grpc --lib server::published"
   },
   {
@@ -137,10 +137,10 @@
   },
   {
     "id": "f3-s1/P17",
-    "desc": "publication does not check, under the publication locks, for a gRPC router built after the early check",
+    "desc": "publication does not check, under the publication locks, for a reserving router built after a gRPC router",
     "file": "src/server.rs",
-    "old": "if refuse_reserving_after_grpc {",
-    "new": "if false {",
+    "old": "self.refuse_reserving_after_grpc()?;",
+    "new": "",
     "cmd": "cargo test --locked --offline --features grpc --lib server::published"
   },
   {
@@ -157,6 +157,38 @@
     "file": "src/server.rs",
     "old": "if self.grpc_built.load(Ordering::SeqCst) && self.has_bindings() {",
     "new": "if self.grpc_built.load(Ordering::SeqCst) {",
+    "cmd": "cargo test --locked --offline --features grpc --lib server::published"
+  },
+  {
+    "id": "f3-s1/P21",
+    "desc": "a gRPC router that adopted a router published without an administration token is not remembered as running without tokens",
+    "file": "src/server.rs",
+    "old": "if admin.is_open() {",
+    "new": "if false && admin.is_open() {",
+    "cmd": "cargo test --locked --offline --features grpc --lib server::published"
+  },
+  {
+    "id": "f3-s1/P22",
+    "desc": "publication does not check, under the publication locks, for a gRPC router that runs without tokens",
+    "file": "src/server.rs",
+    "old": "self.refuse_after_unconfigured_grpc()?;",
+    "new": "",
+    "cmd": "cargo test --locked --offline --features grpc --lib server::published"
+  },
+  {
+    "id": "f3-s1/P23",
+    "desc": "a router that reserves and has no token is not refused over a held router that has a token and reserves nothing",
+    "file": "src/server.rs",
+    "old": "&& bindings.as_ref().is_some_and(|held| held.is_empty())",
+    "new": "&& bindings.as_ref().is_some_and(|held| false)",
+    "cmd": "cargo test --locked --offline --features grpc --lib server::published"
+  },
+  {
+    "id": "f3-s1/P24",
+    "desc": "a router that reserves and has no token is refused even where the held router has a token and reserves too",
+    "file": "src/server.rs",
+    "old": "&& bindings.as_ref().is_some_and(|held| held.is_empty())",
+    "new": "&& true",
     "cmd": "cargo test --locked --offline --features grpc --lib server::published"
   },
   {
