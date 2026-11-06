@@ -902,7 +902,7 @@ class FakeApi:
                 return route.fulfill(status=200, body=stream.read(), headers={"content-type": kind + "; charset=utf-8", "content-security-policy": CSP})
         body = json.loads(request.post_data) if request.post_data else None
         self.log.append({"method": request.method, "path": path, "query": query, "body": body, "headers": request.headers})
-        status, value, headers = self.memory_refusal(request.method, path, request.headers) or self.api(request.method, path, query, body, request.headers)
+        status, value, headers = self.memory_mode_refusal(request.method, path, request.headers) or self.api(request.method, path, query, body, request.headers)
         headers = {"cache-control": "no-store", "x-request-id": str(len(self.log)), **headers}
         if status == 204:
             return route.fulfill(status=204, headers=headers)
@@ -914,7 +914,7 @@ class FakeApi:
     def error(status, code):
         return status, {"error": {"code": code, "message": code.replace("_", " ")}}, {}
 
-    def memory_refusal(self, method, path, headers):
+    def memory_mode_refusal(self, method, path, headers):
         if not (self.memory and headers.get("authorization", "").startswith("Bearer ") and self.MEMORY_REFUSED.match(path)):
             return None
         if path.startswith("/v1/admin/webhooks") and method != "GET":
