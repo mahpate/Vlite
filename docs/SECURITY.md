@@ -87,10 +87,12 @@ and automatic-maintenance routes return `403 forbidden_scope`, including for
 credentials with `raw_access`. Webhook creation answers a reserved-name filter
 exactly as it answers a missing-name filter (both are accepted with `201`), so
 a subscription cannot be used to find out what is reserved; the dispatcher
-still filters reserved events from all subscriptions. The gRPC handlers
-resolve every name through the same per-request guard as the REST routes, but
-the gRPC listener and scheduled automatic index maintenance still fail closed
-at startup while a binding exists, until the release differential covers them.
+still filters reserved events from all subscriptions. The gRPC adapter applies
+the memory reservations of the REST router it is built after, resolves every
+name through the same per-request guard as the REST routes, and the generated
+guard differential compares the two transports over every RPC. The server still
+refuses `--grpc-bind` and scheduled automatic index maintenance at startup
+while a binding is configured or reserved resources remain.
 
 Each bound graph holds a binding record, the node `binding:v1`, with the
 binding's name, tenant, generation, state, receipt window, graph and evidence

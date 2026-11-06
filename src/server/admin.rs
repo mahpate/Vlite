@@ -229,6 +229,11 @@ pub fn configured_admin_router(
     options: ServerOptions,
 ) -> std::io::Result<Router> {
     options.validate()?;
+    if service.grpc_runs_unconfigured() {
+        return Err(std::io::Error::other(
+            "a gRPC router was already built from this service and applies none of this router's tokens or memory reservations; build the REST router first",
+        ));
+    }
     if let Some(path) = &options.memory_bindings_file {
         service = service.with_bindings(read_memory_bindings(path)?);
     }

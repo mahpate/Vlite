@@ -1,8 +1,10 @@
 //! Checks around the gRPC matrix (lane F3, slice S1): the inventory read from
-//! the proto, the calls that must take effect, the digest's sensitivity to a
-//! gRPC write, the markers a holder reads back, lists and feeds, grants, the
-//! RPCs that span the database, import jobs, console sessions and the audit
-//! trail of a hidden attempt.
+//! the proto (its rows, its exempt RPCs and the classification of request
+//! fields that look like names), the calls that must take effect, the digest's
+//! sensitivity to a gRPC write, the markers a holder reads back, lists and
+//! feeds, grants, the RPCs that span the database, import jobs, console
+//! sessions, the audit trail of a hidden attempt and the reader of server
+//! streams.
 
 use super::*;
 
@@ -32,14 +34,38 @@ struct ProtoRpc {
 
 struct ProtoModel {
     rpcs: Vec<ProtoRpc>,
-    /// Top-level messages and their fields as `(type, name)`; nested messages
-    /// are not entered.
+    /// Every message and its fields as `(type, name)`; a nested message is
+    /// keyed by its dotted name (`Operation.Put`). A map is recorded as the
+    /// type `map`: its key and value types are not followed.
     messages: BTreeMap<String, Vec<(String, String)>>,
 }
 
-fn proto_tokens() -> Vec<String> {
+impl ProtoModel {
+    /// The message that a field of type `ty`, declared in `scope`, refers to,
+    /// looked up the way protobuf does: in `scope`, then in each message that
+    /// encloses it, then at the top level. Scalars and enums are no message.
+    fn resolve(&self, scope: &str, ty: &str) -> Option<String> {
+        let mut scope = scope;
+        loop {
+            let candidate = if scope.is_empty() {
+                ty.to_owned()
+            } else {
+                format!("{scope}.{ty}")
+            };
+            if self.messages.contains_key(&candidate) {
+                return Some(candidate);
+            }
+            if scope.is_empty() {
+                return None;
+            }
+            scope = scope.rsplit_once('.').map_or("", |(outer, _)| outer);
+        }
+    }
+}
+
+fn proto_tokens(source: &str) -> Vec<String> {
     let mut tokens = Vec::new();
-    for line in PROTO.lines() {
+    for line in source.lines() {
         let line = line.split("//").next().unwrap_or_default();
         let mut word = String::new();
         for c in line.chars() {
@@ -61,10 +87,25 @@ fn proto_tokens() -> Vec<String> {
     tokens
 }
 
-/// The services, their RPCs and the fields of the top-level messages, read
-/// from the proto that the server is generated from.
+/// The services, their RPCs and the fields of the messages, read from the proto
+/// that the server is generated from.
 fn proto_model() -> ProtoModel {
-    let tokens = proto_tokens();
+    read_proto(PROTO)
+}
+
+/// The message a field being read belongs to: the innermost one that is open.
+fn innermost_message<'a>(blocks: &'a [(&str, String)]) -> Option<&'a String> {
+    blocks
+        .iter()
+        .rev()
+        .find(|(kind, _)| *kind == "message")
+        .map(|(_, name)| name)
+}
+
+/// The same for any proto source, so that the checks around the inventory can
+/// be tried on a proto of their own.
+fn read_proto(source: &str) -> ProtoModel {
+    let tokens = proto_tokens(source);
     let mut rpcs = Vec::new();
     let mut messages: BTreeMap<String, Vec<(String, String)>> = BTreeMap::new();
     let mut blocks: Vec<(&str, String)> = Vec::new();
@@ -78,13 +119,13 @@ fn proto_model() -> ProtoModel {
                 at += 3;
             }
             "message" => {
-                let kind = if blocks.is_empty() {
-                    messages.entry(tokens[at + 1].clone()).or_default();
-                    "message"
-                } else {
-                    "nested"
+                let name = &tokens[at + 1];
+                let full = match innermost_message(&blocks) {
+                    Some(outer) => format!("{outer}.{name}"),
+                    None => name.clone(),
                 };
-                blocks.push((kind, tokens[at + 1].clone()));
+                messages.entry(full.clone()).or_default();
+                blocks.push(("message", full));
                 at += 3;
             }
             "oneof" | "enum" => {
@@ -121,11 +162,7 @@ fn proto_model() -> ProtoModel {
                     at += 1;
                 }
                 if matches!(inside, Some("message" | "oneof")) {
-                    let owner = &blocks
-                        .iter()
-                        .find(|(kind, _)| *kind == "message")
-                        .unwrap()
-                        .1;
+                    let owner = innermost_message(&blocks).unwrap();
                     let statement: Vec<&str> =
                         tokens[start..at].iter().map(String::as_str).collect();
                     match statement.first().copied() {
@@ -164,6 +201,53 @@ const NAME_ALIASES: &[(&str, &str)] = &[
     ("DropCollectionRequest", "name"),
 ];
 
+/// Request fields that look like the name of a collection or a graph (a string
+/// called `name`, or with `collection` or `graph` in its name) and are none, as
+/// `(message, field, reason)`, a nested message by its dotted name. A field
+/// that looks like a name is either name-bearing (`NAME_FIELDS`,
+/// `NAME_ALIASES`), so that a row varies it, or listed here with its reason:
+/// `name_like_request_fields_are_classified` fails for any other, so that a new
+/// `source_collection` cannot slip past the inventory because it is not called
+/// `collection`.
+const NOT_A_NAME: &[(&str, &str, &str)] = &[
+    (
+        "NamedVectorSpec",
+        "name",
+        "the vector space being configured in the addressed collection",
+    ),
+    (
+        "NamedVector",
+        "name",
+        "a dense vector space of the addressed collection",
+    ),
+    (
+        "SparseVector",
+        "name",
+        "a sparse vector space of the addressed collection",
+    ),
+    (
+        "PutVectorVersionRequest",
+        "name",
+        "the vector space of the addressed collection that gets a version",
+    ),
+    (
+        "SearchNamedRequest",
+        "name",
+        "the vector space of the addressed collection that is searched",
+    ),
+    (
+        "SearchSparseRequest",
+        "name",
+        "the sparse vector space of the addressed collection that is searched",
+    ),
+];
+
+/// Whether a request field names a collection or a graph by the rule of the
+/// inventory: a string called as `NAME_FIELDS` says, or an alias.
+fn is_name_bearing(message: &str, ty: &str, field: &str) -> bool {
+    (ty == "string" && NAME_FIELDS.contains(&field)) || NAME_ALIASES.contains(&(message, field))
+}
+
 /// Where a request message names a collection or a graph, directly or through
 /// a message it carries: `collection`, `address.collection`.
 fn named_fields(
@@ -175,16 +259,116 @@ fn named_fields(
     let mut out = Vec::new();
     for (ty, field) in model.messages.get(message).into_iter().flatten() {
         let path = format!("{prefix}{field}");
-        let alias = NAME_ALIASES.contains(&(message, field.as_str()));
-        if (ty == "string" && NAME_FIELDS.contains(&field.as_str())) || alias {
+        if is_name_bearing(message, ty, field) {
             out.push(path);
-        } else if model.messages.contains_key(ty) && !seen.contains(ty) {
-            seen.push(ty.clone());
-            out.extend(named_fields(model, ty, &format!("{path}."), seen));
+        } else if let Some(inner) = model
+            .resolve(message, ty)
+            .filter(|inner| !seen.contains(inner))
+        {
+            seen.push(inner.clone());
+            out.extend(named_fields(model, &inner, &format!("{path}."), seen));
             seen.pop();
         }
     }
     out
+}
+
+/// The RPCs whose request names a collection or a graph, with where.
+fn name_bearing_rpcs(model: &ProtoModel) -> BTreeMap<String, Vec<String>> {
+    let mut bearing = BTreeMap::new();
+    for rpc in &model.rpcs {
+        let fields = named_fields(model, &rpc.request, "", &mut vec![rpc.request.clone()]);
+        if !fields.is_empty() {
+            bearing.insert(format!("{}/{}", rpc.service, rpc.name), fields);
+        }
+    }
+    bearing
+}
+
+/// The RPCs, exempt ones left out, whose request names a collection or a graph
+/// in more than one field. A row varies one name at a time, so no row can cover
+/// such an RPC; the ones that a memory binding addresses are exempt and covered
+/// by `tests/grpc_memory.rs` instead.
+fn names_in_several_fields(
+    model: &ProtoModel,
+    exempt: &BTreeSet<String>,
+) -> Vec<(String, Vec<String>)> {
+    name_bearing_rpcs(model)
+        .into_iter()
+        .filter(|(rpc, fields)| !exempt.contains(rpc) && fields.len() > 1)
+        .collect()
+}
+
+/// A field whose name suggests a collection or a graph, in any letter case.
+fn looks_like_a_name(field: &str) -> bool {
+    let field = field.to_ascii_lowercase();
+    field == "name" || field.contains("collection") || field.contains("graph")
+}
+
+/// The request of every RPC that is not exempt and every message those carry,
+/// nested ones included.
+fn carried_messages(model: &ProtoModel, exempt: &BTreeSet<String>) -> BTreeSet<String> {
+    let mut pending: Vec<String> = model
+        .rpcs
+        .iter()
+        .filter(|rpc| !exempt.contains(&format!("{}/{}", rpc.service, rpc.name)))
+        .filter_map(|rpc| model.resolve("", &rpc.request))
+        .collect();
+    let mut found = BTreeSet::new();
+    while let Some(message) = pending.pop() {
+        if found.insert(message.clone()) {
+            pending.extend(
+                model.messages[&message]
+                    .iter()
+                    .filter_map(|(ty, _)| model.resolve(&message, ty)),
+            );
+        }
+    }
+    found
+}
+
+/// The string and map fields of the request of every RPC that is not exempt,
+/// and of the messages it carries, that look like the name of a collection or a
+/// graph and are neither name-bearing nor in `classified`, as `Message.field`.
+fn unclassified_name_fields(
+    model: &ProtoModel,
+    exempt: &BTreeSet<String>,
+    classified: &[(&str, &str, &str)],
+) -> BTreeSet<String> {
+    let mut found = BTreeSet::new();
+    for message in carried_messages(model, exempt) {
+        for (ty, field) in &model.messages[&message] {
+            let listed = classified
+                .iter()
+                .any(|(owner, name, _)| *owner == message.as_str() && *name == field.as_str());
+            if matches!(ty.as_str(), "string" | "map")
+                && looks_like_a_name(field)
+                && !is_name_bearing(&message, ty, field)
+                && !listed
+            {
+                found.insert(format!("{message}.{field}"));
+            }
+        }
+    }
+    found
+}
+
+/// The RPCs of the `EXEMPT` table, each with its reason.
+fn exempt_rpcs() -> BTreeSet<String> {
+    EXEMPT
+        .iter()
+        .map(|(rpc, reason)| {
+            assert!(!reason.is_empty(), "{rpc} is exempt without a reason");
+            (*rpc).to_owned()
+        })
+        .collect()
+}
+
+/// The exempt RPCs that also have a row. An RPC is in the matrix or exempt, not
+/// both: an `EXEMPT` entry beside a row would let a request that the row no
+/// longer varies pass the one-name rule.
+fn listed_twice(exempt: &BTreeSet<String>, covered: &BTreeSet<String>) -> Vec<String> {
+    exempt.intersection(covered).cloned().collect()
 }
 
 fn uncovered(
@@ -223,20 +407,16 @@ fn every_rpc_has_a_row() {
     let globals = global_rows();
     let named: BTreeSet<String> = table.iter().map(|row| row.rpc.to_owned()).collect();
     let global: BTreeSet<String> = globals.iter().map(|row| row.rpc.to_owned()).collect();
-    let exempt: BTreeSet<String> = EXEMPT
-        .iter()
-        .map(|(rpc, reason)| {
-            assert!(!reason.is_empty(), "{rpc} is exempt without a reason");
-            (*rpc).to_owned()
-        })
-        .collect();
+    let exempt = exempt_rpcs();
     let covered: BTreeSet<String> = named.union(&global).cloned().collect();
 
     let missing = uncovered(&declared, &exempt, &covered);
     assert!(
         missing.is_empty(),
-        "an RPC needs a row in rows() (it names a collection) or global_rows() (it names none), \
-         or an EXEMPT entry with its reason, before it ships: {missing:?}"
+        "an RPC needs a row in rows() (it names a collection) or global_rows() (it names none) \
+         before it ships; an RPC that a memory binding addresses instead of a collection or a \
+         graph name goes in the EXEMPT table of grpc_leg.rs with its reason, and \
+         tests/grpc_memory.rs covers it: {missing:?}"
     );
     let orphans: Vec<_> = covered.difference(&declared).collect();
     assert!(
@@ -245,6 +425,11 @@ fn every_rpc_has_a_row() {
     );
     let stale: Vec<_> = exempt.difference(&declared).collect();
     assert!(stale.is_empty(), "EXEMPT entries without an RPC: {stale:?}");
+    let twice = listed_twice(&exempt, &covered);
+    assert!(
+        twice.is_empty(),
+        "an RPC is in the matrix or EXEMPT, not both: {twice:?}"
+    );
     let both: Vec<_> = named.intersection(&global).collect();
     assert!(both.is_empty(), "rows in both tables: {both:?}");
 
@@ -258,13 +443,7 @@ fn every_rpc_has_a_row() {
             "{message}.{field} is not in the proto"
         );
     }
-    let mut bearing = BTreeMap::new();
-    for rpc in &model.rpcs {
-        let fields = named_fields(&model, &rpc.request, "", &mut vec![rpc.request.clone()]);
-        if !fields.is_empty() {
-            bearing.insert(format!("{}/{}", rpc.service, rpc.name), fields);
-        }
-    }
+    let bearing = name_bearing_rpcs(&model);
     let bearing_rpcs: BTreeSet<String> = bearing
         .keys()
         .filter(|rpc| !exempt.contains(*rpc))
@@ -274,13 +453,15 @@ fn every_rpc_has_a_row() {
         bearing_rpcs, named,
         "the RPCs whose request names a collection must be exactly the rows of rows()"
     );
-    for (rpc, fields) in &bearing {
-        assert_eq!(
-            fields.len(),
-            1,
-            "{rpc} names a collection in several fields {fields:?}: its row must vary each of them"
-        );
-    }
+    // One row varies one name; an RPC that a memory binding addresses may carry
+    // several collection paths and is exempt.
+    let several = names_in_several_fields(&model, &exempt);
+    assert!(
+        several.is_empty(),
+        "{several:?}: an RPC that names a collection in several fields needs a row that varies \
+         each of them, or, when a memory binding addresses it, an EXEMPT entry that \
+         tests/grpc_memory.rs covers"
+    );
     // The RPCs that address `default` when their collection is empty name it
     // in a field called `collection`.
     for rpc in LEGACY {
@@ -304,6 +485,204 @@ fn every_rpc_has_a_row() {
             "the inventory must notice a missing row for {omitted}"
         );
     }
+}
+
+#[test]
+fn name_like_request_fields_are_classified() {
+    let model = proto_model();
+    let exempt = exempt_rpcs();
+    let unclassified = unclassified_name_fields(&model, &exempt, NOT_A_NAME);
+    assert!(
+        unclassified.is_empty(),
+        "{unclassified:?} look like the name of a collection or a graph (a string called `name`, \
+         or with `collection` or `graph` in its name), but no row varies them and none is \
+         classified. If one is a name, add it to NAME_ALIASES and give its RPC a row that varies \
+         it; if it is not, add it to NOT_A_NAME with the reason"
+    );
+    // The table holds what the proto needs and no more: without it, the fields
+    // that are found are its entries.
+    let listed: BTreeSet<String> = NOT_A_NAME
+        .iter()
+        .map(|(message, field, reason)| {
+            assert!(
+                !reason.is_empty(),
+                "{message}.{field} is not a name without a reason"
+            );
+            format!("{message}.{field}")
+        })
+        .collect();
+    assert_eq!(
+        unclassified_name_fields(&model, &exempt, &[]),
+        listed,
+        "NOT_A_NAME must list exactly the name-like request fields that are not names; remove \
+         an entry whose field is gone, renamed or now treated as a name"
+    );
+}
+
+/// A proto shaped like the `Memory` service that is to come, next to ordinary
+/// RPCs: requests that a binding addresses and that carry two collection
+/// paths, requests that name a collection in several fields, and fields that
+/// only look like names, in a nested message, in a oneof, repeated and in a map.
+const SYNTHETIC: &str = r#"
+service Memory {
+  rpc Remember(RememberRequest) returns (Reply);
+  rpc Merge(MergeRequest) returns (Reply);
+}
+service Plain {
+  rpc Copy(CopyRequest) returns (Reply);
+  rpc Fetch(FetchRequest) returns (Reply);
+  rpc Grow(stream GrowRequest) returns (Reply);
+}
+message Path { string collection = 1; }
+message RememberRequest { Path source = 1; Path evidence = 2; }
+message MergeRequest { string collection = 1; string graph = 2; string source_collection = 3; }
+message CopyRequest { string collection = 1; string graph = 2; string source_collection = 3; }
+message FetchRequest { string collection = 1; string evidenceGraph = 2; }
+message GrowRequest {
+  message Inner {
+    oneof pick { string graph_name = 1; Path path = 2; }
+    repeated string evidence_collections = 3;
+  }
+  Inner inner = 1;
+  string name = 2;
+  uint32 collection_id = 3;
+  map<string, string> graphs = 4;
+}
+message Reply {}
+"#;
+
+fn rpc_ids(rpcs: &[&str]) -> BTreeSet<String> {
+    rpcs.iter().map(|rpc| (*rpc).to_owned()).collect()
+}
+
+fn fields_of<'a>(model: &'a ProtoModel, message: &str) -> Vec<(&'a str, &'a str)> {
+    model.messages[message]
+        .iter()
+        .map(|(ty, field)| (ty.as_str(), field.as_str()))
+        .collect()
+}
+
+#[test]
+fn an_exempt_rpc_may_name_a_collection_in_several_fields() {
+    let model = read_proto(SYNTHETIC);
+    let several = |exempt: &[&str]| -> Vec<String> {
+        names_in_several_fields(&model, &rpc_ids(exempt))
+            .into_iter()
+            .map(|(rpc, _)| rpc)
+            .collect()
+    };
+    // Without an exemption every RPC that names a collection or a graph twice
+    // trips the rule, also when it carries one of the names in a message.
+    assert_eq!(
+        several(&[]),
+        ["Memory/Merge", "Memory/Remember", "Plain/Copy"]
+    );
+    assert_eq!(
+        name_bearing_rpcs(&model)["Memory/Remember"],
+        ["source.collection", "evidence.collection"]
+    );
+    // An exempt RPC is skipped, one that is not still trips the rule.
+    assert_eq!(
+        several(&["Memory/Merge", "Memory/Remember"]),
+        ["Plain/Copy"]
+    );
+    assert!(several(&["Memory/Merge", "Memory/Remember", "Plain/Copy"]).is_empty());
+}
+
+#[test]
+fn a_name_like_field_nobody_classified_is_noticed() {
+    let model = read_proto(SYNTHETIC);
+    let found = |exempt: &[&str], classified: &[(&str, &str, &str)]| -> Vec<String> {
+        unclassified_name_fields(&model, &rpc_ids(exempt), classified)
+            .into_iter()
+            .collect()
+    };
+    // A field that looks like a name without being called `collection` is
+    // found in a request and in the messages it carries (nested ones, oneofs,
+    // repeated fields and maps included, in any letter case); a field the rule
+    // knows is not, and neither is an id.
+    assert_eq!(
+        found(&[], &[]),
+        [
+            "CopyRequest.source_collection",
+            "FetchRequest.evidenceGraph",
+            "GrowRequest.Inner.evidence_collections",
+            "GrowRequest.Inner.graph_name",
+            "GrowRequest.graphs",
+            "GrowRequest.name",
+            "MergeRequest.source_collection",
+        ]
+    );
+    // The requests of exempt RPCs are left to the file that covers them.
+    assert!(!found(&["Memory/Merge"], &[]).contains(&"MergeRequest.source_collection".to_owned()));
+    // A field with a reason is classified, and only that field.
+    let classified = [
+        ("GrowRequest", "name", "a label"),
+        ("GrowRequest.Inner", "graph_name", "a label"),
+    ];
+    assert_eq!(
+        found(&[], &classified),
+        [
+            "CopyRequest.source_collection",
+            "FetchRequest.evidenceGraph",
+            "GrowRequest.Inner.evidence_collections",
+            "GrowRequest.graphs",
+            "MergeRequest.source_collection",
+        ]
+    );
+}
+
+#[test]
+fn the_proto_reader_follows_nested_messages() {
+    let model = read_proto(SYNTHETIC);
+    assert_eq!(
+        fields_of(&model, "GrowRequest.Inner"),
+        [
+            ("string", "graph_name"),
+            ("Path", "path"),
+            ("string", "evidence_collections")
+        ]
+    );
+    assert_eq!(
+        fields_of(&model, "GrowRequest"),
+        [
+            ("Inner", "inner"),
+            ("string", "name"),
+            ("uint32", "collection_id"),
+            ("map", "graphs")
+        ]
+    );
+    // A type is looked up in its message, in the messages around it, then at
+    // the top level.
+    assert_eq!(
+        model.resolve("GrowRequest", "Inner").as_deref(),
+        Some("GrowRequest.Inner")
+    );
+    assert_eq!(
+        model.resolve("GrowRequest.Inner", "Path").as_deref(),
+        Some("Path")
+    );
+    assert_eq!(model.resolve("GrowRequest", "uint32"), None);
+    let streamed = model.rpcs.iter().find(|rpc| rpc.name == "Grow");
+    assert_eq!(
+        streamed.map(|rpc| rpc.request.as_str()),
+        Some("GrowRequest")
+    );
+    // The proto of the server has nested messages too.
+    assert_eq!(
+        proto_model().resolve("Operation", "Put").as_deref(),
+        Some("Operation.Put")
+    );
+}
+
+#[test]
+fn an_rpc_is_exempt_or_in_the_matrix_never_both() {
+    let exempt = rpc_ids(&["Memory/Remember"]);
+    assert!(listed_twice(&exempt, &rpc_ids(&["VLite/Search"])).is_empty());
+    assert_eq!(
+        listed_twice(&exempt, &rpc_ids(&["VLite/Search", "Memory/Remember"])),
+        ["Memory/Remember"]
+    );
 }
 
 // ----------------------------------------------------------- what must work
@@ -984,4 +1363,102 @@ async fn a_credentials_hidden_attempt_over_grpc_is_audited_without_the_name() {
     assert_eq!(noted[0]["credential_id"], "abcdefghij22");
     assert_eq!(noted[0]["route"], "grpc:/vlite.v1.VLite/GetCollection");
     assert!(!audit.to_string().contains("notes_ev"));
+}
+
+// ------------------------------------------------------- the stream reader
+
+fn frame(cursor: &str, has_more: bool) -> proto::ChangesResponse {
+    proto::ChangesResponse {
+        cursor: cursor.to_owned(),
+        has_more,
+        ..Default::default()
+    }
+}
+
+/// How long a step of a scripted stream waits, in milliseconds, and what it
+/// then yields.
+type Step = (u64, Result<Option<proto::ChangesResponse>, Status>);
+
+/// A stream that answers as scripted; once the script is spent it stays silent
+/// for good.
+fn scripted(
+    steps: Vec<Step>,
+) -> impl AsyncFnMut() -> Result<Option<proto::ChangesResponse>, Status> {
+    let mut steps = steps.into_iter();
+    async move || match steps.next() {
+        Some((wait, step)) => {
+            tokio::time::sleep(Duration::from_millis(wait)).await;
+            step
+        }
+        None => std::future::pending().await,
+    }
+}
+
+/// Far longer than any test waits: a read that takes this long has waited for a
+/// bound it must not wait for.
+const LONG: Duration = Duration::from_secs(30);
+const SHORT: Duration = Duration::from_millis(50);
+
+/// A read that is over by itself, long before any `LONG` bound it was given.
+async fn read(
+    steps: Vec<Step>,
+    first: Duration,
+    silence: Duration,
+    last: impl Fn(&proto::ChangesResponse) -> bool,
+) -> GAnswer {
+    let reading = read_frames(scripted(steps), first, silence, last);
+    tokio::time::timeout(Duration::from_secs(10), reading)
+        .await
+        .expect("the read waited for a bound that it must not wait for")
+}
+
+/// The first frame of a stream is waited for as long as a call may take; only
+/// the gaps after it are short. A feed that answers after the silence bound is
+/// not an empty feed, or a slow machine would make every feed look empty.
+#[tokio::test]
+async fn a_feed_that_answers_late_is_not_an_empty_feed() {
+    let steps = vec![(500, Ok(Some(frame("late", false))))];
+    let shown = read(steps, LONG, SHORT, |frame| !frame.has_more).await;
+    assert_eq!(shown.code, Code::Ok);
+    assert!(shown.text.contains("late"), "{}", brief(&shown.text));
+}
+
+#[tokio::test]
+async fn a_feed_that_goes_silent_after_a_frame_is_complete() {
+    let steps = vec![(0, Ok(Some(frame("only", true))))];
+    let shown = read(steps, LONG, SHORT, |_| false).await;
+    assert!(shown.text.contains("only"), "{}", brief(&shown.text));
+}
+
+#[tokio::test]
+async fn a_stream_is_complete_at_its_last_frame_and_at_its_end() {
+    // The frame that says it is the last ends the read at once, whatever the
+    // bound.
+    let steps = vec![(0, Ok(Some(frame("last", false))))];
+    let shown = read(steps, LONG, LONG, |frame| !frame.has_more).await;
+    assert!(shown.text.contains("last"), "{}", brief(&shown.text));
+    // So does the end of the stream, and a failure after a frame keeps it.
+    let steps = vec![(0, Ok(Some(frame("one", true)))), (0, Ok(None))];
+    let shown = read(steps, LONG, LONG, |_| false).await;
+    assert_eq!((shown.code, shown.text.contains("one")), (Code::Ok, true));
+    let steps = vec![
+        (0, Ok(Some(frame("before", true)))),
+        (0, Err(Status::aborted("broken"))),
+    ];
+    let shown = read(steps, LONG, LONG, |_| false).await;
+    assert_eq!(shown.code, Code::Aborted);
+    assert!(shown.text.contains("before"), "{}", brief(&shown.text));
+}
+
+#[tokio::test]
+#[should_panic(expected = "the stream showed nothing")]
+async fn a_stream_that_never_shows_anything_is_hung_not_empty() {
+    let first = Duration::from_millis(200);
+    read_frames(
+        scripted(Vec::new()),
+        first,
+        SHORT,
+        |_: &proto::ChangesResponse| false,
+    )
+    .await;
 }
