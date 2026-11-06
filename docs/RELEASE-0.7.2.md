@@ -67,13 +67,14 @@ Back up and verify checksums first. Replace the binary or image with 0.7.2 and r
 Check these before you upgrade:
 
 - **Servers before clients.** A 0.7.2 client that calls a batch or a multi-get on a 0.7.1 server gets 404 `not_found` with the administrator token (the clients raise their unsupported-operation error) and 403 with every other credential (an ordinary permission error), because that server checks permissions before it matches a route. Over gRPC the 0.7.1 server answers `UNIMPLEMENTED` to every caller. Nothing falls back to single calls. To find out beforehand, look for the two paths in `routes` of `GET /v1/capabilities`; gRPC has no capabilities call, so a gRPC client asks REST.
+- **The standalone dashboard image.** The server serves the dashboard from its own binary, so upgrading the server brings the dashboard fixes. If you also run the separate dashboard image (`ghcr.io/mahpate/vlite-dashboard:<version>`, which the release workflow publishes on its own), upgrade it together with the server: the fixes live in the dashboard files, and that image carries its own copy of them. Use the same version for both; see [Docker operations](DOCKER-OPERATIONS.md#upgrade).
 - **Audit queries.** A query, alert or export that counts key-value writes by the `kv_put` and `kv_delete` events must also count `kv_batch`, which is one event per batch with `puts` and `deletes` counts.
 - **Group commit.** If you run `--group-commit` and send large batches, keep `--group-commit-bytes` at 8 MiB or more. Each mutating request is charged an estimate of the memory it retains against that budget (default 64 MiB), and a request that alone needs more than the whole budget is refused with 503 `busy` on every attempt. A batch at every limit at once is charged less than 8 MiB.
 - **gRPC clients.** The proto file only gains messages and RPCs, so existing stubs keep working. Generate new ones to call `WriteKvBatch` and `GetKvEntries`, and give the channel a receive limit of at least 16 MiB + 1 KiB for `ListKvEntries` and `GetKvEntries` and a send limit above 6 MiB for a full `WriteKvBatch`.
 - **Programs that build the routers themselves.** Build the REST router first and the gRPC router after it.
-  <!-- source: docs/KEY-VALUE.md (Batches and multi-get, Limits), docs/GRPC.md (Older servers), docs/SECURITY.md#audit-actors, src/server/admin.rs -->
+  <!-- source: docs/KEY-VALUE.md (Batches and multi-get, Limits), docs/GRPC.md (Older servers), docs/SECURITY.md#audit-actors, src/server/admin.rs, Dockerfile (dashboard target), .github/workflows/release.yml, docs/DOCKER-OPERATIONS.md#what-you-run -->
 
-These changes apply automatically and need no action: the dashboard fixes and the reservation parity of the gRPC library path. The batch, the multi-get and the embedded key-value operations need explicit use.
+These changes apply with the upgrade and need no further action: the dashboard fixes (the standalone dashboard image needs its own upgrade, above) and the reservation parity of the gRPC library path. The batch, the multi-get and the embedded key-value operations need explicit use.
 
 ## Rollback
 
@@ -85,9 +86,9 @@ After a rollback:
 - **Batch and multi-get stop working.** 0.7.1 has neither route, RPC, MCP tool nor shell command. A call over REST answers 404 `not_found` to the administrator token and 403 to every other credential, and a gRPC call answers `UNIMPLEMENTED` to every caller. Stop clients and scripts from sending them.
 - **The embedded key-value methods go with the packages.** The 0.7.1 libraries have no key-value request. Entries written through them stay in the file, and the 0.7.1 server, shell and MCP tools read them.
 - **Audit log.** The log is only appended to, so the `kv_batch` lines stay. 0.7.1 reads each line of the log as JSON without a fixed list of event names, so it reads a log that holds `kv_batch` lines without error.
-- **The dashboard fixes go.** With agent memory enabled, the 0.7.1 dashboard again fails sign-in for a super admin with `HTTP 403: forbidden_scope`, the MemoryAI clock hint again appears for every 422 `invalid_input` of a memory request, and a vertical touch drag over a graph again scrolls the page.
+- **The dashboard fixes go.** With agent memory enabled, the 0.7.1 dashboard again fails sign-in for a super admin with `HTTP 403: forbidden_scope`, the MemoryAI clock hint again appears for every 422 `invalid_input` of a memory request, and a vertical touch drag over a graph again scrolls the page. This holds for the standalone dashboard image too: roll it back together with the server.
 - **Further back.** Rolling back past 0.7.1 to 0.7.0 has its own exceptions, which the [0.7.1 rollback section](RELEASE-0.7.1.md#rollback) lists: item evidence references and the gRPC disk-ANN path rule.
-  <!-- source: src/server/audit.rs (tail), docs/KEY-VALUE.md, docs/GRPC.md (Older servers), docs/API.md#key-value-entries, bindings/c/FEATURES.md, docs/RELEASE-0.7.1.md#rollback, src/dashboard/app.js -->
+  <!-- source: src/server/audit.rs (tail), docs/KEY-VALUE.md, docs/GRPC.md (Older servers), docs/API.md#key-value-entries, bindings/c/FEATURES.md, docs/RELEASE-0.7.1.md#rollback, docs/DOCKER-OPERATIONS.md#rollback, src/dashboard/app.js -->
 
 ## Compatibility
 
@@ -111,6 +112,10 @@ After a rollback:
 
 - **Server-wide metrics while agent memory is enabled.** While a memory bindings file is configured, or the database still holds memory binding records after the file is removed, `GET /metrics` (JSON and Prometheus text), `GET /v1/admin/metrics/summary`, graph guard statistics, replication export, webhook list and status, every import route and the automatic-maintenance routes answer 403 `forbidden_scope` to every credential, the administrator token included. This did not change. What changed is that the dashboard shows these views as unavailable instead of failing sign-in, so with memory on the overview, Observability and Health stay empty of server metrics.
   <!-- source: docs/SECURITY.md#memory-bound-resources, src/server/observability.rs (metrics_route, summary), src/dashboard/app.js -->
+- **Dashboard messages while agent memory is enabled.** The plain-words message appears only where the refusal cannot be an ordinary scope denial: a tenant editor (a scoped credential) still sees the raw 403 on the import routes. When the bindings file is removed but memory binding records remain in the database, the server keeps the same routes off and the dashboard still says that agent memory is enabled. The MemoryAI clock hint can still appear for another 422 on a `remember` or `consolidate` that names no field.
+  <!-- source: docs/SECURITY.md#memory-bound-resources, src/dashboard/app.js (MEMORY_OFF, memoryOff), src/dashboard/console-tools.js (memoryClockGuidance) -->
+- **Touch drag on a 3D graph label.** A touch drag that starts on a label of the 3D graph (a node or edge button) does nothing: the label answers a tap, and the graph's stage keeps the page from scrolling. Start the drag on the canvas.
+  <!-- source: src/dashboard/graph3d.js (labels and canvas pointer handlers), src/dashboard/graph.css (graph-three-node, graph-three-stage) -->
 - **No gRPC and no automatic index maintenance with memory.** `vlite-server` refuses to start with `--grpc-bind` or with automatic index maintenance while a memory binding is configured or the database holds reserved memory resources ("gRPC listener is disabled while memory bindings are configured", or "...while the database holds reserved memory resources"). The gRPC adapter applies the reservations, but the refusal stays.
   <!-- source: src/server/admin.rs (configured_admin_router), docs/GRPC.md, docs/SECURITY.md#memory-bound-resources -->
 - **Backups are the administrator's while anything is reserved.** A backup job that uses a backup credential gets 403 once memory bindings exist: run it with the administrator token, or take the backups before you enable memory.
