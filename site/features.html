@@ -199,21 +199,22 @@
       <section id="dashboard">
         <h2>Dashboard</h2>
         <ul class="list">
-          <li>Sign in with a username and password; an access token covers first-time setup, automation and recovery.</li>
-          <li>Nine workspaces: Overview; Collections, Search, Key-value, MemoryAI and Graph under Data; Observability and Administration under Server; and the Developer Console under Tools.</li>
-          <li>Super admin, editor and viewer roles. A control your role cannot use is disabled and says why.</li>
-          <li>Paginated records with selectable metadata columns and a Payload, Metadata, Vector and Raw JSON inspector.</li>
-          <li>One-record and bulk JSON writes with validation, revision checks and confirmation before every change.</li>
-          <li>Quick JSON and CSV import and export, and resumable large-file import for JSON, NDJSON and CSV.</li>
-          <li>Collection creation and settings, index builds and background rebuilds, readiness and sampled recall.</li>
-          <li>Exact, approximate, ready-only, automatic and hybrid search with a filter builder, explain, exact-versus-approximate comparison, copy as code and saved queries.</li>
-          <li>Advanced retrieval: reranking, grouping, geo radius, named and sparse vectors, recommendations, facets and the query language.</li>
-          <li>Analyze &amp; compare: checks a sample of up to 32 records for duplicates and metadata types, plots it in 2-D and compares two records.</li>
-          <li>Graph workspace: lookups, traversal and shortest paths; confirmed edits and rotatable 3D results; explain plans and server graph statistics.</li>
-          <li>Observability: live request metrics and log tail, slow-query diagnostics and the change feed.</li>
-          <li>Administration: health and token files; users, API keys, tenants, admin tokens and the audit log; backups, drills, schedules, point-in-time restore and replication-log export; automatic index maintenance, webhooks and TLS certificate reload.</li>
-          <li>Developer Console: request inspector, REST playground and read-only test scenarios.</li>
-          <li>An account menu for identity, password change, theme, density, the quick tour and sign-out, in a responsive, keyboard-accessible layout.</li>
+          <li>Password sign-in; tokens for setup, automation and recovery.</li>
+          <li>Nine source-build workspaces: Overview; Data: Collections, Search, Key-value, MemoryAI, Graph; Server: Observability, Administration; Tools: Developer Console.</li>
+          <li>Super admin, editor and viewer roles; disabled controls explain why.</li>
+          <li>Paginated records, selectable metadata columns; Payload, Metadata, Vector and Raw JSON inspector.</li>
+          <li>Validated single-record and bulk JSON writes, revision checks and change confirmations.</li>
+          <li>JSON/CSV import and export; resumable JSON, NDJSON and CSV imports.</li>
+          <li>Collection creation/settings, index builds, background rebuilds, readiness and sampled recall.</li>
+          <li>Exact, approximate, ready-only, automatic and hybrid search; filters, explain, exact-versus-approximate comparison, code examples and saved queries.</li>
+          <li>Reranking, grouping, geo radius, named/sparse vectors, recommendations, facets and query language.</li>
+          <li>Analyze &amp; compare: duplicate/type checks and 2-D plots of up to 32 records; two-record comparison.</li>
+          <li>Source-build Graph: lookups, traversal, shortest paths, confirmed edits, rotatable 3D results, explain plans and statistics.</li>
+          <li>Observability: live metrics/logs, slow-query diagnostics and change feed.</li>
+          <li>Administration: health, token files, users, tenants, admin tokens, audit; backups, drills, schedules, point-in-time restore, replication-log export; automatic index maintenance, webhooks, TLS reload.</li>
+          <li>API keys (super admin): list, create, rotate, revoke; collection/graph scopes, optional tenant, expiry, request-rate and vector quotas. All 11 operations: <code>read</code>, <code>search</code>, <code>search_build</code>, <code>write</code>, <code>import</code>, <code>index</code>, <code>collections</code>, <code>diagnostics</code>, <code>backup</code>, <code>graph_read</code>, <code>graph_write</code>. Secrets appear once; rotation preserves scope with optional grace. No scope-edit route: create a replacement and revoke the old key.</li>
+          <li>Developer Console: request inspector, REST playground, read-only scenarios.</li>
+          <li>Account menu: identity, password, theme, density, tour, sign-out; responsive and keyboard-accessible.</li>
         </ul>
         <p><a href="dashboard.html">Take a tour</a> &middot; <a href="docs/CONSOLE.html">Dashboard guide</a></p>
       </section>
