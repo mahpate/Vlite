@@ -210,8 +210,31 @@ export class Database {
   }): Promise<GraphReadResult & { shortest_path: GraphPathOutcome }>;
   /** Plans one read request in native form (`{ op: "neighbors", graph, node: { key }, ... }`) without running it. */
   graphExplain(query: Record<string, unknown> & { op: string; graph: string }): Promise<GraphExplanation>;
+  /**
+   * Key-value operations on an existing one-dimension collection; a missing collection is never created.
+   * Libraries older than the key-value operations reject every method with `unsupported`.
+   * Rejects with `kv_not_found` for an absent or expired key.
+   */
+  kvGet(options: KvAddress): Promise<KvEntry>;
+  /** `expected` defaults to "any"; a failed condition rejects with `precondition_failed`. Omitted or null `expiresAtMs` keeps no expiry. */
+  kvPut(options: KvPutOptions): Promise<KvPutResult>;
+  /** Resolves with whether an entry was deleted (`false` for an absent or expired key); a failed condition rejects with `precondition_failed`. */
+  kvDelete(options: KvAddress & { expected?: KvExpected }): Promise<boolean>;
+  /** One page in UTF-8 key order. Pass `next_after` as `after` for the next page; it is `null` after the last page. */
+  kvList(options: KvListOptions): Promise<KvPage>;
 
 }
+/** Compare-and-set condition: "any" (the default), "absent" (create only) or the exact version you read, as a bigint. */
+export type KvExpected = "any" | "absent" | { revision: bigint };
+/** `namespace` is 1 to 255 bytes and `key` 1 to 1,024 bytes of UTF-8. */
+export interface KvAddress { collection: string; namespace: string; key: string }
+/** `value` is at most 1,047,290 bytes. `expiresAtMs` is an absolute Unix-millisecond deadline (u64, V5 files). */
+export interface KvPutOptions extends KvAddress { value: Uint8Array; expected?: KvExpected; expiresAtMs?: bigint | null }
+/** `after` is exclusive, `limit` is 1 to 10,000 (default 100); `prefix` and `after` are at most 1,024 bytes. */
+export interface KvListOptions { collection: string; namespace: string; prefix?: string; after?: string; limit?: number }
+export interface KvPutResult { version: bigint; expires_at_ms: bigint | null }
+export interface KvEntry extends KvPutResult { key: string; value: Uint8Array }
+export interface KvPage { items: KvEntry[]; next_after: string | null }
 export interface Credentials { key?: Uint8Array; passphrase?: string }
 export interface Float32PutOperation { id: string; vector: Float32Array; payload?: Uint8Array; metadata?: Metadata }
 /**

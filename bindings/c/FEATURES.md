@@ -193,6 +193,42 @@ the existing codes (`read_only`, `locked`, `invalid_input`, …); responses over
 8 MiB return `response_too_large`. A library without the feature opening a
 graph-enabled file keeps the existing `invalid_input` rejection.
 
+## Key-value
+
+`{"op":"kv","request":{"op":...,...}}` carries the [key-value store](../../docs/KEY-VALUE.md) on a database handle
+(`vlite_abi_version()` stays 1 and no symbol is added). A library predating the envelope answers `invalid_input` for
+the unknown `kv` op, which the Python and Node wrappers report as `unsupported`; `capabilities` does not list it. The
+request and result JSON is that of the local `vlite-shell` and `vlite-mcp` tools: `collection` is required (it never
+defaults to `default`), values are canonical padded standard base64, versions and deadlines are canonical decimal
+strings, and unknown or repeated request fields are rejected.
+
+| `op` | Fields | Result |
+|---|---|---|
+| `get` | `collection`, `namespace`, `key` | `{key,value_base64,version,expires_at_ms}`; an absent or due key fails with `kv_not_found` |
+| `put` | `collection`, `namespace`, `key`, `value_base64`, optional `expected`, `expires_at_ms` | `{version,expires_at_ms}` |
+| `delete` | `collection`, `namespace`, `key`, optional `expected` | `{deleted}`; false for an absent or due key |
+| `list` | `collection`, `namespace`, optional `prefix` (default empty), `after`, `limit` | `{items:[get results],next_after}` |
+
+`expected` is `"any"` (default), `"absent"` or `{"revision":"<decimal>"}`, checked atomically with the write.
+`expires_at_ms` is an absolute Unix-millisecond deadline as a decimal string; omitted or null it clears the expiry, a due
+entry (`deadline <= now`) reads as absent, and expiry needs a format 5 file. Limits: namespace 1 to 255 and key 1 to
+1,024 UTF-8 bytes, `prefix` at most 1,024 bytes, `after` 1 to 1,024 bytes, value 0 to 1,047,290 bytes (at most
+1,396,388 base64 characters), `limit` 1 to 10,000 (default 100). The collection must exist and have one dimension; it
+is never created.
+
+A list page is the largest prefix of the matches in UTF-8 key order that fits `limit` and 16,777,216 bytes of compact
+JSON, so it can be shorter than `limit`. `next_after` is the last returned key when another live match follows and null
+otherwise; pass it as `after`. A list page is not held to the 8 MiB `response_too_large` bound of other responses.
+
+Failures use the tools' codes: `kv_not_found`, `collection_not_found`, `not_kv_collection` (a collection with another
+dimension), `kv_slots_exhausted`, `precondition_failed`, `upgrade_required` (expiry on a format 4 file), `read_only`,
+`invalid_input` (bounds, base64, decimals), `invalid_request` (unknown, repeated, missing or mistyped fields and an
+unknown `request.op`), `invalid_handle`, `locked`, `io_error`, `commit_indeterminate`, `poisoned`, `corrupt`,
+`incomplete_tail`, `graph_attached_record`, `graph_attached_record_expiry`, and `database_error` for any other engine
+error. A read-only handle refuses `put` and `delete` with `read_only` before it looks at anything else. There are no
+lease operations. The goldens in `tests/fixtures/kv/kv_dialect_goldens.json` pin this dialect: the C ABI, Python, Node
+and WASM tests and the shell and MCP tests all replay them.
+
 ## Optional float32 input entry points
 
 `vlite_search_f32` and `vlite_batch_put_f32` are additive, optional ABI-1 exports

@@ -305,6 +305,7 @@ C_PREFIXES = {
     ("features", "Request"): "c:features/",
     ("graph", "Request"): "c:graph/",
     ("graph", "OpIn"): "c:graph-op/",
+    ("kv", "Request"): "c:kv/",
 }
 C_ENUM_RE = re.compile(
     r'#\[serde\(([^\]]*tag = "op"[^\]]*)\)\]\s*\n(?:\s*#\[[^\n]*\]\s*\n)*\s*(?:pub(?:\([^)]*\))? )?enum (\w+)(?:<[^>]*>)? \{'

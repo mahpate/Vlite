@@ -588,6 +588,49 @@ class Database:
         """Plan a read request (``{"op": "neighbors", "graph": ..., ...}``) without running it."""
         return self._graph("explain", query=query)["explain"]
 
+    # Key-value: namespaced byte values in an existing one-dimension collection (a missing collection is never
+    # created). Values are ``bytes``; versions and deadlines are ``int``. Bounds are checked by the native layer:
+    # namespace 1..255 and key 1..1024 UTF-8 bytes, value 0..1047290 bytes, list ``limit`` 1..10000, ``prefix`` and
+    # ``after`` at most 1024 bytes. ``expected`` is "any", "absent" or {"revision": int}; a failed check raises
+    # EmbeddedError("precondition_failed"). Libraries without the operation raise EmbeddedError("unsupported").
+
+    def _kv(self, operation: str, **fields):
+        return _kv_call(lambda request: self._execute("kv", request=request), {"op": operation, **fields})
+
+    def kv_get(self, *, collection: str, namespace: str, key: str) -> dict:
+        """Return ``{"key", "value": bytes, "version": int, "expires_at_ms": int | None}``. An absent or
+        expired key raises EmbeddedError("kv_not_found")."""
+        return _kv_entry(self._kv("get", collection=_kv_text(collection, "collection"),
+                                  namespace=_kv_text(namespace, "namespace"), key=_kv_text(key, "key")))
+
+    def kv_put(self, *, collection: str, namespace: str, key: str, value: bytes, expected="any",
+               expires_at_ms: int | None = None) -> dict:
+        """Write ``value``; returns ``{"version": int, "expires_at_ms": int | None}``. ``expires_at_ms`` is an
+        absolute Unix-millisecond deadline (needs a V5 file; None keeps no expiry, so an overwrite clears it)."""
+        deadline = None if expires_at_ms is None else str(_kv_u64(expires_at_ms, "expires_at_ms"))
+        result = self._kv("put", collection=_kv_text(collection, "collection"),
+                          namespace=_kv_text(namespace, "namespace"), key=_kv_text(key, "key"),
+                          value_base64=_bytes_base64(value), expected=_kv_expected(expected),
+                          **_given(expires_at_ms=deadline))
+        return {"version": int(result["version"]), "expires_at_ms": _kv_optional_int(result["expires_at_ms"])}
+
+    def kv_delete(self, *, collection: str, namespace: str, key: str, expected="any") -> bool:
+        """Delete the entry; returns False when it is absent or expired."""
+        return self._kv("delete", collection=_kv_text(collection, "collection"),
+                        namespace=_kv_text(namespace, "namespace"), key=_kv_text(key, "key"),
+                        expected=_kv_expected(expected))["deleted"]
+
+    def kv_list(self, *, collection: str, namespace: str, prefix: str = "", after: str | None = None,
+                limit: int = 100) -> dict:
+        """List live entries in UTF-8 byte order: ``{"items": [kv_get-style entries], "next_after": str | None}``.
+        Pass ``next_after`` as ``after`` for the next page. A page holds at most ``limit`` entries and 16 MiB of
+        JSON, so it can be shorter than ``limit`` while ``next_after`` is set."""
+        result = self._kv("list", collection=_kv_text(collection, "collection"),
+                          namespace=_kv_text(namespace, "namespace"), prefix=_kv_text(prefix, "prefix"),
+                          limit=_kv_u64(limit, "limit"),
+                          **_given(after=None if after is None else _kv_text(after, "after")))
+        return {"items": [_kv_entry(item) for item in result["items"]], "next_after": result["next_after"]}
+
 
 def _given(**fields) -> dict:
     """Drop omitted options so the native layer applies the collection's declared defaults."""
@@ -615,6 +658,50 @@ def _graph_ref(value) -> dict:
     if isinstance(value, str):
         return {"key": value}
     raise TypeError("graph selector must be a key string, an integer ID, or a selector dict")
+
+
+def _kv_call(run, request: dict):
+    """Run one key-value request; libraries predating the op, or one operation of it, report it as unsupported."""
+    try:
+        return run(request)
+    except EmbeddedError as error:
+        message = str(error)
+        if (error.code == "invalid_input" and "unknown variant `kv`" in message) or (
+                error.code == "invalid_request" and f"unknown variant `{request['op']}`" in message):
+            raise EmbeddedError("unsupported", f"Native library predates key-value {request['op']}") from None
+        raise
+
+
+def _kv_text(value, name: str) -> str:
+    if not isinstance(value, str):
+        raise TypeError(f"{name} must be a str")
+    return value
+
+
+def _kv_u64(value, name: str) -> int:
+    """Versions, deadlines and limits are ints in 0..2**64-1; a bool or float is a mistake, not a number."""
+    if isinstance(value, bool) or not isinstance(value, int):
+        raise TypeError(f"{name} must be an int")
+    if not 0 <= value <= 0xFFFFFFFFFFFFFFFF:
+        raise ValueError(f"{name} must be in 0..18446744073709551615")
+    return value
+
+
+def _kv_expected(expected):
+    if isinstance(expected, str) and expected in ("any", "absent"):
+        return expected
+    if isinstance(expected, dict) and set(expected) == {"revision"}:
+        return {"revision": str(_kv_u64(expected["revision"], "revision"))}
+    raise ValueError('expected must be "any", "absent" or {"revision": int}')
+
+
+def _kv_optional_int(text) -> int | None:
+    return None if text is None else int(text)
+
+
+def _kv_entry(item: dict) -> dict:
+    return {"key": item["key"], "value": base64.b64decode(item["value_base64"], validate=True),
+            "version": int(item["version"]), "expires_at_ms": _kv_optional_int(item["expires_at_ms"])}
 
 
 def _bytes_base64(data: bytes) -> str:

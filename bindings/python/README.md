@@ -210,6 +210,50 @@ cargo build -p vlite-ffi
 VLITE_TEST_LIBRARY=target/debug/vlite_ffi.dll VLITE_TEST_EXPECT_GRAPH=1 python bindings/python/test_graph.py
 ```
 
+## Key-value
+
+`kv_get`, `kv_put`, `kv_delete` and `kv_list` store byte values under namespaced text keys in a collection that
+already exists and has one dimension, such as the `default` collection of a file created with one dimension; they never
+create a collection. All arguments are keyword-only. Values are `bytes`; versions and deadlines are `int`, never
+`float`. `expected` is `"any"` (the default), `"absent"` or `{"revision": int}`; a failed check raises
+`EmbeddedError(code="precondition_failed")` and writes nothing. `expires_at_ms` is an absolute Unix-millisecond
+deadline (it needs a format 5 file); a put without it clears the expiry, and a due entry reads as absent. Namespace is
+1 to 255 and key 1 to 1,024 UTF-8 bytes, a value 0 to 1,047,290 bytes, and `limit` 1 to 10,000 (default 100).
+
+```python
+import time
+from vlite_embedded import NativeLibrary, EmbeddedError
+
+native = NativeLibrary()  # or the path of a source build
+with native.create("cache.vlite", 1) as db:   # the default collection has one dimension
+    put = db.kv_put(collection="default", namespace="app", key="greeting", value=b"hello", expected="absent")
+    entry = db.kv_get(collection="default", namespace="app", key="greeting")
+    assert entry["value"] == b"hello" and entry["version"] == put["version"]
+    db.kv_put(collection="default", namespace="app", key="greeting", value=b"hello again",
+              expected={"revision": entry["version"]}, expires_at_ms=int(time.time() * 1000) + 60_000)
+    page = db.kv_list(collection="default", namespace="app", prefix="gre")
+    print([item["key"] for item in page["items"]], page["next_after"])
+    print(db.kv_delete(collection="default", namespace="app", key="greeting"))  # True
+    try:
+        db.kv_get(collection="default", namespace="app", key="greeting")
+    except EmbeddedError as error:
+        print(error.code)  # kv_not_found
+```
+
+`kv_get` returns `{"key", "value", "version", "expires_at_ms"}` (`expires_at_ms` is `None` without a deadline) and
+raises `kv_not_found` for an absent or due key. `kv_put` returns `{"version", "expires_at_ms"}`, `kv_delete` returns
+`True`, or `False` when nothing was stored, and `kv_list` returns `{"items": [...], "next_after": str | None}`: a page
+holds at most `limit` entries and 16 MiB of JSON, so follow `next_after` (pass it as `after`) until it is `None`.
+Missing collections are `collection_not_found`, a collection with another dimension `not_kv_collection`, bound
+violations `invalid_input`, and a read-only handle refuses writes with `read_only`; the codes are those of
+`bindings/c/FEATURES.md` ("Key-value"). Against a native library that predates the operations every method raises
+`EmbeddedError(code="unsupported")`. There are no lease operations.
+
+```text
+cargo build -p vlite-ffi
+VLITE_TEST_LIBRARY=target/debug/vlite_ffi.dll python bindings/python/test_kv.py
+```
+
 ## Optional contiguous float32 search and bulk puts
 
 Source builds provide opt-in `search_f32` and `batch_put_f32` methods. Existing

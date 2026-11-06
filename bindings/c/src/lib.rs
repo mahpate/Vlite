@@ -2,6 +2,7 @@
 
 mod features;
 mod graph;
+mod kv;
 mod typed;
 
 use base64::{Engine, prelude::BASE64_STANDARD};
@@ -43,6 +44,10 @@ enum Request {
     /// Property-graph operations (`graph.rs`).
     Graph {
         request: Value,
+    },
+    /// Key-value operations (`kv.rs`).
+    Kv {
+        request: kv::Body,
     },
     /// Optional capabilities compiled into this library.
     Capabilities {},
@@ -776,6 +781,8 @@ fn execute(handle: u64, request: Request) -> Result<Value> {
             }
             return Ok(result);
         }
+        // A list page is bounded by its own 16 MiB rule, not the 8 MiB cap above.
+        Request::Kv { request } => return kv::execute(&mut state, handle, request),
         _ => {}
     }
     match request {
@@ -1295,6 +1302,7 @@ fn execute(handle: u64, request: Request) -> Result<Value> {
         | Request::Close {}
         | Request::Features { .. }
         | Request::Graph { .. }
+        | Request::Kv { .. }
         | Request::Capabilities {} => unreachable!(),
     }
 }
