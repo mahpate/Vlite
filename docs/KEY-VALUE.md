@@ -90,7 +90,7 @@ Versions are commit sequences. They increase for a key within one file lineage, 
 An expired entry stays in the file until it is replaced, deleted or compacted away, and it still counts toward record quotas. A later put of another key can reuse its slot. Expiry needs format 5: on a format 4 file a put with a deadline answers 409 `upgrade_required`, and nothing is upgraded for you.
 
 The ordinary record routes treat a due expiry differently from this: `PUT /v1/collections/{collection}/vectors/{id}` refuses an `expires_at_ms` that is not later than the server clock, and a `ttl_ms` of 0, with 422 `invalid_input` (see [Record expiry and metadata](API.md#record-expiry-and-metadata)). The key-value routes accept it by contract.
-<!-- TODO-VERIFY (K71 in review): the 422 for a due expiry on the record put routes is taken from docs/API.md and src/openapi.json; src/server/record_put.rs was not read. -->
+<!-- TODO-VERIFY (K71 in review): the refusal was read in src/server/record_put.rs (refuse_due_expiry, ensure_expiry_after); the REST handlers that call it were not traced one by one. -->
 
 ## Listing, paging and its cost
 
