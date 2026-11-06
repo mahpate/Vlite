@@ -1,0 +1,20 @@
+name: Fast Windows disk
+description: >-
+  On Windows runners, keep Cargo's home and the temporary directory on the local D: drive (the
+  workspace and the target directory already live there). Elsewhere it does nothing.
+
+runs:
+  using: composite
+  steps:
+    # Run it right after checkout and before the toolchain and cache steps: dtolnay/rust-toolchain
+    # keeps a CARGO_HOME that is already set, and Swatinem/rust-cache reads CARGO_HOME when it
+    # restores and saves, so the registry cache follows the new location.
+    - name: "Move Cargo's home and TEMP to the D: drive"
+      if: runner.os == 'Windows'
+      shell: pwsh
+      run: |
+        New-Item -ItemType Directory -Force D:\cargo\bin, D:\tmp | Out-Null
+        "CARGO_HOME=D:\cargo" >> $env:GITHUB_ENV
+        "TMP=D:\tmp" >> $env:GITHUB_ENV
+        "TEMP=D:\tmp" >> $env:GITHUB_ENV
+        "D:\cargo\bin" >> $env:GITHUB_PATH

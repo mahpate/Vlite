@@ -14,6 +14,11 @@ on:
         description: "Also list the tests to prove the Windows buckets are disjoint and complete and that Nextest lists the same tests as cargo test (a few extra minutes)."
         type: boolean
         default: false
+      debuginfo:
+        description: "Debug info of dev and test builds: line-tables-only (default, panic backtraces keep file and line), 0 (lighter still) or 2 (full, the old default)."
+        type: choice
+        options: [line-tables-only, "0", "2"]
+        default: line-tables-only
 
 permissions:
   contents: read
@@ -21,6 +26,12 @@ permissions:
 concurrency:
   group: ci-${{ github.event.pull_request.number || github.ref }}
   cancel-in-progress: true
+
+env:
+  # Dev and test builds write line tables instead of full debug info: much less to write and link
+  # (the Windows suite links 155 test binaries), and a panic backtrace still names file and line.
+  CARGO_PROFILE_DEV_DEBUG: ${{ inputs.debuginfo || 'line-tables-only' }}
+  CARGO_PROFILE_TEST_DEBUG: ${{ inputs.debuginfo || 'line-tables-only' }}
 
 jobs:
   changes:
@@ -114,6 +125,7 @@ jobs:
       VLITE_REQUIRE_AVX2: ${{ (matrix.os == 'ubuntu-latest' || matrix.os == 'windows-latest') && '1' || '0' }}
     steps:
       - uses: actions/checkout@v5
+      - uses: ./.github/actions/windows-fast-disk
       - uses: dtolnay/rust-toolchain@master
         with:
           toolchain: ${{ matrix.toolchain }}
@@ -242,6 +254,7 @@ jobs:
       VLITE_REQUIRE_AVX2: "1"
     steps:
       - uses: actions/checkout@v5
+      - uses: ./.github/actions/windows-fast-disk
       - uses: dtolnay/rust-toolchain@master
         with:
           toolchain: ${{ matrix.toolchain }}
@@ -267,6 +280,7 @@ jobs:
     runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v5
+      - uses: ./.github/actions/windows-fast-disk
       - uses: actions/setup-python@v6
         with:
           python-version: "3.11"

@@ -291,6 +291,40 @@ class Policy(unittest.TestCase):
             if "cargo nextest run" in step or "--all-targets --all-features" in step:
                 self.assertIn("matrix.os != 'windows-latest'", step)
 
+    def test_ci_builds_write_line_tables_instead_of_full_debug_info(self):
+        text = (ROOT / ".github/workflows/ci.yml").read_text(encoding="utf-8")
+        header, jobs = text.split("\njobs:\n", 1)
+        env = header.split("\nenv:\n", 1)[1]
+        for name in ("CARGO_PROFILE_DEV_DEBUG", "CARGO_PROFILE_TEST_DEBUG"):
+            self.assertIn(f"  {name}: ${{{{ inputs.debuginfo || 'line-tables-only' }}}}\n", env)
+        option = header.split("      debuginfo:\n", 1)[1].split("\n\n", 1)[0]
+        self.assertIn("type: choice\n", option)
+        self.assertIn('options: [line-tables-only, "0", "2"]\n', option)
+        self.assertTrue(option.rstrip().endswith("default: line-tables-only"), option)
+        # A job-level value would shadow the dispatch choice.
+        self.assertNotIn("CARGO_PROFILE", jobs)
+        # Line tables keep panic backtraces readable; "0" and "2" stay available by dispatch only.
+        self.assertNotIn("CARGO_PROFILE_DEV_DEBUG: 0", text)
+
+    def test_windows_jobs_keep_cargo_home_and_temp_on_the_local_disk(self):
+        text = (ROOT / ".github/workflows/ci.yml").read_text(encoding="utf-8")
+        jobs = text.split("\njobs:\n", 1)[1]
+        step = "      - uses: actions/checkout@v5\n      - uses: ./.github/actions/windows-fast-disk\n"
+        self.assertEqual(jobs.count("./.github/actions/windows-fast-disk"), 3)
+        for name in ("native", "windows-tests", "clients"):
+            body = re.split(r"\n  [a-z0-9-]+:\n", jobs.split(f"\n  {name}:\n", 1)[1], maxsplit=1)[0]
+            self.assertIn(step, body, name)
+            # Before the toolchain and the cache: rust-toolchain keeps a CARGO_HOME that is already
+            # set and rust-cache reads it to find the registry.
+            moved = body.index("windows-fast-disk")
+            self.assertLess(moved, body.index("dtolnay/rust-toolchain"), name)
+            self.assertLess(moved, body.index("Swatinem/rust-cache"), name)
+        action = (ROOT / ".github/actions/windows-fast-disk/action.yml").read_text(encoding="utf-8")
+        self.assertIn("if: runner.os == 'Windows'", action)
+        for line in ("CARGO_HOME=D:\\cargo", "TMP=D:\\tmp", "TEMP=D:\\tmp", "D:\\cargo\\bin"):
+            self.assertIn(line, action)
+        self.assertNotIn("uses:", action)
+
     def test_compact_method_inventory_runs_with_documentation_gates(self):
         text = (ROOT / ".github/workflows/ci.yml").read_text(encoding="utf-8")
         documentation = text.split("\n  documentation:\n", 1)[1].split("\n  native:\n", 1)[0]
