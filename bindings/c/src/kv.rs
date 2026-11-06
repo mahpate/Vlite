@@ -293,8 +293,14 @@ pub(super) fn execute(state: &mut State, handle: u64, body: Body) -> Result<Valu
     if body.duplicate {
         return Err(("invalid_request", "duplicate argument field".into()));
     }
+    // serde reads an internally tagged enum from a sequence too; the dialect is an object.
+    if !body.value.is_object() {
+        return Err(("invalid_request", "request must be a JSON object".into()));
+    }
     // A read-only handle refuses a write before the request is read any further,
     // so a precondition, a bound or a malformed field never masks `read_only`.
+    // A repeated field and a request that is not an object come first, as in
+    // vlite-mcp (vlite-shell checks read-only before a repeated field).
     let write = body
         .value
         .get("op")
@@ -693,7 +699,7 @@ mod tests {
             .is_some_and(|surfaces| surfaces.iter().any(|surface| surface == "c"))
     }
 
-    fn replay(sequence: &Value, directory: &Path) {
+    fn replay(sequence: &Value, directory: &Path) -> usize {
         let name = sequence["name"].as_str().unwrap();
         let none = BTreeMap::new();
         let db = if sequence["mode"] == "read_only" {
@@ -717,10 +723,12 @@ mod tests {
             db
         };
         let mut bound = BTreeMap::new();
+        let mut replayed = 0;
         for step in sequence["steps"].as_array().unwrap() {
             if skipped(step) {
                 continue;
             }
+            replayed += 1;
             let step_name = step["name"].as_str().unwrap();
             let request = expand(&step["request"], &bound);
             let response = kv(db, request.clone());
@@ -748,17 +756,34 @@ mod tests {
             }
         }
         close(db);
+        replayed
     }
 
     #[test]
     fn replays_the_shared_dialect_goldens() {
         let goldens: Value = serde_json::from_str(GOLDENS).unwrap();
+        assert_eq!(goldens["format"], 1);
         let directory = tempfile::tempdir().unwrap();
-        let sequences = goldens["sequences"].as_array().unwrap();
-        assert!(sequences.len() >= 6);
-        for sequence in sequences.iter().filter(|sequence| !skipped(sequence)) {
-            replay(sequence, directory.path());
-        }
+        let sequences: Vec<&Value> = goldens["sequences"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter(|sequence| !skipped(sequence))
+            .collect();
+        let expected: usize = sequences
+            .iter()
+            .map(|sequence| {
+                let steps = sequence["steps"].as_array().unwrap();
+                steps.iter().filter(|step| !skipped(step)).count()
+            })
+            .sum();
+        let replayed: usize = sequences
+            .iter()
+            .map(|sequence| replay(sequence, directory.path()))
+            .sum();
+        // A `skip` added to the file must not quietly remove coverage.
+        assert_eq!(replayed, expected);
+        assert!(replayed >= 100, "only {replayed} golden steps replayed");
     }
 
     #[test]
@@ -797,6 +822,9 @@ mod tests {
             json!({"op": "frobnicate"}),
             json!({"op": ""}),
             json!([]),
+            // serde would read these as an internally tagged enum from a sequence.
+            json!(["get", "default", "n", "a"]),
+            json!(["put", "absent", "n", "a", ""]),
             json!("get"),
             json!(null),
             json!(7),
@@ -807,6 +835,7 @@ mod tests {
         for request in [
             r#"{"op":"kv"}"#,
             r#"{"op":"kv","request":{"op":"list","collection":"default","namespace":"n"},"extra":1}"#,
+            r#"{"op":"kv","request":{"op":"list","collection":"default","namespace":"n"},"request":{"op":"list","collection":"default","namespace":"n"}}"#,
         ] {
             assert_eq!(call_text(db, request)["error"]["code"], "invalid_input");
         }
@@ -934,6 +963,18 @@ mod tests {
         // A malformed read is still an invalid request.
         assert_eq!(
             code(db, json!({"op": "get", "collection": "default"})),
+            "invalid_request"
+        );
+        // A repeated field and a request that is not an object are reported
+        // before the read-only refusal, as in vlite-mcp.
+        let repeated = call_text(
+            db,
+            r#"{"op":"kv","request":{"op":"put","op":"put","collection":"default","namespace":"n","key":"b","value_base64":""}}"#,
+        );
+        assert_eq!(repeated["error"]["code"], "invalid_request");
+        assert_eq!(repeated["error"]["message"], "duplicate argument field");
+        assert_eq!(
+            code(db, json!(["put", "default", "n", "b", ""])),
             "invalid_request"
         );
         assert_eq!(
@@ -1143,6 +1184,28 @@ mod tests {
         let page = page_of(&over, 2);
         assert_eq!(page["items"].as_array().unwrap().len(), 1);
         assert_eq!(page["next_after"], "a");
+    }
+
+    #[test]
+    fn listing_defaults_to_a_hundred_entries() {
+        let db = memory(1);
+        for index in 0..101 {
+            put(db, &format!("k{index:03}"), "");
+        }
+        let page = ok(
+            db,
+            json!({"op": "list", "collection": "default", "namespace": "n"}),
+        );
+        assert_eq!(page["items"].as_array().unwrap().len(), 100);
+        assert_eq!(page["next_after"], "k099");
+        let rest = ok(
+            db,
+            json!({"op": "list", "collection": "default", "namespace": "n",
+                "after": page["next_after"]}),
+        );
+        assert_eq!(rest["items"].as_array().unwrap().len(), 1);
+        assert_eq!(rest["next_after"], Value::Null);
+        close(db);
     }
 
     #[test]

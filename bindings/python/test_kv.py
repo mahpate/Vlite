@@ -22,6 +22,7 @@ LIBRARY = Path(os.environ.get("VLITE_TEST_LIBRARY", str(ROOT / "target" / "debug
     "vlite_ffi.dll" if sys.platform == "win32" else "libvlite_ffi.dylib" if sys.platform == "darwin" else "libvlite_ffi.so"))))
 NATIVE = NativeLibrary(LIBRARY)
 GOLDENS = json.loads((ROOT / "tests" / "fixtures" / "kv" / "kv_dialect_goldens.json").read_text(encoding="utf-8"))
+assert GOLDENS["format"] == 1, "the replay reads format 1"
 U64_MAX = 2 ** 64 - 1
 
 

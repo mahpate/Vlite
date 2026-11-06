@@ -369,6 +369,7 @@ fn replay(sequence: &Value, surface: Surface, directory: &Path) -> usize {
 
 fn replay_all(surface: Surface) {
     let goldens: Value = serde_json::from_str(GOLDENS).unwrap();
+    assert_eq!(goldens["format"], 1, "the replay reads format 1");
     let directory = tempfile::tempdir().unwrap();
     let mut replayed = 0;
     for sequence in goldens["sequences"].as_array().unwrap() {

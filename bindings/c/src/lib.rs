@@ -781,7 +781,9 @@ fn execute(handle: u64, request: Request) -> Result<Value> {
             }
             return Ok(result);
         }
-        // A list page is bounded by its own 16 MiB rule, not the 8 MiB cap above.
+        // A list page is bounded by its own 16 MiB rule, not the 8 MiB cap above; every
+        // other result is one entry (at most 1.4 MB). An operation that returns more
+        // (a batch read) must bound itself or go through the cap.
         Request::Kv { request } => return kv::execute(&mut state, handle, request),
         _ => {}
     }

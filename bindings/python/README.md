@@ -157,7 +157,7 @@ filter values retain the existing explicit typed JSON shape. Responses are
 ordinary dictionaries/lists; byte images are `bytes`. New methods carry inline
 Python type annotations; no separate stub file is required.
 
-JSON requests/responses are capped at 8 MiB including base64 overhead, so large
+JSON requests/responses are capped at 8 MiB including base64 overhead (a key-value `list` page may reach 16 MiB), so large
 byte images need a different persistence surface. In-memory images are durable
 only when the host saves them. Encryption protects contents, not access patterns
 or process memory; Python/JSON key copies cannot be reliably wiped. No provider

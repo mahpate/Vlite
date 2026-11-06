@@ -231,7 +231,7 @@ export interface KvAddress { collection: string; namespace: string; key: string 
 /** `value` is at most 1,047,290 bytes. `expiresAtMs` is an absolute Unix-millisecond deadline (u64, V5 files). */
 export interface KvPutOptions extends KvAddress { value: Uint8Array; expected?: KvExpected; expiresAtMs?: bigint | null }
 /** `after` is exclusive, `limit` is 1 to 10,000 (default 100); `prefix` and `after` are at most 1,024 bytes. */
-export interface KvListOptions { collection: string; namespace: string; prefix?: string; after?: string; limit?: number }
+export interface KvListOptions { collection: string; namespace: string; prefix?: string; after?: string | null; limit?: number }
 export interface KvPutResult { version: bigint; expires_at_ms: bigint | null }
 export interface KvEntry extends KvPutResult { key: string; value: Uint8Array }
 export interface KvPage { items: KvEntry[]; next_after: string | null }

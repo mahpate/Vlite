@@ -64,6 +64,7 @@ assert.throws(() => pkg.VLiteDatabase.fromBytes(image.slice(0, image.length - 3)
 const U64_MAX = 2n ** 64n - 1n;
 const goldens = JSON.parse(readFileSync(
   fileURLToPath(new URL('../../../tests/fixtures/kv/kv_dialect_goldens.json', import.meta.url)), 'utf8'));
+assert.equal(goldens.format, 1, 'the replay reads format 1');
 const skipped = (node) => (node.skip ?? []).includes('wasm') || node.typed === false;
 const codeOf = (error) => { assert.ok(error instanceof Error, `${error}`); return error.code; };
 
@@ -213,6 +214,53 @@ assert.throws(() => strict.kvList('default', 'n', undefined, undefined, 0), (err
 assert.throws(() => strict.kvPut('default', 'n', 'k', new Uint8Array(1047291)), (error) => codeOf(error) === 'invalid_input');
 // Nothing was written by the rejected calls.
 assert.equal(strict.kvGet('default', 'n', 'k'), undefined);
+
+// A value is a Uint8Array and nothing else: a typed parameter would copy a string as zero bytes, an ArrayBuffer or a
+// DataView as nothing and the numbers of an array modulo 256, and report success.
+const typed = pkg.VLiteDatabase.create(1);
+for (const bad of ['text', new ArrayBuffer(4), new DataView(new ArrayBuffer(2)), [1, 300], undefined, null, 7, {}]) {
+  assert.throws(() => typed.kvPut('default', 'n', 'k', bad), (error) => codeOf(error) === 'invalid_request', String(bad));
+}
+assert.equal(typed.kvGet('default', 'n', 'k'), undefined);
+// A Node Buffer is a Uint8Array.
+typed.kvPut('default', 'n', 'k', Buffer.from([1, 2]));
+assert.deepEqual(typed.kvGet('default', 'n', 'k').value, new Uint8Array([1, 2]));
+
+// Every text argument is a string, and a well-formed one: an unpaired surrogate would be copied as U+FFFD, and two
+// different keys would name one entry. The other bindings refuse it too.
+for (const bad of [1, null, undefined, {}, ['a'], new String('a')]) {
+  for (const action of [
+    () => typed.kvGet(bad, 'n', 'k'), () => typed.kvGet('default', bad, 'k'), () => typed.kvGet('default', 'n', bad),
+    () => typed.kvPut('default', 'n', bad, new Uint8Array()), () => typed.kvDelete('default', 'n', bad),
+    () => typed.kvList(bad, 'n'), () => typed.kvList('default', bad),
+  ]) assert.throws(action, (error) => codeOf(error) === 'invalid_request', String(bad));
+}
+assert.deepEqual(typed.kvList('default', 'n', null, null, null).items.map((item) => item.key), ['k']);
+for (const bad of ['\ud800', 'a\udc00', '\udc00\ud800', 'x\ud83d']) {
+  for (const action of [
+    () => typed.kvGet('default', 'n', bad), () => typed.kvGet('default', bad, 'k'), () => typed.kvGet(bad, 'n', 'k'),
+    () => typed.kvPut('default', 'n', bad, new Uint8Array()), () => typed.kvDelete('default', 'n', bad),
+    () => typed.kvList('default', 'n', bad), () => typed.kvList('default', 'n', undefined, bad),
+  ]) assert.throws(action, (error) => codeOf(error) === 'invalid_input', JSON.stringify(bad));
+}
+// A valid surrogate pair is an ordinary character.
+const smile = '\u{1F600}/é';
+typed.kvPut('default', smile, smile, new Uint8Array([3]));
+assert.equal(typed.kvGet('default', smile, smile).key, smile);
+assert.deepEqual(typed.kvList('default', smile, '\u{1F600}').items.map((item) => item.key), [smile]);
+
+// An `expected` that runs the caller's code and throws is a malformed value, and leaves the database usable: an
+// exception that unwound through the native frame would leave it borrowed for good.
+const hostile = pkg.VLiteDatabase.create(1);
+const getter = { get revision() { throw new Error('the getter ran'); } };
+const trap = new Proxy({}, { ownKeys() { throw new Error('the trap ran'); } });
+for (const expected of [getter, trap]) {
+  assert.throws(() => hostile.kvPut('default', 'n', 'k', new Uint8Array(), expected), (error) => codeOf(error) === 'invalid_request');
+  assert.throws(() => hostile.kvDelete('default', 'n', 'k', expected), (error) => codeOf(error) === 'invalid_request');
+}
+hostile.kvPut('default', 'n', 'k', new Uint8Array([9]));
+assert.deepEqual(hostile.kvGet('default', 'n', 'k').value, new Uint8Array([9]));
+assert.ok(hostile.toBytes().length > 0);
 // A collection with other than one dimension is not a key-value collection.
 const wide = pkg.VLiteDatabase.create(2);
 assert.throws(() => wide.kvGet('default', 'n', 'k'), (error) => codeOf(error) === 'not_kv_collection');

@@ -13,6 +13,7 @@ import { NativeLibrary, Database, EmbeddedError } from "./index.js";
 const nativeOptions = { libraryPath: process.env.VLITE_TEST_LIBRARY };
 const GOLDENS = JSON.parse(await readFile(
   fileURLToPath(new URL("../../tests/fixtures/kv/kv_dialect_goldens.json", import.meta.url)), "utf8"));
+assert.equal(GOLDENS.format, 1, "the replay reads format 1");
 const U64_MAX = 2n ** 64n - 1n;
 const code = expected => error => error instanceof EmbeddedError && error.code === expected;
 
@@ -197,6 +198,9 @@ test("paging follows next_after", async () => fixture(async native => {
     if (after === null) break;
   }
   assert.deepEqual(seen, Array.from({ length: 25 }, (_, index) => [`k${String(index).padStart(2, "0")}`, index]));
+  // The `next_after` of a last page is null; sending it back starts from the beginning, as if omitted.
+  const restarted = await db.kvList({ ...address, prefix: "k", after: null, limit: 10 });
+  assert.deepEqual(restarted.items.map(item => item.key), seen.slice(0, 10).map(([key]) => key));
   await db.close();
 }));
 

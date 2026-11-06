@@ -32,7 +32,10 @@ Key-value: `kvGet(collection, namespace, key)`, `kvPut(collection, namespace, ke
 `kvDelete(collection, namespace, key, expected?)` and `kvList(collection, namespace, prefix?, after?, limit?)` store
 byte values under namespaced text keys in a collection that already exists and has one dimension: `create(1)` has the
 `default` collection, an image from `fromBytes` may hold others, and a missing collection is never created. Values are
-`Uint8Array`; versions and deadlines are `bigint` (a `Number` is rejected), `expected` is `"any"` (the default),
+`Uint8Array` (a string, an `ArrayBuffer`, a `DataView` or an array is refused with `invalid_request`, never copied);
+collections, namespaces, keys, prefixes and `after` are well-formed strings (a value that is not a string is
+`invalid_request`, and one with an unpaired surrogate `invalid_input`, as in the other bindings). Versions and deadlines are
+`bigint` (a `Number` is rejected), `expected` is `"any"` (the default),
 `"absent"` or `{ revision: bigint }`, and `expiresAtMs` is an absolute Unix-millisecond deadline judged on the
 `setClock` clock: a due entry reads as absent, and a put without a deadline clears it. `kvGet` returns
 `{ key, value, version, expires_at_ms }`, or `undefined` for an absent or due key; `kvPut` returns

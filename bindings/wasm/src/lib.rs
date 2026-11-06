@@ -1,6 +1,7 @@
 //! WebAssembly bindings: an in-memory VLite database persisted by the host as
 //! a byte image (`toBytes` / `fromBytes`). No files, locks or threads.
 
+use js_sys::{JsString, Uint8Array};
 use std::ops::ControlFlow;
 use std::sync::atomic::{AtomicU64, Ordering};
 use vlite::changes::{Change, ChangeKind, FeedCursor};
@@ -27,6 +28,9 @@ pub fn set_clock(now_ms: f64) {
 }
 
 // JS built-ins that build key-value results and errors. They are not exported.
+// The two that read the caller's `expected` object can run the caller's code (a
+// getter, a proxy), so they are `catch`: a JavaScript exception that unwound through
+// this frame would leave the database borrowed for good.
 #[wasm_bindgen]
 extern "C" {
     type Object;
@@ -41,10 +45,10 @@ extern "C" {
     fn length(this: &Array) -> u32;
     #[wasm_bindgen(js_namespace = Reflect, js_name = set)]
     fn reflect_set(target: &JsValue, key: &str, value: &JsValue) -> bool;
-    #[wasm_bindgen(js_namespace = Reflect, js_name = get)]
-    fn reflect_get(target: &JsValue, key: &str) -> JsValue;
-    #[wasm_bindgen(static_method_of = Object)]
-    fn keys(target: &JsValue) -> Array;
+    #[wasm_bindgen(catch, js_namespace = Reflect, js_name = get)]
+    fn reflect_get(target: &JsValue, key: &str) -> Result<JsValue, JsValue>;
+    #[wasm_bindgen(catch, static_method_of = Object)]
+    fn keys(target: &JsValue) -> Result<Array, JsValue>;
 }
 
 #[wasm_bindgen(typescript_custom_section)]
@@ -238,17 +242,25 @@ impl VLiteDatabase {
     // deadlines `bigint`. Failures throw an `Error` whose `code` is the stable
     // code of the MCP/shell/C ABI key-value dialect (`kv_not_found`,
     // `collection_not_found`, `precondition_failed`, `invalid_input`, ...).
-    // Expiry reads the clock set with `setClock`.
+    // Expiry reads the clock set with `setClock`. Every argument is checked as
+    // received: a string must be a well-formed string and a value a `Uint8Array`,
+    // because a typed parameter would copy anything array-like or lossy.
 
     /// The live entry, or `undefined` when the key is absent or expired.
     #[wasm_bindgen(js_name = kvGet, unchecked_return_type = "KvEntry | undefined")]
-    pub fn kv_get(&self, collection: &str, namespace: &str, key: &str) -> Result<JsValue, JsValue> {
-        address(collection, namespace, Some(key))?;
+    pub fn kv_get(
+        &self,
+        #[wasm_bindgen(unchecked_param_type = "string")] collection: JsValue,
+        #[wasm_bindgen(unchecked_param_type = "string")] namespace: JsValue,
+        #[wasm_bindgen(unchecked_param_type = "string")] key: JsValue,
+    ) -> Result<JsValue, JsValue> {
+        let (collection, namespace) = address(&collection, &namespace)?;
+        let key = key_of(&key)?;
         let entry = self
             .inner
-            .kv_view(collection)
+            .kv_view(&collection)
             .map_err(kv_error)?
-            .get_at(namespace, key, now())
+            .get_at(&namespace, &key, now())
             .map_err(kv_error)?;
         Ok(entry.map_or(JsValue::UNDEFINED, |entry| {
             entry_object(&entry.key, &entry.value, entry.version, entry.expires_at_ms)
@@ -261,28 +273,27 @@ impl VLiteDatabase {
     #[wasm_bindgen(js_name = kvPut, unchecked_return_type = "KvPutResult")]
     pub fn kv_put(
         &mut self,
-        collection: &str,
-        namespace: &str,
-        key: &str,
-        value: Vec<u8>,
+        #[wasm_bindgen(unchecked_param_type = "string")] collection: JsValue,
+        #[wasm_bindgen(unchecked_param_type = "string")] namespace: JsValue,
+        #[wasm_bindgen(unchecked_param_type = "string")] key: JsValue,
+        #[wasm_bindgen(unchecked_param_type = "Uint8Array")] value: JsValue,
         #[wasm_bindgen(unchecked_optional_param_type = "KvExpected")] expected: JsValue,
         #[wasm_bindgen(unchecked_optional_param_type = "bigint | null")] expires_at_ms: JsValue,
     ) -> Result<JsValue, JsValue> {
-        address(collection, namespace, Some(key))?;
+        let (collection, namespace) = address(&collection, &namespace)?;
+        let key = key_of(&key)?;
         let expected = expected_of(&expected)?;
         let expires_at_ms = deadline_of(&expires_at_ms)?;
-        if value.len() > MAX_KV_VALUE_BYTES {
-            return Err(invalid(format!("value exceeds {MAX_KV_VALUE_BYTES} bytes")));
-        }
+        let value = value_of(&value)?;
         // `kv_store` creates a missing collection; this surface must not.
-        self.inner.kv_view(collection).map_err(kv_error)?;
+        self.inner.kv_view(&collection).map_err(kv_error)?;
         let version = self
             .inner
-            .kv_store(collection)
+            .kv_store(&collection)
             .map_err(kv_error)?
             .put_at(
-                namespace,
-                key,
+                &namespace,
+                &key,
                 &value,
                 KvPut {
                     expected,
@@ -301,18 +312,19 @@ impl VLiteDatabase {
     #[wasm_bindgen(js_name = kvDelete)]
     pub fn kv_delete(
         &mut self,
-        collection: &str,
-        namespace: &str,
-        key: &str,
+        #[wasm_bindgen(unchecked_param_type = "string")] collection: JsValue,
+        #[wasm_bindgen(unchecked_param_type = "string")] namespace: JsValue,
+        #[wasm_bindgen(unchecked_param_type = "string")] key: JsValue,
         #[wasm_bindgen(unchecked_optional_param_type = "KvExpected")] expected: JsValue,
     ) -> Result<bool, JsValue> {
-        address(collection, namespace, Some(key))?;
+        let (collection, namespace) = address(&collection, &namespace)?;
+        let key = key_of(&key)?;
         let expected = expected_of(&expected)?;
-        self.inner.kv_view(collection).map_err(kv_error)?;
+        self.inner.kv_view(&collection).map_err(kv_error)?;
         self.inner
-            .kv_store(collection)
+            .kv_store(&collection)
             .map_err(kv_error)?
-            .delete_at(namespace, key, expected, now())
+            .delete_at(&namespace, &key, expected, now())
             .map_err(kv_error)
     }
 
@@ -322,18 +334,15 @@ impl VLiteDatabase {
     #[wasm_bindgen(js_name = kvList, unchecked_return_type = "KvPage")]
     pub fn kv_list(
         &self,
-        collection: &str,
-        namespace: &str,
-        prefix: Option<String>,
-        after: Option<String>,
-        limit: Option<f64>,
+        #[wasm_bindgen(unchecked_param_type = "string")] collection: JsValue,
+        #[wasm_bindgen(unchecked_param_type = "string")] namespace: JsValue,
+        #[wasm_bindgen(unchecked_optional_param_type = "string | null")] prefix: JsValue,
+        #[wasm_bindgen(unchecked_optional_param_type = "string | null")] after: JsValue,
+        #[wasm_bindgen(unchecked_optional_param_type = "number | null")] limit: Option<f64>,
     ) -> Result<JsValue, JsValue> {
-        address(collection, namespace, None)?;
-        let prefix = prefix.unwrap_or_default();
-        bounded(&prefix, "prefix", 0, 1024)?;
-        if let Some(after) = &after {
-            bounded(after, "after", 1, 1024)?;
-        }
+        let (collection, namespace) = address(&collection, &namespace)?;
+        let prefix = optional_text(&prefix, "prefix", 0, 1024)?.unwrap_or_default();
+        let after = optional_text(&after, "after", 1, 1024)?;
         let limit = match limit {
             None => 100,
             Some(value) if safe_integer(value) => value as u64,
@@ -347,9 +356,9 @@ impl VLiteDatabase {
         if !(1..=10_000).contains(&limit) {
             return Err(invalid("limit must be 1..10000"));
         }
-        let view = self.inner.kv_view(collection).map_err(kv_error)?;
+        let view = self.inner.kv_view(&collection).map_err(kv_error)?;
         let (entries, next_after) =
-            page(view, namespace, &prefix, after.as_deref(), limit as usize)?;
+            page(view, &namespace, &prefix, after.as_deref(), limit as usize)?;
         let items = Array::new();
         for entry in &entries {
             items.push(&entry_object(
@@ -439,15 +448,74 @@ fn bounded(text: &str, name: &str, min: usize, max: usize) -> Result<(), JsValue
     Ok(())
 }
 
-fn address(collection: &str, namespace: &str, key: Option<&str>) -> Result<(), JsValue> {
+/// A string argument of `min..=max` UTF-8 bytes. A `&str` parameter would be
+/// copied through `TextEncoder`, which turns an unpaired surrogate into U+FFFD,
+/// so two different keys could name one entry; the other bindings refuse such a
+/// string, and so does this one, as it does anything that is not a string.
+fn text(value: &JsValue, name: &str, min: usize, max: usize) -> Result<String, JsValue> {
+    let string = value
+        .dyn_ref::<JsString>()
+        .ok_or_else(|| reject("invalid_request", format!("{name} must be a string")))?;
+    // Every UTF-16 unit takes at least one UTF-8 byte.
+    if string.length() as usize > max {
+        return Err(invalid(format!("{name} must be {min}..{max} UTF-8 bytes")));
+    }
+    let mut units = (0..string.length())
+        .map(|index| string.char_code_at(index) as u16)
+        .peekable();
+    while let Some(unit) = units.next() {
+        match unit {
+            0xD800..=0xDBFF if matches!(units.peek(), Some(0xDC00..=0xDFFF)) => {
+                units.next();
+            }
+            0xD800..=0xDFFF => {
+                return Err(invalid(format!("{name} must be well-formed Unicode")));
+            }
+            _ => {}
+        }
+    }
+    let text = value.as_string().unwrap_or_default();
+    bounded(&text, name, min, max)?;
+    Ok(text)
+}
+
+/// `undefined` and `null` are absent.
+fn optional_text(
+    value: &JsValue,
+    name: &str,
+    min: usize,
+    max: usize,
+) -> Result<Option<String>, JsValue> {
+    if value.is_undefined() || value.is_null() {
+        return Ok(None);
+    }
+    text(value, name, min, max).map(Some)
+}
+
+/// The collection and the namespace of a call.
+fn address(collection: &JsValue, namespace: &JsValue) -> Result<(String, String), JsValue> {
+    let collection = text(collection, "collection", 0, usize::MAX)?;
     if collection.is_empty() {
         return Err(invalid("collection must not be empty"));
     }
-    bounded(namespace, "namespace", 1, 255)?;
-    if let Some(key) = key {
-        bounded(key, "key", 1, 1024)?;
+    Ok((collection, text(namespace, "namespace", 1, 255)?))
+}
+
+fn key_of(key: &JsValue) -> Result<String, JsValue> {
+    text(key, "key", 1, 1024)
+}
+
+/// The bytes of a `Uint8Array`, checked before they are copied. A `Vec<u8>`
+/// parameter would copy any array-like: a string as zero bytes, an `ArrayBuffer`
+/// as nothing, numbers modulo 256.
+fn value_of(value: &JsValue) -> Result<Vec<u8>, JsValue> {
+    let bytes = value
+        .dyn_ref::<Uint8Array>()
+        .ok_or_else(|| reject("invalid_request", "value must be a Uint8Array"))?;
+    if bytes.length() as usize > MAX_KV_VALUE_BYTES {
+        return Err(invalid(format!("value exceeds {MAX_KV_VALUE_BYTES} bytes")));
     }
-    Ok(())
+    Ok(bytes.to_vec())
 }
 
 fn safe_integer(value: f64) -> bool {
@@ -472,11 +540,14 @@ fn expected_of(value: &JsValue) -> Result<Expected, JsValue> {
             _ => Err(malformed()),
         };
     }
-    if value.is_object() && Object::keys(value).length() == 1 {
+    // A getter or a proxy of the caller's may throw: that is a malformed value.
+    if value.is_object()
+        && let Ok(names) = Object::keys(value)
+        && names.length() == 1
         // `u64::try_from` accepts only a bigint in range, never a wrapped one.
-        if let Ok(revision) = u64::try_from(reflect_get(value, "revision")) {
-            return Ok(Expected::Revision(revision));
-        }
+        && let Ok(Ok(revision)) = reflect_get(value, "revision").map(u64::try_from)
+    {
+        return Ok(Expected::Revision(revision));
     }
     Err(malformed())
 }

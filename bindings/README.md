@@ -324,7 +324,9 @@ key from `get` as `kv_not_found`; WebAssembly's `kvGet` returns `undefined`. A r
 `read_only`. Against a library that predates the operations, Python and Node.js raise `unsupported`. There are no lease
 operations. See the [Python](python/README.md#key-value), [Node.js](node/README.md#key-value) and
 [WebAssembly](wasm/README.md) guides for examples. The same goldens, `tests/fixtures/kv/kv_dialect_goldens.json`, are
-replayed by every binding's tests and by the shell and MCP tests, so the dialects cannot drift apart.
+replayed by the C ABI, Python and Node.js tests, by the WebAssembly smoke test (which skips the steps that need a raw
+request, a read-only handle or a second collection) and by the shell and MCP tests; the REST and gRPC servers do not
+replay them. A replay catches a drift of one surface in the cases the file holds, not a drift of every case.
 
 ## Ownership, errors and durability
 

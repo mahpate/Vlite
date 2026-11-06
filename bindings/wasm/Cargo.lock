@@ -494,6 +494,7 @@ dependencies = [
 name = "vlite-wasm"
 version = "0.7.1"
 dependencies = [
+ "js-sys",
  "serde_json",
  "vlite",
  "wasm-bindgen",

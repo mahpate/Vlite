@@ -403,7 +403,7 @@ export class Database {
   }
   async kvList({ collection, namespace, prefix = "", after, limit = 100 }) {
     const result = await this.#kv("list", { collection: kvText(collection, "collection"), namespace: kvText(namespace, "namespace"),
-      prefix: kvText(prefix, "prefix"), limit: kvLimit(limit), ...(after === undefined ? {} : { after: kvText(after, "after") }) });
+      prefix: kvText(prefix, "prefix"), limit: kvLimit(limit), ...(after == null ? {} : { after: kvText(after, "after") }) });
     return { items: result.items.map(kvEntry), next_after: result.next_after };
   }
 

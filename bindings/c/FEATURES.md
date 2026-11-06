@@ -225,7 +225,9 @@ dimension), `kv_slots_exhausted`, `precondition_failed`, `upgrade_required` (exp
 `invalid_input` (bounds, base64, decimals), `invalid_request` (unknown, repeated, missing or mistyped fields and an
 unknown `request.op`), `invalid_handle`, `locked`, `io_error`, `commit_indeterminate`, `poisoned`, `corrupt`,
 `incomplete_tail`, `graph_attached_record`, `graph_attached_record_expiry`, and `database_error` for any other engine
-error. A read-only handle refuses `put` and `delete` with `read_only` before it looks at anything else. There are no
+error. A read-only handle refuses `put` and `delete` with `read_only` before it reads the request any further, so a
+precondition, a bound or a malformed field never masks it; only a repeated field or a request that is not an object is
+reported first, as in `vlite-mcp` (`vlite-shell` checks read-only first). There are no
 lease operations. The goldens in `tests/fixtures/kv/kv_dialect_goldens.json` pin this dialect: the C ABI, Python, Node
 and WASM tests and the shell and MCP tests all replay them.
 
