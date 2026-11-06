@@ -1926,6 +1926,115 @@ async fn grpc_kv_health_and_transport_limits() {
         .unwrap();
 }
 
+/// A message of exactly `size` encoded bytes: `build` makes one with a field
+/// of the given length, and the length is corrected for the envelope.
+fn sized<M: Message>(size: usize, build: impl Fn(usize) -> M) -> M {
+    let mut length = size;
+    loop {
+        let message = build(length);
+        let encoded = message.encoded_len();
+        if encoded == size {
+            return message;
+        }
+        length = (length + size)
+            .checked_sub(encoded)
+            .expect("the field fits the size");
+    }
+}
+
+#[tokio::test]
+async fn grpc_batch_and_get_many_share_the_transport_limit_of_the_service() {
+    let directory = tempfile::tempdir().unwrap();
+    let mut h = start(database(FormatVersion::V5), directory.path()).await;
+    for size in [8_388_608, 8_388_609] {
+        let batched = sized(size, |length| {
+            batch("default", vec![batch_put("n", "k", &vec![0; length], None)])
+        });
+        let read = sized(size, |length| {
+            many("default", &[("n", "k".repeat(length).as_str())])
+        });
+        let batch_error = h
+            .client
+            .write_kv_batch(request(ADMIN, batched))
+            .await
+            .unwrap_err();
+        let read_error = h
+            .client
+            .get_kv_entries(request(ADMIN, read))
+            .await
+            .unwrap_err();
+        for error in [batch_error, read_error] {
+            if size == 8_388_608 {
+                // It reaches the handler, which refuses what it holds.
+                assert_error(error, Code::InvalidArgument, "invalid_input");
+            } else {
+                assert_eq!(error.code(), Code::OutOfRange, "{error:?}");
+                assert!(error.metadata().get(ERROR_CODE_TRAILER).is_none());
+            }
+        }
+    }
+}
+
+#[tokio::test]
+async fn grpc_batch_counts_its_operations_before_it_converts_any_and_names_a_missing_kind() {
+    let directory = tempfile::tempdir().unwrap();
+    let mut h = start(database(FormatVersion::V5), directory.path()).await;
+    // Too many operations, the first without a kind: the count is refused, so
+    // no operation is converted to find the fault.
+    let mut operations = vec![proto::KvBatchOperation { kind: None }];
+    operations.extend((0..1000).map(|index| batch_delete(&format!("k{index}"), None)));
+    assert_eq!(operations.len(), 1001);
+    let error = h
+        .client
+        .write_kv_batch(request(ADMIN, batch("default", operations)))
+        .await
+        .unwrap_err();
+    let message = error.message().to_owned();
+    assert_error(error, Code::InvalidArgument, "invalid_input");
+    assert!(message.contains("at most 1000 operations"), "{message}");
+    // An operation without a kind is named by its position. The messages are
+    // converted before REST checks them in order, so it is reported ahead of
+    // an invalid key that comes first.
+    for (operations, position) in [
+        (
+            vec![
+                batch_put("n", "a", b"x", None),
+                proto::KvBatchOperation { kind: None },
+            ],
+            1,
+        ),
+        (
+            vec![
+                batch_put("n", "", b"x", None),
+                batch_put("n", "b", b"x", None),
+                proto::KvBatchOperation { kind: None },
+            ],
+            2,
+        ),
+    ] {
+        let error = h
+            .client
+            .write_kv_batch(request(ADMIN, batch("default", operations)))
+            .await
+            .unwrap_err();
+        let message = error.message().to_owned();
+        assert_error(error, Code::InvalidArgument, "invalid_input");
+        assert!(
+            message.starts_with(&format!("operations[{position}]: ")),
+            "{message}"
+        );
+        assert!(message.contains("operation is required"), "{message}");
+    }
+    // Nothing was written by any of them.
+    let read = h
+        .client
+        .get_kv_entries(request(ADMIN, many("default", &[("n", "a"), ("n", "b")])))
+        .await
+        .unwrap()
+        .into_inner();
+    assert!(read.items.iter().all(|item| item.entry.is_none()));
+}
+
 #[tokio::test]
 async fn grpc_kv_rest_parity_trace() {
     let rest_dir = tempfile::tempdir().unwrap();

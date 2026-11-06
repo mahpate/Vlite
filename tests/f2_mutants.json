@@ -315,8 +315,8 @@
   "id": "kvb/S03-get-many-not-a-read-post",
   "desc": "The read-only token cannot use the get-many POST. Killed by server_kv_batch::scopes_decide_who_may_read_or_batch.",
   "file": "src/server.rs",
-  "old": "|| (method == Method::POST && route == \"/v1/collections/{collection}/kv/entries/get\");",
-  "new": "|| (method == Method::POST && route == \"/v1/collections/{collection}/kv/entries/get/never\");",
+  "old": "|| (method == Method::POST && route == \"/v1/collections/{collection}/kv/entries/get\")",
+  "new": "|| (method == Method::POST && route == \"/v1/collections/{collection}/kv/entries/get/never\")",
   "cmd": "cargo test --locked --offline --features server --test server_kv_batch"
  },
  {
@@ -462,5 +462,85 @@
   "old": "if full && items.is_empty() {",
   "new": "if false && full && items.is_empty() {",
   "cmd": "cargo test --locked --offline --features mcp,tools --bin vlite-mcp kv_mcp::tests::"
+ },
+ {
+  "id": "kvb/R15-batch-quota-judged-without-a-put",
+  "desc": "A batch that writes no record is judged on the record quota. Killed by server_kv_batch::a_batch_that_writes_no_record_is_never_refused_for_quota.",
+  "file": "src/server/kv.rs",
+  "old": "if changes.iter().any(|&(_, present)| present) {",
+  "new": "if true {",
+  "cmd": "cargo test --locked --offline --features server --test server_kv_batch"
+ },
+ {
+  "id": "kvb/R16-batch-quota-skipped-when-it-writes",
+  "desc": "A batch that writes a record is not judged on the record quota. Killed by server_kv_batch::quota_is_judged_on_the_net_change_of_the_whole_batch.",
+  "file": "src/server/kv.rs",
+  "old": "if changes.iter().any(|&(_, present)| present) {",
+  "new": "if changes.iter().all(|&(_, present)| !present) {",
+  "cmd": "cargo test --locked --offline --features server --test server_kv_batch"
+ },
+ {
+  "id": "kvb/R17-batch-values-not-charged-to-group-commit",
+  "desc": "The values of a batch are not counted in what it retains, so the group-commit byte budget never sees them. Killed by server_kv_batch::a_batch_is_charged_to_the_group_commit_budget_for_what_it_holds.",
+  "file": "src/server/kv.rs",
+  "old": ".saturating_add(value.as_ref().map_or(0, Vec::capacity))",
+  "new": ".saturating_add(0)",
+  "cmd": "cargo test --locked --offline --features server --test server_kv_batch"
+ },
+ {
+  "id": "kvb/G06-grpc-missing-kind-unnamed",
+  "desc": "A batch operation without a kind is reported without its position. Killed by server_grpc_kv::grpc_batch_counts_its_operations_before_it_converts_any_and_names_a_missing_kind.",
+  "file": "src/server/grpc/kv.rs",
+  "old": "rest::at(\"operations\", index, error)",
+  "new": "rest::at(\"operations\", 0 * index, error)",
+  "cmd": "cargo test --locked --offline --features grpc --test server_grpc_kv -- grpc_batch_counts_its_operations_before_it_converts_any_and_names_a_missing_kind"
+ },
+ {
+  "id": "kvb/G07-grpc-count-unchecked-before-conversion",
+  "desc": "The operation count of a WriteKvBatch message is not checked before its operations are converted. Killed by server_grpc_kv::grpc_batch_counts_its_operations_before_it_converts_any_and_names_a_missing_kind.",
+  "file": "src/server/grpc/kv.rs",
+  "old": "                rest::check_operation_count(request.operations.len())?;\n",
+  "new": "",
+  "cmd": "cargo test --locked --offline --features grpc --test server_grpc_kv -- grpc_batch_counts_its_operations_before_it_converts_any_and_names_a_missing_kind"
+ },
+ {
+  "id": "kvb/B19-batch-state-checked-before-the-request",
+  "desc": "The state of the handle is checked before the request of a batch. Killed by kv::batch_tests::a_request_error_comes_before_the_state_of_the_handle.",
+  "file": "src/kv/batch.rs",
+  "old": "    check(operations)?;\n    db.ensure_resident_in(collection)?;\n",
+  "new": "    db.ensure_resident_in(collection)?;\n    check(operations)?;\n",
+  "cmd": "cargo test --locked --offline --features server,mcp,tools --lib kv::batch_tests"
+ },
+ {
+  "id": "kvb/B20-get-many-state-checked-before-the-keys",
+  "desc": "The state of the handle is checked before the keys of a get-many. Killed by kv::batch_tests::a_request_error_comes_before_the_state_of_the_handle.",
+  "file": "src/kv/batch.rs",
+  "old": "    if keys.len() > MAX_KV_GET_MANY_KEYS {\n",
+  "new": "    db.ensure_resident_in(collection)?;\n    if keys.len() > MAX_KV_GET_MANY_KEYS {\n",
+  "cmd": "cargo test --locked --offline --features server,mcp,tools --lib kv::batch_tests"
+ },
+ {
+  "id": "kvb/B21-get-many-state-never-checked",
+  "desc": "A get-many never checks the state of the handle. Killed by kv::batch_tests::a_request_error_comes_before_the_state_of_the_handle.",
+  "file": "src/kv/batch.rs",
+  "old": "    db.ensure_resident_in(collection)?;\n    let state = db.state(collection);",
+  "new": "    let state = db.state(collection);",
+  "cmd": "cargo test --locked --offline --features server,mcp,tools --lib kv::batch_tests"
+ },
+ {
+  "id": "kvb/B22-batch-state-never-checked",
+  "desc": "A batch never checks the state of the handle. Killed by kv::batch_tests::a_request_error_comes_before_the_state_of_the_handle.",
+  "file": "src/kv/batch.rs",
+  "old": "    check(operations)?;\n    db.ensure_resident_in(collection)?;\n",
+  "new": "    check(operations)?;\n",
+  "cmd": "cargo test --locked --offline --features server,mcp,tools --lib kv::batch_tests"
+ },
+ {
+  "id": "kvb/K04-overtaken-plan-committed",
+  "desc": "A plan that a commit has overtaken is applied anyway. Killed by kv::batch_tests::a_plan_commits_what_write_batch_commits_and_only_where_it_was_made.",
+  "file": "src/kv.rs",
+  "old": "if plan.sequence != self.db.sequence {",
+  "new": "if false && plan.sequence != self.db.sequence {",
+  "cmd": "cargo test --locked --offline --features server,mcp,tools --lib kv::batch_tests"
  }
 ]
