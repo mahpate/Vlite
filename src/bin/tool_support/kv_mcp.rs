@@ -18,14 +18,19 @@ const LIST: &str = "vlite_kv_list";
 const GET_MANY: &str = "vlite_kv_get_many";
 const BATCH: &str = "vlite_kv_batch";
 const PAGE_BYTES: usize = 16 * 1024 * 1024;
+/// The longest base64 text of a value of `MAX_KV_VALUE_BYTES` bytes.
+const MAX_VALUE_BASE64: usize = MAX_KV_VALUE_BYTES.div_ceil(3) * 4;
 
 // An entry always fits a page together with the cursor that names it, so a page
 // is never empty for want of room: the largest value as base64, the key twice
 // (item and cursor) at six bytes per key byte when escaped, and the field names.
 // The key is bounded by the 16-bit length a stored record holds, not by
 // `MAX_KV_KEY_BYTES`: a record planted through another route need not keep to it.
-const _: () =
-    assert!(MAX_KV_VALUE_BYTES.div_ceil(3) * 4 + 2 * 6 * (u16::MAX as usize) + 512 < PAGE_BYTES);
+const _: () = assert!(MAX_VALUE_BASE64 + 2 * 6 * (u16::MAX as usize) + 512 < PAGE_BYTES);
+
+fn value_too_large() -> String {
+    format!("value exceeds {MAX_KV_VALUE_BYTES} decoded bytes")
+}
 
 #[cfg(test)]
 thread_local! {
@@ -288,12 +293,12 @@ pub(crate) fn run(
             address(&request.collection, &request.namespace, Some(&request.key))?;
             let expected = request.expected.expected()?;
             let expires_at_ms = request.expires_at_ms.as_deref().map(decimal).transpose()?;
-            if request.value_base64.len() > 1_396_388 {
-                return Err(invalid("value exceeds 1047290 decoded bytes"));
+            if request.value_base64.len() > MAX_VALUE_BASE64 {
+                return Err(invalid(value_too_large()));
             }
             let value = decode_base64(&request.value_base64)?;
             if value.len() > MAX_KV_VALUE_BYTES {
-                return Err(invalid("value exceeds 1047290 decoded bytes"));
+                return Err(invalid(value_too_large()));
             }
             // kv_store creates missing collections; the serving surfaces must not.
             db.kv_view(&request.collection).map_err(failure)?;
@@ -453,20 +458,12 @@ fn batch_checked(request: &Batch) -> Result<Vec<Checked<'_>>, String> {
             .map_err(|error| at("operations", index, error))?;
         let value = match text {
             Some(text) => {
-                if text.len() > 1_396_388 {
-                    return Err(at(
-                        "operations",
-                        index,
-                        invalid("value exceeds 1047290 decoded bytes"),
-                    ));
+                if text.len() > MAX_VALUE_BASE64 {
+                    return Err(at("operations", index, invalid(value_too_large())));
                 }
                 let value = decode_base64(text).map_err(|error| at("operations", index, error))?;
                 if value.len() > MAX_KV_VALUE_BYTES {
-                    return Err(at(
-                        "operations",
-                        index,
-                        invalid("value exceeds 1047290 decoded bytes"),
-                    ));
+                    return Err(at("operations", index, invalid(value_too_large())));
                 }
                 Some(value)
             }
@@ -768,7 +765,7 @@ pub(crate) fn tool_definitions(read_only: bool) -> Vec<Value> {
         }
         if name == PUT {
             required.push("value_base64");
-            object.insert("value_base64".into(), json!({"type":"string","contentEncoding":"base64","maxLength":1396388,"x-maxDecodedBytes":1047290}));
+            object.insert("value_base64".into(), json!({"type":"string","contentEncoding":"base64","maxLength":MAX_VALUE_BASE64,"x-maxDecodedBytes":MAX_KV_VALUE_BYTES}));
             object.insert(
                 "expires_at_ms".into(),
                 json!({"anyOf":[decimal,{"type":"null"}],"default":null}),
@@ -797,7 +794,7 @@ pub(crate) fn tool_definitions(read_only: bool) -> Vec<Value> {
                 "collection":collection,
                 "operations":{"type":"array","maxItems":MAX_KV_BATCH_OPERATIONS,"items":{"oneOf":[
                     {"type":"object","properties":{"op":{"const":"put"},"namespace":namespace,"key":key,
-                        "value_base64":{"type":"string","contentEncoding":"base64","maxLength":1396388,"x-maxDecodedBytes":1047290},
+                        "value_base64":{"type":"string","contentEncoding":"base64","maxLength":MAX_VALUE_BASE64,"x-maxDecodedBytes":MAX_KV_VALUE_BYTES},
                         "expected":expected},
                         "required":["op","namespace","key","value_base64"],"additionalProperties":false},
                     {"type":"object","properties":{"op":{"const":"delete"},"namespace":namespace,"key":key,

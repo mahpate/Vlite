@@ -1013,49 +1013,60 @@ fn visit_many_lends_entries_in_order_and_stops_when_the_visitor_breaks() {
     assert_eq!(calls, 2);
 }
 
+/// The slot changes that the gate of `write_batch_gated_at` is given for
+/// `operations`. The gate refuses, so nothing is written.
+#[cfg(feature = "server")]
+fn changes_seen(db: &mut Database, operations: &[KvOp<'_>]) -> Result<Vec<(u64, bool)>> {
+    let id = db.resolve("default").unwrap();
+    let mut seen = Vec::new();
+    let result =
+        db.kv_store_by_id(id)
+            .unwrap()
+            .write_batch_gated_at(operations, NOW, |_, changes| {
+                seen = changes.to_vec();
+                Err(())
+            });
+    match result {
+        Err(Gated::Refused(())) => Ok(seen),
+        Err(Gated::Batch(error)) => Err(error),
+        Ok(outcomes) => panic!("a refusing gate let a batch through: {outcomes:?}"),
+    }
+}
+
 #[cfg(feature = "server")]
 #[test]
 fn the_quota_check_sees_the_slots_the_batch_will_write_and_delete() {
     let [a, b, c, _] = SHARED;
     let mut db = memory();
     batch(&mut db, &[put("n", a, b"a"), put("n", b, b"b")]).unwrap();
-    let id = db.resolve("default").unwrap();
-    let plan = db
-        .kv_view_by_id(id)
-        .unwrap()
-        .plan_batch_at(
-            &[
-                delete("n", a),
-                put("n", c, b"c"),
-                put("n", b, b"b2"),
-                delete("n", "absent"),
-            ],
-            NOW,
-        )
-        .unwrap();
+    let changes = changes_seen(
+        &mut db,
+        &[
+            delete("n", a),
+            put("n", c, b"c"),
+            put("n", b, b"b2"),
+            delete("n", "absent"),
+        ],
+    )
+    .unwrap();
     // a's slot is freed and then taken by c; b keeps its own slot; the delete
     // of a key that is not there changes nothing.
     assert_eq!(
-        plan.changes(),
+        changes,
         [(slot(0), false), (slot(0), true), (slot(1), true)]
     );
-    let error = db
-        .kv_view_by_id(id)
-        .unwrap()
-        .plan_batch_at(&[put_if("n", a, b"x", Expected::Absent)], NOW)
-        .err()
-        .unwrap();
+    let error = changes_seen(&mut db, &[put_if("n", a, b"x", Expected::Absent)]).unwrap_err();
     assert!(matches!(error, Error::RevisionMismatch { .. }));
 }
 
 #[cfg(feature = "server")]
 #[test]
-fn a_plan_commits_what_write_batch_commits_and_only_where_it_was_made() {
+fn a_gate_sees_the_batch_before_it_is_written_and_can_refuse_it() {
     let [a, b, c, _] = SHARED;
-    let mut planned = memory();
+    let mut gated = memory();
     let mut direct = memory();
     let mut version = 0;
-    for db in [&mut planned, &mut direct] {
+    for db in [&mut gated, &mut direct] {
         let outcomes = batch(db, &[put("n", a, b"a"), put("n", b, b"b")]).unwrap();
         let KvOutcome::Put { version: written } = outcomes[1] else {
             panic!("a put gives a version");
@@ -1068,40 +1079,53 @@ fn a_plan_commits_what_write_batch_commits_and_only_where_it_was_made() {
         put_if("n", b, b"b2", Expected::Revision(version)),
         delete("n", "absent"),
     ];
-    let id = planned.resolve("default").unwrap();
-    let sequence = planned.sequence;
-    let plan = planned
-        .kv_view_by_id(id)
-        .unwrap()
-        .plan_batch_at(&operations, NOW)
-        .unwrap();
-    // Planning writes nothing.
-    assert_eq!(planned.sequence, sequence);
-    let outcomes = planned
+    let id = gated.resolve("default").unwrap();
+    let sequence = gated.sequence;
+    let before = snapshot(&gated);
+    let mut calls = 0;
+    // The gate runs once, before anything is written, and the batch is then
+    // committed as `write_batch_at` commits it.
+    let outcomes = gated
         .kv_store_by_id(id)
         .unwrap()
-        .commit_batch_plan(plan)
+        .write_batch_gated_at(&operations, NOW, |db, _| {
+            calls += 1;
+            assert_eq!(db.sequence, sequence);
+            assert_eq!(snapshot(db), before);
+            Ok::<(), ()>(())
+        })
         .unwrap();
+    assert_eq!(calls, 1);
     assert_eq!(outcomes, batch(&mut direct, &operations).unwrap());
-    assert_eq!(snapshot(&planned), snapshot(&direct));
-    assert_eq!(planned.sequence, direct.sequence);
+    assert_eq!(snapshot(&gated), snapshot(&direct));
+    assert_eq!(gated.sequence, direct.sequence);
 
-    // A plan that a commit has overtaken is refused, unwritten: its slots may
-    // no longer be what it saw.
-    let stale = planned
-        .kv_view_by_id(id)
-        .unwrap()
-        .plan_batch_at(&[put("n", a, b"again")], NOW)
-        .unwrap();
-    batch(&mut planned, &[put("n", SHARED[3], b"other")]).unwrap();
-    let before = (planned.sequence, snapshot(&planned));
-    let error = planned
-        .kv_store_by_id(id)
-        .unwrap()
-        .commit_batch_plan(stale)
-        .unwrap_err();
-    assert!(matches!(error, Error::Corrupt { .. }), "{error:?}");
-    assert_eq!((planned.sequence, snapshot(&planned)), before);
+    // A refusal writes nothing and leaves the handle as it was.
+    let before = (gated.sequence, snapshot(&gated));
+    let refused = gated.kv_store_by_id(id).unwrap().write_batch_gated_at(
+        &[put("n", a, b"again")],
+        NOW,
+        |_, _| Err("over quota"),
+    );
+    assert!(matches!(refused, Err(Gated::Refused("over quota"))));
+    assert_eq!((gated.sequence, snapshot(&gated)), before);
+
+    // A batch that cannot run fails as it does without a gate, and the gate is
+    // not asked.
+    let mut asked = false;
+    let failed = gated.kv_store_by_id(id).unwrap().write_batch_gated_at(
+        &[put_if("n", c, b"x", Expected::Absent)],
+        NOW,
+        |_, _| {
+            asked = true;
+            Ok::<(), ()>(())
+        },
+    );
+    assert!(matches!(
+        failed,
+        Err(Gated::Batch(Error::RevisionMismatch { .. }))
+    ));
+    assert!(!asked);
 }
 
 #[test]

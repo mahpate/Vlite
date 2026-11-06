@@ -668,6 +668,11 @@ message KvBatchDelete {
   reserved 100 to 199;
   string namespace = 1; string key = 2; Expected expected = 3;
 }
+// A batch grows by new `oneof kind` cases (for example a put with a deadline),
+// never by a field added to KvBatchPut or KvBatchDelete: a server that does not
+// know the case refuses the operation (`kind` unset), where it would ignore the
+// field and write the entry without what the caller asked for. See
+// docs/projects/roadmap/kv-batch-contract.md section 2.7.
 message KvBatchOperation {
   reserved 100 to 199;
   oneof kind { KvBatchPut put = 1; KvBatchDelete delete = 2; }

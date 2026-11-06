@@ -291,6 +291,43 @@ fn a_read_only_handle_refuses_a_batch_and_still_reads_many() {
 }
 
 #[test]
+fn a_format_1_file_refuses_a_batch_that_writes_and_nothing_else() {
+    let directory = tempfile::tempdir().unwrap();
+    let path = directory.path().join("v1.vlite");
+    // The header of a format 1 file with one dimension (magic, version 1,
+    // dimensions 1, no lineage or flags, CRC-32): format 1 predates atomic
+    // batches, and nothing upgrades it for the caller.
+    let mut header = b"VLITEDB\0".to_vec();
+    header.extend_from_slice(&[1, 0, 0, 0, 1, 0, 0, 0]);
+    header.extend_from_slice(&[0; 12]);
+    header.extend_from_slice(&[0x77, 0x1a, 0x9d, 0x78]);
+    fs::write(&path, &header).unwrap();
+    let mut db = Database::open(&path).unwrap();
+    assert_eq!(db.format_version(), 1);
+    let mut kv = db.kv_store("default").unwrap();
+    let single = kv.put("n", "single", b"1", KvPut::default()).unwrap();
+    assert!(matches!(
+        kv.write_batch(&[put("n", "other", b"x"), delete("n", "single")]),
+        Err(Error::BatchRequiresUpgrade)
+    ));
+    // A batch that changes no record attempts no write.
+    assert!(kv.write_batch(&[]).unwrap().is_empty());
+    assert_eq!(
+        kv.write_batch(&[delete("n", "absent")]).unwrap(),
+        [KvOutcome::Deleted(false)]
+    );
+    let entries = db
+        .kv_view("default")
+        .unwrap()
+        .get_many(&[("n", "single"), ("n", "other")])
+        .unwrap();
+    assert_eq!(entries[0].as_ref().unwrap().version, single);
+    assert!(entries[1].is_none());
+    db.close().unwrap();
+    assert_eq!(Database::open(&path).unwrap().format_version(), 1);
+}
+
+#[test]
 fn a_graph_attached_record_is_not_deleted_by_a_batch() {
     let directory = tempfile::tempdir().unwrap();
     let path = directory.path().join("attached.vlite");

@@ -573,6 +573,48 @@ async fn the_request_bounds_are_exact() {
 }
 
 #[tokio::test]
+async fn a_batch_at_every_limit_at_once_fits_the_body_limit_only_while_keys_are_plain() {
+    let directory = tempfile::tempdir().unwrap();
+    let app = start(database(), directory.path());
+    // 1,000 operations with 1,024-byte keys and 4,194,304 value bytes in all.
+    let body = |key: &dyn Fn(usize) -> String| {
+        let operations: Vec<Value> = (0..1000)
+            .map(|index| {
+                let size = 4_194 + if index == 0 { 304 } else { 0 };
+                put_op(&key(index), &vec![5u8; size])
+            })
+            .collect();
+        json!({ "operations": operations }).to_string()
+    };
+    let plain = |index: usize| format!("{index:04}{}", "k".repeat(1_020));
+    // A JSON encoder writes a control character in six bytes (\u0001).
+    let escaped = |index: usize| {
+        let mut key: String = (0..4u32)
+            .rev()
+            .map(|place| char::from(1 + (index / 7usize.pow(place) % 7) as u8))
+            .collect();
+        key.push_str(&"\u{1}".repeat(1_020));
+        key
+    };
+    assert_eq!(plain(999).len(), 1_024);
+    assert_eq!(escaped(999).len(), 1_024);
+
+    let committed = head(&app).await;
+    let too_big = body(&escaped);
+    assert!(too_big.len() > 8 * 1024 * 1024, "{}", too_big.len());
+    let (status, reply, _) = raw(&app, ADMIN, "POST", BATCH, too_big).await;
+    assert_eq!(status, 413, "{reply}");
+    assert_eq!(reply["error"]["code"], "invalid_json");
+    assert_eq!(head(&app).await, committed);
+
+    let fits = body(&plain);
+    assert!(fits.len() < 8 * 1024 * 1024, "{}", fits.len());
+    let (status, reply, _) = raw(&app, ADMIN, "POST", BATCH, fits).await;
+    assert_eq!(status, 200, "{reply}");
+    assert_eq!(reply["results"].as_array().unwrap().len(), 1000);
+}
+
+#[tokio::test]
 async fn a_batch_request_is_strict_about_its_shape() {
     let directory = tempfile::tempdir().unwrap();
     let app = start(database(), directory.path());
@@ -1746,7 +1788,9 @@ async fn a_batch_is_one_atomic_step_for_concurrent_readers() {
     let directory = tempfile::tempdir().unwrap();
     let app = start(database(), directory.path());
     // Two counters that always move together: a reader that sees one without
-    // the other has seen half a batch.
+    // the other has seen half a batch. This is a smoke test, not a proof: a
+    // torn read would only be likely to show. Atomicity itself rests on one
+    // engine frame applied under the database's write lock.
     assert_eq!(
         batch(&app, vec![put_op("left", b"0"), put_op("right", b"0")])
             .await
