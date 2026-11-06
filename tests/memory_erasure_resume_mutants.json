@@ -1,0 +1,371 @@
+[
+ {
+  "id": "E2-M01",
+  "desc": "the fence ignores expected_revision",
+  "file": "src/memory/erasure/resume.rs",
+  "old": "            || request.expected_revision != job.revision\n",
+  "new": "            || false\n",
+  "cmd": "cargo test --locked --offline --lib memory::erasure::",
+  "kill": "mutant_each_fence_field_alone_refuses_the_chunk"
+ },
+ {
+  "id": "E2-M02",
+  "desc": "the fence ignores the generation",
+  "file": "src/memory/erasure/resume.rs",
+  "old": "        if request.generation != 1\n",
+  "new": "        if false\n",
+  "cmd": "cargo test --locked --offline --lib memory::erasure::",
+  "kill": "mutant_each_fence_field_alone_refuses_the_chunk"
+ },
+ {
+  "id": "E2-M03",
+  "desc": "the token ignores the job revision (a token of another revision is accepted)",
+  "file": "src/memory/erasure/resume.rs",
+  "old": "    bytes.extend_from_slice(&revision.to_be_bytes());\n",
+  "new": "    let _ = revision;\n",
+  "cmd": "cargo test --locked --offline --lib memory::erasure::",
+  "kill": "a_token_is_valid_only_for_its_revision_and_chunk_count"
+ },
+ {
+  "id": "E2-M04",
+  "desc": "the token ignores the chunk count (a token of another chunk count is accepted)",
+  "file": "src/memory/erasure/resume.rs",
+  "old": "    bytes.extend_from_slice(&chunks.to_be_bytes());\n",
+  "new": "    let _ = chunks;\n",
+  "cmd": "cargo test --locked --offline --lib memory::erasure::",
+  "kill": "a_token_is_valid_only_for_its_revision_and_chunk_count"
+ },
+ {
+  "id": "E2-M05",
+  "desc": "a replay returns the current job instead of the stored outcome",
+  "file": "src/memory/erasure/resume.rs",
+  "old": "            return Ok(replay_view(scope, collection.as_deref(), &job_key, decoded));\n",
+  "new": "            let mut view = replay_view(scope, collection.as_deref(), &job_key, decoded);\n            view.job = job_view(scope, collection.as_deref(), &job_key, &job);\n            return Ok(view);\n",
+  "cmd": "cargo test --locked --offline --lib memory::erasure::",
+  "kill": "mutant_replay_returns_the_original_chunk_view_after_later_chunks"
+ },
+ {
+  "id": "E2-M06",
+  "desc": "the resume digest omits the token",
+  "file": "src/memory/erasure/resume.rs",
+  "old": "    put_string(&mut bytes, &request.resume_token);\n",
+  "new": "    let _ = &request.resume_token;\n",
+  "cmd": "cargo test --locked --offline --lib memory::erasure::",
+  "kill": "mutant_digest_binds_the_fence_token_and_window"
+ },
+ {
+  "id": "E2-M07",
+  "desc": "the resume digest omits the receipt window",
+  "file": "src/memory/erasure/resume.rs",
+  "old": "    bytes.extend_from_slice(&request.receipt_window_ms.to_be_bytes());\n",
+  "new": "    let _ = request.receipt_window_ms;\n",
+  "cmd": "cargo test --locked --offline --lib memory::erasure::",
+  "kill": "mutant_digest_binds_the_fence_token_and_window"
+ },
+ {
+  "id": "E2-M08",
+  "desc": "the frame deletes only the memory nodes (incident edges dangle)",
+  "file": "src/memory/erasure/resume.rs",
+  "old": "        for (&id, &revision) in &plan.edges {\n",
+  "new": "        for (&id, &revision) in plan.edges.iter().filter(|_| false) {\n",
+  "cmd": "cargo test --locked --offline --lib memory::erasure::",
+  "kill": "a_chunk_deletes_memories_edges_content_and_evidence_then_completes"
+ },
+ {
+  "id": "E2-M09",
+  "desc": "the frame skips the content nodes",
+  "file": "src/memory/erasure/resume.rs",
+  "old": "        for (key, revision) in plan.content.values() {\n",
+  "new": "        for (key, revision) in plan.content.values().filter(|_| false) {\n",
+  "cmd": "cargo test --locked --offline --lib memory::erasure::",
+  "kill": "a_chunk_deletes_memories_edges_content_and_evidence_then_completes"
+ },
+ {
+  "id": "E2-M10",
+  "desc": "evidence is retained by A2's rule when a survivor references the memory",
+  "file": "src/memory/erasure/resume.rs",
+  "old": "        let record = candidate_evidence(db, graph, collection, collection_id, read, &memory, now)?;\n        let Some(found) = incident_edges(read, &memory.key)? else {\n            break;\n        };\n",
+  "new": "        let record = candidate_evidence(db, graph, collection, collection_id, read, &memory, now)?;\n        let Some(found) = incident_edges(read, &memory.key)? else {\n            break;\n        };\n        let record = if found\n            .values()\n            .any(|edge| edge.relationship == \"REFERENCES\" && edge.target_key == memory.key)\n        {\n            None\n        } else {\n            record\n        };\n",
+  "cmd": "cargo test --locked --offline --lib memory::erasure::",
+  "kill": "mutant_evidence_is_never_retained_even_when_a_survivor_references_it"
+ },
+ {
+  "id": "E2-M11",
+  "desc": "the evidence record is detached but never deleted",
+  "file": "src/memory/erasure/resume.rs",
+  "old": "                ops.push(GraphOp::Vector {\n                    collection: name.to_owned(),\n                    mutation: Mutation::Delete { id: record },\n                });\n",
+  "new": "                let _ = record;\n",
+  "cmd": "cargo test --locked --offline --lib memory::erasure::",
+  "kill": "a_chunk_deletes_memories_edges_content_and_evidence_then_completes"
+ },
+ {
+  "id": "E2-M12",
+  "desc": "the fit rule counts one operation too many (4,096 refused)",
+  "file": "src/memory/erasure/resume.rs",
+  "old": "        if operations + guards > MAX_OPS {\n",
+  "new": "        if operations + guards >= MAX_OPS {\n",
+  "cmd": "cargo test --locked --offline --lib memory::erasure::",
+  "kill": "mutant_fit_rule_is_exact_at_4096_operations"
+ },
+ {
+  "id": "E2-M13",
+  "desc": "the fit rule counts one operation too few (4,097 accepted)",
+  "file": "src/memory/erasure/resume.rs",
+  "old": "        if operations + guards > MAX_OPS {\n",
+  "new": "        if operations + guards > MAX_OPS + 1 {\n",
+  "cmd": "cargo test --locked --offline --lib memory::erasure::",
+  "kill": "mutant_fit_rule_is_exact_at_4096_operations"
+ },
+ {
+  "id": "E2-M14",
+  "desc": "an edge shared by two chunk members is counted twice",
+  "file": "src/memory/erasure/resume.rs",
+  "old": "        let added_edges = found.keys().filter(|id| !edges.contains_key(*id)).count();\n",
+  "new": "        let added_edges = found.len();\n",
+  "cmd": "cargo test --locked --offline --lib memory::erasure::",
+  "kill": "mutant_an_edge_shared_by_two_chunk_members_counts_once"
+ },
+ {
+  "id": "E2-M15",
+  "desc": "the window is ordered by key instead of node ID",
+  "file": "src/memory/erasure/resume.rs",
+  "old": "    let window = scan_window(read, scope_key)?;\n",
+  "new": "    let mut window = scan_window(read, scope_key)?;\n    window.sort_by(|left, right| left.key.cmp(&right.key));\n",
+  "cmd": "cargo test --locked --offline --lib memory::erasure::",
+  "kill": "mutant_chunks_follow_node_id_order_and_a_full_window_leaves_remaining_unknown"
+ },
+ {
+  "id": "E2-M16",
+  "desc": "only the chunk members are decoded instead of the whole window",
+  "file": "src/memory/erasure/resume.rs",
+  "old": "    let candidates = window\n        .iter()\n        .map(|node| decode_candidate(node, scope_key))\n        .collect::<MemoryResult<Vec<_>>>()?;\n    let total = (window.len() < WINDOW).then_some(window.len() as u64);\n    let collection_id = collection.map(|name| db.resolve(name)).transpose()?;\n    let mut members: Vec<Member> = Vec::new();\n    let mut edges: BTreeMap<u64, u64> = BTreeMap::new();\n    let mut content: BTreeMap<u64, (String, u64)> = BTreeMap::new();\n    let mut evidence_ops = 0usize;\n    for memory in candidates {\n",
+  "new": "    let total = (window.len() < WINDOW).then_some(window.len() as u64);\n    let collection_id = collection.map(|name| db.resolve(name)).transpose()?;\n    let mut members: Vec<Member> = Vec::new();\n    let mut edges: BTreeMap<u64, u64> = BTreeMap::new();\n    let mut content: BTreeMap<u64, (String, u64)> = BTreeMap::new();\n    let mut evidence_ops = 0usize;\n    for decoded in window.iter().map(|node| decode_candidate(node, scope_key)) {\n        let memory = decoded?;\n",
+  "cmd": "cargo test --locked --offline --lib memory::erasure::",
+  "kill": "mutant_the_whole_window_is_decoded_not_only_the_chunk_members"
+ },
+ {
+  "id": "E2-M17",
+  "desc": "the content edge key is not validated",
+  "file": "src/memory/erasure/resume.rs",
+  "old": "        if edge.key.as_deref() != Some(content_edge_key(&memory.key, index).as_str())\n",
+  "new": "        if false\n",
+  "cmd": "cargo test --locked --offline --lib memory::erasure::",
+  "kill": "mutant_content_validation_refuses_every_malformed_content_node"
+ },
+ {
+  "id": "E2-M18",
+  "desc": "the content node key, label and scope are not validated",
+  "file": "src/memory/erasure/resume.rs",
+  "old": "            || target.key != content_key(&memory.key, index)\n            || target.labels.len() != 1\n            || !target.labels.contains(LABEL_CONTENT)\n            || string_property(&target, \"scope\").ok() != Some(scope_key)\n",
+  "new": "            || false\n",
+  "cmd": "cargo test --locked --offline --lib memory::erasure::",
+  "kill": "mutant_content_validation_refuses_every_malformed_content_node"
+ },
+ {
+  "id": "E2-M19",
+  "desc": "the content node's own edges are not checked",
+  "file": "src/memory/erasure/resume.rs",
+  "old": "        match incident_edges(read, &target.key)? {\n            Some(others) if others.len() == 1 && others.contains_key(&edge.id) => {}\n            _ => return Err(MemoryError::InvalidBundle),\n        }\n",
+  "new": "        let _ = incident_edges(read, &target.key)?;\n",
+  "cmd": "cargo test --locked --offline --lib memory::erasure::",
+  "kill": "mutant_content_validation_refuses_every_malformed_content_node"
+ },
+ {
+  "id": "E2-M20",
+  "desc": "a content node's attachments are not checked",
+  "file": "src/memory/erasure/resume.rs",
+  "old": "        if !read.memory_node_attachments(&target.key)?.is_empty() {\n            return Err(MemoryError::ForeignAttachment);\n        }\n",
+  "new": "        let _ = read.memory_node_attachments(&target.key)?;\n",
+  "cmd": "cargo test --locked --offline --lib memory::erasure::",
+  "kill": "mutant_content_validation_refuses_every_malformed_content_node"
+ },
+ {
+  "id": "E2-M21",
+  "desc": "the job is marked logical while the remaining count is unknown",
+  "file": "src/memory/erasure/resume.rs",
+  "old": "        let state = if plan.remaining_after == Some(0) {\n",
+  "new": "        let state = if plan.remaining_after.is_none_or(|remaining| remaining == 0) {\n",
+  "cmd": "cargo test --locked --offline --lib memory::erasure::",
+  "kill": "mutant_chunks_follow_node_id_order_and_a_full_window_leaves_remaining_unknown"
+ },
+ {
+  "id": "E2-M22",
+  "desc": "a resume on a logical job is allowed",
+  "file": "src/memory/erasure/resume.rs",
+  "old": "        if progress.is_some_and(|progress| progress.state == ErasureState::Logical) {\n",
+  "new": "        if false {\n",
+  "cmd": "cargo test --locked --offline --lib memory::erasure::",
+  "kill": "mutant_resume_on_a_logical_job"
+ },
+ {
+  "id": "E2-M23",
+  "desc": "the deadline is checked before the replay",
+  "file": "src/memory/erasure/resume.rs",
+  "old": "        let digest = resume_digest(request, collection.as_deref(), &job_key);\n",
+  "new": "        if request.deadline_ms.is_some_and(|deadline| now >= deadline) {\n            return Err(MemoryError::DeadlineExceeded);\n        }\n        let digest = resume_digest(request, collection.as_deref(), &job_key);\n",
+  "cmd": "cargo test --locked --offline --lib memory::erasure::",
+  "kill": "mutant_deadline_is_checked_after_the_replay_and_before_the_fence"
+ },
+ {
+  "id": "E2-M24",
+  "desc": "the missing job is probed before the receipt",
+  "file": "src/memory/erasure/resume.rs",
+  "old": "        let receipt_key = resume_receipt_key(&scope_key, &request.idempotency_key);\n",
+  "new": "        job.as_ref().ok_or(MemoryError::MissingMemory)?;\n        let receipt_key = resume_receipt_key(&scope_key, &request.idempotency_key);\n",
+  "cmd": "cargo test --locked --offline --lib memory::erasure::",
+  "kill": "mutant_missing_job_is_probed_after_the_receipt_and_the_key_after_both"
+ },
+ {
+  "id": "E2-M25",
+  "desc": "the latest receipt is found by revision equality with the job instead of chunk_no",
+  "file": "src/memory/erasure/resume.rs",
+  "old": "        .filter(|outcome| outcome_valid(outcome) && outcome_fits_job(outcome, progress))\n",
+  "new": "        .filter(|outcome| {\n            let latest = job.is_some_and(|job| job.revision == receipt.revision);\n            outcome_valid(outcome)\n                && outcome.chunk_no <= progress.chunks\n                && outcome.total <= progress.deleted_count\n                && (outcome.state != ErasureState::Logical || latest)\n                && (!latest\n                    || (outcome.total == progress.deleted_count\n                        && outcome.remaining == progress.remaining\n                        && outcome.state == progress.state))\n        })\n",
+  "cmd": "cargo test --locked --offline --lib memory::erasure::",
+  "kill": "mutant_latest_receipt_is_found_by_chunk_no_after_a_checkpoint_and_reopen"
+ },
+ {
+  "id": "E2-M26",
+  "desc": "the begin receipt of a v2 job must share the job's revision (E1's rule)",
+  "file": "src/memory/erasure.rs",
+  "old": "(job.progress.is_none() && receipt.revision != job.revision)",
+  "new": "receipt.revision != job.revision",
+  "cmd": "cargo test --locked --offline --lib memory::erasure::",
+  "kill": "e1_surfaces_over_a_progressed_job"
+ },
+ {
+  "id": "E2-Q1",
+  "desc": "equivalent: the chunk frame drops the job revision guard",
+  "file": "src/memory/erasure/resume.rs",
+  "old": "            expected: Expected::Revision(job.revision),\n",
+  "new": "            expected: Expected::Any,\n",
+  "cmd": "cargo test --locked --offline --lib memory::erasure::",
+  "equivalent": "Nothing can change the job between the planning read and the frame while the handle holds &mut Database, and the fence has already compared expected_revision, the token and the generation against the job just read."
+ },
+ {
+  "id": "E2-Q2",
+  "desc": "equivalent: an expired receipt is replaced without its revision guards",
+  "file": "src/memory/erasure/resume.rs",
+  "old": "                    expected: Expected::Revision(old_outcome.revision),\n                });\n                ops.push(GraphOp::UpsertNode {\n                    key: receipt_key.clone(),\n                    labels: vec![LABEL_RECEIPT.into()],\n                    properties: receipt_properties,\n                    expected: Expected::Revision(old.revision),\n",
+  "new": "                    expected: Expected::Any,\n                });\n                ops.push(GraphOp::UpsertNode {\n                    key: receipt_key.clone(),\n                    labels: vec![LABEL_RECEIPT.into()],\n                    properties: receipt_properties,\n                    expected: Expected::Any,\n",
+  "cmd": "cargo test --locked --offline --lib memory::erasure::",
+  "equivalent": "Nothing can change the expired receipt or its outcome between the planning read and the frame while the handle holds &mut Database; both nodes were read in the same call."
+ },
+ {
+  "id": "E2-X01",
+  "desc": "decoder: a chunk may delete one memory more than the cap (DO3)",
+  "file": "src/memory/erasure/resume.rs",
+  "old": "        && outcome.deleted <= MAX_CHUNK_MEMORIES\n",
+  "new": "        && outcome.deleted <= MAX_CHUNK_MEMORIES + 1\n",
+  "cmd": "cargo test --locked --offline --lib memory::erasure::",
+  "kill": "every_decoder_rule_of_section_4_rejects_its_defect"
+ },
+ {
+  "id": "E2-X02",
+  "desc": "decoder: the job's deleted_count bound is exclusive (DJ6)",
+  "file": "src/memory/erasure.rs",
+  "old": "u128::from(deleted_count) > u128::from(resume::MAX_CHUNK_MEMORIES) * u128::from(chunks)",
+  "new": "u128::from(deleted_count) >= u128::from(resume::MAX_CHUNK_MEMORIES) * u128::from(chunks)",
+  "cmd": "cargo test --locked --offline --lib memory::erasure::",
+  "kill": "every_decoder_rule_of_section_4_rejects_its_defect"
+ },
+ {
+  "id": "E2-X03",
+  "desc": "decoder: an outcome may name a chunk beyond the job's chunk count (DO4)",
+  "file": "src/memory/erasure/resume.rs",
+  "old": "    outcome.chunk_no <= progress.chunks\n",
+  "new": "    true\n",
+  "cmd": "cargo test --locked --offline --lib memory::erasure::",
+  "kill": "every_decoder_rule_of_section_4_rejects_its_defect"
+ },
+ {
+  "id": "E2-X04",
+  "desc": "decoder: state and remaining may disagree in an outcome (DO3)",
+  "file": "src/memory/erasure/resume.rs",
+  "old": "        && (outcome.state == ErasureState::Logical) == (outcome.remaining == Some(0))\n",
+  "new": "        && true\n",
+  "cmd": "cargo test --locked --offline --lib memory::erasure::",
+  "kill": "every_decoder_rule_of_section_4_rejects_its_defect"
+ },
+ {
+  "id": "E2-X05",
+  "desc": "decoder: erasure_status accepts a v2 job (E1's accessor must fail closed)",
+  "file": "src/memory/erasure.rs",
+  "old": "let job = decode_job_v1(&node, &request.scope, &scope_key, binding)?;",
+  "new": "let job = decode_job(&node, &request.scope, &scope_key, binding)?;",
+  "cmd": "cargo test --locked --offline --lib memory::erasure::",
+  "kill": "e1_surfaces_over_a_progressed_job"
+ },
+ {
+  "id": "E2-X06",
+  "desc": "order: the job key is compared before the receipt is read",
+  "file": "src/memory/erasure/resume.rs",
+  "old": "        let receipt_key = resume_receipt_key(&scope_key, &request.idempotency_key);\n",
+  "new": "        if request.job_key != job_key {\n            return Err(MemoryError::MissingMemory);\n        }\n        let receipt_key = resume_receipt_key(&scope_key, &request.idempotency_key);\n",
+  "cmd": "cargo test --locked --offline --lib memory::erasure::",
+  "kill": "mutant_missing_job_is_probed_after_the_receipt_and_the_key_after_both"
+ },
+ {
+  "id": "E2-X07",
+  "desc": "validation: a malformed token is not refused as a target",
+  "file": "src/memory/erasure/resume.rs",
+  "old": "        if !token_shaped(&request.resume_token) {\n",
+  "new": "        if false {\n",
+  "cmd": "cargo test --locked --offline --lib memory::erasure::",
+  "kill": "structural_validation_follows_the_documented_order"
+ },
+ {
+  "id": "E2-X08",
+  "desc": "validation: a zero revision or generation is not refused as a target",
+  "file": "src/memory/erasure/resume.rs",
+  "old": "        if request.expected_revision == 0 || request.generation == 0 {\n",
+  "new": "        if false {\n",
+  "cmd": "cargo test --locked --offline --lib memory::erasure::",
+  "kill": "structural_validation_follows_the_documented_order"
+ },
+ {
+  "id": "E2-X09",
+  "desc": "decoder: an outcome with non-canonical numbers is accepted (DO2)",
+  "file": "src/memory/erasure/resume.rs",
+  "old": "    (outcome_text(job_key, &outcome) == stored).then_some(outcome)\n",
+  "new": "    Some(outcome)\n",
+  "cmd": "cargo test --locked --offline --lib memory::erasure::",
+  "kill": "every_decoder_rule_of_section_4_rejects_its_defect"
+ },
+ {
+  "id": "E2-X10",
+  "desc": "decoder: a receipt may carry another outcome count (DR3)",
+  "file": "src/memory/erasure/resume.rs",
+  "old": "        || integer(receipt, \"outcome_chunks\") != Some(1)\n",
+  "new": "        || false\n",
+  "cmd": "cargo test --locked --offline --lib memory::erasure::",
+  "kill": "every_decoder_rule_of_section_4_rejects_its_defect"
+ },
+ {
+  "id": "E2-X11",
+  "desc": "the evidence record is deleted without being detached first",
+  "file": "src/memory/erasure/resume.rs",
+  "old": "                ops.push(GraphOp::Detach {\n                    node: member.memory.key.clone(),\n                    collection: name.to_owned(),\n                });\n",
+  "new": "                let _ = name;\n",
+  "cmd": "cargo test --locked --offline --lib memory::erasure::",
+  "kill": "a_chunk_deletes_memories_edges_content_and_evidence_then_completes"
+ },
+ {
+  "id": "E2-X12",
+  "desc": "a receipt still replays at the instant it expires",
+  "file": "src/memory/erasure/resume.rs",
+  "old": "            && now < decoded.expiry\n",
+  "new": "            && now <= decoded.expiry\n",
+  "cmd": "cargo test --locked --offline --lib memory::erasure::",
+  "kill": "an_expired_receipt_is_ignored_and_its_key_is_reusable"
+ },
+ {
+  "id": "E2-X13",
+  "desc": "a full window of 4,097 memories is taken for a known total",
+  "file": "src/memory/erasure/resume.rs",
+  "old": "    let total = (window.len() < WINDOW).then_some(window.len() as u64);\n",
+  "new": "    let total = (window.len() <= WINDOW).then_some(window.len() as u64);\n",
+  "cmd": "cargo test --locked --offline --lib memory::erasure::",
+  "kill": "mutant_chunks_follow_node_id_order_and_a_full_window_leaves_remaining_unknown"
+ }
+]

@@ -18,9 +18,16 @@ use crate::{
 };
 
 const SCHEMA: &str = "erase-scope:v1";
+/// E2: the progressed job (`docs/projects/roadmap/gap1-e2-resume-contract.md`
+/// section 4); a v1 job becomes v2 in the frame of its first chunk.
+const SCHEMA_V2: &str = "erase-scope:v2";
 pub(super) const LABEL_JOB: &str = "VliteMemoryErasureJob";
 const BEGIN_DOMAIN: &[u8] = b"vlite.memory.erasure.begin.v1\0";
 const MAX_COLLECTION_BYTES: usize = 63;
+
+mod resume;
+#[cfg(test)]
+mod resume_tests;
 
 #[derive(Clone, Debug)]
 pub(crate) struct EraseScopeRequest {
@@ -40,6 +47,8 @@ pub(crate) struct ErasureStatusRequest {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum ErasureState {
     Pending,
+    /// E2: no live memory of the scope remains; the barrier stays.
+    Logical,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -82,6 +91,22 @@ const JOB_FIELDS: &[(&str, Field)] = &[
     ("logical_visibility", Field::String),
     ("deleted_count", Field::String),
     ("remaining", Field::String),
+    ("created_at_ms", Field::Integer),
+];
+
+/// The v2 job is the v1 job plus the chunk count.
+const JOB_FIELDS_V2: &[(&str, Field)] = &[
+    ("e1_schema", Field::String),
+    ("scope", Field::String),
+    ("e1_scope_tuple", Field::String),
+    ("e1_collection", Field::String),
+    ("begin_digest", Field::String),
+    ("generation", Field::String),
+    ("state", Field::String),
+    ("logical_visibility", Field::String),
+    ("deleted_count", Field::String),
+    ("remaining", Field::String),
+    ("e2_chunks", Field::String),
     ("created_at_ms", Field::Integer),
 ];
 
@@ -211,8 +236,9 @@ fn common(
     scope: &MemoryScope,
     scope_key: &str,
     binding: &str,
+    schema: &str,
 ) -> MemoryResult<()> {
-    if text(node, "e1_schema") != SCHEMA || text(node, "scope") != scope_key {
+    if text(node, "e1_schema") != schema || text(node, "scope") != scope_key {
         return Err(MemoryError::InvalidBundle);
     }
     if text(node, "e1_scope_tuple") != hex(&scope.encode()) {
@@ -224,32 +250,112 @@ fn common(
     Ok(())
 }
 
+/// A decoded job: v1 (begun, no chunk yet) or v2 (progressed by E2).
 struct Job {
     begin_digest: String,
     revision: u64,
+    created_at_ms: i64,
+    /// `None` for a v1 job.
+    progress: Option<Progress>,
 }
 
-fn decode_job(
+/// The persisted progress of a v2 job (contract section 4, DJ1-DJ6).
+#[derive(Clone, Copy)]
+struct Progress {
+    chunks: u64,
+    deleted_count: u64,
+    remaining: Option<u64>,
+    state: ErasureState,
+}
+
+/// E1's strict decoder: only a schema-v1 job (never any progress).
+fn decode_job_v1(
     node: &NodeView,
     scope: &MemoryScope,
     scope_key: &str,
     binding: &str,
 ) -> MemoryResult<Job> {
     exact(node, LABEL_JOB, JOB_FIELDS)?;
-    common(node, scope, scope_key, binding)?;
+    common(node, scope, scope_key, binding, SCHEMA)?;
+    let created_at_ms = integer(node, "created_at_ms").filter(|created| *created >= 0);
     if !digest_shaped(text(node, "begin_digest"))
         || text(node, "generation") != "1"
         || text(node, "state") != "pending"
         || text(node, "logical_visibility") != "hidden"
         || text(node, "deleted_count") != "0"
         || text(node, "remaining") != "unknown"
-        || integer(node, "created_at_ms").is_none_or(|created| created < 0)
     {
         return Err(MemoryError::InvalidBundle);
     }
     Ok(Job {
         begin_digest: text(node, "begin_digest").to_owned(),
         revision: node.revision,
+        created_at_ms: created_at_ms.ok_or(MemoryError::InvalidBundle)?,
+        progress: None,
+    })
+}
+
+/// The decoder for either schema; a node of any other schema fails the v1
+/// decoder exactly as in E1.
+fn decode_job(
+    node: &NodeView,
+    scope: &MemoryScope,
+    scope_key: &str,
+    binding: &str,
+) -> MemoryResult<Job> {
+    if text(node, "e1_schema") == SCHEMA_V2 {
+        decode_job_v2(node, scope, scope_key, binding)
+    } else {
+        decode_job_v1(node, scope, scope_key, binding)
+    }
+}
+
+/// Contract section 4: DJ1-DJ6, the closed rule set of a schema-v2 job.
+fn decode_job_v2(
+    node: &NodeView,
+    scope: &MemoryScope,
+    scope_key: &str,
+    binding: &str,
+) -> MemoryResult<Job> {
+    exact(node, LABEL_JOB, JOB_FIELDS_V2)?;
+    common(node, scope, scope_key, binding, SCHEMA_V2)?;
+    let state = match text(node, "state") {
+        "pending" => ErasureState::Pending,
+        "logical" => ErasureState::Logical,
+        _ => return Err(MemoryError::InvalidBundle),
+    };
+    let remaining = match text(node, "remaining") {
+        "unknown" => None,
+        value => Some(
+            resume::canonical_counter(value)
+                .filter(|remaining| *remaining <= resume::MAX_KNOWN_REMAINING)
+                .ok_or(MemoryError::InvalidBundle)?,
+        ),
+    };
+    let deleted_count =
+        resume::canonical_counter(text(node, "deleted_count")).ok_or(MemoryError::InvalidBundle)?;
+    let chunks = resume::canonical_counter(text(node, "e2_chunks"))
+        .filter(|chunks| *chunks != 0)
+        .ok_or(MemoryError::InvalidBundle)?;
+    let created_at_ms = integer(node, "created_at_ms").filter(|created| *created >= 0);
+    if !digest_shaped(text(node, "begin_digest"))
+        || text(node, "generation") != "1"
+        || text(node, "logical_visibility") != "hidden"
+        || (state == ErasureState::Logical) != (remaining == Some(0))
+        || u128::from(deleted_count) > u128::from(resume::MAX_CHUNK_MEMORIES) * u128::from(chunks)
+    {
+        return Err(MemoryError::InvalidBundle);
+    }
+    Ok(Job {
+        begin_digest: text(node, "begin_digest").to_owned(),
+        revision: node.revision,
+        created_at_ms: created_at_ms.ok_or(MemoryError::InvalidBundle)?,
+        progress: Some(Progress {
+            chunks,
+            deleted_count,
+            remaining,
+            state,
+        }),
     })
 }
 
@@ -263,7 +369,7 @@ fn decode_receipt(
     job: Option<&Job>,
 ) -> MemoryResult<(String, u64)> {
     exact(receipt, LABEL_RECEIPT, RECEIPT_FIELDS)?;
-    common(receipt, scope, scope_key, binding)?;
+    common(receipt, scope, scope_key, binding, SCHEMA)?;
     let digest = text(receipt, "digest");
     if !digest_shaped(digest)
         || text(receipt, "job_key") != job_key(scope_key)
@@ -274,7 +380,10 @@ fn decode_receipt(
     let expiry =
         canonical_nonzero(text(receipt, "expires_at_ms")).ok_or(MemoryError::InvalidBundle)?;
     let job = job.ok_or(MemoryError::InvalidBundle)?;
-    if digest != job.begin_digest || receipt.revision != job.revision {
+    // The begin frame creates the job and this receipt together, so a v1
+    // job has the receipt's revision. A v2 job has since been rewritten by
+    // chunks (and maintenance may restate revisions): the digest decides.
+    if digest != job.begin_digest || (job.progress.is_none() && receipt.revision != job.revision) {
         return Err(MemoryError::InvalidBundle);
     }
     if read
@@ -354,7 +463,9 @@ impl MemoryRef<'_> {
             .output
             .ok_or(MemoryError::MissingMemory)?;
         let binding = self.evidence_collection.as_deref().unwrap_or_default();
-        let job = decode_job(&node, &request.scope, &scope_key, binding)?;
+        // E1's frozen accessor: a schema-v2 job fails closed here; serving
+        // uses `erasure_job` (contract section 1).
+        let job = decode_job_v1(&node, &request.scope, &scope_key, binding)?;
         Ok(pending(key, job.revision))
     }
 }
