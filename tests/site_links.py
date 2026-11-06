@@ -1,8 +1,10 @@
 """Check local page, asset and fragment links in an assembled website."""
 
 from html.parser import HTMLParser
+from hashlib import sha256
 from pathlib import Path
-from urllib.parse import unquote, urlsplit
+import re
+from urllib.parse import parse_qs, unquote, urlsplit
 import sys
 
 
@@ -11,6 +13,7 @@ class Page(HTMLParser):
         super().__init__()
         self.ids = set()
         self.links = []
+        self.assets = []
         self.primary_links = []
         self.in_primary = False
         self.text = []
@@ -36,6 +39,10 @@ class Page(HTMLParser):
         for key in ("href", "src", "data-tour", "data-poster"):
             if attrs.get(key):
                 self.links.append(attrs[key])
+        for key in ("href", "src", "data-light", "data-dark", "srcset"):
+            for entry in attrs.get(key, "").split(","):
+                if entry.strip() and entry.strip().split()[0].startswith("assets/"):
+                    self.assets.append(entry.strip().split()[0])
 
     def handle_endtag(self, tag):
         if tag == "nav":
@@ -96,11 +103,36 @@ def check(root):
             if "docs/GRAPH.html" not in page.links:
                 errors.append("features.html: missing property graph guide link")
         if path == root / "index.html":
+            pending = [(path.parent, asset) for asset in page.assets]
+            checked = set()
+            while pending:
+                parent, asset = pending.pop()
+                parsed = urlsplit(asset)
+                source = (parent / unquote(parsed.path)).resolve()
+                if (source, asset) in checked:
+                    continue
+                checked.add((source, asset))
+                if not source.is_file():
+                    errors.append(f"index.html: missing fingerprinted asset: {asset}")
+                    continue
+                content = source.read_bytes()
+                if source.suffix in (".css", ".js", ".svg"):
+                    content = content.replace(b"\r\n", b"\n")
+                fingerprint = sha256(content).hexdigest()[:12]
+                if parse_qs(parsed.query) != {"v": [fingerprint]}:
+                    errors.append(
+                        f"index.html: stale asset fingerprint: {asset}; expected ?v={fingerprint}")
+                if source.suffix in (".css", ".js"):
+                    text = source.read_text(encoding="utf-8")
+                    dependencies = re.findall(
+                        r'(?:url|import)\(\s*["\']([^"\']+)["\']\s*\)', text)
+                    pending.extend((source.parent, dep) for dep in dependencies
+                                   if not urlsplit(dep).scheme and not dep.startswith("#"))
             for guide in ("docs/MCP.html", "docs/AGENT-SKILLS.html"):
                 if guide not in page.links:
                     errors.append(f"index.html: agent links must open their own guide: {guide}")
             for mode in ("embedded", "self-hosted"):
-                if f"assets/diagrams/deployment-{mode}-light.svg" not in page.links:
+                if f"assets/diagrams/deployment-{mode}-light.svg" not in [urlsplit(link).path for link in page.links]:
                     errors.append(f"index.html: missing {mode} deployment diagram")
             if "deployment-options" not in page.ids:
                 errors.append("index.html: missing deployment-options anchor")

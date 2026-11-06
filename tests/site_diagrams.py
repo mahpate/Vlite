@@ -12,6 +12,7 @@ from pathlib import Path
 import re
 import sys
 from threading import Thread
+from urllib.parse import urlsplit
 import xml.etree.ElementTree as ET
 
 from playwright.sync_api import sync_playwright
@@ -150,7 +151,7 @@ def check_landing_buffers(p, url):
     browser = p.chromium.launch(args=SWIFTSHADER)
     try:
         context = browser.new_context(reduced_motion="reduce", viewport={"width": 1440, "height": 1050})
-        context.route("**/assets/landing3d.js", lambda route: route.fulfill(
+        context.route(re.compile(r"/assets/landing3d\.js(?:\?|$)"), lambda route: route.fulfill(
             content_type="text/javascript", body=module))
         page = context.new_page()
         errors = []
@@ -161,7 +162,7 @@ def check_landing_buffers(p, url):
             page.evaluate("theme => document.documentElement.dataset.theme = theme", theme)
             page.wait_for_timeout(150)
             result = page.evaluate("""async () => {
-                const m = await import('./assets/landing3d.js');
+                const m = await import(document.querySelector('script[src*="assets/landing3d.js"]').src);
                 const view = m.views.find(v => !v.optional);
                 const {data, pointGeo, linkGeo, fxLineGeo, fxPointGeo, U} = view.inspect();
                 const P = m.palette();
@@ -226,7 +227,7 @@ def check_landing_previews(p, url, screenshots=None):
                     assert panel.is_visible()
                     capture = panel.locator("img")
                     capture.evaluate("img => img.decode()")
-                    assert capture.evaluate("img => img.currentSrc").endswith(f"current-{image}.png?v=connected")
+                    assert capture.evaluate("img => new URL(img.currentSrc).pathname").endswith(f"current-{image}.png")
                     assert page.locator("#dashboard-preview [role=tabpanel]:visible").count() == 1
                     assert page.evaluate("document.documentElement.scrollWidth <= innerWidth"), (theme, width)
                     if screenshots and width in (1440, 390):
@@ -338,6 +339,147 @@ def check_toolkit(page, animated=False):
         assert core.locator(".lane-canvas").count() == 1, "all five scenes share one renderer"
 
 
+def check_intrinsic_memory_diagram(page):
+    card = page.locator(".product-memory")
+    assert card.evaluate("""card => {
+        const svg = card.querySelector('svg'), art = svg.parentElement;
+        const s = svg.getBoundingClientRect(), a = art.getBoundingClientRect();
+        const h = card.querySelector('h3').getBoundingClientRect();
+        return s.width > 0 && s.height === 200 && s.left >= a.left && s.right <= a.right + 1
+            && s.top >= a.top && s.bottom <= a.bottom + 1 && s.bottom <= h.top
+            && [...svg.querySelectorAll('path')].every(p => getComputedStyle(p).fill === 'none')
+            && [...svg.querySelectorAll('.lane-diagram')].every(g =>
+                !['none', 'rgb(0, 0, 0)'].includes(getComputedStyle(g).stroke))
+            && [...svg.querySelectorAll('text')].every(t => {
+                const b = t.getBBox(), m = t.getScreenCTM();
+                return b.x >= 0 && b.y >= 0 && b.x + b.width <= 240 && b.y + b.height <= 200
+                    && parseFloat(getComputedStyle(t).fontSize) * Math.hypot(m.a, m.b) >= 12;
+            });
+    }"""), "fallback must be bounded, unfilled, connected and readable without its stylesheet"
+
+
+def check_cached_upgrade(p, site, screenshots=None):
+    """Prime the real HTTP cache at legacy URLs, then navigate to fingerprinted HTML."""
+    html = (site / "index.html").read_text(encoding="utf-8")
+    legacy_html = re.sub(r"\?v=[0-9a-f]{12}", "", html).encode()
+    style = (site / "assets" / "style.css").read_text(encoding="utf-8")
+    # Recreate the preceding four-column/150px rules, without fifth-card selectors.
+    legacy_style = re.sub(
+        r"^.*(?:product-memory|lane-fallback|lane-kv|lane-memory|lane-diagram|max-width: 1200px).*\n",
+        "", style, flags=re.MULTILINE).replace(
+            "grid-template-columns: repeat(5,", "grid-template-columns: repeat(4,").replace(
+            ".lane-art { flex: none; height: 200px;", ".lane-art { flex: none; height: 150px;")
+    legacy_style = re.sub(r"\?v=[0-9a-f]{12}", "", legacy_style)
+    legacy_assets = {"/assets/style.css": legacy_style.encode()}
+    for name in ("site.js", "landing3d.js", "diagrams3d.js"):
+        source = (site / "assets" / name).read_text(encoding="utf-8")
+        if name == "landing3d.js":
+            source = source.replace(', "product-memory": memoryLane', "")
+        source = re.sub(r"\?v=[0-9a-f]{12}", "", source)
+        legacy_assets[f"/assets/{name}"] = (
+            "window.__legacyAssets = (window.__legacyAssets || 0) + 1;\n" + source).encode()
+
+    class UpgradeHandler(QuietHandler):
+        def end_headers(self):
+            self.send_header("Cache-Control", "public, max-age=600" if self.path.startswith("/assets/")
+                             else "no-store")
+            super().end_headers()
+
+        def do_GET(self):
+            self.server.received.append(self.path)
+            resource = urlsplit(self.path)
+            if resource.path == "/legacy.html":
+                body, mime = legacy_html, "text/html"
+            elif not resource.query and resource.path in legacy_assets:
+                body = legacy_assets[resource.path]
+                mime = "text/css" if resource.path.endswith(".css") else "text/javascript"
+            else:
+                return super().do_GET()
+            self.send_response(200)
+            self.send_header("Content-Type", mime)
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+
+    server = ThreadingHTTPServer(("127.0.0.1", 0), partial(UpgradeHandler, directory=str(site)))
+    server.received = []
+    Thread(target=server.serve_forever, daemon=True).start()
+    browser = p.chromium.launch(args=SWIFTSHADER)
+    try:
+        url = f"http://127.0.0.1:{server.server_port}"
+        for theme in ("light", "dark"):
+            for width in (1440, 390):
+                for animated in (False, True):
+                    context = browser.new_context(color_scheme=theme, reduced_motion="reduce",
+                                                  viewport={"width": width, "height": 1050})
+                    if not animated:
+                        context.add_init_script("""(() => {
+                            const get = HTMLCanvasElement.prototype.getContext;
+                            HTMLCanvasElement.prototype.getContext = function(type, ...args) {
+                                return /^webgl/.test(type) ? null : get.call(this, type, ...args);
+                            };
+                        })()""")
+                    page = context.new_page()
+                    errors = []
+                    track_errors(page, errors)
+                    for _ in range(2):
+                        before = len(server.received)
+                        page.goto(f"{url}/legacy.html" + ("?force3d" if animated else ""))
+                        hero_state(page)
+                        page.evaluate("document.fonts.ready")
+                        assert page.evaluate("window.__legacyAssets") == 3
+                        page.locator(".product-map-core").scroll_into_view_if_needed()
+                        check_intrinsic_memory_diagram(page)
+                        if _ == 0:
+                            assert all(path in server.received[before:] for path in legacy_assets)
+                            assert page.locator(".product-map-core").evaluate(
+                                "e => getComputedStyle(e).gridTemplateColumns.split(' ').length") == (
+                                    4 if width == 1440 else 1)
+                        else:
+                            assert not any(path in legacy_assets for path in server.received[before:]), (
+                                "legacy assets were not actually reused from HTTP cache", server.received[before:])
+                    before = len(server.received)
+                    page.goto(f"{url}/index.html?force3d")
+                    assert hero_state(page)[0] == ("ready" if animated else "off")
+                    page.locator(".product-map-core").scroll_into_view_if_needed()
+                    if animated:
+                        page.wait_for_selector(".lanes-3d .lane-canvas", state="attached")
+                    page.evaluate("document.fonts.ready")
+                    check_toolkit(page, animated=animated)
+                    check_intrinsic_memory_diagram(page)
+                    assert page.evaluate("typeof window.__legacyAssets") == "undefined"
+                    requests = server.received[before:]
+                    for asset in (*legacy_assets, "/assets/diagrams3d.css"):
+                        assert any(path.startswith(asset + "?v=") for path in requests), (asset, requests)
+                    assert not any(path in legacy_assets for path in requests), requests
+                    dependencies = ["/assets/theme.css", "/assets/diagrams/palette.css",
+                                    "/assets/fonts/outfit-latin-wght-normal.woff2",
+                                    "/assets/fonts/jetbrains-mono-latin-wght-normal.woff2"]
+                    if animated:
+                        dependencies.append("/assets/vendor/three/three.min.js")
+                    for asset in dependencies:
+                        assert any(path.startswith(asset + "?v=") for path in requests), (asset, requests)
+                        assert asset not in requests, (asset, requests)
+                    if animated:
+                        for kind in ("kv", "memory"):
+                            assert drawn(page, page.locator(f".product-memory .lane-{kind}"),
+                                         ".lane-canvas", 0.005) > 0.005
+                    if screenshots:
+                        mode = "webgl" if animated else "fallback"
+                        page.locator(".product-map-core").screenshot(
+                            path=str(screenshots / f"cache-upgrade-{theme}-{width}-{mode}.png"),
+                            style="header, .landing-skip { visibility: hidden !important; }")
+                    if not animated:
+                        page.evaluate("document.querySelectorAll('link[rel=stylesheet]').forEach(e => e.remove())")
+                        check_intrinsic_memory_diagram(page)
+                    assert not errors, errors
+                    context.close()
+    finally:
+        browser.close()
+        server.shutdown()
+        server.server_close()
+
+
 def check_toolkit_buffers(p, url):
     module = (ROOT / "site" / "assets" / "landing3d.js").read_text(encoding="utf-8")
     marker = "const lanes = [];"
@@ -350,7 +492,7 @@ def check_toolkit_buffers(p, url):
     browser = p.chromium.launch(args=SWIFTSHADER)
     try:
         context = browser.new_context(reduced_motion="reduce", viewport={"width": 1440, "height": 1050})
-        context.route("**/assets/landing3d.js", lambda route: route.fulfill(
+        context.route(re.compile(r"/assets/landing3d\.js(?:\?|$)"), lambda route: route.fulfill(
             content_type="text/javascript", body=module))
         page = context.new_page()
         errors = []
@@ -363,7 +505,7 @@ def check_toolkit_buffers(p, url):
             page.evaluate("theme => document.documentElement.dataset.theme = theme", theme)
             page.wait_for_timeout(200)
             result = page.evaluate("""async () => {
-                const { views, palette } = await import('./assets/landing3d.js');
+                const { views, palette } = await import(document.querySelector('script[src*="assets/landing3d.js"]').src);
                 const lanes = views.find(v => v.optional).inspect();
                 const lane = lanes.find(l => l.row.classList.contains('product-memory'));
                 const P = palette();
@@ -491,7 +633,7 @@ def decode_image(page, image, theme):
     image.scroll_into_view_if_needed()
     page.wait_for_function(
         """([img, suffix]) => img.complete && img.naturalWidth > 0
-            && img.currentSrc.endsWith(suffix)""",
+            && new URL(img.currentSrc).pathname.endsWith(suffix)""",
         arg=[image.element_handle(), f"-{theme}.svg"],
     )
     image.evaluate("img => img.decode()")
@@ -503,14 +645,14 @@ def check_diagram_palette(p, url):
     try:
         context = browser.new_context(reduced_motion="reduce")
         module = (ROOT / "site" / "assets" / "diagrams3d.js").read_text(encoding="utf-8")
-        context.route("**/assets/diagrams3d.js", lambda route: route.fulfill(
+        context.route(re.compile(r"/assets/diagrams3d\.js(?:\?|$)"), lambda route: route.fulfill(
             content_type="text/javascript", body=module + "\nexport { views };\n"))
         page = context.new_page()
         errors, warnings = [], []
         track_errors(page, errors)
         page.on("console", lambda message: message.type == "warning" and warnings.append(message.text))
         inspect = """async () => {
-            const {views} = await import('./assets/diagrams3d.js');
+            const {views} = await import(document.querySelector('script[src*="assets/diagrams3d.js"]').src);
             return views.map(v => ({
                 name: v.picture.closest('figure')?.dataset.diagram || v.image.dataset.light,
                 roles: v.edges.map(e => e.role),
@@ -752,14 +894,14 @@ def check(site, screenshots=None):
                             for image in images.all():
                                 decode_image(page, image, theme)
                                 assert image.evaluate("img => img.naturalWidth > 0 && img.alt.length > 30")
-                                assert image.evaluate("img => img.currentSrc").endswith(f"-{theme}.svg")
+                                assert image.evaluate("img => new URL(img.currentSrc).pathname").endswith(f"-{theme}.svg")
                             page.locator("#layers").scroll_into_view_if_needed()
                         elif path == "index.html":
                             images = page.locator(".deployment-options img")
                             assert images.count() == 2
                             for image in images.all():
                                 decode_image(page, image, theme)
-                                assert image.evaluate("img => img.currentSrc").endswith(f"-{theme}.svg")
+                                assert image.evaluate("img => new URL(img.currentSrc).pathname").endswith(f"-{theme}.svg")
                                 assert image.evaluate("img => img.naturalWidth > 0 && img.alt.length > 30")
                         else:
                             assert page.locator(".feature-catalog section[id]").count() == 11
@@ -783,7 +925,7 @@ def check(site, screenshots=None):
                 first = page.locator(".diagram img").first
                 opposite = "dark" if theme == "light" else "light"
                 decode_image(page, first, opposite)
-                assert first.evaluate("img => img.currentSrc").endswith(f"-{opposite}.svg")
+                assert first.evaluate("img => new URL(img.currentSrc).pathname").endswith(f"-{opposite}.svg")
                 page.emulate_media(color_scheme=opposite)
                 page.emulate_media(color_scheme=theme)
                 assert page.locator("html").get_attribute("data-theme") == opposite, "A manual theme must survive system changes"
@@ -795,7 +937,7 @@ def check(site, screenshots=None):
             page.goto(f"{url}/architecture.html")
             image = page.locator(".diagram img").first
             decode_image(page, image, "dark")
-            assert image.evaluate("img => img.currentSrc").endswith("-dark.svg")
+            assert image.evaluate("img => new URL(img.currentSrc).pathname").endswith("-dark.svg")
             page.goto(f"{url}/index.html")
             assert page.locator("svg.file-map").is_visible()
             assert page.locator(".hero-split").get_attribute("data-3d") is None
@@ -813,6 +955,7 @@ def check(site, screenshots=None):
                 check_landing_buffers(p, url)
                 check_toolkit_buffers(p, url)
             check_landing_previews(p, url, screenshots)
+            check_cached_upgrade(p, site, screenshots)
             check_diagram_scenes(p, url, screenshots)
             check_diagram_palette(p, url)
     finally:
@@ -825,6 +968,8 @@ def check(site, screenshots=None):
           "shader palettes, reduced motion and four keyboard-accessible dashboard previews.")
     print("Checked Toolkit before Dashboard, five responsive cards, separate lookup/recall geometry, "
           "shared renderer, actual canvas pixels, themes and SVG fallbacks.")
+    print("Checked real cached-unversioned-to-fingerprinted upgrades and intrinsically bounded/unfilled "
+          "SVG fallback with stale or missing CSS, light/dark, desktop/mobile and WebGL/fallback.")
     print("Checked shared WebGL pixels on both deployment diagrams and all 14 architecture figures, "
           "light/dark, four widths, motion, ordered sequences, offscreen pause, context count and fallbacks.")
 

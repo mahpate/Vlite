@@ -1573,7 +1573,7 @@ async function boot() {
     teardown("software-gl");
     return;
   }
-  THREE = await import("./vendor/three/three.min.js");
+  THREE = await import("./vendor/three/three.min.js?v=e2258dba3dfa");
   if (dead) return;
   const renderer = makeRenderer(canvas, gl);
   cleanups.push(() => { renderer.dispose(); canvas.remove(); hero.classList.remove("has-3d"); });

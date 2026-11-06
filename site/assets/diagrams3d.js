@@ -218,7 +218,7 @@ async function start() {
     return;
   }
   try {
-    const THREE = await import("./vendor/three/three.min.js");
+    const THREE = await import("./vendor/three/three.min.js?v=e2258dba3dfa");
     renderer = new THREE.WebGLRenderer({ canvas, context: gl, alpha: true, antialias: true });
     renderer.autoClear = false;
     renderer.setClearColor(0, 0);

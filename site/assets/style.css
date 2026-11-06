@@ -1,8 +1,8 @@
-@import url("diagrams/palette.css");
-@import url("theme.css");
+@import url("diagrams/palette.css?v=d245c75d2edd");
+@import url("theme.css?v=4192ff7fd37d");
 /* Self-hosted variable fonts (SIL OFL 1.1; licences in assets/fonts/) */
-@font-face { font-family: "Outfit"; font-style: normal; font-weight: 100 900; font-display: swap; src: url("fonts/outfit-latin-wght-normal.woff2") format("woff2"); }
-@font-face { font-family: "JetBrains Mono"; font-style: normal; font-weight: 100 800; font-display: swap; src: url("fonts/jetbrains-mono-latin-wght-normal.woff2") format("woff2"); }
+@font-face { font-family: "Outfit"; font-style: normal; font-weight: 100 900; font-display: swap; src: url("fonts/outfit-latin-wght-normal.woff2?v=6c18d579fd87") format("woff2"); }
+@font-face { font-family: "JetBrains Mono"; font-style: normal; font-weight: 100 800; font-display: swap; src: url("fonts/jetbrains-mono-latin-wght-normal.woff2?v=18be452724bf") format("woff2"); }
 .deployment-options img { display: block; width: 100%; height: auto; margin: 20px 0; border-radius: 12px; }
 .dashboard-guided-tour { margin-bottom: 28px; }
 .tour-controls { display: flex; flex-wrap: wrap; align-items: center; gap: 12px; }
