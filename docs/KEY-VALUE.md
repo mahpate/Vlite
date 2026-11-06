@@ -334,7 +334,7 @@ Failures print `error: <code>: <message>` in the shell (exit code 1) and set `is
 | Scope, tenant or collection binding refused | 403 `forbidden_scope` | `PERMISSION_DENIED` | |
 | Read-only database or token | 403 `read_only` | `PERMISSION_DENIED` | `read_only` |
 | Request rate or live-vector quota | 429 `rate_limited` or `quota_exceeded` | `RESOURCE_EXHAUSTED` | |
-| Commit outcome unknown | 503 `commit_indeterminate` | `UNKNOWN` | |
+| Commit outcome unknown | 503 `commit_indeterminate` | `UNKNOWN` | `commit_indeterminate` |
 
 A batch and a multi-get answer with the same rows, except for the two faults whose class differs in the shell and MCP (see [above](#use-it-from-the-shell-and-mcp)). A batch is checked as a whole before it runs, so a fault in the request is reported whatever the state of the collection; after that the first operation that cannot run decides the answer, and nothing is written. A duplicate key, more than 1,000 operations and more than 4,194,304 value bytes are `invalid_input`, and the message names the operation. A put with `expires_at_ms` in a batch is an unknown field: `invalid_json` over REST, `invalid_request` in the shell and MCP.
 
