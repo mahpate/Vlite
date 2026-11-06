@@ -325,6 +325,17 @@ class Policy(unittest.TestCase):
             self.assertIn(line, action)
         self.assertNotIn("uses:", action)
 
+    def test_dev_fast_scripts_are_checked_on_every_os_without_a_build(self):
+        text = (ROOT / ".github/workflows/ci.yml").read_text(encoding="utf-8")
+        clients = text.split("\n  clients:\n", 1)[1].split("\n  manylinux:\n", 1)[0]
+        step = clients.split("- name: Verify the opt-in dev-fast environment scripts", 1)[1].split("\n      - ", 1)[0]
+        self.assertIn("run: python tests/dev_fast_env.py", step)
+        # No OS condition: Linux (bash, dash), macOS (bash, zsh) and Windows (PowerShell) each test their own.
+        self.assertNotIn("if:", step)
+        self.assertEqual(text.count("dev_fast_env.py"), 1)
+        # Only the scripts apply sccache or a linker: none of it is committed Cargo configuration.
+        self.assertFalse((ROOT / ".cargo").exists())
+
     def test_compact_method_inventory_runs_with_documentation_gates(self):
         text = (ROOT / ".github/workflows/ci.yml").read_text(encoding="utf-8")
         documentation = text.split("\n  documentation:\n", 1)[1].split("\n  native:\n", 1)[0]

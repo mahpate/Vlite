@@ -298,6 +298,8 @@ jobs:
         run: |
           python tests/api_reference.py
           python tests/api_route_inventory.py
+      - name: Verify the opt-in dev-fast environment scripts (sets variables only; no cargo build)
+        run: python tests/dev_fast_env.py
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2
         with:
