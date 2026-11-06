@@ -4,6 +4,7 @@
 //! request. No persisted format changes here; remember lookup is refused by
 //! the adapter because its receipts cannot be decoded without the request.
 
+use super::erasure::{ChunkSummary, ErasureJob, lookup_begin, lookup_chunk};
 use super::mapping::ReceiptOperation;
 use super::{
     LABEL_RECEIPT, MAX_OPS, MemoryError, MemoryRef, MemoryResult, MemoryScope, consolidate,
@@ -19,6 +20,13 @@ pub(crate) enum ReceiptOutcome {
     Forget { deleted: Vec<String> },
     /// C1 consolidate: the created summary, always at memory revision 1.
     Consolidate { summary_id: String },
+    /// ES: a job-begin receipt, as its begin view (`begin_job_view`).
+    BeginErasure { job: ErasureJob },
+    /// ES: a resume receipt, as the original view of its chunk.
+    ResumeErasure {
+        job: ErasureJob,
+        chunk: ChunkSummary,
+    },
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -72,6 +80,16 @@ impl MemoryRef<'_> {
                 let (summary_id, expiry) =
                     consolidate::lookup(&read, &receipt, scope, &scope_key, collection)?;
                 (ReceiptOutcome::Consolidate { summary_id }, expiry)
+            }
+            ReceiptOperation::BeginErasure => {
+                let (job, expiry) =
+                    lookup_begin(&read, &receipt, scope, self.evidence_collection.as_deref())?;
+                (ReceiptOutcome::BeginErasure { job }, expiry)
+            }
+            ReceiptOperation::ResumeErasure => {
+                let (job, chunk, expiry) =
+                    lookup_chunk(&read, &receipt, scope, self.evidence_collection.as_deref())?;
+                (ReceiptOutcome::ResumeErasure { job, chunk }, expiry)
             }
             // The adapter refuses remember lookup before calling here; a
             // stray call is an internal fault, never a silent not-found.

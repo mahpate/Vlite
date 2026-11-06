@@ -18,13 +18,15 @@ use super::super::{
     FAIL_NEXT_WRITE_BATCH, LABEL_CONTENT, LABEL_RECEIPT, LABEL_RECEIPT_OUTCOME, MemoryError,
     MemoryEvidence, MemoryItem, MemoryKind, MemoryMut, MemoryRef, MemoryResult, MemoryScope,
     RememberRequest, RememberResult, content_edge_key, content_key, evidence_record_id, hex,
-    memory_key, operation_receipt_key, receipt_outcome_key, scan_memories,
+    mapping::ReceiptOperation, memory_key, operation_receipt_key, receipt::ReceiptOutcome,
+    receipt_outcome_key, scan_memories,
 };
 use super::{
-    BeginErasureResult, EraseScopeRequest, ErasureState, ErasureStatusRequest, LABEL_JOB, job_key,
+    BeginErasureResult, EraseScopeRequest, ErasureState, ErasureStatusRequest, LABEL_JOB,
+    begin_receipt_key, job_key,
     resume::{
         ChunkSummary, ErasureJob, ErasureJobRequest, ResumeErasureRequest, ResumeErasureResult,
-        token,
+        begin_job_view, token,
     },
 };
 use crate::{
@@ -1149,18 +1151,19 @@ fn a_hub_of_more_than_4096_edges_stops_the_job_without_skipping_anything() {
     assert_eq!(store.live(&scope), ["hub"]);
 }
 
-/// Mutant: decode only chunk members instead of the window. The hub fits a
-/// frame alone (4,095) and a second memory would not (4,097), so the chunk
-/// holds only the hub; the broken second memory is still in the window.
+/// Mutants: decode only chunk members instead of the window; decode the
+/// window lazily and stop at the first memory that does not fit. The hub fits
+/// a frame alone (4,095) and a second memory would not (4,097), so the chunk
+/// holds only the hub. The damage goes on `x`, the first memory that does not
+/// fit, and on `y`, which lies beyond the point where the chunk stops filling:
+/// only decoding the whole window first reaches `y`.
 #[test]
 fn mutant_the_whole_window_is_decoded_not_only_the_chunk_members() {
     let mut store = Store::plain();
     let scope = scope();
     store.provision(&scope);
-    store.remember(&scope, vec![item("h", "h"), item("x", "x")]);
+    store.remember(&scope, vec![item("h", "h"), item("x", "x"), item("y", "y")]);
     store.hub(&scope, "h", 4_089);
-    let x_key = memory_key(&scope.key(), "x");
-    let original = store.node(&x_key).unwrap();
     store.begin(&scope);
     type Fault = Box<dyn Fn(&mut NodeView)>;
     let faults: [(&str, Fault); 4] = [
@@ -1190,27 +1193,30 @@ fn mutant_the_whole_window_is_decoded_not_only_the_chunk_members() {
             }),
         ),
     ];
-    for (label, fault) in faults {
-        let mut broken = original.clone();
-        fault(&mut broken);
-        store.raw(vec![upsert(&broken)]);
-        let request = store.request(&scope, "k1", T0 + 1);
-        let error = store.unchanged(|store| error_of(store.resume(&request)));
-        assert!(
-            matches!(error, MemoryError::InvalidBundle),
-            "{label}: {error:?}"
-        );
-        store.raw(vec![upsert(&original)]);
+    for target in ["x", "y"] {
+        let original = store.node(&memory_key(&scope.key(), target)).unwrap();
+        for (label, fault) in &faults {
+            let mut broken = original.clone();
+            fault(&mut broken);
+            store.raw(vec![upsert(&broken)]);
+            let request = store.request(&scope, "k1", T0 + 1);
+            let error = store.unchanged(|store| error_of(store.resume(&request)));
+            assert!(
+                matches!(error, MemoryError::InvalidBundle),
+                "{target}, {label}: {error:?}"
+            );
+            store.raw(vec![upsert(&original)]);
+        }
     }
     let first = store.next(&scope, "k1", T0 + 2);
     assert_eq!(
         first.chunk,
         ChunkSummary {
             memories_deleted: 1,
-            remaining_after: Some(1)
+            remaining_after: Some(2)
         }
     );
-    assert_eq!(store.live(&scope), ["x"]);
+    assert_eq!(store.live(&scope), ["x", "y"]);
 }
 
 /// Mutants: order by key instead of node ID; mark `logical` while
@@ -2601,4 +2607,328 @@ fn an_unprovisioned_scope_and_a_tuple_mismatch_are_refused_like_e1() {
     assert!(matches!(error, MemoryError::DigestCollision), "{error:?}");
     let error = store.unchanged(|store| error_of(store.resume(&probe(&scope))));
     assert!(matches!(error, MemoryError::DigestCollision), "{error:?}");
+}
+
+/// A retained lookup of `operation` and `key` at `now`, unwrapped.
+fn found(
+    store: &Store,
+    operation: ReceiptOperation,
+    scope: &MemoryScope,
+    key: &str,
+    now: u64,
+) -> super::super::receipt::ReceiptLookup {
+    store
+        .reader()
+        .receipt(operation, scope, key, now)
+        .unwrap()
+        .unwrap_or_else(|| panic!("{operation:?} {key}: no live receipt"))
+}
+
+/// ES8: GetReceipt reads a chunk receipt without the request. The result is
+/// the original view of the chunk the receipt belongs to, never the current
+/// job: on a barred scope, after later chunks and once the job is logical.
+/// Mutants: the lookup returns the current job; the lookup ignores the
+/// expiry (`found` panics when a live receipt is missing, the expiry
+/// assertions fail when it never ends).
+#[test]
+fn a_chunk_receipt_is_looked_up_as_its_original_view() {
+    for backend in BACKENDS {
+        let mut store = Store::new(backend);
+        let scope = scope();
+        three_chunk_scope(&mut store, &scope);
+        store.begin(&scope);
+        let first = store.next(&scope, "k1", T0 + 1);
+        let second = store.next(&scope, "k2", T0 + 2);
+        let third = store.next(&scope, "k3", T0 + 3);
+        assert_eq!(third.job.state, ErasureState::Logical, "{backend:?}");
+        for (key, at, original) in [
+            ("k1", T0 + 1, &first),
+            ("k2", T0 + 2, &second),
+            ("k3", T0 + 3, &third),
+        ] {
+            let lookup = found(&store, ReceiptOperation::ResumeErasure, &scope, key, at + 1);
+            let ReceiptOutcome::ResumeErasure { job, chunk } = lookup.outcome else {
+                panic!("{backend:?} {key}: {:?}", lookup.outcome);
+            };
+            assert_eq!(job, original.job, "{backend:?} {key}");
+            assert_eq!(chunk, original.chunk, "{backend:?} {key}");
+            assert_eq!(lookup.receipt_revision, original.receipt_revision);
+            assert_eq!(lookup.retry_until_ms, at + WINDOW, "{backend:?} {key}");
+            let reader = store.reader();
+            let at_expiry =
+                reader.receipt(ReceiptOperation::ResumeErasure, &scope, key, at + WINDOW);
+            assert!(at_expiry.unwrap().is_none(), "{backend:?} {key}");
+        }
+        // The original views are not the current job; the last one is.
+        assert_ne!(first.job, store.job(&scope), "{backend:?}");
+        assert_ne!(second.job, store.job(&scope), "{backend:?}");
+        assert_eq!(third.job, store.job(&scope), "{backend:?}");
+        assert_eq!(third.job.resume_token, None, "{backend:?}");
+        assert_eq!(first.job.deleted_count, 1, "{backend:?}");
+        assert_eq!(second.job.deleted_count, 2, "{backend:?}");
+        // An unknown key and the begin key are not resume receipts.
+        for key in ["nope", "begin"] {
+            let missing = store
+                .reader()
+                .receipt(ReceiptOperation::ResumeErasure, &scope, key, T0 + 5)
+                .unwrap();
+            assert!(missing.is_none(), "{backend:?} {key}");
+        }
+    }
+}
+
+/// ES6 and ES8: a begin receipt is looked up as the begin view (pending,
+/// nothing deleted, the token of the begin revision), also after chunks
+/// moved the job on. Mutants: the view reports the current job; the view's
+/// token is built from the current revision; the begin and forget
+/// namespaces are mixed up.
+#[test]
+fn a_begin_receipt_is_looked_up_as_the_begin_view_even_after_chunks() {
+    for backend in BACKENDS {
+        let mut store = Store::new(backend);
+        let scope = scope();
+        three_chunk_scope(&mut store, &scope);
+        let begun = store.begin(&scope);
+        let view = begin_job_view(&scope, Some(BINDING), &begun);
+        assert_eq!(
+            view,
+            store.job(&scope),
+            "{backend:?}: begin view is the live job"
+        );
+        assert_eq!(
+            (view.state, view.chunks, view.deleted_count, view.remaining),
+            (ErasureState::Pending, 0, 0, None),
+            "{backend:?}"
+        );
+        store.next(&scope, "k1", T0 + 1);
+        store.next(&scope, "k2", T0 + 2);
+        let lookup = found(
+            &store,
+            ReceiptOperation::BeginErasure,
+            &scope,
+            "begin",
+            T0 + 3,
+        );
+        let ReceiptOutcome::BeginErasure { job } = lookup.outcome else {
+            panic!("{backend:?}: {:?}", lookup.outcome);
+        };
+        assert_eq!(job, view, "{backend:?}");
+        assert_ne!(job, store.job(&scope), "{backend:?}");
+        assert_ne!(
+            job.resume_token,
+            store.job(&scope).resume_token,
+            "{backend:?}"
+        );
+        assert_eq!(
+            lookup.receipt_revision, begun.status.revision,
+            "{backend:?}"
+        );
+        assert_eq!(lookup.retry_until_ms, T0 + WINDOW, "{backend:?}");
+        let reader = store.reader();
+        let at_expiry =
+            reader.receipt(ReceiptOperation::BeginErasure, &scope, "begin", T0 + WINDOW);
+        assert!(at_expiry.unwrap().is_none(), "{backend:?}");
+        // The `forget` namespace holds no such receipt.
+        let forget = reader.receipt(ReceiptOperation::Forget, &scope, "begin", T0 + 3);
+        assert!(forget.unwrap().is_none(), "{backend:?}");
+        // The expiry is readable by identity in each namespace.
+        let expiry =
+            |operation, key: &str| reader.retry_until(operation, &scope, key, T0 + 3).unwrap();
+        assert_eq!(
+            expiry(ReceiptOperation::BeginErasure, "begin"),
+            Some(T0 + WINDOW)
+        );
+        assert_eq!(
+            expiry(ReceiptOperation::ResumeErasure, "k1"),
+            Some(T0 + 1 + WINDOW)
+        );
+        assert_eq!(expiry(ReceiptOperation::ResumeErasure, "begin"), None);
+        assert_eq!(expiry(ReceiptOperation::BeginErasure, "k1"), None);
+    }
+}
+
+/// Section 7 for lookups: after a directory checkpoint and reopen, or a
+/// compaction, a begin receipt and the chunk receipts still decode, each
+/// view reports the receipt's own current revision with a token built from
+/// it, and the job still resumes. (A job that has run no chunk keeps E1's
+/// equal-revision rule for its begin receipt.)
+#[test]
+fn receipt_lookups_survive_a_checkpoint_and_a_compaction() {
+    for backend in BACKENDS {
+        for chunks in [0u32, 2] {
+            let mut store = Store::new(backend);
+            let scope = scope();
+            three_chunk_scope(&mut store, &scope);
+            let begun = store.begin(&scope);
+            let mut done = Vec::new();
+            for index in 0..chunks {
+                done.push(store.next(&scope, &format!("k{index}"), T0 + 1 + u64::from(index)));
+            }
+            if backend.directory() {
+                store.raw(vec![GraphOp::CreateNode {
+                    key: "marker".into(),
+                    labels: vec!["Other".into()],
+                    properties: Metadata::new(),
+                }]);
+                assert!(store.db_mut().checkpoint().unwrap().is_some());
+                store.reopen();
+            } else {
+                store.compact();
+            }
+            let label = format!("{backend:?} chunks={chunks}");
+            let lookup = found(
+                &store,
+                ReceiptOperation::BeginErasure,
+                &scope,
+                "begin",
+                T0 + 5,
+            );
+            let ReceiptOutcome::BeginErasure { job } = lookup.outcome else {
+                panic!("{label}: {:?}", lookup.outcome);
+            };
+            assert_eq!(job.revision, lookup.receipt_revision, "{label}");
+            assert_eq!(
+                job.resume_token,
+                Some(token(
+                    &scope,
+                    Some(BINDING),
+                    &job.job_key,
+                    1,
+                    lookup.receipt_revision,
+                    0
+                )),
+                "{label}"
+            );
+            assert_eq!(job.job_key, begun.status.job_key, "{label}");
+            for (index, original) in done.iter().enumerate() {
+                let key = format!("k{index}");
+                let lookup = found(
+                    &store,
+                    ReceiptOperation::ResumeErasure,
+                    &scope,
+                    &key,
+                    T0 + 5,
+                );
+                let ReceiptOutcome::ResumeErasure { job, chunk } = lookup.outcome else {
+                    panic!("{label} {key}: {:?}", lookup.outcome);
+                };
+                assert_eq!(chunk, original.chunk, "{label} {key}");
+                assert_eq!(job.revision, lookup.receipt_revision, "{label} {key}");
+                assert_eq!(job.chunks, original.job.chunks, "{label} {key}");
+                assert_eq!(
+                    job.deleted_count, original.job.deleted_count,
+                    "{label} {key}"
+                );
+                assert_eq!(job.remaining, original.job.remaining, "{label} {key}");
+                assert_eq!(
+                    job.resume_token,
+                    Some(token(
+                        &scope,
+                        Some(BINDING),
+                        &job.job_key,
+                        1,
+                        lookup.receipt_revision,
+                        job.chunks
+                    )),
+                    "{label} {key}"
+                );
+            }
+            let resumed = store.next(&scope, "after", T0 + 9);
+            assert_eq!(resumed.job.chunks, u64::from(chunks) + 1, "{label}");
+        }
+    }
+}
+
+/// A damaged receipt, outcome or job fails closed in the lookup: never a
+/// plausible view and never `None` (a present receipt is strict).
+#[test]
+fn a_damaged_receipt_or_job_fails_closed_in_the_lookup() {
+    type Damage = fn(&mut Store, &MemoryScope);
+    type Check = fn(&MemoryError) -> bool;
+    let cases: [(&str, ReceiptOperation, &str, Damage, Check); 6] = [
+        (
+            "begin receipt digest is not a digest",
+            ReceiptOperation::BeginErasure,
+            "begin",
+            |store, scope| {
+                let key = begin_receipt_key(&scope.key(), "begin");
+                edit_node(store, &key, |node| {
+                    node.properties.insert("digest".into(), string("zz"));
+                });
+            },
+            |error| matches!(error, MemoryError::InvalidBundle),
+        ),
+        (
+            "begin receipt names another scope tuple",
+            ReceiptOperation::BeginErasure,
+            "begin",
+            |store, scope| {
+                let key = begin_receipt_key(&scope.key(), "begin");
+                edit_node(store, &key, |node| {
+                    node.properties
+                        .insert("e1_scope_tuple".into(), string("00"));
+                });
+            },
+            |error| matches!(error, MemoryError::DigestCollision),
+        ),
+        (
+            "begin receipt beside no job",
+            ReceiptOperation::BeginErasure,
+            "begin",
+            |store, scope| {
+                store.raw(vec![GraphOp::DeleteNode {
+                    key: job_key(&scope.key()),
+                    expected: Expected::Any,
+                }]);
+            },
+            |error| matches!(error, MemoryError::InvalidBundle),
+        ),
+        (
+            "chunk receipt without its outcome",
+            ReceiptOperation::ResumeErasure,
+            "k1",
+            |store, scope| {
+                let key = receipt_outcome_key(&resume_receipt(scope, "k1"), 0);
+                store.raw(vec![GraphOp::DeleteNode {
+                    key,
+                    expected: Expected::Any,
+                }]);
+            },
+            |error| matches!(error, MemoryError::InvalidBundle),
+        ),
+        (
+            "chunk receipt of another job key",
+            ReceiptOperation::ResumeErasure,
+            "k1",
+            |store, scope| {
+                edit_node(store, &resume_receipt(scope, "k1"), |node| {
+                    node.properties.insert("job_key".into(), string("other"));
+                });
+            },
+            |error| matches!(error, MemoryError::InvalidBundle),
+        ),
+        (
+            "chunk receipt beside a job of another schema",
+            ReceiptOperation::ResumeErasure,
+            "k1",
+            |store, scope| {
+                edit_node(store, &job_key(&scope.key()), |node| {
+                    node.properties
+                        .insert("e1_schema".into(), string("erase-scope:v9"));
+                });
+            },
+            |error| matches!(error, MemoryError::InvalidBundle),
+        ),
+    ];
+    for (label, operation, key, damage, expected) in cases {
+        let mut store = Store::plain();
+        let scope = scope();
+        store.provision(&scope);
+        store.remember(&scope, vec![item("a", "a"), item("b", "b")]);
+        store.begin(&scope);
+        store.next(&scope, "k1", T0 + 1);
+        damage(&mut store, &scope);
+        let error = error_of(store.reader().receipt(operation, &scope, key, T0 + 2));
+        assert!(expected(&error), "{label}: {error:?}");
+    }
 }

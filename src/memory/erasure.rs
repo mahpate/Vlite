@@ -28,6 +28,7 @@ const MAX_COLLECTION_BYTES: usize = 63;
 mod resume;
 #[cfg(test)]
 mod resume_tests;
+pub(crate) use resume::{ChunkSummary, ErasureJob, lookup_begin, lookup_chunk};
 
 #[derive(Clone, Debug)]
 pub(crate) struct EraseScopeRequest {

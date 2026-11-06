@@ -18,9 +18,9 @@ use super::super::{
     receipt_outcome_key, string_property,
 };
 use super::{
-    ErasureState, Job, LABEL_JOB, LogicalVisibility, MAX_COLLECTION_BYTES, OUTCOME_FIELDS,
-    Progress, RECEIPT_FIELDS, SCHEMA_V2, canonical_nonzero, common, decode_job, digest_shaped,
-    exact, integer, job_key, scope_node, text,
+    BeginErasureResult, ErasureState, Job, LABEL_JOB, LogicalVisibility, MAX_COLLECTION_BYTES,
+    OUTCOME_FIELDS, Progress, RECEIPT_FIELDS, SCHEMA_V2, canonical_nonzero, common, decode_job,
+    decode_receipt, digest_shaped, exact, integer, job_key, pending, scope_node, text,
 };
 use crate::{
     Condition, Database, Expected, Metadata, MetadataValue, Mutation,
@@ -370,6 +370,83 @@ fn replay_view(
         commit_sequence: decoded.revision,
         replayed: true,
     }
+}
+
+/// ES6: the job as its begin frame left it, the view a begin and its replay
+/// report: pending, nothing deleted, `remaining` unknown, no chunk yet and
+/// the token of the begin revision (any later chunk makes it stale; the live
+/// token comes from `erasure_job`).
+pub(crate) fn begin_job_view(
+    scope: &MemoryScope,
+    collection: Option<&str>,
+    begin: &BeginErasureResult,
+) -> ErasureJob {
+    let status = &begin.status;
+    ErasureJob {
+        job_key: status.job_key.clone(),
+        revision: status.revision,
+        generation: status.generation,
+        state: ErasureState::Pending,
+        logical_visibility: LogicalVisibility::Hidden,
+        deleted_count: 0,
+        remaining: None,
+        chunks: 0,
+        resume_token: Some(token(
+            scope,
+            collection,
+            &status.job_key,
+            status.generation,
+            status.revision,
+            0,
+        )),
+    }
+}
+
+/// ES8: a stored begin receipt as its begin view, read without the request
+/// and decoded strictly (live or expired) with the job it belongs to. The
+/// receipt revision is the begin revision, as E1's replay reports it.
+pub(crate) fn lookup_begin(
+    read: &GraphRef<'_>,
+    receipt: &NodeView,
+    scope: &MemoryScope,
+    collection: Option<&str>,
+) -> MemoryResult<(ErasureJob, u64)> {
+    let scope_key = scope.key();
+    let binding = collection.unwrap_or_default();
+    let key = job_key(&scope_key);
+    let job = read
+        .get_node(&key)?
+        .output
+        .map(|node| decode_job(&node, scope, &scope_key, binding))
+        .transpose()?;
+    let (_, expiry) = decode_receipt(read, receipt, scope, &scope_key, binding, job.as_ref())?;
+    let begin = BeginErasureResult {
+        status: pending(key, receipt.revision),
+        replayed: true,
+    };
+    Ok((begin_job_view(scope, collection, &begin), expiry))
+}
+
+/// ES8: a stored resume receipt as the original view of its chunk (the view
+/// a live replay returns), read without the request and decoded strictly
+/// (live or expired) with the job it belongs to.
+pub(crate) fn lookup_chunk(
+    read: &GraphRef<'_>,
+    receipt: &NodeView,
+    scope: &MemoryScope,
+    collection: Option<&str>,
+) -> MemoryResult<(ErasureJob, ChunkSummary, u64)> {
+    let scope_key = scope.key();
+    let binding = collection.unwrap_or_default();
+    let key = job_key(&scope_key);
+    let job = read
+        .get_node(&key)?
+        .output
+        .map(|node| decode_job(&node, scope, &scope_key, binding))
+        .transpose()?;
+    let decoded = decode_resume_receipt(read, receipt, scope, &scope_key, binding, job.as_ref())?;
+    let view = replay_view(scope, collection, &key, &decoded);
+    Ok((view.job, view.chunk, decoded.expiry))
 }
 
 impl MemoryRef<'_> {

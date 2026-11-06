@@ -230,12 +230,27 @@ fn receipt_id_is_opaque_and_separates_every_input() {
     for other in [
         receipt_id(ReceiptOperation::Forget, &scope(), "k1", 7),
         receipt_id(ReceiptOperation::Consolidate, &scope(), "k1", 7),
+        receipt_id(ReceiptOperation::BeginErasure, &scope(), "k1", 7),
+        receipt_id(ReceiptOperation::ResumeErasure, &scope(), "k1", 7),
         receipt_id(ReceiptOperation::Remember, &other_scope, "k1", 7),
         receipt_id(ReceiptOperation::Remember, &scope(), "k2", 7),
         receipt_id(ReceiptOperation::Remember, &scope(), "k1", 8),
     ] {
         assert_ne!(other.unwrap(), base);
     }
+    // The two erasure namespaces never share an ID with each other or with
+    // the forget namespace a wire `forget` also names (ES6, ES7).
+    let ids: std::collections::BTreeSet<String> = [
+        ReceiptOperation::Forget,
+        ReceiptOperation::BeginErasure,
+        ReceiptOperation::ResumeErasure,
+    ]
+    .into_iter()
+    .map(|operation| receipt_id(operation, &scope(), "k1", 7).unwrap())
+    .collect();
+    assert_eq!(ids.len(), 3);
+    assert_eq!(ReceiptOperation::BeginErasure.name(), "begin-erasure");
+    assert_eq!(ReceiptOperation::ResumeErasure.name(), "resume-erasure");
     // Pinned bytes: domain, u32-BE-prefixed receipt node key, u64-BE revision.
     let key = operation_receipt_key("remember", &scope().key(), "k1");
     let mut input = b"vlite.memory.receipt.id.v1\0".to_vec();

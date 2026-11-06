@@ -91,6 +91,11 @@ fn lookup(
             vec![json!({"id": summary_id, "action": "created", "revision": "1"})],
             false,
         ),
+        // `from_wire` still refuses both operations, so a lookup cannot
+        // reach them until the erasure routes are served.
+        ReceiptOutcome::BeginErasure { .. } | ReceiptOutcome::ResumeErasure { .. } => {
+            return Err(internal());
+        }
     };
     let receipt = Receipt {
         operation,

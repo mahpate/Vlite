@@ -28,6 +28,11 @@ pub(crate) enum ReceiptOperation {
     Remember,
     Forget,
     Consolidate,
+    /// ES: the receipt of a job-begin `forget` (E1). The wire names it
+    /// `forget`; it lives in its own core namespace.
+    BeginErasure,
+    /// ES: the receipt of one resume chunk (E2).
+    ResumeErasure,
 }
 
 /// One wire status and code, with the optional `details.feature` context.
@@ -83,6 +88,8 @@ impl ReceiptOperation {
             Self::Remember => "remember",
             Self::Forget => "forget",
             Self::Consolidate => "consolidate",
+            Self::BeginErasure => "begin-erasure",
+            Self::ResumeErasure => "resume-erasure",
         }
     }
 

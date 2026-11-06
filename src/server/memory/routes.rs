@@ -403,8 +403,9 @@ fn mutation_body(
 fn operation_name(operation: ReceiptOperation) -> &'static str {
     match operation {
         ReceiptOperation::Remember => "remember",
-        ReceiptOperation::Forget => "forget",
+        ReceiptOperation::Forget | ReceiptOperation::BeginErasure => "forget",
         ReceiptOperation::Consolidate => "consolidate",
+        ReceiptOperation::ResumeErasure => "resume_erasure",
     }
 }
 
