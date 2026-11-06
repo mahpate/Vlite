@@ -6,14 +6,14 @@
   "capabilities": {
     "version": "0.7.0"
   },
-  "source_git_sha": "cf3d6f285b3889a4d19869e3d215e487819ec705",
+  "source_git_sha": "b82b99d3c03616f85aa2246f002e372585da14f2",
   "source_git_dirty": false,
   "format_version": 5,
   "source_assets": {
     "admin-tools.js": "e46d3ab6267dcab8dacec1128debc2a0433e61b6c0519dd2d0a34453eee2f52a",
     "ambience.js": "678612f0fe51412d5b8bce773f49333e3423154be61562a905908f7e41510087",
     "app.js": "8968897faf01a316ca8ab9e51dd72ce86109b6f80ec27e9c30dcd7f6d45204ce",
-    "console-tools.js": "193b801ceb3e5eb9e90e5cece577154d9dc15e591acc9696982af2a80d268a2d",
+    "console-tools.js": "cb670dad36d563c662bcdd4d8904a293cc0f1e847ecdf455f38752f792bb7e50",
     "graph.css": "7cae74a0ada0dd46a67ffc66857c44a3a34704bf7cae2bd50bb85df4e7999e62",
     "graph.js": "49c6a44d639e080b8fe7a162e953d98f9d8f6df63044125f50606d545adf337d",
     "graph3d.js": "0ef3b257f0304211838dd46417a89197df819da168e4aae465e7b59cd7a323c5",
@@ -32,7 +32,7 @@
     {
       "file": "current-sign-in.png",
       "workspace": "Sign in",
-      "sha256": "92b57a41f017468d3a3018a338a08b408fe553186e37da60c1b21f6ea60c9073"
+      "sha256": "8bb253eebce04672807a8489cd0ef9bc721f99b7170693810ba4c30069e77531"
     },
     {
       "file": "current-overview-light.png",
@@ -77,12 +77,12 @@
     {
       "file": "current-search.png",
       "workspace": "Search",
-      "sha256": "94b8921d41c64d37658edbcc7783233042df76e37c6b1439700f75a13b756f07"
+      "sha256": "739e9090ed95449f9e87612377b186a845131fb23ae56783992a7461fabc1260"
     },
     {
       "file": "current-hybrid.png",
       "workspace": "Search",
-      "sha256": "6614ccccaf232ee76e1f8a07d3d46dd582baecc3a02f285e11841396cd289a23"
+      "sha256": "6715c35c83faeb60946c250b7ff15fbe9c4b4b6105282d8b2e6b29508a3cf9ef"
     },
     {
       "file": "current-retrieval.png",
@@ -122,17 +122,17 @@
     {
       "file": "current-observability.png",
       "workspace": "Observability",
-      "sha256": "690840670a66f530f65d1b24f8164eaca11e8980bf25e5e34e3c367cfe1efb4e"
+      "sha256": "6ab1b683f393c5133e1818ca764e25653f79d1173229c326d4c57b4fe8fdba00"
     },
     {
       "file": "current-feed.png",
       "workspace": "Observability",
-      "sha256": "fc06230c45dc437ddb442644f52ee322538d392ed1a2734660a2781c1ca9e1b2"
+      "sha256": "ce4667d6e35796d6580a85db2f69101eb624875c796fb33c54e2b0d7b4ca43ae"
     },
     {
       "file": "current-administration.png",
       "workspace": "Administration",
-      "sha256": "de5160f4851419e8fccb114d50cf39cc5542e198e32c49d36c821d7e79891eee"
+      "sha256": "893068378f498a9f1fceab0504090e54a68af39fe0318776623fce2c59e229f4"
     },
     {
       "file": "current-users.png",
@@ -142,17 +142,17 @@
     {
       "file": "current-backups.png",
       "workspace": "Administration",
-      "sha256": "f0a0517b579fd44d7f1593eb5c5e8cebe0b94391a3bcfa5f495df8f532419190"
+      "sha256": "9a61afaa1308fd277447b5ca820760f03ba432fbe9b2e03bc8af0a918af92447"
     },
     {
       "file": "current-credentials.png",
       "workspace": "Administration",
-      "sha256": "8c7a41a763ec9b3049583b55aae7a12aabf73207ef583e82d654c5a0e46215fc"
+      "sha256": "dbf6ca5c502583ef82d44826698c3281ac888a5cd6c6ecfc4769d5c856d609a7"
     },
     {
       "file": "current-tenants.png",
       "workspace": "Administration",
-      "sha256": "5a47c234a5c01a5fc6c3eb338030f298f1c470a55e2523ccc2ba961d9fc7e3ae"
+      "sha256": "346b20643e6047a82bad3bd04f7a4a304d7ed7a0774945a6bf0a1187c1ce7962"
     },
     {
       "file": "current-automation.png",
@@ -172,12 +172,12 @@
     {
       "file": "current-replication.png",
       "workspace": "Administration",
-      "sha256": "9f31797dc9be5c612c9e442395f53efced977da57f5b85a841c8921d5594592c"
+      "sha256": "10ad8bb058624401cd7f7fc5ffe06700688ca69a4fc398270d5ab520857de1fa"
     },
     {
       "file": "current-developer.png",
       "workspace": "Developer Console",
-      "sha256": "07f76a393cb7d91647ecde0e74fe921b9f0ea3745eaa748b2dff405402b5b249"
+      "sha256": "ad9f084ff3ad7429acb296bac457b8cc97c042f7e36290f0738dfdcbcf2ffd4c"
     },
     {
       "file": "current-overview-dark.png",
