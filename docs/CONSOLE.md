@@ -55,7 +55,7 @@ Treat tokens as secrets. Keep them out of screenshots and logs.
 
 ## Find your way around
 
-The sidebar groups nine workspaces in 0.7.1 source builds. Tabs inside each
+The sidebar groups nine workspaces in 0.7.1. Tabs inside each
 workspace hold its views:
 
 | Group | Workspace | Inside |

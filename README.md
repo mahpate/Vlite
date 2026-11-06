@@ -40,7 +40,7 @@ service to operate.
   names a collection, graph, job or tenant, and agent-memory resources stay hidden
   from callers without raw access; see the [release notes](docs/RELEASE-0.7.1.md#security).
 - **Dashboard.** Browse, search, write, import, index, monitor and query
-  graphs, with user accounts, roles and tenants. The 0.7.1 source dashboard adds
+  graphs, with user accounts, roles and tenants. The 0.7.1 dashboard adds
   dedicated Key-value and MemoryAI workspaces, interactive graph navigation and
   authorized provider controls and named/sparse vector management; see the [dashboard guide](docs/CONSOLE.md).
 - **Storage options.** Encryption at rest, point-in-time restore, a change
