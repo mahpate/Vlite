@@ -39,6 +39,23 @@ public abstract record Expected
     public sealed record Revision([property: JsonPropertyName("revision")] ulong Value) : Expected;
 }
 
+public sealed record KvKeyRef(string Namespace, string Key);
+public sealed record KvGetManyResult(
+    [property: JsonPropertyName("items")] KvEntry?[] Items,
+    [property: JsonPropertyName("next_index")] int? NextIndex);
+public abstract record KvBatchOperation
+{
+    private KvBatchOperation() { }
+    public sealed record Put(string Namespace, string Key, byte[] Value, Expected? Expected = null) : KvBatchOperation;
+    public sealed record Delete(string Namespace, string Key, Expected? Expected = null) : KvBatchOperation;
+}
+public abstract record KvBatchResult
+{
+    private KvBatchResult() { }
+    public sealed record Put(ulong Version) : KvBatchResult;
+    public sealed record Delete(bool Deleted) : KvBatchResult;
+}
+
 public sealed record KvEntry(
     [property: JsonPropertyName("key")] string Key,
     [property: JsonPropertyName("value")] byte[] Value,
@@ -229,6 +246,86 @@ public sealed class Client : Records, IDisposable
             var next = value.GetProperty("next_after");
             return new KvPage(value.GetProperty("items").EnumerateArray().Select(KvReadEntry).ToArray(),
                 next.ValueKind == JsonValueKind.Null ? null : KvText(next.GetString()!, "next_after", 1024));
+        });
+    }
+    public async Task<KvGetManyResult> KvGetManyAsync(string collection, IReadOnlyList<KvKeyRef> keys,
+        CancellationToken cancellation = default)
+    {
+        ArgumentNullException.ThrowIfNull(keys);
+        if (keys.Count > 1000) throw new ArgumentOutOfRangeException(nameof(keys));
+        var path = KvPath(collection) + "/entries/get";
+        var wireKeys = keys.Select(key =>
+        {
+            ArgumentNullException.ThrowIfNull(key);
+            return new Dictionary<string, object>
+            {
+                ["namespace"] = KvText(key.Namespace, "namespace", 255), ["key"] = KvText(key.Key, "key", 1024)
+            };
+        }).ToArray();
+        return KvDecode(await KvRequestAsync("POST", path, new { keys = wireKeys }, cancellation).ConfigureAwait(false), value =>
+        {
+            var items = value.GetProperty("items").EnumerateArray()
+                .Select(item => item.ValueKind == JsonValueKind.Null ? null : KvReadEntry(item)).ToArray();
+            var next = value.GetProperty("next_index");
+            int? nextIndex = next.ValueKind == JsonValueKind.Null ? null : next.GetInt32();
+            if (items.Length > wireKeys.Length ||
+                (nextIndex is null ? items.Length != wireKeys.Length :
+                    nextIndex < 1 || nextIndex != items.Length || nextIndex >= wireKeys.Length))
+                throw new JsonException("Invalid KV get-many result count or next_index");
+            return new KvGetManyResult(items, nextIndex);
+        });
+    }
+    public async Task<KvBatchResult[]> KvBatchAsync(string collection, IReadOnlyList<KvBatchOperation> operations,
+        CancellationToken cancellation = default)
+    {
+        ArgumentNullException.ThrowIfNull(operations);
+        if (operations.Count > 1000) throw new ArgumentOutOfRangeException(nameof(operations));
+        var path = KvPath(collection) + "/batch";
+        var keys = new HashSet<(string Namespace, string Key)>();
+        var valueBytes = 0;
+        var wireOperations = operations.Select(operation =>
+        {
+            var (ns, key, expected) = operation switch
+            {
+                KvBatchOperation.Put put => (put.Namespace, put.Key, put.Expected),
+                KvBatchOperation.Delete delete => (delete.Namespace, delete.Key, delete.Expected),
+                _ => throw new ArgumentException("Invalid batch operation", nameof(operations))
+            };
+            KvText(ns, "namespace", 255);
+            KvText(key, "key", 1024);
+            if (!keys.Add((ns, key))) throw new ArgumentException("Duplicate batch key", nameof(operations));
+            var body = new Dictionary<string, object>
+            {
+                ["op"] = operation is KvBatchOperation.Put ? "put" : "delete",
+                ["namespace"] = ns, ["key"] = key, ["expected"] = KvExpected(expected)
+            };
+            if (operation is KvBatchOperation.Put putOperation)
+            {
+                ArgumentNullException.ThrowIfNull(putOperation.Value);
+                if (putOperation.Value.Length > 1047290)
+                    throw new ArgumentException("value must be at most 1047290 bytes", nameof(operations));
+                valueBytes += putOperation.Value.Length;
+                if (valueBytes > 4194304)
+                    throw new ArgumentException("batch values must total at most 4194304 bytes", nameof(operations));
+                body["value_base64"] = Convert.ToBase64String(putOperation.Value);
+            }
+            return body;
+        }).ToArray();
+        return KvDecode(await KvRequestAsync("POST", path, new { operations = wireOperations }, cancellation).ConfigureAwait(false), value =>
+        {
+            var results = value.GetProperty("results");
+            if (results.GetArrayLength() != wireOperations.Length)
+                throw new JsonException("Invalid KV batch result count");
+            return results.EnumerateArray().Select((result, index) =>
+            {
+                if ((string)wireOperations[index]["op"] == "put")
+                {
+                    if (result.TryGetProperty("deleted", out _)) throw new JsonException("Expected put result");
+                    return (KvBatchResult)new KvBatchResult.Put(KvReadDecimal(result.GetProperty("version"), true));
+                }
+                if (result.TryGetProperty("version", out _)) throw new JsonException("Expected delete result");
+                return new KvBatchResult.Delete(result.GetProperty("deleted").GetBoolean());
+            }).ToArray();
         });
     }
 

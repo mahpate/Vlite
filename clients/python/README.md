@@ -67,6 +67,57 @@ route (404 `not_found`) raises `UnsupportedError`. No fallback or automatic retr
 occurs. A timeout may hide a committed mutation; re-read before deciding what
 to do. Acknowledgements sync only with server `--durability full`.
 
+`kv_get_many` and `kv_batch` take up to 1,000 keys or operations of one collection
+in a single request. A server without them (it does not advertise
+`features.kv_batch`) answers 404 `not_found`, which raises `UnsupportedError`; the
+client never falls back to single calls and never retries:
+
+```python
+keys = [{"namespace": "app", "key": "a"}, {"namespace": "app", "key": "b"}]
+read = client.kv_get_many(collection="cache", keys=keys)
+print([None if item is None else item["value"] for item in read["items"]], read["next_index"])
+
+done = client.kv_batch(collection="cache", operations=[
+    {"op": "put", "namespace": "app", "key": "a", "value": b"1", "expected": "absent"},
+    {"op": "delete", "namespace": "app", "key": "b", "expected": {"revision": 42}},
+])
+print(done)  # one result per operation, in order: {"version": int} or {"deleted": bool}
+```
+
+`kv_get_many` takes `KvKey` dicts (`{"namespace", "key"}`, a key may repeat) and
+returns a `KvGetManyResult` whose `items` follow the order of `keys`; `None` marks a
+key that is absent or due, which is not an error. A call whose answer would pass the
+server's 16 MiB response cap returns only a prefix of the keys, with `next_index` set
+to the first key not read (`None` when every key was read). The client does not
+continue a partial result for you: loop on `next_index` yourself. Calls share no
+snapshot, so a later call sees the state at its own time:
+
+```python
+pending, entries = keys, []
+while pending:
+    page = client.kv_get_many(collection="cache", keys=pending)
+    entries += page["items"]
+    pending = [] if page["next_index"] is None else pending[page["next_index"]:]
+```
+
+A `kv_batch` operation is a `KvBatchPut` or a `KvBatchDelete`:
+`{"op": "put", "namespace": str, "key": str, "value": bytes, "expected": Expected}`
+or `{"op": "delete", "namespace": str, "key": str, "expected": Expected}`, where
+`expected` is optional and defaults to `"any"`. The batch commits every operation or
+none. The results answer the operations in order: a `KvBatchPutResult`
+(`{"version": int}`) for a put and a `KvBatchDeleteResult` (`{"deleted": bool}`) for a
+delete. All puts of one batch share one version, which is a valid
+`{"revision": ...}` for each of their keys. The first operation that cannot run (a
+failed `expected` is 412 `precondition_failed`, no free slot is 409
+`kv_slots_exhausted`) fails the whole batch, and nothing is written. A batch names
+each `(namespace, key)` at most once, holds at most 1,000 operations and carries at
+most 4,194,304 value bytes in total. The client checks these bounds and rejects any
+unknown field with `ValueError` before it sends anything. A batch put has no
+`expires_at_ms`: like a put without one, it clears the deadline of the entry it
+replaces. After a `TransportError` or a 503 `commit_indeterminate` the batch is applied
+entirely or not at all, but which is unknown: read the keys back with `kv_get_many`
+before deciding anything, and do not retry blindly.
+
 ## Agent memory
 
 The unreleased agent-memory REST surface needs a server with a provisioned memory

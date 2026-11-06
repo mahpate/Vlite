@@ -1047,6 +1047,374 @@ class KvTests(unittest.TestCase):
                 self.client.kv_put(collection="cache", namespace="n", key="k", value=b"")
         self.assertEqual(len(Scripted.log), 1)
 
+    def test_kv_get_many_wire_and_results(self):
+        entry = {"key": "雪 /+?%", "value_base64": "AP8=", "version": MAX_ID, "expires_at_ms": "0", "future": True}
+        found = {"key": "雪 /+?%", "value": b"\x00\xff", "version": 18446744073709551615, "expires_at_ms": 0}
+        keys = [{"namespace": "名 +", "key": "雪 /+?%"}, {"namespace": "n", "key": "missing"},
+                {"namespace": "名 +", "key": "雪 /+?%"}]
+        given = copy.deepcopy(keys)
+        Scripted.respond = lambda *_: (200, {"items": [entry, None, entry], "next_index": None, "future": 1}, {})
+        self.assertEqual(self.client.kv_get_many(collection="cache", keys=keys),
+                         {"items": [found, None, found], "next_index": None})
+        self.assertEqual(Scripted.log, [("POST", "/v1/collections/cache/kv/entries/get", {"keys": [
+            {"namespace": "名 +", "key": "雪 /+?%"}, {"namespace": "n", "key": "missing"},
+            {"namespace": "名 +", "key": "雪 /+?%"}]})])
+        self.assertEqual(keys, given)
+        Scripted.respond = lambda *_: (200, {"items": [], "next_index": None}, {})
+        self.assertEqual(self.client.kv_get_many(collection="cache", keys=()), {"items": [], "next_index": None})
+        self.assertEqual(Scripted.log[-1][2], {"keys": []})
+        Scripted.respond = lambda *_: (200, {"items": [None, None], "next_index": None}, {})
+        self.assertEqual(self.client.kv_get_many(collection="cache", keys=({"namespace": "n", "key": "k"},) * 2),
+                         {"items": [None, None], "next_index": None})
+        longest = {"namespace": "n" * 255, "key": "é" * 512}
+        Scripted.respond = lambda *_: (200, {"items": [None] * 1000, "next_index": None}, {})
+        self.assertEqual(self.client.kv_get_many(collection="cache", keys=[longest] * 1000),
+                         {"items": [None] * 1000, "next_index": None})
+        self.assertEqual(Scripted.log[-1][2], {"keys": [longest] * 1000})
+        for headers in Scripted.headers_seen:
+            self.assertEqual(headers["Authorization"], "Bearer " + TOKEN)
+            self.assertEqual(headers["Accept"], "application/json")
+            self.assertEqual(headers["Content-Type"], "application/json")
+
+    def test_kv_get_many_partial_result_is_returned_as_sent(self):
+        hit = {"key": "a", "value_base64": "AQ==", "version": "7", "expires_at_ms": None}
+        keys = [{"namespace": "n", "key": name} for name in "abcde"]
+        Scripted.respond = lambda *_: (200, {"items": [hit, None], "next_index": 2}, {})
+        self.assertEqual(self.client.kv_get_many(collection="cache", keys=keys), {
+            "items": [{"key": "a", "value": b"\x01", "version": 7, "expires_at_ms": None}, None], "next_index": 2})
+        self.assertEqual(len(Scripted.log), 1)
+        for count in (1, 4):
+            Scripted.respond = lambda *_, count=count: (200, {"items": [hit] * count, "next_index": count}, {})
+            self.assertEqual(self.client.kv_get_many(collection="cache", keys=keys)["next_index"], count)
+        self.assertEqual(len(Scripted.log), 3)
+
+    def test_kv_get_many_caller_continues_on_next_index(self):
+        keys = [{"namespace": "n", "key": name} for name in "abcde"]
+        def answer(_method, _path, body):
+            read = len(body["keys"][:2])
+            return 200, {"items": [None] * read, "next_index": read if len(body["keys"]) > read else None}, {}
+        Scripted.respond = answer
+        pending, items = keys, []
+        while pending:
+            page = self.client.kv_get_many(collection="cache", keys=pending)
+            items += page["items"]
+            pending = [] if page["next_index"] is None else pending[page["next_index"]:]
+        self.assertEqual(items, [None] * 5)
+        self.assertEqual([[key["key"] for key in body["keys"]] for _, _, body in Scripted.log],
+                         [list("abcde"), list("cde"), list("e")])
+
+    def test_kv_batch_wire_and_results(self):
+        operations = [
+            {"op": "put", "namespace": "名 +", "key": "雪 /+?%", "value": b"\x00\xff", "expected": "absent"},
+            {"op": "delete", "namespace": "n", "key": "b", "expected": {"revision": 42}},
+            {"op": "put", "namespace": "n", "key": "c", "value": b"", "expected": {"revision": 18446744073709551615}},
+            {"op": "delete", "namespace": "n", "key": "d"},
+            {"op": "put", "namespace": "m", "key": "c", "value": b"\xfb\xff\xfe"},
+            {"op": "delete", "namespace": "m", "key": "e", "expected": "absent"}]
+        given = copy.deepcopy(operations)
+        Scripted.respond = lambda *_: (200, {"results": [
+            {"version": "43"}, {"deleted": True}, {"version": MAX_ID}, {"deleted": False},
+            {"version": "43", "future": True}, {"deleted": True}], "future": 1}, {})
+        self.assertEqual(self.client.kv_batch(collection="cache", operations=operations),
+                         [{"version": 43}, {"deleted": True}, {"version": 18446744073709551615},
+                          {"deleted": False}, {"version": 43}, {"deleted": True}])
+        self.assertEqual(Scripted.log, [("POST", "/v1/collections/cache/kv/batch", {"operations": [
+            {"op": "put", "namespace": "名 +", "key": "雪 /+?%", "value_base64": "AP8=", "expected": "absent"},
+            {"op": "delete", "namespace": "n", "key": "b", "expected": {"revision": "42"}},
+            {"op": "put", "namespace": "n", "key": "c", "value_base64": "", "expected": {"revision": MAX_ID}},
+            {"op": "delete", "namespace": "n", "key": "d", "expected": "any"},
+            {"op": "put", "namespace": "m", "key": "c", "value_base64": "+//+", "expected": "any"},
+            {"op": "delete", "namespace": "m", "key": "e", "expected": "absent"}]})])
+        self.assertEqual(operations, given)
+        for expected, wire in [("any", "any"), ("absent", "absent"), ({"revision": 0}, {"revision": "0"}),
+                               ({"revision": 18446744073709551615}, {"revision": MAX_ID})]:
+            Scripted.respond = lambda *_: (200, {"results": [{"version": "1"}, {"deleted": False}]}, {})
+            self.client.kv_batch(collection="cache", operations=(
+                {"op": "put", "namespace": "n", "key": "a", "value": b"\xff", "expected": expected},
+                {"op": "delete", "namespace": "n", "key": "b", "expected": expected}))
+            self.assertEqual(Scripted.log[-1][2], {"operations": [
+                {"op": "put", "namespace": "n", "key": "a", "value_base64": "/w==", "expected": wire},
+                {"op": "delete", "namespace": "n", "key": "b", "expected": wire}]})
+        Scripted.respond = lambda *_: (200, {"results": []}, {})
+        self.assertEqual(self.client.kv_batch(collection="cache", operations=[]), [])
+        self.assertEqual(Scripted.log[-1][2], {"operations": []})
+        Scripted.respond = lambda *_: (200, {"results": [{"deleted": False}] * 1000}, {})
+        longest = tuple({"op": "delete", "namespace": "n" * 255, "key": f"{index:04}" + "é" * 510}
+                        for index in range(1000))
+        self.assertEqual(self.client.kv_batch(collection="cache", operations=longest), [{"deleted": False}] * 1000)
+        self.assertEqual(len(Scripted.log[-1][2]["operations"]), 1000)
+        for headers in Scripted.headers_seen:
+            self.assertEqual(headers["Authorization"], "Bearer " + TOKEN)
+            self.assertEqual(headers["Accept"], "application/json")
+            self.assertEqual(headers["Content-Type"], "application/json")
+
+    def test_kv_batch_value_bounds(self):
+        sizes = [1047290] * 4 + [5144]
+        operations = [{"op": "put", "namespace": "n", "key": f"k{index}", "value": b"\x01" * size}
+                      for index, size in enumerate(sizes)]
+        Scripted.respond = lambda *_: (200, {"results": [{"version": "9"}] * 5}, {})
+        self.assertEqual(self.client.kv_batch(collection="cache", operations=operations), [{"version": 9}] * 5)
+        sent = Scripted.log[-1][2]["operations"]
+        self.assertEqual([len(operation["value_base64"]) for operation in sent],
+                         [4 * ((size + 2) // 3) for size in sizes])
+        self.assertEqual(sum(sizes), 4194304)
+        self.assertEqual(len(Scripted.log), 1)
+
+    def test_kv_get_many_and_batch_errors_and_unsupported_are_not_retried(self):
+        calls = [lambda: self.client.kv_get_many(collection="cache", keys=[{"namespace": "n", "key": "k"}]),
+                 lambda: self.client.kv_batch(collection="cache", operations=[
+                     {"op": "put", "namespace": "n", "key": "k", "value": b""}])]
+        for status, code in [(404, "not_found"), (404, "collection_not_found"), (404, "kv_not_found"),
+                             (409, "not_found"), (412, "precondition_failed"), (409, "kv_slots_exhausted"),
+                             (409, "not_kv_collection"), (409, "upgrade_required"), (409, "graph_attached_record"),
+                             (422, "invalid_input"), (422, "invalid_json"), (403, "read_only"),
+                             (403, "forbidden_scope"), (429, "rate_limited"), (429, "quota_exceeded"),
+                             (503, "commit_indeterminate")]:
+            Scripted.respond = lambda *_, status=status, code=code: error(status, code)
+            for call in calls:
+                before = len(Scripted.log)
+                unsupported = (status, code) == (404, "not_found")
+                with self.assertRaises(UnsupportedError if unsupported else VLiteError) as raised:
+                    call()
+                if unsupported:
+                    self.assertNotIsInstance(raised.exception, VLiteError)
+                    self.assertEqual((raised.exception.__cause__.status, raised.exception.__cause__.code),
+                                     (404, "not_found"))
+                else:
+                    self.assertEqual((raised.exception.status, raised.exception.code, raised.exception.request_id),
+                                     (status, code, f"rid-{status}"))
+                self.assertEqual(len(Scripted.log), before + 1)
+
+    def test_kv_get_many_invalid_inputs_never_send(self):
+        key = {"namespace": "n", "key": "k"}
+        cases = [None, "k", b"k", key, {"keys": [key]}, iter([key]), (item for item in [key]),
+                 [None], ["k"], [("n", "k")], [[]], [{}], [{"namespace": "n"}], [{"key": "k"}],
+                 [{"namespace": "n", "key": "k", "extra": 1}], [{"namespace": "n", "key": "k", "expected": "any"}],
+                 [{"namespace": "", "key": "k"}], [{"namespace": "é" * 128, "key": "k"}],
+                 [{"namespace": "n" * 256, "key": "k"}], [{"namespace": "\ud800", "key": "k"}],
+                 [{"namespace": 1, "key": "k"}], [{"namespace": None, "key": "k"}], [{"namespace": b"n", "key": "k"}],
+                 [{"namespace": "n", "key": ""}], [{"namespace": "n", "key": "é" * 513}],
+                 [{"namespace": "n", "key": "k" * 1025}], [{"namespace": "n", "key": "\udfff"}],
+                 [{"namespace": "n", "key": 1}], [{"namespace": "n", "key": None}], [{"namespace": "n", "key": b"k"}],
+                 [key, key, {"namespace": "n", "key": ""}], [key] * 1001, tuple([key] * 1001)]
+        for index, keys in enumerate(cases):
+            with self.subTest(index=index), self.assertRaises(ValueError):
+                self.client.kv_get_many(collection="cache", keys=keys)
+        for collection in ["", "Cache", "a" * 64, "1a", "a b", None, 1, b"cache"]:
+            with self.subTest(collection=collection), self.assertRaises(ValueError):
+                self.client.kv_get_many(collection=collection, keys=[key])
+        with self.assertRaises(TypeError):
+            self.client.kv_get_many("cache", [key])
+        self.assertEqual(Scripted.log, [])
+        for keys, message in [([key, {"namespace": "", "key": "k"}], r"keys\[1\]\.namespace must be 1\.\.255 UTF-8 bytes"),
+                              ([key, {"namespace": "n", "key": "é" * 513}], r"keys\[1\]\.key must be 1\.\.1024 UTF-8 bytes"),
+                              ([key, {"namespace": "n"}], r"keys\[1\] must be an object with exactly namespace and key"),
+                              ([key] * 1001, r"keys must be a list or tuple of at most 1000 items")]:
+            with self.assertRaisesRegex(ValueError, message):
+                self.client.kv_get_many(collection="cache", keys=keys)
+        self.assertEqual(Scripted.log, [])
+
+    def test_kv_batch_invalid_inputs_never_send(self):
+        put = {"op": "put", "namespace": "n", "key": "k", "value": b""}
+        delete = {"op": "delete", "namespace": "n", "key": "k"}
+        cap = 1047290
+
+        def without(operation, name):
+            return {field: item for field, item in operation.items() if field != name}
+
+        def sized(*sizes):
+            return [put | {"key": f"k{index}", "value": b"\0" * size} for index, size in enumerate(sizes)]
+
+        cases = [None, "put", b"", put, {"operations": [put]}, iter([put]), (item for item in [put]),
+                 [None], ["put"], [[]], [()], [{}],
+                 [put | {"op": "upsert"}], [put | {"op": "PUT"}], [put | {"op": None}], [put | {"op": ["put"]}],
+                 [put | {"op": 1}], [without(put, "op")], [delete | {"op": "remove"}],
+                 [put | {"expires_at_ms": 1}], [put | {"expires_at_ms": None}], [put | {"expires_at_ms": "1"}],
+                 [delete | {"expires_at_ms": 1}], [delete | {"expires_at_ms": None}],
+                 [put | {"ttl_ms": 1}], [put | {"value_base64": "AA=="}], [put | {"extra": 1}],
+                 [delete | {"value": b""}], [delete | {"value_base64": ""}], [delete | {"extra": 1}],
+                 [without(put, "namespace")], [without(put, "key")], [without(put, "value")],
+                 [without(delete, "namespace")], [without(delete, "key")],
+                 [put | {"namespace": ""}], [put | {"namespace": "é" * 128}], [put | {"namespace": "n" * 256}],
+                 [put | {"namespace": "\ud800"}], [put | {"namespace": 1}], [put | {"namespace": None}],
+                 [put | {"namespace": b"n"}], [delete | {"namespace": ""}], [delete | {"namespace": "é" * 128}],
+                 [put | {"key": ""}], [put | {"key": "é" * 513}], [put | {"key": "k" * 1025}],
+                 [put | {"key": "\udfff"}], [put | {"key": 1}], [put | {"key": None}], [put | {"key": b"k"}],
+                 [delete | {"key": ""}], [delete | {"key": "é" * 513}],
+                 [put | {"value": "text"}], [put | {"value": bytearray(b"x")}], [put | {"value": memoryview(b"x")}],
+                 [put | {"value": None}], [put | {"value": [1]}], [put | {"value": b"\0" * (cap + 1)}],
+                 [put | {"key": "a"}, put | {"key": "b", "expires_at_ms": 1}],
+                 [put, put], [put, delete], [delete, put], [delete, delete],
+                 [put, put | {"value": b"x", "expected": "absent"}],
+                 [put | {"key": "a"}, put | {"key": "b"}, delete | {"key": "a"}],
+                 [delete | {"key": f"k{index}"} for index in range(1001)],
+                 tuple(put | {"key": f"k{index}"} for index in range(1001)),
+                 sized(cap, cap, cap, cap, 5145), sized(cap, cap, cap, cap, cap), sized(cap, cap, cap, cap, 5144, 1)]
+        for expected in [None, "wrong", "Any", ["any"], {"revision": True}, {"revision": -1}, {"revision": 2**64},
+                         {"revision": "1"}, {"revision": 1.0}, {"revision": 1, "extra": 0}, {}, {"absent": True}]:
+            cases += [[put | {"expected": expected}], [delete | {"expected": expected}]]
+        for index, operations in enumerate(cases):
+            with self.subTest(index=index), self.assertRaises(ValueError):
+                self.client.kv_batch(collection="cache", operations=operations)
+        for collection in ["", "Cache", "a" * 64, "1a", "a b", None, 1, b"cache"]:
+            with self.subTest(collection=collection), self.assertRaises(ValueError):
+                self.client.kv_batch(collection=collection, operations=[put])
+        with self.assertRaises(TypeError):
+            self.client.kv_batch("cache", [put])
+        self.assertEqual(Scripted.log, [])
+
+    def test_kv_batch_local_errors_name_the_offending_operation(self):
+        put = {"op": "put", "namespace": "n", "key": "a", "value": b""}
+        for operations, message in [
+                ([put, put | {"key": "b"}, put], r"operations\[2\] names the same namespace and key as operations\[0\]"),
+                ([put, put | {"key": "b", "expires_at_ms": 1}], r"operations\[1\]: a batch has no expires_at_ms"),
+                ([put, put | {"key": "b", "ttl": 1}], r"operations\[1\]: unknown field 'ttl' is never sent"),
+                ([put, {"op": "put", "namespace": "n", "key": "b"}],
+                 r"operations\[1\]: missing required field 'value'"),
+                ([put, {"op": "upsert"}], r"operations\[1\]\.op must be put or delete"),
+                ([put, put | {"key": ""}], r"operations\[1\]\.key must be 1\.\.1024 UTF-8 bytes"),
+                ([put, put | {"key": "b", "value": "text"}],
+                 r"operations\[1\]\.value must be bytes of length at most 1047290"),
+                ([put | {"key": f"k{index}", "value": b"\0" * 1047290} for index in range(4)]
+                 + [put | {"key": "z", "value": b"\0" * 5145}],
+                 r"operations must carry at most 4194304 value bytes in total"),
+                ([put] * 1001, r"operations must be a list or tuple of at most 1000 items")]:
+            with self.assertRaisesRegex(ValueError, message):
+                self.client.kv_batch(collection="cache", operations=operations)
+        self.assertEqual(Scripted.log, [])
+
+    def test_kv_get_many_malformed_responses_are_transport_errors(self):
+        entry = {"key": "k", "value_base64": "", "version": "1", "expires_at_ms": None}
+        keys = [{"namespace": "n", "key": "k"}] * 2
+        malformed = [None, [], '"items"', 7, {}, {"items": []}, {"next_index": None},
+                     {"items": {}, "next_index": None}, {"items": None, "next_index": None},
+                     {"items": "ab", "next_index": None},
+                     {"items": [entry] * 3, "next_index": None}, {"items": [entry] * 3, "next_index": 3},
+                     {"items": [entry], "next_index": None}, {"items": [], "next_index": None},
+                     {"items": [entry] * 2, "next_index": 2},
+                     {"items": [entry], "next_index": 0}, {"items": [], "next_index": 0},
+                     {"items": [], "next_index": 1}, {"items": [entry], "next_index": 2},
+                     {"items": [entry] * 2, "next_index": 1}, {"items": [entry], "next_index": -1},
+                     {"items": [entry], "next_index": "1"}, {"items": [entry], "next_index": True},
+                     {"items": [entry], "next_index": 1.0}, {"items": [entry], "next_index": [1]},
+                     {"items": [entry, 5], "next_index": None}, {"items": [entry, "k"], "next_index": None},
+                     {"items": [entry, []], "next_index": None}, {"items": [entry, {}], "next_index": None},
+                     {"items": [entry, False], "next_index": None}]
+        for patch in [{"version": "0"}, {"version": 1}, {"version": "01"}, {"version": str(2**64)},
+                      {"expires_at_ms": 0}, {"expires_at_ms": "01"}, {"value_base64": "/x=="},
+                      {"value_base64": "/w"}, {"value_base64": "_w=="}, {"value_base64": " /w=="},
+                      {"value_base64": None}, {"value_base64": 5}, {"key": ""}, {"key": 5}]:
+            malformed += [{"items": [entry | patch, None], "next_index": None},
+                          {"items": [None, entry | patch], "next_index": None},
+                          {"items": [entry | patch], "next_index": 1}]
+        for index, response in enumerate(malformed):
+            Scripted.respond = lambda *_, response=response: (200, response, {})
+            with self.subTest(index=index), self.assertRaisesRegex(
+                    TransportError, "^Invalid KV response; no retry performed$"):
+                self.client.kv_get_many(collection="cache", keys=keys)
+        for response in [{"items": {}, "next_index": None}, {"items": "", "next_index": None}]:
+            Scripted.respond = lambda *_, response=response: (200, response, {})
+            with self.subTest(response=response), self.assertRaises(TransportError):
+                self.client.kv_get_many(collection="cache", keys=[])
+        self.assertEqual(len(Scripted.log), len(malformed) + 2)
+
+    def test_kv_batch_malformed_responses_are_transport_errors(self):
+        operations = [{"op": "put", "namespace": "n", "key": "a", "value": b""},
+                      {"op": "delete", "namespace": "n", "key": "b"}]
+        put, deleted = {"version": "5"}, {"deleted": True}
+        malformed = [None, [], '"results"', 7, {}, {"results": None}, {"results": {}}, {"results": "ab"},
+                     {"results": 2}, {"results": []}, {"results": [put]}, {"results": [put, deleted, deleted]},
+                     {"results": [put, deleted, put]}, {"results": [deleted, deleted]}, {"results": [put, put]},
+                     {"results": [deleted, put]}, {"results": [put | deleted, deleted]},
+                     {"results": [put, put | deleted]}, {"results": [{}, deleted]}, {"results": [put, {}]},
+                     {"results": [None, deleted]}, {"results": [put, None]}, {"results": [5, deleted]},
+                     {"results": ["version", deleted]}, {"results": [[put], deleted]}, {"results": [put, [deleted]]}]
+        malformed += [{"results": [{"version": version}, deleted]}
+                      for version in ["0", 5, "05", "-1", str(2**64), "", None, " 5", 5.0, True, []]]
+        malformed += [{"results": [put, {"deleted": flag}]} for flag in [1, 0, "true", "false", None, [], {}]]
+        for index, response in enumerate(malformed):
+            Scripted.respond = lambda *_, response=response: (200, response, {})
+            with self.subTest(index=index), self.assertRaisesRegex(
+                    TransportError, "^Invalid KV response; no retry performed$"):
+                self.client.kv_batch(collection="cache", operations=operations)
+        for response in [{"results": {}}, {"results": ""}]:
+            Scripted.respond = lambda *_, response=response: (200, response, {})
+            with self.subTest(response=response), self.assertRaises(TransportError):
+                self.client.kv_batch(collection="cache", operations=[])
+        self.assertEqual(len(Scripted.log), len(malformed) + 2)
+
+    def test_kv_get_many_and_batch_timeouts_do_not_retry(self):
+        calls = {"kv_get_many": lambda client: client.kv_get_many(
+                     collection="cache", keys=[{"namespace": "n", "key": "k"}]),
+                 "kv_batch": lambda client: client.kv_batch(
+                     collection="cache", operations=[{"op": "delete", "namespace": "n", "key": "k"}])}
+        for name, call in calls.items():
+            admitted, release = Event(), Event()
+            def respond(*_, admitted=admitted, release=release):
+                admitted.set()
+                release.wait(5)
+                return 200, None, {}
+            Scripted.respond = respond
+            before = len(Scripted.log)
+            try:
+                with self.subTest(call=name), self.assertRaises(TransportError):
+                    call(Client(f"http://127.0.0.1:{self.server.server_port}", TOKEN, timeout=0.1))
+                self.assertTrue(admitted.is_set())
+                self.assertEqual(len(Scripted.log), before + 1)
+            finally:
+                release.set()
+
+    def test_kv_get_many_and_batch_caller_interruption_does_not_retry(self):
+        from unittest.mock import patch
+        calls = {"kv_get_many": lambda: self.client.kv_get_many(
+                     collection="cache", keys=[{"namespace": "n", "key": "k"}]),
+                 "kv_batch": lambda: self.client.kv_batch(
+                     collection="cache", operations=[{"op": "delete", "namespace": "n", "key": "k"}])}
+        original_open = self.client._opener.open
+        def interrupted(*args, **kwargs):
+            with original_open(*args, **kwargs):
+                raise KeyboardInterrupt("caller cancelled")
+        for name, call in calls.items():
+            Scripted.respond = lambda *_: (200, {"items": [None], "next_index": None, "results": [{"deleted": False}]}, {})
+            before = len(Scripted.log)
+            with patch.object(self.client._opener, "open", side_effect=interrupted):
+                with self.subTest(call=name), self.assertRaises(KeyboardInterrupt):
+                    call()
+            self.assertEqual(len(Scripted.log), before + 1)
+
+    def test_kv_batch_types_are_exported_with_their_wire_shapes(self):
+        import inspect
+        for name, required, optional in [("KvKey", {"namespace", "key"}, set()),
+                                         ("KvGetManyResult", {"items", "next_index"}, set()),
+                                         ("KvBatchPut", {"op", "namespace", "key", "value"}, {"expected"}),
+                                         ("KvBatchDelete", {"op", "namespace", "key"}, {"expected"}),
+                                         ("KvBatchPutResult", {"version"}, set()),
+                                         ("KvBatchDeleteResult", {"deleted"}, set())]:
+            cls = getattr(vlite_client, name)
+            self.assertEqual((set(cls.__required_keys__), set(cls.__optional_keys__)), (required, optional), name)
+        self.assertEqual(get_args(vlite_client.KvBatchOperation), (vlite_client.KvBatchPut, vlite_client.KvBatchDelete))
+        self.assertEqual(get_args(vlite_client.KvBatchResult),
+                         (vlite_client.KvBatchPutResult, vlite_client.KvBatchDeleteResult))
+        many = get_type_hints(vlite_client.KvGetManyResult)
+        self.assertEqual(get_args(many["items"]), (vlite_client.KvEntry | None,))
+        self.assertEqual(many["next_index"], int | None)
+        put, delete = get_type_hints(vlite_client.KvBatchPut), get_type_hints(vlite_client.KvBatchDelete)
+        self.assertEqual((get_args(put["op"]), get_args(delete["op"])), (("put",), ("delete",)))
+        self.assertIs(put["value"], bytes)
+        self.assertEqual((put["expected"], delete["expected"]), (vlite_client.Expected, vlite_client.Expected))
+        self.assertIs(get_type_hints(vlite_client.KvBatchPutResult)["version"], int)
+        self.assertIs(get_type_hints(vlite_client.KvBatchDeleteResult)["deleted"], bool)
+        for method, argument, element, result in [
+                ("kv_get_many", "keys", vlite_client.KvKey, vlite_client.KvGetManyResult),
+                ("kv_batch", "operations", vlite_client.KvBatchOperation, list[vlite_client.KvBatchResult])]:
+            function = getattr(Client, method)
+            self.assertEqual([(name, parameter.kind) for name, parameter in inspect.signature(function).parameters.items()],
+                             [("self", inspect.Parameter.POSITIONAL_OR_KEYWORD),
+                              ("collection", inspect.Parameter.KEYWORD_ONLY), (argument, inspect.Parameter.KEYWORD_ONLY)])
+            hints = get_type_hints(function)
+            self.assertEqual(get_args(hints[argument]), (element,))
+            self.assertEqual(hints["return"], result)
+
 
 # --- Agent memory (Gap 1) -------------------------------------------------------
 # Expected values come from the serving memory contract (sections 3, 4 and 8) and
