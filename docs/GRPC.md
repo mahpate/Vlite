@@ -50,8 +50,11 @@ A program that builds the routers itself must build every REST router first
 (`configured_admin_router`, then `grpc_router`) over one `Service`. The listener
 adopts, once, when it is built, the tokens, credential store and reservations
 that the REST routers had published: normally those of the last one. A router
-that protects less (no admin token, or reservations that do not cover the ones
-already published) does not replace them. Token files are reloaded in place
+that protects less (no admin token where the published one has one, or
+reservations that do not cover the ones already published) does not replace
+them. Only those two things are compared: the token values, the credential
+store and the raw-access grants of the bindings are those of the router that
+last replaced the publication. Token files are reloaded in place
 (`POST /v1/admin/tokens/reload`) and the listener follows; any other change of
 tokens or reservations needs a new `Service` and new routers, because a router
 built after the listener changes what REST applies and not what the listener
@@ -62,13 +65,17 @@ applies. `configured_admin_router` returns an error when
   administrator;
 - the router reserves memory resources (a bindings file, or records that remain
   in the database) and a `grpc_router` has been built from the service;
-- the router protects less than the published ones in one respect and more in
-  the other (it has no admin token but reserves something they do not, or it has
-  a token but its reservations do not cover theirs), because a listener could
-  adopt only one of them.
+- in a build with the `grpc` feature, the published tokens and reservations and
+  the router's own cannot be ordered: each protects something the other does
+  not (the router has no admin token where they have one but reserves a
+  resource they do not; it has a token where they have none but leaves one of
+  their resources unreserved; or each reserves a resource the other does not),
+  because a listener could adopt only one of them.
 
-After any error the program discards the service: a router refused after it set
-the engine up may already have written records or created the admin directory.
+After any error the program discards the service and every router built from
+it: a router refused after it set the engine up may already have written
+records, created the admin directory, or configured the log buffer, the
+schedules and the webhooks that every router of the service shares.
 `router` and `authenticated_router` cannot refuse: they log a warning for the
 first order, and keep the published tokens and reservations, with a warning, for
 the last. These are the rules of the library routers in this release and may

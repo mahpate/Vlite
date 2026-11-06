@@ -36,7 +36,8 @@ byte values under namespaced text keys in a collection that already exists and h
 object that only resembles one is refused with `invalid_request`, never copied; a `Buffer` or a subclass is a `Uint8Array`, and
 what is stored is what the array holds whatever `length`, `slice` or species it claims or defines: the binding reads it through
 the intrinsics of `%TypedArray%.prototype`, so no code of the value's own runs, whether the array is from this realm or
-another; code on the page that replaces those built-ins runs as the caller and is outside what the binding guards);
+another; code on the page that replaces a built-in the binding uses runs as the caller and is outside what the binding
+guards (it can make the instance unusable));
 collections, namespaces, keys, prefixes and `after` are well-formed strings (an argument of the wrong type throws an `Error`
 whose `code` is `invalid_request`, where the Node and Python wrappers throw `TypeError` or `ValueError` first, and one with an
 unpaired surrogate is `invalid_input`, as in the other bindings). `limit` is a `number` that is a safe integer, never a coerced

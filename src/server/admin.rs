@@ -236,12 +236,14 @@ impl ServerOptions {
 }
 
 /// A configured REST router publishes its tokens and its memory reservations
-/// (`Service::publish_reserving`) for the gRPC router that is built after it to
-/// adopt (`Service::adopt_published`), so every REST router is built first and
-/// the gRPC router last; `docs/GRPC.md` lists what is refused. A refusal before
-/// startup writes anything changes nothing. A refusal at publication may come
-/// after the engine was set up (records written, the admin directory created),
-/// so the caller discards the service after any `Err`.
+/// for the gRPC router that is built after it to adopt, so every REST router is
+/// built first and the gRPC router last; `docs/GRPC.md` lists the build orders
+/// it refuses. A refusal before startup writes anything changes nothing. A
+/// refusal at publication may come after the engine was set up (records
+/// written, the admin directory created, the log buffer, the schedules and the
+/// webhooks configured, all of them shared by every router of the service), so
+/// the caller discards the service and every router built from it after any
+/// `Err`.
 pub fn configured_admin_router(
     mut service: Service,
     options: ServerOptions,

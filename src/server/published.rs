@@ -6,7 +6,8 @@
 //! panic poisoned, and the order of the routers: a configured router is
 //! refused after a listener that runs without tokens (it adopted nothing, or
 //! an open router), a router that reserves is refused after any listener, and
-//! a router that protects less in one respect and more in the other is refused.
+//! a router that protects less in some respect and more in another (the token,
+//! each reserved resource) is refused.
 
 use super::*;
 use crate::{CollectionSpec, CreateOptions, FormatVersion};
@@ -49,14 +50,23 @@ fn bindings_file(directory: &Path) -> PathBuf {
     path
 }
 
+/// The text of `BINDINGS` with `OTHER_BINDING` added.
+fn both_text() -> String {
+    format!(
+        "{},{OTHER_BINDING}]}}",
+        BINDINGS.strip_suffix("]}").unwrap()
+    )
+}
+
+/// `OTHER_BINDING` alone.
+fn other_text() -> String {
+    format!(r#"{{"version":"memory-bindings-v1","bindings":[{OTHER_BINDING}]}}"#)
+}
+
 /// The file of `bindings_file` with `OTHER_BINDING` added.
 fn both_bindings_file(directory: &Path) -> PathBuf {
     let path = directory.join("both.json");
-    let text = format!(
-        "{},{OTHER_BINDING}]}}",
-        BINDINGS.strip_suffix("]}").unwrap()
-    );
-    std::fs::write(&path, text).unwrap();
+    std::fs::write(&path, both_text()).unwrap();
     path
 }
 
@@ -83,10 +93,15 @@ fn with_token(mut service: Service, token: &str) -> Service {
     service
 }
 
-fn with_notes(service: Service) -> Service {
+fn with_bindings_text(service: Service, text: &str) -> Service {
     service.with_bindings(reserved::Bindings::new(
-        crate::memory::binding::parse(BINDINGS.as_bytes()).unwrap(),
+        crate::memory::binding::parse(text.as_bytes()).unwrap(),
     ))
+}
+
+/// A service that reserves what `BINDINGS` names.
+fn with_notes(service: Service) -> Service {
+    with_bindings_text(service, BINDINGS)
 }
 
 fn has_token(service: &Service, token: &str) -> bool {
@@ -393,8 +408,9 @@ fn a_listener_that_adopted_a_router_with_a_token_is_not_open() {
     assert!(has_token(&listener, FIRST));
     assert!(!listener.grpc_runs_unconfigured());
     // A router with another token is accepted, and the listener that exists
-    // keeps the tokens it adopted: the tokens of a listener change by a new
-    // service with new routers, not by another router.
+    // keeps the tokens it adopted (token files reloaded in place are followed,
+    // another token is not): the tokens of a listener change by a new service
+    // with new routers, not by another router.
     let _again = configured_admin_router(service.clone(), options(SECOND, None)).unwrap();
     assert!(has_token(&listener, FIRST) && !has_token(&listener, SECOND));
     let mut later = service.clone();
@@ -472,6 +488,49 @@ fn a_router_with_a_token_that_reserves_less_is_refused_over_an_open_one_that_res
     assert!(listener.adopt_published());
     assert!(!has_token(&listener, SECOND), "the held state is untouched");
     assert!(!listener.memory_bindings.is_empty());
+}
+
+#[test]
+fn a_router_that_reserves_part_of_what_the_held_one_does_is_kept_out_not_refused() {
+    let service = service();
+    // Both have a token. The second reserves `notes` and not `other`: following
+    // it would leave a listener that serves `other` raw while the first router
+    // hides it, and refusing it would lose nothing, because the held
+    // publication protects more in every respect.
+    with_bindings_text(with_token(service.clone(), FIRST), &both_text()).publish();
+    with_notes(with_token(service.clone(), SECOND))
+        .publish_reserving()
+        .expect("a router that protects less in every respect is kept out");
+
+    let mut listener = service.clone();
+    assert!(listener.adopt_published());
+    assert!(has_token(&listener, FIRST) && !has_token(&listener, SECOND));
+    let reserved = listener.memory_bindings.reserved();
+    assert!(reserved.is_reserved(reserved::Resource::Graph, "notes_graph"));
+    assert!(
+        reserved.is_reserved(reserved::Resource::Graph, "other_graph"),
+        "the held reservations stay"
+    );
+}
+
+#[test]
+fn two_routers_that_each_reserve_what_the_other_does_not_are_refused() {
+    let service = service();
+    with_notes(with_token(service.clone(), FIRST)).publish();
+    let error = with_bindings_text(with_token(service.clone(), SECOND), &other_text())
+        .publish_reserving()
+        .expect_err("neither reserves everything the other does");
+    assert!(error.to_string().contains(INCOMPARABLE), "{error}");
+
+    let mut listener = service.clone();
+    assert!(listener.adopt_published());
+    assert!(has_token(&listener, FIRST) && !has_token(&listener, SECOND));
+    let reserved = listener.memory_bindings.reserved();
+    assert!(reserved.is_reserved(reserved::Resource::Graph, "notes_graph"));
+    assert!(
+        !reserved.is_reserved(reserved::Resource::Graph, "other_graph"),
+        "the held reservations are untouched"
+    );
 }
 
 #[test]

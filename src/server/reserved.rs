@@ -150,7 +150,8 @@ impl Reserved {
     }
 
     /// Whether every resource that `other` reserves is reserved here too,
-    /// whoever owns it: what the other registry hides, this one hides as well.
+    /// whoever owns it. Which credentials hold raw access to a resource is not
+    /// compared.
     pub(super) fn covers(&self, other: &Self) -> bool {
         other
             .owners
@@ -213,7 +214,8 @@ impl Bindings {
         &self.reserved
     }
 
-    /// Whether everything `other` reserves is reserved here too.
+    /// Whether everything `other` reserves is reserved here too; owners and
+    /// raw-access grants are not compared (`Reserved::covers`).
     pub(super) fn covers(&self, other: &Self) -> bool {
         self.reserved.covers(&other.reserved)
     }

@@ -87,11 +87,11 @@ impl GrpcHealth {
 /// that the REST routers published, and adopts them once, when it is built. A
 /// REST router built after it changes what REST applies and not what the
 /// listener applies, and `configured_admin_router` refuses the orders that
-/// would leave the listener without a token or a reservation that a router
-/// applies (`docs/GRPC.md` lists them). Without a configured REST router the
-/// listener uses the service's own state, which, like `router`, has no admin
-/// token and no reservations (local development only), and
-/// `configured_admin_router` then refuses to configure that service.
+/// would leave the listener open where a router has an admin token, or without
+/// a reservation that a router applies (`docs/GRPC.md` lists them). Without a
+/// configured REST router the listener uses the service's own state, which,
+/// like `router`, has no admin token and no reservations (local development
+/// only), and `configured_admin_router` then refuses to configure that service.
 pub async fn grpc_router(mut service: Service) -> GrpcServer {
     service.adopt_published();
     let (reporter, health_service) = tonic_health::server::health_reporter();

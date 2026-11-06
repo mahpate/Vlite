@@ -216,6 +216,22 @@
     "cmd": "cargo test --locked --offline --features grpc --lib server::reserved"
   },
   {
+    "id": "f3-s1/P28",
+    "desc": "a router counts as reserving less only when it reserves nothing where the held one reserves something, so a router that reserves part of what the held one does is seen as protecting as much",
+    "file": "src/server.rs",
+    "old": ".is_some_and(|held| !self.memory_bindings.covers(held));",
+    "new": ".is_some_and(|held| self.memory_bindings.is_empty() && !held.is_empty());",
+    "cmd": "cargo test --locked --offline --features grpc --lib server::published"
+  },
+  {
+    "id": "f3-s1/P29",
+    "desc": "two routers that each reserve something the other does not are refused only when one of them also lacks a token the other has",
+    "file": "src/server.rs",
+    "old": "&& (reserves_more || protects_more)",
+    "new": "&& (protects_more || (reserves_more && protects_less))",
+    "cmd": "cargo test --locked --offline --features grpc --lib server::published"
+  },
+  {
     "id": "f3-s1/G1",
     "desc": "the WatchChanges continuation no longer drops feed entries of reserved resources",
     "file": "src/server/grpc.rs",

@@ -542,8 +542,9 @@ thread_local! {
 /// detached or out-of-bounds array is refused, and nothing larger than a value
 /// may be is allocated. The intrinsics come from the page's realm: code that
 /// replaces a built-in runs as the caller and is outside this guard, and the
-/// allocation of the copy and `copy_to` are not `catch`, so such code can trap
-/// while the database is borrowed.
+/// allocation of the copy and `copy_to` are not `catch`, so an exception that
+/// such code throws passes through the wasm frame and leaves the database
+/// borrowed: every later call then fails.
 fn value_of(value: &JsValue) -> Result<Vec<u8>, JsValue> {
     let malformed = || reject("invalid_request", "value must be a Uint8Array");
     INTRINSICS.with(|intrinsics| {
