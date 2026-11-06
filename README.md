@@ -39,6 +39,7 @@ service to operate.
 - **Security.** One request guard covers every REST, gRPC and webhook path that
   names a collection, graph, job or tenant, and agent-memory resources stay hidden
   from callers without raw access; see the [release notes](docs/RELEASE-0.7.1.md#security).
+  A gRPC adapter built with the library now honors the same reservations ([fix](docs/RELEASE-0.7.2.md#fixed)).
 - **Dashboard.** Browse, search, write, import, index, monitor and query
   graphs, with user accounts, roles and tenants. The dashboard has Key-value and MemoryAI
   workspaces, interactive 2D and 3D graphs, provider controls and named and sparse
