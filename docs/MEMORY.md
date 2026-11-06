@@ -120,7 +120,7 @@ An item has these fields:
 | `observed_at_ms` | Required. When it was observed, in Unix milliseconds, as an integer or a decimal string. A time later than the server's clock is refused with 422, so a client whose clock runs ahead needs a margin. |
 | `source` | Required: `source_id` and `source_kind`, and optionally `uri` and `transformation_id`, each 1 to 256 bytes. |
 | `importance` | Optional, 0 to 1 (default 0.5). |
-| `expires_at_ms` | Optional absolute expiry of the memory, in Unix milliseconds. |
+| `expires_at_ms` | Optional absolute expiry of the memory, in Unix milliseconds. Expiry is a logical deletion and does not delete the memory's evidence record (see [Forget](#forget)). |
 | `provenance` | Optional list of up to 64 sources (default: just `source`). |
 | `references` | Optional `{id, revision}` entries that name other items of the same request, with revision `0`. They become the links that recall follows from an entity seed. At most `max_references` (1 to 256, default 64). |
 | `merge`, `expected` | `"merge": "merge_provenance"` with `"expected": {"revision": N}` adds a source to an existing memory (see below). |
@@ -256,6 +256,7 @@ Forget deletes memories by ID. It is a logical deletion: the memory and its cont
 - `target.ids` lists 1 to 4,096 memories, each with its current revision (1 or more). A stale revision answers 412 and a missing memory 404; nothing is deleted unless every target matches.
 - The answer lists a `deleted` outcome per memory, `"state": "logical"` and an `erasure_notice`: `live_state_only: true`, `secure_erasure: false`, `external_copies: "operator_managed"`, `restore_requires_manifest: true` and `backup_history_purge: "not_verified"`. It has no `manifest_id`.
 - **Forget is not secure erasure.** Backups, replicas, exported change logs and other copies keep what they held. Manage them separately.
+- **Expiry is logical deletion too.** A memory whose `expires_at_ms` has passed is hidden from reads and later removed from the graph, but its evidence record is not deleted with it: the memory's expiry does not carry over to the record, which stays in the evidence collection until someone with `raw_access` deletes it, or until it expires on its own if it was given an expiry. Only `forget` deletes the evidence record that only the forgotten memory used. Neither expiry nor forget is secure erasure.
 - Targets by series or entity (409, feature `forget_target`), by session or scope or with `allow_job: true` (`erasure_jobs`), and `mode: expire` (`forget_expire`) are refused with 409.
 
 ## Receipts and retries
@@ -453,5 +454,5 @@ Approximate recall answers 422 `memory_bounded_plan_unsupported`: no approximate
 - **What a binding changes elsewhere.** While any resource is reserved, the backup routes are the administrator's alone (scoped credentials get 403), global metrics, replication export, webhook list and status, imports and the automatic-maintenance routes answer 403 `forbidden_scope` to credentials, and the gRPC listener does not start.
 - **Audit.** Each memory request writes a `memory_request` event with the operation, binding, principal, `actor`, outcome and, for a mutation, the receipt ID and sequence. Memory text, keys and identifiers are never logged. See [Audit actors](SECURITY.md#audit-actors).
 - **Known limits.** The commit sequence is database-wide, so `sequence` values, graph revisions and the change-feed head show that other writes happened. In a filtered change feed, `has_more`, `next_cursor`, `head` and gaps in the `sequence` and `ordinal` of the remaining events show the same thing. Use separate database files for tenants that must not see each other's write volume. Keys are shared by credentials that can write one scope. The administrator's request log and audit show reserved names. [Memory-bound resources](SECURITY.md#memory-bound-resources) lists all of them.
-- **Deletion.** Forget is logical. Plan backup retention and external copies yourself.
+- **Deletion.** Forget and expiry are logical, and the evidence record of an expired memory stays until it is deleted or expires on its own. Plan backup retention and external copies yourself.
 - **Transport.** The clients, the CLI and the MCP tools require HTTPS except for loopback hosts, and never print the token.
