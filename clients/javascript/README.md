@@ -81,9 +81,14 @@ field is a `TypeError`. A failed condition (412 `precondition_failed`) or full
 slots (409 `kv_slots_exhausted`) rejects the whole batch. After a
 `TransportError` or 503 `commit_indeterminate` the batch either committed in
 full or not at all, and which is not known: read the keys back with
-`kvGetMany` before deciding. A server without the two routes answers 404
-`not_found`, which is `UnsupportedError`; the client never falls back to
-single-key calls.
+`kvGetMany` before deciding. A server without the two routes answers the admin
+token 404 `not_found`, which is `UnsupportedError`, and every other credential
+403 (`read_only` or `forbidden_scope`), which is a `VLiteError`, because its
+permission check runs before it matches a route. To find out beforehand, look
+for the two route paths in the `routes` of `GET /v1/capabilities`; the
+`features.kv_batch` flag is not that test, because a format 3 or 4 file serves
+both routes with the flag false. The client never falls back to single-key
+calls.
 
 ## Memory operations
 

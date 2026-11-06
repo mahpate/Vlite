@@ -201,8 +201,8 @@ test generates its stubs from the same proto. No generated stubs are checked in.
 ## Key-value entries
 
 `vlite.v1.Kv` provides `GetKvEntry`, `PutKvEntry`, `DeleteKvEntry`,
-`ListKvEntries`, `GetKvEntries` and `WriteKvBatch`. The six ordinary KV RPCs
-join 35 `VLite` RPCs (41 total); there are no lease RPCs. Addresses require a
+`ListKvEntries`, `GetKvEntries` and `WriteKvBatch`. It is a separate service
+from `vlite.v1.VLite`, and there are no lease RPCs. Addresses require a
 nonempty collection name. Values are raw bytes, versions/deadlines are
 `uint64`, and optional expiry distinguishes an unset deadline from zero. Get,
 list and `GetKvEntries` require collection `read`; put, delete and
@@ -223,7 +223,7 @@ writes many, all or nothing. Their messages:
 |---|---|
 | `KvKeyRef` | `namespace`, `key` |
 | `KvGetManyRequest` | `collection`, `repeated KvKeyRef keys` |
-| `KvGetManyItem` | `optional KvEntry entry` |
+| `KvGetManyItem` | `KvEntry entry` (a message field, unset for a key that is absent or due) |
 | `KvGetManyResponse` | `repeated KvGetManyItem items`, `optional uint32 next_index` |
 | `KvBatchPut` | `namespace`, `key`, `bytes value`, `Expected expected` |
 | `KvBatchDelete` | `namespace`, `key`, `Expected expected` |
@@ -247,7 +247,11 @@ time, in order, against the live state and one expiry clock, then committed once
 Each `(namespace, key)` may appear once, and the values of all puts total at most
 4,194,304 bytes; either violation is `INVALID_ARGUMENT` with `invalid_input`,
 and the message names the operation. An unset `Expected` means any. An operation
-that sets neither `put` nor `delete` is `INVALID_ARGUMENT` (`invalid_input`). A
+that sets neither `put` nor `delete` is `INVALID_ARGUMENT` (`invalid_input`), and
+its message starts `operations[<index>]: `. The adapter converts every operation
+before REST's ordered checks run, after it has checked the operation count, so
+this fault is refused ahead of a bound fault in an earlier operation, like a
+malformed operation object over REST (422 `invalid_json`, also refused first). A
 put has no deadline field and clears the deadline of the entry it replaces.
 `results[i]` answers `operations[i]`: `version` is the same `uint64` for every
 put of the batch, and `deleted` is false for a key with no live entry. The first

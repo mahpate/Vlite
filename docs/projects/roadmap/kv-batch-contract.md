@@ -98,35 +98,86 @@ before deciding anything, and do not retry blindly.
 
 No new engine error variant is needed. Existing codes map as for the single
 operations: 412 `precondition_failed` (the message stays `revision
-precondition failed`, so a caller that may write but not read learns nothing
-more than from a single put), 409 `kv_slots_exhausted`, `not_kv_collection`,
+precondition failed`, so a failed condition tells a caller that may write but
+not read no more than it does for a single put, with the one difference
+described below), 409 `kv_slots_exhausted`, `not_kv_collection`,
 `upgrade_required` and `graph_attached_record`, 422 `invalid_input`
 (bounds, duplicate keys, too many operations or bytes; the message names the
 operation), 403 `read_only` and `forbidden_scope`, 404 `collection_not_found`,
 429 `rate_limited` and `quota_exceeded`, 503 `commit_indeterminate`.
 
+One difference from a single put remains. A batch can follow a condition with an
+operation that cannot run, and a refused batch writes nothing, so a caller that
+may write but not read, and that has filled all 16 record IDs of some key, can
+test a guessed revision without changing the entry: a batch whose first
+operation puts or deletes another key under the revision to test, and whose
+second operation puts the key whose IDs it filled, answers 412 when the revision
+is wrong and 409 `kv_slots_exhausted` when it is right, because the engine runs
+the operations in order and stops at the first that cannot run (`plan` in
+`src/kv/batch.rs`). That learns only whether a guessed revision (a commit
+sequence) is the current one of a key that the caller may already overwrite.
+Each 409 counts in `kv_slots_exhausted_total`, and a single put cannot do the
+same without writing.
+
+A batch that changes at least one record on a file of format 1 is refused with
+409 `upgrade_required` (engine error `BatchRequiresUpgrade`), although single
+puts work there, because format 1 predates atomic batches: compact the closed
+file to a new path, as the error message says. A batch that changes no record,
+and an empty batch, still succeed.
+
 | Bound | Value | Why |
 |---|---|---|
 | Operations per batch | 1,000 | Short owner-guard time and bounded memory; the engine allows 4,096 |
-| Value bytes per batch | 4,194,304 | Keeps the frame near 5.5 MB with the largest keys and namespaces; the engine allows 16 MiB; fits the 8 MiB REST and gRPC request as base64 |
+| Value bytes per batch | 4,194,304 | Keeps the frame near 5.5 MB with the largest keys and namespaces; the engine allows 16 MiB; fits the 8 MiB gRPC request, which carries raw bytes; fits the 8 MiB REST body as base64 only while the keys and namespaces stay plain text, because a JSON encoder writes a control character in up to 6 bytes and the Python and .NET clients also escape non-ASCII characters, so a batch at every limit at once (1,000 operations with 1,024-byte keys and 4,194,304 value bytes) can pass the body limit and is then refused with 413 `invalid_json` |
 | Keys per get-many | 1,000 | Same count bound |
 | Get-many response | 16,777,216 bytes of compact JSON | The page cap of a list |
 | Namespace, key, value | 255, 1,024, 1,047,290 bytes | Unchanged |
 
-Raising a bound later is compatible; lowering one is not. Every surface uses
-the same bounds (the 16 MiB shell line and the 128 MiB MCP line sit far above
-them). The live-record quota is checked once over all the batch's slot
-changes, under the same guard as the commit, and a refused batch is one
-refused request: `kv_slots_exhausted_total` counts it once. An empty batch is a
-successful no-op.
+Raising a bound later is compatible; lowering one is not. The shipped clients
+check these bounds before they send, so a client keeps refusing a larger batch
+until it is updated, and a release that raises a bound must ship the client
+change with it. Every surface uses the same bounds (the 16 MiB shell line and
+the 128 MiB MCP line sit far above them). The live-record quota is judged once,
+under the same guard as the commit, on the count that the whole batch leaves
+(the net change of all its slot changes: the last write to a slot wins), and
+only when the batch writes at least one record. An empty batch or a batch of
+deletes is never refused for quota, like a single delete. A batch refused for
+slots is one refused request: `kv_slots_exhausted_total` counts it once. An
+empty batch is a successful no-op.
 
 ### 2.6 Compatibility and rollback
 
 The frames a batch writes are the ordinary batch frames that every build since
 format 2 reads. A batch entry is an ordinary record, so 0.7.1 reads, lists,
-updates and deletes batch-written entries. A 0.7.1 server answers 404
-`not_found` to the two new routes, which the clients report as an unsupported
-operation. Nothing about a batch is one-way.
+updates and deletes batch-written entries. A server without the two new routes
+(0.7.1 and earlier) answers 404 `not_found` to the admin token, which the
+clients report as an unsupported operation. It answers every other credential
+403 (`read_only` for the read-only token, `forbidden_scope` for a scoped
+credential), because its permission check runs before it matches a route, and
+the clients report that as an ordinary permission error. To find out
+beforehand, read `GET /v1/capabilities`, which every credential may call, and
+look for the two route paths in its `routes`. Do not test `features.kv_batch`
+for this: it is true only for files at format 5 or later, while a format 3 or 4
+file serves both routes with the flag false. Nothing about a batch is one-way.
+
+### 2.7 Growing the batch later
+
+These rules keep a later change to the batch compatible. Nothing in this
+subsection is a decision to build any of it.
+
+- A new kind of batch operation, or a new field on an existing operation, ships
+  with its own capability flag. An older server refuses it as an unknown field,
+  so a client that needs it checks the flag first.
+- Over gRPC an older server silently ignores a field of a message that it does
+  not know. A per-operation extension therefore needs a new `oneof` case (an
+  older server refuses an operation whose `kind` it cannot read) or a
+  capability gate that the client checks first.
+- A batch across collections and a delete by prefix are new surfaces, never
+  per-operation fields. Delete by prefix stays decision (p) of the
+  [serving contract](serving-kv-ttl-contract.md#12-delivery-slices-ledger-and-owner-decisions).
+- A batch deadline (decision D1) gets its own capability flag, and the flag must
+  not be tied to the lease ledger, even where the two share format work: a
+  server can offer one without the other.
 
 ## 3. Surfaces
 
@@ -159,7 +210,7 @@ A put in a batch whose `options.expires_at_ms` is set is refused with
 `InvalidKvKey` in this release (D1). `visit_many_at` lends each entry like
 `visit_at`; its `has_next` says that a later requested key follows.
 
-**REST** (new paths, so a 0.7.1 server answers 404):
+**REST** (new paths; section 2.6 says what a server without them answers):
 
 - `POST /v1/collections/{collection}/kv/batch`, scope `write`:
   `{"operations":[{"op":"put","namespace":"app","key":"a","value_base64":"AAEC","expected":"absent"},{"op":"delete","namespace":"app","key":"b","expected":{"revision":"42"}}]}`
@@ -173,7 +224,10 @@ A put in a batch whose `options.expires_at_ms` is set is refused with
   first key not read; the first key always fits. One read guard and one clock
   serve the whole call. The graph routes use the same `POST …/get` shape.
 - `GET /v1/capabilities` gains `features.kv_batch` (true on format 5 and later
-  files, like `features.kv`) and the two routes.
+  files, like `features.kv`) and the two routes in `routes`, which it lists on
+  every format of file. A caller that needs to know whether a server has the
+  routes looks for the two paths in `routes`: the flag is not that test,
+  because a format 3 or 4 file serves both routes with the flag false.
 
 Wire details that every client and tool follows:
 
@@ -186,6 +240,15 @@ Wire details that every client and tool follows:
   `invalid_json`. The decoded values of all puts total at most 4,194,304
   bytes, and no two operations name the same `(namespace, key)`; either
   violation is 422 `invalid_input`.
+- **Order of the checks.** A body that does not parse (an unknown or duplicate
+  field and a wrong type included) is refused first as `invalid_json`. Then the
+  operation count and the stateless checks of section 2.2 run in order, and the
+  first fault is the answer, whatever the state of the collection. Over gRPC the
+  adapter converts every operation of the message to JSON before those checks,
+  after it has checked the operation count, so an operation whose `kind` is
+  unset is refused ahead of them, in the way of a malformed operation object
+  over REST: `INVALID_ARGUMENT` with `invalid_input` and a message that starts
+  `operations[<index>]: ` and goes on `KV batch operation is required`.
 - **Batch result.** `results[i]` answers `operations[i]`: a put gives
   `{"version":"<nonzero u64 decimal>"}` (every put of one batch gives the same
   version) and a delete gives `{"deleted":<bool>}`. An empty batch answers
@@ -204,13 +267,16 @@ Wire details that every client and tool follows:
   `kv_slots_exhausted`, `not_kv_collection`, `upgrade_required`,
   `graph_attached_record` 409, `invalid_input` and `invalid_json` 422,
   `collection_not_found` 404, 403, 429 and 503 `commit_indeterminate`). A
-  server without the routes answers 404 `not_found`; a client reports that as
-  an unsupported operation and never falls back to single calls.
+  server without the routes answers 404 `not_found` to the admin token and 403
+  to every other credential (section 2.6). A client reports the 404 as an
+  unsupported operation and the 403 as an ordinary permission error, and never
+  falls back to single calls.
 
 **gRPC** (`vlite.v1.Kv`, new RPCs and messages, no tag reused):
 `rpc GetKvEntries(KvGetManyRequest) returns (KvGetManyResponse)` and
 `rpc WriteKvBatch(KvBatchRequest) returns (KvBatchResponse)`, with
-`KvKeyRef { namespace, key }`, `KvGetManyItem { optional KvEntry entry }`,
+`KvKeyRef { namespace, key }`, `KvGetManyItem { KvEntry entry }` (a message
+field, unset for a key that is absent or due),
 `KvGetManyResponse { repeated KvGetManyItem items; optional uint32 next_index }`,
 `KvBatchPut`, `KvBatchDelete`, a `KvBatchOperation` oneof, and a
 `KvBatchResult` oneof (`version` or `deleted`).
@@ -222,12 +288,12 @@ fields plus `collection`.
 **Clients.** Python `kv_get_many` and `kv_batch`, JavaScript `kvGetMany` and
 `kvBatch`, .NET `KvGetManyAsync` and `KvBatchAsync`, Go `KvGetMany` and
 `KvBatch`. Each client follows its existing key-value style: it validates the
-bounds before sending, returns `bytes`, `Uint8Array` or `byte[]` values and
-64-bit versions as `int`, `bigint` or `ulong`, hands the caller the server's
-result unchanged (a partial get-many result carries `next_index`; the client
-does not continue it for the caller), never retries and never falls back to
-single calls. The Go client has no key-value methods today, so it gains the
-whole set (get, put, delete, list, get-many and batch).
+bounds before sending, returns `bytes`, `Uint8Array`, `byte[]` or `[]byte`
+values and 64-bit versions as `int`, `bigint`, `ulong` or `uint64`, hands the
+caller the server's result unchanged (a partial get-many result carries
+`next_index`; the client does not continue it for the caller), never retries
+and never falls back to single calls. The Go client has no key-value methods
+today, so it gains the whole set (get, put, delete, list, get-many and batch).
 
 **Audit and metrics.** A `kv_batch` audit event carries the principal, actor,
 collection, outcome and the counts of puts and deletes, never a namespace, key

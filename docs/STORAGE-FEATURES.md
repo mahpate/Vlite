@@ -311,9 +311,11 @@ let entries = kv.view().get_many(&[("pool", "claim/43"), ("pool", "claim/41")])?
   The first operation that cannot run fails the whole batch with the error of
   its single call (`RevisionMismatch`, `KvSlotsExhausted`,
   `GraphAttachedRecord`) and nothing is written. A batch that changes no record
-  writes nothing, and an empty batch is a no-op. After `CommitIndeterminate` the
-  batch is written entirely or not at all, and which is unknown: read the keys
-  back with `get_many` before you decide anything.
+  writes nothing, and an empty batch is a no-op. On a format 1 file a batch
+  that changes a record fails with `BatchRequiresUpgrade`, although single puts
+  work there. After `CommitIndeterminate` the batch is written entirely or not
+  at all, and which is unknown: read the keys back with `get_many` before you
+  decide anything.
 - **No deadline in a batch.** A `KvOp::Put` whose `options.expires_at_ms` is
   set is refused with `InvalidKvKey`. Like a put without a deadline, a batch
   put clears the deadline of the entry it replaces. Use `put` for an entry that
