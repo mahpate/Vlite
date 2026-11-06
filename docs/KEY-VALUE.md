@@ -90,7 +90,6 @@ Versions are commit sequences. They increase for a key within one file lineage, 
 An expired entry stays in the file until it is replaced, deleted or compacted away, and it still counts toward record quotas. A later put of another key can reuse its slot. Expiry needs format 5: on a format 4 file a put with a deadline answers 409 `upgrade_required`, and nothing is upgraded for you.
 
 The ordinary record routes treat a due expiry differently from this: `PUT /v1/collections/{collection}/vectors/{id}` refuses an `expires_at_ms` that is not later than the server clock, and a `ttl_ms` of 0, with 422 `invalid_input` (see [Record expiry and metadata](API.md#record-expiry-and-metadata)). The key-value routes accept it by contract.
-<!-- TODO-VERIFY (K71 in review): the refusal was read in src/server/record_put.rs (refuse_due_expiry, ensure_expiry_after); the REST handlers that call it were not traced one by one. -->
 
 ## Listing, paging and its cost
 
@@ -138,8 +137,8 @@ A line over the shell or MCP limit is refused (`invalid_input: line exceeds 1677
 
 A key hashes to 16 consecutive record IDs. If all 16 hold live entries of other keys or other records, a put for that key answers 409 `kv_slots_exhausted` (gRPC `FAILED_PRECONDITION`; the shell and MCP prefix `kv_slots_exhausted:`). A slot that holds an expired entry of another key is reused, and a record that is not a key-value entry is never overwritten. Anyone who can write the collection can place ordinary records at a key's IDs, so give `write` on a key-value collection only to principals you trust with its keys.
 
-The JSON and Prometheus metrics carry `kv_slots_exhausted_total`, the number of REST or gRPC requests answered that way, across all credentials. A rise that nobody expects points at records planted over a key's IDs. The slots are the record IDs from `vlite::kv::first_slot(namespace, key)` (Rust), wrapping, so freeing a key means removing the other records at those IDs. Using another key also works.
-<!-- TODO-VERIFY (K71 in review): `kv_slots_exhausted_total` was read in src/server/observability.rs and src/server.rs. "Freeing a key means removing the other records at those IDs" is derived from the slot probe in src/kv.rs, not from a documented procedure. -->
+The JSON metrics carry `kv_slots_exhausted_total` and Prometheus carries `vlite_kv_slots_exhausted_total`: the number of key-value puts refused this way, across all credentials. A rise that nobody expects points at records planted over a key's IDs. The slots are the record IDs from `vlite::kv::first_slot(namespace, key)` (Rust), wrapping, so freeing a key means removing the other records at those IDs. Using another key also works.
+<!-- TODO-VERIFY: "freeing a key means removing the other records at those IDs" is derived from the slot probe in src/kv.rs, not from a documented procedure. -->
 
 ## Durability
 
