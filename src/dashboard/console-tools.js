@@ -1031,9 +1031,15 @@
     const milliseconds = Date.parse(date) - 2000;
     return Number.isSafeInteger(milliseconds) && milliseconds >= 0 ? milliseconds : null;
   }
-  function memoryClockGuidance(message) {
-    if (!/observed_at|future|clock|server time is unavailable|memory request field is invalid/i.test(String(message))) return "";
-    return "Your computer or proxy clock may be ahead of the VLite server. Check both clocks before retrying; retain the same idempotency key and request.";
+  // Only remember and consolidate send an observation time. The server refuses one later than its clock like any
+  // core error: 422 invalid_input, the generic message and no details. A refused request field is named in details.field.
+  function memoryClockGuidance(error, action) {
+    const guidance = "Your computer or proxy clock may be ahead of the VLite server. Check both clocks before retrying; retain the same idempotency key and request.";
+    if (/^server time is unavailable/i.test(String(error?.message ?? error))) return guidance;
+    const refusal = error?.body?.error;
+    if (!["remember", "consolidate"].includes(action) || error?.status !== 422 || refusal?.code !== "invalid_input" || refusal.message !== "memory request field is invalid") return "";
+    const field = refusal.details?.field;
+    return field === undefined || field === "observed_at_ms" ? guidance : "";
   }
   const displayKey = value => JSON.stringify(value).replaceAll(" ", "␠");
   function memoryRequest(action, input, now) {
@@ -1303,7 +1309,7 @@
       try {
         body = memoryAttempt?.signature === signature ? memoryAttempt.request : memoryRequest(action, input, ctx.serverNow());
       } catch (error) {
-        const guidance = memoryClockGuidance(error.message);
+        const guidance = memoryClockGuidance(error, action);
         if (guidance) text("memory-outcome", `${error.message} ${guidance}`);
         throw error;
       }
@@ -1325,7 +1331,7 @@
         }
         text("memory-outcome", `${actionLabels[action]}: server confirmed. ${action === "recall" ? "Inspect truncation and ranking details in the response." : "Retain the response and receipt before signing out."}`);
       } catch (error) {
-        const guidance = memoryClockGuidance(error.message);
+        const guidance = memoryClockGuidance(error, action);
         text("memory-outcome", `${error.message} ${guidance ? `${guidance} ` : ""}${read ? "Read failed." : "Outcome may be unknown after a transport or server failure. Retain the original key and request; do not generate a new key to retry."} The last successful response, if any, remains below.`);
         throw error;
       }

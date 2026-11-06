@@ -10,6 +10,15 @@ from playwright.sync_api import expect, sync_playwright
 from dashboard_e2e import FakeApi, mocked_page, control, confirm, sign_out, assert_no_stored_credentials
 
 MAX_U64 = "18446744073709551615"
+SERVER_DATE = "Thu, 05 Nov 2026 22:00:00 GMT"
+CLOCK_HINT = "Your computer or proxy clock may be ahead of the VLite server"
+# The server refuses an observation later than its clock like any core error: 422 invalid_input with the generic
+# message and no details. A refused request field is named in details.field instead.
+GENERIC_REFUSAL = {"code": "invalid_input", "message": "memory request field is invalid"}
+
+
+def invalid_field(name):
+    return {**GENERIC_REFUSAL, "details": {"field": name}}
 
 
 class WorkspaceApi(FakeApi):
@@ -31,13 +40,14 @@ class WorkspaceApi(FakeApi):
         }
         self.fail_write = False
         self.fail_memory = False
-        self.memory_clock_error = False
+        self.memory_refusal = None
+        self.server_date = SERVER_DATE
         self.fail_vectors = False
 
     def api(self, method, path, query, body, headers):
         if path == "/v1/capabilities":
             status, value, response_headers = super().api(method, path, query, body, headers)
-            return status, value, {**response_headers, "Date": "Thu, 05 Nov 2026 22:00:00 GMT"}
+            return status, value, {**response_headers, **({"Date": self.server_date} if self.server_date else {})}
         if "/kv/" in path:
             if self.fail_write and method != "GET":
                 return self.error(412, "precondition_failed")
@@ -58,8 +68,8 @@ class WorkspaceApi(FakeApi):
                 return self.error(404, "kv_not_found")
             return 200, self.values[key], {}
         if path.startswith("/v1/memory/"):
-            if self.memory_clock_error:
-                return 400, {"error": {"code": "invalid_input", "message": "memory request field is invalid"}}, {}
+            if self.memory_refusal:
+                return 422, {"error": self.memory_refusal}, {}
             if self.fail_memory:
                 return self.error(503, "busy")
             if body["scope"] != {"agent": "assistant", "user": "owner"}:
@@ -280,13 +290,6 @@ def exercise(browser):
     expect(page.locator("#memory-outcome")).to_contain_text("server confirmed")
     replay = next(item for item in reversed(fake.log) if item["path"].endswith("/remember"))
     assert replay["body"] == original, "Explicit replay of an unchanged draft must preserve its timestamp"
-    fake.memory_clock_error = True
-    page.locator("#memory-idempotency").fill("clock-error")
-    page.locator("#memory-run").click()
-    confirm(page, "Idempotency key: clock-error")
-    expect(page.locator("#memory-outcome")).to_contain_text(
-        "Your computer or proxy clock may be ahead of the VLite server")
-    fake.memory_clock_error = False
     page.locator("#memory-action").select_option("consolidate")
     page.locator("#memory-transformation").fill("summary-v1")
     page.locator("#memory-references").fill(json.dumps([{"id": f"m{n}", "revision": "1"} for n in range(65)]))
@@ -422,10 +425,79 @@ def exercise(browser):
         context.close()
 
 
+def exercise_memory_clock_hint(browser):
+    """The clock hint shows once for an observation-time problem and never for another invalid memory field."""
+    fake = WorkspaceApi()
+    context, page, errors = mocked_page(browser, fake)
+    control(page, "#memory-binding").fill("assistant-memory")
+    page.locator("#memory-agent").fill("assistant")
+    page.locator("#memory-user").fill("owner")
+    references = json.dumps([{"id": "<entity>", "revision": MAX_U64}])
+    drafts = {
+        "recall": {"seeds": "<entity>"},
+        "remember": {"id": "new-memory", "content": "Synthetic memory", "source": "test"},
+        "consolidate": {"id": "summary", "content": "Synthetic summary", "source": "test", "transformation": "summary-v1", "references": references},
+        "forget": {"references": references},
+        "receipts/lookup": {},
+    }
+    outcome = page.locator("#memory-outcome")
+
+    def submit(action, key, confirmed=True):
+        page.locator("#memory-action").select_option(action)
+        fields = dict(drafts[action])
+        if action != "recall":
+            fields["idempotency"] = key
+        for name, value in fields.items():
+            page.locator("#memory-" + name).fill(value)
+        # A cleared line cannot show the previous scenario's answer in place of this one.
+        page.evaluate("document.getElementById('memory-outcome').textContent = ''")
+        page.locator("#memory-run").click()
+        if confirmed and action not in ("recall", "receipts/lookup"):
+            confirm(page, f"Idempotency key: {key}")
+
+    def hints():
+        return page.locator("body").inner_text().count(CLOCK_HINT)
+
+    scenarios = [
+        # Only a time later than the server clock (no details, or observed_at_ms named) is a clock problem, and
+        # only where the dashboard sent an observation time: remember and consolidate.
+        ("recall", invalid_field("vector"), 0), ("recall", invalid_field("limit"), 0), ("recall", GENERIC_REFUSAL, 0),
+        ("receipts/lookup", invalid_field("operation"), 0),
+        ("forget", invalid_field("target"), 0), ("forget", GENERIC_REFUSAL, 0),
+        ("remember", invalid_field("content"), 0), ("remember", invalid_field("scope"), 0), ("remember", invalid_field("id"), 0),
+        ("remember", invalid_field("observed_at_ms"), 1), ("remember", GENERIC_REFUSAL, 1),
+        ("consolidate", invalid_field("output"), 0), ("consolidate", invalid_field("inputs"), 0), ("consolidate", GENERIC_REFUSAL, 1),
+    ]
+    wrong = []
+    for number, (action, refusal, expected) in enumerate(scenarios):
+        fake.memory_refusal = refusal
+        submit(action, f"refused-{number}")
+        expect(outcome).to_contain_text("HTTP 422: invalid_input: memory request field is invalid")
+        shown = hints()
+        if shown != expected:
+            wrong.append(f"{action} {refusal.get('details') or 'without details'}: hint shown {shown} times, expected {expected}")
+    fake.memory_refusal = None
+    assert not wrong, wrong
+    # The dashboard's own refusal: with no Date header there is no server time to observe, so nothing is sent.
+    fake.server_date = None
+    before = len(fake.log)
+    submit("remember", "no-server-time", confirmed=False)
+    expect(outcome).to_contain_text("Server time is unavailable")
+    assert hints() == 1
+    assert not any(item["path"].endswith("/remember") for item in fake.log[before:])
+    for width in (1280, 768, 390):
+        page.set_viewport_size({"width": width, "height": 900})
+        assert page.evaluate("document.documentElement.scrollWidth <= innerWidth"), width
+        assert outcome.evaluate("element => element.scrollWidth <= element.clientWidth"), width
+    assert not errors, errors
+    context.close()
+
+
 if __name__ == "__main__":
     with sync_playwright() as p:
         browser = p.chromium.launch()
         exercise_kv_bytes(browser)
         exercise(browser)
+        exercise_memory_clock_hint(browser)
         browser.close()
     print("PASS Key-value, MemoryAI and managed providers: contracts, exact revisions, conflict safety, scope gates, receipts, sign-out and responsive layout")
