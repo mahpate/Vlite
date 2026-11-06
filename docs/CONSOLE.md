@@ -170,7 +170,7 @@ values, refusing lossy text conversions. See the [key-value guide](KEY-VALUE.md)
 MemoryAI serves agent memory through an operator-provided binding, exact
 agent/user/session scope and **scoped API token**, not administrator sign-in.
 Recall accepts seeds, indexed text or vectors. Weighted ranking combines squared
-Euclidean vector distance with other signals. Exact/MMR use cosine distance
+Euclidean vector distance with other signals; exact/MMR use cosine distance
 without entity seeds. Exact permits text; MMR does not. Inspect revisions and truncation.
 
 Remember supports entity/episodic memories; consolidation retains originals.
