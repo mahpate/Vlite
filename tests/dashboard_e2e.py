@@ -859,7 +859,7 @@ class FakeApi:
                                 r"|maintenance/auto(?:/tick)?)|v1/collections/[^/]+/imports|v1/imports/.+)$")
 
     def __init__(self, role="admin", features=ALL_FEATURES, format_version=4, scope=None):
-        self.memory = False
+        self.memory_mode_enabled = False
         self.caps = {"api_version": 1, "role": role, "features": {name: True for name in features}}
         if format_version is not None:
             self.caps["format_version"] = format_version
@@ -914,9 +914,18 @@ class FakeApi:
     def error(status, code):
         return status, {"error": {"code": code, "message": code.replace("_", " ")}}, {}
 
+    def credentialed(self, headers):
+        """Whether the request carries a credential. The real server answers 401 before it looks at anything else."""
+        return headers.get("authorization", "").startswith("Bearer ")
+
     def memory_mode_refusal(self, method, path, headers):
-        if not (self.memory and headers.get("authorization", "").startswith("Bearer ") and self.MEMORY_REFUSED.match(path)):
+        """The refusals the real server makes before a handler runs, in its order: sign-in (401, left to api()), the
+        role (a read-only token is refused every /v1/admin route and every write by its role first), then the
+        reserved-resource refusal. Any credential reaches the last one: a token or a signed-in session."""
+        if not (self.memory_mode_enabled and self.MEMORY_REFUSED.match(path) and self.credentialed(headers)):
             return None
+        if self.caps["role"] == "read_only" and (path.startswith("/v1/admin/") or method not in ("GET", "HEAD")):
+            return 403, {"error": {"code": "read_only", "message": "admin access required"}}, {}
         if path.startswith("/v1/admin/webhooks") and method != "GET":
             return None
         return self.error(403, "forbidden_scope")
@@ -1647,7 +1656,7 @@ def exercise_memory_mode_mocked(browser):
     403 forbidden_scope, even to the super admin. Signing in must still work and every affected view must say
     so in plain words instead of failing (docs/SECURITY.md, Memory-bound resources)."""
     fake = FeatureApi()
-    fake.memory = True
+    fake.memory_mode_enabled = True
     fake.caps["routes"] = [*fake.caps["routes"], "/v1/admin/replication/export"]
     context, page, errors = mocked_page(browser, fake)  # the sign-in inside fails without the dashboard fix
     metrics_off = "Server metrics are off while agent memory is enabled."
@@ -1742,10 +1751,25 @@ def exercise_memory_mode_mocked(browser):
     context.close()
     # The refusal is only trusted from a credential that could use the route: a scoped token without diagnostics never asks.
     fake = FeatureApi("scoped", {"collections": ["*"], "operations": ["read", "search"], "expires_unix_ms": 2000000000000})
-    fake.memory = True
+    fake.memory_mode_enabled = True
     context, page, errors = mocked_page(browser, fake)
     expect(control(page, "#metrics-note")).to_be_hidden()
     assert not any(item["path"] == "/metrics" for item in fake.log), fake.log
+    assert not errors, errors
+    context.close()
+    # A read-only token is refused every /v1/admin route by its role first, as on the real server, so only global
+    # metrics and import status can carry the memory refusal for it; the note still appears and sign-in succeeds.
+    fake = FeatureApi("read_only")
+    fake.memory_mode_enabled = True
+    context, page, errors = mocked_page(browser, fake)
+    expect(control(page, "#metrics-note")).to_have_text(f"{metrics_off} Database size shows Unavailable.")
+    answers = page.evaluate("""async () => Object.fromEntries(await Promise.all(
+        ["/v1/admin/webhooks", "/v1/admin/replication/export", "/metrics", "/v1/imports/7"].map(async (path) => {
+            const response = await fetch(path, { headers: { Authorization: "Bearer " + "r".repeat(32) } });
+            return [path, [response.status, (await response.json()).error.code]];
+        })))""")
+    assert answers == {"/v1/admin/webhooks": [403, "read_only"], "/v1/admin/replication/export": [403, "read_only"],
+                       "/metrics": [403, "forbidden_scope"], "/v1/imports/7": [403, "forbidden_scope"]}, answers
     assert not errors, errors
     context.close()
     print("PASS agent memory enabled (mocked): sign-in survives the refused /metrics; overview, Observability, health, Prometheus, webhooks, automatic maintenance, import status and replication export each say so in plain words; no raw 403; no overflow at 1280/768/390")
