@@ -196,8 +196,25 @@ Local numbers below show direction only (see rules).
   (a test-gated ordered browse and exact, filtered search over base plus
   overlay, identical to the resident path at the same clock) is accepted with
   notes and integrated on the same terms; hybrid, query-language, grouping and
-  facet reads still refuse compact records. Slices 4–5 and all normal
-  `Database` wiring remain; slice 4 is next.
+  facet reads refuse compact records at 0.7.0, and 0.7.1 serves them under the same test gate (lane A, below). Slice 4 is split into three lanes
+  and only lane B is in 0.7.0: its crate-private read seam in
+  `src/compact/source.rs` (opaque generation identity, bounded authenticated
+  vector, metadata and payload reads, and separate source, mapped, vector,
+  plaintext and cell accounting), the effective-row accessors in
+  `src/records.rs` and the metadata, text-index and rerank consumers are
+  integrated, test-gated and unreleased. Its fix-forward commit
+  (`250a98b`) is not in the tag; 0.7.1 integrates it, with its 18 replay
+  obligations replayed in the mutation ledgers of R0 and B4. 0.7.1 also integrates lane A (record consumers): A4 cherry-picked its
+  four patches, replayed lane A's 47 recorded mutants (26 of them survivors) and added 170 of its own, 217 in all and all killed; the bounded exact
+  scan of lane A stays a draft that lane E4 owns. Lane C (server and MCP consumers) is not
+  integrated, and slice 5 (lifecycle) has not started. All of the compact code compiles only
+  under `cfg(test)`: release builds have no compact dispatch and no normal
+  `Database` wiring. The only changes that a release build sees are the few resident-visible ones of lane A4 (one clock for
+  the hybrid search and for graph retrieval, a read error that the named-vector search now returns, the key-value read path
+  and one guard), which A4's page lists and a script checks. The 0.7.1 plan freezes the seam in
+  [p3b-seam-freeze.md](p3b-seam-freeze.md) and records the survivor ledgers of
+  lanes A and B in [p3b-survivor-ledgers.md](p3b-survivor-ledgers.md). The plan's first lane, R0, also adds the ordered
+  cursors that the bounded exact scan needs (`base_rows`, `affected_ids` and `ordered_ids`), under the same test gate.
   The [P3c compact-ANN design](p3c-compact-ann.md) (source-bound flat
   topology, persisted scalar-u8 codes, background rebuild and a separately
   opted-in rotated one-bit candidate) is independently reviewed; its nine

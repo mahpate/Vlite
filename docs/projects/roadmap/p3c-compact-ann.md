@@ -6,9 +6,14 @@ Inventory head: `2b045b63ac598b0cce8e27f061b6a87f3b9b455f`.
 All code anchors below were checked at that head, not copied from the older
 P3b inventory. This document changes no API, code, default, gate or release
 criterion. The owner explicitly approved J.1-J.9 individually on 2026-11-02,
-subject to the independent acceptance and dependencies below. P3b slice 0
-is now independently accepted and integrated; that does not satisfy the
-remaining engine-integration, source-interface or lifecycle prerequisites.
+subject to the independent acceptance and dependencies below. P3b slices 0, 1a,
+1b, 2 and 3 are independently accepted and integrated behind test gates, and
+lane B's read seam is integrated with its fix-forward and the replayed mutation
+ledgers of 0.7.1 (all 18 of its replay obligations: seven in R0's ledger, eleven in B4's); that does
+not satisfy the remaining engine-integration, source-interface or lifecycle
+prerequisites. The 0.7.1 [seam freeze](p3b-seam-freeze.md) records what the
+code at v0.7.0 provides and states the section G additions as concrete shapes;
+the paragraphs below keep their setup-head wording unless marked reconciled.
 
 The governing documents are [P3](p3-compact-vectors.md),
 the [storage contract](compact-storage-contract.md), the
@@ -629,8 +634,16 @@ crate-private `ReadAccess::{base_rows, base_vector_at, source_identity,
 affected_since, score_batch}` with explicit lifetimes/error propagation,
 not a second public trait. `base_rows` iterates physical source rows;
 `affected_since(S)` must cover every commit S..T or fail explicitly.
-These names/shapes remain proposals until reviewed and frozen with P3b;
-slice-0 acceptance alone does not freeze these additions. Metadata
+The 0.7.1 [seam freeze](p3b-seam-freeze.md#5-additions-for-p3c) states these as
+concrete signatures, and the owner approved them as additive shapes on
+2026-11-05 (OPEN-71-03). Lane R0's slice 3 implemented `base_rows`,
+`affected_ids` (for `affected_since`) and `ordered_ids` (crate-private, under the
+seam's test gate). `affected_ids` takes no `S` and cannot fail: it lists the whole
+overlay, which is the delta since the base's own floor, so gap (3) is only partly
+closed. The check that the `S` and lineage of the ANN's graph equal the base's moves
+to `binding` (for
+`source_identity`), which with `for_each_vector_block` (for `score_batch`) stays with the
+ANN lane. `base_vector_at` is the existing `CompactView::read_vector`. Metadata
 decode/auth failure remains an error, never predicate false.
 
 P3d supplies exact kernels over canonical expanded stored values with f64
@@ -685,6 +698,7 @@ round-tripping Rust output alone is insufficient.
 | `compact_ann_lifecycle_matrix`, `compact_ann_report_once` | Copy versus rewritten backup/restore/convert/re-encrypt/replica/feed/export, refusal parity, rebinding or omission, corruption not repair; all readers validate, reports bounded/once, no worker in inspection/feed/export. |
 | `compact_ann_reference_numeric_edges`, `compact_ann_exact_rerank_oracle` | Signed zeros, subnormals, extreme finite stored values, empty/zero cosine, odd dimensions, scalar ties/constants/clamps; exact returned distances/tie order match stored-value oracle on every supported P3d kernel. |
 | `compact_ann_private_gate_stays_closed`, `compact_ann_old_build_refusal` | No default/public activation or wire/API diff; old pre-compact reader refuses flag before replay/repair, current release reader still refuses unqualified source capability, compact-aware unknown-derived reader skips only authentic optional data. |
+| `compact_hnsw_rerank_uses_pinned_generation`, `compact_rebuild_snapshot_survives_drop_and_refused_checkpoint`, `compact_ann_snapshot_rejects_other_generation` | Moved here from the P3 slice 4 row (OPEN-71-04, 2026-11-05) and required before any compact ANN activation: a rebuild or HNSW rerank reads the one pinned generation across a Database drop and a refused checkpoint attempt, and an ANN snapshot built for one generation is refused by another. P3b slice 4 keeps the generic pin and the refusal; no gate disappears with the move. |
 
 Future build coverage: default and `--no-default-features`, WASM owned-buffer
 path with no worker thread, native supported architectures; unavailable
@@ -803,11 +817,21 @@ wire/binding fields remain frozen for this slice.
 
 ## K. Risks and unverified items
 
-- **P3b slice 0 is an unaccepted candidate.** No production
-  `CollectionRecords`/`ReadAccess`, generation pin, complete base/overlay
-  cursor or fallible batch scorer was found at the setup head. The accepted
-  test-only column accessor is not that engine seam. G lists the exact
-  assumptions; freeze them before code, revise this candidate if they differ.
+- **Reconciled at v0.7.0.** P3b slice 0 is accepted and integrated, with
+  slices 1a, 1b, 2 and 3 and lane B's seam. A test-gated generation pin
+  (`CompactGeneration`, `CompactView`), a base-plus-overlay `CollectionRecords`,
+  an ordered base-plus-overlay cursor (`compact_iter`) and a bounded read
+  workspace (`ReadWorkspace`) exist; there is no `ReadAccess` trait, and the
+  seam compiles only under `cfg(test)`. Added in 0.7.1 (lane R0, slice 3): the
+  physical-base cursor `CompactView::base_rows`, the affected-ID cursor
+  `CollectionRecords::affected_ids` (the whole overlay, without an `S`: the floor
+  and lineage check waits for the binding) and the non-materializing
+  `CollectionRecords::ordered_ids`. Still absent: a portable binding and a
+  fallible bounded batch scorer (base-only vectors exist as
+  `CompactView::read_vector`). G's assumptions are restated with concrete shapes
+  in the [seam freeze](p3b-seam-freeze.md#5-additions-for-p3c), which the owner
+  approved as additive shapes on 2026-11-05. The binding and the batch scorer
+  stay with the ANN lane.
 - Current `ImageCheck` retains some validation state and current loader
   materializes sources. Eager full ANN source/code checks must not force a
   resident record map. Peak validation, rebuild arena and aggregate concurrent
