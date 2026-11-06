@@ -100,7 +100,8 @@ Then, strictly in this order:
 3. Probe the resume receipt of the request key. If present, decode it
    strictly, live or expired (section 4). A receipt with no v2 job (the job is
    absent, or still v1) is `InvalidBundle`: E1 answers a receipt without its
-   job the same way.
+   job the same way. If it is absent while an outcome node of its key exists
+   (index 0 or 1), that is `InvalidBundle` too (DR6).
 4. No job: `MissingMemory`.
 5. `job_key` of the request differs from the scope's `JobKey`: `MissingMemory`.
 6. A live receipt (`now < expiry`): the same digest replays (section 6)
@@ -172,8 +173,10 @@ original revision is read from the actual receipt node after commit or reopen.
 
 All nodes have exactly one label and exactly the listed properties, no graph
 TTL, temporal segment or inline outcome. Strings are at most 4,096 bytes;
-integers use the engine i64. u64 counters are canonical decimal Strings (the
-same canonical-form rule as E1's expiry).
+integers use the engine i64. u64 counters are canonical decimal Strings: `0`
+or no leading zero, as E1 section 4 specifies for counters (`e2_chunks` and
+`expires_at_ms` are also nonzero, as E1's expiry). Every bound of the rules
+below that multiplies a counter is compared exactly, in 128-bit arithmetic.
 
 **Job, schema v2** (`VliteMemoryErasureJob`, key `JobKey`; replaces the v1
 node by `UpsertNode`, which keeps the node's edges and attachments, none of
@@ -217,6 +220,8 @@ receipt, with these rules and no others:
   `outcome_chunks` is 1; `expires_at_ms` is a canonical nonzero u64.
 - DR4. The outcome node with index 0 exists and the one with index 1 does not.
 - DR5. The scope's job is a valid v2 job (step 3 of section 2).
+- DR6. When the receipt is absent, no outcome node of its key exists (index 0
+  or 1).
 - DO1. The outcome node has exactly the properties above; `receipt_key` is the
   receipt's key; `index` is 0.
 - DO2. `outcome` parses as exactly the seven lines of section 3 with canonical
@@ -261,13 +266,16 @@ deleted memories no longer match. A memory hidden by TTL at `now` is not a
 candidate. Node IDs are never reused, and compaction, upgrade and conversion
 keep them, so the order is stable; the barrier refuses memory writes, so a
 pending scope only shrinks. The memory layer declares no property index, so a
-page examines the `VliteMemory` nodes of every scope in ID order: a chunk reads
-the nodes up to its last candidate, not 4,097.
+page examines the `VliteMemory` nodes of every scope in ID order: a chunk
+examines them up to the page that holds the 4,097th candidate (that page can
+return up to 1,000 matches, so up to 5,000 candidates are read before the cut),
+or to the last `VliteMemory` node of the graph when fewer candidates exist.
 
 **Decode.** Every candidate of the window is decoded with A2's
 `existing_memory`, and must also have exactly the label `VliteMemory` and the
-key `memory_key(ScopeKey, id)`. A failure is `InvalidBundle` and aborts the
-chunk before any planning, whatever the candidate's position. If the window
+key `memory_key(ScopeKey, id)`. Every `existing_memory` error and every failed
+check is `InvalidBundle` (as C1 maps it) and aborts the chunk before any
+planning, whatever the candidate's position. If the window
 holds fewer than 4,097 candidates (`N` of them) the total is known and the
 chunk's `remaining_after` is `N - memories_deleted`; otherwise it is unknown.
 
@@ -285,17 +293,24 @@ chunk's `remaining_after` is `N - memories_deleted`; otherwise it is unknown.
    record.
 2. Incident edges, both directions, deduplicated by edge ID, read in pages with
    the graph read ceilings until the list ends. More than 4,096 unique edges
-   stop the reading: `m` can never fit (no further validation of `m`).
+   stop the reading: `m` can never fit, and its content (step 3) is not
+   validated.
 3. Content. Each incident `HAS_CONTENT` edge whose source is `m` names a
-   content node. With `i` the target's integer `index` property, the edge key
-   must be `content_edge_key(m.key, i)`, the target key `content_key(m.key, i)`,
-   its labels exactly `VliteMemoryContent` and its `scope` the ScopeKey, else
-   `InvalidBundle`. Each content node is deleted after its edges.
+   content node. With `i` the target's `index` property, which must be a
+   non-negative Integer, the edge key must be `content_edge_key(m.key, i)`, the
+   target key `content_key(m.key, i)`, its labels exactly `VliteMemoryContent`
+   and its `scope` the ScopeKey, else `InvalidBundle`. The content node's only
+   visible incident edge must be that `HAS_CONTENT` edge (else `InvalidBundle`)
+   and it must have no attachment (else `ForeignAttachment`): the node delete
+   removes attachments, and an edge would refuse it. Each check is one
+   `neighbors` read and one attachment read per content node. Each content node
+   is deleted after its edges.
 4. The memory node delete with `Expected::Revision` of the revision read.
 
-Evidence and content validation of `m` precede the fit test, so a candidate
-that does not fit is still validated (an error aborts the chunk) unless it
-exceeded 4,096 edges.
+The evidence check (step 1) always runs before the edge read, and steps 1-3 run
+before the fit test, so a candidate that does not fit is still validated (an
+error aborts the chunk), except that a candidate with more than 4,096 unique
+edges skips step 3.
 
 **Fit rule.** Cost is counted as A2 counts, plus the E2 operations:
 
@@ -339,15 +354,19 @@ returned token is the token of the new revision when `pending`, absent when
 outside E2, which never skips: a job bound to no collection (E1 allows the
 begin through such a handle) over a scope with evidence (`InvalidEvidence`);
 evidence attached in another collection, an application's own attachment on a
-memory node, or an owner mismatch (`ForeignAttachment`); an inconsistent
-evidence list, memory or content structure (`InvalidBundle`); and a first
-candidate that alone does not fit (`OperationLimit`). A handle bound to a
+memory node or on one of its content nodes, or an owner mismatch
+(`ForeignAttachment`); an inconsistent evidence list, memory or content
+structure, including a content node with another visible edge
+(`InvalidBundle`); and a first candidate that alone does not fit
+(`OperationLimit`). A handle bound to a
 different collection cannot resume the job (`InvalidBundle`, as E1). Repair is
 an administrative action through raw graph access, or a later tool; the
 user-facing message must say the job is stopped, never that it is complete.
 
 **Residue.** A completed job keeps the job (`logical`), the begin and resume
-receipts with their outcomes and the scope node. It also leaves what E2 cannot
+receipts with their outcomes and the scope node, and the receipts of earlier
+remember, forget and consolidate operations, whose outcome nodes name memory
+IDs (hex-encoded). It also leaves what E2 cannot
 reach, to be swept by E4's bounded orphan cleanup (R15): the
 `VliteMemoryContent` nodes (memory text) and detached evidence records of
 memories that graph TTL reclaimed, before the barrier or by a chunk frame's
@@ -360,9 +379,16 @@ every byte of text.
 ## 6. Barrier, replay and the E1 matrix
 
 The barrier is unchanged: job presence, checked right after the scope-node
-read, still decides every other operation. E2 changes no barrier row. A chunk
+read, still decides every other operation. E2 changes no barrier row, but the
+pre-barrier replay exception of the other operations (a receipt older than the
+job replays) compares graph revisions: after a checkpoint and reopen the job
+and those receipts can carry one revision, and the exception then fails closed
+with `DeletionPending` until a chunk raises the job revision, and for good once
+the job is `logical` (compaction can do the same to receipts that share the
+job's body); E4 reconciles, and the maintenance goldens expect it. A chunk
 frame deletes only nodes of memories of this exact scope and their verified
-content nodes, and edges incident to them; it never touches the scope node, a
+content nodes, and the edges incident to those memories (a content node has no
+other edge, section 5); it never touches the scope node, a
 receipt of another operation or another scope's memory. Child and sibling
 scopes stay unbarred and untouched.
 
@@ -379,7 +405,8 @@ view, not the current job: after later chunks its token is stale and a fresh
 **Same key, after expiry.** The key may be used for a new chunk: the old
 receipt and outcome are replaced in the new frame (section 5). A retry of a
 chunk that already committed, made after its receipt expired, therefore fails
-the fence (`JobConflict`).
+the fence (`JobConflict`, or `DeadlineExceeded` first when its deadline also
+passed).
 
 **`erasure_job`.** Returns the current job: `job_key`, the node revision,
 generation, state, hidden visibility, `deleted_count`, `remaining`, `chunks`
@@ -404,20 +431,27 @@ re-plans an uncommitted one.
 **Clocks and TTL.** The commit clock is `max(now, wall clock, graph high-water)`,
 captured once; no E2 node has a TTL. The frame first reclaims every entity due
 at that clock, then applies its operations. Planning saw the entities that
-expire after `now` as live, so a memory, edge or evidence record that expires
-in `(now, commit clock]` is already gone when its planned operation runs: the
-frame fails with a `Storage` error (a revision mismatch or a not-found), commits
-nothing, and E2 does not remap it. A caller retries with a current clock; a
-retry at the same `now` plans the same entity and fails the same way, one at a
-clock at or after its expiry no longer sees it. This needs a request clock
-behind the wall clock, so test and oracle TTL cases use clocks above the wall
-clock and model the high-water mark (E1's begin frame already reclaimed
-everything due at its own clock). The frame's reclaim also removes the nodes of
-memories that were hidden at `now` (R14), without counting them as deleted.
+expire after `now` as live, so a memory or edge that expires in
+`(now, commit clock]` is already gone when its planned operation runs (the
+evidence operations of such a memory fail because its node is gone; attached
+records have no expiry of their own): the frame fails with a `Storage` error (a
+revision mismatch or a not-found), commits nothing, and E2 does not remap it. A
+caller retries with a current clock; a retry at the same `now` plans the same
+entity and fails the same way, one at a clock at or after its expiry no longer
+sees it. The race needs a commit clock above the request clock: a request clock
+behind the wall clock, or a graph high-water above it. Real frames raise the
+high-water to the clock they reclaim at, so tests reproduce the race with the
+harness-only high-water poke (`graph_clock` set above the request clock before
+the call, as the E1 and C1 tests do) and oracle cases model it as `high_water`
+in the setup. TTL cases use clocks above the wall clock so that the wall clock
+never decides an outcome (E1's begin frame already reclaimed everything due at
+its own clock). The frame's reclaim also removes the nodes of memories that were
+hidden at `now` (R14), without counting them as deleted.
 
-**Reads.** A chunk reads at most the window of section 5 plus the planning
-reads of its members and of the first candidate that does not fit; no chunk
-claims a latency or size figure.
+**Reads.** A chunk examines the `VliteMemory` nodes described in section 5 (up
+to 5,000 candidates, or every node of the label when fewer match), plus the
+planning reads of its members and of the first candidate that does not fit; no
+chunk claims a latency or size figure.
 
 **Reopen.** Acceptance round-trips every v2 node, the token, the replay result,
 the fence failures and the barrier matrix on plain file, encrypted file,
@@ -428,17 +462,22 @@ append (the whole chunk is there).
 **Maintenance.** An ordinary directory checkpoint restates every graph node and
 edge at the checkpoint sequence (only a precision image restores revisions,
 `src/maintenance.rs` `write_v5_image`; the p2 design says "Graph entities
-restate at S"), and compaction and upgrade renumber them per body. Afterwards
+restate at S"), and compaction and upgrade renumber them per body.
+`Database::checkpoint()` installs the image but keeps the open handle's graph:
+the restated revisions appear when the store is next opened, so maintenance
+cases checkpoint and reopen. Afterwards
 the job and every receipt can carry one shared revision or unrelated ones, so E2
 decides nothing from a relation between graph revisions: the fence compares
 `expected_revision` with the job node's current revision, the latest chunk
 receipt is the one whose `chunk_no` equals `e2_chunks`, and the begin receipt of
 a v2 job is checked by digest only (section 4). After such maintenance a token
-read earlier is stale (`JobConflict`): read the job again with `erasure_job`;
+read earlier may be stale (`JobConflict`; it stays valid only when the job
+revision did not change): read the job again with `erasure_job`;
 replays of older keys keep working. A v1 job keeps E1's equality of the begin
 receipt's revision with the job's, so its begin replay can fail `InvalidBundle`
 after compaction or upgrade (E1's documented limit). Barrier and deletion state
-are unaffected; E4 owns reconciliation and lineage fencing. A pending job is
+are unaffected, except for the pre-barrier replay exception of section 6; E4
+owns reconciliation and lineage fencing. A pending job is
 never silently completed or skipped by maintenance. This corrects C2 decision 10
 and the E4 test list, which say that directory checkpoints do not renumber: for
 graph entities of an ordinary store they do, so E4 must treat a checkpoint like
@@ -467,11 +506,11 @@ serving.
 | R9 | Resume of a `logical` job | `JobConflict` for a new key; replay of an old key works | The barrier is permanent (C2 decision 5) |
 | R10 | Receipt contents | Counts only: no memory IDs, no content | Privacy; the deletion manifest and its retention are E4 |
 | R11 | Replay view | The original chunk's numbers and the token of its revision and chunk number | C2 E2: replay returns the original chunk result |
-| R12 | Errors | No new `MemoryError` variant; a frame error stays `Storage` | Existing categories suffice (E1 R-table style) |
+| R12 | Errors | No new `MemoryError` variant; frame errors are returned as A2 returns them | Existing categories suffice (E1 R-table style) |
 | R13 | Maintenance | No decision from graph-revision relations; latest chunk by `chunk_no`; document and let E4 reconcile; corrects C2 decision 10 for checkpoints | Checkpoint and compaction renumber graph revisions (section 7) |
 | R14 | Hidden expired memories | Not candidates; the frame's own reclaim removes their nodes | They are invisible at `now`; deleting them needs a TTL-aware scan outside E2 |
 | R15 | Residue (content nodes and evidence records of reclaimed memories, evidence retained earlier by A2) | Not swept by E2; E4 owns a bounded orphan sweep. Option: sweep the scope's edgeless content nodes in the completing chunk (costs a second label scan and changes `remaining`) | No manifest exists yet to account for it; recommend E4 |
-| R16 | Planning strictness | Decode the whole window; check the memory key and label; verify content edges and nodes (A2 trusts them) | Erasure must not delete a node it cannot prove is this memory's |
+| R16 | Planning strictness | Decode the whole window; check the memory key and label; verify content edges and nodes, and that a content node has no other edge and no attachment (A2 trusts them) | Erasure must not delete a node, or detach a record, it cannot prove is this memory's |
 | R17 | Amendments to C2 section 6 E2 | The surface returns `ResumeErasureResult` (not `ErasureStatus`); allowed files add new `src/memory/erasure/resume.rs` and `src/memory/erasure/resume_tests.rs` (hooks in `erasure.rs`, visibility in `src/memory.rs`); the test "shared evidence retained" becomes "evidence never retained"; "same erasure oracle" becomes two new files; E1 section 8's plan to append E2 groups to `erasure_golden.json` is replaced by a separate golden | Accepted fixtures stay additive-only; keeps `erasure.rs` and its tests small |
 
 ## 9. Independent acceptance and not frozen
@@ -487,7 +526,9 @@ precedence probe separate, including a receipt beside no job, a wrong job key
 beside a live receipt and an old job); the window, the decode of the whole
 window and the 4,097 cut; the fit rule at exactly 4,095, 4,096 and 4,097
 operations with shared edges counted once, and a hub of more than 4,096 edges;
-content edge and node validation; evidence ownership and every stop of
+content edge and node validation, including a content node with another edge
+or an attachment, and an outcome node without its receipt (DR6); evidence
+ownership and every stop of
 section 5; completion, the empty scope and a chunk that completes empty;
 replay of the original view after later chunks; expired-key reuse and the
 `JobConflict` of a late retry; key and digest conflicts; begin replay and
@@ -495,13 +536,16 @@ replay of the original view after later chunks; expired-key reuse and the
 `erasure_status` on a v2 job; the exact-scope barrier rows, including
 receipts that predate the barrier, after chunks; barrier isolation of child
 and sibling scopes; binding mismatch and a missing binding; the TTL race of
-section 7 (clocks above the wall clock, high-water modeled) and the residue
-statement; and logical reopen. Maintenance cases relabel the graph revisions
-(a checkpoint gives every node one value, a compaction an arbitrary assignment)
-and assert errors and counts, never revision numbers. Rust replays them on the
+section 7 (clocks above the wall clock, the high-water poke modeled as
+`high_water`) and the residue statement; and logical reopen. Maintenance cases
+relabel the graph revisions (a checkpoint gives every node one value, a
+compaction an arbitrary assignment) and assert errors and counts, never
+revision numbers; they include a pre-barrier receipt, which fails closed with
+`DeletionPending` after the relabel (section 6). Rust replays them on the
 four storage backends and, for the maintenance cases, through a real
-`Database::checkpoint()` and `maintenance::compact` on the stores that have
-them. A Python snapshot round trip is logical evidence, not backend evidence.
+`Database::checkpoint()` followed by a reopen, and `maintenance::compact`, on
+the stores that have them. A Python snapshot round trip is logical evidence,
+not backend evidence.
 
 Hand mutants the Rust slice must kill, each by a named test: ignore
 `expected_revision`; ignore the generation; accept a token of another revision;
@@ -510,12 +554,14 @@ of the stored outcome; the digest omits the token or the window; delete only
 the memory node (dangling edges); skip content nodes; retain evidence by A2's
 rule; skip the evidence delete; count guards wrongly (4,096 versus 4,095 or
 4,097); count a shared edge twice; order by key instead of node ID; decode only
-chunk members instead of the window; skip the content edge or node validation;
-mark `logical` while `remaining` is unknown; allow a resume on a `logical` job;
+chunk members instead of the window; skip the content edge or node validation
+or the content node's edge and attachment checks; mark `logical` while
+`remaining` is unknown; allow a resume on a `logical` job;
 check the deadline before the replay; probe the missing job before the
 receipt; find the latest receipt by revision equality instead of `chunk_no`
-(killed by a checkpoint case); and require E1's revision equality for the begin
-receipt of a v2 job (killed by a checkpoint case). Two mutants are equivalent
+(killed by a checkpoint-and-reopen case); and require E1's revision equality
+for the begin receipt of a v2 job (killed by the ordinary v2 begin replay, where
+the begin revision is below the job revision). Two mutants are equivalent
 under `&mut Database` and are recorded, not killed (E1's ledger precedent):
 drop the job revision guard in the frame, and reuse an expired receipt without
 its replacement guard.
