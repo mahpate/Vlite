@@ -192,7 +192,7 @@ Key-value writes follow the server's configured durability. With `full`, a put, 
 
 ## Revisions are not fencing tokens
 
-A version is a commit sequence inside one file lineage. It rises with every write to the file, and it changes after compaction, format upgrade and restore. It is a compare-and-set token, not a durable lease-fencing token: entry revisions do not establish durable, never-reused fencing domains, so a version cannot stop a slow holder's later side effects. Leases and a fencing-token ledger are not implemented; they are a design only (see [Not included in 0.7.1](RELEASE-0.7.1.md#not-included-in-this-release)). A recipe that needs mutual exclusion must stay safe when two workers briefly believe they hold the same claim.
+A version is a commit sequence inside one file lineage. It rises with every write to the file, and it changes after compaction, format upgrade and restore. It is a compare-and-set token, not a durable lease-fencing token: entry revisions do not establish durable, never-reused fencing domains, so a version cannot stop a slow holder's later side effects. Leases and a fencing-token ledger are not implemented; they are a design only (see [Not included in 0.7.2](RELEASE-0.7.2.md#not-included-in-this-release)). A recipe that needs mutual exclusion must stay safe when two workers briefly believe they hold the same claim.
 
 ## Use it from a client
 
