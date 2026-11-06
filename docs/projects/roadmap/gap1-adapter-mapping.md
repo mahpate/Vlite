@@ -419,3 +419,61 @@ code, goldens, OpenAPI text and user documentation agree.
   (1 for orthogonal vectors), are regenerated with evidence IDs the server can
   be seeded with and replayed ([0.7.1 design note](m71-memory-followups.md),
   section 3).
+
+## 7. ES: serving the erasure jobs (PROPOSED, 2026-11-06)
+
+Status: **PROPOSED, nothing here is approved or implemented.** Sections 1-6
+describe the shipped behaviour until ES lands. ES serves the E1 barrier and
+the E2 chunks ([E1](gap1-e1-erasure-barrier-contract.md),
+[E2](gap1-e2-resume-contract.md)) over REST, MCP and CLI. It adds no persisted
+format, no public `Error` variant and no wire shape: every shape below is the
+owner-selected one of the [memory serving
+contract](serving-memory-contract.md) sections 4-8. The dashboard workspace is
+a separate, later slice. Each ruling that is not already settled by those
+documents is a PROPOSAL with options and a recommendation.
+
+| Wire operation | After ES | Core entry point |
+|---|---|---|
+| Forget | `ids` as today; `target.scope` and `target.session` with `allow_job: true` begin a job | `MemoryMut::begin_erasure` (E1) |
+| GetErasure | served | `MemoryRef::erasure_job` (E2) |
+| ResumeErasure | served | `MemoryMut::resume_erasure` (E2) |
+| GetReceipt | adds `resume_erasure` and the receipt of a job-begin `forget` | `MemoryRef::receipt`, extended |
+| Still refused | `series` and `entity` targets (`forget_target`), `expire` (`forget_expire`), facts (`facts`), the `correct_facts` and `remember` receipts | none |
+
+**Settled by the contract (no decision needed).** Success is 200 for state
+`logical` and 202 for `pending` (Forget, ResumeErasure; GetErasure is always
+200). An absent job is 404 `erasure_not_found`. A job revision or generation
+mismatch is 412 `precondition_failed` with `details.field`. `outcomes` is empty
+for a bulk target and `remaining_work` is a decimal string when known and null
+when unknown. `erasure_notice` is on every response with `manifest_id` omitted
+until E4 (section 1). The route order of section 2 applies unchanged
+(authentication, binding and exact scope, writable precheck, request
+validation, core call). The begin commits the barrier and deletes nothing.
+
+| ID | Question | Options | Recommendation |
+|---|---|---|---|
+| ES1 | What is `job_id` and `erasure.id`? | (a) the E1 `JobKey` (a per-scope singleton, 149 bytes); (b) a short derived ID; (c) a constant | (a). A `job_id` that is not the scope's `JobKey` answers like no job: 404 `erasure_not_found` |
+| ES2 | What does `erasure.target` echo? | (a) `{"scope": true}` for every job; (b) `{"session": true}` when the scope has a session; (c) persist the kind (a v3 job schema) | (a). The v2 job records no target kind and E1 erases the exact scope whichever form the request used; (b) would guess |
+| ES3 | A `scope` or `session` target with `allow_job` absent or false | (a) 422 `invalid_input`, `details.field` `allow_job`, no barrier; (b) a 409 capability refusal | (a). It is the contract's "oversized deletion needs `allow_job`" rule applied to every scope or session target, because this release has no atomic scope delete. A later atomic path would accept more requests, never fewer. `session: true` without `scope.session` is 422 `invalid_input`, `details.field` `target`. `expire` with either target stays `forget_expire` |
+| ES4 | A job already exists (any state) and a begin arrives under a new or expired key | (a) 409 `memory_deletion_pending`; (b) 412 `precondition_failed` | (a). The scope is already behind the permanent barrier, as for every other write (E1); the message tells the caller to read the job with GetErasure. The core error is `JobConflict` |
+| ES5 | `details.field` of a resume `JobConflict` | (a) the adapter names it from a fresh `erasure_job` read in the same write: `state` if the job is `logical`, else `generation` if it is not 1, else `revision` if it differs, else `resume_token`; (b) always `resume_token` | (a). It follows the core's own check order and costs one read; no new core error payload |
+| ES6 | What does a replayed begin return? | (a) the original begin view: `pending`, 0 deleted, remaining null, the token of the begin revision, `replayed: true`, HTTP 202, even after chunks ran; (b) the current job | (a), the "original result" rule of the contract. After progress the token inside it is stale; GetErasure gives the live one. A retry after maintenance renumbered the scope node within the receipt window is 409 `idempotency_conflict` (the E1 digest binds the scope revision); no second job is possible and GetErasure shows the job |
+| ES7 | A job-begin and a `forget` by IDs share the wire operation `forget` but live in two core receipt namespaces | (a) the adapter refuses either with 409 `idempotency_conflict` when the other namespace holds a LIVE receipt under the same key (one `retry_until` read, before any write); (b) allow both and let GetReceipt return the first found; (c) merge the namespaces (a format change) | (a). GetReceipt for `forget` then reads at most one receipt |
+| ES8 | GetReceipt result shapes | `resume_erasure`: the chunk's original view (`replayed: true`, `outcomes` empty, `state`, `remaining_work`, `erasure` as the chunk left it, the token recomputed from the receipt revision); `forget`: the `forget` namespace, then the job-begin namespace, whose result is the ES6 begin view | One reading, no option: the lookup needs no request. Two crate-private core additions: the begin and chunk lookups, and a helper that builds the begin view. No persisted change |
+| ES9 | A retired binding (rule 4 of section 4) with a pending job | (a) keep rule 4: ResumeErasure is refused as `binding_retired`, so a job can never be finished through the memory routes; (b) amend rule 4: ResumeErasure stays served on a retired binding, a begin stays refused | (b). Deletion only removes data and creates none, a retired binding never becomes active again, and (a) leaves an erased scope half deleted with only raw graph access to finish it. This amends a provisional ruling |
+| ES10 | A job that cannot advance: a memory with more than 4,096 incident edges or a scan that reaches a read ceiling (`OperationLimit`), evidence owned elsewhere (`ForeignAttachment`) | (a) keep the section 2 mappings: 422 `invalid_input` with `details.limit` naming the bound, and 409 `memory_attachment_conflict`; nothing is deleted by the failed chunk; (b) a new code | (a). No new code. The 4,096-edge case is lifted by E3's edge-level chunks; until then it is operator action |
+| ES11 | Authorization per route | GetErasure: `graph_read` and the exact scope grant (status only, no evidence operation); ResumeErasure and the job-begin Forget: `graph_write` plus `write` on the binding's evidence collection, as Forget today (the chunk may delete evidence records) | One reading of contract section 6, no option |
+| ES12 | Base `MemoryMutation` fields on ResumeErasure and the job-begin Forget | `deadline_ms` is the core deadline; `require_complete_feed: true` is 409 `memory_feed_unsupported` before any write, as on every mutation; `max_references` is validated and unused | One reading, no option |
+| ES13 | MCP and CLI | The tool names and verbs of contract section 4 stay (`vlite_memory_erasure`, `vlite_memory_resume_erasure`, `erasure`, `resume-erasure`); `vlite_memory_forget` and `forget` accept the new target forms; a 202 is a success; the CLI makes one call per command and never loops (the caller resumes until `logical`) | One reading, no option |
+| ES14 | Rollback to 0.7.1 | No persisted change in ES. v0.7.1 contains the E1 core and honours the barrier at every memory read and write hook (a presence probe of the job node: `src/memory.rs`, `recall.rs`, `consolidate.rs`, `stale.rs`), so a barred scope stays hidden and write-refused after a rollback; it has no route to read, resume or clear a job, and the barrier is permanent. Deleted memories stay deleted. Document it: roll back only knowing the job cannot be advanced there | Documentation only |
+
+Tests ES adds: server pins derived by hand from the contract (a new
+`pins_erasure.rs`), replayed wire fixtures written by an independent author
+(positive begin, get and resume cases, each rejection with its defect and
+repair), a CASES row for each new mutating or name-addressed route in
+`tests/server_memory_reserved_as_missing.rs`, the MCP and CLI exchange
+fixtures, the client tests that pinned the refusal, a live end-to-end script
+case and a differential against v0.7.1 in which only the 409-to-2xx changes
+named in section 1 may differ. The dashboard coverage list keeps
+`erasures/get` and `erasures/resume` as unsupported until the dashboard slice
+lands.
