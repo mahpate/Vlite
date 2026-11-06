@@ -44,7 +44,7 @@
 #graph .graph-view-actions label { margin: 0; }
 #graph .graph-view-actions button { min-width: 40px; min-height: 40px; }
 #graph .graph-gesture-help { flex: 1 1 280px; color: var(--studio-muted); font-size: 12px; }
-#graph #graph-view { max-height: none; height: clamp(280px, 42vw, 460px); touch-action: pan-y; outline-offset: 3px; }
+#graph #graph-view { max-height: none; height: clamp(280px, 42vw, 460px); touch-action: none; outline-offset: 3px; }
 #graph #graph-scene { transform-origin: 0 0; }
 #graph #graph-view.is-gesturing { cursor: grabbing; }
 #graph #graph-view:not(.is-gesturing) { cursor: grab; }
@@ -64,7 +64,8 @@
 #graph #graph-view .graph-node.is-neighbor circle { fill: var(--studio-accent); stroke-width: 3; }
 #graph #graph-view .graph-node.is-selected circle { fill: var(--studio-search); stroke: var(--studio-surface); stroke-width: 3; }
 #graph #graph-view .graph-node.is-selected text { fill: var(--studio-search); }
-#graph .graph-three-stage, #graph .graph-three-stage canvas { touch-action: pan-y; }
+/* A finger that starts on the graph drags or turns it; the page scrolls from anywhere around it. */
+#graph .graph-three-stage, #graph .graph-three-stage canvas { touch-action: none; }
 #graph .graph-three-stage canvas { cursor: grab; }
 #graph .graph-three-stage canvas.is-gesturing { cursor: grabbing; }
 #graph .graph-three-node { transition: opacity 140ms ease, border-color 140ms ease, background-color 140ms ease, box-shadow 140ms ease; }

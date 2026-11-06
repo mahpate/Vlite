@@ -549,7 +549,7 @@
             h(doc, "button", { id: "graph-zoom-out", type: "button", class: "secondary", "aria-label": "Zoom out", text: "−" }),
             h(doc, "button", { id: "graph-zoom-in", type: "button", class: "secondary", "aria-label": "Zoom in", text: "+" }),
             h(doc, "button", { id: "graph-fit", type: "button", class: "secondary", text: "Fit / reset view" }),
-            h(doc, "span", { class: "graph-gesture-help", text: "Drag nodes · drag empty space to pan or rotate · Ctrl/Cmd + scroll to zoom · use + / − and 0 when focused" }),
+            h(doc, "span", { class: "graph-gesture-help", text: "Drag nodes · drag empty space to pan or rotate · Ctrl/Cmd + scroll to zoom · use + / − and 0 when focused · on touch screens, drag outside the graph to scroll the page" }),
             h(doc, "button", { id: "graph-connect-nodes", type: "button", class: "secondary", hidden: true, "aria-pressed": "false", text: "Connect two nodes" }),
             h(doc, "label", { "data-graph-rotation": "", hidden: true }, "Turn", h(doc, "input", { id: "graph-yaw", type: "range", min: "-180", max: "180", value: "25" })),
             h(doc, "label", { "data-graph-rotation": "", hidden: true }, "Tilt", h(doc, "input", { id: "graph-pitch", type: "range", min: "-80", max: "80", value: "15" }))),

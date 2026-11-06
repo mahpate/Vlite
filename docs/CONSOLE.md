@@ -190,7 +190,7 @@ up to 40 nodes/400 edges; tables retain everything. Select nodes/edges to edit o
 **Connect two nodes**. Confirm writes; edits reject stale revisions. Only empty
 graphs can be deleted. Requery after writes.
 Drag nodes; pan/rotate in 2D/3D; Ctrl/Cmd + scroll zooms.
-Ordinary scrolling/vertical touch scrolls the page. Selection highlights neighbors,
+Touch scrolling starts outside the graph. Selection highlights neighbors,
 not dimming labels. Fit/reset and keyboard controls remain available.
 Settling respects reduced motion and pauses offscreen.
 
