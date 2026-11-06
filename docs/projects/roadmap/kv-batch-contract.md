@@ -60,9 +60,14 @@ that expired record, like a single delete, and also reports `false`. A batch
 that changes no record (every operation a delete that finds nothing) commits
 nothing and writes no frame.
 
-The first operation, in order, that cannot run fails the whole batch and
-nothing is written: a failed condition, 16 occupied slots, an attached record
-(`graph_attached_record`) or an invalid operation.
+Every check that needs no state is made first, over the whole request and in
+order: the operation count, each namespace, key and value, the running total
+of value bytes, the absence of a deadline and the duplicate keys. An invalid
+request is refused with its first such error, whatever the state of the
+collection. Then the operations run in order against the state, and the first
+that cannot run fails the whole batch and nothing is written: a failed
+condition (`precondition_failed`), 16 occupied slots (`kv_slots_exhausted`) or
+an attached record (`graph_attached_record`).
 
 ### 2.3 Crash behavior
 
@@ -167,7 +172,8 @@ A put in a batch whose `options.expires_at_ms` is set is refused with
   whose results fit the response cap is returned with `next_index` set to the
   first key not read; the first key always fits. One read guard and one clock
   serve the whole call. The graph routes use the same `POST …/get` shape.
-- `GET /v1/capabilities` gains `features.kv_batch` and the two routes.
+- `GET /v1/capabilities` gains `features.kv_batch` (true on format 5 and later
+  files, like `features.kv`) and the two routes.
 
 Wire details that every client and tool follows:
 

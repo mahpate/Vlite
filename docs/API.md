@@ -87,6 +87,8 @@ keys, not permissions.
 | `PUT /v1/collections/{collection}/kv/entry` | `write` | `version`, `expires_at_ms` |
 | `DELETE /v1/collections/{collection}/kv/entry?namespace=n&key=k` | `write` | `deleted` |
 | `GET /v1/collections/{collection}/kv/entries?namespace=n` | `read` | `items`, `next_after` |
+| `POST /v1/collections/{collection}/kv/batch` | `write` | `results` |
+| `POST /v1/collections/{collection}/kv/entries/get` | `read` | `items`, `next_index` |
 
 A put body is `{"namespace":"n","key":"k","value_base64":"YQ=="}`.
 Optional `expected` is `"any"` (default), `"absent"`, or
@@ -124,17 +126,73 @@ otherwise it is null, including empty pages. One owner guard and expiry clock
 cover a page; no snapshot spans pages. Each key appears once, as `GET` returns
 it; look-alike records that ordinary routes left elsewhere are ignored.
 
+**Batch.** `POST /v1/collections/{collection}/kv/batch` applies puts and
+deletes of one collection, all or nothing. The body
+
+```json
+{"operations":[
+  {"op":"put","namespace":"app","key":"a","value_base64":"AAEC","expected":"absent"},
+  {"op":"delete","namespace":"app","key":"b","expected":{"revision":"42"}}]}
+```
+
+answers 200 `{"results":[{"version":"43"},{"deleted":true}]}`. `operations` is
+required and holds 0 to 1,000 objects. A `put` takes `namespace`, `key`,
+`value_base64` and an optional `expected`; a `delete` takes `namespace`, `key`
+and the same `expected`. `expected` is `"any"` (default), `"absent"` or
+`{"revision":"<u64 decimal>"}`, with the bounds of the single routes. A put has
+no `expires_at_ms`: the field is unknown, so 422 `invalid_json`, like any other
+unknown or duplicate field. The decoded values of all puts total at most
+**4,194,304 bytes**, and no two operations name the same `(namespace, key)`;
+either violation is 422 `invalid_input`, and its message names the operation.
+`results[i]` answers `operations[i]`: a put gives
+`{"version":"<nonzero u64 decimal>"}` and a delete gives `{"deleted":<bool>}`.
+An empty batch answers `{"results":[]}`.
+
+The batch behaves as if its operations ran one at a time, in order, against the
+live state and one expiry clock, and were then committed once, as one frame: a
+crash leaves all of it or none of it, and no reader sees part of it. Every put
+of one batch gets the same version, the commit's sequence, so each is a valid
+`expected` revision for its key; a put clears the deadline of the entry it
+replaces. Each operation fails as its single call does: a failed condition is
+412 `precondition_failed` with the same message, sixteen occupied slots are 409
+`kv_slots_exhausted`, and a delete of an entry that a graph node is attached to
+is 409 `graph_attached_record`. The first operation, in order, that cannot run
+fails the whole batch, and nothing is written. A delete of a key with no live
+entry succeeds with `deleted:false`, and a batch that changes no record commits
+nothing. Record quotas are checked once over the whole batch under the same
+guard as the commit, and a batch refused for slots counts once in
+`kv_slots_exhausted_total`.
+
+**Multi-get.** `POST /v1/collections/{collection}/kv/entries/get` takes
+`{"keys":[{"namespace":"app","key":"a"}]}`: 0 to 1,000 objects with the bounds
+of the single routes, and the same key may repeat. It answers 200
+`{"items":[<entry>|null],"next_index":null}`. `items` is positional: each
+element is the entry object that `GET …/kv/entry` returns (`key`,
+`value_base64`, `version`, `expires_at_ms`), or `null` for a key that is absent
+or due. One read guard and one expiry clock serve the call. The response is the
+largest prefix of the keys whose items fit **16,777,216 bytes of compact JSON**
+(the first key always fits), and `next_index` is then the index of the first
+key not read, equal to `len(items)` and at least 1; otherwise it is null. No
+snapshot spans calls: ask again for the remaining keys until `next_index` is
+null. The route needs `read`, so the read-only token may call it.
+
 Missing/due reads return 404 `kv_not_found`; a collection with other dimensions
 returns 409 `not_kv_collection`. Sixteen occupied collision-probe slots return
 409 `kv_slots_exhausted`; expiry before v5 returns 409 `upgrade_required`.
+The batch and multi-get routes answer 403 `forbidden_scope` or `read_only`,
+404 `collection_not_found`, 429 and 503 `commit_indeterminate` as the single
+routes do, and a server without them answers 404 `not_found`.
 Operation scope, tenant and immutable collection bindings apply before lookup.
 Ordinary record quotas also count KV entries. Mutations are audited without
-keys, namespaces or values. The audit covers requests that reach the store,
+keys, namespaces or values; a batch is one `kv_batch` event with the number of
+puts and deletes. The audit covers requests that reach the store,
 including a failed compare-and-set and a missing or non-KV collection (logged
 as `(invalid)`); a request rejected while parsing is not audited, only logged
 without its address or content. Read-only handles refuse mutations.
 `GET /v1/capabilities` reports `features.kv: true` for format 5 files; a
 format 4 file still serves ordinary KV without expiry although the flag is false.
+`features.kv_batch` is true under the same condition, and `routes` lists the
+batch and multi-get routes; a server without them reports neither.
 
 Ordinary KV follows configured durability: `full` syncs before acknowledgment,
 `periodic` can lose up to a flush interval on OS crash/power loss, and `none` is
@@ -143,16 +201,17 @@ per-call forced sync, automatic retry or lease guarantee; disconnects and
 `commit_indeterminate` do not prove a write failed. Lease operations are not
 exposed. The local `vlite_kv_*` MCP tools and `vlite-shell` `kv-*` commands work
 on a local file only ([MCP](MCP.md#local-key-value-tools)); the Python,
-JavaScript and .NET clients wrap these REST routes
+JavaScript, .NET and Go clients wrap these REST routes
 ([clients](../clients/README.md)).
 
 ## Key-value gRPC service
 
-`vlite.v1.Kv` adds four unary RPCs alongside the 35 `VLite` RPCs (39 total):
-`GetKvEntry`, `PutKvEntry`, `DeleteKvEntry`, and `ListKvEntries`. Generate clients
-from `proto/vlite/v1/vlite.proto`. Each address requires an explicit nonempty
-`collection`; unlike legacy vector RPCs, empty does not mean `default`.
-Get/list require collection `read`, and put/delete require collection `write`.
+`vlite.v1.Kv` adds six unary RPCs alongside the 35 `VLite` RPCs (41 total):
+`GetKvEntry`, `PutKvEntry`, `DeleteKvEntry`, `ListKvEntries`, `GetKvEntries`
+and `WriteKvBatch`. Generate clients from `proto/vlite/v1/vlite.proto`. Each
+address requires an explicit nonempty `collection`; unlike legacy vector RPCs,
+empty does not mean `default`. Get, list and `GetKvEntries` require collection
+`read`; put, delete and `WriteKvBatch` require collection `write`.
 
 The [KV rules above](#key-value-entries) also apply to gRPC, including byte
 bounds, CAS, expiry, tenant bindings, quotas, audit and the canonical-JSON page
@@ -160,6 +219,12 @@ boundary. Protobuf values are raw `bytes`; versions and deadlines are `uint64`.
 Unset `Expected` (or its oneof) means any. Unset put expiry clears TTL; an
 explicit zero is a due deadline, not absence. List `after`, `limit` and
 `next_after` preserve optional presence.
+
+`GetKvEntries` and `WriteKvBatch` are the multi-get and the batch above, with
+raw `bytes` values and `uint64` versions; their messages are in the
+[gRPC guide](GRPC.md#key-value-entries). A batch put has no deadline field.
+`KvGetManyResponse.next_index` is optional and unset when every key was read.
+The limits and error codes are those of the REST routes.
 
 Errors carry `vlite-error-code` and `x-request-id`: missing entries use
 `NOT_FOUND`, invalid input `INVALID_ARGUMENT`, CAS mismatch `ABORTED`,
