@@ -40,12 +40,20 @@ signed-in `identity` are REST-only.
 
 When the REST router was configured with memory bindings, the gRPC adapter built
 after it applies the same reservations: a reserved collection or graph answers
-like a missing one on every RPC, and a generated differential compares the two
-transports for every RPC. `vlite-server` still refuses `--grpc-bind` while a
-memory binding is configured or reserved records remain. A program that builds
-the routers itself must build the REST router first (`configured_admin_router`,
-then `grpc_router`); `configured_admin_router` refuses the opposite order, and
-`router` and `authenticated_router` log a warning for it.
+like a missing one on every RPC. A generated differential runs the checks of the
+REST differential on every RPC (with and without bindings, reserved as missing,
+the digest read back over REST); it never compares a REST answer with a gRPC
+answer. `vlite-server` still refuses `--grpc-bind` while a memory binding is
+configured or reserved records remain. A program that builds the routers itself
+must build every REST router first (`configured_admin_router`, then
+`grpc_router`): the listener applies the tokens and reservations that the REST
+routers had published when it was built, and a router that protects less (no
+admin token, or no reservations where an earlier one has them) does not replace
+them, so rotating a token means restarting the program, not building another
+router. `configured_admin_router` refuses to follow a `grpc_router` that adopted
+nothing, and refuses a router that reserves memory resources once any
+`grpc_router` exists; `router` and `authenticated_router` cannot refuse and log a
+warning for the first order.
 
 ## Scope
 

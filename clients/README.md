@@ -602,8 +602,9 @@ until nil. Search options and collection settings use `Object`, preserving REST
 field names, modes, typed filters and decimal-string integers. Structured record,
 metadata, page and hit types are included. Dynamic JSON numbers use `json.Number`.
 
-The Go client has no agent-memory methods: it does not wrap the `/v1/memory/{binding}/...`
-routes. Use the Python, JavaScript or .NET client for them.
+The Go client has no key-value or agent-memory methods: it does not wrap the
+`/v1/collections/{collection}/kv/...` or `/v1/memory/{binding}/...` routes. Use the Python,
+JavaScript or .NET client for them.
 
 Use `errors.As(err, &apiError)` with `*vlite.APIError` to inspect `Status`, `Code`
 and `RequestID`. `*vlite.TransportError` has code `transport_error` and unwraps

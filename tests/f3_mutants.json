@@ -67,8 +67,16 @@
     "id": "f3-s1/P9",
     "desc": "a configured REST router no longer publishes its configuration",
     "file": "src/server.rs",
-    "old": "    service.publish();\n    let observation = service.clone();",
-    "new": "    let observation = service.clone();",
+    "old": "    service.publish();\n    routes(service)",
+    "new": "    routes(service)",
+    "cmd": "cargo test --locked --offline --features grpc --lib server::published"
+  },
+  {
+    "id": "f3-s1/P20",
+    "desc": "configured_admin_router no longer publishes its configuration",
+    "file": "src/server/admin.rs",
+    "old": "    service.publish_reserving()?;\n    Ok(super::routes(service))",
+    "new": "    Ok(super::routes(service))",
     "cmd": "cargo test --locked --offline --features grpc --lib server::published"
   },
   {
@@ -83,16 +91,72 @@
     "id": "f3-s1/P11",
     "desc": "a router that reserves nothing replaces the publication of one that does",
     "file": "src/server.rs",
-    "old": "if self.memory_bindings.is_empty() && bindings",
-    "new": "if false && bindings",
+    "old": "let reserves_less = self.memory_bindings.is_empty()",
+    "new": "let reserves_less = false",
     "cmd": "cargo test --locked --offline --features grpc --lib server::published"
   },
   {
     "id": "f3-s1/P12",
     "desc": "a router that holds reserved records without a file counts as one that reserves nothing",
     "file": "src/server.rs",
-    "old": "if self.memory_bindings.is_empty() && bindings",
-    "new": "if !self.memory_bindings.is_configured() && bindings",
+    "old": "let reserves_less = self.memory_bindings.is_empty()",
+    "new": "let reserves_less = !self.memory_bindings.is_configured()",
+    "cmd": "cargo test --locked --offline --features grpc --lib server::published"
+  },
+  {
+    "id": "f3-s1/P13",
+    "desc": "a router without an admin token replaces the publication of one that has one",
+    "file": "src/server.rs",
+    "old": "if reserves_less || protects_less {",
+    "new": "if reserves_less {",
+    "cmd": "cargo test --locked --offline --features grpc --lib server::published"
+  },
+  {
+    "id": "f3-s1/P14",
+    "desc": "a router with an admin token never replaces the publication of one that has one",
+    "file": "src/server.rs",
+    "old": "let protects_less = open(&self.admin) && admin",
+    "new": "let protects_less = true && admin",
+    "cmd": "cargo test --locked --offline --features grpc --lib server::published"
+  },
+  {
+    "id": "f3-s1/P15",
+    "desc": "a router with a file of bindings is not refused before startup writes its records, once a gRPC router exists",
+    "file": "src/server/admin.rs",
+    "old": "// Before startup writes the records of the file: a refused router changes nothing.\n    service.refuse_reserving_after_grpc()?;",
+    "new": "// Before startup writes the records of the file: a refused router changes nothing.",
+    "cmd": "cargo test --locked --offline --features grpc --lib server::published"
+  },
+  {
+    "id": "f3-s1/P16",
+    "desc": "a router that finds reserved records is not refused before it sets anything up, once a gRPC router exists",
+    "file": "src/server/admin.rs",
+    "old": "// The records found above reserve resources too.\n    service.refuse_reserving_after_grpc()?;",
+    "new": "// The records found above reserve resources too.",
+    "cmd": "cargo test --locked --offline --features grpc --lib server::published"
+  },
+  {
+    "id": "f3-s1/P17",
+    "desc": "publication does not check, under the publication locks, for a gRPC router built after the early check",
+    "file": "src/server.rs",
+    "old": "if refuse_reserving_after_grpc {",
+    "new": "if false {",
+    "cmd": "cargo test --locked --offline --features grpc --lib server::published"
+  },
+  {
+    "id": "f3-s1/P18",
+    "desc": "a gRPC router that adopted a publication is not remembered",
+    "file": "src/server.rs",
+    "old": "self.grpc_built.store(true, Ordering::SeqCst);",
+    "new": "",
+    "cmd": "cargo test --locked --offline --features grpc --lib server::published"
+  },
+  {
+    "id": "f3-s1/P19",
+    "desc": "a router that reserves nothing is refused too once a gRPC router exists",
+    "file": "src/server.rs",
+    "old": "if self.grpc_built.load(Ordering::SeqCst) && self.has_bindings() {",
+    "new": "if self.grpc_built.load(Ordering::SeqCst) {",
     "cmd": "cargo test --locked --offline --features grpc --lib server::published"
   },
   {
@@ -225,7 +289,7 @@
   },
   {
     "id": "f3-kv-abi/K9",
-    "desc": "a namespace of 256 bytes is accepted",
+    "desc": "a namespace of 256 bytes is not refused before the collection is looked up",
     "file": "bindings/c/src/kv.rs",
     "old": "bounded(namespace, \"namespace\", 1, 255)?;",
     "new": "bounded(namespace, \"namespace\", 1, 256)?;",
@@ -233,7 +297,7 @@
   },
   {
     "id": "f3-kv-abi/K10",
-    "desc": "a key of 1025 bytes is accepted",
+    "desc": "a key of 1025 bytes is not refused before the collection is looked up",
     "file": "bindings/c/src/kv.rs",
     "old": "bounded(key, \"key\", 1, 1024)?;",
     "new": "bounded(key, \"key\", 1, 1025)?;",
@@ -241,7 +305,7 @@
   },
   {
     "id": "f3-kv-abi/K11",
-    "desc": "a list limit of 10001 is accepted",
+    "desc": "a list limit of 10001 is not refused before the collection is looked up",
     "file": "bindings/c/src/kv.rs",
     "old": "if !(1..=10_000).contains(&limit) {",
     "new": "if !(1..=10_001).contains(&limit) {",
@@ -337,7 +401,7 @@
   },
   {
     "id": "f3-kv-abi/K23",
-    "desc": "the measured size of an entry undercounts the base64 value",
+    "desc": "the measured size of an entry undercounts the base64 of a partial group of three bytes",
     "file": "bindings/c/src/kv.rs",
     "old": "+ value_len.div_ceil(3) * 4",
     "new": "+ value_len * 4 / 3",
@@ -345,7 +409,7 @@
   },
   {
     "id": "f3-kv-abi/K24",
-    "desc": "a page never carries the cursor of the entry that follows it",
+    "desc": "the cursor that follows a page is left out of the measured page size",
     "file": "bindings/c/src/kv.rs",
     "old": "let next = entry.has_next.then_some(entry.key);",
     "new": "let next: Option<&str> = None;",

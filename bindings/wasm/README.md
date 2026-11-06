@@ -32,9 +32,13 @@ Key-value: `kvGet(collection, namespace, key)`, `kvPut(collection, namespace, ke
 `kvDelete(collection, namespace, key, expected?)` and `kvList(collection, namespace, prefix?, after?, limit?)` store
 byte values under namespaced text keys in a collection that already exists and has one dimension: `create(1)` has the
 `default` collection, an image from `fromBytes` may hold others, and a missing collection is never created. Values are
-`Uint8Array` (a string, an `ArrayBuffer`, a `DataView` or an array is refused with `invalid_request`, never copied);
-collections, namespaces, keys, prefixes and `after` are well-formed strings (a value that is not a string is
-`invalid_request`, and one with an unpaired surrogate `invalid_input`, as in the other bindings). Versions and deadlines are
+`Uint8Array` (a string, an `ArrayBuffer`, a `DataView`, another typed array, an array, or a proxy or other object that only
+resembles one is refused with `invalid_request`, never copied; a `Buffer` or a subclass is a `Uint8Array`, and what is
+stored is what the array holds whatever `length` it claims);
+collections, namespaces, keys, prefixes and `after` are well-formed strings (an argument of the wrong type throws an `Error`
+whose `code` is `invalid_request`, where the Node and Python wrappers throw `TypeError` or `ValueError` first, and one with an
+unpaired surrogate is `invalid_input`, as in the other bindings). `limit` is a `number` that is a safe integer, never a coerced
+value, and a collection name over 63 bytes is `invalid_input`. Versions and deadlines are
 `bigint` (a `Number` is rejected), `expected` is `"any"` (the default),
 `"absent"` or `{ revision: bigint }`, and `expiresAtMs` is an absolute Unix-millisecond deadline judged on the
 `setClock` clock: a due entry reads as absent, and a put without a deadline clears it. `kvGet` returns

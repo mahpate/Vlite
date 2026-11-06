@@ -237,6 +237,8 @@ pub fn configured_admin_router(
     if let Some(path) = &options.memory_bindings_file {
         service = service.with_bindings(read_memory_bindings(path)?);
     }
+    // Before startup writes the records of the file: a refused router changes nothing.
+    service.refuse_reserving_after_grpc()?;
     if options.grpc_enabled && service.has_bindings() {
         return Err(std::io::Error::other(
             "gRPC listener is disabled while memory bindings are configured",
@@ -265,6 +267,8 @@ pub fn configured_admin_router(
         let reserved = service.memory_bindings.with_orphans(&orphans);
         service = service.with_bindings(reserved);
     }
+    // The records found above reserve resources too.
+    service.refuse_reserving_after_grpc()?;
     super::logs::configure(
         options
             .log_buffer_capacity
@@ -361,7 +365,8 @@ pub fn configured_admin_router(
     service
         .webhooks
         .configure(service.admin.directory.clone(), service.clone())?;
-    Ok(super::configured_routes(service))
+    service.publish_reserving()?;
+    Ok(super::routes(service))
 }
 
 fn read_memory_bindings(path: &FilePath) -> std::io::Result<super::reserved::Bindings> {

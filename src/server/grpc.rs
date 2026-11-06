@@ -81,11 +81,17 @@ impl GrpcHealth {
 
 /// Builds the gRPC routes over an opened database and reports `SERVING`.
 ///
-/// Call it with a clone of the `Service` after building the REST router
-/// (`configured_admin_router` or `authenticated_router`): gRPC then shares
-/// that router's tokens, credential store, token reloads, audit log and memory
-/// reservations, and the guard differential compares the two transports for
-/// every RPC. Without a configured REST router it uses the service's own
+/// Call it with a clone of the `Service` after building every REST router
+/// (`configured_admin_router` or `authenticated_router`): gRPC then applies the
+/// tokens, credential store, token reloads, audit log and memory reservations
+/// that the most recently built REST router published, unless a later router
+/// protects less (no admin token, or no reservations where the earlier one has
+/// them), which does not replace them. It adopts them once, when it is built:
+/// a REST router built afterwards changes what REST applies and not what the
+/// listener applies. The guard differential runs the checks of the REST
+/// differential (with and without bindings, reserved as missing, the digest
+/// read back over REST) on every RPC; it never compares a REST answer with a
+/// gRPC answer. Without a configured REST router it uses the service's own
 /// state, which, like `router`, has no admin token and no reservations (local
 /// development only); `configured_admin_router` then refuses to configure that
 /// service afterwards, because the listener that already runs would not apply

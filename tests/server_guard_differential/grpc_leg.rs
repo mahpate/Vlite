@@ -20,7 +20,8 @@
 //! names a collection or a graph) or in `global_rows()` (it names none), so a
 //! new RPC cannot ship unchecked. `EXEMPT` is the home of the RPCs that are
 //! addressed by a memory binding instead of a collection or graph name, each
-//! with its reason, and each is covered by `tests/grpc_memory.rs`. A request
+//! with its reason, and each must be covered by `tests/grpc_memory.rs` (an S2
+//! deliverable: nothing checks that yet). A request
 //! field that looks like a name must be varied by a row or be classified in
 //! `NOT_A_NAME` (see `checks`), so that a field not called `collection` cannot
 //! escape the inventory.
@@ -842,7 +843,8 @@ const LEGACY: &[&str] = &[
 /// The RPCs that stay out of the matrix because a memory binding addresses them
 /// instead of a collection or graph name (their requests may carry several
 /// collection paths, which one row cannot vary), each with its reason. Every
-/// one of them is covered by `tests/grpc_memory.rs`. None today.
+/// one of them must be covered by `tests/grpc_memory.rs` (S2; nothing checks that
+/// yet). None today.
 const EXEMPT: &[(&str, &str)] = &[];
 
 fn ordered_rows(rows: &[GRow]) -> impl Iterator<Item = &GRow> {

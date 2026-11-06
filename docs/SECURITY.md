@@ -90,7 +90,8 @@ a subscription cannot be used to find out what is reserved; the dispatcher
 still filters reserved events from all subscriptions. The gRPC adapter applies
 the memory reservations of the REST router it is built after, resolves every
 name through the same per-request guard as the REST routes, and the generated
-guard differential compares the two transports over every RPC. The server still
+guard differential runs the REST differential's checks on every RPC (it never
+compares a REST answer with a gRPC answer). The server still
 refuses `--grpc-bind` and scheduled automatic index maintenance at startup
 while a binding is configured or reserved resources remain.
 
