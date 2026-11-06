@@ -5,6 +5,11 @@ on:
     branches: [main]
   pull_request:
   workflow_dispatch:
+    inputs:
+      docker:
+        description: "Run the Docker job (the container test suite). Clear it for a quicker run; such a run cannot qualify a deployment image."
+        type: boolean
+        default: true
 
 permissions:
   contents: read
@@ -18,6 +23,7 @@ jobs:
     runs-on: ubuntu-latest
     outputs:
       full: ${{ steps.route.outputs.full }}
+      docker: ${{ steps.route.outputs.docker }}
     steps:
       - uses: actions/checkout@v5
         with:
@@ -68,6 +74,8 @@ jobs:
           python tests/lease_ledger_oracle.py --self-test
           python -O tests/lease_ledger_oracle.py --self-test
       - id: route
+        env:
+          CI_DOCKER_INPUT: ${{ inputs.docker }}
         run: python scripts/ci_policy.py route
 
   documentation:
@@ -357,7 +365,7 @@ jobs:
 
   docker:
     needs: changes
-    if: needs.changes.outputs.full == 'true'
+    if: needs.changes.outputs.docker == 'true'
     runs-on: ubuntu-latest
     env:
       VLITE_IMAGE_TESTS: "0" # The tests target below always runs the full suite.
@@ -535,9 +543,13 @@ jobs:
         run: |
           import json, os
           jobs = json.loads(os.environ["RESULTS"])
-          full = jobs["changes"]["outputs"].get("full")
+          outputs = jobs["changes"]["outputs"]
+          full, docker = outputs.get("full"), outputs.get("docker")
           assert full in ("true", "false"), "Change routing did not complete"
+          assert docker in ("true", "false"), "Docker routing did not complete"
+          assert full == "true" or docker == "false", "The Docker job cannot run without the full matrix"
           always = {"changes", "documentation", "clients", "python-integrations", "helm-chart"}
           for name, job in jobs.items():
-              expected = {"success"} if full == "true" or name in always else {"skipped"}
+              applies = name in always or (docker if name == "docker" else full) == "true"
+              expected = {"success"} if applies else {"skipped"}
               assert job["result"] in expected, f"{name}: {job['result']} (expected {expected})"

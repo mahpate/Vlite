@@ -1,6 +1,7 @@
 """Conservative CI routing and exact-source image publication checks."""
 import json
 import os
+import re
 import subprocess
 import sys
 
@@ -9,6 +10,26 @@ def docs_only(paths):
     return bool(paths) and all(
         path == "README.md"
         or (path.startswith("docs/") and path.endswith(".md"))
+        for path in paths
+    )
+
+
+# The Docker job rebuilds the image from source and runs the whole suite inside it, which is
+# the longest job of a run. It follows the files that can change its outcome: the image and
+# compose definitions, the deployment assets, the container helper scripts, and the end-to-end
+# scripts that only this job runs. Source changes are covered by the native matrix, and every
+# release still runs the container suite (release.yml, image-test).
+DOCKER_FILES = frozenset({
+    "Dockerfile", ".dockerignore", "tests/docker_setup.py", ".github/workflows/ci.yml",
+    "tests/rest_e2e.py", "tests/tls_e2e.py", "tests/dashboard_e2e.py", "tests/requirements-dashboard.txt",
+})
+DOCKER_PREFIXES = ("deploy/", "scripts/docker")
+COMPOSE_FILE = re.compile(r"(docker-)?compose(\.[\w-]+)?\.ya?ml")
+
+
+def touches_docker(paths):
+    return any(
+        path in DOCKER_FILES or path.startswith(DOCKER_PREFIXES) or COMPOSE_FILE.fullmatch(path)
         for path in paths
     )
 
@@ -83,7 +104,9 @@ def image_ci():
                 return
     raise RuntimeError(
         "No successful full main CI run for this exact SHA. Wait for CI, or "
-        "dispatch VLite CI on main (docs-only runs do not qualify), then retry."
+        "dispatch VLite CI on main (docs-only runs do not qualify), then retry. "
+        "A run qualifies only if its Docker job succeeded: a push that changed no container "
+        "file skips that job, so dispatch VLite CI on main with the Docker job enabled."
     )
 
 
@@ -91,7 +114,8 @@ def route():
     with open(os.environ["GITHUB_EVENT_PATH"], encoding="utf-8") as source:
         event = json.load(source)
     kind = os.environ["GITHUB_EVENT_NAME"]
-    full = True
+    # Unknown changes (a new branch, a manual run) take the whole matrix, Docker job included.
+    full = docker = True
     if kind in ("push", "pull_request"):
         base = event["before"] if kind == "push" else event["pull_request"]["base"]["sha"]
         if base and set(base) != {"0"}:
@@ -99,9 +123,18 @@ def route():
                 ["git", "diff", "--name-only", "-z", base, os.environ["GITHUB_SHA"]]
             ).decode("utf-8").rstrip("\0").split("\0")
             full = not docs_only(paths)
+            docker = full and touches_docker(paths)
+    elif os.environ.get("CI_DOCKER_INPUT", "").lower() == "false":
+        # Only a manual run can leave the container suite out, for a quicker look at the rest.
+        docker = False
     with open(os.environ["GITHUB_OUTPUT"], "a") as output:
-        output.write(f"full={str(full).lower()}\n")
-    print("Full native/container matrix" if full else "Markdown-only documentation checks")
+        output.write(f"full={str(full).lower()}\ndocker={str(docker).lower()}\n")
+    if not full:
+        print("Markdown-only documentation checks")
+    elif docker:
+        print("Full native/container matrix")
+    else:
+        print("Full native matrix; the Docker job is skipped (no container file changed)")
 
 
 if __name__ == "__main__":

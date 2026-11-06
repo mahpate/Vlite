@@ -3,7 +3,9 @@ import importlib.util
 import json
 import os
 from pathlib import Path
+import re
 import tempfile
+import textwrap
 import unittest
 from unittest.mock import patch
 
@@ -66,30 +68,61 @@ class Policy(unittest.TestCase):
         self.assertFalse(policy.full_ci_jobs(jobs + [dict(shards[0], name="windows-tests (stable, shard 4/3)")]))
 
     def test_manual_ci_always_forces_full_matrix(self):
-        self.check_route("workflow_dispatch", {}, b"README.md\0", "true")
+        self.check_route("workflow_dispatch", {}, b"README.md\0", "true", "true")
+
+    def test_manual_ci_can_leave_out_only_the_docker_job(self):
+        self.check_route("workflow_dispatch", {}, b"", "true", "false", CI_DOCKER_INPUT="false")
+        self.check_route("workflow_dispatch", {}, b"", "true", "true", CI_DOCKER_INPUT="true")
+        self.check_route("workflow_dispatch", {}, b"", "true", "true", CI_DOCKER_INPUT="")
+        # Only a manual run reads the input: a push or pull request cannot opt out of the Docker job.
+        self.check_route("push", {"before": "abc"}, b"Dockerfile\0", "true", "true", CI_DOCKER_INPUT="false")
 
     def test_push_routing(self):
-        for paths, result in ((b"README.md\0docs/API.md\0", "false"),
-                              (b"src/dashboard/index.html\0", "true"),
-                              (b"", "true")):
-            self.check_route("push", {"before": "abc"}, paths, result)
-        self.check_route("push", {"before": "0" * 40}, b"README.md\0", "true")
+        for paths, full, docker in ((b"README.md\0docs/API.md\0", "false", "false"),
+                                    (b"src/dashboard/index.html\0", "true", "false"),
+                                    (b"src/lib.rs\0tests/server_kv.rs\0Cargo.lock\0", "true", "false"),
+                                    (b"src/lib.rs\0compose.yaml\0", "true", "true"),
+                                    (b"", "true", "false")):
+            with self.subTest(paths=paths):
+                self.check_route("push", {"before": "abc"}, paths, full, docker)
+        # Without a base the changes are unknown, so everything runs.
+        self.check_route("push", {"before": "0" * 40}, b"README.md\0", "true", "true")
 
     def test_pr_routing_uses_base_sha(self):
-        self.check_route("pull_request", {"pull_request": {"base": {"sha": "abc"}}},
-                         b"README.md\0", "false")
+        pull_request = {"pull_request": {"base": {"sha": "abc"}}}
+        self.check_route("pull_request", pull_request, b"README.md\0", "false", "false")
+        self.check_route("pull_request", pull_request, b"src/server.rs\0", "true", "false")
+        self.check_route("pull_request", pull_request, b"deploy/helm/vlite/Chart.yaml\0", "true", "true")
 
-    def check_route(self, kind, event, paths, expected):
+    def test_docker_job_follows_the_container_files(self):
+        for path in ("Dockerfile", "compose.yaml", "compose.tls.yaml", ".dockerignore",
+                     "deploy/helm/vlite/values.yaml", "deploy/dashboard.conf",
+                     "deploy/azure-container-apps/deploy.ps1", "scripts/docker-dashboard.sh",
+                     "tests/docker_setup.py", ".github/workflows/ci.yml",
+                     "tests/rest_e2e.py", "tests/tls_e2e.py", "tests/dashboard_e2e.py",
+                     "tests/requirements-dashboard.txt"):
+            with self.subTest(path=path):
+                self.assertTrue(policy.touches_docker(["src/lib.rs", path]))
+        for path in ("src/lib.rs", "src/server.rs", "Cargo.lock", "README.md", "tests/rest_graph.rs",
+                     "scripts/ci_policy.py", "bindings/manylinux.Dockerfile", "bindings/node/Dockerfile",
+                     "docs/DOCKER-OPERATIONS.md", ".github/workflows/release.yml",
+                     ".github/workflows/deployment-image.yml", "deployments/x.yaml", "my-compose.yaml",
+                     "tests/docker_build_inputs.py", ""):
+            with self.subTest(path=path):
+                self.assertFalse(policy.touches_docker([path]))
+        self.assertFalse(policy.touches_docker([]))
+
+    def check_route(self, kind, event, paths, expected, docker="false", **env):
         with tempfile.TemporaryDirectory() as directory:
             event_path, output_path = Path(directory) / "event.json", Path(directory) / "output"
             event_path.write_text(json.dumps(event), encoding="utf-8")
-            env = dict(GITHUB_EVENT_PATH=str(event_path), GITHUB_OUTPUT=str(output_path),
+            env = dict(env, GITHUB_EVENT_PATH=str(event_path), GITHUB_OUTPUT=str(output_path),
                        GITHUB_EVENT_NAME=kind, GITHUB_SHA="head")
             with patch.dict(os.environ, env), patch.object(
                 policy.subprocess, "check_output", return_value=paths
             ) as diff:
                 policy.route()
-            self.assertEqual(output_path.read_text(), f"full={expected}\n")
+            self.assertEqual(output_path.read_text(), f"full={expected}\ndocker={docker}\n")
             if diff.called:
                 self.assertEqual(diff.call_args.args[0], ["git", "diff", "--name-only", "-z", "abc", "head"])
 
@@ -150,6 +183,69 @@ class Policy(unittest.TestCase):
             self.assertIn('"target": "/app/target/release"', text)
             self.assertNotIn('"target": "/app/target"', text)
             self.assertNotIn('"target": "/app/target/debug"', text)
+
+    def test_docker_job_is_routed_by_its_own_output(self):
+        text = (ROOT / ".github/workflows/ci.yml").read_text(encoding="utf-8")
+        header, _ = text.split("\njobs:\n", 1)
+        self.assertIn("  workflow_dispatch:\n    inputs:\n      docker:\n", header)
+        self.assertIn("        type: boolean\n        default: true\n", header)
+        changes = text.split("\n  changes:\n", 1)[1].split("\n  documentation:\n", 1)[0]
+        self.assertIn("      docker: ${{ steps.route.outputs.docker }}\n", changes)
+        self.assertIn("          CI_DOCKER_INPUT: ${{ inputs.docker }}\n", changes)
+        docker = text.split("\n  docker:\n", 1)[1].split("\n  go-client:\n", 1)[0]
+        self.assertIn("    if: needs.changes.outputs.docker == 'true'\n", docker)
+        # Every other full-matrix job keeps following `full`.
+        for name, after in (("native", "windows-tests"), ("windows-tests", "clients"),
+                            ("manylinux", "node-linux-package"), ("node-linux-package", "lint"),
+                            ("lint", "docker"), ("go-client", "dotnet-client"),
+                            ("dotnet-client", "python-integrations"), ("wasm", "required")):
+            job = text.split(f"\n  {name}:\n", 1)[1].split(f"\n  {after}:\n", 1)[0]
+            self.assertIn("    if: needs.changes.outputs.full == 'true'\n", job)
+
+    def required_check(self, full, docker, overrides=None):
+        """Run the CI required job's own script against a made-up `needs` context."""
+        text = (ROOT / ".github/workflows/ci.yml").read_text(encoding="utf-8")
+        required = text.split("\n  required:\n", 1)[1]
+        needs = re.search(r"needs: \[(.*?)\]", required).group(1).split(", ")
+        self.assertIn("windows-tests", needs)
+        always = {"changes", "documentation", "clients", "python-integrations", "helm-chart"}
+        jobs = {}
+        for name in needs:
+            if name in always:
+                result = "success"
+            elif name == "docker":
+                result = "success" if docker == "true" else "skipped"
+            else:
+                result = "success" if full == "true" else "skipped"
+            jobs[name] = {"result": result, "outputs": {}}
+        jobs["changes"]["outputs"] = {"full": full, "docker": docker}
+        for name, result in (overrides or {}).items():
+            jobs[name]["result"] = result
+        script = textwrap.dedent(required.split("        run: |\n", 1)[1])
+        with patch.dict(os.environ, {"RESULTS": json.dumps(jobs)}):
+            exec(compile(script, "ci-required", "exec"), {})
+
+    def test_required_check_expects_the_docker_job_only_when_it_was_routed(self):
+        self.required_check("true", "true")
+        self.required_check("true", "false")
+        self.required_check("false", "false")
+        for full, docker, overrides in (
+            ("true", "true", {"docker": "skipped"}),
+            ("true", "true", {"docker": "failure"}),
+            ("true", "true", {"windows-tests": "failure"}),
+            ("true", "true", {"native": "skipped"}),
+            ("true", "false", {"docker": "success"}),
+            ("true", "false", {"docker": "failure"}),
+            ("false", "false", {"native": "success"}),
+            ("false", "false", {"windows-tests": "success"}),
+            ("false", "false", {"documentation": "skipped"}),
+            ("false", "true", {}),
+            ("maybe", "true", {}),
+            ("true", "", {}),
+        ):
+            with self.subTest(full=full, docker=docker, overrides=overrides):
+                with self.assertRaises(AssertionError):
+                    self.required_check(full, docker, overrides)
 
     def test_browser_checks_reuse_the_already_tested_runtime(self):
         text = (ROOT / ".github/workflows/ci.yml").read_text(encoding="utf-8")
