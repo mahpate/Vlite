@@ -90,6 +90,12 @@ VOLATILE = {
     "backup_drill_last_success_unix_ms", "backup_last_success_unix_ms",
     "hnsw_last_build_seconds",
 }
+# Reviewed and accepted: `POST /v1/collections/{c}/batches` shares its handler
+# with `/v1/batches` and has always answered 204. Its document listed a 200 and
+# no errors; it now lists the 204 and the answers of the handler. Spec only.
+ACCEPTED_ISSUES["/paths/~1v1~1collections~1{c}~1batches/post/responses/200 removed"] = (
+    "The route answers 204 like /v1/batches; the documented 200 was never served."
+)
 HEADERS = {
     "content-type", "allow", "www-authenticate", "retry-after", "cache-control",
     "content-security-policy", "x-content-type-options", "x-frame-options",

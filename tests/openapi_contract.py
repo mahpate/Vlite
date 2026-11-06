@@ -87,6 +87,23 @@ class OpenApiTests(unittest.TestCase):
         metrics = document["paths"]["/metrics"]["get"]["responses"]["200"]["content"]
         self.assertIn("text/plain", metrics)
 
+    def test_batch_routes_document_the_handler_answers(self):
+        paths = json.loads((ROOT / "src" / "openapi.json").read_text(encoding="utf-8"))["paths"]
+        legacy = paths["/v1/batches"]["post"]["responses"]
+        named = paths["/v1/collections/{c}/batches"]["post"]["responses"]
+        # One handler serves both routes: success is 204 No Content, never 200.
+        for responses in (legacy, named):
+            self.assertIn("204", responses)
+            self.assertNotIn("200", responses)
+            self.assertNotIn("content", responses["204"])
+        # The named route answers what the legacy one does, plus a 403 (read_only
+        # or forbidden_scope, from route authorization and the collection guard)
+        # and the guard's 404 (collection_not_found). The legacy entry lists no
+        # 403 although the shared handler refuses a read-only token there too.
+        self.assertEqual(set(named), set(legacy) | {"403", "404"})
+        for status, response in legacy.items():
+            self.assertEqual(named[status], response, status)
+
     def test_rejects_missing_path_parameter(self):
         with self.assertRaises(ValueError):
             validate({
