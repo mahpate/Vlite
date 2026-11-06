@@ -63,6 +63,19 @@ ACCEPTED_ISSUES = {
         "/components/schemas/RerankOptions/allOf",
     )
 }
+# Reviewed and accepted for 0.7.1 (release notes, Fixed; docs/API.md, Record
+# expiry and metadata): the record put `ttl_ms` minimum is 1. A 0.7.0 server
+# already failed every `ttl_ms` of 0 (500 after a write), so the tightening only
+# turns that failure into a 422 refusal. Matching is exact on the issue text.
+ACCEPTED_ISSUES.update({
+    f"{where}/properties/ttl_ms/minimum lower bound raised":
+        "Record put ttl_ms is at least 1 (0 was a 500 after a write in 0.7.0, a 422 with no write since 0.7.1)."
+    for where in (
+        "/paths/~1v1~1collections~1{c}~1vectors~1{id}/put/requestBody/content/application~1json/schema",
+        "/paths/~1v1~1vectors~1{id}/put/requestBody/content/application~1json/schema",
+        "/components/schemas/Put",
+    )
+})
 VOLATILE = {
     "created_unix_ms", "updated_unix_ms", "last_login_unix_ms",
     "suspended_unix_ms", "expires_unix_ms", "timestamp_ms", "unix_ms",
