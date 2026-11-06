@@ -220,7 +220,7 @@ ledger (`tests/compact_a4_mutants.json`) passes `check` on A4's head; on T two o
 ## The ledgers on the integration tree
 
 R0 ran `check` and `verify` of T's `tests/compact_mutant_replay.py` on every compact ledger on `2d405125` (2026-11-05), before any lane
-replayed its list there; the last row of the table is R0's own replay on T, which came after (section 7.3 of the seam freeze).
+replayed its list there; the third row of the table is R0's own replay on T, which came after (section 7.3 of the seam freeze).
 `verify` calls a run stale when the file it ran on differs from the file on T, and `verify --strict`
 accepts only runs made on exactly T's sources (`python tests/compact_mutant_replay.py sources`), so no run that a lane recorded before T
 is accepted by `--strict`. The counts of the other rows change when a lane replays its list on T.
@@ -229,7 +229,7 @@ is accepted by `--strict`. The counts of the other rows change when a lane repla
 |---|---:|---|---|---|
 | R0 seam, `compact_seam_mutants.json` | 91 | every anchor matches once | all 91 open (the ledger has its own record shape, which `verify` does not read) | |
 | R0 cursors, `compact_ordered_cursors_mutants.json` | 34 | every anchor matches once | all 34 open (own record shape) | |
-| R0 on T, `compact_r0_integrated_mutants.json` (the 52 mutants of `records.rs` and `lib.rs` of the two ledgers above) | 52 | every anchor matches once | 52 accepted by `verify --strict` (104 runs on exactly T's sources, on two machines) | none |
+| R0 on T, `compact_r0_integrated_mutants.json` (the 52 mutants of `records.rs` and `lib.rs` of the two ledgers above) | 52 | every anchor matches once | 52 accepted by `verify --strict` (104 runs on exactly T's sources: two per mutant, one on the lane's machine and one on a separate machine) | none |
 | B4, `compact_b4_mutants.json` | 48 | ok | 25 accepted, 23 stale | `lib.rs` (14), `collection.rs` (6), `compact/source.rs` (2), `records.rs` (1) |
 | B4 slice 3, `compact_b4_s3_mutants.json` | 11 | ok | 4 accepted, 7 stale | `lib.rs` (7) |
 | A4, `compact_a4_mutants.json` | 217 | two anchors match twice | 99 accepted, 116 stale, 2 open (those two) | `records.rs` (51), `property_graph/retrieve.rs` (28), `kv.rs` (25), `lib.rs` (11), `property_graph/mod.rs` (1) |
@@ -250,4 +250,4 @@ were not replayed as such. A4 replayed lane A's 26 survivors, the other 21 mutan
 `records.rs` and `lib.rs` and not the other 73 of its ledgers (section 7.3 of the seam freeze). The coordinator's runs on T,
 the library suites, the strict lint and the documentation guards,
 are in section 1 of [the seam freeze](p3b-seam-freeze.md#1-baseline) with their counts; R0 ran the 204-test selector of its own replays on T,
-and no clippy and no other test target.
+and no clippy and no other test target there (only the throwaway probes of section 7.4, in a scratch checkout of T).

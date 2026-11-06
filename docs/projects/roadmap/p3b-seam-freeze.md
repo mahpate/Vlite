@@ -561,23 +561,27 @@ allocation, no frame read or authentication) cannot be observed by a test throug
 
 ### 7.3 The mutants of `records.rs` and `lib.rs` on the integration tree
 
-7.1 and 7.2 replayed their mutants on R0's own trees. B4, A4 and E4 also change `src/records.rs` and `src/lib.rs`, and `verify` of
-the replay tool calls a recorded run stale when the file it ran on differs from the file on the tree it checks, so the recorded
-runs of the mutants of those two files say nothing about T until they are replayed there. The list of this section is the 52
-mutants that mutate `src/records.rs` (50) or `src/lib.rs` (2): 31 of 7.1 (29 and 2) and the 21 of 7.2. It is
+7.1 and 7.2 replayed their mutants on R0's own trees. After R0's last commit, other lanes and the 0.7.1 release changed
+`src/records.rs` (B4's `8e63e049`, A4's `eb979fcb` and the bounded vector workspace of exact scans, `3eceeb5c`) and
+`src/lib.rs` (those three, E4's `312bf2fa`, one line, and 0.7.1's `03b22899` and `fb1c8701`). `verify` of the replay tool
+calls a recorded run stale when the file it ran on differs from the file on the tree it checks, so the recorded runs of the
+mutants of those two files say nothing about T until they are replayed there. The list of this section is the 52 mutants
+that mutate `src/records.rs` (50) or `src/lib.rs` (2): 31 of 7.1 (29 and 2) and the 21 of 7.2. It is
 [`tests/compact_r0_integrated_mutants.json`](../../../tests/compact_r0_integrated_mutants.json), in the form of B4's ledger:
 
 - The definitions (`id`, `desc`, `file`, `old`, `new`, `cmd`) are copied unchanged from the two older ledgers, and `check`
   confirms that every anchor matches exactly once on T.
 - `expect` is derived by a script and not typed: the tests that failed in every record that the older ledger holds for the
-  mutant on its latest recorded tree (7.2: `result` and `independent`; 7.1 on a final tree: `final` and `independent`; the
+  mutant from its last stage (7.2: `result` and `independent`; 7.1 on a final tree: `final` and `independent`; the
   re-based `R0-EF-03`: `independent`; the 20 mutants of 7.1 that only have a kill on `v0.7.0`: `baseline` and
   `baseline_lane`). No intersection is empty. A run counts only when it fails at least those tests (`expect_met`), so a
   mutant that some other, newer test happens to kill does not count.
 - The selector is the one of 7.1: 204 tests on T, green before the first mutant and again after the last.
 - Every mutant needs two clean kills (`two_machines`): one on the lane's machine and one on a machine that is not the lane's
-  (the coordinator's rule, section 8). A kill is clean when the anchor matched once, the tree compiled, the selector ran, the
-  expected tests failed and the file was restored byte-identically (SHA-256 over the bytes and over the LF-normalized text).
+  (the coordinator's rule, section 8; the tool requires a valid run under each of the labels `local` and `second` and takes the
+  label on trust, and the `os` that each run records differs between the two labels). A kill is clean when the anchor matched
+  once, the tree compiled, the selector ran, the expected tests failed and the file was restored byte-identically (SHA-256
+  over the bytes and over the LF-normalized text).
 
 The 20 of the 52 that 7.1 only killed on `v0.7.0` (the baseline-only mutants of `records.rs`) had never run on a tree that
 carries R0's tests; this is their first replay on a final tree. The other 36 baseline-only mutants of 7.1 are in
@@ -590,7 +594,7 @@ Every run is of the sources of T: `python tests/compact_mutant_replay.py sources
 | Run | Mutants | Clean kills | Not clean | The 204-test selector, before / after |
 |---|---:|---:|---:|---|
 | The lane's machine: one process, one mutant per build | 52 | 52 | 0 | green / green |
-| Separate machines: three shards (18, 17 and 17 mutants) on two machines, one mutant per build | 52 | 52 | 0 | green / green in each shard |
+| Separate machines: three shards (18, 17 and 17 mutants), one mutant per build | 52 | 52 | 0 | green / green in each shard |
 
 By origin of the mutant:
 
@@ -604,19 +608,22 @@ By origin of the mutant:
 
 `python tests/compact_mutant_replay.py verify tests/compact_r0_integrated_mutants.json --strict`, run on T, accepts all 52
 mutants: 104 valid runs, every one made on exactly the sources of T (52 accepted, 0 stale, 0 open), and `check` finds every
-anchor once. The checkout of a separate machine was T plus one commit that adds the replay list and its instructions outside the
-fingerprint, so the `head` in the `environment` of those runs is not T's commit, while their `sources_sha256` is T's.
+anchor once. The checkout of a separate machine was T plus one commit (35 of the 52 runs) or two commits (the other 17, a
+shard that ran again with corrected instructions) that add only the replay list and its instructions, outside the
+fingerprint. So the `head` in the `environment` of those runs is not T's commit: it is a scratch commit that is not kept, and
+what identifies the replayed sources is the `sources_sha256` of each run, which is T's, together with its file hashes.
 
 What this does and does not establish. It establishes that the tests which killed these 52 mutants on R0's trees (and on
-`v0.7.0` for the 20) still kill them on T, after B4's, A4's and E4's changes to the two files and their tests, on two machines.
+`v0.7.0` for the 20) still kill them on T, after the changes to the two files and their tests that this section lists at its
+start, on the lane's machine and on separate machines.
 It does not replay the other 73 mutants of R0's two ledgers (72 in `src/compact/source.rs` and 1 in `src/quality.rs`): those files
 are byte-identical on T and on R0's last commit, and the independent runs of 7.1 and 7.2 on `faa3b32e` (separate machines,
 37 of the 73) were made on that same file. The 36 baseline-only mutants among them have no run on a final tree on any machine
 yet. It replays none of the other lanes' mutants.
 
-A first attempt of one shard, on another machine, stopped before it applied any mutant: its offline build used an empty Cargo
-cache and could not resolve a crate. That is an infrastructure failure and no result. The shard (17 mutants) ran again with the
-machine's own Cargo cache, and nothing of the first attempt is in the ledger.
+A first attempt of one shard stopped before it applied any mutant: its offline build used an empty Cargo
+cache and could not resolve a crate. That is an infrastructure failure and no result. The shard (17 mutants) ran again on
+another machine with that machine's own Cargo cache, and nothing of the first attempt is in the ledger.
 
 ### 7.4 Probes of the scan statistics on T
 
@@ -746,7 +753,7 @@ The mutant list replays with any runner that applies one anchored replacement at
 endings preserved on write), runs `cmd`, classifies the outcome and restores the file; the ledger records the
 selector, the failing tests and the SHA-256 of the file before, during and after. Its records have the shape
 `{id, desc, file, old, new, cmd}` plus the evidence, so B4's `tests/compact_mutant_replay.py` reads them: its `check`
-mode (the first three commands above) confirms that every anchor matches once.
+mode (the three `check` commands above) confirms that every anchor matches once.
 
 B4's `verify` mode does not read the evidence of the first two ledgers: it judges the `runs` records that the lists of B4 and
 A4 keep, so on these ledgers it reports every mutant open, with no valid run. It reads the seam ledger for one purpose, to

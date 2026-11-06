@@ -1,6 +1,6 @@
 {
  "campaign": "R0 on the integrated tree: the mutants of src/records.rs and src/lib.rs of the seam and cursor ledgers",
- "format": "Same form as tests/compact_b4_mutants.json. The definitions are copied from tests/compact_seam_mutants.json and tests/compact_ordered_cursors_mutants.json; `expect` is derived from the tests that failed in every record those ledgers hold for the mutant on its latest recorded tree (the origin field names it). runs.<label> holds the evidence of one replay on the tree named in `base`: local is this lane's own machine, second is another machine. Replay with tests/compact_mutant_replay.py.",
+ "format": "Same form as tests/compact_b4_mutants.json. The definitions are copied from tests/compact_seam_mutants.json and tests/compact_ordered_cursors_mutants.json; `expect` is derived from the tests that failed in every record those ledgers hold for the mutant from its last stage (the origin field names it). runs.<label> holds the evidence of one replay on the tree named in `base`: local is this lane's own machine, second is a different machine. Replay with tests/compact_mutant_replay.py.",
  "base": "2d40512513a851d8c13c8747411609517d4300b1",
  "selectors": {
   "seam": "test --locked --offline --lib -- compact::source records:: metadata_index::tests::compact rerank::"
@@ -2591,7 +2591,7 @@
   },
   {
    "id": "R0-EF-03",
-   "origin": "R0 slice 2, class identity, tests/compact_seam_mutants.json; expect from the integrated tree of slice 2 (re-based anchor)",
+   "origin": "R0 slice 2, class identity, tests/compact_seam_mutants.json; expect from the integrated tree of slices 2 and 3 (re-based anchor)",
    "desc": "effective_ids returns the merged IDs in descending order",
    "file": "src/records.rs",
    "old": "ids.into_iter().collect()",
