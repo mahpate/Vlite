@@ -108,7 +108,9 @@ to 6 were not started in 0.7.1 (the [0.7.1 handover](handover-0.7.1.md) names no
    replayed again on separate machines on R0's integrated tree (`faa3b32e`), all killed. On T the 52 mutants of the two ledgers
    that mutate `records.rs` or `lib.rs` were replayed again, on the lane's machine and on separate machines, all killed, and
    `verify --strict` accepts that replay ([seam freeze, 7.3](p3b-seam-freeze.md#73-the-mutants-of-recordsrs-and-librs-on-the-integration-tree),
-   [`tests/compact_r0_integrated_mutants.json`](../../../tests/compact_r0_integrated_mutants.json)).
+   [`tests/compact_r0_integrated_mutants.json`](../../../tests/compact_r0_integrated_mutants.json)). The 36 baseline-only mutants of
+   `source.rs` and `quality.rs` were replayed on T in the same way ([7.5](p3b-seam-freeze.md#75-the-baseline-only-mutants-of-sourcers-and-qualityrs-on-the-integration-tree),
+   [`tests/compact_r0_integrated_source_mutants.json`](../../../tests/compact_r0_integrated_source_mutants.json)).
 2. **B4** finished lane B by cherry-picking `250a98bc` (never by merge). Its 18 replay obligations are replayed on B4's own tree: the seven
    that mutate the read seam are in R0's ledger and the eleven for consumers, settings and rerank are in B4's, each gap
    measured on `v0.7.0` before the tests that kill it. B4 added the five survivors that lane B's own report names (four

@@ -138,7 +138,9 @@ same holds the other way round: R0's 50 mutants in `records.rs` and 2 in `lib.rs
 those files, which B4 and A4 also edit (E4 changes one line of `lib.rs`), so a file-hash check of their runs calls them stale on T; their anchors
 still match once there (`check` accepts both R0 ledgers on T), and [section 7.3 of the seam
 freeze](p3b-seam-freeze.md#73-the-mutants-of-recordsrs-and-librs-on-the-integration-tree) replays them on T: all 52 are killed, on the lane's machine and on separate machines. R0's 72 mutants in `source.rs` and its one in `quality.rs` are in files that
-no other lane edits (those two files on T are byte-identical to R0's head). The combined declared-index scan
+no other lane edits (those two files on T are byte-identical to R0's head), and [section
+7.5](p3b-seam-freeze.md#75-the-baseline-only-mutants-of-sourcers-and-qualityrs-on-the-integration-tree) replays on T the 36 of them that had a kill on
+`v0.7.0` only: all 36 are killed too. The combined declared-index scan
 differential, A's compact exact search against B's index rebuild, is B4's slice S3: T carries it, with its 11 mutants in
 `tests/compact_b4_s3_mutants.json`, and it is not part of what R0 established.
 
@@ -220,7 +222,7 @@ ledger (`tests/compact_a4_mutants.json`) passes `check` on A4's head; on T two o
 ## The ledgers on the integration tree
 
 R0 ran `check` and `verify` of T's `tests/compact_mutant_replay.py` on every compact ledger on `2d405125` (2026-11-05), before any lane
-replayed its list there; the third row of the table is R0's own replay on T, which came after (section 7.3 of the seam freeze).
+replayed its list there; the third and fourth rows of the table are R0's own replays on T, which came after (sections 7.3 and 7.5 of the seam freeze).
 `verify` calls a run stale when the file it ran on differs from the file on T, and `verify --strict`
 accepts only runs made on exactly T's sources (`python tests/compact_mutant_replay.py sources`), so no run that a lane recorded before T
 is accepted by `--strict`. The counts of the other rows change when a lane replays its list on T.
@@ -230,6 +232,7 @@ is accepted by `--strict`. The counts of the other rows change when a lane repla
 | R0 seam, `compact_seam_mutants.json` | 91 | every anchor matches once | all 91 open (the ledger has its own record shape, which `verify` does not read) | |
 | R0 cursors, `compact_ordered_cursors_mutants.json` | 34 | every anchor matches once | all 34 open (own record shape) | |
 | R0 on T, `compact_r0_integrated_mutants.json` (the 52 mutants of `records.rs` and `lib.rs` of the two ledgers above) | 52 | every anchor matches once | 52 accepted by `verify --strict` (104 runs on exactly T's sources: two per mutant, one on the lane's machine and one on a separate machine) | none |
+| R0 on T, `compact_r0_integrated_source_mutants.json` (36 mutants of `source.rs` (35) and `quality.rs` (1) of the seam ledger, which had a kill on `v0.7.0` only) | 36 | every anchor matches once | 36 accepted by `verify --strict` (72 runs on exactly T's sources, two per mutant as above) | none |
 | B4, `compact_b4_mutants.json` | 48 | ok | 25 accepted, 23 stale | `lib.rs` (14), `collection.rs` (6), `compact/source.rs` (2), `records.rs` (1) |
 | B4 slice 3, `compact_b4_s3_mutants.json` | 11 | ok | 4 accepted, 7 stale | `lib.rs` (7) |
 | A4, `compact_a4_mutants.json` | 217 | two anchors match twice | 99 accepted, 116 stale, 2 open (those two) | `records.rs` (51), `property_graph/retrieve.rs` (28), `kv.rs` (25), `lib.rs` (11), `property_graph/mod.rs` (1) |
@@ -246,8 +249,9 @@ Since then B4 replayed lane B's eleven consumer survivors (see [Lane B](#lane-b)
 mutants as such: eight of them (consumers, settings, rerank and quality) are re-derived in its list, and the other ten
 were not replayed as such. A4 replayed lane A's 26 survivors, the other 21 mutants of lane A's ledger and 170 of its own (see
 [Lane A](#lane-a)); R0 did not replay them. R0 checked the ledgers of A4, B4 and E4 on T with `check` and `verify` only
-([the table above](#the-ledgers-on-the-integration-tree)) and replayed none of their mutants. R0 replayed on T its own 52 mutants of
-`records.rs` and `lib.rs` and not the other 73 of its ledgers (section 7.3 of the seam freeze). The coordinator's runs on T,
+([the table above](#the-ledgers-on-the-integration-tree)) and replayed none of their mutants. R0 replayed on T 88 of its own 125 mutants: the 52 of
+`records.rs` and `lib.rs` (section 7.3 of the seam freeze) and 36 of the 73 of `source.rs` and `quality.rs` (section 7.5); the other 37 of
+those 73 have an independent run on `faa3b32e`, whose copy of the two files is T's, and were not replayed on T. The coordinator's runs on T,
 the library suites, the strict lint and the documentation guards,
 are in section 1 of [the seam freeze](p3b-seam-freeze.md#1-baseline) with their counts; R0 ran the 204-test selector of its own replays on T,
 and no clippy and no other test target there (only the throwaway probes of section 7.4, in a scratch checkout of T).

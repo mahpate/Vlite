@@ -209,7 +209,7 @@ Local numbers below show direction only (see rules).
   obligations replayed in the mutation ledgers of R0 and B4 (on those lanes' own trees). T also carries lane A (record consumers): A4 cherry-picked its
   four patches, replayed lane A's 47 recorded mutants (26 of them survivors) and added 170 of its own, 217 in all and all killed on A4's own head
   (`4670d858`), and E4 moved the bounded exact scan of lane A onto the lazy `ordered_ids` cursor. What has been replayed on T itself is in
-  [section 7.3 of the seam freeze](p3b-seam-freeze.md#73-the-mutants-of-recordsrs-and-librs-on-the-integration-tree) and in each lane's ledger. Lane C (server and MCP consumers) is not
+  [section 7.3 of the seam freeze](p3b-seam-freeze.md#73-the-mutants-of-recordsrs-and-librs-on-the-integration-tree) (and 7.5) and in each lane's ledger. Lane C (server and MCP consumers) is not
   integrated, and slice 5 (lifecycle) has not started. All of the compact code compiles only
   under `cfg(test)`: release builds have no compact dispatch and no normal
   `Database` wiring. The only changes that a release build sees are the few resident-visible ones of lane A4 (one clock for

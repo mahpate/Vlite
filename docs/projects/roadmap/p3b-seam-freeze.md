@@ -5,7 +5,7 @@ and OPEN-71-14, stated in section 8, were taken by the coordinator under the own
 those of the storage readiness inventory behind the [0.7.1 plan](handover-0.7.0.md#071)). The same day the owner moved the
 compact work (lanes R0, B4, A4, E4 and C4) to 0.7.2: 0.7.1 shipped without it ([handover-0.7.1.md](handover-0.7.1.md)), so
 where this page says that a lane integrates its work, it means the integration tree for 0.7.2 and not the tag `v0.7.1`. The
-tree that section 7.3 and the T paragraph of section 1 name is the commit `2d405125` of the integration branch `mahpate-int072-c1` (a later tree is another commit), called T below; sections 7.1
+tree that sections 7.3 and 7.5 and the T paragraph of section 1 name is the commit `2d405125` of the integration branch `mahpate-int072-c1` (a later tree is another commit), called T below; sections 7.1
 and 7.2 predate it, and the "integrated tree" they name is R0's own `faa3b32e`, which is not T.
 Sections 3 and 4 describe what the code does today and pin it with tests. Section 3 is frozen for the lanes that follow it:
 B4 and A4, which worked from it, E4, which consumed it, and C4, L5 and the ANN, P4 and P5 lanes. Section 4 is the approved inventory of deviations and limits: it
@@ -40,7 +40,8 @@ passing by default and 1,688 with all features, the documentation guards, `scrip
 `scripts/shadow_copy_check.py --integration` passing (it needs a `--lane` range for what 0.7.1 changed and `--kv-base` for
 K71's visitor; with its default arguments it fails on the functions that 0.7.1 changed). R0 measured on T that all 91 and 34 anchors of its ledgers match
 exactly once and that the selector of section 7 (204 tests there) is green; section 7.3 holds the replays of its 52 mutants of
-`records.rs` and `lib.rs` on T (all killed, on the lane's machine and on separate machines, and accepted by `verify --strict`).
+`records.rs` and `lib.rs` on T and 7.5 those of 36 mutants of `source.rs` and `quality.rs` (all killed, on the lane's machine and
+on separate machines, and accepted by `verify --strict`).
 T was frozen while the evidence was taken: a change to anything that cargo builds changes the
 fingerprint of the sources (`python tests/compact_mutant_replay.py sources`) and makes the replays of every lane stale
 under `verify --strict`, so a later tree needs its own replays.
@@ -443,8 +444,8 @@ Replays, all with `cargo test --locked --offline --lib -- compact::source record
   56 mutants, which an existing test kills on `v0.7.0` and which three other machines replayed there, were not replayed on
   R0's final trees. No existing test changed in R0's trees since `v0.7.0` (the changes are the new `freeze_tests.rs` and
   `ordered_tests.rs`, their module declarations and the test-gated cursors of 7.2), so the test that killed each of them
-  on `v0.7.0` was still there. 20 of the 56 (the ones in `src/records.rs`) are replayed on T in 7.3. The other 36 (35 in
-  `src/compact/source.rs` and 1 in `src/quality.rs`) have no run on a final tree, and replaying them there is open.
+  on `v0.7.0` was still there. 20 of the 56 (the ones in `src/records.rs`) are replayed on T in 7.3, and the other 36 (35 in
+  `src/compact/source.rs` and 1 in `src/quality.rs`) in 7.5.
 
 The 28 gaps, with how each is reached and what closes it:
 
@@ -597,7 +598,7 @@ that mutate `src/records.rs` (50) or `src/lib.rs` (2): 31 of 7.1 (29 and 2) and 
 The 20 of the 52 that 7.1 only killed on `v0.7.0` (the baseline-only mutants of `records.rs`) had never run on a tree that
 carries R0's tests; this is their first replay on a final tree. The other 36 baseline-only mutants of 7.1 are in
 `src/compact/source.rs` (35) and `src/quality.rs` (1), which are byte-identical on T and on R0's head `6635a454`, and are not in
-this list.
+this list; 7.5 replays them.
 
 Every run is of the sources of T: `python tests/compact_mutant_replay.py sources` prints the fingerprint
 `eaf4962586c77b556471e9c4b9c4b8addcff449b019309157d4f158279c7b549` (600 files) on T and on each machine's checkout.
@@ -628,9 +629,8 @@ What this does and does not establish. It establishes that the tests which kille
 `v0.7.0` for the 20) still kill them on T, after the changes to the two files and their tests that this section lists at its
 start, on the lane's machine and on separate machines.
 It does not replay the other 73 mutants of R0's two ledgers (72 in `src/compact/source.rs` and 1 in `src/quality.rs`): those files
-are byte-identical on T and on R0's head `6635a454`, and the independent runs of 7.1 and 7.2 on `faa3b32e` (separate machines,
-37 of the 73) were made on that same file. The 36 baseline-only mutants among them have no run on a final tree on any machine
-yet. It replays none of the other lanes' mutants.
+are byte-identical on T and on R0's head `6635a454`. 7.5 replays 36 of them, and the independent runs of 7.1 and 7.2 on
+`faa3b32e` (separate machines, the other 37 of the 73) were made on that same file. It replays none of the other lanes' mutants.
 
 A first attempt of one shard stopped before it applied any mutant: its offline build used an empty Cargo
 cache and could not resolve a crate. That is an infrastructure failure and no result. The shard (17 mutants) ran again on
@@ -683,6 +683,36 @@ lane that persists the summaries (P5-71) flips B4's test and should add these tw
 because a test is source that cargo builds and T was frozen. They do not change the decision of section 8 that the difference is
 allowed (E4's amendment moves the compact summary fallback to P5-71), they pin nothing, they ran once, and they measure T only.
 
+### 7.5 The baseline-only mutants of `source.rs` and `quality.rs` on the integration tree
+
+7.3 replays the 52 mutants of R0's two ledgers that mutate `src/records.rs` or `src/lib.rs`, the files that other lanes changed.
+The other 73 mutate `src/compact/source.rs` (72) or `src/quality.rs` (1), which are byte-identical on T and on R0's head
+`6635a454`, and so on `faa3b32e`. 37 of the 73 have an independent run on `faa3b32e` (7.1 and 7.2), made on that same file. The
+other 36 are the mutants that an existing test already killed on `v0.7.0` and that no later run covers: 35 in
+`src/compact/source.rs` and `R0-AC-14` in `src/quality.rs`. Seven are of the earlier seam campaign and 29 are new in 7.1; by class
+they are accounting (14), authentication (7), budget (7), identity (6) and expiry (2). Their list is
+[`tests/compact_r0_integrated_source_mutants.json`](../../../tests/compact_r0_integrated_source_mutants.json), in the form of
+7.3's ledger and on the same terms: the definitions are copied unchanged from
+[the seam ledger](../../../tests/compact_seam_mutants.json), `check` confirms that every anchor matches exactly once on T,
+`expect` is the tests that failed in every baseline record of the mutant (`baseline` and `baseline_lane`, both runs on
+`v0.7.0`), the selector is the one of 7.1 (204 tests on T, green before the first mutant and again after the last), and every
+mutant needs two clean kills (`two_machines`).
+
+| Run | Mutants | Clean kills | Not clean | The 204-test selector, before / after |
+|---|---:|---:|---:|---|
+| The lane's machine: one process, one mutant per build | 36 | 36 | 0 | green / green |
+| Separate machines: two shards (18 and 18 mutants), one mutant per build | 36 | 36 | 0 | green / green in each shard |
+
+Every run is of the sources of T (the fingerprint of 7.3). `verify --strict`, run on T, accepts all 36 mutants: 72 valid runs,
+every one made on exactly the sources of T (36 accepted, 0 stale, 0 open), and `check` finds every anchor once. As in 7.3, the
+checkout of a separate machine was T plus replay lists and instructions only (three commits here), so the `head` of those runs is
+a scratch commit that is not kept.
+
+What this establishes. With 7.3, every mutant of R0's two ledgers has a kill on a final tree on a machine that is not the
+lane's: 88 of the 125 (52 and 36) on T itself, on the lane's machine and on separate machines, 176 runs on exactly T's sources
+in two ledgers, and the other 37, which mutate the same unchanged files, on `faa3b32e` on separate machines (7.1 and 7.2). It
+replays no mutant of another lane, and its runs use no test target other than the selector (the probes of 7.4 are separate).
+
 ## 8. Decisions
 
 Decided on 2026-11-05 by the coordinator under the owner's delegation, as recommended. The entries from "Scan statistics" on
@@ -705,7 +735,7 @@ record what other lanes changed or what R0 found after the freeze.
   replayed, `R0-EF-03` and all 34 of slice 3, was replayed again on separate machines on the integrated tree (7.1 and
   7.2): 69 mutants, all killed. On T, the 52 mutants of `records.rs` and `lib.rs` (31 of slice 2 and 21 of slice 3) were
   replayed again, on the lane's machine and on separate machines, all killed, and `verify --strict` accepts the ledger of that
-  replay (7.3). An equivalence claim
+  replay (7.3). So were the 36 baseline-only mutants of `source.rs` and `quality.rs` (7.5): 88 mutants and 176 runs in all. An equivalence claim
   (`pa-graph-evidence-wall-clock`) additionally needs an independent review and a pinning test wherever one can be
   written.
 - **OPEN-71-03, seam freeze: approved.** Section 3 is frozen, section 4 is the approved inventory of limits that need not
@@ -744,7 +774,9 @@ record what other lanes changed or what R0 found after the freeze.
   shipped in 0.7.1). E4's page (its section 4) limits the difference in `records_scanned` to "above one 1,024-row block" and
   "where no posting serves the filter", which 7.4 shows to be too narrow, and B4's `index_differential.rs` says the same in its
   module documentation and in the comment of the test that pins the difference. Each owner amends its own text, and the
-  cases of 7.4 belong next to B4's test, in the lane that persists the summaries (P5-71). Delete this entry when they have.
+  cases of 7.4 belong next to B4's test, in the lane that persists the summaries (P5-71). The coordinator decided on
+  2026-11-05 that no second integration tree is cut for them (a test change would break T's freeze): they are owed for the
+  first integration after T's freeze, not for 0.7.2. Delete this entry when they have been made.
 
 R0's own choices in slice 3 were not coordinator decisions. The coordinator accepted them on 2026-11-05 as coded and
 reviewed, by three independent reviewers:
@@ -766,14 +798,16 @@ python tests/compact_method_matrix.py
 python tests/compact_mutant_replay.py check tests/compact_seam_mutants.json
 python tests/compact_mutant_replay.py check tests/compact_ordered_cursors_mutants.json
 python tests/compact_mutant_replay.py check tests/compact_r0_integrated_mutants.json
+python tests/compact_mutant_replay.py check tests/compact_r0_integrated_source_mutants.json
 python tests/compact_mutant_replay.py verify tests/compact_r0_integrated_mutants.json --strict
+python tests/compact_mutant_replay.py verify tests/compact_r0_integrated_source_mutants.json --strict
 ```
 
 The mutant list replays with any runner that applies one anchored replacement at a time (LF-normalized match, line
 endings preserved on write), runs `cmd`, classifies the outcome and restores the file; the ledger records the
 selector, the failing tests and the SHA-256 of the file before, during and after. Its records have the shape
 `{id, desc, file, old, new, cmd}` plus the evidence, so B4's `tests/compact_mutant_replay.py` reads them: its `check`
-mode (the three `check` commands above) confirms that every anchor matches once.
+mode (the `check` commands above) confirms that every anchor matches once.
 
 B4's `verify` mode does not read the evidence of the first two ledgers: it judges the `runs` records that the lists of B4 and
 A4 keep, so on these ledgers it reports every mutant open, with no valid run. It reads the seam ledger for one purpose, to
@@ -781,8 +815,9 @@ check that it holds the 24 mutants that B4's list reuses: the seven obligations,
 restored kill, and the 17 mutants of the earlier seam campaign, which carry their baseline kill on `v0.7.0` and no
 final-tree run.
 
-The third ledger (7.3) has the `runs` shape, so the last command judges it. With `--strict` a mutant is accepted only when both
-of its runs (`local` and `second`) are kills with the whole evidence and were made on exactly the sources of the tree that
-`verify` runs in. Those are T's: the fingerprint that `python tests/compact_mutant_replay.py sources` prints does not cover
-documents or `tests/*.json`, so a commit of documents and ledgers leaves it unchanged. On T it accepts all 52 mutants of the
-third ledger (104 valid runs, 0 stale, 0 open).
+The third and fourth ledgers (7.3 and 7.5) have the `runs` shape, so the last two commands judge them. With `--strict` a mutant
+is accepted only when it has valid runs under at least two labels (here `local` and `second`), each a kill with the whole
+evidence that was made on exactly the sources of the tree that `verify` runs in. Those are T's: the fingerprint that
+`python tests/compact_mutant_replay.py sources` prints does not cover documents or `tests/*.json`, so a commit of documents and
+ledgers leaves it unchanged. On T it accepts all 52 mutants of the third ledger (104 valid runs, 0 stale, 0 open) and all 36 of
+the fourth (72 valid runs, 0 stale, 0 open).
