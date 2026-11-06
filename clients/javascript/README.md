@@ -64,7 +64,7 @@ console.log((await memory.recall({ scope, text: "Ada" })).memories);
 Text and vector recall find only memories that hold an evidence record, so the recall above returns
 nothing on a new binding, and a binding without an evidence collection refuses it with 409
 `memory_capability_unavailable` (`details.feature` `evidence_recall`). Recall with
-`entity_seeds: ["ada"]` to read back what you saved.
+`entity_seeds: ["ada"]` to read back that entity and the memories it references.
 
 Requests use the wire (snake_case) names and are closed: an unknown member is a `TypeError` and is never
 sent, and a required member (including `idempotency_key`) is never invented. u64 and i64 inputs accept a
@@ -75,9 +75,12 @@ optional `{ signal }`. HTTP 202 resolves like 200: check `state`. Failures are `
 `status`, `requestId`, optional `details`), `UnsupportedError` for 404 `not_found` only, or
 `TransportError` for a timeout, cancellation or lost connection, after which a mutation may have
 committed. Look up a `forget` or `consolidate` with `getReceipt` and the same idempotency key. The
-server refuses a lookup of a `remember` receipt (409 `remember_receipt_lookup`), so repeat the same
-`remember` request, with the same key and body, inside the receipt window: an exact repeat returns the
-original result with `replayed: true` and writes nothing. The client never repeats a request for you;
-nothing is retried, embedded, split or paged.
+server refuses a lookup of a `remember` receipt (409 `memory_capability_unavailable`, `details.feature`
+`remember_receipt_lookup`), so repeat the same `remember` request, with the same key and body, inside the
+receipt window (not after its `retry_until_ms` without reading the state first): an exact repeat returns
+the original result with `replayed: true` and writes nothing. The example's `observed_at_ms: Date.now()`
+changes the body on every run, so a fixed key answers 409 `idempotency_conflict` when the snippet runs again
+inside the receipt window. The client
+never repeats a request for you; nothing is retried, embedded, split or paged.
 
 Licensed under MIT; see LICENSE.

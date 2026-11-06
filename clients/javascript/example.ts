@@ -113,8 +113,10 @@ export async function kvExample(baseUrl: string, token: string): Promise<void> {
     const entry: KvEntry = await client.kvGet(address);
     console.log(new TextDecoder().decode(entry.value), entry.version, entry.expires_at_ms);
     // Compare-and-set: the write succeeds only while the entry still has the version you read, otherwise 412.
+    // Pass the deadline again: a put that omits it clears the expiry.
     const unchanged: Expected = { revision: stored.version };
-    await client.kvPut({ ...address, value: new TextEncoder().encode("again"), expected: unchanged });
+    await client.kvPut({ ...address, value: new TextEncoder().encode("again"), expected: unchanged,
+      expiresAtMs: stored.expires_at_ms });
     const page: KvPage = await client.kvList({ collection: "cache", namespace: "app", prefix: "he", limit: 100 });
     console.log(page.items.map((item) => item.key), page.next_after);
     // A cancelled or timed-out mutation may have committed: read the entry back before deciding. Nothing is retried.
@@ -140,7 +142,8 @@ export async function memoryExample(baseUrl: string, token: string): Promise<voi
         source: { source_id: "chat", source_kind: "caller" } }],
     });
     console.log(remembered.receipt.id, remembered.receipt.sequence, remembered.outcomes[0]?.revision);
-    // Text and vector recall find only memories that hold an evidence record; entity_seeds reads back what you saved.
+    // Text and vector recall find only memories that hold an evidence record; entity_seeds reads back an entity
+    // and the memories it references.
     const found = await memory.recall({ scope, entity_seeds: ["ada"], limit: 5 });
     console.log(found.memories.map((hit) => hit.id), found.meta.complete, found.meta.limitations);
     const revision = remembered.outcomes[0]?.revision ?? 1n;
@@ -152,8 +155,9 @@ export async function memoryExample(baseUrl: string, token: string): Promise<voi
     console.log(receipt.result.replayed);
     const forgotten = await memory.forget({ scope, idempotency_key: "forget-1", mode: "logical_delete",
       target: { ids: [{ id: "ada", revision }] } });
-    // HTTP 202 is an ordinary result: the logical deletion is accepted and the job continues.
-    if (forgotten.state === "pending") console.log(forgotten.erasure?.resume_token);
+    // A logical delete is complete when the call returns. A server that runs it as a job answers HTTP 202, an
+    // ordinary result: read `state`.
+    console.log(forgotten.receipt.id, forgotten.state);
   } catch (error) {
     if (error instanceof UnsupportedError) return;
     if (error instanceof VLiteError) console.error(error.code, error.status, error.requestId, error.details?.feature);

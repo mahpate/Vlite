@@ -11,7 +11,7 @@ Status: **decided on 2026-11-05: option R (through the coordinator, on the owner
 - **A one-way effect exists.** A memory that names an existing evidence record (item evidence references, 0.7.1) makes a 0.7.0 server answer 500 for that scope. An embedded API that exposed evidence references would carry the same effect into files written by embedded code.
 - **Gates.** `scripts/api_surface.py check` compares the public item list of the default build with a baseline and fails on any addition outside `vlite::property_graph`, so a public `vlite::memory` module changes the baseline. Every public item also needs a `site/api.html` row with a `data-api` key (`tests/api_reference.py`).
 - **Lane F1 is changing the core now.** Facts and erasure add and change core types and error cases. A public API frozen while they move would freeze half-settled shapes.
-- **What exists today for a non-Rust embedded user:** the REST clients (Python, JavaScript, .NET, Go) against a local or remote `vlite-server`, the MCP tools and `vlite-memory-cli`, and, after goal (a), the gRPC `Memory` service.
+- **What exists today for a non-Rust embedded user:** the REST clients (Python, JavaScript and .NET wrap memory; Go does not) against a local or remote `vlite-server`, the MCP tools and `vlite-memory-cli`, and, after goal (a), the gRPC `Memory` service.
 
 ## 2. Options
 

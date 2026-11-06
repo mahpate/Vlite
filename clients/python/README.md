@@ -102,7 +102,7 @@ except UnsupportedError:  # 404 not_found: the server has no memory routes
 Text and vector recall find only memories that hold an evidence record, so the `text` recall above
 returns nothing on a new binding, and a binding without an evidence collection refuses it with 409
 `memory_capability_unavailable` (`details["feature"]` `evidence_recall`). Recall with
-`"entity_seeds": ["e1"]` to read back what you saved.
+`"entity_seeds": ["e1"]` to read back that entity and the memories it references.
 
 The methods are `remember`, `recall`, `find_facts`, `correct_facts`, `consolidate`,
 `forget`, `get_receipt`, `get_erasure` and `resume_erasure`; types carry the
@@ -129,7 +129,8 @@ carries the complete receipt); `find_facts`, `correct_facts`,
 `TransportError` a mutation may have committed. Look up a `forget` or `consolidate`
 with `get_receipt` and the same idempotency key. The server refuses a lookup of a
 `remember` receipt, so repeat the same `remember` request (same key, same body) inside
-the receipt window instead: an exact repeat returns the original result with
+the receipt window instead (not after its `retry_until_ms` without reading the state
+first): an exact repeat returns the original result with
 `replayed: true` and writes nothing. The client never repeats a request for you.
 
 Licensed under MIT; see LICENSE.

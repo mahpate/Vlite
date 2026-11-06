@@ -1542,7 +1542,8 @@ class Memory:
 
     def get_receipt(self, request: MemoryReceiptRequest) -> MemoryReceiptResponse:
         """Look up a retained receipt by scope, operation and idempotency key (the
-        first server slice refuses operation remember: 409 remember_receipt_lookup)."""
+        first server slice refuses operation remember: 409 memory_capability_unavailable,
+        details["feature"] remember_receipt_lookup)."""
         return self._post("/receipts/lookup", _MEMORY_RECEIPT, request)
 
     def get_erasure(self, request: MemoryErasureRequest) -> MemoryErasureResponse:

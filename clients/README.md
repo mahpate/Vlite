@@ -111,16 +111,17 @@ The Python, JavaScript and .NET clients also expose the agent-memory REST surfac
 methods, each taking one request and returning the full response: `remember`, `recall`,
 `find_facts`, `correct_facts`, `consolidate`, `forget`, `get_receipt`, `get_erasure` and
 `resume_erasure` (`findFacts` and so on in JavaScript, `FindFactsAsync` and so on in .NET). The
-server serves remember (`entity` and `episodic`), recall, consolidate (retain, commit only), forget
+first server slice (provisional; the server is authoritative) serves remember (`entity` and `episodic`), recall, consolidate (retain, commit only), forget
 (`ids` target, logical delete) and receipt lookup, except that it refuses a lookup of a `remember`
 receipt (the original `remember` response carries the complete receipt). That lookup and other
 operations and fields answer 409 `memory_capability_unavailable` with `details.feature`
 (`remember_receipt_lookup` for the lookup), and every client surfaces that refusal unchanged. Text
 and vector recall find only memories that hold an evidence record, so use `entity_seeds` to read
-back what you saved on a new binding. After a timeout or cancellation a mutation may have
-committed: look up a `forget` or `consolidate` with `get_receipt` and the same idempotency key, or
-repeat a `remember` with the same key and body inside the receipt window. The Go client has no
-key-value or agent-memory methods. See the [Python](python/README.md#agent-memory) and
+back an entity you saved and the memories it references on a new binding. After a timeout or
+cancellation a mutation may have committed: look up a `forget` or `consolidate` with `get_receipt`
+and the same idempotency key, or repeat a `remember` with the same key and body inside the receipt
+window (not after its `retry_until_ms` without reading the state first). The Go client has no
+agent-memory methods. See the [Python](python/README.md#agent-memory) and
 [JavaScript](javascript/README.md#memory-operations) examples and .NET below.
 
 In JavaScript, u64 and i64 inputs are decimal strings, safe integers or `bigint` (an unsafe `Number`
@@ -487,12 +488,13 @@ The JavaScript and .NET clients have the same nine operations.
   ends in `TransportError` (timeout, disconnect, cancellation) may have committed:
   look up a `forget` or `consolidate` with `get_receipt` and the same key. The
   server refuses a lookup of a `remember` receipt, so repeat the same `remember`
-  request (same key, same body) inside the receipt window instead; an exact
+  request (same key, same body) inside the receipt window instead (not after its
+  `retry_until_ms` without reading the state first); an exact
   repeat returns the original result with `replayed: true` and writes nothing.
 - `recall` by `text` or `vector` finds only memories that hold an evidence record
   (a binding without an evidence collection refuses it with 409
   `memory_capability_unavailable`, `details["feature"]` `evidence_recall`); use
-  `entity_seeds` to read back what you remembered.
+  `entity_seeds` to read back an entity you remembered and the memories it references.
 - The first server slice (provisional; the server is authoritative) supports
   `remember` for kinds `entity` and `episodic`, `recall`, `consolidate` (retain
   only, commit only), `forget` (an `ids` target with `logical_delete`) and
@@ -579,9 +581,8 @@ until nil. Search options and collection settings use `Object`, preserving REST
 field names, modes, typed filters and decimal-string integers. Structured record,
 metadata, page and hit types are included. Dynamic JSON numbers use `json.Number`.
 
-The Go client has no key-value or agent-memory methods: it does not wrap the
-`/v1/collections/{collection}/kv/...` or `/v1/memory/{binding}/...` routes. Use the Python,
-JavaScript or .NET client for them.
+The Go client has no agent-memory methods: it does not wrap the `/v1/memory/{binding}/...`
+routes. Use the Python, JavaScript or .NET client for them.
 
 Use `errors.As(err, &apiError)` with `*vlite.APIError` to inspect `Status`, `Code`
 and `RequestID`. `*vlite.TransportError` has code `transport_error` and unwraps
@@ -663,8 +664,8 @@ dotnet build clients/dotnet/VLite.Client.Tests
 dotnet run --project clients/dotnet/VLite.Client.Tests --no-build
 ```
 
-Apart from key-value and agent memory (.NET only; see the sections above and below), Go and .NET
-cover the core REST surface above, including exact/ANN and typed filters. The broader Python/JS
+Go and .NET cover the core REST surface above, including exact/ANN and typed filters; .NET also
+wraps key-value and agent memory (see the sections above and below). The broader Python/JS
 convenience APIs for imports, backups, diagnostics, credentials, conditional writes and
 maintenance are not yet wrapped in these two clients. No client silently retries or falls back
 between search modes.
@@ -691,7 +692,7 @@ Console.WriteLine(saved.Receipt.Sequence);
 Text and vector recall find only memories that hold an evidence record, so the `Text` recall above
 returns nothing on a new binding, and a binding without an evidence collection refuses it with 409
 `memory_capability_unavailable` (`Details.Feature` `evidence_recall`). Recall with
-`EntitySeeds: ["e1"]` to read back what you saved.
+`EntitySeeds: ["e1"]` to read back the entity you saved and the memories it references.
 
 The first server slice implements remember (kinds `entity` and `episodic`),
 recall, consolidate, forget (`ids` targets, logical delete) and receipt lookup,

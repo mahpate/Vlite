@@ -426,7 +426,10 @@ test("KV get, list and delete honor a caller signal and never retry", async () =
     for await (const _ of req);
     calls++;
     controller.abort();
-    res.end("{}");
+    // A valid body for each route, so that only the abort can make a call fail.
+    res.end(req.method === "DELETE" ? '{"deleted":true}'
+      : req.url.includes("/kv/entries") ? '{"items":[],"next_after":null}'
+      : '{"key":"k","value_base64":"","version":"1","expires_at_ms":null}');
   });
   await new Promise((resolve) => server.listen(0, "127.0.0.1", resolve));
   try {

@@ -324,7 +324,7 @@ export type MemoryTarget<U extends MemoryU64Input = MemoryU64> =
 export interface MemoryForgetRequest extends MemoryMutation {
   target: MemoryTarget<MemoryU64Input>; mode: "logical_delete" | "expire"; expires_at_ms?: MemoryU64Input; allow_job?: boolean;
 }
-/** The first server slice refuses `operation: "remember"` (409 `remember_receipt_lookup`): repeat the remember, with the same key and body, instead. */
+/** The first server slice refuses `operation: "remember"` (409 `memory_capability_unavailable`, `details.feature` `remember_receipt_lookup`): repeat the remember, with the same key and body, instead. */
 export interface MemoryReceiptRequest { scope: MemoryScope; operation: MemoryOperation; idempotency_key: MemoryKey }
 export interface MemoryErasureRequest { scope: MemoryScope; job_id: MemoryKey }
 export interface MemoryResumeRequest extends MemoryMutation {
