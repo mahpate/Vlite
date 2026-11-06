@@ -209,6 +209,10 @@ for (const action of [
   () => strict.kvList('default', 'n', undefined, undefined, 1.5),
   () => strict.kvList('default', 'n', undefined, undefined, NaN),
   () => strict.kvList('default', 'n', undefined, undefined, 2 ** 60),
+  () => strict.kvList('default', 'n', undefined, undefined, '5'),
+  () => strict.kvList('default', 'n', undefined, undefined, true),
+  () => strict.kvList('default', 'n', undefined, undefined, [7]),
+  () => strict.kvList('default', 'n', undefined, undefined, { valueOf() { return 5; } }),
 ]) assert.throws(action, (error) => codeOf(error) === 'invalid_request');
 assert.throws(() => strict.kvList('default', 'n', undefined, undefined, 0), (error) => codeOf(error) === 'invalid_input');
 assert.throws(() => strict.kvPut('default', 'n', 'k', new Uint8Array(1047291)), (error) => codeOf(error) === 'invalid_input');
@@ -260,6 +264,44 @@ for (const expected of [getter, trap]) {
 }
 hostile.kvPut('default', 'n', 'k', new Uint8Array([9]));
 assert.deepEqual(hostile.kvGet('default', 'n', 'k').value, new Uint8Array([9]));
+assert.ok(hostile.toBytes().length > 0);
+
+// A value that only looks like a Uint8Array is refused, and one that runs the caller's code cannot leave the database
+// borrowed: a proxy (whose traps would run), an object that inherits from Uint8Array.prototype (whose built-in
+// getters throw) and another kind of typed array. What is stored is what the array holds, never what an object says
+// its length is: a subclass or an own property can claim any `length`.
+class Padded extends Uint8Array { get length() { return 4096; } }
+class Throwing extends Uint8Array { get length() { throw new Error('the getter ran'); } }
+const padded = new Padded(2);
+padded.set([1, 2]);
+const lying = new Uint8Array([3]);
+Object.defineProperty(lying, 'length', { value: 4096 });
+for (const bad of [
+  new Proxy(new Uint8Array(4), {}),
+  new Proxy({}, { getPrototypeOf() { throw new Error('the trap ran'); } }),
+  new Proxy(new Uint8Array(4), { get() { throw new Error('the trap ran'); } }),
+  Object.create(Uint8Array.prototype),
+  new Float64Array(2),
+  new BigUint64Array(1),
+]) {
+  assert.throws(() => hostile.kvPut('default', 'n', 'v', bad), (error) => codeOf(error) === 'invalid_request');
+  assert.equal(hostile.kvGet('default', 'n', 'v'), undefined);
+}
+for (const [source, bytes] of [[padded, [1, 2]], [lying, [3]], [new Throwing(2), [0, 0]]]) {
+  hostile.kvPut('default', 'n', 'v', source);
+  assert.deepEqual(hostile.kvGet('default', 'n', 'v').value, new Uint8Array(bytes));
+}
+// The largest value and one byte more, however it is held.
+hostile.kvPut('default', 'n', 'big', new Uint8Array(1047290));
+assert.throws(() => hostile.kvPut('default', 'n', 'big', new Uint8Array(1047291)), (error) => codeOf(error) === 'invalid_input');
+assert.throws(() => hostile.kvPut('default', 'n', 'big', new Padded(1047291)), (error) => codeOf(error) === 'invalid_input');
+assert.equal(hostile.kvGet('default', 'n', 'big').value.length, 1047290);
+
+// The longest collection name is 63 bytes: a longer string is refused whatever it holds, before it is scanned.
+assert.throws(() => hostile.kvGet('a'.repeat(63), 'n', 'k'), (error) => codeOf(error) === 'collection_not_found');
+for (const long of ['a'.repeat(64), 'a'.repeat(1_000_000), '\u{1F600}'.repeat(20)]) {
+  assert.throws(() => hostile.kvGet(long, 'n', 'k'), (error) => codeOf(error) === 'invalid_input');
+}
 assert.ok(hostile.toBytes().length > 0);
 // A collection with other than one dimension is not a key-value collection.
 const wide = pkg.VLiteDatabase.create(2);

@@ -28,9 +28,9 @@ pub fn set_clock(now_ms: f64) {
 }
 
 // JS built-ins that build key-value results and errors. They are not exported.
-// The two that read the caller's `expected` object can run the caller's code (a
-// getter, a proxy), so they are `catch`: a JavaScript exception that unwound through
-// this frame would leave the database borrowed for good.
+// The ones that read the caller's `expected` object or `value` can run the
+// caller's code (a getter, a proxy), so they are `catch`: a JavaScript exception
+// that unwound through this frame would leave the database borrowed for good.
 #[wasm_bindgen]
 extern "C" {
     type Object;
@@ -49,6 +49,10 @@ extern "C" {
     fn reflect_get(target: &JsValue, key: &str) -> Result<JsValue, JsValue>;
     #[wasm_bindgen(catch, static_method_of = Object)]
     fn keys(target: &JsValue) -> Result<Array, JsValue>;
+    #[wasm_bindgen(js_name = Uint8Array)]
+    type Bytes;
+    #[wasm_bindgen(method, catch, js_name = slice)]
+    fn bytes_slice(this: &Bytes, begin: u32, end: u32) -> Result<JsValue, JsValue>;
 }
 
 #[wasm_bindgen(typescript_custom_section)]
@@ -338,21 +342,12 @@ impl VLiteDatabase {
         #[wasm_bindgen(unchecked_param_type = "string")] namespace: JsValue,
         #[wasm_bindgen(unchecked_optional_param_type = "string | null")] prefix: JsValue,
         #[wasm_bindgen(unchecked_optional_param_type = "string | null")] after: JsValue,
-        #[wasm_bindgen(unchecked_optional_param_type = "number | null")] limit: Option<f64>,
+        #[wasm_bindgen(unchecked_optional_param_type = "number | null")] limit: JsValue,
     ) -> Result<JsValue, JsValue> {
         let (collection, namespace) = address(&collection, &namespace)?;
         let prefix = optional_text(&prefix, "prefix", 0, 1024)?.unwrap_or_default();
         let after = optional_text(&after, "after", 1, 1024)?;
-        let limit = match limit {
-            None => 100,
-            Some(value) if safe_integer(value) => value as u64,
-            Some(_) => {
-                return Err(reject(
-                    "invalid_request",
-                    "limit must be a non-negative safe integer",
-                ));
-            }
-        };
+        let limit = limit_of(&limit)?;
         if !(1..=10_000).contains(&limit) {
             return Err(invalid("limit must be 1..10000"));
         }
@@ -492,9 +487,13 @@ fn optional_text(
     text(value, name, min, max).map(Some)
 }
 
+/// The longest name a collection can have: `^[a-z][a-z0-9_-]{0,62}$`. A longer
+/// string is refused before it is scanned.
+const MAX_COLLECTION_BYTES: usize = 63;
+
 /// The collection and the namespace of a call.
 fn address(collection: &JsValue, namespace: &JsValue) -> Result<(String, String), JsValue> {
-    let collection = text(collection, "collection", 0, usize::MAX)?;
+    let collection = text(collection, "collection", 0, MAX_COLLECTION_BYTES)?;
     if collection.is_empty() {
         return Err(invalid("collection must not be empty"));
     }
@@ -509,9 +508,20 @@ fn key_of(key: &JsValue) -> Result<String, JsValue> {
 /// parameter would copy any array-like: a string as zero bytes, an `ArrayBuffer`
 /// as nothing, numbers modulo 256.
 fn value_of(value: &JsValue) -> Result<Vec<u8>, JsValue> {
-    let bytes = value
-        .dyn_ref::<Uint8Array>()
-        .ok_or_else(|| reject("invalid_request", "value must be a Uint8Array"))?;
+    let malformed = || reject("invalid_request", "value must be a Uint8Array");
+    // `Uint8Array.prototype.slice` reads only the internal slots of a typed array,
+    // so a proxy, an object that merely inherits from `Uint8Array.prototype` or
+    // anything else that is not one throws before any code of the caller's runs,
+    // and the call is `catch`: nothing unwinds through this frame while the
+    // database is borrowed. It copies at most one byte more than a value may hold.
+    let copy = value
+        .unchecked_ref::<Bytes>()
+        .bytes_slice(0, MAX_KV_VALUE_BYTES as u32 + 1)
+        .map_err(|_| malformed())?;
+    // A `Float64Array` copies as a `Float64Array`.
+    let copy = copy.dyn_ref::<Uint8Array>().ok_or_else(malformed)?;
+    // A subclass can override `length`: the bytes are read through a plain array.
+    let bytes = Uint8Array::new(copy);
     if bytes.length() as usize > MAX_KV_VALUE_BYTES {
         return Err(invalid(format!("value exceeds {MAX_KV_VALUE_BYTES} bytes")));
     }
@@ -520,6 +530,21 @@ fn value_of(value: &JsValue) -> Result<Vec<u8>, JsValue> {
 
 fn safe_integer(value: f64) -> bool {
     value.is_finite() && value >= 0.0 && value.fract() == 0.0 && value <= 9_007_199_254_740_991.0
+}
+
+/// `undefined` and `null` are the default of 100; anything else must be a
+/// number that is a safe integer, as in the Node binding, never a coerced value.
+fn limit_of(value: &JsValue) -> Result<u64, JsValue> {
+    if value.is_undefined() || value.is_null() {
+        return Ok(100);
+    }
+    match value.as_f64() {
+        Some(number) if safe_integer(number) => Ok(number as u64),
+        _ => Err(reject(
+            "invalid_request",
+            "limit must be a non-negative safe integer",
+        )),
+    }
 }
 
 /// `undefined`/`"any"`, `"absent"` or `{ revision: bigint }`; nothing else.

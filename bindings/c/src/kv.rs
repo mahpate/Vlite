@@ -781,7 +781,8 @@ mod tests {
             .iter()
             .map(|sequence| replay(sequence, directory.path()))
             .sum();
-        // A `skip` added to the file must not quietly remove coverage.
+        // Every step that the file does not skip for `c` was replayed; the floor
+        // stops a file that skips nearly everything from passing.
         assert_eq!(replayed, expected);
         assert!(replayed >= 100, "only {replayed} golden steps replayed");
     }
@@ -995,14 +996,20 @@ mod tests {
             code(db, json!({"op": "get", "collection": "default"})),
             "invalid_request"
         );
-        // A repeated field and a request that is not an object are reported
-        // before the read-only refusal, as in vlite-mcp.
-        let repeated = call_text(
-            db,
+        // A repeated field (at any depth, an array included) and a request that
+        // is not an object are reported before the read-only refusal, as in
+        // vlite-mcp.
+        for request in [
             r#"{"op":"kv","request":{"op":"put","op":"put","collection":"default","namespace":"n","key":"b","value_base64":""}}"#,
-        );
-        assert_eq!(repeated["error"]["code"], "invalid_request");
-        assert_eq!(repeated["error"]["message"], "duplicate argument field");
+            r#"{"op":"kv","request":{"op":"put","collection":"default","namespace":"n","key":"b","value_base64":"","extra":[{"a":1,"a":1}]}}"#,
+        ] {
+            let repeated = call_text(db, request);
+            assert_eq!(repeated["error"]["code"], "invalid_request", "{request}");
+            assert_eq!(
+                repeated["error"]["message"], "duplicate argument field",
+                "{request}"
+            );
+        }
         assert_eq!(
             code(db, json!(["put", "default", "n", "b", ""])),
             "invalid_request"
