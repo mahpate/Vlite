@@ -170,12 +170,13 @@
      "status": "killed",
      "expect_met": true,
      "restored_identically": true,
-     "seconds": 15,
+     "seconds": 14,
      "environment": {
-      "os": "Windows-11-10.0.26300-SP0",
+      "os": "Windows-11-10.0.26200-SP0",
       "rustc": "rustc 1.99.1 (58cf8f9c3 2026-10-13)",
-      "head": "75055532df583c0fb48ec4fc5922516840f5313c"
+      "head": "5557ee7fed3f0db496cf944b0708dd2fdf9a2c22"
      },
+     "sources_sha256": "eaf4962586c77b556471e9c4b9c4b8addcff449b019309157d4f158279c7b549",
      "baseline_green": true
     },
     "local": {
@@ -200,12 +201,13 @@
      "status": "killed",
      "expect_met": true,
      "restored_identically": true,
-     "seconds": 80,
+     "seconds": 14,
      "environment": {
       "os": "Windows-11-10.0.26300-SP0",
       "rustc": "rustc 1.99.1 (58cf8f9c3 2026-10-13)",
-      "head": "00bac1c229677b1d58e4f0445462cf1d169cb57f"
+      "head": "2d40512513a851d8c13c8747411609517d4300b1"
      },
+     "sources_sha256": "eaf4962586c77b556471e9c4b9c4b8addcff449b019309157d4f158279c7b549",
      "baseline_green": true
     }
    }
@@ -244,21 +246,23 @@
      },
      "build_attempts": 1,
      "compiled": true,
-     "tests": 196,
-     "passed": 194,
+     "tests": 230,
+     "passed": 227,
      "failed_tests": [
       "compact::source::overlay_tests::compact_hybrid_rejects_poisoned_text_only_search",
-      "compact::source::overlay_tests::consumer_hybrid::hybrid_health_precedes_every_validation_and_every_valid_query"
+      "compact::source::overlay_tests::consumer_hybrid::hybrid_health_precedes_every_validation_and_every_valid_query",
+      "compact::source::overlay_tests::consumer_text::compact_text_queries_report_a_poisoned_handle_before_an_unavailable_index"
      ],
      "status": "killed",
      "expect_met": true,
      "restored_identically": true,
-     "seconds": 48,
+     "seconds": 119,
      "environment": {
-      "os": "Windows-11-10.0.26300-SP0",
+      "os": "Windows-11-10.0.26200-SP0",
       "rustc": "rustc 1.99.1 (58cf8f9c3 2026-10-13)",
-      "head": "75055532df583c0fb48ec4fc5922516840f5313c"
+      "head": "5557ee7fed3f0db496cf944b0708dd2fdf9a2c22"
      },
+     "sources_sha256": "eaf4962586c77b556471e9c4b9c4b8addcff449b019309157d4f158279c7b549",
      "baseline_green": true
     },
     "local": {
@@ -275,21 +279,23 @@
      },
      "build_attempts": 1,
      "compiled": true,
-     "tests": 196,
-     "passed": 194,
+     "tests": 230,
+     "passed": 227,
      "failed_tests": [
       "compact::source::overlay_tests::compact_hybrid_rejects_poisoned_text_only_search",
-      "compact::source::overlay_tests::consumer_hybrid::hybrid_health_precedes_every_validation_and_every_valid_query"
+      "compact::source::overlay_tests::consumer_hybrid::hybrid_health_precedes_every_validation_and_every_valid_query",
+      "compact::source::overlay_tests::consumer_text::compact_text_queries_report_a_poisoned_handle_before_an_unavailable_index"
      ],
      "status": "killed",
      "expect_met": true,
      "restored_identically": true,
-     "seconds": 306,
+     "seconds": 109,
      "environment": {
       "os": "Windows-11-10.0.26300-SP0",
       "rustc": "rustc 1.99.1 (58cf8f9c3 2026-10-13)",
-      "head": "00bac1c229677b1d58e4f0445462cf1d169cb57f"
+      "head": "2d40512513a851d8c13c8747411609517d4300b1"
      },
+     "sources_sha256": "eaf4962586c77b556471e9c4b9c4b8addcff449b019309157d4f158279c7b549",
      "baseline_green": true
     }
    }
@@ -329,8 +335,8 @@
      },
      "build_attempts": 1,
      "compiled": true,
-     "tests": 196,
-     "passed": 187,
+     "tests": 230,
+     "passed": 221,
      "failed_tests": [
       "compact::source::overlay_tests::compact_hybrid_text_leg_matches_resident_after_overlay_resolution",
       "compact::source::overlay_tests::consumer_hybrid::hybrid_deadline_only_overlay_write_applies_its_deadline_to_both_legs",
@@ -345,12 +351,13 @@
      "status": "killed",
      "expect_met": true,
      "restored_identically": true,
-     "seconds": 50,
+     "seconds": 116,
      "environment": {
       "os": "Windows-11-10.0.26200-SP0",
       "rustc": "rustc 1.99.1 (58cf8f9c3 2026-10-13)",
-      "head": "b35c0131ba0b34ce2fe362c42c9d66674c43d017"
+      "head": "5557ee7fed3f0db496cf944b0708dd2fdf9a2c22"
      },
+     "sources_sha256": "eaf4962586c77b556471e9c4b9c4b8addcff449b019309157d4f158279c7b549",
      "baseline_green": true
     },
     "local": {
@@ -367,8 +374,8 @@
      },
      "build_attempts": 1,
      "compiled": true,
-     "tests": 196,
-     "passed": 187,
+     "tests": 230,
+     "passed": 221,
      "failed_tests": [
       "compact::source::overlay_tests::compact_hybrid_text_leg_matches_resident_after_overlay_resolution",
       "compact::source::overlay_tests::consumer_hybrid::hybrid_deadline_only_overlay_write_applies_its_deadline_to_both_legs",
@@ -383,12 +390,13 @@
      "status": "killed",
      "expect_met": true,
      "restored_identically": true,
-     "seconds": 232,
+     "seconds": 112,
      "environment": {
       "os": "Windows-11-10.0.26300-SP0",
       "rustc": "rustc 1.99.1 (58cf8f9c3 2026-10-13)",
-      "head": "00bac1c229677b1d58e4f0445462cf1d169cb57f"
+      "head": "2d40512513a851d8c13c8747411609517d4300b1"
      },
+     "sources_sha256": "eaf4962586c77b556471e9c4b9c4b8addcff449b019309157d4f158279c7b549",
      "baseline_green": true
     }
    }
@@ -429,8 +437,8 @@
      },
      "build_attempts": 1,
      "compiled": true,
-     "tests": 196,
-     "passed": 191,
+     "tests": 230,
+     "passed": 225,
      "failed_tests": [
       "compact::source::overlay_tests::compact_hybrid_text_leg_matches_resident_after_overlay_resolution",
       "compact::source::overlay_tests::consumer_hybrid::hybrid_deadline_only_overlay_write_applies_its_deadline_to_both_legs",
@@ -441,12 +449,13 @@
      "status": "killed",
      "expect_met": true,
      "restored_identically": true,
-     "seconds": 236,
+     "seconds": 117,
      "environment": {
       "os": "Windows-11-10.0.26300-SP0",
       "rustc": "rustc 1.99.1 (58cf8f9c3 2026-10-13)",
-      "head": "00bac1c229677b1d58e4f0445462cf1d169cb57f"
+      "head": "2d40512513a851d8c13c8747411609517d4300b1"
      },
+     "sources_sha256": "eaf4962586c77b556471e9c4b9c4b8addcff449b019309157d4f158279c7b549",
      "baseline_green": true
     },
     "second": {
@@ -463,8 +472,8 @@
      },
      "build_attempts": 1,
      "compiled": true,
-     "tests": 196,
-     "passed": 191,
+     "tests": 230,
+     "passed": 225,
      "failed_tests": [
       "compact::source::overlay_tests::compact_hybrid_text_leg_matches_resident_after_overlay_resolution",
       "compact::source::overlay_tests::consumer_hybrid::hybrid_deadline_only_overlay_write_applies_its_deadline_to_both_legs",
@@ -475,12 +484,13 @@
      "status": "killed",
      "expect_met": true,
      "restored_identically": true,
-     "seconds": 48,
+     "seconds": 116,
      "environment": {
       "os": "Windows-11-10.0.26200-SP0",
       "rustc": "rustc 1.99.1 (58cf8f9c3 2026-10-13)",
-      "head": "b35c0131ba0b34ce2fe362c42c9d66674c43d017"
+      "head": "5557ee7fed3f0db496cf944b0708dd2fdf9a2c22"
      },
+     "sources_sha256": "eaf4962586c77b556471e9c4b9c4b8addcff449b019309157d4f158279c7b549",
      "baseline_green": true
     }
    }
@@ -520,8 +530,8 @@
      },
      "build_attempts": 1,
      "compiled": true,
-     "tests": 196,
-     "passed": 193,
+     "tests": 230,
+     "passed": 227,
      "failed_tests": [
       "compact::source::overlay_tests::compact_hybrid_requires_declared_text_fields",
       "compact::source::overlay_tests::consumer_hybrid::hybrid_disabled_legs_are_never_evaluated",
@@ -530,12 +540,13 @@
      "status": "killed",
      "expect_met": true,
      "restored_identically": true,
-     "seconds": 47,
+     "seconds": 119,
      "environment": {
       "os": "Windows-11-10.0.26200-SP0",
       "rustc": "rustc 1.99.1 (58cf8f9c3 2026-10-13)",
-      "head": "b35c0131ba0b34ce2fe362c42c9d66674c43d017"
+      "head": "5557ee7fed3f0db496cf944b0708dd2fdf9a2c22"
      },
+     "sources_sha256": "eaf4962586c77b556471e9c4b9c4b8addcff449b019309157d4f158279c7b549",
      "baseline_green": true
     },
     "local": {
@@ -552,8 +563,8 @@
      },
      "build_attempts": 1,
      "compiled": true,
-     "tests": 196,
-     "passed": 193,
+     "tests": 230,
+     "passed": 227,
      "failed_tests": [
       "compact::source::overlay_tests::compact_hybrid_requires_declared_text_fields",
       "compact::source::overlay_tests::consumer_hybrid::hybrid_disabled_legs_are_never_evaluated",
@@ -562,12 +573,13 @@
      "status": "killed",
      "expect_met": true,
      "restored_identically": true,
-     "seconds": 242,
+     "seconds": 112,
      "environment": {
       "os": "Windows-11-10.0.26300-SP0",
       "rustc": "rustc 1.99.1 (58cf8f9c3 2026-10-13)",
-      "head": "00bac1c229677b1d58e4f0445462cf1d169cb57f"
+      "head": "2d40512513a851d8c13c8747411609517d4300b1"
      },
+     "sources_sha256": "eaf4962586c77b556471e9c4b9c4b8addcff449b019309157d4f158279c7b549",
      "baseline_green": true
     }
    }
@@ -606,8 +618,8 @@
      },
      "build_attempts": 1,
      "compiled": true,
-     "tests": 196,
-     "passed": 194,
+     "tests": 230,
+     "passed": 228,
      "failed_tests": [
       "compact::source::overlay_tests::compact_hybrid_text_leg_matches_resident_after_overlay_resolution",
       "compact::source::overlay_tests::consumer_hybrid::hybrid_filter_applies_to_both_legs_and_the_vector_leg_reports_its_work"
@@ -615,12 +627,13 @@
      "status": "killed",
      "expect_met": true,
      "restored_identically": true,
-     "seconds": 49,
+     "seconds": 119,
      "environment": {
-      "os": "Windows-11-10.0.26300-SP0",
+      "os": "Windows-11-10.0.26200-SP0",
       "rustc": "rustc 1.99.1 (58cf8f9c3 2026-10-13)",
-      "head": "75055532df583c0fb48ec4fc5922516840f5313c"
+      "head": "5557ee7fed3f0db496cf944b0708dd2fdf9a2c22"
      },
+     "sources_sha256": "eaf4962586c77b556471e9c4b9c4b8addcff449b019309157d4f158279c7b549",
      "baseline_green": true
     },
     "local": {
@@ -637,8 +650,8 @@
      },
      "build_attempts": 1,
      "compiled": true,
-     "tests": 196,
-     "passed": 194,
+     "tests": 230,
+     "passed": 228,
      "failed_tests": [
       "compact::source::overlay_tests::compact_hybrid_text_leg_matches_resident_after_overlay_resolution",
       "compact::source::overlay_tests::consumer_hybrid::hybrid_filter_applies_to_both_legs_and_the_vector_leg_reports_its_work"
@@ -646,12 +659,13 @@
      "status": "killed",
      "expect_met": true,
      "restored_identically": true,
-     "seconds": 272,
+     "seconds": 144,
      "environment": {
       "os": "Windows-11-10.0.26300-SP0",
       "rustc": "rustc 1.99.1 (58cf8f9c3 2026-10-13)",
-      "head": "00bac1c229677b1d58e4f0445462cf1d169cb57f"
+      "head": "2d40512513a851d8c13c8747411609517d4300b1"
      },
+     "sources_sha256": "eaf4962586c77b556471e9c4b9c4b8addcff449b019309157d4f158279c7b549",
      "baseline_green": true
     }
    }
@@ -1182,8 +1196,8 @@
      },
      "build_attempts": 1,
      "compiled": true,
-     "tests": 196,
-     "passed": 193,
+     "tests": 230,
+     "passed": 227,
      "failed_tests": [
       "compact::source::overlay_tests::compact_named_vector_visibility_matches_resident",
       "compact::source::overlay_tests::consumer_vectors::compact_reembed_pending_decodes_no_row_beyond_its_limit",
@@ -1192,12 +1206,13 @@
      "status": "killed",
      "expect_met": true,
      "restored_identically": true,
-     "seconds": 48,
+     "seconds": 117,
      "environment": {
       "os": "Windows-11-10.0.26200-SP0",
       "rustc": "rustc 1.99.1 (58cf8f9c3 2026-10-13)",
-      "head": "b35c0131ba0b34ce2fe362c42c9d66674c43d017"
+      "head": "5557ee7fed3f0db496cf944b0708dd2fdf9a2c22"
      },
+     "sources_sha256": "eaf4962586c77b556471e9c4b9c4b8addcff449b019309157d4f158279c7b549",
      "baseline_green": true
     },
     "local": {
@@ -1214,8 +1229,8 @@
      },
      "build_attempts": 1,
      "compiled": true,
-     "tests": 196,
-     "passed": 193,
+     "tests": 230,
+     "passed": 227,
      "failed_tests": [
       "compact::source::overlay_tests::compact_named_vector_visibility_matches_resident",
       "compact::source::overlay_tests::consumer_vectors::compact_reembed_pending_decodes_no_row_beyond_its_limit",
@@ -1224,12 +1239,13 @@
      "status": "killed",
      "expect_met": true,
      "restored_identically": true,
-     "seconds": 235,
+     "seconds": 142,
      "environment": {
       "os": "Windows-11-10.0.26300-SP0",
       "rustc": "rustc 1.99.1 (58cf8f9c3 2026-10-13)",
-      "head": "00bac1c229677b1d58e4f0445462cf1d169cb57f"
+      "head": "2d40512513a851d8c13c8747411609517d4300b1"
      },
+     "sources_sha256": "eaf4962586c77b556471e9c4b9c4b8addcff449b019309157d4f158279c7b549",
      "baseline_green": true
     }
    }
@@ -1268,8 +1284,8 @@
      },
      "build_attempts": 1,
      "compiled": true,
-     "tests": 196,
-     "passed": 194,
+     "tests": 230,
+     "passed": 228,
      "failed_tests": [
       "compact::source::overlay_tests::compact_named_vector_visibility_matches_resident",
       "compact::source::overlay_tests::consumer_vectors::compact_named_search_matches_resident_at_every_deadline_boundary"
@@ -1277,12 +1293,13 @@
      "status": "killed",
      "expect_met": true,
      "restored_identically": true,
-     "seconds": 260,
+     "seconds": 112,
      "environment": {
       "os": "Windows-11-10.0.26300-SP0",
       "rustc": "rustc 1.99.1 (58cf8f9c3 2026-10-13)",
-      "head": "00bac1c229677b1d58e4f0445462cf1d169cb57f"
+      "head": "2d40512513a851d8c13c8747411609517d4300b1"
      },
+     "sources_sha256": "eaf4962586c77b556471e9c4b9c4b8addcff449b019309157d4f158279c7b549",
      "baseline_green": true
     },
     "second": {
@@ -1299,8 +1316,8 @@
      },
      "build_attempts": 1,
      "compiled": true,
-     "tests": 196,
-     "passed": 194,
+     "tests": 230,
+     "passed": 228,
      "failed_tests": [
       "compact::source::overlay_tests::compact_named_vector_visibility_matches_resident",
       "compact::source::overlay_tests::consumer_vectors::compact_named_search_matches_resident_at_every_deadline_boundary"
@@ -1308,12 +1325,13 @@
      "status": "killed",
      "expect_met": true,
      "restored_identically": true,
-     "seconds": 48,
+     "seconds": 116,
      "environment": {
       "os": "Windows-11-10.0.26200-SP0",
       "rustc": "rustc 1.99.1 (58cf8f9c3 2026-10-13)",
-      "head": "b35c0131ba0b34ce2fe362c42c9d66674c43d017"
+      "head": "5557ee7fed3f0db496cf944b0708dd2fdf9a2c22"
      },
+     "sources_sha256": "eaf4962586c77b556471e9c4b9c4b8addcff449b019309157d4f158279c7b549",
      "baseline_green": true
     }
    }
@@ -1353,8 +1371,8 @@
      },
      "build_attempts": 1,
      "compiled": true,
-     "tests": 196,
-     "passed": 193,
+     "tests": 230,
+     "passed": 227,
      "failed_tests": [
       "compact::source::overlay_tests::compact_query_language_matches_resident_after_overlay_resolution",
       "compact::source::overlay_tests::consumer_query::query_clauses_match_resident_before_and_after_overlay_mutations",
@@ -1363,12 +1381,13 @@
      "status": "killed",
      "expect_met": true,
      "restored_identically": true,
-     "seconds": 58,
+     "seconds": 116,
      "environment": {
-      "os": "Windows-11-10.0.26300-SP0",
+      "os": "Windows-11-10.0.26200-SP0",
       "rustc": "rustc 1.99.1 (58cf8f9c3 2026-10-13)",
-      "head": "75055532df583c0fb48ec4fc5922516840f5313c"
+      "head": "5557ee7fed3f0db496cf944b0708dd2fdf9a2c22"
      },
+     "sources_sha256": "eaf4962586c77b556471e9c4b9c4b8addcff449b019309157d4f158279c7b549",
      "baseline_green": true
     },
     "local": {
@@ -1385,8 +1404,8 @@
      },
      "build_attempts": 1,
      "compiled": true,
-     "tests": 196,
-     "passed": 193,
+     "tests": 230,
+     "passed": 227,
      "failed_tests": [
       "compact::source::overlay_tests::compact_query_language_matches_resident_after_overlay_resolution",
       "compact::source::overlay_tests::consumer_query::query_clauses_match_resident_before_and_after_overlay_mutations",
@@ -1395,12 +1414,13 @@
      "status": "killed",
      "expect_met": true,
      "restored_identically": true,
-     "seconds": 175,
+     "seconds": 117,
      "environment": {
       "os": "Windows-11-10.0.26300-SP0",
       "rustc": "rustc 1.99.1 (58cf8f9c3 2026-10-13)",
-      "head": "00bac1c229677b1d58e4f0445462cf1d169cb57f"
+      "head": "2d40512513a851d8c13c8747411609517d4300b1"
      },
+     "sources_sha256": "eaf4962586c77b556471e9c4b9c4b8addcff449b019309157d4f158279c7b549",
      "baseline_green": true
     }
    }
@@ -1437,20 +1457,21 @@
      },
      "build_attempts": 1,
      "compiled": true,
-     "tests": 196,
-     "passed": 195,
+     "tests": 230,
+     "passed": 229,
      "failed_tests": [
       "compact::source::overlay_tests::consumer_query::query_clauses_match_resident_before_and_after_overlay_mutations"
      ],
      "status": "killed",
      "expect_met": true,
      "restored_identically": true,
-     "seconds": 48,
+     "seconds": 118,
      "environment": {
       "os": "Windows-11-10.0.26200-SP0",
       "rustc": "rustc 1.99.1 (58cf8f9c3 2026-10-13)",
-      "head": "b35c0131ba0b34ce2fe362c42c9d66674c43d017"
+      "head": "5557ee7fed3f0db496cf944b0708dd2fdf9a2c22"
      },
+     "sources_sha256": "eaf4962586c77b556471e9c4b9c4b8addcff449b019309157d4f158279c7b549",
      "baseline_green": true
     },
     "local": {
@@ -1467,20 +1488,21 @@
      },
      "build_attempts": 1,
      "compiled": true,
-     "tests": 196,
-     "passed": 195,
+     "tests": 230,
+     "passed": 229,
      "failed_tests": [
       "compact::source::overlay_tests::consumer_query::query_clauses_match_resident_before_and_after_overlay_mutations"
      ],
      "status": "killed",
      "expect_met": true,
      "restored_identically": true,
-     "seconds": 232,
+     "seconds": 116,
      "environment": {
       "os": "Windows-11-10.0.26300-SP0",
       "rustc": "rustc 1.99.1 (58cf8f9c3 2026-10-13)",
-      "head": "00bac1c229677b1d58e4f0445462cf1d169cb57f"
+      "head": "2d40512513a851d8c13c8747411609517d4300b1"
      },
+     "sources_sha256": "eaf4962586c77b556471e9c4b9c4b8addcff449b019309157d4f158279c7b549",
      "baseline_green": true
     }
    }
@@ -1521,24 +1543,26 @@
      },
      "build_attempts": 1,
      "compiled": true,
-     "tests": 196,
-     "passed": 191,
+     "tests": 230,
+     "passed": 224,
      "failed_tests": [
       "compact::source::overlay_tests::compact_query_language_matches_resident_after_overlay_resolution",
       "compact::source::overlay_tests::compact_query_language_vector_leg_uses_full_candidate_depth",
       "compact::source::overlay_tests::consumer_query::query_clauses_match_resident_before_and_after_overlay_mutations",
       "compact::source::overlay_tests::consumer_query::query_hides_expired_and_deleted_rows_in_every_output_and_shows_the_rest",
-      "compact::source::overlay_tests::consumer_query::query_named_vectors_match_resident_on_the_full_collection"
+      "compact::source::overlay_tests::consumer_query::query_named_vectors_match_resident_on_the_full_collection",
+      "compact::source::overlay_tests::consumer_text::compact_text_queries_answer_index_not_ready_while_the_index_is_unavailable"
      ],
      "status": "killed",
      "expect_met": true,
      "restored_identically": true,
-     "seconds": 245,
+     "seconds": 119,
      "environment": {
       "os": "Windows-11-10.0.26300-SP0",
       "rustc": "rustc 1.99.1 (58cf8f9c3 2026-10-13)",
-      "head": "00bac1c229677b1d58e4f0445462cf1d169cb57f"
+      "head": "2d40512513a851d8c13c8747411609517d4300b1"
      },
+     "sources_sha256": "eaf4962586c77b556471e9c4b9c4b8addcff449b019309157d4f158279c7b549",
      "baseline_green": true
     },
     "second": {
@@ -1555,24 +1579,26 @@
      },
      "build_attempts": 1,
      "compiled": true,
-     "tests": 196,
-     "passed": 191,
+     "tests": 230,
+     "passed": 224,
      "failed_tests": [
       "compact::source::overlay_tests::compact_query_language_matches_resident_after_overlay_resolution",
       "compact::source::overlay_tests::compact_query_language_vector_leg_uses_full_candidate_depth",
       "compact::source::overlay_tests::consumer_query::query_clauses_match_resident_before_and_after_overlay_mutations",
       "compact::source::overlay_tests::consumer_query::query_hides_expired_and_deleted_rows_in_every_output_and_shows_the_rest",
-      "compact::source::overlay_tests::consumer_query::query_named_vectors_match_resident_on_the_full_collection"
+      "compact::source::overlay_tests::consumer_query::query_named_vectors_match_resident_on_the_full_collection",
+      "compact::source::overlay_tests::consumer_text::compact_text_queries_answer_index_not_ready_while_the_index_is_unavailable"
      ],
      "status": "killed",
      "expect_met": true,
      "restored_identically": true,
-     "seconds": 48,
+     "seconds": 116,
      "environment": {
       "os": "Windows-11-10.0.26200-SP0",
       "rustc": "rustc 1.99.1 (58cf8f9c3 2026-10-13)",
-      "head": "b35c0131ba0b34ce2fe362c42c9d66674c43d017"
+      "head": "5557ee7fed3f0db496cf944b0708dd2fdf9a2c22"
      },
+     "sources_sha256": "eaf4962586c77b556471e9c4b9c4b8addcff449b019309157d4f158279c7b549",
      "baseline_green": true
     }
    }
@@ -1880,8 +1906,8 @@
      },
      "build_attempts": 1,
      "compiled": true,
-     "tests": 196,
-     "passed": 166,
+     "tests": 230,
+     "passed": 198,
      "failed_tests": [
       "compact::source::method_tests::compact_installed_collection_method_matrix",
       "compact::source::method_tests::compact_installed_database_and_snapshot_method_matrix",
@@ -1899,6 +1925,7 @@
       "compact::source::overlay_tests::consumer_graph::compact_graph_pivot_filter_sees_the_effective_metadata",
       "compact::source::overlay_tests::consumer_graph::compact_graph_retrieval_uses_one_explicit_clock_for_pivots_and_evidence",
       "compact::source::overlay_tests::consumer_graph::compact_graph_retrieve_propagates_read_errors_of_the_pivot_and_evidence_collections",
+      "compact::source::overlay_tests::consumer_graph::graph_retrieve_validates_the_request_bounds_before_the_health_of_a_handle_that_turned_unhealthy",
       "compact::source::overlay_tests::consumer_hybrid::hybrid_approximate_leg_stays_refused_on_compact_records_without_side_effects",
       "compact::source::overlay_tests::consumer_hybrid::hybrid_base_row_deadline_hides_exactly_at_the_clock_and_an_overlay_without_one_restores_it",
       "compact::source::overlay_tests::consumer_hybrid::hybrid_deadline_only_overlay_write_applies_its_deadline_to_both_legs",
@@ -1912,17 +1939,81 @@
       "compact::source::overlay_tests::consumer_hybrid::hybrid_k_zero_keeps_the_vector_leg_work_and_its_validation",
       "compact::source::overlay_tests::consumer_hybrid::hybrid_tombstone_hides_the_base_row_at_every_clock",
       "compact::source::overlay_tests::consumer_hybrid::hybrid_validation_matches_resident_in_check_order",
-      "compact::source::overlay_tests::consumer_hybrid::hybrid_wall_clock_entry_hides_past_deadlines_and_keeps_far_ones_in_both_legs"
+      "compact::source::overlay_tests::consumer_hybrid::hybrid_wall_clock_entry_hides_past_deadlines_and_keeps_far_ones_in_both_legs",
+      "compact::source::overlay_tests::consumer_text::compact_text_queries_answer_index_not_ready_while_the_index_is_unavailable"
      ],
      "status": "killed",
      "expect_met": true,
      "restored_identically": true,
-     "seconds": 227,
+     "seconds": 121,
      "environment": {
       "os": "Windows-11-10.0.26300-SP0",
       "rustc": "rustc 1.99.1 (58cf8f9c3 2026-10-13)",
-      "head": "00bac1c229677b1d58e4f0445462cf1d169cb57f"
+      "head": "2d40512513a851d8c13c8747411609517d4300b1"
      },
+     "sources_sha256": "eaf4962586c77b556471e9c4b9c4b8addcff449b019309157d4f158279c7b549",
+     "baseline_green": true
+    },
+    "second": {
+     "file": "src/hybrid.rs",
+     "anchor_matches": 1,
+     "sha256_lf": {
+      "before": "3136b4dfa38c0ab34570d851521430a43ea4600a256af837e059784036cdb361",
+      "mutated": "4c7a72c1ce3a35a5953515fcf2f0d48781c63a76fa4cedc0f2f1fd0727cbfb1d",
+      "restored": "3136b4dfa38c0ab34570d851521430a43ea4600a256af837e059784036cdb361"
+     },
+     "sha256_bytes": {
+      "before": "cf556bc1ded79380e0f6124f40d16aefd20e2b64f64c37ed0ed4004e31d2ee30",
+      "restored": "cf556bc1ded79380e0f6124f40d16aefd20e2b64f64c37ed0ed4004e31d2ee30"
+     },
+     "build_attempts": 1,
+     "compiled": true,
+     "tests": 230,
+     "passed": 198,
+     "failed_tests": [
+      "compact::source::method_tests::compact_installed_collection_method_matrix",
+      "compact::source::method_tests::compact_installed_database_and_snapshot_method_matrix",
+      "compact::source::method_tests::compact_installed_restricted_method_guards_refuse",
+      "compact::source::overlay_tests::compact_graph_retrieve_projects_effective_row_at_one_clock",
+      "compact::source::overlay_tests::compact_hybrid_requires_declared_text_fields",
+      "compact::source::overlay_tests::compact_hybrid_text_leg_matches_resident_after_overlay_resolution",
+      "compact::source::overlay_tests::compact_hybrid_ties_order_by_id",
+      "compact::source::overlay_tests::consumer_graph::an_attached_record_never_carries_a_deadline_on_compact_or_resident_records",
+      "compact::source::overlay_tests::consumer_graph::compact_graph_access_and_retrieval_answer_poisoned_on_an_unhealthy_handle",
+      "compact::source::overlay_tests::consumer_graph::compact_graph_evidence_decodes_only_the_attached_rows_it_projects",
+      "compact::source::overlay_tests::consumer_graph::compact_graph_evidence_follows_the_requested_collections_and_effective_rows",
+      "compact::source::overlay_tests::consumer_graph::compact_graph_evidence_is_read_at_the_retrieval_clock_even_if_an_attached_row_had_a_deadline",
+      "compact::source::overlay_tests::consumer_graph::compact_graph_lists_at_most_sixty_four_unmapped_pivots_and_counts_all_of_them",
+      "compact::source::overlay_tests::consumer_graph::compact_graph_pivot_filter_sees_the_effective_metadata",
+      "compact::source::overlay_tests::consumer_graph::compact_graph_retrieval_uses_one_explicit_clock_for_pivots_and_evidence",
+      "compact::source::overlay_tests::consumer_graph::compact_graph_retrieve_propagates_read_errors_of_the_pivot_and_evidence_collections",
+      "compact::source::overlay_tests::consumer_graph::graph_retrieve_validates_the_request_bounds_before_the_health_of_a_handle_that_turned_unhealthy",
+      "compact::source::overlay_tests::consumer_hybrid::hybrid_approximate_leg_stays_refused_on_compact_records_without_side_effects",
+      "compact::source::overlay_tests::consumer_hybrid::hybrid_base_row_deadline_hides_exactly_at_the_clock_and_an_overlay_without_one_restores_it",
+      "compact::source::overlay_tests::consumer_hybrid::hybrid_deadline_only_overlay_write_applies_its_deadline_to_both_legs",
+      "compact::source::overlay_tests::consumer_hybrid::hybrid_disabled_legs_are_never_evaluated",
+      "compact::source::overlay_tests::consumer_hybrid::hybrid_equal_fused_scores_break_ties_by_ascending_id_across_the_legs",
+      "compact::source::overlay_tests::consumer_hybrid::hybrid_equal_fused_scores_of_rows_in_both_legs_break_ties_by_ascending_id",
+      "compact::source::overlay_tests::consumer_hybrid::hybrid_expired_overlay_put_hides_the_row_in_both_legs_and_never_reveals_the_base_row",
+      "compact::source::overlay_tests::consumer_hybrid::hybrid_filter_applies_to_both_legs_and_the_vector_leg_reports_its_work",
+      "compact::source::overlay_tests::consumer_hybrid::hybrid_fusion_scores_distances_and_bm25_equal_the_resident_values_bit_for_bit",
+      "compact::source::overlay_tests::consumer_hybrid::hybrid_k_truncates_the_fused_list_and_candidates_bound_each_leg",
+      "compact::source::overlay_tests::consumer_hybrid::hybrid_k_zero_keeps_the_vector_leg_work_and_its_validation",
+      "compact::source::overlay_tests::consumer_hybrid::hybrid_tombstone_hides_the_base_row_at_every_clock",
+      "compact::source::overlay_tests::consumer_hybrid::hybrid_validation_matches_resident_in_check_order",
+      "compact::source::overlay_tests::consumer_hybrid::hybrid_wall_clock_entry_hides_past_deadlines_and_keeps_far_ones_in_both_legs",
+      "compact::source::overlay_tests::consumer_text::compact_text_queries_answer_index_not_ready_while_the_index_is_unavailable"
+     ],
+     "status": "killed",
+     "expect_met": true,
+     "restored_identically": true,
+     "seconds": 133,
+     "environment": {
+      "os": "Windows-11-10.0.26200-SP0",
+      "rustc": "rustc 1.99.1 (58cf8f9c3 2026-10-13)",
+      "head": "5557ee7fed3f0db496cf944b0708dd2fdf9a2c22"
+     },
+     "sources_sha256": "eaf4962586c77b556471e9c4b9c4b8addcff449b019309157d4f158279c7b549",
      "baseline_green": true
     }
    }
@@ -1962,8 +2053,8 @@
      },
      "build_attempts": 1,
      "compiled": true,
-     "tests": 196,
-     "passed": 190,
+     "tests": 230,
+     "passed": 224,
      "failed_tests": [
       "compact::source::overlay_tests::compact_named_vector_visibility_matches_resident",
       "compact::source::overlay_tests::consumer_vectors::compact_named_vector_consumers_propagate_a_poisoned_cell",
@@ -1975,12 +2066,49 @@
      "status": "killed",
      "expect_met": true,
      "restored_identically": true,
-     "seconds": 190,
+     "seconds": 131,
      "environment": {
       "os": "Windows-11-10.0.26300-SP0",
       "rustc": "rustc 1.99.1 (58cf8f9c3 2026-10-13)",
-      "head": "00bac1c229677b1d58e4f0445462cf1d169cb57f"
+      "head": "2d40512513a851d8c13c8747411609517d4300b1"
      },
+     "sources_sha256": "eaf4962586c77b556471e9c4b9c4b8addcff449b019309157d4f158279c7b549",
+     "baseline_green": true
+    },
+    "second": {
+     "file": "src/vectors.rs",
+     "anchor_matches": 1,
+     "sha256_lf": {
+      "before": "9d9b333d8d40219c5375255592e6888e3f64d86f359db683100491c4f44cf867",
+      "mutated": "67e955f82a4fbb41abe46d3711b74fb2e8643ffe70ae383fdf18ab05f117e701",
+      "restored": "9d9b333d8d40219c5375255592e6888e3f64d86f359db683100491c4f44cf867"
+     },
+     "sha256_bytes": {
+      "before": "d96f320c27691b9e3913443e94aa7093974ab19fc96511b6ca2f7ba089b812fb",
+      "restored": "d96f320c27691b9e3913443e94aa7093974ab19fc96511b6ca2f7ba089b812fb"
+     },
+     "build_attempts": 1,
+     "compiled": true,
+     "tests": 230,
+     "passed": 224,
+     "failed_tests": [
+      "compact::source::overlay_tests::compact_named_vector_visibility_matches_resident",
+      "compact::source::overlay_tests::consumer_vectors::compact_named_vector_consumers_propagate_a_poisoned_cell",
+      "compact::source::overlay_tests::consumer_vectors::compact_named_vector_consumers_read_no_base_row_that_the_overlay_shadows",
+      "compact::source::overlay_tests::consumer_vectors::compact_reembed_pending_decodes_no_row_beyond_its_limit",
+      "compact::source::overlay_tests::consumer_vectors::compact_reembed_pending_lists_the_effective_rows_without_the_target_version",
+      "compact::source::overlay_tests::consumer_vectors::compact_reembed_pending_validates_in_the_resident_order"
+     ],
+     "status": "killed",
+     "expect_met": true,
+     "restored_identically": true,
+     "seconds": 117,
+     "environment": {
+      "os": "Windows-11-10.0.26200-SP0",
+      "rustc": "rustc 1.99.1 (58cf8f9c3 2026-10-13)",
+      "head": "5557ee7fed3f0db496cf944b0708dd2fdf9a2c22"
+     },
+     "sources_sha256": "eaf4962586c77b556471e9c4b9c4b8addcff449b019309157d4f158279c7b549",
      "baseline_green": true
     }
    }
@@ -2019,8 +2147,8 @@
      },
      "build_attempts": 1,
      "compiled": true,
-     "tests": 196,
-     "passed": 193,
+     "tests": 230,
+     "passed": 227,
      "failed_tests": [
       "compact::source::overlay_tests::compact_named_vector_visibility_matches_resident",
       "compact::source::overlay_tests::consumer_vectors::compact_named_vector_consumers_read_no_base_row_that_the_overlay_shadows",
@@ -2029,12 +2157,46 @@
      "status": "killed",
      "expect_met": true,
      "restored_identically": true,
-     "seconds": 171,
+     "seconds": 192,
      "environment": {
       "os": "Windows-11-10.0.26300-SP0",
       "rustc": "rustc 1.99.1 (58cf8f9c3 2026-10-13)",
-      "head": "00bac1c229677b1d58e4f0445462cf1d169cb57f"
+      "head": "2d40512513a851d8c13c8747411609517d4300b1"
      },
+     "sources_sha256": "eaf4962586c77b556471e9c4b9c4b8addcff449b019309157d4f158279c7b549",
+     "baseline_green": true
+    },
+    "second": {
+     "file": "src/vectors.rs",
+     "anchor_matches": 1,
+     "sha256_lf": {
+      "before": "9d9b333d8d40219c5375255592e6888e3f64d86f359db683100491c4f44cf867",
+      "mutated": "cf7a55e713f0b1fe063ed124e45b4740edc2f7e17964213714f54c56d8f1a5f5",
+      "restored": "9d9b333d8d40219c5375255592e6888e3f64d86f359db683100491c4f44cf867"
+     },
+     "sha256_bytes": {
+      "before": "d96f320c27691b9e3913443e94aa7093974ab19fc96511b6ca2f7ba089b812fb",
+      "restored": "d96f320c27691b9e3913443e94aa7093974ab19fc96511b6ca2f7ba089b812fb"
+     },
+     "build_attempts": 1,
+     "compiled": true,
+     "tests": 230,
+     "passed": 227,
+     "failed_tests": [
+      "compact::source::overlay_tests::compact_named_vector_visibility_matches_resident",
+      "compact::source::overlay_tests::consumer_vectors::compact_named_vector_consumers_read_no_base_row_that_the_overlay_shadows",
+      "compact::source::overlay_tests::consumer_vectors::compact_reembed_pending_lists_the_effective_rows_without_the_target_version"
+     ],
+     "status": "killed",
+     "expect_met": true,
+     "restored_identically": true,
+     "seconds": 117,
+     "environment": {
+      "os": "Windows-11-10.0.26200-SP0",
+      "rustc": "rustc 1.99.1 (58cf8f9c3 2026-10-13)",
+      "head": "5557ee7fed3f0db496cf944b0708dd2fdf9a2c22"
+     },
+     "sources_sha256": "eaf4962586c77b556471e9c4b9c4b8addcff449b019309157d4f158279c7b549",
      "baseline_green": true
     }
    }
@@ -2073,8 +2235,8 @@
      },
      "build_attempts": 1,
      "compiled": true,
-     "tests": 196,
-     "passed": 193,
+     "tests": 230,
+     "passed": 227,
      "failed_tests": [
       "compact::source::method_tests::compact_installed_collection_method_matrix",
       "compact::source::overlay_tests::consumer_vectors::compact_named_ann_stays_refused_and_leaves_the_state_unchanged",
@@ -2083,12 +2245,46 @@
      "status": "killed",
      "expect_met": true,
      "restored_identically": true,
-     "seconds": 217,
+     "seconds": 150,
      "environment": {
       "os": "Windows-11-10.0.26300-SP0",
       "rustc": "rustc 1.99.1 (58cf8f9c3 2026-10-13)",
-      "head": "00bac1c229677b1d58e4f0445462cf1d169cb57f"
+      "head": "2d40512513a851d8c13c8747411609517d4300b1"
      },
+     "sources_sha256": "eaf4962586c77b556471e9c4b9c4b8addcff449b019309157d4f158279c7b549",
+     "baseline_green": true
+    },
+    "second": {
+     "file": "src/vectors.rs",
+     "anchor_matches": 1,
+     "sha256_lf": {
+      "before": "9d9b333d8d40219c5375255592e6888e3f64d86f359db683100491c4f44cf867",
+      "mutated": "0c37c2a3905ec4f7be00ce7457377a4f739ae5cf8512cba33868128c8aeba483",
+      "restored": "9d9b333d8d40219c5375255592e6888e3f64d86f359db683100491c4f44cf867"
+     },
+     "sha256_bytes": {
+      "before": "d96f320c27691b9e3913443e94aa7093974ab19fc96511b6ca2f7ba089b812fb",
+      "restored": "d96f320c27691b9e3913443e94aa7093974ab19fc96511b6ca2f7ba089b812fb"
+     },
+     "build_attempts": 1,
+     "compiled": true,
+     "tests": 230,
+     "passed": 227,
+     "failed_tests": [
+      "compact::source::method_tests::compact_installed_collection_method_matrix",
+      "compact::source::overlay_tests::consumer_vectors::compact_named_ann_stays_refused_and_leaves_the_state_unchanged",
+      "compact::source::overlay_tests::consumer_vectors::compact_named_vector_consumers_check_health_before_anything_else"
+     ],
+     "status": "killed",
+     "expect_met": true,
+     "restored_identically": true,
+     "seconds": 124,
+     "environment": {
+      "os": "Windows-11-10.0.26200-SP0",
+      "rustc": "rustc 1.99.1 (58cf8f9c3 2026-10-13)",
+      "head": "5557ee7fed3f0db496cf944b0708dd2fdf9a2c22"
+     },
+     "sources_sha256": "eaf4962586c77b556471e9c4b9c4b8addcff449b019309157d4f158279c7b549",
      "baseline_green": true
     }
    }
@@ -2131,8 +2327,8 @@
      },
      "build_attempts": 1,
      "compiled": true,
-     "tests": 196,
-     "passed": 188,
+     "tests": 230,
+     "passed": 221,
      "failed_tests": [
       "compact::source::method_tests::compact_installed_restricted_method_guards_refuse",
       "compact::source::overlay_tests::compact_query_language_matches_resident_after_overlay_resolution",
@@ -2141,7 +2337,8 @@
       "compact::source::overlay_tests::consumer_query::query_clauses_match_resident_before_and_after_overlay_mutations",
       "compact::source::overlay_tests::consumer_query::query_errors_match_resident_and_precede_row_materialization",
       "compact::source::overlay_tests::consumer_query::query_hides_expired_and_deleted_rows_in_every_output_and_shows_the_rest",
-      "compact::source::overlay_tests::consumer_query::query_named_vectors_match_resident_on_the_full_collection"
+      "compact::source::overlay_tests::consumer_query::query_named_vectors_match_resident_on_the_full_collection",
+      "compact::source::overlay_tests::consumer_text::compact_text_queries_answer_index_not_ready_while_the_index_is_unavailable"
      ],
      "status": "killed",
      "expect_met": true,
@@ -2150,8 +2347,48 @@
      "environment": {
       "os": "Windows-11-10.0.26300-SP0",
       "rustc": "rustc 1.99.1 (58cf8f9c3 2026-10-13)",
-      "head": "00bac1c229677b1d58e4f0445462cf1d169cb57f"
+      "head": "2d40512513a851d8c13c8747411609517d4300b1"
      },
+     "sources_sha256": "eaf4962586c77b556471e9c4b9c4b8addcff449b019309157d4f158279c7b549",
+     "baseline_green": true
+    },
+    "second": {
+     "file": "src/query_language.rs",
+     "anchor_matches": 1,
+     "sha256_lf": {
+      "before": "13c22909a48b46edc0487eef58b82f530b8cb260bde18e7dbd47752cb90750b0",
+      "mutated": "5c7146d61fd4bd738bdcec9f886b5dd059a624c42c22eba075894365499c4f1d",
+      "restored": "13c22909a48b46edc0487eef58b82f530b8cb260bde18e7dbd47752cb90750b0"
+     },
+     "sha256_bytes": {
+      "before": "4261ed9c33617ffd04a52354dde6242ebb073f78dc89805f4c1c059f6d41eed3",
+      "restored": "4261ed9c33617ffd04a52354dde6242ebb073f78dc89805f4c1c059f6d41eed3"
+     },
+     "build_attempts": 1,
+     "compiled": true,
+     "tests": 230,
+     "passed": 221,
+     "failed_tests": [
+      "compact::source::method_tests::compact_installed_restricted_method_guards_refuse",
+      "compact::source::overlay_tests::compact_query_language_matches_resident_after_overlay_resolution",
+      "compact::source::overlay_tests::compact_query_language_vector_leg_uses_full_candidate_depth",
+      "compact::source::overlay_tests::compact_query_validates_before_materializing_rows",
+      "compact::source::overlay_tests::consumer_query::query_clauses_match_resident_before_and_after_overlay_mutations",
+      "compact::source::overlay_tests::consumer_query::query_errors_match_resident_and_precede_row_materialization",
+      "compact::source::overlay_tests::consumer_query::query_hides_expired_and_deleted_rows_in_every_output_and_shows_the_rest",
+      "compact::source::overlay_tests::consumer_query::query_named_vectors_match_resident_on_the_full_collection",
+      "compact::source::overlay_tests::consumer_text::compact_text_queries_answer_index_not_ready_while_the_index_is_unavailable"
+     ],
+     "status": "killed",
+     "expect_met": true,
+     "restored_identically": true,
+     "seconds": 119,
+     "environment": {
+      "os": "Windows-11-10.0.26200-SP0",
+      "rustc": "rustc 1.99.1 (58cf8f9c3 2026-10-13)",
+      "head": "5557ee7fed3f0db496cf944b0708dd2fdf9a2c22"
+     },
+     "sources_sha256": "eaf4962586c77b556471e9c4b9c4b8addcff449b019309157d4f158279c7b549",
      "baseline_green": true
     }
    }
@@ -2191,23 +2428,60 @@
      },
      "build_attempts": 1,
      "compiled": true,
-     "tests": 196,
-     "passed": 192,
+     "tests": 230,
+     "passed": 225,
      "failed_tests": [
       "compact::source::overlay_tests::compact_query_language_matches_resident_after_overlay_resolution",
       "compact::source::overlay_tests::consumer_query::query_clauses_match_resident_before_and_after_overlay_mutations",
       "compact::source::overlay_tests::consumer_query::query_hides_expired_and_deleted_rows_in_every_output_and_shows_the_rest",
-      "compact::source::overlay_tests::consumer_query::query_named_vectors_match_resident_on_the_full_collection"
+      "compact::source::overlay_tests::consumer_query::query_named_vectors_match_resident_on_the_full_collection",
+      "compact::source::overlay_tests::consumer_text::compact_text_queries_answer_index_not_ready_while_the_index_is_unavailable"
      ],
      "status": "killed",
      "expect_met": true,
      "restored_identically": true,
-     "seconds": 157,
+     "seconds": 248,
      "environment": {
       "os": "Windows-11-10.0.26300-SP0",
       "rustc": "rustc 1.99.1 (58cf8f9c3 2026-10-13)",
-      "head": "00bac1c229677b1d58e4f0445462cf1d169cb57f"
+      "head": "2d40512513a851d8c13c8747411609517d4300b1"
      },
+     "sources_sha256": "eaf4962586c77b556471e9c4b9c4b8addcff449b019309157d4f158279c7b549",
+     "baseline_green": true
+    },
+    "second": {
+     "file": "src/query_language.rs",
+     "anchor_matches": 1,
+     "sha256_lf": {
+      "before": "13c22909a48b46edc0487eef58b82f530b8cb260bde18e7dbd47752cb90750b0",
+      "mutated": "4b027821c7fc8b51501810dee73f5816407191260fa825a90bd36c4dda8d56ae",
+      "restored": "13c22909a48b46edc0487eef58b82f530b8cb260bde18e7dbd47752cb90750b0"
+     },
+     "sha256_bytes": {
+      "before": "4261ed9c33617ffd04a52354dde6242ebb073f78dc89805f4c1c059f6d41eed3",
+      "restored": "4261ed9c33617ffd04a52354dde6242ebb073f78dc89805f4c1c059f6d41eed3"
+     },
+     "build_attempts": 1,
+     "compiled": true,
+     "tests": 230,
+     "passed": 225,
+     "failed_tests": [
+      "compact::source::overlay_tests::compact_query_language_matches_resident_after_overlay_resolution",
+      "compact::source::overlay_tests::consumer_query::query_clauses_match_resident_before_and_after_overlay_mutations",
+      "compact::source::overlay_tests::consumer_query::query_hides_expired_and_deleted_rows_in_every_output_and_shows_the_rest",
+      "compact::source::overlay_tests::consumer_query::query_named_vectors_match_resident_on_the_full_collection",
+      "compact::source::overlay_tests::consumer_text::compact_text_queries_answer_index_not_ready_while_the_index_is_unavailable"
+     ],
+     "status": "killed",
+     "expect_met": true,
+     "restored_identically": true,
+     "seconds": 117,
+     "environment": {
+      "os": "Windows-11-10.0.26200-SP0",
+      "rustc": "rustc 1.99.1 (58cf8f9c3 2026-10-13)",
+      "head": "5557ee7fed3f0db496cf944b0708dd2fdf9a2c22"
+     },
+     "sources_sha256": "eaf4962586c77b556471e9c4b9c4b8addcff449b019309157d4f158279c7b549",
      "baseline_green": true
     }
    }
@@ -2245,8 +2519,8 @@
      },
      "build_attempts": 1,
      "compiled": true,
-     "tests": 196,
-     "passed": 193,
+     "tests": 230,
+     "passed": 227,
      "failed_tests": [
       "compact::source::overlay_tests::consumer_query::query_clauses_match_resident_before_and_after_overlay_mutations",
       "compact::source::overlay_tests::consumer_query::query_hides_expired_and_deleted_rows_in_every_output_and_shows_the_rest",
@@ -2255,12 +2529,46 @@
      "status": "killed",
      "expect_met": true,
      "restored_identically": true,
-     "seconds": 178,
+     "seconds": 170,
      "environment": {
       "os": "Windows-11-10.0.26300-SP0",
       "rustc": "rustc 1.99.1 (58cf8f9c3 2026-10-13)",
-      "head": "00bac1c229677b1d58e4f0445462cf1d169cb57f"
+      "head": "2d40512513a851d8c13c8747411609517d4300b1"
      },
+     "sources_sha256": "eaf4962586c77b556471e9c4b9c4b8addcff449b019309157d4f158279c7b549",
+     "baseline_green": true
+    },
+    "second": {
+     "file": "src/query_language.rs",
+     "anchor_matches": 1,
+     "sha256_lf": {
+      "before": "13c22909a48b46edc0487eef58b82f530b8cb260bde18e7dbd47752cb90750b0",
+      "mutated": "9551b1775499e3f9ca6617e2c7a4d80d5ed11773c21e151be032e1623698ee1e",
+      "restored": "13c22909a48b46edc0487eef58b82f530b8cb260bde18e7dbd47752cb90750b0"
+     },
+     "sha256_bytes": {
+      "before": "4261ed9c33617ffd04a52354dde6242ebb073f78dc89805f4c1c059f6d41eed3",
+      "restored": "4261ed9c33617ffd04a52354dde6242ebb073f78dc89805f4c1c059f6d41eed3"
+     },
+     "build_attempts": 1,
+     "compiled": true,
+     "tests": 230,
+     "passed": 227,
+     "failed_tests": [
+      "compact::source::overlay_tests::consumer_query::query_clauses_match_resident_before_and_after_overlay_mutations",
+      "compact::source::overlay_tests::consumer_query::query_hides_expired_and_deleted_rows_in_every_output_and_shows_the_rest",
+      "compact::source::overlay_tests::consumer_query::query_named_vectors_match_resident_on_the_full_collection"
+     ],
+     "status": "killed",
+     "expect_met": true,
+     "restored_identically": true,
+     "seconds": 117,
+     "environment": {
+      "os": "Windows-11-10.0.26200-SP0",
+      "rustc": "rustc 1.99.1 (58cf8f9c3 2026-10-13)",
+      "head": "5557ee7fed3f0db496cf944b0708dd2fdf9a2c22"
+     },
+     "sources_sha256": "eaf4962586c77b556471e9c4b9c4b8addcff449b019309157d4f158279c7b549",
      "baseline_green": true
     }
    }
@@ -2300,8 +2608,8 @@
      },
      "build_attempts": 1,
      "compiled": true,
-     "tests": 196,
-     "passed": 192,
+     "tests": 230,
+     "passed": 226,
      "failed_tests": [
       "compact::source::overlay_tests::compact_query_language_matches_resident_after_overlay_resolution",
       "compact::source::overlay_tests::consumer_query::query_clauses_match_resident_before_and_after_overlay_mutations",
@@ -2311,12 +2619,47 @@
      "status": "killed",
      "expect_met": true,
      "restored_identically": true,
-     "seconds": 200,
+     "seconds": 190,
      "environment": {
       "os": "Windows-11-10.0.26300-SP0",
       "rustc": "rustc 1.99.1 (58cf8f9c3 2026-10-13)",
-      "head": "00bac1c229677b1d58e4f0445462cf1d169cb57f"
+      "head": "2d40512513a851d8c13c8747411609517d4300b1"
      },
+     "sources_sha256": "eaf4962586c77b556471e9c4b9c4b8addcff449b019309157d4f158279c7b549",
+     "baseline_green": true
+    },
+    "second": {
+     "file": "src/query_language.rs",
+     "anchor_matches": 1,
+     "sha256_lf": {
+      "before": "13c22909a48b46edc0487eef58b82f530b8cb260bde18e7dbd47752cb90750b0",
+      "mutated": "877d830a194a05ce26cd9b0d521821ba7cfa69ec393b7a8953e2ac60757f6924",
+      "restored": "13c22909a48b46edc0487eef58b82f530b8cb260bde18e7dbd47752cb90750b0"
+     },
+     "sha256_bytes": {
+      "before": "4261ed9c33617ffd04a52354dde6242ebb073f78dc89805f4c1c059f6d41eed3",
+      "restored": "4261ed9c33617ffd04a52354dde6242ebb073f78dc89805f4c1c059f6d41eed3"
+     },
+     "build_attempts": 1,
+     "compiled": true,
+     "tests": 230,
+     "passed": 226,
+     "failed_tests": [
+      "compact::source::overlay_tests::compact_query_language_matches_resident_after_overlay_resolution",
+      "compact::source::overlay_tests::consumer_query::query_clauses_match_resident_before_and_after_overlay_mutations",
+      "compact::source::overlay_tests::consumer_query::query_hides_expired_and_deleted_rows_in_every_output_and_shows_the_rest",
+      "compact::source::overlay_tests::consumer_query::query_named_vectors_match_resident_on_the_full_collection"
+     ],
+     "status": "killed",
+     "expect_met": true,
+     "restored_identically": true,
+     "seconds": 125,
+     "environment": {
+      "os": "Windows-11-10.0.26200-SP0",
+      "rustc": "rustc 1.99.1 (58cf8f9c3 2026-10-13)",
+      "head": "5557ee7fed3f0db496cf944b0708dd2fdf9a2c22"
+     },
+     "sources_sha256": "eaf4962586c77b556471e9c4b9c4b8addcff449b019309157d4f158279c7b549",
      "baseline_green": true
     }
    }
@@ -2457,8 +2800,8 @@
      },
      "build_attempts": 1,
      "compiled": true,
-     "tests": 196,
-     "passed": 151,
+     "tests": 230,
+     "passed": 178,
      "failed_tests": [
       "compact::source::dispatch_tests::compact_dispatch_grouped_facets_match_nonempty_resident_rows",
       "compact::source::dispatch_tests::compact_dispatch_unqualified_scans_and_derived_reads_refuse",
@@ -2483,6 +2826,7 @@
       "compact::source::overlay_tests::consumer_graph::compact_graph_pivot_filter_sees_the_effective_metadata",
       "compact::source::overlay_tests::consumer_graph::compact_graph_retrieval_uses_one_explicit_clock_for_pivots_and_evidence",
       "compact::source::overlay_tests::consumer_graph::compact_graph_retrieve_propagates_read_errors_of_the_pivot_and_evidence_collections",
+      "compact::source::overlay_tests::consumer_graph::graph_retrieve_validates_the_request_bounds_before_the_health_of_a_handle_that_turned_unhealthy",
       "compact::source::overlay_tests::consumer_group::compact_grouped_search_and_facets_apply_the_and_filter_to_overlay_rows",
       "compact::source::overlay_tests::consumer_group::compact_grouped_search_and_facets_return_base_read_errors",
       "compact::source::overlay_tests::consumer_group::compact_grouped_search_and_facets_validate_before_materializing_rows",
@@ -2504,17 +2848,106 @@
       "compact::source::overlay_tests::consumer_query::query_clauses_match_resident_before_and_after_overlay_mutations",
       "compact::source::overlay_tests::consumer_query::query_errors_match_resident_and_precede_row_materialization",
       "compact::source::overlay_tests::consumer_query::query_hides_expired_and_deleted_rows_in_every_output_and_shows_the_rest",
-      "compact::source::overlay_tests::consumer_query::query_named_vectors_match_resident_on_the_full_collection"
+      "compact::source::overlay_tests::consumer_query::query_named_vectors_match_resident_on_the_full_collection",
+      "compact::source::overlay_tests::consumer_text::compact_text_queries_answer_index_not_ready_while_the_index_is_unavailable",
+      "compact::source::overlay_tests::exact_scan::compact_exact_scan_consumes_ordered_ids_across_base_and_overlay",
+      "compact::source::overlay_tests::exact_scan::compact_exact_scan_folds_dimensions_left_to_right",
+      "compact::source::overlay_tests::exact_scan::compact_exact_scan_scores_without_materializing_record_cells",
+      "compact::source::seam_tests::index_differential::compact_declared_index_scans_match_the_resident_oracle_and_the_contract_across_changes",
+      "compact::source::seam_tests::index_differential::compact_scan_examines_every_row_where_the_resident_block_summaries_prune"
      ],
      "status": "killed",
      "expect_met": true,
      "restored_identically": true,
-     "seconds": 152,
+     "seconds": 151,
      "environment": {
       "os": "Windows-11-10.0.26300-SP0",
       "rustc": "rustc 1.99.1 (58cf8f9c3 2026-10-13)",
-      "head": "00bac1c229677b1d58e4f0445462cf1d169cb57f"
+      "head": "2d40512513a851d8c13c8747411609517d4300b1"
      },
+     "sources_sha256": "eaf4962586c77b556471e9c4b9c4b8addcff449b019309157d4f158279c7b549",
+     "baseline_green": true
+    },
+    "second": {
+     "file": "src/collection.rs",
+     "anchor_matches": 1,
+     "sha256_lf": {
+      "before": "c6868ca284516a9b815504a64ad681acceaeb6d2678b78ec19766c62cbf794f6",
+      "mutated": "e4a15fdcad6eccf3a7e9b0d8bb11b71c1d754df676aebcf2c475b8437d1a9a3f",
+      "restored": "c6868ca284516a9b815504a64ad681acceaeb6d2678b78ec19766c62cbf794f6"
+     },
+     "sha256_bytes": {
+      "before": "d502d514609997f05f374085dfd14ed65f814f3a8de6f0cb737e6ba1afeb0bca",
+      "restored": "d502d514609997f05f374085dfd14ed65f814f3a8de6f0cb737e6ba1afeb0bca"
+     },
+     "build_attempts": 1,
+     "compiled": true,
+     "tests": 230,
+     "passed": 178,
+     "failed_tests": [
+      "compact::source::dispatch_tests::compact_dispatch_grouped_facets_match_nonempty_resident_rows",
+      "compact::source::dispatch_tests::compact_dispatch_unqualified_scans_and_derived_reads_refuse",
+      "compact::source::method_tests::compact_installed_collection_method_matrix",
+      "compact::source::method_tests::compact_installed_database_and_snapshot_method_matrix",
+      "compact::source::method_tests::compact_installed_restricted_method_guards_refuse",
+      "compact::source::overlay_tests::compact_exact_scan_is_bit_identical_at_same_clock",
+      "compact::source::overlay_tests::compact_exact_search_candidate_and_stats_match_declared_index",
+      "compact::source::overlay_tests::compact_graph_retrieve_projects_effective_row_at_one_clock",
+      "compact::source::overlay_tests::compact_grouped_search_and_facets_match_resident",
+      "compact::source::overlay_tests::compact_hybrid_text_leg_matches_resident_after_overlay_resolution",
+      "compact::source::overlay_tests::compact_query_language_matches_resident_after_overlay_resolution",
+      "compact::source::overlay_tests::compact_query_language_vector_leg_uses_full_candidate_depth",
+      "compact::source::overlay_tests::compact_search_filters_after_overlay_resolution",
+      "compact::source::overlay_tests::consumer_exact::compact_exact_search_uses_declared_postings_up_to_half_of_the_rows",
+      "compact::source::overlay_tests::consumer_graph::an_attached_record_never_carries_a_deadline_on_compact_or_resident_records",
+      "compact::source::overlay_tests::consumer_graph::compact_graph_access_and_retrieval_answer_poisoned_on_an_unhealthy_handle",
+      "compact::source::overlay_tests::consumer_graph::compact_graph_evidence_decodes_only_the_attached_rows_it_projects",
+      "compact::source::overlay_tests::consumer_graph::compact_graph_evidence_follows_the_requested_collections_and_effective_rows",
+      "compact::source::overlay_tests::consumer_graph::compact_graph_evidence_is_read_at_the_retrieval_clock_even_if_an_attached_row_had_a_deadline",
+      "compact::source::overlay_tests::consumer_graph::compact_graph_lists_at_most_sixty_four_unmapped_pivots_and_counts_all_of_them",
+      "compact::source::overlay_tests::consumer_graph::compact_graph_pivot_filter_sees_the_effective_metadata",
+      "compact::source::overlay_tests::consumer_graph::compact_graph_retrieval_uses_one_explicit_clock_for_pivots_and_evidence",
+      "compact::source::overlay_tests::consumer_graph::compact_graph_retrieve_propagates_read_errors_of_the_pivot_and_evidence_collections",
+      "compact::source::overlay_tests::consumer_graph::graph_retrieve_validates_the_request_bounds_before_the_health_of_a_handle_that_turned_unhealthy",
+      "compact::source::overlay_tests::consumer_group::compact_grouped_search_and_facets_apply_the_and_filter_to_overlay_rows",
+      "compact::source::overlay_tests::consumer_group::compact_grouped_search_and_facets_return_base_read_errors",
+      "compact::source::overlay_tests::consumer_group::compact_grouped_search_and_facets_validate_before_materializing_rows",
+      "compact::source::overlay_tests::consumer_group::compact_grouped_search_follows_the_nearest_hit_and_the_group_limits",
+      "compact::source::overlay_tests::consumer_group::compact_grouped_search_reads_every_row_and_honors_the_metric",
+      "compact::source::overlay_tests::consumer_hybrid::hybrid_base_row_deadline_hides_exactly_at_the_clock_and_an_overlay_without_one_restores_it",
+      "compact::source::overlay_tests::consumer_hybrid::hybrid_deadline_only_overlay_write_applies_its_deadline_to_both_legs",
+      "compact::source::overlay_tests::consumer_hybrid::hybrid_disabled_legs_are_never_evaluated",
+      "compact::source::overlay_tests::consumer_hybrid::hybrid_equal_fused_scores_break_ties_by_ascending_id_across_the_legs",
+      "compact::source::overlay_tests::consumer_hybrid::hybrid_equal_fused_scores_of_rows_in_both_legs_break_ties_by_ascending_id",
+      "compact::source::overlay_tests::consumer_hybrid::hybrid_expired_overlay_put_hides_the_row_in_both_legs_and_never_reveals_the_base_row",
+      "compact::source::overlay_tests::consumer_hybrid::hybrid_filter_applies_to_both_legs_and_the_vector_leg_reports_its_work",
+      "compact::source::overlay_tests::consumer_hybrid::hybrid_fusion_scores_distances_and_bm25_equal_the_resident_values_bit_for_bit",
+      "compact::source::overlay_tests::consumer_hybrid::hybrid_k_truncates_the_fused_list_and_candidates_bound_each_leg",
+      "compact::source::overlay_tests::consumer_hybrid::hybrid_k_zero_keeps_the_vector_leg_work_and_its_validation",
+      "compact::source::overlay_tests::consumer_hybrid::hybrid_tombstone_hides_the_base_row_at_every_clock",
+      "compact::source::overlay_tests::consumer_hybrid::hybrid_validation_matches_resident_in_check_order",
+      "compact::source::overlay_tests::consumer_hybrid::hybrid_wall_clock_entry_hides_past_deadlines_and_keeps_far_ones_in_both_legs",
+      "compact::source::overlay_tests::consumer_query::query_clauses_match_resident_before_and_after_overlay_mutations",
+      "compact::source::overlay_tests::consumer_query::query_errors_match_resident_and_precede_row_materialization",
+      "compact::source::overlay_tests::consumer_query::query_hides_expired_and_deleted_rows_in_every_output_and_shows_the_rest",
+      "compact::source::overlay_tests::consumer_query::query_named_vectors_match_resident_on_the_full_collection",
+      "compact::source::overlay_tests::consumer_text::compact_text_queries_answer_index_not_ready_while_the_index_is_unavailable",
+      "compact::source::overlay_tests::exact_scan::compact_exact_scan_consumes_ordered_ids_across_base_and_overlay",
+      "compact::source::overlay_tests::exact_scan::compact_exact_scan_folds_dimensions_left_to_right",
+      "compact::source::overlay_tests::exact_scan::compact_exact_scan_scores_without_materializing_record_cells",
+      "compact::source::seam_tests::index_differential::compact_declared_index_scans_match_the_resident_oracle_and_the_contract_across_changes",
+      "compact::source::seam_tests::index_differential::compact_scan_examines_every_row_where_the_resident_block_summaries_prune"
+     ],
+     "status": "killed",
+     "expect_met": true,
+     "restored_identically": true,
+     "seconds": 88,
+     "environment": {
+      "os": "Windows-11-10.0.26200-SP0",
+      "rustc": "rustc 1.99.1 (58cf8f9c3 2026-10-13)",
+      "head": "5557ee7fed3f0db496cf944b0708dd2fdf9a2c22"
+     },
+     "sources_sha256": "eaf4962586c77b556471e9c4b9c4b8addcff449b019309157d4f158279c7b549",
      "baseline_green": true
     }
    }
@@ -5054,8 +5487,8 @@
      },
      "build_attempts": 1,
      "compiled": true,
-     "tests": 196,
-     "passed": 188,
+     "tests": 230,
+     "passed": 222,
      "failed_tests": [
       "compact::source::overlay_tests::compact_graph_retrieve_projects_effective_row_at_one_clock",
       "compact::source::overlay_tests::compact_hybrid_text_leg_matches_resident_after_overlay_resolution",
@@ -5069,12 +5502,13 @@
      "status": "killed",
      "expect_met": true,
      "restored_identically": true,
-     "seconds": 319,
+     "seconds": 217,
      "environment": {
       "os": "Windows-11-10.0.26300-SP0",
       "rustc": "rustc 1.99.1 (58cf8f9c3 2026-10-13)",
-      "head": "00bac1c229677b1d58e4f0445462cf1d169cb57f"
+      "head": "2d40512513a851d8c13c8747411609517d4300b1"
      },
+     "sources_sha256": "eaf4962586c77b556471e9c4b9c4b8addcff449b019309157d4f158279c7b549",
      "baseline_green": true
     },
     "second": {
@@ -5091,8 +5525,8 @@
      },
      "build_attempts": 1,
      "compiled": true,
-     "tests": 196,
-     "passed": 188,
+     "tests": 230,
+     "passed": 222,
      "failed_tests": [
       "compact::source::overlay_tests::compact_graph_retrieve_projects_effective_row_at_one_clock",
       "compact::source::overlay_tests::compact_hybrid_text_leg_matches_resident_after_overlay_resolution",
@@ -5106,12 +5540,13 @@
      "status": "killed",
      "expect_met": true,
      "restored_identically": true,
-     "seconds": 48,
+     "seconds": 157,
      "environment": {
       "os": "Windows-11-10.0.26200-SP0",
       "rustc": "rustc 1.99.1 (58cf8f9c3 2026-10-13)",
-      "head": "b35c0131ba0b34ce2fe362c42c9d66674c43d017"
+      "head": "5557ee7fed3f0db496cf944b0708dd2fdf9a2c22"
      },
+     "sources_sha256": "eaf4962586c77b556471e9c4b9c4b8addcff449b019309157d4f158279c7b549",
      "baseline_green": true
     }
    }
@@ -5143,8 +5578,8 @@
      },
      "build_attempts": 1,
      "compiled": true,
-     "tests": 196,
-     "passed": 193,
+     "tests": 230,
+     "passed": 227,
      "failed_tests": [
       "compact::source::overlay_tests::compact_hybrid_text_leg_matches_resident_after_overlay_resolution",
       "compact::source::overlay_tests::consumer_hybrid::hybrid_base_row_deadline_hides_exactly_at_the_clock_and_an_overlay_without_one_restores_it",
@@ -5153,12 +5588,13 @@
      "status": "killed",
      "expect_met": true,
      "restored_identically": true,
-     "seconds": 226,
+     "seconds": 213,
      "environment": {
       "os": "Windows-11-10.0.26300-SP0",
       "rustc": "rustc 1.99.1 (58cf8f9c3 2026-10-13)",
-      "head": "00bac1c229677b1d58e4f0445462cf1d169cb57f"
+      "head": "2d40512513a851d8c13c8747411609517d4300b1"
      },
+     "sources_sha256": "eaf4962586c77b556471e9c4b9c4b8addcff449b019309157d4f158279c7b549",
      "baseline_green": true
     },
     "second": {
@@ -5175,8 +5611,8 @@
      },
      "build_attempts": 1,
      "compiled": true,
-     "tests": 196,
-     "passed": 193,
+     "tests": 230,
+     "passed": 227,
      "failed_tests": [
       "compact::source::overlay_tests::compact_hybrid_text_leg_matches_resident_after_overlay_resolution",
       "compact::source::overlay_tests::consumer_hybrid::hybrid_base_row_deadline_hides_exactly_at_the_clock_and_an_overlay_without_one_restores_it",
@@ -5185,12 +5621,13 @@
      "status": "killed",
      "expect_met": true,
      "restored_identically": true,
-     "seconds": 49,
+     "seconds": 118,
      "environment": {
       "os": "Windows-11-10.0.26200-SP0",
       "rustc": "rustc 1.99.1 (58cf8f9c3 2026-10-13)",
-      "head": "b35c0131ba0b34ce2fe362c42c9d66674c43d017"
+      "head": "5557ee7fed3f0db496cf944b0708dd2fdf9a2c22"
      },
+     "sources_sha256": "eaf4962586c77b556471e9c4b9c4b8addcff449b019309157d4f158279c7b549",
      "baseline_green": true
     }
    }
@@ -5221,20 +5658,21 @@
      },
      "build_attempts": 1,
      "compiled": true,
-     "tests": 196,
-     "passed": 195,
+     "tests": 230,
+     "passed": 229,
      "failed_tests": [
       "compact::source::overlay_tests::consumer_vectors::compact_reembed_pending_decodes_no_row_beyond_its_limit"
      ],
      "status": "killed",
      "expect_met": true,
      "restored_identically": true,
-     "seconds": 239,
+     "seconds": 187,
      "environment": {
       "os": "Windows-11-10.0.26300-SP0",
       "rustc": "rustc 1.99.1 (58cf8f9c3 2026-10-13)",
-      "head": "00bac1c229677b1d58e4f0445462cf1d169cb57f"
+      "head": "2d40512513a851d8c13c8747411609517d4300b1"
      },
+     "sources_sha256": "eaf4962586c77b556471e9c4b9c4b8addcff449b019309157d4f158279c7b549",
      "baseline_green": true
     },
     "second": {
@@ -5251,20 +5689,21 @@
      },
      "build_attempts": 1,
      "compiled": true,
-     "tests": 196,
-     "passed": 195,
+     "tests": 230,
+     "passed": 229,
      "failed_tests": [
       "compact::source::overlay_tests::consumer_vectors::compact_reembed_pending_decodes_no_row_beyond_its_limit"
      ],
      "status": "killed",
      "expect_met": true,
      "restored_identically": true,
-     "seconds": 55,
+     "seconds": 120,
      "environment": {
       "os": "Windows-11-10.0.26200-SP0",
       "rustc": "rustc 1.99.1 (58cf8f9c3 2026-10-13)",
-      "head": "b35c0131ba0b34ce2fe362c42c9d66674c43d017"
+      "head": "5557ee7fed3f0db496cf944b0708dd2fdf9a2c22"
      },
+     "sources_sha256": "eaf4962586c77b556471e9c4b9c4b8addcff449b019309157d4f158279c7b549",
      "baseline_green": true
     }
    }
@@ -7454,36 +7893,6 @@
     "compact::source::overlay_tests::consumer_hybrid::hybrid_validation_matches_resident_in_check_order"
    ],
    "runs": {
-    "second": {
-     "file": "src/hybrid.rs",
-     "anchor_matches": 1,
-     "sha256_lf": {
-      "before": "3136b4dfa38c0ab34570d851521430a43ea4600a256af837e059784036cdb361",
-      "mutated": "611e27e4fcf13b9100d17d821e5cf67f36acc3fd66f59dd6d22b28d1c257e5ec",
-      "restored": "3136b4dfa38c0ab34570d851521430a43ea4600a256af837e059784036cdb361"
-     },
-     "sha256_bytes": {
-      "before": "cf556bc1ded79380e0f6124f40d16aefd20e2b64f64c37ed0ed4004e31d2ee30",
-      "restored": "cf556bc1ded79380e0f6124f40d16aefd20e2b64f64c37ed0ed4004e31d2ee30"
-     },
-     "build_attempts": 1,
-     "compiled": true,
-     "tests": 15,
-     "passed": 14,
-     "failed_tests": [
-      "compact::source::overlay_tests::consumer_hybrid::hybrid_validation_matches_resident_in_check_order"
-     ],
-     "status": "killed",
-     "expect_met": true,
-     "restored_identically": true,
-     "seconds": 46,
-     "environment": {
-      "os": "Windows-11-10.0.26200-SP0",
-      "rustc": "rustc 1.99.1 (58cf8f9c3 2026-10-13)",
-      "head": "b35c0131ba0b34ce2fe362c42c9d66674c43d017"
-     },
-     "baseline_green": true
-    },
     "local": {
      "file": "src/hybrid.rs",
      "anchor_matches": 1,
@@ -7498,20 +7907,21 @@
      },
      "build_attempts": 1,
      "compiled": true,
-     "tests": 15,
-     "passed": 14,
+     "tests": 16,
+     "passed": 15,
      "failed_tests": [
       "compact::source::overlay_tests::consumer_hybrid::hybrid_validation_matches_resident_in_check_order"
      ],
      "status": "killed",
      "expect_met": true,
      "restored_identically": true,
-     "seconds": 179,
+     "seconds": 58,
      "environment": {
       "os": "Windows-11-10.0.26300-SP0",
       "rustc": "rustc 1.99.1 (58cf8f9c3 2026-10-13)",
-      "head": "00bac1c229677b1d58e4f0445462cf1d169cb57f"
+      "head": "2d40512513a851d8c13c8747411609517d4300b1"
      },
+     "sources_sha256": "eaf4962586c77b556471e9c4b9c4b8addcff449b019309157d4f158279c7b549",
      "baseline_green": true
     }
    }
@@ -7528,7 +7938,7 @@
     "compact::source::overlay_tests::consumer_hybrid::hybrid_validation_matches_resident_in_check_order"
    ],
    "runs": {
-    "second": {
+    "local": {
      "file": "src/hybrid.rs",
      "anchor_matches": 1,
      "sha256_lf": {
@@ -7542,20 +7952,21 @@
      },
      "build_attempts": 1,
      "compiled": true,
-     "tests": 15,
-     "passed": 14,
+     "tests": 16,
+     "passed": 15,
      "failed_tests": [
       "compact::source::overlay_tests::consumer_hybrid::hybrid_validation_matches_resident_in_check_order"
      ],
      "status": "killed",
      "expect_met": true,
      "restored_identically": true,
-     "seconds": 46,
+     "seconds": 63,
      "environment": {
-      "os": "Windows-11-10.0.26200-SP0",
+      "os": "Windows-11-10.0.26300-SP0",
       "rustc": "rustc 1.99.1 (58cf8f9c3 2026-10-13)",
-      "head": "b35c0131ba0b34ce2fe362c42c9d66674c43d017"
+      "head": "2d40512513a851d8c13c8747411609517d4300b1"
      },
+     "sources_sha256": "eaf4962586c77b556471e9c4b9c4b8addcff449b019309157d4f158279c7b549",
      "baseline_green": true
     }
    }
@@ -7573,37 +7984,6 @@
     "compact::source::overlay_tests::consumer_hybrid::hybrid_k_zero_keeps_the_vector_leg_work_and_its_validation"
    ],
    "runs": {
-    "second": {
-     "file": "src/hybrid.rs",
-     "anchor_matches": 1,
-     "sha256_lf": {
-      "before": "3136b4dfa38c0ab34570d851521430a43ea4600a256af837e059784036cdb361",
-      "mutated": "72b782057b58145f7bf9295e93a352c2b5139b375dcd19a862075d9d8209facd",
-      "restored": "3136b4dfa38c0ab34570d851521430a43ea4600a256af837e059784036cdb361"
-     },
-     "sha256_bytes": {
-      "before": "cf556bc1ded79380e0f6124f40d16aefd20e2b64f64c37ed0ed4004e31d2ee30",
-      "restored": "cf556bc1ded79380e0f6124f40d16aefd20e2b64f64c37ed0ed4004e31d2ee30"
-     },
-     "build_attempts": 1,
-     "compiled": true,
-     "tests": 15,
-     "passed": 13,
-     "failed_tests": [
-      "compact::source::overlay_tests::consumer_hybrid::hybrid_k_truncates_the_fused_list_and_candidates_bound_each_leg",
-      "compact::source::overlay_tests::consumer_hybrid::hybrid_k_zero_keeps_the_vector_leg_work_and_its_validation"
-     ],
-     "status": "killed",
-     "expect_met": true,
-     "restored_identically": true,
-     "seconds": 46,
-     "environment": {
-      "os": "Windows-11-10.0.26200-SP0",
-      "rustc": "rustc 1.99.1 (58cf8f9c3 2026-10-13)",
-      "head": "b35c0131ba0b34ce2fe362c42c9d66674c43d017"
-     },
-     "baseline_green": true
-    },
     "local": {
      "file": "src/hybrid.rs",
      "anchor_matches": 1,
@@ -7618,8 +7998,8 @@
      },
      "build_attempts": 1,
      "compiled": true,
-     "tests": 15,
-     "passed": 13,
+     "tests": 16,
+     "passed": 14,
      "failed_tests": [
       "compact::source::overlay_tests::consumer_hybrid::hybrid_k_truncates_the_fused_list_and_candidates_bound_each_leg",
       "compact::source::overlay_tests::consumer_hybrid::hybrid_k_zero_keeps_the_vector_leg_work_and_its_validation"
@@ -7627,12 +8007,13 @@
      "status": "killed",
      "expect_met": true,
      "restored_identically": true,
-     "seconds": 148,
+     "seconds": 60,
      "environment": {
       "os": "Windows-11-10.0.26300-SP0",
       "rustc": "rustc 1.99.1 (58cf8f9c3 2026-10-13)",
-      "head": "00bac1c229677b1d58e4f0445462cf1d169cb57f"
+      "head": "2d40512513a851d8c13c8747411609517d4300b1"
      },
+     "sources_sha256": "eaf4962586c77b556471e9c4b9c4b8addcff449b019309157d4f158279c7b549",
      "baseline_green": true
     }
    }
@@ -7649,7 +8030,7 @@
     "compact::source::overlay_tests::consumer_hybrid::hybrid_validation_matches_resident_in_check_order"
    ],
    "runs": {
-    "second": {
+    "local": {
      "file": "src/hybrid.rs",
      "anchor_matches": 1,
      "sha256_lf": {
@@ -7663,20 +8044,21 @@
      },
      "build_attempts": 1,
      "compiled": true,
-     "tests": 15,
-     "passed": 14,
+     "tests": 16,
+     "passed": 15,
      "failed_tests": [
       "compact::source::overlay_tests::consumer_hybrid::hybrid_validation_matches_resident_in_check_order"
      ],
      "status": "killed",
      "expect_met": true,
      "restored_identically": true,
-     "seconds": 44,
+     "seconds": 67,
      "environment": {
-      "os": "Windows-11-10.0.26200-SP0",
+      "os": "Windows-11-10.0.26300-SP0",
       "rustc": "rustc 1.99.1 (58cf8f9c3 2026-10-13)",
-      "head": "b35c0131ba0b34ce2fe362c42c9d66674c43d017"
+      "head": "2d40512513a851d8c13c8747411609517d4300b1"
      },
+     "sources_sha256": "eaf4962586c77b556471e9c4b9c4b8addcff449b019309157d4f158279c7b549",
      "baseline_green": true
     }
    }
@@ -7693,36 +8075,6 @@
     "compact::source::overlay_tests::consumer_hybrid::hybrid_validation_matches_resident_in_check_order"
    ],
    "runs": {
-    "second": {
-     "file": "src/hybrid.rs",
-     "anchor_matches": 1,
-     "sha256_lf": {
-      "before": "3136b4dfa38c0ab34570d851521430a43ea4600a256af837e059784036cdb361",
-      "mutated": "0bf2f99e2f86227e29f2c8df30d9fbf83248a06780f9667b6b57ad0704cb6c1d",
-      "restored": "3136b4dfa38c0ab34570d851521430a43ea4600a256af837e059784036cdb361"
-     },
-     "sha256_bytes": {
-      "before": "cf556bc1ded79380e0f6124f40d16aefd20e2b64f64c37ed0ed4004e31d2ee30",
-      "restored": "cf556bc1ded79380e0f6124f40d16aefd20e2b64f64c37ed0ed4004e31d2ee30"
-     },
-     "build_attempts": 1,
-     "compiled": true,
-     "tests": 15,
-     "passed": 14,
-     "failed_tests": [
-      "compact::source::overlay_tests::consumer_hybrid::hybrid_validation_matches_resident_in_check_order"
-     ],
-     "status": "killed",
-     "expect_met": true,
-     "restored_identically": true,
-     "seconds": 46,
-     "environment": {
-      "os": "Windows-11-10.0.26200-SP0",
-      "rustc": "rustc 1.99.1 (58cf8f9c3 2026-10-13)",
-      "head": "b35c0131ba0b34ce2fe362c42c9d66674c43d017"
-     },
-     "baseline_green": true
-    },
     "local": {
      "file": "src/hybrid.rs",
      "anchor_matches": 1,
@@ -7737,20 +8089,21 @@
      },
      "build_attempts": 1,
      "compiled": true,
-     "tests": 15,
-     "passed": 14,
+     "tests": 16,
+     "passed": 15,
      "failed_tests": [
       "compact::source::overlay_tests::consumer_hybrid::hybrid_validation_matches_resident_in_check_order"
      ],
      "status": "killed",
      "expect_met": true,
      "restored_identically": true,
-     "seconds": 165,
+     "seconds": 68,
      "environment": {
       "os": "Windows-11-10.0.26300-SP0",
       "rustc": "rustc 1.99.1 (58cf8f9c3 2026-10-13)",
-      "head": "00bac1c229677b1d58e4f0445462cf1d169cb57f"
+      "head": "2d40512513a851d8c13c8747411609517d4300b1"
      },
+     "sources_sha256": "eaf4962586c77b556471e9c4b9c4b8addcff449b019309157d4f158279c7b549",
      "baseline_green": true
     }
    }
@@ -7767,7 +8120,7 @@
     "compact::source::overlay_tests::consumer_hybrid::hybrid_validation_matches_resident_in_check_order"
    ],
    "runs": {
-    "second": {
+    "local": {
      "file": "src/hybrid.rs",
      "anchor_matches": 1,
      "sha256_lf": {
@@ -7781,20 +8134,21 @@
      },
      "build_attempts": 1,
      "compiled": true,
-     "tests": 15,
-     "passed": 14,
+     "tests": 16,
+     "passed": 15,
      "failed_tests": [
       "compact::source::overlay_tests::consumer_hybrid::hybrid_validation_matches_resident_in_check_order"
      ],
      "status": "killed",
      "expect_met": true,
      "restored_identically": true,
-     "seconds": 46,
+     "seconds": 71,
      "environment": {
-      "os": "Windows-11-10.0.26200-SP0",
+      "os": "Windows-11-10.0.26300-SP0",
       "rustc": "rustc 1.99.1 (58cf8f9c3 2026-10-13)",
-      "head": "b35c0131ba0b34ce2fe362c42c9d66674c43d017"
+      "head": "2d40512513a851d8c13c8747411609517d4300b1"
      },
+     "sources_sha256": "eaf4962586c77b556471e9c4b9c4b8addcff449b019309157d4f158279c7b549",
      "baseline_green": true
     }
    }
@@ -7811,36 +8165,6 @@
     "compact::source::overlay_tests::consumer_hybrid::hybrid_validation_matches_resident_in_check_order"
    ],
    "runs": {
-    "second": {
-     "file": "src/hybrid.rs",
-     "anchor_matches": 1,
-     "sha256_lf": {
-      "before": "3136b4dfa38c0ab34570d851521430a43ea4600a256af837e059784036cdb361",
-      "mutated": "095b3083de10dd64bb20e64dd5bb740705dd183a598cde13bf727143ef4d2077",
-      "restored": "3136b4dfa38c0ab34570d851521430a43ea4600a256af837e059784036cdb361"
-     },
-     "sha256_bytes": {
-      "before": "cf556bc1ded79380e0f6124f40d16aefd20e2b64f64c37ed0ed4004e31d2ee30",
-      "restored": "cf556bc1ded79380e0f6124f40d16aefd20e2b64f64c37ed0ed4004e31d2ee30"
-     },
-     "build_attempts": 1,
-     "compiled": true,
-     "tests": 15,
-     "passed": 14,
-     "failed_tests": [
-      "compact::source::overlay_tests::consumer_hybrid::hybrid_validation_matches_resident_in_check_order"
-     ],
-     "status": "killed",
-     "expect_met": true,
-     "restored_identically": true,
-     "seconds": 44,
-     "environment": {
-      "os": "Windows-11-10.0.26200-SP0",
-      "rustc": "rustc 1.99.1 (58cf8f9c3 2026-10-13)",
-      "head": "b35c0131ba0b34ce2fe362c42c9d66674c43d017"
-     },
-     "baseline_green": true
-    },
     "local": {
      "file": "src/hybrid.rs",
      "anchor_matches": 1,
@@ -7855,20 +8179,21 @@
      },
      "build_attempts": 1,
      "compiled": true,
-     "tests": 15,
-     "passed": 14,
+     "tests": 16,
+     "passed": 15,
      "failed_tests": [
       "compact::source::overlay_tests::consumer_hybrid::hybrid_validation_matches_resident_in_check_order"
      ],
      "status": "killed",
      "expect_met": true,
      "restored_identically": true,
-     "seconds": 191,
+     "seconds": 70,
      "environment": {
       "os": "Windows-11-10.0.26300-SP0",
       "rustc": "rustc 1.99.1 (58cf8f9c3 2026-10-13)",
-      "head": "00bac1c229677b1d58e4f0445462cf1d169cb57f"
+      "head": "2d40512513a851d8c13c8747411609517d4300b1"
      },
+     "sources_sha256": "eaf4962586c77b556471e9c4b9c4b8addcff449b019309157d4f158279c7b549",
      "baseline_green": true
     }
    }
@@ -7886,7 +8211,7 @@
     "compact::source::overlay_tests::consumer_hybrid::hybrid_validation_matches_resident_in_check_order"
    ],
    "runs": {
-    "second": {
+    "local": {
      "file": "src/hybrid.rs",
      "anchor_matches": 1,
      "sha256_lf": {
@@ -7900,8 +8225,8 @@
      },
      "build_attempts": 1,
      "compiled": true,
-     "tests": 15,
-     "passed": 13,
+     "tests": 16,
+     "passed": 14,
      "failed_tests": [
       "compact::source::overlay_tests::consumer_hybrid::hybrid_approximate_leg_stays_refused_on_compact_records_without_side_effects",
       "compact::source::overlay_tests::consumer_hybrid::hybrid_validation_matches_resident_in_check_order"
@@ -7909,12 +8234,13 @@
      "status": "killed",
      "expect_met": true,
      "restored_identically": true,
-     "seconds": 44,
+     "seconds": 56,
      "environment": {
-      "os": "Windows-11-10.0.26200-SP0",
+      "os": "Windows-11-10.0.26300-SP0",
       "rustc": "rustc 1.99.1 (58cf8f9c3 2026-10-13)",
-      "head": "b35c0131ba0b34ce2fe362c42c9d66674c43d017"
+      "head": "2d40512513a851d8c13c8747411609517d4300b1"
      },
+     "sources_sha256": "eaf4962586c77b556471e9c4b9c4b8addcff449b019309157d4f158279c7b549",
      "baseline_green": true
     }
    }
@@ -7932,37 +8258,6 @@
     "compact::source::overlay_tests::consumer_hybrid::hybrid_validation_matches_resident_in_check_order"
    ],
    "runs": {
-    "second": {
-     "file": "src/hybrid.rs",
-     "anchor_matches": 1,
-     "sha256_lf": {
-      "before": "3136b4dfa38c0ab34570d851521430a43ea4600a256af837e059784036cdb361",
-      "mutated": "3afd1b5a64ee376e853398daa1341a3a5c2c7215f3621209a8cb0188c48940df",
-      "restored": "3136b4dfa38c0ab34570d851521430a43ea4600a256af837e059784036cdb361"
-     },
-     "sha256_bytes": {
-      "before": "cf556bc1ded79380e0f6124f40d16aefd20e2b64f64c37ed0ed4004e31d2ee30",
-      "restored": "cf556bc1ded79380e0f6124f40d16aefd20e2b64f64c37ed0ed4004e31d2ee30"
-     },
-     "build_attempts": 1,
-     "compiled": true,
-     "tests": 15,
-     "passed": 13,
-     "failed_tests": [
-      "compact::source::overlay_tests::consumer_hybrid::hybrid_disabled_legs_are_never_evaluated",
-      "compact::source::overlay_tests::consumer_hybrid::hybrid_validation_matches_resident_in_check_order"
-     ],
-     "status": "killed",
-     "expect_met": true,
-     "restored_identically": true,
-     "seconds": 45,
-     "environment": {
-      "os": "Windows-11-10.0.26200-SP0",
-      "rustc": "rustc 1.99.1 (58cf8f9c3 2026-10-13)",
-      "head": "b35c0131ba0b34ce2fe362c42c9d66674c43d017"
-     },
-     "baseline_green": true
-    },
     "local": {
      "file": "src/hybrid.rs",
      "anchor_matches": 1,
@@ -7977,8 +8272,8 @@
      },
      "build_attempts": 1,
      "compiled": true,
-     "tests": 15,
-     "passed": 13,
+     "tests": 16,
+     "passed": 14,
      "failed_tests": [
       "compact::source::overlay_tests::consumer_hybrid::hybrid_disabled_legs_are_never_evaluated",
       "compact::source::overlay_tests::consumer_hybrid::hybrid_validation_matches_resident_in_check_order"
@@ -7986,12 +8281,13 @@
      "status": "killed",
      "expect_met": true,
      "restored_identically": true,
-     "seconds": 150,
+     "seconds": 52,
      "environment": {
       "os": "Windows-11-10.0.26300-SP0",
       "rustc": "rustc 1.99.1 (58cf8f9c3 2026-10-13)",
-      "head": "00bac1c229677b1d58e4f0445462cf1d169cb57f"
+      "head": "2d40512513a851d8c13c8747411609517d4300b1"
      },
+     "sources_sha256": "eaf4962586c77b556471e9c4b9c4b8addcff449b019309157d4f158279c7b549",
      "baseline_green": true
     }
    }
@@ -8010,7 +8306,7 @@
     "compact::source::overlay_tests::consumer_hybrid::hybrid_k_zero_keeps_the_vector_leg_work_and_its_validation"
    ],
    "runs": {
-    "second": {
+    "local": {
      "file": "src/hybrid.rs",
      "anchor_matches": 1,
      "sha256_lf": {
@@ -8024,8 +8320,8 @@
      },
      "build_attempts": 1,
      "compiled": true,
-     "tests": 15,
-     "passed": 12,
+     "tests": 16,
+     "passed": 13,
      "failed_tests": [
       "compact::source::overlay_tests::consumer_hybrid::hybrid_equal_fused_scores_of_rows_in_both_legs_break_ties_by_ascending_id",
       "compact::source::overlay_tests::consumer_hybrid::hybrid_k_truncates_the_fused_list_and_candidates_bound_each_leg",
@@ -8034,12 +8330,13 @@
      "status": "killed",
      "expect_met": true,
      "restored_identically": true,
-     "seconds": 45,
+     "seconds": 55,
      "environment": {
-      "os": "Windows-11-10.0.26200-SP0",
+      "os": "Windows-11-10.0.26300-SP0",
       "rustc": "rustc 1.99.1 (58cf8f9c3 2026-10-13)",
-      "head": "b35c0131ba0b34ce2fe362c42c9d66674c43d017"
+      "head": "2d40512513a851d8c13c8747411609517d4300b1"
      },
+     "sources_sha256": "eaf4962586c77b556471e9c4b9c4b8addcff449b019309157d4f158279c7b549",
      "baseline_green": true
     }
    }
@@ -8058,39 +8355,6 @@
     "compact::source::overlay_tests::consumer_hybrid::hybrid_expired_overlay_put_hides_the_row_in_both_legs_and_never_reveals_the_base_row"
    ],
    "runs": {
-    "second": {
-     "file": "src/hybrid.rs",
-     "anchor_matches": 1,
-     "sha256_lf": {
-      "before": "3136b4dfa38c0ab34570d851521430a43ea4600a256af837e059784036cdb361",
-      "mutated": "53829e81c901d05b791dcdbaddc30c37426e2051e5364e1b5091834b8d5749c7",
-      "restored": "3136b4dfa38c0ab34570d851521430a43ea4600a256af837e059784036cdb361"
-     },
-     "sha256_bytes": {
-      "before": "cf556bc1ded79380e0f6124f40d16aefd20e2b64f64c37ed0ed4004e31d2ee30",
-      "restored": "cf556bc1ded79380e0f6124f40d16aefd20e2b64f64c37ed0ed4004e31d2ee30"
-     },
-     "build_attempts": 1,
-     "compiled": true,
-     "tests": 15,
-     "passed": 11,
-     "failed_tests": [
-      "compact::source::overlay_tests::consumer_hybrid::hybrid_base_row_deadline_hides_exactly_at_the_clock_and_an_overlay_without_one_restores_it",
-      "compact::source::overlay_tests::consumer_hybrid::hybrid_deadline_only_overlay_write_applies_its_deadline_to_both_legs",
-      "compact::source::overlay_tests::consumer_hybrid::hybrid_expired_overlay_put_hides_the_row_in_both_legs_and_never_reveals_the_base_row",
-      "compact::source::overlay_tests::consumer_hybrid::hybrid_wall_clock_entry_hides_past_deadlines_and_keeps_far_ones_in_both_legs"
-     ],
-     "status": "killed",
-     "expect_met": true,
-     "restored_identically": true,
-     "seconds": 46,
-     "environment": {
-      "os": "Windows-11-10.0.26200-SP0",
-      "rustc": "rustc 1.99.1 (58cf8f9c3 2026-10-13)",
-      "head": "b35c0131ba0b34ce2fe362c42c9d66674c43d017"
-     },
-     "baseline_green": true
-    },
     "local": {
      "file": "src/hybrid.rs",
      "anchor_matches": 1,
@@ -8105,8 +8369,8 @@
      },
      "build_attempts": 1,
      "compiled": true,
-     "tests": 15,
-     "passed": 11,
+     "tests": 16,
+     "passed": 12,
      "failed_tests": [
       "compact::source::overlay_tests::consumer_hybrid::hybrid_base_row_deadline_hides_exactly_at_the_clock_and_an_overlay_without_one_restores_it",
       "compact::source::overlay_tests::consumer_hybrid::hybrid_deadline_only_overlay_write_applies_its_deadline_to_both_legs",
@@ -8116,12 +8380,13 @@
      "status": "killed",
      "expect_met": true,
      "restored_identically": true,
-     "seconds": 148,
+     "seconds": 56,
      "environment": {
       "os": "Windows-11-10.0.26300-SP0",
       "rustc": "rustc 1.99.1 (58cf8f9c3 2026-10-13)",
-      "head": "00bac1c229677b1d58e4f0445462cf1d169cb57f"
+      "head": "2d40512513a851d8c13c8747411609517d4300b1"
      },
+     "sources_sha256": "eaf4962586c77b556471e9c4b9c4b8addcff449b019309157d4f158279c7b549",
      "baseline_green": true
     }
    }
@@ -8139,7 +8404,7 @@
     "compact::source::overlay_tests::consumer_hybrid::hybrid_validation_matches_resident_in_check_order"
    ],
    "runs": {
-    "second": {
+    "local": {
      "file": "src/hybrid.rs",
      "anchor_matches": 1,
      "sha256_lf": {
@@ -8153,8 +8418,8 @@
      },
      "build_attempts": 1,
      "compiled": true,
-     "tests": 15,
-     "passed": 13,
+     "tests": 16,
+     "passed": 14,
      "failed_tests": [
       "compact::source::overlay_tests::consumer_hybrid::hybrid_fusion_scores_distances_and_bm25_equal_the_resident_values_bit_for_bit",
       "compact::source::overlay_tests::consumer_hybrid::hybrid_validation_matches_resident_in_check_order"
@@ -8162,12 +8427,13 @@
      "status": "killed",
      "expect_met": true,
      "restored_identically": true,
-     "seconds": 47,
+     "seconds": 49,
      "environment": {
-      "os": "Windows-11-10.0.26200-SP0",
+      "os": "Windows-11-10.0.26300-SP0",
       "rustc": "rustc 1.99.1 (58cf8f9c3 2026-10-13)",
-      "head": "b35c0131ba0b34ce2fe362c42c9d66674c43d017"
+      "head": "2d40512513a851d8c13c8747411609517d4300b1"
      },
+     "sources_sha256": "eaf4962586c77b556471e9c4b9c4b8addcff449b019309157d4f158279c7b549",
      "baseline_green": true
     }
    }
@@ -8185,37 +8451,6 @@
     "compact::source::overlay_tests::consumer_hybrid::hybrid_validation_matches_resident_in_check_order"
    ],
    "runs": {
-    "second": {
-     "file": "src/hybrid.rs",
-     "anchor_matches": 1,
-     "sha256_lf": {
-      "before": "3136b4dfa38c0ab34570d851521430a43ea4600a256af837e059784036cdb361",
-      "mutated": "a66adeb671515c6bed880ae6eeb6037a768e1ef064c3748ee57c65b9615de280",
-      "restored": "3136b4dfa38c0ab34570d851521430a43ea4600a256af837e059784036cdb361"
-     },
-     "sha256_bytes": {
-      "before": "cf556bc1ded79380e0f6124f40d16aefd20e2b64f64c37ed0ed4004e31d2ee30",
-      "restored": "cf556bc1ded79380e0f6124f40d16aefd20e2b64f64c37ed0ed4004e31d2ee30"
-     },
-     "build_attempts": 1,
-     "compiled": true,
-     "tests": 15,
-     "passed": 13,
-     "failed_tests": [
-      "compact::source::overlay_tests::consumer_hybrid::hybrid_filter_applies_to_both_legs_and_the_vector_leg_reports_its_work",
-      "compact::source::overlay_tests::consumer_hybrid::hybrid_validation_matches_resident_in_check_order"
-     ],
-     "status": "killed",
-     "expect_met": true,
-     "restored_identically": true,
-     "seconds": 46,
-     "environment": {
-      "os": "Windows-11-10.0.26200-SP0",
-      "rustc": "rustc 1.99.1 (58cf8f9c3 2026-10-13)",
-      "head": "b35c0131ba0b34ce2fe362c42c9d66674c43d017"
-     },
-     "baseline_green": true
-    },
     "local": {
      "file": "src/hybrid.rs",
      "anchor_matches": 1,
@@ -8230,8 +8465,8 @@
      },
      "build_attempts": 1,
      "compiled": true,
-     "tests": 15,
-     "passed": 13,
+     "tests": 16,
+     "passed": 14,
      "failed_tests": [
       "compact::source::overlay_tests::consumer_hybrid::hybrid_filter_applies_to_both_legs_and_the_vector_leg_reports_its_work",
       "compact::source::overlay_tests::consumer_hybrid::hybrid_validation_matches_resident_in_check_order"
@@ -8239,12 +8474,13 @@
      "status": "killed",
      "expect_met": true,
      "restored_identically": true,
-     "seconds": 161,
+     "seconds": 50,
      "environment": {
       "os": "Windows-11-10.0.26300-SP0",
       "rustc": "rustc 1.99.1 (58cf8f9c3 2026-10-13)",
-      "head": "00bac1c229677b1d58e4f0445462cf1d169cb57f"
+      "head": "2d40512513a851d8c13c8747411609517d4300b1"
      },
+     "sources_sha256": "eaf4962586c77b556471e9c4b9c4b8addcff449b019309157d4f158279c7b549",
      "baseline_green": true
     }
    }
@@ -8263,7 +8499,7 @@
     "compact::source::overlay_tests::consumer_hybrid::hybrid_validation_matches_resident_in_check_order"
    ],
    "runs": {
-    "second": {
+    "local": {
      "file": "src/hybrid.rs",
      "anchor_matches": 1,
      "sha256_lf": {
@@ -8277,8 +8513,8 @@
      },
      "build_attempts": 1,
      "compiled": true,
-     "tests": 15,
-     "passed": 12,
+     "tests": 16,
+     "passed": 13,
      "failed_tests": [
       "compact::source::overlay_tests::consumer_hybrid::hybrid_approximate_leg_stays_refused_on_compact_records_without_side_effects",
       "compact::source::overlay_tests::consumer_hybrid::hybrid_k_zero_keeps_the_vector_leg_work_and_its_validation",
@@ -8287,12 +8523,13 @@
      "status": "killed",
      "expect_met": true,
      "restored_identically": true,
-     "seconds": 52,
+     "seconds": 51,
      "environment": {
-      "os": "Windows-11-10.0.26200-SP0",
+      "os": "Windows-11-10.0.26300-SP0",
       "rustc": "rustc 1.99.1 (58cf8f9c3 2026-10-13)",
-      "head": "b35c0131ba0b34ce2fe362c42c9d66674c43d017"
+      "head": "2d40512513a851d8c13c8747411609517d4300b1"
      },
+     "sources_sha256": "eaf4962586c77b556471e9c4b9c4b8addcff449b019309157d4f158279c7b549",
      "baseline_green": true
     }
    }
@@ -8310,37 +8547,6 @@
     "compact::source::overlay_tests::consumer_hybrid::hybrid_deadline_only_overlay_write_applies_its_deadline_to_both_legs"
    ],
    "runs": {
-    "second": {
-     "file": "src/hybrid.rs",
-     "anchor_matches": 1,
-     "sha256_lf": {
-      "before": "3136b4dfa38c0ab34570d851521430a43ea4600a256af837e059784036cdb361",
-      "mutated": "3b9450957cdc402b6f8ebfc6653c5d2b96dc5f425505fc0a125b7829d27e51aa",
-      "restored": "3136b4dfa38c0ab34570d851521430a43ea4600a256af837e059784036cdb361"
-     },
-     "sha256_bytes": {
-      "before": "cf556bc1ded79380e0f6124f40d16aefd20e2b64f64c37ed0ed4004e31d2ee30",
-      "restored": "cf556bc1ded79380e0f6124f40d16aefd20e2b64f64c37ed0ed4004e31d2ee30"
-     },
-     "build_attempts": 1,
-     "compiled": true,
-     "tests": 15,
-     "passed": 13,
-     "failed_tests": [
-      "compact::source::overlay_tests::consumer_hybrid::hybrid_base_row_deadline_hides_exactly_at_the_clock_and_an_overlay_without_one_restores_it",
-      "compact::source::overlay_tests::consumer_hybrid::hybrid_deadline_only_overlay_write_applies_its_deadline_to_both_legs"
-     ],
-     "status": "killed",
-     "expect_met": true,
-     "restored_identically": true,
-     "seconds": 50,
-     "environment": {
-      "os": "Windows-11-10.0.26200-SP0",
-      "rustc": "rustc 1.99.1 (58cf8f9c3 2026-10-13)",
-      "head": "b35c0131ba0b34ce2fe362c42c9d66674c43d017"
-     },
-     "baseline_green": true
-    },
     "local": {
      "file": "src/hybrid.rs",
      "anchor_matches": 1,
@@ -8355,8 +8561,8 @@
      },
      "build_attempts": 1,
      "compiled": true,
-     "tests": 15,
-     "passed": 13,
+     "tests": 16,
+     "passed": 14,
      "failed_tests": [
       "compact::source::overlay_tests::consumer_hybrid::hybrid_base_row_deadline_hides_exactly_at_the_clock_and_an_overlay_without_one_restores_it",
       "compact::source::overlay_tests::consumer_hybrid::hybrid_deadline_only_overlay_write_applies_its_deadline_to_both_legs"
@@ -8364,12 +8570,13 @@
      "status": "killed",
      "expect_met": true,
      "restored_identically": true,
-     "seconds": 159,
+     "seconds": 57,
      "environment": {
       "os": "Windows-11-10.0.26300-SP0",
       "rustc": "rustc 1.99.1 (58cf8f9c3 2026-10-13)",
-      "head": "00bac1c229677b1d58e4f0445462cf1d169cb57f"
+      "head": "2d40512513a851d8c13c8747411609517d4300b1"
      },
+     "sources_sha256": "eaf4962586c77b556471e9c4b9c4b8addcff449b019309157d4f158279c7b549",
      "baseline_green": true
     }
    }
@@ -8388,7 +8595,7 @@
     "compact::source::overlay_tests::consumer_hybrid::hybrid_wall_clock_entry_hides_past_deadlines_and_keeps_far_ones_in_both_legs"
    ],
    "runs": {
-    "second": {
+    "local": {
      "file": "src/hybrid.rs",
      "anchor_matches": 1,
      "sha256_lf": {
@@ -8402,8 +8609,8 @@
      },
      "build_attempts": 1,
      "compiled": true,
-     "tests": 15,
-     "passed": 12,
+     "tests": 16,
+     "passed": 13,
      "failed_tests": [
       "compact::source::overlay_tests::consumer_hybrid::hybrid_base_row_deadline_hides_exactly_at_the_clock_and_an_overlay_without_one_restores_it",
       "compact::source::overlay_tests::consumer_hybrid::hybrid_deadline_only_overlay_write_applies_its_deadline_to_both_legs",
@@ -8412,12 +8619,13 @@
      "status": "killed",
      "expect_met": true,
      "restored_identically": true,
-     "seconds": 45,
+     "seconds": 53,
      "environment": {
-      "os": "Windows-11-10.0.26200-SP0",
+      "os": "Windows-11-10.0.26300-SP0",
       "rustc": "rustc 1.99.1 (58cf8f9c3 2026-10-13)",
-      "head": "b35c0131ba0b34ce2fe362c42c9d66674c43d017"
+      "head": "2d40512513a851d8c13c8747411609517d4300b1"
      },
+     "sources_sha256": "eaf4962586c77b556471e9c4b9c4b8addcff449b019309157d4f158279c7b549",
      "baseline_green": true
     }
    }
@@ -8435,37 +8643,6 @@
     "compact::source::overlay_tests::consumer_hybrid::hybrid_k_zero_keeps_the_vector_leg_work_and_its_validation"
    ],
    "runs": {
-    "second": {
-     "file": "src/hybrid.rs",
-     "anchor_matches": 1,
-     "sha256_lf": {
-      "before": "3136b4dfa38c0ab34570d851521430a43ea4600a256af837e059784036cdb361",
-      "mutated": "288a8a9fa73659d7468821cfd48bc1f4dc02ae5a41335ebdd9e5ef327e98b40a",
-      "restored": "3136b4dfa38c0ab34570d851521430a43ea4600a256af837e059784036cdb361"
-     },
-     "sha256_bytes": {
-      "before": "cf556bc1ded79380e0f6124f40d16aefd20e2b64f64c37ed0ed4004e31d2ee30",
-      "restored": "cf556bc1ded79380e0f6124f40d16aefd20e2b64f64c37ed0ed4004e31d2ee30"
-     },
-     "build_attempts": 1,
-     "compiled": true,
-     "tests": 15,
-     "passed": 13,
-     "failed_tests": [
-      "compact::source::overlay_tests::consumer_hybrid::hybrid_k_truncates_the_fused_list_and_candidates_bound_each_leg",
-      "compact::source::overlay_tests::consumer_hybrid::hybrid_k_zero_keeps_the_vector_leg_work_and_its_validation"
-     ],
-     "status": "killed",
-     "expect_met": true,
-     "restored_identically": true,
-     "seconds": 46,
-     "environment": {
-      "os": "Windows-11-10.0.26200-SP0",
-      "rustc": "rustc 1.99.1 (58cf8f9c3 2026-10-13)",
-      "head": "b35c0131ba0b34ce2fe362c42c9d66674c43d017"
-     },
-     "baseline_green": true
-    },
     "local": {
      "file": "src/hybrid.rs",
      "anchor_matches": 1,
@@ -8480,8 +8657,8 @@
      },
      "build_attempts": 1,
      "compiled": true,
-     "tests": 15,
-     "passed": 13,
+     "tests": 16,
+     "passed": 14,
      "failed_tests": [
       "compact::source::overlay_tests::consumer_hybrid::hybrid_k_truncates_the_fused_list_and_candidates_bound_each_leg",
       "compact::source::overlay_tests::consumer_hybrid::hybrid_k_zero_keeps_the_vector_leg_work_and_its_validation"
@@ -8489,12 +8666,13 @@
      "status": "killed",
      "expect_met": true,
      "restored_identically": true,
-     "seconds": 144,
+     "seconds": 61,
      "environment": {
       "os": "Windows-11-10.0.26300-SP0",
       "rustc": "rustc 1.99.1 (58cf8f9c3 2026-10-13)",
-      "head": "00bac1c229677b1d58e4f0445462cf1d169cb57f"
+      "head": "2d40512513a851d8c13c8747411609517d4300b1"
      },
+     "sources_sha256": "eaf4962586c77b556471e9c4b9c4b8addcff449b019309157d4f158279c7b549",
      "baseline_green": true
     }
    }
@@ -8513,7 +8691,7 @@
     "compact::source::overlay_tests::consumer_hybrid::hybrid_validation_matches_resident_in_check_order"
    ],
    "runs": {
-    "second": {
+    "local": {
      "file": "src/hybrid.rs",
      "anchor_matches": 1,
      "sha256_lf": {
@@ -8527,8 +8705,8 @@
      },
      "build_attempts": 1,
      "compiled": true,
-     "tests": 15,
-     "passed": 12,
+     "tests": 16,
+     "passed": 13,
      "failed_tests": [
       "compact::source::overlay_tests::consumer_hybrid::hybrid_disabled_legs_are_never_evaluated",
       "compact::source::overlay_tests::consumer_hybrid::hybrid_fusion_scores_distances_and_bm25_equal_the_resident_values_bit_for_bit",
@@ -8537,12 +8715,13 @@
      "status": "killed",
      "expect_met": true,
      "restored_identically": true,
-     "seconds": 46,
+     "seconds": 56,
      "environment": {
-      "os": "Windows-11-10.0.26200-SP0",
+      "os": "Windows-11-10.0.26300-SP0",
       "rustc": "rustc 1.99.1 (58cf8f9c3 2026-10-13)",
-      "head": "b35c0131ba0b34ce2fe362c42c9d66674c43d017"
+      "head": "2d40512513a851d8c13c8747411609517d4300b1"
      },
+     "sources_sha256": "eaf4962586c77b556471e9c4b9c4b8addcff449b019309157d4f158279c7b549",
      "baseline_green": true
     }
    }
@@ -8561,48 +8740,6 @@
     "compact::source::overlay_tests::consumer_hybrid::hybrid_disabled_legs_are_never_evaluated"
    ],
    "runs": {
-    "second": {
-     "file": "src/hybrid.rs",
-     "anchor_matches": 1,
-     "sha256_lf": {
-      "before": "3136b4dfa38c0ab34570d851521430a43ea4600a256af837e059784036cdb361",
-      "mutated": "8f5efd03f2088600eb0f8392588673512d4ca4d14ff48a58099e29f8865b5223",
-      "restored": "3136b4dfa38c0ab34570d851521430a43ea4600a256af837e059784036cdb361"
-     },
-     "sha256_bytes": {
-      "before": "cf556bc1ded79380e0f6124f40d16aefd20e2b64f64c37ed0ed4004e31d2ee30",
-      "restored": "cf556bc1ded79380e0f6124f40d16aefd20e2b64f64c37ed0ed4004e31d2ee30"
-     },
-     "build_attempts": 1,
-     "compiled": true,
-     "tests": 15,
-     "passed": 2,
-     "failed_tests": [
-      "compact::source::overlay_tests::consumer_hybrid::hybrid_base_row_deadline_hides_exactly_at_the_clock_and_an_overlay_without_one_restores_it",
-      "compact::source::overlay_tests::consumer_hybrid::hybrid_deadline_only_overlay_write_applies_its_deadline_to_both_legs",
-      "compact::source::overlay_tests::consumer_hybrid::hybrid_disabled_legs_are_never_evaluated",
-      "compact::source::overlay_tests::consumer_hybrid::hybrid_equal_fused_scores_break_ties_by_ascending_id_across_the_legs",
-      "compact::source::overlay_tests::consumer_hybrid::hybrid_equal_fused_scores_of_rows_in_both_legs_break_ties_by_ascending_id",
-      "compact::source::overlay_tests::consumer_hybrid::hybrid_expired_overlay_put_hides_the_row_in_both_legs_and_never_reveals_the_base_row",
-      "compact::source::overlay_tests::consumer_hybrid::hybrid_filter_applies_to_both_legs_and_the_vector_leg_reports_its_work",
-      "compact::source::overlay_tests::consumer_hybrid::hybrid_fusion_scores_distances_and_bm25_equal_the_resident_values_bit_for_bit",
-      "compact::source::overlay_tests::consumer_hybrid::hybrid_k_truncates_the_fused_list_and_candidates_bound_each_leg",
-      "compact::source::overlay_tests::consumer_hybrid::hybrid_k_zero_keeps_the_vector_leg_work_and_its_validation",
-      "compact::source::overlay_tests::consumer_hybrid::hybrid_tombstone_hides_the_base_row_at_every_clock",
-      "compact::source::overlay_tests::consumer_hybrid::hybrid_validation_matches_resident_in_check_order",
-      "compact::source::overlay_tests::consumer_hybrid::hybrid_wall_clock_entry_hides_past_deadlines_and_keeps_far_ones_in_both_legs"
-     ],
-     "status": "killed",
-     "expect_met": true,
-     "restored_identically": true,
-     "seconds": 46,
-     "environment": {
-      "os": "Windows-11-10.0.26200-SP0",
-      "rustc": "rustc 1.99.1 (58cf8f9c3 2026-10-13)",
-      "head": "b35c0131ba0b34ce2fe362c42c9d66674c43d017"
-     },
-     "baseline_green": true
-    },
     "local": {
      "file": "src/hybrid.rs",
      "anchor_matches": 1,
@@ -8617,8 +8754,8 @@
      },
      "build_attempts": 1,
      "compiled": true,
-     "tests": 15,
-     "passed": 2,
+     "tests": 16,
+     "passed": 3,
      "failed_tests": [
       "compact::source::overlay_tests::consumer_hybrid::hybrid_base_row_deadline_hides_exactly_at_the_clock_and_an_overlay_without_one_restores_it",
       "compact::source::overlay_tests::consumer_hybrid::hybrid_deadline_only_overlay_write_applies_its_deadline_to_both_legs",
@@ -8637,12 +8774,13 @@
      "status": "killed",
      "expect_met": true,
      "restored_identically": true,
-     "seconds": 181,
+     "seconds": 62,
      "environment": {
       "os": "Windows-11-10.0.26300-SP0",
       "rustc": "rustc 1.99.1 (58cf8f9c3 2026-10-13)",
-      "head": "00bac1c229677b1d58e4f0445462cf1d169cb57f"
+      "head": "2d40512513a851d8c13c8747411609517d4300b1"
      },
+     "sources_sha256": "eaf4962586c77b556471e9c4b9c4b8addcff449b019309157d4f158279c7b549",
      "baseline_green": true
     }
    }
@@ -8661,7 +8799,7 @@
     "compact::source::overlay_tests::consumer_hybrid::hybrid_equal_fused_scores_of_rows_in_both_legs_break_ties_by_ascending_id"
    ],
    "runs": {
-    "second": {
+    "local": {
      "file": "src/hybrid.rs",
      "anchor_matches": 1,
      "sha256_lf": {
@@ -8675,8 +8813,8 @@
      },
      "build_attempts": 1,
      "compiled": true,
-     "tests": 15,
-     "passed": 11,
+     "tests": 16,
+     "passed": 12,
      "failed_tests": [
       "compact::source::overlay_tests::consumer_hybrid::hybrid_deadline_only_overlay_write_applies_its_deadline_to_both_legs",
       "compact::source::overlay_tests::consumer_hybrid::hybrid_equal_fused_scores_break_ties_by_ascending_id_across_the_legs",
@@ -8686,12 +8824,13 @@
      "status": "killed",
      "expect_met": true,
      "restored_identically": true,
-     "seconds": 46,
+     "seconds": 54,
      "environment": {
-      "os": "Windows-11-10.0.26200-SP0",
+      "os": "Windows-11-10.0.26300-SP0",
       "rustc": "rustc 1.99.1 (58cf8f9c3 2026-10-13)",
-      "head": "b35c0131ba0b34ce2fe362c42c9d66674c43d017"
+      "head": "2d40512513a851d8c13c8747411609517d4300b1"
      },
+     "sources_sha256": "eaf4962586c77b556471e9c4b9c4b8addcff449b019309157d4f158279c7b549",
      "baseline_green": true
     }
    }
@@ -8710,39 +8849,6 @@
     "compact::source::overlay_tests::consumer_hybrid::hybrid_equal_fused_scores_of_rows_in_both_legs_break_ties_by_ascending_id"
    ],
    "runs": {
-    "second": {
-     "file": "src/hybrid.rs",
-     "anchor_matches": 1,
-     "sha256_lf": {
-      "before": "3136b4dfa38c0ab34570d851521430a43ea4600a256af837e059784036cdb361",
-      "mutated": "8a4a6203ae1683ec90990bb2094dfb2d6b5cb664611fbe6ef888816f822711f1",
-      "restored": "3136b4dfa38c0ab34570d851521430a43ea4600a256af837e059784036cdb361"
-     },
-     "sha256_bytes": {
-      "before": "cf556bc1ded79380e0f6124f40d16aefd20e2b64f64c37ed0ed4004e31d2ee30",
-      "restored": "cf556bc1ded79380e0f6124f40d16aefd20e2b64f64c37ed0ed4004e31d2ee30"
-     },
-     "build_attempts": 1,
-     "compiled": true,
-     "tests": 15,
-     "passed": 11,
-     "failed_tests": [
-      "compact::source::overlay_tests::consumer_hybrid::hybrid_deadline_only_overlay_write_applies_its_deadline_to_both_legs",
-      "compact::source::overlay_tests::consumer_hybrid::hybrid_equal_fused_scores_break_ties_by_ascending_id_across_the_legs",
-      "compact::source::overlay_tests::consumer_hybrid::hybrid_equal_fused_scores_of_rows_in_both_legs_break_ties_by_ascending_id",
-      "compact::source::overlay_tests::consumer_hybrid::hybrid_expired_overlay_put_hides_the_row_in_both_legs_and_never_reveals_the_base_row"
-     ],
-     "status": "killed",
-     "expect_met": true,
-     "restored_identically": true,
-     "seconds": 45,
-     "environment": {
-      "os": "Windows-11-10.0.26200-SP0",
-      "rustc": "rustc 1.99.1 (58cf8f9c3 2026-10-13)",
-      "head": "b35c0131ba0b34ce2fe362c42c9d66674c43d017"
-     },
-     "baseline_green": true
-    },
     "local": {
      "file": "src/hybrid.rs",
      "anchor_matches": 1,
@@ -8757,8 +8863,8 @@
      },
      "build_attempts": 1,
      "compiled": true,
-     "tests": 15,
-     "passed": 11,
+     "tests": 16,
+     "passed": 12,
      "failed_tests": [
       "compact::source::overlay_tests::consumer_hybrid::hybrid_deadline_only_overlay_write_applies_its_deadline_to_both_legs",
       "compact::source::overlay_tests::consumer_hybrid::hybrid_equal_fused_scores_break_ties_by_ascending_id_across_the_legs",
@@ -8768,12 +8874,13 @@
      "status": "killed",
      "expect_met": true,
      "restored_identically": true,
-     "seconds": 187,
+     "seconds": 59,
      "environment": {
       "os": "Windows-11-10.0.26300-SP0",
       "rustc": "rustc 1.99.1 (58cf8f9c3 2026-10-13)",
-      "head": "00bac1c229677b1d58e4f0445462cf1d169cb57f"
+      "head": "2d40512513a851d8c13c8747411609517d4300b1"
      },
+     "sources_sha256": "eaf4962586c77b556471e9c4b9c4b8addcff449b019309157d4f158279c7b549",
      "baseline_green": true
     }
    }
@@ -8790,7 +8897,7 @@
     "compact::source::overlay_tests::consumer_hybrid::hybrid_equal_fused_scores_break_ties_by_ascending_id_across_the_legs"
    ],
    "runs": {
-    "second": {
+    "local": {
      "file": "src/hybrid.rs",
      "anchor_matches": 1,
      "sha256_lf": {
@@ -8804,20 +8911,21 @@
      },
      "build_attempts": 1,
      "compiled": true,
-     "tests": 15,
-     "passed": 14,
+     "tests": 16,
+     "passed": 15,
      "failed_tests": [
       "compact::source::overlay_tests::consumer_hybrid::hybrid_equal_fused_scores_break_ties_by_ascending_id_across_the_legs"
      ],
      "status": "killed",
      "expect_met": true,
      "restored_identically": true,
-     "seconds": 45,
+     "seconds": 63,
      "environment": {
-      "os": "Windows-11-10.0.26200-SP0",
+      "os": "Windows-11-10.0.26300-SP0",
       "rustc": "rustc 1.99.1 (58cf8f9c3 2026-10-13)",
-      "head": "b35c0131ba0b34ce2fe362c42c9d66674c43d017"
+      "head": "2d40512513a851d8c13c8747411609517d4300b1"
      },
+     "sources_sha256": "eaf4962586c77b556471e9c4b9c4b8addcff449b019309157d4f158279c7b549",
      "baseline_green": true
     }
    }
@@ -8836,39 +8944,6 @@
     "compact::source::overlay_tests::consumer_hybrid::hybrid_equal_fused_scores_of_rows_in_both_legs_break_ties_by_ascending_id"
    ],
    "runs": {
-    "second": {
-     "file": "src/hybrid.rs",
-     "anchor_matches": 1,
-     "sha256_lf": {
-      "before": "3136b4dfa38c0ab34570d851521430a43ea4600a256af837e059784036cdb361",
-      "mutated": "8c7c1a3b91a3ca32ca6fee27d64cea16c0a9554a11a288b523f7ea32ea075416",
-      "restored": "3136b4dfa38c0ab34570d851521430a43ea4600a256af837e059784036cdb361"
-     },
-     "sha256_bytes": {
-      "before": "cf556bc1ded79380e0f6124f40d16aefd20e2b64f64c37ed0ed4004e31d2ee30",
-      "restored": "cf556bc1ded79380e0f6124f40d16aefd20e2b64f64c37ed0ed4004e31d2ee30"
-     },
-     "build_attempts": 1,
-     "compiled": true,
-     "tests": 15,
-     "passed": 11,
-     "failed_tests": [
-      "compact::source::overlay_tests::consumer_hybrid::hybrid_disabled_legs_are_never_evaluated",
-      "compact::source::overlay_tests::consumer_hybrid::hybrid_equal_fused_scores_break_ties_by_ascending_id_across_the_legs",
-      "compact::source::overlay_tests::consumer_hybrid::hybrid_equal_fused_scores_of_rows_in_both_legs_break_ties_by_ascending_id",
-      "compact::source::overlay_tests::consumer_hybrid::hybrid_k_truncates_the_fused_list_and_candidates_bound_each_leg"
-     ],
-     "status": "killed",
-     "expect_met": true,
-     "restored_identically": true,
-     "seconds": 46,
-     "environment": {
-      "os": "Windows-11-10.0.26200-SP0",
-      "rustc": "rustc 1.99.1 (58cf8f9c3 2026-10-13)",
-      "head": "b35c0131ba0b34ce2fe362c42c9d66674c43d017"
-     },
-     "baseline_green": true
-    },
     "local": {
      "file": "src/hybrid.rs",
      "anchor_matches": 1,
@@ -8883,8 +8958,8 @@
      },
      "build_attempts": 1,
      "compiled": true,
-     "tests": 15,
-     "passed": 11,
+     "tests": 16,
+     "passed": 12,
      "failed_tests": [
       "compact::source::overlay_tests::consumer_hybrid::hybrid_disabled_legs_are_never_evaluated",
       "compact::source::overlay_tests::consumer_hybrid::hybrid_equal_fused_scores_break_ties_by_ascending_id_across_the_legs",
@@ -8894,12 +8969,13 @@
      "status": "killed",
      "expect_met": true,
      "restored_identically": true,
-     "seconds": 90,
+     "seconds": 54,
      "environment": {
       "os": "Windows-11-10.0.26300-SP0",
       "rustc": "rustc 1.99.1 (58cf8f9c3 2026-10-13)",
-      "head": "00bac1c229677b1d58e4f0445462cf1d169cb57f"
+      "head": "2d40512513a851d8c13c8747411609517d4300b1"
      },
+     "sources_sha256": "eaf4962586c77b556471e9c4b9c4b8addcff449b019309157d4f158279c7b549",
      "baseline_green": true
     }
    }
@@ -8916,7 +8992,7 @@
     "compact::source::overlay_tests::consumer_query::query_health_precedes_every_validation_and_every_valid_query"
    ],
    "runs": {
-    "second": {
+    "local": {
      "file": "src/query_language.rs",
      "anchor_matches": 1,
      "sha256_lf": {
@@ -8938,12 +9014,13 @@
      "status": "killed",
      "expect_met": true,
      "restored_identically": true,
-     "seconds": 77,
+     "seconds": 57,
      "environment": {
-      "os": "Windows-11-10.0.26200-SP0",
+      "os": "Windows-11-10.0.26300-SP0",
       "rustc": "rustc 1.99.1 (58cf8f9c3 2026-10-13)",
-      "head": "b35c0131ba0b34ce2fe362c42c9d66674c43d017"
+      "head": "2d40512513a851d8c13c8747411609517d4300b1"
      },
+     "sources_sha256": "eaf4962586c77b556471e9c4b9c4b8addcff449b019309157d4f158279c7b549",
      "baseline_green": true
     }
    }
@@ -8961,37 +9038,6 @@
     "compact::source::overlay_tests::consumer_query::query_named_vectors_match_resident_on_the_full_collection"
    ],
    "runs": {
-    "second": {
-     "file": "src/query_language.rs",
-     "anchor_matches": 1,
-     "sha256_lf": {
-      "before": "13c22909a48b46edc0487eef58b82f530b8cb260bde18e7dbd47752cb90750b0",
-      "mutated": "66c5833c3299dccf5769cf815b7169905592562ff9c88fe06611f983a580454c",
-      "restored": "13c22909a48b46edc0487eef58b82f530b8cb260bde18e7dbd47752cb90750b0"
-     },
-     "sha256_bytes": {
-      "before": "4261ed9c33617ffd04a52354dde6242ebb073f78dc89805f4c1c059f6d41eed3",
-      "restored": "4261ed9c33617ffd04a52354dde6242ebb073f78dc89805f4c1c059f6d41eed3"
-     },
-     "build_attempts": 1,
-     "compiled": true,
-     "tests": 5,
-     "passed": 3,
-     "failed_tests": [
-      "compact::source::overlay_tests::consumer_query::query_errors_match_resident_and_precede_row_materialization",
-      "compact::source::overlay_tests::consumer_query::query_named_vectors_match_resident_on_the_full_collection"
-     ],
-     "status": "killed",
-     "expect_met": true,
-     "restored_identically": true,
-     "seconds": 54,
-     "environment": {
-      "os": "Windows-11-10.0.26200-SP0",
-      "rustc": "rustc 1.99.1 (58cf8f9c3 2026-10-13)",
-      "head": "b35c0131ba0b34ce2fe362c42c9d66674c43d017"
-     },
-     "baseline_green": true
-    },
     "local": {
      "file": "src/query_language.rs",
      "anchor_matches": 1,
@@ -9015,12 +9061,13 @@
      "status": "killed",
      "expect_met": true,
      "restored_identically": true,
-     "seconds": 166,
+     "seconds": 53,
      "environment": {
       "os": "Windows-11-10.0.26300-SP0",
       "rustc": "rustc 1.99.1 (58cf8f9c3 2026-10-13)",
-      "head": "00bac1c229677b1d58e4f0445462cf1d169cb57f"
+      "head": "2d40512513a851d8c13c8747411609517d4300b1"
      },
+     "sources_sha256": "eaf4962586c77b556471e9c4b9c4b8addcff449b019309157d4f158279c7b549",
      "baseline_green": true
     }
    }
@@ -9037,7 +9084,7 @@
     "compact::source::overlay_tests::consumer_query::query_named_vectors_match_resident_on_the_full_collection"
    ],
    "runs": {
-    "second": {
+    "local": {
      "file": "src/query_language.rs",
      "anchor_matches": 1,
      "sha256_lf": {
@@ -9059,12 +9106,13 @@
      "status": "killed",
      "expect_met": true,
      "restored_identically": true,
-     "seconds": 55,
+     "seconds": 54,
      "environment": {
-      "os": "Windows-11-10.0.26200-SP0",
+      "os": "Windows-11-10.0.26300-SP0",
       "rustc": "rustc 1.99.1 (58cf8f9c3 2026-10-13)",
-      "head": "b35c0131ba0b34ce2fe362c42c9d66674c43d017"
+      "head": "2d40512513a851d8c13c8747411609517d4300b1"
      },
+     "sources_sha256": "eaf4962586c77b556471e9c4b9c4b8addcff449b019309157d4f158279c7b549",
      "baseline_green": true
     }
    }
@@ -9081,7 +9129,7 @@
     "compact::source::overlay_tests::consumer_query::query_errors_match_resident_and_precede_row_materialization"
    ],
    "runs": {
-    "second": {
+    "local": {
      "file": "src/query_language.rs",
      "anchor_matches": 1,
      "sha256_lf": {
@@ -9103,41 +9151,13 @@
      "status": "killed",
      "expect_met": true,
      "restored_identically": true,
-     "seconds": 69,
-     "environment": {
-      "os": "Windows-11-10.0.26200-SP0",
-      "rustc": "rustc 1.99.1 (58cf8f9c3 2026-10-13)",
-      "head": "b35c0131ba0b34ce2fe362c42c9d66674c43d017"
-     },
-     "baseline_green": true
-    },
-    "local": {
-     "file": "src/query_language.rs",
-     "anchor_matches": 1,
-     "sha256_lf": {
-      "before": "13c22909a48b46edc0487eef58b82f530b8cb260bde18e7dbd47752cb90750b0",
-      "mutated": "501e57417bd0748cfeba8164368b04a3d353f271346f1af2e066b64a8d03117c",
-      "restored": "13c22909a48b46edc0487eef58b82f530b8cb260bde18e7dbd47752cb90750b0"
-     },
-     "sha256_bytes": {
-      "before": "4261ed9c33617ffd04a52354dde6242ebb073f78dc89805f4c1c059f6d41eed3",
-      "restored": "4261ed9c33617ffd04a52354dde6242ebb073f78dc89805f4c1c059f6d41eed3"
-     },
-     "compiled": true,
-     "tests": 5,
-     "passed": 4,
-     "failed_tests": [
-      "compact::source::overlay_tests::consumer_query::query_errors_match_resident_and_precede_row_materialization"
-     ],
-     "status": "killed",
-     "expect_met": true,
-     "restored_identically": true,
-     "seconds": 114,
+     "seconds": 55,
      "environment": {
       "os": "Windows-11-10.0.26300-SP0",
       "rustc": "rustc 1.99.1 (58cf8f9c3 2026-10-13)",
-      "head": "e1ecccaeedd815b604f87282a09c51ba40b73f50"
+      "head": "2d40512513a851d8c13c8747411609517d4300b1"
      },
+     "sources_sha256": "eaf4962586c77b556471e9c4b9c4b8addcff449b019309157d4f158279c7b549",
      "baseline_green": true
     }
    }
@@ -9154,7 +9174,7 @@
     "compact::source::overlay_tests::consumer_query::query_errors_match_resident_and_precede_row_materialization"
    ],
    "runs": {
-    "second": {
+    "local": {
      "file": "src/query_language.rs",
      "anchor_matches": 1,
      "sha256_lf": {
@@ -9176,41 +9196,13 @@
      "status": "killed",
      "expect_met": true,
      "restored_identically": true,
-     "seconds": 52,
-     "environment": {
-      "os": "Windows-11-10.0.26200-SP0",
-      "rustc": "rustc 1.99.1 (58cf8f9c3 2026-10-13)",
-      "head": "b35c0131ba0b34ce2fe362c42c9d66674c43d017"
-     },
-     "baseline_green": true
-    },
-    "local": {
-     "file": "src/query_language.rs",
-     "anchor_matches": 1,
-     "sha256_lf": {
-      "before": "13c22909a48b46edc0487eef58b82f530b8cb260bde18e7dbd47752cb90750b0",
-      "mutated": "1a1994017308e9ec150e2660e0a6fbf7a8d854066eddc0e35f14468964f6e287",
-      "restored": "13c22909a48b46edc0487eef58b82f530b8cb260bde18e7dbd47752cb90750b0"
-     },
-     "sha256_bytes": {
-      "before": "4261ed9c33617ffd04a52354dde6242ebb073f78dc89805f4c1c059f6d41eed3",
-      "restored": "4261ed9c33617ffd04a52354dde6242ebb073f78dc89805f4c1c059f6d41eed3"
-     },
-     "compiled": true,
-     "tests": 5,
-     "passed": 4,
-     "failed_tests": [
-      "compact::source::overlay_tests::consumer_query::query_errors_match_resident_and_precede_row_materialization"
-     ],
-     "status": "killed",
-     "expect_met": true,
-     "restored_identically": true,
-     "seconds": 110,
+     "seconds": 59,
      "environment": {
       "os": "Windows-11-10.0.26300-SP0",
       "rustc": "rustc 1.99.1 (58cf8f9c3 2026-10-13)",
-      "head": "e1ecccaeedd815b604f87282a09c51ba40b73f50"
+      "head": "2d40512513a851d8c13c8747411609517d4300b1"
      },
+     "sources_sha256": "eaf4962586c77b556471e9c4b9c4b8addcff449b019309157d4f158279c7b549",
      "baseline_green": true
     }
    }
@@ -9229,38 +9221,6 @@
     "compact::source::overlay_tests::consumer_query::query_named_vectors_match_resident_on_the_full_collection"
    ],
    "runs": {
-    "second": {
-     "file": "src/query_language.rs",
-     "anchor_matches": 1,
-     "sha256_lf": {
-      "before": "13c22909a48b46edc0487eef58b82f530b8cb260bde18e7dbd47752cb90750b0",
-      "mutated": "57086a2885240e7f9c9130cd8981048a41c3c679eba1ee7aa82dceca0578faec",
-      "restored": "13c22909a48b46edc0487eef58b82f530b8cb260bde18e7dbd47752cb90750b0"
-     },
-     "sha256_bytes": {
-      "before": "4261ed9c33617ffd04a52354dde6242ebb073f78dc89805f4c1c059f6d41eed3",
-      "restored": "4261ed9c33617ffd04a52354dde6242ebb073f78dc89805f4c1c059f6d41eed3"
-     },
-     "build_attempts": 1,
-     "compiled": true,
-     "tests": 5,
-     "passed": 2,
-     "failed_tests": [
-      "compact::source::overlay_tests::consumer_query::query_clauses_match_resident_before_and_after_overlay_mutations",
-      "compact::source::overlay_tests::consumer_query::query_hides_expired_and_deleted_rows_in_every_output_and_shows_the_rest",
-      "compact::source::overlay_tests::consumer_query::query_named_vectors_match_resident_on_the_full_collection"
-     ],
-     "status": "killed",
-     "expect_met": true,
-     "restored_identically": true,
-     "seconds": 49,
-     "environment": {
-      "os": "Windows-11-10.0.26200-SP0",
-      "rustc": "rustc 1.99.1 (58cf8f9c3 2026-10-13)",
-      "head": "b35c0131ba0b34ce2fe362c42c9d66674c43d017"
-     },
-     "baseline_green": true
-    },
     "local": {
      "file": "src/query_language.rs",
      "anchor_matches": 1,
@@ -9285,12 +9245,13 @@
      "status": "killed",
      "expect_met": true,
      "restored_identically": true,
-     "seconds": 137,
+     "seconds": 56,
      "environment": {
       "os": "Windows-11-10.0.26300-SP0",
       "rustc": "rustc 1.99.1 (58cf8f9c3 2026-10-13)",
-      "head": "00bac1c229677b1d58e4f0445462cf1d169cb57f"
+      "head": "2d40512513a851d8c13c8747411609517d4300b1"
      },
+     "sources_sha256": "eaf4962586c77b556471e9c4b9c4b8addcff449b019309157d4f158279c7b549",
      "baseline_green": true
     }
    }
@@ -9307,7 +9268,7 @@
     "compact::source::overlay_tests::consumer_query::query_clauses_match_resident_before_and_after_overlay_mutations"
    ],
    "runs": {
-    "second": {
+    "local": {
      "file": "src/query_language.rs",
      "anchor_matches": 1,
      "sha256_lf": {
@@ -9329,12 +9290,13 @@
      "status": "killed",
      "expect_met": true,
      "restored_identically": true,
-     "seconds": 49,
+     "seconds": 51,
      "environment": {
-      "os": "Windows-11-10.0.26200-SP0",
+      "os": "Windows-11-10.0.26300-SP0",
       "rustc": "rustc 1.99.1 (58cf8f9c3 2026-10-13)",
-      "head": "b35c0131ba0b34ce2fe362c42c9d66674c43d017"
+      "head": "2d40512513a851d8c13c8747411609517d4300b1"
      },
+     "sources_sha256": "eaf4962586c77b556471e9c4b9c4b8addcff449b019309157d4f158279c7b549",
      "baseline_green": true
     }
    }
@@ -9351,36 +9313,6 @@
     "compact::source::overlay_tests::consumer_query::query_clauses_match_resident_before_and_after_overlay_mutations"
    ],
    "runs": {
-    "second": {
-     "file": "src/query_language.rs",
-     "anchor_matches": 1,
-     "sha256_lf": {
-      "before": "13c22909a48b46edc0487eef58b82f530b8cb260bde18e7dbd47752cb90750b0",
-      "mutated": "aab7b35480ef6a301be48c229a4ca6a8a33cc993cce896a9d95fa69f66ef16fe",
-      "restored": "13c22909a48b46edc0487eef58b82f530b8cb260bde18e7dbd47752cb90750b0"
-     },
-     "sha256_bytes": {
-      "before": "4261ed9c33617ffd04a52354dde6242ebb073f78dc89805f4c1c059f6d41eed3",
-      "restored": "4261ed9c33617ffd04a52354dde6242ebb073f78dc89805f4c1c059f6d41eed3"
-     },
-     "build_attempts": 1,
-     "compiled": true,
-     "tests": 5,
-     "passed": 4,
-     "failed_tests": [
-      "compact::source::overlay_tests::consumer_query::query_clauses_match_resident_before_and_after_overlay_mutations"
-     ],
-     "status": "killed",
-     "expect_met": true,
-     "restored_identically": true,
-     "seconds": 50,
-     "environment": {
-      "os": "Windows-11-10.0.26200-SP0",
-      "rustc": "rustc 1.99.1 (58cf8f9c3 2026-10-13)",
-      "head": "b35c0131ba0b34ce2fe362c42c9d66674c43d017"
-     },
-     "baseline_green": true
-    },
     "local": {
      "file": "src/query_language.rs",
      "anchor_matches": 1,
@@ -9403,12 +9335,13 @@
      "status": "killed",
      "expect_met": true,
      "restored_identically": true,
-     "seconds": 148,
+     "seconds": 51,
      "environment": {
       "os": "Windows-11-10.0.26300-SP0",
       "rustc": "rustc 1.99.1 (58cf8f9c3 2026-10-13)",
-      "head": "00bac1c229677b1d58e4f0445462cf1d169cb57f"
+      "head": "2d40512513a851d8c13c8747411609517d4300b1"
      },
+     "sources_sha256": "eaf4962586c77b556471e9c4b9c4b8addcff449b019309157d4f158279c7b549",
      "baseline_green": true
     }
    }
@@ -9425,7 +9358,7 @@
     "compact::source::overlay_tests::consumer_query::query_clauses_match_resident_before_and_after_overlay_mutations"
    ],
    "runs": {
-    "second": {
+    "local": {
      "file": "src/query_language.rs",
      "anchor_matches": 1,
      "sha256_lf": {
@@ -9447,12 +9380,13 @@
      "status": "killed",
      "expect_met": true,
      "restored_identically": true,
-     "seconds": 50,
+     "seconds": 56,
      "environment": {
-      "os": "Windows-11-10.0.26200-SP0",
+      "os": "Windows-11-10.0.26300-SP0",
       "rustc": "rustc 1.99.1 (58cf8f9c3 2026-10-13)",
-      "head": "b35c0131ba0b34ce2fe362c42c9d66674c43d017"
+      "head": "2d40512513a851d8c13c8747411609517d4300b1"
      },
+     "sources_sha256": "eaf4962586c77b556471e9c4b9c4b8addcff449b019309157d4f158279c7b549",
      "baseline_green": true
     }
    }
@@ -9469,36 +9403,6 @@
     "compact::source::overlay_tests::consumer_query::query_clauses_match_resident_before_and_after_overlay_mutations"
    ],
    "runs": {
-    "second": {
-     "file": "src/query_language.rs",
-     "anchor_matches": 1,
-     "sha256_lf": {
-      "before": "13c22909a48b46edc0487eef58b82f530b8cb260bde18e7dbd47752cb90750b0",
-      "mutated": "e542ea17a035bf263f1c4c0e9a6d0f4783569f6b6510238e306538fb1118615b",
-      "restored": "13c22909a48b46edc0487eef58b82f530b8cb260bde18e7dbd47752cb90750b0"
-     },
-     "sha256_bytes": {
-      "before": "4261ed9c33617ffd04a52354dde6242ebb073f78dc89805f4c1c059f6d41eed3",
-      "restored": "4261ed9c33617ffd04a52354dde6242ebb073f78dc89805f4c1c059f6d41eed3"
-     },
-     "build_attempts": 1,
-     "compiled": true,
-     "tests": 5,
-     "passed": 4,
-     "failed_tests": [
-      "compact::source::overlay_tests::consumer_query::query_clauses_match_resident_before_and_after_overlay_mutations"
-     ],
-     "status": "killed",
-     "expect_met": true,
-     "restored_identically": true,
-     "seconds": 48,
-     "environment": {
-      "os": "Windows-11-10.0.26200-SP0",
-      "rustc": "rustc 1.99.1 (58cf8f9c3 2026-10-13)",
-      "head": "b35c0131ba0b34ce2fe362c42c9d66674c43d017"
-     },
-     "baseline_green": true
-    },
     "local": {
      "file": "src/query_language.rs",
      "anchor_matches": 1,
@@ -9521,12 +9425,13 @@
      "status": "killed",
      "expect_met": true,
      "restored_identically": true,
-     "seconds": 95,
+     "seconds": 62,
      "environment": {
       "os": "Windows-11-10.0.26300-SP0",
       "rustc": "rustc 1.99.1 (58cf8f9c3 2026-10-13)",
-      "head": "00bac1c229677b1d58e4f0445462cf1d169cb57f"
+      "head": "2d40512513a851d8c13c8747411609517d4300b1"
      },
+     "sources_sha256": "eaf4962586c77b556471e9c4b9c4b8addcff449b019309157d4f158279c7b549",
      "baseline_green": true
     }
    }
@@ -9545,7 +9450,7 @@
     "compact::source::overlay_tests::consumer_query::query_named_vectors_match_resident_on_the_full_collection"
    ],
    "runs": {
-    "second": {
+    "local": {
      "file": "src/query_language.rs",
      "anchor_matches": 1,
      "sha256_lf": {
@@ -9569,12 +9474,13 @@
      "status": "killed",
      "expect_met": true,
      "restored_identically": true,
-     "seconds": 47,
+     "seconds": 53,
      "environment": {
-      "os": "Windows-11-10.0.26200-SP0",
+      "os": "Windows-11-10.0.26300-SP0",
       "rustc": "rustc 1.99.1 (58cf8f9c3 2026-10-13)",
-      "head": "b35c0131ba0b34ce2fe362c42c9d66674c43d017"
+      "head": "2d40512513a851d8c13c8747411609517d4300b1"
      },
+     "sources_sha256": "eaf4962586c77b556471e9c4b9c4b8addcff449b019309157d4f158279c7b549",
      "baseline_green": true
     }
    }
@@ -9593,38 +9499,6 @@
     "compact::source::overlay_tests::consumer_query::query_named_vectors_match_resident_on_the_full_collection"
    ],
    "runs": {
-    "second": {
-     "file": "src/query_language.rs",
-     "anchor_matches": 1,
-     "sha256_lf": {
-      "before": "13c22909a48b46edc0487eef58b82f530b8cb260bde18e7dbd47752cb90750b0",
-      "mutated": "af1bff5ba1fb99baf211845fa4ecb78e1e12c1aa79e45f8238bb55693bfc6d83",
-      "restored": "13c22909a48b46edc0487eef58b82f530b8cb260bde18e7dbd47752cb90750b0"
-     },
-     "sha256_bytes": {
-      "before": "4261ed9c33617ffd04a52354dde6242ebb073f78dc89805f4c1c059f6d41eed3",
-      "restored": "4261ed9c33617ffd04a52354dde6242ebb073f78dc89805f4c1c059f6d41eed3"
-     },
-     "build_attempts": 1,
-     "compiled": true,
-     "tests": 5,
-     "passed": 2,
-     "failed_tests": [
-      "compact::source::overlay_tests::consumer_query::query_clauses_match_resident_before_and_after_overlay_mutations",
-      "compact::source::overlay_tests::consumer_query::query_hides_expired_and_deleted_rows_in_every_output_and_shows_the_rest",
-      "compact::source::overlay_tests::consumer_query::query_named_vectors_match_resident_on_the_full_collection"
-     ],
-     "status": "killed",
-     "expect_met": true,
-     "restored_identically": true,
-     "seconds": 47,
-     "environment": {
-      "os": "Windows-11-10.0.26200-SP0",
-      "rustc": "rustc 1.99.1 (58cf8f9c3 2026-10-13)",
-      "head": "b35c0131ba0b34ce2fe362c42c9d66674c43d017"
-     },
-     "baseline_green": true
-    },
     "local": {
      "file": "src/query_language.rs",
      "anchor_matches": 1,
@@ -9649,12 +9523,13 @@
      "status": "killed",
      "expect_met": true,
      "restored_identically": true,
-     "seconds": 141,
+     "seconds": 53,
      "environment": {
       "os": "Windows-11-10.0.26300-SP0",
       "rustc": "rustc 1.99.1 (58cf8f9c3 2026-10-13)",
-      "head": "00bac1c229677b1d58e4f0445462cf1d169cb57f"
+      "head": "2d40512513a851d8c13c8747411609517d4300b1"
      },
+     "sources_sha256": "eaf4962586c77b556471e9c4b9c4b8addcff449b019309157d4f158279c7b549",
      "baseline_green": true
     }
    }
@@ -9671,7 +9546,7 @@
     "compact::source::overlay_tests::consumer_query::query_clauses_match_resident_before_and_after_overlay_mutations"
    ],
    "runs": {
-    "second": {
+    "local": {
      "file": "src/query_language.rs",
      "anchor_matches": 1,
      "sha256_lf": {
@@ -9693,12 +9568,13 @@
      "status": "killed",
      "expect_met": true,
      "restored_identically": true,
-     "seconds": 48,
+     "seconds": 52,
      "environment": {
-      "os": "Windows-11-10.0.26200-SP0",
+      "os": "Windows-11-10.0.26300-SP0",
       "rustc": "rustc 1.99.1 (58cf8f9c3 2026-10-13)",
-      "head": "b35c0131ba0b34ce2fe362c42c9d66674c43d017"
+      "head": "2d40512513a851d8c13c8747411609517d4300b1"
      },
+     "sources_sha256": "eaf4962586c77b556471e9c4b9c4b8addcff449b019309157d4f158279c7b549",
      "baseline_green": true
     }
    }
@@ -9716,37 +9592,6 @@
     "compact::source::overlay_tests::consumer_query::query_named_vectors_match_resident_on_the_full_collection"
    ],
    "runs": {
-    "second": {
-     "file": "src/query_language.rs",
-     "anchor_matches": 1,
-     "sha256_lf": {
-      "before": "13c22909a48b46edc0487eef58b82f530b8cb260bde18e7dbd47752cb90750b0",
-      "mutated": "4795b9d02866e63148dfea4d7ccc3e758812555ce96f3903c41b9ba4ee151038",
-      "restored": "13c22909a48b46edc0487eef58b82f530b8cb260bde18e7dbd47752cb90750b0"
-     },
-     "sha256_bytes": {
-      "before": "4261ed9c33617ffd04a52354dde6242ebb073f78dc89805f4c1c059f6d41eed3",
-      "restored": "4261ed9c33617ffd04a52354dde6242ebb073f78dc89805f4c1c059f6d41eed3"
-     },
-     "build_attempts": 1,
-     "compiled": true,
-     "tests": 5,
-     "passed": 3,
-     "failed_tests": [
-      "compact::source::overlay_tests::consumer_query::query_clauses_match_resident_before_and_after_overlay_mutations",
-      "compact::source::overlay_tests::consumer_query::query_named_vectors_match_resident_on_the_full_collection"
-     ],
-     "status": "killed",
-     "expect_met": true,
-     "restored_identically": true,
-     "seconds": 47,
-     "environment": {
-      "os": "Windows-11-10.0.26200-SP0",
-      "rustc": "rustc 1.99.1 (58cf8f9c3 2026-10-13)",
-      "head": "b35c0131ba0b34ce2fe362c42c9d66674c43d017"
-     },
-     "baseline_green": true
-    },
     "local": {
      "file": "src/query_language.rs",
      "anchor_matches": 1,
@@ -9770,12 +9615,13 @@
      "status": "killed",
      "expect_met": true,
      "restored_identically": true,
-     "seconds": 128,
+     "seconds": 55,
      "environment": {
       "os": "Windows-11-10.0.26300-SP0",
       "rustc": "rustc 1.99.1 (58cf8f9c3 2026-10-13)",
-      "head": "00bac1c229677b1d58e4f0445462cf1d169cb57f"
+      "head": "2d40512513a851d8c13c8747411609517d4300b1"
      },
+     "sources_sha256": "eaf4962586c77b556471e9c4b9c4b8addcff449b019309157d4f158279c7b549",
      "baseline_green": true
     }
    }
@@ -9792,7 +9638,7 @@
     "compact::source::overlay_tests::consumer_query::query_clauses_match_resident_before_and_after_overlay_mutations"
    ],
    "runs": {
-    "second": {
+    "local": {
      "file": "src/query_language.rs",
      "anchor_matches": 1,
      "sha256_lf": {
@@ -9814,12 +9660,13 @@
      "status": "killed",
      "expect_met": true,
      "restored_identically": true,
-     "seconds": 55,
+     "seconds": 59,
      "environment": {
-      "os": "Windows-11-10.0.26200-SP0",
+      "os": "Windows-11-10.0.26300-SP0",
       "rustc": "rustc 1.99.1 (58cf8f9c3 2026-10-13)",
-      "head": "b35c0131ba0b34ce2fe362c42c9d66674c43d017"
+      "head": "2d40512513a851d8c13c8747411609517d4300b1"
      },
+     "sources_sha256": "eaf4962586c77b556471e9c4b9c4b8addcff449b019309157d4f158279c7b549",
      "baseline_green": true
     }
    }
@@ -9836,36 +9683,6 @@
     "compact::source::overlay_tests::consumer_query::query_clauses_match_resident_before_and_after_overlay_mutations"
    ],
    "runs": {
-    "second": {
-     "file": "src/query_language.rs",
-     "anchor_matches": 1,
-     "sha256_lf": {
-      "before": "13c22909a48b46edc0487eef58b82f530b8cb260bde18e7dbd47752cb90750b0",
-      "mutated": "e63b14428c175855ce64b2d6168a09295953fc4dc049a98ee42997115eb5aa47",
-      "restored": "13c22909a48b46edc0487eef58b82f530b8cb260bde18e7dbd47752cb90750b0"
-     },
-     "sha256_bytes": {
-      "before": "4261ed9c33617ffd04a52354dde6242ebb073f78dc89805f4c1c059f6d41eed3",
-      "restored": "4261ed9c33617ffd04a52354dde6242ebb073f78dc89805f4c1c059f6d41eed3"
-     },
-     "build_attempts": 1,
-     "compiled": true,
-     "tests": 5,
-     "passed": 4,
-     "failed_tests": [
-      "compact::source::overlay_tests::consumer_query::query_clauses_match_resident_before_and_after_overlay_mutations"
-     ],
-     "status": "killed",
-     "expect_met": true,
-     "restored_identically": true,
-     "seconds": 55,
-     "environment": {
-      "os": "Windows-11-10.0.26200-SP0",
-      "rustc": "rustc 1.99.1 (58cf8f9c3 2026-10-13)",
-      "head": "b35c0131ba0b34ce2fe362c42c9d66674c43d017"
-     },
-     "baseline_green": true
-    },
     "local": {
      "file": "src/query_language.rs",
      "anchor_matches": 1,
@@ -9888,12 +9705,13 @@
      "status": "killed",
      "expect_met": true,
      "restored_identically": true,
-     "seconds": 125,
+     "seconds": 52,
      "environment": {
       "os": "Windows-11-10.0.26300-SP0",
       "rustc": "rustc 1.99.1 (58cf8f9c3 2026-10-13)",
-      "head": "00bac1c229677b1d58e4f0445462cf1d169cb57f"
+      "head": "2d40512513a851d8c13c8747411609517d4300b1"
      },
+     "sources_sha256": "eaf4962586c77b556471e9c4b9c4b8addcff449b019309157d4f158279c7b549",
      "baseline_green": true
     }
    }
@@ -9911,7 +9729,7 @@
     "compact::source::overlay_tests::consumer_query::query_hides_expired_and_deleted_rows_in_every_output_and_shows_the_rest"
    ],
    "runs": {
-    "second": {
+    "local": {
      "file": "src/query_language.rs",
      "anchor_matches": 1,
      "sha256_lf": {
@@ -9934,12 +9752,13 @@
      "status": "killed",
      "expect_met": true,
      "restored_identically": true,
-     "seconds": 48,
+     "seconds": 63,
      "environment": {
-      "os": "Windows-11-10.0.26200-SP0",
+      "os": "Windows-11-10.0.26300-SP0",
       "rustc": "rustc 1.99.1 (58cf8f9c3 2026-10-13)",
-      "head": "b35c0131ba0b34ce2fe362c42c9d66674c43d017"
+      "head": "2d40512513a851d8c13c8747411609517d4300b1"
      },
+     "sources_sha256": "eaf4962586c77b556471e9c4b9c4b8addcff449b019309157d4f158279c7b549",
      "baseline_green": true
     }
    }
@@ -9956,36 +9775,6 @@
     "compact::source::overlay_tests::consumer_query::query_clauses_match_resident_before_and_after_overlay_mutations"
    ],
    "runs": {
-    "second": {
-     "file": "src/query_language.rs",
-     "anchor_matches": 1,
-     "sha256_lf": {
-      "before": "13c22909a48b46edc0487eef58b82f530b8cb260bde18e7dbd47752cb90750b0",
-      "mutated": "3987b113ba6943bc3a7a223e7515c2085c28a068967fb48df11e667a09485298",
-      "restored": "13c22909a48b46edc0487eef58b82f530b8cb260bde18e7dbd47752cb90750b0"
-     },
-     "sha256_bytes": {
-      "before": "4261ed9c33617ffd04a52354dde6242ebb073f78dc89805f4c1c059f6d41eed3",
-      "restored": "4261ed9c33617ffd04a52354dde6242ebb073f78dc89805f4c1c059f6d41eed3"
-     },
-     "build_attempts": 1,
-     "compiled": true,
-     "tests": 5,
-     "passed": 4,
-     "failed_tests": [
-      "compact::source::overlay_tests::consumer_query::query_clauses_match_resident_before_and_after_overlay_mutations"
-     ],
-     "status": "killed",
-     "expect_met": true,
-     "restored_identically": true,
-     "seconds": 48,
-     "environment": {
-      "os": "Windows-11-10.0.26200-SP0",
-      "rustc": "rustc 1.99.1 (58cf8f9c3 2026-10-13)",
-      "head": "b35c0131ba0b34ce2fe362c42c9d66674c43d017"
-     },
-     "baseline_green": true
-    },
     "local": {
      "file": "src/query_language.rs",
      "anchor_matches": 1,
@@ -10008,12 +9797,13 @@
      "status": "killed",
      "expect_met": true,
      "restored_identically": true,
-     "seconds": 150,
+     "seconds": 51,
      "environment": {
       "os": "Windows-11-10.0.26300-SP0",
       "rustc": "rustc 1.99.1 (58cf8f9c3 2026-10-13)",
-      "head": "00bac1c229677b1d58e4f0445462cf1d169cb57f"
+      "head": "2d40512513a851d8c13c8747411609517d4300b1"
      },
+     "sources_sha256": "eaf4962586c77b556471e9c4b9c4b8addcff449b019309157d4f158279c7b549",
      "baseline_green": true
     }
    }
@@ -10031,7 +9821,7 @@
     "compact::source::overlay_tests::consumer_query::query_hides_expired_and_deleted_rows_in_every_output_and_shows_the_rest"
    ],
    "runs": {
-    "second": {
+    "local": {
      "file": "src/query_language.rs",
      "anchor_matches": 1,
      "sha256_lf": {
@@ -10054,12 +9844,13 @@
      "status": "killed",
      "expect_met": true,
      "restored_identically": true,
-     "seconds": 48,
+     "seconds": 69,
      "environment": {
-      "os": "Windows-11-10.0.26200-SP0",
+      "os": "Windows-11-10.0.26300-SP0",
       "rustc": "rustc 1.99.1 (58cf8f9c3 2026-10-13)",
-      "head": "b35c0131ba0b34ce2fe362c42c9d66674c43d017"
+      "head": "2d40512513a851d8c13c8747411609517d4300b1"
      },
+     "sources_sha256": "eaf4962586c77b556471e9c4b9c4b8addcff449b019309157d4f158279c7b549",
      "baseline_green": true
     }
    }
@@ -10077,37 +9868,6 @@
     "compact::source::overlay_tests::consumer_query::query_named_vectors_match_resident_on_the_full_collection"
    ],
    "runs": {
-    "second": {
-     "file": "src/query_language.rs",
-     "anchor_matches": 1,
-     "sha256_lf": {
-      "before": "13c22909a48b46edc0487eef58b82f530b8cb260bde18e7dbd47752cb90750b0",
-      "mutated": "dc2b5854710e794ae1d74ab60a85c6ba588985ce1a51cf0c8ac195f93345d438",
-      "restored": "13c22909a48b46edc0487eef58b82f530b8cb260bde18e7dbd47752cb90750b0"
-     },
-     "sha256_bytes": {
-      "before": "4261ed9c33617ffd04a52354dde6242ebb073f78dc89805f4c1c059f6d41eed3",
-      "restored": "4261ed9c33617ffd04a52354dde6242ebb073f78dc89805f4c1c059f6d41eed3"
-     },
-     "build_attempts": 1,
-     "compiled": true,
-     "tests": 5,
-     "passed": 3,
-     "failed_tests": [
-      "compact::source::overlay_tests::consumer_query::query_clauses_match_resident_before_and_after_overlay_mutations",
-      "compact::source::overlay_tests::consumer_query::query_named_vectors_match_resident_on_the_full_collection"
-     ],
-     "status": "killed",
-     "expect_met": true,
-     "restored_identically": true,
-     "seconds": 48,
-     "environment": {
-      "os": "Windows-11-10.0.26200-SP0",
-      "rustc": "rustc 1.99.1 (58cf8f9c3 2026-10-13)",
-      "head": "b35c0131ba0b34ce2fe362c42c9d66674c43d017"
-     },
-     "baseline_green": true
-    },
     "local": {
      "file": "src/query_language.rs",
      "anchor_matches": 1,
@@ -10131,12 +9891,13 @@
      "status": "killed",
      "expect_met": true,
      "restored_identically": true,
-     "seconds": 94,
+     "seconds": 57,
      "environment": {
       "os": "Windows-11-10.0.26300-SP0",
       "rustc": "rustc 1.99.1 (58cf8f9c3 2026-10-13)",
-      "head": "00bac1c229677b1d58e4f0445462cf1d169cb57f"
+      "head": "2d40512513a851d8c13c8747411609517d4300b1"
      },
+     "sources_sha256": "eaf4962586c77b556471e9c4b9c4b8addcff449b019309157d4f158279c7b549",
      "baseline_green": true
     }
    }
@@ -10153,36 +9914,6 @@
     "compact::source::overlay_tests::consumer_vectors::compact_named_search_matches_resident_at_every_deadline_boundary"
    ],
    "runs": {
-    "second": {
-     "file": "src/vectors.rs",
-     "anchor_matches": 1,
-     "sha256_lf": {
-      "before": "9d9b333d8d40219c5375255592e6888e3f64d86f359db683100491c4f44cf867",
-      "mutated": "9d063b8d14b284718a82d9457c479eafd29e070b9390f37d13b5fd5812fad34d",
-      "restored": "9d9b333d8d40219c5375255592e6888e3f64d86f359db683100491c4f44cf867"
-     },
-     "sha256_bytes": {
-      "before": "d96f320c27691b9e3913443e94aa7093974ab19fc96511b6ca2f7ba089b812fb",
-      "restored": "d96f320c27691b9e3913443e94aa7093974ab19fc96511b6ca2f7ba089b812fb"
-     },
-     "build_attempts": 1,
-     "compiled": true,
-     "tests": 20,
-     "passed": 19,
-     "failed_tests": [
-      "compact::source::overlay_tests::consumer_vectors::compact_named_search_matches_resident_at_every_deadline_boundary"
-     ],
-     "status": "killed",
-     "expect_met": true,
-     "restored_identically": true,
-     "seconds": 46,
-     "environment": {
-      "os": "Windows-11-10.0.26200-SP0",
-      "rustc": "rustc 1.99.1 (58cf8f9c3 2026-10-13)",
-      "head": "b35c0131ba0b34ce2fe362c42c9d66674c43d017"
-     },
-     "baseline_green": true
-    },
     "local": {
      "file": "src/vectors.rs",
      "anchor_matches": 1,
@@ -10197,20 +9928,21 @@
      },
      "build_attempts": 1,
      "compiled": true,
-     "tests": 20,
-     "passed": 19,
+     "tests": 22,
+     "passed": 21,
      "failed_tests": [
       "compact::source::overlay_tests::consumer_vectors::compact_named_search_matches_resident_at_every_deadline_boundary"
      ],
      "status": "killed",
      "expect_met": true,
      "restored_identically": true,
-     "seconds": 153,
+     "seconds": 55,
      "environment": {
       "os": "Windows-11-10.0.26300-SP0",
       "rustc": "rustc 1.99.1 (58cf8f9c3 2026-10-13)",
-      "head": "00bac1c229677b1d58e4f0445462cf1d169cb57f"
+      "head": "2d40512513a851d8c13c8747411609517d4300b1"
      },
+     "sources_sha256": "eaf4962586c77b556471e9c4b9c4b8addcff449b019309157d4f158279c7b549",
      "baseline_green": true
     }
    }
@@ -10227,7 +9959,7 @@
     "compact::source::overlay_tests::consumer_vectors::compact_named_search_matches_resident_at_every_deadline_boundary"
    ],
    "runs": {
-    "second": {
+    "local": {
      "file": "src/vectors.rs",
      "anchor_matches": 1,
      "sha256_lf": {
@@ -10241,20 +9973,21 @@
      },
      "build_attempts": 1,
      "compiled": true,
-     "tests": 20,
-     "passed": 19,
+     "tests": 22,
+     "passed": 21,
      "failed_tests": [
       "compact::source::overlay_tests::consumer_vectors::compact_named_search_matches_resident_at_every_deadline_boundary"
      ],
      "status": "killed",
      "expect_met": true,
      "restored_identically": true,
-     "seconds": 46,
+     "seconds": 61,
      "environment": {
-      "os": "Windows-11-10.0.26200-SP0",
+      "os": "Windows-11-10.0.26300-SP0",
       "rustc": "rustc 1.99.1 (58cf8f9c3 2026-10-13)",
-      "head": "b35c0131ba0b34ce2fe362c42c9d66674c43d017"
+      "head": "2d40512513a851d8c13c8747411609517d4300b1"
      },
+     "sources_sha256": "eaf4962586c77b556471e9c4b9c4b8addcff449b019309157d4f158279c7b549",
      "baseline_green": true
     }
    }
@@ -10271,36 +10004,6 @@
     "compact::source::overlay_tests::consumer_vectors::compact_named_search_matches_resident_at_every_deadline_boundary"
    ],
    "runs": {
-    "second": {
-     "file": "src/vectors.rs",
-     "anchor_matches": 1,
-     "sha256_lf": {
-      "before": "9d9b333d8d40219c5375255592e6888e3f64d86f359db683100491c4f44cf867",
-      "mutated": "699f8bfd1871ef2167a98d2cf62ff650d0ddb58629655204eba72aeebbe990bf",
-      "restored": "9d9b333d8d40219c5375255592e6888e3f64d86f359db683100491c4f44cf867"
-     },
-     "sha256_bytes": {
-      "before": "d96f320c27691b9e3913443e94aa7093974ab19fc96511b6ca2f7ba089b812fb",
-      "restored": "d96f320c27691b9e3913443e94aa7093974ab19fc96511b6ca2f7ba089b812fb"
-     },
-     "build_attempts": 1,
-     "compiled": true,
-     "tests": 20,
-     "passed": 19,
-     "failed_tests": [
-      "compact::source::overlay_tests::consumer_vectors::compact_named_search_matches_resident_at_every_deadline_boundary"
-     ],
-     "status": "killed",
-     "expect_met": true,
-     "restored_identically": true,
-     "seconds": 47,
-     "environment": {
-      "os": "Windows-11-10.0.26200-SP0",
-      "rustc": "rustc 1.99.1 (58cf8f9c3 2026-10-13)",
-      "head": "b35c0131ba0b34ce2fe362c42c9d66674c43d017"
-     },
-     "baseline_green": true
-    },
     "local": {
      "file": "src/vectors.rs",
      "anchor_matches": 1,
@@ -10315,20 +10018,21 @@
      },
      "build_attempts": 1,
      "compiled": true,
-     "tests": 20,
-     "passed": 19,
+     "tests": 22,
+     "passed": 21,
      "failed_tests": [
       "compact::source::overlay_tests::consumer_vectors::compact_named_search_matches_resident_at_every_deadline_boundary"
      ],
      "status": "killed",
      "expect_met": true,
      "restored_identically": true,
-     "seconds": 133,
+     "seconds": 64,
      "environment": {
       "os": "Windows-11-10.0.26300-SP0",
       "rustc": "rustc 1.99.1 (58cf8f9c3 2026-10-13)",
-      "head": "00bac1c229677b1d58e4f0445462cf1d169cb57f"
+      "head": "2d40512513a851d8c13c8747411609517d4300b1"
      },
+     "sources_sha256": "eaf4962586c77b556471e9c4b9c4b8addcff449b019309157d4f158279c7b549",
      "baseline_green": true
     }
    }
@@ -10346,7 +10050,7 @@
     "compact::source::overlay_tests::consumer_vectors::compact_named_vector_consumers_propagate_a_tampered_block"
    ],
    "runs": {
-    "second": {
+    "local": {
      "file": "src/vectors.rs",
      "anchor_matches": 1,
      "sha256_lf": {
@@ -10360,8 +10064,8 @@
      },
      "build_attempts": 1,
      "compiled": true,
-     "tests": 20,
-     "passed": 18,
+     "tests": 22,
+     "passed": 20,
      "failed_tests": [
       "compact::source::overlay_tests::consumer_vectors::compact_named_vector_consumers_propagate_a_poisoned_cell",
       "compact::source::overlay_tests::consumer_vectors::compact_named_vector_consumers_propagate_a_tampered_block"
@@ -10369,12 +10073,13 @@
      "status": "killed",
      "expect_met": true,
      "restored_identically": true,
-     "seconds": 51,
+     "seconds": 65,
      "environment": {
-      "os": "Windows-11-10.0.26200-SP0",
+      "os": "Windows-11-10.0.26300-SP0",
       "rustc": "rustc 1.99.1 (58cf8f9c3 2026-10-13)",
-      "head": "b35c0131ba0b34ce2fe362c42c9d66674c43d017"
+      "head": "2d40512513a851d8c13c8747411609517d4300b1"
      },
+     "sources_sha256": "eaf4962586c77b556471e9c4b9c4b8addcff449b019309157d4f158279c7b549",
      "baseline_green": true
     }
    }
@@ -10393,38 +10098,6 @@
     "compact::source::overlay_tests::consumer_vectors::compact_record_vectors_hide_tombstoned_expired_and_absent_rows"
    ],
    "runs": {
-    "second": {
-     "file": "src/vectors.rs",
-     "anchor_matches": 1,
-     "sha256_lf": {
-      "before": "9d9b333d8d40219c5375255592e6888e3f64d86f359db683100491c4f44cf867",
-      "mutated": "b44271220cb62c61d9cb378c3fef03a01017516f08dd806137a0b5d3f380b9aa",
-      "restored": "9d9b333d8d40219c5375255592e6888e3f64d86f359db683100491c4f44cf867"
-     },
-     "sha256_bytes": {
-      "before": "d96f320c27691b9e3913443e94aa7093974ab19fc96511b6ca2f7ba089b812fb",
-      "restored": "d96f320c27691b9e3913443e94aa7093974ab19fc96511b6ca2f7ba089b812fb"
-     },
-     "build_attempts": 1,
-     "compiled": true,
-     "tests": 20,
-     "passed": 17,
-     "failed_tests": [
-      "compact::source::overlay_tests::consumer_vectors::compact_named_vector_consumers_propagate_a_poisoned_cell",
-      "compact::source::overlay_tests::consumer_vectors::compact_named_vector_consumers_propagate_a_tampered_block",
-      "compact::source::overlay_tests::consumer_vectors::compact_record_vectors_hide_tombstoned_expired_and_absent_rows"
-     ],
-     "status": "killed",
-     "expect_met": true,
-     "restored_identically": true,
-     "seconds": 50,
-     "environment": {
-      "os": "Windows-11-10.0.26200-SP0",
-      "rustc": "rustc 1.99.1 (58cf8f9c3 2026-10-13)",
-      "head": "b35c0131ba0b34ce2fe362c42c9d66674c43d017"
-     },
-     "baseline_green": true
-    },
     "local": {
      "file": "src/vectors.rs",
      "anchor_matches": 1,
@@ -10439,8 +10112,8 @@
      },
      "build_attempts": 1,
      "compiled": true,
-     "tests": 20,
-     "passed": 17,
+     "tests": 22,
+     "passed": 19,
      "failed_tests": [
       "compact::source::overlay_tests::consumer_vectors::compact_named_vector_consumers_propagate_a_poisoned_cell",
       "compact::source::overlay_tests::consumer_vectors::compact_named_vector_consumers_propagate_a_tampered_block",
@@ -10449,12 +10122,13 @@
      "status": "killed",
      "expect_met": true,
      "restored_identically": true,
-     "seconds": 131,
+     "seconds": 71,
      "environment": {
       "os": "Windows-11-10.0.26300-SP0",
       "rustc": "rustc 1.99.1 (58cf8f9c3 2026-10-13)",
-      "head": "00bac1c229677b1d58e4f0445462cf1d169cb57f"
+      "head": "2d40512513a851d8c13c8747411609517d4300b1"
      },
+     "sources_sha256": "eaf4962586c77b556471e9c4b9c4b8addcff449b019309157d4f158279c7b549",
      "baseline_green": true
     }
    }
@@ -10472,7 +10146,7 @@
     "compact::source::overlay_tests::consumer_vectors::compact_named_vector_consumers_propagate_a_tampered_block"
    ],
    "runs": {
-    "second": {
+    "local": {
      "file": "src/vectors.rs",
      "anchor_matches": 1,
      "sha256_lf": {
@@ -10486,8 +10160,8 @@
      },
      "build_attempts": 1,
      "compiled": true,
-     "tests": 20,
-     "passed": 18,
+     "tests": 22,
+     "passed": 20,
      "failed_tests": [
       "compact::source::overlay_tests::consumer_vectors::compact_named_vector_consumers_propagate_a_poisoned_cell",
       "compact::source::overlay_tests::consumer_vectors::compact_named_vector_consumers_propagate_a_tampered_block"
@@ -10495,12 +10169,13 @@
      "status": "killed",
      "expect_met": true,
      "restored_identically": true,
-     "seconds": 46,
+     "seconds": 62,
      "environment": {
-      "os": "Windows-11-10.0.26200-SP0",
+      "os": "Windows-11-10.0.26300-SP0",
       "rustc": "rustc 1.99.1 (58cf8f9c3 2026-10-13)",
-      "head": "b35c0131ba0b34ce2fe362c42c9d66674c43d017"
+      "head": "2d40512513a851d8c13c8747411609517d4300b1"
      },
+     "sources_sha256": "eaf4962586c77b556471e9c4b9c4b8addcff449b019309157d4f158279c7b549",
      "baseline_green": true
     }
    }
@@ -10518,37 +10193,6 @@
     "compact::source::overlay_tests::consumer_vectors::compact_record_vectors_hide_tombstoned_expired_and_absent_rows"
    ],
    "runs": {
-    "second": {
-     "file": "src/vectors.rs",
-     "anchor_matches": 1,
-     "sha256_lf": {
-      "before": "9d9b333d8d40219c5375255592e6888e3f64d86f359db683100491c4f44cf867",
-      "mutated": "0d874b85dea5b720285f832771a9856419a00d65f529c5a188cad569d04a95ab",
-      "restored": "9d9b333d8d40219c5375255592e6888e3f64d86f359db683100491c4f44cf867"
-     },
-     "sha256_bytes": {
-      "before": "d96f320c27691b9e3913443e94aa7093974ab19fc96511b6ca2f7ba089b812fb",
-      "restored": "d96f320c27691b9e3913443e94aa7093974ab19fc96511b6ca2f7ba089b812fb"
-     },
-     "build_attempts": 1,
-     "compiled": true,
-     "tests": 20,
-     "passed": 18,
-     "failed_tests": [
-      "compact::source::overlay_tests::consumer_vectors::compact_named_vector_consumers_read_no_base_row_that_the_overlay_shadows",
-      "compact::source::overlay_tests::consumer_vectors::compact_record_vectors_hide_tombstoned_expired_and_absent_rows"
-     ],
-     "status": "killed",
-     "expect_met": true,
-     "restored_identically": true,
-     "seconds": 46,
-     "environment": {
-      "os": "Windows-11-10.0.26200-SP0",
-      "rustc": "rustc 1.99.1 (58cf8f9c3 2026-10-13)",
-      "head": "b35c0131ba0b34ce2fe362c42c9d66674c43d017"
-     },
-     "baseline_green": true
-    },
     "local": {
      "file": "src/vectors.rs",
      "anchor_matches": 1,
@@ -10563,8 +10207,8 @@
      },
      "build_attempts": 1,
      "compiled": true,
-     "tests": 20,
-     "passed": 18,
+     "tests": 22,
+     "passed": 20,
      "failed_tests": [
       "compact::source::overlay_tests::consumer_vectors::compact_named_vector_consumers_read_no_base_row_that_the_overlay_shadows",
       "compact::source::overlay_tests::consumer_vectors::compact_record_vectors_hide_tombstoned_expired_and_absent_rows"
@@ -10572,12 +10216,13 @@
      "status": "killed",
      "expect_met": true,
      "restored_identically": true,
-     "seconds": 157,
+     "seconds": 56,
      "environment": {
       "os": "Windows-11-10.0.26300-SP0",
       "rustc": "rustc 1.99.1 (58cf8f9c3 2026-10-13)",
-      "head": "00bac1c229677b1d58e4f0445462cf1d169cb57f"
+      "head": "2d40512513a851d8c13c8747411609517d4300b1"
      },
+     "sources_sha256": "eaf4962586c77b556471e9c4b9c4b8addcff449b019309157d4f158279c7b549",
      "baseline_green": true
     }
    }
@@ -10595,7 +10240,7 @@
     "compact::source::overlay_tests::consumer_vectors::compact_reembed_pending_lists_the_effective_rows_without_the_target_version"
    ],
    "runs": {
-    "second": {
+    "local": {
      "file": "src/vectors.rs",
      "anchor_matches": 1,
      "sha256_lf": {
@@ -10609,8 +10254,8 @@
      },
      "build_attempts": 1,
      "compiled": true,
-     "tests": 20,
-     "passed": 18,
+     "tests": 22,
+     "passed": 20,
      "failed_tests": [
       "compact::source::overlay_tests::consumer_vectors::compact_reembed_pending_decodes_no_row_beyond_its_limit",
       "compact::source::overlay_tests::consumer_vectors::compact_reembed_pending_lists_the_effective_rows_without_the_target_version"
@@ -10618,12 +10263,13 @@
      "status": "killed",
      "expect_met": true,
      "restored_identically": true,
-     "seconds": 46,
+     "seconds": 70,
      "environment": {
-      "os": "Windows-11-10.0.26200-SP0",
+      "os": "Windows-11-10.0.26300-SP0",
       "rustc": "rustc 1.99.1 (58cf8f9c3 2026-10-13)",
-      "head": "b35c0131ba0b34ce2fe362c42c9d66674c43d017"
+      "head": "2d40512513a851d8c13c8747411609517d4300b1"
      },
+     "sources_sha256": "eaf4962586c77b556471e9c4b9c4b8addcff449b019309157d4f158279c7b549",
      "baseline_green": true
     }
    }
@@ -10640,36 +10286,6 @@
     "compact::source::overlay_tests::consumer_vectors::compact_reembed_pending_lists_the_effective_rows_without_the_target_version"
    ],
    "runs": {
-    "second": {
-     "file": "src/vectors.rs",
-     "anchor_matches": 1,
-     "sha256_lf": {
-      "before": "9d9b333d8d40219c5375255592e6888e3f64d86f359db683100491c4f44cf867",
-      "mutated": "e1293d6d3820246cfcb244df35b8a4d82bb2e680027bf31c2019d1f6283dbb0f",
-      "restored": "9d9b333d8d40219c5375255592e6888e3f64d86f359db683100491c4f44cf867"
-     },
-     "sha256_bytes": {
-      "before": "d96f320c27691b9e3913443e94aa7093974ab19fc96511b6ca2f7ba089b812fb",
-      "restored": "d96f320c27691b9e3913443e94aa7093974ab19fc96511b6ca2f7ba089b812fb"
-     },
-     "build_attempts": 1,
-     "compiled": true,
-     "tests": 20,
-     "passed": 19,
-     "failed_tests": [
-      "compact::source::overlay_tests::consumer_vectors::compact_reembed_pending_lists_the_effective_rows_without_the_target_version"
-     ],
-     "status": "killed",
-     "expect_met": true,
-     "restored_identically": true,
-     "seconds": 46,
-     "environment": {
-      "os": "Windows-11-10.0.26200-SP0",
-      "rustc": "rustc 1.99.1 (58cf8f9c3 2026-10-13)",
-      "head": "b35c0131ba0b34ce2fe362c42c9d66674c43d017"
-     },
-     "baseline_green": true
-    },
     "local": {
      "file": "src/vectors.rs",
      "anchor_matches": 1,
@@ -10684,20 +10300,21 @@
      },
      "build_attempts": 1,
      "compiled": true,
-     "tests": 20,
-     "passed": 19,
+     "tests": 22,
+     "passed": 21,
      "failed_tests": [
       "compact::source::overlay_tests::consumer_vectors::compact_reembed_pending_lists_the_effective_rows_without_the_target_version"
      ],
      "status": "killed",
      "expect_met": true,
      "restored_identically": true,
-     "seconds": 161,
+     "seconds": 66,
      "environment": {
       "os": "Windows-11-10.0.26300-SP0",
       "rustc": "rustc 1.99.1 (58cf8f9c3 2026-10-13)",
-      "head": "00bac1c229677b1d58e4f0445462cf1d169cb57f"
+      "head": "2d40512513a851d8c13c8747411609517d4300b1"
      },
+     "sources_sha256": "eaf4962586c77b556471e9c4b9c4b8addcff449b019309157d4f158279c7b549",
      "baseline_green": true
     }
    }
@@ -10716,7 +10333,7 @@
     "compact::source::overlay_tests::consumer_vectors::compact_reembed_pending_lists_the_effective_rows_without_the_target_version"
    ],
    "runs": {
-    "second": {
+    "local": {
      "file": "src/vectors.rs",
      "anchor_matches": 1,
      "sha256_lf": {
@@ -10730,8 +10347,8 @@
      },
      "build_attempts": 1,
      "compiled": true,
-     "tests": 20,
-     "passed": 16,
+     "tests": 22,
+     "passed": 18,
      "failed_tests": [
       "compact::source::overlay_tests::consumer_vectors::compact_named_vector_consumers_read_no_base_row_that_the_overlay_shadows",
       "compact::source::overlay_tests::consumer_vectors::compact_reembed_pending_decodes_no_row_beyond_its_limit",
@@ -10741,12 +10358,13 @@
      "status": "killed",
      "expect_met": true,
      "restored_identically": true,
-     "seconds": 46,
+     "seconds": 69,
      "environment": {
-      "os": "Windows-11-10.0.26200-SP0",
+      "os": "Windows-11-10.0.26300-SP0",
       "rustc": "rustc 1.99.1 (58cf8f9c3 2026-10-13)",
-      "head": "b35c0131ba0b34ce2fe362c42c9d66674c43d017"
+      "head": "2d40512513a851d8c13c8747411609517d4300b1"
      },
+     "sources_sha256": "eaf4962586c77b556471e9c4b9c4b8addcff449b019309157d4f158279c7b549",
      "baseline_green": true
     }
    }
@@ -10764,37 +10382,6 @@
     "compact::source::overlay_tests::consumer_vectors::compact_named_vector_consumers_propagate_a_tampered_block"
    ],
    "runs": {
-    "second": {
-     "file": "src/vectors.rs",
-     "anchor_matches": 1,
-     "sha256_lf": {
-      "before": "9d9b333d8d40219c5375255592e6888e3f64d86f359db683100491c4f44cf867",
-      "mutated": "58af0f8fa89da70a18e20501e5be1cecf2bc8cc027e405a465d0038c9e6a598f",
-      "restored": "9d9b333d8d40219c5375255592e6888e3f64d86f359db683100491c4f44cf867"
-     },
-     "sha256_bytes": {
-      "before": "d96f320c27691b9e3913443e94aa7093974ab19fc96511b6ca2f7ba089b812fb",
-      "restored": "d96f320c27691b9e3913443e94aa7093974ab19fc96511b6ca2f7ba089b812fb"
-     },
-     "build_attempts": 1,
-     "compiled": true,
-     "tests": 20,
-     "passed": 18,
-     "failed_tests": [
-      "compact::source::overlay_tests::consumer_vectors::compact_named_vector_consumers_propagate_a_poisoned_cell",
-      "compact::source::overlay_tests::consumer_vectors::compact_named_vector_consumers_propagate_a_tampered_block"
-     ],
-     "status": "killed",
-     "expect_met": true,
-     "restored_identically": true,
-     "seconds": 44,
-     "environment": {
-      "os": "Windows-11-10.0.26200-SP0",
-      "rustc": "rustc 1.99.1 (58cf8f9c3 2026-10-13)",
-      "head": "b35c0131ba0b34ce2fe362c42c9d66674c43d017"
-     },
-     "baseline_green": true
-    },
     "local": {
      "file": "src/vectors.rs",
      "anchor_matches": 1,
@@ -10809,8 +10396,8 @@
      },
      "build_attempts": 1,
      "compiled": true,
-     "tests": 20,
-     "passed": 18,
+     "tests": 22,
+     "passed": 20,
      "failed_tests": [
       "compact::source::overlay_tests::consumer_vectors::compact_named_vector_consumers_propagate_a_poisoned_cell",
       "compact::source::overlay_tests::consumer_vectors::compact_named_vector_consumers_propagate_a_tampered_block"
@@ -10818,12 +10405,13 @@
      "status": "killed",
      "expect_met": true,
      "restored_identically": true,
-     "seconds": 152,
+     "seconds": 52,
      "environment": {
       "os": "Windows-11-10.0.26300-SP0",
       "rustc": "rustc 1.99.1 (58cf8f9c3 2026-10-13)",
-      "head": "00bac1c229677b1d58e4f0445462cf1d169cb57f"
+      "head": "2d40512513a851d8c13c8747411609517d4300b1"
      },
+     "sources_sha256": "eaf4962586c77b556471e9c4b9c4b8addcff449b019309157d4f158279c7b549",
      "baseline_green": true
     }
    }
@@ -10840,7 +10428,7 @@
     "compact::source::overlay_tests::consumer_vectors::compact_reembed_pending_lists_the_effective_rows_without_the_target_version"
    ],
    "runs": {
-    "second": {
+    "local": {
      "file": "src/vectors.rs",
      "anchor_matches": 1,
      "sha256_lf": {
@@ -10854,20 +10442,21 @@
      },
      "build_attempts": 1,
      "compiled": true,
-     "tests": 20,
-     "passed": 19,
+     "tests": 22,
+     "passed": 21,
      "failed_tests": [
       "compact::source::overlay_tests::consumer_vectors::compact_reembed_pending_lists_the_effective_rows_without_the_target_version"
      ],
      "status": "killed",
      "expect_met": true,
      "restored_identically": true,
-     "seconds": 45,
+     "seconds": 57,
      "environment": {
-      "os": "Windows-11-10.0.26200-SP0",
+      "os": "Windows-11-10.0.26300-SP0",
       "rustc": "rustc 1.99.1 (58cf8f9c3 2026-10-13)",
-      "head": "b35c0131ba0b34ce2fe362c42c9d66674c43d017"
+      "head": "2d40512513a851d8c13c8747411609517d4300b1"
      },
+     "sources_sha256": "eaf4962586c77b556471e9c4b9c4b8addcff449b019309157d4f158279c7b549",
      "baseline_green": true
     }
    }
@@ -10885,37 +10474,6 @@
     "compact::source::overlay_tests::consumer_vectors::compact_named_vector_consumers_propagate_a_poisoned_cell"
    ],
    "runs": {
-    "second": {
-     "file": "src/vectors.rs",
-     "anchor_matches": 1,
-     "sha256_lf": {
-      "before": "9d9b333d8d40219c5375255592e6888e3f64d86f359db683100491c4f44cf867",
-      "mutated": "4627a9a66e74acbe6712aaebabf46c9b76d20c1d299d181d2aa2597bb985fdb3",
-      "restored": "9d9b333d8d40219c5375255592e6888e3f64d86f359db683100491c4f44cf867"
-     },
-     "sha256_bytes": {
-      "before": "d96f320c27691b9e3913443e94aa7093974ab19fc96511b6ca2f7ba089b812fb",
-      "restored": "d96f320c27691b9e3913443e94aa7093974ab19fc96511b6ca2f7ba089b812fb"
-     },
-     "build_attempts": 1,
-     "compiled": true,
-     "tests": 20,
-     "passed": 18,
-     "failed_tests": [
-      "compact::source::overlay_tests::consumer_vectors::compact_named_search_matches_resident_at_every_deadline_boundary",
-      "compact::source::overlay_tests::consumer_vectors::compact_named_vector_consumers_propagate_a_poisoned_cell"
-     ],
-     "status": "killed",
-     "expect_met": true,
-     "restored_identically": true,
-     "seconds": 46,
-     "environment": {
-      "os": "Windows-11-10.0.26200-SP0",
-      "rustc": "rustc 1.99.1 (58cf8f9c3 2026-10-13)",
-      "head": "b35c0131ba0b34ce2fe362c42c9d66674c43d017"
-     },
-     "baseline_green": true
-    },
     "local": {
      "file": "src/vectors.rs",
      "anchor_matches": 1,
@@ -10930,8 +10488,8 @@
      },
      "build_attempts": 1,
      "compiled": true,
-     "tests": 20,
-     "passed": 18,
+     "tests": 22,
+     "passed": 20,
      "failed_tests": [
       "compact::source::overlay_tests::consumer_vectors::compact_named_search_matches_resident_at_every_deadline_boundary",
       "compact::source::overlay_tests::consumer_vectors::compact_named_vector_consumers_propagate_a_poisoned_cell"
@@ -10939,12 +10497,13 @@
      "status": "killed",
      "expect_met": true,
      "restored_identically": true,
-     "seconds": 138,
+     "seconds": 54,
      "environment": {
       "os": "Windows-11-10.0.26300-SP0",
       "rustc": "rustc 1.99.1 (58cf8f9c3 2026-10-13)",
-      "head": "00bac1c229677b1d58e4f0445462cf1d169cb57f"
+      "head": "2d40512513a851d8c13c8747411609517d4300b1"
      },
+     "sources_sha256": "eaf4962586c77b556471e9c4b9c4b8addcff449b019309157d4f158279c7b549",
      "baseline_green": true
     }
    }
@@ -10962,7 +10521,7 @@
     "compact::source::overlay_tests::consumer_vectors::compact_named_search_validates_in_the_resident_order"
    ],
    "runs": {
-    "second": {
+    "local": {
      "file": "src/vectors.rs",
      "anchor_matches": 1,
      "sha256_lf": {
@@ -10976,8 +10535,8 @@
      },
      "build_attempts": 1,
      "compiled": true,
-     "tests": 20,
-     "passed": 18,
+     "tests": 22,
+     "passed": 20,
      "failed_tests": [
       "compact::source::overlay_tests::consumer_vectors::compact_named_search_matches_resident_at_every_deadline_boundary",
       "compact::source::overlay_tests::consumer_vectors::compact_named_search_validates_in_the_resident_order"
@@ -10985,12 +10544,13 @@
      "status": "killed",
      "expect_met": true,
      "restored_identically": true,
-     "seconds": 46,
+     "seconds": 57,
      "environment": {
-      "os": "Windows-11-10.0.26200-SP0",
+      "os": "Windows-11-10.0.26300-SP0",
       "rustc": "rustc 1.99.1 (58cf8f9c3 2026-10-13)",
-      "head": "b35c0131ba0b34ce2fe362c42c9d66674c43d017"
+      "head": "2d40512513a851d8c13c8747411609517d4300b1"
      },
+     "sources_sha256": "eaf4962586c77b556471e9c4b9c4b8addcff449b019309157d4f158279c7b549",
      "baseline_green": true
     }
    }
@@ -11007,36 +10567,6 @@
     "compact::source::overlay_tests::consumer_vectors::compact_named_vector_consumers_check_health_before_anything_else"
    ],
    "runs": {
-    "second": {
-     "file": "src/vectors.rs",
-     "anchor_matches": 1,
-     "sha256_lf": {
-      "before": "9d9b333d8d40219c5375255592e6888e3f64d86f359db683100491c4f44cf867",
-      "mutated": "607c3134e5d177a4a3e9803e5d2d2ac2313da229577ea4613383c32a12ad23d6",
-      "restored": "9d9b333d8d40219c5375255592e6888e3f64d86f359db683100491c4f44cf867"
-     },
-     "sha256_bytes": {
-      "before": "d96f320c27691b9e3913443e94aa7093974ab19fc96511b6ca2f7ba089b812fb",
-      "restored": "d96f320c27691b9e3913443e94aa7093974ab19fc96511b6ca2f7ba089b812fb"
-     },
-     "build_attempts": 1,
-     "compiled": true,
-     "tests": 20,
-     "passed": 19,
-     "failed_tests": [
-      "compact::source::overlay_tests::consumer_vectors::compact_named_vector_consumers_check_health_before_anything_else"
-     ],
-     "status": "killed",
-     "expect_met": true,
-     "restored_identically": true,
-     "seconds": 45,
-     "environment": {
-      "os": "Windows-11-10.0.26200-SP0",
-      "rustc": "rustc 1.99.1 (58cf8f9c3 2026-10-13)",
-      "head": "b35c0131ba0b34ce2fe362c42c9d66674c43d017"
-     },
-     "baseline_green": true
-    },
     "local": {
      "file": "src/vectors.rs",
      "anchor_matches": 1,
@@ -11051,20 +10581,21 @@
      },
      "build_attempts": 1,
      "compiled": true,
-     "tests": 20,
-     "passed": 19,
+     "tests": 22,
+     "passed": 21,
      "failed_tests": [
       "compact::source::overlay_tests::consumer_vectors::compact_named_vector_consumers_check_health_before_anything_else"
      ],
      "status": "killed",
      "expect_met": true,
      "restored_identically": true,
-     "seconds": 147,
+     "seconds": 63,
      "environment": {
       "os": "Windows-11-10.0.26300-SP0",
       "rustc": "rustc 1.99.1 (58cf8f9c3 2026-10-13)",
-      "head": "00bac1c229677b1d58e4f0445462cf1d169cb57f"
+      "head": "2d40512513a851d8c13c8747411609517d4300b1"
      },
+     "sources_sha256": "eaf4962586c77b556471e9c4b9c4b8addcff449b019309157d4f158279c7b549",
      "baseline_green": true
     }
    }
@@ -11081,7 +10612,7 @@
     "compact::source::overlay_tests::consumer_vectors::compact_named_vector_consumers_check_health_before_anything_else"
    ],
    "runs": {
-    "second": {
+    "local": {
      "file": "src/vectors.rs",
      "anchor_matches": 1,
      "sha256_lf": {
@@ -11095,20 +10626,21 @@
      },
      "build_attempts": 1,
      "compiled": true,
-     "tests": 20,
-     "passed": 19,
+     "tests": 22,
+     "passed": 21,
      "failed_tests": [
       "compact::source::overlay_tests::consumer_vectors::compact_named_vector_consumers_check_health_before_anything_else"
      ],
      "status": "killed",
      "expect_met": true,
      "restored_identically": true,
-     "seconds": 45,
+     "seconds": 62,
      "environment": {
-      "os": "Windows-11-10.0.26200-SP0",
+      "os": "Windows-11-10.0.26300-SP0",
       "rustc": "rustc 1.99.1 (58cf8f9c3 2026-10-13)",
-      "head": "b35c0131ba0b34ce2fe362c42c9d66674c43d017"
+      "head": "2d40512513a851d8c13c8747411609517d4300b1"
      },
+     "sources_sha256": "eaf4962586c77b556471e9c4b9c4b8addcff449b019309157d4f158279c7b549",
      "baseline_green": true
     }
    }
@@ -11126,37 +10658,6 @@
     "compact::source::overlay_tests::consumer_vectors::compact_reembed_pending_validates_in_the_resident_order"
    ],
    "runs": {
-    "second": {
-     "file": "src/vectors.rs",
-     "anchor_matches": 1,
-     "sha256_lf": {
-      "before": "9d9b333d8d40219c5375255592e6888e3f64d86f359db683100491c4f44cf867",
-      "mutated": "4bc8343cd097f746550076b25f41d7348b748308f1fdf1ed8df7f6620e44b590",
-      "restored": "9d9b333d8d40219c5375255592e6888e3f64d86f359db683100491c4f44cf867"
-     },
-     "sha256_bytes": {
-      "before": "d96f320c27691b9e3913443e94aa7093974ab19fc96511b6ca2f7ba089b812fb",
-      "restored": "d96f320c27691b9e3913443e94aa7093974ab19fc96511b6ca2f7ba089b812fb"
-     },
-     "build_attempts": 1,
-     "compiled": true,
-     "tests": 20,
-     "passed": 18,
-     "failed_tests": [
-      "compact::source::overlay_tests::consumer_vectors::compact_reembed_pending_lists_the_effective_rows_without_the_target_version",
-      "compact::source::overlay_tests::consumer_vectors::compact_reembed_pending_validates_in_the_resident_order"
-     ],
-     "status": "killed",
-     "expect_met": true,
-     "restored_identically": true,
-     "seconds": 46,
-     "environment": {
-      "os": "Windows-11-10.0.26200-SP0",
-      "rustc": "rustc 1.99.1 (58cf8f9c3 2026-10-13)",
-      "head": "b35c0131ba0b34ce2fe362c42c9d66674c43d017"
-     },
-     "baseline_green": true
-    },
     "local": {
      "file": "src/vectors.rs",
      "anchor_matches": 1,
@@ -11171,8 +10672,8 @@
      },
      "build_attempts": 1,
      "compiled": true,
-     "tests": 20,
-     "passed": 18,
+     "tests": 22,
+     "passed": 20,
      "failed_tests": [
       "compact::source::overlay_tests::consumer_vectors::compact_reembed_pending_lists_the_effective_rows_without_the_target_version",
       "compact::source::overlay_tests::consumer_vectors::compact_reembed_pending_validates_in_the_resident_order"
@@ -11180,12 +10681,13 @@
      "status": "killed",
      "expect_met": true,
      "restored_identically": true,
-     "seconds": 149,
+     "seconds": 53,
      "environment": {
       "os": "Windows-11-10.0.26300-SP0",
       "rustc": "rustc 1.99.1 (58cf8f9c3 2026-10-13)",
-      "head": "00bac1c229677b1d58e4f0445462cf1d169cb57f"
+      "head": "2d40512513a851d8c13c8747411609517d4300b1"
      },
+     "sources_sha256": "eaf4962586c77b556471e9c4b9c4b8addcff449b019309157d4f158279c7b549",
      "baseline_green": true
     }
    }
@@ -11203,7 +10705,7 @@
     "compact::source::overlay_tests::consumer_vectors::compact_named_vector_consumers_check_health_before_anything_else"
    ],
    "runs": {
-    "second": {
+    "local": {
      "file": "src/vectors.rs",
      "anchor_matches": 1,
      "sha256_lf": {
@@ -11217,8 +10719,8 @@
      },
      "build_attempts": 1,
      "compiled": true,
-     "tests": 20,
-     "passed": 18,
+     "tests": 22,
+     "passed": 20,
      "failed_tests": [
       "compact::source::overlay_tests::consumer_vectors::compact_named_ann_stays_refused_and_leaves_the_state_unchanged",
       "compact::source::overlay_tests::consumer_vectors::compact_named_vector_consumers_check_health_before_anything_else"
@@ -11226,12 +10728,13 @@
      "status": "killed",
      "expect_met": true,
      "restored_identically": true,
-     "seconds": 45,
+     "seconds": 58,
      "environment": {
-      "os": "Windows-11-10.0.26200-SP0",
+      "os": "Windows-11-10.0.26300-SP0",
       "rustc": "rustc 1.99.1 (58cf8f9c3 2026-10-13)",
-      "head": "b35c0131ba0b34ce2fe362c42c9d66674c43d017"
+      "head": "2d40512513a851d8c13c8747411609517d4300b1"
      },
+     "sources_sha256": "eaf4962586c77b556471e9c4b9c4b8addcff449b019309157d4f158279c7b549",
      "baseline_green": true
     }
    }
@@ -11248,36 +10751,6 @@
     "compact::source::overlay_tests::consumer_vectors::compact_named_ann_stays_refused_and_leaves_the_state_unchanged"
    ],
    "runs": {
-    "second": {
-     "file": "src/vectors.rs",
-     "anchor_matches": 1,
-     "sha256_lf": {
-      "before": "9d9b333d8d40219c5375255592e6888e3f64d86f359db683100491c4f44cf867",
-      "mutated": "23a3e65698d126bc1959deffeeeb00e42b0086f01b57165b1a3d42af16d8548a",
-      "restored": "9d9b333d8d40219c5375255592e6888e3f64d86f359db683100491c4f44cf867"
-     },
-     "sha256_bytes": {
-      "before": "d96f320c27691b9e3913443e94aa7093974ab19fc96511b6ca2f7ba089b812fb",
-      "restored": "d96f320c27691b9e3913443e94aa7093974ab19fc96511b6ca2f7ba089b812fb"
-     },
-     "build_attempts": 1,
-     "compiled": true,
-     "tests": 20,
-     "passed": 19,
-     "failed_tests": [
-      "compact::source::overlay_tests::consumer_vectors::compact_named_ann_stays_refused_and_leaves_the_state_unchanged"
-     ],
-     "status": "killed",
-     "expect_met": true,
-     "restored_identically": true,
-     "seconds": 44,
-     "environment": {
-      "os": "Windows-11-10.0.26200-SP0",
-      "rustc": "rustc 1.99.1 (58cf8f9c3 2026-10-13)",
-      "head": "b35c0131ba0b34ce2fe362c42c9d66674c43d017"
-     },
-     "baseline_green": true
-    },
     "local": {
      "file": "src/vectors.rs",
      "anchor_matches": 1,
@@ -11292,20 +10765,21 @@
      },
      "build_attempts": 1,
      "compiled": true,
-     "tests": 20,
-     "passed": 19,
+     "tests": 22,
+     "passed": 21,
      "failed_tests": [
       "compact::source::overlay_tests::consumer_vectors::compact_named_ann_stays_refused_and_leaves_the_state_unchanged"
      ],
      "status": "killed",
      "expect_met": true,
      "restored_identically": true,
-     "seconds": 158,
+     "seconds": 62,
      "environment": {
       "os": "Windows-11-10.0.26300-SP0",
       "rustc": "rustc 1.99.1 (58cf8f9c3 2026-10-13)",
-      "head": "00bac1c229677b1d58e4f0445462cf1d169cb57f"
+      "head": "2d40512513a851d8c13c8747411609517d4300b1"
      },
+     "sources_sha256": "eaf4962586c77b556471e9c4b9c4b8addcff449b019309157d4f158279c7b549",
      "baseline_green": true
     }
    }
@@ -11322,7 +10796,7 @@
     "compact::source::overlay_tests::consumer_vectors::compact_named_search_matches_resident_at_every_deadline_boundary"
    ],
    "runs": {
-    "second": {
+    "local": {
      "file": "src/vectors.rs",
      "anchor_matches": 1,
      "sha256_lf": {
@@ -11336,20 +10810,21 @@
      },
      "build_attempts": 1,
      "compiled": true,
-     "tests": 20,
-     "passed": 19,
+     "tests": 22,
+     "passed": 21,
      "failed_tests": [
       "compact::source::overlay_tests::consumer_vectors::compact_named_search_matches_resident_at_every_deadline_boundary"
      ],
      "status": "killed",
      "expect_met": true,
      "restored_identically": true,
-     "seconds": 45,
+     "seconds": 67,
      "environment": {
-      "os": "Windows-11-10.0.26200-SP0",
+      "os": "Windows-11-10.0.26300-SP0",
       "rustc": "rustc 1.99.1 (58cf8f9c3 2026-10-13)",
-      "head": "b35c0131ba0b34ce2fe362c42c9d66674c43d017"
+      "head": "2d40512513a851d8c13c8747411609517d4300b1"
      },
+     "sources_sha256": "eaf4962586c77b556471e9c4b9c4b8addcff449b019309157d4f158279c7b549",
      "baseline_green": true
     }
    }
@@ -12902,36 +12377,6 @@
     "compact::source::overlay_tests::consumer_vectors::compact_named_search_validates_in_the_resident_order"
    ],
    "runs": {
-    "second": {
-     "file": "src/vectors.rs",
-     "anchor_matches": 1,
-     "sha256_lf": {
-      "before": "9d9b333d8d40219c5375255592e6888e3f64d86f359db683100491c4f44cf867",
-      "mutated": "516c16840f98589c2989497fb9c35537736ed444a987299542589fa47d0fd972",
-      "restored": "9d9b333d8d40219c5375255592e6888e3f64d86f359db683100491c4f44cf867"
-     },
-     "sha256_bytes": {
-      "before": "d96f320c27691b9e3913443e94aa7093974ab19fc96511b6ca2f7ba089b812fb",
-      "restored": "d96f320c27691b9e3913443e94aa7093974ab19fc96511b6ca2f7ba089b812fb"
-     },
-     "build_attempts": 1,
-     "compiled": true,
-     "tests": 20,
-     "passed": 19,
-     "failed_tests": [
-      "compact::source::overlay_tests::consumer_vectors::compact_named_search_validates_in_the_resident_order"
-     ],
-     "status": "killed",
-     "expect_met": true,
-     "restored_identically": true,
-     "seconds": 45,
-     "environment": {
-      "os": "Windows-11-10.0.26200-SP0",
-      "rustc": "rustc 1.99.1 (58cf8f9c3 2026-10-13)",
-      "head": "b35c0131ba0b34ce2fe362c42c9d66674c43d017"
-     },
-     "baseline_green": true
-    },
     "local": {
      "file": "src/vectors.rs",
      "anchor_matches": 1,
@@ -12946,20 +12391,21 @@
      },
      "build_attempts": 1,
      "compiled": true,
-     "tests": 20,
-     "passed": 19,
+     "tests": 22,
+     "passed": 21,
      "failed_tests": [
       "compact::source::overlay_tests::consumer_vectors::compact_named_search_validates_in_the_resident_order"
      ],
      "status": "killed",
      "expect_met": true,
      "restored_identically": true,
-     "seconds": 240,
+     "seconds": 63,
      "environment": {
       "os": "Windows-11-10.0.26300-SP0",
       "rustc": "rustc 1.99.1 (58cf8f9c3 2026-10-13)",
-      "head": "00bac1c229677b1d58e4f0445462cf1d169cb57f"
+      "head": "2d40512513a851d8c13c8747411609517d4300b1"
      },
+     "sources_sha256": "eaf4962586c77b556471e9c4b9c4b8addcff449b019309157d4f158279c7b549",
      "baseline_green": true
     }
    }
@@ -12976,7 +12422,7 @@
     "compact::source::overlay_tests::consumer_vectors::compact_named_search_validates_in_the_resident_order"
    ],
    "runs": {
-    "second": {
+    "local": {
      "file": "src/vectors.rs",
      "anchor_matches": 1,
      "sha256_lf": {
@@ -12990,20 +12436,21 @@
      },
      "build_attempts": 1,
      "compiled": true,
-     "tests": 20,
-     "passed": 19,
+     "tests": 22,
+     "passed": 21,
      "failed_tests": [
       "compact::source::overlay_tests::consumer_vectors::compact_named_search_validates_in_the_resident_order"
      ],
      "status": "killed",
      "expect_met": true,
      "restored_identically": true,
-     "seconds": 45,
+     "seconds": 59,
      "environment": {
-      "os": "Windows-11-10.0.26200-SP0",
+      "os": "Windows-11-10.0.26300-SP0",
       "rustc": "rustc 1.99.1 (58cf8f9c3 2026-10-13)",
-      "head": "b35c0131ba0b34ce2fe362c42c9d66674c43d017"
+      "head": "2d40512513a851d8c13c8747411609517d4300b1"
      },
+     "sources_sha256": "eaf4962586c77b556471e9c4b9c4b8addcff449b019309157d4f158279c7b549",
      "baseline_green": true
     }
    }
@@ -13196,37 +12643,6 @@
     "compact::source::overlay_tests::consumer_vectors::compact_reembed_pending_decodes_no_row_beyond_its_limit"
    ],
    "runs": {
-    "second": {
-     "file": "src/vectors.rs",
-     "anchor_matches": 1,
-     "sha256_lf": {
-      "before": "9d9b333d8d40219c5375255592e6888e3f64d86f359db683100491c4f44cf867",
-      "mutated": "1169c9071cbe6a6364e6aa83988088436bf843cc9f374510e60b49b35b085bca",
-      "restored": "9d9b333d8d40219c5375255592e6888e3f64d86f359db683100491c4f44cf867"
-     },
-     "sha256_bytes": {
-      "before": "d96f320c27691b9e3913443e94aa7093974ab19fc96511b6ca2f7ba089b812fb",
-      "restored": "d96f320c27691b9e3913443e94aa7093974ab19fc96511b6ca2f7ba089b812fb"
-     },
-     "build_attempts": 1,
-     "compiled": true,
-     "tests": 20,
-     "passed": 18,
-     "failed_tests": [
-      "compact::source::overlay_tests::consumer_vectors::compact_named_vector_consumers_read_no_base_row_that_the_overlay_shadows",
-      "compact::source::overlay_tests::consumer_vectors::compact_reembed_pending_decodes_no_row_beyond_its_limit"
-     ],
-     "status": "killed",
-     "expect_met": true,
-     "restored_identically": true,
-     "seconds": 46,
-     "environment": {
-      "os": "Windows-11-10.0.26200-SP0",
-      "rustc": "rustc 1.99.1 (58cf8f9c3 2026-10-13)",
-      "head": "b35c0131ba0b34ce2fe362c42c9d66674c43d017"
-     },
-     "baseline_green": true
-    },
     "local": {
      "file": "src/vectors.rs",
      "anchor_matches": 1,
@@ -13241,8 +12657,8 @@
      },
      "build_attempts": 1,
      "compiled": true,
-     "tests": 20,
-     "passed": 18,
+     "tests": 22,
+     "passed": 20,
      "failed_tests": [
       "compact::source::overlay_tests::consumer_vectors::compact_named_vector_consumers_read_no_base_row_that_the_overlay_shadows",
       "compact::source::overlay_tests::consumer_vectors::compact_reembed_pending_decodes_no_row_beyond_its_limit"
@@ -13250,12 +12666,13 @@
      "status": "killed",
      "expect_met": true,
      "restored_identically": true,
-     "seconds": 115,
+     "seconds": 80,
      "environment": {
       "os": "Windows-11-10.0.26300-SP0",
       "rustc": "rustc 1.99.1 (58cf8f9c3 2026-10-13)",
-      "head": "00bac1c229677b1d58e4f0445462cf1d169cb57f"
+      "head": "2d40512513a851d8c13c8747411609517d4300b1"
      },
+     "sources_sha256": "eaf4962586c77b556471e9c4b9c4b8addcff449b019309157d4f158279c7b549",
      "baseline_green": true
     }
    }
@@ -13284,6 +12701,7 @@
       "before": "cf556bc1ded79380e0f6124f40d16aefd20e2b64f64c37ed0ed4004e31d2ee30",
       "restored": "cf556bc1ded79380e0f6124f40d16aefd20e2b64f64c37ed0ed4004e31d2ee30"
      },
+     "build_attempts": 1,
      "compiled": true,
      "tests": 2,
      "passed": 1,
@@ -13293,12 +12711,13 @@
      "status": "killed",
      "expect_met": true,
      "restored_identically": true,
-     "seconds": 265,
+     "seconds": 70,
      "environment": {
       "os": "Windows-11-10.0.26300-SP0",
       "rustc": "rustc 1.99.1 (58cf8f9c3 2026-10-13)",
-      "head": "8e995045306f88d30ae36e2f3debe0c25c0d6aa6"
+      "head": "2d40512513a851d8c13c8747411609517d4300b1"
      },
+     "sources_sha256": "eaf4962586c77b556471e9c4b9c4b8addcff449b019309157d4f158279c7b549",
      "baseline_green": true
     }
    }
@@ -13327,6 +12746,7 @@
       "before": "cf556bc1ded79380e0f6124f40d16aefd20e2b64f64c37ed0ed4004e31d2ee30",
       "restored": "cf556bc1ded79380e0f6124f40d16aefd20e2b64f64c37ed0ed4004e31d2ee30"
      },
+     "build_attempts": 1,
      "compiled": true,
      "tests": 2,
      "passed": 1,
@@ -13336,12 +12756,13 @@
      "status": "killed",
      "expect_met": true,
      "restored_identically": true,
-     "seconds": 136,
+     "seconds": 61,
      "environment": {
       "os": "Windows-11-10.0.26300-SP0",
       "rustc": "rustc 1.99.1 (58cf8f9c3 2026-10-13)",
-      "head": "8e995045306f88d30ae36e2f3debe0c25c0d6aa6"
+      "head": "2d40512513a851d8c13c8747411609517d4300b1"
      },
+     "sources_sha256": "eaf4962586c77b556471e9c4b9c4b8addcff449b019309157d4f158279c7b549",
      "baseline_green": true
     }
    }
@@ -13370,6 +12791,7 @@
       "before": "cf556bc1ded79380e0f6124f40d16aefd20e2b64f64c37ed0ed4004e31d2ee30",
       "restored": "cf556bc1ded79380e0f6124f40d16aefd20e2b64f64c37ed0ed4004e31d2ee30"
      },
+     "build_attempts": 1,
      "compiled": true,
      "tests": 2,
      "passed": 1,
@@ -13379,12 +12801,13 @@
      "status": "killed",
      "expect_met": true,
      "restored_identically": true,
-     "seconds": 157,
+     "seconds": 59,
      "environment": {
       "os": "Windows-11-10.0.26300-SP0",
       "rustc": "rustc 1.99.1 (58cf8f9c3 2026-10-13)",
-      "head": "8e995045306f88d30ae36e2f3debe0c25c0d6aa6"
+      "head": "2d40512513a851d8c13c8747411609517d4300b1"
      },
+     "sources_sha256": "eaf4962586c77b556471e9c4b9c4b8addcff449b019309157d4f158279c7b549",
      "baseline_green": true
     }
    }
@@ -13413,6 +12836,7 @@
       "before": "cf556bc1ded79380e0f6124f40d16aefd20e2b64f64c37ed0ed4004e31d2ee30",
       "restored": "cf556bc1ded79380e0f6124f40d16aefd20e2b64f64c37ed0ed4004e31d2ee30"
      },
+     "build_attempts": 1,
      "compiled": true,
      "tests": 2,
      "passed": 1,
@@ -13422,12 +12846,13 @@
      "status": "killed",
      "expect_met": true,
      "restored_identically": true,
-     "seconds": 130,
+     "seconds": 56,
      "environment": {
       "os": "Windows-11-10.0.26300-SP0",
       "rustc": "rustc 1.99.1 (58cf8f9c3 2026-10-13)",
-      "head": "8e995045306f88d30ae36e2f3debe0c25c0d6aa6"
+      "head": "2d40512513a851d8c13c8747411609517d4300b1"
      },
+     "sources_sha256": "eaf4962586c77b556471e9c4b9c4b8addcff449b019309157d4f158279c7b549",
      "baseline_green": true
     }
    }
@@ -13456,6 +12881,7 @@
       "before": "cf556bc1ded79380e0f6124f40d16aefd20e2b64f64c37ed0ed4004e31d2ee30",
       "restored": "cf556bc1ded79380e0f6124f40d16aefd20e2b64f64c37ed0ed4004e31d2ee30"
      },
+     "build_attempts": 1,
      "compiled": true,
      "tests": 2,
      "passed": 1,
@@ -13465,12 +12891,13 @@
      "status": "killed",
      "expect_met": true,
      "restored_identically": true,
-     "seconds": 122,
+     "seconds": 70,
      "environment": {
       "os": "Windows-11-10.0.26300-SP0",
       "rustc": "rustc 1.99.1 (58cf8f9c3 2026-10-13)",
-      "head": "8e995045306f88d30ae36e2f3debe0c25c0d6aa6"
+      "head": "2d40512513a851d8c13c8747411609517d4300b1"
      },
+     "sources_sha256": "eaf4962586c77b556471e9c4b9c4b8addcff449b019309157d4f158279c7b549",
      "baseline_green": true
     }
    }
@@ -13499,6 +12926,7 @@
       "before": "4261ed9c33617ffd04a52354dde6242ebb073f78dc89805f4c1c059f6d41eed3",
       "restored": "4261ed9c33617ffd04a52354dde6242ebb073f78dc89805f4c1c059f6d41eed3"
      },
+     "build_attempts": 1,
      "compiled": true,
      "tests": 2,
      "passed": 1,
@@ -13508,12 +12936,13 @@
      "status": "killed",
      "expect_met": true,
      "restored_identically": true,
-     "seconds": 241,
+     "seconds": 66,
      "environment": {
       "os": "Windows-11-10.0.26300-SP0",
       "rustc": "rustc 1.99.1 (58cf8f9c3 2026-10-13)",
-      "head": "8e995045306f88d30ae36e2f3debe0c25c0d6aa6"
+      "head": "2d40512513a851d8c13c8747411609517d4300b1"
      },
+     "sources_sha256": "eaf4962586c77b556471e9c4b9c4b8addcff449b019309157d4f158279c7b549",
      "baseline_green": true
     }
    }
@@ -13542,6 +12971,7 @@
       "before": "4261ed9c33617ffd04a52354dde6242ebb073f78dc89805f4c1c059f6d41eed3",
       "restored": "4261ed9c33617ffd04a52354dde6242ebb073f78dc89805f4c1c059f6d41eed3"
      },
+     "build_attempts": 1,
      "compiled": true,
      "tests": 2,
      "passed": 1,
@@ -13551,12 +12981,13 @@
      "status": "killed",
      "expect_met": true,
      "restored_identically": true,
-     "seconds": 145,
+     "seconds": 66,
      "environment": {
       "os": "Windows-11-10.0.26300-SP0",
       "rustc": "rustc 1.99.1 (58cf8f9c3 2026-10-13)",
-      "head": "8e995045306f88d30ae36e2f3debe0c25c0d6aa6"
+      "head": "2d40512513a851d8c13c8747411609517d4300b1"
      },
+     "sources_sha256": "eaf4962586c77b556471e9c4b9c4b8addcff449b019309157d4f158279c7b549",
      "baseline_green": true
     }
    }
@@ -13585,6 +13016,7 @@
       "before": "4261ed9c33617ffd04a52354dde6242ebb073f78dc89805f4c1c059f6d41eed3",
       "restored": "4261ed9c33617ffd04a52354dde6242ebb073f78dc89805f4c1c059f6d41eed3"
      },
+     "build_attempts": 1,
      "compiled": true,
      "tests": 2,
      "passed": 1,
@@ -13594,12 +13026,13 @@
      "status": "killed",
      "expect_met": true,
      "restored_identically": true,
-     "seconds": 137,
+     "seconds": 57,
      "environment": {
       "os": "Windows-11-10.0.26300-SP0",
       "rustc": "rustc 1.99.1 (58cf8f9c3 2026-10-13)",
-      "head": "8e995045306f88d30ae36e2f3debe0c25c0d6aa6"
+      "head": "2d40512513a851d8c13c8747411609517d4300b1"
      },
+     "sources_sha256": "eaf4962586c77b556471e9c4b9c4b8addcff449b019309157d4f158279c7b549",
      "baseline_green": true
     }
    }
@@ -13628,6 +13061,7 @@
       "before": "4261ed9c33617ffd04a52354dde6242ebb073f78dc89805f4c1c059f6d41eed3",
       "restored": "4261ed9c33617ffd04a52354dde6242ebb073f78dc89805f4c1c059f6d41eed3"
      },
+     "build_attempts": 1,
      "compiled": true,
      "tests": 2,
      "passed": 1,
@@ -13637,12 +13071,13 @@
      "status": "killed",
      "expect_met": true,
      "restored_identically": true,
-     "seconds": 144,
+     "seconds": 57,
      "environment": {
       "os": "Windows-11-10.0.26300-SP0",
       "rustc": "rustc 1.99.1 (58cf8f9c3 2026-10-13)",
-      "head": "8e995045306f88d30ae36e2f3debe0c25c0d6aa6"
+      "head": "2d40512513a851d8c13c8747411609517d4300b1"
      },
+     "sources_sha256": "eaf4962586c77b556471e9c4b9c4b8addcff449b019309157d4f158279c7b549",
      "baseline_green": true
     }
    }
@@ -14060,6 +13495,7 @@
       "before": "d502d514609997f05f374085dfd14ed65f814f3a8de6f0cb737e6ba1afeb0bca",
       "restored": "d502d514609997f05f374085dfd14ed65f814f3a8de6f0cb737e6ba1afeb0bca"
      },
+     "build_attempts": 1,
      "compiled": true,
      "tests": 18,
      "passed": 17,
@@ -14069,41 +13505,13 @@
      "status": "killed",
      "expect_met": true,
      "restored_identically": true,
-     "seconds": 166,
+     "seconds": 74,
      "environment": {
       "os": "Windows-11-10.0.26300-SP0",
       "rustc": "rustc 1.99.1 (58cf8f9c3 2026-10-13)",
-      "head": "7406b9f364b7f39285a2fb5d70f923bac19e3f75"
+      "head": "2d40512513a851d8c13c8747411609517d4300b1"
      },
-     "baseline_green": true
-    },
-    "second": {
-     "file": "src/collection.rs",
-     "anchor_matches": 1,
-     "sha256_lf": {
-      "before": "c6868ca284516a9b815504a64ad681acceaeb6d2678b78ec19766c62cbf794f6",
-      "mutated": "487fa00c4747088e20f6618bbe03aca4029b3a6d79abadea62ac39458153f3e8",
-      "restored": "c6868ca284516a9b815504a64ad681acceaeb6d2678b78ec19766c62cbf794f6"
-     },
-     "sha256_bytes": {
-      "before": "d502d514609997f05f374085dfd14ed65f814f3a8de6f0cb737e6ba1afeb0bca",
-      "restored": "d502d514609997f05f374085dfd14ed65f814f3a8de6f0cb737e6ba1afeb0bca"
-     },
-     "compiled": true,
-     "tests": 18,
-     "passed": 17,
-     "failed_tests": [
-      "compact::source::overlay_tests::consumer_graph::a_graph_batch_that_puts_and_attaches_a_record_leaves_it_without_a_deadline"
-     ],
-     "status": "killed",
-     "expect_met": true,
-     "restored_identically": true,
-     "seconds": 47,
-     "environment": {
-      "os": "Windows-11-10.0.26200-SP0",
-      "rustc": "rustc 1.99.1 (58cf8f9c3 2026-10-13)",
-      "head": "d4ecf6effba41626bc0efea3f180ec2551c50346"
-     },
+     "sources_sha256": "eaf4962586c77b556471e9c4b9c4b8addcff449b019309157d4f158279c7b549",
      "baseline_green": true
     }
    }
