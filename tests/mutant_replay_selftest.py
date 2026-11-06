@@ -12,10 +12,12 @@ repository that holds this file is touched; the ledgers on disk are only read.
     python tests/mutant_replay_selftest.py
 """
 import contextlib
+import hashlib
 import importlib.util
 import io
 import json
 import os
+import re
 import shutil
 import subprocess
 import sys
@@ -272,6 +274,10 @@ TEMPLATE_FILES = {
 TEMPLATE = {}
 
 
+def sha(text):
+    return hashlib.sha256(text.encode("utf-8")).hexdigest()
+
+
 def norm(path):
     return os.path.normcase(os.path.realpath(str(path)))
 
@@ -354,6 +360,17 @@ def standard_ledger():
 
 def compact_ledger(entries):
     return {"campaign": "demo", "base": "0" * 40, "mutants": entries}
+
+
+@contextlib.contextmanager
+def edited(path, transform):
+    """Change a file for the duration of the block."""
+    original = Path(path).read_bytes()
+    put(path, transform(original.decode("utf-8")))
+    try:
+        yield
+    finally:
+        Path(path).write_bytes(original)
 
 
 class ToolTest(unittest.TestCase):
@@ -608,7 +625,154 @@ class ShardTests(ToolTest):
         self.assertEqual(tool.parse_shard("0/1"), (0, 1))
 
 
+class FingerprintTests(ToolTest):
+    FILES = {
+        "Cargo.toml": "a\n",
+        "Cargo.lock": "b\n",
+        "build.rs": "fn main() {}\n",
+        "src/a.rs": "a\n",
+        "src/sub/b.rs": "b\n",
+        "src/target/skipped.rs": "x\n",
+        "tests/t1.rs": "t1\n",
+        "tests/t2.rs": "t2\n",
+        "tests/dir/main.rs": "main\n",
+        "tests/dir/helper.rs": "helper\n",
+        "tests/common/mod.rs": "common\n",
+        "crates/x/src/lib.rs": "lib\n",
+        "crates/x/Cargo.toml": "x\n",
+    }
+
+    def tree(self, name="tree"):
+        root = self.base / name
+        for relative, text in self.FILES.items():
+            put(root / relative, text)
+        return root
+
+    def test_the_selection_of_a_command(self):
+        for command, expected in (
+            (
+                "cargo test --locked --offline --features tools --test import_lines -- jsonl_line",
+                (["import_lines"], False, False),
+            ),
+            ("cargo test --lib kv::tests", ([], True, False)),
+            ("cargo test --bin vlite-mcp kv_mcp::tests", ([], True, False)),
+            ("cargo test --test a --features x --test b", (["a", "b"], False, False)),
+            ("cargo test --test=a", (["a"], False, False)),
+            ("cargo test --lib -- --test foo", ([], True, False)),
+            ("cargo test --test t1 --lib", (["t1"], True, False)),
+            ("test --all-targets", ([], True, False)),
+            ("cargo test", ([], False, False)),
+            ("cargo test -p vlite-graph --doc", ([], True, True)),
+            ("cargo test --workspace", ([], False, True)),
+            ("cargo test --test", ([], False, False)),
+        ):
+            with self.subTest(command):
+                self.assertEqual(tool.parse_selection(command), expected)
+
+    def test_the_selected_test_files(self):
+        fingerprints = tool.Fingerprints(self.tree())
+        base = ["Cargo.lock", "Cargo.toml"]
+        for command, expected in (
+            ("cargo test --lib", base + ["build.rs", "src/a.rs", "src/sub/b.rs"]),
+            ("cargo test", base + ["build.rs", "src/a.rs", "src/sub/b.rs"]),
+            ("test --bin x", base + ["build.rs", "src/a.rs", "src/sub/b.rs"]),
+            ("cargo test --test t1 -- f", base + ["tests/common/mod.rs", "tests/t1.rs"]),
+            (
+                "cargo test --test dir",
+                base + ["tests/common/mod.rs", "tests/dir/helper.rs", "tests/dir/main.rs"],
+            ),
+            ("cargo test --test nope", base + ["tests/common/mod.rs", "tests/nope.rs"]),
+            (
+                "cargo test --test t2 --test t1",
+                base + ["tests/common/mod.rs", "tests/t1.rs", "tests/t2.rs"],
+            ),
+            (
+                "cargo test --test t1 --lib",
+                base + [
+                    "build.rs", "src/a.rs", "src/sub/b.rs", "tests/common/mod.rs", "tests/t1.rs"
+                ],
+            ),
+            (
+                "cargo test -p x",
+                base + [
+                    "build.rs",
+                    "crates/x/Cargo.toml",
+                    "crates/x/src/lib.rs",
+                    "src/a.rs",
+                    "src/sub/b.rs",
+                ],
+            ),
+        ):
+            with self.subTest(command):
+                self.assertEqual(fingerprints.test_files(command), expected)
+
+    def test_a_folder_and_a_file_of_one_test_target_are_both_inputs(self):
+        root = self.tree()
+        put(root / "tests" / "dir.rs", "module\n")
+        self.assertIn("tests/dir.rs", tool.Fingerprints(root).test_files("cargo test --test dir"))
+
+    def test_only_the_selected_sources_change_the_tests_fingerprint(self):
+        root = self.tree()
+
+        def hashes():
+            fingerprints = tool.Fingerprints(root)
+            return {c: fingerprints.tests_hash(c) for c in ("--lib", "--test t1", "--test t2")}
+
+        before = hashes()
+        for relative, changed in (
+            ("src/a.rs", {"--lib"}),
+            ("tests/t1.rs", {"--test t1"}),
+            ("tests/t2.rs", {"--test t2"}),
+            ("tests/common/mod.rs", {"--test t1", "--test t2"}),
+            ("Cargo.lock", {"--lib", "--test t1", "--test t2"}),
+            ("src/target/skipped.rs", set()),
+            ("tests/dir/main.rs", set()),
+        ):
+            with self.subTest(relative), edited(root / relative, lambda text: text + "// edit\n"):
+                after = hashes()
+                self.assertEqual({c for c in before if before[c] != after[c]}, changed)
+
+    def test_hashes_use_lf_text_and_a_missing_file_hashes_the_word_missing(self):
+        lf, crlf = self.base / "lf", self.base / "crlf"
+        put(lf / "src" / "a.rs", "one\ntwo\n")
+        put(crlf / "src" / "a.rs", "one\r\ntwo\r\n")
+        self.assertEqual(tool.Fingerprints(lf).file_hash("src/a.rs"), sha("one\ntwo\n"))
+        self.assertEqual(tool.Fingerprints(crlf).file_hash("src/a.rs"), sha("one\ntwo\n"))
+        self.assertEqual(tool.Fingerprints(lf).file_hash("src\\a.rs"), sha("one\ntwo\n"))
+        self.assertEqual(tool.Fingerprints(lf).file_hash("src/none.rs"), sha("missing"))
+        self.assertEqual(
+            tool.Fingerprints(lf).tests_hash("--lib"), tool.Fingerprints(crlf).tests_hash("--lib")
+        )
+
+    def test_the_mutant_and_command_fingerprints(self):
+        fingerprints = tool.Fingerprints(self.tree())
+        base = mutant("a", old="x\ny", new="x\nz", cmd="cargo test  --lib")
+        same = dict(base, old="x\r\ny", new="x\r\nz", cmd="test --lib", id="other", desc="changed")
+        self.assertEqual(fingerprints.of(base), fingerprints.of(same))
+        for change in ({"old": "x\nq"}, {"new": "x\nq"}, {"file": "src/b.rs"}):
+            self.assertNotEqual(
+                fingerprints.of(base)["mutant"], fingerprints.of(dict(base, **change))["mutant"]
+            )
+        self.assertNotEqual(
+            fingerprints.of(base)["cmd"], fingerprints.of(dict(base, cmd="test --lib --x"))["cmd"]
+        )
+        self.assertEqual(sorted(fingerprints.of(base)), ["cmd", "file", "mutant", "tests"])
+
+    def test_the_mutated_hash_needs_one_anchor(self):
+        root = self.base / "mutated"
+        put(root / "src" / "a.rs", "a\r\nb\r\na\r\n")
+        fingerprints = tool.Fingerprints(root)
+        self.assertEqual(fingerprints.mutated_hash(mutant("m", old="b", new="c")), sha("a\nc\na\n"))
+        self.assertIsNone(fingerprints.mutated_hash(mutant("m", old="a", new="c")))
+        self.assertIsNone(fingerprints.mutated_hash(mutant("m", old="q", new="c")))
+        self.assertIsNone(
+            fingerprints.mutated_hash(mutant("m", file="src/none.rs", old="a", new="c"))
+        )
+
+
 class NormalizeTests(ToolTest):
+    PRINT = {"mutant": "m", "cmd": "c", "tests": "t", "file": "f"}
+
     def outcome(self, ids, raw):
         job = tool.Job(0, "tree", "target", [{"id": name} for name in ids])
         found = tool.Outcome(job)
@@ -617,8 +781,9 @@ class NormalizeTests(ToolTest):
 
     def normalize(self, kind, ids, raw):
         expected = {name: "killed" for name in ids}
+        prints = {name: self.PRINT for name in ids}
         found = self.outcome(ids, raw)
-        return tool.normalize_outcome({"kind": kind}, found, expected), found
+        return tool.normalize_outcome({"kind": kind}, found, expected, prints), found
 
     def test_k71_results_map_to_the_normalized_record(self):
         raw = {
@@ -655,6 +820,7 @@ class NormalizeTests(ToolTest):
                 "seconds": 7,
                 "restored": True,
                 "expected": "killed",
+                "fingerprint": self.PRINT,
             },
         )
         self.assertEqual((records["b"]["status"], records["b"]["seconds"]), ("survived", 4))
@@ -721,6 +887,7 @@ class NormalizeTests(ToolTest):
                     "seconds": 0,
                     "restored": None,
                     "expected": "killed",
+                    "fingerprint": self.PRINT,
                 },
             )
             self.assertEqual(found.missing, ["a"])
@@ -798,7 +965,7 @@ class RunTests(ToolTest):
         for key in ("started_at", "finished_at"):
             self.assertRegex(document[key], r"^\d{4}-\d\d-\d\dT\d\d:\d\d:\d\dZ$")
         self.assertIsInstance(document["wall_seconds"], float)
-        self.assertEqual(document["unsupported"], [])
+        self.assertEqual((document["skipped"], document["unsupported"]), ({}, []))
         statuses = {name: record["status"] for name, record in document["results"].items()}
         self.assertEqual(
             statuses, {"m1": "killed", "m2": "survived", "m3": "killed", "m4": "killed"}
@@ -810,6 +977,7 @@ class RunTests(ToolTest):
             [
                 "expected",
                 "failed_tests",
+                "fingerprint",
                 "restored",
                 "seconds",
                 "status",
@@ -821,6 +989,7 @@ class RunTests(ToolTest):
             ("KILLED", ["stub::fails"], True),
         )
         self.assertEqual(document["results"]["m2"]["expected"], "survived")
+        self.assertEqual(sorted(record["fingerprint"]), ["cmd", "file", "mutant", "tests"])
         (log,) = self.stub_logs()
         self.assertEqual((norm(log["cwd"]), norm(log["root"])), (norm(repo), norm(repo)))
         self.assertEqual(norm(log["target"]), norm(work / "target-0"))
@@ -833,7 +1002,7 @@ class RunTests(ToolTest):
         self.assertNotIn("--no-offline", argv)
         self.assertFalse(Path(argv[argv.index("--list") + 1]).exists())
         self.assertFalse(Path(argv[argv.index("--out") + 1]).exists())
-        self.assertEqual(sorted(p.name for p in work.iterdir()), ["target-0"])
+        self.assertEqual(sorted(p.name for p in work.iterdir()), ["record.json", "target-0"])
         self.assertEqual(git(repo, "status", "--porcelain"), "")
         self.assertNotIn("[job", text)
         self.assertIn("m1: KILLED", text)
@@ -1074,6 +1243,7 @@ class RunTests(ToolTest):
             ["plan", "--help"],
             ["run", "--help"],
             ["merge", "--help"],
+            ["changed", "--help"],
         ):
             with self.subTest(argv), self.assertRaises(SystemExit) as caught:
                 self.invoke(*argv)
@@ -1195,6 +1365,264 @@ class RunTests(ToolTest):
         self.assertIn("RESTORE FAILED", err)
 
 
+class OnlyChangedTests(ToolTest):
+    def setUp(self):
+        super().setUp()
+        self.repo = self.make_repo()
+        self.work = self.base / "work"
+        self.ledger = self.ledger_file(standard_ledger())
+
+    def run_all(self, *extra, **named):
+        ledger = named.get("ledger", self.ledger)
+        code, text, err = self.invoke(*self.run_args(self.repo, ledger, *extra))
+        self.assertEqual(code, 0, text + err)
+        return text
+
+    def changed(self, *extra, **named):
+        ledger = named.get("ledger", self.ledger)
+        code, out, err = self.invoke(
+            "changed", "--root", self.repo, "--ledger", ledger, "--work-dir", self.work, *extra
+        )
+        self.assertEqual(code, 0, err)
+        self.last_err = err
+        lines = out.splitlines()
+        ids = [line for line in lines if not line.startswith("#")]
+        counts = [line for line in lines if re.match(r"# \d+ of \d+$", line)]
+        skips = dict(
+            line[len("# skip "):].split(": ", 1) for line in lines if line.startswith("# skip ")
+        )
+        self.assertEqual(len(counts), 1, out)
+        return ids, counts[0], skips
+
+    def test_a_run_records_what_it_replayed_and_nothing_else_needs_a_replay(self):
+        self.assertEqual(self.changed()[:2], (["m1", "m2", "m3", "m4"], "# 4 of 4"))
+        self.assertEqual(self.changed("--shard", "0/2")[:2], (["m1", "m3"], "# 2 of 2"))
+        self.run_all()
+        store = json.loads((self.work / "record.json").read_text(encoding="utf-8"))
+        self.assertEqual(list(store), [str(self.ledger)])
+        entry = store[str(self.ledger)]["m1"]
+        self.assertEqual(sorted(entry), ["at", "fingerprint", "head", "status"])
+        self.assertEqual(
+            (entry["status"], entry["head"]), ("killed", git(self.repo, "rev-parse", "HEAD"))
+        )
+        ids, count, skips = self.changed()
+        head = git(self.repo, "rev-parse", "HEAD")[:12]
+        self.assertEqual((ids, count), ([], "# 0 of 4"))
+        self.assertEqual(
+            skips, {name: "unchanged since " + head for name in ("m1", "m2", "m3", "m4")}
+        )
+        for stale in self.logs.glob("*.json"):
+            stale.unlink()
+        text = self.run_all("--only-changed")
+        self.assertEqual(self.stub_logs(), [])
+        document = json.loads((self.base / "out.json").read_text(encoding="utf-8"))
+        self.assertEqual(
+            (document["results"], sorted(document["skipped"])), ({}, ["m1", "m2", "m3", "m4"])
+        )
+        self.assertIn("only changed: 0 of 4", text)
+        # An edit of one selected test file makes exactly that mutant run again.
+        with edited(self.repo / "tests" / "t1.rs", lambda text: text + "// edit\n"):
+            code, out, err = self.invoke(
+                "changed", "--root", self.repo, "--ledger", self.ledger, "--work-dir", self.work
+            )
+            skipped = [
+                "# skip %s: unchanged since %s" % (name, head) for name in ("m1", "m2", "m4")
+            ]
+            self.assertEqual((code, out.splitlines()), (0, ["m3", "# 1 of 4"] + skipped))
+            text = self.run_all("--only-changed")
+            (log,) = self.stub_logs()
+            self.assertEqual(log["ids"], ["m3"])
+            document = json.loads((self.base / "out.json").read_text(encoding="utf-8"))
+            self.assertEqual(list(document["results"]), ["m3"])
+            self.assertEqual(sorted(document["skipped"]), ["m1", "m2", "m4"])
+            self.assertIn("only changed: 1 of 4", text)
+            self.assertEqual(self.changed()[:2], ([], "# 0 of 4"))
+
+    def test_changes_that_matter_to_a_recorded_verdict(self):
+        self.run_all()
+        root = self.repo
+        cases = (
+            ("a mutated file", root / "src" / "a.rs", ["m1", "m2"]),
+            ("a selected test file", root / "tests" / "t1.rs", ["m3"]),
+            ("the other test file", root / "tests" / "t2.rs", ["m4"]),
+            ("the shared test helpers", root / "tests" / "common" / "mod.rs", ["m3", "m4"]),
+            ("the lock file", root / "Cargo.lock", ["m1", "m2", "m3", "m4"]),
+            ("a file nobody selects", root / ".gitignore", []),
+        )
+        for name, path, expected in cases:
+            with self.subTest(name), edited(path, lambda text: text + "// edit\n"):
+                ids, count, skips = self.changed()
+                self.assertEqual(ids, expected)
+                self.assertEqual(count, "# %d of 4" % len(expected))
+                self.assertEqual(
+                    sorted(skips), [m for m in ("m1", "m2", "m3", "m4") if m not in expected]
+                )
+
+        def ledger_with(index, **changes):
+            data = standard_ledger()
+            data[index].update(changes)
+            return self.ledger_file(data)
+
+        self.assertEqual(self.changed(ledger=ledger_with(3, desc="only a description"))[0], [])
+        self.assertEqual(
+            self.changed(
+                ledger=ledger_with(3, cmd="cargo   test --locked --offline  --test t2")
+            )[0],
+            [],
+        )
+        # Another filter after `--` is another baseline command: the verdict may differ.
+        self.assertEqual(
+            self.changed(
+                ledger=ledger_with(3, cmd="cargo test --locked --offline --test t2 -- other")
+            )[0],
+            ["m4"],
+        )
+        self.assertEqual(
+            self.changed(
+                ledger=ledger_with(3, cmd="cargo test --locked --offline --features x --test t2")
+            )[0],
+            ["m4"],
+        )
+        self.assertEqual(self.changed(ledger=ledger_with(1, new="let y = 4;"))[0], ["m2"])
+        self.assertEqual(self.changed(ledger=ledger_with(0, old="let x = 1; "))[0], ["m1"])
+        added = standard_ledger() + [
+            mutant("m5", "src/b.rs", "let z = 3;", "let z = 6;", "cargo test --lib")
+        ]
+        ids, count, _ = self.changed(ledger=self.ledger_file(added))
+        self.assertEqual((ids, count), (["m5"], "# 1 of 5"))
+        self.ledger_file(standard_ledger())
+        # Another expectation is another verdict to reach: the recorded one no longer counts.
+        ids, _, skips = self.changed("--survivors-ok", "m1")
+        self.assertEqual((ids, "m1" in skips), (["m1"], False))
+        # The shard and the id filter select before the change test does.
+        with edited(root / "tests" / "common" / "mod.rs", lambda text: text + "// edit\n"):
+            self.assertEqual(self.changed("--shard", "0/2")[:2], (["m3"], "# 1 of 2"))
+            self.assertEqual(self.changed("--shard", "1/2")[:2], (["m4"], "# 1 of 2"))
+            self.assertEqual(self.changed("--ids", "m1,m4")[:2], (["m4"], "# 1 of 2"))
+
+    def test_the_record_keeps_only_clean_verdicts(self):
+        data = [
+            standard_ledger()[0],
+            mutant("bad", desc="STUB_INVALID", old="let y = 2;", new="let y = 3;"),
+            mutant("loose", desc="STUB_RESTORE_FAIL", old="let y = 2;", new="let y = 4;"),
+            standard_ledger()[2],
+        ]
+        ledger = self.ledger_file(data)
+        code, text, err = self.invoke(*self.run_args(self.repo, ledger))
+        self.assertEqual(code, 2, text + err)
+        store = json.loads((self.work / "record.json").read_text(encoding="utf-8"))
+        self.assertEqual(sorted(store[str(ledger)]), ["m1"])
+
+    def test_a_record_can_live_elsewhere_and_a_corrupt_one_is_ignored(self):
+        elsewhere = self.base / "records" / "mine.json"
+        put(elsewhere, "{broken")
+        ids, count, _ = self.changed("--record", elsewhere)
+        self.assertEqual((ids, count), (["m1", "m2", "m3", "m4"], "# 4 of 4"))
+        self.assertIn("warning: ignoring the unreadable record file mine.json", self.last_err)
+        # A record that is not an object is replaced, not trusted.
+        put(elsewhere, json.dumps({str(self.ledger): ["not", "an", "object"]}))
+        self.assertEqual(self.changed("--record", elsewhere)[1], "# 4 of 4")
+        self.run_all("--record", elsewhere)
+        self.assertFalse((self.work / "record.json").exists())
+        self.assertEqual(self.changed("--record", elsewhere)[:2], ([], "# 0 of 4"))
+        # The record is kept per ledger path, as given.
+        other = self.ledger_file(standard_ledger(), "other.json")
+        self.assertEqual(
+            self.changed("--record", elsewhere, ledger=other)[:2],
+            (["m1", "m2", "m3", "m4"], "# 4 of 4"),
+        )
+
+
+class CarriedRunTests(ToolTest):
+    """Compact ledgers carry runs; an unchanged run is accepted, a stale one is replayed."""
+
+    def setUp(self):
+        super().setUp()
+        self.repo = self.make_repo()
+        self.work = self.base / "work"
+
+    def entry(self, status="killed", **extra):
+        text = SRC_A
+        new = "let x = 2;" + KILLS
+        run = {
+            "status": status,
+            "anchor_matches": 1,
+            "compiled": True,
+            "restored_identically": True,
+            "baseline_green": True,
+            "sha256_lf": {
+                "before": sha(text),
+                "mutated": sha(text.replace("let x = 1;", new)),
+                "restored": sha(text),
+            },
+        }
+        return mutant("c1", new=new, cmd="test --lib", runs={"box": run}, **extra)
+
+    def changed(self, data):
+        ledger = self.ledger_file(data)
+        code, out, err = self.invoke(
+            "changed", "--root", self.repo, "--ledger", ledger, "--work-dir", self.work
+        )
+        self.assertEqual(code, 0, err)
+        return out.splitlines()
+
+    def test_a_run_that_describes_the_current_file_is_accepted(self):
+        lines = self.changed(compact_ledger([self.entry()]))
+        self.assertEqual(lines, ["# 0 of 1", "# skip c1: accepted by the ledger's recorded run"])
+
+    def test_an_equivalent_mutant_is_accepted_on_a_surviving_run(self):
+        entry = dict(self.entry("survived"), equivalent={"argument": "x"})
+        self.assertEqual(self.changed(compact_ledger([entry]))[0], "# 0 of 1")
+        self.assertEqual(self.changed(compact_ledger([self.entry("survived")]))[0], "c1")
+
+    def test_any_missing_piece_of_evidence_replays_the_mutant(self):
+        broken = {
+            "wrong status": lambda run: run.update(status="survived"),
+            "not compiled": lambda run: run.update(compiled=False),
+            "two anchors": lambda run: run.update(anchor_matches=2),
+            "not restored": lambda run: run.update(restored_identically=False),
+            "baseline not green": lambda run: run.update(baseline_green=False),
+            "stale file": lambda run: run["sha256_lf"].update(before="0" * 64),
+            "other mutated text": lambda run: run["sha256_lf"].update(mutated="0" * 64),
+            "no hashes": lambda run: run.pop("sha256_lf"),
+        }
+        for name, spoil in broken.items():
+            entry = self.entry()
+            spoil(entry["runs"]["box"])
+            with self.subTest(name):
+                self.assertEqual(self.changed(compact_ledger([entry]))[0], "c1")
+
+    def test_an_edit_of_the_file_makes_the_recorded_run_stale(self):
+        data = compact_ledger([self.entry()])
+        with edited(self.repo / "src" / "a.rs", lambda text: "// header\n" + text):
+            self.assertEqual(self.changed(data)[0], "c1")
+        crlf = SRC_A.replace("\n", "\r\n")
+        with edited(self.repo / "src" / "a.rs", lambda text: crlf):
+            self.assertEqual(self.changed(data)[0], "# 0 of 1")
+
+    def test_an_anchor_that_is_not_unique_anymore_replays_the_mutant(self):
+        data = compact_ledger([self.entry()])
+        with edited(self.repo / "src" / "a.rs", lambda text: text + "let x = 1;\n"):
+            self.assertEqual(self.changed(data)[0], "c1")
+
+    def test_a_list_ledger_ignores_carried_runs(self):
+        data = [self.entry()]
+        self.assertEqual(self.changed(data)[0], "c1")
+
+    def test_a_record_of_this_machine_wins_over_the_carried_run(self):
+        data = compact_ledger([self.entry()])
+        ledger = self.ledger_file(data)
+        code, text, err = self.invoke(*self.run_args(self.repo, ledger, "--only-changed"))
+        self.assertEqual(code, 0, text + err)
+        self.assertEqual(self.stub_logs(), [])
+        code, text, err = self.invoke(*self.run_args(self.repo, ledger))
+        self.assertEqual(code, 0, text + err)
+        self.assertEqual(len(self.stub_logs()), 1)
+        lines = self.changed(data)
+        self.assertEqual(lines[0], "# 0 of 1")
+        self.assertIn("unchanged since", lines[1])
+
+
 class MergeTests(ToolTest):
     HEAD = "0123456789abcdef0123456789abcdef01234567"
 
@@ -1206,6 +1634,7 @@ class MergeTests(ToolTest):
             "seconds": seconds,
             "restored": True,
             "expected": expected,
+            "fingerprint": {"mutant": "a", "cmd": "b", "tests": "c", "file": "d"},
         }
         record.update(extra)
         return record
@@ -1223,6 +1652,7 @@ class MergeTests(ToolTest):
             "finished_at": "2026-01-01T00:10:00Z",
             "wall_seconds": 600.0,
             "results": results,
+            "skipped": {},
             "unsupported": [],
         }
         document.update(extra)
@@ -1263,6 +1693,7 @@ class MergeTests(ToolTest):
                 "survived": 1,
                 "invalid": 0,
                 "missing": 0,
+                "skipped": 0,
                 "unsupported": 0,
                 "unexpected": 0,
             },
@@ -1270,10 +1701,11 @@ class MergeTests(ToolTest):
         self.assertIn("# Mutant replay: ", markdown.splitlines()[0])
         self.assertTrue(markdown.splitlines()[0].endswith(" @ " + self.HEAD[:12]))
         self.assertIn(
-            "| mutants | killed | survived | invalid | missing | unsupported | unexpected |",
+            "| mutants | killed | survived | invalid | missing | skipped | unsupported |"
+            " unexpected |",
             markdown,
         )
-        self.assertIn("| 4 | 3 | 1 | 0 | 0 | 0 | 0 |", markdown)
+        self.assertIn("| 4 | 3 | 1 | 0 | 0 | 0 | 0 | 0 |", markdown)
         self.assertIn("## Differences from the ledger", markdown)
         self.assertIn("None: every replayable mutant has the expected verdict.", markdown)
         self.assertIn("<details><summary>All mutants (4)</summary>", markdown)
@@ -1315,6 +1747,15 @@ class MergeTests(ToolTest):
         self.assertIn("| m4 | killed | missing | - | - | - |", markdown)
         code, *_ = self.merge(standard_ledger(), self.base / "results")
         self.assertEqual(code, 1)
+
+    def test_a_skipped_mutant_counts_as_matching(self):
+        results = self.good()
+        del results["m3"]
+        document = self.document("a.json", results, skipped={"m3": "unchanged since 0123456789ab"})
+        code, out, markdown, data = self.merge(standard_ledger(), document)
+        self.assertEqual(code, 0, out)
+        self.assertEqual((data["totals"]["skipped"], data["totals"]["unexpected"]), (1, 0))
+        self.assertIn("| m3 | killed | skipped | - | - |", markdown)
 
     def test_expected_survivors(self):
         ledger = [
@@ -1508,7 +1949,7 @@ class MergeTests(ToolTest):
             "merge", "--root", repo, "--ledger", ledger, "--results", self.base / "results"
         )
         self.assertEqual(code, 0, out + err)
-        self.assertIn("| 4 | 3 | 1 | 0 | 0 | 0 | 0 |", out)
+        self.assertIn("| 4 | 3 | 1 | 0 | 0 | 0 | 0 | 0 |", out)
 
 
 class RealLedgerTests(ToolTest):

@@ -4,10 +4,10 @@
 Why: tests/k71_mutants.py and tests/compact_mutant_replay.py replay a ledger one mutant at a time
 in one tree, and every mutant is a cargo build, so a whole ledger takes hours. This front end only
 changes how that work is scheduled, never what is measured. It splits a ledger over CI jobs
-(`plan`, `run --shard`), runs several isolated git worktrees at once (`run --jobs`) and merges the
-shard results into one verdict table (`merge`). Anchors, restores and verdicts stay in the two
-existing tools: they are called as black boxes, from the copy inside the tree under test, and are
-never edited.
+(`plan`, `run --shard`), runs several isolated git worktrees at once (`run --jobs`), replays only
+the mutants whose inputs changed (`run --only-changed`) and merges the shard results into one
+verdict table (`merge`). Anchors, restores and verdicts stay in the two existing tools: they are
+called as black boxes, from the copy inside the tree under test, and are never edited.
 
 Supported ledgers (`load_ledger` detects the kind):
   list     a JSON list of {id, desc, file, old, new, cmd}, or a dict {"mutants": [...]} of such
@@ -46,10 +46,25 @@ run per work dir at a time. A restore that fails leaves a mutated file in the tr
 (exit 2): in --root fix it with `git checkout`; the job trees are reset at the start of the next
 run.
 
+--only-changed is for intermediate heads. Every run stores, per ledger path as given, the
+fingerprint of each mutant it replayed in <work-dir>/record.json (--record overrides it): hashes of
+the mutant text, of the baseline command, of the mutated file and of the test sources the command
+selects (Cargo files, tests/NAME.rs or tests/NAME/ plus tests/common for --test NAME; src/ and
+build.rs for the library, a binary, examples or no --test; crates/ too for -p or --workspace), all
+over LF-normalized text so Windows and Linux agree. --only-changed skips a mutant whose stored
+fingerprint is unchanged and whose stored verdict is the expected one. For a compact ledger it
+also accepts the run the ledger carries when no record exists: expected status, one anchor,
+compiled, restored identically, green baseline, and the hashes of the current file and of the
+current file with old replaced by new. It trusts that nothing outside those inputs, for example a
+source file other than the mutated one, flips a verdict. That is why it is for intermediate heads
+only: the independent second-machine replay, and any `--min-machines 2` evidence, is needed once,
+at the final head, and is run without --only-changed so that every mutant is replayed on exactly
+that tree.
+
 Results: `run --out` writes one normalized document {tool, kind, ledger, shard, jobs, machine,
-head, started_at, finished_at, wall_seconds, results, unsupported}. `results` maps each
+head, started_at, finished_at, wall_seconds, results, skipped, unsupported}. `results` maps each
 replayed id to {status (killed, survived or invalid), tool_status (the word of the tool itself),
-failed_tests (at most 5), seconds, restored, expected}. A selected mutant that its
+failed_tests (at most 5), seconds, restored, expected, fingerprint}. A selected mutant that its
 tool never reported (the tool died, or the whole job timed out) is invalid with tool_status
 "no-result". For a compact ledger `--native-out FILE` also writes the union of the workers' own
 OUT files, which the compact tool's own `merge` reads.
@@ -64,17 +79,20 @@ Usage:
   python tests/mutant_replay.py run --root . --ledger tests/k71_mutants.json --shard 3/20 \\
       --out results/shard-3.json
   python tests/mutant_replay.py run --root . --ledger tests/k71_mutants.json --jobs 4 \\
-      --out results.json
+      --only-changed --out results.json
   python tests/mutant_replay.py merge --root . --ledger tests/k71_mutants.json --results results/ \\
       --summary summary.md
+  python tests/mutant_replay.py changed --root . --ledger tests/k71_mutants.json
 """
 import argparse
 import collections
 import concurrent.futures
 import datetime
+import hashlib
 import json
 import os
 import platform
+import shlex
 import shutil
 import stat
 import subprocess
@@ -101,9 +119,11 @@ TOTAL_COLUMNS = (
     "survived",
     "invalid",
     "missing",
+    "skipped",
     "unsupported",
     "unexpected",
 )
+MISSING = hashlib.sha256(b"missing").hexdigest()
 PRINT_LOCK = threading.Lock()
 
 
@@ -117,6 +137,18 @@ def say(text="", stream=None):
             # A console that cannot show a character must not stop a replay that runs for hours.
             encoding = getattr(stream, "encoding", None) or "ascii"
             print(text.encode(encoding, "replace").decode(encoding), file=stream, flush=True)
+
+
+def sha(data):
+    return hashlib.sha256(data).hexdigest()
+
+
+def lf_text(text):
+    return text.replace("\r\n", "\n")
+
+
+def lf_bytes(data):
+    return data.replace(b"\r\n", b"\n")
 
 
 def posix(path):
@@ -337,6 +369,205 @@ def select_mutants(ledger, ids=(), shard=None):
 def unsupported_of(ledger, ids=()):
     wanted = set(ids)
     return [name for name in ledger.unsupported if not wanted or name in wanted]
+
+
+# --- fingerprints ---------------------------------------------------------------------------
+
+
+def command_words(command):
+    try:
+        words = shlex.split(command)
+    except ValueError:
+        words = command.split()
+    if words and words[0] == "cargo":
+        words = words[1:]
+    # Words after a bare `--` go to the test harness (libtest has its own --test flag).
+    return words[: words.index("--")] if "--" in words else words
+
+
+def parse_selection(command):
+    """(names of the --test targets, selects the library or a binary, selects a package)."""
+    words = command_words(command)
+    tests, library, package = [], False, False
+    index = 0
+    while index < len(words):
+        flag, equals, value = words[index].partition("=")
+        index += 1
+        if flag in ("--test", "--bin", "--example", "-p", "--package", "--manifest-path"):
+            if not equals and index < len(words):
+                value = words[index]
+                index += 1
+            if flag == "--test":
+                if value:
+                    tests.append(value)
+            elif flag in ("--bin", "--example"):
+                library = True
+            else:
+                package = True
+        elif flag in ("--lib", "--bins", "--examples", "--all-targets", "--doc"):
+            library = True
+        elif flag in ("--workspace", "--all"):
+            package = True
+    return tests, library, package
+
+
+class Fingerprints(object):
+    """The hashes that decide whether an earlier verdict still holds in the tree under `root`."""
+
+    def __init__(self, root):
+        self.root = Path(root)
+        self._files = {}
+        self._walks = {}
+        self._tests = {}
+
+    def file_hash(self, relative):
+        """SHA-256 of the LF-normalized file; the literal text "missing" when it is not there."""
+        relative = posix(relative)
+        if relative not in self._files:
+            try:
+                data = (self.root / relative).read_bytes()
+            except OSError:
+                self._files[relative] = MISSING
+            else:
+                self._files[relative] = sha(lf_bytes(data))
+        return self._files[relative]
+
+    def source_text(self, relative):
+        try:
+            return lf_text((self.root / posix(relative)).read_bytes().decode("utf-8"))
+        except (OSError, ValueError):
+            return None
+
+    def walk(self, folder, suffixes=(".rs",)):
+        """Relative paths of the matching files under `folder`; build output is never an input."""
+        key = (folder, suffixes)
+        if key not in self._walks:
+            found = []
+            for directory, names, files in os.walk(str(self.root / folder)):
+                names[:] = [name for name in names if name != "target"]
+                for name in files:
+                    if name.endswith(suffixes):
+                        relative = os.path.relpath(os.path.join(directory, name), str(self.root))
+                        found.append(posix(relative))
+            self._walks[key] = sorted(found)
+        return self._walks[key]
+
+    def test_files(self, command):
+        tests, library, package = parse_selection(command)
+        files = ["Cargo.toml", "Cargo.lock"]
+        for name in tests:
+            folder = self.root / "tests" / name
+            if folder.is_dir():
+                files += self.walk("tests/" + name)
+            if not folder.is_dir() or (self.root / "tests" / (name + ".rs")).is_file():
+                files.append("tests/%s.rs" % name)
+        if tests and (self.root / "tests" / "common").is_dir():
+            files += self.walk("tests/common")
+        if library or not tests:
+            files += self.walk("src")
+            if (self.root / "build.rs").is_file():
+                files.append("build.rs")
+        if package:
+            files += self.walk("crates", (".rs", "Cargo.toml"))
+        return sorted(set(files))
+
+    def tests_hash(self, command):
+        files = tuple(self.test_files(command))
+        if files not in self._tests:
+            digest = hashlib.sha256()
+            for relative in files:
+                digest.update(("%s\0%s\n" % (relative, self.file_hash(relative))).encode("utf-8"))
+            self._tests[files] = digest.hexdigest()
+        return self._tests[files]
+
+    def of(self, mutant):
+        """The four fingerprints of a mutant: its text, its command, its tests and its file."""
+        text = "\0".join([posix(mutant["file"]), lf_text(mutant["old"]), lf_text(mutant["new"])])
+        command = " ".join(mutant["cmd"].split())
+        if command.startswith("cargo "):
+            command = command[len("cargo ") :]
+        return {
+            "mutant": sha(text.encode("utf-8")),
+            "cmd": sha(command.encode("utf-8")),
+            "tests": self.tests_hash(mutant["cmd"]),
+            "file": self.file_hash(mutant["file"]),
+        }
+
+    def mutated_hash(self, mutant):
+        """Hash of the LF-normalized file with `old` replaced by `new`.
+
+        None unless `old` occurs exactly once, which is what both tools require of an anchor.
+        """
+        text = self.source_text(mutant["file"])
+        old, new = lf_text(mutant["old"]), lf_text(mutant["new"])
+        if text is None or text.count(old) != 1:
+            return None
+        return sha(text.replace(old, new, 1).encode("utf-8"))
+
+
+def carried_run(fingerprints, entry, expected):
+    """The machine whose run, recorded in the ledger itself, still describes the current file."""
+    runs = entry.get("runs")
+    if not isinstance(runs, dict):
+        return None
+    here = fingerprints.file_hash(entry["file"])
+    mutated = fingerprints.mutated_hash(entry)
+    if here == MISSING or mutated is None:
+        return None
+    for machine, run in sorted(runs.items()):
+        sums = run.get("sha256_lf") if isinstance(run, dict) else None
+        if (
+            isinstance(sums, dict)
+            and run.get("status") == expected
+            and run.get("anchor_matches") == 1
+            and run.get("compiled") is True
+            and run.get("restored_identically") is True
+            and run.get("baseline_green") is True
+            and sums.get("before") == here
+            and sums.get("mutated") == mutated
+        ):
+            return machine
+    return None
+
+
+def split_changed(ledger, chosen, expected, fingerprints, records):
+    """(mutants to replay, {id: reason} of the mutants whose earlier verdict still holds)."""
+    todo, skipped = [], {}
+    for mutant in chosen:
+        name = mutant["id"]
+        record = records.get(name)
+        if isinstance(record, dict):
+            same = record.get("fingerprint") == fingerprints.of(mutant)
+            if same and record.get("status") == expected[name]:
+                head = str(record.get("head") or "")[:12]
+                skipped[name] = "unchanged since " + (head or "an earlier replay")
+                continue
+        elif ledger.kind == "compact" and carried_run(
+            fingerprints, ledger.entries[name], expected[name]
+        ):
+            skipped[name] = "accepted by the ledger's recorded run"
+            continue
+        todo.append(mutant)
+    return todo, skipped
+
+
+def load_store(path):
+    """The record of earlier replays: {ledger path: {id: {fingerprint, status, head, at}}}."""
+    if not Path(path).is_file():
+        return {}
+    data = read_json(path)
+    if not isinstance(data, dict):
+        say("warning: ignoring the unreadable record file " + Path(path).name, sys.stderr)
+        return {}
+    return data
+
+
+def store_records(store, ledger_path):
+    """The records of one ledger; the store is repaired in place if that entry is not a dict."""
+    records = store.get(ledger_path)
+    if not isinstance(records, dict):
+        records = store[ledger_path] = {}
+    return records
 
 
 # --- git and worktrees ----------------------------------------------------------------------
@@ -571,7 +802,7 @@ def seconds_of(value):
     return 0
 
 
-def make_record(entry, statuses, restored_key, tail_key, expected):
+def make_record(entry, statuses, restored_key, tail_key, expected, fingerprint):
     """The normalized record of one mutant from the raw entry of a tool (None: no result)."""
     if not isinstance(entry, dict):
         return {
@@ -581,6 +812,7 @@ def make_record(entry, statuses, restored_key, tail_key, expected):
             "seconds": 0,
             "restored": None,
             "expected": expected,
+            "fingerprint": fingerprint,
         }
     raw = entry.get("status") if isinstance(entry.get("status"), str) else "unknown"
     restored = entry.get(restored_key)
@@ -591,6 +823,7 @@ def make_record(entry, statuses, restored_key, tail_key, expected):
         "seconds": seconds_of(entry.get("seconds")),
         "restored": restored if isinstance(restored, bool) else None,
         "expected": expected,
+        "fingerprint": fingerprint,
     }
     tail = entry.get(tail_key)
     if record["status"] == "invalid" and isinstance(tail, str) and tail.strip():
@@ -606,7 +839,7 @@ def raw_table(kind, raw):
     return {r["id"]: r for r in results or [] if isinstance(r, dict) and "id" in r}
 
 
-def normalize_outcome(config, outcome, expected):
+def normalize_outcome(config, outcome, expected, prints):
     """Normalized records of every mutant of the worker; the ids without a result are listed."""
     table = raw_table(config["kind"], outcome.raw)
     if config["kind"] == "list":
@@ -619,7 +852,9 @@ def normalize_outcome(config, outcome, expected):
         entry = table.get(name)
         if entry is None:
             outcome.missing.append(name)
-        records[name] = make_record(entry, statuses, restored_key, tail_key, expected[name])
+        records[name] = make_record(
+            entry, statuses, restored_key, tail_key, expected[name], prints[name]
+        )
     return records
 
 
@@ -709,6 +944,24 @@ def cmd_plan(args):
     return 0
 
 
+def cmd_changed(args):
+    root = existing_dir(args.root)
+    ledger = load_ledger(resolve_ledger(root, args.ledger))
+    expected = ledger.expected_map(parse_ids(args.survivors_ok))
+    shard = parse_shard(args.shard) if args.shard else None
+    chosen = select_mutants(ledger, parse_ids(args.ids), shard)
+    work = work_dir_of(root, args.work_dir)
+    record_path = Path(args.record) if args.record else work / "record.json"
+    records = store_records(load_store(record_path), args.ledger)
+    todo, skipped = split_changed(ledger, chosen, expected, Fingerprints(root), records)
+    for mutant in todo:
+        say(mutant["id"])
+    say("# %d of %d" % (len(todo), len(chosen)))
+    for name, reason in skipped.items():
+        say("# skip %s: %s" % (name, reason))
+    return 0
+
+
 def cmd_run(args):
     started_at, began = utc_now(), time.monotonic()
     root = existing_dir(args.root)
@@ -718,10 +971,19 @@ def cmd_run(args):
     expected = ledger.expected_map(parse_ids(args.survivors_ok))
     ids = parse_ids(args.ids)
     shard = parse_shard(args.shard) if args.shard else None
-    todo = select_mutants(ledger, ids, shard)
-    order = [m["id"] for m in todo]
+    chosen = select_mutants(ledger, ids, shard)
+    order = [m["id"] for m in chosen]
     work = work_dir_of(root, args.work_dir)
+    record_path = Path(args.record) if args.record else work / "record.json"
+    store = load_store(record_path)
+    records = store_records(store, args.ledger)
     head = head_of(root)
+    fingerprints = Fingerprints(root)
+    prints = {m["id"]: fingerprints.of(m) for m in chosen}
+    todo, skipped = chosen, {}
+    if args.only_changed:
+        todo, skipped = split_changed(ledger, chosen, expected, fingerprints, records)
+        say("only changed: %d of %d mutants to replay" % (len(todo), len(chosen)))
     if args.native_out and ledger.kind != "compact":
         say("warning: --native-out is only used for compact ledgers", sys.stderr)
     document = {
@@ -736,6 +998,7 @@ def cmd_run(args):
         "finished_at": None,
         "wall_seconds": None,
         "results": {},
+        "skipped": skipped,
         "unsupported": unsupported_of(ledger, ids),
     }
     results = {}
@@ -745,6 +1008,18 @@ def cmd_run(args):
         document["finished_at"] = utc_now()
         document["wall_seconds"] = round(time.monotonic() - began, 1)
         write_json(args.out, document)
+
+    def remember(new_records):
+        stamp = utc_now()
+        for name, record in new_records.items():
+            if record["status"] in ("killed", "survived") and record["restored"] is not False:
+                records[name] = {
+                    "fingerprint": record["fingerprint"],
+                    "status": record["status"],
+                    "head": head,
+                    "at": stamp,
+                }
+        write_json(record_path, store)
 
     outcomes = []
     if todo:
@@ -775,9 +1050,10 @@ def cmd_run(args):
                 for future in concurrent.futures.as_completed(futures):
                     outcome = future.result()
                     outcomes.append(outcome)
-                    normal = normalize_outcome(config, outcome, expected)
+                    normal = normalize_outcome(config, outcome, expected, prints)
                     results.update(normal)
                     flush()
+                    remember(normal)
     flush()
     if args.native_out and ledger.kind == "compact":
         union = union_native([o.raw for o in outcomes], order)
@@ -785,7 +1061,7 @@ def cmd_run(args):
             say("warning: nothing was replayed, --native-out is not written", sys.stderr)
         else:
             write_json(args.native_out, union)
-    return report_run(args, results, outcomes)
+    return report_run(args, results, skipped, outcomes)
 
 
 def restore_failed(outcome, results):
@@ -795,12 +1071,12 @@ def restore_failed(outcome, results):
     )
 
 
-def report_run(args, results, outcomes):
+def report_run(args, results, skipped, outcomes):
     """Print the short summary of a run and return its exit code."""
     count = collections.Counter(record["status"] for record in results.values())
     say(
-        "replayed %d: %d killed, %d survived, %d invalid"
-        % (len(results), count["killed"], count["survived"], count["invalid"])
+        "replayed %d: %d killed, %d survived, %d invalid; skipped %d"
+        % (len(results), count["killed"], count["survived"], count["invalid"], len(skipped))
     )
     differing = [(n, r) for n, r in results.items() if r["status"] != r["expected"]]
     for name, record in differing[:10]:
@@ -853,9 +1129,9 @@ def load_result_files(paths):
 
 
 def combine(documents):
-    """Results and unsupported ids of all files; a later file wins, except that a
+    """Results, skipped ids and unsupported ids of all files; a later file wins, except that a
     valid record is never replaced by an invalid one."""
-    results, unsupported = {}, []
+    results, skipped, unsupported = {}, {}, []
     for _path, document in documents:
         for name, record in document["results"].items():
             if not isinstance(record, dict):
@@ -866,14 +1142,17 @@ def combine(documents):
             )
             if not worse:
                 results[name] = record
+        skipped.update(document.get("skipped") or {})
         unsupported += [n for n in document.get("unsupported") or [] if n not in unsupported]
-    return results, unsupported
+    return results, skipped, unsupported
 
 
-def verdict_of(name, results):
+def verdict_of(name, results, skipped):
     record = results.get(name)
     if record is not None and record.get("status") in ("killed", "survived"):
         return record["status"]
+    if name in skipped:
+        return "skipped"
     return "invalid" if record is not None else "missing"
 
 
@@ -892,7 +1171,7 @@ def wall_time(documents, given):
 
 
 def build_summary(args, ledger, documents, expected):
-    results, extra_unsupported = combine(documents)
+    results, skipped, extra_unsupported = combine(documents)
     rows = []
     for mutant in ledger.mutants:
         name = mutant["id"]
@@ -902,7 +1181,7 @@ def build_summary(args, ledger, documents, expected):
             {
                 "id": name,
                 "expected": expected[name],
-                "verdict": verdict_of(name, results),
+                "verdict": verdict_of(name, results, skipped),
                 "tool_status": record.get("tool_status"),
                 "seconds": seconds if isinstance(seconds, (int, float)) else None,
                 "failed_tests": list(record.get("failed_tests") or []),
@@ -910,7 +1189,7 @@ def build_summary(args, ledger, documents, expected):
             }
         )
     count = collections.Counter(row["verdict"] for row in rows)
-    unexpected = [row for row in rows if row["verdict"] != row["expected"]]
+    unexpected = [row for row in rows if row["verdict"] not in (row["expected"], "skipped")]
     unsupported = list(ledger.unsupported)
     unsupported += [n for n in extra_unsupported if n not in unsupported]
     totals = {
@@ -919,6 +1198,7 @@ def build_summary(args, ledger, documents, expected):
         "survived": count["survived"],
         "invalid": count["invalid"],
         "missing": count["missing"],
+        "skipped": count["skipped"],
         "unsupported": len(unsupported),
         "unexpected": len(unexpected),
     }
@@ -1086,8 +1366,12 @@ def build_parser():
     run.add_argument("--ids", default="", help="comma-separated ids to replay")
     run.add_argument("--jobs", type=int, default=1, help="isolated worktrees to run at once")
     run.add_argument(
-        "--work-dir", help="trees and target dirs (default <root>/target/mutant-replay)"
+        "--work-dir", help="trees, target dirs and record (default <root>/target/mutant-replay)"
     )
+    run.add_argument(
+        "--only-changed", action="store_true", help="skip mutants whose inputs did not change"
+    )
+    run.add_argument("--record", help="record of earlier replays (default <work-dir>/record.json)")
     run.add_argument("--timeout", type=int, default=3600, help="seconds per mutant (default 3600)")
     run.add_argument("--machine", help="machine label of the compact tool (default: the host name)")
     run.add_argument("--no-offline", action="store_true", help="forwarded to k71_mutants.py only")
@@ -1107,6 +1391,15 @@ def build_parser():
     merge.add_argument(
         "--report-only", action="store_true", help="exit 0 whatever the verdicts are"
     )
+
+    changed = add("changed", cmd_changed, "list the ids --only-changed would replay")
+    changed.add_argument("--ids", default="", help="comma-separated ids to look at")
+    changed.add_argument("--shard", help="I/N")
+    changed.add_argument(
+        "--record", help="record of earlier replays (default <work-dir>/record.json)"
+    )
+    changed.add_argument("--work-dir", help="default <root>/target/mutant-replay")
+    changed.add_argument("--survivors-ok", default="", help="comma-separated ids that may survive")
     return parser
 
 

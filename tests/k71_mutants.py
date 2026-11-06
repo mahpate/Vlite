@@ -29,6 +29,11 @@ again), while a fresh directory pays a cold start (every dependency, once). Carg
 absolute workspace path in its fingerprints, so a kept directory is warm only for the path it was
 built in. `tests/mutant_replay.py run` keeps one target dir per worker under its work dir (default
 target/mutant-replay) and, with --jobs N, replays in N isolated worktrees at once.
+
+Intermediate heads: `tests/mutant_replay.py run --only-changed` replays only the mutants whose text,
+selected test files, baseline command or mutated source file differ from what it recorded, so a
+campaign does not start over at every head. An independent second-machine replay is needed only at
+the final head, and it runs without --only-changed so that every mutant ran on exactly that tree.
 """
 import argparse
 import hashlib
