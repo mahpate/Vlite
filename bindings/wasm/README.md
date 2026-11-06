@@ -32,9 +32,10 @@ Key-value: `kvGet(collection, namespace, key)`, `kvPut(collection, namespace, ke
 `kvDelete(collection, namespace, key, expected?)` and `kvList(collection, namespace, prefix?, after?, limit?)` store
 byte values under namespaced text keys in a collection that already exists and has one dimension: `create(1)` has the
 `default` collection, an image from `fromBytes` may hold others, and a missing collection is never created. Values are
-`Uint8Array` (a string, an `ArrayBuffer`, a `DataView`, another typed array, an array, or a proxy or other object that only
-resembles one is refused with `invalid_request`, never copied; a `Buffer` or a subclass is a `Uint8Array`, and what is
-stored is what the array holds whatever `length` it claims);
+`Uint8Array` (a string, an `ArrayBuffer`, a `DataView`, another typed array, an array, a detached array, or a proxy or other
+object that only resembles one is refused with `invalid_request`, never copied; a `Buffer` or a subclass is a `Uint8Array`, and
+what is stored is what the array holds whatever `length`, `slice` or species it claims or defines: the binding reads it through
+the intrinsics of `%TypedArray%.prototype`, so no code of the value's own runs);
 collections, namespaces, keys, prefixes and `after` are well-formed strings (an argument of the wrong type throws an `Error`
 whose `code` is `invalid_request`, where the Node and Python wrappers throw `TypeError` or `ValueError` first, and one with an
 unpaired surrogate is `invalid_input`, as in the other bindings). `limit` is a `number` that is a safe integer, never a coerced

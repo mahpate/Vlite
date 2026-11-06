@@ -291,6 +291,37 @@ for (const [source, bytes] of [[padded, [1, 2]], [lying, [3]], [new Throwing(2),
   hostile.kvPut('default', 'n', 'v', source);
   assert.deepEqual(hostile.kvGet('default', 'n', 'v').value, new Uint8Array(bytes));
 }
+// Nothing of the caller's value is looked up while the database is borrowed: an own `slice`, a species, a
+// constructor getter and a proxy that supplies a `slice` are never run, and what is stored is what the array holds.
+let ran = 0;
+const own = new Uint8Array([1, 2, 3]);
+own.slice = () => { ran++; return new Uint8Array([9]); };
+class Species extends Uint8Array { static get [Symbol.species]() { ran++; return Uint8Array; } }
+const species = new Species(2);
+species.set([4, 5]);
+const constructed = new Uint8Array([6]);
+Object.defineProperty(constructed, 'constructor', { get() { ran++; throw new Error('the getter ran'); } });
+for (const [source, bytes] of [[own, [1, 2, 3]], [species, [4, 5]], [constructed, [6]]]) {
+  hostile.kvPut('default', 'n', 'v', source);
+  assert.deepEqual(hostile.kvGet('default', 'n', 'v').value, new Uint8Array(bytes));
+}
+for (const bad of [
+  { slice: () => Object.create(Uint8Array.prototype) },
+  new Proxy({}, { get() { ran++; return () => new Uint8Array(1); } }),
+  new Proxy(new Uint8Array(1), { get(target, key) { ran++; return key === 'slice' ? () => new Uint8Array(1) : Reflect.get(target, key); } }),
+]) {
+  assert.throws(() => hostile.kvPut('default', 'n', 'w', bad), (error) => codeOf(error) === 'invalid_request');
+  assert.equal(hostile.kvGet('default', 'n', 'w'), undefined);
+}
+assert.equal(ran, 0, 'no code of the caller ran');
+// A detached array is refused, and the database stays usable.
+const buffer = new ArrayBuffer(8);
+const detached = new Uint8Array(buffer);
+structuredClone(buffer, { transfer: [buffer] });
+assert.throws(() => hostile.kvPut('default', 'n', 'w', detached), (error) => codeOf(error) === 'invalid_request');
+assert.equal(hostile.kvGet('default', 'n', 'w'), undefined);
+hostile.kvPut('default', 'n', 'ok', new Uint8Array([7]));
+assert.deepEqual(hostile.kvGet('default', 'n', 'ok').value, new Uint8Array([7]));
 // The largest value and one byte more, however it is held.
 hostile.kvPut('default', 'n', 'big', new Uint8Array(1047290));
 assert.throws(() => hostile.kvPut('default', 'n', 'big', new Uint8Array(1047291)), (error) => codeOf(error) === 'invalid_input');
