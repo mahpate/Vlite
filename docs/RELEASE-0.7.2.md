@@ -4,7 +4,7 @@ VLite 0.7.2 adds an atomic key-value batch and a multi-key read (REST, gRPC, the
 
 <!-- source: docs/KEY-VALUE.md, docs/API.md#key-value-entries, docs/GRPC.md#key-value-entries, docs/MCP.md#local-key-value-tools, docs/TOOLS.md, bindings/README.md, docs/CONSOLE.md, docs/SECURITY.md#memory-bound-resources, docs/MEMORY.md -->
 
-It follows [0.7.1](RELEASE-0.7.1.md). The store opens unchanged: there is no new file format, setting or migration, and files written by 0.7.1 open as before. The wire changes only add: two REST routes, two gRPC calls, two MCP tools, two shell commands, one audit event and one capability flag. A file written by 0.7.2 opens in 0.7.1 (see [Rollback](#rollback)). No benchmarks were run for this release, and the [0.7.0 numbers](RELEASE-0.7.0.md#benchmarks) make no claim about it.
+It follows [0.7.1](RELEASE-0.7.1.md). The store opens unchanged: there is no new file format, setting or migration, and files written by 0.7.1 open as before. The server's behavior only gains: two REST routes, two gRPC calls, two MCP tools, two shell commands, one audit event and one capability flag. The OpenAPI document also corrects the entry of one existing route without changing the route (see [Compatibility](#compatibility)). A file written by 0.7.2 opens in 0.7.1 (see [Rollback](#rollback)). No benchmarks were run for this release, and the [0.7.0 numbers](RELEASE-0.7.0.md#benchmarks) make no claim about it.
 
 ## What is new
 
@@ -94,8 +94,8 @@ After a rollback:
 
 - **Files and settings.** No file format, flag or setting changes, and no server dependency changes: `Cargo.toml` and `Cargo.lock` match 0.7.1 apart from the version, and the minimum Rust version (1.89) is unchanged. The WebAssembly package adds one dependency, `js-sys` (default features off), for its key-value methods.
   <!-- source: Cargo.toml, Cargo.lock, bindings/wasm/Cargo.toml, docs/RELEASE-0.7.1.md#compatibility -->
-- **Wire.** The OpenAPI document gains the two paths and their schemas, and the proto file gains the two RPCs `GetKvEntries` and `WriteKvBatch` and ten messages; nothing existing is removed or changed. `GET /v1/capabilities` gains `features.kv_batch` and the two paths in `routes`. The OpenAPI `info.version` reads 0.7.2.
-  <!-- source: src/openapi.json, proto/vlite/v1/vlite.proto, docs/GRPC.md#key-value-entries, src/server/admin.rs -->
+- **Wire.** The proto file gains the two RPCs `GetKvEntries` and `WriteKvBatch` and ten messages, and nothing existing in it is removed or changed. The OpenAPI document gains the two paths and their schemas and corrects one entry: `POST /v1/collections/{collection}/batches` now documents its `204` and its errors (400, 401, 403, 404, 409, 413, 415, 422, 429 and 503) and no longer lists a `200`, which the route never served. That changes the document only: the handler, its answers and the route are unchanged, and `POST /v1/batches` is as before. `GET /v1/capabilities` gains `features.kv_batch` and the two paths in `routes`. The OpenAPI `info.version` reads 0.7.2.
+  <!-- source: src/openapi.json (the two kv paths and the entry /v1/collections/{c}/batches), proto/vlite/v1/vlite.proto, docs/GRPC.md#key-value-entries, src/server/admin.rs -->
 - **Audit log.** The new `kv_batch` event is described above. The existing events keep their fields.
   <!-- source: docs/SECURITY.md#audit-actors, src/server/kv.rs -->
 - **Tools.** `vlite-mcp` lists `vlite_kv_get_many` always and `vlite_kv_batch` only with `--writable`; a read-only session refuses the batch with `read_only`. `vlite-shell` gains `kv-get-many` and `kv-batch`, and `--read-only` refuses `kv-batch`. Their request fields and bounds are those of the REST routes.
