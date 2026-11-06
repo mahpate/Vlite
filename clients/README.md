@@ -89,7 +89,7 @@ Node.js is the tested runtime; browser clients are not a separate supported SDK.
 ## Supported operations and wire contracts
 
 The Python, JavaScript and .NET clients also expose the key-value REST
-operations added in 0.7.0: `kv_get`, `kv_put`, `kv_delete`, `kv_list`; `kvGet`, `kvPut`,
+operations: `kv_get`, `kv_put`, `kv_delete`, `kv_list`; `kvGet`, `kvPut`,
 `kvDelete`, `kvList`; and `KvGetAsync`, `KvPutAsync`, `KvDeleteAsync`,
 `KvListAsync`, respectively. These flat methods require an explicit collection,
 namespace and (except list) key. Use a pre-existing, dedicated one-dimensional
@@ -614,7 +614,7 @@ transports (the caller is responsible for equivalent transport safety).
 
 ### .NET key-value operations
 
-For a server that serves the key-value routes (0.7.0 or newer) and an existing dedicated
+For a server that serves the key-value routes and an existing dedicated
 one-dimensional `cache` collection, run in a .NET 8+ console application
 referencing `VLite.Client`:
 

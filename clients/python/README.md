@@ -41,7 +41,7 @@ If the caller elects to retry, it must retry the whole request.
 
 ## Key-value operations
 
-The KV REST surface (added in 0.7.0) requires a server with KV routes and an existing,
+The KV REST surface requires a server with KV routes and an existing,
 dedicated one-dimensional collection (`cache` below). Namespaces are application
 partitions, not authorization boundaries. Run with `VLITE_URL` and
 `VLITE_AUTH_TOKEN` set:
