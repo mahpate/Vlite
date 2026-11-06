@@ -99,7 +99,7 @@ There is no snapshot across pages: one page uses one expiry clock, and entries w
 
 A list reads the whole collection. Its cost grows with the number of entries in the collection, not with `limit`, and heavy listing can slow writers. Since 0.7.1 the memory a list holds is bounded by `limit` and the 16 MiB page, not by the number of entries: the scan keeps only the `limit + 1` smallest candidate keys, and a REST, gRPC, MCP or shell page is built from one scan that encodes only the entries it returns. Keep large key spaces in their own collections and list by a narrow prefix.
 
-In Rust, `KvView::list` copies every value it returns: 10,000 values of just under 1 MiB are roughly 10 GB, so use a smaller `limit` when values are large. `KvView::visit_at` lends each entry to a callback as a `KvRef` instead, with `has_next` telling whether the listing continues, and stops when the callback returns `ControlFlow::Break(())`:
+In Rust, `KvView::list` copies every value it returns: 10,000 values of just under 1 MiB are roughly 10 GB, so use a smaller `limit` when values are large. `KvView::visit_at` lends each entry to a callback as a `KvRef` instead (only the library builds one, and a later release may add fields), with `has_next` telling whether the listing continues, and stops when the callback returns `ControlFlow::Break(())`:
 
 ```rust
 use std::{ops::ControlFlow, time::{SystemTime, UNIX_EPOCH}};
@@ -137,7 +137,7 @@ A line over the shell or MCP limit is refused (`invalid_input: line exceeds 1677
 
 A key hashes to 16 consecutive record IDs. If all 16 hold live entries of other keys or other records, a put for that key answers 409 `kv_slots_exhausted` (gRPC `FAILED_PRECONDITION`; the shell and MCP prefix `kv_slots_exhausted:`). A slot that holds an expired entry of another key is reused, and a record that is not a key-value entry is never overwritten. Anyone who can write the collection can place ordinary records at a key's IDs, so give `write` on a key-value collection only to principals you trust with its keys.
 
-The JSON metrics carry `kv_slots_exhausted_total` and Prometheus carries `vlite_kv_slots_exhausted_total`: the number of key-value puts refused this way, across all credentials. A rise that nobody expects points at records planted over a key's IDs. The slots are the record IDs from `vlite::kv::first_slot(namespace, key)` (Rust), wrapping, so freeing a key means removing the other records at those IDs. Using another key also works.
+The JSON metrics carry `kv_slots_exhausted_total` and Prometheus carries `vlite_kv_slots_exhausted_total`: the number of key-value puts refused this way, across all credentials (a REST request whose client disconnected before the answer was produced is not counted; a gRPC call is counted even if its client cancels). A rise that nobody expects points at records planted over a key's IDs. The slots are the record IDs from `vlite::kv::first_slot(namespace, key)` (Rust), wrapping, so freeing a key means removing the other records at those IDs. Using another key also works.
 <!-- TODO-VERIFY: "freeing a key means removing the other records at those IDs" is derived from the slot probe in src/kv.rs, not from a documented procedure. -->
 
 ## Durability
