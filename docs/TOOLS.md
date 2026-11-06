@@ -40,9 +40,9 @@ It requires an explicitly provisioned memory binding on a running server;
 it never opens a database or supplies a tenant/provider endpoint.
 
 ```powershell
-# Set VLITE_TOKEN securely in the environment, not on the command line.
-vlite-memory-cli --url https://localhost:8443 --binding notes --token-env VLITE_TOKEN remember --request remember.json
-vlite-memory-cli --url https://localhost:8443 --binding notes --token-env VLITE_TOKEN recall --request recall.json
+# Set VLITE_URL (for example http://127.0.0.1:8080) and VLITE_TOKEN in the environment; keep the token off the command line.
+vlite-memory-cli --url $env:VLITE_URL --binding notes --token-env VLITE_TOKEN remember --request remember.json
+vlite-memory-cli --url $env:VLITE_URL --binding notes --token-env VLITE_TOKEN recall --request recall.json
 ```
 
 Required flags are `--url`, `--binding`, `--token-env` and `--request FILE|-`.

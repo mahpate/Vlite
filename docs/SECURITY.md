@@ -128,7 +128,7 @@ Provision raw-holder credentials with `collections:["*"]` before granting raw
 access in the bindings file; credential creation treats a named reserved
 collection as missing. A memory agent's credential needs the same care: every
 memory route requires the credential to name the binding's evidence collection
-(or hold `["*"]`) as well as the `memory` operation, and once the bindings file
+(or hold `["*"]`), plus `graph_read` or `graph_write` and its route's evidence operations ([agent memory guide](MEMORY.md#set-up-a-binding)), and once the bindings file
 is in place a request to create a credential that names that collection answers
 `404`. Create such credentials before you configure the binding (they keep
 working, with the early-grant limit below), or give them `["*"]`. A root

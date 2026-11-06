@@ -55,7 +55,7 @@ Treat tokens as secrets. Keep them out of screenshots and logs.
 
 ## Find your way around
 
-The sidebar groups nine workspaces in 0.7.1. Tabs inside each
+The sidebar groups nine workspaces. Tabs inside each
 workspace hold its views:
 
 | Group | Workspace | Inside |
@@ -161,7 +161,7 @@ Versions/absolute expiry stay decimal strings. Blank expiry **clears TTL**.
 After conflicts/timeouts, fetch before retrying. Namespace changes retain drafts
 but reset to create-only. Keys retain line breaks. Expiry-only edits preserve
 bytes. CR/CRLF, BOM and binary values load as base64. Format switching converts
-values, refusing lossy text conversions.
+values, refusing lossy text conversions. See the [key-value guide](KEY-VALUE.md).
 
 ![Key-value workspace browsing synthetic preference keys](../site/assets/dashboard/current-key-value.png?v=connected)
 
@@ -170,7 +170,7 @@ values, refusing lossy text conversions.
 MemoryAI serves agent memory through an operator-provided binding, exact
 agent/user/session scope and **scoped API token**, not administrator sign-in.
 Recall accepts seeds, indexed text or vectors. Weighted ranking combines squared
-Euclidean vector distance with other signals. From 0.7.1, exact/MMR use cosine distance
+Euclidean vector distance with other signals. Exact/MMR use cosine distance
 without entity seeds. Exact permits text; MMR does not. Inspect revisions and truncation.
 
 Remember supports entity/episodic memories; consolidation retains originals.
@@ -181,7 +181,7 @@ minus two seconds for proxy clock skew, never your device clock. If unavailable,
 refresh and ask your operator to check server/proxy time. Consolidation accepts
 at most 64 memories.
 Receipt lookup supports forget/consolidate only. Fact correction, erasure jobs
-and automatic chat import are unavailable. See [memory serving](API.md).
+and automatic chat import are unavailable. See the [agent memory guide](MEMORY.md).
 
 ## Explore graphs
 
