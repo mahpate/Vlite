@@ -210,4 +210,51 @@ if (caps.features?.kv === true) {
 } else {
   console.log("SKIP JavaScript live key-value entries (the server has no key-value routes)");
 }
+
+// Atomic key-value batch and get-many on a dedicated one-dimension collection, dropped afterward.
+const kvName = "kvlive";
+await client.createCollection(kvName, 1);
+try {
+  const bytes = (...values) => Uint8Array.from(values);
+  const put = (namespace, key, value, expected = "any") => ({ op: "put", namespace, key, value, expected });
+  const del = (namespace, key, expected = "any") => ({ op: "delete", namespace, key, expected });
+  const ref = (namespace, key) => ({ namespace, key });
+  const first = await client.kvBatch({ collection: kvName, operations: [
+    put("a", "one", bytes(49)), put("a", "two", bytes(0, 255)), put("b", "one", bytes()), del("a", "nothing")] });
+  const version = first[0].version;
+  assert.ok(version > 0n);
+  assert.deepEqual(first.slice(0, 3).map((r) => r.version), [version, version, version]);
+  assert.deepEqual(first[3], { deleted: false });
+  const found = await client.kvGetMany({ collection: kvName, keys: [
+    ref("a", "two"), ref("a", "missing"), ref("b", "one"), ref("a", "one")] });
+  assert.equal(found.next_index, null);
+  assert.equal(found.items[1], null);
+  assert.deepEqual(found.items.filter((e) => e !== null).map((e) => [e.key, [...e.value], e.version]),
+    [["two", [0, 255], version], ["one", [], version], ["one", [49], version]]);
+  assert.deepEqual([...(await client.kvGet({ collection: kvName, namespace: "a", key: "one" })).value], [49]);
+  // A condition that fails anywhere in the batch writes nothing.
+  await assert.rejects(client.kvBatch({ collection: kvName, operations: [
+    put("a", "new", bytes(120)), del("a", "one", { revision: version + 1000n })] }), is412);
+  const after = await client.kvGetMany({ collection: kvName, keys: [ref("a", "new"), ref("a", "one")] });
+  assert.equal(after.items[0], null);
+  assert.deepEqual([...after.items[1].value], [49]);
+  // Conditions that hold; a replaced entry gets a larger version, and one batch shares one version.
+  const again = await client.kvBatch({ collection: kvName, operations: [
+    put("a", "one", bytes(49, 49), { revision: version }), put("a", "new", bytes(120), "absent"),
+    del("b", "one", { revision: version })] });
+  assert.ok(again[0].version === again[1].version && again[0].version > version);
+  assert.deepEqual(again[2], { deleted: true });
+  await assert.rejects(client.kvBatch({ collection: kvName, operations: [put("a", "new", bytes(121), "absent")] }), is412);
+  const listed = (await client.kvList({ collection: kvName, namespace: "a" })).items;
+  assert.deepEqual(listed.map((e) => [e.key, [...e.value]]), [["new", [120]], ["one", [49, 49]], ["two", [0, 255]]]);
+  assert.deepEqual(await client.kvBatch({ collection: kvName, operations: [] }), []);
+  assert.deepEqual(await client.kvBatch({ collection: kvName, operations: [del("a", "new"), del("a", "one"), del("a", "two")] }),
+    [{ deleted: true }, { deleted: true }, { deleted: true }]);
+  assert.deepEqual((await client.kvList({ collection: kvName, namespace: "a" })).items, []);
+  await assert.rejects(client.kvGetMany({ collection: "kvmissing", keys: [ref("a", "k")] }),
+    (e) => e instanceof VLiteError && e.status === 404 && e.code === "collection_not_found");
+  console.log("PASS JavaScript live key-value batch and get-many");
+} finally {
+  await client.dropCollection(kvName);
+}
 console.log("PASS JavaScript live REST client");

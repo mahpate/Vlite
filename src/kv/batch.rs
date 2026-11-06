@@ -35,8 +35,8 @@ pub(super) fn plan(
     operations: &[KvOp<'_>],
     now_ms: u64,
 ) -> Result<Plan> {
-    db.ensure_resident_in(collection)?;
     check(operations)?;
+    db.ensure_resident_in(collection)?;
     let mut pending: HashMap<u64, Slot> = HashMap::with_capacity(operations.len());
     let mut mutations = Vec::with_capacity(operations.len());
     let mut outcomes = Vec::with_capacity(operations.len());
@@ -143,13 +143,13 @@ pub(super) fn visit_many<F>(
 where
     F: FnMut(usize, Option<KvRef<'_>>) -> ControlFlow<()>,
 {
-    db.ensure_resident_in(collection)?;
     if keys.len() > MAX_KV_GET_MANY_KEYS {
         return Err(Error::InvalidKvKey("get-many takes at most 1000 keys"));
     }
     for &(namespace, key) in keys {
         validate(namespace, key)?;
     }
+    db.ensure_resident_in(collection)?;
     let state = db.state(collection);
     let records = state.records.resident()?;
     for (index, &(namespace, key)) in keys.iter().enumerate() {

@@ -68,9 +68,15 @@ occurs. A timeout may hide a committed mutation; re-read before deciding what
 to do. Acknowledgements sync only with server `--durability full`.
 
 `kv_get_many` and `kv_batch` take up to 1,000 keys or operations of one collection
-in a single request. A server without them (it does not advertise
-`features.kv_batch`) answers 404 `not_found`, which raises `UnsupportedError`; the
-client never falls back to single calls and never retries:
+in a single request. A server without them answers the admin token 404
+`not_found`, which raises `UnsupportedError`, and every other credential 403
+(`read_only` or `forbidden_scope`), which raises `VLiteError`, because its
+permission check runs before it matches a route. To find out beforehand, look for
+`/v1/collections/{collection}/kv/batch` and
+`/v1/collections/{collection}/kv/entries/get` in the `routes` of
+`GET /v1/capabilities`, which every credential may call; `features.kv_batch` is
+not that test, because a format 3 or 4 file serves both routes with the flag
+false. The client never falls back to single calls and never retries:
 
 ```python
 keys = [{"namespace": "app", "key": "a"}, {"namespace": "app", "key": "b"}]

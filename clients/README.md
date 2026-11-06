@@ -97,8 +97,9 @@ collection's `Records`), respectively. These flat methods require an explicit
 collection, namespace and (except list, get-many and batch) key. Use a
 pre-existing, dedicated one-dimensional
 collection: namespaces are not authorization boundaries. Values are bytes,
-`Uint8Array` or `byte[]` (maximum 1,047,290 bytes); u64s are `int`, `bigint` or
-`ulong`, encoded losslessly as decimal strings. Get decodes the value, put
+`Uint8Array`, `byte[]` or `[]byte` (maximum 1,047,290 bytes); u64s are `int`,
+`bigint`, `ulong` or `uint64`, encoded losslessly as decimal strings. Get
+decodes the value, put
 returns version/expiry, delete returns a boolean, and list returns items and
 `next_after` (exclusive `after`, no cross-page snapshot). Omitted/null KV expiry
 clears TTL. Get-many reads up to 1,000 keys and answers one position per key,
@@ -109,8 +110,16 @@ A batch commits up to 1,000 puts and deletes of one collection all or nothing
 (4,194,304 value bytes in total, each key named once); a batch put has no expiry,
 so it clears the deadline of the entry it replaces, and every put of a batch
 returns the same version. Only 404 `not_found` maps to an explicit unsupported
-exception (a server without the batch routes answers it); 404 `kv_not_found` and
-all other stable errors remain ordinary HTTP errors.
+exception; 404 `kv_not_found` and all other stable errors remain ordinary HTTP
+errors. A server without the batch routes answers 404 `not_found` to the admin
+token only. It answers every other credential 403 (`read_only` or
+`forbidden_scope`), an ordinary error, because its permission check runs before
+it matches a route. To find out beforehand, look for
+`/v1/collections/{collection}/kv/batch` and
+`/v1/collections/{collection}/kv/entries/get` in the `routes` of
+`GET /v1/capabilities`, which every credential may call; `features.kv_batch` is
+not that test, because a format 3 or 4 file serves both routes with the flag
+false.
 No retry, fallback, collection creation or exactly-once promise is added.
 Disconnects, cancellations and timeouts may hide committed mutations.
 Ordinary KV acknowledgements sync only under server `--durability full`.
@@ -632,9 +641,12 @@ A batch holds at most 1,000 operations and 4,194,304 value bytes and names each
 `(namespace, key)` once. Its puts carry no deadline: like a put without
 `ExpiresAtMs`, a batch put clears the deadline of the entry it replaces, and
 every put of one batch returns the same version. A server without the batch
-routes answers 404 `not_found`, returned as `*vlite.UnsupportedError`
-(`errors.Is(err, errors.ErrUnsupported)`, unwrapping to the `*vlite.APIError`);
-nothing falls back to single-key calls. After a `*vlite.TransportError` the
+routes answers the admin token 404 `not_found`, returned as
+`*vlite.UnsupportedError` (`errors.Is(err, errors.ErrUnsupported)`, unwrapping
+to the `*vlite.APIError`), and every other credential 403, an ordinary
+`*vlite.APIError`; the `routes` of `GET /v1/capabilities` tell beforehand
+whether the routes exist. Nothing falls back to single-key calls. After a
+`*vlite.TransportError` the
 batch either committed in full or not at all, and which is unknown: read the
 keys back with `KvGetMany` before deciding, and do not retry blindly.
 
@@ -702,6 +714,8 @@ milliseconds; omission/null clears expiry. `KvEntry`, `KvPutResult` and
 Pass `cancellation:` to any KV method; cancellation/timeout is a
 `TransportException` with an uncertain mutation outcome, never an automatic
 retry. Only an unknown KV route (404 `not_found`) raises `UnsupportedException`.
+A server without the batch routes answers that to the admin token only; every
+other credential gets 403, an ordinary `VLiteException`.
 
 `KvBatchAsync` atomically puts/deletes distinct keys in one collection (up to
 1,000 operations and 4 MiB of values); batch puts have no expiry and clear any

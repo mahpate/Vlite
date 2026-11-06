@@ -146,7 +146,10 @@ unknown or duplicate field. The decoded values of all puts total at most
 either violation is 422 `invalid_input`, and its message names the operation.
 `results[i]` answers `operations[i]`: a put gives
 `{"version":"<nonzero u64 decimal>"}` and a delete gives `{"deleted":<bool>}`.
-An empty batch answers `{"results":[]}`.
+An empty batch answers `{"results":[]}`. The 8 MiB body cap applies to the whole
+JSON body, so a batch inside every other limit is refused with 413
+`invalid_json` when many of its keys are escaped in JSON; use fewer or shorter
+keys, because a batch cannot be split without losing atomicity.
 
 The batch behaves as if its operations ran one at a time, in order, against the
 live state and one expiry clock, and were then committed once, as one frame: a
@@ -159,8 +162,11 @@ replaces. Each operation fails as its single call does: a failed condition is
 is 409 `graph_attached_record`. The first operation, in order, that cannot run
 fails the whole batch, and nothing is written. A delete of a key with no live
 entry succeeds with `deleted:false`, and a batch that changes no record commits
-nothing. Record quotas are checked once over the whole batch under the same
-guard as the commit, and a batch refused for slots counts once in
+nothing. The record quota is judged once, under the same guard as the commit, on
+the count that the whole batch leaves (the net change of all its slot changes,
+where the last write to a slot wins), and only when the batch writes at least
+one record, so an empty batch or a batch of deletes is never refused for quota,
+like a single delete. A batch refused for slots counts once in
 `kv_slots_exhausted_total`.
 
 **Multi-get.** `POST /v1/collections/{collection}/kv/entries/get` takes
@@ -178,21 +184,29 @@ null. The route needs `read`, so the read-only token may call it.
 
 Missing/due reads return 404 `kv_not_found`; a collection with other dimensions
 returns 409 `not_kv_collection`. Sixteen occupied collision-probe slots return
-409 `kv_slots_exhausted`; expiry before v5 returns 409 `upgrade_required`.
+409 `kv_slots_exhausted`; expiry before v5, or a batch that changes a record on a
+format 1 file, returns 409 `upgrade_required`.
 The batch and multi-get routes answer 403 `forbidden_scope` or `read_only`,
 404 `collection_not_found`, 429 and 503 `commit_indeterminate` as the single
-routes do, and a server without them answers 404 `not_found`.
+routes do. A server without them (0.7.1 and earlier) answers 404 `not_found` to
+the admin token and 403 to every other credential, because its permission check
+runs before it matches a route; look in `routes` of `GET /v1/capabilities`, as
+described below.
 Operation scope, tenant and immutable collection bindings apply before lookup.
 Ordinary record quotas also count KV entries. Mutations are audited without
 keys, namespaces or values; a batch is one `kv_batch` event with the number of
-puts and deletes. The audit covers requests that reach the store,
-including a failed compare-and-set and a missing or non-KV collection (logged
-as `(invalid)`); a request rejected while parsing is not audited, only logged
-without its address or content. Read-only handles refuse mutations.
+puts and deletes. The audit covers requests that reach the store. Any such
+request that fails (a failed compare-and-set, a 409 or 429, a missing or non-KV
+collection) records the collection as `(invalid)` and still records the actor;
+a request rejected while parsing is not audited, only logged without its
+address or content. Read-only handles refuse mutations.
 `GET /v1/capabilities` reports `features.kv: true` for format 5 files; a
 format 4 file still serves ordinary KV without expiry although the flag is false.
-`features.kv_batch` is true under the same condition, and `routes` lists the
-batch and multi-get routes; a server without them reports neither.
+`features.kv_batch` is true under the same condition. `routes` lists the batch
+and multi-get routes on every format of file, and a format 3 or 4 file serves
+both routes while the flag is false, so look for the two paths in `routes`, not
+at the flag, to learn whether a server has them. A server without them lists
+neither and has no `kv_batch` flag.
 
 Ordinary KV follows configured durability: `full` syncs before acknowledgment,
 `periodic` can lose up to a flush interval on OS crash/power loss, and `none` is
@@ -206,7 +220,7 @@ JavaScript, .NET and Go clients wrap these REST routes
 
 ## Key-value gRPC service
 
-`vlite.v1.Kv` adds six unary RPCs alongside the 35 `VLite` RPCs (41 total):
+`vlite.v1.Kv` is a separate service from `vlite.v1.VLite`. Its unary RPCs are:
 `GetKvEntry`, `PutKvEntry`, `DeleteKvEntry`, `ListKvEntries`, `GetKvEntries`
 and `WriteKvBatch`. Generate clients from `proto/vlite/v1/vlite.proto`. Each
 address requires an explicit nonempty `collection`; unlike legacy vector RPCs,

@@ -270,6 +270,15 @@ fn a_read_only_handle_refuses_a_batch_and_still_reads_many() {
             .write_batch(&[put("n", "new", b"x")]),
         Err(Error::ReadOnly)
     ));
+    // A batch that changes no record attempts no write, so the mode of the
+    // handle does not matter, as for a single delete of an absent key.
+    let mut kv = db.kv_store("default").unwrap();
+    assert!(kv.write_batch(&[]).unwrap().is_empty());
+    assert_eq!(
+        kv.write_batch(&[delete("n", "absent")]).unwrap(),
+        [KvOutcome::Deleted(false)]
+    );
+    assert!(!kv.delete("n", "absent", Expected::Any).unwrap());
     let entries = db
         .kv_view("default")
         .unwrap()
@@ -312,6 +321,26 @@ fn a_graph_attached_record_is_not_deleted_by_a_batch() {
             Err(Error::GraphAttachedRecord)
         ));
         assert!(kv.get("n", "first").unwrap().is_none());
+        // The first operation that cannot run is the one reported, as when
+        // they run one at a time: the attached delete before a failed
+        // condition, and a failed condition before the attached delete.
+        let failing = KvOp::Put {
+            namespace: "n",
+            key: "first",
+            value: b"x",
+            options: KvPut {
+                expected: Expected::Revision(1),
+                expires_at_ms: None,
+            },
+        };
+        assert!(matches!(
+            kv.write_batch(&[delete("n", "old"), failing]),
+            Err(Error::GraphAttachedRecord)
+        ));
+        assert!(matches!(
+            kv.write_batch(&[failing, delete("n", "old")]),
+            Err(Error::RevisionMismatch { .. })
+        ));
         // A put over the attached record is as allowed as the single call.
         kv.write_batch(&[put("n", "old", b"replaced")]).unwrap();
     }

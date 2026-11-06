@@ -290,7 +290,11 @@ impl proto::kv_server::Kv for Adapter {
                 let operations = request
                     .operations
                     .into_iter()
-                    .map(batch_operation)
+                    .enumerate()
+                    .map(|(index, operation)| {
+                        batch_operation(operation)
+                            .map_err(|error| rest::at("operations", index, error))
+                    })
                     .collect::<Result<Vec<_>, _>>()?;
                 let input = decode(json!({"operations":operations}))?;
                 let Json(value) = rest::batch(
@@ -338,18 +342,36 @@ impl proto::kv_server::Kv for Adapter {
     }
 }
 
-/// One batch operation as the REST request carries it; REST checks it.
+/// One batch operation as the REST request carries it; REST checks it. Every
+/// field of the message is named, so a field that a later release adds fails
+/// the build here instead of being dropped.
 fn batch_operation(operation: proto::KvBatchOperation) -> Result<Value, ApiError> {
-    match operation.kind {
-        Some(proto::kv_batch_operation::Kind::Put(put)) => Ok(json!({
-            "op":"put","namespace":put.namespace,"key":put.key,
-            "value_base64":BASE64_STANDARD.encode(put.value),
-            "expected":expectation(put.expected)
-        })),
-        Some(proto::kv_batch_operation::Kind::Delete(delete)) => Ok(json!({
-            "op":"delete","namespace":delete.namespace,"key":delete.key,
-            "expected":expectation(delete.expected)
-        })),
+    let proto::KvBatchOperation { kind } = operation;
+    match kind {
+        Some(proto::kv_batch_operation::Kind::Put(put)) => {
+            let proto::KvBatchPut {
+                namespace,
+                key,
+                value,
+                expected,
+            } = put;
+            Ok(json!({
+                "op":"put","namespace":namespace,"key":key,
+                "value_base64":BASE64_STANDARD.encode(value),
+                "expected":expectation(expected)
+            }))
+        }
+        Some(proto::kv_batch_operation::Kind::Delete(delete)) => {
+            let proto::KvBatchDelete {
+                namespace,
+                key,
+                expected,
+            } = delete;
+            Ok(json!({
+                "op":"delete","namespace":namespace,"key":key,
+                "expected":expectation(expected)
+            }))
+        }
         None => Err(unprocessable("KV batch operation is required")),
     }
 }

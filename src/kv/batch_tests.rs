@@ -1020,10 +1020,10 @@ fn the_quota_check_sees_the_slots_the_batch_will_write_and_delete() {
     let mut db = memory();
     batch(&mut db, &[put("n", a, b"a"), put("n", b, b"b")]).unwrap();
     let id = db.resolve("default").unwrap();
-    let changes = db
+    let plan = db
         .kv_view_by_id(id)
         .unwrap()
-        .batch_changes_at(
+        .plan_batch_at(
             &[
                 delete("n", a),
                 put("n", c, b"c"),
@@ -1036,15 +1036,117 @@ fn the_quota_check_sees_the_slots_the_batch_will_write_and_delete() {
     // a's slot is freed and then taken by c; b keeps its own slot; the delete
     // of a key that is not there changes nothing.
     assert_eq!(
-        changes,
+        plan.changes(),
         [(slot(0), false), (slot(0), true), (slot(1), true)]
     );
     let error = db
         .kv_view_by_id(id)
         .unwrap()
-        .batch_changes_at(&[put_if("n", a, b"x", Expected::Absent)], NOW)
-        .unwrap_err();
+        .plan_batch_at(&[put_if("n", a, b"x", Expected::Absent)], NOW)
+        .err()
+        .unwrap();
     assert!(matches!(error, Error::RevisionMismatch { .. }));
+}
+
+#[cfg(feature = "server")]
+#[test]
+fn a_plan_commits_what_write_batch_commits_and_only_where_it_was_made() {
+    let [a, b, c, _] = SHARED;
+    let mut planned = memory();
+    let mut direct = memory();
+    let mut version = 0;
+    for db in [&mut planned, &mut direct] {
+        let outcomes = batch(db, &[put("n", a, b"a"), put("n", b, b"b")]).unwrap();
+        let KvOutcome::Put { version: written } = outcomes[1] else {
+            panic!("a put gives a version");
+        };
+        version = written;
+    }
+    let operations = [
+        delete("n", a),
+        put("n", c, b"c"),
+        put_if("n", b, b"b2", Expected::Revision(version)),
+        delete("n", "absent"),
+    ];
+    let id = planned.resolve("default").unwrap();
+    let sequence = planned.sequence;
+    let plan = planned
+        .kv_view_by_id(id)
+        .unwrap()
+        .plan_batch_at(&operations, NOW)
+        .unwrap();
+    // Planning writes nothing.
+    assert_eq!(planned.sequence, sequence);
+    let outcomes = planned
+        .kv_store_by_id(id)
+        .unwrap()
+        .commit_batch_plan(plan)
+        .unwrap();
+    assert_eq!(outcomes, batch(&mut direct, &operations).unwrap());
+    assert_eq!(snapshot(&planned), snapshot(&direct));
+    assert_eq!(planned.sequence, direct.sequence);
+
+    // A plan that a commit has overtaken is refused, unwritten: its slots may
+    // no longer be what it saw.
+    let stale = planned
+        .kv_view_by_id(id)
+        .unwrap()
+        .plan_batch_at(&[put("n", a, b"again")], NOW)
+        .unwrap();
+    batch(&mut planned, &[put("n", SHARED[3], b"other")]).unwrap();
+    let before = (planned.sequence, snapshot(&planned));
+    let error = planned
+        .kv_store_by_id(id)
+        .unwrap()
+        .commit_batch_plan(stale)
+        .unwrap_err();
+    assert!(matches!(error, Error::Corrupt { .. }), "{error:?}");
+    assert_eq!((planned.sequence, snapshot(&planned)), before);
+}
+
+#[test]
+fn a_request_error_comes_before_the_state_of_the_handle() {
+    let mut db = memory();
+    let id = db.resolve("default").unwrap();
+    db.poisoned = true;
+    let long_key = "k".repeat(MAX_KV_KEY_BYTES + 1);
+    for operations in [
+        vec![put("a", &long_key, b"1")],
+        vec![put("a", "x", b"1"), put("a", "x", b"2")],
+    ] {
+        assert!(
+            matches!(
+                super::batch::plan(&db, id, &operations, NOW).err(),
+                Some(Error::InvalidKvKey(_))
+            ),
+            "{operations:?}"
+        );
+    }
+    let too_many = vec![("a", "x"); MAX_KV_GET_MANY_KEYS + 1];
+    let blank = [("a", "")];
+    for keys in [&too_many[..], &blank[..]] {
+        let result = super::batch::visit_many(&db, id, keys, NOW, |_, _| ControlFlow::Continue(()));
+        assert!(
+            matches!(result, Err(Error::InvalidKvKey(_))),
+            "{} keys",
+            keys.len()
+        );
+    }
+    // A request that is valid meets the state of the handle.
+    assert!(matches!(
+        super::batch::plan(&db, id, &[put("a", "x", b"1")], NOW).err(),
+        Some(Error::Poisoned)
+    ));
+    assert!(matches!(
+        super::batch::visit_many(
+            &db,
+            id,
+            &[("a", "x")],
+            NOW,
+            |_, _| ControlFlow::Continue(())
+        ),
+        Err(Error::Poisoned)
+    ));
 }
 
 #[test]

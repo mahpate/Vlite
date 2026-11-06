@@ -165,6 +165,24 @@ pub struct KvStore<'a> {
     id: u16,
 }
 
+/// A batch resolved against the collection as it stood at `sequence`, the last
+/// commit; [`KvStore::commit_batch_plan`] refuses it once anything has been
+/// committed since.
+#[cfg(feature = "server")]
+pub(crate) struct BatchPlan {
+    plan: batch::Plan,
+    sequence: u64,
+}
+
+#[cfg(feature = "server")]
+impl BatchPlan {
+    /// Each slot the batch writes or deletes, in order, with whether a record
+    /// is there afterwards: what the live-record quota is judged on.
+    pub(crate) fn changes(&self) -> Vec<(u64, bool)> {
+        batch::changes(&self.plan.mutations)
+    }
+}
+
 impl Database {
     /// Opens the key-value store in `collection`, creating a one-dimension
     /// collection when it does not exist (v4+). An existing collection must
@@ -255,18 +273,16 @@ impl KvView<'_> {
         }
     }
 
-    /// The record slots `operations` would write or delete, in order, each
-    /// with whether a record is there afterwards: what the live-record quota
-    /// is judged on before the batch commits. Fails as `write_batch_at` does
-    /// for the same arguments.
+    /// A batch checked and resolved against the collection as it stands, not
+    /// yet committed: the quota is judged on its slot changes before
+    /// [`KvStore::commit_batch_plan`] commits it, and the batch is resolved
+    /// only once. Fails as `write_batch_at` does for the same arguments.
     #[cfg(feature = "server")]
-    pub(crate) fn batch_changes_at(
-        &self,
-        operations: &[KvOp<'_>],
-        now_ms: u64,
-    ) -> Result<Vec<(u64, bool)>> {
-        let plan = batch::plan(self.db, self.id, operations, now_ms)?;
-        Ok(batch::changes(&plan.mutations))
+    pub(crate) fn plan_batch_at(&self, operations: &[KvOp<'_>], now_ms: u64) -> Result<BatchPlan> {
+        Ok(BatchPlan {
+            plan: batch::plan(self.db, self.id, operations, now_ms)?,
+            sequence: self.db.sequence,
+        })
     }
 
     pub fn get(&self, namespace: &str, key: &str) -> Result<Option<KvEntry>> {
@@ -527,6 +543,25 @@ impl KvStore<'_> {
         now_ms: u64,
     ) -> Result<Vec<KvOutcome>> {
         let plan = batch::plan(self.db, self.id, operations, now_ms)?;
+        self.commit(plan)
+    }
+
+    /// Commits a plan that [`KvView::plan_batch_at`] made. The caller keeps the
+    /// database exclusively from the plan to here, so nothing can have been
+    /// committed in between; a plan that was overtaken anyway is refused
+    /// unwritten, never applied to slots it did not see.
+    #[cfg(feature = "server")]
+    pub(crate) fn commit_batch_plan(&mut self, plan: BatchPlan) -> Result<Vec<KvOutcome>> {
+        if plan.sequence != self.db.sequence {
+            return Err(Error::Corrupt {
+                offset: 0,
+                reason: "a key-value batch plan was overtaken by a commit",
+            });
+        }
+        self.commit(plan.plan)
+    }
+
+    fn commit(&mut self, plan: batch::Plan) -> Result<Vec<KvOutcome>> {
         if !plan.mutations.is_empty() {
             self.db.write_batch_in(self.id, &plan.mutations)?;
         }
@@ -581,8 +616,9 @@ fn probe(db: &Database, collection: u16, namespace: &str, key: &str, now_ms: u64
 /// `probe` as an earlier operation of the same batch leaves the collection.
 /// `pending` holds the slots it wrote or freed and takes precedence over the
 /// stored records, so a key looks at the collection as if the earlier writes
-/// had been applied. It can never name the key's own slot: a batch names each
-/// key once.
+/// had been applied. A batch names each key once, so `pending` never holds this
+/// key's own live record. It can hold the slot of an expired leftover of this
+/// key that an earlier put reused, and then the key reads as absent.
 fn probe_pending(
     db: &Database,
     collection: u16,

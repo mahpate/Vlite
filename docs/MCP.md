@@ -333,7 +333,7 @@ Server errors keep their `<code>: <message>` form; an unreachable server returns
 
 ## Local key-value tools
 
-These six tools work with `--db PATH`, independently of graph support.
+The tools below work with `--db PATH`, independently of graph support.
 They require an explicit `collection` naming an existing one-dimensional
 collection: they never create one and do not default to `default`.
 Use dedicated KV collections; vector/import/graph operations can otherwise
@@ -387,7 +387,8 @@ put succeeds but is immediately absent. TTL requires v5; no automatic upgrade
 occurs. Versions increase within a file lineage but must be re-read after
 maintenance that rewrites revisions.
 
-Unknown/duplicate fields and wrong types fail `invalid_request`; bounds and
+Unknown/duplicate fields and wrong types fail `invalid_request`, and so does an
+`expected` text that is not `any`, `absent` or a revision object; bounds and
 noncanonical values fail `invalid_input`. Other stable error prefixes include
 `kv_not_found`, `collection_not_found`, `not_kv_collection`,
 `precondition_failed`, `kv_slots_exhausted`, `graph_attached_record`,

@@ -375,7 +375,14 @@ can also expose, overwrite, delete or expire ordinary KV records. A principal
 that can write the collection can also fill a key's 16 record IDs with ordinary
 records, so that puts for that key fail with `kv_slots_exhausted` (409 on REST,
 `FAILED_PRECONDITION` on gRPC), and a batch that holds such a put fails as a
-whole. Use dedicated collections for key-value data,
+whole. A refused batch writes nothing, so a principal that can write but not
+read, and that has filled all 16 record IDs of some key, can test a guessed
+revision without changing the entry: a batch whose first operation names the
+revision to test and whose second puts the key whose IDs it filled answers 412
+when the revision is wrong and 409 `kv_slots_exhausted` when it is right. That
+tells it only whether a commit sequence is the current revision of a key it may
+already overwrite, and each such 409 counts in `kv_slots_exhausted_total`. Use
+dedicated collections for key-value data,
 grant `write` on them only to principals you trust with their keys, and watch
 `kv_slots_exhausted_total`: it counts each REST or gRPC request answered this
 way, across all credentials (a refused batch counts once; a REST request whose

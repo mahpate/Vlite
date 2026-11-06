@@ -587,7 +587,7 @@ pub(super) async fn list(
 
 /// Prefixes the message of a request error with the position of the part of
 /// the request it is about.
-fn at(list: &str, index: usize, error: ApiError) -> ApiError {
+pub(super) fn at(list: &str, index: usize, error: ApiError) -> ApiError {
     ApiError {
         message: format!("{list}[{index}]: {}", error.message),
         ..error
@@ -780,14 +780,19 @@ pub(super) async fn batch(
             writable(db)?;
             let now = crate::current_time_ms();
             let operations = prepared.operations();
-            let changes = collection
+            let plan = collection
                 .kv_view(db)?
-                .batch_changes_at(&operations, now)
+                .plan_batch_at(&operations, now)
                 .map_err(kv_failure)?;
-            enforce_quota(&quota_service, db, scope.role(), collection.id(), &changes)?;
+            // A batch that writes no record takes no slot: as for a single
+            // delete, no quota applies, whatever the scope already holds.
+            let changes = plan.changes();
+            if changes.iter().any(|&(_, present)| present) {
+                enforce_quota(&quota_service, db, scope.role(), collection.id(), &changes)?;
+            }
             let outcomes = collection
                 .kv_store(db)?
-                .write_batch_at(&operations, now)
+                .commit_batch_plan(plan)
                 .map_err(kv_failure)?;
             Ok(Json(
                 json!({"results":outcomes.iter().map(outcome_json).collect::<Vec<_>>()}),

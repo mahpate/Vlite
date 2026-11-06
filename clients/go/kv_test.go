@@ -1091,6 +1091,10 @@ func TestLiveKv(t *testing.T) {
 		t.Fatal(e)
 	}
 	defer func() {
+		// A collection must be empty to be dropped, also after a failed check.
+		for _, key := range []string{"greeting", "a", "b", "c"} {
+			_, _ = kv.KvDelete(ctx, "app", key, KvAny())
+		}
 		if _, err := kv.Drop(ctx); err != nil {
 			t.Error(err)
 		}

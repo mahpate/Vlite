@@ -11,7 +11,7 @@ use tower::ServiceExt;
 use vlite::{
     CollectionSpec, CreateOptions, Database, FormatVersion,
     kv::{KvPut, first_slot},
-    server::{BearerToken, ServerOptions, Service, configured_admin_router},
+    server::{BearerToken, GroupCommitConfig, ServerOptions, Service, configured_admin_router},
 };
 
 const ADMIN: &str = "fake_kv_batch_admin_token_0123456789_ABCDEFGHIJKLMNOPQRSTUVWXYZ";
@@ -890,12 +890,16 @@ fn item(key: &str, value: &[u8], version: u64) -> Value {
 
 #[tokio::test]
 async fn a_get_many_response_is_inclusive_at_sixteen_mebibytes() {
-    // The same boundary with and without an absent key among the twelve: it
-    // stays in the response as `null`, which has bytes of its own.
-    for (with_null, boundary) in [false, true]
-        .into_iter()
-        .flat_map(|with_null| [PAGE - 1, PAGE, PAGE + 1].map(|boundary| (with_null, boundary)))
-    {
+    // The same boundary with and without an absent key among the twelve (it
+    // stays in the response as `null`, which has bytes of its own), and with
+    // and without one more key after the entry at the boundary: that entry
+    // then ends the response with the index of the key that follows, which
+    // has fewer bytes than `null`.
+    for (with_null, trailing, boundary) in [false, true].into_iter().flat_map(|with_null| {
+        [false, true].into_iter().flat_map(move |trailing| {
+            [PAGE - 1, PAGE, PAGE + 1].map(move |boundary| (with_null, trailing, boundary))
+        })
+    }) {
         let directory = tempfile::tempdir().unwrap();
         let mut db = database();
         let mut store = db.kv_store("default").unwrap();
@@ -916,7 +920,8 @@ async fn a_get_many_response_is_inclusive_at_sixteen_mebibytes() {
         }
         // The thirteenth entry brings the whole response to `boundary` bytes:
         // the twelve items and their envelope, a comma, then its own item.
-        let head_bytes = serde_json::to_vec(&json!({"items":expected,"next_index":null}))
+        let next = trailing.then_some(count + 1);
+        let head_bytes = serde_json::to_vec(&json!({"items":expected,"next_index":next}))
             .unwrap()
             .len();
         let version = last + 1;
@@ -931,7 +936,7 @@ async fn a_get_many_response_is_inclusive_at_sixteen_mebibytes() {
             version
         );
         expected.push(item(&key, &value, version));
-        let oracle = json!({"items":expected,"next_index":null});
+        let oracle = json!({"items":expected,"next_index":next});
         assert_eq!(
             serde_json::to_vec(&oracle).unwrap().len(),
             boundary,
@@ -943,6 +948,9 @@ async fn a_get_many_response_is_inclusive_at_sixteen_mebibytes() {
             .map(|i| json!({"namespace":"edge","key":format!("{i:02}")}))
             .collect();
         keys.push(json!({"namespace":"edge","key":key}));
+        if trailing {
+            keys.push(json!({"namespace":"edge","key":"zz"}));
+        }
         let (status, page, size) = raw(
             &app,
             ADMIN,
@@ -953,11 +961,11 @@ async fn a_get_many_response_is_inclusive_at_sixteen_mebibytes() {
         .await;
         assert_eq!(status, 200);
         if boundary <= PAGE {
-            assert_eq!(size, boundary);
-            assert_eq!(page, oracle);
+            assert_eq!(size, boundary, "{with_null} {trailing}");
+            assert_eq!(page, oracle, "{with_null} {trailing}");
         } else {
             // One byte over: the last key is left for the next call.
-            assert!(size <= PAGE, "{with_null}: {size} bytes");
+            assert!(size <= PAGE, "{with_null} {trailing}: {size} bytes");
             assert_eq!(page["items"].as_array().unwrap().len(), count);
             assert_eq!(page["next_index"], count);
             assert_eq!(page["items"], json!(&expected[..count]));
@@ -970,7 +978,12 @@ async fn a_get_many_response_is_inclusive_at_sixteen_mebibytes() {
             )
             .await;
             assert_eq!(status, 200);
-            assert_eq!(tail, json!({"items":[expected[count]],"next_index":null}));
+            let rest = if trailing {
+                json!([expected[count], null])
+            } else {
+                json!([expected[count]])
+            };
+            assert_eq!(tail, json!({"items":rest,"next_index":null}));
         }
     }
 }
@@ -1294,6 +1307,124 @@ async fn quota_is_judged_on_the_net_change_of_the_whole_batch() {
 }
 
 #[tokio::test]
+async fn a_batch_that_writes_no_record_is_never_refused_for_quota() {
+    let directory = tempfile::tempdir().unwrap();
+    let app = start(database(), directory.path());
+    // Three entries, then a credential that may keep one: its scope is over
+    // quota, as after a quota is lowered.
+    let all = vec![put_op("a", b"1"), put_op("b", b"1"), put_op("c", b"1")];
+    assert_eq!(batch(&app, all).await.0, 200);
+    let writer = credential(&app, json!({"operations":["write"],"max_vectors":1})).await;
+    let run = |operations: Vec<Value>| {
+        let app = app.clone();
+        let writer = writer.clone();
+        async move {
+            call(
+                &app,
+                &writer,
+                "POST",
+                BATCH,
+                json!({"operations":operations}),
+            )
+            .await
+        }
+    };
+    let committed = head(&app).await;
+    // No put, no growth: nothing to judge, as for a single delete.
+    assert_eq!(run(vec![]).await, (200, json!({"results":[]})));
+    assert_eq!(
+        run(vec![delete_op("absent")]).await,
+        (200, json!({"results":[{"deleted":false}]}))
+    );
+    assert_eq!(head(&app).await, committed);
+    // A put is judged on the count it leaves, which is still over quota.
+    assert_error(&run(vec![put_op("d", b"1")]).await, 429, "quota_exceeded");
+    assert_error(
+        &run(vec![delete_op("a"), put_op("d", b"1")]).await,
+        429,
+        "quota_exceeded",
+    );
+    assert_eq!(head(&app).await, committed);
+    // Deletes only shrink the scope, one by one or in a batch.
+    let single = call(&app, &writer, "DELETE", &entry("c"), Value::Null).await;
+    assert_eq!(single.0, 200, "{single:?}");
+    assert_eq!(
+        run(vec![delete_op("a")]).await,
+        (200, json!({"results":[{"deleted":true}]}))
+    );
+    assert_eq!(
+        values(&app, &["a", "b", "c"]).await,
+        [None, Some(b64(b"1")), None]
+    );
+}
+
+#[tokio::test]
+async fn a_slot_freed_and_taken_again_in_one_batch_is_no_growth() {
+    let directory = tempfile::tempdir().unwrap();
+    let app = start(database(), directory.path());
+    let writer = credential(&app, json!({"operations":["write"],"max_vectors":2})).await;
+    let run = |operations: Vec<Value>| {
+        let app = app.clone();
+        let writer = writer.clone();
+        async move {
+            call(
+                &app,
+                &writer,
+                "POST",
+                BATCH,
+                json!({"operations":operations}),
+            )
+            .await
+        }
+    };
+    let [a, b, c, d] = SHARED;
+    assert_eq!(run(vec![put_op(a, b"1"), put_op(b, b"1")]).await.0, 200);
+    // `c` takes the slot that the delete of `a` frees: two entries before and
+    // after.
+    assert_eq!(run(vec![delete_op(a), put_op(c, b"1")]).await.0, 200);
+    // `d` takes a free slot and the delete of `b` frees one: no growth either.
+    assert_eq!(run(vec![put_op(d, b"1"), delete_op(b)]).await.0, 200);
+    assert_eq!(
+        values(&app, &[a, b, c, d]).await,
+        [None, None, Some(b64(b"1")), Some(b64(b"1"))]
+    );
+    // One more key is growth.
+    assert_error(&run(vec![put_op(a, b"1")]).await, 429, "quota_exceeded");
+}
+
+#[tokio::test]
+async fn a_batch_is_charged_to_the_group_commit_budget_for_what_it_holds() {
+    let directory = tempfile::tempdir().unwrap();
+    let path = directory.path().join("group.vlite");
+    let service = Service::new(Database::create_with_format(&path, 1, FormatVersion::V5).unwrap())
+        .with_group_commit(GroupCommitConfig {
+            max_requests: 1,
+            max_bytes: 8192,
+            max_delay: std::time::Duration::from_millis(0),
+        })
+        .unwrap();
+    let app = configured_admin_router(
+        service,
+        ServerOptions {
+            admin_token: Some(BearerToken::new(ADMIN).unwrap()),
+            admin_directory: Some(directory.path().join("admin")),
+            ..Default::default()
+        },
+    )
+    .unwrap();
+    // The budget holds a small batch and refuses one whose values alone pass
+    // it, before anything is written.
+    assert_eq!(batch(&app, vec![put_op("small", b"x")]).await.0, 200);
+    let big = vec![7; 16 * 1024];
+    let refused = batch(&app, vec![put_op("big", &big)]).await;
+    assert_error(&refused, 503, "busy");
+    assert_eq!(
+        values(&app, &["small", "big"]).await,
+        [Some(b64(b"x")), None]
+    );
+}
+
+#[tokio::test]
 async fn scopes_decide_who_may_read_or_batch() {
     let directory = tempfile::tempdir().unwrap();
     let app = start(database(), directory.path());
@@ -1306,9 +1437,13 @@ async fn scopes_decide_who_may_read_or_batch() {
     let many_body = json!({"keys":[{"namespace":"n","key":"k"}]});
     let committed = head(&app).await;
 
-    for token in [&reader, READ, &graph] {
+    for (token, code) in [
+        (reader.as_str(), "forbidden_scope"),
+        (READ, "read_only"),
+        (graph.as_str(), "forbidden_scope"),
+    ] {
         let reply = call(&app, token, "POST", BATCH, batch_body.clone()).await;
-        assert_eq!(reply.0, 403, "{reply:?}");
+        assert_error(&reply, 403, code);
     }
     assert_eq!(head(&app).await, committed);
     for token in [&reader, READ, &both] {
