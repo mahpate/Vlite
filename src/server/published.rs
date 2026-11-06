@@ -127,8 +127,7 @@ fn the_rest_router_must_come_before_the_grpc_router() {
         service.clone(),
         options(FIRST, Some(&bindings_file(directory.path()))),
     )
-    .err()
-    .expect("a REST router after a gRPC router that adopted nothing is refused");
+    .expect_err("a REST router after a gRPC router that adopted nothing is refused");
     assert!(
         error.to_string().contains("build the REST router first"),
         "{error}"
