@@ -267,6 +267,10 @@ They are not effort, schedule, code-size or performance estimates.
 
 ### E2: fenced resume chunks
 
+*Amended by the provisionally ratified [E2 contract](gap1-e2-resume-contract.md)
+(R1-R17, 2026-11-06): it supersedes this text where they differ (private
+surface, chunk order, evidence retention, tests, allowed files, oracle).*
+
 - **Goal.** `resume_erasure` deletes one bounded, deterministic chunk per call
   and advances the job in the same frame, until the scope holds no memory.
 - **Allowed files.** `src/memory/erasure.rs`, `src/memory/erasure/tests.rs`;
@@ -321,8 +325,11 @@ They are not effort, schedule, code-size or performance estimates.
   and advances its generation (decision 10). A manifest node stores target
   identities and policy only, never content, vectors or source URIs, with
   explicit retention (decision 11). No secure-erasure, backup or replica claim.
-- **Tests.** Compaction, upgrade, directory checkpoint (no renumbering, so no
-  reconciliation), encrypted variants; manifest field allowlist.
+- **Tests.** Compaction, upgrade, directory checkpoint (E2 R13 erratum: a
+  checkpoint renumbers graph revisions like a compaction, so it reconciles like
+  one, including a receipt that predates the barrier, which answers
+  `DeletionPending` after a checkpoint and reopen), encrypted variants;
+  manifest field allowlist.
 - **Fail-first.** Accepting a pre-compaction token fails the reconciliation test.
 - **Oracle.** Erasure oracle, reconciliation cases.
 - **Size.** M.
@@ -441,12 +448,19 @@ They are not effort, schedule, code-size or performance estimates.
 7. A chunk is at most one frame, including progress, manifest delta and
    receipt; order is canonical memory-key order; the token binds scope, job,
    generation, revision and next key, at most 4,096 bytes.
+   *Amended by E2 R2 (provisionally ratified 2026-11-06): ascending node-ID
+   order, and the token binds scope, binding, job key, generation, revision and
+   chunk count.* See [E2](gap1-e2-resume-contract.md#8-ruling-table-r1-r17-provisionally-ratified-2026-11-06-not-a-release-go).
 8. `remaining` is exact only when counted within the chunk's bounded scan,
    otherwise `None`.
 9. New operations use C1-style length-delimited binary digests under new
    domain strings and new operation names.
 10. Revision-changing maintenance requires explicit private reconciliation
     that advances the generation; directory checkpoints do not.
+    *Erratum (E2 R13, provisionally ratified 2026-11-06): the last clause is
+    wrong for graph revisions. A directory checkpoint restates every graph
+    node and edge at the checkpoint sequence, so a checkpoint renumbers graph
+    revisions like a compaction does.* See [E2 section 7](gap1-e2-resume-contract.md#7-atomicity-budgets-clocks-maintenance-and-rollback).
 11. Manifests are graph nodes holding target identities and policy only, with
     an explicit retention input; their cleanup is bounded and separate.
 12. Entity erasure deletes incident REFERENCES, DERIVED_FROM and content edges

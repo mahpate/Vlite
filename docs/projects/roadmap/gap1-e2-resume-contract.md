@@ -1,11 +1,11 @@
 # Gap 1 E2: fenced resume chunks for the exact-scope erasure job (proposed)
 
-Status: **PROPOSED, not ratified, not implemented.** Documentation only. It needs
-the coordinator's provisional ratification (as E1 had) and an independent
-oracle (section 9) before any Rust. Nothing here is activated, public, wired to
-a route or a format change. The persisted schemas of sections 3-4 are
-persisted graph state and freeze at ratification; they are flagged for the
-release go/no-go like E1's.
+Status: **PROVISIONALLY RATIFIED (R1-R17, 2026-11-06, coordinator under owner
+delegation); ratification is not a release go.** The persisted schemas of
+sections 3-4 are persisted graph state and are frozen by it; they stay flagged
+for the release go/no-go like E1's. Implementation and the independent oracle
+(section 9) are in progress. Nothing here is activated, public, wired to a
+route or a format change.
 Base: `b4673670` (origin/main, v0.7.1 plus test-only commits).
 Authority: [C2 remainder](gap1-c2-remainder-contract.md) section 6 E2,
 decisions 4-12 and section 9, and the ratified
@@ -290,7 +290,12 @@ chunk's `remaining_after` is `N - memories_deleted`; otherwise it is unknown.
    that record (`InvalidBundle`). The plan has `Detach` and `Vector::Delete` of
    the record. **E2 never retains evidence** (R5): no memory of the scope
    remains at completion, so A2's reachability retention would orphan the
-   record.
+   record. A record has one owner (an attachment is exclusive, and
+   `memory_attachment_owner` answers at most one `(graph, node)`), so the owner
+   check proves that the record is this memory's. A memory that names a record
+   owned by a memory of another scope, by an application node or by another
+   graph is damage: the job stops with `ForeignAttachment`, and that record is
+   neither detached nor deleted.
 2. Incident edges, both directions, deduplicated by edge ID, read in pages with
    the graph read ceilings until the list ends. More than 4,096 unique edges
    stop the reading: `m` can never fit, and its content (step 3) is not
@@ -366,15 +371,26 @@ user-facing message must say the job is stopped, never that it is complete.
 **Residue.** A completed job keeps the job (`logical`), the begin and resume
 receipts with their outcomes and the scope node, and the receipts of earlier
 remember, forget and consolidate operations, whose outcome nodes name memory
-IDs (hex-encoded). It also leaves what E2 cannot
-reach, to be swept by E4's bounded orphan cleanup (R15): the
-`VliteMemoryContent` nodes (memory text) and detached evidence records of
-memories that graph TTL reclaimed, before the barrier or by a chunk frame's
-opening reclaim (reclaim removes a due node with its edges and attachments;
-content nodes carry no TTL and no edge reaches them afterwards; vector records
-never expire), and evidence records that an earlier A2 forget detached but
-retained under its reachability rule. Scope erasure removes live memories, not
-every byte of text.
+IDs (hex-encoded). It also leaves what E2 cannot reach, to be swept by E4's
+bounded orphan cleanup (R15):
+
+- On served data (0.7.1 routes): the evidence records of memories that graph
+  TTL reclaimed, before the barrier or by a chunk frame's opening reclaim
+  (reclaim removes a due node with its edges and attachments, so the record is
+  detached; a memory's expiry does not propagate to its record, which
+  expires only if it was given an expiry of its own), and the evidence records
+  that an earlier A2 forget detached but retained under its reachability rule.
+  A forget that retains nothing deletes its evidence record, so that case
+  leaves none.
+- Only for data written through the core with content over 4,096 bytes: the
+  `VliteMemoryContent` nodes of reclaimed memories (they carry no TTL, and no
+  edge reaches them afterwards). Content nodes exist only for such content
+  (`MAX_STRING_VALUE_BYTES` and the chunking branch of `remember` in
+  `src/memory.rs`), and every served route caps content at 4,096 bytes
+  (`MAX_CONTENT_BYTES` in `src/server/memory/routes.rs`), so served data holds
+  none. A1 and C1 are not changed by this finding.
+
+Scope erasure removes live memories, not every byte they once referenced.
 
 ## 6. Barrier, replay and the E1 matrix
 
@@ -491,7 +507,7 @@ never be erased by the job; a `pending` job would delete them in later chunks.
 Do not roll back while any job exists. This is a one-way feature to document at
 serving.
 
-## 8. Ruling table (proposed; each needs provisional ratification)
+## 8. Ruling table (R1-R17 provisionally ratified 2026-11-06, not a release go)
 
 | # | Open point and options | Choice | Rationale |
 |---|---|---|---|
@@ -499,7 +515,7 @@ serving.
 | R2 | Chunk order: memory-key order (C2 decision 7 as drafted) or node-ID order | **Ascending node ID.** Amends C2 decision 7 | A memory key is `mem:v1:` plus a hash of the ID, so key order needs a full-scope read and sort per chunk; ID order is creation order, stable across maintenance, and needs no stored cursor. Alternative: key order with a bounded scan and a stuck job beyond it |
 | R3 | Remaining count | Exact only when the 4,097 window reaches its end, else `unknown` | C2 decision 8; bounds the candidates a chunk decodes |
 | R4 | Oversized member | Stop with `OperationLimit`, nothing skipped | Never skip silently; E3 owns edge-level chunks for hubs |
-| R5 | Evidence of a deleted member | Always detach and delete; no retention | A2 retains evidence reachable from memories that remain; in a scope erasure every memory goes, so retention would orphan records forever |
+| R5 | Evidence of a deleted member | Always detach and delete; no retention | A2 retains evidence reachable from memories that remain; in a scope erasure every memory goes, so retention would orphan records forever. A record has one owner, so the owner check of step 1 keeps a record of another scope out of reach (`ForeignAttachment`, never deleted) |
 | R6 | Foreign attachment and other stops | Stop with an explicit error, never a skip; section 5 lists them | C2 E2 text |
 | R7 | Fence | Generation, job revision and a derived token, checked before planning (step 9); the frame repeats the job and receipt revision guards as defense in depth | C2 decision 6; stale token or concurrent chunk cannot commit. The frame guards cannot fail under `&mut Database` (hand mutants on them are equivalent, section 9) |
 | R8 | Token | `t1:` plus a SHA-256 over scope, binding, job key, generation, revision and chunk count; derived, not stored | Stateless and deterministic; staleness and concurrency, not authorization |
@@ -509,7 +525,7 @@ serving.
 | R12 | Errors | No new `MemoryError` variant; frame errors are returned as A2 returns them | Existing categories suffice (E1 R-table style) |
 | R13 | Maintenance | No decision from graph-revision relations; latest chunk by `chunk_no`; document and let E4 reconcile; corrects C2 decision 10 for checkpoints | Checkpoint and compaction renumber graph revisions (section 7) |
 | R14 | Hidden expired memories | Not candidates; the frame's own reclaim removes their nodes | They are invisible at `now`; deleting them needs a TTL-aware scan outside E2 |
-| R15 | Residue (content nodes and evidence records of reclaimed memories, evidence retained earlier by A2) | Not swept by E2; E4 owns a bounded orphan sweep. Option: sweep the scope's edgeless content nodes in the completing chunk (costs a second label scan and changes `remaining`) | No manifest exists yet to account for it; recommend E4 |
+| R15 | Residue (on served data: evidence records of reclaimed memories and evidence retained earlier by A2; content nodes only for core data over 4,096 bytes, which served routes never write) | Not swept by E2; E4 owns a bounded orphan sweep. Option: sweep the scope's edgeless content nodes in the completing chunk (costs a second label scan and changes `remaining`) | No manifest exists yet to account for it; recommend E4 |
 | R16 | Planning strictness | Decode the whole window; check the memory key and label; verify content edges and nodes, and that a content node has no other edge and no attachment (A2 trusts them) | Erasure must not delete a node, or detach a record, it cannot prove is this memory's |
 | R17 | Amendments to C2 section 6 E2 | The surface returns `ResumeErasureResult` (not `ErasureStatus`); allowed files add new `src/memory/erasure/resume.rs` and `src/memory/erasure/resume_tests.rs` (hooks in `erasure.rs`, visibility in `src/memory.rs`); the test "shared evidence retained" becomes "evidence never retained"; "same erasure oracle" becomes two new files; E1 section 8's plan to append E2 groups to `erasure_golden.json` is replaced by a separate golden | Accepted fixtures stay additive-only; keeps `erasure.rs` and its tests small |
 
@@ -528,8 +544,9 @@ window and the 4,097 cut; the fit rule at exactly 4,095, 4,096 and 4,097
 operations with shared edges counted once, and a hub of more than 4,096 edges;
 content edge and node validation, including a content node with another edge
 or an attachment, and an outcome node without its receipt (DR6); evidence
-ownership and every stop of
-section 5; completion, the empty scope and a chunk that completes empty;
+ownership, including a record owned by a memory of another scope (the job
+stops with `ForeignAttachment` and that record is never deleted), and every
+stop of section 5; completion, the empty scope and a chunk that completes empty;
 replay of the original view after later chunks; expired-key reuse and the
 `JobConflict` of a late retry; key and digest conflicts; begin replay and
 `JobConflict` over a v2 and over a `logical` job after two or more chunks;
@@ -537,7 +554,10 @@ replay of the original view after later chunks; expired-key reuse and the
 receipts that predate the barrier, after chunks; barrier isolation of child
 and sibling scopes; binding mismatch and a missing binding; the TTL race of
 section 7 (clocks above the wall clock, the high-water poke modeled as
-`high_water`) and the residue statement; and logical reopen. Maintenance cases
+`high_water`) and the residue statement of section 5 (the evidence record of a
+TTL-reclaimed memory stays detached; the content nodes of a reclaimed memory
+of more than 4,096 bytes stay too, a core-level case that no served route
+writes); and logical reopen. Maintenance cases
 relabel the graph revisions (a checkpoint gives every node one value, a
 compaction an arbitrary assignment) and assert errors and counts, never
 revision numbers; they include a pre-barrier receipt, which fails closed with
@@ -579,3 +599,9 @@ manifests, `manifest_id`, retention, reconciliation, lineage fencing,
 mapping (HTTP 200 for `logical` and 202 for `pending`, error codes, request
 and response fields); X1; every F-track item; multi-worker claims; secure
 erasure and any backup, replica or feed claim. E2 is not whole C.
+
+**E3/E4 scalability list (watch item, not E2).** The memory layer has no scope
+index, so a chunk scans the `VliteMemory` nodes of every scope from the lowest
+node ID (section 5): a small scope in a large tenant graph costs a scan of all
+memory nodes per chunk and can reach the read ceilings (`OperationLimit`).
+That is acceptable for E2; a scope index or an equivalent is an E3/E4 item.
