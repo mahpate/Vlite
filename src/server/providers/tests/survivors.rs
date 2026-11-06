@@ -553,20 +553,25 @@ async fn dns_slots_match_concurrency_and_return_after_success_error_and_timeout(
         tokio::time::sleep(Duration::from_millis(5)).await;
     }
     assert_eq!(registry.providers["test"].dns_slots.available_permits(), 2);
+    // Half the total budget: far above a late timer on a loaded host, far
+    // below the wait of a lookup that used the total instead of the connect budget.
     assert!(
-        elapsed < Duration::from_millis(500),
+        elapsed < Duration::from_secs(5),
         "DNS used the total instead of connect budget: {elapsed:?}"
     );
 }
 
 #[tokio::test]
 async fn response_latency_may_exceed_connect_but_not_total_budget() {
+    // The connect budget leaves a loaded host room to open the loopback
+    // connection, and the reply comes six times later, so it always arrives
+    // after the connect budget has passed.
     let server = Loopback::new(vec![(
         Loopback::json(200, EMBEDDING),
-        Duration::from_millis(500),
+        Duration::from_millis(1500),
     )]);
     let mut value = config(&server.endpoint, "embedding");
-    value["aliases"][0]["connect_timeout_ms"] = json!(50);
+    value["aliases"][0]["connect_timeout_ms"] = json!(250);
     value["aliases"][0]["total_timeout_ms"] = json!(10000);
     assert_eq!(
         registry(&value)

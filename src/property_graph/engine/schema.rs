@@ -4,7 +4,7 @@
 //! replaces the previous schema; an empty schema removes every rule. Rules
 //! apply only to declared labels, relationship types and properties:
 //! undeclared ones stay open-world. After each entry of a batch is applied
-//! the state checks the rules the entry can affect ([`check_entry`]), so a
+//! the state checks the rules the entry can affect (`check_entry`), so a
 //! violation fails the whole batch and nothing is written (FM-013).
 //!
 //! - Label properties: `type` (the value has the declared type), `required`

@@ -97,6 +97,14 @@ const APPROVED_OPENAPI_EDITS: &[(&str, &str)] = &[
         r##""expires_at_ms": {"type": ["integer", "null"], "minimum": 0}, "ttl_ms": {"type": "integer", "minimum": 0, "description": "Relative lifetime in milliseconds; mutually exclusive with expires_at_ms"}"##,
         r##""expires_at_ms": {"type": ["integer", "null"], "minimum": 0, "description": "Absolute Unix milliseconds; needs format v5. Must be later than the server clock when the write is applied: an equal or earlier value is refused with 422 invalid_input and nothing is written"}, "ttl_ms": {"type": "integer", "minimum": 1, "description": "Lifetime in milliseconds, at least 1, counted from the moment the write is applied; needs format v5; mutually exclusive with expires_at_ms. 0 is refused with 422 invalid_input and nothing is written"}"##,
     ),
+    // The collection batch route shares its handler with `/v1/batches`: it
+    // answers 204, never 200, and the errors of that route plus a 403 (route
+    // authorization and the collection guard) and the guard's 404. The
+    // documented answers follow the handler.
+    (
+        r##""responses":{"200":{"description":"Synced atomic batch"},"429":"##,
+        r##""responses":{"204":{"description":"Entire batch durably committed, or empty no-op"},"401":{"$ref":"#/components/responses/Unauthorized"},"400":{"$ref":"#/components/responses/BadRequest"},"403":{"description":"read_only or forbidden_scope: the token or credential may not write to this collection (operation, tenant or collection grant refused).","content":{"application/json":{"schema":{"$ref":"#/components/schemas/Error"}}}},"404":{"description":"collection_not_found: the collection does not exist or is not visible to this caller.","content":{"application/json":{"schema":{"$ref":"#/components/schemas/Error"}}}},"409":{"$ref":"#/components/responses/Upgrade"},"413":{"$ref":"#/components/responses/TooLarge"},"415":{"$ref":"#/components/responses/MediaType"},"422":{"$ref":"#/components/responses/InvalidInput"},"503":{"$ref":"#/components/responses/Unavailable"},"429":"##,
+    ),
 ];
 
 /// Short reviewed wording changes on the already-approved KV route additions.

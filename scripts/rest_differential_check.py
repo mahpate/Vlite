@@ -66,6 +66,19 @@ ACCEPTED_ISSUES = {
         "/components/schemas/RerankOptions/allOf",
     )
 }
+# Reviewed and accepted for 0.7.1 (release notes, Fixed; docs/API.md, Record
+# expiry and metadata): the record put `ttl_ms` minimum is 1. A 0.7.0 server
+# already failed every `ttl_ms` of 0 (500 after a write), so the tightening only
+# turns that failure into a 422 refusal. Matching is exact on the issue text.
+ACCEPTED_ISSUES.update({
+    f"{where}/properties/ttl_ms/minimum lower bound raised":
+        "Record put ttl_ms is at least 1 (0 was a 500 after a write in 0.7.0, a 422 with no write since 0.7.1)."
+    for where in (
+        "/paths/~1v1~1collections~1{c}~1vectors~1{id}/put/requestBody/content/application~1json/schema",
+        "/paths/~1v1~1vectors~1{id}/put/requestBody/content/application~1json/schema",
+        "/components/schemas/Put",
+    )
+})
 VOLATILE = {
     "created_unix_ms", "updated_unix_ms", "last_login_unix_ms",
     "suspended_unix_ms", "expires_unix_ms", "timestamp_ms", "unix_ms",
@@ -80,6 +93,12 @@ VOLATILE = {
     "backup_drill_last_success_unix_ms", "backup_last_success_unix_ms",
     "hnsw_last_build_seconds",
 }
+# Reviewed and accepted: `POST /v1/collections/{c}/batches` shares its handler
+# with `/v1/batches` and has always answered 204. Its document listed a 200 and
+# no errors; it now lists the 204 and the answers of the handler. Spec only.
+ACCEPTED_ISSUES["/paths/~1v1~1collections~1{c}~1batches/post/responses/200 removed"] = (
+    "The route answers 204 like /v1/batches; the documented 200 was never served."
+)
 HEADERS = {
     "content-type", "allow", "www-authenticate", "retry-after", "cache-control",
     "content-security-policy", "x-content-type-options", "x-frame-options",

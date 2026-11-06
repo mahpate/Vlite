@@ -587,6 +587,133 @@ fn put_op(id: u64, vector: Value) -> Value {
     json!({"op":"put","id":id.to_string(),"vector":vector})
 }
 
+/// A POST that `call` cannot make: a body that is not JSON, or JSON sent with
+/// another media type.
+async fn post_raw(app: &Router, uri: &str, content_type: &str, body: &str) -> StatusCode {
+    let request = Request::builder()
+        .method("POST")
+        .uri(uri)
+        .header(header::AUTHORIZATION, format!("Bearer {ADMIN}"))
+        .header(header::CONTENT_TYPE, content_type)
+        .body(Body::from(body.to_owned()))
+        .unwrap();
+    app.clone().oneshot(request).await.unwrap().status()
+}
+
+/// The named batch route shares its handler with `/v1/batches`, which answers
+/// 204 No Content. Its entry in the served contract once listed only 200 and
+/// 429: every answer below must be listed for it, and 200 must not be.
+#[tokio::test]
+async fn collection_batch_answers_are_listed_in_the_served_contract() {
+    let directory = tempfile::tempdir().unwrap();
+    let db = Database::create_with_format(directory.path().join("b.vlite"), 2, FormatVersion::V4)
+        .unwrap();
+    let service = Service::new(db);
+    let app = configured_admin_router(
+        service.clone(),
+        ServerOptions {
+            admin_token: Some(BearerToken::new(ADMIN).unwrap()),
+            read_only_token: Some(BearerToken::new(READ).unwrap()),
+            ..ServerOptions::default()
+        },
+    )
+    .unwrap();
+    let (status, _, _) = call(
+        &app,
+        Some(ADMIN),
+        "POST",
+        "/v1/collections",
+        Some(json!({"name":"a","dimensions":2})),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED);
+    let (status, _, contract) = call(&app, Some(ADMIN), "GET", "/openapi.json", None).await;
+    assert_eq!(status, StatusCode::OK);
+    let listed = contract["paths"]["/v1/collections/{c}/batches"]["post"]["responses"]
+        .as_object()
+        .unwrap();
+    assert!(!listed.contains_key("200"), "a batch is never answered 200");
+
+    let batch = json!({"operations":[put_op(1, json!([1, 1]))]});
+    let cases = [
+        ("commit", Some(ADMIN), "a", batch.clone(), 204, None),
+        (
+            "empty batch",
+            Some(ADMIN),
+            "a",
+            json!({"operations":[]}),
+            204,
+            None,
+        ),
+        ("no credential", None, "a", batch.clone(), 401, None),
+        (
+            "read-only token",
+            Some(READ),
+            "a",
+            batch.clone(),
+            403,
+            Some("read_only"),
+        ),
+        (
+            "missing collection",
+            Some(ADMIN),
+            "absent",
+            batch.clone(),
+            404,
+            Some("collection_not_found"),
+        ),
+        (
+            "unknown field",
+            Some(ADMIN),
+            "a",
+            json!({"operations":[],"extra":1}),
+            422,
+            None,
+        ),
+        (
+            "invalid id",
+            Some(ADMIN),
+            "a",
+            json!({"operations":[{"op":"delete","id":"x"}]}),
+            400,
+            None,
+        ),
+        (
+            "wrong dimensions",
+            Some(ADMIN),
+            "a",
+            json!({"operations":[put_op(2, json!([1, 2, 3]))]}),
+            422,
+            None,
+        ),
+    ];
+    let mut answered = Vec::new();
+    for (case, token, collection, body, expected, code) in cases {
+        let uri = format!("/v1/collections/{collection}/batches");
+        let (status, _, value) = call(&app, token, "POST", &uri, Some(body)).await;
+        assert_eq!(status.as_u16(), expected, "{case}: {value}");
+        if let Some(code) = code {
+            assert_eq!(value["error"]["code"], code, "{case}");
+        }
+        answered.push(expected);
+    }
+    for (content_type, body, expected) in [
+        ("application/json", "{", StatusCode::BAD_REQUEST),
+        ("text/plain", "{}", StatusCode::UNSUPPORTED_MEDIA_TYPE),
+    ] {
+        let status = post_raw(&app, "/v1/collections/a/batches", content_type, body).await;
+        assert_eq!(status, expected, "{content_type}");
+        answered.push(status.as_u16());
+    }
+    for status in answered {
+        assert!(
+            listed.contains_key(&status.to_string()),
+            "{status} is not listed for the route"
+        );
+    }
+    service.close().await.unwrap();
+}
+
 #[tokio::test]
 async fn imports_commit_replay_reject_skip_finish_and_abort() {
     let (_dir, service, app) = v4(2);

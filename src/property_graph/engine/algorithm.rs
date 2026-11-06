@@ -111,10 +111,10 @@ pub struct GraphAlgorithmLimits {
     pub max_scratch_bytes: u64,
     /// Full PageRank iterations or label propagation sweeps (default 20,
     /// ceiling 100). Reaching it without converging stops the run with
-    /// [`AlgorithmTruncation::IterationLimit`]; the other algorithms ignore
+    /// `AlgorithmTruncation::IterationLimit`; the other algorithms ignore
     /// it.
     pub max_iterations: u64,
-    /// Sources sampled by [`Algorithm::Betweenness`] (default 16, ceiling
+    /// Sources sampled by `Algorithm::Betweenness` (default 16, ceiling
     /// 64): the first `min(max_sampled_sources, n)` scoped nodes in
     /// sampling order. The other algorithms ignore it.
     pub max_sampled_sources: u64,
