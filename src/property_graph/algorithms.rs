@@ -84,7 +84,7 @@ pub enum LabelScope {
     All(Vec<String>),
 }
 
-/// One explicit local scope (see the [module docs](self)).
+/// One explicit local scope (see the module docs).
 #[derive(Clone, Debug, PartialEq)]
 pub struct GraphAlgorithmScope {
     /// 1..=`max_visited_nodes` distinct nodes after deduplication (at most
