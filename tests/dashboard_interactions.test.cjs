@@ -414,9 +414,24 @@ test("only the routes agent memory switches off, and only for credentials that c
   assert.equal(admin("POST", "/v1/collections/docs/imports"), "");
   scoped(["read", "diagnostics", "import"]);
   assert.equal(admin("GET", "/metrics"), MEMORY_OFF_METRICS);
-  assert.equal(admin("POST", "/v1/collections/docs/imports"), "Resumable imports are off while agent memory is enabled.");
+  // An import refusal can be an ordinary scope denial (another tenant's job), so a scoped credential never reads as memory.
+  for (const [method, route] of [["POST", "/v1/collections/docs/imports"], ["GET", "/v1/imports/7"], ["POST", "/v1/imports/7/finish"]]) assert.equal(admin(method, route), "", `${method} ${route}`);
   assert.equal(admin("GET", "/v1/admin/webhooks"), "");
   assert.equal(admin("GET", "/v1/admin/maintenance/auto"), "");
+  // Replication export: the server checks read on every collection and no tenant before it refuses for memory.
+  scoped(["read"]);
+  assert.equal(admin("GET", "/v1/admin/replication/export"), "Replication export is off while agent memory is enabled.");
+  scoped(["read"], ["docs"]);
+  assert.equal(admin("GET", "/v1/admin/replication/export"), "");
+  scoped(["search"]);
+  assert.equal(admin("GET", "/v1/admin/replication/export"), "");
+  ui.setCapabilities({ role: "scoped", features: {}, scope: { operations: ["read"], collections: ["*"], tenant_id: "ab12cd34ef56ab12cd34ef56" } });
+  assert.equal(admin("GET", "/v1/admin/replication/export"), "");
+  // A read-only token reads the import status the same way: it cannot be denied for any ordinary reason.
+  ui.setCapabilities({ role: "read_only", features: {} });
+  assert.equal(admin("GET", "/v1/imports/7"), "Resumable imports are off while agent memory is enabled.");
+  assert.equal(admin("POST", "/v1/imports/7/finish"), "");
+  assert.equal(admin("GET", "/v1/admin/replication/export"), "");
 });
 
 test("api() reports a memory refusal in plain words and keeps every other 403 as it was", async () => {

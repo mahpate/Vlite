@@ -514,25 +514,31 @@
   }
   // While agent memory is enabled the server refuses a few database-wide routes with 403 forbidden_scope, even to the
   // super admin (docs/SECURITY.md, Memory-bound resources). That is expected, so each view says so in plain words
-  // instead of failing. `scoped` is the operation a scoped credential must hold for the refusal to be the memory one
-  // (without it the denial is ordinary); `readOnly` marks the one route a read-only token can reach.
+  // instead of failing. Only a refusal that cannot be an ordinary scope denial reads as the memory one: always for the
+  // super admin; for a read-only token on `readOnly` rows; for a scoped credential when it holds the `scoped`
+  // operation, or the `everywhere` operation on every collection with no tenant (the server checks that first).
   const MEMORY_OFF = [
     { route: /^\/metrics$/, readOnly: true, scoped: "diagnostics", subject: "Server metrics are" },
     { route: /^\/v1\/admin\/metrics\/summary$/, subject: "Server metrics are" },
     { route: /^\/v1\/admin\/graph\/stats$/, subject: "Graph engine statistics are" },
-    { route: /^\/v1\/admin\/replication\/export$/, subject: "Replication export is" },
+    { route: /^\/v1\/admin\/replication\/export$/, everywhere: "read", subject: "Replication export is" },
     { methods: ["GET"], route: /^\/v1\/admin\/webhooks(?:\/[^/]+)?$/, subject: "Webhook lists and delivery status are" },
-    { route: /^\/v1\/(?:collections\/[^/]+\/imports|imports\/[^/]+(?:\/(?:chunks\/[^/]+|finish|abort))?)$/, scoped: "import", subject: "Resumable imports are" },
+    { methods: ["GET"], route: /^\/v1\/imports\/[^/]+$/, readOnly: true, subject: "Resumable imports are" },
+    { route: /^\/v1\/(?:collections\/[^/]+\/imports|imports\/[^/]+(?:\/(?:chunks\/[^/]+|finish|abort))?)$/, subject: "Resumable imports are" },
     { route: /^\/v1\/admin\/maintenance\/auto(?:\/tick)?$/, subject: "Automatic index maintenance is" },
   ];
-  const MEMORY_HELP = "This is expected, not a sign-in or permission problem: while agent memory is enabled the server keeps these database-wide routes off so private memory data cannot be reached through them.";
-  // The plain-language message when this refusal is the memory one, else "". Admin (super admin) refusals always are.
+  const MEMORY_HELP = "This is expected, not a sign-in or permission problem: while agent memory is enabled, or a database still holds its memory records after memory was turned off, the server keeps these database-wide routes off so private memory data cannot be reached through them.";
+  // The plain-language message when this refusal is the memory one, else "".
   function memoryOff(method, route, status, code) {
     if (status !== 403 || code !== "forbidden_scope" || !capabilities) return "";
     const found = MEMORY_OFF.find((item) => item.route.test(String(route).split("?")[0]) && (!item.methods || item.methods.includes(method)));
     if (!found) return "";
     const role = capabilities.role;
-    const memory = role === "admin" || (role === "read_only" && found.readOnly === true) || (role === "scoped" && found.scoped !== undefined && can(found.scoped));
+    const scope = capabilities.scope;
+    const everywhere = (operation) => Array.isArray(scope?.operations) && scope.operations.includes(operation)
+      && Array.isArray(scope.collections) && scope.collections.includes("*") && !scope.tenant_id;
+    const memory = role === "admin" || (role === "read_only" && found.readOnly === true)
+      || (role === "scoped" && ((found.scoped !== undefined && can(found.scoped)) || (found.everywhere !== undefined && everywhere(found.everywhere))));
     return memory ? `${found.subject} off while agent memory is enabled.` : "";
   }
   // `unavailable` is the same sentence as a JSON placeholder ("Unavailable: ...").

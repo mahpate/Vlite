@@ -92,8 +92,9 @@ resolve every name through the same per-request guard as the REST routes, but
 the gRPC listener and scheduled automatic index maintenance still fail closed
 at startup while a binding exists, until the release differential covers them.
 The [dashboard](CONSOLE.md#monitor-the-server) shows the refused views above as
-unavailable while agent memory is enabled; sign-in still works and each
-affected view says so in plain words.
+unavailable while agent memory is enabled, or while the database still holds
+memory binding records after the bindings file is removed; sign-in still works
+and each affected view says so in plain words.
 
 Each bound graph holds a binding record, the node `binding:v1`, with the
 binding's name, tenant, generation, state, receipt window, graph and evidence
