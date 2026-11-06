@@ -160,14 +160,6 @@
   "cmd": "cargo test --locked --offline --features server,mcp,tools --lib kv::batch_tests"
  },
  {
-  "id": "kvb/K01-empty-plan-writes-a-frame",
-  "desc": "A batch that changes no record still calls the engine, which refuses a read-only handle (the engine returns early for an empty batch, so no file tells it apart). Killed by tests/kv_batch.rs a_read_only_handle_refuses_a_batch_and_still_reads_many.",
-  "file": "src/kv.rs",
-  "old": "        if !plan.mutations.is_empty() {\n            self.db.write_batch_in(self.id, &plan.mutations)?;\n        }",
-  "new": "        self.db.write_batch_in(self.id, &plan.mutations)?;",
-  "cmd": "cargo test --locked --offline --features server,mcp,tools --test kv_batch"
- },
- {
   "id": "kvb/K02-put-version-is-the-previous-sequence",
   "desc": "The puts of a batch report the sequence before the commit. Killed by kv::batch_tests::a_batch_is_one_commit_and_its_puts_share_one_version.",
   "file": "src/kv.rs",
@@ -235,8 +227,8 @@
   "id": "kvb/R07-batch-quota-unchecked",
   "desc": "A batch is not checked against the record quota. Killed by server_kv_batch::quota_is_judged_on_the_net_change_of_the_whole_batch.",
   "file": "src/server/kv.rs",
-  "old": "            enforce_quota(&quota_service, db, scope.role(), collection.id(), &changes)?;",
-  "new": "            let _ = (&quota_service, &changes);",
+  "old": "                        enforce_quota(\n                            &quota_service,\n                            database,\n                            scope.role(),\n                            collection.id(),\n                            changes,\n                        )?;",
+  "new": "                        let _ = (&quota_service, database, changes);",
   "cmd": "cargo test --locked --offline --features server --test server_kv_batch"
  },
  {
@@ -363,8 +355,8 @@
   "id": "kvb/G05-grpc-get-many-refused-to-read-only",
   "desc": "The read-only token cannot call GetKvEntries. Killed by server_grpc_kv::grpc_kv_read_only_handle or grpc_batch_and_get_many_scopes_quota_and_audit.",
   "file": "src/server/grpc/kv.rs",
-  "old": "            true,\n            false,\n            |service, role, _, request| async move {\n                let target = collection(request.collection)?;\n                rest::check_key_count(",
-  "new": "            false,\n            false,\n            |service, role, _, request| async move {\n                let target = collection(request.collection)?;\n                rest::check_key_count(",
+  "old": "            true,\n            false,\n            |service, role, _, request| async move {\n                let proto::KvGetManyRequest {\n",
+  "new": "            false,\n            false,\n            |service, role, _, request| async move {\n                let proto::KvGetManyRequest {\n",
   "cmd": "cargo test --locked --offline --features grpc --test server_grpc_kv"
  },
  {
@@ -499,7 +491,7 @@
   "id": "kvb/G07-grpc-count-unchecked-before-conversion",
   "desc": "The operation count of a WriteKvBatch message is not checked before its operations are converted. Killed by server_grpc_kv::grpc_batch_counts_its_operations_before_it_converts_any_and_names_a_missing_kind.",
   "file": "src/server/grpc/kv.rs",
-  "old": "                rest::check_operation_count(request.operations.len())?;\n",
+  "old": "                rest::check_operation_count(operations.len())?;\n",
   "new": "",
   "cmd": "cargo test --locked --offline --features grpc --test server_grpc_kv -- grpc_batch_counts_its_operations_before_it_converts_any_and_names_a_missing_kind"
  },
@@ -536,11 +528,19 @@
   "cmd": "cargo test --locked --offline --features server,mcp,tools --lib kv::batch_tests"
  },
  {
-  "id": "kvb/K04-overtaken-plan-committed",
-  "desc": "A plan that a commit has overtaken is applied anyway. Killed by kv::batch_tests::a_plan_commits_what_write_batch_commits_and_only_where_it_was_made.",
+  "id": "kvb/K04-gate-runs-after-the-commit",
+  "desc": "The gate judges the batch after it is committed. Killed by kv::batch_tests::a_gate_sees_the_batch_before_it_is_written_and_can_refuse_it.",
   "file": "src/kv.rs",
-  "old": "if plan.sequence != self.db.sequence {",
-  "new": "if false && plan.sequence != self.db.sequence {",
+  "old": "        gate(self.db, &changes).map_err(Gated::Refused)?;\n        self.commit(plan).map_err(Gated::Batch)",
+  "new": "        let outcomes = self.commit(plan).map_err(Gated::Batch)?;\n        gate(self.db, &changes).map_err(Gated::Refused)?;\n        Ok(outcomes)",
+  "cmd": "cargo test --locked --offline --features server,mcp,tools --lib kv::batch_tests"
+ },
+ {
+  "id": "kvb/K05-refusing-gate-ignored",
+  "desc": "A batch that the gate refuses is committed anyway. Killed by kv::batch_tests::a_gate_sees_the_batch_before_it_is_written_and_can_refuse_it.",
+  "file": "src/kv.rs",
+  "old": "gate(self.db, &changes).map_err(Gated::Refused)?;",
+  "new": "let _ = gate(self.db, &changes);",
   "cmd": "cargo test --locked --offline --features server,mcp,tools --lib kv::batch_tests"
  },
  {
@@ -550,5 +550,29 @@
   "old": "let next = (index + 1 < total).then_some(index + 1);",
   "new": "let next: Option<usize> = (index + 1 < total).then_some(index + 1).and(None);",
   "cmd": "cargo test --locked --offline --features mcp,tools --bin vlite-mcp kv_mcp::tests::"
+ },
+ {
+  "id": "kvb/M14-mcp-value-text-bound-miscomputed",
+  "desc": "The longest base64 text of a value is one block too long, so the tool schemas advertise a bound that the decoded-size check alone enforces. Killed by graph_surface_parity::reg008_mcp_tools_list_and_outputs_match_baseline.",
+  "file": "src/bin/tool_support/kv_mcp.rs",
+  "old": "const MAX_VALUE_BASE64: usize = MAX_KV_VALUE_BYTES.div_ceil(3) * 4;",
+  "new": "const MAX_VALUE_BASE64: usize = MAX_KV_VALUE_BYTES.div_ceil(3) * 4 + 4;",
+  "cmd": "cargo test --locked --offline --features server,mcp,tools --test graph_surface_parity reg008_mcp_tools_list_and_outputs_match_baseline"
+ },
+ {
+  "id": "kvb/R18-batch-operation-charge-inflated",
+  "desc": "Each operation of a batch is charged a hundred times its fixed amount, so a batch at every limit would pass 8 MiB of group-commit budget. Killed by server::kv::tests::a_batch_at_every_limit_is_charged_less_than_eight_mebibytes.",
+  "file": "src/server/kv.rs",
+  "old": ".saturating_add(64)",
+  "new": ".saturating_add(6400)",
+  "cmd": "cargo test --locked --offline --features server --lib server::kv::tests::a_batch_at_every_limit_is_charged_less_than_eight_mebibytes"
+ },
+ {
+  "id": "kvb/B23-absent-delete-writes-a-frame",
+  "desc": "The delete of a key with no record plans a delete of some record, so a batch that changes nothing commits a frame. Killed by tests/kv_batch.rs a_batch_that_changes_no_record_writes_no_frame.",
+  "file": "src/kv/batch.rs",
+  "old": "                    outcomes.push(Planned::Deleted(false));\n                    continue;",
+  "new": "                    outcomes.push(Planned::Deleted(false));\n                    mutations.push(Mutation::Delete { id: 0 });\n                    continue;",
+  "cmd": "cargo test --locked --offline --features server,mcp,tools --test kv_batch"
  }
 ]

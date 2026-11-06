@@ -165,22 +165,16 @@ pub struct KvStore<'a> {
     id: u16,
 }
 
-/// A batch resolved against the collection as it stood at `sequence`, the last
-/// commit; [`KvStore::commit_batch_plan`] refuses it once anything has been
-/// committed since.
+/// Why [`KvStore::write_batch_gated_at`] failed.
 #[cfg(feature = "server")]
-pub(crate) struct BatchPlan {
-    plan: batch::Plan,
-    sequence: u64,
-}
-
-#[cfg(feature = "server")]
-impl BatchPlan {
-    /// Each slot the batch writes or deletes, in order, with whether a record
-    /// is there afterwards: what the live-record quota is judged on.
-    pub(crate) fn changes(&self) -> Vec<(u64, bool)> {
-        batch::changes(&self.plan.mutations)
-    }
+#[derive(Debug)]
+pub(crate) enum Gated<G> {
+    /// `write_batch_at` fails the same way for this batch: it could not be
+    /// planned, or its commit failed. After a failed commit the batch may or
+    /// may not have been written (`CommitIndeterminate`).
+    Batch(Error),
+    /// The gate refused the batch before anything was written.
+    Refused(G),
 }
 
 impl Database {
@@ -273,18 +267,6 @@ impl KvView<'_> {
         }
     }
 
-    /// A batch checked and resolved against the collection as it stands, not
-    /// yet committed: the quota is judged on its slot changes before
-    /// [`KvStore::commit_batch_plan`] commits it, and the batch is resolved
-    /// only once. Fails as `write_batch_at` does for the same arguments.
-    #[cfg(feature = "server")]
-    pub(crate) fn plan_batch_at(&self, operations: &[KvOp<'_>], now_ms: u64) -> Result<BatchPlan> {
-        Ok(BatchPlan {
-            plan: batch::plan(self.db, self.id, operations, now_ms)?,
-            sequence: self.db.sequence,
-        })
-    }
-
     pub fn get(&self, namespace: &str, key: &str) -> Result<Option<KvEntry>> {
         get_at(self.db, self.id, namespace, key, current_time_ms())
     }
@@ -371,9 +353,13 @@ impl KvView<'_> {
     ///
     /// At most [`MAX_KV_GET_MANY_KEYS`] keys, each with a namespace and a key
     /// of the sizes [`KvView::get`] takes; otherwise `InvalidKvKey` and
-    /// nothing is read. Every returned value is copied, so a result can hold
-    /// that many values of up to [`MAX_KV_VALUE_BYTES`] at once: use
-    /// [`KvView::visit_many_at`] to read without copying.
+    /// nothing is read. These checks come before any state of the collection
+    /// is read, but not before the view is opened: [`Database::kv_view`] has
+    /// already failed for a missing collection, one of another kind or a handle
+    /// that cannot serve it (`Poisoned`). Every
+    /// returned value is copied, so a result can hold that many values of up
+    /// to [`MAX_KV_VALUE_BYTES`] at once: use [`KvView::visit_many_at`] to read
+    /// without copying.
     pub fn get_many(&self, keys: &[(&str, &str)]) -> Result<Vec<Option<KvEntry>>> {
         self.get_many_at(keys, current_time_ms())
     }
@@ -523,8 +509,11 @@ impl KvStore<'_> {
     /// value of the sizes a single call takes, the values of the puts totaling
     /// at most [`MAX_KV_BATCH_VALUE_BYTES`], no put with a deadline, and no two
     /// operations naming the same `(namespace, key)`; otherwise `InvalidKvKey`
-    /// (`PayloadTooLarge` for one value) and nothing is written. An empty batch
-    /// is a no-op.
+    /// (`PayloadTooLarge` for one value) and nothing is written. These checks
+    /// come before any state of the collection is read, but not before the
+    /// store is opened: [`Database::kv_store`] has already created the
+    /// collection or failed for it (one of another kind, or a handle that
+    /// cannot serve it, `Poisoned`). An empty batch is a no-op.
     ///
     /// Every put of the batch gets the same version, the commit's sequence. A
     /// put clears the deadline of the entry it replaces. As for a single write,
@@ -546,25 +535,35 @@ impl KvStore<'_> {
         self.commit(plan)
     }
 
-    /// Commits a plan that [`KvView::plan_batch_at`] made. The caller keeps the
-    /// database exclusively from the plan to here, so nothing can have been
-    /// committed in between; a plan that was overtaken anyway is refused
-    /// unwritten, never applied to slots it did not see.
+    /// `write_batch_at` with a gate between resolving the batch and
+    /// committing it. `gate` is called once, with the database as it still
+    /// stands (the batch is not written) and each slot the batch writes or
+    /// deletes, in order, with whether a record is there afterwards: what the
+    /// live-record quota is judged on. It refuses the batch by returning an
+    /// error, and then nothing is written. A batch that cannot be planned
+    /// fails as `write_batch_at` does for it, and the gate is not called. A
+    /// failure of the commit itself (a format 1 file, a read-only or poisoned
+    /// handle, an I/O error) comes after the gate has accepted the batch. The
+    /// resolved batch never leaves this call, so what the gate judged is what
+    /// is committed.
     #[cfg(feature = "server")]
-    pub(crate) fn commit_batch_plan(&mut self, plan: BatchPlan) -> Result<Vec<KvOutcome>> {
-        if plan.sequence != self.db.sequence {
-            return Err(Error::Corrupt {
-                offset: 0,
-                reason: "a key-value batch plan was overtaken by a commit",
-            });
-        }
-        self.commit(plan.plan)
+    pub(crate) fn write_batch_gated_at<G>(
+        &mut self,
+        operations: &[KvOp<'_>],
+        now_ms: u64,
+        gate: impl FnOnce(&Database, &[(u64, bool)]) -> std::result::Result<(), G>,
+    ) -> std::result::Result<Vec<KvOutcome>, Gated<G>> {
+        let plan = batch::plan(self.db, self.id, operations, now_ms).map_err(Gated::Batch)?;
+        let changes = batch::changes(&plan.mutations);
+        gate(self.db, &changes).map_err(Gated::Refused)?;
+        self.commit(plan).map_err(Gated::Batch)
     }
 
     fn commit(&mut self, plan: batch::Plan) -> Result<Vec<KvOutcome>> {
-        if !plan.mutations.is_empty() {
-            self.db.write_batch_in(self.id, &plan.mutations)?;
-        }
+        // A batch that changes no record goes to the engine too: an empty
+        // engine batch writes nothing, on a read-only or format 1 handle as
+        // well, so no frame is written for it.
+        self.db.write_batch_in(self.id, &plan.mutations)?;
         // `write_batch_in` commits one frame, and every record of a frame
         // takes its sequence as its revision.
         let version = self.db.sequence;

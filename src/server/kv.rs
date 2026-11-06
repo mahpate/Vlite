@@ -1,9 +1,9 @@
 //! Ordinary key-value operations on explicitly authorized collections.
 use super::*;
 use crate::kv::{
-    KvEntry, KvOp, KvOutcome, KvPut, KvRef, MAX_KV_BATCH_OPERATIONS, MAX_KV_BATCH_VALUE_BYTES,
-    MAX_KV_GET_MANY_KEYS, MAX_KV_KEY_BYTES, MAX_KV_LIST_LIMIT, MAX_KV_NAMESPACE_BYTES,
-    MAX_KV_VALUE_BYTES,
+    Gated, KvEntry, KvOp, KvOutcome, KvPut, KvRef, MAX_KV_BATCH_OPERATIONS,
+    MAX_KV_BATCH_VALUE_BYTES, MAX_KV_GET_MANY_KEYS, MAX_KV_KEY_BYTES, MAX_KV_LIST_LIMIT,
+    MAX_KV_NAMESPACE_BYTES, MAX_KV_VALUE_BYTES,
 };
 use axum::extract::RawQuery;
 use std::{collections::HashMap, ops::ControlFlow};
@@ -780,20 +780,27 @@ pub(super) async fn batch(
             writable(db)?;
             let now = crate::current_time_ms();
             let operations = prepared.operations();
-            let plan = collection
-                .kv_view(db)?
-                .plan_batch_at(&operations, now)
-                .map_err(kv_failure)?;
-            // A batch that writes no record takes no slot: as for a single
-            // delete, no quota applies, whatever the scope already holds.
-            let changes = plan.changes();
-            if changes.iter().any(|&(_, present)| present) {
-                enforce_quota(&quota_service, db, scope.role(), collection.id(), &changes)?;
-            }
             let outcomes = collection
                 .kv_store(db)?
-                .commit_batch_plan(plan)
-                .map_err(kv_failure)?;
+                .write_batch_gated_at(&operations, now, |database, changes| {
+                    // A batch that writes no record takes no slot: as for a
+                    // single delete, no quota applies, whatever the scope
+                    // already holds.
+                    if changes.iter().any(|&(_, present)| present) {
+                        enforce_quota(
+                            &quota_service,
+                            database,
+                            scope.role(),
+                            collection.id(),
+                            changes,
+                        )?;
+                    }
+                    Ok(())
+                })
+                .map_err(|error| match error {
+                    Gated::Batch(error) => kv_failure(error),
+                    Gated::Refused(error) => error,
+                })?;
             Ok(Json(
                 json!({"results":outcomes.iter().map(outcome_json).collect::<Vec<_>>()}),
             ))
@@ -1484,5 +1491,27 @@ mod tests {
         for invalid in ["YQ", "YR==", "__8=", "YQ==\n"] {
             assert_eq!(value(invalid).unwrap_err().code, "invalid_input");
         }
+    }
+
+    #[test]
+    fn a_batch_at_every_limit_is_charged_less_than_eight_mebibytes() {
+        // docs/KEY-VALUE.md tells operators that a group-commit budget of 8 MiB
+        // always admits a batch: 1,000 puts with the longest namespaces and
+        // keys and 4,194,304 value bytes in all.
+        let names: Vec<(String, String)> = (0..MAX_KV_BATCH_OPERATIONS)
+            .map(|index| ("n".repeat(255), format!("{index:04}{}", "k".repeat(1_020))))
+            .collect();
+        let mut values: Vec<Option<Vec<u8>>> = vec![Some(vec![0; 4_194]); MAX_KV_BATCH_OPERATIONS];
+        values[0] = Some(vec![0; 4_194 + 304]);
+        let value_bytes: usize = values.iter().flatten().map(Vec::len).sum();
+        assert_eq!(value_bytes, MAX_KV_BATCH_VALUE_BYTES);
+        let prepared = Prepared {
+            names,
+            values,
+            conditions: vec![Expected::Any; MAX_KV_BATCH_OPERATIONS],
+        };
+        let charged = prepared.retained_bytes();
+        assert!(charged > value_bytes, "{charged}");
+        assert!(charged < 8 * 1024 * 1024, "{charged}");
     }
 }

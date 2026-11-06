@@ -20,7 +20,7 @@ fn address(address: Option<proto::KvAddress>) -> Result<proto::KvAddress, ApiErr
 }
 
 fn expectation(value: Option<proto::Expected>) -> Value {
-    match value.and_then(|value| value.kind) {
+    match value.and_then(|proto::Expected { kind }| kind) {
         None | Some(proto::expected::Kind::Any(_)) => json!("any"),
         Some(proto::expected::Kind::Absent(_)) => json!("absent"),
         Some(proto::expected::Kind::Revision(revision)) => {
@@ -234,12 +234,15 @@ impl proto::kv_server::Kv for Adapter {
             true,
             false,
             |service, role, _, request| async move {
-                let target = collection(request.collection)?;
-                rest::check_key_count(request.keys.len())?;
-                let keys: Vec<Value> = request
-                    .keys
+                let proto::KvGetManyRequest {
+                    collection: name,
+                    keys,
+                } = request;
+                let target = collection(name)?;
+                rest::check_key_count(keys.len())?;
+                let keys: Vec<Value> = keys
                     .into_iter()
-                    .map(|key| json!({"namespace":key.namespace,"key":key.key}))
+                    .map(|proto::KvKeyRef { namespace, key }| json!({"namespace":namespace,"key":key}))
                     .collect();
                 let input = decode(json!({"keys":keys}))?;
                 let Json(value) = rest::fetch_many(
@@ -285,10 +288,13 @@ impl proto::kv_server::Kv for Adapter {
             false,
             false,
             |service, role, request_id, request| async move {
-                let target = collection(request.collection)?;
-                rest::check_operation_count(request.operations.len())?;
-                let operations = request
-                    .operations
+                let proto::KvBatchRequest {
+                    collection: name,
+                    operations,
+                } = request;
+                let target = collection(name)?;
+                rest::check_operation_count(operations.len())?;
+                let operations = operations
                     .into_iter()
                     .enumerate()
                     .map(|(index, operation)| {
@@ -344,7 +350,8 @@ impl proto::kv_server::Kv for Adapter {
 
 /// One batch operation as the REST request carries it; REST checks it. Every
 /// field of the message is named, so a field that a later release adds fails
-/// the build here instead of being dropped.
+/// the build here instead of being dropped; the requests of the two batch RPCs
+/// are read the same way.
 fn batch_operation(operation: proto::KvBatchOperation) -> Result<Value, ApiError> {
     let proto::KvBatchOperation { kind } = operation;
     match kind {
