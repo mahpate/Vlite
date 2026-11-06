@@ -40,19 +40,19 @@ service to operate.
   names a collection, graph, job or tenant, and agent-memory resources stay hidden
   from callers without raw access; see the [release notes](docs/RELEASE-0.7.1.md#security).
 - **Dashboard.** Browse, search, write, import, index, monitor and query
-  graphs, with user accounts, roles and tenants. The 0.7.1 dashboard adds
-  dedicated Key-value and MemoryAI workspaces, interactive graph navigation and
-  authorized provider controls and named/sparse vector management; see the [dashboard guide](docs/CONSOLE.md).
+  graphs, with user accounts, roles and tenants. The dashboard has Key-value and MemoryAI
+  workspaces, interactive 2D and 3D graphs, provider controls and named and sparse
+  vectors; see the [dashboard guide](docs/CONSOLE.md).
 - **Storage options.** Encryption at rest, point-in-time restore, a change
   feed, file-shipped read replicas, a disk-based ANN index, a key-value store
   and an opt-in directory store with checkpoints (Rust).
 - **Tools.** Interactive shell, validated imports, offline maintenance, index
   tuning, a graph CLI, an MCP server and agent skills, with local key-value
   commands in the shell and MCP, and agent-memory tools and a CLI client.
-- **Performance.** At 100,000 × 384 dimensions, this release has about 42% lower
-  exact query latency and 23% lower filtered query latency than the previous
-  one (p50), with identical recall and file size. Ingest, reopen and memory
-  stay within about 3%. Patch releases are not re-measured.
+- **Performance.** At 100,000 × 384 dimensions, 0.7.0 had about 42% lower exact
+  and 23% lower filtered p50 query latency than 0.6.0, with identical recall and
+  file size. Ingest, reopen and memory stayed within about 3%. 0.7.1 was not
+  re-measured.
   [Results](benchmarks/RESULTS.md#release-candidate-070-against-v060-november-4-2026-utc)
 
 ## Key terms
