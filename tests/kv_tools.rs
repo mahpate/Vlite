@@ -461,6 +461,52 @@ fn pagination_order_prefix_exclusive_after_and_default_limit() {
 }
 
 #[test]
+fn list_reports_each_entrys_version_and_expiry_over_mcp_and_shell() {
+    let temp = tempfile::tempdir_in(".").unwrap();
+    let path = temp.path().join("expiry.vlite");
+    let mut db = Database::create(&path, 1).unwrap();
+    let deadline = 4_102_444_800_000_u64;
+    let plain = db
+        .kv_store("default")
+        .unwrap()
+        .put("n", "a", b"", vlite::kv::KvPut::default())
+        .unwrap();
+    let expiring = db
+        .kv_store("default")
+        .unwrap()
+        .put(
+            "n",
+            "b",
+            b"",
+            vlite::kv::KvPut {
+                expires_at_ms: Some(deadline),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+    db.close().unwrap();
+    for mcp in [true, false] {
+        let case = json!({"command":"kv-list","request":{"collection":"default","namespace":"n"}});
+        let output = process(&path, mcp, false, &[line(&case, mcp, 0)]);
+        assert!(output.status.success(), "{output:?}");
+        let reply = values(&output).remove(0);
+        let page = if mcp {
+            reply["result"]["structuredContent"].clone()
+        } else {
+            reply
+        };
+        let items = page["items"].as_array().unwrap();
+        assert_eq!(items.len(), 2, "{page}");
+        assert_eq!(items[0]["key"], "a");
+        assert_eq!(items[0]["version"], plain.to_string());
+        assert_eq!(items[0]["expires_at_ms"], Value::Null);
+        assert_eq!(items[1]["key"], "b");
+        assert_eq!(items[1]["version"], expiring.to_string());
+        assert_eq!(items[1]["expires_at_ms"], deadline.to_string());
+    }
+}
+
+#[test]
 fn cas_revision_success_stale_and_due_absent() {
     let temp = tempfile::tempdir_in(".").unwrap();
     let path = temp.path().join("cas.vlite");
