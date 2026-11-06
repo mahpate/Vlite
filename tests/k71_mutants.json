@@ -1600,5 +1600,53 @@
   "old": "            \"actor\": self.actor,\n",
   "new": "            \"actor\": if self.binding.is_some() { json!(self.actor) } else { Value::Null },\n",
   "cmd": "cargo test --locked --offline --features server --test server_memory_actor"
+ },
+ {
+  "id": "lent/L1-key",
+  "desc": "the MCP/shell page adapter lends an empty key instead of the entry's key",
+  "file": "src/bin/tool_support/kv_mcp.rs",
+  "old": "                    visit(Lent {\n                        key: entry.key,\n",
+  "new": "                    visit(Lent {\n                        key: \"\",\n",
+  "cmd": "cargo test --locked --offline --features grpc,mcp,tools --test kv_tools -- pagination_order_prefix_exclusive_after_and_default_limit contract_goldens_mcp_and_shell list_limit_10000_peeks_for_continuation"
+ },
+ {
+  "id": "lent/L2-value",
+  "desc": "the MCP/shell page adapter lends an empty value instead of the entry's value",
+  "file": "src/bin/tool_support/kv_mcp.rs",
+  "old": "                        key: entry.key,\n                        value: entry.value,\n",
+  "new": "                        key: entry.key,\n                        value: &[],\n",
+  "cmd": "cargo test --locked --offline --features grpc,mcp,tools --test kv_tools -- pagination_order_prefix_exclusive_after_and_default_limit contract_goldens_mcp_and_shell list_limit_10000_peeks_for_continuation"
+ },
+ {
+  "id": "lent/L3-version",
+  "desc": "the MCP/shell page adapter lends version 0 instead of the entry's version",
+  "file": "src/bin/tool_support/kv_mcp.rs",
+  "old": "                        value: entry.value,\n                        version: entry.version,\n",
+  "new": "                        value: entry.value,\n                        version: 0,\n",
+  "cmd": "cargo test --locked --offline --features grpc,mcp,tools --test kv_tools -- pagination_order_prefix_exclusive_after_and_default_limit contract_goldens_mcp_and_shell list_limit_10000_peeks_for_continuation"
+ },
+ {
+  "id": "lent/L4-expiry",
+  "desc": "the MCP/shell page adapter lends no expiry instead of the entry's deadline",
+  "file": "src/bin/tool_support/kv_mcp.rs",
+  "old": "                        version: entry.version,\n                        expires_at_ms: entry.expires_at_ms,\n                        has_next: entry.has_next,\n",
+  "new": "                        version: entry.version,\n                        expires_at_ms: None,\n                        has_next: entry.has_next,\n",
+  "cmd": "cargo test --locked --offline --features grpc,mcp,tools --test kv_tools -- list_reports_each_entrys_version_and_expiry_over_mcp_and_shell"
+ },
+ {
+  "id": "lent/L5-has-next-false",
+  "desc": "the MCP/shell page adapter never reports a following entry, so a page never carries a cursor",
+  "file": "src/bin/tool_support/kv_mcp.rs",
+  "old": "                        has_next: entry.has_next,\n",
+  "new": "                        has_next: false,\n",
+  "cmd": "cargo test --locked --offline --features grpc,mcp,tools --test kv_tools -- pagination_order_prefix_exclusive_after_and_default_limit contract_goldens_mcp_and_shell list_limit_10000_peeks_for_continuation"
+ },
+ {
+  "id": "lent/L6-has-next-true",
+  "desc": "the MCP/shell page adapter always reports a following entry, so the last page carries a cursor",
+  "file": "src/bin/tool_support/kv_mcp.rs",
+  "old": "                        has_next: entry.has_next,\n",
+  "new": "                        has_next: true,\n",
+  "cmd": "cargo test --locked --offline --features grpc,mcp,tools --test kv_tools -- pagination_order_prefix_exclusive_after_and_default_limit contract_goldens_mcp_and_shell list_limit_10000_peeks_for_continuation"
  }
 ]
