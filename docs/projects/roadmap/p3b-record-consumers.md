@@ -2,7 +2,7 @@
 
 | | |
 |---|---|
-| Status | Integrated behind the test gates on `mahpate-r071-a4`. Nothing compact becomes active: every compact arm below is `cfg(test)`, and no default, file format or wire shape changes. Replaces the parked lane A (`origin/mahpate-p3b-consumers` @ `834a0a6`) |
+| Status | Integrated behind the test gates on `mahpate-r071-a4` (accepted at `4670d858`), and checked again on the 0.7.2 integration tree T (`mahpate-int072-c1` @ `2d405125`), where the commits of this lane apply to `main` without a conflict and the replays of the files that changed there were repeated (section 8; the gate, section 9). Nothing compact becomes active: every compact arm below is `cfg(test)`, and no default, file format or wire shape changes. Replaces the parked lane A (`origin/mahpate-p3b-consumers` @ `834a0a6`) |
 | Scope | Key-value reads, hybrid search, the query language, grouped search and facets, the record iterator and browse, named vectors and re-embedding, graph evidence, and the exact-scan draft |
 | Out of scope | Named ANN and every other HNSW, snapshot, rebuild or disk-ANN path (they stay refused on compact and belong to [P3c](p3c-compact-ann.md)); the exact scan beyond the lane A draft (lane E4 owns it); the seam itself (`src/compact/source.rs`, lane R0) |
 | Reads with | The [seam freeze](p3b-seam-freeze.md) (the frozen semantics CLK, PRE, ERR, ACC and IDN are cited below), the [survivor ledgers](p3b-survivor-ledgers.md#lane-a) and the [P3 design](p3-compact-vectors.md), slice 4 and table J |
@@ -94,7 +94,7 @@ counter of the generation or the materialized cells of a row.
 | `compact_iter`, `CompactRecordIter`, `compact_browse` (`src/records.rs`) | A cursor seeks by binary search over the base rows and merges the overlay in ascending ID order; a tombstone or an expired winner is skipped and never falls through (CLK-4, PRE-1); pages chain like the resident ones at every clock; a snapshot keeps the state it captured; read errors are items, never skipped rows | `consumer_cursor` (8) |
 | `record_vectors`, `search_named_at`, `reembed_pending(_checked)` (`src/vectors.rs`) | A named vector is visible only while its primary row is visible at the one clock; a poisoned cell or a tampered block is an error; no base row that the overlay shadows is read; re-embedding lists the effective rows without the target version in ascending order, within its limit and without decoding a row beyond it; named ANN stays refused with nothing built | `compact_named_vector_visibility_matches_resident` (table J, `full` and `half`), `compact_named_vector_search_propagates_primary_read_error`, `consumer_vectors` (11) |
 | `GraphRef::retrieve` evidence reads (`src/property_graph/retrieve.rs`) | Pivots and evidence are read at the one retrieval clock; only the requested evidence collections are read and only the attached rows that are projected are decoded; errors propagate; at most 64 unmapped pivots are listed and all are counted; the pivot records are read at the clock of the graph handle on resident files too; the bounds of a request are validated before the health of the handle (a known order after acquisition, section 6) | `consumer_graph` (11) and, for resident files, `retrieve_reads_the_pivot_records_at_the_read_clock` in `tests/graph_ttl.rs` |
-| `Database::search_in_at`, compact arm; `exact_search_compact` (`src/lib.rs`) | Draft. Hits, order and statistics equal the resident ones; a declared posting narrows the scan only when it holds at most half of the rows | `consumer_exact` (1) and the lane A tests |
+| `Database::search_in_at`, compact arm; `exact_search_compact` (`src/lib.rs`) | Draft, refined by lane E4 (section 7). Hits, their order, the distances, the evaluations and the index candidates equal the resident ones; a declared posting narrows the scan only when it holds at most half of the rows. One exception: `records_scanned` differs where the resident scan prunes by block summaries (a filter that no declared posting serves, over more than one 1,024-row block), because a compact collection has no summaries until P5-71 persists them and its scan examines every row. In the pinned case (2,500 rows, a range inside one block) the resident scan examines 1,024 rows and the compact scan 2,500; R0's probe of range summaries measured 176 rows for the resident scan and 1,200 for the compact scan. See `p3b-exact-scan.md` (lane E4's page), section 4 | `consumer_exact` (1) and the lane A tests; the exception is pinned by `compact_scan_examines_every_row_where_the_resident_block_summaries_prune` (lane B4) |
 
 ## 3. Table J obligations that exist only on lane A
 
@@ -108,7 +108,7 @@ counter of the generation or the materialized cells of a row.
 
 Lane A's ledger lists 47 mutants, 26 of them survivors. Each was re-created from its recorded description and anchored
 on the tree after the cherry-picks (`tests/compact_a4_mutants.json`, `first_replay` is the first replay on that tree,
-before the A4 tests). On that tree 40 of the 47 were already killed and 7 survived: `pa-exact-cap-quarter`, `pa-graph-evidence-wall-clock`, `pa-group-clock-zero`, `pa-kv-probe-reads-base-slot-only`, `pa-kv-view-health-removed`, `pa-ql-clock-zero`, `pa-ql-order-key-reads-b`. Three of them, `pa-group-clock-zero`, `pa-ql-clock-zero` and `pa-exact-cap-quarter`, are recorded as killed in lane A's ledger; their tests used far-future deadlines only (and a quarter of the rows as the index cap satisfied the same cases as half). `pa-kv-probe-reads-base-slot-only` survived because the fixture of the named test never produced an image in which a key is displaced; `pa-ql-order-key-reads-b` because the named test does not fail on it; `pa-kv-view-health-removed` because the check it removed was dead code (`Database::resolve` checks health first), so the line is gone and the mutant is re-anchored on `resolve`; and `pa-graph-evidence-wall-clock` is lane A's equivalence claim (section 6). Every one of the 47 is killed on the final tree, by the tests in the last column; the 26 survivors of lane A's ledger are also replayed on a second machine.
+before the A4 tests). On that tree 40 of the 47 were already killed and 7 survived: `pa-exact-cap-quarter`, `pa-graph-evidence-wall-clock`, `pa-group-clock-zero`, `pa-kv-probe-reads-base-slot-only`, `pa-kv-view-health-removed`, `pa-ql-clock-zero`, `pa-ql-order-key-reads-b`. Three of them, `pa-group-clock-zero`, `pa-ql-clock-zero` and `pa-exact-cap-quarter`, are recorded as killed in lane A's ledger; their tests used far-future deadlines only (and a quarter of the rows as the index cap satisfied the same cases as half). `pa-kv-probe-reads-base-slot-only` survived because the fixture of the named test never produced an image in which a key is displaced; `pa-ql-order-key-reads-b` because the named test does not fail on it; `pa-kv-view-health-removed` because the check it removed was dead code (`Database::resolve` checks health first), so the line is gone and the mutant is re-anchored on `resolve`; and `pa-graph-evidence-wall-clock` is lane A's equivalence claim (section 6). Every one of the 47 is killed by the tests in the last column, on the lane head or, for the files that T changed, on T (section 8); the 26 survivors of lane A's ledger are killed on two machines.
 
 | Mutant | File | Lane A's bucket | Replay on the tree after the cherry-picks | A4 | Closing tests |
 |---|---|---|---|---|---|
@@ -127,7 +127,7 @@ before the A4 tests). On that tree 40 of the 47 were already killed and 7 surviv
 | `pa-kv-get-key-validation-removed` | `kv.rs` | named test only | killed by `compact_kv_point_and_prefix_match_resident` | killed on both machines | `compact_kv_point_and_prefix_match_resident`, `compact_kv_view_checks_health_then_dimension_then_arguments` |
 | `pa-kv-list-after-inclusive` | `kv.rs` | named test only | killed by `compact_kv_point_and_prefix_match_resident` | killed on both machines | `compact_kv_point_and_prefix_match_resident`, `compact_kv_list_offers_only_the_record_get_resolves` |
 | `pa-kv-list-limit-plus-one` | `kv.rs` | named test only | killed by `compact_kv_point_and_prefix_match_resident` | killed on both machines | `compact_kv_point_and_prefix_match_resident`, `compact_kv_list_offers_only_the_record_get_resolves` |
-| `pa-kv-list-namespace-ignored` | `kv.rs` | named test only | killed by `compact_kv_point_and_prefix_match_resident` | killed on both machines | `only_candidates_that_can_be_entries_are_probed` |
+| `pa-kv-list-namespace-ignored` | `kv.rs` | named test only | killed by `compact_kv_point_and_prefix_match_resident` | killed on both machines | `a_record_of_another_namespace_inside_a_keys_window_costs_no_probe` |
 | `pa-kv-list-namespace-validation-removed` | `kv.rs` | named test only | killed by `compact_kv_point_and_prefix_match_resident` | killed on both machines | `compact_kv_point_and_prefix_match_resident`, `compact_kv_view_checks_health_then_dimension_then_arguments` |
 | `pa-kv-list-zero-limit-allowed` | `kv.rs` | named test only | killed by `compact_kv_point_and_prefix_match_resident` | killed on both machines | `compact_kv_point_and_prefix_match_resident`, `compact_kv_view_checks_health_then_dimension_then_arguments` |
 | `pa-kv-probe-reads-base-slot-only` | `kv.rs` | named test only | survived | killed on both machines | `compact_kv_point_and_prefix_match_resident`, `compact_kv_list_offers_only_the_record_get_resolves`, `compact_kv_probe_window_is_exactly_sixteen_slots` |
@@ -139,7 +139,7 @@ before the A4 tests). On that tree 40 of the 47 were already killed and 7 surviv
 | `pa-reembed-limit-never-breaks` | `vectors.rs` | named test only | killed by `compact_named_vector_visibility_matches_resident` | killed on both machines | `compact_named_vector_visibility_matches_resident`, `compact_reembed_pending_decodes_no_row_beyond_its_limit`, `compact_reembed_pending_lists_the_effective_rows_without_the_target_version` |
 | `pa-graph-evidence-wall-clock` | `property_graph/retrieve.rs` | equivalent claim | survived | killed on both machines | `compact_graph_evidence_is_read_at_the_retrieval_clock_even_if_an_attached_row_had_a_deadline` |
 | `pa-ann-resident-guard-removed` | `vectors.rs` | recorded as killed | killed by `compact_installed_collection_method_matrix` | killed | `compact_named_ann_stays_refused_and_leaves_the_state_unchanged`, `compact_named_vector_consumers_check_health_before_anything_else` |
-| `pa-exact-cap-quarter` | `lib.rs` | recorded as killed | survived | killed | `compact_exact_search_uses_declared_postings_up_to_half_of_the_rows`, `hybrid_filter_applies_to_both_legs_and_the_vector_leg_reports_its_work`, `hybrid_validation_matches_resident_in_check_order` |
+| `pa-exact-cap-quarter` | `lib.rs` | recorded as killed | survived | killed on both machines | `compact_exact_search_uses_declared_postings_up_to_half_of_the_rows`, `hybrid_filter_applies_to_both_legs_and_the_vector_leg_reports_its_work`, `hybrid_validation_matches_resident_in_check_order` |
 | `pa-exact-compact-arm-off` | `collection.rs` | recorded as killed | killed by `compact_dispatch_grouped_facets_match_nonempty_resident_rows`, `compact_dispatch_unqualified_scans_and_derived_reads_refuse` and 11 more | killed | `compact_exact_search_uses_declared_postings_up_to_half_of_the_rows`, `an_attached_record_never_carries_a_deadline_on_compact_or_resident_records`, `compact_graph_access_and_retrieval_answer_poisoned_on_an_unhealthy_handle` |
 | `pa-graph-compact-pivot-state-off` | `property_graph/retrieve.rs` | recorded as killed | killed by `compact_graph_retrieve_projects_effective_row_at_one_clock` | killed on both machines | `an_attached_record_never_carries_a_deadline_on_compact_or_resident_records`, `compact_graph_access_and_retrieval_answer_poisoned_on_an_unhealthy_handle`, `compact_graph_evidence_decodes_only_the_attached_rows_it_projects` |
 | `pa-graph-revalidate-wall-clock` | `property_graph/retrieve.rs` | recorded as killed | killed by `compact_graph_retrieve_projects_effective_row_at_one_clock` | killed on both machines | `compact_graph_evidence_is_read_at_the_retrieval_clock_even_if_an_attached_row_had_a_deadline`, `compact_graph_retrieval_uses_one_explicit_clock_for_pivots_and_evidence` |
@@ -151,7 +151,7 @@ before the A4 tests). On that tree 40 of the 47 were already killed and 7 surviv
 | `pa-kv-list-expiry-dropped` | `kv.rs` | recorded as killed | killed by `compact_kv_point_and_prefix_match_resident` | killed | `compact_kv_list_offers_only_the_record_get_resolves` |
 | `pa-kv-list-sort-desc` | `kv.rs` | recorded as killed | killed by `compact_kv_point_and_prefix_match_resident` | killed | `compact_kv_list_offers_only_the_record_get_resolves` |
 | `pa-kv-list-version-zero` | `kv.rs` | recorded as killed | killed by `compact_kv_point_and_prefix_match_resident` | killed | `compact_kv_list_offers_only_the_record_get_resolves` |
-| `pa-kv-store-resident-guard-removed` | `kv.rs` | recorded as killed | killed by `compact_dispatch_mutable_acquisition_keeps_other_refusals`, `compact_installed_database_and_snapshot_method_matrix` | killed | `compact_dispatch_mutable_acquisition_keeps_other_refusals` |
+| `pa-kv-store-resident-guard-removed` | `kv.rs` | recorded as killed | killed by `compact_dispatch_mutable_acquisition_keeps_other_refusals`, `compact_installed_database_and_snapshot_method_matrix` | killed on both machines | `compact_dispatch_mutable_acquisition_keeps_other_refusals` |
 | `pa-kv-view-dimension-check-removed` | `kv.rs` | recorded as killed | killed by `compact_dispatch_mutable_acquisition_keeps_other_refusals`, `compact_installed_database_and_snapshot_method_matrix` | killed | `compact_kv_view_checks_health_then_dimension_then_arguments` |
 | `pa-ql-clock-zero` | `query_language.rs` | recorded as killed | survived | killed | `query_clauses_match_resident_before_and_after_overlay_mutations`, `query_hides_expired_and_deleted_rows_in_every_output_and_shows_the_rest`, `query_named_vectors_match_resident_on_the_full_collection` |
 | `pa-ql-compact-dispatch-off` | `query_language.rs` | recorded as killed | killed by `compact_installed_restricted_method_guards_refuse`, `compact_query_language_matches_resident_after_overlay_resolution` and 2 more | killed | `query_clauses_match_resident_before_and_after_overlay_mutations`, `query_errors_match_resident_and_precede_row_materialization`, `query_hides_expired_and_deleted_rows_in_every_output_and_shows_the_rest` |
@@ -162,19 +162,19 @@ before the A4 tests). On that tree 40 of the 47 were already killed and 7 surviv
 
 ## 5. The A4 mutants
 
-A4 adds 170 mutants to the 47 of lane A, 217 in all. Every record in `tests/compact_a4_mutants.json` is one anchored replacement that was replayed with the tool of section 8: 164 on the machine that wrote the tests and 176 on a second machine, all killed, with the evidence of the 0.7.1 acceptance form (the anchor matched once, the mutated tree compiled, the named tests failed, the SHA-256 of the file before, mutated and restored, the unmodified selectors green before the first and after the last mutant of the replay, one mutant per build). `expect` names tests that failed on every replay.
+A4 adds 170 mutants to the 47 of lane A, 217 in all. Every record in `tests/compact_a4_mutants.json` is one anchored replacement that was replayed and killed with the tool of section 8, with the evidence of the 0.7.1 acceptance form (the anchor matched once, the mutated tree compiled, the named tests failed, the SHA-256 of the file before, mutated and restored, the unmodified selectors green before the first and after the last mutant of the replay, one mutant per build). `expect` names tests that failed on every replay. 118 of the 217 were replayed on T (the files that T changed, section 8); the other 99 keep their replays from the lane head, which are valid because T leaves their files byte for byte as they were.
 
-| Group | Mutants | Files | Killed here | Killed on a second machine |
+| Group | Mutants | Files | Replayed on T | Replays kept from the lane head |
 |---|---|---|---|---|
 | A4 key-value tests | 13 | `kv.rs` | 13 | 0 |
-| A4 exact scan and hybrid lead tests | 10 | `hybrid.rs`, `lib.rs`, `vectors.rs` | 10 | 10 |
-| A4 cursor, browse, group and facet tests | 44 | `records.rs` | 22 | 44 |
-| A4 hybrid and query-language tests | 43 | `hybrid.rs`, `query_language.rs` | 23 | 43 |
-| A4 named-vector and graph evidence tests | 45 | `property_graph/retrieve.rs`, `vectors.rs` | 34 | 45 |
-| A4 unavailable-text-index tests | 9 | `hybrid.rs`, `query_language.rs` | 9 | 0 |
-| A4 retrieve order after acquisition | 1 | `property_graph/retrieve.rs` | 1 | 1 |
-| A4 resident read clock | 2 | `property_graph/retrieve.rs` | 2 | 2 |
-| A4 attached-record invariant tests | 3 | `collection.rs`, `lib.rs`, `property_graph/mod.rs` | 3 | 3 |
+| A4 exact scan and hybrid lead tests | 10 | `hybrid.rs`, `lib.rs`, `vectors.rs` | 7 | 3 |
+| A4 cursor, browse, group and facet tests | 44 | `records.rs` | 44 | 0 |
+| A4 hybrid and query-language tests | 43 | `hybrid.rs`, `query_language.rs` | 0 | 43 |
+| A4 named-vector and graph evidence tests | 45 | `property_graph/retrieve.rs`, `vectors.rs` | 22 | 23 |
+| A4 unavailable-text-index tests | 9 | `hybrid.rs`, `query_language.rs` | 0 | 9 |
+| A4 retrieve order after acquisition | 1 | `property_graph/retrieve.rs` | 1 | 0 |
+| A4 resident read clock | 2 | `property_graph/retrieve.rs` | 2 | 0 |
+| A4 attached-record invariant tests | 3 | `collection.rs`, `lib.rs`, `property_graph/mod.rs` | 2 | 1 |
 
 ## 6. Findings and limits that remain
 
@@ -249,47 +249,52 @@ Limits that A4 leaves as they are, each with the owner that can change it:
 
 ## 7. Hand-offs
 
-- **E4** owns the exact scan from here: the draft reads visibility from the columns (CLK-6), materializes a cell per
-  visited row and ignores summary candidates, so its statistics can differ from the resident ones once summaries exist.
-  `consumer_exact` and the lane A tests are its parity harness.
-- **K71**: the first two commits of the key-value group are K71's `src/kv.rs` commits (`6167835`, `7592127`). If K71 is
-  integrated first (the order is R0, B4, K71, A4, G71), skip them: the dispatch commit applies on K71's tip. K71's later
-  `src/kv.rs` commit `ce3616a` (look-alikes outside their window are skipped without a probe) applies cleanly on this
-  lane's tip, and the key-value selector (`kv::`, `consumer_kv`, `compact_kv`, the dispatch and method tests) passes on
-  the result. A4 edits functions that the freeze note reserves for K71 in `src/kv.rs` (`probe`, `entry`, `get_at`,
-  `visit_at`, `kv_view`); the edits are the named exceptions of the gate, which takes K71's visitor as the baseline of
-  `visit_at` (`--kv-base`; pass K71's accepted head when it is not `7592127`). The rule "list only the record `get`
-  resolves" is pinned by `compact_kv_list_offers_only_the_record_get_resolves` and by K71's
-  `only_candidates_that_can_be_entries_are_probed`. The server's key-value PUT computes the slot through
-  `kv_view(..).put_slot_at` before it takes the writable store (`src/server/kv.rs`): with the compact `kv_view` arm a
-  compact collection would be read and quota-checked before it is refused, so take the store first when that code is
-  touched.
-- **R0** (slice 3: `base_rows`, `affected_ids`, `ordered_ids`) changes `src/compact/source.rs` and the effective block of
-  `src/records.rs`. The recorded replays are checked against the SHA-256 of the file they mutated, so a lane that edits one
-  of the mutated files makes every mutant of that file stale until it is replayed again; the table after this list shows
-  who edits which file next.
+- **E4** is done on T, the 0.7.2 integration tree (`mahpate-int072-c1` @ `2d405125`): E4 owns the exact scan there. The
+  loop of `exact_search_compact_with_workspace` in `src/lib.rs` now walks `CollectionRecords::ordered_ids` (one line) and
+  five tests were added (`src/compact/source/overlay_tests/exact_scan.rs`). One of them,
+  `compact_exact_scan_scores_without_materializing_record_cells`, pins that scoring creates no record cell; the draft of
+  this lane already read visibility, metadata and vectors through the `effective_*` accessors (PRE-1) and did not
+  materialize one. Its statistics equal the resident ones except `records_scanned` where summaries prune (section 2;
+  `p3b-exact-scan.md`, section 4). `consumer_exact` and the lane A tests are its parity harness.
+- **K71, G71 and M71** are final in `main` (0.7.1). The order of the first integration (R0, B4, K71, A4, G71) is
+  historical: on T, 27 of this lane's 30 commits (up to `4670d858`) are cherry-picked onto `main` with no conflict. The
+  other three are skipped there as duplicates: this lane's picks of K71's two `src/kv.rs` commits `6167835` and `7592127`
+  (`f689d03` and `71077a0`; `4ee251b` and `5584946` on `main`) and its pick of B4's `b42dd99` (`3017ff4`). K71's later
+  `src/kv.rs` commit `ce3616a` (look-alikes outside their window are skipped without a probe) is `a4c8936` on `main`, and
+  the key-value selector (`kv::`, `consumer_kv`, `compact_kv`, the dispatch and method tests) is green on T. A4 edits
+  functions that the freeze note reserves for K71 in `src/kv.rs` (`probe`, `entry`, `get_at`, `visit_at`, `kv_view`);
+  the edits are the named exceptions of the gate, which takes K71's visitor as the baseline of `visit_at` (`--kv-base`;
+  on T pass `--kv-base origin/main`, where K71 is final). The rule "list only the record `get` resolves" is pinned by
+  `compact_kv_list_offers_only_the_record_get_resolves` and by K71's `only_candidates_that_can_be_entries_are_probed`. The
+  server's key-value PUT computes the slot through `kv_view(..).put_slot_at` before it takes the writable store
+  (`src/server/kv.rs`): with the compact `kv_view` arm a compact collection would be read and quota-checked before it is
+  refused, so take the store first when that code is touched.
+- **R0** (slice 3: `base_rows`, `affected_ids`, `ordered_ids`) is merged on T: it changed `src/compact/source.rs` and the
+  effective block of `src/records.rs`. The recorded replays are checked against the SHA-256 of the file they mutated, so
+  a change to a mutated file makes every mutant of that file stale until it is replayed again; the table after this list
+  shows which files T changed since the lane head, and section 8 what was replayed.
 - **L5** removes the test gates and with them the ten shadow copies (section 9). `retrieve.rs` decides "compact or not" from
   the pivot collection alone while `db.graphs()` still requires every collection to be resident, and
   `compact_graph_for_test` bypasses `Database::graph()`, so that public entry point is never exercised for compact
   records.
 - **B4, slice S3** (the declared-index differential) runs the compact exact search of A against B's index rebuild;
   `consumer_text` shows how to leave a text index unavailable on both forms (`TextIndex::with_posting_limit`, then the
-  rebuild that a reopen runs). B4's `b42dd99` is in this lane's history and is skipped when B4 is integrated first.
+  rebuild that a reopen runs). B4's `b42dd99` (`3017ff4` in this lane's history) is skipped on T as a duplicate.
 - **P3c**: named ANN and the approximate hybrid leg stay refused on compact records.
 
-The files that carry mutants, with the lane that edits each next (freeze note, section 6):
+The files that carry mutants, and what changed them on T since the lane head (`mahpate-r071-a4` @ `4670d858`):
 
-| File | Mutants | Edited next by |
-|---|---|---|
-| `collection.rs` | 2 | E4 and B4 (`exact_search_candidates`, `rebuild_derived`) |
-| `hybrid.rs` | 37 | the ANN lanes (the approximate leg) |
-| `kv.rs` | 26 | K71 (bounded paging) |
-| `lib.rs` | 11 | E4 (`search_in_at`, `exact_search_compact`), L5 |
-| `property_graph/mod.rs` | 1 | L5 (removes the test gates) |
-| `property_graph/retrieve.rs` | 28 | L5 (removes the test gates) |
-| `query_language.rs` | 31 | L5 (removes the test gates) |
-| `records.rs` | 52 | R0 (the effective block, slice 3), E4 (the snapshot exact path), the ANN lanes |
-| `vectors.rs` | 29 | the ANN lanes (named ANN) |
+| File | Mutants | Changed on T since the lane head | Replayed on T |
+|---|---|---|---|
+| `collection.rs` | 2 | nothing: byte for byte the file of the lane head | 0 of 2 |
+| `hybrid.rs` | 37 | nothing: byte for byte the file of the lane head | 0 of 37 |
+| `kv.rs` | 26 | K71 (`a4c8936`: look-alikes outside their window are skipped without a probe; `3aa708a`: `KvRef` is non-exhaustive) and G71 S1 (`03b2289`: collection accessors by identity); this lane's key-value commit applies on them (`33a2867`) | 26 of 26 |
+| `lib.rs` | 11 | E4 (`312bf2f`: the exact scan walks `ordered_ids`), `fb1c870` (one precondition check for dropping a collection) and G71 S1 (`03b2289`) | 11 of 11 |
+| `property_graph/mod.rs` | 1 | G71 S1 (`03b2289`) and S7 (`f7fa694`: reserved-resource residues) | 1 of 1 |
+| `property_graph/retrieve.rs` | 28 | G71 S1 (`03b2289`: the visible collection resolves in one call) | 28 of 28 |
+| `query_language.rs` | 31 | nothing: byte for byte the file of the lane head | 0 of 31 |
+| `records.rs` | 52 | R0 (`f167cf3`: base rows, affected IDs and ordered IDs) | 52 of 52 |
+| `vectors.rs` | 29 | nothing: byte for byte the file of the lane head | 0 of 29 |
 
 ## 8. Replaying the evidence
 
@@ -309,7 +314,17 @@ python tests/compact_mutant_replay.py verify tests/compact_a4_mutants.json
 
 `verify` re-checks every recorded run against the file in the tree: a run replayed on an older file is stale and must be
 replayed again. It needs one machine for a mutant, and two for the ids of the ledger's `two_machines` list, which are the 26
-survivors of lane A: 26 of the 26 have a kill on two machines. 97 of the other 191 mutants have one as well, and the rest one machine. Tests must not sleep or read the wall clock; every test here passes an explicit clock.
+survivors of lane A: 26 of the 26 have a kill on two machines. 78 of the other 191 mutants have one as well, and the rest one machine. Tests must not sleep or read the wall clock; every test here passes an explicit clock.
+
+### Replays on the 0.7.2 integration tree
+
+The replays recorded at the lane head (`4670d858`) were made before the compact work moved to 0.7.2, and T carries the changes of other lanes in 5 of the 9 files that the ledger mutates (the table of section 7). The ledger was brought up to T in four steps.
+
+1. **Anchors.** `check` reads every anchor exactly once on T except two: `pa-kv-store-resident-guard-removed` and `a4-cursorgroup-07` matched twice, because G71's `kv_store_by_id` and R0's `OrderedIds::next` repeat the text of their anchors. Both anchors are longer now (the replacements and the tests are the same); `check` reads 217 mutants and 0 problems on T and on the lane head.
+2. **What was stale.** `verify` counts a run only while the SHA-256 of the file it mutated is the file's in the tree, so a change to a mutated file makes every mutant of that file stale until it is replayed again. On T it read 99 accepted and 118 stale: the 118 mutants of the files that T changed (`kv.rs` 26, `lib.rs` 11, `property_graph/mod.rs` 1, `property_graph/retrieve.rs` 28, `records.rs` 52) were stale, and the 99 mutants of the files that T leaves byte for byte as they were (`collection.rs` 2, `hybrid.rs` 37, `query_language.rs` 31, `vectors.rs` 29) were not.
+3. **Replays on T.** The 118 stale mutants were replayed on T, one mutant per build, in the form above: every one was killed (0 survivors), with the unmodified selectors green before the first and after the last mutant of each replay and every file restored byte for byte. The 15 of them that are on the `two_machines` list were replayed on two machines, as the rule asks, and so were 39 others (the 37 graph evidence, `lib.rs` and `property_graph/mod.rs` mutants of one shard and the two re-anchored ones were also replayed here); the other 64 on one. The second machine replayed T plus the shard lists (files outside the source fingerprint), so its runs record the fingerprint of T as well. The runs of the lane head that these replace are dropped from the ledger (they stay in its history). One mutant is killed on T by another test than the one it named, so its `expect` was updated in the ledger (`expect_history` keeps the old names and the reason; the runs are untouched): `pa-kv-list-namespace-ignored`: K71's `a4c8936` rejects a record outside a key's probe window before any probe, which also stops a record of another namespace that lies outside the window, so `only_candidates_that_can_be_entries_are_probed` passes without the namespace test; K71's `a_record_of_another_namespace_inside_a_keys_window_costs_no_probe` plants such a record inside the window, counts the probes and fails.
+4. **Result.** `verify` on T reads 217 accepted, 0 stale, 0 open of 217. `verify --strict` (an option of the final tool of lane B4, which T carries) also requires that a run was replayed on exactly the sources of the tree (`sources` prints the fingerprint of T, `eaf4962586c7`, over 600 files): it counts 172 of 172 valid runs as bound to T and reads 118 accepted, 99 stale, 0 open. The 99 are the mutants of the files that T leaves as they were: their lane-head replays are valid by the file rule of 0.7.1 and carry no fingerprint of T's sources. Replaying them on T closes that; it was not needed for the rule that this lane is accepted by.
+
 
 ## 9. The shadow-copy gate
 
@@ -390,3 +405,27 @@ optional and the stale integration edit), and fifteen mutants of the new code al
 integrates this lane with G71, K71 and M71 failed in the default mode, on the functions of the other lanes and on the one
 interplay (G71's closure in `retrieve_with_visibility`); in the integration mode it passes with the three ranges, fails
 when the range of one lane is left out, and on this lane's own branch both modes pass.
+
+### Run on the 0.7.2 integration tree
+
+On T (`mahpate-int072-c1` @ `2d405125`: `main` with K71, G71 and M71 final, then R0, B4, this lane, S3 and E4) the
+integration mode takes what `main` changed since `v0.7.0` as one lane (`rel071`) and E4's commit as another, and K71's
+visitor as it is in `main`:
+
+```text
+python scripts/shadow_copy_check.py --base v0.7.0 --kv-base origin/main --root . --integration --lane rel071=v0.7.0..origin/main --lane e4=312bf2fa~1..312bf2fa
+```
+
+It exits 0 in 24 seconds (`shadow-copy gate: ok`; `--self-test` is ok as well):
+
+- 323 shipped functions differ from `v0.7.0`; 20 are covered by a site or a listed change and 303 are owned by `rel071`
+  (listed as `owned by lane rel071, not checked here`); the range of E4 owns none.
+- `retrieve_with_visibility` equals `v0.7.0` with its four named edits and the one integration edit of G71's closure,
+  and its shadow pair has equal resident arms.
+- K71's visitor is compared with `origin/main`, where it is final: the function `visit_at` equals it with the five named
+  edits of this lane (`acquire`, `rows` and `get_physical` in place of the inline residency check, map iterator and
+  lookup), and the method `KvView::visit_at` and `list_at` equal it unchanged.
+- The number of `#[cfg(not(test))]` attributes is the baseline's plus the ten shadow sites.
+
+The `--kv-base` default of the script (`75921271`, the commit that first carried K71's visitor) still names that
+commit; a tree that holds K71's final code passes `--kv-base origin/main`, as above.
