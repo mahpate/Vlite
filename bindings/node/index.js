@@ -383,6 +383,30 @@ export class Database {
   /** Plan a read request (`{ op: "neighbors", graph, ... }`, native snake_case) without running it. */
   async graphExplain(query) { return (await this.#graph("explain", { query })).explain; }
 
+  // Key-value: namespaced byte values in an existing one-dimension collection (a missing collection is never created).
+  // Values are Uint8Array; versions and deadlines are bigint (never Number: they can exceed 2**53). Bounds are checked
+  // by the native layer (namespace 1..255 and key 1..1024 UTF-8 bytes, value 0..1047290 bytes, limit 1..10000).
+  // `expected` is "any", "absent" or { revision: bigint }. Libraries without the operation reject with EmbeddedError("unsupported").
+  #kv(op, fields = {}) { return kvCall(this.#call("kv", { request: { op, ...fields } }), op); }
+  /** Rejects with `kv_not_found` for an absent or expired key. */
+  async kvGet({ collection, namespace, key }) {
+    return kvEntry(await this.#kv("get", kvAddress(collection, namespace, key)));
+  }
+  async kvPut({ collection, namespace, key, value, expected = "any", expiresAtMs }) {
+    const result = await this.#kv("put", { ...kvAddress(collection, namespace, key), value_base64: bytesBase64(value),
+      expected: kvExpected(expected), expires_at_ms: kvDeadline(expiresAtMs) });
+    return { version: BigInt(result.version), expires_at_ms: kvOptionalBigint(result.expires_at_ms) };
+  }
+  /** Resolves with whether an entry was deleted (`false` for an absent or expired key). */
+  async kvDelete({ collection, namespace, key, expected = "any" }) {
+    return (await this.#kv("delete", { ...kvAddress(collection, namespace, key), expected: kvExpected(expected) })).deleted;
+  }
+  async kvList({ collection, namespace, prefix = "", after, limit = 100 }) {
+    const result = await this.#kv("list", { collection: kvText(collection, "collection"), namespace: kvText(namespace, "namespace"),
+      prefix: kvText(prefix, "prefix"), limit: kvLimit(limit), ...(after == null ? {} : { after: kvText(after, "after") }) });
+    return { items: result.items.map(kvEntry), next_after: result.next_after };
+  }
+
 }
 
 // Omitted options are not sent, so the native side applies the collection's declared defaults.
@@ -440,6 +464,49 @@ function graphRef(value) {
 }
 function readFields({ limits, projection }) {
   return { ...optional("limits", snake(limits)), ...optional("projection", projection) };
+}
+// Libraries that predate the kv op reject the envelope, and one that predates a single operation rejects that
+// request, as an unknown variant.
+function kvCall(promise, operation) {
+  return promise.catch((error) => {
+    if (error instanceof EmbeddedError && ((error.code === "invalid_input" && error.message.includes("unknown variant `kv`"))
+      || (error.code === "invalid_request" && error.message.includes(`unknown variant \`${operation}\``)))) {
+      throw new EmbeddedError("unsupported", `Native library predates key-value ${operation}`);
+    }
+    throw error;
+  });
+}
+function kvText(value, name) {
+  if (typeof value !== "string") throw new TypeError(`${name} must be a string`);
+  return value;
+}
+function kvAddress(collection, namespace, key) {
+  return { collection: kvText(collection, "collection"), namespace: kvText(namespace, "namespace"), key: kvText(key, "key") };
+}
+// Versions and deadlines are bigint in 0..2**64-1 and travel as canonical decimal strings.
+function kvU64(value, name) {
+  if (typeof value !== "bigint") throw new TypeError(`${name} must be a bigint`);
+  if (value < 0n || value > 0xFFFFFFFFFFFFFFFFn) throw new RangeError(`${name} must be in 0..18446744073709551615`);
+  return value.toString();
+}
+function kvExpected(expected) {
+  if (expected === "any" || expected === "absent") return expected;
+  if (expected !== null && typeof expected === "object" && !Array.isArray(expected)
+    && Object.keys(expected).length === 1 && "revision" in expected) {
+    return { revision: kvU64(expected.revision, "revision") };
+  }
+  throw new TypeError('expected must be "any", "absent" or { revision: bigint }');
+}
+function kvDeadline(value) { return value === undefined || value === null ? null : kvU64(value, "expiresAtMs"); }
+function kvLimit(limit) {
+  if (!Number.isSafeInteger(limit)) throw new TypeError("limit must be an integer");
+  if (limit < 0) throw new RangeError("limit must not be negative");
+  return limit;
+}
+function kvOptionalBigint(text) { return text === null ? null : BigInt(text); }
+function kvEntry(item) {
+  return { key: item.key, value: new Uint8Array(Buffer.from(item.value_base64, "base64")), version: BigInt(item.version),
+    expires_at_ms: kvOptionalBigint(item.expires_at_ms) };
 }
 
 function bytesBase64(data) {

@@ -180,4 +180,34 @@ for (const metric of ["squared_l2", "cosine"]) {
   assert.equal((await client.database()).records, filteredBefore);
 }
 console.log("PASS JavaScript live filtered ANN");
+
+// Key-value entries against a real server; a dedicated one-dimensional collection holds them.
+if (caps.features?.kv === true) {
+  await client.createCollection("cache", 1);
+  const entry = { collection: "cache", namespace: "app", key: "k/é" };
+  const written = await client.kvPut({ ...entry, value: new Uint8Array([0, 255]), expected: "absent" });
+  assert.equal(written.expires_at_ms, null);
+  assert.ok(written.version > 0n);
+  assert.deepEqual(await client.kvGet(entry), { key: "k/é", value: new Uint8Array([0, 255]), ...written });
+  await assert.rejects(client.kvPut({ ...entry, value: new Uint8Array(), expected: "absent" }), is412);
+  await assert.rejects(client.kvPut({ ...entry, value: new Uint8Array(), expected: { revision: written.version + 1n } }), is412);
+  const replaced = await client.kvPut({ ...entry, value: new TextEncoder().encode("two"), expected: { revision: written.version } });
+  assert.ok(replaced.version > written.version);
+  assert.deepEqual(await client.kvList({ collection: "cache", namespace: "app", prefix: "k/" }),
+    { items: [{ key: "k/é", value: new TextEncoder().encode("two"), ...replaced }], next_after: null });
+  await assert.rejects(client.kvDelete({ ...entry, expected: { revision: written.version } }), is412);
+  assert.equal(await client.kvDelete({ ...entry, expected: { revision: replaced.version } }), true);
+  assert.equal(await client.kvDelete(entry), false);
+  const notFound = (e) => e instanceof VLiteError && e.status === 404 && e.code === "kv_not_found";
+  await assert.rejects(client.kvGet(entry), notFound);
+  // A deadline that is already due is accepted and the entry is immediately absent.
+  assert.equal((await client.kvPut({ ...entry, value: new Uint8Array(), expiresAtMs: 0n })).expires_at_ms, 0n);
+  await assert.rejects(client.kvGet(entry), notFound);
+  // The default collection is not a key-value collection.
+  await assert.rejects(client.kvGet({ collection: "default", namespace: "app", key: "k" }),
+    (e) => e instanceof VLiteError && e.status === 409 && e.code === "not_kv_collection");
+  console.log("PASS JavaScript live key-value entries");
+} else {
+  console.log("SKIP JavaScript live key-value entries (the server has no key-value routes)");
+}
 console.log("PASS JavaScript live REST client");

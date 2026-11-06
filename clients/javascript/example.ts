@@ -6,6 +6,7 @@ import {
   type MemoryMutationResponse, type MemoryReadMeta, type MemoryReceipt, type MemoryReceiptRequest, type MemoryRecallRequest,
   type MemoryResumeRequest, type MemoryScalar, type MemoryTarget, type MemoryView, type Metadata, type SearchResponse,
 } from "./index.js";
+import type { Expected, KvEntry, KvPage, KvPutResult } from "./index.js";
 
 // Supply the token at runtime; never hard-code real credentials.
 export async function example(baseUrl: string, token: string): Promise<void> {
@@ -101,31 +102,62 @@ export async function capabilities(baseUrl: string, token: string, ndjsonPath: s
   console.log((await client.listCredentials()).items.map((c: Credential) => c.state), await client.persistentAudit({ limit: 10 }));
 }
 
+// Key-value: the dedicated one-dimensional collection must already exist. Versions and deadlines are bigint, never Number.
+// 404 kv_not_found and 412 precondition_failed are ordinary VLiteErrors; UnsupportedError means the server has no KV routes.
+export async function kvExample(baseUrl: string, token: string): Promise<void> {
+  const client = new Client(baseUrl, token);
+  const address = { collection: "cache", namespace: "app", key: "hello" };
+  try {
+    const stored: KvPutResult = await client.kvPut({ ...address, value: new TextEncoder().encode("world"),
+      expected: "absent", expiresAtMs: BigInt(Date.now() + 60_000) });
+    const entry: KvEntry = await client.kvGet(address);
+    console.log(new TextDecoder().decode(entry.value), entry.version, entry.expires_at_ms);
+    // Compare-and-set: the write succeeds only while the entry still has the version you read, otherwise 412.
+    // Pass the deadline again: a put that omits it clears the expiry.
+    const unchanged: Expected = { revision: stored.version };
+    await client.kvPut({ ...address, value: new TextEncoder().encode("again"), expected: unchanged,
+      expiresAtMs: stored.expires_at_ms });
+    const page: KvPage = await client.kvList({ collection: "cache", namespace: "app", prefix: "he", limit: 100 });
+    console.log(page.items.map((item) => item.key), page.next_after);
+    // A cancelled or timed-out mutation may have committed: read the entry back before deciding. Nothing is retried.
+    console.log(await client.kvDelete({ ...address, expected: "any", signal: AbortSignal.timeout(5_000) }));
+  } catch (error) {
+    if (error instanceof UnsupportedError) return;
+    if (error instanceof VLiteError) console.error(error.status, error.code, error.requestId);
+    throw error;
+  }
+}
+
 // Agent memory: one binding-local facade. Responses are whole objects; u64/i64 outputs are decimal strings.
 // A server without memory routes answers with UnsupportedError (404 not_found); nothing is retried or embedded.
 export async function memoryExample(baseUrl: string, token: string): Promise<void> {
   const memory: Memory = new Client(baseUrl, token).memory("notes");
   const scope = { agent: "assistant", user: "ada" };
   try {
-    // The idempotency key is yours: reuse it to replay a mutation whose outcome is unknown, then getReceipt.
+    // The idempotency key is yours. After an uncertain write, repeat a remember with the same key and body inside the
+    // receipt window; getReceipt looks up a consolidate or forget (a remember receipt cannot be looked up).
     const remembered = await memory.remember({
       scope, idempotency_key: "remember-1",
       items: [{ id: "ada", kind: "entity", content: "Ada", observed_at_ms: 1700000000000n,
         source: { source_id: "chat", source_kind: "caller" } }],
     });
     console.log(remembered.receipt.id, remembered.receipt.sequence, remembered.outcomes[0]?.revision);
-    const found = await memory.recall({ scope, text: "Ada", limit: 5 });
+    // Text and vector recall find only memories that hold an evidence record; entity_seeds reads back an entity
+    // and the memories it references.
+    const found = await memory.recall({ scope, entity_seeds: ["ada"], limit: 5 });
     console.log(found.memories.map((hit) => hit.id), found.meta.complete, found.meta.limitations);
-    const receipt = await memory.getReceipt({ scope, operation: "remember", idempotency_key: "remember-1" });
+    const revision = remembered.outcomes[0]?.revision ?? 1n;
+    const consolidated: MemoryConsolidateResponse = await memory.consolidate({ scope, idempotency_key: "c-1",
+      inputs: [{ id: "ada", revision }],
+      output: { id: "s", kind: "episodic", content: "Summary", observed_at_ms: "1", source: { source_id: "s", source_kind: "caller", transformation_id: "v1" } } });
+    if (!consolidated.dry_run) console.log(consolidated.receipt.id);
+    const receipt = await memory.getReceipt({ scope, operation: "consolidate", idempotency_key: "c-1" });
     console.log(receipt.result.replayed);
     const forgotten = await memory.forget({ scope, idempotency_key: "forget-1", mode: "logical_delete",
-      target: { ids: [{ id: "ada", revision: remembered.outcomes[0]?.revision ?? 1n }] } });
-    // HTTP 202 is an ordinary result: the logical deletion is accepted and the job continues.
-    if (forgotten.state === "pending") console.log(forgotten.erasure?.resume_token);
-    const plan: MemoryConsolidateResponse = await memory.consolidate({ scope, idempotency_key: "c-1", dry_run: true,
-      inputs: [{ id: "ada", revision: 1 }],
-      output: { id: "s", kind: "episodic", content: "Summary", observed_at_ms: "1", source: { source_id: "s", source_kind: "caller", transformation_id: "v1" } } });
-    console.log(plan.dry_run ? plan.user_operations : plan.receipt.id);
+      target: { ids: [{ id: "ada", revision }] } });
+    // A logical delete is complete when the call returns. A server that runs it as a job answers HTTP 202, an
+    // ordinary result: read `state`.
+    console.log(forgotten.receipt.id, forgotten.state);
   } catch (error) {
     if (error instanceof UnsupportedError) return;
     if (error instanceof VLiteError) console.error(error.code, error.status, error.requestId, error.details?.feature);
@@ -163,6 +195,40 @@ function typeChecks(client: Client): void {
   client.importChunk("1", "1", [], { policy: "ignore" });
 }
 void typeChecks;
+
+// Compile-time key-value contract assertions; never executed.
+async function kvTypeChecks(client: Client): Promise<void> {
+  const address = { collection: "c", namespace: "n", key: "k" };
+  const value = new Uint8Array();
+  // @ts-expect-error A revision is a bigint, never a lossy JavaScript Number.
+  client.kvDelete({ ...address, expected: { revision: 1 } });
+  // @ts-expect-error Expected is "any", "absent" or { revision }.
+  client.kvPut({ ...address, value, expected: "present" });
+  // @ts-expect-error Values are bytes, not strings.
+  client.kvPut({ ...address, value: "text" });
+  // @ts-expect-error A deadline is a bigint or null, never a Number.
+  client.kvPut({ ...address, value, expiresAtMs: 1 });
+  // @ts-expect-error The collection is explicit; the client never defaults one.
+  client.kvGet({ namespace: "n", key: "k" });
+  // @ts-expect-error A list takes an exclusive after, never a key.
+  client.kvList({ collection: "c", namespace: "n", key: "k" });
+  // @ts-expect-error A signal must be an AbortSignal.
+  client.kvGet({ ...address, signal: "stop" });
+
+  // Outputs keep 64-bit values lossless and nullable members nullable.
+  const entry = await client.kvGet(address);
+  const version: bigint = entry.version;
+  const expiry: bigint | null = entry.expires_at_ms;
+  const bytes: Uint8Array = entry.value;
+  // @ts-expect-error A version is a bigint, never a Number.
+  const asNumber: number = entry.version;
+  const stored = await client.kvPut({ ...address, value, expiresAtMs: null, signal: AbortSignal.abort() });
+  const page = await client.kvList({ collection: "c", namespace: "n", after: "a", limit: 10, signal: AbortSignal.abort() });
+  const next: string | null = page.next_after;
+  const deleted: boolean = await client.kvDelete({ ...address, expected: { revision: stored.version } });
+  void [version, expiry, bytes, asNumber, next, deleted];
+}
+void kvTypeChecks;
 
 async function memoryTypeChecks(memory: Memory): Promise<void> {
   const scope = { agent: "a" };

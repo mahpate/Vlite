@@ -298,6 +298,36 @@ are JSON numbers. Automatic index maintenance, scheduled backups and restore
 drills, metrics and slow-query logs, and scoped credentials with audit logs are
 **server-only** features: the embedded binding provides no operations for them.
 
+## Key-value
+
+Every library includes the [key-value store](../docs/KEY-VALUE.md): byte values under namespaced text keys, with
+compare-and-set on revisions, optional absolute expiry and ordered prefix listing. It runs in the collection you name,
+which must already exist and have one dimension (the `default` collection of a file created with one dimension does);
+the bindings never create one. The C ABI carries it as one request on a database handle,
+`{"op":"kv","request":{"op":"get","collection":"default","namespace":"app","key":"greeting"}}`: `vlite_abi_version()`
+stays 1 and no symbol is added. Its fields, limits and error codes are in [FEATURES.md](c/FEATURES.md#key-value) and are
+exactly those of the local `vlite-shell` and `vlite-mcp` tools.
+
+| Binding | Calls | Values, versions and deadlines |
+|---|---|---|
+| C ABI | the `kv` request with `op` `get`, `put`, `delete` or `list` | base64 text, decimal strings |
+| Python | `db.kv_get`, `db.kv_put`, `db.kv_delete`, `db.kv_list` (keyword-only) | `bytes`, `int` |
+| Node.js | `db.kvGet`, `db.kvPut`, `db.kvDelete`, `db.kvList` (an options object) | `Uint8Array`, `bigint` |
+| WebAssembly | `db.kvGet`, `db.kvPut`, `db.kvDelete`, `db.kvList` | `Uint8Array`, `bigint` |
+
+`expected` is `"any"` (the default), `"absent"` or the version you read (`{"revision": 42}` in Python, `{ revision: 42n }`
+in JavaScript). A mismatch writes nothing and fails with `precondition_failed`, so a read-modify-write loop gets the
+entry, writes with its `version` as the revision and starts again on that code. An entry may carry an absolute deadline
+in Unix milliseconds; a put without one clears it, and a due entry reads as absent. A list page holds at most `limit`
+entries and 16 MiB of JSON: follow `next_after` until it is null. Python, Node.js and the C ABI report a missing or due
+key from `get` as `kv_not_found`; WebAssembly's `kvGet` returns `undefined`. A read-only handle refuses writes with
+`read_only`. Against a library that predates the operations, Python and Node.js raise `unsupported`. There are no lease
+operations. See the [Python](python/README.md#key-value), [Node.js](node/README.md#key-value) and
+[WebAssembly](wasm/README.md) guides for examples. The same goldens, `tests/fixtures/kv/kv_dialect_goldens.json`, are
+replayed by the C ABI, Python and Node.js tests, by the WebAssembly smoke test (which skips the steps that need a raw
+request, a read-only handle or a second collection) and by the shell and MCP tests; the REST and gRPC servers do not
+replay them. A replay catches a drift of one surface in the cases the file holds, not a drift of every case.
+
 ## Ownership, errors and durability
 
 All calls are synchronous. ABI v1 serializes all handles through one in-process

@@ -120,7 +120,7 @@ before deciding anything, and do not retry blindly.
 
 ## Agent memory
 
-The unreleased agent-memory REST surface needs a server with a provisioned memory
+The agent-memory REST surface needs a server with a provisioned memory
 binding (`notes` below). `client.memory(binding)` makes no request and returns a
 facade with nine methods; each takes one `TypedDict` request and returns the full
 typed response, including an HTTP 202 pending result. Run with `VLITE_URL` and
@@ -150,6 +150,11 @@ except UnsupportedError:  # 404 not_found: the server has no memory routes
     pass
 ```
 
+Text and vector recall find only memories that hold an evidence record, so the `text` recall above
+returns nothing on a new binding, and a binding without an evidence collection refuses it with 409
+`memory_capability_unavailable` (`details["feature"]` `evidence_recall`). Recall with
+`"entity_seeds": ["e1"]` to read back that entity and the memories it references.
+
 The methods are `remember`, `recall`, `find_facts`, `correct_facts`, `consolidate`,
 `forget`, `get_receipt`, `get_erasure` and `resume_erasure`; types carry the
 contract's names (`MemoryRememberRequest`, `MemoryTarget`, `MemoryConsolidateResponse`
@@ -164,7 +169,7 @@ returns a `MemoryMutationResponse` or, with `dry_run`, a `MemoryPlanResponse`.
 404 `memory_not_found`, `receipt_not_found` and `erasure_not_found` are ordinary
 errors. The first server slice (provisional) serves `remember` for kinds `entity`
 and `episodic`, `recall`, `consolidate` (retain only, commit only), `forget` (an
-`ids` target with `logical_delete`) and `get_receipt`, except that it will refuse a
+`ids` target with `logical_delete`) and `get_receipt`, except that it refuses a
 lookup of a `remember` receipt with 409 `memory_capability_unavailable` and
 `details["feature"]` `remember_receipt_lookup` (the original `remember` response
 carries the complete receipt); `find_facts`, `correct_facts`,
@@ -172,7 +177,11 @@ carries the complete receipt); `find_facts`, `correct_facts`,
 `embedding_provider` and `as_of_ms` answer 409 `memory_capability_unavailable` with
 `details["feature"]`. Body `deadline_ms` is the engine deadline, not the HTTP
 `timeout`. Nothing is retried, split, paginated or embedded; after a
-`TransportError` a mutation may have committed, so reconcile with `get_receipt`
-(the first server slice will refuse a lookup of a `remember` receipt).
+`TransportError` a mutation may have committed. Look up a `forget` or `consolidate`
+with `get_receipt` and the same idempotency key. The server refuses a lookup of a
+`remember` receipt, so repeat the same `remember` request (same key, same body) inside
+the receipt window instead (not after its `retry_until_ms` without reading the state
+first): an exact repeat returns the original result with
+`replayed: true` and writes nothing. The client never repeats a request for you.
 
 Licensed under MIT; see LICENSE.

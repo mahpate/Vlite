@@ -118,23 +118,30 @@ See the [Python](python/README.md#key-value-operations) and
 [JavaScript](javascript/README.md#key-value-operations) examples, and the .NET and
 Go sections below.
 
-The JavaScript client also exposes the unreleased agent-memory REST candidate through
-`client.memory(binding)`, a binding-local facade with `remember`, `recall`, `findFacts`,
-`correctFacts`, `consolidate`, `forget`, `getReceipt`, `getErasure` and `resumeErasure`, each taking
-one request object and returning the full response. The first server slice supports remember
-(`entity` and `episodic`), recall, consolidate (retain, commit only), forget (`ids` target, logical
-delete) and receipt lookup, except that it will refuse a lookup of a `remember` receipt (the original
-`remember` response carries the complete receipt). That lookup and other operations and fields answer
-409 `memory_capability_unavailable` with `details.feature` (`remember_receipt_lookup` for the lookup),
-and the client surfaces that refusal unchanged. u64 and i64 inputs are
-decimal strings, safe integers or `bigint` (an unsafe `Number` is a `TypeError`) and are sent as
-decimal strings; outputs stay decimal strings. `deadline_ms` is the engine deadline, not the HTTP
-timeout. HTTP 202 is an ordinary pending response. Errors carry `code`, `status`, `requestId` and
-optional `details`; only 404 `not_found` becomes `UnsupportedError`. A timeout or cancellation is a
-`TransportError` and never a retry: reconcile a mutation with `getReceipt` (the first server slice
-will refuse a lookup of a `remember` receipt). No embedding, splitting,
-paging or idempotency key is added. See the
-[JavaScript](javascript/README.md#memory-operations) example.
+The Python, JavaScript and .NET clients also expose the agent-memory REST surface through
+`client.memory(binding)` (`client.Memory(binding)` in .NET), a binding-local facade with nine
+methods, each taking one request and returning the full response: `remember`, `recall`,
+`find_facts`, `correct_facts`, `consolidate`, `forget`, `get_receipt`, `get_erasure` and
+`resume_erasure` (`findFacts` and so on in JavaScript, `FindFactsAsync` and so on in .NET). The
+first server slice (provisional; the server is authoritative) serves remember (`entity` and `episodic`), recall, consolidate (retain, commit only), forget
+(`ids` target, logical delete) and receipt lookup, except that it refuses a lookup of a `remember`
+receipt (the original `remember` response carries the complete receipt). That lookup and other
+operations and fields answer 409 `memory_capability_unavailable` with `details.feature`
+(`remember_receipt_lookup` for the lookup), and every client surfaces that refusal unchanged. Text
+and vector recall find only memories that hold an evidence record, so use `entity_seeds` to read
+back an entity you saved and the memories it references on a new binding. After a timeout or
+cancellation a mutation may have committed: look up a `forget` or `consolidate` with `get_receipt`
+and the same idempotency key, or repeat a `remember` with the same key and body inside the receipt
+window (not after its `retry_until_ms` without reading the state first). The Go client has no
+agent-memory methods. See the [Python](python/README.md#agent-memory) and
+[JavaScript](javascript/README.md#memory-operations) examples and .NET below.
+
+In JavaScript, u64 and i64 inputs are decimal strings, safe integers or `bigint` (an unsafe `Number`
+is a `TypeError`) and are sent as decimal strings; outputs stay decimal strings. `deadline_ms` is
+the engine deadline, not the HTTP timeout. HTTP 202 is an ordinary pending response. Errors carry
+`code`, `status`, `requestId` and optional `details`; only 404 `not_found` becomes
+`UnsupportedError`. A timeout or cancellation is a `TransportError` and never a retry. No
+embedding, splitting, paging or idempotency key is added.
 
 Exact search accepts `metric: "squared_l2" | "cosine" | "inner_product"` in the
 request (Python uses a dictionary). Omission preserves squared L2.
@@ -466,7 +473,7 @@ without a durable chunk (`durable: false`) does not survive a restart.
   bound to the collection identity and database lineage: a dropped and
   recreated collection, or a restored different database, fails closed.
 
-## Agent memory (Python, unreleased)
+## Agent memory (Python)
 
 `client.memory(binding)` returns a binding-local facade for an explicitly
 provisioned memory binding (`POST /v1/memory/{binding}/...`; see the
@@ -491,12 +498,19 @@ The JavaScript and .NET clients have the same nine operations.
   `erasure_not_found` are ordinary errors.
 - Nothing is retried, split, paginated, embedded or defaulted. A mutation that
   ends in `TransportError` (timeout, disconnect, cancellation) may have committed:
-  reconcile with `get_receipt` before reusing the key (the first server slice
-  will refuse a lookup of a `remember` receipt).
+  look up a `forget` or `consolidate` with `get_receipt` and the same key. The
+  server refuses a lookup of a `remember` receipt, so repeat the same `remember`
+  request (same key, same body) inside the receipt window instead (not after its
+  `retry_until_ms` without reading the state first); an exact
+  repeat returns the original result with `replayed: true` and writes nothing.
+- `recall` by `text` or `vector` finds only memories that hold an evidence record
+  (a binding without an evidence collection refuses it with 409
+  `memory_capability_unavailable`, `details["feature"]` `evidence_recall`); use
+  `entity_seeds` to read back an entity you remembered and the memories it references.
 - The first server slice (provisional; the server is authoritative) supports
   `remember` for kinds `entity` and `episodic`, `recall`, `consolidate` (retain
   only, commit only), `forget` (an `ids` target with `logical_delete`) and
-  `get_receipt`, except that it will refuse a lookup of a `remember` receipt
+  `get_receipt`, except that it refuses a lookup of a `remember` receipt
   with 409 `memory_capability_unavailable` and `details["feature"]`
   `remember_receipt_lookup` (the original `remember` response carries the
   complete receipt). `find_facts`, `correct_facts`, `get_erasure` and `resume_erasure`,
@@ -578,6 +592,9 @@ _ = err
 until nil. Search options and collection settings use `Object`, preserving REST
 field names, modes, typed filters and decimal-string integers. Structured record,
 metadata, page and hit types are included. Dynamic JSON numbers use `json.Number`.
+
+The Go client has no agent-memory methods: it does not wrap the `/v1/memory/{binding}/...`
+routes. Use the Python, JavaScript or .NET client for them.
 
 Use `errors.As(err, &apiError)` with `*vlite.APIError` to inspect `Status`, `Code`
 and `RequestID`. `*vlite.TransportError` has code `transport_error` and unwraps
@@ -713,10 +730,11 @@ dotnet build clients/dotnet/VLite.Client.Tests
 dotnet run --project clients/dotnet/VLite.Client.Tests --no-build
 ```
 
-Go and .NET cover the core REST surface above, including exact/ANN and typed
-filters. The broader Python/JS convenience APIs for imports, backups, diagnostics,
-credentials, conditional writes and maintenance are not yet wrapped in these two
-clients. No client silently retries or falls back between search modes.
+Go and .NET cover the core REST surface above, including exact/ANN and typed filters; .NET also
+wraps key-value and agent memory (see the sections above and below). The broader Python/JS
+convenience APIs for imports, backups, diagnostics, credentials, conditional writes and
+maintenance are not yet wrapped in these two clients. No client silently retries or falls back
+between search modes.
 
 ### .NET agent-memory operations
 
@@ -737,9 +755,14 @@ var found = await memory.RecallAsync(new MemoryRecallRequest(scope, Text: "Ada",
 Console.WriteLine(saved.Receipt.Sequence);
 ```
 
+Text and vector recall find only memories that hold an evidence record, so the `Text` recall above
+returns nothing on a new binding, and a binding without an evidence collection refuses it with 409
+`memory_capability_unavailable` (`Details.Feature` `evidence_recall`). Recall with
+`EntitySeeds: ["e1"]` to read back the entity you saved and the memories it references.
+
 The first server slice implements remember (kinds `entity` and `episodic`),
 recall, consolidate, forget (`ids` targets, logical delete) and receipt lookup,
-except that it will refuse a lookup of a `remember` receipt (409
+except that it refuses a lookup of a `remember` receipt (409
 `memory_capability_unavailable` with `Details.Feature` `remember_receipt_lookup`;
 the `RememberAsync` response carries the complete receipt).
 Facts, fact correction and erasure lookup/resume answer 409
@@ -755,10 +778,12 @@ Errors are `VLiteException` (`Status`, `Code`, `RequestId`, optional `Details`
 with `Field`, `Limit`, `Requested`, `Feature`, `Category`). HTTP 202 (a pending
 erasure) is a normal result. Only 404 `not_found` (unknown route) raises
 `UnsupportedException`. A timeout, cancellation or unreadable reply is a
-`TransportException`: a mutation may have committed, so reconcile it with
-`GetReceiptAsync` instead of retrying (the first server slice will refuse a
-lookup of a `remember` receipt). Nothing is retried, paged, split or
-embedded for you, and `DeadlineMs` is the engine deadline, never the HTTP timeout.
+`TransportException`: a mutation may have committed. Look up a `forget` or
+`consolidate` with `GetReceiptAsync` and the same idempotency key. The server
+refuses a lookup of a `remember` receipt, so repeat the same `RememberAsync`
+request (same key, same body) inside the receipt window instead. Nothing is
+retried, paged, split or embedded for you, and `DeadlineMs` is the engine
+deadline, never the HTTP timeout.
 
 ### Optional live Go/.NET e2e
 

@@ -23,9 +23,10 @@ This guide explains how to use it and what it does not do. The shell examples ar
 | Python, JavaScript, .NET, Go clients | `vlite-server` | no | `kv_get`, `kv_put`, `kv_delete`, `kv_list`, `kv_batch`, `kv_get_many`; `kvGet` and so on; `KvGetAsync` and so on; `KvGet` and so on |
 | `vlite-shell --db PATH` | a local file | no | `kv-get`, `kv-put`, `kv-delete`, `kv-list`, `kv-batch`, `kv-get-many` |
 | `vlite-mcp --db PATH` | a local file | no | `vlite_kv_get`, `vlite_kv_put`, `vlite_kv_delete`, `vlite_kv_list`, `vlite_kv_batch`, `vlite_kv_get_many` |
+| Embedded bindings: the C ABI `kv` request, Python `vlite_embedded`, Node.js `@vlite/embedded`, WebAssembly | a local file in your process (an in-memory image in WebAssembly) | no | `get`, `put`, `delete`, `list`: `kv_get` and so on; `kvGet` and so on; see the [bindings guide](../bindings/README.md#key-value) |
 | Dashboard **Key-value** workspace | `vlite-server` | no | the REST routes; see the [dashboard guide](CONSOLE.md#key-value) |
 
-The shell and MCP tools open the file themselves, so stop `vlite-server` first, and they are not forwarded by `vlite-mcp --server`. There are no lease operations on any surface.
+The shell and MCP tools open the file themselves, so stop `vlite-server` first, and they are not forwarded by `vlite-mcp --server`. The embedded bindings open it inside your own process, so the same rule holds. There are no lease operations on any surface, the embedded bindings included.
 
 ## Start with REST
 

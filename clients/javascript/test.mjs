@@ -733,6 +733,40 @@ test("KV batch and get-many time out with a caller signal and never retry", asyn
   }
 });
 
+test("KV get, list and delete honor a caller signal and never retry", async () => {
+  const address = { collection: "cache", namespace: "n", key: "k" };
+  let controller = new AbortController();
+  let calls = 0;
+  const server = createServer(async (req, res) => {
+    for await (const _ of req);
+    calls++;
+    controller.abort();
+    // A valid body for each route, so that only the abort can make a call fail.
+    res.end(req.method === "DELETE" ? '{"deleted":true}'
+      : req.url.includes("/kv/entries") ? '{"items":[],"next_after":null}'
+      : '{"key":"k","value_base64":"","version":"1","expires_at_ms":null}');
+  });
+  await new Promise((resolve) => server.listen(0, "127.0.0.1", resolve));
+  try {
+    const client = new Client(`http://127.0.0.1:${server.address().port}`, token);
+    for (const call of [(signal) => client.kvGet({ ...address, signal }),
+      (signal) => client.kvList({ collection: "cache", namespace: "n", signal }),
+      (signal) => client.kvDelete({ ...address, signal })]) {
+      controller = new AbortController();
+      const before = calls;
+      await assert.rejects(async () => call(controller.signal), TransportError);
+      assert.equal(calls, before + 1);
+      // An already-aborted signal sends nothing.
+      await assert.rejects(async () => call(controller.signal), TransportError);
+      await assert.rejects(async () => call(AbortSignal.abort()), TransportError);
+      assert.equal(calls, before + 1);
+    }
+  } finally {
+    server.closeAllConnections();
+    await new Promise((resolve) => server.close(resolve));
+  }
+});
+
 test("collection-scoped routes and legacy defaults", async () => {
   await scripted(async ({ client, calls, reply }) => {
     const docs = client.collection("docs");

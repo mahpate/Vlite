@@ -858,6 +858,8 @@ option (`bindings/c/src/features.rs:820-828`), so `graph_write_batch` /
 `graphWriteBatch` accept them; embedded KV and lease methods wait for the §12
 Rust slices; WASM keeps the default feed and reports an explicit unsupported
 error for TTL. HTTP clients and the CLI get full parity; .NET is HTTP only.
+(Superseded in part on 2026-11-05: `get`, `put`, `delete` and `list` are bound in all four
+bindings; see decision (i) in section 12.)
 
 ## 10. Authorization, failure mapping and observability
 
@@ -1050,7 +1052,7 @@ the text above without rewriting those original rows.
 | (f) DELETE shape (§4) | JSON body (DELETE has no defined body semantics) / query parameters / POST `.../delete` | Query parameters and the existing 200 `{"deleted"}` shape (`src/openapi.json:115`) |
 | (g) TTL-mode feed cursor (§6) | Keep `vlc1` with an out-of-band mode flag / `vlc2` binding lineage, mode, sequence and ordinal / a separate endpoint | `vlc2` with `cursor_mode_mismatch`; formerly proposed mode binding, **Withdrawn** in favor of set binding above. Wire conventions, decision 8 (owner-selected) |
 | (h) Size errors (§3, §10) | New size-specific error codes / reuse existing codes | Reuse 413 `invalid_json` and 422 `invalid_input`; gRPC size violations stay tonic's `OUT_OF_RANGE` |
-| (i) C ABI and WASM scope (§9) | Embedded KV and leases in every binding / C ABI graph TTL only / none | C ABI graph TTL only; WASM explicitly unsupported; embedded KV and leases wait for the Rust slices; HTTP clients and the CLI get full parity |
+| (i) C ABI and WASM scope (§9) | Embedded KV and leases in every binding / C ABI graph TTL only / none | C ABI graph TTL only; WASM explicitly unsupported; embedded KV and leases wait for the Rust slices; HTTP clients and the CLI get full parity. **Superseded in part (2026-11-05, owner request through the coordinator, lane F3):** `get`, `put`, `delete` and `list` are bound in the Python, Node, WASM and C bindings (C ABI version stays 1, no new C symbol); leases, batch and graph TTL scope are unchanged by this note |
 | (j) Restart holders (§5) | Preserve live grants with a durable clock protocol / invalidate all at recovery | Invalidate all; document the availability tradeoff |
 | (k) Lease quotas (§10) | A fixed universal cap / an explicit configured per-tenant quota / unlimited | An explicit finite quota; activation is rejected until configured; allocator history is never evicted |
 | (l) Lease holder identity (§5) | Transferable token / principal-bound / an admin takeover API | Principal-bound; no takeover API |

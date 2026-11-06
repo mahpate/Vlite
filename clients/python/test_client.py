@@ -897,6 +897,17 @@ class CapabilityTests(unittest.TestCase):
             self.client.prometheus_metrics()
 
 
+def kv_valid_body(command, path):
+    """A valid answer for each key-value route, so that a test can only fail a call by its transport."""
+    if command == "DELETE":
+        return {"deleted": True}
+    if "/kv/entries" in path:
+        return {"items": [], "next_after": None}
+    if command == "PUT":
+        return {"version": "1", "expires_at_ms": None}
+    return {"key": "k", "value_base64": "", "version": "1", "expires_at_ms": None}
+
+
 class KvTests(unittest.TestCase):
     setUpClass = classmethod(CapabilityTests.setUpClass.__func__)
     tearDownClass = classmethod(CapabilityTests.tearDownClass.__func__)
@@ -1021,17 +1032,43 @@ class KvTests(unittest.TestCase):
 
     def test_kv_timeout_does_not_retry(self):
         admitted, release = Event(), Event()
-        def respond(*_):
+        def respond(command, path, _body):
             admitted.set()
             release.wait(5)
-            return 200, None, {}
+            return 200, kv_valid_body(command, path), {}
         Scripted.respond = respond
         try:
+            started = time.monotonic()
             with self.assertRaises(TransportError):
                 Client(f"http://127.0.0.1:{self.server.server_port}", TOKEN, timeout=0.1).kv_put(
                     collection="cache", namespace="n", key="k", value=b"")
-            self.assertTrue(admitted.is_set())
+            # The server would answer validly after five seconds: only the timeout can fail the call.
+            self.assertLess(time.monotonic() - started, 3)
+            self.assertTrue(admitted.wait(2))
             self.assertEqual(len(Scripted.log), 1)
+        finally:
+            release.set()
+
+    def test_kv_delete_and_reads_do_not_retry_after_timeout(self):
+        admitted, release = Event(), Event()
+        def respond(command, path, _body):
+            admitted.set()
+            release.wait(5)
+            return 200, kv_valid_body(command, path), {}
+        Scripted.respond = respond
+        slow = Client(f"http://127.0.0.1:{self.server.server_port}", TOKEN, timeout=0.1)
+        try:
+            for call in [lambda: slow.kv_delete(collection="cache", namespace="n", key="k"),
+                         lambda: slow.kv_get(collection="cache", namespace="n", key="k"),
+                         lambda: slow.kv_list(collection="cache", namespace="n")]:
+                admitted.clear()
+                before = len(Scripted.log)
+                started = time.monotonic()
+                with self.assertRaises(TransportError):
+                    call()
+                self.assertLess(time.monotonic() - started, 3)
+                self.assertTrue(admitted.wait(2))
+                self.assertEqual(len(Scripted.log), before + 1)
         finally:
             release.set()
 

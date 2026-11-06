@@ -6,6 +6,7 @@ dependencies. Install the local `clients/javascript` directory using npm.
 See the [client guide](https://github.com/mahpate/Vlite/blob/main/clients/README.md)
 for authentication, examples, supported operations and uncertain-write handling.
 This package does not automatically retry requests or follow redirects.
+
 ## Key-value operations
 
 The KV REST surface requires a server with KV routes and an existing,
@@ -87,13 +88,13 @@ single-key calls.
 
 ## Memory operations
 
-The unreleased agent-memory REST surface requires a server with a provisioned memory binding.
+The agent-memory REST surface requires a server with a provisioned memory binding.
 `client.memory(binding)` returns a binding-local facade whose nine methods each POST one request
 object to `/v1/memory/{binding}/...` and resolve with the full response: `remember`, `recall`,
 `findFacts`, `correctFacts`, `consolidate`, `forget`, `getReceipt`, `getErasure` and `resumeErasure`.
 The first server slice supports remember (`entity` and `episodic` kinds), recall, consolidate
 (retain dispositions, commit only), forget (`ids` target, logical delete) and receipt lookup, except
-that it will refuse a lookup of a `remember` receipt (the original `remember` response carries the
+that it refuses a lookup of a `remember` receipt (the original `remember` response carries the
 complete receipt). The other four methods, every request field beyond that slice and that lookup
 answer 409 `memory_capability_unavailable` with `details.feature` (`remember_receipt_lookup` for the
 lookup); the client never interprets, hides or works around a refusal.
@@ -110,6 +111,11 @@ console.log(saved.receipt.sequence, saved.outcomes);
 console.log((await memory.recall({ scope, text: "Ada" })).memories);
 ```
 
+Text and vector recall find only memories that hold an evidence record, so the recall above returns
+nothing on a new binding, and a binding without an evidence collection refuses it with 409
+`memory_capability_unavailable` (`details.feature` `evidence_recall`). Recall with
+`entity_seeds: ["ada"]` to read back that entity and the memories it references.
+
 Requests use the wire (snake_case) names and are closed: an unknown member is a `TypeError` and is never
 sent, and a required member (including `idempotency_key`) is never invented. u64 and i64 inputs accept a
 canonical decimal string, a safe-integer `Number` or a `bigint`; an unsafe `Number` is a `TypeError`
@@ -118,8 +124,13 @@ strings. `deadline_ms` is the engine deadline, not the HTTP timeout (`timeoutMs`
 optional `{ signal }`. HTTP 202 resolves like 200: check `state`. Failures are `VLiteError` (`code`,
 `status`, `requestId`, optional `details`), `UnsupportedError` for 404 `not_found` only, or
 `TransportError` for a timeout, cancellation or lost connection, after which a mutation may have
-committed: look it up with `getReceipt` using the same idempotency key (the first server slice will
-refuse a lookup of a `remember` receipt). Nothing is retried, embedded,
-split or paged.
+committed. Look up a `forget` or `consolidate` with `getReceipt` and the same idempotency key. The
+server refuses a lookup of a `remember` receipt (409 `memory_capability_unavailable`, `details.feature`
+`remember_receipt_lookup`), so repeat the same `remember` request, with the same key and body, inside the
+receipt window (not after its `retry_until_ms` without reading the state first): an exact repeat returns
+the original result with `replayed: true` and writes nothing. The example's `observed_at_ms: Date.now()`
+changes the body on every run, so a fixed key answers 409 `idempotency_conflict` when the snippet runs again
+inside the receipt window. The client
+never repeats a request for you; nothing is retried, embedded, split or paged.
 
 Licensed under MIT; see LICENSE.

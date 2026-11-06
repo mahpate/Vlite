@@ -1,4 +1,4 @@
-import { NativeLibrary, EmbeddedError, type Hit } from "./index.js";
+import { NativeLibrary, EmbeddedError, type Hit, type KvEntry, type KvPage, type KvPutResult } from "./index.js";
 
 export async function example(path: string): Promise<void> {
   const native = new NativeLibrary();
@@ -89,3 +89,29 @@ async function featureTypes(native: NativeLibrary) {
   return groups;
 }
 void featureTypes;
+
+// Compile-time coverage for the key-value API (not automatically executed).
+async function kvTypes(db: Awaited<ReturnType<NativeLibrary["open"]>>) {
+  const address = { collection: "default", namespace: "n", key: "k" };
+  const put: KvPutResult = await db.kvPut({
+    ...address, value: new Uint8Array([0, 255]), expected: "absent", expiresAtMs: 18446744073709551615n,
+  });
+  await db.kvPut({ ...address, value: new Uint8Array(), expected: { revision: put.version }, expiresAtMs: null });
+  const entry: KvEntry = await db.kvGet(address);
+  const value: Uint8Array = entry.value;
+  const version: bigint = entry.version;
+  const deadline: bigint | null = entry.expires_at_ms;
+  const deleted: boolean = await db.kvDelete({ ...address, expected: "any" });
+  const page: KvPage = await db.kvList({ collection: "default", namespace: "n", prefix: "a/", after: "a/1", limit: 10 });
+  const next: string | null = page.next_after;
+  // @ts-expect-error deadlines are bigint: u64 values exceed what a Number holds exactly.
+  await db.kvPut({ ...address, value: new Uint8Array(), expiresAtMs: 1 });
+  // @ts-expect-error compare-and-set revisions are bigint.
+  await db.kvDelete({ ...address, expected: { revision: 1 } });
+  // @ts-expect-error values are bytes.
+  await db.kvPut({ ...address, value: "text" });
+  // @ts-expect-error the collection is required: it is never defaulted or created.
+  await db.kvGet({ namespace: "n", key: "k" });
+  void [value, version, deadline, deleted, next];
+}
+void kvTypes;
