@@ -57,8 +57,11 @@ pub struct KvEntry {
 }
 
 /// One live entry lent to the visitor of [`KvView::visit_at`]: the key and
-/// value borrow the store and are valid only for that call.
+/// value borrow the store and are valid only for that call. The struct is
+/// `#[non_exhaustive]`: only the library builds one, so a later release can add
+/// a field.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[non_exhaustive]
 pub struct KvRef<'a> {
     pub key: &'a str,
     pub value: &'a [u8],

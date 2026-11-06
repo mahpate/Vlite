@@ -5,7 +5,7 @@ use serde_json::{Value, json};
 use std::ops::ControlFlow;
 use vlite::{
     Database, Error, Expected,
-    kv::{KvEntry, KvPut, KvRef, MAX_KV_VALUE_BYTES},
+    kv::{KvEntry, KvPut, MAX_KV_VALUE_BYTES},
 };
 
 const GET: &str = "vlite_kv_get";
@@ -337,11 +337,30 @@ fn page(db: &Database, request: &List) -> Result<Value, String> {
                 after,
                 limit,
                 now,
-                visit,
+                |entry| {
+                    visit(Lent {
+                        key: entry.key,
+                        value: entry.value,
+                        version: entry.version,
+                        expires_at_ms: entry.expires_at_ms,
+                        has_next: entry.has_next,
+                    })
+                },
             )
             .map_err(failure)
         },
     )
+}
+
+/// An entry as `visit_page` reads it. `KvRef` is `#[non_exhaustive]`, so only
+/// the library can build one: the tests stand in for `KvView::visit_at` with
+/// this copy of its fields.
+struct Lent<'a> {
+    key: &'a str,
+    value: &'a [u8],
+    version: u64,
+    expires_at_ms: Option<u64>,
+    has_next: bool,
 }
 
 /// One page of at most `limit` entries and `PAGE_BYTES` of compact JSON, built
@@ -356,7 +375,7 @@ fn visit_page(
     scan: impl FnOnce(
         Option<&str>,
         usize,
-        &mut dyn FnMut(KvRef<'_>) -> ControlFlow<()>,
+        &mut dyn FnMut(Lent<'_>) -> ControlFlow<()>,
     ) -> Result<(), String>,
 ) -> Result<Value, String> {
     let mut items = Vec::new();
@@ -694,7 +713,7 @@ mod tests {
         dyn FnOnce(
                 Option<&str>,
                 usize,
-                &mut dyn FnMut(KvRef<'_>) -> ControlFlow<()>,
+                &mut dyn FnMut(Lent<'_>) -> ControlFlow<()>,
             ) -> Result<(), String>
             + 'a,
     >;
@@ -719,7 +738,7 @@ mod tests {
             let total = matching.len().min(count + 1);
             for (index, entry) in matching.iter().take(count).enumerate() {
                 lent.set(lent.get() + 1);
-                let borrowed = KvRef {
+                let borrowed = Lent {
                     key: &entry.key,
                     value: &entry.value,
                     version: entry.version,
