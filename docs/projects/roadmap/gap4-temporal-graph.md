@@ -1,4 +1,4 @@
-# Gap 4: time-aware graph
+# Gap 4: time-aware graph <!-- STATUS: paused 2026-11-06; lane F1 edited line 304 only (one-line fix, unreviewed); the rest of this document is unchanged and is not covered by this note; not done: nothing -->
 
 Status: private/gated slices A, B and C1/C2 reads are implemented; A/B, C1 and
 C2 are independently reviewed and integrated, but all remain unreleased. Slice C
@@ -301,7 +301,7 @@ same frame checks to non-precision log export; see
 [Review fixes, round 3](#review-fixes-round-3). Round 4 extends them to
 compact images without precision and audits every graph mode; see
 [Review fixes, round 4](#review-fixes-round-4). Everything waits for
-independent execution review. Slice C (reads) is not started, so no user can
+independent execution review. Slice C reads (C1, C2) are implemented but gated, so no user can
 observe validity yet and every release build refuses the capability.
 
 ### Slice A: contract and format
