@@ -54,11 +54,14 @@ that protects less (no admin token where the published one has one, or
 reservations that do not cover the ones already published) does not replace
 them. Only those two things are compared: the token values, the credential
 store and the raw-access grants of the bindings are those of the router that
-last replaced the publication. Token files are reloaded in place
-(`POST /v1/admin/tokens/reload`) and the listener follows; any other change of
-tokens or reservations needs a new `Service` and new routers, because a router
-built after the listener changes what REST applies and not what the listener
-applies. `configured_admin_router` returns an error when
+last replaced the publication. What the listener adopted changes in place:
+token files are reloaded (`POST /v1/admin/tokens/reload`), credentials are
+revoked and tenants suspended through the router whose state it adopted, and
+the listener follows; the same calls made through any other router reach that
+router's REST only. Any other change of tokens or reservations needs a new
+`Service` and new routers, because a router built after the listener changes
+what REST applies and not what the listener applies. `configured_admin_router`
+returns an error when
 
 - a `grpc_router` was built from the service before any REST router, or after
   one that has no admin token, so that the listener serves every caller as the
@@ -72,10 +75,11 @@ applies. `configured_admin_router` returns an error when
   their resources unreserved; or each reserves a resource the other does not),
   because a listener could adopt only one of them.
 
-After any error the program discards the service and every router built from
-it: a router refused after it set the engine up may already have written
-records, created the admin directory, or configured the log buffer, the
-schedules and the webhooks that every router of the service shares.
+After any error the program closes the service (`Service::close().await` stops
+the scheduler and the webhook dispatcher that a refused router may have
+started) and drops it with every router built from it. What the refused router
+already did stays: records written, the admin directory created and the first
+account seeded, and the setting of the process-wide log buffer.
 `router` and `authenticated_router` cannot refuse: they log a warning for the
 first order, and keep the published tokens and reservations, with a warning, for
 the last. These are the rules of the library routers in this release and may

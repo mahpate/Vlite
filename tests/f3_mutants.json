@@ -177,7 +177,7 @@
   },
   {
     "id": "f3-s1/P23",
-    "desc": "a router that protects less in one respect and more in the other is not refused",
+    "desc": "a router that protects less in some respect and more in another is not refused",
     "file": "src/server.rs",
     "old": "&& (reserves_more || protects_more)",
     "new": "&& false",
@@ -185,7 +185,7 @@
   },
   {
     "id": "f3-s1/P24",
-    "desc": "a router that protects less in one respect is refused even where it protects more in no respect",
+    "desc": "a router that protects less in some respect is refused even where it protects more in no respect",
     "file": "src/server.rs",
     "old": "&& (reserves_more || protects_more)",
     "new": "&& true",
@@ -230,6 +230,22 @@
     "old": "&& (reserves_more || protects_more)",
     "new": "&& (protects_more || (reserves_more && protects_less))",
     "cmd": "cargo test --locked --offline --features grpc --lib server::published"
+  },
+  {
+    "id": "f3-s1/P30",
+    "desc": "a build without gRPC refuses a router that protects less in some respect and more in another",
+    "file": "src/server.rs",
+    "old": "&& (reserves_less || protects_less)",
+    "new": "|| (reserves_less || protects_less)",
+    "cmd": "cargo test --locked --offline --features server --lib server::published_rest"
+  },
+  {
+    "id": "f3-s1/P31",
+    "desc": "a build without gRPC logs the warning for a router that is kept out",
+    "file": "src/server.rs",
+    "old": "if cfg!(feature = \"grpc\") {",
+    "new": "if true {",
+    "cmd": "cargo test --locked --offline --features server --lib server::published_rest"
   },
   {
     "id": "f3-s1/G1",

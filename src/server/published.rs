@@ -495,12 +495,12 @@ fn a_router_that_reserves_part_of_what_the_held_one_does_is_kept_out_not_refused
     let service = service();
     // Both have a token. The second reserves `notes` and not `other`: following
     // it would leave a listener that serves `other` raw while the first router
-    // hides it, and refusing it would lose nothing, because the held
-    // publication protects more in every respect.
+    // hides it. Keeping it out loses nothing, because the held publication
+    // protects at least as much in every respect, so it is not refused.
     with_bindings_text(with_token(service.clone(), FIRST), &both_text()).publish();
     with_notes(with_token(service.clone(), SECOND))
         .publish_reserving()
-        .expect("a router that protects less in every respect is kept out");
+        .expect("a router that protects nothing more is kept out");
 
     let mut listener = service.clone();
     assert!(listener.adopt_published());

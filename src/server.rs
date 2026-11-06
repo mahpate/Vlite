@@ -51,6 +51,8 @@ mod provider_serving;
 pub mod providers;
 #[cfg(all(test, feature = "grpc"))]
 mod published;
+#[cfg(all(test, not(feature = "grpc")))]
+mod published_rest;
 mod record_put;
 mod reserved;
 #[cfg(feature = "otel")]
@@ -374,7 +376,8 @@ impl Service {
     /// protects less in some respect and more in another (the token, each
     /// reserved resource) can neither be kept out nor followed safely: this
     /// form is for the routers that cannot be refused (`router`,
-    /// `authenticated_router`), and it keeps the held publication and warns.
+    /// `authenticated_router`), and it keeps the held publication and, in a
+    /// build with gRPC, warns.
     fn publish(&self) {
         // Nothing is refused when `refusing` is false.
         let _ = self.publish_with(false);
@@ -391,8 +394,9 @@ impl Service {
     /// another (the administration token; each reserved resource): a gRPC
     /// router would have to adopt one or the other. A refusal under the locks
     /// may come after the router set the engine up (records written, the admin
-    /// directory created, settings shared by every router of the service): the
-    /// caller discards the service and every router built from it.
+    /// directory created, settings that the routers of a service or the process
+    /// share, a webhook dispatcher started): the caller closes the service and
+    /// drops it with every router built from it.
     fn publish_reserving(&self) -> std::io::Result<()> {
         self.publish_with(true)
     }
@@ -432,7 +436,7 @@ impl Service {
                 logs::stderr(
                     "warn",
                     "server",
-                    json!({"event":"publication_kept","message":"a router with no admin token, or whose memory reservations do not cover the ones held, does not replace the tokens and reservations that other transports adopt"})
+                    json!({"event":"publication_kept","message":"a router with no admin token where the held one has one, or whose memory reservations do not cover the ones held, does not replace the tokens and reservations that other transports adopt"})
                         .to_string(),
                 );
             }
