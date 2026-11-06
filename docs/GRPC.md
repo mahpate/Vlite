@@ -262,6 +262,13 @@ call and writes nothing: `ABORTED` (`precondition_failed`) or
 written: read the keys back with `GetKvEntries` before you decide, and do not
 retry blindly.
 
+**Older servers.** A server that predates the two RPCs answers `UNIMPLEMENTED`
+to every caller, authenticated or not, as it does for any method of the service
+that it does not have, because the permission check is inside each method. gRPC
+has no capabilities call: ask `GET /v1/capabilities` over REST and look for the
+two route paths in `routes` (see
+[Batches and multi-get](KEY-VALUE.md#batches-and-multi-get)).
+
 ## Streaming export and import
 
 `ExportVectors` is a server stream of `Vector` messages for one collection, in

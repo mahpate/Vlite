@@ -195,11 +195,12 @@ described below.
 Operation scope, tenant and immutable collection bindings apply before lookup.
 Ordinary record quotas also count KV entries. Mutations are audited without
 keys, namespaces or values; a batch is one `kv_batch` event with the number of
-puts and deletes. The audit covers requests that reach the store. Any such
-request that fails (a failed compare-and-set, a 409 or 429, a missing or non-KV
-collection) records the collection as `(invalid)` and still records the actor;
-a request rejected while parsing is not audited, only logged without its
-address or content. Read-only handles refuse mutations.
+puts and deletes. The audit covers a request once it has been parsed and
+validated: a request that then fails (a failed compare-and-set, a 409, 429 or
+503, a missing or non-KV collection) records the collection as `(invalid)` and
+still records the actor; a request rejected while parsing or validating is not
+audited, only logged without its address or content. Read-only handles refuse
+mutations.
 `GET /v1/capabilities` reports `features.kv: true` for format 5 files; a
 format 4 file still serves ordinary KV without expiry although the flag is false.
 `features.kv_batch` is true under the same condition. `routes` lists the batch

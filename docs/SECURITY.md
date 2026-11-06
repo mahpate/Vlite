@@ -375,13 +375,19 @@ can also expose, overwrite, delete or expire ordinary KV records. A principal
 that can write the collection can also fill a key's 16 record IDs with ordinary
 records, so that puts for that key fail with `kv_slots_exhausted` (409 on REST,
 `FAILED_PRECONDITION` on gRPC), and a batch that holds such a put fails as a
-whole. A refused batch writes nothing, so a principal that can write but not
-read, and that has filled all 16 record IDs of some key, can test a guessed
-revision without changing the entry: a batch whose first operation names the
-revision to test and whose second puts the key whose IDs it filled answers 412
-when the revision is wrong and 409 `kv_slots_exhausted` when it is right. That
-tells it only whether a commit sequence is the current revision of a key it may
-already overwrite, and each such 409 counts in `kv_slots_exhausted_total`. Use
+whole. A refused write changes nothing, so a principal that can write but not
+read can test a condition on an entry without changing it, whenever it can make
+the request fail in a way that differs from the failed condition: the answer is
+412 when the condition (`absent` or a guessed revision) does not hold and that
+other failure when it does. A single put does this at a live-record quota (429
+`quota_exceeded`), and a single delete on a record that is attached to a graph
+node (409 `graph_attached_record`). A batch widens the class, because it can
+add the failure on any other key after the operation under test: a put of a key
+whose 16 record IDs the principal has filled (409 `kv_slots_exhausted`), or
+either failure above. That tells the principal only whether a key is live and
+whether a commit sequence is its current revision, never its value, for a key
+it may already overwrite; each such `kv_slots_exhausted` answer counts in
+`kv_slots_exhausted_total`. Use
 dedicated collections for key-value data,
 grant `write` on them only to principals you trust with their keys, and watch
 `kv_slots_exhausted_total`: it counts each REST or gRPC request answered this

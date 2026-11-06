@@ -308,6 +308,8 @@ let entries = kv.view().get_many(&[("pool", "claim/43"), ("pool", "claim/41")])?
   returns one `KvOutcome` for each: `Put { version }` or `Deleted(bool)`. All
   puts of a batch get the same version, and each is a valid
   `Expected::Revision` for its key. Each `(namespace, key)` may appear once.
+  The whole request is checked before any state is read, once `kv_store` has
+  opened the collection (it creates a missing one).
   The first operation that cannot run fails the whole batch with the error of
   its single call (`RevisionMismatch`, `KvSlotsExhausted`,
   `GraphAttachedRecord`) and nothing is written. A batch that changes no record
