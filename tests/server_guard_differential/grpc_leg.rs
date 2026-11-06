@@ -655,6 +655,26 @@ fn rows() -> Vec<GRow> {
                 namespace: "n".into(),
                 ..Default::default()
             })),
+        unary!("Kv/GetKvEntries", Reference, Unchecked, READ, |n| kv
+            .get_kv_entries(proto::KvGetManyRequest {
+                collection: n.c.clone(),
+                keys: vec![proto::KvKeyRef {
+                    namespace: "n".into(),
+                    key: "k".into()
+                }],
+            })),
+        unary!("Kv/WriteKvBatch", Reference, Unchecked, WRITE, |n| kv
+            .write_kv_batch(proto::KvBatchRequest {
+                collection: n.c.clone(),
+                operations: vec![proto::KvBatchOperation {
+                    kind: Some(proto::kv_batch_operation::Kind::Put(proto::KvBatchPut {
+                        namespace: "n".into(),
+                        key: "k".into(),
+                        value: b"PROBE".to_vec(),
+                        expected: None
+                    })),
+                }],
+            })),
         // Creating a name: a reserved one answers like an occupied one.
         unary!("VLite/CreateCollection", Create, Succeeds, WRITE, |n| vlite
             .create_collection(proto::CreateCollectionRequest {
