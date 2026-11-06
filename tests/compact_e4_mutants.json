@@ -1,297 +1,1881 @@
 {
-  "campaign": "E4: the bounded exact scan over a compact collection (ordered-ID consumption, scoring without record cells, workspace boundaries and accounting)",
-  "format": "Same form as tests/compact_b4_mutants.json. Every mutant here is killed by a named test of the E4 selector itself (compact::source::overlay_tests::exact_scan), never by a borrowed cursor or seam test. Replay with tests/compact_mutant_replay.py.",
-  "selectors": {
-    "exact_scan": "test --locked --offline --lib -- compact::source::overlay_tests::exact_scan"
-  },
-  "mutants": [
-    {
-      "id": "e4-ordered-overlay-first-skipped",
-      "origin": "E4 G2: ordered cursor",
-      "desc": "the ordered-ID cursor drops the first overlay entry, so an overlay-only first ID is never scanned",
-      "expect": [
-        "compact::source::overlay_tests::exact_scan::compact_exact_scan_consumes_ordered_ids_across_base_and_overlay"
-      ],
-      "file": "src/records.rs",
-      "old": "overlay: overlay.0.iter().peekable(),",
-      "new": "overlay: {\n                    let mut entries = overlay.0.iter().peekable();\n                    entries.next();\n                    entries\n                },",
-      "cmd": "test --locked --offline --lib -- compact::source::overlay_tests::exact_scan"
+ "campaign": "E4: the bounded exact scan over a compact collection (ordered-ID consumption, scoring without record cells, workspace boundaries and accounting)",
+ "format": "Same form as tests/compact_b4_mutants.json. Every mutant here is killed by a named test of the E4 selector itself (compact::source::overlay_tests::exact_scan), never by a borrowed cursor or seam test. Replay with tests/compact_mutant_replay.py.",
+ "selectors": {
+  "exact_scan": "test --locked --offline --lib -- compact::source::overlay_tests::exact_scan"
+ },
+ "mutants": [
+  {
+   "id": "e4-ordered-overlay-first-skipped",
+   "origin": "E4 G2: ordered cursor",
+   "desc": "the ordered-ID cursor drops the first overlay entry, so an overlay-only first ID is never scanned",
+   "expect": [
+    "compact::source::overlay_tests::exact_scan::compact_exact_scan_consumes_ordered_ids_across_base_and_overlay"
+   ],
+   "file": "src/records.rs",
+   "old": "overlay: overlay.0.iter().peekable(),",
+   "new": "overlay: {\n                    let mut entries = overlay.0.iter().peekable();\n                    entries.next();\n                    entries\n                },",
+   "cmd": "test --locked --offline --lib -- compact::source::overlay_tests::exact_scan",
+   "runs": {
+    "local": {
+     "file": "src/records.rs",
+     "anchor_matches": 1,
+     "sha256_lf": {
+      "before": "1d48d957e11cd2165cc6856183941e1f1e0e086271b8ff47a1f34e73f6d39f6b",
+      "mutated": "fb99807dc3a9e04b1414cfeb3675b9a509e5b1d013f11da9c4cce81309d2035f",
+      "restored": "1d48d957e11cd2165cc6856183941e1f1e0e086271b8ff47a1f34e73f6d39f6b"
+     },
+     "sha256_bytes": {
+      "before": "7dce0ffad23aadfc3cb835a11258ef18802ffa0e9826f53a5da81323837132ed",
+      "restored": "7dce0ffad23aadfc3cb835a11258ef18802ffa0e9826f53a5da81323837132ed"
+     },
+     "build_attempts": 1,
+     "compiled": true,
+     "tests": 5,
+     "passed": 4,
+     "failed_tests": [
+      "compact::source::overlay_tests::exact_scan::compact_exact_scan_consumes_ordered_ids_across_base_and_overlay"
+     ],
+     "status": "killed",
+     "expect_met": true,
+     "restored_identically": true,
+     "seconds": 136,
+     "environment": {
+      "os": "Windows-11-10.0.26300-SP0",
+      "rustc": "rustc 1.99.1 (58cf8f9c3 2026-10-13)",
+      "head": "2d40512513a851d8c13c8747411609517d4300b1"
+     },
+     "sources_sha256": "eaf4962586c77b556471e9c4b9c4b8addcff449b019309157d4f158279c7b549",
+     "baseline_green": true
     },
-    {
-      "id": "e4-ordered-base-first-skipped",
-      "origin": "E4 G2: ordered cursor",
-      "desc": "the ordered-ID cursor drops the first base row, so the lowest base ID is never scanned",
-      "expect": [
-        "compact::source::overlay_tests::exact_scan::compact_exact_scan_consumes_ordered_ids_across_base_and_overlay"
-      ],
-      "file": "src/records.rs",
-      "old": "base: view.base_rows().peekable(),",
-      "new": "base: {\n                    let mut rows = view.base_rows().peekable();\n                    rows.next();\n                    rows\n                },",
-      "cmd": "test --locked --offline --lib -- compact::source::overlay_tests::exact_scan"
-    },
-    {
-      "id": "e4-ordered-tie-lists-base-and-overlay",
-      "origin": "E4 G2: ordered cursor",
-      "desc": "when the base and the overlay hold the same ID the cursor lists it from the base and again from the overlay",
-      "expect": [
-        "compact::source::overlay_tests::exact_scan::compact_exact_scan_consumes_ordered_ids_across_base_and_overlay"
-      ],
-      "file": "src/records.rs",
-      "old": "(Some(id), Some(overlay_id)) if id < overlay_id => {\n                    base.next();",
-      "new": "(Some(id), Some(overlay_id)) if id <= overlay_id => {\n                    base.next();",
-      "cmd": "test --locked --offline --lib -- compact::source::overlay_tests::exact_scan"
-    },
-    {
-      "id": "e4-ordered-tombstone-listed",
-      "origin": "E4 G2: ordered cursor",
-      "desc": "the cursor lists the ID of an overlay tombstone, so the scan counts a deleted row as examined",
-      "expect": [
-        "compact::source::overlay_tests::exact_scan::compact_exact_scan_consumes_ordered_ids_across_base_and_overlay"
-      ],
-      "file": "src/records.rs",
-      "old": "if matches!(entry, OverlayEntry::Put { .. }) {\n                        return Some(overlay_id);",
-      "new": "if matches!(entry, OverlayEntry::Put { .. }) || true {\n                        return Some(overlay_id);",
-      "cmd": "test --locked --offline --lib -- compact::source::overlay_tests::exact_scan"
-    },
-    {
-      "id": "e4-scan-materializes-record-cell",
-      "origin": "E4 G3: no scoring-only cells",
-      "desc": "the compact exact loop materializes the physical record of every row before reading its metadata (answers and statistics unchanged)",
-      "expect": [
-        "compact::source::overlay_tests::exact_scan::compact_exact_scan_scores_without_materializing_record_cells"
-      ],
-      "file": "src/lib.rs",
-      "old": "let Some(metadata) = records.effective_metadata(id, workspace)? else {",
-      "new": "let _ = records.get_physical(id)?;\n        let Some(metadata) = records.effective_metadata(id, workspace)? else {",
-      "cmd": "test --locked --offline --lib -- compact::source::overlay_tests::exact_scan"
-    },
-    {
-      "id": "e4-effective-metadata-materializes-cell",
-      "origin": "E4 G3: no scoring-only cells",
-      "desc": "the effective metadata accessor materializes the base row's record cell before decoding its metadata",
-      "expect": [
-        "compact::source::overlay_tests::exact_scan::compact_exact_scan_scores_without_materializing_record_cells"
-      ],
-      "file": "src/records.rs",
-      "old": "Some(row) => Ok(view.read_metadata(row, workspace)?.map(Cow::Owned)),",
-      "new": "Some(row) => {\n                        view.get_physical(id)?;\n                        Ok(view.read_metadata(row, workspace)?.map(Cow::Owned))\n                    }",
-      "cmd": "test --locked --offline --lib -- compact::source::overlay_tests::exact_scan"
-    },
-    {
-      "id": "e4-effective-vector-materializes-cell",
-      "origin": "E4 G3: no scoring-only cells",
-      "desc": "the effective vector accessor materializes the base row's record cell before reading its vector",
-      "expect": [
-        "compact::source::overlay_tests::exact_scan::compact_exact_scan_scores_without_materializing_record_cells"
-      ],
-      "file": "src/records.rs",
-      "old": "Some(row) => view.read_vector(row, workspace),",
-      "new": "Some(row) => {\n                        view.get_physical(id)?;\n                        view.read_vector(row, workspace)\n                    }",
-      "cmd": "test --locked --offline --lib -- compact::source::overlay_tests::exact_scan"
-    },
-    {
-      "id": "e4-scan-scores-squared-l2-only",
-      "origin": "E4 G3: distance bits",
-      "desc": "the compact exact loop scores every metric as squared L2",
-      "expect": [
-        "compact::source::overlay_tests::exact_scan::compact_exact_scan_scores_without_materializing_record_cells"
-      ],
-      "file": "src/lib.rs",
-      "old": "let scorer = exact_kernels::Scorer::new(query, metric, query_norm);\n    let mut hits: BinaryHeap<RankedHit> = BinaryHeap::with_capacity(limit);\n    for id in records.ordered_ids() {",
-      "new": "let scorer = exact_kernels::Scorer::new(query, DistanceMetric::SquaredL2, query_norm);\n    let mut hits: BinaryHeap<RankedHit> = BinaryHeap::with_capacity(limit);\n    for id in records.ordered_ids() {",
-      "cmd": "test --locked --offline --lib -- compact::source::overlay_tests::exact_scan"
-    },
-    {
-      "id": "e4-scan-clock-one-behind",
-      "origin": "E4 G3: one clock",
-      "desc": "the compact exact loop checks visibility one millisecond before the caller's clock, so a row is visible at its own deadline",
-      "expect": [
-        "compact::source::overlay_tests::exact_scan::compact_exact_scan_scores_without_materializing_record_cells"
-      ],
-      "file": "src/lib.rs",
-      "old": "if !records.effective_visible(id, now_ms, expiries) {",
-      "new": "if !records.effective_visible(id, now_ms.saturating_sub(1), expiries) {",
-      "cmd": "test --locked --offline --lib -- compact::source::overlay_tests::exact_scan"
-    },
-    {
-      "id": "e4-scratch-fit-guard-inclusive",
-      "origin": "E4 G4: workspace boundary",
-      "desc": "a block that exactly fills the workspace budget is refused",
-      "expect": [
-        "compact::source::overlay_tests::exact_scan::compact_exact_scan_workspace_boundaries_preserve_explicit_error_accounting"
-      ],
-      "file": "src/compact/source.rs",
-      "old": "if bytes > workspace.budget {",
-      "new": "if bytes >= workspace.budget {",
-      "cmd": "test --locked --offline --lib -- compact::source::overlay_tests::exact_scan"
-    },
-    {
-      "id": "e4-evict-loop-inclusive",
-      "origin": "E4 G4: LRU accounting",
-      "desc": "the cache evicts a block when the new one would exactly fill the budget",
-      "expect": [
-        "compact::source::overlay_tests::exact_scan::compact_exact_scan_workspace_boundaries_preserve_explicit_error_accounting"
-      ],
-      "file": "src/compact/source.rs",
-      "old": ".ok_or(Error::InvalidQuery(\"compact vector accounting overflow\"))?\n                > workspace.budget",
-      "new": ".ok_or(Error::InvalidQuery(\"compact vector accounting overflow\"))?\n                >= workspace.budget",
-      "cmd": "test --locked --offline --lib -- compact::source::overlay_tests::exact_scan"
-    },
-    {
-      "id": "e4-vectors-live-not-grown",
-      "origin": "E4 G4: LRU accounting",
-      "desc": "a decoded block adds nothing to the live vector bytes, so the live and peak counters stay behind",
-      "expect": [
-        "compact::source::overlay_tests::exact_scan::compact_exact_scan_workspace_boundaries_preserve_explicit_error_accounting"
-      ],
-      "file": "src/compact/source.rs",
-      "old": ".checked_add(bytes)\n                .ok_or(Error::InvalidQuery(\"compact vector accounting overflow\"))?;\n            workspace.accounting.vectors_peak = workspace",
-      "new": ".checked_add(0)\n                .ok_or(Error::InvalidQuery(\"compact vector accounting overflow\"))?;\n            workspace.accounting.vectors_peak = workspace",
-      "cmd": "test --locked --offline --lib -- compact::source::overlay_tests::exact_scan"
-    },
-    {
-      "id": "e4-evaluation-counted-after-vector-read",
-      "origin": "E4 G4: attempted-row counter",
-      "desc": "the scan counts a distance evaluation only after the vector was read, so a refused read is not counted",
-      "expect": [
-        "compact::source::overlay_tests::exact_scan::compact_exact_scan_workspace_boundaries_preserve_explicit_error_accounting"
-      ],
-      "file": "src/lib.rs",
-      "old": "stats.distance_evaluations += 1;\n        let Some(vector) = records.effective_vector(id, workspace)? else {\n            return Err(Error::InvalidQuery(\"compact scan vector is missing\"));\n        };",
-      "new": "let Some(vector) = records.effective_vector(id, workspace)? else {\n            return Err(Error::InvalidQuery(\"compact scan vector is missing\"));\n        };\n        stats.distance_evaluations += 1;",
-      "cmd": "test --locked --offline --lib -- compact::source::overlay_tests::exact_scan"
-    },
-    {
-      "id": "e4-wrapper-workspace-1-mib",
-      "origin": "E4 G4: real ceiling",
-      "desc": "the exact-scan wrapper creates a 1 MiB workspace instead of the 4 MiB one",
-      "expect": [
-        "compact::source::overlay_tests::exact_scan::compact_exact_scan_workspace_ceiling_and_the_largest_blocks"
-      ],
-      "file": "src/lib.rs",
-      "old": "let mut workspace = compact::source::ReadWorkspace::new(4 << 20)?;\n    exact_search_compact_with_workspace(",
-      "new": "let mut workspace = compact::source::ReadWorkspace::new(1 << 20)?;\n    exact_search_compact_with_workspace(",
-      "cmd": "test --locked --offline --lib -- compact::source::overlay_tests::exact_scan"
-    },
-    {
-      "id": "e4-workspace-ceiling-8-mib",
-      "origin": "E4 G4: real ceiling",
-      "desc": "the workspace constructor accepts budgets up to 8 MiB",
-      "expect": [
-        "compact::source::overlay_tests::exact_scan::compact_exact_scan_workspace_ceiling_and_the_largest_blocks"
-      ],
-      "file": "src/compact/source.rs",
-      "old": "if budget > 4 * 1024 * 1024 {",
-      "new": "if budget > 8 * 1024 * 1024 {",
-      "cmd": "test --locked --offline --lib -- compact::source::overlay_tests::exact_scan"
-    },
-    {
-      "id": "e4-vector-read-before-filter",
-      "origin": "E4 G4: only needed blocks decode",
-      "desc": "the scan reads every row's vector before applying the filter, so a block no matching row needs is still decoded",
-      "expect": [
-        "compact::source::overlay_tests::exact_scan::compact_exact_scan_workspace_boundaries_preserve_explicit_error_accounting"
-      ],
-      "file": "src/lib.rs",
-      "old": "if !metadata::matches(&metadata, conditions) {\n            continue;\n        }\n        stats.distance_evaluations += 1;\n        let Some(vector) = records.effective_vector(id, workspace)? else {",
-      "new": "let _ = records.effective_vector(id, workspace)?;\n        if !metadata::matches(&metadata, conditions) {\n            continue;\n        }\n        stats.distance_evaluations += 1;\n        let Some(vector) = records.effective_vector(id, workspace)? else {",
-      "cmd": "test --locked --offline --lib -- compact::source::overlay_tests::exact_scan"
-    },
-    {
-      "id": "e4-cache-hits-uncounted",
-      "origin": "E4 G4: LRU accounting",
-      "desc": "a cached block read is not counted as a hit",
-      "expect": [
-        "compact::source::overlay_tests::exact_scan::compact_exact_scan_workspace_boundaries_preserve_explicit_error_accounting"
-      ],
-      "file": "src/compact/source.rs",
-      "old": "increment(&mut workspace.accounting.hits)?;",
-      "new": "",
-      "cmd": "test --locked --offline --lib -- compact::source::overlay_tests::exact_scan"
-    },
-    {
-      "id": "e4-evictions-uncounted",
-      "origin": "E4 G4: LRU accounting",
-      "desc": "an evicted block is not counted",
-      "expect": [
-        "compact::source::overlay_tests::exact_scan::compact_exact_scan_workspace_boundaries_preserve_explicit_error_accounting"
-      ],
-      "file": "src/compact/source.rs",
-      "old": "increment(&mut workspace.accounting.evictions)?;",
-      "new": "",
-      "cmd": "test --locked --offline --lib -- compact::source::overlay_tests::exact_scan"
-    },
-    {
-      "id": "e4-lru-evicts-most-recent",
-      "origin": "E4 G4: LRU accounting",
-      "desc": "the cache evicts the most recently used block instead of the least recently used one",
-      "expect": [
-        "compact::source::overlay_tests::exact_scan::compact_exact_scan_workspace_boundaries_preserve_explicit_error_accounting"
-      ],
-      "file": "src/compact/source.rs",
-      "old": ".min_by_key(|(key, entry)| (entry.used, **key))",
-      "new": ".max_by_key(|(key, entry)| (entry.used, **key))",
-      "cmd": "test --locked --offline --lib -- compact::source::overlay_tests::exact_scan"
-    },
-    {
-      "id": "e4-scanned-counted-after-visibility",
-      "origin": "E4 G3: scan statistics",
-      "desc": "the compact exact loop counts a row as examined only when it is visible",
-      "expect": [
-        "compact::source::overlay_tests::exact_scan::compact_exact_scan_consumes_ordered_ids_across_base_and_overlay"
-      ],
-      "file": "src/lib.rs",
-      "old": "stats.records_scanned += 1;\n        if !records.effective_visible(id, now_ms, expiries) {\n            continue;\n        }",
-      "new": "if !records.effective_visible(id, now_ms, expiries) {\n            continue;\n        }\n        stats.records_scanned += 1;",
-      "cmd": "test --locked --offline --lib -- compact::source::overlay_tests::exact_scan"
-    },
-    {
-      "id": "e4-candidate-filter-dropped",
-      "origin": "E4 G4: candidate set",
-      "desc": "the compact exact loop ignores the candidate set and scans every row",
-      "expect": [
-        "compact::source::overlay_tests::exact_scan::compact_exact_scan_workspace_boundaries_preserve_explicit_error_accounting"
-      ],
-      "file": "src/lib.rs",
-      "old": "if candidates.is_some_and(|ids| !ids.contains(&id)) {\n            continue;\n        }\n        stats.records_scanned += 1;",
-      "new": "stats.records_scanned += 1;",
-      "cmd": "test --locked --offline --lib -- compact::source::overlay_tests::exact_scan"
-    },
-    {
-      "id": "e4-filter-negated",
-      "origin": "E4 G3: filter",
-      "desc": "the compact exact loop keeps the rows the filter rejects",
-      "expect": [
-        "compact::source::overlay_tests::exact_scan::compact_exact_scan_scores_without_materializing_record_cells"
-      ],
-      "file": "src/lib.rs",
-      "old": "if !metadata::matches(&metadata, conditions) {",
-      "new": "if metadata::matches(&metadata, conditions) {",
-      "cmd": "test --locked --offline --lib -- compact::source::overlay_tests::exact_scan"
-    },
-    {
-      "id": "e4-evaluation-counted-before-filter",
-      "origin": "E4 G3: scan statistics",
-      "desc": "the compact exact loop counts a distance evaluation before the filter has accepted the row",
-      "expect": [
-        "compact::source::overlay_tests::exact_scan::compact_exact_scan_scores_without_materializing_record_cells"
-      ],
-      "file": "src/lib.rs",
-      "old": "if !metadata::matches(&metadata, conditions) {\n            continue;\n        }\n        stats.distance_evaluations += 1;",
-      "new": "stats.distance_evaluations += 1;\n        if !metadata::matches(&metadata, conditions) {\n            continue;\n        }",
-      "cmd": "test --locked --offline --lib -- compact::source::overlay_tests::exact_scan"
-    },
-    {
-      "id": "e4-limit-zero-scans",
-      "origin": "E4 G2: no hit wanted",
-      "desc": "the compact exact scan with nothing to return still walks the rows and counts them",
-      "expect": [
-        "compact::source::overlay_tests::exact_scan::compact_exact_scan_consumes_ordered_ids_across_base_and_overlay"
-      ],
-      "file": "src/lib.rs",
-      "old": "    if limit == 0 {\n        return Ok(Vec::new());\n    }\n    let scorer = exact_kernels::Scorer::new(query, metric, query_norm);\n    let mut hits: BinaryHeap<RankedHit> = BinaryHeap::with_capacity(limit);\n    for id in records.ordered_ids() {",
-      "new": "    let scorer = exact_kernels::Scorer::new(query, metric, query_norm);\n    let mut hits: BinaryHeap<RankedHit> = BinaryHeap::with_capacity(limit);\n    for id in records.ordered_ids() {",
-      "cmd": "test --locked --offline --lib -- compact::source::overlay_tests::exact_scan"
+    "pool-1": {
+     "file": "src/records.rs",
+     "anchor_matches": 1,
+     "sha256_lf": {
+      "before": "1d48d957e11cd2165cc6856183941e1f1e0e086271b8ff47a1f34e73f6d39f6b",
+      "mutated": "fb99807dc3a9e04b1414cfeb3675b9a509e5b1d013f11da9c4cce81309d2035f",
+      "restored": "1d48d957e11cd2165cc6856183941e1f1e0e086271b8ff47a1f34e73f6d39f6b"
+     },
+     "sha256_bytes": {
+      "before": "7dce0ffad23aadfc3cb835a11258ef18802ffa0e9826f53a5da81323837132ed",
+      "restored": "7dce0ffad23aadfc3cb835a11258ef18802ffa0e9826f53a5da81323837132ed"
+     },
+     "build_attempts": 1,
+     "compiled": true,
+     "tests": 5,
+     "passed": 4,
+     "failed_tests": [
+      "compact::source::overlay_tests::exact_scan::compact_exact_scan_consumes_ordered_ids_across_base_and_overlay"
+     ],
+     "status": "killed",
+     "expect_met": true,
+     "restored_identically": true,
+     "seconds": 148,
+     "environment": {
+      "os": "Windows-11-10.0.26200-SP0",
+      "rustc": "rustc 1.99.1 (58cf8f9c3 2026-10-13)",
+      "head": "2d40512513a851d8c13c8747411609517d4300b1"
+     },
+     "sources_sha256": "eaf4962586c77b556471e9c4b9c4b8addcff449b019309157d4f158279c7b549",
+     "baseline_green": true
     }
-  ]
+   }
+  },
+  {
+   "id": "e4-ordered-base-first-skipped",
+   "origin": "E4 G2: ordered cursor",
+   "desc": "the ordered-ID cursor drops the first base row, so the lowest base ID is never scanned",
+   "expect": [
+    "compact::source::overlay_tests::exact_scan::compact_exact_scan_consumes_ordered_ids_across_base_and_overlay"
+   ],
+   "file": "src/records.rs",
+   "old": "base: view.base_rows().peekable(),",
+   "new": "base: {\n                    let mut rows = view.base_rows().peekable();\n                    rows.next();\n                    rows\n                },",
+   "cmd": "test --locked --offline --lib -- compact::source::overlay_tests::exact_scan",
+   "runs": {
+    "local": {
+     "file": "src/records.rs",
+     "anchor_matches": 1,
+     "sha256_lf": {
+      "before": "1d48d957e11cd2165cc6856183941e1f1e0e086271b8ff47a1f34e73f6d39f6b",
+      "mutated": "e1f4a8fdf9900d1061e2be5a5d208ac09c07ac69cad4c90041d90b52fff3337d",
+      "restored": "1d48d957e11cd2165cc6856183941e1f1e0e086271b8ff47a1f34e73f6d39f6b"
+     },
+     "sha256_bytes": {
+      "before": "7dce0ffad23aadfc3cb835a11258ef18802ffa0e9826f53a5da81323837132ed",
+      "restored": "7dce0ffad23aadfc3cb835a11258ef18802ffa0e9826f53a5da81323837132ed"
+     },
+     "build_attempts": 1,
+     "compiled": true,
+     "tests": 5,
+     "passed": 0,
+     "failed_tests": [
+      "compact::source::overlay_tests::exact_scan::compact_exact_scan_consumes_ordered_ids_across_base_and_overlay",
+      "compact::source::overlay_tests::exact_scan::compact_exact_scan_folds_dimensions_left_to_right",
+      "compact::source::overlay_tests::exact_scan::compact_exact_scan_scores_without_materializing_record_cells",
+      "compact::source::overlay_tests::exact_scan::compact_exact_scan_workspace_boundaries_preserve_explicit_error_accounting",
+      "compact::source::overlay_tests::exact_scan::compact_exact_scan_workspace_ceiling_and_the_largest_blocks"
+     ],
+     "status": "killed",
+     "expect_met": true,
+     "restored_identically": true,
+     "seconds": 84,
+     "environment": {
+      "os": "Windows-11-10.0.26300-SP0",
+      "rustc": "rustc 1.99.1 (58cf8f9c3 2026-10-13)",
+      "head": "2d40512513a851d8c13c8747411609517d4300b1"
+     },
+     "sources_sha256": "eaf4962586c77b556471e9c4b9c4b8addcff449b019309157d4f158279c7b549",
+     "baseline_green": true
+    },
+    "pool-1": {
+     "file": "src/records.rs",
+     "anchor_matches": 1,
+     "sha256_lf": {
+      "before": "1d48d957e11cd2165cc6856183941e1f1e0e086271b8ff47a1f34e73f6d39f6b",
+      "mutated": "e1f4a8fdf9900d1061e2be5a5d208ac09c07ac69cad4c90041d90b52fff3337d",
+      "restored": "1d48d957e11cd2165cc6856183941e1f1e0e086271b8ff47a1f34e73f6d39f6b"
+     },
+     "sha256_bytes": {
+      "before": "7dce0ffad23aadfc3cb835a11258ef18802ffa0e9826f53a5da81323837132ed",
+      "restored": "7dce0ffad23aadfc3cb835a11258ef18802ffa0e9826f53a5da81323837132ed"
+     },
+     "build_attempts": 1,
+     "compiled": true,
+     "tests": 5,
+     "passed": 0,
+     "failed_tests": [
+      "compact::source::overlay_tests::exact_scan::compact_exact_scan_consumes_ordered_ids_across_base_and_overlay",
+      "compact::source::overlay_tests::exact_scan::compact_exact_scan_folds_dimensions_left_to_right",
+      "compact::source::overlay_tests::exact_scan::compact_exact_scan_scores_without_materializing_record_cells",
+      "compact::source::overlay_tests::exact_scan::compact_exact_scan_workspace_boundaries_preserve_explicit_error_accounting",
+      "compact::source::overlay_tests::exact_scan::compact_exact_scan_workspace_ceiling_and_the_largest_blocks"
+     ],
+     "status": "killed",
+     "expect_met": true,
+     "restored_identically": true,
+     "seconds": 79,
+     "environment": {
+      "os": "Windows-11-10.0.26200-SP0",
+      "rustc": "rustc 1.99.1 (58cf8f9c3 2026-10-13)",
+      "head": "2d40512513a851d8c13c8747411609517d4300b1"
+     },
+     "sources_sha256": "eaf4962586c77b556471e9c4b9c4b8addcff449b019309157d4f158279c7b549",
+     "baseline_green": true
+    }
+   }
+  },
+  {
+   "id": "e4-ordered-tie-lists-base-and-overlay",
+   "origin": "E4 G2: ordered cursor",
+   "desc": "when the base and the overlay hold the same ID the cursor lists it from the base and again from the overlay",
+   "expect": [
+    "compact::source::overlay_tests::exact_scan::compact_exact_scan_consumes_ordered_ids_across_base_and_overlay"
+   ],
+   "file": "src/records.rs",
+   "old": "(Some(id), Some(overlay_id)) if id < overlay_id => {\n                    base.next();",
+   "new": "(Some(id), Some(overlay_id)) if id <= overlay_id => {\n                    base.next();",
+   "cmd": "test --locked --offline --lib -- compact::source::overlay_tests::exact_scan",
+   "runs": {
+    "local": {
+     "file": "src/records.rs",
+     "anchor_matches": 1,
+     "sha256_lf": {
+      "before": "1d48d957e11cd2165cc6856183941e1f1e0e086271b8ff47a1f34e73f6d39f6b",
+      "mutated": "1b27cf89c6085294e933192b684f82bbc5e168140fc640d08a39855540b276a2",
+      "restored": "1d48d957e11cd2165cc6856183941e1f1e0e086271b8ff47a1f34e73f6d39f6b"
+     },
+     "sha256_bytes": {
+      "before": "7dce0ffad23aadfc3cb835a11258ef18802ffa0e9826f53a5da81323837132ed",
+      "restored": "7dce0ffad23aadfc3cb835a11258ef18802ffa0e9826f53a5da81323837132ed"
+     },
+     "build_attempts": 1,
+     "compiled": true,
+     "tests": 5,
+     "passed": 3,
+     "failed_tests": [
+      "compact::source::overlay_tests::exact_scan::compact_exact_scan_consumes_ordered_ids_across_base_and_overlay",
+      "compact::source::overlay_tests::exact_scan::compact_exact_scan_scores_without_materializing_record_cells"
+     ],
+     "status": "killed",
+     "expect_met": true,
+     "restored_identically": true,
+     "seconds": 118,
+     "environment": {
+      "os": "Windows-11-10.0.26300-SP0",
+      "rustc": "rustc 1.99.1 (58cf8f9c3 2026-10-13)",
+      "head": "2d40512513a851d8c13c8747411609517d4300b1"
+     },
+     "sources_sha256": "eaf4962586c77b556471e9c4b9c4b8addcff449b019309157d4f158279c7b549",
+     "baseline_green": true
+    },
+    "pool-1": {
+     "file": "src/records.rs",
+     "anchor_matches": 1,
+     "sha256_lf": {
+      "before": "1d48d957e11cd2165cc6856183941e1f1e0e086271b8ff47a1f34e73f6d39f6b",
+      "mutated": "1b27cf89c6085294e933192b684f82bbc5e168140fc640d08a39855540b276a2",
+      "restored": "1d48d957e11cd2165cc6856183941e1f1e0e086271b8ff47a1f34e73f6d39f6b"
+     },
+     "sha256_bytes": {
+      "before": "7dce0ffad23aadfc3cb835a11258ef18802ffa0e9826f53a5da81323837132ed",
+      "restored": "7dce0ffad23aadfc3cb835a11258ef18802ffa0e9826f53a5da81323837132ed"
+     },
+     "build_attempts": 1,
+     "compiled": true,
+     "tests": 5,
+     "passed": 3,
+     "failed_tests": [
+      "compact::source::overlay_tests::exact_scan::compact_exact_scan_consumes_ordered_ids_across_base_and_overlay",
+      "compact::source::overlay_tests::exact_scan::compact_exact_scan_scores_without_materializing_record_cells"
+     ],
+     "status": "killed",
+     "expect_met": true,
+     "restored_identically": true,
+     "seconds": 108,
+     "environment": {
+      "os": "Windows-11-10.0.26200-SP0",
+      "rustc": "rustc 1.99.1 (58cf8f9c3 2026-10-13)",
+      "head": "2d40512513a851d8c13c8747411609517d4300b1"
+     },
+     "sources_sha256": "eaf4962586c77b556471e9c4b9c4b8addcff449b019309157d4f158279c7b549",
+     "baseline_green": true
+    }
+   }
+  },
+  {
+   "id": "e4-ordered-tombstone-listed",
+   "origin": "E4 G2: ordered cursor",
+   "desc": "the cursor lists the ID of an overlay tombstone, so the scan counts a deleted row as examined",
+   "expect": [
+    "compact::source::overlay_tests::exact_scan::compact_exact_scan_consumes_ordered_ids_across_base_and_overlay"
+   ],
+   "file": "src/records.rs",
+   "old": "if matches!(entry, OverlayEntry::Put { .. }) {\n                        return Some(overlay_id);",
+   "new": "if matches!(entry, OverlayEntry::Put { .. }) || true {\n                        return Some(overlay_id);",
+   "cmd": "test --locked --offline --lib -- compact::source::overlay_tests::exact_scan",
+   "runs": {
+    "local": {
+     "file": "src/records.rs",
+     "anchor_matches": 1,
+     "sha256_lf": {
+      "before": "1d48d957e11cd2165cc6856183941e1f1e0e086271b8ff47a1f34e73f6d39f6b",
+      "mutated": "fbf2f12e38be798d84c2de90df1db8f1ba77ef0964caee304b9a7a67bb11f24d",
+      "restored": "1d48d957e11cd2165cc6856183941e1f1e0e086271b8ff47a1f34e73f6d39f6b"
+     },
+     "sha256_bytes": {
+      "before": "7dce0ffad23aadfc3cb835a11258ef18802ffa0e9826f53a5da81323837132ed",
+      "restored": "7dce0ffad23aadfc3cb835a11258ef18802ffa0e9826f53a5da81323837132ed"
+     },
+     "build_attempts": 1,
+     "compiled": true,
+     "tests": 5,
+     "passed": 3,
+     "failed_tests": [
+      "compact::source::overlay_tests::exact_scan::compact_exact_scan_consumes_ordered_ids_across_base_and_overlay",
+      "compact::source::overlay_tests::exact_scan::compact_exact_scan_scores_without_materializing_record_cells"
+     ],
+     "status": "killed",
+     "expect_met": true,
+     "restored_identically": true,
+     "seconds": 136,
+     "environment": {
+      "os": "Windows-11-10.0.26300-SP0",
+      "rustc": "rustc 1.99.1 (58cf8f9c3 2026-10-13)",
+      "head": "2d40512513a851d8c13c8747411609517d4300b1"
+     },
+     "sources_sha256": "eaf4962586c77b556471e9c4b9c4b8addcff449b019309157d4f158279c7b549",
+     "baseline_green": true
+    },
+    "pool-1": {
+     "file": "src/records.rs",
+     "anchor_matches": 1,
+     "sha256_lf": {
+      "before": "1d48d957e11cd2165cc6856183941e1f1e0e086271b8ff47a1f34e73f6d39f6b",
+      "mutated": "fbf2f12e38be798d84c2de90df1db8f1ba77ef0964caee304b9a7a67bb11f24d",
+      "restored": "1d48d957e11cd2165cc6856183941e1f1e0e086271b8ff47a1f34e73f6d39f6b"
+     },
+     "sha256_bytes": {
+      "before": "7dce0ffad23aadfc3cb835a11258ef18802ffa0e9826f53a5da81323837132ed",
+      "restored": "7dce0ffad23aadfc3cb835a11258ef18802ffa0e9826f53a5da81323837132ed"
+     },
+     "build_attempts": 1,
+     "compiled": true,
+     "tests": 5,
+     "passed": 3,
+     "failed_tests": [
+      "compact::source::overlay_tests::exact_scan::compact_exact_scan_consumes_ordered_ids_across_base_and_overlay",
+      "compact::source::overlay_tests::exact_scan::compact_exact_scan_scores_without_materializing_record_cells"
+     ],
+     "status": "killed",
+     "expect_met": true,
+     "restored_identically": true,
+     "seconds": 109,
+     "environment": {
+      "os": "Windows-11-10.0.26200-SP0",
+      "rustc": "rustc 1.99.1 (58cf8f9c3 2026-10-13)",
+      "head": "2d40512513a851d8c13c8747411609517d4300b1"
+     },
+     "sources_sha256": "eaf4962586c77b556471e9c4b9c4b8addcff449b019309157d4f158279c7b549",
+     "baseline_green": true
+    }
+   }
+  },
+  {
+   "id": "e4-scan-materializes-record-cell",
+   "origin": "E4 G3: no scoring-only cells",
+   "desc": "the compact exact loop materializes the physical record of every row before reading its metadata (answers and statistics unchanged)",
+   "expect": [
+    "compact::source::overlay_tests::exact_scan::compact_exact_scan_scores_without_materializing_record_cells"
+   ],
+   "file": "src/lib.rs",
+   "old": "let Some(metadata) = records.effective_metadata(id, workspace)? else {",
+   "new": "let _ = records.get_physical(id)?;\n        let Some(metadata) = records.effective_metadata(id, workspace)? else {",
+   "cmd": "test --locked --offline --lib -- compact::source::overlay_tests::exact_scan",
+   "runs": {
+    "local": {
+     "file": "src/lib.rs",
+     "anchor_matches": 1,
+     "sha256_lf": {
+      "before": "c8ab37ef087785cb12419041bc0c017d15bf7f736f6ecc0763e0cd639490a2a9",
+      "mutated": "9caa90b178d9af5f33586243866254f22f1acf2e1516a53ee01dc71aa24d2ea3",
+      "restored": "c8ab37ef087785cb12419041bc0c017d15bf7f736f6ecc0763e0cd639490a2a9"
+     },
+     "sha256_bytes": {
+      "before": "6c0e502a4c7a88ec14ab8fef94dd5bf67c65201ae98e1fc66a1c5e9f0a0f1202",
+      "restored": "6c0e502a4c7a88ec14ab8fef94dd5bf67c65201ae98e1fc66a1c5e9f0a0f1202"
+     },
+     "build_attempts": 1,
+     "compiled": true,
+     "tests": 5,
+     "passed": 3,
+     "failed_tests": [
+      "compact::source::overlay_tests::exact_scan::compact_exact_scan_scores_without_materializing_record_cells",
+      "compact::source::overlay_tests::exact_scan::compact_exact_scan_workspace_boundaries_preserve_explicit_error_accounting"
+     ],
+     "status": "killed",
+     "expect_met": true,
+     "restored_identically": true,
+     "seconds": 87,
+     "environment": {
+      "os": "Windows-11-10.0.26300-SP0",
+      "rustc": "rustc 1.99.1 (58cf8f9c3 2026-10-13)",
+      "head": "2d40512513a851d8c13c8747411609517d4300b1"
+     },
+     "sources_sha256": "eaf4962586c77b556471e9c4b9c4b8addcff449b019309157d4f158279c7b549",
+     "baseline_green": true
+    },
+    "pool-1": {
+     "file": "src/lib.rs",
+     "anchor_matches": 1,
+     "sha256_lf": {
+      "before": "c8ab37ef087785cb12419041bc0c017d15bf7f736f6ecc0763e0cd639490a2a9",
+      "mutated": "9caa90b178d9af5f33586243866254f22f1acf2e1516a53ee01dc71aa24d2ea3",
+      "restored": "c8ab37ef087785cb12419041bc0c017d15bf7f736f6ecc0763e0cd639490a2a9"
+     },
+     "sha256_bytes": {
+      "before": "6c0e502a4c7a88ec14ab8fef94dd5bf67c65201ae98e1fc66a1c5e9f0a0f1202",
+      "restored": "6c0e502a4c7a88ec14ab8fef94dd5bf67c65201ae98e1fc66a1c5e9f0a0f1202"
+     },
+     "build_attempts": 1,
+     "compiled": true,
+     "tests": 5,
+     "passed": 3,
+     "failed_tests": [
+      "compact::source::overlay_tests::exact_scan::compact_exact_scan_scores_without_materializing_record_cells",
+      "compact::source::overlay_tests::exact_scan::compact_exact_scan_workspace_boundaries_preserve_explicit_error_accounting"
+     ],
+     "status": "killed",
+     "expect_met": true,
+     "restored_identically": true,
+     "seconds": 79,
+     "environment": {
+      "os": "Windows-11-10.0.26200-SP0",
+      "rustc": "rustc 1.99.1 (58cf8f9c3 2026-10-13)",
+      "head": "2d40512513a851d8c13c8747411609517d4300b1"
+     },
+     "sources_sha256": "eaf4962586c77b556471e9c4b9c4b8addcff449b019309157d4f158279c7b549",
+     "baseline_green": true
+    }
+   }
+  },
+  {
+   "id": "e4-effective-metadata-materializes-cell",
+   "origin": "E4 G3: no scoring-only cells",
+   "desc": "the effective metadata accessor materializes the base row's record cell before decoding its metadata",
+   "expect": [
+    "compact::source::overlay_tests::exact_scan::compact_exact_scan_scores_without_materializing_record_cells"
+   ],
+   "file": "src/records.rs",
+   "old": "Some(row) => Ok(view.read_metadata(row, workspace)?.map(Cow::Owned)),",
+   "new": "Some(row) => {\n                        view.get_physical(id)?;\n                        Ok(view.read_metadata(row, workspace)?.map(Cow::Owned))\n                    }",
+   "cmd": "test --locked --offline --lib -- compact::source::overlay_tests::exact_scan",
+   "runs": {
+    "local": {
+     "file": "src/records.rs",
+     "anchor_matches": 1,
+     "sha256_lf": {
+      "before": "1d48d957e11cd2165cc6856183941e1f1e0e086271b8ff47a1f34e73f6d39f6b",
+      "mutated": "600ffab0540bfce9181245b5a188e348de8a761f83c321dbd1ef52a7dfd952fc",
+      "restored": "1d48d957e11cd2165cc6856183941e1f1e0e086271b8ff47a1f34e73f6d39f6b"
+     },
+     "sha256_bytes": {
+      "before": "7dce0ffad23aadfc3cb835a11258ef18802ffa0e9826f53a5da81323837132ed",
+      "restored": "7dce0ffad23aadfc3cb835a11258ef18802ffa0e9826f53a5da81323837132ed"
+     },
+     "build_attempts": 1,
+     "compiled": true,
+     "tests": 5,
+     "passed": 3,
+     "failed_tests": [
+      "compact::source::overlay_tests::exact_scan::compact_exact_scan_scores_without_materializing_record_cells",
+      "compact::source::overlay_tests::exact_scan::compact_exact_scan_workspace_boundaries_preserve_explicit_error_accounting"
+     ],
+     "status": "killed",
+     "expect_met": true,
+     "restored_identically": true,
+     "seconds": 91,
+     "environment": {
+      "os": "Windows-11-10.0.26300-SP0",
+      "rustc": "rustc 1.99.1 (58cf8f9c3 2026-10-13)",
+      "head": "2d40512513a851d8c13c8747411609517d4300b1"
+     },
+     "sources_sha256": "eaf4962586c77b556471e9c4b9c4b8addcff449b019309157d4f158279c7b549",
+     "baseline_green": true
+    },
+    "pool-1": {
+     "file": "src/records.rs",
+     "anchor_matches": 1,
+     "sha256_lf": {
+      "before": "1d48d957e11cd2165cc6856183941e1f1e0e086271b8ff47a1f34e73f6d39f6b",
+      "mutated": "600ffab0540bfce9181245b5a188e348de8a761f83c321dbd1ef52a7dfd952fc",
+      "restored": "1d48d957e11cd2165cc6856183941e1f1e0e086271b8ff47a1f34e73f6d39f6b"
+     },
+     "sha256_bytes": {
+      "before": "7dce0ffad23aadfc3cb835a11258ef18802ffa0e9826f53a5da81323837132ed",
+      "restored": "7dce0ffad23aadfc3cb835a11258ef18802ffa0e9826f53a5da81323837132ed"
+     },
+     "build_attempts": 1,
+     "compiled": true,
+     "tests": 5,
+     "passed": 3,
+     "failed_tests": [
+      "compact::source::overlay_tests::exact_scan::compact_exact_scan_scores_without_materializing_record_cells",
+      "compact::source::overlay_tests::exact_scan::compact_exact_scan_workspace_boundaries_preserve_explicit_error_accounting"
+     ],
+     "status": "killed",
+     "expect_met": true,
+     "restored_identically": true,
+     "seconds": 77,
+     "environment": {
+      "os": "Windows-11-10.0.26200-SP0",
+      "rustc": "rustc 1.99.1 (58cf8f9c3 2026-10-13)",
+      "head": "2d40512513a851d8c13c8747411609517d4300b1"
+     },
+     "sources_sha256": "eaf4962586c77b556471e9c4b9c4b8addcff449b019309157d4f158279c7b549",
+     "baseline_green": true
+    }
+   }
+  },
+  {
+   "id": "e4-effective-vector-materializes-cell",
+   "origin": "E4 G3: no scoring-only cells",
+   "desc": "the effective vector accessor materializes the base row's record cell before reading its vector",
+   "expect": [
+    "compact::source::overlay_tests::exact_scan::compact_exact_scan_scores_without_materializing_record_cells"
+   ],
+   "file": "src/records.rs",
+   "old": "Some(row) => view.read_vector(row, workspace),",
+   "new": "Some(row) => {\n                        view.get_physical(id)?;\n                        view.read_vector(row, workspace)\n                    }",
+   "cmd": "test --locked --offline --lib -- compact::source::overlay_tests::exact_scan",
+   "runs": {
+    "local": {
+     "file": "src/records.rs",
+     "anchor_matches": 1,
+     "sha256_lf": {
+      "before": "1d48d957e11cd2165cc6856183941e1f1e0e086271b8ff47a1f34e73f6d39f6b",
+      "mutated": "fd14b3645e6103fc4ee42dcb8cc24cdff51be60c451e6f63e3a062907f81e441",
+      "restored": "1d48d957e11cd2165cc6856183941e1f1e0e086271b8ff47a1f34e73f6d39f6b"
+     },
+     "sha256_bytes": {
+      "before": "7dce0ffad23aadfc3cb835a11258ef18802ffa0e9826f53a5da81323837132ed",
+      "restored": "7dce0ffad23aadfc3cb835a11258ef18802ffa0e9826f53a5da81323837132ed"
+     },
+     "build_attempts": 1,
+     "compiled": true,
+     "tests": 5,
+     "passed": 3,
+     "failed_tests": [
+      "compact::source::overlay_tests::exact_scan::compact_exact_scan_scores_without_materializing_record_cells",
+      "compact::source::overlay_tests::exact_scan::compact_exact_scan_workspace_boundaries_preserve_explicit_error_accounting"
+     ],
+     "status": "killed",
+     "expect_met": true,
+     "restored_identically": true,
+     "seconds": 92,
+     "environment": {
+      "os": "Windows-11-10.0.26300-SP0",
+      "rustc": "rustc 1.99.1 (58cf8f9c3 2026-10-13)",
+      "head": "2d40512513a851d8c13c8747411609517d4300b1"
+     },
+     "sources_sha256": "eaf4962586c77b556471e9c4b9c4b8addcff449b019309157d4f158279c7b549",
+     "baseline_green": true
+    },
+    "pool-1": {
+     "file": "src/records.rs",
+     "anchor_matches": 1,
+     "sha256_lf": {
+      "before": "1d48d957e11cd2165cc6856183941e1f1e0e086271b8ff47a1f34e73f6d39f6b",
+      "mutated": "fd14b3645e6103fc4ee42dcb8cc24cdff51be60c451e6f63e3a062907f81e441",
+      "restored": "1d48d957e11cd2165cc6856183941e1f1e0e086271b8ff47a1f34e73f6d39f6b"
+     },
+     "sha256_bytes": {
+      "before": "7dce0ffad23aadfc3cb835a11258ef18802ffa0e9826f53a5da81323837132ed",
+      "restored": "7dce0ffad23aadfc3cb835a11258ef18802ffa0e9826f53a5da81323837132ed"
+     },
+     "build_attempts": 1,
+     "compiled": true,
+     "tests": 5,
+     "passed": 3,
+     "failed_tests": [
+      "compact::source::overlay_tests::exact_scan::compact_exact_scan_scores_without_materializing_record_cells",
+      "compact::source::overlay_tests::exact_scan::compact_exact_scan_workspace_boundaries_preserve_explicit_error_accounting"
+     ],
+     "status": "killed",
+     "expect_met": true,
+     "restored_identically": true,
+     "seconds": 77,
+     "environment": {
+      "os": "Windows-11-10.0.26200-SP0",
+      "rustc": "rustc 1.99.1 (58cf8f9c3 2026-10-13)",
+      "head": "2d40512513a851d8c13c8747411609517d4300b1"
+     },
+     "sources_sha256": "eaf4962586c77b556471e9c4b9c4b8addcff449b019309157d4f158279c7b549",
+     "baseline_green": true
+    }
+   }
+  },
+  {
+   "id": "e4-scan-scores-squared-l2-only",
+   "origin": "E4 G3: distance bits",
+   "desc": "the compact exact loop scores every metric as squared L2",
+   "expect": [
+    "compact::source::overlay_tests::exact_scan::compact_exact_scan_scores_without_materializing_record_cells"
+   ],
+   "file": "src/lib.rs",
+   "old": "let scorer = exact_kernels::Scorer::new(query, metric, query_norm);\n    let mut hits: BinaryHeap<RankedHit> = BinaryHeap::with_capacity(limit);\n    for id in records.ordered_ids() {",
+   "new": "let scorer = exact_kernels::Scorer::new(query, DistanceMetric::SquaredL2, query_norm);\n    let mut hits: BinaryHeap<RankedHit> = BinaryHeap::with_capacity(limit);\n    for id in records.ordered_ids() {",
+   "cmd": "test --locked --offline --lib -- compact::source::overlay_tests::exact_scan",
+   "runs": {
+    "local": {
+     "file": "src/lib.rs",
+     "anchor_matches": 1,
+     "sha256_lf": {
+      "before": "c8ab37ef087785cb12419041bc0c017d15bf7f736f6ecc0763e0cd639490a2a9",
+      "mutated": "cbc845d9f0b2062666a497b2f3ee5b3cc213790817977a238cd42708fe4a4941",
+      "restored": "c8ab37ef087785cb12419041bc0c017d15bf7f736f6ecc0763e0cd639490a2a9"
+     },
+     "sha256_bytes": {
+      "before": "6c0e502a4c7a88ec14ab8fef94dd5bf67c65201ae98e1fc66a1c5e9f0a0f1202",
+      "restored": "6c0e502a4c7a88ec14ab8fef94dd5bf67c65201ae98e1fc66a1c5e9f0a0f1202"
+     },
+     "build_attempts": 1,
+     "compiled": true,
+     "tests": 5,
+     "passed": 2,
+     "failed_tests": [
+      "compact::source::overlay_tests::exact_scan::compact_exact_scan_consumes_ordered_ids_across_base_and_overlay",
+      "compact::source::overlay_tests::exact_scan::compact_exact_scan_folds_dimensions_left_to_right",
+      "compact::source::overlay_tests::exact_scan::compact_exact_scan_scores_without_materializing_record_cells"
+     ],
+     "status": "killed",
+     "expect_met": true,
+     "restored_identically": true,
+     "seconds": 128,
+     "environment": {
+      "os": "Windows-11-10.0.26300-SP0",
+      "rustc": "rustc 1.99.1 (58cf8f9c3 2026-10-13)",
+      "head": "2d40512513a851d8c13c8747411609517d4300b1"
+     },
+     "sources_sha256": "eaf4962586c77b556471e9c4b9c4b8addcff449b019309157d4f158279c7b549",
+     "baseline_green": true
+    },
+    "pool-1": {
+     "file": "src/lib.rs",
+     "anchor_matches": 1,
+     "sha256_lf": {
+      "before": "c8ab37ef087785cb12419041bc0c017d15bf7f736f6ecc0763e0cd639490a2a9",
+      "mutated": "cbc845d9f0b2062666a497b2f3ee5b3cc213790817977a238cd42708fe4a4941",
+      "restored": "c8ab37ef087785cb12419041bc0c017d15bf7f736f6ecc0763e0cd639490a2a9"
+     },
+     "sha256_bytes": {
+      "before": "6c0e502a4c7a88ec14ab8fef94dd5bf67c65201ae98e1fc66a1c5e9f0a0f1202",
+      "restored": "6c0e502a4c7a88ec14ab8fef94dd5bf67c65201ae98e1fc66a1c5e9f0a0f1202"
+     },
+     "build_attempts": 1,
+     "compiled": true,
+     "tests": 5,
+     "passed": 2,
+     "failed_tests": [
+      "compact::source::overlay_tests::exact_scan::compact_exact_scan_consumes_ordered_ids_across_base_and_overlay",
+      "compact::source::overlay_tests::exact_scan::compact_exact_scan_folds_dimensions_left_to_right",
+      "compact::source::overlay_tests::exact_scan::compact_exact_scan_scores_without_materializing_record_cells"
+     ],
+     "status": "killed",
+     "expect_met": true,
+     "restored_identically": true,
+     "seconds": 110,
+     "environment": {
+      "os": "Windows-11-10.0.26200-SP0",
+      "rustc": "rustc 1.99.1 (58cf8f9c3 2026-10-13)",
+      "head": "2d40512513a851d8c13c8747411609517d4300b1"
+     },
+     "sources_sha256": "eaf4962586c77b556471e9c4b9c4b8addcff449b019309157d4f158279c7b549",
+     "baseline_green": true
+    }
+   }
+  },
+  {
+   "id": "e4-scan-clock-one-behind",
+   "origin": "E4 G3: one clock",
+   "desc": "the compact exact loop checks visibility one millisecond before the caller's clock, so a row is visible at its own deadline",
+   "expect": [
+    "compact::source::overlay_tests::exact_scan::compact_exact_scan_scores_without_materializing_record_cells"
+   ],
+   "file": "src/lib.rs",
+   "old": "if !records.effective_visible(id, now_ms, expiries) {",
+   "new": "if !records.effective_visible(id, now_ms.saturating_sub(1), expiries) {",
+   "cmd": "test --locked --offline --lib -- compact::source::overlay_tests::exact_scan",
+   "runs": {
+    "local": {
+     "file": "src/lib.rs",
+     "anchor_matches": 1,
+     "sha256_lf": {
+      "before": "c8ab37ef087785cb12419041bc0c017d15bf7f736f6ecc0763e0cd639490a2a9",
+      "mutated": "0f65a603c2f9fcf175fda46b95aef7603a2d939451650ada6e03eead8d589bf7",
+      "restored": "c8ab37ef087785cb12419041bc0c017d15bf7f736f6ecc0763e0cd639490a2a9"
+     },
+     "sha256_bytes": {
+      "before": "6c0e502a4c7a88ec14ab8fef94dd5bf67c65201ae98e1fc66a1c5e9f0a0f1202",
+      "restored": "6c0e502a4c7a88ec14ab8fef94dd5bf67c65201ae98e1fc66a1c5e9f0a0f1202"
+     },
+     "build_attempts": 1,
+     "compiled": true,
+     "tests": 5,
+     "passed": 3,
+     "failed_tests": [
+      "compact::source::overlay_tests::exact_scan::compact_exact_scan_consumes_ordered_ids_across_base_and_overlay",
+      "compact::source::overlay_tests::exact_scan::compact_exact_scan_scores_without_materializing_record_cells"
+     ],
+     "status": "killed",
+     "expect_met": true,
+     "restored_identically": true,
+     "seconds": 120,
+     "environment": {
+      "os": "Windows-11-10.0.26300-SP0",
+      "rustc": "rustc 1.99.1 (58cf8f9c3 2026-10-13)",
+      "head": "2d40512513a851d8c13c8747411609517d4300b1"
+     },
+     "sources_sha256": "eaf4962586c77b556471e9c4b9c4b8addcff449b019309157d4f158279c7b549",
+     "baseline_green": true
+    },
+    "pool-2": {
+     "file": "src/lib.rs",
+     "anchor_matches": 1,
+     "sha256_lf": {
+      "before": "c8ab37ef087785cb12419041bc0c017d15bf7f736f6ecc0763e0cd639490a2a9",
+      "mutated": "0f65a603c2f9fcf175fda46b95aef7603a2d939451650ada6e03eead8d589bf7",
+      "restored": "c8ab37ef087785cb12419041bc0c017d15bf7f736f6ecc0763e0cd639490a2a9"
+     },
+     "sha256_bytes": {
+      "before": "6c0e502a4c7a88ec14ab8fef94dd5bf67c65201ae98e1fc66a1c5e9f0a0f1202",
+      "restored": "6c0e502a4c7a88ec14ab8fef94dd5bf67c65201ae98e1fc66a1c5e9f0a0f1202"
+     },
+     "build_attempts": 1,
+     "compiled": true,
+     "tests": 5,
+     "passed": 3,
+     "failed_tests": [
+      "compact::source::overlay_tests::exact_scan::compact_exact_scan_consumes_ordered_ids_across_base_and_overlay",
+      "compact::source::overlay_tests::exact_scan::compact_exact_scan_scores_without_materializing_record_cells"
+     ],
+     "status": "killed",
+     "expect_met": true,
+     "restored_identically": true,
+     "seconds": 112,
+     "environment": {
+      "os": "Windows-11-10.0.26300-SP0",
+      "rustc": "rustc 1.99.1 (58cf8f9c3 2026-10-13)",
+      "head": "2d40512513a851d8c13c8747411609517d4300b1"
+     },
+     "sources_sha256": "eaf4962586c77b556471e9c4b9c4b8addcff449b019309157d4f158279c7b549",
+     "baseline_green": true
+    }
+   }
+  },
+  {
+   "id": "e4-scratch-fit-guard-inclusive",
+   "origin": "E4 G4: workspace boundary",
+   "desc": "a block that exactly fills the workspace budget is refused",
+   "expect": [
+    "compact::source::overlay_tests::exact_scan::compact_exact_scan_workspace_boundaries_preserve_explicit_error_accounting"
+   ],
+   "file": "src/compact/source.rs",
+   "old": "if bytes > workspace.budget {",
+   "new": "if bytes >= workspace.budget {",
+   "cmd": "test --locked --offline --lib -- compact::source::overlay_tests::exact_scan",
+   "runs": {
+    "local": {
+     "file": "src/compact/source.rs",
+     "anchor_matches": 1,
+     "sha256_lf": {
+      "before": "8161c6c5456b451fbbdead5afabc7b04b51a2b2e3c4e5db3143a02e2d4f73ff5",
+      "mutated": "4b7cdeb5aa0de11fae767f25105778adc597b73b1dc6e2fb14e291cdf7f226a7",
+      "restored": "8161c6c5456b451fbbdead5afabc7b04b51a2b2e3c4e5db3143a02e2d4f73ff5"
+     },
+     "sha256_bytes": {
+      "before": "0a53f446137cbe99db47c5193a553cb8255e4e7d6349ed5828fe42fb124f5b6a",
+      "restored": "0a53f446137cbe99db47c5193a553cb8255e4e7d6349ed5828fe42fb124f5b6a"
+     },
+     "build_attempts": 1,
+     "compiled": true,
+     "tests": 5,
+     "passed": 3,
+     "failed_tests": [
+      "compact::source::overlay_tests::exact_scan::compact_exact_scan_workspace_boundaries_preserve_explicit_error_accounting",
+      "compact::source::overlay_tests::exact_scan::compact_exact_scan_workspace_ceiling_and_the_largest_blocks"
+     ],
+     "status": "killed",
+     "expect_met": true,
+     "restored_identically": true,
+     "seconds": 151,
+     "environment": {
+      "os": "Windows-11-10.0.26300-SP0",
+      "rustc": "rustc 1.99.1 (58cf8f9c3 2026-10-13)",
+      "head": "2d40512513a851d8c13c8747411609517d4300b1"
+     },
+     "sources_sha256": "eaf4962586c77b556471e9c4b9c4b8addcff449b019309157d4f158279c7b549",
+     "baseline_green": true
+    },
+    "pool-2": {
+     "file": "src/compact/source.rs",
+     "anchor_matches": 1,
+     "sha256_lf": {
+      "before": "8161c6c5456b451fbbdead5afabc7b04b51a2b2e3c4e5db3143a02e2d4f73ff5",
+      "mutated": "4b7cdeb5aa0de11fae767f25105778adc597b73b1dc6e2fb14e291cdf7f226a7",
+      "restored": "8161c6c5456b451fbbdead5afabc7b04b51a2b2e3c4e5db3143a02e2d4f73ff5"
+     },
+     "sha256_bytes": {
+      "before": "0a53f446137cbe99db47c5193a553cb8255e4e7d6349ed5828fe42fb124f5b6a",
+      "restored": "0a53f446137cbe99db47c5193a553cb8255e4e7d6349ed5828fe42fb124f5b6a"
+     },
+     "build_attempts": 1,
+     "compiled": true,
+     "tests": 5,
+     "passed": 3,
+     "failed_tests": [
+      "compact::source::overlay_tests::exact_scan::compact_exact_scan_workspace_boundaries_preserve_explicit_error_accounting",
+      "compact::source::overlay_tests::exact_scan::compact_exact_scan_workspace_ceiling_and_the_largest_blocks"
+     ],
+     "status": "killed",
+     "expect_met": true,
+     "restored_identically": true,
+     "seconds": 152,
+     "environment": {
+      "os": "Windows-11-10.0.26300-SP0",
+      "rustc": "rustc 1.99.1 (58cf8f9c3 2026-10-13)",
+      "head": "2d40512513a851d8c13c8747411609517d4300b1"
+     },
+     "sources_sha256": "eaf4962586c77b556471e9c4b9c4b8addcff449b019309157d4f158279c7b549",
+     "baseline_green": true
+    }
+   }
+  },
+  {
+   "id": "e4-evict-loop-inclusive",
+   "origin": "E4 G4: LRU accounting",
+   "desc": "the cache evicts a block when the new one would exactly fill the budget",
+   "expect": [
+    "compact::source::overlay_tests::exact_scan::compact_exact_scan_workspace_boundaries_preserve_explicit_error_accounting"
+   ],
+   "file": "src/compact/source.rs",
+   "old": ".ok_or(Error::InvalidQuery(\"compact vector accounting overflow\"))?\n                > workspace.budget",
+   "new": ".ok_or(Error::InvalidQuery(\"compact vector accounting overflow\"))?\n                >= workspace.budget",
+   "cmd": "test --locked --offline --lib -- compact::source::overlay_tests::exact_scan",
+   "runs": {
+    "local": {
+     "file": "src/compact/source.rs",
+     "anchor_matches": 1,
+     "sha256_lf": {
+      "before": "8161c6c5456b451fbbdead5afabc7b04b51a2b2e3c4e5db3143a02e2d4f73ff5",
+      "mutated": "4bfec5ea9faae9cfdb983e1d29b4a49f8796dc7bdc0da322a496ad22616200b3",
+      "restored": "8161c6c5456b451fbbdead5afabc7b04b51a2b2e3c4e5db3143a02e2d4f73ff5"
+     },
+     "sha256_bytes": {
+      "before": "0a53f446137cbe99db47c5193a553cb8255e4e7d6349ed5828fe42fb124f5b6a",
+      "restored": "0a53f446137cbe99db47c5193a553cb8255e4e7d6349ed5828fe42fb124f5b6a"
+     },
+     "build_attempts": 1,
+     "compiled": true,
+     "tests": 5,
+     "passed": 3,
+     "failed_tests": [
+      "compact::source::overlay_tests::exact_scan::compact_exact_scan_workspace_boundaries_preserve_explicit_error_accounting",
+      "compact::source::overlay_tests::exact_scan::compact_exact_scan_workspace_ceiling_and_the_largest_blocks"
+     ],
+     "status": "killed",
+     "expect_met": true,
+     "restored_identically": true,
+     "seconds": 148,
+     "environment": {
+      "os": "Windows-11-10.0.26300-SP0",
+      "rustc": "rustc 1.99.1 (58cf8f9c3 2026-10-13)",
+      "head": "2d40512513a851d8c13c8747411609517d4300b1"
+     },
+     "sources_sha256": "eaf4962586c77b556471e9c4b9c4b8addcff449b019309157d4f158279c7b549",
+     "baseline_green": true
+    },
+    "pool-2": {
+     "file": "src/compact/source.rs",
+     "anchor_matches": 1,
+     "sha256_lf": {
+      "before": "8161c6c5456b451fbbdead5afabc7b04b51a2b2e3c4e5db3143a02e2d4f73ff5",
+      "mutated": "4bfec5ea9faae9cfdb983e1d29b4a49f8796dc7bdc0da322a496ad22616200b3",
+      "restored": "8161c6c5456b451fbbdead5afabc7b04b51a2b2e3c4e5db3143a02e2d4f73ff5"
+     },
+     "sha256_bytes": {
+      "before": "0a53f446137cbe99db47c5193a553cb8255e4e7d6349ed5828fe42fb124f5b6a",
+      "restored": "0a53f446137cbe99db47c5193a553cb8255e4e7d6349ed5828fe42fb124f5b6a"
+     },
+     "build_attempts": 1,
+     "compiled": true,
+     "tests": 5,
+     "passed": 3,
+     "failed_tests": [
+      "compact::source::overlay_tests::exact_scan::compact_exact_scan_workspace_boundaries_preserve_explicit_error_accounting",
+      "compact::source::overlay_tests::exact_scan::compact_exact_scan_workspace_ceiling_and_the_largest_blocks"
+     ],
+     "status": "killed",
+     "expect_met": true,
+     "restored_identically": true,
+     "seconds": 151,
+     "environment": {
+      "os": "Windows-11-10.0.26300-SP0",
+      "rustc": "rustc 1.99.1 (58cf8f9c3 2026-10-13)",
+      "head": "2d40512513a851d8c13c8747411609517d4300b1"
+     },
+     "sources_sha256": "eaf4962586c77b556471e9c4b9c4b8addcff449b019309157d4f158279c7b549",
+     "baseline_green": true
+    }
+   }
+  },
+  {
+   "id": "e4-vectors-live-not-grown",
+   "origin": "E4 G4: LRU accounting",
+   "desc": "a decoded block adds nothing to the live vector bytes, so the live and peak counters stay behind",
+   "expect": [
+    "compact::source::overlay_tests::exact_scan::compact_exact_scan_workspace_boundaries_preserve_explicit_error_accounting"
+   ],
+   "file": "src/compact/source.rs",
+   "old": ".checked_add(bytes)\n                .ok_or(Error::InvalidQuery(\"compact vector accounting overflow\"))?;\n            workspace.accounting.vectors_peak = workspace",
+   "new": ".checked_add(0)\n                .ok_or(Error::InvalidQuery(\"compact vector accounting overflow\"))?;\n            workspace.accounting.vectors_peak = workspace",
+   "cmd": "test --locked --offline --lib -- compact::source::overlay_tests::exact_scan",
+   "runs": {
+    "local": {
+     "file": "src/compact/source.rs",
+     "anchor_matches": 1,
+     "sha256_lf": {
+      "before": "8161c6c5456b451fbbdead5afabc7b04b51a2b2e3c4e5db3143a02e2d4f73ff5",
+      "mutated": "32a97b17df670a9f53c2e4f1db3b58e67426cc93dd8fd5065efb488bb763a198",
+      "restored": "8161c6c5456b451fbbdead5afabc7b04b51a2b2e3c4e5db3143a02e2d4f73ff5"
+     },
+     "sha256_bytes": {
+      "before": "0a53f446137cbe99db47c5193a553cb8255e4e7d6349ed5828fe42fb124f5b6a",
+      "restored": "0a53f446137cbe99db47c5193a553cb8255e4e7d6349ed5828fe42fb124f5b6a"
+     },
+     "build_attempts": 1,
+     "compiled": true,
+     "tests": 5,
+     "passed": 2,
+     "failed_tests": [
+      "compact::source::overlay_tests::exact_scan::compact_exact_scan_scores_without_materializing_record_cells",
+      "compact::source::overlay_tests::exact_scan::compact_exact_scan_workspace_boundaries_preserve_explicit_error_accounting",
+      "compact::source::overlay_tests::exact_scan::compact_exact_scan_workspace_ceiling_and_the_largest_blocks"
+     ],
+     "status": "killed",
+     "expect_met": true,
+     "restored_identically": true,
+     "seconds": 85,
+     "environment": {
+      "os": "Windows-11-10.0.26300-SP0",
+      "rustc": "rustc 1.99.1 (58cf8f9c3 2026-10-13)",
+      "head": "2d40512513a851d8c13c8747411609517d4300b1"
+     },
+     "sources_sha256": "eaf4962586c77b556471e9c4b9c4b8addcff449b019309157d4f158279c7b549",
+     "baseline_green": true
+    },
+    "pool-2": {
+     "file": "src/compact/source.rs",
+     "anchor_matches": 1,
+     "sha256_lf": {
+      "before": "8161c6c5456b451fbbdead5afabc7b04b51a2b2e3c4e5db3143a02e2d4f73ff5",
+      "mutated": "32a97b17df670a9f53c2e4f1db3b58e67426cc93dd8fd5065efb488bb763a198",
+      "restored": "8161c6c5456b451fbbdead5afabc7b04b51a2b2e3c4e5db3143a02e2d4f73ff5"
+     },
+     "sha256_bytes": {
+      "before": "0a53f446137cbe99db47c5193a553cb8255e4e7d6349ed5828fe42fb124f5b6a",
+      "restored": "0a53f446137cbe99db47c5193a553cb8255e4e7d6349ed5828fe42fb124f5b6a"
+     },
+     "build_attempts": 1,
+     "compiled": true,
+     "tests": 5,
+     "passed": 2,
+     "failed_tests": [
+      "compact::source::overlay_tests::exact_scan::compact_exact_scan_scores_without_materializing_record_cells",
+      "compact::source::overlay_tests::exact_scan::compact_exact_scan_workspace_boundaries_preserve_explicit_error_accounting",
+      "compact::source::overlay_tests::exact_scan::compact_exact_scan_workspace_ceiling_and_the_largest_blocks"
+     ],
+     "status": "killed",
+     "expect_met": true,
+     "restored_identically": true,
+     "seconds": 73,
+     "environment": {
+      "os": "Windows-11-10.0.26300-SP0",
+      "rustc": "rustc 1.99.1 (58cf8f9c3 2026-10-13)",
+      "head": "2d40512513a851d8c13c8747411609517d4300b1"
+     },
+     "sources_sha256": "eaf4962586c77b556471e9c4b9c4b8addcff449b019309157d4f158279c7b549",
+     "baseline_green": true
+    }
+   }
+  },
+  {
+   "id": "e4-evaluation-counted-after-vector-read",
+   "origin": "E4 G4: attempted-row counter",
+   "desc": "the scan counts a distance evaluation only after the vector was read, so a refused read is not counted",
+   "expect": [
+    "compact::source::overlay_tests::exact_scan::compact_exact_scan_workspace_boundaries_preserve_explicit_error_accounting"
+   ],
+   "file": "src/lib.rs",
+   "old": "stats.distance_evaluations += 1;\n        let Some(vector) = records.effective_vector(id, workspace)? else {\n            return Err(Error::InvalidQuery(\"compact scan vector is missing\"));\n        };",
+   "new": "let Some(vector) = records.effective_vector(id, workspace)? else {\n            return Err(Error::InvalidQuery(\"compact scan vector is missing\"));\n        };\n        stats.distance_evaluations += 1;",
+   "cmd": "test --locked --offline --lib -- compact::source::overlay_tests::exact_scan",
+   "runs": {
+    "local": {
+     "file": "src/lib.rs",
+     "anchor_matches": 1,
+     "sha256_lf": {
+      "before": "c8ab37ef087785cb12419041bc0c017d15bf7f736f6ecc0763e0cd639490a2a9",
+      "mutated": "23f6c5e33680fbd05617832cbd6916adf8f438cac61850bda000dfd666e7cf9d",
+      "restored": "c8ab37ef087785cb12419041bc0c017d15bf7f736f6ecc0763e0cd639490a2a9"
+     },
+     "sha256_bytes": {
+      "before": "6c0e502a4c7a88ec14ab8fef94dd5bf67c65201ae98e1fc66a1c5e9f0a0f1202",
+      "restored": "6c0e502a4c7a88ec14ab8fef94dd5bf67c65201ae98e1fc66a1c5e9f0a0f1202"
+     },
+     "build_attempts": 1,
+     "compiled": true,
+     "tests": 5,
+     "passed": 3,
+     "failed_tests": [
+      "compact::source::overlay_tests::exact_scan::compact_exact_scan_workspace_boundaries_preserve_explicit_error_accounting",
+      "compact::source::overlay_tests::exact_scan::compact_exact_scan_workspace_ceiling_and_the_largest_blocks"
+     ],
+     "status": "killed",
+     "expect_met": true,
+     "restored_identically": true,
+     "seconds": 145,
+     "environment": {
+      "os": "Windows-11-10.0.26300-SP0",
+      "rustc": "rustc 1.99.1 (58cf8f9c3 2026-10-13)",
+      "head": "2d40512513a851d8c13c8747411609517d4300b1"
+     },
+     "sources_sha256": "eaf4962586c77b556471e9c4b9c4b8addcff449b019309157d4f158279c7b549",
+     "baseline_green": true
+    },
+    "pool-2": {
+     "file": "src/lib.rs",
+     "anchor_matches": 1,
+     "sha256_lf": {
+      "before": "c8ab37ef087785cb12419041bc0c017d15bf7f736f6ecc0763e0cd639490a2a9",
+      "mutated": "23f6c5e33680fbd05617832cbd6916adf8f438cac61850bda000dfd666e7cf9d",
+      "restored": "c8ab37ef087785cb12419041bc0c017d15bf7f736f6ecc0763e0cd639490a2a9"
+     },
+     "sha256_bytes": {
+      "before": "6c0e502a4c7a88ec14ab8fef94dd5bf67c65201ae98e1fc66a1c5e9f0a0f1202",
+      "restored": "6c0e502a4c7a88ec14ab8fef94dd5bf67c65201ae98e1fc66a1c5e9f0a0f1202"
+     },
+     "build_attempts": 1,
+     "compiled": true,
+     "tests": 5,
+     "passed": 3,
+     "failed_tests": [
+      "compact::source::overlay_tests::exact_scan::compact_exact_scan_workspace_boundaries_preserve_explicit_error_accounting",
+      "compact::source::overlay_tests::exact_scan::compact_exact_scan_workspace_ceiling_and_the_largest_blocks"
+     ],
+     "status": "killed",
+     "expect_met": true,
+     "restored_identically": true,
+     "seconds": 150,
+     "environment": {
+      "os": "Windows-11-10.0.26300-SP0",
+      "rustc": "rustc 1.99.1 (58cf8f9c3 2026-10-13)",
+      "head": "2d40512513a851d8c13c8747411609517d4300b1"
+     },
+     "sources_sha256": "eaf4962586c77b556471e9c4b9c4b8addcff449b019309157d4f158279c7b549",
+     "baseline_green": true
+    }
+   }
+  },
+  {
+   "id": "e4-wrapper-workspace-1-mib",
+   "origin": "E4 G4: real ceiling",
+   "desc": "the exact-scan wrapper creates a 1 MiB workspace instead of the 4 MiB one",
+   "expect": [
+    "compact::source::overlay_tests::exact_scan::compact_exact_scan_workspace_ceiling_and_the_largest_blocks"
+   ],
+   "file": "src/lib.rs",
+   "old": "let mut workspace = compact::source::ReadWorkspace::new(4 << 20)?;\n    exact_search_compact_with_workspace(",
+   "new": "let mut workspace = compact::source::ReadWorkspace::new(1 << 20)?;\n    exact_search_compact_with_workspace(",
+   "cmd": "test --locked --offline --lib -- compact::source::overlay_tests::exact_scan",
+   "runs": {
+    "local": {
+     "file": "src/lib.rs",
+     "anchor_matches": 1,
+     "sha256_lf": {
+      "before": "c8ab37ef087785cb12419041bc0c017d15bf7f736f6ecc0763e0cd639490a2a9",
+      "mutated": "146c7307d595d9e806d5b325b214f2ff7314e8442aad79f28e5c1d26536d8cd1",
+      "restored": "c8ab37ef087785cb12419041bc0c017d15bf7f736f6ecc0763e0cd639490a2a9"
+     },
+     "sha256_bytes": {
+      "before": "6c0e502a4c7a88ec14ab8fef94dd5bf67c65201ae98e1fc66a1c5e9f0a0f1202",
+      "restored": "6c0e502a4c7a88ec14ab8fef94dd5bf67c65201ae98e1fc66a1c5e9f0a0f1202"
+     },
+     "build_attempts": 1,
+     "compiled": true,
+     "tests": 5,
+     "passed": 4,
+     "failed_tests": [
+      "compact::source::overlay_tests::exact_scan::compact_exact_scan_workspace_ceiling_and_the_largest_blocks"
+     ],
+     "status": "killed",
+     "expect_met": true,
+     "restored_identically": true,
+     "seconds": 153,
+     "environment": {
+      "os": "Windows-11-10.0.26300-SP0",
+      "rustc": "rustc 1.99.1 (58cf8f9c3 2026-10-13)",
+      "head": "2d40512513a851d8c13c8747411609517d4300b1"
+     },
+     "sources_sha256": "eaf4962586c77b556471e9c4b9c4b8addcff449b019309157d4f158279c7b549",
+     "baseline_green": true
+    },
+    "pool-2": {
+     "file": "src/lib.rs",
+     "anchor_matches": 1,
+     "sha256_lf": {
+      "before": "c8ab37ef087785cb12419041bc0c017d15bf7f736f6ecc0763e0cd639490a2a9",
+      "mutated": "146c7307d595d9e806d5b325b214f2ff7314e8442aad79f28e5c1d26536d8cd1",
+      "restored": "c8ab37ef087785cb12419041bc0c017d15bf7f736f6ecc0763e0cd639490a2a9"
+     },
+     "sha256_bytes": {
+      "before": "6c0e502a4c7a88ec14ab8fef94dd5bf67c65201ae98e1fc66a1c5e9f0a0f1202",
+      "restored": "6c0e502a4c7a88ec14ab8fef94dd5bf67c65201ae98e1fc66a1c5e9f0a0f1202"
+     },
+     "build_attempts": 1,
+     "compiled": true,
+     "tests": 5,
+     "passed": 4,
+     "failed_tests": [
+      "compact::source::overlay_tests::exact_scan::compact_exact_scan_workspace_ceiling_and_the_largest_blocks"
+     ],
+     "status": "killed",
+     "expect_met": true,
+     "restored_identically": true,
+     "seconds": 158,
+     "environment": {
+      "os": "Windows-11-10.0.26300-SP0",
+      "rustc": "rustc 1.99.1 (58cf8f9c3 2026-10-13)",
+      "head": "2d40512513a851d8c13c8747411609517d4300b1"
+     },
+     "sources_sha256": "eaf4962586c77b556471e9c4b9c4b8addcff449b019309157d4f158279c7b549",
+     "baseline_green": true
+    }
+   }
+  },
+  {
+   "id": "e4-workspace-ceiling-8-mib",
+   "origin": "E4 G4: real ceiling",
+   "desc": "the workspace constructor accepts budgets up to 8 MiB",
+   "expect": [
+    "compact::source::overlay_tests::exact_scan::compact_exact_scan_workspace_ceiling_and_the_largest_blocks"
+   ],
+   "file": "src/compact/source.rs",
+   "old": "if budget > 4 * 1024 * 1024 {",
+   "new": "if budget > 8 * 1024 * 1024 {",
+   "cmd": "test --locked --offline --lib -- compact::source::overlay_tests::exact_scan",
+   "runs": {
+    "local": {
+     "file": "src/compact/source.rs",
+     "anchor_matches": 1,
+     "sha256_lf": {
+      "before": "8161c6c5456b451fbbdead5afabc7b04b51a2b2e3c4e5db3143a02e2d4f73ff5",
+      "mutated": "e5adbcf53b0a1e6dea8099ee3843d1a0f85244838c1d9de9f97ff83bed620976",
+      "restored": "8161c6c5456b451fbbdead5afabc7b04b51a2b2e3c4e5db3143a02e2d4f73ff5"
+     },
+     "sha256_bytes": {
+      "before": "0a53f446137cbe99db47c5193a553cb8255e4e7d6349ed5828fe42fb124f5b6a",
+      "restored": "0a53f446137cbe99db47c5193a553cb8255e4e7d6349ed5828fe42fb124f5b6a"
+     },
+     "build_attempts": 1,
+     "compiled": true,
+     "tests": 5,
+     "passed": 4,
+     "failed_tests": [
+      "compact::source::overlay_tests::exact_scan::compact_exact_scan_workspace_ceiling_and_the_largest_blocks"
+     ],
+     "status": "killed",
+     "expect_met": true,
+     "restored_identically": true,
+     "seconds": 148,
+     "environment": {
+      "os": "Windows-11-10.0.26300-SP0",
+      "rustc": "rustc 1.99.1 (58cf8f9c3 2026-10-13)",
+      "head": "2d40512513a851d8c13c8747411609517d4300b1"
+     },
+     "sources_sha256": "eaf4962586c77b556471e9c4b9c4b8addcff449b019309157d4f158279c7b549",
+     "baseline_green": true
+    },
+    "pool-2": {
+     "file": "src/compact/source.rs",
+     "anchor_matches": 1,
+     "sha256_lf": {
+      "before": "8161c6c5456b451fbbdead5afabc7b04b51a2b2e3c4e5db3143a02e2d4f73ff5",
+      "mutated": "e5adbcf53b0a1e6dea8099ee3843d1a0f85244838c1d9de9f97ff83bed620976",
+      "restored": "8161c6c5456b451fbbdead5afabc7b04b51a2b2e3c4e5db3143a02e2d4f73ff5"
+     },
+     "sha256_bytes": {
+      "before": "0a53f446137cbe99db47c5193a553cb8255e4e7d6349ed5828fe42fb124f5b6a",
+      "restored": "0a53f446137cbe99db47c5193a553cb8255e4e7d6349ed5828fe42fb124f5b6a"
+     },
+     "build_attempts": 1,
+     "compiled": true,
+     "tests": 5,
+     "passed": 4,
+     "failed_tests": [
+      "compact::source::overlay_tests::exact_scan::compact_exact_scan_workspace_ceiling_and_the_largest_blocks"
+     ],
+     "status": "killed",
+     "expect_met": true,
+     "restored_identically": true,
+     "seconds": 151,
+     "environment": {
+      "os": "Windows-11-10.0.26300-SP0",
+      "rustc": "rustc 1.99.1 (58cf8f9c3 2026-10-13)",
+      "head": "2d40512513a851d8c13c8747411609517d4300b1"
+     },
+     "sources_sha256": "eaf4962586c77b556471e9c4b9c4b8addcff449b019309157d4f158279c7b549",
+     "baseline_green": true
+    }
+   }
+  },
+  {
+   "id": "e4-vector-read-before-filter",
+   "origin": "E4 G4: only needed blocks decode",
+   "desc": "the scan reads every row's vector before applying the filter, so a block no matching row needs is still decoded",
+   "expect": [
+    "compact::source::overlay_tests::exact_scan::compact_exact_scan_workspace_boundaries_preserve_explicit_error_accounting"
+   ],
+   "file": "src/lib.rs",
+   "old": "if !metadata::matches(&metadata, conditions) {\n            continue;\n        }\n        stats.distance_evaluations += 1;\n        let Some(vector) = records.effective_vector(id, workspace)? else {",
+   "new": "let _ = records.effective_vector(id, workspace)?;\n        if !metadata::matches(&metadata, conditions) {\n            continue;\n        }\n        stats.distance_evaluations += 1;\n        let Some(vector) = records.effective_vector(id, workspace)? else {",
+   "cmd": "test --locked --offline --lib -- compact::source::overlay_tests::exact_scan",
+   "runs": {
+    "local": {
+     "file": "src/lib.rs",
+     "anchor_matches": 1,
+     "sha256_lf": {
+      "before": "c8ab37ef087785cb12419041bc0c017d15bf7f736f6ecc0763e0cd639490a2a9",
+      "mutated": "32bb93324ec3f4f03758d0dcb4a8d5f01b2a4c02355ae04591f19a05cdf42289",
+      "restored": "c8ab37ef087785cb12419041bc0c017d15bf7f736f6ecc0763e0cd639490a2a9"
+     },
+     "sha256_bytes": {
+      "before": "6c0e502a4c7a88ec14ab8fef94dd5bf67c65201ae98e1fc66a1c5e9f0a0f1202",
+      "restored": "6c0e502a4c7a88ec14ab8fef94dd5bf67c65201ae98e1fc66a1c5e9f0a0f1202"
+     },
+     "build_attempts": 1,
+     "compiled": true,
+     "tests": 5,
+     "passed": 3,
+     "failed_tests": [
+      "compact::source::overlay_tests::exact_scan::compact_exact_scan_workspace_boundaries_preserve_explicit_error_accounting",
+      "compact::source::overlay_tests::exact_scan::compact_exact_scan_workspace_ceiling_and_the_largest_blocks"
+     ],
+     "status": "killed",
+     "expect_met": true,
+     "restored_identically": true,
+     "seconds": 195,
+     "environment": {
+      "os": "Windows-11-10.0.26300-SP0",
+      "rustc": "rustc 1.99.1 (58cf8f9c3 2026-10-13)",
+      "head": "2d40512513a851d8c13c8747411609517d4300b1"
+     },
+     "sources_sha256": "eaf4962586c77b556471e9c4b9c4b8addcff449b019309157d4f158279c7b549",
+     "baseline_green": true
+    },
+    "pool-2": {
+     "file": "src/lib.rs",
+     "anchor_matches": 1,
+     "sha256_lf": {
+      "before": "c8ab37ef087785cb12419041bc0c017d15bf7f736f6ecc0763e0cd639490a2a9",
+      "mutated": "32bb93324ec3f4f03758d0dcb4a8d5f01b2a4c02355ae04591f19a05cdf42289",
+      "restored": "c8ab37ef087785cb12419041bc0c017d15bf7f736f6ecc0763e0cd639490a2a9"
+     },
+     "sha256_bytes": {
+      "before": "6c0e502a4c7a88ec14ab8fef94dd5bf67c65201ae98e1fc66a1c5e9f0a0f1202",
+      "restored": "6c0e502a4c7a88ec14ab8fef94dd5bf67c65201ae98e1fc66a1c5e9f0a0f1202"
+     },
+     "build_attempts": 1,
+     "compiled": true,
+     "tests": 5,
+     "passed": 3,
+     "failed_tests": [
+      "compact::source::overlay_tests::exact_scan::compact_exact_scan_workspace_boundaries_preserve_explicit_error_accounting",
+      "compact::source::overlay_tests::exact_scan::compact_exact_scan_workspace_ceiling_and_the_largest_blocks"
+     ],
+     "status": "killed",
+     "expect_met": true,
+     "restored_identically": true,
+     "seconds": 198,
+     "environment": {
+      "os": "Windows-11-10.0.26300-SP0",
+      "rustc": "rustc 1.99.1 (58cf8f9c3 2026-10-13)",
+      "head": "2d40512513a851d8c13c8747411609517d4300b1"
+     },
+     "sources_sha256": "eaf4962586c77b556471e9c4b9c4b8addcff449b019309157d4f158279c7b549",
+     "baseline_green": true
+    }
+   }
+  },
+  {
+   "id": "e4-cache-hits-uncounted",
+   "origin": "E4 G4: LRU accounting",
+   "desc": "a cached block read is not counted as a hit",
+   "expect": [
+    "compact::source::overlay_tests::exact_scan::compact_exact_scan_workspace_boundaries_preserve_explicit_error_accounting"
+   ],
+   "file": "src/compact/source.rs",
+   "old": "increment(&mut workspace.accounting.hits)?;",
+   "new": "",
+   "cmd": "test --locked --offline --lib -- compact::source::overlay_tests::exact_scan",
+   "runs": {
+    "local": {
+     "file": "src/compact/source.rs",
+     "anchor_matches": 1,
+     "sha256_lf": {
+      "before": "8161c6c5456b451fbbdead5afabc7b04b51a2b2e3c4e5db3143a02e2d4f73ff5",
+      "mutated": "b5a3197a2ea1db5a6df31f98fed3b03483e36f97718471692550e1a718a53de9",
+      "restored": "8161c6c5456b451fbbdead5afabc7b04b51a2b2e3c4e5db3143a02e2d4f73ff5"
+     },
+     "sha256_bytes": {
+      "before": "0a53f446137cbe99db47c5193a553cb8255e4e7d6349ed5828fe42fb124f5b6a",
+      "restored": "0a53f446137cbe99db47c5193a553cb8255e4e7d6349ed5828fe42fb124f5b6a"
+     },
+     "build_attempts": 1,
+     "compiled": true,
+     "tests": 5,
+     "passed": 4,
+     "failed_tests": [
+      "compact::source::overlay_tests::exact_scan::compact_exact_scan_workspace_boundaries_preserve_explicit_error_accounting"
+     ],
+     "status": "killed",
+     "expect_met": true,
+     "restored_identically": true,
+     "seconds": 165,
+     "environment": {
+      "os": "Windows-11-10.0.26300-SP0",
+      "rustc": "rustc 1.99.1 (58cf8f9c3 2026-10-13)",
+      "head": "2d40512513a851d8c13c8747411609517d4300b1"
+     },
+     "sources_sha256": "eaf4962586c77b556471e9c4b9c4b8addcff449b019309157d4f158279c7b549",
+     "baseline_green": true
+    },
+    "pool-3": {
+     "file": "src/compact/source.rs",
+     "anchor_matches": 1,
+     "sha256_lf": {
+      "before": "8161c6c5456b451fbbdead5afabc7b04b51a2b2e3c4e5db3143a02e2d4f73ff5",
+      "mutated": "b5a3197a2ea1db5a6df31f98fed3b03483e36f97718471692550e1a718a53de9",
+      "restored": "8161c6c5456b451fbbdead5afabc7b04b51a2b2e3c4e5db3143a02e2d4f73ff5"
+     },
+     "sha256_bytes": {
+      "before": "0a53f446137cbe99db47c5193a553cb8255e4e7d6349ed5828fe42fb124f5b6a",
+      "restored": "0a53f446137cbe99db47c5193a553cb8255e4e7d6349ed5828fe42fb124f5b6a"
+     },
+     "build_attempts": 1,
+     "compiled": true,
+     "tests": 5,
+     "passed": 4,
+     "failed_tests": [
+      "compact::source::overlay_tests::exact_scan::compact_exact_scan_workspace_boundaries_preserve_explicit_error_accounting"
+     ],
+     "status": "killed",
+     "expect_met": true,
+     "restored_identically": true,
+     "seconds": 144,
+     "environment": {
+      "os": "Windows-11-10.0.26200-SP0",
+      "rustc": "rustc 1.99.1 (58cf8f9c3 2026-10-13)",
+      "head": "2d40512513a851d8c13c8747411609517d4300b1"
+     },
+     "sources_sha256": "eaf4962586c77b556471e9c4b9c4b8addcff449b019309157d4f158279c7b549",
+     "baseline_green": true
+    }
+   }
+  },
+  {
+   "id": "e4-evictions-uncounted",
+   "origin": "E4 G4: LRU accounting",
+   "desc": "an evicted block is not counted",
+   "expect": [
+    "compact::source::overlay_tests::exact_scan::compact_exact_scan_workspace_boundaries_preserve_explicit_error_accounting"
+   ],
+   "file": "src/compact/source.rs",
+   "old": "increment(&mut workspace.accounting.evictions)?;",
+   "new": "",
+   "cmd": "test --locked --offline --lib -- compact::source::overlay_tests::exact_scan",
+   "runs": {
+    "local": {
+     "file": "src/compact/source.rs",
+     "anchor_matches": 1,
+     "sha256_lf": {
+      "before": "8161c6c5456b451fbbdead5afabc7b04b51a2b2e3c4e5db3143a02e2d4f73ff5",
+      "mutated": "9483217050b7727813a879c599cba0b9dae26fc7553ec55b47b6d5c3239af75a",
+      "restored": "8161c6c5456b451fbbdead5afabc7b04b51a2b2e3c4e5db3143a02e2d4f73ff5"
+     },
+     "sha256_bytes": {
+      "before": "0a53f446137cbe99db47c5193a553cb8255e4e7d6349ed5828fe42fb124f5b6a",
+      "restored": "0a53f446137cbe99db47c5193a553cb8255e4e7d6349ed5828fe42fb124f5b6a"
+     },
+     "build_attempts": 1,
+     "compiled": true,
+     "tests": 5,
+     "passed": 4,
+     "failed_tests": [
+      "compact::source::overlay_tests::exact_scan::compact_exact_scan_workspace_boundaries_preserve_explicit_error_accounting"
+     ],
+     "status": "killed",
+     "expect_met": true,
+     "restored_identically": true,
+     "seconds": 154,
+     "environment": {
+      "os": "Windows-11-10.0.26300-SP0",
+      "rustc": "rustc 1.99.1 (58cf8f9c3 2026-10-13)",
+      "head": "2d40512513a851d8c13c8747411609517d4300b1"
+     },
+     "sources_sha256": "eaf4962586c77b556471e9c4b9c4b8addcff449b019309157d4f158279c7b549",
+     "baseline_green": true
+    },
+    "pool-3": {
+     "file": "src/compact/source.rs",
+     "anchor_matches": 1,
+     "sha256_lf": {
+      "before": "8161c6c5456b451fbbdead5afabc7b04b51a2b2e3c4e5db3143a02e2d4f73ff5",
+      "mutated": "9483217050b7727813a879c599cba0b9dae26fc7553ec55b47b6d5c3239af75a",
+      "restored": "8161c6c5456b451fbbdead5afabc7b04b51a2b2e3c4e5db3143a02e2d4f73ff5"
+     },
+     "sha256_bytes": {
+      "before": "0a53f446137cbe99db47c5193a553cb8255e4e7d6349ed5828fe42fb124f5b6a",
+      "restored": "0a53f446137cbe99db47c5193a553cb8255e4e7d6349ed5828fe42fb124f5b6a"
+     },
+     "build_attempts": 1,
+     "compiled": true,
+     "tests": 5,
+     "passed": 4,
+     "failed_tests": [
+      "compact::source::overlay_tests::exact_scan::compact_exact_scan_workspace_boundaries_preserve_explicit_error_accounting"
+     ],
+     "status": "killed",
+     "expect_met": true,
+     "restored_identically": true,
+     "seconds": 144,
+     "environment": {
+      "os": "Windows-11-10.0.26200-SP0",
+      "rustc": "rustc 1.99.1 (58cf8f9c3 2026-10-13)",
+      "head": "2d40512513a851d8c13c8747411609517d4300b1"
+     },
+     "sources_sha256": "eaf4962586c77b556471e9c4b9c4b8addcff449b019309157d4f158279c7b549",
+     "baseline_green": true
+    }
+   }
+  },
+  {
+   "id": "e4-lru-evicts-most-recent",
+   "origin": "E4 G4: LRU accounting",
+   "desc": "the cache evicts the most recently used block instead of the least recently used one",
+   "expect": [
+    "compact::source::overlay_tests::exact_scan::compact_exact_scan_workspace_boundaries_preserve_explicit_error_accounting"
+   ],
+   "file": "src/compact/source.rs",
+   "old": ".min_by_key(|(key, entry)| (entry.used, **key))",
+   "new": ".max_by_key(|(key, entry)| (entry.used, **key))",
+   "cmd": "test --locked --offline --lib -- compact::source::overlay_tests::exact_scan",
+   "runs": {
+    "local": {
+     "file": "src/compact/source.rs",
+     "anchor_matches": 1,
+     "sha256_lf": {
+      "before": "8161c6c5456b451fbbdead5afabc7b04b51a2b2e3c4e5db3143a02e2d4f73ff5",
+      "mutated": "f8e8cc29b6218f456ef264f538813242c8c307976d1fbe677107055e7866a4a1",
+      "restored": "8161c6c5456b451fbbdead5afabc7b04b51a2b2e3c4e5db3143a02e2d4f73ff5"
+     },
+     "sha256_bytes": {
+      "before": "0a53f446137cbe99db47c5193a553cb8255e4e7d6349ed5828fe42fb124f5b6a",
+      "restored": "0a53f446137cbe99db47c5193a553cb8255e4e7d6349ed5828fe42fb124f5b6a"
+     },
+     "build_attempts": 1,
+     "compiled": true,
+     "tests": 5,
+     "passed": 4,
+     "failed_tests": [
+      "compact::source::overlay_tests::exact_scan::compact_exact_scan_workspace_boundaries_preserve_explicit_error_accounting"
+     ],
+     "status": "killed",
+     "expect_met": true,
+     "restored_identically": true,
+     "seconds": 157,
+     "environment": {
+      "os": "Windows-11-10.0.26300-SP0",
+      "rustc": "rustc 1.99.1 (58cf8f9c3 2026-10-13)",
+      "head": "2d40512513a851d8c13c8747411609517d4300b1"
+     },
+     "sources_sha256": "eaf4962586c77b556471e9c4b9c4b8addcff449b019309157d4f158279c7b549",
+     "baseline_green": true
+    },
+    "pool-3": {
+     "file": "src/compact/source.rs",
+     "anchor_matches": 1,
+     "sha256_lf": {
+      "before": "8161c6c5456b451fbbdead5afabc7b04b51a2b2e3c4e5db3143a02e2d4f73ff5",
+      "mutated": "f8e8cc29b6218f456ef264f538813242c8c307976d1fbe677107055e7866a4a1",
+      "restored": "8161c6c5456b451fbbdead5afabc7b04b51a2b2e3c4e5db3143a02e2d4f73ff5"
+     },
+     "sha256_bytes": {
+      "before": "0a53f446137cbe99db47c5193a553cb8255e4e7d6349ed5828fe42fb124f5b6a",
+      "restored": "0a53f446137cbe99db47c5193a553cb8255e4e7d6349ed5828fe42fb124f5b6a"
+     },
+     "build_attempts": 1,
+     "compiled": true,
+     "tests": 5,
+     "passed": 4,
+     "failed_tests": [
+      "compact::source::overlay_tests::exact_scan::compact_exact_scan_workspace_boundaries_preserve_explicit_error_accounting"
+     ],
+     "status": "killed",
+     "expect_met": true,
+     "restored_identically": true,
+     "seconds": 141,
+     "environment": {
+      "os": "Windows-11-10.0.26200-SP0",
+      "rustc": "rustc 1.99.1 (58cf8f9c3 2026-10-13)",
+      "head": "2d40512513a851d8c13c8747411609517d4300b1"
+     },
+     "sources_sha256": "eaf4962586c77b556471e9c4b9c4b8addcff449b019309157d4f158279c7b549",
+     "baseline_green": true
+    }
+   }
+  },
+  {
+   "id": "e4-scanned-counted-after-visibility",
+   "origin": "E4 G3: scan statistics",
+   "desc": "the compact exact loop counts a row as examined only when it is visible",
+   "expect": [
+    "compact::source::overlay_tests::exact_scan::compact_exact_scan_consumes_ordered_ids_across_base_and_overlay"
+   ],
+   "file": "src/lib.rs",
+   "old": "stats.records_scanned += 1;\n        if !records.effective_visible(id, now_ms, expiries) {\n            continue;\n        }",
+   "new": "if !records.effective_visible(id, now_ms, expiries) {\n            continue;\n        }\n        stats.records_scanned += 1;",
+   "cmd": "test --locked --offline --lib -- compact::source::overlay_tests::exact_scan",
+   "runs": {
+    "local": {
+     "file": "src/lib.rs",
+     "anchor_matches": 1,
+     "sha256_lf": {
+      "before": "c8ab37ef087785cb12419041bc0c017d15bf7f736f6ecc0763e0cd639490a2a9",
+      "mutated": "57b14f8fb835a2642dae0a20ff3a3cca3facb0d0c303642c6d623f05b5c79554",
+      "restored": "c8ab37ef087785cb12419041bc0c017d15bf7f736f6ecc0763e0cd639490a2a9"
+     },
+     "sha256_bytes": {
+      "before": "6c0e502a4c7a88ec14ab8fef94dd5bf67c65201ae98e1fc66a1c5e9f0a0f1202",
+      "restored": "6c0e502a4c7a88ec14ab8fef94dd5bf67c65201ae98e1fc66a1c5e9f0a0f1202"
+     },
+     "build_attempts": 1,
+     "compiled": true,
+     "tests": 5,
+     "passed": 3,
+     "failed_tests": [
+      "compact::source::overlay_tests::exact_scan::compact_exact_scan_consumes_ordered_ids_across_base_and_overlay",
+      "compact::source::overlay_tests::exact_scan::compact_exact_scan_scores_without_materializing_record_cells"
+     ],
+     "status": "killed",
+     "expect_met": true,
+     "restored_identically": true,
+     "seconds": 118,
+     "environment": {
+      "os": "Windows-11-10.0.26300-SP0",
+      "rustc": "rustc 1.99.1 (58cf8f9c3 2026-10-13)",
+      "head": "2d40512513a851d8c13c8747411609517d4300b1"
+     },
+     "sources_sha256": "eaf4962586c77b556471e9c4b9c4b8addcff449b019309157d4f158279c7b549",
+     "baseline_green": true
+    },
+    "pool-3": {
+     "file": "src/lib.rs",
+     "anchor_matches": 1,
+     "sha256_lf": {
+      "before": "c8ab37ef087785cb12419041bc0c017d15bf7f736f6ecc0763e0cd639490a2a9",
+      "mutated": "57b14f8fb835a2642dae0a20ff3a3cca3facb0d0c303642c6d623f05b5c79554",
+      "restored": "c8ab37ef087785cb12419041bc0c017d15bf7f736f6ecc0763e0cd639490a2a9"
+     },
+     "sha256_bytes": {
+      "before": "6c0e502a4c7a88ec14ab8fef94dd5bf67c65201ae98e1fc66a1c5e9f0a0f1202",
+      "restored": "6c0e502a4c7a88ec14ab8fef94dd5bf67c65201ae98e1fc66a1c5e9f0a0f1202"
+     },
+     "build_attempts": 1,
+     "compiled": true,
+     "tests": 5,
+     "passed": 3,
+     "failed_tests": [
+      "compact::source::overlay_tests::exact_scan::compact_exact_scan_consumes_ordered_ids_across_base_and_overlay",
+      "compact::source::overlay_tests::exact_scan::compact_exact_scan_scores_without_materializing_record_cells"
+     ],
+     "status": "killed",
+     "expect_met": true,
+     "restored_identically": true,
+     "seconds": 104,
+     "environment": {
+      "os": "Windows-11-10.0.26200-SP0",
+      "rustc": "rustc 1.99.1 (58cf8f9c3 2026-10-13)",
+      "head": "2d40512513a851d8c13c8747411609517d4300b1"
+     },
+     "sources_sha256": "eaf4962586c77b556471e9c4b9c4b8addcff449b019309157d4f158279c7b549",
+     "baseline_green": true
+    }
+   }
+  },
+  {
+   "id": "e4-candidate-filter-dropped",
+   "origin": "E4 G4: candidate set",
+   "desc": "the compact exact loop ignores the candidate set and scans every row",
+   "expect": [
+    "compact::source::overlay_tests::exact_scan::compact_exact_scan_workspace_boundaries_preserve_explicit_error_accounting"
+   ],
+   "file": "src/lib.rs",
+   "old": "if candidates.is_some_and(|ids| !ids.contains(&id)) {\n            continue;\n        }\n        stats.records_scanned += 1;",
+   "new": "stats.records_scanned += 1;",
+   "cmd": "test --locked --offline --lib -- compact::source::overlay_tests::exact_scan",
+   "runs": {
+    "local": {
+     "file": "src/lib.rs",
+     "anchor_matches": 1,
+     "sha256_lf": {
+      "before": "c8ab37ef087785cb12419041bc0c017d15bf7f736f6ecc0763e0cd639490a2a9",
+      "mutated": "c88065937b0a3961133e451f985145e3a358d4da7d3daa1c3b38c625f937ff34",
+      "restored": "c8ab37ef087785cb12419041bc0c017d15bf7f736f6ecc0763e0cd639490a2a9"
+     },
+     "sha256_bytes": {
+      "before": "6c0e502a4c7a88ec14ab8fef94dd5bf67c65201ae98e1fc66a1c5e9f0a0f1202",
+      "restored": "6c0e502a4c7a88ec14ab8fef94dd5bf67c65201ae98e1fc66a1c5e9f0a0f1202"
+     },
+     "build_attempts": 1,
+     "compiled": true,
+     "tests": 5,
+     "passed": 4,
+     "failed_tests": [
+      "compact::source::overlay_tests::exact_scan::compact_exact_scan_workspace_boundaries_preserve_explicit_error_accounting"
+     ],
+     "status": "killed",
+     "expect_met": true,
+     "restored_identically": true,
+     "seconds": 154,
+     "environment": {
+      "os": "Windows-11-10.0.26300-SP0",
+      "rustc": "rustc 1.99.1 (58cf8f9c3 2026-10-13)",
+      "head": "2d40512513a851d8c13c8747411609517d4300b1"
+     },
+     "sources_sha256": "eaf4962586c77b556471e9c4b9c4b8addcff449b019309157d4f158279c7b549",
+     "baseline_green": true
+    },
+    "pool-3": {
+     "file": "src/lib.rs",
+     "anchor_matches": 1,
+     "sha256_lf": {
+      "before": "c8ab37ef087785cb12419041bc0c017d15bf7f736f6ecc0763e0cd639490a2a9",
+      "mutated": "c88065937b0a3961133e451f985145e3a358d4da7d3daa1c3b38c625f937ff34",
+      "restored": "c8ab37ef087785cb12419041bc0c017d15bf7f736f6ecc0763e0cd639490a2a9"
+     },
+     "sha256_bytes": {
+      "before": "6c0e502a4c7a88ec14ab8fef94dd5bf67c65201ae98e1fc66a1c5e9f0a0f1202",
+      "restored": "6c0e502a4c7a88ec14ab8fef94dd5bf67c65201ae98e1fc66a1c5e9f0a0f1202"
+     },
+     "build_attempts": 1,
+     "compiled": true,
+     "tests": 5,
+     "passed": 4,
+     "failed_tests": [
+      "compact::source::overlay_tests::exact_scan::compact_exact_scan_workspace_boundaries_preserve_explicit_error_accounting"
+     ],
+     "status": "killed",
+     "expect_met": true,
+     "restored_identically": true,
+     "seconds": 142,
+     "environment": {
+      "os": "Windows-11-10.0.26200-SP0",
+      "rustc": "rustc 1.99.1 (58cf8f9c3 2026-10-13)",
+      "head": "2d40512513a851d8c13c8747411609517d4300b1"
+     },
+     "sources_sha256": "eaf4962586c77b556471e9c4b9c4b8addcff449b019309157d4f158279c7b549",
+     "baseline_green": true
+    }
+   }
+  },
+  {
+   "id": "e4-filter-negated",
+   "origin": "E4 G3: filter",
+   "desc": "the compact exact loop keeps the rows the filter rejects",
+   "expect": [
+    "compact::source::overlay_tests::exact_scan::compact_exact_scan_scores_without_materializing_record_cells"
+   ],
+   "file": "src/lib.rs",
+   "old": "if !metadata::matches(&metadata, conditions) {",
+   "new": "if metadata::matches(&metadata, conditions) {",
+   "cmd": "test --locked --offline --lib -- compact::source::overlay_tests::exact_scan",
+   "runs": {
+    "local": {
+     "file": "src/lib.rs",
+     "anchor_matches": 1,
+     "sha256_lf": {
+      "before": "c8ab37ef087785cb12419041bc0c017d15bf7f736f6ecc0763e0cd639490a2a9",
+      "mutated": "b5e882cba5b623c8cddf2ee25d50d2171c0facf3764d6920b5976a45f8d5ac4c",
+      "restored": "c8ab37ef087785cb12419041bc0c017d15bf7f736f6ecc0763e0cd639490a2a9"
+     },
+     "sha256_bytes": {
+      "before": "6c0e502a4c7a88ec14ab8fef94dd5bf67c65201ae98e1fc66a1c5e9f0a0f1202",
+      "restored": "6c0e502a4c7a88ec14ab8fef94dd5bf67c65201ae98e1fc66a1c5e9f0a0f1202"
+     },
+     "build_attempts": 1,
+     "compiled": true,
+     "tests": 5,
+     "passed": 0,
+     "failed_tests": [
+      "compact::source::overlay_tests::exact_scan::compact_exact_scan_consumes_ordered_ids_across_base_and_overlay",
+      "compact::source::overlay_tests::exact_scan::compact_exact_scan_folds_dimensions_left_to_right",
+      "compact::source::overlay_tests::exact_scan::compact_exact_scan_scores_without_materializing_record_cells",
+      "compact::source::overlay_tests::exact_scan::compact_exact_scan_workspace_boundaries_preserve_explicit_error_accounting",
+      "compact::source::overlay_tests::exact_scan::compact_exact_scan_workspace_ceiling_and_the_largest_blocks"
+     ],
+     "status": "killed",
+     "expect_met": true,
+     "restored_identically": true,
+     "seconds": 87,
+     "environment": {
+      "os": "Windows-11-10.0.26300-SP0",
+      "rustc": "rustc 1.99.1 (58cf8f9c3 2026-10-13)",
+      "head": "2d40512513a851d8c13c8747411609517d4300b1"
+     },
+     "sources_sha256": "eaf4962586c77b556471e9c4b9c4b8addcff449b019309157d4f158279c7b549",
+     "baseline_green": true
+    },
+    "pool-3": {
+     "file": "src/lib.rs",
+     "anchor_matches": 1,
+     "sha256_lf": {
+      "before": "c8ab37ef087785cb12419041bc0c017d15bf7f736f6ecc0763e0cd639490a2a9",
+      "mutated": "b5e882cba5b623c8cddf2ee25d50d2171c0facf3764d6920b5976a45f8d5ac4c",
+      "restored": "c8ab37ef087785cb12419041bc0c017d15bf7f736f6ecc0763e0cd639490a2a9"
+     },
+     "sha256_bytes": {
+      "before": "6c0e502a4c7a88ec14ab8fef94dd5bf67c65201ae98e1fc66a1c5e9f0a0f1202",
+      "restored": "6c0e502a4c7a88ec14ab8fef94dd5bf67c65201ae98e1fc66a1c5e9f0a0f1202"
+     },
+     "build_attempts": 1,
+     "compiled": true,
+     "tests": 5,
+     "passed": 0,
+     "failed_tests": [
+      "compact::source::overlay_tests::exact_scan::compact_exact_scan_consumes_ordered_ids_across_base_and_overlay",
+      "compact::source::overlay_tests::exact_scan::compact_exact_scan_folds_dimensions_left_to_right",
+      "compact::source::overlay_tests::exact_scan::compact_exact_scan_scores_without_materializing_record_cells",
+      "compact::source::overlay_tests::exact_scan::compact_exact_scan_workspace_boundaries_preserve_explicit_error_accounting",
+      "compact::source::overlay_tests::exact_scan::compact_exact_scan_workspace_ceiling_and_the_largest_blocks"
+     ],
+     "status": "killed",
+     "expect_met": true,
+     "restored_identically": true,
+     "seconds": 82,
+     "environment": {
+      "os": "Windows-11-10.0.26200-SP0",
+      "rustc": "rustc 1.99.1 (58cf8f9c3 2026-10-13)",
+      "head": "2d40512513a851d8c13c8747411609517d4300b1"
+     },
+     "sources_sha256": "eaf4962586c77b556471e9c4b9c4b8addcff449b019309157d4f158279c7b549",
+     "baseline_green": true
+    }
+   }
+  },
+  {
+   "id": "e4-evaluation-counted-before-filter",
+   "origin": "E4 G3: scan statistics",
+   "desc": "the compact exact loop counts a distance evaluation before the filter has accepted the row",
+   "expect": [
+    "compact::source::overlay_tests::exact_scan::compact_exact_scan_scores_without_materializing_record_cells"
+   ],
+   "file": "src/lib.rs",
+   "old": "if !metadata::matches(&metadata, conditions) {\n            continue;\n        }\n        stats.distance_evaluations += 1;",
+   "new": "stats.distance_evaluations += 1;\n        if !metadata::matches(&metadata, conditions) {\n            continue;\n        }",
+   "cmd": "test --locked --offline --lib -- compact::source::overlay_tests::exact_scan",
+   "runs": {
+    "local": {
+     "file": "src/lib.rs",
+     "anchor_matches": 1,
+     "sha256_lf": {
+      "before": "c8ab37ef087785cb12419041bc0c017d15bf7f736f6ecc0763e0cd639490a2a9",
+      "mutated": "0ca2e0b1cd8059e3f4ad392d0194595c199cc05b923e331b0e5b6c68b9d32a44",
+      "restored": "c8ab37ef087785cb12419041bc0c017d15bf7f736f6ecc0763e0cd639490a2a9"
+     },
+     "sha256_bytes": {
+      "before": "6c0e502a4c7a88ec14ab8fef94dd5bf67c65201ae98e1fc66a1c5e9f0a0f1202",
+      "restored": "6c0e502a4c7a88ec14ab8fef94dd5bf67c65201ae98e1fc66a1c5e9f0a0f1202"
+     },
+     "build_attempts": 1,
+     "compiled": true,
+     "tests": 5,
+     "passed": 3,
+     "failed_tests": [
+      "compact::source::overlay_tests::exact_scan::compact_exact_scan_scores_without_materializing_record_cells",
+      "compact::source::overlay_tests::exact_scan::compact_exact_scan_workspace_boundaries_preserve_explicit_error_accounting"
+     ],
+     "status": "killed",
+     "expect_met": true,
+     "restored_identically": true,
+     "seconds": 83,
+     "environment": {
+      "os": "Windows-11-10.0.26300-SP0",
+      "rustc": "rustc 1.99.1 (58cf8f9c3 2026-10-13)",
+      "head": "2d40512513a851d8c13c8747411609517d4300b1"
+     },
+     "sources_sha256": "eaf4962586c77b556471e9c4b9c4b8addcff449b019309157d4f158279c7b549",
+     "baseline_green": true
+    },
+    "pool-3": {
+     "file": "src/lib.rs",
+     "anchor_matches": 1,
+     "sha256_lf": {
+      "before": "c8ab37ef087785cb12419041bc0c017d15bf7f736f6ecc0763e0cd639490a2a9",
+      "mutated": "0ca2e0b1cd8059e3f4ad392d0194595c199cc05b923e331b0e5b6c68b9d32a44",
+      "restored": "c8ab37ef087785cb12419041bc0c017d15bf7f736f6ecc0763e0cd639490a2a9"
+     },
+     "sha256_bytes": {
+      "before": "6c0e502a4c7a88ec14ab8fef94dd5bf67c65201ae98e1fc66a1c5e9f0a0f1202",
+      "restored": "6c0e502a4c7a88ec14ab8fef94dd5bf67c65201ae98e1fc66a1c5e9f0a0f1202"
+     },
+     "build_attempts": 1,
+     "compiled": true,
+     "tests": 5,
+     "passed": 3,
+     "failed_tests": [
+      "compact::source::overlay_tests::exact_scan::compact_exact_scan_scores_without_materializing_record_cells",
+      "compact::source::overlay_tests::exact_scan::compact_exact_scan_workspace_boundaries_preserve_explicit_error_accounting"
+     ],
+     "status": "killed",
+     "expect_met": true,
+     "restored_identically": true,
+     "seconds": 73,
+     "environment": {
+      "os": "Windows-11-10.0.26200-SP0",
+      "rustc": "rustc 1.99.1 (58cf8f9c3 2026-10-13)",
+      "head": "2d40512513a851d8c13c8747411609517d4300b1"
+     },
+     "sources_sha256": "eaf4962586c77b556471e9c4b9c4b8addcff449b019309157d4f158279c7b549",
+     "baseline_green": true
+    }
+   }
+  },
+  {
+   "id": "e4-limit-zero-scans",
+   "origin": "E4 G2: no hit wanted",
+   "desc": "the compact exact scan with nothing to return still walks the rows and counts them",
+   "expect": [
+    "compact::source::overlay_tests::exact_scan::compact_exact_scan_consumes_ordered_ids_across_base_and_overlay"
+   ],
+   "file": "src/lib.rs",
+   "old": "    if limit == 0 {\n        return Ok(Vec::new());\n    }\n    let scorer = exact_kernels::Scorer::new(query, metric, query_norm);\n    let mut hits: BinaryHeap<RankedHit> = BinaryHeap::with_capacity(limit);\n    for id in records.ordered_ids() {",
+   "new": "    let scorer = exact_kernels::Scorer::new(query, metric, query_norm);\n    let mut hits: BinaryHeap<RankedHit> = BinaryHeap::with_capacity(limit);\n    for id in records.ordered_ids() {",
+   "cmd": "test --locked --offline --lib -- compact::source::overlay_tests::exact_scan",
+   "runs": {
+    "local": {
+     "file": "src/lib.rs",
+     "anchor_matches": 1,
+     "sha256_lf": {
+      "before": "c8ab37ef087785cb12419041bc0c017d15bf7f736f6ecc0763e0cd639490a2a9",
+      "mutated": "b9a3d1b205670392b4efd5bf1b3f11707dba055d77ef3f80c7d54416c5cd9c2c",
+      "restored": "c8ab37ef087785cb12419041bc0c017d15bf7f736f6ecc0763e0cd639490a2a9"
+     },
+     "sha256_bytes": {
+      "before": "6c0e502a4c7a88ec14ab8fef94dd5bf67c65201ae98e1fc66a1c5e9f0a0f1202",
+      "restored": "6c0e502a4c7a88ec14ab8fef94dd5bf67c65201ae98e1fc66a1c5e9f0a0f1202"
+     },
+     "build_attempts": 1,
+     "compiled": true,
+     "tests": 5,
+     "passed": 4,
+     "failed_tests": [
+      "compact::source::overlay_tests::exact_scan::compact_exact_scan_consumes_ordered_ids_across_base_and_overlay"
+     ],
+     "status": "killed",
+     "expect_met": true,
+     "restored_identically": true,
+     "seconds": 151,
+     "environment": {
+      "os": "Windows-11-10.0.26300-SP0",
+      "rustc": "rustc 1.99.1 (58cf8f9c3 2026-10-13)",
+      "head": "2d40512513a851d8c13c8747411609517d4300b1"
+     },
+     "sources_sha256": "eaf4962586c77b556471e9c4b9c4b8addcff449b019309157d4f158279c7b549",
+     "baseline_green": true
+    },
+    "pool-3": {
+     "file": "src/lib.rs",
+     "anchor_matches": 1,
+     "sha256_lf": {
+      "before": "c8ab37ef087785cb12419041bc0c017d15bf7f736f6ecc0763e0cd639490a2a9",
+      "mutated": "b9a3d1b205670392b4efd5bf1b3f11707dba055d77ef3f80c7d54416c5cd9c2c",
+      "restored": "c8ab37ef087785cb12419041bc0c017d15bf7f736f6ecc0763e0cd639490a2a9"
+     },
+     "sha256_bytes": {
+      "before": "6c0e502a4c7a88ec14ab8fef94dd5bf67c65201ae98e1fc66a1c5e9f0a0f1202",
+      "restored": "6c0e502a4c7a88ec14ab8fef94dd5bf67c65201ae98e1fc66a1c5e9f0a0f1202"
+     },
+     "build_attempts": 1,
+     "compiled": true,
+     "tests": 5,
+     "passed": 4,
+     "failed_tests": [
+      "compact::source::overlay_tests::exact_scan::compact_exact_scan_consumes_ordered_ids_across_base_and_overlay"
+     ],
+     "status": "killed",
+     "expect_met": true,
+     "restored_identically": true,
+     "seconds": 150,
+     "environment": {
+      "os": "Windows-11-10.0.26200-SP0",
+      "rustc": "rustc 1.99.1 (58cf8f9c3 2026-10-13)",
+      "head": "2d40512513a851d8c13c8747411609517d4300b1"
+     },
+     "sources_sha256": "eaf4962586c77b556471e9c4b9c4b8addcff449b019309157d4f158279c7b549",
+     "baseline_green": true
+    }
+   }
+  }
+ ]
 }

@@ -2,7 +2,7 @@
 
 | | |
 |---|---|
-| Status | Moved to 0.7.2 with the rest of the compact work (owner decision, 0.7.1 ships the request guard, the memory follow-ups and the dashboard). Integrated behind the test gates on `mahpate-r071-e4`; mutant evidence is partial (section 5). Nothing compact becomes active: the compact exact scan and every arm that reaches it are `cfg(test)`, and no default, file format or wire shape changes |
+| Status | Moved to 0.7.2 with the rest of the compact work (owner decision, 0.7.1 ships the request guard, the memory follow-ups and the dashboard). Integrated behind the test gates on `mahpate-r071-e4`; 24 mutants killed on two machines (section 5). Nothing compact becomes active: the compact exact scan and every arm that reaches it are `cfg(test)`, and no default, file format or wire shape changes |
 | Scope | `exact_search_compact` and `exact_search_compact_with_workspace` in `src/lib.rs`, and their four consumers: the direct helper, `Collection::exact_search_candidates`, `Database::search_in_at` and `ReadSnapshot::search_with_stats_at` |
 | Out of scope | Persisted block summaries (item P5-71 of the [0.7.0 handover](handover-0.7.0.md) and [P5](p5-filters-and-serving.md): see section 4), the seam (`src/compact/source.rs`), the ordered cursor itself (`src/records.rs`), early termination (an exact top-k scan reads every candidate row) |
 | Reads with | The [seam freeze](p3b-seam-freeze.md) (CLK, ERR, ACC), the [record consumers](p3b-record-consumers.md) that delivered the scan as a draft, and the [declared-index differential](p3b-survivor-ledgers.md) of lane B4 slice 3 |
@@ -83,13 +83,7 @@ accounting and candidate set (G4). Ten of them repeat the mechanism of a mutant 
 (`compact_ordered_cursors_mutants.json`, `compact_seam_mutants.json`); they are listed again because the E4 selector,
 not a cursor or seam test, has to kill them, and they are the ones that would survive a revert of the loop.
 
-**Evidence so far.** The first 19 mutants were written against the first version of the tests (`6048d7ce`); a local replay
-killed the first five before the replay was stopped (every kill named the E4 tests; see the session notes). The tests
-and the list changed afterwards (review fixes, five more mutants, a fifth test), so the final evidence is a full replay
-of the final tree on two machines. Until it exists the ledger carries no `runs` and `verify` fails by design. Replay with
-`tests/compact_mutant_replay.py` (`check`, `run`, `finish`, `merge`, `verify`); the evidence form is the 0.7.1 one
-(anchor matches once, clean compile, named failing tests, SHA-256 before, mutated and restored, selector green before and
-after, one mutant per build, a replay on a second machine).
+**Evidence.** All 24 mutants were replayed on the 0.7.2 integration tree (`2d405125`, source fingerprint `eaf4962586c7`): 24 of 24 killed on the local machine and 24 of 24 on a second machine (three shards), each kill naming E4 tests, with the selector green before and after and every file restored byte for byte. No survivor, no equivalent mutant. `python tests/compact_mutant_replay.py verify tests/compact_e4_mutants.json --strict --min-machines 2` reports 24 accepted, 0 stale, 0 open. Any change to the sources it fingerprints makes the runs stale and needs a new replay.
 
 ## 6. Hazards for the release promotion
 
