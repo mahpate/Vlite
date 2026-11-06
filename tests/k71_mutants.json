@@ -123,8 +123,8 @@
   "id": "kv-list/K16",
   "desc": "list_at drops the value bytes",
   "file": "src/kv.rs",
-  "old": "                value: entry.value.to_vec(),",
-  "new": "                value: Vec::new(),",
+  "old": "entries.push(KvEntry {\n                key: entry.key.to_owned(),\n                value: entry.value.to_vec(),",
+  "new": "entries.push(KvEntry {\n                key: entry.key.to_owned(),\n                value: Vec::new(),",
   "cmd": "cargo test --locked --offline --features server,mcp,tools --lib kv::bounded_tests"
  },
  {
@@ -155,8 +155,8 @@
   "id": "kv-page/R1",
   "desc": "REST page boundary is exclusive (>= PAGE_BYTES)",
   "file": "src/server/kv.rs",
-  "old": "if envelope + self.item_bytes + size + self.items.len() > PAGE_BYTES {",
-  "new": "if envelope + self.item_bytes + size + self.items.len() >= PAGE_BYTES {",
+  "old": "\"next_after\":next}))\n            .map_err(internal)?\n            .len();\n        if envelope + self.item_bytes + size + self.items.len() > PAGE_BYTES {",
+  "new": "\"next_after\":next}))\n            .map_err(internal)?\n            .len();\n        if envelope + self.item_bytes + size + self.items.len() >= PAGE_BYTES {",
   "cmd": "cargo test --locked --offline --features server,mcp,tools --lib server::kv::"
  },
  {
@@ -187,8 +187,8 @@
   "id": "kv-page/R5",
   "desc": "REST commas between items not counted",
   "file": "src/server/kv.rs",
-  "old": "if envelope + self.item_bytes + size + self.items.len() > PAGE_BYTES {",
-  "new": "if envelope + self.item_bytes + size > PAGE_BYTES {",
+  "old": "\"next_after\":next}))\n            .map_err(internal)?\n            .len();\n        if envelope + self.item_bytes + size + self.items.len() > PAGE_BYTES {",
+  "new": "\"next_after\":next}))\n            .map_err(internal)?\n            .len();\n        if envelope + self.item_bytes + size > PAGE_BYTES {",
   "cmd": "cargo test --locked --offline --features server,mcp,tools --lib server::kv::"
  },
  {
@@ -219,8 +219,8 @@
   "id": "kv-page/R9",
   "desc": "REST: an entry larger than a page is not an error",
   "file": "src/server/kv.rs",
-  "old": "if page.full && page.items.is_empty() {",
-  "new": "if false && page.full && page.items.is_empty() {",
+  "old": "    }\n    if page.full && page.items.is_empty() {",
+  "new": "    }\n    if false && page.full && page.items.is_empty() {",
   "cmd": "cargo test --locked --offline --features server,mcp,tools --lib server::kv::"
  },
  {
@@ -1069,16 +1069,16 @@
   "id": "actor/m08-save-ignores-session",
   "desc": "The REST kv put handler drops the session principal before auditing.",
   "file": "src/server/kv.rs",
-  "old": "            expires_at_ms: options.expires_at_ms,\n            principal: principal.as_ref().map(|Extension(principal)| principal),",
-  "new": "            expires_at_ms: options.expires_at_ms,\n            principal: None,",
+  "old": "            expires_at_ms: options.expires_at_ms,\n            counts: None,\n            principal: principal.as_ref().map(|Extension(principal)| principal),",
+  "new": "            expires_at_ms: options.expires_at_ms,\n            counts: None,\n            principal: None,",
   "cmd": "cargo test --locked --offline --features server --test server_audit_actor"
  },
  {
   "id": "actor/m09-remove-ignores-session",
   "desc": "The REST kv delete handler drops the session principal before auditing.",
   "file": "src/server/kv.rs",
-  "old": "            operation: \"kv_delete\",\n            expires_at_ms: None,\n            principal: principal.as_ref().map(|Extension(principal)| principal),",
-  "new": "            operation: \"kv_delete\",\n            expires_at_ms: None,\n            principal: None,",
+  "old": "            operation: \"kv_delete\",\n            expires_at_ms: None,\n            counts: None,\n            principal: principal.as_ref().map(|Extension(principal)| principal),",
+  "new": "            operation: \"kv_delete\",\n            expires_at_ms: None,\n            counts: None,\n            principal: None,",
   "cmd": "cargo test --locked --offline --features server --test server_audit_actor"
  },
  {

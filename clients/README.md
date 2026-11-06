@@ -88,23 +88,35 @@ Node.js is the tested runtime; browser clients are not a separate supported SDK.
 
 ## Supported operations and wire contracts
 
-The Python, JavaScript and .NET clients also expose the key-value REST
-operations: `kv_get`, `kv_put`, `kv_delete`, `kv_list`; `kvGet`, `kvPut`,
-`kvDelete`, `kvList`; and `KvGetAsync`, `KvPutAsync`, `KvDeleteAsync`,
-`KvListAsync`, respectively. These flat methods require an explicit collection,
-namespace and (except list) key. Use a pre-existing, dedicated one-dimensional
+The Python, JavaScript, .NET and Go clients also expose the key-value REST
+operations: `kv_get`, `kv_put`, `kv_delete`, `kv_list`, `kv_get_many`, `kv_batch`;
+`kvGet`, `kvPut`, `kvDelete`, `kvList`, `kvGetMany`, `kvBatch`; `KvGetAsync`,
+`KvPutAsync`, `KvDeleteAsync`, `KvListAsync`, `KvGetManyAsync`, `KvBatchAsync`;
+and `KvGet`, `KvPut`, `KvDelete`, `KvList`, `KvGetMany`, `KvBatch` (methods of a
+collection's `Records`), respectively. These flat methods require an explicit
+collection, namespace and (except list, get-many and batch) key. Use a
+pre-existing, dedicated one-dimensional
 collection: namespaces are not authorization boundaries. Values are bytes,
 `Uint8Array` or `byte[]` (maximum 1,047,290 bytes); u64s are `int`, `bigint` or
 `ulong`, encoded losslessly as decimal strings. Get decodes the value, put
 returns version/expiry, delete returns a boolean, and list returns items and
 `next_after` (exclusive `after`, no cross-page snapshot). Omitted/null KV expiry
-clears TTL. Only 404 `not_found` maps to an explicit unsupported exception;
-404 `kv_not_found` and all other stable errors remain ordinary HTTP errors.
+clears TTL. Get-many reads up to 1,000 keys and answers one position per key,
+empty for a key that is absent or due; when the response would pass the
+server's 16 MiB page bound it stops early and `next_index` names the first key
+not read. A client never continues a partial result and calls share no snapshot.
+A batch commits up to 1,000 puts and deletes of one collection all or nothing
+(4,194,304 value bytes in total, each key named once); a batch put has no expiry,
+so it clears the deadline of the entry it replaces, and every put of a batch
+returns the same version. Only 404 `not_found` maps to an explicit unsupported
+exception (a server without the batch routes answers it); 404 `kv_not_found` and
+all other stable errors remain ordinary HTTP errors.
 No retry, fallback, collection creation or exactly-once promise is added.
 Disconnects, cancellations and timeouts may hide committed mutations.
 Ordinary KV acknowledgements sync only under server `--durability full`.
 See the [Python](python/README.md#key-value-operations) and
-[JavaScript](javascript/README.md#key-value-operations) examples and .NET below.
+[JavaScript](javascript/README.md#key-value-operations) examples, and the .NET and
+Go sections below.
 
 The JavaScript client also exposes the unreleased agent-memory REST candidate through
 `client.memory(binding)`, a binding-local facade with `remember`, `recall`, `findFacts`,
@@ -574,6 +586,41 @@ committed when a transport error occurs: do not blindly retry. Redirects and
 implicit proxies are disabled. Timeout zero selects 30 seconds; negative values
 are rejected. Server-side validation remains authoritative.
 
+### Go key-value operations
+
+The key-value methods belong to a collection's `Records`: the client names no
+default collection, and a `Records` taken from the `Client` itself answers
+"select a collection". Each call checks its bounds before it sends anything.
+
+```go
+cache, err := client.Collection("cache")
+if err != nil { panic(err) }
+put, err := cache.KvPut(ctx, "app", "hello", []byte{1, 2}, vlite.KvPutOptions{Expected: vlite.KvAbsent()})
+entry, err := cache.KvGet(ctx, "app", "hello")
+page, err := cache.KvList(ctx, "app", vlite.KvListOptions{Prefix: "h"})
+deleted, err := cache.KvDelete(ctx, "app", "hello", vlite.KvRevision(put.Version))
+
+many, err := cache.KvGetMany(ctx, []vlite.KvKey{{Namespace: "app", Key: "a"}, {Namespace: "app", Key: "b"}})
+// many.Items[i] answers keys[i], nil when absent or due; many.NextIndex is set
+// only when the response stopped early. The client never continues it.
+results, err := cache.KvBatch(ctx, []vlite.KvBatchOperation{
+    vlite.KvBatchPut("app", "a", []byte("1"), vlite.KvAbsent()),
+    vlite.KvBatchDelete("app", "b", vlite.KvAny()),
+})
+// results[i].Kind is "put" with Version, or "delete" with Deleted.
+_, _, _, _, _, _ = entry, page, deleted, many, results, err
+```
+
+A batch holds at most 1,000 operations and 4,194,304 value bytes and names each
+`(namespace, key)` once. Its puts carry no deadline: like a put without
+`ExpiresAtMs`, a batch put clears the deadline of the entry it replaces, and
+every put of one batch returns the same version. A server without the batch
+routes answers 404 `not_found`, returned as `*vlite.UnsupportedError`
+(`errors.Is(err, errors.ErrUnsupported)`, unwrapping to the `*vlite.APIError`);
+nothing falls back to single-key calls. After a `*vlite.TransportError` the
+batch either committed in full or not at all, and which is unknown: read the
+keys back with `KvGetMany` before deciding, and do not retry blindly.
+
 ```sh
 cd clients/go
 go test ./...
@@ -638,6 +685,25 @@ milliseconds; omission/null clears expiry. `KvEntry`, `KvPutResult` and
 Pass `cancellation:` to any KV method; cancellation/timeout is a
 `TransportException` with an uncertain mutation outcome, never an automatic
 retry. Only an unknown KV route (404 `not_found`) raises `UnsupportedException`.
+
+`KvBatchAsync` atomically puts/deletes distinct keys in one collection (up to
+1,000 operations and 4 MiB of values); batch puts have no expiry and clear any
+existing deadline. `KvGetManyAsync` reads up to 1,000 keys, allowing duplicates.
+Its positional `Items` contain null for absent/due keys; a partial result carries
+`NextIndex` and is never continued automatically. Both methods validate bounds
+before sending, preserve `ulong` versions, and never retry or fall back.
+
+```csharp
+KvBatchResult[] results = await client.KvBatchAsync("cache", [
+    new KvBatchOperation.Put("app", "hello", new byte[] { 1, 2 }, new Expected.Absent()),
+    new KvBatchOperation.Delete("app", "old", new Expected.Any())
+]);
+KvGetManyResult many = await client.KvGetManyAsync("cache", [
+    new KvKeyRef("app", "hello"), new KvKeyRef("app", "old")
+]);
+Console.WriteLine(many.Items[0]?.Version);
+Console.WriteLine(many.NextIndex);
+```
 
 The package-free test executable uses a fake HTTP handler and exits nonzero on
 failure. Run it rather than `dotnet test` (no test-runner package is needed):

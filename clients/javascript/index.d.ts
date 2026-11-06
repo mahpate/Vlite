@@ -89,6 +89,21 @@ export interface KvListOptions {
 export interface KvPutResult { version: bigint; expires_at_ms: bigint | null }
 export interface KvEntry extends KvPutResult { key: string; value: Uint8Array }
 export interface KvPage { items: KvEntry[]; next_after: string | null }
+export interface KvKey { namespace: string; key: string }
+/**
+ * `items[i]` answers `keys[i]`: an entry, or null for a key that is absent or due. `next_index` is null when every key
+ * was read; otherwise it is the index of the first key not read (equal to `items.length`, at least 1). The client
+ * never continues a partial result.
+ */
+export interface KvGetManyResult { items: (KvEntry | null)[]; next_index: number | null }
+/** A batch put has no deadline: like a put without `expiresAtMs` it clears the deadline of the entry it replaces. */
+export interface KvBatchPut { op: "put"; namespace: string; key: string; value: Uint8Array; expected?: Expected }
+export interface KvBatchDelete { op: "delete"; namespace: string; key: string; expected?: Expected }
+export type KvBatchOperation = KvBatchPut | KvBatchDelete;
+export interface KvBatchPutResult { version: bigint }
+export interface KvBatchDeleteResult { deleted: boolean }
+/** One result per operation, in order: a put gives its version and a delete reports whether it deleted a live entry. */
+export type KvBatchResult = (KvBatchPutResult | KvBatchDeleteResult)[];
 export interface DatabaseInfo { dimensions: number; format_version: number; records: number }
 export interface IndexStatus {
   metric?: "squared_l2" | "cosine" | null;
@@ -489,6 +504,10 @@ export class Client extends Records {
   kvPut(options: KvPutOptions): Promise<KvPutResult>;
   kvDelete(options: KvAddress & { expected?: Expected }): Promise<boolean>;
   kvList(options: KvListOptions): Promise<KvPage>;
+  /** At most 1,000 keys, repeats allowed. One request: a partial result is returned as sent; continue from `next_index`. */
+  kvGetMany(options: { collection: string; keys: readonly KvKey[]; signal?: AbortSignal }): Promise<KvGetManyResult>;
+  /** Commits every operation or none: at most 1,000 operations, 4,194,304 value bytes, and no repeated (namespace, key). */
+  kvBatch(options: { collection: string; operations: readonly KvBatchOperation[]; signal?: AbortSignal }): Promise<KvBatchResult>;
   changes(options?: { cursor?: string; limit?: number }): Promise<object>;
   listWebhooks(): Promise<object>;
   createWebhook(request: object): Promise<object>;

@@ -23,7 +23,9 @@ Commands: help | header | format | collections | stats | use NAME | browse [LIMI
 get ID | delete ID | put {"id":1,"vector":[1,2],"payload":"text","metadata":{}}
 search {"vector":[1,2],"k":10,"ann":false,"ef_search":100,"metric":"squared_l2","filters":[]}
 kv-get REQUEST | kv-put REQUEST | kv-delete REQUEST | kv-list REQUEST
+kv-get-many REQUEST | kv-batch REQUEST
 KV REQUEST is one JSON object with required collection and namespace; see docs/TOOLS.md.
+kv-get-many takes collection and keys, kv-batch takes collection and operations; each key or operation names its own namespace.
 Metadata uses typed values, e.g. {"tag":{"type":"string","value":"x"}}.
 Filters use engine JSON: [{"op":"eq","field":"tag","value":{"type":"string","value":"x"}}].
 verify | backup DEST | compact DEST | upgrade DEST | rebuild | quit

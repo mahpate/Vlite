@@ -418,6 +418,321 @@ test("KV cancellation after admission never retries a mutation", async () => {
   }
 });
 
+test("KV get-many exact wire, positional nulls and an unchanged partial result", async () => {
+  await scripted(async ({ client, calls, reply }) => {
+    const first = { key: "雪 /+?%", value_base64: "AP8=", version: "18446744073709551615", expires_at_ms: "0", future: true };
+    const second = { key: "b", value_base64: "", version: "9007199254740993", expires_at_ms: "18446744073709551615" };
+    const decoded = [{ key: "雪 /+?%", value: new Uint8Array([0, 255]), version: 18446744073709551615n, expires_at_ms: 0n },
+      { key: "b", value: new Uint8Array(), version: 9007199254740993n, expires_at_ms: 18446744073709551615n }];
+    const keys = [{ namespace: "名 +", key: "雪 /+?%" }, { namespace: "n", key: "gone" }, { namespace: "n", key: "b" },
+      { namespace: "名 +", key: "雪 /+?%" }];
+    reply({ body: { items: [first, null, second, first], next_index: null } });
+    assert.deepEqual(await client.kvGetMany({ collection: "cache", keys }),
+      { items: [decoded[0], null, decoded[1], decoded[0]], next_index: null });
+    assert.equal(calls.at(-1).method, "POST");
+    assert.equal(calls.at(-1).path, "/v1/collections/cache/kv/entries/get");
+    assert.deepEqual(calls.at(-1).body, { keys: [{ namespace: "名 +", key: "雪 /+?%" }, { namespace: "n", key: "gone" },
+      { namespace: "n", key: "b" }, { namespace: "名 +", key: "雪 /+?%" }] });
+    // An absent or due key is null at its own position.
+    reply({ body: { items: [null, null], next_index: null } });
+    assert.deepEqual(await client.kvGetMany({ collection: "cache", keys: keys.slice(0, 2) }), { items: [null, null], next_index: null });
+    // A partial result is returned as sent: next_index is not followed, so the call is one request.
+    const before = calls.length;
+    reply({ body: { items: [first, null], next_index: 2 } });
+    assert.deepEqual(await client.kvGetMany({ collection: "cache", keys: keys.slice(0, 3) }), { items: [decoded[0], null], next_index: 2 });
+    assert.equal(calls.length, before + 1);
+    assert.deepEqual(calls.at(-1).body.keys, keys.slice(0, 3));
+    reply({ body: { items: [second], next_index: 1 } });
+    assert.deepEqual(await client.kvGetMany({ collection: "cache", keys: keys.slice(2) }), { items: [decoded[1]], next_index: 1 });
+    assert.equal(calls.length, before + 2);
+    reply({ body: { items: [], next_index: null } });
+    assert.deepEqual(await client.kvGetMany({ collection: "cache", keys: [] }), { items: [], next_index: null });
+    assert.deepEqual(calls.at(-1).body, { keys: [] });
+    // The widest multibyte namespace and key are 255 and 1,024 UTF-8 bytes.
+    const wide = { namespace: "é".repeat(127) + "n", key: "é".repeat(512) };
+    reply({ body: { items: [null], next_index: null } });
+    assert.deepEqual(await client.kvGetMany({ collection: "cache", keys: [wide] }), { items: [null], next_index: null });
+    assert.deepEqual(calls.at(-1).body, { keys: [wide] });
+    const widest = Array.from({ length: 1000 }, () => ({ namespace: "n".repeat(255), key: "k".repeat(1024) }));
+    reply({ body: { items: widest.map(() => null), next_index: null } });
+    assert.equal((await client.kvGetMany({ collection: "cache", keys: widest })).items.length, 1000);
+    assert.deepEqual(calls.at(-1).body, { keys: widest });
+    for (const call of calls) {
+      assert.equal(call.accept, "application/json");
+      assert.equal(call.contentType, "application/json");
+    }
+  });
+});
+
+test("KV batch exact wire, Expected forms, base64 values and typed results", async () => {
+  await scripted(async ({ client, calls, reply }) => {
+    const operations = [
+      { op: "put", namespace: "名 +", key: "雪 /+?%", value: new Uint8Array([0, 255]), expected: "absent" },
+      { op: "put", namespace: "n", key: "empty", value: new Uint8Array() },
+      { op: "put", namespace: "n", key: "rev", value: new TextEncoder().encode("hi"), expected: { revision: 9007199254740993n } },
+      { op: "put", namespace: "n", key: "view", value: new Uint8Array([9, 1, 2, 3]).subarray(1, 3), expected: { revision: 0n } },
+      { op: "delete", namespace: "n", key: "gone" },
+      { op: "delete", namespace: "n", key: "雪 /+?%", expected: "absent" },
+      { op: "delete", namespace: "other", key: "雪 /+?%", expected: { revision: 18446744073709551615n } },
+      { op: "put", namespace: "a", key: "bc", value: new Uint8Array([1]), expected: "any" },
+      { op: "delete", namespace: "ab", key: "c" },
+      { op: "put", namespace: "a\u0000b", key: "c", value: new Uint8Array([2]) },
+      { op: "put", namespace: "a", key: "b\u0000c", value: new Uint8Array([3]) },
+    ];
+    const snapshot = structuredClone(operations);
+    reply({ body: { results: [{ version: "9007199254740993" }, { version: "9007199254740993", future: true }, { version: "9007199254740993" },
+      { version: "9007199254740993" }, { deleted: true }, { deleted: false }, { deleted: true }, { version: "9007199254740993" },
+      { deleted: false }, { version: "9007199254740993" }, { version: "9007199254740993" }] } });
+    assert.deepEqual(await client.kvBatch({ collection: "cache", operations }), [{ version: 9007199254740993n }, { version: 9007199254740993n },
+      { version: 9007199254740993n }, { version: 9007199254740993n }, { deleted: true }, { deleted: false }, { deleted: true },
+      { version: 9007199254740993n }, { deleted: false }, { version: 9007199254740993n }, { version: 9007199254740993n }]);
+    assert.equal(calls.at(-1).method, "POST");
+    assert.equal(calls.at(-1).path, "/v1/collections/cache/kv/batch");
+    assert.deepEqual(calls.at(-1).body, { operations: [
+      { op: "put", namespace: "名 +", key: "雪 /+?%", value_base64: "AP8=", expected: "absent" },
+      { op: "put", namespace: "n", key: "empty", value_base64: "", expected: "any" },
+      { op: "put", namespace: "n", key: "rev", value_base64: "aGk=", expected: { revision: "9007199254740993" } },
+      { op: "put", namespace: "n", key: "view", value_base64: "AQI=", expected: { revision: "0" } },
+      { op: "delete", namespace: "n", key: "gone", expected: "any" },
+      { op: "delete", namespace: "n", key: "雪 /+?%", expected: "absent" },
+      { op: "delete", namespace: "other", key: "雪 /+?%", expected: { revision: "18446744073709551615" } },
+      { op: "put", namespace: "a", key: "bc", value_base64: "AQ==", expected: "any" },
+      { op: "delete", namespace: "ab", key: "c", expected: "any" },
+      { op: "put", namespace: "a\u0000b", key: "c", value_base64: "Ag==", expected: "any" },
+      { op: "put", namespace: "a", key: "b\u0000c", value_base64: "Aw==", expected: "any" },
+    ] });
+    assert.equal(JSON.stringify(calls.at(-1).body).includes("expires_at_ms"), false);
+    assert.deepEqual(operations, snapshot);
+    reply({ body: { results: [] } });
+    assert.deepEqual(await client.kvBatch({ collection: "cache", operations: [] }), []);
+    assert.deepEqual(calls.at(-1).body, { operations: [] });
+    // A Buffer is a Uint8Array and only its own bytes are sent.
+    reply({ body: { results: [{ version: "5" }] } });
+    assert.deepEqual(await client.kvBatch({ collection: "cache", operations: [{ op: "put", namespace: "n", key: "k", value: Buffer.from("hi") }] }),
+      [{ version: 5n }]);
+    assert.deepEqual(calls.at(-1).body, { operations: [{ op: "put", namespace: "n", key: "k", value_base64: "aGk=", expected: "any" }] });
+    const wide = { namespace: "é".repeat(127) + "n", key: "é".repeat(512) };
+    reply({ body: { results: [{ deleted: true }] } });
+    assert.deepEqual(await client.kvBatch({ collection: "cache", operations: [{ op: "delete", ...wide }] }), [{ deleted: true }]);
+    assert.deepEqual(calls.at(-1).body, { operations: [{ op: "delete", ...wide, expected: "any" }] });
+    // The edge of every bound is accepted: 1,000 operations and the largest value and batch.
+    const many = Array.from({ length: 1000 }, (_, index) => ({ op: "delete", namespace: "n", key: `k${index}` }));
+    reply({ body: { results: many.map(() => ({ deleted: false })) } });
+    assert.equal((await client.kvBatch({ collection: "cache", operations: many })).length, 1000);
+    assert.equal(calls.at(-1).body.operations.length, 1000);
+    const sizes = [1047290, 1047290, 1047290, 1047290, 5144];
+    const heavy = sizes.map((size, index) => ({ op: "put", namespace: "n", key: `v${index}`, value: new Uint8Array(size).fill(index) }));
+    reply({ body: { results: heavy.map(() => ({ version: "43" })) } });
+    assert.deepEqual(await client.kvBatch({ collection: "cache", operations: heavy }), heavy.map(() => ({ version: 43n })));
+    assert.deepEqual(calls.at(-1).body.operations.map((operation) => operation.value_base64),
+      heavy.map((operation) => Buffer.from(operation.value).toString("base64")));
+    for (const call of calls) {
+      assert.equal(call.accept, "application/json");
+      assert.equal(call.contentType, "application/json");
+    }
+  });
+});
+
+test("KV batch and get-many stable errors and exact unsupported route mapping without retries", async () => {
+  await scripted(async ({ client, calls, reply }) => {
+    const routes = [["/v1/collections/cache/kv/entries/get", () => client.kvGetMany({ collection: "cache", keys: [{ namespace: "n", key: "k" }] })],
+      ["/v1/collections/cache/kv/batch", () => client.kvBatch({ collection: "cache",
+        operations: [{ op: "put", namespace: "n", key: "k", value: new Uint8Array(), expected: "absent" }] })]];
+    for (const [status, code] of [[404, "not_found"], [412, "precondition_failed"], [409, "kv_slots_exhausted"], [409, "not_kv_collection"],
+      [409, "upgrade_required"], [409, "graph_attached_record"], [422, "invalid_input"], [422, "invalid_json"], [404, "collection_not_found"],
+      [403, "read_only"], [403, "forbidden_scope"], [429, "rate_limited"], [429, "quota_exceeded"], [503, "commit_indeterminate"],
+      [409, "not_found"]]) {
+      for (const [path, call] of routes) {
+        const before = calls.length;
+        reply({ ...err(status, code), headers: { "X-Request-ID": "kv-error" } });
+        await assert.rejects(async () => call(), (e) => status === 404 && code === "not_found" ? e instanceof UnsupportedError
+          : e instanceof VLiteError && e.status === status && e.code === code && e.requestId === "kv-error");
+        // One request only: no retry and no fallback to the single-key routes.
+        assert.equal(calls.length, before + 1);
+        assert.equal(calls.at(-1).path, path);
+      }
+    }
+  });
+});
+
+test("KV batch and get-many validate every input before sending anything", async () => {
+  await scripted(async ({ client, calls }) => {
+    const put = (patch = {}) => ({ op: "put", namespace: "n", key: "k", value: new Uint8Array(1), ...patch });
+    const del = (patch = {}) => ({ op: "delete", namespace: "n", key: "k", ...patch });
+    const large = (size, index) => put({ key: `v${index}`, value: new Uint8Array(size) });
+    const batches = [
+      undefined, null, {}, "put", new Set([put()]), { length: 1, 0: put() },
+      Array.from({ length: 1001 }, (_, index) => del({ key: `k${index}` })),
+      [put(), put()], [put(), del()], [del(), put()], [del(), del({ expected: "absent" })],
+      [put({ key: "a" }), put({ key: "b" }), put({ key: "a" })], [put({ namespace: "名", key: "雪" }), put({ namespace: "名", key: "雪" })],
+      [put({ value: new Uint8Array(1047291) })],
+      [0, 1, 2, 3].map((index) => large(1047290, index)).concat(large(5145, 4)),
+      [put({ op: "upsert" })], [put({ op: "PUT" })], [put({ op: undefined })], [put({ op: 1 })], [put({ op: null })],
+      [del({ op: "remove" })], [del({ op: "DELETE" })], [del({ op: undefined })], [del({ op: ["delete"] })], [del({ op: null })],
+      [{ namespace: "n", key: "k", value: new Uint8Array(1) }], [{ namespace: "n", key: "k" }], [{ namespace: "n", key: "k", expected: "any" }],
+      [put({ expiresAtMs: 1n })], [put({ expiresAtMs: null })], [put({ expires_at_ms: "1" })], [put({ expires_at_ms: null })],
+      [del({ expiresAtMs: 1n })], [del({ expires_at_ms: "1" })], [put({ foo: 1 })], [put({ ifMatch: '"x"' })],
+      [del({ value: new Uint8Array() })], [put({ signal: new AbortController().signal })],
+      [put({ expected: { revision: 1 } })], [del({ expected: { revision: 1 } })], [put({ expected: { revision: "1" } })],
+      [del({ expected: { revision: -1n } })], [put({ expected: { revision: 2n ** 64n } })], [put({ expected: { revision: undefined } })],
+      [del({ expected: {} })], [put({ expected: null })], [del({ expected: "wrong" })], [put({ expected: 1 })],
+      [del({ expected: { revision: 1n, extra: true } })],
+      [put({ namespace: "" })], [put({ namespace: "é".repeat(128) })], [put({ namespace: 1 })], [put({ namespace: undefined })],
+      [put({ namespace: "\ud800" })], [put({ key: "" })], [put({ key: "é".repeat(513) })], [del({ key: null })], [del({ key: undefined })],
+      [put({ key: "\udc00" })], [put({ namespace: "n".repeat(256) })], [del({ key: "k".repeat(1025) })],
+      [put({ value: "not bytes" })], [put({ value: [1, 2] })], [put({ value: new ArrayBuffer(1) })], [put({ value: new Uint16Array(1) })],
+      [put({ value: null })], [put({ value: undefined })],
+      [null], [[]], ["put"], [1], [undefined], [put({ key: "a" }), , put({ key: "b" })],
+    ];
+    for (const operations of batches) {
+      await assert.rejects(async () => client.kvBatch({ collection: "cache", operations }), TypeError);
+    }
+    const key = (patch = {}) => ({ namespace: "n", key: "k", ...patch });
+    const lists = [
+      undefined, null, {}, "k", new Set([key()]), { length: 1, 0: key() }, Array.from({ length: 1001 }, () => key()),
+      [null], [[]], ["k"], [1], [undefined], [{}], [{ namespace: "n" }], [{ key: "k" }],
+      [key({ namespace: "" })], [key({ key: "" })], [key({ namespace: "é".repeat(128) })], [key({ key: "é".repeat(513) })],
+      [key({ namespace: "\ud800" })], [key({ key: "\udc00" })], [key({ namespace: 1 })], [key({ key: null })],
+      [key({ namespace: "n".repeat(256) })], [key({ key: "k".repeat(1025) })],
+      [key({ expected: "any" })], [key({ collection: "cache" })], [key(), , key()],
+    ];
+    for (const keys of lists) {
+      await assert.rejects(async () => client.kvGetMany({ collection: "cache", keys }), TypeError);
+    }
+    for (const collection of [undefined, "", "Cache", "a/b", 1]) {
+      await assert.rejects(async () => client.kvBatch({ collection, operations: [put()] }), TypeError);
+      await assert.rejects(async () => client.kvGetMany({ collection, keys: [key()] }), TypeError);
+    }
+    assert.equal(calls.length, 0);
+  });
+});
+
+test("KV batch and get-many treat an undefined member as absent and refuse a null one", async () => {
+  await scripted(async ({ client, calls, reply }) => {
+    reply({ body: { results: [{ version: "1" }, { deleted: true }] } }, { body: { items: [null], next_index: null } });
+    await client.kvBatch({ collection: "cache", operations: [{ op: "put", namespace: "n", key: "a", value: new Uint8Array(),
+      expected: undefined, expiresAtMs: undefined }, { op: "delete", namespace: "n", key: "b", expected: undefined, value: undefined }] });
+    assert.deepEqual(calls.at(-1).body, { operations: [{ op: "put", namespace: "n", key: "a", value_base64: "", expected: "any" },
+      { op: "delete", namespace: "n", key: "b", expected: "any" }] });
+    await client.kvGetMany({ collection: "cache", keys: [{ namespace: "n", key: "a", expected: undefined }] });
+    assert.deepEqual(calls.at(-1).body, { keys: [{ namespace: "n", key: "a" }] });
+    const before = calls.length;
+    await assert.rejects(async () => client.kvBatch({ collection: "cache", operations: [{ op: "put", namespace: "n", key: "a",
+      value: new Uint8Array(), expiresAtMs: null }] }), TypeError);
+    await assert.rejects(async () => client.kvBatch({ collection: "cache", operations: [{ op: "delete", namespace: "n", key: "a",
+      expected: undefined, value: null }] }), TypeError);
+    await assert.rejects(async () => client.kvGetMany({ collection: "cache", keys: [{ namespace: "n", key: "a", expected: null }] }), TypeError);
+    assert.equal(calls.length, before);
+  });
+});
+
+test("KV batch and get-many malformed responses are invalid-response errors", async () => {
+  await scripted(async ({ client, calls, reply }) => {
+    const operations = [{ op: "put", namespace: "n", key: "a", value: new Uint8Array(1) }, { op: "delete", namespace: "n", key: "b" }];
+    const keys = [1, 2, 3].map((index) => ({ namespace: "n", key: `k${index}` }));
+    const results = [
+      [], [{ version: "1" }], [{ version: "1" }, { deleted: true }, { deleted: true }],
+      [{ deleted: true }, { deleted: true }], [{ version: "1" }, { version: "1" }], [{ deleted: true }, { version: "1" }],
+      [{ version: "1", deleted: true }, { deleted: true }], [{ version: "1" }, { version: "1", deleted: false }],
+      [{ version: "0" }, { deleted: true }],
+      ...["01", 1, "18446744073709551616", "-1", "", null, undefined].map((version) => [{ version }, { deleted: true }]),
+      ...[1, 0, "true", null, undefined].map((deleted) => [{ version: "1" }, { deleted }]),
+      [null, { deleted: true }], [1, { deleted: true }], [[], { deleted: true }], ["x", { deleted: true }],
+    ];
+    const bodies = [...results.map((value) => ({ results: value })), { results: {} }, { results: null }, {}, null, [], "x", 1];
+    for (const body of [...bodies, undefined]) {
+      const before = calls.length;
+      reply(body === undefined ? { status: 204 } : { body });
+      await assert.rejects(async () => client.kvBatch({ collection: "cache", operations }), (e) => e instanceof TransportError);
+      assert.equal(calls.length, before + 1);
+    }
+    const entry = { key: "k1", value_base64: "AA==", version: "1", expires_at_ms: null };
+    const entries = [{ value_base64: "/x==" }, { value_base64: "/w" }, { value_base64: "_w==" }, { value_base64: " /w==" },
+      { value_base64: 1 }, { value_base64: undefined }, { version: "0" }, { version: 1 }, { version: "01" },
+      { version: "18446744073709551616" }, { version: undefined }, { expires_at_ms: undefined }, { expires_at_ms: 0 },
+      { expires_at_ms: "01" }, { key: "" }, { key: 1 }].map((patch) => ({ items: [{ ...entry, ...patch }, null, null], next_index: null }));
+    const pages = [
+      { items: [null, null, null, null], next_index: null }, { items: [null, null, null, null], next_index: 4 },
+      { items: [null, null], next_index: 1 }, { items: [null, null], next_index: 3 }, { items: [null, null], next_index: 4 },
+      { items: [null, null], next_index: 0 }, { items: [null, null], next_index: -1 }, { items: [null, null], next_index: 1.5 },
+      { items: [null, null], next_index: "2" }, { items: [null, null], next_index: true }, { items: [null, null] },
+      { items: [], next_index: 0 }, { items: [null, null], next_index: null }, { items: [], next_index: null },
+      { items: [null, null, null], next_index: 3 }, { items: {}, next_index: null }, { items: null, next_index: null }, { next_index: null },
+      { items: [1, null, null], next_index: null }, { items: ["x", null, null], next_index: null },
+      { items: [[], null, null], next_index: null }, { items: [true, null, null], next_index: null },
+      ...entries, null, [], "x", 1, undefined,
+    ];
+    for (const body of pages) {
+      const before = calls.length;
+      reply(body === undefined ? { status: 204 } : { body });
+      await assert.rejects(async () => client.kvGetMany({ collection: "cache", keys }), (e) => e instanceof TransportError);
+      assert.equal(calls.length, before + 1);
+    }
+    // The same entry in a well-formed page decodes, so only the patched members above were at fault.
+    reply({ body: { items: [entry, null, null], next_index: null } });
+    assert.equal((await client.kvGetMany({ collection: "cache", keys })).items[0].version, 1n);
+  });
+});
+
+test("KV batch and get-many honor the caller signal and never retry", async () => {
+  let current;
+  let calls = 0;
+  const server = createServer(async (req, res) => {
+    for await (const _ of req);
+    calls++;
+    current.abort();
+    res.end("{}");
+  });
+  await new Promise((resolve) => server.listen(0, "127.0.0.1", resolve));
+  try {
+    const client = new Client(`http://127.0.0.1:${server.address().port}`, token);
+    for (const call of [(signal) => client.kvBatch({ collection: "cache", operations: [{ op: "delete", namespace: "n", key: "k" }], signal }),
+      (signal) => client.kvGetMany({ collection: "cache", keys: [{ namespace: "n", key: "k" }], signal })]) {
+      current = new AbortController();
+      const before = calls;
+      await assert.rejects(async () => call(current.signal), TransportError);
+      assert.equal(calls, before + 1);
+      // An already aborted signal sends nothing.
+      await assert.rejects(async () => call(current.signal), TransportError);
+      assert.equal(calls, before + 1);
+    }
+  } finally {
+    server.closeAllConnections();
+    await new Promise((resolve) => server.close(resolve));
+  }
+});
+
+test("KV batch and get-many time out with a caller signal and never retry", async (t) => {
+  let timeout;
+  let calls = 0;
+  const server = createServer(async (req, res) => {
+    for await (const _ of req);
+    calls++;
+    timeout.abort(new DOMException("Timed out", "TimeoutError"));
+    res.end("{}");
+  });
+  await new Promise((resolve) => server.listen(0, "127.0.0.1", resolve));
+  t.mock.method(AbortSignal, "timeout", (milliseconds) => {
+    assert.equal(milliseconds, 100);
+    return timeout.signal;
+  });
+  try {
+    const client = new Client(`http://127.0.0.1:${server.address().port}`, token, { timeoutMs: 100 });
+    const caller = new AbortController();
+    for (const call of [() => client.kvBatch({ collection: "cache", operations: [{ op: "delete", namespace: "n", key: "k" }], signal: caller.signal }),
+      () => client.kvGetMany({ collection: "cache", keys: [{ namespace: "n", key: "k" }], signal: caller.signal })]) {
+      timeout = new AbortController();
+      const before = calls;
+      await assert.rejects(call, TransportError);
+      assert.equal(calls, before + 1);
+    }
+    assert.equal(caller.signal.aborted, false);
+  } finally {
+    server.closeAllConnections();
+    await new Promise((resolve) => server.close(resolve));
+  }
+});
+
 test("collection-scoped routes and legacy defaults", async () => {
   await scripted(async ({ client, calls, reply }) => {
     const docs = client.collection("docs");

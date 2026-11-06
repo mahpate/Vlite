@@ -693,6 +693,9 @@ const SEED_NAMED: &str =
 const NAMED: &str = r#"{"dense":{"v":[{"version":"v1","vector":[0,1]}]},"sparse":{"s":[[1,1]]}}"#;
 /// Key-value writes only succeed on a collection of one dimension (`kvstore`).
 const KV_PUT: &str = r#"{"namespace":"n","key":"k","value_base64":"UFJPQkU="}"#;
+const KV_BATCH: &str =
+    r#"{"operations":[{"op":"put","namespace":"n","key":"k","value_base64":"UFJPQkU="}]}"#;
+const KV_GET_MANY: &str = r#"{"keys":[{"namespace":"n","key":"k"}]}"#;
 
 /// Deletions run last, in table order, so every other row still has its
 /// resource to act on.
@@ -769,6 +772,8 @@ const ROWS: &[Row] = &[
     row("GET", "/v1/collections/$c/kv/entry?namespace=n&key=k", ""),
     row("PUT", "/v1/collections/$c/kv/entry", KV_PUT),
     row("GET", "/v1/collections/$c/kv/entries?namespace=n", ""),
+    row("POST", "/v1/collections/$c/kv/entries/get", KV_GET_MANY),
+    row("POST", "/v1/collections/$c/kv/batch", KV_BATCH),
     row("GET", "/v1/collections/$c/index/hnsw", ""),
     row("POST", "/v1/collections/$c/index/hnsw", "{}"),
     row("GET", "/v1/collections/$c/index/hnsw/maintenance", ""),

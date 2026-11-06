@@ -200,18 +200,63 @@ test generates its stubs from the same proto. No generated stubs are checked in.
 
 ## Key-value entries
 
-`vlite.v1.Kv` provides `GetKvEntry`, `PutKvEntry`, `DeleteKvEntry` and
-`ListKvEntries`. The four ordinary KV RPCs join 35 `VLite` RPCs (39 total);
-there are no lease RPCs. Addresses require a nonempty collection name.
-Values are raw bytes, versions/deadlines are `uint64`, and optional expiry
-distinguishes an unset deadline from zero. Get/list require collection `read`;
-put/delete require collection `write`. Validation, CAS, tenant bindings,
+`vlite.v1.Kv` provides `GetKvEntry`, `PutKvEntry`, `DeleteKvEntry`,
+`ListKvEntries`, `GetKvEntries` and `WriteKvBatch`. The six ordinary KV RPCs
+join 35 `VLite` RPCs (41 total); there are no lease RPCs. Addresses require a
+nonempty collection name. Values are raw bytes, versions/deadlines are
+`uint64`, and optional expiry distinguishes an unset deadline from zero. Get,
+list and `GetKvEntries` require collection `read`; put, delete and
+`WriteKvBatch` require collection `write`. Validation, CAS, tenant bindings,
 quotas, audit, durability and pagination match [the REST KV rules](API.md#key-value-entries).
 The list page boundary is measured using the canonical REST JSON encoding,
 including base64 values, not the smaller protobuf encoding.
 A client needs a receive limit of at least 16 MiB + 1 KiB for `ListKvEntries`
-(the canonical JSON page cap is 16,777,216 bytes; the protobuf page is not larger)
-and a send limit above 1 MiB.
+and `GetKvEntries` (the canonical JSON page cap is 16,777,216 bytes; the
+protobuf page is not larger) and a send limit above 1 MiB (above 6 MiB to send a
+full `WriteKvBatch`).
+
+`GetKvEntries(KvGetManyRequest) returns (KvGetManyResponse)` reads many keys of
+one collection, and `WriteKvBatch(KvBatchRequest) returns (KvBatchResponse)`
+writes many, all or nothing. Their messages:
+
+| Message | Fields |
+|---|---|
+| `KvKeyRef` | `namespace`, `key` |
+| `KvGetManyRequest` | `collection`, `repeated KvKeyRef keys` |
+| `KvGetManyItem` | `optional KvEntry entry` |
+| `KvGetManyResponse` | `repeated KvGetManyItem items`, `optional uint32 next_index` |
+| `KvBatchPut` | `namespace`, `key`, `bytes value`, `Expected expected` |
+| `KvBatchDelete` | `namespace`, `key`, `Expected expected` |
+| `KvBatchOperation` | a oneof: `KvBatchPut put` or `KvBatchDelete delete` |
+| `KvBatchRequest` | `collection`, `repeated KvBatchOperation operations` |
+| `KvBatchResult` | a oneof: `uint64 version` or `bool deleted` |
+| `KvBatchResponse` | `repeated KvBatchResult results` |
+
+**Multi-get.** A call names 0 to 1,000 keys, and a key may repeat. `items[i]`
+answers `keys[i]`: an unset `entry` means the key is absent or due, which is not
+an error. One read guard and one expiry clock serve the call. If the entries
+would pass 16,777,216 bytes of canonical REST JSON, the response holds the
+largest prefix of the keys that fits (the first key always fits), and
+`next_index` is the index of the first key not read, equal to the number of
+items and at least 1. It is unset when every key was read. Calls share no
+snapshot: ask again for the remaining keys.
+
+**Batch.** A call holds 0 to 1,000 operations. It behaves as the
+[REST batch](API.md#key-value-entries) does: as if the operations ran one at a
+time, in order, against the live state and one expiry clock, then committed once.
+Each `(namespace, key)` may appear once, and the values of all puts total at most
+4,194,304 bytes; either violation is `INVALID_ARGUMENT` with `invalid_input`,
+and the message names the operation. An unset `Expected` means any. An operation
+that sets neither `put` nor `delete` is `INVALID_ARGUMENT` (`invalid_input`). A
+put has no deadline field and clears the deadline of the entry it replaces.
+`results[i]` answers `operations[i]`: `version` is the same `uint64` for every
+put of the batch, and `deleted` is false for a key with no live entry. The first
+operation that cannot run fails the whole batch with the status of its single
+call and writes nothing: `ABORTED` (`precondition_failed`) or
+`FAILED_PRECONDITION` (`kv_slots_exhausted`, `graph_attached_record`).
+`UNKNOWN` (`commit_indeterminate`) means that all of the batch or none of it was
+written: read the keys back with `GetKvEntries` before you decide, and do not
+retry blindly.
 
 ## Streaming export and import
 

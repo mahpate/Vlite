@@ -319,7 +319,7 @@ name or request content. It has four forms:
 | `read_only_token` | The read-only token. Of the routes that write these events, it reaches only the four memory read routes (recall, receipt lookup, facts query, erasure get), where the handler refuses it and audits the refusal as a `memory_request`; none of the other events below shows this form. |
 | The credential ID | A scoped API key. Its 12 characters from `a-z2-7` cannot equal another form. |
 
-These events carry an `actor`: `kv_put`, `kv_delete`, `memory_request`,
+These events carry an `actor`: `kv_put`, `kv_delete`, `kv_batch`, `memory_request`,
 `collection_created`, `collection_dropped`, `collection_settings_changed`,
 `credential_denied`, and the account events `user_created`, `user_updated`,
 `user_deleted`, `user_password_reset` and `user_password_changed`. The account
@@ -350,17 +350,23 @@ error. Read both forms of a log that spans an upgrade or a rollback.
 ## Key-value permissions
 
 Collection KV GET/HEAD and list need the collection's `read` scope; PUT and
-DELETE need `write`. These scopes also apply to `vlite.v1.Kv`:
-`GetKvEntry`/`ListKvEntries` need `read`, and
-`PutKvEntry`/`DeleteKvEntry` need `write`. Graph scopes do not grant KV access.
-Read-only credentials cannot mutate. Tenant-local names and immutable
+DELETE need `write`. The multi-get route (`POST …/kv/entries/get`) needs `read`,
+and the batch route (`POST …/kv/batch`) needs `write`. These scopes also apply
+to `vlite.v1.Kv`: `GetKvEntry`/`ListKvEntries`/`GetKvEntries` need `read`, and
+`PutKvEntry`/`DeleteKvEntry`/`WriteKvBatch` need `write`. Graph scopes grant
+none of them. Read-only credentials cannot mutate: the read-only token may call
+multi-get but not batch. Tenant-local names and immutable
 lineage/collection bindings are checked before collection lookup;
 a binding for a dropped collection does not authorize its replacement.
 KV never implicitly creates a collection and shares ordinary record quotas.
 Mutation audit entries contain operation, principal, [actor](#audit-actors),
 collection, request ID, outcome and, for a put, its expiry deadline, never
 namespace, key or value. A failed request records the collection as `(invalid)`
-and still records the actor.
+and still records the actor. A batch writes one `kv_batch` event, not one per
+operation: it records the request ID, principal, actor, collection, outcome and
+duration (`duration_ns`) like the other key-value events, plus the counts `puts`
+and `deletes`. It has no expiry deadline and never records a namespace, key or
+value.
 
 A namespace is an application partition **inside** an authorized collection,
 not an authorization boundary. Put sensitive KV data in dedicated collections
@@ -368,13 +374,15 @@ and bind credentials narrowly: vector, graph-attachment and import permissions
 can also expose, overwrite, delete or expire ordinary KV records. A principal
 that can write the collection can also fill a key's 16 record IDs with ordinary
 records, so that puts for that key fail with `kv_slots_exhausted` (409 on REST,
-`FAILED_PRECONDITION` on gRPC). Use dedicated collections for key-value data,
+`FAILED_PRECONDITION` on gRPC), and a batch that holds such a put fails as a
+whole. Use dedicated collections for key-value data,
 grant `write` on them only to principals you trust with their keys, and watch
 `kv_slots_exhausted_total`: it counts each REST or gRPC request answered this
-way, across all credentials (a REST request whose client disconnected before the
-answer was produced is not counted, as with every REST counter; a gRPC call is
-counted even if its client cancels), and a rise nobody
-expects points at records planted over a key's IDs. The failed `kv_put` audit event names the caller
+way, across all credentials (a refused batch counts once; a REST request whose
+client disconnected before the answer was produced is not counted, as with
+every REST counter; a gRPC call is counted even if its client cancels), and a
+rise nobody expects points at records planted over a key's IDs. The failed
+`kv_put` or `kv_batch` audit event names the caller
 (`actor`) and the request ID, not the collection, and global metrics are
 unavailable while memory bindings are configured (see above). A list call
 scans the whole collection, so its cost grows with the number of entries rather

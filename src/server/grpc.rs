@@ -2628,6 +2628,8 @@ fn request_collection<T: 'static>(request: &T) -> String {
     field!(proto::ReserveImportRequest, collection);
     field!(proto::ExportVectorsRequest, collection);
     field!(proto::KvListRequest, collection);
+    field!(proto::KvGetManyRequest, collection);
+    field!(proto::KvBatchRequest, collection);
     macro_rules! address {
         ($type:ty) => {
             if let Some(r) = request.downcast_ref::<$type>() {

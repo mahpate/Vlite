@@ -905,6 +905,16 @@ async fn reserved_resource_routes_deny_before_resource_lookup_across_families() 
             "",
         ),
         (
+            "POST",
+            "/v1/collections/notes_ev/kv/entries/get",
+            r#"{"keys":[{"namespace":"n","key":"k"}]}"#,
+        ),
+        (
+            "POST",
+            "/v1/collections/notes_ev/kv/batch",
+            r#"{"operations":[{"op":"put","namespace":"n","key":"k","value_base64":"AQ=="},{"op":"delete","namespace":"n","key":"missing"}]}"#,
+        ),
+        (
             "PATCH",
             "/v1/collections/notes_ev/vectors/7/metadata",
             r#"{"metadata":{}}"#,

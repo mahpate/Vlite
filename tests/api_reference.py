@@ -470,7 +470,7 @@ def mcp_keys(root: Path) -> set[str]:
 
 def cli_keys(root: Path) -> set[str]:
     kv = (root / "src/bin/tool_support/kv_mcp.rs").read_text(encoding="utf-8")
-    keys = {f"cli:vlite-shell/{name}" for name in re.findall(r'"(kv-[a-z]+)" => Some\(', kv)}
+    keys = {f"cli:vlite-shell/{name}" for name in re.findall(r'"(kv-[a-z-]+)" => Some\(', kv)}
     memory = (root / "src/bin/vlite-memory-cli.rs").read_text(encoding="utf-8")
     routes = re.search(r"const ROUTES:.*?= &\[(.*?)\];", memory, re.S)
     if not routes:

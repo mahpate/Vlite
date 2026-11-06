@@ -16,7 +16,7 @@ MUTANTS = [
         ('bounded(namespace, "namespace", 1, 255)?;', 'bounded(namespace, "namespace", 1, 254)?;'),
     ], "kv_tools", "bounds_and_tool_listing"),
     ("writable-call-gate-dropped", KV, [
-        ("if read_only && matches!(name, PUT | DELETE) {", "if false && read_only && matches!(name, PUT | DELETE) {"),
+        ("if read_only && matches!(name, PUT | DELETE | BATCH) {", "if false && read_only && matches!(name, PUT | DELETE | BATCH) {"),
     ], "kv_tools", "contract_goldens_mcp_and_shell"),
     ("writable-list-gate-dropped", KV, [
         ("if read_only && write {", "if false && read_only && write {"),

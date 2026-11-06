@@ -470,6 +470,46 @@ const APPROVED_OPENAPI_ADDITIONS: &[&str] = &[
         "\n"
     ),
     concat!(
+        r##"    "/v1/collections/{collection}/kv/batch":{"parameters":[{"name":"collection","in":"path","required":true,"schema":{"type":"string"}}],"post":{"operationId":"KvBatch","summary":"Apply puts and deletes of one collection atomically","description":"Uses an existing one-dimension collection; never creates it. Tenant and immutable collection bindings apply before lookup. Namespaces are application partitions, not authorization boundaries. All successes are HTTP 200. Unlisted methods return 405; unknown routes return 404. Requires collection write scope. At most 1000 operations whose decoded put values total at most 4194304 bytes; no two operations name the same namespace and key; an empty batch is a successful no-op. The operations behave as if they ran one at a time, in order, on one clock, and commit as one engine frame: all or none, and a reader sees the state before the batch or the state after it. A put has no expires_at_ms and clears the deadline of the entry it replaces; every put of one batch returns the same version. The request is checked as a whole first (422); then the first operation that cannot run fails the batch and nothing is written: precondition_failed (412, naming no operation) or kv_slots_exhausted (409). The live-record quota is checked once over all slot changes. Follows the configured durability: full syncs, periodic can lose one flush interval, none is memory-only. A commit_indeterminate outcome proves nothing: read the keys back with the get-many route before any retry. A server older than this route answers 404 not_found.","responses":{"200":{"description":"Operation result","content":{"application/json":{"schema":{"$ref":"#/components/schemas/KvBatchResponse"}}}},"400":{"description":"invalid_query for unknown, duplicate or malformed query parameters; invalid_json for malformed JSON.","content":{"application/json":{"schema":{"$ref":"#/components/schemas/Error"}}}},"401":{"$ref":"#/components/responses/Unauthorized"},"403":{"description":"read_only or forbidden_scope: operation, tenant or collection binding refused before lookup.","content":{"application/json":{"schema":{"$ref":"#/components/schemas/Error"}}}},"404":{"description":"collection_not_found for an authorized missing collection.","content":{"application/json":{"schema":{"$ref":"#/components/schemas/Error"}}}},"409":{"description":"not_kv_collection for dimensions other than one; kv_slots_exhausted for 16 occupied probe slots; graph_attached_record for a delete of a record attached to a graph node; upgrade_required for a file that predates batches.","content":{"application/json":{"schema":{"$ref":"#/components/schemas/Error"}}}},"412":{"description":"precondition_failed: an expected live version or absence does not match; nothing was written.","content":{"application/json":{"schema":{"$ref":"#/components/schemas/Error"}}}},"413":{"$ref":"#/components/responses/TooLarge"},"415":{"$ref":"#/components/responses/MediaType"},"422":{"description":"invalid_json for unknown/duplicate JSON fields or wrong types; invalid_input for canonical decimal/base64 or byte bounds, more than 1000 operations, more than 4194304 value bytes, or a repeated namespace and key; the message names the operation.","content":{"application/json":{"schema":{"$ref":"#/components/schemas/Error"}}}},"429":{"description":"rate_limited or quota_exceeded; quotas share ordinary record accounting, including physically retained expired records.","content":{"application/json":{"schema":{"$ref":"#/components/schemas/Error"}}},"headers":{"Retry-After":{"description":"Conservative retry delay in seconds (1).","schema":{"type":"integer"}}}},"503":{"$ref":"#/components/responses/Unavailable"}},"requestBody":{"required":true,"content":{"application/json":{"schema":{"$ref":"#/components/schemas/KvBatchRequest"}}}}}},"##,
+        "\n"
+    ),
+    concat!(
+        r##"    "/v1/collections/{collection}/kv/entries/get":{"parameters":[{"name":"collection","in":"path","required":true,"schema":{"type":"string"}}],"post":{"operationId":"KvGetMany","summary":"Read up to 1000 named entries in one call","description":"Uses an existing one-dimension collection; never creates it. Tenant and immutable collection bindings apply before lookup. Namespaces are application partitions, not authorization boundaries. All successes are HTTP 200. Unlisted methods return 405; unknown routes return 404. Requires collection read scope; a read-only credential may use this POST. 0 to 1000 keys, repeats allowed. items has one element for each of the first len(items) keys, in order: the entry, or null for a key that is absent or due. The canonical compact JSON body never exceeds 16777216 bytes: the longest prefix of the keys that fits is returned and next_index is the index of the first key not read (at least 1, equal to len(items)); it is null when every key was read. One owner guard and expiry clock serve a call; there is no snapshot across calls. A server older than this route answers 404 not_found.","responses":{"200":{"description":"Operation result","content":{"application/json":{"schema":{"$ref":"#/components/schemas/KvGetManyResponse"}}}},"400":{"description":"invalid_query for unknown, duplicate or malformed query parameters; invalid_json for malformed JSON.","content":{"application/json":{"schema":{"$ref":"#/components/schemas/Error"}}}},"401":{"$ref":"#/components/responses/Unauthorized"},"403":{"description":"read_only or forbidden_scope: operation, tenant or collection binding refused before lookup.","content":{"application/json":{"schema":{"$ref":"#/components/schemas/Error"}}}},"404":{"description":"collection_not_found for an authorized missing collection.","content":{"application/json":{"schema":{"$ref":"#/components/schemas/Error"}}}},"409":{"description":"not_kv_collection for dimensions other than one.","content":{"application/json":{"schema":{"$ref":"#/components/schemas/Error"}}}},"413":{"$ref":"#/components/responses/TooLarge"},"415":{"$ref":"#/components/responses/MediaType"},"422":{"description":"invalid_json for unknown/duplicate JSON fields or wrong types; invalid_input for byte bounds or more than 1000 keys; the message names the key.","content":{"application/json":{"schema":{"$ref":"#/components/schemas/Error"}}}},"429":{"description":"rate_limited or quota_exceeded; quotas share ordinary record accounting, including physically retained expired records.","content":{"application/json":{"schema":{"$ref":"#/components/schemas/Error"}}},"headers":{"Retry-After":{"description":"Conservative retry delay in seconds (1).","schema":{"type":"integer"}}}},"503":{"$ref":"#/components/responses/Unavailable"}},"requestBody":{"required":true,"content":{"application/json":{"schema":{"$ref":"#/components/schemas/KvGetManyRequest"}}}}}},"##,
+        "\n"
+    ),
+    concat!(
+        r##"      "KvKeyRef":{"type":"object","additionalProperties":false,"required":["namespace","key"],"properties":{"namespace":{"$ref":"#/components/schemas/KvNamespace"},"key":{"$ref":"#/components/schemas/KvKey"}}},"##,
+        "\n"
+    ),
+    concat!(
+        r##"      "KvGetManyRequest":{"type":"object","additionalProperties":false,"required":["keys"],"properties":{"keys":{"type":"array","maxItems":1000,"items":{"$ref":"#/components/schemas/KvKeyRef"}}}},"##,
+        "\n"
+    ),
+    concat!(
+        r##"      "KvGetManyResponse":{"type":"object","additionalProperties":false,"required":["items","next_index"],"properties":{"items":{"type":"array","maxItems":1000,"items":{"anyOf":[{"$ref":"#/components/schemas/KvEntry"},{"type":"null"}]}},"next_index":{"type":["integer","null"],"minimum":1,"maximum":999,"description":"null when every key was read; otherwise the index of the first key not read, equal to the number of items."}}},"##,
+        "\n"
+    ),
+    concat!(
+        r##"      "KvBatchPut":{"type":"object","additionalProperties":false,"required":["op","namespace","key","value_base64"],"properties":{"op":{"const":"put"},"namespace":{"$ref":"#/components/schemas/KvNamespace"},"key":{"$ref":"#/components/schemas/KvKey"},"value_base64":{"$ref":"#/components/schemas/KvValue"},"expected":{"$ref":"#/components/schemas/KvExpected"}}},"##,
+        "\n"
+    ),
+    concat!(
+        r##"      "KvBatchDelete":{"type":"object","additionalProperties":false,"required":["op","namespace","key"],"properties":{"op":{"const":"delete"},"namespace":{"$ref":"#/components/schemas/KvNamespace"},"key":{"$ref":"#/components/schemas/KvKey"},"expected":{"$ref":"#/components/schemas/KvExpected"}}},"##,
+        "\n"
+    ),
+    concat!(
+        r##"      "KvBatchRequest":{"type":"object","additionalProperties":false,"required":["operations"],"properties":{"operations":{"type":"array","maxItems":1000,"items":{"oneOf":[{"$ref":"#/components/schemas/KvBatchPut"},{"$ref":"#/components/schemas/KvBatchDelete"}]}}}},"##,
+        "\n"
+    ),
+    concat!(
+        r##"      "KvBatchPutResult":{"type":"object","additionalProperties":false,"required":["version"],"properties":{"version":{"$ref":"#/components/schemas/KvDecimal"}}},"##,
+        "\n"
+    ),
+    concat!(
+        r##"      "KvBatchResponse":{"type":"object","additionalProperties":false,"required":["results"],"properties":{"results":{"type":"array","maxItems":1000,"description":"One result for each operation, in order: a put gives its version, the same for every put of the batch; a delete gives whether a live entry was deleted.","items":{"oneOf":[{"$ref":"#/components/schemas/KvBatchPutResult"},{"$ref":"#/components/schemas/KvDeleteResult"}]}}}},"##,
+        "\n"
+    ),
+    concat!(
         r##"      "ProviderAlias": {"type":"string","minLength":1,"maxLength":256,"pattern":"^[A-Za-z0-9._-]{1,256}$","description":"Validated provider alias syntax. hashing and legacy http remain accepted; other aliases must be configured and allowlisted by an administrator."},"##,
         "\n"
     ),
@@ -826,7 +866,9 @@ async fn reg008_served_openapi_matches_baseline_except_approved_additions() {
 
 /// Private Gap 2 K3a (owner-approved 2026-11-04): `tools/list` gains the
 /// ordinary key-value tools, `vlite_kv_get` and `vlite_kv_list` in read-only
-/// mode and all four with writes enabled. Their exact definitions are pinned
+/// mode and all four with writes enabled. F2 (owner-approved 2026-11-05) adds
+/// `vlite_kv_get_many` in both modes and `vlite_kv_batch` with writes enabled,
+/// after the original four. Their exact definitions are pinned
 /// in `tests/fixtures/kv/mcp-tool-additions.json`; every baseline tool and every other
 /// response must still match the capture.
 fn approved_mcp_additions(mode: &str) -> Vec<Value> {
@@ -862,8 +904,8 @@ fn take_mcp_additions(response: &mut Value, approved: &[Value]) -> Option<Vec<Va
 fn reg008_mcp_allowlist_accepts_only_the_exact_approved_tools() {
     let golden: Vec<Value> = serde_json::from_str(&fixture("mcp_read_only.json")).unwrap();
     let approved = approved_mcp_additions("read-only");
-    assert_eq!(approved.len(), 2);
-    assert_eq!(approved_mcp_additions("writable").len(), 4);
+    assert_eq!(approved.len(), 3);
+    assert_eq!(approved_mcp_additions("writable").len(), 6);
     let mut served = golden[1].clone();
     served["result"]["tools"]
         .as_array_mut()

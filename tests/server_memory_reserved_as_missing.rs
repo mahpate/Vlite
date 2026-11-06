@@ -270,6 +270,16 @@ const CASES: &[(&str, &str, &str)] = &[
         "",
     ),
     ("GET", "/v1/collections/$c/kv/entries?namespace=n", ""),
+    (
+        "POST",
+        "/v1/collections/$c/kv/entries/get",
+        r#"{"keys":[{"namespace":"n","key":"k"}]}"#,
+    ),
+    (
+        "POST",
+        "/v1/collections/$c/kv/batch",
+        r#"{"operations":[{"op":"put","namespace":"n","key":"k","value_base64":""}]}"#,
+    ),
     ("GET", "/v1/collections/$c/index/hnsw", ""),
     ("POST", "/v1/collections/$c/index/hnsw", "{}"),
     ("GET", "/v1/collections/$c/index/hnsw/maintenance", ""),

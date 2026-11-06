@@ -35,6 +35,56 @@ timeout may hide a committed mutation; neither triggers a retry.
 `UnsupportedError`, without fallback. Writes sync only with server
 `--durability full`.
 
+`kvGetMany` and `kvBatch` read or write several keys of one collection in one
+request. Both check their input before anything is sent, accept the optional
+`signal`, and are never retried. Continuing the script above:
+
+```javascript
+const keys = [{ namespace: "app", key: "a" }, { namespace: "app", key: "b" }];
+const { items, next_index } = await client.kvGetMany({ collection: "cache", keys });
+console.log(items, next_index); // items[i] answers keys[i]: a KvEntry, or null
+
+const results = await client.kvBatch({ collection: "cache", operations: [
+  { op: "put", namespace: "app", key: "a", value: new TextEncoder().encode("1"), expected: "absent" },
+  { op: "delete", namespace: "app", key: "b", expected: { revision: 42n } },
+] });
+console.log(results); // [{ version: 43n }, { deleted: true }]
+```
+
+`kvGetMany` takes at most 1,000 `{ namespace, key }` keys (a key may repeat)
+and returns `{ items, next_index }`. `items[i]` is the entry of `keys[i]`, or
+`null` when that key is absent or due. When the response would exceed the
+server's response cap, `items` holds only the first keys and `next_index` is
+the index of the first key not read (equal to `items.length`, at least 1);
+otherwise `next_index` is `null`. The client never continues a partial result
+for you: loop on `next_index` yourself. Calls share no snapshot.
+
+```javascript
+const found = [];
+for (let rest = keys; rest.length > 0;) {
+  const page = await client.kvGetMany({ collection: "cache", keys: rest });
+  found.push(...page.items);
+  rest = page.next_index === null ? [] : rest.slice(page.next_index);
+}
+```
+
+`kvBatch` commits every operation of one collection or none. An operation is
+`{ op: "put", namespace, key, value, expected? }` or `{ op: "delete",
+namespace, key, expected? }`, with `expected` as above (default `"any"`). At
+most 1,000 operations and 4,194,304 value bytes in total are allowed, and no
+two operations may name the same namespace and key. The result has one element
+per operation, in order: `{ version }` for a put (all puts of a batch share
+one version) and `{ deleted }` for a delete. A batch put has no deadline: like a
+put without `expiresAtMs` it clears the deadline of the entry it replaces, and
+an operation that carries `expiresAtMs`, `expires_at_ms` or any other unknown
+field is a `TypeError`. A failed condition (412 `precondition_failed`) or full
+slots (409 `kv_slots_exhausted`) rejects the whole batch. After a
+`TransportError` or 503 `commit_indeterminate` the batch either committed in
+full or not at all, and which is not known: read the keys back with
+`kvGetMany` before deciding. A server without the two routes answers 404
+`not_found`, which is `UnsupportedError`; the client never falls back to
+single-key calls.
+
 ## Memory operations
 
 The unreleased agent-memory REST surface requires a server with a provisioned memory binding.

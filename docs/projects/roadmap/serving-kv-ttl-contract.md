@@ -1057,7 +1057,7 @@ the text above without rewriting those original rows.
 | (m) Feed compatibility (§6) | Change the default decoder / opt-in `graph_ttl` | Opt-in; the default feed is unchanged; formerly proposed boolean, **Withdrawn** in favor of the set above. Wire conventions, decision 8 (owner-selected) |
 | (n) Oversized reclaim feed (§6) | Truncate / fail permanently / deterministic resumable chunks | Chunks; independent cursor and replay acceptance is mandatory. Wire conventions, decision 9 (owner-selected) |
 | (o) Wire numbers (§3) | JSON numbers / canonical decimal strings | Decimal strings for every new u64; existing numeric inputs only where already public |
-| (p) KV batch (§2, §12) | Simulate with sequential writes / a storage transaction API first / omit | Omit; a future batch needs independent atomicity and schema review |
+| (p) KV batch (§2, §12) | Simulate with sequential writes / a storage transaction API first / omit | Omit at proposal. Superseded on 2026-11-05: the owner approved an atomic batch and a multi-key read, reviewed in [kv-batch-contract.md](kv-batch-contract.md) (one engine batch frame, no format change; a deadline on a batch put is deferred). Delete by prefix stays omitted. |
 
 Not decided here: the ledger byte layout, framing and replay; restore
 provenance detection; the converter; the lease-quota configuration surface;
