@@ -109,15 +109,8 @@ jobs:
         with:
           key: ${{ matrix.os }}-${{ matrix.toolchain }}
           save-if: ${{ github.event_name != 'pull_request' }}
-      - uses: taiki-e/install-action@5488ac5a951645ce95062214902ac4b6bc1a1037
-        if: matrix.os == 'windows-latest'
-        with:
-          tool: cargo-nextest@0.9.149
-          fallback: none
       - run: cargo check --locked --no-default-features --lib
-      - name: Test full feature suite with bounded Nextest on Windows
-        if: matrix.os == 'windows-latest'
-        run: cargo nextest run --locked --workspace --all-targets --all-features --test-threads 2
+      # The Windows all-features suite runs in the sharded windows-tests job.
       - name: Test full feature suite with Cargo on other platforms
         if: matrix.os != 'windows-latest'
         run: cargo test --locked --workspace --all-targets --all-features
@@ -205,6 +198,37 @@ jobs:
         with:
           name: search-capabilities-measurements
           path: search-capabilities.json
+
+  # The Windows all-features suite is the longest test run (about 3,900 tests, two at a time), so it is
+  # split into three hash buckets, each on its own runner. Every test lands in exactly one bucket, so the
+  # three jobs together run what the single job ran. The other native steps stay in `native`, once per toolchain.
+  windows-tests:
+    name: windows-tests (${{ matrix.toolchain }}, shard ${{ matrix.shard }}/3)
+    needs: changes
+    if: needs.changes.outputs.full == 'true'
+    strategy:
+      fail-fast: false
+      matrix:
+        toolchain: ["1.89.0", stable]
+        shard: [1, 2, 3]
+    runs-on: windows-latest
+    env:
+      VLITE_REQUIRE_AVX2: "1"
+    steps:
+      - uses: actions/checkout@v5
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: ${{ matrix.toolchain }}
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2
+        with:
+          key: windows-latest-${{ matrix.toolchain }}
+          save-if: ${{ github.event_name != 'pull_request' && matrix.shard == 1 }}
+      - uses: taiki-e/install-action@5488ac5a951645ce95062214902ac4b6bc1a1037
+        with:
+          tool: cargo-nextest@0.9.149
+          fallback: none
+      - name: Test one third of the full feature suite with bounded Nextest
+        run: cargo nextest run --locked --workspace --all-targets --all-features --test-threads 2 --partition hash:${{ matrix.shard }}/3
 
   clients:
     strategy:
@@ -501,7 +525,7 @@ jobs:
   required:
     name: CI required
     if: always()
-    needs: [changes, documentation, native, clients, manylinux, node-linux-package, lint, docker, go-client, dotnet-client, python-integrations, helm-chart, wasm]
+    needs: [changes, documentation, native, windows-tests, clients, manylinux, node-linux-package, lint, docker, go-client, dotnet-client, python-integrations, helm-chart, wasm]
     runs-on: ubuntu-latest
     steps:
       - name: Require every applicable check

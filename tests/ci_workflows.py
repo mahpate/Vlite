@@ -13,6 +13,18 @@ policy = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(policy)
 
 
+def qualified_jobs():
+    """The jobs of a full CI run that qualifies an image, all green."""
+    return (
+        [dict(name=f"native ({os}, {rust})", conclusion="success")
+         for os in ("ubuntu-latest", "ubuntu-24.04-arm", "windows-latest", "macos-latest")
+         for rust in ("1.89.0", "stable")]
+        + [dict(name=f"windows-tests ({rust}, shard {shard}/3)", conclusion="success")
+           for rust in ("1.89.0", "stable") for shard in (1, 2, 3)]
+        + [dict(name=name, conclusion="success") for name in ("lint", "docker")]
+    )
+
+
 class Policy(unittest.TestCase):
     def test_only_markdown_documentation_can_skip_native(self):
         self.assertTrue(policy.docs_only(["README.md", "docs/API.md"]))
@@ -31,17 +43,27 @@ class Policy(unittest.TestCase):
             self.assertFalse(policy.trusted_run(dict(run, **{field: value}), "abc"))
 
     def test_skipped_or_partial_matrix_cannot_qualify_an_image(self):
-        jobs = [
-            dict(name=f"native ({os}, {rust})", conclusion="success")
-            for os in ("ubuntu-latest", "ubuntu-24.04-arm", "windows-latest", "macos-latest")
-            for rust in ("1.89.0", "stable")
-        ] + [dict(name=name, conclusion="success") for name in ("lint", "docker")]
+        jobs = qualified_jobs()
         self.assertTrue(policy.full_ci_jobs(jobs))
         self.assertFalse(policy.full_ci_jobs(jobs[1:]))
         for conclusion in ("skipped", "cancelled", "failure"):
             self.assertFalse(policy.full_ci_jobs([dict(jobs[0], conclusion=conclusion)] + jobs[1:]))
         self.assertFalse(policy.full_ci_jobs(jobs[:-1]))
         self.assertFalse(policy.full_ci_jobs([dict(jobs[0], name="native (unknown, stable)")] + jobs[1:]))
+
+    def test_every_windows_test_shard_must_succeed_to_qualify_an_image(self):
+        jobs = qualified_jobs()
+        shards = [job for job in jobs if job["name"].startswith("windows-tests (")]
+        self.assertEqual(len(shards), 2 * policy.WINDOWS_SHARDS)
+        for shard in shards:
+            with self.subTest(shard=shard["name"]):
+                rest = [job for job in jobs if job is not shard]
+                self.assertFalse(policy.full_ci_jobs(rest))
+                for conclusion in ("skipped", "cancelled", "failure"):
+                    self.assertFalse(policy.full_ci_jobs(rest + [dict(shard, conclusion=conclusion)]))
+        wrong_total = dict(shards[0], name="windows-tests (1.89.0, shard 1/2)")
+        self.assertFalse(policy.full_ci_jobs([wrong_total] + [j for j in jobs if j is not shards[0]]))
+        self.assertFalse(policy.full_ci_jobs(jobs + [dict(shards[0], name="windows-tests (stable, shard 4/3)")]))
 
     def test_manual_ci_always_forces_full_matrix(self):
         self.check_route("workflow_dispatch", {}, b"README.md\0", "true")
@@ -104,8 +126,12 @@ class Policy(unittest.TestCase):
 
     def test_rust_caches_are_isolated_and_fork_writes_disabled(self):
         text = (ROOT / ".github/workflows/ci.yml").read_text(encoding="utf-8")
-        self.assertEqual(text.count("Swatinem/rust-cache@"), 6)
+        self.assertEqual(text.count("Swatinem/rust-cache@"), 7)
+        # Pull requests never write a cache; the sharded Windows job lets only its first bucket write.
         self.assertEqual(text.count("save-if: ${{ github.event_name != 'pull_request' }}"), 6)
+        self.assertEqual(
+            text.count("save-if: ${{ github.event_name != 'pull_request' && matrix.shard == 1 }}"), 1
+        )
         self.assertIn("key: ${{ matrix.os }}-${{ matrix.toolchain }}", text)
         self.assertIn("cancel-in-progress: true", text)
 
@@ -140,14 +166,37 @@ class Policy(unittest.TestCase):
 
     def test_native_x86_64_jobs_require_avx2(self):
         text = (ROOT / ".github/workflows/ci.yml").read_text(encoding="utf-8")
-        native = text.split("\n  native:\n", 1)[1].split("\n  clients:\n", 1)[0]
+        native = text.split("\n  native:\n", 1)[1].split("\n  windows-tests:\n", 1)[0]
         self.assertIn(
             "    env:\n"
             "      VLITE_REQUIRE_AVX2: ${{ (matrix.os == 'ubuntu-latest' || "
             "matrix.os == 'windows-latest') && '1' || '0' }}\n",
             native,
         )
-        self.assertEqual(text.count("VLITE_REQUIRE_AVX2:"), 1)
+        windows = text.split("\n  windows-tests:\n", 1)[1].split("\n  clients:\n", 1)[0]
+        self.assertIn("    env:\n      VLITE_REQUIRE_AVX2: \"1\"\n", windows)
+        self.assertEqual(text.count("VLITE_REQUIRE_AVX2:"), 2)
+
+    def test_windows_suite_is_split_into_exact_hash_buckets(self):
+        text = (ROOT / ".github/workflows/ci.yml").read_text(encoding="utf-8")
+        job = text.split("\n  windows-tests:\n", 1)[1].split("\n  clients:\n", 1)[0]
+        shards = policy.WINDOWS_SHARDS
+        self.assertEqual(shards, 3)
+        # One runner per bucket, buckets 1..N of N once each, per toolchain.
+        self.assertIn(f"        shard: {list(range(1, shards + 1))}\n", job)
+        self.assertIn('        toolchain: ["1.89.0", stable]\n', job)
+        self.assertIn("shard ${{ matrix.shard }}/" + str(shards) + ")", job)
+        self.assertEqual(job.count("--partition hash:${{ matrix.shard }}/" + str(shards)), 1)
+        self.assertEqual(job.count("cargo nextest run"), 1)
+        self.assertIn("--workspace --all-targets --all-features --test-threads 2 --partition", job)
+        self.assertIn("fail-fast: false", job)
+        # Only the cache of bucket 1 is written: three identical uploads would race for one key.
+        self.assertIn("save-if: ${{ github.event_name != 'pull_request' && matrix.shard == 1 }}", job)
+        # The suite is not repeated in `native`: its Windows cells keep only the small steps.
+        native = text.split("\n  native:\n", 1)[1].split("\n  windows-tests:\n", 1)[0]
+        for step in native.split("\n      - ")[1:]:
+            if "cargo nextest run" in step or "--all-targets --all-features" in step:
+                self.assertIn("if: matrix.os != 'windows-latest'", step)
 
     def test_compact_method_inventory_runs_with_documentation_gates(self):
         text = (ROOT / ".github/workflows/ci.yml").read_text(encoding="utf-8")
