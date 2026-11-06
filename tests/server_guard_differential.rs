@@ -1131,14 +1131,20 @@ fn variants(principal: &Principal) -> Vec<Variant> {
 }
 
 /// Names a tenant shares with root resources, one reserved there and one
-/// ordinary: whatever it does with them must stay in its own namespace.
+/// ordinary: whatever it does with them must stay in its own namespace. A
+/// request body takes stored names, so a name a tenant spells there without its
+/// prefix is the root resource's: its grant must refuse it before anything is
+/// looked up, and no root resource may answer or change.
 fn namesakes(principal: &Principal) -> Vec<Names> {
     if principal.tenant {
-        vec![
-            stored(names("", "other_ev", "other_graph")),
-            stored(names("", "ordinary", "ordinary_graph")),
-            stored(names("", "kvstore", "absent_graph")),
-        ]
+        const SHARED: [(&str, &str); 3] = [
+            ("other_ev", "other_graph"),
+            ("ordinary", "ordinary_graph"),
+            ("kvstore", "absent_graph"),
+        ];
+        let prefixed = SHARED.iter().map(|(c, g)| stored(names("", c, g)));
+        let unprefixed = SHARED.iter().map(|(c, g)| names("", c, g));
+        prefixed.chain(unprefixed).collect()
     } else {
         Vec::new()
     }
@@ -2338,6 +2344,98 @@ async fn a_tenants_body_names_are_stored_names_that_reach_the_guard() {
         describe(&reserved)
     );
 }
+
+/// A name outside a credential's grant is refused with `403` before anything
+/// is looked up (SECURITY.md: an out-of-scope name retains `403
+/// forbidden_scope`), so it must not matter whether the name is reserved,
+/// missing or an ordinary collection that exists. Without the grant check the
+/// later checks would answer `404` for the first two and `403` for the third,
+/// and a credential could tell which collections exist outside its grant. The
+/// matrix compares reserved with missing names only; this adds the third and
+/// holds every row that names a resource to the documented status.
+#[tokio::test]
+async fn a_name_outside_a_credentials_grant_is_refused_whatever_it_names() {
+    let tenanted = format!("t{TENANT}__");
+    // The credential limited to `ordinary` and `ordinary_graph`: every name,
+    // in a path or a body, is outside its grant, even the ordinary names a row
+    // mixes in.
+    let limited = |collection: &str, graph: &str| {
+        let mut spelled = names("", collection, graph);
+        spelled.o = format!("{tenanted}ordinary");
+        spelled.og = format!("{tenanted}ordinary_graph");
+        spelled.so = spelled.o.clone();
+        spelled
+    };
+    // A tenant: a path name is always its own, so only the names a body spells
+    // without its prefix, which are the root's, are outside its grant.
+    let tenant = |root_collection: &str| Names {
+        c: "ordinary".to_owned(),
+        g: "ordinary_graph".to_owned(),
+        o: "ordinary".to_owned(),
+        og: "ordinary_graph".to_owned(),
+        sc: root_collection.to_owned(),
+        so: root_collection.to_owned(),
+    };
+    let cases: [(usize, &[&str], [(&str, Names); 3]); 2] = [
+        (
+            1,
+            &["$c", "$g", "$o", "$og", "$C", "$O"],
+            [
+                ("a reserved name", limited("notes_ev", "notes_graph")),
+                ("a missing name", limited("absent_ev", "absent_graph")),
+                (
+                    "an ordinary name that exists",
+                    limited(
+                        &format!("{tenanted}ordinary"),
+                        &format!("{tenanted}ordinary_graph"),
+                    ),
+                ),
+            ],
+        ),
+        (
+            4,
+            &["$C", "$O"],
+            [
+                ("a reserved root name", tenant("notes_ev")),
+                ("a missing root name", tenant("absent_ev")),
+                ("an ordinary root name that exists", tenant("ordinary")),
+            ],
+        ),
+    ];
+    for (index, placeholders, spellings) in cases {
+        let principal = &PRINCIPALS[index];
+        let world = prepared(true, principal).await;
+        let token = world.token(principal.name);
+        let mut compared = 0;
+        for row in ordered() {
+            if !placeholders
+                .iter()
+                .any(|placeholder| row.path.contains(placeholder) || row.body.contains(placeholder))
+            {
+                continue;
+            }
+            for (what, spelled) in &spellings {
+                let (path, body) = row.fill(spelled);
+                let answer = exec(&world, token, row.method, &path, &body).await;
+                assert_eq!(
+                    answer.0,
+                    403,
+                    "{}: {} {path} with {what}: {}",
+                    principal.name,
+                    row.method,
+                    describe(&answer)
+                );
+            }
+            compared += 1;
+        }
+        assert!(
+            compared >= 10,
+            "{}: only {compared} rows name a resource",
+            principal.name
+        );
+    }
+}
+
 #[tokio::test]
 async fn lists_and_the_feed_never_name_a_reserved_resource_to_a_caller_that_may_not_reach_it() {
     let mut world = build(true);
