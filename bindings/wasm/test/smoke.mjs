@@ -4,6 +4,7 @@ import { readFileSync } from 'node:fs';
 import { createRequire } from 'node:module';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
+import vm from 'node:vm';
 
 const require = createRequire(import.meta.url);
 const pkg = require(path.resolve(process.argv[2] ?? 'pkg/vlite_wasm.js'));
@@ -281,6 +282,7 @@ for (const bad of [
   new Proxy({}, { getPrototypeOf() { throw new Error('the trap ran'); } }),
   new Proxy(new Uint8Array(4), { get() { throw new Error('the trap ran'); } }),
   Object.create(Uint8Array.prototype),
+  { [Symbol.toStringTag]: 'Uint8Array', length: 1, 0: 5 },
   new Float64Array(2),
   new BigUint64Array(1),
 ]) {
@@ -291,6 +293,9 @@ for (const [source, bytes] of [[padded, [1, 2]], [lying, [3]], [new Throwing(2),
   hostile.kvPut('default', 'n', 'v', source);
   assert.deepEqual(hostile.kvGet('default', 'n', 'v').value, new Uint8Array(bytes));
 }
+// An array of another realm is an array: the tag and the length are read from its own slots.
+hostile.kvPut('default', 'n', 'v', vm.runInNewContext('new Uint8Array([8, 9])'));
+assert.deepEqual(hostile.kvGet('default', 'n', 'v').value, new Uint8Array([8, 9]));
 // Nothing of the caller's value is looked up while the database is borrowed: an own `slice`, a species, a
 // constructor getter and a proxy that supplies a `slice` are never run, and what is stored is what the array holds.
 let ran = 0;

@@ -1,12 +1,12 @@
 //! What a REST router publishes to the other transports of its engine
 //! (`Service::publish` and `Service::adopt_published`): the pairing of
 //! authentication state and memory reservations, what an unconfigured service
-//! adopts, a router that protects less (no token, or no reserved resources)
-//! never replacing one that protects more, a lock that a panic poisoned, and
-//! the order of the two routers: a configured router is refused after a
-//! listener that runs without tokens (it adopted nothing, or an open router),
-//! a router that reserves is refused after any listener, and a router whose
-//! reservations and token cannot both be kept is refused.
+//! adopts, a router that protects less (no token, or reservations that do not
+//! cover the held ones) never replacing one that protects more, a lock that a
+//! panic poisoned, and the order of the routers: a configured router is
+//! refused after a listener that runs without tokens (it adopted nothing, or
+//! an open router), a router that reserves is refused after any listener, and
+//! a router that protects less in one respect and more in the other is refused.
 
 use super::*;
 use crate::{CollectionSpec, CreateOptions, FormatVersion};
@@ -17,6 +17,9 @@ const SECOND: &str = "second_token_second_token_second_tok_2";
 
 const BINDINGS: &str = r#"{"version":"memory-bindings-v1","bindings":[{"binding":"notes","tenant":"@root","generation":1,"state":"active","graph":"notes_graph","evidence_collection":"notes_ev","schema_version":"memory-schema-v1","ranking_version":"memory-ranking-v1","digest_version":"memory-request-v1","receipt_window_ms":86400000,"grants":[{"principal":"abcdefghij27","scopes":[{"agent":"a"}]}]}]}"#;
 
+/// A second binding, with its own graph and evidence collection.
+const OTHER_BINDING: &str = r#"{"binding":"other","tenant":"@root","generation":1,"state":"active","graph":"other_graph","evidence_collection":"other_ev","schema_version":"memory-schema-v1","ranking_version":"memory-ranking-v1","digest_version":"memory-request-v1","receipt_window_ms":86400000,"grants":[{"principal":"abcdefghij34","scopes":[{"agent":"a"}]}]}"#;
+
 fn service() -> Service {
     let mut db = Database::create_in_memory(
         2,
@@ -26,15 +29,17 @@ fn service() -> Service {
         },
     )
     .unwrap();
-    db.create_graph("notes_graph").unwrap();
-    db.create_collection(
-        "notes_ev",
-        CollectionSpec {
-            dimensions: 2,
-            settings: Default::default(),
-        },
-    )
-    .unwrap();
+    for (graph, evidence) in [("notes_graph", "notes_ev"), ("other_graph", "other_ev")] {
+        db.create_graph(graph).unwrap();
+        db.create_collection(
+            evidence,
+            CollectionSpec {
+                dimensions: 2,
+                settings: Default::default(),
+            },
+        )
+        .unwrap();
+    }
     Service::new(db)
 }
 
@@ -44,12 +49,44 @@ fn bindings_file(directory: &Path) -> PathBuf {
     path
 }
 
+/// The file of `bindings_file` with `OTHER_BINDING` added.
+fn both_bindings_file(directory: &Path) -> PathBuf {
+    let path = directory.join("both.json");
+    let text = format!(
+        "{},{OTHER_BINDING}]}}",
+        BINDINGS.strip_suffix("]}").unwrap()
+    );
+    std::fs::write(&path, text).unwrap();
+    path
+}
+
 fn options(token: &str, bindings: Option<&Path>) -> ServerOptions {
     ServerOptions {
         admin_token: Some(BearerToken::new(token).unwrap()),
         memory_bindings_file: bindings.map(Path::to_owned),
         ..ServerOptions::default()
     }
+}
+
+fn open_options(bindings: &Path) -> ServerOptions {
+    ServerOptions {
+        memory_bindings_file: Some(bindings.to_owned()),
+        ..ServerOptions::default()
+    }
+}
+
+/// A service whose own state has an administration token, as the state of a
+/// router has.
+fn with_token(mut service: Service, token: &str) -> Service {
+    service.admin = Arc::new(admin::AdminState::default());
+    service.admin.auth.lock().unwrap().admin = Some(BearerToken::new(token).unwrap());
+    service
+}
+
+fn with_notes(service: Service) -> Service {
+    service.with_bindings(reserved::Bindings::new(
+        crate::memory::binding::parse(BINDINGS.as_bytes()).unwrap(),
+    ))
 }
 
 fn has_token(service: &Service, token: &str) -> bool {
@@ -77,6 +114,7 @@ fn sequence(service: &Service) -> u64 {
 }
 
 const AFTER_GRPC: &str = "build every REST router before the gRPC router";
+const INCOMPARABLE: &str = "each protect something the other does not";
 
 #[test]
 fn a_service_that_no_router_configured_adopts_neither_and_says_so() {
@@ -279,9 +317,9 @@ fn publication_itself_refuses_a_router_that_reserves_after_a_grpc_router() {
     let _secured = authenticated_router(service.clone(), BearerToken::new(SECOND).unwrap());
     let mut listener = service.clone();
     assert!(listener.adopt_published());
-    let reserving = service.clone().with_bindings(reserved::Bindings::new(
-        crate::memory::binding::parse(BINDINGS.as_bytes()).unwrap(),
-    ));
+    // A token and reservations, over a held router that has a token and
+    // reserves nothing: the only thing against it is the gRPC router.
+    let reserving = with_notes(with_token(service.clone(), FIRST));
 
     let error = reserving
         .publish_reserving()
@@ -290,7 +328,7 @@ fn publication_itself_refuses_a_router_that_reserves_after_a_grpc_router() {
     let mut next = service.clone();
     assert!(next.adopt_published());
     assert!(
-        has_token(&next, SECOND) && next.memory_bindings.is_empty(),
+        has_token(&next, SECOND) && !has_token(&next, FIRST) && next.memory_bindings.is_empty(),
         "nothing was published"
     );
     // A router that reserves nothing is never refused.
@@ -354,8 +392,14 @@ fn a_listener_that_adopted_a_router_with_a_token_is_not_open() {
     assert!(listener.adopt_published());
     assert!(has_token(&listener, FIRST));
     assert!(!listener.grpc_runs_unconfigured());
-    // A router with another token is the supported way to rotate them.
+    // A router with another token is accepted, and the listener that exists
+    // keeps the tokens it adopted: the tokens of a listener change by a new
+    // service with new routers, not by another router.
     let _again = configured_admin_router(service.clone(), options(SECOND, None)).unwrap();
+    assert!(has_token(&listener, FIRST) && !has_token(&listener, SECOND));
+    let mut later = service.clone();
+    assert!(later.adopt_published());
+    assert!(has_token(&later, SECOND) && !has_token(&later, FIRST));
 }
 
 #[test]
@@ -363,17 +407,12 @@ fn a_router_that_reserves_without_a_token_is_refused_over_one_that_has_a_token_a
  {
     let service = service();
     let _secured = authenticated_router(service.clone(), BearerToken::new(FIRST).unwrap());
-    let reserving = service.clone().with_bindings(reserved::Bindings::new(
-        crate::memory::binding::parse(BINDINGS.as_bytes()).unwrap(),
-    ));
+    let reserving = with_notes(service.clone());
 
     let error = reserving
         .publish_reserving()
         .expect_err("keeping either state would leave a gRPC router without the other");
-    assert!(
-        error.to_string().contains("no administration token"),
-        "{error}"
-    );
+    assert!(error.to_string().contains(INCOMPARABLE), "{error}");
     let mut adopter = service.clone();
     assert!(adopter.adopt_published());
     assert!(
@@ -385,6 +424,77 @@ fn a_router_that_reserves_without_a_token_is_refused_over_one_that_has_a_token_a
     let mut adopter = service.clone();
     assert!(adopter.adopt_published());
     assert!(has_token(&adopter, FIRST) && adopter.memory_bindings.is_empty());
+}
+
+#[test]
+fn a_router_that_reserves_more_without_a_token_is_refused_over_one_with_a_token() {
+    let directory = tempfile::tempdir().unwrap();
+    let service = service();
+    // The first router has a token and reserves `notes`; the second has no
+    // token and reserves `notes` and `other`. Keeping the first would leave a
+    // gRPC router that serves `other` raw to the holders of its token while
+    // the second router hides it; following the second would leave it open.
+    let _first = configured_admin_router(
+        service.clone(),
+        options(FIRST, Some(&bindings_file(directory.path()))),
+    )
+    .unwrap();
+    let error = configured_admin_router(
+        service.clone(),
+        open_options(&both_bindings_file(directory.path())),
+    )
+    .expect_err("neither state can be kept without losing the other");
+    assert!(error.to_string().contains(INCOMPARABLE), "{error}");
+
+    let mut listener = service.clone();
+    assert!(listener.adopt_published());
+    assert!(has_token(&listener, FIRST), "the held tokens are untouched");
+    let reserved = listener.memory_bindings.reserved();
+    assert!(reserved.is_reserved(reserved::Resource::Graph, "notes_graph"));
+    assert!(
+        !reserved.is_reserved(reserved::Resource::Graph, "other_graph"),
+        "the held reservations are untouched"
+    );
+}
+
+#[test]
+fn a_router_with_a_token_that_reserves_less_is_refused_over_an_open_one_that_reserves() {
+    let service = service();
+    // An open router that reserves `notes`, published as one is whose records
+    // were never written (a read-only database): the router built next finds
+    // no records, so it reserves nothing.
+    with_notes(service.clone()).publish();
+    let error = configured_admin_router(service.clone(), options(SECOND, None))
+        .expect_err("neither state can be kept without losing the other");
+    assert!(error.to_string().contains(INCOMPARABLE), "{error}");
+
+    let mut listener = service.clone();
+    assert!(listener.adopt_published());
+    assert!(!has_token(&listener, SECOND), "the held state is untouched");
+    assert!(!listener.memory_bindings.is_empty());
+}
+
+#[test]
+fn a_router_that_reserves_what_the_held_one_does_and_more_replaces_it() {
+    let directory = tempfile::tempdir().unwrap();
+    let service = service();
+    let _first = configured_admin_router(
+        service.clone(),
+        options(FIRST, Some(&bindings_file(directory.path()))),
+    )
+    .unwrap();
+    let _wider = configured_admin_router(
+        service.clone(),
+        options(SECOND, Some(&both_bindings_file(directory.path()))),
+    )
+    .unwrap();
+
+    let mut listener = service.clone();
+    assert!(listener.adopt_published());
+    assert!(has_token(&listener, SECOND) && !has_token(&listener, FIRST));
+    let reserved = listener.memory_bindings.reserved();
+    assert!(reserved.is_reserved(reserved::Resource::Graph, "notes_graph"));
+    assert!(reserved.is_reserved(reserved::Resource::Graph, "other_graph"));
 }
 
 #[test]
@@ -436,9 +546,7 @@ fn a_router_that_reserves_without_a_token_is_kept_out_by_one_that_has_both() {
         options(FIRST, Some(&bindings_file(directory.path()))),
     )
     .unwrap();
-    let reserving = service.clone().with_bindings(reserved::Bindings::new(
-        crate::memory::binding::parse(BINDINGS.as_bytes()).unwrap(),
-    ));
+    let reserving = with_notes(service.clone());
 
     // Nothing is lost by keeping the held publication: it has the token and
     // the reservations, so the router is kept out without a refusal.

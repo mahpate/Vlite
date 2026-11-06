@@ -84,18 +84,14 @@ impl GrpcHealth {
 /// Call it with a clone of the `Service` after building every REST router
 /// (`configured_admin_router` or `authenticated_router`): gRPC then applies the
 /// tokens, credential store, token reloads, audit log and memory reservations
-/// that the most recently built REST router published, unless a later router
-/// protects less (no admin token, or no reservations where the earlier one has
-/// them), which does not replace them. It adopts them once, when it is built:
-/// a REST router built afterwards changes what REST applies and not what the
-/// listener applies. The guard differential runs the checks of the REST
-/// differential (with and without bindings, reserved as missing, the digest
-/// read back over REST) on every RPC; it never compares a REST answer with a
-/// gRPC answer. Without a configured REST router it uses the service's own
-/// state, which, like `router`, has no admin token and no reservations (local
-/// development only); `configured_admin_router` then refuses to configure that
-/// service afterwards, because the listener that already runs would not apply
-/// what it configures.
+/// that the REST routers published, and adopts them once, when it is built. A
+/// REST router built after it changes what REST applies and not what the
+/// listener applies, and `configured_admin_router` refuses the orders that
+/// would leave the listener without a token or a reservation that a router
+/// applies (`docs/GRPC.md` lists them). Without a configured REST router the
+/// listener uses the service's own state, which, like `router`, has no admin
+/// token and no reservations (local development only), and
+/// `configured_admin_router` then refuses to configure that service.
 pub async fn grpc_router(mut service: Service) -> GrpcServer {
     service.adopt_published();
     let (reporter, health_service) = tonic_health::server::health_reporter();

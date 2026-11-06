@@ -367,11 +367,14 @@ impl Service {
     /// replaced whole, so a skipped publication would leave a transport
     /// without the reservations it must apply. A router that protects less
     /// does not replace the publication of one that protects more: not one
-    /// that reserves nothing where the held one reserves, and not one without
-    /// an administration token where the held one has one. So a plain router
+    /// whose reservations do not cover the held ones, and not one without an
+    /// administration token where the held one has one. So a plain router
     /// built later cannot leave a listener without the tokens and the
-    /// reservations of the strictest router of its engine. This form is for
-    /// the routers that cannot be refused (`router`, `authenticated_router`).
+    /// reservations of the strictest router of its engine. A router that
+    /// protects less in one of the two and more in the other cannot be kept
+    /// out or followed: this form is for the routers that cannot be refused
+    /// (`router`, `authenticated_router`), and it keeps the held publication
+    /// and warns.
     fn publish(&self) {
         // Nothing is refused when `refusing` is false.
         let _ = self.publish_with(false);
@@ -383,12 +386,12 @@ impl Service {
     /// any moment either sees this router's tokens and reservations or is seen
     /// by these checks. They refuse a router built after a gRPC router that
     /// runs without tokens, a router that reserves memory resources and is
-    /// built after any gRPC router, and a router that reserves memory
-    /// resources and has no administration token while the held router has a
-    /// token and reserves nothing (keeping either would leave a gRPC router
-    /// without the tokens or without the reservations). A refused router may
-    /// already have set up the engine it shares: the caller discards the
-    /// service.
+    /// built after any gRPC router, and, in a build with gRPC, a router that
+    /// protects less than the held publication in one respect (an
+    /// administration token, reservations) and more in the other: a gRPC
+    /// router would have to adopt one or the other. A refusal under the locks
+    /// may come after the router set the engine up (records written, the admin
+    /// directory created): the caller discards the service.
     fn publish_reserving(&self) -> std::io::Result<()> {
         self.publish_with(true)
     }
@@ -402,19 +405,24 @@ impl Service {
             .published_bindings
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
-        let reserves_less = self.memory_bindings.is_empty()
-            && bindings.as_ref().is_some_and(|held| !held.is_empty());
-        let protects_less =
-            self.admin.is_open() && admin.as_ref().is_some_and(|held| !held.is_open());
+        let open = self.admin.is_open();
+        let reserves_less = bindings
+            .as_ref()
+            .is_some_and(|held| !self.memory_bindings.covers(held));
+        let reserves_more = bindings
+            .as_ref()
+            .is_some_and(|held| !held.covers(&self.memory_bindings));
+        let protects_less = open && admin.as_ref().is_some_and(|held| !held.is_open());
+        let protects_more = !open && admin.as_ref().is_some_and(|held| held.is_open());
         if refusing {
             self.refuse_after_unconfigured_grpc()?;
             self.refuse_reserving_after_grpc()?;
-            if protects_less
-                && self.has_bindings()
-                && bindings.as_ref().is_some_and(|held| held.is_empty())
+            if cfg!(feature = "grpc")
+                && (reserves_less || protects_less)
+                && (reserves_more || protects_more)
             {
                 return Err(std::io::Error::other(
-                    "this router reserves memory resources and has no administration token, while an earlier router of this service has a token and reserves nothing; a gRPC router would adopt one or the other, so give this router the token or build it first",
+                    "this router and an earlier router of this service each protect something the other does not (the administration token, the memory reservations), and a gRPC router can adopt only one of them; give this router the token and the reservations of the earlier one",
                 ));
             }
         }
@@ -422,7 +430,7 @@ impl Service {
             logs::stderr(
                 "warn",
                 "server",
-                json!({"event":"publication_kept","message":"a router with no admin token or with no memory reservations does not replace the tokens and reservations that other transports adopt"})
+                json!({"event":"publication_kept","message":"a router with no admin token, or whose memory reservations do not cover the ones held, does not replace the tokens and reservations that other transports adopt"})
                     .to_string(),
             );
             return Ok(());

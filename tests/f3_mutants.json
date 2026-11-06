@@ -57,7 +57,7 @@
   },
   {
     "id": "f3-s1/P8",
-    "desc": "configured_admin_router no longer refuses to follow a gRPC router that adopted nothing",
+    "desc": "configured_admin_router no longer refuses early to follow a gRPC router that adopted nothing (publication still refuses, after the engine is set up)",
     "file": "src/server/admin.rs",
     "old": "service.refuse_after_unconfigured_grpc()?;",
     "new": "",
@@ -89,18 +89,18 @@
   },
   {
     "id": "f3-s1/P11",
-    "desc": "a router that reserves nothing replaces the publication of one that does",
+    "desc": "a router whose reservations do not cover the held ones is not seen as reserving less, so it replaces the publication of one that does",
     "file": "src/server.rs",
-    "old": "let reserves_less = self.memory_bindings.is_empty()",
-    "new": "let reserves_less = false",
+    "old": ".is_some_and(|held| !self.memory_bindings.covers(held));",
+    "new": ".is_some_and(|_| false);",
     "cmd": "cargo test --locked --offline --features grpc --lib server::published"
   },
   {
     "id": "f3-s1/P12",
     "desc": "a router that holds reserved records without a file counts as one that reserves nothing",
     "file": "src/server.rs",
-    "old": "let reserves_less = self.memory_bindings.is_empty()",
-    "new": "let reserves_less = !self.memory_bindings.is_configured()",
+    "old": ".is_some_and(|held| !self.memory_bindings.covers(held));",
+    "new": ".is_some_and(|held| !self.memory_bindings.is_configured() && !held.is_empty());",
     "cmd": "cargo test --locked --offline --features grpc --lib server::published"
   },
   {
@@ -113,10 +113,10 @@
   },
   {
     "id": "f3-s1/P14",
-    "desc": "a router with an admin token never replaces the publication of one that has one",
+    "desc": "a router with an admin token is treated as one without, so it never replaces the publication of one that has a token",
     "file": "src/server.rs",
-    "old": "self.admin.is_open() && admin.as_ref()",
-    "new": "true && admin.as_ref()",
+    "old": "let open = self.admin.is_open();",
+    "new": "let open = true;",
     "cmd": "cargo test --locked --offline --features grpc --lib server::published"
   },
   {
@@ -177,19 +177,43 @@
   },
   {
     "id": "f3-s1/P23",
-    "desc": "a router that reserves and has no token is not refused over a held router that has a token and reserves nothing",
+    "desc": "a router that protects less in one respect and more in the other is not refused",
     "file": "src/server.rs",
-    "old": "&& bindings.as_ref().is_some_and(|held| held.is_empty())",
-    "new": "&& bindings.as_ref().is_some_and(|held| false)",
+    "old": "&& (reserves_more || protects_more)",
+    "new": "&& false",
     "cmd": "cargo test --locked --offline --features grpc --lib server::published"
   },
   {
     "id": "f3-s1/P24",
-    "desc": "a router that reserves and has no token is refused even where the held router has a token and reserves too",
+    "desc": "a router that protects less in one respect is refused even where it protects more in no respect",
     "file": "src/server.rs",
-    "old": "&& bindings.as_ref().is_some_and(|held| held.is_empty())",
+    "old": "&& (reserves_more || protects_more)",
     "new": "&& true",
     "cmd": "cargo test --locked --offline --features grpc --lib server::published"
+  },
+  {
+    "id": "f3-s1/P25",
+    "desc": "a router that reserves what the held one does not, where the held one reserves something, is not seen as reserving more",
+    "file": "src/server.rs",
+    "old": ".is_some_and(|held| !held.covers(&self.memory_bindings));",
+    "new": ".is_some_and(|held| held.is_empty());",
+    "cmd": "cargo test --locked --offline --features grpc --lib server::published"
+  },
+  {
+    "id": "f3-s1/P26",
+    "desc": "a router with a token is not seen as protecting more than an open held router, so one that reserves less is not refused",
+    "file": "src/server.rs",
+    "old": "let protects_more = !open && admin.as_ref().is_some_and(|held| held.is_open());",
+    "new": "let protects_more = false;",
+    "cmd": "cargo test --locked --offline --features grpc --lib server::published"
+  },
+  {
+    "id": "f3-s1/P27",
+    "desc": "a registry covers another when it reserves any resource of it, not every resource of it",
+    "file": "src/server/reserved.rs",
+    "old": ".all(|resource| self.owners.contains_key(resource))",
+    "new": ".any(|resource| self.owners.contains_key(resource))",
+    "cmd": "cargo test --locked --offline --features grpc --lib server::reserved"
   },
   {
     "id": "f3-s1/G1",

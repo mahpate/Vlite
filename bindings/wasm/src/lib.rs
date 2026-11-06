@@ -536,12 +536,14 @@ thread_local! {
 ///
 /// The check and the copy call the intrinsics of `%TypedArray%.prototype`
 /// themselves. Nothing of the caller's value is looked up (`slice`, `length`,
-/// `constructor`, `Symbol.species`), so no code of the caller's runs: a proxy
+/// `constructor`, `Symbol.species`), so no code of the value's own runs: a proxy
 /// or an object that merely inherits from `Uint8Array.prototype` is refused, a
 /// subclass that overrides those members is copied as the array it is, a
 /// detached or out-of-bounds array is refused, and nothing larger than a value
-/// may be is allocated. Every call is `catch`: nothing unwinds through this
-/// frame while the database is borrowed.
+/// may be is allocated. The intrinsics come from the page's realm: code that
+/// replaces a built-in runs as the caller and is outside this guard, and the
+/// allocation of the copy and `copy_to` are not `catch`, so such code can trap
+/// while the database is borrowed.
 fn value_of(value: &JsValue) -> Result<Vec<u8>, JsValue> {
     let malformed = || reject("invalid_request", "value must be a Uint8Array");
     INTRINSICS.with(|intrinsics| {
