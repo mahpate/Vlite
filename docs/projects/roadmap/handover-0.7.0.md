@@ -4,6 +4,12 @@ Status: written at the 0.7.0 freeze. Read it with [RELEASE-0.7.0.md](../../RELEA
 [next-major.md](next-major.md) (the roadmap). This page records how the release was qualified, which limits it ships with and
 what 0.7.1 takes up first. It holds no credentials, subscription identifiers or private infrastructure names.
 
+Update after the release: 0.7.1 shipped on 2026-11-05 with the request guard (G71), the agent-memory follow-ups (M71), the
+key-value, input and audit follow-ups (K71) and the dashboard, and without any compact work ([handover-0.7.1.md](handover-0.7.1.md)
+is its handover). The owner moved the compact lanes of the plan below (R0, B4, A4, E4 and C4) to 0.7.2. What this page
+records for items 1 and 2 is carried on the integration tree T (`mahpate-int072-c1` at `2d405125`; [seam
+freeze](p3b-seam-freeze.md#1-baseline)).
+
 ## What 0.7.0 contains
 
 Key-value store, agent memory (five of nine routes served), the directory store (opt-in), graph expiry and change feeds, bounded
@@ -54,7 +60,8 @@ unchanged and no size claim is made.
 
 ## Limits shipped in 0.7.0
 
-0.7.1 takes these up in the order given below. The shared commit sequence (F2 and the tenants row) and the import job
+The table is the state at 0.7.0; [the 0.7.1 handover](handover-0.7.1.md) says what 0.7.1 closed and what it left open, and the
+plan below is the one written for it at 0.7.0. The shared commit sequence (F2 and the tenants row) and the import job
 numbering describe design properties, so they need an owner decision before anything changes.
 
 | Item | What it is |
@@ -84,6 +91,9 @@ and whether an evidence alias is the binding name or the collection name.
 ## 0.7.1
 
 Order and gates come from the storage readiness inventory. Defaults stay unchanged and nothing compact becomes active.
+0.7.1 shipped K71 (item 3) and G71 and M71 (item 7). It shipped none of the compact work: R0, B4, A4 and E4 (items 1 and 2) were
+built and are carried to 0.7.2 for re-qualification on an integration tree, C4 (item 3) moved to 0.7.2 not started, and items 4
+to 6 were not started in 0.7.1 (the [0.7.1 handover](handover-0.7.1.md) names no release for them).
 
 1. **R0** baseline and seam freeze from the 0.7.0 tag, reconciled progress text and 91 hand mutants of the read seam, of
    which 28 had no replay evidence on `v0.7.0` (12 are reached through the seam's calls, the test-only mapped copy or an
@@ -95,8 +105,11 @@ Order and gates come from the storage readiness inventory. Defaults stay unchang
    unchanged) with 7 tests and 34 more hand mutants, all killed
    ([`tests/compact_ordered_cursors_mutants.json`](../../../tests/compact_ordered_cursors_mutants.json)). The final-tree
    replays ran on the lane's machine, and every mutant that counts on a final tree (35 of the 91, all 34 of slice 3) was
-   replayed again on separate machines on the integrated tree, all killed.
-2. **B4** finished lane B by cherry-picking `250a98bc` (never by merge). Its 18 replay obligations are replayed: the seven
+   replayed again on separate machines on R0's integrated tree (`faa3b32e`), all killed. On T the 52 mutants of the two ledgers
+   that mutate `records.rs` or `lib.rs` were replayed again, on the lane's machine and on separate machines, all killed, and
+   `verify --strict` accepts that replay ([seam freeze, 7.3](p3b-seam-freeze.md#73-the-mutants-of-recordsrs-and-librs-on-the-integration-tree),
+   [`tests/compact_r0_integrated_mutants.json`](../../../tests/compact_r0_integrated_mutants.json)).
+2. **B4** finished lane B by cherry-picking `250a98bc` (never by merge). Its 18 replay obligations are replayed on B4's own tree: the seven
    that mutate the read seam are in R0's ledger and the eleven for consumers, settings and rerank are in B4's, each gap
    measured on `v0.7.0` before the tests that kill it. B4 added the five survivors that lane B's own report names (four
    are killed by new tests, one is accepted as an equivalent mutant whose invariant a test pins) and three gaps that its
@@ -110,14 +123,19 @@ Order and gates come from the storage readiness inventory. Defaults stay unchang
    tool on A4's head ([lane A4](p3b-record-consumers.md)). A few changes are visible to a resident file and ship in a release
    build (one clock for the exact and text legs of the hybrid search and for the pivot and evidence reads of graph retrieval,
    among them; the approximate leg still reads the wall clock), and `scripts/shadow_copy_check.py` checks that the shipped
-   code is that of `v0.7.0` apart from the named exceptions. The recorded replays of `records.rs` go stale on a tree that also
-   holds R0's slice 3, until they are replayed there, and one of its anchors, `a4-cursorgroup-07`, matches twice there and
-   needs more context first. **E4**, the bounded exact scan, follows.
-3. **C4** server and MCP consumers and accounting; **K71** bounded key-value, input and audit follow-ups (beside B4).
+   code is that of `v0.7.0` apart from the named exceptions. A ledger run is tied to the file it ran on, so on T the recorded
+   replays of B4's and A4's mutants in the files that changed since are stale until they are replayed there (A4's, in
+   `records.rs`, `kv.rs`, `lib.rs` and `property_graph`), and two of A4's anchors, `a4-cursorgroup-07` and
+   `pa-kv-store-resident-guard-removed`, match twice and need more
+   context first ([the ledgers on T](p3b-survivor-ledgers.md#the-ledgers-on-the-integration-tree)). **E4** moved the exact
+   scan of lane A onto the lazy `ordered_ids` cursor (one line of `src/lib.rs`, under the test gate) and added five tests and
+   24 mutants in `tests/compact_e4_mutants.json`; its recorded runs on T are E4's to add ([E4's page](p3b-exact-scan.md)).
+3. **C4** server and MCP consumers and accounting (moved to 0.7.2); **K71** bounded key-value, input and audit follow-ups
+   (shipped in 0.7.1).
 4. **L5** effective-source lifecycle and generation retirement after A4, B4, E4 and C4.
 5. **P4-71** compact graph integration, **ANN71** compact approximate search, **P5-71** persisted summaries then compression.
 6. **F4 and F5** measurements of the actual changed behavior after correctness lands.
-7. The limits above: **G71** (guards) and **M71** (memory).
+7. The limits above: **G71** (guards) and **M71** (memory), both shipped in 0.7.1.
 
 Each lane carries its own hand-mutation minimum (12 to 24 effective mutants, more for the codec and durability lanes), an
 independent review and the shared-file serialization map in the inventory. No benchmark campaign runs for 0.7.1.

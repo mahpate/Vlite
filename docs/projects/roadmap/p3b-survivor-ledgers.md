@@ -1,8 +1,10 @@
 # P3b slice 4: survivor ledgers of lanes A and B
 
-Status: inventory for 0.7.1 lane R0, taken against `v0.7.0` (`02ef3e5f`). It records the evidence that exists for each
-lane at the tag; it does not accept, reject or integrate either one. Since then 0.7.1 has integrated lane B (see
-[Lane B](#lane-b)) and lane A (see [Lane A](#lane-a), the work of A4). Read it with the [seam freeze](p3b-seam-freeze.md) and
+Status: inventory for lane R0 of the compact work, taken against `v0.7.0` (`02ef3e5f`). It records the evidence that exists for each
+lane at the tag; it does not accept, reject or integrate either one. Since then the lanes have been integrated on a private
+integration tree, T (`mahpate-int072-c1` at `2d405125`, [seam freeze](p3b-seam-freeze.md#1-baseline), section 1): lane B (see
+[Lane B](#lane-b)) and lane A (see [Lane A](#lane-a), the work of A4). 0.7.1 shipped without any of it; the compact work moved
+to 0.7.2, where it is qualified again on T before anything is activated ([handover-0.7.1.md](handover-0.7.1.md)). Read it with the [seam freeze](p3b-seam-freeze.md) and
 the slice 4 row of the [P3 design](p3-compact-vectors.md). Nothing compact is active: the compact arms of both lanes are
 test-gated (the few changes that lane A4 makes to resident code are listed on A4's page), and no size or speed claim follows
 from them.
@@ -36,7 +38,7 @@ this:
 | B, `mahpate-p3b-indexes` | `250a98bc` | `250a98bc` review gaps (six files, tests plus one three-line production gate and a GPU preflight extraction) |
 
 A merge of either branch conflicts only because the identical equivalent patches sit next to the new hunks. Reconcile
-by `git cherry-pick` of these five commits, never by merge. B4 and A4 did so in 0.7.1, and A4 put the key-value hunks last.
+by `git cherry-pick` of these five commits, never by merge. B4 and A4 did so, and A4 put the key-value hunks last.
 The two lanes do not conflict with each other.
 
 Three 0.7.0 changes land in functions that lane A also edits and needed a read, not just a textual merge, which A4 made:
@@ -103,9 +105,11 @@ The 21 killed mutants are `pa-iter-cursor-lt`, `pa-group-clock-zero`, `pa-group-
 `pa-exact-cap-quarter`, `pa-exact-compact-arm-off`, `pa-graph-revalidate-wall-clock` and
 `pa-graph-compact-pivot-state-off`. Their killing tests are the lane's parity tests against a resident oracle.
 
-**Closed in 0.7.1 by A4** (the [record consumers of lane A4](p3b-record-consumers.md), accepted at `4670d858`). A4 cherry-picked
+**Closed by A4** (the [record consumers of lane A4](p3b-record-consumers.md), accepted at `4670d858`; T carries its own
+commits). A4 cherry-picked
 lane A's four patches with `git cherry-pick -x`, never by merge: `02062058` and `834a0a6f` without their key-value hunks,
-`c859d2d5` unchanged, as a draft that E4 owns, and `60d65f99` with those hunks last, as a group on K71's bounded visitor.
+`c859d2d5` unchanged, as a draft that E4 then finished (on T its loop walks `ordered_ids`, [E4's page](p3b-exact-scan.md)),
+and `60d65f99` with those hunks last, as a group on K71's bounded visitor (which shipped in 0.7.1).
 It re-created lane A's 47 mutants from their recorded descriptions and anchored them on the tree after the
 cherry-picks (`tests/compact_a4_mutants.json`): 40 were killed there already and 7 survived. Three of the seven,
 `pa-group-clock-zero`, `pa-ql-clock-zero` and `pa-exact-cap-quarter`, are recorded as killed in lane A's ledger: their
@@ -116,24 +120,27 @@ injects the forbidden state through `Collection::apply_committed` kills it. It r
 gives a graph-attached record a deadline, which A4 pinned with `an_attached_record_never_carries_a_deadline_on_compact_or_resident_records`
 and three mutants of its guards; A4's page records that an independent review read the enumeration of the writers and
 found no counterexample. `pa-kv-view-health-removed` was dead code (`Database::resolve` checks health first), so A4
-removed the line and re-based the mutant onto `resolve`. A4 added 170 mutants to the 47: 217 in all, every one killed.
+removed the line and re-based the mutant onto `resolve`. A4 added 170 mutants to the 47: 217 in all, every one killed on A4's own head.
 `verify` of B4's final tool accepts all 217 on A4's head, with none stale (the copy of the tool that A4's branch carries has
 `check`, `run` and `merge` only). The changes that a resident file can see (the exact and
 text legs of the hybrid search and the pivot and evidence reads of `GraphRef::retrieve` read one clock, while the approximate
 leg still reads the wall clock; a named-vector search whose handle turns unhealthy answers `Poisoned`; the
 key-value read path and two guards) are listed on A4's page, with the script that checks the shipped code against
 `v0.7.0`, `python scripts/shadow_copy_check.py` (`--integration` with one `--lane` range per other lane, for a tree that
-holds other lanes). A ledger run is tied to the file it ran on, so on a tree that also holds
-R0's slice 3, which edits `records.rs`, the 52 mutants of A4's ledger in that file are not accepted again until they are
-replayed there (checked on a merge of R0's and A4's heads with B4's final tool: 165 accepted, 51 stale and 1 open of 217, the
-52 all in `records.rs`). The open one, `a4-cursorgroup-07`, needs more than a replay: its anchor, the merge of a base row
-and an overlay entry in `CompactRecordIter::next`, appears a second time in R0's `OrderedIds::next`, so `check` reports
-`matches 2` and the anchor needs more context. The same holds the other way round: R0's 50 mutants in `records.rs` and
-2 in `lib.rs` were replayed on R0's version of those files, which A4 and B4 also edit, so a file-hash check of their runs
-would call them stale on the integrated tree; their anchors still match once there (`check` accepts both R0 ledgers on the
-merge of R0's and A4's heads). R0's 72 mutants in `source.rs` and its one in `quality.rs` are in files that neither lane
-edits. The combined declared-index scan differential, A's compact exact search against B's index rebuild, is B4's
-slice S3 and is not part of what is established here.
+holds other lanes). A ledger run is tied to the file it ran on: a file that changed after a run makes that run stale (not
+failed) until it is replayed again, and [the table below](#the-ledgers-on-the-integration-tree) gives the state on T. Two
+of A4's anchors need more than a replay on T, because T holds a second copy of the code they name. `a4-cursorgroup-07` anchors
+the merge of a base row and an overlay entry in `CompactRecordIter::next`, which appears a second time in R0's
+`OrderedIds::next`; `pa-kv-store-resident-guard-removed` anchors the call that makes the writable key-value handle refuse
+a compact collection (`check_kv_collection` in `Database::kv_store`), which 0.7.1's `kv_store_by_id` repeats. `check`
+reports `matches 2` for both and each anchor needs more context. The
+same holds the other way round: R0's 50 mutants in `records.rs` and 2 in `lib.rs` were replayed on R0's version of
+those files, which B4 and A4 also edit (E4 changes one line of `lib.rs`), so a file-hash check of their runs calls them stale on T; their anchors
+still match once there (`check` accepts both R0 ledgers on T), and [section 7.3 of the seam
+freeze](p3b-seam-freeze.md#73-the-mutants-of-recordsrs-and-librs-on-the-integration-tree) replays them on T: all 52 are killed, on the lane's machine and on separate machines. R0's 72 mutants in `source.rs` and its one in `quality.rs` are in files that
+no other lane edits (those two files on T are byte-identical to R0's head). The combined declared-index scan
+differential, A's compact exact search against B's index rebuild, is B4's slice S3: T carries it, with its 11 mutants in
+`tests/compact_b4_s3_mutants.json`, and it is not part of what R0 established.
 
 ## Lane B
 
@@ -174,7 +181,7 @@ At `v0.7.0` all 18 survivors were test gaps, because the closing tests are in th
 are in the read seam itself (`compact/source.rs` and `records.rs`): lane R0 replayed each of those on the 0.7.0 tree, found
 all seven alive and closed them with its own tests; see [the seam freeze](p3b-seam-freeze.md#7-the-r0-mutation-campaign).
 
-**Closed in 0.7.1 by B4.** B4 cherry-picked `250a98bc` (never merged it) and replayed the other eleven (consumers,
+**Closed by B4.** B4 cherry-picked `250a98bc` (never merged it) and replayed the other eleven (consumers,
 settings and rerank) in the evidence form below: each gap is measured alive on `v0.7.0` before the tests that kill it,
 and each kill records the failing tests, the SHA-256 of the file before, during and after, and a green selector before
 the first and after the last mutant of its replay. B4's ledger, `tests/compact_b4_mutants.json`, holds 48 mutants: lane
@@ -191,7 +198,8 @@ are the same replacements as `R0-AU-01`, `R0-AU-02` and `R0-AU-12`, which B4 re-
 three are killed in both ledgers. B4's ledger lists the seven seam obligations and the 17 mutants of the earlier seam
 campaign as `reused`, and its `verify` mode reads R0's ledger to check that it holds each of those 24, and that the
 final-tree run of each obligation is a kill that restored the file byte-identically (the 17 mutants carry only their
-baseline kill on `v0.7.0`).
+baseline kill on `v0.7.0`). B4's slice 3, a differential of the declared-index scan that runs the compact arm against the
+resident arm and a model of the contract, has 11 mutants of its own in `tests/compact_b4_s3_mutants.json`; T carries it.
 
 ## Evidence that would settle OPEN-71-02
 
@@ -204,10 +212,28 @@ it rests on pinned by a test where one can be written. Replays of several mutant
 `tests/compact_mutant_replay.py` (B4) checks this form mechanically: `check` runs the anchor test, `run` replays one
 mutant per build, and `verify` re-checks the recorded evidence against the tree it runs in, calling a run that was made
 on an older tree stale and not failed. `verify` is in B4's final tool; the copy of the tool that A4's branch carries has
-`check`, `run` and `merge` only. R0's ledgers record the fields of this form in their own shape (`final` and `independent`
-records), and `check` accepts them, on R0's head and on a merge with A4's; `verify` reads the `runs` shape of B4's and A4's
-lists, so it reports every mutant of R0's ledgers open (see [the seam freeze](p3b-seam-freeze.md#9-verification)). A4's ledger (`tests/compact_a4_mutants.json`) passes `check` on A4's head; on a tree that also holds R0's slice 3
-one of its anchors matches twice (see [Lane A](#lane-a)).
+`check`, `run` and `merge` only. R0's two older ledgers record the fields of this form in their own shape (`final` and
+`independent` records), and `check` accepts them, on R0's head and on T; `verify` reads the `runs` shape of B4's and A4's
+lists, so it reports every mutant of those two ledgers open (see [the seam freeze](p3b-seam-freeze.md#9-verification)). A4's
+ledger (`tests/compact_a4_mutants.json`) passes `check` on A4's head; on T two of its anchors match twice (see [Lane A](#lane-a)).
+
+## The ledgers on the integration tree
+
+R0 ran `check` and `verify` of T's `tests/compact_mutant_replay.py` on every compact ledger on `2d405125` (2026-11-05), before any lane
+replayed its list there; the last row of the table is R0's own replay on T, which came after (section 7.3 of the seam freeze).
+`verify` calls a run stale when the file it ran on differs from the file on T, and `verify --strict`
+accepts only runs made on exactly T's sources (`python tests/compact_mutant_replay.py sources`), so no run that a lane recorded before T
+is accepted by `--strict`. The counts of the other rows change when a lane replays its list on T.
+
+| Ledger | Mutants | `check` on T | `verify` on T | The stale runs are in files that changed since |
+|---|---:|---|---|---|
+| R0 seam, `compact_seam_mutants.json` | 91 | every anchor matches once | all 91 open (the ledger has its own record shape, which `verify` does not read) | |
+| R0 cursors, `compact_ordered_cursors_mutants.json` | 34 | every anchor matches once | all 34 open (own record shape) | |
+| R0 on T, `compact_r0_integrated_mutants.json` (the 52 mutants of `records.rs` and `lib.rs` of the two ledgers above) | 52 | every anchor matches once | 52 accepted by `verify --strict` (104 runs on exactly T's sources, on two machines) | none |
+| B4, `compact_b4_mutants.json` | 48 | ok | 25 accepted, 23 stale | `lib.rs` (14), `collection.rs` (6), `compact/source.rs` (2), `records.rs` (1) |
+| B4 slice 3, `compact_b4_s3_mutants.json` | 11 | ok | 4 accepted, 7 stale | `lib.rs` (7) |
+| A4, `compact_a4_mutants.json` | 217 | two anchors match twice | 99 accepted, 116 stale, 2 open (those two) | `records.rs` (51), `property_graph/retrieve.rs` (28), `kv.rs` (25), `lib.rs` (11), `property_graph/mod.rs` (1) |
+| E4, `compact_e4_mutants.json` | 24 | ok | no runs recorded: 24 open | |
 
 ## Not established here
 
@@ -219,7 +245,9 @@ The classification of the evidence comes from the lanes' own reports and commit 
 Since then B4 replayed lane B's eleven consumer survivors (see [Lane B](#lane-b)). It did not replay lane B's 18 killed
 mutants as such: eight of them (consumers, settings, rerank and quality) are re-derived in its list, and the other ten
 were not replayed as such. A4 replayed lane A's 26 survivors, the other 21 mutants of lane A's ledger and 170 of its own (see
-[Lane A](#lane-a)); R0 did not replay them. R0 checked A4's ledger with `check` and `verify` only, and ran the default and
-all-features library suites on a scratch merge of its head with A4's head `1db6a43a` (A4's final head `4670d858` adds only a
-script and one docs page to it): 1,138 and 1,510 tests passed and none failed. It ran no clippy and no other test target
-on that merge.
+[Lane A](#lane-a)); R0 did not replay them. R0 checked the ledgers of A4, B4 and E4 on T with `check` and `verify` only
+([the table above](#the-ledgers-on-the-integration-tree)) and replayed none of their mutants. R0 replayed on T its own 52 mutants of
+`records.rs` and `lib.rs` and not the other 73 of its ledgers (section 7.3 of the seam freeze). The coordinator's runs on T,
+the library suites, the strict lint and the documentation guards,
+are in section 1 of [the seam freeze](p3b-seam-freeze.md#1-baseline) with their counts; R0 ran the 204-test selector of its own replays on T,
+and no clippy and no other test target.

@@ -13,6 +13,7 @@
   "overlay": 10
  },
  "total": 34,
+ "integration_tree_replay": "On the integration tree T (commit 2d40512513a851d8c13c8747411609517d4300b1) the 21 mutants of this ledger that mutate src/records.rs were replayed again, together with the 31 of tests/compact_seam_mutants.json, on two machines; the evidence is in tests/compact_r0_integrated_mutants.json (docs/projects/roadmap/p3b-seam-freeze.md, section 7.3). The records of this ledger are unchanged.",
  "killed": 34,
  "survived": 0,
  "other": 0,

@@ -9,9 +9,9 @@ criterion. The owner explicitly approved J.1-J.9 individually on 2026-11-02,
 subject to the independent acceptance and dependencies below. P3b slices 0, 1a,
 1b, 2 and 3 are independently accepted and integrated behind test gates, and
 lane B's read seam is integrated with its fix-forward and the replayed mutation
-ledgers of 0.7.1 (all 18 of its replay obligations: seven in R0's ledger, eleven in B4's); that does
+ledgers (all 18 of its replay obligations: seven in R0's ledger, eleven in B4's; carried on the integration tree for 0.7.2); that does
 not satisfy the remaining engine-integration, source-interface or lifecycle
-prerequisites. The 0.7.1 [seam freeze](p3b-seam-freeze.md) records what the
+prerequisites. The [seam freeze](p3b-seam-freeze.md) (written during 0.7.1 and carried to 0.7.2) records what the
 code at v0.7.0 provides and states the section G additions as concrete shapes;
 the paragraphs below keep their setup-head wording unless marked reconciled.
 
@@ -634,7 +634,7 @@ crate-private `ReadAccess::{base_rows, base_vector_at, source_identity,
 affected_since, score_batch}` with explicit lifetimes/error propagation,
 not a second public trait. `base_rows` iterates physical source rows;
 `affected_since(S)` must cover every commit S..T or fail explicitly.
-The 0.7.1 [seam freeze](p3b-seam-freeze.md#5-additions-for-p3c) states these as
+The [seam freeze](p3b-seam-freeze.md#5-additions-for-p3c) states these as
 concrete signatures, and the owner approved them as additive shapes on
 2026-11-05 (OPEN-71-03). Lane R0's slice 3 implemented `base_rows`,
 `affected_ids` (for `affected_since`) and `ordered_ids` (crate-private, under the
@@ -822,11 +822,11 @@ wire/binding fields remain frozen for this slice.
   (`CompactGeneration`, `CompactView`), a base-plus-overlay `CollectionRecords`,
   an ordered base-plus-overlay cursor (`compact_iter`) and a bounded read
   workspace (`ReadWorkspace`) exist; there is no `ReadAccess` trait, and the
-  seam compiles only under `cfg(test)`. Added in 0.7.1 (lane R0, slice 3): the
+  seam compiles only under `cfg(test)`. Added by lane R0's slice 3 (written during 0.7.1, carried to 0.7.2): the
   physical-base cursor `CompactView::base_rows`, the affected-ID cursor
   `CollectionRecords::affected_ids` (the whole overlay, without an `S`: the floor
   and lineage check waits for the binding) and the non-materializing
-  `CollectionRecords::ordered_ids`. Still absent: a portable binding and a
+  `CollectionRecords::ordered_ids`, which E4's compact exact scan walks. Still absent: a portable binding and a
   fallible bounded batch scorer (base-only vectors exist as
   `CompactView::read_vector`). G's assumptions are restated with concrete shapes
   in the [seam freeze](p3b-seam-freeze.md#5-additions-for-p3c), which the owner
