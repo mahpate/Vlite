@@ -51,7 +51,7 @@ service to operate.
   commands in the shell and MCP, and agent-memory tools and a CLI client.
 - **Performance.** At 100,000 × 384 dimensions, 0.7 had about 42% lower exact
   and 23% lower filtered p50 query latency than 0.6, with identical recall and
-  file size. Ingest, reopen and memory stayed within about 3%. 0.7.1 was not
+  file size. Ingest, reopen and memory stayed within about 3%. 0.7.2 was not
   re-measured.
   [Results](benchmarks/RESULTS.md#release-candidate-070-against-v060-november-4-2026-utc)
 
@@ -198,7 +198,7 @@ Prebuilt packages: [PyPI](docs/INSTALL.md#pypi) and [release assets](docs/INSTAL
 | Webhooks | [WEBHOOKS](docs/WEBHOOKS.md) |
 | Property graphs, expiry and algorithms | [GRAPH](docs/GRAPH.md) |
 | Benchmarks | [Methodology](benchmarks/README.md), [results](benchmarks/RESULTS.md) |
-| Upgrade notes | [Release notes](docs/RELEASE-0.7.1.md) |
+| Upgrade notes | [Release notes](docs/RELEASE-0.7.2.md) |
 
 ## Status and limitations
 
