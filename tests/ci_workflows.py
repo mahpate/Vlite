@@ -7,7 +7,7 @@ import re
 import tempfile
 import textwrap
 import unittest
-from unittest.mock import patch
+from unittest.mock import Mock, patch
 
 ROOT = Path(__file__).resolve().parents[1]
 spec = importlib.util.spec_from_file_location("ci_policy", ROOT / "scripts/ci_policy.py")
@@ -465,6 +465,26 @@ class TestProof(unittest.TestCase):
         )
         self.assertEqual(proof.read_cargo_list(output),
                          {("vlite-aa", "a::b::c"), ("vlite-aa", "slow"), ("it-bb", "plain"), ("it-bb", "bench_one")})
+
+    def test_cargo_list_survives_the_colored_headings_ci_produces(self):
+        # CI runs with CARGO_TERM_COLOR=always: the heading starts with escape codes.
+        output = (
+            "\x1b[1m\x1b[92m     Running\x1b[0m unittests src/lib.rs (target/debug/deps/vlite-aa)\n"
+            "a::b: test\n\n1 test, 0 benchmarks\n"
+            "\x1b[1m\x1b[92m     Running\x1b[0m tests/it.rs (target/debug/deps/it-bb)\nplain: test\n"
+        )
+        self.assertEqual(proof.read_cargo_list(output), {("vlite-aa", "a::b"), ("it-bb", "plain")})
+
+    def test_parity_asks_cargo_for_plain_output_and_accepts_colored_output(self):
+        colored = ("\x1b[1m\x1b[92m     Running\x1b[0m unittests src/lib.rs (target/debug/deps/vlite-aa)\n"
+                   "a: test\n")
+        cargo = Mock(returncode=0, stdout=colored)
+        listing = Mock(returncode=0, stdout=self.listing(**{"vlite-aa": {"a": (False, True)}}), stderr="")
+        with patch.object(proof.subprocess, "run", side_effect=[cargo, listing]) as run:
+            self.assertEqual(proof.parity(["--locked", "--all-targets"]), 0)
+        command = run.call_args_list[0].args[0]
+        self.assertEqual(command[:4], ["cargo", "test", "--color", "never"])
+        self.assertEqual(command[-2:], ["--", "--list"])
 
     def test_nextest_listing_keeps_the_ignored_flag_and_the_selection(self):
         document = self.listing(**{"vlite-aa": {"a": (False, True), "b": (True, False), "c": (False, False)}})

@@ -26,6 +26,7 @@ import sys
 
 RUNNING = re.compile(r"^\s*Running .*\((?P<path>[^()]+)\)\s*$")
 LISTED = re.compile(r"^(?P<name>.+): (?:test|benchmark)$")
+ANSI = re.compile(r"\x1b\[[0-9;]*[A-Za-z]")
 
 
 def binary_key(path):
@@ -58,9 +59,12 @@ def names(listing, selected_only=False):
 
 
 def read_cargo_list(output):
-    """The set of (binary file name, test name) in the interleaved output of `cargo test -- --list`."""
+    """The set of (binary file name, test name) in the interleaved output of `cargo test -- --list`.
+
+    CI sets CARGO_TERM_COLOR=always, so the headings can carry ANSI escapes: they are dropped first.
+    """
     found, current = set(), None
-    for line in output.splitlines():
+    for line in ANSI.sub("", output).splitlines():
         header = RUNNING.match(line)
         if header:
             current = binary_key(header["path"])
@@ -143,7 +147,7 @@ def shards(count, args):
 
 def parity(args):
     done = subprocess.run(
-        ["cargo", "test", *args, "--", "--list"], stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+        ["cargo", "test", "--color", "never", *args, "--", "--list"], stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
         text=True, encoding="utf-8", errors="replace",
     )
     if done.returncode != 0:
