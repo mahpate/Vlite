@@ -53,6 +53,10 @@ test("KV presentation refuses lossy textarea encodings and converts formats loss
 test("Memory observation timestamps require server time, never the device clock", () => {
   assert.equal(u.serverTime("Thu, 05 Nov 2026 22:00:00 GMT"), 1793915998000);
   assert.equal(u.serverTime(null), null);
+  const guidance = "Your computer or proxy clock may be ahead of the VLite server.";
+  assert.ok(u.memoryClockGuidance("Server time is unavailable").includes(guidance));
+  assert.ok(u.memoryClockGuidance("HTTP 400: invalid_input: memory request field is invalid").includes(guidance));
+  assert.equal(u.memoryClockGuidance("HTTP 403: forbidden_scope"), "");
 });
 
 const draft = {

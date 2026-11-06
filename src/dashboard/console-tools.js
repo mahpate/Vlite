@@ -1025,6 +1025,10 @@
     const milliseconds = Date.parse(date) - 2000;
     return Number.isSafeInteger(milliseconds) && milliseconds >= 0 ? milliseconds : null;
   }
+  function memoryClockGuidance(message) {
+    if (!/observed_at|future|clock|server time is unavailable|memory request field is invalid/i.test(String(message))) return "";
+    return "Your computer or proxy clock may be ahead of the VLite server. Check both clocks before retrying; retain the same idempotency key and request.";
+  }
   const displayKey = value => JSON.stringify(value).replaceAll(" ", "␠");
   function memoryRequest(action, input, now) {
     const required = (value, label) => {
@@ -1289,7 +1293,14 @@
       const signature = JSON.stringify({ binding, action, input });
       // Reusing an unchanged draft must preserve its observation timestamp and idempotent body.
       if (memoryAttempt?.signature !== signature && ["remember", "consolidate"].includes(action)) await ctx.api("GET", "/v1/capabilities", undefined, { data: false });
-      const body = memoryAttempt?.signature === signature ? memoryAttempt.request : memoryRequest(action, input, ctx.serverNow());
+      let body;
+      try {
+        body = memoryAttempt?.signature === signature ? memoryAttempt.request : memoryRequest(action, input, ctx.serverNow());
+      } catch (error) {
+        const guidance = memoryClockGuidance(error.message);
+        if (guidance) text("memory-outcome", `${error.message} ${guidance}`);
+        throw error;
+      }
       const read = ["recall", "receipts/lookup"].includes(action);
       if (!read && !await ctx.confirm(`${actionLabels[action]} in binding ${binding}, exact scope ${JSON.stringify(body.scope)}?${action === "forget" ? " This is NOT secure erasure." : ""} Idempotency key: ${body.idempotency_key}. No automatic retry.`)) return;
       memoryAttempt = { signature, binding, operation: action, request: body };
@@ -1308,7 +1319,8 @@
         }
         text("memory-outcome", `${actionLabels[action]}: server confirmed. ${action === "recall" ? "Inspect truncation and ranking details in the response." : "Retain the response and receipt before signing out."}`);
       } catch (error) {
-        text("memory-outcome", `${error.message} ${/observed_at|future|clock/i.test(error.message) ? "Observation time must not be ahead of the server. Check the server clock and proxy Date header; retain the submitted request and verify its outcome before changing the idempotency key. " : ""}${read ? "Read failed." : "Outcome may be unknown after a transport or server failure. Retain the original key and request; do not generate a new key to retry."} The last successful response, if any, remains below.`);
+        const guidance = memoryClockGuidance(error.message);
+        text("memory-outcome", `${error.message} ${guidance ? `${guidance} ` : ""}${read ? "Read failed." : "Outcome may be unknown after a transport or server failure. Retain the original key and request; do not generate a new key to retry."} The last successful response, if any, remains below.`);
         throw error;
       }
     });
@@ -2247,7 +2259,7 @@
     collectionName, collectionPath, settings, scoreDirection, redact, maskSecret, OPERATIONS, credentialRequest, credentialScope, graceSeconds,
     expiry, rerank, sparseVector, webhookRequest, WEBHOOK_EVENTS, feedRows, pitrRequest, feedPath,
     boundedInteger, importRows, chunk, resumePlan, savedQueryV2, autoMaintenance, autoMaintenanceForm, backupSchedule, memoryRows, requestAllowed, isSearch,
-    kvAddress, kvValue, kvPresentation, kvExpected, memoryRequest, providerAlias, serverTime, displayKey,
+    kvAddress, kvValue, kvPresentation, kvExpected, memoryRequest, providerAlias, serverTime, memoryClockGuidance, displayKey,
     vectorDeclaration, namedVectorValues,
   } };
 })();

@@ -31,6 +31,7 @@ class WorkspaceApi(FakeApi):
         }
         self.fail_write = False
         self.fail_memory = False
+        self.memory_clock_error = False
         self.fail_vectors = False
 
     def api(self, method, path, query, body, headers):
@@ -57,6 +58,8 @@ class WorkspaceApi(FakeApi):
                 return self.error(404, "kv_not_found")
             return 200, self.values[key], {}
         if path.startswith("/v1/memory/"):
+            if self.memory_clock_error:
+                return 400, {"error": {"code": "invalid_input", "message": "memory request field is invalid"}}, {}
             if self.fail_memory:
                 return self.error(503, "busy")
             if body["scope"] != {"agent": "assistant", "user": "owner"}:
@@ -277,6 +280,13 @@ def exercise(browser):
     expect(page.locator("#memory-outcome")).to_contain_text("server confirmed")
     replay = next(item for item in reversed(fake.log) if item["path"].endswith("/remember"))
     assert replay["body"] == original, "Explicit replay of an unchanged draft must preserve its timestamp"
+    fake.memory_clock_error = True
+    page.locator("#memory-idempotency").fill("clock-error")
+    page.locator("#memory-run").click()
+    confirm(page, "Idempotency key: clock-error")
+    expect(page.locator("#memory-outcome")).to_contain_text(
+        "Your computer or proxy clock may be ahead of the VLite server")
+    fake.memory_clock_error = False
     page.locator("#memory-action").select_option("consolidate")
     page.locator("#memory-transformation").fill("summary-v1")
     page.locator("#memory-references").fill(json.dumps([{"id": f"m{n}", "revision": "1"} for n in range(65)]))
