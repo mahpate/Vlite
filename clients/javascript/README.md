@@ -8,7 +8,7 @@ for authentication, examples, supported operations and uncertain-write handling.
 This package does not automatically retry requests or follow redirects.
 ## Key-value operations
 
-The KV REST surface (added in 0.7.0) requires a server with KV routes and an existing,
+The KV REST surface requires a server with KV routes and an existing,
 dedicated one-dimensional `cache` collection. Namespaces are not authorization
 boundaries. Run as an ESM script with `VLITE_URL` and `VLITE_AUTH_TOKEN` set:
 
