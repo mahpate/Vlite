@@ -1,6 +1,6 @@
 # VLite 0.7.2 upgrade and rollback
 
-VLite 0.7.2 adds an atomic key-value batch and a multi-key read to every key-value surface, adds key-value operations to the embedded libraries and lets the dashboard sign in while agent memory is enabled.
+VLite 0.7.2 adds an atomic key-value batch and a multi-key read (REST, gRPC, the clients, the shell and the MCP tools), adds key-value operations to the embedded libraries and lets the dashboard sign in while agent memory is enabled.
 
 <!-- source: docs/KEY-VALUE.md, docs/API.md#key-value-entries, docs/GRPC.md#key-value-entries, docs/MCP.md#local-key-value-tools, docs/TOOLS.md, bindings/README.md, docs/CONSOLE.md, docs/SECURITY.md#memory-bound-resources, docs/MEMORY.md -->
 
@@ -42,7 +42,7 @@ The C library, the Python package (`vlite-embedded`), the Node.js package (`@vli
 
 ### Agent memory
 
-Expiry and forget are logical deletion. A memory whose `expires_at_ms` has passed is hidden from reads and later removed from the graph, but its expiry does not carry over to its evidence record: the record stays in the evidence collection until someone with `raw_access` deletes it, or until it expires on its own if it was given an expiry. Only `forget` deletes the evidence record that only the forgotten memory used. Neither is secure erasure. This documents the behavior of 0.7.1 and earlier; nothing changed in the server. See [Forget](MEMORY.md#forget).
+Expiry and forget are logical deletion. A memory whose `expires_at_ms` has passed is hidden from reads and later removed from the graph, but its expiry does not carry over to its evidence record: the record stays in the evidence collection until someone with `raw_access` deletes it, or until it expires on its own if it was given an expiry. Only `forget` deletes the evidence record that only the forgotten memory used. Neither is secure erasure. This documents behavior that 0.7.1 already had; nothing changed in the server. See [Forget](MEMORY.md#forget).
 <!-- source: docs/MEMORY.md (expires_at_ms, Forget, Limits and error codes) -->
 
 ### Clients and guides
@@ -115,10 +115,10 @@ After a rollback:
   <!-- source: src/server/admin.rs (configured_admin_router), docs/GRPC.md, docs/SECURITY.md#memory-bound-resources -->
 - **Backups are the administrator's while anything is reserved.** A backup job that uses a backup credential gets 403 once memory bindings exist: run it with the administrator token, or take the backups before you enable memory.
   <!-- source: src/server.rs (authorize_need), docs/SECURITY.md#memory-bound-resources -->
-- **Batch.** One collection per batch, at most 1,000 operations and 4,194,304 value bytes, each key once, no deadline on a batch put and no check-only operation. Over REST, a batch inside every other limit can still pass the 8 MiB body limit when many of its keys are escaped in JSON, and then answers 413 `invalid_json`; a batch is atomic and cannot be split, so use fewer or shorter keys. A batch that changes a record in a file of format 1 is refused. The shell and MCP tools open the file themselves, so stop `vlite-server` first.
+- **Batch.** One collection per batch, at most 1,000 operations and 4,194,304 value bytes, each key once, no deadline on a batch put and no check-only operation. Over REST, a batch inside every other limit can still pass the 8 MiB body limit when many of its keys are escaped in JSON, and then answers 413 `invalid_json`; a batch is atomic and cannot be split, so use fewer or shorter keys. A batch that changes a record in a file of format 1 is refused.
 - **Multi-get.** At most 1,000 keys per call, and a long result stops early with `next_index`; the client never continues it, and calls share no snapshot.
   <!-- source: docs/KEY-VALUE.md (Batches and multi-get, Limits, Choose a surface) -->
-- **Key-value generally.** A list still reads the whole collection, so its cost grows with the number of entries; keep large key spaces in their own collections and list by a narrow prefix. A version is a compare-and-set token, not a fencing token.
+- **Key-value generally.** A list still reads the whole collection, so its cost grows with the number of entries; keep large key spaces in their own collections and list by a narrow prefix. A version is a compare-and-set token, not a fencing token. The local shell and MCP tools, `kv-batch` and `vlite_kv_batch` included, open the file themselves, so stop `vlite-server` first; `vlite-mcp --server` does not forward them.
   <!-- source: docs/KEY-VALUE.md (Listing, paging and its cost; Revisions are not fencing tokens) -->
 - **Embedded key-value.** The embedded libraries open the file inside your process, so the single-writer rule holds; they have the four single-key operations only.
   <!-- source: bindings/README.md#key-value, docs/KEY-VALUE.md (Choose a surface) -->
