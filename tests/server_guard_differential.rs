@@ -2376,10 +2376,10 @@ async fn a_name_outside_a_credentials_grant_is_refused_whatever_it_names() {
         sc: root_collection.to_owned(),
         so: root_collection.to_owned(),
     };
-    let cases: [(usize, &[&str], [(&str, Names); 3]); 2] = [
+    let cases = [
         (
             1,
-            &["$c", "$g", "$o", "$og", "$C", "$O"],
+            &["$c", "$g", "$o", "$og", "$C", "$O"][..],
             [
                 ("a reserved name", limited("notes_ev", "notes_graph")),
                 ("a missing name", limited("absent_ev", "absent_graph")),
@@ -2394,7 +2394,7 @@ async fn a_name_outside_a_credentials_grant_is_refused_whatever_it_names() {
         ),
         (
             4,
-            &["$C", "$O"],
+            &["$C", "$O"][..],
             [
                 ("a reserved root name", tenant("notes_ev")),
                 ("a missing root name", tenant("absent_ev")),
