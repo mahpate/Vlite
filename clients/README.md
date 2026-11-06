@@ -602,9 +602,8 @@ until nil. Search options and collection settings use `Object`, preserving REST
 field names, modes, typed filters and decimal-string integers. Structured record,
 metadata, page and hit types are included. Dynamic JSON numbers use `json.Number`.
 
-The Go client has no key-value or agent-memory methods: it does not wrap the
-`/v1/collections/{collection}/kv/...` or `/v1/memory/{binding}/...` routes. Use the Python,
-JavaScript or .NET client for them.
+The Go client has no agent-memory methods: it does not wrap the `/v1/memory/{binding}/...`
+routes. Use the Python, JavaScript or .NET client for them.
 
 Use `errors.As(err, &apiError)` with `*vlite.APIError` to inspect `Status`, `Code`
 and `RequestID`. `*vlite.TransportError` has code `transport_error` and unwraps
@@ -745,8 +744,8 @@ dotnet build clients/dotnet/VLite.Client.Tests
 dotnet run --project clients/dotnet/VLite.Client.Tests --no-build
 ```
 
-Go and .NET cover the core REST surface above, including exact/ANN and typed filters; .NET also
-wraps key-value and agent memory (see the sections above and below). The broader Python/JS
+Go and .NET cover the core REST surface above, including exact/ANN and typed filters; both
+also wrap key-value, and .NET also wraps agent memory (see the sections above and below). The broader Python/JS
 convenience APIs for imports, backups, diagnostics, credentials, conditional writes and
 maintenance are not yet wrapped in these two clients. No client silently retries or falls back
 between search modes.
