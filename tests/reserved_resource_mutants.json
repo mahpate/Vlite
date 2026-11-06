@@ -1565,7 +1565,7 @@
         "old": "if !self.collection_visible(&stored) {",
         "new": "if false && !self.collection_visible(&stored) {",
         "cmd": "cargo test --locked --offline --features server --no-fail-fast --test server_guard_differential",
-        "ran_on": "dfe6eb07",
+        "ran_on": "0b085870",
         "result": "killed",
         "failing_tests": [
           "matrix_admin",
@@ -1580,7 +1580,7 @@
           "matrix_wildcard"
         ],
         "note": "matrix_admin:  | matrix_editor:  | matrix_raw:  | matrix_raw_other:  | matrix_read_only:  | matrix_tenant: ",
-        "seconds": 332
+        "seconds": 207
       },
       {
         "id": "G71-02",
@@ -1605,9 +1605,10 @@
         "old": ".raw_allowed(self.raw(), reserved::Resource::Collection, stored)",
         "new": ".raw_allowed(None, reserved::Resource::Collection, stored)",
         "cmd": "cargo test --locked --offline --features server --no-fail-fast --test server_guard_differential",
-        "ran_on": "dfe6eb07",
+        "ran_on": "0b085870",
         "result": "killed",
         "failing_tests": [
+          "a_name_outside_a_credentials_grant_is_refused_whatever_it_names",
           "a_tenant_is_refused_every_route_that_spans_the_database",
           "a_tenants_body_names_are_stored_names_that_reach_the_guard",
           "lists_and_the_feed_never_name_a_reserved_resource_to_a_caller_that_may_not_reach_it",
@@ -1627,8 +1628,8 @@
           "routes_that_name_no_resource_leak_nothing_and_change_nothing",
           "the_digest_sees_a_write_to_every_protected_resource"
         ],
-        "note": "a_tenant_is_refused_every_route_that_spans_the_database:  | a_tenants_body_names_are_stored_names_that_reach_the_guard:  | lists_and_the_feed_never_name_a_reserved_resource_to_a_caller_that_may_not_reach_it:  | markers_reach_their_holders_so_a_leak_would_show:  | matrix_admin:  | matrix_editor: ",
-        "seconds": 147
+        "note": "a_name_outside_a_credentials_grant_is_refused_whatever_it_names:  | a_tenant_is_refused_every_route_that_spans_the_database:  | a_tenants_body_names_are_stored_names_that_reach_the_guard:  | lists_and_the_feed_never_name_a_reserved_resource_to_a_caller_that_may_not_reach_it:  | markers_reach_their_holders_so_a_leak_would_show:  | matrix_admin: ",
+        "seconds": 148
       },
       {
         "id": "G71-04",
@@ -1637,9 +1638,10 @@
         "old": ".raw_allowed(self.raw(), reserved::Resource::Graph, stored)",
         "new": ".raw_allowed(None, reserved::Resource::Graph, stored)",
         "cmd": "cargo test --locked --offline --features server --no-fail-fast --test server_guard_differential",
-        "ran_on": "dfe6eb07",
+        "ran_on": "0b085870",
         "result": "killed",
         "failing_tests": [
+          "a_name_outside_a_credentials_grant_is_refused_whatever_it_names",
           "a_tenant_is_refused_every_route_that_spans_the_database",
           "a_tenants_body_names_are_stored_names_that_reach_the_guard",
           "lists_and_the_feed_never_name_a_reserved_resource_to_a_caller_that_may_not_reach_it",
@@ -1659,8 +1661,8 @@
           "routes_that_name_no_resource_leak_nothing_and_change_nothing",
           "the_digest_sees_a_write_to_every_protected_resource"
         ],
-        "note": "a_tenant_is_refused_every_route_that_spans_the_database:  | a_tenants_body_names_are_stored_names_that_reach_the_guard:  | lists_and_the_feed_never_name_a_reserved_resource_to_a_caller_that_may_not_reach_it:  | markers_reach_their_holders_so_a_leak_would_show:  | matrix_admin:  | matrix_editor: ",
-        "seconds": 149
+        "note": "a_name_outside_a_credentials_grant_is_refused_whatever_it_names:  | a_tenant_is_refused_every_route_that_spans_the_database:  | a_tenants_body_names_are_stored_names_that_reach_the_guard:  | lists_and_the_feed_never_name_a_reserved_resource_to_a_caller_that_may_not_reach_it:  | markers_reach_their_holders_so_a_leak_would_show:  | matrix_admin: ",
+        "seconds": 124
       },
       {
         "id": "G71-05",
@@ -1669,7 +1671,7 @@
         "old": "move |stored| self.collection_visible(stored)",
         "new": "move |_stored| true",
         "cmd": "cargo test --locked --offline --features server --no-fail-fast --test server_guard_differential",
-        "ran_on": "dfe6eb07",
+        "ran_on": "0b085870",
         "result": "killed",
         "failing_tests": [
           "matrix_admin",
@@ -1685,7 +1687,7 @@
           "matrix_wildcard"
         ],
         "note": "matrix_admin:  | matrix_editor:  | matrix_memory_only:  | matrix_raw:  | matrix_raw_other:  | matrix_read_only: ",
-        "seconds": 198
+        "seconds": 217
       },
       {
         "id": "G71-06",
@@ -1694,7 +1696,7 @@
         "old": "let hidden = !self.graph_visible(&stored);",
         "new": "let hidden = false;",
         "cmd": "cargo test --locked --offline --features server --no-fail-fast --test server_guard_differential",
-        "ran_on": "dfe6eb07",
+        "ran_on": "0b085870",
         "result": "killed",
         "failing_tests": [
           "matrix_admin",
@@ -1709,7 +1711,7 @@
           "matrix_wildcard"
         ],
         "note": "matrix_admin:  | matrix_editor:  | matrix_raw:  | matrix_raw_other:  | matrix_read_only:  | matrix_tenant: ",
-        "seconds": 209
+        "seconds": 186
       },
       {
         "id": "G71-07",
@@ -1718,13 +1720,13 @@
         "old": "if let admin::Role::Scoped(grant) = &self.role",
         "new": "if let admin::Role::Scoped(grant) = &self.role && false",
         "cmd": "cargo test --locked --offline --features server --no-fail-fast --test server_ops",
-        "ran_on": "dfe6eb07",
+        "ran_on": "0b085870",
         "result": "killed",
         "failing_tests": [
           "scopes_fail_closed_on_recreated_collections_and_switched_databases"
         ],
         "note": "scopes_fail_closed_on_recreated_collections_and_switched_databases: ",
-        "seconds": 183,
+        "seconds": 180,
         "comment": "Not killed by the generated differential, which does not model grants bound to a collection ID and lineage; killed by the existing server_ops test of recreated collections and switched databases."
       },
       {
@@ -1734,9 +1736,10 @@
         "old": "tenants::qualify(&self.role, name)",
         "new": "name.to_owned()",
         "cmd": "cargo test --locked --offline --features server --no-fail-fast --test server_guard_differential",
-        "ran_on": "dfe6eb07",
+        "ran_on": "0b085870",
         "result": "killed",
         "failing_tests": [
+          "a_name_outside_a_credentials_grant_is_refused_whatever_it_names",
           "a_tenant_is_refused_every_route_that_spans_the_database",
           "a_tenants_body_names_are_stored_names_that_reach_the_guard",
           "generated_requests_take_effect_when_nothing_is_hidden",
@@ -1758,8 +1761,8 @@
           "routes_that_name_no_resource_leak_nothing_and_change_nothing",
           "the_digest_sees_a_write_to_every_protected_resource"
         ],
-        "note": "a_tenant_is_refused_every_route_that_spans_the_database:  | a_tenants_body_names_are_stored_names_that_reach_the_guard:  | generated_requests_take_effect_when_nothing_is_hidden:  | import_jobs_answer_only_to_the_credentials_that_reach_their_collection:  | lists_and_the_feed_never_name_a_reserved_resource_to_a_caller_that_may_not_reach_it:  | markers_reach_their_holders_so_a_leak_would_show: ",
-        "seconds": 165
+        "note": "a_name_outside_a_credentials_grant_is_refused_whatever_it_names:  | a_tenant_is_refused_every_route_that_spans_the_database:  | a_tenants_body_names_are_stored_names_that_reach_the_guard:  | generated_requests_take_effect_when_nothing_is_hidden:  | import_jobs_answer_only_to_the_credentials_that_reach_their_collection:  | lists_and_the_feed_never_name_a_reserved_resource_to_a_caller_that_may_not_reach_it: ",
+        "seconds": 130
       },
       {
         "id": "G71-09",
@@ -1768,15 +1771,16 @@
         "old": "self.guard_collection(db, stored.to_owned())",
         "new": "self.guard_collection(db, self.qualify(stored))",
         "cmd": "cargo test --locked --offline --features server --no-fail-fast --test server_guard_differential",
-        "ran_on": "dfe6eb07",
+        "ran_on": "0b085870",
         "result": "killed",
         "failing_tests": [
+          "a_name_outside_a_credentials_grant_is_refused_whatever_it_names",
           "a_tenants_body_names_are_stored_names_that_reach_the_guard",
           "matrix_tenant",
           "matrix_tenant_editor"
         ],
-        "note": "a_tenants_body_names_are_stored_names_that_reach_the_guard:  | matrix_tenant:  | matrix_tenant_editor: ",
-        "seconds": 352
+        "note": "a_name_outside_a_credentials_grant_is_refused_whatever_it_names:  | a_tenants_body_names_are_stored_names_that_reach_the_guard:  | matrix_tenant:  | matrix_tenant_editor: ",
+        "seconds": 215
       },
       {
         "id": "G71-10",
@@ -1785,13 +1789,13 @@
         "old": "item.name = self.unqualify(&item.name);",
         "new": "item.name = item.name.clone();",
         "cmd": "cargo test --locked --offline --features server --no-fail-fast --test server_guard_differential",
-        "ran_on": "dfe6eb07",
+        "ran_on": "0b085870",
         "result": "killed",
         "failing_tests": [
           "lists_and_the_feed_never_name_a_reserved_resource_to_a_caller_that_may_not_reach_it"
         ],
         "note": "lists_and_the_feed_never_name_a_reserved_resource_to_a_caller_that_may_not_reach_it: ",
-        "seconds": 250
+        "seconds": 212
       },
       {
         "id": "G71-11",
@@ -1800,14 +1804,14 @@
         "old": "self.collection_visible(&change.collection)",
         "new": "true",
         "cmd": "cargo test --locked --offline --features server --no-fail-fast --test server_guard_differential",
-        "ran_on": "dfe6eb07",
+        "ran_on": "0b085870",
         "result": "killed",
         "failing_tests": [
           "lists_and_the_feed_never_name_a_reserved_resource_to_a_caller_that_may_not_reach_it",
           "routes_that_name_no_resource_leak_nothing_and_change_nothing"
         ],
         "note": "lists_and_the_feed_never_name_a_reserved_resource_to_a_caller_that_may_not_reach_it:  | routes_that_name_no_resource_leak_nothing_and_change_nothing: ",
-        "seconds": 182
+        "seconds": 252
       },
       {
         "id": "G71-12",
@@ -1834,7 +1838,7 @@
         "old": "Ok(db.kv_view_by_id(self.id)?)",
         "new": "Ok(db.kv_view(self.stored.rsplit(\"__\").next().unwrap_or(&*self.stored))?)",
         "cmd": "cargo test --locked --offline --features server --no-fail-fast --test server_guard_differential",
-        "ran_on": "dfe6eb07",
+        "ran_on": "0b085870",
         "result": "killed",
         "failing_tests": [
           "markers_reach_their_holders_so_a_leak_would_show",
@@ -1844,7 +1848,7 @@
           "matrix_tenant_viewer"
         ],
         "note": "markers_reach_their_holders_so_a_leak_would_show:  | matrix_tenant:  | matrix_tenant_editor:  | matrix_tenant_raw:  | matrix_tenant_viewer: ",
-        "seconds": 224
+        "seconds": 170
       },
       {
         "id": "G71-14",
@@ -1853,9 +1857,10 @@
         "old": "Ok(db.collection_mut_by_id(self.id)?)",
         "new": "Ok(db.collection_mut(self.stored.rsplit(\"__\").next().unwrap_or(&*self.stored))?)",
         "cmd": "cargo test --locked --offline --features server --no-fail-fast --test server_guard_differential --test server_memory_reserved_as_missing",
-        "ran_on": "dfe6eb07",
+        "ran_on": "0b085870",
         "result": "killed",
         "failing_tests": [
+          "a_name_outside_a_credentials_grant_is_refused_whatever_it_names",
           "a_tenant_is_refused_every_route_that_spans_the_database",
           "a_tenants_body_names_are_stored_names_that_reach_the_guard",
           "generated_requests_take_effect_when_nothing_is_hidden",
@@ -1878,8 +1883,8 @@
           "tenant_named_and_sparse_search_use_the_guarded_collection",
           "the_digest_sees_a_write_to_every_protected_resource"
         ],
-        "note": "a_tenant_is_refused_every_route_that_spans_the_database:  | a_tenants_body_names_are_stored_names_that_reach_the_guard:  | generated_requests_take_effect_when_nothing_is_hidden:  | import_jobs_answer_only_to_the_credentials_that_reach_their_collection:  | lists_and_the_feed_never_name_a_reserved_resource_to_a_caller_that_may_not_reach_it:  | markers_reach_their_holders_so_a_leak_would_show: ",
-        "seconds": 177,
+        "note": "a_name_outside_a_credentials_grant_is_refused_whatever_it_names:  | a_tenant_is_refused_every_route_that_spans_the_database:  | a_tenants_body_names_are_stored_names_that_reach_the_guard:  | generated_requests_take_effect_when_nothing_is_hidden:  | import_jobs_answer_only_to_the_credentials_that_reach_their_collection:  | lists_and_the_feed_never_name_a_reserved_resource_to_a_caller_that_may_not_reach_it: ",
+        "seconds": 147,
         "comment": "Killed through the seeds of the generated differential: the tenant's vector space is configured in the root namesake, which already has it, so the seed answers 422 (the old record had a single hand test for this mutant)."
       },
       {
@@ -1889,7 +1894,7 @@
         "old": "Some(index) => credential.is_some_and(|id| self.raw.contains(&(index, id.to_owned()))),",
         "new": "Some(_) => credential.is_some(),",
         "cmd": "cargo test --locked --offline --features server --no-fail-fast --test server_guard_differential",
-        "ran_on": "dfe6eb07",
+        "ran_on": "0b085870",
         "result": "killed",
         "failing_tests": [
           "a_tenants_body_names_are_stored_names_that_reach_the_guard",
@@ -1902,7 +1907,7 @@
           "routes_that_name_no_resource_leak_nothing_and_change_nothing"
         ],
         "note": "a_tenants_body_names_are_stored_names_that_reach_the_guard:  | lists_and_the_feed_never_name_a_reserved_resource_to_a_caller_that_may_not_reach_it:  | matrix_memory_only:  | matrix_raw:  | matrix_raw_other:  | matrix_tenant: ",
-        "seconds": 199
+        "seconds": 164
       },
       {
         "id": "G71-16",
@@ -1911,13 +1916,13 @@
         "old": "Some(owner) => self.owner(Resource::Collection, collection) == Some(owner),",
         "new": "Some(_) => true,",
         "cmd": "cargo test --locked --offline --features server --no-fail-fast --test server_memory_guards -- an_ordinary_record_cannot_be_attached_to_a_reserved_graph_even_by_its_raw_holder",
-        "ran_on": "dfe6eb07",
+        "ran_on": "0b085870",
         "result": "killed",
         "failing_tests": [
           "an_ordinary_record_cannot_be_attached_to_a_reserved_graph_even_by_its_raw_holder"
         ],
         "note": "an_ordinary_record_cannot_be_attached_to_a_reserved_graph_even_by_its_raw_holder: ",
-        "seconds": 149
+        "seconds": 207
       },
       {
         "id": "G71-17",
@@ -1926,13 +1931,13 @@
         "old": "|| (op == credentials::Op::Backup && service.has_bindings())",
         "new": "|| (op == credentials::Op::Backup && false)",
         "cmd": "cargo test --locked --offline --features server --no-fail-fast --test server_memory_guards",
-        "ran_on": "dfe6eb07",
+        "ran_on": "0b085870",
         "result": "killed",
         "failing_tests": [
           "backups_belong_to_the_administrator_while_resources_are_reserved"
         ],
         "note": "backups_belong_to_the_administrator_while_resources_are_reserved: ",
-        "seconds": 152
+        "seconds": 200
       },
       {
         "id": "G71-18",
@@ -1941,13 +1946,13 @@
         "old": "if let (Some(admin::Role::Scoped(grant)), true) = (role, hidden) {",
         "new": "if let (Some(admin::Role::Scoped(grant)), true) = (role, true) {",
         "cmd": "cargo test --locked --offline --features server --no-fail-fast --test server_memory_guards",
-        "ran_on": "dfe6eb07",
+        "ran_on": "0b085870",
         "result": "killed",
         "failing_tests": [
           "a_credentials_attempt_on_a_reserved_name_is_audited_without_the_name"
         ],
         "note": "a_credentials_attempt_on_a_reserved_name_is_audited_without_the_name: ",
-        "seconds": 137
+        "seconds": 198
       },
       {
         "id": "G71-19",
@@ -1956,13 +1961,13 @@
         "old": "(output, flag.load(Ordering::Relaxed))",
         "new": "(output, false)",
         "cmd": "cargo test --locked --offline --features server --no-fail-fast --test server_memory_guards",
-        "ran_on": "dfe6eb07",
+        "ran_on": "0b085870",
         "result": "killed",
         "failing_tests": [
           "a_credentials_attempt_on_a_reserved_name_is_audited_without_the_name"
         ],
         "note": "a_credentials_attempt_on_a_reserved_name_is_audited_without_the_name: ",
-        "seconds": 141
+        "seconds": 140
       },
       {
         "id": "G71-20",
@@ -1971,14 +1976,14 @@
         "old": "state.name.strip_prefix(&prefix).map(|name| {",
         "new": "state.name.strip_prefix(&prefix).filter(|name| !name.ends_with(\"_ev\")).map(|name| {",
         "cmd": "cargo test --locked --offline --features server --no-fail-fast --test server_memory_guards",
-        "ran_on": "dfe6eb07",
+        "ran_on": "0b085870",
         "result": "killed",
         "failing_tests": [
           "tenant_qualified_reservations_follow_scoped_credentials_and_raw_access",
           "tenant_usage_and_headroom_count_reserved_records_for_the_administrator"
         ],
         "note": "tenant_qualified_reservations_follow_scoped_credentials_and_raw_access:  | tenant_usage_and_headroom_count_reserved_records_for_the_administrator: ",
-        "seconds": 143
+        "seconds": 105
       },
       {
         "id": "G71-21",
@@ -2048,13 +2053,13 @@
         "old": "if !attachable(graph, collection) {",
         "new": "if false && !attachable(graph, collection) {",
         "cmd": "cargo test --locked --offline --features server --no-fail-fast --test server_memory_guards -- an_ordinary_record_cannot_be_attached_to_a_reserved_graph_even_by_its_raw_holder",
-        "ran_on": "dfe6eb07",
+        "ran_on": "0b085870",
         "result": "killed",
         "failing_tests": [
           "an_ordinary_record_cannot_be_attached_to_a_reserved_graph_even_by_its_raw_holder"
         ],
         "note": "an_ordinary_record_cannot_be_attached_to_a_reserved_graph_even_by_its_raw_holder: ",
-        "seconds": 132
+        "seconds": 157
       },
       {
         "id": "G71-26",
@@ -2063,14 +2068,15 @@
         "old": "if self.collections.contains_key(&id) {",
         "new": "if true {",
         "cmd": "cargo test --locked --offline --features server --no-fail-fast --lib -- by_id:: server::guard:: server::reserved::",
-        "ran_on": "6cc6b9ff",
+        "ran_on": "0b085870",
         "result": "killed",
         "failing_tests": [
+          "by_id::tests::a_drop_by_id_refuses_in_the_order_a_drop_by_name_does",
           "by_id::tests::a_stale_or_unknown_id_is_not_found_and_never_panics",
           "server::guard::tests::a_stale_handle_is_not_found_after_its_collection_is_dropped"
         ],
-        "note": "by_id::tests::a_stale_or_unknown_id_is_not_found_and_never_panics: assertion failed: matches!(db.collection_by_id(id), Err(Error::CollectionNotFound)) | server::guard::tests::a_stale_handle_is_not_found_after_its_collection_is_dropped: called `Option::unwrap()` on a `None` value",
-        "seconds": 284
+        "note": "by_id::tests::a_drop_by_id_refuses_in_the_order_a_drop_by_name_does: no entry found for key | by_id::tests::a_stale_or_unknown_id_is_not_found_and_never_panics: assertion failed: matches!(db.collection_by_id(id), Err(Error::CollectionNotFound)) | server::guard::tests::a_stale_handle_is_not_found_after_its_collection_is_dropped: called `Option::unwrap()` on a `None` value",
+        "seconds": 277
       },
       {
         "id": "G71-27",
@@ -2096,7 +2102,7 @@
         "old": "let revision = db.update_metadata_in(collection, id, &metadata, Expected::Any)?;",
         "new": "let revision = db.update_metadata_in(db.resolve(target.name())?, id, &metadata, Expected::Any)?;",
         "cmd": "cargo test --locked --offline --features server --no-fail-fast --test server_guard_differential",
-        "ran_on": "dfe6eb07",
+        "ran_on": "0b085870",
         "result": "killed",
         "failing_tests": [
           "matrix_tenant",
@@ -2104,7 +2110,7 @@
           "matrix_tenant_raw"
         ],
         "note": "matrix_tenant:  | matrix_tenant_editor:  | matrix_tenant_raw: ",
-        "seconds": 360
+        "seconds": 213
       },
       {
         "id": "G71-29",
@@ -2113,14 +2119,14 @@
         "old": "    \"kv_store\",",
         "new": "    \"kv_storex\",",
         "cmd": "cargo test --locked --offline --features server --no-fail-fast --test server_name_lookup_scan",
-        "ran_on": "6cc6b9ff",
+        "ran_on": "0b085870",
         "result": "killed",
         "failing_tests": [
           "the_scanner_finds_every_banned_form",
           "the_scanner_names_the_enclosing_function"
         ],
         "note": "the_scanner_finds_every_banned_form: assertion `left == right` failed | the_scanner_names_the_enclosing_function: assertion `left == right` failed",
-        "seconds": 167
+        "seconds": 147
       },
       {
         "id": "G71-30",
@@ -2129,13 +2135,13 @@
         "old": "\"auto_tick\",",
         "new": "\"auto_tickx\",",
         "cmd": "cargo test --locked --offline --features server --no-fail-fast --test server_name_lookup_scan",
-        "ran_on": "6cc6b9ff",
+        "ran_on": "0b085870",
         "result": "killed",
         "failing_tests": [
           "no_server_code_looks_a_name_up_outside_the_guard"
         ],
         "note": "no_server_code_looks_a_name_up_outside_the_guard: ",
-        "seconds": 168
+        "seconds": 141
       },
       {
         "id": "G71-31",
@@ -2144,7 +2150,7 @@
         "old": "if BY_NAME.contains(&name) && !database_first(&tokens, index + 3)",
         "new": "if BY_NAME.contains(&name) && false && !database_first(&tokens, index + 3)",
         "cmd": "cargo test --locked --offline --features server --no-fail-fast --test server_name_lookup_scan",
-        "ran_on": "6cc6b9ff",
+        "ran_on": "0b085870",
         "result": "killed",
         "failing_tests": [
           "no_server_code_looks_a_name_up_outside_the_guard",
@@ -2153,7 +2159,7 @@
           "the_scanner_names_the_enclosing_function"
         ],
         "note": "no_server_code_looks_a_name_up_outside_the_guard:  | the_scanner_finds_every_banned_form: assertion `left == right` failed | the_scanner_ignores_what_is_not_code_or_not_a_lookup: assertion `left == right` failed | the_scanner_names_the_enclosing_function: assertion `left == right` failed",
-        "seconds": 150
+        "seconds": 149
       },
       {
         "id": "G71-32",
@@ -2162,13 +2168,13 @@
         "old": "        \"/v1/admin/credentials\",",
         "new": "        \"/v1/admin/credentials-x\",",
         "cmd": "cargo test --locked --offline --features server --no-fail-fast --test server_guard_differential -- every_name_bearing_operation_has_generated_coverage the_digest_sees_a_write_to_every_protected_resource",
-        "ran_on": "6cc6b9ff",
+        "ran_on": "0b085870",
         "result": "killed",
         "failing_tests": [
           "every_name_bearing_operation_has_generated_coverage"
         ],
         "note": "every_name_bearing_operation_has_generated_coverage: ",
-        "seconds": 28
+        "seconds": 19
       },
       {
         "id": "G71-33",
@@ -2177,13 +2183,13 @@
         "old": "if let Some(content) = operation[\"requestBody\"][\"content\"].as_object() {",
         "new": "if let Some(content) = operation[\"requestBody\"][\"contentx\"].as_object() {",
         "cmd": "cargo test --locked --offline --features server --no-fail-fast --test server_guard_differential -- every_name_bearing_operation_has_generated_coverage the_digest_sees_a_write_to_every_protected_resource",
-        "ran_on": "6cc6b9ff",
+        "ran_on": "0b085870",
         "result": "killed",
         "failing_tests": [
           "every_name_bearing_operation_has_generated_coverage"
         ],
         "note": "every_name_bearing_operation_has_generated_coverage: ",
-        "seconds": 26
+        "seconds": 31
       },
       {
         "id": "G71-34",
@@ -2192,13 +2198,13 @@
         "old": "out.insert(\"root.kvstore\", read_kv(world, \"admin\", \"kvstore\").await);",
         "new": "let _ = read_kv(world, \"admin\", \"kvstore\").await;",
         "cmd": "cargo test --locked --offline --features server --no-fail-fast --test server_guard_differential -- every_name_bearing_operation_has_generated_coverage the_digest_sees_a_write_to_every_protected_resource",
-        "ran_on": "6cc6b9ff",
+        "ran_on": "0b085870",
         "result": "killed",
         "failing_tests": [
           "the_digest_sees_a_write_to_every_protected_resource"
         ],
         "note": "the_digest_sees_a_write_to_every_protected_resource: ",
-        "seconds": 18
+        "seconds": 26
       },
       {
         "id": "G71-35",
@@ -2207,13 +2213,13 @@
         "old": ".filter(|info| self.entry_visible(lineage, info.id, &info.name))",
         "new": ".filter(|info| info.id != u16::MAX)",
         "cmd": "cargo test --locked --offline --features server --no-fail-fast --test server_guard_differential -- lists_and_the_feed_never_name_a_reserved_resource_to_a_caller_that_may_not_reach_it",
-        "ran_on": "6cc6b9ff",
+        "ran_on": "0b085870",
         "result": "killed",
         "failing_tests": [
           "lists_and_the_feed_never_name_a_reserved_resource_to_a_caller_that_may_not_reach_it"
         ],
         "note": "lists_and_the_feed_never_name_a_reserved_resource_to_a_caller_that_may_not_reach_it: ",
-        "seconds": 128
+        "seconds": 140
       },
       {
         "id": "G71-36",
@@ -2222,7 +2228,7 @@
         "old": "self.retain_visible_graphs(&mut graphs, |graph| graph.name.as_str());",
         "new": "let _ = &mut graphs;",
         "cmd": "cargo test --locked --offline --features server --no-fail-fast --test server_guard_differential -- lists_and_the_feed_never_name_a_reserved_resource_to_a_caller_that_may_not_reach_it",
-        "ran_on": "6cc6b9ff",
+        "ran_on": "0b085870",
         "result": "killed",
         "failing_tests": [
           "lists_and_the_feed_never_name_a_reserved_resource_to_a_caller_that_may_not_reach_it"
@@ -2237,13 +2243,13 @@
         "old": "graph::feed_visible(&self.role, name) && self.graph_visible(name)",
         "new": "graph::feed_visible(&self.role, name)",
         "cmd": "cargo test --locked --offline --features server --no-fail-fast --test server_guard_differential -- lists_and_the_feed_never_name_a_reserved_resource_to_a_caller_that_may_not_reach_it",
-        "ran_on": "6cc6b9ff",
+        "ran_on": "0b085870",
         "result": "killed",
         "failing_tests": [
           "lists_and_the_feed_never_name_a_reserved_resource_to_a_caller_that_may_not_reach_it"
         ],
         "note": "lists_and_the_feed_never_name_a_reserved_resource_to_a_caller_that_may_not_reach_it: ",
-        "seconds": 189
+        "seconds": 110
       },
       {
         "id": "G71-38",
@@ -2252,13 +2258,13 @@
         "old": "(change.collection.is_empty() || self.names_covered(&change.collection))",
         "new": "true",
         "cmd": "cargo test --locked --offline --features server --no-fail-fast --lib -- server::guard::",
-        "ran_on": "6cc6b9ff",
+        "ran_on": "0b085870",
         "result": "killed",
         "failing_tests": [
           "server::guard::tests::a_feed_event_is_kept_only_inside_the_namespace_and_outside_reservations"
         ],
         "note": "server::guard::tests::a_feed_event_is_kept_only_inside_the_namespace_and_outside_reservations: assertion failed: !kept(&tenant, put(\"ordinary\"))",
-        "seconds": 380
+        "seconds": 213
       },
       {
         "id": "G71-39",
@@ -2267,14 +2273,14 @@
         "old": "admin::Role::Scoped(grant) => grant.covers(lineage, id, stored),",
         "new": "admin::Role::Scoped(_) => true,",
         "cmd": "cargo test --locked --offline --features server --no-fail-fast --test server_guard_differential",
-        "ran_on": "6cc6b9ff",
+        "ran_on": "0b085870",
         "result": "killed",
         "failing_tests": [
           "import_jobs_answer_only_to_the_credentials_that_reach_their_collection",
           "lists_and_the_feed_never_name_a_reserved_resource_to_a_caller_that_may_not_reach_it"
         ],
         "note": "import_jobs_answer_only_to_the_credentials_that_reach_their_collection:  | lists_and_the_feed_never_name_a_reserved_resource_to_a_caller_that_may_not_reach_it: ",
-        "seconds": 425
+        "seconds": 176
       },
       {
         "id": "G71-40",
@@ -2283,13 +2289,13 @@
         "old": "        self.collection_visible(stored)",
         "new": "        self.graph_visible(stored)",
         "cmd": "cargo test --locked --offline --features server --no-fail-fast --test server_guard_differential",
-        "ran_on": "6cc6b9ff",
+        "ran_on": "0b085870",
         "result": "killed",
         "failing_tests": [
           "lists_and_the_feed_never_name_a_reserved_resource_to_a_caller_that_may_not_reach_it"
         ],
         "note": "lists_and_the_feed_never_name_a_reserved_resource_to_a_caller_that_may_not_reach_it: ",
-        "seconds": 221
+        "seconds": 174
       },
       {
         "id": "G71-41",
@@ -2298,9 +2304,10 @@
         "old": "collection.write(db)?.configure_vector(&name, spec)?;",
         "new": "db.collection_mut(target.name())?.configure_vector(&name, spec)?;",
         "cmd": "cargo test --locked --offline --features server --no-fail-fast --test server_guard_differential",
-        "ran_on": "dfe6eb07",
+        "ran_on": "0b085870",
         "result": "killed",
         "failing_tests": [
+          "a_name_outside_a_credentials_grant_is_refused_whatever_it_names",
           "a_tenant_is_refused_every_route_that_spans_the_database",
           "a_tenants_body_names_are_stored_names_that_reach_the_guard",
           "generated_requests_take_effect_when_nothing_is_hidden",
@@ -2322,8 +2329,8 @@
           "routes_that_name_no_resource_leak_nothing_and_change_nothing",
           "the_digest_sees_a_write_to_every_protected_resource"
         ],
-        "note": "a_tenant_is_refused_every_route_that_spans_the_database:  | a_tenants_body_names_are_stored_names_that_reach_the_guard:  | generated_requests_take_effect_when_nothing_is_hidden:  | import_jobs_answer_only_to_the_credentials_that_reach_their_collection:  | lists_and_the_feed_never_name_a_reserved_resource_to_a_caller_that_may_not_reach_it:  | markers_reach_their_holders_so_a_leak_would_show: ",
-        "seconds": 159
+        "note": "a_name_outside_a_credentials_grant_is_refused_whatever_it_names:  | a_tenant_is_refused_every_route_that_spans_the_database:  | a_tenants_body_names_are_stored_names_that_reach_the_guard:  | generated_requests_take_effect_when_nothing_is_hidden:  | import_jobs_answer_only_to_the_credentials_that_reach_their_collection:  | lists_and_the_feed_never_name_a_reserved_resource_to_a_caller_that_may_not_reach_it: ",
+        "seconds": 127
       },
       {
         "id": "G71-42",
@@ -2332,9 +2339,10 @@
         "old": "collection.write(db)?.put_vectors(record_id, vectors)?;",
         "new": "db.collection_mut(target.name())?.put_vectors(record_id, vectors)?;",
         "cmd": "cargo test --locked --offline --features server --no-fail-fast --test server_guard_differential",
-        "ran_on": "dfe6eb07",
+        "ran_on": "0b085870",
         "result": "killed",
         "failing_tests": [
+          "a_name_outside_a_credentials_grant_is_refused_whatever_it_names",
           "a_tenant_is_refused_every_route_that_spans_the_database",
           "a_tenants_body_names_are_stored_names_that_reach_the_guard",
           "generated_requests_take_effect_when_nothing_is_hidden",
@@ -2356,8 +2364,8 @@
           "routes_that_name_no_resource_leak_nothing_and_change_nothing",
           "the_digest_sees_a_write_to_every_protected_resource"
         ],
-        "note": "a_tenant_is_refused_every_route_that_spans_the_database:  | a_tenants_body_names_are_stored_names_that_reach_the_guard:  | generated_requests_take_effect_when_nothing_is_hidden:  | import_jobs_answer_only_to_the_credentials_that_reach_their_collection:  | lists_and_the_feed_never_name_a_reserved_resource_to_a_caller_that_may_not_reach_it:  | markers_reach_their_holders_so_a_leak_would_show: ",
-        "seconds": 141
+        "note": "a_name_outside_a_credentials_grant_is_refused_whatever_it_names:  | a_tenant_is_refused_every_route_that_spans_the_database:  | a_tenants_body_names_are_stored_names_that_reach_the_guard:  | generated_requests_take_effect_when_nothing_is_hidden:  | import_jobs_answer_only_to_the_credentials_that_reach_their_collection:  | lists_and_the_feed_never_name_a_reserved_resource_to_a_caller_that_may_not_reach_it: ",
+        "seconds": 126
       },
       {
         "id": "G71-43",
@@ -2366,7 +2374,7 @@
         "old": "            db.build_hnsw_with_options_in(collection, config, metric, options)?;",
         "new": "            db.build_hnsw_with_options_in(db.resolve(target.name())?, config, metric, options)?;",
         "cmd": "cargo test --locked --offline --features server --no-fail-fast --test server_guard_differential",
-        "ran_on": "dfe6eb07",
+        "ran_on": "0b085870",
         "result": "killed",
         "failing_tests": [
           "matrix_tenant",
@@ -2375,7 +2383,7 @@
           "the_digest_sees_a_write_to_every_protected_resource"
         ],
         "note": "matrix_tenant:  | matrix_tenant_editor:  | matrix_tenant_raw:  | the_digest_sees_a_write_to_every_protected_resource: ",
-        "seconds": 202
+        "seconds": 153
       },
       {
         "id": "G71-44",
@@ -2405,13 +2413,13 @@
         "old": "(Some(collection), Some(name)) => scope.entry_visible(lineage, collection, name),",
         "new": "(Some(_), Some(_)) => true,",
         "cmd": "cargo test --locked --offline --features server --no-fail-fast --lib -- server::guard::",
-        "ran_on": "6cc6b9ff",
+        "ran_on": "0b085870",
         "result": "killed",
         "failing_tests": [
           "server::guard::tests::the_slow_query_log_and_the_metrics_show_what_the_scope_shows"
         ],
         "note": "server::guard::tests::the_slow_query_log_and_the_metrics_show_what_the_scope_shows: assertion `left == right` failed: admin: slow-query entries",
-        "seconds": 380
+        "seconds": 198
       },
       {
         "id": "G71-46",
@@ -2420,13 +2428,13 @@
         "old": ".filter(|&(&id, state)| scope.entry_visible(db.lineage(), id, &state.name))",
         "new": ".filter(|&(&_id, _state)| true)",
         "cmd": "cargo test --locked --offline --features server --no-fail-fast --lib -- server::guard::",
-        "ran_on": "6cc6b9ff",
+        "ran_on": "0b085870",
         "result": "killed",
         "failing_tests": [
           "server::guard::tests::the_slow_query_log_and_the_metrics_show_what_the_scope_shows"
         ],
         "note": "server::guard::tests::the_slow_query_log_and_the_metrics_show_what_the_scope_shows: assertion `left == right` failed: admin: metrics for notes_ev",
-        "seconds": 435
+        "seconds": 191
       },
       {
         "id": "G71-47",
@@ -2435,13 +2443,13 @@
         "old": "if db.read_only {",
         "new": "if false && db.read_only {",
         "cmd": "cargo test --locked --offline --features server --no-fail-fast --lib -- server::guard::",
-        "ran_on": "6cc6b9ff",
+        "ran_on": "0b085870",
         "result": "killed",
         "failing_tests": [
           "server::guard::tests::a_hidden_graph_behaves_like_a_missing_one_at_every_stage"
         ],
         "note": "server::guard::tests::a_hidden_graph_behaves_like_a_missing_one_at_every_stage: ",
-        "seconds": 403
+        "seconds": 190
       },
       {
         "id": "G71-48",
@@ -2450,13 +2458,13 @@
         "old": "Some((owner, job)) if *owner == collection => {",
         "new": "Some((_, job)) => {",
         "cmd": "cargo test --locked --offline --features server --no-fail-fast --test collections",
-        "ran_on": "6cc6b9ff",
+        "ran_on": "0b085870",
         "result": "killed",
         "failing_tests": [
           "single_rebuild_job_is_shared_across_collections"
         ],
         "note": "single_rebuild_job_is_shared_across_collections: assertion `left == right` failed",
-        "seconds": 182
+        "seconds": 92
       },
       {
         "id": "G71-49",
@@ -2465,13 +2473,13 @@
         "old": "let allowed = |collection: u16, name: &str| scope.entry_visible(lineage, collection, name);",
         "new": "let allowed = |_collection: u16, _name: &str| true;",
         "cmd": "cargo test --locked --offline --features server --no-fail-fast --test server_guard_differential",
-        "ran_on": "6cc6b9ff",
+        "ran_on": "0b085870",
         "result": "killed",
         "failing_tests": [
           "import_jobs_answer_only_to_the_credentials_that_reach_their_collection"
         ],
         "note": "import_jobs_answer_only_to_the_credentials_that_reach_their_collection: ",
-        "seconds": 241
+        "seconds": 158
       },
       {
         "id": "G71-50",
@@ -2480,13 +2488,13 @@
         "old": "pub(super) fn attachment_collections(&self, db: &Database, key: &str) -> Vec<String> {",
         "new": "pub(super) fn attachment_collections(&self, db: &Database, key: &str) -> Vec<String> { if true { return db.node_attachment_collections(&self.stored, key); }",
         "cmd": "cargo test --locked --offline --features server --no-fail-fast --test server_memory_reserved_as_missing",
-        "ran_on": "6cc6b9ff",
+        "ran_on": "0b085870",
         "result": "killed",
         "failing_tests": [
           "retrieve_masks_collections_at_their_normal_resolution_stage"
         ],
         "note": "retrieve_masks_collections_at_their_normal_resolution_stage: ",
-        "seconds": 215
+        "seconds": 128
       },
       {
         "id": "G71-51",
@@ -2495,13 +2503,13 @@
         "old": "for grant in binding.grants.iter().filter(|grant| grant.raw_access) {",
         "new": "for grant in binding.grants.iter() {",
         "cmd": "cargo test --locked --offline --features server --no-fail-fast --test server_guard_differential",
-        "ran_on": "6cc6b9ff",
+        "ran_on": "0b085870",
         "result": "killed",
         "failing_tests": [
           "matrix_memory_only"
         ],
         "note": "matrix_memory_only: ",
-        "seconds": 337
+        "seconds": 185
       },
       {
         "id": "G71-52",
@@ -2510,14 +2518,14 @@
         "old": "&& op != credentials::Op::Collections)))",
         "new": "&& !matches!(op, credentials::Op::Collections | credentials::Op::Read))))",
         "cmd": "cargo test --locked --offline --features server --no-fail-fast --test server_guard_differential",
-        "ran_on": "6cc6b9ff",
+        "ran_on": "0b085870",
         "result": "killed",
         "failing_tests": [
           "a_tenant_is_refused_every_route_that_spans_the_database",
           "routes_that_name_no_resource_leak_nothing_and_change_nothing"
         ],
         "note": "a_tenant_is_refused_every_route_that_spans_the_database:  | routes_that_name_no_resource_leak_nothing_and_change_nothing: ",
-        "seconds": 277
+        "seconds": 189
       },
       {
         "id": "G71-53",
@@ -2526,14 +2534,14 @@
         "old": ".retain_mut(|change| scope.retain_feed_change(change));",
         "new": ".retain_mut(|_change| true);",
         "cmd": "cargo test --locked --offline --features server --no-fail-fast --test server_guard_differential",
-        "ran_on": "6cc6b9ff",
+        "ran_on": "0b085870",
         "result": "killed",
         "failing_tests": [
           "lists_and_the_feed_never_name_a_reserved_resource_to_a_caller_that_may_not_reach_it",
           "routes_that_name_no_resource_leak_nothing_and_change_nothing"
         ],
         "note": "lists_and_the_feed_never_name_a_reserved_resource_to_a_caller_that_may_not_reach_it:  | routes_that_name_no_resource_leak_nothing_and_change_nothing: ",
-        "seconds": 278
+        "seconds": 180
       },
       {
         "id": "G71-54",
@@ -2542,13 +2550,13 @@
         "old": ".retain_mut(|change| scope.retain_feed_change(change));",
         "new": ".retain_mut(|_change| true);",
         "cmd": "cargo test --locked --offline --features server --no-fail-fast --test server_memory_guards",
-        "ran_on": "6cc6b9ff",
+        "ran_on": "0b085870",
         "result": "killed",
         "failing_tests": [
           "webhook_dispatcher_never_delivers_reserved_resource_events"
         ],
         "note": "webhook_dispatcher_never_delivers_reserved_resource_events: reserved resource event was delivered",
-        "seconds": 163
+        "seconds": 167
       },
       {
         "id": "G71-55",
@@ -2637,9 +2645,7 @@
     "not_built": 0,
     "pending": 0,
     "ran_on_counts": {
-      "dfe6eb07": 23,
-      "0b085870": 13,
-      "6cc6b9ff": 23
+      "0b085870": 59
     },
     "gates": {
       "head": "0b085870",
@@ -2738,9 +2744,8 @@
     },
     "notes": [
       "Every mutant ran locally on a snapshot of the commit named by its `ran_on`, one single-line anchor at a time, with the file restored byte for byte afterwards. The Rust sources of every snapshot were compared file by file with the worktree before the runs.",
-      "Mutants not re-run on 0b085870 keep their earlier result and name the commit it ran on (6cc6b9ff: G71-26, G71-29, G71-30, G71-31, G71-32, G71-33, G71-34, G71-35, G71-36, G71-37, G71-38, G71-39, G71-40, G71-45, G71-46, G71-47, G71-48, G71-49, G71-50, G71-51, G71-52, G71-53, G71-54; dfe6eb07: G71-01, G71-03, G71-04, G71-05, G71-06, G71-07, G71-08, G71-09, G71-10, G71-11, G71-13, G71-14, G71-15, G71-16, G71-17, G71-18, G71-19, G71-20, G71-25, G71-28, G71-41, G71-42, G71-43). The differential was strengthened after those runs (see the G71-02 note): since dfe6eb07 only tests/server_guard_differential.rs changed (3e42c67e appended rows and one test, 0b085870 dropped a type annotation from it), so a kill by that file's tests on dfe6eb07 still holds, because the old rows send the same requests in the same order. Results on 6cc6b9ff predate the stored-name rows of the tenant principals (1974abe2): for a mutant whose command includes tests/server_guard_differential.rs they are not evidence for 0b085870 until it is re-run.",
-      "G71-02 (the guard skips the credential's name grant) survived the generated differential on dfe6eb07: since the tenant body rows were rewritten to stored names (1974abe2), those rows never leave the grant, and for a name that exists the later grant check still answers 403, so no answer, marker or digest the matrix compares changed; only the status of a name outside the grant changes (404 for a reserved or missing name, 403 for an ordinary collection that exists), which would tell a credential which collections exist. The old rows had caught it by accident. a_name_outside_a_credentials_grant_is_refused_whatever_it_names now holds every row that names a resource to the documented 403 for a reserved, a missing and an existing name, for the credential limited to one collection and for a tenant, and kills it.",
-      "The same commit sends a tenant's body-named rows with the root's names unprefixed again, after the stored-name rows, so that a root resource read or written through a body name shows as a leak or a changed digest.",
+      "G71-02 (the guard skips the credential's name grant) survived the generated differential on dfe6eb07: since the tenant body rows were rewritten to stored names (1974abe2), those rows never leave the grant, and for a name that exists the later grant check still answers 403, so no answer, marker or digest the matrix compares changed; only the status of a name outside the grant changes (404 for a reserved or missing name, 403 for an ordinary collection that exists), which would tell a credential which collections exist. The old rows had caught it by accident. a_name_outside_a_credentials_grant_is_refused_whatever_it_names now holds every row that names a resource to the documented 403 for a reserved, a missing and an existing name, for the credential limited to one collection and for a tenant, and kills it (commit 3e42c67e; 0b085870 only drops a type annotation from the test, for clippy).",
+      "That commit also sends a tenant's body-named rows with the root's names unprefixed again, after the stored-name rows, so that a root resource read or written through a body name shows as a leak or a changed digest.",
       "Two earlier runs were stopped before any mutant finished and discarded: one on f53f0170, because strict clippy found err_expect in the new symlink test, and one on 3e42c67e, because it found type_complexity in the new grant test. Every result that names 0b085870 comes from a run on that commit.",
       "G71-21 and G71-27 were redefined and G71-56 to 59 added with the revert of D5 and the shared drop preconditions.",
       "The regular-file check behind a link (a link to a directory) runs only on Unix: Windows cannot open a directory, so there the open fails first with a refusal. No mutant of that line is claimed on the Windows host that ran this campaign.",
