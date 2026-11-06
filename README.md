@@ -36,6 +36,9 @@ service to operate.
 - **Server.** Authenticated REST with OpenAPI, optional gRPC and TLS,
   key-value operations, opt-in agent memory and managed embedding and ranking
   providers, Prometheus metrics, non-root Docker images and a Helm chart.
+- **Security.** One request guard covers every REST, gRPC and webhook path that
+  names a collection, graph, job or tenant, and agent-memory resources stay hidden
+  from callers without raw access; see the [release notes](docs/RELEASE-0.7.1.md#security).
 - **Dashboard.** Browse, search, write, import, index, monitor and query
   graphs, with user accounts, roles and tenants. The 0.7.1 source dashboard adds
   dedicated Key-value and MemoryAI workspaces, interactive graph navigation and
@@ -188,12 +191,14 @@ Prebuilt packages: [PyPI](docs/INSTALL.md#pypi) and [release assets](docs/INSTAL
 | Collections, hybrid search and imports | [CAPABILITIES](docs/CAPABILITIES.md) |
 | Named and sparse vectors | [VECTORS](docs/VECTORS.md) |
 | Encryption, restore, change feed, replicas, key-value and directory stores | [STORAGE-FEATURES](docs/STORAGE-FEATURES.md) |
+| Key-value store: compare-and-set, expiry, paging and limits | [KEY-VALUE](docs/KEY-VALUE.md) |
+| Agent memory: remember, recall, consolidate and forget | [MEMORY](docs/MEMORY.md) |
 | Command-line tools and tests | [TOOLS](docs/TOOLS.md) |
 | gRPC, MCP and agent skills | [GRPC](docs/GRPC.md), [MCP](docs/MCP.md), [AGENT-SKILLS](docs/AGENT-SKILLS.md) |
 | Webhooks | [WEBHOOKS](docs/WEBHOOKS.md) |
 | Property graphs, expiry and algorithms | [GRAPH](docs/GRAPH.md) |
 | Benchmarks | [Methodology](benchmarks/README.md), [results](benchmarks/RESULTS.md) |
-| Upgrade notes | [Release notes](docs/RELEASE-0.7.0.md) |
+| Upgrade notes | [Release notes](docs/RELEASE-0.7.1.md) |
 
 ## Status and limitations
 
