@@ -95,10 +95,11 @@ Optional `expected` is `"any"` (default), `"absent"`, or
 `{"revision":"42"}`; it is checked atomically with the write. DELETE takes
 `expected=any|absent|<revision>` in the query. A revision mismatch returns
 412 `precondition_failed`, including a missing/due key. On REST and gRPC its
-message is always `revision precondition failed`, so a caller with `write` but
-not `read` cannot learn whether a key exists or what its revision is. An
-unconditional or absence-conditional delete of a missing key succeeds with
-`deleted:false`.
+message is always `revision precondition failed`: it never names the current
+revision. An unconditional or absence-conditional delete of a missing key
+succeeds with `deleted:false`, so a caller with `write` but not `read` can still
+learn whether a key is live: `expected=absent` answers 412 for a live key and
+changes no live entry either way.
 
 Versions and deadlines are canonical uint64 **decimal strings**, without signs
 or leading zeroes except `"0"` (maximum `"18446744073709551615"`). Expected
@@ -204,7 +205,7 @@ mutations.
 `GET /v1/capabilities` reports `features.kv: true` for format 5 files; a
 format 4 file still serves ordinary KV without expiry although the flag is false.
 `features.kv_batch` is true under the same condition. `routes` lists the batch
-and multi-get routes on every format of file, and a format 3 or 4 file serves
+and multi-get routes on every format of file, and a file before format 5 serves
 both routes while the flag is false, so look for the two paths in `routes`, not
 at the flag, to learn whether a server has them. A server without them lists
 neither and has no `kv_batch` flag.

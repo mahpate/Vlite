@@ -165,13 +165,15 @@ pub struct KvStore<'a> {
     id: u16,
 }
 
-/// Why a batch given to [`KvStore::write_batch_gated_at`] was not written.
+/// Why [`KvStore::write_batch_gated_at`] failed.
 #[cfg(feature = "server")]
 #[derive(Debug)]
 pub(crate) enum Gated<G> {
-    /// The batch could not run; `write_batch_at` fails the same way for it.
+    /// `write_batch_at` fails the same way for this batch: it could not be
+    /// planned, or its commit failed. After a failed commit the batch may or
+    /// may not have been written (`CommitIndeterminate`).
     Batch(Error),
-    /// The gate refused it.
+    /// The gate refused the batch before anything was written.
     Refused(G),
 }
 
@@ -353,7 +355,8 @@ impl KvView<'_> {
     /// of the sizes [`KvView::get`] takes; otherwise `InvalidKvKey` and
     /// nothing is read. These checks come before any state of the collection
     /// is read, but not before the view is opened: [`Database::kv_view`] has
-    /// already failed for a missing collection or one of another kind. Every
+    /// already failed for a missing collection, one of another kind or a handle
+    /// that cannot serve it (`Poisoned`). Every
     /// returned value is copied, so a result can hold that many values of up
     /// to [`MAX_KV_VALUE_BYTES`] at once: use [`KvView::visit_many_at`] to read
     /// without copying.
@@ -508,8 +511,9 @@ impl KvStore<'_> {
     /// operations naming the same `(namespace, key)`; otherwise `InvalidKvKey`
     /// (`PayloadTooLarge` for one value) and nothing is written. These checks
     /// come before any state of the collection is read, but not before the
-    /// store is opened: [`Database::kv_store`] has already created or refused
-    /// the collection. An empty batch is a no-op.
+    /// store is opened: [`Database::kv_store`] has already created the
+    /// collection or failed for it (one of another kind, or a handle that
+    /// cannot serve it, `Poisoned`). An empty batch is a no-op.
     ///
     /// Every put of the batch gets the same version, the commit's sequence. A
     /// put clears the deadline of the entry it replaces. As for a single write,
@@ -536,10 +540,12 @@ impl KvStore<'_> {
     /// stands (the batch is not written) and each slot the batch writes or
     /// deletes, in order, with whether a record is there afterwards: what the
     /// live-record quota is judged on. It refuses the batch by returning an
-    /// error, and then nothing is written. A batch that cannot run fails as
-    /// `write_batch_at` does for it, and the gate is not called. The resolved
-    /// batch never leaves this call, so what the gate judged is what is
-    /// committed.
+    /// error, and then nothing is written. A batch that cannot be planned
+    /// fails as `write_batch_at` does for it, and the gate is not called. A
+    /// failure of the commit itself (a format 1 file, a read-only or poisoned
+    /// handle, an I/O error) comes after the gate has accepted the batch. The
+    /// resolved batch never leaves this call, so what the gate judged is what
+    /// is committed.
     #[cfg(feature = "server")]
     pub(crate) fn write_batch_gated_at<G>(
         &mut self,

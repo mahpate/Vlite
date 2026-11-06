@@ -671,7 +671,10 @@ message KvBatchDelete {
 // A batch grows by new `oneof kind` cases (for example a put with a deadline),
 // never by a field added to KvBatchPut or KvBatchDelete: a server that does not
 // know the case refuses the operation (`kind` unset), where it would ignore the
-// field and write the entry without what the caller asked for. See
+// field and write the entry without what the caller asked for. For the same
+// reason a new condition is never a new case of `Expected` (an older server
+// reads an unset `Expected` as `any` and writes without it) and a new field of
+// KvBatchRequest never changes what the batch does. See
 // docs/projects/roadmap/kv-batch-contract.md section 2.7.
 message KvBatchOperation {
   reserved 100 to 199;

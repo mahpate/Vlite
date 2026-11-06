@@ -63,17 +63,17 @@ nothing and writes no frame.
 Every check that needs no state is made first, over the whole request: the
 operation count, then each operation in order for its namespace and key, the
 absence of a deadline (a Rust caller only: no other surface can send one), the
-size of its value, the running total of value bytes and whether an earlier
-operation names the same key. An invalid request is refused with the error of
-the first operation that fails a check, whatever the state of the collection.
-That holds once the collection is open: in Rust, opening the store comes first
-(`Database::kv_store` creates a missing collection and fails with
-`NotKvCollection` for another kind), while REST and gRPC check the request
-before they open the collection. Then the operations run in order against the
-state, and the first
-that cannot run fails the whole batch and nothing is written: a failed
-condition (`precondition_failed`), 16 occupied slots (`kv_slots_exhausted`) or
-an attached record (`graph_attached_record`).
+size of its value, the running total of value bytes, whether an earlier
+operation names the same key and, over REST, whether its `expected` revision
+parses. An invalid request is refused with the error of the first operation
+that fails a check, whatever the state of the collection. That holds once the
+collection is open: in Rust, opening the store comes first (`Database::kv_store`
+creates a missing collection and fails with `NotKvCollection` for another kind
+or `Poisoned` for a handle that has failed), while REST and gRPC check the
+request before they open the collection. Then the operations run in order
+against the state, and the first that cannot run fails the whole batch and
+nothing is written: a failed condition (`precondition_failed`), 16 occupied
+slots (`kv_slots_exhausted`) or an attached record (`graph_attached_record`).
 
 ### 2.3 Crash behavior
 
@@ -113,21 +113,27 @@ operation), 403 `read_only` and `forbidden_scope`, 404 `collection_not_found`,
 429 `rate_limited` and `quota_exceeded`, 503 `commit_indeterminate`.
 
 One difference from a single put remains, and it widens an oracle that a single
-put already has. A refused request writes nothing, so a caller that may write
-but not read can test a condition on an entry without changing it, whenever it
-can make the request fail in a way that differs from the failed condition: the
-answer is 412 when the condition (`absent` or a guessed revision) does not hold
-and the other failure when it does. A single put does this at a live-record
-quota (429 `quota_exceeded`), and a single delete on a record that is attached
-to a graph node (409 `graph_attached_record`). A batch widens the class,
-because it can add the failure on any other key after the operation under
-test: a put of a key whose 16 record IDs the caller has filled (409
-`kv_slots_exhausted`), or either failure above. The first operation that cannot
-run decides the answer (`plan` in `src/kv/batch.rs`), and a quota or
-attached-record refusal comes only after every condition held. That learns only
-whether a key is live and whether a guessed revision (a commit sequence) is its
-current one, never its value, for a key that the caller may already overwrite.
-Each 409 `kv_slots_exhausted` counts in `kv_slots_exhausted_total`.
+put already has. A caller that may write but not read can already learn whether
+a key is live, with a delete that says `absent`: 412 for a live key and
+`deleted: false` for a missing one, and no live entry changes either way. What
+a single put or delete keeps from such a caller is whether a guessed revision (a
+commit sequence) is the current one: the 412 message never names it, and a
+refused request writes nothing, so the caller can test a guess without changing
+the entry only when it can make the request fail in a way that differs from the
+failed condition. The answer is then 412 when the guess is wrong and the other
+failure when it is right. A single put does this when it would leave the scope
+over a live-record quota (429 `quota_exceeded`), and a single delete on a record
+that is attached to a graph node (409 `graph_attached_record`). A batch widens
+the class, because it can add the failure on any other key after the operation
+under test: a put of a key whose 16 record IDs the caller has filled (409
+`kv_slots_exhausted`), or either failure above, or, on a file of format 1, the
+409 `upgrade_required` that any batch which writes gets. The first operation
+that cannot run decides the answer (`plan` in `src/kv/batch.rs`): a quota or
+format 1 refusal comes only after every condition of the batch held, an
+attached-record refusal only after the conditions of the operations before it.
+That learns only whether a guessed revision is the current one, never a value,
+for a key that the caller may already overwrite. Each 409
+`kv_slots_exhausted` counts in `kv_slots_exhausted_total`.
 
 A batch that changes at least one record on a file of format 1 is refused with
 409 `upgrade_required` (engine error `BatchRequiresUpgrade`), although single
@@ -170,8 +176,8 @@ credential), because its permission check runs before it matches a route, and
 the clients report that as an ordinary permission error. To find out
 beforehand, read `GET /v1/capabilities`, which every credential may call, and
 look for the two route paths in its `routes`. Do not test `features.kv_batch`
-for this: it is true only for files at format 5 or later, while a format 3 or 4
-file serves both routes with the flag false. Over gRPC such a server answers
+for this: it is true only for files at format 5 or later, while a file before
+format 5 serves both routes with the flag false. Over gRPC such a server answers
 `UNIMPLEMENTED` to every caller, as for any method of the service that it does
 not have, and gRPC has no capabilities call, so a gRPC client asks REST. Nothing
 about a batch is one-way.
@@ -185,9 +191,13 @@ subsection is a decision to build any of it.
   with its own capability flag. An older server refuses it as an unknown field,
   so a client that needs it checks the flag first.
 - Over gRPC an older server silently ignores a field of a message that it does
-  not know. A per-operation extension therefore needs a new `oneof` case (an
-  older server refuses an operation whose `kind` it cannot read) or a
-  capability gate that the client checks first.
+  not know, and reads a `oneof` case that it does not know as unset. A
+  per-operation extension therefore needs a new case of the operation's `oneof`
+  (an older server refuses an operation whose `kind` it cannot read), never a
+  new field on `KvBatchPut` or `KvBatchDelete`, and a new field of the request
+  never changes what the batch does. A new condition is never a new case of
+  `Expected`: an older server reads an unset `Expected` as `any` and would write
+  without it. It travels as a new operation case instead.
 - A batch across collections and a delete by prefix are new surfaces, never
   per-operation fields. Delete by prefix stays decision (p) of the
   [serving contract](serving-kv-ttl-contract.md#12-delivery-slices-ledger-and-owner-decisions).
@@ -196,9 +206,9 @@ subsection is a decision to build any of it.
   server can offer one without the other.
 - **What `features.kv_batch` means.** D2 approved the name, but the flag follows
   the format of the file, not the batch: it is true on a file at format 5 or
-  later, like `features.kv`, and false says only that the file is at format 3 or
-  4. It does not tell whether the server has the routes, which a format 3 or 4
-  file serves with the flag false; the two paths in `routes` tell that.
+  later, like `features.kv`, and false says only that the file is before format
+  5. It does not tell whether the server has the routes, which a file before
+  format 5 serves with the flag false; the two paths in `routes` tell that.
 
 ## 3. Surfaces
 
@@ -248,7 +258,7 @@ A put in a batch whose `options.expires_at_ms` is set is refused with
   files, like `features.kv`) and the two routes in `routes`, which it lists on
   every format of file. A caller that needs to know whether a server has the
   routes looks for the two paths in `routes`: the flag is not that test,
-  because a format 3 or 4 file serves both routes with the flag false.
+  because a file before format 5 serves both routes with the flag false.
 
 Wire details that every client and tool follows:
 

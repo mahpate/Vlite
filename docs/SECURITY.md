@@ -375,19 +375,22 @@ can also expose, overwrite, delete or expire ordinary KV records. A principal
 that can write the collection can also fill a key's 16 record IDs with ordinary
 records, so that puts for that key fail with `kv_slots_exhausted` (409 on REST,
 `FAILED_PRECONDITION` on gRPC), and a batch that holds such a put fails as a
-whole. A refused write changes nothing, so a principal that can write but not
-read can test a condition on an entry without changing it, whenever it can make
-the request fail in a way that differs from the failed condition: the answer is
-412 when the condition (`absent` or a guessed revision) does not hold and that
-other failure when it does. A single put does this at a live-record quota (429
-`quota_exceeded`), and a single delete on a record that is attached to a graph
-node (409 `graph_attached_record`). A batch widens the class, because it can
-add the failure on any other key after the operation under test: a put of a key
-whose 16 record IDs the principal has filled (409 `kv_slots_exhausted`), or
-either failure above. That tells the principal only whether a key is live and
-whether a commit sequence is its current revision, never its value, for a key
-it may already overwrite; each such `kv_slots_exhausted` answer counts in
-`kv_slots_exhausted_total`. Use
+whole. A principal that can write but not read can learn two things about a key
+that it may already overwrite, and never its value. Whether the key is live: a
+delete with `absent` answers 412 for a live key and succeeds with
+`deleted: false` for a missing one, and changes no live entry either way. And
+whether a guessed commit sequence is its current revision: a refused write
+changes nothing, so the principal can test that condition without changing the
+entry whenever it can make the request fail in a way that differs from the
+failed condition (the answer is 412 when the guess is wrong and that other
+failure when it is right). A single put does this when it would leave the scope
+over a live-record quota (429 `quota_exceeded`), and a single delete on a record
+that is attached to a graph node (409 `graph_attached_record`). A batch widens
+the class, because it can add the failure on any other key after the operation
+under test: a put of a key whose 16 record IDs the principal has filled (409
+`kv_slots_exhausted`), or either failure above, or, on a file of format 1, the
+409 `upgrade_required` that any batch which writes gets. Each such
+`kv_slots_exhausted` answer counts in `kv_slots_exhausted_total`. Use
 dedicated collections for key-value data,
 grant `write` on them only to principals you trust with their keys, and watch
 `kv_slots_exhausted_total`: it counts each REST or gRPC request answered this
