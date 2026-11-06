@@ -287,8 +287,8 @@ fn name_bearing_rpcs(model: &ProtoModel) -> BTreeMap<String, Vec<String>> {
 
 /// The RPCs, exempt ones left out, whose request names a collection or a graph
 /// in more than one field. A row varies one name at a time, so no row can cover
-/// such an RPC; the ones that a memory binding addresses are exempt and covered
-/// by `tests/grpc_memory.rs` instead.
+/// such an RPC; the ones that a memory binding addresses are exempt and must be
+/// covered by `tests/grpc_memory.rs` instead (S2).
 fn names_in_several_fields(
     model: &ProtoModel,
     exempt: &BTreeSet<String>,
@@ -416,7 +416,7 @@ fn every_rpc_has_a_row() {
         "an RPC needs a row in rows() (it names a collection) or global_rows() (it names none) \
          before it ships; an RPC that a memory binding addresses instead of a collection or a \
          graph name goes in the EXEMPT table of grpc_leg.rs with its reason, and \
-         tests/grpc_memory.rs covers it: {missing:?}"
+         tests/grpc_memory.rs must cover it (S2): {missing:?}"
     );
     let orphans: Vec<_> = covered.difference(&declared).collect();
     assert!(
@@ -460,7 +460,7 @@ fn every_rpc_has_a_row() {
         several.is_empty(),
         "{several:?}: an RPC that names a collection in several fields needs a row that varies \
          each of them, or, when a memory binding addresses it, an EXEMPT entry that \
-         tests/grpc_memory.rs covers"
+         tests/grpc_memory.rs must cover (S2)"
     );
     // The RPCs that address `default` when their collection is empty name it
     // in a field called `collection`.

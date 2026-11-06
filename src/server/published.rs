@@ -1,8 +1,10 @@
 //! What a REST router publishes to the other transports of its engine
 //! (`Service::publish` and `Service::adopt_published`): the pairing of
 //! authentication state and memory reservations, what an unconfigured service
-//! adopts, a router that reserves nothing never replacing one that does, a
-//! lock that a panic poisoned, and the order of the two routers.
+//! adopts, a router that protects less (no token, or no reserved resources)
+//! never replacing one that protects more, a lock that a panic poisoned, the
+//! order of the two routers, and a router that reserves being refused once a
+//! gRPC router exists.
 
 use super::*;
 use crate::{CollectionSpec, CreateOptions, FormatVersion};
@@ -67,6 +69,12 @@ fn poison<T: Send + 'static>(lock: &Arc<Mutex<T>>) {
     })
     .join();
 }
+
+fn sequence(service: &Service) -> u64 {
+    service.database.read().unwrap().as_ref().unwrap().sequence
+}
+
+const AFTER_GRPC: &str = "build every REST router before the gRPC router";
 
 #[test]
 fn a_service_that_no_router_configured_adopts_neither_and_says_so() {
@@ -176,6 +184,108 @@ fn a_router_that_reserves_nothing_does_not_replace_one_that_does() {
         adopter.memory_bindings.is_configured() && !adopter.memory_bindings.is_empty(),
         "the reservations stay"
     );
+}
+
+#[test]
+fn a_router_without_a_token_does_not_replace_one_that_has_one() {
+    let service = service();
+    let _secured = configured_admin_router(service.clone(), options(FIRST, None)).unwrap();
+    let _open = router(service.clone());
+
+    let mut adopter = service.clone();
+    assert!(adopter.adopt_published());
+    assert!(
+        has_token(&adopter, FIRST),
+        "a listener built after an open router stays authenticated"
+    );
+}
+
+#[test]
+fn a_router_with_a_token_replaces_one_without() {
+    let service = service();
+    let _open = router(service.clone());
+    let _secured = authenticated_router(service.clone(), BearerToken::new(FIRST).unwrap());
+
+    let mut adopter = service.clone();
+    assert!(adopter.adopt_published());
+    assert!(has_token(&adopter, FIRST));
+}
+
+#[test]
+fn a_router_that_reserves_is_refused_once_a_grpc_router_exists() {
+    let directory = tempfile::tempdir().unwrap();
+    let service = service();
+    // A plain router, then the listener that adopts it, then a router with a
+    // token and a file of bindings: the listener would serve what it hides.
+    let _plain = router(service.clone());
+    let mut listener = service.clone();
+    assert!(listener.adopt_published());
+    let written = sequence(&service);
+
+    let admin_directory = directory.path().join("admin");
+    let mut late = options(FIRST, Some(&bindings_file(directory.path())));
+    late.admin_directory = Some(admin_directory.clone());
+    let error = configured_admin_router(service.clone(), late)
+        .expect_err("a router that reserves is refused after a gRPC router");
+    assert!(error.to_string().contains(AFTER_GRPC), "{error}");
+    assert_eq!(
+        sequence(&service),
+        written,
+        "the records of the file were not written"
+    );
+    assert!(!admin_directory.exists(), "nothing was set up");
+
+    assert!(!has_token(&listener, FIRST) && listener.memory_bindings.is_empty());
+    let mut next = service.clone();
+    assert!(next.adopt_published());
+    assert!(
+        !has_token(&next, FIRST) && next.memory_bindings.is_empty(),
+        "a refused router publishes nothing"
+    );
+}
+
+#[test]
+fn a_router_that_finds_reserved_records_is_refused_once_a_grpc_router_exists() {
+    let directory = tempfile::tempdir().unwrap();
+    let service = service();
+    // The first router writes the records of the file, which the second is
+    // not given: it finds records the file does not name, which reserve their
+    // resources.
+    let _first = configured_admin_router(
+        service.clone(),
+        options(FIRST, Some(&bindings_file(directory.path()))),
+    )
+    .unwrap();
+    let mut listener = service.clone();
+    assert!(listener.adopt_published());
+
+    let admin_directory = directory.path().join("admin");
+    let mut late = options(SECOND, None);
+    late.admin_directory = Some(admin_directory.clone());
+    let error = configured_admin_router(service.clone(), late)
+        .expect_err("a router that finds reserved records is refused after a gRPC router");
+    assert!(error.to_string().contains(AFTER_GRPC), "{error}");
+    assert!(!admin_directory.exists(), "nothing was set up");
+}
+
+#[test]
+fn publication_itself_refuses_a_router_that_reserves_after_a_grpc_router() {
+    let service = service();
+    let mut listener = service.clone();
+    assert!(!listener.adopt_published());
+    let reserving = service.clone().with_bindings(reserved::Bindings::new(
+        crate::memory::binding::parse(BINDINGS.as_bytes()).unwrap(),
+    ));
+
+    let error = reserving
+        .publish_reserving()
+        .expect_err("the check and the publication share the locks");
+    assert!(error.to_string().contains(AFTER_GRPC), "{error}");
+    assert!(service.published_admin.lock().unwrap().is_none());
+    assert!(service.published_bindings.lock().unwrap().is_none());
+    // A router that reserves nothing is never refused.
+    service.clone().publish_reserving().unwrap();
+    assert!(service.published_admin.lock().unwrap().is_some());
 }
 
 #[test]
