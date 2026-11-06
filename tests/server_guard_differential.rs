@@ -2130,26 +2130,22 @@ async fn the_digest_sees_a_write_to_every_protected_resource() {
             }
         }
     }
-    {
+    for (method, path, body) in [
+        ("PUT", "/v1/collections/kvstore/kv/entry", KV_PUT),
+        ("POST", "/v1/collections/kvstore/kv/batch", KV_BATCH),
+    ] {
         let before = snapshot(&world).await;
-        let answer = request(
-            &world.app,
-            ADMIN,
-            "PUT",
-            "/v1/collections/kvstore/kv/entry",
-            KV_PUT,
-        )
-        .await;
+        let answer = request(&world.app, ADMIN, method, path, body).await;
         assert!(
             (200..300).contains(&answer.0),
-            "PUT kvstore/kv/entry: {}",
+            "{method} {path}: {}",
             describe(&answer)
         );
         let after = snapshot(&world).await;
         for (name, now) in &after {
             if (*name == "root.kvstore") != (before[name] != *now) {
                 failures.push(format!(
-                    "PUT kvstore/kv/entry: {name} is not the only label that changed"
+                    "{method} {path}: {name} is not the only label that changed"
                 ));
             }
         }

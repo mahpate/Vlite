@@ -796,6 +796,11 @@ async fn the_digest_sees_a_grpc_write_to_every_protected_resource() {
             "root.kvstore",
         ),
         (
+            "Kv/WriteKvBatch",
+            names("", "kvstore", "unused_graph"),
+            "root.kvstore",
+        ),
+        (
             "VLite/CreateCollection",
             names("", "listed_ev", "unused_graph"),
             "root.lists",
