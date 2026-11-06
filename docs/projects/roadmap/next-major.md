@@ -213,8 +213,8 @@ Local numbers below show direction only (see rules).
   integrated, and slice 5 (lifecycle) has not started. All of the compact code compiles only
   under `cfg(test)`: release builds have no compact dispatch and no normal
   `Database` wiring. The only changes that a release build sees are the few resident-visible ones of lane A4 (one clock for
-  the hybrid search and for graph retrieval, a read error that the named-vector search now returns, the key-value read path
-  and two guards), which A4's page lists and a script checks. The plan for those lanes froze the seam in
+  the hybrid search and for graph retrieval, a read error that the named-vector search now returns, the key-value read path,
+  a residency check and a skipped-hit guard), which A4's page lists and a script checks. The plan for those lanes froze the seam in
   [p3b-seam-freeze.md](p3b-seam-freeze.md) and recorded the survivor ledgers of
   lanes A and B in [p3b-survivor-ledgers.md](p3b-survivor-ledgers.md). Its first lane, R0, also added the ordered
   cursors that the bounded exact scan needs (`base_rows`, `affected_ids` and `ordered_ids`), under the same test gate, and

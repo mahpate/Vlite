@@ -5,7 +5,7 @@ and OPEN-71-14, stated in section 8, were taken by the coordinator under the own
 those of the storage readiness inventory behind the [0.7.1 plan](handover-0.7.0.md#071)). The same day the owner moved the
 compact work (lanes R0, B4, A4, E4 and C4) to 0.7.2: 0.7.1 shipped without it ([handover-0.7.1.md](handover-0.7.1.md)), so
 where this page says that a lane integrates its work, it means the integration tree for 0.7.2 and not the tag `v0.7.1`. The
-tree that section 7.3 and the T paragraph of section 1 name is `mahpate-int072-c1` at `2d405125`, called T below; sections 7.1
+tree that section 7.3 and the T paragraph of section 1 name is the commit `2d405125` of the integration branch `mahpate-int072-c1` (a later tree is another commit), called T below; sections 7.1
 and 7.2 predate it, and the "integrated tree" they name is R0's own `faa3b32e`, which is not T.
 Sections 3 and 4 describe what the code does today and pin it with tests. Section 3 is frozen for the lanes that follow it:
 B4 and A4, which worked from it, E4, which consumed it, and C4, L5 and the ANN, P4 and P5 lanes. Section 4 is the approved inventory of deviations and limits: it
@@ -32,8 +32,8 @@ consumers of lane A4](p3b-record-consumers.md), the [bounded exact scan of lane 
 | Lane E4 (bounded exact scan) | Not in the tag. On T the loop of `exact_search_compact_with_workspace` walks `ordered_ids` where the draft walked `effective_ids` (one line of `src/lib.rs`, compiled only under `cfg(test)`), and E4 adds five tests (`src/compact/source/overlay_tests/exact_scan.rs`) and 24 mutants (`tests/compact_e4_mutants.json`). [Its page](p3b-exact-scan.md) states the contract, the one allowed difference in `records_scanned` (section 4 of this page) and the hazards for the promotion. Its mutant evidence is E4's to add: the ledger carried no recorded runs when T was cut, so `verify` lists all 24 as open ([the ledgers on T](p3b-survivor-ledgers.md#the-ledgers-on-the-integration-tree)). |
 | Lane C (server and MCP consumers), slice 5 (lifecycle) | Not started. |
 
-The table is the state of the tag, except for the lane A, B and E4 rows, which say what T adds to it. T is `mahpate-int072-c1`
-at `2d405125`: `main` after 0.7.1, with a few test-only commits picked, lane R0's branch merged (all of it, up to
+The table is the state of the tag, except for the lane A, B and E4 rows, which say what T adds to it. T is the commit `2d405125`
+of `mahpate-int072-c1`: `main` after 0.7.1, with a few test-only commits picked, lane R0's branch merged (all of it, up to
 `6635a454`, without a conflict), lane B4 merged, A4's own commits, B4's slice 3 and E4's four commits cherry-picked. The
 coordinator reports for T: formatting and the strict lint (workspace, all targets, all features) clean, 1,216 library tests
 passing by default and 1,688 with all features, the documentation guards, `scripts/api_surface.py` and
@@ -41,9 +41,13 @@ passing by default and 1,688 with all features, the documentation guards, `scrip
 K71's visitor; with its default arguments it fails on the functions that 0.7.1 changed). R0 measured on T that all 91 and 34 anchors of its ledgers match
 exactly once and that the selector of section 7 (204 tests there) is green; section 7.3 holds the replays of its 52 mutants of
 `records.rs` and `lib.rs` on T (all killed, on the lane's machine and on separate machines, and accepted by `verify --strict`).
-T is frozen while the evidence is taken: a change to anything that cargo builds changes the
+T was frozen while the evidence was taken: a change to anything that cargo builds changes the
 fingerprint of the sources (`python tests/compact_mutant_replay.py sources`) and makes the replays of every lane stale
-under `verify --strict`.
+under `verify --strict`, so a later tree needs its own replays.
+
+The hashes of commits on other lanes' own branches that this page cites (`834a0a6f`, `250a98bc`, `4670d858`, `c859d2d5` and
+`60d65f99`) are not in T's history: T carries their changes as cherry-picks and merges with hashes of their own (for
+`records.rs` and `lib.rs`: B4's `8e63e049`, A4's `eb979fcb` and `3eceeb5c`, a cherry-pick of `c859d2d5`).
 
 Between the 0.7.0
 candidate that the readiness inventory used (`5cc496d4`) and the tag, only `src/kv.rs`,
@@ -178,7 +182,7 @@ as they were, so those rows name L5.
 | `CompactView::base_rows` and `CollectionRecords::ordered_ids` (slice 3) | Neither seeks: both start at the first row, so a walk that resumes after an ID pays for every row before it. `compact_iter(after)` does seek, by a binary search over the base IDs (lane A's patch, in `records.rs`). `Affected` carries the overlay's revision and deadline, not its metadata or payload. E4's scan starts at the first ID and asked for no seek. Its page (section 6) recommends, for the promotion, an additive cursor that yields the base rows and the overlay entries together, because `ordered_ids` drops the row index and the deadline that the base cursor already holds; it made no request for it to R0. | a later lane that resumes a walk or wants the merged cursor (an additive amendment to this page, section 8) |
 | `records.rs::effective_ids` | Builds a full ID set and vector. The 4 MiB workspace bounds vector scratch only, not ID memory. `ordered_ids` (slice 3) lists the same IDs lazily, and E4's exact scan walks it. The rebuilds of the derived indexes (`MetadataIndexes::rebuilt_effective` and `TextIndex::rebuilt_effective`) and some tests still call `effective_ids`. | its callers move to `ordered_ids` one by one (the derived-index rebuilds are next); `effective_ids` stays until the last one has moved |
 | Record walks and the exact scan | Browse (`compact_browse`, also on a `ReadSnapshot`), facets, the text leg of the hybrid search, query-language execution, the key-value listing and `reembed_pending` walk `compact_iter`. It decodes each row it visits into a cell, which is never evicted (record cells, below), before the caller looks at the deadline, and each caller reads deadlines from the resident map (CLK-6). Browse stops after one page and `reembed_pending` at its limit; the others visit every row. The exact scan (last row of this table) is not a record walk: it takes visibility from the view and overlay columns and creates no cell. E4's `compact_exact_scan_scores_without_materializing_record_cells` pins that a scan through the helper, the collection state, the database search, a snapshot and the handle's filtered search, in both float precisions, plain and encrypted, leaves the decode counter and the initialized cells as they were before it (none, for an untouched generation). A4's page still says that the draft materializes a cell per visited row (its section 7); it does not. | L5 (it may rebuild `compact_iter` on `ordered_ids` and point reads) |
-| Scan statistics of a filtered exact search (`Database::search_in_at`) | The resident arm narrows its scan with the declared postings: when the most selective served condition holds at most half of the rows, its IDs (intersected with those of the other served conditions within that bound) are the candidates, counted in `index_candidates`. When that leaves no candidates (no posting serves a condition of the filter, or the best one holds more than half of the rows), it falls back to the block summaries of the declared fields (P5: blocks of 1,024 live rows, used when at least one block is pruned and at most half the rows remain). The compact arm takes the postings in the same way and passes them to the exact scan, but it has no block summaries, so without candidates it scans every effective row and lets the filter decide. The hits, their order, `distance_evaluations` and `index_candidates` are equal on the two paths. `records_scanned` is equal too, except for a filter that block summaries could prune and no posting narrows, where the resident arm counts fewer rows. A block is pruned when its summary proves that no row of it can match: per covered field a block keeps the distinct string and point values (up to 32 values and 1,024 bytes, past which it can no longer prune an equality), the interval of its integers and of its floats and the booleans seen, so an equality value that is not among them or outside the interval, or a range that misses the interval, prunes the block. That happens in several blocks when a filter matches rows of only a few of them, and in a single block when its summary shows that no row matches (`Summaries::candidates` over `View::survivors` in `src/compact/stats.rs`). On T, B4's `compact_scan_examines_every_row_where_the_resident_block_summaries_prune` pins the difference over 2,500 rows in three blocks, with six range filters on a field declared for equality only (so that no posting serves them): the compact arm scanned all 2,500 rows each time and the resident arm 1,024, 1,024, 452, 2,500, 2,500 and 1,024, with equal hits, evaluations and candidates. The difference needs neither a second block nor a missing posting, which B4's test and E4's page (section 4: "above one 1,024-row block" and "where no posting serves the filter") do not say: section 7.4 records R0's probes of a single block and of a posting that holds more than half of the rows. No test on T pins those two cases; they belong next to B4's test, and are not added now because T is frozen. A snapshot search (`ReadSnapshot::search_with_stats_at`) passes no candidates on either path and reports equal statistics.† E4's page records the difference as the one allowed, a decision of the release coordinator that moves the compact summary fallback to P5-71 (persisted summaries). No result changes. P3's claim of equal scan statistics holds for a filter that a declared posting narrows and for one on fields that are not declared; B4's differential sweeps it over five declarations and every kind of operation. | P5-71 (it flips B4's test above, which asserts that the compact arm scans every row, and adds the two cases of section 7.4) |
+| Scan statistics of a filtered exact search (`Database::search_in_at`) | The resident arm narrows its scan with the declared postings: when the most selective served condition holds at most half of the rows, its IDs (intersected with those of the other served conditions within that bound) are the candidates, counted in `index_candidates`. When that leaves no candidates (no posting serves a condition of the filter, or the best one holds more than half of the rows), it falls back to the block summaries of the declared fields (P5: blocks of 1,024 live rows, used when at least one block is pruned and at most half the rows remain). The compact arm takes the postings in the same way and passes them to the exact scan, but it has no block summaries, so without candidates it scans every effective row and lets the filter decide. The hits, their order, `distance_evaluations` and `index_candidates` are equal on the two paths. `records_scanned` is equal too, except for a filter that block summaries could prune and no posting narrows, where the resident arm counts fewer rows. A block is pruned when its summary proves that no row of it can match: per covered field a block keeps the distinct string and point values (up to 32 values and 1,024 bytes, past which it can no longer prune an equality), the interval of its integers and of its floats and the booleans seen, so an equality value that is not among them or outside the interval, or a range that misses the interval, prunes the block. That happens in several blocks when a filter matches rows of only a few of them, and in a single block when its summary shows that no row matches (`Summaries::candidates` over `View::survivors` in `src/compact/stats.rs`). On T, B4's `compact_scan_examines_every_row_where_the_resident_block_summaries_prune` pins the difference over 2,500 rows in three blocks, with six range filters on a field declared for equality only (so that no posting serves them): the compact arm scanned all 2,500 rows each time and the resident arm 1,024, 1,024, 452, 2,500, 2,500 and 1,024, with equal hits, evaluations and candidates. The difference needs neither a second block nor a missing posting, which B4's test and E4's page (section 4: "above one 1,024-row block" and "where no posting serves the filter") do not say: section 7.4 records R0's probes of a single block and of a posting that holds more than half of the rows. No test on T pins those two cases; they belong next to B4's test, and are not added now because T was frozen when this page was written. A snapshot search (`ReadSnapshot::search_with_stats_at`) passes no candidates on either path and reports equal statistics.† E4's page records the difference as the one allowed, a decision of the release coordinator that moves the compact summary fallback to P5-71 (persisted summaries). No result changes. P3's claim of equal scan statistics holds for a filter that a declared posting narrows and for one on fields that are not declared; B4's differential sweeps it over five declarations and every kind of operation. | P5-71 (it flips B4's test above, which asserts that the compact arm scans every row, and adds the two cases of section 7.4) |
 | Expiry and revision readers | The record walks above read the resident expiry map (the key-value listing also reads the revisions of its entries from the resident map), and the exact scan, `get_at` and `effective_visible` (and so `rerank_effective`) read the view and overlay columns (CLK-6). `revision_in`, which serves `revision()`, the server and graph retrieve, answers from the overlay when it holds an entry for the ID and from the resident map otherwise, and a conditional write (`put_with_expiry_in`, `put_in`, `delete_in`, `update_metadata_in` and `apply_reembed_batch_checked`) checks the resident map alone.† A lane may move a reader to the other representation if it keeps one clock per operation and the agreement of the two. | L5 |
 | `Database::open_backed` | The loader decodes every record into a resident map before the generation is installed. | L5 |
 | `CollectionRecords::len`, `first_id` | `len` walks the overlay on every call, and `first_id` scans the base from row 0 past tombstoned rows and then the overlay. | not scheduled |
@@ -290,6 +294,12 @@ function goes to the coordinator, who routes it to that owner. New production co
 changes only through an amendment. Seam code stays under `cfg(test)` until L5 decides otherwise, and new tests go to
 sibling files, not to the end of a test module that another lane's patch also extends.
 
+A function that a table below marks frozen changes only through an amendment to this page (section 8). The lanes that section 4
+names for a row (L5, P5-71, the ANN lane) have no cell for its functions until they start, and get one by that amendment. In
+the tables, "done" says that the lane's edits to the function are on T; it says nothing about the lane's mutant evidence, which
+T holds as the lane recorded it. A recorded run is tied to the file it ran on, so each lane replays its own ledger on T (R0's
+replay is 7.3, and [the ledgers on T](p3b-survivor-ledgers.md#the-ledgers-on-the-integration-tree) have the counts).
+
 Order of integration follows the readiness inventory: R0, then B4 and A4 (file-disjoint except where marked), then E4,
 then C4, then L5, then the ANN lanes.
 
@@ -350,8 +360,9 @@ their compact refusal arms are pinned by `compact_ann_paths_remain_refused_with_
 `compact/mod.rs::ImageCheck`, `format.rs`, `maintenance.rs`, `directory.rs`, `changes.rs`, `logops.rs` (L5 and the
 storage owner).
 
-C4 wires the server to the by-ID entry points that 0.7.1's request guard added (`GuardedCollection` in `server/guard.rs` calls
-them): `collection_by_id`, `collection_mut_by_id`, `drop_collection_by_id` and `set_settings_by_id` (`by_id.rs`), `kv_view_by_id`
+C4 owns the by-ID entry points that 0.7.1's request guard added (`GuardedCollection` in `server/guard.rs` already calls them) and
+decides whether and when each gets a compact arm, with the key-value routes of `server/kv.rs`. They are `collection_by_id`,
+`collection_mut_by_id`, `drop_collection_by_id` and `set_settings_by_id` (`by_id.rs`), `kv_view_by_id`
 and `kv_store_by_id` (`kv.rs`) and `build_disk_ann_by_id` (`disk_ann.rs`). None has a compact arm of its own on T, so a guarded
 request reaches what the library's call by name reaches. `collection_by_id` and `collection_mut_by_id` return the same
 `CollectionRef` and `CollectionMut` as `collection` and `collection_mut`, so a guarded read or write reaches the same compact arms
@@ -561,7 +572,7 @@ allocation, no frame read or authentication) cannot be observed by a test throug
 
 ### 7.3 The mutants of `records.rs` and `lib.rs` on the integration tree
 
-7.1 and 7.2 replayed their mutants on R0's own trees. After R0's last commit, other lanes and the 0.7.1 release changed
+7.1 and 7.2 replayed their mutants on R0's own trees. Since R0's head `6635a454`, which T merged, other lanes and the 0.7.1 release changed
 `src/records.rs` (B4's `8e63e049`, A4's `eb979fcb` and the bounded vector workspace of exact scans, `3eceeb5c`) and
 `src/lib.rs` (those three, E4's `312bf2fa`, one line, and 0.7.1's `03b22899` and `fb1c8701`). `verify` of the replay tool
 calls a recorded run stale when the file it ran on differs from the file on the tree it checks, so the recorded runs of the
@@ -572,20 +583,20 @@ that mutate `src/records.rs` (50) or `src/lib.rs` (2): 31 of 7.1 (29 and 2) and 
 - The definitions (`id`, `desc`, `file`, `old`, `new`, `cmd`) are copied unchanged from the two older ledgers, and `check`
   confirms that every anchor matches exactly once on T.
 - `expect` is derived by a script and not typed: the tests that failed in every record that the older ledger holds for the
-  mutant from its last stage (7.2: `result` and `independent`; 7.1 on a final tree: `final` and `independent`; the
+  mutant from its last stage (the record keys of a mutant there; 7.2: `result` and `independent`; 7.1 on a final tree: `final` and `independent`; the
   re-based `R0-EF-03`: `independent`; the 20 mutants of 7.1 that only have a kill on `v0.7.0`: `baseline` and
   `baseline_lane`). No intersection is empty. A run counts only when it fails at least those tests (`expect_met`), so a
   mutant that some other, newer test happens to kill does not count.
 - The selector is the one of 7.1: 204 tests on T, green before the first mutant and again after the last.
 - Every mutant needs two clean kills (`two_machines`): one on the lane's machine and one on a machine that is not the lane's
-  (the coordinator's rule, section 8; the tool requires a valid run under each of the labels `local` and `second` and takes the
-  label on trust, and the `os` that each run records differs between the two labels). A kill is clean when the anchor matched
+  (the coordinator's rule, section 8; the tool requires valid runs under at least two labels and takes a label on trust, and
+  the `os` that each run records differs between `local` and `second`). A kill is clean when the anchor matched
   once, the tree compiled, the selector ran, the expected tests failed and the file was restored byte-identically (SHA-256
   over the bytes and over the LF-normalized text).
 
 The 20 of the 52 that 7.1 only killed on `v0.7.0` (the baseline-only mutants of `records.rs`) had never run on a tree that
 carries R0's tests; this is their first replay on a final tree. The other 36 baseline-only mutants of 7.1 are in
-`src/compact/source.rs` (35) and `src/quality.rs` (1), which are byte-identical on T and on R0's last commit, and are not in
+`src/compact/source.rs` (35) and `src/quality.rs` (1), which are byte-identical on T and on R0's head `6635a454`, and are not in
 this list.
 
 Every run is of the sources of T: `python tests/compact_mutant_replay.py sources` prints the fingerprint
@@ -608,8 +619,8 @@ By origin of the mutant:
 
 `python tests/compact_mutant_replay.py verify tests/compact_r0_integrated_mutants.json --strict`, run on T, accepts all 52
 mutants: 104 valid runs, every one made on exactly the sources of T (52 accepted, 0 stale, 0 open), and `check` finds every
-anchor once. The checkout of a separate machine was T plus one commit (35 of the 52 runs) or two commits (the other 17, a
-shard that ran again with corrected instructions) that add only the replay list and its instructions, outside the
+anchor once. The checkout of a separate machine was T plus one commit (35 of the 52 runs) or two commits (the other 17, the
+shard that ran again, below) that add only the replay list and its instructions, outside the
 fingerprint. So the `head` in the `environment` of those runs is not T's commit: it is a scratch commit that is not kept, and
 what identifies the replayed sources is the `sources_sha256` of each run, which is T's, together with its file hashes.
 
@@ -617,7 +628,7 @@ What this does and does not establish. It establishes that the tests which kille
 `v0.7.0` for the 20) still kill them on T, after the changes to the two files and their tests that this section lists at its
 start, on the lane's machine and on separate machines.
 It does not replay the other 73 mutants of R0's two ledgers (72 in `src/compact/source.rs` and 1 in `src/quality.rs`): those files
-are byte-identical on T and on R0's last commit, and the independent runs of 7.1 and 7.2 on `faa3b32e` (separate machines,
+are byte-identical on T and on R0's head `6635a454`, and the independent runs of 7.1 and 7.2 on `faa3b32e` (separate machines,
 37 of the 73) were made on that same file. The 36 baseline-only mutants among them have no run on a final tree on any machine
 yet. It replays none of the other lanes' mutants.
 
@@ -669,12 +680,13 @@ serves a condition of the filter therefore does not by itself guarantee equal st
 
 What the probes do and do not show. They show that the difference needs neither a second block nor a missing posting, so the
 lane that persists the summaries (P5-71) flips B4's test and should add these two cases next to it. They are not added now,
-because a test is source that cargo builds and T is frozen. They do not change the decision of section 8 that the difference is
+because a test is source that cargo builds and T was frozen. They do not change the decision of section 8 that the difference is
 allowed (E4's amendment moves the compact summary fallback to P5-71), they pin nothing, they ran once, and they measure T only.
 
 ## 8. Decisions
 
-Decided on 2026-11-05 by the coordinator under the owner's delegation, as recommended.
+Decided on 2026-11-05 by the coordinator under the owner's delegation, as recommended. The entries from "Scan statistics" on
+record what other lanes changed or what R0 found after the freeze.
 
 - **OPEN-71-01, activation: private integration only.** Nothing in 0.7.1 turns the compact seam on, and 0.7.1 shipped without
   the compact work (section 1). The production compact writer, float16 and temporal copy-out stay opt-in and closed, no
@@ -725,6 +737,14 @@ Decided on 2026-11-05 by the coordinator under the owner's delegation, as recomm
   it. The first sentence of CLK-7 and every other statement of section 3 are unchanged. The rule of section 3 is met: this
   amendment, the tests that CLK-7 now names and A4's mutants of the new behavior (`pa-hybrid-resident-default-clock-zero`,
   `a4-retrieve-resident-pivot-search-wall-clock` and `a4-retrieve-resident-revalidation-wall-clock`).
+- **Corrections that other lanes' pages and tests owe.** R0 found them while folding in T and edits none of them: the pages
+  exist on T and not on this branch, and the test needs a source change while T is frozen. A4's page says in its section 2
+  that the statistics of the draft exact scan equal the resident ones, in its section 7 that the draft materializes a cell per
+  visited row (E4's test pins that the scan creates none) and, in the same section, that K71 edits `src/kv.rs` next (K71
+  shipped in 0.7.1). E4's page (its section 4) limits the difference in `records_scanned` to "above one 1,024-row block" and
+  "where no posting serves the filter", which 7.4 shows to be too narrow, and B4's `index_differential.rs` says the same in its
+  module documentation and in the comment of the test that pins the difference. Each owner amends its own text, and the
+  cases of 7.4 belong next to B4's test, in the lane that persists the summaries (P5-71). Delete this entry when they have.
 
 R0's own choices in slice 3 were not coordinator decisions. The coordinator accepted them on 2026-11-05 as coded and
 reviewed, by three independent reviewers:

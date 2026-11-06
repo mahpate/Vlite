@@ -124,7 +124,7 @@ to 6 were not started in 0.7.1 (the [0.7.1 handover](handover-0.7.1.md) names no
    build (one clock for the exact and text legs of the hybrid search and for the pivot and evidence reads of graph retrieval,
    among them; the approximate leg still reads the wall clock), and `scripts/shadow_copy_check.py` checks that the shipped
    code is that of `v0.7.0` apart from the named exceptions. A ledger run is tied to the file it ran on, so on T the recorded
-   replays of B4's and A4's mutants in the files that changed since are stale until they are replayed there (A4's, in
+   replays of B4's and A4's mutants in the files that changed since are stale until their lanes replay them there (A4's, in
    `records.rs`, `kv.rs`, `lib.rs` and `property_graph`), and two of A4's anchors, `a4-cursorgroup-07` and
    `pa-kv-store-resident-guard-removed`, match twice and need more
    context first ([the ledgers on T](p3b-survivor-ledgers.md#the-ledgers-on-the-integration-tree)). **E4** moved the exact
