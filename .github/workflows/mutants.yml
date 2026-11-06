@@ -1,0 +1,208 @@
+name: Mutant replay
+
+# Replays a hand-mutant ledger on up to 20 parallel runners and merges the verdicts into one table
+# (killed, survived and invalid per mutant, wall time, minutes per mutant). It only reads the
+# repository: nothing here commits, pushes or publishes, and results are run artifacts.
+#
+# Start it from the Actions tab, or: gh workflow run mutants.yml -f ledger=tests/k71_mutants.json
+#
+# The replay driver (tests/mutant_replay.py) comes from the commit this run was started from; the
+# tree that is mutated is `ref` (default: that same commit). The driver calls the replay tool that
+# the mutated tree carries (tests/k71_mutants.py or tests/compact_mutant_replay.py), so older refs
+# replay with their own tool. Mutants are spread over the shards in turn, each shard runs on a fresh
+# runner, and an independent second-machine replay of a final head is still a separate run.
+
+on:
+  workflow_dispatch:
+    inputs:
+      ledger:
+        description: "Mutant ledger, relative to the repository root"
+        type: string
+        default: tests/k71_mutants.json
+      ref:
+        description: "Branch, tag or commit to mutate (empty: the commit this run was started from)"
+        type: string
+        default: ""
+      shards:
+        description: "Parallel shards, 1 to 20 (fewer when the ledger has fewer mutants)"
+        type: number
+        default: 20
+      ids:
+        description: "Optional comma-separated mutant ids to replay (empty: every replayable mutant)"
+        type: string
+        default: ""
+      survivors_ok:
+        description: "Optional comma-separated ids that may survive (proven equivalent mutants)"
+        type: string
+        default: ""
+
+permissions:
+  contents: read
+
+env:
+  CARGO_PROFILE_DEV_DEBUG: line-tables-only
+  CARGO_PROFILE_TEST_DEBUG: line-tables-only
+  CARGO_NET_RETRY: "10"
+  VLITE_REQUIRE_AVX2: "1"
+
+jobs:
+  plan:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    outputs:
+      shards: ${{ steps.plan.outputs.shards }}
+      total_shards: ${{ steps.plan.outputs.total_shards }}
+      count: ${{ steps.plan.outputs.count }}
+      started: ${{ steps.clock.outputs.started }}
+    steps:
+      - id: clock
+        run: echo "started=$(date +%s)" >> "$GITHUB_OUTPUT"
+      - name: Check the inputs
+        env:
+          LEDGER: ${{ inputs.ledger }}
+          SHARDS: ${{ inputs.shards }}
+          IDS: ${{ inputs.ids }}
+          SURVIVORS_OK: ${{ inputs.survivors_ok }}
+        run: |
+          if ! [[ "$LEDGER" =~ ^[A-Za-z0-9_][A-Za-z0-9._/-]*\.json$ ]] || [[ "$LEDGER" == *..* ]]; then
+            echo "::error::ledger must be a relative .json path inside the repository, not '$LEDGER'"
+            exit 1
+          fi
+          if ! [[ "$SHARDS" =~ ^[0-9]+$ ]] || [ "$SHARDS" -lt 1 ] || [ "$SHARDS" -gt 20 ]; then
+            echo "::error::shards must be a whole number from 1 to 20, not '$SHARDS'"
+            exit 1
+          fi
+          for list in "$IDS" "$SURVIVORS_OK"; do
+            if [[ -n "$list" ]] && ! [[ "$list" =~ ^[A-Za-z0-9_.,:\ -]+$ ]]; then
+              echo "::error::ids and survivors_ok are comma-separated mutant ids"
+              exit 1
+            fi
+          done
+      - uses: actions/checkout@v5
+        with:
+          path: tools
+          sparse-checkout: tests/mutant_replay.py
+          sparse-checkout-cone-mode: false
+          persist-credentials: false
+      - uses: actions/checkout@v5
+        with:
+          ref: ${{ inputs.ref || github.sha }}
+          path: tree
+          persist-credentials: false
+      - id: plan
+        name: Plan the shards
+        env:
+          LEDGER: ${{ inputs.ledger }}
+          SHARDS: ${{ inputs.shards }}
+          IDS: ${{ inputs.ids }}
+        run: python3 tools/tests/mutant_replay.py plan --root tree --ledger "$LEDGER" --shards "$SHARDS" --max-shards 20 --ids "$IDS"
+      - name: Refuse an empty plan
+        env:
+          COUNT: ${{ steps.plan.outputs.count }}
+        run: |
+          if [ "$COUNT" = "0" ]; then
+            echo "::error::the ledger has no replayable mutant for these inputs"
+            exit 1
+          fi
+      - name: Record the plan
+        env:
+          LEDGER: ${{ inputs.ledger }}
+          COUNT: ${{ steps.plan.outputs.count }}
+          TOTAL: ${{ steps.plan.outputs.total_shards }}
+        run: |
+          {
+            echo "Replaying $COUNT mutants of \`$LEDGER\` in $TOTAL shards."
+            echo "Tree: \`$(git -C tree rev-parse HEAD)\`. Driver: \`$(git -C tools rev-parse HEAD)\`."
+          } >> "$GITHUB_STEP_SUMMARY"
+
+  replay:
+    name: replay (shard ${{ matrix.shard }}/${{ needs.plan.outputs.total_shards }})
+    needs: plan
+    runs-on: ubuntu-latest
+    timeout-minutes: 120
+    strategy:
+      fail-fast: false
+      max-parallel: 20
+      matrix:
+        shard: ${{ fromJSON(needs.plan.outputs.shards) }}
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          path: tools
+          sparse-checkout: tests/mutant_replay.py
+          sparse-checkout-cone-mode: false
+          persist-credentials: false
+      - uses: actions/checkout@v5
+        with:
+          ref: ${{ inputs.ref || github.sha }}
+          path: tree
+          persist-credentials: false
+      - uses: dtolnay/rust-toolchain@683b588c487a69d01f6c6ddf40f036ff682cc2c8 # master, Rust 1.99.1
+        with:
+          toolchain: stable
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2
+        with:
+          shared-key: mutants
+          workspaces: tree -> target/mutant-replay/target-0
+          save-if: ${{ matrix.shard == 0 }}
+      - name: Fetch the locked dependencies (the replay tool builds offline)
+        working-directory: tree
+        run: cargo fetch --locked
+      - name: Replay this shard's mutants
+        env:
+          LEDGER: ${{ inputs.ledger }}
+          IDS: ${{ inputs.ids }}
+          SURVIVORS_OK: ${{ inputs.survivors_ok }}
+          SHARD: ${{ matrix.shard }}
+          TOTAL: ${{ needs.plan.outputs.total_shards }}
+        run: >-
+          python3 tools/tests/mutant_replay.py run --root tree --ledger "$LEDGER"
+          --shard "$SHARD/$TOTAL" --ids "$IDS" --survivors-ok "$SURVIVORS_OK"
+          --out "results/shard-$SHARD.json"
+      - uses: actions/upload-artifact@v4
+        if: ${{ !cancelled() }}
+        with:
+          name: mutants-shard-${{ matrix.shard }}
+          path: results/shard-${{ matrix.shard }}.json
+          if-no-files-found: warn
+          retention-days: 14
+
+  summary:
+    needs: [plan, replay]
+    if: ${{ !cancelled() && needs.plan.result == 'success' }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          path: tools
+          sparse-checkout: tests/mutant_replay.py
+          sparse-checkout-cone-mode: false
+          persist-credentials: false
+      - uses: actions/checkout@v5
+        with:
+          ref: ${{ inputs.ref || github.sha }}
+          path: tree
+          persist-credentials: false
+      - uses: actions/download-artifact@v5
+        with:
+          pattern: mutants-shard-*
+          merge-multiple: true
+          path: results
+      - name: Merge the shard results into one table
+        env:
+          LEDGER: ${{ inputs.ledger }}
+          SURVIVORS_OK: ${{ inputs.survivors_ok }}
+          STARTED: ${{ needs.plan.outputs.started }}
+        run: >-
+          python3 tools/tests/mutant_replay.py merge --root tree --ledger "$LEDGER"
+          --results results --survivors-ok "$SURVIVORS_OK"
+          --wall-seconds "$(( $(date +%s) - STARTED ))"
+          --summary "$GITHUB_STEP_SUMMARY" --json mutants-summary.json
+      - uses: actions/upload-artifact@v4
+        if: ${{ !cancelled() }}
+        with:
+          name: mutants-summary
+          path: mutants-summary.json
+          if-no-files-found: warn
+          retention-days: 14

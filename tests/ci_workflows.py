@@ -433,6 +433,80 @@ class Policy(unittest.TestCase):
         self.assertNotIn("cargo test --locked -p vlite-graph\n", text)
 
 
+class MutantsWorkflow(unittest.TestCase):
+    """.github/workflows/mutants.yml: a dispatch-only, read-only fan-out of a mutant ledger."""
+
+    @classmethod
+    def setUpClass(cls):
+        cls.text = (ROOT / ".github/workflows/mutants.yml").read_text(encoding="utf-8")
+        cls.header = cls.text.split("\njobs:\n", 1)[0]
+
+    def job(self, name):
+        rest = self.text.split(f"\n  {name}:\n", 1)[1]
+        return re.split(r"\n  [a-z0-9-]+:\n", rest, maxsplit=1)[0]
+
+    def test_it_is_started_by_hand_and_can_only_read(self):
+        self.assertIn("\non:\n  workflow_dispatch:\n", self.header)
+        for trigger in ("push", "pull_request", "pull_request_target", "schedule", "workflow_run", "release"):
+            self.assertNotIn(f"\n  {trigger}:", self.header)
+        self.assertIn("\npermissions:\n  contents: read\n\n", self.header)
+        for forbidden in ("git commit", "git push", "git tag", "gh pr ", "gh release", "secrets.", "id-token"):
+            self.assertNotIn(forbidden, self.text)
+        self.assertEqual(self.text.count("persist-credentials: false"), self.text.count("actions/checkout@"))
+
+    def test_actions_are_pinned_and_every_job_runs_on_ubuntu(self):
+        for use in re.findall(r"uses: (\S+)", self.text):
+            if not use.startswith("actions/"):
+                self.assertRegex(use, r"@[0-9a-f]{40}$", use)
+        self.assertEqual(len(re.findall(r"Swatinem/rust-cache@[0-9a-f]{40} # v2\n", self.text)), 1)
+        self.assertEqual(len(re.findall(r"dtolnay/rust-toolchain@[0-9a-f]{40} ", self.text)), 1)
+        self.assertEqual(set(re.findall(r"runs-on: (\S+)", self.text)), {"ubuntu-latest"})
+
+    def test_inputs_cover_the_ledger_the_tree_the_shards_and_an_id_filter(self):
+        for name in ("ledger", "ref", "shards", "ids", "survivors_ok"):
+            self.assertIn(f"\n      {name}:\n", self.header)
+        self.assertIn("default: tests/k71_mutants.json", self.header)
+        self.assertIn("ref: ${{ inputs.ref || github.sha }}", self.text)
+
+    def test_shards_never_exceed_twenty(self):
+        plan, replay = self.job("plan"), self.job("replay")
+        self.assertIn('[ "$SHARDS" -gt 20 ]', plan)
+        self.assertIn("--max-shards 20", plan)
+        self.assertIn("max-parallel: 20", replay)
+        self.assertIn("shard: ${{ fromJSON(needs.plan.outputs.shards) }}", replay)
+        self.assertIn("fail-fast: false", replay)
+
+    def test_inputs_reach_the_shell_through_the_environment_only(self):
+        for name, body in (("plan", self.job("plan")), ("replay", self.job("replay")),
+                           ("summary", self.job("summary"))):
+            for line in body.splitlines():
+                if line.lstrip().startswith(("run:", "python3 ", "if ")) or "$(" in line:
+                    self.assertNotIn("${{ inputs.", line, (name, line))
+        self.assertNotIn("run: ${{", self.text)
+
+    def test_each_shard_uploads_one_json_and_a_final_job_merges_them(self):
+        replay, summary = self.job("replay"), self.job("summary")
+        self.assertIn('--out "results/shard-$SHARD.json"', replay)
+        self.assertIn("name: mutants-shard-${{ matrix.shard }}", replay)
+        self.assertIn("path: results/shard-${{ matrix.shard }}.json", replay)
+        self.assertIn("save-if: ${{ matrix.shard == 0 }}", replay)
+        self.assertIn("needs: [plan, replay]", summary)
+        self.assertIn("pattern: mutants-shard-*", summary)
+        self.assertIn("merge-multiple: true", summary)
+        self.assertIn('--summary "$GITHUB_STEP_SUMMARY"', summary)
+        self.assertIn("--wall-seconds", summary)
+        # The table is written even when some shards failed.
+        self.assertIn("if: ${{ !cancelled() && needs.plan.result == 'success' }}", summary)
+
+    def test_the_replay_driver_comes_from_the_dispatched_commit(self):
+        for name in ("plan", "replay", "summary"):
+            body = self.job(name)
+            self.assertIn("path: tools\n          sparse-checkout: tests/mutant_replay.py\n", body)
+            self.assertIn("ref: ${{ inputs.ref || github.sha }}\n          path: tree\n", body)
+            self.assertIn("tools/tests/mutant_replay.py", body)
+        self.assertTrue((ROOT / "tests/mutant_replay.py").is_file())
+
+
 class TestProof(unittest.TestCase):
     """scripts/ci_test_proof.py: the proofs that nextest and its buckets run the tests cargo test ran."""
 
