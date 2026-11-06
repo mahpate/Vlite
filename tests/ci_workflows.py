@@ -13,6 +13,9 @@ ROOT = Path(__file__).resolve().parents[1]
 spec = importlib.util.spec_from_file_location("ci_policy", ROOT / "scripts/ci_policy.py")
 policy = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(policy)
+spec = importlib.util.spec_from_file_location("ci_test_proof", ROOT / "scripts/ci_test_proof.py")
+proof = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(proof)
 
 
 def qualified_jobs():
@@ -254,12 +257,6 @@ class Policy(unittest.TestCase):
         self.assertIn("VLITE_IMAGE: vlite-smoke:local", browser)
         self.assertIn("VLITE_E2E_NO_BUILD: \"1\"", browser)
 
-    def test_graph_workspace_suite_only_repeats_unique_doctests(self):
-        text = (ROOT / ".github/workflows/ci.yml").read_text(encoding="utf-8")
-        self.assertIn("cargo test --locked --workspace --all-targets --all-features", text)
-        self.assertIn("cargo test --locked -p vlite-graph --doc", text)
-        self.assertNotIn("cargo test --locked -p vlite-graph\n", text)
-
     def test_native_x86_64_jobs_require_avx2(self):
         text = (ROOT / ".github/workflows/ci.yml").read_text(encoding="utf-8")
         native = text.split("\n  native:\n", 1)[1].split("\n  windows-tests:\n", 1)[0]
@@ -292,7 +289,7 @@ class Policy(unittest.TestCase):
         native = text.split("\n  native:\n", 1)[1].split("\n  windows-tests:\n", 1)[0]
         for step in native.split("\n      - ")[1:]:
             if "cargo nextest run" in step or "--all-targets --all-features" in step:
-                self.assertIn("if: matrix.os != 'windows-latest'", step)
+                self.assertIn("matrix.os != 'windows-latest'", step)
 
     def test_compact_method_inventory_runs_with_documentation_gates(self):
         text = (ROOT / ".github/workflows/ci.yml").read_text(encoding="utf-8")
@@ -337,19 +334,130 @@ class Policy(unittest.TestCase):
         node = (ROOT / "bindings/node/build.mjs").read_text(encoding="utf-8")
         self.assertIn('join(root, "target", "node-default")', node)
 
-    def test_windows_uses_pinned_bounded_nextest_without_dropping_targets(self):
+    def test_every_os_runs_the_all_features_suite_with_pinned_nextest(self):
         workflow = (ROOT / ".github/workflows/ci.yml").read_text(encoding="utf-8")
-        self.assertIn("taiki-e/install-action@5488ac5a951645ce95062214902ac4b6bc1a1037", workflow)
-        self.assertIn("tool: cargo-nextest@0.9.149", workflow)
+        # One install per job that runs nextest: `native` (not on Windows) and `windows-tests`.
+        self.assertEqual(workflow.count("taiki-e/install-action@5488ac5a951645ce95062214902ac4b6bc1a1037"), 2)
+        self.assertEqual(workflow.count("tool: cargo-nextest@0.9.149"), 2)
+        native = workflow.split("\n  native:\n", 1)[1].split("\n  windows-tests:\n", 1)[0]
+        install = [s for s in native.split("\n      - ")[1:] if "install-action" in s]
+        self.assertEqual(len(install), 1)
+        self.assertIn("if: matrix.os != 'windows-latest'", install[0])
+        # Windows is bounded to two tests at a time per bucket; Linux and macOS use nextest's default
+        # of one test per CPU, which is what the per-binary thread pool of `cargo test` already did.
         self.assertIn(
-            "cargo nextest run --locked --workspace --all-targets --all-features --test-threads 2",
+            "cargo nextest run --locked --workspace --all-targets --all-features --test-threads 2 --partition",
             workflow,
         )
+        self.assertIn("run: cargo nextest run --locked --workspace --all-targets --all-features\n", native)
+        self.assertEqual(workflow.count("cargo nextest run"), 2)
+        # No target is dropped: nextest runs what `cargo test --all-targets --all-features` ran.
+        self.assertNotIn("cargo test --locked --workspace --all-targets --all-features", workflow)
+        self.assertNotIn("cargo nextest run --locked --workspace --all-targets --test-threads", workflow)
         # The default-feature suite runs once (Linux stable); other cells only compile it.
         self.assertIn("cargo check --locked --workspace --all-targets\n", workflow)
-        self.assertNotIn("cargo nextest run --locked --workspace --all-targets --test-threads 2", workflow)
-        self.assertIn("cargo test --locked --workspace --all-targets --all-features", workflow)
         self.assertIn("run: cargo test --locked --workspace --all-targets\n", workflow)
+
+    def test_test_count_proofs_are_opt_in_and_match_the_suite(self):
+        text = (ROOT / ".github/workflows/ci.yml").read_text(encoding="utf-8")
+        option = text.split("\njobs:\n", 1)[0].split("      test_proof:\n", 1)[1]
+        self.assertIn("type: boolean\n        default: false\n", option)
+        windows = text.split("\n  windows-tests:\n", 1)[1].split("\n  clients:\n", 1)[0]
+        step = windows.split("- name: Prove the buckets are disjoint and complete\n", 1)[1]
+        self.assertIn("if: inputs.test_proof && matrix.shard == 1\n", step)
+        self.assertIn(f"python scripts/ci_test_proof.py shards {policy.WINDOWS_SHARDS} -- --locked "
+                      "--workspace --all-targets --all-features", step)
+        native = text.split("\n  native:\n", 1)[1].split("\n  windows-tests:\n", 1)[0]
+        step = native.split("- name: Prove Nextest lists the same tests as cargo test\n", 1)[1].split("\n      - ")[0]
+        self.assertIn("if: inputs.test_proof && matrix.os != 'windows-latest'\n", step)
+        self.assertIn("python3 scripts/ci_test_proof.py parity -- --locked --workspace --all-targets "
+                      "--all-features", step)
+
+    def test_doc_tests_still_run_next_to_nextest(self):
+        text = (ROOT / ".github/workflows/ci.yml").read_text(encoding="utf-8")
+        native = text.split("\n  native:\n", 1)[1].split("\n  windows-tests:\n", 1)[0]
+        # Nextest runs no doc tests and `--all-targets` never did, so each OS has a doc step. The
+        # Windows cells build no all-features suite, so they keep the cheap per-crate step.
+        steps = {s.split("\n", 1)[0]: s for s in native.split("\n      - ")[1:]}
+        every = steps["name: Doc tests of every crate"]
+        self.assertIn("if: matrix.os != 'windows-latest'", every)
+        self.assertTrue(every.endswith("run: cargo test --locked --workspace --all-features --doc"), every)
+        graph = steps["name: Doc tests of vlite-graph"]
+        self.assertIn("if: matrix.os == 'windows-latest'", graph)
+        self.assertTrue(graph.endswith("run: cargo test --locked -p vlite-graph --doc"), graph)
+        self.assertNotIn("cargo test --locked -p vlite-graph\n", text)
+
+
+class TestProof(unittest.TestCase):
+    """scripts/ci_test_proof.py: the proofs that nextest and its buckets run the tests cargo test ran."""
+
+    @staticmethod
+    def listing(**binaries):
+        """A `cargo nextest list --message-format json` document: binary -> {test: (ignored, matches)}."""
+        suites = {}
+        for binary, tests in binaries.items():
+            suites[binary] = {
+                "binary-path": f"C:\\work\\target\\debug\\deps\\{binary}.exe",
+                "testcases": {
+                    name: {"ignored": ignored,
+                           "filter-match": {"status": "matches"} if matches
+                           else {"status": "mismatch", "reason": "partition"}}
+                    for name, (ignored, matches) in tests.items()
+                },
+            }
+        return json.dumps({"test-count": 0, "rust-suites": suites})
+
+    def test_binary_keys_ignore_directories_and_extensions(self):
+        self.assertEqual(proof.binary_key("target/debug/deps/vlite-2e5104f9"), "vlite-2e5104f9")
+        self.assertEqual(proof.binary_key("target\\debug\\deps\\kv_tools-ab12.exe"), "kv_tools-ab12")
+
+    def test_cargo_list_is_read_per_binary_with_colons_in_names(self):
+        output = (
+            "   Compiling x\n     Running unittests src/lib.rs (target/debug/deps/vlite-aa)\n"
+            "a::b::c: test\nslow: test\n\n2 tests, 0 benchmarks\n"
+            "     Running tests/it.rs (target/debug/deps/it-bb)\nplain: test\nbench_one: benchmark\n"
+            "     Doc-tests vlite\n0 tests, 0 benchmarks\n"
+        )
+        self.assertEqual(proof.read_cargo_list(output),
+                         {("vlite-aa", "a::b::c"), ("vlite-aa", "slow"), ("it-bb", "plain"), ("it-bb", "bench_one")})
+
+    def test_nextest_listing_keeps_the_ignored_flag_and_the_selection(self):
+        document = self.listing(**{"vlite-aa": {"a": (False, True), "b": (True, False), "c": (False, False)}})
+        listing = proof.read_nextest(document)
+        self.assertEqual(listing["vlite-aa"]["b"], (True, False))
+        self.assertEqual(proof.names(listing), {("vlite-aa", n) for n in "abc"})
+        self.assertEqual(proof.names(listing, selected_only=True), {("vlite-aa", "a")})
+
+    def test_buckets_must_be_disjoint_and_complete(self):
+        whole = proof.read_nextest(self.listing(x={"a": (False, True), "b": (False, True), "c": (False, True)},
+                                                y={"d": (False, True), "e": (True, False)}))
+
+        def bucket(selected):
+            return proof.read_nextest(self.listing(
+                x={n: (False, n in selected) for n in "abc"}, y={"d": (False, "d" in selected), "e": (True, False)}))
+
+        problems, sizes = proof.compare_buckets(whole, [bucket("ad"), bucket("b"), bucket("c")])
+        self.assertEqual((problems, sizes), ([], [2, 1, 1]))
+        problems, _ = proof.compare_buckets(whole, [bucket("ad"), bucket("bd"), bucket("c")])
+        self.assertTrue(any("repeats" in p for p in problems), problems)
+        problems, _ = proof.compare_buckets(whole, [bucket("ad"), bucket("b")])
+        self.assertTrue(any("missing" in p for p in problems), problems)
+
+    def test_parity_compares_every_binary(self):
+        listing = proof.read_nextest(self.listing(**{"vlite-aa": {"a": (False, True), "s": (True, False)},
+                                                     "it-bb": {"p": (False, True)}}))
+        same = {("vlite-aa", "a"), ("vlite-aa", "s"), ("it-bb", "p")}
+        self.assertEqual(proof.compare_parity(same, listing), [])
+        self.assertEqual(len(proof.compare_parity(same - {("it-bb", "p")}, listing)), 1)
+        self.assertEqual(len(proof.compare_parity(same | {("other-cc", "z")}, listing)), 1)
+        moved = (same - {("it-bb", "p")}) | {("vlite-aa", "p")}
+        self.assertEqual(len(proof.compare_parity(moved, listing)), 2)
+
+    def test_the_cli_refuses_unknown_modes(self):
+        for argv in ([], ["shards", "3"], ["shards", "x", "--"], ["unknown", "--"]):
+            with self.subTest(argv=argv):
+                with self.assertRaises(SystemExit):
+                    proof.main(argv)
 
 
 if __name__ == "__main__":

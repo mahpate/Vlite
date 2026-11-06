@@ -10,6 +10,10 @@ on:
         description: "Run the Docker job (the container test suite). Clear it for a quicker run; such a run cannot qualify a deployment image."
         type: boolean
         default: true
+      test_proof:
+        description: "Also list the tests to prove the Windows buckets are disjoint and complete and that Nextest lists the same tests as cargo test (a few extra minutes)."
+        type: boolean
+        default: false
 
 permissions:
   contents: read
@@ -117,12 +121,26 @@ jobs:
         with:
           key: ${{ matrix.os }}-${{ matrix.toolchain }}
           save-if: ${{ github.event_name != 'pull_request' }}
+      - uses: taiki-e/install-action@5488ac5a951645ce95062214902ac4b6bc1a1037
+        if: matrix.os != 'windows-latest'
+        with:
+          tool: cargo-nextest@0.9.149
+          fallback: none
       - run: cargo check --locked --no-default-features --lib
       # The Windows all-features suite runs in the sharded windows-tests job.
-      - name: Test full feature suite with Cargo on other platforms
+      - name: Test full feature suite with Nextest on Linux and macOS
         if: matrix.os != 'windows-latest'
-        run: cargo test --locked --workspace --all-targets --all-features
-      - run: cargo test --locked -p vlite-graph --doc
+        run: cargo nextest run --locked --workspace --all-targets --all-features
+      - name: Prove Nextest lists the same tests as cargo test
+        if: inputs.test_proof && matrix.os != 'windows-latest'
+        run: python3 scripts/ci_test_proof.py parity -- --locked --workspace --all-targets --all-features
+      # Nextest does not run doc tests (and --all-targets never did): this step keeps them.
+      - name: Doc tests of every crate
+        if: matrix.os != 'windows-latest'
+        run: cargo test --locked --workspace --all-features --doc
+      - name: Doc tests of vlite-graph
+        if: matrix.os == 'windows-latest'
+        run: cargo test --locked -p vlite-graph --doc
       - name: Graph CLI with json only (FOLLOWUP-001; without tools or server)
         run: cargo test --locked --features json --test graph_cli
       - name: Server without grpc or mcp (ITEM-027..030; catches cfg gaps hidden by --all-features)
@@ -237,6 +255,9 @@ jobs:
           fallback: none
       - name: Test one third of the full feature suite with bounded Nextest
         run: cargo nextest run --locked --workspace --all-targets --all-features --test-threads 2 --partition hash:${{ matrix.shard }}/3
+      - name: Prove the buckets are disjoint and complete
+        if: inputs.test_proof && matrix.shard == 1
+        run: python scripts/ci_test_proof.py shards 3 -- --locked --workspace --all-targets --all-features
 
   clients:
     strategy:
