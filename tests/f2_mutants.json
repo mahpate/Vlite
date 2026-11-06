@@ -557,7 +557,7 @@
   "file": "src/bin/tool_support/kv_mcp.rs",
   "old": "const MAX_VALUE_BASE64: usize = MAX_KV_VALUE_BYTES.div_ceil(3) * 4;",
   "new": "const MAX_VALUE_BASE64: usize = MAX_KV_VALUE_BYTES.div_ceil(3) * 4 + 4;",
-  "cmd": "cargo test --locked --offline --features mcp,tools --test graph_surface_parity reg008_mcp_tools_list_and_outputs_match_baseline"
+  "cmd": "cargo test --locked --offline --features server,mcp,tools --test graph_surface_parity reg008_mcp_tools_list_and_outputs_match_baseline"
  },
  {
   "id": "kvb/R18-batch-operation-charge-inflated",
