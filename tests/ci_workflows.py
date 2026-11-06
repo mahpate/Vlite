@@ -366,6 +366,14 @@ class Policy(unittest.TestCase):
             self.assertIn(command, changes)
             self.assertLess(changes.index(command), changes.index("ci_policy.py route"))
 
+    def test_the_replay_driver_self_test_runs_before_ci_routing(self):
+        text = (ROOT / ".github/workflows/ci.yml").read_text(encoding="utf-8")
+        changes = text.split("\n  changes:\n", 1)[1].split("\n  documentation:\n", 1)[0]
+        command = "python tests/mutant_replay_selftest.py"
+        self.assertIn(f"      - run: {command}\n", changes)
+        self.assertLess(changes.index(command), changes.index("ci_policy.py route"))
+        self.assertTrue((ROOT / "tests/mutant_replay_selftest.py").is_file())
+
     def test_client_ffi_builds_share_a_cached_target_directory(self):
         workflow = (ROOT / ".github/workflows/ci.yml").read_text(encoding="utf-8")
         self.assertIn(". -> target/node-default", workflow)
