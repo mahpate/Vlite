@@ -70,7 +70,7 @@ def full_ci_jobs(jobs):
         and all_succeeded(jobs, "windows-tests (", windows)
         and all(
             any(job["name"] == name and job["conclusion"] == "success" for job in jobs)
-            for name in ("lint", "docker")
+            for name in ("lint", "docker", "default-features")
         )
     )
 

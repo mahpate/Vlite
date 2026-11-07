@@ -1,0 +1,19 @@
+# Nextest settings (https://nexte.st), read from the workspace root by `cargo nextest run`.
+nextest-version = "0.9.91"
+
+# Nextest starts tests in alphabetical order, so a test that takes minutes and sorts into the middle
+# of the list is still running long after everything else has finished, and sets the length of the
+# whole run (kv_tools alone ran 4 to 7 minutes on the CI runners). The slowest tests start first
+# instead, next to the rest of the suite. Matching is by exact test name: a renamed test just loses
+# its priority, and no test is added, skipped or changed.
+[[profile.default.overrides]]
+filter = 'test(=list_page_exact_byte_cap_mcp_and_shell)'
+priority = 100
+
+[[profile.default.overrides]]
+filter = 'test(=forced_termination_of_copy_out_maintenance_never_publishes_partial_output)'
+priority = 90
+
+[[profile.default.overrides]]
+filter = 'test(=a_get_many_response_is_inclusive_at_sixteen_mebibytes) | test(=tenant_requests_never_change_or_read_a_root_namesake) | test(=format::tests::slicing_crc_matches_bitwise_reference_for_lengths_offsets_and_streaming)'
+priority = 80

@@ -158,9 +158,6 @@ jobs:
         run: cargo test --locked --features json --test graph_cli
       - name: Server without grpc or mcp (ITEM-027..030; catches cfg gaps hidden by --all-features)
         run: cargo test --locked --features server --test graph_server_surfaces --test rest_graph
-      - name: Default features suite (graph always compiled since v0.5.1; includes graph_regression and graph_compat), run once on Linux stable
-        if: matrix.os == 'ubuntu-latest' && matrix.toolchain == 'stable'
-        run: cargo test --locked --workspace --all-targets
       - name: Default features compile check on every other platform (the all-features suite already ran the tests there)
         if: matrix.os != 'ubuntu-latest' || matrix.toolchain != 'stable'
         run: cargo check --locked --workspace --all-targets
@@ -570,10 +567,31 @@ jobs:
           wasm-bindgen target/wasm32-unknown-unknown/release/vlite_wasm.wasm --target nodejs --out-dir pkg
           node test/smoke.mjs pkg/vlite_wasm.js
 
+  # The default-feature suite (graph is always compiled; it includes graph_regression and graph_compat)
+  # does not depend on the all-features suite, so it runs next to it instead of after it in `native`
+  # (about ten minutes of the longest job). It keeps `cargo test`, as before, on Linux stable.
+  default-features:
+    needs: changes
+    if: needs.changes.outputs.full == 'true'
+    runs-on: ubuntu-latest
+    env:
+      VLITE_REQUIRE_AVX2: "1"
+    steps:
+      - uses: actions/checkout@v5
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: stable
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2
+        with:
+          key: ubuntu-latest-stable
+          save-if: ${{ github.event_name != 'pull_request' }}
+      - name: Default features suite (graph always compiled since v0.5.1; includes graph_regression and graph_compat)
+        run: cargo test --locked --workspace --all-targets
+
   required:
     name: CI required
     if: always()
-    needs: [changes, documentation, native, windows-tests, clients, manylinux, node-linux-package, lint, docker, go-client, dotnet-client, python-integrations, helm-chart, wasm]
+    needs: [changes, documentation, native, default-features, windows-tests, clients, manylinux, node-linux-package, lint, docker, go-client, dotnet-client, python-integrations, helm-chart, wasm]
     runs-on: ubuntu-latest
     steps:
       - name: Require every applicable check

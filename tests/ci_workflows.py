@@ -26,7 +26,7 @@ def qualified_jobs():
          for rust in ("1.89.0", "stable")]
         + [dict(name=f"windows-tests ({rust}, shard {shard}/3)", conclusion="success")
            for rust in ("1.89.0", "stable") for shard in (1, 2, 3)]
-        + [dict(name=name, conclusion="success") for name in ("lint", "docker")]
+        + [dict(name=name, conclusion="success") for name in ("lint", "docker", "default-features")]
     )
 
 
@@ -54,6 +54,9 @@ class Policy(unittest.TestCase):
         for conclusion in ("skipped", "cancelled", "failure"):
             self.assertFalse(policy.full_ci_jobs([dict(jobs[0], conclusion=conclusion)] + jobs[1:]))
         self.assertFalse(policy.full_ci_jobs(jobs[:-1]))
+        for name in ("lint", "docker", "default-features"):
+            with self.subTest(job=name):
+                self.assertFalse(policy.full_ci_jobs([job for job in jobs if job["name"] != name]))
         self.assertFalse(policy.full_ci_jobs([dict(jobs[0], name="native (unknown, stable)")] + jobs[1:]))
 
     def test_every_windows_test_shard_must_succeed_to_qualify_an_image(self):
@@ -162,9 +165,9 @@ class Policy(unittest.TestCase):
 
     def test_rust_caches_are_isolated_and_fork_writes_disabled(self):
         text = (ROOT / ".github/workflows/ci.yml").read_text(encoding="utf-8")
-        self.assertEqual(text.count("Swatinem/rust-cache@"), 7)
+        self.assertEqual(text.count("Swatinem/rust-cache@"), 8)
         # Pull requests never write a cache; the sharded Windows job lets only its first bucket write.
-        self.assertEqual(text.count("save-if: ${{ github.event_name != 'pull_request' }}"), 6)
+        self.assertEqual(text.count("save-if: ${{ github.event_name != 'pull_request' }}"), 7)
         self.assertEqual(
             text.count("save-if: ${{ github.event_name != 'pull_request' && matrix.shard == 1 }}"), 1
         )
@@ -201,7 +204,8 @@ class Policy(unittest.TestCase):
         for name, after in (("native", "windows-tests"), ("windows-tests", "clients"),
                             ("manylinux", "node-linux-package"), ("node-linux-package", "lint"),
                             ("lint", "docker"), ("go-client", "dotnet-client"),
-                            ("dotnet-client", "python-integrations"), ("wasm", "required")):
+                            ("dotnet-client", "python-integrations"), ("wasm", "default-features"),
+                            ("default-features", "required")):
             job = text.split(f"\n  {name}:\n", 1)[1].split(f"\n  {after}:\n", 1)[0]
             self.assertIn("    if: needs.changes.outputs.full == 'true'\n", job)
 
@@ -211,6 +215,7 @@ class Policy(unittest.TestCase):
         required = text.split("\n  required:\n", 1)[1]
         needs = re.search(r"needs: \[(.*?)\]", required).group(1).split(", ")
         self.assertIn("windows-tests", needs)
+        self.assertIn("default-features", needs)
         always = {"changes", "documentation", "clients", "python-integrations", "helm-chart"}
         jobs = {}
         for name in needs:
@@ -236,11 +241,14 @@ class Policy(unittest.TestCase):
             ("true", "true", {"docker": "skipped"}),
             ("true", "true", {"docker": "failure"}),
             ("true", "true", {"windows-tests": "failure"}),
+            ("true", "true", {"default-features": "failure"}),
+            ("true", "true", {"default-features": "skipped"}),
             ("true", "true", {"native": "skipped"}),
             ("true", "false", {"docker": "success"}),
             ("true", "false", {"docker": "failure"}),
             ("false", "false", {"native": "success"}),
             ("false", "false", {"windows-tests": "success"}),
+            ("false", "false", {"default-features": "success"}),
             ("false", "false", {"documentation": "skipped"}),
             ("false", "true", {}),
             ("maybe", "true", {}),
@@ -268,7 +276,9 @@ class Policy(unittest.TestCase):
         )
         windows = text.split("\n  windows-tests:\n", 1)[1].split("\n  clients:\n", 1)[0]
         self.assertIn("    env:\n      VLITE_REQUIRE_AVX2: \"1\"\n", windows)
-        self.assertEqual(text.count("VLITE_REQUIRE_AVX2:"), 2)
+        default_features = text.split("\n  default-features:\n", 1)[1].split("\n  required:\n", 1)[0]
+        self.assertIn("    runs-on: ubuntu-latest\n    env:\n      VLITE_REQUIRE_AVX2: \"1\"\n", default_features)
+        self.assertEqual(text.count("VLITE_REQUIRE_AVX2:"), 3)
 
     def test_windows_suite_is_split_into_exact_hash_buckets(self):
         text = (ROOT / ".github/workflows/ci.yml").read_text(encoding="utf-8")
@@ -439,6 +449,46 @@ class Policy(unittest.TestCase):
         self.assertIn("if: matrix.os == 'windows-latest'", graph)
         self.assertTrue(graph.endswith("run: cargo test --locked -p vlite-graph --doc"), graph)
         self.assertNotIn("cargo test --locked -p vlite-graph\n", text)
+
+    def test_default_features_suite_runs_next_to_the_all_features_suite(self):
+        text = (ROOT / ".github/workflows/ci.yml").read_text(encoding="utf-8")
+        native = text.split("\n  native:\n", 1)[1].split("\n  windows-tests:\n", 1)[0]
+        # It left the longest job: `native` keeps only the compile check of the default features.
+        self.assertNotIn("run: cargo test --locked --workspace --all-targets\n", native)
+        self.assertNotIn("Default features suite", native)
+        check = [s for s in native.split("\n      - ")[1:] if s.endswith("run: cargo check --locked --workspace --all-targets")]
+        self.assertEqual(len(check), 1)
+        self.assertIn("if: matrix.os != 'ubuntu-latest' || matrix.toolchain != 'stable'\n", check[0])
+        job = text.split("\n  default-features:\n", 1)[1].split("\n  required:\n", 1)[0]
+        self.assertIn("    needs: changes\n    if: needs.changes.outputs.full == 'true'\n    runs-on: ubuntu-latest\n", job)
+        self.assertIn('      VLITE_REQUIRE_AVX2: "1"\n', job)
+        self.assertIn("          toolchain: stable\n", job)
+        self.assertTrue(job.rstrip().endswith("run: cargo test --locked --workspace --all-targets"), job)
+        # The image gate (full_ci_jobs) also expects it: test_skipped_or_partial_matrix_cannot_qualify_an_image.
+
+    def test_the_slowest_tests_start_first_in_nextest(self):
+        import tomllib
+        config = tomllib.loads((ROOT / ".config/nextest.toml").read_text(encoding="utf-8"))
+        required = tuple(int(part) for part in config["nextest-version"].split("."))
+        pinned = re.search(r"tool: cargo-nextest@(\d+\.\d+\.\d+)\n", (ROOT / ".github/workflows/ci.yml").read_text(encoding="utf-8"))
+        self.assertLessEqual(required, tuple(int(part) for part in pinned.group(1).split(".")))
+        overrides = config["profile"]["default"]["overrides"]
+        self.assertTrue(overrides)
+        names = []
+        for override in overrides:
+            self.assertEqual(set(override), {"filter", "priority"})
+            self.assertTrue(1 <= override["priority"] <= 100, override)
+            found = re.findall(r"test\(=([\w:]+)\)", override["filter"])
+            self.assertEqual(" | ".join(f"test(={name})" for name in found), override["filter"])
+            names += found
+        self.assertEqual(len(names), len(set(names)))
+        # Each name is a test that exists, so a rename is noticed instead of silently dropping the priority.
+        sources = [path.read_text(encoding="utf-8", errors="replace")
+                   for folder in ("src", "tests") for path in (ROOT / folder).rglob("*.rs")]
+        for name in names:
+            function = name.rsplit("::", 1)[-1]
+            with self.subTest(test=name):
+                self.assertTrue(any(re.search(rf"\bfn {function}\b", source) for source in sources), name)
 
 
 class MutantsWorkflow(unittest.TestCase):
