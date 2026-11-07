@@ -684,6 +684,19 @@ class TestProof(unittest.TestCase):
         problems, _ = proof.compare_buckets(whole, [bucket("ad"), bucket("b")])
         self.assertTrue(any("missing" in p for p in problems), problems)
 
+    def test_empty_listings_prove_nothing(self):
+        empty = proof.read_nextest(self.listing(x={"a": (False, False), "b": (True, False)}))
+        problems, sizes = proof.compare_buckets(empty, [empty, empty])
+        self.assertEqual((len(problems), sizes), (1, [0, 0]))
+        self.assertIn("nothing was proved", problems[0])
+        self.assertEqual(len(proof.compare_parity(set(), proof.read_nextest(self.listing()))), 1)
+        listing = proof.read_nextest(self.listing(x={"a": (False, True)}))
+        problems = proof.compare_parity(set(), listing)
+        self.assertTrue(any("nothing was proved" in p for p in problems), problems)
+        problems = proof.compare_parity({("x", "a")}, proof.read_nextest(self.listing()))
+        self.assertTrue(any("nothing was proved" in p for p in problems), problems)
+        self.assertEqual(proof.compare_parity({("x", "a")}, listing), [])
+
     def test_parity_compares_every_binary(self):
         listing = proof.read_nextest(self.listing(**{"vlite-aa": {"a": (False, True), "s": (True, False)},
                                                      "it-bb": {"p": (False, True)}}))

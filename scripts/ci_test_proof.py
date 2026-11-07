@@ -89,6 +89,8 @@ def compare_buckets(whole, buckets):
     """Problems (empty when the buckets partition the selected tests of `whole`) and the bucket sizes."""
     selected = names(whole, selected_only=True)
     problems, sizes, union = [], [], set()
+    if not selected:
+        problems.append("the unpartitioned listing selects no test, so nothing was proved")
     for index, bucket in enumerate(buckets, 1):
         members = names(bucket, selected_only=True)
         sizes.append(len(members))
@@ -108,6 +110,10 @@ def compare_parity(cargo, listing):
     """Problems (empty when both runners list the same names in every binary)."""
     nextest_names = names(listing)
     problems = []
+    if not cargo or not nextest_names:
+        problems.append(
+            f"cargo test listed {len(cargo)} tests and nextest {len(nextest_names)}: nothing was proved"
+        )
     for binary in sorted({b for b, _ in cargo} | {b for b, _ in nextest_names}):
         here = {n for b, n in cargo if b == binary}
         there = {n for b, n in nextest_names if b == binary}
