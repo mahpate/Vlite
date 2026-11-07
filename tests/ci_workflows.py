@@ -25,7 +25,7 @@ def qualified_jobs():
          for os in ("ubuntu-latest", "ubuntu-24.04-arm", "windows-latest", "macos-latest")
          for rust in ("1.89.0", "stable")]
         + [dict(name=f"windows-tests ({rust}, shard {shard}/3)", conclusion="success")
-           for rust in ("1.89.0", "stable") for shard in (1, 2, 3)]
+           for rust in policy.WINDOWS_TOOLCHAINS for shard in (1, 2, 3)]
         + [dict(name=name, conclusion="success") for name in ("lint", "docker", "default-features")]
     )
 
@@ -62,16 +62,18 @@ class Policy(unittest.TestCase):
     def test_every_windows_test_shard_must_succeed_to_qualify_an_image(self):
         jobs = qualified_jobs()
         shards = [job for job in jobs if job["name"].startswith("windows-tests (")]
-        self.assertEqual(len(shards), 2 * policy.WINDOWS_SHARDS)
+        self.assertEqual(len(shards), len(policy.WINDOWS_TOOLCHAINS) * policy.WINDOWS_SHARDS)
         for shard in shards:
             with self.subTest(shard=shard["name"]):
                 rest = [job for job in jobs if job is not shard]
                 self.assertFalse(policy.full_ci_jobs(rest))
                 for conclusion in ("skipped", "cancelled", "failure"):
                     self.assertFalse(policy.full_ci_jobs(rest + [dict(shard, conclusion=conclusion)]))
-        wrong_total = dict(shards[0], name="windows-tests (1.89.0, shard 1/2)")
+        wrong_total = dict(shards[0], name="windows-tests (stable, shard 1/2)")
         self.assertFalse(policy.full_ci_jobs([wrong_total] + [j for j in jobs if j is not shards[0]]))
         self.assertFalse(policy.full_ci_jobs(jobs + [dict(shards[0], name="windows-tests (stable, shard 4/3)")]))
+        # The MSRV no longer runs Windows buckets: such a job is not part of the expected set.
+        self.assertFalse(policy.full_ci_jobs(jobs + [dict(shards[0], name="windows-tests (1.89.0, shard 1/3)")]))
 
     def test_manual_ci_always_forces_full_matrix(self):
         self.check_route("workflow_dispatch", {}, b"README.md\0", "true", "true")
@@ -285,9 +287,9 @@ class Policy(unittest.TestCase):
         job = text.split("\n  windows-tests:\n", 1)[1].split("\n  clients:\n", 1)[0]
         shards = policy.WINDOWS_SHARDS
         self.assertEqual(shards, 3)
-        # One runner per bucket, buckets 1..N of N once each, per toolchain.
+        # One runner per bucket, buckets 1..N of N once each; stable only (the MSRV is checked in `native`).
         self.assertIn(f"        shard: {list(range(1, shards + 1))}\n", job)
-        self.assertIn('        toolchain: ["1.89.0", stable]\n', job)
+        self.assertIn("        toolchain: [stable]\n", job)
         self.assertIn("shard ${{ matrix.shard }}/" + str(shards) + ")", job)
         self.assertEqual(job.count("--partition hash:${{ matrix.shard }}/" + str(shards)), 1)
         self.assertEqual(job.count("cargo nextest run"), 1)
@@ -298,7 +300,8 @@ class Policy(unittest.TestCase):
         # The suite is not repeated in `native`: its Windows cells keep only the small steps.
         native = text.split("\n  native:\n", 1)[1].split("\n  windows-tests:\n", 1)[0]
         for step in native.split("\n      - ")[1:]:
-            if "cargo nextest run" in step or "--all-targets --all-features" in step:
+            command = " ".join(line for line in step.splitlines() if line.strip().startswith("run:"))
+            if "cargo nextest run" in command or ("cargo test" in command and "--all-features" in command):
                 self.assertIn("matrix.os != 'windows-latest'", step)
 
     def test_ci_builds_write_line_tables_instead_of_full_debug_info(self):
@@ -345,6 +348,29 @@ class Policy(unittest.TestCase):
         self.assertEqual(text.count("dev_fast_env.py"), 1)
         # Only the scripts apply sccache or a linker: none of it is committed Cargo configuration.
         self.assertFalse((ROOT / ".cargo").exists())
+
+    def test_msrv_runs_the_suite_on_ubuntu_only_and_is_checked_elsewhere(self):
+        text = (ROOT / ".github/workflows/ci.yml").read_text(encoding="utf-8")
+        native = text.split("\n  native:\n", 1)[1].split("\n  windows-tests:\n", 1)[0]
+        # Every system still builds the MSRV: the matrix keeps both toolchains.
+        self.assertIn('        toolchain: ["1.89.0", stable]\n', native)
+        steps = {s.split("\n", 1)[0]: s for s in native.split("\n      - ")[1:]}
+        suite = "matrix.os != 'windows-latest' && (matrix.toolchain == 'stable' || matrix.os == 'ubuntu-latest')"
+        for name in ("name: Test full feature suite with Nextest on Linux and macOS", "name: Doc tests of every crate"):
+            self.assertIn(f"if: {suite}\n", steps[name], name)
+        install = [step for step in native.split("\n      - ")[1:] if "install-action" in step]
+        self.assertEqual(len(install), 1)
+        self.assertIn(f"if: {suite}\n", install[0])
+        check = steps["name: Check the full feature suite builds on the MSRV (its tests run on ubuntu-latest)"]
+        self.assertIn("if: matrix.toolchain != 'stable' && matrix.os != 'ubuntu-latest'\n", check)
+        self.assertTrue(check.endswith("run: cargo check --locked --workspace --all-targets --all-features"), check)
+        self.assertIn("if: matrix.os == 'windows-latest' && matrix.toolchain == 'stable'\n",
+                      steps["name: Doc tests of vlite-graph"])
+        # Stable is fully tested everywhere: Windows through the buckets, the rest through Nextest.
+        windows = text.split("\n  windows-tests:\n", 1)[1].split("\n  clients:\n", 1)[0]
+        self.assertNotIn("1.89.0", windows)
+        self.assertEqual(policy.WINDOWS_TOOLCHAINS, ("stable",))
+        self.assertEqual(policy.TOOLCHAINS, ("1.89.0", "stable"))
 
     def test_compact_method_inventory_runs_with_documentation_gates(self):
         text = (ROOT / ".github/workflows/ci.yml").read_text(encoding="utf-8")
@@ -432,7 +458,8 @@ class Policy(unittest.TestCase):
                       "--workspace --all-targets --all-features", step)
         native = text.split("\n  native:\n", 1)[1].split("\n  windows-tests:\n", 1)[0]
         step = native.split("- name: Prove Nextest lists the same tests as cargo test\n", 1)[1].split("\n      - ")[0]
-        self.assertIn("if: inputs.test_proof && matrix.os != 'windows-latest'\n", step)
+        self.assertIn("if: inputs.test_proof && matrix.os != 'windows-latest' && "
+                      "(matrix.toolchain == 'stable' || matrix.os == 'ubuntu-latest')\n", step)
         self.assertIn("python3 scripts/ci_test_proof.py parity -- --locked --workspace --all-targets "
                       "--all-features", step)
 

@@ -135,30 +135,34 @@ jobs:
           key: ${{ matrix.os }}-${{ matrix.toolchain }}
           save-if: ${{ github.event_name != 'pull_request' }}
       - uses: taiki-e/install-action@5488ac5a951645ce95062214902ac4b6bc1a1037
-        if: matrix.os != 'windows-latest'
+        if: matrix.os != 'windows-latest' && (matrix.toolchain == 'stable' || matrix.os == 'ubuntu-latest')
         with:
           tool: cargo-nextest@0.9.149
           fallback: none
       - run: cargo check --locked --no-default-features --lib
-      # The Windows all-features suite runs in the sharded windows-tests job.
+      # The Windows all-features suite runs in the sharded windows-tests job (stable only). The MSRV
+      # (1.89.0) runs the suite on ubuntu-latest and only checks it on the other systems.
       - name: Test full feature suite with Nextest on Linux and macOS
-        if: matrix.os != 'windows-latest'
+        if: matrix.os != 'windows-latest' && (matrix.toolchain == 'stable' || matrix.os == 'ubuntu-latest')
         run: cargo nextest run --locked --workspace --all-targets --all-features
+      - name: Check the full feature suite builds on the MSRV (its tests run on ubuntu-latest)
+        if: matrix.toolchain != 'stable' && matrix.os != 'ubuntu-latest'
+        run: cargo check --locked --workspace --all-targets --all-features
       - name: Prove Nextest lists the same tests as cargo test
-        if: inputs.test_proof && matrix.os != 'windows-latest'
+        if: inputs.test_proof && matrix.os != 'windows-latest' && (matrix.toolchain == 'stable' || matrix.os == 'ubuntu-latest')
         run: python3 scripts/ci_test_proof.py parity -- --locked --workspace --all-targets --all-features
       # Nextest does not run doc tests (and --all-targets never did): this step keeps them.
       - name: Doc tests of every crate
-        if: matrix.os != 'windows-latest'
+        if: matrix.os != 'windows-latest' && (matrix.toolchain == 'stable' || matrix.os == 'ubuntu-latest')
         run: cargo test --locked --workspace --all-features --doc
       - name: Doc tests of vlite-graph
-        if: matrix.os == 'windows-latest'
+        if: matrix.os == 'windows-latest' && matrix.toolchain == 'stable'
         run: cargo test --locked -p vlite-graph --doc
       - name: Graph CLI with json only (FOLLOWUP-001; without tools or server)
         run: cargo test --locked --features json --test graph_cli
       - name: Server without grpc or mcp (ITEM-027..030; catches cfg gaps hidden by --all-features)
         run: cargo test --locked --features server --test graph_server_surfaces --test rest_graph
-      - name: Default features compile check on every other platform (the all-features suite already ran the tests there)
+      - name: Default features compile check on every other platform (the all-features suite, or its MSRV check, already covered the tests there)
         if: matrix.os != 'ubuntu-latest' || matrix.toolchain != 'stable'
         run: cargo check --locked --workspace --all-targets
       - name: REG-008 served OpenAPI bytes and MCP tools/list/outputs match the baseline capture
@@ -247,7 +251,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        toolchain: ["1.89.0", stable]
+        toolchain: [stable]
         shard: [1, 2, 3]
     runs-on: windows-latest
     env:

@@ -57,6 +57,15 @@ are comparable). Each used more than five runner-hours. One job varies by about 
 tests and prove that the Windows buckets are disjoint and complete and that Nextest lists what `cargo test` listed) and
 `debuginfo`. A run without the Docker job cannot qualify a deployment image.
 
+## Optional: MSRV tests on Ubuntu only
+
+A separate, optional commit (`OPTIONAL gate cut: run the MSRV suite on ubuntu only, check it elsewhere`): revert it to keep
+the full MSRV matrix. MSRV 1.89.0 keeps the full all-features suite (Nextest and the doc tests) on `ubuntu-latest`. On Windows,
+macOS and ARM it builds every target with all features (`cargo check --locked --workspace --all-targets --all-features`) and
+still runs the small per-feature steps; stable stays fully tested everywhere. The Windows buckets run stable only (three jobs
+instead of six). What it risks: a test that fails only on the MSRV, and only on Windows, macOS or ARM, is no longer found by
+the MSRV run.
+
 ## Measured
 
 Minutes per job, from `workflow_dispatch` runs of `ci.yml` on the lane branch. The baseline is the median of 42183727536,

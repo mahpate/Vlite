@@ -1326,7 +1326,8 @@ not recoverable, so plan capacity. HNSW adds O(n*m) adjacency plus build and
 search scratch space.
 
 CI runs the full test suite natively on Windows, Linux (x86_64 and arm64) and
-macOS with Rust 1.89.0 and stable, plus Linux Docker checks for REST
+macOS with stable Rust, and with Rust 1.89.0 on Linux x86_64 (the other systems
+only build every target with 1.89.0), plus Linux Docker checks for REST
 persistence, HTTPS, the dashboard and SIGTERM shutdown. The arm64 images
 themselves are not run in tests, Docker on macOS is untested, and container
 tests do not prove power-loss durability. VLite uses its own storage format,

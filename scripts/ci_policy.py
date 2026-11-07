@@ -45,6 +45,8 @@ def trusted_run(run, sha):
 
 NATIVE_OSES = ("ubuntu-latest", "ubuntu-24.04-arm", "windows-latest", "macos-latest")
 TOOLCHAINS = ("1.89.0", "stable")
+# The MSRV runs the Windows suite nowhere: native (windows-latest, 1.89.0) only checks it.
+WINDOWS_TOOLCHAINS = ("stable",)
 WINDOWS_SHARDS = 3
 
 
@@ -62,7 +64,7 @@ def full_ci_jobs(jobs):
     native = {f"native ({os_name}, {rust})" for os_name in NATIVE_OSES for rust in TOOLCHAINS}
     windows = {
         f"windows-tests ({rust}, shard {shard}/{WINDOWS_SHARDS})"
-        for rust in TOOLCHAINS
+        for rust in WINDOWS_TOOLCHAINS
         for shard in range(1, WINDOWS_SHARDS + 1)
     }
     return (
