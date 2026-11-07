@@ -3,15 +3,16 @@
 #   . .\scripts\dev-fast-env.ps1          enable what is available and print it
 #   . .\scripts\dev-fast-env.ps1 -Off     unset what this script set
 #   $env:VLITE_DEV_FAST_DEBUG = '2'       before running: debug info level (default line-tables-only; 2 for a debugger)
-#   $env:VLITE_DEV_FAST_INCREMENTAL = '1' before running: keep incremental builds on even with sccache
-# It sets, and never overrides a variable you already set: RUSTC_WRAPPER (sccache, if installed),
-# CARGO_INCREMENTAL (off with sccache, which cannot cache incremental crates), CARGO_PROFILE_DEV_DEBUG,
-# CARGO_PROFILE_TEST_DEBUG and, on Windows, the MSVC host linker (rust-lld or lld-link, if found).
-# Changing these rebuilds the target directory once. CI does not use this script.
-param([switch]$Off)
+#   $env:VLITE_DEV_FAST_INCREMENTAL = '1' before running: 1 or 0, incremental builds on (release too) or off, even with sccache
+# It sets, and never overrides a variable you already set (a value it set itself is replaced when you run it
+# again): RUSTC_WRAPPER (sccache, if installed), CARGO_INCREMENTAL (off with sccache, which cannot cache
+# incremental crates), CARGO_PROFILE_DEV_DEBUG, CARGO_PROFILE_TEST_DEBUG and the MSVC host linker (rust-lld or
+# lld-link, if found). Changing these rebuilds the target directory once. Not used by CI.
 
+# No param block: a dot-sourced script's parameters would become variables of the caller's shell.
 & {
-    param([bool]$Off)
+    param([string[]]$Words)
+    $Off = $Words -contains '-Off'
 
     function Say([string]$text) { Write-Host "dev-fast: $text" }
 
@@ -28,11 +29,15 @@ param([switch]$Off)
         return
     }
 
+    $owned = New-Object System.Collections.Generic.List[string]
+    $owned.AddRange([string[]]$before)
     $applied = New-Object System.Collections.Generic.List[string]
     function Enable([string]$name, [string]$value, [string]$why) {
         $current = [Environment]::GetEnvironmentVariable($name)
-        if ($current) { Say "kept your $name=$current"; return }
+        $ours = $owned.Contains($name)
+        if ($null -ne $current -and -not $ours) { Say "kept your $name=$current"; return }
         [Environment]::SetEnvironmentVariable($name, $value)
+        if (-not $ours) { $owned.Add($name) }
         $applied.Add($name)
         Say "$name=$value  ($why)"
     }
@@ -45,10 +50,16 @@ param([switch]$Off)
     }
 
     $forced = [Environment]::GetEnvironmentVariable('VLITE_DEV_FAST_INCREMENTAL')
+    if ($forced -and $forced -notin '0', '1') {
+        Say "VLITE_DEV_FAST_INCREMENTAL must be 0 or 1, not '$forced': ignored"
+        $forced = $null
+    }
     $incremental = $forced
     if (-not $incremental -and $env:RUSTC_WRAPPER -match 'sccache') { $incremental = '0' }
     if ($incremental) {
-        $reason = if ($forced) { 'from VLITE_DEV_FAST_INCREMENTAL' } else { 'sccache cannot cache incremental crates; VLITE_DEV_FAST_INCREMENTAL=1 keeps them' }
+        $reason = if ($forced -eq '1') { 'from VLITE_DEV_FAST_INCREMENTAL; release builds become incremental too' }
+                  elseif ($forced) { 'from VLITE_DEV_FAST_INCREMENTAL' }
+                  else { 'sccache cannot cache incremental crates; VLITE_DEV_FAST_INCREMENTAL=1 keeps them' }
         Enable 'CARGO_INCREMENTAL' $incremental $reason
     } else {
         Say 'CARGO_INCREMENTAL left at the Cargo default (incremental dev builds): fastest for edit and rebuild loops'
@@ -83,8 +94,8 @@ param([switch]$Off)
         }
     }
 
-    if ($applied.Count) {
-        [Environment]::SetEnvironmentVariable($listName, ((@($before) + @($applied)) -join ' '))
+    if ($owned.Count) {
+        [Environment]::SetEnvironmentVariable($listName, ($owned -join ' '))
     }
     Say "$($applied.Count) setting(s) applied; undo with: . .\scripts\dev-fast-env.ps1 -Off"
-} $Off.IsPresent
+} (@($args | ForEach-Object { [string]$_ }))
