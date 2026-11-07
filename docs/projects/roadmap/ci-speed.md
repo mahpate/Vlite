@@ -126,6 +126,13 @@ API cannot be read, they run it as before. Formatting, clippy, builds, wheels, t
 unchanged, and the publish jobs still run on a `v*` tag only. Tag a commit after its CI run is green to get the saving: a tag
 pushed while CI is still running just runs the tests, as it always did.
 
-What it drops: the release's threaded `cargo test --all-features` run on each system. With the Nextest change, `ci.yml` runs
-that suite with one process per test everywhere, so a failure that shows only when tests share a process (global state, a fixed
-port) would be found only by the `default-features` job (default features, Linux stable) and by local runs.
+What it drops: the release's threaded `cargo test --all-features` run on Windows, macOS, Linux and ARM. With the Nextest
+change, `ci.yml` runs that suite with one process per test everywhere, so a failure that shows only when tests share a
+process (global state, a fixed port) would be found only by the release's `image-test` (its image build runs the threaded
+suite on Linux x86_64), the `default-features` job (default features) and local runs.
+
+What it saves: runner minutes, not wall time. `image-test` is the longest release job (30 to 48 minutes), so a dry run went
+from 175 job minutes and 43.0 minutes wall with the tests repeated (run 42335783932) to 84 and 39.8 (run 42346683352).
+One earlier dry run of the same commit (42337799041, cancelled) spent over 100 minutes in `image-test`: its second image build
+did not reuse the first build's layers, so the container suite ran twice. If that job runs past an hour, cancel it and
+dispatch again.
