@@ -13,8 +13,12 @@ runs:
       if: runner.os == 'Windows'
       shell: pwsh
       run: |
-        New-Item -ItemType Directory -Force D:\cargo\bin, D:\tmp | Out-Null
-        "CARGO_HOME=D:\cargo" >> $env:GITHUB_ENV
-        "TMP=D:\tmp" >> $env:GITHUB_ENV
-        "TEMP=D:\tmp" >> $env:GITHUB_ENV
-        "D:\cargo\bin" >> $env:GITHUB_PATH
+        if (Test-Path D:\) {
+          New-Item -ItemType Directory -Force D:\cargo\bin, D:\tmp | Out-Null
+          "CARGO_HOME=D:\cargo" >> $env:GITHUB_ENV
+          "TMP=D:\tmp" >> $env:GITHUB_ENV
+          "TEMP=D:\tmp" >> $env:GITHUB_ENV
+          "D:\cargo\bin" >> $env:GITHUB_PATH
+        } else {
+          Write-Host "No D: drive on this runner: Cargo's home and TEMP stay where they are."
+        }
