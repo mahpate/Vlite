@@ -1,11 +1,12 @@
 //! Ordinary key-value operations on explicitly authorized collections.
 use super::*;
 use crate::kv::{
-    KvEntry, KvPut, KvRef, MAX_KV_KEY_BYTES, MAX_KV_LIST_LIMIT, MAX_KV_NAMESPACE_BYTES,
-    MAX_KV_VALUE_BYTES,
+    Gated, KvEntry, KvOp, KvOutcome, KvPut, KvRef, MAX_KV_BATCH_OPERATIONS,
+    MAX_KV_BATCH_VALUE_BYTES, MAX_KV_GET_MANY_KEYS, MAX_KV_KEY_BYTES, MAX_KV_LIST_LIMIT,
+    MAX_KV_NAMESPACE_BYTES, MAX_KV_VALUE_BYTES,
 };
 use axum::extract::RawQuery;
-use std::ops::ControlFlow;
+use std::{collections::HashMap, ops::ControlFlow};
 
 const PAGE_BYTES: usize = 16_777_216;
 
@@ -26,6 +27,9 @@ thread_local! {
 struct AuditDetails<'a> {
     operation: &'a str,
     expires_at_ms: Option<u64>,
+    /// The puts and deletes of a batch. A batch event carries these counts and
+    /// never a namespace, key or value.
+    counts: Option<(usize, usize)>,
     /// The dashboard session behind the request, when there is one.
     principal: Option<&'a users::Principal>,
 }
@@ -37,6 +41,11 @@ pub(super) fn routes() -> Router<Service> {
             get(fetch).put(save).delete(remove),
         )
         .route("/v1/collections/{collection}/kv/entries", get(list))
+        .route("/v1/collections/{collection}/kv/batch", post(batch))
+        .route(
+            "/v1/collections/{collection}/kv/entries/get",
+            post(fetch_many),
+        )
 }
 
 #[derive(Deserialize)]
@@ -176,6 +185,40 @@ pub(super) struct ListQuery {
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
 pub(super) struct NoQuery {}
+
+/// `POST …/kv/batch`: puts and deletes of one collection, applied together.
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(super) struct BatchInput {
+    operations: Vec<BatchOperation>,
+}
+
+/// A put has no `expires_at_ms`: a batch commits as one engine batch frame,
+/// which has no deadline, so the field is unknown and refused.
+#[derive(Deserialize)]
+#[serde(tag = "op", rename_all = "lowercase", deny_unknown_fields)]
+enum BatchOperation {
+    Put {
+        namespace: String,
+        key: String,
+        value_base64: String,
+        #[serde(default)]
+        expected: Expectation,
+    },
+    Delete {
+        namespace: String,
+        key: String,
+        #[serde(default)]
+        expected: Expectation,
+    },
+}
+
+/// `POST …/kv/entries/get`: the entries of up to 1,000 named keys.
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(super) struct GetManyInput {
+    keys: Vec<Address>,
+}
 
 fn query<T>(input: Result<Query<T>, QueryRejection>) -> Result<T, ApiError> {
     input.map(|Query(input)| input).map_err(|_| {
@@ -437,6 +480,7 @@ pub(super) async fn save(
         AuditDetails {
             operation: "kv_put",
             expires_at_ms: options.expires_at_ms,
+            counts: None,
             principal: principal.as_ref().map(|Extension(principal)| principal),
         },
         &result,
@@ -489,6 +533,7 @@ pub(super) async fn remove(
         AuditDetails {
             operation: "kv_delete",
             expires_at_ms: None,
+            counts: None,
             principal: principal.as_ref().map(|Extension(principal)| principal),
         },
         &result,
@@ -538,6 +583,352 @@ pub(super) async fn list(
             Ok(Json(page))
         })
         .await
+}
+
+/// Prefixes the message of a request error with the position of the part of
+/// the request it is about.
+pub(super) fn at(list: &str, index: usize, error: ApiError) -> ApiError {
+    ApiError {
+        message: format!("{list}[{index}]: {}", error.message),
+        ..error
+    }
+}
+
+/// A batch request after every check that needs no store: counts and bounds,
+/// values decoded, conditions parsed, no key named twice.
+struct Prepared {
+    names: Vec<(String, String)>,
+    /// The decoded value of a put; `None` for a delete.
+    values: Vec<Option<Vec<u8>>>,
+    conditions: Vec<Expected>,
+}
+
+impl Prepared {
+    fn puts(&self) -> usize {
+        self.values.iter().flatten().count()
+    }
+
+    fn retained_bytes(&self) -> usize {
+        self.names
+            .iter()
+            .zip(&self.values)
+            .fold(0usize, |total, ((namespace, key), value)| {
+                total
+                    .saturating_add(namespace.capacity())
+                    .saturating_add(key.capacity())
+                    .saturating_add(value.as_ref().map_or(0, Vec::capacity))
+                    .saturating_add(64)
+            })
+    }
+
+    fn operations(&self) -> Vec<KvOp<'_>> {
+        self.names
+            .iter()
+            .zip(&self.values)
+            .zip(&self.conditions)
+            .map(|(((namespace, key), value), &expected)| match value {
+                Some(value) => KvOp::Put {
+                    namespace,
+                    key,
+                    value,
+                    options: KvPut {
+                        expected,
+                        expires_at_ms: None,
+                    },
+                },
+                None => KvOp::Delete {
+                    namespace,
+                    key,
+                    expected,
+                },
+            })
+            .collect()
+    }
+}
+
+/// The count check of a batch. The gRPC adapter runs it before it converts a
+/// single operation, so a message of many tiny operations is refused without
+/// building a JSON value for each.
+pub(super) fn check_operation_count(count: usize) -> Result<(), ApiError> {
+    if count > MAX_KV_BATCH_OPERATIONS {
+        return Err(unprocessable(format!(
+            "a batch takes at most {MAX_KV_BATCH_OPERATIONS} operations"
+        )));
+    }
+    Ok(())
+}
+
+/// The count check of a get-many, shared with the gRPC adapter like
+/// `check_operation_count`.
+pub(super) fn check_key_count(count: usize) -> Result<(), ApiError> {
+    if count > MAX_KV_GET_MANY_KEYS {
+        return Err(unprocessable(format!(
+            "a get-many takes at most {MAX_KV_GET_MANY_KEYS} keys"
+        )));
+    }
+    Ok(())
+}
+
+/// Checks a whole batch request in operation order, so the first operation
+/// that cannot be valid is the one reported, whatever the state of the store.
+/// Messages name the position of the operation.
+fn prepare(input: BatchInput) -> Result<Prepared, ApiError> {
+    let operations = input.operations;
+    check_operation_count(operations.len())?;
+    let mut values = Vec::with_capacity(operations.len());
+    let mut conditions = Vec::with_capacity(operations.len());
+    let mut value_bytes = 0usize;
+    {
+        let mut named: HashMap<(&str, &str), usize> = HashMap::with_capacity(operations.len());
+        for (index, operation) in operations.iter().enumerate() {
+            let (namespace, key, text, condition) = match operation {
+                BatchOperation::Put {
+                    namespace,
+                    key,
+                    value_base64,
+                    expected,
+                } => (namespace, key, Some(value_base64), expected),
+                BatchOperation::Delete {
+                    namespace,
+                    key,
+                    expected,
+                } => (namespace, key, None, expected),
+            };
+            address(namespace, key).map_err(|error| at("operations", index, error))?;
+            let bytes = text
+                .map(|text| value(text))
+                .transpose()
+                .map_err(|error| at("operations", index, error))?;
+            value_bytes += bytes.as_ref().map_or(0, Vec::len);
+            if value_bytes > MAX_KV_BATCH_VALUE_BYTES {
+                return Err(at(
+                    "operations",
+                    index,
+                    unprocessable(format!(
+                        "the values of a batch total at most {MAX_KV_BATCH_VALUE_BYTES} decoded bytes"
+                    )),
+                ));
+            }
+            if let Some(first) = named.insert((namespace.as_str(), key.as_str()), index) {
+                return Err(at(
+                    "operations",
+                    index,
+                    unprocessable(format!(
+                        "names the same namespace and key as operations[{first}]; a batch names each key once"
+                    )),
+                ));
+            }
+            conditions.push(
+                condition
+                    .parse()
+                    .map_err(|error| at("operations", index, error))?,
+            );
+            values.push(bytes);
+        }
+    }
+    // The base64 text and the conditions are done with: keep only the names.
+    let names = operations
+        .into_iter()
+        .map(|operation| match operation {
+            BatchOperation::Put { namespace, key, .. }
+            | BatchOperation::Delete { namespace, key, .. } => (namespace, key),
+        })
+        .collect();
+    Ok(Prepared {
+        names,
+        values,
+        conditions,
+    })
+}
+
+fn outcome_json(outcome: &KvOutcome) -> Value {
+    match outcome {
+        KvOutcome::Put { version } => json!({"version":version.to_string()}),
+        KvOutcome::Deleted(deleted) => json!({"deleted":deleted}),
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+pub(super) async fn batch(
+    State(service): State<Service>,
+    Extension(role): Extension<admin::Role>,
+    Extension(request_id): Extension<RequestId>,
+    principal: Option<Extension<users::Principal>>,
+    target: Result<Path<String>, PathRejection>,
+    RawQuery(raw_query): RawQuery,
+    no_query: Result<Query<NoQuery>, QueryRejection>,
+    input: Result<Json<BatchInput>, JsonRejection>,
+) -> Result<Json<Value>, ApiError> {
+    strict_query_encoding(raw_query.as_deref())?;
+    let started = Instant::now();
+    let target = collection_path(target)?;
+    query(no_query)?;
+    let prepared = prepare(body(input)?)?;
+    let puts = prepared.puts();
+    let counts = (puts, prepared.names.len() - puts);
+    let retained = prepared
+        .retained_bytes()
+        .saturating_add(target.retained_bytes())
+        .saturating_add(4096);
+    let quota_service = service.clone();
+    let audit_role = role.clone();
+    let audit_target = target.clone();
+    let scope = service.scope(role);
+    let result = service
+        .run_mutation(retained, move |db| {
+            let collection = scope.collection(db, &target)?;
+            writable(db)?;
+            let now = crate::current_time_ms();
+            let operations = prepared.operations();
+            let outcomes = collection
+                .kv_store(db)?
+                .write_batch_gated_at(&operations, now, |database, changes| {
+                    // A batch that writes no record takes no slot: as for a
+                    // single delete, no quota applies, whatever the scope
+                    // already holds.
+                    if changes.iter().any(|&(_, present)| present) {
+                        enforce_quota(
+                            &quota_service,
+                            database,
+                            scope.role(),
+                            collection.id(),
+                            changes,
+                        )?;
+                    }
+                    Ok(())
+                })
+                .map_err(|error| match error {
+                    Gated::Batch(error) => kv_failure(error),
+                    Gated::Refused(error) => error,
+                })?;
+            Ok(Json(
+                json!({"results":outcomes.iter().map(outcome_json).collect::<Vec<_>>()}),
+            ))
+        })
+        .await;
+    audit(
+        &service,
+        &audit_role,
+        &audit_target,
+        &request_id,
+        AuditDetails {
+            operation: "kv_batch",
+            expires_at_ms: None,
+            counts: Some(counts),
+            principal: principal.as_ref().map(|Extension(principal)| principal),
+        },
+        &result,
+        started,
+    );
+    result
+}
+
+pub(super) async fn fetch_many(
+    State(service): State<Service>,
+    Extension(role): Extension<admin::Role>,
+    target: Result<Path<String>, PathRejection>,
+    RawQuery(raw_query): RawQuery,
+    no_query: Result<Query<NoQuery>, QueryRejection>,
+    input: Result<Json<GetManyInput>, JsonRejection>,
+) -> Result<Json<Value>, ApiError> {
+    strict_query_encoding(raw_query.as_deref())?;
+    let target = collection_path(target)?;
+    query(no_query)?;
+    let input = body(input)?;
+    check_key_count(input.keys.len())?;
+    for (index, key) in input.keys.iter().enumerate() {
+        address(&key.namespace, &key.key).map_err(|error| at("keys", index, error))?;
+    }
+    let scope = service.scope(role);
+    service
+        .run_read(move |db| {
+            let view = scope.collection(db, &target)?.kv_view(db)?;
+            let keys: Vec<(&str, &str)> = input
+                .keys
+                .iter()
+                .map(|key| (key.namespace.as_str(), key.key.as_str()))
+                .collect();
+            let total = keys.len();
+            let mut page = ManyPage::default();
+            let mut failure = None;
+            view.visit_many_at(&keys, crate::current_time_ms(), |index, entry| {
+                match page.push(index, total, entry.as_ref()) {
+                    Ok(true) => ControlFlow::Continue(()),
+                    Ok(false) => {
+                        page.full = true;
+                        ControlFlow::Break(())
+                    }
+                    Err(error) => {
+                        failure = Some(error);
+                        ControlFlow::Break(())
+                    }
+                }
+            })?;
+            if let Some(error) = failure {
+                return Err(error);
+            }
+            if page.full && page.items.is_empty() {
+                return Err(internal("one KV entry exceeds the page boundary"));
+            }
+            // The first key not read: this response ends where the next must
+            // begin.
+            let next_index = page.full.then_some(page.items.len());
+            let mut body = serde_json::Map::with_capacity(2);
+            body.insert("items".to_owned(), Value::Array(page.items));
+            body.insert(
+                "next_index".to_owned(),
+                next_index.map_or(Value::Null, |index| json!(index)),
+            );
+            Ok(Json(Value::Object(body)))
+        })
+        .await
+}
+
+/// One get-many response: the items of the longest prefix of the keys whose
+/// response, closed after it, fits `PAGE_BYTES`.
+#[derive(Default)]
+struct ManyPage {
+    items: Vec<Value>,
+    item_bytes: usize,
+    /// A key was refused because the response would pass `PAGE_BYTES`.
+    full: bool,
+}
+
+impl ManyPage {
+    /// Adds the item for the key at `index` of `total` unless the response,
+    /// closed after it, would pass `PAGE_BYTES`. A value is measured from the
+    /// borrow and only encoded when its item is added.
+    fn push(
+        &mut self,
+        index: usize,
+        total: usize,
+        entry: Option<&KvRef<'_>>,
+    ) -> Result<bool, ApiError> {
+        let size = match entry {
+            Some(entry) => item_size(
+                entry.key,
+                entry.value.len(),
+                entry.version,
+                entry.expires_at_ms,
+            )?,
+            None => "null".len(),
+        };
+        // As the last item of the response it carries the index of the key
+        // that follows, when one does.
+        let next = (index + 1 < total).then_some(index + 1);
+        let envelope = serde_json::to_vec(&json!({"items":[],"next_index":next}))
+            .map_err(internal)?
+            .len();
+        if envelope + self.item_bytes + size + self.items.len() > PAGE_BYTES {
+            return Ok(false);
+        }
+        self.item_bytes += size;
+        self.items.push(match entry {
+            Some(entry) => item_json(entry.key, entry.value, entry.version, entry.expires_at_ms),
+            None => Value::Null,
+        });
+        Ok(true)
+    }
 }
 
 /// One list page: the entries of a single selection scan, in key order, that
@@ -664,19 +1055,20 @@ fn audit<T>(
     } else {
         "(invalid)".to_owned()
     };
+    let mut event = json!({
+        "event":details.operation,"request_id":request_id.0,"principal":principal,
+        "actor":actor,
+        "collection":collection,"outcome":outcome,
+        "expires_at_ms":details.expires_at_ms.map(|value|value.to_string()),
+        "duration_ns":started.elapsed().as_nanos().min(u64::MAX as u128) as u64
+    });
+    if let (Some((puts, deletes)), Some(fields)) = (details.counts, event.as_object_mut()) {
+        fields.remove("expires_at_ms");
+        fields.insert("puts".to_owned(), json!(puts));
+        fields.insert("deletes".to_owned(), json!(deletes));
+    }
     if let Some(log) = &service.admin.audit_log
-        && log
-            .append(
-                json!({
-                    "event":details.operation,"request_id":request_id.0,"principal":principal,
-                    "actor":actor,
-                    "collection":collection,"outcome":outcome,
-                    "expires_at_ms":details.expires_at_ms.map(|value|value.to_string()),
-                    "duration_ns":started.elapsed().as_nanos().min(u64::MAX as u128) as u64
-                }),
-                false,
-            )
-            .is_err()
+        && log.append(event, false).is_err()
     {
         service
             .metrics
@@ -1069,6 +1461,7 @@ mod tests {
             AuditDetails {
                 operation: "kv_put",
                 expires_at_ms: None,
+                counts: None,
                 principal: None,
             },
             &failure,
@@ -1098,5 +1491,27 @@ mod tests {
         for invalid in ["YQ", "YR==", "__8=", "YQ==\n"] {
             assert_eq!(value(invalid).unwrap_err().code, "invalid_input");
         }
+    }
+
+    #[test]
+    fn a_batch_at_every_limit_is_charged_less_than_eight_mebibytes() {
+        // docs/KEY-VALUE.md tells operators that a group-commit budget of 8 MiB
+        // always admits a batch: 1,000 puts with the longest namespaces and
+        // keys and 4,194,304 value bytes in all.
+        let names: Vec<(String, String)> = (0..MAX_KV_BATCH_OPERATIONS)
+            .map(|index| ("n".repeat(255), format!("{index:04}{}", "k".repeat(1_020))))
+            .collect();
+        let mut values: Vec<Option<Vec<u8>>> = vec![Some(vec![0; 4_194]); MAX_KV_BATCH_OPERATIONS];
+        values[0] = Some(vec![0; 4_194 + 304]);
+        let value_bytes: usize = values.iter().flatten().map(Vec::len).sum();
+        assert_eq!(value_bytes, MAX_KV_BATCH_VALUE_BYTES);
+        let prepared = Prepared {
+            names,
+            values,
+            conditions: vec![Expected::Any; MAX_KV_BATCH_OPERATIONS],
+        };
+        let charged = prepared.retained_bytes();
+        assert!(charged > value_bytes, "{charged}");
+        assert!(charged < 8 * 1024 * 1024, "{charged}");
     }
 }

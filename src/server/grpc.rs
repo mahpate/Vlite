@@ -81,20 +81,22 @@ impl GrpcHealth {
 
 /// Builds the gRPC routes over an opened database and reports `SERVING`.
 ///
-/// Call it with a clone of the `Service` after building the REST router
-/// (`configured_admin_router` or `authenticated_router`): gRPC then shares
-/// that router's tokens, credential store, token reloads and audit log.
-/// Without a configured REST router it uses the service's own state, which,
-/// like `router`, has no admin token (local development only).
+/// Call it with a clone of the `Service` after building every REST router
+/// (`configured_admin_router` or `authenticated_router`): gRPC then applies the
+/// tokens, credential store, token reloads, audit log and memory reservations
+/// that the REST routers published, and adopts them once, when it is built. A
+/// REST router built after it changes what REST applies and not what the
+/// listener applies. `configured_admin_router` refuses the build orders that
+/// would leave the listener open although that router has an admin token, or
+/// without a reservation that router applies; `router` and
+/// `authenticated_router` cannot refuse and only warn. `docs/GRPC.md` lists
+/// these rules of this release, which may change when gRPC serves memory.
+/// Without a configured REST router the listener uses the service's own state,
+/// which, like `router`, has no admin token and no reservations (local
+/// development only), and `configured_admin_router` then refuses to configure
+/// that service.
 pub async fn grpc_router(mut service: Service) -> GrpcServer {
-    if let Some(admin) = service
-        .published_admin
-        .lock()
-        .ok()
-        .and_then(|published| published.clone())
-    {
-        service.admin = admin;
-    }
+    service.adopt_published();
     let (reporter, health_service) = tonic_health::server::health_reporter();
     let health = GrpcHealth(reporter);
     health.set(tonic_health::ServingStatus::Serving).await;
@@ -2628,6 +2630,8 @@ fn request_collection<T: 'static>(request: &T) -> String {
     field!(proto::ReserveImportRequest, collection);
     field!(proto::ExportVectorsRequest, collection);
     field!(proto::KvListRequest, collection);
+    field!(proto::KvGetManyRequest, collection);
+    field!(proto::KvBatchRequest, collection);
     macro_rules! address {
         ($type:ty) => {
             if let Some(r) = request.downcast_ref::<$type>() {

@@ -8,6 +8,7 @@ This is deliberately a small source-contract checker, not a JavaScript interpret
 when a handler is refactored, update its explicit call chain and the browser tests.
 No third-party packages or running server are required.
 """
+import ast
 import re
 from dataclasses import dataclass
 from pathlib import Path
@@ -432,6 +433,8 @@ EXCLUDED = {
     "rest:PUT " + GRAPH + "/schema": "SDK schema administration; no dedicated dashboard schema editor.",
     "rest:POST " + GRAPH + "/query": "Tagged graph-query multiplexor; UI uses explicit operation routes.",
     "rest:POST " + GRAPH + "/retrieve": "Composite SDK retrieval pipeline; not a dedicated dashboard operation.",
+    "rest:POST " + COLLECTION + "/kv/batch": "Atomic multi-key SDK write; the Key-value workspace edits one key at a time.",
+    "rest:POST " + COLLECTION + "/kv/entries/get": "Multi-key SDK read; the Key-value workspace reads one key or one listed page at a time.",
 }
 for asset in (
     "", "/admin-tools.js", "/ambience.js", "/app.js", "/console-tools.js",
@@ -519,6 +522,29 @@ def checker_regressions(sources, scripts, html):
         raise AssertionError(f"Coverage checker accepted misdirected handler: {key}: {after}")
 
 
+def memory_mode_routes():
+    """Every route the server refuses while agent memory is on (the list pinned in server_memory_binding_record.rs)
+    is classified by app.js MEMORY_OFF and refused by the browser-test mock, so a new route cannot slip through."""
+    pinned = (ROOT / "tests" / "server_memory_binding_record.rs").read_text(encoding="utf-8")
+    block = re.search(r"const AGGREGATE_ROUTES: \[[^;]*; (\d+)\] = \[(.*?)\n\];", pinned, re.S)
+    routes = re.findall(r'\("([A-Z]+)", "(/[^"]*)"', block.group(2))
+    assert len(routes) == int(block.group(1)), "Update the AGGREGATE_ROUTES parser"
+    app = (ROOT / "src" / "dashboard" / "app.js").read_text(encoding="utf-8")
+    table = re.search(r"const MEMORY_OFF = \[(.*?)\n  \];", app, re.S).group(1)
+    rows = re.findall(r"\{\s*(?:methods: \[([^\]]*)\],\s*)?route: /(.+?)/(?=,\s)", table)
+    assert len(rows) == table.count("route:"), "Update the MEMORY_OFF parser"
+    classified = [(re.findall(r'"([A-Z]+)"', verbs), re.compile(route.replace("\\/", "/"))) for verbs, route in rows]
+    mock = ast.parse((ROOT / "tests" / "dashboard_e2e.py").read_text(encoding="utf-8"))
+    refused = re.compile(next(node.value.args[0].value for node in ast.walk(mock) if isinstance(node, ast.Assign)
+                              and any(getattr(target, "id", "") == "MEMORY_REFUSED" for target in node.targets)))
+    for method, path in routes:
+        assert any(rx.match(path) and (not verbs or method in verbs) for verbs, rx in classified), (
+            f"app.js MEMORY_OFF does not classify the memory-mode refusal of {method} {path}")
+        assert refused.match(path), f"The dashboard_e2e.py mock does not refuse {method} {path} while memory is on"
+    assert not refused.match("/v1/database") and not any(rx.match("/v1/database") for _, rx in classified)
+    return len(routes)
+
+
 def main():
     registered = rest_keys(ROOT)
     classified = set(INVENTORY) | set(EXCLUDED)
@@ -544,7 +570,8 @@ def main():
             ("const route = (suffix) =>", '`/v1/collections/${collectionName(ctx.collection())}${suffix}`'),
             ("const indexPath = (suffix) =>", 'ctx.settingsPath(suffix)'),
             ("function collectionPath(collection, suffix)", 'return collection === "default" ? `/v1${suffix}` : `/v1/collections/${collection}${suffix}`'),
-            ("const on = (name, action) =>", 'element.addEventListener("click", () => ctx.run(action))'),
+            ("const on = (name, action, output) =>", 'element.addEventListener("click", () => ctx.run(output ? memoryAware(output, action) : action))'),
+            ("const memoryAware = (output, action) =>", "if (!error?.memoryMode) throw error"),
             ("function init(ctx)", "advancedTools(ctx, on, get)"),
             ("function init(ctx)", "dataWorkspaces(ctx, on)"),
             ("function init(ctx)", "studioTools(ctx, on, get)"),
@@ -601,8 +628,10 @@ def main():
     assert "bound.refusal.map(Fail::wire)" in refused
     for phrase in ("graph expiry", "graph algorithms", "checkpoint", "Compact storage"):
         assert phrase in html, f"Missing explicit backend-only disclosure: {phrase}"
+    memory_routes = memory_mode_routes()
     print(f"PASS dashboard REST coverage: {len(registered)} registered method/routes; "
-          f"{len(INVENTORY)} linked to named controls; {len(EXCLUDED)} explicit exclusions")
+          f"{len(INVENTORY)} linked to named controls; {len(EXCLUDED)} explicit exclusions; "
+          f"{memory_routes} memory-mode refusals classified by the dashboard and its mock")
 
 
 if __name__ == "__main__":

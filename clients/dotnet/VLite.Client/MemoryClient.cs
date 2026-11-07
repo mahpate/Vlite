@@ -8,7 +8,9 @@ namespace VLite;
 /// POST to <c>/v1/memory/{binding}/...</c> and returns the full typed response. Nothing is embedded, split, paged, retried or
 /// polled for you: HTTP 202 (pending erasure) is a normal answer, a 409 refusal such as <c>memory_capability_unavailable</c>
 /// is a <see cref="VLiteException"/> with its <see cref="VLiteException.Details"/>, and a timeout or cancellation is a
-/// <see cref="TransportException"/> whose mutation outcome is unknown until reconciled with <see cref="GetReceiptAsync"/>.
+/// <see cref="TransportException"/> whose mutation outcome is unknown: look up a forget or consolidate with
+/// <see cref="GetReceiptAsync"/> and the same idempotency key, or repeat a remember with the same key and body inside the
+/// receipt window.
 /// <c>deadline_ms</c> in a request is the engine deadline; the HTTP timeout stays the client's own.
 /// </summary>
 public sealed class MemoryClient

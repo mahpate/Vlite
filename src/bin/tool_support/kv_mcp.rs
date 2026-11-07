@@ -2,25 +2,35 @@
 
 use serde::{Deserialize, Deserializer, de};
 use serde_json::{Value, json};
-use std::ops::ControlFlow;
+use std::{collections::HashMap, ops::ControlFlow};
 use vlite::{
     Database, Error, Expected,
-    kv::{KvEntry, KvPut, MAX_KV_VALUE_BYTES},
+    kv::{
+        KvEntry, KvOp, KvOutcome, KvPut, MAX_KV_BATCH_OPERATIONS, MAX_KV_BATCH_VALUE_BYTES,
+        MAX_KV_GET_MANY_KEYS, MAX_KV_VALUE_BYTES,
+    },
 };
 
 const GET: &str = "vlite_kv_get";
 const PUT: &str = "vlite_kv_put";
 const DELETE: &str = "vlite_kv_delete";
 const LIST: &str = "vlite_kv_list";
+const GET_MANY: &str = "vlite_kv_get_many";
+const BATCH: &str = "vlite_kv_batch";
 const PAGE_BYTES: usize = 16 * 1024 * 1024;
+/// The longest base64 text of a value of `MAX_KV_VALUE_BYTES` bytes.
+const MAX_VALUE_BASE64: usize = MAX_KV_VALUE_BYTES.div_ceil(3) * 4;
 
 // An entry always fits a page together with the cursor that names it, so a page
 // is never empty for want of room: the largest value as base64, the key twice
 // (item and cursor) at six bytes per key byte when escaped, and the field names.
 // The key is bounded by the 16-bit length a stored record holds, not by
 // `MAX_KV_KEY_BYTES`: a record planted through another route need not keep to it.
-const _: () =
-    assert!(MAX_KV_VALUE_BYTES.div_ceil(3) * 4 + 2 * 6 * (u16::MAX as usize) + 512 < PAGE_BYTES);
+const _: () = assert!(MAX_VALUE_BASE64 + 2 * 6 * (u16::MAX as usize) + 512 < PAGE_BYTES);
+
+fn value_too_large() -> String {
+    format!("value exceeds {MAX_KV_VALUE_BYTES} decoded bytes")
+}
 
 #[cfg(test)]
 thread_local! {
@@ -77,6 +87,47 @@ fn present_string<'de, D: Deserializer<'de>>(deserializer: D) -> Result<Option<S
 
 fn default_limit() -> u64 {
     100
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct Key {
+    namespace: String,
+    key: String,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct GetMany {
+    collection: String,
+    keys: Vec<Key>,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct Batch {
+    collection: String,
+    operations: Vec<Operation>,
+}
+
+/// A batch put has no `expires_at_ms`: the batch is one engine frame, which
+/// has no deadline, so the field is unknown and refused.
+#[derive(Deserialize)]
+#[serde(tag = "op", rename_all = "lowercase", deny_unknown_fields)]
+enum Operation {
+    Put {
+        namespace: String,
+        key: String,
+        value_base64: String,
+        #[serde(default)]
+        expected: Expectation,
+    },
+    Delete {
+        namespace: String,
+        key: String,
+        #[serde(default)]
+        expected: Expectation,
+    },
 }
 
 #[derive(Default)]
@@ -185,7 +236,7 @@ fn failure(error: Error) -> String {
 }
 
 pub(crate) fn is_tool(name: &str) -> bool {
-    matches!(name, GET | PUT | DELETE | LIST)
+    matches!(name, GET | PUT | DELETE | LIST | GET_MANY | BATCH)
 }
 
 #[allow(dead_code)]
@@ -195,6 +246,8 @@ pub(crate) fn shell_tool(command: &str) -> Option<&'static str> {
         "kv-put" => Some(PUT),
         "kv-delete" => Some(DELETE),
         "kv-list" => Some(LIST),
+        "kv-get-many" => Some(GET_MANY),
+        "kv-batch" => Some(BATCH),
         _ => None,
     }
 }
@@ -218,7 +271,7 @@ pub(crate) fn run(
     name: &str,
     text: &str,
 ) -> Result<Value, String> {
-    if read_only && matches!(name, PUT | DELETE) {
+    if read_only && matches!(name, PUT | DELETE | BATCH) {
         return Err(format!(
             "read_only: database is read-only; {name} is unavailable"
         ));
@@ -240,12 +293,12 @@ pub(crate) fn run(
             address(&request.collection, &request.namespace, Some(&request.key))?;
             let expected = request.expected.expected()?;
             let expires_at_ms = request.expires_at_ms.as_deref().map(decimal).transpose()?;
-            if request.value_base64.len() > 1_396_388 {
-                return Err(invalid("value exceeds 1047290 decoded bytes"));
+            if request.value_base64.len() > MAX_VALUE_BASE64 {
+                return Err(invalid(value_too_large()));
             }
             let value = decode_base64(&request.value_base64)?;
             if value.len() > MAX_KV_VALUE_BYTES {
-                return Err(invalid("value exceeds 1047290 decoded bytes"));
+                return Err(invalid(value_too_large()));
             }
             // kv_store creates missing collections; the serving surfaces must not.
             db.kv_view(&request.collection).map_err(failure)?;
@@ -290,8 +343,162 @@ pub(crate) fn run(
             }
             page(db, &request)
         }
+        GET_MANY => {
+            let request: GetMany = parse(text)?;
+            if request.collection.is_empty() {
+                return Err(invalid("collection must not be empty"));
+            }
+            if request.keys.len() > MAX_KV_GET_MANY_KEYS {
+                return Err(invalid(format!(
+                    "a get-many takes at most {MAX_KV_GET_MANY_KEYS} keys"
+                )));
+            }
+            for (index, key) in request.keys.iter().enumerate() {
+                address(&request.collection, &key.namespace, Some(&key.key))
+                    .map_err(|error| at("keys", index, error))?;
+            }
+            many_page(db, &request)
+        }
+        BATCH => {
+            let request: Batch = parse(text)?;
+            if request.collection.is_empty() {
+                return Err(invalid("collection must not be empty"));
+            }
+            if request.operations.len() > MAX_KV_BATCH_OPERATIONS {
+                return Err(invalid(format!(
+                    "a batch takes at most {MAX_KV_BATCH_OPERATIONS} operations"
+                )));
+            }
+            let checked = batch_checked(&request)?;
+            // kv_store creates missing collections; the serving surfaces must not.
+            db.kv_view(&request.collection).map_err(failure)?;
+            let operations: Vec<KvOp<'_>> = checked.iter().map(Checked::operation).collect();
+            let outcomes = db
+                .kv_store(&request.collection)
+                .map_err(failure)?
+                .write_batch(&operations)
+                .map_err(failure)?;
+            let results = outcomes
+                .iter()
+                .map(|outcome| match outcome {
+                    KvOutcome::Put { version } => Ok(json!({"version":version.to_string()})),
+                    KvOutcome::Deleted(deleted) => Ok(json!({"deleted":deleted})),
+                    _ => Err("internal_error: unknown KV batch outcome".to_owned()),
+                })
+                .collect::<Result<Vec<Value>, String>>()?;
+            Ok(json!({"results":results}))
+        }
         _ => Err(format!("invalid_request: unknown KV tool {name}")),
     }
+}
+
+/// Prefixes the message of a request error with the position of the part of
+/// the request it is about.
+fn at(list: &str, index: usize, error: String) -> String {
+    match error.strip_prefix("invalid_input: ") {
+        Some(message) => format!("invalid_input: {list}[{index}]: {message}"),
+        None => error,
+    }
+}
+
+/// One operation of a batch request that passed every check that needs no
+/// store.
+struct Checked<'a> {
+    namespace: &'a str,
+    key: &'a str,
+    /// The decoded value of a put; `None` for a delete.
+    value: Option<Vec<u8>>,
+    expected: Expected,
+}
+
+impl Checked<'_> {
+    fn operation(&self) -> KvOp<'_> {
+        match &self.value {
+            Some(value) => KvOp::Put {
+                namespace: self.namespace,
+                key: self.key,
+                value,
+                options: KvPut {
+                    expected: self.expected,
+                    expires_at_ms: None,
+                },
+            },
+            None => KvOp::Delete {
+                namespace: self.namespace,
+                key: self.key,
+                expected: self.expected,
+            },
+        }
+    }
+}
+
+/// Checks a whole batch request in operation order, as the REST route does, so
+/// the first operation that cannot be valid is the one reported whatever the
+/// state of the store: bounds, decoded values, conditions, the total size, and
+/// no key named twice.
+fn batch_checked(request: &Batch) -> Result<Vec<Checked<'_>>, String> {
+    let mut checked = Vec::with_capacity(request.operations.len());
+    let mut named: HashMap<(&str, &str), usize> = HashMap::with_capacity(request.operations.len());
+    let mut value_bytes = 0usize;
+    for (index, operation) in request.operations.iter().enumerate() {
+        let (namespace, key, text, condition) = match operation {
+            Operation::Put {
+                namespace,
+                key,
+                value_base64,
+                expected,
+            } => (namespace, key, Some(value_base64), expected),
+            Operation::Delete {
+                namespace,
+                key,
+                expected,
+            } => (namespace, key, None, expected),
+        };
+        address(&request.collection, namespace, Some(key))
+            .map_err(|error| at("operations", index, error))?;
+        let value = match text {
+            Some(text) => {
+                if text.len() > MAX_VALUE_BASE64 {
+                    return Err(at("operations", index, invalid(value_too_large())));
+                }
+                let value = decode_base64(text).map_err(|error| at("operations", index, error))?;
+                if value.len() > MAX_KV_VALUE_BYTES {
+                    return Err(at("operations", index, invalid(value_too_large())));
+                }
+                Some(value)
+            }
+            None => None,
+        };
+        value_bytes += value.as_ref().map_or(0, Vec::len);
+        if value_bytes > MAX_KV_BATCH_VALUE_BYTES {
+            return Err(at(
+                "operations",
+                index,
+                invalid(format!(
+                    "the values of a batch total at most {MAX_KV_BATCH_VALUE_BYTES} decoded bytes"
+                )),
+            ));
+        }
+        if let Some(first) = named.insert((namespace.as_str(), key.as_str()), index) {
+            return Err(at(
+                "operations",
+                index,
+                invalid(format!(
+                    "names the same namespace and key as operations[{first}]; a batch names each key once"
+                )),
+            ));
+        }
+        let expected = condition
+            .expected()
+            .map_err(|error| at("operations", index, error))?;
+        checked.push(Checked {
+            namespace,
+            key,
+            value,
+            expected,
+        });
+    }
+    Ok(checked)
 }
 
 fn entry_json(entry: &KvEntry) -> Value {
@@ -422,6 +629,87 @@ fn visit_page(
     Ok(Value::Object(body))
 }
 
+/// One get-many response of at most `PAGE_BYTES` of compact JSON: the items of
+/// the longest prefix of the keys whose response, closed after it, fits. `scan`
+/// calls its visitor with each key's position and entry, in order; the visitor
+/// stops it at the first key whose item does not fit. A value is measured from
+/// the borrow and only encoded when its item is added.
+fn visit_many_page(
+    total: usize,
+    scan: impl FnOnce(&mut dyn FnMut(usize, Option<Lent<'_>>) -> ControlFlow<()>) -> Result<(), String>,
+) -> Result<Value, String> {
+    let mut items = Vec::new();
+    let mut item_bytes = 0;
+    let mut full = false;
+    scan(&mut |index, entry| {
+        let bytes = match &entry {
+            Some(entry) => item_size(
+                entry.key,
+                entry.value.len(),
+                entry.version,
+                entry.expires_at_ms,
+            ),
+            None => "null".len(),
+        };
+        // As the last item of the response it carries the index of the key
+        // that follows, when one does.
+        let next = (index + 1 < total).then_some(index + 1);
+        let envelope = json!({"items":[],"next_index":next}).to_string().len();
+        if envelope + item_bytes + bytes + items.len() > PAGE_BYTES {
+            full = true;
+            return ControlFlow::Break(());
+        }
+        item_bytes += bytes;
+        items.push(match entry {
+            Some(entry) => item_json(entry.key, entry.value, entry.version, entry.expires_at_ms),
+            None => Value::Null,
+        });
+        ControlFlow::Continue(())
+    })?;
+    if full && items.is_empty() {
+        return Err("internal_error: one KV entry exceeds the page boundary".to_owned());
+    }
+    // The first key not read: this response ends where the next must begin.
+    let next_index = full.then_some(items.len());
+    let mut body = serde_json::Map::with_capacity(2);
+    body.insert("items".to_owned(), Value::Array(items));
+    body.insert(
+        "next_index".to_owned(),
+        next_index.map_or(Value::Null, |index| json!(index)),
+    );
+    Ok(Value::Object(body))
+}
+
+fn many_page(db: &Database, request: &GetMany) -> Result<Value, String> {
+    let view = db.kv_view(&request.collection).map_err(failure)?;
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_err(|error| format!("internal_error: {error}"))?
+        .as_millis()
+        .try_into()
+        .map_err(|_| "internal_error: system clock exceeds u64 milliseconds")?;
+    let keys: Vec<(&str, &str)> = request
+        .keys
+        .iter()
+        .map(|key| (key.namespace.as_str(), key.key.as_str()))
+        .collect();
+    visit_many_page(keys.len(), |visit| {
+        view.visit_many_at(&keys, now, |index, entry| {
+            visit(
+                index,
+                entry.map(|entry| Lent {
+                    key: entry.key,
+                    value: entry.value,
+                    version: entry.version,
+                    expires_at_ms: entry.expires_at_ms,
+                    has_next: entry.has_next,
+                }),
+            )
+        })
+        .map_err(failure)
+    })
+}
+
 pub(crate) fn tool_definitions(read_only: bool) -> Vec<Value> {
     let decimal = json!({"type":"string","pattern":"^(0|[1-9][0-9]{0,19})$","x-maximumUint64":"18446744073709551615"});
     let expected = json!({"oneOf":[{"enum":["any","absent"]},
@@ -477,7 +765,7 @@ pub(crate) fn tool_definitions(read_only: bool) -> Vec<Value> {
         }
         if name == PUT {
             required.push("value_base64");
-            object.insert("value_base64".into(), json!({"type":"string","contentEncoding":"base64","maxLength":1396388,"x-maxDecodedBytes":1047290}));
+            object.insert("value_base64".into(), json!({"type":"string","contentEncoding":"base64","maxLength":MAX_VALUE_BASE64,"x-maxDecodedBytes":MAX_KV_VALUE_BYTES}));
             object.insert(
                 "expires_at_ms".into(),
                 json!({"anyOf":[decimal,{"type":"null"}],"default":null}),
@@ -486,6 +774,34 @@ pub(crate) fn tool_definitions(read_only: bool) -> Vec<Value> {
         tools.push(json!({"name":name,"description":description,
             "inputSchema":{"type":"object","properties":properties,"required":required,"additionalProperties":false},
             "annotations":{"readOnlyHint":!write,"destructiveHint":write,"idempotentHint":name!=PUT}}));
+    }
+    let collection = json!({"type":"string","minLength":1,"description":"Required existing one-dimensional collection; never created implicitly."});
+    let namespace = json!({"type":"string","minLength":1,"x-maxUtf8Bytes":255});
+    let key = json!({"type":"string","minLength":1,"x-maxUtf8Bytes":1024});
+    tools.push(json!({"name":GET_MANY,
+        "description":"Fetch up to 1000 live KV entries by key in one call, in the order given; a key that is absent or expired is null. A response that would pass 16 MiB stops early and next_index names the first key not read. Calls share no snapshot.",
+        "inputSchema":{"type":"object","properties":{
+            "collection":collection,
+            "keys":{"type":"array","maxItems":MAX_KV_GET_MANY_KEYS,"items":{"type":"object",
+                "properties":{"namespace":namespace,"key":key},
+                "required":["namespace","key"],"additionalProperties":false}}},
+            "required":["collection","keys"],"additionalProperties":false},
+        "annotations":{"readOnlyHint":true,"destructiveHint":false,"idempotentHint":true}}));
+    if !read_only {
+        tools.push(json!({"name":BATCH,
+            "description":"Commit up to 1000 puts and deletes of one collection atomically, all or none, as one frame; synced only under full durability. Operations behave as if run one at a time in order; a key may be named once. A put has no expires_at_ms and clears the deadline of the entry it replaces; every put gets the same version.",
+            "inputSchema":{"type":"object","properties":{
+                "collection":collection,
+                "operations":{"type":"array","maxItems":MAX_KV_BATCH_OPERATIONS,"items":{"oneOf":[
+                    {"type":"object","properties":{"op":{"const":"put"},"namespace":namespace,"key":key,
+                        "value_base64":{"type":"string","contentEncoding":"base64","maxLength":MAX_VALUE_BASE64,"x-maxDecodedBytes":MAX_KV_VALUE_BYTES},
+                        "expected":expected},
+                        "required":["op","namespace","key","value_base64"],"additionalProperties":false},
+                    {"type":"object","properties":{"op":{"const":"delete"},"namespace":namespace,"key":key,
+                        "expected":expected},
+                        "required":["op","namespace","key"],"additionalProperties":false}]}}},
+                "required":["collection","operations"],"additionalProperties":false},
+            "annotations":{"readOnlyHint":false,"destructiveHint":true,"idempotentHint":false}}));
     }
     tools
 }
@@ -989,5 +1305,434 @@ mod tests {
         assert_eq!(over["items"].as_array().unwrap().len(), 12);
         assert_eq!(over["next_after"], "l");
         assert_eq!(page(&[], 100), json!({"items":[],"next_after":null}));
+    }
+
+    /// A scan shaped like the `scan` argument of `visit_many_page`.
+    type ManyScan<'a> = Box<
+        dyn FnOnce(&mut dyn FnMut(usize, Option<Lent<'_>>) -> ControlFlow<()>) -> Result<(), String>
+            + 'a,
+    >;
+
+    /// `KvView::visit_many_at` as documented: each requested key in order with
+    /// its entry, or `None`, and `has_next` set while a later key follows.
+    /// `lent` counts the keys handed to the visitor.
+    fn scan_many<'a>(
+        entries: &'a [Option<KvEntry>],
+        lent: &'a std::cell::Cell<usize>,
+    ) -> ManyScan<'a> {
+        Box::new(move |visit| {
+            for (index, entry) in entries.iter().enumerate() {
+                lent.set(lent.get() + 1);
+                let borrowed = entry.as_ref().map(|entry| Lent {
+                    key: &entry.key,
+                    value: &entry.value,
+                    version: entry.version,
+                    expires_at_ms: entry.expires_at_ms,
+                    has_next: index + 1 < entries.len(),
+                });
+                if visit(index, borrowed).is_break() {
+                    break;
+                }
+            }
+            Ok(())
+        })
+    }
+
+    fn many_of(entries: &[Option<KvEntry>]) -> Value {
+        let lent = std::cell::Cell::new(0);
+        visit_many_page(entries.len(), scan_many(entries, &lent)).unwrap()
+    }
+
+    /// The longest prefix of the items whose whole response, closed with the
+    /// index of the key that follows, fits: each item by its specified JSON
+    /// and each response measured whole. Generated values are zero bytes.
+    fn whole_many_model(entries: &[Option<KvEntry>]) -> Value {
+        let items: Vec<Value> = entries
+            .iter()
+            .map(|entry| match entry {
+                None => Value::Null,
+                Some(entry) => {
+                    let mut encoded = "AAAA".repeat(entry.value.len() / 3);
+                    encoded.push_str(match entry.value.len() % 3 {
+                        0 => "",
+                        1 => "AA==",
+                        _ => "AAA=",
+                    });
+                    json!({
+                        "key":entry.key,
+                        "value_base64":encoded,
+                        "version":entry.version.to_string(),
+                        "expires_at_ms":entry.expires_at_ms.map(|value| value.to_string())
+                    })
+                }
+            })
+            .collect();
+        let mut kept = 0;
+        for count in 1..=items.len() {
+            let next = (count < items.len()).then_some(count);
+            let size = json!({"items":[],"next_index":next}).to_string().len()
+                + items[..count]
+                    .iter()
+                    .map(|item| item.to_string().len())
+                    .sum::<usize>()
+                + (count - 1);
+            if size > 16_777_216 {
+                break;
+            }
+            kept = count;
+        }
+        json!({"items":&items[..kept],"next_index":(kept < items.len()).then_some(kept)})
+    }
+
+    #[test]
+    fn many_pages_match_a_whole_model() {
+        for (count, large) in [
+            (0, false),
+            (1, false),
+            (7, false),
+            (1_000, false),
+            (30, true),
+        ] {
+            let entries: Vec<Option<KvEntry>> = (0..count)
+                .map(|index| {
+                    // Every fifth key is absent, and stays in the page as null.
+                    (index % 5 != 2).then(|| KvEntry {
+                        key: format!("k{index:05}\"\\\u{e9}"),
+                        value: vec![
+                            0;
+                            if large {
+                                [1_047_290, 1_047_289, 900_001, 14_763][index % 4]
+                            } else {
+                                [0, 1, 2, 3, 7, 8, 9][index % 7]
+                            }
+                        ],
+                        version: if index % 2 == 0 { 1 } else { u64::MAX },
+                        expires_at_ms: (index % 2 == 0).then_some(u64::MAX),
+                    })
+                })
+                .collect();
+            assert_eq!(
+                many_of(&entries).to_string(),
+                whole_many_model(&entries).to_string(),
+                "count={count}, large={large}"
+            );
+        }
+        // Nothing is read for no keys.
+        assert_eq!(many_of(&[]), json!({"items":[],"next_index":null}));
+    }
+
+    // 16 MiB of response holds 12 values of the largest size. Reading is
+    // bounded by the page: the key that does not fit is measured, never
+    // encoded, and no key beyond it is touched.
+    #[test]
+    fn a_many_page_reads_only_what_it_emits() {
+        let entries: Vec<Option<KvEntry>> = (0..20)
+            .map(|index| {
+                Some(KvEntry {
+                    key: format!("{index:05}"),
+                    value: vec![0; 1_047_290],
+                    version: 1,
+                    expires_at_ms: None,
+                })
+            })
+            .collect();
+        let lent = std::cell::Cell::new(0);
+        ENCODED_VALUE_BYTES.with(|bytes| bytes.set(0));
+        let actual = visit_many_page(entries.len(), scan_many(&entries, &lent)).unwrap();
+        let emitted = actual["items"].as_array().unwrap().len();
+        assert_eq!(emitted, 12);
+        assert_eq!(actual["next_index"], 12);
+        assert_eq!(
+            ENCODED_VALUE_BYTES.with(std::cell::Cell::get),
+            emitted * 1_047_290,
+            "only emitted values are encoded"
+        );
+        assert_eq!(lent.get(), emitted + 1, "emitted keys plus the one refused");
+        assert!(actual.to_string().len() <= 16_777_216);
+    }
+
+    #[test]
+    fn a_failed_many_scan_returns_its_error_and_no_page() {
+        let result = visit_many_page(3, |_| Err("io_error: injected get-many failure".into()));
+        assert_eq!(result.unwrap_err(), "io_error: injected get-many failure");
+    }
+
+    #[test]
+    fn a_first_key_larger_than_a_page_is_an_internal_error() {
+        // No stored entry is this large; this pins the answer for the
+        // unreachable case, as for a list page.
+        let entries = [Some(KvEntry {
+            key: "k".into(),
+            value: vec![0; 13_000_000],
+            version: 1,
+            expires_at_ms: None,
+        })];
+        let lent = std::cell::Cell::new(0);
+        ENCODED_VALUE_BYTES.with(|bytes| bytes.set(0));
+        let error = visit_many_page(1, scan_many(&entries, &lent)).unwrap_err();
+        assert!(error.starts_with("internal_error: "), "{error}");
+        assert_eq!(ENCODED_VALUE_BYTES.with(std::cell::Cell::get), 0);
+    }
+
+    #[test]
+    fn many_page_exact_encoded_boundary() {
+        let fixed = item_json("", &[], 1, None).to_string().len();
+        // The same boundary with and without an absent key among the entries
+        // (it stays in the response as `null`, which has bytes of its own), and
+        // with and without one more key after the entry at the boundary: that
+        // entry then ends the response with the index of the key that follows,
+        // which has fewer bytes than `null`.
+        for (with_null, trailing) in [(false, false), (false, true), (true, false), (true, true)] {
+            let mut entries: Vec<Option<KvEntry>> = (0..12)
+                .map(|index| {
+                    Some(KvEntry {
+                        key: format!("{index:02}"),
+                        value: vec![0; 1_047_290],
+                        version: 1,
+                        expires_at_ms: None,
+                    })
+                })
+                .collect();
+            if with_null {
+                entries.insert(0, None);
+            }
+            let count = entries.len();
+            let next = trailing.then_some(count + 1);
+            let head = json!({
+                "items":entries
+                    .iter()
+                    .map(|entry| entry.as_ref().map_or(Value::Null, entry_json))
+                    .collect::<Vec<_>>(),
+                "next_index":next
+            })
+            .to_string()
+            .len();
+            for boundary in [PAGE_BYTES - 1, PAGE_BYTES, PAGE_BYTES + 1] {
+                // The last item brings the whole response to `boundary`: the
+                // items before it and their envelope, a comma, then its own
+                // item. Its key takes one to four bytes so that its base64 fills
+                // groups of four.
+                let need = boundary - head - 1 - fixed;
+                let key = format!("m{}", "x".repeat((need - 1) % 4));
+                let value = vec![0; (need - key.len()) / 4 * 3];
+                entries.push(Some(KvEntry {
+                    key,
+                    value,
+                    version: 1,
+                    expires_at_ms: None,
+                }));
+                if trailing {
+                    entries.push(None);
+                }
+                let response = many_of(&entries);
+                entries.truncate(count);
+                if boundary <= PAGE_BYTES {
+                    assert_eq!(
+                        response.to_string().len(),
+                        boundary,
+                        "{with_null} {trailing}"
+                    );
+                    assert_eq!(response["items"].as_array().unwrap().len(), count + 1);
+                    assert_eq!(response["next_index"], json!(next));
+                } else {
+                    assert_eq!(response["items"].as_array().unwrap().len(), count);
+                    assert_eq!(response["next_index"], count);
+                }
+            }
+        }
+    }
+
+    fn memory() -> Database {
+        let mut db = Database::create_in_memory(1, vlite::CreateOptions::default()).unwrap();
+        db.kv_store("default").unwrap();
+        db
+    }
+
+    fn put_text(namespace: &str, key: &str, value_base64: &str) -> Value {
+        json!({"op":"put","namespace":namespace,"key":key,"value_base64":value_base64})
+    }
+
+    fn delete_text(namespace: &str, key: &str) -> Value {
+        json!({"op":"delete","namespace":namespace,"key":key})
+    }
+
+    fn batch_text(operations: Vec<Value>) -> String {
+        json!({"collection":"default","operations":operations}).to_string()
+    }
+
+    #[test]
+    fn a_batch_is_checked_as_a_whole_before_the_store_is_touched() {
+        let mut db = memory();
+        let stale = json!({"op":"put","namespace":"n","key":"live","value_base64":"",
+            "expected":{"revision":"999"}});
+        // The operation that would fail its condition comes first; the request
+        // is refused for the invalid one after it.
+        for (case, bad, expected) in [
+            (
+                "an empty namespace",
+                delete_text("", "k"),
+                "invalid_input: operations[1]: ",
+            ),
+            (
+                "an empty key",
+                delete_text("n", ""),
+                "invalid_input: operations[1]: ",
+            ),
+            (
+                "base64 without padding",
+                put_text("n", "k", "AA"),
+                "invalid_input: operations[1]: ",
+            ),
+            (
+                "a repeated key",
+                put_text("n", "live", ""),
+                "invalid_input: operations[1]: names the same namespace and key as operations[0]",
+            ),
+        ] {
+            let error =
+                run(&mut db, false, BATCH, &batch_text(vec![stale.clone(), bad])).unwrap_err();
+            assert!(error.starts_with(expected), "{case}: {error}");
+        }
+        // An expectation that is neither any nor absent never parses, as for a
+        // single call.
+        let unknown = json!({"op":"delete","namespace":"n","key":"k","expected":"later"});
+        let error = run(
+            &mut db,
+            false,
+            BATCH,
+            &batch_text(vec![stale.clone(), unknown]),
+        )
+        .unwrap_err();
+        assert!(error.starts_with("invalid_request: "), "{error}");
+        // The stale operation alone is a failed condition and writes nothing.
+        let error = run(&mut db, false, BATCH, &batch_text(vec![stale.clone()])).unwrap_err();
+        assert!(error.starts_with("precondition_failed: "), "{error}");
+        assert!(
+            db.kv_view("default")
+                .unwrap()
+                .list("n", "", None, 10)
+                .unwrap()
+                .is_empty()
+        );
+
+        let many: Vec<Value> = (0..=MAX_KV_BATCH_OPERATIONS)
+            .map(|index| delete_text("n", &format!("k{index}")))
+            .collect();
+        let error = run(&mut db, false, BATCH, &batch_text(many)).unwrap_err();
+        assert_eq!(
+            error,
+            format!("invalid_input: a batch takes at most {MAX_KV_BATCH_OPERATIONS} operations")
+        );
+        // Exactly that many are taken.
+        let exactly: Vec<Value> = (0..MAX_KV_BATCH_OPERATIONS)
+            .map(|index| delete_text("n", &format!("k{index}")))
+            .collect();
+        let done = run(&mut db, false, BATCH, &batch_text(exactly)).unwrap();
+        assert_eq!(
+            done["results"].as_array().unwrap().len(),
+            MAX_KV_BATCH_OPERATIONS
+        );
+        // The values of a batch total at most 4,194,304 bytes.
+        let part = encode_base64(&vec![1; 1_000_000]);
+        let last = |extra: usize| encode_base64(&vec![1; 194_304 + extra]);
+        let sized = |extra: usize| {
+            let mut operations: Vec<Value> = (0..4)
+                .map(|index| put_text("n", &format!("v{index}"), &part))
+                .collect();
+            operations.push(put_text("n", "v4", &last(extra)));
+            batch_text(operations)
+        };
+        let error = run(&mut db, false, BATCH, &sized(1)).unwrap_err();
+        assert!(
+            error.starts_with("invalid_input: operations[4]: "),
+            "{error}"
+        );
+        assert_eq!(
+            run(&mut db, false, BATCH, &sized(0)).unwrap()["results"]
+                .as_array()
+                .unwrap()
+                .len(),
+            5
+        );
+    }
+
+    #[test]
+    fn a_batch_has_no_deadline_and_a_closed_shape() {
+        for text in [
+            r#"{"collection":"c","operations":[{"op":"put","namespace":"n","key":"k","value_base64":"","expires_at_ms":"1"}]}"#,
+            r#"{"collection":"c","operations":[{"op":"delete","namespace":"n","key":"k","value_base64":""}]}"#,
+            r#"{"collection":"c","operations":[{"op":"swap","namespace":"n","key":"k"}]}"#,
+            r#"{"collection":"c","operations":[{"namespace":"n","key":"k"}]}"#,
+            r#"{"collection":"c","operations":[{"op":"put","namespace":"n","key":"k"}]}"#,
+            r#"{"collection":"c","operations":[],"extra":0}"#,
+            r#"{"collection":"c"}"#,
+            r#"{"operations":[]}"#,
+            r#"{"collection":"c","operations":[],"operations":[]}"#,
+            r#"{"collection":"c","operations":[{"op":"delete","namespace":"n","key":"k","expected":null}]}"#,
+        ] {
+            assert!(parse::<Batch>(text).is_err(), "{text}");
+        }
+        assert!(
+            parse::<Batch>(
+                r#"{"collection":"c","operations":[{"op":"put","namespace":"n","key":"k","value_base64":"","expected":{"revision":"7"}}]}"#
+            )
+            .is_ok()
+        );
+        for text in [
+            r#"{"collection":"c","keys":[{"namespace":"n","key":"k","extra":0}]}"#,
+            r#"{"collection":"c","keys":[{"namespace":"n"}]}"#,
+            r#"{"collection":"c","keys":[],"limit":1}"#,
+            r#"{"keys":[]}"#,
+            r#"{"collection":"c"}"#,
+        ] {
+            assert!(parse::<GetMany>(text).is_err(), "{text}");
+        }
+    }
+
+    #[test]
+    fn get_many_checks_its_keys_before_reading_and_the_gates_follow_the_tool() {
+        let mut db = memory();
+        let keys = |keys: Vec<Value>| json!({"collection":"default","keys":keys}).to_string();
+        let key = |namespace: &str, key: &str| json!({"namespace":namespace,"key":key});
+        let error = run(
+            &mut db,
+            false,
+            GET_MANY,
+            &keys(vec![key("n", "a"), key("n", "b"), key("", "c")]),
+        )
+        .unwrap_err();
+        assert!(error.starts_with("invalid_input: keys[2]: "), "{error}");
+        let too_many: Vec<Value> = (0..=MAX_KV_GET_MANY_KEYS)
+            .map(|index| key("n", &format!("k{index}")))
+            .collect();
+        assert_eq!(
+            run(&mut db, false, GET_MANY, &keys(too_many)).unwrap_err(),
+            format!("invalid_input: a get-many takes at most {MAX_KV_GET_MANY_KEYS} keys")
+        );
+        // Exactly that many are taken.
+        let exactly: Vec<Value> = (0..MAX_KV_GET_MANY_KEYS)
+            .map(|index| key("n", &format!("k{index}")))
+            .collect();
+        let page = run(&mut db, false, GET_MANY, &keys(exactly)).unwrap();
+        assert_eq!(
+            page["items"].as_array().unwrap().len(),
+            MAX_KV_GET_MANY_KEYS
+        );
+        assert_eq!(
+            run(&mut db, false, GET_MANY, &keys(vec![])).unwrap(),
+            json!({"items":[],"next_index":null})
+        );
+        // Reading is allowed on a read-only database; writing a batch is not.
+        assert!(run(&mut db, true, GET_MANY, &keys(vec![key("n", "a")])).is_ok());
+        let error = run(&mut db, true, BATCH, &batch_text(vec![])).unwrap_err();
+        assert!(error.starts_with("read_only: "), "{error}");
+        // Neither tool creates a collection.
+        let missing = json!({"collection":"missing","keys":[]}).to_string();
+        let error = run(&mut db, false, GET_MANY, &missing).unwrap_err();
+        assert!(error.starts_with("collection_not_found: "), "{error}");
+        let missing = json!({"collection":"missing","operations":[]}).to_string();
+        let error = run(&mut db, false, BATCH, &missing).unwrap_err();
+        assert!(error.starts_with("collection_not_found: "), "{error}");
+        assert!(db.collection("missing").is_err());
     }
 }

@@ -88,41 +88,69 @@ Node.js is the tested runtime; browser clients are not a separate supported SDK.
 
 ## Supported operations and wire contracts
 
-The Python, JavaScript and .NET clients also expose the key-value REST
-operations: `kv_get`, `kv_put`, `kv_delete`, `kv_list`; `kvGet`, `kvPut`,
-`kvDelete`, `kvList`; and `KvGetAsync`, `KvPutAsync`, `KvDeleteAsync`,
-`KvListAsync`, respectively. These flat methods require an explicit collection,
-namespace and (except list) key. Use a pre-existing, dedicated one-dimensional
+The Python, JavaScript, .NET and Go clients also expose the key-value REST
+operations: `kv_get`, `kv_put`, `kv_delete`, `kv_list`, `kv_get_many`, `kv_batch`;
+`kvGet`, `kvPut`, `kvDelete`, `kvList`, `kvGetMany`, `kvBatch`; `KvGetAsync`,
+`KvPutAsync`, `KvDeleteAsync`, `KvListAsync`, `KvGetManyAsync`, `KvBatchAsync`;
+and `KvGet`, `KvPut`, `KvDelete`, `KvList`, `KvGetMany`, `KvBatch` (methods of a
+collection's `Records`), respectively. These flat methods require an explicit
+collection, namespace and (except list, get-many and batch) key. Use a
+pre-existing, dedicated one-dimensional
 collection: namespaces are not authorization boundaries. Values are bytes,
-`Uint8Array` or `byte[]` (maximum 1,047,290 bytes); u64s are `int`, `bigint` or
-`ulong`, encoded losslessly as decimal strings. Get decodes the value, put
+`Uint8Array`, `byte[]` or `[]byte` (maximum 1,047,290 bytes); u64s are `int`,
+`bigint`, `ulong` or `uint64`, encoded losslessly as decimal strings. Get
+decodes the value, put
 returns version/expiry, delete returns a boolean, and list returns items and
 `next_after` (exclusive `after`, no cross-page snapshot). Omitted/null KV expiry
-clears TTL. Only 404 `not_found` maps to an explicit unsupported exception;
-404 `kv_not_found` and all other stable errors remain ordinary HTTP errors.
+clears TTL. Get-many reads up to 1,000 keys and answers one position per key,
+empty for a key that is absent or due; when the response would pass the
+server's 16 MiB page bound it stops early and `next_index` names the first key
+not read. A client never continues a partial result and calls share no snapshot.
+A batch commits up to 1,000 puts and deletes of one collection all or nothing
+(4,194,304 value bytes in total, each key named once); a batch put has no expiry,
+so it clears the deadline of the entry it replaces, and every put of a batch
+returns the same version. Only 404 `not_found` maps to an explicit unsupported
+exception; 404 `kv_not_found` and all other stable errors remain ordinary HTTP
+errors. A server without the batch routes answers 404 `not_found` to the admin
+token only. It answers every other credential 403 (`read_only` or
+`forbidden_scope`), an ordinary error, because its permission check runs before
+it matches a route. To find out beforehand, look for
+`/v1/collections/{collection}/kv/batch` and
+`/v1/collections/{collection}/kv/entries/get` in the `routes` of
+`GET /v1/capabilities`, which every credential may call; `features.kv_batch` is
+not that test, because a format 3 or 4 file serves both routes with the flag
+false.
 No retry, fallback, collection creation or exactly-once promise is added.
 Disconnects, cancellations and timeouts may hide committed mutations.
 Ordinary KV acknowledgements sync only under server `--durability full`.
 See the [Python](python/README.md#key-value-operations) and
-[JavaScript](javascript/README.md#key-value-operations) examples and .NET below.
+[JavaScript](javascript/README.md#key-value-operations) examples, and the .NET and
+Go sections below.
 
-The JavaScript client also exposes the unreleased agent-memory REST candidate through
-`client.memory(binding)`, a binding-local facade with `remember`, `recall`, `findFacts`,
-`correctFacts`, `consolidate`, `forget`, `getReceipt`, `getErasure` and `resumeErasure`, each taking
-one request object and returning the full response. The first server slice supports remember
-(`entity` and `episodic`), recall, consolidate (retain, commit only), forget (`ids` target, logical
-delete) and receipt lookup, except that it will refuse a lookup of a `remember` receipt (the original
-`remember` response carries the complete receipt). That lookup and other operations and fields answer
-409 `memory_capability_unavailable` with `details.feature` (`remember_receipt_lookup` for the lookup),
-and the client surfaces that refusal unchanged. u64 and i64 inputs are
-decimal strings, safe integers or `bigint` (an unsafe `Number` is a `TypeError`) and are sent as
-decimal strings; outputs stay decimal strings. `deadline_ms` is the engine deadline, not the HTTP
-timeout. HTTP 202 is an ordinary pending response. Errors carry `code`, `status`, `requestId` and
-optional `details`; only 404 `not_found` becomes `UnsupportedError`. A timeout or cancellation is a
-`TransportError` and never a retry: reconcile a mutation with `getReceipt` (the first server slice
-will refuse a lookup of a `remember` receipt). No embedding, splitting,
-paging or idempotency key is added. See the
-[JavaScript](javascript/README.md#memory-operations) example.
+The Python, JavaScript and .NET clients also expose the agent-memory REST surface through
+`client.memory(binding)` (`client.Memory(binding)` in .NET), a binding-local facade with nine
+methods, each taking one request and returning the full response: `remember`, `recall`,
+`find_facts`, `correct_facts`, `consolidate`, `forget`, `get_receipt`, `get_erasure` and
+`resume_erasure` (`findFacts` and so on in JavaScript, `FindFactsAsync` and so on in .NET). The
+first server slice (provisional; the server is authoritative) serves remember (`entity` and `episodic`), recall, consolidate (retain, commit only), forget
+(`ids` target, logical delete) and receipt lookup, except that it refuses a lookup of a `remember`
+receipt (the original `remember` response carries the complete receipt). That lookup and other
+operations and fields answer 409 `memory_capability_unavailable` with `details.feature`
+(`remember_receipt_lookup` for the lookup), and every client surfaces that refusal unchanged. Text
+and vector recall find only memories that hold an evidence record, so use `entity_seeds` to read
+back an entity you saved and the memories it references on a new binding. After a timeout or
+cancellation a mutation may have committed: look up a `forget` or `consolidate` with `get_receipt`
+and the same idempotency key, or repeat a `remember` with the same key and body inside the receipt
+window (not after its `retry_until_ms` without reading the state first). The Go client has no
+agent-memory methods. See the [Python](python/README.md#agent-memory) and
+[JavaScript](javascript/README.md#memory-operations) examples and .NET below.
+
+In JavaScript, u64 and i64 inputs are decimal strings, safe integers or `bigint` (an unsafe `Number`
+is a `TypeError`) and are sent as decimal strings; outputs stay decimal strings. `deadline_ms` is
+the engine deadline, not the HTTP timeout. HTTP 202 is an ordinary pending response. Errors carry
+`code`, `status`, `requestId` and optional `details`; only 404 `not_found` becomes
+`UnsupportedError`. A timeout or cancellation is a `TransportError` and never a retry. No
+embedding, splitting, paging or idempotency key is added.
 
 Exact search accepts `metric: "squared_l2" | "cosine" | "inner_product"` in the
 request (Python uses a dictionary). Omission preserves squared L2.
@@ -454,7 +482,7 @@ without a durable chunk (`durable: false`) does not survive a restart.
   bound to the collection identity and database lineage: a dropped and
   recreated collection, or a restored different database, fails closed.
 
-## Agent memory (Python, unreleased)
+## Agent memory (Python)
 
 `client.memory(binding)` returns a binding-local facade for an explicitly
 provisioned memory binding (`POST /v1/memory/{binding}/...`; see the
@@ -479,12 +507,19 @@ The JavaScript and .NET clients have the same nine operations.
   `erasure_not_found` are ordinary errors.
 - Nothing is retried, split, paginated, embedded or defaulted. A mutation that
   ends in `TransportError` (timeout, disconnect, cancellation) may have committed:
-  reconcile with `get_receipt` before reusing the key (the first server slice
-  will refuse a lookup of a `remember` receipt).
+  look up a `forget` or `consolidate` with `get_receipt` and the same key. The
+  server refuses a lookup of a `remember` receipt, so repeat the same `remember`
+  request (same key, same body) inside the receipt window instead (not after its
+  `retry_until_ms` without reading the state first); an exact
+  repeat returns the original result with `replayed: true` and writes nothing.
+- `recall` by `text` or `vector` finds only memories that hold an evidence record
+  (a binding without an evidence collection refuses it with 409
+  `memory_capability_unavailable`, `details["feature"]` `evidence_recall`); use
+  `entity_seeds` to read back an entity you remembered and the memories it references.
 - The first server slice (provisional; the server is authoritative) supports
   `remember` for kinds `entity` and `episodic`, `recall`, `consolidate` (retain
   only, commit only), `forget` (an `ids` target with `logical_delete`) and
-  `get_receipt`, except that it will refuse a lookup of a `remember` receipt
+  `get_receipt`, except that it refuses a lookup of a `remember` receipt
   with 409 `memory_capability_unavailable` and `details["feature"]`
   `remember_receipt_lookup` (the original `remember` response carries the
   complete receipt). `find_facts`, `correct_facts`, `get_erasure` and `resume_erasure`,
@@ -567,12 +602,53 @@ until nil. Search options and collection settings use `Object`, preserving REST
 field names, modes, typed filters and decimal-string integers. Structured record,
 metadata, page and hit types are included. Dynamic JSON numbers use `json.Number`.
 
+The Go client has no agent-memory methods: it does not wrap the `/v1/memory/{binding}/...`
+routes. Use the Python, JavaScript or .NET client for them.
+
 Use `errors.As(err, &apiError)` with `*vlite.APIError` to inspect `Status`, `Code`
 and `RequestID`. `*vlite.TransportError` has code `transport_error` and unwraps
 the underlying timeout/cancellation/network/JSON error. A mutation may have
 committed when a transport error occurs: do not blindly retry. Redirects and
 implicit proxies are disabled. Timeout zero selects 30 seconds; negative values
 are rejected. Server-side validation remains authoritative.
+
+### Go key-value operations
+
+The key-value methods belong to a collection's `Records`: the client names no
+default collection, and a `Records` taken from the `Client` itself answers
+"select a collection". Each call checks its bounds before it sends anything.
+
+```go
+cache, err := client.Collection("cache")
+if err != nil { panic(err) }
+put, err := cache.KvPut(ctx, "app", "hello", []byte{1, 2}, vlite.KvPutOptions{Expected: vlite.KvAbsent()})
+entry, err := cache.KvGet(ctx, "app", "hello")
+page, err := cache.KvList(ctx, "app", vlite.KvListOptions{Prefix: "h"})
+deleted, err := cache.KvDelete(ctx, "app", "hello", vlite.KvRevision(put.Version))
+
+many, err := cache.KvGetMany(ctx, []vlite.KvKey{{Namespace: "app", Key: "a"}, {Namespace: "app", Key: "b"}})
+// many.Items[i] answers keys[i], nil when absent or due; many.NextIndex is set
+// only when the response stopped early. The client never continues it.
+results, err := cache.KvBatch(ctx, []vlite.KvBatchOperation{
+    vlite.KvBatchPut("app", "a", []byte("1"), vlite.KvAbsent()),
+    vlite.KvBatchDelete("app", "b", vlite.KvAny()),
+})
+// results[i].Kind is "put" with Version, or "delete" with Deleted.
+_, _, _, _, _, _ = entry, page, deleted, many, results, err
+```
+
+A batch holds at most 1,000 operations and 4,194,304 value bytes and names each
+`(namespace, key)` once. Its puts carry no deadline: like a put without
+`ExpiresAtMs`, a batch put clears the deadline of the entry it replaces, and
+every put of one batch returns the same version. A server without the batch
+routes answers the admin token 404 `not_found`, returned as
+`*vlite.UnsupportedError` (`errors.Is(err, errors.ErrUnsupported)`, unwrapping
+to the `*vlite.APIError`), and every other credential 403, an ordinary
+`*vlite.APIError`; the `routes` of `GET /v1/capabilities` tell beforehand
+whether the routes exist. Nothing falls back to single-key calls. After a
+`*vlite.TransportError` the
+batch either committed in full or not at all, and which is unknown: read the
+keys back with `KvGetMany` before deciding, and do not retry blindly.
 
 ```sh
 cd clients/go
@@ -638,6 +714,27 @@ milliseconds; omission/null clears expiry. `KvEntry`, `KvPutResult` and
 Pass `cancellation:` to any KV method; cancellation/timeout is a
 `TransportException` with an uncertain mutation outcome, never an automatic
 retry. Only an unknown KV route (404 `not_found`) raises `UnsupportedException`.
+A server without the batch routes answers that to the admin token only; every
+other credential gets 403, an ordinary `VLiteException`.
+
+`KvBatchAsync` atomically puts/deletes distinct keys in one collection (up to
+1,000 operations and 4 MiB of values); batch puts have no expiry and clear any
+existing deadline. `KvGetManyAsync` reads up to 1,000 keys, allowing duplicates.
+Its positional `Items` contain null for absent/due keys; a partial result carries
+`NextIndex` and is never continued automatically. Both methods validate bounds
+before sending, preserve `ulong` versions, and never retry or fall back.
+
+```csharp
+KvBatchResult[] results = await client.KvBatchAsync("cache", [
+    new KvBatchOperation.Put("app", "hello", new byte[] { 1, 2 }, new Expected.Absent()),
+    new KvBatchOperation.Delete("app", "old", new Expected.Any())
+]);
+KvGetManyResult many = await client.KvGetManyAsync("cache", [
+    new KvKeyRef("app", "hello"), new KvKeyRef("app", "old")
+]);
+Console.WriteLine(many.Items[0]?.Version);
+Console.WriteLine(many.NextIndex);
+```
 
 The package-free test executable uses a fake HTTP handler and exits nonzero on
 failure. Run it rather than `dotnet test` (no test-runner package is needed):
@@ -647,10 +744,11 @@ dotnet build clients/dotnet/VLite.Client.Tests
 dotnet run --project clients/dotnet/VLite.Client.Tests --no-build
 ```
 
-Go and .NET cover the core REST surface above, including exact/ANN and typed
-filters. The broader Python/JS convenience APIs for imports, backups, diagnostics,
-credentials, conditional writes and maintenance are not yet wrapped in these two
-clients. No client silently retries or falls back between search modes.
+Go and .NET cover the core REST surface above, including exact/ANN and typed filters; both
+also wrap key-value, and .NET also wraps agent memory (see the sections above and below). The broader Python/JS
+convenience APIs for imports, backups, diagnostics, credentials, conditional writes and
+maintenance are not yet wrapped in these two clients. No client silently retries or falls back
+between search modes.
 
 ### .NET agent-memory operations
 
@@ -671,9 +769,14 @@ var found = await memory.RecallAsync(new MemoryRecallRequest(scope, Text: "Ada",
 Console.WriteLine(saved.Receipt.Sequence);
 ```
 
+Text and vector recall find only memories that hold an evidence record, so the `Text` recall above
+returns nothing on a new binding, and a binding without an evidence collection refuses it with 409
+`memory_capability_unavailable` (`Details.Feature` `evidence_recall`). Recall with
+`EntitySeeds: ["e1"]` to read back the entity you saved and the memories it references.
+
 The first server slice implements remember (kinds `entity` and `episodic`),
 recall, consolidate, forget (`ids` targets, logical delete) and receipt lookup,
-except that it will refuse a lookup of a `remember` receipt (409
+except that it refuses a lookup of a `remember` receipt (409
 `memory_capability_unavailable` with `Details.Feature` `remember_receipt_lookup`;
 the `RememberAsync` response carries the complete receipt).
 Facts, fact correction and erasure lookup/resume answer 409
@@ -689,10 +792,12 @@ Errors are `VLiteException` (`Status`, `Code`, `RequestId`, optional `Details`
 with `Field`, `Limit`, `Requested`, `Feature`, `Category`). HTTP 202 (a pending
 erasure) is a normal result. Only 404 `not_found` (unknown route) raises
 `UnsupportedException`. A timeout, cancellation or unreadable reply is a
-`TransportException`: a mutation may have committed, so reconcile it with
-`GetReceiptAsync` instead of retrying (the first server slice will refuse a
-lookup of a `remember` receipt). Nothing is retried, paged, split or
-embedded for you, and `DeadlineMs` is the engine deadline, never the HTTP timeout.
+`TransportException`: a mutation may have committed. Look up a `forget` or
+`consolidate` with `GetReceiptAsync` and the same idempotency key. The server
+refuses a lookup of a `remember` receipt, so repeat the same `RememberAsync`
+request (same key, same body) inside the receipt window instead. Nothing is
+retried, paged, split or embedded for you, and `DeadlineMs` is the engine
+deadline, never the HTTP timeout.
 
 ### Optional live Go/.NET e2e
 

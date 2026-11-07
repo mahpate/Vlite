@@ -298,6 +298,8 @@
   };
   function explain(error) {
     const message = String(error?.message ?? error);
+    // Off while agent memory is enabled: the message already says so; the 403 hint below would be wrong.
+    if (error?.memoryMode) return message;
     const hint = HINTS[error?.code] || (error?.status === 403 ? "This credential is not permitted to perform this operation." : "");
     return hint ? `${message}\n${hint}` : message;
   }
@@ -329,6 +331,8 @@
       try { await action(mark); }
       catch (error) {
         if (!error?.stale && current(mark)) show(TARGETS[area], explain(error));
+        // The panel already says it is off while agent memory is enabled; that is not a failure to report again.
+        if (error?.memoryMode) { ctx.status?.(error.message); return; }
         throw error;
       }
     }));

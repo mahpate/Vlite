@@ -853,7 +853,13 @@ def settings(metric="squared_l2", text_fields=()):
 class FakeApi:
     """Minimal in-memory Wave 2 API: records every request so tests can assert routing and headers."""
 
+    # With agent memory enabled the server answers these with 403 forbidden_scope, even to the super admin
+    # (docs/SECURITY.md, Memory-bound resources). Creating and deleting webhook subscriptions still work.
+    MEMORY_REFUSED = re.compile(r"^/(?:metrics|v1/admin/(?:metrics/summary|graph/stats|replication/export|webhooks(?:/[^/]+)?"
+                                r"|maintenance/auto(?:/tick)?)|v1/collections/[^/]+/imports|v1/imports/.+)$")
+
     def __init__(self, role="admin", features=ALL_FEATURES, format_version=4, scope=None):
+        self.memory_mode_enabled = False
         self.caps = {"api_version": 1, "role": role, "features": {name: True for name in features}}
         if format_version is not None:
             self.caps["format_version"] = format_version
@@ -896,7 +902,7 @@ class FakeApi:
                 return route.fulfill(status=200, body=stream.read(), headers={"content-type": kind + "; charset=utf-8", "content-security-policy": CSP})
         body = json.loads(request.post_data) if request.post_data else None
         self.log.append({"method": request.method, "path": path, "query": query, "body": body, "headers": request.headers})
-        status, value, headers = self.api(request.method, path, query, body, request.headers)
+        status, value, headers = self.memory_mode_refusal(request.method, path, request.headers) or self.api(request.method, path, query, body, request.headers)
         headers = {"cache-control": "no-store", "x-request-id": str(len(self.log)), **headers}
         if status == 204:
             return route.fulfill(status=204, headers=headers)
@@ -907,6 +913,22 @@ class FakeApi:
     @staticmethod
     def error(status, code):
         return status, {"error": {"code": code, "message": code.replace("_", " ")}}, {}
+
+    def credentialed(self, headers):
+        """Whether the request carries a credential. The real server answers 401 before it looks at anything else."""
+        return headers.get("authorization", "").startswith("Bearer ")
+
+    def memory_mode_refusal(self, method, path, headers):
+        """The refusals the real server makes before a handler runs, in its order: sign-in (401, left to api()), the
+        role (a read-only token is refused every /v1/admin route and every write by its role first), then the
+        reserved-resource refusal. Any credential reaches the last one: a token or a signed-in session."""
+        if not (self.memory_mode_enabled and self.MEMORY_REFUSED.match(path) and self.credentialed(headers)):
+            return None
+        if self.caps["role"] == "read_only" and (path.startswith("/v1/admin/") or method not in ("GET", "HEAD")):
+            return 403, {"error": {"code": "read_only", "message": "admin access required"}}, {}
+        if path.startswith("/v1/admin/webhooks") and method != "GET":
+            return None
+        return self.error(403, "forbidden_scope")
 
     def collection_route(self, path):
         parts = path.split("/")
@@ -1629,10 +1651,135 @@ def exercise_features_mocked(browser):
     print("PASS V5 console: TTL, metadata If-Match, MMR, grouped/geo/named/dense+sparse/recommend/facets/stats/query, cursor paging, webhooks secret hygiene, disk ANN, PITR, encryption and role gates")
 
 
+def exercise_memory_mode_mocked(browser):
+    """While agent memory is enabled the server refuses /metrics and a few other database-wide routes with
+    403 forbidden_scope, even to the super admin. Signing in must still work and every affected view must say
+    so in plain words instead of failing (docs/SECURITY.md, Memory-bound resources)."""
+    fake = FeatureApi()
+    fake.memory_mode_enabled = True
+    fake.caps["routes"] = [*fake.caps["routes"], "/v1/admin/replication/export"]
+    context, page, errors = mocked_page(browser, fake)  # the sign-in inside fails without the dashboard fix
+    metrics_off = "Server metrics are off while agent memory is enabled."
+
+    def no_overflow(selector):
+        control(page, selector)
+        for width in (1280, 768, 390):
+            page.set_viewport_size({"width": width, "height": 844})
+            assert page.evaluate("document.documentElement.scrollWidth <= innerWidth"), (selector, width)
+        page.set_viewport_size({"width": 1280, "height": 900})
+
+    # Overview: the figures that need metrics say Unavailable and one note explains why.
+    expect(page.locator("#status")).to_have_text("Connected; overview refreshed")
+    expect(control(page, "#metrics-note")).to_have_text(f"{metrics_off} Database size shows Unavailable.")
+    expect(control(page, "#stat-bytes")).to_have_text("Unavailable")
+    expect(control(page, "#stat-dimensions")).to_have_text("3")
+    expect(control(page, "#overview")).to_contain_text("Unavailable: server metrics are off while agent memory is enabled.")
+    expect(control(page, "#error-help")).to_have_text("")
+    no_overflow("#metrics-note")
+    # Observability: the metrics panel explains itself and does not ask the refused route again on every tick.
+    summary, slow = "/v1/admin/metrics/summary", "/v1/admin/diagnostics/slow-queries"
+    calls = lambda path: sum(1 for item in fake.log if item["path"] == path)
+
+    def wait_until(condition, what):
+        for _ in range(100):
+            if condition():
+                return
+            page.wait_for_timeout(100)
+        raise AssertionError(what)
+
+    expect(control(page, "#obs-metrics-status")).to_contain_text(metrics_off)
+    expect(control(page, "#obs-metrics-status")).to_contain_text("select Refresh now to ask again")
+    expect(control(page, "#obs-metrics-status")).not_to_contain_text("Super admin needed")
+    fake.log.clear()
+    control(page, "#obs-interval").select_option("2000")  # refreshes at once, then on every tick
+    wait_until(lambda: calls(slow) >= 2, "Observability stopped refreshing")
+    assert calls(summary) == 0 and calls("/metrics") == 0, fake.log
+    control(page, "#obs-interval").select_option("0")
+    for _ in range(50):  # a click made while a refresh is still running is ignored, so repeat until it is answered
+        if calls(summary):
+            break
+        control(page, "#obs-refresh").click()
+        page.wait_for_timeout(200)
+    page.wait_for_timeout(300)
+    assert calls(summary) == 1 and calls("/metrics") == 0, "Refresh now asks the metrics route exactly once"
+    expect(control(page, "#obs-metrics-status")).to_contain_text(metrics_off)
+    no_overflow("#obs-metrics-status")
+    # Administration: the health snapshot keeps its index status and says why metrics are missing.
+    control(page, "#refresh-health").click()
+    expect(control(page, "#health-result")).to_contain_text("observed_at")
+    expect(control(page, "#health-result")).to_contain_text("Unavailable: server metrics are off while agent memory is enabled.")
+    expect(control(page, "#health-result")).to_contain_text('"index"')
+    no_overflow("#refresh-health")
+    # Each view the server keeps off answers in its own result area, not as a failure in the status line.
+    off = {
+        "#prometheus": ("#prometheus-result", metrics_off),
+        "#auto-maintenance-read": ("#auto-maintenance-result", "Automatic index maintenance is off while agent memory is enabled."),
+        "#webhook-list": ("#webhook-result", "Webhook lists and delivery status are off while agent memory is enabled."),
+        "#replication-export": ("#replication-result", "Replication export is off while agent memory is enabled."),
+    }
+    for button, (result, message) in off.items():
+        control(page, button).click()
+        expect(control(page, result)).to_have_text(message)
+        expect(control(page, "#status")).to_have_text(message)
+        expect(control(page, "#error-help")).to_have_text("")
+    expect(control(page, "#replication-download")).to_be_disabled()
+    control(page, "#webhook-id").fill("a" * 24)
+    control(page, "#webhook-status").click()
+    expect(control(page, "#webhook-result")).to_have_text(off["#webhook-list"][1])
+    control(page, "#auto-maintenance-tick").click()
+    confirm(page, "exactly one bounded")
+    expect(control(page, "#auto-maintenance-result")).to_have_text(off["#auto-maintenance-read"][1])
+    control(page, "#job-id").fill("7")
+    control(page, "#job-status").click()
+    expect(control(page, "#job-result")).to_have_text("Resumable imports are off while agent memory is enabled.")
+    # Creating and deleting subscriptions still work; the deletion is reported even though the list is off.
+    control(page, "#webhook-url").fill("https://consumer.example/hook")
+    control(page, "#webhook-secret").fill("local-webhook-signing-secret")
+    control(page, "#webhook-create").click()
+    confirm(page, "Create this webhook")
+    expect(control(page, "#webhook-result")).to_contain_text('"id": "' + "a" * 24 + '"')
+    control(page, "#webhook-delete").click()
+    confirm(page, "Delete webhook")
+    expect(control(page, "#webhook-result")).to_have_text(f"Subscription {'a' * 24} was deleted. {off['#webhook-list'][1]}")
+    expect(control(page, "#status")).to_have_text(f"Subscription {'a' * 24} deleted")
+    # No raw refusal reaches any visible panel.
+    for selector in ("#status", "#error-help", "#gate-message", "#health-result", "#webhook-result", "#auto-maintenance-result",
+                     "#replication-result", "#job-result", "#prometheus-result", "#obs-metrics-status", "#metrics-note"):
+        expect(control(page, selector)).not_to_contain_text("forbidden_scope")
+        expect(control(page, selector)).not_to_contain_text("403")
+    assert not errors, errors
+    context.close()
+    # The refusal is only trusted from a credential that could use the route: a scoped token without diagnostics never asks.
+    fake = FeatureApi("scoped", {"collections": ["*"], "operations": ["read", "search"], "expires_unix_ms": 2000000000000})
+    fake.memory_mode_enabled = True
+    context, page, errors = mocked_page(browser, fake)
+    expect(control(page, "#metrics-note")).to_be_hidden()
+    assert not any(item["path"] == "/metrics" for item in fake.log), fake.log
+    assert not errors, errors
+    context.close()
+    # A read-only token is refused every /v1/admin route by its role first, as on the real server, so only global
+    # metrics and import status can carry the memory refusal for it; the note still appears and sign-in succeeds.
+    fake = FeatureApi("read_only")
+    fake.memory_mode_enabled = True
+    context, page, errors = mocked_page(browser, fake)
+    expect(control(page, "#metrics-note")).to_have_text(f"{metrics_off} Database size shows Unavailable.")
+    answers = page.evaluate("""async () => Object.fromEntries(await Promise.all(
+        ["/v1/admin/webhooks", "/v1/admin/replication/export", "/metrics", "/v1/imports/7"].map(async (path) => {
+            const response = await fetch(path, { headers: { Authorization: "Bearer " + "r".repeat(32) } });
+            return [path, [response.status, (await response.json()).error.code]];
+        })))""")
+    assert answers == {"/v1/admin/webhooks": [403, "read_only"], "/v1/admin/replication/export": [403, "read_only"],
+                       "/metrics": [403, "forbidden_scope"], "/v1/imports/7": [403, "forbidden_scope"]}, answers
+    assert not errors, errors
+    context.close()
+    print("PASS agent memory enabled (mocked): sign-in survives the refused /metrics; overview, Observability, health, Prometheus, webhooks, automatic maintenance, import status and replication export each say so in plain words; no raw 403; no overflow at 1280/768/390")
+
+
 def exercise_epic015_mocked(browser):
     exercise_navigation_mocked(browser)
     exercise_read_loading_mocked(browser)
     exercise_features_mocked(browser)
+    exercise_memory_mode_mocked(browser)
     exercise_collections_mocked(browser)
     exercise_scoped_mocked(browser)
     exercise_legacy_mocked(browser)

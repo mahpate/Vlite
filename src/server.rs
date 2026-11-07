@@ -49,6 +49,10 @@ mod observability;
 mod ops;
 mod provider_serving;
 pub mod providers;
+#[cfg(all(test, feature = "grpc"))]
+mod published;
+#[cfg(all(test, not(feature = "grpc")))]
+mod published_rest;
 mod record_put;
 mod reserved;
 #[cfg(feature = "otel")]
@@ -181,10 +185,25 @@ pub struct Service {
     lineage: Option<u64>,
     ops: Arc<ops::Ops>,
     imports: Arc<Mutex<collections::Reservations>>,
-    /// Authentication state of the most recently configured REST router on
-    /// any clone of this service; other transports share it (same tokens,
-    /// credential store, audit log and reloads).
+    /// Authentication state that the other transports of this engine adopt:
+    /// the most recently configured REST router's, unless a later router
+    /// protects less (see `publish`). They share its tokens, credential store,
+    /// audit log and reloads.
     published_admin: Arc<Mutex<Option<Arc<admin::AdminState>>>>,
+    /// The memory reservations of that same router. They are published and
+    /// adopted together with `published_admin` (see `publish`), so that every
+    /// transport of one engine applies the reservations its router applies.
+    published_bindings: Arc<Mutex<Option<Arc<reserved::Bindings>>>>,
+    /// Set when a gRPC router was built from this engine without the tokens
+    /// of a REST router: before any REST router published, so it adopted
+    /// nothing, or after one that has no administration token, so every caller
+    /// is the administrator. `configured_admin_router` refuses to follow it.
+    grpc_before_rest: Arc<std::sync::atomic::AtomicBool>,
+    /// Set by every gRPC router built from this engine, under the publication
+    /// locks. A listener applies the reservations it adopted when it was built,
+    /// so a REST router that reserves memory resources and is built after it
+    /// is refused rather than left to hide what the listener serves.
+    grpc_built: Arc<std::sync::atomic::AtomicBool>,
     tls: Arc<Mutex<Vec<tls::TlsIdentity>>>,
     rate_limits: Arc<Mutex<BTreeMap<String, (f64, Instant)>>>,
     webhooks: Arc<webhooks::Dispatcher>,
@@ -277,6 +296,9 @@ impl Service {
             lineage,
             imports: Arc::new(Mutex::new(collections::Reservations::default())),
             published_admin: Arc::default(),
+            published_bindings: Arc::default(),
+            grpc_before_rest: Arc::default(),
+            grpc_built: Arc::default(),
             tls: Arc::default(),
             rate_limits: Arc::default(),
             webhooks: Arc::default(),
@@ -308,6 +330,152 @@ impl Service {
 
     fn has_bindings(&self) -> bool {
         !self.memory_bindings.is_empty()
+    }
+
+    /// Whether a gRPC router already runs from this engine without the tokens
+    /// of a REST router (see `grpc_before_rest`).
+    fn grpc_runs_unconfigured(&self) -> bool {
+        self.grpc_before_rest.load(Ordering::SeqCst)
+    }
+
+    /// The refusal of a configured REST router built after a gRPC router that
+    /// runs without tokens: the router would demand tokens that the listener
+    /// does not.
+    fn refuse_after_unconfigured_grpc(&self) -> std::io::Result<()> {
+        if self.grpc_runs_unconfigured() {
+            return Err(std::io::Error::other(
+                "a gRPC router was already built from this service and applies none of this router's tokens or memory reservations; build the REST router first",
+            ));
+        }
+        Ok(())
+    }
+
+    /// The refusal of a REST router that reserves memory resources and is
+    /// built after a gRPC router (see `grpc_built`).
+    fn refuse_reserving_after_grpc(&self) -> std::io::Result<()> {
+        if self.grpc_built.load(Ordering::SeqCst) && self.has_bindings() {
+            return Err(std::io::Error::other(
+                "a gRPC router was already built from this service and may not apply this router's memory reservations; build every REST router before the gRPC router",
+            ));
+        }
+        Ok(())
+    }
+
+    /// Makes this service's authentication state and memory reservations the
+    /// ones every other transport of the same engine adopts. Both change under
+    /// one lock order (administration first), so a reader never pairs the
+    /// state of one router with the reservations of another. A lock that a
+    /// panic poisoned is recovered, never skipped: both guarded values are
+    /// replaced whole, so a skipped publication would leave a transport
+    /// without the reservations it must apply. A router that protects less
+    /// does not replace the publication of one that protects more: not one
+    /// whose reservations do not cover the held ones, and not one without an
+    /// administration token where the held one has one. So a plain router
+    /// built later cannot leave a listener without the tokens and the
+    /// reservations of the strictest router of its engine. A router that
+    /// protects less in some respect and more in another (the token, each
+    /// reserved resource) can neither be kept out nor followed safely: this
+    /// form is for the routers that cannot be refused (`router`,
+    /// `authenticated_router`), and it keeps the held publication and, in a
+    /// build with gRPC, warns.
+    fn publish(&self) {
+        // Nothing is refused when `refusing` is false.
+        let _ = self.publish_with(false);
+    }
+
+    /// `publish` for the router that can be refused (`configured_admin_router`).
+    /// The checks and the publication happen under the publication locks, as
+    /// does the adoption that records a gRPC router, so a gRPC router built at
+    /// any moment either sees this router's tokens and reservations or is seen
+    /// by these checks. They refuse a router built after a gRPC router that
+    /// runs without tokens, a router that reserves memory resources and is
+    /// built after any gRPC router, and, in a build with gRPC, a router that
+    /// protects less than the held publication in some respect and more in
+    /// another (the administration token; each reserved resource): a gRPC
+    /// router would have to adopt one or the other. A refusal under the locks
+    /// may come after the router set the engine up (records written, the admin
+    /// directory created, settings that the routers of a service or the process
+    /// share, a webhook dispatcher started): the caller closes the service and
+    /// drops it with every router built from it.
+    fn publish_reserving(&self) -> std::io::Result<()> {
+        self.publish_with(true)
+    }
+
+    fn publish_with(&self, refusing: bool) -> std::io::Result<()> {
+        let mut admin = self
+            .published_admin
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let mut bindings = self
+            .published_bindings
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let open = self.admin.is_open();
+        let reserves_less = bindings
+            .as_ref()
+            .is_some_and(|held| !self.memory_bindings.covers(held));
+        let reserves_more = bindings
+            .as_ref()
+            .is_some_and(|held| !held.covers(&self.memory_bindings));
+        let protects_less = open && admin.as_ref().is_some_and(|held| !held.is_open());
+        let protects_more = !open && admin.as_ref().is_some_and(|held| held.is_open());
+        if refusing {
+            self.refuse_after_unconfigured_grpc()?;
+            self.refuse_reserving_after_grpc()?;
+            if cfg!(feature = "grpc")
+                && (reserves_less || protects_less)
+                && (reserves_more || protects_more)
+            {
+                return Err(std::io::Error::other(
+                    "this router and an earlier router of this service each protect something the other does not (the administration token, the memory reservations), and a gRPC router can adopt only one of them; give this router an administration token if the earlier one has one, and every resource the earlier one reserves",
+                ));
+            }
+        }
+        if reserves_less || protects_less {
+            if cfg!(feature = "grpc") {
+                logs::stderr(
+                    "warn",
+                    "server",
+                    json!({"event":"publication_kept","message":"a router with no admin token where the held one has one, or whose memory reservations do not cover the ones held, does not replace the tokens and reservations that other transports adopt"})
+                        .to_string(),
+                );
+            }
+            return Ok(());
+        }
+        *admin = Some(self.admin.clone());
+        *bindings = Some(self.memory_bindings.clone());
+        Ok(())
+    }
+
+    /// Adopts what a REST router published, authentication state and
+    /// reservations together or neither, and says whether it adopted. A
+    /// service that no router configured keeps its own, which is the
+    /// unauthenticated development mode that `grpc_router` documents, and so
+    /// does a router published without an administration token: both are
+    /// remembered, so that a REST router configured afterwards is refused
+    /// rather than left to disagree with a listener that already runs. Every
+    /// adoption is remembered too (`grpc_built`), under the same locks.
+    #[cfg(feature = "grpc")]
+    fn adopt_published(&mut self) -> bool {
+        let admin = self
+            .published_admin
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let bindings = self
+            .published_bindings
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        self.grpc_built.store(true, Ordering::SeqCst);
+        if let (Some(admin), Some(bindings)) = (admin.as_ref(), bindings.as_ref()) {
+            self.admin = admin.clone();
+            self.memory_bindings = bindings.clone();
+            if admin.is_open() {
+                self.grpc_before_rest.store(true, Ordering::SeqCst);
+            }
+            return true;
+        }
+        self.grpc_before_rest.store(true, Ordering::SeqCst);
+        false
     }
 
     /// The guard for one request made as `role`: the only way a handler
@@ -576,9 +744,21 @@ fn data_routes() -> Router<Service> {
 }
 
 fn configured_routes(service: Service) -> Router {
-    if let Ok(mut published) = service.published_admin.lock() {
-        *published = Some(service.admin.clone());
+    if service.grpc_runs_unconfigured() {
+        logs::stderr(
+            "warn",
+            "server",
+            json!({"event":"grpc_before_rest","message":"a gRPC router built before this REST router applies none of its tokens or memory reservations"})
+                .to_string(),
+        );
     }
+    service.publish();
+    routes(service)
+}
+
+/// The routes of a service whose authentication state and memory reservations
+/// are already published.
+fn routes(service: Service) -> Router {
     let observation = service.clone();
     let graph_routes = graph::routes();
     admin::routes()
@@ -946,6 +1126,11 @@ fn permission(method: &Method, route: &str) -> Need {
         | ("POST", "/v1/batches" | "/v1/collections/{collection}/batches") => {
             Need::Op(Op::Write, Reach::Collection)
         }
+        ("POST", "/v1/collections/{collection}/kv/batch") => Need::Op(Op::Write, Reach::Collection),
+        // A read by POST (the key list is a body): the read-only credential may use it.
+        ("POST", "/v1/collections/{collection}/kv/entries/get") => {
+            Need::Op(Op::Read, Reach::Collection)
+        }
         (
             "POST",
             "/v1/search"
@@ -1038,7 +1223,8 @@ fn authorize(
             || route == "/v1/collections/{collection}/search/disk-ann");
     let search = search
         || graph::read_post(method, route)
-        || (method == Method::POST && memory::read_route(route));
+        || (method == Method::POST && memory::read_route(route))
+        || (method == Method::POST && route == "/v1/collections/{collection}/kv/entries/get");
     let read_only_allowed =
         path.starts_with("/v1/auth/") || (!path.starts_with("/v1/admin/") && (read || search));
     // Legacy routes address `default` (ID 0); their handlers may not resolve

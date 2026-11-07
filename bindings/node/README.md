@@ -335,3 +335,44 @@ results keep native snake_case. Results and error codes follow
 cargo build --release -p vlite-ffi
 VLITE_TEST_LIBRARY=target/release/vlite_ffi.dll VLITE_TEST_EXPECT_GRAPH=1 node --test bindings/node/graph.test.mjs
 ```
+
+## Key-value
+
+`kvGet`, `kvPut`, `kvDelete` and `kvList` store byte values under namespaced text keys in a collection that already
+exists and has one dimension, such as the `default` collection of a file created with one dimension; they never create
+a collection. Each takes an options object and returns a promise. Values are `Uint8Array`; versions, revisions and
+deadlines are `bigint`, never `Number`. `expected` is `"any"` (the default), `"absent"` or `{ revision: bigint }`; a
+failed check rejects with `EmbeddedError` code `precondition_failed` and writes nothing. `expiresAtMs` is an absolute
+Unix-millisecond `bigint` deadline (it needs a format 5 file); a put without it clears the expiry, and a due entry reads
+as absent. Namespace is 1 to 255 and key 1 to 1,024 UTF-8 bytes, a value 0 to 1,047,290 bytes, and `limit` 1 to 10,000
+(default 100).
+
+```js
+const native = new NativeLibrary();
+const db = await native.create("cache.vlite", 1); // the default collection has one dimension
+const address = { collection: "default", namespace: "app", key: "greeting" };
+const put = await db.kvPut({ ...address, value: new TextEncoder().encode("hello"), expected: "absent" });
+const entry = await db.kvGet(address);
+console.log(new TextDecoder().decode(entry.value), entry.version === put.version); // hello true
+await db.kvPut({ ...address, value: new TextEncoder().encode("hello again"),
+  expected: { revision: entry.version }, expiresAtMs: BigInt(Date.now() + 60_000) });
+const page = await db.kvList({ collection: "default", namespace: "app", prefix: "gre" });
+console.log(page.items.map(item => item.key), page.next_after);
+console.log(await db.kvDelete(address)); // true
+await db.close();
+```
+
+`kvGet` resolves to `{ key, value, version, expires_at_ms }` (`expires_at_ms` is `null` without a deadline) and rejects
+with `kv_not_found` for an absent or due key. `kvPut` resolves to `{ version, expires_at_ms }`, `kvDelete` to `true`, or
+`false` when nothing was stored, and `kvList` to `{ items, next_after }`: a page holds at most `limit` entries and 16 MiB
+of JSON, so follow `next_after` (pass it as `after`) until it is `null`. Results keep the native snake_case names.
+Missing collections are `collection_not_found`, a collection with another dimension `not_kv_collection`, bound
+violations `invalid_input`, and a read-only handle refuses writes with `read_only`; the codes are those of
+`bindings/c/FEATURES.md` ("Key-value"). Against a native library that predates the operations every method rejects with
+`EmbeddedError` code `unsupported`. An argument of the wrong type rejects with `TypeError` or `RangeError` before the
+native call. There are no lease operations.
+
+```sh
+cargo build -p vlite-ffi
+VLITE_TEST_LIBRARY=target/debug/vlite_ffi.dll node --test bindings/node/kv.test.mjs
+```

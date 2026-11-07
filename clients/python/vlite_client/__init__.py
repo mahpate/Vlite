@@ -2,6 +2,7 @@
 
 import base64
 import binascii
+from collections.abc import Sequence
 import json
 from http.client import HTTPException
 import math
@@ -92,6 +93,51 @@ class KvPutResult(TypedDict):
 class KvPage(TypedDict):
     items: list[KvEntry]
     next_after: str | None
+
+
+class KvKey(TypedDict):
+    namespace: str
+    key: str
+
+
+class KvGetManyResult(TypedDict):
+    """``items`` is positional: None marks an absent or due key. ``next_index`` is
+    None once every key was read, else the first key not read (no snapshot across
+    calls)."""
+
+    items: list[KvEntry | None]
+    next_index: int | None
+
+
+class KvBatchPut(TypedDict):
+    """No ``expires_at_ms``: a batch put clears the deadline of the entry it replaces."""
+
+    op: Literal["put"]
+    namespace: str
+    key: str
+    value: bytes
+    expected: NotRequired[Expected]
+
+
+class KvBatchDelete(TypedDict):
+    op: Literal["delete"]
+    namespace: str
+    key: str
+    expected: NotRequired[Expected]
+
+
+KvBatchOperation = KvBatchPut | KvBatchDelete
+
+
+class KvBatchPutResult(TypedDict):
+    version: int
+
+
+class KvBatchDeleteResult(TypedDict):
+    deleted: bool
+
+
+KvBatchResult = KvBatchPutResult | KvBatchDeleteResult
 
 
 class Equal(TypedDict):
@@ -1039,6 +1085,60 @@ def _kv_expected(value: Expected):
     raise ValueError("expected must be any, absent or {revision: int}")
 
 
+def _kv_sequence(value, name: str) -> list:
+    if not isinstance(value, (list, tuple)) or len(value) > 1000:
+        raise ValueError(f"{name} must be a list or tuple of at most 1000 items")
+    return list(value)
+
+
+def _kv_key_ref(value, path: str) -> dict:
+    if not isinstance(value, dict) or set(value) != {"namespace", "key"}:
+        raise ValueError(f"{path} must be an object with exactly namespace and key")
+    return {"namespace": _kv_text(value["namespace"], f"{path}.namespace", 255),
+            "key": _kv_text(value["key"], f"{path}.key", 1024)}
+
+
+def _kv_batch_operation(value, path: str) -> dict:
+    if not isinstance(value, dict):
+        raise ValueError(f"{path} must be an object")
+    kind = value.get("op")
+    if not isinstance(kind, str) or kind not in ("put", "delete"):
+        raise ValueError(f"{path}.op must be put or delete")
+    if "expires_at_ms" in value:
+        raise ValueError(f"{path}: a batch has no expires_at_ms")
+    required = ("namespace", "key", "value") if kind == "put" else ("namespace", "key")
+    for name in value:
+        if name not in ("op", "expected", *required):
+            raise ValueError(f"{path}: unknown field {name!r} is never sent")
+    for name in required:
+        if name not in value:
+            raise ValueError(f"{path}: missing required field {name!r}")
+    operation = {"op": kind, "namespace": _kv_text(value["namespace"], f"{path}.namespace", 255),
+                 "key": _kv_text(value["key"], f"{path}.key", 1024)}
+    if kind == "put":
+        if not isinstance(value["value"], bytes) or len(value["value"]) > 1047290:
+            raise ValueError(f"{path}.value must be bytes of length at most 1047290")
+        operation["value_base64"] = base64.b64encode(value["value"]).decode("ascii")
+    operation["expected"] = _kv_expected(value.get("expected", "any"))
+    return operation
+
+
+def _kv_batch_operations(operations) -> list:
+    wire, seen, total = [], {}, 0
+    for index, operation in enumerate(_kv_sequence(operations, "operations")):
+        path = f"operations[{index}]"
+        item = _kv_batch_operation(operation, path)
+        pair = item["namespace"], item["key"]
+        if pair in seen:
+            raise ValueError(f"{path} names the same namespace and key as operations[{seen[pair]}]")
+        seen[pair] = index
+        total += len(operation["value"]) if item["op"] == "put" else 0
+        if total > 4194304:
+            raise ValueError("operations must carry at most 4194304 value bytes in total")
+        wire.append(item)
+    return wire
+
+
 def _kv_read_decimal(value, *, nonzero: bool = False) -> int:
     result = int(_id(value))
     if nonzero and result == 0:
@@ -1059,6 +1159,16 @@ def _kv_read_entry(value) -> KvEntry:
     if len(decoded) > 1047290 or base64.b64encode(decoded).decode("ascii") != encoded:
         raise ValueError("noncanonical KV base64")
     return {"key": _kv_text(value["key"], "key", 1024), "value": decoded, **_kv_read_put(value)}
+
+
+def _kv_read_batch_result(kind: str, value) -> KvBatchResult:
+    if not isinstance(value, dict) or ("deleted" if kind == "put" else "version") in value:
+        raise ValueError("batch result does not match its operation")
+    if kind == "put":
+        return {"version": _kv_read_decimal(value["version"], nonzero=True)}
+    if type(value["deleted"]) is not bool:
+        raise ValueError("deleted must be a boolean")
+    return {"deleted": value["deleted"]}
 
 
 def _policy(value: str) -> str:
@@ -1497,8 +1607,11 @@ class Memory:
     VLiteError (``code``, ``status``, ``request_id`` and ``details``; for example 409
     memory_capability_unavailable with ``details["feature"]``). A server without
     memory routes (404 not_found) raises UnsupportedError. A mutation that ends in
-    TransportError may have committed: reconcile with ``get_receipt`` before
-    retrying with the same idempotency key.
+    TransportError may have committed: look up a forget or consolidate with
+    ``get_receipt``. The server refuses a lookup of a remember receipt (409
+    memory_capability_unavailable, ``details["feature"]`` remember_receipt_lookup),
+    so repeat the same remember request, with the same idempotency key and body,
+    inside the receipt window.
 
     ``deadline_ms`` in a body is the engine deadline, not the HTTP timeout
     (``Client(timeout=...)``)."""
@@ -1538,7 +1651,9 @@ class Memory:
         return self._post("/forget", _MEMORY_FORGET, request)
 
     def get_receipt(self, request: MemoryReceiptRequest) -> MemoryReceiptResponse:
-        """Look up a retained receipt by scope, operation and idempotency key."""
+        """Look up a retained receipt by scope, operation and idempotency key (the
+        first server slice refuses operation remember: 409 memory_capability_unavailable,
+        details["feature"] remember_receipt_lookup)."""
         return self._post("/receipts/lookup", _MEMORY_RECEIPT, request)
 
     def get_erasure(self, request: MemoryErasureRequest) -> MemoryErasureResponse:
@@ -1842,6 +1957,42 @@ class Client(_Records):
                 raise ValueError("items must be an array")
             return {"items": [_kv_read_entry(item) for item in page["items"]],
                     "next_after": None if page["next_after"] is None else _kv_text(page["next_after"], "next_after", 1024)}
+        return self._kv_decode(decode, value)
+
+    def kv_get_many(self, *, collection: str, keys: Sequence[KvKey]) -> KvGetManyResult:
+        """Read up to 1000 keys (repeats allowed) in one call. A result that reaches the
+        server's response cap is partial: ``next_index`` is the first key not read and the
+        caller asks for ``keys[next_index:]`` itself (no snapshot across calls)."""
+        refs = [_kv_key_ref(key, f"keys[{index}]") for index, key in enumerate(_kv_sequence(keys, "keys"))]
+        value = self._kv_request("POST", "/v1/collections/" + _collection(collection) + "/kv/entries/get",
+                                 {"keys": refs})
+        def decode(result) -> KvGetManyResult:
+            items, next_index = result["items"], result["next_index"]
+            if not isinstance(items, list):
+                raise ValueError("items must be an array")
+            if next_index is None:
+                complete = len(items) == len(refs)
+            else:
+                complete = type(next_index) is int and 1 <= next_index == len(items) < len(refs)
+            if not complete:
+                raise ValueError("items must answer every key, or exactly the keys before next_index")
+            return {"items": [None if item is None else _kv_read_entry(item) for item in items],
+                    "next_index": next_index}
+        return self._kv_decode(decode, value)
+
+    def kv_batch(self, *, collection: str, operations: Sequence[KvBatchOperation]) -> list[KvBatchResult]:
+        """Apply up to 1000 puts and deletes (at most 4194304 value bytes, each namespace and
+        key once) to one collection: every operation commits or none does. A put has no
+        ``expires_at_ms`` and clears the deadline of the entry it replaces. After a
+        TransportError the batch may have committed; read the keys back before deciding."""
+        wire = _kv_batch_operations(operations)
+        value = self._kv_request("POST", "/v1/collections/" + _collection(collection) + "/kv/batch",
+                                 {"operations": wire})
+        def decode(result) -> list[KvBatchResult]:
+            results = result["results"]
+            if not isinstance(results, list) or len(results) != len(wire):
+                raise ValueError("results must hold one element per operation")
+            return [_kv_read_batch_result(operation["op"], item) for operation, item in zip(wire, results)]
         return self._kv_decode(decode, value)
 
     # Agent memory (Gap 1): see the Memory facade.

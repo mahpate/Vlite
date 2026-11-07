@@ -1,6 +1,6 @@
 # Key-value store
 
-The key-value store saves byte values under text keys. It needs no vectors: each entry is a record in a collection whose vectors have one dimension. It offers compare-and-set on revisions, optional expiry and ordered prefix listing from Rust, REST, gRPC, the Python, JavaScript and .NET clients, and a local shell and MCP server.
+The key-value store saves byte values under text keys. It needs no vectors: each entry is a record in a collection whose vectors have one dimension. It offers compare-and-set on revisions, optional expiry, ordered prefix listing, an atomic batch of puts and deletes and a multi-key read from Rust, REST, gRPC, the Python, JavaScript, .NET and Go clients, and a local shell and MCP server.
 
 This guide explains how to use it and what it does not do. The shell examples are POSIX `sh` (bash, zsh, Git Bash or WSL): in PowerShell `$VLITE_URL` is empty and a backslash does not continue a line. The reference text of each surface stays in [REST](API.md#key-value-entries), [gRPC](GRPC.md#key-value-entries), [storage features](STORAGE-FEATURES.md#key-value-store), the [MCP tools](MCP.md#local-key-value-tools), the [shell commands](TOOLS.md#local-key-value-shell-commands) and [Key-value permissions](SECURITY.md#key-value-permissions).
 
@@ -17,15 +17,16 @@ This guide explains how to use it and what it does not do. The shell examples ar
 
 | Surface | Runs against | Creates the collection | Operations |
 |---|---|---|---|
-| Rust: `Database::kv_store`, `kv_view` | a file you open | yes (`kv_store`) | get, put, delete, list |
-| REST | `vlite-server` | no | `GET`, `PUT`, `DELETE` on `.../kv/entry`; `GET` on `.../kv/entries` |
-| gRPC | `vlite-server` built with `grpc` | no | `vlite.v1.Kv`: `GetKvEntry`, `PutKvEntry`, `DeleteKvEntry`, `ListKvEntries` |
-| Python, JavaScript, .NET clients | `vlite-server` | no | `kv_get`, `kv_put`, `kv_delete`, `kv_list`; `kvGet` and so on; `KvGetAsync` and so on |
-| `vlite-shell --db PATH` | a local file | no | `kv-get`, `kv-put`, `kv-delete`, `kv-list` |
-| `vlite-mcp --db PATH` | a local file | no | `vlite_kv_get`, `vlite_kv_put`, `vlite_kv_delete`, `vlite_kv_list` |
+| Rust: `Database::kv_store`, `kv_view` | a file you open | yes (`kv_store`) | get, put, delete, list, batch, get-many |
+| REST | `vlite-server` | no | `GET`, `PUT`, `DELETE` on `.../kv/entry`; `GET` on `.../kv/entries`; `POST` on `.../kv/batch` and `.../kv/entries/get` |
+| gRPC | `vlite-server` built with `grpc` | no | `vlite.v1.Kv`: `GetKvEntry`, `PutKvEntry`, `DeleteKvEntry`, `ListKvEntries`, `WriteKvBatch`, `GetKvEntries` |
+| Python, JavaScript, .NET, Go clients | `vlite-server` | no | `kv_get`, `kv_put`, `kv_delete`, `kv_list`, `kv_batch`, `kv_get_many`; `kvGet` and so on; `KvGetAsync` and so on; `KvGet` and so on |
+| `vlite-shell --db PATH` | a local file | no | `kv-get`, `kv-put`, `kv-delete`, `kv-list`, `kv-batch`, `kv-get-many` |
+| `vlite-mcp --db PATH` | a local file | no | `vlite_kv_get`, `vlite_kv_put`, `vlite_kv_delete`, `vlite_kv_list`, `vlite_kv_batch`, `vlite_kv_get_many` |
+| Embedded bindings: the C ABI `kv` request, Python `vlite_embedded`, Node.js `@vlite/embedded`, WebAssembly | a local file in your process (an in-memory image in WebAssembly) | no | `get`, `put`, `delete`, `list`: `kv_get` and so on; `kvGet` and so on; see the [bindings guide](../bindings/README.md#key-value) |
 | Dashboard **Key-value** workspace | `vlite-server` | no | the REST routes; see the [dashboard guide](CONSOLE.md#key-value) |
 
-The shell and MCP tools open the file themselves, so stop `vlite-server` first, and they are not forwarded by `vlite-mcp --server`. There are no lease operations on any surface.
+The shell and MCP tools open the file themselves, so stop `vlite-server` first, and they are not forwarded by `vlite-mcp --server`. The embedded bindings open it inside your own process, so the same rule holds. There are no lease operations on any surface, the embedded bindings included.
 
 ## Start with REST
 
@@ -58,8 +59,10 @@ The put answers `{"version":"…","expires_at_ms":null}`, the get `{"key":"greet
 | `GET /v1/collections/{collection}/kv/entry?namespace=n&key=k` | `read` | `key`, `value_base64`, `version`, `expires_at_ms` |
 | `DELETE /v1/collections/{collection}/kv/entry?namespace=n&key=k[&expected=…]` | `write` | `deleted` |
 | `GET /v1/collections/{collection}/kv/entries?namespace=n[&prefix=…][&after=…][&limit=…]` | `read` | `items`, `next_after` |
+| `POST /v1/collections/{collection}/kv/batch` | `write` | `results` |
+| `POST /v1/collections/{collection}/kv/entries/get` | `read` | `items`, `next_index` |
 
-Requests are strict. A put takes no query parameters. Unknown or duplicate JSON fields and wrong types answer 422 `invalid_json`, bound or encoding violations answer 422 `invalid_input`, and unknown or duplicate query parameters answer 400 `invalid_query`. Versions and deadlines are canonical `uint64` decimal strings. Query strings use form decoding, so `+` is a space and a literal plus is sent as `%2B`. `HEAD` on the two `GET` routes behaves like `GET` without a body. The request body limit is 8 MiB.
+Requests are strict. A put, a batch and a multi-get take no query parameters. Unknown or duplicate JSON fields and wrong types answer 422 `invalid_json`, bound or encoding violations answer 422 `invalid_input`, and unknown or duplicate query parameters answer 400 `invalid_query`. Versions and deadlines are canonical `uint64` decimal strings. Query strings use form decoding, so `+` is a space and a literal plus is sent as `%2B`. `HEAD` on the two `GET` routes behaves like `GET` without a body. The request body limit is 8 MiB.
 
 ## Compare-and-set with revisions
 
@@ -71,7 +74,7 @@ Requests are strict. A put takes no query parameters. Unknown or duplicate JSON 
 | `"absent"` | the key has no live entry (an expired entry counts as absent) |
 | `{"revision":"42"}` over REST, `expected=42` on a delete | the live entry's version is exactly 42 |
 
-A mismatch answers 412 `precondition_failed` and writes nothing. A revision condition on a key that is missing or due answers 412 too. Over REST and gRPC the message is always `revision precondition failed`, so a caller that may write but not read cannot learn whether a key exists or what its revision is. Revision `"0"` is valid input but never matches a live entry. A delete of a missing key with `any` or `absent` succeeds with `deleted: false`.
+A mismatch answers 412 `precondition_failed` and writes nothing. A revision condition on a key that is missing or due answers 412 too. Over REST and gRPC the message is always `revision precondition failed`: it never names the current revision. A caller that may write but not read can still learn whether a key is live, because a delete with `absent` answers 412 for a live key and `deleted: false` for a missing one, and changes no live entry either way; it can test a guessed revision only where it can make the request fail in some other way after the condition (see [security](SECURITY.md)). Revision `"0"` is valid input but never matches a live entry. A delete of a missing key with `any` or `absent` succeeds with `deleted: false`.
 
 A put returns the new version, so a read-modify-write loop does not need a second read:
 
@@ -83,9 +86,46 @@ A transport error is different from a 412: the write may have committed. Read th
 
 Versions are commit sequences. They increase for a key within one file lineage, so they work as compare-and-set tokens, but compaction, format upgrade and restore rewrite revisions. Read an entry again after any of those before you use an old version. A directory store checkpoint keeps every live record's revision, so versions stay valid across it.
 
+## Batches and multi-get
+
+A batch writes several keys of one collection, all or nothing. It holds puts and deletes for any namespaces of the collection, and each operation takes the same `expected` condition as the single call (`any`, `absent` or a revision). A reader sees the state before the batch or the state after it, never part of it. A batch cannot span collections and has no check-only operation. A multi-get reads several keys in one call.
+
+```sh
+curl -sS -X POST "$VLITE_URL/v1/collections/cache/kv/batch" \
+  -H "Authorization: Bearer $VLITE_AUTH_TOKEN" -H "Content-Type: application/json" \
+  -d '{"operations":[
+        {"op":"put","namespace":"app","key":"a","value_base64":"AAEC","expected":"absent"},
+        {"op":"put","namespace":"app","key":"b","value_base64":"AwQF"},
+        {"op":"delete","namespace":"app","key":"c"}]}'
+
+curl -sS -X POST "$VLITE_URL/v1/collections/cache/kv/entries/get" \
+  -H "Authorization: Bearer $VLITE_AUTH_TOKEN" -H "Content-Type: application/json" \
+  -d '{"keys":[{"namespace":"app","key":"a"},{"namespace":"app","key":"b"},{"namespace":"app","key":"c"}]}'
+```
+
+The batch answers `{"results":[{"version":"7"},{"version":"7"},{"deleted":false}]}`: one result per operation, in order. The multi-get answers `{"items":[{"key":"a","value_base64":"AAEC","version":"7","expires_at_ms":null},{"key":"b","value_base64":"AwQF","version":"7","expires_at_ms":null},null],"next_index":null}`: one element per key, in order, and `null` for a key that is absent or due.
+
+What a batch does:
+
+- It behaves as if its operations ran one at a time, in order, against the live state, with one expiry clock, and the result were then committed once. After a crash you find all of it or none of it.
+- Each `(namespace, key)` may appear in at most one operation. A duplicate is 422 `invalid_input`.
+- Every put of one batch gets the same version, the commit's sequence. Each is a valid compare-and-set token for its own key, and a later write to that key gets a larger one.
+- A put in a batch has no `expires_at_ms`: the field is unknown, so 422 `invalid_json`. Like a put without a deadline, it clears the deadline of the entry it replaces. A deadline in a batch is deferred: use single puts for entries that need one.
+- The request is checked as a whole before anything runs: bounds, encoding, the size total, the duplicate keys and the `expected` conditions. The first fault, in order, is 422 `invalid_input`, and its message names the operation, whatever the state of the collection. Over gRPC an operation without a `kind` is refused ahead of that order, as `INVALID_ARGUMENT` (`invalid_input`) with a message that starts `operations[<index>]: `, like an operation object that REST cannot read (422 `invalid_json`); the operation count is checked before any operation is converted. Then the operations run in order against the state, and the first that cannot run fails the whole batch and nothing is written: 412 `precondition_failed` (with the usual message, `revision precondition failed`), or 409 `kv_slots_exhausted` or `graph_attached_record`.
+- A delete of a key with no live entry succeeds with `deleted: false`. If an expired record of the key is still stored, the delete removes it, still reports `deleted: false`, and counts as a change: a batch of only such deletes commits a frame. A batch that changes no record commits nothing, and an empty batch answers `{"results":[]}`.
+- The record quota is judged once, on the count that the whole batch leaves (the net change of all its slot changes, where the last write to a slot wins), and only when the batch writes at least one record, so an empty batch or a batch of deletes is never refused for quota, like a single delete.
+- A batch that changes at least one record on a file of format 1 is refused with 409 `upgrade_required`, although single puts work there, because format 1 predates atomic batches: compact the closed file to a new path, as the message says. A batch that changes no record, and an empty batch, still succeed.
+- Durability follows the server setting, as for a single put. A `commit_indeterminate` answer (503; `UNKNOWN` over gRPC) means that all of the batch or none of it was written, and nobody can tell which. Read the keys back with a multi-get before you decide anything, and do not retry blindly.
+
+A multi-get names 0 to 1,000 keys, and a key may repeat. One read and one expiry clock serve the whole call. If the entries would pass 16,777,216 bytes of compact JSON, the call returns the largest prefix of the keys that fits (the first key always fits) and sets `next_index` to the first key it did not read; otherwise `next_index` is `null`. Ask again for the remaining keys and loop until `next_index` is `null`. There is no snapshot across calls: each call reads the state at its own time, so a key can change between two calls. The limits are in the [table below](#limits).
+
+In Rust, `KvStore::write_batch` returns one `KvOutcome` per operation (`Put { version }` or `Deleted(bool)`), `KvView::get_many` returns one `Option<KvEntry>` per key, and `write_batch_at`, `get_many_at` and `visit_many_at` take the clock; a put with `options.expires_at_ms` set is refused with `InvalidKvKey` (see [storage features](STORAGE-FEATURES.md#key-value-store)). The whole-request checks above come first only once the store is open: `Database::kv_store` creates a missing collection and, like `kv_view`, fails with `NotKvCollection` for a collection of another kind and with `Poisoned` for a handle that has failed, whereas REST and gRPC check the request before they open the collection. gRPC has `WriteKvBatch` and `GetKvEntries` with raw `bytes` values ([gRPC](GRPC.md#key-value-entries)). The clients, the shell and MCP are shown [below](#use-it-from-a-client).
+
+A server without the two routes (0.7.1 and earlier) answers 404 `not_found` to the admin token, and the clients then raise their unsupported-operation error and never fall back to single calls. It answers every other credential 403 (`read_only` for the read-only token, `forbidden_scope` for a scoped credential), because its permission check runs before it matches a route, and the clients report that as an ordinary permission error. Over gRPC such a server answers `UNIMPLEMENTED` to every caller. To find out beforehand, read `GET /v1/capabilities`, which every credential may call, and look for `/v1/collections/{collection}/kv/batch` and `/v1/collections/{collection}/kv/entries/get` in its `routes`; gRPC has no capabilities call, so a gRPC client asks REST. Do not test `features.kv_batch` for this: it is true only for files at format 5 or later, while a file before format 5 serves both routes with the flag false. A batch writes ordinary records, so 0.7.1 reads, lists, updates and deletes the entries it wrote.
+
 ## Expiry
 
-`expires_at_ms` is an absolute Unix-millisecond deadline, sent as a decimal string. A put without it, or with `null`, clears the entry's expiry, so pass the deadline again whenever you refresh a value. Due means `deadline <= now`, judged on the server's clock when the call is served, so a client whose clock is wrong changes how long an entry lives. A put with a deadline that is already due succeeds, and the entry then reads as absent. There is no call that only extends a deadline: put the value again, with `expected` set to the version you read if another writer may be active.
+`expires_at_ms` is an absolute Unix-millisecond deadline, sent as a decimal string. A put without it, or with `null`, clears the entry's expiry, so pass the deadline again whenever you refresh a value. Due means `deadline <= now`, judged on the server's clock when the call is served, so a client whose clock is wrong changes how long an entry lives. A put with a deadline that is already due succeeds, and the entry then reads as absent. There is no call that only extends a deadline: put the value again, with `expected` set to the version you read if another writer may be active. A put inside a [batch](#batches-and-multi-get) takes no deadline and clears the old one.
 
 An expired entry stays in the file until it is replaced, deleted or compacted away, and it still counts toward record quotas. A later put of another key can reuse its slot. Expiry needs format 5: on a format 4 file a put with a deadline answers 409 `upgrade_required`, and nothing is upgraded for you.
 
@@ -124,31 +164,39 @@ fn print_keys(db: &Database) -> vlite::Result<()> {
 | Value | 0 to 1,047,290 bytes (1,396,388 base64 characters) |
 | List `limit` | 1 to 10,000 (default 100) |
 | List page | 16,777,216 bytes of compact JSON |
+| Batch operations | at most 1,000 (an empty batch is a no-op) |
+| Batch value bytes | at most 4,194,304 decoded bytes over all puts of one batch |
+| Multi-get keys | at most 1,000 |
+| Multi-get response | 16,777,216 bytes of compact JSON; a longer result is cut and `next_index` names the first key not read |
 | Request body | 8 MiB |
 | Slots per key | 16 record IDs |
-| gRPC | 8 MiB request, 16 MiB response; a client needs a receive limit of at least 16 MiB + 1 KiB for `ListKvEntries` and a send limit above 1 MiB |
+| gRPC | 8 MiB request, 16 MiB response; a client needs a receive limit of at least 16 MiB + 1 KiB for `ListKvEntries` and `GetKvEntries`, and a send limit above 1 MiB (above 6 MiB for a full `WriteKvBatch`) |
 | `vlite-shell` command line | 16 MiB |
 | `vlite-mcp` request line | 128 MiB (134,217,728 bytes) |
 
-A line over the shell or MCP limit is refused (`invalid_input: line exceeds 16777216 bytes` in the shell; JSON-RPC error -32600 with a null `id` in MCP, after which the session goes on). A key-value call is far below both limits.
+A line over the shell or MCP limit is refused (`invalid_input: line exceeds 16777216 bytes` in the shell; JSON-RPC error -32600 with a null `id` in MCP, after which the session goes on). A key-value call, a full batch included, stays below both limits.
+
+Over REST, a batch that is inside every other limit can still pass the 8 MiB body limit when many of its keys are escaped in JSON. A control character takes up to 6 bytes in every client. The Python client also writes every non-ASCII character as a 6-byte escape (12 bytes outside the Basic Multilingual Plane), the .NET client does the same and escapes ASCII characters such as `<`, `>`, `&`, `'`, `+` and `"` too, and the Go client escapes `<`, `>`, `&`, U+2028 and U+2029; the JavaScript client writes other characters as they are. The answer is 413 `invalid_json`. A batch is atomic, so it cannot be split without losing that: use fewer or shorter keys. Over gRPC the values are raw bytes, and a batch at every limit at once fits the 8 MiB request.
+
+With `vlite-server --group-commit`, each mutating request is charged an estimate of the memory it retains against `--group-commit-bytes` (1,024 to 268,435,456 bytes, default 64 MiB); for a batch the estimate counts its decoded values, namespaces and keys and a fixed amount for each operation. A request that alone needs more than the whole budget is refused with 503 `busy` on every attempt, although `busy` reads like an answer to retry. A batch at every limit at once is charged less than 8 MiB, so keep `--group-commit-bytes` at 8 MiB or more if you use group commit and send large batches (see [group commit](CONSOLE-ADMIN.md#opt-in-durable-group-commit)).
 
 ## Slot exhaustion
 
-A key hashes to 16 consecutive record IDs. If all 16 hold live entries of other keys or other records, a put for that key answers 409 `kv_slots_exhausted` (gRPC `FAILED_PRECONDITION`; the shell and MCP prefix `kv_slots_exhausted:`). A slot that holds an expired entry of another key is reused, and a record that is not a key-value entry is never overwritten. Anyone who can write the collection can place ordinary records at a key's IDs, so give `write` on a key-value collection only to principals you trust with its keys.
+A key hashes to 16 consecutive record IDs. If all 16 hold live entries of other keys or other records, a put for that key answers 409 `kv_slots_exhausted` (gRPC `FAILED_PRECONDITION`; the shell and MCP prefix `kv_slots_exhausted:`). A put in a batch can fail this way too, and then nothing in the batch is written. A slot that holds an expired entry of another key is reused, and a record that is not a key-value entry is never overwritten. Anyone who can write the collection can place ordinary records at a key's IDs, so give `write` on a key-value collection only to principals you trust with its keys.
 
-The JSON metrics carry `kv_slots_exhausted_total` and Prometheus carries `vlite_kv_slots_exhausted_total`: the number of key-value puts refused this way, across all credentials (a REST request whose client disconnected before the answer was produced is not counted; a gRPC call is counted even if its client cancels). A rise that nobody expects points at records planted over a key's IDs. The slots are the record IDs from `vlite::kv::first_slot(namespace, key)` (Rust), wrapping. To free the key, delete any one of the other records at those IDs, or use another key.
+The JSON metrics carry `kv_slots_exhausted_total` and Prometheus carries `vlite_kv_slots_exhausted_total`: the number of key-value puts refused this way, across all credentials (a REST request whose client disconnected before the answer was produced is not counted; a gRPC call is counted even if its client cancels). A batch refused this way counts once, however many puts it holds. A rise that nobody expects points at records planted over a key's IDs. The slots are the record IDs from `vlite::kv::first_slot(namespace, key)` (Rust), wrapping. To free the key, delete any one of the other records at those IDs, or use another key.
 
 ## Durability
 
-Key-value writes follow the server's configured durability. With `full`, a put or delete is synced before it is acknowledged. With `periodic` (the default, 60 s), an OS crash or power loss can lose up to about one flush interval. With `none`, data is memory-only. There is no per-call sync, no automatic retry and no lease guarantee. A successful call is acknowledged after the commit. A disconnect or a `commit_indeterminate` answer (503 over REST, `UNKNOWN` over gRPC) does not prove that a write failed: read the entry, and do not retry a put blindly. See [periodic durability](STORAGE-FEATURES.md#periodic-lazy-durability).
+Key-value writes follow the server's configured durability. With `full`, a put, delete or batch is synced before it is acknowledged. With `periodic` (the default, 60 s), an OS crash or power loss can lose up to about one flush interval. With `none`, data is memory-only. There is no per-call sync, no automatic retry and no lease guarantee. A successful call is acknowledged after the commit. A disconnect or a `commit_indeterminate` answer (503 over REST, `UNKNOWN` over gRPC) does not prove that a write failed: read the entry (after a batch, read all its keys with a multi-get), and do not retry a put or a batch blindly. See [periodic durability](STORAGE-FEATURES.md#periodic-lazy-durability).
 
 ## Revisions are not fencing tokens
 
-A version is a commit sequence inside one file lineage. It rises with every write to the file, and it changes after compaction, format upgrade and restore. It is a compare-and-set token, not a durable lease-fencing token: entry revisions do not establish durable, never-reused fencing domains, so a version cannot stop a slow holder's later side effects. Leases and a fencing-token ledger are not implemented; they are a design only (see [Not included in 0.7.1](RELEASE-0.7.1.md#not-included-in-this-release)). A recipe that needs mutual exclusion must stay safe when two workers briefly believe they hold the same claim.
+A version is a commit sequence inside one file lineage. It rises with every write to the file, and it changes after compaction, format upgrade and restore. It is a compare-and-set token, not a durable lease-fencing token: entry revisions do not establish durable, never-reused fencing domains, so a version cannot stop a slow holder's later side effects. Leases and a fencing-token ledger are not implemented; they are a design only (see [Not included in 0.7.2](RELEASE-0.7.2.md#not-included-in-this-release)). A recipe that needs mutual exclusion must stay safe when two workers briefly believe they hold the same claim.
 
 ## Use it from a client
 
-The Python, JavaScript and .NET clients call the REST routes. They need a server with the key-value routes and an existing, dedicated one-dimension collection (`cache` below). Values are bytes, and versions and deadlines are lossless 64-bit integers. Omitted or null expiry clears the TTL. A 404 `kv_not_found` is an ordinary error, and only an unknown route (404 `not_found`) becomes an unsupported-operation error. A timeout or cancellation may hide a committed write, and nothing is retried.
+The Python, JavaScript, .NET and Go clients call the REST routes. They need a server with the key-value routes and an existing, dedicated one-dimension collection (`cache` below). Values are bytes, and versions and deadlines are lossless 64-bit integers. Omitted or null expiry clears the TTL. A 404 `kv_not_found` is an ordinary error, and only an unknown route (404 `not_found`) becomes an unsupported-operation error. A server without the batch routes answers 404 `not_found` only to the admin token and 403 to every other credential, which is an ordinary permission error (see [Batches and multi-get](#batches-and-multi-get)). A timeout or cancellation may hide a committed write, and nothing is retried.
 
 **Python** (`vlite-client`):
 
@@ -195,6 +243,53 @@ Console.WriteLine(await client.KvDeleteAsync("cache", "app", "hello", new Expect
 
 Python `Expected` is `"any"`, `"absent"` or `{"revision": int}`. JavaScript `Expected` is `"any"`, `"absent"` or `{ revision: bigint }`, and versions are `bigint`, never `Number`. .NET uses `Expected.Any`, `Expected.Absent` or `Expected.Revision(ulong)`. See the [Python](../clients/python/README.md#key-value-operations), [JavaScript](../clients/javascript/README.md#key-value-operations) and [.NET](../clients/README.md#net-key-value-operations) client guides.
 
+**Batch and multi-get.** The batch and multi-get calls take the REST fields with byte values in place of base64. They check every bound before they send and never retry. A batch returns one result per operation, in order. A multi-get returns `items` and `next_index`: the client does not continue a partial result, so ask again for the keys from `next_index` on until `next_index` is empty. Calls share no snapshot. After a transport error or a `commit_indeterminate` answer, read the keys back with a multi-get before you decide anything.
+
+```python
+done = client.kv_batch(collection="cache", operations=[
+    {"op": "put", "namespace": "app", "key": "a", "value": b"1", "expected": "absent"},
+    {"op": "delete", "namespace": "app", "key": "b", "expected": {"revision": 42}},
+])
+print(done)  # [{'version': 43}, {'deleted': True}]
+page = client.kv_get_many(collection="cache", keys=[{"namespace": "app", "key": "a"}])
+print(page["items"], page["next_index"])
+```
+
+```javascript
+const done = await client.kvBatch({ collection: "cache", operations: [
+  { op: "put", namespace: "app", key: "a", value: new Uint8Array([1]), expected: "absent" },
+  { op: "delete", namespace: "app", key: "b", expected: { revision: 42n } },
+] });
+const page = await client.kvGetMany({ collection: "cache", keys: [{ namespace: "app", key: "a" }] });
+console.log(done, page.items, page.next_index);
+```
+
+**.NET** has `KvBatchAsync` and `KvGetManyAsync`. A batch is a list of `KvBatchOperation.Put` and `KvBatchOperation.Delete` records, a multi-get is a list of `KvKeyRef`, and each batch result is a `KvBatchResult.Put` with `Version` or a `KvBatchResult.Delete` with `Deleted`. `KvGetManyResult.NextIndex` is an `int?`, and the client never continues a partial result.
+
+```csharp
+KvBatchResult[] done = await client.KvBatchAsync("cache", [
+    new KvBatchOperation.Put("app", "a", new byte[] { 1 }, new Expected.Absent()),
+    new KvBatchOperation.Delete("app", "b", new Expected.Revision(42)),
+]);
+KvGetManyResult page = await client.KvGetManyAsync("cache", [new KvKeyRef("app", "a")]);
+Console.WriteLine($"{page.Items[0]?.Version} {page.NextIndex}");
+```
+
+**Go** (`github.com/mahpate/Vlite/clients/go`) gets its first key-value calls on `Records`, which `client.Collection("cache")` returns: `KvGet`, `KvPut`, `KvDelete`, `KvList`, `KvGetMany` and `KvBatch`. Each takes a `context.Context` and byte values. `KvAny()`, `KvAbsent()` and `KvRevision(version)` build conditions, and `KvBatchPut` and `KvBatchDelete` build operations. `KvGetMany` returns `Items` (a nil pointer for an absent key) and `NextIndex`, a `*int` that is nil when every key was read. See the [Go client guide](../clients/README.md#go).
+
+```go
+records, err := client.Collection("cache")
+if err != nil { panic(err) }
+done, err := records.KvBatch(ctx, []vlite.KvBatchOperation{
+	vlite.KvBatchPut("app", "a", []byte("1"), vlite.KvAbsent()),
+	vlite.KvBatchDelete("app", "b", vlite.KvRevision(42)),
+})
+if err != nil { panic(err) }
+page, err := records.KvGetMany(ctx, []vlite.KvKey{{Namespace: "app", Key: "a"}})
+if err != nil { panic(err) }
+fmt.Println(done, page.Items, page.NextIndex)
+```
+
 ## Use it from the shell and MCP
 
 `vlite-shell --db PATH` and `vlite-mcp --db PATH` work on a local file, so stop `vlite-server` first. Each takes the same fields as REST, with a required `collection` that must already exist and have one dimension. `vlite-shell` takes one JSON object per line:
@@ -204,15 +299,23 @@ kv-put {"collection":"default","namespace":"cache","key":"a","value_base64":"AAE
 kv-get {"collection":"default","namespace":"cache","key":"a"}
 kv-list {"collection":"default","namespace":"cache","prefix":"","limit":100}
 kv-delete {"collection":"default","namespace":"cache","key":"a","expected":"any"}
+kv-batch {"collection":"default","operations":[{"op":"put","namespace":"cache","key":"a","value_base64":"AAEC","expected":"absent"},{"op":"delete","namespace":"cache","key":"b"}]}
+kv-get-many {"collection":"default","keys":[{"namespace":"cache","key":"a"},{"namespace":"cache","key":"b"}]}
 ```
 
-The example uses the `default` collection. To try the shell commands on a new file, run `vlite-shell --db kv.vlite --create 1`; its default collection has one dimension. Otherwise use the name of your own key-value collection. `vlite-mcp` lists `vlite_kv_get` and `vlite_kv_list`, and with `--writable` also `vlite_kv_put` and `vlite_kv_delete`; a `tools/call` takes the same fields as the shell command:
+The example uses the `default` collection. To try the shell commands on a new file, run `vlite-shell --db kv.vlite --create 1`; its default collection has one dimension. Otherwise use the name of your own key-value collection. `vlite-mcp` lists `vlite_kv_get`, `vlite_kv_get_many` and `vlite_kv_list`, and with `--writable` also `vlite_kv_put`, `vlite_kv_delete` and `vlite_kv_batch`; a `tools/call` takes the same fields as the shell command:
 
 ```json
 {"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"vlite_kv_put","arguments":{"collection":"cache","namespace":"app","key":"a","value_base64":"AAEC","expected":"absent"}}}
 ```
 
-Failures print `error: <code>: <message>` in the shell (exit code 1) and set `isError: true` in MCP, with the code first: `kv_not_found`, `collection_not_found`, `not_kv_collection`, `precondition_failed`, `kv_slots_exhausted`, `upgrade_required`, `invalid_request` for unknown or duplicate fields and wrong types, `invalid_input` for bounds, and `read_only` for a write in a read-only session. The shell and MCP tools have no lease commands.
+```json
+{"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":"vlite_kv_batch","arguments":{"collection":"cache","operations":[{"op":"put","namespace":"app","key":"a","value_base64":"AAEC","expected":"absent"},{"op":"delete","namespace":"app","key":"b"}]}}}
+```
+
+`kv-batch` and `vlite_kv_batch` take `collection` and `operations`; `kv-get-many` and `vlite_kv_get_many` take `collection` and `keys`. The operations and keys are the REST objects, and the results are the REST bodies, `{"results":[…]}` and `{"items":[…],"next_index":null}`. `--read-only` refuses `kv-batch`, and a read-only MCP session does not list `vlite_kv_batch`.
+
+Failures print `error: <code>: <message>` in the shell (exit code 1) and set `isError: true` in MCP, with the code first: `kv_not_found`, `collection_not_found`, `not_kv_collection`, `precondition_failed`, `kv_slots_exhausted`, `graph_attached_record`, `upgrade_required`, `commit_indeterminate`, `invalid_request` for unknown or duplicate fields and wrong types, `invalid_input` for bounds and for a duplicate key in a batch, and `read_only` for a write in a read-only session. A request that cannot be parsed is `invalid_request` here. REST answers 422 `invalid_json` for a field that is unknown or repeated or has the wrong type, 400 `invalid_json` for JSON that is not well formed, 413 for a body over 8 MiB and 415 for another media type; an `expected` text that is not `any`, `absent` or a revision object (for example `"later"`) is `invalid_request` here too, although REST calls it 422 `invalid_input`. Every other bound or encoding fault of a batch or a multi-get is `invalid_input` on both. The shell and MCP tools have no lease commands.
 
 ## Errors
 
@@ -222,6 +325,7 @@ Failures print `error: <code>: <message>` in the shell (exit code 1) and set `is
 | Collection does not exist | 404 `collection_not_found` | `NOT_FOUND` | `collection_not_found` |
 | Collection is not one-dimension | 409 `not_kv_collection` | `FAILED_PRECONDITION` | `not_kv_collection` |
 | All 16 slots occupied | 409 `kv_slots_exhausted` | `FAILED_PRECONDITION` | `kv_slots_exhausted` |
+| Delete of an entry that a graph node is attached to | 409 `graph_attached_record` | `FAILED_PRECONDITION` | `graph_attached_record` |
 | Expiry on a format 4 file | 409 `upgrade_required` | `FAILED_PRECONDITION` | `upgrade_required` |
 | `expected` does not match | 412 `precondition_failed` | `ABORTED` | `precondition_failed` |
 | Bound or encoding violation | 422 `invalid_input` | `INVALID_ARGUMENT` | `invalid_input` |
@@ -230,7 +334,9 @@ Failures print `error: <code>: <message>` in the shell (exit code 1) and set `is
 | Scope, tenant or collection binding refused | 403 `forbidden_scope` | `PERMISSION_DENIED` | |
 | Read-only database or token | 403 `read_only` | `PERMISSION_DENIED` | `read_only` |
 | Request rate or live-vector quota | 429 `rate_limited` or `quota_exceeded` | `RESOURCE_EXHAUSTED` | |
-| Commit outcome unknown | 503 `commit_indeterminate` | `UNKNOWN` | |
+| Commit outcome unknown | 503 `commit_indeterminate` | `UNKNOWN` | `commit_indeterminate` |
+
+A batch and a multi-get answer with the same rows, except for the two faults whose class differs in the shell and MCP (see [above](#use-it-from-the-shell-and-mcp)). A batch is checked as a whole before it runs, so a fault in the request is reported whatever the state of the collection; after that the first operation that cannot run decides the answer, and nothing is written. A duplicate key, more than 1,000 operations and more than 4,194,304 value bytes are `invalid_input`, and the message names the operation. A put with `expires_at_ms` in a batch is an unknown field: `invalid_json` over REST, `invalid_request` in the shell and MCP.
 
 gRPC errors carry `vlite-error-code` and `x-request-id`. Size errors from the transport are `OUT_OF_RANGE` without an application code.
 
@@ -268,7 +374,31 @@ def increment(collection: str, namespace: str, key: str) -> int:
 print(increment("cache", "stats", "page-views"))
 ```
 
-It protects one key. There are no multi-key transactions, so two counters cannot be changed together.
+It protects one key. To change two counters together, read both with one multi-get and write both with one batch, each put expecting the revision you read. If either counter changed in between, the batch fails with 412 and writes nothing, so you read again and retry:
+
+```python
+def move(collection: str, source: str, target: str, amount: int) -> None:
+    keys = [{"namespace": "stats", "key": source}, {"namespace": "stats", "key": target}]
+    while True:
+        first, second = client.kv_get_many(collection=collection, keys=keys)["items"]
+        if first is None or second is None:
+            raise KeyError("both counters must exist")
+        try:
+            client.kv_batch(collection=collection, operations=[
+                {"op": "put", "namespace": "stats", "key": source,
+                 "value": str(int(first["value"]) - amount).encode(),
+                 "expected": {"revision": first["version"]}},
+                {"op": "put", "namespace": "stats", "key": target,
+                 "value": str(int(second["value"]) + amount).encode(),
+                 "expected": {"revision": second["version"]}},
+            ])
+            return
+        except VLiteError as error:
+            if error.code != "precondition_failed":
+                raise
+```
+
+Two keys always fit one multi-get response. A transport error is not caught here either: after one, read both counters before you decide anything.
 
 ### A cache with a time to live
 
@@ -338,6 +468,6 @@ To extend a claim, put again with `expected={"revision": version}` and a new dea
 
 ## Security and audit
 
-Get and list need the collection's `read` scope, and put and delete need `write`; the same scopes apply to the `vlite.v1.Kv` RPCs. Graph scopes do not grant key-value access, read-only credentials cannot mutate, and tenant-local names and collection bindings are checked before any lookup. Put sensitive data in dedicated collections and bind credentials narrowly: vector, graph-attachment and import permissions can also expose, overwrite, delete or expire key-value records.
+Get, list and multi-get need the collection's `read` scope, and put, delete and batch need `write`; the same scopes apply to the `vlite.v1.Kv` RPCs. The read-only token may read, multi-get included, but cannot write or batch. Graph scopes do not grant key-value access, read-only credentials cannot mutate, and tenant-local names and collection bindings are checked before any lookup. Put sensitive data in dedicated collections and bind credentials narrowly: vector, graph-attachment and import permissions can also expose, overwrite, delete or expire key-value records.
 
-Put and delete are audited as `kv_put` and `kv_delete` events with the principal, a stable [actor](SECURITY.md#audit-actors), the collection, the request ID and the outcome, and for a put the deadline, never the namespace, key or value. A request that fails records the collection as `(invalid)` and still records the actor. A request that is rejected while it is parsed is not audited. See [Key-value permissions](SECURITY.md#key-value-permissions).
+Put and delete are audited as `kv_put` and `kv_delete` events with the principal, a stable [actor](SECURITY.md#audit-actors), the collection, the request ID and the outcome, and for a put the deadline, never the namespace, key or value. A request that fails records the collection as `(invalid)` and still records the actor. A request that is rejected while it is parsed is not audited. A batch is one `kv_batch` event, not one per operation: it carries the request ID, the principal, the actor, the collection, the outcome and the duration, plus the counts `puts` and `deletes`, and never a namespace, key or value. See [Key-value permissions](SECURITY.md#key-value-permissions).

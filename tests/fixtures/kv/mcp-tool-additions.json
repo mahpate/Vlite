@@ -79,6 +79,54 @@
         "type": "object"
       },
       "name": "vlite_kv_list"
+    },
+    {
+      "annotations": {
+        "destructiveHint": false,
+        "idempotentHint": true,
+        "readOnlyHint": true
+      },
+      "description": "Fetch up to 1000 live KV entries by key in one call, in the order given; a key that is absent or expired is null. A response that would pass 16 MiB stops early and next_index names the first key not read. Calls share no snapshot.",
+      "inputSchema": {
+        "additionalProperties": false,
+        "properties": {
+          "collection": {
+            "description": "Required existing one-dimensional collection; never created implicitly.",
+            "minLength": 1,
+            "type": "string"
+          },
+          "keys": {
+            "items": {
+              "additionalProperties": false,
+              "properties": {
+                "key": {
+                  "minLength": 1,
+                  "type": "string",
+                  "x-maxUtf8Bytes": 1024
+                },
+                "namespace": {
+                  "minLength": 1,
+                  "type": "string",
+                  "x-maxUtf8Bytes": 255
+                }
+              },
+              "required": [
+                "namespace",
+                "key"
+              ],
+              "type": "object"
+            },
+            "maxItems": 1000,
+            "type": "array"
+          }
+        },
+        "required": [
+          "collection",
+          "keys"
+        ],
+        "type": "object"
+      },
+      "name": "vlite_kv_get_many"
     }
   ],
   "writable": [
@@ -301,6 +349,191 @@
         "type": "object"
       },
       "name": "vlite_kv_list"
+    },
+    {
+      "annotations": {
+        "destructiveHint": false,
+        "idempotentHint": true,
+        "readOnlyHint": true
+      },
+      "description": "Fetch up to 1000 live KV entries by key in one call, in the order given; a key that is absent or expired is null. A response that would pass 16 MiB stops early and next_index names the first key not read. Calls share no snapshot.",
+      "inputSchema": {
+        "additionalProperties": false,
+        "properties": {
+          "collection": {
+            "description": "Required existing one-dimensional collection; never created implicitly.",
+            "minLength": 1,
+            "type": "string"
+          },
+          "keys": {
+            "items": {
+              "additionalProperties": false,
+              "properties": {
+                "key": {
+                  "minLength": 1,
+                  "type": "string",
+                  "x-maxUtf8Bytes": 1024
+                },
+                "namespace": {
+                  "minLength": 1,
+                  "type": "string",
+                  "x-maxUtf8Bytes": 255
+                }
+              },
+              "required": [
+                "namespace",
+                "key"
+              ],
+              "type": "object"
+            },
+            "maxItems": 1000,
+            "type": "array"
+          }
+        },
+        "required": [
+          "collection",
+          "keys"
+        ],
+        "type": "object"
+      },
+      "name": "vlite_kv_get_many"
+    },
+    {
+      "annotations": {
+        "destructiveHint": true,
+        "idempotentHint": false,
+        "readOnlyHint": false
+      },
+      "description": "Commit up to 1000 puts and deletes of one collection atomically, all or none, as one frame; synced only under full durability. Operations behave as if run one at a time in order; a key may be named once. A put has no expires_at_ms and clears the deadline of the entry it replaces; every put gets the same version.",
+      "inputSchema": {
+        "additionalProperties": false,
+        "properties": {
+          "collection": {
+            "description": "Required existing one-dimensional collection; never created implicitly.",
+            "minLength": 1,
+            "type": "string"
+          },
+          "operations": {
+            "items": {
+              "oneOf": [
+                {
+                  "additionalProperties": false,
+                  "properties": {
+                    "expected": {
+                      "default": "any",
+                      "oneOf": [
+                        {
+                          "enum": [
+                            "any",
+                            "absent"
+                          ]
+                        },
+                        {
+                          "additionalProperties": false,
+                          "properties": {
+                            "revision": {
+                              "pattern": "^(0|[1-9][0-9]{0,19})$",
+                              "type": "string",
+                              "x-maximumUint64": "18446744073709551615"
+                            }
+                          },
+                          "required": [
+                            "revision"
+                          ],
+                          "type": "object"
+                        }
+                      ]
+                    },
+                    "key": {
+                      "minLength": 1,
+                      "type": "string",
+                      "x-maxUtf8Bytes": 1024
+                    },
+                    "namespace": {
+                      "minLength": 1,
+                      "type": "string",
+                      "x-maxUtf8Bytes": 255
+                    },
+                    "op": {
+                      "const": "put"
+                    },
+                    "value_base64": {
+                      "contentEncoding": "base64",
+                      "maxLength": 1396388,
+                      "type": "string",
+                      "x-maxDecodedBytes": 1047290
+                    }
+                  },
+                  "required": [
+                    "op",
+                    "namespace",
+                    "key",
+                    "value_base64"
+                  ],
+                  "type": "object"
+                },
+                {
+                  "additionalProperties": false,
+                  "properties": {
+                    "expected": {
+                      "default": "any",
+                      "oneOf": [
+                        {
+                          "enum": [
+                            "any",
+                            "absent"
+                          ]
+                        },
+                        {
+                          "additionalProperties": false,
+                          "properties": {
+                            "revision": {
+                              "pattern": "^(0|[1-9][0-9]{0,19})$",
+                              "type": "string",
+                              "x-maximumUint64": "18446744073709551615"
+                            }
+                          },
+                          "required": [
+                            "revision"
+                          ],
+                          "type": "object"
+                        }
+                      ]
+                    },
+                    "key": {
+                      "minLength": 1,
+                      "type": "string",
+                      "x-maxUtf8Bytes": 1024
+                    },
+                    "namespace": {
+                      "minLength": 1,
+                      "type": "string",
+                      "x-maxUtf8Bytes": 255
+                    },
+                    "op": {
+                      "const": "delete"
+                    }
+                  },
+                  "required": [
+                    "op",
+                    "namespace",
+                    "key"
+                  ],
+                  "type": "object"
+                }
+              ]
+            },
+            "maxItems": 1000,
+            "type": "array"
+          }
+        },
+        "required": [
+          "collection",
+          "operations"
+        ],
+        "type": "object"
+      },
+      "name": "vlite_kv_batch"
     }
   ]
 }

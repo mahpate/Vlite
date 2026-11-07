@@ -26,7 +26,10 @@ VLITE_API uint32_t vlite_abi_version(void);
    commands use {"op":"graph","request":{"op":..., ...}}; every library since
    0.5.1 includes them (0.5.0 builds without `graph` return "unsupported",
    builds predating graph return "invalid_input").
-   Graph create requires handle=0; see FEATURES.md "Property graph". */
+   Graph create requires handle=0; see FEATURES.md "Property graph".
+   Key-value operations use {"op":"kv","request":{"op":"get"|"put"|"delete"|"list",...}}
+   on a database handle; see FEATURES.md "Key-value" (builds predating them
+   return "invalid_input"). */
 VLITE_API char *vlite_execute(uint64_t handle, const uint8_t *input, size_t length);
 /* Optional additive symbols: detect availability when loading older ABI-1 builds.
    vectors is borrowed, aligned native-endian IEEE float32, immutable until return.

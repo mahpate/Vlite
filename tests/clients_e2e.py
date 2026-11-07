@@ -87,6 +87,8 @@ def python_test(base, token):
         assert error.status == 404
     conditional_test(client)
     filtered_ann_test(client)
+    kv_test(client)
+    kv_batch_test(client)
     print("PASS Python live REST client")
 
 
@@ -161,6 +163,35 @@ def filtered_ann_test(client):
                      + [{"op": "delete", "id": "305"}])
         assert client.database()["records"] == before
     print("PASS Python live filtered ANN")
+
+
+def kv_test(client):
+    """Key-value entries against a real server; a dedicated one-dimensional collection holds them."""
+    if client.capabilities()["features"].get("kv") is not True:
+        print("SKIP Python live key-value entries (the server has no key-value routes)")
+        return
+    client.create_collection("cache", 1)
+    entry = {"collection": "cache", "namespace": "app", "key": "k/é"}
+    first = client.kv_put(**entry, value=b"\x00\xff", expected="absent")
+    assert first["expires_at_ms"] is None and first["version"] > 0, first
+    assert client.kv_get(**entry) == {"key": "k/é", "value": b"\x00\xff", **first}
+    expect_error(lambda: client.kv_put(**entry, value=b"", expected="absent"), 412, "precondition_failed")
+    expect_error(lambda: client.kv_put(**entry, value=b"", expected={"revision": first["version"] + 1}),
+                 412, "precondition_failed")
+    second = client.kv_put(**entry, value=b"two", expected={"revision": first["version"]})
+    assert second["version"] > first["version"], (first, second)
+    assert client.kv_list(collection="cache", namespace="app", prefix="k/") == {
+        "items": [{"key": "k/é", "value": b"two", **second}], "next_after": None}
+    expect_error(lambda: client.kv_delete(**entry, expected={"revision": first["version"]}), 412, "precondition_failed")
+    assert client.kv_delete(**entry, expected={"revision": second["version"]}) is True
+    assert client.kv_delete(**entry) is False
+    expect_error(lambda: client.kv_get(**entry), 404, "kv_not_found")
+    # A deadline that is already due is accepted and the entry is immediately absent.
+    assert client.kv_put(**entry, value=b"x", expires_at_ms=0)["expires_at_ms"] == 0
+    expect_error(lambda: client.kv_get(**entry), 404, "kv_not_found")
+    # The default collection is not a key-value collection.
+    expect_error(lambda: client.kv_get(collection="default", namespace="app", key="k"), 409, "not_kv_collection")
+    print("PASS Python live key-value entries")
 
 
 def expect_412(action):
@@ -263,6 +294,55 @@ def conditional_test(client):
     assert client.delete(other, if_match=tag) is True
     assert client.database()["records"] == before
     print("PASS Python live conditional writes")
+
+
+def kv_batch_test(client):
+    """Atomic key-value batch and get-many on a dedicated one-dimension collection, dropped afterward."""
+    name = "kvlive"
+
+    def put(namespace, key, value, expected="any"):
+        return {"op": "put", "namespace": namespace, "key": key, "value": value, "expected": expected}
+
+    def delete(namespace, key, expected="any"):
+        return {"op": "delete", "namespace": namespace, "key": key, "expected": expected}
+
+    def ref(namespace, key):
+        return {"namespace": namespace, "key": key}
+
+    client.create_collection(name, 1)
+    try:
+        first = client.kv_batch(collection=name, operations=[
+            put("a", "one", b"1"), put("a", "two", b"\x00\xff"), put("b", "one", b""), delete("a", "nothing")])
+        version = first[0]["version"]
+        assert version > 0 and [r.get("version") for r in first[:3]] == [version] * 3, first
+        assert first[3] == {"deleted": False}, first
+        found = client.kv_get_many(collection=name, keys=[
+            ref("a", "two"), ref("a", "missing"), ref("b", "one"), ref("a", "one")])
+        assert found["next_index"] is None and found["items"][1] is None, found
+        assert [(e["key"], e["value"], e["version"]) for e in (found["items"][0], found["items"][2], found["items"][3])] == [
+            ("two", b"\x00\xff", version), ("one", b"", version), ("one", b"1", version)], found
+        assert client.kv_get(collection=name, namespace="a", key="one")["value"] == b"1", "single-key reads see batch writes"
+        # A condition that fails anywhere in the batch writes nothing.
+        expect_412(lambda: client.kv_batch(collection=name, operations=[
+            put("a", "new", b"x"), delete("a", "one", {"revision": version + 1000})]))
+        after = client.kv_get_many(collection=name, keys=[ref("a", "new"), ref("a", "one")])
+        assert after["items"][0] is None and after["items"][1]["value"] == b"1", after
+        # Conditions that hold; a replaced entry gets a larger version, and one batch shares one version.
+        again = client.kv_batch(collection=name, operations=[
+            put("a", "one", b"11", {"revision": version}), put("a", "new", b"x", "absent"),
+            delete("b", "one", {"revision": version})])
+        assert again[0]["version"] == again[1]["version"] > version and again[2] == {"deleted": True}, again
+        expect_412(lambda: client.kv_batch(collection=name, operations=[put("a", "new", b"y", "absent")]))
+        listed = client.kv_list(collection=name, namespace="a")["items"]
+        assert [(e["key"], e["value"]) for e in listed] == [("new", b"x"), ("one", b"11"), ("two", b"\x00\xff")], listed
+        assert client.kv_batch(collection=name, operations=[]) == []
+        assert client.kv_batch(collection=name, operations=[
+            delete("a", "new"), delete("a", "one"), delete("a", "two")]) == [{"deleted": True}] * 3
+        assert client.kv_list(collection=name, namespace="a")["items"] == []
+        expect_error(lambda: client.kv_get_many(collection="kvmissing", keys=[ref("a", "k")]), 404, "collection_not_found")
+        print("PASS Python live key-value batch and get-many")
+    finally:
+        client.drop_collection(name)
 
 
 V4_FLAGS = ["collections", "imports", "per_record_etags", "search_auto", "search_hybrid", "search_explain",

@@ -476,7 +476,7 @@ checksum = "0b928f33d975fc6ad9f86c8f283853ad26bdd5b10b7f1542aa2fa15e2289105a"
 
 [[package]]
 name = "vlite"
-version = "0.7.1"
+version = "0.7.2"
 dependencies = [
  "argon2",
  "chacha20poly1305",
@@ -492,8 +492,9 @@ dependencies = [
 
 [[package]]
 name = "vlite-wasm"
-version = "0.7.1"
+version = "0.7.2"
 dependencies = [
+ "js-sys",
  "serde_json",
  "vlite",
  "wasm-bindgen",

@@ -56,6 +56,11 @@ const OPS: &[&str] = &[
 
 type Answer = (u16, HeaderMap, Vec<u8>);
 
+/// The same properties over gRPC (lane F3, slice S1), in a module of its own.
+#[cfg(feature = "grpc")]
+#[path = "server_guard_differential/grpc_leg.rs"]
+mod grpc_leg;
+
 struct Principal {
     name: &'static str,
     tenant: bool,
@@ -213,6 +218,9 @@ struct World {
     bound: bool,
     tokens: BTreeMap<&'static str, String>,
     _directory: tempfile::TempDir,
+    /// The service the router was built over, for the gRPC leg.
+    #[cfg(feature = "grpc")]
+    service: Service,
 }
 
 impl World {
@@ -313,8 +321,9 @@ fn build(bound: bool) -> World {
         db.feed_cursor().unwrap().to_token(),
     )
     .unwrap();
+    let service = Service::new(db);
     let app = configured_admin_router(
-        Service::new(db),
+        service.clone(),
         ServerOptions {
             loopback_only: true,
             admin_token: Some(BearerToken::new(ADMIN).unwrap()),
@@ -330,6 +339,8 @@ fn build(bound: bool) -> World {
         bound,
         tokens,
         _directory: directory,
+        #[cfg(feature = "grpc")]
+        service,
     }
 }
 
@@ -693,6 +704,9 @@ const SEED_NAMED: &str =
 const NAMED: &str = r#"{"dense":{"v":[{"version":"v1","vector":[0,1]}]},"sparse":{"s":[[1,1]]}}"#;
 /// Key-value writes only succeed on a collection of one dimension (`kvstore`).
 const KV_PUT: &str = r#"{"namespace":"n","key":"k","value_base64":"UFJPQkU="}"#;
+const KV_BATCH: &str =
+    r#"{"operations":[{"op":"put","namespace":"n","key":"k","value_base64":"UFJPQkU="}]}"#;
+const KV_GET_MANY: &str = r#"{"keys":[{"namespace":"n","key":"k"}]}"#;
 
 /// Deletions run last, in table order, so every other row still has its
 /// resource to act on.
@@ -769,6 +783,8 @@ const ROWS: &[Row] = &[
     row("GET", "/v1/collections/$c/kv/entry?namespace=n&key=k", ""),
     row("PUT", "/v1/collections/$c/kv/entry", KV_PUT),
     row("GET", "/v1/collections/$c/kv/entries?namespace=n", ""),
+    row("POST", "/v1/collections/$c/kv/entries/get", KV_GET_MANY),
+    row("POST", "/v1/collections/$c/kv/batch", KV_BATCH),
     row("GET", "/v1/collections/$c/index/hnsw", ""),
     row("POST", "/v1/collections/$c/index/hnsw", "{}"),
     row("GET", "/v1/collections/$c/index/hnsw/maintenance", ""),
@@ -2114,26 +2130,22 @@ async fn the_digest_sees_a_write_to_every_protected_resource() {
             }
         }
     }
-    {
+    for (method, path, body) in [
+        ("PUT", "/v1/collections/kvstore/kv/entry", KV_PUT),
+        ("POST", "/v1/collections/kvstore/kv/batch", KV_BATCH),
+    ] {
         let before = snapshot(&world).await;
-        let answer = request(
-            &world.app,
-            ADMIN,
-            "PUT",
-            "/v1/collections/kvstore/kv/entry",
-            KV_PUT,
-        )
-        .await;
+        let answer = request(&world.app, ADMIN, method, path, body).await;
         assert!(
             (200..300).contains(&answer.0),
-            "PUT kvstore/kv/entry: {}",
+            "{method} {path}: {}",
             describe(&answer)
         );
         let after = snapshot(&world).await;
         for (name, now) in &after {
             if (*name == "root.kvstore") != (before[name] != *now) {
                 failures.push(format!(
-                    "PUT kvstore/kv/entry: {name} is not the only label that changed"
+                    "{method} {path}: {name} is not the only label that changed"
                 ));
             }
         }

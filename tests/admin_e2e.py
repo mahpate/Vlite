@@ -106,6 +106,10 @@ class PasswordApi(AdminApi):
         return {"user": {**self.users[ANN], "must_change_password": self.must_change},
                 "must_change_password": self.must_change, "idle_timeout_seconds": 1800, "expires_unix_ms": CREATED + 43200000}
 
+    def credentialed(self, headers):
+        # A session counts once its password is settled; a temporary one is answered password_change_required.
+        return (self.active and not self.must_change) or super().credentialed(headers)
+
     def api(self, method, path, query, body, headers):
         if path == "/v1/auth/config":
             return 200, self.config, {}
@@ -412,6 +416,28 @@ def exercise_password(browser):
         context.close()
 
 
+def exercise_password_memory_mode(browser):
+    """The incident: a super admin signs in with a password while agent memory is on. The mock refuses the
+    database-wide routes to session requests exactly as it does to tokens, so sign-in must survive the refusal."""
+    fake = PasswordApi()
+    fake.memory_mode_enabled = True
+    fake.must_change = False
+    context, page, errors = session_page(browser, fake)
+    sign_in(page, "ann", FIRST)
+    expect(page.locator("#app-shell")).to_be_visible()
+    expect(page.locator("#status")).to_have_text("Signed in as ann; overview refreshed")
+    expect(page.locator("#connection-badge")).to_have_text("Connected")
+    expect(control(page, "#metrics-note")).to_have_text(
+        "Server metrics are off while agent memory is enabled. Database size shows Unavailable.")
+    metrics = calls(fake, "/metrics", "GET")
+    assert metrics and all("authorization" not in item["headers"] for item in metrics), "The refused request is a session request"
+    for selector in ("#status", "#error-help", "#gate-message", "#metrics-note"):
+        expect(page.locator(selector)).not_to_contain_text("403")
+        expect(page.locator(selector)).not_to_contain_text("forbidden_scope")
+    assert not errors, errors
+    context.close()
+
+
 def exercise(browser):
     fake = AdminApi()
     context, page, errors = mocked_page(browser, fake)
@@ -568,6 +594,7 @@ if __name__ == "__main__":
         try:
             exercise(browser)
             exercise_password(browser)
+            exercise_password_memory_mode(browser)
         finally:
             browser.close()
     print("PASS browser admin flows: identity badge, confirmations/cancel, tenant CRUD/usage/settings/"
@@ -576,3 +603,4 @@ if __name__ == "__main__":
     print("PASS password sign-in: sign-in screen, errors and throttling, forced first password change, cookie-mode "
           "headers, user add/save/reset/delete with self-protection, reload restore, ended session, account-menu "
           "password change and sign-out, token fallback and setup/HTTPS hints.")
+    print("PASS password sign-in with agent memory enabled: the session's refused /metrics leaves sign-in working and says so.")

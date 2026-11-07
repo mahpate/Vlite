@@ -305,6 +305,7 @@ C_PREFIXES = {
     ("features", "Request"): "c:features/",
     ("graph", "Request"): "c:graph/",
     ("graph", "OpIn"): "c:graph-op/",
+    ("kv", "Request"): "c:kv/",
 }
 C_ENUM_RE = re.compile(
     r'#\[serde\(([^\]]*tag = "op"[^\]]*)\)\]\s*\n(?:\s*#\[[^\n]*\]\s*\n)*\s*(?:pub(?:\([^)]*\))? )?enum (\w+)(?:<[^>]*>)? \{'
@@ -470,7 +471,7 @@ def mcp_keys(root: Path) -> set[str]:
 
 def cli_keys(root: Path) -> set[str]:
     kv = (root / "src/bin/tool_support/kv_mcp.rs").read_text(encoding="utf-8")
-    keys = {f"cli:vlite-shell/{name}" for name in re.findall(r'"(kv-[a-z]+)" => Some\(', kv)}
+    keys = {f"cli:vlite-shell/{name}" for name in re.findall(r'"(kv-[a-z-]+)" => Some\(', kv)}
     memory = (root / "src/bin/vlite-memory-cli.rs").read_text(encoding="utf-8")
     routes = re.search(r"const ROUTES:.*?= &\[(.*?)\];", memory, re.S)
     if not routes:

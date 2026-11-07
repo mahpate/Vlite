@@ -596,11 +596,18 @@ message InfoResponse {
 
 // Ordinary KV operations require an explicit, existing one-dimension collection.
 // Values are raw bytes; an unset put expiry clears TTL. No lease RPCs.
+// WriteKvBatch commits puts and deletes of one collection atomically (at most
+// 1000 operations, 4194304 value bytes, no key named twice; a batch put has no
+// expiry and clears the deadline of the entry it replaces). GetKvEntries reads
+// up to 1000 keys; a response that would pass the 16 MiB limit stops early and
+// `next_index` names the first key not read. Calls share no snapshot.
 service Kv {
   rpc GetKvEntry(KvGetRequest) returns (KvEntry);
   rpc PutKvEntry(KvPutRequest) returns (KvPutResponse);
   rpc DeleteKvEntry(KvDeleteRequest) returns (KvDeleteResponse);
   rpc ListKvEntries(KvListRequest) returns (KvListResponse);
+  rpc GetKvEntries(KvGetManyRequest) returns (KvGetManyResponse);
+  rpc WriteKvBatch(KvBatchRequest) returns (KvBatchResponse);
 }
 message KvAddress {
   reserved 100 to 199;
@@ -635,3 +642,52 @@ message KvListResponse {
   reserved 100 to 199;
   repeated KvEntry items = 1; optional string next_after = 2;
 }
+message KvKeyRef {
+  reserved 100 to 199;
+  string namespace = 1; string key = 2;
+}
+message KvGetManyRequest {
+  reserved 100 to 199;
+  string collection = 1; repeated KvKeyRef keys = 2;
+}
+// One answer per key read, in order; `entry` is unset for a key that is absent
+// or due.
+message KvGetManyItem { reserved 100 to 199; KvEntry entry = 1; }
+message KvGetManyResponse {
+  reserved 100 to 199;
+  repeated KvGetManyItem items = 1;
+  // Set when the response stops before the last key: the index of the first
+  // key not read, equal to the number of items and at least 1.
+  optional uint32 next_index = 2;
+}
+message KvBatchPut {
+  reserved 100 to 199;
+  string namespace = 1; string key = 2; bytes value = 3; Expected expected = 4;
+}
+message KvBatchDelete {
+  reserved 100 to 199;
+  string namespace = 1; string key = 2; Expected expected = 3;
+}
+// A batch grows by new `oneof kind` cases (for example a put with a deadline),
+// never by a field added to KvBatchPut or KvBatchDelete: a server that does not
+// know the case refuses the operation (`kind` unset), where it would ignore the
+// field and write the entry without what the caller asked for. For the same
+// reason a new condition is never a new case of `Expected` (an older server
+// reads an unset `Expected` as `any` and writes without it) and a new field of
+// KvBatchRequest never changes what the batch does. See
+// docs/projects/roadmap/kv-batch-contract.md section 2.7.
+message KvBatchOperation {
+  reserved 100 to 199;
+  oneof kind { KvBatchPut put = 1; KvBatchDelete delete = 2; }
+}
+message KvBatchRequest {
+  reserved 100 to 199;
+  string collection = 1; repeated KvBatchOperation operations = 2;
+}
+// The answer to one operation: a put gives the version it wrote (the same for
+// every put of the batch), a delete whether a live entry was deleted.
+message KvBatchResult {
+  reserved 100 to 199;
+  oneof kind { uint64 version = 1; bool deleted = 2; }
+}
+message KvBatchResponse { reserved 100 to 199; repeated KvBatchResult results = 1; }

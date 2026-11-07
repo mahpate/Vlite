@@ -21,8 +21,8 @@ Sign in with a username and password; a session cookie keeps you signed in.
 - **Temporary password:** a password set by an admin must be changed at first
   sign-in. Passwords are 15–128 characters.
 - **Forgot your password:** ask a super admin to reset it.
-- **Sessions** end when you sign out, when they expire and when the server
-  restarts. Sign in again to continue.
+- **Sessions** end when you sign out, when they expire or when the server
+  restarts.
 - **HTTPS or a loopback-only server:** sign-in is accepted only over HTTPS or
   when the server listens on loopback only. When a TLS-terminating or local
   reverse proxy fronts the API, the operator sets `VLITE_TRUSTED_PROXY=1`.
@@ -190,7 +190,7 @@ up to 40 nodes/400 edges; tables retain everything. Select nodes/edges to edit o
 **Connect two nodes**. Confirm writes; edits reject stale revisions. Only empty
 graphs can be deleted. Requery after writes.
 Drag nodes; pan/rotate in 2D/3D; Ctrl/Cmd + scroll zooms.
-Ordinary scrolling/vertical touch scrolls the page. Selection highlights neighbors,
+Touch scrolling starts outside the graph. Selection highlights neighbors,
 not dimming labels. Fit/reset and keyboard controls remain available.
 Settling respects reduced motion and pauses offscreen.
 
@@ -207,11 +207,15 @@ writes stay searchable until the replacement is published.
 ## Monitor the server
 
 Super admins open **Observability → Live monitor** for request rates, errors,
-latency, a per-route table and a live log tail with level and text filters and
-JSONL export. The server keeps the log in memory only, so it clears on
-restart. **Diagnostics** lists slow queries. **Change feed** lists committed
+latency, a per-route table and a live log tail with level/text filters and
+JSONL export. The log is memory-only and clears on restart. **Diagnostics**
+lists slow queries. **Change feed** lists committed
 events across the database and needs read access to all collections. Server
 health is under **Administration → Health**.
+
+With [agent memory](MEMORY.md) on, server-wide metrics are unavailable. Sign-in
+still works and each affected view says so; see
+[SECURITY.md](SECURITY.md#memory-bound-resources).
 
 ## Administer users and tenants
 

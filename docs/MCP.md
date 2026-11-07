@@ -333,7 +333,7 @@ Server errors keep their `<code>: <message>` form; an unreachable server returns
 
 ## Local key-value tools
 
-These four tools work with `--db PATH`, independently of graph support.
+The tools below work with `--db PATH`, independently of graph support.
 They require an explicit `collection` naming an existing one-dimensional
 collection: they never create one and do not default to `default`.
 Use dedicated KV collections; vector/import/graph operations can otherwise
@@ -355,9 +355,28 @@ access permissions. KV tools are not forwarded in `--server` mode.
   no continuation. A page is built from one scan that reads only the entries
   it returns, plus at most the one that did not fit, so the requested limit is
   never copied in full before the page cap applies.
+- `vlite_kv_get_many`: `collection` and `keys`, 0 to 1,000 objects
+  `{"namespace":"a","key":"k"}` (a key may repeat). Returns
+  `{"items":[...],"next_index":null}`: one element per key read, in order, an
+  entry as `vlite_kv_get` returns it or `null` for an absent/due key. One
+  expiry clock serves the call. A result that would pass the 16 MiB canonical
+  JSON budget is cut: `next_index` is then the first key not read (the first
+  key always fits), and the caller asks again for the rest; calls share no
+  snapshot. Always listed.
+- `vlite_kv_batch`: `collection` and `operations`, 0 to 1,000 objects, each
+  `{"op":"put","namespace":"a","key":"k","value_base64":"AAEC","expected":"absent"}`
+  or `{"op":"delete","namespace":"a","key":"k","expected":{"revision":"42"}}`
+  (`expected` is optional and defaults to `"any"`). A put has no `expires_at_ms`
+  (an unknown field). Each `(namespace, key)` may appear once, and the decoded
+  values total at most 4,194,304 bytes (`invalid_input` otherwise). Every
+  operation commits or none does: the first that cannot run fails the batch and
+  nothing is written. Returns `{"results":[{"version":"43"},{"deleted":true}]}`,
+  one result per operation in order, with the same version for every put.
+  Listed and callable only with `--writable`. After `commit_indeterminate`, read
+  the keys back with `vlite_kv_get_many` before deciding anything.
 
-Put/delete are listed and callable only with `--writable`; direct calls in a
-read-only session fail `read_only: ...`. Namespace is 1..255 UTF-8 bytes,
+Put, delete and batch are listed and callable only with `--writable`; direct
+calls in a read-only session fail `read_only: ...`. Namespace is 1..255 UTF-8 bytes,
 key/after 1..1024 bytes and prefix 0..1024 bytes, without normalization.
 Values are canonical padded RFC 4648 standard base64, at most 1,047,290 decoded
 bytes (empty is valid). `expected` is `"any"` (default), `"absent"` or
@@ -368,10 +387,12 @@ put succeeds but is immediately absent. TTL requires v5; no automatic upgrade
 occurs. Versions increase within a file lineage but must be re-read after
 maintenance that rewrites revisions.
 
-Unknown/duplicate fields and wrong types fail `invalid_request`; bounds and
+Unknown/duplicate fields and wrong types fail `invalid_request`, and so does an
+`expected` text that is not `any`, `absent` or a revision object; bounds and
 noncanonical values fail `invalid_input`. Other stable error prefixes include
 `kv_not_found`, `collection_not_found`, `not_kv_collection`,
-`precondition_failed`, `kv_slots_exhausted` and `upgrade_required`.
+`precondition_failed`, `kv_slots_exhausted`, `graph_attached_record`,
+`upgrade_required` and `commit_indeterminate`.
 Success has identical JSON in `structuredContent` and its single text block.
 Failures have `isError:true` and a code-first string in
 `structuredContent.error`. Malformed JSON-RPC params remain error -32602.

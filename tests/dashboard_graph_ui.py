@@ -115,7 +115,7 @@ def check(browser):
     page.mouse.wheel(0, -180)
     page.keyboard.up("Control")
     expect(page.locator("#graph-scene")).to_have_attribute("transform", re.compile(r"scale\(1\.[0-9]+\)"))
-    assert diagram.evaluate("el => getComputedStyle(el).touchAction") == "pan-y"
+    assert diagram.evaluate("el => getComputedStyle(el).touchAction") == "none"
     page.get_by_role("button", name="Fit / reset view").click()
     expect(page.locator("#graph-scene")).to_have_attribute("transform", "translate(0 0) scale(1)")
     diagram.focus()
@@ -205,7 +205,7 @@ def check(browser):
     point = node_label.evaluate("node => ({x: Number(node.dataset.pickX), y: Number(node.dataset.pickY)})")
     canvas.click(position=point)
     expect(node_label).to_have_class(re.compile(r"is-selected"))
-    assert canvas.evaluate("el => getComputedStyle(el).touchAction") == "pan-y"
+    assert canvas.evaluate("el => getComputedStyle(el).touchAction") == "none"
     for label in stage.locator(".graph-three-node, .graph-three-edge").all():
         assert label.evaluate("el => getComputedStyle(el).opacity") == "1"
     expect(stage.locator('[data-edge-id="1"]')).to_have_class(re.compile(r"is-neighbor"))
@@ -404,12 +404,204 @@ def check_graph_only_tenant(browser):
         context.close()
 
 
+PHONE = {"width": 390, "height": 844}
+FINGER = 120  # CSS pixels a finger travels: far past the touch slop yet still inside the canvas
+FIRST_NODE, SECOND_NODE = "18446744073709551615", "2"
+
+
+class PhoneBrowser:
+    """Lets mocked_page open a phone-sized touch context without changing its signature."""
+
+    def __init__(self, browser):
+        self.browser = browser
+
+    def new_context(self, **options):
+        return self.browser.new_context(**{**options, "viewport": PHONE, "has_touch": True, "is_mobile": True})
+
+
+def finger_drag(page, cdp, start, dy, steps=10):
+    """One finger goes down at start, travels dy pixels down in small steps and lifts.
+
+    Playwright has no touch drag, so the events go through CDP into Chromium's real input
+    pipeline: touch-action decides whether the page scrolls or the page's pointer handlers
+    keep the gesture, exactly as for a finger on a phone."""
+    def touch(kind, y=None):
+        cdp.send("Input.dispatchTouchEvent", {"type": kind, "touchPoints": [] if y is None else [{"x": start[0], "y": y, "id": 1}]})
+    touch("touchStart", start[1])
+    for step in range(1, steps + 1):
+        touch("touchMove", start[1] + dy * step / steps)
+        page.wait_for_timeout(20)
+    page.wait_for_timeout(150)  # resting before the lift avoids momentum scrolling
+    touch("touchEnd")
+
+
+def settled_scroll(page):
+    """Page and graph-section scroll offsets once any smooth or momentum scrolling has stopped."""
+    return page.evaluate("""() => new Promise(resolve => {
+        const section = document.getElementById("graph");
+        const read = () => [scrollX, scrollY, section.scrollLeft, section.scrollTop];
+        let last = read().join(), calm = 0;
+        const poll = () => {
+            const now = read().join();
+            calm = now === last ? calm + 1 : 0;
+            last = now;
+            if (calm >= 4) resolve(read()); else setTimeout(poll, 50);
+        };
+        setTimeout(poll, 50);
+    })""")
+
+
+def center_on(page, locator):
+    """Scroll an element to mid-screen so the page can scroll a long way both up and down."""
+    locator.evaluate("el => el.scrollIntoView({block: 'center'})")
+    offset = settled_scroll(page)[1]
+    room = page.evaluate("document.scrollingElement.scrollHeight - innerHeight")
+    assert 2 * FINGER < offset < room - 2 * FINGER, (offset, room)
+
+
+def center_of(locator):
+    box = locator.bounding_box()
+    return box["x"] + box["width"] / 2, box["y"] + box["height"] / 2
+
+
+def hits(page, point, selector):
+    """Whether a touch at the point lands on an element that matches the selector, or inside one."""
+    return page.evaluate("([x, y, selector]) => !!document.elementFromPoint(x, y)?.closest(selector)", [*point, selector])
+
+
+def drag_keeps_page(page, cdp, start, dy, what):
+    """A finger drag that starts on the graph must not scroll the page."""
+    before = settled_scroll(page)
+    finger_drag(page, cdp, start, dy)
+    after = settled_scroll(page)
+    assert after == before, f"A vertical finger drag that starts on {what} scrolled the page: {before} -> {after}"
+    return after
+
+
+def touch_graph(browser, view):
+    """A phone-sized touch session showing the mocked graph result as the "2d" diagram or the "3d" graph."""
+    context, page, errors = mocked_page(PhoneBrowser(browser), GraphApi())
+    page.evaluate("window.VLiteNavigation.reveal('graph')")
+    page.locator("#graph-operation").select_option("find-nodes")
+    page.locator("#graph-run").click()
+    expect(page.locator("#graph-nodes tbody tr")).to_have_count(2)
+    if view == "3d":
+        page.locator("#graph-view-mode").select_option("3d")
+        stage = page.locator("#graph-three-stage")
+        expect(stage).to_have_attribute("data-renderer", "three")
+        center_on(page, stage)
+        expect(stage).to_have_attribute("data-settled", "true")
+    return context, page, context.new_cdp_session(page), errors
+
+
+def check_touch_2d(browser):
+    """A finger drag that starts on the 2D diagram moves a node or pans the view and never scrolls the page."""
+    context, page, cdp, errors = touch_graph(browser, "2d")
+    diagram = page.locator("#graph-view")
+    first = diagram.locator(f'[data-pick-node="{FIRST_NODE}"] circle')
+    second = diagram.locator(f'[data-pick-node="{SECOND_NODE}"] circle')
+    expect(page.locator(".graph-gesture-help")).to_contain_text("on touch screens, drag outside the graph to scroll the page")
+    center_on(page, diagram)
+
+    # Starting on a node drags that node and leaves the rest of the diagram where it was.
+    first_at, second_at = center_of(first), center_of(second)
+    assert hits(page, first_at, f'[data-pick-node="{FIRST_NODE}"]')
+    scroll = drag_keeps_page(page, cdp, first_at, FINGER // 2, "a node")
+    moved = center_of(first)
+    assert abs(moved[0] - first_at[0]) <= 3 and abs(moved[1] - first_at[1] - FINGER // 2) <= 3, ("The node must follow the finger", first_at, moved)
+    assert max(abs(a - b) for a, b in zip(center_of(second), second_at)) <= 1, "Only the touched node may move"
+
+    # Starting on empty canvas pans the whole diagram with the finger.
+    box = diagram.bounding_box()
+    empty = (box["x"] + 30, box["y"] + 100)
+    assert hits(page, empty, "#graph-view") and not hits(page, empty, "[data-pick-node], [data-pick-edge]")
+    before = center_of(second)
+    drag_keeps_page(page, cdp, empty, FINGER, "the canvas")
+    after = center_of(second)
+    assert abs(after[0] - before[0]) <= 3 and abs(after[1] - before[1] - FINGER) <= 3, ("The diagram must follow the finger", before, after)
+
+    # Control: the same drag that starts outside the canvas scrolls the page and does not touch the graph.
+    outside = center_of(page.locator("#graph-figure-caption"))
+    assert hits(page, outside, "#graph-figure-caption")
+    drawing = diagram.evaluate("el => el.innerHTML")
+    finger_drag(page, cdp, outside, FINGER)
+    scrolled = settled_scroll(page)
+    assert scrolled[1] <= scroll[1] - FINGER // 2, ("A finger drag that starts outside the canvas must scroll the page", scroll, scrolled)
+    assert diagram.evaluate("el => el.innerHTML") == drawing, "Scrolling the page must not move the graph"
+
+    # Over the canvas the mouse wheel still scrolls the page and does not zoom.
+    center_on(page, diagram)
+    scroll = settled_scroll(page)
+    box = diagram.bounding_box()
+    page.mouse.move(box["x"] + 30, box["y"] + 100)
+    page.mouse.wheel(0, FINGER)
+    page.wait_for_timeout(300)
+    assert settled_scroll(page)[1] >= scroll[1] + FINGER // 2, "The wheel must scroll the page over the canvas"
+    assert diagram.evaluate("el => el.innerHTML") == drawing, "A plain wheel must not zoom or pan the diagram"
+    assert not errors, errors
+    context.close()
+
+
+def check_touch_3d(browser):
+    """A finger drag that starts on the 3D canvas moves a node or turns the graph and never scrolls the page."""
+    context, page, cdp, errors = touch_graph(browser, "3d")
+    stage = page.locator("#graph-three-stage")
+    labels = stage.locator(".graph-three-labels")
+    node = stage.locator(f'[data-node-id="{FIRST_NODE}"]')
+
+    def node_at():
+        return node.evaluate("el => [Number(el.dataset.pickX), Number(el.dataset.pickY)]")
+
+    def turn():
+        return [int(page.locator(f"#graph-{name}").input_value()) for name in ("yaw", "pitch")]
+
+    # Starting on a node drags that node, which follows the finger.
+    box = stage.bounding_box()
+    node_before = node_at()
+    start = (box["x"] + node_before[0], box["y"] + node_before[1])
+    assert hits(page, start, "#graph-three-stage canvas")
+    scroll = drag_keeps_page(page, cdp, start, FINGER // 2, "a node")
+    page.wait_for_function("([id, y]) => Math.abs(Number(document.querySelector(`[data-node-id='${id}']`).dataset.pickY) - y) <= 4",
+                           arg=[FIRST_NODE, node_before[1] + FINGER // 2], timeout=5000)
+    assert abs(node_at()[0] - node_before[0]) <= 4, ("The node must follow the finger", node_before, node_at())
+
+    # Starting on empty canvas turns the graph, as a mouse drag does.
+    empty = (box["x"] + 18, box["y"] + 18)
+    assert hits(page, empty, "#graph-three-stage canvas")
+    yaw, pitch = turn()
+    drag_keeps_page(page, cdp, empty, FINGER, "the canvas")
+    assert turn()[1] - pitch >= 40 and turn()[0] == yaw, ("The graph must turn with the finger", (yaw, pitch), turn())
+
+    # Control: the same drag that starts outside the canvas scrolls the page and does not touch the graph.
+    outside = center_of(page.locator("#graph-figure-caption"))
+    assert hits(page, outside, "#graph-figure-caption")
+    turned, drawing = turn(), labels.evaluate("el => el.innerHTML")
+    finger_drag(page, cdp, outside, FINGER)
+    scrolled = settled_scroll(page)
+    assert scrolled[1] <= scroll[1] - FINGER // 2, ("A finger drag that starts outside the canvas must scroll the page", scroll, scrolled)
+    assert turn() == turned and labels.evaluate("el => el.innerHTML") == drawing, "Scrolling the page must not turn the graph"
+
+    # Over the canvas the mouse wheel still scrolls the page and does not zoom.
+    center_on(page, stage)
+    scroll = settled_scroll(page)
+    box = stage.bounding_box()
+    page.mouse.move(box["x"] + 18, box["y"] + 18)
+    page.mouse.wheel(0, FINGER)
+    page.wait_for_timeout(300)
+    assert settled_scroll(page)[1] >= scroll[1] + FINGER // 2, "The wheel must scroll the page over the canvas"
+    assert labels.evaluate("el => el.innerHTML") == drawing, "A plain wheel must not zoom the graph"
+    assert not errors, errors
+    context.close()
+
+
 if __name__ == "__main__":
     with sync_playwright() as p:
         browser = p.chromium.launch(args=["--enable-webgl", "--use-gl=angle", "--use-angle=swiftshader", "--enable-unsafe-swiftshader"])
         try:
             check(browser)
             check_graph_only_tenant(browser)
+            check_touch_2d(browser)
+            check_touch_3d(browser)
         finally:
             browser.close()
-    print("Graph editing, revision conflicts, read-only scope, confirmation invalidation, responsive 3D and graph-only tenants passed.")
+    print("Graph editing, revision conflicts, read-only scope, confirmation invalidation, responsive 3D, touch drags and graph-only tenants passed.")

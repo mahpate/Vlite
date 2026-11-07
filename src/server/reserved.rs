@@ -148,6 +148,16 @@ impl Reserved {
     fn reserve_unowned(&mut self, resource: Resource, stored: String) {
         self.owners.entry((resource, stored)).or_insert(UNOWNED);
     }
+
+    /// Whether every resource that `other` reserves is reserved here too,
+    /// whoever owns it. Which credentials hold raw access to a resource is not
+    /// compared.
+    pub(super) fn covers(&self, other: &Self) -> bool {
+        other
+            .owners
+            .keys()
+            .all(|resource| self.owners.contains_key(resource))
+    }
 }
 
 /// The validated binding set read at startup and its reservations.
@@ -202,6 +212,12 @@ impl Bindings {
 
     pub(super) fn reserved(&self) -> &Reserved {
         &self.reserved
+    }
+
+    /// Whether everything `other` reserves is reserved here too; owners and
+    /// raw-access grants are not compared (`Reserved::covers`).
+    pub(super) fn covers(&self, other: &Self) -> bool {
+        self.reserved.covers(&other.reserved)
     }
 
     /// The binding named `binding` in the caller's tenant (`None` is the
@@ -471,6 +487,45 @@ mod tests {
         assert!(reserved.raw_allowed(Some(RAW), Resource::Graph, "notes_graph"));
         assert!(reserved.raw_allowed(Some(RAW), Resource::Collection, "notes_ev"));
         assert!(!reserved.raw_allowed(Some(PLAIN), Resource::Graph, "notes_graph"));
+    }
+
+    #[test]
+    fn a_registry_covers_what_another_one_reserves() {
+        let none = Bindings::new(BindingSet::default());
+        let notes = registry();
+        let other = Bindings::new(BindingSet {
+            bindings: vec![binding(
+                ROOT_TENANT,
+                "other",
+                "other_graph",
+                Some("other_ev"),
+            )],
+        });
+        assert!(none.covers(&none));
+        assert!(
+            notes.covers(&none),
+            "every registry covers one that reserves nothing"
+        );
+        assert!(
+            !none.covers(&notes),
+            "one that reserves nothing covers nothing else"
+        );
+        assert!(notes.covers(&notes));
+        assert!(
+            !notes.covers(&other) && !other.covers(&notes),
+            "neither of two that reserve different resources covers the other"
+        );
+        // A record found in the database reserves its resources with no owner,
+        // and that is cover enough; a partial overlap is not.
+        let found = recorded(ROOT_TENANT, "other_graph", Some("other_ev"));
+        let both = notes.with_orphans(std::slice::from_ref(&found));
+        assert!(both.covers(&notes) && both.covers(&other));
+        assert!(!notes.covers(&both) && !other.covers(&both));
+        let half = notes.with_orphans(&[recorded(ROOT_TENANT, "other_graph", None)]);
+        assert!(
+            half.covers(&notes) && !half.covers(&other),
+            "the evidence is not covered"
+        );
     }
 
     #[test]

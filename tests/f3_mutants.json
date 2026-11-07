@@ -1,0 +1,530 @@
+[
+  {
+    "id": "f3-s1/P1",
+    "desc": "adopt_published keeps the service's own authentication state instead of the router's",
+    "file": "src/server.rs",
+    "old": "self.admin = admin.clone();",
+    "new": "let _ = admin.clone();",
+    "cmd": "cargo test --locked --offline --features grpc --lib server::published"
+  },
+  {
+    "id": "f3-s1/P2",
+    "desc": "adopt_published keeps the service's own reservations instead of the router's",
+    "file": "src/server.rs",
+    "old": "self.memory_bindings = bindings.clone();",
+    "new": "let _ = bindings.clone();",
+    "cmd": "cargo test --locked --offline --features grpc --lib server::published"
+  },
+  {
+    "id": "f3-s1/P3",
+    "desc": "publish stores empty reservations next to the router's authentication state",
+    "file": "src/server.rs",
+    "old": "*bindings = Some(self.memory_bindings.clone());",
+    "new": "*bindings = Some(Arc::new(reserved::Bindings::default()));",
+    "cmd": "cargo test --locked --offline --features grpc --lib server::published"
+  },
+  {
+    "id": "f3-s1/P4",
+    "desc": "publish stores a default (unauthenticated) administration state next to the reservations",
+    "file": "src/server.rs",
+    "old": "*admin = Some(self.admin.clone());",
+    "new": "*admin = Some(Arc::new(admin::AdminState::default()));",
+    "cmd": "cargo test --locked --offline --features grpc --lib server::published"
+  },
+  {
+    "id": "f3-s1/P5",
+    "desc": "publish panics on a poisoned administration lock instead of recovering it",
+    "file": "src/server.rs",
+    "old": "let mut admin = self\n            .published_admin\n            .lock()\n            .unwrap_or_else(std::sync::PoisonError::into_inner);",
+    "new": "let mut admin = self\n            .published_admin\n            .lock()\n            .unwrap();",
+    "cmd": "cargo test --locked --offline --features grpc --lib server::published"
+  },
+  {
+    "id": "f3-s1/P6",
+    "desc": "adopt_published panics on a poisoned reservations lock instead of recovering it",
+    "file": "src/server.rs",
+    "old": "let bindings = self\n            .published_bindings\n            .lock()\n            .unwrap_or_else(std::sync::PoisonError::into_inner);",
+    "new": "let bindings = self\n            .published_bindings\n            .lock()\n            .unwrap();",
+    "cmd": "cargo test --locked --offline --features grpc --lib server::published"
+  },
+  {
+    "id": "f3-s1/P7",
+    "desc": "a gRPC router that adopted nothing does not record that it runs without a REST configuration",
+    "file": "src/server.rs",
+    "old": "self.grpc_before_rest.store(true, Ordering::SeqCst);\n        false",
+    "new": "self.grpc_before_rest.store(false, Ordering::SeqCst);\n        false",
+    "cmd": "cargo test --locked --offline --features grpc --lib server::published"
+  },
+  {
+    "id": "f3-s1/P8",
+    "desc": "configured_admin_router no longer refuses early to follow a gRPC router that adopted nothing (publication still refuses, after the engine is set up)",
+    "file": "src/server/admin.rs",
+    "old": "service.refuse_after_unconfigured_grpc()?;",
+    "new": "",
+    "cmd": "cargo test --locked --offline --features grpc --lib server::published"
+  },
+  {
+    "id": "f3-s1/P9",
+    "desc": "router and authenticated_router no longer publish their configuration",
+    "file": "src/server.rs",
+    "old": "    service.publish();\n    routes(service)",
+    "new": "    routes(service)",
+    "cmd": "cargo test --locked --offline --features grpc --lib server::published"
+  },
+  {
+    "id": "f3-s1/P20",
+    "desc": "configured_admin_router no longer publishes its configuration",
+    "file": "src/server/admin.rs",
+    "old": "    service.publish_reserving()?;\n    Ok(super::routes(service))",
+    "new": "    Ok(super::routes(service))",
+    "cmd": "cargo test --locked --offline --features grpc --lib server::published"
+  },
+  {
+    "id": "f3-s1/P10",
+    "desc": "grpc_router builds its routes without adopting what the REST router published",
+    "file": "src/server/grpc.rs",
+    "old": "    service.adopt_published();\n    let (reporter, health_service)",
+    "new": "    let (reporter, health_service)",
+    "cmd": "cargo test --locked --offline --features grpc --test server_guard_differential"
+  },
+  {
+    "id": "f3-s1/P11",
+    "desc": "a router whose reservations do not cover the held ones is not seen as reserving less, so it replaces the publication of one that does",
+    "file": "src/server.rs",
+    "old": ".is_some_and(|held| !self.memory_bindings.covers(held));",
+    "new": ".is_some_and(|_| false);",
+    "cmd": "cargo test --locked --offline --features grpc --lib server::published"
+  },
+  {
+    "id": "f3-s1/P12",
+    "desc": "a router that holds reserved records without a file counts as one that reserves nothing",
+    "file": "src/server.rs",
+    "old": ".is_some_and(|held| !self.memory_bindings.covers(held));",
+    "new": ".is_some_and(|held| !self.memory_bindings.is_configured() && !held.is_empty());",
+    "cmd": "cargo test --locked --offline --features grpc --lib server::published"
+  },
+  {
+    "id": "f3-s1/P13",
+    "desc": "a router without an admin token replaces the publication of one that has one",
+    "file": "src/server.rs",
+    "old": "if reserves_less || protects_less {",
+    "new": "if reserves_less {",
+    "cmd": "cargo test --locked --offline --features grpc --lib server::published"
+  },
+  {
+    "id": "f3-s1/P14",
+    "desc": "a router with an admin token is treated as one without, so it never replaces the publication of one that has a token",
+    "file": "src/server.rs",
+    "old": "let open = self.admin.is_open();",
+    "new": "let open = true;",
+    "cmd": "cargo test --locked --offline --features grpc --lib server::published"
+  },
+  {
+    "id": "f3-s1/P15",
+    "desc": "a router with a file of bindings is not refused before startup writes its records, once a gRPC router exists",
+    "file": "src/server/admin.rs",
+    "old": "// Before startup writes the records of the file: a refused router changes nothing.\n    service.refuse_reserving_after_grpc()?;",
+    "new": "// Before startup writes the records of the file: a refused router changes nothing.",
+    "cmd": "cargo test --locked --offline --features grpc --lib server::published"
+  },
+  {
+    "id": "f3-s1/P16",
+    "desc": "a router that finds reserved records is not refused before it sets anything up, once a gRPC router exists",
+    "file": "src/server/admin.rs",
+    "old": "// The records found above reserve resources too.\n    service.refuse_reserving_after_grpc()?;",
+    "new": "// The records found above reserve resources too.",
+    "cmd": "cargo test --locked --offline --features grpc --lib server::published"
+  },
+  {
+    "id": "f3-s1/P17",
+    "desc": "publication does not check, under the publication locks, for a reserving router built after a gRPC router",
+    "file": "src/server.rs",
+    "old": "self.refuse_reserving_after_grpc()?;",
+    "new": "",
+    "cmd": "cargo test --locked --offline --features grpc --lib server::published"
+  },
+  {
+    "id": "f3-s1/P18",
+    "desc": "a gRPC router that adopted a publication is not remembered",
+    "file": "src/server.rs",
+    "old": "self.grpc_built.store(true, Ordering::SeqCst);",
+    "new": "",
+    "cmd": "cargo test --locked --offline --features grpc --lib server::published"
+  },
+  {
+    "id": "f3-s1/P19",
+    "desc": "a router that reserves nothing is refused too once a gRPC router exists",
+    "file": "src/server.rs",
+    "old": "if self.grpc_built.load(Ordering::SeqCst) && self.has_bindings() {",
+    "new": "if self.grpc_built.load(Ordering::SeqCst) {",
+    "cmd": "cargo test --locked --offline --features grpc --lib server::published"
+  },
+  {
+    "id": "f3-s1/P21",
+    "desc": "a gRPC router that adopted a router published without an administration token is not remembered as running without tokens",
+    "file": "src/server.rs",
+    "old": "if admin.is_open() {",
+    "new": "if false && admin.is_open() {",
+    "cmd": "cargo test --locked --offline --features grpc --lib server::published"
+  },
+  {
+    "id": "f3-s1/P22",
+    "desc": "publication does not check, under the publication locks, for a gRPC router that runs without tokens",
+    "file": "src/server.rs",
+    "old": "self.refuse_after_unconfigured_grpc()?;",
+    "new": "",
+    "cmd": "cargo test --locked --offline --features grpc --lib server::published"
+  },
+  {
+    "id": "f3-s1/P23",
+    "desc": "a router that protects less in some respect and more in another is not refused",
+    "file": "src/server.rs",
+    "old": "&& (reserves_more || protects_more)",
+    "new": "&& false",
+    "cmd": "cargo test --locked --offline --features grpc --lib server::published"
+  },
+  {
+    "id": "f3-s1/P24",
+    "desc": "a router that protects less in some respect is refused even where it protects more in no respect",
+    "file": "src/server.rs",
+    "old": "&& (reserves_more || protects_more)",
+    "new": "&& true",
+    "cmd": "cargo test --locked --offline --features grpc --lib server::published"
+  },
+  {
+    "id": "f3-s1/P25",
+    "desc": "a router that reserves what the held one does not, where the held one reserves something, is not seen as reserving more",
+    "file": "src/server.rs",
+    "old": ".is_some_and(|held| !held.covers(&self.memory_bindings));",
+    "new": ".is_some_and(|held| held.is_empty());",
+    "cmd": "cargo test --locked --offline --features grpc --lib server::published"
+  },
+  {
+    "id": "f3-s1/P26",
+    "desc": "a router with a token is not seen as protecting more than an open held router, so one that reserves less is not refused",
+    "file": "src/server.rs",
+    "old": "let protects_more = !open && admin.as_ref().is_some_and(|held| held.is_open());",
+    "new": "let protects_more = false;",
+    "cmd": "cargo test --locked --offline --features grpc --lib server::published"
+  },
+  {
+    "id": "f3-s1/P27",
+    "desc": "a registry covers another when it reserves any resource of it, not every resource of it",
+    "file": "src/server/reserved.rs",
+    "old": ".all(|resource| self.owners.contains_key(resource))",
+    "new": ".any(|resource| self.owners.contains_key(resource))",
+    "cmd": "cargo test --locked --offline --features grpc --lib server::reserved"
+  },
+  {
+    "id": "f3-s1/P28",
+    "desc": "a router counts as reserving less only when it reserves nothing where the held one reserves something, so a router that reserves part of what the held one does is seen as protecting as much",
+    "file": "src/server.rs",
+    "old": ".is_some_and(|held| !self.memory_bindings.covers(held));",
+    "new": ".is_some_and(|held| self.memory_bindings.is_empty() && !held.is_empty());",
+    "cmd": "cargo test --locked --offline --features grpc --lib server::published"
+  },
+  {
+    "id": "f3-s1/P29",
+    "desc": "two routers that each reserve something the other does not are refused only when one of them also lacks a token the other has",
+    "file": "src/server.rs",
+    "old": "&& (reserves_more || protects_more)",
+    "new": "&& (protects_more || (reserves_more && protects_less))",
+    "cmd": "cargo test --locked --offline --features grpc --lib server::published"
+  },
+  {
+    "id": "f3-s1/P30",
+    "desc": "a build without gRPC refuses a router that protects less in some respect and more in another",
+    "file": "src/server.rs",
+    "old": "&& (reserves_less || protects_less)",
+    "new": "|| (reserves_less || protects_less)",
+    "cmd": "cargo test --locked --offline --features server --lib server::published_rest"
+  },
+  {
+    "id": "f3-s1/P31",
+    "desc": "a build without gRPC logs the warning for a router that is kept out",
+    "file": "src/server.rs",
+    "old": "if cfg!(feature = \"grpc\") {",
+    "new": "if true {",
+    "cmd": "cargo test --locked --offline --features server --lib server::published_rest"
+  },
+  {
+    "id": "f3-s1/G1",
+    "desc": "the WatchChanges continuation no longer drops feed entries of reserved resources",
+    "file": "src/server/grpc.rs",
+    "old": ".retain_mut(|change| scope.retain_feed_change(change));\n            Ok(batch)",
+    "new": ".retain_mut(|_| true);\n            Ok(batch)",
+    "cmd": "cargo test --locked --offline --features grpc --test server_guard_differential"
+  },
+  {
+    "id": "f3-s1/G2",
+    "desc": "ListChanges no longer drops feed entries of reserved resources",
+    "file": "src/server/grpc.rs",
+    "old": ".retain_mut(|change| scope.retain_feed_change(change));\n                        Ok(proto::ChangesResponse {",
+    "new": ".retain_mut(|_| true);\n                        Ok(proto::ChangesResponse {",
+    "cmd": "cargo test --locked --offline --features grpc --test server_guard_differential"
+  },
+  {
+    "id": "f3-s1/G3",
+    "desc": "the ExportVectors continuation resolves its collection by name, around the request guard",
+    "file": "src/server/grpc.rs",
+    "old": "let collection = scope.collection(db, &target)?.id();",
+    "new": "let collection = db.resolve(target.name())?;",
+    "cmd": "cargo test --locked --offline --features grpc --test server_guard_differential"
+  },
+  {
+    "id": "f3-s1/G4",
+    "desc": "SearchDiskAnn resolves its collection by name, around the request guard",
+    "file": "src/server/grpc.rs",
+    "old": "let collection = scope.collection(db, &addressed)?.id();\n                        let index = sidecar.open(collection, options)?;",
+    "new": "let collection = db.resolve(addressed.name())?;\n                        let index = sidecar.open(collection, options)?;",
+    "cmd": "cargo test --locked --offline --features grpc --test server_guard_differential"
+  },
+  {
+    "id": "f3-s1/S1",
+    "desc": "a handler opens its pipeline call under the route of another RPC",
+    "file": "src/server/grpc.rs",
+    "old": "\"grpc:/vlite.v1.VLite/Info\",",
+    "new": "\"grpc:/vlite.v1.VLite/Query\",",
+    "cmd": "cargo test --locked --offline --features grpc --test server_name_lookup_scan"
+  },
+  {
+    "id": "f3-s1/S2",
+    "desc": "a handler reads the database field outside its pipeline call",
+    "file": "src/server/grpc.rs",
+    "old": "        self.call(\n            \"grpc:/vlite.v1.VLite/Info\",",
+    "new": "        let _database = &self.service.database;\n        self.call(\n            \"grpc:/vlite.v1.VLite/Info\",",
+    "cmd": "cargo test --locked --offline --features grpc --test server_name_lookup_scan"
+  },
+  {
+    "id": "f3-s1/S3",
+    "desc": "a handler takes a pipeline step (rate limit) outside its pipeline call",
+    "file": "src/server/grpc.rs",
+    "old": "        self.call(\n            \"grpc:/vlite.v1.VLite/Info\",",
+    "new": "        let _ = rate_limit(&self.service, &admin::Role::Admin);\n        self.call(\n            \"grpc:/vlite.v1.VLite/Info\",",
+    "cmd": "cargo test --locked --offline --features grpc --test server_name_lookup_scan"
+  },
+  {
+    "id": "f3-s1/S4",
+    "desc": "a handler runs a shared core outside its pipeline call",
+    "file": "src/server/grpc.rs",
+    "old": "        self.call(\n            \"grpc:/vlite.v1.VLite/Info\",",
+    "new": "        let _ = collections::list_core(&self.service, admin::Role::Admin);\n        self.call(\n            \"grpc:/vlite.v1.VLite/Info\",",
+    "cmd": "cargo test --locked --offline --features grpc --test server_name_lookup_scan"
+  },
+  {
+    "id": "f3-kv-abi/K1",
+    "desc": "a repeated key of one JSON object is not noticed",
+    "file": "bindings/c/src/kv.rs",
+    "old": "duplicate |= object.insert(key, member.value).is_some();",
+    "new": "object.insert(key, member.value);",
+    "cmd": "cargo test --locked --offline -p vlite-ffi kv::"
+  },
+  {
+    "id": "f3-kv-abi/K2",
+    "desc": "a repeated key inside a nested object is not noticed",
+    "file": "bindings/c/src/kv.rs",
+    "old": "duplicate |= member.duplicate;",
+    "new": "",
+    "cmd": "cargo test --locked --offline -p vlite-ffi kv::"
+  },
+  {
+    "id": "f3-kv-abi/K3",
+    "desc": "a repeated key inside an array element is not noticed",
+    "file": "bindings/c/src/kv.rs",
+    "old": "duplicate |= item.duplicate;",
+    "new": "",
+    "cmd": "cargo test --locked --offline -p vlite-ffi kv::"
+  },
+  {
+    "id": "f3-kv-abi/K4",
+    "desc": "a request that is not a JSON object is read as a tagged enum anyway",
+    "file": "bindings/c/src/kv.rs",
+    "old": "if !body.value.is_object() {",
+    "new": "if false {",
+    "cmd": "cargo test --locked --offline -p vlite-ffi kv::"
+  },
+  {
+    "id": "f3-kv-abi/K5",
+    "desc": "a write on a read-only handle is not refused before the request is read",
+    "file": "bindings/c/src/kv.rs",
+    "old": "writable(db, operation)?;",
+    "new": "let _ = writable(db, operation);",
+    "cmd": "cargo test --locked --offline -p vlite-ffi kv::"
+  },
+  {
+    "id": "f3-kv-abi/K6",
+    "desc": "delete is not listed as a write for the read-only check",
+    "file": "bindings/c/src/kv.rs",
+    "old": "const WRITES: [&str; 2] = [\"put\", \"delete\"];",
+    "new": "const WRITES: [&str; 2] = [\"put\", \"put\"];",
+    "cmd": "cargo test --locked --offline -p vlite-ffi kv::"
+  },
+  {
+    "id": "f3-kv-abi/K7",
+    "desc": "a decimal with a leading zero is accepted",
+    "file": "bindings/c/src/kv.rs",
+    "old": "|| (text.len() > 1 && text.starts_with('0'))",
+    "new": "|| false",
+    "cmd": "cargo test --locked --offline -p vlite-ffi kv::"
+  },
+  {
+    "id": "f3-kv-abi/K8",
+    "desc": "the upper bound of every bounded text is exclusive",
+    "file": "bindings/c/src/kv.rs",
+    "old": "if !(min..=max).contains(&text.len()) {",
+    "new": "if !(min..max).contains(&text.len()) {",
+    "cmd": "cargo test --locked --offline -p vlite-ffi kv::"
+  },
+  {
+    "id": "f3-kv-abi/K9",
+    "desc": "a namespace of 256 bytes is not refused before the collection is looked up",
+    "file": "bindings/c/src/kv.rs",
+    "old": "bounded(namespace, \"namespace\", 1, 255)?;",
+    "new": "bounded(namespace, \"namespace\", 1, 256)?;",
+    "cmd": "cargo test --locked --offline -p vlite-ffi kv::"
+  },
+  {
+    "id": "f3-kv-abi/K10",
+    "desc": "a key of 1025 bytes is not refused before the collection is looked up",
+    "file": "bindings/c/src/kv.rs",
+    "old": "bounded(key, \"key\", 1, 1024)?;",
+    "new": "bounded(key, \"key\", 1, 1025)?;",
+    "cmd": "cargo test --locked --offline -p vlite-ffi kv::"
+  },
+  {
+    "id": "f3-kv-abi/K11",
+    "desc": "a list limit of 10001 is not refused before the collection is looked up",
+    "file": "bindings/c/src/kv.rs",
+    "old": "if !(1..=10_000).contains(&limit) {",
+    "new": "if !(1..=10_001).contains(&limit) {",
+    "cmd": "cargo test --locked --offline -p vlite-ffi kv::"
+  },
+  {
+    "id": "f3-kv-abi/K12",
+    "desc": "a list without a limit returns 101 entries",
+    "file": "bindings/c/src/kv.rs",
+    "old": "fn default_limit() -> u64 {\n    100\n}",
+    "new": "fn default_limit() -> u64 {\n    101\n}",
+    "cmd": "cargo test --locked --offline -p vlite-ffi kv::"
+  },
+  {
+    "id": "f3-kv-abi/K13",
+    "desc": "an empty after cursor is accepted",
+    "file": "bindings/c/src/kv.rs",
+    "old": "bounded(after, \"after\", 1, 1024)?;",
+    "new": "bounded(after, \"after\", 0, 1024)?;",
+    "cmd": "cargo test --locked --offline -p vlite-ffi kv::"
+  },
+  {
+    "id": "f3-kv-abi/K14",
+    "desc": "put creates a missing collection",
+    "file": "bindings/c/src/kv.rs",
+    "old": "// `kv_store` creates a missing collection; this surface must not.\n            db.kv_view(&collection).map_err(kv_failure)?;",
+    "new": "// `kv_store` creates a missing collection; this surface must not.",
+    "cmd": "cargo test --locked --offline -p vlite-ffi kv::"
+  },
+  {
+    "id": "f3-kv-abi/K15",
+    "desc": "delete creates a missing collection",
+    "file": "bindings/c/src/kv.rs",
+    "old": "db.kv_view(&collection).map_err(kv_failure)?;\n            let deleted = db",
+    "new": "let deleted = db",
+    "cmd": "cargo test --locked --offline -p vlite-ffi kv::"
+  },
+  {
+    "id": "f3-kv-abi/K16",
+    "desc": "a page may reach exactly the 16 MiB limit but not pass it: the limit becomes exclusive",
+    "file": "bindings/c/src/kv.rs",
+    "old": "if size > PAGE_BYTES {",
+    "new": "if size >= PAGE_BYTES {",
+    "cmd": "cargo test --locked --offline -p vlite-ffi kv::"
+  },
+  {
+    "id": "f3-kv-abi/K17",
+    "desc": "the cursor is reported only when nothing follows the page",
+    "file": "bindings/c/src/kv.rs",
+    "old": ".filter(|(_, more)| *more)",
+    "new": ".filter(|(_, more)| !*more)",
+    "cmd": "cargo test --locked --offline -p vlite-ffi kv::"
+  },
+  {
+    "id": "f3-kv-abi/K18",
+    "desc": "the last emitted entry never knows that another live entry follows",
+    "file": "bindings/c/src/kv.rs",
+    "old": "last = Some((entry.key.to_owned(), entry.has_next));",
+    "new": "last = Some((entry.key.to_owned(), false));",
+    "cmd": "cargo test --locked --offline -p vlite-ffi kv::"
+  },
+  {
+    "id": "f3-kv-abi/K19",
+    "desc": "a failed precondition reports another stable code",
+    "file": "bindings/c/src/kv.rs",
+    "old": "E::RevisionMismatch { .. } => \"precondition_failed\",",
+    "new": "E::RevisionMismatch { .. } => \"conflict\",",
+    "cmd": "cargo test --locked --offline -p vlite-ffi kv::"
+  },
+  {
+    "id": "f3-kv-abi/K20",
+    "desc": "a collection that is not a key-value collection reports another stable code",
+    "file": "bindings/c/src/kv.rs",
+    "old": "E::NotKvCollection => \"not_kv_collection\",",
+    "new": "E::NotKvCollection => \"collection_not_found\",",
+    "cmd": "cargo test --locked --offline -p vlite-ffi kv::"
+  },
+  {
+    "id": "f3-kv-abi/K21",
+    "desc": "a base64 value of exactly the largest encoded length is refused",
+    "file": "bindings/c/src/kv.rs",
+    "old": "if text.len() > MAX_VALUE_BASE64 {",
+    "new": "if text.len() >= MAX_VALUE_BASE64 {",
+    "cmd": "cargo test --locked --offline -p vlite-ffi kv::"
+  },
+  {
+    "id": "f3-kv-abi/K22",
+    "desc": "a value of exactly the largest decoded size is refused",
+    "file": "bindings/c/src/kv.rs",
+    "old": "if value.len() > MAX_KV_VALUE_BYTES {",
+    "new": "if value.len() >= MAX_KV_VALUE_BYTES {",
+    "cmd": "cargo test --locked --offline -p vlite-ffi kv::"
+  },
+  {
+    "id": "f3-kv-abi/K23",
+    "desc": "the measured size of an entry undercounts the base64 of a partial group of three bytes",
+    "file": "bindings/c/src/kv.rs",
+    "old": "+ value_len.div_ceil(3) * 4",
+    "new": "+ value_len * 4 / 3",
+    "cmd": "cargo test --locked --offline -p vlite-ffi kv::"
+  },
+  {
+    "id": "f3-kv-abi/K24",
+    "desc": "the cursor that follows a page is left out of the measured page size",
+    "file": "bindings/c/src/kv.rs",
+    "old": "let next = entry.has_next.then_some(entry.key);",
+    "new": "let next: Option<&str> = None;",
+    "cmd": "cargo test --locked --offline -p vlite-ffi kv::"
+  },
+  {
+    "id": "f3-kv-abi/K25",
+    "desc": "a delete always reports that it removed an entry",
+    "file": "bindings/c/src/kv.rs",
+    "old": "Ok(json!({\"deleted\":deleted}))",
+    "new": "Ok(json!({\"deleted\":true}))",
+    "cmd": "cargo test --locked --offline -p vlite-ffi kv::"
+  },
+  {
+    "id": "f3-kv-abi/K26",
+    "desc": "a get of an absent key reports another stable code",
+    "file": "bindings/c/src/kv.rs",
+    "old": ".ok_or_else(|| (\"kv_not_found\", \"key is absent or expired\".into()))?;",
+    "new": ".ok_or_else(|| (\"not_found\", \"key is absent or expired\".into()))?;",
+    "cmd": "cargo test --locked --offline -p vlite-ffi kv::"
+  },
+  {
+    "id": "f3-kv-abi/K27",
+    "desc": "the key-value operation is not dispatched by the ABI",
+    "file": "bindings/c/src/lib.rs",
+    "old": "Request::Kv { request } => return kv::execute(&mut state, handle, request),",
+    "new": "Request::Kv { request } => {\n            let _ = request;\n            return Err((\"invalid_request\", \"kv is unavailable\".into()));\n        }",
+    "cmd": "cargo test --locked --offline -p vlite-ffi kv::"
+  }
+]

@@ -1,7 +1,10 @@
 // Node smoke test: node test/smoke.mjs [path/to/vlite_wasm.js]  (wasm-bindgen --target nodejs output)
 import assert from 'node:assert/strict';
+import { readFileSync } from 'node:fs';
 import { createRequire } from 'node:module';
 import path from 'node:path';
+import { fileURLToPath } from 'node:url';
+import vm from 'node:vm';
 
 const require = createRequire(import.meta.url);
 const pkg = require(path.resolve(process.argv[2] ?? 'pkg/vlite_wasm.js'));
@@ -55,4 +58,301 @@ assert.throws(() => pkg.VLiteDatabase.fromBytes(sealed));
 assert.throws(() => pkg.VLiteDatabase.fromBytes(sealed, new Uint8Array(32).fill(8)));
 assert.equal(pkg.VLiteDatabase.fromBytes(sealed, key).len(), 1);
 assert.throws(() => pkg.VLiteDatabase.fromBytes(image.slice(0, image.length - 3)));
+
+// Key-value. The shared dialect goldens (tests/fixtures/kv/kv_dialect_goldens.json, replayed by every surface) run
+// through the typed methods on a fresh one-dimension database per sequence. This surface has no raw JSON channel,
+// no read-only handle and no named collections, so those steps are not replayed here.
+const U64_MAX = 2n ** 64n - 1n;
+const goldens = JSON.parse(readFileSync(
+  fileURLToPath(new URL('../../../tests/fixtures/kv/kv_dialect_goldens.json', import.meta.url)), 'utf8'));
+assert.equal(goldens.format, 1, 'the replay reads format 1');
+const skipped = (node) => (node.skip ?? []).includes('wasm') || node.typed === false;
+const codeOf = (error) => { assert.ok(error instanceof Error, `${error}`); return error.code; };
+
+// `$ref:NAME` becomes the bound version and { $repeat: [text, count], $suffix: text } a long string.
+function expand(template, bound) {
+  if (typeof template === 'string') return template.startsWith('$ref:') ? bound[template.slice(5)] : template;
+  if (Array.isArray(template)) return template.map((item) => expand(item, bound));
+  if (template !== null && typeof template === 'object') {
+    if ('$repeat' in template) return template.$repeat[0].repeat(template.$repeat[1]) + (template.$suffix ?? '');
+    return Object.fromEntries(Object.entries(template).map(([name, item]) => [name, expand(item, bound)]));
+  }
+  return template;
+}
+
+// Exact equality, except that `$bind:NAME[>OTHER]` binds a commit version (a canonical decimal u64 above zero).
+function matches(expected, actual, bound) {
+  if (typeof expected === 'string' && expected.startsWith('$bind:')) {
+    const [name, floor] = expected.slice(6).split('>');
+    if (typeof actual !== 'string' || !/^[1-9][0-9]{0,19}$/.test(actual) || BigInt(actual) > U64_MAX) return false;
+    if (floor !== undefined && BigInt(actual) <= BigInt(bound[floor])) return false;
+    bound[name] = actual;
+    return true;
+  }
+  if (Array.isArray(expected)) {
+    return Array.isArray(actual) && expected.length === actual.length
+      && expected.every((item, index) => matches(item, actual[index], bound));
+  }
+  if (expected !== null && typeof expected === 'object') {
+    if (actual === null || typeof actual !== 'object' || Array.isArray(actual)) return false;
+    const names = Object.keys(expected);
+    return names.length === Object.keys(actual).length
+      && names.every((name) => name in actual && matches(expected[name], actual[name], bound));
+  }
+  return expected === actual;
+}
+
+function dialectEntry(entry) {
+  assert.ok(entry.value instanceof Uint8Array, 'value must be a Uint8Array');
+  assert.equal(typeof entry.version, 'bigint');
+  assert.ok(entry.expires_at_ms === null || typeof entry.expires_at_ms === 'bigint');
+  return { key: entry.key, value_base64: Buffer.from(entry.value).toString('base64'), version: entry.version.toString(),
+    expires_at_ms: entry.expires_at_ms === null ? null : entry.expires_at_ms.toString() };
+}
+
+const expectedOf = (expected) => (typeof expected === 'object' ? { revision: BigInt(expected.revision) } : expected);
+
+// Runs a golden request through the typed methods; the result comes back in the dialect's JSON shape.
+function call(db, request) {
+  const { op, collection, namespace, ...rest } = request;
+  if (op === 'get') {
+    const entry = db.kvGet(collection, namespace, rest.key);
+    // An absent or expired key is `undefined` here, like get(id).
+    if (entry === undefined) throw Object.assign(new Error('kv_not_found'), { code: 'kv_not_found' });
+    return dialectEntry(entry);
+  }
+  if (op === 'put') {
+    const deadline = rest.expires_at_ms === undefined || rest.expires_at_ms === null ? null : BigInt(rest.expires_at_ms);
+    const result = db.kvPut(collection, namespace, rest.key, new Uint8Array(Buffer.from(rest.value_base64, 'base64')),
+      expectedOf(rest.expected), deadline);
+    assert.equal(typeof result.version, 'bigint');
+    return { version: result.version.toString(), expires_at_ms: result.expires_at_ms === null ? null : result.expires_at_ms.toString() };
+  }
+  if (op === 'delete') {
+    const deleted = db.kvDelete(collection, namespace, rest.key, expectedOf(rest.expected));
+    assert.equal(typeof deleted, 'boolean');
+    return { deleted };
+  }
+  const page = db.kvList(collection, namespace, rest.prefix, rest.after, rest.limit);
+  return { items: page.items.map(dialectEntry), next_after: page.next_after };
+}
+
+pkg.setClock(Date.now());
+let replayed = 0;
+for (const sequence of goldens.sequences) {
+  if (skipped(sequence)) continue;
+  const kv = pkg.VLiteDatabase.create(1);
+  const bound = {};
+  for (const step of sequence.steps) {
+    if (skipped(step)) continue;
+    const request = expand(step.request, bound);
+    const context = `${sequence.name}/${step.name}`;
+    replayed++;
+    let result;
+    try { result = call(kv, request); } catch (error) {
+      assert.equal(codeOf(error), step.error, `${context}: ${error.message.slice(0, 300)}`);
+      continue;
+    }
+    assert.ok(step.result !== undefined, `${context}: succeeded unexpectedly with ${JSON.stringify(result).slice(0, 300)}`);
+    assert.ok(matches(expand(step.result, bound), result, bound), `${context}: ${JSON.stringify(result).slice(0, 300)}`);
+  }
+}
+assert.ok(replayed > 100, `only ${replayed} golden steps replayed`);
+
+// Values are Uint8Array, versions and deadlines bigint; results are plain objects.
+const kvOne = pkg.VLiteDatabase.create(1);
+const written = kvOne.kvPut('default', 'n', 'a', new Uint8Array([7, 8]), 'absent', 2n ** 53n + 1n);
+assert.equal(Object.getPrototypeOf(written), Object.prototype);
+assert.equal(written.expires_at_ms, 2n ** 53n + 1n);
+const entry = kvOne.kvGet('default', 'n', 'a');
+assert.deepEqual(entry, { key: 'a', value: new Uint8Array([7, 8]), version: written.version, expires_at_ms: 2n ** 53n + 1n });
+const next = kvOne.kvPut('default', 'n', 'a', new Uint8Array(), { revision: written.version });
+assert.ok(next.version > written.version);
+assert.equal(next.expires_at_ms, null);
+assert.throws(() => kvOne.kvDelete('default', 'n', 'a', { revision: written.version }), (error) => codeOf(error) === 'precondition_failed');
+assert.equal(kvOne.kvDelete('default', 'n', 'a', { revision: next.version }), true);
+assert.equal(kvOne.kvDelete('default', 'n', 'a'), false);
+assert.equal(kvOne.kvGet('default', 'n', 'a'), undefined);
+
+// A byte image keeps entries, versions and deadlines.
+const kept = pkg.VLiteDatabase.create(1);
+const keptPut = kept.kvPut('default', 'n', 'a', new Uint8Array([7, 8]), 'absent', U64_MAX);
+assert.deepEqual(pkg.VLiteDatabase.fromBytes(kept.toBytes()).kvGet('default', 'n', 'a'),
+  { key: 'a', value: new Uint8Array([7, 8]), version: keptPut.version, expires_at_ms: U64_MAX });
+
+// Expiry follows setClock: an entry whose deadline is the clock is due.
+pkg.setClock(1_000_000);
+const timed = pkg.VLiteDatabase.create(1);
+timed.kvPut('default', 'n', 'k', new Uint8Array([1]), undefined, 1_001_000n);
+pkg.setClock(1_000_999);
+assert.equal(timed.kvGet('default', 'n', 'k').expires_at_ms, 1_001_000n);
+pkg.setClock(1_001_000);
+assert.equal(timed.kvGet('default', 'n', 'k'), undefined);
+assert.deepEqual(timed.kvList('default', 'n').items, []);
+pkg.setClock(Date.now());
+
+// Arguments that cannot be honoured throw: a Number deadline or revision is never coerced to a bigint.
+const strict = pkg.VLiteDatabase.create(1);
+const value = new Uint8Array([1]);
+for (const action of [
+  () => strict.kvPut('default', 'n', 'k', value, undefined, 5),
+  () => strict.kvPut('default', 'n', 'k', value, undefined, '5'),
+  () => strict.kvPut('default', 'n', 'k', value, undefined, -1n),
+  () => strict.kvPut('default', 'n', 'k', value, undefined, 2n ** 64n),
+  () => strict.kvPut('default', 'n', 'k', value, 'present'),
+  () => strict.kvPut('default', 'n', 'k', value, null),
+  () => strict.kvPut('default', 'n', 'k', value, { revision: 1 }),
+  () => strict.kvPut('default', 'n', 'k', value, { revision: -1n }),
+  () => strict.kvPut('default', 'n', 'k', value, { revision: 1n, extra: 1 }),
+  () => strict.kvPut('default', 'n', 'k', value, {}),
+  () => strict.kvDelete('default', 'n', 'k', { revision: 2n ** 64n }),
+  () => strict.kvList('default', 'n', undefined, undefined, -1),
+  () => strict.kvList('default', 'n', undefined, undefined, 1.5),
+  () => strict.kvList('default', 'n', undefined, undefined, NaN),
+  () => strict.kvList('default', 'n', undefined, undefined, 2 ** 60),
+  () => strict.kvList('default', 'n', undefined, undefined, '5'),
+  () => strict.kvList('default', 'n', undefined, undefined, true),
+  () => strict.kvList('default', 'n', undefined, undefined, [7]),
+  () => strict.kvList('default', 'n', undefined, undefined, { valueOf() { return 5; } }),
+]) assert.throws(action, (error) => codeOf(error) === 'invalid_request');
+assert.throws(() => strict.kvList('default', 'n', undefined, undefined, 0), (error) => codeOf(error) === 'invalid_input');
+assert.throws(() => strict.kvPut('default', 'n', 'k', new Uint8Array(1047291)), (error) => codeOf(error) === 'invalid_input');
+// Nothing was written by the rejected calls.
+assert.equal(strict.kvGet('default', 'n', 'k'), undefined);
+
+// A value is a Uint8Array and nothing else: a typed parameter would copy a string as zero bytes, an ArrayBuffer or a
+// DataView as nothing and the numbers of an array modulo 256, and report success.
+const typed = pkg.VLiteDatabase.create(1);
+for (const bad of ['text', new ArrayBuffer(4), new DataView(new ArrayBuffer(2)), [1, 300], undefined, null, 7, {}]) {
+  assert.throws(() => typed.kvPut('default', 'n', 'k', bad), (error) => codeOf(error) === 'invalid_request', String(bad));
+}
+assert.equal(typed.kvGet('default', 'n', 'k'), undefined);
+// A Node Buffer is a Uint8Array.
+typed.kvPut('default', 'n', 'k', Buffer.from([1, 2]));
+assert.deepEqual(typed.kvGet('default', 'n', 'k').value, new Uint8Array([1, 2]));
+
+// Every text argument is a string, and a well-formed one: an unpaired surrogate would be copied as U+FFFD, and two
+// different keys would name one entry. The other bindings refuse it too.
+for (const bad of [1, null, undefined, {}, ['a'], new String('a')]) {
+  for (const action of [
+    () => typed.kvGet(bad, 'n', 'k'), () => typed.kvGet('default', bad, 'k'), () => typed.kvGet('default', 'n', bad),
+    () => typed.kvPut('default', 'n', bad, new Uint8Array()), () => typed.kvDelete('default', 'n', bad),
+    () => typed.kvList(bad, 'n'), () => typed.kvList('default', bad),
+  ]) assert.throws(action, (error) => codeOf(error) === 'invalid_request', String(bad));
+}
+assert.deepEqual(typed.kvList('default', 'n', null, null, null).items.map((item) => item.key), ['k']);
+for (const bad of ['\ud800', 'a\udc00', '\udc00\ud800', 'x\ud83d']) {
+  for (const action of [
+    () => typed.kvGet('default', 'n', bad), () => typed.kvGet('default', bad, 'k'), () => typed.kvGet(bad, 'n', 'k'),
+    () => typed.kvPut('default', 'n', bad, new Uint8Array()), () => typed.kvDelete('default', 'n', bad),
+    () => typed.kvList('default', 'n', bad), () => typed.kvList('default', 'n', undefined, bad),
+  ]) assert.throws(action, (error) => codeOf(error) === 'invalid_input', JSON.stringify(bad));
+}
+// A valid surrogate pair is an ordinary character.
+const smile = '\u{1F600}/é';
+typed.kvPut('default', smile, smile, new Uint8Array([3]));
+assert.equal(typed.kvGet('default', smile, smile).key, smile);
+assert.deepEqual(typed.kvList('default', smile, '\u{1F600}').items.map((item) => item.key), [smile]);
+
+// An `expected` that runs the caller's code and throws is a malformed value, and leaves the database usable: an
+// exception that unwound through the native frame would leave it borrowed for good.
+const hostile = pkg.VLiteDatabase.create(1);
+const getter = { get revision() { throw new Error('the getter ran'); } };
+const trap = new Proxy({}, { ownKeys() { throw new Error('the trap ran'); } });
+for (const expected of [getter, trap]) {
+  assert.throws(() => hostile.kvPut('default', 'n', 'k', new Uint8Array(), expected), (error) => codeOf(error) === 'invalid_request');
+  assert.throws(() => hostile.kvDelete('default', 'n', 'k', expected), (error) => codeOf(error) === 'invalid_request');
+}
+hostile.kvPut('default', 'n', 'k', new Uint8Array([9]));
+assert.deepEqual(hostile.kvGet('default', 'n', 'k').value, new Uint8Array([9]));
+assert.ok(hostile.toBytes().length > 0);
+
+// A value that only looks like a Uint8Array is refused, and one that runs the caller's code cannot leave the database
+// borrowed: a proxy (whose traps would run), an object that inherits from Uint8Array.prototype (whose built-in
+// getters throw) and another kind of typed array. What is stored is what the array holds, never what an object says
+// its length is: a subclass or an own property can claim any `length`.
+class Padded extends Uint8Array { get length() { return 4096; } }
+class Throwing extends Uint8Array { get length() { throw new Error('the getter ran'); } }
+const padded = new Padded(2);
+padded.set([1, 2]);
+const lying = new Uint8Array([3]);
+Object.defineProperty(lying, 'length', { value: 4096 });
+for (const bad of [
+  new Proxy(new Uint8Array(4), {}),
+  new Proxy({}, { getPrototypeOf() { throw new Error('the trap ran'); } }),
+  new Proxy(new Uint8Array(4), { get() { throw new Error('the trap ran'); } }),
+  Object.create(Uint8Array.prototype),
+  { [Symbol.toStringTag]: 'Uint8Array', length: 1, 0: 5 },
+  new Float64Array(2),
+  new BigUint64Array(1),
+]) {
+  assert.throws(() => hostile.kvPut('default', 'n', 'v', bad), (error) => codeOf(error) === 'invalid_request');
+  assert.equal(hostile.kvGet('default', 'n', 'v'), undefined);
+}
+for (const [source, bytes] of [[padded, [1, 2]], [lying, [3]], [new Throwing(2), [0, 0]]]) {
+  hostile.kvPut('default', 'n', 'v', source);
+  assert.deepEqual(hostile.kvGet('default', 'n', 'v').value, new Uint8Array(bytes));
+}
+// An array of another realm is an array: the tag and the length are read from its own slots.
+hostile.kvPut('default', 'n', 'v', vm.runInNewContext('new Uint8Array([8, 9])'));
+assert.deepEqual(hostile.kvGet('default', 'n', 'v').value, new Uint8Array([8, 9]));
+// Nothing of the caller's value is looked up while the database is borrowed: an own `slice`, a species, a
+// constructor getter and a proxy that supplies a `slice` are never run, and what is stored is what the array holds.
+let ran = 0;
+const own = new Uint8Array([1, 2, 3]);
+own.slice = () => { ran++; return new Uint8Array([9]); };
+class Species extends Uint8Array { static get [Symbol.species]() { ran++; return Uint8Array; } }
+const species = new Species(2);
+species.set([4, 5]);
+const constructed = new Uint8Array([6]);
+Object.defineProperty(constructed, 'constructor', { get() { ran++; throw new Error('the getter ran'); } });
+for (const [source, bytes] of [[own, [1, 2, 3]], [species, [4, 5]], [constructed, [6]]]) {
+  hostile.kvPut('default', 'n', 'v', source);
+  assert.deepEqual(hostile.kvGet('default', 'n', 'v').value, new Uint8Array(bytes));
+}
+for (const bad of [
+  { slice: () => Object.create(Uint8Array.prototype) },
+  new Proxy({}, { get() { ran++; return () => new Uint8Array(1); } }),
+  new Proxy(new Uint8Array(1), { get(target, key) { ran++; return key === 'slice' ? () => new Uint8Array(1) : Reflect.get(target, key); } }),
+]) {
+  assert.throws(() => hostile.kvPut('default', 'n', 'w', bad), (error) => codeOf(error) === 'invalid_request');
+  assert.equal(hostile.kvGet('default', 'n', 'w'), undefined);
+}
+assert.equal(ran, 0, 'no code of the caller ran');
+// A detached array is refused, and the database stays usable.
+const buffer = new ArrayBuffer(8);
+const detached = new Uint8Array(buffer);
+structuredClone(buffer, { transfer: [buffer] });
+assert.throws(() => hostile.kvPut('default', 'n', 'w', detached), (error) => codeOf(error) === 'invalid_request');
+assert.equal(hostile.kvGet('default', 'n', 'w'), undefined);
+hostile.kvPut('default', 'n', 'ok', new Uint8Array([7]));
+assert.deepEqual(hostile.kvGet('default', 'n', 'ok').value, new Uint8Array([7]));
+// The largest value and one byte more, however it is held.
+hostile.kvPut('default', 'n', 'big', new Uint8Array(1047290));
+assert.throws(() => hostile.kvPut('default', 'n', 'big', new Uint8Array(1047291)), (error) => codeOf(error) === 'invalid_input');
+assert.throws(() => hostile.kvPut('default', 'n', 'big', new Padded(1047291)), (error) => codeOf(error) === 'invalid_input');
+assert.equal(hostile.kvGet('default', 'n', 'big').value.length, 1047290);
+
+// The longest collection name is 63 bytes: a longer string is refused whatever it holds, before it is scanned.
+assert.throws(() => hostile.kvGet('a'.repeat(63), 'n', 'k'), (error) => codeOf(error) === 'collection_not_found');
+for (const long of ['a'.repeat(64), 'a'.repeat(1_000_000), '\u{1F600}'.repeat(20)]) {
+  assert.throws(() => hostile.kvGet(long, 'n', 'k'), (error) => codeOf(error) === 'invalid_input');
+}
+assert.ok(hostile.toBytes().length > 0);
+// A collection with other than one dimension is not a key-value collection.
+const wide = pkg.VLiteDatabase.create(2);
+assert.throws(() => wide.kvGet('default', 'n', 'k'), (error) => codeOf(error) === 'not_kv_collection');
+assert.throws(() => wide.kvPut('default', 'n', 'k', value), (error) => codeOf(error) === 'not_kv_collection');
+
+// A list page holds at most 16 MiB of JSON: 12 of 13 largest values.
+const paged = pkg.VLiteDatabase.create(1);
+const largest = new Uint8Array(1047290);
+for (let index = 0; index < 13; index++) paged.kvPut('default', 'n', `k${String(index).padStart(2, '0')}`, largest);
+const first = paged.kvList('default', 'n', undefined, undefined, 10000);
+assert.equal(first.items.length, 12);
+assert.equal(first.next_after, 'k11');
+const second = paged.kvList('default', 'n', undefined, first.next_after, 10000);
+assert.deepEqual(second.items.map((item) => item.key), ['k12']);
+assert.equal(second.next_after, null);
+assert.equal(second.items[0].value.length, 1047290);
 console.log('wasm smoke test passed');

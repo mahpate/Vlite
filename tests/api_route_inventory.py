@@ -30,6 +30,8 @@ rest:POST /v1/collections
 rest:POST /v1/collections/{collection}/batches
 rest:POST /v1/collections/{collection}/embed
 rest:POST /v1/collections/{collection}/facets
+rest:POST /v1/collections/{collection}/kv/batch
+rest:POST /v1/collections/{collection}/kv/entries/get
 rest:POST /v1/collections/{collection}/query
 rest:POST /v1/collections/{collection}/recommend
 rest:POST /v1/collections/{collection}/search

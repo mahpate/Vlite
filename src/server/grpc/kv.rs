@@ -20,7 +20,7 @@ fn address(address: Option<proto::KvAddress>) -> Result<proto::KvAddress, ApiErr
 }
 
 fn expectation(value: Option<proto::Expected>) -> Value {
-    match value.and_then(|value| value.kind) {
+    match value.and_then(|proto::Expected { kind }| kind) {
         None | Some(proto::expected::Kind::Any(_)) => json!("any"),
         Some(proto::expected::Kind::Absent(_)) => json!("absent"),
         Some(proto::expected::Kind::Revision(revision)) => {
@@ -222,6 +222,165 @@ impl proto::kv_server::Kv for Adapter {
         )
         .await
     }
+
+    async fn get_kv_entries(
+        &self,
+        request: Request<proto::KvGetManyRequest>,
+    ) -> Result<Response<proto::KvGetManyResponse>, Status> {
+        self.call(
+            "grpc:/vlite.v1.Kv/GetKvEntries",
+            request,
+            Need::Op(Op::Read, Reach::Collection),
+            true,
+            false,
+            |service, role, _, request| async move {
+                let proto::KvGetManyRequest {
+                    collection: name,
+                    keys,
+                } = request;
+                let target = collection(name)?;
+                rest::check_key_count(keys.len())?;
+                let keys: Vec<Value> = keys
+                    .into_iter()
+                    .map(|proto::KvKeyRef { namespace, key }| json!({"namespace":namespace,"key":key}))
+                    .collect();
+                let input = decode(json!({"keys":keys}))?;
+                let Json(value) = rest::fetch_many(
+                    State(service),
+                    Extension(role),
+                    Ok(target),
+                    RawQuery(None),
+                    Ok(Query(rest::NoQuery {})),
+                    Ok(Json(input)),
+                )
+                .await?;
+                #[derive(Deserialize)]
+                struct Many {
+                    items: Vec<Option<Value>>,
+                    next_index: Option<u32>,
+                }
+                let value: Many = decode(value)?;
+                Ok(proto::KvGetManyResponse {
+                    items: value
+                        .items
+                        .into_iter()
+                        .map(|item| {
+                            Ok(proto::KvGetManyItem {
+                                entry: item.map(entry).transpose()?,
+                            })
+                        })
+                        .collect::<Result<_, ApiError>>()?,
+                    next_index: value.next_index,
+                })
+            },
+        )
+        .await
+    }
+
+    async fn write_kv_batch(
+        &self,
+        request: Request<proto::KvBatchRequest>,
+    ) -> Result<Response<proto::KvBatchResponse>, Status> {
+        self.call(
+            "grpc:/vlite.v1.Kv/WriteKvBatch",
+            request,
+            Need::Op(Op::Write, Reach::Collection),
+            false,
+            false,
+            |service, role, request_id, request| async move {
+                let proto::KvBatchRequest {
+                    collection: name,
+                    operations,
+                } = request;
+                let target = collection(name)?;
+                rest::check_operation_count(operations.len())?;
+                let operations = operations
+                    .into_iter()
+                    .enumerate()
+                    .map(|(index, operation)| {
+                        batch_operation(operation)
+                            .map_err(|error| rest::at("operations", index, error))
+                    })
+                    .collect::<Result<Vec<_>, _>>()?;
+                let input = decode(json!({"operations":operations}))?;
+                let Json(value) = rest::batch(
+                    State(service),
+                    Extension(role),
+                    Extension(RequestId(request_id)),
+                    None,
+                    Ok(target),
+                    RawQuery(None),
+                    Ok(Query(rest::NoQuery {})),
+                    Ok(Json(input)),
+                )
+                .await?;
+                #[derive(Deserialize)]
+                struct Results {
+                    results: Vec<Outcome>,
+                }
+                #[derive(Deserialize)]
+                struct Outcome {
+                    version: Option<String>,
+                    deleted: Option<bool>,
+                }
+                let value: Results = decode(value)?;
+                Ok(proto::KvBatchResponse {
+                    results: value
+                        .results
+                        .into_iter()
+                        .map(|outcome| {
+                            let kind = match (outcome.version, outcome.deleted) {
+                                (Some(version), None) => proto::kv_batch_result::Kind::Version(
+                                    version.parse().map_err(internal)?,
+                                ),
+                                (None, Some(deleted)) => {
+                                    proto::kv_batch_result::Kind::Deleted(deleted)
+                                }
+                                _ => return Err(internal("malformed KV batch result")),
+                            };
+                            Ok(proto::KvBatchResult { kind: Some(kind) })
+                        })
+                        .collect::<Result<_, ApiError>>()?,
+                })
+            },
+        )
+        .await
+    }
+}
+
+/// One batch operation as the REST request carries it; REST checks it. Every
+/// field of the message is named, so a field that a later release adds fails
+/// the build here instead of being dropped; the requests of the two batch RPCs
+/// are read the same way.
+fn batch_operation(operation: proto::KvBatchOperation) -> Result<Value, ApiError> {
+    let proto::KvBatchOperation { kind } = operation;
+    match kind {
+        Some(proto::kv_batch_operation::Kind::Put(put)) => {
+            let proto::KvBatchPut {
+                namespace,
+                key,
+                value,
+                expected,
+            } = put;
+            Ok(json!({
+                "op":"put","namespace":namespace,"key":key,
+                "value_base64":BASE64_STANDARD.encode(value),
+                "expected":expectation(expected)
+            }))
+        }
+        Some(proto::kv_batch_operation::Kind::Delete(delete)) => {
+            let proto::KvBatchDelete {
+                namespace,
+                key,
+                expected,
+            } = delete;
+            Ok(json!({
+                "op":"delete","namespace":namespace,"key":key,
+                "expected":expectation(expected)
+            }))
+        }
+        None => Err(unprocessable("KV batch operation is required")),
+    }
 }
 
 #[cfg(test)]
@@ -241,8 +400,8 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn grpc_kv_commit_indeterminate_is_unknown_for_put_and_delete() {
-        for delete in [false, true] {
+    async fn grpc_kv_commit_indeterminate_is_unknown_for_put_delete_and_batch() {
+        for kind in ["put", "delete", "batch"] {
             let directory = tempfile::tempdir().unwrap();
             let path = directory.path().join("commit-failure.vlite");
             let mut db = Database::create_with_format(&path, 1, crate::FormatVersion::V5).unwrap();
@@ -255,23 +414,36 @@ mod tests {
             let adapter = Adapter {
                 service: service.clone(),
             };
-            let error = if delete {
-                adapter
+            let error = match kind {
+                "delete" => adapter
                     .delete_kv_entry(Request::new(proto::KvDeleteRequest {
                         address: address(),
                         expected: None,
                     }))
                     .await
-                    .unwrap_err()
-            } else {
-                adapter
+                    .unwrap_err(),
+                "batch" => adapter
+                    .write_kv_batch(Request::new(proto::KvBatchRequest {
+                        collection: "default".into(),
+                        operations: vec![proto::KvBatchOperation {
+                            kind: Some(proto::kv_batch_operation::Kind::Put(proto::KvBatchPut {
+                                namespace: "n".into(),
+                                key: "k".into(),
+                                value: b"after".to_vec(),
+                                expected: None,
+                            })),
+                        }],
+                    }))
+                    .await
+                    .unwrap_err(),
+                _ => adapter
                     .put_kv_entry(Request::new(proto::KvPutRequest {
                         address: address(),
                         value: b"after".to_vec(),
                         ..Default::default()
                     }))
                     .await
-                    .unwrap_err()
+                    .unwrap_err(),
             };
             assert_eq!(error.code(), tonic::Code::Unknown);
             assert_eq!(
@@ -407,6 +579,20 @@ mod tests {
         );
         assert_eq!(
             request_collection(&proto::KvListRequest {
+                collection: "default".into(),
+                ..Default::default()
+            }),
+            "default"
+        );
+        assert_eq!(
+            request_collection(&proto::KvGetManyRequest {
+                collection: "default".into(),
+                ..Default::default()
+            }),
+            "default"
+        );
+        assert_eq!(
+            request_collection(&proto::KvBatchRequest {
                 collection: "default".into(),
                 ..Default::default()
             }),

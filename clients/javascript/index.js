@@ -148,6 +148,56 @@ function kvQuery(fields) {
   return Object.entries(fields).map(([key, value]) => `${key}=${encodeURIComponent(value)}`).join("&");
 }
 
+const KV_PUT_FIELDS = ["op", "namespace", "key", "value", "expected"];
+const KV_DELETE_FIELDS = ["op", "namespace", "key", "expected"];
+
+// A member the request does not define is refused rather than sent or silently dropped; undefined means absent.
+function kvClosed(value, name, fields) {
+  object(value, name);
+  const unknown = Object.keys(value).find((field) => value[field] !== undefined && !fields.includes(field));
+  if (unknown !== undefined) throw new TypeError(`${name}.${unknown} is not a field of this request`);
+  return value;
+}
+
+function kvKeys(keys) {
+  if (!Array.isArray(keys) || keys.length > 1000) throw new TypeError("keys must be an array of at most 1000 keys");
+  const body = [];
+  for (let index = 0; index < keys.length; index++) {
+    const name = `keys[${index}]`;
+    const { namespace, key } = kvClosed(keys[index], name, ["namespace", "key"]);
+    body.push({ namespace: kvText(namespace, `${name}.namespace`, 255), key: kvText(key, `${name}.key`, 1024) });
+  }
+  return body;
+}
+
+function kvOperations(operations) {
+  if (!Array.isArray(operations) || operations.length > 1000) throw new TypeError("operations must be an array of at most 1000 operations");
+  const seen = new Set();
+  const body = [];
+  let bytes = 0;
+  for (let index = 0; index < operations.length; index++) {
+    const name = `operations[${index}]`;
+    const operation = object(operations[index], name);
+    const put = operation.op === "put";
+    if (!put && operation.op !== "delete") throw new TypeError(`${name}.op must be put or delete`);
+    const { namespace, key, value, expected = "any" } = kvClosed(operation, name, put ? KV_PUT_FIELDS : KV_DELETE_FIELDS);
+    const address = { namespace: kvText(namespace, `${name}.namespace`, 255), key: kvText(key, `${name}.key`, 1024) };
+    const identity = JSON.stringify([address.namespace, address.key]);
+    if (seen.has(identity)) throw new TypeError(`${name} names the same namespace and key as an earlier operation`);
+    seen.add(identity);
+    const condition = kvExpected(expected);
+    if (!put) {
+      body.push({ op: "delete", ...address, expected: condition });
+      continue;
+    }
+    if (!(value instanceof Uint8Array) || value.byteLength > 1047290) throw new TypeError(`${name}.value must be Uint8Array of length at most 1047290`);
+    bytes += value.byteLength;
+    if (bytes > 4194304) throw new TypeError("operation values must total at most 4194304 bytes");
+    body.push({ op: "put", ...address, value_base64: Buffer.from(value).toString("base64"), expected: condition });
+  }
+  return body;
+}
+
 function kvReadDecimal(value, nonzero = false) {
   const result = BigInt(id(value));
   if (nonzero && result === 0n) throw new TypeError("issued version must be nonzero");
@@ -165,6 +215,33 @@ function kvReadEntry(value) {
   const decoded = Buffer.from(encoded, "base64");
   if (decoded.length > 1047290 || decoded.toString("base64") !== encoded) throw new TypeError("noncanonical KV base64");
   return { key: kvText(value.key, "key", 1024), value: new Uint8Array(decoded), ...kvReadPut(value) };
+}
+
+// next_index is null only when every key was read; otherwise it names the first key not read and equals items.length.
+function kvReadMany(page, count) {
+  object(page, "response");
+  if (!Array.isArray(page.items) || page.items.length > count) throw new TypeError("items must be an array with at most one entry per key");
+  const next = page.next_index;
+  if (next === null ? page.items.length !== count : !(next >= 1 && next === page.items.length && next < count)) {
+    throw new TypeError("next_index does not match the items");
+  }
+  return { items: page.items.map((item) => item === null ? null : kvReadEntry(item)), next_index: next };
+}
+
+function kvReadBatchResult(op, result) {
+  object(result, "result");
+  if (op === "put") {
+    if (Object.hasOwn(result, "deleted")) throw new TypeError("a put must answer with a version");
+    return { version: kvReadDecimal(result.version, true) };
+  }
+  if (Object.hasOwn(result, "version") || typeof result.deleted !== "boolean") throw new TypeError("a delete must answer with deleted");
+  return { deleted: result.deleted };
+}
+
+function kvReadBatch(answer, operations) {
+  object(answer, "response");
+  if (!Array.isArray(answer.results) || answer.results.length !== operations.length) throw new TypeError("results must have one result per operation");
+  return answer.results.map((result, index) => kvReadBatchResult(operations[index].op, result));
 }
 
 function kvDecode(decode, value) {
@@ -696,6 +773,16 @@ export class Client extends Records {
       return { items: page.items.map(kvReadEntry),
         next_after: page.next_after === null ? null : kvText(page.next_after, "next_after", 1024) };
     }, result);
+  }
+  async kvGetMany({ collection, keys, signal }) {
+    const body = { keys: kvKeys(keys) };
+    const result = await kvRequest(this.#t, "POST", `/v1/collections/${collectionName(collection)}/kv/entries/get`, body, signal);
+    return kvDecode((page) => kvReadMany(page, body.keys.length), result);
+  }
+  async kvBatch({ collection, operations, signal }) {
+    const body = { operations: kvOperations(operations) };
+    const result = await kvRequest(this.#t, "POST", `/v1/collections/${collectionName(collection)}/kv/batch`, body, signal);
+    return kvDecode((answer) => kvReadBatch(answer, body.operations), result);
   }
 
   changes({ cursor, limit = 1000 } = {}) {

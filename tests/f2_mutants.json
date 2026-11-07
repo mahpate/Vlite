@@ -1,0 +1,578 @@
+[
+ {
+  "id": "kvb/B01-put-slot-not-taken",
+  "desc": "A put does not mark its slot Taken, so a later new key of the same window takes the same slot. Killed by kv::batch_tests::a_put_cannot_take_a_slot_an_earlier_put_of_the_batch_took.",
+  "file": "src/kv/batch.rs",
+  "old": "                pending.insert(slot, Slot::Taken);\n",
+  "new": "                let _ = slot;\n",
+  "cmd": "cargo test --locked --offline --features server,mcp,tools --lib kv::batch_tests"
+ },
+ {
+  "id": "kvb/B02-delete-slot-not-freed",
+  "desc": "A delete does not mark its slot Freed, so a later put of the batch cannot reuse it. Killed by kv::batch_tests::a_put_takes_the_slot_an_earlier_delete_of_the_batch_freed.",
+  "file": "src/kv/batch.rs",
+  "old": "                pending.insert(found.slot, Slot::Freed);\n",
+  "new": "                let _ = found.slot;\n",
+  "cmd": "cargo test --locked --offline --features server,mcp,tools --lib kv::batch_tests"
+ },
+ {
+  "id": "kvb/B03-put-condition-unchecked",
+  "desc": "A put's expected condition is never checked. Killed by kv::batch_tests::a_failed_condition_reports_the_current_version_and_writes_nothing.",
+  "file": "src/kv/batch.rs",
+  "old": "options.expected.check(probe.live_version())?;",
+  "new": "let _ = options.expected;",
+  "cmd": "cargo test --locked --offline --features server,mcp,tools --lib kv::batch_tests"
+ },
+ {
+  "id": "kvb/B04-delete-condition-unchecked",
+  "desc": "A delete's expected condition is never checked. Killed by kv::batch_tests::a_failed_condition_reports_the_current_version_and_writes_nothing.",
+  "file": "src/kv/batch.rs",
+  "old": "                expected.check(probe.live_version())?;",
+  "new": "                let _ = expected;",
+  "cmd": "cargo test --locked --offline --features server,mcp,tools --lib kv::batch_tests"
+ },
+ {
+  "id": "kvb/B05-attached-delete-allowed",
+  "desc": "A batch deletes a record a graph node is attached to. Killed by tests/kv_batch.rs a_graph_attached_record_is_not_deleted_by_a_batch.",
+  "file": "src/kv/batch.rs",
+  "old": "if db.is_attached(collection, found.slot) {",
+  "new": "if false && db.is_attached(collection, found.slot) {",
+  "cmd": "cargo test --locked --offline --features server,mcp,tools --test kv_batch"
+ },
+ {
+  "id": "kvb/B06-due-leftover-reported-deleted",
+  "desc": "The delete of an expired leftover reports deleted: true. Killed by kv::batch_tests::a_delete_of_an_expired_leftover_removes_the_record_and_reports_false.",
+  "file": "src/kv/batch.rs",
+  "old": "outcomes.push(Planned::Deleted(!found.expired));",
+  "new": "outcomes.push(Planned::Deleted(true));",
+  "cmd": "cargo test --locked --offline --features server,mcp,tools --lib kv::batch_tests"
+ },
+ {
+  "id": "kvb/B07-operation-count-bound-exclusive",
+  "desc": "A batch of exactly 1,000 operations is refused. Killed by kv::batch_tests::the_operation_and_value_byte_limits_are_exact.",
+  "file": "src/kv/batch.rs",
+  "old": "if operations.len() > MAX_KV_BATCH_OPERATIONS {",
+  "new": "if operations.len() >= MAX_KV_BATCH_OPERATIONS {",
+  "cmd": "cargo test --locked --offline --features server,mcp,tools --lib kv::batch_tests"
+ },
+ {
+  "id": "kvb/B08-value-total-bound-exclusive",
+  "desc": "A batch whose values total exactly 4,194,304 bytes is refused. Killed by kv::batch_tests::the_operation_and_value_byte_limits_are_exact.",
+  "file": "src/kv/batch.rs",
+  "old": "if value_bytes > MAX_KV_BATCH_VALUE_BYTES {",
+  "new": "if value_bytes >= MAX_KV_BATCH_VALUE_BYTES {",
+  "cmd": "cargo test --locked --offline --features server,mcp,tools --lib kv::batch_tests"
+ },
+ {
+  "id": "kvb/B09-single-value-bound-exclusive",
+  "desc": "A batch put of exactly the largest single value is refused. Killed by kv::batch_tests::keys_and_values_keep_the_bounds_of_the_single_operations.",
+  "file": "src/kv/batch.rs",
+  "old": "if value.len() > MAX_KV_VALUE_BYTES {",
+  "new": "if value.len() >= MAX_KV_VALUE_BYTES {",
+  "cmd": "cargo test --locked --offline --features server,mcp,tools --lib kv::batch_tests"
+ },
+ {
+  "id": "kvb/B10-duplicate-key-accepted",
+  "desc": "A key named twice in one batch is accepted. Killed by kv::batch_tests::a_key_is_named_once_per_batch_whatever_the_operations.",
+  "file": "src/kv/batch.rs",
+  "old": "if !named.insert((namespace, key)) {",
+  "new": "if !named.insert((namespace, key)) && false {",
+  "cmd": "cargo test --locked --offline --features server,mcp,tools --lib kv::batch_tests"
+ },
+ {
+  "id": "kvb/B11-batch-put-expiry-accepted",
+  "desc": "A batch put with a deadline is accepted and the deadline dropped. Killed by kv::batch_tests::a_batch_put_with_a_deadline_is_refused_unwritten.",
+  "file": "src/kv/batch.rs",
+  "old": "if options.expires_at_ms.is_some() {",
+  "new": "if false && options.expires_at_ms.is_some() {",
+  "cmd": "cargo test --locked --offline --features server,mcp,tools --lib kv::batch_tests"
+ },
+ {
+  "id": "kvb/B12-delete-key-unvalidated",
+  "desc": "The namespace and key of a delete are not validated. Killed by kv::batch_tests::keys_and_values_keep_the_bounds_of_the_single_operations.",
+  "file": "src/kv/batch.rs",
+  "old": "            KvOp::Delete { namespace, key, .. } => {\n                validate(namespace, key)?;\n                (namespace, key)\n            }",
+  "new": "            KvOp::Delete { namespace, key, .. } => (namespace, key),",
+  "cmd": "cargo test --locked --offline --features server,mcp,tools --lib kv::batch_tests"
+ },
+ {
+  "id": "kvb/B13-get-many-key-bound-exclusive",
+  "desc": "A get-many of exactly 1,000 keys is refused. Killed by kv::batch_tests::get_many_takes_exactly_the_documented_number_of_keys.",
+  "file": "src/kv/batch.rs",
+  "old": "if keys.len() > MAX_KV_GET_MANY_KEYS {",
+  "new": "if keys.len() >= MAX_KV_GET_MANY_KEYS {",
+  "cmd": "cargo test --locked --offline --features server,mcp,tools --lib kv::batch_tests"
+ },
+ {
+  "id": "kvb/B14-get-many-shows-due-entries",
+  "desc": "A get-many returns an entry whose deadline is due. Killed by kv::batch_tests::get_many_equals_one_get_per_key_in_the_order_given.",
+  "file": "src/kv/batch.rs",
+  "old": "            .found\n            .filter(|found| !found.expired);",
+  "new": "            .found;",
+  "cmd": "cargo test --locked --offline --features server,mcp,tools --lib kv::batch_tests"
+ },
+ {
+  "id": "kvb/B15-get-many-ignores-visitor-break",
+  "desc": "A get-many goes on reading after its visitor stops it. Killed by kv::batch_tests::visit_many_lends_entries_in_order_and_stops_when_the_visitor_breaks.",
+  "file": "src/kv/batch.rs",
+  "old": "        if visitor(index, entry).is_break() {\n            break;\n        }",
+  "new": "        let _ = visitor(index, entry);",
+  "cmd": "cargo test --locked --offline --features server,mcp,tools --lib kv::batch_tests"
+ },
+ {
+  "id": "kvb/B16-get-many-has-next-off-by-one",
+  "desc": "The last key of a get-many reports a key after it. Killed by kv::batch_tests::visit_many_lends_entries_in_order_and_stops_when_the_visitor_breaks.",
+  "file": "src/kv/batch.rs",
+  "old": "has_next: index + 1 < keys.len(),",
+  "new": "has_next: index < keys.len(),",
+  "cmd": "cargo test --locked --offline --features server,mcp,tools --lib kv::batch_tests"
+ },
+ {
+  "id": "kvb/B17-get-many-keys-unvalidated",
+  "desc": "The keys of a get-many are not validated before the first is read. Killed by kv::batch_tests::get_many_checks_every_key_before_it_reads_one.",
+  "file": "src/kv/batch.rs",
+  "old": "    for &(namespace, key) in keys {\n        validate(namespace, key)?;\n    }\n",
+  "new": "",
+  "cmd": "cargo test --locked --offline --features server,mcp,tools --lib kv::batch_tests"
+ },
+ {
+  "id": "kvb/B18-static-check-ignored",
+  "desc": "The checks over the whole batch run but their error is dropped. Killed by kv::batch_tests::the_whole_batch_is_checked_before_any_operation_runs.",
+  "file": "src/kv/batch.rs",
+  "old": "    check(operations)?;\n",
+  "new": "    let _ = check(operations);\n",
+  "cmd": "cargo test --locked --offline --features server,mcp,tools --lib kv::batch_tests"
+ },
+ {
+  "id": "kvb/P01-taken-slot-probed",
+  "desc": "The probe does not skip a slot an earlier put of the batch took. Killed by kv::batch_tests::a_key_does_not_find_its_expired_leftover_in_a_slot_an_earlier_put_reused.",
+  "file": "src/kv.rs",
+  "old": "            Some(Slot::Taken) => continue,",
+  "new": "            Some(Slot::Taken) => {}",
+  "cmd": "cargo test --locked --offline --features server,mcp,tools --lib kv::batch_tests"
+ },
+ {
+  "id": "kvb/P02-freed-slot-not-offered",
+  "desc": "The probe does not offer a slot an earlier delete of the batch freed. Killed by kv::batch_tests::a_put_takes_the_slot_an_earlier_delete_of_the_batch_freed.",
+  "file": "src/kv.rs",
+  "old": "            Some(Slot::Freed) => {\n                free.get_or_insert((slot, None));\n                continue;\n            }",
+  "new": "            Some(Slot::Freed) => {\n                continue;\n            }",
+  "cmd": "cargo test --locked --offline --features server,mcp,tools --lib kv::batch_tests"
+ },
+ {
+  "id": "kvb/K02-put-version-is-the-previous-sequence",
+  "desc": "The puts of a batch report the sequence before the commit. Killed by kv::batch_tests::a_batch_is_one_commit_and_its_puts_share_one_version.",
+  "file": "src/kv.rs",
+  "old": "        let version = self.db.sequence;",
+  "new": "        let version = self.db.sequence.saturating_sub(1);",
+  "cmd": "cargo test --locked --offline --features server,mcp,tools --lib kv::batch_tests"
+ },
+ {
+  "id": "kvb/K03-get-many-drops-the-value",
+  "desc": "get_many returns every entry with an empty value. Killed by kv::batch_tests::get_many_equals_one_get_per_key_in_the_order_given.",
+  "file": "src/kv.rs",
+  "old": "entries.push(entry.map(|entry| KvEntry {\n                key: entry.key.to_owned(),\n                value: entry.value.to_vec(),",
+  "new": "entries.push(entry.map(|entry| KvEntry {\n                key: entry.key.to_owned(),\n                value: Vec::new(),",
+  "cmd": "cargo test --locked --offline --features server,mcp,tools --lib kv::batch_tests"
+ },
+ {
+  "id": "kvb/R01-rest-operation-count-exclusive",
+  "desc": "REST refuses a batch of exactly 1,000 operations. Killed by server_kv_batch::the_request_bounds_are_exact.",
+  "file": "src/server/kv.rs",
+  "old": "    if count > MAX_KV_BATCH_OPERATIONS {",
+  "new": "    if count >= MAX_KV_BATCH_OPERATIONS {",
+  "cmd": "cargo test --locked --offline --features server --test server_kv_batch"
+ },
+ {
+  "id": "kvb/R02-rest-key-count-exclusive",
+  "desc": "REST refuses a get-many of exactly 1,000 keys. Killed by server_kv_batch::the_request_bounds_are_exact.",
+  "file": "src/server/kv.rs",
+  "old": "    if count > MAX_KV_GET_MANY_KEYS {",
+  "new": "    if count >= MAX_KV_GET_MANY_KEYS {",
+  "cmd": "cargo test --locked --offline --features server --test server_kv_batch"
+ },
+ {
+  "id": "kvb/R03-rest-value-total-exclusive",
+  "desc": "REST refuses a batch whose values total exactly 4,194,304 bytes. Killed by server_kv_batch::the_request_bounds_are_exact.",
+  "file": "src/server/kv.rs",
+  "old": "if value_bytes > MAX_KV_BATCH_VALUE_BYTES {",
+  "new": "if value_bytes >= MAX_KV_BATCH_VALUE_BYTES {",
+  "cmd": "cargo test --locked --offline --features server --test server_kv_batch"
+ },
+ {
+  "id": "kvb/R04-rest-duplicate-key-accepted",
+  "desc": "REST accepts a key named twice. Killed by server_kv_batch::the_whole_request_is_checked_before_any_operation_runs.",
+  "file": "src/server/kv.rs",
+  "old": "if let Some(first) = named.insert((namespace.as_str(), key.as_str()), index) {",
+  "new": "if let Some(first) = named.insert((namespace.as_str(), key.as_str()), index).filter(|_| false) {",
+  "cmd": "cargo test --locked --offline --features server --test server_kv_batch"
+ },
+ {
+  "id": "kvb/R05-rest-operation-index-off-by-one",
+  "desc": "An address error names the operation after the wrong one. Killed by server_kv_batch::the_whole_request_is_checked_before_any_operation_runs.",
+  "file": "src/server/kv.rs",
+  "old": "address(namespace, key).map_err(|error| at(\"operations\", index, error))?;",
+  "new": "address(namespace, key).map_err(|error| at(\"operations\", index + 1, error))?;",
+  "cmd": "cargo test --locked --offline --features server --test server_kv_batch"
+ },
+ {
+  "id": "kvb/R06-audit-counts-dropped",
+  "desc": "The kv_batch audit event carries no counts. Killed by server_kv_batch::a_batch_is_audited_by_its_counts_and_never_by_its_content.",
+  "file": "src/server/kv.rs",
+  "old": "counts: Some(counts),",
+  "new": "counts: None,",
+  "cmd": "cargo test --locked --offline --features server --test server_kv_batch"
+ },
+ {
+  "id": "kvb/R07-batch-quota-unchecked",
+  "desc": "A batch is not checked against the record quota. Killed by server_kv_batch::quota_is_judged_on_the_net_change_of_the_whole_batch.",
+  "file": "src/server/kv.rs",
+  "old": "                        enforce_quota(\n                            &quota_service,\n                            database,\n                            scope.role(),\n                            collection.id(),\n                            changes,\n                        )?;",
+  "new": "                        let _ = (&quota_service, database, changes);",
+  "cmd": "cargo test --locked --offline --features server --test server_kv_batch"
+ },
+ {
+  "id": "kvb/R08-batch-writes-a-read-only-database",
+  "desc": "A batch does not check that the database is writable. Killed by server_kv_batch::a_read_only_database_answers_get_many_and_refuses_a_batch.",
+  "file": "src/server/kv.rs",
+  "old": "            writable(db)?;\n            let now = crate::current_time_ms();\n            let operations = prepared.operations();",
+  "new": "            let now = crate::current_time_ms();\n            let operations = prepared.operations();",
+  "cmd": "cargo test --locked --offline --features server --test server_kv_batch"
+ },
+ {
+  "id": "kvb/R09-many-envelope-ignores-next-index",
+  "desc": "The get-many page measures its envelope without a next_index. Killed by server_kv_batch::a_get_many_response_is_inclusive_at_sixteen_mebibytes.",
+  "file": "src/server/kv.rs",
+  "old": "let next = (index + 1 < total).then_some(index + 1);",
+  "new": "let next: Option<usize> = None;",
+  "cmd": "cargo test --locked --offline --features server --test server_kv_batch"
+ },
+ {
+  "id": "kvb/R10-many-page-has-no-next-index",
+  "desc": "A cut get-many page does not say where to go on. Killed by server_kv_batch::get_many_pages_are_maximal_and_cover_every_key_once_in_order.",
+  "file": "src/server/kv.rs",
+  "old": "let next_index = page.full.then_some(page.items.len());",
+  "new": "let next_index: Option<usize> = None;",
+  "cmd": "cargo test --locked --offline --features server --test server_kv_batch"
+ },
+ {
+  "id": "kvb/R11-many-page-bound-exclusive",
+  "desc": "A get-many response of exactly 16 MiB is cut. Killed by server_kv_batch::a_get_many_response_is_inclusive_at_sixteen_mebibytes.",
+  "file": "src/server/kv.rs",
+  "old": "\"next_index\":next}))\n            .map_err(internal)?\n            .len();\n        if envelope + self.item_bytes + size + self.items.len() > PAGE_BYTES {",
+  "new": "\"next_index\":next}))\n            .map_err(internal)?\n            .len();\n        if envelope + self.item_bytes + size + self.items.len() >= PAGE_BYTES {",
+  "cmd": "cargo test --locked --offline --features server --test server_kv_batch"
+ },
+ {
+  "id": "kvb/R12-many-page-commas-uncounted",
+  "desc": "The commas between the items of a get-many are not counted. Killed by server_kv_batch::a_get_many_response_is_inclusive_at_sixteen_mebibytes.",
+  "file": "src/server/kv.rs",
+  "old": "\"next_index\":next}))\n            .map_err(internal)?\n            .len();\n        if envelope + self.item_bytes + size + self.items.len() > PAGE_BYTES {",
+  "new": "\"next_index\":next}))\n            .map_err(internal)?\n            .len();\n        if envelope + self.item_bytes + size > PAGE_BYTES {",
+  "cmd": "cargo test --locked --offline --features server --test server_kv_batch"
+ },
+ {
+  "id": "kvb/R13-many-page-null-has-no-bytes",
+  "desc": "An absent key of a get-many takes no bytes of the page. Killed by server_kv_batch::a_get_many_response_is_inclusive_at_sixteen_mebibytes.",
+  "file": "src/server/kv.rs",
+  "old": "            None => \"null\".len(),",
+  "new": "            None => 0,",
+  "cmd": "cargo test --locked --offline --features server --test server_kv_batch"
+ },
+ {
+  "id": "kvb/R14-many-page-reads-past-the-cut",
+  "desc": "A get-many goes on after the key that did not fit, so a later small item jumps the gap. Killed by server_kv_batch::get_many_pages_are_maximal_and_cover_every_key_once_in_order.",
+  "file": "src/server/kv.rs",
+  "old": "                        page.full = true;\n                        ControlFlow::Break(())",
+  "new": "                        page.full = true;\n                        ControlFlow::Continue(())",
+  "cmd": "cargo test --locked --offline --features server --test server_kv_batch"
+ },
+ {
+  "id": "kvb/S01-batch-needs-read",
+  "desc": "The batch route asks for the read scope. Killed by server_kv_batch::scopes_decide_who_may_read_or_batch.",
+  "file": "src/server.rs",
+  "old": "(\"POST\", \"/v1/collections/{collection}/kv/batch\") => Need::Op(Op::Write, Reach::Collection),",
+  "new": "(\"POST\", \"/v1/collections/{collection}/kv/batch\") => Need::Op(Op::Read, Reach::Collection),",
+  "cmd": "cargo test --locked --offline --features server --test server_kv_batch"
+ },
+ {
+  "id": "kvb/S02-get-many-needs-write",
+  "desc": "The get-many route asks for the write scope. Killed by server_kv_batch::scopes_decide_who_may_read_or_batch.",
+  "file": "src/server.rs",
+  "old": "(\"POST\", \"/v1/collections/{collection}/kv/entries/get\") => {\n            Need::Op(Op::Read, Reach::Collection)",
+  "new": "(\"POST\", \"/v1/collections/{collection}/kv/entries/get\") => {\n            Need::Op(Op::Write, Reach::Collection)",
+  "cmd": "cargo test --locked --offline --features server --test server_kv_batch"
+ },
+ {
+  "id": "kvb/S03-get-many-not-a-read-post",
+  "desc": "The read-only token cannot use the get-many POST. Killed by server_kv_batch::scopes_decide_who_may_read_or_batch.",
+  "file": "src/server.rs",
+  "old": "|| (method == Method::POST && route == \"/v1/collections/{collection}/kv/entries/get\")",
+  "new": "|| (method == Method::POST && route == \"/v1/collections/{collection}/kv/entries/get/never\")",
+  "cmd": "cargo test --locked --offline --features server --test server_kv_batch"
+ },
+ {
+  "id": "kvb/A01-capability-never-advertised",
+  "desc": "features.kv_batch is false on every file. Killed by server_kv_batch::capabilities_advertise_the_batch_routes_with_the_format.",
+  "file": "src/server/admin.rs",
+  "old": "(\"kv_batch\", s.format_version >= 5),",
+  "new": "(\"kv_batch\", false),",
+  "cmd": "cargo test --locked --offline --features server --test server_kv_batch"
+ },
+ {
+  "id": "kvb/G01-grpc-deleted-inverted",
+  "desc": "gRPC reports the opposite of a delete result. Killed by server_grpc_kv::grpc_batch_and_get_many_commit_and_read_like_rest.",
+  "file": "src/server/grpc/kv.rs",
+  "old": "proto::kv_batch_result::Kind::Deleted(deleted)",
+  "new": "proto::kv_batch_result::Kind::Deleted(!deleted)",
+  "cmd": "cargo test --locked --offline --features grpc --test server_grpc_kv"
+ },
+ {
+  "id": "kvb/G02-grpc-next-index-dropped",
+  "desc": "gRPC never reports the key a cut get-many goes on at. Killed by server_grpc_kv::grpc_get_many_stops_at_the_page_bound_where_rest_does.",
+  "file": "src/server/grpc/kv.rs",
+  "old": "next_index: value.next_index,",
+  "new": "next_index: None,",
+  "cmd": "cargo test --locked --offline --features grpc --test server_grpc_kv"
+ },
+ {
+  "id": "kvb/G03-grpc-batch-needs-read",
+  "desc": "WriteKvBatch asks for the read scope. Killed by server_grpc_kv::grpc_batch_and_get_many_scopes_quota_and_audit.",
+  "file": "src/server/grpc/kv.rs",
+  "old": "\"grpc:/vlite.v1.Kv/WriteKvBatch\",\n            request,\n            Need::Op(Op::Write, Reach::Collection),",
+  "new": "\"grpc:/vlite.v1.Kv/WriteKvBatch\",\n            request,\n            Need::Op(Op::Read, Reach::Collection),",
+  "cmd": "cargo test --locked --offline --features grpc --test server_grpc_kv"
+ },
+ {
+  "id": "kvb/G04-grpc-get-many-needs-write",
+  "desc": "GetKvEntries asks for the write scope. Killed by server_grpc_kv::grpc_batch_and_get_many_scopes_quota_and_audit.",
+  "file": "src/server/grpc/kv.rs",
+  "old": "\"grpc:/vlite.v1.Kv/GetKvEntries\",\n            request,\n            Need::Op(Op::Read, Reach::Collection),",
+  "new": "\"grpc:/vlite.v1.Kv/GetKvEntries\",\n            request,\n            Need::Op(Op::Write, Reach::Collection),",
+  "cmd": "cargo test --locked --offline --features grpc --test server_grpc_kv"
+ },
+ {
+  "id": "kvb/G05-grpc-get-many-refused-to-read-only",
+  "desc": "The read-only token cannot call GetKvEntries. Killed by server_grpc_kv::grpc_kv_read_only_handle or grpc_batch_and_get_many_scopes_quota_and_audit.",
+  "file": "src/server/grpc/kv.rs",
+  "old": "            true,\n            false,\n            |service, role, _, request| async move {\n                let proto::KvGetManyRequest {\n",
+  "new": "            false,\n            false,\n            |service, role, _, request| async move {\n                let proto::KvGetManyRequest {\n",
+  "cmd": "cargo test --locked --offline --features grpc --test server_grpc_kv"
+ },
+ {
+  "id": "kvb/M01-mcp-batch-allowed-read-only",
+  "desc": "A read-only MCP or shell session runs a batch. Killed by kv_tools::a_read_only_server_serves_get_many_and_refuses_batch.",
+  "file": "src/bin/tool_support/kv_mcp.rs",
+  "old": "if read_only && matches!(name, PUT | DELETE | BATCH) {",
+  "new": "if read_only && matches!(name, PUT | DELETE) {",
+  "cmd": "cargo test --locked --offline --features mcp,tools --test kv_tools -- a_read_only_server_serves_get_many_and_refuses_batch"
+ },
+ {
+  "id": "kvb/M02-mcp-batch-listed-read-only",
+  "desc": "A read-only MCP session lists vlite_kv_batch. Killed by kv_tools::tool_listing_offers_get_many_always_and_batch_when_writable.",
+  "file": "src/bin/tool_support/kv_mcp.rs",
+  "old": "    if !read_only {\n        tools.push(json!({\"name\":BATCH,",
+  "new": "    if true {\n        tools.push(json!({\"name\":BATCH,",
+  "cmd": "cargo test --locked --offline --features mcp,tools --test kv_tools -- tool_listing_offers_get_many_always_and_batch_when_writable"
+ },
+ {
+  "id": "kvb/M03-mcp-duplicate-key-accepted",
+  "desc": "The MCP batch check accepts a key named twice. Killed by kv_mcp::tests::a_batch_is_checked_as_a_whole_before_the_store_is_touched.",
+  "file": "src/bin/tool_support/kv_mcp.rs",
+  "old": "if let Some(first) = named.insert((namespace.as_str(), key.as_str()), index) {",
+  "new": "if let Some(first) = named.insert((namespace.as_str(), key.as_str()), index).filter(|_| false) {",
+  "cmd": "cargo test --locked --offline --features mcp,tools --bin vlite-mcp kv_mcp::tests::"
+ },
+ {
+  "id": "kvb/M04-mcp-operation-count-exclusive",
+  "desc": "The MCP batch refuses exactly 1,000 operations. Killed by kv_mcp::tests::a_batch_is_checked_as_a_whole_before_the_store_is_touched.",
+  "file": "src/bin/tool_support/kv_mcp.rs",
+  "old": "if request.operations.len() > MAX_KV_BATCH_OPERATIONS {",
+  "new": "if request.operations.len() >= MAX_KV_BATCH_OPERATIONS {",
+  "cmd": "cargo test --locked --offline --features mcp,tools --bin vlite-mcp kv_mcp::tests::"
+ },
+ {
+  "id": "kvb/M05-mcp-key-count-exclusive",
+  "desc": "The MCP get-many refuses exactly 1,000 keys. Killed by kv_mcp::tests::get_many_checks_its_keys_before_reading_and_the_gates_follow_the_tool.",
+  "file": "src/bin/tool_support/kv_mcp.rs",
+  "old": "if request.keys.len() > MAX_KV_GET_MANY_KEYS {",
+  "new": "if request.keys.len() >= MAX_KV_GET_MANY_KEYS {",
+  "cmd": "cargo test --locked --offline --features mcp,tools --bin vlite-mcp kv_mcp::tests::"
+ },
+ {
+  "id": "kvb/M06-mcp-value-total-exclusive",
+  "desc": "The MCP batch refuses values totaling exactly 4,194,304 bytes. Killed by kv_mcp::tests::a_batch_is_checked_as_a_whole_before_the_store_is_touched.",
+  "file": "src/bin/tool_support/kv_mcp.rs",
+  "old": "if value_bytes > MAX_KV_BATCH_VALUE_BYTES {",
+  "new": "if value_bytes >= MAX_KV_BATCH_VALUE_BYTES {",
+  "cmd": "cargo test --locked --offline --features mcp,tools --bin vlite-mcp kv_mcp::tests::"
+ },
+ {
+  "id": "kvb/M07-mcp-many-page-bound-exclusive",
+  "desc": "The MCP get-many cuts a response of exactly 16 MiB. Killed by kv_mcp::tests::many_page_exact_encoded_boundary.",
+  "file": "src/bin/tool_support/kv_mcp.rs",
+  "old": "if envelope + item_bytes + bytes + items.len() > PAGE_BYTES {",
+  "new": "if envelope + item_bytes + bytes + items.len() >= PAGE_BYTES {",
+  "cmd": "cargo test --locked --offline --features mcp,tools --bin vlite-mcp kv_mcp::tests::"
+ },
+ {
+  "id": "kvb/M08-mcp-many-page-commas-uncounted",
+  "desc": "The MCP get-many does not count the commas between items. Killed by kv_mcp::tests::many_page_exact_encoded_boundary.",
+  "file": "src/bin/tool_support/kv_mcp.rs",
+  "old": "if envelope + item_bytes + bytes + items.len() > PAGE_BYTES {",
+  "new": "if envelope + item_bytes + bytes > PAGE_BYTES {",
+  "cmd": "cargo test --locked --offline --features mcp,tools --bin vlite-mcp kv_mcp::tests::"
+ },
+ {
+  "id": "kvb/M09-mcp-many-page-has-no-next-index",
+  "desc": "A cut MCP get-many does not say where to go on. Killed by kv_mcp::tests::a_many_page_reads_only_what_it_emits.",
+  "file": "src/bin/tool_support/kv_mcp.rs",
+  "old": "let next_index = full.then_some(items.len());",
+  "new": "let next_index: Option<usize> = None;",
+  "cmd": "cargo test --locked --offline --features mcp,tools --bin vlite-mcp kv_mcp::tests::"
+ },
+ {
+  "id": "kvb/M10-mcp-many-page-null-has-no-bytes",
+  "desc": "An absent key takes no bytes of the MCP get-many page. Killed by kv_mcp::tests::many_page_exact_encoded_boundary.",
+  "file": "src/bin/tool_support/kv_mcp.rs",
+  "old": "            None => \"null\".len(),",
+  "new": "            None => 0,",
+  "cmd": "cargo test --locked --offline --features mcp,tools --bin vlite-mcp kv_mcp::tests::"
+ },
+ {
+  "id": "kvb/M11-mcp-deleted-inverted",
+  "desc": "The MCP batch reports the opposite of a delete result. Killed by kv_tools::batch_commits_with_one_version_and_get_many_reads_it_back.",
+  "file": "src/bin/tool_support/kv_mcp.rs",
+  "old": "KvOutcome::Deleted(deleted) => Ok(json!({\"deleted\":deleted})),",
+  "new": "KvOutcome::Deleted(deleted) => Ok(json!({\"deleted\":!deleted})),",
+  "cmd": "cargo test --locked --offline --features mcp,tools --test kv_tools -- batch_commits_with_one_version_and_get_many_reads_it_back"
+ },
+ {
+  "id": "kvb/M12-mcp-oversized-first-key-not-an-error",
+  "desc": "A first key that cannot fit a page is not an error. Killed by kv_mcp::tests::a_first_key_larger_than_a_page_is_an_internal_error.",
+  "file": "src/bin/tool_support/kv_mcp.rs",
+  "old": "if full && items.is_empty() {",
+  "new": "if false && full && items.is_empty() {",
+  "cmd": "cargo test --locked --offline --features mcp,tools --bin vlite-mcp kv_mcp::tests::"
+ },
+ {
+  "id": "kvb/R15-batch-quota-judged-without-a-put",
+  "desc": "A batch that writes no record is judged on the record quota. Killed by server_kv_batch::a_batch_that_writes_no_record_is_never_refused_for_quota.",
+  "file": "src/server/kv.rs",
+  "old": "if changes.iter().any(|&(_, present)| present) {",
+  "new": "if true {",
+  "cmd": "cargo test --locked --offline --features server --test server_kv_batch"
+ },
+ {
+  "id": "kvb/R16-batch-quota-skipped-when-it-writes",
+  "desc": "A batch that writes a record is not judged on the record quota. Killed by server_kv_batch::quota_is_judged_on_the_net_change_of_the_whole_batch.",
+  "file": "src/server/kv.rs",
+  "old": "if changes.iter().any(|&(_, present)| present) {",
+  "new": "if changes.iter().all(|&(_, present)| !present) {",
+  "cmd": "cargo test --locked --offline --features server --test server_kv_batch"
+ },
+ {
+  "id": "kvb/R17-batch-values-not-charged-to-group-commit",
+  "desc": "The values of a batch are not counted in what it retains, so the group-commit byte budget never sees them. Killed by server_kv_batch::a_batch_is_charged_to_the_group_commit_budget_for_what_it_holds.",
+  "file": "src/server/kv.rs",
+  "old": ".saturating_add(value.as_ref().map_or(0, Vec::capacity))",
+  "new": ".saturating_add(0)",
+  "cmd": "cargo test --locked --offline --features server --test server_kv_batch"
+ },
+ {
+  "id": "kvb/G06-grpc-missing-kind-unnamed",
+  "desc": "A batch operation without a kind is reported without its position. Killed by server_grpc_kv::grpc_batch_counts_its_operations_before_it_converts_any_and_names_a_missing_kind.",
+  "file": "src/server/grpc/kv.rs",
+  "old": "rest::at(\"operations\", index, error)",
+  "new": "rest::at(\"operations\", 0 * index, error)",
+  "cmd": "cargo test --locked --offline --features grpc --test server_grpc_kv -- grpc_batch_counts_its_operations_before_it_converts_any_and_names_a_missing_kind"
+ },
+ {
+  "id": "kvb/G07-grpc-count-unchecked-before-conversion",
+  "desc": "The operation count of a WriteKvBatch message is not checked before its operations are converted. Killed by server_grpc_kv::grpc_batch_counts_its_operations_before_it_converts_any_and_names_a_missing_kind.",
+  "file": "src/server/grpc/kv.rs",
+  "old": "                rest::check_operation_count(operations.len())?;\n",
+  "new": "",
+  "cmd": "cargo test --locked --offline --features grpc --test server_grpc_kv -- grpc_batch_counts_its_operations_before_it_converts_any_and_names_a_missing_kind"
+ },
+ {
+  "id": "kvb/B19-batch-state-checked-before-the-request",
+  "desc": "The state of the handle is checked before the request of a batch. Killed by kv::batch_tests::a_request_error_comes_before_the_state_of_the_handle.",
+  "file": "src/kv/batch.rs",
+  "old": "    check(operations)?;\n    db.ensure_resident_in(collection)?;\n",
+  "new": "    db.ensure_resident_in(collection)?;\n    check(operations)?;\n",
+  "cmd": "cargo test --locked --offline --features server,mcp,tools --lib kv::batch_tests"
+ },
+ {
+  "id": "kvb/B20-get-many-state-checked-before-the-keys",
+  "desc": "The state of the handle is checked before the keys of a get-many. Killed by kv::batch_tests::a_request_error_comes_before_the_state_of_the_handle.",
+  "file": "src/kv/batch.rs",
+  "old": "    if keys.len() > MAX_KV_GET_MANY_KEYS {\n",
+  "new": "    db.ensure_resident_in(collection)?;\n    if keys.len() > MAX_KV_GET_MANY_KEYS {\n",
+  "cmd": "cargo test --locked --offline --features server,mcp,tools --lib kv::batch_tests"
+ },
+ {
+  "id": "kvb/B21-get-many-state-never-checked",
+  "desc": "A get-many never checks the state of the handle. Killed by kv::batch_tests::a_request_error_comes_before_the_state_of_the_handle.",
+  "file": "src/kv/batch.rs",
+  "old": "    db.ensure_resident_in(collection)?;\n    let state = db.state(collection);",
+  "new": "    let state = db.state(collection);",
+  "cmd": "cargo test --locked --offline --features server,mcp,tools --lib kv::batch_tests"
+ },
+ {
+  "id": "kvb/B22-batch-state-never-checked",
+  "desc": "A batch never checks the state of the handle. Killed by kv::batch_tests::a_request_error_comes_before_the_state_of_the_handle.",
+  "file": "src/kv/batch.rs",
+  "old": "    check(operations)?;\n    db.ensure_resident_in(collection)?;\n",
+  "new": "    check(operations)?;\n",
+  "cmd": "cargo test --locked --offline --features server,mcp,tools --lib kv::batch_tests"
+ },
+ {
+  "id": "kvb/K04-gate-runs-after-the-commit",
+  "desc": "The gate judges the batch after it is committed. Killed by kv::batch_tests::a_gate_sees_the_batch_before_it_is_written_and_can_refuse_it.",
+  "file": "src/kv.rs",
+  "old": "        gate(self.db, &changes).map_err(Gated::Refused)?;\n        self.commit(plan).map_err(Gated::Batch)",
+  "new": "        let outcomes = self.commit(plan).map_err(Gated::Batch)?;\n        gate(self.db, &changes).map_err(Gated::Refused)?;\n        Ok(outcomes)",
+  "cmd": "cargo test --locked --offline --features server,mcp,tools --lib kv::batch_tests"
+ },
+ {
+  "id": "kvb/K05-refusing-gate-ignored",
+  "desc": "A batch that the gate refuses is committed anyway. Killed by kv::batch_tests::a_gate_sees_the_batch_before_it_is_written_and_can_refuse_it.",
+  "file": "src/kv.rs",
+  "old": "gate(self.db, &changes).map_err(Gated::Refused)?;",
+  "new": "let _ = gate(self.db, &changes);",
+  "cmd": "cargo test --locked --offline --features server,mcp,tools --lib kv::batch_tests"
+ },
+ {
+  "id": "kvb/M13-mcp-many-envelope-ignores-next-index",
+  "desc": "The MCP get-many page measures its envelope without a next_index. Killed by kv_mcp::tests::many_page_exact_encoded_boundary.",
+  "file": "src/bin/tool_support/kv_mcp.rs",
+  "old": "let next = (index + 1 < total).then_some(index + 1);",
+  "new": "let next: Option<usize> = (index + 1 < total).then_some(index + 1).and(None);",
+  "cmd": "cargo test --locked --offline --features mcp,tools --bin vlite-mcp kv_mcp::tests::"
+ },
+ {
+  "id": "kvb/M14-mcp-value-text-bound-miscomputed",
+  "desc": "The longest base64 text of a value is one block too long, so the tool schemas advertise a bound that the decoded-size check alone enforces. Killed by graph_surface_parity::reg008_mcp_tools_list_and_outputs_match_baseline.",
+  "file": "src/bin/tool_support/kv_mcp.rs",
+  "old": "const MAX_VALUE_BASE64: usize = MAX_KV_VALUE_BYTES.div_ceil(3) * 4;",
+  "new": "const MAX_VALUE_BASE64: usize = MAX_KV_VALUE_BYTES.div_ceil(3) * 4 + 4;",
+  "cmd": "cargo test --locked --offline --features server,mcp,tools --test graph_surface_parity reg008_mcp_tools_list_and_outputs_match_baseline"
+ },
+ {
+  "id": "kvb/R18-batch-operation-charge-inflated",
+  "desc": "Each operation of a batch is charged a hundred times its fixed amount, so a batch at every limit would pass 8 MiB of group-commit budget. Killed by server::kv::tests::a_batch_at_every_limit_is_charged_less_than_eight_mebibytes.",
+  "file": "src/server/kv.rs",
+  "old": ".saturating_add(64)",
+  "new": ".saturating_add(6400)",
+  "cmd": "cargo test --locked --offline --features server --lib server::kv::tests::a_batch_at_every_limit_is_charged_less_than_eight_mebibytes"
+ },
+ {
+  "id": "kvb/B23-absent-delete-writes-a-frame",
+  "desc": "The delete of a key with no record plans a delete of some record, so a batch that changes nothing commits a frame. Killed by tests/kv_batch.rs a_batch_that_changes_no_record_writes_no_frame.",
+  "file": "src/kv/batch.rs",
+  "old": "                    outcomes.push(Planned::Deleted(false));\n                    continue;",
+  "new": "                    outcomes.push(Planned::Deleted(false));\n                    mutations.push(Mutation::Delete { id: 0 });\n                    continue;",
+  "cmd": "cargo test --locked --offline --features server,mcp,tools --test kv_batch"
+ }
+]

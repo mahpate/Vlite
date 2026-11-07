@@ -268,6 +268,21 @@ let token = kv.put("pool", "claim/42", b"worker-a", KvPut {
 kv.delete("pool", "claim/42", Expected::Revision(token))?;
 ```
 
+```rust
+use vlite::kv::{KvOp, KvOutcome};
+let outcomes = kv.write_batch(&[
+    KvOp::Put {
+        namespace: "pool",
+        key: "claim/43",
+        value: b"worker-b",
+        options: KvPut { expected: Expected::Absent, expires_at_ms: None },
+    },
+    KvOp::Delete { namespace: "pool", key: "claim/41", expected: Expected::Any },
+])?;                                   // all or nothing; one KvOutcome each
+assert!(matches!(outcomes[0], KvOutcome::Put { .. }));
+let entries = kv.view().get_many(&[("pool", "claim/43"), ("pool", "claim/41")])?;
+```
+
 - **Versions** are commit sequences. Use them for compare-and-set
   (`Expected::Revision`). They are revisions within one file lineage, not
   durable lease-fencing tokens: they change after compaction, upgrade or
@@ -286,8 +301,43 @@ kv.delete("pool", "claim/42", Expected::Revision(token))?;
   which says whether the listing continues) and stops when the callback returns
   `ControlFlow::Break(())`, so a caller can build a page of a fixed byte size
   without copying the entries it leaves out.
+- **Batch.** `kv.write_batch(&[KvOp])` commits puts and deletes of any
+  namespaces of the collection, all or nothing, as one frame: a crash leaves
+  all of it or none of it, and a reader sees the state before or after. It
+  behaves as if the operations ran one at a time, in order, on one clock, and
+  returns one `KvOutcome` for each: `Put { version }` or `Deleted(bool)`. All
+  puts of a batch get the same version, and each is a valid
+  `Expected::Revision` for its key. Each `(namespace, key)` may appear once.
+  The whole request is checked before any state is read, once `kv_store` has
+  opened the collection (it creates a missing one, and refuses a collection of
+  another kind or a handle that has failed).
+  The first operation that cannot run fails the whole batch with the error of
+  its single call (`RevisionMismatch`, `KvSlotsExhausted`,
+  `GraphAttachedRecord`) and nothing is written. A batch that changes no record
+  writes nothing, and an empty batch is a no-op. On a format 1 file a batch
+  that changes a record fails with `BatchRequiresUpgrade`, although single puts
+  work there. After `CommitIndeterminate` the batch is written entirely or not
+  at all, and which is unknown: read the keys back with `get_many` before you
+  decide anything.
+- **No deadline in a batch.** A `KvOp::Put` whose `options.expires_at_ms` is
+  set is refused with `InvalidKvKey`. Like a put without a deadline, a batch
+  put clears the deadline of the entry it replaces. Use `put` for an entry that
+  needs a deadline.
+- **Multi-get** with `view().get_many(&[(namespace, key)])` returns one
+  `Option<KvEntry>` for each key, in order: `None` for a key that is absent or
+  expired. One clock and one view of the store serve the call, so its keys
+  agree with each other; nothing is consistent between two calls.
+  `view().visit_many_at(keys, now_ms, visitor)` lends each entry to a
+  callback as a `KvRef` instead of copying it (`has_next` says that a later
+  requested key follows) and stops when the callback returns
+  `ControlFlow::Break(())`. `write_batch_at` and `get_many_at` take the clock
+  like `put_at`.
 - **Limits:** namespaces up to 255 bytes, keys up to 1,024 bytes, values just
-  under 1 MiB.
+  under 1 MiB. A batch takes at most `MAX_KV_BATCH_OPERATIONS` (1,000)
+  operations and `MAX_KV_BATCH_VALUE_BYTES` (4,194,304) value bytes in all, and
+  `get_many` at most `MAX_KV_GET_MANY_KEYS` (1,000) keys; over any of them is
+  `InvalidKvKey`, and nothing is written or read. `KvOp` and `KvOutcome` are
+  `#[non_exhaustive]`.
 - **Hash collisions:** keys hash to 16 consecutive record IDs. If all 16 hold
   other keys or other records, `KvSlotsExhausted` is returned (REST and gRPC:
   409 / `FAILED_PRECONDITION` `kv_slots_exhausted`, counted by the
@@ -296,11 +346,12 @@ kv.delete("pool", "claim/42", Expected::Revision(token))?;
   who can write the collection can place ordinary records at those IDs, give
   write access to a key-value collection only to principals you trust with its
   keys and keep it separate from other data ([SECURITY](SECURITY.md#key-value-permissions)).
-- REST and gRPC provide ordinary get, put/CAS, delete and prefix listing on
-  existing one-dimension collections; see [REST KV](API.md#key-value-entries) for wire
-  bounds and pagination. Unlike the Rust handle, neither transport creates a
-  collection. gRPC uses `vlite.v1.Kv` and raw byte values with the same page
-  boundary. The Python, JavaScript and .NET clients call the REST routes; the
+- REST and gRPC provide ordinary get, put/CAS, delete, prefix listing, an atomic
+  batch and a multi-get on existing one-dimension collections; see
+  [REST KV](API.md#key-value-entries) for wire bounds and pagination. Unlike the
+  Rust handle, neither transport creates a collection. gRPC uses `vlite.v1.Kv`
+  and raw byte values with the same page boundary. The Python, JavaScript,
+  .NET and Go clients call the REST routes; the
   [shell](TOOLS.md#local-key-value-shell-commands) and
   [MCP](MCP.md#local-key-value-tools) tools work on local files only. Leases
   are not provided.

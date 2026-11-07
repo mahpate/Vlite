@@ -385,7 +385,9 @@ fn memory_local_mode_keeps_the_baseline_inventory() {
         });
         let output = run_command(command, vec![list(), call(&goldens()["cases"][0])]);
         let tools = output[0]["result"]["tools"].as_array().unwrap();
-        assert_eq!(tools.len(), if writable { 13 } else { 9 });
+        // Seven core read tools and three KV read tools; a writable server adds
+        // two core and three KV write tools.
+        assert_eq!(tools.len(), if writable { 15 } else { 10 });
         assert!(
             tools
                 .iter()

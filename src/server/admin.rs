@@ -49,6 +49,17 @@ pub(super) struct AdminState {
     pub users: Option<Arc<super::users::Accounts>>,
 }
 impl AdminState {
+    /// Whether no administration token is configured. A transport that
+    /// authenticates from this state then serves every caller as the
+    /// administrator (the development mode).
+    pub fn is_open(&self) -> bool {
+        self.auth
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .admin
+            .is_none()
+    }
+
     pub fn record(&self, event: Value) {
         let mut audit = match self.audit.lock() {
             Ok(audit) => audit,
@@ -224,14 +235,28 @@ impl ServerOptions {
     }
 }
 
+/// A configured REST router publishes its tokens and its memory reservations
+/// for the gRPC router that is built after it to adopt, so every REST router is
+/// built first and the gRPC router last; `docs/GRPC.md` lists what it refuses,
+/// the rules of this release, which may change when gRPC serves memory. A
+/// refusal before startup writes anything changes nothing. A refusal at
+/// publication may come after the engine was set up (for example records
+/// written, the admin directory created and the first account seeded, the
+/// process-wide log buffer, and the slow-query threshold, schedules and
+/// webhooks that the routers of a service share), so the caller closes the
+/// service (`Service::close`, which stops the scheduler and the webhook
+/// dispatcher) and drops it with every router built from it after any `Err`.
 pub fn configured_admin_router(
     mut service: Service,
     options: ServerOptions,
 ) -> std::io::Result<Router> {
     options.validate()?;
+    service.refuse_after_unconfigured_grpc()?;
     if let Some(path) = &options.memory_bindings_file {
         service = service.with_bindings(read_memory_bindings(path)?);
     }
+    // Before startup writes the records of the file: a refused router changes nothing.
+    service.refuse_reserving_after_grpc()?;
     if options.grpc_enabled && service.has_bindings() {
         return Err(std::io::Error::other(
             "gRPC listener is disabled while memory bindings are configured",
@@ -260,6 +285,8 @@ pub fn configured_admin_router(
         let reserved = service.memory_bindings.with_orphans(&orphans);
         service = service.with_bindings(reserved);
     }
+    // The records found above reserve resources too.
+    service.refuse_reserving_after_grpc()?;
     super::logs::configure(
         options
             .log_buffer_capacity
@@ -356,7 +383,8 @@ pub fn configured_admin_router(
     service
         .webhooks
         .configure(service.admin.directory.clone(), service.clone())?;
-    Ok(super::configured_routes(service))
+    service.publish_reserving()?;
+    Ok(super::routes(service))
 }
 
 fn read_memory_bindings(path: &FilePath) -> std::io::Result<super::reserved::Bindings> {
@@ -504,6 +532,7 @@ async fn capabilities(
         ("change_feed", v4),
         ("record_expiry", s.format_version >= 5),
         ("kv", s.format_version >= 5),
+        ("kv_batch", s.format_version >= 5),
         ("metadata_updates", s.format_version >= 5),
         ("grouped_search", s.format_version >= 5),
         ("recommendations", s.format_version >= 5),
@@ -533,6 +562,8 @@ async fn capabilities(
             "/v1/collections/{collection}/vectors/{id}/metadata",
             "/v1/collections/{collection}/kv/entry",
             "/v1/collections/{collection}/kv/entries",
+            "/v1/collections/{collection}/kv/batch",
+            "/v1/collections/{collection}/kv/entries/get",
             "/v1/collections/{collection}/vectors/{id}/named",
             "/v1/collections/{collection}/vectors/configure",
             "/v1/collections/{collection}/search/grouped",

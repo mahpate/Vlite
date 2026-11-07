@@ -35,6 +35,10 @@ use std::{
     path::{Path, PathBuf},
 };
 
+/// The structural check of the gRPC adapters (lane F3), in a module of its own.
+#[path = "server_name_lookup_scan/grpc_leg.rs"]
+mod grpc_leg;
+
 /// Methods that look a collection or graph up by name, create or drop one by
 /// name, or enumerate them. Banned on any receiver unless the database is the
 /// first argument: no other type of the server layer has a method of these
@@ -200,6 +204,14 @@ enum Token {
 /// Replaces comments, string literals and character literals with spaces,
 /// keeping every newline, so offsets and line numbers still match the source.
 fn blank(source: &str) -> String {
+    blank_with(source, true)
+}
+
+/// As [`blank`], but with `literals` false only the comments go: string and
+/// character literals stay, still read as literals (a `//` inside a string is
+/// no comment), so that text written as a literal of code can be read from
+/// code alone.
+fn blank_with(source: &str, literals: bool) -> String {
     let bytes = source.as_bytes();
     let mut out = bytes.to_vec();
     let mut i = 0;
@@ -208,6 +220,11 @@ fn blank(source: &str) -> String {
             if *byte != b'\n' {
                 *byte = b' ';
             }
+        }
+    };
+    let erase_literal = |out: &mut Vec<u8>, from: usize, to: usize| {
+        if literals {
+            erase(out, from, to);
         }
     };
     let identifier_byte = |byte: u8| byte.is_ascii_alphanumeric() || byte == b'_';
@@ -259,7 +276,7 @@ fn blank(source: &str) -> String {
                 let end = source[body..]
                     .find(std::str::from_utf8(&closing).unwrap())
                     .map_or(bytes.len(), |at| body + at + closing.len());
-                erase(&mut out, i, end);
+                erase_literal(&mut out, i, end);
                 i = end;
             }
             b'"' => {
@@ -269,7 +286,7 @@ fn blank(source: &str) -> String {
                     i += if bytes[i] == b'\\' { 2 } else { 1 };
                 }
                 i = (i + 1).min(bytes.len());
-                erase(&mut out, start, i);
+                erase_literal(&mut out, start, i);
             }
             b'\'' => {
                 // A character literal, not a lifetime: one character (or one
@@ -286,7 +303,7 @@ fn blank(source: &str) -> String {
                         .map(|c| c.len_utf8() + 1)
                 };
                 if let Some(length) = length {
-                    erase(&mut out, i, i + 1 + length);
+                    erase_literal(&mut out, i, i + 1 + length);
                     i += 1 + length;
                 } else {
                     i += 1;
@@ -365,7 +382,45 @@ fn item_end(bytes: &[u8], at: usize) -> usize {
     bytes.len()
 }
 
-/// Removes every `#[cfg(test)]` item from blanked source, keeping newlines.
+/// Whether a compacted attribute (`cfg(..)`, without whitespace) compiles only
+/// under test: `cfg(test)`, or `cfg(all(..))` with such a predicate among its
+/// arguments (`all(test, feature = "grpc")`). `any(..)` and `not(..)` do not.
+fn requires_test(attribute: &str) -> bool {
+    fn predicate(text: &str) -> bool {
+        if text == "test" {
+            return true;
+        }
+        let Some(inner) = text
+            .strip_prefix("all(")
+            .and_then(|rest| rest.strip_suffix(')'))
+        else {
+            return false;
+        };
+        let mut depth = 0usize;
+        let mut start = 0;
+        let mut arguments = Vec::new();
+        for (at, c) in inner.char_indices() {
+            match c {
+                '(' => depth += 1,
+                ')' => depth = depth.saturating_sub(1),
+                ',' if depth == 0 => {
+                    arguments.push(&inner[start..at]);
+                    start = at + 1;
+                }
+                _ => {}
+            }
+        }
+        arguments.push(&inner[start..]);
+        arguments.into_iter().any(predicate)
+    }
+    attribute
+        .strip_prefix("cfg(")
+        .and_then(|rest| rest.strip_suffix(')'))
+        .is_some_and(predicate)
+}
+
+/// Removes every `#[cfg(test)]` item (or `#[cfg(all(test, ..))]`, see
+/// `requires_test`) from blanked source, keeping newlines.
 fn without_test_items(text: &str) -> String {
     let bytes = text.as_bytes();
     let mut out = bytes.to_vec();
@@ -380,7 +435,7 @@ fn without_test_items(text: &str) -> String {
             .chars()
             .filter(|c| !c.is_whitespace())
             .collect();
-        if attribute != "cfg(test)" {
+        if !requires_test(&attribute) {
             continue;
         }
         // The item starts after this attribute and any further attributes.
@@ -470,7 +525,7 @@ fn module_declarations(source: &str, blanked: &str) -> Vec<ModuleDecl> {
             if let Some(name) = name {
                 let test = attributes
                     .iter()
-                    .any(|(compact, ..)| compact == "cfg(test)");
+                    .any(|(compact, ..)| requires_test(compact));
                 let path = attributes
                     .iter()
                     .find(|(compact, ..)| compact.starts_with("path="))
@@ -1048,6 +1103,63 @@ fn not_a_module() { mod local; }
     assert_eq!(
         join_relative("src/server/memory/routes", "../pins_recall2.rs"),
         "src/server/memory/pins_recall2.rs"
+    );
+}
+
+#[test]
+fn a_cfg_that_requires_test_makes_an_item_or_a_module_test_only() {
+    for attribute in [
+        "cfg(test)",
+        "cfg(all(test,feature=))",
+        "cfg(all(feature=,test))",
+        "cfg(all(all(test,unix),feature=))",
+    ] {
+        assert!(requires_test(attribute), "{attribute}");
+    }
+    for attribute in [
+        "cfg(feature=)",
+        "cfg(not(test))",
+        "cfg(any(test,feature=))",
+        "cfg(all(feature=,not(test)))",
+        "cfg(all(testing,feature=))",
+        "cfg_attr(test,derive(Debug))",
+        "test",
+        "path=",
+    ] {
+        assert!(!requires_test(attribute), "{attribute}");
+    }
+    let source = r##"
+#[cfg(all(test, feature = "grpc"))]
+mod published;
+#[cfg(any(test, feature = "grpc"))]
+mod either;
+#[cfg(not(test))]
+mod production;
+#[cfg(all(test, feature = "grpc"))]
+fn setup(db: &Database) { db.create_graph("notes"); }
+#[cfg(any(test, feature = "grpc"))]
+fn shared(db: &Database) { db.create_graph("counted"); }
+"##;
+    let declared: Vec<_> = parse_modules(source)
+        .into_iter()
+        .map(|module| (module.name, module.test))
+        .collect();
+    assert_eq!(
+        declared,
+        [
+            ("published".to_owned(), true),
+            ("either".to_owned(), false),
+            ("production".to_owned(), false),
+        ]
+    );
+    let seen: Vec<_> = found(source)
+        .into_iter()
+        .map(|(function, pattern, _)| (function, pattern))
+        .collect();
+    assert_eq!(
+        seen,
+        [("shared".to_owned(), ".create_graph(".to_owned())],
+        "only an item that compiles under test alone is left out of the scan"
     );
 }
 

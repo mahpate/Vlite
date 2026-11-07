@@ -1,5 +1,5 @@
 //! Gap 3 (unreleased): the TTL projection of graph frames for the
-//! [`GraphEventSet::Ttl`](crate::changes::GraphEventSet::Ttl) feed.
+//! [`GraphEventSet::Ttl`] feed.
 //!
 //! A tracker separate from the legacy [`super::feed::FeedGraphs`], whose
 //! output must not change. It replays every frame from the log start and
@@ -85,7 +85,7 @@ impl Database {
     /// an empty `ttl`. [`GraphEventSet::Ttl`] also reports graph TTL: each
     /// logged deadline change as an otherwise-empty node or edge patch, and
     /// each logged expiry reclaim as its edge deletes, detaches and node
-    /// deletes, with one [`GraphTtl`](crate::changes::GraphTtl) annotation
+    /// deletes, with one [`GraphTtl`] annotation
     /// per graph operation. Removals come only from reclaims in the log,
     /// never from the reader's clock. A large reclaim is delivered in
     /// chunks, so `next` may stand inside a commit; pass it back unchanged.
