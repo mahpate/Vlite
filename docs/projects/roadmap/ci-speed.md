@@ -115,3 +115,17 @@ not a different run.
 - The `sccache`, lld and zsh paths of `scripts/dev-fast-env.*` were not measured, and the build times above come from one
   machine.
 - The three invalid `tests/k71_mutants.json` entries still need a different edit.
+
+## Optional: the release skips its native test re-run
+
+A separate, optional commit (`OPTIONAL gate cut: release skips its native test re-run when CI is green for the commit`):
+revert it to keep the re-run. `release.yml` gets a read-only `ci-green` job that asks the Actions API for a successful
+`ci.yml` run (push or dispatch) of the same commit in which every stable test job succeeded: the four native cells and the
+three Windows buckets. When there is one, the `native` and `linux-arm64` jobs skip their `cargo test` step; with none, or if the
+API cannot be read, they run it as before. Formatting, clippy, builds, wheels, the container suite and publishing are
+unchanged, and the publish jobs still run on a `v*` tag only. Tag a commit after its CI run is green to get the saving: a tag
+pushed while CI is still running just runs the tests, as it always did.
+
+What it drops: the release's threaded `cargo test --all-features` run on each system. With the Nextest change, `ci.yml` runs
+that suite with one process per test everywhere, so a failure that shows only when tests share a process (global state, a fixed
+port) would be found only by the `default-features` job (default features, Linux stable) and by local runs.

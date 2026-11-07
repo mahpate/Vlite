@@ -34,6 +34,27 @@ jobs:
       - run: python tests/release_assets.py
       - run: python tests/wheel_platform.py
 
+  # The native jobs below re-run the whole test suite, which ci.yml already ran on this commit.
+  # When a successful ci.yml run of every stable test job exists for this exact commit they skip
+  # it; with no such run (or if the API cannot be read) they run it as before.
+  ci-green:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      actions: read
+    outputs:
+      green: ${{ steps.ci.outputs.green }}
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          persist-credentials: false
+      - name: Look for a successful CI run of this exact commit
+        id: ci
+        continue-on-error: true
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: python3 scripts/ci_policy.py release-ci
+
   clients:
     needs: identity
     runs-on: ubuntu-latest
@@ -82,7 +103,9 @@ jobs:
           path: dist/*
 
   native:
-    needs: identity
+    needs: [identity, ci-green]
+    # ci-green only saves work: whatever it did (even fail), the tests run unless it said green.
+    if: ${{ !cancelled() && needs.identity.result == 'success' }}
     strategy:
       fail-fast: false
       matrix:
@@ -98,7 +121,9 @@ jobs:
           components: clippy, rustfmt
       - run: cargo fmt --check
       - run: cargo clippy --locked --workspace --all-targets --all-features -- -D warnings
-      - run: cargo test --locked --workspace --all-targets --all-features
+      - name: Test the full feature suite (skipped when CI already ran it on this commit)
+        if: needs.ci-green.outputs.green != 'true'
+        run: cargo test --locked --workspace --all-targets --all-features
       - run: cargo check --locked --no-default-features --lib
       - run: cargo build --locked --release --bins --features http-embedder,otel,tools,import-formats,json,mcp,server,grpc,gpu,mcp-proxy
       - uses: actions/setup-python@v6
@@ -198,15 +223,19 @@ jobs:
           name: native-${{ runner.os }}-${{ runner.arch }}
           path: dist/*
 
-  # Native linux/arm64 gate for the published arm64 images, whose Docker build
-  # (image-build) skips the test suite (VLITE_IMAGE_TESTS=0) to avoid repeating it.
+  # Native linux/arm64 gate for the published arm64 images, whose Docker build (image-build)
+  # skips the test suite (VLITE_IMAGE_TESTS=0) to avoid repeating it. Its tests are skipped
+  # here when ci.yml already ran them on this commit (ci-green).
   linux-arm64:
-    needs: identity
+    needs: [identity, ci-green]
+    if: ${{ !cancelled() && needs.identity.result == 'success' }}
     runs-on: ubuntu-24.04-arm
     steps:
       - uses: actions/checkout@v5
       - uses: dtolnay/rust-toolchain@stable
-      - run: cargo test --locked --workspace --all-targets --all-features
+      - name: Test the full feature suite (skipped when CI already ran it on this commit)
+        if: needs.ci-green.outputs.green != 'true'
+        run: cargo test --locked --workspace --all-targets --all-features
       - run: cargo build --locked --release --bins --features http-embedder,otel,tools,import-formats,json,mcp,server,grpc,gpu,mcp-proxy
       - uses: actions/setup-python@v6
         with:

@@ -1,9 +1,12 @@
 """CI routing, qualification and cache wiring regressions (standard library only)."""
+import contextlib
 import importlib.util
+import io
 import json
 import os
 from pathlib import Path
 import re
+import subprocess
 import tempfile
 import textwrap
 import unittest
@@ -634,6 +637,185 @@ class MutantsWorkflow(unittest.TestCase):
             self.assertIn("path: tools\n          sparse-checkout: tests/mutant_replay.py\n", body)
             self.assertIn("tools/tests/mutant_replay.py", body)
         self.assertTrue((ROOT / "tests/mutant_replay.py").is_file())
+
+
+class ReleaseCi(unittest.TestCase):
+    """scripts/ci_policy.py release-ci: the release skips its native tests only on proof from CI."""
+
+    @staticmethod
+    def green_jobs():
+        return [dict(name=name, conclusion="success") for name in sorted(policy.RELEASE_TEST_JOBS)]
+
+    @staticmethod
+    def run_of(**fields):
+        return dict(dict(head_sha="abc", event="push", conclusion="success", id=1, run_attempt=1,
+                         html_url="https://github.com/mahpate/Vlite/actions/runs/1"), **fields)
+
+    def gate(self, side_effect):
+        with tempfile.TemporaryDirectory() as directory:
+            output, summary = Path(directory) / "output", Path(directory) / "summary"
+            env = dict(GITHUB_REPOSITORY="mahpate/Vlite", GITHUB_SHA="abc",
+                       GITHUB_OUTPUT=str(output), GITHUB_STEP_SUMMARY=str(summary))
+            with patch.dict(os.environ, env), patch.object(
+                policy, "gh_pages", side_effect=side_effect
+            ) as api, contextlib.redirect_stdout(io.StringIO()):
+                policy.release_ci()
+            return output.read_text(), summary.read_text(), api
+
+    def test_the_release_needs_the_stable_suite_of_every_system(self):
+        self.assertEqual(policy.RELEASE_TEST_JOBS, frozenset({
+            "native (ubuntu-latest, stable)", "native (ubuntu-24.04-arm, stable)",
+            "native (windows-latest, stable)", "native (macos-latest, stable)",
+            "windows-tests (stable, shard 1/3)", "windows-tests (stable, shard 2/3)",
+            "windows-tests (stable, shard 3/3)",
+        }))
+        # These are the names ci.yml really produces.
+        text = (ROOT / ".github/workflows/ci.yml").read_text(encoding="utf-8")
+        native = text.split("\n  native:\n", 1)[1].split("\n  windows-tests:\n", 1)[0]
+        self.assertIn("        os: [ubuntu-latest, ubuntu-24.04-arm, windows-latest, macos-latest]\n", native)
+        self.assertRegex(native, r"toolchain: \[[^\]]*\bstable\]")
+        self.assertNotIn("\n    name:", native)
+        windows = text.split("\n  windows-tests:\n", 1)[1].split("\n  clients:\n", 1)[0]
+        self.assertIn("    name: windows-tests (${{ matrix.toolchain }}, shard ${{ matrix.shard }}/3)\n", windows)
+        self.assertRegex(windows, r"toolchain: \[[^\]]*\bstable\]")
+        self.assertIn("        shard: [1, 2, 3]\n", windows)
+
+    def test_only_a_green_push_or_dispatch_of_the_exact_commit_counts(self):
+        run = dict(head_sha="abc", event="push", conclusion="success")
+        self.assertTrue(policy.release_run(run, "abc"))
+        self.assertTrue(policy.release_run(dict(run, event="workflow_dispatch"), "abc"))
+        # The commit is what was tested, so the branch it ran on does not matter.
+        self.assertTrue(policy.release_run(dict(run, head_branch="feature"), "abc"))
+        for field, value in (("head_sha", "old"), ("event", "pull_request"), ("event", "schedule"),
+                             ("conclusion", "failure"), ("conclusion", "cancelled"), ("conclusion", None)):
+            with self.subTest(field=field, value=value):
+                self.assertFalse(policy.release_run(dict(run, **{field: value}), "abc"))
+
+    def test_every_stable_test_job_must_have_succeeded(self):
+        jobs = self.green_jobs()
+        self.assertTrue(policy.release_tests_ran(jobs))
+        self.assertFalse(policy.release_tests_ran([]))
+        for job in jobs:
+            with self.subTest(job=job["name"]):
+                rest = [other for other in jobs if other is not job]
+                self.assertFalse(policy.release_tests_ran(rest))
+                for conclusion in ("skipped", "cancelled", "failure", None):
+                    self.assertFalse(policy.release_tests_ran(rest + [dict(job, conclusion=conclusion)]))
+        self.assertFalse(policy.release_tests_ran(jobs + [dict(jobs[0], conclusion="failure")]))
+        # Other jobs, the MSRV cells included, are not part of the proof.
+        others = [dict(name=name, conclusion="skipped")
+                  for name in ("native (windows-latest, 1.89.0)", "windows-tests (1.89.0, shard 1/3)",
+                               "docker", "lint")]
+        self.assertTrue(policy.release_tests_ran(jobs + others))
+
+    def test_a_green_run_of_this_commit_skips_the_release_tests(self):
+        run = self.run_of(event="workflow_dispatch", id=7, run_attempt=3,
+                          html_url="https://github.com/mahpate/Vlite/actions/runs/7")
+        output, summary, api = self.gate([[run], self.green_jobs()])
+        self.assertEqual(output, "green=true\n")
+        self.assertIn(run["html_url"], summary)
+        self.assertIn("not repeated", summary)
+        runs_url, jobs_url = (call.args[0] for call in api.call_args_list)
+        self.assertIn("repos/mahpate/Vlite/actions/workflows/ci.yml/runs?head_sha=abc&status=success", runs_url)
+        self.assertIn("repos/mahpate/Vlite/actions/runs/7/attempts/3/jobs", jobs_url)
+        # A run that skipped the tests does not stop the search: a later one can still qualify.
+        output, _, _ = self.gate([[self.run_of(id=1), self.run_of(id=2)], [], self.green_jobs()])
+        self.assertEqual(output, "green=true\n")
+
+    def test_anything_less_runs_the_tests_as_before(self):
+        docs_only = [dict(name="documentation", conclusion="success"),
+                     dict(name="native (ubuntu-latest, stable)", conclusion="skipped")]
+        cases = {
+            "no run": [[]],
+            "another commit": [[self.run_of(head_sha="old")]],
+            "a pull request run": [[self.run_of(event="pull_request")]],
+            "a run that did not succeed": [[self.run_of(conclusion="failure")]],
+            "a documentation-only run": [[self.run_of()], docs_only],
+            "a missing bucket": [[self.run_of()], self.green_jobs()[1:]],
+        }
+        for name, effects in cases.items():
+            with self.subTest(name):
+                output, summary, _ = self.gate(effects)
+                self.assertEqual(output, "green=false\n")
+                self.assertIn("the native test suites run in this release", summary)
+
+    def test_an_unreadable_api_never_fails_the_job(self):
+        for failure in (subprocess.CalledProcessError(1, "gh"), FileNotFoundError("gh"),
+                        ValueError("not json"), KeyError("html_url")):
+            with self.subTest(failure=type(failure).__name__):
+                output, summary, _ = self.gate(failure)
+                self.assertEqual(output, "green=false\n")
+                self.assertIn(type(failure).__name__, summary)
+        output, _, _ = self.gate([[dict(head_sha="abc")]])
+        self.assertEqual(output, "green=false\n")
+
+
+class ReleaseWorkflow(unittest.TestCase):
+    """.github/workflows/release.yml: only the native test steps may be skipped, and only on proof."""
+
+    @classmethod
+    def setUpClass(cls):
+        cls.text = (ROOT / ".github/workflows/release.yml").read_text(encoding="utf-8")
+
+    def job(self, name):
+        rest = self.text.split(f"\n  {name}:\n", 1)[1]
+        return re.split(r"\n  [a-z0-9-]+:\n", rest, maxsplit=1)[0]
+
+    def test_ci_green_can_only_read_the_actions_api_and_cannot_fail_the_release(self):
+        job = self.job("ci-green")
+        self.assertNotIn("needs:", job)
+        self.assertIn("    permissions:\n      contents: read\n      actions: read\n", job)
+        self.assertIn("    outputs:\n      green: ${{ steps.ci.outputs.green }}\n", job)
+        self.assertIn("persist-credentials: false", job)
+        step = job.split("      - name: Look for a successful CI run of this exact commit\n", 1)[1]
+        self.assertIn("        id: ci\n        continue-on-error: true\n", step)
+        self.assertIn("          GH_TOKEN: ${{ github.token }}\n", step)
+        self.assertTrue(step.rstrip().endswith("run: python3 scripts/ci_policy.py release-ci"), step)
+        # No other job reads the Actions API, and nothing gains a write permission.
+        self.assertEqual(self.text.count("actions: read"), 1)
+        self.assertEqual(self.text.count("contents: write"), 1)
+        self.assertTrue(self.text.startswith("name: VLite release\n"))
+        self.assertIn("\npermissions:\n  contents: read\n", self.text)
+
+    def test_only_the_two_native_test_steps_wait_for_the_answer(self):
+        skip = ("      - name: Test the full feature suite (skipped when CI already ran it on this commit)\n"
+                "        if: needs.ci-green.outputs.green != 'true'\n"
+                "        run: cargo test --locked --workspace --all-targets --all-features\n")
+        # ci-green only saves work: a job that failed or was skipped must not stop the release, it
+        # must leave the tests to run. Only a failed identity check or a cancelled run may.
+        guard = "    if: ${{ !cancelled() && needs.identity.result == 'success' }}\n"
+        for name in ("native", "linux-arm64"):
+            with self.subTest(name):
+                job = self.job(name)
+                self.assertIn("    needs: [identity, ci-green]\n", job)
+                self.assertIn(guard, job)
+                self.assertNotIn("needs.ci-green.result", job)
+                self.assertNotIn("always()", job)
+                self.assertIn(skip, job + "\n")
+                self.assertEqual(job.count("ci-green.outputs"), 1, "one condition, on the test step")
+                self.assertNotIn("      - run: cargo test --locked --workspace --all-targets --all-features", job)
+        native, arm = self.job("native"), self.job("linux-arm64")
+        for command in ("cargo fmt --check", "cargo clippy --locked --workspace --all-targets --all-features -- -D warnings",
+                        "cargo check --locked --no-default-features --lib", "cargo build --locked --release --bins",
+                        "python tests/grpc_smoke.py", "cargo build --locked --release -p vlite-ffi",
+                        "python tests/embedded_e2e.py", "python tests/embedded_wheel.py embedded-wheels",
+                        "npm --prefix bindings/node test", "node bindings/node/pack.mjs node-packages"):
+            self.assertIn(command, native)
+        for command in ("cargo build --locked --release --bins", "python tests/grpc_smoke.py",
+                        "name: native-Linux-ARM64"):
+            self.assertIn(command, arm)
+
+    def test_images_wheels_and_publishing_are_unchanged(self):
+        self.assertIn("    needs: [native, linux-arm64, image-test, manylinux, clients]\n", self.job("image-build"))
+        for name in ("image-build", "image-publish"):
+            self.assertIn("    if: startsWith(github.ref, 'refs/tags/v')\n", self.job(name))
+        self.assertIn("    needs: image-build\n", self.job("image-publish"))
+        for name in ("clients", "manylinux", "image-test"):
+            self.assertIn("    needs: identity\n", self.job(name))
+        # The container suite and the wheels never wait for, or skip because of, the CI answer.
+        for name in ("clients", "manylinux", "image-test", "image-build", "image-publish", "image-verify", "release"):
+            self.assertNotIn("ci-green.outputs", self.job(name), name)
+        self.assertIn("python3 tests/dashboard_e2e.py", self.job("image-test"))
 
 
 class TestProof(unittest.TestCase):

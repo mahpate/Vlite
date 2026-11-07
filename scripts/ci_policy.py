@@ -112,6 +112,67 @@ def image_ci():
     )
 
 
+def release_run(run, sha):
+    # A pull request run tests the merge of its head, never the head itself, so it cannot vouch for it.
+    return (
+        run["head_sha"] == sha
+        and run["event"] in ("push", "workflow_dispatch")
+        and run["conclusion"] == "success"
+    )
+
+
+# A release is built with stable. When ci.yml already ran the stable suites on this exact commit,
+# the release skips its own native test runs (release.yml, ci-green). Anything short of a green
+# run of every one of these jobs means the release runs the tests itself, as it always did.
+RELEASE_TEST_JOBS = frozenset(
+    {f"native ({os_name}, stable)" for os_name in NATIVE_OSES}
+    | {f"windows-tests (stable, shard {shard}/{WINDOWS_SHARDS})" for shard in range(1, WINDOWS_SHARDS + 1)}
+)
+
+
+def release_tests_ran(jobs):
+    for name in RELEASE_TEST_JOBS:
+        found = [job for job in jobs if job["name"] == name]
+        if not found or any(job["conclusion"] != "success" for job in found):
+            return False
+    return True
+
+
+def release_ci():
+    """Write green=true when a successful full CI run of this exact commit can stand in for the tests."""
+    repo, sha = os.environ["GITHUB_REPOSITORY"], os.environ["GITHUB_SHA"]
+    green, detail = False, "no successful CI run of this commit was found"
+    try:
+        runs = gh_pages(
+            f"repos/{repo}/actions/workflows/ci.yml/runs"
+            f"?head_sha={sha}&status=success&per_page=100",
+            "workflow_runs",
+        )
+        for run in runs:
+            if not release_run(run, sha):
+                continue
+            jobs = gh_pages(
+                f"repos/{repo}/actions/runs/{run['id']}/attempts/{run['run_attempt']}"
+                "/jobs?per_page=100", "jobs"
+            )
+            if release_tests_ran(jobs):
+                green, detail = True, run["html_url"]
+                break
+            detail = "the successful CI runs of this commit skipped some stable test jobs"
+    except Exception as error:  # Whatever goes wrong, the safe answer is to run the tests.
+        detail = f"the Actions API could not be read ({type(error).__name__})"
+    message = (
+        f"CI is green for {sha} ({detail}); the native test suites are not repeated."
+        if green
+        else f"No qualifying CI run for {sha} ({detail}); the native test suites run in this release."
+    )
+    print(message)
+    with open(os.environ["GITHUB_OUTPUT"], "a") as output:
+        output.write(f"green={str(green).lower()}\n")
+    with open(os.environ["GITHUB_STEP_SUMMARY"], "a") as summary:
+        summary.write(message + "\n\n")
+
+
 def route():
     with open(os.environ["GITHUB_EVENT_PATH"], encoding="utf-8") as source:
         event = json.load(source)
@@ -140,4 +201,4 @@ def route():
 
 
 if __name__ == "__main__":
-    {"route": route, "image-ci": image_ci}[sys.argv[1]]()
+    {"route": route, "image-ci": image_ci, "release-ci": release_ci}[sys.argv[1]]()
