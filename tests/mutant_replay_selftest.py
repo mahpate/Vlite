@@ -92,6 +92,8 @@ def main():
     for mutant in mutants:
         if "STUB_DIE" in mutant["desc"]:
             sys.exit(3)
+        if "STUB_SLEEP" in mutant["desc"]:
+            time.sleep(0.8)
         path = ROOT / mutant["file"]
         original = path.read_bytes()
         text = original.decode("utf-8")
@@ -112,6 +114,9 @@ def main():
         finally:
             path.write_bytes(original)
         restored = path.read_bytes() == original and "STUB_RESTORE_FAIL" not in mutant["desc"]
+        quiet = "STUB_QUIET_RESTORE" in mutant["desc"]
+        if quiet:
+            restored = False
         results[mutant["id"]] = {
             "desc": mutant["desc"],
             "status": status,
@@ -122,9 +127,14 @@ def main():
         }
         Path(args.out).write_text(json.dumps(results, indent=1), encoding="utf-8")
         print("%s: %s" % (mutant["id"], status), flush=True)
-        if not restored:
+        if "STUB_LOUD_RESTORE" in mutant["desc"]:
+            print("RESTORE FAILED", file=sys.stderr, flush=True)
+        if not restored and not quiet:
             print("RESTORE FAILED", file=sys.stderr)
             return 2
+    done = os.environ.get("STUB_DONE_DIR")
+    if done:
+        Path(done, str(os.getpid())).write_text("done", encoding="utf-8")
     return 0
 
 
@@ -539,12 +549,17 @@ class LedgerTests(ToolTest):
 
 
 class PlanTests(ToolTest):
+    def setUp(self):
+        super().setUp()
+        self.repo = self.make_repo()
+
     def plan(self, data, *extra):
         code, out, err = self.invoke(
-            "plan", "--root", self.base, "--ledger", self.ledger_file(data), *extra
+            "plan", "--root", self.repo, "--ledger", self.ledger_file(data), *extra
         )
         self.assertEqual(code, 0, err)
         self.assertEqual(len(out.strip().splitlines()), 1)
+        self.last_err = err
         return json.loads(out)
 
     def many(self, count):
@@ -554,8 +569,36 @@ class PlanTests(ToolTest):
         plan = self.plan(self.many(3))
         self.assertEqual(
             plan,
-            {"kind": "list", "count": 3, "total_shards": 3, "shards": [0, 1, 2], "unsupported": []},
+            {
+                "kind": "list",
+                "count": 3,
+                "total_shards": 3,
+                "shards": [0, 1, 2],
+                "stale": 0,
+                "unsupported": [],
+            },
         )
+        self.assertEqual(self.last_err, "")
+
+    def test_a_stale_anchor_is_counted_and_warned_about(self):
+        data = self.many(2) + [
+            mutant("gone", old="no such text"),
+            mutant("twice", old="let"),
+            mutant("nofile", file="src/none.rs"),
+        ]
+        plan = self.plan(data)
+        self.assertEqual((plan["count"], plan["stale"], plan["total_shards"]), (5, 3, 5))
+        self.assertIn(
+            "warning: 3 mutant(s) have an anchor that does not occur exactly once", self.last_err
+        )
+        for name in ("gone", "twice", "nofile"):
+            self.assertIn(name, self.last_err)
+        self.assertNotIn("m0", self.last_err)
+        self.assertEqual(self.plan(data, "--ids", "m0,m1")["stale"], 0)
+        output = self.base / "github-output"
+        os.environ["GITHUB_OUTPUT"] = str(output)
+        self.plan(data)
+        self.assertIn("stale=3\n", output.read_text(encoding="utf-8"))
 
     def test_the_shards_are_capped_by_the_request_and_by_max_shards(self):
         self.assertEqual(self.plan(self.many(25))["total_shards"], 20)
@@ -591,15 +634,17 @@ class PlanTests(ToolTest):
         output.write_bytes(b"earlier=1\n")
         os.environ["GITHUB_OUTPUT"] = str(output)
         self.plan(self.many(3))
-        expected = b"earlier=1\nkind=list\ncount=3\ntotal_shards=3\nshards=[0,1,2]\n"
+        expected = b"earlier=1\nkind=list\ncount=3\ntotal_shards=3\nstale=0\nshards=[0,1,2]\n"
         self.assertEqual(output.read_bytes(), expected)
         self.plan(compact_ledger([mutant("c", cmd="test --lib")]))
         self.assertTrue(
-            output.read_bytes().endswith(b"kind=compact\ncount=1\ntotal_shards=1\nshards=[0]\n")
+            output.read_bytes().endswith(
+                b"kind=compact\ncount=1\ntotal_shards=1\nstale=0\nshards=[0]\n"
+            )
         )
 
     def test_the_ledger_path_is_looked_up_under_the_root(self):
-        root = self.make_repo()
+        root = self.repo
         put(root / "tests" / "demo.json", json.dumps(self.many(2)))
         code, out, _ = self.invoke("plan", "--root", root, "--ledger", "tests/demo.json")
         self.assertEqual((code, json.loads(out)["count"]), (0, 2))
@@ -672,10 +717,20 @@ class FingerprintTests(ToolTest):
     def test_the_selected_test_files(self):
         fingerprints = tool.Fingerprints(self.tree())
         base = ["Cargo.lock", "Cargo.toml"]
+        library = ["build.rs", "src/a.rs", "src/sub/b.rs"]
+        every = [
+            "tests/common/mod.rs",
+            "tests/dir/helper.rs",
+            "tests/dir/main.rs",
+            "tests/t1.rs",
+            "tests/t2.rs",
+        ]
         for command, expected in (
-            ("cargo test --lib", base + ["build.rs", "src/a.rs", "src/sub/b.rs"]),
-            ("cargo test", base + ["build.rs", "src/a.rs", "src/sub/b.rs"]),
-            ("test --bin x", base + ["build.rs", "src/a.rs", "src/sub/b.rs"]),
+            ("cargo test --lib", base + library),
+            ("cargo test --doc", base + library),
+            ("cargo test", base + library + every),
+            ("cargo test --tests", base + library + every),
+            ("test --bin x", base + library),
             ("cargo test --test t1 -- f", base + ["tests/common/mod.rs", "tests/t1.rs"]),
             (
                 "cargo test --test dir",
@@ -688,23 +743,154 @@ class FingerprintTests(ToolTest):
             ),
             (
                 "cargo test --test t1 --lib",
-                base + [
-                    "build.rs", "src/a.rs", "src/sub/b.rs", "tests/common/mod.rs", "tests/t1.rs"
-                ],
+                base + library + ["tests/common/mod.rs", "tests/t1.rs"],
             ),
             (
                 "cargo test -p x",
-                base + [
-                    "build.rs",
-                    "crates/x/Cargo.toml",
-                    "crates/x/src/lib.rs",
-                    "src/a.rs",
-                    "src/sub/b.rs",
-                ],
+                base
+                + ["build.rs", "crates/x/Cargo.toml", "crates/x/src/lib.rs"]
+                + ["src/a.rs", "src/sub/b.rs"]
+                + every,
             ),
         ):
             with self.subTest(command):
                 self.assertEqual(fingerprints.test_files(command), expected)
+
+    def test_a_command_with_no_target_flag_runs_every_test(self):
+        for command, expected in (
+            ("cargo test", True),
+            ("cargo test --locked --offline", True),
+            ("cargo test --tests", True),
+            ("cargo test --workspace", True),
+            ("cargo test --all-targets", True),
+            ("cargo test --lib --tests", True),
+            ("cargo test --lib", False),
+            ("cargo test --doc", False),
+            ("cargo test --bin x", False),
+            ("cargo test --bins", False),
+            ("cargo test --examples", False),
+            ("cargo test --test t1", False),
+            ("cargo test --test=t1 --features x", False),
+            ("cargo test --lib -- --tests", False),
+            ("cargo test -p x --lib", False),
+        ):
+            with self.subTest(command):
+                self.assertIs(tool.selects_every_test(command), expected)
+
+    def test_every_file_under_src_is_an_input_of_the_library(self):
+        root = self.base / "embedded"
+        for relative, text in (
+            ("src/a.rs", "a\n"),
+            ("src/page.html", "<p>\n"),
+            ("src/api/openapi.json", "{}\n"),
+            ("src/target/skipped.json", "x\n"),
+        ):
+            put(root / relative, text)
+        files = tool.Fingerprints(root).test_files("cargo test --lib")
+        self.assertEqual(
+            files, ["Cargo.lock", "Cargo.toml", "src/a.rs", "src/api/openapi.json", "src/page.html"]
+        )
+        before = tool.Fingerprints(root).tests_hash("--lib")
+        with edited(root / "src" / "page.html", lambda text: text + "x"):
+            self.assertNotEqual(tool.Fingerprints(root).tests_hash("--lib"), before)
+
+    SUPPORT = {
+        "tests/t1.rs": (
+            "mod helper_support;\n"
+            "mod late;\n"
+            "#[cfg(test)]\n"
+            '#[path = "weird/place.rs"]\n'
+            "mod elsewhere;\n"
+            'const A: &str = include_str!("fixtures/a.json");\n'
+            'const B: &[u8] = include_bytes!("../proto/x.proto");\n'
+            "// mod ghost;\n"
+        ),
+        "tests/helper_support/mod.rs": "pub(crate) mod deeper;\n",
+        "tests/helper_support/deeper.rs": 'const C: &str = include_str!("../fixtures/b.json");\n',
+        "tests/weird/place.rs": 'mod inner;\ninclude!("generated.rs");\n',
+        "tests/weird/inner.rs": "// inner\n",
+        "tests/weird/generated.rs": "mod leaf;\n",
+        "tests/weird/leaf.rs": "// leaf\n",
+        "tests/fixtures/a.json": "{}\n",
+        "tests/fixtures/b.json": "{}\n",
+        "tests/t2.rs": "mod unrelated;\n",
+        "tests/unrelated.rs": "// unrelated\n",
+        "proto/x.proto": "syntax = 'proto3';\n",
+        "Cargo.toml": "a\n",
+        "Cargo.lock": "b\n",
+    }
+
+    def support_tree(self):
+        root = self.base / "support"
+        for relative, text in self.SUPPORT.items():
+            put(root / relative, text)
+        return root
+
+    def test_a_test_target_includes_what_it_declares_embeds_and_includes(self):
+        fingerprints = tool.Fingerprints(self.support_tree())
+        files = fingerprints.test_files("cargo test --test t1")
+        for relative in (
+            "tests/t1.rs",
+            "tests/helper_support/mod.rs",
+            "tests/helper_support/deeper.rs",
+            "tests/weird/place.rs",
+            "tests/weird/inner.rs",
+            "tests/weird/generated.rs",
+            "tests/weird/leaf.rs",
+            "tests/fixtures/a.json",
+            "tests/fixtures/b.json",
+            "proto/x.proto",
+        ):
+            self.assertIn(relative, files)
+        for relative in ("tests/t2.rs", "tests/unrelated.rs"):
+            self.assertNotIn(relative, files)
+        other = fingerprints.test_files("cargo test --test t2")
+        self.assertIn("tests/unrelated.rs", other)
+        self.assertNotIn("tests/helper_support/mod.rs", other)
+        self.assertNotIn("proto/x.proto", other)
+
+    def test_every_file_a_target_pulls_in_changes_its_fingerprint(self):
+        root = self.support_tree()
+
+        def hashes():
+            fingerprints = tool.Fingerprints(root)
+            return {c: fingerprints.tests_hash(c) for c in ("--test t1", "--test t2", "--lib")}
+
+        before = hashes()
+        shared = {"--test t1", "--test t2"}
+        for relative, changed in (
+            ("tests/t1.rs", {"--test t1"}),
+            ("tests/helper_support/mod.rs", {"--test t1"}),
+            ("tests/helper_support/deeper.rs", {"--test t1"}),
+            ("tests/weird/place.rs", {"--test t1"}),
+            ("tests/weird/inner.rs", {"--test t1"}),
+            ("tests/weird/generated.rs", {"--test t1"}),
+            ("tests/weird/leaf.rs", {"--test t1"}),
+            ("proto/x.proto", {"--test t1"}),
+            ("tests/t2.rs", {"--test t2"}),
+            ("tests/unrelated.rs", {"--test t2"}),
+            ("tests/fixtures/a.json", shared),
+            ("tests/fixtures/b.json", shared),
+        ):
+            with self.subTest(relative), edited(root / relative, lambda text: text + "// edit\n"):
+                after = hashes()
+                self.assertEqual({c for c in before if before[c] != after[c]}, changed)
+
+    def test_a_file_that_appears_later_changes_the_fingerprint(self):
+        root = self.support_tree()
+        before = tool.Fingerprints(root).tests_hash("--test t1")
+        put(root / "tests" / "helper_support" / "extra.rs", "// not declared anywhere\n")
+        self.assertEqual(tool.Fingerprints(root).tests_hash("--test t1"), before)
+        put(root / "tests" / "late.rs", "// declared by t1.rs\n")
+        self.assertNotEqual(tool.Fingerprints(root).tests_hash("--test t1"), before)
+
+    def test_a_reference_that_leaves_the_tree_or_does_not_exist_is_ignored(self):
+        root = self.base / "outside"
+        text = 'const A: &str = include_str!("../../secret.txt");\nmod nope;\n'
+        put(root / "tests" / "t1.rs", text)
+        put(root.parent / "secret.txt", "outside the tree")
+        files = tool.Fingerprints(root).test_files("cargo test --test t1")
+        self.assertEqual(files, ["Cargo.lock", "Cargo.toml", "tests/t1.rs"])
 
     def test_a_folder_and_a_file_of_one_test_target_are_both_inputs(self):
         root = self.tree()
@@ -1220,9 +1406,167 @@ class RunTests(ToolTest):
         code, text, err = self.invoke(*self.run_args(repo, ledger))
         self.assertEqual(code, 2, text + err)
         self.assertIn("RESTORE FAILED", err)
+        # The tool's own stderr line reaches the output, and the warning names the tree to fix.
+        self.assertIn("RESTORE FAILED", text.splitlines())
+        self.assertRegex(err, r"!!! RESTORE FAILED in .*repo")
+        self.assertIn("!!! a source file may still be mutated: check `git status` there", err)
         results = self.results()["results"]
         self.assertEqual(results["loose"]["restored"], False)
         self.assertEqual(results["m3"]["tool_status"], "no-result")
+
+    def test_a_restore_that_only_the_record_reports_still_exits_two(self):
+        repo = self.make_repo()
+        quiet = mutant("quiet", desc="STUB_QUIET_RESTORE", old="let y = 2;", new="let y = 3;")
+        ledger = self.ledger_file([standard_ledger()[0], quiet, standard_ledger()[2]])
+        code, text, err = self.invoke(*self.run_args(repo, ledger))
+        self.assertEqual(code, 2, text + err)
+        results = self.results()["results"]
+        self.assertEqual((results["quiet"]["restored"], results["m3"]["status"]), (False, "killed"))
+        self.assertNotIn("RESTORE FAILED", text)
+        self.assertIn("!!! RESTORE FAILED in", err)
+
+    def test_a_restore_that_only_the_output_reports_still_exits_two(self):
+        repo = self.make_repo()
+        loud = mutant("loud", desc="STUB_LOUD_RESTORE", old="let y = 2;", new="let y = 3;")
+        ledger = self.ledger_file([standard_ledger()[0], loud, standard_ledger()[2]])
+        code, text, err = self.invoke(*self.run_args(repo, ledger))
+        self.assertEqual(code, 2, text + err)
+        results = self.results()["results"]
+        self.assertEqual((results["loud"]["restored"], results["m3"]["status"]), (True, "killed"))
+        self.assertIn("RESTORE FAILED", text.splitlines())
+        self.assertIn("!!! RESTORE FAILED in", err)
+
+    def test_a_stale_anchor_is_invalid_and_never_stops_the_other_mutants(self):
+        repo = self.make_repo()
+        entries = [
+            standard_ledger()[0],
+            mutant("gone", old="no such text"),
+            standard_ledger()[2],
+            mutant("lost", file="src/none.rs"),
+        ]
+        ledger = self.ledger_file(entries)
+        code, text, err = self.invoke(*self.run_args(repo, ledger))
+        self.assertEqual(code, 0, text + err)
+        results = self.results()["results"]
+        self.assertEqual(list(results), ["m1", "gone", "m3", "lost"])
+        self.assertEqual(
+            [results[name]["status"] for name in results], ["killed", "invalid", "killed", "invalid"]
+        )
+        for name in ("gone", "lost"):
+            self.assertEqual(results[name]["tool_status"], "anchor")
+            self.assertEqual(results[name]["restored"], None)
+            self.assertEqual(results[name]["expected"], "killed")
+            self.assertEqual(sorted(results[name]["fingerprint"]), ["cmd", "file", "mutant", "tests"])
+        self.assertIn("the anchor occurs 0 times in src/a.rs", results["gone"]["tail"])
+        self.assertIn("cannot read src/none.rs", results["lost"]["tail"])
+        (log,) = self.stub_logs()
+        self.assertEqual(log["ids"], ["m1", "m3"])
+        self.assertIn("warning: 2 mutant(s) have a stale anchor", err)
+        self.assertIn("replaying 2 mutants with 1 job(s)", text)
+        self.assertIn("differs: gone expected killed, got invalid", text)
+        store = json.loads((self.base / "work" / "record.json").read_text(encoding="utf-8"))
+        self.assertEqual(sorted(store[str(ledger)]), ["m1", "m3"])
+
+    def test_stale_anchors_are_checked_in_each_job_tree_and_an_empty_job_does_not_run(self):
+        repo = self.make_repo()
+        entries = [
+            standard_ledger()[0],
+            mutant("gone", old="no such text"),
+            standard_ledger()[2],
+            mutant("lost", old="also not there"),
+        ]
+        code, text, err = self.invoke(*self.run_args(repo, self.ledger_file(entries), "--jobs", "2"))
+        self.assertEqual(code, 0, text + err)
+        results = self.results()["results"]
+        self.assertEqual(
+            [results[name]["status"] for name in results], ["killed", "invalid", "killed", "invalid"]
+        )
+        (log,) = self.stub_logs()
+        self.assertEqual(log["ids"], ["m1", "m3"])
+        everything = self.ledger_file([mutant("a", old="x1"), mutant("b", old="x2")], "all.json")
+        for stale in self.logs.glob("*.json"):
+            stale.unlink()
+        code, text, err = self.invoke(*self.run_args(repo, everything, out=self.base / "all.out"))
+        self.assertEqual(code, 0, text + err)
+        self.assertEqual(self.stub_logs(), [])
+        self.assertEqual(
+            [r["status"] for r in self.results(self.base / "all.out")["results"].values()],
+            ["invalid", "invalid"],
+        )
+
+    def test_binary_files_travel_to_the_job_trees(self):
+        repo, work = self.make_repo(), self.base / "work"
+        blob = repo / "tests" / "blob.bin"
+        blob.write_bytes(bytes(range(256)))
+        git(repo, "add", "tests/blob.bin")
+        git(repo, *GIT_IDENTITY, "-c", "commit.gpgsign=false", "commit", "-q", "--no-verify", "-m", "b")
+        changed = bytes(range(255, -1, -1)) + b"\0\0\r\n"
+        blob.write_bytes(changed)
+        ledger = self.ledger_file(standard_ledger()[:2])
+        code, text, err = self.invoke(*self.run_args(repo, ledger, "--jobs", "2"))
+        self.assertEqual(code, 0, text + err)
+        for index in range(2):
+            self.assertEqual((work / ("tree-%d" % index) / "tests" / "blob.bin").read_bytes(), changed)
+
+    def test_a_console_that_fails_does_not_abandon_the_tool(self):
+        repo, ledger = self.make_repo(), self.ledger_file(standard_ledger())
+        real = tool.say
+
+        def flaky(text="", stream=None):
+            if text.startswith("m1:"):
+                raise OSError("the console went away")
+            return real(text, stream)
+
+        with mock.patch.object(tool, "say", flaky):
+            code, text, err = self.invoke(*self.run_args(repo, ledger))
+        self.assertEqual(code, 0, text + err)
+        statuses = [r["status"] for r in self.results()["results"].values()]
+        self.assertEqual(statuses, ["killed", "survived", "killed", "killed"])
+        self.assertEqual(git(repo, "status", "--porcelain"), "")
+
+    def test_a_pipe_that_breaks_still_lets_the_tool_finish_and_restore(self):
+        class FlakyPipe(object):
+            """The first line, then an error once; later reads (the drain) are normal."""
+
+            def __init__(self, real):
+                self.real, self.armed = real, True
+
+            def __iter__(self):
+                if self.armed:
+                    self.armed = False
+                    yield next(iter(self.real))
+                    raise OSError("the pipe broke")
+                yield from self.real
+
+            def close(self):
+                self.real.close()
+
+        class FlakyPopen(subprocess.Popen):
+            def __init__(self, command, *args, **kwargs):
+                super().__init__(command, *args, **kwargs)
+                if str(command[0]) == sys.executable and self.stdout is not None:
+                    self.stdout = FlakyPipe(self.stdout)
+
+        repo = self.make_repo()
+        ledger = self.ledger_file([standard_ledger()[0], mutant("slow", desc="STUB_SLEEP")])
+        done = self.base / "done"
+        done.mkdir()
+        os.environ["STUB_DONE_DIR"] = str(done)
+        with mock.patch.object(tool.subprocess, "Popen", FlakyPopen):
+            code, text, err = self.invoke(*self.run_args(repo, ledger))
+        # The tool was still replaying its second mutant when the pipe broke: it was waited for.
+        self.assertEqual(len(list(done.iterdir())), 1, text + err)
+        self.assertEqual(git(repo, "status", "--porcelain"), "")
+        self.assertEqual(code, 1, text + err)
+        self.assertIn("OSError: the pipe broke", err)
+
+    def test_drain_lets_a_running_tool_finish(self):
+        code = "import sys, time; print('a', flush=True); time.sleep(0.3); print('b'); sys.exit(3)"
+        with subprocess.Popen(
+            [sys.executable, "-c", code], stdout=subprocess.PIPE, universal_newlines=True
+        ) as process:
+            self.assertEqual(tool.drain(process), 3)
+            self.assertEqual(process.poll(), 3)
 
     def test_usage_errors_exit_with_one_not_two(self):
         repo, ledger = self.make_repo(), self.ledger_file(standard_ledger()[:1])
@@ -1500,6 +1844,36 @@ class OnlyChangedTests(ToolTest):
             self.assertEqual(self.changed("--shard", "1/2")[:2], (["m4"], "# 1 of 2"))
             self.assertEqual(self.changed("--ids", "m1,m4")[:2], (["m4"], "# 1 of 2"))
 
+    def test_an_edit_of_only_the_mutated_file_replays_a_mutant_that_selects_a_test(self):
+        # A --test selection does not walk src/, so only the "file" fingerprint can notice this.
+        ledger = self.ledger_file(standard_ledger()[2:])
+        self.run_all(ledger=ledger)
+        self.assertEqual(self.changed(ledger=ledger)[:2], ([], "# 0 of 2"))
+        with edited(self.repo / "src" / "b.rs", lambda text: text + "// edit\n"):
+            self.assertEqual(self.changed(ledger=ledger)[:2], (["m3", "m4"], "# 2 of 2"))
+        with edited(self.repo / "src" / "a.rs", lambda text: text + "// edit\n"):
+            self.assertEqual(self.changed(ledger=ledger)[:2], ([], "# 0 of 2"))
+        record = json.loads((self.work / "record.json").read_text(encoding="utf-8"))
+        fingerprint = record[str(ledger)]["m3"]["fingerprint"]
+        self.assertEqual(
+            fingerprint["file"], tool.Fingerprints(self.repo).file_hash("src/b.rs")
+        )
+
+    def test_a_declared_support_file_or_a_fixture_replays_the_mutants_that_use_it(self):
+        put(self.repo / "tests" / "t1.rs", "mod t1_support;\n")
+        support = 'const X: &str = include_str!("../fixtures/x.json");\n'
+        put(self.repo / "tests" / "t1_support" / "mod.rs", support)
+        put(self.repo / "tests" / "fixtures" / "x.json", "{}\n")
+        self.run_all()
+        self.assertEqual(self.changed()[:2], ([], "# 0 of 4"))
+        for path, expected in (
+            (self.repo / "tests" / "t1_support" / "mod.rs", ["m3"]),
+            (self.repo / "tests" / "fixtures" / "x.json", ["m3", "m4"]),
+            (self.repo / "tests" / "t2.rs", ["m4"]),
+        ):
+            with self.subTest(path.name), edited(path, lambda text: text + "// edit\n"):
+                self.assertEqual(self.changed()[0], expected)
+
     def test_the_record_keeps_only_clean_verdicts(self):
         data = [
             standard_ledger()[0],
@@ -1756,6 +2130,28 @@ class MergeTests(ToolTest):
         self.assertEqual(code, 0, out)
         self.assertEqual((data["totals"]["skipped"], data["totals"]["unexpected"]), (1, 0))
         self.assertIn("| m3 | killed | skipped | - | - |", markdown)
+
+    def test_ids_limit_the_table_to_the_replayed_mutants(self):
+        partial = {name: record for name, record in self.good().items() if name in ("m1", "m3")}
+        document = self.document("a.json", partial)
+        ledger = standard_ledger() + [{"id": "u1", "file": "x", "cmd": "cargo test", "edits": []}]
+        code, out, _, data = self.merge(ledger, document)
+        self.assertEqual((code, data["totals"]["missing"], data["totals"]["mutants"]), (1, 2, 4))
+        self.assertEqual(data["unsupported"], ["u1"])
+        code, out, markdown, data = self.merge(ledger, document, extra=["--ids", "m1,m3"])
+        self.assertEqual(code, 0, out)
+        self.assertEqual([row["id"] for row in data["mutants"]], ["m1", "m3"])
+        self.assertEqual(
+            (data["totals"]["mutants"], data["totals"]["missing"], data["totals"]["killed"]),
+            (2, 0, 2),
+        )
+        self.assertEqual(data["unsupported"], [])
+        self.assertNotIn("| m2 |", markdown)
+        # An id that is in the ledger but was not replayed is still missing.
+        code, out, _, data = self.merge(ledger, document, extra=["--ids", "m1,m3,m4"])
+        self.assertEqual((code, data["totals"]["missing"]), (1, 1))
+        with self.assertRaises(SystemExit):
+            self.merge(ledger, document, extra=["--ids", "nope"])
 
     def test_expected_survivors(self):
         ledger = [

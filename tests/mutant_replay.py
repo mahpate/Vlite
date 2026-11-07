@@ -43,23 +43,33 @@ the crate and N; compare a first and a second run on your own. With --jobs 1 the
 so `cargo clean` removes it too (then run `git worktree prune`). To delete the state by hand, run
 `git worktree remove --force <work-dir>/tree-I` for every I and then remove the work dir. Use one
 run per work dir at a time. A restore that fails leaves a mutated file in the tree it happened in
-(exit 2): in --root fix it with `git checkout`; the job trees are reset at the start of the next
-run.
+(exit 2), and so does a tool that is killed hard: in --root fix it with `git checkout`; the job
+trees are reset at the start of the next run.
+
+Anchors: both tools stop at a mutant whose old text does not occur exactly once in its file, which
+would leave every mutant after it without a verdict. `run` therefore checks every anchor in the
+tree it replays in, never hands a stale one to a tool, and reports it invalid with tool_status
+"anchor" and the reason in `tail`; `plan` warns about them. `merge --ids` limits the table to the
+ids a replay was limited to, so that a partial replay does not report the others as missing.
 
 --only-changed is for intermediate heads. Every run stores, per ledger path as given, the
 fingerprint of each mutant it replayed in <work-dir>/record.json (--record overrides it): hashes of
 the mutant text, of the baseline command, of the mutated file and of the test sources the command
-selects (Cargo files, tests/NAME.rs or tests/NAME/ plus tests/common for --test NAME; src/ and
-build.rs for the library, a binary, examples or no --test; crates/ too for -p or --workspace), all
-over LF-normalized text so Windows and Linux agree. --only-changed skips a mutant whose stored
-fingerprint is unchanged and whose stored verdict is the expected one. For a compact ledger it
-also accepts the run the ledger carries when no record exists: expected status, one anchor,
-compiled, restored identically, green baseline, and the hashes of the current file and of the
-current file with old replaced by new. It trusts that nothing outside those inputs, for example a
-source file other than the mutated one, flips a verdict. That is why it is for intermediate heads
-only: the independent second-machine replay, and any `--min-machines 2` evidence, is needed once,
-at the final head, and is run without --only-changed so that every mutant is replayed on exactly
-that tree.
+selects, all over LF-normalized text so Windows and Linux agree. Test sources are the Cargo files;
+for --test NAME tests/NAME.rs or tests/NAME/, tests/common, tests/fixtures and every file those
+declare with `mod NAME;` or #[path = "..."], include! or embed with include_str! and
+include_bytes!, followed from module to module; for a command with no target flag, --tests or
+--all-targets every Rust file under tests/ as well; src/ (any file) and build.rs for the library,
+a binary, examples or no --test; crates/ too for -p or --workspace. A test that builds a path at
+run time and reads that file, or starts a binary, depends on sources this does not follow.
+--only-changed skips a mutant whose stored fingerprint is unchanged and whose stored verdict is the
+expected one. For a compact ledger it also accepts the run the ledger carries when no record
+exists: expected status, one anchor, compiled, restored identically, green baseline, and the
+hashes of the current file and of the current file with old replaced by new. It trusts that
+nothing outside those inputs, for example a source file other than the mutated one, flips a
+verdict. That is why it is for intermediate heads only: the independent second-machine replay, and
+any `--min-machines 2` evidence, is needed once, at the final head, and is run without
+--only-changed so that every mutant is replayed on exactly that tree.
 
 Results: `run --out` writes one normalized document {tool, kind, ledger, shard, jobs, machine,
 head, started_at, finished_at, wall_seconds, results, skipped, unsupported}. `results` maps each
@@ -92,6 +102,8 @@ import hashlib
 import json
 import os
 import platform
+import posixpath
+import re
 import shlex
 import shutil
 import stat
@@ -125,6 +137,27 @@ TOTAL_COLUMNS = (
 )
 MISSING = hashlib.sha256(b"missing").hexdigest()
 PRINT_LOCK = threading.Lock()
+# Rust source files pull other files in with `mod NAME;` (maybe with #[path = "..."]) and
+# include!, and embed data files with include_str! and include_bytes!.
+MODULE_LINE = re.compile(
+    r"^[ \t]*(?:#\[[^\]\n]*\][ \t]*)*(?:pub(?:\([^)\n]*\))?[ \t]+)?mod[ \t]+([A-Za-z_]\w*)[ \t]*;"
+)
+PATH_ATTRIBUTE = re.compile(r'#\[\s*path\s*=\s*"([^"\n]+)"\s*\]')
+INCLUDE_MACRO = re.compile(r'\binclude(_str|_bytes)?!\s*\(\s*"([^"\n]+)"\s*\)')
+SINGLE_TARGET_FLAGS = frozenset(
+    (
+        "--lib",
+        "--bin",
+        "--bins",
+        "--example",
+        "--examples",
+        "--test",
+        "--doc",
+        "--bench",
+        "--benches",
+    )
+)
+CLOSURE_LIMIT = 5000
 
 
 def say(text="", stream=None):
@@ -411,6 +444,29 @@ def parse_selection(command):
     return tests, library, package
 
 
+def selects_every_test(command):
+    """True when the command runs every integration test target (no target flag, or --tests)."""
+    flags = {word.partition("=")[0] for word in command_words(command) if word.startswith("-")}
+    return bool(flags & {"--tests", "--all-targets"}) or not flags & SINGLE_TARGET_FLAGS
+
+
+def module_declarations(text):
+    """[(module name, explicit #[path] or None)] of the `mod NAME;` lines of Rust source text."""
+    lines = text.split("\n")
+    found = []
+    for number, line in enumerate(lines):
+        match = MODULE_LINE.match(line)
+        if not match:
+            continue
+        explicit = PATH_ATTRIBUTE.search(line)
+        before = number - 1
+        while not explicit and before >= 0 and lines[before].lstrip().startswith("#["):
+            explicit = PATH_ATTRIBUTE.search(lines[before])
+            before -= 1
+        found.append((match.group(1), explicit.group(1).replace("\\", "/") if explicit else None))
+    return found
+
+
 class Fingerprints(object):
     """The hashes that decide whether an earlier verdict still holds in the tree under `root`."""
 
@@ -419,6 +475,7 @@ class Fingerprints(object):
         self._files = {}
         self._walks = {}
         self._tests = {}
+        self._lists = {}
 
     def file_hash(self, relative):
         """SHA-256 of the LF-normalized file; the literal text "missing" when it is not there."""
@@ -439,32 +496,92 @@ class Fingerprints(object):
             return None
 
     def walk(self, folder, suffixes=(".rs",)):
-        """Relative paths of the matching files under `folder`; build output is never an input."""
+        """Relative paths of the matching files under `folder` (all files when `suffixes` is
+        None); build output is never an input."""
         key = (folder, suffixes)
         if key not in self._walks:
             found = []
             for directory, names, files in os.walk(str(self.root / folder)):
                 names[:] = [name for name in names if name != "target"]
                 for name in files:
-                    if name.endswith(suffixes):
+                    if suffixes is None or name.endswith(suffixes):
                         relative = os.path.relpath(os.path.join(directory, name), str(self.root))
                         found.append(posix(relative))
             self._walks[key] = sorted(found)
         return self._walks[key]
 
+    def is_file(self, relative):
+        return (self.root / relative).is_file()
+
+    def referenced(self, relative, text):
+        """(compiled, embedded): the existing files that one Rust source file declares as modules
+        or include!s, and the data files it embeds with include_str! or include_bytes!."""
+        directory, name = posixpath.split(relative)
+        bases = [directory] + ([posixpath.join(directory, name[:-3])] if name != "mod.rs" else [])
+        compiled, embedded = [], []
+
+        def keep(candidates, into):
+            for candidate in candidates:
+                clean = posixpath.normpath(candidate)
+                inside_root = clean.split("/")[0] != ".." and not clean.startswith("/")
+                if inside_root and ":" not in clean and self.is_file(clean):
+                    into.append(clean)
+
+        for module, explicit in module_declarations(text):
+            if explicit:
+                keep([posixpath.join(base, explicit) for base in bases], compiled)
+            else:
+                for base in bases:
+                    keep([posixpath.join(base, module + ".rs")], compiled)
+                    keep([posixpath.join(base, module, "mod.rs")], compiled)
+        for kind, target in INCLUDE_MACRO.findall(text):
+            target = posixpath.join(directory, target.replace("\\", "/"))
+            keep([target], embedded if kind else compiled)
+        return compiled, embedded
+
+    def closure(self, entries):
+        """The entry files, every file they pull in as a module or include!, those files' own
+        modules and so on, and every data file any of them embeds."""
+        found, queue = set(), list(entries)
+        while queue and len(found) < CLOSURE_LIMIT:
+            relative = queue.pop()
+            if relative in found:
+                continue
+            found.add(relative)
+            text = self.source_text(relative) if relative.endswith(".rs") else None
+            if text is None:
+                continue
+            compiled, embedded = self.referenced(relative, text)
+            queue += compiled
+            found.update(embedded)
+        return found
+
     def test_files(self, command):
+        """The files whose content decides what the tests of `command` do (see the module doc)."""
+        key = " ".join(command.split())
+        if key not in self._lists:
+            self._lists[key] = self._test_files(command)
+        return self._lists[key]
+
+    def _test_files(self, command):
         tests, library, package = parse_selection(command)
-        files = ["Cargo.toml", "Cargo.lock"]
+        everything = selects_every_test(command)
+        files, entries = ["Cargo.toml", "Cargo.lock"], []
         for name in tests:
             folder = self.root / "tests" / name
             if folder.is_dir():
-                files += self.walk("tests/" + name)
+                entries += self.walk("tests/" + name)
             if not folder.is_dir() or (self.root / "tests" / (name + ".rs")).is_file():
                 files.append("tests/%s.rs" % name)
-        if tests and (self.root / "tests" / "common").is_dir():
-            files += self.walk("tests/common")
+                entries.append("tests/%s.rs" % name)
+        if everything:
+            entries += self.walk("tests")
+        if tests or everything:
+            entries += self.walk("tests/common")
+            files += self.walk("tests/fixtures", None)
+        files += self.closure(entries)
         if library or not tests:
-            files += self.walk("src")
+            files += self.walk("src", None)
             if (self.root / "build.rs").is_file():
                 files.append("build.rs")
         if package:
@@ -503,6 +620,27 @@ class Fingerprints(object):
         if text is None or text.count(old) != 1:
             return None
         return sha(text.replace(old, new, 1).encode("utf-8"))
+
+
+def anchor_problems(fingerprints, kind, mutants):
+    """{id: why} for the mutants whose anchor does not occur exactly once in their file.
+
+    Both replay tools stop at such a mutant (k71_mutants.py raises, the compact tool refuses the
+    whole run), which would leave every mutant after it without a verdict.
+    """
+    problems = {}
+    for mutant in mutants:
+        text = fingerprints.source_text(mutant["file"])
+        if text is None:
+            problems[mutant["id"]] = "cannot read " + mutant["file"]
+            continue
+        count = text.count(mutant["old"] if kind == "list" else lf_text(mutant["old"]))
+        if count != 1:
+            problems[mutant["id"]] = "the anchor occurs %d times in %s, expected exactly once" % (
+                count,
+                mutant["file"],
+            )
+    return problems
 
 
 def carried_run(fingerprints, entry, expected):
@@ -762,10 +900,22 @@ def tool_command(config, job, list_file, out_file):
     return command + ["--timeout", str(config["timeout"])]
 
 
+def drain(process):
+    """Let a child that is still running finish; a tool that is stopped halfway through a mutant
+    leaves the mutated file behind, one that finishes restores it."""
+    try:
+        for _line in process.stdout:
+            pass
+    except (OSError, ValueError):
+        pass
+    return process.wait()
+
+
 def run_job(config, job, scratch):
     """Run the tool once in `job.tree`, forwarding its output; never raises."""
     outcome = Outcome(job)
     prefix = "[job %d] " % job.index if config["prefixed"] else ""
+    process = None
     try:
         list_file = scratch / ("ledger-%d.json" % job.index)
         out_file = scratch / ("out-%d.json" % job.index)
@@ -781,11 +931,16 @@ def run_job(config, job, scratch):
             errors="replace",
             bufsize=1,
         )
+        showing = True
         for line in process.stdout:
             line = line.rstrip("\r\n")
             if "RESTORE FAILED" in line or "not restored byte-identically" in line:
                 outcome.restore_failed = True
-            say(prefix + line)
+            if showing:
+                try:
+                    say(prefix + line)
+                except Exception:  # a console that went away must not abandon the tool
+                    showing = False
         outcome.code = process.wait()
         if out_file.is_file():
             outcome.raw = read_json(out_file)
@@ -793,7 +948,26 @@ def run_job(config, job, scratch):
             outcome.error = "the tool wrote no results file (exit %s)" % outcome.code
     except Exception as error:  # a worker must not take the others down
         outcome.error = "%s: %s" % (type(error).__name__, shorten(error, 80))
+    finally:
+        if process is not None:
+            if process.poll() is None:
+                drain(process)
+            process.stdout.close()
     return outcome
+
+
+def stale_record(why, expected, fingerprint):
+    """The record of a mutant that was never handed to a tool because its anchor is stale."""
+    return {
+        "status": "invalid",
+        "tool_status": "anchor",
+        "failed_tests": [],
+        "seconds": 0,
+        "restored": None,
+        "expected": expected,
+        "fingerprint": fingerprint,
+        "tail": why,
+    }
 
 
 def seconds_of(value):
@@ -923,9 +1097,12 @@ def work_dir_of(root, text):
 
 
 def cmd_plan(args):
-    ledger = load_ledger(resolve_ledger(existing_dir(args.root), args.ledger))
+    root = existing_dir(args.root)
+    ledger = load_ledger(resolve_ledger(root, args.ledger))
     ids = parse_ids(args.ids)
-    count = len(select_mutants(ledger, ids))
+    chosen = select_mutants(ledger, ids)
+    count = len(chosen)
+    stale = anchor_problems(Fingerprints(root), ledger.kind, chosen)
     total = 0 if count == 0 else max(1, min(args.shards, args.max_shards, count))
     shards = list(range(total))
     plan = {
@@ -933,12 +1110,20 @@ def cmd_plan(args):
         "count": count,
         "total_shards": total,
         "shards": shards,
+        "stale": len(stale),
         "unsupported": unsupported_of(ledger, ids),
     }
     say(json.dumps(plan, separators=(",", ":")))
+    if stale:
+        say(
+            "warning: %d mutant(s) have an anchor that does not occur exactly once and will be "
+            "reported invalid: %s" % (len(stale), listing(stale)),
+            sys.stderr,
+        )
     output = os.environ.get("GITHUB_OUTPUT")
     if output:
         lines = ["kind=%s" % ledger.kind, "count=%d" % count, "total_shards=%d" % total]
+        lines.append("stale=%d" % len(stale))
         lines.append("shards=" + json.dumps(shards, separators=(",", ":")))
         write_text(output, "\n".join(lines) + "\n", append=True)
     return 0
@@ -1033,6 +1218,18 @@ def cmd_run(args):
             target = work / ("target-%d" % index)
             target.mkdir(parents=True, exist_ok=True)
             jobs.append(Job(index, trees[index], target, todo[index::workers]))
+        stale = {}
+        for job in jobs:
+            problems = anchor_problems(Fingerprints(job.tree), ledger.kind, job.mutants)
+            job.mutants = [m for m in job.mutants if m["id"] not in problems]
+            stale.update(problems)
+        if stale:
+            for name, why in stale.items():
+                results[name] = stale_record(why, expected[name], prints[name])
+            notice = "warning: %d mutant(s) have a stale anchor and are reported invalid: %s"
+            say(notice % (len(stale), listing(stale)), sys.stderr)
+            flush()
+        jobs = [job for job in jobs if job.mutants]
         config = {
             "kind": ledger.kind,
             "ledger": ledger,
@@ -1042,7 +1239,8 @@ def cmd_run(args):
             "workers": workers,
             "prefixed": args.jobs > 1,
         }
-        say("replaying %d mutants with %d job(s): %s" % (len(todo), workers, TOOLS[ledger.kind]))
+        replayed = len(todo) - len(stale)
+        say("replaying %d mutants with %d job(s): %s" % (replayed, len(jobs), TOOLS[ledger.kind]))
         # The scratch files (ledger subsets and raw tool output) never outlive the run.
         with tempfile.TemporaryDirectory(prefix="mutant-replay-") as scratch:
             with concurrent.futures.ThreadPoolExecutor(max_workers=workers) as executor:
@@ -1172,8 +1370,10 @@ def wall_time(documents, given):
 
 def build_summary(args, ledger, documents, expected):
     results, skipped, extra_unsupported = combine(documents)
+    ids = parse_ids(getattr(args, "ids", ""))
+    chosen = select_mutants(ledger, ids)
     rows = []
-    for mutant in ledger.mutants:
+    for mutant in chosen:
         name = mutant["id"]
         record = results.get(name) or {}
         seconds = record.get("seconds")
@@ -1190,7 +1390,7 @@ def build_summary(args, ledger, documents, expected):
         )
     count = collections.Counter(row["verdict"] for row in rows)
     unexpected = [row for row in rows if row["verdict"] not in (row["expected"], "skipped")]
-    unsupported = list(ledger.unsupported)
+    unsupported = unsupported_of(ledger, ids)
     unsupported += [n for n in extra_unsupported if n not in unsupported]
     totals = {
         "mutants": len(rows),
@@ -1382,6 +1582,7 @@ def build_parser():
 
     merge = add("merge", cmd_merge, "merge result files into a verdict summary")
     merge.add_argument("--results", nargs="+", required=True, help="result files or directories")
+    merge.add_argument("--ids", default="", help="comma-separated ids the replay was limited to")
     merge.add_argument("--survivors-ok", default="", help="comma-separated ids that may survive")
     merge.add_argument(
         "--wall-seconds", type=float, help="wall time to report (default: from the files)"

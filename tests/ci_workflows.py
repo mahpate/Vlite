@@ -521,7 +521,7 @@ class MutantsWorkflow(unittest.TestCase):
         self.assertEqual(set(re.findall(r"runs-on: (\S+)", self.text)), {"ubuntu-latest"})
 
     def test_inputs_cover_the_ledger_the_tree_the_shards_and_an_id_filter(self):
-        for name in ("ledger", "ref", "shards", "ids", "survivors_ok", "jobs"):
+        for name in ("ledger", "ref", "shards", "ids", "survivors_ok", "jobs", "timeout"):
             self.assertIn(f"\n      {name}:\n", self.header)
         self.assertIn("default: tests/k71_mutants.json", self.header)
         self.assertIn("ref: ${{ inputs.ref || github.sha }}", self.text)
@@ -542,6 +542,48 @@ class MutantsWorkflow(unittest.TestCase):
                     self.assertNotIn("${{ inputs.", line, (name, line))
         self.assertNotIn("run: ${{", self.text)
 
+    def test_every_mutant_id_of_every_ledger_passes_the_id_filter(self):
+        match = re.search(r"ids_pattern='([^']+)'", self.job("plan"))
+        self.assertIsNotNone(match, "the plan job must check ids against ids_pattern")
+        pattern = re.compile(match.group(1))
+        for good in ("lines-fix/lf-mcp-cap-64-mib", "a/b,c/d", "a/b, c.d:e_f-g"):
+            self.assertTrue(pattern.fullmatch(good), good)
+        for bad in ("a;b", "$(id)", "`id`", "a|b", "a&b", "a>b", "a'b", 'a"b', "a\nb", "a\\b", "a*b"):
+            self.assertFalse(pattern.fullmatch(bad), repr(bad))
+        seen = 0
+        for path in sorted((ROOT / "tests").glob("*mutants*.json")):
+            data = json.loads(path.read_text(encoding="utf-8-sig"))
+            entries = data.get("mutants") if isinstance(data, dict) else data
+            for entry in entries if isinstance(entries, list) else []:
+                name = entry.get("id") if isinstance(entry, dict) else None
+                if isinstance(name, str):
+                    seen += 1
+                    self.assertTrue(pattern.fullmatch(name), f"{path.name}: {name}")
+        self.assertGreater(seen, 200)
+
+    def test_the_tree_is_pinned_once_by_the_plan_job(self):
+        plan = self.job("plan")
+        self.assertIn("tree_sha: ${{ steps.sha.outputs.tree_sha }}", plan)
+        self.assertIn('echo "tree_sha=$(git -C tree rev-parse HEAD)" >> "$GITHUB_OUTPUT"', plan)
+        self.assertEqual(plan.count("ref: ${{ inputs.ref || github.sha }}\n          path: tree\n"), 1)
+        for name in ("replay", "summary"):
+            body = self.job(name)
+            self.assertIn("ref: ${{ needs.plan.outputs.tree_sha }}\n          path: tree\n", body)
+            self.assertNotIn("inputs.ref", body)
+
+    def test_each_mutant_has_a_timeout_and_a_rerun_can_replace_the_artifacts(self):
+        plan, replay = self.job("plan"), self.job("replay")
+        self.assertIn('[ "$TIMEOUT" -gt 7200 ]', plan)
+        self.assertIn("TIMEOUT: ${{ inputs.timeout }}", replay)
+        self.assertIn('--timeout "$TIMEOUT"', replay)
+        self.assertEqual(self.text.count("uses: actions/upload-artifact@v4"), 2)
+        self.assertEqual(self.text.count("          overwrite: true\n"), 2)
+
+    def test_stale_anchors_are_reported_by_the_plan(self):
+        plan = self.job("plan")
+        self.assertIn("stale: ${{ steps.plan.outputs.stale }}", plan)
+        self.assertIn("if: ${{ steps.plan.outputs.stale != '0' }}", plan)
+
     def test_each_shard_uploads_one_json_and_a_final_job_merges_them(self):
         replay, summary = self.job("replay"), self.job("summary")
         self.assertIn('--out "results/shard-$SHARD.json"', replay)
@@ -553,6 +595,9 @@ class MutantsWorkflow(unittest.TestCase):
         self.assertIn("merge-multiple: true", summary)
         self.assertIn('--summary "$GITHUB_STEP_SUMMARY"', summary)
         self.assertIn("--wall-seconds", summary)
+        # A partial replay (the ids input) is merged over the same ids, never over the whole ledger.
+        self.assertIn('--ids "$IDS"', summary)
+        self.assertIn("IDS: ${{ inputs.ids }}", summary)
         # The table is written even when some shards failed.
         self.assertIn("if: ${{ !cancelled() && needs.plan.result == 'success' }}", summary)
 
@@ -560,7 +605,6 @@ class MutantsWorkflow(unittest.TestCase):
         for name in ("plan", "replay", "summary"):
             body = self.job(name)
             self.assertIn("path: tools\n          sparse-checkout: tests/mutant_replay.py\n", body)
-            self.assertIn("ref: ${{ inputs.ref || github.sha }}\n          path: tree\n", body)
             self.assertIn("tools/tests/mutant_replay.py", body)
         self.assertTrue((ROOT / "tests/mutant_replay.py").is_file())
 

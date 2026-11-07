@@ -5,12 +5,18 @@ name: Mutant replay
 # repository: nothing here commits, pushes or publishes, and results are run artifacts.
 #
 # Start it from the Actions tab, or: gh workflow run mutants.yml -f ledger=tests/k71_mutants.json
+# To replay again only what is missing or unexpected in a table, pass those ids in `ids`
+# (comma-separated, for example `import/cap-8-mib,lines-fix/lf-mcp-cap-64-mib`): the summary then
+# covers exactly those mutants.
 #
 # The replay driver (tests/mutant_replay.py) comes from the commit this run was started from; the
-# tree that is mutated is `ref` (default: that same commit). The driver calls the replay tool that
-# the mutated tree carries (tests/k71_mutants.py or tests/compact_mutant_replay.py), so older refs
+# tree that is mutated is `ref` (default: that same commit), resolved once by the plan job so that
+# every shard and the summary use the same commit. The driver calls the replay tool that the
+# mutated tree carries (tests/k71_mutants.py or tests/compact_mutant_replay.py), so older refs
 # replay with their own tool. Mutants are spread over the shards in turn, each shard runs on a fresh
 # runner, and an independent second-machine replay of a final head is still a separate run.
+# A mutant that runs longer than `timeout` is invalid, but a shard that reaches the 120 minute job
+# limit loses all its results: use more shards for a big ledger.
 
 on:
   workflow_dispatch:
@@ -40,6 +46,10 @@ on:
         type: choice
         options: ["1", "2"]
         default: "1"
+      timeout:
+        description: "Seconds one mutant may take, build and tests together (60 to 7200)"
+        type: number
+        default: 1800
 
 permissions:
   contents: read
@@ -58,6 +68,8 @@ jobs:
       shards: ${{ steps.plan.outputs.shards }}
       total_shards: ${{ steps.plan.outputs.total_shards }}
       count: ${{ steps.plan.outputs.count }}
+      stale: ${{ steps.plan.outputs.stale }}
+      tree_sha: ${{ steps.sha.outputs.tree_sha }}
       started: ${{ steps.clock.outputs.started }}
     steps:
       - id: clock
@@ -68,6 +80,7 @@ jobs:
           SHARDS: ${{ inputs.shards }}
           IDS: ${{ inputs.ids }}
           SURVIVORS_OK: ${{ inputs.survivors_ok }}
+          TIMEOUT: ${{ inputs.timeout }}
         run: |
           if ! [[ "$LEDGER" =~ ^[A-Za-z0-9_][A-Za-z0-9._/-]*\.json$ ]] || [[ "$LEDGER" == *..* ]]; then
             echo "::error::ledger must be a relative .json path inside the repository, not '$LEDGER'"
@@ -77,8 +90,14 @@ jobs:
             echo "::error::shards must be a whole number from 1 to 20, not '$SHARDS'"
             exit 1
           fi
+          if ! [[ "$TIMEOUT" =~ ^[0-9]+$ ]] || [ "$TIMEOUT" -lt 60 ] || [ "$TIMEOUT" -gt 7200 ]; then
+            echo "::error::timeout must be a whole number of seconds from 60 to 7200, not '$TIMEOUT'"
+            exit 1
+          fi
+          # Mutant ids are paths of words such as lines-fix/lf-mcp-cap-64-mib, comma-separated.
+          ids_pattern='^[A-Za-z0-9_.:/, -]+$'
           for list in "$IDS" "$SURVIVORS_OK"; do
-            if [[ -n "$list" ]] && ! [[ "$list" =~ ^[A-Za-z0-9_.,:\ -]+$ ]]; then
+            if [[ -n "$list" ]] && ! [[ "$list" =~ $ids_pattern ]]; then
               echo "::error::ids and survivors_ok are comma-separated mutant ids"
               exit 1
             fi
@@ -94,6 +113,9 @@ jobs:
           ref: ${{ inputs.ref || github.sha }}
           path: tree
           persist-credentials: false
+      - id: sha
+        name: Pin the tree
+        run: echo "tree_sha=$(git -C tree rev-parse HEAD)" >> "$GITHUB_OUTPUT"
       - id: plan
         name: Plan the shards
         env:
@@ -109,16 +131,22 @@ jobs:
             echo "::error::the ledger has no replayable mutant for these inputs"
             exit 1
           fi
+      - name: Warn about stale anchors
+        if: ${{ steps.plan.outputs.stale != '0' }}
+        env:
+          STALE: ${{ steps.plan.outputs.stale }}
+        run: echo "::warning::$STALE mutant(s) have an anchor that no longer occurs exactly once in its file; they are reported invalid, not replayed (the plan step lists them)"
       - name: Record the plan
         env:
           LEDGER: ${{ inputs.ledger }}
           COUNT: ${{ steps.plan.outputs.count }}
           TOTAL: ${{ steps.plan.outputs.total_shards }}
           JOBS: ${{ inputs.jobs }}
+          TREE_SHA: ${{ steps.sha.outputs.tree_sha }}
         run: |
           {
             echo "Replaying $COUNT mutants of \`$LEDGER\` in $TOTAL shards ($JOBS worktree(s) each)."
-            echo "Tree: \`$(git -C tree rev-parse HEAD)\`. Driver: \`$(git -C tools rev-parse HEAD)\`."
+            echo "Tree: \`$TREE_SHA\`. Driver: \`$(git -C tools rev-parse HEAD)\`."
           } >> "$GITHUB_STEP_SUMMARY"
 
   replay:
@@ -140,7 +168,7 @@ jobs:
           persist-credentials: false
       - uses: actions/checkout@v5
         with:
-          ref: ${{ inputs.ref || github.sha }}
+          ref: ${{ needs.plan.outputs.tree_sha }}
           path: tree
           persist-credentials: false
       - uses: dtolnay/rust-toolchain@683b588c487a69d01f6c6ddf40f036ff682cc2c8 # master, Rust 1.99.1
@@ -162,12 +190,13 @@ jobs:
           IDS: ${{ inputs.ids }}
           SURVIVORS_OK: ${{ inputs.survivors_ok }}
           JOBS: ${{ inputs.jobs }}
+          TIMEOUT: ${{ inputs.timeout }}
           SHARD: ${{ matrix.shard }}
           TOTAL: ${{ needs.plan.outputs.total_shards }}
         run: >-
           python3 tools/tests/mutant_replay.py run --root tree --ledger "$LEDGER"
           --shard "$SHARD/$TOTAL" --jobs "$JOBS" --ids "$IDS" --survivors-ok "$SURVIVORS_OK"
-          --out "results/shard-$SHARD.json"
+          --timeout "$TIMEOUT" --out "results/shard-$SHARD.json"
       - uses: actions/upload-artifact@v4
         if: ${{ !cancelled() }}
         with:
@@ -175,6 +204,7 @@ jobs:
           path: results/shard-${{ matrix.shard }}.json
           if-no-files-found: warn
           retention-days: 14
+          overwrite: true
 
   summary:
     needs: [plan, replay]
@@ -190,7 +220,7 @@ jobs:
           persist-credentials: false
       - uses: actions/checkout@v5
         with:
-          ref: ${{ inputs.ref || github.sha }}
+          ref: ${{ needs.plan.outputs.tree_sha }}
           path: tree
           persist-credentials: false
       - uses: actions/download-artifact@v5
@@ -201,11 +231,12 @@ jobs:
       - name: Merge the shard results into one table
         env:
           LEDGER: ${{ inputs.ledger }}
+          IDS: ${{ inputs.ids }}
           SURVIVORS_OK: ${{ inputs.survivors_ok }}
           STARTED: ${{ needs.plan.outputs.started }}
         run: >-
           python3 tools/tests/mutant_replay.py merge --root tree --ledger "$LEDGER"
-          --results results --survivors-ok "$SURVIVORS_OK"
+          --results results --ids "$IDS" --survivors-ok "$SURVIVORS_OK"
           --wall-seconds "$(( $(date +%s) - STARTED ))"
           --summary "$GITHUB_STEP_SUMMARY" --json mutants-summary.json
       - uses: actions/upload-artifact@v4
@@ -215,3 +246,4 @@ jobs:
           path: mutants-summary.json
           if-no-files-found: warn
           retention-days: 14
+          overwrite: true
