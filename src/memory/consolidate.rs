@@ -18,7 +18,7 @@ use crate::{
     property_graph::{GraphOp, GraphOpOutcome, GraphRef, NodeView},
 };
 
-const SCHEMA: &str = "consolidate:v1";
+pub(super) const SCHEMA: &str = "consolidate:v1";
 const OPERATION: &str = "consolidate";
 const DEFAULT_INPUT_BUDGET: u64 = 64;
 const MAX_INPUT_BUDGET: u64 = 256;
@@ -359,13 +359,13 @@ fn decode_outcome(value: &str) -> MemoryResult<StoredOutcome> {
 }
 
 #[derive(Clone, Copy)]
-enum Field {
+pub(super) enum Field {
     String,
     Integer,
 }
 
 /// Exactly one label and exactly these property names and types.
-fn exact_node(node: &NodeView, label: &str, fields: &[(&str, Field)]) -> bool {
+pub(super) fn exact_node(node: &NodeView, label: &str, fields: &[(&str, Field)]) -> bool {
     node.labels.len() == 1
         && node.labels.contains(label)
         && node.properties.len() == fields.len()
@@ -378,21 +378,21 @@ fn exact_node(node: &NodeView, label: &str, fields: &[(&str, Field)]) -> bool {
         })
 }
 
-fn text<'a>(node: &'a NodeView, name: &str) -> &'a str {
+pub(super) fn text<'a>(node: &'a NodeView, name: &str) -> &'a str {
     match node.properties.get(name) {
         Some(MetadataValue::String(value)) => value,
         _ => "",
     }
 }
 
-fn integer(node: &NodeView, name: &str) -> Option<i64> {
+pub(super) fn integer(node: &NodeView, name: &str) -> Option<i64> {
     match node.properties.get(name) {
         Some(MetadataValue::Integer(value)) => Some(*value),
         _ => None,
     }
 }
 
-const RECEIPT_FIELDS: &[(&str, Field)] = &[
+pub(super) const RECEIPT_FIELDS: &[(&str, Field)] = &[
     ("scope", Field::String),
     ("c1_scope_tuple", Field::String),
     ("c1_schema", Field::String),
@@ -402,7 +402,7 @@ const RECEIPT_FIELDS: &[(&str, Field)] = &[
     ("outcome_chunks", Field::Integer),
 ];
 
-const OUTCOME_FIELDS: &[(&str, Field)] = &[
+pub(super) const OUTCOME_FIELDS: &[(&str, Field)] = &[
     ("receipt_key", Field::String),
     ("index", Field::Integer),
     ("outcome", Field::String),
@@ -756,6 +756,7 @@ impl MemoryMut<'_> {
             string((now + request.receipt_window_ms).to_string()),
         );
         receipt_properties.insert("outcome_chunks".into(), MetadataValue::Integer(1));
+        let own_receipt_key = receipt_key.clone();
         ops.push(put_node(
             receipt_key,
             LABEL_RECEIPT,
@@ -764,7 +765,13 @@ impl MemoryMut<'_> {
         ));
         debug_assert_eq!(ops.len(), physical);
 
-        let batch = self.db.graph_mut(&self.graph)?.write_batch_at(&ops, now)?;
+        let reclaim = super::reclaim::plan(
+            &self.db.graph(&self.graph)?.with_clock(now),
+            &own_receipt_key,
+            now,
+            MAX_OPS.saturating_sub(logical),
+        );
+        let batch = super::reclaim::write(self.db, &self.graph, reclaim, ops, now)?;
         let (Some(commit_sequence), Some(GraphOpOutcome::Node(receipt))) =
             (batch.revision, batch.outcomes.last())
         else {

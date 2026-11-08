@@ -29,6 +29,7 @@ pub(crate) use recall::{
 mod ranking;
 mod recall;
 mod receipt;
+mod reclaim;
 #[cfg(feature = "server")]
 pub(crate) use receipt::{ReceiptLookup, ReceiptOutcome};
 mod stale;
@@ -553,10 +554,17 @@ impl<'db> MemoryMut<'db> {
                 });
             }
         });
-        let batch = self
-            .db
-            .graph_mut(&self.graph)?
-            .write_batch_at(&ops, request.now_ms)?;
+        let headroom = MAX_OPS.saturating_sub(
+            ops.len()
+                .max(planned.budget_operations + 1 + outcome_chunk_count),
+        );
+        let reclaim = reclaim::plan(
+            &self.db.graph(&self.graph)?.with_clock(request.now_ms),
+            &receipt_key,
+            request.now_ms,
+            headroom,
+        );
+        let batch = reclaim::write(self.db, &self.graph, reclaim, ops, request.now_ms)?;
         let receipt_write = batch
             .outcomes
             .last()
@@ -819,10 +827,14 @@ impl<'db> MemoryMut<'db> {
         if ops.len() + guard_operations > MAX_OPS {
             return Err(MemoryError::OperationLimit);
         }
-        let batch = self
-            .db
-            .graph_mut(&self.graph)?
-            .write_batch_at(&ops, request.now_ms)?;
+        let headroom = MAX_OPS.saturating_sub(ops.len() + guard_operations);
+        let reclaim = reclaim::plan(
+            &self.db.graph(&self.graph)?.with_clock(request.now_ms),
+            &key,
+            request.now_ms,
+            headroom,
+        );
+        let batch = reclaim::write(self.db, &self.graph, reclaim, ops, request.now_ms)?;
         let receipt_write = batch
             .outcomes
             .last()

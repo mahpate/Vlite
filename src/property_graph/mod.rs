@@ -198,6 +198,25 @@ impl GraphRef<'_> {
         self.graph.node_count()
     }
 
+    /// At most `limit` IDs of the nodes labelled `label`: ascending from
+    /// `seed % next_node_id`, then wrapping once to the lowest ID. Every member
+    /// visited counts toward `limit`, hidden or not. For the memory receipt reclaimer.
+    pub(crate) fn memory_label_window(&self, label: &str, seed: u64, limit: usize) -> Vec<u64> {
+        let next = self.graph.next_node_id();
+        let start = if next == 0 { 0 } else { seed % next };
+        let after = start.checked_sub(1).map(engine::NodeId);
+        self.graph
+            .label_scan(label, after)
+            .chain(
+                self.graph
+                    .label_scan(label, None)
+                    .take_while(move |id| id.0 < start),
+            )
+            .take(limit)
+            .map(|id| id.0)
+            .collect()
+    }
+
     pub(crate) fn memory_string_property(&self, key: &str, field: &str) -> Option<&str> {
         let node = self.graph.node_by_key(key)?;
         if self.graph.node_expired(node.id, self.now()) {
