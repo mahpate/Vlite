@@ -558,13 +558,14 @@ impl<'db> MemoryMut<'db> {
             ops.len()
                 .max(planned.budget_operations + 1 + outcome_chunk_count),
         );
-        let reclaim = reclaim::plan(
-            &self.db.graph(&self.graph)?.with_clock(request.now_ms),
+        let batch = reclaim::commit(
+            self.db,
+            &self.graph,
             &receipt_key,
             request.now_ms,
             headroom,
-        );
-        let batch = reclaim::write(self.db, &self.graph, reclaim, ops, request.now_ms)?;
+            ops,
+        )?;
         let receipt_write = batch
             .outcomes
             .last()
@@ -828,13 +829,7 @@ impl<'db> MemoryMut<'db> {
             return Err(MemoryError::OperationLimit);
         }
         let headroom = MAX_OPS.saturating_sub(ops.len() + guard_operations);
-        let reclaim = reclaim::plan(
-            &self.db.graph(&self.graph)?.with_clock(request.now_ms),
-            &key,
-            request.now_ms,
-            headroom,
-        );
-        let batch = reclaim::write(self.db, &self.graph, reclaim, ops, request.now_ms)?;
+        let batch = reclaim::commit(self.db, &self.graph, &key, request.now_ms, headroom, ops)?;
         let receipt_write = batch
             .outcomes
             .last()

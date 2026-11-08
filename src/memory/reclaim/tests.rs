@@ -12,8 +12,9 @@ use super::super::consolidate::{ConsolidateInput, ConsolidateRequest, Consolidat
 use super::super::erasure::EraseScopeRequest;
 use super::super::{
     FAIL_NEXT_WRITE_BATCH, ForgetRequest, ForgetTarget, LABEL_RECEIPT, LABEL_RECEIPT_OUTCOME,
-    MemoryError, MemoryItem, MemoryKind, MemoryMut, MemoryScope, RememberRequest, RememberResult,
-    forget_receipt_key, hex, operation_receipt_key, receipt_key, receipt_outcome_key,
+    MAX_OPS, MemoryError, MemoryItem, MemoryKind, MemoryMut, MemoryScope, RememberRequest,
+    RememberResult, forget_receipt_key, hex, operation_receipt_key, receipt_key,
+    receipt_outcome_key,
 };
 use super::{
     FAIL_RECLAIM_ATTEMPT, Limits, RECEIPT_RECLAIM_GRACE_MS, RECLAIM_MAX_OPS, RECLAIM_MAX_READS,
@@ -30,7 +31,7 @@ const GRAPH: &str = "memory";
 const ELIGIBLE: u64 = 110 + RECEIPT_RECLAIM_GRACE_MS;
 const WIDE: Limits = Limits {
     scan: RECLAIM_SCAN,
-    max_ops: 4_096,
+    max_ops: MAX_OPS,
     max_reads: usize::MAX,
 };
 
@@ -354,7 +355,7 @@ fn plan_at(
 }
 
 fn plan_wide(db: &Database, now_ms: u64) -> Vec<String> {
-    plan_at(db, "", now_ms, 4_096, 0, WIDE)
+    plan_at(db, "", now_ms, MAX_OPS, 0, WIDE)
 }
 
 fn concat(groups: &[&Vec<String>]) -> Vec<String> {
@@ -442,7 +443,7 @@ fn the_writing_requests_own_receipt_is_never_reclaimed() {
     let own_id = node_id(&db, &own);
     let own_group = vec![own.clone(), receipt_outcome_key(&own, 0)];
     assert_eq!(plan_wide(&db, ELIGIBLE), own_group);
-    assert!(plan_at(&db, &own, ELIGIBLE, 4_096, 0, WIDE).is_empty());
+    assert!(plan_at(&db, &own, ELIGIBLE, MAX_OPS, 0, WIDE).is_empty());
 
     // An own-key retry after expiry writes a fresh result in place, as before.
     let retry = remember(&mut db, &writer, "k", "m", ELIGIBLE);
@@ -674,7 +675,7 @@ fn malformed_partial_or_pinned_groups_are_skipped() {
     let before = snapshot(&db);
     assert_eq!(plan_wide(&db, u64::MAX / 4), control);
     for seed in [0, 1, 7, 40, 80] {
-        let planned = plan_at(&db, "", u64::MAX / 4, 4_096, seed, WIDE);
+        let planned = plan_at(&db, "", u64::MAX / 4, MAX_OPS, seed, WIDE);
         for (name, key) in &skipped {
             assert!(!planned.contains(key), "{name} was planned");
         }
@@ -768,14 +769,17 @@ fn budgets_bound_each_write_and_one_large_first_group_fits_the_headroom() {
     assert!(plan(1, limits).is_empty());
     // No more than `scan` members are examined.
     let narrow = Limits { scan: 3, ..WIDE };
-    assert_eq!(plan(4_096, narrow), concat(&[&large, &small[0], &small[1]]));
+    assert_eq!(
+        plan(MAX_OPS, narrow),
+        concat(&[&large, &small[0], &small[1]])
+    );
     // With the default bounds, every group fits.
     let all: Vec<String> = std::iter::once(&large)
         .chain(small.iter())
         .flatten()
         .cloned()
         .collect();
-    assert_eq!(plan(4_096, Limits::DEFAULT), all);
+    assert_eq!(plan(MAX_OPS, Limits::DEFAULT), all);
 }
 
 #[test]
@@ -796,7 +800,7 @@ fn the_read_budget_drops_a_partial_group() {
     // The first group costs 7 reads (barrier, receipt edges and attachments,
     // chunk 0, its edges and attachments, the chunk 1 probe); later groups of
     // the same scope cost 6 (the barrier is cached).
-    let reads = |max_reads| plan_at(&db, "", ELIGIBLE, 4_096, 0, Limits { max_reads, ..WIDE });
+    let reads = |max_reads| plan_at(&db, "", ELIGIBLE, MAX_OPS, 0, Limits { max_reads, ..WIDE });
     assert!(reads(0).is_empty());
     assert!(reads(6).is_empty());
     assert_eq!(reads(7), groups[0]);

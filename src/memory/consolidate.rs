@@ -765,13 +765,14 @@ impl MemoryMut<'_> {
         ));
         debug_assert_eq!(ops.len(), physical);
 
-        let reclaim = super::reclaim::plan(
-            &self.db.graph(&self.graph)?.with_clock(now),
+        let batch = super::reclaim::commit(
+            self.db,
+            &self.graph,
             &own_receipt_key,
             now,
             MAX_OPS.saturating_sub(logical),
-        );
-        let batch = super::reclaim::write(self.db, &self.graph, reclaim, ops, now)?;
+            ops,
+        )?;
         let (Some(commit_sequence), Some(GraphOpOutcome::Node(receipt))) =
             (batch.revision, batch.outcomes.last())
         else {

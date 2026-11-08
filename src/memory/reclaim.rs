@@ -137,6 +137,27 @@ pub(super) fn plan_with(
     planned
 }
 
+/// Plans the reclamation of expired receipts at the request clock and writes
+/// it ahead of `ops`: the one entry point of a committing remember, forget or
+/// consolidate. `headroom` is the operation count the caller's own batch
+/// leaves free.
+pub(super) fn commit(
+    db: &mut Database,
+    graph: &str,
+    own_receipt_key: &str,
+    now_ms: u64,
+    headroom: usize,
+    ops: Vec<GraphOp>,
+) -> crate::Result<GraphBatchResult> {
+    let reclaim = plan(
+        &db.graph(graph)?.with_clock(now_ms),
+        own_receipt_key,
+        now_ms,
+        headroom,
+    );
+    write(db, graph, reclaim, ops, now_ms)
+}
+
 /// The batch `reclaim` then `ops` at the request clock; on a pre-frame
 /// planning error of that attempt, `ops` alone, exactly once.
 pub(super) fn write(
@@ -303,6 +324,10 @@ impl Reader<'_, '_> {
             key: receipt.key.clone(),
             expected: Expected::Revision(receipt.revision),
         }];
+        // Probing stops at the first absent chunk past the named ones. A
+        // surplus chunk behind a gap, past `MAX_CHUNKS` or hidden by its own
+        // expiry is never found and stays behind: storage only, and only a
+        // raw graph write can create one.
         for index in 0..MAX_CHUNKS {
             let key = receipt_outcome_key(&receipt.key, index);
             let Some(chunk) = self.node(&key)? else {
