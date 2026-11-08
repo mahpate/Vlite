@@ -210,7 +210,8 @@ struct Bound {
     receipt_window_ms: u64,
     refusal: Option<WireCode>,
     scopes: Vec<MemoryScope>,
-    /// The grant's read-only scopes: `recall` and `facts/query` only.
+    /// The grant's read-only scopes, copied only for an operation that
+    /// accepts them (`recall`, `facts/query`); empty for every other route.
     read_scopes: Vec<MemoryScope>,
     /// Whether the credential's grant carries `raw_access` on this binding.
     raw_access: bool,
@@ -262,7 +263,11 @@ fn resolve(
             receipt_window_ms: binding.receipt_window_ms,
             refusal: binding.refusal(operation),
             scopes: granted.scopes.clone(),
-            read_scopes: granted.read_scopes.clone(),
+            read_scopes: if operation.accepts_read_scopes() {
+                granted.read_scopes.clone()
+            } else {
+                Vec::new()
+            },
             raw_access: granted.raw_access,
             grant: grant.clone(),
         },

@@ -46,6 +46,27 @@ fn first_slice_serves_five_operations_and_refuses_four_explicitly() {
 }
 
 #[test]
+fn only_recall_and_find_facts_accept_read_scopes() {
+    use WireOperation::*;
+    let all = [
+        Remember,
+        Recall,
+        FindFacts,
+        CorrectFacts,
+        Consolidate,
+        Forget,
+        GetReceipt,
+        GetErasure,
+        ResumeErasure,
+    ];
+    let readers: Vec<_> = all
+        .into_iter()
+        .filter(|operation| operation.accepts_read_scopes())
+        .collect();
+    assert_eq!(readers, [Recall, FindFacts]);
+}
+
+#[test]
 fn receipt_operations_map_from_wire_names() {
     assert_eq!(
         ReceiptOperation::from_wire("remember"),

@@ -75,6 +75,22 @@ impl WireOperation {
             Self::GetErasure | Self::ResumeErasure => Some(unavailable("erasure_jobs")),
         }
     }
+
+    /// Whether a grant's read-only scopes may authorize the operation. The
+    /// match is exhaustive on purpose: a new operation has to be classified,
+    /// and anything that writes or touches a receipt must answer `false`.
+    pub(crate) fn accepts_read_scopes(self) -> bool {
+        match self {
+            Self::Recall | Self::FindFacts => true,
+            Self::Remember
+            | Self::CorrectFacts
+            | Self::Consolidate
+            | Self::Forget
+            | Self::GetReceipt
+            | Self::GetErasure
+            | Self::ResumeErasure => false,
+        }
+    }
 }
 
 impl ReceiptOperation {

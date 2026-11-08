@@ -18,8 +18,7 @@ async fn refused(
     write: bool,
 ) -> Response {
     let service = call.service.clone();
-    // Only facts/query is a read route: it alone accepts a read scope.
-    let reader = matches!(operation, WireOperation::FindFacts);
+    let reader = operation.accepts_read_scopes();
     let (bound, name) = match resolve(&service, &call.role, name, operation, evidence_ops) {
         Ok(found) => found,
         Err(fail) => return call.finish(Err(fail), None),
