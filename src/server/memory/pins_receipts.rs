@@ -898,6 +898,79 @@ async fn a_stored_receipt_expiry_does_not_depend_on_the_read_clock() {
     });
 }
 
+// ------------------------------------------------------------ reclamation
+
+fn outcome_key(receipt_key: &str, index: usize) -> String {
+    format!(
+        "receipt-outcome:v1:{}:{index:04x}",
+        hex(&Sha256::digest(receipt_key.as_bytes()))
+    )
+}
+
+/// TEST-008: a later write in another scope reclaims expired receipt groups
+/// only once the grace has passed, and the lookup answer for a reclaimed
+/// receipt is the same 404 it was before reclamation.
+#[tokio::test]
+async fn an_expired_receipt_is_reclaimed_by_a_later_write_and_still_answers_404() {
+    let rig = std_rig();
+    rig.at(1_000);
+    let a = json!({"agent": "a"});
+    let b = json!({"agent": "b"});
+    forget(&rig, "notes", &a, "k", &["m"]).await;
+    consolidate(&rig, "notes", &a, "c", "n", "s1").await;
+    let owner = scope_key(&root("a"));
+    let groups: Vec<String> = [
+        ("forget", "k"),
+        ("remember", "seed-k"),
+        ("consolidate", "c"),
+        ("remember", "seed-c"),
+    ]
+    .into_iter()
+    .flat_map(|(operation, key)| {
+        let receipt = node_key(operation, &owner, key);
+        let chunk = outcome_key(&receipt, 0);
+        [receipt, chunk]
+    })
+    .collect();
+    let exists = |rig: &Rig| {
+        rig.with_db(|db| {
+            groups
+                .iter()
+                .map(|key| node_exists(db, "notes_graph", key))
+                .collect::<Vec<_>>()
+        })
+    };
+    assert!(exists(&rig).iter().all(|exists| *exists));
+
+    rig.at(61_000);
+    let before = [
+        lookup(&rig, &query(&a, "forget", "k")).await,
+        lookup(&rig, &query(&a, "consolidate", "c")).await,
+    ];
+    for response in &before {
+        fault(response, 404, "receipt_not_found", Value::Null);
+    }
+
+    rig.at(360_999);
+    remember(&rig, "notes", &b, "w1", &["x"]).await;
+    assert!(
+        exists(&rig).iter().all(|exists| *exists),
+        "kept within the grace"
+    );
+
+    rig.at(361_000);
+    remember(&rig, "notes", &b, "w2", &["y"]).await;
+    assert!(
+        exists(&rig).iter().all(|exists| !*exists),
+        "reclaimed once the grace has passed"
+    );
+    let after = [
+        lookup(&rig, &query(&a, "forget", "k")).await,
+        lookup(&rig, &query(&a, "consolidate", "c")).await,
+    ];
+    assert_eq!(after, before);
+}
+
 // ------------------------------------------------------------ identity
 
 /// Contract section 3: a receipt's identity is its exact scope (no parent,
