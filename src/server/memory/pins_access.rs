@@ -164,8 +164,10 @@ impl Rig {
     }
 }
 
-/// The status and the exact body bytes.
-async fn send(router: &Router, path: &str, body: &Value) -> (u16, Vec<u8>) {
+/// The status, the headers and the exact body bytes, as a client sees them.
+type Wire = (u16, Vec<(String, Vec<u8>)>, Vec<u8>);
+
+async fn send(router: &Router, path: &str, body: &Value) -> Wire {
     let request = Request::builder()
         .method("POST")
         .uri(path)
@@ -174,12 +176,18 @@ async fn send(router: &Router, path: &str, body: &Value) -> (u16, Vec<u8>) {
         .unwrap();
     let response = router.clone().oneshot(request).await.unwrap();
     let status = response.status().as_u16();
+    let mut headers: Vec<(String, Vec<u8>)> = response
+        .headers()
+        .iter()
+        .map(|(name, value)| (name.as_str().to_owned(), value.as_bytes().to_vec()))
+        .collect();
+    headers.sort();
     let bytes = response.into_body().collect().await.unwrap().to_bytes();
-    (status, bytes.to_vec())
+    (status, headers, bytes.to_vec())
 }
 
 async fn post(router: &Router, route: &str, body: &Value) -> (u16, Value) {
-    let (status, bytes) = send(router, &path("notes", route), body).await;
+    let (status, _, bytes) = send(router, &path("notes", route), body).await;
     let value = serde_json::from_slice(&bytes)
         .unwrap_or_else(|error| panic!("not JSON ({error}): {bytes:?}"));
     (status, value)
@@ -209,7 +217,7 @@ fn request(route: &str, scope: &Value, key: &str) -> Value {
         "forget" => json!({"scope": scope, "idempotency_key": key,
             "target": {"ids": [{"id": "never", "revision": "1"}]}, "mode": "logical_delete"}),
         "receipts/lookup" => {
-            json!({"scope": scope, "operation": "remember", "idempotency_key": key})
+            json!({"scope": scope, "operation": "forget", "idempotency_key": key})
         }
         _ => json!({"scope": scope}),
     }
@@ -225,11 +233,21 @@ fn assert_forbidden(status: u16, answer: &Value, case: &str) {
     assert_eq!(answer["error"]["code"], FORBIDDEN, "{case}: {answer}");
 }
 
-fn assert_allowed(status: u16, answer: &Value, case: &str) {
-    assert!(
-        status != 403 && answer["error"]["code"] != FORBIDDEN,
-        "{case}: {status} {answer}"
-    );
+/// What an authorized request for `route` answers: the route's own outcome
+/// for [`request`], never the 403 of an unauthorized one.
+fn allowed(route: &str) -> (u16, Option<&'static str>) {
+    match route {
+        "remember" | "recall" => (200, None),
+        "consolidate" | "forget" => (404, Some("memory_not_found")),
+        "receipts/lookup" => (404, Some("receipt_not_found")),
+        _ => (409, Some("memory_capability_unavailable")),
+    }
+}
+
+fn assert_allowed(route: &str, status: u16, answer: &Value, case: &str) {
+    let (expected, code) = allowed(route);
+    assert_eq!(status, expected, "{case}: {answer}");
+    assert_eq!(answer["error"]["code"].as_str(), code, "{case}: {answer}");
 }
 
 fn ids(answer: &Value) -> Vec<String> {
@@ -252,12 +270,12 @@ async fn each_route_checks_the_right_scope_list() {
         // on the two read routes only, and nothing else.
         let key = format!("s{n}");
         let (status, answer) = post(&rig.session, route, &request(route, &personal(), &key)).await;
-        assert_allowed(status, &answer, &format!("session personal {route}"));
+        assert_allowed(route, status, &answer, &format!("session personal {route}"));
         for scope in [shared(), archive()] {
             let case = format!("session read {scope} {route}");
             let (status, answer) = post(&rig.session, route, &request(route, &scope, &key)).await;
             if reads {
-                assert_allowed(status, &answer, &case);
+                assert_allowed(route, status, &answer, &case);
             } else {
                 assert_forbidden(status, &answer, &case);
             }
@@ -267,7 +285,7 @@ async fn each_route_checks_the_right_scope_list() {
         // The publisher: the shared scope everywhere, none of the session's.
         let key = format!("p{n}");
         let (status, answer) = post(&rig.publisher, route, &request(route, &shared(), &key)).await;
-        assert_allowed(status, &answer, &format!("publisher shared {route}"));
+        assert_allowed(route, status, &answer, &format!("publisher shared {route}"));
         for scope in [personal(), archive()] {
             let (status, answer) = post(&rig.publisher, route, &request(route, &scope, &key)).await;
             assert_forbidden(status, &answer, &format!("publisher {scope} {route}"));
