@@ -87,10 +87,11 @@ the step it replaces.
 
 **Mutation replay.** `mutants.yml` on `tests/k71_mutants.json` (206 mutants, 20 shards, cold caches, run 42286695573) took
 9.1 minutes wall and 110 runner-minutes: 203 killed, 0 survived and 3 invalid. The last serial campaign needed 0.85 to 2.1
-minutes per mutant on each machine. The three invalid entries (`lines-fix/lf-mcp-cap-64-mib`, `lines-fix/lf-mcp-cap-minus-one`
-and `import/cap-8-mib`) edit a line cap that a compile-time assertion guards, so the mutated build stops before any test runs.
-`tests/k71_mutants.py` calls that INVALID, and the assertions are older than the ledger: those three need a different edit,
-not a different run.
+minutes per mutant on each machine. The three previously invalid entries now mutate the reader budget at the call site,
+leaving the constants and compile-time assertions unchanged. A targeted replay on Windows reports
+`lines-fix/lf-mcp-cap-64-mib`: KILLED, `lines-fix/lf-mcp-cap-minus-one`: KILLED and `import/cap-8-mib`: KILLED, each by its
+named boundary test after the unmodified MCP and import baselines passed. The verdict policy is unchanged: a build failure
+without a failing test remains INVALID. The full-ledger replay still runs at the final head.
 
 ## Known gaps
 
@@ -105,4 +106,4 @@ not a different run.
   suite does not read it: the Dockerfile copies no `.config`.
 - The `sccache`, lld and zsh paths of `scripts/dev-fast-env.*` were not measured, and the build times above come from one
   machine.
-- The three invalid `tests/k71_mutants.json` entries still need a different edit.
+- The three reader-budget entries are KILLED in the targeted Windows replay; the full-ledger replay still runs at the final head.
