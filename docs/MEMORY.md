@@ -83,6 +83,15 @@ vlite-server data.vlite --bind 127.0.0.1:8080 --create-if-missing 3 --create-for
 
    A grant lists the exact scopes that credential may use; the scopes above are the ones the examples in this guide use. `"raw_access": true` on a grant lets that credential also reach the graph and the collection through the raw routes: the `notes-raw` credential needs it for the evidence example. `receipt_window_ms` runs from 1 to 2,592,000,000 (30 days). A file holds at most 256 bindings, 1,024 grants per binding and 256 scopes per grant. After the first start with the file, a binding's receipt window, graph and evidence names never change. Raise `generation` when grants or state change and keep it otherwise; startup refuses both mistakes. Editing the file after the first start, for example to add a grant, without a higher `generation` makes startup exit with `a memory binding changed without a higher generation`. [Start the server with memory](API.md#start-the-server-with-memory) lists every rule, including retiring a binding.
 
+     **Read-only scopes.** A grant may also list `read_scopes`, with the same entry fields as `scopes`. A read scope allows only `recall` and `facts/query`; every other route answers the same 403 as for an ungranted scope. This lets one binding serve shared, reviewed memory: a publisher credential writes the shared scope, and each session credential writes its personal scope and only reads the shared one.
+
+     ```json
+     "grants": [{"principal": "abcdefghij27", "scopes": [{"agent": "assistant", "user": "ada"}], "read_scopes": [{"agent": "assistant"}]},
+                {"principal": "uvwxyzabcd27", "scopes": [{"agent": "assistant"}]}]
+     ```
+
+     A scope appears at most once across both lists, `scopes` may be empty when `read_scopes` is not, `raw_access` cannot be combined with `read_scopes`, and the 256-scope cap counts both lists. Startup provisions read scopes too, so recalling one that nobody wrote yet answers an empty list. Adding, removing or moving a read scope is a grant change: raise `generation` and restart. Everything a publisher writes is visible to its readers, so review shared memory before the publisher writes it; VLite does not review it. A server without read-scope support refuses a file that uses `read_scopes` (`memory bindings file is invalid`); to roll back, remove every `read_scopes` list and every grant that only reads, raise `generation` and restart.
+
 4. **Stop that server (`kill $SERVER_PID`) and restart it with the file.**
 
    ```sh
@@ -264,8 +273,9 @@ Forget deletes memories by ID. It is a logical deletion: the memory and its cont
 Every mutation answers with a receipt, and a mutation is safe to repeat exactly:
 
 - **A replay.** The same `idempotency_key` and the same request, inside the receipt window, returns the original result with `"replayed": true` and writes nothing. The same key with a different request answers 409 `idempotency_conflict`. After `retry_until_ms` the key may run again; expiry ends the replay guarantee, not the memory.
-- **The key's scope.** A key belongs to the binding and the memory scope, not to the credential. Credentials that may write the same scope are peers: one can replay another's request, and read its receipt, by repeating the key.
+- **The key's scope.** A key belongs to the binding and the memory scope, not to the credential. Credentials that may write the same scope are peers: one can replay another's request, and read its receipt, by repeating the key. A read scope is not a peer: it cannot replay, look up a receipt or read erasure status there.
 - **Lookup.** `POST /v1/memory/{binding}/receipts/lookup` takes `{"scope": …, "operation": "forget" | "consolidate", "idempotency_key": …}` and returns `{"result": …}` with `replayed: true`. An unknown or expired receipt answers 404 `receipt_not_found`.
+- **Expired receipts are removed.** A later successful `remember`, `forget` or `consolidate` on the binding deletes, in its own batch, a bounded number of receipts (with their stored results) that expired at least 5 minutes earlier on the request clock, including receipts written by earlier releases. Each write examines at most 512 receipts and deletes at most 1,024 nodes (or one larger receipt that fits the write), so a backlog clears over several writes; a binding that receives no writes keeps its expired receipts. A lookup answers 404 before and after the deletion. This is not secure erasure: the bytes stay in the log, backups and replicas until compaction. The deletes travel like the binding's other writes: replicas and backups receive them, and the change feed and webhooks show them only to holders of `raw_access` on the binding.
 - **No lookup for `remember`.** A `remember` lookup answers 409 `memory_capability_unavailable` with `details.feature` `remember_receipt_lookup`. The original `remember` answer carries the complete receipt, so keep it.
 - **After an uncertain write.** A timeout, a lost connection or a 503 `commit_indeterminate` does not prove that the write failed. Look up the receipt of a `forget` or `consolidate`; for a `remember`, repeat the same request with the same key and body inside the window. Do not change the body, and do not repeat it after `retry_until_ms` without reading the state first.
 
@@ -409,7 +419,7 @@ A refusal is `{"error":{"code":"…","message":"…","details":{…}}}`. `detail
 |---|---|---|
 | 400, 413, 415 | `invalid_json` | Not JSON, duplicate keys, too large, or the wrong media type. A JSON value that is not an object answers 422 `invalid_input` (`details.field` `body`). |
 | 401 | `unauthorized` | No or an invalid credential. |
-| 403 | `forbidden_scope` | No grant for the binding, the scope, the graph or the evidence collection, or a credential that is not scoped. An unknown binding gives the same answer. |
+| 403 | `forbidden_scope` | No grant for the binding, the scope, the graph or the evidence collection, a read scope on a route other than `recall` or `facts/query`, or a credential that is not scoped. An unknown binding gives the same answer. |
 | 403 | `read_only`, `tenant_suspended`, `tenant_unavailable` | The node is read-only, or the tenant is not available. |
 | 404 | `memory_not_found`, `receipt_not_found` | A named memory, seed or receipt does not exist. |
 | 409 | `memory_not_configured` | The scope is not provisioned. |
@@ -448,6 +458,7 @@ Approximate recall answers 422 `memory_bounded_plan_unsupported`: no approximate
 ## Security model
 
 - **Only scoped credentials.** A binding grants credential IDs exact scopes. The admin token and the read-only token hold no grant and are refused (403), and so is a credential without a grant for the binding or scope: the answer is the same 403 as for an unknown binding, so a caller cannot probe which bindings exist. There is no parent, child or sibling fallback between scopes.
+- **Read scopes only read.** A scope in `read_scopes` allows `recall` and `facts/query` and nothing else, and its refusals are the same 403 as for an ungranted scope. A grant with read scopes cannot hold `raw_access`, which would reach every scope of the binding.
 - **Memory grants are not raw access.** A credential also needs `graph_read` or `graph_write` for the graph and the evidence permissions its route uses. Memory grants never confer access to the graph or the collection through the raw routes.
 - **Reserved resources look missing.** For every caller that does not hold `raw_access` on the binding (the administrator token included), the binding's graph and evidence collection answer as if they did not exist on every REST and webhook path: lists omit them, a read answers 404 or 409 as for a missing name and a create answers as for an occupied name. The operator can see such attempts in the audit log as `reserved_hidden_attempt`, without the name. `raw_access` is granted only in the bindings file, and the holder still needs the ordinary tenant, collection and operation permissions.
 - **Raw writers cannot forge memory.** `POST /v1/graphs/{graph}/batch` refuses nodes with memory's reserved keys and labels with 422, on every graph.
@@ -455,5 +466,5 @@ Approximate recall answers 422 `memory_bounded_plan_unsupported`: no approximate
   The dashboard shows those routes as unavailable, and sign-in keeps working, even for the super admin ([details](CONSOLE.md#monitor-the-server)).
 - **Audit.** Each memory request writes a `memory_request` event with the operation, binding, principal, `actor`, outcome and, for a mutation, the receipt ID and sequence. Memory text, keys and identifiers are never logged. See [Audit actors](SECURITY.md#audit-actors).
 - **Known limits.** The commit sequence is database-wide, so `sequence` values, graph revisions and the change-feed head show that other writes happened. In a filtered change feed, `has_more`, `next_cursor`, `head` and gaps in the `sequence` and `ordinal` of the remaining events show the same thing. Use separate database files for tenants that must not see each other's write volume. Keys are shared by credentials that can write one scope. The administrator's request log and audit show reserved names. [Memory-bound resources](SECURITY.md#memory-bound-resources) lists all of them.
-- **Deletion.** Forget and expiry are logical, and the evidence record of an expired memory stays until it is deleted or expires on its own. Plan backup retention and external copies yourself.
+- **Deletion.** Forget and expiry are logical, and the evidence record of an expired memory stays until it is deleted or expires on its own. Removing expired receipts removes them from the current graph only. Plan backup retention and external copies yourself.
 - **Transport.** The clients, the CLI and the MCP tools require HTTPS except for loopback hosts, and never print the token.

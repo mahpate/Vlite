@@ -269,7 +269,9 @@ graph or collection path. All nine routes are unary `POST` requests beneath
 
 Authenticate with a bearer credential authorized for the operation and binding:
 exact startup scope grants plus `graph_read`/`graph_write` and the required
-evidence-collection read/search/write permissions. Mutation dry runs still need
+evidence-collection read/search/write permissions. A grant's optional
+`read_scopes` are accepted only by `recall` and `facts/query`; every other
+route needs a scope from `scopes`. Mutation dry runs still need
 write grants. Memory grants never confer raw graph or collection access.
 Unknown and ungranted bindings return the same 403 before existence lookup.
 Provision raw-holder credentials with `collections:["*"]`; named reserved
@@ -280,10 +282,12 @@ Mutations require a body-only `idempotency_key`. A retained matching retry
 returns the original result with `replayed:true`; a changed digest conflicts.
 A key is scoped to the binding and the memory scope, not to the credential:
 credentials granted the same scope are peers and can replay or look up each
-other's receipts with the key (see
+other's receipts with the key; a read scope is not a peer (see
 [Memory-bound resources](SECURITY.md#memory-bound-resources)).
 Bindings explicitly configure a receipt window; expiry ends replay guarantees,
-not memory retention. After an indeterminate commit, reopen and reconcile the
+not memory retention. Later writes to the binding delete a bounded number of
+receipts that expired at least 5 minutes earlier; lookups answer 404 either way.
+After an indeterminate commit, reopen and reconcile the
 receipt rather than blindly retrying. Full schemas retain future capabilities,
 including 202 pending forget/resume results; these do not imply secure erasure.
 
@@ -437,10 +441,18 @@ its content.
   memory deletes the record too) and is a one-way change to the file: a 0.7.0
   server answers 500 for every memory operation of a scope that holds such a
   memory (see Upgrading from 0.7.0).
+- `"read_scopes"` (optional, same entry fields as `scopes`) lists scopes the
+  credential may only read: `recall` and `facts/query` accept them, every
+  other route answers 403 `forbidden_scope` as for an ungranted scope. A scope
+  appears at most once across both lists; `scopes` may be empty only when
+  `read_scopes` is not; `raw_access` cannot be combined with `read_scopes`.
+  Startup provisions read scopes, and changing them needs a higher
+  `generation`. Older servers refuse a file that uses `read_scopes`.
 - `"state": "retired"` with `retired_at_ms` keeps `receipts/lookup` working and
   answers every other route 409 `memory_capability_unavailable` with
   `details.feature` `binding_retired`.
-- At most 256 bindings, 1,024 grants per binding and 256 scopes per grant.
+- At most 256 bindings, 1,024 grants per binding and 256 scopes per grant,
+  counting `scopes` and `read_scopes` together.
 
 While any binding is configured the gRPC listener, automatic index
 maintenance, imports, replication export and a few aggregate admin routes are

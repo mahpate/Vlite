@@ -68,7 +68,8 @@ The routes are listed in [API.md](API.md#dashboard-sign-in-and-accounts).
 When `VLITE_MEMORY_BINDINGS_FILE` is configured, each binding reserves its
 stored graph and evidence collection from raw server routes. Memory operation
 grants do not grant raw graph, record, search, feed or attachment access.
-`raw_access` is false unless explicitly granted in the private bindings file;
+`raw_access` is false unless explicitly granted in the private bindings file,
+and a grant that lists `read_scopes` cannot hold it;
 even with it, the caller still needs the ordinary tenant, collection and
 operation permissions. It is also the opt-in for naming an existing evidence
 record in a `remember` item. That transfers the record to the memory, so
@@ -160,6 +161,13 @@ scoped to the binding and the memory scope, not to the credential. Credentials
 that may write the same scope are peers: one can replay another's request by
 repeating its key and exact content, and can read its receipt with the key
 alone. Give separate scopes to credentials that must not observe each other.
+A read scope (`read_scopes`) is not a peer: it allows only `recall` and
+`facts/query`, so its holder cannot replay, look up a receipt or read erasure
+status in that scope, and every other route answers the same 403 as for an
+ungranted scope. Later writes delete receipts that expired at least 5 minutes
+earlier from the current graph; that is not erasure, the bytes stay in logs,
+backups and replicas until compaction, and the deletes appear in the change
+feed and webhooks only to holders of `raw_access` on the binding.
 A reservation outlives the file: a graph that holds a binding record stays
 reserved when its entry is retired and removed (only after its receipt window
 has ended) and when the whole file is removed. To give such memory up, keep the
@@ -192,7 +200,8 @@ show reserved names and record IDs, and collection list `id` values have gaps
 where reserved collections sit; both are accepted: the administrator can see
 everything, so keep the log and audit directories private, and collection IDs
 are never renumbered, because clients cache them. `raw_access` covers every
-scope of its binding's resources, not one memory scope. It is also what lets a
+scope of its binding's resources, not one memory scope, which is why a grant
+with read-only scopes cannot hold it. It is also what lets a
 `remember` item name an existing evidence record (an evidence reference, which
 claims a record no memory owns): without it that request answers 403 before any
 record is looked at, so a credential that holds only memory grants cannot claim
