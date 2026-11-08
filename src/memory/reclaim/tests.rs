@@ -1402,7 +1402,6 @@ fn replays_refusals_errors_erasure_and_read_only_files_reclaim_nothing() {
 /// batch before it writes a frame, and `write` commits the own operations alone.
 #[test]
 fn a_combined_batch_over_the_real_byte_limit_commits_the_own_ops_alone() {
-    use super::super::MAX_OPS;
     use crate::property_graph::GraphOpOutcome;
     use crate::property_graph::engine::codec::{BODY_HEADER_BYTES, ENTRY_HEADER_BYTES};
     use crate::property_graph::engine::limits::{MAX_BATCH_BYTES, MAX_BATCH_ENTRIES};
