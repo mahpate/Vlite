@@ -34,6 +34,7 @@ fn binding(name: &str, graph: &str, evidence: Option<&str>) -> Binding {
             principal: PRINCIPAL.into(),
             scopes: vec![scope("@root", "a")],
             raw_access: false,
+            read_scopes: Vec::new(),
         }],
     }
 }
@@ -499,6 +500,7 @@ fn rule_two_a_change_needs_a_higher_generation_and_no_change_keeps_it() {
         principal: PRINCIPAL.into(),
         scopes: vec![scope("@root", agent)],
         raw_access: false,
+        read_scopes: Vec::new(),
     };
     assert_eq!(
         rotation(&db, |b| b.grants = vec![grant("b")], NOW),
@@ -522,6 +524,51 @@ fn rule_two_a_change_needs_a_higher_generation_and_no_change_keeps_it() {
     );
     assert_eq!(rotation(&db, |b| b.generation = 2, NOW), moved);
     assert_eq!(rotation(&db, |b| b.generation = u64::MAX >> 1, NOW), moved);
+}
+
+#[test]
+fn rule_two_covers_read_scopes() {
+    let (mut db, ..) = recorded_file();
+    let not_advanced = Refusal::Rotation(BindingError::GenerationNotAdvanced);
+    let read = |b: &mut Binding| b.grants[0].read_scopes = vec![scope("@root", "b")];
+    assert_eq!(rotation(&db, read, NOW), not_advanced);
+    // Moving the one scope to the read list is a change too.
+    assert_eq!(
+        rotation(
+            &db,
+            |b| b.grants[0].read_scopes = std::mem::take(&mut b.grants[0].scopes),
+            NOW
+        ),
+        not_advanced
+    );
+    // An explicit empty list is no change: no record write.
+    let mut empty = binding("notes", "g1", Some("ev1"));
+    empty.grants[0].read_scopes = Vec::new();
+    assert_eq!(
+        plan(&db, &set(vec![empty]), NOW),
+        Ok(Plan {
+            writes: Vec::new(),
+            orphans: Vec::new()
+        })
+    );
+    // With a higher generation the change is accepted and recorded.
+    let mut advanced = binding("notes", "g1", Some("ev1"));
+    read(&mut advanced);
+    advanced.generation = 2;
+    let file = set(vec![advanced.clone()]);
+    assert_eq!(
+        plan(&db, &file, NOW),
+        Ok(Plan {
+            writes: vec![0],
+            orphans: Vec::new()
+        })
+    );
+    start(&mut db, &file, NOW).unwrap();
+    assert_eq!(stored_record(&db, "g1"), Recorded::of(&advanced));
+    // Removing the read scope again needs yet another generation.
+    let mut removed = binding("notes", "g1", Some("ev1"));
+    removed.generation = 2;
+    assert_eq!(refusal(&db, &set(vec![removed]), NOW), not_advanced);
 }
 
 #[test]

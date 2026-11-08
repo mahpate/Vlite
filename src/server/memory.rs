@@ -144,7 +144,13 @@ fn prepare(
         let scopes: BTreeSet<_> = binding
             .grants
             .iter()
-            .flat_map(|grant| grant.scopes.iter().map(scope_tuple))
+            .flat_map(|grant| {
+                grant
+                    .scopes
+                    .iter()
+                    .chain(&grant.read_scopes)
+                    .map(scope_tuple)
+            })
             .collect();
         let mut memory =
             MemoryMut::bind(db, &graph, evidence.as_deref()).map_err(|_| PROVISION_FAILED)?;
@@ -211,6 +217,8 @@ fn scope_tuple(scope: &MemoryScope) -> ScopeTuple {
     )
 }
 
+#[cfg(test)]
+mod pins_access;
 #[cfg(test)]
 mod pins_binding;
 #[cfg(test)]

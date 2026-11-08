@@ -9,7 +9,7 @@ use std::collections::BTreeSet;
 use sha2::{Digest, Sha256};
 
 use super::{Binding, BindingError, BindingState, Grant};
-use crate::memory::{MAX_STRING_VALUE_BYTES, hex};
+use crate::memory::{MAX_STRING_VALUE_BYTES, MemoryScope, hex};
 use crate::property_graph::NodeView;
 use crate::{Metadata, MetadataValue};
 
@@ -19,6 +19,9 @@ pub(crate) const KEY: &str = "binding:v1";
 pub(crate) const LABEL: &str = "VliteMemoryBinding";
 const RECORD_SCHEMA: &str = "memory-binding-record:v1";
 const GRANTS_DOMAIN: &[u8] = b"vlite.memory.binding.grants.v1\0";
+/// The domain of a grants digest when any grant has read scopes; without
+/// them the bytes stay those of `GRANTS_DOMAIN`, so stored digests hold.
+const GRANTS_DOMAIN_V2: &[u8] = b"vlite.memory.binding.grants.v2\0";
 const MAX_RETIRED_AT: u64 = u64::MAX;
 
 /// Properties every record has, and the two a record may have.
@@ -59,9 +62,17 @@ pub(crate) struct Recorded {
 }
 
 /// `v1:` and the SHA-256 of the grants as written (design note 1.1): the
-/// order of grants and of scopes is part of the digest.
+/// order of grants and of scopes is part of the digest. When any grant has
+/// read scopes, the domain is `GRANTS_DOMAIN_V2` and every grant also frames
+/// its read scopes after its scopes.
 pub(crate) fn grants_digest(grants: &[Grant]) -> String {
-    let mut bytes = GRANTS_DOMAIN.to_vec();
+    let read_scoped = grants.iter().any(|entry| !entry.read_scopes.is_empty());
+    let domain = if read_scoped {
+        GRANTS_DOMAIN_V2
+    } else {
+        GRANTS_DOMAIN
+    };
+    let mut bytes = domain.to_vec();
     bytes.extend_from_slice(&(grants.len() as u32).to_be_bytes());
     for grant in grants {
         bytes.extend_from_slice(&(grant.principal.len() as u32).to_be_bytes());
@@ -73,8 +84,21 @@ pub(crate) fn grants_digest(grants: &[Grant]) -> String {
             bytes.extend_from_slice(&(encoded.len() as u32).to_be_bytes());
             bytes.extend_from_slice(&encoded);
         }
+        if read_scoped {
+            framed(&mut bytes, &grant.read_scopes);
+        }
     }
     format!("v1:{}", hex(&Sha256::digest(bytes)))
+}
+
+/// Appends a read-scope count, then each read scope's length and encoding.
+fn framed(out: &mut Vec<u8>, read_scopes: &[MemoryScope]) {
+    out.extend_from_slice(&(read_scopes.len() as u32).to_be_bytes());
+    for read_scope in read_scopes {
+        let encoding = read_scope.encode();
+        out.extend_from_slice(&(encoding.len() as u32).to_be_bytes());
+        out.extend_from_slice(&encoding);
+    }
 }
 
 /// Digits only, no sign, no leading zero, no whitespace, within `low..=high`.

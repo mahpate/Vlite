@@ -505,11 +505,13 @@ mod tests {
                     principal: RAW.into(),
                     scopes: vec![scope.clone()],
                     raw_access: true,
+                    read_scopes: Vec::new(),
                 },
                 BindingGrant {
                     principal: PLAIN.into(),
                     scopes: vec![scope],
                     raw_access: false,
+                    read_scopes: Vec::new(),
                 },
             ],
         }

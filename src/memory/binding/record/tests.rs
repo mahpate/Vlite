@@ -59,6 +59,18 @@ fn binding_of(entry: &Value) -> Binding {
                         session: scope.get("session").map(text),
                     })
                     .collect(),
+                read_scopes: grant
+                    .get("read_scopes")
+                    .and_then(Value::as_array)
+                    .into_iter()
+                    .flatten()
+                    .map(|scope| MemoryScope {
+                        tenant: tenant.clone(),
+                        agent: text(&scope["agent"]),
+                        user: scope.get("user").map(text),
+                        session: scope.get("session").map(text),
+                    })
+                    .collect(),
             })
             .collect(),
     }
@@ -252,6 +264,15 @@ fn the_grants_digest_covers_everything_the_design_names() {
     twice.push(base[0].clone());
     changed.push(twice);
     changed.push(Vec::new());
+    // A read scope added, and the one scope moved to the read list.
+    let mut read = base.clone();
+    let mut other = base[0].scopes[0].clone();
+    other.agent = "b".into();
+    read[0].read_scopes.push(other);
+    changed.push(read);
+    let mut moved = base.clone();
+    moved[0].read_scopes = std::mem::take(&mut moved[0].scopes);
+    changed.push(moved);
     let mut seen = std::collections::BTreeSet::new();
     seen.insert(digest);
     for grants in changed {
@@ -264,6 +285,7 @@ fn a_user_and_a_session_are_not_interchangeable_in_the_digest() {
     let scope = |user: Option<&str>, session: Option<&str>| Grant {
         principal: "abcdefghij27".into(),
         raw_access: false,
+        read_scopes: Vec::new(),
         scopes: vec![MemoryScope {
             tenant: "@root".into(),
             agent: "a".into(),
@@ -279,6 +301,73 @@ fn a_user_and_a_session_are_not_interchangeable_in_the_digest() {
         grants_digest(&[scope(Some("xy"), None)]),
         grants_digest(&[scope(Some("x"), Some("y"))])
     );
+}
+
+#[test]
+fn read_scopes_change_the_digest_only_when_present() {
+    let scope = |agent: &str| MemoryScope {
+        tenant: "@root".into(),
+        agent: agent.into(),
+        user: None,
+        session: None,
+    };
+    let grant = |principal: &str, scopes: &[&str], read: &[&str]| Grant {
+        principal: principal.into(),
+        raw_access: false,
+        scopes: scopes.iter().map(|agent| scope(agent)).collect(),
+        read_scopes: read.iter().map(|agent| scope(agent)).collect(),
+    };
+    // `[]` is the legacy encoding: the golden `grants-plain` digest.
+    let golden = golden();
+    let plain = golden["records"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|case| case["name"] == "grants-plain")
+        .unwrap();
+    let plain_digest = text(&plain["expected"]["properties"]["grants_digest"]);
+    assert_eq!(
+        plain_digest,
+        "v1:f567d9dd44e7c3eb2027f756c63e94a174eddf15ad38822df9931d28f11e1ee7"
+    );
+    assert_eq!(
+        grants_digest(&[grant("abcdefghij27", &["c"], &[])]),
+        plain_digest
+    );
+    assert_eq!(grants_digest(&[]), EMPTY_GRANTS_DIGEST);
+    // Which grant holds the read scope is part of the digest.
+    assert_ne!(
+        grants_digest(&[
+            grant("abcdefghij27", &["a"], &["b"]),
+            grant("bcdefghij234", &["c"], &[]),
+        ]),
+        grants_digest(&[
+            grant("abcdefghij27", &["a"], &[]),
+            grant("bcdefghij234", &["c"], &["b"]),
+        ])
+    );
+    // A read scope is not a write scope.
+    assert_ne!(
+        grants_digest(&[grant("abcdefghij27", &["a"], &["b"])]),
+        grants_digest(&[grant("abcdefghij27", &["a", "b"], &[])])
+    );
+    assert_ne!(
+        grants_digest(&[grant("abcdefghij27", &[], &["a"])]),
+        grants_digest(&[grant("abcdefghij27", &["a"], &[])])
+    );
+    // With read scopes anywhere, every grant gains a read-scope count.
+    assert_ne!(
+        grants_digest(&[
+            grant("abcdefghij27", &["a"], &[]),
+            grant("bcdefghij234", &[], &["b"]),
+        ]),
+        grants_digest(&[
+            grant("abcdefghij27", &["a"], &["b"]),
+            grant("bcdefghij234", &[], &[]),
+        ])
+    );
+    let digest = grants_digest(&[grant("abcdefghij27", &["a"], &["b"])]);
+    assert!(digest_shaped(&digest), "{digest}");
 }
 
 #[test]

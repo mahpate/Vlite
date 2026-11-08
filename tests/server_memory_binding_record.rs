@@ -39,6 +39,13 @@ fn bindings(generation: u64, window: u64, agent: &str) -> String {
     )
 }
 
+/// The `bindings(generation, WINDOW, _)` entry with `grants` as its grants.
+fn grant_bindings(generation: u64, grants: Value) -> String {
+    let mut file: Value = serde_json::from_str(&bindings(generation, WINDOW, "a")).unwrap();
+    file["bindings"][0]["grants"] = grants;
+    file.to_string()
+}
+
 struct Rig {
     directory: TempDir,
     path: PathBuf,
@@ -336,6 +343,101 @@ async fn new_grants_need_a_higher_generation_and_the_old_scope_stops_working() {
     );
     let db = rig.open();
     assert_eq!(record(&db).unwrap().properties["generation"], text("2"));
+    db.close().unwrap();
+}
+
+/// The (status, `error.code`) of the raw graph and evidence collection reads
+/// for the memory credential.
+async fn raw_reads(app: &Router) -> Vec<(u16, Value)> {
+    let mut answers = Vec::new();
+    for path in ["/v1/graphs/notes_graph", "/v1/collections/notes_ev"] {
+        let (status, body) = call(app, "GET", path, &credential(), None).await;
+        assert_ne!(status, 200, "{path}: {body}");
+        answers.push((status, body["error"]["code"].clone()));
+    }
+    answers
+}
+
+#[tokio::test]
+async fn a_read_only_scope_needs_a_higher_generation_and_then_refuses_writes() {
+    let rig = Rig::new();
+    let writer = json!([{"principal": ID, "scopes": [{"agent": "a"}]}]);
+    let before = rig
+        .run(Some(&grant_bindings(1, writer.clone())), async |app| {
+            let (status, body) = memory(app, "remember", &remember_body("a", "k1")).await;
+            assert_eq!(status, 200, "{body}");
+            raw_reads(app).await
+        })
+        .await;
+    // Adding a read scope under the same generation is refused.
+    let reader = json!([{"principal": ID, "scopes": [{"agent": "b"}],
+        "read_scopes": [{"agent": "a"}]}]);
+    let size = rig.size();
+    assert_eq!(
+        rig.refused(Some(&grant_bindings(1, reader.clone()))).await,
+        NOT_ADVANCED
+    );
+    assert_eq!(rig.size(), size, "a refused start writes nothing");
+    // Under the next generation `a` is read-only: recall finds e1, a write or
+    // a replay of the old write is refused.
+    let after = rig
+        .run(Some(&grant_bindings(2, reader)), async |app| {
+            let (status, body) = memory(app, "remember", &remember_body("a", "k2")).await;
+            assert_eq!(status, 403, "{body}");
+            assert_eq!(body["error"]["code"], "forbidden_scope");
+            let recall = json!({"scope": {"agent": "a"}, "entity_seeds": ["e1"]});
+            let (status, body) = memory(app, "recall", &recall).await;
+            assert_eq!(status, 200, "{body}");
+            assert_eq!(body["memories"][0]["id"], "e1", "{body}");
+            let (status, body) = memory(app, "remember", &remember_body("a", "k1")).await;
+            assert_eq!(status, 403, "{body}");
+            assert_eq!(body["error"]["code"], "forbidden_scope");
+            let (status, body) = memory(app, "remember", &remember_body("b", "k3")).await;
+            assert_eq!(status, 200, "{body}");
+            raw_reads(app).await
+        })
+        .await;
+    assert_eq!(before, after, "a read scope opens no raw access");
+    // Removing the read scope under a higher generation removes the read.
+    let only_b = json!([{"principal": ID, "scopes": [{"agent": "b"}]}]);
+    rig.run(Some(&grant_bindings(3, only_b)), async |app| {
+        let recall = json!({"scope": {"agent": "a"}, "entity_seeds": ["e1"]});
+        let (status, body) = memory(app, "recall", &recall).await;
+        assert_eq!(status, 403, "{body}");
+        assert_eq!(body["error"]["code"], "forbidden_scope");
+    })
+    .await;
+    // Raw access never comes with read scopes.
+    let raw = json!([{"principal": ID, "scopes": [{"agent": "b"}],
+        "read_scopes": [{"agent": "a"}], "raw_access": true}]);
+    assert_eq!(
+        rig.refused(Some(&grant_bindings(4, raw))).await,
+        "memory bindings file is invalid"
+    );
+    let db = rig.open();
+    assert_eq!(record(&db).unwrap().properties["generation"], text("3"));
+    db.close().unwrap();
+}
+
+#[tokio::test]
+async fn an_explicit_empty_read_scopes_keeps_the_digest_and_needs_no_new_generation() {
+    let rig = Rig::new();
+    let plain = json!([{"principal": ID, "scopes": [{"agent": "a"}]}]);
+    rig.run(Some(&grant_bindings(1, plain)), async |_| {}).await;
+    let db = rig.open();
+    let node = record(&db).unwrap();
+    db.close().unwrap();
+    let empty = json!([{"principal": ID, "scopes": [{"agent": "a"}], "read_scopes": []}]);
+    rig.run(Some(&grant_bindings(1, empty)), async |app| {
+        let (status, body) = memory(app, "remember", &remember_body("a", "k1")).await;
+        assert_eq!(status, 200, "{body}");
+    })
+    .await;
+    let db = rig.open();
+    let kept = record(&db).unwrap();
+    assert_eq!(kept.revision, node.revision, "the record is not rewritten");
+    assert_eq!(kept.properties, node.properties);
+    assert_eq!(kept.properties["generation"], text("1"));
     db.close().unwrap();
 }
 
