@@ -41,6 +41,9 @@ pub(crate) struct Grant {
     pub principal: String,
     /// Exact scopes; each scope's tenant is the entry's tenant.
     pub scopes: Vec<MemoryScope>,
+    /// Exact scopes this grant may only read (`recall` and `facts/query`);
+    /// never also in `scopes`, and never with `raw_access`.
+    pub read_scopes: Vec<MemoryScope>,
     /// Raw access to the reserved resources (mapping section 6). Never a
     /// memory scope grant; the underlying grants are still required.
     pub raw_access: bool,
@@ -134,7 +137,7 @@ impl Binding {
             || self
                 .grants
                 .iter()
-                .any(|grant| grant.scopes.len() > MAX_SCOPES)
+                .any(|grant| grant.scopes.len() + grant.read_scopes.len() > MAX_SCOPES)
         {
             return Err(BindingError::TooLarge);
         }
@@ -150,12 +153,14 @@ impl Binding {
         for grant in &self.grants {
             if !valid_principal(&grant.principal)
                 || !principals.insert(grant.principal.as_str())
-                || grant.scopes.is_empty()
+                || (grant.scopes.is_empty() && grant.read_scopes.is_empty())
+                || (grant.raw_access && !grant.read_scopes.is_empty())
             {
                 return Err(BindingError::InvalidGrant);
             }
+            // One set across both lists: a scope is in at most one of them.
             let mut scopes = BTreeSet::new();
-            for scope in &grant.scopes {
+            for scope in grant.scopes.iter().chain(&grant.read_scopes) {
                 if scope.validate().is_err()
                     || scope.tenant != self.tenant
                     || !scopes.insert(scope.encode())
@@ -414,6 +419,8 @@ mod json {
         principal: String,
         scopes: Vec<ScopeEntry>,
         #[serde(default)]
+        read_scopes: Vec<ScopeEntry>,
+        #[serde(default)]
         raw_access: bool,
     }
 
@@ -441,22 +448,24 @@ mod json {
                 _ => return Err(BindingError::InvalidState),
             };
             let tenant = entry.tenant;
+            let scoped = |list: Vec<ScopeEntry>| -> Vec<MemoryScope> {
+                list.into_iter()
+                    .map(|scope| MemoryScope {
+                        tenant: tenant.clone(),
+                        agent: scope.agent,
+                        user: scope.user,
+                        session: scope.session,
+                    })
+                    .collect()
+            };
             let grants = entry
                 .grants
                 .into_iter()
                 .map(|grant| Grant {
                     principal: grant.principal,
                     raw_access: grant.raw_access,
-                    scopes: grant
-                        .scopes
-                        .into_iter()
-                        .map(|scope| MemoryScope {
-                            tenant: tenant.clone(),
-                            agent: scope.agent,
-                            user: scope.user,
-                            session: scope.session,
-                        })
-                        .collect(),
+                    scopes: scoped(grant.scopes),
+                    read_scopes: scoped(grant.read_scopes),
                 })
                 .collect();
             bindings.push(Binding {

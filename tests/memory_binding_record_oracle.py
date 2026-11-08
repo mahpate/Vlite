@@ -27,6 +27,8 @@ LABEL = "VliteMemoryBinding"
 RECORD_SCHEMA = "memory-binding-record:v1"
 SCHEMA, RANKING, DIGEST = "memory-schema-v1", "memory-ranking-v1", "memory-request-v1"
 DOMAIN = b"vlite.memory.binding.grants.v1\0"
+# Used instead of DOMAIN when any grant has a non-empty read_scopes list.
+DOMAIN_V2 = b"vlite.memory.binding.grants.v2\0"
 MAX_GENERATION, MAX_WINDOW, MAX_STRING = 2**63 - 1, 2_592_000_000, 4096
 REQUIRED = ("record_schema", "tenant", "binding", "generation", "state", "graph",
             "memory_schema", "ranking_version", "request_digest_version",
@@ -60,15 +62,25 @@ def scope_bytes(tenant, scope):
     return out
 
 
+def scope_list(tenant, scopes):
+    out = struct.pack(">I", len(scopes))
+    for scope in scopes:
+        encoded = scope_bytes(tenant, scope)
+        out += struct.pack(">I", len(encoded)) + encoded
+    return out
+
+
 def grants_digest(tenant, grants):
-    out = DOMAIN + struct.pack(">I", len(grants))
+    read_scoped = any(grant.get("read_scopes") for grant in grants)
+    if MUTANT == "digest_ignores_read_scopes":
+        read_scoped = False
+    out = (DOMAIN_V2 if read_scoped else DOMAIN) + struct.pack(">I", len(grants))
     for grant in grants:
         out += frame(grant["principal"])
         out += b"\1" if grant.get("raw_access", False) else b"\0"
-        out += struct.pack(">I", len(grant["scopes"]))
-        for scope in grant["scopes"]:
-            encoded = scope_bytes(tenant, scope)
-            out += struct.pack(">I", len(encoded)) + encoded
+        out += scope_list(tenant, grant["scopes"])
+        if read_scoped:
+            out += scope_list(tenant, grant.get("read_scopes", []))
     if MUTANT == "digest_unframed_scopes":
         out = out.replace(b"\0\0\0", b"")
     return "v1:" + hashlib.sha256(out).hexdigest()
@@ -173,6 +185,14 @@ def self_test():
     verify(digests["grants-raw-access"] != digests["grants-plain"], "raw access matters")
     verify(digests["scope-with-session"] != digests["scope-agent-only"], "scopes matter")
     verify(len(set(digests.values())) == len(digests), "all digests distinct")
+    # An explicit empty read_scopes list is the legacy encoding.
+    plain = next(case for case in fixture["records"] if case["name"] == "grants-plain")
+    explicit = copy.deepcopy(plain["entry"])
+    for grant in explicit["grants"]:
+        grant["read_scopes"] = []
+    verify(record_properties(explicit) == plain["expected"]["properties"], "empty read scopes")
+    verify(digests["grants-read-scope"] != digests["grants-plain"], "read scopes matter")
+    verify(digests["grants-read-only"] != digests["grants-read-scope"], "write scopes matter")
     for case in fixture["malformed"]:
         try:
             decode(copy.deepcopy(case["node"]), case["holder"])
@@ -182,7 +202,8 @@ def self_test():
     verify(len(fixture["malformed"]) >= 40, "malformed catalog is complete")
     # The goldens must be sensitive to each intended defect of this reference.
     global MUTANT
-    for mutant in ("digest_unframed_scopes", "digest_sorted_grants"):
+    for mutant in ("digest_unframed_scopes", "digest_sorted_grants",
+                   "digest_ignores_read_scopes"):
         MUTANT = mutant
         changed = [case["name"] for case in fixture["records"]
                    if record_properties(case["entry"]) != case["expected"]["properties"]]

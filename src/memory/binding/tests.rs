@@ -25,6 +25,7 @@ fn entry(binding: &str, graph: &str) -> Binding {
         grants: vec![Grant {
             principal: PRINCIPAL.into(),
             raw_access: false,
+            read_scopes: Vec::new(),
             scopes: vec![scope("@root", "a")],
         }],
     }
@@ -73,8 +74,31 @@ fn field_rules_accept_their_boundaries() {
     let mut retired = entry("r_9-x", "g4");
     retired.state = BindingState::Retired { at_ms: 1 };
     retired.grants[0].raw_access = true;
+    // A pure reader: no write scope, one read scope.
+    let mut reader = entry("p", "g5");
+    reader.grants[0].scopes.clear();
+    reader.grants[0].read_scopes = vec![scope("@root", "a")];
+    // Both lists count toward one cap: 255 + 1 is at it.
+    let mut mixed = entry("q", "g6");
+    mixed.grants[0].scopes = (0..MAX_SCOPES - 1)
+        .map(|i| scope("@root", &format!("a{i}")))
+        .collect();
+    mixed.grants[0].read_scopes = vec![MemoryScope {
+        tenant: "@root".into(),
+        agent: "a0".into(),
+        user: Some("u".into()),
+        session: None,
+    }];
     assert_eq!(
-        set(vec![longest, smallest, same_name_other_tenant, retired]).validate(),
+        set(vec![
+            longest,
+            smallest,
+            same_name_other_tenant,
+            retired,
+            reader,
+            mixed
+        ])
+        .validate(),
         Ok(())
     );
     assert_eq!(BindingSet::default().validate(), Ok(()));
@@ -184,6 +208,7 @@ fn field_rules_reject_each_bad_field() {
         grant_cases.push(vec![Grant {
             principal: principal.into(),
             raw_access: false,
+            read_scopes: Vec::new(),
             scopes: vec![scope("@root", "a")],
         }]);
     }
@@ -191,33 +216,39 @@ fn field_rules_reject_each_bad_field() {
         vec![Grant {
             principal: PRINCIPAL.into(),
             raw_access: false,
+            read_scopes: Vec::new(),
             scopes: Vec::new(),
         }],
         vec![
             Grant {
                 principal: PRINCIPAL.into(),
                 raw_access: false,
+                read_scopes: Vec::new(),
                 scopes: vec![scope("@root", "a")],
             },
             Grant {
                 principal: PRINCIPAL.into(),
                 raw_access: false,
+                read_scopes: Vec::new(),
                 scopes: vec![scope("@root", "b")],
             },
         ],
         vec![Grant {
             principal: PRINCIPAL.into(),
             raw_access: false,
+            read_scopes: Vec::new(),
             scopes: vec![scope("@root", "a"), scope("@root", "a")],
         }],
         vec![Grant {
             principal: PRINCIPAL.into(),
             raw_access: false,
+            read_scopes: Vec::new(),
             scopes: vec![scope("@root", "")],
         }],
         vec![Grant {
             principal: PRINCIPAL.into(),
             raw_access: false,
+            read_scopes: Vec::new(),
             scopes: vec![MemoryScope {
                 tenant: "@root".into(),
                 agent: "a".into(),
@@ -229,12 +260,57 @@ fn field_rules_reject_each_bad_field() {
         vec![Grant {
             principal: PRINCIPAL.into(),
             raw_access: false,
+            read_scopes: Vec::new(),
             scopes: vec![scope(HEX_TENANT, "a")],
         }],
     ]);
     for grants in grant_cases {
         let mut bad = entry("n", "g");
         bad.grants = grants;
+        cases.push((bad, InvalidGrant));
+    }
+    // Read scopes: duplicates within or across the lists, the scope rules,
+    // the entry's tenant, and never with raw access.
+    let user_scope = MemoryScope {
+        tenant: "@root".into(),
+        agent: "a".into(),
+        user: Some("u".into()),
+        session: None,
+    };
+    let read_cases: [(Vec<MemoryScope>, Vec<MemoryScope>, bool); 8] = [
+        (Vec::new(), Vec::new(), false),
+        (
+            Vec::new(),
+            vec![scope("@root", "b"), scope("@root", "b")],
+            false,
+        ),
+        (vec![scope("@root", "a")], vec![scope("@root", "a")], false),
+        (
+            vec![scope("@root", "a")],
+            vec![user_scope.clone(), scope("@root", "a")],
+            false,
+        ),
+        (vec![scope("@root", "a")], vec![scope("@root", "")], false),
+        (
+            vec![scope("@root", "a")],
+            vec![MemoryScope {
+                session: Some("s".into()),
+                ..scope("@root", "b")
+            }],
+            false,
+        ),
+        (
+            vec![scope("@root", "a")],
+            vec![scope(HEX_TENANT, "b")],
+            false,
+        ),
+        (vec![scope("@root", "a")], vec![user_scope], true),
+    ];
+    for (scopes, read_scopes, raw_access) in read_cases {
+        let mut bad = entry("n", "g");
+        bad.grants[0].scopes = scopes;
+        bad.grants[0].read_scopes = read_scopes;
+        bad.grants[0].raw_access = raw_access;
         cases.push((bad, InvalidGrant));
     }
     let mut zero = entry("n", "g");
@@ -521,6 +597,7 @@ fn caps_reject_the_whole_set() {
         .map(|i| Grant {
             principal: principal(i),
             raw_access: false,
+            read_scopes: Vec::new(),
             scopes: vec![scope("@root", "a")],
         })
         .collect();
@@ -536,6 +613,22 @@ fn caps_reject_the_whole_set() {
     at_cap.grants[0].scopes.truncate(MAX_SCOPES);
     assert_eq!(invalid(at_cap), Ok(()));
     assert_eq!(invalid(scopes), Err(BindingError::TooLarge));
+    // The cap counts both lists: 256 + 1 is over it, as is 0 + 257.
+    let mut across = entry("n", "g");
+    across.grants[0].scopes = (0..MAX_SCOPES)
+        .map(|i| scope("@root", &format!("a{i}")))
+        .collect();
+    across.grants[0].read_scopes = vec![scope("@root", "b")];
+    assert_eq!(invalid(across), Err(BindingError::TooLarge));
+    let mut readers = entry("n", "g");
+    readers.grants[0].scopes.clear();
+    readers.grants[0].read_scopes = (0..=MAX_SCOPES)
+        .map(|i| scope("@root", &format!("a{i}")))
+        .collect();
+    let mut at_cap = readers.clone();
+    at_cap.grants[0].read_scopes.truncate(MAX_SCOPES);
+    assert_eq!(invalid(at_cap), Ok(()));
+    assert_eq!(invalid(readers), Err(BindingError::TooLarge));
 }
 
 #[test]
@@ -620,6 +713,81 @@ mod json {
                 "{text}"
             );
         }
+    }
+
+    #[test]
+    fn read_scopes_is_a_strict_optional_list() {
+        let scopes = r#""scopes":[{"agent":"a"}]"#;
+        assert!(
+            parse(EXAMPLE.as_bytes()).unwrap().bindings[0].grants[0]
+                .read_scopes
+                .is_empty()
+        );
+        let empty = edit(scopes, r#""scopes":[{"agent":"a"}],"read_scopes":[]"#);
+        assert_eq!(parse(empty.as_bytes()), parse(EXAMPLE.as_bytes()));
+        let read = edit(
+            scopes,
+            r#""scopes":[{"agent":"a"}],"read_scopes":[{"agent":"b"},{"agent":"b","user":"u","session":"s"}]"#,
+        );
+        let parsed = parse(read.as_bytes()).unwrap();
+        assert_eq!(
+            parsed.bindings[0].grants[0].scopes,
+            vec![scope("@root", "a")]
+        );
+        assert_eq!(
+            parsed.bindings[0].grants[0].read_scopes,
+            vec![
+                scope("@root", "b"),
+                MemoryScope {
+                    tenant: "@root".into(),
+                    agent: "b".into(),
+                    user: Some("u".into()),
+                    session: Some("s".into()),
+                },
+            ]
+        );
+        // A tenant entry's read scopes are in its own tenant.
+        let tenant = edit(
+            r#""tenant":"@root""#,
+            &format!(r#""tenant":"{HEX_TENANT}""#),
+        )
+        .replace(scopes, r#""scopes":[],"read_scopes":[{"agent":"b"}]"#);
+        let parsed = parse(tenant.as_bytes()).unwrap();
+        assert!(parsed.bindings[0].grants[0].scopes.is_empty());
+        assert_eq!(
+            parsed.bindings[0].grants[0].read_scopes,
+            vec![scope(HEX_TENANT, "b")]
+        );
+        let cases = [
+            ("null", BindingError::Malformed),
+            ("1", BindingError::Malformed),
+            ("{}", BindingError::Malformed),
+            (r#""a""#, BindingError::Malformed),
+            ("[null]", BindingError::Malformed),
+            (
+                r#"[{"agent":"b","tenant":"@root"}]"#,
+                BindingError::Malformed,
+            ),
+            (r#"[{"agent":"b","x":1}]"#, BindingError::Malformed),
+            (r#"[{"agent":"b","user":null}]"#, BindingError::Malformed),
+            (r#"[{"user":"u"}]"#, BindingError::Malformed),
+            (r#"[{"agent":"a"}]"#, BindingError::InvalidGrant),
+            (r#"[{"agent":""}]"#, BindingError::InvalidGrant),
+        ];
+        for (bad, expected) in cases {
+            let text = edit(
+                scopes,
+                &format!(r#""scopes":[{{"agent":"a"}}],"read_scopes":{bad}"#),
+            );
+            assert_eq!(parse(text.as_bytes()), Err(expected), "{text}");
+        }
+        let raw = edit(
+            scopes,
+            r#""scopes":[{"agent":"a"}],"read_scopes":[{"agent":"b"}],"raw_access":true"#,
+        );
+        assert_eq!(parse(raw.as_bytes()), Err(BindingError::InvalidGrant));
+        let none = edit(scopes, r#""scopes":[],"read_scopes":[]"#);
+        assert_eq!(parse(none.as_bytes()), Err(BindingError::InvalidGrant));
     }
 
     #[test]

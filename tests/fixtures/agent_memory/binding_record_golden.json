@@ -213,6 +213,94 @@
       }
     },
     {
+      "name": "grants-read-scope",
+      "entry": {
+        "binding": "notes",
+        "tenant": "@root",
+        "generation": 1,
+        "state": "active",
+        "graph": "notes_graph",
+        "evidence_collection": null,
+        "schema_version": "memory-schema-v1",
+        "ranking_version": "memory-ranking-v1",
+        "digest_version": "memory-request-v1",
+        "receipt_window_ms": 86400000,
+        "grants": [
+          {
+            "principal": "abcdefghij27",
+            "scopes": [
+              {
+                "agent": "c"
+              }
+            ],
+            "read_scopes": [
+              {
+                "agent": "d"
+              }
+            ]
+          }
+        ]
+      },
+      "expected": {
+        "holder": "notes_graph",
+        "properties": {
+          "record_schema": "memory-binding-record:v1",
+          "tenant": "@root",
+          "binding": "notes",
+          "generation": "1",
+          "state": "active",
+          "graph": "notes_graph",
+          "memory_schema": "memory-schema-v1",
+          "ranking_version": "memory-ranking-v1",
+          "request_digest_version": "memory-request-v1",
+          "receipt_window_ms": "86400000",
+          "grants_digest": "v1:7f2bf98a2d5b7d903d8797b1969241dadf8e2ca7f2eea0a980488b552fd996aa"
+        }
+      }
+    },
+    {
+      "name": "grants-read-only",
+      "entry": {
+        "binding": "notes",
+        "tenant": "@root",
+        "generation": 1,
+        "state": "active",
+        "graph": "notes_graph",
+        "evidence_collection": null,
+        "schema_version": "memory-schema-v1",
+        "ranking_version": "memory-ranking-v1",
+        "digest_version": "memory-request-v1",
+        "receipt_window_ms": 86400000,
+        "grants": [
+          {
+            "principal": "abcdefghij27",
+            "scopes": [],
+            "read_scopes": [
+              {
+                "agent": "d"
+              }
+            ]
+          }
+        ]
+      },
+      "expected": {
+        "holder": "notes_graph",
+        "properties": {
+          "record_schema": "memory-binding-record:v1",
+          "tenant": "@root",
+          "binding": "notes",
+          "generation": "1",
+          "state": "active",
+          "graph": "notes_graph",
+          "memory_schema": "memory-schema-v1",
+          "ranking_version": "memory-ranking-v1",
+          "request_digest_version": "memory-request-v1",
+          "receipt_window_ms": "86400000",
+          "grants_digest": "v1:fc568fa60a44412d06a71c0cced9ced3900c679aea0099a35f9a1ff22b51dbf5"
+        }
+      }
+    },
+    {
       "name": "two-grants-in-order",
       "entry": {
         "binding": "notes",
