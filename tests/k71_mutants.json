@@ -617,18 +617,18 @@
  },
  {
   "id": "lines-fix/lf-mcp-cap-64-mib",
-  "desc": "the MCP cap is 64 MiB, the value before the fix",
+  "desc": "the MCP reader budget is 64 MiB, half the declared cap",
   "file": "src/bin/vlite-mcp.rs",
-  "old": "const MAX_LINE_BYTES: usize = 128 * 1024 * 1024;",
-  "new": "const MAX_LINE_BYTES: usize = 64 * 1024 * 1024;",
+  "old": "read_bounded_line(&mut input, MAX_LINE_BYTES)",
+  "new": "read_bounded_line(&mut input, MAX_LINE_BYTES / 2)",
   "cmd": "cargo test --locked --offline --features mcp,tools --test stdin_lines -- mcp_serves_a_line_of_exactly_the_cap_and_refuses_one_byte_more"
  },
  {
   "id": "lines-fix/lf-mcp-cap-minus-one",
-  "desc": "the MCP cap is 128 MiB - 1",
+  "desc": "the MCP reader budget is one byte under the declared cap",
   "file": "src/bin/vlite-mcp.rs",
-  "old": "const MAX_LINE_BYTES: usize = 128 * 1024 * 1024;",
-  "new": "const MAX_LINE_BYTES: usize = 128 * 1024 * 1024 - 1;",
+  "old": "read_bounded_line(&mut input, MAX_LINE_BYTES)",
+  "new": "read_bounded_line(&mut input, MAX_LINE_BYTES - 1)",
   "cmd": "cargo test --locked --offline --features mcp,tools --test stdin_lines -- mcp_serves_a_line_of_exactly_the_cap_and_refuses_one_byte_more"
  },
  {
@@ -858,10 +858,10 @@
  },
  {
   "id": "import/cap-8-mib",
-  "desc": "the cap is 8 MiB instead of 16 MiB",
+  "desc": "the import reader budget is 8 MiB, half the declared cap",
   "file": "src/bin/vlite-import.rs",
-  "old": "const MAX_LINE_BYTES: usize = 16 * 1024 * 1024;",
-  "new": "const MAX_LINE_BYTES: usize = 8 * 1024 * 1024;",
+  "old": "read_bounded_line(&mut input, MAX_LINE_BYTES)",
+  "new": "read_bounded_line(&mut input, MAX_LINE_BYTES / 2)",
   "cmd": "cargo test --locked --offline --features tools --test import_lines -- jsonl_line_of_exactly_the_cap_is_imported_with_lf_and_crlf"
  },
  {
