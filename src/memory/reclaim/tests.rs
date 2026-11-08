@@ -1394,3 +1394,114 @@ fn replays_refusals_errors_erasure_and_read_only_files_reclaim_nothing() {
     assert_eq!(snapshot(&db), state);
     assert!(present(&db, &group));
 }
+
+/// The memory layer bounds the operation count of its own batch (the headroom
+/// leaves room for the deletes) but nothing bounds its encoded bytes, so an
+/// own batch that fits the 16 MiB codec limit can overflow it once the planned
+/// deletes (16 bytes each) are prepended. The engine refuses that combined
+/// batch before it writes a frame, and `write` commits the own operations alone.
+#[test]
+fn a_combined_batch_over_the_real_byte_limit_commits_the_own_ops_alone() {
+    use super::super::MAX_OPS;
+    use crate::property_graph::GraphOpOutcome;
+    use crate::property_graph::engine::codec::{BODY_HEADER_BYTES, ENTRY_HEADER_BYTES};
+    use crate::property_graph::engine::limits::{MAX_BATCH_BYTES, MAX_BATCH_ENTRIES};
+
+    // The own batch spreads its ~16 MiB over nodes of string properties that
+    // stay under the 4 KiB value and 64 KiB property limits.
+    const NODES: usize = 273;
+    const FIELDS: usize = 15;
+    const KEY_BYTES: usize = "own-000".len();
+    const LABEL_BYTES: usize = "Own".len();
+    const NAME_BYTES: usize = "p00".len();
+
+    let dir = tempfile::tempdir().unwrap();
+    let mut db = database(dir.path());
+    let group = legacy_group(
+        &mut db,
+        &loose_scope("a"),
+        "g",
+        110,
+        Shape::A2(RECLAIM_MAX_OPS - 1),
+    );
+    let deletes = super::plan(
+        &db.graph(GRAPH).unwrap().with_clock(ELIGIBLE),
+        "",
+        ELIGIBLE,
+        MAX_OPS - NODES,
+    );
+    assert_eq!(deletes.len(), RECLAIM_MAX_OPS, "the whole group is planned");
+
+    // Every entry is an 8-byte envelope and its payload. A delete payload is
+    // the 8-byte node ID. A node payload is the ID, the length-prefixed key
+    // and label (with a label count) and the properties: a 4-byte size and a
+    // 4-byte count, then per field its length-prefixed name, a type tag and a
+    // length-prefixed string. The values end the own body in the middle of
+    // the window the deletes overflow.
+    let delete_bytes = deletes.len() * (ENTRY_HEADER_BYTES + 8);
+    let node_bytes = ENTRY_HEADER_BYTES + 8 + (2 + KEY_BYTES) + (1 + 1 + LABEL_BYTES) + (4 + 4);
+    let field_bytes = 2 + NAME_BYTES + 1 + 4;
+    let fixed_bytes = BODY_HEADER_BYTES + NODES * (node_bytes + FIELDS * field_bytes);
+    let value_bytes = (MAX_BATCH_BYTES - delete_bytes / 2 - fixed_bytes) / (NODES * FIELDS);
+    let own_bytes = fixed_bytes + NODES * FIELDS * value_bytes;
+    assert!(own_bytes <= MAX_BATCH_BYTES, "the own batch fits alone");
+    assert!(
+        own_bytes + delete_bytes > MAX_BATCH_BYTES,
+        "the deletes overflow it"
+    );
+    assert!(
+        NODES + deletes.len() <= MAX_BATCH_ENTRIES,
+        "bytes, not entries"
+    );
+
+    let value = "v".repeat(value_bytes);
+    let fields: Metadata = (0..FIELDS)
+        .map(|field| (format!("p{field:02}"), string(&value)))
+        .collect();
+    let own_keys: Vec<String> = (0..NODES).map(|node| format!("own-{node:03}")).collect();
+    let own: Vec<GraphOp> = own_keys
+        .iter()
+        .map(|key| GraphOp::CreateNode {
+            key: key.clone(),
+            labels: vec!["Own".into()],
+            properties: fields.clone(),
+        })
+        .collect();
+    let state = snapshot(&db);
+    let before = db.sequence;
+
+    // The real engine refuses the combined batch before it writes a frame.
+    let deleted = deletes.len();
+    let mut batch = deletes;
+    batch.extend(own);
+    let refused = db
+        .graph_mut(GRAPH)
+        .unwrap()
+        .write_batch_at(&batch, ELIGIBLE);
+    assert!(matches!(refused, Err(Error::BatchTooLarge)), "{refused:?}");
+    assert_eq!(db.sequence, before, "a refused batch commits nothing");
+
+    let own = batch.split_off(deleted);
+    let result = write(&mut db, GRAPH, batch, own, ELIGIBLE).unwrap();
+    assert_eq!(db.sequence, before + 1, "one commit: the own operations");
+    assert_eq!(result.revision, Some(db.sequence));
+    assert_eq!(result.outcomes.len(), NODES, "no delete outcome");
+    for outcome in &result.outcomes {
+        let GraphOpOutcome::Node(node) = outcome else {
+            panic!("an own node outcome, got {outcome:?}");
+        };
+        assert!(node.created);
+        assert_eq!(node.revision, db.sequence);
+    }
+    assert!(present(&db, &group), "no expired receipt was deleted");
+    for (key, expected) in &state {
+        assert_eq!(revision(&db, key), Some(*expected), "{key}");
+    }
+    let graph = db.graph(GRAPH).unwrap();
+    for key in &own_keys {
+        let node = graph.get_node(key).unwrap().output.unwrap();
+        assert_eq!(node.labels, BTreeSet::from(["Own".to_string()]), "{key}");
+        assert_eq!(node.properties, fields, "{key}");
+        assert_eq!(node.revision, db.sequence, "{key}");
+    }
+}
