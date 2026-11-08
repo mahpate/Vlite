@@ -18,6 +18,8 @@ async fn refused(
     write: bool,
 ) -> Response {
     let service = call.service.clone();
+    // Only facts/query is a read route: it alone accepts a read scope.
+    let reader = matches!(operation, WireOperation::FindFacts);
     let (bound, name) = match resolve(&service, &call.role, name, operation, evidence_ops) {
         Ok(found) => found,
         Err(fail) => return call.finish(Err(fail), None),
@@ -25,7 +27,11 @@ async fn refused(
     call.binding = Some(name);
     let authorized = body(&headers, bytes).and_then(|mut fields| {
         let scope = wire::scope(fields.require("scope")?, &bound.tenant, "scope")?;
-        bound.authorize(&scope)
+        if reader {
+            bound.authorize_read(&scope)
+        } else {
+            bound.authorize(&scope)
+        }
     });
     if let Err(fail) = authorized {
         return call.finish(Err(fail), None);

@@ -210,6 +210,8 @@ struct Bound {
     receipt_window_ms: u64,
     refusal: Option<WireCode>,
     scopes: Vec<MemoryScope>,
+    /// The grant's read-only scopes: `recall` and `facts/query` only.
+    read_scopes: Vec<MemoryScope>,
     /// Whether the credential's grant carries `raw_access` on this binding.
     raw_access: bool,
     grant: Arc<super::super::credentials::Grant>,
@@ -260,6 +262,7 @@ fn resolve(
             receipt_window_ms: binding.receipt_window_ms,
             refusal: binding.refusal(operation),
             scopes: granted.scopes.clone(),
+            read_scopes: granted.read_scopes.clone(),
             raw_access: granted.raw_access,
             grant: grant.clone(),
         },
@@ -275,6 +278,15 @@ impl Bound {
         } else {
             Err(Fail::forbidden())
         }
+    }
+
+    /// [`Bound::authorize`] for the read routes (`recall`, `facts/query`):
+    /// a read scope is also accepted. The refusal is the same 403.
+    fn authorize_read(&self, scope: &MemoryScope) -> Result<(), Fail> {
+        if self.read_scopes.contains(scope) {
+            return Ok(());
+        }
+        self.authorize(scope)
     }
 
     /// Before a mutation, under the database write lock: the graph's binding

@@ -529,7 +529,7 @@ pub(super) async fn recall(
     let parsed = body(&headers, bytes).and_then(|mut fields| {
         let (scope, scopes) = scopes(&mut fields, &bound.tenant)?;
         for scope in &scopes {
-            bound.authorize(scope)?;
+            bound.authorize_read(scope)?;
         }
         refuse(&bound, fields.raw(), |body| {
             recall_refusal(body, bound.evidence.is_some())
