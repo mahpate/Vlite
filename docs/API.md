@@ -285,8 +285,8 @@ credentials granted the same scope are peers and can replay or look up each
 other's receipts with the key; a read scope is not a peer (see
 [Memory-bound resources](SECURITY.md#memory-bound-resources)).
 Bindings explicitly configure a receipt window; expiry ends replay guarantees,
-not memory retention. Later writes to the binding delete a bounded number of
-receipts that expired at least 5 minutes earlier; lookups answer 404 either way.
+not memory retention. A later write that commits deletes a bounded number of
+receipts that expired at least 5 minutes earlier on the server's clock; lookups answer 404 either way.
 After an indeterminate commit, reopen and reconcile the
 receipt rather than blindly retrying. Full schemas retain future capabilities,
 including 202 pending forget/resume results; these do not imply secure erasure.
@@ -445,7 +445,7 @@ its content.
   credential may only read: `recall` and `facts/query` accept them, every
   other route answers 403 `forbidden_scope` as for an ungranted scope. A scope
   appears at most once across both lists; `scopes` may be empty only when
-  `read_scopes` is not; `raw_access` cannot be combined with `read_scopes`.
+  `read_scopes` is not; a grant with `raw_access` cannot list any `read_scopes`.
   Startup provisions read scopes, and changing them needs a higher
   `generation`. Older servers refuse a file that uses `read_scopes`.
 - `"state": "retired"` with `retired_at_ms` keeps `receipts/lookup` working and

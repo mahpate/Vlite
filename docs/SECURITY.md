@@ -150,7 +150,7 @@ wildcard stays inside its tenant.
 **Known limits.** A tenant that owns a binding cannot be deleted and answers
 `409 tenant_not_empty` even when no visible collection remains. Sequence numbers are
 database-wide: graph `view_sequence` and `revision`, change-feed `head` and
-memory receipt `sequence` advance for hidden writes, so a caller can count the
+memory receipt `sequence` and recall `meta.sequence` advance for hidden writes, so a caller can count the
 activity of other tenants and of memory, but not read it. In a filtered change
 feed, `has_more`, `next_cursor`, `head` and gaps in the `sequence` and
 `ordinal` of the remaining events show the same thing. The sequence is the
@@ -164,10 +164,10 @@ alone. Give separate scopes to credentials that must not observe each other.
 A read scope (`read_scopes`) is not a peer: it allows only `recall` and
 `facts/query`, so its holder cannot replay, look up a receipt or read erasure
 status in that scope, and every other route answers the same 403 as for an
-ungranted scope. Later writes delete receipts that expired at least 5 minutes
-earlier from the current graph; that is not erasure, the bytes stay in logs,
-backups and replicas until compaction, and the deletes appear in the change
-feed and webhooks only to holders of `raw_access` on the binding.
+ungranted scope. A later write that commits deletes receipts that expired at least 5 minutes
+earlier on the server's clock from the current graph; that is not erasure: the bytes stay in the log
+until compaction and in earlier backups; no replica receives the deletes (replication export is refused while a binding is configured); and they appear in the change
+feed and webhooks only to holders of `raw_access` on the binding. Keep the server clock monotonic: a step forward past a receipt's expiry plus 5 minutes, and then back, lets a retry inside its original window run again instead of replaying.
 A reservation outlives the file: a graph that holds a binding record stays
 reserved when its entry is retired and removed (only after its receipt window
 has ended) and when the whole file is removed. To give such memory up, keep the

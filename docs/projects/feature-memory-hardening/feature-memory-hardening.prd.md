@@ -201,7 +201,7 @@ digest = "v1:" + lowercase hex(sha256(bytes))
 ```
 
 **Authorization** (`src/server/memory/routes.rs`):
-- `Bound` (lines 203-216) gains `read_scopes: Vec<MemoryScope>`, filled in `resolve` on a new line after line 262.
+- `Bound` (lines 203-216) gains `read_scopes: Vec<MemoryScope>`, filled in `resolve`, and only for an operation that `accepts_read_scopes`.
 - `authorize` (lines 272-278) stays unchanged. A new method follows it:
   ```rust
   fn authorize_read(&self, scope: &MemoryScope) -> Result<(), Fail> {
@@ -210,7 +210,7 @@ digest = "v1:" + lowercase hex(sha256(bytes))
   }
   ```
 - `recall.rs:531-533` calls `authorize_read` for every requested scope (at most 16, `recall.rs:17`).
-- `refused.rs` computes `let reader = matches!(operation, WireOperation::FindFacts);` before `resolve` consumes `operation`. It then calls `authorize_read` when `reader` is true and `authorize` otherwise, at `refused.rs:26-29`. Its signature is unchanged (RD-016).
+- `refused.rs` computes `let reader = operation.accepts_read_scopes();` before `resolve` consumes `operation`. It then calls `authorize_read` when `reader` is true and `authorize` otherwise, at `refused.rs:29-33`. Its signature is unchanged (RD-016). `WireOperation::accepts_read_scopes` (`src/memory/mapping.rs`) is an exhaustive match: only `Recall` and `FindFacts` accept read scopes, and a new operation does not compile until it is classified. `resolve` fills `Bound.read_scopes` only for those operations, so every other route authorizes against `scopes` alone.
 - `write()` (`routes.rs:710`) and `receipt.rs:29` stay unchanged.
 
 **Route matrix.** Credential permissions and evidence operations are unchanged. A 403 is `forbidden_scope`, byte-identical for a read scope, an ungranted scope and an unknown binding. The check order is unchanged.
@@ -364,14 +364,14 @@ for id in read.memory_label_window(LABEL_RECEIPT, seed, limits.scan) {
 | forget | `memory.rs:822-825` | `key` | `MAX_OPS - (ops.len() + guard_operations)` |
 | consolidate | `consolidate.rs:767`, after `debug_assert_eq!(ops.len(), physical)` | `receipt_key`, cloned before the final `put_node` moves it | `MAX_OPS - logical` |
 
-- Each hook plans with a read handle `with_clock(request clock)` and passes the request clock.
+- Each hook calls `reclaim::commit` (RD-019), which plans with a read handle `with_clock(request clock)` and passes the request clock to `write`.
 - Headroom uses `saturating_sub`, and it is computed after the existing `OperationLimit` checks, so the combined batch never exceeds `MAX_OPS`.
 - These are never hooked: erasure, replays, refusals, failed requests, recall, lookups, startup, binding-record writes and read-only databases.
 - The response, the `logical_operations` value, the audit events and the error mapping are unchanged.
 
 **Guarantees and non-guarantees.**
-- Deletion is atomic with the write. It is deterministic on replay and on replicas, because the frame carries explicit deletes.
-- It removes current graph state only. The log, backups and replica logs keep the bytes until compaction, and nothing is wiped securely or swept while idle.
+- Deletion is atomic with the write. It is deterministic on replay, because the frame carries explicit deletes.
+- It removes current graph state only. The log and backups keep the bytes until compaction, and nothing is wiped securely or swept while idle. No replica receives the deletes while a binding is configured: replication export answers 403.
 - Receipt lookups answer the same before and after deletion: an expired receipt already answers like a missing one.
 - Reclaim deletes are ordinary `DeleteNode` operations of the write's own batch.
   - Replicas and backups receive them like any other write.
@@ -403,7 +403,7 @@ Neither owner edits another owner's files, `Cargo.toml`, `Cargo.lock`, the mutat
 | FM-008 | The own ops fail (key conflict, I/O, any other error) | The request fails as today | The error is returned unchanged; nothing is reclaimed | AC-015, AC-016 |
 | FM-009 | Crash during a reclaiming write | After reopen the frame is absent or complete | Existing frame atomicity | AC-016 |
 | FM-010 | A read error or the read budget runs out while planning | Planning stops | Completed groups are kept; the error is not surfaced | AC-014 |
-| FM-011 | The request clock steps forward by more than the grace | Receipts are deleted early by up to the step size; a retry after a later step back runs again instead of replaying | The grace absorbs normal steps; documented | AC-011 |
+| FM-011 | The request clock steps forward by more than the grace | Receipts are deleted early by up to the step size; a retry after a later step back runs again instead of replaying | The grace absorbs normal steps; documented in the memory guide (Receipts and retries) and SECURITY.md (Known limits), which ask for a monotonic server clock | AC-011 |
 | FM-012 | A corrupt or unexpected receipt-like node | Never reclaimed | A `raw_access` holder may delete reserved nodes by key (`src/memory/names/tests.rs:241-248`) | AC-013 |
 | FM-013 | A window holds no eligible group: live receipts, receipts reused in place, corrupt receipts or barred scopes | That write reclaims nothing | The next commit moves the window start. No fixed set of receipts can block an eligible group from every later window (RD-011). Corrupt receipts also have the FM-012 remedy. Barred scopes and E1 receipts cannot come from served routes at 5d0524ab, because `begin_erasure` (`erasure.rs:364`) has only test callers | AC-020, AC-024 |
 | FM-014 | A scope behind an erasure barrier | Its receipts are skipped | By design | AC-013 |
@@ -447,7 +447,8 @@ Neither owner edits another owner's files, `Cargo.toml`, `Cargo.lock`, the mutat
   - reader limits;
   - reclamation timing, bounds and idle bindings;
   - the not-erasure caveat;
-  - where reclaim deletes are visible (feed, webhooks, replicas);
+  - where reclaim deletes are visible (feed and webhooks; no replica receives them while a binding is configured);
+  - the monotonic-clock caution, the per-write cost and the missing switch (FM-011, RISK-005, RISK-012);
   - rollback.
 - **REQ-020**: The window MUST start at `seed % next_node_id` and wrap once. The seed MUST derive from the planning handle's `view_sequence`, so no fixed set of ineligible receipts can keep an eligible group out of every later window. Seed 0 MUST give the 512 lowest members.
 - **SEC-001**: A grant with read scopes MUST NOT hold `raw_access`.
@@ -488,8 +489,8 @@ Neither owner edits another owner's files, `Cargo.toml`, `Cargo.lock`, the mutat
   - the own-key exclusion;
   - edge, attachment and barrier checks;
   - AC-011 and AC-013.
-- **RISK-005** (Medium): Write latency grows by one 512-member window (an index range plus at most 512 `get_node_by_id` calls) and by point reads for candidate groups. Mitigation: fixed caps, and point reads only after rules 1-9 pass. Benchmarks are out of scope; tuning the constants is a follow-up.
-- **RISK-006** (Low): Clock steps larger than the grace (FM-011). Mitigation: documented.
+- **RISK-005** (Medium): Write latency grows by one 512-member window (an index range plus at most 512 `get_node_by_id` calls) and by point reads for candidate groups. Mitigation: fixed caps, and point reads only after rules 1-9 pass. Benchmarks are out of scope for this release; measure the cost at the next major release's benchmark campaign and tune the constants then if needed (follow-up). The scan covers every scope of the binding and runs under the write lock that the whole database shares; the docs say so.
+- **RISK-006** (Low): Clock steps larger than the grace (FM-011). Mitigation: documented in the memory guide and SECURITY.md (keep the server clock monotonic).
 - **RISK-007** (Low): Reclamation is slow when eligible groups are rare among the label members (FM-013). This happens when most members are live or reused in place, or when receipt IDs cluster so that many starts wrap to the same members. Mitigation:
   - every write examines a fresh seeded window, and every member is reachable;
   - with evenly interleaved IDs, a write deletes on average 512 × (eligible share) groups and adds at most one receipt, so the expected backlog settles near 1/512 of all receipts;
@@ -497,8 +498,10 @@ Neither owner edits another owner's files, `Cargo.toml`, `Cargo.lock`, the mutat
 
   A persistent cursor is a follow-up only if measured progress is too slow.
 - **RISK-008** (Low): Write latency reveals roughly how many expired receipts exist in other scopes of the same binding. Accepted: those receipts are already invisible, and the binding is the trust boundary.
-- **RISK-009** (Low): Deleted receipts persist in logs, backups and replicas until compaction. Mitigation: SEC-006 docs.
+- **RISK-009** (Low): Deleted receipts persist in logs and backups until compaction. No replica receives them while a binding is configured, because replication export answers 403. Mitigation: SEC-006 docs.
 - **RISK-010** (Low): An existing test expects expired receipt nodes to persist. Mitigation: a scan at 5d0524ab found none, and GUD-003 applies.
+- **RISK-011** (Low): A surplus chunk of a receipt (a chunk beyond `outcome_chunks`) is probed only up to the first missing index, up to 4,096 chunks, and only while it is visible at the request clock. A surplus chunk behind a gap, past that limit or hidden by its own expiry is never found and stays in the graph after its receipt is reclaimed. This costs storage only, and only a raw graph write can create such a chunk, because the served routes write contiguous chunks. Accepted; a comment in `Reader::group` records it.
+- **RISK-012** (Low): Reclamation is silent: it has no counter or log line, a fallback to the write's own operations is not reported, and a binary downgrade is the only way back, which also drops `read_scopes` (Section 9). Accepted for this release (RD-018); audit counters are a follow-up.
 - **ASSUMPTION-001**: Existing files hold only the A2, C1 and E1 receipt shapes that the 0.7.0-0.7.2 encoders write.
 - **ASSUMPTION-002**: Shared memory is reviewed outside VLite before the publisher writes it.
 - **ASSUMPTION-003**: Operators create the publisher credential with the existing credential API.
@@ -639,8 +642,8 @@ Neither owner edits another owner's files, `Cargo.toml`, `Cargo.lock`, the mutat
 **Data handling**:
 - No new data is stored. The audit event fields and log content are unchanged, and the credential IDs in the file are not secrets.
 - Reclamation deletes only already-expired, already-invisible receipt groups (SEC-005).
-- Bytes remain in log segments, backups and replica logs until compaction (SEC-006).
-- Reclaim deletes travel in the write's own frame. Replicas, backups, the change feed and webhooks carry them exactly like the binding's other writes, and the feed shows them only to `raw_access` holders of the binding (Section 3.3).
+- Bytes remain in log segments and backups until compaction (SEC-006).
+- Reclaim deletes travel in the write's own frame. Backups, the change feed and webhooks carry them exactly like the binding's other writes, and the feed shows them only to `raw_access` holders of the binding (Section 3.3). No replica receives them while a binding is configured, because replication export answers 403 (`src/server/features.rs:801-803`).
 
 **Input validation**:
 - `read_scopes` uses the strict `serde` rules and `deny_unknown_fields`, plus the validation table.
@@ -670,7 +673,7 @@ Neither owner edits another owner's files, `Cargo.toml`, `Cargo.lock`, the mutat
 
 The stored digest keeps the `v1:` prefix, so an older binary decodes the record and treats the change like any grant change. Starting an older binary with `read_scopes` still in the file fails closed (FM-001).
 
-**Rollback of reclamation:** downgrade the binary. The format is unchanged, deleted receipts answer like expired ones (404), and remaining receipts stay readable by every 0.7.x binary. There is deliberately no switch to disable reclamation (RD-018).
+**Rollback of reclamation:** downgrade the binary. The format is unchanged, deleted receipts answer like expired ones (404), and remaining receipts stay readable by every 0.7.x binary. There is deliberately no switch to disable reclamation (RD-018). A downgrade also drops `read_scopes`, so remove every `read_scopes` list first, as above. Reclamation is silent: no counter or log line reports it or its fallback (RISK-012).
 
 ## 10. Resolved Decisions
 
@@ -685,15 +688,16 @@ The stored digest keeps the `v1:` prefix, so an older binary decodes the record 
 | RD-007 | Read scopes are provisioned at startup | Recall answers 200 empty instead of 409, matching writers |
 | RD-008 | A read-scope refusal is the same 403 as an ungranted scope | Anti-enumeration; the check order is unchanged |
 | RD-009 | Reclaim deletes are prepended to the request's own batch | Atomic with no new frame type; the own receipt stays the last outcome |
-| RD-010 | The grace is 300,000 ms after `expires_at_ms` | It covers clock skew between request clocks and between primary and replica |
+| RD-010 | The grace is 300,000 ms after `expires_at_ms` | It covers clock skew between request clocks |
 | RD-011 | A stateless seeded window over the label index, with no cursor or stored position | It needs no persistent state or migration. Receipts reused in place keep their node IDs, so a fixed front scan could stall for good behind them. A start derived from the view sequence reaches every member without stored state. Engine cursors cannot carry over between writes, because a cursor goes stale after any commit (`engine/cursor.rs:1-16`) |
 | RD-012 | Caps of 512 window members, 1,024 deletes and 16,384 point reads, with a first-group exception up to the headroom | Bounded latency per write. A group larger than 1,024 nodes is still reclaimed as the first group of a write whose headroom fits it; a write with less headroom skips it |
 | RD-013 | Exact shape, chunk, edge, attachment and barrier checks | Never delete data the planner does not fully recognize |
 | RD-014 | A single fallback retry with own ops | Today's outcome is guaranteed whatever the reclaim ops do |
 | RD-015 | Eligibility uses the request clock | It matches the lookup and replay decision, so deletion never precedes "expired" |
-| RD-016 | `refused()` derives the reader rule from `WireOperation::FindFacts` | No new parameter and no lint exception |
+| RD-016 | `refused()` and `resolve` derive the read-scope rule from `WireOperation::accepts_read_scopes`, an exhaustive match | No new parameter and no lint exception; a new operation does not compile until it is classified, so it never gets read scopes by default |
 | RD-017 | Owners A and B work in parallel on disjoint files; integration and docs are serialized | Safe parallelism with no shared-file conflicts |
 | RD-018 | Publisher configuration is documentation only, and there is no reclamation switch | No live settings change; the binary is the rollback unit |
+| RD-019 | The three write routes call one function, `reclaim::commit`, which plans and writes the combined batch | One place owns the hook, so remember, forget and consolidate cannot drift apart |
 
 ## 11. Alternatives Considered
 
@@ -726,17 +730,17 @@ The stored digest keeps the `v1:` prefix, so an older binary decodes the record 
 - **FILE-005**: `src/memory/startup/tests.rs` — TEST-004 and literals.
 - **FILE-006**: `tests/memory_binding_record_oracle.py` — TEST-003 oracle.
 - **FILE-007**: `tests/fixtures/agent_memory/binding_record_golden.json` — two new records.
-- **FILE-008**: `src/server/memory/routes.rs` — `Bound.read_scopes` and `authorize_read`.
+- **FILE-008**: `src/server/memory/routes.rs` — `Bound.read_scopes` (filled only for an operation that `accepts_read_scopes`) and `authorize_read`.
 - **FILE-009**: `src/server/memory/routes/recall.rs` — `authorize_read` in the scope loop.
-- **FILE-010**: `src/server/memory/routes/refused.rs` — the reader rule for `facts/query`.
+- **FILE-010**: `src/server/memory/routes/refused.rs` — the reader rule, derived from `accepts_read_scopes`.
 - **FILE-011**: `src/server/memory.rs` — provisioning union, and `#[cfg(test)] mod pins_access;` before `pins_binding`.
-- **FILE-012**: `src/server/memory/pins_access.rs` (new) — TEST-005.
+- **FILE-012**: `src/server/memory/pins_access.rs` (new) — TEST-005. Each refusal and each allowed route is compared by status, headers and body.
 - **FILE-013**: `src/server/guard.rs` — test literals only.
 - **FILE-014**: `src/server/reserved.rs` — test literals only.
 - **FILE-015**: `tests/server_memory_binding_record.rs` — TEST-006.
-- **FILE-016**: `src/memory.rs` — `mod reclaim;` and the remember and forget hooks.
-- **FILE-017**: `src/memory/consolidate.rs` — `pub(super)` helpers and the consolidate hook.
-- **FILE-018**: `src/memory/reclaim.rs` (new) — constants, `Limits`, `plan`, `plan_with`, `write` and the seam.
+- **FILE-016**: `src/memory.rs` — `mod reclaim;` and the remember and forget calls to `reclaim::commit`.
+- **FILE-017**: `src/memory/consolidate.rs` — `pub(super)` helpers and the consolidate call to `reclaim::commit`.
+- **FILE-018**: `src/memory/reclaim.rs` (new) — constants, `Limits`, `plan`, `plan_with`, `write`, `commit` (RD-019) and the seam.
 - **FILE-019**: `src/memory/reclaim/tests.rs` (new) — TEST-007.
 - **FILE-020**: `src/server/memory/pins_receipts.rs` — TEST-008 and the `outcome_key` helper.
 - **FILE-021**: `src/property_graph/mod.rs` — adds the crate-private `memory_label_window` read helper after `memory_scan_bound`; existing lines are unchanged, and the engine is not touched.
@@ -745,6 +749,8 @@ The stored digest keeps the `v1:` prefix, so an older binary decodes the record 
 - **FILE-024**: `docs/SECURITY.md` — ITEM-017.
 - **FILE-025**: `site/api.html` — ITEM-018 Access cells only.
 - **FILE-026**: `docs/projects/feature-memory-hardening/feature-memory-hardening.prd.md` — status and change log.
+- **FILE-027**: `src/memory/mapping.rs` — `WireOperation::accepts_read_scopes`, an exhaustive match (RD-016).
+- **FILE-028**: `src/memory/mapping/tests.rs` — a test that pins exactly which operations accept read scopes.
 
 These are not changed:
 - `src/memory/startup.rs`, `src/memory/receipt.rs`, `src/memory/erasure.rs`;
@@ -805,7 +811,7 @@ These are not changed:
 | Task | Description | Status | Relevant Files |
 |---|---|---|---|
 | ITEM-014 | Merge both branches in either order (the files are disjoint), then rerun the ITEM-006 and ITEM-013 commands on the merge | Done | FILE-001..FILE-021 |
-| ITEM-015 | `docs/MEMORY.md`: 1. After the step-3 paragraph (line 84), add a `read_scopes` paragraph with the Section 3.2 snippet, its rules, the generation rule, review outside VLite, and that servers without support refuse the file. 2. Receipts (lines 262-270): "a read scope is not a peer", and a bullet **Expired receipts are removed.** (5-minute grace, bounded per write, 404 before and after, not secure erasure, idle bindings keep them, and the deletes travel like the binding's other writes: in replicas and backups, and in the change feed and webhooks only for `raw_access` holders of the binding). 3. The 403 row (line 412). 4. The security model (lines 448-460) | Done | FILE-022 |
+| ITEM-015 | `docs/MEMORY.md`: 1. After the step-3 paragraph (line 84), add a `read_scopes` paragraph with the Section 3.2 snippet, its rules, the generation rule, review outside VLite, and that servers without support refuse the file. 2. Receipts (lines 262-270): "a read scope is not a peer", and a bullet **Expired receipts are removed.** (5-minute grace, bounded per write, 404 before and after, not secure erasure, idle bindings keep them, and the deletes show in backups, and in the change feed and webhooks only for `raw_access` holders of the binding; no replica receives them while a binding is configured). 3. The 403 row (line 412). 4. The security model (lines 448-460) | Done | FILE-022 |
 | ITEM-016 | `docs/API.md`: scope grants (270-276; `read_scopes` for recall and facts/query only), peers and readers (281-284), one reclamation sentence (285-288), grant rules and the cap counting both lists (430-443) | Done | FILE-023 |
 | ITEM-017 | `docs/SECURITY.md`: `raw_access` excludes `read_scopes` (68-71); peers versus readers, reclamation as not erasure, and reclaim deletes in the feed only for `raw_access` holders (159-162); why raw access forbids read scopes (194-195) | Done | FILE-024 |
 | ITEM-018 | `site/api.html` lines 1396-1404, Access cells only: "exact write scope" on the seven write-only routes, "exact read or write scope" on recall and facts/query; `data-api` is unchanged | Done | FILE-025 |
@@ -821,3 +827,10 @@ These are not changed:
   - the recall and actor suites are added to the EPIC-001 gate;
   - the f3 and f2 ledgers are added to every ledger check.
 - 2026-11-07 — 1.1 — Implemented. Remote delegation was unavailable in the implementing session, so EPIC-001 and EPIC-002 were built in parallel by local subagents in two worktrees from `5d0524ab`: branch `mahpate-memory-epic001` (`1686dd69`, `aed354e2`, `0391d243`) and branch `mahpate-memory-epic002` (`68e09d58`, `461a1852`). Both were reviewed and merged into `mahpate-graph-store-continuation` (merge commits `dd19c38e` and `bf26a475`); EPIC-003 documentation is applied on top. Gates on the merge: `memory::` lib suite 487 passed; the ITEM-006 and ITEM-013 integration suites passed; both oracle self-tests, `mutant_replay_selftest.py` and all eight doc checks passed; ledger plans `"stale":0` with counts 257, 206, 66 and 72; `cargo fmt --check`, clippy `-D warnings` and `cargo check --no-default-features --lib` passed; workspace all-features nextest 4,095 passed; doc tests, `graph_server_surfaces`, `rest_graph` and `graph_surface_parity` passed. Deviations: TEST-005 and TEST-006 were written after their code rather than before; AC-008 is checked with two recalls, each naming both scopes, because recall seeds only its main scope; the reader receipt test uses a `forget` receipt because `remember` lookups answer 409.
+- 2026-11-07 — 1.2 — Deep review fixes. Three independent reviewers (advocate, skeptic and architect) examined `5f0a519f`. None found a blocking defect, and their findings are applied on top of the merge `094bb5b0`:
+  - code: `WireOperation::accepts_read_scopes`, an exhaustive match, decides which operations see `read_scopes`, so a new operation cannot get them by default (RD-016); `reclaim::commit` is the one place that plans and writes the combined batch for remember, forget and consolidate (RD-019); a comment in `Reader::group` records the chunk-probe edge (RISK-011);
+  - tests: `pins_access.rs` compares status, headers and body of every refusal and every allowed route; the reclaim tests use `MAX_OPS` instead of the `4_096` literal, except the one test that pins the engine's own limit;
+  - docs: the clock-step caution; "a later write that commits"; `raw_access` excludes only a non-empty `read_scopes`; no replica receives the deletes while a binding is configured, because replication export answers 403; the per-write cost across every scope of the binding; the silent fallback and the missing switch; and that recall's `meta.sequence` moves for hidden writes (SECURITY.md);
+  - risks: RISK-011 and RISK-012 are added, and RISK-005, RISK-006 and RISK-009 are reworded;
+  - kept as built: the `memory_label_window` name and the fixed 5-minute grace;
+  - follow-ups, none blocking: audit counters for reclamation, one shared module for the receipt shape, measuring the reclaim cost at the next major release's benchmark campaign, and E1 erasure receipts, which are still never reclaimed (REQ-018).
