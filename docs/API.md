@@ -414,6 +414,10 @@ On a writable database, records are durable before new grants are served;
 a restart with the same file adds no commit. A read-only node checks and
 serves the new grants without writing records; memory writes stay 403 `read_only`.
 
+Once apply has started, a client disconnect does not cancel the reload,
+its bounded drain or its success reporting. A retry while it is still
+running gets `memory_reload_in_progress`; retry afterwards to check again.
+
 | Status | `error.code` and meaning |
 |---|---|
 | 403 | Read-only tokens and scoped credentials cannot reload. |

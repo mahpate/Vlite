@@ -1,9 +1,11 @@
 //! Live grant reload pins that need crate-private state: the database write
-//! lock, the request-lifetime pin, the storage file and the gRPC adoption.
-//! Every expectation comes from the restart-free memory grants PRD
+//! lock, the request-lifetime pin, the storage file, the gRPC adoption and the
+//! audit log. Every expectation comes from the restart-free memory grants PRD
 //! (`docs/projects/feature-memory-live-grants/feature-memory-live-grants.prd.md`,
-//! sections 3.4 to 3.7 and TEST-005 to TEST-009), never from the reload code.
+//! sections 3.4 to 3.7, TEST-005 to TEST-009 and TEST-019), never from the
+//! reload code.
 
+use std::path::Path;
 use std::sync::{Arc, atomic::Ordering};
 use std::time::Duration;
 
@@ -17,7 +19,9 @@ use http_body_util::BodyExt;
 use serde_json::{Value, json};
 use tower::ServiceExt;
 
-use super::super::{MAX_JSON_BYTES, RequestId, Service, admin, credentials, guard};
+use super::super::{
+    MAX_JSON_BYTES, RequestId, Service, admin, audit, credentials, guard, reserved,
+};
 use super::reload::{apply, reload};
 use super::routes::Clock;
 use crate::{CollectionSpec, CreateOptions, Database, FormatVersion};
@@ -82,6 +86,15 @@ fn recall_body() -> Value {
     json!({"scope": {"agent": "a"}, "vector": [1, 0]})
 }
 
+/// The audit event of a successful reload of the one binding: counts and the
+/// outcome only.
+fn reloaded(changed: u64, drained: bool) -> Value {
+    json!({
+        "event": "memory_bindings_reloaded", "bindings": 1, "changed": changed,
+        "drained": drained, "outcome": "ok",
+    })
+}
+
 impl Pins {
     /// A server over an in-memory database, started from a bindings file at
     /// generation 1 that grants agent `a`.
@@ -102,6 +115,15 @@ impl Pins {
         let directory = tempfile::tempdir().unwrap();
         let db = Database::create(directory.path().join(DATABASE), 2).unwrap();
         Self::start(db, directory)
+    }
+
+    /// [`Pins::new`] whose reloads append to an audit log next to the
+    /// bindings file.
+    fn audited() -> Self {
+        let mut pins = Self::new();
+        let directory = pins.directory.path().to_owned();
+        pins.audit_in(&directory);
+        pins
     }
 
     /// Wired as the server wires it: the bindings read from the file, the
@@ -168,6 +190,52 @@ impl Pins {
     fn sequence(&self) -> u64 {
         let owner = self.service.database.read().unwrap();
         owner.as_ref().unwrap().sequence
+    }
+
+    /// Gives the service that reloads run with an audit log in `directory`.
+    /// The router keeps the service it was built with, which audits nothing,
+    /// so the log holds only what reloads append.
+    fn audit_in(&mut self, directory: &Path) {
+        let mut state = admin::AdminState::default();
+        state.audit_log = Some(Arc::new(audit::Log::open(directory).unwrap()));
+        self.service.admin = Arc::new(state);
+    }
+
+    /// The entries of the [`Pins::audited`] log, each without the time the
+    /// log adds to every entry. None names a binding, tenant, principal,
+    /// scope or path.
+    fn audit_entries(&self) -> Vec<Value> {
+        let text = std::fs::read_to_string(self.directory.path().join("audit.jsonl")).unwrap();
+        let directory = self.directory.path().file_name().unwrap().to_str().unwrap();
+        for named in ["notes", "@root", PRINCIPAL, "agent", FILE, directory] {
+            assert!(!text.contains(named), "the audit log names {named}: {text}");
+        }
+        text.lines()
+            .map(|line| {
+                let mut entry: Value = serde_json::from_str(line).unwrap();
+                let at = entry.as_object_mut().unwrap().remove("unix_ms");
+                assert!(at.is_some_and(|at| at.is_u64()), "{line}");
+                entry
+            })
+            .collect()
+    }
+
+    /// A reload that starts now is refused: one still runs.
+    async fn assert_reloading(&self) {
+        let refused = reload(&self.service, DRAIN)
+            .await
+            .map(|answer| answer.0)
+            .expect_err("a concurrent reload is refused while one runs");
+        assert_eq!(refused.status, StatusCode::CONFLICT, "{refused:?}");
+        assert_eq!(refused.code, "memory_reload_in_progress", "{refused:?}");
+    }
+
+    /// Waits until no reload holds the reload lock, which a reload keeps
+    /// until it has reported.
+    async fn finished(&self) {
+        while self.service.memory_bindings.try_reload().is_none() {
+            tokio::task::yield_now().await;
+        }
     }
 }
 
@@ -329,6 +397,143 @@ async fn a_second_concurrent_reload_answers_409_in_progress() {
     holder.join().unwrap();
     let first = first.await.unwrap().unwrap();
     assert_eq!(first, json!({"bindings": 1, "changed": 1, "drained": true}));
+}
+
+/// TEST-019: a reload whose caller goes away while its apply waits for the
+/// database write lock completes without the caller: a concurrent reload is
+/// refused meanwhile, the new grants are installed, and one counts-only audit
+/// event is appended.
+#[tokio::test]
+async fn a_reload_dropped_while_its_apply_waits_for_the_lock_completes_and_audits_once() {
+    let pins = Pins::audited();
+    pins.write(2, json!([{"agent": "a"}, {"agent": "b"}]));
+    let before = pins.service.memory_bindings.current();
+    let idle = pins.service.workers.available_permits();
+    let (locked_tx, locked_rx) = std::sync::mpsc::channel::<()>();
+    let (release_tx, release_rx) = std::sync::mpsc::channel::<()>();
+    let service = pins.service.clone();
+    let holder = std::thread::spawn(move || {
+        let _owner = service.database.write().unwrap();
+        locked_tx.send(()).unwrap();
+        release_rx.recv().unwrap();
+    });
+    locked_rx.recv().unwrap();
+    let service = pins.service.clone();
+    let caller = tokio::spawn(async move {
+        reload(&service, reserved::DRAIN_TIMEOUT)
+            .await
+            .map(|answer| answer.0)
+    });
+    // The reload's worker holds a permit: the apply waits for the lock.
+    while pins.service.workers.available_permits() == idle {
+        tokio::task::yield_now().await;
+    }
+    caller.abort();
+    assert!(caller.await.unwrap_err().is_cancelled());
+    pins.assert_reloading().await;
+    release_tx.send(()).unwrap();
+    holder.join().unwrap();
+    pins.finished().await;
+    assert!(
+        !Arc::ptr_eq(&before, &pins.service.memory_bindings.current()),
+        "the new grants are in force"
+    );
+    assert_eq!(pins.audit_entries(), [reloaded(1, true)]);
+}
+
+/// TEST-019: a reload whose caller goes away after the install, while a
+/// request pinned to the superseded grants holds up the drain, keeps the
+/// reload lock until the drain ends, then appends one counts-only audit event
+/// that reports the drain.
+#[tokio::test]
+async fn a_reload_dropped_while_it_drains_keeps_the_lock_and_audits_once() {
+    let pins = Pins::audited();
+    let (pinned_tx, pinned_rx) = tokio::sync::oneshot::channel::<()>();
+    let (release_tx, release_rx) = tokio::sync::oneshot::channel::<()>();
+    let router = pins.router.clone();
+    let held = tokio::spawn(guard::track_hidden(async move {
+        let recalled = post_to(router, "recall", recall_body()).await;
+        pinned_tx.send(()).unwrap();
+        release_rx.await.unwrap();
+        recalled
+    }));
+    pinned_rx.await.unwrap();
+    let before = pins.service.memory_bindings.current();
+    let idle = pins.service.workers.available_permits();
+    pins.write(2, json!([{"agent": "b"}]));
+    let service = pins.service.clone();
+    let caller = tokio::spawn(async move {
+        reload(&service, reserved::DRAIN_TIMEOUT)
+            .await
+            .map(|answer| answer.0)
+    });
+    // Installed and off the worker: what remains is the drain, which waits
+    // for the pinned request.
+    while Arc::ptr_eq(&before, &pins.service.memory_bindings.current())
+        || pins.service.workers.available_permits() != idle
+    {
+        tokio::task::yield_now().await;
+    }
+    caller.abort();
+    assert!(caller.await.unwrap_err().is_cancelled());
+    pins.assert_reloading().await;
+    release_tx.send(()).unwrap();
+    let ((status, recalled), _) = held.await.unwrap();
+    assert_eq!(status, 200, "{recalled}");
+    pins.finished().await;
+    assert_eq!(pins.audit_entries(), [reloaded(1, true)]);
+}
+
+/// TEST-019: each successful reload appends exactly one audit event with only
+/// `event`, `bindings`, `changed`, `drained` and `outcome` (and the time the
+/// log adds to every entry). Run as the pipeline runs it, the reload's own
+/// request pins nothing, so its drain never waits for itself.
+#[tokio::test]
+async fn each_successful_reload_appends_one_counts_only_audit_event() {
+    let pins = Pins::audited();
+    pins.write(2, json!([{"agent": "a"}, {"agent": "b"}]));
+    let (changed, hidden) = guard::track_hidden(reload(&pins.service, DRAIN)).await;
+    assert_eq!(
+        changed.unwrap().0,
+        json!({"bindings": 1, "changed": 1, "drained": true})
+    );
+    assert!(!hidden, "a reload hides nothing");
+    let unchanged = reload(&pins.service, DRAIN).await.unwrap().0;
+    assert_eq!(
+        unchanged,
+        json!({"bindings": 1, "changed": 0, "drained": true})
+    );
+    assert_eq!(pins.audit_entries(), [reloaded(1, true), reloaded(0, true)]);
+    assert_eq!(
+        pins.service.metrics.audit_failures.load(Ordering::Relaxed),
+        0
+    );
+}
+
+/// The audit event is best effort (PRD section 3.4, step 6): one that cannot
+/// be appended is counted, and the reload still answers.
+#[tokio::test]
+async fn a_reload_whose_audit_event_cannot_be_appended_counts_it_and_answers() {
+    let mut pins = Pins::new();
+    // A log at the 16 MiB at which it rotates (`src/server/audit.rs`), whose
+    // rotated file is a directory: the next append must rotate, and cannot.
+    let directory = pins.directory.path().join("audit");
+    std::fs::create_dir_all(directory.join("audit.1.jsonl")).unwrap();
+    std::fs::File::create(directory.join("audit.jsonl"))
+        .unwrap()
+        .set_len(16 * 1024 * 1024)
+        .unwrap();
+    pins.audit_in(&directory);
+    pins.write(2, json!([{"agent": "a"}, {"agent": "b"}]));
+    let answer = reload(&pins.service, DRAIN).await.unwrap().0;
+    assert_eq!(
+        answer,
+        json!({"bindings": 1, "changed": 1, "drained": true})
+    );
+    assert_eq!(
+        pins.service.metrics.audit_failures.load(Ordering::Relaxed),
+        1
+    );
 }
 
 #[cfg(feature = "grpc")]

@@ -61,17 +61,32 @@ pub(super) async fn reload(service: &Service, drain: Duration) -> Result<Json<Va
                 error.to_string(),
             )
         })?;
+    // The rest runs in a task of its own, which a client that goes away does
+    // not cancel: the apply, the drain and the report all happen, once.
+    tokio::spawn(complete(service.clone(), read, reloading, drain))
+        .await
+        .map_err(internal)?
+}
+
+/// Applies `read`, waits at most `drain` for the requests that consulted the
+/// grants it superseded, then logs and audits the counts. The reload lock is
+/// released last.
+async fn complete(
+    service: Service,
+    read: reserved::Bindings,
+    reloading: tokio::sync::OwnedMutexGuard<()>,
+    drain: Duration,
+) -> Result<Json<Value>, ApiError> {
     let applying = service.clone();
     // The reload lock comes back with the result, so it is held while the
-    // apply runs even if the client goes away, and then through the drain.
+    // apply runs, and then through the drain and the report.
     let ((bindings, changed), reloading) = service
         .run(move |db| {
             let applied = apply(db, &applying, read, crate::current_time_ms())?;
             Ok((applied, reloading))
         })
         .await?;
-    let drained = served.drain(drain).await;
-    drop(reloading);
+    let drained = service.memory_bindings.drain(drain).await;
     let event = json!({
         "event": "memory_bindings_reloaded",
         "bindings": bindings,
@@ -89,6 +104,7 @@ pub(super) async fn reload(service: &Service, drain: Duration) -> Result<Json<Va
                 .fetch_add(1, Ordering::Relaxed);
         }
     }
+    drop(reloading);
     Ok(Json(
         json!({"bindings": bindings, "changed": changed, "drained": drained}),
     ))

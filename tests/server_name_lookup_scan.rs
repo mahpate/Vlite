@@ -130,6 +130,24 @@ const ALLOWED: &[(&str, &str, &str, &str)] = &[
          request is served; no request names it.",
     ),
     (
+        "src/server/memory/reload.rs",
+        "apply",
+        ".collection(",
+        "Admin-only live reload, run while requests are served: an existence check of the \
+         evidence collection named by the operator's configured binding file, never by the \
+         request, which the grants-only delta already required to equal the served binding's; \
+         it runs under the exclusive database write lock and returns no name.",
+    ),
+    (
+        "src/server/memory/reload.rs",
+        "apply",
+        ".graph(",
+        "Admin-only live reload, run while requests are served: an existence check of the graph \
+         named by the operator's configured binding file, never by the request, which the \
+         grants-only delta already required to equal the served binding's; it runs under the \
+         exclusive database write lock and returns no name.",
+    ),
+    (
         "src/server/memory/routes.rs",
         "covers",
         "db.resolve(",

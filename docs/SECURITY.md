@@ -130,6 +130,13 @@ at return time. `drained: false` means the change is applied, but the
 10-second wait ended first; send the same request again to wait again.
 No in-flight request is cancelled.
 
+After its owned task starts, the reload continues through apply, bounded
+drain and success reporting even if the caller disconnects. The
+`memory_bindings_reloaded` success event contains only counts, the drain
+result and outcome; its persistent audit append is best effort. Refused or
+failed reloads do not emit that success event. The process-local request
+ring may omit cancelled HTTP requests, and this event does not name an actor.
+
 A failed reload is not a revocation. If a record write fails after earlier
 records committed, served grants stay unchanged but records are partially
 advanced: memory writes on those bindings fail closed, while reads and raw

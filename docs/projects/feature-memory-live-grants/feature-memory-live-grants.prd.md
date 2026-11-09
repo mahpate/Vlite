@@ -221,19 +221,19 @@ sequenceDiagram
 The handler (`src/server/memory/reload.rs`) runs these steps in order:
 
 1. **Availability.** Return 409 `memory_reload_unavailable` when the cell has no source or the current view is not configured.
-2. **Serialization.** `served.reloading.clone().try_lock_owned()`, otherwise 409 `memory_reload_in_progress`. The owned guard moves into the database closure and comes back with its result, so it is held while the apply runs even if the client disconnects. After that it is held through the drain.
+2. **Serialization.** `served.reloading.clone().try_lock_owned()`, otherwise 409 `memory_reload_in_progress`. The owned guard moves into the database closure and comes back with its result, so it is held while the apply runs even if the client disconnects. After that it is held through the drain and the report, and released last, so audit entries follow reload order.
 3. **Read.** `read_memory_bindings(source)` runs inside `spawn_blocking`, before any database lock. An error gives 422 with the existing fixed message.
-4. **Apply.** The rest runs in one `service.run` closure, so the exclusive database write lock is held for all of it:
+4. **Apply.** After the file is read, an owned task runs steps 4 to 6. The handler awaits that task, but dropping the handler does not cancel it. The apply phase runs in one `service.run` closure, so the exclusive database write lock is held for all of it:
    1. Lock `published_bindings`, and keep it until step 4.8. Lock order is always database write lock → `published_bindings` → cell lock. If `grpc_built` is set, return 409 `memory_reload_unavailable`. `adopt_published` takes the same lock (`src/server.rs:462-468`), so a gRPC router cannot adopt the cell between this check and the install.
    2. Read `old = served.current()`. Check the grants-only delta of the new set against `old.set()`; otherwise return 409 `memory_restart_required`. This check runs under the lock, so it always compares against the view in force. Set `changed` to the number of bindings whose entry differs from `old`.
-   3. Run the resource checks of `prepare` (graph-enabled database, graph exists, evidence exists). Then run `plan(db, set, now_ms)`. Map refusals to 409 `memory_bindings_conflict` with the startup message.
+   3. Run the resource checks of `prepare` (graph-enabled database, graph exists, evidence exists). These two existence lookups take names from the operator's file, never the request, so `tests/server_name_lookup_scan.rs` allows them in `reload.rs::apply` with a live-server justification. Then run `plan(db, set, now_ms)`. Map refusals to 409 `memory_bindings_conflict` with the startup message.
    4. Build `new = Bindings::new(set).with_orphans(&plan.orphans)`. If `!(new.covers(&old) && old.covers(&new))`, return 409 `memory_restart_required`. This check is defensive: with equal keys and unchanged graphs it holds unless an orphan record appeared or vanished.
    5. If the database is writable, provision every scope and read scope of every **active** binding in the new set, exactly as startup does. Provisioning is idempotent: an existing scope costs one lookup and no commit. On error, return the storage error's 5xx mapping (the `core_error` rule, `src/server/memory/routes.rs:355-366`), or otherwise 409 `memory_bindings_conflict` with `PROVISION_FAILED`.
    6. If the database is writable, write the record of each binding in `plan.writes` (`write_binding_record`, one commit each). From the first committed record on, a memory write admitted under the old view and reaching the lock gets 409 `binding_generation`. On error, use the step 4.5 mapping with `RECORD_FAILED`.
    7. If `changed > 0`, install `new`: swap the current view and push a `Weak` of the old epoch onto `retired`. If the set is identical, install nothing. The file was still checked against the records, so a reverted or diverged file is refused exactly as at a restart.
    8. Release the `published_bindings` lock.
 5. **Drain.** Release the database lock (the closure returns). Then await `served.drain(DRAIN_TIMEOUT)`, which polls every 10 ms with `tokio::time::sleep` (precedent: `src/server/providers.rs:1032`). It prunes dead `Weak`s and returns `true` once none is alive.
-6. **Report.** Write a structured stderr line, `{"event":"memory_bindings_reloaded","bindings":N,"changed":K,"drained":b}`, with no names. When the persistent audit log is configured, append the same event plus `outcome` (best effort, `sync=false`; on failure, increment `audit_failures`, as at `src/server/memory/routes.rs:180-184`). Return 200.
+6. **Report.** On success, write a structured stderr line, `{"event":"memory_bindings_reloaded","bindings":N,"changed":K,"drained":b}`, with no names. When the persistent audit log is configured, append the same event plus `outcome:"ok"` (best effort, `sync=false`; on failure, increment `audit_failures`, as at `src/server/memory/routes.rs:180-184`). Reporting still runs if the client disconnected during apply or drain. Refused or failed reloads do not emit this success event. Return 200 when the caller is still waiting.
 
 On a **read-only database or replica**, steps 4.5 and 4.6 are skipped and step 4.7 still installs. Startup behaves the same way: it runs every check, writes nothing, and serves the file's grants, while memory writes keep answering 403 `read_only` (`docs/API.md:407-409`).
 
@@ -249,9 +249,9 @@ On a **read-only database or replica**, steps 4.5 and 4.6 are skipped and step 4
   - Reads and raw writes admitted under the old view may complete.
   - A memory write admitted under the old view fails closed with 409 `binding_generation` if it reaches the write lock after its binding's record was written.
 - **Emergency revocation.** It stays `POST /v1/admin/credentials/{id}/revoke`. It is immediate for new requests and independent of this feature.
-- **Outside REST requests** (the webhook dispatcher, startup, tests, gRPC), `current()` is used without a pin.
+- **Outside a request context** (the webhook dispatcher, startup, direct test calls), `current()` is used without a pin.
   - The dispatcher uses the Admin role, whose decisions do not depend on grants (§3.1, TEST-002).
-  - gRPC is excluded by step 4.1.
+  - gRPC also has a guard context, but live-reload behavior over gRPC is outside this feature's supported and qualified scope; step 4.1 excludes it.
 - **Why a plain swap is not enough.** An `Arc` swap alone would let one request authorize with two versions (for example, a list filtered under old `raw_access` followed by a read under new grants). It would let served grants run ahead of the durable records, and it could not say when superseded grants stop being used. The pin, the record-first install under the lock and the drain each close one of these gaps.
 
 ### 3.6 Persistence and restart contract
@@ -288,7 +288,7 @@ On a **read-only database or replica**, steps 4.5 and 4.6 are skipped and step 4
 | FM-014 | A gRPC router was built from the service | 409 `memory_reload_unavailable` | unchanged | unchanged | Restart |
 | FM-015 | No configured file, or no binding served | 409 `memory_reload_unavailable` | unchanged | unchanged | First-time enable is restart-only |
 | FM-016 | Request pinned before the install still running | its own result under the old grants; a memory write after the record write gets 409 `binding_generation` | — | — | Covered by the drain |
-| FM-017 | Client disconnects during a reload | — | the closure runs to completion (determinate); the reload lock is released when it ends | — | Send the request again: an unchanged-file recheck that waits for the drain, or a convergent retry |
+| FM-017 | Client disconnects after the reload's owned task starts | — | apply, bounded drain and success reporting continue; the reload lock stays held through the drain | installed on success | Send the request again after the running reload: an unchanged-file recheck that waits for the drain, or a convergent retry; a concurrent retry still answers 409 |
 | FM-018 | Revoked scope still holds memory | — | — | data kept | Use `forget` or erasure (out of scope) |
 
 ## 4. Requirements
@@ -296,7 +296,7 @@ On a **read-only database or replica**, steps 4.5 and 4.6 are skipped and step 4
 - **REQ-001**: The server MUST register `POST /v1/admin/memory/bindings/reload` in `src/server/admin.rs` `routes()` on every configured REST router. With no binding configured it answers 409 `memory_reload_unavailable`. The handler lives in `src/server/memory/reload.rs`.
 - **REQ-002**: The handler MUST NOT read a path, grant or binding name from the request. It MUST reread exactly the configured `memory_bindings_file` through the same reader as startup (`read_memory_bindings`), with the same three fixed messages, under 422 `invalid_input`.
 - **REQ-003**: The handler MUST answer 409 `memory_reload_unavailable` when the live cell has no source, when the current view is not configured, or when `grpc_built` is set. The `grpc_built` check MUST happen while the `published_bindings` lock is held, and the lock MUST be held until the install.
-- **REQ-004**: At most one reload MUST run per live cell. A concurrent request MUST receive 409 `memory_reload_in_progress`. The lock MUST stay held until the apply closure finishes, even if the client disconnects, and then through the drain.
+- **REQ-004**: At most one reload MUST run per live cell. A concurrent request MUST receive 409 `memory_reload_in_progress`. Once the owned task starts, it MUST keep the lock through apply and drain and finish success reporting even if the client disconnects.
 - **REQ-005**: A reload MUST be refused with 409 `memory_restart_required` and change nothing unless both conditions hold:
   - the new set has exactly the served set's (tenant, binding) keys;
   - every binding's `state` (including `retired_at_ms`), `graph`, `evidence_collection` and `receipt_window_ms` are equal.
@@ -451,6 +451,10 @@ On a **read-only database or replica**, steps 4.5 and 4.6 are skipped and step 4
 - **TEST-018**:
   - `python tests/mutant_replay.py plan` reports `"stale":0` for the four replayable ledgers.
   - A count script shows every `G71-*` `old` text of `tests/reserved_resource_mutants.json` occurring exactly once in its file (CON-004).
+- **TEST-019**: Cancellation and success auditing (ITEM-006 and ITEM-011):
+  - Drop the outer reload while its apply waits on the database lock and while its drain waits on an old pin; the owned task completes without the caller.
+  - A concurrent reload is still refused until the bounded drain ends.
+  - Successful reloads append exactly one configured audit event with only `event`, `bindings`, `changed`, `drained` and `outcome:"ok"`; no binding, tenant, principal, scope or path is disclosed.
 
 **Validation commands.**
 - `cargo nextest run --locked --workspace --all-targets --all-features`
@@ -468,7 +472,7 @@ On a **read-only database or replica**, steps 4.5 and 4.6 are skipped and step 4
 | AC-005 | Served grants never run ahead of durable records; storage failures report 5xx and leave the served view unchanged | TEST-007, TEST-010 | SEC-005, REQ-012, FM-008, FM-009 |
 | AC-006 | `drained` is truthful: `false` while an older-grants request lives, `true` when none does, never blocked by the reload itself | TEST-001, TEST-006, TEST-013 | REQ-015, REQ-016, FM-013 |
 | AC-007 | After a reload, a restart with the same file adds no commit; an older file is refused | TEST-010, TEST-013 | G3, §3.6 |
-| AC-008 | Admin-only; no name, principal, scope or path in any response, log or audit event | TEST-012, TEST-013 | SEC-001, SEC-002 |
+| AC-008 | Admin-only; no name, principal, scope or path in any response, log or audit event | TEST-012, TEST-013, TEST-019 | SEC-001, SEC-002 |
 | AC-009 | Startup, file format, generation rules and existing routes are unchanged; mutation anchors stay at `stale:0` | TEST-017, TEST-018 | REQ-019, CON-001, CON-004 |
 | AC-010 | All CI gates pass with only additive, reviewed entries; no public API change | TEST-015, TEST-016 | CON-002, CON-003 |
 | AC-011 | Read-only and replica reloads apply the grants and write nothing | TEST-014 | REQ-009, FM-010 |
@@ -478,7 +482,7 @@ On a **read-only database or replica**, steps 4.5 and 4.6 are skipped and step 4
 - **Data handling.**
   - The reload reads the private bindings file, which holds credential IDs (never tokens) and scope tuples.
   - Nothing from the file is echoed: responses carry counts only, errors use fixed messages, and the stderr line and audit event carry counts and outcome only (SEC-002).
-  - The existing request audit ring records the route, status, role and caller (`src/server.rs:1479`).
+  - The existing request audit ring records completed HTTP requests' route, status, role and caller (`src/server.rs:1479`); cancellation can omit that ring entry. The counts-only success event survives caller cancellation but does not attribute an actor.
   - Revoking a scope does not erase its memory (FM-018).
 - **Input validation.**
   - The request carries no input. The file goes through the strict startup parser and the 1 MiB cap.
@@ -492,7 +496,7 @@ On a **read-only database or replica**, steps 4.5 and 4.6 are skipped and step 4
     - for memory writes, by the record recheck (SEC-004);
     - in time, by the reported drain.
   - Credential revoke stays the immediate emergency control (SEC-006).
-  - gRPC, which has no request context, is excluded (REQ-003).
+  - gRPC live-reload behavior is not supported or qualified by this feature and is excluded (REQ-003).
 - **Secrets.** No token is read, written or logged. The file path comes from server configuration only and is never accepted from a request or returned in a response.
 
 ## 9. Deployment & Rollback
@@ -522,12 +526,12 @@ On a **read-only database or replica**, steps 4.5 and 4.6 are skipped and step 4
 | RD-006 | Provision every active binding of the new set, as startup does | Exact restart parity. Covers records written without provisioning (a failed startup, the `write_records` test state). Provisioning is idempotent, so existing scopes cost one lookup each and no commit |
 | RD-007 | A live cell (`Served`) with a lazy per-request pin carried by the existing task-local context, plus a bounded drain | Evidence: only two code paths read grants, and every REST request already has a propagated context. This changes two call sites, not every handler |
 | RD-008 | `DRAIN_TIMEOUT` = 10 s, polled every 10 ms; `drained` reported, never enforced by cancelling requests | Bounded admin latency below common proxy timeouts; no request is cut off; an honest flag |
-| RD-009 | Refuse reload once a gRPC router was built (checked under `published_bindings`) | gRPC requests have no request context to pin; the shipped server already refuses gRPC with bindings |
+| RD-009 | Refuse reload once a gRPC router was built (checked under `published_bindings`) | Live-reload behavior over gRPC is outside this feature's supported and qualified scope; the shipped server already refuses gRPC with bindings |
 | RD-010 | One live cell per configured REST router; reload applies to the router that answered | Matches per-router `AdminState` (tokens, credentials) at `src/server/admin.rs:370-384`; the shipped binary builds one router |
 | RD-011 | An unchanged file is rechecked against the records and provisioned like any reload, installs nothing, and waits for the drain | Gives operators a way to wait again after `drained:false` without a second route. Keeps restart parity: a reverted file after FM-009 is refused rather than reported as success |
 | RD-012 | One dashboard button ("Reload memory grants") in the existing admin token section, handled in `console-tools.js` | `tests/admin_route_coverage.py` requires a named control for every admin route, and lowering it is forbidden. This is not the excluded memory-management UI |
 | RD-013 | New error codes `memory_reload_unavailable`, `memory_reload_in_progress`, `memory_restart_required`, `memory_bindings_conflict`; storage 5xx mappings pass through | Distinguishes configuration state, a race, an out-of-scope change and a rule refusal; keeps `commit_indeterminate` distinct, unlike startup's fixed strings |
-| RD-014 | Best-effort persistent audit event and a stderr line, counts only | Grant changes matter for security, and the pattern follows `memory_request` audit at `src/server/memory/routes.rs:180-184`; the request audit ring already records the caller |
+| RD-014 | Best-effort persistent success audit event and a stderr line, counts only, independent of caller cancellation | Grant changes matter for security; the owned task completes reporting after its bounded drain. Completed HTTP requests also enter the existing request ring, but that ring is not guaranteed on disconnect. Actor attribution and failed-reload events are not added |
 
 ## 11. Alternatives Considered
 
@@ -601,40 +605,40 @@ EPIC-001 and EPIC-002 are sequential. EPIC-003 and EPIC-005 can follow EPIC-002 
 
 | Task | Description | Status | Relevant Files |
 |---|---|---|---|
-| ITEM-001 | Add `Served`, `Epoch` and `Pin` with `current`, `pin`, `install`, `drain(timeout)` and delegating `is_empty`, `is_configured` and `covers`; `DRAIN_TIMEOUT`; TEST-001 and TEST-002 | Not Started | `src/server/reserved.rs` |
-| ITEM-002 | Change `Service.memory_bindings` to `Arc<Served>` and `published_bindings` to `Option<Arc<Served>>`; `with_bindings` keeps a `None` source; keep anchor texts | Not Started | `src/server.rs` |
-| ITEM-003 | Request context with a lazy `OnceLock<Pin>`; `guard::bindings`; `RequestScope::new` uses it. `track_hidden` keeps `let flag = &context.hidden;` so `(output, flag.load(Ordering::Relaxed))` stays byte-identical (G71-19); the 23 `G71-*` guard anchors are unchanged. TEST-003 and TEST-004 | Not Started | `src/server/guard.rs` |
-| ITEM-004 | Switch memory `resolve` to `guard::bindings`. Switch `tenants.rs:289`, `start`'s `prepare(db, &service.memory_bindings.current(), ..)` at `src/server/memory.rs:105` and the `write_records` test helper at `:85` to `current()`. Update the `published.rs` tests | Not Started | `src/server/memory/routes.rs`, `src/server/tenants.rs`, `src/server/memory.rs`, `src/server/published.rs` |
+| ITEM-001 | Add `Served`, `Epoch` and `Pin` with `current`, `pin`, `install`, `drain(timeout)` and delegating `is_empty`, `is_configured` and `covers`; `DRAIN_TIMEOUT`; TEST-001 and TEST-002 | Implemented | `src/server/reserved.rs` |
+| ITEM-002 | Change `Service.memory_bindings` to `Arc<Served>` and `published_bindings` to `Option<Arc<Served>>`; `with_bindings` keeps a `None` source; keep anchor texts | Implemented | `src/server.rs` |
+| ITEM-003 | Request context with a lazy `OnceLock<Pin>`; `guard::bindings`; `RequestScope::new` uses it. `track_hidden` keeps `let flag = &context.hidden;` so `(output, flag.load(Ordering::Relaxed))` stays byte-identical (G71-19); the 23 `G71-*` guard anchors are unchanged. TEST-003 and TEST-004 | Implemented | `src/server/guard.rs` |
+| ITEM-004 | Switch memory `resolve` to `guard::bindings`. Switch `tenants.rs:289`, `start`'s `prepare(db, &service.memory_bindings.current(), ..)` at `src/server/memory.rs:105` and the `write_records` test helper at `:85` to `current()`. Update the `published.rs` tests | Implemented | `src/server/memory/routes.rs`, `src/server/tenants.rs`, `src/server/memory.rs`, `src/server/published.rs` |
 
 ### EPIC-002: Reload route and apply path
 
 | Task | Description | Status | Relevant Files |
 |---|---|---|---|
-| ITEM-005 | Declare `mod reload`; make `resources`, `refusal_message` and the fixed messages reachable from `reload.rs` (visibility only; `prepare` byte-identical) | Not Started | `src/server/memory.rs` |
-| ITEM-006 | Implement the handler of §3.4: availability, owned reload lock, file read, the closure under the database and `published_bindings` locks, delta, resource checks, plan, reservation equality, provisioning (every active binding), records, conditional install; then drain, log, audit and response | Not Started | `src/server/memory/reload.rs` |
-| ITEM-007 | Register the literal route; record the source after the orphan block (REQ-017); capabilities flag and route; `read_memory_bindings` unchanged | Not Started | `src/server/admin.rs` |
+| ITEM-005 | Declare `mod reload`; make `resources`, `refusal_message` and the fixed messages reachable from `reload.rs` (visibility only; `prepare` byte-identical) | Implemented | `src/server/memory.rs` |
+| ITEM-006 | Implement the handler of §3.4: availability, owned reload lock, file read, the closure under the database and `published_bindings` locks, delta, resource checks, plan, reservation equality, provisioning (every active binding), records, conditional install; then drain, log, audit and response | Implemented (owned-task cancellation fix) | `src/server/memory/reload.rs`, `tests/server_name_lookup_scan.rs` |
+| ITEM-007 | Register the literal route; record the source after the orphan block (REQ-017); capabilities flag and route; `read_memory_bindings` unchanged | Implemented | `src/server/admin.rs` |
 
 ### EPIC-003: Contract surfaces and CI gates
 
 | Task | Description | Status | Relevant Files |
 |---|---|---|---|
-| ITEM-008 | OpenAPI path line (admin security; 200, 403, 409, 422, 503 responses) and the matching reviewed REG-008 addition | Not Started | `src/openapi.json`, `tests/graph_surface_parity.rs` |
-| ITEM-009 | API reference row | Not Started | `site/api.html` |
-| ITEM-010 | Dashboard button, result `<pre>` and handler; admin-route inventory entry | Not Started | `src/dashboard/index.html`, `src/dashboard/console-tools.js`, `tests/admin_route_coverage.py` |
+| ITEM-008 | OpenAPI path line (admin security; 200, 403, 409, 422, 503 responses) and the matching reviewed REG-008 addition | Implemented | `src/openapi.json`, `tests/graph_surface_parity.rs` |
+| ITEM-009 | API reference row | Implemented | `site/api.html` |
+| ITEM-010 | Dashboard button, result `<pre>` and handler; admin-route inventory entry | Implemented | `src/dashboard/index.html`, `src/dashboard/console-tools.js`, `tests/admin_route_coverage.py` |
 
 ### EPIC-004: Tests
 
 | Task | Description | Status | Relevant Files |
 |---|---|---|---|
-| ITEM-011 | In-crate REST pins TEST-005 to TEST-009 | Not Started | `src/server/memory/pins_reload.rs`, `src/server/memory.rs` |
-| ITEM-012 | Integration tests TEST-010 to TEST-014 | Not Started | `tests/server_memory_live_grants.rs` |
-| ITEM-013 | Dashboard end-to-end step TEST-015; run the TEST-016 to TEST-018 gates and the validation commands | Not Started | `tests/dashboard_memory_mode.py` |
+| ITEM-011 | In-crate REST pins TEST-005 to TEST-009 and cancellation/audit TEST-019 | Implemented | `src/server/memory/pins_reload.rs`, `src/server/memory.rs` |
+| ITEM-012 | Integration tests TEST-010 to TEST-014 | Implemented | `tests/server_memory_live_grants.rs` |
+| ITEM-013 | Dashboard end-to-end step TEST-015; run the TEST-016 to TEST-018 gates and the validation commands | In progress: final validation | `tests/dashboard_memory_mode.py` |
 
 ### EPIC-005: Documentation
 
 | Task | Description | Status | Relevant Files |
 |---|---|---|---|
-| ITEM-014 | Operator procedure, response and error codes, in-flight contract, FM-009, emergency revoke, library multi-router note; within content budgets | Not Started | `docs/API.md`, `docs/MEMORY.md`, `docs/SECURITY.md`, `docs/CONSOLE-ADMIN.md` |
+| ITEM-014 | Operator procedure, response and error codes, in-flight contract, FM-009, emergency revoke, library multi-router note; within content budgets | In progress: review clarifications | `docs/API.md`, `docs/MEMORY.md`, `docs/SECURITY.md`, `docs/CONSOLE-ADMIN.md` |
 
 ## 15. Change Log
 
@@ -644,3 +648,4 @@ EPIC-001 and EPIC-002 are sequential. EPIC-003 and EPIC-005 can follow EPIC-002 
 | 1.1 | 2026-11-08 | Author self-check against code: provisioning covers every active binding and an unchanged file is rechecked rather than skipped (restart parity, RD-006 and RD-011); `prepare` stays byte-identical (PAT-001); anchors listed per file (CON-004); `tokio::time` provenance recorded (ASSUMPTION-003); `covers` snapshots both views (REQ-013). |
 | 1.2 | 2026-11-08 | One local read-only `code-review` pass against `4cdb2ce3`. It found no safety, authorization, lock-order, drain or CI-gate defect: the two grant readers, task-local coverage, recheck-under-write-lock and gate compliance were confirmed. Applied: (MAJOR) `tests/reserved_resource_mutants.json` `G71-*` anchors added to CON-004 and TEST-018, with G71-19 and G71-21 preserved; (MINOR) the `with_orphans` and `prepare` call sites named and the source placement fixed (REQ-017, ITEM-004); §9 lock-duration text matched to RD-006; TEST-009 gated on `grpc`. Simplification: `read_memory_bindings` stays unchanged (FILE-008). |
 | 1.3 | 2026-11-09 | Integration clarifications: TEST-011 preserves the existing graph 409 and collection 404 missing-resource responses; TEST-012's same-generation refusal applies to changed grants, not an unchanged file. No production status or generation rule changes. |
+| 1.4 | 2026-11-09 | Three-perspective implementation review identified lost success auditing on caller cancellation. Clarified owned-task completion through drain/report and added TEST-019; corrected the gRPC-context rationale and request-ring limitations without adding actor or failure-event schemas. Full regression found the source-guard scan rejecting reload's two operator-file existence lookups; added two justified allow entries. |
