@@ -521,17 +521,15 @@ async fn live_grants_test_011_raw_access_revocation_and_restoration_apply_live()
             rig.write_bindings(&file);
             reload(&app, 1, 1).await;
         }
-        for (path, code) in [
-            ("/v1/graphs/notes_graph", "graph_not_found"),
-            ("/v1/collections/notes_ev", "collection_not_found"),
+        for (path, missing_status, code) in [
+            ("/v1/graphs/notes_graph", 409, "graph_not_found"),
+            ("/v1/collections/notes_ev", 404, "collection_not_found"),
         ] {
             let answer = call(&app, "GET", path, &credential(ID), None).await;
             if allowed {
                 assert_eq!(answer.0, 200, "{path}: {}", answer.1);
             } else {
-                // PRD-ambiguity: existing graph misses use 409, but TEST-011
-                // explicitly requires 404 for both hidden raw resources.
-                assert_error(answer, 404, code);
+                assert_error(answer, missing_status, code);
             }
         }
         empty_recall(&app, "notes", ID, "raw_scope").await;

@@ -417,9 +417,9 @@ On a **read-only database or replica**, steps 4.5 and 4.6 are skipped and step 4
   - revoking a scope gives 403 `forbidden_scope` on the next request;
   - adding a scope or read scope provisions it, and recall answers an empty list;
   - adding or replacing a principal takes effect;
-  - revoking `raw_access` hides the raw graph and collection (404 as missing), and granting it restores access.
+  - revoking `raw_access` hides the raw graph and collection using their existing missing-resource responses (409 `graph_not_found`, 404 `collection_not_found`), and granting it restores access.
 - **TEST-012**: Refusals change nothing (record node and file size unchanged):
-  - same generation → 409 `memory_bindings_conflict`;
+  - changed grants with the same generation → 409 `memory_bindings_conflict`; an unchanged file at the same generation is accepted under REQ-010;
   - lower or reverted generation → 409;
   - generation raised without a change → 409;
   - a window, state, graph or evidence change, or an added or removed binding → 409 `memory_restart_required`;
@@ -643,3 +643,4 @@ EPIC-001 and EPIC-002 are sequential. EPIC-003 and EPIC-005 can follow EPIC-002 
 | 1.0 | 2026-11-08 | Initial PRD from local `HEAD` `4cdb2ce3`, with baseline tests (518 passed) and mutation anchors (`stale:0`) recorded. |
 | 1.1 | 2026-11-08 | Author self-check against code: provisioning covers every active binding and an unchanged file is rechecked rather than skipped (restart parity, RD-006 and RD-011); `prepare` stays byte-identical (PAT-001); anchors listed per file (CON-004); `tokio::time` provenance recorded (ASSUMPTION-003); `covers` snapshots both views (REQ-013). |
 | 1.2 | 2026-11-08 | One local read-only `code-review` pass against `4cdb2ce3`. It found no safety, authorization, lock-order, drain or CI-gate defect: the two grant readers, task-local coverage, recheck-under-write-lock and gate compliance were confirmed. Applied: (MAJOR) `tests/reserved_resource_mutants.json` `G71-*` anchors added to CON-004 and TEST-018, with G71-19 and G71-21 preserved; (MINOR) the `with_orphans` and `prepare` call sites named and the source placement fixed (REQ-017, ITEM-004); §9 lock-duration text matched to RD-006; TEST-009 gated on `grpc`. Simplification: `read_memory_bindings` stays unchanged (FILE-008). |
+| 1.3 | 2026-11-09 | Integration clarifications: TEST-011 preserves the existing graph 409 and collection 404 missing-resource responses; TEST-012's same-generation refusal applies to changed grants, not an unchanged file. No production status or generation rule changes. |
