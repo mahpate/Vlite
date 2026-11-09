@@ -114,6 +114,31 @@ collections reserved, with no grants and no memory routes, even when the file
 names no binding or is gone, and the refusals above (gRPC, automatic
 maintenance, imports, replication export) then apply too.
 
+The admin-only `POST /v1/admin/memory/bindings/reload` rereads the configured
+file and applies only grants and their higher generations. New or retired
+bindings, receipt windows, tenant, state, graph and evidence changes still
+need a restart. Reload is refused after a gRPC router is built.
+Each REST request uses one grants version, including its blocking and commit
+workers. New grants are served only after all changed records are durable on
+a writable database. Until older requests finish, reads and raw writes
+admitted under old grants may complete; a memory write reaching the write lock
+after its binding's record advances fails closed with 409
+`memory_capability_unavailable`, feature `binding_generation`.
+
+`drained: true` means no request or worker using older grants is still running
+at return time. `drained: false` means the change is applied, but the
+10-second wait ended first; send the same request again to wait again.
+No in-flight request is cancelled.
+
+A failed reload is not a revocation. If a record write fails after earlier
+records committed, served grants stay unchanged but records are partially
+advanced: memory writes on those bindings fail closed, while reads and raw
+access keep the old grants. Retry with the same file or restart with it to
+converge; storage failures may require reopening the database first.
+`POST /v1/admin/credentials/{id}/revoke` remains the immediate emergency
+control for new requests, independent of grants reload. Revoking a grant
+does not erase its memory.
+
 Without raw access on the owning binding, a raw request naming its graph or
 collection answers as if that resource were missing, using the ordinary
 `404 collection_not_found` or `409 graph_not_found` response. Ordinary grant

@@ -389,6 +389,48 @@ is no longer the binding and generation being served, answers 409
 `memory_capability_unavailable` with `details.feature` `binding_generation` and
 writes nothing.
 
+### Change grants without a restart
+
+`POST /v1/admin/memory/bindings/reload` is admin-only and takes no request
+input. It rereads only the configured bindings file; it never rewrites it.
+Change principals, `scopes`, `read_scopes` or `raw_access`, raise each changed
+binding's `generation`, and replace the file atomically before sending the
+request. An unchanged entry keeps its generation. Discover support through
+`features.memory_bindings_reload` and the capabilities route list.
+
+Success is 200:
+
+```json
+{"bindings": 3, "changed": 1, "drained": true}
+```
+
+`bindings` counts entries in the file; `changed` counts entries different from
+the served grants. An unchanged file is rechecked and returns `changed: 0`.
+`drained: true` means every request using older grants, including its workers,
+has finished. After a 10-second wait, `drained: false` means the change is
+already applied but older requests may still finish: send the same request
+again to wait again. See the [in-flight and failure contract](SECURITY.md#memory-bound-resources).
+On a writable database, records are durable before new grants are served;
+a restart with the same file adds no commit. A read-only node checks and
+serves the new grants without writing records; memory writes stay 403 `read_only`.
+
+| Status | `error.code` and meaning |
+|---|---|
+| 403 | Read-only tokens and scoped credentials cannot reload. |
+| 409 | `memory_reload_unavailable`: no configured file or served binding, or a gRPC router was built. |
+| 409 | `memory_reload_in_progress`: another reload is running; retry after it returns. |
+| 409 | `memory_restart_required`: the change is not grants-only; restart instead. |
+| 409 | `memory_bindings_conflict`: startup checks refused the file, including stale or invalid generations. |
+| 422 | `invalid_input`: the file is unavailable, not regular, too large or invalid. |
+| 503 | Storage or admission failure, including `commit_indeterminate`, `poisoned`, `busy` or `unavailable`. |
+
+New, removed, renamed or retired bindings, tenant or state changes, receipt
+windows, graphs and evidence collections are not live changes: they need a
+restart and must still satisfy the binding rules. First-time memory enable
+also needs a restart. Reload is refused after a gRPC router is built; the
+server refuses gRPC with memory bindings configured. For library embedders
+with several REST routers, only the router answering the request reloads.
+
 ### Start the server with memory
 
 Memory is off until the server reads a private bindings file
