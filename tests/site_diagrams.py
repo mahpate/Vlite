@@ -838,6 +838,9 @@ def check(site, screenshots=None):
         assert f"--diagram-{role}: {values['color']}" in css
     html = (site / "architecture.html").read_text(encoding="utf-8")
     assert html.count('data-diagram="') == 14
+    assert 'href="#file-contract">Storage map</a>' in html
+    assert 'assets/diagrams/storage-map-light.svg' in html
+    assert 'assets/diagrams/storage-map-dark.svg' in html
     assert "cdn.jsdelivr.net" not in html
     assert 'site/assets/diagrams/layers-light.svg' in (ROOT / "README.md").read_text(encoding="utf-8")
     readme = (ROOT / "README.md").read_text(encoding="utf-8")
@@ -851,7 +854,7 @@ def check(site, screenshots=None):
         assert svg.attrib.get("viewBox"), image
         assert not re.search(r"<(?:script|foreignObject)\b", text), image
         assert not re.search(r'(?:href|src)="https?://', text), image
-    assert len(list(assets.glob("*.svg"))) == 32
+    assert len(list(assets.glob("*.svg"))) == 34
     for mode in ("embedded", "self-hosted"):
         for theme in ("light", "dark"):
             assert (assets / f"deployment-{mode}-{theme}.svg").is_file()
@@ -890,11 +893,16 @@ def check(site, screenshots=None):
                         assert page.locator(".spatial-diagram").count() == 0
                         if path == "architecture.html":
                             images = page.locator(".diagram img")
-                            assert images.count() == 14
+                            assert images.count() == 15
                             for image in images.all():
                                 decode_image(page, image, theme)
                                 assert image.evaluate("img => img.naturalWidth > 0 && img.alt.length > 30")
                                 assert image.evaluate("img => new URL(img.currentSrc).pathname").endswith(f"-{theme}.svg")
+                            storage_map = page.locator(".storage-map")
+                            assert storage_map.locator("img").is_visible()
+                            assert storage_map.locator("picture").evaluate("e => e.scrollWidth >= 900")
+                            if width < 900:
+                                assert storage_map.evaluate("e => e.scrollWidth > e.clientWidth")
                             page.locator("#layers").scroll_into_view_if_needed()
                         elif path == "index.html":
                             images = page.locator(".deployment-options img")

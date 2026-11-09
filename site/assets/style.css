@@ -699,6 +699,8 @@ table.param-table td:first-child { white-space: nowrap; }
 .diagram { margin: 18px 0 26px; padding: 22px; border: 1px solid color-mix(in srgb, var(--diagram-interface) 25%, var(--border)); border-radius: 20px; background: radial-gradient(ellipse at top left, color-mix(in srgb, var(--diagram-interface) 6%, var(--card)), var(--card) 70%); box-shadow: var(--shadow); }
 .diagram picture, .diagram img { display: block; width: 100%; height: auto; }
 .diagram img { max-height: 760px; object-fit: contain; }
+.storage-map { overflow-x: auto; }
+.storage-map picture { min-width: 900px; }
 .diagram-full { display: inline-block; margin-top: 12px; font-size: 12px; }
 .diagram-source { margin-top: 16px; color: var(--muted); font-size: 12px; }
 .diagram-source summary { cursor: pointer; }

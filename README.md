@@ -34,12 +34,13 @@ service to operate.
 - **Advanced retrieval.** Opt-in collections, record expiry, named and sparse
   vectors, hybrid search, facets, geo filters and recommendations.
 - **Server.** Authenticated REST with OpenAPI, optional gRPC and TLS,
-  key-value operations, opt-in agent memory and managed embedding and ranking
-  providers, Prometheus metrics, non-root Docker images and a Helm chart.
+  key-value operations, opt-in agent memory with read-only shared scopes and
+  restart-free grant reload, managed embedding and ranking providers, Prometheus
+  metrics, non-root Docker images and a Helm chart.
 - **Security.** One request guard covers every REST, gRPC and webhook path that
   names a collection, graph, job or tenant, and agent-memory resources stay hidden
-  from callers without raw access; see the [release notes](docs/RELEASE-0.7.1.md#security).
-  A gRPC adapter built with the library now honors the same reservations ([fix](docs/RELEASE-0.7.2.md#fixed)).
+  from callers without raw access; see [memory-bound resources](docs/SECURITY.md#memory-bound-resources).
+  A gRPC adapter built with the library honors the same reservations ([gRPC guide](docs/GRPC.md)).
 - **Dashboard.** Browse, search, write, import, index, monitor and query
   graphs, with user accounts, roles and tenants. The dashboard has Key-value and MemoryAI
   workspaces, interactive 2D and 3D graphs, provider controls and named and sparse
@@ -52,8 +53,8 @@ service to operate.
   commands in the shell and MCP, and agent-memory tools and a CLI client.
 - **Performance.** At 100,000 × 384 dimensions, 0.7 had about 42% lower exact
   and 23% lower filtered p50 query latency than 0.6, with identical recall and
-  file size. Ingest, reopen and memory stayed within about 3%. 0.7.2 was not
-  re-measured.
+  file size. Ingest, reopen and memory stayed within about 3%. Later releases
+  have not been re-measured.
   [Results](benchmarks/RESULTS.md#release-candidate-070-against-v060-november-4-2026-utc)
 
 ## Key terms
@@ -199,7 +200,7 @@ Prebuilt packages: [PyPI](docs/INSTALL.md#pypi) and [release assets](docs/INSTAL
 | Webhooks | [WEBHOOKS](docs/WEBHOOKS.md) |
 | Property graphs, expiry and algorithms | [GRAPH](docs/GRAPH.md) |
 | Benchmarks | [Methodology](benchmarks/README.md), [results](benchmarks/RESULTS.md) |
-| Upgrade notes | [Release notes](docs/RELEASE-0.7.2.md) |
+| Upgrade notes | [Release notes](docs/RELEASE-0.7.3.md) |
 
 ## Status and limitations
 

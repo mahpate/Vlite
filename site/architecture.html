@@ -43,7 +43,7 @@
       <h4>On this page</h4>
       <a href="#terms">Key terms</a>
       <a href="#layers">Layers</a>
-      <a href="#file-contract">One file</a>
+      <a href="#file-contract">Storage map</a>
       <a href="#header">File header</a>
       <a href="#frames">Frames</a>
       <a href="#versions">Format versions</a>
@@ -124,16 +124,12 @@ flowchart LR
   A -. "load if identity matches" .-> M
 </pre></details>
     </figure>
-    <p>Inside, the file is a fixed header followed by frames. Each commit appends one frame, and all integers are little-endian.</p>
-    <div class="bytemap" role="img" aria-label="File layout: a 32-byte header, then a 64-byte encryption descriptor in encrypted files only, then one frame per commit, from commit 1 to commit n.">
-      <div class="bm-row">
-        <span class="bm-cell c-magic" style="--w:4">32 B<b>header</b><i>always</i></span>
-        <span class="bm-cell c-flag" style="--w:4">64 B<b>descriptor</b><i>if encrypted</i></span>
-        <span class="bm-cell c-body" style="--w:5">frame<b>commit 1</b><i>prefix &middot; body &middot; footer</i></span>
-        <span class="bm-cell c-body" style="--w:5">frame<b>commit 2</b><i>appended</i></span>
-        <span class="bm-cell c-body" style="--w:5">&hellip;<b>commit n</b><i>end of file</i></span>
-      </div>
-    </div>
+    <p>Header, optional encryption descriptor, then the append-only log. Each commit adds a data frame; timestamped commits add a time anchor first. Integers are little-endian.</p>
+    <figure class="diagram storage-map">
+      <picture><source srcset="assets/diagrams/storage-map-dark.svg" media="(prefers-color-scheme: dark)"><img src="assets/diagrams/storage-map-light.svg" data-light="assets/diagrams/storage-map-light.svg" data-dark="assets/diagrams/storage-map-dark.svg" alt="Header and optional encryption descriptor precede frames; each frame ends with a validated commit footer." loading="lazy"></picture>
+      <a class="diagram-full" href="assets/diagrams/storage-map-light.svg" data-light="assets/diagrams/storage-map-light.svg" data-dark="assets/diagrams/storage-map-dark.svg">Open full-size diagram</a>
+      <figcaption>A valid footer marks a committed frame.</figcaption>
+    </figure>
 
     <h2 id="header">File header</h2>
     <p>Every file starts with a 32-byte header. Its CRC32 covers bytes 0&ndash;27 and is checked on every open.</p>

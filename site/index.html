@@ -10,7 +10,7 @@
   <meta property="og:type" content="website">
   <!-- Local asset v values are 12 SHA-256 hex digits (LF-normalized text); tests/site_links.py checks dependencies too. -->
   <link rel="icon" href="assets/logo.svg?v=46ebf632994c" type="image/svg+xml">
-  <link rel="stylesheet" href="assets/style.css?v=351c7d92316b">
+  <link rel="stylesheet" href="assets/style.css?v=54f88bc2d053">
   <link rel="stylesheet" href="assets/diagrams3d.css?v=1515ab28e6d7">
   <script type="module" src="assets/diagrams3d.js?v=5e884a1374ec"></script>
   <link rel="preload" href="assets/fonts/outfit-latin-wght-normal.woff2?v=6c18d579fd87" as="font" type="font/woff2" crossorigin>
@@ -49,7 +49,7 @@
       <div class="hero-copy">
         <span class="eyebrow">MIT licensed &middot; written in Rust</span>
         <h1>Vectors and graphs in <span class="grad">one durable file</span>.</h1>
-        <p class="lead">Vector search, graphs, key-value data and opt-in agent memory. Embed it, or self-host an API.</p>
+        <p class="lead">Vector search, graphs, key-value and opt-in agent memory. Embed or self-host.</p>
         <div class="cta">
           <a class="btn primary" href="#quickstart">Get started</a>
           <a class="btn" href="dashboard.html">View dashboard</a>
@@ -107,7 +107,7 @@
         <div class="tabpanel" role="tabpanel" id="p-py" aria-labelledby="t-py" tabindex="0">
 <button class="copy" data-copy="c-py" aria-label="Copy Python example">Copy</button>
 <pre class="code" id="c-py"><span class="c-c"># Python 3.11+; run in a fresh directory</span>
-<span class="c-c"># python -m pip install vlite-embedded==0.7.2</span>
+<span class="c-c"># python -m pip install vlite-embedded==0.7.3</span>
 <span class="c-k">from</span> vlite_embedded <span class="c-k">import</span> NativeLibrary
 
 native = NativeLibrary()
@@ -117,7 +117,7 @@ native = NativeLibrary()
         </div>
         <div class="tabpanel" role="tabpanel" id="p-node" aria-labelledby="t-node" hidden>
 <button class="copy" data-copy="c-node">Copy</button>
-<pre class="code" id="c-node"><span class="c-c">// npm install ./vlite-embedded-0.7.2-&lt;platform&gt;.tgz (release tarball)</span>
+<pre class="code" id="c-node"><span class="c-c">// npm install ./vlite-embedded-0.7.3-&lt;platform&gt;.tgz (release tarball)</span>
 <span class="c-k">import</span> { NativeLibrary } <span class="c-k">from</span> <span class="c-s">"@vlite/embedded"</span>;
 
 <span class="c-k">const</span> native = <span class="c-k">new</span> NativeLibrary();
@@ -131,7 +131,7 @@ native = NativeLibrary()
         </div>
         <div class="tabpanel" role="tabpanel" id="p-rust" aria-labelledby="t-rust" hidden>
 <button class="copy" data-copy="c-rust">Copy</button>
-<pre class="code" id="c-rust"><span class="c-c">// Cargo.toml: vlite = { git = "https://github.com/mahpate/Vlite", tag = "v0.7.2" }</span>
+<pre class="code" id="c-rust"><span class="c-c">// Cargo.toml: vlite = { git = "https://github.com/mahpate/Vlite", tag = "v0.7.3" }</span>
 <span class="c-k">use</span> vlite::Database;
 
 <span class="c-k">fn</span> main() -&gt; vlite::Result&lt;()&gt; {
@@ -197,7 +197,7 @@ powershell -NoProfile -ExecutionPolicy Bypass -File .\devbox.ps1 -Token
               </svg>
             </div>
             <h3><span class="product-symbol" aria-hidden="true">&#9906;</span> Key-value &amp; MemoryAI</h3>
-            <div class="product-chips"><a href="docs/KEY-VALUE.html">Keys, values, versions</a><a href="docs/MEMORY.html">Agent memory (opt-in)</a></div>
+            <div class="product-chips"><a href="docs/KEY-VALUE.html">Keys, values, versions</a><a href="docs/MEMORY.html">Agent memory (opt-in)</a><a href="docs/MEMORY.html#change-grants-live">Live grant reload</a></div>
           </div>
         </div>
         <aside class="product-map-tools" aria-label="Tools and agents">
@@ -233,7 +233,7 @@ powershell -NoProfile -ExecutionPolicy Bypass -File .\devbox.ps1 -Token
       <div class="section-head">
         <div class="kicker">Dashboard</div>
         <h2>Your data, in view</h2>
-        <p>Nine workspaces: records, search, Key-value, MemoryAI, interactive graphs and server tools. MemoryAI requires configured bindings and a scoped token.</p>
+        <p>Nine workspaces: records, search, Key-value, MemoryAI, interactive graphs and server tools. MemoryAI uses scoped grants; admins can reload them live.</p>
       </div>
       <figure class="landing-shot">
         <div class="tabs">
@@ -280,7 +280,7 @@ powershell -NoProfile -ExecutionPolicy Bypass -File .\devbox.ps1 -Token
       <div class="glow-panel">
         <div class="section-head"><div class="kicker">Know the boundaries</div><h2>Data safety you can reason about</h2><p>Corruption fails closed. Indexes rebuild from records. Default periodic durability can lose the last flush interval on power loss; full syncs every commit.</p></div>
         <p class="callout">Limits: the live dataset fits in RAM. One writer or several read-only owners per file. Durability depends on your filesystem.</p>
-        <nav class="landing-evidence" aria-label="Technical evidence"><a href="architecture.html">Architecture &#8594;</a><a href="docs/REFERENCE.html">Data-safety contracts &#8594;</a><a href="compare.html">Benchmarks &#8594;</a><a href="docs/RELEASE-0.7.2.html">Release notes &#8594;</a></nav>
+        <nav class="landing-evidence" aria-label="Technical evidence"><a href="architecture.html">Architecture &#8594;</a><a href="docs/REFERENCE.html">Data-safety contracts &#8594;</a><a href="compare.html">Benchmarks &#8594;</a><a href="docs/RELEASE-0.7.3.html">Release notes &#8594;</a></nav>
       </div>
     </div>
   </section>

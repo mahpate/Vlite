@@ -1,0 +1,94 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1200 470" role="img" aria-labelledby="title description">
+  <title id="title">How VLite file headers and commit frames fit together</title>
+  <desc id="description">A file header and optional encryption descriptor precede an append-only log. A zoomed frame shows its prefix, optional encryption fields, operation body, and commit footer.</desc>
+  <defs>
+    <marker id="arrow" markerWidth="10" markerHeight="10" refX="8" refY="5" orient="auto">
+      <path d="M0 0 10 5 0 10z" fill="#64748b"/>
+    </marker>
+    <style>
+      text{font-family:ui-sans-serif,system-ui,sans-serif;fill:#172033}
+      .heading{font-size:19px;font-weight:700}
+      .label{font-size:16px;font-weight:700}
+      .detail{font-size:16px}
+      .note{font-size:16px;fill:#475569}
+      .box{stroke-width:2}
+      .header{fill:#eff6ff;stroke:#2563eb}
+      .optional{fill:#fff7ed;stroke:#d97706;stroke-dasharray:7 5}
+      .log{fill:#f8fafc;stroke:#64748b;stroke-dasharray:8 5}
+      .frame{fill:#ecfdf5;stroke:#059669}
+      .anchor{fill:#fff7ed;stroke:#d97706;stroke-dasharray:5 4}
+      .prefix{fill:#eff6ff;stroke:#2563eb}
+      .body{fill:#ecfdf5;stroke:#059669}
+      .footer{fill:#fefce8;stroke:#ca8a04}
+      .arrow{stroke:#64748b;stroke-width:2;fill:none;marker-end:url(#arrow)}
+      .divider{stroke:#cbd5e1;stroke-width:1}
+    </style>
+  </defs>
+  <text class="heading" x="40" y="30">ONE AUTHORITATIVE FILE</text>
+  <rect class="box header" x="40" y="48" width="225" height="112" rx="12"/>
+  <text class="label" x="58" y="75">Header · 32 bytes</text>
+  <text class="detail" x="58" y="99">Magic · format</text>
+  <text class="detail" x="58" y="120">Dimensions · lineage</text>
+  <text class="detail" x="58" y="141">ID floor · flags · CRC32</text>
+
+  <path class="arrow" d="M265 98h28"/>
+  <rect class="box optional" x="300" y="48" width="235" height="112" rx="12"/>
+  <text class="label" x="318" y="75">Encryption descriptor</text>
+  <text class="detail" x="318" y="99">64 bytes · if encrypted</text>
+  <text class="detail" x="318" y="120">KDF · key ID</text>
+  <text class="detail" x="318" y="141">Salt · key check</text>
+
+  <path class="arrow" d="M535 98h28"/>
+  <rect class="box log" x="570" y="42" width="590" height="116" rx="12"/>
+  <text class="label" x="590" y="68">Append-only log</text>
+  <text class="detail" x="590" y="88">Each commit adds a data frame; timestamps add an anchor first.</text>
+  <rect class="box anchor" x="590" y="102" width="105" height="42" rx="8"/>
+  <text class="detail" x="603" y="119">Time anchor</text>
+  <text class="detail" x="603" y="136">optional · op 11</text>
+  <path class="arrow" d="M695 123h20"/>
+  <rect class="box frame" x="721" y="102" width="112" height="42" rx="8"/>
+  <text class="detail" x="739" y="128">Frame · commit 1</text>
+  <path class="arrow" d="M833 123h20"/>
+  <text class="label" x="861" y="129">…</text>
+  <path class="arrow" d="M884 123h20"/>
+  <rect class="box frame" x="910" y="102" width="220" height="42" rx="8"/>
+  <text class="detail" x="957" y="128">Frame · commit n</text>
+
+  <path class="arrow" d="M935 159v35"/>
+  <text class="heading" x="40" y="220">ZOOM IN · ONE DATA FRAME</text>
+  <rect class="box prefix" x="40" y="238" width="300" height="126" rx="12"/>
+  <text class="label" x="58" y="265">Prefix · 36 bytes</text>
+  <text class="detail" x="58" y="289">VREC · op · collection · sequence</text>
+  <text class="detail" x="58" y="310">ID · count · body length · CRC32</text>
+  <text class="note" x="58" y="342">Identifies and checks the operation</text>
+
+  <path class="arrow" d="M340 301h17"/>
+  <rect class="box optional" x="365" y="238" width="118" height="126" rx="12"/>
+  <text class="label" x="383" y="265">Nonce</text>
+  <text class="detail" x="383" y="289">12 bytes</text>
+  <text class="detail" x="383" y="310">if encrypted</text>
+
+  <path class="arrow" d="M483 301h17"/>
+  <rect class="box body" x="508" y="238" width="310" height="126" rx="12"/>
+  <text class="label" x="526" y="265">Operation body</text>
+  <text class="detail" x="526" y="289">Opcode payload · up to 256 MiB</text>
+  <text class="detail" x="526" y="310">Records · vectors · graphs</text>
+  <text class="note" x="526" y="342">Sealed as ciphertext when encrypted</text>
+
+  <path class="arrow" d="M818 301h17"/>
+  <rect class="box optional" x="843" y="238" width="118" height="126" rx="12"/>
+  <text class="label" x="861" y="265">Auth tag</text>
+  <text class="detail" x="861" y="289">16 bytes</text>
+  <text class="detail" x="861" y="310">if encrypted</text>
+
+  <path class="arrow" d="M961 301h17"/>
+  <rect class="box footer" x="986" y="238" width="174" height="126" rx="12"/>
+  <text class="label" x="1004" y="265">Footer · 16 bytes</text>
+  <text class="detail" x="1004" y="289">VCMT · CRC32</text>
+  <text class="detail" x="1004" y="310">Sequence</text>
+  <text class="note" x="1004" y="342">Valid footer = committed</text>
+
+  <line class="divider" x1="40" y1="392" x2="1160" y2="392"/>
+  <text class="note" x="40" y="422">The header describes the file; each prefix describes one frame. Recovery accepts only frames with a valid footer.</text>
+  <text class="note" x="40" y="446">Indexes are rebuildable caches, not part of the authoritative commit log.</text>
+</svg>

@@ -66,7 +66,7 @@
           <tr><th scope="row">Metadata-only updates</th><td>Change metadata without rewriting the vector or payload; expiry is kept. Requires format 5.</td></tr>
           <tr><th scope="row">Resumable ingestion</th><td>Atomic chunks with durable checkpoints, replay detection, row validation and reject or skip-invalid policies. Requires format 4 or 5.</td></tr>
           <tr><th scope="row"><a href="docs/KEY-VALUE.html">Key-value store</a></th><td>Namespaced string keys with byte values and no vector: ordered prefix listing, optional expiry and compare-and-set on versions. Use it from Rust, REST, gRPC, the clients, and local shell and MCP tools. Requires format 4 or 5; expiry needs 5.</td></tr>
-          <tr><th scope="row"><a href="docs/MEMORY.html">Agent memory</a></th><td>Opt-in. Remember, recall, consolidate, forget over REST; clients, CLI, MCP tools.</td></tr>
+          <tr><th scope="row"><a href="docs/MEMORY.html">Agent memory</a></th><td>Opt-in REST memory with per-scope read-only grants, bounded cleanup of expired receipts and restart-free grant reload for existing bindings. Clients, CLI and MCP tools are also supported.</td></tr>
           <tr><th scope="row">Directory store (opt-in)</th><td>A format 5 database kept as a directory of write-ahead logs and a checkpoint image, so reopening replays only the active log. Created from Rust or converted from a file; older releases cannot open a directory store.</td></tr>
           <tr><th scope="row">In-memory database</th><td>Create in memory, open from bytes and export bytes; the host handles persistence.</td></tr>
         </tbody></table></div>
@@ -211,7 +211,7 @@
           <li>Analyze &amp; compare: duplicate/type checks and 2-D plots of up to 32 records; two-record comparison.</li>
           <li>Graph: lookups, traversal, shortest paths, confirmed edits, rotatable 3D results, explain plans and statistics.</li>
           <li>Observability: live metrics/logs, slow-query diagnostics and change feed.</li>
-          <li>Administration: health, token files, users, tenants, admin tokens, audit; backups, drills, schedules, point-in-time restore, replication-log export; automatic index maintenance, webhooks, TLS reload.</li>
+          <li>Administration: health, token files, users, tenants, admin tokens, audit and restart-free reload of existing MemoryAI grants; backups, drills, schedules, point-in-time restore, replication-log export; automatic index maintenance, webhooks, TLS reload.</li>
           <li>API keys (super admin): list, create, rotate, revoke; collection/graph scopes, optional tenant, expiry, request-rate and vector quotas. All 11 operations: <code>read</code>, <code>search</code>, <code>search_build</code>, <code>write</code>, <code>import</code>, <code>index</code>, <code>collections</code>, <code>diagnostics</code>, <code>backup</code>, <code>graph_read</code>, <code>graph_write</code>. Secrets appear once; rotation preserves scope with optional grace. No scope-edit route: create a replacement and revoke the old key.</li>
           <li>Developer Console: request inspector, REST playground, read-only scenarios.</li>
           <li>Account menu: identity, password, theme, density, tour, sign-out; responsive and keyboard-accessible.</li>
