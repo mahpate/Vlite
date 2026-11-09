@@ -818,7 +818,7 @@ def check_diagram_scenes(p, url, screenshots=None):
                 page.goto(f"{url}/{path}?force3d")
                 page.wait_for_load_state("networkidle")
                 assert page.locator(".diagrams-3d-canvas, .diagram-3d-stage").count() == 0
-                images = page.locator(".deployment-options img" if count == 2 else ".diagram img")
+                images = page.locator(".deployment-options img" if count == 2 else "figure[data-diagram] img")
                 assert images.count() == count
                 for image in images.all():
                     decode_image(page, image, "dark")
