@@ -330,6 +330,16 @@ impl Service {
         self
     }
 
+    /// Records the bindings file of the bindings served, which a reload
+    /// (`memory/reload.rs`) reads again.
+    fn with_bindings_source(mut self, source: Option<std::path::PathBuf>) -> Self {
+        self.memory_bindings = Arc::new(reserved::Served::new(
+            self.memory_bindings.current(),
+            source,
+        ));
+        self
+    }
+
     fn has_bindings(&self) -> bool {
         !self.memory_bindings.is_empty()
     }

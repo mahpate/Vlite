@@ -15,6 +15,8 @@ use crate::memory::binding::{Binding, BindingError, BindingState, Recorded};
 use crate::memory::startup::{Refusal, plan};
 use crate::memory::{MemoryMut, MemoryScope};
 
+pub(super) use reload::reload_bindings;
+
 /// Startup refusal messages; they never name a binding, resource or scope.
 pub(super) const GRAPH_DISABLED: &str = "memory bindings require a graph-enabled database";
 pub(super) const GRAPH_MISSING: &str = "a memory binding graph does not exist";
@@ -231,6 +233,7 @@ mod pins_forget;
 mod pins_receipts;
 #[cfg(test)]
 mod pins_remember;
+mod reload;
 #[cfg(test)]
 mod replay;
 mod routes;

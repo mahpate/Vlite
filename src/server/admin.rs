@@ -285,6 +285,7 @@ pub fn configured_admin_router(
         let reserved = service.memory_bindings.with_orphans(&orphans);
         service = service.with_bindings(reserved);
     }
+    service = service.with_bindings_source(options.memory_bindings_file.clone());
     // The records found above reserve resources too.
     service.refuse_reserving_after_grpc()?;
     super::logs::configure(
@@ -387,7 +388,7 @@ pub fn configured_admin_router(
     Ok(super::routes(service))
 }
 
-fn read_memory_bindings(path: &FilePath) -> std::io::Result<super::reserved::Bindings> {
+pub(super) fn read_memory_bindings(path: &FilePath) -> std::io::Result<super::reserved::Bindings> {
     use std::io::Read;
 
     let file = std::fs::File::open(path)
@@ -444,6 +445,10 @@ pub(super) fn routes() -> Router<Service> {
         .route("/v1/capabilities", get(capabilities))
         .route("/v1/admin/tokens", get(tokens))
         .route("/v1/admin/tokens/reload", post(reload))
+        .route(
+            "/v1/admin/memory/bindings/reload",
+            post(super::memory::reload_bindings),
+        )
         .route("/v1/admin/tokens/revoke-read-only", post(revoke))
         .route("/v1/admin/audit", get(audit))
         .route(
@@ -546,6 +551,12 @@ async fn capabilities(
         ("tenant_lifecycle", s.admin.tenants.is_some()),
         ("accounts", s.admin.users.is_some()),
         ("password_login", s.admin.users.is_some()),
+        (
+            "memory_bindings_reload",
+            s.memory_bindings.source().is_some()
+                && s.memory_bindings.is_configured()
+                && !s.grpc_built.load(Ordering::SeqCst),
+        ),
     ] {
         features.insert(name.to_owned(), json!(enabled));
     }
@@ -589,6 +600,7 @@ async fn capabilities(
             "/v1/admin/users",
             "/v1/admin/users/{id}",
             "/v1/admin/users/{id}/password",
+            "/v1/admin/memory/bindings/reload",
         ]
         .into_iter()
         .map(|route| json!(route)),
