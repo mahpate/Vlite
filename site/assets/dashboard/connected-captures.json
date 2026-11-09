@@ -2,25 +2,25 @@
   "data": "Synthetic demo records and an articles graph in one isolated disposable database",
   "record_count": 8,
   "connected": true,
-  "backend_image": "vlite-capture:source",
+  "backend_image": "native isolated server",
   "capabilities": {
-    "version": "0.7.1"
+    "version": "0.7.2"
   },
-  "source_git_sha": "78d11f269b38cdcc51b3d0ab6c84a73c4709de0b",
+  "source_git_sha": "222fb2168c3ab2d503a0536c6f3d6a1f715c81d2",
   "source_git_dirty": false,
   "format_version": 5,
   "source_assets": {
-    "navigation.js": "d59f7eaf70c9ffbea8d8529fe7457bda5315f9ccbd3f3fbce585c87726252707",
-    "ambience.js": "678612f0fe51412d5b8bce773f49333e3423154be61562a905908f7e41510087",
-    "observability.js": "cce03d05074e86263a08b71eadb8298f3771d2b09878f1ddec78d638b8fb1d07",
-    "graph3d.js": "0ef3b257f0304211838dd46417a89197df819da168e4aae465e7b59cd7a323c5",
-    "graph.js": "02976f38ff2a4a23b5621b2639140d9082aea425cf75cb8b0d10925696554795",
-    "console-tools.js": "cd0662f0101039f70b084768808a79357a716f3035cffc921fe2a7631d5946bc",
     "admin-tools.js": "bce7511518ffc3ac5ac2045a296f946f3114c5b11cff00c358260620eff4088e",
-    "index.html": "4b0508d3a6063d5d7b7b45cfc7caebc260182e7b8ff7a4b020f2d72dedfebfde",
+    "ambience.js": "678612f0fe51412d5b8bce773f49333e3423154be61562a905908f7e41510087",
     "app.js": "5c38d07fa0037e2f05a9d27e172bbabe994c68f331b9f9c0fe8342a1e82395c5",
-    "style.css": "8d45ef3d9fd885e9ddfcccf022374fe9c039e681d0a71ff0859bc6194d42da6e",
-    "graph.css": "fd125471b3613335c91ec0f9cc68b1499c25a27fbfe1f683a825544cab9efe9c"
+    "console-tools.js": "500d718be3b3e5d7810c0d985a8aa2415c5df7d590ebab0054980e91bb6ff93e",
+    "graph.css": "fd125471b3613335c91ec0f9cc68b1499c25a27fbfe1f683a825544cab9efe9c",
+    "graph.js": "02976f38ff2a4a23b5621b2639140d9082aea425cf75cb8b0d10925696554795",
+    "graph3d.js": "0ef3b257f0304211838dd46417a89197df819da168e4aae465e7b59cd7a323c5",
+    "index.html": "578e2331884a4ede8e0d665f003d122679ac7e6757d216359f1c7d0d5fdbd0d0",
+    "navigation.js": "d59f7eaf70c9ffbea8d8529fe7457bda5315f9ccbd3f3fbce585c87726252707",
+    "observability.js": "cce03d05074e86263a08b71eadb8298f3771d2b09878f1ddec78d638b8fb1d07",
+    "style.css": "8d45ef3d9fd885e9ddfcccf022374fe9c039e681d0a71ff0859bc6194d42da6e"
   },
   "theme_sha256": "4192ff7fd37dcf8221b558863c4a55112557f6e7a3bee90c0a8045207a96987f",
   "shared_assets": {
@@ -32,162 +32,162 @@
     {
       "file": "current-sign-in.png",
       "workspace": "Sign in",
-      "sha256": "1172382fe2ac2da3b7dfbd3835c1b3f6c3a21a5a4980c97dd486edae2686b6aa"
+      "sha256": "8bb253eebce04672807a8489cd0ef9bc721f99b7170693810ba4c30069e77531"
     },
     {
       "file": "current-overview-light.png",
       "workspace": "Overview",
-      "sha256": "7514b2281f0cf227539fbf2af5cbcdca02020aac36b3deaecae7fcdc2c89e854"
+      "sha256": "341362edc0310408a41910ed6b06ed866bcb5fdf52405524c930a1b384deb50f"
     },
     {
       "file": "current-records.png",
       "workspace": "Collections",
-      "sha256": "7325f82244771749270ba6021791ef965eb6f0493caa87dc6437f6beda3c7838"
+      "sha256": "0755949d929e49c0ee86ded92862b3af3ea3924a29c5da75d274d02d227013ee"
     },
     {
       "file": "current-payload.png",
       "workspace": "Collections",
-      "sha256": "ade7f36f0a0c30d32f22ffe2d703e779069249f530cbe860f85d2b6fb86d92a7"
+      "sha256": "0b99185166f8e416da3dab820feb4a27116be2f41df1619cdc234d1b16fe6d78"
     },
     {
       "file": "current-metadata.png",
       "workspace": "Collections",
-      "sha256": "b23670d90bc79a9a5b00be949c484542985e7e1f2af4aea13124f62f2598d751"
+      "sha256": "4c30d9c3f1f846dabe5a31e2cfd946645c8528032eb45bb541df8e0b110aba9e"
     },
     {
       "file": "current-vector.png",
       "workspace": "Collections",
-      "sha256": "f997defb7e6f3e11c419cb44367a7a9a48ce3405e57c8f0b6eb10f8640ed7379"
+      "sha256": "ec6cb24f506c532c7a7c6efd7907924fe96957d3a507d57d844dd682a871b62b"
     },
     {
       "file": "current-write.png",
       "workspace": "Collections",
-      "sha256": "dd5cde9f37f987deb1316f82f3faa98986535942c2c2eb843e31538633e2d7fd"
+      "sha256": "7d206d4091332210a7872316965ecd0360af26627def892310b07c45f567c06b"
     },
     {
       "file": "current-index.png",
       "workspace": "Collections",
-      "sha256": "3a66c2617027bd9a88385354db66709df61406fb321fcc4f2686b189b9cf517e"
+      "sha256": "8644e11a55639e92beaf543e6313082d3d22dc595298565e84cc1cd06762392c"
     },
     {
       "file": "current-collections.png",
       "workspace": "Collections",
-      "sha256": "22cd60474f37beeba046f6637df5472fb098eb04bb8b05809d7e56c9279af700"
+      "sha256": "3770cf95477466283e8383a281ccf02aa980f759275ed7a0939d85fcea043343"
     },
     {
       "file": "current-search.png",
       "workspace": "Search",
-      "sha256": "2699636cff0340cfb9eb754480eed45cc76a03af2c3d0d2506d0dc90cd3fe6cb"
+      "sha256": "0b1e5d8b66c189cb91a2016f7210f5bd8c73ec532ee22b3519da30c1d41a6a7e"
     },
     {
       "file": "current-hybrid.png",
       "workspace": "Search",
-      "sha256": "cee81f30c51b965fc5399ce6cf3e481cd54e61e85dba2040eba5a0cc1edb4b62"
+      "sha256": "590a35e1d71deec72981bf75d1fb4994155c0ef35c8384caa1e6b753f3301dc5"
     },
     {
       "file": "current-retrieval.png",
       "workspace": "Search",
-      "sha256": "602a119f749f3efcb660d9acd0a84c77941e9611bf9aa81ad8df44d2b2e03734"
+      "sha256": "b7e16a5c1c1137b0dd54e8d382eefea90ac98e607a1b4d0842711b4f921196ff"
     },
     {
       "file": "current-explore.png",
       "workspace": "Search",
-      "sha256": "e5864d895baa91146854a12d37186e6bd44354e45113f704c8d26f3afa2d5903"
+      "sha256": "5085925a49eb182bf6348d24e202c07bf8efbd0af4fc39338116267791af480f"
     },
     {
       "file": "current-import.png",
       "workspace": "Collections",
-      "sha256": "e806d89cf71455ef94e6695574db47fc739e64ed9e1c3490435a4a20d4715ebc"
+      "sha256": "3d4ec16627ec2e61ee7f4d674618a559d631778f088b0c27e2b444d9a857587f"
     },
     {
       "file": "current-key-value.png",
       "workspace": "Key-value",
-      "sha256": "70528446185d0a3d48e29240ad03f9184ca3fe91239ed15b809d8075c433e759"
+      "sha256": "de27b8decfdc82406c3dce88f1944a49d533655060a8ec48400b0d7b963bc2f9"
     },
     {
       "file": "current-memory.png",
       "workspace": "MemoryAI",
-      "sha256": "bb2bf5f80d98770a512337d55d1f0f9bd11a8214a91a61bc0678adcb105b20f2"
+      "sha256": "6293903ba81d54e58ee585431d20274640864dd8dfddf055486d53150db84930"
     },
     {
       "file": "current-graph.png",
       "workspace": "Graph",
-      "sha256": "25dfc3fbf6e8021b6e6ef122feb779fc1c47219eb9633ef3dc1da53dc3ad4b2b"
+      "sha256": "08cf68dcca129923bc086c2ce769010f341a0c64005829ce21bf71fb24623ea8"
     },
     {
       "file": "current-graph-edit.png",
       "workspace": "Graph",
-      "sha256": "57fcf58bcec8eed8f6d5b32d0d405da74d05b02efdd381ce889f1b8b5a4f3a84"
+      "sha256": "532fe586592e9f1ffb7e4fa8cb234b63dfc740f4953c8abff761526765b70e9b"
     },
     {
       "file": "current-observability.png",
       "workspace": "Observability",
-      "sha256": "061b976d927ef14dcf0c79ba013af62688b70567eba51f290c638e5a87fe3339"
+      "sha256": "b698b1b328b96a35d6c57a4bfcbc9e6ef01d5bb37e365f19fd5aaab875f9342b"
     },
     {
       "file": "current-feed.png",
       "workspace": "Observability",
-      "sha256": "1faf900f6aaaf203f3079ea08df40edf4b28956525f1168b99ac72ba941543be"
+      "sha256": "8f99a5b44a2672dc0cec142619a1fab77c794eb524094a2c7b376d5fb9111738"
     },
     {
       "file": "current-administration.png",
       "workspace": "Administration",
-      "sha256": "b94480aeff7488bc9c31d1d7fa1cf183f1b989e5f3f2d7e7229de0f263ee04ca"
+      "sha256": "f1b2eebf9b19cf170faaad453d5d1d761de61164b1c7f0dd2eb41a551d7eb3b2"
     },
     {
       "file": "current-users.png",
       "workspace": "Administration",
-      "sha256": "c42fb74b15d2dcd2df97df45216eaab87a1a53486bbc8002228424bb0281fec7"
+      "sha256": "4db5bf44ad8eb3a52f9954bb46a557a89d1240d4b1e313b1398af9d596f8ea61"
     },
     {
       "file": "current-backups.png",
       "workspace": "Administration",
-      "sha256": "1d18431b65d335284b620d280752abe57ddbb9586e44311a6a0c9cdfe9310a4b"
+      "sha256": "907b925f724cd0275de72014768688dcfc9c0435650a890e2b1cef138c2af805"
     },
     {
       "file": "current-credentials.png",
       "workspace": "Administration",
-      "sha256": "ad6fee4728a0723d78339b92fa3cdb0418fe1ed6330cb0e4cf96ec7125b919e6"
+      "sha256": "088a3bde931a50bb9bcb1d0d5a2f561a7425408810c635eae6b8024c414668ec"
     },
     {
       "file": "current-tenants.png",
       "workspace": "Administration",
-      "sha256": "1ed39bce7042e115247d2c53f4991d142dd8555592f6847980348e0d83f39560"
+      "sha256": "fbc107bf7f991d12358a247ec44847b7598f2e5ca308b6bda5fd3a61563cb4ed"
     },
     {
       "file": "current-automation.png",
       "workspace": "Administration",
-      "sha256": "16806881863a67c5836687893f4f700e7226b8e99eb6f9139ac8a3fc58c656f3"
+      "sha256": "1470e07ae5229df93171ee1c21bd81fad8b44e0970ba1ac2a16ef248cefda284"
     },
     {
       "file": "current-webhooks.png",
       "workspace": "Administration",
-      "sha256": "8b57f4deb966a99e8abc786d73e01f86e5cf8360dbe58bdba12ba79e564c367b"
+      "sha256": "f48e350c07e8f26485ed8ef58e92c963b8bf33277e4df97ca8680db7cdfd8844"
     },
     {
       "file": "current-tls.png",
       "workspace": "Administration",
-      "sha256": "57565e143d888702544f67b21e3851e67007f55a7f846fe18cc6d808a71c75d9"
+      "sha256": "97cc04cf3c09ed2d5128cc7467ca8a2c6e3bc5cad01244a1dda4d738df6ea2f4"
     },
     {
       "file": "current-replication.png",
       "workspace": "Administration",
-      "sha256": "86a3699bed0e845cead3a074375ab2e49ba5ec9de360e1a11ad60c2ad61a6670"
+      "sha256": "9b6cc03008080325c90c20b2742e79acabd1b7b07f95fa59903d62488f37264c"
     },
     {
       "file": "current-developer.png",
       "workspace": "Developer Console",
-      "sha256": "44d4c815e0241fd2cef359b0f1d9e876d1a54ef32c2b646d155904b6f5336695"
+      "sha256": "c9e54645e57cc0e87f26e185197b518544ac156f7b1b9715d2cf338c7282fba7"
     },
     {
       "file": "current-overview-dark.png",
       "workspace": "Overview",
-      "sha256": "95788e4c9be7d16c1414496bcb843ee010f723ae5950918814d586c41d802265"
+      "sha256": "2ab5f978c98a964972b309fbf09434c9b438c67d1a06dfe992b659dbdf373656"
     },
     {
       "file": "current-preferences.png",
       "workspace": "Overview",
-      "sha256": "14ce6434a469a627bab5cf7223c471ddf8f6ba3e5e3303cda298506e2a848735"
+      "sha256": "320ba6de9874b030602d62cd2b9216b8e3475cc8d8385819a05c09e05d6d9aee"
     }
   ]
 }
