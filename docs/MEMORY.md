@@ -90,7 +90,7 @@ vlite-server data.vlite --bind 127.0.0.1:8080 --create-if-missing 3 --create-for
                 {"principal": "uvwxyzabcd27", "scopes": [{"agent": "assistant"}]}]
      ```
 
-     A scope appears at most once across both lists, `scopes` may be empty when `read_scopes` is not, a grant with `raw_access` cannot also list a read scope, and the 256-scope cap counts both lists. Startup provisions read scopes too, so recalling one that nobody wrote yet answers an empty list. Adding, removing or moving a read scope is a grant change: raise `generation` and restart. Everything a publisher writes is visible to its readers, so review shared memory before the publisher writes it; VLite does not review it. A server without read-scope support refuses a file that uses `read_scopes` (`memory bindings file is invalid`); to roll back, remove every `read_scopes` list and every grant that only reads, raise `generation` and restart.
+     A scope appears at most once across both lists, `scopes` may be empty when `read_scopes` is not, a grant with `raw_access` cannot also list a read scope, and the 256-scope cap counts both lists. Startup provisions read scopes too, so recalling one that nobody wrote yet answers an empty list. Adding, removing or moving a read scope is a grant change: raise `generation` and reload or restart. Everything a publisher writes is visible to its readers, so review shared memory before the publisher writes it; VLite does not review it. A server without read-scope support refuses a file that uses `read_scopes` (`memory bindings file is invalid`); to roll back, remove every `read_scopes` list and every grant that only reads, raise `generation` and restart.
 
 4. **Stop that server (`kill $SERVER_PID`) and restart it with the file.**
 
@@ -102,6 +102,34 @@ vlite-server data.vlite --bind 127.0.0.1:8080 --create-if-missing 3 --create-for
 
 
 Neither the admin token nor the read-only token can use the memory routes: a binding grants a credential, and only scoped credentials are granted.
+
+### Change grants live
+
+For existing bindings, change principals, scopes, read scopes or `raw_access`
+without restarting:
+
+1. Raise `generation` for each changed binding, keeping unchanged generations.
+   Write a complete new file privately, then replace the configured file
+   atomically so reload cannot read a half-written file.
+2. Send the admin request (no body or file path is needed):
+
+   ```sh
+   curl -sS -X POST "$VLITE_URL/v1/admin/memory/bindings/reload" \
+     -H "Authorization: Bearer $VLITE_ADMIN_TOKEN"
+   ```
+
+3. Confirm `"drained": true` in the result. If it is false, the grants are
+   applied but requests using older grants may still finish; send the request
+   again to wait again. An unchanged file is rechecked and reports `changed: 0`.
+
+New, removed, renamed or retired bindings, receipt windows, tenant, state,
+graph and evidence changes need a restart and must satisfy the existing
+binding rules. First-time enable also needs a restart. Reload is refused with
+gRPC; the server refuses a gRPC listener with bindings configured.
+A failed reload is not a revocation: records can be partially advanced while
+reads and raw access keep old grants. Retry the same file or restart with it;
+revoke the credential for urgent revocation. See [response and errors](API.md#change-grants-without-a-restart)
+and the [security contract](SECURITY.md#memory-bound-resources).
 
 ## Remember
 

@@ -88,9 +88,8 @@ Listing and rotation show graph scope; rotation preserves permissions.
 
 **Administration** and **Observability** also hold:
 
-- **Health and tokens:** refresh health, see token sources, reload token files,
-  revoke the read-only token and read the recent request audit. Change token
-  files on the host first.
+- **Health and tokens:** health, token sources, reload, read-only revocation
+  and audit. Edit host files first.
 - **Monitoring:** request rates, errors, latency, a per-route table and the
   live log tail.
 - **Backup and restore:** list and create snapshots, verify or drill a backup,
@@ -238,12 +237,13 @@ memory).
 | Route | Behavior |
 |---|---|
 | `GET /v1/admin/tokens` | Returns `{generation,admin_file_configured,read_only_configured,read_only_file_configured}`. |
-| `POST /v1/admin/tokens/reload` with `{}` | Reads only configured files, validates both credentials and swaps them atomically. Invalid files change nothing. An empty read-only file revokes that role; identical admin and read-only tokens are rejected. |
-| `POST /v1/admin/tokens/revoke-read-only` with `{}` | Disables the read-only token in memory and increments `generation`. Empty its file to keep it revoked after reload or restart. |
+| `POST /v1/admin/tokens/reload` with `{}` | Validates configured files, then swaps both credentials atomically; invalid files change nothing. Empty read-only files revoke access; identical role tokens are rejected. |
+| `POST /v1/admin/memory/bindings/reload` (no body) | **Reload memory grants** rereads the configured file. Returns `{bindings,changed,drained}`; if `drained` is false, send again. [Grants only; other changes need restart; no gRPC](API.md#change-grants-without-a-restart). |
+| `POST /v1/admin/tokens/revoke-read-only` with `{}` | Revokes read-only access in memory, incrementing `generation`; empty its file to persist across reload or restart. |
 | `GET /v1/admin/audit` | Returns `{items:[...],capacity:256}`. |
 
-Environment credentials are read at startup; restart to rotate them. No route
-creates arbitrary tokens or accepts file paths.
+Environment credentials need restart to rotate. No route creates arbitrary
+tokens or accepts file paths.
 
 Audit items contain only
 `{request_id,method,route,status,role,duration_ns,timestamp_unix_ms}`. `route`

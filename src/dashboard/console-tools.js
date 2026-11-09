@@ -1770,6 +1770,11 @@
       text("token-result", result);
       ctx.status("Configured credentials reloaded. Sign in again with a current token.");
     });
+    on("memory-bindings-reload", async () => {
+      admin("memory_bindings_reload");
+      if (!await ctx.confirm("Reload memory grants from the configured bindings file? Requests using older grants may finish. Check drained in the result; if false, send it again to wait. A failed reload is not a revocation.")) return;
+      text("memory-bindings-reload-result", await ctx.api("POST", "/v1/admin/memory/bindings/reload", {}));
+    });
     on("token-revoke", async () => {
       admin();
       if (!await ctx.confirm("Revoke the in-memory read-only credential now? Persist by emptying its configured file offline; already admitted requests may finish.")) return;

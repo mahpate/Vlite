@@ -41,7 +41,7 @@ from urllib.parse import urlsplit
 
 from playwright.sync_api import Error as PlaywrightError, expect, sync_playwright
 
-from dashboard_e2e import assert_no_stored_credentials, control, expect_signed_out, sign_in_with_token, sign_out
+from dashboard_e2e import assert_no_stored_credentials, confirm, control, expect_signed_out, sign_in_with_token, sign_out
 
 ROOT = Path(__file__).resolve().parent.parent
 METRICS_OFF = "server metrics are off while agent memory is enabled"
@@ -483,6 +483,11 @@ def memory_phase(browser, url, token, username, password, editor, editor_passwor
         overview(page)
         observability(page)
         administration(page)
+        with step(page, "TEST-015: reload memory grants and wait for older requests", ("#memory-bindings-reload-result",)):
+            control(page, "#memory-bindings-reload").click()
+            confirm(page, "Reload memory grants")
+            expect(control(page, "#memory-bindings-reload-result")).to_contain_text('"drained": true')
+            no_overflow(page, "memory grants reload")
         refused_panels(page, accepted("capabilities", rest(url, "GET", "/v1/capabilities", token=token), 200)["routes"])
         with step(page, "step 6: sign out, then sign in again with the admin token"):
             sign_out(page)
