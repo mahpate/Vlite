@@ -23,7 +23,7 @@ use axum::{
 };
 use serde_json::{Map, Value, json};
 
-use super::super::{ApiError, RequestId, Service, admin, audit, credentials::Op, users};
+use super::super::{ApiError, RequestId, Service, admin, audit, credentials::Op, guard, users};
 use super::wire::{self, Fail, Fields};
 use crate::Database;
 use crate::memory::binding::Binding;
@@ -235,8 +235,8 @@ fn resolve(
     let Ok(Path(name)) = name else {
         return Err(Fail::forbidden());
     };
-    let binding: &Binding = service
-        .memory_bindings
+    let bindings = guard::bindings(&service.memory_bindings);
+    let binding: &Binding = bindings
         .resolve(grant.tenant_id.as_deref(), &name)
         .ok_or_else(Fail::forbidden)?;
     let granted = binding

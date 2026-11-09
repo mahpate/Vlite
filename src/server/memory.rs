@@ -82,7 +82,7 @@ pub(super) fn startup_at(service: &Service, now_ms: u64) -> std::io::Result<Vec<
 pub(super) fn write_records(service: &Service) {
     let mut owner = service.database.write().unwrap();
     let db = owner.as_mut().unwrap();
-    for binding in service.memory_bindings.iter() {
+    for binding in service.memory_bindings.current().iter() {
         let (graph, evidence) = resources(binding);
         MemoryMut::bind(db, &graph, evidence.as_deref())
             .and_then(|mut memory| memory.write_binding_record(binding))
@@ -102,7 +102,7 @@ fn start(service: &Service, now_ms: u64) -> std::io::Result<Vec<Recorded>> {
             Ok(Vec::new())
         };
     };
-    prepare(db, &service.memory_bindings, now_ms).map_err(std::io::Error::other)
+    prepare(db, &service.memory_bindings.current(), now_ms).map_err(std::io::Error::other)
 }
 
 fn prepare(

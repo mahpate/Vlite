@@ -287,6 +287,7 @@ async fn delete(
                 .ok_or_else(not_found)?;
             if service_clone
                 .memory_bindings
+                .current()
                 .iter()
                 .any(|binding| binding.tenant == id)
                 || db

@@ -19,6 +19,9 @@
 
 use crate::memory::binding::{Binding, BindingSet, ROOT_TENANT, Recorded};
 use std::collections::{BTreeMap, BTreeSet};
+use std::path::{Path, PathBuf};
+use std::sync::{Arc, Mutex, PoisonError, RwLock, Weak};
+use std::time::Duration;
 
 /// The namespace of a stored name: graphs and collections are separate.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
@@ -228,6 +231,133 @@ impl Bindings {
 
     pub(super) fn iter(&self) -> impl Iterator<Item = &Binding> {
         self.set.bindings.iter()
+    }
+}
+
+/// How long a reload waits for the requests that consulted superseded grants.
+pub(super) const DRAIN_TIMEOUT: Duration = Duration::from_secs(10);
+
+const DRAIN_POLL: Duration = Duration::from_millis(10);
+
+/// The lifetime of one installed view: every request that consulted the view
+/// holds its epoch until the request ends.
+#[derive(Debug, Default)]
+pub(super) struct Epoch;
+
+/// The view one request decides with, and the epoch that marks it in use.
+#[derive(Clone, Debug)]
+pub(super) struct Pin {
+    bindings: Arc<Bindings>,
+    _epoch: Arc<Epoch>,
+}
+
+impl Pin {
+    pub(super) fn bindings(&self) -> Arc<Bindings> {
+        self.bindings.clone()
+    }
+}
+
+/// The bindings a router serves. A reload of the bindings file replaces the
+/// view in force with one whose grants differ (`memory/reload.rs`); the
+/// bindings, their resources and the reservations never change while serving.
+#[derive(Debug, Default)]
+pub(super) struct Served {
+    /// The configured bindings file, which a reload reads again.
+    source: Option<PathBuf>,
+    current: RwLock<(Arc<Bindings>, Arc<Epoch>)>,
+    /// The epochs of superseded views, until no request holds one.
+    retired: Mutex<Vec<Weak<Epoch>>>,
+    reloading: Arc<tokio::sync::Mutex<()>>,
+}
+
+impl Served {
+    pub(super) fn new(bindings: Arc<Bindings>, source: Option<PathBuf>) -> Self {
+        Self {
+            source,
+            current: RwLock::new((bindings, Arc::new(Epoch))),
+            retired: Mutex::default(),
+            reloading: Arc::default(),
+        }
+    }
+
+    pub(super) fn source(&self) -> Option<&Path> {
+        self.source.as_deref()
+    }
+
+    /// The view in force, unpinned: for code outside a request and for every
+    /// decision that does not depend on grants.
+    pub(super) fn current(&self) -> Arc<Bindings> {
+        self.current
+            .read()
+            .unwrap_or_else(PoisonError::into_inner)
+            .0
+            .clone()
+    }
+
+    /// The view in force, marked in use until the pin is dropped.
+    pub(super) fn pin(&self) -> Pin {
+        let current = self.current.read().unwrap_or_else(PoisonError::into_inner);
+        Pin {
+            bindings: current.0.clone(),
+            _epoch: current.1.clone(),
+        }
+    }
+
+    /// Makes `bindings` the view in force. Requests that consulted the
+    /// previous view keep it; [`Self::drain`] waits for them. Only a reload
+    /// installs, under the database write lock.
+    pub(super) fn install(&self, bindings: Bindings) {
+        let (_, superseded) = std::mem::replace(
+            &mut *self.current.write().unwrap_or_else(PoisonError::into_inner),
+            (Arc::new(bindings), Arc::new(Epoch)),
+        );
+        self.retired
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .push(Arc::downgrade(&superseded));
+    }
+
+    /// Waits until no request holds a superseded view, for at most `timeout`,
+    /// and says whether none does. No request is cut off.
+    pub(super) async fn drain(&self, timeout: Duration) -> bool {
+        let deadline = tokio::time::Instant::now() + timeout;
+        while !self.drained() {
+            if tokio::time::Instant::now() >= deadline {
+                return false;
+            }
+            tokio::time::sleep(DRAIN_POLL).await;
+        }
+        true
+    }
+
+    fn drained(&self) -> bool {
+        let mut retired = self.retired.lock().unwrap_or_else(PoisonError::into_inner);
+        retired.retain(|epoch| epoch.strong_count() > 0);
+        retired.is_empty()
+    }
+
+    /// The reload lock, unless another reload holds it.
+    pub(super) fn try_reload(&self) -> Option<tokio::sync::OwnedMutexGuard<()>> {
+        self.reloading.clone().try_lock_owned().ok()
+    }
+
+    pub(super) fn is_empty(&self) -> bool {
+        self.current().is_empty()
+    }
+
+    pub(super) fn is_configured(&self) -> bool {
+        self.current().is_configured()
+    }
+
+    /// [`Bindings::covers`] of the views in force. Both are copied out first:
+    /// `other` may be this very cell.
+    pub(super) fn covers(&self, other: &Self) -> bool {
+        let (mine, theirs) = (self.current(), other.current());
+        mine.covers(&theirs)
+    }
+
+    pub(super) fn with_orphans(&self, orphans: &[Recorded]) -> Bindings {
+        self.current().with_orphans(orphans)
     }
 }
 
@@ -528,6 +658,104 @@ mod tests {
             half.covers(&notes) && !half.covers(&other),
             "the evidence is not covered"
         );
+    }
+
+    /// The registry with every grant's `raw_access` flipped and one principal
+    /// replaced: the same bindings and reservations under other grants.
+    fn regranted() -> Bindings {
+        let mut set = registry().set().clone();
+        for binding in &mut set.bindings {
+            for grant in &mut binding.grants {
+                grant.raw_access = !grant.raw_access;
+                if grant.principal == PLAIN {
+                    grant.principal = "otherotherot".into();
+                }
+            }
+        }
+        assert_eq!(set.validate(), Ok(()));
+        Bindings::new(set)
+    }
+
+    #[tokio::test]
+    async fn an_install_swaps_the_view_and_a_drain_waits_for_its_pins() {
+        let served = Served::new(Arc::new(registry()), None);
+        assert!(served.source().is_none());
+        let before = served.current();
+        let pinned = served.pin();
+        served.install(regranted());
+        let after = served.current();
+        assert!(!Arc::ptr_eq(&before, &after), "the install swaps the view");
+        assert!(
+            after
+                .reserved()
+                .raw_allowed(Some("otherotherot"), Resource::Graph, "notes_graph")
+        );
+        assert!(
+            Arc::ptr_eq(&pinned.bindings(), &before),
+            "a pin keeps its view"
+        );
+        assert!(
+            !served.drain(Duration::from_millis(50)).await,
+            "a pin of the superseded view is alive"
+        );
+        drop(pinned);
+        assert!(served.drain(Duration::from_millis(50)).await);
+        assert!(served.retired.lock().unwrap().is_empty(), "pruned");
+        // An unpinned snapshot holds no epoch, so there is nothing to wait for.
+        let snapshot = served.current();
+        served.install(registry());
+        assert!(served.drain(Duration::ZERO).await);
+        assert!(Arc::ptr_eq(&snapshot, &after));
+        // Whatever does not depend on grants reads the view in force.
+        assert!(served.is_configured() && !served.is_empty());
+        assert!(served.covers(&served));
+        let unconfigured = Served::default();
+        assert!(!unconfigured.is_configured() && unconfigured.is_empty());
+        assert!(served.covers(&unconfigured) && !unconfigured.covers(&served));
+    }
+
+    #[test]
+    fn the_administrators_decisions_do_not_depend_on_grants() {
+        let names = [
+            "notes_graph".to_owned(),
+            "notes_ev".to_owned(),
+            "old_graph".to_owned(),
+            format!("t{TENANT}__g"),
+            format!("t{TENANT}__ev"),
+            "ordinary".to_owned(),
+            "g".to_owned(),
+            "ev".to_owned(),
+        ];
+        let (old, new) = (registry(), regranted());
+        let (before, after) = (old.reserved(), new.reserved());
+        // The grants differ for a credential...
+        assert_ne!(
+            before.raw_allowed(Some(RAW), Resource::Graph, "notes_graph"),
+            after.raw_allowed(Some(RAW), Resource::Graph, "notes_graph")
+        );
+        // ...and never for the administrator, who holds no credential ID.
+        for resource in [Resource::Graph, Resource::Collection] {
+            for name in &names {
+                assert_eq!(
+                    before.raw_allowed(None, resource, name),
+                    after.raw_allowed(None, resource, name),
+                    "{name}"
+                );
+            }
+            let (mut seen, mut also) = (names.to_vec(), names.to_vec());
+            before.retain_visible(None, resource, &mut seen, String::as_str);
+            after.retain_visible(None, resource, &mut also, String::as_str);
+            assert_eq!(seen, also);
+        }
+        for graph in &names {
+            for collection in &names {
+                assert_eq!(
+                    before.attachment_allowed(graph, collection),
+                    after.attachment_allowed(graph, collection),
+                    "{graph} {collection}"
+                );
+            }
+        }
     }
 
     #[test]

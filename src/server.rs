@@ -193,7 +193,7 @@ pub struct Service {
     /// The memory reservations of that same router. They are published and
     /// adopted together with `published_admin` (see `publish`), so that every
     /// transport of one engine applies the reservations its router applies.
-    published_bindings: Arc<Mutex<Option<Arc<reserved::Bindings>>>>,
+    published_bindings: Arc<Mutex<Option<Arc<reserved::Served>>>>,
     /// Set when a gRPC router was built from this engine without the tokens
     /// of a REST router: before any REST router published, so it adopted
     /// nothing, or after one that has no administration token, so every caller
@@ -216,7 +216,9 @@ pub struct Service {
     /// EPIC-011: graph read/write guard hold times.
     graph_stats: Arc<graph::GuardStats>,
     providers: Arc<providers::ProviderRegistry>,
-    memory_bindings: Arc<reserved::Bindings>,
+    /// The memory bindings this router serves; a reload may replace their
+    /// grants while serving (see `reserved::Served`).
+    memory_bindings: Arc<reserved::Served>,
 }
 
 impl Service {
@@ -309,7 +311,7 @@ impl Service {
             graph_enabled,
             graph_stats: Arc::default(),
             providers: Arc::default(),
-            memory_bindings: Arc::new(reserved::Bindings::default()),
+            memory_bindings: Arc::new(reserved::Served::default()),
         })
     }
 
@@ -324,7 +326,7 @@ impl Service {
     }
 
     fn with_bindings(mut self, bindings: reserved::Bindings) -> Self {
-        self.memory_bindings = Arc::new(bindings);
+        self.memory_bindings = Arc::new(reserved::Served::new(Arc::new(bindings), None));
         self
     }
 

@@ -35,12 +35,22 @@ use crate::{
     kv::{KvStore, KvView},
     property_graph::{GraphInfo, GraphMut, GraphRef},
 };
-use std::sync::atomic::AtomicBool;
+use std::sync::{OnceLock, atomic::AtomicBool};
 
 tokio::task_local! {
     /// Set by the request pipeline for the handler it runs, so that the guard
-    /// can tell the pipeline when it hid a reserved resource from a credential.
-    static HIDDEN: Arc<AtomicBool>;
+    /// can tell the pipeline when it hid a reserved resource from a credential,
+    /// and so that every guard of the request decides with the same grants.
+    static HIDDEN: Arc<RequestContext>;
+}
+
+/// What the guards of one request share.
+#[derive(Default)]
+pub(super) struct RequestContext {
+    /// Whether the guard hid a reserved resource from the credential.
+    hidden: AtomicBool,
+    /// The bindings view the request decides with, once it consulted one.
+    pinned: OnceLock<reserved::Pin>,
 }
 
 /// Runs the handler of one request and reports, next to its output, whether
@@ -48,24 +58,37 @@ tokio::task_local! {
 /// not reach like a request for a missing one (a hidden attempt). The pipeline
 /// counts and audits it, without the name, once the request is done.
 pub(super) async fn track_hidden<F: std::future::Future>(future: F) -> (F::Output, bool) {
-    let flag = Arc::new(AtomicBool::new(false));
-    let output = HIDDEN.scope(flag.clone(), future).await;
+    let context = Arc::new(RequestContext::default());
+    let output = HIDDEN.scope(context.clone(), future).await;
+    let flag = &context.hidden;
     (output, flag.load(Ordering::Relaxed))
 }
 
-/// The flag of the request running on this task, to be carried into the
+/// The context of the request running on this task, to be carried into the
 /// blocking worker that runs a database closure for it.
-pub(super) fn current() -> Option<Arc<AtomicBool>> {
+pub(super) fn current() -> Option<Arc<RequestContext>> {
     HIDDEN.try_with(Arc::clone).ok()
 }
 
-/// Runs `operation` as part of the request that owns `flag`, so a guard built
-/// inside a blocking worker notes into the same request.
-pub(super) fn within<T>(flag: Option<Arc<AtomicBool>>, operation: impl FnOnce() -> T) -> T {
-    match flag {
-        Some(flag) => HIDDEN.sync_scope(flag, operation),
+/// Runs `operation` as part of the request that owns `context`, so a guard
+/// built inside a blocking worker notes into the same request and decides
+/// with the same grants.
+pub(super) fn within<T>(context: Option<Arc<RequestContext>>, operation: impl FnOnce() -> T) -> T {
+    match context {
+        Some(context) => HIDDEN.sync_scope(context, operation),
         None => operation(),
     }
+}
+
+/// The bindings that grant-dependent decisions use. Inside a request, the
+/// view the request first consulted, pinned for the rest of it (every scope,
+/// memory route and worker of the request), so one request never decides
+/// with two versions of the grants; a request that never consults them pins
+/// nothing. Outside a request, the view in force.
+pub(super) fn bindings(served: &reserved::Served) -> Arc<reserved::Bindings> {
+    HIDDEN
+        .try_with(|context| context.pinned.get_or_init(|| served.pin()).bindings())
+        .unwrap_or_else(|_| served.current())
 }
 
 /// What one request may reach: the authenticated role and the reservations of
@@ -74,8 +97,8 @@ pub(super) fn within<T>(flag: Option<Arc<AtomicBool>>, operation: impl FnOnce() 
 pub(super) struct RequestScope {
     role: admin::Role,
     bindings: Arc<reserved::Bindings>,
-    /// The pipeline's hidden-attempt flag, when the request runs under it.
-    hidden: Option<Arc<AtomicBool>>,
+    /// The pipeline's context, when the request runs under it.
+    hidden: Option<Arc<RequestContext>>,
 }
 
 impl RequestScope {
@@ -84,7 +107,7 @@ impl RequestScope {
     pub(super) fn new(service: &Service, role: admin::Role) -> Self {
         Self {
             role,
-            bindings: service.memory_bindings.clone(),
+            bindings: bindings(&service.memory_bindings),
             hidden: HIDDEN.try_with(Arc::clone).ok(),
         }
     }
@@ -109,9 +132,9 @@ impl RequestScope {
     /// are not probing. The note carries no name.
     fn note_hidden(&self) {
         if matches!(self.role, admin::Role::Scoped(_))
-            && let Some(flag) = &self.hidden
+            && let Some(context) = &self.hidden
         {
-            flag.store(true, Ordering::Relaxed);
+            context.hidden.store(true, Ordering::Relaxed);
         }
     }
 
@@ -480,6 +503,7 @@ mod tests {
         MemoryScope,
         binding::{Binding, BindingSet, BindingState, Grant as BindingGrant, ROOT_TENANT},
     };
+    use std::time::Duration;
 
     const TENANT: &str = "0123456789abcdef0123456789abcdef";
     const RAW: &str = "rawrawrawraw";
@@ -955,6 +979,96 @@ mod tests {
                 .collection(&db, &Target::Named("notes_ev".into()))
                 .is_err()
         );
+    }
+
+    /// The test bindings with every `raw_access` revoked: the same bindings
+    /// and reservations under other grants.
+    fn revoked() -> reserved::Bindings {
+        let mut set = bindings().set().clone();
+        for binding in &mut set.bindings {
+            for grant in &mut binding.grants {
+                grant.raw_access = false;
+            }
+        }
+        reserved::Bindings::new(set)
+    }
+
+    #[tokio::test]
+    async fn a_request_keeps_the_grants_it_first_consulted() {
+        let served = Arc::new(reserved::Served::new(bindings(), None));
+        let first = served.current();
+        track_hidden(async {
+            assert!(Arc::ptr_eq(&super::bindings(&served), &first));
+            served.install(revoked());
+            assert!(
+                Arc::ptr_eq(&super::bindings(&served), &first),
+                "same request"
+            );
+            assert!(!served.drain(Duration::ZERO).await, "the request holds it");
+            // A blocking worker of the request reuses its pin.
+            let context = current();
+            let worker = served.clone();
+            let seen =
+                tokio::task::spawn_blocking(move || within(context, || super::bindings(&worker)))
+                    .await
+                    .unwrap();
+            assert!(Arc::ptr_eq(&seen, &first), "blocking worker");
+        })
+        .await;
+        assert!(served.drain(Duration::ZERO).await, "the request ended");
+        let second = served.current();
+        assert!(!Arc::ptr_eq(&second, &first));
+        track_hidden(async {
+            assert!(
+                Arc::ptr_eq(&super::bindings(&served), &second),
+                "new request"
+            );
+        })
+        .await;
+        // Outside any request: the view in force, unpinned.
+        assert!(Arc::ptr_eq(&super::bindings(&served), &second));
+        served.install(revoked());
+        assert!(served.drain(Duration::ZERO).await);
+    }
+
+    #[tokio::test]
+    async fn a_scope_keeps_its_requests_grants_across_an_install() {
+        let db = database();
+        let raw = grant(RAW, None, &[], &db);
+        let service =
+            Service::new(db).with_bindings(reserved::Bindings::new(bindings().set().clone()));
+        let named = || Target::Named("notes_ev".into());
+        let (kept, hidden) = track_hidden(async {
+            let before = RequestScope::new(&service, raw.clone());
+            service.memory_bindings.install(revoked());
+            let after = RequestScope::new(&service, raw.clone());
+            let owner = service.database.read().unwrap();
+            let db = owner.as_ref().unwrap();
+            [before, after].map(|scope| {
+                scope
+                    .collection(db, &named())
+                    .map(|handle| handle.stored().to_owned())
+            })
+        })
+        .await;
+        for (when, result) in ["built before the install", "built after it"]
+            .iter()
+            .zip(kept)
+        {
+            assert_eq!(result.unwrap(), "notes_ev", "{when}");
+        }
+        assert!(!hidden);
+        let (missing, hidden) = track_hidden(async {
+            let scope = RequestScope::new(&service, raw.clone());
+            let owner = service.database.read().unwrap();
+            scope
+                .collection(owner.as_ref().unwrap(), &named())
+                .err()
+                .map(summary)
+        })
+        .await;
+        assert_eq!(missing, Some((404, "collection_not_found")), "next request");
+        assert!(hidden);
     }
 
     #[test]

@@ -465,7 +465,8 @@ fn a_router_that_reserves_more_without_a_token_is_refused_over_one_with_a_token(
     let mut listener = service.clone();
     assert!(listener.adopt_published());
     assert!(has_token(&listener, FIRST), "the held tokens are untouched");
-    let reserved = listener.memory_bindings.reserved();
+    let current = listener.memory_bindings.current();
+    let reserved = current.reserved();
     assert!(reserved.is_reserved(reserved::Resource::Graph, "notes_graph"));
     assert!(
         !reserved.is_reserved(reserved::Resource::Graph, "other_graph"),
@@ -505,7 +506,8 @@ fn a_router_that_reserves_part_of_what_the_held_one_does_is_kept_out_not_refused
     let mut listener = service.clone();
     assert!(listener.adopt_published());
     assert!(has_token(&listener, FIRST) && !has_token(&listener, SECOND));
-    let reserved = listener.memory_bindings.reserved();
+    let current = listener.memory_bindings.current();
+    let reserved = current.reserved();
     assert!(reserved.is_reserved(reserved::Resource::Graph, "notes_graph"));
     assert!(
         reserved.is_reserved(reserved::Resource::Graph, "other_graph"),
@@ -525,7 +527,8 @@ fn two_routers_that_each_reserve_what_the_other_does_not_are_refused() {
     let mut listener = service.clone();
     assert!(listener.adopt_published());
     assert!(has_token(&listener, FIRST) && !has_token(&listener, SECOND));
-    let reserved = listener.memory_bindings.reserved();
+    let current = listener.memory_bindings.current();
+    let reserved = current.reserved();
     assert!(reserved.is_reserved(reserved::Resource::Graph, "notes_graph"));
     assert!(
         !reserved.is_reserved(reserved::Resource::Graph, "other_graph"),
@@ -551,7 +554,8 @@ fn a_router_that_reserves_what_the_held_one_does_and_more_replaces_it() {
     let mut listener = service.clone();
     assert!(listener.adopt_published());
     assert!(has_token(&listener, SECOND) && !has_token(&listener, FIRST));
-    let reserved = listener.memory_bindings.reserved();
+    let current = listener.memory_bindings.current();
+    let reserved = current.reserved();
     assert!(reserved.is_reserved(reserved::Resource::Graph, "notes_graph"));
     assert!(reserved.is_reserved(reserved::Resource::Graph, "other_graph"));
 }
