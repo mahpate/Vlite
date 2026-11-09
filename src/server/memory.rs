@@ -232,6 +232,8 @@ mod pins_forget;
 #[cfg(test)]
 mod pins_receipts;
 #[cfg(test)]
+mod pins_reload;
+#[cfg(test)]
 mod pins_remember;
 mod reload;
 #[cfg(test)]
