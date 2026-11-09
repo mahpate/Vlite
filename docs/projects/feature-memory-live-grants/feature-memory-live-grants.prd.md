@@ -1,8 +1,8 @@
 ---
 goal: VLite MemoryAI live grants — restart-free updates to the grants of memory bindings the server already serves
-version: 1.2
+version: 1.5
 date_created: 2026-11-08
-last_updated: 2026-11-08
+last_updated: 2026-11-09
 owner: VLite maintainers (mahpate/Vlite)
 tags: [feature, memory, security, authorization, operations]
 ---
@@ -632,13 +632,13 @@ EPIC-001 and EPIC-002 are sequential. EPIC-003 and EPIC-005 can follow EPIC-002 
 |---|---|---|---|
 | ITEM-011 | In-crate REST pins TEST-005 to TEST-009 and cancellation/audit TEST-019 | Implemented | `src/server/memory/pins_reload.rs`, `src/server/memory.rs` |
 | ITEM-012 | Integration tests TEST-010 to TEST-014 | Implemented | `tests/server_memory_live_grants.rs` |
-| ITEM-013 | Dashboard end-to-end step TEST-015; run the TEST-016 to TEST-018 gates and the validation commands | In progress: final validation | `tests/dashboard_memory_mode.py` |
+| ITEM-013 | Dashboard end-to-end step TEST-015; run the TEST-016 to TEST-018 gates and the validation commands | Implemented | `tests/dashboard_memory_mode.py` |
 
 ### EPIC-005: Documentation
 
 | Task | Description | Status | Relevant Files |
 |---|---|---|---|
-| ITEM-014 | Operator procedure, response and error codes, in-flight contract, FM-009, emergency revoke, library multi-router note; within content budgets | In progress: review clarifications | `docs/API.md`, `docs/MEMORY.md`, `docs/SECURITY.md`, `docs/CONSOLE-ADMIN.md` |
+| ITEM-014 | Operator procedure, response and error codes, in-flight contract, FM-009, emergency revoke, library multi-router note; within content budgets | Implemented | `docs/API.md`, `docs/MEMORY.md`, `docs/SECURITY.md`, `docs/CONSOLE-ADMIN.md` |
 
 ## 15. Change Log
 
@@ -649,3 +649,4 @@ EPIC-001 and EPIC-002 are sequential. EPIC-003 and EPIC-005 can follow EPIC-002 
 | 1.2 | 2026-11-08 | One local read-only `code-review` pass against `4cdb2ce3`. It found no safety, authorization, lock-order, drain or CI-gate defect: the two grant readers, task-local coverage, recheck-under-write-lock and gate compliance were confirmed. Applied: (MAJOR) `tests/reserved_resource_mutants.json` `G71-*` anchors added to CON-004 and TEST-018, with G71-19 and G71-21 preserved; (MINOR) the `with_orphans` and `prepare` call sites named and the source placement fixed (REQ-017, ITEM-004); §9 lock-duration text matched to RD-006; TEST-009 gated on `grpc`. Simplification: `read_memory_bindings` stays unchanged (FILE-008). |
 | 1.3 | 2026-11-09 | Integration clarifications: TEST-011 preserves the existing graph 409 and collection 404 missing-resource responses; TEST-012's same-generation refusal applies to changed grants, not an unchanged file. No production status or generation rule changes. |
 | 1.4 | 2026-11-09 | Three-perspective implementation review identified lost success auditing on caller cancellation. Clarified owned-task completion through drain/report and added TEST-019; corrected the gRPC-context rationale and request-ring limitations without adding actor or failure-event schemas. Full regression found the source-guard scan rejecting reload's two operator-file existence lookups; added two justified allow entries. |
+| 1.5 | 2026-11-09 | Final validation at `a00e6cf4`: an isolated Windows/MSVC run of fmt, all-target all-feature clippy, `cargo test --workspace --all-targets --all-features --no-fail-fast` (159 of 159 harnesses; 4,119 passed, 0 failed, 7 ignored), doctests and the server-only memory library tests (212 passed) all passed. CI (TEST-016 gates) and Dashboard UI (TEST-015) passed on that commit; TEST-018 reports `"stale":0` for all four ledgers and all 59 `G71-*` anchors occur once. Follow-up reviews accepted the correction. ITEM-013 and ITEM-014 implemented. |
