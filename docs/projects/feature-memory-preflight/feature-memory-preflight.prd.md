@@ -1,6 +1,6 @@
 ---
 goal: VLite MemoryAI grant-change preflight and status, and a release guard that requires successful full CI on the exact commit before any publication
-version: 1.9
+version: 2.0
 date_created: 2026-11-09
 last_updated: 2026-11-09
 owner: VLite maintainers (mahpate/Vlite)
@@ -555,7 +555,7 @@ Behaviour of the edited workflow:
 | RISK-B03 | GitHub API rate limit or outage | 🟢 | Retries, then fail closed; rerun |
 | RISK-B04 | A writer dispatches `pypi.yml` from a branch whose copy drops the guard | 🟡 | Residual: repository write access already allows workflow edits. Recommend the existing `pypi` and `pypi-embedded` environment protections (`docs/INSTALL.md:201-202`). Out of scope |
 | RISK-B05 | Old tags lack a qualifying run, so a PyPI re-dispatch fails | 🟢 | Intended (fail closed); dispatch CI on the old tag if ever needed |
-| ASSUMPTION-B01 | **Re-run failed jobs** reruns `ci-guard` and its skipped dependents, which can download the artifacts of earlier attempts in the same run | — | GitHub behaviour for `actions/download-artifact@v5` within a run. If it fails, rerunning all jobs is the fallback (no re-tag). Verify once on a branch dry run with a forced failure |
+| ASSUMPTION-B01 | **Re-run failed jobs** reruns `ci-guard` and its skipped dependents, which can download the artifacts of earlier attempts in the same run | — | GitHub behaviour for `actions/download-artifact@v5` within a run. If it fails, rerunning all jobs is the fallback (no re-tag). Verify once on a branch dry run with a forced failure. (v2.0: still **unverified**; it was not exercised live. A branch dispatch never fails the guard, because report mode exits 0 on every verdict, and forcing a failure would need a code change. The rerun-all fallback stays documented.) |
 | ASSUMPTION-B02 | The `workflows/{id}/runs` listing reports the latest attempt's `status`, `conclusion` and `run_attempt` | — | Documented API behaviour; `image_ci` relies on it today |
 | ASSUMPTION-B03 | `GET commits/refs/tags/{tag}` peels annotated tags to the commit | — | Verified live (v1.2): `commits/refs/tags/v0.7.3` returns the commit of the annotated tag; `commits/tags/v0.7.3` returns 422. Unit-tested with a fake |
 
@@ -657,11 +657,21 @@ Behaviour of the edited workflow:
   - The `pypi.yml` guard sets `CI_GUARD_MODE: enforce` and has no `id-token`.
   - `image-ci` and `route` stay in the dispatch table, and `test_only_exact_successful_main_ci_is_trusted` passes unchanged.
 - **TEST-B12** (v1.4, review R1): PyPI qualifies the tag commit and every distinct wheel source commit of the checksum-validated manifest; a malformed or mismatched manifest fails closed; the upload step accepts only wheels whose hashes match the guarded manifest. TEST-B03/B07 gain the clamped-retry, immediate zero-wait retry, counted job-listing and no-retry malformed-field regressions.
-- **TEST-B11** (manual, recorded in the PR description by the coordinator): two dispatch dry runs of `release.yml` on the feature branch.
+- **TEST-B11** (manual, performed by the coordinator; results below, as there is no PR): two dispatch dry runs of `release.yml` on the feature branch.
   - The two runs need different qualification states, so they do not both need a prior full CI run. At the integrated head `X`, dispatch `release.yml` **before** any `ci.yml` run exists at `X`: it reports `missing`. Then dispatch full `ci.yml` (Docker on) at `X`; once it is green, dispatch `release.yml` at `X` again: it reports `qualified`. One CI run serves both.
   - Record the run URLs and the guard step summaries.
   - Both exit 0, and every publishing job is skipped.
   - Enforce mode cannot be exercised live without publishing; TEST-B01 to TEST-B09 cover it.
+  - **Results (v2.0, 2026-11-10).** Every run below was a `workflow_dispatch` on `mahpate-graph-store-continuation` at `X` = `8b648c3207108846517ff0619910516444a81844`. Nothing was published, and no tag, release or PR was created.
+
+    | Run | Workflow | Result |
+    |---|---|---|
+    | R1 | `release.yml` [https://github.com/mahpate/Vlite/actions/runs/42788057912](https://github.com/mahpate/Vlite/actions/runs/42788057912), dispatched before any `ci.yml` run existed at `X` | `ci-guard` job 129734253902 succeeded with verdict `missing` (report mode; publication is never authorized), "no candidate ci.yml run at this commit" and the remedy line; exit 0. The run succeeded; `image-build`, `image-publish`, `image-verify` and `release` were skipped |
+    | C1 | `ci.yml` [https://github.com/mahpate/Vlite/actions/runs/42788263403](https://github.com/mahpate/Vlite/actions/runs/42788263403), `-f docker=true -f test_proof=false` | All 31 jobs succeeded, including `docker` and `CI required` (job 129757288366) |
+    | D1 | `dashboard-ui.yml` [https://github.com/mahpate/Vlite/actions/runs/42788266923](https://github.com/mahpate/Vlite/actions/runs/42788266923) | Succeeded (`browser` and `memory-mode`) |
+    | R2 | `release.yml` [https://github.com/mahpate/Vlite/actions/runs/42797256086](https://github.com/mahpate/Vlite/actions/runs/42797256086), dispatched after C1 was green | `ci-guard` job 129771753320 succeeded with verdict `qualified` (report mode; publication is never authorized), citing run 42788263403 (`workflow_dispatch`, `mahpate-graph-store-continuation`, attempt 1, qualified). The run succeeded; the same four publishing jobs were skipped (129806611904, 129806613125, 129806614550, 129806614989) |
+
+    The `pypi.yml` `workflow_run` runs triggered by R1 and R2 (42799088905, 42809379748) concluded skipped. Releases and tags are unchanged (latest `v0.7.3`).
 
 ### Acceptance Criteria
 
@@ -821,7 +831,7 @@ Depends on EPIC-001 for merge; the recapture comes last.
 | ITEM-010 | TEST-A15 Playwright steps; CONSOLE-ADMIN folded row within budget (CON-003) | Done | `tests/dashboard_memory_mode.py`, `docs/CONSOLE-ADMIN.md` |
 | ITEM-011 | Dispatch `dashboard-capture.yml` on the integrated feature branch; commit the artifact output; `tests/dashboard_tours.py` passes (REQ-A10) | Done | `site/assets/dashboard/*`, `site/index.html` |
 
-### EPIC-004: Release CI guard (Part B) — IMPLEMENTED; review fixes R1–R3/L1 applied (v1.4); re-review acceptance and TEST-B11 live dry runs pending
+### EPIC-004: Release CI guard (Part B) — DONE; both independent re-reviews approved (guard plan d2a2e6e7; server/dashboard/docs plan 8a90edb1) and the TEST-B11 live dry runs passed at `8b648c32`
 
 Independent of the other epics.
 
@@ -830,7 +840,7 @@ Independent of the other epics.
 | ITEM-012 | `release-ci` per §3.5.1–§3.5.3 with injectable API, sleep and clock; existing functions byte-identical (REQ-B01) | Done | `scripts/ci_policy.py` |
 | ITEM-013 | `ci-guard` jobs and the `needs`/`if` edits (REQ-B02, B03) | Done | `.github/workflows/release.yml`, `.github/workflows/pypi.yml` |
 | ITEM-014 | TEST-B01–B10 | Done | `tests/ci_workflows.py` |
-| ITEM-015 | Maintainer note (REQ-B05). The coordinator performs the TEST-B11 dry runs on the feature branch | Done | `docs/INSTALL.md` |
+| ITEM-015 | Maintainer note (REQ-B05). The TEST-B11 dry runs were done by the coordinator on the feature branch: release runs 42788057912 (`missing`) and 42797256086 (`qualified`), CI run 42788263403, Dashboard UI run 42788266923 | Done | `docs/INSTALL.md` |
 
 ### 14.1 Effort estimate
 
@@ -859,3 +869,4 @@ Engineering effort is the human-equivalent design, coding, testing and review ti
 | 1.7 | 2026-11-09 | EPIC-002 docs result `f90c3486` integrated (ITEM-006–008 Done); status's 503 `busy` from shared admission is documented. Server review P2-2–P2-4, L1, L2: P2-2 was stale, because capture run 42771433763 at `34c1126a` and Dashboard UI run 42771908341 at `6386bba1` both passed. §3.4 now names the generic observers that record every request (caller's own credential ID, `credential_denied`, `internal_error`), and REQ-A03, SEC-002 and AC-004 are qualified to match. TEST-A09 gains an isolated observer test with a unique sentinel per dimension, which kills the helper-log mutant. TEST-A06 gains a held-reader case, which kills the exclusive-lock mutant. TEST-A07 gains the poisoned-lock 500. TEST-A13 requires the exact documented operations and the router's answers, which kills the parameterized-route mutant. |
 | 1.8 | 2026-11-09 | Server review P2-1: the dashboard preflight request passes `{data:false}`, with a handler regression and a transport regression (200/500/503). It was recaptured by `dashboard-capture.yml` run 42778766120 at `4ec83f38` (manifest `source_git_sha` `4ec83f38…`, `source_git_dirty` false) and installed; `dashboard_tours.py site` hash checks pass locally. EPIC-004 delta review: F1, so a wheel absent from `SHA256SUMS` with an omitted or null hash no longer passes, and its hash must be lowercase SHA-256 hex. F2, so TEST-B12's other commit has hex letters and an upper-case source is refused before any CI lookup. Every malformed case asserts exactly `verified=false` with no `manifest_sha256`. Multi-source freshness is described as sequential observations (§3.5.5, `docs/INSTALL.md`). |
 | 1.9 | 2026-11-10 | Delta re-review (approved `4ec83f38`) nit: the scoped rate limiter runs after authentication resolves the caller and before route authorization (`src/server.rs`, `observe`); the status 503 wording in §3.3, `docs/API.md`, OpenAPI and its parity addition now says "before route authorization". |
+| 2.0 | 2026-11-10 | TEST-B11 results recorded at `X` = `8b648c3207108846517ff0619910516444a81844`: R1 `missing`, C1 full CI green, D1 Dashboard UI green, R2 `qualified`; all publishing jobs skipped and nothing published. Both independent re-reviews approved (guard plan d2a2e6e7; server/dashboard/docs plan 8a90edb1). The qualified code SHA stays `X`; this commit changes docs only. ASSUMPTION-B01 remains unverified. |
