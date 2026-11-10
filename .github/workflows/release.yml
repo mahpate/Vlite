@@ -34,6 +34,25 @@ jobs:
       - run: python tests/release_assets.py
       - run: python tests/wheel_platform.py
 
+  # Publication waits for a successful full ci.yml run at this exact commit; a branch
+  # dispatch only reports the verdict (scripts/ci_policy.py release-ci).
+  ci-guard:
+    needs: identity
+    runs-on: ubuntu-latest
+    timeout-minutes: 150
+    permissions:
+      contents: read
+      actions: read
+    outputs:
+      verified: ${{ steps.guard.outputs.verified }}
+    steps:
+      - uses: actions/checkout@v5
+      - id: guard
+        env:
+          GH_TOKEN: ${{ github.token }}
+          CI_GUARD_MODE: ${{ startsWith(github.ref, 'refs/tags/v') && 'enforce' || 'report' }}
+        run: python3 scripts/ci_policy.py release-ci
+
   clients:
     needs: identity
     runs-on: ubuntu-latest
@@ -315,8 +334,8 @@ jobs:
   # Each architecture builds natively (no QEMU) and pushes untagged per-platform
   # images by digest; image-publish then tags the multi-platform manifest lists.
   image-build:
-    if: startsWith(github.ref, 'refs/tags/v')
-    needs: [native, linux-arm64, image-test, manylinux, clients]
+    if: startsWith(github.ref, 'refs/tags/v') && needs.ci-guard.outputs.verified == 'true'
+    needs: [native, linux-arm64, image-test, manylinux, clients, ci-guard]
     strategy:
       fail-fast: true
       matrix:
@@ -424,8 +443,8 @@ jobs:
           retention-days: 1
 
   image-publish:
-    if: startsWith(github.ref, 'refs/tags/v')
-    needs: image-build
+    if: startsWith(github.ref, 'refs/tags/v') && needs.ci-guard.outputs.verified == 'true'
+    needs: [image-build, ci-guard]
     runs-on: ubuntu-latest
     permissions:
       contents: read
@@ -487,7 +506,8 @@ jobs:
           done
 
   image-verify:
-    needs: image-publish
+    if: startsWith(github.ref, 'refs/tags/v') && needs.ci-guard.outputs.verified == 'true'
+    needs: [image-publish, ci-guard]
     # Playwright does not support the Ubuntu 26.04 image behind ubuntu-latest.
     runs-on: ubuntu-24.04
     permissions:
@@ -538,7 +558,8 @@ jobs:
         run: python3 tests/dashboard_e2e.py
 
   release:
-    needs: [image-publish, image-verify]
+    if: startsWith(github.ref, 'refs/tags/v') && needs.ci-guard.outputs.verified == 'true'
+    needs: [image-publish, image-verify, ci-guard]
     runs-on: ubuntu-latest
     permissions:
       contents: write

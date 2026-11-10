@@ -1,5 +1,7 @@
 """CI routing, qualification and cache wiring regressions (standard library only)."""
+import contextlib
 import importlib.util
+import io
 import json
 import os
 from pathlib import Path
@@ -712,6 +714,416 @@ class TestProof(unittest.TestCase):
             with self.subTest(argv=argv):
                 with self.assertRaises(SystemExit):
                     proof.main(argv)
+
+
+REPO = "mahpate/Vlite"
+SHA = "0123456789abcdef" * 2 + "01234567"
+WORKFLOW_ID = 77
+RUNS = f"repos/{REPO}/actions/workflows/ci.yml/runs?head_sha={SHA}&per_page=100"
+GUARD_IF = "startsWith(github.ref, 'refs/tags/v') && needs.ci-guard.outputs.verified == 'true'"
+PUBLICATION_MARKERS = ("packages: write", "contents: write", "id-token: write", "push: true",
+                       "imagetools create", "gh release", "gh-action-pypi-publish")
+
+
+def ci_run(**overrides):
+    """A ci.yml run at SHA that passes rules 1-6 of the release guard."""
+    run = dict(id=5, run_attempt=1, workflow_id=WORKFLOW_ID, path=".github/workflows/ci.yml",
+               head_sha=SHA, event="workflow_dispatch", head_branch="release/0.7.4",
+               repository={"full_name": REPO}, head_repository={"full_name": REPO},
+               status="completed", conclusion="success",
+               html_url=f"https://github.com/{REPO}/actions/runs/5")
+    run.update(overrides)
+    return run
+
+
+def guard_jobs():
+    return qualified_jobs() + [dict(name="CI required", conclusion="success")]
+
+
+class Runaway(BaseException):
+    """A guard that would never stop; BaseException so that the guard cannot swallow it."""
+
+
+class FakeGitHub:
+    """GitHub API fakes on a fake clock. `listings` gives the runs per evaluation (the last repeats)."""
+
+    def __init__(self, listings, jobs=None, refetch=None, tags=None, cost=0, total=None):
+        self.listings, self.jobs, self.refetch = listings, jobs or {}, refetch or {}
+        self.tags, self.cost, self.total = tags or {}, cost, total
+        self.now, self.sleeps, self.calls, self.evaluations = 1000.0, [], [], 0
+        self.current = []
+
+    def clock(self):
+        return self.now
+
+    def sleep(self, seconds):
+        if seconds <= 0 or len(self.sleeps) > 1000:
+            raise Runaway(f"sleep({seconds}) after {len(self.sleeps)} sleeps")
+        self.sleeps.append((self.now, seconds))
+        self.now += seconds
+
+    def api(self, endpoint):
+        self.calls.append(endpoint)
+        self.now += self.cost
+        if endpoint == RUNS:
+            self.current = self.listings[min(self.evaluations, len(self.listings) - 1)]
+            self.evaluations += 1
+            total = len(self.current) if self.total is None else self.total
+            return [dict(total_count=total, workflow_runs=self.current)]
+        match = re.fullmatch(rf"repos/{REPO}/actions/runs/(\d+)/attempts/(\d+)/jobs\?per_page=100", endpoint)
+        if match:
+            jobs = self.jobs.get((int(match[1]), int(match[2])), guard_jobs())
+            return [dict(total_count=len(jobs), jobs=jobs[:20]), dict(total_count=len(jobs), jobs=jobs[20:])]
+        raise AssertionError(f"unexpected paginated endpoint {endpoint}")
+
+    def api_object(self, endpoint):
+        self.calls.append(endpoint)
+        self.now += self.cost
+        if endpoint == f"repos/{REPO}/actions/workflows/ci.yml":
+            return dict(id=WORKFLOW_ID, path=".github/workflows/ci.yml")
+        if endpoint.startswith(f"repos/{REPO}/commits/refs/tags/"):
+            return dict(sha=self.tags[endpoint.rsplit("/", 1)[1]])
+        match = re.fullmatch(rf"repos/{REPO}/actions/runs/(\d+)", endpoint)
+        if match:
+            run_id = int(match[1])
+            return self.refetch.get(run_id) or next(run for run in self.current if run["id"] == run_id)
+        raise AssertionError(f"unexpected endpoint {endpoint}")
+
+
+def flaky(call, errors):
+    """Raise each error in turn, then behave like `call`."""
+    errors = list(errors)
+
+    def wrapped(endpoint):
+        if errors:
+            raise errors.pop(0)
+        return call(endpoint)
+    return wrapped
+
+
+class ReleaseGuard(unittest.TestCase):
+    """scripts/ci_policy.py release-ci and the ci-guard jobs that gate every publication."""
+
+    def setUp(self):
+        directory = tempfile.TemporaryDirectory()
+        self.addCleanup(directory.cleanup)
+        self.output, self.summary = Path(directory.name) / "output", Path(directory.name) / "summary"
+        self.directory = Path(directory.name)
+
+    def guard(self, github, **env):
+        env = {key: value for key, value in (dict(
+            GITHUB_REPOSITORY=REPO, GITHUB_SHA=SHA, GITHUB_REF="refs/tags/v0.7.4", GITHUB_REF_NAME="v0.7.4",
+            GITHUB_OUTPUT=str(self.output), GITHUB_STEP_SUMMARY=str(self.summary)
+        ) | env).items() if value is not None}
+        self.output.unlink(missing_ok=True)
+        self.summary.unlink(missing_ok=True)
+        stdout, stderr = io.StringIO(), io.StringIO()
+        with contextlib.redirect_stdout(stdout), contextlib.redirect_stderr(stderr):
+            code = policy.release_ci(env, github.api, github.api_object, github.sleep, github.clock)
+        output = self.output.read_text() if self.output.is_file() else ""
+        summary = self.summary.read_text() if self.summary.is_file() else ""
+        if code:
+            self.assertNotIn("verified=true", output)
+        return code, output, summary, stderr.getvalue()
+
+    def assert_failed(self, github, **env):
+        code, output, summary, stderr = self.guard(github, **env)
+        self.assertEqual(code, 1)
+        self.assertNotIn("verified=true", output)
+        return summary + stderr
+
+    def report(self, github, **env):
+        code, output, summary, _ = self.guard(github, **(dict(CI_GUARD_MODE="report", GITHUB_REF="refs/heads/release") | env))
+        self.assertEqual(code, 0)
+        self.assertEqual(output, "verified=false\n")
+        self.assertEqual(github.sleeps, [])
+        return summary
+
+    def test_b01_a_qualified_dispatch_or_main_push_passes_at_once(self):
+        for run in (ci_run(), ci_run(head_branch="v0.7.4"), ci_run(event="push", head_branch="main")):
+            with self.subTest(event=run["event"], ref=run["head_branch"]):
+                github = FakeGitHub([[run]])
+                code, output, summary, _ = self.guard(github, CI_GUARD_MODE="enforce")
+                self.assertEqual((code, output), (0, "verified=true\n"))
+                self.assertEqual(github.sleeps, [])
+                self.assertIn(run["html_url"], summary)
+                self.assertIn(f"repos/{REPO}/actions/runs/5/attempts/1/jobs?per_page=100", github.calls)
+                self.assertIn(f"repos/{REPO}/actions/runs/5", github.calls)
+
+    def test_b02_a_missing_run_waits_for_the_grace_period_then_fails_with_the_remedy(self):
+        github = FakeGitHub([[]])
+        message = self.assert_failed(github)
+        self.assertEqual(github.now - 1000, 15 * 60)
+        self.assertEqual(github.evaluations, 16)
+        self.assertTrue(all(seconds <= 60 for _, seconds in github.sleeps))
+        self.assertIn("gh workflow run ci.yml --ref v0.7.4 -f docker=true", message)
+        self.assertIn("Re-run failed jobs", message)
+        github = FakeGitHub([[]])
+        self.assert_failed(github, CI_MISSING_GRACE_MINUTES="0")
+        self.assertEqual((github.sleeps, github.evaluations), ([], 1))
+        self.assertIn("verdict: missing", self.report(FakeGitHub([[]])))
+
+    def test_b03_a_pending_run_is_awaited_within_the_bound(self):
+        github = FakeGitHub([[ci_run(status="queued", conclusion=None)],
+                             [ci_run(status="in_progress", conclusion=None)], [ci_run()]])
+        code, output, _, _ = self.guard(github)
+        self.assertEqual((code, output), (0, "verified=true\n"))
+        self.assertEqual([seconds for _, seconds in github.sleeps], [60, 60])
+        for wait, cost in ((30, 0), (1, 7), (3, 13)):
+            with self.subTest(wait=wait, cost=cost):
+                github = FakeGitHub([[ci_run(status="in_progress", conclusion=None)]], cost=cost)
+                message = self.assert_failed(github, CI_WAIT_MINUTES=str(wait), CI_MISSING_GRACE_MINUTES="0")
+                deadline = 1000 + wait * 60
+                self.assertTrue(all(at + seconds <= deadline for at, seconds in github.sleeps))
+                self.assertGreaterEqual(github.now, deadline)
+                self.assertLess(github.now, deadline + 4 * cost + 1)
+                self.assertIn("status in_progress", message)
+        self.assertIn("verdict: pending", self.report(FakeGitHub([[ci_run(status="waiting", conclusion=None)]])))
+
+    def test_b04_failed_or_partial_runs_are_rejected(self):
+        for conclusion in ("failure", "cancelled", "skipped", "timed_out", "startup_failure", None):
+            with self.subTest(conclusion=conclusion):
+                github = FakeGitHub([[ci_run(conclusion=conclusion)]])
+                self.assertIn(f"conclusion {conclusion or 'null'}",
+                              self.assert_failed(github, CI_MISSING_GRACE_MINUTES="0"))
+                self.assertIn("verdict: rejected", self.report(FakeGitHub([[ci_run(conclusion=conclusion)]])))
+        full = guard_jobs()
+        for name, jobs in (
+            ("docker skipped", [dict(job, conclusion="skipped") if job["name"] == "docker" else job for job in full]),
+            ("docs-only", [dict(name="lint", conclusion="success"), dict(name="CI required", conclusion="success")]),
+            ("no CI required", [job for job in full if job["name"] != "CI required"]),
+            ("CI required failed", full[:-1] + [dict(name="CI required", conclusion="failure")]),
+        ):
+            with self.subTest(jobs=name):
+                github = FakeGitHub([[ci_run()]], jobs={(5, 1): jobs})
+                self.assertIn("partial CI (docs-only or Docker skipped)",
+                              self.assert_failed(github, CI_MISSING_GRACE_MINUTES="0"))
+
+    def test_b05_untrusted_or_unrelated_runs_never_pass(self):
+        for run, verdict, reason in (
+            (ci_run(event="pull_request"), "rejected", "event pull_request"),
+            (ci_run(head_repository={"full_name": "fork/Vlite"}), "rejected", "foreign repository"),
+            (ci_run(head_repository=None), "rejected", "foreign repository"),
+            (ci_run(repository={"full_name": "other/Vlite"}), "rejected", "foreign repository"),
+            (ci_run(workflow_id=78), "missing", None),
+            (ci_run(path=".github/workflows/release.yml"), "missing", None),
+            (ci_run(head_sha="f" * 40), "missing", None),
+        ):
+            with self.subTest(run=reason or verdict):
+                github = FakeGitHub([[run]])
+                message = self.assert_failed(github, CI_MISSING_GRACE_MINUTES="0")
+                if reason:
+                    self.assertIn(reason, message)
+                summary = self.report(FakeGitHub([[run]]))
+                self.assertIn(f"verdict: {verdict}", summary)
+                self.assertNotIn("verdict: qualified", summary)
+                self.assertFalse(any("/jobs" in call for call in github.calls))
+
+    def test_b06_only_the_latest_attempt_counts(self):
+        # Attempt 1 succeeded; attempt 2 is the latest and is still running or failed.
+        github = FakeGitHub([[ci_run(run_attempt=2, status="in_progress", conclusion=None)]])
+        self.assertIn("verdict: pending", self.report(github))
+        self.assertFalse(any("/attempts/" in call for call in github.calls))
+        self.assertIn("conclusion failure", self.assert_failed(
+            FakeGitHub([[ci_run(run_attempt=2, conclusion="failure")]]), CI_MISSING_GRACE_MINUTES="0"))
+        # A rerun starts between the jobs fetch and the re-fetch: re-evaluate on the new attempt.
+        github = FakeGitHub([[ci_run()], [ci_run(run_attempt=2)]],
+                            refetch={5: ci_run(run_attempt=2, status="queued", conclusion=None)})
+        self.assertIn("verdict: pending", self.report(github))
+        github = FakeGitHub([[ci_run()], [ci_run(run_attempt=2)]],
+                            refetch={5: ci_run(run_attempt=2, status="queued", conclusion=None)})
+        original = github.api_object
+
+        def refetch_once(endpoint):
+            result = original(endpoint)
+            if endpoint == f"repos/{REPO}/actions/runs/5":
+                github.refetch = {}
+            return result
+        github.api_object = refetch_once
+        code, output, _, _ = self.guard(github)
+        self.assertEqual((code, output), (0, "verified=true\n"))
+        self.assertEqual(github.evaluations, 2)
+        self.assertIn(f"repos/{REPO}/actions/runs/5/attempts/2/jobs?per_page=100", github.calls)
+        # A newer attempt that already finished green still needs its own jobs checked.
+        github = FakeGitHub([[ci_run()]], refetch={5: ci_run(run_attempt=2)})
+        self.assertIn("verdict: pending", self.report(github))
+        self.assertNotIn(f"repos/{REPO}/actions/runs/5/attempts/2/jobs?per_page=100", github.calls)
+        github = FakeGitHub([[ci_run()]], refetch={5: ci_run(run_attempt=2, status="in_progress")})
+        self.assertIn("rerun", self.assert_failed(github, CI_WAIT_MINUTES="2", CI_MISSING_GRACE_MINUTES="0"))
+
+    def test_b07_api_failures_are_retried_three_times_then_fail_closed(self):
+        timeout = policy.subprocess.TimeoutExpired(["gh", "api"], 60)
+        for errors in ([RuntimeError("HTTP 502")] * 2, [timeout, timeout]):
+            with self.subTest(errors=errors):
+                github = FakeGitHub([[ci_run()]])
+                github.api_object = flaky(github.api_object, errors)
+                code, output, _, _ = self.guard(github)
+                self.assertEqual((code, output), (0, "verified=true\n"))
+                self.assertEqual([seconds for _, seconds in github.sleeps], [5, 15])
+        for errors in ([RuntimeError("HTTP 401")] * 3, [timeout] * 3, [ValueError("Expecting value")] * 3):
+            with self.subTest(errors=errors):
+                github = FakeGitHub([[ci_run()]])
+                github.api = flaky(github.api, errors)
+                self.assertIn("error", self.assert_failed(github))
+                self.assertEqual([seconds for _, seconds in github.sleeps], [5, 15])
+        broken = (
+            ("malformed JSON", dict(api_object=lambda endpoint: "<html>")),
+            ("malformed pages", dict(api=lambda endpoint: {"message": "Not Found"})),
+            ("missing key", dict(listings=[[{key: value for key, value in ci_run().items() if key != "status"}]])),
+            ("truncated pagination", dict(total=2)),
+        )
+        for name, fault in broken:
+            for mode in ("enforce", "report"):
+                with self.subTest(fault=name, mode=mode):
+                    github = FakeGitHub(fault.get("listings", [[ci_run()]]), total=fault.get("total"))
+                    for attribute in ("api", "api_object"):
+                        if attribute in fault:
+                            setattr(github, attribute, fault[attribute])
+                    code, output, summary, stderr = self.guard(
+                        github, CI_GUARD_MODE=mode, GITHUB_REF="refs/heads/release")
+                    self.assertEqual((code, output), (1, "verified=false\n"))
+                    self.assertIn("verdict: error", summary)
+                    self.assertIn("verdict: error", stderr)
+
+    def test_b07_the_real_gh_wrapper_is_bounded(self):
+        done = policy.subprocess.CompletedProcess(["gh"], 0, stdout='[{"total_count": 0}]', stderr="")
+        with patch.object(policy.subprocess, "run", return_value=done) as run:
+            self.assertEqual(policy.gh_slurp(RUNS), [{"total_count": 0}])
+            self.assertEqual(run.call_args.args[0], ["gh", "api", "--paginate", "--slurp", RUNS])
+            self.assertEqual(run.call_args.kwargs["timeout"], 60)
+            policy.gh_object(f"repos/{REPO}/actions/runs/5")
+            self.assertEqual(run.call_args.args[0], ["gh", "api", f"repos/{REPO}/actions/runs/5"])
+            self.assertEqual(run.call_args.kwargs["timeout"], 60)
+        for result in (policy.subprocess.TimeoutExpired(["gh"], 60),
+                       policy.subprocess.CompletedProcess(["gh"], 1, stdout="", stderr="HTTP 404"),
+                       policy.subprocess.CompletedProcess(["gh"], 0, stdout="not json", stderr="")):
+            with self.subTest(result=result), patch.object(policy.subprocess, "run", side_effect=[result]):
+                with self.assertRaises(Exception):
+                    policy.gh_object("repos/x")
+        # Wired through the guard, a timeout is one failed try and three of them fail closed.
+        timeout = policy.subprocess.TimeoutExpired(["gh"], 60)
+        sleeps = []
+        with patch.object(policy.subprocess, "run", side_effect=[timeout] * 3) as run:
+            env = dict(GITHUB_REPOSITORY=REPO, GITHUB_SHA=SHA, GITHUB_REF="refs/tags/v0.7.4",
+                       GITHUB_OUTPUT=str(self.output), GITHUB_STEP_SUMMARY=str(self.summary))
+            with contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(io.StringIO()):
+                code = policy.release_ci(env, policy.gh_slurp, policy.gh_object, sleeps.append, lambda: 0)
+        self.assertEqual((code, run.call_count, sleeps), (1, 3, [5, 15]))
+        self.assertEqual(self.output.read_text(), "verified=false\n")
+
+    def test_b07_report_mode_fails_when_its_summary_cannot_be_written(self):
+        github = FakeGitHub([[ci_run()]])
+        code, output, _, stderr = self.guard(github, CI_GUARD_MODE="report", GITHUB_REF="refs/heads/release",
+                                             GITHUB_STEP_SUMMARY=str(self.directory))
+        self.assertEqual((code, output), (1, "verified=false\n"))
+        self.assertIn("verdict: error", stderr)
+
+    def test_b08_modes_and_wait_bounds_are_validated_before_any_api_call(self):
+        for env in (dict(CI_GUARD_MODE="Enforce"), dict(CI_GUARD_MODE="off"), dict(CI_GUARD_MODE="publish"),
+                    dict(CI_GUARD_MODE="report", GITHUB_REF="refs/tags/v1.2.3"),
+                    dict(CI_WAIT_MINUTES="-1"), dict(CI_WAIT_MINUTES="241"), dict(CI_WAIT_MINUTES="abc"),
+                    dict(CI_WAIT_MINUTES="1.5"), dict(CI_WAIT_MINUTES=" 5"), dict(CI_MISSING_GRACE_MINUTES="x"),
+                    dict(CI_WAIT_MINUTES="20", CI_MISSING_GRACE_MINUTES="30"),
+                    dict(CI_WAIT_MINUTES="0", CI_MISSING_GRACE_MINUTES="1")):
+            with self.subTest(env=env):
+                github = FakeGitHub([[ci_run()]])
+                self.assert_failed(github, **env)
+                self.assertEqual(github.calls, [])
+        for env in (dict(CI_GUARD_MODE=None), dict(CI_GUARD_MODE="enforce"),
+                    dict(CI_WAIT_MINUTES="240", CI_MISSING_GRACE_MINUTES="240"),
+                    dict(CI_WAIT_MINUTES="0", CI_MISSING_GRACE_MINUTES="0")):
+            with self.subTest(env=env):
+                code, output, _, _ = self.guard(FakeGitHub([[ci_run()]]), **env)
+                self.assertEqual((code, output), (0, "verified=true\n"))
+        summary = self.report(FakeGitHub([[ci_run()]]))
+        self.assertIn("verdict: qualified", summary)
+
+    def test_b09_the_tag_is_resolved_to_its_commit(self):
+        endpoint = f"repos/{REPO}/commits/refs/tags/v0.7.4"
+        for ci_sha in ("", None, SHA):
+            with self.subTest(ci_sha=ci_sha):
+                github = FakeGitHub([[ci_run()]], tags={"v0.7.4": SHA})
+                code, output, _, _ = self.guard(github, CI_TAG="v0.7.4", CI_SHA=ci_sha, GITHUB_SHA="e" * 40)
+                self.assertEqual((code, output), (0, "verified=true\n"))
+                self.assertEqual(github.calls[0], endpoint)
+                self.assertIn(RUNS, github.calls)
+        github = FakeGitHub([[ci_run()]], tags={"v0.7.4": SHA})
+        self.assertIn("v0.7.4", self.assert_failed(github, CI_TAG="v0.7.4", CI_SHA="e" * 40))
+        self.assertEqual(github.calls, [endpoint])
+        for tag in ("0.7.4", "v", "va", "v1;rm", "refs/tags/v1", "v1 ", "v1/../x"):
+            with self.subTest(tag=tag):
+                github = FakeGitHub([[ci_run()]], tags={tag: SHA})
+                self.assert_failed(github, CI_TAG=tag)
+                self.assertEqual(github.calls, [])
+        for sha in ("abc", SHA.upper(), SHA[:-1], SHA + "0", "g" * 40, ""):
+            with self.subTest(sha=sha):
+                github = FakeGitHub([[ci_run()]])
+                self.assertIn("40 lowercase hex", self.assert_failed(github, GITHUB_SHA=sha))
+                self.assertEqual(github.calls, [])
+                github = FakeGitHub([[ci_run()]], tags={"v0.7.4": sha})
+                self.assertIn("40 lowercase hex", self.assert_failed(github, CI_TAG="v0.7.4"))
+                self.assertEqual(github.calls, [endpoint])
+
+    def jobs(self, workflow):
+        text = (ROOT / ".github/workflows" / workflow).read_text(encoding="utf-8")
+        header, body = text.split("\njobs:\n", 1)
+        parts = re.split(r"^  ([a-z0-9-]+):\n", body, flags=re.M)
+        return text, header, dict(zip(parts[1::2], parts[2::2]))
+
+    def test_b10_every_publication_waits_for_an_enforced_guard(self):
+        gated = {"release.yml": {"image-build", "image-publish", "image-verify", "release"},
+                 "pypi.yml": {"publish"}}
+        for workflow, expected in gated.items():
+            text, _, jobs = self.jobs(workflow)
+            self.assertNotIn("continue-on-error", text)
+            publishing = {name for name, block in jobs.items()
+                          if any(marker in block for marker in PUBLICATION_MARKERS)}
+            self.assertLessEqual(publishing, expected, workflow)
+            self.assertNotIn("ci-guard", publishing)
+            for name in expected:
+                with self.subTest(workflow=workflow, job=name):
+                    block = jobs[name]
+                    needs = re.search(r"^    needs: (.+)$", block, re.M)[1]
+                    self.assertIn("ci-guard", re.findall(r"[a-z0-9-]+", needs))
+                    condition = re.search(r"^    if: (.+)$", block, re.M)[1]
+                    self.assertIn("needs.ci-guard.outputs.verified == 'true'", condition)
+            guard = jobs["ci-guard"]
+            for line in ("      contents: read\n", "      actions: read\n",
+                         "      verified: ${{ steps.guard.outputs.verified }}\n",
+                         "      - id: guard\n", "        run: python3 scripts/ci_policy.py release-ci\n"):
+                self.assertIn(line, guard)
+            self.assertRegex(guard, r"\n    timeout-minutes: \d+\n")
+            self.assertNotIn("id-token", guard)
+            self.assertNotIn("write", guard)
+        text, header, jobs = self.jobs("release.yml")
+        self.assertIn("\n  workflow_dispatch:\n\npermissions:", header)
+        self.assertNotIn("inputs:", header)
+        self.assertIn("    needs: identity\n", jobs["ci-guard"])
+        self.assertIn("    timeout-minutes: 150\n", jobs["ci-guard"])
+        self.assertIn("CI_GUARD_MODE: ${{ startsWith(github.ref, 'refs/tags/v') && 'enforce' || 'report' }}\n",
+                      jobs["ci-guard"])
+        for name in gated["release.yml"]:
+            self.assertIn(f"    if: {GUARD_IF}\n", jobs[name])
+        for name in ("identity", "clients", "native", "linux-arm64", "manylinux", "image-test"):
+            self.assertNotIn("ci-guard", jobs[name])
+        for kept in ("python tests/release_assets.py", "python tests/wheel_platform.py",
+                     "bindings/release_assets.py", "tests/dashboard_e2e.py"):
+            self.assertIn(kept, text)
+        text, _, jobs = self.jobs("pypi.yml")
+        condition = ("github.event_name == 'workflow_dispatch' || (github.event.workflow_run.conclusion == "
+                     "'success' && startsWith(github.event.workflow_run.head_branch, 'v'))")
+        self.assertIn(f"    if: {condition}\n", jobs["ci-guard"])
+        self.assertIn(f"    if: ({condition}) && needs.ci-guard.outputs.verified == 'true'\n", jobs["publish"])
+        self.assertIn("    timeout-minutes: 15\n", jobs["ci-guard"])
+        for line in ("CI_GUARD_MODE: enforce", "CI_WAIT_MINUTES: 0", "CI_MISSING_GRACE_MINUTES: 0",
+                     "CI_TAG: ${{ github.event.inputs.tag || github.event.workflow_run.head_branch }}",
+                     "CI_SHA: ${{ github.event.workflow_run.head_sha }}"):
+            self.assertIn(f"          {line}\n", jobs["ci-guard"])
+        self.assertIn("      id-token: write\n", jobs["publish"])
+        source = (ROOT / "scripts/ci_policy.py").read_text(encoding="utf-8")
+        table = source.rsplit("\n", 2)[-2]
+        for entry in ('"route": route', '"image-ci": image_ci', '"release-ci": '):
+            self.assertIn(entry, table)
 
 
 if __name__ == "__main__":

@@ -203,6 +203,30 @@ One-time publisher configuration (only if setting up a new publisher):
 4. Run **Actions → Publish to PyPI → Run workflow** with an existing release
    tag, or push the next release tag.
 
+### Release CI guard
+
+GHCR images, the GitHub release and the PyPI upload all need a successful full
+`ci.yml` run at the exact tagged commit: a `push` or `workflow_dispatch` run in
+this repository whose latest attempt passed, with Docker and the full matrix.
+The `ci-guard` jobs of `release.yml` and `pypi.yml` check this
+(`scripts/ci_policy.py release-ci`). Recommended order:
+
+1. On the release branch at the release commit, run
+   `gh workflow run ci.yml --ref <branch> -f docker=true`.
+2. Optionally dispatch `release.yml` on the branch. The guard only reports its
+   verdict, and nothing publishes.
+3. Push the tag `vX.Y.Z` at that commit. Publication proceeds once the run
+   passes; PyPI checks again without waiting.
+
+Bounds: the guard waits up to 120 minutes for a pending run and 15 minutes for
+a run to appear. Each GitHub API call times out after 60 s and is tried 3
+times; then the guard fails closed.
+
+If the tag was pushed first and the guard failed, do not re-tag. Run
+`gh workflow run ci.yml --ref vX.Y.Z -f docker=true` and, once it is green, use
+**Re-run failed jobs** on the release run. A failed, cancelled or partial CI run
+(docs-only, or Docker off) needs the same remedy.
+
 ### npm
 
 Native npm packages need platform-specific package names and a public loader to
