@@ -2,7 +2,7 @@
 
 Agent memory lets an AI agent keep what it learns between sessions. A caller remembers items in an exact scope, recalls them later with bounded, ranked retrieval, consolidates them into summaries and forgets them. It is built from a property graph and an optional evidence collection in the same database file, and it is off unless an operator provides a bindings file.
 
-This guide covers VLite 0.7.3: what the server serves, how to use it from each interface and what it refuses. The reference text is in [Agent memory (REST)](API.md#agent-memory-rest), [Memory-bound resources](SECURITY.md#memory-bound-resources) and the [serving contract](projects/roadmap/serving-memory-contract.md). The shell examples are POSIX `sh` (bash, zsh, Git Bash or WSL): in PowerShell `$VLITE_URL` is empty, a backslash does not continue a line and `EXPIRES=$((...))` is not valid.
+This guide covers VLite 0.7.4: what the server serves, how to use it from each interface and what it refuses. The reference text is in [Agent memory (REST)](API.md#agent-memory-rest), [Memory-bound resources](SECURITY.md#memory-bound-resources) and the [serving contract](projects/roadmap/serving-memory-contract.md). The shell examples are POSIX `sh` (bash, zsh, Git Bash or WSL): in PowerShell `$VLITE_URL` is empty, a backslash does not continue a line and `EXPIRES=$((...))` is not valid.
 
 ## Concepts
 
@@ -15,7 +15,7 @@ This guide covers VLite 0.7.3: what the server serves, how to use it from each i
 
 ## What is served
 
-| Route (all `POST`, under `/v1/memory/{binding}`) | Status in 0.7.3 |
+| Route (all `POST`, under `/v1/memory/{binding}`) | Status in 0.7.4 |
 |---|---|
 | `/remember` | served: `entity` and `episodic` items |
 | `/recall` | served: bounded, exact retrieval with `weighted`, `exact` and `mmr` selection |

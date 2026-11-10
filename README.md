@@ -35,7 +35,7 @@ service to operate.
   vectors, hybrid search, facets, geo filters and recommendations.
 - **Server.** Authenticated REST with OpenAPI, optional gRPC and TLS,
   key-value operations, opt-in agent memory with read-only shared scopes and
-  restart-free grant reload, managed embedding and ranking providers, Prometheus
+  grant-change preflight, restart-free reload and status, managed embedding and ranking providers, Prometheus
   metrics, non-root Docker images and a Helm chart.
 - **Security.** One request guard covers every REST, gRPC and webhook path that
   names a collection, graph, job or tenant, and agent-memory resources stay hidden
@@ -200,7 +200,7 @@ Prebuilt packages: [PyPI](docs/INSTALL.md#pypi) and [release assets](docs/INSTAL
 | Webhooks | [WEBHOOKS](docs/WEBHOOKS.md) |
 | Property graphs, expiry and algorithms | [GRAPH](docs/GRAPH.md) |
 | Benchmarks | [Methodology](benchmarks/README.md), [results](benchmarks/RESULTS.md) |
-| Upgrade notes | [Release notes](docs/RELEASE-0.7.3.md) |
+| Upgrade notes | [Release notes](docs/RELEASE-0.7.4.md) |
 
 ## Status and limitations
 
