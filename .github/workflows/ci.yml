@@ -403,6 +403,7 @@ jobs:
   docker:
     needs: changes
     if: needs.changes.outputs.docker == 'true'
+    # Playwright does not support the Ubuntu 26.04 image behind ubuntu-latest.
     runs-on: ubuntu-24.04
     env:
       VLITE_IMAGE_TESTS: "0" # The tests target below always runs the full suite.
