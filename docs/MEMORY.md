@@ -110,17 +110,38 @@ without restarting:
 
 1. Raise `generation` for each changed binding, keeping unchanged generations.
    Write a complete new file privately, then replace the configured file
-   atomically so reload cannot read a half-written file.
-2. Send the admin request (no body or file path is needed):
+   atomically so preflight and reload cannot read a half-written file.
+2. Preflight with the admin token (no body or file path is needed):
+
+   ```sh
+   curl -sS -X POST "$VLITE_URL/v1/admin/memory/bindings/preflight" \
+     -H "Authorization: Bearer $VLITE_ADMIN_TOKEN"
+   ```
+
+   Check `outcome`, not just HTTP 200: `reload` or `unchanged` passes the
+   current checks; other outcomes explain why reload would refuse the file.
+   Preflight is read-only and advisory. It never takes the reload lock and
+   cannot predict concurrent reloads, write failures or intervening changes;
+   reload rereads and rechecks.
+3. Reload:
 
    ```sh
    curl -sS -X POST "$VLITE_URL/v1/admin/memory/bindings/reload" \
      -H "Authorization: Bearer $VLITE_ADMIN_TOKEN"
    ```
 
-3. Confirm `"drained": true` in the result. If it is false, the grants are
-   applied but requests using older grants may still finish; send the request
-   again to wait again. An unchanged file is rechecked and reports `changed: 0`.
+   An unchanged file is rechecked and reports `changed: 0`.
+4. After reload returns successfully, poll status until `"file": "agrees"`
+   and `"drained": true`:
+
+   ```sh
+   curl -sS "$VLITE_URL/v1/admin/memory/bindings/status" \
+     -H "Authorization: Bearer $VLITE_ADMIN_TOKEN"
+   ```
+
+   If `drained` is false, the grants are applied but requests using older
+   grants may still finish. Status changes nothing and takes no database or
+   reload lock; its snapshot may lag a concurrent reload by one call.
 
 New, removed, renamed or retired bindings, receipt windows, tenant, state,
 graph and evidence changes need a restart and must satisfy the existing

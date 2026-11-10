@@ -118,6 +118,18 @@ The admin-only `POST /v1/admin/memory/bindings/reload` rereads the configured
 file and applies only grants and their higher generations. New or retired
 bindings, receipt windows, tenant, state, graph and evidence changes still
 need a restart. Reload is refused after a gRPC router is built.
+The admin-only `POST /v1/admin/memory/bindings/preflight` is a read-only,
+advisory check; reload rereads and revalidates. It holds a shared database
+lock, so writers can queue behind it, but never takes the reload lock.
+Admin-only `GET /v1/admin/memory/bindings/status` takes neither lock and
+reports an advisory snapshot; after reload, poll until `file` is `agrees`
+and `drained` is true. Neither handler provisions, writes, installs or drains.
+Responses name no binding, tenant, principal, scope, graph, collection or path;
+refusal codes and messages are reload's fixed constants. These handlers add
+no audit event or log line of their own. This is not a promise of no logging:
+ordinary request logging and metrics still apply, and non-disclosure alone
+does not prove an absence of logging.
+
 Each REST request uses one grants version, including its blocking and commit
 workers. New grants are served only after all changed records are durable on
 a writable database. Until older requests finish, reads and raw writes
