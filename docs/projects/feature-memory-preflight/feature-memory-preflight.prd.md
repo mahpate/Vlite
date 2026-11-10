@@ -1,6 +1,6 @@
 ---
 goal: VLite MemoryAI grant-change preflight and status, and a release guard that requires successful full CI on the exact commit before any publication
-version: 1.7
+version: 1.8
 date_created: 2026-11-09
 last_updated: 2026-11-09
 owner: VLite maintainers (mahpate/Vlite)
@@ -427,7 +427,7 @@ Behaviour of the edited workflow:
     - the manifest's sha256 equals its `SHA256SUMS` line;
     - `version` equals the tag without `v`;
     - the default `source_commit` equals the tag's commit (and `CI_SHA` when set);
-    - every asset is unique and listed in `SHA256SUMS` with the same hash.
+    - every asset is unique and listed in `SHA256SUMS` with the same hash. (v1.8: the asset must be listed, and its `sha256` must be a 64-character lowercase hex string. An omitted or null hash never matches a missing line.)
   - The tag's commit and every distinct effective wheel source (`asset.source_commit`, else the default) must each qualify under §3.5.1. A documented corrective packaging build is still supported, but only when its own commit qualifies.
   - On a pass, the guard also outputs `manifest_sha256`. `publish` requires the downloaded manifest to have that hash, and every downloaded wheel to match both `SHA256SUMS` and its manifest entry.
   - For PyPI, G4's "exact published commit" means every wheel source commit. `release.yml` is unchanged: it builds at the guarded commit.
@@ -439,6 +439,7 @@ Behaviour of the edited workflow:
 - **Malformed fields.** Malformed pages and count mismatches are retried. A well-formed response missing a run, job or re-fetch field is not retried and fails closed at once.
 - **Freshness.**
   - Qualification holds at the instant of the successful guard evaluation.
+  - (v1.8) With several sources (the tag's commit and each corrective wheel source), the guard checks them one after another. That is a sequence of observations, not an atomic common-time snapshot. A source that was green when checked may change while a later one is checked, and the guard does not check it again. The final output does not claim all sources are green at that moment. This is the accepted one-shot design; no final re-check is added.
   - A CI rerun started afterwards does not revoke a guard that already passed (one-shot design, RD-013). G4/RD-011 "latest attempt" applies at that instant.
   - GitHub reruns and registry pushes cannot be made atomic.
 
@@ -856,3 +857,4 @@ Engineering effort is the human-equivalent design, coding, testing and review ti
 | 1.5 | 2026-11-09 | EPIC-003 controls: preflight and status buttons, handlers and INVENTORY entries; TEST-A15 Playwright steps after TEST-015; CONSOLE-ADMIN reload row folded within its 2,500-word budget. `admin_route_coverage.py`, `dashboard_feature_coverage.py` and `content_budget.py` pass; TEST-A15 runs in CI (no local Playwright driver). Recapture pending. |
 | 1.6 | 2026-11-09 | ITEM-011: `dashboard-capture.yml` run 42771433763 at `34c1126a` (manifest `source_git_sha` `34c1126a…`, `source_git_dirty` false) installed into `site/assets/dashboard/`; `site/index.html` fingerprints refreshed. The capture hashes only dashboard sources, the theme and shared assets, which EPIC-002/004 do not touch. `dashboard_tours.py site` hash checks pass locally after the docs build; its browser walk runs in Dashboard UI. |
 | 1.7 | 2026-11-09 | EPIC-002 docs result `f90c3486` integrated (ITEM-006–008 Done); status's 503 `busy` from shared admission is documented. Server review P2-2–P2-4, L1, L2: P2-2 was stale, because capture run 42771433763 at `34c1126a` and Dashboard UI run 42771908341 at `6386bba1` both passed. §3.4 now names the generic observers that record every request (caller's own credential ID, `credential_denied`, `internal_error`), and REQ-A03, SEC-002 and AC-004 are qualified to match. TEST-A09 gains an isolated observer test with a unique sentinel per dimension, which kills the helper-log mutant. TEST-A06 gains a held-reader case, which kills the exclusive-lock mutant. TEST-A07 gains the poisoned-lock 500. TEST-A13 requires the exact documented operations and the router's answers, which kills the parameterized-route mutant. |
+| 1.8 | 2026-11-09 | Server review P2-1: the dashboard preflight request passes `{data:false}`, with a handler regression and a transport regression (200/500/503), and a new recapture follows. EPIC-004 delta review: F1, so a wheel absent from `SHA256SUMS` with an omitted or null hash no longer passes, and its hash must be lowercase SHA-256 hex. F2, so TEST-B12's other commit has hex letters and an upper-case source is refused before any CI lookup. Every malformed case asserts exactly `verified=false` with no `manifest_sha256`. Multi-source freshness is described as sequential observations (§3.5.5, `docs/INSTALL.md`). |

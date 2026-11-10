@@ -232,8 +232,11 @@ wheel's source commit (its own `source_commit` or the default) needs its own
 qualifying CI run. A corrective packaging build therefore needs CI at its
 commit. The upload accepts only wheels listed in that exact manifest.
 
-Qualification holds at the instant the guard passes. A CI rerun started
-afterwards does not revoke it; the release run continues.
+Each commit qualifies when the guard checks it. With several wheel sources, the
+checks run one after another, not as one snapshot: an earlier commit's CI can
+change while a later one is checked, and the guard does not check it again. A
+CI rerun started afterwards does not revoke the guard; the release run
+continues.
 
 If the tag was pushed first and the guard failed, do not re-tag. Run
 `gh workflow run ci.yml --ref vX.Y.Z -f docker=true` and, once it is green, use

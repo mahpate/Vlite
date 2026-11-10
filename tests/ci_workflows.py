@@ -802,7 +802,8 @@ def flaky(call, errors):
     return wrapped
 
 
-OTHER = "1" * 40
+# Hex letters, so that upper-casing it changes it (TEST-B12 rejects the upper-case form).
+OTHER = "abcdef0123" * 4
 WHEEL = "vlite_client-0.7.4-py3-none-any.whl"
 
 
@@ -1316,6 +1317,16 @@ class ReleaseGuard(unittest.TestCase):
             ("default source is not the tag commit", dict(manifest=good | dict(source_commit=OTHER))),
             ("default source missing", dict(manifest={k: v for k, v in good.items() if k != "source_commit"})),
             ("asset hash mismatch", dict(manifest=good | dict(assets=[wheel | dict(sha256="0" * 64)]))),
+            ("hash omitted, wheel not in SHA256SUMS",
+             dict(sums=lambda lines: lines[1:],
+                  manifest=good | dict(assets=[{k: v for k, v in wheel.items() if k != "sha256"}]))),
+            ("hash null, wheel not in SHA256SUMS",
+             dict(sums=lambda lines: lines[1:], manifest=good | dict(assets=[wheel | dict(sha256=None)]))),
+            ("hash omitted, wheel in SHA256SUMS",
+             dict(manifest=good | dict(assets=[{k: v for k, v in wheel.items() if k != "sha256"}]))),
+            ("hash not a string", dict(manifest=good | dict(assets=[wheel | dict(sha256=12)]))),
+            ("upper-case hash", dict(sums=lambda lines: [lines[0].upper().replace(WHEEL.upper(), WHEEL)] + lines[1:],
+                                     manifest=good | dict(assets=[wheel | dict(sha256=wheel["sha256"].upper())]))),
             ("malformed asset source", dict(manifest=good | dict(assets=[wheel | dict(source_commit="abc")]))),
             ("upper-case asset source", dict(manifest=good | dict(assets=[wheel | dict(source_commit=OTHER.upper())]))),
             ("repeated asset", dict(manifest=good | dict(assets=[wheel, wheel]))),
@@ -1329,7 +1340,13 @@ class ReleaseGuard(unittest.TestCase):
                 folder = self.directory / name.replace(" ", "-")
                 release_files(folder, [wheel], **fault)
                 github = FakeGitHub([[ci_run()]], tags={"v0.7.4": SHA})
-                self.assertIn("verdict: error", self.assert_failed(github, CI_MANIFEST_DIR=str(folder), **env))
+                code, output, summary, stderr = self.guard(github, CI_MANIFEST_DIR=str(folder), **env)
+                # Exactly the denial: no manifest digest is published for a manifest the guard refused,
+                # and it is refused before any source commit's CI is looked up.
+                self.assertEqual((code, output), (1, "verified=false\n"))
+                self.assertIn("verdict: error", summary + stderr)
+                self.assertFalse([call for call in github.calls if "actions/workflows/ci.yml/runs" in call],
+                                 github.calls)
         folder = self.directory / "json"
         release_files(folder, [wheel])
         (folder / "release-manifest.json").write_text("{not json", encoding="utf-8")

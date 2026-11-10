@@ -143,6 +143,7 @@ def route():
 CI_PATH = ".github/workflows/ci.yml"
 RELEASE_TAG = re.compile(r"v[0-9][0-9A-Za-z.+-]*")
 COMMIT_SHA = re.compile(r"[0-9a-f]{40}")
+SHA256_HEX = re.compile(r"[0-9a-f]{64}")
 GH_TIMEOUT_SECONDS = 60
 RETRY_BACKOFF_SECONDS = (5, 15)
 POLL_SECONDS = 60
@@ -318,8 +319,10 @@ def manifest_sources(directory, tag, sha):
     for asset in manifest["assets"]:
         if not isinstance(asset, dict):
             raise GuardError(f"malformed manifest asset {asset!r}")
-        name, source = asset.get("name"), asset.get("source_commit", sha)
-        if not (isinstance(name, str) and name not in names and sums.get(name) == asset.get("sha256")
+        name, source, hashed = asset.get("name"), asset.get("source_commit", sha), asset.get("sha256")
+        # Membership first: an asset absent from SHA256SUMS with no hash must not match "no entry".
+        if not (isinstance(name, str) and name not in names and name in sums
+                and isinstance(hashed, str) and SHA256_HEX.fullmatch(hashed) and sums[name] == hashed
                 and isinstance(source, str) and COMMIT_SHA.fullmatch(source)):
             raise GuardError(f"manifest asset {asset!r} is malformed, repeated or not in SHA256SUMS")
         names.add(name)
