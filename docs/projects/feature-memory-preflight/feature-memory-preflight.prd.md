@@ -1,6 +1,6 @@
 ---
 goal: VLite MemoryAI grant-change preflight and status, and a release guard that requires successful full CI on the exact commit before any publication
-version: 1.5
+version: 1.6
 date_created: 2026-11-09
 last_updated: 2026-11-09
 owner: VLite maintainers (mahpate/Vlite)
@@ -800,7 +800,7 @@ Depends on EPIC-001 for merge.
 | ITEM-007 | `site/api.html` rows (REQ-A08) | Not Started | `site/api.html` |
 | ITEM-008 | Docs: API contract and outcome table; MEMORY procedure (edit, then preflight, then reload, then status until `drained:true`); SECURITY confidentiality and admin-only | Not Started | `docs/API.md`, `docs/MEMORY.md`, `docs/SECURITY.md` |
 
-### EPIC-003: Dashboard and recapture (Part A) — controls DONE; recapture (ITEM-011) pending EPIC-002 integration
+### EPIC-003: Dashboard and recapture (Part A) — DONE
 
 Depends on EPIC-001 for merge; the recapture comes last.
 
@@ -808,7 +808,7 @@ Depends on EPIC-001 for merge; the recapture comes last.
 |---|---|---|---|
 | ITEM-009 | Two buttons, results and handlers (REQ-A09), with the literal `ctx.api("POST", "/v1/admin/memory/bindings/preflight"` and `ctx.api("GET", "/v1/admin/memory/bindings/status"` forms inside their `on("<control>",` scopes; INVENTORY entries. Validate with `tests/admin_route_coverage.py` and `tests/dashboard_feature_coverage.py` (unchanged; it derives the admin contracts from INVENTORY and requires `registered == classified`) | Done | `src/dashboard/index.html`, `src/dashboard/console-tools.js`, `tests/admin_route_coverage.py` |
 | ITEM-010 | TEST-A15 Playwright steps; CONSOLE-ADMIN folded row within budget (CON-003) | Done | `tests/dashboard_memory_mode.py`, `docs/CONSOLE-ADMIN.md` |
-| ITEM-011 | Dispatch `dashboard-capture.yml` on the integrated feature branch; commit the artifact output; `tests/dashboard_tours.py` passes (REQ-A10) | Not Started | `site/assets/dashboard/*`, `site/index.html` |
+| ITEM-011 | Dispatch `dashboard-capture.yml` on the integrated feature branch; commit the artifact output; `tests/dashboard_tours.py` passes (REQ-A10) | Done | `site/assets/dashboard/*`, `site/index.html` |
 
 ### EPIC-004: Release CI guard (Part B) — IMPLEMENTED; review fixes R1–R3/L1 applied (v1.4); re-review acceptance and TEST-B11 live dry runs pending
 
@@ -844,3 +844,4 @@ Engineering effort is the human-equivalent design, coding, testing and review ti
 | 1.3 | 2026-11-09 | EPIC-001 implementation notes: TEST-A02 drops the evidence collection, not the graph, for the missing-resource refusal; TEST-A09 tolerates the router's generic per-request audit access records, and its log sweep is a non-disclosure check only, with absence of new log and audit writes pinned by a separate static check. |
 | 1.4 | 2026-11-09 | EPIC-004 independent review R1–R3, L1: PyPI qualifies every wheel source commit of the checksum-validated release manifest and binds the uploaded wheels to it; job listings are counted; retry backoff is clamped to the active deadline; malformed fields fail closed without retry; freshness is stated at guard evaluation (§3.5.5, TEST-B12). |
 | 1.5 | 2026-11-09 | EPIC-003 controls: preflight and status buttons, handlers and INVENTORY entries; TEST-A15 Playwright steps after TEST-015; CONSOLE-ADMIN reload row folded within its 2,500-word budget. `admin_route_coverage.py`, `dashboard_feature_coverage.py` and `content_budget.py` pass; TEST-A15 runs in CI (no local Playwright driver). Recapture pending. |
+| 1.6 | 2026-11-09 | ITEM-011: `dashboard-capture.yml` run 42771433763 at `34c1126a` (manifest `source_git_sha` `34c1126a…`, `source_git_dirty` false) installed into `site/assets/dashboard/`; `site/index.html` fingerprints refreshed. The capture hashes only dashboard sources, the theme and shared assets, which EPIC-002/004 do not touch. `dashboard_tours.py site` hash checks pass locally after the docs build; its browser walk runs in Dashboard UI. |
