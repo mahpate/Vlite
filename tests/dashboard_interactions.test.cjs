@@ -279,6 +279,41 @@ test("Stop waiting explains that aborting a browser wait does not cancel a mutat
   assert.match(ui.get("status").textContent, /Mutation outcome may be unknown/);
 });
 
+test("a data:false admin POST keeps browse, search and inspector state on 200, 500 and 503", async () => {
+  const replies = [response({ outcome: "unchanged" }), response({ error: { code: "internal_error", message: "x" } }, 500),
+    response({ error: { code: "busy", message: "database queue is full" } }, 503)];
+  const ui = dashboard(async () => replies.shift());
+  const preflight = () => ui.context.api("POST", "/v1/admin/memory/bindings/preflight", {}, { data: false });
+  const kept = new ui.Element("kept-row");
+  const marks = () => {
+    ui.get("index-status").textContent = "Index ready";
+    ui.get("browse-preview").textContent = "Record 42";
+    ui.get("payload-preview").textContent = "payload";
+    ui.get("hits").querySelector("tbody").replaceChildren(kept);
+  };
+  const assertKept = () => {
+    assert.equal(ui.get("index-status").textContent, "Index ready");
+    assert.doesNotMatch(ui.get("index-status").textContent, /Data changed/);
+    assert.equal(ui.get("browse-preview").textContent, "Record 42");
+    assert.equal(ui.get("payload-preview").textContent, "payload");
+    assert.deepEqual(ui.get("hits").querySelector("tbody").children, [kept]);
+  };
+  marks();
+  assert.equal(JSON.stringify(await preflight()), JSON.stringify({ outcome: "unchanged" }));
+  assertKept();
+  for (const status of [500, 503]) {
+    marks();
+    await assert.rejects(preflight(), (error) => error.status === status);
+    assertKept();
+  }
+  // The control: the same POST without data:false is a mutation and clears.
+  const mutation = dashboard(async () => response({ outcome: "unchanged" }));
+  mutation.get("browse-preview").textContent = "Record 42";
+  await mutation.context.api("POST", "/v1/admin/memory/bindings/preflight", {});
+  assert.match(mutation.get("index-status").textContent, /Data changed/);
+  assert.equal(mutation.get("browse-preview").textContent, "");
+});
+
 test("search preserves existing rows during refresh and after read failures", async () => {
   const pending = deferred();
   let calls = 0;

@@ -1777,7 +1777,7 @@
     });
     on("memory-bindings-preflight", async () => {
       admin("memory_bindings_reload");
-      text("memory-bindings-preflight-result", await ctx.api("POST", "/v1/admin/memory/bindings/preflight", {}));
+      text("memory-bindings-preflight-result", await ctx.api("POST", "/v1/admin/memory/bindings/preflight", {}, { data: false }));
     });
     on("memory-bindings-status", async () => {
       admin("memory_bindings_reload");

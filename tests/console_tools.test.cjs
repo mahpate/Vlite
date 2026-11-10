@@ -375,6 +375,15 @@ async function adminHandlerChecks() {
   assert.match(elements.get("cred-result").textContent, /change IS in effect/);
   await assert.rejects(click("cred-copy"), /No secret/);
   failure = null;
+  // Preflight is a read-only POST: it must tell the transport that no data
+  // changed, so the dashboard keeps its browse, search and inspector state.
+  caps.features.memory_bindings_reload = true;
+  requests.length = 0;
+  await click("memory-bindings-preflight");
+  await click("memory-bindings-status");
+  assert.deepEqual(requests.map(({ method, path }) => [method, path]), [
+    ["POST", "/v1/admin/memory/bindings/preflight"], ["GET", "/v1/admin/memory/bindings/status"]]);
+  assert.equal(requests[0].options?.data, false, "preflight changes no data");
   tools.clear();
   for (const name of ["cred-graphs", "cred-tenant", "cred-rpm", "cred-max-vectors", "cred-max-vectors-per-collection"])
     assert.equal(elements.get(name).value, "");
