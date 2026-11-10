@@ -818,9 +818,11 @@ async fn audit_events(app: &Router) -> Vec<Value> {
 /// Calls preflight or status as the administrator and expects 200 with a
 /// body, an audit and log entries that name none of the sentinels. The log
 /// buffer is shared by every test in this process, so the sweep checks what
-/// new entries disclose; that the handlers write no log or audit event at all
-/// is a separate static check
-/// ([`preflight_and_status_write_no_log_or_audit_event`]).
+/// new entries disclose. That the handlers and every helper they call write
+/// no log entry beyond the server's generic request records is observed in
+/// its own process by `tests/server_memory_preflight_observers.rs`, with a
+/// unique sentinel for every fixture dimension; a static scan of the handler
+/// bodies backs it ([`preflight_and_status_write_no_log_or_audit_event`]).
 async fn swept(rig: &Rig, app: &Router, method: &str, path: &str) -> Value {
     let since = log_seq(app).await;
     let audit = audit_events(app).await;
@@ -933,7 +935,8 @@ async fn preflight_test_a09_no_outcome_or_status_discloses_a_sentinel() {
 
 /// The preflight and status handlers, and the check they share with reload,
 /// contain no log or audit write: their non-disclosure in TEST-A09 is not
-/// taken as proof that nothing is logged.
+/// taken as proof that nothing is logged. This scan reaches only those bodies;
+/// the isolated observer test reaches the helpers they call.
 #[test]
 fn preflight_and_status_write_no_log_or_audit_event() {
     let source = include_str!("../src/server/memory/reload.rs").replace("\r\n", "\n");

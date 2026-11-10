@@ -20,7 +20,7 @@ use serde_json::{Value, json};
 use tower::ServiceExt;
 
 use super::super::{
-    ApiError, MAX_JSON_BYTES, RequestId, Service, admin, audit, credentials, guard, reserved,
+    ApiError, MAX_JSON_BYTES, RequestId, Service, admin, audit, credentials, guard, logs, reserved,
 };
 use super::reload::{apply, reload};
 use super::routes::Clock;
@@ -844,6 +844,69 @@ async fn a_preflight_under_a_full_queue_is_busy_and_status_still_answers() {
             "drained": true,
         })
     );
+}
+
+/// TEST-A06 (shared lock): preflight reads under the shared database lock,
+/// so it answers while another reader holds that lock; under the exclusive
+/// lock it would wait for the reader and time out.
+#[tokio::test]
+async fn a_preflight_shares_the_database_lock_with_a_held_reader() {
+    let pins = Pins::new();
+    let unchanged = pins.preflight().await;
+    let (locked_tx, locked_rx) = std::sync::mpsc::channel::<()>();
+    let (release_tx, release_rx) = std::sync::mpsc::channel::<()>();
+    let service = pins.service.clone();
+    let reader = std::thread::spawn(move || {
+        let _owner = service.database.read().unwrap();
+        locked_tx.send(()).unwrap();
+        release_rx.recv().unwrap();
+    });
+    locked_rx.recv().unwrap();
+    let answered = tokio::time::timeout(Duration::from_secs(10), pins.preflight()).await;
+    release_tx.send(()).unwrap();
+    reader.join().unwrap();
+    assert_eq!(
+        answered.expect("preflight waited for a shared reader"),
+        unchanged
+    );
+    assert_eq!(unchanged["outcome"], "unchanged", "{unchanged}");
+}
+
+/// TEST-A09 (error path): a failure inside preflight answers the server's
+/// generic 500 `internal_error`, whose only log entry is the fixed generic
+/// `{"event":"internal_error"}` line, naming nothing; status, which takes no
+/// database lock, still answers.
+#[tokio::test]
+async fn a_preflight_internal_error_logs_only_the_generic_line() {
+    let pins = Pins::new();
+    let service = pins.service.clone();
+    let poisoned = std::thread::spawn(move || {
+        let _owner = service.database.write().unwrap();
+        panic!("poison the database lock");
+    })
+    .join();
+    assert!(poisoned.is_err());
+    let (_, _, _, since) = logs::buffer().snapshot();
+    let (status, body) = admin_call(&admin_routes(&pins.service), "POST", PREFLIGHT).await;
+    assert_eq!(status, 500, "{body}");
+    assert_eq!(
+        body,
+        json!({"error": {"code": "internal_error",
+            "message": "internal service error; inspect server logs"}})
+    );
+    let (entries, _, _, _) = logs::buffer().snapshot();
+    let errors: Vec<_> = entries
+        .iter()
+        .filter(|entry| entry.seq > since && entry.message.contains("internal_error"))
+        .collect();
+    assert!(!errors.is_empty());
+    // Other tests share the process-wide buffer; every internal_error line is
+    // the same fixed text whichever test wrote it.
+    for entry in errors {
+        assert_eq!(entry.message, r#"{"event":"internal_error"}"#);
+        assert_eq!(entry.fields, json!({"event": "internal_error"}));
+    }
+    assert_eq!(pins.status().await["file"], "agrees");
 }
 
 /// TEST-A08: a request pinned to the grants a reload superseded keeps status

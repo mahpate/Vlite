@@ -1,6 +1,6 @@
 ---
 goal: VLite MemoryAI grant-change preflight and status, and a release guard that requires successful full CI on the exact commit before any publication
-version: 1.6
+version: 1.7
 date_created: 2026-11-09
 last_updated: 2026-11-09
 owner: VLite maintainers (mahpate/Vlite)
@@ -225,7 +225,7 @@ flowchart LR
       - `Ok(c)` → `outcome` is `"reload"` if `c.changed > 0`, else `"unchanged"`. `records` is `0` if `db.is_read_only()`, else `c.writes.len()`; it is computed inside the closure.
       - `Err(e)` whose `e.code` is `memory_reload_unavailable` → `"unavailable"`; `memory_restart_required` → `"restart_required"`; `memory_bindings_conflict` → `"refused"`. `error` is `{code: e.code, message: e.message}`.
       - Any other `Err` propagates as the HTTP error. That covers 503 `busy` (worker admission) and 503 `unavailable` (database closed), both from `run_read` (`src/server.rs:600-614`), 500 `internal_error` (a poisoned lock or a join failure, `:612`, `:620`), and a storage error that `plan` surfaces.
-   6. No `logs::stderr`, no audit append and no metrics beyond the router's generic request metrics.
+   6. No `logs::stderr`, no audit append and no metrics beyond the router's generic request metrics. (v1.7: the handler and the helpers it calls write nothing of their own; the server's generic observers of §3.4 still apply.)
 4. **Status handler** `bindings_status` (new, in `reload.rs`), for `GET /v1/admin/memory/bindings/status`. It never touches the database lock or the reload lock.
    - `configured` = `served.is_configured()`.
    - `reloadable` uses exactly the capabilities expression `memory_bindings_reload`. Factor that expression into one `pub(super) fn reloadable(&Service) -> bool` in `admin.rs` and use it in both places.
@@ -271,7 +271,7 @@ flowchart LR
 | HTTP | Body |
 |---|---|
 | 200 | `{"configured":bool,"reloadable":bool,"bindings":n,"file":"agrees"\|"differs"\|"unreadable"\|"none","drained":bool}` |
-| 401 / 403 / 429 / 500 | As for every admin route. There is no 503, because status takes no database lock |
+| 401 / 403 / 429 / 500 | As for every admin route. The handler never answers 503, because status takes no database lock (v1.7: the shared admission middleware can still answer 503 `busy` to a rate-limited scoped credential before authentication, as for every route) |
 
 Neither route touches reload's request, response or errors (CON-001). The capabilities `routes` array lists both routes next to reload (`admin.rs:603`). No new feature flag is added: dashboard controls use `memory_bindings_reload`.
 
@@ -293,12 +293,19 @@ Neither route touches reload's request, response or errors (CON-001). The capabi
   - Neither handler calls `try_reload`.
   - A reload concurrent with any number of preflights or status calls never gets `memory_reload_in_progress` because of them. Preflight only competes for the shared read lock, as any read request does.
 - **Non-mutation.**
-  - Preflight has `&Database` only, and it does not provision, write records, install, drain, prune `retired`, log or audit.
+  - Preflight has `&Database` only, and it does not provision, write records, install, drain, prune `retired`, or write a log or audit event of its own.
   - Status has no database access, and `is_drained` does not prune.
   - The cost of preflight equals reload's check phase, because `plan` scans every graph through `collect`. It holds the shared lock, so writers queue behind it as behind any long read. It is admin-only (RISK-A02).
 - **Confidentiality.**
   - Bodies contain only booleans, integers, the fixed enums above, and codes and messages that are compile-time constants already returned by reload.
   - No binding, tenant, principal, scope, graph, collection or path appears in a body, a log or an audit entry, on any outcome.
+- **Observability (v1.7).** Neither handler, nor any helper it calls, adds a log entry or audit event of its own. The server's existing generic observers still record every request, and they are not changed:
+  - the per-request log line `{event:"request", request_id, method, route, status, duration_ns, credential_id}` and the HTTP access log entry (method, literal path, status, duration);
+  - the per-request access record in the admin audit ring (the same fields plus `role`);
+  - the persistent `credential_denied` audit event when a scoped credential is refused (credential ID, actor, method, route, request ID);
+  - the fixed `{"event":"internal_error"}` log line of any 500 `internal_error` (`src/server.rs`, `internal`).
+
+  These carry the caller's own identity: a scoped caller's own credential ID, the same as for every route, even when that credential is also a principal in the bindings file. That is not a disclosure from the file. They never carry a name read from the bindings file, and the routes take no path parameter. "No log" in this PRD means no log or audit event added by these routes; it is not a promise that requests go unobserved.
 
 ### 3.5 Target design — Part B
 
@@ -483,7 +490,7 @@ Behaviour of the edited workflow:
 
 - **REQ-A01**: The admin router MUST register `POST /v1/admin/memory/bindings/preflight` and `GET /v1/admin/memory/bindings/status` literally in `src/server/admin.rs`, next to reload. The capabilities `routes` array MUST list them.
 - **REQ-A02**: `check` MUST hold steps 1–7 of reload's current `apply` with byte-identical codes, messages and order. `apply` MUST call it and then perform step 8 unchanged.
-- **REQ-A03**: Preflight MUST use `Service::run_read` and MUST NOT call `try_reload`, `install`, `provision`, `write_binding_record`, `drain`, `logs::stderr` or the audit log.
+- **REQ-A03**: Preflight MUST use `Service::run_read` and MUST NOT call `try_reload`, `install`, `provision`, `write_binding_record`, `drain`, `logs::stderr` or the audit log. (v1.7: neither directly nor through a helper, except the server's generic observers of §3.4, such as the `internal_error` line that `run_read` writes on a 500.)
 - **REQ-A04**: The preflight response MUST follow §3.3 exactly. `error` MUST equal the code and message reload would return for the same file and database state.
 - **REQ-A05**: Status MUST NOT take the database lock or the reload lock. `reloadable` MUST come from the same function as the capabilities flag.
 - **REQ-A06**: `Served::is_drained(&self) -> bool` MUST NOT mutate `retired`. `drain` and `drained` stay byte-identical.
@@ -507,7 +514,7 @@ Behaviour of the edited workflow:
 **Security**
 
 - **SEC-001** (A): Both routes are admin-only through the `/v1/admin/` rule. Read-only tokens and scoped credentials get 403 with the existing codes. Tests MUST pin this.
-- **SEC-002** (A): No body, log line or audit entry from preflight or status may contain a binding, tenant, principal, scope, graph, collection or path. A sentinel sweep MUST pin this (TEST-A09).
+- **SEC-002** (A): No body, log line or audit entry from preflight or status may contain a binding, tenant, principal, scope, graph, collection or path. A sentinel sweep MUST pin this (TEST-A09). (v1.7: the generic observers of §3.4 carry the caller's own credential ID, an identity the caller presented, not a name read from the bindings file.)
 - **SEC-003** (A): Preflight and status MUST NOT weaken read-only, replica or gRPC restrictions:
   - on a read-only database or replica, preflight reports `records:0` and writes nothing;
   - after gRPC, preflight reports `unavailable`.
@@ -584,9 +591,10 @@ Behaviour of the edited workflow:
 - **TEST-A05**: Preflight says `reload`. The file is then changed to a non-grant change, and reload answers 409 `memory_restart_required` and installs nothing.
 - **TEST-A06**:
   - A held reload lock (`served.try_reload()` kept in the test) does not change preflight or status answers.
+  - (v1.7) A reader holding the shared database lock on another thread does not delay preflight: it answers within a bounded wait, which an exclusive lock could not.
   - Conversely, a reload issued while a preflight is parked on the read lock by the holder-thread pattern completes with 200, not `memory_reload_in_progress`.
   - The preflight result is either the before verdict or the after verdict.
-- **TEST-A07**: Preflight under a saturated worker queue answers 503 `busy`. Status still answers 200.
+- **TEST-A07**: Preflight under a saturated worker queue answers 503 `busy`. Status still answers 200. (v1.7: a poisoned database lock answers 500 `internal_error` whose only log entry is the fixed `{"event":"internal_error"}` line; status still answers.)
 - **TEST-A08**: A pin taken before a reload with a short drain makes status report `drained:false`. After the pin drops, status reports `drained:true`. `is_drained` does not shrink `retired` (unit test in `reserved.rs`).
 
 **Part A — integration (`tests/server_memory_live_grants.rs`)**
@@ -595,6 +603,7 @@ Behaviour of the edited workflow:
   - the body contains no sentinel;
   - the audit (`GET /v1/admin/audit`) gains no handler event from preflight or status (v1.3: the router's generic per-request access record, with method, route, status, role and timing only, is added for every admin request and is swept for sentinels as well);
   - the structured log buffer gains no entry naming this test's own sentinels (scope and path). (v1.3: the buffer is process-wide and other tests log the shared fixture names, so this is a non-disclosure check only. That no log or audit event is written is established separately by a static check that the bodies of `check`, `changed`, `preflight_bindings`, `verdict` and `bindings_status` contain no log, audit or print call.)
+  - (v1.7) An observer test in its own process (`tests/server_memory_preflight_observers.rs`) gives every sensitive dimension a sentinel used nowhere else: binding, tenant, principal, scope, graph, evidence collection, file and directory. It drives every outcome, status, the denied callers (read-only token, the binding's own principal as a scoped caller, an unnamed scoped caller, no token) and the closed-database 503. Every log entry after its marker must be one of the generic request records of §3.4, with `credential_id` only the caller's own. The access ring may gain only generic access records, and `audit.jsonl` only names the denied callers. Nothing else may name a sentinel. A helper that logs a resource name fails it.
 - **TEST-A10**: Read-only token → 403 `read_only`; scoped credential → 403 `forbidden_scope`; no token → 401. Applies to both routes.
 - **TEST-A11**: On a read-only database or replica, preflight reports `records:0` and status works. Reload behaviour is unchanged (existing tests).
 - **TEST-A12**: Status:
@@ -602,7 +611,7 @@ Behaviour of the edited workflow:
   - is `differs` after a grants edit;
   - is `agrees` after reload;
   - is `agrees` after reordering the bindings, but `differs` after reordering the grants of one binding (same rule as `changed`).
-- **TEST-A13** (reserved-as-missing): `server_memory_reserved_as_missing::every_name_addressed_openapi_operation_has_a_differential_case` passes unchanged, and a new assertion in that file pins that the two new OpenAPI paths carry no `{collection}`/`{graph}` segment. On a server with reserved bindings, preflight and status answers name no reserved resource (covered by TEST-A09 sentinels).
+- **TEST-A13** (reserved-as-missing): `server_memory_reserved_as_missing::every_name_addressed_openapi_operation_has_a_differential_case` passes unchanged, and a new assertion in that file pins that the two new OpenAPI paths carry no `{collection}`/`{graph}` segment. (v1.7: the documented operations under the bindings prefix must be exactly reload POST, preflight POST and status GET, and the router must answer both new routes at those literal paths; `graph_surface_parity` requires both operations in the served document. There are no fallback constants.) On a server with reserved bindings, preflight and status answers name no reserved resource (covered by TEST-A09 sentinels).
 - **TEST-A14**: `capabilities.routes` lists both routes. `features.memory_bindings_reload` equals status `reloadable` in every configuration exercised.
 
 **Part A — dashboard**
@@ -660,7 +669,7 @@ Behaviour of the edited workflow:
 | AC-001 | Preflight reports each of the six outcomes with reload's exact code and message and changes nothing | TEST-A01–A05, A09 |
 | AC-002 | Status reports `configured`, `reloadable`, `bindings`, `file`, `drained` per §3.3, with no database or reload lock | TEST-A06–A08, A12, A14 |
 | AC-003 | Neither route can make reload answer `in_progress`; preflight sees the before or after state | TEST-A06 |
-| AC-004 | No sensitive string in any body, log line or audit entry; admin-only | TEST-A09, A10, A13 |
+| AC-004 | No sensitive string in any body, log line or audit entry; admin-only. Only the generic observers of §3.4 record these requests | TEST-A09, A10, A13 |
 | AC-005 | Reload wire, errors, auth, read-only, replica and gRPC behaviour unchanged | CON-001 suites, TEST-A04, A11 |
 | AC-006 | OpenAPI, parity, `api.html`, capabilities, admin inventory, dashboard and recapture all consistent | TEST-A14–A16 |
 | AC-007 | No GHCR push, manifest, release or PyPI upload is reachable without enforce Pass at the exact SHA | TEST-B01–B10 |
@@ -749,6 +758,7 @@ python tests/dashboard_memory_mode.py target/debug/vlite-server; python tests/da
 | FILE-006 | `tests/server_memory_live_grants.rs` | TEST-A09–A12, A14 | EPIC-001 |
 | FILE-007 | `tests/server_name_lookup_scan.rs` | Move the two `reload.rs` entries `apply` → `check`; update the justification | EPIC-001 |
 | FILE-008 | `tests/server_memory_reserved_as_missing.rs` | TEST-A13 name-free assertion | EPIC-001 |
+| FILE-021 | `tests/server_memory_preflight_observers.rs` | TEST-A09 isolated observer test (v1.7) | EPIC-001 |
 | FILE-009 | `src/openapi.json` | Two path entries | EPIC-002 |
 | FILE-010 | `tests/graph_surface_parity.rs` | Verbatim `APPROVED_OPENAPI_ADDITIONS` entries | EPIC-002 |
 | FILE-011 | `site/api.html` | Two `data-api` rows after `:1546` | EPIC-002 |
@@ -788,17 +798,17 @@ There are four epics with disjoint file ownership (Section 12). EPIC-001 and EPI
 | ITEM-002 | `Served::is_drained` with its unit test (REQ-A06) | Done | `src/server/reserved.rs` |
 | ITEM-003 | `preflight_bindings` and `bindings_status` (§3.2–§3.4); `reloadable(&Service)`; route registration; capabilities route list (REQ-A01, A03–A05) | Done | `src/server/memory/reload.rs`, `src/server/memory.rs`, `src/server/admin.rs` |
 | ITEM-004 | TEST-A01–A08; move `admin_call`'s `#[cfg(feature = "grpc")]` so the helper builds under `server` (body unchanged) | Done | `src/server/memory/pins_reload.rs`, `src/server/reserved.rs` |
-| ITEM-005 | TEST-A09–A14; run CON-001 suites and the ledger replay (CON-002) | Done | `tests/server_memory_live_grants.rs`, `tests/server_memory_reserved_as_missing.rs` |
+| ITEM-005 | TEST-A09–A14; run CON-001 suites and the ledger replay (CON-002) | Done | `tests/server_memory_live_grants.rs`, `tests/server_memory_reserved_as_missing.rs`, `tests/server_memory_preflight_observers.rs` |
 
-### EPIC-002: Contract and documentation (Part A)
+### EPIC-002: Contract and documentation (Part A) — DONE
 
 Depends on EPIC-001 for merge.
 
 | Task | Description | Status | Relevant Files |
 |---|---|---|---|
-| ITEM-006 | OpenAPI paths for §3.3 (200 schema with the `outcome` enum, plus 403/429/503/500 for preflight; 200 plus 403/429/500 for status). The descriptions state advisory semantics and confidentiality. Add the verbatim parity additions | Not Started | `src/openapi.json`, `tests/graph_surface_parity.rs` |
-| ITEM-007 | `site/api.html` rows (REQ-A08) | Not Started | `site/api.html` |
-| ITEM-008 | Docs: API contract and outcome table; MEMORY procedure (edit, then preflight, then reload, then status until `drained:true`); SECURITY confidentiality and admin-only | Not Started | `docs/API.md`, `docs/MEMORY.md`, `docs/SECURITY.md` |
+| ITEM-006 | OpenAPI paths for §3.3 (200 schema with the `outcome` enum, plus 403/429/503/500 for preflight; 200 plus 403/429/500 for status). The descriptions state advisory semantics and confidentiality. Add the verbatim parity additions | Done | `src/openapi.json`, `tests/graph_surface_parity.rs` |
+| ITEM-007 | `site/api.html` rows (REQ-A08) | Done | `site/api.html` |
+| ITEM-008 | Docs: API contract and outcome table; MEMORY procedure (edit, then preflight, then reload, then status until `drained:true`); SECURITY confidentiality and admin-only | Done | `docs/API.md`, `docs/MEMORY.md`, `docs/SECURITY.md` |
 
 ### EPIC-003: Dashboard and recapture (Part A) — DONE
 
@@ -845,3 +855,4 @@ Engineering effort is the human-equivalent design, coding, testing and review ti
 | 1.4 | 2026-11-09 | EPIC-004 independent review R1–R3, L1: PyPI qualifies every wheel source commit of the checksum-validated release manifest and binds the uploaded wheels to it; job listings are counted; retry backoff is clamped to the active deadline; malformed fields fail closed without retry; freshness is stated at guard evaluation (§3.5.5, TEST-B12). |
 | 1.5 | 2026-11-09 | EPIC-003 controls: preflight and status buttons, handlers and INVENTORY entries; TEST-A15 Playwright steps after TEST-015; CONSOLE-ADMIN reload row folded within its 2,500-word budget. `admin_route_coverage.py`, `dashboard_feature_coverage.py` and `content_budget.py` pass; TEST-A15 runs in CI (no local Playwright driver). Recapture pending. |
 | 1.6 | 2026-11-09 | ITEM-011: `dashboard-capture.yml` run 42771433763 at `34c1126a` (manifest `source_git_sha` `34c1126a…`, `source_git_dirty` false) installed into `site/assets/dashboard/`; `site/index.html` fingerprints refreshed. The capture hashes only dashboard sources, the theme and shared assets, which EPIC-002/004 do not touch. `dashboard_tours.py site` hash checks pass locally after the docs build; its browser walk runs in Dashboard UI. |
+| 1.7 | 2026-11-09 | EPIC-002 docs result `f90c3486` integrated (ITEM-006–008 Done); status's 503 `busy` from shared admission is documented. Server review P2-2–P2-4, L1, L2: P2-2 was stale, because capture run 42771433763 at `34c1126a` and Dashboard UI run 42771908341 at `6386bba1` both passed. §3.4 now names the generic observers that record every request (caller's own credential ID, `credential_denied`, `internal_error`), and REQ-A03, SEC-002 and AC-004 are qualified to match. TEST-A09 gains an isolated observer test with a unique sentinel per dimension, which kills the helper-log mutant. TEST-A06 gains a held-reader case, which kills the exclusive-lock mutant. TEST-A07 gains the poisoned-lock 500. TEST-A13 requires the exact documented operations and the router's answers, which kills the parameterized-route mutant. |

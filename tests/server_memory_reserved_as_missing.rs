@@ -420,22 +420,55 @@ fn every_name_addressed_openapi_operation_has_a_differential_case() {
 
 /// TEST-A13 (feature-memory-preflight PRD): the bindings preflight and status
 /// routes address no collection or graph, so they need no differential case;
-/// their answers name no reserved resource (TEST-A09 sentinels).
-#[test]
-fn memory_bindings_admin_routes_address_no_collection_or_graph() {
+/// their answers name no reserved resource (TEST-A09). The documented
+/// operations under the bindings prefix are exactly reload, preflight and
+/// status, with their methods and no path parameter, and the router answers
+/// each new one at that literal path: a renamed or parameterized
+/// registration fails here, and `graph_surface_parity` separately requires
+/// both operations in the served document.
+#[tokio::test]
+async fn memory_bindings_admin_routes_address_no_collection_or_graph() {
+    use std::collections::BTreeSet;
+
     let spec: Value = serde_json::from_str(include_str!("../src/openapi.json")).unwrap();
-    let documented = spec["paths"]
+    let documented: BTreeSet<(String, String)> = spec["paths"]
         .as_object()
         .unwrap()
-        .keys()
-        .filter(|path| path.starts_with("/v1/admin/memory/bindings/"));
-    for path in documented.map(String::as_str).chain([
-        "/v1/admin/memory/bindings/preflight",
-        "/v1/admin/memory/bindings/status",
-    ]) {
+        .iter()
+        .filter(|(path, _)| path.starts_with("/v1/admin/memory/bindings/"))
+        .flat_map(|(path, item)| {
+            item.as_object()
+                .unwrap()
+                .keys()
+                .map(move |method| (method.clone(), path.clone()))
+        })
+        .collect();
+    let expected: BTreeSet<(String, String)> = [
+        ("post", "/v1/admin/memory/bindings/reload"),
+        ("post", "/v1/admin/memory/bindings/preflight"),
+        ("get", "/v1/admin/memory/bindings/status"),
+    ]
+    .into_iter()
+    .map(|(method, path)| (method.to_owned(), path.to_owned()))
+    .collect();
+    assert_eq!(documented, expected);
+    for (_, path) in &documented {
         assert!(
             !path.contains('{'),
             "{path} must not address a collection or graph"
+        );
+    }
+    let fixture = fixture_with_bindings(true);
+    for (method, path) in [
+        ("POST", "/v1/admin/memory/bindings/preflight"),
+        ("GET", "/v1/admin/memory/bindings/status"),
+    ] {
+        let (status, _, body) = request(&fixture.app, ADMIN, method, path, "").await;
+        assert_eq!(
+            status,
+            200,
+            "{method} {path}: {}",
+            String::from_utf8_lossy(&body)
         );
     }
 }
