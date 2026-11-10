@@ -1775,6 +1775,14 @@
       if (!await ctx.confirm("Reload memory grants from the configured bindings file? Requests using older grants may finish. Check drained in the result; if false, send it again to wait. A failed reload is not a revocation.")) return;
       text("memory-bindings-reload-result", await ctx.api("POST", "/v1/admin/memory/bindings/reload", {}));
     });
+    on("memory-bindings-preflight", async () => {
+      admin("memory_bindings_reload");
+      text("memory-bindings-preflight-result", await ctx.api("POST", "/v1/admin/memory/bindings/preflight", {}));
+    });
+    on("memory-bindings-status", async () => {
+      admin("memory_bindings_reload");
+      text("memory-bindings-status-result", await ctx.api("GET", "/v1/admin/memory/bindings/status"));
+    });
     on("token-revoke", async () => {
       admin();
       if (!await ctx.confirm("Revoke the in-memory read-only credential now? Persist by emptying its configured file offline; already admitted requests may finish.")) return;

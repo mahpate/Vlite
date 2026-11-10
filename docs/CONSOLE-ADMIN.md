@@ -238,7 +238,7 @@ memory).
 |---|---|
 | `GET /v1/admin/tokens` | Returns `{generation,admin_file_configured,read_only_configured,read_only_file_configured}`. |
 | `POST /v1/admin/tokens/reload` with `{}` | Validates configured files, then swaps both credentials atomically; invalid files change nothing. Empty read-only files revoke access; identical role tokens are rejected. |
-| `POST /v1/admin/memory/bindings/reload` (no body) | **Reload memory grants** rereads the configured file. Returns `{bindings,changed,drained}`; if `drained` is false, send again. [Grants only; other changes need restart; no gRPC](API.md#change-grants-without-a-restart). |
+| `POST /v1/admin/memory/bindings/reload`, `…/preflight`; `GET …/status` | **Reload** rereads the grants file; resend while `drained` is false. **Check** previews without changing grants; **status** compares them to it. [Grants only; no gRPC](API.md#change-grants-without-a-restart). |
 | `POST /v1/admin/tokens/revoke-read-only` with `{}` | Revokes read-only access in memory, incrementing `generation`; empty its file to persist across reload or restart. |
 | `GET /v1/admin/audit` | Returns `{items:[...],capacity:256}`. |
 

@@ -739,9 +739,13 @@
     <button id="token-revoke" data-admin data-write type="button" class="danger">Revoke read-only credential</button>
     <p>Change configured secret files offline first. Reload validates both before swapping. After rotating the admin token, sign in again with the new token. Environment tokens require restart. Revocation is in-memory; empty its configured file to persist it.</p>
     <pre id="token-result"></pre>
-    <p>Replace the configured memory bindings file first, raising the generation for changed grants. Reload changes grants only; other binding changes need a restart. If the result says drained is false, send it again to wait for requests using older grants.</p>
+    <p>Replace the configured memory bindings file first, raising the generation for changed grants. Check it to see what a reload would decide; the check changes nothing. Reload changes grants only; other binding changes need a restart. If the result says drained is false, send it again to wait for requests using older grants. Status shows whether the served grants agree with the file.</p>
+    <button id="memory-bindings-preflight" data-admin data-feature="memory_bindings_reload" type="button" class="secondary">Check memory grants file</button>
+    <pre id="memory-bindings-preflight-result" aria-live="polite"></pre>
     <button id="memory-bindings-reload" data-admin data-feature="memory_bindings_reload" type="button">Reload memory grants</button>
     <pre id="memory-bindings-reload-result" aria-live="polite"></pre>
+    <button id="memory-bindings-status" data-admin data-feature="memory_bindings_reload" type="button" class="secondary">Memory grants status</button>
+    <pre id="memory-bindings-status-result" aria-live="polite"></pre>
     <button id="read-audit" data-admin type="button" class="secondary">Read sanitized audit trail</button>
     <p>Last 256 process-local requests only; not a durable compliance log. No credentials or record contents.</p>
     <pre id="audit-result"></pre>

@@ -41,6 +41,8 @@ INVENTORY = {
     ("GET", "/v1/admin/tokens"): ("console-tools.js", "token-status"),
     ("POST", "/v1/admin/tokens/reload"): ("console-tools.js", "token-reload"),
     ("POST", "/v1/admin/memory/bindings/reload"): ("console-tools.js", "memory-bindings-reload"),
+    ("POST", "/v1/admin/memory/bindings/preflight"): ("console-tools.js", "memory-bindings-preflight"),
+    ("GET", "/v1/admin/memory/bindings/status"): ("console-tools.js", "memory-bindings-status"),
     ("POST", "/v1/admin/tokens/revoke-read-only"): ("console-tools.js", "token-revoke"),
     ("GET", "/v1/admin/audit"): ("console-tools.js", "read-audit"),
     ("GET", "/v1/admin/audit/persistent"): ("console-tools.js", "persistent-audit"),

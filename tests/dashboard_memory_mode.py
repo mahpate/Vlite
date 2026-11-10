@@ -488,6 +488,15 @@ def memory_phase(browser, url, token, username, password, editor, editor_passwor
             confirm(page, "Reload memory grants")
             expect(control(page, "#memory-bindings-reload-result")).to_contain_text('"drained": true')
             no_overflow(page, "memory grants reload")
+        with step(page, "TEST-A15: check the memory grants file and read their status",
+                  ("#memory-bindings-preflight-result", "#memory-bindings-status-result")):
+            control(page, "#memory-bindings-preflight").click()
+            expect(control(page, "#memory-bindings-preflight-result")).to_contain_text('"outcome": "unchanged"')
+            control(page, "#memory-bindings-status").click()
+            status = control(page, "#memory-bindings-status-result")
+            expect(status).to_contain_text('"file": "agrees"')
+            expect(status).to_contain_text('"drained": true')
+            no_overflow(page, "memory grants preflight and status")
         refused_panels(page, accepted("capabilities", rest(url, "GET", "/v1/capabilities", token=token), 200)["routes"])
         with step(page, "step 6: sign out, then sign in again with the admin token"):
             sign_out(page)

@@ -1,6 +1,6 @@
 ---
 goal: VLite MemoryAI grant-change preflight and status, and a release guard that requires successful full CI on the exact commit before any publication
-version: 1.4
+version: 1.5
 date_created: 2026-11-09
 last_updated: 2026-11-09
 owner: VLite maintainers (mahpate/Vlite)
@@ -800,14 +800,14 @@ Depends on EPIC-001 for merge.
 | ITEM-007 | `site/api.html` rows (REQ-A08) | Not Started | `site/api.html` |
 | ITEM-008 | Docs: API contract and outcome table; MEMORY procedure (edit, then preflight, then reload, then status until `drained:true`); SECURITY confidentiality and admin-only | Not Started | `docs/API.md`, `docs/MEMORY.md`, `docs/SECURITY.md` |
 
-### EPIC-003: Dashboard and recapture (Part A)
+### EPIC-003: Dashboard and recapture (Part A) — controls DONE; recapture (ITEM-011) pending EPIC-002 integration
 
 Depends on EPIC-001 for merge; the recapture comes last.
 
 | Task | Description | Status | Relevant Files |
 |---|---|---|---|
-| ITEM-009 | Two buttons, results and handlers (REQ-A09), with the literal `ctx.api("POST", "/v1/admin/memory/bindings/preflight"` and `ctx.api("GET", "/v1/admin/memory/bindings/status"` forms inside their `on("<control>",` scopes; INVENTORY entries. Validate with `tests/admin_route_coverage.py` and `tests/dashboard_feature_coverage.py` (unchanged; it derives the admin contracts from INVENTORY and requires `registered == classified`) | Not Started | `src/dashboard/index.html`, `src/dashboard/console-tools.js`, `tests/admin_route_coverage.py` |
-| ITEM-010 | TEST-A15 Playwright steps; CONSOLE-ADMIN folded row within budget (CON-003) | Not Started | `tests/dashboard_memory_mode.py`, `docs/CONSOLE-ADMIN.md` |
+| ITEM-009 | Two buttons, results and handlers (REQ-A09), with the literal `ctx.api("POST", "/v1/admin/memory/bindings/preflight"` and `ctx.api("GET", "/v1/admin/memory/bindings/status"` forms inside their `on("<control>",` scopes; INVENTORY entries. Validate with `tests/admin_route_coverage.py` and `tests/dashboard_feature_coverage.py` (unchanged; it derives the admin contracts from INVENTORY and requires `registered == classified`) | Done | `src/dashboard/index.html`, `src/dashboard/console-tools.js`, `tests/admin_route_coverage.py` |
+| ITEM-010 | TEST-A15 Playwright steps; CONSOLE-ADMIN folded row within budget (CON-003) | Done | `tests/dashboard_memory_mode.py`, `docs/CONSOLE-ADMIN.md` |
 | ITEM-011 | Dispatch `dashboard-capture.yml` on the integrated feature branch; commit the artifact output; `tests/dashboard_tours.py` passes (REQ-A10) | Not Started | `site/assets/dashboard/*`, `site/index.html` |
 
 ### EPIC-004: Release CI guard (Part B) — IMPLEMENTED; review fixes R1–R3/L1 applied (v1.4); re-review acceptance and TEST-B11 live dry runs pending
@@ -843,3 +843,4 @@ Engineering effort is the human-equivalent design, coding, testing and review ti
 | 1.2 | 2026-11-09 | Implementation clarifications by the coder before coding: (1) the tag endpoint is `commits/refs/tags/{tag}`, verified live (`commits/tags/{tag}` answers 422); (2) every `gh api` subprocess has a 60 s timeout that counts as a failed try, the guard uses its own bounded pagination instead of `gh_pages`, and no sleep passes the deadline (AC-008); (3) report mode exits 1 with an explicit `error` verdict when the evaluation itself fails, and still never sets `verified=true`; (4) preflight `bindings` is `null` for every `unavailable` outcome, matching the wire table; (5) TEST-B11 dry runs use different states at one head (`missing` before CI, `qualified` after). |
 | 1.3 | 2026-11-09 | EPIC-001 implementation notes: TEST-A02 drops the evidence collection, not the graph, for the missing-resource refusal; TEST-A09 tolerates the router's generic per-request audit access records, and its log sweep is a non-disclosure check only, with absence of new log and audit writes pinned by a separate static check. |
 | 1.4 | 2026-11-09 | EPIC-004 independent review R1–R3, L1: PyPI qualifies every wheel source commit of the checksum-validated release manifest and binds the uploaded wheels to it; job listings are counted; retry backoff is clamped to the active deadline; malformed fields fail closed without retry; freshness is stated at guard evaluation (§3.5.5, TEST-B12). |
+| 1.5 | 2026-11-09 | EPIC-003 controls: preflight and status buttons, handlers and INVENTORY entries; TEST-A15 Playwright steps after TEST-015; CONSOLE-ADMIN reload row folded within its 2,500-word budget. `admin_route_coverage.py`, `dashboard_feature_coverage.py` and `content_budget.py` pass; TEST-A15 runs in CI (no local Playwright driver). Recapture pending. |
