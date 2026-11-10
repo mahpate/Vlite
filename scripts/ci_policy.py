@@ -4,6 +4,7 @@ import os
 import re
 import subprocess
 import sys
+import time
 
 
 def docs_only(paths):
@@ -137,5 +138,212 @@ def route():
         print("Full native matrix; the Docker job is skipped (no container file changed)")
 
 
+# Release CI guard: publication needs a successful full ci.yml run at the exact commit.
+CI_PATH = ".github/workflows/ci.yml"
+RELEASE_TAG = re.compile(r"v[0-9][0-9A-Za-z.+-]*")
+COMMIT_SHA = re.compile(r"[0-9a-f]{40}")
+GH_TIMEOUT_SECONDS = 60
+RETRY_BACKOFF_SECONDS = (5, 15)
+POLL_SECONDS = 60
+
+
+class GuardError(Exception):
+    """The guard could not reach a verdict, so it fails closed."""
+
+
+class GuardFailure(Exception):
+    """Enforce mode found no qualifying run within its bounds."""
+
+
+def gh_json(*args):
+    """One `gh api` call with a hard timeout; a timeout raises like any other failure."""
+    done = subprocess.run(
+        ["gh", "api", *args], capture_output=True, text=True, timeout=GH_TIMEOUT_SECONDS
+    )
+    if done.returncode != 0:
+        raise GuardError(f"gh api {args[-1]} exited {done.returncode}: {done.stderr.strip()}")
+    return json.loads(done.stdout)
+
+
+def gh_slurp(endpoint):
+    return gh_json("--paginate", "--slurp", endpoint)
+
+
+def gh_object(endpoint):
+    return gh_json(endpoint)
+
+
+def retried(call, sleep):
+    failure = None
+    for backoff in RETRY_BACKOFF_SECONDS + (None,):
+        try:
+            return call()
+        except Exception as error:  # any failure, a timeout included, is one failed try
+            failure = error
+        if backoff is not None:
+            sleep(backoff)
+    raise GuardError(f"GitHub API failed after {len(RETRY_BACKOFF_SECONDS) + 1} tries: {failure!r}")
+
+
+def slurped(pages, field, counted=False):
+    if not (isinstance(pages, list) and pages and all(
+        isinstance(page, dict) and isinstance(page.get(field), list) for page in pages
+    )):
+        raise GuardError(f"malformed {field} pages")
+    items = [item for page in pages for item in page[field]]
+    if counted and len(items) != pages[0]["total_count"]:
+        raise GuardError(f"collected {len(items)} {field}, but total_count is {pages[0]['total_count']}")
+    return items
+
+
+def wait_minutes(env, name, default, upper):
+    value = env.get(name) or str(default)
+    if not re.fullmatch(r"[0-9]{1,3}", value) or int(value) > upper:
+        raise GuardError(f"{name} must be an integer from 0 to {upper}, not {value!r}")
+    return int(value)
+
+
+def target_sha(env, repo, api_object, sleep):
+    tag, ci_sha = env.get("CI_TAG") or "", env.get("CI_SHA") or ""
+    if tag:
+        if not RELEASE_TAG.fullmatch(tag):
+            raise GuardError(f"CI_TAG {tag!r} is not a release tag")
+        sha = retried(lambda: api_object(f"repos/{repo}/commits/refs/tags/{tag}")["sha"], sleep)
+        if ci_sha and ci_sha != sha:
+            raise GuardError(f"CI_SHA {ci_sha} is not {sha}, the commit of tag {tag}: the tag moved")
+    else:
+        sha = ci_sha or env.get("GITHUB_SHA", "")
+    if not (isinstance(sha, str) and COMMIT_SHA.fullmatch(sha)):
+        raise GuardError(f"the target commit {sha!r} is not 40 lowercase hex characters")
+    return sha
+
+
+def classify(run, repo, sha, workflow_id, jobs_of, refetch):
+    """The qualification rules in order, on the latest attempt; None means not a candidate."""
+    if run["workflow_id"] != workflow_id or run["path"] != CI_PATH or run["head_sha"] != sha:
+        return None
+    if run["event"] not in ("push", "workflow_dispatch"):
+        return "rejected", f"event {run['event']}"
+    head = run["head_repository"] or {}
+    if not run["repository"]["full_name"] == head.get("full_name") == repo:
+        return "rejected", "foreign repository"
+    if run["status"] != "completed":
+        return "pending", f"status {run['status']}"
+    if run["conclusion"] != "success":
+        return "rejected", f"conclusion {run['conclusion'] or 'null'}"
+    jobs = jobs_of(run)
+    required = [job for job in jobs if job["name"] == "CI required"]
+    if not (len(required) == 1 and required[0]["conclusion"] == "success" and full_ci_jobs(jobs)):
+        return "rejected", "partial CI (docs-only or Docker skipped)"
+    fresh = refetch(run)
+    if (fresh["run_attempt"], fresh["status"], fresh["conclusion"]) != (run["run_attempt"], "completed", "success"):
+        return "pending", f"rerun started (attempt {fresh['run_attempt']}, status {fresh['status']})"
+    return "qualified", "qualified"
+
+
+def evaluate(repo, sha, workflow_id, api, api_object, sleep):
+    runs = retried(lambda: slurped(
+        api(f"repos/{repo}/actions/workflows/ci.yml/runs?head_sha={sha}&per_page=100"),
+        "workflow_runs", counted=True,
+    ), sleep)
+
+    def jobs_of(run):
+        endpoint = f"repos/{repo}/actions/runs/{run['id']}/attempts/{run['run_attempt']}/jobs?per_page=100"
+        return retried(lambda: slurped(api(endpoint), "jobs"), sleep)
+
+    def refetch(run):
+        return retried(lambda: api_object(f"repos/{repo}/actions/runs/{run['id']}"), sleep)
+
+    candidates = []
+    for run in runs:
+        result = classify(run, repo, sha, workflow_id, jobs_of, refetch)
+        if result:
+            candidates.append((run, *result))
+            if result[0] == "qualified":
+                return "qualified", candidates
+    states = {state for _, state, _ in candidates}
+    verdict = "pending" if "pending" in states else "rejected" if candidates else "missing"
+    return verdict, candidates
+
+
+def candidate_lines(candidates):
+    return "".join(
+        f"- {run.get('html_url')}, {run.get('event')}, {run.get('head_branch')}, "
+        f"attempt {run.get('run_attempt')}, {reason}\n"
+        for run, _, reason in candidates
+    ) or "- no candidate ci.yml run at this commit\n"
+
+
+def remedy(env):
+    ref = env.get("CI_TAG") or env.get("GITHUB_REF_NAME") or "<ref>"
+    return (
+        f"Remedy: run `gh workflow run ci.yml --ref {ref} -f docker=true` (the release branch or tag at "
+        "this commit), or re-run a failed or partial CI run with Docker on. When it succeeds, use "
+        "Re-run failed jobs on this run. No re-tag is needed.\n"
+    )
+
+
+def guard(env, mode, api, api_object, sleep, clock):
+    """Returns (verified, summary) or raises GuardFailure (enforce) or another error."""
+    start = clock()
+    if mode not in ("enforce", "report"):
+        raise GuardError(f"CI_GUARD_MODE must be enforce or report, not {mode!r}")
+    if mode == "report" and env.get("GITHUB_REF", "").startswith("refs/tags/"):
+        raise GuardError("a tag run cannot be report-only")
+    wait = wait_minutes(env, "CI_WAIT_MINUTES", 120, 240)
+    grace = wait_minutes(env, "CI_MISSING_GRACE_MINUTES", 15, wait)
+    repo = env["GITHUB_REPOSITORY"]
+    sha = target_sha(env, repo, api_object, sleep)
+    workflow_id = retried(lambda: api_object(f"repos/{repo}/actions/workflows/ci.yml")["id"], sleep)
+    while True:
+        verdict, candidates = evaluate(repo, sha, workflow_id, api, api_object, sleep)
+        if mode == "report":
+            return False, (
+                f"Release CI guard verdict: {verdict} (report mode; publication is never authorized) "
+                f"for {sha}\n\n{candidate_lines(candidates)}"
+                + ("" if verdict == "qualified" else "\n" + remedy(env))
+            )
+        if verdict == "qualified":
+            return True, f"Release CI guard verdict: qualified for {sha}: {candidates[-1][0]['html_url']}\n"
+        deadline = start + 60 * (wait if verdict == "pending" else grace)
+        remaining = deadline - clock()
+        if remaining <= 0:
+            raise GuardFailure(
+                f"Release CI guard verdict: {verdict}: no qualifying full CI run for {sha} within "
+                f"{(wait if verdict == 'pending' else grace)} minutes.\n\n{candidate_lines(candidates)}\n"
+                + remedy(env)
+            )
+        sleep(min(POLL_SECONDS, remaining))
+
+
+def append(env, name, text):
+    with open(env[name], "a", encoding="utf-8") as target:
+        target.write(text)
+
+
+def release_ci(env, api, api_object, sleep, clock):
+    """Exit code of the guard; `verified=true` is written only by enforce mode after a pass."""
+    mode = env.get("CI_GUARD_MODE") or "enforce"
+    try:
+        verified, summary = guard(env, mode, api, api_object, sleep, clock)
+        print(summary)
+        append(env, "GITHUB_STEP_SUMMARY", summary + "\n")
+        append(env, "GITHUB_OUTPUT", f"verified={str(verified and mode == 'enforce').lower()}\n")
+        return 0
+    except Exception as error:
+        text = str(error) if isinstance(error, GuardFailure) else f"Release CI guard verdict: error\n\n{error!r}\n"
+        print(text, file=sys.stderr)
+        for name, content in (("GITHUB_STEP_SUMMARY", text + "\n"), ("GITHUB_OUTPUT", "verified=false\n")):
+            try:
+                append(env, name, content)
+            except Exception as failure:
+                print(f"cannot write {name}: {failure!r}", file=sys.stderr)
+        return 1
+
+
+def release_ci_main():
+    sys.exit(release_ci(os.environ, gh_slurp, gh_object, time.sleep, time.monotonic))
+
+
 if __name__ == "__main__":
-    {"route": route, "image-ci": image_ci}[sys.argv[1]]()
+    {"route": route, "image-ci": image_ci, "release-ci": release_ci_main}[sys.argv[1]]()

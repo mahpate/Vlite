@@ -786,16 +786,16 @@ Depends on EPIC-001 for merge; the recapture comes last.
 | ITEM-010 | TEST-A15 Playwright steps; CONSOLE-ADMIN folded row within budget (CON-003) | Not Started | `tests/dashboard_memory_mode.py`, `docs/CONSOLE-ADMIN.md` |
 | ITEM-011 | Dispatch `dashboard-capture.yml` on the integrated feature branch; commit the artifact output; `tests/dashboard_tours.py` passes (REQ-A10) | Not Started | `site/assets/dashboard/*`, `site/index.html` |
 
-### EPIC-004: Release CI guard (Part B)
+### EPIC-004: Release CI guard (Part B) — DONE (TEST-B11 live dry runs pending)
 
 Independent of the other epics.
 
 | Task | Description | Status | Relevant Files |
 |---|---|---|---|
-| ITEM-012 | `release-ci` per §3.5.1–§3.5.3 with injectable API, sleep and clock; existing functions byte-identical (REQ-B01) | Not Started | `scripts/ci_policy.py` |
-| ITEM-013 | `ci-guard` jobs and the `needs`/`if` edits (REQ-B02, B03) | Not Started | `.github/workflows/release.yml`, `.github/workflows/pypi.yml` |
-| ITEM-014 | TEST-B01–B10 | Not Started | `tests/ci_workflows.py` |
-| ITEM-015 | Maintainer note (REQ-B05). The coordinator performs the TEST-B11 dry runs on the feature branch | Not Started | `docs/INSTALL.md` |
+| ITEM-012 | `release-ci` per §3.5.1–§3.5.3 with injectable API, sleep and clock; existing functions byte-identical (REQ-B01) | Done | `scripts/ci_policy.py` |
+| ITEM-013 | `ci-guard` jobs and the `needs`/`if` edits (REQ-B02, B03) | Done | `.github/workflows/release.yml`, `.github/workflows/pypi.yml` |
+| ITEM-014 | TEST-B01–B10 | Done | `tests/ci_workflows.py` |
+| ITEM-015 | Maintainer note (REQ-B05). The coordinator performs the TEST-B11 dry runs on the feature branch | Done | `docs/INSTALL.md` |
 
 ### 14.1 Effort estimate
 

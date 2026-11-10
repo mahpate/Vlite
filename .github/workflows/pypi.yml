@@ -24,9 +24,33 @@ concurrency:
   cancel-in-progress: false
 
 jobs:
+  # Uploads only after a successful full ci.yml run at the tag's commit
+  # (scripts/ci_policy.py release-ci); CI must already be complete.
+  ci-guard:
+    if: github.event_name == 'workflow_dispatch' || (github.event.workflow_run.conclusion == 'success' && startsWith(github.event.workflow_run.head_branch, 'v'))
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    permissions:
+      contents: read
+      actions: read
+    outputs:
+      verified: ${{ steps.guard.outputs.verified }}
+    steps:
+      - uses: actions/checkout@v5
+      - id: guard
+        env:
+          GH_TOKEN: ${{ github.token }}
+          CI_GUARD_MODE: enforce
+          CI_TAG: ${{ github.event.inputs.tag || github.event.workflow_run.head_branch }}
+          CI_SHA: ${{ github.event.workflow_run.head_sha }}
+          CI_WAIT_MINUTES: 0
+          CI_MISSING_GRACE_MINUTES: 0
+        run: python3 scripts/ci_policy.py release-ci
+
   publish:
     name: publish (${{ matrix.project }})
-    if: github.event_name == 'workflow_dispatch' || (github.event.workflow_run.conclusion == 'success' && startsWith(github.event.workflow_run.head_branch, 'v'))
+    needs: ci-guard
+    if: (github.event_name == 'workflow_dispatch' || (github.event.workflow_run.conclusion == 'success' && startsWith(github.event.workflow_run.head_branch, 'v'))) && needs.ci-guard.outputs.verified == 'true'
     runs-on: ubuntu-latest
     strategy:
       fail-fast: false
