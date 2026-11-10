@@ -1,4 +1,5 @@
 """Conservative CI routing and exact-source image publication checks."""
+import hashlib
 import json
 import os
 import re
@@ -173,7 +174,8 @@ def gh_object(endpoint):
     return gh_json(endpoint)
 
 
-def retried(call, sleep):
+def retried(call, sleep, clock, deadline):
+    """At most three tries; each backoff is clamped so that no sleep passes `deadline`."""
     failure = None
     for backoff in RETRY_BACKOFF_SECONDS + (None,):
         try:
@@ -181,7 +183,9 @@ def retried(call, sleep):
         except Exception as error:  # any failure, a timeout included, is one failed try
             failure = error
         if backoff is not None:
-            sleep(backoff)
+            pause = min(backoff, max(0, deadline - clock()))
+            if pause > 0:
+                sleep(pause)
     raise GuardError(f"GitHub API failed after {len(RETRY_BACKOFF_SECONDS) + 1} tries: {failure!r}")
 
 
@@ -191,8 +195,9 @@ def slurped(pages, field, counted=False):
     )):
         raise GuardError(f"malformed {field} pages")
     items = [item for page in pages for item in page[field]]
-    if counted and len(items) != pages[0]["total_count"]:
-        raise GuardError(f"collected {len(items)} {field}, but total_count is {pages[0]['total_count']}")
+    total = pages[0].get("total_count")
+    if counted and (type(total) is not int or len(items) != total):
+        raise GuardError(f"collected {len(items)} {field}, but total_count is {total!r}")
     return items
 
 
@@ -203,12 +208,12 @@ def wait_minutes(env, name, default, upper):
     return int(value)
 
 
-def target_sha(env, repo, api_object, sleep):
+def target_sha(env, repo, api_object, retry):
     tag, ci_sha = env.get("CI_TAG") or "", env.get("CI_SHA") or ""
     if tag:
         if not RELEASE_TAG.fullmatch(tag):
             raise GuardError(f"CI_TAG {tag!r} is not a release tag")
-        sha = retried(lambda: api_object(f"repos/{repo}/commits/refs/tags/{tag}")["sha"], sleep)
+        sha = retry(lambda: api_object(f"repos/{repo}/commits/refs/tags/{tag}")["sha"])
         if ci_sha and ci_sha != sha:
             raise GuardError(f"CI_SHA {ci_sha} is not {sha}, the commit of tag {tag}: the tag moved")
     else:
@@ -241,18 +246,18 @@ def classify(run, repo, sha, workflow_id, jobs_of, refetch):
     return "qualified", "qualified"
 
 
-def evaluate(repo, sha, workflow_id, api, api_object, sleep):
-    runs = retried(lambda: slurped(
+def evaluate(repo, sha, workflow_id, api, api_object, retry):
+    runs = retry(lambda: slurped(
         api(f"repos/{repo}/actions/workflows/ci.yml/runs?head_sha={sha}&per_page=100"),
         "workflow_runs", counted=True,
-    ), sleep)
+    ))
 
     def jobs_of(run):
         endpoint = f"repos/{repo}/actions/runs/{run['id']}/attempts/{run['run_attempt']}/jobs?per_page=100"
-        return retried(lambda: slurped(api(endpoint), "jobs"), sleep)
+        return retry(lambda: slurped(api(endpoint), "jobs", counted=True))
 
     def refetch(run):
-        return retried(lambda: api_object(f"repos/{repo}/actions/runs/{run['id']}"), sleep)
+        return retry(lambda: api_object(f"repos/{repo}/actions/runs/{run['id']}"))
 
     candidates = []
     for run in runs:
@@ -283,28 +288,66 @@ def remedy(env):
     )
 
 
-def guard(env, mode, api, api_object, sleep, clock):
-    """Returns (verified, summary) or raises GuardFailure (enforce) or another error."""
-    start = clock()
-    if mode not in ("enforce", "report"):
-        raise GuardError(f"CI_GUARD_MODE must be enforce or report, not {mode!r}")
-    if mode == "report" and env.get("GITHUB_REF", "").startswith("refs/tags/"):
-        raise GuardError("a tag run cannot be report-only")
-    wait = wait_minutes(env, "CI_WAIT_MINUTES", 120, 240)
-    grace = wait_minutes(env, "CI_MISSING_GRACE_MINUTES", 15, wait)
-    repo = env["GITHUB_REPOSITORY"]
-    sha = target_sha(env, repo, api_object, sleep)
-    workflow_id = retried(lambda: api_object(f"repos/{repo}/actions/workflows/ci.yml")["id"], sleep)
+def manifest_sources(directory, tag, sha):
+    """The checksum-verified release manifest's sha256 and the commits its wheels were built from."""
+    folder = os.path.join(directory, "")
+    try:
+        sums = {}
+        with open(folder + "SHA256SUMS", encoding="ascii") as source:
+            for line in source.read().splitlines():
+                match = re.fullmatch(r"([0-9a-f]{64}) [ *]([^/\\]+)", line)
+                if not match or match[2] in sums:
+                    raise GuardError(f"malformed SHA256SUMS line {line!r}")
+                sums[match[2]] = match[1]
+        with open(folder + "release-manifest.json", "rb") as source:
+            data = source.read()
+        manifest = json.loads(data)
+    except (OSError, ValueError) as error:
+        raise GuardError(f"cannot read the release manifest: {error!r}") from error
+    digest = hashlib.sha256(data).hexdigest()
+    if sums.get("release-manifest.json") != digest:
+        raise GuardError("release-manifest.json does not match SHA256SUMS")
+    if not (isinstance(manifest, dict) and isinstance(manifest.get("assets"), list)):
+        raise GuardError("malformed release manifest")
+    if manifest.get("version") != tag.removeprefix("v"):
+        raise GuardError(f"manifest version {manifest.get('version')!r} does not match tag {tag}")
+    if manifest.get("source_commit") != sha:
+        raise GuardError(f"manifest source_commit {manifest.get('source_commit')!r} is not {sha}, "
+                         f"the commit of tag {tag}")
+    names, sources = set(), set()
+    for asset in manifest["assets"]:
+        if not isinstance(asset, dict):
+            raise GuardError(f"malformed manifest asset {asset!r}")
+        name, source = asset.get("name"), asset.get("source_commit", sha)
+        if not (isinstance(name, str) and name not in names and sums.get(name) == asset.get("sha256")
+                and isinstance(source, str) and COMMIT_SHA.fullmatch(source)):
+            raise GuardError(f"manifest asset {asset!r} is malformed, repeated or not in SHA256SUMS")
+        names.add(name)
+        if name.endswith(".whl"):
+            sources.add(source)
+    if not sources:
+        raise GuardError("the release manifest lists no wheels")
+    return [sha] + sorted(sources - {sha}), digest
+
+
+def await_ci(env, mode, repo, sha, workflow_id, api, api_object, sleep, clock, start, wait, grace):
+    """Polls one commit; returns its summary, or raises GuardFailure (enforce) when it never qualifies."""
+    # Before the first verdict the active deadline is the guard's overall bound (grace <= wait);
+    # afterwards it is the bound of the previous verdict. No poll or retry sleep passes it.
+    deadline = start + 60 * max(wait, grace)
     while True:
-        verdict, candidates = evaluate(repo, sha, workflow_id, api, api_object, sleep)
+        verdict, candidates = evaluate(
+            repo, sha, workflow_id, api, api_object,
+            lambda call, until=deadline: retried(call, sleep, clock, until),
+        )
         if mode == "report":
-            return False, (
+            return (
                 f"Release CI guard verdict: {verdict} (report mode; publication is never authorized) "
                 f"for {sha}\n\n{candidate_lines(candidates)}"
                 + ("" if verdict == "qualified" else "\n" + remedy(env))
             )
         if verdict == "qualified":
-            return True, f"Release CI guard verdict: qualified for {sha}: {candidates[-1][0]['html_url']}\n"
+            return f"Release CI guard verdict: qualified for {sha}: {candidates[-1][0]['html_url']}\n"
         deadline = start + 60 * (wait if verdict == "pending" else grace)
         remaining = deadline - clock()
         if remaining <= 0:
@@ -316,6 +359,36 @@ def guard(env, mode, api, api_object, sleep, clock):
         sleep(min(POLL_SECONDS, remaining))
 
 
+def guard(env, mode, api, api_object, sleep, clock):
+    """Returns (verified, summary, outputs) or raises GuardFailure (enforce) or another error.
+
+    With CI_MANIFEST_DIR (PyPI), every distinct wheel source commit of the release manifest must
+    qualify, not only the tag's commit."""
+    start = clock()
+    if mode not in ("enforce", "report"):
+        raise GuardError(f"CI_GUARD_MODE must be enforce or report, not {mode!r}")
+    if mode == "report" and env.get("GITHUB_REF", "").startswith("refs/tags/"):
+        raise GuardError("a tag run cannot be report-only")
+    wait = wait_minutes(env, "CI_WAIT_MINUTES", 120, 240)
+    grace = wait_minutes(env, "CI_MISSING_GRACE_MINUTES", 15, wait)
+    if env.get("CI_MANIFEST_DIR") and not env.get("CI_TAG"):
+        raise GuardError("CI_MANIFEST_DIR needs CI_TAG")
+    repo = env["GITHUB_REPOSITORY"]
+
+    def retry(call):
+        return retried(call, sleep, clock, start + 60 * max(wait, grace))
+    sha = target_sha(env, repo, api_object, retry)
+    shas, outputs = [sha], {}
+    if env.get("CI_MANIFEST_DIR"):
+        shas, outputs["manifest_sha256"] = manifest_sources(env["CI_MANIFEST_DIR"], env["CI_TAG"], sha)
+    workflow_id = retry(lambda: api_object(f"repos/{repo}/actions/workflows/ci.yml")["id"])
+    summary = "".join(
+        await_ci(env, mode, repo, commit, workflow_id, api, api_object, sleep, clock, start, wait, grace)
+        for commit in shas
+    )
+    return mode == "enforce", summary, outputs
+
+
 def append(env, name, text):
     with open(env[name], "a", encoding="utf-8") as target:
         target.write(text)
@@ -325,10 +398,12 @@ def release_ci(env, api, api_object, sleep, clock):
     """Exit code of the guard; `verified=true` is written only by enforce mode after a pass."""
     mode = env.get("CI_GUARD_MODE") or "enforce"
     try:
-        verified, summary = guard(env, mode, api, api_object, sleep, clock)
+        verified, summary, outputs = guard(env, mode, api, api_object, sleep, clock)
+        verified = verified and mode == "enforce"
         print(summary)
         append(env, "GITHUB_STEP_SUMMARY", summary + "\n")
-        append(env, "GITHUB_OUTPUT", f"verified={str(verified and mode == 'enforce').lower()}\n")
+        append(env, "GITHUB_OUTPUT", f"verified={str(verified).lower()}\n" + "".join(
+            f"{name}={value}\n" for name, value in outputs.items() if verified))
         return 0
     except Exception as error:
         text = str(error) if isinstance(error, GuardFailure) else f"Release CI guard verdict: error\n\n{error!r}\n"

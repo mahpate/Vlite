@@ -1,5 +1,6 @@
 """CI routing, qualification and cache wiring regressions (standard library only)."""
 import contextlib
+import hashlib
 import importlib.util
 import io
 import json
@@ -801,6 +802,52 @@ def flaky(call, errors):
     return wrapped
 
 
+OTHER = "1" * 40
+WHEEL = "vlite_client-0.7.4-py3-none-any.whl"
+
+
+def asset(name, content=b"wheel", **extra):
+    return dict(name=name, bytes=len(content), sha256=hashlib.sha256(content).hexdigest(), **extra)
+
+
+def release_files(folder, assets, manifest=None, sums=None):
+    """release-manifest.json and SHA256SUMS as bindings/release_assets.py writes them."""
+    folder.mkdir(parents=True)
+    manifest = dict(version="0.7.4", source_commit=SHA, assets=assets) if manifest is None else manifest
+    data = (json.dumps(manifest, indent=2) + "\n").encode()
+    (folder / "release-manifest.json").write_bytes(data)
+    lines = [f"{entry['sha256']}  {entry['name']}" for entry in assets if isinstance(entry, dict)]
+    lines.append(f"{hashlib.sha256(data).hexdigest()}  release-manifest.json")
+    (folder / "SHA256SUMS").write_text("\n".join(sums(lines) if sums else lines) + "\n", encoding="ascii")
+    return hashlib.sha256(data).hexdigest()
+
+
+def at_sources(github, listings):
+    """Serve the ci.yml runs of further commits (`listings` maps a SHA to its runs)."""
+    original = github.api
+
+    def api(endpoint):
+        for sha, runs in listings.items():
+            if endpoint == RUNS.replace(SHA, sha):
+                github.calls.append(endpoint)
+                github.current = runs
+                return [dict(total_count=len(runs), workflow_runs=runs)]
+        return original(endpoint)
+    github.api = api
+
+
+def job_pages(github, pages):
+    """Answer every attempt-jobs listing with `pages`."""
+    original = github.api
+
+    def api(endpoint):
+        if "/jobs?" in endpoint:
+            github.calls.append(endpoint)
+            return pages
+        return original(endpoint)
+    github.api = api
+
+
 class ReleaseGuard(unittest.TestCase):
     """scripts/ci_policy.py release-ci and the ci-guard jobs that gate every publication."""
 
@@ -1076,8 +1123,10 @@ class ReleaseGuard(unittest.TestCase):
         for workflow, expected in gated.items():
             text, _, jobs = self.jobs(workflow)
             self.assertNotIn("continue-on-error", text)
+            # Downloading release assets is read-only; creating or editing a release publishes.
             publishing = {name for name, block in jobs.items()
-                          if any(marker in block for marker in PUBLICATION_MARKERS)}
+                          if any(marker in block.replace("gh release download", "")
+                                 for marker in PUBLICATION_MARKERS)}
             self.assertLessEqual(publishing, expected, workflow)
             self.assertNotIn("ci-guard", publishing)
             for name in expected:
@@ -1124,6 +1173,220 @@ class ReleaseGuard(unittest.TestCase):
         table = source.rsplit("\n", 2)[-2]
         for entry in ('"route": route', '"image-ci": image_ci', '"release-ci": '):
             self.assertIn(entry, table)
+
+    def test_b07_job_counts_must_match_the_collected_jobs(self):
+        jobs = guard_jobs()
+        self.assertEqual(len(jobs), 18)
+        for name, pages in (("total_count 19", [dict(total_count=19, jobs=jobs)]),
+                            ("no total_count", [dict(jobs=jobs[:9]), dict(jobs=jobs[9:])]),
+                            ("total_count text", [dict(total_count="18", jobs=jobs)])):
+            for mode in ("enforce", "report"):
+                with self.subTest(pages=name, mode=mode):
+                    github = FakeGitHub([[ci_run()]])
+                    job_pages(github, pages)
+                    code, output, summary, _ = self.guard(github, CI_GUARD_MODE=mode, GITHUB_REF="refs/heads/release")
+                    self.assertEqual((code, output), (1, "verified=false\n"))
+                    self.assertIn("verdict: error", summary)
+                    self.assertEqual(sum("/jobs?" in call for call in github.calls), 3)
+        github = FakeGitHub([[ci_run()]])
+        job_pages(github, [dict(total_count=18, jobs=jobs[:9]), dict(total_count=18, jobs=jobs[9:])])
+        code, output, _, _ = self.guard(github)
+        self.assertEqual((code, output), (0, "verified=true\n"))
+        self.assertIn("verdict: qualified", self.report(github))
+
+    def test_b03_retry_backoff_never_sleeps_past_the_active_deadline(self):
+        pending = ci_run(status="in_progress", conclusion=None)
+        for name, runs, fail_at, expected in (
+            # The reviewer's case: a transient failure exactly at the pending deadline.
+            ("pending, fails at the deadline", [pending], [2], [(1000, 60)]),
+            # After a `missing` verdict, the active deadline is the grace, not the wait.
+            ("missing, fails at the grace", [], [2], [(1000, 60)]),
+        ):
+            with self.subTest(case=name):
+                github = FakeGitHub([runs])
+                listings = [0]
+                original = github.api
+
+                def api(endpoint, github=github, original=original, listings=listings, fail_at=fail_at):
+                    if endpoint == RUNS:
+                        listings[0] += 1
+                        if listings[0] in fail_at:
+                            raise RuntimeError("HTTP 502")
+                    return original(endpoint)
+                github.api = api
+                wait = "2" if runs == [] else "1"
+                self.assert_failed(github, CI_WAIT_MINUTES=wait, CI_MISSING_GRACE_MINUTES="1")
+                self.assertEqual(github.sleeps, expected)
+                self.assertEqual(github.now, 1060)
+                self.assertEqual(listings[0], 3)
+        # Before the first verdict the deadline is the overall bound: a lookup failing 3 s before
+        # it sleeps 3 s, not 5, and the next retry does not sleep at all.
+        github = FakeGitHub([[pending]])
+        original, tries = github.api_object, []
+
+        def late(endpoint):
+            if endpoint == f"repos/{REPO}/actions/workflows/ci.yml":
+                tries.append(github.now)
+                if len(tries) == 1:
+                    github.now = 1057
+                if len(tries) < 3:
+                    raise RuntimeError("HTTP 502")
+            return original(endpoint)
+        github.api_object = late
+        self.assert_failed(github, CI_WAIT_MINUTES="1", CI_MISSING_GRACE_MINUTES="1")
+        self.assertEqual(github.sleeps, [(1057, 3)])
+        self.assertEqual(tries, [1000, 1060, 1060])
+        self.assertEqual((github.now, github.evaluations), (1060, 1))
+
+    def test_b07_with_no_wait_retries_are_immediate(self):
+        for errors, code in (([RuntimeError("HTTP 502")] * 2, 0), ([RuntimeError("HTTP 502")] * 3, 1)):
+            with self.subTest(errors=len(errors)):
+                github = FakeGitHub([[ci_run()]])
+                tries = []
+                failing = flaky(github.api, errors)
+                github.api = lambda endpoint: tries.append(endpoint) or failing(endpoint)
+                result, output, _, _ = self.guard(github, CI_WAIT_MINUTES="0", CI_MISSING_GRACE_MINUTES="0")
+                self.assertEqual(result, code)
+                self.assertEqual(output, "verified=true\n" if code == 0 else "verified=false\n")
+                self.assertEqual(github.sleeps, [])
+                self.assertEqual(github.now, 1000)
+                self.assertEqual(tries.count(RUNS), 3)
+
+    def test_b07_a_malformed_run_or_refetch_fails_closed_without_retry(self):
+        # Missing fields in a well-formed response are terminal: no retry, no sleep, no pass.
+        for name, github in (
+            ("listed run without status", FakeGitHub([[{k: v for k, v in ci_run().items() if k != "status"}]])),
+            ("refetch without run_attempt", FakeGitHub(
+                [[ci_run()]], refetch={5: {k: v for k, v in ci_run().items() if k != "run_attempt"}})),
+            ("job without conclusion", FakeGitHub([[ci_run()]], jobs={(5, 1): [dict(name="CI required")]})),
+        ):
+            with self.subTest(case=name):
+                message = self.assert_failed(github)
+                self.assertIn("verdict: error", message)
+                self.assertEqual((github.evaluations, github.sleeps), (1, []))
+
+    def test_b12_pypi_qualifies_every_wheel_source_of_the_checksummed_manifest(self):
+        env = dict(CI_TAG="v0.7.4", CI_SHA="", CI_WAIT_MINUTES="0", CI_MISSING_GRACE_MINUTES="0")
+        other_runs = f"repos/{REPO}/actions/workflows/ci.yml/runs?head_sha={OTHER}&per_page=100"
+        folder = self.directory / "plain"
+        digest = release_files(folder, [asset(WHEEL), asset("vlite-0.7.4-linux.zip", b"zip", source_commit=OTHER)])
+        github = FakeGitHub([[ci_run()]], tags={"v0.7.4": SHA})
+        code, output, _, _ = self.guard(github, CI_MANIFEST_DIR=str(folder), **env)
+        self.assertEqual((code, output), (0, f"verified=true\nmanifest_sha256={digest}\n"))
+        self.assertNotIn(other_runs, github.calls)
+        # Report mode never hands a manifest digest to a publisher.
+        self.assertIn("verdict: qualified", self.report(FakeGitHub([[ci_run()]], tags={"v0.7.4": SHA}),
+                                                        CI_MANIFEST_DIR=str(folder), **env))
+        # A corrective wheel built at OTHER needs its own qualifying run.
+        folder = self.directory / "corrective"
+        digest = release_files(folder, [asset(WHEEL, source_commit=OTHER), asset("vlite_embedded-0.7.4.whl", b"e")])
+        for name, runs, reason in (
+            ("no run", [], "verdict: missing"),
+            ("pending", [ci_run(id=6, head_sha=OTHER, status="in_progress", conclusion=None)], "verdict: pending"),
+            ("failed", [ci_run(id=6, head_sha=OTHER, conclusion="failure")], "conclusion failure"),
+        ):
+            for ci_sha in ("", SHA):
+                with self.subTest(source=name, ci_sha=ci_sha):
+                    github = FakeGitHub([[ci_run()]], tags={"v0.7.4": SHA})
+                    at_sources(github, {OTHER: runs})
+                    message = self.assert_failed(github, CI_MANIFEST_DIR=str(folder), **(env | dict(CI_SHA=ci_sha)))
+                    self.assertIn(reason, message)
+                    self.assertIn(OTHER, message)
+                    self.assertEqual(github.calls.count(RUNS), 1)
+                    self.assertEqual(github.sleeps, [])
+        github = FakeGitHub([[ci_run()]], tags={"v0.7.4": SHA})
+        at_sources(github, {OTHER: [ci_run(id=6, head_sha=OTHER)]})
+        code, output, summary, _ = self.guard(github, CI_MANIFEST_DIR=str(folder), **env)
+        self.assertEqual((code, output), (0, f"verified=true\nmanifest_sha256={digest}\n"))
+        self.assertIn(f"qualified for {SHA}", summary)
+        self.assertIn(f"qualified for {OTHER}", summary)
+        self.assertIn(f"repos/{REPO}/actions/runs/6/attempts/1/jobs?per_page=100", github.calls)
+
+    def test_b12_a_malformed_or_mismatched_manifest_fails_closed(self):
+        env = dict(CI_TAG="v0.7.4", CI_WAIT_MINUTES="0", CI_MISSING_GRACE_MINUTES="0")
+        wheel = asset(WHEEL)
+        good = dict(version="0.7.4", source_commit=SHA, assets=[wheel])
+        cases = (
+            ("manifest not in SHA256SUMS", dict(sums=lambda lines: lines[:-1])),
+            ("manifest checksum mismatch", dict(sums=lambda lines: lines[:-1] + ["0" * 64 + "  release-manifest.json"])),
+            ("malformed SHA256SUMS", dict(sums=lambda lines: lines + ["not a checksum line"])),
+            ("SHA256SUMS path", dict(sums=lambda lines: [line.replace(WHEEL, "dir/" + WHEEL) for line in lines])),
+            ("wheel not in SHA256SUMS", dict(sums=lambda lines: lines[1:])),
+            ("version mismatch", dict(manifest=good | dict(version="0.7.5"))),
+            ("default source is not the tag commit", dict(manifest=good | dict(source_commit=OTHER))),
+            ("default source missing", dict(manifest={k: v for k, v in good.items() if k != "source_commit"})),
+            ("asset hash mismatch", dict(manifest=good | dict(assets=[wheel | dict(sha256="0" * 64)]))),
+            ("malformed asset source", dict(manifest=good | dict(assets=[wheel | dict(source_commit="abc")]))),
+            ("upper-case asset source", dict(manifest=good | dict(assets=[wheel | dict(source_commit=OTHER.upper())]))),
+            ("repeated asset", dict(manifest=good | dict(assets=[wheel, wheel]))),
+            ("asset not an object", dict(manifest=good | dict(assets=[wheel, WHEEL]))),
+            ("no wheels", dict(manifest=good | dict(assets=[]))),
+            ("assets not a list", dict(manifest=good | dict(assets={WHEEL: wheel}))),
+            ("manifest not an object", dict(manifest=[good])),
+        )
+        for name, fault in cases:
+            with self.subTest(fault=name):
+                folder = self.directory / name.replace(" ", "-")
+                release_files(folder, [wheel], **fault)
+                github = FakeGitHub([[ci_run()]], tags={"v0.7.4": SHA})
+                self.assertIn("verdict: error", self.assert_failed(github, CI_MANIFEST_DIR=str(folder), **env))
+        folder = self.directory / "json"
+        release_files(folder, [wheel])
+        (folder / "release-manifest.json").write_text("{not json", encoding="utf-8")
+        data = (folder / "release-manifest.json").read_bytes()
+        (folder / "SHA256SUMS").write_text(f"{wheel['sha256']}  {WHEEL}\n"
+                                           f"{hashlib.sha256(data).hexdigest()}  release-manifest.json\n")
+        for name, extra in (("invalid JSON", dict(CI_MANIFEST_DIR=str(folder))),
+                            ("no files", dict(CI_MANIFEST_DIR=str(self.directory / "absent"))),
+                            ("no tag", dict(CI_MANIFEST_DIR=str(folder), CI_TAG=None))):
+            with self.subTest(fault=name):
+                github = FakeGitHub([[ci_run()]], tags={"v0.7.4": SHA})
+                self.assertIn("verdict: error", self.assert_failed(github, **(env | extra)))
+                self.assertNotIn(RUNS, github.calls)
+
+    def test_b12_pypi_uploads_only_wheels_of_the_guarded_manifest(self):
+        text, _, jobs = self.jobs("pypi.yml")
+        guard, publish = jobs["ci-guard"], jobs["publish"]
+        self.assertIn("      manifest_sha256: ${{ steps.guard.outputs.manifest_sha256 }}\n", guard)
+        self.assertIn("          CI_MANIFEST_DIR: release-manifest\n", guard)
+        self.assertRegex(guard, r"\n {10}timeout \d+ gh release download \"\$TAG\" .*--dir release-manifest "
+                                r"--pattern release-manifest\.json --pattern SHA256SUMS\n")
+        self.assertLess(guard.index("gh release download"), guard.index("      - id: guard\n"))
+        self.assertIn("--pattern '*.whl' --pattern release-manifest.json --pattern SHA256SUMS", publish)
+        self.assertIn("          MANIFEST_SHA256: ${{ needs.ci-guard.outputs.manifest_sha256 }}\n", publish)
+        self.assertNotIn("CI_MANIFEST_DIR", (ROOT / ".github/workflows/release.yml").read_text(encoding="utf-8"))
+        script = textwrap.dedent(re.search(r"shell: python\n.*?\n        run: \|\n(.*?)\n      - uses: pypa/",
+                                           publish, re.S)[1])
+        wheels = {WHEEL: b"client", "vlite_client-0.7.4-cp312-linux_x86_64.whl": b"linux"}
+        for name, change, ok in (
+            ("selected", {}, True),
+            ("guard saw another manifest", dict(guarded="0" * 64), False),
+            ("no guarded manifest", dict(guarded=""), False),
+            ("wheel not in the manifest", dict(unlisted=True), False),
+            ("wheel differs from its manifest entry", dict(entry=b"other"), False),
+        ):
+            with self.subTest(case=name):
+                folder = self.directory / name.replace(" ", "-")
+                assets = [asset(wheel, content) for wheel, content in wheels.items()]
+                if change.get("unlisted"):
+                    assets = assets[1:]
+                if "entry" in change:
+                    assets[0] = asset(WHEEL, change["entry"])
+                digest = release_files(folder / "release", assets)
+                sums = (folder / "release" / "SHA256SUMS").read_text()
+                for wheel, content in wheels.items():
+                    (folder / "release" / wheel).write_bytes(content)
+                    digest_line = f"{hashlib.sha256(content).hexdigest()}  {wheel}\n"
+                    if digest_line not in sums:
+                        sums += digest_line
+                (folder / "release" / "SHA256SUMS").write_text(sums)
+                done = policy.subprocess.run(
+                    [policy.sys.executable, "-c", script], cwd=folder, capture_output=True, text=True,
+                    env=os.environ | dict(TAG="v0.7.4", PREFIX="vlite_client",
+                                          MANIFEST_SHA256=change.get("guarded", digest)))
+                self.assertEqual(done.returncode == 0, ok, done.stderr)
+                if ok:
+                    self.assertEqual(sorted(path.name for path in (folder / "pypi-dist").iterdir()), [WHEEL])
 
 
 if __name__ == "__main__":

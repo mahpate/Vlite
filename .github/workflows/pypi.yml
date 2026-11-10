@@ -24,7 +24,8 @@ concurrency:
   cancel-in-progress: false
 
 jobs:
-  # Uploads only after a successful full ci.yml run at the tag's commit
+  # Uploads only after a successful full ci.yml run at the tag's commit and at
+  # every commit the release manifest records for a wheel
   # (scripts/ci_policy.py release-ci); CI must already be complete.
   ci-guard:
     if: github.event_name == 'workflow_dispatch' || (github.event.workflow_run.conclusion == 'success' && startsWith(github.event.workflow_run.head_branch, 'v'))
@@ -35,8 +36,15 @@ jobs:
       actions: read
     outputs:
       verified: ${{ steps.guard.outputs.verified }}
+      manifest_sha256: ${{ steps.guard.outputs.manifest_sha256 }}
     steps:
       - uses: actions/checkout@v5
+      - name: Download the release manifest and checksums
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ github.event.inputs.tag || github.event.workflow_run.head_branch }}
+        run: |
+          timeout 120 gh release download "$TAG" --repo "$GITHUB_REPOSITORY" --dir release-manifest --pattern release-manifest.json --pattern SHA256SUMS
       - id: guard
         env:
           GH_TOKEN: ${{ github.token }}
@@ -45,6 +53,7 @@ jobs:
           CI_SHA: ${{ github.event.workflow_run.head_sha }}
           CI_WAIT_MINUTES: 0
           CI_MISSING_GRACE_MINUTES: 0
+          CI_MANIFEST_DIR: release-manifest
         run: python3 scripts/ci_policy.py release-ci
 
   publish:
@@ -69,30 +78,37 @@ jobs:
       contents: read
       id-token: write
     steps:
-      - name: Download release wheels and checksums
+      - name: Download release wheels, manifest and checksums
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           TAG: ${{ github.event.inputs.tag || github.event.workflow_run.head_branch }}
         run: |
-          gh release download "$TAG" --repo "$GITHUB_REPOSITORY" --dir release --pattern '*.whl' --pattern SHA256SUMS
+          gh release download "$TAG" --repo "$GITHUB_REPOSITORY" --dir release --pattern '*.whl' --pattern release-manifest.json --pattern SHA256SUMS
       - name: Verify checksums and select registry-compatible wheels
         shell: python
         env:
           TAG: ${{ github.event.inputs.tag || github.event.workflow_run.head_branch }}
           PREFIX: ${{ matrix.prefix }}
+          MANIFEST_SHA256: ${{ needs.ci-guard.outputs.manifest_sha256 }}
         run: |
-          import hashlib, os, pathlib, shutil
+          import hashlib, json, os, pathlib, shutil
           release = pathlib.Path("release")
           sums = {}
           for line in (release / "SHA256SUMS").read_text().splitlines():
               digest, name = line.split(maxsplit=1)
               sums[pathlib.PurePosixPath(name.lstrip("*")).name] = digest
+          # The guard qualified CI for the source of every wheel in exactly this manifest.
+          data = (release / "release-manifest.json").read_bytes()
+          digest = hashlib.sha256(data).hexdigest()
+          assert digest == os.environ["MANIFEST_SHA256"] == sums["release-manifest.json"], "manifest"
+          manifest = {asset["name"]: asset["sha256"] for asset in json.loads(data)["assets"]}
           version = os.environ["TAG"].removeprefix("v")
           prefix = os.environ["PREFIX"]
           out = pathlib.Path("pypi-dist")
           out.mkdir()
           for wheel in sorted(release.glob("*.whl")):
-              assert hashlib.sha256(wheel.read_bytes()).hexdigest() == sums[wheel.name], wheel.name
+              digest = hashlib.sha256(wheel.read_bytes()).hexdigest()
+              assert digest == sums[wheel.name] == manifest[wheel.name], wheel.name
               parts = wheel.stem.split("-")
               assert parts[1] == version, f"{wheel.name} does not match {version}"
               # PyPI rejects bare linux_* tags; the audited manylinux wheel covers Linux.

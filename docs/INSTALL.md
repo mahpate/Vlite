@@ -220,7 +220,20 @@ The `ci-guard` jobs of `release.yml` and `pypi.yml` check this
 
 Bounds: the guard waits up to 120 minutes for a pending run and 15 minutes for
 a run to appear. Each GitHub API call times out after 60 s and is tried 3
-times; then the guard fails closed.
+times; then the guard fails closed. Retry backoff (5 s, then 15 s) is cut short
+so that no sleep passes the active deadline: the overall wait bound before the
+first verdict, then the bound of the last verdict. With PyPI's zero wait the
+retries are immediate. A response missing a run or job field is not retried;
+it fails closed at once.
+
+PyPI also downloads `release-manifest.json` and `SHA256SUMS`: the manifest
+must match its checksum, the tag version and the tag's commit, and every
+wheel's source commit (its own `source_commit` or the default) needs its own
+qualifying CI run. A corrective packaging build therefore needs CI at its
+commit. The upload accepts only wheels listed in that exact manifest.
+
+Qualification holds at the instant the guard passes. A CI rerun started
+afterwards does not revoke it; the release run continues.
 
 If the tag was pushed first and the guard failed, do not re-tag. Run
 `gh workflow run ci.yml --ref vX.Y.Z -f docker=true` and, once it is green, use

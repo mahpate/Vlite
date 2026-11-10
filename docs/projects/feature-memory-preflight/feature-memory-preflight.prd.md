@@ -1,6 +1,6 @@
 ---
 goal: VLite MemoryAI grant-change preflight and status, and a release guard that requires successful full CI on the exact commit before any publication
-version: 1.3
+version: 1.4
 date_created: 2026-11-09
 last_updated: 2026-11-09
 owner: VLite maintainers (mahpate/Vlite)
@@ -412,6 +412,29 @@ Behaviour of the edited workflow:
   - The job has no `id-token` permission.
 - `publish` gains `needs: ci-guard`. Its `if` becomes `(<current condition>) && needs.ci-guard.outputs.verified == 'true'`.
 
+#### 3.5.5 Review clarifications (v1.4)
+
+- **Wheel provenance (PyPI).**
+  - Before the guard, `ci-guard` downloads `release-manifest.json` and `SHA256SUMS` (bounded by `timeout 120`) and sets `CI_MANIFEST_DIR`.
+  - The guard fails closed unless:
+    - the manifest's sha256 equals its `SHA256SUMS` line;
+    - `version` equals the tag without `v`;
+    - the default `source_commit` equals the tag's commit (and `CI_SHA` when set);
+    - every asset is unique and listed in `SHA256SUMS` with the same hash.
+  - The tag's commit and every distinct effective wheel source (`asset.source_commit`, else the default) must each qualify under §3.5.1. A documented corrective packaging build is still supported, but only when its own commit qualifies.
+  - On a pass, the guard also outputs `manifest_sha256`. `publish` requires the downloaded manifest to have that hash, and every downloaded wheel to match both `SHA256SUMS` and its manifest entry.
+  - For PyPI, G4's "exact published commit" means every wheel source commit. `release.yml` is unchanged: it builds at the guarded commit.
+- **Counted job listings.** Run listings and attempt-job listings are both counted. A missing, non-integer or mismatched `total_count` is a failed try (FM-B08, TEST-B07).
+- **Bounded retries.**
+  - There are at most 3 tries. Each backoff (5 s, 15 s) is cut to the time left before the active deadline, and a retry with no time left runs at once. No sleep passes the deadline.
+  - The active deadline is start + max(WAIT, GRACE) before the first verdict, then start + WAIT (pending) or start + GRACE (missing).
+  - With zero bounds (PyPI), retries are immediate. API execution time stays excluded only through the 60 s per-call timeout.
+- **Malformed fields.** Malformed pages and count mismatches are retried. A well-formed response missing a run, job or re-fetch field is not retried and fails closed at once.
+- **Freshness.**
+  - Qualification holds at the instant of the successful guard evaluation.
+  - A CI rerun started afterwards does not revoke a guard that already passed (one-shot design, RD-013). G4/RD-011 "latest attempt" applies at that instant.
+  - GitHub reruns and registry pushes cannot be made atomic.
+
 ### 3.6 Operator flow and the tag-first deadlock
 
 1. Recommended order (documented in `docs/INSTALL.md`):
@@ -623,6 +646,7 @@ Behaviour of the edited workflow:
   - `release.yml` `workflow_dispatch:` has no `inputs:`.
   - The `pypi.yml` guard sets `CI_GUARD_MODE: enforce` and has no `id-token`.
   - `image-ci` and `route` stay in the dispatch table, and `test_only_exact_successful_main_ci_is_trusted` passes unchanged.
+- **TEST-B12** (v1.4, review R1): PyPI qualifies the tag commit and every distinct wheel source commit of the checksum-validated manifest; a malformed or mismatched manifest fails closed; the upload step accepts only wheels whose hashes match the guarded manifest. TEST-B03/B07 gain the clamped-retry, immediate zero-wait retry, counted job-listing and no-retry malformed-field regressions.
 - **TEST-B11** (manual, recorded in the PR description by the coordinator): two dispatch dry runs of `release.yml` on the feature branch.
   - The two runs need different qualification states, so they do not both need a prior full CI run. At the integrated head `X`, dispatch `release.yml` **before** any `ci.yml` run exists at `X`: it reports `missing`. Then dispatch full `ci.yml` (Docker on) at `X`; once it is green, dispatch `release.yml` at `X` again: it reports `qualified`. One CI run serves both.
   - Record the run URLs and the guard step summaries.
@@ -786,7 +810,7 @@ Depends on EPIC-001 for merge; the recapture comes last.
 | ITEM-010 | TEST-A15 Playwright steps; CONSOLE-ADMIN folded row within budget (CON-003) | Not Started | `tests/dashboard_memory_mode.py`, `docs/CONSOLE-ADMIN.md` |
 | ITEM-011 | Dispatch `dashboard-capture.yml` on the integrated feature branch; commit the artifact output; `tests/dashboard_tours.py` passes (REQ-A10) | Not Started | `site/assets/dashboard/*`, `site/index.html` |
 
-### EPIC-004: Release CI guard (Part B) — DONE (TEST-B11 live dry runs pending)
+### EPIC-004: Release CI guard (Part B) — IMPLEMENTED; review fixes R1–R3/L1 applied (v1.4); re-review acceptance and TEST-B11 live dry runs pending
 
 Independent of the other epics.
 
@@ -818,3 +842,4 @@ Engineering effort is the human-equivalent design, coding, testing and review ti
 | 1.1 | 2026-11-09 | One read-only `code-review` pass against `12e4829c`. It found no blocker and confirmed the following: `check(&Database)` compiles because `graph`, `collection`, `is_read_only` and `is_graph_enabled` take `&self`; no name collisions; line references are accurate; the Actions semantics hold (`needs` outputs, implicit `success()`, skipped-needs propagation, `workflow_run` fields, `commits/tags/{tag}`); no ledger anchor covers the capabilities expression. Applied the six MINOR findings: (1) preflight errors corrected to 503 `busy`/`unavailable` and 500 `internal_error` per `run_read` (`src/server.rs:600-620`); (2) the `admin_call` `grpc` cfg moved in ITEM-004; (3) an empty `CI_SHA` counts as unset, with a TEST-B09 case for it; (4) `dashboard_feature_coverage.py` added to ITEM-009 validation; (5) the effort total is the sum of the rows, 4–5.25 days; (6) the full list of tight content budgets recorded in CON-003. |
 | 1.2 | 2026-11-09 | Implementation clarifications by the coder before coding: (1) the tag endpoint is `commits/refs/tags/{tag}`, verified live (`commits/tags/{tag}` answers 422); (2) every `gh api` subprocess has a 60 s timeout that counts as a failed try, the guard uses its own bounded pagination instead of `gh_pages`, and no sleep passes the deadline (AC-008); (3) report mode exits 1 with an explicit `error` verdict when the evaluation itself fails, and still never sets `verified=true`; (4) preflight `bindings` is `null` for every `unavailable` outcome, matching the wire table; (5) TEST-B11 dry runs use different states at one head (`missing` before CI, `qualified` after). |
 | 1.3 | 2026-11-09 | EPIC-001 implementation notes: TEST-A02 drops the evidence collection, not the graph, for the missing-resource refusal; TEST-A09 tolerates the router's generic per-request audit access records, and its log sweep is a non-disclosure check only, with absence of new log and audit writes pinned by a separate static check. |
+| 1.4 | 2026-11-09 | EPIC-004 independent review R1–R3, L1: PyPI qualifies every wheel source commit of the checksum-validated release manifest and binds the uploaded wheels to it; job listings are counted; retry backoff is clamped to the active deadline; malformed fields fail closed without retry; freshness is stated at guard evaluation (§3.5.5, TEST-B12). |
