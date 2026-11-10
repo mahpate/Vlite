@@ -127,7 +127,9 @@ and `drained` is true. Neither handler provisions, writes, installs or drains.
 Responses name no binding, tenant, principal, scope, graph, collection or path;
 refusal codes and messages are reload's fixed constants. These handlers add
 no audit event or log line of their own. This is not a promise of no logging:
-ordinary request logging and metrics still apply, and non-disclosure alone
+ordinary request records and metrics, authentication-denial events (which carry
+the caller's own credential ID, never a name from the bindings file) and the
+generic `internal_error` line of a 500 still apply, and non-disclosure alone
 does not prove an absence of logging.
 
 Each REST request uses one grants version, including its blocking and commit

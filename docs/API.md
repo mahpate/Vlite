@@ -444,9 +444,14 @@ request using older grants has finished. Status takes neither the database nor
 reload lock, changes nothing and reports no in-progress state. Its advisory
 snapshot may lag a concurrent reload by one call; poll after reload until
 `file` is `agrees` and `drained` is true. Errors are 401/403/429 as above or 500
-`internal_error` for a blocking task join failure; there is no 503 because it
-takes no database lock. Neither route names a binding, tenant, principal, scope,
-graph, collection or path.
+`internal_error` for a blocking task join failure. The handler never answers
+503 because it takes no database lock; only the shared admission check before
+authentication can answer 503 `busy`, when the rate limiter for rate-limited
+scoped credentials is full. Neither response names a binding, tenant,
+principal, scope, graph, collection or path. Neither handler adds an audit event
+or log line of its own; the generic request record, authentication-denial event
+(both carry the caller's own credential ID, never a name from the bindings
+file) and the generic `internal_error` log line of a 500 still apply.
 
 Reload success is 200:
 
