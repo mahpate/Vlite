@@ -398,7 +398,57 @@ binding's `generation`, and replace the file atomically before sending the
 request. An unchanged entry keeps its generation. Discover support through
 `features.memory_bindings_reload` and the capabilities route list.
 
-Success is 200:
+Before reload, call admin-only `POST /v1/admin/memory/bindings/preflight`
+(no body; any body is ignored). It reads the configured file and runs reload's
+checks under the shared database lock without provisioning, writing records,
+installing grants or waiting for older requests. It never takes the reload lock.
+The verdict is **advisory**: reload rereads the file and rechecks.
+
+Completed evaluations return 200 with all five fields:
+
+```json
+{"outcome": "reload", "bindings": 3, "changed": 1, "records": 1, "error": null}
+```
+
+| `outcome` | `bindings` | `changed` | `records` | `error` | Reload now would answer |
+|---|---|---|---|---|---|
+| `reload` | n >= 1 | >= 1 | >= 0 | `null` | 200 with this change count |
+| `unchanged` | n >= 1 | 0 | >= 0 | `null` | 200 `changed:0`; a recheck may still write records |
+| `restart_required` | n | `null` | `null` | `{"code":"memory_restart_required","message":<fixed message>}` | 409, same code and message |
+| `refused` | n | `null` | `null` | `{"code":"memory_bindings_conflict","message":<fixed message>}` | 409, same code and message |
+| `unavailable` | `null` | `null` | `null` | `{"code":"memory_reload_unavailable","message":<fixed message>}` | 409, no configured file/binding or a gRPC router was built |
+| `invalid` | `null` | `null` | `null` | `{"code":"invalid_input","message":<fixed message>}` | 422, file missing, not regular, too large or invalid |
+
+`bindings` counts file entries, but is null for `unavailable` (including gRPC)
+and `invalid`. `changed` and `records` are null for every refusal outcome.
+`records` counts binding records this node would write, and is 0 on a read-only
+database or replica. Preflight cannot predict `memory_reload_in_progress`,
+provisioning or record-write storage failures, or file/database changes before
+reload. Authentication/admission failures remain HTTP errors: 401 `unauthorized`,
+403 `read_only` or `forbidden_scope`, 429 `rate_limited`, 503 `busy` or
+`unavailable`, and 500 `internal_error` for poisoned locks or blocking task
+join failures; surfaced storage errors use the ordinary read error mapping.
+
+Admin-only `GET /v1/admin/memory/bindings/status` returns 200:
+
+```json
+{"configured": true, "reloadable": true, "bindings": 3, "file": "agrees", "drained": true}
+```
+
+`configured` means the served view has a binding; `reloadable` equals
+`features.memory_bindings_reload`; `bindings` counts served entries.
+`file` is `agrees` when entry counts and entries match (binding order does not
+matter, grant order does), `differs` otherwise, `unreadable` for a failed file
+read/validation, or `none` without a configured source. `drained` means every
+request using older grants has finished. Status takes neither the database nor
+reload lock, changes nothing and reports no in-progress state. Its advisory
+snapshot may lag a concurrent reload by one call; poll after reload until
+`file` is `agrees` and `drained` is true. Errors are 401/403/429 as above or 500
+`internal_error` for a blocking task join failure; there is no 503 because it
+takes no database lock. Neither route names a binding, tenant, principal, scope,
+graph, collection or path.
+
+Reload success is 200:
 
 ```json
 {"bindings": 3, "changed": 1, "drained": true}
