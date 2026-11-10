@@ -449,6 +449,14 @@ pub(super) fn routes() -> Router<Service> {
             "/v1/admin/memory/bindings/reload",
             post(super::memory::reload_bindings),
         )
+        .route(
+            "/v1/admin/memory/bindings/preflight",
+            post(super::memory::preflight_bindings),
+        )
+        .route(
+            "/v1/admin/memory/bindings/status",
+            get(super::memory::bindings_status),
+        )
         .route("/v1/admin/tokens/revoke-read-only", post(revoke))
         .route("/v1/admin/audit", get(audit))
         .route(
@@ -485,6 +493,15 @@ pub(super) fn routes() -> Router<Service> {
         .route("/v1/admin/backups", get(backups).post(backup))
         .route("/v1/admin/restores", post(restore))
         .route("/v1/admin/restores/select", post(select_restore))
+}
+
+/// Whether a memory bindings reload can run: a configured file and no gRPC
+/// router yet. The capabilities flag `memory_bindings_reload` and the
+/// bindings status `reloadable` both answer it.
+pub(super) fn reloadable(s: &Service) -> bool {
+    s.memory_bindings.source().is_some()
+        && s.memory_bindings.is_configured()
+        && !s.grpc_built.load(Ordering::SeqCst)
 }
 
 async fn capabilities(
@@ -551,12 +568,7 @@ async fn capabilities(
         ("tenant_lifecycle", s.admin.tenants.is_some()),
         ("accounts", s.admin.users.is_some()),
         ("password_login", s.admin.users.is_some()),
-        (
-            "memory_bindings_reload",
-            s.memory_bindings.source().is_some()
-                && s.memory_bindings.is_configured()
-                && !s.grpc_built.load(Ordering::SeqCst),
-        ),
+        ("memory_bindings_reload", reloadable(&s)),
     ] {
         features.insert(name.to_owned(), json!(enabled));
     }
@@ -601,6 +613,8 @@ async fn capabilities(
             "/v1/admin/users/{id}",
             "/v1/admin/users/{id}/password",
             "/v1/admin/memory/bindings/reload",
+            "/v1/admin/memory/bindings/preflight",
+            "/v1/admin/memory/bindings/status",
         ]
         .into_iter()
         .map(|route| json!(route)),

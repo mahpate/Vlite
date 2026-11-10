@@ -20,7 +20,7 @@ use serde_json::{Value, json};
 use tower::ServiceExt;
 
 use super::super::{
-    MAX_JSON_BYTES, RequestId, Service, admin, audit, credentials, guard, reserved,
+    ApiError, MAX_JSON_BYTES, RequestId, Service, admin, audit, credentials, guard, reserved,
 };
 use super::reload::{apply, reload};
 use super::routes::Clock;
@@ -536,7 +536,344 @@ async fn a_reload_whose_audit_event_cannot_be_appended_counts_it_and_answers() {
     );
 }
 
-#[cfg(feature = "grpc")]
+/// The read-only preflight and status of a reload
+/// (`docs/projects/feature-memory-preflight/feature-memory-preflight.prd.md`,
+/// sections 3.2 to 3.4 and TEST-A01 to TEST-A08): every expectation comes
+/// from that PRD and from what reload itself answers on the same state.
+const PREFLIGHT: &str = "/v1/admin/memory/bindings/preflight";
+const STATUS: &str = "/v1/admin/memory/bindings/status";
+
+/// The bindings file of [`bindings`] with `field` of the one binding set to
+/// `value`.
+fn edited(generation: u64, scopes: Value, field: &str, value: Value) -> String {
+    let mut file: Value = serde_json::from_str(&bindings(generation, scopes)).unwrap();
+    file["bindings"][0][field] = value;
+    file.to_string()
+}
+
+/// Reload's error as preflight reports it.
+fn refusal(error: &ApiError) -> Value {
+    json!({"code": error.code, "message": error.message})
+}
+
+/// The admin routes over `service`, called as an administrator.
+fn admin_routes(service: &Service) -> Router {
+    admin::routes()
+        .with_state(service.clone())
+        .layer(Extension(admin::Role::Admin))
+}
+
+/// Calls `uri` as an administrator, expects 200, and checks that the answer
+/// names no binding, tenant, principal, scope, graph, collection or path.
+async fn admin_ok(service: &Service, method: &str, uri: &str, directory: &Path) -> Value {
+    let (status, body) = admin_call(&admin_routes(service), method, uri).await;
+    assert_eq!(status, 200, "{body}");
+    let text = body.to_string();
+    let directory = directory.file_name().unwrap().to_str().unwrap();
+    for named in [
+        "notes", "@root", PRINCIPAL, "agent", GRAPH, EVIDENCE, FILE, directory,
+    ] {
+        assert!(!text.contains(named), "{uri} names {named}: {text}");
+    }
+    body
+}
+
+impl Pins {
+    fn write_text(&self, text: &str) {
+        std::fs::write(self.directory.path().join(FILE), text).unwrap();
+    }
+
+    async fn preflight(&self) -> Value {
+        admin_ok(&self.service, "POST", PREFLIGHT, self.directory.path()).await
+    }
+
+    async fn status(&self) -> Value {
+        admin_ok(&self.service, "GET", STATUS, self.directory.path()).await
+    }
+
+    /// A preflight that answers `outcome` with reload's own refusal, and
+    /// changes nothing: the same view, no write (scopes or records) and no
+    /// audit entry. Reload then refuses with that same code and message.
+    async fn assert_refused_alike(&self, outcome: &str) {
+        let before = self.service.memory_bindings.current();
+        let sequence = self.sequence();
+        let audited = self.audit_entries().len();
+        let predicted = self.preflight().await;
+        assert!(Arc::ptr_eq(
+            &before,
+            &self.service.memory_bindings.current()
+        ));
+        assert_eq!(self.sequence(), sequence, "a preflight writes nothing");
+        assert_eq!(
+            self.audit_entries().len(),
+            audited,
+            "a preflight audits nothing"
+        );
+        let refused = reload(&self.service, DRAIN)
+            .await
+            .map(|answer| answer.0)
+            .expect_err("reload refuses");
+        assert_eq!(refused.status, StatusCode::CONFLICT, "{refused:?}");
+        assert_eq!(
+            predicted,
+            json!({
+                "outcome": outcome, "bindings": 1, "changed": null, "records": null,
+                "error": refusal(&refused),
+            })
+        );
+    }
+}
+
+/// TEST-A01: preflight predicts a grants-only reload with reload's own counts,
+/// writes nothing, and afterwards reports the file unchanged.
+#[tokio::test]
+async fn a_preflight_predicts_a_grants_only_reload_and_then_reports_unchanged() {
+    let pins = Pins::new();
+    pins.write(2, json!([{"agent": "a"}, {"agent": "b"}]));
+    let before = pins.service.memory_bindings.current();
+    let sequence = pins.sequence();
+    let predicted = pins.preflight().await;
+    assert_eq!(
+        predicted,
+        json!({"outcome": "reload", "bindings": 1, "changed": 1, "records": 1, "error": null})
+    );
+    assert!(Arc::ptr_eq(
+        &before,
+        &pins.service.memory_bindings.current()
+    ));
+    assert_eq!(pins.sequence(), sequence, "a preflight writes nothing");
+    let reloaded = reload(&pins.service, DRAIN).await.unwrap().0;
+    assert_eq!(reloaded["changed"], predicted["changed"]);
+    assert_eq!(reloaded["bindings"], predicted["bindings"]);
+    assert_eq!(
+        pins.preflight().await,
+        json!({"outcome": "unchanged", "bindings": 1, "changed": 0, "records": 0, "error": null})
+    );
+}
+
+/// TEST-A02: for every refusal, preflight reports reload's own 409 code and
+/// message on the same state, and changes nothing.
+#[tokio::test]
+async fn a_preflight_reports_each_refusal_as_reload_does_and_changes_nothing() {
+    let pins = Pins::audited();
+    let scopes = || json!([{"agent": "a"}, {"agent": "b"}]);
+    pins.write_text(&edited(2, scopes(), "binding", json!("renamed")));
+    pins.assert_refused_alike("restart_required").await;
+    pins.write_text(&edited(
+        2,
+        scopes(),
+        "evidence_collection",
+        json!("other_ev"),
+    ));
+    pins.assert_refused_alike("restart_required").await;
+    pins.write_text(&edited(2, scopes(), "receipt_window_ms", json!(120_000)));
+    pins.assert_refused_alike("restart_required").await;
+    // The same generation with other grants: a refusal of the records plan.
+    pins.write(1, scopes());
+    pins.assert_refused_alike("refused").await;
+    // A bound resource missing from the database. The bound graph holds the
+    // binding record, so it cannot be dropped; the evidence collection can.
+    pins.write(2, scopes());
+    {
+        let mut owner = pins.service.database.write().unwrap();
+        owner.as_mut().unwrap().drop_collection(EVIDENCE).unwrap();
+    }
+    pins.assert_refused_alike("refused").await;
+    assert!(
+        pins.audit_entries().is_empty(),
+        "nothing reloaded or audited"
+    );
+}
+
+/// TEST-A03: with no bindings file preflight is unavailable; a missing,
+/// directory or invalid file is `invalid` with reload's own 422 message, and
+/// status reports it `unreadable`. No answer names the path.
+#[tokio::test]
+async fn a_preflight_without_a_readable_file_is_unavailable_or_invalid() {
+    let db = Database::create_in_memory(2, CreateOptions::default()).unwrap();
+    let unconfigured = Service::new(db);
+    let nowhere = tempfile::tempdir().unwrap();
+    let predicted = admin_ok(&unconfigured, "POST", PREFLIGHT, nowhere.path()).await;
+    let refused = reload(&unconfigured, DRAIN)
+        .await
+        .map(|answer| answer.0)
+        .expect_err("reload is unavailable");
+    assert_eq!(refused.code, "memory_reload_unavailable", "{refused:?}");
+    assert_eq!(
+        predicted,
+        json!({
+            "outcome": "unavailable", "bindings": null, "changed": null, "records": null,
+            "error": refusal(&refused),
+        })
+    );
+    assert_eq!(
+        admin_ok(&unconfigured, "GET", STATUS, nowhere.path()).await,
+        json!({
+            "configured": false, "reloadable": false, "bindings": 0, "file": "none",
+            "drained": true,
+        })
+    );
+
+    let pins = Pins::new();
+    let file = pins.directory.path().join(FILE);
+    let unreadable: [&dyn Fn(); 3] = [
+        &|| std::fs::remove_file(&file).unwrap(),
+        &|| std::fs::create_dir(&file).unwrap(),
+        &|| {
+            std::fs::remove_dir(&file).unwrap();
+            std::fs::write(&file, "{").unwrap();
+        },
+    ];
+    for make in unreadable {
+        make();
+        let predicted = pins.preflight().await;
+        let refused = reload(&pins.service, DRAIN)
+            .await
+            .map(|answer| answer.0)
+            .expect_err("reload refuses the file");
+        assert_eq!(
+            refused.status,
+            StatusCode::UNPROCESSABLE_ENTITY,
+            "{refused:?}"
+        );
+        assert_eq!(
+            predicted,
+            json!({
+                "outcome": "invalid", "bindings": null, "changed": null, "records": null,
+                "error": refusal(&refused),
+            })
+        );
+        assert_eq!(predicted["error"]["code"], "invalid_input");
+        assert_eq!(pins.status().await["file"], "unreadable");
+    }
+}
+
+/// TEST-A05: preflight is advisory. A file changed after it said `reload`
+/// gets reload's own verdict, and nothing is installed.
+#[tokio::test]
+async fn a_file_changed_after_a_preflight_gets_reloads_own_verdict() {
+    let pins = Pins::new();
+    pins.write(2, json!([{"agent": "a"}, {"agent": "b"}]));
+    assert_eq!(pins.preflight().await["outcome"], "reload");
+    pins.write_text(&edited(
+        2,
+        json!([{"agent": "b"}]),
+        "binding",
+        json!("renamed"),
+    ));
+    let before = pins.service.memory_bindings.current();
+    let refused = reload(&pins.service, DRAIN)
+        .await
+        .map(|answer| answer.0)
+        .expect_err("reload refuses the renamed binding");
+    assert_eq!(refused.status, StatusCode::CONFLICT, "{refused:?}");
+    assert_eq!(refused.code, "memory_restart_required", "{refused:?}");
+    assert!(Arc::ptr_eq(
+        &before,
+        &pins.service.memory_bindings.current()
+    ));
+}
+
+/// TEST-A06: neither route touches the reload lock. A held reload lock does
+/// not change their answers, and a reload issued while a preflight waits for
+/// the database lock completes rather than answering
+/// `memory_reload_in_progress`; the preflight reports the state before or
+/// after it.
+#[tokio::test]
+async fn preflight_and_status_neither_take_nor_heed_the_reload_lock() {
+    let pins = Pins::new();
+    pins.write(2, json!([{"agent": "a"}, {"agent": "b"}]));
+    let free = (pins.preflight().await, pins.status().await);
+    let held = pins.service.memory_bindings.try_reload().unwrap();
+    assert_eq!((pins.preflight().await, pins.status().await), free);
+    drop(held);
+
+    let idle = pins.service.workers.available_permits();
+    let (locked_tx, locked_rx) = std::sync::mpsc::channel::<()>();
+    let (release_tx, release_rx) = std::sync::mpsc::channel::<()>();
+    let service = pins.service.clone();
+    let holder = std::thread::spawn(move || {
+        let _owner = service.database.write().unwrap();
+        locked_tx.send(()).unwrap();
+        release_rx.recv().unwrap();
+    });
+    locked_rx.recv().unwrap();
+    let routes = admin_routes(&pins.service);
+    let parked = tokio::spawn(async move { admin_call(&routes, "POST", PREFLIGHT).await });
+    while pins.service.workers.available_permits() == idle {
+        tokio::task::yield_now().await;
+    }
+    let service = pins.service.clone();
+    let reloading =
+        tokio::spawn(async move { reload(&service, DRAIN).await.map(|answer| answer.0) });
+    while pins.service.workers.available_permits() + 2 > idle {
+        tokio::task::yield_now().await;
+    }
+    release_tx.send(()).unwrap();
+    holder.join().unwrap();
+    assert_eq!(
+        reloading.await.unwrap().unwrap(),
+        json!({"bindings": 1, "changed": 1, "drained": true})
+    );
+    let (status, parked) = parked.await.unwrap();
+    assert_eq!(status, 200, "{parked}");
+    let after =
+        json!({"outcome": "unchanged", "bindings": 1, "changed": 0, "records": 0, "error": null});
+    assert!(parked == free.0 || parked == after, "{parked}");
+}
+
+/// TEST-A07: preflight under a saturated worker queue answers reload's
+/// read-path 503 `busy`; status takes no database lock and still answers.
+#[tokio::test]
+async fn a_preflight_under_a_full_queue_is_busy_and_status_still_answers() {
+    let pins = Pins::new();
+    let all = pins.service.workers.available_permits();
+    let _saturated = pins
+        .service
+        .workers
+        .clone()
+        .try_acquire_many_owned(u32::try_from(all).unwrap())
+        .unwrap();
+    let (status, busy) = admin_call(&admin_routes(&pins.service), "POST", PREFLIGHT).await;
+    assert_eq!(status, 503, "{busy}");
+    assert_eq!(busy["error"]["code"], "busy", "{busy}");
+    assert_eq!(
+        pins.status().await,
+        json!({
+            "configured": true, "reloadable": true, "bindings": 1, "file": "agrees",
+            "drained": true,
+        })
+    );
+}
+
+/// TEST-A08: a request pinned to the grants a reload superseded keeps status
+/// at `drained:false` until it finishes.
+#[tokio::test]
+async fn status_is_undrained_while_a_superseded_view_is_pinned() {
+    let pins = Pins::new();
+    let (pinned_tx, pinned_rx) = tokio::sync::oneshot::channel::<()>();
+    let (release_tx, release_rx) = tokio::sync::oneshot::channel::<()>();
+    let router = pins.router.clone();
+    let held = tokio::spawn(guard::track_hidden(async move {
+        let recalled = post_to(router, "recall", recall_body()).await;
+        pinned_tx.send(()).unwrap();
+        release_rx.await.unwrap();
+        recalled
+    }));
+    pinned_rx.await.unwrap();
+    pins.write(2, json!([{"agent": "b"}]));
+    assert_eq!(pins.status().await["file"], "differs");
+    let reloaded = reload(&pins.service, DRAIN).await.unwrap().0;
+    assert_eq!(reloaded["drained"], false);
+    let undrained = pins.status().await;
+    assert_eq!(undrained["drained"], false, "{undrained}");
+    assert_eq!(undrained["file"], "agrees", "{undrained}");
+    release_tx.send(()).unwrap();
+    let ((status, recalled), _) = held.await.unwrap();
+    assert_eq!(status, 200, "{recalled}");
+    assert_eq!(pins.status().await["drained"], true);
+}
+
 async fn admin_call(routes: &Router, method: &str, uri: &str) -> (u16, Value) {
     let request = Request::builder()
         .method(method)
@@ -575,4 +912,36 @@ async fn a_reload_after_a_grpc_router_was_built_is_unavailable() {
     );
     let (_, withdrawn) = admin_call(&routes, "GET", "/v1/capabilities").await;
     assert_eq!(withdrawn["features"]["memory_bindings_reload"], false);
+}
+
+/// TEST-A04 (feature-memory-preflight PRD): once a gRPC router adopted the
+/// service, preflight reports reload's AFTER_GRPC refusal with no counts, and
+/// status stops calling it reloadable, as the capabilities do.
+#[cfg(feature = "grpc")]
+#[tokio::test]
+async fn a_preflight_after_a_grpc_router_was_built_is_unavailable() {
+    let pins = Pins::new();
+    let mut adopted = pins.service.clone();
+    adopted.adopt_published();
+    pins.write(2, json!([{"agent": "a"}, {"agent": "b"}]));
+    let predicted = pins.preflight().await;
+    let refused = reload(&pins.service, DRAIN)
+        .await
+        .map(|answer| answer.0)
+        .expect_err("reload is unavailable");
+    assert_eq!(refused.code, "memory_reload_unavailable", "{refused:?}");
+    assert_eq!(
+        predicted,
+        json!({
+            "outcome": "unavailable", "bindings": null, "changed": null, "records": null,
+            "error": refusal(&refused),
+        })
+    );
+    let status = pins.status().await;
+    assert_eq!(status["reloadable"], false, "{status}");
+    let (_, offered) = admin_call(&admin_routes(&pins.service), "GET", "/v1/capabilities").await;
+    assert_eq!(
+        offered["features"]["memory_bindings_reload"],
+        status["reloadable"]
+    );
 }

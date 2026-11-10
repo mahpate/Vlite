@@ -1,6 +1,6 @@
 ---
 goal: VLite MemoryAI grant-change preflight and status, and a release guard that requires successful full CI on the exact commit before any publication
-version: 1.2
+version: 1.3
 date_created: 2026-11-09
 last_updated: 2026-11-09
 owner: VLite maintainers (mahpate/Vlite)
@@ -553,7 +553,7 @@ Behaviour of the edited workflow:
   - a second preflight answers `unchanged`, `changed:0`.
 - **TEST-A02**: For each refusal, preflight `error` equals reload's 409 body `{code,message}` on the same state:
   - restart required: renamed binding, changed evidence, changed receipt window;
-  - refused: same generation with changed grants, missing graph.
+  - refused: same generation with changed grants, missing bound resource. (v1.3: the evidence collection is dropped, because the bound graph holds the binding record and cannot be dropped; both go through the same `conflict` refusal.)
 
   After every preflight, the served view is `Arc::ptr_eq` to the one before, `records()` are unchanged, scopes are unprovisioned, and the audit length is unchanged.
 - **TEST-A03**: Unconfigured (no source) gives `unavailable` + UNCONFIGURED. Missing, directory or invalid file gives `invalid`, whose message equals reload's 422 message, and status `unreadable`. No body contains the temp path.
@@ -570,8 +570,8 @@ Behaviour of the edited workflow:
 
 - **TEST-A09** (confidentiality sweep): the tenant, binding, principal, scope, graph, evidence and file path all carry unique sentinels. For every outcome of TEST-A01 to TEST-A03 and for status, assert:
   - the body contains no sentinel;
-  - the audit (`GET /v1/admin/audit`) gains no entry from preflight or status;
-  - captured server stderr gains no `memory_bindings_*` event.
+  - the audit (`GET /v1/admin/audit`) gains no handler event from preflight or status (v1.3: the router's generic per-request access record, with method, route, status, role and timing only, is added for every admin request and is swept for sentinels as well);
+  - the structured log buffer gains no entry naming this test's own sentinels (scope and path). (v1.3: the buffer is process-wide and other tests log the shared fixture names, so this is a non-disclosure check only. That no log or audit event is written is established separately by a static check that the bodies of `check`, `changed`, `preflight_bindings`, `verdict` and `bindings_status` contain no log, audit or print call.)
 - **TEST-A10**: Read-only token → 403 `read_only`; scoped credential → 403 `forbidden_scope`; no token → 401. Applies to both routes.
 - **TEST-A11**: On a read-only database or replica, preflight reports `records:0` and status works. Reload behaviour is unchanged (existing tests).
 - **TEST-A12**: Status:
@@ -756,15 +756,15 @@ python tests/dashboard_memory_mode.py target/debug/vlite-server; python tests/da
 
 There are four epics with disjoint file ownership (Section 12). EPIC-001 and EPIC-004 start immediately and in parallel. EPIC-002 and EPIC-003 can be authored in parallel from §3.3 and merge after EPIC-001. EPIC-003's recapture runs last on the integrated branch.
 
-### EPIC-001: Server — shared check, preflight and status (Part A)
+### EPIC-001: Server — shared check, preflight and status (Part A) — DONE
 
 | Task | Description | Status | Relevant Files |
 |---|---|---|---|
-| ITEM-001 | Extract `check` and `changed` from `apply` (REQ-A02, REQ-A07); keep `apply`'s signature, lock and step 8; update the name-scan entries (REQ-A11) | Not Started | `src/server/memory/reload.rs`, `tests/server_name_lookup_scan.rs` |
-| ITEM-002 | `Served::is_drained` with its unit test (REQ-A06) | Not Started | `src/server/reserved.rs` |
-| ITEM-003 | `preflight_bindings` and `bindings_status` (§3.2–§3.4); `reloadable(&Service)`; route registration; capabilities route list (REQ-A01, A03–A05) | Not Started | `src/server/memory/reload.rs`, `src/server/memory.rs`, `src/server/admin.rs` |
-| ITEM-004 | TEST-A01–A08; move `admin_call`'s `#[cfg(feature = "grpc")]` so the helper builds under `server` (body unchanged) | Not Started | `src/server/memory/pins_reload.rs`, `src/server/reserved.rs` |
-| ITEM-005 | TEST-A09–A14; run CON-001 suites and the ledger replay (CON-002) | Not Started | `tests/server_memory_live_grants.rs`, `tests/server_memory_reserved_as_missing.rs` |
+| ITEM-001 | Extract `check` and `changed` from `apply` (REQ-A02, REQ-A07); keep `apply`'s signature, lock and step 8; update the name-scan entries (REQ-A11) | Done | `src/server/memory/reload.rs`, `tests/server_name_lookup_scan.rs` |
+| ITEM-002 | `Served::is_drained` with its unit test (REQ-A06) | Done | `src/server/reserved.rs` |
+| ITEM-003 | `preflight_bindings` and `bindings_status` (§3.2–§3.4); `reloadable(&Service)`; route registration; capabilities route list (REQ-A01, A03–A05) | Done | `src/server/memory/reload.rs`, `src/server/memory.rs`, `src/server/admin.rs` |
+| ITEM-004 | TEST-A01–A08; move `admin_call`'s `#[cfg(feature = "grpc")]` so the helper builds under `server` (body unchanged) | Done | `src/server/memory/pins_reload.rs`, `src/server/reserved.rs` |
+| ITEM-005 | TEST-A09–A14; run CON-001 suites and the ledger replay (CON-002) | Done | `tests/server_memory_live_grants.rs`, `tests/server_memory_reserved_as_missing.rs` |
 
 ### EPIC-002: Contract and documentation (Part A)
 
@@ -817,3 +817,4 @@ Engineering effort is the human-equivalent design, coding, testing and review ti
 | 1.0 | 2026-11-09 | Initial PRD from local `HEAD` `12e4829c` (= `origin/main` = `v0.7.3`). Baselines recorded: `ci_workflows.py` 52 OK, content budgets pass, four ledgers `stale:0`. Gaps found during research and planned: the name-lookup scan allowlist (REQ-A11) and the mandatory dashboard recapture (REQ-A10). |
 | 1.1 | 2026-11-09 | One read-only `code-review` pass against `12e4829c`. It found no blocker and confirmed the following: `check(&Database)` compiles because `graph`, `collection`, `is_read_only` and `is_graph_enabled` take `&self`; no name collisions; line references are accurate; the Actions semantics hold (`needs` outputs, implicit `success()`, skipped-needs propagation, `workflow_run` fields, `commits/tags/{tag}`); no ledger anchor covers the capabilities expression. Applied the six MINOR findings: (1) preflight errors corrected to 503 `busy`/`unavailable` and 500 `internal_error` per `run_read` (`src/server.rs:600-620`); (2) the `admin_call` `grpc` cfg moved in ITEM-004; (3) an empty `CI_SHA` counts as unset, with a TEST-B09 case for it; (4) `dashboard_feature_coverage.py` added to ITEM-009 validation; (5) the effort total is the sum of the rows, 4–5.25 days; (6) the full list of tight content budgets recorded in CON-003. |
 | 1.2 | 2026-11-09 | Implementation clarifications by the coder before coding: (1) the tag endpoint is `commits/refs/tags/{tag}`, verified live (`commits/tags/{tag}` answers 422); (2) every `gh api` subprocess has a 60 s timeout that counts as a failed try, the guard uses its own bounded pagination instead of `gh_pages`, and no sleep passes the deadline (AC-008); (3) report mode exits 1 with an explicit `error` verdict when the evaluation itself fails, and still never sets `verified=true`; (4) preflight `bindings` is `null` for every `unavailable` outcome, matching the wire table; (5) TEST-B11 dry runs use different states at one head (`missing` before CI, `qualified` after). |
+| 1.3 | 2026-11-09 | EPIC-001 implementation notes: TEST-A02 drops the evidence collection, not the graph, for the missing-resource refusal; TEST-A09 tolerates the router's generic per-request audit access records, and its log sweep is a non-disclosure check only, with absence of new log and audit writes pinned by a separate static check. |

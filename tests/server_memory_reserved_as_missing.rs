@@ -418,6 +418,28 @@ fn every_name_addressed_openapi_operation_has_a_differential_case() {
     }
 }
 
+/// TEST-A13 (feature-memory-preflight PRD): the bindings preflight and status
+/// routes address no collection or graph, so they need no differential case;
+/// their answers name no reserved resource (TEST-A09 sentinels).
+#[test]
+fn memory_bindings_admin_routes_address_no_collection_or_graph() {
+    let spec: Value = serde_json::from_str(include_str!("../src/openapi.json")).unwrap();
+    let documented = spec["paths"]
+        .as_object()
+        .unwrap()
+        .keys()
+        .filter(|path| path.starts_with("/v1/admin/memory/bindings/"));
+    for path in documented.map(String::as_str).chain([
+        "/v1/admin/memory/bindings/preflight",
+        "/v1/admin/memory/bindings/status",
+    ]) {
+        assert!(
+            !path.contains('{'),
+            "{path} must not address a collection or graph"
+        );
+    }
+}
+
 async fn add_sessions(fixture: &mut Fixture) {
     for tenant in [false, true] {
         for role in ["viewer", "editor"] {

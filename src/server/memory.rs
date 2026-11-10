@@ -15,7 +15,7 @@ use crate::memory::binding::{Binding, BindingError, BindingState, Recorded};
 use crate::memory::startup::{Refusal, plan};
 use crate::memory::{MemoryMut, MemoryScope};
 
-pub(super) use reload::reload_bindings;
+pub(super) use reload::{bindings_status, preflight_bindings, reload_bindings};
 
 /// Startup refusal messages; they never name a binding, resource or scope.
 pub(super) const GRAPH_DISABLED: &str = "memory bindings require a graph-enabled database";

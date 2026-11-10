@@ -336,6 +336,16 @@ impl Served {
         retired.is_empty()
     }
 
+    /// Whether no request holds a superseded view. Unlike [`Self::drain`] it
+    /// prunes nothing, so status can ask it without changing the cell.
+    pub(super) fn is_drained(&self) -> bool {
+        self.retired
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .iter()
+            .all(|epoch| epoch.strong_count() == 0)
+    }
+
     /// The reload lock, unless another reload holds it.
     pub(super) fn try_reload(&self) -> Option<tokio::sync::OwnedMutexGuard<()>> {
         self.reloading.clone().try_lock_owned().ok()
@@ -712,6 +722,29 @@ mod tests {
         let unconfigured = Served::default();
         assert!(!unconfigured.is_configured() && unconfigured.is_empty());
         assert!(served.covers(&unconfigured) && !unconfigured.covers(&served));
+    }
+
+    /// TEST-A08 (feature-memory-preflight PRD): status asks whether the
+    /// superseded views are unpinned without pruning them, so asking leaves
+    /// the retired list as it was.
+    #[test]
+    fn is_drained_reports_the_pins_without_pruning() {
+        let served = Served::new(Arc::new(registry()), None);
+        assert!(served.is_drained(), "nothing superseded yet");
+        let pinned = served.pin();
+        served.install(regranted());
+        assert!(
+            !served.is_drained(),
+            "a pin of the superseded view is alive"
+        );
+        assert_eq!(served.retired.lock().unwrap().len(), 1);
+        drop(pinned);
+        assert!(served.is_drained());
+        assert_eq!(
+            served.retired.lock().unwrap().len(),
+            1,
+            "asking prunes nothing"
+        );
     }
 
     #[test]

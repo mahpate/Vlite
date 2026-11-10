@@ -131,21 +131,23 @@ const ALLOWED: &[(&str, &str, &str, &str)] = &[
     ),
     (
         "src/server/memory/reload.rs",
-        "apply",
+        "check",
         ".collection(",
-        "Admin-only live reload, run while requests are served: an existence check of the \
-         evidence collection named by the operator's configured binding file, never by the \
-         request, which the grants-only delta already required to equal the served binding's; \
-         it runs under the exclusive database write lock and returns no name.",
+        "Admin-only live reload and its read-only preflight, run while requests are served: an \
+         existence check of the evidence collection named by the operator's configured binding \
+         file, never by the request, which the grants-only delta already required to equal the \
+         served binding's; it runs under the exclusive database write lock (reload) or the \
+         shared read lock (preflight) and returns no name.",
     ),
     (
         "src/server/memory/reload.rs",
-        "apply",
+        "check",
         ".graph(",
-        "Admin-only live reload, run while requests are served: an existence check of the graph \
-         named by the operator's configured binding file, never by the request, which the \
-         grants-only delta already required to equal the served binding's; it runs under the \
-         exclusive database write lock and returns no name.",
+        "Admin-only live reload and its read-only preflight, run while requests are served: an \
+         existence check of the graph named by the operator's configured binding file, never by \
+         the request, which the grants-only delta already required to equal the served \
+         binding's; it runs under the exclusive database write lock (reload) or the shared read \
+         lock (preflight) and returns no name.",
     ),
     (
         "src/server/memory/routes.rs",

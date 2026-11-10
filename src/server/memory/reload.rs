@@ -126,20 +126,56 @@ pub(super) fn apply(
         .published_bindings
         .lock()
         .unwrap_or_else(PoisonError::into_inner);
+    let Checked {
+        new,
+        changed,
+        writes,
+    } = check(db, service, &read, now_ms)?;
+    // A read-only database is checked and serves the new grants; its records
+    // advance through the primary, as at startup.
+    if !db.is_read_only() {
+        provision(db, &new)?;
+        for index in &writes {
+            let binding = &new.set().bindings[*index];
+            let (graph, evidence) = resources(binding);
+            MemoryMut::bind(db, &graph, evidence.as_deref())
+                .and_then(|mut memory| memory.write_binding_record(binding))
+                .map_err(|error| refused(error, RECORD_FAILED))?;
+        }
+    }
+    if changed > 0 {
+        service.memory_bindings.install(new);
+    }
+    Ok((read.set().bindings.len(), changed))
+}
+
+/// What [`check`] found: the view a reload would install, how many bindings
+/// changed, and which binding records it would write.
+pub(super) struct Checked {
+    new: reserved::Bindings,
+    changed: usize,
+    writes: Vec<usize>,
+}
+
+/// Every check of a reload of `read`, in reload's order, against `db`: the
+/// gRPC adoption, the grants-only delta, the resources, the records plan and
+/// the coverage both ways. It writes nothing, installs nothing and takes no
+/// lock beyond the caller's, so a preflight runs it under the shared lock.
+pub(super) fn check(
+    db: &Database,
+    service: &Service,
+    read: &reserved::Bindings,
+    now_ms: u64,
+) -> Result<Checked, ApiError> {
     if service.grpc_built.load(Ordering::SeqCst) {
         return Err(reload_unavailable(AFTER_GRPC));
     }
-    let served = &service.memory_bindings;
-    let old = served.current();
+    let old = service.memory_bindings.current();
     let set = read.set();
     if !grants_only(old.set(), set) {
         return Err(restart_required());
     }
-    let changed = set
-        .bindings
-        .iter()
-        .filter(|entry| old.set().find(&entry.tenant, &entry.binding) != Some(*entry))
-        .count();
+    let changed = changed(old.set(), set);
     if !db.is_graph_enabled() {
         return Err(conflict(GRAPH_DISABLED));
     }
@@ -156,22 +192,138 @@ pub(super) fn apply(
     if !new.covers(&old) || !old.covers(&new) {
         return Err(restart_required());
     }
-    // A read-only database is checked and serves the new grants; its records
-    // advance through the primary, as at startup.
-    if !db.is_read_only() {
-        provision(db, &new)?;
-        for index in &planned.writes {
-            let binding = &new.set().bindings[*index];
-            let (graph, evidence) = resources(binding);
-            MemoryMut::bind(db, &graph, evidence.as_deref())
-                .and_then(|mut memory| memory.write_binding_record(binding))
-                .map_err(|error| refused(error, RECORD_FAILED))?;
+    Ok(Checked {
+        new,
+        changed,
+        writes: planned.writes,
+    })
+}
+
+/// How many entries of `new` differ from the entry of the same tenant and
+/// binding in `old`, grants and their order included. A reload counts its
+/// `changed` with it, and status its agreement with the file.
+fn changed(old: &BindingSet, new: &BindingSet) -> usize {
+    new.bindings
+        .iter()
+        .filter(|entry| old.find(&entry.tenant, &entry.binding) != Some(*entry))
+        .count()
+}
+
+/// `POST /v1/admin/memory/bindings/preflight`: what a reload of the file as it
+/// is now would decide, with reload's own code and message, changing nothing.
+/// It never takes the reload lock, so it cannot make a reload answer
+/// `memory_reload_in_progress`; it runs [`check`] under the shared database
+/// lock, and neither logs nor audits. The verdict is advisory: a reload
+/// checks again.
+pub(in crate::server) async fn preflight_bindings(
+    State(service): State<Service>,
+) -> Result<Json<Value>, ApiError> {
+    let served = &service.memory_bindings;
+    let source = match served.source() {
+        Some(source) if served.is_configured() => source.to_path_buf(),
+        _ => {
+            return Ok(verdict(
+                "unavailable",
+                None,
+                &reload_unavailable(UNCONFIGURED),
+            ));
         }
+    };
+    let read = match tokio::task::spawn_blocking(move || admin::read_memory_bindings(&source))
+        .await
+        .map_err(internal)?
+    {
+        Ok(read) => read,
+        Err(error) => {
+            let invalid = ApiError::new(
+                StatusCode::UNPROCESSABLE_ENTITY,
+                "invalid_input",
+                error.to_string(),
+            );
+            return Ok(verdict("invalid", None, &invalid));
+        }
+    };
+    let bindings = read.set().bindings.len();
+    let checking = service.clone();
+    let checked = service
+        .run_read(move |db| {
+            let checked = check(db, &checking, &read, crate::current_time_ms());
+            // A read-only database or replica writes no record on reload.
+            let records = |checked: &Checked| {
+                if db.is_read_only() {
+                    0
+                } else {
+                    checked.writes.len()
+                }
+            };
+            Ok(checked.map(|checked| (checked.changed, records(&checked))))
+        })
+        .await?;
+    match checked {
+        Ok((changed, records)) => Ok(Json(json!({
+            "outcome": if changed > 0 { "reload" } else { "unchanged" },
+            "bindings": bindings,
+            "changed": changed,
+            "records": records,
+            "error": null,
+        }))),
+        Err(error) => match error.code {
+            "memory_reload_unavailable" => Ok(verdict("unavailable", None, &error)),
+            "memory_restart_required" => Ok(verdict("restart_required", Some(bindings), &error)),
+            "memory_bindings_conflict" => Ok(verdict("refused", Some(bindings), &error)),
+            _ => Err(error),
+        },
     }
-    if changed > 0 {
-        served.install(new);
-    }
-    Ok((set.bindings.len(), changed))
+}
+
+/// A preflight verdict that reload would refuse: the counts reload never
+/// reached are `null`, and `error` is reload's own code and message.
+fn verdict(outcome: &str, bindings: Option<usize>, error: &ApiError) -> Json<Value> {
+    Json(json!({
+        "outcome": outcome,
+        "bindings": bindings,
+        "changed": null,
+        "records": null,
+        "error": {"code": error.code, "message": error.message},
+    }))
+}
+
+/// `GET /v1/admin/memory/bindings/status`: whether the served grants agree
+/// with the configured file, and whether the requests that consulted
+/// superseded grants have finished. It takes neither the database lock nor
+/// the reload lock and changes nothing; it may lag a concurrent reload by one
+/// call.
+pub(in crate::server) async fn bindings_status(
+    State(service): State<Service>,
+) -> Result<Json<Value>, ApiError> {
+    let served = &service.memory_bindings;
+    let current = served.current();
+    let file = match served.source() {
+        None => "none",
+        Some(source) => {
+            let source = source.to_path_buf();
+            match tokio::task::spawn_blocking(move || admin::read_memory_bindings(&source))
+                .await
+                .map_err(internal)?
+            {
+                Err(_) => "unreadable",
+                Ok(read)
+                    if read.set().bindings.len() == current.set().bindings.len()
+                        && changed(current.set(), read.set()) == 0 =>
+                {
+                    "agrees"
+                }
+                Ok(_) => "differs",
+            }
+        }
+    };
+    Ok(Json(json!({
+        "configured": current.is_configured(),
+        "reloadable": admin::reloadable(&service),
+        "bindings": current.set().bindings.len(),
+        "file": file,
+        "drained": served.is_drained(),
+    })))
 }
 
 /// Whether `new` names exactly the bindings of `old`, in any order, each with

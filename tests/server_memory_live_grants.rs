@@ -783,3 +783,308 @@ async fn live_grants_test_014_read_only_reopen_installs_grants_without_writing()
     assert_eq!(rig.size(), size);
     assert_eq!(rig.records(), records);
 }
+
+// Preflight and status of a reload (feature-memory-preflight PRD, sections
+// 3.3 and 3.4, TEST-A09 to TEST-A12 and TEST-A14).
+
+const PREFLIGHT: &str = "/v1/admin/memory/bindings/preflight";
+const STATUS: &str = "/v1/admin/memory/bindings/status";
+/// The scope sentinel of the confidentiality sweep; the tenant, binding,
+/// principal, graph and evidence names of [`bindings`] are the others.
+const SENTINEL_SCOPE: &str = "sentinel_scope_a09";
+
+/// The newest structured log sequence number.
+async fn log_seq(app: &Router) -> u64 {
+    let (status, body) = call(app, "GET", "/v1/admin/logs?limit=1", ADMIN, None).await;
+    assert_eq!(status, 200, "{body}");
+    body["next_seq"].as_u64().unwrap()
+}
+
+/// The audit ring's entries other than the router's generic per-request
+/// access records (method, route, status, role, timing), which every admin
+/// request gets: what a handler itself appends.
+async fn audit_events(app: &Router) -> Vec<Value> {
+    let (status, body) = call(app, "GET", "/v1/admin/audit", ADMIN, None).await;
+    assert_eq!(status, 200, "{body}");
+    body["items"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter(|item| item.get("route").is_none())
+        .cloned()
+        .collect()
+}
+
+/// Calls preflight or status as the administrator and expects 200 with a
+/// body, an audit and log entries that name none of the sentinels. The log
+/// buffer is shared by every test in this process, so the sweep checks what
+/// new entries disclose; that the handlers write no log or audit event at all
+/// is a separate static check
+/// ([`preflight_and_status_write_no_log_or_audit_event`]).
+async fn swept(rig: &Rig, app: &Router, method: &str, path: &str) -> Value {
+    let since = log_seq(app).await;
+    let audit = audit_events(app).await;
+    let (status, body) = call(app, method, path, ADMIN, None).await;
+    assert_eq!(status, 200, "{body}");
+    assert_eq!(
+        audit_events(app).await,
+        audit,
+        "{path} appends no audit event"
+    );
+    let (_, ring) = call(app, "GET", "/v1/admin/audit", ADMIN, None).await;
+    let (_, logs) = call(
+        app,
+        "GET",
+        &format!("/v1/admin/logs?since={since}&limit=1000"),
+        ADMIN,
+        None,
+    )
+    .await;
+    let directory = rig.directory.path().to_str().unwrap().to_owned();
+    let leaf = rig.directory.path().file_name().unwrap().to_str().unwrap();
+    let own = [SENTINEL_SCOPE, directory.as_str(), leaf];
+    let shared = [
+        "notes",
+        "@root",
+        ID,
+        "notes_graph",
+        "notes_ev",
+        "memory-bindings.json",
+    ];
+    for text in [body.to_string(), ring["items"].to_string()] {
+        for named in own.iter().chain(&shared) {
+            assert!(!text.contains(named), "{path} disclosed {named}: {text}");
+        }
+    }
+    // Other tests in this process log the shared fixture names, so the shared
+    // buffer is swept for the sentinels only this test uses.
+    let logged = logs["entries"].to_string();
+    for named in own {
+        assert!(!logged.contains(named), "{path} logged {named}: {logged}");
+    }
+    body
+}
+
+fn verdict(outcome: &str, bindings: Value, code: &str) -> Value {
+    json!({"outcome": outcome, "bindings": bindings, "changed": null, "records": null,
+           "error": {"code": code}})
+}
+
+/// The preflight body without the error message, which the in-crate pins
+/// compare with reload's own.
+fn without_message(mut body: Value) -> Value {
+    if let Some(error) = body["error"].as_object_mut() {
+        error.remove("message");
+    }
+    body
+}
+
+/// TEST-A09: every preflight outcome and status names no tenant, binding,
+/// principal, scope, graph, evidence collection or path, and audits nothing.
+#[tokio::test]
+async fn preflight_test_a09_no_outcome_or_status_discloses_a_sentinel() {
+    let rig = Rig::new();
+    let old = bindings(1, SENTINEL_SCOPE, true);
+    let (app, service) = rig.start(Some(&old), false).await.unwrap();
+    assert_eq!(swept(&rig, &app, "GET", STATUS).await["file"], "agrees");
+    rig.write_bindings(&bindings(2, "sentinel_scope_a09_b", true));
+    assert_eq!(
+        swept(&rig, &app, "POST", PREFLIGHT).await,
+        json!({"outcome": "reload", "bindings": 1, "changed": 1, "records": 1, "error": null})
+    );
+    assert_eq!(swept(&rig, &app, "GET", STATUS).await["file"], "differs");
+    reload(&app, 1, 1).await;
+    assert_eq!(
+        swept(&rig, &app, "POST", PREFLIGHT).await,
+        json!({"outcome": "unchanged", "bindings": 1, "changed": 0, "records": 0, "error": null})
+    );
+    let mut renamed = bindings(3, SENTINEL_SCOPE, true);
+    renamed["bindings"][0]["binding"] = json!("renamed");
+    rig.write_bindings(&renamed);
+    assert_eq!(
+        without_message(swept(&rig, &app, "POST", PREFLIGHT).await),
+        verdict("restart_required", json!(1), "memory_restart_required")
+    );
+    rig.write_bindings(&bindings(2, SENTINEL_SCOPE, true));
+    assert_eq!(
+        without_message(swept(&rig, &app, "POST", PREFLIGHT).await),
+        verdict("refused", json!(1), "memory_bindings_conflict")
+    );
+    rig.write_text("not JSON");
+    assert_eq!(
+        without_message(swept(&rig, &app, "POST", PREFLIGHT).await),
+        verdict("invalid", Value::Null, "invalid_input")
+    );
+    assert_eq!(swept(&rig, &app, "GET", STATUS).await["file"], "unreadable");
+    service.close().await.unwrap();
+
+    let (app, service) = rig.start(None, false).await.unwrap();
+    assert_eq!(
+        without_message(swept(&rig, &app, "POST", PREFLIGHT).await),
+        verdict("unavailable", Value::Null, "memory_reload_unavailable")
+    );
+    assert_eq!(
+        swept(&rig, &app, "GET", STATUS).await,
+        json!({"configured": false, "reloadable": false, "bindings": 0, "file": "none",
+               "drained": true})
+    );
+    service.close().await.unwrap();
+}
+
+/// The preflight and status handlers, and the check they share with reload,
+/// contain no log or audit write: their non-disclosure in TEST-A09 is not
+/// taken as proof that nothing is logged.
+#[test]
+fn preflight_and_status_write_no_log_or_audit_event() {
+    let source = include_str!("../src/server/memory/reload.rs").replace("\r\n", "\n");
+    for function in [
+        "fn check(",
+        "fn changed(",
+        "fn preflight_bindings(",
+        "fn verdict(",
+        "fn bindings_status(",
+    ] {
+        let start = source
+            .find(function)
+            .unwrap_or_else(|| panic!("{function} exists"));
+        let end = start + source[start..].find("\n}\n").unwrap();
+        let body = &source[start..end];
+        for write in [
+            "logs::",
+            "audit",
+            ".append(",
+            ".record(",
+            "eprintln!",
+            "println!",
+        ] {
+            assert!(!body.contains(write), "{function} writes through {write}");
+        }
+    }
+}
+
+/// TEST-A10: both routes are admin-only.
+#[tokio::test]
+async fn preflight_test_a10_both_routes_are_admin_only() {
+    let rig = Rig::new();
+    let (app, service) = rig
+        .start(Some(&bindings(1, "scope", true)), false)
+        .await
+        .unwrap();
+    for (method, path) in [("POST", PREFLIGHT), ("GET", STATUS)] {
+        assert_error(
+            call(&app, method, path, READ_ONLY, None).await,
+            403,
+            "read_only",
+        );
+        assert_error(
+            call(&app, method, path, &credential(ID), None).await,
+            403,
+            "forbidden_scope",
+        );
+        let request = Request::builder()
+            .method(method)
+            .uri(path)
+            .body(Body::empty())
+            .unwrap();
+        let response = app.clone().oneshot(request).await.unwrap();
+        assert_eq!(response.status().as_u16(), 401, "{path} without a token");
+    }
+    service.close().await.unwrap();
+}
+
+/// TEST-A11: on a read-only database preflight counts no record to write,
+/// and status answers.
+#[tokio::test]
+async fn preflight_test_a11_a_read_only_database_writes_no_record() {
+    let rig = Rig::new();
+    let old = bindings(1, "first_scope", true);
+    rig.run(&old, async |_| {}).await;
+    let (app, service) = rig.start(Some(&old), true).await.unwrap();
+    rig.write_bindings(&bindings(2, "first_scope_b", true));
+    let (status, body) = call(&app, "POST", PREFLIGHT, ADMIN, None).await;
+    assert_eq!(status, 200, "{body}");
+    assert_eq!(
+        body,
+        json!({"outcome": "reload", "bindings": 1, "changed": 1, "records": 0, "error": null})
+    );
+    let (status, body) = call(&app, "GET", STATUS, ADMIN, None).await;
+    assert_eq!(status, 200, "{body}");
+    assert_eq!(body["file"], "differs", "{body}");
+    service.close().await.unwrap();
+}
+
+async fn file_status(app: &Router) -> Value {
+    let (status, body) = call(app, "GET", STATUS, ADMIN, None).await;
+    assert_eq!(status, 200, "{body}");
+    body["file"].clone()
+}
+
+/// TEST-A12: status compares the served grants with the file as reload counts
+/// `changed`: the order of bindings does not matter, the order of grants does.
+#[tokio::test]
+async fn preflight_test_a12_status_compares_the_file_as_reload_counts_changes() {
+    let rig = Rig::new();
+    let grants = |generation: u64| {
+        let mut file = two_bindings(generation, "scope");
+        file["bindings"][0]["grants"] = json!([
+            {"principal": ID, "scopes": [{"agent": "scope"}]},
+            {"principal": OTHER_ID, "scopes": [{"agent": "scope"}]},
+        ]);
+        // Only the first binding's grants change, so only it advances.
+        file["bindings"][1]["generation"] = json!(1);
+        file
+    };
+    let old = grants(1);
+    let (app, service) = rig.start(Some(&old), false).await.unwrap();
+    assert_eq!(file_status(&app).await, "agrees");
+    let mut new = grants(2);
+    new["bindings"][0]["grants"][0]["scopes"] = json!([{"agent": "other"}]);
+    rig.write_bindings(&new);
+    assert_eq!(file_status(&app).await, "differs");
+    reload(&app, 2, 1).await;
+    assert_eq!(file_status(&app).await, "agrees");
+    let mut reordered = new.clone();
+    reordered["bindings"].as_array_mut().unwrap().reverse();
+    rig.write_bindings(&reordered);
+    assert_eq!(file_status(&app).await, "agrees", "binding order is free");
+    let mut regranted = new.clone();
+    regranted["bindings"][0]["grants"]
+        .as_array_mut()
+        .unwrap()
+        .reverse();
+    rig.write_bindings(&regranted);
+    assert_eq!(file_status(&app).await, "differs", "grant order counts");
+    service.close().await.unwrap();
+}
+
+/// TEST-A14: capabilities list both routes, and the reload feature flag
+/// equals status `reloadable` in every configuration.
+#[tokio::test]
+async fn preflight_test_a14_capabilities_list_both_routes_and_agree_with_status() {
+    let rig = Rig::new();
+    let file = bindings(1, "scope", true);
+    rig.run(&file, async |_| {}).await;
+    let empty = json!({"version": "memory-bindings-v1", "bindings": []});
+    for (file, read_only, reloadable) in [
+        (Some(&file), false, true),
+        (Some(&file), true, true),
+        (None, false, false),
+        (Some(&empty), false, false),
+    ] {
+        let (app, service) = rig.start(file, read_only).await.unwrap();
+        let (status, capabilities) = call(&app, "GET", "/v1/capabilities", ADMIN, None).await;
+        assert_eq!(status, 200, "{capabilities}");
+        let routes = capabilities["routes"].as_array().unwrap();
+        for path in [RELOAD, PREFLIGHT, STATUS] {
+            assert!(routes.contains(&json!(path)), "{path} listed");
+        }
+        let (status, body) = call(&app, "GET", STATUS, ADMIN, None).await;
+        assert_eq!(status, 200, "{body}");
+        assert_eq!(body["reloadable"], reloadable, "{body}");
+        assert_eq!(
+            capabilities["features"]["memory_bindings_reload"],
+            body["reloadable"]
+        );
+        service.close().await.unwrap();
+    }
+}
