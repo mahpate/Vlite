@@ -1,6 +1,6 @@
 ---
 goal: VLite MemoryAI grant-change preflight and status, and a release guard that requires successful full CI on the exact commit before any publication
-version: 1.8
+version: 1.9
 date_created: 2026-11-09
 last_updated: 2026-11-09
 owner: VLite maintainers (mahpate/Vlite)
@@ -271,7 +271,7 @@ flowchart LR
 | HTTP | Body |
 |---|---|
 | 200 | `{"configured":bool,"reloadable":bool,"bindings":n,"file":"agrees"\|"differs"\|"unreadable"\|"none","drained":bool}` |
-| 401 / 403 / 429 / 500 | As for every admin route. The handler never answers 503, because status takes no database lock (v1.7: the shared admission middleware can still answer 503 `busy` to a rate-limited scoped credential before authentication, as for every route) |
+| 401 / 403 / 429 / 500 | As for every admin route. The handler never answers 503, because status takes no database lock (v1.7: the shared admission middleware can still answer 503 `busy` to a rate-limited scoped credential before route authorization, as for every route) |
 
 Neither route touches reload's request, response or errors (CON-001). The capabilities `routes` array lists both routes next to reload (`admin.rs:603`). No new feature flag is added: dashboard controls use `memory_bindings_reload`.
 
@@ -858,3 +858,4 @@ Engineering effort is the human-equivalent design, coding, testing and review ti
 | 1.6 | 2026-11-09 | ITEM-011: `dashboard-capture.yml` run 42771433763 at `34c1126a` (manifest `source_git_sha` `34c1126a…`, `source_git_dirty` false) installed into `site/assets/dashboard/`; `site/index.html` fingerprints refreshed. The capture hashes only dashboard sources, the theme and shared assets, which EPIC-002/004 do not touch. `dashboard_tours.py site` hash checks pass locally after the docs build; its browser walk runs in Dashboard UI. |
 | 1.7 | 2026-11-09 | EPIC-002 docs result `f90c3486` integrated (ITEM-006–008 Done); status's 503 `busy` from shared admission is documented. Server review P2-2–P2-4, L1, L2: P2-2 was stale, because capture run 42771433763 at `34c1126a` and Dashboard UI run 42771908341 at `6386bba1` both passed. §3.4 now names the generic observers that record every request (caller's own credential ID, `credential_denied`, `internal_error`), and REQ-A03, SEC-002 and AC-004 are qualified to match. TEST-A09 gains an isolated observer test with a unique sentinel per dimension, which kills the helper-log mutant. TEST-A06 gains a held-reader case, which kills the exclusive-lock mutant. TEST-A07 gains the poisoned-lock 500. TEST-A13 requires the exact documented operations and the router's answers, which kills the parameterized-route mutant. |
 | 1.8 | 2026-11-09 | Server review P2-1: the dashboard preflight request passes `{data:false}`, with a handler regression and a transport regression (200/500/503). It was recaptured by `dashboard-capture.yml` run 42778766120 at `4ec83f38` (manifest `source_git_sha` `4ec83f38…`, `source_git_dirty` false) and installed; `dashboard_tours.py site` hash checks pass locally. EPIC-004 delta review: F1, so a wheel absent from `SHA256SUMS` with an omitted or null hash no longer passes, and its hash must be lowercase SHA-256 hex. F2, so TEST-B12's other commit has hex letters and an upper-case source is refused before any CI lookup. Every malformed case asserts exactly `verified=false` with no `manifest_sha256`. Multi-source freshness is described as sequential observations (§3.5.5, `docs/INSTALL.md`). |
+| 1.9 | 2026-11-10 | Delta re-review (approved `4ec83f38`) nit: the scoped rate limiter runs after authentication resolves the caller and before route authorization (`src/server.rs`, `observe`); the status 503 wording in §3.3, `docs/API.md`, OpenAPI and its parity addition now says "before route authorization". |
