@@ -45,6 +45,7 @@ BUDGETS = [
     ("site/index.html", "visible words", 500),
     ("site/dashboard.html", "visible words", 400),
     ("site/about.html", "visible words", 250),
+    ("site/peer-pool.html", "visible words", 550),
     ("docs/CONSOLE.md", "words", 1500),
     ("docs/CONSOLE-ADMIN.md", "words", 2500),
 ]

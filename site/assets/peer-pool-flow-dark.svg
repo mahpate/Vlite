@@ -1,0 +1,87 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1040" height="660" viewBox="0 0 1040 660" role="img" aria-labelledby="title description">
+  <title id="title">How a Peer Pool shares work</title>
+  <desc id="description">You create plans in the portal or from a Copilot session. Plans, tasks, dependencies, claims and heartbeats live in the pool's VLite graph, never code. Peer machines on Windows and Linux claim ready tasks from the graph and send heartbeats; a machine with a gpu label takes only matching tasks. Each peer runs Copilot in its own Git checkout and pushes the result to a Git branch that you review before anything merges. Moving dashes show direction, not live traffic.</desc>
+  <style>
+    :root { --bg:#0c101b; --surface:#141b2b; --text:#edf1fa; --muted:#a9b6cd; --border:#303e57; --accent:#bda4ff; --accent-soft:#2c2345; --search:#65d2ed; --success:#64dbad }
+    text { font-family:system-ui,-apple-system,"Segoe UI",sans-serif; fill:var(--text); font-size:17px }
+    .heading { font-size:28px; font-weight:700 } .label { font-size:20px; font-weight:650 } .small { font-size:15px; fill:var(--muted) }
+    .card { fill:var(--surface); stroke:var(--border); stroke-width:2 }
+    .graph { fill:var(--surface); stroke:var(--accent); stroke-width:2 }
+    .node { fill:var(--accent-soft); stroke:var(--accent); stroke-width:1.5 }
+    .node-text { font-size:15px; font-weight:600; text-anchor:middle }
+    .edge { fill:none; stroke:var(--muted); stroke-width:1.5; marker-end:url(#tip) }
+    .route { fill:none; stroke:var(--accent); stroke-width:2; marker-end:url(#arrow) }
+    .push { stroke:var(--search); marker-end:url(#down) }
+    .git { fill:var(--surface); stroke:var(--success); stroke-width:2 }
+    .pulse { stroke-dasharray:6 14; animation:flow 1.5s linear 3 }
+    @keyframes flow { to { stroke-dashoffset:-40 } }
+    @media (prefers-reduced-motion:reduce) { .pulse { animation:none; stroke-dasharray:none } }
+  </style>
+  <defs>
+    <marker id="arrow" markerWidth="8" markerHeight="8" refX="7" refY="4" orient="auto"><path d="M0 0 8 4 0 8Z" fill="var(--accent)"/></marker>
+    <marker id="down" markerWidth="8" markerHeight="8" refX="7" refY="4" orient="auto"><path d="M0 0 8 4 0 8Z" fill="var(--search)"/></marker>
+    <marker id="tip" markerWidth="7" markerHeight="7" refX="6" refY="3.5" orient="auto"><path d="M0 0 7 3.5 0 7Z" fill="var(--muted)"/></marker>
+  </defs>
+  <rect width="1040" height="660" rx="18" fill="var(--bg)"/>
+  <text x="40" y="52" class="heading">No machine in charge.</text>
+  <text x="40" y="82" class="small">Peers pull ready work from one VLite graph. Code moves through Git branches.</text>
+
+  <rect class="card" x="40" y="140" width="230" height="150" rx="14"/>
+  <text x="62" y="178" class="label">Portal</text>
+  <text x="62" y="212">Pools and machines</text>
+  <text x="62" y="244" class="small">Sign in with a VLite</text>
+  <text x="62" y="268" class="small">account; watch work live</text>
+
+  <rect class="graph" x="330" y="120" width="380" height="210" rx="14"/>
+  <text x="352" y="156" class="label">VLite graph, one per pool</text>
+  <path class="edge" d="M422 215L464 194"/>
+  <path class="edge" d="M422 229L464 250"/>
+  <path class="edge" d="M532 194L574 215"/>
+  <path class="edge" d="M532 250L574 229"/>
+  <rect class="node" x="358" y="208" width="64" height="28" rx="14"/>
+  <text x="390" y="227" class="node-text">plan</text>
+  <rect class="node" x="468" y="174" width="64" height="28" rx="14"/>
+  <text x="500" y="193" class="node-text">task</text>
+  <rect class="node" x="468" y="240" width="64" height="28" rx="14"/>
+  <text x="500" y="259" class="node-text">task</text>
+  <rect class="node" x="578" y="208" width="72" height="28" rx="14"/>
+  <text x="614" y="227" class="node-text">merge</text>
+  <text x="352" y="294" class="small">Plans, tasks, dependencies, claims</text>
+  <text x="352" y="316" class="small">and heartbeats. Metadata only, no code.</text>
+
+  <rect class="card" x="770" y="140" width="230" height="150" rx="14"/>
+  <text x="792" y="178" class="label">Copilot session</text>
+  <text x="792" y="212">Submit a plan</text>
+  <text x="792" y="244" class="small">through the pool's</text>
+  <text x="792" y="268" class="small">MCP tools</text>
+
+  <path class="route pulse" d="M270 215H322"/>
+  <text x="281" y="203" class="small">plans</text>
+  <path class="route pulse" d="M770 215H718"/>
+  <text x="722" y="203" class="small">plans</text>
+
+  <path class="route pulse" d="M220 400V368H430V338"/>
+  <path class="route pulse" d="M520 400V338"/>
+  <path class="route pulse" d="M820 400V368H610V338"/>
+  <text x="528" y="387" class="small">claim ready task, heartbeat</text>
+
+  <rect class="card" x="95" y="400" width="250" height="100" rx="14"/>
+  <text x="117" y="438" class="label">Peer A &#183; Windows</text>
+  <text x="117" y="472" class="small">Copilot CLI, own checkout</text>
+  <rect class="card" x="395" y="400" width="250" height="100" rx="14"/>
+  <text x="417" y="438" class="label">Peer B &#183; Linux</text>
+  <text x="417" y="472" class="small">Copilot CLI, own checkout</text>
+  <rect class="card" x="695" y="400" width="250" height="100" rx="14"/>
+  <text x="717" y="438" class="label">Peer C &#183; gpu label</text>
+  <text x="717" y="472" class="small">Takes only matching tasks</text>
+
+  <path class="route push pulse" d="M220 500V532"/>
+  <path class="route push pulse" d="M520 500V532"/>
+  <path class="route push pulse" d="M820 500V532"/>
+  <text x="528" y="524" class="small">push result branch</text>
+
+  <rect class="git" x="95" y="540" width="850" height="74" rx="14"/>
+  <text x="117" y="572" class="label">Git branches</text>
+  <text x="117" y="598" class="small">Each task's code or report lands on its own branch. You review it before anything merges.</text>
+  <text x="40" y="644" class="small">Illustrative flow, not live traffic. Motion stops after a short preview; reduced motion stays still.</text>
+</svg>
