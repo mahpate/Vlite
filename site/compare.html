@@ -240,11 +240,17 @@
           <tbody>
             <tr class="group"><td colspan="3">Storage &amp; durability</td></tr>
             <tr><td>Deployment model</td><td>Single <code>.vlite</code> file (+ optional sidecars)</td><td>Collection directory</td></tr>
-            <tr><td>Commit semantics</td><td class="yes">Checksummed, fsync before ack, atomic batches</td><td>Not listed</td></tr>
+            <tr><td>Commit semantics</td><td class="yes">Checksummed frames, atomic batches; periodic (default), full or in-memory durability</td><td class="yes">Write-ahead log</td></tr>
+            <tr><td>Conditional writes</td><td class="yes">Record revisions, put-if-absent, checked deletes</td><td class="no">Not listed</td></tr>
+            <tr><td>Record expiry (TTL)</td><td class="yes">Records, keys, graph nodes and edges</td><td class="no">Not listed</td></tr>
             <tr><td>Encryption at rest</td><td class="yes">Yes (opt-in)</td><td class="no">Not listed</td></tr>
-            <tr><td>Point-in-time restore / change feed</td><td class="yes">Yes</td><td class="no">Not listed</td></tr>
+            <tr><td>Backups, point-in-time restore, change feed, webhooks</td><td class="yes">Yes</td><td class="no">Not listed</td></tr>
             <tr><td>Read replicas</td><td class="yes">Export/apply replication</td><td class="no">Not listed</td></tr>
             <tr><td>Persisted ANN index</td><td>Snapshot sidecar / disk-ANN sidecar</td><td class="yes">Yes, native</td></tr>
+            <tr class="group"><td colspan="3">Data models</td></tr>
+            <tr><td>Property graphs</td><td class="yes">Nodes, edges, traversal, paths, algorithms, vector attachments</td><td class="no">Not listed</td></tr>
+            <tr><td>Key-value store</td><td class="yes">Namespaced keys, prefix listing, compare-and-set</td><td class="no">Not listed</td></tr>
+            <tr><td>Agent memory</td><td class="yes">Opt-in scoped REST memory; clients, CLI, MCP tools</td><td class="no">Not listed</td></tr>
             <tr class="group"><td colspan="3">Retrieval</td></tr>
             <tr><td>Dense vectors</td><td class="yes">Yes</td><td class="yes">Yes</td></tr>
             <tr><td>Multiple / named vectors</td><td class="yes">Yes</td><td class="yes">Yes</td></tr>
@@ -253,21 +259,25 @@
             <tr><td>Grouped search</td><td class="yes">Yes</td><td class="yes">Yes</td></tr>
             <tr><td>Scalar filters</td><td class="yes">Typed filters + metadata indexes</td><td class="yes">Yes</td></tr>
             <tr><td>Recommendations, facets, geo</td><td class="yes">Yes</td><td class="no">Not listed</td></tr>
+            <tr><td>Query language</td><td class="yes">Read-only, parameterized search, groups, facets</td><td>SQL-like filter strings</td></tr>
+            <tr><td>Embedding and reranking</td><td class="yes">Pluggable embedders and rerankers, MMR, managed provider aliases</td><td class="yes">Local/API embedders; cross-encoder, RRF, weighted rerankers</td></tr>
+            <tr><td>Model version history</td><td class="yes">Retained versions, resumable re-embedding</td><td class="no">Not listed</td></tr>
             <tr class="group"><td colspan="3">Indexes &amp; performance</td></tr>
             <tr><td>Index types</td><td>Flat, HNSW, disk-ANN sidecar</td><td class="yes">Flat, HNSW, IVF, DiskANN/Vamana</td></tr>
             <tr><td>Quantization</td><td>Scalar u8</td><td class="yes">FP16, INT8, INT4, RaBitQ, PQ</td></tr>
             <tr><td>GPU search</td><td class="yes">Exact L2 via wgpu (opt-in)</td><td class="no">Not listed</td></tr>
             <tr><td>Runtime optimizations</td><td>Rayon parallel exact scans (native), HNSW snapshots</td><td class="yes">SIMD, mmap, buffer pool, thread pool</td></tr>
             <tr class="group"><td colspan="3">Interfaces &amp; operations</td></tr>
-            <tr><td>Embedded SDKs</td><td>Rust, Python, Node.js, C ABI, WASM</td><td>Python, Node.js</td></tr>
+            <tr><td>Embedded SDKs</td><td>Rust, Python, Node.js, C ABI, WASM</td><td>Python, Node.js, Go, Rust, Java, Dart</td></tr>
             <tr><td>Network server</td><td class="yes">REST + OpenAPI, gRPC (streaming, TLS)</td><td class="no">Not listed</td></tr>
             <tr><td>Remote clients</td><td class="yes">Python, JS, Go, .NET</td><td class="no">Not listed</td></tr>
-            <tr><td>Auth</td><td class="yes">Scoped credentials, rate limits</td><td>Not applicable (embedded)</td></tr>
+            <tr><td>Server deployment</td><td class="yes">Docker images, Helm chart</td><td>Not applicable (embedded)</td></tr>
+            <tr><td>Auth</td><td class="yes">Scoped credentials, tenants, quotas, rate limits</td><td>Not applicable (embedded)</td></tr>
             <tr><td>Multi-process embedded readers</td><td class="yes"><code>open_read_only</code> shared locks; exclusive writer</td><td class="yes"><code>read_only</code> opens</td></tr>
             <tr><td>Concurrent server reads</td><td class="yes">Shared RwLock reads; exclusive writes</td><td>Not applicable (embedded)</td></tr>
-            <tr><td>Visual UI</td><td class="yes">Browser dashboard: search, records, vector projection, user accounts</td><td><a href="https://github.com/zvec-ai/zvec-studio">zvec-studio</a> (separate project)</td></tr>
-            <tr><td>Metrics &amp; logs</td><td class="yes">Prometheus, route latency, live logs, JSONL export</td><td class="no">Not listed in core API comparison</td></tr>
-            <tr><td>Agent tooling</td><td class="yes">CLI, stdio MCP server, four agent skills</td><td class="yes">CLI, MCP, Zvec-Grep</td></tr>
+            <tr><td>Visual UI</td><td class="yes">Browser dashboard: search, records, key-value, MemoryAI, graph, observability, administration</td><td><a href="https://github.com/zvec-ai/zvec-studio">zvec-studio</a> (separate project)</td></tr>
+            <tr><td>Metrics &amp; logs</td><td class="yes">Prometheus, route latency, live logs, JSONL export, OpenTelemetry</td><td class="no">Not listed in core API comparison</td></tr>
+            <tr><td>Agent tooling</td><td class="yes">Shell, graph CLI, stdio MCP server, four agent skills</td><td class="yes">CLI, MCP, agent skills, Zvec-Grep</td></tr>
             <tr><td>Platforms</td><td>Windows, Linux, macOS (x86_64/arm64)</td><td class="yes">Linux, macOS, Windows, Android, iOS</td></tr>
           </tbody>
         </table>
