@@ -699,6 +699,66 @@ fn start_tenant_scoped_empty_memory_graph(directory: &TempDir) -> (Router, Strin
 }
 
 #[tokio::test]
+async fn metrics_with_memory_opt_in_serves_totals_without_reserved_names() {
+    let directory = tempfile::tempdir().unwrap();
+    let memory_bindings_file = directory.path().join("memory-bindings.json");
+    std::fs::write(&memory_bindings_file, BINDINGS).unwrap();
+    let app = configured_admin_router(
+        Service::new(database()),
+        ServerOptions {
+            admin_token: Some(BearerToken::new(ADMIN).unwrap()),
+            read_only_token: Some(BearerToken::new(READ_ONLY).unwrap()),
+            admin_directory: Some(directory.path().into()),
+            memory_bindings_file: Some(memory_bindings_file),
+            metrics_with_memory: true,
+            ..Default::default()
+        },
+    )
+    .unwrap();
+
+    for token in [ADMIN, READ_ONLY] {
+        let (status, _, body) =
+            call_with_response(&app, "GET", "/metrics", Body::empty(), token).await;
+        assert_eq!(status, 200);
+        let metrics: Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(metrics["collections_total"], 3);
+        let names = metrics["collections"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|item| item["name"].as_str().unwrap())
+            .collect::<Vec<_>>();
+        assert!(names.contains(&"ordinary"), "{names:?}");
+        let text = String::from_utf8(body).unwrap();
+        assert!(!text.contains("notes_ev") && !text.contains("notes_graph"));
+    }
+    let (status, _, body) = call_with_response(
+        &app,
+        "GET",
+        "/metrics?format=prometheus",
+        Body::empty(),
+        ADMIN,
+    )
+    .await;
+    assert_eq!(status, 200);
+    let text = String::from_utf8(body).unwrap();
+    assert!(text.contains("collection=\"ordinary\""));
+    assert!(!text.contains("notes_ev") && !text.contains("notes_graph"));
+
+    let (status, summary) = get(&app, "/v1/admin/metrics/summary").await;
+    assert_eq!(status, 200);
+    assert_eq!(summary["database"]["collections"], 3);
+    let text = summary.to_string();
+    assert!(!text.contains("notes_ev") && !text.contains("notes_graph"));
+
+    for path in ["/v1/admin/graph/stats", "/v1/admin/replication/export"] {
+        let (status, error) = get(&app, path).await;
+        assert_eq!(status, 403, "{path}");
+        assert_eq!(error["error"]["code"], "forbidden_scope", "{path}");
+    }
+}
+
+#[tokio::test]
 async fn reserved_graph_and_collection_are_denied_and_lists_filter_them() {
     let directory = tempfile::tempdir().unwrap();
     let app = start(&directory, Some(BINDINGS), false).unwrap();

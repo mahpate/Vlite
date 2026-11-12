@@ -120,6 +120,10 @@ pub struct ServerOptions {
     pub memory_bindings_file: Option<PathBuf>,
     /// Marks a configured second listener that cannot yet enforce reservations.
     pub grpc_enabled: bool,
+    /// Serve `GET /metrics` and `GET /v1/admin/metrics/summary` while memory
+    /// bindings exist (default off). Their database-wide totals then count
+    /// memory resources; reserved names stay hidden.
+    pub metrics_with_memory: bool,
 }
 
 impl ServerOptions {
@@ -286,6 +290,7 @@ pub fn configured_admin_router(
         service = service.with_bindings(reserved);
     }
     service = service.with_bindings_source(options.memory_bindings_file.clone());
+    service = service.with_metrics_with_memory(options.metrics_with_memory);
     // The records found above reserve resources too.
     service.refuse_reserving_after_grpc()?;
     super::logs::configure(

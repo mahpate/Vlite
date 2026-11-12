@@ -98,6 +98,17 @@ while a binding is configured or reserved resources remain.
 The [dashboard](CONSOLE.md#monitor-the-server) shows the refused views above as
 unavailable, and sign-in still works, while agent memory is enabled or the
 database still holds memory binding records after the bindings file is removed.
+
+`vlite-server` can opt back in to the metrics routes with
+`VLITE_METRICS_WITH_MEMORY=1` (library embedders: `ServerOptions::metrics_with_memory`).
+`GET /metrics` (JSON and Prometheus) and `GET /v1/admin/metrics/summary` then
+answer as they do without memory. Their totals (database bytes, record and
+collection counts, search counters) include the reserved resources, so a caller
+who can read metrics learns how much memory data exists. Reserved names stay out
+of per-collection rows, and scoped callers still see only their own collections.
+Graph statistics, replication export and the other routes above stay `403`.
+The switch is off by default; leave it off when aggregate memory sizes must
+stay private.
 It does so for the super admin, for a read-only token on the routes its role
 may call and for a scoped credential only where the refusal cannot be an
 ordinary scope denial; a tenant editor's refusal on the import routes looks like

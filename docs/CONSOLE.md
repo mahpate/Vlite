@@ -215,7 +215,9 @@ health is under **Administration → Health**.
 
 With [agent memory](MEMORY.md) on, server-wide metrics are unavailable. Sign-in
 still works and each affected view says so; see
-[SECURITY.md](SECURITY.md#memory-bound-resources).
+[SECURITY.md](SECURITY.md#memory-bound-resources). Starting the server with
+`VLITE_METRICS_WITH_MEMORY=1` brings back the metrics-based views, whose totals
+then include memory data; graph statistics stay unavailable.
 
 ## Administer users and tenants
 

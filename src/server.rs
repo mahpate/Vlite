@@ -219,6 +219,9 @@ pub struct Service {
     /// The memory bindings this router serves; a reload may replace their
     /// grants while serving (see `reserved::Served`).
     memory_bindings: Arc<reserved::Served>,
+    /// Operator opt-in: serve `/metrics` and the metrics summary while memory
+    /// bindings exist. Their database-wide totals then include memory data.
+    metrics_with_memory: bool,
 }
 
 impl Service {
@@ -312,6 +315,7 @@ impl Service {
             graph_stats: Arc::default(),
             providers: Arc::default(),
             memory_bindings: Arc::new(reserved::Served::default()),
+            metrics_with_memory: false,
         })
     }
 
@@ -342,6 +346,16 @@ impl Service {
 
     fn has_bindings(&self) -> bool {
         !self.memory_bindings.is_empty()
+    }
+
+    fn with_metrics_with_memory(mut self, on: bool) -> Self {
+        self.metrics_with_memory = on;
+        self
+    }
+
+    /// Whether the memory guard refuses `/metrics` and the metrics summary.
+    fn metrics_blocked_by_memory(&self) -> bool {
+        self.has_bindings() && !self.metrics_with_memory
     }
 
     /// Whether a gRPC router already runs from this engine without the tokens
