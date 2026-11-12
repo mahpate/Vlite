@@ -191,7 +191,7 @@
           <tr><th scope="row">Change feed</th><td>Lineage and sequence cursors, whole-commit batches and explicit cursor invalidation after history changes. Covers vector and graph commits. Requires format 4 or 5.</td></tr>
           <tr><th scope="row">Read replicas</th><td>Validated log-segment export and apply, lag status and explicit promotion. File shipping, not automatic network replication.</td></tr>
           <tr><th scope="row">Webhooks</th><td>At-least-once change-feed delivery with HMAC signatures, retry backoff and persisted subscriptions and cursor. Every event type by default, with optional event, collection and graph filters. Consumers deduplicate events.</td></tr>
-          <tr><th scope="row">Health and metrics</th><td>Health endpoints, JSON and Prometheus metrics, latency and route counters, and queue, sync, snapshot and rebuild diagnostics.</td></tr>
+          <tr><th scope="row">Health and metrics</th><td>Health endpoints, JSON and Prometheus metrics, latency and route counters, and queue, sync, snapshot and rebuild diagnostics. With agent memory, metrics are opt-in.</td></tr>
           <tr><th scope="row">Live logs</th><td>A bounded in-memory ring, sequence cursors, filters and JSONL export; not a durable log archive.</td></tr>
           <tr><th scope="row">OpenTelemetry</th><td>Optional OTLP tracing through <code>otel</code>, with an operator-configured collector.</td></tr>
         </tbody></table></div>

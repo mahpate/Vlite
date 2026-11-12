@@ -200,7 +200,7 @@ Prebuilt packages: [PyPI](docs/INSTALL.md#pypi) and [release assets](docs/INSTAL
 | Webhooks | [WEBHOOKS](docs/WEBHOOKS.md) |
 | Property graphs, expiry and algorithms | [GRAPH](docs/GRAPH.md) |
 | Benchmarks | [Methodology](benchmarks/README.md), [results](benchmarks/RESULTS.md) |
-| Upgrade notes | [Release notes](docs/RELEASE-0.7.4.md) |
+| Upgrade notes | [Release notes](docs/RELEASE-0.7.5.md) |
 
 ## Status and limitations
 

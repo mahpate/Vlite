@@ -213,11 +213,9 @@ lists slow queries. **Change feed** lists committed
 events across the database and needs read access to all collections. Server
 health is under **Administration → Health**.
 
-With [agent memory](MEMORY.md) on, server-wide metrics are unavailable. Sign-in
-still works and each affected view says so; see
-[SECURITY.md](SECURITY.md#memory-bound-resources). Starting the server with
-`VLITE_METRICS_WITH_MEMORY=1` brings back the metrics-based views, whose totals
-then include memory data; graph statistics stay unavailable.
+With [agent memory](MEMORY.md) on, metrics-based views say they are unavailable
+unless the operator sets `VLITE_METRICS_WITH_MEMORY=1`. Sign-in still works. See
+[SECURITY.md](SECURITY.md#memory-bound-resources).
 
 ## Administer users and tenants
 
