@@ -341,7 +341,7 @@ pub(crate) fn scan_path(path: &Path) -> Result<std::result::Result<Manifest, Ref
 
 /// Failure of a two-hop transform.
 #[derive(Debug)]
-#[cfg_attr(not(test), allow(dead_code))]
+#[cfg_attr(not(any(test, feature = "server")), allow(dead_code))]
 pub(crate) enum TransformError {
     /// The frozen source is outside the supported preservation matrix.
     Refused(Refusal),

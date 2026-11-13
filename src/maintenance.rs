@@ -782,7 +782,7 @@ pub(crate) fn publish_held(
     Ok((report, held))
 }
 
-#[cfg_attr(not(test), allow(dead_code))]
+#[cfg_attr(not(any(test, feature = "server")), allow(dead_code))]
 pub(crate) mod compaction;
 
 #[cfg(test)]

@@ -34,6 +34,7 @@ use crate::{
 mod admin;
 mod audit;
 mod collections;
+mod compaction;
 mod credentials;
 mod features;
 mod graph;
@@ -62,6 +63,7 @@ pub mod tls;
 mod users;
 mod webhooks;
 pub use admin::{ServerOptions, configured_admin_router, read_token_file, selected_database};
+pub use compaction::{Managed, ManagedHandle};
 
 /// Emit a legacy stderr line and also capture it in the bounded server log buffer.
 pub fn log_stderr(level: &'static str, target: &'static str, message: impl Into<String>) {
@@ -210,6 +212,8 @@ pub struct Service {
     encryption_key: Option<crate::EncryptionKey>,
     started: Instant,
     group_commit: Option<Arc<group_commit::Coordinator>>,
+    /// Kept so a compaction successor generation applies the same policy.
+    group_commit_config: Option<GroupCommitConfig>,
     snapshot_reads: bool,
     /// Fixed for the service lifetime: the owned file never changes.
     graph_enabled: bool,
@@ -310,6 +314,7 @@ impl Service {
             encryption_key,
             started: Instant::now(),
             group_commit: None,
+            group_commit_config: None,
             snapshot_reads: true,
             graph_enabled,
             graph_stats: Arc::default(),
@@ -535,9 +540,69 @@ impl Service {
             self.metrics.clone(),
             config,
         )?));
+        self.group_commit_config = Some(config);
         Ok(self)
     }
 
+    /// A new generation around `database` (a compaction successor or the
+    /// freshly reopened source) with this service's startup policy: provider
+    /// state, group commit, snapshot reads, TLS identities and encryption key.
+    /// Router state (tokens, sessions) is shared separately by the runtime.
+    fn successor(&self, database: Database) -> std::io::Result<Self> {
+        let mut next = Self::try_new_with_key(database, self.encryption_key.clone())?;
+        next.providers = self.providers.clone();
+        next.tls = self.tls.clone();
+        next.snapshot_reads = self.snapshot_reads;
+        next.rate_limits = self.rate_limits.clone();
+        next.started = self.started;
+        next.metrics_with_memory = self.metrics_with_memory;
+        if let Some(config) = self.group_commit_config {
+            next = next.with_group_commit(config)?;
+        }
+        Ok(next)
+    }
+
+    /// Retires this generation for a compaction restart. Every worker permit
+    /// is taken first, within `budget`: queued, disconnected and group-commit
+    /// work holds a permit until it finished with the database, and the ops
+    /// scheduler needs one to start. On timeout nothing changed and the
+    /// generation stays usable. Then group commit, webhooks and the scheduler
+    /// stop and the open database is returned without being closed; the
+    /// generation stays unusable.
+    async fn retire(&self, budget: std::time::Duration) -> std::io::Result<Database> {
+        let permits = tokio::time::timeout(
+            budget,
+            self.workers
+                .clone()
+                .acquire_many_owned(MAX_IN_FLIGHT as u32),
+        )
+        .await
+        .map_err(|_| std::io::Error::new(std::io::ErrorKind::TimedOut, "work did not drain"))?
+        .map_err(std::io::Error::other)?;
+        permits.forget();
+        let ops = self.ops.clone();
+        let webhooks = self.webhooks.clone();
+        let group = self.group_commit.clone();
+        let database = self.database.clone();
+        tokio::task::spawn_blocking(move || {
+            let stopped = group.map_or(Ok(()), |group| group.shutdown());
+            webhooks.shutdown();
+            ops.shutdown();
+            let taken = database
+                .write()
+                .map_err(|error| std::io::Error::other(error.to_string()))?
+                .take()
+                .ok_or_else(|| std::io::Error::other("database is closed"))?;
+            if let Err(error) = stopped {
+                // The source is reconstructed fresh by the caller.
+                let _ = taken.close();
+                return Err(error);
+            }
+            Ok(taken)
+        })
+        .await
+        .map_err(std::io::Error::other)?
+    }
     async fn run_mutation<T: Send + 'static>(
         &self,
         bytes: usize,
@@ -794,6 +859,7 @@ fn routes(service: Service) -> Router {
         .merge(users::routes())
         .merge(webhooks::routes())
         .merge(collections::routes())
+        .merge(compaction::routes())
         .merge(ops::routes())
         .merge(credentials::routes())
         .merge(data_routes())
@@ -999,6 +1065,10 @@ fn routes(service: Service) -> Router {
         )
         .layer(DefaultBodyLimit::max(MAX_JSON_BYTES))
         .layer(middleware::from_fn_with_state(service.clone(), admission))
+        .layer(middleware::from_fn_with_state(
+            service.clone(),
+            compaction::fence,
+        ))
         .layer(middleware::from_fn_with_state(observation, observe))
         .with_state(service)
 }
@@ -1746,6 +1816,13 @@ impl IntoResponse for ApiError {
             response.headers_mut().insert(
                 header::RETRY_AFTER,
                 axum::http::HeaderValue::from_static("1"),
+            );
+        }
+        if self.status == StatusCode::SERVICE_UNAVAILABLE && self.code == "maintenance_in_progress"
+        {
+            response.headers_mut().insert(
+                header::RETRY_AFTER,
+                axum::http::HeaderValue::from_static("5"),
             );
         }
         response.extensions_mut().insert(ErrorCode(self.code));

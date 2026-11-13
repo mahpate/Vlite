@@ -407,8 +407,13 @@ impl Graph {
     /// Compaction scanner: whether any stored node or edge carries a deadline,
     /// including entities that are already due and hidden from reads.
     pub(crate) fn has_stored_expiry(&self) -> bool {
-        self.nodes.keys().any(|id| self.node_expiry.get(*id).is_some())
-            || self.edges.keys().any(|id| self.edge_expiry.get(*id).is_some())
+        self.nodes
+            .keys()
+            .any(|id| self.node_expiry.get(*id).is_some())
+            || self
+                .edges
+                .keys()
+                .any(|id| self.edge_expiry.get(*id).is_some())
     }
     /// Compaction scanner: whether any temporal edge segments are stored.
     pub(crate) fn has_temporal_segments(&self) -> bool {

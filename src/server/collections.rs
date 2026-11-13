@@ -438,6 +438,13 @@ pub(super) struct Reservations {
     jobs: BTreeMap<u64, (u16, String)>,
 }
 
+impl Reservations {
+    /// No import job is reserved (compaction refuses reserved import state).
+    pub(super) fn is_empty(&self) -> bool {
+        self.jobs.is_empty()
+    }
+}
+
 fn status_json(status: &ImportStatus, durable: bool) -> Value {
     let digest = status
         .last_digest

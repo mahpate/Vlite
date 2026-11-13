@@ -19,7 +19,10 @@ tools = ["json", "dep:csv"]
 import-formats = ["tools", "dep:arrow-array", "dep:arrow-schema", "dep:arrow-ipc", "dep:parquet"]
 json = ["dep:serde", "dep:serde_json"]
 mcp = ["json"]
-server = ["json", "dep:axum", "dep:base64", "dep:tokio", "dep:subtle", "dep:tokio-rustls", "dep:rustls-pemfile", "dep:tokio-stream", "dep:reqwest"]
+server = ["json", "dep:axum", "dep:base64", "dep:tokio", "dep:subtle", "dep:tokio-rustls", "dep:rustls-pemfile", "dep:tokio-stream", "dep:reqwest", "dep:tower", "dep:libc"]
+# Test-only fault points and the relaxed test profile of managed compaction.
+# Never enabled by release or container builds.
+compaction-test-hooks = ["server"]
 grpc = [
     "server",
     "dep:tonic",
@@ -67,6 +70,12 @@ argon2 = { version = "0.5.3", default-features = false, features = ["alloc"] }
 tempfile = "3"
 subtle = { version = "2.6", optional = true }
 tokio = { version = "1", features = ["macros", "rt-multi-thread", "net", "signal", "sync", "io-util"], optional = true }
+# Managed compaction routes the current server generation (already an axum dependency).
+tower = { version = "0.5", default-features = false, features = ["util"], optional = true }
+
+[target.'cfg(unix)'.dependencies]
+# Managed compaction measures free space with statvfs (already a transitive dependency).
+libc = { version = "0.2", optional = true }
 
 [target.'cfg(not(target_arch = "wasm32"))'.dependencies]
 rayon = "1.10"
@@ -98,6 +107,11 @@ required-features = ["server"]
 [[test]]
 name = "server_cli"
 required-features = ["server"]
+
+# feature-dashboard-compaction: managed compaction lifecycle, recovery and API.
+[[test]]
+name = "server_compaction"
+required-features = ["server", "compaction-test-hooks"]
 
 [[test]]
 name = "grpc"

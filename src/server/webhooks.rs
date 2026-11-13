@@ -108,6 +108,12 @@ impl Dispatcher {
         let path = directory.join("webhooks.json");
         atomic_write(&path, &bytes).map_err(internal)
     }
+    /// Whether any subscription is configured (compaction refuses them).
+    pub(super) fn has_subscriptions(&self) -> bool {
+        self.state
+            .lock()
+            .map_or(true, |state| !state.subscriptions.is_empty())
+    }
     pub(super) fn shutdown(&self) {
         self.stopping.store(true, Ordering::Release);
         if let Ok(mut worker) = self.worker.lock()

@@ -47,6 +47,9 @@ pub(super) struct AdminState {
     pub audit_log: Option<Arc<super::audit::Log>>,
     /// Dashboard accounts; requires an admin token and admin directory.
     pub users: Option<Arc<super::users::Accounts>>,
+    /// Managed compaction (feature-dashboard-compaction). Set once by the
+    /// managed runtime; survives generation restarts with this state.
+    pub compaction: std::sync::OnceLock<Arc<super::compaction::Coordinator>>,
 }
 impl AdminState {
     /// Whether no administration token is configured. A transport that
@@ -77,7 +80,7 @@ impl AdminState {
 
 /// Token files are explicit reload sources. The admin directory must be private
 /// to the operator; it contains database snapshots and startup selection.
-#[derive(Default)]
+#[derive(Default, Clone)]
 pub struct ServerOptions {
     pub admin_token: Option<BearerToken>,
     pub read_only_token: Option<BearerToken>,
@@ -251,55 +254,22 @@ impl ServerOptions {
 /// service (`Service::close`, which stops the scheduler and the webhook
 /// dispatcher) and drops it with every router built from it after any `Err`.
 pub fn configured_admin_router(
-    mut service: Service,
+    service: Service,
     options: ServerOptions,
 ) -> std::io::Result<Router> {
     options.validate()?;
-    service.refuse_after_unconfigured_grpc()?;
-    if let Some(path) = &options.memory_bindings_file {
-        service = service.with_bindings(read_memory_bindings(path)?);
-    }
-    // Before startup writes the records of the file: a refused router changes nothing.
-    service.refuse_reserving_after_grpc()?;
-    if options.grpc_enabled && service.has_bindings() {
-        return Err(std::io::Error::other(
-            "gRPC listener is disabled while memory bindings are configured",
-        ));
-    }
-    if service.has_bindings() && options.auto_maintenance_interval.is_some() {
-        return Err(std::io::Error::other(
-            "automatic index maintenance is disabled while memory bindings are configured",
-        ));
-    }
-    let orphans = super::memory::startup(&service)?;
-    if !orphans.is_empty() {
-        // The database holds memory that the file does not name: it stays
-        // reserved with no grants, and the refusals that protect a
-        // reservation apply (0.7.1 design note, section 1.4).
-        if options.grpc_enabled {
-            return Err(std::io::Error::other(
-                "gRPC listener is disabled while the database holds reserved memory resources",
-            ));
-        }
-        if options.auto_maintenance_interval.is_some() {
-            return Err(std::io::Error::other(
-                "automatic index maintenance is disabled while the database holds reserved memory resources",
-            ));
-        }
-        let reserved = service.memory_bindings.with_orphans(&orphans);
-        service = service.with_bindings(reserved);
-    }
-    service = service.with_bindings_source(options.memory_bindings_file.clone());
-    service = service.with_metrics_with_memory(options.metrics_with_memory);
-    // The records found above reserve resources too.
-    service.refuse_reserving_after_grpc()?;
-    super::logs::configure(
-        options
-            .log_buffer_capacity
-            .unwrap_or(super::logs::DEFAULT_CAPACITY),
-    );
+    configured_with_control(service, options, None)
+}
+
+/// Loads the database-independent control state (tokens, accounts and
+/// sessions, credentials, tenants, audit log) before any database opens, so
+/// sign-in and status work while the database is unavailable (ITEM-020). A
+/// malformed store fails closed.
+pub(super) fn load_control(options: &ServerOptions) -> std::io::Result<Arc<AdminState>> {
+    options.validate()?;
     let directory = options
         .admin_directory
+        .clone()
         .map(|p| {
             std::fs::create_dir_all(&p)?;
             std::fs::canonicalize(p)
@@ -348,6 +318,91 @@ pub fn configured_admin_router(
         }
         _ => None,
     };
+    Ok(Arc::new(AdminState {
+        auth: Mutex::new(Auth {
+            admin: options.admin_token.clone(),
+            read_only: options.read_only_token.clone(),
+            admin_file: options.admin_token_file.clone(),
+            read_only_file: options.read_only_token_file.clone(),
+            generation: 1,
+        }),
+        directory,
+        credentials,
+        tenants,
+        audit_log,
+        users,
+        ..AdminState::default()
+    }))
+}
+
+/// `configured_admin_router` around already loaded control state. Every
+/// generation of a managed runtime shares one control state, so sessions and
+/// reloaded tokens survive a compaction restart.
+pub(super) fn configured_with_control(
+    service: Service,
+    options: ServerOptions,
+    control: Option<Arc<AdminState>>,
+) -> std::io::Result<Router> {
+    configured_service(service, options, control).map(|(_, router)| router)
+}
+
+/// `configured_with_control` that also returns the configured service (the
+/// one the router serves), which a managed runtime inspects and drains.
+pub(super) fn configured_service(
+    mut service: Service,
+    options: ServerOptions,
+    control: Option<Arc<AdminState>>,
+) -> std::io::Result<(Service, Router)> {
+    service.refuse_after_unconfigured_grpc()?;
+    if let Some(path) = &options.memory_bindings_file {
+        service = service.with_bindings(read_memory_bindings(path)?);
+    }
+    // Before startup writes the records of the file: a refused router changes nothing.
+    service.refuse_reserving_after_grpc()?;
+    if options.grpc_enabled && service.has_bindings() {
+        return Err(std::io::Error::other(
+            "gRPC listener is disabled while memory bindings are configured",
+        ));
+    }
+    if service.has_bindings() && options.auto_maintenance_interval.is_some() {
+        return Err(std::io::Error::other(
+            "automatic index maintenance is disabled while memory bindings are configured",
+        ));
+    }
+    let orphans = super::memory::startup(&service)?;
+    if !orphans.is_empty() {
+        // The database holds memory that the file does not name: it stays
+        // reserved with no grants, and the refusals that protect a
+        // reservation apply (0.7.1 design note, section 1.4).
+        if options.grpc_enabled {
+            return Err(std::io::Error::other(
+                "gRPC listener is disabled while the database holds reserved memory resources",
+            ));
+        }
+        if options.auto_maintenance_interval.is_some() {
+            return Err(std::io::Error::other(
+                "automatic index maintenance is disabled while the database holds reserved memory resources",
+            ));
+        }
+        let reserved = service.memory_bindings.with_orphans(&orphans);
+        service = service.with_bindings(reserved);
+    }
+    service = service.with_bindings_source(options.memory_bindings_file.clone());
+    service = service.with_metrics_with_memory(options.metrics_with_memory);
+    // The records found above reserve resources too.
+    service.refuse_reserving_after_grpc()?;
+    super::logs::configure(
+        options
+            .log_buffer_capacity
+            .unwrap_or(super::logs::DEFAULT_CAPACITY),
+    );
+    // Loaded here, after the refusals above, so a refused router writes nothing.
+    let control = match control {
+        Some(control) => control,
+        None => load_control(&options)?,
+    };
+    let directory = control.directory.clone();
+    let audit_log = control.audit_log.clone();
     if let Some(threshold) = options.slow_query_threshold {
         service.metrics.slow_threshold_ns.store(
             threshold.as_nanos().min(u64::MAX as u128) as u64,
@@ -371,26 +426,12 @@ pub fn configured_admin_router(
             },
         )
         .map_err(|error| std::io::Error::other(error.message))?;
-    service.admin = Arc::new(AdminState {
-        auth: Mutex::new(Auth {
-            admin: options.admin_token,
-            read_only: options.read_only_token,
-            admin_file: options.admin_token_file,
-            read_only_file: options.read_only_token_file,
-            generation: 1,
-        }),
-        directory,
-        credentials,
-        tenants,
-        audit_log,
-        users,
-        ..AdminState::default()
-    });
+    service.admin = control;
     service
         .webhooks
         .configure(service.admin.directory.clone(), service.clone())?;
     service.publish_reserving()?;
-    Ok(super::routes(service))
+    Ok((service.clone(), super::routes(service)))
 }
 
 pub(super) fn read_memory_bindings(path: &FilePath) -> std::io::Result<super::reserved::Bindings> {
@@ -574,6 +615,7 @@ async fn capabilities(
         ("accounts", s.admin.users.is_some()),
         ("password_login", s.admin.users.is_some()),
         ("memory_bindings_reload", reloadable(&s)),
+        ("compaction", s.admin.compaction.get().is_some()),
     ] {
         features.insert(name.to_owned(), json!(enabled));
     }
@@ -583,6 +625,11 @@ async fn capabilities(
     routes.extend(
         [
             "/v1/changes",
+            "/v1/admin/compaction",
+            "/v1/admin/compaction/config",
+            "/v1/admin/compaction/jobs",
+            "/v1/admin/compaction/jobs/{id}",
+            "/v1/admin/compaction/jobs/{id}/cancel",
             "/v1/admin/webhooks",
             "/v1/admin/webhooks/{id}",
             "/v1/admin/replication/export",
@@ -1259,7 +1306,11 @@ async fn select_restore(
 ) -> Result<Json<Value>, ApiError> {
     let input = body(input)?;
     let dir = directory(&s)?;
+    let pins = s.admin.compaction.get().cloned();
     s.run(move |_| {
+        // Serialized with compaction selection: refused while a compaction job
+        // is active or a committed compaction authority pins the selection.
+        let _guard = super::compaction::selection_guard(pins.as_deref(), &dir)?;
         let path = safe_file(&dir, &input.name, "restore-")?;
         let report = crate::maintenance::inspect(path)?;
         if report.incomplete_tail_bytes != 0 {
@@ -1279,6 +1330,10 @@ async fn select_restore(
 /// Resolves only a validated generated restored copy. A selection remains active
 /// across restarts until the operator removes the private marker offline.
 pub fn selected_database(directory: &FilePath) -> std::io::Result<Option<PathBuf>> {
+    // The compaction selection authority wins over the legacy marker.
+    if let Some(path) = super::compaction::selected(directory)? {
+        return Ok(Some(path));
+    }
     let marker = directory.join("next-startup");
     if !marker.try_exists()? {
         return Ok(None);

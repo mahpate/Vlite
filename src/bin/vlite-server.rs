@@ -10,8 +10,8 @@ use tokio::net::TcpListener;
 use vlite::{
     AnnSnapshotLoad, Database, Durability, FormatVersion,
     server::{
-        BearerToken, GroupCommitConfig, ServerOptions, Service, configured_admin_router,
-        read_token_file, selected_database,
+        BearerToken, GroupCommitConfig, Managed, ManagedHandle, ServerOptions, Service,
+        configured_admin_router, read_token_file, selected_database,
     },
 };
 
@@ -679,6 +679,14 @@ async fn run() -> Result<(), Box<dyn Error>> {
     let telemetry = vlite::server::telemetry::configure(config.otlp_endpoint.as_deref())?;
     #[cfg(not(feature = "otel"))]
     let _ = &config.otlp_endpoint;
+    let finish = move |result: Result<(), Box<dyn Error>>| -> Result<(), Box<dyn Error>> {
+        result?;
+        #[cfg(feature = "otel")]
+        if let Some(provider) = telemetry {
+            provider.shutdown()?;
+        }
+        Ok(())
+    };
     let signals = Signals::new()?;
     // Bind both listeners before opening, so a port conflict never opens
     // (or creates) the database.
@@ -688,8 +696,62 @@ async fn run() -> Result<(), Box<dyn Error>> {
         Some(bind) => Some(TcpListener::bind(bind).await?),
         None => None,
     };
-    let (mut database, active) = open(&config)?;
     let in_memory = config.durability == Durability::None;
+    // Managed compaction runtime: control state (tokens, accounts, the
+    // compaction journal) loads before any database opens, so an interrupted
+    // compaction is reconciled first and recovery mode can still sign in.
+    let mut managed =
+        if !in_memory && config.admin_directory.is_some() && config.grpc_bind.is_none() {
+            Some(Managed::prepare(&options(&config, None))?)
+        } else {
+            None
+        };
+    let mut recovery = managed.as_ref().and_then(Managed::recovery_reason);
+    let opened = if recovery.is_some() {
+        None
+    } else {
+        match open(&config) {
+            Ok(opened) => Some(opened),
+            Err(error) if managed.as_ref().is_some_and(Managed::has_selection) => {
+                vlite::server::log_stderr(
+                    "error",
+                    "server",
+                    json!({"event":"compaction_recovery","code":"selected_candidate_open_failed",
+                        "reason":error.to_string()})
+                    .to_string(),
+                );
+                recovery = Some("selected_candidate_open_failed");
+                None
+            }
+            Err(error) => return Err(error.into()),
+        }
+    };
+    let Some((mut database, active)) = opened else {
+        let managed = managed.take().expect("recovery needs the managed runtime");
+        let code = recovery.unwrap_or("recovery_required");
+        vlite::server::log_stderr(
+            "error",
+            "server",
+            json!({"event":"compaction_recovery_mode","code":code,
+                "message":"serving authenticated recovery mode; data routes answer 503 recovery_required"})
+            .to_string(),
+        );
+        let (router, handle) = managed.serve_recovery(code)?;
+        return finish(
+            serve(
+                config,
+                listener,
+                address,
+                None,
+                signals,
+                router,
+                Some(handle),
+                None,
+                None,
+            )
+            .await,
+        );
+    };
     if in_memory {
         vlite::server::log_stderr(
             "warn",
@@ -722,15 +784,51 @@ async fn run() -> Result<(), Box<dyn Error>> {
     if let Some(tls) = &config.grpc_tls {
         service.register_tls(tls.clone())?;
     }
-    let database_path = (!in_memory).then_some(active);
-    let router = match configured_admin_router(service.clone(), options(&config, database_path)) {
-        Ok(router) => router,
+    let database_path = (!in_memory).then_some(active.clone());
+    let started = match managed {
+        Some(managed) => managed
+            .serve(service.clone(), active, config.durability)
+            .map(|(router, handle)| (router, Some(handle))),
+        None => configured_admin_router(service.clone(), options(&config, database_path))
+            .map(|router| (router, None)),
+    };
+    let (router, handle) = match started {
+        Ok(started) => started,
         Err(error) => {
             // Never leave a scheduler or the database open on failed startup.
             let _ = service.close().await;
             return Err(error.into());
         }
     };
+    finish(
+        serve(
+            config,
+            listener,
+            address,
+            grpc_listener,
+            signals,
+            router,
+            handle,
+            Some(service),
+            snapshot,
+        )
+        .await,
+    )
+}
+
+/// Serves REST (and gRPC) until a stop signal, then drains and closes.
+#[allow(clippy::too_many_arguments)]
+async fn serve(
+    config: Config,
+    listener: TcpListener,
+    address: std::net::SocketAddr,
+    grpc_listener: Option<TcpListener>,
+    signals: Signals,
+    router: axum::Router,
+    handle: Option<ManagedHandle>,
+    service: Option<Service>,
+    snapshot: Option<PathBuf>,
+) -> Result<(), Box<dyn Error>> {
     let (stop_tx, stop_rx) = tokio::sync::watch::channel(false);
     let signal = tokio::spawn({
         let stop_tx = stop_tx.clone();
@@ -746,7 +844,12 @@ async fn run() -> Result<(), Box<dyn Error>> {
         // Built after the REST router so it shares its tokens, audit log and
         // memory reservations (configured_admin_router refuses to follow it).
         Some(listener) => {
-            let server = vlite::server::grpc::grpc_router(service.clone()).await;
+            let server = vlite::server::grpc::grpc_router(
+                service
+                    .clone()
+                    .expect("gRPC runs only with an unmanaged service"),
+            )
+            .await;
             let server = match config.grpc_tls.clone() {
                 Some(tls) => server.with_reloadable_tls(tls),
                 None => server,
@@ -824,10 +927,26 @@ async fn run() -> Result<(), Box<dyn Error>> {
         result
     };
     let (rest, grpc) = tokio::join!(rest, grpc);
-    if let Some(path) = &snapshot {
-        save_ann_snapshot(&service, path).await;
+    // A managed runtime may have replaced the generation (compaction): stop
+    // its scheduler and any pre-selection job, then save/close the current one.
+    let (service, snapshot) = match &handle {
+        Some(handle) => {
+            handle.shutdown().await;
+            let snapshot = snapshot
+                .is_some()
+                .then(|| handle.path().map(|path| Database::ann_snapshot_path(&path)))
+                .flatten();
+            (handle.current(), snapshot)
+        }
+        None => (service, snapshot),
+    };
+    if let (Some(path), Some(service)) = (&snapshot, &service) {
+        save_ann_snapshot(service, path).await;
     }
-    let closing = service.close().await;
+    let closing = match &service {
+        Some(service) => service.close().await,
+        None => Ok(()),
+    };
     vlite::server::log_stderr(
         "info",
         "server",
@@ -836,10 +955,6 @@ async fn run() -> Result<(), Box<dyn Error>> {
     rest?;
     grpc?;
     closing?;
-    #[cfg(feature = "otel")]
-    if let Some(provider) = telemetry {
-        provider.shutdown()?;
-    }
     if signal.is_finished() {
         signal.await??;
     } else {
