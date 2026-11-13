@@ -33,8 +33,7 @@ use crate::{
 };
 mod admin;
 mod audit;
-// Wired into the admin runtime by the cloud backup policy/scheduler change.
-#[allow(dead_code)]
+mod backup_policy;
 mod cloud_backup;
 mod collections;
 mod compaction;
@@ -865,6 +864,7 @@ fn routes(service: Service) -> Router {
         .merge(collections::routes())
         .merge(compaction::routes())
         .merge(ops::routes())
+        .merge(backup_policy::routes())
         .merge(credentials::routes())
         .merge(data_routes())
         .merge(features::routes())

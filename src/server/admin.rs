@@ -50,6 +50,9 @@ pub(super) struct AdminState {
     /// Managed compaction (feature-dashboard-compaction). Set once by the
     /// managed runtime; survives generation restarts with this state.
     pub compaction: std::sync::OnceLock<Arc<super::compaction::Coordinator>>,
+    /// Azure Blob backup policy runtime (feature-backup-ha). Set once when an
+    /// admin directory exists; shared by every generation of this state.
+    pub cloud: std::sync::OnceLock<Arc<super::backup_policy::Runtime>>,
 }
 impl AdminState {
     /// Whether no administration token is configured. A transport that
@@ -401,6 +404,14 @@ pub(super) fn configured_service(
         Some(control) => control,
         None => load_control(&options)?,
     };
+    // An invalid persisted cloud policy fails startup instead of silently
+    // disabling backups.
+    if let Some(directory) = &control.directory
+        && control.cloud.get().is_none()
+    {
+        let runtime = super::backup_policy::Runtime::open(directory.join("cloud-backup"))?;
+        let _ = control.cloud.set(Arc::new(runtime));
+    }
     let directory = control.directory.clone();
     let audit_log = control.audit_log.clone();
     if let Some(threshold) = options.slow_query_threshold {
@@ -431,6 +442,14 @@ pub(super) fn configured_service(
         .webhooks
         .configure(service.admin.directory.clone(), service.clone())?;
     service.publish_reserving()?;
+    // Recovery mode and in-memory servers have no database file to back up.
+    if let Some(runtime) = service.admin.cloud.get()
+        && options.database_path.is_some()
+    {
+        service
+            .ops
+            .configure_cloud(runtime.clone(), super::backup_policy::Handle::new(&service));
+    }
     Ok((service.clone(), super::routes(service)))
 }
 
@@ -616,6 +635,7 @@ async fn capabilities(
         ("password_login", s.admin.users.is_some()),
         ("memory_bindings_reload", reloadable(&s)),
         ("compaction", s.admin.compaction.get().is_some()),
+        ("cloud_backup", s.admin.cloud.get().is_some()),
     ] {
         features.insert(name.to_owned(), json!(enabled));
     }
@@ -667,6 +687,14 @@ async fn capabilities(
             "/v1/admin/memory/bindings/reload",
             "/v1/admin/memory/bindings/preflight",
             "/v1/admin/memory/bindings/status",
+            "/v1/admin/cloud-backup",
+            "/v1/admin/cloud-backup/run",
+            "/v1/admin/cloud-backup/collect",
+            "/v1/admin/cloud-backup/sets",
+            "/v1/admin/cloud-backup/sets/{id}/drill",
+            "/v1/admin/cloud-backup/sets/{id}/restore",
+            "/v1/admin/cloud-backup/sets/{id}/pins",
+            "/v1/admin/cloud-backup/sets/{id}/pins/{pin}",
         ]
         .into_iter()
         .map(|route| json!(route)),

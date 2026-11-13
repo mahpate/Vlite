@@ -240,6 +240,13 @@ impl Target {
         if self.auth == AuthMode::EmulatorSharedKey && !loopback {
             return Err("emulator_shared_key is accepted only with a loopback endpoint".into());
         }
+        // A bearer token is sent with every request: never to another host.
+        let public = format!("https://{}.blob.core.windows.net", self.account);
+        if self.auth == AuthMode::ManagedIdentity && text != public {
+            return Err(format!(
+                "managed_identity sends tokens only to the account's public-cloud endpoint {public}; omit endpoint"
+            ));
+        }
         Ok(text)
     }
 }
@@ -654,6 +661,13 @@ fn conflict(code: &'static str, message: impl Into<String>) -> ApiError {
     ApiError::new(StatusCode::CONFLICT, code, message)
 }
 
+fn prefix_owned() -> ApiError {
+    conflict(
+        "cloud_prefix_owned",
+        "the cloud prefix belongs to another installation; configure a new prefix",
+    )
+}
+
 fn corrupt(message: impl Into<String>) -> ApiError {
     ApiError::new(StatusCode::BAD_GATEWAY, "cloud_set_corrupt", message)
 }
@@ -803,12 +817,7 @@ impl Sets {
         for _ in 0..3 {
             match self.owner()? {
                 Some(owner) if owner == installation => return Ok(()),
-                Some(_) => {
-                    return Err(conflict(
-                        "cloud_prefix_owned",
-                        "the cloud prefix belongs to another installation; configure a new prefix",
-                    ));
-                }
+                Some(_) => return Err(prefix_owned()),
                 None => {
                     let bytes = encode(&Owner {
                         schema: OWNER_SCHEMA.into(),
@@ -1037,6 +1046,14 @@ impl Sets {
             }
             listing.sets.push(listed);
         }
+        // IDs from the same second sort by their random suffix, so "newest"
+        // (retention, listing) is the record's creation time, then the ID.
+        listing.sets.sort_by_cached_key(|l| {
+            std::cmp::Reverse((
+                l.record.as_ref().map_or(0, |r| r.created_unix_ms),
+                l.set_id.clone(),
+            ))
+        });
         Ok(listing)
     }
 
@@ -1429,6 +1446,11 @@ impl Sets {
         now: u64,
     ) -> Result<Collection, ApiError> {
         let mut out = Collection::default();
+        // Only the prefix owner collects: a restored copy pointed at the old
+        // prefix must never apply its retention to the original's sets.
+        if self.owner()?.is_some_and(|owner| owner != installation) {
+            return Err(prefix_owned());
+        }
         let (mut catalog, mut etag) = self.catalog(now)?;
         if let Some(decision) = catalog.decision.clone() {
             let why = Condemn::Retention(decision.id.clone());
@@ -1496,7 +1518,7 @@ impl Sets {
             .sets
             .iter()
             .filter_map(|l| l.record.as_ref().map(|r| (&l.set_id, r)))
-            .filter(|(_, r)| r.state == SetState::Published)
+            .filter(|(_, r)| r.state == SetState::Published && r.installation_id == installation)
             .collect();
         let newest_drilled = published
             .iter()
@@ -1792,6 +1814,10 @@ mod tests {
     }
 
     fn prepare(env: &Env, now: u64) -> (Manifest, Vec<Upload>) {
+        prepare_as(env, now, &new_set_id(now).unwrap())
+    }
+
+    fn prepare_as(env: &Env, now: u64, id: &str) -> (Manifest, Vec<Upload>) {
         let path = env.db.path().join("source.vlite");
         let verification = maintenance::verify(&path).unwrap();
         let detail = maintenance::inspect_detail(&path).unwrap();
@@ -1799,8 +1825,7 @@ mod tests {
             Upload::file(ROLE_DATABASE, path).unwrap(),
             Upload::bytes(ROLE_BUNDLE, bundle_bytes(detail.lineage)),
         ];
-        let id = new_set_id(now).unwrap();
-        let manifest = Manifest::new(&id, INSTALL, now, &verification, &detail, &uploads);
+        let manifest = Manifest::new(id, INSTALL, now, &verification, &detail, &uploads);
         (manifest, uploads)
     }
 
@@ -1899,6 +1924,41 @@ mod tests {
         }
         let unknown = json!({"account":"a1b","container":"abc","prefix":"p/","sas":"x"});
         assert!(serde_json::from_value::<Target>(unknown).is_err());
+    }
+
+    #[test]
+    fn managed_identity_tokens_go_only_to_the_account_blob_host() {
+        let base = Target {
+            account: "vlitebackup".into(),
+            container: "vlite-data".into(),
+            coordination_container: None,
+            prefix: "prod/".into(),
+            endpoint: None,
+            auth: AuthMode::ManagedIdentity,
+            client_id: None,
+        };
+        let with = |endpoint: &str| Target {
+            endpoint: Some(endpoint.into()),
+            ..base.clone()
+        };
+        assert!(base.validate().is_ok());
+        assert!(
+            with("https://vlitebackup.blob.core.windows.net/")
+                .validate()
+                .is_ok()
+        );
+        for endpoint in [
+            "https://attacker.example.com",
+            "https://other.blob.core.windows.net",
+            "https://vlitebackup.blob.core.windows.net.example.com",
+            "https://vlitebackup.blob.core.windows.net/devstoreaccount1",
+            "https://vlitebackup.blob.core.windows.net:8443",
+            "http://127.0.0.1:10000/devstoreaccount1",
+            "https://localhost/",
+        ] {
+            let error = with(endpoint).validate().unwrap_err();
+            assert!(error.contains("managed_identity"), "{endpoint}: {error}");
+        }
     }
 
     #[test]
@@ -2048,6 +2108,38 @@ mod tests {
             .unwrap();
         assert_eq!(out.swept, vec![id.clone()]);
         assert_eq!(data_objects(&env, &id), 0);
+    }
+
+    #[test]
+    fn sets_from_one_second_are_ordered_by_creation_time() {
+        let env = setup();
+        let second = &new_set_id(BASE).unwrap()[..17];
+        // Later sets get lower random suffixes than earlier ones.
+        let ids: Vec<String> = ["ffffffffffffffff", "8888888888888888", "0000000000000000"]
+            .iter()
+            .enumerate()
+            .map(|(i, suffix)| {
+                let (id, now) = (format!("{second}{suffix}"), BASE + i as u64);
+                let (manifest, uploads) = prepare_as(&env, now, &id);
+                let published = env.sets.publish(&manifest, &uploads, now).unwrap();
+                assert!(matches!(published, Publication::Published(_)));
+                id
+            })
+            .collect();
+        let listed: Vec<String> = env
+            .sets
+            .list()
+            .unwrap()
+            .sets
+            .into_iter()
+            .map(|l| l.set_id)
+            .collect();
+        assert_eq!(listed, vec![ids[2].clone(), ids[1].clone(), ids[0].clone()]);
+        let out = env
+            .sets
+            .collect(INSTALL, &retention(true), BASE + 86_400_000)
+            .unwrap();
+        assert_eq!(out.deleted, vec![ids[0].clone()], "the oldest set goes");
     }
 
     #[test]
@@ -2214,6 +2306,18 @@ mod tests {
             .unwrap();
         assert_eq!(err.code, "cloud_prefix_owned");
         assert_eq!(env.sets.owner().unwrap().as_deref(), Some(INSTALL));
+        // Another installation never collects (or applies retention) here.
+        let ids: Vec<String> = (0..3).map(|i| publish(&env, BASE + i * 1000)).collect();
+        let far = BASE + 30 * 86_400_000;
+        let err = env
+            .sets
+            .collect("fedcba9876543210", &retention(true), far)
+            .err()
+            .unwrap();
+        assert_eq!(err.code, "cloud_prefix_owned");
+        assert_eq!(data_objects(&env, &ids[0]), 3);
+        let out = env.sets.collect(INSTALL, &retention(true), far).unwrap();
+        assert_eq!(out.deleted, vec![ids[0].clone()]);
     }
 
     #[test]

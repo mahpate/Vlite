@@ -130,6 +130,12 @@ struct Inner {
     next_backup: Option<Instant>,
     cursor: Option<u16>,
     spawn_error: Option<String>,
+    /// Azure Blob backup policy runtime (shared across generations) and the
+    /// handle of this generation's service.
+    cloud: Option<(
+        Arc<super::backup_policy::Runtime>,
+        super::backup_policy::Handle,
+    )>,
 }
 
 pub(super) struct Ops {
@@ -224,8 +230,36 @@ impl Ops {
         Ok(())
     }
 
+    /// Schedules the persisted cloud backup policy on this worker.
+    pub(super) fn configure_cloud(
+        self: &Arc<Self>,
+        runtime: Arc<super::backup_policy::Runtime>,
+        handle: super::backup_policy::Handle,
+    ) {
+        if let Ok(mut inner) = self.inner.lock() {
+            inner.cloud = Some((runtime, handle));
+            self.ensure_thread(&mut inner);
+        }
+    }
+
+    /// Starts the worker after the cloud policy was enabled.
+    pub(super) fn cloud_changed(self: &Arc<Self>) {
+        if let Ok(mut inner) = self.inner.lock() {
+            self.ensure_thread(&mut inner);
+        }
+    }
+
+    /// Whether this generation serves a database file (not in-memory or the
+    /// recovery placeholder).
+    pub(super) fn file_backed(&self) -> bool {
+        self.inner.lock().is_ok_and(|inner| inner.active.is_some())
+    }
+
     fn ensure_thread(self: &Arc<Self>, inner: &mut Inner) {
-        if inner.stopped || inner.thread.is_some() || !(inner.auto.enabled || inner.backup.enabled)
+        let cloud = inner.cloud.as_ref().is_some_and(|(r, _)| r.enabled());
+        if inner.stopped
+            || inner.thread.is_some()
+            || !(inner.auto.enabled || inner.backup.enabled || cloud)
         {
             self.wake.notify_all();
             return;
@@ -264,7 +298,7 @@ impl Ops {
 
     fn run_loop(self: Arc<Self>) {
         loop {
-            let (auto, backup) = {
+            let (auto, backup, cloud) = {
                 let Ok(mut inner) = self.inner.lock() else {
                     return;
                 };
@@ -276,14 +310,20 @@ impl Ops {
                     let auto = inner.auto.enabled && inner.next_auto.is_some_and(|t| t <= now);
                     let backup =
                         inner.backup.enabled && inner.next_backup.is_some_and(|t| t <= now);
-                    if auto || backup {
+                    // Claiming marks the run as started; it must then run.
+                    let cloud = inner
+                        .cloud
+                        .as_ref()
+                        .filter(|(runtime, _)| runtime.claim_due())
+                        .cloned();
+                    if auto || backup || cloud.is_some() {
                         if auto {
                             inner.next_auto = Some(now + inner.auto.interval);
                         }
                         if backup {
                             inner.next_backup = Some(now + inner.backup.interval);
                         }
-                        break (auto, backup);
+                        break (auto, backup, cloud);
                     }
                     let next = [
                         inner.next_auto.filter(|_| inner.auto.enabled),
@@ -303,6 +343,10 @@ impl Ops {
                     };
                 }
             };
+            // The cloud cycle runs on its own thread (uploads can be long).
+            if let Some((runtime, handle)) = cloud {
+                runtime.start_claimed(handle);
+            }
             if auto {
                 self.scheduled_tick();
             }
