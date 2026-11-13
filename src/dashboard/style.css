@@ -184,6 +184,24 @@ legend { padding: 0 6px; color: var(--studio-text); font-size: 13px; font-weight
 .hybrid-fields { margin: 8px 0; }
 #cred-operations { display: flex; flex-wrap: wrap; gap: 4px 14px; }
 progress { width: 100%; }
+/* File compaction card: the text carries the state; the border colour only reinforces it. */
+.field-help { margin: -8px 0 12px; font-size: 13px; }
+.field-error { margin: -8px 0 12px; color: var(--studio-danger); font-size: 13px; font-weight: 600; }
+[aria-invalid="true"] { border-color: var(--studio-danger); }
+.compaction-status { margin: 16px 0; padding: 12px 16px; border: 1px solid var(--studio-border); border-left: 4px solid var(--studio-muted); border-radius: 10px; background: var(--studio-surface); color: var(--studio-text); font-weight: 600; overflow-wrap: anywhere; }
+.compaction-status[data-tone="ready"] { border-left-color: var(--studio-success); }
+.compaction-status[data-tone="busy"] { border-left-color: var(--studio-accent); }
+.compaction-status[data-tone="blocked"] { border-left-color: var(--studio-danger); }
+.compaction-facts { display: grid; grid-template-columns: repeat(auto-fill, minmax(min(100%, 260px), 1fr)); gap: 12px; margin: 12px 0; }
+.compaction-facts > div { min-width: 0; padding: 12px 14px; border: 1px solid var(--studio-border); border-radius: 10px; background: var(--studio-surface); }
+.compaction-facts dt { color: var(--studio-muted); font-size: 12px; }
+.compaction-facts dd { margin: 4px 0 0; color: var(--studio-text); font-size: 14px; overflow-wrap: anywhere; }
+.compaction-why:has(> ul[hidden]) { display: none; }
+.compaction-why ul { margin: 0 0 12px; padding-left: 20px; color: var(--studio-text); font-size: 14px; line-height: 1.6; }
+.compaction-checks label, .compaction-toggle { display: flex; align-items: center; gap: 4px; min-height: 44px; margin: 4px 0; font-weight: 500; }
+.compaction-checks input[type="checkbox"], .compaction-toggle input[type="checkbox"] { flex: 0 0 auto; }
+.compaction-actions { display: flex; flex-wrap: wrap; align-items: center; }
+.compaction-grid { display: grid; grid-template-columns: minmax(0, 1fr); }
 
 /* Buttons: primary by default; secondary, danger and in-table variants. */
 button { min-height: 44px; margin: 4px 8px 4px 0; padding: 10px 18px; border: 1px solid transparent; border-radius: 10px; background: var(--studio-action); color: var(--studio-on-accent); font-weight: 600; cursor: pointer; touch-action: manipulation; transition: background var(--studio-motion), border-color var(--studio-motion), color var(--studio-motion), box-shadow var(--studio-motion); }

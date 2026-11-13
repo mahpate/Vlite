@@ -6,7 +6,9 @@ const vm = require("node:vm");
 function element(id, tagName = "BUTTON") {
   const listeners = [];
   const inputs = [];
-  return { id, tagName, value: "", textContent: "", disabled: false, checked: false, listeners, inputs,
+  return { id, tagName, value: "", textContent: "", disabled: false, checked: false, hidden: false, attributes: {}, children: [], focused: 0, listeners, inputs,
+    setAttribute(name, value) { this.attributes[name] = String(value); }, replaceChildren(...nodes) { this.children = nodes; },
+    append(...nodes) { this.children.push(...nodes); }, focus() { this.focused++; },
     addEventListener(type, fn) { if (type === "click") listeners.push(fn); else if (type === "input") inputs.push(fn); },
     click() { return Promise.all(listeners.map((fn) => fn())); },
     input() { inputs.forEach((fn) => fn()); } };
@@ -15,15 +17,25 @@ const ids = ["tenant-list", "tenant-name", "tenant-max-vectors", "tenant-create"
   "tenant-usage", "tenant-new-name", "tenant-limit-mode", "tenant-new-limit", "tenant-save-settings", "tenant-suspend", "tenant-resume",
   "tls-reload", "tls-result", "replication-after", "replication-max-bytes", "replication-export", "replication-download", "replication-result",
   "user-list", "user-id", "user-username", "user-role", "user-tenant", "user-password", "user-must-change", "user-disabled",
-  "user-create", "user-save", "user-reset-password", "user-delete", "user-result"];
+  "user-create", "user-save", "user-reset-password", "user-delete", "user-result",
+  "compaction-status", "compaction-facts", "compaction-reasons", "compaction-refresh", "compaction-start", "compaction-cancel", "compaction-start-help",
+  "compaction-ack", "compaction-ack-error", "compaction-ack-downtime", "compaction-ack-history", "compaction-enabled", "compaction-history-policy",
+  "compaction-history-policy-error", "compaction-start-utc", "compaction-start-utc-error", "compaction-local-time", "compaction-window", "compaction-window-error",
+  "compaction-max-run", "compaction-max-run-error", "compaction-min-file", "compaction-min-file-error", "compaction-min-growth", "compaction-min-growth-error",
+  "compaction-growth-percent", "compaction-growth-percent-error", "compaction-cooldown", "compaction-cooldown-error", "compaction-max-source",
+  "compaction-max-source-error", "compaction-save", "compaction-result"];
 const elements = Object.fromEntries(ids.map((id) => [id, element(id, id.endsWith("-result") ? "PRE" : "BUTTON")]));
 const downloads = [];
+// Polling timers (5 s and longer) are captured so tests advance them by hand.
+const timers = [];
 const sandbox = {
-  window: {}, URLSearchParams, Blob, setTimeout, BigInt, Number, JSON,
+  window: {}, URLSearchParams, Blob, BigInt, Number, JSON, Uint8Array, Date, crypto: globalThis.crypto,
+  setTimeout: (fn, ms) => { if (ms >= 5000) { timers.push({ fn, ms }); return timers.length; } return setTimeout(fn, ms); },
+  clearTimeout: (id) => { if (typeof id === "number") { if (timers[id - 1]) timers[id - 1].fn = null; } else clearTimeout(id); },
   URL: { createObjectURL: (blob) => { downloads.push(blob); return "blob:x"; }, revokeObjectURL() {} },
   document: {
     getElementById: (id) => elements[id] ?? null,
-    createElement: () => ({ click() { downloads.push(this.download); }, remove() {} }),
+    createElement: (tag) => ({ ...element("", tag.toUpperCase()), click() { downloads.push(this.download); }, remove() {} }),
     body: { append() {} },
   },
 };
@@ -250,10 +262,18 @@ function fakeCtx() {
     confirm: async (message) => { ctx.confirms.push(message); return typeof ctx.answer === "function" ? ctx.answer() : ctx.answer; },
     run: async (fn) => { try { await fn(); } catch (error) { ctx.errors.push(error); } },
     status: (message) => ctx.statuses.push(message),
+    reads: [], readResponses: [],
+    background: async (path) => {
+      ctx.reads.push(path);
+      const next = ctx.readResponses.shift();
+      if (next instanceof Error) throw next;
+      if (next === undefined) throw new Error("unexpected background read");
+      return next;
+    },
   };
   return ctx;
 }
-const reset = () => { for (const e of Object.values(elements)) { e.listeners.length = 0; e.inputs.length = 0; e.value = ""; e.textContent = ""; e.disabled = false; e.checked = false; } };
+const reset = () => { for (const e of Object.values(elements)) { e.listeners.length = 0; e.inputs.length = 0; e.value = ""; e.textContent = ""; e.disabled = false; e.checked = false; e.hidden = false; e.attributes = {}; e.children = []; } };
 
 (async () => {
   // Missing markup fails loudly; init itself issues no requests.
@@ -547,5 +567,211 @@ const reset = () => { for (const e of Object.values(elements)) { e.listeners.len
   await elements["tenant-create"].click();
   await elements["replication-export"].click();
   assert.equal(ctx.calls.length, count);
+  await compactionTests();
   console.log("admin tools tests passed");
 })().catch((error) => { console.error(error); process.exit(1); });
+
+// ---- File compaction: pure helpers, then the card controller against a fake backend. ----
+async function compactionTests() {
+  const { formatBytes, compactionForm, compactionSettings, compactionOutcome, compactionView, idempotencyKey } = utils;
+  const MIB = 1048576;
+  const flush = () => new Promise((resolve) => setImmediate(resolve));
+  assert.equal(formatBytes(0), "0 bytes");
+  assert.equal(formatBytes(1536), "1.5 KiB (1,536 bytes)");
+  assert.equal(formatBytes(-1), "unknown");
+  assert.equal(idempotencyKey((b) => b), "00000000-0000-4000-8000-000000000000");
+  assert.match(idempotencyKey(), /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/);
+  const settings = { enabled: false, daily_start_utc: "02:00", window_minutes: 60, max_run_seconds: 900, min_file_bytes: 256 * MIB,
+    min_growth_bytes: 128 * MIB, min_growth_percent: 25, cooldown_hours: 168, max_source_bytes: 1024 * MIB, history_policy: "unacknowledged" };
+  // Round trip: what the form shows is exactly what Save sends back.
+  assert.deepEqual({ ...compactionSettings(compactionForm(settings)).settings }, settings);
+  assert.equal(compactionForm(settings).minFile, "256");
+  const bad = compactionSettings({ ...compactionForm(settings), start: "25:00", window: "4", minFile: "10", maxSource: "2048", growthPercent: "5", cooldown: "1", enabled: true });
+  assert.deepEqual(Object.keys(bad.errors).sort(), ["cooldown", "growthPercent", "history", "maxSource", "minFile", "start", "window"]);
+  assert.equal(bad.settings, undefined);
+  assert.match(compactionSettings({ ...compactionForm(settings), maxRun: "3600" }).errors.maxRun, /at most 3540 seconds/);
+  assert.match(compactionSettings({ ...compactionForm(settings), minFile: "2000" }).errors.minFile, /largest file size/);
+  // The test profile has no 64 MiB floor, so tiny qualification files can be scheduled.
+  const tiny = compactionSettings({ ...compactionForm(settings), minFile: "0", minGrowth: "0.001", maxSource: "1" }, 0);
+  assert.equal(tiny.settings.min_file_bytes, 0);
+  assert.equal(tiny.settings.min_growth_bytes, 1049);
+  assert.ok(compactionSettings({ ...compactionForm(settings), minFile: "0" }).errors.minFile);
+  assert.equal(compactionSettings({ ...compactionForm(settings), enabled: true, history: true }).settings.history_policy, "resnapshot_allowed");
+  assert.match(compactionOutcome({ outcome: "skipped", code: "no_material_savings" }), /kept using the original file.*not have been meaningfully smaller/);
+  assert.match(compactionOutcome({ outcome: "failed", selection: "committed" }), /after switching/);
+
+  const status = (over = {}) => ({ capability: true, profile: "linux_ext4", test_profile: false, available: true, reasons: [],
+    file: { name: "data.vlite", bytes: 300 * MIB, sampled_unix_ms: 10 }, settings: { ...settings }, settings_version: 3, history_acknowledged: false,
+    schedule: { enabled: false, suspended: false, failures: 0, baseline_bytes: null, growth_bytes: null, next_window_unix_ms: null, in_window: false, next_eligible_unix_ms: null },
+    job: null, last_job: null, phase: null, fence: "open", recovery: { required: false, retained_bytes: 0, retained_copies: 0 }, selection: null, ...over });
+  const job = (over = {}) => ({ id: "job-1", trigger: "manual", phase: "building", cancel_requested: false, created_unix_ms: 1, selection: "none", ...over });
+  let view = compactionView(status());
+  assert.equal(view.tone, "ready");
+  assert.equal(view.canStart, true);
+  assert.ok(view.facts.some(([k, v]) => k === "Last run" && v === "Never"));
+  view = compactionView(status({ available: false, reasons: [{ code: "history_ack_required", message: "ack" }, { code: "unqualified_filesystem", message: "Not a qualified file system." }] }));
+  assert.deepEqual(view.reasons, ["Not a qualified file system."]);
+  assert.equal(view.canStart, false);
+  view = compactionView(status({ available: false, job: job(), reasons: [{ code: "job_active", message: "busy" }] }));
+  assert.equal(view.tone, "busy");
+  assert.match(view.headline, /started from Compact now.*Building the compacted copy|In progress/);
+  assert.deepEqual([view.canStart, view.canCancel, view.watch, view.reasons.length], [false, true, true, 0]);
+  assert.equal(compactionView(status({ job: job({ phase: "selecting" }) })).canCancel, false);
+  assert.equal(compactionView(status({ job: job({ cancel_requested: true }) })).canCancel, false);
+  view = compactionView(status({ recovery: { required: true, code: "selection_unresolved", retained_bytes: 5, retained_copies: 1 } }));
+  assert.equal(view.tone, "blocked");
+  assert.equal(view.canStart, false);
+  assert.ok(view.facts.some(([k]) => k === "Recovery copies kept"));
+  assert.equal(compactionView(status({ fence: "maintenance" })).watch, true);
+  assert.equal(compactionView({ capability: false, reasons: [{ code: "managed_runtime_required", message: "managed" }], settings: null, job: null }).headline, "Not available on this server.");
+  const last = { id: "job-1", trigger: "manual", outcome: "succeeded", selection: "committed", before_bytes: 300 * MIB, after_bytes: 100 * MIB, saved_bytes: 200 * MIB, finished_unix_ms: 1 };
+  assert.ok(compactionView(status({ last_job: last })).facts.some(([k, v]) => k === "Last size change" && /saved 200 MiB/.test(v)));
+  assert.ok(compactionView(status({ settings: { ...settings, enabled: true }, schedule: { suspended: true, failures: 3 } })).facts.some(([, v]) => /Suspended after 3/.test(v)));
+
+  // Controller wired to a fake backend.
+  reset();
+  timers.length = 0;
+  const ctx = fakeCtx();
+  const caps = { role: "admin", features: { compaction: true }, routes: [] };
+  ctx.caps = caps;
+  const tools = init(ctx);
+  ctx.readResponses.push(status());
+  tools.capabilities(caps);
+  await flush();
+  assert.deepEqual(ctx.reads, ["/v1/admin/compaction"]);
+  assert.equal(ctx.calls.length, 0, "status loads through the background reader, not a foreground request");
+  assert.match(elements["compaction-status"].textContent, /^Ready/);
+  assert.equal(elements["compaction-status"].attributes["data-tone"], "ready");
+  assert.equal(elements["compaction-window"].value, "60");
+  assert.equal(elements["compaction-min-file"].value, "256");
+  assert.match(elements["compaction-local-time"].textContent, /02:00 UTC is/);
+  assert.equal(elements["compaction-facts"].children.length > 2, true);
+  assert.equal(elements["compaction-reasons"].hidden, true);
+  assert.deepEqual([elements["compaction-start"].disabled, elements["compaction-cancel"].disabled, elements["compaction-save"].disabled, elements["compaction-enabled"].disabled], [false, true, false, false]);
+  assert.equal(timers.length, 0, "an idle card does not poll");
+
+  // Compact now needs both acknowledgements on every start.
+  await elements["compaction-start"].click();
+  assert.match(ctx.errors.at(-1).message, /Tick both/);
+  assert.equal(elements["compaction-ack-error"].textContent, "Tick both statements to continue.");
+  assert.equal(elements["compaction-ack"].attributes["aria-invalid"], "true");
+  assert.equal(ctx.calls.length, 0);
+  elements["compaction-ack-downtime"].checked = elements["compaction-ack-history"].checked = true;
+  ctx.answer = false;
+  await elements["compaction-start"].click();
+  assert.equal(ctx.calls.length, 0, "declining the confirmation sends nothing");
+  assert.match(ctx.confirms.at(-1), /Reads and writes pause.*900 seconds.*new snapshot/);
+  ctx.answer = true;
+  // Unknown outcome (503): the retry reuses the same idempotency key.
+  ctx.responses.push(Object.assign(new Error("HTTP 503"), { status: 503 }));
+  await elements["compaction-start"].click();
+  ctx.responses.push({ job: job({ phase: "preflight" }), replayed: true });
+  ctx.readResponses.push(status({ available: false, job: job(), fence: "maintenance", reasons: [{ code: "job_active", message: "busy" }] }));
+  await elements["compaction-start"].click();
+  const [first, second] = ctx.calls;
+  assert.deepEqual([first.method, first.path], ["POST", "/v1/admin/compaction/jobs"]);
+  assert.equal(first.body.idempotency_key, second.body.idempotency_key);
+  assert.deepEqual({ ...second.body, idempotency_key: "k" }, { expected_version: 3, acknowledge_downtime: true, acknowledge_history: true, idempotency_key: "k" });
+  assert.equal(elements["compaction-ack-downtime"].checked || elements["compaction-ack-history"].checked, false, "acknowledgements reset after a start");
+  assert.match(elements["compaction-result"].textContent, /"replayed": true/);
+  assert.match(elements["compaction-status"].textContent, /In progress/);
+  assert.deepEqual([elements["compaction-start"].disabled, elements["compaction-cancel"].disabled, elements["compaction-save"].disabled, elements["compaction-window"].disabled], [true, false, true, true]);
+  assert.equal(timers.at(-1).ms, 5000);
+
+  // A dropped poll while the file switches keeps watching instead of failing.
+  ctx.readResponses.push(new Error("Failed to fetch"));
+  let tick = timers.at(-1); await tick.fn();
+  assert.match(elements["compaction-status"].textContent, /Waiting for the server to answer \(attempt 1\)/);
+  assert.notEqual(timers.at(-1), tick);
+  assert.equal(timers.at(-1).ms, 5000);
+  ctx.readResponses.push(new Error("Failed to fetch"));
+  tick = timers.at(-1); await tick.fn();
+  assert.match(elements["compaction-status"].textContent, /attempt 2/);
+  assert.equal(timers.at(-1).ms, 10000, "dropped polls back off toward 30 seconds");
+
+  // Cancel goes to the running job and is refused once past the safe point.
+  ctx.responses.push({ job: job({ cancel_requested: true }) });
+  ctx.readResponses.push(status({ available: false, job: job({ cancel_requested: true }), fence: "maintenance" }));
+  await elements["compaction-cancel"].click();
+  assert.deepEqual([ctx.calls.at(-1).method, ctx.calls.at(-1).path], ["POST", "/v1/admin/compaction/jobs/job-1/cancel"]);
+  assert.match(ctx.confirms.at(-1), /original file stays in use/);
+  assert.match(elements["compaction-status"].textContent, /Cancellation requested/);
+  assert.equal(elements["compaction-cancel"].disabled, true);
+  const callsBefore = ctx.calls.length;
+  await elements["compaction-cancel"].click();
+  assert.equal(ctx.calls.length, callsBefore);
+
+  // Polling reports the finished run with before/after sizes and then stops.
+  ctx.readResponses.push(status({ last_job: { ...last, outcome: "cancelled", code: "cancelled", selection: "none", after_bytes: null, saved_bytes: null } }));
+  tick = timers.at(-1); timers.length = 0; await tick.fn();
+  assert.match(elements["compaction-status"].textContent, /^Cancelled: the server kept using the original file\. Reason: an administrator cancelled it\. Ready/);
+  assert.equal(timers.length, 0);
+  ctx.readResponses.push(status({ last_job: last, schedule: { baseline_bytes: 100 * MIB, growth_bytes: 0 } }));
+  await elements["compaction-refresh"].click();
+  const facts = elements["compaction-facts"].children.map((row) => row.children.map((cell) => cell.textContent).join(": "));
+  assert.ok(facts.some((f) => /^Last size change: 300 MiB .* before, 100 MiB .* after; saved 200 MiB/.test(f)), facts.join("\n"));
+
+  // A later (scheduled) run replaced the watched job as the last job: the card reads the watched job by id.
+  elements["compaction-ack-downtime"].checked = elements["compaction-ack-history"].checked = true;
+  ctx.responses.push({ job: job({ id: "job-2", phase: "preflight" }), replayed: false });
+  ctx.readResponses.push(status({ available: false, job: job({ id: "job-2" }), fence: "maintenance" }));
+  await elements["compaction-start"].click();
+  ctx.readResponses.push(status({ last_job: { ...last, id: "job-3", trigger: "scheduled" } }),
+    { job: { ...last, id: "job-2", outcome: "skipped", code: "no_material_savings", selection: "none", after_bytes: null, saved_bytes: null } });
+  tick = timers.at(-1); timers.length = 0; await tick.fn();
+  assert.deepEqual(ctx.reads.slice(-2), ["/v1/admin/compaction", "/v1/admin/compaction/jobs/job-2"]);
+  assert.match(elements["compaction-status"].textContent, /^Your earlier run: Skipped: the server kept using the original file\. Reason: the compacted file would not have been meaningfully smaller\. Ready/);
+  assert.equal(timers.length, 0);
+
+  // Save: inline errors stop the request and focus the first invalid field.
+  const putsBefore = ctx.calls.length;
+  elements["compaction-window"].value = "4";
+  elements["compaction-window"].inputs.forEach((fn) => fn());
+  elements["compaction-enabled"].checked = true;
+  await elements["compaction-save"].click();
+  assert.equal(ctx.calls.length, putsBefore);
+  assert.match(elements["compaction-window-error"].textContent, /5 to 120/);
+  assert.equal(elements["compaction-window"].attributes["aria-invalid"], "true");
+  assert.match(elements["compaction-history-policy-error"].textContent, /needs this consent/);
+  await new Promise((resolve) => setTimeout(resolve, 5));
+  assert.equal(elements["compaction-window"].focused > 0, true);
+  // A version conflict reloads the status without overwriting the edits.
+  elements["compaction-window"].value = "90";
+  elements["compaction-history-policy"].checked = true;
+  ctx.responses.push(Object.assign(new Error("HTTP 409: settings_version_conflict"), { status: 409, code: "settings_version_conflict" }));
+  ctx.readResponses.push(status({ settings_version: 4 }));
+  await elements["compaction-save"].click();
+  assert.match(elements["compaction-result"].textContent, /changed in another session/);
+  assert.equal(elements["compaction-window"].value, "90", "edits survive a refresh");
+  const enabled = { ...settings, enabled: true, window_minutes: 90, history_policy: "resnapshot_allowed" };
+  ctx.responses.push(status({ settings: enabled, settings_version: 5, history_acknowledged: true }));
+  await elements["compaction-save"].click();
+  const put = ctx.calls.at(-1);
+  assert.deepEqual([put.method, put.path, put.body.expected_version, put.body.acknowledge_history], ["PUT", "/v1/admin/compaction/config", 4, true]);
+  assert.deepEqual({ ...put.body.settings }, enabled);
+  assert.match(ctx.confirms.at(-1), /Turn on automatic compaction daily at 02:00 UTC for up to 90 minutes/);
+  assert.match(elements["compaction-result"].textContent, /Saved\. Automatic compaction is on \(settings version 5\)/);
+  assert.equal(elements["compaction-window-error"].hidden, true);
+
+  // Gating: non-admins and servers without the feature get plain reasons and send nothing.
+  const sent = ctx.calls.length, read = ctx.reads.length;
+  ctx.caps = { role: "read_only", features: { compaction: true }, routes: [] };
+  tools.capabilities(ctx.caps);
+  assert.match(elements["compaction-result"].textContent, /File compaction requires a super admin/);
+  assert.match(elements["compaction-start-help"].textContent, /requires a super admin/);
+  assert.deepEqual([elements["compaction-start"].disabled, elements["compaction-refresh"].disabled, elements["compaction-save"].disabled], [true, true, true]);
+  await elements["compaction-refresh"].click();
+  ctx.caps = { role: "admin", features: {}, routes: [] };
+  tools.capabilities(ctx.caps);
+  assert.match(elements["compaction-result"].textContent, /does not offer file compaction/);
+  assert.deepEqual([ctx.calls.length, ctx.reads.length], [sent, read]);
+  // Disconnect stops any polling and locks the card.
+  ctx.caps = caps;
+  ctx.readResponses.push(status({ job: job(), available: false }));
+  tools.capabilities(caps);
+  await flush();
+  const pollTimer = timers.at(-1);
+  tools.disconnect();
+  assert.equal(pollTimer.fn, null, "disconnect cancels the poll");
+  assert.equal(elements["compaction-cancel"].disabled, true);
+}

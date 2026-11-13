@@ -1131,7 +1131,7 @@ fn reason(code: &'static str) -> Value {
             "A restore is selected for next startup; restart or clear it before compacting."
         }
         "history_ack_required" => {
-            "Acknowledge that compaction pins restore selection and the backup history first."
+            "Acknowledge first that change history from before compaction is not kept: change-feed and replication readers must take a new snapshot."
         }
         "job_active" => "A compaction job is already running.",
         _ => "Compaction is unavailable.",
@@ -1563,6 +1563,10 @@ async fn build(
         if fault("slow_build") {
             std::thread::sleep(Duration::from_secs(4));
         }
+        if fault("very_slow_build") {
+            // Long enough for a browser test to observe the build phase between 5 s polls.
+            std::thread::sleep(Duration::from_secs(15));
+        }
         if fault("build_fail") {
             return Err(crate::maintenance::compaction::TransformError::Failed(
                 crate::Error::Io(std::io::Error::other("injected build failure")),
@@ -1963,7 +1967,7 @@ async fn status(State(service): State<Service>) -> Json<Value> {
         "recovery": {"required": c.recovery().is_some(), "code": c.recovery(),
             "retained_bytes": retained_bytes, "retained_copies": retained_copies},
         "selection": selection.map(|s| json!({"candidate": s.candidate, "epoch": s.epoch, "job": s.job})),
-        "warning": "Compaction briefly stops serving (reads and writes answer 503 maintenance_in_progress), keeps the previous file and a recovery copy, and pins restore selection to the compacted file afterwards.",
+        "warning": "Compaction briefly stops serving (reads and writes answer 503 maintenance_in_progress), keeps the previous file and a recovery copy, drops change history from before the run (change-feed and replication readers must take a new snapshot), may make graph clients re-read revisions before their next conditional write, and pins restore selection to the compacted file afterwards.",
     }))
 }
 
@@ -2114,7 +2118,7 @@ async fn submit(
         return Err(ApiError::new(
             StatusCode::UNPROCESSABLE_ENTITY,
             "acknowledgement_required",
-            "acknowledge the brief outage and the restore-selection pin first",
+            "acknowledge the brief outage and the loss of change history from before compaction first",
         ));
     }
     if state.settings_version != input.expected_version {

@@ -247,7 +247,7 @@
     const features = object(caps?.features) ? caps.features : {};
     const routes = Array.isArray(caps?.routes) ? caps.routes : [];
     const offline = { allowed: false, reason: "Sign in first." };
-    if (!connected || !object(caps)) return { users: offline, tenants: offline, lifecycle: offline, tls: offline, replication: offline };
+    if (!connected || !object(caps)) return { users: offline, tenants: offline, lifecycle: offline, tls: offline, replication: offline, compaction: offline };
     const admin = role === "admin";
     const notAdmin = (what) => `${what} requires a super admin: a super-admin account or the bootstrap admin token (current role: ${role ?? "unknown"}). Editors, viewers, read-only and scoped credentials cannot use it.`;
     const users = !admin ? { allowed: false, reason: notAdmin("User management") }
@@ -270,7 +270,10 @@
     const replication = !routes.includes(EXPORT_ROUTE) ? { allowed: false, reason: "This server does not expose replication log export." }
       : !readAll ? { allowed: false, reason: `Replication export requires admin, read-only, or a scoped credential with read on all collections ("*") (current role: ${role ?? "unknown"}).` }
       : { allowed: true, reason: "" };
-    return { users, tenants, lifecycle, tls, replication };
+    const compaction = !admin ? { allowed: false, reason: notAdmin("File compaction") }
+      : features.compaction !== true ? { allowed: false, reason: "This server does not offer file compaction: it needs the managed vlite-server runtime with an admin directory (VLITE_ADMIN_DIR), a durable single-file database and no gRPC listener." }
+      : { allowed: true, reason: "" };
+    return { users, tenants, lifecycle, tls, replication, compaction };
   }
 
   const HINTS = {
@@ -292,6 +295,18 @@
     tenants_commit_indeterminate: "The change is in effect but its durability was not confirmed. List tenants before retrying; do not repeat blindly.",
     tls_disabled: "No file-backed TLS listener is configured; nothing was reloaded.",
     tls_reload_failed: "The TLS files on the server are invalid or unreadable. Nothing changed: the previous certificates remain active. Fix the files on the server host and retry.",
+    settings_version_conflict: "The compaction settings changed in another session. The card now shows the latest status; review it and try again.",
+    compaction_busy: "A compaction is already running. Wait for it to finish; the card updates on its own.",
+    job_active: "A compaction is already running. Wait for it to finish; the card updates on its own.",
+    job_finished: "That compaction already finished. Refresh to see its result.",
+    selection_in_progress: "Too late to cancel: the server is already switching to the compacted file.",
+    selection_committed: "Too late to cancel: the server already switched to the compacted file.",
+    selection_outcome_unknown: "Too late to cancel: the switch result is being confirmed. Refresh in a moment.",
+    idempotency_key_reused: "This start request was already used with different values. Refresh the status and start again.",
+    acknowledgement_required: "Tick both statements before starting, or consent to dropping change history before turning on automatic compaction.",
+    invalid_settings: "The server rejected these settings. Check the limits shown next to each field.",
+    maintenance_in_progress: "The server is briefly paused while it switches database files. Wait and refresh.",
+    managed_runtime_required: "Compaction needs the managed vlite-server runtime with an admin directory (VLITE_ADMIN_DIR), a durable single-file database and no gRPC listener.",
     invalid_input: "The server rejected the input; nothing was changed.",
     invalid_query: "The server rejected the export parameters; nothing was exported.",
     invalid_id: "After sequence must be a canonical decimal u64.",
@@ -304,15 +319,169 @@
     return hint ? `${message}\n${hint}` : message;
   }
 
+  // ---- File compaction (Administration > Backup & recovery) ----
+  const MIB = 1048576;
+  const COMPACTION_MAX_MIB = 1024;
+  const COMPACTION_PHASES = {
+    preflight: "Checking that compaction can start",
+    quiescing: "Pausing new requests and letting running ones finish",
+    freezing: "Making a frozen copy of the database file",
+    building: "Writing the compacted file",
+    validating: "Checking the compacted file",
+    ready_to_select: "Compacted file checked; about to switch to it",
+    selecting: "Switching the server to the compacted file",
+    selection_outcome_unknown: "Switch outcome unknown; the server needs a restart to recover",
+    committed: "Switched to the compacted file",
+    reopening: "Restarting the server on the new file",
+    recovering_source: "Reopening the original file",
+  };
+  // Phases before the switch, where cancelling keeps the original file in use.
+  const CANCELLABLE = ["preflight", "quiescing", "freezing", "building", "validating", "ready_to_select"];
+  const TRIGGERS = { manual: "started from Compact now", scheduled: "automatic" };
+  function formatBytes(value) {
+    if (!Number.isSafeInteger(value) || value < 0) return "unknown";
+    const exact = `${value.toLocaleString("en-US")} bytes`;
+    const units = ["KiB", "MiB", "GiB", "TiB"];
+    let n = value, unit = -1;
+    while (n >= 1024 && unit < units.length - 1) { n /= 1024; unit++; }
+    return unit < 0 ? exact : `${n.toFixed(n >= 100 ? 0 : 1)} ${units[unit]} (${exact})`;
+  }
+  const utcTime = (ms) => Number.isSafeInteger(ms) ? new Date(ms).toISOString().replace("T", " ").replace(/:\d\d\.\d{3}Z$/, " UTC") : "--";
+  const mib = (bytes) => Number.isSafeInteger(bytes) ? String(Number((bytes / MIB).toFixed(3))) : "";
+  // Server settings to form text; sizes in MiB, times in UTC.
+  function compactionForm(settings) {
+    const s = object(settings) ? settings : {};
+    return {
+      enabled: s.enabled === true, history: s.history_policy === "resnapshot_allowed",
+      start: s.daily_start_utc ?? "", window: String(s.window_minutes ?? ""), maxRun: String(s.max_run_seconds ?? ""),
+      minFile: mib(s.min_file_bytes), minGrowth: mib(s.min_growth_bytes), growthPercent: String(s.min_growth_percent ?? ""),
+      cooldown: String(s.cooldown_hours ?? ""), maxSource: mib(s.max_source_bytes),
+    };
+  }
+  // Form text to server settings. Bounds mirror the server; errors are per field, in plain words.
+  function compactionSettings(fields, floorBytes = 64 * MIB) {
+    const errors = {};
+    const int = (key, min, max, message) => {
+      const text = String(fields?.[key] ?? "").trim();
+      const value = /^\d{1,9}$/.test(text) ? Number(text) : NaN;
+      if (!(value >= min && value <= max)) { errors[key] = message; return null; }
+      return value;
+    };
+    const size = (key, min, max, message) => {
+      const text = String(fields?.[key] ?? "").trim();
+      const bytes = /^\d{1,7}(\.\d{1,3})?$/.test(text) ? Math.round(Number(text) * MIB) : NaN;
+      if (!(bytes >= min && bytes <= max)) { errors[key] = message; return null; }
+      return bytes;
+    };
+    const start = String(fields?.start ?? "").trim();
+    if (!/^([01]\d|2[0-3]):[0-5]\d$/.test(start)) errors.start = "Enter a 24-hour UTC time such as 02:00.";
+    const window = int("window", 5, 120, "Enter whole minutes from 5 to 120.");
+    const maxRun = int("maxRun", 60, 3600, "Enter whole seconds from 60 to 3600.");
+    if (maxRun !== null && window !== null && maxRun + 60 > window * 60) errors.maxRun = `Must leave at least one minute of the ${window}-minute window: at most ${window * 60 - 60} seconds.`;
+    const floorMib = mib(floorBytes) || "0";
+    const maxSource = size("maxSource", Math.max(floorBytes, 1), COMPACTION_MAX_MIB * MIB, `Enter MiB above ${floorMib} and at most ${COMPACTION_MAX_MIB} (the qualified limit).`);
+    const ceiling = maxSource ?? COMPACTION_MAX_MIB * MIB;
+    const minFile = size("minFile", floorBytes, ceiling, `Enter MiB from ${floorMib} up to the largest file size.`);
+    const minGrowth = size("minGrowth", floorBytes, ceiling, `Enter MiB from ${floorMib} up to the largest file size.`);
+    const growthPercent = int("growthPercent", 10, 200, "Enter a whole percentage from 10 to 200.");
+    const cooldown = int("cooldown", 24, 720, "Enter whole hours from 24 to 720.");
+    const enabled = fields?.enabled === true, history = fields?.history === true;
+    if (enabled && !history) errors.history = "Automatic compaction needs this consent.";
+    if (Object.keys(errors).length) return { errors };
+    return { errors, settings: {
+      enabled, daily_start_utc: start, window_minutes: window, max_run_seconds: maxRun,
+      min_file_bytes: minFile, min_growth_bytes: minGrowth, min_growth_percent: growthPercent,
+      cooldown_hours: cooldown, max_source_bytes: maxSource,
+      history_policy: history ? "resnapshot_allowed" : "unacknowledged",
+    } };
+  }
+  function compactionOutcome(job) {
+    if (!object(job)) return "";
+    const switched = job.selection === "committed";
+    const base = { succeeded: "Finished: the server now uses the compacted file.",
+      cancelled: "Cancelled: the server kept using the original file.",
+      skipped: "Skipped: the server kept using the original file.",
+      failed: switched ? "Failed after switching to the compacted file." : "Failed: the server kept using the original file." }[job.outcome] ?? `Ended (${job.outcome}).`;
+    const reasons = { no_material_savings: "the compacted file would not have been meaningfully smaller",
+      maintenance_budget_exceeded: "the run would have exceeded its time limit", window_closed: "the automatic window closed",
+      cancelled: "an administrator cancelled it", drain_timeout: "running requests did not finish in time", interrupted: "the server stopped during the run" };
+    const why = job.code ? ` Reason: ${reasons[job.code] ?? job.code}.` : "";
+    return `${base}${why}${job.action ? ` ${job.action}` : ""}`;
+  }
+  // Pure view model of GET /v1/admin/compaction.
+  function compactionView(status) {
+    if (!object(status)) return { headline: "Compaction status not loaded.", tone: "idle", facts: [], reasons: [], canStart: false, canCancel: false, watch: false };
+    const reasons = (Array.isArray(status.reasons) ? status.reasons : [])
+      .filter((r) => object(r) && !["job_active", "history_ack_required"].includes(r.code))
+      .map((r) => String(r.message || r.code));
+    const job = object(status.job) ? status.job : null;
+    const recovery = object(status.recovery) ? status.recovery : {};
+    const schedule = object(status.schedule) ? status.schedule : {};
+    const settings = object(status.settings) ? status.settings : {};
+    const file = object(status.file) ? status.file : {};
+    const facts = [];
+    let headline, tone;
+    if (status.capability !== true) { headline = "Not available on this server."; tone = "blocked"; }
+    else if (recovery.required === true) { headline = `Recovery needed (${recovery.code ?? "unknown"}). Data routes are closed until an operator restarts the server; the previous file and recovery copies are kept.`; tone = "blocked"; }
+    else if (job) {
+      headline = `In progress (${TRIGGERS[job.trigger] ?? job.trigger}): ${COMPACTION_PHASES[job.phase] ?? job.phase}.${job.cancel_requested ? " Cancellation requested; stopping at the next safe point." : ""}`;
+      tone = "busy";
+    } else if (status.fence === "maintenance") { headline = "The server is briefly paused for maintenance."; tone = "busy"; }
+    else if (status.available !== true) { headline = "Compaction cannot run right now. See why below."; tone = "blocked"; }
+    else { headline = "Ready. Compaction can run now."; tone = "ready"; }
+    facts.push(["Database file", file.name ? `${file.name}, ${formatBytes(file.bytes)}` : formatBytes(file.bytes)]);
+    if (job) {
+      facts.push(["Started", utcTime(job.created_unix_ms)]);
+      if (Number.isSafeInteger(job.before_bytes)) facts.push(["Size before", formatBytes(job.before_bytes)]);
+      if (Number.isSafeInteger(job.after_bytes)) facts.push(["Compacted size", formatBytes(job.after_bytes)]);
+    }
+    const last = object(status.last_job) ? status.last_job : null;
+    if (last) {
+      facts.push(["Last run", `${utcTime(last.finished_unix_ms)}, ${TRIGGERS[last.trigger] ?? last.trigger}. ${compactionOutcome(last)}`]);
+      if (Number.isSafeInteger(last.before_bytes) && Number.isSafeInteger(last.after_bytes)) {
+        facts.push(["Last size change", `${formatBytes(last.before_bytes)} before, ${formatBytes(last.after_bytes)} after; saved ${formatBytes(last.saved_bytes ?? Math.max(0, last.before_bytes - last.after_bytes))}`]);
+      }
+    } else facts.push(["Last run", "Never"]);
+    const auto = settings.enabled !== true ? "Off"
+      : schedule.suspended === true ? `Suspended after ${schedule.failures ?? "repeated"} failed runs. Save the settings again to resume.`
+      : `On, daily from ${settings.daily_start_utc} UTC for up to ${settings.window_minutes} minutes`;
+    facts.push(["Automatic compaction", auto]);
+    if (settings.enabled === true && schedule.suspended !== true) {
+      facts.push(["Next window", schedule.in_window === true ? "Open now" : utcTime(schedule.next_window_unix_ms)]);
+      if (Number.isSafeInteger(schedule.next_eligible_unix_ms) && schedule.next_eligible_unix_ms > (file.sampled_unix_ms ?? 0)) facts.push(["Waiting until", `${utcTime(schedule.next_eligible_unix_ms)} (cooldown)`]);
+    }
+    facts.push(["Growth since last compaction", Number.isSafeInteger(schedule.baseline_bytes)
+      ? formatBytes(schedule.growth_bytes) : "Not measured yet: the baseline is set by the first compaction or the first automatic window"]);
+    if (Number.isSafeInteger(recovery.retained_copies) && recovery.retained_copies > 0) facts.push(["Recovery copies kept", `${recovery.retained_copies}, ${formatBytes(recovery.retained_bytes)}`]);
+    if (object(status.selection) && status.selection.candidate) facts.push(["Selected compacted file", String(status.selection.candidate)]);
+    const canStart = status.capability === true && status.available === true && !job && status.fence === "open" && recovery.required !== true;
+    const canCancel = !!job && CANCELLABLE.includes(job.phase) && job.cancel_requested !== true;
+    const watch = !!job || status.fence === "maintenance";
+    return { headline, tone, facts, reasons, canStart, canCancel, watch, job };
+  }
+  // RFC 4122 version 4, also on plain-HTTP origins where crypto.randomUUID is missing.
+  function idempotencyKey(random = (bytes) => globalThis.crypto.getRandomValues(bytes)) {
+    const b = random(new Uint8Array(16));
+    b[6] = (b[6] & 0x0f) | 0x40; b[8] = (b[8] & 0x3f) | 0x80;
+    const h = [...b].map((x) => x.toString(16).padStart(2, "0")).join("");
+    return `${h.slice(0, 8)}-${h.slice(8, 12)}-${h.slice(12, 16)}-${h.slice(16, 20)}-${h.slice(20)}`;
+  }
+
   function init(ctx) {
     const $ = (id) => document.getElementById(id);
     const controls = ["tenant-list", "tenant-name", "tenant-max-vectors", "tenant-create", "tenant-id", "tenant-delete", "tenant-result",
       "tenant-usage", "tenant-new-name", "tenant-limit-mode", "tenant-new-limit", "tenant-save-settings", "tenant-suspend", "tenant-resume",
       "tls-reload", "tls-result", "replication-after", "replication-max-bytes", "replication-export", "replication-download", "replication-result",
       "user-list", "user-id", "user-username", "user-role", "user-tenant", "user-password", "user-must-change", "user-disabled",
-      "user-create", "user-save", "user-reset-password", "user-delete", "user-result"];
+      "user-create", "user-save", "user-reset-password", "user-delete", "user-result",
+      "compaction-status", "compaction-facts", "compaction-reasons", "compaction-refresh", "compaction-start", "compaction-cancel", "compaction-start-help",
+      "compaction-ack", "compaction-ack-error", "compaction-ack-downtime", "compaction-ack-history", "compaction-enabled", "compaction-history-policy",
+      "compaction-history-policy-error", "compaction-start-utc", "compaction-start-utc-error", "compaction-local-time", "compaction-window", "compaction-window-error",
+      "compaction-max-run", "compaction-max-run-error", "compaction-min-file", "compaction-min-file-error", "compaction-min-growth", "compaction-min-growth-error",
+      "compaction-growth-percent", "compaction-growth-percent-error", "compaction-cooldown", "compaction-cooldown-error", "compaction-max-source",
+      "compaction-max-source-error", "compaction-save", "compaction-result"];
     for (const name of controls) if (!$(name)) throw new Error(`admin markup is missing control #${name}`);
-    const OUTPUTS = { users: "user-result", tenants: "tenant-result", tls: "tls-result", replication: "replication-result" };
+    const OUTPUTS = { users: "user-result", tenants: "tenant-result", tls: "tls-result", replication: "replication-result", compaction: "compaction-result" };
     const TARGETS = { ...OUTPUTS, lifecycle: "tenant-result" };
     let epoch = 0;
     let segment = null;
@@ -538,15 +707,195 @@
       setTimeout(() => URL.revokeObjectURL(url), 0);
       ctx.status?.(`Saved ${link.download}`);
     });
+    // File compaction. Status polling uses ctx.background (no busy lock, no inspector);
+    // actions go through ctx.run/ctx.api like every other control.
+    const FIELDS = { start: "compaction-start-utc", window: "compaction-window", maxRun: "compaction-max-run",
+      minFile: "compaction-min-file", minGrowth: "compaction-min-growth", growthPercent: "compaction-growth-percent",
+      cooldown: "compaction-cooldown", maxSource: "compaction-max-source", history: "compaction-history-policy" };
+    const SETTINGS_INPUTS = [...Object.values(FIELDS), "compaction-enabled"];
+    let cstatus = null, cview = compactionView(null), dirty = false, pending = null, timer = null, failures = 0, watchedJob = null;
+    const cRead = (path) => (ctx.background ?? ((p) => ctx.api("GET", p, undefined, { data: false })))(path);
+    // Controls are inert while an operation runs, so move focus once it has finished.
+    const focusAfterRun = (id) => setTimeout(() => { try { $(id).focus?.({ preventScroll: false }); } catch { /* best effort */ } }, 0);
+    const fieldError = (key, message) => {
+      const input = $(FIELDS[key] ?? key), note = $(`${FIELDS[key] ?? key}-error`);
+      input.setAttribute?.("aria-invalid", message ? "true" : "false");
+      if (note) { note.textContent = message || ""; note.hidden = !message; }
+    };
+    const cFields = () => ({ enabled: $("compaction-enabled").checked, history: $("compaction-history-policy").checked,
+      ...Object.fromEntries(Object.entries(FIELDS).filter(([k]) => k !== "history").map(([k, id]) => [k, $(id).value])) });
+    const cFill = (settings) => {
+      const form = compactionForm(settings);
+      $("compaction-enabled").checked = form.enabled;
+      $("compaction-history-policy").checked = form.history;
+      for (const [key, id] of Object.entries(FIELDS)) if (key !== "history") $(id).value = form[key];
+      for (const key of Object.keys(FIELDS)) fieldError(key, "");
+      localTime();
+    };
+    function localTime() {
+      const match = /^([01]\d|2[0-3]):([0-5]\d)$/.exec($("compaction-start-utc").value.trim());
+      if (!match) { $("compaction-local-time").textContent = "Times are in UTC (24-hour clock)."; return; }
+      const at = new Date(Date.UTC(2000, 0, 1, Number(match[1]), Number(match[2])));
+      $("compaction-local-time").textContent = `Times are in UTC. ${match[1]}:${match[2]} UTC is ${at.toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" })} in this browser's time zone.`;
+    }
+    const cList = (id, items, render) => {
+      const host = $(id);
+      host.replaceChildren?.(...items.map(render));
+      host.hidden = items.length === 0;
+    };
+    function cRender(status, announce = "") {
+      cstatus = status;
+      cview = compactionView(status);
+      const finished = watchedJob && !cview.job && object(status?.last_job) && status.last_job.id === watchedJob ? `${compactionOutcome(status.last_job)} ` : "";
+      watchedJob = cview.job?.id ?? (finished ? null : watchedJob);
+      $("compaction-status").textContent = `${announce}${finished}${cview.headline}`;
+      $("compaction-status").setAttribute?.("data-tone", cview.tone);
+      cList("compaction-facts", cview.facts, ([term, value]) => {
+        const row = document.createElement("div"), dt = document.createElement("dt"), dd = document.createElement("dd");
+        dt.textContent = term; dd.textContent = value; row.append(dt, dd); return row;
+      });
+      cList("compaction-reasons", cview.reasons, (text) => { const li = document.createElement("li"); li.textContent = text; return li; });
+      if (!dirty && object(status?.settings)) cFill(status.settings);
+      gateCompaction();
+      cSchedule();
+    }
+    function cSchedule() {
+      clearTimeout(timer); timer = null;
+      if (!cview.watch || !gates.compaction.allowed) return;
+      const mark = epoch;
+      timer = setTimeout(() => cRefresh(mark, true), document.hidden ? 30000 : 5000);
+    }
+    async function cRefresh(mark, background = false) {
+      try {
+        const status = await cRead("/v1/admin/compaction");
+        if (!current(mark)) return;
+        failures = 0;
+        let announce = "";
+        if (watchedJob && !object(status?.job) && status?.last_job?.id !== watchedJob) {
+          // A later run (for example a scheduled one) replaced the watched job as the last job; read its own outcome.
+          const job = await cRead(`/v1/admin/compaction/jobs/${encodeURIComponent(watchedJob)}`).then((value) => value?.job, () => null);
+          if (!current(mark)) return;
+          if (object(job) && job.outcome) announce = `Your earlier run: ${compactionOutcome(job)} `;
+          watchedJob = null;
+        }
+        cRender(status, announce);
+      } catch (error) {
+        if (!current(mark)) return;
+        if (!background) throw error;
+        // Tolerate brief gaps (network errors, 503) while the server switches files; keep watching.
+        if (Number.isInteger(error?.status) && error.status !== 503) { $("compaction-status").textContent = explain(error); return; }
+        failures++;
+        $("compaction-status").textContent = `Waiting for the server to answer (attempt ${failures}). ${cview.headline}`;
+        if (failures < 60) { clearTimeout(timer); timer = setTimeout(() => cRefresh(mark, true), Math.min(30000, 5000 * failures)); }
+      }
+    }
+    function gateCompaction(offline = false) {
+      const allowed = !offline && gates.compaction.allowed;
+      const settingsReady = allowed && object(cstatus?.settings) && !cview.job;
+      for (const id of SETTINGS_INPUTS) $(id).disabled = !settingsReady;
+      $("compaction-save").disabled = !settingsReady;
+      $("compaction-refresh").disabled = !allowed;
+      $("compaction-start").disabled = !allowed || !cview.canStart;
+      $("compaction-cancel").disabled = !allowed || !cview.canCancel;
+      $("compaction-ack-downtime").disabled = $("compaction-ack-history").disabled = !allowed || !cview.canStart;
+      $("compaction-start-help").textContent = !allowed ? gates.compaction.reason
+        : !cstatus ? "Load the status first."
+        : cview.job ? (cview.canCancel ? "A compaction is running. You can cancel it until the server starts switching files." : "A compaction is running and is past the point where it can be cancelled.")
+        : cview.canStart ? "Runs once now, outside the automatic window and size limits. Reads and writes pause until it finishes."
+        : cview.reasons.length ? "Compact now is off until the problems listed under Why it cannot run are fixed."
+        : "Compact now is off while the server is busy.";
+    }
+    $("compaction-start-utc").addEventListener("input", localTime);
+    for (const id of SETTINGS_INPUTS) $(id).addEventListener("input", () => { dirty = true; });
+    for (const id of ["compaction-ack-downtime", "compaction-ack-history"]) $(id).addEventListener("input", () => fieldError("compaction-ack", ""));
+    on("compaction-refresh", "compaction", async (mark) => {
+      need("compaction");
+      dirty = false;
+      await cRefresh(mark);
+      if (current(mark)) show("compaction-result", "Status refreshed.");
+    });
+    on("compaction-start", "compaction", async (mark) => {
+      need("compaction");
+      if (!cstatus) throw new Error("Load the compaction status first.");
+      if (!$("compaction-ack-downtime").checked || !$("compaction-ack-history").checked) {
+        fieldError("compaction-ack", "Tick both statements to continue.");
+        focusAfterRun("compaction-ack-downtime");
+        throw new Error("Tick both acknowledgements before starting compaction.");
+      }
+      const budget = cstatus.settings?.max_run_seconds;
+      if (!await ctx.confirm(`Compact the database file now? Reads and writes pause (HTTP 503 maintenance_in_progress) until the run finishes, up to ${budget ?? "the configured"} seconds plus the time to reopen the file. Change history from before the run is dropped: change-feed and replication readers must take a new snapshot, and graph clients may need to re-read revisions before their next conditional write. The original file and a recovery copy stay on disk. If the compacted file would not be meaningfully smaller, the original stays in use.`)) return;
+      if (!current(mark)) return;
+      const body = { expected_version: cstatus.settings_version, acknowledge_downtime: true, acknowledge_history: true };
+      const text = JSON.stringify(body);
+      // Reuse the key only to retry the identical request after an unknown outcome.
+      if (pending?.body !== text) pending = { body: text, key: idempotencyKey() };
+      let value;
+      try {
+        value = await ctx.api("POST", "/v1/admin/compaction/jobs", { ...body, idempotency_key: pending.key }, { data: false });
+      } catch (error) {
+        if (Number.isInteger(error?.status) && error.status < 500) pending = null;
+        if (error?.code === "settings_version_conflict" && current(mark)) await cRefresh(mark).catch(() => {});
+        throw error;
+      }
+      pending = null;
+      if (!current(mark)) return;
+      $("compaction-ack-downtime").checked = $("compaction-ack-history").checked = false;
+      watchedJob = value?.job?.id ?? null;
+      show("compaction-result", { started: value?.job?.id ?? null, replayed: value?.replayed === true, phase: value?.job?.phase ?? null });
+      await cRefresh(mark);
+    });
+    on("compaction-cancel", "compaction", async (mark) => {
+      need("compaction");
+      const job = cview.job;
+      if (!job || !cview.canCancel) throw new Error("No compaction can be cancelled right now.");
+      if (!await ctx.confirm("Cancel the running compaction? It stops at the next safe point before the server switches files, and the original file stays in use. Reads and writes resume once the original file is reopened.")) return;
+      if (!current(mark)) return;
+      const value = await ctx.api("POST", `/v1/admin/compaction/jobs/${encodeURIComponent(job.id)}/cancel`, undefined, { data: false });
+      if (!current(mark)) return;
+      show("compaction-result", { cancel_requested: value?.job?.cancel_requested === true, phase: value?.job?.phase ?? null });
+      await cRefresh(mark);
+    });
+    on("compaction-save", "compaction", async (mark) => {
+      need("compaction");
+      if (!cstatus?.settings) throw new Error("Load the compaction status first.");
+      const { settings, errors } = compactionSettings(cFields(), cstatus.test_profile === true ? 0 : 64 * MIB);
+      for (const key of Object.keys(FIELDS)) fieldError(key, errors[key] ?? "");
+      if (!settings) {
+        focusAfterRun(FIELDS[Object.keys(errors)[0]]);
+        throw new Error("Fix the highlighted settings; nothing was saved.");
+      }
+      const summary = settings.enabled
+        ? `Turn on automatic compaction daily at ${settings.daily_start_utc} UTC for up to ${settings.window_minutes} minutes? A run starts only when the file is at least ${formatBytes(settings.min_file_bytes)}, has grown by at least ${formatBytes(settings.min_growth_bytes)} and ${settings.min_growth_percent}% since the last compaction, and at most once every ${settings.cooldown_hours} hours. Each run pauses reads and writes and drops change history from before it; files above ${formatBytes(settings.max_source_bytes)} are skipped.`
+        : "Save these compaction settings with automatic compaction off? Nothing runs automatically; Compact now still works.";
+      if (!await ctx.confirm(summary)) return;
+      if (!current(mark)) return;
+      let value;
+      try {
+        value = await ctx.api("PUT", "/v1/admin/compaction/config", { expected_version: cstatus.settings_version, settings, acknowledge_history: settings.history_policy === "resnapshot_allowed" }, { data: false });
+      } catch (error) {
+        if (error?.code === "settings_version_conflict" && current(mark)) await cRefresh(mark).catch(() => {});
+        throw error;
+      }
+      if (!current(mark)) return;
+      dirty = false;
+      cRender(value);
+      show("compaction-result", `Saved. Automatic compaction is ${settings.enabled ? "on" : "off"} (settings version ${value?.settings_version ?? "?"}).`);
+    });
     function gate(offline = false) {
       gates = availability(ctx.capabilities(), !offline && ctx.connected());
       $("replication-export").disabled = !gates.replication.allowed;
       $("replication-download").disabled = !gates.replication.allowed || segment === null;
+      gateCompaction(offline);
     }
     function reset() {
       epoch++;
       segment = null;
       known = new Map();
+      clearTimeout(timer); timer = null;
+      cstatus = null; cview = compactionView(null); dirty = false; pending = null; failures = 0; watchedJob = null;
+      $("compaction-status").textContent = "Compaction status not loaded.";
+      cList("compaction-facts", [], () => null);
+      cList("compaction-reasons", [], () => null);
       graphSupport(false);
       for (const id of Object.values(OUTPUTS)) show(id, "");
     }
@@ -556,6 +905,7 @@
         gates = availability(caps, ctx.connected());
         for (const [area, id] of Object.entries(OUTPUTS)) if (!gates[area].allowed) show(id, gates[area].reason);
         gate();
+        if (gates.compaction.allowed) cRefresh(epoch, true);
       },
       disconnect() {
         reset();
@@ -568,7 +918,8 @@
   }
 
   const api = { init, utils: { tenantName, maxVectors, tenantId, tenantRequest, tenantPath, tenantList, tenantView, tenantSettings, tenantUsage, identity, exportPath, exportSegment, exportFilename, availability, explain, utf8Length,
-    username, password, userRole, userTenant, userId, userRequest, userChanges, userView, userList } };
+    username, password, userRole, userTenant, userId, userRequest, userChanges, userView, userList,
+    formatBytes, compactionForm, compactionSettings, compactionOutcome, compactionView, idempotencyKey, COMPACTION_PHASES } };
   if (typeof window !== "undefined") window.VLiteAdminTools = api;
   if (typeof module !== "undefined" && module.exports) module.exports = api;
 })();

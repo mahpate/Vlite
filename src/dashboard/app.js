@@ -153,7 +153,8 @@
       webhooks: "Configure a private VLITE_ADMIN_DIR on the server.",
       tenants: "Configure admin authentication and a private VLITE_ADMIN_DIR.",
       accounts: "Configure admin authentication and a private VLITE_ADMIN_DIR.",
-      tls_reload: "Configure a file-backed native TLS listener. Plaintext and reverse-proxy TLS cannot be reloaded here."
+      tls_reload: "Configure a file-backed native TLS listener. Plaintext and reverse-proxy TLS cannot be reloaded here.",
+      compaction: "Run the managed vlite-server with admin token authentication, a private VLITE_ADMIN_DIR, a durable database file and no gRPC listener."
     };
     document.querySelectorAll("[data-admin-availability]").forEach(element => {
       const name = element.dataset.adminAvailability;
@@ -1347,6 +1348,8 @@
       return listed;
     },
     applySettings: (info) => { if (info.name === collection) applySettings(info); },
+    // Status polling for file compaction: no busy lock, no inspector, dropped on disconnect.
+    background: (route) => window.VLiteObservabilityConnection.request(route),
   };
   tools = window.VLiteTools.init(toolsContext);
   adminTools = window.VLiteAdminTools.init(toolsContext);
@@ -1365,7 +1368,8 @@
       async function request(route, options = {}) {
         if (!connected) throw new Error("Sign in before accessing the database");
         const endpoint = route.split("?")[0];
-        if (!["/metrics", "/v1/admin/metrics/summary", "/v1/admin/logs", "/v1/admin/diagnostics/slow-queries", "/v1/admin/audit"].includes(endpoint)) throw new Error("Unsupported observability endpoint");
+        if (!["/metrics", "/v1/admin/metrics/summary", "/v1/admin/logs", "/v1/admin/diagnostics/slow-queries", "/v1/admin/audit", "/v1/admin/compaction"].includes(endpoint)
+          && !/^\/v1\/admin\/compaction\/jobs\/[A-Za-z0-9-]{1,64}$/.test(endpoint)) throw new Error("Unsupported observability endpoint");
         // Independent reads never replace the foreground cancel handle or request inspector.
         const controller = new AbortController();
         const snapshot = generation;

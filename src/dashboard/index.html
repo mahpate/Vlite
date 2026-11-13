@@ -784,6 +784,57 @@
     <button id="backup-schedule-run" data-admin data-feature="backup_schedule" type="button" class="secondary">Run one scheduled cycle now</button>
     <pre id="backup-schedule-result"></pre>
   </section>
+  <section id="admin-compaction" class="wide compaction">
+    <h2>File compaction</h2>
+    <p data-admin-availability="compaction">Sign in to check file compaction support.</p>
+    <p>Compaction rewrites the database file without the space left behind by deleted and overwritten data, then switches the server to the smaller file. Reads and writes pause (HTTP 503) while it runs. The previous file and a recovery copy stay on disk, change history from before the run is dropped, and graph clients may need to re-read revisions before their next conditional write. If the new file would not be meaningfully smaller, the server keeps the original.</p>
+    <p id="compaction-status" class="compaction-status" role="status" aria-live="polite" data-tone="idle">Compaction status not loaded.</p>
+    <dl id="compaction-facts" class="compaction-facts" hidden></dl>
+    <div class="compaction-why">
+      <h3>Why it cannot run</h3>
+      <ul id="compaction-reasons" hidden></ul>
+    </div>
+    <fieldset id="compaction-ack" class="compaction-checks" aria-describedby="compaction-ack-error">
+      <legend>Before you compact now</legend>
+      <label><input id="compaction-ack-downtime" type="checkbox" data-admin data-feature="compaction"> I understand reads and writes pause until compaction finishes.</label>
+      <label><input id="compaction-ack-history" type="checkbox" data-admin data-feature="compaction"> I understand change history from before compaction is dropped; change-feed and replication readers must take a new snapshot.</label>
+      <p id="compaction-ack-error" class="field-error" hidden></p>
+    </fieldset>
+    <div class="compaction-actions">
+      <button id="compaction-refresh" data-admin data-feature="compaction" type="button" class="secondary">Refresh status</button>
+      <button id="compaction-start" data-admin data-feature="compaction" type="button" aria-describedby="compaction-start-help">Compact now</button>
+      <button id="compaction-cancel" data-admin data-feature="compaction" type="button" class="danger" aria-describedby="compaction-start-help">Cancel compaction</button>
+    </div>
+    <p id="compaction-start-help" class="field-help">Sign in to use this.</p>
+    <fieldset class="compaction-schedule">
+      <legend>Automatic compaction</legend>
+      <label class="compaction-toggle"><input id="compaction-enabled" type="checkbox" data-admin data-feature="compaction"> Enable automatic compaction</label>
+      <label class="compaction-toggle"><input id="compaction-history-policy" type="checkbox" data-admin data-feature="compaction" aria-describedby="compaction-history-policy-error"> Change-feed and replication readers can take a new snapshot after each run (required to enable)</label>
+      <p id="compaction-history-policy-error" class="field-error" hidden></p>
+      <div class="compaction-grid">
+        <label>Daily start (UTC, HH:MM)<input id="compaction-start-utc" data-admin data-feature="compaction" inputmode="numeric" spellcheck="false" autocomplete="off" placeholder="02:00" aria-describedby="compaction-local-time compaction-start-utc-error"></label>
+        <p id="compaction-local-time" class="field-help">Times are in UTC (24-hour clock).</p>
+        <p id="compaction-start-utc-error" class="field-error" hidden></p>
+        <label>Window length (minutes, 5 to 120)<input id="compaction-window" data-admin data-feature="compaction" inputmode="numeric" aria-describedby="compaction-window-error"></label>
+        <p id="compaction-window-error" class="field-error" hidden></p>
+        <label>Longest run (seconds, 60 to 3600; at least one minute shorter than the window)<input id="compaction-max-run" data-admin data-feature="compaction" inputmode="numeric" aria-describedby="compaction-max-run-error"></label>
+        <p id="compaction-max-run-error" class="field-error" hidden></p>
+        <label>Only when the file is at least (MiB)<input id="compaction-min-file" data-admin data-feature="compaction" inputmode="decimal" aria-describedby="compaction-min-file-error"></label>
+        <p id="compaction-min-file-error" class="field-error" hidden></p>
+        <label>And has grown by at least (MiB)<input id="compaction-min-growth" data-admin data-feature="compaction" inputmode="decimal" aria-describedby="compaction-min-growth-error"></label>
+        <p id="compaction-min-growth-error" class="field-error" hidden></p>
+        <label>And by at least (percent, 10 to 200)<input id="compaction-growth-percent" data-admin data-feature="compaction" inputmode="numeric" aria-describedby="compaction-growth-percent-error"></label>
+        <p id="compaction-growth-percent-error" class="field-error" hidden></p>
+        <label>At most once every (hours, 24 to 720)<input id="compaction-cooldown" data-admin data-feature="compaction" inputmode="numeric" aria-describedby="compaction-cooldown-error"></label>
+        <p id="compaction-cooldown-error" class="field-error" hidden></p>
+        <label>Skip files larger than (MiB, at most 1024)<input id="compaction-max-source" data-admin data-feature="compaction" inputmode="decimal" aria-describedby="compaction-max-source-error"></label>
+        <p id="compaction-max-source-error" class="field-error" hidden></p>
+      </div>
+      <p class="field-help">Growth is measured from a baseline: the file size after the last compaction or, before any compaction, the size first seen in an automatic window. A run starts only near the beginning of a window, when the whole longest run still fits. Missed windows are not made up later.</p>
+      <button id="compaction-save" data-admin data-feature="compaction" type="button">Save compaction settings</button>
+    </fieldset>
+    <pre id="compaction-result" aria-live="polite"></pre>
+  </section>
   <section id="admin-pitr" class="wide">
     <h2>Point-in-time restore</h2>
     <p data-admin-availability="backup_restore">Sign in to check backup and restore availability.</p>

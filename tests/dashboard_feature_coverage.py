@@ -200,7 +200,7 @@ chain("GET", "/v1/changes", "feed-load", (
 ADMIN_SPECIAL = {
     "list-backups", "cred-list", "cred-table", "backup-verify", "backup-drill",
     "tenant-save-settings", "tenant-suspend", "tenant-resume", "replication-export",
-    "obs-refresh", "webhook-list", "tenant-list",
+    "obs-refresh", "webhook-list", "tenant-list", "compaction-refresh", "compaction-cancel",
 }
 ADMIN_DYNAMIC = {
     "/v1/admin/tenants/{id}": '`/v1/admin/tenants/${value}`',
@@ -260,6 +260,18 @@ chain("GET", "/v1/admin/replication/export", "replication-export", (
     ("function exportPath(after, maxBytes)", 'return query ? `${EXPORT_ROUTE}?${query}` : EXPORT_ROUTE'),
     ("const EXPORT_ROUTE =", '"/v1/admin/replication/export"'),
 ), "admin-tools.js")
+# File compaction card: status (and a watched job) through the read-only polling bridge.
+add("POST", "/v1/admin/compaction/jobs/{id}/cancel", "compaction-cancel",
+    '`/v1/admin/compaction/jobs/${encodeURIComponent(job.id)}/cancel`', script="admin-tools.js")
+for path, expression in (
+    ("/v1/admin/compaction", 'cRead("/v1/admin/compaction")'),
+    ("/v1/admin/compaction/jobs/{id}", 'cRead(`/v1/admin/compaction/jobs/${encodeURIComponent(watchedJob)}`)'),
+):
+    chain("GET", path, "compaction-refresh", (
+        (on("compaction-refresh"), "cRefresh(mark)"),
+        ("async function cRefresh(mark, background = false)", expression),
+        ("const cRead = (path) =>", 'ctx.background'),
+    ), "admin-tools.js")
 
 # Collection management, resumable import and index lifecycle.
 for method, suffix, control in (

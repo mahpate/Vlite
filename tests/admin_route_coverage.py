@@ -83,6 +83,12 @@ INVENTORY = {
     ("PUT", "/v1/admin/users/{id}"): ("admin-tools.js", "user-save"),
     ("DELETE", "/v1/admin/users/{id}"): ("admin-tools.js", "user-delete"),
     ("POST", "/v1/admin/users/{id}/password"): ("admin-tools.js", "user-reset-password"),
+    ("GET", "/v1/admin/compaction"): ("admin-tools.js", "compaction-refresh"),
+    ("PUT", "/v1/admin/compaction/config"): ("admin-tools.js", "compaction-save"),
+    ("POST", "/v1/admin/compaction/jobs"): ("admin-tools.js", "compaction-start"),
+    # The card polls the status and reads a watched job by id once a later run replaces it.
+    ("GET", "/v1/admin/compaction/jobs/{id}"): ("admin-tools.js", "compaction-refresh"),
+    ("POST", "/v1/admin/compaction/jobs/{id}/cancel"): ("admin-tools.js", "compaction-cancel"),
 }
 
 # Graph routes (src/server/graph.rs).
