@@ -572,6 +572,11 @@ fn run_dispatcher(dispatcher: Arc<Dispatcher>, service: Service, stopping: Arc<A
 }
 
 fn hmac_sha256(secret: &[u8], message: &[u8]) -> String {
+    hex(&hmac_sha256_bytes(secret, message))
+}
+
+/// HMAC-SHA256 (RFC 2104); also signs Azure Storage SharedKey requests.
+pub(super) fn hmac_sha256_bytes(secret: &[u8], message: &[u8]) -> [u8; 32] {
     let mut key = [0u8; 64];
     if secret.len() > 64 {
         let digest = sha2::Sha256::digest(secret);
@@ -586,5 +591,5 @@ fn hmac_sha256(secret: &[u8], message: &[u8]) -> String {
     let mut outer = Vec::with_capacity(96);
     outer.extend(key.iter().map(|byte| byte ^ 0x5c));
     outer.extend_from_slice(&inner);
-    hex(&sha2::Sha256::digest(outer))
+    sha2::Sha256::digest(outer).into()
 }

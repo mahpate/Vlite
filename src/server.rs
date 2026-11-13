@@ -33,6 +33,9 @@ use crate::{
 };
 mod admin;
 mod audit;
+// Wired into the admin runtime by the cloud backup policy/scheduler change.
+#[allow(dead_code)]
+mod cloud_backup;
 mod collections;
 mod compaction;
 mod credentials;
