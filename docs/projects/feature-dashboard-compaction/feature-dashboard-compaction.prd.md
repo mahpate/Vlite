@@ -1,0 +1,469 @@
+---
+goal: Dashboard-managed safe single-file compaction
+version: 1
+date_created: 2026-11-13
+last_updated: 2026-11-13
+owner: VLite maintainers
+tags: [feature, dashboard, storage, maintenance, safety]
+---
+
+# Introduction
+
+Add **Compact now** and an **off-by-default automatic compaction schedule** to the installation administrator's dashboard. Compact VLite's existing v5 single-file database into a distinct single-file candidate, retaining the original and a verified recovery copy. Preserve credential bindings and lineage, and prevent revision regression. Temporary directory staging is an implementation detail, not a production storage migration.
+
+This is an implementation plan, not an instruction to enable a schedule, deploy, compact production, or discard recovery files. Implementation can proceed without another design approval; evidence-dependent gates below MUST remain closed until demonstrated. No product implementation, release/version change, or production operation is part of authoring this document.
+
+The key words "MUST", "MUST NOT", "REQUIRED", "SHALL", "SHALL NOT", "SHOULD", "SHOULD NOT", "RECOMMENDED", "MAY", and "OPTIONAL" in this document are to be interpreted as described in RFC 2119.
+
+**Cross-reference conventions**: `FR-` functional requirements; `NFR-` non-functional requirements; `FM-` failure modes; `AC-` acceptance criteria; `RD-` resolved decisions; `ASM-` assumptions; `ALT-` alternatives; `GATE-` qualification gates; `EPIC-` implementation phases; `ITEM-` executable work items. No separate requirements artifact is required.
+
+**Plan-level base**: [`mahpate/Vlite@25003dd9dace64f5829a4cf2afad23ab8d78edcc`](https://github.com/mahpate/Vlite/tree/25003dd9dace64f5829a4cf2afad23ab8d78edcc), released version 0.7.5. All source references below are pinned to this base. Proposed behavior is explicitly distinguished from existing behavior.
+
+## 1. Goals and Non-Goals
+
+- **Goal 1**: Let an installation administrator reclaim append-log growth manually or on an opt-in daily UTC schedule without handling cloud credentials.
+- **Goal 2**: Preserve current supported logical state, authentication, lineage, allocation high-waters, and monotonic CAS fencing through deterministic crash recovery.
+- **Goal 3**: Make downtime, retained recovery files, history loss, disabled reasons, and measured file-size results understandable.
+- **Goal 4**: Ship a narrowly qualified capability; fail closed rather than silently accepting an unsupported combination.
+- **Non-Goal 1**: Zero-downtime/online compaction, permanent directory-store migration, or deployment automation.
+- **Non-Goal 2**: Ordinary `maintenance::compact` followed by credential rebinding; that changes lineage/revisions and is prohibited.
+- **Non-Goal 3**: No-op-upsert changes, query-language changes, webhook repair, historical-restore expansion, general scheduler rewrite, or major benchmarking.
+
+### In Scope
+
+- A local supervised lifecycle for the stock REST server, one serialized durable maintenance job per installation, and protected recovery artifacts.
+- A preservation-qualified wrapper around public conversion/backup APIs, with explicit refusal predicates.
+- Dashboard controls, administrator-only REST endpoints, durable schedule/settings, audit and bounded operational telemetry.
+- Failure-injection, concurrency, restart, tenancy, UI, and bounded real-filesystem qualification.
+
+### Out of Scope (deferred)
+
+- Cloud restarts, replica management, platform snapshots, remote leases, and container-app automation. A previous one-off outage approval is not continuing authorization.
+- gRPC-enabled installations, externally published/embedded `Service` instances, multi-process database ownership, network filesystems, and live reserved-memory installations in the first qualified release.
+- Encrypted, TTL-bearing, import-bearing, temporal, precision, and compact-image sources in the first qualified release. Their future support requires separate preservation evidence, not merely enabling a UI flag.
+- Automatic deletion of compaction originals or recovery copies. Initial retention is indefinite, capacity-limited; explicit offline recovery/cleanup remains an operator procedure.
+
+## 2. Terminology
+
+| Term | Definition |
+|------|------------|
+| Active source | The file actually opened by the running generation, including a previous `admin/restore-*.vlite` selection; not necessarily the CLI database argument. |
+| Generation | One complete `Service`, its routers, queues, workers, caches, providers, and database ownership. A retired generation MUST never accept work again. |
+| Supervisor | Proposed local `ManagedRuntime` outside `Service`; owns control-plane status, generation admission, durable compaction state, and the lifetime namespace lock. Not a cloud controller. |
+| Namespace fence | Exclusive OS lock in the private admin directory held across source close, candidate activation, and recovery. Supplements, never replaces, each database file's existing lock. |
+| Frozen checkpoint `S` | Source global sequence after admission closes, all admitted work drains, and `Database::sync()` succeeds. |
+| History floor | Earliest retained commit boundary after conversion. For this transform it is `S`; older history is not available in the candidate. |
+| Candidate | Newly generated `restore-*.vlite` file made from temporary directory staging. Never overwrites or renames onto the active file. |
+| Commit-selection record | Durable journal record making the candidate authoritative. Once durable, source fallback is forbidden even before the first client write. |
+| Logical manifest | Canonically ordered comparison of supported data, metadata, allocation state, lineage, and sequence; stores digests/counts, not payloads or credentials. |
+| File bytes | Actual active file length. Distinct from resident RAM and from total disk usage including recovery copies. |
+
+## 3. Solution Architecture
+
+### 3.1 Code-grounded baseline
+
+| Evidence | Existing behavior and design consequence |
+|----------|------------------------------------------|
+| [SRC-001: conversion](https://github.com/mahpate/Vlite/blob/25003dd9dace64f5829a4cf2afad23ab8d78edcc/src/maintenance.rs#L208-L252), [directory conversion](https://github.com/mahpate/Vlite/blob/25003dd9dace64f5829a4cf2afad23ab8d78edcc/src/directory.rs#L984-L1018), [packing backup](https://github.com/mahpate/Vlite/blob/25003dd9dace64f5829a4cf2afad23ab8d78edcc/src/maintenance.rs#L371-L388) | `convert_to_directory` plus directory `backup` can retain lineage and checkpoint sequence while returning a normal single file. They do not form a transaction or implement server cutover. |
+| [SRC-002: checkpoint image](https://github.com/mahpate/Vlite/blob/25003dd9dace64f5829a4cf2afad23ab8d78edcc/src/maintenance.rs#L921-L1159), [graph snapshot revision assignment](https://github.com/mahpate/Vlite/blob/25003dd9dace64f5829a4cf2afad23ab8d78edcc/src/property_graph/engine/state/snapshot.rs#L175-L261), [graph CAS](https://github.com/mahpate/Vlite/blob/25003dd9dace64f5829a4cf2afad23ab8d78edcc/src/property_graph/engine/mutate.rs#L148-L160) | Ordinary graph snapshot application sets entity revisions to `S`; older revisions advance. Exact individual graph revisions are NOT preserved. CAS compares equality; clients holding formerly-current lower revisions must re-read. |
+| [SRC-003: imports](https://github.com/mahpate/Vlite/blob/25003dd9dace64f5829a4cf2afad23ab8d78edcc/src/import.rs#L279-L395) and SRC-002 | Conversion retains open-job state but omits completed/aborted import history; import-ID high-water can regress. Refuse any source with persisted import state/history in v1 of this feature. |
+| [SRC-004: cursor validation](https://github.com/mahpate/Vlite/blob/25003dd9dace64f5829a4cf2afad23ab8d78edcc/src/changes.rs#L437-L574), [split commit](https://github.com/mahpate/Vlite/blob/25003dd9dace64f5829a4cf2afad23ab8d78edcc/src/changes.rs#L887-L913) | Preserved lineage does not retain historical replay. A cursor below `S`, or partway through checkpoint commit `S`, cannot transparently resume. |
+| [SRC-005: Service state](https://github.com/mahpate/Vlite/blob/25003dd9dace64f5829a4cf2afad23ab8d78edcc/src/server.rs#L175-L223), [execution and close](https://github.com/mahpate/Vlite/blob/25003dd9dace64f5829a4cf2afad23ab8d78edcc/src/server.rs#L525-L690) | Database ownership is `Arc<RwLock<Option<Database>>>`; `Service` also caches identity, format, graph capability, bindings, imports, and workers. Snapshot-read completion can outlive its read lock; disconnected blocking work retains a permit. A database write lock alone is insufficient. |
+| [SRC-006: group commit](https://github.com/mahpate/Vlite/blob/25003dd9dace64f5829a4cf2afad23ab8d78edcc/src/server/group_commit.rs#L161-L344) | Submission and the queue worker are separate; `shutdown()` drops the sender and joins the worker. Join/drain MUST precede final database locking, or a queued commit can deadlock or cross the checkpoint boundary. |
+| [SRC-007: active open](https://github.com/mahpate/Vlite/blob/25003dd9dace64f5829a4cf2afad23ab8d78edcc/src/bin/vlite-server.rs#L522-L580), [generation creation](https://github.com/mahpate/Vlite/blob/25003dd9dace64f5829a4cf2afad23ab8d78edcc/src/bin/vlite-server.rs#L676-L757) | `open` returns `(Database, active_path)` after resolving persistent selection; startup currently builds one generation. Proposed lifecycle MUST retain this resolved path and configure replacement generations completely. |
+| [SRC-008: backup and selection](https://github.com/mahpate/Vlite/blob/25003dd9dace64f5829a4cf2afad23ab8d78edcc/src/server/admin.rs#L1172-L1305) | `next-startup` persists across restarts and selects generated `restore-` names. Existing marker is a bounded plain name, not a transactional job record; add journal recovery before resolving it. Directory sync currently does nothing on non-Unix. |
+| [SRC-009: ops active state](https://github.com/mahpate/Vlite/blob/25003dd9dace64f5829a4cf2afad23ab8d78edcc/src/server/ops.rs#L187-L224), [backup/retention/snapshot](https://github.com/mahpate/Vlite/blob/25003dd9dace64f5829a4cf2afad23ab8d78edcc/src/server/ops.rs#L584-L822) | Scheduled backups retain an active-path snapshot; retention protects some names but no compaction journal references. `snapshot` syncs and copies under ownership. Extend protection rather than adding a second competing retention policy. |
+| [SRC-010: credentials/bindings](https://github.com/mahpate/Vlite/blob/25003dd9dace64f5829a4cf2afad23ab8d78edcc/src/server/credentials.rs#L162-L175), [persistent authentication](https://github.com/mahpate/Vlite/blob/25003dd9dace64f5829a4cf2afad23ab8d78edcc/src/server/credentials.rs#L420-L495), [admin setup](https://github.com/mahpate/Vlite/blob/25003dd9dace64f5829a4cf2afad23ab8d78edcc/src/server/admin.rs#L253-L348) | Credential hashes, tenant/account state and audit live in the private admin directory, not just database payloads. Graph/collection grants bind to lineage/names/IDs. Preserve sidecars unchanged; do not rotate/rebind credentials. |
+| [SRC-011: authorization](https://github.com/mahpate/Vlite/blob/25003dd9dace64f5829a4cf2afad23ab8d78edcc/src/server.rs#L1230-L1305), [cookie CSRF](https://github.com/mahpate/Vlite/blob/25003dd9dace64f5829a4cf2afad23ab8d78edcc/src/server/users.rs#L485-L505) | Admin routes can have scoped-operation exceptions. New routes MUST explicitly require installation `Need::Admin`, and reuse same-origin/custom-header cookie protections, not merely an `/admin` prefix. |
+| [SRC-012: webhook dispatcher](https://github.com/mahpate/Vlite/blob/25003dd9dace64f5829a4cf2afad23ab8d78edcc/src/server/webhooks.rs#L397-L451) | Dispatcher accesses the database directly and continues after feed errors. It cannot be assumed to recover from the new floor. Refuse configured webhook subscriptions; no cursor-reset workaround. |
+| [SRC-013: file bytes estimate](https://github.com/mahpate/Vlite/blob/25003dd9dace64f5829a4cf2afad23ab8d78edcc/src/server/observability.rs#L90-L145) | `live_bytes` sums collection record bodies, not the full graph. `reclaimable_bytes_estimate` MUST NOT trigger compaction or be advertised as graph reclaimability. |
+| [SRC-014: UI operations](https://github.com/mahpate/Vlite/blob/25003dd9dace64f5829a4cf2afad23ab8d78edcc/src/dashboard/console-tools.js#L2007-L2049), [capability reasons](https://github.com/mahpate/Vlite/blob/25003dd9dace64f5829a4cf2afad23ab8d78edcc/src/dashboard/app.js#L140-L152) | Backup and automatic-index controls live in `console-tools.js`, not primarily `admin-tools.js`. Reuse their API/capability patterns but add a separate plain-language compaction card. |
+| [SRC-015: file locks](https://github.com/mahpate/Vlite/blob/25003dd9dace64f5829a4cf2afad23ab8d78edcc/src/lib.rs#L1134-L1179), [close](https://github.com/mahpate/Vlite/blob/25003dd9dace64f5829a4cf2afad23ab8d78edcc/src/lib.rs#L3926-L3942) | Locks follow file ownership and are released on close/drop. Closing the source before offline conversion without a retained namespace fence is not a safe handoff. |
+| [SRC-016: account/session loading](https://github.com/mahpate/Vlite/blob/25003dd9dace64f5829a4cf2afad23ab8d78edcc/src/server/users.rs#L657-L691), [unconfigured authentication](https://github.com/mahpate/Vlite/blob/25003dd9dace64f5829a4cf2afad23ab8d78edcc/src/server.rs#L1048-L1055) | Existing sessions are memory-resident, and absent admin configuration can mean open administration. Recovery must bootstrap authoritative admin authentication before database open, permit login after restart, and never fall back to unconfigured authentication. |
+
+### 3.2 Selected architecture: fenced generation restart
+
+1. Add a small `ManagedRuntime` lifecycle in `src/server/lifecycle.rs`, wired by the stock `vlite-server` binary. It owns a stable outer REST/control router and dispatches database work to one generation. Do NOT replace `Option<Database>` under existing live `Service` clones.
+2. Before opening a selected file in a supported managed installation, acquire `admin/compaction-owner.lock` and validate private-directory permissions, file identity, and supported filesystem profile. Hold the descriptor for the whole managed process lifetime, including schedule-off operation, maintenance, errors, and recovery. Two managed servers sharing that directory MUST conflict. A second admin directory pointing to the same installation, arbitrary external library writers, and older non-cooperating binaries are unsupported; file locks remain mandatory. This is not a distributed lease or a defense against a privileged process writing raw files. **Compatibility rule**: without existing compaction authority/unresolved state, unsupported configurations retain ordinary server behavior with compaction unavailable, rather than becoming startup failures. Existing authority or unresolved journal state MUST always undergo fenced reconciliation; unsupported configuration MUST NOT bypass it through legacy startup.
+3. Initialize an authoritative `ControlContext` before database open, reusing existing admin-token, account/session, credential and audit implementations without changing their authentication policy. Preserve the same context across generation replacement, including live sessions. Keep the outer control plane independent of the database lock and worker pool. Static dashboard assets, health/readiness, authenticated compaction status/cancel, and existing auth-config/login/session/logout routes remain available during maintenance and recovery. Login after process restart is necessary because old cookies no longer have live sessions. Preserve existing transport/origin/CSRF checks, throttling, expiry, revocation and session semantics; only installation-admin roles receive maintenance details. Configuration/credential changes and other database/admin operations are fenced. Database-open failure leaves authenticated status available and readiness false. Authentication-load failure exposes only generic health/not-ready responses; it MUST NOT fall back to default/open authentication.
+4. Put a generation admission ticket around all accepted data-plane work, including `run`, `run_mutation`, `run_read_then`, streams and detached blocking work. Tickets live until actual completion, not HTTP disconnection. Close admission atomically with retirement intent, pause and join ops/webhook activity, prevent new queue submission, drain admitted work and group commits, and then take final database ownership. Never join a worker while holding the database lock it needs.
+5. Sync and snapshot the active source while its `Database` and inode lock remain owned. Verify the frozen backup before transformation. Run `convert_to_directory(frozen_backup, new_staging_dir)` and `backup(new_staging_dir, new_candidate)`; do NOT convert the live source path or use ordinary `compact`. The source remains open and fenced until selection is durable.
+6. Open/validate the candidate under exclusive ownership while still retaining the source. Compare logical manifests and invariants. Budget for source plus candidate memory; fail safely on inability to validate/open. Candidate validation MUST NOT perform application writes.
+7. Durably commit candidate selection as described below, then close the old database and retire the entire old generation. Build a fresh `Service` with the already-owned candidate, preserved runtime configuration/providers, authentication, durability mode, and fresh queues/caches. Re-run ordinary startup validation before admitting data. Existing ANN sidecars MUST NOT be loaded by blindly changing the filename; rebuild or use existing validated snapshot-compatibility checks.
+8. The proposed supervisor owns this restart, not the browser. `Service` users outside this supported owner MUST see `managed_runtime_required`. No cloud SDK, arbitrary shell command, or browser-provided path is introduced.
+
+**Pre-selection exit rule**: Once irreversible generation shutdown begins, cancellation, timeout, validation error and no-benefit skip MUST enter `RECOVERING_SOURCE`. Join all work without holding its database lock, transfer the still-owned source into a fresh generation, recreate queues/workers, and validate readiness before reopening admission. Never reactivate retired clones or restart a joined group queue in place. A cancellation response means cancellation was requested, not that source service is already restored. If drain is still in progress, remain fenced; if source reconstruction fails, remain in authenticated recovery mode.
+
+**Availability contract**: Preflight leaves the data plane running. From `QUIESCING` through `REOPENING`, new reads AND writes return HTTP 503 `maintenance_in_progress` with `Retry-After: 5`; already-admitted work drains. `/health` remains live, `/ready` is not ready, and admin status remains available. A full process crash temporarily removes HTTP availability; after process restart the control plane MUST report recovery/failure without opening an unvalidated database. HTTP 503 is retryable, but clients MUST NOT blindly retry a write with an unknown prior outcome.
+
+### 3.3 Durable artifacts and state machine
+
+- Generate safe relative names internally. Use an admin-private `compaction/` directory for versioned config, checksum-protected state records, manifests and staging. Publish candidate names in the existing `restore-*.vlite` namespace. Never accept caller paths.
+- Each job record MUST contain schema version, job ID, state version, previous-state digest, trigger/occurrence ID, generation ID, actual source identity/relative selection, source lineage/sequence/bytes, recovery and candidate names/digests, settings version, timestamps, deadlines and sanitized error code. It MUST NOT contain data payloads, tokens, absolute host paths or encryption keys.
+- State replacement uses write-new, file sync, atomic rename, then parent-directory sync on a qualified filesystem. Validate bounded sizes, schema, names, symlinks, checksums and monotonic state versions. A missing/invalid required record is not equivalent to idle.
+- `next-startup` remains compatible as a generated filename. A stable versioned `compaction/selection.json` is the authoritative commit-selection record, separate from mutable latest-job status/config; it contains the selected candidate, lineage, minimum sequence, selection epoch and pinned predecessor references. Failed later jobs or cleanup MUST NOT clear or roll back this authority. Startup MUST reconcile authority and journal before the legacy selector. Candidate filenames are not sufficient evidence to select them.
+- Every selecting intent binds the expected predecessor epoch and the proposed next epoch/candidate. An older valid authority record does not resolve a newer in-flight selecting intent; recovery MUST reconcile that exact epoch before opening admission.
+- Publication helpers MUST distinguish `not_published`, `committed` and `outcome_unknown`. A write/rename/sync failure is not proof of no side effect. Persist a `SELECTING` intent before attempting authority publication; if that intent's own publication is uncertain, stop before attempting the authority update and remain fenced. Presence of a valid selecting intent without a conclusive authority record is recovery-required, not an instruction to resume source.
+
+| State | Required work and durable boundary | Crash/restart action |
+|-------|-----------------------------------|---------------------|
+| `IDLE` / terminal | Persist validated settings and attempt/baseline history. | Recover last terminal state, do not replay a missed schedule occurrence. |
+| `PREFLIGHT` | Serialize job acceptance; pin source identity and all recovery references; verify eligibility, acknowledged history policy, capacity and budget. | Mark interrupted attempt; retain references; leave existing selection unchanged. |
+| `QUIESCING` | Persist intent before closing admission; drain every generation ticket/queue/background job. | Recover the currently authoritative source; discard no file automatically. Do not resume a stale staged candidate. |
+| `FROZEN` | `db.sync`; capture `S`; persist verified recovery-copy manifest; retain source lock. Copy protected auth/config sidecars into restricted recovery storage without exposing their contents. | Before selection, recover the source, not the old backup. If it changed after a process crash, invalidate the old job; do not overwrite new source writes. |
+| `BUILDING` | Convert frozen backup to distinct directory; pack distinct single-file candidate. Durably record names before creation. | Mark attempt interrupted; source remains authoritative. Keep incomplete staging quarantined until safe cleanup. |
+| `VALIDATING` | Verify complete file/reopen, supported logical manifest, high-waters, `S`, lineage, size benefit and key mode; take exclusive candidate ownership. | Source remains authoritative. Never select a candidate solely because it exists. |
+| `READY_TO_SELECT` | Sync candidate file and directories; persist complete candidate identity and verification receipt. Recheck source generation/sequence and deadline. Cancellation is still allowed. | Enter source reconstruction; candidate is only a retained artifact. |
+| `SELECTING` | Persist and sync an intent to publish the authoritative selection, under the cancellation/selection mutex. Cancellation is no longer accepted while the outcome is being resolved. | Validate intent/candidate and conclusively finish candidate selection or stay recovery-required; never reopen source admission from an unresolved intent. |
+| `SELECTION_COMMITTED` | Persist and sync this record FIRST; it irrevocably selects the already-durable candidate. Then persist/sync `next-startup` naming that candidate. No data admission between these operations. | Candidate is authoritative even if `next-startup` is absent/old. Repair the marker from the valid journal, validate/reopen candidate, or fail closed. NEVER fall back to source. |
+| `SELECTION_OUTCOME_UNKNOWN` | Authority publication or its prerequisite intent may have taken effect but durability/outcome is uncertain. Keep admission closed, both artifacts pinned, and report uncertainty rather than success/cancellation. | Reconcile authoritative records; a validated candidate authority is resumed, otherwise remain recovery-required. No automatic source rollback. |
+| `REOPENING` | Retire old generation and close source; initialize fresh generation, restore runtime policy and verify active-path tracking; no admission until ready. | Resume candidate initialization; never replay conversion or select stale source. |
+| `SUCCEEDED` | Persist readiness/selection outcome before opening admission, then expose measured result. Later jobs MUST use the candidate as source. | Reopen the authoritative selected file with normal log recovery. Original checkpoint digest no longer describes the file after new writes. |
+| `RECOVERING_SOURCE` | For exits proven to precede selecting intent/publication, join all work and construct a fresh generation around the still-owned healthy source. Persist outcome/baseline before admission. | Use the authoritative source; no stale candidate selection. Failure stays fenced and reports recovery-required. |
+| `FAILED` / `CANCELLED` / `SKIPPED` | Persist phase, selection outcome (`not_published`, `committed` or `outcome_unknown`), code, references, timestamps and next eligibility. | Only a conclusively pre-selection failure may reconstruct source. After commit, maintain candidate authority. Recovery retries mean restart of the recovery-capable supervisor, not a new conversion job or schedule retry. |
+
+**Post-activation digest rule**: Validation digests prove the pre-activation image. After commit selection, normal recovery MUST accept legitimate later commits in the same candidate lineage with sequence at least `S`; it MUST NOT require equality to the old whole-file digest. Missing/corrupt candidate identity, lower sequence, incomplete selection metadata or unexpected lineage causes `recovery_required`, not source fallback.
+
+**Retention/selection interlock**: All current, selected, in-flight, original, recovery and committed-history references are pinned. Extend backup retention and restore selection to consult the journal and stable authority under the same lifecycle serialization. Reject restore selection while a job is active. After successful compaction, historical restore selection would require an equally durable authority-retirement/replacement transition, which is deferred. Return `compaction_selection_pinned` explaining that a recovery-capable future transition is required; do not suggest deleting the journal, editing `next-startup` or using legacy restore tooling. Ordinary backup retention MUST never delete pinned compaction recovery copies. This persistent restore/downgrade restriction MUST be disclosed before the first compaction.
+
+### 3.4 Preservation contract and unsupported predicates
+
+| Data/mode | Required behavior for initial capability |
+|-----------|-----------------------------------------|
+| Format | Plain writable v5 single-file only. Refuse pre-v5, directory, in-memory, read-only, poisoned, truncated/unrepaired and compact-image sources. No implicit upgrade/repair. |
+| Lineage/global revision | Candidate lineage equals source; candidate checkpoint/global sequence equals frozen `S`; next successful write is strictly greater than `S`. Refuse exhausted sequence space. |
+| Entity CAS | Record revisions preserved where represented by current writer; graph node/edge revisions MAY advance to `S`, MUST NOT decrease. Stale pre-checkpoint CAS MUST fail. Do not promise unchanged ETags or exact graph revisions. |
+| Graph/collection state | Compare every graph/collection ID/name/settings, graph key/label/property/endpoint/attachment, schema/index definition and supported vector/re-embedding state. Rebuilt derived indexes MUST answer equivalent probes. |
+| Allocation state | Compare collection, record and surviving-graph node/edge allocator high-waters, including deleted highest IDs. Compaction MUST introduce no additional ID reuse relative to the source allocator. Existing dropped-graph-ID reuse policy is not changed. If a relevant allocator cannot be compared/preserved, refuse; never infer high-water from surviving maxima alone. |
+| Imports | Refuse active jobs AND any retained import markers/history/noninitial allocator state. Inspect persisted source state, not just `open_jobs().count()`. Return `import_state_unsupported`. Do not erase provenance or allow compaction-induced import-ID reuse. |
+| TTL | Refuse any stored record/node/edge expiry metadata, including already expired entries not visible in ordinary current-time enumeration. No wall-clock-dependent filtering in the initial qualified transform. Return `ttl_compaction_unsupported`. |
+| Encryption | Refuse before quiescence with `encrypted_compaction_unqualified`. Existing keyed conversion AND keyed backup are necessary but not sufficient evidence for support. Never retry unkeyed, decrypt to staging, or persist a key. |
+| Temporal/precision | Refuse commit timestamps/temporal history, production-unsupported precision features and other unrecognized v5 feature flags. Do not normalize these silently. |
+| Credentials/tenants | Keep admin sidecars, hashes, grants, expiry, revocation, IDs and lineage unchanged. Snapshot them under the admin mutation fence. Reuse normal authentication checks on replacement generation. No same-token rebinding. |
+| Reserved memory | Refuse configured bindings OR detected orphan/reserved resources using existing startup detection. Do not rely only on a configuration filename. Tenant/scoped callers cannot discover root reservation details. |
+| Consumers | Refuse any webhook subscription; do not reset saved cursors. Require administrator acknowledgement that all external feed/replication consumers can resnapshot at a new history floor. Unknown consumers cannot be discovered reliably; absent acknowledgement means ineligible. |
+| Runtime | Stock managed REST generation only. Refuse gRPC listener, external `Service` publication/ownership, active import/index-build/checkpoint work that cannot be joined, or unknown background owner. Preserve plain record group-commit support by proving its drain protocol. |
+| Filesystem | Initial qualification target is a Linux local filesystem with working exclusive locks, rename, file and directory fsync. Windows-native, NFS/SMB/Azure Files, multi-replica shares and unclassified Docker bind mounts remain unsupported until separately qualified. |
+
+Eligibility combines four evidence sources, each reporting `supported`, `unsupported` or `unknown`: (1) runtime/configuration evidence for owner, transport, read-only/in-memory mode, reservations and consumers; (2) open/health diagnostics for poison, incomplete tails and active jobs; (3) recognized filesystem-profile evidence; (4) persisted-source inspection for format flags, imports, TTL, sequence and allocator/data state. Unknown MUST NOT enable selection. Capture diagnostics that normal open/recovery/normalization could discard before opening or copying. The storage scanner certifies currently observable retained state, not erased historical provenance; absence of import markers does not establish that a database was never imported.
+
+The preservation scanner SHOULD be internal (`pub(crate)`) and shared by preflight/validation; avoid a new general storage API. Private scanner/manifest fixtures belong in module unit tests; external integration tests verify public transform behavior. Every exclusion MUST name its actual evidence source and a negative fixture in the implementation. If scanning the frozen source discovers a mode missed by inexpensive preflight, abort before selection with an actionable disabled reason. Full validation is required even if runtime preflight passed.
+
+### 3.5 Proposed settings and eligibility
+
+These are deterministic implementation defaults, **not permission to enable automatic maintenance**. Store them durably with schema version and optimistic settings version; reject unknown fields, overflow, invalid UTC strings and out-of-range values.
+
+| Setting | Default | Validation / meaning |
+|---------|---------|----------------------|
+| `enabled` | `false` | Boolean; capability gates cannot be overridden by this flag. |
+| `daily_start_utc` | `"02:00"` | Exact `HH:MM`, 00:00–23:59; UTC only, no cron/timezone/DST language. |
+| `window_minutes` | `30` | Integer 5–120; bounds automatic admission and selection, not guaranteed service-restoration time. |
+| `max_run_seconds` | `900` | Integer 60–3600 and at most window length minus 60 seconds. Monotonic elapsed budget from durable acceptance through readiness, including quiescence/build/validation/reconstruction. |
+| `min_file_bytes` | `1073741824` | Integer 67108864–1099511627776. Automatic runs only. |
+| `min_growth_bytes` | `268435456` | Integer 67108864–1099511627776, automatic runs only. |
+| `min_growth_percent` | `25` | Integer 10–200; automatic runs require BOTH absolute and relative growth. |
+| `cooldown_hours` | `168` | Integer 24–720 since last completed attempt, including no-benefit attempts. |
+| `max_source_bytes` | `4294967296` | Integer 67108864–17179869184; operator limit cannot exceed the tested profile's maximum. Manual and automatic. |
+| `history_policy` | `"unacknowledged"` | Only alternative is `"resnapshot_allowed"`; enabling schedule/manual submission requires an explicit warning acknowledgement, bound to settings version and lineage. |
+
+- Define baseline `B` as measured candidate bytes on success or frozen-source bytes on no-benefit, persisted before admission resumes; initial enabling records current file size and waits for growth. Let growth `G = max(0, F - B)`. File growth eligibility is `F >= min_file_bytes`, `G >= min_growth_bytes`, and `100 * G >= min_growth_percent * B`, using checked integer arithmetic. It is an eligibility signal, NOT a savings estimate.
+- When source identity changes outside compaction, reset baseline and disable the schedule until settings/history acknowledgement is renewed. Do not apply a previous lineage's policy.
+- Manual **Compact now** bypasses minimum-size/growth/cooldown and clock-window eligibility, but NOT the hard runtime/filesystem/preservation/capacity/history gates or its `max_run_seconds` budget. A manual run requires explicit downtime/history confirmation.
+- Candidate selection requires measured savings of at least `max(16 MiB, ceil(0.05 * F))`; otherwise record `SKIPPED/no_material_savings`, retain the source, update baseline/cooldown, and safely remove only unselected job-private staging/candidate files after journaling cleanup.
+- Before freeze, require same-filesystem staging/candidate/admin storage and free space at least `4 * F + max(64 MiB, ceil(0.10 * F))`, after accounting for all retained artifacts. Track allocated job bytes against this budget; ENOSPC remains a tested failure, not a preflight guarantee. Do not delete recovery copies to make space. Abort before selection if budget would be exceeded.
+- Use a single durable UTC occurrence ID per start date. Windows are half-open `[start, start + window_minutes)`, including windows crossing midnight. At most one automatic attempt per occurrence. On every automatic acceptance, including restart, require a not-yet-attempted occurrence and the full budget plus 60 seconds remaining; outside it, skip, never catch up repeatedly. UTC determines occurrence identity; monotonic time governs live deadlines. Recheck the window and budget before beginning selecting intent; wall-clock jumps never permit duplicate occurrence IDs.
+- Retry transient failures only in later daily windows. Failure one adds 24h backoff, failure two adds 48h, failure three suspends scheduling until an administrator saves a new settings version. The next eligible window begins after the maximum of cooldown expiry and backoff expiry; the conservative default cooldown can dominate backoff. Persist that timestamp. Success and validated no-benefit reset failure count; eligibility skips/cancellation neither reset nor increment it. Pre-selection transient I/O/drain failures increment it; post-selection or uncertain-authority failures suspend immediately pending recovery.
+- Quiescence has a 30-second budget within `max_run_seconds`. No selecting intent may begin after the deadline/window; once selecting intent begins, finish authoritative recovery even if the budget/window expires, rather than roll back. Cancellation/deadline is cooperative between bounded stages; public conversion APIs do not presently offer cancellation. A timed-out I/O operation MUST be joined before fresh source generation admission resumes. The maintenance budget is NOT a promise that an uninterruptible filesystem call can be killed safely; an overrun remains fenced, reports `deadline_exceeded_draining` or `recovery_budget_overrun`, and fails filesystem/runtime qualification if reproducible. Do not detach work or pretend timeout makes it safe to reopen.
+- Configuration, last attempt/success/failure, baseline, next eligible occurrence and backoff survive restart. Do not reuse the existing process-local index policy as compaction configuration.
+
+### 3.6 REST and dashboard contract
+
+All paths below are proposed; all GET/HEAD and mutation variants require installation-admin authorization before any status/path/size lookup. Register explicit `Need::Admin` requirements, capability inventory and reserved-route policy.
+
+| Route | Request / response |
+|-------|--------------------|
+| `GET /v1/admin/compaction` | Capability/disabled codes, settings version, safe active-file label, actual bytes with sample timestamp, current job/phase, last result, next eligible time, retained recovery bytes and history warning. No absolute paths or payloads. |
+| `PUT /v1/admin/compaction/config` | Complete validated settings plus expected version; 409 on stale version. Schedule remains off unless explicitly enabled with valid acknowledgement. |
+| `POST /v1/admin/compaction/jobs` | Expected settings version, explicit downtime/history acknowledgement, and bounded idempotency key (UUID). 202 plus job ID only after durable acceptance; same key/same body returns original outcome, different active job returns 409. |
+| `GET /v1/admin/compaction/jobs/{id}` | Phase, phase start/elapsed/budget, measured bytes when known, cancellation availability, selection outcome (`not_published`, `committed`, `outcome_unknown`), sanitized failure code and recommended action. Unknown IDs return 404 after authorization. |
+| `POST /v1/admin/compaction/jobs/{id}/cancel` | Before selecting intent, persist cancellation request and return 202. Return 409 `selection_in_progress`, `selection_outcome_unknown` or `selection_committed` once the corresponding boundary is reached. Cancellation is not rollback. |
+
+- Stable error codes: `compaction_disabled`, `compaction_busy`, `maintenance_in_progress`, `maintenance_budget_exceeded`, `insufficient_space`, `unsupported_source`, `history_ack_required`, `source_changed`, `validation_failed`, `recovery_required`, plus the specific unsupported codes above. Errors MUST distinguish refusal, no-benefit skip and post-selection failure.
+- Show a **File compaction** card in Administration → Backup & recovery, adjacent to existing scheduling patterns. Keep **Automatic index maintenance** separately named. Do not mislabel it as existing file compaction.
+- Labels: **Compact now**, **Enable automatic compaction**, **Daily start (UTC)**, **Maintenance window**, **Current database file**, **Recovery copies retained**, **Last run**, **Next eligible run**, **Before / after file size**. Explain that total disk use can rise because originals/backups remain.
+- Default toggle off, no destructive preselection. Confirmation states that reads/writes pause, old feed history disappears, older graph CAS tokens may need re-read, recovery files remain, and future automatic runs start/select only in the configured window. Warn that safe recovery can overrun the window. Also disclose that committed compaction pins selection: legacy historical-restore selection and downgrade to a journal-unaware binary are unavailable until a compatible authority-replacement transition exists.
+- Use existing dashboard API client, role/capability visibility, keyboard focus/dialog patterns, labels, light/dark styling and live-region feedback. Apply accessible spacing and visual hierarchy consistent with the requested UI/UX design preference; no external design package/tool installation is necessary.
+- Show exact disabled reasons to administrators; tenant/scoped users see no root file bytes, graph presence, filenames, schedule, job ID or maintenance error details. Generic authenticated data-plane unavailability is sufficient.
+- Poll status every 5 seconds while visible, slow to 30 seconds in a hidden tab, stop on terminal state/logout, and back off network failures to 30 seconds. On page reload, recover the active job from GET; never auto-resubmit POST. Show phases rather than fabricated completion percentages.
+
+## 4. Requirements
+
+**Summary**: The user asked for dashboard automatic compaction, then selected a safety-focused implementation plan with manual execution, opt-in scheduling and retained recovery. The capability MUST remain single-file and gated by evidence.
+
+**Items**:
+- **FR-001**: Manual and scheduled compaction MUST share one durable serialized state machine, idempotency handling and administrator authorization.
+- **FR-002**: The schedule MUST default off, survive restart, obey the validated UTC/budget/growth/cooldown/backoff settings, and never retry in a tight loop.
+- **FR-003**: The transform MUST preserve supported logical state, lineage, credential bindings, allocator high-waters and monotonic revision fencing; unsupported state MUST be refused before selection.
+- **FR-004**: Candidate activation MUST use the actual active path, explicit quiescence, retained file ownership, durable selection and fresh-generation initialization; no live-handle database swap.
+- **FR-005**: The original, verified recovery copy and protected sidecars MUST survive cutover; retention/restore selection MUST respect authority and pinned history.
+- **FR-006**: Dashboard/status MUST explain eligibility, downtime, history/CAS changes, file versus RAM size, retained bytes, last/next run and before/after results.
+- **FR-007**: After committed selection, recovery MUST use the candidate or fail closed, never silently select stale source, including when candidate startup fails. Uncertain selection outcomes MUST stay fenced until conclusively reconciled.
+- **FR-008**: Existing credentials/tenant isolation MUST survive generation replacement; only installation administrators can see or alter sensitive compaction details.
+- **NFR-001**: Ownership and admission MUST cover every queue/worker/read snapshot and disconnected operation; unsupported owners/transports MUST disable compaction.
+- **NFR-002**: All recovery-critical writes MUST be checked and synced in order; filesystem qualification MUST precede enablement.
+- **NFR-003**: Work MUST have bounded admission/budgets, controlled cancellation and honest timeout reporting; control-plane status MUST not wait on the database lock.
+- **NFR-004**: Public API/docs/capabilities/UI tours MUST match the implemented routes, supported-mode matrix and current source hashes.
+- **CON-001**: No permanent directory migration, ordinary compact/rebind, no-op-upsert/query work, product version bump, automatic cloud operation or unrelated refactor.
+
+## 5. Risk Classification
+
+**Risk**: 🔴 HIGH RISK
+
+**Summary**: This changes durable selection and file ownership. A UI-only implementation could lose acknowledged writes, invalidate credentials, strand feed consumers, reuse IDs or reopen stale data.
+
+**Items**:
+
+| ID | Risk / failure mode | Required mitigation |
+|----|---------------------|---------------------|
+| FM-001 | Concurrent or disconnected writer crosses `S`; queued group commit deadlocks with owner lock. | Admission tickets, stop producers, drain/join outside database lock, source sequence recheck; deterministic barriers in tests. |
+| FM-002 | Process dies at any sync/rename/selection boundary. | Enumerated fault points and startup reconciliation; candidate authority starts at durable commit-selection record. |
+| FM-003 | Source cannot reopen after cancellation or pre-selection crash. | Keep control plane available, retain files, report `source_open_failed/recovery_required`; never create a new empty database or substitute backup automatically. |
+| FM-004 | ENOSPC, quota, sync failure or candidate corruption. | Budget, checked I/O, full validation, pinned original/recovery; no selection on uncertainty. After commit, fail closed. |
+| FM-005 | Marker/journal missing, corrupt, symlinked, inconsistent, truncated or from a newer schema. | Bounded strict parsing, atomic records, fail closed; no filename guessing or original-CLI fallback. |
+| FM-006 | Timeout/cancel races durable selection or rename takes effect but returns an error. | Serialized transition; cancel accepted only before selecting intent; uncertain outcome stays fenced. Fresh source generation is mandatory after irreversible shutdown; post-intent cancel returns conflict. |
+| FM-007 | Import/TTL/encryption/feature flag loses unenumerated state. | Persisted-state eligibility scanner, explicit refusal matrix and negative fixtures; no implicit downgrade. |
+| FM-008 | Credential cache, memory reservation or stale `Service` survives handoff. | Fresh generation, authoritative auth continuity, generation invalidation, reserved-memory refusal and cross-tenant tests. |
+| FM-009 | External consumer requires discarded history. | Block webhooks; explicit versioned resnapshot acknowledgement for external consumers; do not rewrite cursors. |
+| FM-010 | Retry scheduling repeatedly generates copies without savings. | Actual measured benefit threshold, baseline/cooldown even on no-benefit, one occurrence/day and suspended failure state. |
+| FM-011 | Retention removes active/in-flight/recovery artifacts or restore conflicts with selection. | Shared pin set and serialized selector; default indefinite recovery retention; explicit offline action when selection is pinned. |
+| FM-012 | Network filesystem or hosted replica bypasses local ownership/durability assumptions. | Disabled capability with actionable reason; local profile qualification does not qualify network storage or platform rollout. |
+| FM-013 | Old whole-file digest rejects legitimate new candidate writes on restart. | Validate selected identity/lineage/minimum sequence and normal log recovery after activation, not old digest equality. |
+| FM-014 | Source/candidate dual-open validation exceeds memory. | Qualify bounded maximum size/resident working set; report resource refusal before selection; no claim that file size equals RAM demand. |
+
+- **ASM-001**: Initial supported operators accept temporary read/write unavailability. Defaults are proposals; schedule enablement is an explicit persisted operator action.
+- **ASM-002**: A supported deployment has one managed owner and a private admin directory on the same qualified local filesystem. Platform "Single" replica mode alone does not establish this.
+- **ASM-003**: External change consumers are not fully discoverable; the administrator's history acknowledgement is a declared operational contract, not a verified absence of consumers.
+- **ASM-004**: Initial source-mode exclusions are deliberate conservative decisions, not unfinished optional branches. Removing an exclusion requires a separately reviewed preservation test and capability change.
+
+## 6. Dependencies
+
+**Summary**: Implementation is ordered by correctness prerequisites; UI wiring MUST NOT bypass unfinished storage/runtime gates. The explicit dependency chain is EPIC-001 → EPIC-003, EPIC-002 → EPIC-003 → EPIC-004 → EPIC-005 → EPIC-006; EPIC-007 depends on EPIC-004 and EPIC-005; EPIC-008 depends on EPIC-006 and EPIC-007. EPIC-001 and EPIC-002 may run independently with non-overlapping file ownership.
+
+**Items**:
+- **DEP-001**: EPIC-001 establishes the internal preservation scanner/manifest and refusal predicates. No candidate can be selected until its positive and negative fixtures pass.
+- **DEP-002**: EPIC-002 establishes database-independent authenticated recovery; EPIC-003 then establishes managed ownership and complete admission/drain. EPIC-004 cutover depends on both; `RwLock` by itself does not satisfy this dependency.
+- **DEP-003**: EPIC-004 journal/recovery/pinning must pass crash tests before EPIC-005 enables job submission or schedule execution. All runtime/persisted-state refusal predicates precede submission, not a later metrics task.
+- **DEP-004**: EPIC-005 admin APIs/config/authorization contract precedes EPIC-006 interactive UI. Capability flags remain false when any runtime or filesystem gate is unsatisfied.
+- **DEP-005**: EPIC-007 qualification and EPIC-008 documentation/tour checks are release gates, not post-release cleanup.
+- **DEP-006**: Reuse Rust/Tokio/Axum, existing `tempfile`/hashing, filesystem locks, admin auth/audit and public maintenance APIs. No new cloud service, job framework or broker is required.
+
+## 7. Quality & Testing
+
+**Summary**: Plan authoring performed source inspection and independent research, not a runtime qualification campaign. Implementation MUST add focused positive/negative fixtures and deterministic lifecycle/crash tests. Large throughput benchmarking is not required.
+
+**Items**:
+- **TEST-001**: Extend `tests/directory_store.rs` with plain v5 two-hop fixtures: periodic graph updates, deleted highest IDs, nodes/edges/attachments/schema/indexes, collection settings/IDs, vectors/metadata/re-embedding state and checkpoint sequence. Compare canonical logical manifests before and after.
+- **TEST-002**: Explicitly distinguish exact record revision retention from graph revisions rebased upward to `S`. A formerly-current graph revision `r < S` conflicts; an unchanged current revision already equal to `S` remains valid; genuinely stale revisions fail; refreshed current revisions work; next write is `> S`. Verify unchanged lineage through multiple compactions.
+- **TEST-003**: Negative sources include completed/aborted and active imports, expired/nonexpired TTL entries and incident edges, encryption, compact encoding, unsupported flags, pre-v5/directory/in-memory/read-only/poisoned/truncated source, sequence exhaustion and failed allocator comparison. No original mutation or selection on refusal.
+- **TEST-004**: Deterministic admission barriers test group enqueue vs fence, disconnected HTTP writes, long snapshot-read completion, ops/backup races, rebuild cancellation, old `Service` clones and second owner processes. Assert every admitted acknowledged write appears in candidate and no retired generation writes.
+- **TEST-005**: Kill/restart or fault-inject before/after each state write, file sync, directory sync, candidate publication, selecting intent, authority record, marker rename, old close, new initialization and first new write. Include write/rename/sync operations that take effect but return failure. Check authority, retained files and durable acknowledged data.
+- **TEST-006**: ENOSPC/short copy/sync errors, corrupted candidate/journal/marker, missing source, wrong lineage, source identity drift, candidate open failure, timeout/cancel races and stale digest after new writes. Status remains available or returns after process restart without weakening auth.
+- **TEST-007**: Reuse `tests/server_ops.rs` credential/history-floor patterns and `tests/server_memory_reserved_as_missing.rs` isolation coverage. Test admin bearer and cookie sessions, CSRF, read-only/scoped/all-collection/tenant credentials, guessed IDs and reservation orphans before/during/after maintenance. Include login/status after process restart with an unopenable database, live-session continuity across generation replacement and generic fail-closed responses on auth-load failure.
+- **TEST-008**: Fake-clock schedule tests cover bounds, restart, occurrence de-duplication, clock jumps, no missed-window catch-up, growth baseline, backoff suspension, no-benefit cooldown, settings-version conflicts and idempotent POST replay.
+- **TEST-009**: UI tests cover off default, all disabled reasons, keyboard/dialog focus, confirmation text, plain size labels, terminal results, reload/reconnect/logout, no duplicate POST and no non-admin detail leakage.
+- **TEST-010**: Bounded Linux local-filesystem and Linux-container qualification: run a fixture with concurrent periodic graph updates/group commits, crash/restart, two compactions and candidate writes, then validate data/credential/CAS invariants. Run WSL Docker using a named local volume separately from host bind mounts. Record actual filesystem/mount, lock behavior, fsync/rename behavior and interruption limitations. Process-kill tests alone do not prove power-loss safety.
+- **TEST-011**: Update/run `python tests/api_reference.py`; build site with existing scripts and run `python tests/dashboard_tours.py <assembled-site>` after recapture. Connected captures MUST record current dashboard source hashes; do not hand-edit hashes to avoid recapture.
+
+### Acceptance Criteria
+
+| ID | Criterion | Verification | Traces To |
+|----|-----------|--------------|-----------|
+| AC-001 | Fresh/restarted installation has schedule off unless valid durable enabled config exists; one manual or scheduled job at a time; replay is idempotent. | API/fake-clock tests, settings recovery | FR-001, FR-002 |
+| AC-002 | Supported two-hop output retains lineage/global `S`, logical state and allocator high-waters; graph revisions never decrease, stale CAS fails, next write exceeds `S`. | TEST-001/002 manifest/CAS fixtures | FR-003 |
+| AC-003 | Every unsupported matrix row yields a stable actionable refusal with no selection/source changes; completed imports and expired hidden TTL data are detected. | TEST-003 negative fixtures | FR-003, FM-007 |
+| AC-004 | Actual selected restore file is compacted on the second run, not the original CLI path; no queued/disconnected writer crosses freeze; no stale-generation work executes. | TEST-004/005 repeated-run integration | FR-004, NFR-001, FM-001 |
+| AC-005 | At every injected boundary restart reconstructs source before selecting intent, conclusively completes candidate selection or fails closed after intent, and uses candidate after committed selection. Indeterminate publication never permits automatic source admission. Writes acknowledged after activation are never replaced with old source. | TEST-005/006 | FR-007, NFR-002, FM-002, FM-006, FM-013 |
+| AC-006 | Original/recovery/pinned files survive retention, failures and restart; conflicting restore selection is refused. | Retention/race and recovery tests | FR-005, FM-011 |
+| AC-007 | Status/cancel stay responsive without database locks during deliberate blocked engine work; data routes return retryable unavailability; expired/revoked/cross-site sessions stay denied. Fresh admin login/status works after restart with source open failure; auth-load failure never enables open administration. | HTTP tests with barriers and CSRF fixtures | FR-006, FR-008, NFR-003 |
+| AC-008 | Existing credentials authenticate with unchanged scope after activation; tenant/scoped/non-admin callers cannot infer root state through any new method/path. | TEST-007, reserved-as-missing suite | FR-008, FM-008 |
+| AC-009 | Old cursors report history conflict; active webhooks block both manual/scheduled runs; missing acknowledgement disables runs. | Feed/API fixtures | FR-003, FM-009 |
+| AC-010 | Deadline expiry never begins a new selecting intent; already-started selection/recovery stays fenced until resolved. Cancellation/no-benefit after queue shutdown rebuilds a fresh source generation. Transient failures use deterministic cooldown/backoff precedence and suspension. | Fake clock, barriers and I/O faults | FR-002, NFR-003, FM-006 |
+| AC-011 | UI accurately reports file size, retained disk costs, phase, last/next eligibility, results and disabled reasons; no savings or percentage invented. | TEST-009 browser/JS tests | FR-006 |
+| AC-012 | Unsupported filesystems/ownership profiles cannot enable compaction; qualified profile passes lock/crash tests and has recorded limits. | TEST-010 and capability tests | NFR-001, NFR-002, FM-012 |
+| AC-013 | Route inventory, API/site docs and recaptured tours match source; no new endpoint inherits a scoped backup/index privilege. | API inventory, route permission tests, tour/hash checks | FR-008, NFR-004 |
+
+Suggested implementation checks: `cargo test --features server --test directory_store`, `cargo test --features server --test server_ops`, `cargo test --features server --test server_memory_reserved_as_missing`, the new `server_compaction` integration target, and `cargo test --features server --lib server::group_commit`. Also compile/test existing gRPC configurations to prove their unchanged behavior and explicit compaction refusal. Use the repository's existing JS/browser harness; no tests are represented as passed by this plan.
+
+## 8. Security Considerations
+
+- **Data handling**: Recovery artifacts contain full database data and protected admin sidecars. Keep private permissions/ownership; deny symlinks/path traversal and cross-device publication. Expose opaque safe labels, not absolute paths, hashes of secrets, data contents or root graph details.
+- **Input validation**: Strict schemas, bounded JSON/files, safe generated names, UUID idempotency keys, checked arithmetic and expected settings version. No arbitrary cron, command, path, provider secret or cloud key input.
+- **Access control**: Explicit installation administrator only, including sensitive GET/HEAD. Reuse `Need::Admin`, account/session/CSRF checks and reserved-route inventory. Authorization runs before job existence/eligibility checks. An unconfigured unauthenticated router does not qualify.
+- **Secrets**: Existing credential/account stores remain authoritative and unchanged. Preserve revocation/expiry checks across control-plane and generation lifetimes. No credential rebinding, plaintext key persistence or browser/cloud authentication bridge.
+- **Audit**: Sync acceptance, actor ID, settings version, lifecycle transition, cancellation, selection and final outcome with safe job IDs/byte counts/error codes. Audit failure proven before selecting intent aborts through source reconstruction; failure during uncertain selection stays fenced, and failure after commit keeps candidate authority and requires recovery. Never log request tokens, property values or key material.
+- **Ownership**: Namespace locking does not secure an exposed shared directory against hostile local users or older binaries. Enforce private deployment ownership and fail qualification for independent writers; retain existing OS file locks.
+
+## 9. Deployment & Rollback
+
+| Gate | Required evidence / decision |
+|------|------------------------------|
+| GATE-001 Storage preservation | EPIC-001 positive and negative tests pass at implementation HEAD. Any unpreserved state remains unsupported. Ordinary compact/rebind can never be substituted. |
+| GATE-002 Runtime ownership | EPIC-002 proves independent authenticated recovery, and EPIC-003 proves complete admission/drain, source-lock retention and namespace ownership; managed lifecycle only. Unknown owners disable capability. |
+| GATE-003 Durable recovery | EPIC-004 crash matrix passes, including uncertain publication, missing/corrupt marker and writes after candidate activation. Pinning/restore conflict tests pass. |
+| GATE-004 Filesystem | EPIC-007 qualifies the specific local mount/runtime and limits. Azure Files/SMB remains experimental and disabled for this feature; no power-loss claim follows from a successful operational cutover. |
+| GATE-005 Product surface | Auth isolation, docs/API inventory, UI warnings and fresh tours pass. Manual operation is qualified before scheduling is enabled in any test rollout. |
+| GATE-006 Operator enablement | Operator has installed a qualified managed runtime, kept recovery capacity, accepted downtime/history policy and deliberately enabled settings. Neither this PRD nor coding authorization enables production. |
+
+- Roll out code with schedule off and truthful capability refusal. Validate on disposable/local copies first; then allow a separately authorized manual run on a qualified installation, observing budget and retained copies. Automatic scheduling remains an independent opt-in.
+- **Qualification bootstrap**: Define a versioned compiled profile registry, initially empty until evidence passes. The first target profile is `linux-local-ext4-v1`, with local ext4, working file/directory sync and locks, same-filesystem staging, and measured source-size/resident-memory limits. Runtime matches OS, actual mount/filesystem and profile constraints; Docker/WSL names alone never qualify a mount. Only the test harness may inject an unqualified profile through test-only dependency injection in a disposable process/volume; no production environment/CLI/API override exists. EPIC-007 promotes a profile into the compiled registry only with its implementation revision, test matrix and limits recorded in repository qualification documentation. Other local filesystems require their own profile/evidence.
+- **Pre-selection abort**: Before selecting intent, keep source authoritative; join/cancel all work, validate source health, and after any irreversible shutdown construct a fresh source generation before admission. A failed source open stays in recovery; do not create an empty store.
+- **Uncertain selection**: Publication uncertainty stays fenced. Reconcile intent/authority/candidate; do not convert an I/O error into automatic source rollback.
+- **Post-selection failure**: Continue/recover the candidate or remain unavailable. Do not select the original merely because startup or validation later fails; it may lack acknowledged writes. Recovery is retried by restarting the recovery-capable supervisor, not resubmitting compaction.
+- **Code rollback**: Disable schedule and preserve all artifacts. A committed selection, including terminal success, prohibits downgrade to a journal/pin-unaware binary. This release does not implement authority retirement; an offline identity check, journal deletion, marker edit or legacy restore command cannot substitute for it. A future compatible authority-replacement transition requires its own tests and plan.
+- **Data rollback**: Restoring an older copy is a separate explicit data-loss operation, not a failed-job handler. Requires downtime and acknowledging writes that would be discarded. This feature does not expand historical restore.
+- Hosting automation, lease orchestration for multi-host shares and cloud snapshots are separate deployment projects. No platform credentials are collected or cloud resources modified by this implementation.
+
+## 10. Resolved Decisions
+
+| ID | Decision | Rationale |
+|----|----------|-----------|
+| RD-001 | Keep production v5 single-file; use public directory conversion and backup only as temporary staging. | Smallest existing path with demonstrated lineage/global-sequence continuity. |
+| RD-002 | Reject ordinary compact plus credential rebinding. | Rebinding a reset lineage/revision domain can make stale numeric CAS valid again. |
+| RD-003 | Restart a whole engine generation under a lifetime local supervisor; no live `Database` hot swap. | Cached state, published bindings, direct workers and detached work make lock-only swapping unproven. |
+| RD-004 | Freeze/snapshot while source remains open; transform the copy and retain both source/candidate ownership through selection. | Avoids releasing the source's file lock for path-based maintenance calls. |
+| RD-005 | Durable commit-selection journal precedes the legacy startup marker; never fall back after that record. | Deterministic crash authority even between marker operations and before first new write. |
+| RD-006 | Block reads and writes during maintenance; keep authenticated control status alive. | Simpler than stale snapshot serving, dual writers or live replay; honest downtime. |
+| RD-007 | Monotonic graph revision fencing, not exact preservation. | Matches ordinary graph snapshot behavior; explicit CAS re-read warning is necessary. |
+| RD-008 | Strict first-release exclusions for imports/TTL/encryption/advanced formats, webhooks, reserved memory, gRPC and unqualified filesystem/owners. | Avoids expanding the storage format, feed semantics or general transport lifecycle solely to unlock this feature. |
+| RD-009 | Growth and actual before/after bytes determine eligibility/results; never use current graph reclaim estimate. | Existing metric omits graph live bytes and cannot justify destructive maintenance. |
+| RD-010 | Indefinite original/recovery retention initially; no automatic deletion to make space. | Minimal safe retention semantics; disk-pressure refusal is preferable to losing recovery. |
+| RD-011 | Settings/budgets are fixed bounded proposals; schedule defaults off, one occurrence/day and bounded backoff. | Predictable automation without a cron engine or retry storm. |
+| RD-012 | No approval question blocks implementation; unresolved evidence blocks capability instead. | Engineering discretion does not authorize weakening correctness or mutating production. |
+| RD-013 | Preserve database-independent authentication across generation replacement and permit ordinary admin login during recovery. | Source-open failure and session loss on process restart must not strand the dashboard or weaken authentication. |
+| RD-014 | Use explicit selecting/unknown/source-recovery states and a stable authority record independent of latest job status. | A failed filesystem operation can have side effects; cancelled retired queues cannot simply resume; later failures must not erase authority. |
+| RD-015 | Keep compaction refusal separate from ordinary server startup compatibility; test-only profile injection bootstraps qualification. | Unsupported existing installations remain usable unless unresolved authority requires fenced recovery. No production safety override is introduced. |
+
+**Reviewed open decisions (evidence gates, not unanswered product choices)**:
+
+| ID | Question requiring implementation evidence | Deterministic disposition / owner |
+|----|-------------------------------------------|----------------------------------|
+| OPEN-001 | Can every actual owner/queue/transport be fenced and fully drained? | EPIC-003 implementer must enumerate/test all owners; any unaccounted owner returns unsupported. No hot-swap fallback. |
+| OPEN-002 | Does the two-hop image preserve every eligible allocator/settings/index field? | EPIC-001 compares source allocator state, not inferred live maxima. A failing combination is refused; no silent approximation. |
+| OPEN-003 | Can the actual mount satisfy lock, publication and sync semantics within the operational budget? | EPIC-007 qualification determines profile/size limits. Unknown/native-Windows/network profiles stay disabled. |
+| OPEN-004 | Can a specific external consumer tolerate floor `S`? | Installation admin must attest resnapshot capability. Otherwise job cannot run; no hidden cursor reset. |
+
+## 11. Alternatives Considered
+
+| Alternative | Pros | Cons | Decision |
+|-------------|------|------|----------|
+| ALT-001 Browser invokes ordinary compact then rebinds tokens | Small UI change | Revision/lineage reset, stale CAS hazard, no ownership or crash protocol | Rejected |
+| ALT-002 Replace `Option<Database>` while holding its write lock | Few local edits | Does not fence enqueued/detached work, cached identity, shared bindings or external owners | Rejected |
+| ALT-003 Permanent directory-store migration | Native checkpoint machinery | Changes production storage architecture and exceeds request | Rejected |
+| ALT-004 Cloud stop/snapshot/restart from dashboard | Can quiesce managed replicas | Needs provider authority, creates outages and is not portable or authorized | Deferred to separate deployment work |
+| ALT-005 Fully offline manual CLI only | Existing tools, minimal engineering | Does not satisfy dashboard automatic operation/status and does not understand new authority/pins | Fallback only for installations without committed compaction authority; not a post-compaction recovery escape hatch |
+| ALT-006 Supervised generation restart plus frozen-copy conversion | Reuses existing APIs and normal startup; clear authority | Requires admission/lifecycle work and a temporary outage | Selected |
+| ALT-007 Fix import/TTL/encryption/history fidelity in this initiative | Broader source coverage | Broadens storage/consumer semantics and increases irreversible-data risk | Deferred; fail-closed unsupported matrix instead |
+
+## 12. Files
+
+### Files Affected
+
+These are implementation targets, not changes made by this planning phase. Proposed new files are marked **new**.
+
+| ID | Files | Intended effect |
+|----|-------|-----------------|
+| FILE-001 | `src/maintenance/compaction.rs` **new**, `src/maintenance.rs`, `tests/directory_store.rs` | Internal source-mode scanner, canonical preservation report, two-hop validation and negative fixtures; existing public transform APIs remain reused. |
+| FILE-002 | `src/server/lifecycle.rs` **new**, `src/server.rs`, `src/server/group_commit.rs`, `src/bin/vlite-server.rs` | Managed owner, outer admission/control dispatch, generation retirement/rebuild, drain ordering and actual-path continuity. |
+| FILE-010 | `src/server/control.rs` **new**, `src/server/admin.rs`, `src/server/users.rs`, `src/server.rs`, `src/bin/vlite-server.rs`, `tests/server_compaction.rs` **new** | Extract/reuse authoritative authentication/control context before database open; keep login/session/revocation/CSRF policy and existing unmanaged startup behavior. |
+| FILE-003 | `src/server/compaction.rs` **new**, `src/server/admin.rs`, `src/server/ops.rs`, `tests/server_compaction.rs` **new** | Journal/state machine, selector reconciliation, pin set, serialized scheduling/API and recovery tests. |
+| FILE-004 | `src/server/credentials.rs`, `src/server/users.rs`, `src/server/webhooks.rs`, `src/server/reserved.rs`, `tests/server_ops.rs`, `tests/server_memory_reserved_as_missing.rs` | Prefer existing auth/CSRF and subscription/reservation inspection; add only narrow lifecycle accessors if required and explicit permission/regression tests. No credential migration or webhook repair. |
+| FILE-005 | `src/server/observability.rs` | Safe bounded maintenance metrics/status integration; exclude secrets and avoid graph-reclaimability claims. |
+| FILE-006 | `src/dashboard/index.html`, `src/dashboard/console-tools.js`, `src/dashboard/app.js`, `src/dashboard/navigation.js`, `src/dashboard/style.css`, `tests/dashboard_interactions.test.cjs`, `tests/dashboard_e2e.py` | Compaction card, validators/actions, capability reasons, accessible navigation and tests. Existing `admin-tools.js` need not change unless a shared identity helper is necessary. |
+| FILE-007 | `tests/compaction_qualification.py` **new**, `docs/DOCKER-OPERATIONS.md` | Bounded disposable-volume lifecycle/crash qualification and recorded filesystem limits, not cloud automation. |
+| FILE-008 | `docs/API.md`, `docs/CONSOLE-ADMIN.md`, `docs/STORAGE-FEATURES.md`, `README.md`, `site/api.html`, `tests/api_reference.py` | Route inventory, support/limitation tables, administrator guidance and honest feature copy. |
+| FILE-009 | `site/dashboard.html`, `site/features.html`, `site/assets/dashboard/connected-captures.json`, `site/assets/dashboard/current-*.png`, `scripts/capture_connected_dashboard.py`, `tests/dashboard_tours.py` | Actual connected recapture and source hashes following dashboard implementation; update capture recipe only when new controls require it. |
+
+No deploy scripts or unrelated worktree files are part of this plan. No package/dependency upgrade, generated API binding expansion or version/changelog edit is required.
+
+## 13. Simplicity Rationale
+
+- **Scope justification**: EPIC-001 → FR-003; EPIC-002 → FR-008/NFR-003; EPIC-003 → FR-004/NFR-001; EPIC-004 → FR-005/FR-007/NFR-002; EPIC-005 → FR-001/FR-002/FR-008; EPIC-006 → FR-006; EPIC-007 → NFR-002/NFR-003; EPIC-008 → NFR-004. Authentication, ownership, durability and qualification are enabling work that cannot be collapsed into a dashboard button without losing correctness.
+- **Abstractions check**: New abstractions are limited to an internal preservation report, a shared database-independent control/auth context, one managed generation owner/admission ticket, and one compaction coordinator/journal. The auth context reuses existing stores/policies; it exists because recovery status must function when no database can open. No general maintenance plugin, generic DAG/job framework, distributed lease service, cloud adapter or dual-store abstraction.
+- **Configuration check**: Only the table in section 3.5 is user-configurable. The runtime exposes detected capability/qualification, not an unsafe override flag. Time/window/budget meet downtime constraints; size/growth/cooldown suppress waste; history policy records necessary consumer acknowledgement. Retention deletion and cron extensions are deliberately absent.
+- **Could this be simpler?**: Calling `compact` from a dashboard handler or swapping the database under one lock would be shorter, but neither preserves the required revision domain, lifetime ownership or recovery authority. Frozen-copy conversion reuses existing APIs; complete-generation reinitialization reuses normal startup instead of patching every cache in place. Conservative mode refusals avoid expanding storage formats or repairing consumers as part of this feature.
+
+## 14. Implementation Plan
+
+Item status is tracked per row below. Each epic targets at most seven primary source/test files; documentation/recapture is split into bounded batches. Dependencies are mandatory. `ITEM-020` was inserted during review without renumbering existing item identities. Each item must leave tests and capability refusals consistent even if later epics are not implemented. Named verification targets below refer to section 7's concrete fixtures and acceptance criteria; no item may enable production compaction until the complete dependency closure and profile qualification pass.
+
+- **EPIC-001: Qualify eligible single-file preservation** — Depends on none. Traces FR-003. Primary files: `src/maintenance/compaction.rs`, `src/maintenance.rs`, `tests/directory_store.rs`.
+
+| Task | Description | Status | Relevant Files |
+|------|-------------|--------|----------------|
+| ITEM-001 | Depends: none. Add internal persisted-v5 eligibility scanning for retained import markers/noninitial allocator, expired TTL-bearing entries and encryption/unsupported flags, with separate open/health evidence inputs. Return supported/unsupported/unknown; never infer erased provenance or mutate source. Private scanner fixtures stay in module unit tests; public negative behavior goes in integration tests. Verify TEST-003 and AC-003 for every excluded mode. | Done | `src/maintenance/compaction.rs`, `src/maintenance.rs`, `tests/directory_store.rs` |
+| ITEM-002 | Depends: ITEM-001. Build canonical logical/allocator manifests and a two-hop wrapper converting a frozen copy then backing up the directory. Compare lineage, global sequence, record revisions, upward graph fencing, graph/collection fields and allocator high-waters. Reuse public APIs; leave ordinary compact unchanged. Compare actual allocator state, not live maxima; use module unit tests for private manifests. Verify TEST-001 and AC-002. | Done | `src/maintenance/compaction.rs`, `src/maintenance.rs` |
+| ITEM-003 | Depends: ITEM-002. Add public rich fixtures with periodic graph updates, deleted maximum IDs, schema/indexes, attachments/settings/vectors and two successive compactions. Assert exact record behavior separately from graph rebasing: current r below S conflicts; unchanged current r equal to S remains valid; stale fails; refreshed current works; next write exceeds S. Refuse fields not preserved. Verify TEST-001, TEST-002 and AC-002. | Done | `tests/directory_store.rs` |
+
+- **EPIC-002: Bootstrap authenticated control without a database** — Depends on none; may run beside EPIC-001. Traces FR-008, NFR-003. Primary files: `src/server/control.rs`, `src/server/admin.rs`, `src/server/users.rs`, `src/server.rs`, `src/bin/vlite-server.rs`, `tests/server_compaction.rs`.
+
+| Task | Description | Status | Relevant Files |
+|------|-------------|--------|----------------|
+| ITEM-020 | Depends: none. Extract/reuse a single authoritative control/auth context initialized before database open. Keep existing admin login/auth-config/session/logout, CSRF, transport checks, throttling, expiry and revocation without a weaker recovery mode. Preserve live sessions across generation restart; after process restart permit fresh admin login. Source-open failure serves authenticated recovery status; auth-load failure serves only generic health/not-ready. Preserve ordinary unsupported/unmanaged startup behavior when no compaction authority exists. Verify TEST-007 and AC-007/AC-008 with unopenable source, revoked/expired cookies and malformed auth store. | Not Started | `src/server/control.rs`, `src/server/admin.rs`, `src/server/users.rs`, `src/server.rs`, `src/bin/vlite-server.rs`, `tests/server_compaction.rs` |
+
+- **EPIC-003: Establish managed ownership and generation drain** — Depends on EPIC-001 and EPIC-002. Traces FR-004, NFR-001. Primary files: `src/server/lifecycle.rs`, `src/server.rs`, `src/server/group_commit.rs`, `src/bin/vlite-server.rs`, `src/server/ops.rs`, `src/server/admin.rs`, `tests/server_compaction.rs`.
+
+| Task | Description | Status | Relevant Files |
+|------|-------------|--------|----------------|
+| ITEM-004 | Depends: ITEM-001 and ITEM-020. Introduce stock-server `ManagedRuntime`, lifetime namespace lock and identity from `open`'s actual selected path. Use the independent control context. Missing setup/unsupported owner/transport/mount disables compaction without breaking ordinary startup; unresolved authority always requires fenced recovery. Add versioned empty profile registry and test-only injectable profile, with no production override. Verify AC-004/AC-012 and TEST-004 second-owner/prior-restore cases. | Not Started | `src/server/lifecycle.rs`, `src/bin/vlite-server.rs`, `src/server/admin.rs`, `tests/server_compaction.rs` |
+| ITEM-005 | Depends: ITEM-004. Implement admission tickets covering direct/group mutations, read preparation/completion and disconnected work. Add pause/join ordering for ops and group queues outside the database lock; include background rebuild workers. Enumerate and test every direct handle/producer, enqueue/fence race and stale clone. Unknown ownership disables compaction. Verify TEST-004 and AC-004. | Not Started | `src/server/lifecycle.rs`, `src/server.rs`, `src/server/group_commit.rs`, `src/server/ops.rs`, `tests/server_compaction.rs` |
+| ITEM-006 | Depends: ITEM-005. Retire/reconstruct whole generations from preserved runtime config/providers and shared control/auth; never swap a database under live clones. Retain source file lock during snapshot/validation. After irreversible shutdown every preselection exit builds a fresh source generation. Test cancel and no-benefit immediately after group shutdown, ordinary startup/close compatibility, and gRPC/external-publication refusal. Verify TEST-004, TEST-006 and AC-010. | Not Started | `src/server/lifecycle.rs`, `src/bin/vlite-server.rs`, `src/server.rs`, `tests/server_compaction.rs` |
+
+- **EPIC-004: Implement durable transform, selection and recovery** — Depends on EPIC-001 and EPIC-003. Traces FR-003, FR-004, FR-005, FR-007, NFR-002, NFR-003. Primary files: `src/server/compaction.rs`, `src/server/lifecycle.rs`, `src/server/admin.rs`, `src/server/ops.rs`, `src/bin/vlite-server.rs`, `tests/server_compaction.rs`.
+
+| Task | Description | Status | Relevant Files |
+|------|-------------|--------|----------------|
+| ITEM-007 | Depends: ITEM-003 and ITEM-006. Implement bounded journal/config records, stable selection authority independent of latest job, safe names/private permissions/checksums and checked file/rename/directory sync. Persist intent before work. Explicitly classify not-published/committed/unknown outcomes; corrupt state never means idle. Verify TEST-005 effect-then-error injection and AC-005. | Not Started | `src/server/compaction.rs`, `tests/server_compaction.rs` |
+| ITEM-008 | Depends: ITEM-007. Combine runtime/configuration, health, profile and persisted-state eligibility before freeze; unknown evidence refuses. Implement sync/verified recovery with protected sidecars, temporary conversion/pack, memory/disk budgets and full validation. Keep original ownership; enforce no-benefit/deadline/cancel and fresh-source reconstruction. Verify TEST-003, TEST-006, AC-003 and AC-010. | Not Started | `src/server/compaction.rs`, `src/server/lifecycle.rs`, `src/server/ops.rs`, `tests/server_compaction.rs` |
+| ITEM-009 | Depends: ITEM-008. Persist selecting intent, publish stable candidate authority before legacy marker, reconcile before binary open, retain candidate ownership and reconstruct generation. Unknown publication stays fenced; committed selection never falls back. Test marker/source/candidate failures, source drift, authority surviving later failed jobs and legitimate candidate writes on restart without old digest equality. Verify TEST-005, TEST-006 and AC-005. | Not Started | `src/server/compaction.rs`, `src/server/admin.rs`, `src/bin/vlite-server.rs`, `tests/server_compaction.rs` |
+| ITEM-010 | Depends: ITEM-009. Add shared pin-set checks to retention/restore selection. Keep originals/recovery indefinitely; refuse conflicting selection/downgrade with actionable code, not a legacy-tool workaround. Journal cleanup of only unselected job-private artifacts. Test retention races and repeated compaction using current selected source. Verify TEST-005 and AC-006. | Not Started | `src/server/compaction.rs`, `src/server/ops.rs`, `src/server/admin.rs`, `tests/server_compaction.rs` |
+
+- **EPIC-005: Add administrator API and conservative scheduling** — Depends on EPIC-004 passing recovery tests. Traces FR-001, FR-002, FR-008. Primary files: `src/server/compaction.rs`, `src/server.rs`, `src/server/admin.rs`, `src/server/webhooks.rs`, `tests/server_compaction.rs`, `tests/server_ops.rs`, `tests/server_memory_reserved_as_missing.rs`.
+
+| Task | Description | Status | Relevant Files |
+|------|-------------|--------|----------------|
+| ITEM-011 | Depends: ITEM-010 and ITEM-020. Complete webhook-subscription/reservation/external-history refusal predicates before enabling submission. Register five compaction routes with explicit `Need::Admin`, existing CSRF/session protection, strict bodies and pre-lookup authorization. Safe status is independent of database workers; serialize idempotency/settings changes. Verify TEST-007, AC-007, AC-008, AC-009 and permission inventory AC-013. | Not Started | `src/server/compaction.rs`, `src/server.rs`, `src/server/admin.rs`, `src/server/webhooks.rs`, `tests/server_compaction.rs`, `tests/server_memory_reserved_as_missing.rs` |
+| ITEM-012 | Depends: ITEM-011. Persist default-off UTC settings/history acknowledgement, baseline before resumed writes, one occurrence/day, monotonic budget, cooldown/backoff maximum and three-failure suspension. Route manual/schedule through one submission path. No production enablement before qualification. Verify TEST-008, AC-001 and AC-010; prove graph reclaim estimate is never read for eligibility. | Not Started | `src/server/compaction.rs`, `tests/server_compaction.rs`, `tests/server_ops.rs` |
+| ITEM-013 | Depends: ITEM-012. Verify secret-free durable phase audit, unchanged credentials/revocation/expiry, tenant isolation and precise history-floor errors across activation/restart. Verify webhook and unacknowledged external-consumer refusals already gate submission; never repair cursors. Complete TEST-007, AC-008 and AC-009 before UI integration. | Not Started | `src/server/compaction.rs`, `tests/server_ops.rs`, `tests/server_compaction.rs` |
+
+- **EPIC-006: Deliver dashboard compaction controls** — Depends on EPIC-005. Traces FR-006. Primary files: `src/dashboard/index.html`, `src/dashboard/console-tools.js`, `src/dashboard/app.js`, `src/dashboard/navigation.js`, `src/dashboard/style.css`, `tests/dashboard_interactions.test.cjs`, `tests/dashboard_e2e.py`.
+
+| Task | Description | Status | Relevant Files |
+|------|-------------|--------|----------------|
+| ITEM-014 | Depends: ITEM-013. Add admin File compaction card alongside Backup & recovery with off schedule, confirmations, actual file/retained bytes, last/next eligibility, phase/result and disabled reasons. Include downtime/history/CAS, overrun and pinned restore/downgrade warnings. Reuse accessibility/style patterns; no cloud control or RAM/reclaimability confusion. Verify TEST-009 and AC-011. | Not Started | `src/dashboard/index.html`, `src/dashboard/console-tools.js`, `src/dashboard/app.js`, `src/dashboard/navigation.js`, `src/dashboard/style.css` |
+| ITEM-015 | Depends: ITEM-014. Add pure settings/response validators, confirmations/idempotency, bounded polling and reload/logout cleanup. Test keyboard/focus, all warnings, duplicate POST prevention, refused modes, selection-unknown/cancellation states and non-admin detail denial across reconnect. Verify TEST-009 and AC-011. | Not Started | `src/dashboard/console-tools.js`, `tests/dashboard_interactions.test.cjs`, `tests/dashboard_e2e.py` |
+
+- **EPIC-007: Qualify ownership, crash recovery and real filesystem behavior** — Depends on EPIC-004 and EPIC-005; may run independently of UI completion. Traces NFR-001, NFR-002, NFR-003. Primary files: `tests/server_compaction.rs`, `tests/compaction_qualification.py`, `src/server/lifecycle.rs`, `src/server/compaction.rs`, `src/server/observability.rs`, `docs/DOCKER-OPERATIONS.md`.
+
+| Task | Description | Status | Relevant Files |
+|------|-------------|--------|----------------|
+| ITEM-016 | Depends: ITEM-010 and ITEM-013. Complete kill/restart and effect-then-error injection at each persistence boundary, concurrent group commits/readers, ENOSPC/corruption/cancellation and repeated compaction. Add bounded safe phase/outcome metrics. Verify acknowledged data, CAS, auth, pins, uncertain authority and no stale fallback via TEST-004 through TEST-007, AC-004 through AC-010; distinguish process-kill evidence from power loss. | Not Started | `tests/server_compaction.rs`, `src/server/compaction.rs`, `src/server/lifecycle.rs`, `src/server/observability.rs` |
+| ITEM-017 | Depends: ITEM-016. Build disposable local-Linux/WSL-Docker qualification using test-only injected profile. Record actual mount, lock/sync/rename results, maximum source/memory and deadline limits. Promote `linux-local-ext4-v1` into compiled registry only when evidence passes; leave other profiles unavailable. Verify TEST-010 and AC-012; never touch production or equate Docker with qualified storage. | Not Started | `tests/compaction_qualification.py`, `src/server/lifecycle.rs`, `docs/DOCKER-OPERATIONS.md` |
+
+- **EPIC-008: Publish accurate API/operator documentation and recaptured UI evidence** — Depends on EPIC-006 and EPIC-007. Traces NFR-004. Execute two bounded batches rather than one cross-cutting edit, at most seven files/assets per batch; repeat the generated-asset batch as needed for actual changed images.
+
+| Task | Description | Status | Relevant Files |
+|------|-------------|--------|----------------|
+| ITEM-018 | Depends: ITEM-015 and ITEM-017. Document REST/API rows, managed ownership, supported/refused matrix, CAS/history, UTC settings, capacity/deadline limits, uncertain selection and pinned restore/downgrade restriction. Update README/site without transparent/hosted automation claims. Verify TEST-011 API inventory and AC-013; no version bump. | Not Started | `docs/API.md`, `docs/CONSOLE-ADMIN.md`, `docs/STORAGE-FEATURES.md`, `README.md`, `site/api.html`, `site/features.html`, `tests/api_reference.py` |
+| ITEM-019 | Depends: ITEM-018. Recapture affected connected panels from disposable supported server, regenerate source hashes through capture tooling, update tour text/test expectations, and run tests against assembled site. Batch generated assets separately to keep edits bounded. Verify TEST-009, TEST-011 and AC-013; never substitute manual hashes or old screenshots. | Not Started | `site/dashboard.html`, `site/assets/dashboard/connected-captures.json`, `site/assets/dashboard/current-*.png`, `scripts/capture_connected_dashboard.py`, `tests/dashboard_tours.py` |
+
+## 15. Change Log
+
+- 2026-11-13: Initial planning artifact at the pinned 0.7.5 base. No product version or release changelog change.
+
+### Planning review and validation record
+
+- Required deep research completed: one bounded worker-pool report inspected conversion/packing, revision/history semantics, allocator state and unsupported combinations at the pinned base. Report conclusions are represented here as source-grounded constraints, not private operational receipts.
+- Independent local source analysis covered server queues/lifecycle, active selection, credentials/CSRF, scheduling/retention, dashboard ownership and metric semantics. No unrelated ADO repository was queried.
+- One independent architect review requested changes, all incorporated by the author: (1) pre-open auth/login foundation; (2) feature-refusal versus startup-compatibility and test-only qualification bootstrap; (3) mandatory fresh-source reconstruction after shutdown; (4) uncertain-publication fencing; (5) distinct observable eligibility evidence; (6) persistent authority/pins and no unsafe downgrade; (7) monotonic budget/window semantics; (8) deterministic cooldown/backoff; (9) explicit item dependencies, private-test placement and precise CAS assertions. No second reviewer or duplicate storage research was launched.
+- Review outcome: **revised after independent review; ready for gated implementation, not production enablement**. Evidence gates remain unproven until implementation tests pass. No claim is made that the reviewer re-reviewed the final edits.
+- Document validation checks mandatory headings/front matter, unique item/epic IDs, dependency references, required source files/line spans at the pinned SHA, privacy exclusions, whitespace and document-only scope. Product tests and filesystem qualification were not run during planning.

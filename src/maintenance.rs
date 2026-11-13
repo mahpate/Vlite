@@ -782,6 +782,9 @@ pub(crate) fn publish_held(
     Ok((report, held))
 }
 
+#[cfg_attr(not(test), allow(dead_code))]
+pub(crate) mod compaction;
+
 #[cfg(test)]
 mod publication_lock {
     use std::{cell::RefCell, fs::File, fs::TryLockError};

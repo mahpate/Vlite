@@ -404,6 +404,20 @@ impl Graph {
     pub fn schema(&self) -> &GraphSchema {
         &self.schema
     }
+    /// Compaction scanner: whether any stored node or edge carries a deadline,
+    /// including entities that are already due and hidden from reads.
+    pub(crate) fn has_stored_expiry(&self) -> bool {
+        self.nodes.keys().any(|id| self.node_expiry.get(*id).is_some())
+            || self.edges.keys().any(|id| self.edge_expiry.get(*id).is_some())
+    }
+    /// Compaction scanner: whether any temporal edge segments are stored.
+    pub(crate) fn has_temporal_segments(&self) -> bool {
+        !self.segments.is_empty()
+    }
+    /// Compaction scanner: the (label, property) keys of derived indexes.
+    pub(crate) fn property_index_keys(&self) -> impl Iterator<Item = &(String, String)> {
+        self.property_indexes.keys()
+    }
     /// The declared index on `label`.`field`, if any.
     pub(super) fn property_index(&self, label: &str, field: &str) -> Option<&PropertyIndex> {
         self.property_indexes

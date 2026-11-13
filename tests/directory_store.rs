@@ -433,3 +433,79 @@ fn converts_between_file_and_directory() {
         Err(Error::UnsupportedFeature(2))
     ));
 }
+
+/// Compaction two-hop (single file -> directory -> single file): exact
+/// lineage, sequence and record revisions; graph revisions may rise to at
+/// most S, so a stale graph CAS token fails and the next write exceeds S.
+#[test]
+fn two_hop_compaction_preserves_cas_semantics() {
+    let dir = tempdir().unwrap();
+    let source = dir.path().join("source.vlite");
+    let mut db = Database::create(&source, 2).unwrap();
+    fill(&mut db, 1, 4);
+    db.put(2, &[9.0, 9.0], b"again").unwrap();
+    let record_revision = db.revision(2).unwrap().unwrap();
+    db.create_graph("g").unwrap();
+    let stale = {
+        let mut graph = db.graph_mut("g").unwrap();
+        let a = graph.create_node("a", &["L"], &Metadata::new()).unwrap();
+        graph.create_node("b", &[], &Metadata::new()).unwrap();
+        graph.delete_node("b", Expected::Any).unwrap();
+        a.revision
+    };
+    db.put(3, &[3.0, 3.0], b"later").unwrap();
+    let lineage = db.lineage();
+    // Record 3 was the last commit, so its revision is S.
+    let s = db.revision(3).unwrap().unwrap();
+    db.close().unwrap();
+    assert!(stale < s);
+
+    let staging = dir.path().join("staging");
+    let candidate = dir.path().join("restore-1.vlite");
+    maintenance::convert_to_directory(&source, &staging).unwrap();
+    maintenance::backup(&staging, &candidate).unwrap();
+
+    let mut db = Database::open(&candidate).unwrap();
+    assert_eq!(db.lineage(), lineage);
+    assert_eq!(db.revision(2).unwrap(), Some(record_revision));
+    assert!(matches!(
+        db.put_with_metadata_if(
+            2,
+            &[1.0, 1.0],
+            b"",
+            &Metadata::new(),
+            Expected::Revision(record_revision - 1)
+        ),
+        Err(Error::RevisionMismatch { .. })
+    ));
+    let current = db
+        .graph("g")
+        .unwrap()
+        .get_node("a")
+        .unwrap()
+        .output
+        .unwrap()
+        .revision;
+    assert!(current >= stale && current <= s);
+    {
+        let mut graph = db.graph_mut("g").unwrap();
+        if current > stale {
+            assert!(
+                graph
+                    .patch_node("a", &Default::default(), Expected::Revision(stale))
+                    .is_err(),
+                "a stale graph token must fail after compaction"
+            );
+        }
+        let write = graph
+            .patch_node("a", &Default::default(), Expected::Revision(current))
+            .unwrap();
+        assert!(write.revision > s, "the next graph revision exceeds S");
+        // The deleted highest node ID is never reused.
+        let c = graph.create_node("c", &[], &Metadata::new()).unwrap();
+        assert_eq!(c.id, 2);
+    }
+    db.put(4, &[4.0, 4.0], b"new").unwrap();
+    assert!(db.revision(4).unwrap().unwrap() > s);
+    db.close().unwrap();
+}
