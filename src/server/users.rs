@@ -1049,6 +1049,23 @@ impl Accounts {
         Ok(removed.len())
     }
 
+    /// Recovery inventory: identity and authorization of every account,
+    /// never its password hash, ID or sessions (feature-backup-ha ITEM-003).
+    pub(super) fn recovery_inventory(&self) -> Result<Vec<RecoveryAccount>, ApiError> {
+        let users = self.users.lock().map_err(internal)?;
+        Ok(users
+            .iter()
+            .map(|u| RecoveryAccount {
+                username: u.username.clone(),
+                role: u.role,
+                tenant_id: u.tenant_id.clone(),
+                disabled: u.disabled,
+                graphs: u.graphs.clone(),
+                graph_access: u.graph_access,
+            })
+            .collect())
+    }
+
     /// Hashes off the async runtime, at most four at a time.
     async fn hash(&self, password: String) -> Result<String, ApiError> {
         let permit = self
@@ -1064,6 +1081,147 @@ impl Accounts {
         .await
         .map_err(internal)?
     }
+}
+
+/// One account of a recovery bundle. It carries no password hash, account ID,
+/// version or session: a rekey-only restore cannot resurrect a credential.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(super) struct RecoveryAccount {
+    pub username: String,
+    pub role: AccountRole,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tenant_id: Option<String>,
+    pub disabled: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub graphs: Option<Vec<String>>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub graph_access: Option<GraphAccess>,
+}
+
+impl RecoveryAccount {
+    pub(super) fn check(&self) -> Result<(), String> {
+        let name = normalize_username(&self.username).map_err(|e| e.message)?;
+        if name != self.username {
+            return Err("account username is not normalized".into());
+        }
+        match (self.role, self.tenant_id.as_deref()) {
+            (AccountRole::SuperAdmin, Some(_)) => {
+                return Err("a super admin cannot be bound to a tenant".into());
+            }
+            (_, Some(tenant)) if !hex_id(tenant) => {
+                return Err("account tenant_id is invalid".into());
+            }
+            _ => {}
+        }
+        check_graph(
+            self.role,
+            self.tenant_id.as_deref(),
+            self.graphs.as_deref(),
+            self.graph_access,
+        )
+        .map_err(|e| e.message)
+    }
+}
+
+/// A PHC string with random salt and random digest: well-formed, so the
+/// store loads, but no password derives it. Imported accounts are disabled
+/// as well; an administrator re-enables them with a reset password.
+fn unusable_hash() -> std::io::Result<String> {
+    let mut salt = [0u8; 16];
+    let mut hash = [0u8; 32];
+    getrandom::fill(&mut salt).map_err(|_| std::io::Error::other("randomness is unavailable"))?;
+    getrandom::fill(&mut hash).map_err(|_| std::io::Error::other("randomness is unavailable"))?;
+    Ok(Phc {
+        m: ARGON2_M,
+        t: ARGON2_T,
+        p: ARGON2_P,
+        salt: salt.to_vec(),
+        hash,
+    }
+    .encode())
+}
+
+/// Rekey-only account import into a new, isolated admin directory
+/// (feature-backup-ha ITEM-004). Every imported account gets a new ID, an
+/// unusable password, `disabled` and `must_change_password`; the optional
+/// fresh super admin is the only usable sign-in. Refuses an existing store.
+pub(super) fn rekey_import(
+    directory: &FilePath,
+    accounts: &[RecoveryAccount],
+    admin: Option<(&str, &str)>,
+) -> std::io::Result<usize> {
+    let error = |message: &str| std::io::Error::other(message.to_owned());
+    let path = directory.join(FILE);
+    if std::fs::symlink_metadata(&path).is_ok() {
+        return Err(error("the restore admin directory already has users.json"));
+    }
+    if accounts.len() + usize::from(admin.is_some()) > CAPACITY {
+        return Err(error("the recovery bundle has too many accounts"));
+    }
+    let now = now();
+    let mut names = HashSet::new();
+    let mut users = Vec::with_capacity(accounts.len() + 1);
+    for account in accounts {
+        account.check().map_err(|m| error(&m))?;
+        if !names.insert(account.username.clone()) {
+            return Err(error("the recovery bundle repeats a username"));
+        }
+        users.push(Account {
+            id: random_id().map_err(|_| error("randomness is unavailable"))?,
+            username: account.username.clone(),
+            role: account.role,
+            tenant_id: account.tenant_id.clone(),
+            disabled: true,
+            must_change_password: true,
+            password: unusable_hash()?,
+            created_unix_ms: now,
+            updated_unix_ms: now,
+            version: 1,
+            graphs: account.graphs.clone(),
+            graph_access: account.graph_access,
+        });
+    }
+    if let Some((username, password)) = admin {
+        let username = normalize_username(username)
+            .map_err(|_| error("the fresh admin username is not valid"))?;
+        if names.contains(&username) {
+            return Err(error(
+                "the fresh admin username is already used by an imported account",
+            ));
+        }
+        check_password(password, &username)
+            .map_err(|e| std::io::Error::other(format!("fresh admin password: {}", e.message)))?;
+        users.push(Account {
+            id: random_id().map_err(|_| error("randomness is unavailable"))?,
+            username,
+            role: AccountRole::SuperAdmin,
+            tenant_id: None,
+            disabled: false,
+            must_change_password: false,
+            password: hash_password(password)
+                .map_err(|_| error("could not hash the fresh admin password"))?,
+            created_unix_ms: now,
+            updated_unix_ms: now,
+            version: 1,
+            graphs: None,
+            graph_access: None,
+        });
+    }
+    if users.iter().any(|u| !u.valid()) {
+        return Err(error("an imported account is invalid"));
+    }
+    let text = serde_json::to_vec(&StoreRef {
+        schema: SCHEMA,
+        users: &users,
+    })
+    .map_err(std::io::Error::other)?;
+    let mut file = tempfile::NamedTempFile::new_in(directory)?;
+    file.write_all(&text)?;
+    file.as_file().sync_all()?;
+    file.persist_noclobber(&path).map_err(|e| e.error)?;
+    admin::sync_directory(directory).map_err(|e| std::io::Error::other(e.message))?;
+    Ok(users.len())
 }
 
 fn audit_unavailable() -> ApiError {
@@ -2067,5 +2225,97 @@ mod tests {
         assert_eq!(accounts.session_counts(1_100)["0".repeat(32).as_str()], 16);
         let idle = accounts.idle_ms;
         assert!(accounts.session_counts(1_020 + idle).is_empty());
+    }
+
+    #[test]
+    fn rekey_import_disables_imported_accounts_and_adds_only_the_fresh_admin() {
+        let dir = tempfile::tempdir().unwrap();
+        let tenant = "a".repeat(32);
+        let imported = vec![
+            RecoveryAccount {
+                username: "old-admin".into(),
+                role: AccountRole::SuperAdmin,
+                tenant_id: None,
+                disabled: false,
+                graphs: None,
+                graph_access: None,
+            },
+            RecoveryAccount {
+                username: "viewer.one".into(),
+                role: AccountRole::Viewer,
+                tenant_id: Some(tenant),
+                disabled: false,
+                graphs: Some(vec!["g1".into()]),
+                graph_access: Some(GraphAccess::Read),
+            },
+        ];
+        let written = rekey_import(
+            dir.path(),
+            &imported,
+            Some(("restore-admin", "correct horse battery staple")),
+        )
+        .unwrap();
+        assert_eq!(written, 3);
+        let accounts = Accounts::load(dir.path(), &settings()).unwrap();
+        let users = accounts.users.lock().unwrap().clone();
+        for user in users.iter().filter(|u| u.username != "restore-admin") {
+            assert!(
+                user.disabled && user.must_change_password,
+                "{}",
+                user.username
+            );
+            assert!(!verify_password(Some(&user.password), ""));
+        }
+        let fresh = users
+            .iter()
+            .find(|u| u.username == "restore-admin")
+            .unwrap();
+        assert!(!fresh.disabled && fresh.role == AccountRole::SuperAdmin);
+        assert!(verify_password(
+            Some(&fresh.password),
+            "correct horse battery staple"
+        ));
+        assert_eq!(accounts.recovery_inventory().unwrap().len(), 3);
+        // The store exists now: a second import is refused.
+        assert!(rekey_import(dir.path(), &imported, None).is_err());
+    }
+
+    #[test]
+    fn rekey_import_refuses_weak_or_colliding_fresh_admins_and_invalid_accounts() {
+        let account = RecoveryAccount {
+            username: "alice".into(),
+            role: AccountRole::Editor,
+            tenant_id: None,
+            disabled: false,
+            graphs: None,
+            graph_access: None,
+        };
+        for (accounts, admin) in [
+            (
+                vec![account.clone()],
+                Some(("alice", "correct horse battery staple")),
+            ),
+            (vec![account.clone()], Some(("restore-admin", "short"))),
+            (
+                vec![RecoveryAccount {
+                    username: "Not Normalized".into(),
+                    ..account.clone()
+                }],
+                None,
+            ),
+            (
+                vec![RecoveryAccount {
+                    role: AccountRole::SuperAdmin,
+                    tenant_id: Some("b".repeat(32)),
+                    ..account.clone()
+                }],
+                None,
+            ),
+            (vec![account.clone(), account.clone()], None),
+        ] {
+            let dir = tempfile::tempdir().unwrap();
+            assert!(rekey_import(dir.path(), &accounts, admin).is_err());
+            assert!(!dir.path().join(FILE).exists());
+        }
     }
 }

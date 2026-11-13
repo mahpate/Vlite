@@ -55,6 +55,7 @@ mod published;
 #[cfg(all(test, not(feature = "grpc")))]
 mod published_rest;
 mod record_put;
+mod recovery_bundle;
 mod reserved;
 #[cfg(feature = "otel")]
 pub mod telemetry;

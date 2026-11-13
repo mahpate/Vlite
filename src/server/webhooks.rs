@@ -114,6 +114,11 @@ impl Dispatcher {
             .lock()
             .map_or(true, |state| !state.subscriptions.is_empty())
     }
+    /// Subscription count for a recovery bundle; URLs and signing secrets are
+    /// never captured (feature-backup-ha ITEM-003).
+    pub(super) fn subscription_count(&self) -> Result<usize, ApiError> {
+        Ok(self.state.lock().map_err(internal)?.subscriptions.len())
+    }
     pub(super) fn shutdown(&self) {
         self.stopping.store(true, Ordering::Release);
         if let Ok(mut worker) = self.worker.lock()

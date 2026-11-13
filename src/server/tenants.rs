@@ -77,6 +77,33 @@ pub(super) struct Store {
     path: PathBuf,
     tenants: Mutex<Vec<Tenant>>,
 }
+/// Recovery copy of the tenant store (feature-backup-ha ITEM-003/004).
+pub(super) fn recovery_inventory(store: &Store) -> Result<Vec<Tenant>, ApiError> {
+    Ok(store.tenants.lock().map_err(internal)?.clone())
+}
+/// Writes a recovered tenant store into a new, empty admin directory; the
+/// result must load with `Store::load`. Refuses an existing store.
+pub(super) fn recovery_import(
+    directory: &std::path::Path,
+    tenants: &[Tenant],
+) -> std::io::Result<()> {
+    let path = directory.join("tenants.json");
+    if std::fs::symlink_metadata(&path).is_ok() {
+        return Err(std::io::Error::other(
+            "the restore admin directory already has tenants.json",
+        ));
+    }
+    let bytes = serde_json::to_vec(tenants).map_err(std::io::Error::other)?;
+    let mut file = tempfile::NamedTempFile::new_in(directory)?;
+    file.write_all(&bytes)?;
+    file.as_file().sync_all()?;
+    file.persist_noclobber(&path).map_err(|e| e.error)?;
+    if let Err(error) = Store::load(directory) {
+        let _ = std::fs::remove_file(&path);
+        return Err(error);
+    }
+    super::admin::sync_directory(directory).map_err(|e| std::io::Error::other(e.message))
+}
 impl Store {
     pub fn load(directory: &std::path::Path) -> std::io::Result<Self> {
         let path = directory.join("tenants.json");

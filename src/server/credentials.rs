@@ -441,6 +441,14 @@ impl Store {
         })
     }
 
+    /// Recovery inventory (feature-backup-ha ITEM-003): the public view of
+    /// every credential, never its secret hash. A restore reports these for
+    /// re-issue and never recreates them (rekey-only).
+    pub(super) fn recovery_inventory(&self, now: u64) -> Result<Vec<Value>, ApiError> {
+        let entries = self.entries.lock().map_err(internal)?;
+        Ok(entries.iter().map(|e| e.view(now)).collect())
+    }
+
     /// Constant-time verification. Unknown IDs still hash and compare.
     pub(super) fn authenticate(&self, token: &str, now: u64) -> Result<Arc<Grant>, ApiError> {
         let rest = token.strip_prefix(TOKEN_PREFIX).ok_or_else(unauthorized)?;
