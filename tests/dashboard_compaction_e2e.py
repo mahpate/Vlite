@@ -84,6 +84,9 @@ def open_card(page, server, token=TOKEN):
     page.goto(server.base + "/dashboard")
     sign_in_with_token(page, token)
     expect(control(page, "#admin-compaction")).to_be_visible()
+    if token == TOKEN:
+        expect(page.locator('#admin-compaction [data-admin-availability]')).to_have_text(
+            "Supported by this server. The status below says whether compaction can run now.")
 
 
 def status(page):

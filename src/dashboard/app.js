@@ -160,7 +160,9 @@
       const name = element.dataset.adminAvailability;
       element.textContent = !connected || !capabilities ? "Sign in to use this."
         : capabilities.role !== "admin" ? "Needs a super admin. Your current sign-in cannot administer the server."
-          : feature(name) ? "Available. Review each confirmation before changing anything."
+          : feature(name) ? (name === "compaction"
+            ? "Supported by this server. The status below says whether compaction can run now."
+            : "Available. Review each confirmation before changing anything.")
             : `Not available on this server. ${requirements[name] || "Use a server version that reports this capability."}`;
     });
     gateVectorControls();
