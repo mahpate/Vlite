@@ -75,6 +75,7 @@ async fn snapshot(service: Service, role: admin::Role) -> Result<Value, ApiError
     let format_version = service.format_version;
     let snapshot_reads = service.snapshot_reads;
     let group_stats = service.group_commit.as_ref().map(|group| group.stats());
+    let compaction = service.admin.compaction.get().map(|c| c.metrics());
     let scope = service.scope(role.clone());
     service
         .run_read(move |db| {
@@ -174,6 +175,9 @@ async fn snapshot(service: Service, role: admin::Role) -> Result<Value, ApiError
                 }
             }
             if let (Value::Object(target), Value::Object(extra)) = (&mut value, ops) {
+                target.extend(extra);
+            }
+            if let (Value::Object(target), Some(extra)) = (&mut value, compaction) {
                 target.extend(extra);
             }
             Ok(value)

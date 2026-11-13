@@ -545,6 +545,24 @@ fn manual_compaction_preserves_data_cas_ids_and_lineage_and_repeats() {
         "{status}"
     );
     assert_eq!(status["recovery"]["retained_copies"], 2);
+    // Bounded, secret-free metrics: outcome counters and last sizes only.
+    let metrics = server.call("GET", "/metrics", Value::Null);
+    assert_eq!(metrics.status, 200, "{}", metrics.body);
+    let m = &metrics.body;
+    assert_eq!(m["compaction_jobs_succeeded_total"], 2, "{m}");
+    assert_eq!(m["compaction_jobs_failed_total"], 0, "{m}");
+    assert_eq!(m["compaction_last_succeeded"], 1, "{m}");
+    assert_eq!(m["compaction_schedule_enabled"], 0, "{m}");
+    assert_eq!(
+        m["compaction_last_before_bytes"], second["before_bytes"],
+        "{m}"
+    );
+    assert_eq!(
+        m["compaction_last_after_bytes"], second["after_bytes"],
+        "{m}"
+    );
+    let text = m.to_string();
+    assert!(!text.contains(&second_candidate) && !text.contains(second["id"].as_str().unwrap()));
     drop(server);
 
     // The restart opens the selected file, never the CLI source.
@@ -1028,7 +1046,6 @@ fn schedule_runs_once_per_window_after_measured_growth() {
     assert_eq!(status["last_job"]["id"], job["id"]);
 }
 
-
 #[test]
 fn concurrent_writers_sessions_pins_refusals_and_audit() {
     let f = Fixture::new();
@@ -1088,7 +1105,10 @@ fn concurrent_writers_sessions_pins_refusals_and_audit() {
         (job, refused)
     });
     assert_eq!(job["outcome"], "succeeded", "{job}");
-    assert!(refused > 0, "writes during maintenance are refused, not queued");
+    assert!(
+        refused > 0,
+        "writes during maintenance are refused, not queued"
+    );
     let acked = acked.into_inner().unwrap();
     assert!(acked.len() > 3, "writers made progress: {}", acked.len());
     for id in &acked {
@@ -1133,7 +1153,11 @@ fn concurrent_writers_sessions_pins_refusals_and_audit() {
 
     // The audit log records the job without any secret.
     let audit = std::fs::read_to_string(f.admin().join("audit.jsonl")).unwrap();
-    for event in ["compaction_requested", "compaction_accepted", "compaction_finished"] {
+    for event in [
+        "compaction_requested",
+        "compaction_accepted",
+        "compaction_finished",
+    ] {
         assert!(audit.contains(event), "{event} missing");
     }
     for secret in [TOKEN, READ, PASSWORD, kept.as_str()] {
@@ -1162,7 +1186,6 @@ fn concurrent_writers_sessions_pins_refusals_and_audit() {
     assert_ne!(reply.status, 202, "{}", reply.body);
     assert_eq!(reply.body["error"]["code"], "webhook_subscriptions_present");
 }
-
 
 #[test]
 fn missing_selected_candidate_serves_authenticated_recovery_and_bad_auth_fails_closed() {
@@ -1217,5 +1240,8 @@ fn missing_selected_candidate_serves_authenticated_recovery_and_bad_auth_fails_c
     // A malformed account store fails closed: the server does not start.
     std::fs::write(f.admin().join("users.json"), b"{not json").unwrap();
     let started = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| f.start("")));
-    assert!(started.is_err(), "server must not start with a malformed auth store");
+    assert!(
+        started.is_err(),
+        "server must not start with a malformed auth store"
+    );
 }

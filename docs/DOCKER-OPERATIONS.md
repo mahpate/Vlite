@@ -302,6 +302,69 @@ a copy; selecting it takes effect on the next startup rather than replacing a
 live database. See [the administrative API reference](CONSOLE-ADMIN.md) for
 backup and restore details.
 
+## File compaction
+
+The server can compact its database file while it runs. Compaction is
+experimental and off by default: nothing runs until an administrator presses
+**Compact now** or turns on the daily window in the dashboard
+(**Administration → Backup & recovery → File compaction**). Routes, limits
+and reason codes are in [API.md](API.md#file-compaction-experimental-off-by-default).
+
+### Where it is qualified
+
+Compaction is enabled only when all of these are true; otherwise the card
+and `GET /v1/admin/compaction` give the reason and nothing starts:
+
+- the container runs on Linux and the database file and `VLITE_ADMIN_DIR`
+  are on the same local **ext4** filesystem;
+- the server uses durable commits, an admin directory, and no gRPC listener;
+- the file is a current-format, unencrypted single file of at most 1 GiB,
+  with at least four times its size plus 10% (at least 64 MiB) free.
+
+With the default `compose.yaml`, the `api-data` and `api-admin-data` named
+volumes are directories under the Docker data root, so they qualify when that
+root is ext4 (`docker info --format '{{.DockerRootDir}}'`, then
+`df -T <that directory>`). XFS, btrfs, overlay and bind mounts from other
+filesystems, NFS, SMB/Azure Files, and Docker Desktop or native Windows and
+macOS hosts are **not** qualified and stay disabled.
+
+### Qualification evidence
+
+The qualification harness (`tests/compaction_qualification.py`) runs the
+release `vlite-server` in a Linux container on an ext4 Docker volume. It
+measures the filesystem, checks the refusal on an unqualified mount, runs a
+scheduled and a manual compaction, and kills the server during a run. The
+run recorded for this feature (Linux 6.18 kernel, ext4 volume, process kills
+with `SIGKILL`) measured:
+
+| Check | Result |
+| --- | --- |
+| Filesystem probe | exclusive lock, 8 MiB file `fsync` about 20 ms, atomic rename with directory `fsync`, admin directory on the same device |
+| Overlay root filesystem | refused with `unqualified_filesystem` (409) |
+| Scheduled run after 73.6 MB growth | 160.5 MB to 6.7 MB, next run after the 24 h cooldown |
+| Manual run on a 1.02 GB file under concurrent writes | 8.6 seconds in total, to 7.2 MB, peak RSS 114 MiB; 164 writes were refused with `503`, reads were refused for at most 8.1 seconds, and the last acknowledged write of each of 3,836 written records was present afterward |
+| Kill while freezing | the active file did not change, the job was recorded as `interrupted`, and the next run completed |
+| Kill after the new file was selected | the restarted server opened the compacted file and recorded the job as succeeded |
+
+Process kills do not prove behavior across power loss or kernel crashes.
+Run the harness on your own host before you depend on compaction there.
+
+### Running it safely
+
+- Take or confirm a backup first. From the moment a job starts quiescing until
+  it ends, reads, writes and admin routes other than compaction answer `503`
+  `maintenance_in_progress`. The measured 1 GB run paused for about 8
+  seconds; the time grows with the live data and the disk speed.
+- Old change history is dropped. Clients that resume a change feed must take
+  a new snapshot, and earlier ETags or graph revisions stop matching.
+- The original file is kept in the admin directory as a recovery copy and is
+  counted under *Retained recovery copies*. Delete old copies only after you
+  have checked the new file.
+- To go back, stop the server, then restore a backup or a recovery copy using
+  the normal restore procedure. Do not swap files in the volume by hand while
+  a compaction selection is pending; the server pins its startup file until
+  the job is resolved.
+
 ## Release and image verification
 
 The release workflow builds and tests the runtime, API, and dashboard targets.

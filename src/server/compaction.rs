@@ -29,7 +29,7 @@ use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
 use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicBool, AtomicU8, AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU8, AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard, RwLock};
 use std::time::Duration;
 use tokio::sync::Notify;
@@ -448,7 +448,12 @@ pub struct Coordinator {
     control: Arc<AdminState>,
     options: ServerOptions,
     durability: Mutex<Option<Durability>>,
+    /// Jobs finished by this process, indexed like `OUTCOMES`.
+    outcomes: [AtomicU64; 4],
 }
+
+/// Bounded outcome labels for the `/metrics` counters.
+const OUTCOMES: [&str; 4] = ["succeeded", "failed", "cancelled", "skipped"];
 
 impl Coordinator {
     fn snapshot(&self) -> Persisted {
@@ -465,7 +470,16 @@ impl Coordinator {
             .state
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let running = state.job.as_ref().map(|job| job.id.clone());
         change(&mut state);
+        if let (Some(id), None, Some(last)) = (running, &state.job, state.history.first())
+            && last.id == id
+            && let Some(index) = OUTCOMES
+                .iter()
+                .position(|o| Some(*o) == last.outcome.as_deref())
+        {
+            self.outcomes[index].fetch_add(1, Ordering::Relaxed);
+        }
         let mut copy = state.clone();
         let result = store_state(&self.work, &mut copy);
         state.epoch = copy.epoch;
@@ -479,6 +493,50 @@ impl Coordinator {
                 job.updated_unix_ms = now();
             }
         })
+    }
+
+    /// Secret-free `/metrics` fields for administrators: outcome counters for
+    /// this process, schedule state and the last finished job's sizes. No
+    /// file names, job IDs or error text.
+    pub(super) fn metrics(&self) -> serde_json::Map<String, Value> {
+        let state = self.snapshot();
+        let last = state.history.first();
+        let mut out = serde_json::Map::new();
+        for (name, counter) in OUTCOMES.iter().zip(&self.outcomes) {
+            out.insert(
+                format!("compaction_jobs_{name}_total"),
+                json!(counter.load(Ordering::Relaxed)),
+            );
+        }
+        out.insert(
+            "compaction_schedule_enabled".into(),
+            json!(u8::from(state.settings.enabled)),
+        );
+        out.insert(
+            "compaction_schedule_suspended".into(),
+            json!(u8::from(state.suspended)),
+        );
+        out.insert(
+            "compaction_scheduled_failures".into(),
+            json!(state.failures),
+        );
+        out.insert(
+            "compaction_last_finished_unix_seconds".into(),
+            json!(last.and_then(|j| j.finished_unix_ms).map(|ms| ms / 1000)),
+        );
+        out.insert(
+            "compaction_last_succeeded".into(),
+            json!(last.map(|j| u8::from(j.outcome.as_deref() == Some("succeeded")))),
+        );
+        out.insert(
+            "compaction_last_before_bytes".into(),
+            json!(last.and_then(|j| j.before_bytes)),
+        );
+        out.insert(
+            "compaction_last_after_bytes".into(),
+            json!(last.and_then(|j| j.after_bytes)),
+        );
+        out
     }
 
     fn current(&self) -> Option<(Service, PathBuf)> {
@@ -852,6 +910,7 @@ impl Managed {
             control: control.clone(),
             options: options.clone(),
             durability: Mutex::new(None),
+            outcomes: Default::default(),
         });
         if let Some(code) = recovery {
             coordinator.fence_recovery(code);
