@@ -659,6 +659,112 @@ timestamps answers 409 `timestamps_unavailable` (restore by `sequence`
 instead). A restore never replaces the active database; select it for the next
 startup through the existing admin selection route.
 
+### File compaction (experimental, off by default)
+
+A single-file database keeps old pages after updates and deletes, so the file
+grows. File compaction writes a compact copy and switches the server to it.
+These routes need a super administrator (admin token or `super_admin`
+account); read-only and scoped credentials get 403. Dashboard calls need the
+usual same-origin and CSRF headers.
+
+In the dashboard, the **File compaction** card under **Administration →
+Backup & recovery** shows the file size, plain reasons when compaction is
+unavailable, the current phase (announced to screen readers; there is no
+invented progress percentage), **Cancel** while cancelling is still safe and
+the bytes before and after the last run. **Compact now** asks you to confirm
+the pause and the dropped history. **Enable automatic compaction** is off by
+default; the start time and window are UTC, and each setting has a label,
+helper text and an inline range error. Saving sends the settings version, so
+two administrators cannot silently overwrite each other.
+
+| Route | Purpose |
+| --- | --- |
+| `GET /v1/admin/compaction` | Status: `capability`, `available`, plain `reasons` with codes, file size, `settings` and `settings_version`, the schedule, the running and last job and retained recovery copies. Never starts work. |
+| `PUT /v1/admin/compaction/config` | Save settings with `expected_version` (compare-and-set). |
+| `POST /v1/admin/compaction/jobs` | Compact now: `expected_version`, `acknowledge_downtime: true`, `acknowledge_history: true` and a UUID `idempotency_key`. Answers 202 `{job, replayed}`. |
+| `GET /v1/admin/compaction/jobs/{id}` | One job: `phase`, `outcome`, `code`, `selection`, `before_bytes`, `after_bytes`, `saved_bytes`. There is no progress percentage. |
+| `POST /v1/admin/compaction/jobs/{id}/cancel` | Cancel before the switch; the server keeps the original file. |
+
+**Where it runs.** Compaction needs the managed `vlite-server` runtime:
+`VLITE_ADMIN_DIR` set, a persisted database (durability other than `none`)
+and no gRPC listener. Other servers report `capability: false` with
+`managed_runtime_required`. The only qualified profile is
+`linux-local-ext4-v1`: Linux, with the database file and admin directory on
+the same local ext4 filesystem, and sources up to 1 GiB. Everything else is
+refused with a reason code rather than attempted:
+
+* Other filesystems (overlay, 9p, SMB/Azure Files, NFS) and native Windows or
+  macOS give `unqualified_filesystem`.
+* Open (no-token) mode gives `authentication_required`.
+* Encrypted files give `encrypted_compaction_unqualified`.
+* Files older than format v5 give `unsupported_source`.
+* Files over 1 GiB give `source_too_large`.
+* Too little free space (about four times the file) gives
+  `insufficient_space`.
+* Memory bindings, webhook subscriptions and a running import give their own
+  `*_present` or `import_state_unsupported` reasons.
+
+**What happens.** A job passes through `preflight`, `quiescing`, `freezing`,
+`building`, `validating`, `selecting` and `reopening`. Preflight leaves the
+server running. From `quiescing` until the job ends, new reads and writes
+answer 503 `maintenance_in_progress` with `Retry-After: 5`, and `/ready` is
+not ready; requests already admitted finish first. `/health`, sign-in,
+`/v1/capabilities`, the dashboard and the compaction routes keep working.
+A 503 is retryable, but check a write whose outcome you did not see before
+you send it again.
+
+The original file is never changed, and it is kept as a recovery copy.
+Compaction cannot start while a restore selection for the next startup is
+pending (`restore_selection_pending`). While a job runs, restore selection
+answers 409 `compaction_busy`.
+
+If a job is interrupted after its selection was written, restart recovery
+finishes it. Until then the server serves only authenticated status
+(`recovery_required`), and it never falls back to an older file once new
+writes may exist. While a committed compaction selection pins the startup
+file, a different restore selection answers 409
+`compaction_selection_pinned`.
+
+**What is kept.** Records, payloads, graphs, credentials, accounts, the
+database lineage, the global commit sequence and ID allocation high-water
+marks are kept; IDs are never reused. Record ETags and graph revisions can
+advance to the compaction sequence S, so an `If-Match` or graph
+`expected_revision` taken before compaction fails with 412 or 409 rather than
+overwriting newer data. Read again and retry; new revisions are always greater
+than S. Change history from before compaction is not kept: change-feed cursors
+taken earlier answer `cursor_compacted`, which is why both acknowledgements
+are required.
+
+**Automatic compaction.** Automatic compaction is off by default. Times are UTC.
+Enabling needs `history_policy: "resnapshot_allowed"` with
+`acknowledge_history: true`. A scheduled run starts only inside the daily
+window, when enough of the window remains for `max_run_seconds`, after the
+cooldown, and when the file has grown by both `min_growth_bytes` and
+`min_growth_percent` above the size measured after the last run (the first
+evaluation records that baseline). Growth is measured in file bytes, not
+estimated from free pages. Defaults and bounds:
+
+| Setting | Default | Bounds |
+| --- | --- | --- |
+| `daily_start_utc` | `02:00` | `HH:MM`, UTC |
+| `window_minutes` | 30 | 5–120 |
+| `max_run_seconds` | 900 | 60–3600 and at least 60 s shorter than the window |
+| `min_file_bytes` | 256 MiB | ≥ 64 MiB, ≤ `max_source_bytes` |
+| `min_growth_bytes` | 128 MiB | ≥ 64 MiB, ≤ `max_source_bytes` |
+| `min_growth_percent` | 25 | 10–200 |
+| `cooldown_hours` | 168 | 24–720 |
+| `max_source_bytes` | 1 GiB | ≥ 64 MiB, ≤ the profile limit (1 GiB) |
+
+Errors: 409 `settings_version_conflict`, `history_ack_required`,
+`idempotency_key_reused`, `compaction_busy`, `job_finished`,
+`selection_in_progress`, `selection_committed`, `selection_outcome_unknown` or
+an unavailability reason. 422 `invalid_settings`, `invalid_input` or
+`acknowledgement_required`. 404 `not_found`. 503 `recovery_required`. Settings
+changes and job starts and cancellations are audited. To go back to the
+original file, or to an earlier VLite release, restore from a backup or
+recovery copy while the server is stopped. The restore guide in
+[DOCKER-OPERATIONS.md](DOCKER-OPERATIONS.md#file-compaction) has the steps.
+
 `POST /v1/collections/{collection}/index/disk-ann` builds the collection's
 rebuildable sidecar under `VLITE_ADMIN_DIR`; `POST .../search/disk-ann` requires
 a fresh sidecar: with none built it answers 409 `disk_ann_not_built`, and after

@@ -415,6 +415,31 @@ when the matching records sit together in ID order, and a filter whose matches
 are spread over every block runs at the speed of no index. Measured gains are
 in [the supplemental results](../benchmarks/RESULTS.md#supplemental-070-measurements-november-4-2026-utc).
 
+## Server file compaction
+
+A single-file database keeps old pages after updates and deletes until it is
+compacted to a new file. Offline, `vlite-maintain compact` writes that new
+file. The managed `vlite-server` can also do it while it runs, from the
+dashboard (**Administration → Backup & recovery → File compaction**) or the
+admin API, now or on an opt-in daily UTC schedule.
+
+The server makes a frozen copy of the database, builds and validates a compact
+file from it, then restarts its whole storage generation on the new file
+during a short pause. The live file is never changed in place, and the
+original is kept as a recovery copy. Records, graphs, credentials, the
+lineage, the global commit sequence and ID high-water marks are kept. Record
+ETags and graph revisions can advance, so earlier `If-Match` and
+`expected_revision` values fail instead of overwriting data. Change history
+from before compaction is dropped, so the server requires explicit consent
+first.
+
+The feature is experimental and off unless started or enabled. It is
+qualified only for Linux with the database and admin directory on one local
+ext4 filesystem, for files up to 1 GiB. SMB/Azure Files, NFS, overlay and
+native Windows or macOS stay disabled with a reason. See
+[API.md](API.md#file-compaction-experimental-off-by-default) for routes and
+limits.
+
 ## Limitations
 
 - A passphrase is only as strong as its entropy; tune `KdfParams` for your

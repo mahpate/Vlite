@@ -211,7 +211,7 @@ are on the [releases page](https://github.com/mahpate/Vlite/releases).
 - One process writes a file at a time. Read-only handles can share it.
 - HNSW is approximate and supports L2 and cosine only.
 - Replicas are file-shipped. There is no networked replication.
-- Deleted records use disk space until you compact to a new file.
+- Deleted records use disk space until compaction (offline, or experimental in the dashboard).
 - Graphs: expiry and local algorithms are Rust-only, there are no
   point-in-time reads, query text is read-only, and gRPC has no graph service.
   Traversal stops at 4 hops and 10,000 visited nodes.

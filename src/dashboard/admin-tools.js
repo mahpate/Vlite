@@ -305,7 +305,7 @@
     idempotency_key_reused: "This start request was already used with different values. Refresh the status and start again.",
     acknowledgement_required: "Tick both statements before starting, or consent to dropping change history before turning on automatic compaction.",
     invalid_settings: "The server rejected these settings. Check the limits shown next to each field.",
-    maintenance_in_progress: "The server is briefly paused while it switches database files. Wait and refresh.",
+    maintenance_in_progress: "Reads and writes are paused while compaction runs. Wait and refresh.",
     managed_runtime_required: "Compaction needs the managed vlite-server runtime with an admin directory (VLITE_ADMIN_DIR), a durable single-file database and no gRPC listener.",
     invalid_input: "The server rejected the input; nothing was changed.",
     invalid_query: "The server rejected the export parameters; nothing was exported.",

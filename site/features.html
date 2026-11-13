@@ -185,7 +185,7 @@
         <div class="table-scroll"><table><caption>Maintenance and operational visibility</caption><thead><tr><th scope="col">Feature</th><th scope="col">Support and requirements</th></tr></thead><tbody>
           <tr><th scope="row">Inspect and verify</th><td>Offline file, header and frame validation, detailed reports and keyed operations on encrypted files.</td></tr>
           <tr><th scope="row">Backup and restore</th><td>Validated byte-preserving copies, backup drills, optional schedules and retention, and restart-selected server restore.</td></tr>
-          <tr><th scope="row">Compaction and format upgrade</th><td>Validated copy-out maintenance; original files are never replaced in place.</td></tr>
+          <tr><th scope="row">Compaction and format upgrade</th><td>Validated copy-out, never in place; opt-in experimental dashboard compaction (Linux ext4).</td></tr>
           <tr><th scope="row">Interrupted-write recovery</th><td>Explicit repair of an incomplete tail; complete but corrupt data fails closed.</td></tr>
           <tr><th scope="row">Point-in-time restore</th><td>Sequence-targeted restore; timestamp targets need commit timestamps. Restores publish a new lineage.</td></tr>
           <tr><th scope="row">Change feed</th><td>Lineage and sequence cursors, whole-commit batches and explicit cursor invalidation after history changes. Covers vector and graph commits. Requires format 4 or 5.</td></tr>

@@ -80,9 +80,7 @@ Super admins work in **Administration**. Its **Users & access** tab holds:
 
 Select `graph_read` / `graph_write`; **Graphs** requires 1–64 distinct names
 matching `^[a-z][a-z0-9_-]{0,62}$` (28 characters within tenants), or `*` alone.
-For `mahpate`, copy its tenant ID from **Tenants**; enter graph `pool`.
 Graph-only keys send `collections: ["*"]` without vector permissions.
-`POST /v1/admin/credentials` already accepts this `graphs` array.
 Check `GET /v1/capabilities` → `scope` with the key.
 Listing and rotation show graph scope; rotation preserves permissions.
 
@@ -96,6 +94,11 @@ Listing and rotation show graph scope; rotation preserves permissions.
   stage a restored copy and select it for the next restart. Read the scheduled
   backup policy before editing it; runtime changes do not rewrite environment
   settings. No action replaces the live file.
+- **File compaction** (experimental, local Linux ext4): shows status,
+  plain reasons, safe **Cancel** and before/after bytes.
+  **Compact now** pauses reads and writes (503), dropping older history.
+  Automatic runs are off by default (UTC window). See
+  [API.md](API.md#file-compaction-experimental-off-by-default).
 - **Automation:** read or update the automatic index maintenance policy, or run
   one tick. Changes last until restart. Per-collection index work stays in
   **Collections → Index**.
@@ -124,7 +127,7 @@ active graph is ready and whether pressure recommends a rebuild. The graph can
 stay ready while a replacement builds. The optional `rebuild.phase` is
 `building`, `cancelling`, `ready_to_publish` (finished, waiting for a poll) or
 `discard_pending` (terminal, waiting for a poll); Rust exposes it as
-`HnswRebuildProgress.phase`. Observing never publishes. Writes never rebuild
+`HnswRebuildProgress.phase`. Writes never rebuild
 synchronously, and ready-only search never falls back to exact search.
 
 Automatic server maintenance can retry rebuilds that end in catch-up overflow
@@ -218,8 +221,7 @@ Windows host measured zero-delay grouping at 12571–15617 writes/s versus
 1926–2910 writes/s with independent syncs at concurrency 16 (5.4–6.5x); grouped
 p99 was 1.52–1.65 ms versus 5.93–16.43 ms. This is a small, noisy in-process
 workload, not a production SLO. Sequential zero-delay throughput was
-6–8% lower; an explicit 2 ms window was much slower sequentially because of
-host timer granularity. Tune against real arrivals and storage.
+6–8% lower. Tune against real arrivals and storage.
 
 ### Exact-search read snapshots
 

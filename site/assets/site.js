@@ -115,6 +115,7 @@
         ["current-credentials.png", "API keys: issue limited access, rotate secrets and inspect audit history."],
         ["current-tenants.png", "Tenants: create isolated namespaces, set vector limits and see each tenant's state and usage."],
         ["current-backups.png", "Backups: inspect a consistent snapshot and available restore controls."],
+        ["current-compaction.png", "File compaction: see plain reasons when it is unavailable, compact now, or opt in to a UTC schedule."],
         ["current-replication.png", "Replication: export a bounded log segment for a separately managed replica."],
         ["current-automation.png", "Automation: inspect and configure scheduled index maintenance."],
         ["current-webhooks.png", "Webhooks: manage change notifications and inspect delivery status."],

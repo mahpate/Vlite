@@ -543,6 +543,10 @@ def capture(output):
             show("#list-backups").click()
             expect(page.locator("#backup-name option")).to_have_count(1)
             save("current-backups.png")
+            show("#compaction-refresh").click()
+            expect(page.locator("#compaction-status")).not_to_have_text("Compaction status not loaded.")
+            expect(page.locator("#compaction-enabled")).not_to_be_checked()
+            save("current-compaction.png", "#admin-compaction")
             show("#cred-list").click()
             expect(page.locator("#cred-result")).to_contain_text("credential slots used")
             tenant = api("/v1/admin/tenants", {"name": "mahpate"}, "POST")["tenant"]["id"]

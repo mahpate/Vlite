@@ -32,7 +32,7 @@ def check(root):
         "current-key-value.png", "current-memory.png",
         "current-graph.png", "current-graph-edit.png", "current-observability.png", "current-feed.png", "current-administration.png",
         "current-users.png", "current-credentials.png", "current-tenants.png",
-        "current-backups.png", "current-replication.png", "current-automation.png",
+        "current-backups.png", "current-compaction.png", "current-replication.png", "current-automation.png",
         "current-webhooks.png", "current-tls.png", "current-developer.png",
         "current-preferences.png",
     )

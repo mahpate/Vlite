@@ -473,6 +473,72 @@ async fn memory_bindings_admin_routes_address_no_collection_or_graph() {
     }
 }
 
+/// The file compaction routes address the whole database file, never a
+/// collection or graph, so they need no reserved-versus-missing differential
+/// case. The documented set is exactly the five operations (only a job id as
+/// path parameter), and with memory bindings enabled their answers name no
+/// reserved tenant resource and never start a job outside the managed runtime.
+#[tokio::test]
+async fn compaction_admin_routes_address_no_collection_or_graph() {
+    use std::collections::BTreeSet;
+
+    let spec: Value = serde_json::from_str(include_str!("../src/openapi.json")).unwrap();
+    let documented: BTreeSet<(String, String)> = spec["paths"]
+        .as_object()
+        .unwrap()
+        .iter()
+        .filter(|(path, _)| path.starts_with("/v1/admin/compaction"))
+        .flat_map(|(path, item)| {
+            item.as_object()
+                .unwrap()
+                .keys()
+                .filter(|key| *key != "parameters")
+                .map(move |method| (method.clone(), path.clone()))
+        })
+        .collect();
+    let expected: BTreeSet<(String, String)> = [
+        ("get", "/v1/admin/compaction"),
+        ("put", "/v1/admin/compaction/config"),
+        ("post", "/v1/admin/compaction/jobs"),
+        ("get", "/v1/admin/compaction/jobs/{id}"),
+        ("post", "/v1/admin/compaction/jobs/{id}/cancel"),
+    ]
+    .into_iter()
+    .map(|(method, path)| (method.to_owned(), path.to_owned()))
+    .collect();
+    assert_eq!(documented, expected);
+    let fixture = fixture_with_bindings(true);
+    let (status, _, body) = request(&fixture.app, ADMIN, "GET", "/v1/admin/compaction", "").await;
+    assert_eq!(status, 200, "{}", String::from_utf8_lossy(&body));
+    let text = String::from_utf8_lossy(&body);
+    assert!(
+        !text.contains(TENANT),
+        "status names no reserved tenant: {text}"
+    );
+    let reply: Value = serde_json::from_slice(&body).unwrap();
+    assert_eq!(reply["capability"], false, "{reply}");
+    let start = r#"{"expected_version":0,"acknowledge_downtime":true,"acknowledge_history":true,"idempotency_key":"00000000-0000-4000-8000-000000000000"}"#;
+    let (status, _, body) = request(
+        &fixture.app,
+        ADMIN,
+        "POST",
+        "/v1/admin/compaction/jobs",
+        start,
+    )
+    .await;
+    assert!(
+        (400..500).contains(&status) && status != 404,
+        "an unmanaged server refuses the start: {status} {}",
+        String::from_utf8_lossy(&body)
+    );
+    assert!(!String::from_utf8_lossy(&body).contains(TENANT));
+    let (status, _, _) = request(&fixture.app, READ_ONLY, "GET", "/v1/admin/compaction", "").await;
+    assert_eq!(
+        status, 403,
+        "a read-only token cannot read compaction status"
+    );
+}
+
 async fn add_sessions(fixture: &mut Fixture) {
     for tenant in [false, true] {
         for role in ["viewer", "editor"] {
