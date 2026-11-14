@@ -179,7 +179,7 @@ async fn cloud_backup_routes_are_super_admin_only_through_the_configured_router(
             );
         }
         assert!(
-            !policy.join("policy.json").exists(),
+            !policy.join("state.json").exists(),
             "a refused {method} {path} must not change the cloud policy"
         );
     }
@@ -210,5 +210,5 @@ async fn cloud_backup_routes_are_super_admin_only_through_the_configured_router(
         request(&fixture.app, ADMIN, "PUT", "/v1/admin/cloud-backup", POLICY).await;
     assert_eq!(status, 200, "{reply}");
     assert_eq!(reply["configured"], true, "{reply}");
-    assert!(policy.join("policy.json").exists());
+    assert!(policy.join("state.json").exists());
 }

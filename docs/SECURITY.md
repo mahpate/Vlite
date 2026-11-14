@@ -305,7 +305,7 @@ protected separately.
 Cloud backup routes (`/v1/admin/cloud-backup*`) need a super administrator.
 Read-only, scoped and tenant credentials and non-super-admin accounts get 403
 before any work, including pin creation and release. The persisted policy in
-`<admin>/cloud-backup/policy.json` has no credential field and unknown fields
+`<admin>/cloud-backup/state.json` has no credential field and unknown fields
 are rejected, so a key or connection string cannot be saved there.
 
 - **Managed identity** is the default. Tokens are requested only for the

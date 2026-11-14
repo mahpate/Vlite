@@ -787,8 +787,10 @@ release: use these routes or the offline `vlite-server cloud-sets` and
 | `POST /v1/admin/cloud-backup/sets/{id}/pins` | Hold a set against retention: `{"reason": "…"}` (1–200 characters). Answers 201 with the pin ID. |
 | `DELETE /v1/admin/cloud-backup/sets/{id}/pins/{pin}` | Release an operator hold. A pin owned by a running restore or drill (`"kind": "operation"`) is refused with 409 `cloud_pin_owned`; if its owner crashed, `?force=true` releases it (audited as `cloud_backup_pin_force_released`, 409 `cloud_pin_in_use` while this server still runs that operation). |
 
-The policy is persisted in `<admin>/cloud-backup/policy.json` and survives
-restarts. It holds no secret:
+The policy is persisted with the run status in one atomically replaced
+`<admin>/cloud-backup/state.json` and survives restarts. A `PUT` that answers
+500 `cloud_backup_policy_uncertain` could not confirm its write; the `GET`
+view then shows the policy actually in effect. It holds no secret:
 
 ```json
 {"target": {"account": "contosobackup", "container": "vlite-data",
@@ -845,8 +847,8 @@ such as `cloud_backup_not_configured`, `cloud_publication_lost`,
 `cloud_pin_in_use`; 404 `cloud_set_not_found`
 or `cloud_pin_not_found`; 400 or 422 `invalid_json` (fixed text that never
 repeats the body) and 422 `invalid_input`; 502 `cloud_store_failed` or
-`cloud_set_corrupt`; 503 `busy`, `cloud_store_unavailable` or
-`cloud_publication_unknown`. Policy changes, runs, collections, drills,
+`cloud_set_corrupt`; 500 `cloud_backup_policy_uncertain`; 503 `busy`,
+`cloud_store_unavailable` or `cloud_publication_unknown`. Policy changes, runs, collections, drills,
 restores and pins are audited.
 
 `POST /v1/collections/{collection}/index/disk-ann` builds the collection's

@@ -3,11 +3,13 @@
 //!
 //! State lives under `<admin>/cloud-backup/`:
 //!
-//! - `policy.json`: the operator policy (target, schedule, retention, drill
-//!   cadence). It holds no secret: managed identity needs none and the
+//! - `state.json`: one versioned document with the operator policy (target,
+//!   schedule, retention, drill cadence) and the run status, including the
+//!   handle of a publication whose final result was unknown (resolved by the
+//!   next run before anything else). Policy and status are replaced together
+//!   by one atomic rename, so a crash never pairs a new policy with an older
+//!   status. It holds no secret: managed identity needs none and the
 //!   emulator key is read per process from `VLITE_CLOUD_BACKUP_SHARED_KEY_FILE`.
-//! - `state.json`: run status and the handle of a publication whose final
-//!   result was unknown, resolved by the next run before anything else.
 //! - `installation-id`: this installation's identity, created with the first
 //!   policy; it owns the configured prefix.
 //! - `staging/`: snapshot copies and download directories, emptied at startup.
@@ -27,8 +29,8 @@ use std::path::{Path as FilePath, PathBuf};
 use std::sync::Weak;
 use std::sync::atomic::AtomicBool;
 
-const POLICY: &str = "policy.json";
 const STATE: &str = "state.json";
+const FORMAT: u32 = 1;
 const INSTALLATION: &str = "installation-id";
 const STAGING: &str = "staging";
 const MAX_FILE: u64 = 64 * 1024;
@@ -144,6 +146,16 @@ pub(super) struct Status {
     /// A publication whose final CAS result is unknown.
     pub pending: Option<cloud::Pending>,
     pub policy_updated_unix_ms: Option<u64>,
+}
+
+/// The durable document (`state.json`).
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct Document {
+    format: u32,
+    policy: Option<Policy>,
+    #[serde(default)]
+    status: Status,
 }
 
 struct Loaded {
@@ -296,6 +308,43 @@ fn read_json<T: DeserializeOwned>(path: &FilePath) -> std::io::Result<Option<T>>
     }
 }
 
+fn state_too_large() -> ApiError {
+    ApiError::new(
+        StatusCode::INTERNAL_SERVER_ERROR,
+        "cloud_backup_state_too_large",
+        "the cloud backup status exceeds its size limit and was not saved",
+    )
+}
+
+/// Encodes the durable document; one that the next start could not read is
+/// refused before anything is written.
+fn encode(policy: Option<&Policy>, status: &Status) -> Result<Vec<u8>, ApiError> {
+    let document = json!({"format":FORMAT,"policy":policy,"status":status});
+    let bytes = serde_json::to_vec_pretty(&document).map_err(internal)?;
+    if bytes.len() as u64 > MAX_FILE {
+        return Err(state_too_large());
+    }
+    Ok(bytes)
+}
+
+fn read_document(dir: &FilePath) -> std::io::Result<Option<Document>> {
+    let Some(document) = read_json::<Document>(&dir.join(STATE))? else {
+        return Ok(None);
+    };
+    if document.format != FORMAT {
+        return Err(io_error(format!(
+            "unsupported cloud backup state format {}",
+            document.format
+        )));
+    }
+    if let Some(policy) = &document.policy {
+        policy
+            .validate()
+            .map_err(|e| io_error(format!("invalid cloud backup policy: {e}")))?;
+    }
+    Ok(Some(document))
+}
+
 fn valid_installation(id: &str) -> bool {
     id.len() == 16
         && id
@@ -303,11 +352,28 @@ fn valid_installation(id: &str) -> bool {
             .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
 }
 
+#[cfg(test)]
+thread_local! {
+    /// Test fault: fail the next write before (`false`) or after (`true`)
+    /// its rename.
+    static WRITE_FAULT: std::cell::Cell<Option<bool>> = const { std::cell::Cell::new(None) };
+}
+
 fn write_atomic(dir: &FilePath, name: &str, bytes: &[u8]) -> Result<(), ApiError> {
+    #[cfg(test)]
+    let fault = WRITE_FAULT.with(|f| f.take());
+    #[cfg(test)]
+    if fault == Some(false) {
+        return Err(internal("injected write fault"));
+    }
     let mut file = tempfile::NamedTempFile::new_in(dir).map_err(internal)?;
     file.write_all(bytes).map_err(internal)?;
     file.as_file().sync_all().map_err(internal)?;
     file.persist(dir.join(name)).map_err(internal)?;
+    #[cfg(test)]
+    if fault == Some(true) {
+        return Err(internal("injected write fault"));
+    }
     admin::sync_directory(dir)
 }
 
@@ -407,13 +473,10 @@ impl Runtime {
             std::fs::remove_dir_all(&staging)?;
         }
         cloud::create_private_subdir(&staging)?;
-        let policy: Option<Policy> = read_json(&dir.join(POLICY))?;
-        if let Some(policy) = &policy {
-            policy
-                .validate()
-                .map_err(|e| io_error(format!("invalid cloud backup policy: {e}")))?;
-        }
-        let status: Status = read_json(&dir.join(STATE))?.unwrap_or_default();
+        let (policy, status) = match read_document(&dir)? {
+            Some(document) => (document.policy, document.status),
+            None => (None, Status::default()),
+        };
         let installation = match read_limited(&dir.join(INSTALLATION))? {
             None => None,
             Some(bytes) => {
@@ -500,15 +563,13 @@ impl Runtime {
         let mut loaded = lock(&self.state)?;
         let previous = loaded.status.clone();
         change(&mut loaded);
-        let bytes = serde_json::to_vec_pretty(&loaded.status).map_err(internal)?;
-        if bytes.len() as u64 > MAX_FILE {
-            loaded.status = previous;
-            return Err(ApiError::new(
-                StatusCode::INTERNAL_SERVER_ERROR,
-                "cloud_backup_state_too_large",
-                "the cloud backup status exceeds its size limit and was not saved",
-            ));
-        }
+        let bytes = match encode(loaded.policy.as_ref(), &loaded.status) {
+            Ok(bytes) => bytes,
+            Err(error) => {
+                loaded.status = previous;
+                return Err(error);
+            }
+        };
         write_atomic(&self.dir, STATE, &bytes)
     }
 
@@ -539,7 +600,10 @@ impl Runtime {
     }
 
     /// Replaces the policy. Changing the target abandons an unresolved
-    /// publication of the old target (it stays an orphan there).
+    /// publication of the old target (it stays an orphan there). Policy and
+    /// status are one document: a failed write whose rename may or may not
+    /// have happened adopts what the file holds, so memory always matches
+    /// what the next start reads, and the caller is told to check.
     pub(super) fn configure(
         &self,
         policy: Policy,
@@ -562,10 +626,27 @@ impl Runtime {
             let changed = loaded.policy.as_ref().map(|p| &p.target) != Some(&policy.target);
             let abandoned = if changed { status.pending.take() } else { None };
             status.policy_updated_unix_ms = Some(now);
-            let policy_bytes = serde_json::to_vec_pretty(&policy).map_err(internal)?;
-            let status_bytes = serde_json::to_vec_pretty(&status).map_err(internal)?;
-            write_atomic(&self.dir, POLICY, &policy_bytes)?;
-            write_atomic(&self.dir, STATE, &status_bytes)?;
+            let bytes = encode(Some(&policy), &status)?;
+            if let Err(error) = write_atomic(&self.dir, STATE, &bytes) {
+                if let Ok(document) = read_document(&self.dir) {
+                    let (policy, status) =
+                        document.map_or((None, Status::default()), |d| (d.policy, d.status));
+                    loaded.policy = policy;
+                    loaded.status = status;
+                    loaded.retry_at = None;
+                }
+                logs::stderr(
+                    "error",
+                    "cloud_backup",
+                    json!({"event":"cloud_backup_policy_write_failed","code":error.code})
+                        .to_string(),
+                );
+                return Err(ApiError::new(
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    "cloud_backup_policy_uncertain",
+                    "the policy change could not be confirmed on disk; GET /v1/admin/cloud-backup shows the policy in effect",
+                ));
+            }
             loaded.policy = Some(policy.clone());
             loaded.status = status;
             loaded.retry_at = None;
@@ -1337,6 +1418,10 @@ mod tests {
         .unwrap()
     }
 
+    fn document(policy: &Policy, status: Value) -> Vec<u8> {
+        serde_json::to_vec(&json!({"format":FORMAT,"policy":policy,"status":status})).unwrap()
+    }
+
     fn status(runtime: &Runtime) -> Value {
         runtime.view().unwrap()["status"].clone()
     }
@@ -1423,8 +1508,8 @@ mod tests {
         drop(runtime);
         let open = || Runtime::open_with(cloud.clone(), connector(&meta, &data)).err();
 
-        let valid = serde_json::to_vec(&policy(json!({"enabled":true}))).unwrap();
-        std::fs::write(cloud.join(POLICY), &valid).unwrap();
+        let valid = document(&policy(json!({"enabled":true})), json!({}));
+        std::fs::write(cloud.join(STATE), &valid).unwrap();
         let error = open().expect("a policy without its installation id must fail");
         assert!(error.to_string().contains("installation-id"), "{error}");
         std::fs::write(cloud.join(INSTALLATION), b"0123456789abcdef").unwrap();
@@ -1432,19 +1517,82 @@ mod tests {
 
         let mut out_of_range = policy(json!({}));
         out_of_range.interval_secs = 1;
-        let bytes = serde_json::to_vec(&out_of_range).unwrap();
-        std::fs::write(cloud.join(POLICY), bytes).unwrap();
+        std::fs::write(cloud.join(STATE), document(&out_of_range, json!({}))).unwrap();
         let error = open().expect("an out-of-range policy must fail");
         assert!(error.to_string().contains("interval_secs"), "{error}");
-        std::fs::write(cloud.join(POLICY), b"{not json").unwrap();
-        assert!(open().is_some());
+        for bad in [
+            &b"{not json"[..],
+            br#"{"format":2,"policy":null}"#,
+            br#"{"policy":null}"#,
+            br#"{"format":1,"policy":null,"extra":1}"#,
+        ] {
+            std::fs::write(cloud.join(STATE), bad).unwrap();
+            assert!(open().is_some(), "{}", String::from_utf8_lossy(bad));
+        }
 
-        std::fs::write(cloud.join(POLICY), &valid).unwrap();
+        std::fs::write(cloud.join(STATE), &valid).unwrap();
         std::fs::write(cloud.join(INSTALLATION), b"../../etc/passwd").unwrap();
         assert!(open().is_some());
         std::fs::write(cloud.join(INSTALLATION), b"0123456789abcdef").unwrap();
-        std::fs::write(cloud.join(STATE), br#"{"runs":"many"}"#).unwrap();
+        let wrong = document(&policy(json!({})), json!({"runs":"many"}));
+        std::fs::write(cloud.join(STATE), wrong).unwrap();
         assert!(open().is_some());
+    }
+
+    #[test]
+    fn policy_and_status_are_one_atomic_document() {
+        // Review M3: the policy and the status were two renames; a crash or a
+        // failed write between them paired a new policy with an old pending
+        // handle, and memory differed from what the next start reads.
+        let env = setup();
+        let h = Handle::new(&env.service);
+        env.runtime
+            .configure(policy(json!({"drill_every":0})), &h, BASE)
+            .unwrap();
+        env.meta.fault(Op::Put, "record.json", Fault::Before, 1, 1);
+        env.meta.fault(Op::Get, "record.json", Fault::Before, 0, 1);
+        assert_eq!(code(env.runtime.run_now(&h)), "cloud_publication_unknown");
+        let dir = env.root.join("cloud-backup");
+        let names: Vec<_> = std::fs::read_dir(&dir)
+            .unwrap()
+            .map(|e| e.unwrap().file_name().into_string().unwrap())
+            .collect();
+        assert!(
+            !names.iter().any(|n| n.ends_with(".json") && n != STATE),
+            "{names:?}"
+        );
+        let file: Value = serde_json::from_slice(&std::fs::read(dir.join(STATE)).unwrap()).unwrap();
+        assert_eq!(file["format"], FORMAT);
+        assert_eq!(file["policy"]["target"]["prefix"], "vlite/prod/");
+        assert!(file["status"]["pending"].is_object());
+
+        let durable = |runtime: &Runtime| {
+            let view = runtime.view().unwrap();
+            (view["policy"].clone(), view["status"]["pending"].clone())
+        };
+        let mut moved = policy(json!({"drill_every":0}));
+        moved.target.prefix = "vlite/next/".into();
+        // The rename did not happen: the old policy and its handle stay.
+        WRITE_FAULT.with(|f| f.set(Some(false)));
+        assert_eq!(
+            code(env.runtime.configure(moved.clone(), &h, BASE)),
+            "cloud_backup_policy_uncertain"
+        );
+        let (kept, pending) = durable(&env.runtime);
+        assert_eq!(kept["target"]["prefix"], "vlite/prod/");
+        assert!(pending.is_object());
+        assert_eq!(durable(&reopen(&env)), (kept, pending));
+        // The rename happened but was not confirmed: the new policy (without
+        // the old target's handle) is what memory and the next start see.
+        WRITE_FAULT.with(|f| f.set(Some(true)));
+        assert_eq!(
+            code(env.runtime.configure(moved, &h, BASE)),
+            "cloud_backup_policy_uncertain"
+        );
+        let (adopted, pending) = durable(&env.runtime);
+        assert_eq!(adopted["target"]["prefix"], "vlite/next/");
+        assert!(pending.is_null());
+        assert_eq!(durable(&reopen(&env)), (adopted, pending));
     }
 
     #[test]
@@ -1938,10 +2086,10 @@ mod tests {
         let cloud = dir.path().join("cloud-backup");
         std::fs::create_dir_all(&cloud).unwrap();
         let enabled = policy(json!({"enabled":true,"interval_secs":300,"drill_every":0}));
-        std::fs::write(cloud.join(POLICY), serde_json::to_vec(&enabled).unwrap()).unwrap();
         std::fs::write(cloud.join(INSTALLATION), b"0123456789abcdef").unwrap();
         // Configured long ago: the first run is due at startup.
-        std::fs::write(cloud.join(STATE), br#"{"policy_updated_unix_ms":1}"#).unwrap();
+        let state = document(&enabled, json!({"policy_updated_unix_ms":1}));
+        std::fs::write(cloud.join(STATE), state).unwrap();
         let (meta, data) = (Arc::new(Memory::default()), Arc::new(Memory::default()));
         let runtime = Arc::new(Runtime::open_with(cloud, connector(&meta, &data)).unwrap());
         let service = service(dir.path());

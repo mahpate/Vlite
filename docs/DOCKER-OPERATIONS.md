@@ -372,10 +372,13 @@ with `PUT /v1/admin/cloud-backup` (there is no dashboard card in this release;
 body and routes in
 [API.md](API.md#cloud-backups-to-azure-blob-opt-in-off-by-default)). Unlike
 the local backup schedule, this policy is saved in
-`<admin>/cloud-backup/policy.json` and is applied again after a restart. The
-same directory holds `state.json` (run status), `installation-id` (the owner
-of the prefix) and `staging/` (temporary copies, emptied at startup); keep it
-on the private admin volume.
+`<admin>/cloud-backup/state.json` and is applied again after a restart. That
+one file holds the policy and the run status, replaced together by an atomic
+rename. If a `PUT` answers 500 `cloud_backup_policy_uncertain`, the write
+could not be confirmed: `GET /v1/admin/cloud-backup` shows the policy actually
+in effect. The same directory holds `installation-id` (the owner of the
+prefix) and `staging/` (temporary copies, emptied at startup); keep it on the
+private admin volume.
 
 ### Azure setup
 

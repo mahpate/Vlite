@@ -359,7 +359,7 @@ fn azurite_backup_restore_and_isolated_rekey_recovery() {
     assert!(
         source_admin
             .join("cloud-backup")
-            .join("policy.json")
+            .join("state.json")
             .is_file()
     );
     let source_lineage = restored["source_lineage"].clone();
