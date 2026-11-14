@@ -1242,10 +1242,28 @@ mod tests {
             format!("vlite/prod/sets/{}/manifest.json", env.set_id)
         }
         type Case = (&'static str, fn(&Env), &'static str);
-        let cases: [Case; 14] = [
+        let cases: [Case; 16] = [
             (
                 "manifest changed",
                 |env| edit(&env.data, &manifest(env), |b| b[0] ^= 0xff),
+                "cloud_set_corrupt",
+            ),
+            (
+                // Review F-001: a valid manifest at the same length that the
+                // record was never rebound to; only the record's hash of the
+                // manifest catches it.
+                "manifest rewritten at its length",
+                |env| {
+                    edit(&env.data, &manifest(env), |b| {
+                        let mut manifest: Value = serde_json::from_slice(b).unwrap();
+                        let created = manifest["created_unix_ms"].as_u64().unwrap();
+                        manifest["created_unix_ms"] = json!(created + 1);
+                        let rewritten = serde_json::to_vec_pretty(&manifest).unwrap();
+                        assert_eq!(rewritten.len(), b.len());
+                        assert_ne!(&rewritten, b);
+                        *b = rewritten;
+                    })
+                },
                 "cloud_set_corrupt",
             ),
             (
@@ -1327,6 +1345,36 @@ mod tests {
                         for object in m["objects"].as_array_mut().unwrap() {
                             if object["role"] == ROLE_DATABASE {
                                 object["sha256"] = json!(wrong);
+                            }
+                        }
+                    })
+                },
+                "cloud_set_corrupt",
+            ),
+            (
+                // Review F-002: as above, but the bundle is rebound to the
+                // wrong digest too, so the capture binding agrees and only
+                // the downloaded database's own hash catches it.
+                "database under a wrong digest with the bundle rebound",
+                |env| {
+                    let bytes = env.data.raw(&object(env, ROLE_DATABASE)).unwrap();
+                    let wrong = "ab".repeat(32);
+                    let objects = format!("vlite/prod/sets/{}/objects/", env.set_id);
+                    env.data.set_raw(&format!("{objects}{wrong}"), &bytes);
+                    let bundle = env.data.raw(&object(env, ROLE_BUNDLE)).unwrap();
+                    let mut bundle: Value = serde_json::from_slice(&bundle).unwrap();
+                    assert_ne!(bundle["database_sha256"], json!(wrong));
+                    bundle["database_sha256"] = json!(wrong);
+                    let bundle = serde_json::to_vec(&bundle).unwrap();
+                    let sha = cloud::sha_hex(&bundle);
+                    env.data.set_raw(&format!("{objects}{sha}"), &bundle);
+                    rewrite_manifest(env, |m| {
+                        for object in m["objects"].as_array_mut().unwrap() {
+                            if object["role"] == ROLE_DATABASE {
+                                object["sha256"] = json!(wrong);
+                            } else if object["role"] == ROLE_BUNDLE {
+                                object["sha256"] = json!(sha);
+                                object["bytes"] = json!(bundle.len());
                             }
                         }
                     })
