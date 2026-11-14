@@ -500,6 +500,14 @@ thread_local! {
     static WRITE_FAULT: std::cell::Cell<Option<bool>> = const { std::cell::Cell::new(None) };
 }
 
+#[cfg(test)]
+thread_local! {
+    /// Test hook: runs in `hold` after the pin is written, before it is live.
+    #[allow(clippy::type_complexity)]
+    static AFTER_PIN: std::cell::RefCell<Option<Box<dyn FnOnce(&str)>>> =
+        const { std::cell::RefCell::new(None) };
+}
+
 fn write_atomic(dir: &FilePath, name: &str, bytes: &[u8]) -> Result<(), ApiError> {
     #[cfg(test)]
     let fault = WRITE_FAULT.with(|f| f.take());
@@ -735,13 +743,20 @@ impl Runtime {
         self.dir.join(STAGING)
     }
 
-    /// Pins a set for a restore or drill run by this process.
+    /// Pins a set for a restore or drill run by this process. The pin is
+    /// taken and registered as live under the live lock, which a forced
+    /// removal also holds from its check to its removal: it cannot fall
+    /// between the two and remove a pin this process is about to use.
     fn hold(&self, sets: &Sets, set_id: &str, reason: &str) -> Result<Held<'_>, ApiError> {
-        let pin = sets.pin(set_id, reason, cloud::PinKind::Operation, now())?;
-        self.live
+        let mut live = self
+            .live
             .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .insert(pin.id.clone());
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let pin = sets.pin(set_id, reason, cloud::PinKind::Operation, now())?;
+        #[cfg(test)]
+        AFTER_PIN.with(|hook| hook.take().map(|hook| hook(&pin.id)));
+        live.insert(pin.id.clone());
+        drop(live);
         Ok(Held {
             live: &self.live,
             pin,
@@ -1451,20 +1466,21 @@ impl Runtime {
         force: bool,
     ) -> Result<Value, ApiError> {
         let _active = self.enter()?;
-        if force
-            && self
-                .live
+        let (sets, _, _) = self.connect()?;
+        // Held from the check through the removal (see `hold`).
+        let live = force.then(|| {
+            self.live
                 .lock()
                 .unwrap_or_else(std::sync::PoisonError::into_inner)
-                .contains(pin_id)
-        {
+        });
+        if live.as_ref().is_some_and(|live| live.contains(pin_id)) {
             return Err(conflict(
                 "cloud_pin_in_use",
                 "a restore or drill on this server still holds the pin; it is released when that operation ends",
             ));
         }
-        let (sets, _, _) = self.connect()?;
         let kind = sets.unpin(set_id, pin_id, force, now())?;
+        drop(live);
         let forced = kind == Some(cloud::PinKind::Operation);
         let event = if forced {
             "cloud_backup_pin_force_released"
@@ -2807,6 +2823,48 @@ mod tests {
         // Released by its owner, the source is collectable again.
         let collected = env.runtime.collect(&h).unwrap();
         assert_eq!(collected["result"]["deleted"], json!([ids[0]]));
+    }
+
+    #[test]
+    fn a_forced_unpin_between_pin_and_registration_is_refused() {
+        // Review N-03: hold wrote the pin, then registered it as live; a
+        // forced removal in between removed an active restore's pin.
+        let env = setup();
+        let h = Handle::new(&env.service);
+        env.runtime
+            .configure(policy(json!({"drill_every":0})), &h, BASE)
+            .unwrap();
+        let id = env.runtime.run_now(&h).unwrap()["set_id"]
+            .as_str()
+            .unwrap()
+            .to_owned();
+        let (tx, rx) = std::sync::mpsc::channel();
+        let (runtime, handle, source) = (env.runtime.clone(), h.clone(), id.clone());
+        AFTER_PIN.with(|hook| {
+            *hook.borrow_mut() = Some(Box::new(move |pin: &str| {
+                let pin = pin.to_owned();
+                std::thread::spawn(move || {
+                    let result = runtime.unpin(&handle, &source, &pin, true);
+                    tx.send(code(result)).unwrap();
+                });
+                // Without serialization the forced removal finishes here.
+                std::thread::sleep(Duration::from_millis(300));
+            }));
+        });
+        // The download waits for the forced removal's answer.
+        let answer = Arc::new(Mutex::new(None));
+        let out = answer.clone();
+        env.data
+            .hook(Op::Get, &format!("{id}/manifest.json"), move || {
+                *out.lock().unwrap() = rx.recv_timeout(Duration::from_secs(30)).ok();
+            });
+        let admin_dir = env.root.join("admin");
+        std::fs::create_dir(&admin_dir).unwrap();
+        let report = env.runtime.restore(&h, &id, &admin_dir).unwrap();
+        assert_eq!(*answer.lock().unwrap(), Some("cloud_pin_in_use"));
+        assert_eq!(report["pin_released"], true);
+        let listing = env.runtime.list().unwrap();
+        assert_eq!(set(&listing, &id)["record"]["pins"], json!([]));
     }
 
     #[test]
