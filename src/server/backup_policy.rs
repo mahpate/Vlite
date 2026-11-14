@@ -510,7 +510,7 @@ fn encode(policy: Option<&Policy>, status: &Status) -> Result<Vec<u8>, ApiError>
 
 fn read_document(dir: &FilePath) -> std::io::Result<Option<Document>> {
     #[cfg(test)]
-    if READ_FAULT.with(std::cell::Cell::get) {
+    if READ_FAULT.with(std::cell::Cell::get) || dir_fault(dir, |f| f.1).unwrap_or(false) {
         return Err(io_error("injected read fault"));
     }
     let Some(document) = read_json::<Document>(&dir.join(STATE))? else {
@@ -550,6 +550,23 @@ thread_local! {
     static READ_FAULT: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
 }
 
+/// Test faults for one runtime directory, seen from every thread (the routes
+/// do their work on the blocking pool, out of reach of the thread-local
+/// faults): the next write fails as with `WRITE_FAULT`, and `read_document`
+/// fails while the flag is set. Keyed by directory, so tests never share one.
+#[cfg(test)]
+static DIR_FAULTS: Mutex<std::collections::BTreeMap<PathBuf, (Option<bool>, bool)>> =
+    Mutex::new(std::collections::BTreeMap::new());
+
+#[cfg(test)]
+fn dir_fault<T>(dir: &FilePath, f: impl FnOnce(&mut (Option<bool>, bool)) -> T) -> Option<T> {
+    DIR_FAULTS
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .get_mut(dir)
+        .map(f)
+}
+
 #[cfg(test)]
 thread_local! {
     /// Test hook: runs in `hold` after the pin is written, before it is live.
@@ -560,7 +577,9 @@ thread_local! {
 
 fn write_atomic(dir: &FilePath, name: &str, bytes: &[u8]) -> Result<(), ApiError> {
     #[cfg(test)]
-    let fault = WRITE_FAULT.with(|f| f.take());
+    let fault = WRITE_FAULT
+        .with(|f| f.take())
+        .or_else(|| dir_fault(dir, |f| f.0.take()).flatten());
     #[cfg(test)]
     if fault == Some(false) {
         return Err(internal("injected write fault"));
@@ -2505,6 +2524,43 @@ mod tests {
     }
 
     #[test]
+    fn an_uncertain_enabled_policy_keeps_the_scheduler_ticking() {
+        // Review FW3-TEST-01: memory holds a disabled policy while the file
+        // the next start loads enables it. The scheduler must keep ticking
+        // so a tick can reread, adopt and claim the run with no request.
+        let env = setup();
+        let h = Handle::new(&env.service);
+        let schedule = json!({"interval_secs":300,"drill_every":0});
+        env.runtime
+            .configure(policy(schedule.clone()), &h, BASE)
+            .unwrap();
+        assert!(!env.runtime.enabled());
+        let mut enabled = policy(schedule);
+        enabled.enabled = true;
+        WRITE_FAULT.with(|f| f.set(Some(true)));
+        READ_FAULT.with(|f| f.set(true));
+        assert_eq!(
+            code(env.runtime.configure(enabled, &h, BASE)),
+            "cloud_backup_policy_uncertain"
+        );
+        assert!(env.runtime.enabled());
+        let due = BASE + 300_000;
+        assert!(!env.runtime.claim_due_at(due));
+        assert!(env.runtime.enabled());
+        READ_FAULT.with(|f| f.set(false));
+        assert!(env.runtime.claim_due_at(due));
+        {
+            let loaded = env.runtime.state.lock().unwrap();
+            assert!(!loaded.uncertain);
+            assert!(loaded.policy.as_ref().is_some_and(|p| p.enabled));
+            assert_eq!(loaded.status.last_attempt_unix_ms, Some(due));
+        }
+        assert!(env.runtime.busy.load(Ordering::Acquire));
+        // The tick itself never reaches the store.
+        assert!(env.meta.names().is_empty() && env.data.names().is_empty());
+    }
+
+    #[test]
     fn policy_and_status_are_one_atomic_document() {
         // Review M3: the policy and the status were two renames; a crash or a
         // failed write between them paired a new policy with an old pending
@@ -3250,6 +3306,59 @@ mod tests {
         let attempt = view["status"]["last_attempt_unix_ms"].as_u64().unwrap();
         assert_eq!(view["next_run_unix_ms"], attempt + 300_000);
         assert_eq!(view["status"]["runs"], 1);
+    }
+
+    #[tokio::test]
+    async fn a_failed_policy_change_still_wakes_the_maintenance_worker() {
+        // Review FW3-TEST-02: the route notifies the worker after a failed
+        // configure too. Here only the worker can settle the policy the
+        // failed write left uncertain: no further request follows.
+        let env = setup();
+        let mut service = env.service.clone();
+        let mut state = admin::AdminState::default();
+        state.directory = Some(env.root.join("admin"));
+        std::fs::create_dir(env.root.join("admin")).unwrap();
+        let _ = state.cloud.set(env.runtime.clone());
+        service.admin = Arc::new(state);
+        service
+            .ops
+            .configure_cloud(env.runtime.clone(), Handle::new(&service));
+        let app = routes().with_state(service.clone());
+        let base = "/v1/admin/cloud-backup";
+        let body = json!({"target":target(),"interval_secs":300,"drill_every":0});
+        let (status, reply) = call(&app, "PUT", base, Some(body.clone())).await;
+        assert_eq!(status, StatusCode::OK, "{reply}");
+        assert!(!env.runtime.enabled(), "the scheduler starts off");
+
+        let dir = env.root.join("cloud-backup");
+        DIR_FAULTS
+            .lock()
+            .unwrap()
+            .insert(dir.clone(), (Some(true), true));
+        let mut enabled = body;
+        enabled["enabled"] = json!(true);
+        let (status, reply) = call(&app, "PUT", base, Some(enabled)).await;
+        assert_eq!(
+            (status, reply["error"]["code"].as_str()),
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Some("cloud_backup_policy_uncertain")
+            ),
+            "{reply}"
+        );
+        assert!(env.runtime.state.lock().unwrap().uncertain);
+        DIR_FAULTS.lock().unwrap().remove(&dir);
+        let deadline = Instant::now() + Duration::from_secs(20);
+        while env.runtime.state.lock().unwrap().uncertain {
+            assert!(
+                Instant::now() < deadline,
+                "the maintenance worker never reread the policy"
+            );
+            std::thread::sleep(Duration::from_millis(50));
+        }
+        let adopted = env.runtime.state.lock().unwrap().policy.clone().unwrap();
+        assert!(adopted.enabled);
+        service.ops.shutdown();
     }
 
     async fn call(
