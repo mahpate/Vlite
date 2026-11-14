@@ -282,6 +282,30 @@ fn churn(server: &Server, base: u64, rounds: u32) {
     }
 }
 
+/// Like `churn`, but a scheduled run may start (and fence writes) mid-churn;
+/// a refused whole-record PUT was not applied, so it is retried.
+fn churn_through_maintenance(server: &Server, base: u64, rounds: u32) {
+    let deadline = Instant::now() + Duration::from_secs(60);
+    for round in 0..rounds {
+        for id in base..base + 10 {
+            loop {
+                let reply = server.call(
+                    "PUT",
+                    &format!("/v1/vectors/{id}"),
+                    json!({"vector": [id as f32, round as f32], "payload_base64": PAYLOAD}),
+                );
+                if reply.code() == (503, json!("maintenance_in_progress")) {
+                    assert!(Instant::now() < deadline, "{}", reply.body);
+                    std::thread::sleep(Duration::from_millis(100));
+                    continue;
+                }
+                assert_eq!(reply.status, 204, "{}", reply.body);
+                break;
+            }
+        }
+    }
+}
+
 fn assert_churned(server: &Server, base: u64, round: f64) {
     for id in base..base + 10 {
         let reply = server.call("GET", &format!("/v1/vectors/{id}"), Value::Null);
@@ -1011,7 +1035,7 @@ fn schedule_runs_once_per_window_after_measured_growth() {
         server.status()["last_job"].is_null(),
         "no run without growth"
     );
-    churn(&server, 1, 10);
+    churn_through_maintenance(&server, 1, 10);
     let deadline = Instant::now() + Duration::from_secs(60);
     let job = loop {
         let status = server.status();
