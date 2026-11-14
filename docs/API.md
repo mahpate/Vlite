@@ -777,7 +777,7 @@ release: use these routes or the offline `vlite-server cloud-sets` and
 
 | Route | Purpose |
 | --- | --- |
-| `GET /v1/admin/cloud-backup` | Policy, installation ID, run status (last attempt, success, error code, unknown publication, the run in progress as `job`, and `interrupted` runs) and the next scheduled run. |
+| `GET /v1/admin/cloud-backup` | Policy, installation ID, run status (last attempt, success, error code, unknown publication, the run in progress as `job`, `interrupted` runs, and `clock_reset_unix_ms` when future schedule times were pulled back to the clock) and the next scheduled run. |
 | `PUT /v1/admin/cloud-backup` | Save the policy (body below). Does no remote work. |
 | `POST /v1/admin/cloud-backup/run` | Publish one set now. Answers 201. **Not idempotent**: retrying after an unseen outcome can publish another set, so read the status or the set list first. |
 | `POST /v1/admin/cloud-backup/collect` | Cleanup now: removes unpublished sets older than `orphan_grace_hours` and finishes interrupted deletions; deletes published sets only when `retention_enabled` is set. A run collects automatically only with retention on. |

@@ -151,6 +151,9 @@ pub(super) struct Status {
     pub job: Option<Job>,
     /// Runs that stopped without finishing (panic or process exit).
     pub interrupted: u64,
+    /// When schedule times found in the future were pulled back to the
+    /// clock (a clock that ran ahead and was corrected).
+    pub clock_reset_unix_ms: Option<u64>,
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
@@ -515,6 +518,37 @@ pub(super) fn bundle_summary(bundle: &recovery_bundle::Bundle) -> Value {
         "secret_references":c.secret_references,"excluded":c.excluded})
 }
 
+/// Pulls schedule times that lie in the future back to `now`. A clock that
+/// ran ahead and was then corrected would otherwise defer every run by the
+/// size of the error; this caps the delay at one interval (or one retry).
+fn reconcile_clock(loaded: &mut Loaded, now: u64) -> bool {
+    let status = &mut loaded.status;
+    let mut changed = false;
+    for stamp in [
+        &mut status.last_attempt_unix_ms,
+        &mut status.policy_updated_unix_ms,
+    ] {
+        if stamp.is_some_and(|at| at > now) {
+            *stamp = Some(now);
+            changed = true;
+        }
+    }
+    let retry = now.saturating_add(RETRY_MS);
+    if loaded.retry_at.is_some_and(|at| at > retry) {
+        loaded.retry_at = Some(retry);
+        changed = true;
+    }
+    if changed {
+        status.clock_reset_unix_ms = Some(now);
+        logs::stderr(
+            "warn",
+            "cloud_backup",
+            json!({"event":"cloud_backup_clock_reconciled","now_unix_ms":now}).to_string(),
+        );
+    }
+    changed
+}
+
 fn next_run(loaded: &Loaded) -> Option<u64> {
     let policy = loaded.policy.as_ref().filter(|p| p.enabled)?;
     Some(loaded.retry_at.unwrap_or_else(|| {
@@ -573,14 +607,20 @@ impl Runtime {
                 "cloud backup policy without an installation-id; restore the file or remove the policy",
             ));
         }
+        let mut loaded = Loaded {
+            policy,
+            status,
+            installation,
+            retry_at: None,
+        };
+        if reconcile_clock(&mut loaded, now()) {
+            let bytes =
+                encode(loaded.policy.as_ref(), &loaded.status).map_err(|e| io_error(e.message))?;
+            write_atomic(&dir, STATE, &bytes).map_err(|e| io_error(e.message))?;
+        }
         Ok(Self {
             dir,
-            state: Mutex::new(Loaded {
-                policy,
-                status,
-                installation,
-                retry_at: None,
-            }),
+            state: Mutex::new(loaded),
             busy: AtomicBool::new(false),
             live: Mutex::default(),
             operation: Mutex::default(),
@@ -755,6 +795,8 @@ impl Runtime {
         let Ok(mut loaded) = self.state.lock() else {
             return false;
         };
+        // Saved with the next status write; a restart reconciles again.
+        reconcile_clock(&mut loaded, now);
         match next_run(&loaded) {
             Some(next) if now >= next => {}
             _ => return false,
@@ -1835,6 +1877,47 @@ mod tests {
             (json!(2), json!(2))
         );
         assert!(runtime.wait_for_operation(Duration::ZERO));
+    }
+
+    #[test]
+    fn a_corrected_clock_defers_runs_by_at_most_one_interval() {
+        // Review M4: a clock that ran ahead and was corrected deferred every
+        // run by the size of the error, even across a restart.
+        let env = setup();
+        let h = Handle::new(&env.service);
+        let enabled = || policy(json!({"enabled":true,"interval_secs":300,"drill_every":0}));
+        let year = 365 * 24 * 3_600_000;
+        env.runtime.configure(enabled(), &h, BASE + year).unwrap();
+        assert!(!env.runtime.claim_due_at(BASE));
+        let view = env.runtime.view().unwrap();
+        assert_eq!(view["next_run_unix_ms"], BASE + 300_000, "{view}");
+        assert_eq!(view["status"]["clock_reset_unix_ms"], BASE);
+        assert!(!env.runtime.claim_due_at(BASE + 299_999));
+        assert!(env.runtime.claim_due_at(BASE + 300_000));
+        env.runtime.busy.store(false, Ordering::Release);
+        // A busy skip far in the future is capped at one retry.
+        env.runtime.busy.store(true, Ordering::Release);
+        assert!(!env.runtime.claim_due_at(BASE + year));
+        env.runtime.busy.store(false, Ordering::Release);
+        assert!(!env.runtime.claim_due_at(BASE + 600_000));
+        assert!(env.runtime.claim_due_at(BASE + 600_000 + RETRY_MS));
+        env.runtime.busy.store(false, Ordering::Release);
+
+        // Persisted future times are pulled back at startup.
+        env.runtime.configure(enabled(), &h, now() + year).unwrap();
+        let before = now();
+        let reopened = reopen(&env);
+        let after = now();
+        let view = reopened.view().unwrap();
+        let updated = view["status"]["policy_updated_unix_ms"].as_u64().unwrap();
+        assert!((before..=after).contains(&updated), "{view}");
+        let next = view["next_run_unix_ms"].as_u64().unwrap();
+        assert!(next <= after + 300_000, "{view}");
+        let saved: Value = serde_json::from_slice(
+            &std::fs::read(env.root.join("cloud-backup").join(STATE)).unwrap(),
+        )
+        .unwrap();
+        assert_eq!(saved["status"]["policy_updated_unix_ms"], updated);
     }
 
     #[test]
