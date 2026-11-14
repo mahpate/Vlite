@@ -883,6 +883,9 @@ impl Sets {
         self.finish(pending, None, now)
     }
 
+    /// Creates one immutable object and proves the committed bytes: every
+    /// path, including a plain success, ends with a bounded streamed
+    /// read-back of the exact length and SHA-256 the manifest will name.
     fn upload(&self, id: &str, upload: &Upload) -> Result<(), ApiError> {
         let key = self.object_key(id, &upload.sha256);
         for attempt in 0..2 {
@@ -890,25 +893,33 @@ impl Sets {
                 Source::File(path) => self.data.put_file(&key, path, Cond::Create),
                 Source::Bytes(bytes) => self.data.put(&key, bytes, Cond::Create),
             };
-            match result {
-                Ok(_) => return Ok(()),
-                Err(StoreError::Conflict | StoreError::Unknown(_)) => {
-                    let mut check = Hashing::new(std::io::sink());
-                    match self.data.download(&key, &mut check, upload.bytes) {
-                        Ok(_) => {
-                            let (_, sha, bytes) = check.finish();
-                            if sha == upload.sha256 && bytes == upload.bytes {
-                                return Ok(());
-                            }
-                            return Err(conflict(
-                                "cloud_object_conflict",
-                                format!("{key} already exists with different content"),
-                            ));
-                        }
-                        Err(StoreError::NotFound) if attempt == 0 => {}
-                        Err(e) => return Err(e.into()),
+            let created = match result {
+                Ok(_) => true,
+                Err(StoreError::Conflict | StoreError::Unknown(_)) => false,
+                Err(e) => return Err(e.into()),
+            };
+            let mut check = Hashing::new(std::io::sink());
+            match self.data.download(&key, &mut check, upload.bytes) {
+                Ok(_) => {
+                    let (_, sha, bytes) = check.finish();
+                    if sha == upload.sha256 && bytes == upload.bytes {
+                        return Ok(());
                     }
+                    return Err(if created {
+                        conflict(
+                            "cloud_object_mismatch",
+                            format!(
+                                "{key} was committed with content that differs from the manifest (the source changed or the store altered it); the set is not published"
+                            ),
+                        )
+                    } else {
+                        conflict(
+                            "cloud_object_conflict",
+                            format!("{key} already exists with different content"),
+                        )
+                    });
                 }
+                Err(StoreError::NotFound) if attempt == 0 && !created => {}
                 Err(e) => return Err(e.into()),
             }
         }
@@ -2003,6 +2014,48 @@ mod tests {
         env.data.set_raw(&key, &bytes);
         let err = env.sets.fetch(&id, &pin.id, dir.path()).err().unwrap();
         assert_eq!(err.code, "cloud_set_corrupt");
+    }
+
+    #[test]
+    fn committed_bytes_that_differ_from_the_manifest_never_publish() {
+        // Review F-002: the source changes after hashing (or the store
+        // commits other bytes); the read-back refuses before the manifest
+        // and the publication CAS.
+        let env = setup();
+        let now = BASE;
+        let (manifest, uploads) = prepare(&env, now);
+        let path = env.db.path().join("source.vlite");
+        let mut bytes = std::fs::read(&path).unwrap();
+        let last = bytes.len() - 1;
+        bytes[last] ^= 0x01;
+        std::fs::write(&path, &bytes).unwrap();
+        let err = env.sets.publish(&manifest, &uploads, now).err().unwrap();
+        assert_eq!(err.code, "cloud_object_mismatch", "{}", err.message);
+        let id = &manifest.set_id;
+        assert_eq!(record(&env, id).state, SetState::Staging);
+        assert!(env.data.raw(&env.sets.manifest_key(id)).is_none());
+        let listing = env.sets.list().unwrap();
+        assert!(listing.sets.iter().all(|s| {
+            s.record
+                .as_ref()
+                .is_none_or(|r| r.state != SetState::Published)
+        }));
+        // A store that silently truncates a committed bundle is caught too.
+        let env = setup();
+        let (manifest, uploads) = prepare(&env, now);
+        let bundle = env
+            .sets
+            .object_key(&manifest.set_id, &manifest.objects[1].sha256);
+        let truncate = env.data.clone();
+        let key = bundle.clone();
+        env.data.hook(Op::Get, &bundle, move || {
+            let mut bytes = truncate.raw(&key).unwrap();
+            bytes.pop();
+            truncate.set_raw(&key, &bytes);
+        });
+        let err = env.sets.publish(&manifest, &uploads, now).err().unwrap();
+        assert_eq!(err.code, "cloud_object_mismatch", "{}", err.message);
+        assert_eq!(record(&env, &manifest.set_id).state, SetState::Staging);
     }
 
     #[test]
