@@ -873,6 +873,17 @@ impl Runtime {
         }
     }
 
+    /// The one authority check for remote publication writes: refused once
+    /// an expired shutdown wait fenced this runtime (a successor may own the
+    /// directory). The lock is held only for the check, never across the
+    /// remote call that follows.
+    fn authorized(&self) -> Result<(), ApiError> {
+        if lock(&self.state)?.fenced {
+            return Err(closed());
+        }
+        Ok(())
+    }
+
     fn configured(&self) -> Result<(Policy, String), ApiError> {
         let mut loaded = lock(&self.state)?;
         loaded.settle(&self.dir)?;
@@ -1244,10 +1255,13 @@ impl Runtime {
     ) -> Result<(Sets, cloud::Record, Option<Value>), ApiError> {
         handle.refusal()?;
         let capture = admitted.capture()?;
+        let authorize = || self.authorized();
         let sets = (self.connector)(&admitted.policy.target)?;
+        // The connector can block (token, network): recheck after it returns.
+        authorize()?;
         sets.ensure_owner(installation, now)?;
         let settled = match pending {
-            Some(pending) => Some(self.settle(handle, &sets, &pending, now)?),
+            Some(pending) => Some(self.settle(handle, &sets, &pending, now, &authorize)?),
             None => None,
         };
         let admin = handle.admin.upgrade().ok_or_else(unavailable)?;
@@ -1298,12 +1312,10 @@ impl Runtime {
             &uploads,
             capture,
         );
-        // A run fenced by an expired shutdown wait never starts publishing;
-        // collection removes what it left.
-        if lock(&self.state)?.fenced {
-            return Err(closed());
-        }
-        let publication = sets.publish(&manifest, &uploads, now)?;
+        // A run fenced by an expired shutdown wait never publishes: the set
+        // protocol asks again before its first write and before every
+        // commit; collection removes what it left.
+        let publication = sets.publish(&manifest, &uploads, now, &authorize)?;
         drop(staged);
         match publication {
             Publication::Published(record) => Ok((sets, record, settled)),
@@ -1321,15 +1333,17 @@ impl Runtime {
         }
     }
 
-    /// Resolves the persisted pending publication before a new one.
+    /// Resolves the persisted pending publication before a new one; the
+    /// commit is attempted only while `authorize` allows it.
     fn settle(
         &self,
         handle: &Handle,
         sets: &Sets,
         pending: &cloud::Pending,
         now: u64,
+        authorize: cloud::Authorize<'_>,
     ) -> Result<Value, ApiError> {
-        match sets.resolve_pending(pending, now) {
+        match sets.resolve_pending(pending, now, authorize) {
             Ok(Publication::Published(record)) => {
                 self.note(|l| {
                     l.status.pending = None;
@@ -2756,6 +2770,51 @@ mod tests {
         assert!(s["pending"].is_null());
         let listing = reopened.list().unwrap();
         assert_eq!(set(&listing, &pending)["record"]["state"], "published");
+    }
+
+    #[test]
+    fn a_fenced_run_never_settles_an_older_pending_publication() {
+        // Review NEW-FW3-01: the fence guarded only a fresh publication, so a
+        // run blocked in its connector past shutdown still committed the
+        // pending set after a successor runtime owned the directory.
+        let env = setup();
+        let h = Handle::new(&env.service);
+        env.runtime
+            .configure(policy(json!({"drill_every":0})), &h, BASE)
+            .unwrap();
+        env.meta.fault(Op::Put, "record.json", Fault::Before, 1, 1);
+        env.meta.fault(Op::Get, "record.json", Fault::Before, 0, 1);
+        assert_eq!(code(env.runtime.run_now(&h)), "cloud_publication_unknown");
+        let pending = status(&env.runtime)["pending"]["set_id"]
+            .as_str()
+            .unwrap()
+            .to_owned();
+
+        let (gate, calls) = (Arc::new(AtomicBool::new(false)), Arc::default());
+        let old = gated(&env, &gate, &calls);
+        old.busy.store(true, Ordering::Release);
+        old.start_claimed(h.clone());
+        await_admitted(&old);
+        let deadline = Instant::now() + Duration::from_secs(10);
+        while calls.load(Ordering::SeqCst) == 0 {
+            assert!(Instant::now() < deadline, "the connector was never entered");
+            std::thread::sleep(Duration::from_millis(5));
+        }
+        assert!(!old.shutdown(Duration::from_millis(50)));
+        let next = reopen(&env);
+        let file = std::fs::read(env.root.join("cloud-backup").join(STATE)).unwrap();
+
+        gate.store(true, Ordering::SeqCst);
+        assert!(old.shutdown(Duration::from_secs(10)));
+        assert_eq!(
+            std::fs::read(env.root.join("cloud-backup").join(STATE)).unwrap(),
+            file
+        );
+        let listing = next.list().unwrap();
+        assert_eq!(set(&listing, &pending)["record"]["state"], "staging");
+        assert_eq!(listing["sets"].as_array().unwrap().len(), 1);
+        assert_eq!(status(&next)["pending"]["set_id"], pending);
+        assert_eq!(calls.load(Ordering::SeqCst), 1);
     }
 
     #[test]

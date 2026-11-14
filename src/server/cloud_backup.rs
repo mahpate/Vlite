@@ -951,6 +951,11 @@ fn create_verified(store: &dyn ObjectStore, key: &str, bytes: &[u8]) -> Result<S
 
 // ------------------------------------------------------------------- sets
 
+/// Asked right before a publication write; an error stops the publication.
+/// The caller checks its own authority (for example a shutdown fence)
+/// without holding any lock across the remote call that follows.
+pub(super) type Authorize<'a> = &'a dyn Fn() -> Result<(), ApiError>;
+
 /// The set protocol over a data store and a coordination store (the same
 /// container when `shared`).
 #[derive(Clone)]
@@ -1046,12 +1051,15 @@ impl Sets {
 
     /// Writes a set: staging record, objects, manifest, then the publication
     /// CAS. Any failure before the CAS leaves an unrestorable staging set that
-    /// collection removes after the orphan grace period.
+    /// collection removes after the orphan grace period. `authorize` is asked
+    /// before the first write and again right before every commit attempt, so
+    /// a caller that lost its authority while blocked never publishes.
     pub(super) fn publish(
         &self,
         manifest: &Manifest,
         uploads: &[Upload],
         now: u64,
+        authorize: Authorize<'_>,
     ) -> Result<Publication, ApiError> {
         let id = &manifest.set_id;
         if !valid_set_id(id)
@@ -1060,6 +1068,7 @@ impl Sets {
         {
             return Err(internal("invalid cloud backup manifest"));
         }
+        authorize()?;
         let manifest_bytes = encode(manifest)?;
         let staging = Record {
             schema: RECORD_SCHEMA.into(),
@@ -1085,16 +1094,18 @@ impl Sets {
             manifest_sha256: staging.manifest_sha256.clone(),
             staging_revision: staging.revision.clone(),
         };
-        self.finish(&pending, Some((staging, etag)), now)
+        self.finish(&pending, Some((staging, etag)), now, authorize)
     }
 
-    /// Completes a publication whose final CAS result was unknown.
+    /// Completes a publication whose final CAS result was unknown, asking
+    /// `authorize` right before every commit attempt.
     pub(super) fn resolve_pending(
         &self,
         pending: &Pending,
         now: u64,
+        authorize: Authorize<'_>,
     ) -> Result<Publication, ApiError> {
-        self.finish(pending, None, now)
+        self.finish(pending, None, now, authorize)
     }
 
     /// Creates one immutable object and proves the committed bytes: every
@@ -1171,6 +1182,7 @@ impl Sets {
         pending: &Pending,
         mut current: Option<(Record, String)>,
         now: u64,
+        authorize: Authorize<'_>,
     ) -> Result<Publication, ApiError> {
         let key = self.record_key(&pending.set_id);
         for _ in 0..3 {
@@ -1186,7 +1198,9 @@ impl Sets {
             next.state = SetState::Published;
             next.updated_unix_ms = now;
             next.revision = random_hex()?;
-            match self.meta.put(&key, &encode(&next)?, Cond::Match(&etag)) {
+            let bytes = encode(&next)?;
+            authorize()?;
+            match self.meta.put(&key, &bytes, Cond::Match(&etag)) {
                 Ok(_) => return Ok(Publication::Published(next)),
                 Err(StoreError::Conflict | StoreError::Unknown(_) | StoreError::NotFound) => {}
                 Err(e) => return Err(e.into()),
@@ -1873,6 +1887,11 @@ impl Sets {
 pub(super) mod fake {
     use super::*;
 
+    /// Authorizes every publication write.
+    pub fn open() -> Result<(), ApiError> {
+        Ok(())
+    }
+
     /// A policy capture for manifests built directly in tests.
     pub fn policy_capture() -> PolicyCapture {
         PolicyCapture {
@@ -2079,7 +2098,7 @@ pub(super) mod fake {
 
 #[cfg(test)]
 mod tests {
-    use super::fake::{Fault, Memory, Op};
+    use super::fake::{Fault, Memory, Op, open};
     use super::*;
 
     const INSTALL: &str = "0123456789abcdef";
@@ -2151,7 +2170,7 @@ mod tests {
 
     fn publish(env: &Env, now: u64) -> String {
         let (manifest, uploads) = prepare(env, now);
-        match env.sets.publish(&manifest, &uploads, now).unwrap() {
+        match env.sets.publish(&manifest, &uploads, now, &open).unwrap() {
             Publication::Published(record) => {
                 assert_eq!(record.state, SetState::Published);
                 record.set_id
@@ -2409,7 +2428,11 @@ mod tests {
         manifest.policy.keep_days = 0;
         let err = manifest.check(&id, INSTALL).err().unwrap();
         assert_eq!(err.code, "cloud_set_corrupt");
-        assert!(env.sets.publish(&manifest, &uploads, BASE + 1).is_err());
+        assert!(
+            env.sets
+                .publish(&manifest, &uploads, BASE + 1, &open)
+                .is_err()
+        );
         assert!(
             env.meta.raw(&env.sets.record_key(&id)).is_none(),
             "refused before any write"
@@ -2449,7 +2472,7 @@ mod tests {
                 fake::policy_capture(),
             );
             assert!(matches!(
-                env.sets.publish(&manifest, &uploads, now).unwrap(),
+                env.sets.publish(&manifest, &uploads, now, &open).unwrap(),
                 Publication::Published(_)
             ));
             let pin = env.sets.pin(&id, "check", PinKind::Operator, now).unwrap();
@@ -2495,7 +2518,11 @@ mod tests {
         let last = bytes.len() - 1;
         bytes[last] ^= 0x01;
         std::fs::write(&path, &bytes).unwrap();
-        let err = env.sets.publish(&manifest, &uploads, now).err().unwrap();
+        let err = env
+            .sets
+            .publish(&manifest, &uploads, now, &open)
+            .err()
+            .unwrap();
         assert_eq!(err.code, "cloud_object_mismatch", "{}", err.message);
         let id = &manifest.set_id;
         assert_eq!(record(&env, id).state, SetState::Staging);
@@ -2519,7 +2546,11 @@ mod tests {
             bytes.pop();
             truncate.set_raw(&key, &bytes);
         });
-        let err = env.sets.publish(&manifest, &uploads, now).err().unwrap();
+        let err = env
+            .sets
+            .publish(&manifest, &uploads, now, &open)
+            .err()
+            .unwrap();
         assert_eq!(err.code, "cloud_object_mismatch", "{}", err.message);
         assert_eq!(record(&env, &manifest.set_id).state, SetState::Staging);
     }
@@ -2530,7 +2561,11 @@ mod tests {
             let env = setup();
             env.data.fault(Op::Put, needle, Fault::Refuse, 0, 1);
             let (manifest, uploads) = prepare(&env, BASE);
-            let err = env.sets.publish(&manifest, &uploads, BASE).err().unwrap();
+            let err = env
+                .sets
+                .publish(&manifest, &uploads, BASE, &open)
+                .err()
+                .unwrap();
             assert_eq!(err.code, "cloud_store_failed");
             let id = manifest.set_id.clone();
             assert_eq!(record(&env, &id).state, SetState::Staging);
@@ -2570,18 +2605,63 @@ mod tests {
         env.meta.fault(Op::Put, "record.json", Fault::Before, 1, 1);
         env.meta.fault(Op::Get, "record.json", Fault::Before, 0, 1);
         let (manifest, uploads) = prepare(&env, BASE);
-        let pending = match env.sets.publish(&manifest, &uploads, BASE).unwrap() {
+        let pending = match env.sets.publish(&manifest, &uploads, BASE, &open).unwrap() {
             Publication::Pending(pending) => pending,
             Publication::Published(_) => panic!("expected pending"),
         };
         assert_eq!(record(&env, &pending.set_id).state, SetState::Staging);
-        match env.sets.resolve_pending(&pending, BASE + 1).unwrap() {
+        match env.sets.resolve_pending(&pending, BASE + 1, &open).unwrap() {
             Publication::Published(record) => assert_eq!(record.set_id, pending.set_id),
             Publication::Pending(_) => panic!("expected publication"),
         }
         // Resolving again is idempotent.
         assert!(matches!(
-            env.sets.resolve_pending(&pending, BASE + 2).unwrap(),
+            env.sets.resolve_pending(&pending, BASE + 2, &open).unwrap(),
+            Publication::Published(_)
+        ));
+    }
+
+    #[test]
+    fn a_publication_commits_only_while_its_caller_is_authorized() {
+        // Review NEW-FW3-01: authority is asked again right before every
+        // commit, so a caller fenced while blocked never publishes a set.
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        let fenced = || Err::<(), _>(conflict("cloud_backup_closed", "fenced"));
+        let env = setup();
+        let asked = AtomicUsize::new(0);
+        let first_only = || match asked.fetch_add(1, Ordering::SeqCst) {
+            0 => Ok(()),
+            _ => fenced(),
+        };
+        let (manifest, uploads) = prepare(&env, BASE);
+        let id = manifest.set_id.clone();
+        let err = env
+            .sets
+            .publish(&manifest, &uploads, BASE, &first_only)
+            .err()
+            .unwrap();
+        assert_eq!(
+            (err.code, asked.load(Ordering::SeqCst)),
+            ("cloud_backup_closed", 2)
+        );
+        let staging = record(&env, &id);
+        assert_eq!(staging.state, SetState::Staging);
+        assert_eq!(data_objects(&env, &id), 3);
+
+        let pending = Pending {
+            set_id: id.clone(),
+            manifest_sha256: staging.manifest_sha256.clone(),
+            staging_revision: staging.revision.clone(),
+        };
+        let err = env
+            .sets
+            .resolve_pending(&pending, BASE + 1, &fenced)
+            .err()
+            .unwrap();
+        assert_eq!(err.code, "cloud_backup_closed");
+        assert_eq!(record(&env, &id).state, SetState::Staging);
+        assert!(matches!(
+            env.sets.resolve_pending(&pending, BASE + 2, &open).unwrap(),
             Publication::Published(_)
         ));
     }
@@ -2602,7 +2682,7 @@ mod tests {
         env.data
             .fault(Op::Put, "manifest.json", Fault::Refuse, 0, 1);
         let (manifest, uploads) = prepare(&env, BASE);
-        assert!(env.sets.publish(&manifest, &uploads, BASE).is_err());
+        assert!(env.sets.publish(&manifest, &uploads, BASE, &open).is_err());
         let id = manifest.set_id.clone();
         let staging = record(&env, &id);
         env.sets
@@ -2616,11 +2696,15 @@ mod tests {
         };
         let err = env
             .sets
-            .resolve_pending(&pending, BASE + 3 * HOUR)
+            .resolve_pending(&pending, BASE + 3 * HOUR, &open)
             .err()
             .unwrap();
         assert_eq!(err.code, "cloud_publication_lost");
-        let err = env.sets.publish(&manifest, &uploads, BASE).err().unwrap();
+        let err = env
+            .sets
+            .publish(&manifest, &uploads, BASE, &open)
+            .err()
+            .unwrap();
         assert_eq!(err.code, "cloud_object_conflict");
         assert_eq!(record(&env, &id).state, SetState::Tombstoned);
         // Objects a stale writer adds after the tombstone are swept.
@@ -2645,7 +2729,7 @@ mod tests {
             .map(|(i, suffix)| {
                 let (id, now) = (format!("{second}{suffix}"), BASE + i as u64);
                 let (manifest, uploads) = prepare_as(&env, now, &id);
-                let published = env.sets.publish(&manifest, &uploads, now).unwrap();
+                let published = env.sets.publish(&manifest, &uploads, now, &open).unwrap();
                 assert!(matches!(published, Publication::Published(_)));
                 id
             })

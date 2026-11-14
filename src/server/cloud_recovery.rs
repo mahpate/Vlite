@@ -797,7 +797,10 @@ mod tests {
             &uploads,
             cloud::fake::policy_capture(),
         );
-        match sets.publish(&manifest, &uploads, at).unwrap() {
+        match sets
+            .publish(&manifest, &uploads, at, &cloud::fake::open)
+            .unwrap()
+        {
             Publication::Published(record) => assert_eq!(record.state, SetState::Published),
             Publication::Pending(_) => panic!("unexpected pending publication"),
         }

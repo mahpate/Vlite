@@ -413,7 +413,9 @@ private admin volume.
    before any cloud request). A clean shutdown refuses new cloud operations
    (503 `cloud_backup_closed`) and waits up to 10 seconds for the running
    ones. A run still going after that is not stopped: it can no longer write
-   the status or start publishing, and the next start counts it in
+   the status or commit a publication (a new one or an earlier unconfirmed
+   one; the check repeats right before each commit), and the next start
+   counts it in
    `interrupted` (`last_error.code` `cloud_backup_interrupted`), as it does
    a run cut short by a crash or a panic. Collection later removes the set
    it left unpublished. The interval is measured on the wall clock. If the
