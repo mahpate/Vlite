@@ -18,7 +18,7 @@ use sha2::{Digest, Sha256};
 use std::{
     io::{BufRead, BufReader, Read, Write},
     net::TcpStream,
-    path::Path,
+    path::{Path, PathBuf},
     process::{Child, Command, Stdio},
     sync::mpsc,
     time::{Duration, SystemTime, UNIX_EPOCH},
@@ -410,6 +410,55 @@ fn azurite_backup_restore_and_isolated_rekey_recovery() {
     assert!(!copy_admin.join("credentials.json").exists());
     assert!(!copy_admin.join("webhooks.json").exists());
     assert!(!copy_admin.join("cloud-backup").exists());
+    // Every pin taken by the two restores is gone, and a second restore into
+    // the same output is refused without changing it.
+    let (ok, listing, stderr) = cli(&[
+        "cloud-sets".as_ref(),
+        "--target-file".as_ref(),
+        target_file.as_os_str(),
+        "--shared-key-file".as_ref(),
+        key_file.as_os_str(),
+    ]);
+    assert!(ok, "{stderr}");
+    assert_eq!(listing["sets"][0]["record"]["pins"], json!([]), "{listing}");
+    let snapshot = |dir: &Path| -> Vec<(PathBuf, Vec<u8>)> {
+        let mut files = Vec::new();
+        let mut pending = vec![dir.to_path_buf()];
+        while let Some(next) = pending.pop() {
+            for entry in std::fs::read_dir(&next).unwrap() {
+                let path = entry.unwrap().path();
+                if path.is_dir() {
+                    pending.push(path);
+                } else {
+                    files.push((path.clone(), std::fs::read(&path).unwrap()));
+                }
+            }
+        }
+        files.sort();
+        files
+    };
+    let before = snapshot(&output);
+    let (ok, _, stderr) = cli(&[
+        "cloud-restore".as_ref(),
+        "--target-file".as_ref(),
+        target_file.as_os_str(),
+        "--shared-key-file".as_ref(),
+        key_file.as_os_str(),
+        "--set".as_ref(),
+        set_id.as_ref(),
+        "--output".as_ref(),
+        output.as_os_str(),
+        "--admin-username".as_ref(),
+        "restorer".as_ref(),
+        "--admin-password-file".as_ref(),
+        restorer_password.as_os_str(),
+    ]);
+    assert!(!ok, "an existing output must be refused");
+    assert!(!stderr.contains(RESTORER_PASSWORD));
+    assert!(
+        snapshot(&output) == before,
+        "the refused restore changed {output:?}"
+    );
 
     // The recovered copy starts on its own, with a new token: data is back,
     // only the fresh admin can sign in, the imported owner stays disabled.
