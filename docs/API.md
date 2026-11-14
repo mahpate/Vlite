@@ -821,7 +821,11 @@ session, token, filesystem path or host identity. Each
 object is named by its SHA-256 and created once; it is read back and checked
 before the manifest is written, and a set becomes restorable only when its
 record is published by a compare-and-set. A publication whose outcome was
-unknown is resolved by the next run before anything else.
+unknown is resolved by the next run before anything else. The manifest also
+names the policy revision, a SHA-256 of the policy document and the retention
+terms in force. Integrity rests on the SHA-256 chain from record to manifest
+to objects; blob version IDs and ETags are not recorded, and manifests are
+not signed, so authenticity rests on who may write the containers.
 
 **Restore is rekey-only.** The restored copy gets a new lineage, so existing
 scoped credentials, sessions and replication cursors do not carry over:

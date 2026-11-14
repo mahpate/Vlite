@@ -345,7 +345,7 @@ pub(super) fn lineage_hex(lineage: u64) -> String {
     format!("{lineage:016x}")
 }
 
-fn sha_hex(bytes: &[u8]) -> String {
+pub(super) fn sha_hex(bytes: &[u8]) -> String {
     hex(&Sha256::digest(bytes))
 }
 
@@ -515,7 +515,27 @@ pub(super) struct ObjectEntry {
     pub bytes: u64,
 }
 
+/// The backup policy a set was captured under: its revision (the time it
+/// was saved), a SHA-256 of the whole policy document (target and
+/// schedule; it holds no secret) and the retention terms then in force.
+/// Pins and drills change after publication and live in the record.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(super) struct PolicyCapture {
+    pub revision_unix_ms: Option<u64>,
+    pub sha256: String,
+    pub retention_enabled: bool,
+    pub keep_sets: usize,
+    pub keep_days: u64,
+}
+
 /// Immutable set description, written after every object it names.
+///
+/// Objects are named by their SHA-256 and created only if absent; the
+/// record binds the manifest's SHA-256, so the chain record -> manifest ->
+/// objects names exact bytes. Blob version IDs and per-object ETags are not
+/// recorded: this profile does not require account blob versioning or
+/// immutability policies (a later, separately qualified scope).
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub(super) struct Manifest {
@@ -530,6 +550,7 @@ pub(super) struct Manifest {
     pub rekey_only: bool,
     pub database: DatabaseSummary,
     pub objects: Vec<ObjectEntry>,
+    pub policy: PolicyCapture,
 }
 
 impl Manifest {
@@ -540,6 +561,7 @@ impl Manifest {
         verification: &maintenance::Verification,
         detail: &maintenance::InspectionDetail,
         uploads: &[Upload],
+        policy: PolicyCapture,
     ) -> Self {
         let i = &verification.inspection;
         Self {
@@ -569,6 +591,7 @@ impl Manifest {
                     bytes: u.bytes,
                 })
                 .collect(),
+            policy,
         }
     }
 
@@ -588,6 +611,9 @@ impl Manifest {
             return Err(corrupt(
                 "manifest profile is not restorable by this version",
             ));
+        }
+        if !is_sha256(&self.policy.sha256) {
+            return Err(corrupt("manifest policy capture is invalid"));
         }
         if self.objects.len() != 2 || self.objects.iter().any(|o| !is_sha256(&o.sha256)) {
             return Err(corrupt("manifest object list is invalid"));
@@ -1769,6 +1795,17 @@ impl Sets {
 pub(super) mod fake {
     use super::*;
 
+    /// A policy capture for manifests built directly in tests.
+    pub fn policy_capture() -> PolicyCapture {
+        PolicyCapture {
+            revision_unix_ms: Some(1),
+            sha256: sha_hex(b"test policy"),
+            retention_enabled: false,
+            keep_sets: 3,
+            keep_days: 30,
+        }
+    }
+
     #[derive(Clone, Copy, Debug, PartialEq, Eq)]
     pub enum Op {
         Get,
@@ -2017,7 +2054,15 @@ mod tests {
             Upload::file(ROLE_DATABASE, path).unwrap(),
             Upload::bytes(ROLE_BUNDLE, bundle_bytes(detail.lineage)),
         ];
-        let manifest = Manifest::new(id, INSTALL, now, &verification, &detail, &uploads);
+        let manifest = Manifest::new(
+            id,
+            INSTALL,
+            now,
+            &verification,
+            &detail,
+            &uploads,
+            fake::policy_capture(),
+        );
         (manifest, uploads)
     }
 
@@ -2241,6 +2286,20 @@ mod tests {
         let err = env.sets.fetch(&id, &pin.id, dir.path()).err().unwrap();
         assert_eq!(err.code, "cloud_database_too_large", "{}", err.message);
         assert_eq!(std::fs::read_dir(dir.path()).unwrap().count(), 0);
+    }
+
+    #[test]
+    fn a_manifest_without_a_valid_policy_capture_is_refused() {
+        let env = setup();
+        let (mut manifest, _) = prepare(&env, BASE);
+        let id = manifest.set_id.clone();
+        assert!(manifest.check(&id, INSTALL).is_ok());
+        let mut value = serde_json::to_value(&manifest).unwrap();
+        value.as_object_mut().unwrap().remove("policy");
+        assert!(serde_json::from_value::<Manifest>(value).is_err());
+        manifest.policy.sha256 = "not-a-digest".into();
+        let err = manifest.check(&id, INSTALL).err().unwrap();
+        assert_eq!(err.code, "cloud_set_corrupt");
     }
 
     #[test]

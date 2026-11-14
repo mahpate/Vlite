@@ -393,8 +393,9 @@ private admin volume.
   it needs read, create, overwrite-with-ETag and delete. `Storage Blob Data
   Contributor` scoped to those two containers covers both. Without a
   coordination container both roles share one container.
-- Immutability policies and versioning on the data container are compatible
-  but have not been qualified with real Azure in this release.
+- Blob versioning and immutability policies are neither required nor
+  qualified: sets name objects by SHA-256, not by version ID, and a
+  time-based immutability policy would make retention deletes fail.
 
 ### Run, check and restore
 

@@ -646,7 +646,15 @@ mod tests {
         ];
         let at = now();
         let set_id = cloud::new_set_id(at).unwrap();
-        let manifest = Manifest::new(&set_id, INSTALL, at, &verification, &detail, &uploads);
+        let manifest = Manifest::new(
+            &set_id,
+            INSTALL,
+            at,
+            &verification,
+            &detail,
+            &uploads,
+            cloud::fake::policy_capture(),
+        );
         match sets.publish(&manifest, &uploads, at).unwrap() {
             Publication::Published(record) => assert_eq!(record.state, SetState::Published),
             Publication::Pending(_) => panic!("unexpected pending publication"),

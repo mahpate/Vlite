@@ -167,6 +167,26 @@ pub(super) struct Job {
     pub phase: String,
 }
 
+/// The policy a job runs under and its revision, read together when the
+/// job is admitted so the manifest names the policy actually used.
+struct Admitted {
+    policy: Policy,
+    revision: Option<u64>,
+}
+
+impl Admitted {
+    fn capture(&self) -> Result<cloud::PolicyCapture, ApiError> {
+        let document = serde_json::to_vec(&self.policy).map_err(internal)?;
+        Ok(cloud::PolicyCapture {
+            revision_unix_ms: self.revision,
+            sha256: cloud::sha_hex(&document),
+            retention_enabled: self.policy.retention_enabled,
+            keep_sets: self.policy.keep_sets,
+            keep_days: self.policy.keep_days,
+        })
+    }
+}
+
 const PHASE_PUBLISH: &str = "publish";
 const PHASE_AFTER_PUBLISH: &str = "after_publish";
 
@@ -886,7 +906,7 @@ impl Runtime {
     /// mid-run leaves the job for the next start to record.
     fn cycle(&self, handle: &Handle, scheduled: bool) -> Result<Value, ApiError> {
         let started = now();
-        let (policy, installation) = self.configured()?;
+        let (_, installation) = self.configured()?;
         let mut bytes = [0u8; 8];
         getrandom::fill(&mut bytes).map_err(internal)?;
         let id = hex(&bytes);
@@ -897,24 +917,40 @@ impl Runtime {
             phase: PHASE_PUBLISH.into(),
         };
         let mut pending = None;
-        let admitted = self.update(|l| {
+        let mut admitted = None;
+        let saved = self.update(|l| {
+            let Some(policy) = l.policy.clone() else {
+                return;
+            };
             l.status.last_attempt_unix_ms = Some(started);
             l.status.job = Some(job);
             pending = l.status.pending.clone();
+            admitted = Some(Admitted {
+                policy,
+                revision: l.status.policy_updated_unix_ms,
+            });
         });
-        if let Err(error) = admitted {
+        if let Err(error) = saved {
             // Not durably admitted: nothing remote was attempted.
             if let Ok(mut loaded) = self.state.lock() {
                 loaded.status.job.take_if(|job| job.id == id);
             }
             return Err(error);
         }
+        let admitted = admitted.ok_or_else(not_configured)?;
         let guard = Unwinding {
             runtime: self,
             handle,
             id: &id,
         };
-        let result = self.run_job(handle, scheduled, &policy, &installation, pending, started);
+        let result = self.run_job(
+            handle,
+            scheduled,
+            &admitted,
+            &installation,
+            pending,
+            started,
+        );
         drop(guard);
         self.note(|l| {
             l.status.job.take_if(|job| job.id == id);
@@ -929,12 +965,13 @@ impl Runtime {
         &self,
         handle: &Handle,
         scheduled: bool,
-        policy: &Policy,
+        admitted: &Admitted,
         installation: &str,
         pending: Option<cloud::Pending>,
         started: u64,
     ) -> Result<Value, ApiError> {
-        let outcome = self.publish(handle, policy, installation, pending, started);
+        let policy = &admitted.policy;
+        let outcome = self.publish(handle, admitted, installation, pending, started);
         let (sets, record, settled) = match outcome {
             Ok(done) => done,
             Err(error) if error.code == "busy" => {
@@ -1005,13 +1042,14 @@ impl Runtime {
     fn publish(
         &self,
         handle: &Handle,
-        policy: &Policy,
+        admitted: &Admitted,
         installation: &str,
         pending: Option<cloud::Pending>,
         now: u64,
     ) -> Result<(Sets, cloud::Record, Option<Value>), ApiError> {
         handle.refusal()?;
-        let sets = (self.connector)(&policy.target)?;
+        let capture = admitted.capture()?;
+        let sets = (self.connector)(&admitted.policy.target)?;
         sets.ensure_owner(installation, now)?;
         let settled = match pending {
             Some(pending) => Some(self.settle(handle, &sets, &pending, now)?),
@@ -1046,7 +1084,15 @@ impl Runtime {
             ),
         ];
         let set_id = cloud::new_set_id(now)?;
-        let manifest = Manifest::new(&set_id, installation, now, &verification, &detail, &uploads);
+        let manifest = Manifest::new(
+            &set_id,
+            installation,
+            now,
+            &verification,
+            &detail,
+            &uploads,
+            capture,
+        );
         let publication = sets.publish(&manifest, &uploads, now)?;
         drop(staged);
         match publication {
@@ -1981,6 +2027,41 @@ mod tests {
         assert_eq!(adopted["target"]["prefix"], "vlite/next/");
         assert!(pending.is_null());
         assert_eq!(durable(&reopen(&env)), (adopted, pending));
+    }
+
+    /// The manifest names the policy the job ran under, read with its
+    /// revision when the job was admitted.
+    #[test]
+    fn a_published_manifest_names_the_admitted_policy() {
+        let env = setup();
+        let h = Handle::new(&env.service);
+        let saved = policy(json!({"drill_every":0,"keep_sets":4,"keep_days":45}));
+        let view = env.runtime.configure(saved.clone(), &h, BASE).unwrap();
+        let revision = view["status"]["policy_updated_unix_ms"].as_u64().unwrap();
+        let id = env.runtime.run_now(&h).unwrap()["set_id"]
+            .as_str()
+            .unwrap()
+            .to_owned();
+        let name = format!("{id}/manifest.json");
+        let (store, key) = [&env.meta, &env.data]
+            .into_iter()
+            .find_map(|store| {
+                let key = store.names().into_iter().find(|n| n.ends_with(&name))?;
+                Some((store, key))
+            })
+            .expect("a published manifest");
+        let manifest: Manifest = serde_json::from_slice(&store.raw(&key).unwrap()).unwrap();
+        let digest = cloud::sha_hex(&serde_json::to_vec(&saved).unwrap());
+        assert_eq!(
+            manifest.policy,
+            cloud::PolicyCapture {
+                revision_unix_ms: Some(revision),
+                sha256: digest,
+                retention_enabled: false,
+                keep_sets: 4,
+                keep_days: 45,
+            }
+        );
     }
 
     #[test]
