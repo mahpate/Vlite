@@ -399,12 +399,16 @@ fn hash_file(path: &FilePath) -> std::io::Result<(String, u64)> {
     Ok((sha, bytes))
 }
 
+/// The number of random alphanumeric characters after a `private_dir`
+/// prefix; cleanup recognizes generated names by it.
+pub(super) const PRIVATE_DIR_RANDOM: usize = 12;
+
 /// A new temporary directory under `parent`, owner-only (0700) from
 /// creation on Unix. On Windows it inherits the parent's ACL, so downloads
 /// and restores must stage under a private parent.
 pub(super) fn private_dir(parent: &FilePath, prefix: &str) -> std::io::Result<tempfile::TempDir> {
     let mut builder = tempfile::Builder::new();
-    builder.prefix(prefix);
+    builder.prefix(prefix).rand_bytes(PRIVATE_DIR_RANDOM);
     #[cfg(unix)]
     {
         use std::os::unix::fs::PermissionsExt;

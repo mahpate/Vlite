@@ -381,28 +381,71 @@ impl Drop for Staging {
     }
 }
 
+/// Whether `name` is one that `Staging::create` generates.
+fn generated_staging_name(name: &std::ffi::OsStr) -> bool {
+    name.to_str()
+        .and_then(|name| name.strip_prefix(STAGING_PREFIX))
+        .is_some_and(|random| {
+            random.len() == cloud::PRIVATE_DIR_RANDOM
+                && random.bytes().all(|b| b.is_ascii_alphanumeric())
+        })
+}
+
+/// Whether a staging directory holds only what a restore writes there.
+fn only_staging_entries(path: &FilePath) -> bool {
+    let Ok(entries) = std::fs::read_dir(path) else {
+        return false;
+    };
+    entries.into_iter().all(|entry| {
+        let Ok((name, kind)) = entry.and_then(|e| Ok((e.file_name(), e.file_type()?))) else {
+            return false;
+        };
+        match name.to_str() {
+            Some(STAGING_LOCK) => kind.is_file(),
+            Some("download" | "output") => kind.is_dir(),
+            _ => false,
+        }
+    })
+}
+
+/// Reads a lock file as `Staging::create` writes it: empty until it is
+/// locked (`Some(false)`), then the owner's process ID and a newline
+/// (`Some(true)`). Anything else is not a restore's lock (`None`).
+fn lock_written(lock: &mut std::fs::File) -> Option<bool> {
+    let mut bytes = Vec::new();
+    Read::take(&mut *lock, 12).read_to_end(&mut bytes).ok()?;
+    match bytes.as_slice() {
+        [] => Some(false),
+        [pid @ .., b'\n']
+            if (1..=10).contains(&pid.len()) && pid.iter().all(u8::is_ascii_digit) =>
+        {
+            Some(true)
+        }
+        _ => None,
+    }
+}
+
 /// Removes staging directories that interrupted restores left in `parent`:
 /// those whose lock is free after it was taken (the PID is written under
 /// the lock), and those that are over an hour old without a taken lock. A
 /// live restore holds its lock, whatever its age, and is never touched.
+/// Only a directory with a generated name, holding nothing but a restore's
+/// entries and a lock in the expected format, is a candidate: anything else
+/// is left alone.
 fn remove_stale_staging(parent: &FilePath) -> usize {
     let Ok(entries) = std::fs::read_dir(parent) else {
         return 0;
     };
     let mut removed = 0;
     for entry in entries.flatten() {
-        if !entry
-            .file_name()
-            .to_string_lossy()
-            .starts_with(STAGING_PREFIX)
-        {
+        if !generated_staging_name(&entry.file_name()) {
             continue;
         }
         let path = entry.path();
         let Ok(meta) = std::fs::symlink_metadata(&path) else {
             continue;
         };
-        if !meta.is_dir() || meta.file_type().is_symlink() {
+        if !meta.is_dir() || meta.file_type().is_symlink() || !only_staging_entries(&path) {
             continue;
         }
         let old = meta
@@ -412,10 +455,11 @@ fn remove_stale_staging(parent: &FilePath) -> usize {
             .is_some_and(|age| age >= STALE_UNLOCKED);
         let stale = match std::fs::File::open(path.join(STAGING_LOCK)) {
             Ok(mut lock) => {
-                lock.try_lock().is_ok() && {
-                    let mut byte = [0u8; 1];
-                    old || lock.read(&mut byte).is_ok_and(|read| read == 1)
-                }
+                lock.try_lock().is_ok()
+                    && match lock_written(&mut lock) {
+                        Some(written) => written || old,
+                        None => false,
+                    }
             }
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => old,
             Err(_) => false,
@@ -1365,28 +1409,55 @@ mod tests {
         let root = dir.path();
         let live = Staging::create(root).unwrap();
         let crashed = Staging::create(root).unwrap().abandon();
+        assert!(generated_staging_name(crashed.file_name().unwrap()));
+        let generated =
+            |tag: char| root.join(format!("{STAGING_PREFIX}{}", tag.to_string().repeat(12)));
+        let staged = |path: &FilePath, lock: &[u8]| {
+            std::fs::create_dir(path).unwrap();
+            std::fs::create_dir(path.join("output")).unwrap();
+            std::fs::write(path.join(STAGING_LOCK), lock).unwrap();
+        };
         // Created but not yet locked (or never locked) and recent: kept.
-        let unlocked = root.join(format!("{STAGING_PREFIX}unlocked"));
-        std::fs::create_dir(&unlocked).unwrap();
-        std::fs::write(unlocked.join(STAGING_LOCK), b"").unwrap();
-        let fresh = root.join(format!("{STAGING_PREFIX}fresh"));
+        let unlocked = generated('u');
+        staged(&unlocked, b"");
+        let fresh = generated('f');
         std::fs::create_dir(&fresh).unwrap();
-        let file = root.join(format!("{STAGING_PREFIX}file"));
+        let file = generated('x');
         std::fs::write(&file, b"x").unwrap();
+        // Review N-02: entries that only look like staging are kept.
+        let junk_lock = generated('j');
+        staged(&junk_lock, b"operator notes");
+        let extra = generated('e');
+        staged(&extra, b"4242\n");
+        std::fs::write(extra.join("notes.txt"), b"keep").unwrap();
+        let wrong_kind = generated('w');
+        std::fs::create_dir(&wrong_kind).unwrap();
+        std::fs::write(wrong_kind.join("output"), b"keep").unwrap();
+        std::fs::write(wrong_kind.join(STAGING_LOCK), b"4242\n").unwrap();
+        let named = root.join(format!("{STAGING_PREFIX}operator-copy"));
+        staged(&named, b"4242\n");
+        // A crashed restore's layout under a generated name: removed.
+        let pid_lock = generated('p');
+        staged(&pid_lock, b"4242\n");
         std::fs::create_dir(root.join("restored")).unwrap();
 
         assert!(crashed.exists());
-        assert_eq!(remove_stale_staging(root), 1);
-        assert!(!crashed.exists());
+        assert_eq!(remove_stale_staging(root), 2);
+        assert!(!crashed.exists() && !pid_lock.exists());
         for kept in [
             live.path(),
             &unlocked,
             &fresh,
             &file,
+            &junk_lock,
+            &extra,
+            &wrong_kind,
+            &named,
             &root.join("restored"),
         ] {
             assert!(kept.exists(), "{kept:?}");
         }
+        assert_eq!(std::fs::read(extra.join("notes.txt")).unwrap(), b"keep");
         let live_path = live.path().to_owned();
         drop(live);
         assert!(

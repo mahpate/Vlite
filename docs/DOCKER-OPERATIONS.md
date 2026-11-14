@@ -462,8 +462,9 @@ private admin volume.
    No credential, session or webhook is restored. Start a server on the
    restored files, then re-create credentials and webhooks.
 
-   If a restore is interrupted, run it again: it removes abandoned staging
-   directories first. The final move never replaces anything: if a file or
+   If a restore is interrupted, run it again: it first removes abandoned
+   staging directories, recognized by their generated name, their contents
+   and a free lock; any other `.vlite-cloud-restore-*` entry is left alone. The final move never replaces anything: if a file or
    directory appears at `--output` while the restore runs, the restore fails
    with `restore_destination_exists` and leaves it untouched. A file system
    that cannot rename without replacing (`restore_publication_unsupported`)
