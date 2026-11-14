@@ -209,6 +209,11 @@ ADMIN_DYNAMIC = {
     "/v1/admin/users/{id}/password": '`/v1/admin/users/${id}/password`',
     "/v1/admin/webhooks/{id}": '`/v1/admin/webhooks/${webhookId()}`',
     "/v1/admin/audit/persistent": '`/v1/admin/audit/persistent?limit=${limit}`',
+    "/v1/admin/cloud-backup/sets/{id}/drill": '`/v1/admin/cloud-backup/sets/${cloudSet()}/drill`',
+    "/v1/admin/cloud-backup/sets/{id}/restore": '`/v1/admin/cloud-backup/sets/${cloudSet()}/restore`',
+    "/v1/admin/cloud-backup/sets/{id}/pins": '`/v1/admin/cloud-backup/sets/${cloudSet()}/pins`',
+    "/v1/admin/cloud-backup/sets/{id}/pins/{pin}":
+        '`/v1/admin/cloud-backup/sets/${cloudSet()}/pins/${encodeURIComponent(pin)}`',
 }
 for (method, path), (script, control) in ADMIN_INVENTORY.items():
     if control in ADMIN_SPECIAL:

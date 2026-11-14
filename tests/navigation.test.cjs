@@ -22,7 +22,7 @@ const layout = {
   operations: ["administration", "operations"],
   users: ["administration", "users"], credentials: ["administration", "users"], tenants: ["administration", "users"],
   "admin-token-management": ["administration", "users"], "admin-persistent-audit": ["administration", "users"],
-  "admin-backups": ["administration", "admin-backups"], "admin-backup-schedule": ["administration", "admin-backups"], "admin-compaction": ["administration", "admin-backups"],
+  "admin-backups": ["administration", "admin-backups"], "admin-backup-schedule": ["administration", "admin-backups"], "admin-cloud-backup": ["administration", "admin-backups"], "admin-compaction": ["administration", "admin-backups"],
   "admin-pitr": ["administration", "admin-backups"], replication: ["administration", "admin-backups"],
   "admin-auto-maintenance": ["administration", "admin-auto-maintenance"],
   webhooks: ["administration", "admin-auto-maintenance"], "transport-security": ["administration", "admin-auto-maintenance"],

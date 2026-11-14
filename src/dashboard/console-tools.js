@@ -2048,6 +2048,66 @@
       if (result?.config) scheduleConfig = result.config;
       text("backup-schedule-result", result);
     });
+    // Cloud backup (Azure Blob): persisted policy, sets, drills, rekey-only restores and pins.
+    const cloudSet = () => {
+      const id = $("cloud-backup-set").value.trim();
+      if (!id) throw new Error("Enter a set ID (List cloud sets shows them)");
+      return encodeURIComponent(id);
+    };
+    on("cloud-backup-read", async () => {
+      admin("cloud_backup");
+      const result = await ctx.api("GET", "/v1/admin/cloud-backup");
+      if (result?.policy) $("cloud-backup-policy").value = JSON.stringify(result.policy, null, 2);
+      text("cloud-backup-result", result);
+    });
+    on("cloud-backup-save", async () => {
+      admin("cloud_backup");
+      const policy = get("cloud-backup-policy");
+      const target = policy.target || {};
+      const parts = [policy.enabled ? `back up every ${policy.interval_secs || 3600} s` : "scheduled cloud backups OFF",
+        policy.retention_enabled ? "RETENTION ON: sets beyond the kept count and age will be DELETED (pinned sets and the newest verified set are kept)" : "retention off (nothing is deleted)"];
+      if (!await ctx.confirm(`Replace the cloud backup policy with account ${target.account}, container ${target.container}, prefix ${target.prefix}? Result: ${parts.join("; ")}. The policy is saved and survives restarts.`)) return;
+      text("cloud-backup-result", await ctx.api("PUT", "/v1/admin/cloud-backup", policy, { data: false }));
+    });
+    on("cloud-backup-run", async () => {
+      admin("cloud_backup");
+      if (!await ctx.confirm("Publish one cloud backup set now? It snapshots the database and uploads it, then drills and collects as the policy asks. Not idempotent: retrying after an uncertain response publishes another set.")) return;
+      text("cloud-backup-result", await ctx.api("POST", "/v1/admin/cloud-backup/run", undefined, { data: false }));
+    });
+    on("cloud-backup-collect", async () => {
+      admin("cloud_backup");
+      if (!await ctx.confirm("Collect cloud backup sets now? It removes unpublished staging sets and finishes interrupted deletions; it deletes published sets only when retention is enabled.")) return;
+      text("cloud-backup-result", await ctx.api("POST", "/v1/admin/cloud-backup/collect", undefined, { data: false }));
+    });
+    on("cloud-backup-list", async () => {
+      admin("cloud_backup");
+      text("cloud-backup-result", await ctx.api("GET", "/v1/admin/cloud-backup/sets"));
+    });
+    on("cloud-backup-drill", async () => {
+      admin("cloud_backup");
+      const id = cloudSet();
+      if (!await ctx.confirm(`Drill cloud set ${decodeURIComponent(id)}? It downloads and verifies the set into a private scratch copy, probes it and deletes it. The live database is not touched.`)) return;
+      text("cloud-backup-result", await ctx.api("POST", `/v1/admin/cloud-backup/sets/${cloudSet()}/drill`, undefined, { data: false }));
+    });
+    on("cloud-backup-restore", async () => {
+      admin("cloud_backup");
+      const id = cloudSet();
+      if (!await ctx.confirm(`Restore cloud set ${decodeURIComponent(id)} as a new restore-*.vlite copy with a new lineage? The live database is not touched and nothing is selected. Credentials and sessions are not restored: re-key every client after you select the copy and restart.`)) return;
+      text("cloud-backup-result", await ctx.api("POST", `/v1/admin/cloud-backup/sets/${cloudSet()}/restore`, { mode: "restore" }, { data: false }));
+    });
+    on("cloud-backup-pin", async () => {
+      admin("cloud_backup");
+      const reason = $("cloud-backup-pin-reason").value.trim();
+      if (!reason) throw new Error("Enter a pin reason");
+      text("cloud-backup-result", await ctx.api("POST", `/v1/admin/cloud-backup/sets/${cloudSet()}/pins`, { reason }, { data: false }));
+    });
+    on("cloud-backup-unpin", async () => {
+      admin("cloud_backup");
+      const pin = $("cloud-backup-pin-id").value.trim();
+      if (!pin) throw new Error("Enter the pin ID to remove");
+      if (!await ctx.confirm(`Remove pin ${pin}? Retention may then delete the set.`)) return;
+      text("cloud-backup-result", await ctx.api("DELETE", `/v1/admin/cloud-backup/sets/${cloudSet()}/pins/${encodeURIComponent(pin)}`, undefined, { data: false }));
+    });
     for (const [name, verb] of [["backup-verify", "verify"], ["backup-drill", "drill"]]) on(name, async () => {
       admin("backup_verify_drill");
       const backup = $("backup-name").value;
@@ -2218,7 +2278,7 @@
         preview = []; previewCollection = null; sample = []; $("auto-health").checked = false; $("projection").replaceChildren();
         prepared = null; job = null; stopRequested = true; showSecret(null); scheduleConfig = null;
         for (const name of ["import-result", "sample-analysis", "record-comparison", "search-comparison", "scenario-result", "health-result", "code-examples", "payload-preview", "vector-slice-result", "vector-summary", "compatibility", "rebuild-result", "maintenance-result", "maintenance-scope", "token-result", "audit-result", "backup-result",
-          "collection-result", "quality-result", "job-result", "job-invalid", "auto-maintenance-result", "backup-schedule-result", "slow-summary", "prometheus-result", "cred-result", "persistent-audit-result"]) text(name, "");
+          "collection-result", "quality-result", "job-result", "job-invalid", "auto-maintenance-result", "backup-schedule-result", "cloud-backup-result", "slow-summary", "prometheus-result", "cred-result", "persistent-audit-result"]) text(name, "");
         for (const name of ["batch-ids", "request-body", "scenario", "filter-value", "import-file", "scenario-file", "job-file", "job-id", "new-collection-name", "drop-collection-name", "cred-name"]) $(name).value = "";
         for (const name of ["cred-graphs", "cred-tenant", "cred-rpm", "cred-max-vectors", "cred-max-vectors-per-collection"]) if ($(name)) $(name).value = "";
         $("batch-metadata").value = "{}"; $("collection-settings").value = "{}"; $("new-collection-settings").value = "{}";
@@ -2229,7 +2289,7 @@
       },
       connected(caps) {
         const f = caps.features || {};
-        const flags = ["collections", "imports", "per_record_etags", "search_auto", "search_hybrid", "search_explain", "quantization", "auto_maintenance", "backup_schedule", "backup_verify_drill", "slow_query_log", "prometheus_metrics", "scoped_credentials", "persistent_audit"];
+        const flags = ["collections", "imports", "per_record_etags", "search_auto", "search_hybrid", "search_explain", "quantization", "auto_maintenance", "backup_schedule", "backup_verify_drill", "cloud_backup", "slow_query_log", "prometheus_metrics", "scoped_credentials", "persistent_audit"];
         const available = flags.filter((flag) => f[flag] === true), missing = flags.filter((flag) => f[flag] !== true);
         text("admin-note", `Role: ${caps.role}${caps.scope ? ` (collections ${caps.scope.collections.join(", ")}; operations ${caps.scope.operations.join(", ")}; expires ${when(caps.scope.expires_unix_ms)})` : ""}; API v${caps.api_version}${caps.format_version !== undefined ? `; database format v${caps.format_version}` : ""}. Backup/restore ${f.backup_restore ? "enabled" : "disabled: configure VLITE_ADMIN_DIR"}. Token-file reload ${f.tokens_reload ? "available" : "unavailable: use configured files or restart"}. Available: ${available.join(", ") || "none of the newer features"}. Not available on this server/configuration: ${missing.join(", ") || "none"}.`);
         if (caps.format_version !== undefined) formatNote(caps.format_version);

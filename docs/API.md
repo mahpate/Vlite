@@ -765,6 +765,83 @@ original file, or to an earlier VLite release, restore from a backup or
 recovery copy while the server is stopped. The restore guide in
 [DOCKER-OPERATIONS.md](DOCKER-OPERATIONS.md#file-compaction) has the steps.
 
+### Cloud backups to Azure Blob (opt-in, off by default)
+
+The server can publish verified backup sets of its database to Azure Blob
+Storage and restore one as an isolated copy. These routes need a super
+administrator (admin token or `super_admin` account); read-only, scoped and
+tenant credentials get 403. They need `VLITE_ADMIN_DIR`; without it they
+answer 409 `admin_directory_disabled`. Dashboard calls need the usual
+same-origin and CSRF headers. The dashboard card is **Administration → Backup
+& recovery → Cloud backup**.
+
+| Route | Purpose |
+| --- | --- |
+| `GET /v1/admin/cloud-backup` | Policy, installation ID, run status (last attempt, success, error code, unknown publication) and the next scheduled run. |
+| `PUT /v1/admin/cloud-backup` | Save the policy (body below). Does no remote work. |
+| `POST /v1/admin/cloud-backup/run` | Publish one set now. Answers 201. **Not idempotent**: retrying after an unseen outcome can publish another set, so read the status or the set list first. |
+| `POST /v1/admin/cloud-backup/collect` | Cleanup now: removes unpublished sets older than `orphan_grace_hours` and finishes interrupted deletions; deletes published sets only when `retention_enabled` is set. A run collects automatically only with retention on. |
+| `GET /v1/admin/cloud-backup/sets` | Sets under the prefix with state, pins and the last drill. |
+| `POST /v1/admin/cloud-backup/sets/{id}/drill` | Download, verify, restore to scratch and probe a set; records the result. |
+| `POST /v1/admin/cloud-backup/sets/{id}/restore` | Write a new-lineage `restore-*.vlite` copy into the admin directory. Answers 201. |
+| `POST /v1/admin/cloud-backup/sets/{id}/pins` | Hold a set against retention: `{"reason": "…"}` (1–200 characters). Answers 201 with the pin ID. |
+| `DELETE /v1/admin/cloud-backup/sets/{id}/pins/{pin}` | Release a pin. |
+
+The policy is persisted in `<admin>/cloud-backup/policy.json` and survives
+restarts. It holds no secret:
+
+```json
+{"target": {"account": "contosobackup", "container": "vlite-data",
+            "coordination_container": "vlite-meta", "prefix": "vlite/prod/"},
+ "enabled": true, "interval_secs": 3600,
+ "retention_enabled": false, "keep_sets": 3, "keep_days": 30,
+ "orphan_grace_hours": 24, "drill_every": 24}
+```
+
+* `target.auth` defaults to `managed_identity`; `client_id` selects a
+  user-assigned identity. `emulator_shared_key` is accepted only with a
+  loopback `endpoint` (a local Azurite) and reads the key from the file named
+  by `VLITE_CLOUD_BACKUP_SHARED_KEY_FILE`.
+* `interval_secs` 300–604800 (default 3600). `enabled: false` stops scheduled
+  runs; manual runs still work.
+* Retention keeps a set while it is among the newest `keep_sets` (3–1000) or
+  younger than `keep_days` (30–3650), pinned, the newest verified set or the
+  newest set whose last drill passed. Staging sets that never published are
+  removed after `orphan_grace_hours` (1–720).
+* `drill_every` drills every Nth published set (0–100, 0 turns scheduled
+  drills off).
+
+**What a set holds.** A consistent snapshot of the database file and a
+recovery bundle: tenants, dashboard account names and roles, the scoped
+credential inventory and the names of the secrets a restore target must
+provision. It never holds a secret value, password or credential hash,
+session, token, filesystem path or host identity. Each
+object is named by its SHA-256 and created once; it is read back and checked
+before the manifest is written, and a set becomes restorable only when its
+record is published by a compare-and-set. A publication whose outcome was
+unknown is resolved by the next run before anything else.
+
+**Restore is rekey-only.** The restored copy gets a new lineage, so existing
+scoped credentials, sessions and replication cursors do not carry over:
+reissue credentials after you switch. The route never touches the live
+database; select the copy with `POST /v1/admin/restores/select` and restart.
+`{"mode": "seed"}` (same-lineage standby seeding) is refused with 409
+`cloud_seed_mode_deferred`. For a restore on a fresh host, use the offline
+`vlite-server cloud-sets` and `vlite-server cloud-restore` commands (see
+[DOCKER-OPERATIONS.md](DOCKER-OPERATIONS.md#cloud-backups-to-azure-blob)).
+
+**Refused, not attempted.** These answer 409 with a reason code: an
+encrypted database (`encrypted_cloud_backup_unqualified`), served memory
+reservations (`memory_reservations_present`), an in-memory or recovery-mode
+server (`cloud_backup_requires_database_file`) and a prefix owned by another
+installation (`cloud_prefix_owned`). Errors: 409 conflicts
+such as `cloud_backup_not_configured`, `cloud_publication_lost`,
+`cloud_set_unpublished` or `cloud_set_unavailable`; 404 `cloud_set_not_found`
+or `cloud_pin_not_found`; 400 or 422 `invalid_json` and 422 `invalid_input`; 502 `cloud_store_failed` or
+`cloud_set_corrupt`; 503 `busy`, `cloud_store_unavailable` or
+`cloud_publication_unknown`. Policy changes, runs, collections, drills,
+restores and pins are audited.
+
 `POST /v1/collections/{collection}/index/disk-ann` builds the collection's
 rebuildable sidecar under `VLITE_ADMIN_DIR`; `POST .../search/disk-ann` requires
 a fresh sidecar: with none built it answers 409 `disk_ann_not_built`, and after

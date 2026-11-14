@@ -784,6 +784,25 @@
     <button id="backup-schedule-run" data-admin data-feature="backup_schedule" type="button" class="secondary">Run one scheduled cycle now</button>
     <pre id="backup-schedule-result"></pre>
   </section>
+  <section id="admin-cloud-backup" class="wide">
+    <h2>Cloud backup (Azure Blob)</h2>
+    <p data-admin-availability="cloud_backup">Sign in to check cloud backup support.</p>
+    <p>Off by default. The policy is saved in the admin directory and survives restarts; it names a storage target only, never a secret (managed identity). Each run publishes a write-once set: the database snapshot plus a sanitized recovery bundle. Retention is a separate opt-in that always keeps at least 3 sets, 30 days and the newest verified set; pinned sets are never deleted. Restore writes a new copy with a new lineage and never touches the live database; credentials and sessions are not restored. Run is not idempotent: retrying after an uncertain response publishes another set.</p>
+    <button id="cloud-backup-read" data-admin data-feature="cloud_backup" type="button" class="secondary">Read cloud backup policy</button>
+    <label>Cloud backup policy (JSON; replaces the whole policy; Read first)<textarea id="cloud-backup-policy" rows="8">{"target":{"account":"","container":"","prefix":""},"enabled":false}</textarea></label>
+    <button id="cloud-backup-save" data-admin data-feature="cloud_backup" type="button">Save cloud backup policy</button>
+    <button id="cloud-backup-run" data-admin data-feature="cloud_backup" type="button" class="secondary">Back up to the cloud now</button>
+    <button id="cloud-backup-collect" data-admin data-feature="cloud_backup" type="button" class="secondary">Collect</button>
+    <button id="cloud-backup-list" data-admin data-feature="cloud_backup" type="button" class="secondary">List cloud sets</button>
+    <label>Set ID<input id="cloud-backup-set" data-admin data-feature="cloud_backup" spellcheck="false" autocomplete="off"></label>
+    <button id="cloud-backup-drill" data-admin data-feature="cloud_backup" type="button" class="secondary">Drill set</button>
+    <button id="cloud-backup-restore" data-admin data-feature="cloud_backup" type="button">Restore set as a new copy</button>
+    <label>Pin reason<input id="cloud-backup-pin-reason" data-admin data-feature="cloud_backup" maxlength="200" autocomplete="off"></label>
+    <button id="cloud-backup-pin" data-admin data-feature="cloud_backup" type="button" class="secondary">Pin set</button>
+    <label>Pin ID<input id="cloud-backup-pin-id" data-admin data-feature="cloud_backup" spellcheck="false" autocomplete="off"></label>
+    <button id="cloud-backup-unpin" data-admin data-feature="cloud_backup" type="button" class="secondary">Remove pin</button>
+    <pre id="cloud-backup-result"></pre>
+  </section>
   <section id="admin-compaction" class="wide compaction">
     <h2>File compaction</h2>
     <p data-admin-availability="compaction">Sign in to check file compaction support.</p>

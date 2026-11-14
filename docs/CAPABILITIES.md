@@ -220,6 +220,11 @@ Both are **off by default**.
   backup, the newest verified backup, restores, active or startup-selected
   files and symlinks. Enable it only with a recovery policy and an independent
   backup copy.
+- **Cloud backups to Azure Blob** (`/v1/admin/cloud-backup`) are a separate
+  opt-in with a persisted policy and managed identity. Each run publishes a
+  verified set (database snapshot plus a sanitized recovery bundle); restore
+  makes a new-lineage copy and never replaces the active database. See
+  [DOCKER-OPERATIONS.md](DOCKER-OPERATIONS.md#cloud-backups-to-azure-blob).
 
 ## Operational diagnostics
 

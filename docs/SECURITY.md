@@ -300,6 +300,44 @@ These checks apply only at the server boundary. Direct embedded/file access and
 operator-managed backups are outside this authorization policy and must be
 protected separately.
 
+## Cloud backups (Azure Blob)
+
+Cloud backup routes (`/v1/admin/cloud-backup*`) need a super administrator.
+Read-only, scoped and tenant credentials and non-super-admin accounts get 403
+before any work, including pin creation and release. The persisted policy in
+`<admin>/cloud-backup/policy.json` has no credential field and unknown fields
+are rejected, so a key or connection string cannot be saved there.
+
+- **Managed identity** is the default. Tokens are requested only for the
+  configured account's Blob endpoint, are never logged or persisted, and an
+  expiry that is missing or unreadable is refused rather than assumed. HTTP
+  redirects are not followed, and non-loopback endpoints must use HTTPS.
+- **Least privilege.** Grant the identity data-plane access to the data and
+  coordination containers only, not the account or subscription. No
+  management-plane role is needed.
+- **Emulator shared key.** `emulator_shared_key` works only with a loopback
+  endpoint. The key comes from `VLITE_CLOUD_BACKUP_SHARED_KEY_FILE` (or
+  `--shared-key-file`), must be a small private file and is read per process.
+  It is never written to the policy, status or audit log.
+- **What leaves the host.** A set holds the database snapshot and a recovery
+  bundle with tenants, account names and roles, the credential inventory and
+  the names of secrets to provision. Password and credential hashes,
+  sessions, tokens, webhook URLs and secrets, TLS material, the audit log,
+  provider configuration, filesystem paths and host identity are excluded.
+  The database itself is not encrypted by VLite before upload; rely on Azure
+  Storage encryption and access control, and keep encrypted databases off
+  this path (they are refused).
+- **Restore grants nothing silently.** A restore creates a new lineage, so old
+  scoped credentials and sessions stop working. The offline `cloud-restore`
+  imports accounts disabled with unusable passwords and creates one fresh
+  super admin from a password file you supply.
+- **Audit.** Policy changes, runs, publication outcomes, drills, collections,
+  deletions, restores and pin changes are written to the audit log.
+
+Azure immutability policies, Microsoft Entra role assignments and managed
+identity have been exercised only against fakes and a local Azurite emulator
+in this release, not against real Azure.
+
 ## Native REST TLS and gRPC mutual TLS
 
 Build with `--features server` (REST) or `--features grpc` (REST and gRPC):

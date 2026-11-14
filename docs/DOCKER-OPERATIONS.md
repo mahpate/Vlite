@@ -365,6 +365,76 @@ Run the harness on your own host before you depend on compaction there.
   a compaction selection is pending; the server pins its startup file until
   the job is resolved.
 
+## Cloud backups to Azure Blob
+
+Cloud backups are off by default and are configured by a super administrator
+in **Administration → Backup & recovery → Cloud backup**, or with
+`PUT /v1/admin/cloud-backup` (body and routes in
+[API.md](API.md#cloud-backups-to-azure-blob-opt-in-off-by-default)). Unlike
+the local backup schedule, this policy is saved in
+`<admin>/cloud-backup/policy.json` and is applied again after a restart. The
+same directory holds `state.json` (run status), `installation-id` (the owner
+of the prefix) and `staging/` (temporary copies, emptied at startup); keep it
+on the private admin volume.
+
+### Azure setup
+
+- Give the container app a managed identity (system- or user-assigned; set
+  `target.client_id` for a user-assigned one). No key or connection string is
+  stored: the server asks the platform identity endpoint for a token for the
+  storage account's Blob endpoint only, and does not follow redirects.
+- Use two containers. The data container (`container`) receives the
+  content-addressed objects and manifests; the uploader needs create and read
+  on it, and delete for retention and cleanup. The coordination
+  container (`coordination_container`) holds owner, catalog and set records;
+  it needs read, create, overwrite-with-ETag and delete. `Storage Blob Data
+  Contributor` scoped to those two containers covers both. Without a
+  coordination container both roles share one container.
+- Immutability policies and versioning on the data container are compatible
+  but have not been qualified with real Azure in this release.
+
+### Run, check and restore
+
+1. Save a policy with `enabled: true`, then `POST /v1/admin/cloud-backup/run`
+   (or wait for the interval). `GET /v1/admin/cloud-backup` shows the result.
+   A run is not idempotent: if you did not see its outcome, list the sets
+   before you retry.
+2. Drill a set now and then (`POST .../sets/{id}/drill`, or set
+   `drill_every`). A drill downloads, verifies, restores to scratch and
+   queries the copy without touching the live database.
+3. Pin a set before an investigation so retention keeps it. Turn retention on
+   only after you have a verified set; it never removes the newest verified
+   set, pinned sets, or sets inside `keep_sets` (minimum 3) or `keep_days`
+   (minimum 30).
+4. To restore into the running installation, call `POST .../sets/{id}/restore`,
+   select the returned copy with `POST /v1/admin/restores/select`, restart, and
+   reissue scoped credentials (the lineage is new).
+5. To restore on a new host, with the server stopped and nothing selected for
+   you, run the offline commands. Put the policy's `target` JSON in a file:
+
+   ```sh
+   vlite-server cloud-sets --target-file target.json
+   vlite-server cloud-restore --target-file target.json --set <set-id> \
+     --database /data/restored.vlite --admin-dir /data/admin-new \
+     --admin-username recovery-admin --admin-password-file ./admin-password
+   ```
+
+   The command drills the set, writes a new-lineage database and a new, empty
+   admin directory, and prints a JSON report. Imported accounts are disabled
+   with unusable passwords; the new super admin is the only working sign-in.
+   No credential, session or webhook is restored. Start a server on the
+   restored files, then re-create credentials and webhooks.
+
+`--mode seed` and `{"mode":"seed"}` (same-lineage standby seeding) are
+refused. Encrypted databases, served memory reservations and in-memory
+servers are refused with a reason code.
+
+For a local Azurite emulator only, set `target.endpoint` to its loopback URL,
+`target.auth` to `emulator_shared_key`, and point
+`VLITE_CLOUD_BACKUP_SHARED_KEY_FILE` (or `--shared-key-file`) at a private
+file with the account key. The key is read per process and never written to
+the policy; a non-loopback endpoint with a shared key is refused.
+
 ## Release and image verification
 
 The release workflow builds and tests the runtime, API, and dashboard targets.
