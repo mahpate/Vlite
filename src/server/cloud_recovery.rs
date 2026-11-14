@@ -1239,7 +1239,7 @@ mod tests {
             format!("vlite/prod/sets/{}/manifest.json", env.set_id)
         }
         type Case = (&'static str, fn(&Env), &'static str);
-        let cases: [Case; 10] = [
+        let cases: [Case; 14] = [
             (
                 "manifest changed",
                 |env| edit(&env.data, &manifest(env), |b| b[0] ^= 0xff),
@@ -1280,6 +1280,57 @@ mod tests {
                 "cloud_set_corrupt",
             ),
             (
+                "bundle truncated",
+                |env| {
+                    edit(&env.data, &object(env, ROLE_BUNDLE), |b| {
+                        b.truncate(b.len() / 2)
+                    })
+                },
+                "cloud_set_corrupt",
+            ),
+            (
+                // Same length, different content: only the hash catches it.
+                "bundle rewritten at its length",
+                |env| {
+                    edit(&env.data, &object(env, ROLE_BUNDLE), |b| {
+                        let mut bundle: Value = serde_json::from_slice(b).unwrap();
+                        assert_eq!(bundle["created_unix_ms"], 1);
+                        bundle["created_unix_ms"] = json!(2);
+                        let rewritten = serde_json::to_vec(&bundle).unwrap();
+                        assert_eq!(rewritten.len(), b.len());
+                        *b = rewritten;
+                    })
+                },
+                "cloud_set_corrupt",
+            ),
+            (
+                "manifest names another set",
+                |env| {
+                    rewrite_manifest(env, |m| {
+                        m["set_id"] = json!("20200101T000000Z-0123456789abcdef")
+                    })
+                },
+                "cloud_set_corrupt",
+            ),
+            (
+                // The database bytes stored under a digest they do not have.
+                "database under a wrong digest",
+                |env| {
+                    let bytes = env.data.raw(&object(env, ROLE_DATABASE)).unwrap();
+                    let wrong = "ab".repeat(32);
+                    let name = format!("vlite/prod/sets/{}/objects/{wrong}", env.set_id);
+                    env.data.set_raw(&name, &bytes);
+                    rewrite_manifest(env, |m| {
+                        for object in m["objects"].as_array_mut().unwrap() {
+                            if object["role"] == ROLE_DATABASE {
+                                object["sha256"] = json!(wrong);
+                            }
+                        }
+                    })
+                },
+                "cloud_set_corrupt",
+            ),
+            (
                 "staging",
                 |env| set_state(env, "staging"),
                 "cloud_set_unavailable",
@@ -1300,6 +1351,8 @@ mod tests {
             damage(&env);
             let error = env.restore(&env.request()).unwrap_err();
             assert_eq!(error.code, code, "{case}: {error}");
+            assert_eq!(error.exit_status(), 1, "{case}");
+            assert_eq!(error.to_json()["error"]["code"], code, "{case}");
             assert_eq!(env.pins(), 0, "{case}: the pin is released");
             assert!(env.leftovers().is_empty(), "{case}: {:?}", env.leftovers());
         }
@@ -1416,6 +1469,151 @@ mod tests {
     }
 
     #[test]
+    fn kv_versions_and_compare_and_set_survive_cloud_restore_and_reopen() {
+        use crate::kv::KvPut;
+        let versions = Arc::new(std::sync::Mutex::new((0, 0)));
+        let seen = versions.clone();
+        let env = setup_with(move |database| {
+            let mut kv = database.kv_store("kv").unwrap();
+            let old = kv.put("ns", "key", b"old", KvPut::default()).unwrap();
+            let current = kv.put("ns", "key", b"current", KvPut::default()).unwrap();
+            kv.put("ns", "gone", b"deleted", KvPut::default()).unwrap();
+            assert!(kv.delete("ns", "gone", Expected::Any).unwrap());
+            *seen.lock().unwrap() = (old, current);
+        });
+        let (old, current) = *versions.lock().unwrap();
+        let request = env.request();
+        env.restore(&request).unwrap();
+        let restored = request.output.join("database.vlite");
+
+        let mut database = Database::open(&restored).unwrap();
+        let mut kv = database.kv_store("kv").unwrap();
+        let entry = kv.get("ns", "key").unwrap().unwrap();
+        assert_eq!((entry.value, entry.version), (b"current".to_vec(), current));
+        assert!(kv.get("ns", "gone").unwrap().is_none());
+        let stale = KvPut {
+            expected: Expected::Revision(old),
+            ..KvPut::default()
+        };
+        assert!(matches!(
+            kv.put("ns", "key", b"stale", stale),
+            Err(crate::Error::RevisionMismatch { current: Some(v) }) if v == current
+        ));
+        let valid = KvPut {
+            expected: Expected::Revision(current),
+            ..KvPut::default()
+        };
+        let next = kv.put("ns", "key", b"new", valid).unwrap();
+        assert!(next > current);
+        database.close().unwrap();
+        let mut database = Database::open(&restored).unwrap();
+        let entry = database.kv_store("kv").unwrap().get("ns", "key").unwrap();
+        let entry = entry.unwrap();
+        assert_eq!((entry.value, entry.version), (b"new".to_vec(), next));
+    }
+
+    #[test]
+    fn a_restore_never_touches_the_live_admin_selection_or_source() {
+        let env = setup();
+        // A live server's admin stores and compaction selection files.
+        let live = env.dir.path().join("live");
+        std::fs::create_dir_all(live.join("compaction")).unwrap();
+        let files = [
+            ("users.json", "live users"),
+            ("tenants.json", "live tenants"),
+            ("credentials.json", "live credentials"),
+            ("webhooks.json", "live subscriptions"),
+            ("next-startup", "live next startup"),
+            ("compaction/selection.json", "live selection"),
+        ];
+        for (name, text) in files {
+            std::fs::write(live.join(name), text).unwrap();
+        }
+        let source = env.dir.path().join("source.vlite");
+        let before = std::fs::read(&source).unwrap();
+        let request = env.request();
+        env.restore(&request).unwrap();
+
+        assert_eq!(std::fs::read(&source).unwrap(), before);
+        for (name, text) in files {
+            let now = std::fs::read_to_string(live.join(name)).unwrap();
+            assert_eq!(now, text, "{name}");
+        }
+        assert_eq!(
+            names(&live),
+            [
+                "compaction",
+                "credentials.json",
+                "next-startup",
+                "tenants.json",
+                "users.json",
+                "webhooks.json"
+            ]
+        );
+        assert_eq!(names(&live.join("compaction")), ["selection.json"]);
+        assert_eq!(
+            names(&request.output.join(ADMIN_DIR)),
+            ["tenants.json", "users.json"]
+        );
+        assert_eq!(env.leftovers(), ["live", "restored"]);
+    }
+
+    #[test]
+    fn the_output_is_absent_while_the_payload_downloads() {
+        let env = setup();
+        let output = env.request().output;
+        let parent = env.dir.path().to_owned();
+        type Seen = (bool, Vec<PathBuf>, Vec<u32>);
+        let seen: Arc<std::sync::Mutex<Option<Seen>>> = Arc::default();
+        let record = seen.clone();
+        env.data.hook(Op::Get, "/objects/", move || {
+            let staging: Vec<PathBuf> = std::fs::read_dir(&parent)
+                .unwrap()
+                .map(|e| e.unwrap().path())
+                .filter(|p| {
+                    let name = p.file_name().unwrap().to_string_lossy();
+                    name.starts_with(STAGING_PREFIX)
+                })
+                .collect();
+            #[cfg(unix)]
+            let modes = staging.iter().map(|p| mode(p)).collect();
+            #[cfg(not(unix))]
+            let modes = Vec::new();
+            *record.lock().unwrap() = Some((output.exists(), staging, modes));
+        });
+        env.restore(&env.request()).unwrap();
+        let (existed, staging, _modes) = seen.lock().unwrap().take().expect("a payload read");
+        assert!(!existed, "--output exists only after publication");
+        assert_eq!(staging.len(), 1, "{staging:?}");
+        #[cfg(unix)]
+        assert_eq!(_modes, [0o700]);
+        assert_eq!(env.leftovers(), ["restored"]);
+    }
+
+    #[test]
+    fn an_oversized_set_is_refused_before_any_payload_read() {
+        let env = setup();
+        rewrite_manifest(&env, |m| {
+            for object in m["objects"].as_array_mut().unwrap() {
+                if object["role"] == ROLE_DATABASE {
+                    object["bytes"] = json!(cloud::MAX_DATABASE_BYTES + 1);
+                }
+            }
+        });
+        let reads = Arc::new(AtomicUsize::new(0));
+        let count = reads.clone();
+        env.data.hook(Op::Get, "/objects/", move || {
+            count.fetch_add(1, Ordering::SeqCst);
+        });
+        let error = env.restore(&env.request()).unwrap_err();
+        assert_eq!(error.code, "cloud_database_too_large", "{error}");
+        assert_eq!(reads.load(Ordering::SeqCst), 0, "no payload was read");
+        assert!(!env.request().output.exists());
+        assert_eq!(env.pins(), 0);
+        assert!(env.leftovers().is_empty(), "{:?}", env.leftovers());
+    }
+
+    #[test]
     fn a_failed_import_publishes_nothing() {
         let env = setup();
         // The fresh admin collides with an imported account.
@@ -1434,6 +1632,7 @@ mod tests {
     fn a_crash_before_publication_leaves_no_output_and_a_retry_cleans_up() {
         let env = setup();
         assert_eq!(env.restore_crashing("staged").code, "test_crash");
+        assert_eq!(env.pins(), 0, "a failed restore releases its pin");
         let left = env.leftovers();
         assert_eq!(left.len(), 1, "{left:?}");
         assert!(left[0].starts_with(STAGING_PREFIX), "{left:?}");
@@ -1606,6 +1805,7 @@ mod tests {
         let body = error.to_json();
         assert_eq!(body["error"]["code"], "restore_cleanup_failed");
         assert_eq!(body["report"]["pin_id"], pin);
+        assert!(!body.to_string().contains(PASSWORD), "{body}");
         // The output was published before the failure and stays usable.
         assert_eq!(names(&request.output), ["admin", "database.vlite"]);
         assert_eq!(env.pins(), 1);
