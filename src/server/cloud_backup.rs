@@ -35,7 +35,7 @@ const CATALOG_SCHEMA: &str = "vlite.cloud-backup-catalog/1";
 const META_MAX: u64 = 1024 * 1024;
 pub(super) const MAX_PINS: usize = 16;
 /// Active (non-tombstoned) sets a listing accepts under one prefix.
-const MAX_SETS: usize = 10_000;
+pub(super) const MAX_SETS: usize = 10_000;
 pub(super) const ROLE_DATABASE: &str = "database";
 pub(super) const ROLE_BUNDLE: &str = "recovery_bundle";
 

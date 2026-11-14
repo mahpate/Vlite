@@ -31,6 +31,13 @@ const STATE: &str = "state.json";
 const INSTALLATION: &str = "installation-id";
 const STAGING: &str = "staging";
 const MAX_FILE: u64 = 64 * 1024;
+/// IDs kept per list in the persisted collection summary; the HTTP response
+/// and the audit log carry the complete lists.
+const SUMMARY_SAMPLE: usize = 20;
+/// Deleted set IDs per audit event.
+const AUDIT_CHUNK: usize = 500;
+/// Characters kept from an error message in the persisted status.
+const MAX_MESSAGE: usize = 500;
 /// Delay before a scheduled run skipped by a busy queue or operation retries.
 const RETRY_MS: u64 = 30_000;
 /// Process-level emulator key file; never part of the persisted policy.
@@ -314,6 +321,31 @@ pub(super) fn lineage_hex(lineage: Option<u64>) -> Option<String> {
     lineage.map(|l| format!("{l:016x}"))
 }
 
+/// A message bounded for the persisted status.
+fn clip(message: &str) -> String {
+    message.chars().take(MAX_MESSAGE).collect()
+}
+
+/// The persisted form of a collection: counts and a bounded sample of IDs.
+fn summarize(collection: &cloud::Collection) -> Value {
+    let list = |ids: &[String]| {
+        json!({"count":ids.len(),"sample":&ids[..ids.len().min(SUMMARY_SAMPLE)],
+            "truncated":ids.len() > SUMMARY_SAMPLE})
+    };
+    let failures = &collection.failures;
+    let sample: Vec<Value> = failures
+        .iter()
+        .take(SUMMARY_SAMPLE)
+        .map(|f| json!({"set_id":f.set_id,"code":f.code,"message":clip(&f.message)}))
+        .collect();
+    json!({"decision":collection.decision,"deleted":list(&collection.deleted),
+        "orphans_deleted":list(&collection.orphans_deleted),"resumed":list(&collection.resumed),
+        "skipped":list(&collection.skipped),"swept":list(&collection.swept),
+        "unreadable":list(&collection.unreadable),
+        "failures":{"count":failures.len(),"sample":sample,
+            "truncated":failures.len() > SUMMARY_SAMPLE}})
+}
+
 /// What the operator must re-provision; the bundle never carries secrets.
 pub(super) fn bundle_summary(bundle: &recovery_bundle::Bundle) -> Value {
     let c = &bundle.config;
@@ -426,11 +458,22 @@ impl Runtime {
     }
 
     /// Applies `change` and persists the status while holding the state lock,
-    /// so status writes never reorder.
+    /// so status writes never reorder. A status that would exceed the read
+    /// limit is refused and rolled back before the durable file is replaced:
+    /// an unreadable `state.json` would stop the server from starting.
     fn update(&self, change: impl FnOnce(&mut Loaded)) -> Result<(), ApiError> {
         let mut loaded = lock(&self.state)?;
+        let previous = loaded.status.clone();
         change(&mut loaded);
         let bytes = serde_json::to_vec_pretty(&loaded.status).map_err(internal)?;
+        if bytes.len() as u64 > MAX_FILE {
+            loaded.status = previous;
+            return Err(ApiError::new(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "cloud_backup_state_too_large",
+                "the cloud backup status exceeds its size limit and was not saved",
+            ));
+        }
         write_atomic(&self.dir, STATE, &bytes)
     }
 
@@ -590,7 +633,7 @@ impl Runtime {
                     l.status.last_failure_unix_ms = Some(at);
                     l.status.last_error = Some(LastError {
                         code: error.code.into(),
-                        message: error.message.clone(),
+                        message: clip(&error.message),
                     });
                 });
                 handle.audit(json!({"event":"cloud_backup_failed","code":error.code,
@@ -791,7 +834,10 @@ impl Runtime {
                 "error":{"code":error.code,"message":error.message}}),
         };
         let ok = result.is_ok();
-        let summary = report.clone();
+        let mut summary = report.clone();
+        if let Some(message) = summary["error"]["message"].as_str() {
+            summary["error"]["message"] = json!(clip(message));
+        }
         self.note(|l| {
             l.status.drills += 1;
             if !ok {
@@ -814,22 +860,30 @@ impl Runtime {
         installation: &str,
     ) -> (Value, Option<ApiError>) {
         let at = now();
-        let (report, error) = match sets.collect(installation, &policy.retention(), at) {
-            Ok(collection) => (
-                json!({"unix_ms":at,"ok":true,
-                "retention_enabled":policy.retention_enabled,"result":collection}),
-                None,
-            ),
-            Err(error) => (
-                json!({"unix_ms":at,"ok":false,
-                "error":{"code":error.code,"message":error.message}}),
-                Some(error),
-            ),
+        let (report, summary, error) = match sets.collect(installation, &policy.retention(), at) {
+            Ok(collection) => {
+                for chunk in collection.deleted.chunks(AUDIT_CHUNK) {
+                    handle.audit(json!({"event":"cloud_backup_sets_deleted","set_ids":chunk}));
+                }
+                (
+                    json!({"unix_ms":at,"ok":true,
+                    "retention_enabled":policy.retention_enabled,"result":collection}),
+                    json!({"unix_ms":at,"ok":true,
+                    "retention_enabled":policy.retention_enabled,
+                    "result":summarize(&collection)}),
+                    None,
+                )
+            }
+            Err(error) => {
+                let report = json!({"unix_ms":at,"ok":false,
+                    "error":{"code":error.code,"message":clip(&error.message)}});
+                (report.clone(), report, Some(error))
+            }
         };
-        let summary = report.clone();
+        let deleted = summary["result"]["deleted"]["count"].clone();
         self.note(|l| l.status.last_collection = Some(summary));
         handle.audit(json!({"event":"cloud_backup_collected","ok":report["ok"],
-            "deleted":report["result"]["deleted"]}));
+            "deleted":deleted}));
         (report, error)
     }
 
@@ -1590,8 +1644,75 @@ mod tests {
         assert_eq!(collected["result"]["deleted"], json!([ids[0]]));
         assert_eq!(
             status(&env.runtime)["last_collection"]["result"]["deleted"],
-            json!([ids[0]])
+            json!({"count":1,"sample":[ids[0]],"truncated":false})
         );
+    }
+
+    #[test]
+    fn collection_summary_is_bounded_and_restartable_at_max_sets() {
+        // Review H1: a collection deleting thousands of sets persisted every
+        // ID, so state.json outgrew its read limit and startup failed.
+        let env = setup();
+        let h = Handle::new(&env.service);
+        env.runtime
+            .configure(
+                policy(json!({"drill_every":0,"retention_enabled":true})),
+                &h,
+                BASE,
+            )
+            .unwrap();
+        let id = env.runtime.run_now(&h).unwrap()["set_id"]
+            .as_str()
+            .unwrap()
+            .to_owned();
+        let template = env
+            .meta
+            .raw(&format!("vlite/prod/sets/{id}/record.json"))
+            .unwrap();
+        // The listing accepts at most MAX_SETS active sets; fill it with old
+        // ones (older than keep_days) so all but keep_sets are deleted.
+        for i in 0..cloud::MAX_SETS as u64 - 1 {
+            let old = cloud::new_set_id(BASE + i).unwrap();
+            let mut record: cloud::Record = serde_json::from_slice(&template).unwrap();
+            record.set_id = old.clone();
+            record.created_unix_ms = BASE + i;
+            record.updated_unix_ms = BASE + i;
+            env.meta.set_raw(
+                &format!("vlite/prod/sets/{old}/record.json"),
+                &serde_json::to_vec(&record).unwrap(),
+            );
+        }
+        let report = env.runtime.collect(&h).unwrap();
+        let deleted = report["result"]["deleted"].as_array().unwrap().len();
+        assert_eq!(deleted, cloud::MAX_SETS - 3, "the response is complete");
+        let state = env.root.join("cloud-backup").join(STATE);
+        let bytes = std::fs::metadata(&state).unwrap().len();
+        assert!(bytes <= MAX_FILE / 4, "state.json has {bytes} bytes");
+        let reopened = reopen(&env);
+        let last = &status(&reopened)["last_collection"]["result"];
+        assert_eq!(last["deleted"]["count"], deleted);
+        assert_eq!(
+            last["deleted"]["sample"].as_array().unwrap().len(),
+            SUMMARY_SAMPLE
+        );
+        assert_eq!(last["skipped"]["count"], 0);
+    }
+
+    #[test]
+    fn an_oversized_status_never_replaces_the_state_file() {
+        let env = setup();
+        let h = Handle::new(&env.service);
+        env.runtime.configure(policy(json!({})), &h, BASE).unwrap();
+        let state = env.root.join("cloud-backup").join(STATE);
+        let before = std::fs::read(&state).unwrap();
+        let huge = "x".repeat(MAX_FILE as usize);
+        let error = env
+            .runtime
+            .update(|l| l.status.last_collection = Some(json!(huge)))
+            .expect_err("an oversized status must be refused");
+        assert_eq!(error.code, "cloud_backup_state_too_large");
+        assert_eq!(std::fs::read(&state).unwrap(), before);
+        assert!(reopen(&env).view().is_ok());
     }
 
     #[test]
