@@ -603,6 +603,138 @@ mod tests {
         assert!(certify(&config).is_ok());
     }
 
+    /// Twelve lowercase letters, unique per `i`: a valid credential ID,
+    /// account name and secret-reference suffix.
+    fn letters(mut i: usize) -> String {
+        (0..12)
+            .map(|_| {
+                let c = char::from(b'a' + (i % 26) as u8);
+                i /= 26;
+                c
+            })
+            .collect()
+    }
+
+    #[test]
+    fn over_count_configurations_are_refused_and_each_limit_is_admitted() {
+        // Review M01: the count bound is its own refusal, at each list's limit.
+        const TOO_MANY: &str = "the recovery configuration has too many entries";
+        fn tenants(c: &mut Config, n: usize) {
+            c.accounts.retain(|a| a.tenant_id.is_none());
+            c.tenants = (0..n)
+                .map(|i| {
+                    serde_json::from_value(json!({"id": format!("{i:032x}"), "name": letters(i)}))
+                        .unwrap()
+                })
+                .collect();
+        }
+        fn accounts(c: &mut Config, n: usize) {
+            let account = c.accounts[0].clone();
+            c.accounts = (0..n)
+                .map(|i| super::super::users::RecoveryAccount {
+                    username: letters(i),
+                    ..account.clone()
+                })
+                .collect();
+        }
+        fn credentials(c: &mut Config, n: usize) {
+            let credential = c.credentials[0].clone();
+            c.credentials = (0..n)
+                .map(|i| super::super::credentials::RecoveryCredential {
+                    id: letters(i),
+                    ..credential.clone()
+                })
+                .collect();
+        }
+        fn references(c: &mut Config, n: usize) {
+            c.secret_references = (0..n)
+                .map(|i| reference(&format!("ref_{}", letters(i)), true, "provision"))
+                .collect();
+        }
+        type Fill = fn(&mut Config, usize);
+        let lists: [(&str, usize, Fill); 4] = [
+            ("tenants", MAX_ENTRIES, tenants),
+            ("accounts", MAX_ENTRIES, accounts),
+            ("credentials", 64 * MAX_ENTRIES, credentials),
+            ("secret references", 64, references),
+        ];
+        for (list, limit, fill) in lists {
+            let mut c = sample();
+            fill(&mut c, limit);
+            assert_eq!(certify(&c), Ok(()), "{list} at the limit");
+            let mut c = sample();
+            fill(&mut c, limit + 1);
+            assert_eq!(certify(&c), Err(TOO_MANY), "{list} over the limit");
+        }
+    }
+
+    #[test]
+    fn secret_reference_shape_is_enforced_at_each_bound() {
+        // Review M08: name 1..=64 of [a-z_], action at most 256 without controls.
+        let with = |name: &str, action: &str| {
+            let mut c = sample();
+            c.secret_references = vec![reference(name, true, action)];
+            certify(&c)
+        };
+        let (name_64, name_65) = ("a".repeat(64), "a".repeat(65));
+        let (action_256, action_257) = ("x".repeat(256), "x".repeat(257));
+        assert_eq!(with(&name_64, &action_256), Ok(()));
+        assert_eq!(with("a_b", ""), Ok(()));
+        for (name, action) in [
+            ("", "x"),
+            (name_65.as_str(), "x"),
+            ("Admin", "x"),
+            ("admin1", "x"),
+            ("admin-token", "x"),
+            ("admin token", "x"),
+            ("admin", action_257.as_str()),
+            ("admin", "line\nbreak"),
+            ("admin", "tab\there"),
+        ] {
+            assert_eq!(
+                with(name, action),
+                Err("a secret reference is invalid or duplicated"),
+                "{name:?} {action:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn live_capture_certifies_cross_store_references() {
+        // Review M11: an inconsistent live configuration is refused at capture,
+        // not discovered at restore.
+        let dir = tempfile::tempdir().unwrap();
+        let fresh = ("restore-admin", "correct horse battery staple");
+        import(&sealed(sample(), None), dir.path(), fresh).unwrap();
+        let settings = super::super::users::Settings {
+            idle: std::time::Duration::from_secs(600),
+            lifetime: std::time::Duration::from_secs(3600),
+            https: false,
+            loopback_only: true,
+            trusted_proxy: false,
+        };
+        let users = super::super::users::Accounts::load(dir.path(), &settings).unwrap();
+        let tenants = super::super::tenants::Store::load(dir.path()).unwrap();
+        let mut admin = super::super::admin::AdminState::default();
+        admin.users = Some(std::sync::Arc::new(users));
+        admin.tenants = Some(std::sync::Arc::new(tenants));
+        let webhooks = super::super::webhooks::Dispatcher::default();
+        let config = capture(&admin, &webhooks, 1).unwrap();
+        assert!(config.accounts.iter().any(|a| a.tenant_id.is_some()));
+
+        // The tenant store loses the tenant an account is bound to.
+        let empty = tempfile::tempdir().unwrap();
+        let tenants = super::super::tenants::Store::load(empty.path()).unwrap();
+        admin.tenants = Some(std::sync::Arc::new(tenants));
+        let error = capture(&admin, &webhooks, 1).err().unwrap();
+        assert_eq!(error.code, "recovery_config_inconsistent");
+        assert!(
+            error.message.contains("names a tenant"),
+            "{}",
+            error.message
+        );
+    }
+
     #[test]
     fn duplicates_and_malformed_entries_fail_certification() {
         let mut c = sample();
