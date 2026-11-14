@@ -10,9 +10,12 @@
 //! ones) and webhook subscriptions are reported for re-creation.
 //!
 //! Every configuration is certified as one cross-store whole (unique
-//! identities, every tenant reference resolves) at capture, parse and import,
-//! and the bundle names the database object and the admitted policy it was
-//! captured with, so a restore cannot pair it with another set's copy.
+//! identities, every tenant reference resolves) at capture, parse and import.
+//! The bundle names the installation, source lineage, database object digest
+//! and admitted policy it was captured with, and a restore refuses a bundle
+//! whose values differ from its set's manifest. This is a hash binding, not an
+//! authenticated capture: a self-consistent rewrite by a writer to the trusted
+//! containers is outside the hash chain's guarantee (see docs/SECURITY.md).
 use super::*;
 use serde::Serialize;
 use std::{collections::HashSet, path::Path as FilePath};
@@ -727,6 +730,8 @@ mod tests {
             ("admin", action_257.as_str()),
             ("admin", "line\nbreak"),
             ("admin", "tab\there"),
+            // Review F-004: a non-ASCII name (two bytes, neither [a-z_]).
+            ("\u{00e9}", "provision"),
         ] {
             assert_eq!(
                 with(name, action),
@@ -881,6 +886,8 @@ mod tests {
             ".tmpAbC12!",
             ".tmp-..-x",
             ".tmpsecret.json",
+            // Review F-003: six bytes, but not six ASCII alphanumerics.
+            ".tmp\u{00e9}abcd",
         ] {
             assert!(!recognized(name, false), "{name}");
         }
