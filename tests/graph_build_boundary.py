@@ -14,6 +14,9 @@ HARNESS = '#[path = "../../../src/property_graph/engine/mod.rs"]'
 # GATE-008 (v0.5.0) pinned these into distributed artifacts. Since v0.5.1 the
 # graph is always compiled; v0.6.0 removed the `graph` feature alias.
 SHIPPED_GRAPH_FEATURES = {"mcp-proxy"}
+# Test-only fault points and relaxed test profiles. They are never pinned into
+# artifacts, and no shipped or default feature may enable one.
+TEST_ONLY_FEATURES = {"compaction-test-hooks"}
 # Artifact-producing `cargo build --release --bins` commands in each file.
 ARTIFACT_BUILDS = {"Dockerfile": 1, ".github/workflows/release.yml": 2}
 # Artifact-producing vlite-ffi builds (C library, wheels, Node packages) per file.
@@ -120,19 +123,28 @@ class GraphBuildBoundary(unittest.TestCase):
     def test_artifact_builds_pin_shipped_features(self):
         features = load_toml(ROOT / "Cargo.toml")["features"]
         self.assertTrue(SHIPPED_GRAPH_FEATURES <= set(features))
-        # Every non-default feature, including graph and mcp-proxy, is pinned.
-        expected = sorted(set(features) - {"default"})
+        self.assertTrue(TEST_ONLY_FEATURES <= set(features))
+        # Every non-default feature except the test-only ones, including
+        # mcp-proxy, is pinned.
+        expected = sorted(set(features) - {"default"} - TEST_ONLY_FEATURES)
         self.assertTrue(SHIPPED_GRAPH_FEATURES <= set(expected))
+        # Test hooks never ship, not even through another feature.
+        for feature in ["default", *expected]:
+            with self.subTest(feature=feature):
+                self.assertFalse(TEST_ONLY_FEATURES & set(features[feature]))
         for name, count in ARTIFACT_BUILDS.items():
             builds = [line for line in (ROOT / name).read_text(encoding="utf-8").splitlines()
                       if "cargo build" in line and "--release" in line]
             with self.subTest(file=name):
                 self.assertFalse([line for line in builds if "--all-features" in line])
+                self.assertFalse([line for line in builds if any(f in line for f in TEST_ONLY_FEATURES)])
                 pinned = [re.search(r"--features (\S+)", line) for line in builds if "--bins" in line]
                 self.assertEqual(len(pinned), count)
                 for match in pinned:
                     self.assertIsNotNone(match)
-                    self.assertEqual(sorted(match.group(1).split(",")), expected)
+                    shipped = match.group(1).split(",")
+                    self.assertFalse(TEST_ONLY_FEATURES & set(shipped))
+                    self.assertEqual(sorted(shipped), expected)
 
     def test_ffi_artifact_builds_include_graph(self):
         # Graph commands are always built: vlite-ffi has no `graph` feature and
