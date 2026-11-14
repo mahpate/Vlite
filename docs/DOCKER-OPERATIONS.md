@@ -368,8 +368,8 @@ Run the harness on your own host before you depend on compaction there.
 ## Cloud backups to Azure Blob
 
 Cloud backups are off by default and are configured by a super administrator
-in **Administration → Backup & recovery → Cloud backup**, or with
-`PUT /v1/admin/cloud-backup` (body and routes in
+with `PUT /v1/admin/cloud-backup` (there is no dashboard card in this release;
+body and routes in
 [API.md](API.md#cloud-backups-to-azure-blob-opt-in-off-by-default)). Unlike
 the local backup schedule, this policy is saved in
 `<admin>/cloud-backup/policy.json` and is applied again after a restart. The

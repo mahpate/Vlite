@@ -13,6 +13,7 @@ import re
 from dataclasses import dataclass
 from pathlib import Path
 
+from admin_route_coverage import BACKEND_ONLY as ADMIN_BACKEND_ONLY
 from admin_route_coverage import INVENTORY as ADMIN_INVENTORY
 from api_reference import rest_keys
 
@@ -209,11 +210,6 @@ ADMIN_DYNAMIC = {
     "/v1/admin/users/{id}/password": '`/v1/admin/users/${id}/password`',
     "/v1/admin/webhooks/{id}": '`/v1/admin/webhooks/${webhookId()}`',
     "/v1/admin/audit/persistent": '`/v1/admin/audit/persistent?limit=${limit}`',
-    "/v1/admin/cloud-backup/sets/{id}/drill": '`/v1/admin/cloud-backup/sets/${cloudSet()}/drill`',
-    "/v1/admin/cloud-backup/sets/{id}/restore": '`/v1/admin/cloud-backup/sets/${cloudSet()}/restore`',
-    "/v1/admin/cloud-backup/sets/{id}/pins": '`/v1/admin/cloud-backup/sets/${cloudSet()}/pins`',
-    "/v1/admin/cloud-backup/sets/{id}/pins/{pin}":
-        '`/v1/admin/cloud-backup/sets/${cloudSet()}/pins/${encodeURIComponent(pin)}`',
 }
 for (method, path), (script, control) in ADMIN_INVENTORY.items():
     if control in ADMIN_SPECIAL:
@@ -453,6 +449,9 @@ EXCLUDED = {
     "rest:POST " + COLLECTION + "/kv/batch": "Atomic multi-key SDK write; the Key-value workspace edits one key at a time.",
     "rest:POST " + COLLECTION + "/kv/entries/get": "Multi-key SDK read; the Key-value workspace reads one key or one listed page at a time.",
 }
+# Admin routes the static admin inventory classifies as backend/CLI-only, with its reason.
+for (method, path), reason in ADMIN_BACKEND_ONLY.items():
+    EXCLUDED[f"rest:{method} {path}"] = reason
 for asset in (
     "", "/admin-tools.js", "/ambience.js", "/app.js", "/console-tools.js",
     "/graph.css", "/graph.js", "/graph3d.js", "/navigation.js", "/observability.js",

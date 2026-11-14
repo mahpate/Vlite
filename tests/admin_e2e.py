@@ -531,7 +531,7 @@ def exercise(browser):
     for width in (1440, 900, 390, 320):
         page.set_viewport_size({"width": width, "height": 1000})
         for section in ("tenants", "users", "transport-security", "replication", "admin-backups",
-                        "admin-auto-maintenance", "admin-backup-schedule", "admin-cloud-backup"):
+                        "admin-auto-maintenance", "admin-backup-schedule"):
             page.evaluate("id => window.VLiteNavigation.reveal(id)", section)
             assert page.evaluate("document.documentElement.scrollWidth <= innerWidth"), (width, section)
     page.evaluate("window.VLiteNavigation.reveal('database')")
@@ -541,7 +541,6 @@ def exercise(browser):
     expect(page.locator("#user-result")).to_have_text("")
     expect(page.locator("#tls-result")).to_have_text("")
     expect(page.locator("#replication-result")).to_have_text("")
-    expect(page.locator("#cloud-backup-result")).to_have_text("")
     expect(page.locator("#replication-download")).to_be_disabled()
     assert not errors, errors
     context.close()

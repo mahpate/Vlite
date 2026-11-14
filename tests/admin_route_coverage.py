@@ -58,15 +58,6 @@ INVENTORY = {
     ("POST", "/v1/admin/backups/schedule/run"): ("console-tools.js", "backup-schedule-run"),
     ("POST", "/v1/admin/backups/{name}/verify"): ("console-tools.js", "backup-verify"),
     ("POST", "/v1/admin/backups/{name}/drill"): ("console-tools.js", "backup-drill"),
-    ("GET", "/v1/admin/cloud-backup"): ("console-tools.js", "cloud-backup-read"),
-    ("PUT", "/v1/admin/cloud-backup"): ("console-tools.js", "cloud-backup-save"),
-    ("POST", "/v1/admin/cloud-backup/run"): ("console-tools.js", "cloud-backup-run"),
-    ("POST", "/v1/admin/cloud-backup/collect"): ("console-tools.js", "cloud-backup-collect"),
-    ("GET", "/v1/admin/cloud-backup/sets"): ("console-tools.js", "cloud-backup-list"),
-    ("POST", "/v1/admin/cloud-backup/sets/{id}/drill"): ("console-tools.js", "cloud-backup-drill"),
-    ("POST", "/v1/admin/cloud-backup/sets/{id}/restore"): ("console-tools.js", "cloud-backup-restore"),
-    ("POST", "/v1/admin/cloud-backup/sets/{id}/pins"): ("console-tools.js", "cloud-backup-pin"),
-    ("DELETE", "/v1/admin/cloud-backup/sets/{id}/pins/{pin}"): ("console-tools.js", "cloud-backup-unpin"),
     ("GET", "/v1/admin/credentials"): ("console-tools.js", "cred-list"),
     ("POST", "/v1/admin/credentials"): ("console-tools.js", "cred-create"),
     ("POST", "/v1/admin/credentials/{id}/rotate"): ("console-tools.js", "cred-table"),
@@ -100,6 +91,23 @@ INVENTORY = {
     ("POST", "/v1/admin/compaction/jobs/{id}/cancel"): ("admin-tools.js", "compaction-cancel"),
 }
 
+# Admin routes deliberately without a dashboard control. Each needs a reason, and
+# the dashboard must not half-implement one. Cloud backup is operated through the
+# REST API and the offline vlite-server cloud-sets/cloud-restore commands; its
+# dashboard card belongs to the separately approved admin dashboard work.
+CLOUD = "Azure Blob cloud backup: REST API and offline CLI only; no dashboard card in this milestone."
+BACKEND_ONLY = {
+    ("GET", "/v1/admin/cloud-backup"): CLOUD,
+    ("PUT", "/v1/admin/cloud-backup"): CLOUD,
+    ("POST", "/v1/admin/cloud-backup/run"): CLOUD,
+    ("POST", "/v1/admin/cloud-backup/collect"): CLOUD,
+    ("GET", "/v1/admin/cloud-backup/sets"): CLOUD,
+    ("POST", "/v1/admin/cloud-backup/sets/{id}/drill"): CLOUD,
+    ("POST", "/v1/admin/cloud-backup/sets/{id}/restore"): CLOUD,
+    ("POST", "/v1/admin/cloud-backup/sets/{id}/pins"): CLOUD,
+    ("DELETE", "/v1/admin/cloud-backup/sets/{id}/pins/{pin}"): CLOUD,
+}
+
 # Graph routes (src/server/graph.rs).
 # graph.js builds its own controls inside <section id="graph"> (the Graph workspace), so the control id is
 # checked in the script that creates it rather than in index.html.
@@ -111,9 +119,11 @@ def main():
     sources = [ROOT / "src" / "server.rs", *sorted((ROOT / "src" / "server").glob("*.rs"))]
     sources = [path for path in sources if path != graph_source]
     registered = {route for path in sources for route in admin_routes(path.read_text(encoding="utf-8"))}
-    assert registered == set(INVENTORY), (
-        f"Admin route inventory drift: missing controls={registered - set(INVENTORY)}; "
-        f"removed server routes={set(INVENTORY) - registered}"
+    assert not set(INVENTORY) & set(BACKEND_ONLY), "A route cannot have a control and be backend-only"
+    classified = set(INVENTORY) | set(BACKEND_ONLY)
+    assert registered == classified, (
+        f"Admin route inventory drift: missing controls={registered - classified}; "
+        f"removed server routes={classified - registered}"
     )
     if graph_source.exists():
         graph_routes = set(admin_routes(graph_source.read_text(encoding="utf-8")))
@@ -132,13 +142,19 @@ def main():
         assert f'"{control}"' in scripts[script], f"{method} {route}: missing handler #{control}"
         prefix = route.split("{", 1)[0]
         assert prefix in scripts[script], f"{method} {route}: missing request path in {script}"
+    every_script = "".join(path.read_text(encoding="utf-8") for path in sorted(dashboard.glob("*.js")))
+    for (method, route), reason in BACKEND_ONLY.items():
+        assert reason, f"{method} {route}: backend-only routes need a reason"
+        assert route.split("{", 1)[0] not in every_script + markup, (
+            f"{method} {route}: the dashboard references a backend-only route; inventory its control instead")
     console = scripts["console-tools.js"]
     for control in ["pitr-run", "cred-tenant", "cred-rpm", "cred-max-vectors", "cred-max-vectors-per-collection"]:
         assert f'id="{control}"' in markup and f'"{control}"' in console, f"Missing admin input/control #{control}"
     for verb in ["rotate", "revoke"]:
         assert f'"{verb}"' in console and f"/{verb}`" in console, f"Missing credential {verb} action"
     print(f"PASS static admin route inventory: {len(registered)} method/actions across "
-          f"{len({route for _, route in registered})} paths; named controls, not playground")
+          f"{len({route for _, route in registered})} paths; {len(INVENTORY)} named controls, "
+          f"{len(BACKEND_ONLY)} backend-only; not playground")
 
 
 if __name__ == "__main__":

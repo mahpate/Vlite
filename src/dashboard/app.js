@@ -147,7 +147,6 @@
       tokens_reload: "Configure token files on the server; environment-only tokens require a server restart.",
       backup_restore: "Configure a private VLITE_ADMIN_DIR on the server.",
       backup_schedule: "Configure a private VLITE_ADMIN_DIR on the server.",
-      cloud_backup: "Configure a private VLITE_ADMIN_DIR on the server.",
       auto_maintenance: "Use a server that reports automatic maintenance support.",
       scoped_credentials: "Configure admin authentication and a private VLITE_ADMIN_DIR; collection-bound credentials require database format v4 or newer.",
       persistent_audit: "Configure admin authentication and a private VLITE_ADMIN_DIR.",
