@@ -463,6 +463,25 @@ impl Coordinator {
             .clone()
     }
 
+    /// The journal, fence and recovery code as one view. Every transition
+    /// stores its journal change before it moves the fence, so reading the
+    /// fence while the state lock is held never pairs an older journal with
+    /// a newer fence (a status response once could, review W-02).
+    fn view(&self) -> (Persisted, u8, Option<&'static str>) {
+        let state = self
+            .state
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let fence = self.fence.load(Ordering::SeqCst);
+        let recovery = (fence == RECOVERY).then(|| {
+            self.recovery_code
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .unwrap_or("recovery_required")
+        });
+        (state.clone(), fence, recovery)
+    }
+
     /// Mutates and durably stores the state; on failure the in-memory state
     /// keeps the mutation (it describes the attempted transition).
     fn update(&self, change: impl FnOnce(&mut Persisted)) -> std::io::Result<()> {
@@ -1199,9 +1218,15 @@ fn reason(code: &'static str) -> Value {
 }
 
 /// Plain disabled reasons; metadata only, never the database lock.
-fn reasons(c: &Coordinator, service: &Service, path: &Path) -> Vec<&'static str> {
+/// `recovery` is the caller's view of the recovery fence.
+fn reasons(
+    c: &Coordinator,
+    service: &Service,
+    path: &Path,
+    recovery: Option<&'static str>,
+) -> Vec<&'static str> {
     let mut out = Vec::new();
-    if c.recovery().is_some() {
+    if recovery.is_some() {
         out.push("recovery_required");
         return out;
     }
@@ -1329,7 +1354,7 @@ fn evaluate(c: &Arc<Coordinator>) -> Option<()> {
     let (occurrence, left) = window(settings, at)?;
     if state.last_occurrence.as_deref() == Some(occurrence.as_str())
         || left < u64::from(settings.max_run_seconds) * 1000 + 60_000
-        || !reasons(c, &service, &path).is_empty()
+        || !reasons(c, &service, &path, c.recovery()).is_empty()
     {
         return None;
     }
@@ -1977,9 +2002,14 @@ async fn status(State(service): State<Service>) -> Json<Value> {
             "reasons":[reason("managed_runtime_required")],"settings":null,"job":null}));
     };
     let (current, path) = c.current().unwrap_or((service.clone(), PathBuf::new()));
-    let state = c.snapshot();
+    // One view: the response never mixes moments (review W-02).
+    let (state, fence, recovery) = c.view();
+    #[cfg(test)]
+    if let Some(hook) = STATUS_AFTER_VIEW.with(|h| h.borrow_mut().take()) {
+        hook();
+    }
     let at = now();
-    let mut list = reasons(&c, &current, &path);
+    let mut list = reasons(&c, &current, &path, recovery);
     let acknowledged = history_acknowledged(&state);
     if !acknowledged {
         list.push("history_ack_required");
@@ -2022,8 +2052,8 @@ async fn status(State(service): State<Service>) -> Json<Value> {
         "job": state.job.as_ref().map(job_json),
         "last_job": state.history.first().map(job_json),
         "phase": state.job.as_ref().map(|j| j.phase.clone()),
-        "fence": match c.fence.load(Ordering::SeqCst) { OPEN => "open", MAINTENANCE => "maintenance", _ => "recovery" },
-        "recovery": {"required": c.recovery().is_some(), "code": c.recovery(),
+        "fence": match fence { OPEN => "open", MAINTENANCE => "maintenance", _ => "recovery" },
+        "recovery": {"required": recovery.is_some(), "code": recovery,
             "retained_bytes": retained_bytes, "retained_copies": retained_copies},
         "selection": selection.map(|s| json!({"candidate": s.candidate, "epoch": s.epoch, "job": s.job})),
         "warning": "Compaction briefly stops serving (reads and writes answer 503 maintenance_in_progress), keeps the previous file and a recovery copy, drops change history from before the run (change-feed and replication readers must take a new snapshot), may make graph clients re-read revisions before their next conditional write, and pins restore selection to the compacted file afterwards.",
@@ -2055,7 +2085,7 @@ async fn configure(
         )
     })?;
     let (current, path) = c.current().unwrap_or((service.clone(), PathBuf::new()));
-    let blocking = reasons(&c, &current, &path);
+    let blocking = reasons(&c, &current, &path, c.recovery());
     let actor = audit::actor(&role, principal.as_ref().map(|Extension(p)| p));
     let mut outcome = Ok(());
     let mut version = 0;
@@ -2187,7 +2217,7 @@ async fn submit(
         ));
     }
     let (current, path) = c.current().ok_or_else(|| internal("no generation"))?;
-    if let Some(first) = reasons(&c, &current, &path).first() {
+    if let Some(first) = reasons(&c, &current, &path, c.recovery()).first() {
         let status = if *first == "recovery_required" {
             StatusCode::SERVICE_UNAVAILABLE
         } else {
@@ -2273,4 +2303,88 @@ async fn cancel(
     c.audit(json!({"event":"compaction_cancel_requested","actor":actor,"job":job.id}));
     let job = find(&c, &id).unwrap_or(job);
     Ok((StatusCode::ACCEPTED, Json(json!({"job": job_json(&job)}))).into_response())
+}
+
+#[cfg(test)]
+thread_local! {
+    /// Test-only, one shot: runs in `status` right after its view is taken,
+    /// before the filesystem work and the response.
+    static STATUS_AFTER_VIEW: std::cell::RefCell<Option<Box<dyn FnOnce()>>> =
+        const { std::cell::RefCell::new(None) };
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn status_never_pairs_an_older_job_with_a_newer_fence() {
+        // Review W-02: a selection-effect error moves the journal and then
+        // the fence while a status request is between its view and its
+        // response. The response must describe one moment.
+        let dir = tempfile::tempdir().unwrap();
+        let work = dir.path().join("compaction");
+        std::fs::create_dir(&work).unwrap();
+        let owner = std::fs::File::create(work.join("owner.lock")).unwrap();
+        let database = Database::create_in_memory(1, crate::CreateOptions::default()).unwrap();
+        let service = Service::new(database);
+        let job = Job {
+            id: "job".into(),
+            phase: "selecting".into(),
+            selection: "not_published".into(),
+            ..Job::default()
+        };
+        let state = Persisted {
+            job: Some(job),
+            ..Persisted::default()
+        };
+        let c = Arc::new(Coordinator {
+            dir: dir.path().to_path_buf(),
+            work,
+            _owner: owner,
+            state: Mutex::new(state),
+            fence: AtomicU8::new(MAINTENANCE),
+            recovery_code: Mutex::new(None),
+            tickets: AtomicUsize::new(0),
+            drained: Notify::new(),
+            selection: Mutex::new(()),
+            active: AtomicBool::new(true),
+            finished: Notify::new(),
+            stopping: AtomicBool::new(false),
+            generation: RwLock::new(None),
+            control: service.admin.clone(),
+            options: ServerOptions::default(),
+            durability: Mutex::new(None),
+            outcomes: Default::default(),
+        });
+        assert!(service.admin.compaction.set(c.clone()).is_ok());
+        let transition = c.clone();
+        STATUS_AFTER_VIEW.with(|h| {
+            *h.borrow_mut() = Some(Box::new(move || {
+                // The pipeline's selection-effect-error transition.
+                transition
+                    .job(|job| {
+                        job.selection = "outcome_unknown".into();
+                        job.phase = "selection_outcome_unknown".into();
+                        job.code = Some("selection_outcome_unknown".into());
+                    })
+                    .unwrap();
+                transition.fence_recovery("selection_outcome_unknown");
+            }));
+        });
+        let Json(during) = status(State(service.clone())).await;
+        assert!(STATUS_AFTER_VIEW.with(|h| h.borrow().is_none()), "hook ran");
+        assert_eq!(during["fence"], "maintenance", "{during}");
+        assert_eq!(during["recovery"]["required"], false, "{during}");
+        assert_eq!(during["recovery"]["code"], Value::Null, "{during}");
+        assert_eq!(during["job"]["selection"], "not_published", "{during}");
+        let reasons = during["reasons"].to_string();
+        assert!(!reasons.contains("recovery_required"), "{during}");
+
+        let Json(after) = status(State(service)).await;
+        assert_eq!(after["fence"], "recovery", "{after}");
+        assert_eq!(after["recovery"]["code"], "selection_outcome_unknown");
+        assert_eq!(after["job"]["selection"], "outcome_unknown", "{after}");
+        assert!(after["reasons"].to_string().contains("recovery_required"));
+    }
 }
