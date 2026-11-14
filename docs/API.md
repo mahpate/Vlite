@@ -777,7 +777,7 @@ release: use these routes or the offline `vlite-server cloud-sets` and
 
 | Route | Purpose |
 | --- | --- |
-| `GET /v1/admin/cloud-backup` | Policy, installation ID, run status (last attempt, success, error code, unknown publication, the run in progress as `job`, `interrupted` runs, and `clock_reset_unix_ms` when future schedule times were pulled back to the clock) and the next scheduled run. |
+| `GET /v1/admin/cloud-backup` | Policy, installation ID, run status (last attempt, success, error code, unknown publication, the run in progress as `job`, `interrupted` runs, and `clock_reset_unix_ms` when future schedule times were pulled back to the clock) and the next scheduled run, measured on the wall clock. |
 | `PUT /v1/admin/cloud-backup` | Save the policy (body below). Does no remote work. |
 | `POST /v1/admin/cloud-backup/run` | Publish one set now. Answers 201. **Not idempotent**: retrying after an unseen outcome can publish another set, so read the status or the set list first. |
 | `POST /v1/admin/cloud-backup/collect` | Cleanup now: removes unpublished sets older than `orphan_grace_hours` and finishes interrupted deletions; deletes published sets only when `retention_enabled` is set. A run collects automatically only with retention on. |
@@ -786,6 +786,9 @@ release: use these routes or the offline `vlite-server cloud-sets` and
 | `POST /v1/admin/cloud-backup/sets/{id}/restore` | Write a new-lineage `restore-*.vlite` copy into the admin directory. Answers 201. |
 | `POST /v1/admin/cloud-backup/sets/{id}/pins` | Hold a set against retention: `{"reason": "…"}` (1–200 characters). Answers 201 with the pin ID. |
 | `DELETE /v1/admin/cloud-backup/sets/{id}/pins/{pin}` | Release an operator hold. A pin owned by a running restore or drill (`"kind": "operation"`) is refused with 409 `cloud_pin_owned`; if its owner crashed, `?force=true` releases it (audited as `cloud_backup_pin_force_released`, 409 `cloud_pin_in_use` while this server still runs that operation). |
+
+During server shutdown the `PUT`, `POST` and `DELETE` routes answer 503
+`cloud_backup_closed`.
 
 The policy is persisted with the run status in one atomically replaced
 `<admin>/cloud-backup/state.json` and survives restarts. A `PUT` that answers

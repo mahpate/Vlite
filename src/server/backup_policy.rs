@@ -27,7 +27,7 @@ use std::collections::HashSet;
 use std::io::{Read, Write};
 use std::path::{Path as FilePath, PathBuf};
 use std::sync::Weak;
-use std::sync::atomic::AtomicBool;
+use std::sync::atomic::{AtomicBool, AtomicUsize};
 
 const STATE: &str = "state.json";
 const FORMAT: u32 = 1;
@@ -47,6 +47,8 @@ const MIN_KEEP_SETS: usize = 3;
 const MIN_KEEP_DAYS: u64 = 30;
 /// Delay before a scheduled run skipped by a busy queue or operation retries.
 const RETRY_MS: u64 = 30_000;
+/// How often `shutdown` checks for running operations.
+const SHUTDOWN_POLL: std::time::Duration = std::time::Duration::from_millis(20);
 /// Process-level emulator key file; never part of the persisted policy.
 pub(super) const SHARED_KEY_ENV: &str = "VLITE_CLOUD_BACKUP_SHARED_KEY_FILE";
 
@@ -149,7 +151,9 @@ pub(super) struct Status {
     /// The run in progress, saved before any remote work. One still present
     /// at startup, or left by a panic, is recorded as interrupted.
     pub job: Option<Job>,
-    /// Runs that stopped without finishing (panic or process exit).
+    /// Runs that stopped without finishing: a panic, a process exit, or a
+    /// run still going when shutdown stopped waiting (recorded at the next
+    /// start). Saturates at the maximum, like every counter here.
     pub interrupted: u64,
     /// When schedule times found in the future were pulled back to the
     /// clock (a clock that ran ahead and was corrected).
@@ -190,17 +194,24 @@ impl Admitted {
 const PHASE_PUBLISH: &str = "publish";
 const PHASE_AFTER_PUBLISH: &str = "after_publish";
 
+/// Status counters saturate: a counter restored from a file near the maximum
+/// must not overflow (in a destructor that would abort the process).
+fn bump(counter: &mut u64) {
+    *counter = counter.saturating_add(1);
+}
+
 /// Records a job that never finished. Only an interrupted publication counts
 /// as a failed run; after publication the set exists, so only the drill or
-/// collection was cut short.
+/// collection was cut short. A job whose outcome was already counted has
+/// been cleared, so it is never counted twice.
 fn interrupt(status: &mut Status, id: Option<&str>, at: u64) -> Option<Job> {
     let job = status.job.take_if(|job| id.is_none_or(|id| job.id == id))?;
     if job.phase == PHASE_PUBLISH {
-        status.runs += 1;
-        status.failures += 1;
+        bump(&mut status.runs);
+        bump(&mut status.failures);
         status.last_failure_unix_ms = Some(at);
     }
-    status.interrupted += 1;
+    bump(&mut status.interrupted);
     status.last_error = Some(LastError {
         code: "cloud_backup_interrupted".into(),
         message: format!(
@@ -226,6 +237,9 @@ struct Loaded {
     status: Status,
     installation: Option<String>,
     retry_at: Option<u64>,
+    /// Set when `shutdown` gave up waiting: this runtime no longer writes
+    /// its files, so a runtime opened later on the directory owns them.
+    fenced: bool,
 }
 
 type Connector = Box<dyn Fn(&Target) -> Result<Sets, ApiError> + Send + Sync>;
@@ -234,6 +248,11 @@ pub(super) struct Runtime {
     dir: PathBuf,
     state: Mutex<Loaded>,
     busy: AtomicBool,
+    /// Set by `shutdown`: new operations are refused.
+    stopping: AtomicBool,
+    /// Operations in progress (scheduled or operator), waited for by
+    /// `shutdown`.
+    active: Arc<AtomicUsize>,
     /// Operation pins (restores, drills) this process is still using: even a
     /// forced removal refuses them.
     live: Mutex<HashSet<String>>,
@@ -250,22 +269,44 @@ struct Unwinding<'a> {
 }
 
 impl Drop for Unwinding<'_> {
+    /// Runs during unwinding, where a second panic aborts the process: the
+    /// counters saturate and the log ignores a failed stderr write.
     fn drop(&mut self) {
         if !std::thread::panicking() {
             return;
         }
         let at = now();
         let mut phase = None;
-        self.runtime.note(|l| {
+        let saved = self.runtime.update(|l| {
             phase = interrupt(&mut l.status, Some(self.id), at).map(|job| job.phase);
         });
+        // The outcome was counted before the panic: nothing to record.
+        let Some(phase) = phase else {
+            return;
+        };
+        if let Err(error) = saved {
+            logs::stderr_quiet(
+                "error",
+                "cloud_backup",
+                json!({"event":"cloud_backup_state_write_failed","code":error.code}).to_string(),
+            );
+        }
         self.handle
             .audit(json!({"event":"cloud_backup_interrupted","job_id":self.id,"phase":phase}));
-        logs::stderr(
+        logs::stderr_quiet(
             "error",
             "cloud_backup",
             json!({"event":"cloud_backup_interrupted","job_id":self.id,"phase":phase}).to_string(),
         );
+    }
+}
+
+/// An operation counted in `Runtime::active` until it is dropped.
+struct Active(Arc<AtomicUsize>);
+
+impl Drop for Active {
+    fn drop(&mut self) {
+        self.0.fetch_sub(1, Ordering::SeqCst);
     }
 }
 
@@ -398,6 +439,14 @@ fn read_json<T: DeserializeOwned>(path: &FilePath) -> std::io::Result<Option<T>>
             .map(Some)
             .map_err(|e| io_error(format!("invalid {}: {e}", path.display()))),
     }
+}
+
+fn closed() -> ApiError {
+    ApiError::new(
+        StatusCode::SERVICE_UNAVAILABLE,
+        "cloud_backup_closed",
+        "the server is shutting down; cloud backup operations are refused",
+    )
 }
 
 fn state_too_large() -> ApiError {
@@ -540,7 +589,10 @@ pub(super) fn bundle_summary(bundle: &recovery_bundle::Bundle) -> Value {
 
 /// Pulls schedule times that lie in the future back to `now`. A clock that
 /// ran ahead and was then corrected would otherwise defer every run by the
-/// size of the error; this caps the delay at one interval (or one retry).
+/// size of the error; this caps the delay at one interval (or one retry)
+/// once the clock is stable again. The interval is measured on the wall
+/// clock: repeated forward jumps can start extra runs and repeated backward
+/// jumps keep moving the deadline.
 fn reconcile_clock(loaded: &mut Loaded, now: u64) -> bool {
     let status = &mut loaded.status;
     let mut changed = false;
@@ -632,6 +684,7 @@ impl Runtime {
             status,
             installation,
             retry_at: None,
+            fenced: false,
         };
         if reconcile_clock(&mut loaded, now()) {
             let bytes =
@@ -642,6 +695,8 @@ impl Runtime {
             dir,
             state: Mutex::new(loaded),
             busy: AtomicBool::new(false),
+            stopping: AtomicBool::new(false),
+            active: Arc::default(),
             live: Mutex::default(),
             operation: Mutex::default(),
             connector,
@@ -652,6 +707,18 @@ impl Runtime {
         self.state
             .lock()
             .is_ok_and(|s| s.policy.as_ref().is_some_and(|p| p.enabled))
+    }
+
+    /// Counts an operation until the guard drops; refused once `shutdown`
+    /// began. `shutdown` sets the flag before it reads the count, so either
+    /// the operation sees the flag or `shutdown` waits for it.
+    fn enter(&self) -> Result<Active, ApiError> {
+        self.active.fetch_add(1, Ordering::SeqCst);
+        let active = Active(self.active.clone());
+        if self.stopping.load(Ordering::SeqCst) {
+            return Err(closed());
+        }
+        Ok(active)
     }
 
     fn try_busy(&self) -> Result<Busy<'_>, ApiError> {
@@ -700,9 +767,13 @@ impl Runtime {
     /// Applies `change` and persists the status while holding the state lock,
     /// so status writes never reorder. A status that would exceed the read
     /// limit is refused and rolled back before the durable file is replaced:
-    /// an unreadable `state.json` would stop the server from starting.
+    /// an unreadable `state.json` would stop the server from starting. A
+    /// fenced runtime changes and writes nothing.
     fn update(&self, change: impl FnOnce(&mut Loaded)) -> Result<(), ApiError> {
         let mut loaded = lock(&self.state)?;
+        if loaded.fenced {
+            return Err(closed());
+        }
         let previous = loaded.status.clone();
         change(&mut loaded);
         let bytes = match encode(loaded.policy.as_ref(), &loaded.status) {
@@ -754,9 +825,13 @@ impl Runtime {
     ) -> Result<Value, ApiError> {
         handle.refusal_for_policy()?;
         policy.validate().map_err(unprocessable)?;
+        let _active = self.enter()?;
         let _busy = self.try_busy()?;
         let abandoned = {
             let mut loaded = lock(&self.state)?;
+            if loaded.fenced {
+                return Err(closed());
+            }
             if loaded.installation.is_none() {
                 let mut bytes = [0u8; 8];
                 getrandom::fill(&mut bytes).map_err(internal)?;
@@ -812,6 +887,9 @@ impl Runtime {
     }
 
     fn claim_due_at(&self, now: u64) -> bool {
+        if self.stopping.load(Ordering::SeqCst) {
+            return false;
+        }
         let Ok(mut loaded) = self.state.lock() else {
             return false;
         };
@@ -822,8 +900,8 @@ impl Runtime {
             _ => return false,
         }
         if self.busy.swap(true, Ordering::AcqRel) {
-            loaded.status.skipped_busy += 1;
-            loaded.retry_at = Some(now + RETRY_MS);
+            bump(&mut loaded.status.skipped_busy);
+            loaded.retry_at = Some(now.saturating_add(RETRY_MS));
             return false;
         }
         loaded.status.last_attempt_unix_ms = Some(now);
@@ -832,15 +910,18 @@ impl Runtime {
     }
 
     /// Runs a claimed scheduled cycle on its own thread, then releases the
-    /// claim. `Service::close` waits a bounded time for it
-    /// (`wait_for_operation`); a run still going then is recorded as
-    /// interrupted at the next start, and leaves an unpublished set that
-    /// collection removes, or a pending handle.
+    /// claim. `Service::close` calls `shutdown`, which waits a bounded time
+    /// for it.
     pub(super) fn start_claimed(self: &Arc<Self>, handle: Handle) {
+        let Ok(active) = self.enter() else {
+            self.busy.store(false, Ordering::Release);
+            return;
+        };
         let runtime = self.clone();
         let spawned = std::thread::Builder::new()
             .name("vlite-cloud-backup".into())
             .spawn(move || {
+                let _active = active;
                 let _claim = Busy(&runtime.busy);
                 let _ = runtime.cycle(&handle, true);
             });
@@ -853,7 +934,7 @@ impl Runtime {
             self.busy.store(false, Ordering::Release);
             let at = now();
             self.note(|l| {
-                l.status.failures += 1;
+                bump(&mut l.status.failures);
                 l.status.last_failure_unix_ms = Some(at);
                 l.status.last_error = Some(LastError {
                     code: "cloud_backup_thread_failed".into(),
@@ -863,40 +944,59 @@ impl Runtime {
         }
     }
 
-    /// Waits up to `wait` for the last scheduled run's thread. Returns false
-    /// (and logs) if it is still running; that job is then recorded as
-    /// interrupted at the next start.
-    pub(super) fn wait_for_operation(&self, wait: std::time::Duration) -> bool {
-        let slot = || {
-            self.operation
-                .lock()
-                .unwrap_or_else(std::sync::PoisonError::into_inner)
-        };
-        let Some(thread) = slot().take() else {
-            return true;
-        };
-        let deadline = std::time::Instant::now() + wait;
-        while !thread.is_finished() {
-            if std::time::Instant::now() >= deadline {
-                slot().get_or_insert(thread);
-                logs::stderr(
-                    "warn",
-                    "cloud_backup",
-                    json!({"event":"cloud_backup_shutdown_timeout",
-                        "waited_ms":wait.as_millis() as u64})
-                    .to_string(),
-                );
+    /// Refuses new operations, then waits up to `wait` for the running ones
+    /// (the scheduled thread and operator requests). Returns true once none
+    /// is left. Otherwise the runtime is fenced and false is returned: the
+    /// operations still running finish or fail on their own (a thread cannot
+    /// be stopped) but never write `state.json` again, so a runtime opened
+    /// later on the directory owns it and records the unfinished job as
+    /// interrupted. A scheduled run checks the flag and skips its drill and
+    /// collection. Concurrent callers are serialized; each returns true only
+    /// when nothing runs.
+    pub(super) fn shutdown(&self, wait: std::time::Duration) -> bool {
+        let deadline = std::time::Instant::now().checked_add(wait);
+        self.stopping.store(true, Ordering::SeqCst);
+        let mut slot = self
+            .operation
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        loop {
+            let running = self.active.load(Ordering::SeqCst);
+            if running == 0 && slot.as_ref().is_none_or(|t| t.is_finished()) {
+                break;
+            }
+            if deadline.is_some_and(|at| std::time::Instant::now() >= at) {
+                let first = {
+                    let mut loaded = self
+                        .state
+                        .lock()
+                        .unwrap_or_else(std::sync::PoisonError::into_inner);
+                    !std::mem::replace(&mut loaded.fenced, true)
+                };
+                if first {
+                    logs::stderr(
+                        "warn",
+                        "cloud_backup",
+                        json!({"event":"cloud_backup_shutdown_timeout",
+                            "waited_ms":wait.as_millis() as u64,"running":running,
+                            "fenced":true})
+                        .to_string(),
+                    );
+                }
                 return false;
             }
-            std::thread::sleep(std::time::Duration::from_millis(20));
+            std::thread::sleep(SHUTDOWN_POLL);
         }
         // A panic was already recorded by the cycle's unwinding guard.
-        let _ = thread.join();
+        if let Some(thread) = slot.take() {
+            let _ = thread.join();
+        }
         true
     }
 
     /// An operator-requested run; refused while another one runs.
     pub(super) fn run_now(&self, handle: &Handle) -> Result<Value, ApiError> {
+        let _active = self.enter()?;
         let _busy = self.try_busy()?;
         self.cycle(handle, false)
     }
@@ -905,6 +1005,9 @@ impl Runtime {
     /// panic is recorded by the unwinding guard; a process that stops
     /// mid-run leaves the job for the next start to record.
     fn cycle(&self, handle: &Handle, scheduled: bool) -> Result<Value, ApiError> {
+        if self.stopping.load(Ordering::SeqCst) {
+            return Err(closed());
+        }
         let started = now();
         let (_, installation) = self.configured()?;
         let mut bytes = [0u8; 8];
@@ -923,7 +1026,7 @@ impl Runtime {
                 return;
             };
             l.status.last_attempt_unix_ms = Some(started);
-            l.status.job = Some(job);
+            l.status.job = Some(job.clone());
             pending = l.status.pending.clone();
             admitted = Some(Admitted {
                 policy,
@@ -943,14 +1046,7 @@ impl Runtime {
             handle,
             id: &id,
         };
-        let result = self.run_job(
-            handle,
-            scheduled,
-            &admitted,
-            &installation,
-            pending,
-            started,
-        );
+        let result = self.run_job(handle, &job, &admitted, &installation, pending);
         drop(guard);
         self.note(|l| {
             l.status.job.take_if(|job| job.id == id);
@@ -960,25 +1056,28 @@ impl Runtime {
 
     /// Settles a pending publication, captures a consistent database copy and
     /// recovery bundle, publishes the set, then drills and collects as the
-    /// policy asks. Every outcome is recorded in the status and audited.
+    /// policy asks. Every outcome is recorded in the status and audited. A
+    /// failure clears the job in the same write that counts it, so a panic
+    /// in the audit or log after it cannot count the run again.
     fn run_job(
         &self,
         handle: &Handle,
-        scheduled: bool,
+        job: &Job,
         admitted: &Admitted,
         installation: &str,
         pending: Option<cloud::Pending>,
-        started: u64,
     ) -> Result<Value, ApiError> {
+        let (scheduled, started) = (job.scheduled, job.started_unix_ms);
         let policy = &admitted.policy;
         let outcome = self.publish(handle, admitted, installation, pending, started);
         let (sets, record, settled) = match outcome {
             Ok(done) => done,
             Err(error) if error.code == "busy" => {
                 self.note(|l| {
-                    l.status.skipped_busy += 1;
+                    l.status.job.take_if(|j| j.id == job.id);
+                    bump(&mut l.status.skipped_busy);
                     if scheduled {
-                        l.retry_at = Some(started + RETRY_MS);
+                        l.retry_at = Some(started.saturating_add(RETRY_MS));
                     }
                 });
                 return Err(error);
@@ -986,8 +1085,9 @@ impl Runtime {
             Err(error) => {
                 let at = now();
                 self.note(|l| {
-                    l.status.runs += 1;
-                    l.status.failures += 1;
+                    l.status.job.take_if(|j| j.id == job.id);
+                    bump(&mut l.status.runs);
+                    bump(&mut l.status.failures);
                     l.status.last_failure_unix_ms = Some(at);
                     l.status.last_error = Some(LastError {
                         code: error.code.into(),
@@ -1008,8 +1108,8 @@ impl Runtime {
         let at = now();
         let mut published = 0;
         self.note(|l| {
-            l.status.runs += 1;
-            l.status.published += 1;
+            bump(&mut l.status.runs);
+            bump(&mut l.status.published);
             l.status.last_success_unix_ms = Some(at);
             l.status.last_set = Some(record.set_id.clone());
             if let Some(job) = &mut l.status.job {
@@ -1021,6 +1121,14 @@ impl Runtime {
             json!({"event":"cloud_backup_published","set_id":record.set_id,
             "scheduled":scheduled}),
         );
+        // Shutting down: the set is published; the drill and collection wait
+        // for the next run.
+        if self.stopping.load(Ordering::SeqCst) {
+            return Ok(
+                json!({"set_id":record.set_id,"record":record,"settled":settled,
+                "drill":null,"collection":null,"stopped_for_shutdown":true}),
+            );
+        }
         let drill = (policy.drill_every > 0 && published % policy.drill_every == 0).then(|| {
             match self.hold(&sets, &record.set_id, "drill") {
                 Ok(held) => {
@@ -1103,6 +1211,11 @@ impl Runtime {
             &uploads,
             capture,
         );
+        // A run fenced by an expired shutdown wait never starts publishing;
+        // collection removes what it left.
+        if lock(&self.state)?.fenced {
+            return Err(closed());
+        }
         let publication = sets.publish(&manifest, &uploads, now)?;
         drop(staged);
         match publication {
@@ -1133,7 +1246,7 @@ impl Runtime {
             Ok(Publication::Published(record)) => {
                 self.note(|l| {
                     l.status.pending = None;
-                    l.status.published += 1;
+                    bump(&mut l.status.published);
                     l.status.last_success_unix_ms = Some(now);
                     l.status.last_set = Some(record.set_id.clone());
                 });
@@ -1230,9 +1343,9 @@ impl Runtime {
             summary["error"]["message"] = json!(clip(message));
         }
         self.note(|l| {
-            l.status.drills += 1;
+            bump(&mut l.status.drills);
             if !ok {
-                l.status.drill_failures += 1;
+                bump(&mut l.status.drill_failures);
             }
             l.status.last_drill = Some(summary);
         });
@@ -1281,6 +1394,7 @@ impl Runtime {
     /// Janitor (staging orphans, interrupted deletions) plus retention when
     /// enabled. Needs the janitor role; refused while a run is active.
     pub(super) fn collect(&self, handle: &Handle) -> Result<Value, ApiError> {
+        let _active = self.enter()?;
         let _busy = self.try_busy()?;
         let (sets, policy, installation) = self.connect()?;
         match self.collect_with(handle, &sets, &policy, &installation) {
@@ -1304,6 +1418,7 @@ impl Runtime {
     /// is refused without counting a drill; any later failure is recorded on
     /// the set and in the status, then returned.
     pub(super) fn drill(&self, handle: &Handle, set_id: &str) -> Result<Value, ApiError> {
+        let _active = self.enter()?;
         let (sets, _, _) = self.connect()?;
         let held = self.hold(&sets, set_id, "drill")?;
         match self.drill_pinned(handle, &sets, set_id, &held.pin) {
@@ -1318,6 +1433,7 @@ impl Runtime {
         set_id: &str,
         reason: &str,
     ) -> Result<Value, ApiError> {
+        let _active = self.enter()?;
         let (sets, _, _) = self.connect()?;
         let pin = sets.pin(set_id, reason, cloud::PinKind::Operator, now())?;
         handle.audit(json!({"event":"cloud_backup_pinned","set_id":set_id,"pin_id":pin.id}));
@@ -1334,6 +1450,7 @@ impl Runtime {
         pin_id: &str,
         force: bool,
     ) -> Result<Value, ApiError> {
+        let _active = self.enter()?;
         if force
             && self
                 .live
@@ -1368,6 +1485,7 @@ impl Runtime {
         admin_dir: &FilePath,
     ) -> Result<Value, ApiError> {
         handle.refusal_for_policy()?;
+        let _active = self.enter()?;
         let (sets, _, _) = self.connect()?;
         let held = self.hold(&sets, set_id, "restore")?;
         let result = (|| {
@@ -1910,36 +2028,251 @@ mod tests {
 
         // A scheduled run that panics on its thread is joined at shutdown.
         armed.store(true, Ordering::SeqCst);
-        runtime.busy.store(true, Ordering::Release);
-        runtime.start_claimed(h.clone());
-        assert!(runtime.wait_for_operation(Duration::from_secs(10)));
-        assert_eq!(status(&runtime)["interrupted"], 2);
-        assert!(!runtime.busy.load(Ordering::Acquire));
-
-        // A run still going when the bounded wait ends is reported, its job
-        // stays durable, and a later wait joins it.
         gate.store(false, Ordering::SeqCst);
         runtime.busy.store(true, Ordering::Release);
         runtime.start_claimed(h.clone());
-        assert!(!runtime.wait_for_operation(Duration::from_millis(50)));
+        await_admitted(&runtime);
+        gate.store(true, Ordering::SeqCst);
+        assert!(runtime.shutdown(Duration::from_secs(10)));
+        let stopped = status(&runtime);
+        assert_eq!(stopped["interrupted"], 2, "{stopped}");
+        assert!(!runtime.busy.load(Ordering::Acquire));
+        assert!(runtime.shutdown(Duration::ZERO));
+        // Shut down: nothing new starts, and the gate is never reached.
+        gate.store(false, Ordering::SeqCst);
+        assert_eq!(code(runtime.run_now(&h)), "cloud_backup_closed");
+        assert!(!runtime.claim_due_at(u64::MAX));
+        runtime.busy.store(true, Ordering::Release);
+        runtime.start_claimed(h.clone());
+        assert!(!runtime.busy.load(Ordering::Acquire));
+        assert!(runtime.shutdown(Duration::ZERO));
+        assert_eq!(status(&runtime), stopped);
+    }
+
+    /// A runtime whose connector blocks until `gate` opens.
+    fn gated(env: &Env, gate: &Arc<AtomicBool>, calls: &Arc<AtomicUsize>) -> Arc<Runtime> {
+        let (meta, data) = (env.meta.clone(), env.data.clone());
+        let (gate, calls) = (gate.clone(), calls.clone());
+        let connector: Connector = Box::new(move |target: &Target| {
+            calls.fetch_add(1, Ordering::SeqCst);
+            while !gate.load(Ordering::SeqCst) {
+                std::thread::sleep(Duration::from_millis(5));
+            }
+            Ok(Sets::new(
+                meta.clone(),
+                data.clone(),
+                false,
+                target.prefix.clone(),
+            ))
+        });
+        Arc::new(Runtime::open_with(env.root.join("cloud-backup"), connector).unwrap())
+    }
+
+    /// The saved document, read without opening a runtime (which would
+    /// record a saved job as interrupted).
+    fn saved(env: &Env) -> Value {
+        let path = env.root.join("cloud-backup").join(STATE);
+        serde_json::from_slice(&std::fs::read(path).unwrap()).unwrap()
+    }
+
+    /// Waits for the job in memory, which is set only once it is saved.
+    /// (Polling the file could make Windows refuse the replacing rename.)
+    fn await_admitted(runtime: &Runtime) {
         let deadline = Instant::now() + Duration::from_secs(10);
-        // Read the file: opening a runtime would record the job as interrupted.
-        let state = env.root.join("cloud-backup").join(STATE);
-        let saved =
-            || -> Value { serde_json::from_slice(&std::fs::read(&state).unwrap()).unwrap() };
-        while saved()["status"]["job"].is_null() {
+        while status(runtime)["job"].is_null() {
             assert!(Instant::now() < deadline, "the job was never admitted");
             std::thread::sleep(Duration::from_millis(5));
         }
+    }
+
+    #[test]
+    fn a_run_outliving_shutdown_is_fenced_from_the_state_file() {
+        // Review NEW-M5-01/02: after the bounded wait the old thread kept
+        // write authority and overwrote the state a later runtime recorded,
+        // and a second concurrent waiter returned true while it still ran.
+        let env = setup();
+        let h = Handle::new(&env.service);
+        let (gate, calls) = (Arc::new(AtomicBool::new(false)), Arc::default());
+        let runtime = gated(&env, &gate, &calls);
+        runtime
+            .configure(policy(json!({"drill_every":0})), &h, BASE)
+            .unwrap();
+        runtime.busy.store(true, Ordering::Release);
+        runtime.start_claimed(h.clone());
+        await_admitted(&runtime);
+        let waits = std::thread::scope(|scope| {
+            let waiters: Vec<_> = (0..2)
+                .map(|_| scope.spawn(|| runtime.shutdown(Duration::from_millis(50))))
+                .collect();
+            waiters
+                .into_iter()
+                .map(|w| w.join().unwrap())
+                .collect::<Vec<_>>()
+        });
+        assert_eq!(waits, [false, false]);
+        // Fenced: operations are refused and nothing is written.
+        assert_eq!(code(runtime.run_now(&h)), "cloud_backup_closed");
+        assert_eq!(code(runtime.collect(&h)), "cloud_backup_closed");
+        assert_eq!(
+            code(runtime.drill(&h, "20240101T000000Z-0000000000000000")),
+            "cloud_backup_closed"
+        );
+        assert_eq!(
+            code(runtime.configure(policy(json!({})), &h, BASE)),
+            "cloud_backup_closed"
+        );
+        // The next owner records the unfinished run once.
+        let next = reopen(&env);
+        let recorded = status(&next);
+        assert_eq!(
+            (
+                recorded["interrupted"].clone(),
+                recorded["runs"].clone(),
+                recorded["job"].clone()
+            ),
+            (json!(1), json!(1), Value::Null),
+            "{recorded}"
+        );
+        let file = std::fs::read(env.root.join("cloud-backup").join(STATE)).unwrap();
+        // The old run continues, but never overwrites the new owner's file
+        // and never publishes after the fence.
         gate.store(true, Ordering::SeqCst);
-        assert!(runtime.wait_for_operation(Duration::from_secs(10)));
-        let done = status(&runtime);
+        assert!(runtime.shutdown(Duration::from_secs(10)));
+        assert_eq!(
+            std::fs::read(env.root.join("cloud-backup").join(STATE)).unwrap(),
+            file
+        );
+        assert_eq!(status(&next), recorded);
+        assert_eq!(status(&reopen(&env)), recorded);
+        assert!(next.list().unwrap()["sets"].as_array().unwrap().is_empty());
+        assert_eq!(calls.load(Ordering::SeqCst), 1);
+    }
+
+    #[test]
+    fn a_panic_after_publication_counts_the_published_run_once() {
+        // Review NEW-TEST-01: nothing showed that the job leaves the publish
+        // phase once the set is published.
+        let env = setup();
+        let h = Handle::new(&env.service);
+        env.runtime
+            .configure(
+                policy(json!({"drill_every":0,"retention_enabled":true})),
+                &h,
+                BASE,
+            )
+            .unwrap();
+        // The catalog is read only by the collection after publication.
+        env.meta.hook(Op::Get, "catalog.json", || {
+            panic!("injected collection panic")
+        });
+        let outcome =
+            std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| env.runtime.run_now(&h)));
+        assert!(outcome.is_err());
+        let after = status(&env.runtime);
+        let counts = |s: &Value| {
+            ["runs", "published", "failures", "interrupted"].map(|k| s[k].as_u64().unwrap())
+        };
+        assert_eq!(counts(&after), [1, 1, 0, 1], "{after}");
+        assert!(after["job"].is_null(), "{after}");
+        assert_eq!(status(&reopen(&env)), after);
+    }
+
+    #[tokio::test]
+    async fn service_close_waits_for_the_running_cloud_backup() {
+        // Review NEW-TEST-01: removing the wait from `Service::close` went
+        // unnoticed.
+        let env = setup();
+        let (gate, calls) = (Arc::new(AtomicBool::new(false)), Arc::default());
+        let runtime = gated(&env, &gate, &calls);
+        let mut service = env.service.clone();
+        let state = admin::AdminState::default();
+        let _ = state.cloud.set(runtime.clone());
+        service.admin = Arc::new(state);
+        let h = Handle::new(&service);
+        runtime
+            .configure(policy(json!({"drill_every":0})), &h, BASE)
+            .unwrap();
+        runtime.busy.store(true, Ordering::Release);
+        runtime.start_claimed(h);
+        await_admitted(&runtime);
+        let opener = gate.clone();
+        let release = std::thread::spawn(move || {
+            std::thread::sleep(Duration::from_millis(300));
+            opener.store(true, Ordering::SeqCst);
+        });
+        service.close().await.unwrap();
+        release.join().unwrap();
+        let done = saved(&env)["status"].clone();
         assert!(done["job"].is_null(), "{done}");
         assert_eq!(
-            (done["interrupted"].clone(), done["published"].clone()),
-            (json!(2), json!(2))
+            (done["published"].clone(), done["interrupted"].clone()),
+            (json!(1), json!(0)),
+            "{done}"
         );
-        assert!(runtime.wait_for_operation(Duration::ZERO));
+    }
+
+    #[test]
+    fn admission_failures_never_reach_the_cloud() {
+        // Review NEW-TEST-01: the job is saved before any remote work.
+        let env = setup();
+        let h = Handle::new(&env.service);
+        let (gate, calls) = (Arc::new(AtomicBool::new(true)), Arc::default());
+        let runtime = gated(&env, &gate, &calls);
+        runtime
+            .configure(policy(json!({"drill_every":0})), &h, BASE)
+            .unwrap();
+        // Not renamed: no job anywhere.
+        WRITE_FAULT.with(|f| f.set(Some(false)));
+        assert!(runtime.run_now(&h).is_err());
+        assert_eq!(calls.load(Ordering::SeqCst), 0);
+        assert!(saved(&env)["status"]["job"].is_null());
+        assert!(status(&runtime)["job"].is_null());
+        // Renamed but unconfirmed: the job is on disk, nothing remote ran,
+        // and the next start records it.
+        WRITE_FAULT.with(|f| f.set(Some(true)));
+        assert!(runtime.run_now(&h).is_err());
+        assert_eq!(calls.load(Ordering::SeqCst), 0);
+        assert!(saved(&env)["status"]["job"].is_object());
+        assert!(status(&runtime)["job"].is_null());
+        assert!(!runtime.busy.load(Ordering::Acquire));
+        drop(runtime);
+        assert_eq!(status(&reopen(&env))["interrupted"], 1);
+    }
+
+    #[test]
+    fn counters_and_retry_times_saturate() {
+        // Review NEW-M5-03 and SO-M4-02: an overflow in the unwinding guard
+        // aborted the process; a retry near the maximum time panicked.
+        let env = setup();
+        let h = Handle::new(&env.service);
+        let enabled = policy(json!({"enabled":true,"interval_secs":300,"drill_every":0}));
+        env.runtime.configure(enabled, &h, BASE).unwrap();
+        env.runtime.busy.store(true, Ordering::Release);
+        assert!(!env.runtime.claim_due_at(u64::MAX - 1));
+        assert_eq!(env.runtime.view().unwrap()["next_run_unix_ms"], u64::MAX);
+        env.runtime.busy.store(false, Ordering::Release);
+
+        let path = env.root.join("cloud-backup").join(STATE);
+        let mut file = saved(&env);
+        for key in ["runs", "failures", "interrupted", "skipped_busy"] {
+            file["status"][key] = json!(u64::MAX);
+        }
+        file["status"]["job"] = json!({"id":"00000000000000aa","scheduled":true,
+            "started_unix_ms":BASE,"phase":"publish"});
+        std::fs::write(&path, serde_json::to_vec(&file).unwrap()).unwrap();
+        let restarted = Runtime::open_with(
+            env.root.join("cloud-backup"),
+            Box::new(|_: &Target| panic!("injected connector panic")),
+        )
+        .unwrap();
+        let outcome =
+            std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| restarted.run_now(&h)));
+        assert!(outcome.is_err());
+        let after = status(&restarted);
+        for key in ["runs", "failures", "interrupted", "skipped_busy"] {
+            assert_eq!(after[key], u64::MAX, "{key}: {after}");
+        }
+        assert!(after["job"].is_null(), "{after}");
     }
 
     #[test]
@@ -1981,6 +2314,23 @@ mod tests {
         )
         .unwrap();
         assert_eq!(saved["status"]["policy_updated_unix_ms"], updated);
+        drop(reopened);
+
+        // So is a future last attempt (review NEW-TEST-01).
+        let path = env.root.join("cloud-backup").join(STATE);
+        let mut file: Value = serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
+        file["status"]["policy_updated_unix_ms"] = json!(BASE);
+        file["status"]["last_attempt_unix_ms"] = json!(now() + year);
+        std::fs::write(&path, serde_json::to_vec(&file).unwrap()).unwrap();
+        let before = now();
+        let reopened = reopen(&env);
+        let after = now();
+        let view = reopened.view().unwrap();
+        let attempt = view["status"]["last_attempt_unix_ms"].as_u64().unwrap();
+        assert!((before..=after).contains(&attempt), "{view}");
+        assert!(view["next_run_unix_ms"].as_u64().unwrap() <= after + 300_000);
+        let file: Value = serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
+        assert_eq!(file["status"]["last_attempt_unix_ms"], attempt);
     }
 
     #[test]

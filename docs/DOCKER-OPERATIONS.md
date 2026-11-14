@@ -407,13 +407,18 @@ private admin volume.
    (or wait for the interval). `GET /v1/admin/cloud-backup` shows the result.
    A run is not idempotent: if you did not see its outcome, list the sets
    before you retry. The status shows the run in progress (`job`, saved
-   before any cloud request). A clean shutdown waits up to 10 seconds for a
-   scheduled run; a run cut short by a crash, a panic or that limit is
-   counted in `interrupted` with `last_error.code` `cloud_backup_interrupted`
-   (at the next start if the process stopped). If the clock ran ahead and
-   was corrected, schedule times in the future are pulled back to the
-   current time and `clock_reset_unix_ms` records when, so runs are delayed
-   by at most one interval.
+   before any cloud request). A clean shutdown refuses new cloud operations
+   (503 `cloud_backup_closed`) and waits up to 10 seconds for the running
+   ones. A run still going after that is not stopped: it can no longer write
+   the status or start publishing, and the next start counts it in
+   `interrupted` (`last_error.code` `cloud_backup_interrupted`), as it does
+   a run cut short by a crash or a panic. Collection later removes the set
+   it left unpublished. The interval is measured on the wall clock. If the
+   clock ran ahead and was then corrected, schedule times in the future are
+   pulled back to the current time and `clock_reset_unix_ms` records when,
+   so runs are delayed by at most one interval once the clock is stable.
+   Repeated jumps forward can start extra runs; repeated jumps back keep
+   moving the next run.
 2. Drill a set now and then (`POST .../sets/{id}/drill`, or set
    `drill_every`). A drill downloads, verifies, restores to scratch and
    queries the copy without touching the live database.

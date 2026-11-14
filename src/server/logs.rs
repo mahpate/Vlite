@@ -135,6 +135,15 @@ pub(super) fn stderr_with_fields(
     global().record(level, target, message, Value::Object(fields));
 }
 
+/// `stderr` that never panics: a failed write to stderr is ignored. For use
+/// in a destructor during unwinding, where a second panic aborts.
+pub(super) fn stderr_quiet(level: &'static str, target: &str, message: String) {
+    use std::io::Write as _;
+    let _ = writeln!(std::io::stderr().lock(), "{message}");
+    let fields = serde_json::from_str::<Value>(&message).unwrap_or(Value::Null);
+    global().record(level, target, message, fields);
+}
+
 fn level_index(level: &str) -> Option<u8> {
     match level {
         "trace" => Some(0),

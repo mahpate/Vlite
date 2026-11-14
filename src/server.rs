@@ -705,8 +705,10 @@ impl Service {
     }
 
     /// Call after HTTP graceful shutdown. Stops and joins the maintenance and
-    /// backup scheduler, gives a running scheduled cloud backup a bounded
-    /// time to finish, waits for any disconnected writer, then closes.
+    /// backup scheduler, refuses new cloud backup operations and gives the
+    /// running ones a bounded time to finish (one still running after that is
+    /// fenced from the cloud backup state file), waits for any disconnected
+    /// writer, then closes.
     pub async fn close(&self) -> crate::Result<()> {
         let database = self.database.clone();
         let ops = self.ops.clone();
@@ -720,7 +722,7 @@ impl Service {
             webhooks.shutdown();
             ops.shutdown();
             if let Some(cloud) = cloud {
-                cloud.wait_for_operation(std::time::Duration::from_secs(10));
+                cloud.shutdown(std::time::Duration::from_secs(10));
             }
             let mut owner = database
                 .write()
