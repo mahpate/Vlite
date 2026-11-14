@@ -1614,6 +1614,45 @@ mod tests {
     }
 
     #[test]
+    fn too_little_free_space_is_refused_before_any_payload_read() {
+        let env = setup();
+        let name = format!("vlite/prod/sets/{}/manifest.json", env.set_id);
+        let manifest: Value = serde_json::from_slice(&env.data.raw(&name).unwrap()).unwrap();
+        let size = |role: &str| {
+            manifest["objects"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .find(|object| object["role"] == role)
+                .unwrap()["bytes"]
+                .as_u64()
+                .unwrap()
+        };
+        let needed = cloud::restore_space_needed(size(ROLE_DATABASE), size(ROLE_BUNDLE));
+        let reads = Arc::new(AtomicUsize::new(0));
+        let count = reads.clone();
+        env.data.hook(Op::Get, "/objects/", move || {
+            count.fetch_add(1, Ordering::SeqCst);
+        });
+        cloud::FREE_BYTES.with(|free| free.set(Some(Some(needed - 1))));
+        let error = env.restore(&env.request()).unwrap_err();
+        assert_eq!(error.code, "restore_insufficient_space", "{error}");
+        assert_eq!(error.exit_status(), 1);
+        assert_eq!(reads.load(Ordering::SeqCst), 0, "no payload was read");
+        assert!(!env.request().output.exists());
+        assert_eq!(env.pins(), 0);
+        assert!(env.leftovers().is_empty(), "{:?}", env.leftovers());
+
+        // Exactly the needed space is enough.
+        cloud::FREE_BYTES.with(|free| free.set(Some(Some(needed))));
+        let report = env.restore(&env.request()).unwrap();
+        cloud::FREE_BYTES.with(|free| free.set(None));
+        assert_eq!(report["pin_released"], true, "{report}");
+        assert!(env.request().output.join("database.vlite").is_file());
+        assert_eq!(env.pins(), 0);
+    }
+
+    #[test]
     fn a_failed_import_publishes_nothing() {
         let env = setup();
         // The fresh admin collides with an imported account.

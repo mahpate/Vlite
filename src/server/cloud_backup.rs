@@ -67,6 +67,23 @@ pub(super) fn restore_space_needed(database: u64, bundle: u64) -> u64 {
         .saturating_add(RESTORE_SPACE_MARGIN)
 }
 
+#[cfg(test)]
+thread_local! {
+    /// Test override of the free space `Sets::fetch` measures on this thread:
+    /// `Some(free)` replaces the measurement (`Some(None)`: unmeasurable).
+    pub(super) static FREE_BYTES: std::cell::Cell<Option<Option<u64>>> =
+        const { std::cell::Cell::new(None) };
+}
+
+/// Free bytes where a restore stages its copies, if measurable.
+fn free_bytes(dir: &std::path::Path) -> Option<u64> {
+    #[cfg(test)]
+    if let Some(free) = FREE_BYTES.with(std::cell::Cell::get) {
+        return free;
+    }
+    super::compaction::free_bytes(dir)
+}
+
 /// Checks free space where a restore stages its copies. Free space is not
 /// measurable on every platform (`None`); the check is then skipped.
 pub(super) fn check_restore_space(free: Option<u64>, needed: u64) -> Result<(), ApiError> {
@@ -1485,7 +1502,7 @@ impl Sets {
         // Size envelope and peak space before any payload is requested.
         check_database_size(db.bytes)?;
         check_restore_space(
-            super::compaction::free_bytes(dir),
+            free_bytes(dir),
             restore_space_needed(db.bytes, bundle_entry.bytes),
         )?;
 
