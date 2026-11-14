@@ -16,7 +16,9 @@
 //! and can only be added to a published set; deletion first moves an unpinned
 //! published record to `delete_pending` by the same CAS, so a pin and a
 //! deletion cannot both win. Blob leases are not used: the CAS already gives
-//! the exclusion and a lease would only add liveness.
+//! the exclusion and a lease would only add liveness. A retention victim is
+//! condemned only while its record revision equals the one its decision saw,
+//! so a stale janitor never acts on outdated pins or verification.
 use super::*;
 use crate::maintenance;
 use serde::{Serialize, de::DeserializeOwned};
@@ -390,6 +392,12 @@ pub(super) struct Record {
     pub manifest_sha256: String,
     pub pins: Vec<Pin>,
     pub last_drill: Option<DrillResult>,
+    /// Time of the latest passing drill. Never cleared: a set that was ever
+    /// verified keeps the last-verified retention protection even when a later
+    /// recheck fails, so a stale janitor decision cannot remove every
+    /// verified set (see `Sets::collect`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub verified_unix_ms: Option<u64>,
     pub delete_reason: Option<String>,
 }
 
@@ -552,15 +560,31 @@ struct Catalog {
     decision: Option<Decision>,
 }
 
-/// A retention decision is recorded before any deletion so a second janitor
-/// cannot act on a stale view and an interrupted one is resumed.
+/// A retention decision is recorded before any deletion so an interrupted
+/// janitor is resumed and a concurrent catalog change stops collection.
+///
+/// The catalog is not a lease: a janitor whose decision was resumed and
+/// cleared by another one may still be running. Each victim is therefore
+/// fenced by the record revision the decision was computed from; the set
+/// transition condemns it only while that revision (and so its pins, drill
+/// and verification) is unchanged. Together with the monotonic
+/// `Record::verified_unix_ms` protection this keeps the newest verified set
+/// under any interleaving. `survivors` is an audit trail, not a fence.
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct Decision {
     id: String,
     created_unix_ms: u64,
-    delete: Vec<String>,
+    delete: Vec<Victim>,
     survivors: Vec<String>,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct Victim {
+    set_id: String,
+    /// The record revision the decision saw.
+    revision: String,
 }
 
 /// Publication handle persisted while the final CAS result is unknown.
@@ -651,8 +675,9 @@ pub(super) struct Fetched {
     pub verification: maintenance::Verification,
 }
 
-enum Condemn {
-    Retention(String),
+enum Condemn<'a> {
+    /// Decision ID and the revision the decision saw.
+    Retention(&'a str, &'a str),
     Orphan(u64),
 }
 
@@ -859,6 +884,7 @@ impl Sets {
             manifest_sha256: sha_hex(&manifest_bytes),
             pins: Vec::new(),
             last_drill: None,
+            verified_unix_ms: None,
             delete_reason: None,
         };
         let etag = create_verified(&*self.meta, &self.record_key(id), &encode(&staging)?)?;
@@ -1180,6 +1206,9 @@ impl Sets {
             record.pins.retain(|p| p.id != pin_id);
             if record.state == SetState::Published {
                 record.last_drill = Some(result.clone());
+                if result.ok {
+                    record.verified_unix_ms = Some(result.unix_ms);
+                }
             }
             Ok(Step::Write)
         })
@@ -1372,7 +1401,9 @@ impl Sets {
     fn delete_set(&self, id: &str, why: &Condemn, now: u64) -> Result<bool, ApiError> {
         let (record, step) = self.update(id, now, |record, _| {
             let condemn = match (record.state, why) {
-                (SetState::Published, Condemn::Retention(_)) => record.pins.is_empty(),
+                (SetState::Published, Condemn::Retention(_, seen)) => {
+                    record.pins.is_empty() && record.revision == *seen
+                }
                 (SetState::Staging, Condemn::Orphan(grace_ms)) => {
                     record.updated_unix_ms.saturating_add(*grace_ms) <= now
                 }
@@ -1384,7 +1415,7 @@ impl Sets {
             }
             record.state = SetState::DeletePending;
             record.delete_reason = Some(match why {
-                Condemn::Retention(decision) => format!("retention decision {decision}"),
+                Condemn::Retention(decision, _) => format!("retention decision {decision}"),
                 Condemn::Orphan(_) => "unpublished staging set past the orphan grace period".into(),
             });
             Ok(Step::Write)
@@ -1462,8 +1493,11 @@ impl Sets {
         }
         let (mut catalog, mut etag) = self.catalog(now)?;
         if let Some(decision) = catalog.decision.clone() {
-            let why = Condemn::Retention(decision.id.clone());
-            for id in &decision.delete {
+            for victim in &decision.delete {
+                let (id, why) = (
+                    &victim.set_id,
+                    Condemn::Retention(&decision.id, &victim.revision),
+                );
                 match self.delete_set(id, &why, now) {
                     Ok(true) => out.resumed.push(id.clone()),
                     Ok(false) => out.skipped.push(id.clone()),
@@ -1529,7 +1563,14 @@ impl Sets {
             .filter_map(|l| l.record.as_ref().map(|r| (&l.set_id, r)))
             .filter(|(_, r)| r.state == SetState::Published && r.installation_id == installation)
             .collect();
-        let newest_drilled = published
+        // The newest ever-verified set is the hard guarantee (it holds across
+        // stale decisions); the newest set whose latest drill passed is also
+        // kept so a failed recheck never leaves only a failing set protected.
+        let newest_verified = published
+            .iter()
+            .find(|(_, r)| r.verified_unix_ms.is_some())
+            .map(|(id, _)| *id);
+        let newest_passing = published
             .iter()
             .find(|(_, r)| r.last_drill.as_ref().is_some_and(|d| d.ok))
             .map(|(id, _)| *id);
@@ -1539,11 +1580,15 @@ impl Sets {
             let protected = index < retention.keep_sets
                 || now.saturating_sub(record.created_unix_ms) < keep_ms
                 || !record.pins.is_empty()
-                || Some(*id) == newest_drilled;
+                || Some(*id) == newest_verified
+                || Some(*id) == newest_passing;
             if protected {
                 survivors.push((*id).clone());
             } else {
-                delete.push((*id).clone());
+                delete.push(Victim {
+                    set_id: (*id).clone(),
+                    revision: record.revision.clone(),
+                });
             }
         }
         if delete.is_empty() {
@@ -1560,8 +1605,11 @@ impl Sets {
         catalog.updated_unix_ms = now;
         (catalog, etag) = self.write_catalog(&catalog, &etag, now)?;
         out.decision = Some(decision.id.clone());
-        let why = Condemn::Retention(decision.id.clone());
-        for id in &decision.delete {
+        for victim in &decision.delete {
+            let (id, why) = (
+                &victim.set_id,
+                Condemn::Retention(&decision.id, &victim.revision),
+            );
             match self.delete_set(id, &why, now) {
                 Ok(true) => out.deleted.push(id.clone()),
                 Ok(false) => out.skipped.push(id.clone()),
@@ -2238,6 +2286,117 @@ mod tests {
     }
 
     #[test]
+    fn a_stale_janitor_cannot_delete_a_set_verified_after_its_decision() {
+        // Review F-003 reproducer: J1 decides to delete A (B is the verified
+        // survivor). Before J1's set transition, A is pinned, J2 resumes and
+        // clears the decision, A passes a drill and B fails a recheck. J1's
+        // retry must not act on its stale eligibility.
+        let env = setup();
+        let ids: Vec<String> = (0..3).map(|i| publish(&env, BASE + i * 1000)).collect();
+        let verified = DrillResult {
+            ok: true,
+            unix_ms: BASE,
+            detail: "ok".into(),
+        };
+        let pin = env.sets.pin(&ids[1], "initial drill", BASE).unwrap();
+        env.sets
+            .record_drill(&ids[1], &pin.id, &verified, BASE)
+            .unwrap();
+        env.sets.collect(INSTALL, &retention(false), BASE).unwrap();
+        let sets = env.sets.clone();
+        let victim = ids[0].clone();
+        let previous_verified = ids[1].clone();
+        let meta = env.meta.clone();
+        let target = format!("{victim}/record.json");
+        let check = verified.clone();
+        env.meta.hook(Op::Put, &target, move || {
+            let pin = sets.pin(&victim, "concurrent drill", BASE).unwrap();
+            let resumed = sets
+                .collect(INSTALL, &retention(false), BASE + 86_400_000)
+                .unwrap();
+            assert_eq!(resumed.skipped, vec![victim.clone()]);
+            let catalog: Catalog =
+                serde_json::from_slice(&meta.raw(&sets.catalog_key()).unwrap()).unwrap();
+            assert!(catalog.decision.is_none());
+            sets.record_drill(&victim, &pin.id, &check, BASE).unwrap();
+            let pin = sets
+                .pin(&previous_verified, "failed recheck", BASE)
+                .unwrap();
+            let failed = DrillResult {
+                ok: false,
+                unix_ms: BASE,
+                detail: "failed".into(),
+            };
+            sets.record_drill(&previous_verified, &pin.id, &failed, BASE)
+                .unwrap();
+        });
+        let out = env
+            .sets
+            .collect(INSTALL, &retention(true), BASE + 86_400_000)
+            .unwrap();
+        assert_eq!(out.skipped, vec![ids[0].clone()], "{out:?}");
+        assert!(out.deleted.is_empty(), "{out:?}");
+        let kept = record(&env, &ids[0]);
+        assert_eq!(kept.state, SetState::Published);
+        assert!(kept.last_drill.is_some_and(|d| d.ok));
+        assert_eq!(data_objects(&env, &ids[0]), 3);
+        // A later pass sees the current state: A is the newest set whose last
+        // drill passed and B (inside keep_sets) keeps its verification despite
+        // the failed recheck, so nothing is eligible.
+        let out = env
+            .sets
+            .collect(INSTALL, &retention(true), BASE + 2 * 86_400_000)
+            .unwrap();
+        assert!(out.deleted.is_empty(), "{out:?}");
+        for id in &ids {
+            assert_eq!(record(&env, id).state, SetState::Published);
+        }
+    }
+
+    #[test]
+    fn a_failed_recheck_does_not_revoke_verification_protection() {
+        // C (oldest) and B were verified; the decision deletes C because B is
+        // the newest verified set. B then fails a recheck before C goes:
+        // B still counts as verified (protection only grows), so at least one
+        // verified set always remains.
+        let env = setup();
+        let ids: Vec<String> = (0..4).map(|i| publish(&env, BASE + i * 1000)).collect();
+        let ok = DrillResult {
+            ok: true,
+            unix_ms: BASE,
+            detail: "ok".into(),
+        };
+        for id in [&ids[0], &ids[1]] {
+            let pin = env.sets.pin(id, "drill", BASE).unwrap();
+            env.sets.record_drill(id, &pin.id, &ok, BASE).unwrap();
+        }
+        let sets = env.sets.clone();
+        let survivor = ids[1].clone();
+        env.meta
+            .hook(Op::Put, &format!("{}/record.json", ids[0]), move || {
+                let pin = sets.pin(&survivor, "recheck", BASE).unwrap();
+                let failed = DrillResult {
+                    ok: false,
+                    unix_ms: BASE + 1,
+                    detail: "failed".into(),
+                };
+                let after = sets
+                    .record_drill(&survivor, &pin.id, &failed, BASE)
+                    .unwrap();
+                assert_eq!(after.verified_unix_ms, Some(BASE));
+            });
+        let out = env
+            .sets
+            .collect(INSTALL, &retention(true), BASE + 86_400_000)
+            .unwrap();
+        assert_eq!(out.deleted, vec![ids[0].clone()], "{out:?}");
+        let survivor = record(&env, &ids[1]);
+        assert_eq!(survivor.state, SetState::Published);
+        assert!(survivor.verified_unix_ms.is_some());
+        assert!(survivor.last_drill.is_some_and(|d| !d.ok));
+    }
+
+    #[test]
     fn a_concurrent_pin_wins_over_a_retention_deletion() {
         let env = setup();
         let ids: Vec<String> = (0..3).map(|i| publish(&env, BASE + i * 1000)).collect();
@@ -2279,7 +2438,10 @@ mod tests {
             decision: Some(Decision {
                 id: "feedfacefeedface".into(),
                 created_unix_ms: BASE,
-                delete: vec![ids[0].clone()],
+                delete: vec![Victim {
+                    set_id: ids[0].clone(),
+                    revision: record(&env, &ids[0]).revision,
+                }],
                 survivors: vec![ids[1].clone(), ids[2].clone()],
             }),
         };
