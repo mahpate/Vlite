@@ -90,6 +90,9 @@ pub(super) enum StoreError {
     NotFound,
     Unknown(String),
     Failed(String),
+    /// The object is larger than the caller's bound (for a set object: its
+    /// manifest entry), so it is never read past that bound.
+    TooLarge,
 }
 
 impl From<StoreError> for ApiError {
@@ -114,6 +117,11 @@ impl From<StoreError> for ApiError {
                 StatusCode::BAD_GATEWAY,
                 "cloud_store_failed",
                 format!("the cloud store refused the request ({detail})"),
+            ),
+            StoreError::TooLarge => ApiError::new(
+                StatusCode::BAD_GATEWAY,
+                "cloud_store_failed",
+                "the cloud object is larger than expected",
             ),
         }
     }
@@ -1044,12 +1052,17 @@ impl Sets {
                 Err(e) => return Err(e.into()),
             };
             let mut check = Hashing::new(std::io::sink());
-            match self.data.download(&key, &mut check, upload.bytes) {
+            let read = match self.data.download(&key, &mut check, upload.bytes) {
                 Ok(_) => {
                     let (_, sha, bytes) = check.finish();
-                    if sha == upload.sha256 && bytes == upload.bytes {
-                        return Ok(());
-                    }
+                    Ok(sha == upload.sha256 && bytes == upload.bytes)
+                }
+                Err(StoreError::TooLarge) => Ok(false),
+                Err(e) => Err(e),
+            };
+            match read {
+                Ok(true) => return Ok(()),
+                Ok(false) => {
                     return Err(if created {
                         conflict(
                             "cloud_object_mismatch",
@@ -1408,6 +1421,9 @@ impl Sets {
         }
         let missing = |e: StoreError| match e {
             StoreError::NotFound => corrupt("a published set object is missing"),
+            StoreError::TooLarge => {
+                corrupt("a published set object is larger than its manifest entry")
+            }
             e => e.into(),
         };
         let manifest_blob = self
@@ -1872,6 +1888,10 @@ pub(super) mod fake {
                 .map(|(b, _)| b.clone())
         }
 
+        pub fn remove(&self, name: &str) {
+            self.objects.lock().unwrap().remove(name);
+        }
+
         pub fn set_raw(&self, name: &str, bytes: &[u8]) {
             let tag = self.counter.fetch_add(1, Ordering::SeqCst) + 1;
             self.objects
@@ -1928,7 +1948,7 @@ pub(super) mod fake {
             let objects = self.objects.lock().unwrap();
             let (bytes, tag) = objects.get(name).ok_or(StoreError::NotFound)?;
             if bytes.len() as u64 > max {
-                return Err(StoreError::Failed("object too large".into()));
+                return Err(StoreError::TooLarge);
             }
             Ok(Blob {
                 bytes: bytes.clone(),

@@ -385,9 +385,7 @@ fn etag(response: &Response) -> Result<String, StoreError> {
 
 fn read_limited(response: Response, max: u64) -> Result<Vec<u8>, StoreError> {
     if response.content_length().is_some_and(|n| n > max) {
-        return Err(StoreError::Failed(
-            "the object exceeds the size limit".into(),
-        ));
+        return Err(StoreError::TooLarge);
     }
     let mut bytes = Vec::new();
     response
@@ -395,9 +393,7 @@ fn read_limited(response: Response, max: u64) -> Result<Vec<u8>, StoreError> {
         .read_to_end(&mut bytes)
         .map_err(|_| StoreError::Unknown("transport error (body)".into()))?;
     if bytes.len() as u64 > max {
-        return Err(StoreError::Failed(
-            "the object exceeds the size limit".into(),
-        ));
+        return Err(StoreError::TooLarge);
     }
     Ok(bytes)
 }
@@ -605,9 +601,7 @@ impl ObjectStore for Container {
             Ok((length, etag(&response)?))
         })?;
         if length > max {
-            return Err(StoreError::Failed(
-                "the object is larger than its manifest entry".into(),
-            ));
+            return Err(StoreError::TooLarge);
         }
         let mut offset = 0;
         while offset < length {

@@ -596,6 +596,9 @@ mod tests {
     use super::cloud::fake::{Fault, Memory, Op};
     use super::cloud::{Manifest, Publication, ROLE_BUNDLE, ROLE_DATABASE, SetState, Upload};
     use super::*;
+    use crate::property_graph::{FindNodes, Neighbors, NodeSelector, ReadOptions};
+    use crate::{CollectionSettings, CollectionSpec, Expected, Metadata, MetadataValue};
+    use std::sync::atomic::{AtomicUsize, Ordering};
 
     const INSTALL: &str = "0123456789abcdef";
     const PASSWORD: &str = "correct horse battery staple 42";
@@ -626,18 +629,25 @@ mod tests {
     }
 
     fn setup() -> Env {
+        setup_with(|database| {
+            for id in 1..=4u64 {
+                database
+                    .put(id, &[id as f32, 1.0, -0.5], format!("p{id}").as_bytes())
+                    .unwrap();
+            }
+        })
+    }
+
+    /// Publishes one set whose database `fill` populated.
+    fn setup_with(fill: impl FnOnce(&mut Database)) -> Env {
         let meta = Arc::new(Memory::default());
         let data = Arc::new(Memory::default());
         let sets = Sets::new(meta.clone(), data.clone(), false, "vlite/prod/".into());
         let dir = tempfile::tempdir().unwrap();
         let source = dir.path().join("source.vlite");
         let mut database = Database::create(&source, 3).unwrap();
-        for id in 1..=4u64 {
-            database
-                .put(id, &[id as f32, 1.0, -0.5], format!("p{id}").as_bytes())
-                .unwrap();
-        }
-        drop(database);
+        fill(&mut database);
+        database.close().unwrap();
         let verification = maintenance::verify(&source).unwrap();
         let detail = maintenance::inspect_detail(&source).unwrap();
         let database = Upload::file(ROLE_DATABASE, source).unwrap();
@@ -955,6 +965,217 @@ mod tests {
         assert_eq!(error.code, "cloud_set_corrupt", "{error}");
         assert_eq!(env.pins(), 0, "the pin is released after a failure");
         assert!(env.leftovers().is_empty(), "{:?}", env.leftovers());
+    }
+
+    /// The data-store name of the set's object with `role`.
+    fn object(env: &Env, role: &str) -> String {
+        let prefix = format!("vlite/prod/sets/{}/", env.set_id);
+        let manifest = env.data.raw(&format!("{prefix}manifest.json")).unwrap();
+        let manifest: Value = serde_json::from_slice(&manifest).unwrap();
+        let object = manifest["objects"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|object| object["role"] == role)
+            .unwrap();
+        format!("{prefix}objects/{}", object["sha256"].as_str().unwrap())
+    }
+
+    fn edit(store: &Memory, name: &str, change: impl FnOnce(&mut Vec<u8>)) {
+        let mut bytes = store.raw(name).unwrap();
+        change(&mut bytes);
+        store.set_raw(name, &bytes);
+    }
+
+    fn set_state(env: &Env, state: &str) {
+        let key = format!("vlite/prod/sets/{}/record.json", env.set_id);
+        edit(&env.meta, &key, |bytes| {
+            let mut record: Value = serde_json::from_slice(bytes).unwrap();
+            record["state"] = json!(state);
+            *bytes = serde_json::to_vec(&record).unwrap();
+        });
+    }
+
+    #[test]
+    fn corrupt_missing_or_unpublished_sets_are_refused_with_nothing_left() {
+        fn manifest(env: &Env) -> String {
+            format!("vlite/prod/sets/{}/manifest.json", env.set_id)
+        }
+        type Case = (&'static str, fn(&Env), &'static str);
+        let cases: [Case; 10] = [
+            (
+                "manifest changed",
+                |env| edit(&env.data, &manifest(env), |b| b[0] ^= 0xff),
+                "cloud_set_corrupt",
+            ),
+            (
+                "manifest missing",
+                |env| env.data.remove(&manifest(env)),
+                "cloud_set_corrupt",
+            ),
+            (
+                "database truncated",
+                |env| {
+                    edit(&env.data, &object(env, ROLE_DATABASE), |b| {
+                        b.truncate(b.len() - 1)
+                    })
+                },
+                "cloud_set_corrupt",
+            ),
+            (
+                "database extended",
+                |env| edit(&env.data, &object(env, ROLE_DATABASE), |b| b.push(0)),
+                "cloud_set_corrupt",
+            ),
+            (
+                "database missing",
+                |env| env.data.remove(&object(env, ROLE_DATABASE)),
+                "cloud_set_corrupt",
+            ),
+            (
+                "bundle changed",
+                |env| edit(&env.data, &object(env, ROLE_BUNDLE), |b| b[0] ^= 0xff),
+                "cloud_set_corrupt",
+            ),
+            (
+                "bundle missing",
+                |env| env.data.remove(&object(env, ROLE_BUNDLE)),
+                "cloud_set_corrupt",
+            ),
+            (
+                "staging",
+                |env| set_state(env, "staging"),
+                "cloud_set_unavailable",
+            ),
+            (
+                "delete pending",
+                |env| set_state(env, "delete_pending"),
+                "cloud_set_unavailable",
+            ),
+            (
+                "tombstoned",
+                |env| set_state(env, "tombstoned"),
+                "cloud_set_unavailable",
+            ),
+        ];
+        for (case, damage, code) in cases {
+            let env = setup();
+            damage(&env);
+            let error = env.restore(&env.request()).unwrap_err();
+            assert_eq!(error.code, code, "{case}: {error}");
+            assert_eq!(env.pins(), 0, "{case}: the pin is released");
+            assert!(env.leftovers().is_empty(), "{case}: {:?}", env.leftovers());
+        }
+    }
+
+    /// Two collections, a delete, metadata, and a graph with an edge, an
+    /// attachment and a deleted node.
+    fn mixed(database: &mut Database) {
+        let lang = Metadata::from([("lang".into(), MetadataValue::String("en".into()))]);
+        database
+            .create_collection(
+                "docs",
+                CollectionSpec {
+                    dimensions: 2,
+                    settings: CollectionSettings::default(),
+                },
+            )
+            .unwrap();
+        for id in 1..=4u64 {
+            database
+                .put(id, &[id as f32, 1.0, -0.5], format!("p{id}").as_bytes())
+                .unwrap();
+        }
+        database.delete(4).unwrap();
+        database
+            .collection_mut("docs")
+            .unwrap()
+            .put_with_metadata(10, &[1.0, 0.0], b"d10", &lang)
+            .unwrap();
+        database.create_graph("people").unwrap();
+        let mut graph = database.graph_mut("people").unwrap();
+        graph.create_node("ada", &["Person"], &lang).unwrap();
+        graph
+            .create_node("bob", &["Person"], &Metadata::new())
+            .unwrap();
+        graph
+            .create_edge(Some("knows"), "ada", "KNOWS", "bob", &Metadata::new())
+            .unwrap();
+        graph.attach("ada", "docs", 10).unwrap();
+        graph.create_node("gone", &[], &Metadata::new()).unwrap();
+        graph.delete_node("gone", Expected::Any).unwrap();
+    }
+
+    /// Everything a reader observes, in canonical order.
+    fn observed(path: &FilePath) -> String {
+        let database = Database::open(path).unwrap();
+        let collections = database.collections().unwrap();
+        let mut out = format!("{collections:?}\n");
+        for info in &collections {
+            let collection = database.collection(&info.name).unwrap();
+            for id in 0..=12 {
+                if let Some(record) = collection.get(id).unwrap() {
+                    let revision = collection.revision(id).unwrap();
+                    out += &format!("{}/{id} {record:?} {revision:?}\n", info.name);
+                }
+            }
+        }
+        for info in database.list_graphs().unwrap() {
+            let graph = database.graph(&info.name).unwrap();
+            let read = ReadOptions::default();
+            let nodes = graph.find_nodes(&FindNodes::default(), &read).unwrap();
+            assert!(nodes.cursor.is_none());
+            out += &format!("{} {:?}\n", info.name, nodes.output);
+            for node in &nodes.output {
+                let request = Neighbors::new(NodeSelector::Id(node.id));
+                let edges = graph.neighbors(&request, &read).unwrap();
+                out += &format!("{} {:?}\n", node.key, edges.output.edges);
+            }
+        }
+        out
+    }
+
+    /// The same later writes, so allocation high-water marks are compared.
+    fn write_more(path: &FilePath) -> u64 {
+        let mut database = Database::open(path).unwrap();
+        let mut graph = database.graph_mut("people").unwrap();
+        let node = graph.create_node("fresh", &[], &Metadata::new()).unwrap();
+        graph
+            .create_edge(None, "fresh", "KNOWS", "ada", &Metadata::new())
+            .unwrap();
+        database.put(5, &[5.0, 1.0, -0.5], b"p5").unwrap();
+        database.close().unwrap();
+        node.id
+    }
+
+    #[test]
+    fn mixed_data_is_restored_exactly_and_keeps_allocating_after_reopen() {
+        let env = setup_with(mixed);
+        // The set is pinned before any payload is read.
+        let pins = Arc::new(AtomicUsize::new(usize::MAX));
+        let (meta, seen) = (env.meta.clone(), pins.clone());
+        let key = format!("vlite/prod/sets/{}/record.json", env.set_id);
+        env.data.hook(Op::Get, "/objects/", move || {
+            let record: cloud::Record = serde_json::from_slice(&meta.raw(&key).unwrap()).unwrap();
+            seen.store(record.pins.len(), Ordering::SeqCst);
+        });
+        let source = env.dir.path().join("source.vlite");
+        let before = observed(&source);
+        assert!(
+            before.contains("ada") && before.contains("docs/10"),
+            "{before}"
+        );
+        let request = env.request();
+        env.restore(&request).unwrap();
+        assert_eq!(pins.load(Ordering::SeqCst), 1);
+
+        let restored = request.output.join("database.vlite");
+        assert_eq!(observed(&restored), before);
+        let scratch = env.dir.path().join("scratch.vlite");
+        std::fs::copy(&source, &scratch).unwrap();
+        let expected = write_more(&scratch);
+        assert_eq!(write_more(&restored), expected, "node IDs are not reused");
+        assert_eq!(observed(&restored), observed(&scratch));
     }
 
     #[test]
