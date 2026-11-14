@@ -740,6 +740,7 @@ impl Runtime {
             let database = handle.database.upgrade().ok_or_else(unavailable)?;
             let mut owner = database.write().map_err(internal)?;
             let db = owner.as_mut().ok_or_else(unavailable)?;
+            cloud::check_database_size(db.file.0.metadata().map_err(internal)?.len())?;
             ops::snapshot(db, &self.staging())?.1
         };
         let after = recovery_bundle::capture(&admin, &handle.webhooks, now)?;

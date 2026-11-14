@@ -1140,7 +1140,7 @@ fn filesystem_qualified(active: &Path, dir: &Path) -> bool {
 
 #[cfg(unix)]
 #[allow(clippy::unnecessary_cast)]
-fn free_bytes(dir: &Path) -> Option<u64> {
+pub(super) fn free_bytes(dir: &Path) -> Option<u64> {
     use std::os::unix::ffi::OsStrExt;
     let path = std::ffi::CString::new(dir.as_os_str().as_bytes()).ok()?;
     // SAFETY: `path` is a valid NUL-terminated string and `stat` is a plain
@@ -1153,7 +1153,7 @@ fn free_bytes(dir: &Path) -> Option<u64> {
 }
 
 #[cfg(not(unix))]
-fn free_bytes(_dir: &Path) -> Option<u64> {
+pub(super) fn free_bytes(_dir: &Path) -> Option<u64> {
     None
 }
 

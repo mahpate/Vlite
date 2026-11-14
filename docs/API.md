@@ -833,8 +833,13 @@ database; select the copy with `POST /v1/admin/restores/select` and restart.
 **Refused, not attempted.** These answer 409 with a reason code: an
 encrypted database (`encrypted_cloud_backup_unqualified`), served memory
 reservations (`memory_reservations_present`), an in-memory or recovery-mode
-server (`cloud_backup_requires_database_file`) and a prefix owned by another
-installation (`cloud_prefix_owned`). Errors: 409 conflicts
+server (`cloud_backup_requires_database_file`), a prefix owned by another
+installation (`cloud_prefix_owned`) and a database over 1 GiB, the supported
+cloud-backup size (`cloud_database_too_large`, also refused before a restore
+or drill downloads anything). A restore or drill that would need more free
+space than twice the database plus its recovery bundle and a 64 MiB margin
+answers 507 `restore_insufficient_space` before any download (the check runs
+on Linux and macOS; Windows does not report free space to it). Errors: 409 conflicts
 such as `cloud_backup_not_configured`, `cloud_publication_lost`,
 `cloud_set_unpublished`, `cloud_set_unavailable`, `cloud_pin_owned` or
 `cloud_pin_in_use`; 404 `cloud_set_not_found`

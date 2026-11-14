@@ -38,6 +38,47 @@ pub(super) const MAX_PINS: usize = 16;
 pub(super) const MAX_SETS: usize = 10_000;
 pub(super) const ROLE_DATABASE: &str = "database";
 pub(super) const ROLE_BUNDLE: &str = "recovery_bundle";
+/// Supported database size for a cloud backup set (the qualified profile
+/// envelope): larger sources are refused at backup and at restore.
+pub(super) const MAX_DATABASE_BYTES: u64 = 1 << 30;
+/// Free space kept beyond the restore's own peak use.
+const RESTORE_SPACE_MARGIN: u64 = 64 << 20;
+
+/// Refuses a database outside the supported size envelope.
+pub(super) fn check_database_size(bytes: u64) -> Result<(), ApiError> {
+    if bytes > MAX_DATABASE_BYTES {
+        return Err(conflict(
+            "cloud_database_too_large",
+            format!(
+                "the database is {bytes} bytes; cloud backup and restore support at most {MAX_DATABASE_BYTES} bytes (1 GiB)"
+            ),
+        ));
+    }
+    Ok(())
+}
+
+/// Space a fetch and restore of `database` and `bundle` bytes needs at its
+/// peak: the downloaded copy plus one restored or drilled copy (they are
+/// never all present at once), the bundle and a margin.
+pub(super) fn restore_space_needed(database: u64, bundle: u64) -> u64 {
+    database
+        .saturating_mul(2)
+        .saturating_add(bundle)
+        .saturating_add(RESTORE_SPACE_MARGIN)
+}
+
+/// Checks free space where a restore stages its copies. Free space is not
+/// measurable on every platform (`None`); the check is then skipped.
+pub(super) fn check_restore_space(free: Option<u64>, needed: u64) -> Result<(), ApiError> {
+    match free {
+        Some(free) if free < needed => Err(ApiError::new(
+            StatusCode::INSUFFICIENT_STORAGE,
+            "restore_insufficient_space",
+            format!("the restore needs {needed} free bytes for its copies and {free} are free"),
+        )),
+        _ => Ok(()),
+    }
+}
 
 // ------------------------------------------------------------------ store
 
@@ -1356,6 +1397,12 @@ impl Sets {
         if bundle_entry.bytes > recovery_bundle::MAX_BYTES {
             return Err(corrupt("the recovery bundle is too large"));
         }
+        // Size envelope and peak space before any payload is requested.
+        check_database_size(db.bytes)?;
+        check_restore_space(
+            super::compaction::free_bytes(dir),
+            restore_space_needed(db.bytes, bundle_entry.bytes),
+        )?;
 
         let database = dir.join("database.vlite");
         let file = create_private_file(&database).map_err(internal)?;
@@ -2151,6 +2198,49 @@ mod tests {
         assert!(fetched.manifest.source_lineage.is_some());
         env.sets.unpin(&id, &pin.id, false, BASE + 2).unwrap();
         assert!(record(&env, &id).pins.is_empty());
+    }
+
+    #[test]
+    fn oversized_sets_and_short_space_are_refused_before_any_payload_read() {
+        // Review CR-04.
+        assert!(check_database_size(MAX_DATABASE_BYTES).is_ok());
+        let err = check_database_size(MAX_DATABASE_BYTES + 1).err().unwrap();
+        assert_eq!(err.code, "cloud_database_too_large");
+        let needed = restore_space_needed(MAX_DATABASE_BYTES, 1024);
+        assert_eq!(needed, 2 * MAX_DATABASE_BYTES + 1024 + RESTORE_SPACE_MARGIN);
+        assert_eq!(restore_space_needed(u64::MAX, u64::MAX), u64::MAX);
+        assert!(check_restore_space(None, needed).is_ok());
+        assert!(check_restore_space(Some(needed), needed).is_ok());
+        let err = check_restore_space(Some(needed - 1), needed).err().unwrap();
+        assert_eq!(err.code, "restore_insufficient_space");
+        assert_eq!(err.status, StatusCode::INSUFFICIENT_STORAGE);
+
+        // A published set whose manifest claims more than the envelope is
+        // refused without reading its objects.
+        let env = setup();
+        let id = publish(&env, BASE);
+        let manifest_key = env.sets.manifest_key(&id);
+        let mut manifest: Manifest =
+            serde_json::from_slice(&env.data.raw(&manifest_key).unwrap()).unwrap();
+        for object in &mut manifest.objects {
+            if object.role == ROLE_DATABASE {
+                object.bytes = MAX_DATABASE_BYTES + 1;
+            }
+        }
+        let bytes = serde_json::to_vec(&manifest).unwrap();
+        env.data.set_raw(&manifest_key, &bytes);
+        let mut published = record(&env, &id);
+        published.manifest_sha256 = sha_hex(&bytes);
+        env.meta.set_raw(
+            &env.sets.record_key(&id),
+            &serde_json::to_vec(&published).unwrap(),
+        );
+        env.data.fault(Op::Get, "/objects/", Fault::Refuse, 0, 10);
+        let pin = env.sets.pin(&id, "check", PinKind::Operator, BASE).unwrap();
+        let dir = tempfile::tempdir().unwrap();
+        let err = env.sets.fetch(&id, &pin.id, dir.path()).err().unwrap();
+        assert_eq!(err.code, "cloud_database_too_large", "{}", err.message);
+        assert_eq!(std::fs::read_dir(dir.path()).unwrap().count(), 0);
     }
 
     #[test]
