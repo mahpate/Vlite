@@ -347,6 +347,12 @@ are rejected, so a key or connection string cannot be saved there.
   Pin IDs are not secrets, and anyone with write access to the coordination
   container can still change set records, so keep that access to the backup
   identity.
+- **Integrity is hashed, not signed.** The record names the manifest's
+  SHA-256 and the manifest names each object's, so corruption, truncation
+  and partial uploads are refused. A writer to both containers can still
+  replace a set with any self-consistent one; for example, two captures with
+  identical database bytes and policy can exchange recovery bundles. Only the
+  backup identity should be able to write either container.
 - **Audit.** Policy changes, runs, publication outcomes, drills, collections,
   deletions, restores and pin changes are written to the audit log.
 
