@@ -3042,6 +3042,59 @@ mod tests {
     }
 
     #[test]
+    fn a_legal_hold_survives_a_restore_restarts_and_retention_until_released() {
+        // AC-002: an operator (legal) hold keeps a set that age and count
+        // retention would delete. A restore of that set takes and releases
+        // its own operation pin without touching the hold, and the hold lives
+        // in the set's record, so a restarted server still honours it.
+        let env = setup();
+        let h = Handle::new(&env.service);
+        env.runtime
+            .configure(
+                policy(json!({"drill_every":0,"retention_enabled":true})),
+                &h,
+                BASE,
+            )
+            .unwrap();
+        let mut ids = Vec::new();
+        for _ in 0..5 {
+            std::thread::sleep(Duration::from_millis(5));
+            let report = env.runtime.run_now(&h).unwrap();
+            ids.push(report["set_id"].as_str().unwrap().to_owned());
+        }
+        let hold = env.runtime.pin(&h, &ids[0], "legal hold").unwrap()["pin"].clone();
+        let admin_dir = env.root.join("admin");
+        std::fs::create_dir(&admin_dir).unwrap();
+        let report = env.runtime.restore(&h, &ids[0], &admin_dir).unwrap();
+        assert_eq!(report["pin_released"], true);
+        let pins =
+            |runtime: &Runtime| set(&runtime.list().unwrap(), &ids[0])["record"]["pins"].clone();
+        assert_eq!(
+            pins(&env.runtime),
+            json!([hold]),
+            "only the restore's pin went"
+        );
+
+        for (i, id) in ids.iter().enumerate() {
+            age(&env, id, BASE + i as u64);
+        }
+        let collected = env.runtime.collect(&h).unwrap();
+        assert_eq!(collected["result"]["deleted"], json!([ids[1]]));
+        let restarted = reopen(&env);
+        assert_eq!(pins(&restarted), json!([hold]));
+        let collected = restarted.collect(&h).unwrap();
+        assert_eq!(collected["result"]["deleted"], json!([]), "{collected}");
+        assert_eq!(pins(&restarted), json!([hold]));
+
+        // Released by an operator, the set is collectable again.
+        restarted
+            .unpin(&h, &ids[0], hold["id"].as_str().unwrap(), false)
+            .unwrap();
+        let collected = restarted.collect(&h).unwrap();
+        assert_eq!(collected["result"]["deleted"], json!([ids[0]]));
+    }
+
+    #[test]
     fn collection_summary_is_bounded_and_restartable_at_max_sets() {
         // Review H1: a collection deleting thousands of sets persisted every
         // ID, so state.json outgrew its read limit and startup failed.

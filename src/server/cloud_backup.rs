@@ -2906,6 +2906,51 @@ mod tests {
     }
 
     #[test]
+    fn a_legal_hold_after_a_persisted_decision_wins_when_it_is_resumed() {
+        // AC-002: a janitor recorded its decision to delete the oldest set
+        // and stopped; an operator then placed a legal hold on that set. The
+        // next janitor resumes the decision but must keep the held set.
+        let env = setup();
+        let ids: Vec<String> = (0..3).map(|i| publish(&env, BASE + i * 1000)).collect();
+        let decision = Catalog {
+            schema: CATALOG_SCHEMA.into(),
+            revision: 9,
+            updated_unix_ms: BASE,
+            decision: Some(Decision {
+                id: "feedfacefeedface".into(),
+                created_unix_ms: BASE,
+                delete: vec![Victim {
+                    set_id: ids[0].clone(),
+                    revision: record(&env, &ids[0]).revision,
+                }],
+                survivors: vec![ids[1].clone(), ids[2].clone()],
+            }),
+        };
+        env.meta.set_raw(
+            &env.sets.catalog_key(),
+            &serde_json::to_vec(&decision).unwrap(),
+        );
+        let hold = env
+            .sets
+            .pin(&ids[0], "legal hold", PinKind::Operator, BASE)
+            .unwrap();
+        let out = env
+            .sets
+            .collect(INSTALL, &retention(true), BASE + 86_400_000)
+            .unwrap();
+        assert_eq!(out.skipped, vec![ids[0].clone()], "{out:?}");
+        assert!(out.resumed.is_empty() && out.deleted.is_empty(), "{out:?}");
+        let kept = record(&env, &ids[0]);
+        assert_eq!(kept.state, SetState::Published);
+        assert_eq!(kept.pins.len(), 1);
+        assert_eq!(kept.pins[0].id, hold.id);
+        assert_eq!(data_objects(&env, &ids[0]), 3);
+        let catalog: Catalog =
+            serde_json::from_slice(&env.meta.raw(&env.sets.catalog_key()).unwrap()).unwrap();
+        assert!(catalog.decision.is_none());
+    }
+
+    #[test]
     fn a_concurrent_catalog_change_stops_collection() {
         let env = setup();
         let ids: Vec<String> = (0..3).map(|i| publish(&env, BASE + i * 1000)).collect();
