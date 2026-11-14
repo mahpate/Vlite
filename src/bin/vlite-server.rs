@@ -1,5 +1,6 @@
 use std::{
     error::Error,
+    ffi::OsString,
     net::SocketAddr,
     path::{Path, PathBuf},
     time::{Duration, Instant},
@@ -10,12 +11,13 @@ use tokio::net::TcpListener;
 use vlite::{
     AnnSnapshotLoad, Database, Durability, FormatVersion,
     server::{
-        BearerToken, GroupCommitConfig, Managed, ManagedHandle, ServerOptions, Service,
-        configured_admin_router, read_token_file, selected_database,
+        BearerToken, CloudRestore, GroupCommitConfig, Managed, ManagedHandle, RecoveryError,
+        RestoreMode, ServerOptions, Service, configured_admin_router, read_token_file,
+        selected_database,
     },
 };
 
-const USAGE: &str = "usage: vlite-server <database-path> [--providers-file <path> | VLITE_PROVIDERS_FILE] [--memory-bindings-file <path> | VLITE_MEMORY_BINDINGS_FILE] [--create-if-missing <dimensions> [--create-format 3|4|5]] (default 5: graph-enabled; 3 and 4 create plain vector files) [--bind <ip:port>] [--tls-cert <pem> --tls-key <pem>] [--otlp-endpoint <url>] [--grpc-bind <ip:port> [--grpc-tls-cert <pem> --grpc-tls-key <pem> [--grpc-tls-client-ca <pem>]]] [--allow-remote] [--ann-snapshot] [--lock-held-reads] [--group-commit [--group-commit-requests <1..16>] [--group-commit-bytes <1024..268435456>] [--group-commit-delay-ms <0..100>]] [--durability periodic|full|none] (default periodic) [--flush-interval-ms <1..60000>] (periodic only, default 60000; none keeps the database in memory only, needs --create-if-missing and loses all data when the server stops) [--encryption-key-file <path> | VLITE_ENCRYPTION_KEY | VLITE_ENCRYPTION_KEY_HEX] [--token-file <path> | --insecure-local]; admin: VLITE_AUTH_TOKEN or VLITE_AUTH_TOKEN_FILE; optional read-only: VLITE_READ_ONLY_TOKEN or VLITE_READ_ONLY_TOKEN_FILE; backups/credentials/persistent audit: VLITE_ADMIN_DIR; off-by-default schedules: VLITE_AUTO_MAINTENANCE_INTERVAL_SECS, VLITE_BACKUP_INTERVAL_SECS, VLITE_BACKUP_RETENTION_ENABLED=1, VLITE_BACKUP_RETAIN_LAST, VLITE_BACKUP_RETAIN_DAYS, VLITE_BACKUP_DRILL_EVERY, VLITE_BACKUP_DRILL_MAX_BYTES; VLITE_SLOW_QUERY_MS; VLITE_METRICS_WITH_MEMORY=1 (serve /metrics and the metrics summary while agent memory is configured; their totals then include memory data); dashboard sign-in (needs VLITE_ADMIN_DIR and an admin token): VLITE_TRUSTED_PROXY=1 behind a proxy that sets X-Forwarded-Proto/For, VLITE_SESSION_IDLE_MINUTES (default 30), VLITE_SESSION_MAX_HOURS (default 8), optional first super admin: VLITE_ADMIN_USERNAME with VLITE_ADMIN_PASSWORD_FILE; [--log-buffer <n>] (default 2000, maximum 100000)";
+const USAGE: &str = "usage: vlite-server <database-path> [--providers-file <path> | VLITE_PROVIDERS_FILE] [--memory-bindings-file <path> | VLITE_MEMORY_BINDINGS_FILE] [--create-if-missing <dimensions> [--create-format 3|4|5]] (default 5: graph-enabled; 3 and 4 create plain vector files) [--bind <ip:port>] [--tls-cert <pem> --tls-key <pem>] [--otlp-endpoint <url>] [--grpc-bind <ip:port> [--grpc-tls-cert <pem> --grpc-tls-key <pem> [--grpc-tls-client-ca <pem>]]] [--allow-remote] [--ann-snapshot] [--lock-held-reads] [--group-commit [--group-commit-requests <1..16>] [--group-commit-bytes <1024..268435456>] [--group-commit-delay-ms <0..100>]] [--durability periodic|full|none] (default periodic) [--flush-interval-ms <1..60000>] (periodic only, default 60000; none keeps the database in memory only, needs --create-if-missing and loses all data when the server stops) [--encryption-key-file <path> | VLITE_ENCRYPTION_KEY | VLITE_ENCRYPTION_KEY_HEX] [--token-file <path> | --insecure-local]; admin: VLITE_AUTH_TOKEN or VLITE_AUTH_TOKEN_FILE; optional read-only: VLITE_READ_ONLY_TOKEN or VLITE_READ_ONLY_TOKEN_FILE; backups/credentials/persistent audit: VLITE_ADMIN_DIR; off-by-default schedules: VLITE_AUTO_MAINTENANCE_INTERVAL_SECS, VLITE_BACKUP_INTERVAL_SECS, VLITE_BACKUP_RETENTION_ENABLED=1, VLITE_BACKUP_RETAIN_LAST, VLITE_BACKUP_RETAIN_DAYS, VLITE_BACKUP_DRILL_EVERY, VLITE_BACKUP_DRILL_MAX_BYTES; VLITE_SLOW_QUERY_MS; VLITE_METRICS_WITH_MEMORY=1 (serve /metrics and the metrics summary while agent memory is configured; their totals then include memory data); dashboard sign-in (needs VLITE_ADMIN_DIR and an admin token): VLITE_TRUSTED_PROXY=1 behind a proxy that sets X-Forwarded-Proto/For, VLITE_SESSION_IDLE_MINUTES (default 30), VLITE_SESSION_MAX_HOURS (default 8), optional first super admin: VLITE_ADMIN_USERNAME with VLITE_ADMIN_PASSWORD_FILE; [--log-buffer <n>] (default 2000, maximum 100000); opt-in Azure Blob cloud backup policy: PUT /v1/admin/cloud-backup (emulator shared key: VLITE_CLOUD_BACKUP_SHARED_KEY_FILE); offline isolated cloud restore: vlite-server cloud-sets | cloud-restore (run either without arguments for its usage)";
 
 struct Config {
     providers: vlite::server::providers::ProviderRegistry,
@@ -964,6 +966,14 @@ async fn serve(
 }
 #[tokio::main]
 async fn main() -> std::process::ExitCode {
+    let args: Vec<OsString> = std::env::args_os().skip(1).collect();
+    if let Some(command) = args
+        .first()
+        .and_then(|first| first.to_str())
+        .filter(|first| matches!(*first, "cloud-sets" | "cloud-restore"))
+    {
+        return cloud(command.to_owned(), args[1..].to_vec()).await;
+    }
     match run().await {
         Ok(()) => std::process::ExitCode::SUCCESS,
         Err(error) => {
@@ -971,4 +981,99 @@ async fn main() -> std::process::ExitCode {
             std::process::ExitCode::FAILURE
         }
     }
+}
+
+const CLOUD_USAGE: &str = "usage: vlite-server cloud-sets --target-file <json> [--shared-key-file <path>] | vlite-server cloud-restore --target-file <json> [--shared-key-file <path>] --set <set-id> --database <new-file> --admin-dir <new-or-empty-dir> --admin-username <name> --admin-password-file <path> [--mode rekey|seed] (default rekey: new lineage, imported accounts disabled, no credentials or sessions restored; seed is deferred HA scope and refused). The target file holds the cloud backup policy's target JSON; the emulator shared key falls back to VLITE_CLOUD_BACKUP_SHARED_KEY_FILE. Prints a JSON report; nothing is selected or started. A database literally named cloud-sets or cloud-restore needs a ./ prefix.";
+
+/// Offline cloud recovery commands: JSON report on stdout, `{"error":...}`
+/// on stderr. The Azure client is blocking, so it runs off the runtime.
+async fn cloud(command: String, args: Vec<OsString>) -> std::process::ExitCode {
+    let result = tokio::task::spawn_blocking(move || cloud_command(&command, &args))
+        .await
+        .unwrap_or_else(|error| {
+            Err(RecoveryError {
+                code: "internal_error",
+                message: format!("the command stopped unexpectedly: {error}"),
+            })
+        });
+    match result {
+        Ok(report) => {
+            println!(
+                "{}",
+                serde_json::to_string_pretty(&report).unwrap_or_else(|_| report.to_string())
+            );
+            std::process::ExitCode::SUCCESS
+        }
+        Err(error) => {
+            eprintln!("{}", error.to_json());
+            std::process::ExitCode::FAILURE
+        }
+    }
+}
+
+fn cloud_command(command: &str, args: &[OsString]) -> Result<serde_json::Value, RecoveryError> {
+    let usage = |detail: String| RecoveryError {
+        code: "invalid_arguments",
+        message: format!("{detail}; {CLOUD_USAGE}"),
+    };
+    let allowed: &[&str] = if command == "cloud-sets" {
+        &["--target-file", "--shared-key-file"]
+    } else {
+        &[
+            "--target-file",
+            "--shared-key-file",
+            "--set",
+            "--database",
+            "--admin-dir",
+            "--admin-username",
+            "--admin-password-file",
+            "--mode",
+        ]
+    };
+    let mut values: std::collections::BTreeMap<&str, OsString> = Default::default();
+    let mut rest = args.iter();
+    while let Some(flag) = rest.next() {
+        let name = flag
+            .to_str()
+            .and_then(|flag| allowed.iter().find(|allowed| **allowed == flag))
+            .ok_or_else(|| usage(format!("unknown argument {}", flag.to_string_lossy())))?;
+        let value = rest
+            .next()
+            .ok_or_else(|| usage(format!("{name} needs a value")))?;
+        if values.insert(name, value.clone()).is_some() {
+            return Err(usage(format!("{name} is given more than once")));
+        }
+    }
+    let mut take = |name: &str| {
+        values
+            .remove(name)
+            .ok_or_else(|| usage(format!("{name} is required")))
+    };
+    let target_file = PathBuf::from(take("--target-file")?);
+    let shared_key_file = take("--shared-key-file").ok().map(PathBuf::from);
+    if command == "cloud-sets" {
+        return vlite::server::cloud_sets(&target_file, shared_key_file.as_deref());
+    }
+    let text = |name: &str, value: OsString| {
+        value
+            .into_string()
+            .map_err(|_| usage(format!("{name} must be valid UTF-8")))
+    };
+    let mode = match take("--mode") {
+        Ok(mode) => text("--mode", mode)?
+            .parse::<RestoreMode>()
+            .map_err(usage)?,
+        Err(_) => RestoreMode::Rekey,
+    };
+    let request = CloudRestore {
+        set_id: text("--set", take("--set")?)?,
+        database: PathBuf::from(take("--database")?),
+        admin_directory: PathBuf::from(take("--admin-dir")?),
+        admin_username: text("--admin-username", take("--admin-username")?)?,
+        admin_password_file: PathBuf::from(take("--admin-password-file")?),
+        target_file,
+        shared_key_file,
+        mode,
+    };
+    vlite::server::cloud_restore(&request)
 }

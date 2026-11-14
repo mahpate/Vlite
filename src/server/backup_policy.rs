@@ -304,18 +304,18 @@ fn connect(target: &Target) -> Result<Sets, ApiError> {
     cloud::azure::connect(target, key)
 }
 
-fn inspection(i: &maintenance::Inspection) -> Value {
+pub(super) fn inspection(i: &maintenance::Inspection) -> Value {
     json!({"format_version":i.format_version,"dimensions":i.dimensions,"live_records":i.live_records,
         "commits":i.commits,"file_bytes":i.file_bytes,"valid_bytes":i.valid_bytes,
         "incomplete_tail_bytes":i.incomplete_tail_bytes})
 }
 
-fn lineage_hex(lineage: Option<u64>) -> Option<String> {
+pub(super) fn lineage_hex(lineage: Option<u64>) -> Option<String> {
     lineage.map(|l| format!("{l:016x}"))
 }
 
 /// What the operator must re-provision; the bundle never carries secrets.
-fn bundle_summary(bundle: &recovery_bundle::Bundle) -> Value {
+pub(super) fn bundle_summary(bundle: &recovery_bundle::Bundle) -> Value {
     let c = &bundle.config;
     json!({"schema":bundle.schema,"created_unix_ms":bundle.created_unix_ms,
         "installation_id":bundle.installation_id,"source_lineage":bundle.source_lineage,

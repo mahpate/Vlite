@@ -35,6 +35,7 @@ mod admin;
 mod audit;
 mod backup_policy;
 mod cloud_backup;
+mod cloud_recovery;
 mod collections;
 mod compaction;
 mod credentials;
@@ -66,6 +67,7 @@ pub mod tls;
 mod users;
 mod webhooks;
 pub use admin::{ServerOptions, configured_admin_router, read_token_file, selected_database};
+pub use cloud_recovery::{CloudRestore, RecoveryError, RestoreMode, cloud_restore, cloud_sets};
 pub use compaction::{Managed, ManagedHandle};
 
 /// Emit a legacy stderr line and also capture it in the bounded server log buffer.

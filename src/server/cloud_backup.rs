@@ -649,7 +649,6 @@ pub(super) struct Fetched {
     pub database: PathBuf,
     pub bundle: recovery_bundle::Bundle,
     pub verification: maintenance::Verification,
-    pub detail: maintenance::InspectionDetail,
 }
 
 enum Condemn {
@@ -1291,7 +1290,6 @@ impl Sets {
             database,
             bundle,
             verification,
-            detail,
         })
     }
 
@@ -1975,7 +1973,10 @@ mod tests {
         assert_eq!(fetched.bundle.installation_id, INSTALL);
         assert_eq!(
             fetched.manifest.source_lineage,
-            fetched.detail.lineage.map(lineage_hex)
+            maintenance::inspect_detail(&fetched.database)
+                .unwrap()
+                .lineage
+                .map(lineage_hex)
         );
         assert!(fetched.manifest.source_lineage.is_some());
         env.sets.unpin(&id, &pin.id, BASE + 2).unwrap();

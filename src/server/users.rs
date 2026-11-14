@@ -726,19 +726,8 @@ impl Accounts {
         if users.len() >= CAPACITY {
             return Err(error("the account store is full"));
         }
-        let meta = std::fs::metadata(password_file)?;
-        if !meta.is_file() || meta.len() > MAX_SEED_BYTES {
-            return Err(error(
-                "VLITE_ADMIN_PASSWORD_FILE must be a regular file of at most 4 KiB",
-            ));
-        }
-        let mut text = String::new();
-        std::fs::File::open(password_file)?
-            .take(MAX_SEED_BYTES + 1)
-            .read_to_string(&mut text)?;
-        let password = text
-            .strip_suffix('\n')
-            .map_or(text.as_str(), |t| t.strip_suffix('\r').unwrap_or(t));
+        let password = read_password_file(password_file, "VLITE_ADMIN_PASSWORD_FILE")?;
+        let password = password.as_str();
         check_password(password, &username).map_err(|e| {
             std::io::Error::other(format!("VLITE_ADMIN_PASSWORD_FILE: {}", e.message))
         })?;
@@ -1140,6 +1129,51 @@ fn unusable_hash() -> std::io::Result<String> {
         hash,
     }
     .encode())
+}
+
+/// Reads a bootstrap password file: a regular file of at most 4 KiB, minus
+/// one trailing line ending. `label` names the setting in errors; the
+/// password itself never appears in one.
+fn read_password_file(path: &FilePath, label: &str) -> std::io::Result<String> {
+    let labelled = |e: std::io::Error| std::io::Error::new(e.kind(), format!("{label}: {e}"));
+    let meta = std::fs::metadata(path).map_err(labelled)?;
+    if !meta.is_file() || meta.len() > MAX_SEED_BYTES {
+        return Err(std::io::Error::other(format!(
+            "{label} must be a regular file of at most 4 KiB"
+        )));
+    }
+    let mut text = String::new();
+    std::fs::File::open(path)
+        .and_then(|file| file.take(MAX_SEED_BYTES + 1).read_to_string(&mut text))
+        .map_err(labelled)?;
+    if text.ends_with('\n') {
+        text.pop();
+        if text.ends_with('\r') {
+            text.pop();
+        }
+    }
+    Ok(text)
+}
+
+/// The fresh super admin of an isolated restore, validated before anything
+/// is downloaded: a normalized username and a policy-strength password read
+/// from a file. Errors name `label`, never the password.
+pub(super) fn fresh_admin(
+    username: &str,
+    password_file: &FilePath,
+    label: &str,
+) -> Result<(String, String), ApiError> {
+    let username = normalize_username(username)?;
+    let password = read_password_file(password_file, label).map_err(|e| {
+        ApiError::new(
+            StatusCode::UNPROCESSABLE_ENTITY,
+            "invalid_password_file",
+            e.to_string(),
+        )
+    })?;
+    check_password(&password, &username)
+        .map_err(|e| weak_password(&format!("{label}: {}", e.message)))?;
+    Ok((username, password))
 }
 
 /// Rekey-only account import into a new, isolated admin directory

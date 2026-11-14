@@ -1165,3 +1165,115 @@ fn grpc_listener_serves_native_tls_from_pem_files() {
     let exit = launched.stop();
     assert!(exit.success(), "{exit:?}: {:?}", launched.rest_of_stderr());
 }
+
+fn cloud_cli(args: &[&std::ffi::OsStr]) -> (bool, String, Value) {
+    let output = Command::new(env!("CARGO_BIN_EXE_vlite-server"))
+        .args(args)
+        .env_remove("VLITE_CLOUD_BACKUP_SHARED_KEY_FILE")
+        .output()
+        .unwrap();
+    let stdout = String::from_utf8(output.stdout).unwrap();
+    let stderr = String::from_utf8(output.stderr).unwrap();
+    let error = serde_json::from_str(stderr.trim()).unwrap_or(Value::Null);
+    (output.status.success(), stdout, error)
+}
+
+#[test]
+fn cloud_recovery_commands_refuse_bad_requests_before_any_effect() {
+    let directory = tempfile::tempdir().unwrap();
+    let root = directory.path();
+    let target = root.join("target.json");
+    // Loopback port 9 (discard) is closed: the only network attempt below
+    // must fail promptly instead of hanging or leaking the key.
+    std::fs::write(
+        &target,
+        json!({"account":"devstoreaccount1","container":"vlite-data","prefix":"cli/","endpoint":"http://127.0.0.1:9/devstoreaccount1","auth":"emulator_shared_key"}).to_string(),
+    )
+    .unwrap();
+    let key = root.join("key");
+    std::fs::write(&key, "c2VjcmV0LWtleS1ub3QtZWNob2Vk").unwrap();
+    let password = root.join("password");
+    std::fs::write(&password, "correct horse battery staple").unwrap();
+    let database = root.join("restored.vlite");
+    let admin = root.join("admin");
+    let os = |text: &str| std::ffi::OsString::from(text);
+    let restore = |extra: &[&str]| {
+        let mut args = vec![
+            os("cloud-restore"),
+            os("--target-file"),
+            target.clone().into_os_string(),
+            os("--shared-key-file"),
+            key.clone().into_os_string(),
+            os("--set"),
+            os("20260101T000000Z-0123456789abcdef"),
+            os("--database"),
+            database.clone().into_os_string(),
+            os("--admin-dir"),
+            admin.clone().into_os_string(),
+            os("--admin-username"),
+            os("restorer"),
+            os("--admin-password-file"),
+            password.clone().into_os_string(),
+        ];
+        args.extend(extra.iter().map(|text| os(text)));
+        let refs: Vec<&std::ffi::OsStr> = args.iter().map(|arg| arg.as_os_str()).collect();
+        cloud_cli(&refs)
+    };
+    let code = |result: &(bool, String, Value)| {
+        assert!(!result.0, "{result:?}");
+        assert!(result.1.is_empty(), "{result:?}");
+        result.2["error"]["code"].as_str().unwrap().to_owned()
+    };
+
+    let usage = cloud_cli(&["cloud-sets".as_ref()]);
+    assert_eq!(code(&usage), "invalid_arguments");
+    assert!(
+        usage.2["error"]["message"]
+            .as_str()
+            .unwrap()
+            .contains("--target-file is required")
+    );
+    assert_eq!(code(&restore(&["--bogus", "x"])), "invalid_arguments");
+    assert_eq!(code(&restore(&["--set", "again"])), "invalid_arguments");
+    assert_eq!(code(&restore(&["--mode"])), "invalid_arguments");
+    assert_eq!(code(&restore(&["--mode", "fast"])), "invalid_arguments");
+    assert_eq!(
+        code(&restore(&["--mode", "seed"])),
+        "cloud_seed_mode_deferred"
+    );
+    std::fs::write(&database, b"keep").unwrap();
+    assert_eq!(code(&restore(&[])), "restore_destination_exists");
+    assert_eq!(std::fs::read(&database).unwrap(), b"keep");
+    std::fs::remove_file(&database).unwrap();
+    std::fs::write(&target, "{\"account\":\"x\"}").unwrap();
+    assert_eq!(code(&restore(&[])), "invalid_target");
+
+    std::fs::write(
+        &target,
+        json!({"account":"devstoreaccount1","container":"vlite-data","prefix":"cli/","endpoint":"http://127.0.0.1:9/devstoreaccount1","auth":"emulator_shared_key"}).to_string(),
+    )
+    .unwrap();
+    let started = Instant::now();
+    let unreachable = cloud_cli(&[
+        "cloud-sets".as_ref(),
+        "--target-file".as_ref(),
+        target.as_os_str(),
+        "--shared-key-file".as_ref(),
+        key.as_os_str(),
+    ]);
+    assert!(code(&unreachable).starts_with("cloud_"), "{unreachable:?}");
+    assert!(started.elapsed() < Duration::from_secs(60));
+    let failed = restore(&[]);
+    assert!(code(&failed).starts_with("cloud_"), "{failed:?}");
+    for result in [&unreachable, &failed] {
+        assert!(!result.2.to_string().contains("c2VjcmV0"), "{result:?}");
+    }
+    assert!(!database.exists());
+    assert!(!admin.exists());
+    let leftovers: Vec<_> = std::fs::read_dir(root)
+        .unwrap()
+        .map(|entry| entry.unwrap().file_name())
+        .filter(|name| name.to_string_lossy().starts_with(".vlite-cloud-restore"))
+        .collect();
+    assert!(leftovers.is_empty(), "{leftovers:?}");
+}
