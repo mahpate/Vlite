@@ -43,8 +43,11 @@ const AUDIT_CHUNK: usize = 500;
 const MAX_MESSAGE: usize = 500;
 /// Retention floors (PRD sec. 3.3): a policy can keep more, never fewer. The
 /// newest verified set is kept on top of these by the collection itself.
-const MIN_KEEP_SETS: usize = 3;
-const MIN_KEEP_DAYS: u64 = 30;
+/// A set's policy capture is held to the same bounds.
+pub(super) const MIN_KEEP_SETS: usize = 3;
+pub(super) const MIN_KEEP_DAYS: u64 = 30;
+pub(super) const MAX_KEEP_SETS: usize = 1000;
+pub(super) const MAX_KEEP_DAYS: u64 = 3650;
 /// Delay before a scheduled run skipped by a busy queue or operation retries.
 const RETRY_MS: u64 = 30_000;
 /// How often `shutdown` checks for running operations.
@@ -97,11 +100,11 @@ impl Policy {
         if !(300..=604_800).contains(&self.interval_secs) {
             return Err("interval_secs must be 300-604800".into());
         }
-        if !(MIN_KEEP_SETS..=1000).contains(&self.keep_sets) {
-            return Err(format!("keep_sets must be {MIN_KEEP_SETS}-1000"));
+        if !(MIN_KEEP_SETS..=MAX_KEEP_SETS).contains(&self.keep_sets) {
+            return Err(format!("keep_sets must be {MIN_KEEP_SETS}-{MAX_KEEP_SETS}"));
         }
-        if !(MIN_KEEP_DAYS..=3650).contains(&self.keep_days) {
-            return Err(format!("keep_days must be {MIN_KEEP_DAYS}-3650"));
+        if !(MIN_KEEP_DAYS..=MAX_KEEP_DAYS).contains(&self.keep_days) {
+            return Err(format!("keep_days must be {MIN_KEEP_DAYS}-{MAX_KEEP_DAYS}"));
         }
         if !(1..=720).contains(&self.orphan_grace_hours) {
             return Err("orphan_grace_hours must be 1-720".into());

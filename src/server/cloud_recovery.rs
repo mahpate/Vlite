@@ -1128,6 +1128,55 @@ mod tests {
         });
     }
 
+    /// Rewrites the manifest and rebinds the record to the new bytes, so the
+    /// chain still matches and only the manifest's content is wrong.
+    fn rewrite_manifest(env: &Env, change: impl FnOnce(&mut Value)) {
+        let name = format!("vlite/prod/sets/{}/manifest.json", env.set_id);
+        let mut manifest: Value = serde_json::from_slice(&env.data.raw(&name).unwrap()).unwrap();
+        change(&mut manifest);
+        let bytes = serde_json::to_vec(&manifest).unwrap();
+        env.data.set_raw(&name, &bytes);
+        let key = format!("vlite/prod/sets/{}/record.json", env.set_id);
+        edit(&env.meta, &key, |record| {
+            let mut value: Value = serde_json::from_slice(record).unwrap();
+            value["manifest_sha256"] = json!(cloud::sha_hex(&bytes));
+            *record = serde_json::to_vec(&value).unwrap();
+        });
+    }
+
+    #[test]
+    fn a_rebound_manifest_with_invalid_content_is_refused_with_nothing_left() {
+        // Review F004-VALIDATE: the record -> manifest chain matches, but the
+        // policy capture is outside the admitted policy's bounds.
+        type Case = (&'static str, fn(&mut Value), &'static str);
+        let cases: [Case; 3] = [
+            (
+                "keep_sets below the floor",
+                |m| m["policy"]["keep_sets"] = json!(2),
+                "manifest policy capture is invalid",
+            ),
+            (
+                "keep_days zero",
+                |m| m["policy"]["keep_days"] = json!(0),
+                "manifest policy capture is invalid",
+            ),
+            (
+                "keep_sets above the maximum",
+                |m| m["policy"]["keep_sets"] = json!(1001),
+                "manifest policy capture is invalid",
+            ),
+        ];
+        for (case, change, message) in cases {
+            let env = setup();
+            rewrite_manifest(&env, change);
+            let error = env.restore(&env.request()).unwrap_err();
+            assert_eq!(error.code, "cloud_set_corrupt", "{case}: {error}");
+            assert!(error.message.contains(message), "{case}: {error}");
+            assert_eq!(env.pins(), 0, "{case}: the pin is released");
+            assert!(env.leftovers().is_empty(), "{case}: {:?}", env.leftovers());
+        }
+    }
+
     #[test]
     fn corrupt_missing_or_unpublished_sets_are_refused_with_nothing_left() {
         fn manifest(env: &Env) -> String {

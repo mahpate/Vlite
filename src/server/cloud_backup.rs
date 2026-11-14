@@ -541,6 +541,22 @@ pub(super) struct PolicyCapture {
     pub keep_days: u64,
 }
 
+impl PolicyCapture {
+    /// The bounds `Policy::validate` admits a policy with: a capture outside
+    /// them was never admitted. The message is fixed text.
+    pub(super) fn check(&self) -> Result<(), &'static str> {
+        use super::backup_policy::{MAX_KEEP_DAYS, MAX_KEEP_SETS, MIN_KEEP_DAYS, MIN_KEEP_SETS};
+        if is_sha256(&self.sha256)
+            && (MIN_KEEP_SETS..=MAX_KEEP_SETS).contains(&self.keep_sets)
+            && (MIN_KEEP_DAYS..=MAX_KEEP_DAYS).contains(&self.keep_days)
+        {
+            Ok(())
+        } else {
+            Err("the policy capture is invalid")
+        }
+    }
+}
+
 /// Immutable set description, written after every object it names.
 ///
 /// Objects are named by their SHA-256 and created only if absent; the
@@ -624,7 +640,7 @@ impl Manifest {
                 "manifest profile is not restorable by this version",
             ));
         }
-        if !is_sha256(&self.policy.sha256) {
+        if self.policy.check().is_err() {
             return Err(corrupt("manifest policy capture is invalid"));
         }
         if self.objects.len() != 2 || self.objects.iter().any(|o| !is_sha256(&o.sha256)) {
@@ -1000,7 +1016,10 @@ impl Sets {
         now: u64,
     ) -> Result<Publication, ApiError> {
         let id = &manifest.set_id;
-        if !valid_set_id(id) || manifest.objects.len() != uploads.len() {
+        if !valid_set_id(id)
+            || manifest.objects.len() != uploads.len()
+            || manifest.policy.check().is_err()
+        {
             return Err(internal("invalid cloud backup manifest"));
         }
         let manifest_bytes = encode(manifest)?;
@@ -2327,6 +2346,37 @@ mod tests {
         manifest.policy.sha256 = "not-a-digest".into();
         let err = manifest.check(&id, INSTALL).err().unwrap();
         assert_eq!(err.code, "cloud_set_corrupt");
+
+        // Review F004-VALIDATE: the capture holds the admitted policy's
+        // retention bounds, checked on publish, fetch and bundle parse.
+        let good = fake::policy_capture();
+        for (keep_sets, keep_days, valid) in [
+            (3, 30, true),
+            (1000, 3650, true),
+            (0, 30, false),
+            (2, 30, false),
+            (1001, 30, false),
+            (3, 0, false),
+            (3, 29, false),
+            (3, 3651, false),
+        ] {
+            let capture = PolicyCapture {
+                keep_sets,
+                keep_days,
+                ..good.clone()
+            };
+            assert_eq!(capture.check().is_ok(), valid, "{keep_sets}/{keep_days}");
+        }
+        let (mut manifest, uploads) = prepare(&env, BASE + 1);
+        let id = manifest.set_id.clone();
+        manifest.policy.keep_days = 0;
+        let err = manifest.check(&id, INSTALL).err().unwrap();
+        assert_eq!(err.code, "cloud_set_corrupt");
+        assert!(env.sets.publish(&manifest, &uploads, BASE + 1).is_err());
+        assert!(
+            env.meta.raw(&env.sets.record_key(&id)).is_none(),
+            "refused before any write"
+        );
     }
 
     #[test]

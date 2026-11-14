@@ -346,6 +346,9 @@ pub(super) fn parse(bytes: &[u8]) -> Result<Bundle, &'static str> {
     if sha.len() != 64 || !sha.bytes().all(|b| matches!(b, b'0'..=b'9' | b'a'..=b'f')) {
         return Err("the recovery bundle names no valid database object");
     }
+    if bundle.policy.check().is_err() {
+        return Err("the recovery bundle policy capture is invalid");
+    }
     certify(&bundle.config)?;
     Ok(bundle)
 }
@@ -481,6 +484,14 @@ mod tests {
         value["rekey_only"] = json!(false);
         assert!(parse(&serde_json::to_vec(&value).unwrap()).is_err());
         assert!(parse(&vec![b' '; MAX_BYTES as usize + 1]).is_err());
+        // Review F004-VALIDATE: the policy capture is held to the admitted
+        // policy's retention bounds.
+        for (field, bad) in [("keep_sets", 0), ("keep_sets", 1001), ("keep_days", 0)] {
+            let mut value = serde_json::to_value(&b).unwrap();
+            value["policy"][field] = json!(bad);
+            let error = reparse(&value).err().unwrap();
+            assert_eq!(error, "the recovery bundle policy capture is invalid");
+        }
     }
 
     #[test]
