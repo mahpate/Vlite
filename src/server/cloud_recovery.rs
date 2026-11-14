@@ -616,7 +616,8 @@ mod tests {
                 {"username":"ops","role":"super_admin","disabled":false},
                 {"username":"reader","role":"viewer","tenant_id":"c".repeat(32),"disabled":true}
             ],
-            "credentials": [{"id":"abcdefghijkl","name":"ci","tenant_id":null,"state":"active"}],
+            "credentials": [{"id":"abcdefghijkl","name":"ci","tenant_id":null,"collections":["*"],
+                "operations":["read"],"state":"active","expires_unix_ms":99}],
             "webhook_subscriptions": 2,
             "secret_references": [{"name":"admin_token","configured":true,"action":"provision"}],
             "excluded": recovery_bundle::EXCLUDED,
@@ -639,9 +640,18 @@ mod tests {
         drop(database);
         let verification = maintenance::verify(&source).unwrap();
         let detail = maintenance::inspect_detail(&source).unwrap();
-        let bundle = recovery_bundle::bundle(config(), INSTALL, detail.lineage, 1);
+        let database = Upload::file(ROLE_DATABASE, source).unwrap();
+        let policy = cloud::fake::policy_capture();
+        let bundle = recovery_bundle::bundle(
+            config(),
+            INSTALL,
+            detail.lineage,
+            &database.sha256,
+            policy,
+            1,
+        );
         let uploads = vec![
-            Upload::file(ROLE_DATABASE, source).unwrap(),
+            database,
             Upload::bytes(ROLE_BUNDLE, serde_json::to_vec(&bundle).unwrap()),
         ];
         let at = now();

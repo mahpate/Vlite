@@ -250,6 +250,23 @@ impl Entry {
         }
     }
 
+    fn recovery(&self, now: u64) -> RecoveryCredential {
+        RecoveryCredential {
+            id: self.id.clone(),
+            name: self.name.clone(),
+            tenant_id: self.tenant_id.clone(),
+            collections: if self.all {
+                vec!["*".to_owned()]
+            } else {
+                self.collections.iter().map(|s| s.name.clone()).collect()
+            },
+            operations: self.operations.clone(),
+            graphs: self.graphs.clone(),
+            state: self.state(now).to_owned(),
+            expires_unix_ms: self.expires_unix_ms,
+        }
+    }
+
     fn view(&self, now: u64) -> Value {
         if let Some(graphs) = &self.graphs {
             let mut value = self.view_base(now);
@@ -291,6 +308,54 @@ impl Entry {
             && !self.name.is_empty()
             && self.name.len() <= 64)
             .then_some(())
+    }
+}
+
+/// One scoped credential in a recovery bundle: its identity and grant, for
+/// the re-issue report. It has no secret hash or lineage and is never turned
+/// back into a credential (rekey-only).
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(super) struct RecoveryCredential {
+    pub id: String,
+    pub name: String,
+    pub tenant_id: Option<String>,
+    /// Collection names, or `["*"]` for every collection.
+    pub collections: Vec<String>,
+    pub operations: Vec<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub graphs: Option<Vec<String>>,
+    pub state: String,
+    pub expires_unix_ms: u64,
+}
+
+impl RecoveryCredential {
+    /// Shape and bounds only; values are never echoed.
+    pub(super) fn check(&self) -> Result<(), &'static str> {
+        let text = |t: &String| !t.is_empty() && t.len() <= 256 && !t.chars().any(char::is_control);
+        let valid = self.id.len() == 12
+            && self.id.bytes().all(|b| ID_ALPHABET.contains(&b))
+            && !self.name.is_empty()
+            && self.name.len() <= 64
+            && !self.name.chars().any(char::is_control)
+            && self
+                .tenant_id
+                .as_ref()
+                .is_none_or(|id| id.len() == 32 && id.bytes().all(|b| b.is_ascii_hexdigit()))
+            && !self.collections.is_empty()
+            && self.collections.len() <= 1024
+            && self.collections.iter().all(text)
+            && parse_ops(&self.operations).is_ok()
+            && self
+                .graphs
+                .as_ref()
+                .is_none_or(|g| g.len() <= 1024 && g.iter().all(text))
+            && matches!(self.state.as_str(), "active" | "expired" | "revoked");
+        if valid {
+            Ok(())
+        } else {
+            Err("a credential entry is invalid")
+        }
     }
 }
 
@@ -444,9 +509,9 @@ impl Store {
     /// Recovery inventory (feature-backup-ha ITEM-003): the public view of
     /// every credential, never its secret hash. A restore reports these for
     /// re-issue and never recreates them (rekey-only).
-    pub(super) fn recovery_inventory(&self, now: u64) -> Result<Vec<Value>, ApiError> {
+    pub(super) fn recovery_inventory(&self, now: u64) -> Result<Vec<RecoveryCredential>, ApiError> {
         let entries = self.entries.lock().map_err(internal)?;
-        Ok(entries.iter().map(|e| e.view(now)).collect())
+        Ok(entries.iter().map(|e| e.recovery(now)).collect())
     }
 
     /// Constant-time verification. Unknown IDs still hash and compare.

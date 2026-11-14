@@ -77,6 +77,20 @@ pub(super) struct Store {
     path: PathBuf,
     tenants: Mutex<Vec<Tenant>>,
 }
+/// The rules `Store::load` enforces: at most 1024 entries with unique 32-hex
+/// IDs and 1..64 printable-character names.
+pub(super) fn valid_store(tenants: &[Tenant]) -> bool {
+    let mut ids = std::collections::HashSet::new();
+    tenants.len() <= 1024
+        && tenants.iter().all(|t| {
+            t.id.len() == 32
+                && t.id.bytes().all(|b| b.is_ascii_hexdigit())
+                && ids.insert(t.id.as_str())
+                && !t.name.is_empty()
+                && t.name.len() <= 64
+                && !t.name.chars().any(char::is_control)
+        })
+}
 /// Recovery copy of the tenant store (feature-backup-ha ITEM-003/004).
 pub(super) fn recovery_inventory(store: &Store) -> Result<Vec<Tenant>, ApiError> {
     Ok(store.tenants.lock().map_err(internal)?.clone())
@@ -121,17 +135,7 @@ impl Store {
                 serde_json::from_slice(&bytes).map_err(std::io::Error::other)?
             }
         };
-        let mut ids = std::collections::HashSet::new();
-        if tenants.len() > 1024
-            || tenants.iter().any(|t| {
-                t.id.len() != 32
-                    || !t.id.bytes().all(|b| b.is_ascii_hexdigit())
-                    || !ids.insert(t.id.clone())
-                    || t.name.is_empty()
-                    || t.name.len() > 64
-                    || t.name.chars().any(char::is_control)
-            })
-        {
+        if !valid_store(&tenants) {
             return Err(std::io::Error::other("invalid tenant store entries"));
         }
         Ok(Self {

@@ -326,7 +326,11 @@ are rejected, so a key or connection string cannot be saved there.
   provider configuration, filesystem paths and host identity are excluded.
   The database itself is not encrypted by VLite before upload; rely on Azure
   Storage encryption and access control, and keep encrypted databases off
-  this path (they are refused).
+  this path (they are refused). The credential inventory has a fixed shape
+  (ID, name, tenant, scope, state and expiry) and parsing refuses any other
+  field, so a secret cannot ride along. Only files the server writes may sit
+  in the admin directory; anything else (a token or TLS file, for example)
+  fails the backup with `recovery_config_unrecognized` until it is moved.
 - **Restore grants nothing silently.** A restore creates a new lineage, so old
   scoped credentials and sessions stop working. The offline `cloud-restore`
   imports accounts disabled with unusable passwords and creates one fresh

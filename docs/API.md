@@ -826,6 +826,17 @@ names the policy revision, a SHA-256 of the policy document and the retention
 terms in force. Integrity rests on the SHA-256 chain from record to manifest
 to objects; blob version IDs and ETags are not recorded, and manifests are
 not signed, so authenticity rests on who may write the containers.
+The bundle names its database object's SHA-256 and the same policy capture;
+a set that pairs it with anything else is refused as `cloud_set_corrupt`.
+Before upload the bundle is certified (well-formed, unique tenants, accounts
+and credentials whose tenant references resolve), else 409
+`recovery_config_inconsistent`. The admin directory may hold only files the
+server writes; any other entry, such as a token or TLS file, answers 409
+`recovery_config_unrecognized` (the message gives only a count). The admin
+stores are read before and after the database copy and a change answers 409
+`recovery_config_unstable`; the reads are not serialized with admin writes,
+so a change undone in between goes unseen, which a rekey-only restore cannot
+turn into access.
 
 **Restore is rekey-only.** The restored copy gets a new lineage, so existing
 scoped credentials, sessions and replication cursors do not carry over:

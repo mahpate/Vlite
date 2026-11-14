@@ -393,6 +393,10 @@ private admin volume.
   it needs read, create, overwrite-with-ETag and delete. `Storage Blob Data
   Contributor` scoped to those two containers covers both. Without a
   coordination container both roles share one container.
+- Keep the admin directory (`VLITE_ADMIN_DIR`) for files the server writes.
+  A cloud backup refuses to run while it holds anything else, such as a token
+  file or TLS material (409 `recovery_config_unrecognized`); mount those from
+  another path.
 - Blob versioning and immutability policies are neither required nor
   qualified: sets name objects by SHA-256, not by version ID, and a
   time-based immutability policy would make retention deletes fail.

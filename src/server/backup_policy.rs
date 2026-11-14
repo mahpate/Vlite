@@ -1075,9 +1075,19 @@ impl Runtime {
         drop(admin);
         let verification = maintenance::verify(staged.path())?;
         let detail = maintenance::inspect_detail(staged.path())?;
-        let bundle = recovery_bundle::bundle(after, installation, detail.lineage, now);
+        let database =
+            Upload::file(cloud::ROLE_DATABASE, staged.path().to_path_buf()).map_err(internal)?;
+        // The bundle names this exact database object and admitted policy.
+        let bundle = recovery_bundle::bundle(
+            after,
+            installation,
+            detail.lineage,
+            &database.sha256,
+            capture.clone(),
+            now,
+        );
         let uploads = vec![
-            Upload::file(cloud::ROLE_DATABASE, staged.path().to_path_buf()).map_err(internal)?,
+            database,
             Upload::bytes(
                 cloud::ROLE_BUNDLE,
                 serde_json::to_vec_pretty(&bundle).map_err(internal)?,

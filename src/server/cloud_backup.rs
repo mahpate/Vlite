@@ -1482,6 +1482,8 @@ impl Sets {
         }
         if bundle.installation_id != manifest.installation_id
             || bundle.source_lineage != manifest.source_lineage
+            || bundle.database_sha256 != db.sha256
+            || bundle.policy != manifest.policy
         {
             return Err(corrupt("the recovery bundle belongs to another capture"));
         }
@@ -2032,14 +2034,16 @@ mod tests {
         }
     }
 
-    fn bundle_bytes(lineage: Option<u64>) -> Vec<u8> {
+    fn bundle_bytes(lineage: Option<u64>, database_sha256: &str) -> Vec<u8> {
         let config: recovery_bundle::Config = serde_json::from_value(json!({
             "tenants": [], "accounts": [], "credentials": [],
             "webhook_subscriptions": 0, "secret_references": [],
             "excluded": recovery_bundle::EXCLUDED,
         }))
         .unwrap();
-        serde_json::to_vec(&recovery_bundle::bundle(config, INSTALL, lineage, 1)).unwrap()
+        let policy = fake::policy_capture();
+        let bundle = recovery_bundle::bundle(config, INSTALL, lineage, database_sha256, policy, 1);
+        serde_json::to_vec(&bundle).unwrap()
     }
 
     fn prepare(env: &Env, now: u64) -> (Manifest, Vec<Upload>) {
@@ -2050,10 +2054,9 @@ mod tests {
         let path = env.db.path().join("source.vlite");
         let verification = maintenance::verify(&path).unwrap();
         let detail = maintenance::inspect_detail(&path).unwrap();
-        let uploads = vec![
-            Upload::file(ROLE_DATABASE, path).unwrap(),
-            Upload::bytes(ROLE_BUNDLE, bundle_bytes(detail.lineage)),
-        ];
+        let database = Upload::file(ROLE_DATABASE, path).unwrap();
+        let bundle = bundle_bytes(detail.lineage, &database.sha256);
+        let uploads = vec![database, Upload::bytes(ROLE_BUNDLE, bundle)];
         let manifest = Manifest::new(
             id,
             INSTALL,
@@ -2300,6 +2303,50 @@ mod tests {
         manifest.policy.sha256 = "not-a-digest".into();
         let err = manifest.check(&id, INSTALL).err().unwrap();
         assert_eq!(err.code, "cloud_set_corrupt");
+    }
+
+    #[test]
+    fn a_bundle_bound_to_another_database_or_policy_is_refused_on_fetch() {
+        // RB-01: the bundle names the database object and policy it was
+        // captured with; a set pairing it with anything else is corrupt.
+        let env = setup();
+        let path = env.db.path().join("source.vlite");
+        let verification = maintenance::verify(&path).unwrap();
+        let detail = maintenance::inspect_detail(&path).unwrap();
+        let other_db = bundle_bytes(detail.lineage, &"ab".repeat(32));
+        let mut other_policy: Value =
+            serde_json::from_slice(&bundle_bytes(detail.lineage, "")).unwrap();
+        other_policy["policy"]["keep_sets"] = json!(9);
+        for (n, bundle) in [other_db, Vec::new()].into_iter().enumerate() {
+            let now = BASE + n as u64;
+            let database = Upload::file(ROLE_DATABASE, path.clone()).unwrap();
+            let bundle = if bundle.is_empty() {
+                other_policy["database_sha256"] = json!(database.sha256);
+                serde_json::to_vec(&other_policy).unwrap()
+            } else {
+                bundle
+            };
+            let uploads = vec![database, Upload::bytes(ROLE_BUNDLE, bundle)];
+            let id = new_set_id(now).unwrap();
+            let manifest = Manifest::new(
+                &id,
+                INSTALL,
+                now,
+                &verification,
+                &detail,
+                &uploads,
+                fake::policy_capture(),
+            );
+            assert!(matches!(
+                env.sets.publish(&manifest, &uploads, now).unwrap(),
+                Publication::Published(_)
+            ));
+            let pin = env.sets.pin(&id, "check", PinKind::Operator, now).unwrap();
+            let dir = tempfile::tempdir().unwrap();
+            let err = env.sets.fetch(&id, &pin.id, dir.path()).err().unwrap();
+            assert_eq!(err.code, "cloud_set_corrupt", "case {n}");
+            assert!(err.message.contains("another capture"), "{}", err.message);
+        }
     }
 
     #[test]
