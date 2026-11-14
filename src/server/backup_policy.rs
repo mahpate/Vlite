@@ -38,6 +38,10 @@ const SUMMARY_SAMPLE: usize = 20;
 const AUDIT_CHUNK: usize = 500;
 /// Characters kept from an error message in the persisted status.
 const MAX_MESSAGE: usize = 500;
+/// Retention floors (PRD sec. 3.3): a policy can keep more, never fewer. The
+/// newest verified set is kept on top of these by the collection itself.
+const MIN_KEEP_SETS: usize = 3;
+const MIN_KEEP_DAYS: u64 = 30;
 /// Delay before a scheduled run skipped by a busy queue or operation retries.
 const RETRY_MS: u64 = 30_000;
 /// Process-level emulator key file; never part of the persisted policy.
@@ -47,10 +51,10 @@ fn default_interval() -> u64 {
     3600
 }
 fn default_keep_sets() -> usize {
-    3
+    MIN_KEEP_SETS
 }
 fn default_keep_days() -> u64 {
-    30
+    MIN_KEEP_DAYS
 }
 fn default_grace() -> u64 {
     24
@@ -88,11 +92,11 @@ impl Policy {
         if !(300..=604_800).contains(&self.interval_secs) {
             return Err("interval_secs must be 300-604800".into());
         }
-        if !(1..=1000).contains(&self.keep_sets) {
-            return Err("keep_sets must be 1-1000".into());
+        if !(MIN_KEEP_SETS..=1000).contains(&self.keep_sets) {
+            return Err(format!("keep_sets must be {MIN_KEEP_SETS}-1000"));
         }
-        if self.keep_days > 3650 {
-            return Err("keep_days must be 0-3650".into());
+        if !(MIN_KEEP_DAYS..=3650).contains(&self.keep_days) {
+            return Err(format!("keep_days must be {MIN_KEEP_DAYS}-3650"));
         }
         if !(1..=720).contains(&self.orphan_grace_hours) {
             return Err("orphan_grace_hours must be 1-720".into());
@@ -1277,7 +1281,10 @@ mod tests {
             json!({"interval_secs":299}),
             json!({"interval_secs":604_801}),
             json!({"keep_sets":0}),
+            json!({"keep_sets":2}),
             json!({"keep_sets":1001}),
+            json!({"keep_days":0}),
+            json!({"keep_days":29}),
             json!({"keep_days":3651}),
             json!({"orphan_grace_hours":0}),
             json!({"orphan_grace_hours":721}),
@@ -1598,22 +1605,29 @@ mod tests {
         env.runtime.view().unwrap()["installation_id"].clone()
     }
 
+    /// Moves a set's creation time into the past, beyond keep_days.
+    fn age(env: &Env, id: &str, created: u64) {
+        let name = format!("vlite/prod/sets/{id}/record.json");
+        let mut record: cloud::Record =
+            serde_json::from_slice(&env.meta.raw(&name).unwrap()).unwrap();
+        record.created_unix_ms = created;
+        env.meta
+            .set_raw(&name, &serde_json::to_vec(&record).unwrap());
+    }
+
     #[test]
     fn retention_keeps_newest_and_pinned_sets() {
         let env = setup();
         let h = Handle::new(&env.service);
         env.runtime
             .configure(
-                policy(
-                    json!({"drill_every":0,"retention_enabled":true,"keep_sets":1,
-                    "keep_days":0}),
-                ),
+                policy(json!({"drill_every":0,"retention_enabled":true})),
                 &h,
                 BASE,
             )
             .unwrap();
         let mut ids = Vec::new();
-        for _ in 0..3 {
+        for _ in 0..5 {
             std::thread::sleep(Duration::from_millis(5));
             let report = env.runtime.run_now(&h).unwrap();
             assert_eq!(report["collection"]["ok"], true, "{report}");
@@ -1623,6 +1637,19 @@ mod tests {
                 assert_eq!(pinned["pin"]["reason"], "legal hold");
             }
         }
+        // Everything is younger than keep_days: nothing was deleted.
+        assert_eq!(
+            env.runtime.list().unwrap()["sets"]
+                .as_array()
+                .unwrap()
+                .len(),
+            5
+        );
+        for (i, id) in ids.iter().enumerate() {
+            age(&env, id, BASE + i as u64);
+        }
+        let collected = env.runtime.collect(&h).unwrap();
+        assert_eq!(collected["result"]["deleted"], json!([ids[1]]));
         let listing = env.runtime.list().unwrap();
         let active: Vec<&str> = listing["sets"]
             .as_array()
@@ -1630,7 +1657,7 @@ mod tests {
             .iter()
             .map(|s| s["set_id"].as_str().unwrap())
             .collect();
-        assert_eq!(active, vec![ids[2].as_str(), ids[0].as_str()]);
+        assert_eq!(active, vec![&ids[4], &ids[3], &ids[2], &ids[0]]);
         assert_eq!(listing["tombstoned"][0]["set_id"], ids[1]);
         assert_eq!(listing["tombstoned"][0]["data_objects"], 0);
 
