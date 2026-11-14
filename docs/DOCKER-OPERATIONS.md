@@ -477,7 +477,8 @@ private admin volume.
 `--mode seed` and `{"mode":"seed"}` (same-lineage standby seeding) are
 refused. Encrypted databases, served memory reservations, in-memory servers
 and databases over 1 GiB (`cloud_database_too_large`) are refused with a
-reason code. Before any download, a restore or drill checks that the staging
+reason code. Before the payload download (after reading the manifest and
+coordination records), a restore or drill checks that the staging
 volume has room for twice the database plus the recovery bundle and a 64 MiB
 margin (507 `restore_insufficient_space`); on Windows free space is not
 checked, so make sure the volume has room.
