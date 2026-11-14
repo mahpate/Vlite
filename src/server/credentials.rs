@@ -264,6 +264,9 @@ impl Entry {
             graphs: self.graphs.clone(),
             state: self.state(now).to_owned(),
             expires_unix_ms: self.expires_unix_ms,
+            requests_per_second: self.requests_per_second,
+            max_vectors: self.max_vectors,
+            max_vectors_per_collection: self.max_vectors_per_collection,
         }
     }
 
@@ -311,9 +314,9 @@ impl Entry {
     }
 }
 
-/// One scoped credential in a recovery bundle: its identity and grant, for
-/// the re-issue report. It has no secret hash or lineage and is never turned
-/// back into a credential (rekey-only).
+/// One scoped credential in a recovery bundle: its identity, grant and
+/// non-secret limits, for the re-issue report. It has no secret hash or
+/// lineage and is never turned back into a credential (rekey-only).
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub(super) struct RecoveryCredential {
@@ -327,6 +330,12 @@ pub(super) struct RecoveryCredential {
     pub graphs: Option<Vec<String>>,
     pub state: String,
     pub expires_unix_ms: u64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub requests_per_second: Option<u32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max_vectors: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max_vectors_per_collection: Option<u64>,
 }
 
 impl RecoveryCredential {
@@ -350,6 +359,11 @@ impl RecoveryCredential {
                 .graphs
                 .as_ref()
                 .is_none_or(|g| g.len() <= 1024 && g.iter().all(text))
+            // The issue rule (`create`, `Entry::validate`); the vector limits
+            // accept any count there, so any u64 is valid here.
+            && self
+                .requests_per_second
+                .is_none_or(|r| (1..=1_000_000).contains(&r))
             && matches!(self.state.as_str(), "active" | "expired" | "revoked");
         if valid {
             Ok(())
@@ -1034,6 +1048,57 @@ pub(super) mod tests {
 
     fn event(id: &str) -> Value {
         json!({"event": "credential_created", "credential_id": id})
+    }
+
+    #[test]
+    fn recovery_inventory_keeps_the_non_secret_limits_through_bundle_and_import() {
+        // Review RB03-QUOTAS: the re-issue report carries each credential's
+        // rate and live-vector limits; credentials without limits have none.
+        use super::super::recovery_bundle as bundle;
+        let limited = Entry {
+            requests_per_second: Some(250),
+            max_vectors: Some(5_000),
+            max_vectors_per_collection: Some(0),
+            ..entry("abcdefghijkl")
+        };
+        let store = Store {
+            directory: PathBuf::new(),
+            entries: Mutex::new(vec![limited, entry("bbbbbbbbbbbb")]),
+        };
+        let config = bundle::Config {
+            tenants: Vec::new(),
+            accounts: Vec::new(),
+            credentials: store.recovery_inventory(1).unwrap(),
+            webhook_subscriptions: 0,
+            secret_references: Vec::new(),
+            excluded: bundle::EXCLUDED.iter().map(|s| (*s).to_owned()).collect(),
+        };
+        let policy = super::super::cloud_backup::fake::policy_capture();
+        let sealed = bundle::bundle(config, "id", None, &"5c".repeat(32), policy, 1);
+        let bytes = serde_json::to_vec(&sealed).unwrap();
+        let parsed = bundle::parse(&bytes).unwrap();
+        let dir = tempfile::tempdir().unwrap();
+        let fresh = ("restore-admin", "correct horse battery staple");
+        let report = bundle::import(&parsed, dir.path(), fresh).unwrap();
+        let reissue = &report["credentials_to_reissue"];
+        assert_eq!(reissue[0]["id"], "abcdefghijkl");
+        assert_eq!(reissue[0]["requests_per_second"], 250);
+        assert_eq!(reissue[0]["max_vectors"], 5_000);
+        assert_eq!(reissue[0]["max_vectors_per_collection"], 0);
+        for absent in [
+            "requests_per_second",
+            "max_vectors",
+            "max_vectors_per_collection",
+        ] {
+            assert!(reissue[1].get(absent).is_none(), "{absent}");
+        }
+        // The live issue rule for the rate applies to a bundled credential.
+        for rate in [0, 1_000_001] {
+            let mut value: Value = serde_json::from_slice(&bytes).unwrap();
+            value["config"]["credentials"][0]["requests_per_second"] = json!(rate);
+            let bytes = serde_json::to_vec(&value).unwrap();
+            assert!(bundle::parse(&bytes).is_err(), "{rate}");
+        }
     }
 
     #[test]

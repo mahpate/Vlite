@@ -848,8 +848,10 @@ turn into access.
 
 **Restore is rekey-only.** The restored copy gets a new lineage, so existing
 scoped credentials, sessions and replication cursors do not carry over:
-reissue credentials after you switch. The route never touches the live
-database; select the copy with `POST /v1/admin/restores/select` and restart.
+reissue credentials after you switch. The report's `credentials_to_reissue`
+lists each credential's grant and its `requests_per_second`, `max_vectors`
+and `max_vectors_per_collection` limits, never a secret. The route never
+touches the live database; select the copy with `POST /v1/admin/restores/select` and restart.
 `{"mode": "seed"}` (same-lineage standby seeding) is refused with 409
 `cloud_seed_mode_deferred`. For a restore on a fresh host, use the offline
 `vlite-server cloud-sets` and `vlite-server cloud-restore` commands (see
