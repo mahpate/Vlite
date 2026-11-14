@@ -2874,6 +2874,62 @@ mod tests {
     }
 
     #[test]
+    fn a_fence_after_the_connector_blocks_settling_a_pending_publication() {
+        // The settle must recheck the fence itself: a run that passed the
+        // post-connector check and then blocked reading the pending record
+        // past shutdown must not commit it once a successor owns the state.
+        let env = setup();
+        let h = Handle::new(&env.service);
+        env.runtime
+            .configure(policy(json!({"drill_every":0})), &h, BASE)
+            .unwrap();
+        env.meta.fault(Op::Put, "record.json", Fault::Before, 1, 1);
+        env.meta.fault(Op::Get, "record.json", Fault::Before, 0, 1);
+        assert_eq!(code(env.runtime.run_now(&h)), "cloud_publication_unknown");
+        let pending = status(&env.runtime)["pending"]["set_id"]
+            .as_str()
+            .unwrap()
+            .to_owned();
+
+        let entered = Arc::new(AtomicBool::new(false));
+        let release = Arc::new(AtomicBool::new(false));
+        let (inside, gate) = (entered.clone(), release.clone());
+        env.meta
+            .hook(Op::Get, &format!("{pending}/record.json"), move || {
+                inside.store(true, Ordering::SeqCst);
+                while !gate.load(Ordering::SeqCst) {
+                    std::thread::sleep(Duration::from_millis(5));
+                }
+            });
+        let old = Arc::new(reopen(&env));
+        old.busy.store(true, Ordering::Release);
+        old.start_claimed(h.clone());
+        await_admitted(&old);
+        let deadline = Instant::now() + Duration::from_secs(10);
+        while !entered.load(Ordering::SeqCst) {
+            assert!(
+                Instant::now() < deadline,
+                "the pending record was never read"
+            );
+            std::thread::sleep(Duration::from_millis(5));
+        }
+        assert!(!old.shutdown(Duration::from_millis(50)));
+        let next = reopen(&env);
+        let file = std::fs::read(env.root.join("cloud-backup").join(STATE)).unwrap();
+
+        release.store(true, Ordering::SeqCst);
+        assert!(old.shutdown(Duration::from_secs(10)));
+        assert_eq!(
+            std::fs::read(env.root.join("cloud-backup").join(STATE)).unwrap(),
+            file
+        );
+        let listing = next.list().unwrap();
+        assert_eq!(set(&listing, &pending)["record"]["state"], "staging");
+        assert_eq!(listing["sets"].as_array().unwrap().len(), 1);
+        assert_eq!(status(&next)["pending"]["set_id"], pending);
+    }
+
+    #[test]
     fn a_new_target_abandons_the_pending_publication() {
         let env = setup();
         let h = Handle::new(&env.service);

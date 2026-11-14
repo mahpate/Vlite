@@ -367,6 +367,11 @@ pub(super) fn parse(bytes: &[u8]) -> Result<Bundle, &'static str> {
 /// passwords, plus the required fresh super admin) and the tenants, re-reads
 /// both stores as a server start would, and returns the operator report.
 /// Credentials and webhooks are never written.
+///
+/// `directory` must have no other writer: a failure removes the stores this
+/// import persisted by path, so a store another writer swapped in between
+/// would be removed with them. The restore passes a subdirectory of its
+/// owner-only staging directory.
 pub(super) fn import(
     bundle: &Bundle,
     directory: &FilePath,
@@ -615,6 +620,22 @@ mod tests {
             let left = std::fs::read_dir(dir.path()).unwrap().count();
             assert_eq!(left, winner.len(), "{winner:?}");
         }
+    }
+
+    #[test]
+    fn tenant_import_error_defers_cleanup_to_its_caller() {
+        // A failed load after tenants.json is persisted leaves the file and
+        // its record to `import`, which owns cleanup of every step.
+        let dir = tempfile::tempdir().unwrap();
+        let invalid: Vec<super::super::tenants::Tenant> =
+            serde_json::from_value(json!([{"id": "invalid", "name": "", "max_vectors": null}]))
+                .unwrap();
+        let mut created = Vec::new();
+        let result = super::super::tenants::recovery_import(dir.path(), &invalid, &mut created);
+        assert!(result.is_err());
+        let path = dir.path().join("tenants.json");
+        assert_eq!(created, vec![path.clone()]);
+        assert!(path.exists());
     }
 
     #[test]

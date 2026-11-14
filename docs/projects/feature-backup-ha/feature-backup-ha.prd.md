@@ -711,10 +711,11 @@ Vectors, graph, KV with versions and CAS, and allocation high-waters are restore
   - the API, route-inventory, admin-coverage, dashboard-coverage and documentation gates
   - every other `ci.yml` Python and Node gate that needs no built binary or network (66 commands, including the graph build-boundary gate); the gRPC smoke and the binary-driven end-to-end gates did not run
 - Ran the `#[ignore]`d Azurite end-to-end test (`tests/cloud_backup_azurite.rs`) and the Azure adapter boundary test against a local Azurite container. The end-to-end test covers backup, listing, drill, CLI restore, a recovered-server start, fresh-admin login, a disabled owner, released pins and a refused re-restore.
-- Mutation checks killed each mutant that reviewers reported as surviving.
+- Mutation checks killed each mutant that reviewers reported as surviving. A final round replayed the fenced-publication, import-cleanup, status and policy-wake changes. Two mutants survived at first: one let a publication settle without its caller's authorization after the connector call, and one returned import cleanup to the tenant step. Each now fails a dedicated test (`a_fence_after_the_connector_blocks_settling_a_pending_publication`, `tenant_import_error_defers_cleanup_to_its_caller`). One expected control survives: removing the post-connector authorization check, which the settle-time check still enforces.
+- Flake stress on Windows, each run standalone and in a clean build: 30 consecutive passes of each new backup-policy test, and 50 of the compaction status selection test plus 10 whole-binary runs. No failure was observed. Linux was not stressed.
 - Reviews:
   - independent local review
-  - report-only pool review plans 3 to 5, run by the coordinator
+  - report-only pool review plans 3 to 7, run by the coordinator
   - every finding was verified by symbol before it was fixed
 
 **Residual limits and deferred work.**
@@ -725,7 +726,7 @@ Vectors, graph, KV with versions and CAS, and allocation high-waters are restore
 - Pins are not secrets. A forced operation-pin removal is audited, but the server cannot see restores running elsewhere. A failed re-drill does not revoke a set's verified protection.
 - `POST /run` is not idempotent. The schedule interval is a wall-clock bound.
 - On Windows there is no free-space check, and staging inherits the parent's access list, so the `--output` parent must be operator-private.
-- Import cleanup assumes a private directory.
+- Import cleanup removes the stores it wrote by path, so its admin directory must be private with a single writer: a review reproduced that a failed import deletes a store another writer swapped in. The restore imports only into its own new staging directory, which is owner-only on Linux and macOS and inherits the `--output` parent's access list on Windows.
 - Manifests and bundles from before the policy-capture binding are refused; the schema was never released, so no migration is provided.
 - Deferred: the shared selection transaction for reseed/promotion, seed mode and seed or compaction-source pins, the policy-publisher hook, current-credential continuity, dashboard administration (EPIC-012) and every HA epic.
 - Planned files not created:

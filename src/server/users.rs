@@ -1186,7 +1186,8 @@ pub(super) fn fresh_admin(
 /// fresh super admin is the only usable sign-in, so a restore can never end
 /// without a working break-glass account. Refuses an existing store. Once
 /// users.json is persisted its path is pushed to `created`, so the caller
-/// can clean up a later failure without touching another writer's file.
+/// can clean up a later failure without removing a store that was already
+/// there. Cleanup is by path, so `directory` must have no other writer.
 pub(super) fn rekey_import(
     directory: &FilePath,
     accounts: &[RecoveryAccount],
