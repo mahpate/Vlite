@@ -331,6 +331,12 @@ are rejected, so a key or connection string cannot be saved there.
   scoped credentials and sessions stop working. The offline `cloud-restore`
   imports accounts disabled with unusable passwords and creates one fresh
   super admin from a password file you supply.
+- **Pins.** A restore or drill pins its set so retention cannot delete it
+  mid-download. Only the owning operation releases that pin; an operator can
+  force-release one left by a crashed owner, which is audited separately.
+  Pin IDs are not secrets, and anyone with write access to the coordination
+  container can still change set records, so keep that access to the backup
+  identity.
 - **Audit.** Policy changes, runs, publication outcomes, drills, collections,
   deletions, restores and pin changes are written to the audit log.
 

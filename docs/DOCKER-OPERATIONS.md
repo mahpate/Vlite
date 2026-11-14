@@ -405,7 +405,11 @@ on the private admin volume.
 3. Pin a set before an investigation so retention keeps it. Turn retention on
    only after you have a verified set; it never removes the newest verified
    set, pinned sets, or sets inside `keep_sets` (minimum 3) or `keep_days`
-   (minimum 30).
+   (minimum 30). Restores and drills hold their own pin (`"kind":
+   "operation"`) that an ordinary pin removal refuses. If a restore crashed
+   and left one behind, remove it with `DELETE .../pins/{pin}?force=true`
+   after making sure no restore of that set is still running on any host; the
+   server cannot see restores run elsewhere.
 4. To restore into the running installation, call `POST .../sets/{id}/restore`,
    select the returned copy with `POST /v1/admin/restores/select`, restart, and
    reissue scoped credentials (the lineage is new).

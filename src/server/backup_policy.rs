@@ -21,6 +21,7 @@ use super::cloud_backup::{self as cloud, Manifest, Publication, Retention, Sets,
 use super::*;
 use crate::maintenance;
 use serde::{Serialize, de::DeserializeOwned};
+use std::collections::HashSet;
 use std::io::{Read, Write};
 use std::path::{Path as FilePath, PathBuf};
 use std::sync::Weak;
@@ -158,6 +159,9 @@ pub(super) struct Runtime {
     dir: PathBuf,
     state: Mutex<Loaded>,
     busy: AtomicBool,
+    /// Operation pins (restores, drills) this process is still using: even a
+    /// forced removal refuses them.
+    live: Mutex<HashSet<String>>,
     connector: Connector,
 }
 
@@ -167,6 +171,22 @@ struct Busy<'a>(&'a AtomicBool);
 impl Drop for Busy<'_> {
     fn drop(&mut self) {
         self.0.store(false, Ordering::Release);
+    }
+}
+
+/// An operation pin held by this process; it leaves the live set on drop,
+/// after its owner released (or failed to release) it.
+struct Held<'a> {
+    live: &'a Mutex<HashSet<String>>,
+    pin: cloud::Pin,
+}
+
+impl Drop for Held<'_> {
+    fn drop(&mut self) {
+        self.live
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .remove(&self.pin.id);
     }
 }
 
@@ -418,6 +438,7 @@ impl Runtime {
                 retry_at: None,
             }),
             busy: AtomicBool::new(false),
+            live: Mutex::default(),
             connector,
         })
     }
@@ -440,6 +461,19 @@ impl Runtime {
 
     fn staging(&self) -> PathBuf {
         self.dir.join(STAGING)
+    }
+
+    /// Pins a set for a restore or drill run by this process.
+    fn hold(&self, sets: &Sets, set_id: &str, reason: &str) -> Result<Held<'_>, ApiError> {
+        let pin = sets.pin(set_id, reason, cloud::PinKind::Operation, now())?;
+        self.live
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .insert(pin.id.clone());
+        Ok(Held {
+            live: &self.live,
+            pin,
+        })
     }
 
     fn workdir(&self) -> Result<tempfile::TempDir, ApiError> {
@@ -665,8 +699,11 @@ impl Runtime {
             "scheduled":scheduled}),
         );
         let drill = (policy.drill_every > 0 && published % policy.drill_every == 0).then(|| {
-            match sets.pin(&record.set_id, "drill", now()) {
-                Ok(pin) => self.drill_pinned(handle, &sets, &record.set_id, &pin).0,
+            match self.hold(&sets, &record.set_id, "drill") {
+                Ok(held) => {
+                    self.drill_pinned(handle, &sets, &record.set_id, &held.pin)
+                        .0
+                }
                 Err(error) => self.drilled(handle, &record.set_id, Err(error), false).0,
             }
         });
@@ -816,7 +853,7 @@ impl Runtime {
             Ok(_) => true,
             Err(_) => {
                 // Best effort: a pin left behind only delays retention.
-                let _ = sets.unpin(set_id, &pin.id, now());
+                let _ = sets.release(set_id, &pin.id, now());
                 false
             }
         };
@@ -918,8 +955,8 @@ impl Runtime {
     /// the set and in the status, then returned.
     pub(super) fn drill(&self, handle: &Handle, set_id: &str) -> Result<Value, ApiError> {
         let (sets, _, _) = self.connect()?;
-        let pin = sets.pin(set_id, "drill", now())?;
-        match self.drill_pinned(handle, &sets, set_id, &pin) {
+        let held = self.hold(&sets, set_id, "drill")?;
+        match self.drill_pinned(handle, &sets, set_id, &held.pin) {
             (report, None) => Ok(report),
             (_, Some(error)) => Err(error),
         }
@@ -932,21 +969,43 @@ impl Runtime {
         reason: &str,
     ) -> Result<Value, ApiError> {
         let (sets, _, _) = self.connect()?;
-        let pin = sets.pin(set_id, reason, now())?;
+        let pin = sets.pin(set_id, reason, cloud::PinKind::Operator, now())?;
         handle.audit(json!({"event":"cloud_backup_pinned","set_id":set_id,"pin_id":pin.id}));
         Ok(json!({"set_id":set_id,"pin":pin}))
     }
 
+    /// Removes an operator hold. An operation pin needs `force` and is
+    /// refused while this process still runs its restore or drill; a forced
+    /// removal is for an owner that crashed and is audited separately.
     pub(super) fn unpin(
         &self,
         handle: &Handle,
         set_id: &str,
         pin_id: &str,
+        force: bool,
     ) -> Result<Value, ApiError> {
+        if force
+            && self
+                .live
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .contains(pin_id)
+        {
+            return Err(conflict(
+                "cloud_pin_in_use",
+                "a restore or drill on this server still holds the pin; it is released when that operation ends",
+            ));
+        }
         let (sets, _, _) = self.connect()?;
-        sets.unpin(set_id, pin_id, now())?;
-        handle.audit(json!({"event":"cloud_backup_unpinned","set_id":set_id,"pin_id":pin_id}));
-        Ok(json!({"set_id":set_id,"pin_id":pin_id,"removed":true}))
+        let kind = sets.unpin(set_id, pin_id, force, now())?;
+        let forced = kind == Some(cloud::PinKind::Operation);
+        let event = if forced {
+            "cloud_backup_pin_force_released"
+        } else {
+            "cloud_backup_unpinned"
+        };
+        handle.audit(json!({"event":event,"set_id":set_id,"pin_id":pin_id}));
+        Ok(json!({"set_id":set_id,"pin_id":pin_id,"removed":true,"forced":forced}))
     }
 
     /// Downloads and verifies a set, then restores it (new lineage) as a new
@@ -960,10 +1019,10 @@ impl Runtime {
     ) -> Result<Value, ApiError> {
         handle.refusal_for_policy()?;
         let (sets, _, _) = self.connect()?;
-        let pin = sets.pin(set_id, "restore", now())?;
+        let held = self.hold(&sets, set_id, "restore")?;
         let result = (|| {
             let work = self.workdir()?;
-            let fetched = sets.fetch(set_id, &pin.id, work.path())?;
+            let fetched = sets.fetch(set_id, &held.pin.id, work.path())?;
             let name = admin::name("restore-");
             let destination = admin_dir.join(&name);
             let restored = maintenance::restore(&fetched.database, &destination)?;
@@ -977,7 +1036,8 @@ impl Runtime {
                 "restart_required":true,
                 "next":"select the copy with POST /v1/admin/restores/select, then restart"}))
         })();
-        let released = sets.unpin(set_id, &pin.id, now()).is_ok();
+        let released = sets.release(set_id, &held.pin.id, now()).is_ok();
+        drop(held);
         let mut report = result?;
         report["pin_released"] = json!(released);
         handle.audit(json!({"event":"cloud_backup_restored","set_id":set_id,
@@ -1139,7 +1199,13 @@ async fn pin(
 async fn unpin(
     State(s): State<Service>,
     Path((id, pin)): Path<(String, String)>,
+    axum::extract::RawQuery(query): axum::extract::RawQuery,
 ) -> Result<Json<Value>, ApiError> {
+    let force = match query.as_deref() {
+        None | Some("") | Some("force=false") => false,
+        Some("force=true") => true,
+        Some(_) => return Err(unprocessable("the only query parameter is force=true")),
+    };
     set_id(&id)?;
     if !cloud::valid_pin_id(&pin) {
         return Err(unprocessable("invalid pin id"));
@@ -1147,7 +1213,7 @@ async fn unpin(
     let runtime = runtime(&s)?;
     let handle = Handle::new(&s);
     Ok(Json(
-        blocking(move || runtime.unpin(&handle, &id, &pin)).await?,
+        blocking(move || runtime.unpin(&handle, &id, &pin, force)).await?,
     ))
 }
 
@@ -1666,12 +1732,101 @@ mod tests {
             .as_str()
             .unwrap()
             .to_owned();
-        env.runtime.unpin(&h, &ids[0], &pin).unwrap();
+        env.runtime.unpin(&h, &ids[0], &pin, false).unwrap();
         let collected = env.runtime.collect(&h).unwrap();
         assert_eq!(collected["result"]["deleted"], json!([ids[0]]));
         assert_eq!(
             status(&env.runtime)["last_collection"]["result"]["deleted"],
             json!({"count":1,"sample":[ids[0]],"truncated":false})
+        );
+    }
+
+    #[test]
+    fn delete_active_restore_pin_is_refused_and_source_survives_collect() {
+        // Review M2: DELETE could remove a running restore's pin, and a
+        // collection then deleted the set mid-download.
+        let env = setup();
+        let h = Handle::new(&env.service);
+        env.runtime
+            .configure(
+                policy(json!({"drill_every":0,"retention_enabled":true})),
+                &h,
+                BASE,
+            )
+            .unwrap();
+        let mut ids = Vec::new();
+        for _ in 0..5 {
+            std::thread::sleep(Duration::from_millis(5));
+            let report = env.runtime.run_now(&h).unwrap();
+            ids.push(report["set_id"].as_str().unwrap().to_owned());
+        }
+        for (i, id) in ids.iter().enumerate() {
+            age(&env, id, BASE + i as u64);
+        }
+        // Pause the restore of the oldest (collectable) set after its pin was
+        // taken: the admin and the janitor act while the download runs.
+        let seen = Arc::new(Mutex::new(Vec::new()));
+        let (runtime, handle, source, out) =
+            (env.runtime.clone(), h.clone(), ids[0].clone(), seen.clone());
+        env.data
+            .hook(Op::Get, &format!("{source}/manifest.json"), move || {
+                let listing = runtime.list().unwrap();
+                let pin = set(&listing, &source)["record"]["pins"][0].clone();
+                let id = pin["id"].as_str().unwrap().to_owned();
+                let mut out = out.lock().unwrap();
+                out.push(pin["kind"].clone());
+                out.push(json!(code(runtime.unpin(&handle, &source, &id, false))));
+                out.push(json!(code(runtime.unpin(&handle, &source, &id, true))));
+                out.push(runtime.collect(&handle).unwrap()["result"]["deleted"].clone());
+            });
+        let admin_dir = env.root.join("admin");
+        std::fs::create_dir(&admin_dir).unwrap();
+        let report = env.runtime.restore(&h, &ids[0], &admin_dir).unwrap();
+        assert_eq!(report["pin_released"], true);
+        assert_eq!(
+            *seen.lock().unwrap(),
+            vec![
+                json!("operation"),
+                json!("cloud_pin_owned"),
+                json!("cloud_pin_in_use"),
+                json!([ids[1]]),
+            ]
+        );
+        // Released by its owner, the source is collectable again.
+        let collected = env.runtime.collect(&h).unwrap();
+        assert_eq!(collected["result"]["deleted"], json!([ids[0]]));
+    }
+
+    #[test]
+    fn a_crashed_owners_operation_pin_needs_an_audited_force() {
+        let env = setup();
+        let h = Handle::new(&env.service);
+        env.runtime
+            .configure(policy(json!({"drill_every":0})), &h, BASE)
+            .unwrap();
+        let id = env.runtime.run_now(&h).unwrap()["set_id"]
+            .as_str()
+            .unwrap()
+            .to_owned();
+        // An operation pin left by a process that is gone (not live here).
+        let (sets, _, _) = env.runtime.connect().unwrap();
+        let pin = sets
+            .pin(&id, "restore", cloud::PinKind::Operation, BASE)
+            .unwrap();
+        assert_eq!(
+            code(env.runtime.unpin(&h, &id, &pin.id, false)),
+            "cloud_pin_owned"
+        );
+        let report = env.runtime.unpin(&h, &id, &pin.id, true).unwrap();
+        assert_eq!(report["forced"], true);
+        let listing = env.runtime.list().unwrap();
+        assert_eq!(set(&listing, &id)["record"]["pins"], json!([]));
+        // An operator hold needs no force and is not reported as forced.
+        let hold = env.runtime.pin(&h, &id, "legal hold").unwrap();
+        let hold = hold["pin"]["id"].as_str().unwrap();
+        assert_eq!(
+            env.runtime.unpin(&h, &id, hold, false).unwrap()["forced"],
+            false
         );
     }
 
@@ -1854,8 +2009,16 @@ mod tests {
         .await;
         assert_eq!(status, StatusCode::CREATED, "{body}");
         let pin = body["pin"]["id"].as_str().unwrap().to_owned();
+        assert_eq!(body["pin"]["kind"], "operator");
+        for query in ["force=maybe", "force=true&x=1", "FAKE_SECRET_REVIEW_MARKER"] {
+            let (status, body) =
+                call(&app, "DELETE", &format!("{sets}/pins/{pin}?{query}"), None).await;
+            assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY, "{body}");
+            assert!(!body.to_string().contains("MARKER"), "{body}");
+        }
         let (status, body) = call(&app, "DELETE", &format!("{sets}/pins/{pin}"), None).await;
         assert_eq!((status, &body["removed"]), (StatusCode::OK, &json!(true)));
+        assert_eq!(body["forced"], false);
         let (status, body) = call(
             &app,
             "POST",

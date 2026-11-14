@@ -16,7 +16,7 @@
 //! identity-preserving seed mode belongs to the deferred HA work and is
 //! refused.
 use super::backup_policy::{SHARED_KEY_ENV, bundle_summary, inspection, lineage_hex};
-use super::cloud_backup::{self as cloud, Sets, Target};
+use super::cloud_backup::{self as cloud, PinKind, Sets, Target};
 use super::*;
 use crate::maintenance;
 use std::io::Read;
@@ -305,15 +305,15 @@ fn sync_directory(dir: &FilePath) -> Result<(), RecoveryError> {
 
 fn restore_with(plan: &Plan, sets: &Sets) -> Result<Value, RecoveryError> {
     let id = &plan.set_id;
-    let pin = sets.pin(id, PIN_REASON, now())?;
+    let pin = sets.pin(id, PIN_REASON, PinKind::Operation, now())?;
     let result = restore_pinned(plan, sets, &pin.id);
-    let released = sets.unpin(id, &pin.id, now()).is_ok();
+    let released = sets.release(id, &pin.id, now()).is_ok();
     let mut report = match result {
         Ok(report) => report,
         Err(mut error) => {
             if !released {
                 error.message = format!(
-                    "{}; the pin {} on set {id} could not be released: remove it with DELETE /v1/admin/cloud-backup/sets/{id}/pins/{}",
+                    "{}; the pin {} on set {id} could not be released: remove it with DELETE /v1/admin/cloud-backup/sets/{id}/pins/{}?force=true",
                     error.message, pin.id, pin.id
                 );
             }
@@ -324,7 +324,7 @@ fn restore_with(plan: &Plan, sets: &Sets) -> Result<Value, RecoveryError> {
     if !released {
         report["pin_id"] = json!(pin.id);
         report["pin_warning"] = json!(format!(
-            "the pin blocks retention of this set until removed with DELETE /v1/admin/cloud-backup/sets/{id}/pins/{}",
+            "the pin blocks retention of this set until removed with DELETE /v1/admin/cloud-backup/sets/{id}/pins/{}?force=true",
             pin.id
         ));
     }

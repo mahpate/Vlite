@@ -785,7 +785,7 @@ same-origin and CSRF headers. The dashboard card is **Administration → Backup
 | `POST /v1/admin/cloud-backup/sets/{id}/drill` | Download, verify, restore to scratch and probe a set; records the result. |
 | `POST /v1/admin/cloud-backup/sets/{id}/restore` | Write a new-lineage `restore-*.vlite` copy into the admin directory. Answers 201. |
 | `POST /v1/admin/cloud-backup/sets/{id}/pins` | Hold a set against retention: `{"reason": "…"}` (1–200 characters). Answers 201 with the pin ID. |
-| `DELETE /v1/admin/cloud-backup/sets/{id}/pins/{pin}` | Release a pin. |
+| `DELETE /v1/admin/cloud-backup/sets/{id}/pins/{pin}` | Release an operator hold. A pin owned by a running restore or drill (`"kind": "operation"`) is refused with 409 `cloud_pin_owned`; if its owner crashed, `?force=true` releases it (audited as `cloud_backup_pin_force_released`, 409 `cloud_pin_in_use` while this server still runs that operation). |
 
 The policy is persisted in `<admin>/cloud-backup/policy.json` and survives
 restarts. It holds no secret:
@@ -836,7 +836,8 @@ reservations (`memory_reservations_present`), an in-memory or recovery-mode
 server (`cloud_backup_requires_database_file`) and a prefix owned by another
 installation (`cloud_prefix_owned`). Errors: 409 conflicts
 such as `cloud_backup_not_configured`, `cloud_publication_lost`,
-`cloud_set_unpublished` or `cloud_set_unavailable`; 404 `cloud_set_not_found`
+`cloud_set_unpublished`, `cloud_set_unavailable`, `cloud_pin_owned` or
+`cloud_pin_in_use`; 404 `cloud_set_not_found`
 or `cloud_pin_not_found`; 400 or 422 `invalid_json` and 422 `invalid_input`; 502 `cloud_store_failed` or
 `cloud_set_corrupt`; 503 `busy`, `cloud_store_unavailable` or
 `cloud_publication_unknown`. Policy changes, runs, collections, drills,

@@ -361,12 +361,26 @@ pub(super) enum SetState {
     Tombstoned,
 }
 
+/// Who owns a pin. An operator hold is released by any installation admin;
+/// an operation pin protects a running restore or drill and is released by
+/// that operation. Removing someone else's operation pin needs an explicit,
+/// audited force (for an owner that crashed).
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub(super) enum PinKind {
+    #[default]
+    Operator,
+    Operation,
+}
+
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub(super) struct Pin {
     pub id: String,
     pub reason: String,
     pub created_unix_ms: u64,
+    #[serde(default)]
+    pub kind: PinKind,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -1147,7 +1161,13 @@ impl Sets {
 
     /// Pins a published set. Pins never expire; they block deletion until
     /// removed and are required to download a set.
-    pub(super) fn pin(&self, id: &str, reason: &str, now: u64) -> Result<Pin, ApiError> {
+    pub(super) fn pin(
+        &self,
+        id: &str,
+        reason: &str,
+        kind: PinKind,
+        now: u64,
+    ) -> Result<Pin, ApiError> {
         if reason.trim().is_empty() || reason.len() > 200 || reason.chars().any(char::is_control) {
             return Err(unprocessable(
                 "pin reason must be 1-200 characters without control characters",
@@ -1157,6 +1177,7 @@ impl Sets {
             id: format!("pin-{}", random_hex()?),
             reason: reason.into(),
             created_unix_ms: now,
+            kind,
         };
         self.update(id, now, |record, _| {
             if record.pins.iter().any(|p| p.id == pin.id) {
@@ -1180,14 +1201,47 @@ impl Sets {
         Ok(pin)
     }
 
-    pub(super) fn unpin(&self, id: &str, pin_id: &str, now: u64) -> Result<(), ApiError> {
+    /// Removes a pin for an admin. An operation pin is refused unless
+    /// `force`. Returns the kind of the removed pin (`None` when a retry after
+    /// an unknown result finds it already gone).
+    pub(super) fn unpin(
+        &self,
+        id: &str,
+        pin_id: &str,
+        force: bool,
+        now: u64,
+    ) -> Result<Option<PinKind>, ApiError> {
+        let mut removed = None;
         self.update(id, now, |record, first| {
+            match record.pins.iter().position(|p| p.id == pin_id) {
+                Some(index) => {
+                    let kind = record.pins[index].kind;
+                    if kind == PinKind::Operation && !force {
+                        return Err(conflict(
+                            "cloud_pin_owned",
+                            "the pin protects a restore or drill and is released by it; \
+                             force the removal only if that operation is no longer running",
+                        ));
+                    }
+                    record.pins.remove(index);
+                    removed = Some(kind);
+                    Ok(Step::Write)
+                }
+                None if first => Err(not_found("cloud_pin_not_found", "the pin does not exist")),
+                None => Ok(Step::Done),
+            }
+        })?;
+        Ok(removed)
+    }
+
+    /// Releases the caller's own pin; idempotent.
+    pub(super) fn release(&self, id: &str, pin_id: &str, now: u64) -> Result<(), ApiError> {
+        self.update(id, now, |record, _| {
             match record.pins.iter().position(|p| p.id == pin_id) {
                 Some(index) => {
                     record.pins.remove(index);
                     Ok(Step::Write)
                 }
-                None if first => Err(not_found("cloud_pin_not_found", "the pin does not exist")),
                 None => Ok(Step::Done),
             }
         })
@@ -2026,7 +2080,10 @@ mod tests {
         assert_eq!(listing.sets.len(), 1);
         assert_eq!(listing.sets[0].data_objects, 3);
         let dir = tempfile::tempdir().unwrap();
-        let pin = env.sets.pin(&id, "restore drill", BASE + 1).unwrap();
+        let pin = env
+            .sets
+            .pin(&id, "restore drill", PinKind::Operator, BASE + 1)
+            .unwrap();
         let fetched = env.sets.fetch(&id, &pin.id, dir.path()).unwrap();
         assert_eq!(fetched.verification.inspection.live_records, 5);
         assert_eq!(fetched.bundle.installation_id, INSTALL);
@@ -2038,7 +2095,7 @@ mod tests {
                 .map(lineage_hex)
         );
         assert!(fetched.manifest.source_lineage.is_some());
-        env.sets.unpin(&id, &pin.id, BASE + 2).unwrap();
+        env.sets.unpin(&id, &pin.id, false, BASE + 2).unwrap();
         assert!(record(&env, &id).pins.is_empty());
     }
 
@@ -2053,7 +2110,7 @@ mod tests {
             .err()
             .unwrap();
         assert_eq!(err.code, "cloud_set_unavailable");
-        let pin = env.sets.pin(&id, "check", BASE).unwrap();
+        let pin = env.sets.pin(&id, "check", PinKind::Operator, BASE).unwrap();
         let (manifest, _) = prepare(&env, BASE);
         let key = env.sets.object_key(&id, &manifest.objects[0].sha256);
         let mut bytes = env.data.raw(&key).unwrap();
@@ -2116,7 +2173,11 @@ mod tests {
             assert_eq!(err.code, "cloud_store_failed");
             let id = manifest.set_id.clone();
             assert_eq!(record(&env, &id).state, SetState::Staging);
-            let err = env.sets.pin(&id, "restore", BASE).err().unwrap();
+            let err = env
+                .sets
+                .pin(&id, "restore", PinKind::Operator, BASE)
+                .err()
+                .unwrap();
             assert_eq!(err.code, "cloud_set_unavailable");
             // Within the grace period nothing is collected.
             let early = env
@@ -2248,8 +2309,13 @@ mod tests {
     fn retention_keeps_newest_pinned_and_last_drilled_sets() {
         let env = setup();
         let ids: Vec<String> = (0..5).map(|i| publish(&env, BASE + i * 1000)).collect();
-        env.sets.pin(&ids[0], "legal", BASE).unwrap();
-        let drill = env.sets.pin(&ids[1], "drill", BASE).unwrap();
+        env.sets
+            .pin(&ids[0], "legal", PinKind::Operator, BASE)
+            .unwrap();
+        let drill = env
+            .sets
+            .pin(&ids[1], "drill", PinKind::Operator, BASE)
+            .unwrap();
         let ok = DrillResult {
             ok: true,
             unix_ms: BASE,
@@ -2281,7 +2347,11 @@ mod tests {
             serde_json::from_slice(&env.meta.raw(&env.sets.catalog_key()).unwrap()).unwrap();
         assert!(catalog.decision.is_none());
         // A deleted set can no longer be pinned.
-        let err = env.sets.pin(&ids[2], "late", BASE).err().unwrap();
+        let err = env
+            .sets
+            .pin(&ids[2], "late", PinKind::Operator, BASE)
+            .err()
+            .unwrap();
         assert_eq!(err.code, "cloud_set_unavailable");
     }
 
@@ -2298,7 +2368,10 @@ mod tests {
             unix_ms: BASE,
             detail: "ok".into(),
         };
-        let pin = env.sets.pin(&ids[1], "initial drill", BASE).unwrap();
+        let pin = env
+            .sets
+            .pin(&ids[1], "initial drill", PinKind::Operator, BASE)
+            .unwrap();
         env.sets
             .record_drill(&ids[1], &pin.id, &verified, BASE)
             .unwrap();
@@ -2310,7 +2383,9 @@ mod tests {
         let target = format!("{victim}/record.json");
         let check = verified.clone();
         env.meta.hook(Op::Put, &target, move || {
-            let pin = sets.pin(&victim, "concurrent drill", BASE).unwrap();
+            let pin = sets
+                .pin(&victim, "concurrent drill", PinKind::Operator, BASE)
+                .unwrap();
             let resumed = sets
                 .collect(INSTALL, &retention(false), BASE + 86_400_000)
                 .unwrap();
@@ -2320,7 +2395,12 @@ mod tests {
             assert!(catalog.decision.is_none());
             sets.record_drill(&victim, &pin.id, &check, BASE).unwrap();
             let pin = sets
-                .pin(&previous_verified, "failed recheck", BASE)
+                .pin(
+                    &previous_verified,
+                    "failed recheck",
+                    PinKind::Operator,
+                    BASE,
+                )
                 .unwrap();
             let failed = DrillResult {
                 ok: false,
@@ -2367,14 +2447,16 @@ mod tests {
             detail: "ok".into(),
         };
         for id in [&ids[0], &ids[1]] {
-            let pin = env.sets.pin(id, "drill", BASE).unwrap();
+            let pin = env.sets.pin(id, "drill", PinKind::Operator, BASE).unwrap();
             env.sets.record_drill(id, &pin.id, &ok, BASE).unwrap();
         }
         let sets = env.sets.clone();
         let survivor = ids[1].clone();
         env.meta
             .hook(Op::Put, &format!("{}/record.json", ids[0]), move || {
-                let pin = sets.pin(&survivor, "recheck", BASE).unwrap();
+                let pin = sets
+                    .pin(&survivor, "recheck", PinKind::Operator, BASE)
+                    .unwrap();
                 let failed = DrillResult {
                     ok: false,
                     unix_ms: BASE + 1,
@@ -2404,7 +2486,8 @@ mod tests {
         let victim = ids[0].clone();
         let target = format!("{victim}/record.json");
         env.meta.hook(Op::Put, &target, move || {
-            sets.pin(&victim, "operator hold", BASE).unwrap();
+            sets.pin(&victim, "operator hold", PinKind::Operator, BASE)
+                .unwrap();
         });
         let out = env
             .sets
@@ -2488,26 +2571,65 @@ mod tests {
         let id = publish(&env, BASE);
         let err = env
             .sets
-            .unpin(&id, "pin-0000000000000000", BASE)
+            .unpin(&id, "pin-0000000000000000", false, BASE)
             .err()
             .unwrap();
         assert_eq!(err.code, "cloud_pin_not_found");
         let pins: Vec<Pin> = (0..MAX_PINS)
-            .map(|_| env.sets.pin(&id, "hold", BASE).unwrap())
+            .map(|_| env.sets.pin(&id, "hold", PinKind::Operator, BASE).unwrap())
             .collect();
-        let err = env.sets.pin(&id, "hold", BASE).err().unwrap();
+        let err = env
+            .sets
+            .pin(&id, "hold", PinKind::Operator, BASE)
+            .err()
+            .unwrap();
         assert_eq!(err.code, "cloud_pins_full");
         env.meta.fault(Op::Put, "record.json", Fault::After, 0, 1);
-        env.sets.unpin(&id, &pins[0].id, BASE).unwrap();
+        env.sets.unpin(&id, &pins[0].id, false, BASE).unwrap();
         assert_eq!(record(&env, &id).pins.len(), MAX_PINS - 1);
-        let err = env.sets.unpin(&id, &pins[0].id, BASE).err().unwrap();
+        let err = env.sets.unpin(&id, &pins[0].id, false, BASE).err().unwrap();
         assert_eq!(err.code, "cloud_pin_not_found");
         let err = env
             .sets
-            .pin("20231114T221320Z-0000000000000000", "x", BASE)
+            .pin(
+                "20231114T221320Z-0000000000000000",
+                "x",
+                PinKind::Operator,
+                BASE,
+            )
             .err()
             .unwrap();
         assert_eq!(err.code, "cloud_set_not_found");
+    }
+
+    #[test]
+    fn an_operation_pin_is_released_by_its_owner_or_by_force() {
+        let env = setup();
+        let id = publish(&env, BASE);
+        let pin = env
+            .sets
+            .pin(&id, "restore", PinKind::Operation, BASE)
+            .unwrap();
+        let err = env.sets.unpin(&id, &pin.id, false, BASE).err().unwrap();
+        assert_eq!(err.code, "cloud_pin_owned");
+        assert_eq!(record(&env, &id).pins, vec![pin.clone()]);
+        // A pin written before kinds existed is an operator hold.
+        let mut legacy = serde_json::to_value(&pin).unwrap();
+        legacy.as_object_mut().unwrap().remove("kind");
+        let legacy: Pin = serde_json::from_value(legacy).unwrap();
+        assert_eq!(legacy.kind, PinKind::Operator);
+
+        env.sets.release(&id, &pin.id, BASE).unwrap();
+        env.sets.release(&id, &pin.id, BASE).unwrap();
+        assert!(record(&env, &id).pins.is_empty());
+
+        let crashed = env
+            .sets
+            .pin(&id, "drill", PinKind::Operation, BASE)
+            .unwrap();
+        let kind = env.sets.unpin(&id, &crashed.id, true, BASE).unwrap();
+        assert_eq!(kind, Some(PinKind::Operation));
+        assert!(record(&env, &id).pins.is_empty());
     }
 
     #[test]
