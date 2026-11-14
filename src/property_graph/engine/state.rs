@@ -406,6 +406,9 @@ impl Graph {
     }
     /// Compaction scanner: whether any stored node or edge carries a deadline,
     /// including entities that are already due and hidden from reads.
+    // Used by the `vlite` compaction scanner, which the engine-only `vlite-graph`
+    // harness does not build.
+    #[allow(dead_code)]
     pub(crate) fn has_stored_expiry(&self) -> bool {
         self.nodes
             .keys()
@@ -416,10 +419,16 @@ impl Graph {
                 .any(|id| self.edge_expiry.get(*id).is_some())
     }
     /// Compaction scanner: whether any temporal edge segments are stored.
+    // Used by the `vlite` compaction scanner, which the engine-only `vlite-graph`
+    // harness does not build.
+    #[allow(dead_code)]
     pub(crate) fn has_temporal_segments(&self) -> bool {
         !self.segments.is_empty()
     }
     /// Compaction scanner: the (label, property) keys of derived indexes.
+    // Used by the `vlite` compaction scanner, which the engine-only `vlite-graph`
+    // harness does not build.
+    #[allow(dead_code)]
     pub(crate) fn property_index_keys(&self) -> impl Iterator<Item = &(String, String)> {
         self.property_indexes.keys()
     }
