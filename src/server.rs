@@ -705,18 +705,23 @@ impl Service {
     }
 
     /// Call after HTTP graceful shutdown. Stops and joins the maintenance and
-    /// backup scheduler, waits for any disconnected writer, then closes.
+    /// backup scheduler, gives a running scheduled cloud backup a bounded
+    /// time to finish, waits for any disconnected writer, then closes.
     pub async fn close(&self) -> crate::Result<()> {
         let database = self.database.clone();
         let ops = self.ops.clone();
         let webhooks = self.webhooks.clone();
         let group = self.group_commit.clone();
+        let cloud = self.admin.cloud.get().cloned();
         tokio::task::spawn_blocking(move || {
             if let Some(group) = group {
                 group.shutdown()?;
             }
             webhooks.shutdown();
             ops.shutdown();
+            if let Some(cloud) = cloud {
+                cloud.wait_for_operation(std::time::Duration::from_secs(10));
+            }
             let mut owner = database
                 .write()
                 .map_err(|error| std::io::Error::other(error.to_string()))?;
