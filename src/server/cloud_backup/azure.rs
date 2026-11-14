@@ -24,6 +24,9 @@ const RANGE: u64 = 8 * 1024 * 1024;
 const LIST_BODY_MAX: u64 = 32 * 1024 * 1024;
 const TOKEN_BODY_MAX: u64 = 64 * 1024;
 const MAX_LISTED: usize = 1_000_000;
+/// Listing pages per call; empty pages with a marker are legal, so the bound
+/// is well above `MAX_LISTED / 5000`.
+const MAX_PAGES: usize = 4096;
 const ATTEMPTS: u32 = 3;
 const SHARED_KEY_FILE_MAX: u64 = 1024;
 
@@ -246,9 +249,12 @@ fn parse_token(body: &[u8], now: u64) -> Result<Token, StoreError> {
         .ok_or_else(invalid)?
         .to_owned();
     let number = |v: &Value| v.as_u64().or_else(|| v.as_str()?.trim().parse().ok());
+    // A token without a usable expiry is refused rather than cached with a
+    // guessed lifetime.
     let expires_at = number(&value["expires_on"])
         .or_else(|| number(&value["expires_in"]).map(|n| now.saturating_add(n)))
-        .unwrap_or(now + 300);
+        .filter(|&at| at > now)
+        .ok_or_else(invalid)?;
     Ok(Token {
         value: token,
         expires_at,
@@ -409,36 +415,90 @@ fn retry<T>(mut f: impl FnMut() -> Result<T, StoreError>) -> Result<T, StoreErro
     }
 }
 
-fn unescape(text: &str) -> String {
-    text.replace("&lt;", "<")
-        .replace("&gt;", ">")
-        .replace("&quot;", "\"")
-        .replace("&apos;", "'")
-        .replace("&amp;", "&")
+/// Decodes the predefined XML entities and numeric character references of
+/// one text node; a raw `<` or any other entity is a malformed response.
+fn unescape(text: &str) -> Option<String> {
+    if text.contains('<') {
+        return None;
+    }
+    let mut out = String::with_capacity(text.len());
+    let mut rest = text;
+    while let Some(at) = rest.find('&') {
+        out.push_str(&rest[..at]);
+        let tail = &rest[at + 1..];
+        let end = tail.find(';')?;
+        out.push(match &tail[..end] {
+            "lt" => '<',
+            "gt" => '>',
+            "quot" => '"',
+            "apos" => '\'',
+            "amp" => '&',
+            entity => {
+                let code = match entity.strip_prefix("#x") {
+                    Some(hex) => u32::from_str_radix(hex, 16).ok()?,
+                    None => entity.strip_prefix('#')?.parse().ok()?,
+                };
+                char::from_u32(code)?
+            }
+        });
+        rest = &tail[end + 1..];
+    }
+    out.push_str(rest);
+    Some(out)
 }
 
-/// Blob names and the continuation marker of one List Blobs page.
-fn parse_listing(xml: &str) -> (Vec<String>, Option<String>) {
-    let mut names = Vec::new();
-    let mut rest = xml;
-    while let Some(start) = rest.find("<Name>") {
-        let after = &rest[start + 6..];
-        let Some(end) = after.find("</Name>") else {
-            break;
-        };
-        names.push(unescape(&after[..end]));
-        rest = &after[end + 7..];
+/// Blob names and the continuation marker of one List Blobs page. The page
+/// must be one `EnumerationResults` document whose `Blobs` element holds only
+/// `Blob` entries with exactly one `Name` each, plus a `NextMarker` element;
+/// anything else is refused so a truncated or foreign body never reads as a
+/// shorter listing.
+fn parse_listing(xml: &str) -> Result<(Vec<String>, Option<String>), StoreError> {
+    let malformed = || StoreError::Failed("malformed listing response".into());
+    let text = xml.trim();
+    let start = text.find("<EnumerationResults").ok_or_else(malformed)?;
+    let body = text[start..]
+        .strip_suffix("</EnumerationResults>")
+        .ok_or_else(malformed)?;
+    if body.matches("<EnumerationResults").count() != 1 {
+        return Err(malformed());
     }
-    let next = xml
-        .find("<NextMarker>")
-        .and_then(|start| {
-            let after = &xml[start + 12..];
-            after
-                .find("</NextMarker>")
-                .map(|end| unescape(&after[..end]))
-        })
-        .filter(|marker| !marker.is_empty());
-    (names, next)
+    let blobs = if let Some(at) = body.find("<Blobs>") {
+        let after = &body[at + 7..];
+        let end = after.find("</Blobs>").ok_or_else(malformed)?;
+        if after[end..].contains("<Blobs") {
+            return Err(malformed());
+        }
+        &after[..end]
+    } else if body.contains("<Blobs/>") || body.contains("<Blobs />") {
+        ""
+    } else {
+        return Err(malformed());
+    };
+    let mut names = Vec::new();
+    let mut rest = blobs.trim();
+    while !rest.is_empty() {
+        let inner = rest.strip_prefix("<Blob>").ok_or_else(malformed)?;
+        let end = inner.find("</Blob>").ok_or_else(malformed)?;
+        let blob = &inner[..end];
+        let open = blob.find("<Name>").ok_or_else(malformed)?;
+        let after = &blob[open + 6..];
+        let close = after.find("</Name>").ok_or_else(malformed)?;
+        if after[close..].contains("<Name>") {
+            return Err(malformed());
+        }
+        names.push(unescape(&after[..close]).ok_or_else(malformed)?);
+        rest = inner[end + 7..].trim_start();
+    }
+    let next = if let Some(at) = body.find("<NextMarker>") {
+        let after = &body[at + 12..];
+        let end = after.find("</NextMarker>").ok_or_else(malformed)?;
+        Some(unescape(&after[..end]).ok_or_else(malformed)?)
+    } else if body.contains("<NextMarker/>") || body.contains("<NextMarker />") {
+        None
+    } else {
+        return Err(malformed());
+    };
+    Ok((names, next.filter(|marker| !marker.is_empty())))
 }
 
 struct Container {
@@ -449,14 +509,18 @@ struct Container {
 }
 
 impl Container {
+    /// The URL of blob `name` (the container itself when empty). Each name
+    /// segment is percent-encoded as data, so a literal `%`, `?` or `#` in a
+    /// name never addresses another blob.
     fn url(&self, name: &str, query: &[(&str, &str)]) -> Result<Url, StoreError> {
-        let text = if name.is_empty() {
-            self.base.clone()
-        } else {
-            format!("{}/{name}", self.base)
-        };
-        let mut url =
-            Url::parse(&text).map_err(|_| StoreError::Failed("invalid object name".into()))?;
+        let invalid = || StoreError::Failed("invalid object name".into());
+        let mut url = Url::parse(&self.base).map_err(|_| invalid())?;
+        if !name.is_empty() {
+            url.path_segments_mut()
+                .map_err(|_| invalid())?
+                .pop_if_empty()
+                .extend(name.split('/'));
+        }
         if !query.is_empty() {
             url.query_pairs_mut().extend_pairs(query);
         }
@@ -596,9 +660,16 @@ impl ObjectStore for Container {
             let mut chunk = vec![0; size];
             file.read_exact(&mut chunk).map_err(local)?;
             let id = BASE64_STANDARD.encode(format!("{index:08}"));
+            // Put Block answers 201 without an ETag; only the final Put Block
+            // List commit carries (and must return) one.
             retry(|| {
                 let url = self.url(name, &[("comp", "block"), ("blockid", &id)])?;
-                self.put_once(url, Vec::new(), chunk.clone()).map(|_| ())
+                let response = self.send(Verb::PUT, url, Vec::new(), Some(chunk.clone()))?;
+                if response.status().is_success() {
+                    Ok(())
+                } else {
+                    Err(failure(&response))
+                }
             })?;
             ids.push(id);
         }
@@ -633,8 +704,10 @@ impl ObjectStore for Container {
 
     fn list(&self, prefix: &str) -> Result<Vec<String>, StoreError> {
         let mut names = Vec::new();
+        let mut seen = std::collections::HashSet::new();
+        let mut markers = std::collections::HashSet::new();
         let mut marker: Option<String> = None;
-        loop {
+        for _ in 0..MAX_PAGES {
             let body = retry(|| {
                 let mut query = vec![
                     ("restype", "container"),
@@ -653,18 +726,31 @@ impl ObjectStore for Container {
             })?;
             let text = String::from_utf8(body)
                 .map_err(|_| StoreError::Failed("invalid listing response".into()))?;
-            let (page, next) = parse_listing(&text);
-            names.extend(page);
+            let (page, next) = parse_listing(&text)?;
+            for name in page {
+                // A name listed twice means the pages overlap: refuse rather
+                // than let a destructive caller act on a confused listing.
+                if !seen.insert(name.clone()) {
+                    return Err(StoreError::Failed("the listing repeated an object".into()));
+                }
+                names.push(name);
+            }
             if names.len() > MAX_LISTED {
                 return Err(StoreError::Failed(
                     "too many objects under the prefix".into(),
                 ));
             }
             match next {
+                Some(next) if !markers.insert(next.clone()) => {
+                    return Err(StoreError::Failed(
+                        "the listing repeated a continuation marker".into(),
+                    ));
+                }
                 Some(next) => marker = Some(next),
                 None => return Ok(names),
             }
         }
+        Err(StoreError::Failed("the listing has too many pages".into()))
     }
 }
 
@@ -708,15 +794,41 @@ mod tests {
     #[test]
     fn listing_pages_are_parsed_and_unescaped() {
         let xml = "<?xml version=\"1.0\"?><EnumerationResults ContainerName=\"c\"><Prefix>p/</Prefix>\
-            <Blobs><Blob><Name>p/a&amp;b</Name><Properties/></Blob><Blob><Name>p/c</Name></Blob></Blobs>\
+            <Blobs><Blob><Name>p/a&amp;b&#x25;&#37;</Name><Properties><BlobType>BlockBlob</BlobType></Properties></Blob>\
+            <Blob><Name>p/c</Name></Blob></Blobs>\
             <NextMarker>2!8!abc&lt;</NextMarker></EnumerationResults>";
-        let (names, next) = parse_listing(xml);
-        assert_eq!(names, vec!["p/a&b", "p/c"]);
+        let (names, next) = parse_listing(xml).unwrap();
+        assert_eq!(names, vec!["p/a&b%%", "p/c"]);
         assert_eq!(next.as_deref(), Some("2!8!abc<"));
-        let (names, next) = parse_listing("<Blobs></Blobs><NextMarker />");
-        assert!(names.is_empty() && next.is_none());
-        let (_, next) = parse_listing("<NextMarker></NextMarker>");
-        assert!(next.is_none());
+        let last = "<EnumerationResults><Blobs /><NextMarker /></EnumerationResults>";
+        assert_eq!(parse_listing(last).unwrap(), (Vec::new(), None));
+        let empty =
+            "<EnumerationResults><Blobs></Blobs><NextMarker></NextMarker></EnumerationResults>";
+        assert_eq!(parse_listing(empty).unwrap(), (Vec::new(), None));
+    }
+
+    #[test]
+    fn malformed_listings_are_refused_not_shortened() {
+        for xml in [
+            // Truncated body.
+            "<EnumerationResults><Blobs><Blob><Name>p/a</Name></Blob>",
+            // Missing NextMarker: completion cannot be proven.
+            "<EnumerationResults><Blobs></Blobs></EnumerationResults>",
+            // Not a listing.
+            "<Error><Code>x</Code></Error>",
+            "",
+            // Unbalanced or duplicate Name elements.
+            "<EnumerationResults><Blobs><Blob><Name>p/a</Blob></Blobs><NextMarker/></EnumerationResults>",
+            "<EnumerationResults><Blobs><Blob><Name>a</Name><Name>b</Name></Blob></Blobs><NextMarker/></EnumerationResults>",
+            // Unexpected elements inside Blobs (delimiter prefixes).
+            "<EnumerationResults><Blobs><BlobPrefix><Name>p/</Name></BlobPrefix></Blobs><NextMarker/></EnumerationResults>",
+            // Unknown entity.
+            "<EnumerationResults><Blobs><Blob><Name>a&bogus;</Name></Blob></Blobs><NextMarker/></EnumerationResults>",
+            // Two documents.
+            "<EnumerationResults><Blobs/><NextMarker/></EnumerationResults><EnumerationResults><Blobs/><NextMarker/></EnumerationResults>",
+        ] {
+            assert!(parse_listing(xml).is_err(), "{xml}");
+        }
     }
 
     #[test]
@@ -756,6 +868,109 @@ mod tests {
         assert_eq!(token.expires_at, 3699);
         assert!(parse_token(br#"{"access_token":""}"#, 1).is_err());
         assert!(parse_token(b"not json", 1).is_err());
+    }
+
+    #[test]
+    fn token_responses_without_a_usable_expiry_fail_closed() {
+        for body in [
+            r#"{"access_token":"t"}"#,
+            r#"{"access_token":"t","expires_on":"soon"}"#,
+            r#"{"access_token":"t","expires_in":-5}"#,
+            r#"{"access_token":"t","expires_on":50}"#,
+        ] {
+            assert!(parse_token(body.as_bytes(), 100).is_err(), "{body}");
+        }
+    }
+
+    fn container(base: &str) -> Container {
+        Container {
+            http: client(true).unwrap(),
+            base: base.into(),
+            credential: Arc::new(Credential::SharedKey {
+                account: "devstoreaccount1".into(),
+                key: vec![7; 32],
+            }),
+        }
+    }
+
+    #[test]
+    fn blob_names_are_encoded_as_data_segments() {
+        let c = container("http://127.0.0.1:9/devstoreaccount1/data");
+        let url = c.url("p/percent%25name", &[]).unwrap();
+        assert_eq!(url.path(), "/devstoreaccount1/data/p/percent%2525name");
+        let url = c.url("p/a b?c#d%", &[("comp", "block")]).unwrap();
+        assert_eq!(url.path(), "/devstoreaccount1/data/p/a%20b%3Fc%23d%25");
+        assert_eq!(url.query(), Some("comp=block"));
+        assert_eq!(url.fragment(), None);
+        let url = c.url("", &[("restype", "container")]).unwrap();
+        assert_eq!(url.path(), "/devstoreaccount1/data");
+    }
+
+    /// Answers `responses.len()` HTTP requests, one per connection, reading
+    /// each request body; returns the request heads it received.
+    fn serve(responses: Vec<String>) -> (String, std::thread::JoinHandle<Vec<String>>) {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let address = format!("http://{}", listener.local_addr().unwrap());
+        let handle = std::thread::spawn(move || {
+            let mut heads = Vec::new();
+            for response in responses {
+                let (stream, _) = listener.accept().unwrap();
+                let mut reader = BufReader::new(stream.try_clone().unwrap());
+                let mut head = String::new();
+                loop {
+                    let mut line = String::new();
+                    reader.read_line(&mut line).unwrap();
+                    if line == "\r\n" || line.is_empty() {
+                        break;
+                    }
+                    head.push_str(&line);
+                }
+                let length = head
+                    .lines()
+                    .find_map(|l| {
+                        l.to_ascii_lowercase()
+                            .strip_prefix("content-length:")
+                            .map(|v| v.trim().parse::<u64>().unwrap())
+                    })
+                    .unwrap_or(0);
+                std::io::copy(&mut (&mut reader).take(length), &mut std::io::sink()).unwrap();
+                let mut stream = stream;
+                stream.write_all(response.as_bytes()).unwrap();
+                heads.push(head);
+            }
+            heads
+        });
+        (address, handle)
+    }
+
+    fn created(etag: Option<&str>) -> String {
+        let etag = etag.map_or(String::new(), |e| format!("etag: {e}\r\n"));
+        format!("HTTP/1.1 201 Created\r\n{etag}content-length: 0\r\nconnection: close\r\n\r\n")
+    }
+
+    #[test]
+    fn staged_blocks_need_no_etag_but_the_block_list_commit_does() {
+        // Put Block answers 201 without an ETag (as Azure does); the upload
+        // still commits, returning the Put Block List ETag.
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("large");
+        std::fs::write(&path, vec![5u8; SINGLE_PUT_MAX as usize + 1]).unwrap();
+        let (address, handle) = serve(vec![created(None), created(Some("\"0xC0MMIT\""))]);
+        let c = container(&format!("{address}/devstoreaccount1/data"));
+        let etag = c.put_file("p/objects/db", &path, Cond::Create).unwrap();
+        assert_eq!(etag, "\"0xC0MMIT\"");
+        let heads = handle.join().unwrap();
+        assert!(
+            heads[0].starts_with("PUT /devstoreaccount1/data/p/objects/db?comp=block&blockid=")
+        );
+        assert!(!heads[0].to_ascii_lowercase().contains("if-none-match"));
+        assert!(heads[1].starts_with("PUT /devstoreaccount1/data/p/objects/db?comp=blocklist"));
+        assert!(heads[1].to_ascii_lowercase().contains("if-none-match: *"));
+        // A commit without an ETag stays a failure.
+        let (address, handle) = serve(vec![created(None), created(None)]);
+        let c = container(&format!("{address}/devstoreaccount1/data"));
+        assert!(c.put_file("p/objects/db", &path, Cond::Create).is_err());
+        handle.join().unwrap();
     }
 
     fn target(auth: AuthMode) -> Target {
@@ -866,5 +1081,73 @@ mod tests {
         .unwrap();
         let err = sets.owner().err().unwrap();
         assert_eq!(err.code, "cloud_store_unavailable");
+    }
+
+    /// Object-level boundaries against a local Azurite emulator: single-put
+    /// and staged-block uploads around 4 MiB, multi-block read-back, a
+    /// create-only commit conflict, and literal `%` names. Emulator evidence
+    /// only; the end-to-end set flow is `tests/cloud_backup_azurite.rs`.
+    #[test]
+    #[ignore = "needs a local Azurite Blob endpoint in VLITE_AZURITE_BLOB_ENDPOINT"]
+    fn azurite_object_boundaries_and_literal_names() {
+        const KEY: &str = "Eby8vdM02xNOcqFlqUwJPLlmEtlCDXJ1OUzFT50uSRZ6IFsuFq2UVErCz4I6tq/K1SZFPTOtr/KBHBeksoGMGw==";
+        let endpoint = std::env::var("VLITE_AZURITE_BLOB_ENDPOINT").unwrap();
+        let endpoint = endpoint.trim_end_matches('/');
+        assert!(endpoint.starts_with("http://127.0.0.1:"), "loopback only");
+        let name = format!("vlite-objects-{:x}", now_secs());
+        let c = Container {
+            http: client(true).unwrap(),
+            base: format!("{endpoint}/{name}"),
+            credential: Arc::new(Credential::SharedKey {
+                account: "devstoreaccount1".into(),
+                key: BASE64_STANDARD.decode(KEY).unwrap(),
+            }),
+        };
+        let created = c
+            .send(
+                Verb::PUT,
+                c.url("", &[("restype", "container")]).unwrap(),
+                Vec::new(),
+                None,
+            )
+            .unwrap();
+        assert_eq!(created.status().as_u16(), 201);
+        let dir = tempfile::tempdir().unwrap();
+        for (i, size) in [SINGLE_PUT_MAX, SINGLE_PUT_MAX + 1, 2 * BLOCK + 3]
+            .into_iter()
+            .enumerate()
+        {
+            let bytes: Vec<u8> = (0..size).map(|n| (n * 31 + i as u64) as u8).collect();
+            let path = dir.path().join(format!("f{i}"));
+            std::fs::write(&path, &bytes).unwrap();
+            let key = format!("p/objects/{size}");
+            assert!(!c.put_file(&key, &path, Cond::Create).unwrap().is_empty());
+            let mut back = Vec::new();
+            assert_eq!(c.download(&key, &mut back, size).unwrap(), size);
+            assert_eq!(Sha256::digest(&back), Sha256::digest(&bytes), "{size}");
+            assert_eq!(
+                c.put_file(&key, &path, Cond::Create).err(),
+                Some(StoreError::Conflict),
+                "{size}"
+            );
+        }
+        c.put("p/percent%25name", b"escaped", Cond::Create).unwrap();
+        c.put("p/literal%name", b"literal", Cond::Create).unwrap();
+        assert_eq!(c.get("p/percent%25name", 64).unwrap().bytes, b"escaped");
+        assert_eq!(c.get("p/literal%name", 64).unwrap().bytes, b"literal");
+        let mut names = c.list("p/").unwrap();
+        names.sort();
+        assert!(names.contains(&"p/percent%25name".to_owned()), "{names:?}");
+        assert!(names.contains(&"p/literal%name".to_owned()), "{names:?}");
+        assert_eq!(names.len(), 5, "{names:?}");
+        let deleted = c
+            .send(
+                Verb::DELETE,
+                c.url("", &[("restype", "container")]).unwrap(),
+                Vec::new(),
+                None,
+            )
+            .unwrap();
+        assert!(deleted.status().is_success());
     }
 }

@@ -108,6 +108,12 @@ required-features = ["server"]
 name = "server_cli"
 required-features = ["server"]
 
+# feature-backup-ha: Azure Blob backup and isolated restore against a local
+# Azurite emulator (#[ignore]d: run with --ignored and VLITE_AZURITE_BLOB_ENDPOINT).
+[[test]]
+name = "cloud_backup_azurite"
+required-features = ["server"]
+
 # feature-dashboard-compaction: managed compaction lifecycle, recovery and API.
 [[test]]
 name = "server_compaction"
