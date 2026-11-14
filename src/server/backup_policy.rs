@@ -1138,7 +1138,14 @@ impl Runtime {
         };
         let recorded = match sets.record_drill(set_id, &pin.id, &drill, now()) {
             Ok(_) => true,
-            Err(_) => {
+            Err(error) => {
+                logs::stderr(
+                    "warn",
+                    "cloud_backup",
+                    json!({"event":"cloud_drill_unrecorded","set_id":set_id,
+                        "code":error.code,"message":error.message})
+                    .to_string(),
+                );
                 // Best effort: a pin left behind only delays retention.
                 let _ = sets.release(set_id, &pin.id, now());
                 false

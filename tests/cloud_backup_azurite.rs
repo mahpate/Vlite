@@ -379,8 +379,11 @@ fn azurite_backup_restore_and_isolated_rekey_recovery() {
     assert_eq!(listing["sets"][0]["set_id"], set_id, "{listing}");
     let restorer_password = root.join("restorer.password");
     std::fs::write(&restorer_password, RESTORER_PASSWORD).unwrap();
-    let copy = root.join("recovered.vlite");
-    let copy_admin = root.join("recovered-admin");
+    // The output directory must be new; it receives the database and the
+    // admin directory in one step.
+    let output = root.join("recovered");
+    let copy = output.join("database.vlite");
+    let copy_admin = output.join("admin");
     let (ok, report, stderr) = cli(&[
         "cloud-restore".as_ref(),
         "--target-file".as_ref(),
@@ -389,10 +392,8 @@ fn azurite_backup_restore_and_isolated_rekey_recovery() {
         key_file.as_os_str(),
         "--set".as_ref(),
         set_id.as_ref(),
-        "--database".as_ref(),
-        copy.as_os_str(),
-        "--admin-dir".as_ref(),
-        copy_admin.as_os_str(),
+        "--output".as_ref(),
+        output.as_os_str(),
         "--admin-username".as_ref(),
         "restorer".as_ref(),
         "--admin-password-file".as_ref(),
@@ -404,6 +405,8 @@ fn azurite_backup_restore_and_isolated_rekey_recovery() {
     assert_eq!(report["source_lineage"], source_lineage, "{report}");
     assert_ne!(report["lineage"], report["source_lineage"], "{report}");
     assert!(!report.to_string().contains(RESTORER_PASSWORD));
+    assert!(copy.is_file(), "{report}");
+    assert!(copy_admin.join("users.json").is_file(), "{report}");
     assert!(!copy_admin.join("credentials.json").exists());
     assert!(!copy_admin.join("webhooks.json").exists());
     assert!(!copy_admin.join("cloud-backup").exists());
