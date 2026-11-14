@@ -1257,8 +1257,20 @@ pub(super) fn rekey_import(
     file.write_all(&text)?;
     file.as_file().sync_all()?;
     file.persist_noclobber(&path).map_err(|e| e.error)?;
+    #[cfg(test)]
+    if REKEY_SYNC_FAULT.with(std::cell::Cell::get) {
+        return Err(error("injected directory sync failure"));
+    }
     admin::sync_directory(directory).map_err(|e| std::io::Error::other(e.message))?;
     Ok(users.len())
+}
+
+#[cfg(test)]
+thread_local! {
+    /// Test-only: fails `rekey_import` after users.json is persisted, as a
+    /// failed directory sync would.
+    pub(super) static REKEY_SYNC_FAULT: std::cell::Cell<bool> =
+        const { std::cell::Cell::new(false) };
 }
 
 /// Re-reads a rekeyed store before it is published: it must load like a

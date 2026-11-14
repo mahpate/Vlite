@@ -373,14 +373,22 @@ pub(super) fn import(
         ));
     }
     let c = &bundle.config;
-    let accounts = super::users::rekey_import(directory, &c.accounts, fresh_admin)?;
-    let written = super::tenants::recovery_import(directory, &c.tenants)
-        .and_then(|()| super::users::verify_rekeyed(directory, fresh_admin));
-    if let Err(error) = written {
-        let _ = std::fs::remove_file(directory.join("users.json"));
-        let _ = std::fs::remove_file(directory.join("tenants.json"));
-        return Err(error);
-    }
+    // Any step can fail after a store is in place (a directory sync fails
+    // after its file is persisted), so cleanup covers all of them.
+    let written =
+        super::users::rekey_import(directory, &c.accounts, fresh_admin).and_then(|accounts| {
+            super::tenants::recovery_import(directory, &c.tenants)?;
+            super::users::verify_rekeyed(directory, fresh_admin)?;
+            Ok(accounts)
+        });
+    let accounts = match written {
+        Ok(accounts) => accounts,
+        Err(error) => {
+            let _ = std::fs::remove_file(directory.join("users.json"));
+            let _ = std::fs::remove_file(directory.join("tenants.json"));
+            return Err(error);
+        }
+    };
     Ok(json!({
         "schema": bundle.schema,
         "rekey_only": true,
@@ -531,6 +539,24 @@ mod tests {
         let b = sealed(sample(), None);
         let error = import(&b, dir.path(), ("ops", "correct horse battery staple")).unwrap_err();
         assert!(error.to_string().contains("already used"), "{error}");
+        assert_eq!(std::fs::read_dir(dir.path()).unwrap().count(), 0);
+    }
+
+    #[test]
+    fn a_failure_after_the_account_store_is_persisted_leaves_the_directory_empty() {
+        // Review N-05: the importer cleans up after every step, including a
+        // directory sync that fails once users.json is in place.
+        let dir = tempfile::tempdir().unwrap();
+        let b = sealed(sample(), None);
+        super::super::users::REKEY_SYNC_FAULT.with(|f| f.set(true));
+        let result = import(
+            &b,
+            dir.path(),
+            ("restore-admin", "correct horse battery staple"),
+        );
+        super::super::users::REKEY_SYNC_FAULT.with(|f| f.set(false));
+        let error = result.unwrap_err();
+        assert!(error.to_string().contains("directory sync"), "{error}");
         assert_eq!(std::fs::read_dir(dir.path()).unwrap().count(), 0);
     }
 
