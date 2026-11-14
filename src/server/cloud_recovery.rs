@@ -438,6 +438,86 @@ fn crashes_at(point: &str) -> bool {
     CRASH_AT.with(|at| at.get() == Some(point))
 }
 
+#[cfg(test)]
+thread_local! {
+    /// Test-only: runs just before publication, given the `--output` path.
+    #[allow(clippy::type_complexity)]
+    static BEFORE_PUBLISH: std::cell::RefCell<Option<Box<dyn FnOnce(&FilePath)>>> =
+        const { std::cell::RefCell::new(None) };
+}
+
+/// Moves `from` to `to` only while nothing exists at `to`. Unlike
+/// `std::fs::rename`, it never replaces a file or an empty directory. A
+/// file system without such a rename returns `Unsupported`.
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+fn rename_no_replace(from: &FilePath, to: &FilePath) -> std::io::Result<()> {
+    use std::os::unix::ffi::OsStrExt;
+    let c_path = |path: &FilePath| {
+        std::ffi::CString::new(path.as_os_str().as_bytes())
+            .map_err(|_| std::io::Error::from(std::io::ErrorKind::InvalidInput))
+    };
+    let (from, to) = (c_path(from)?, c_path(to)?);
+    // SAFETY: both pointers are NUL-terminated strings that outlive the call.
+    #[cfg(target_os = "linux")]
+    let status = unsafe {
+        libc::renameat2(
+            libc::AT_FDCWD,
+            from.as_ptr(),
+            libc::AT_FDCWD,
+            to.as_ptr(),
+            libc::RENAME_NOREPLACE,
+        )
+    };
+    // SAFETY: as above.
+    #[cfg(target_os = "macos")]
+    let status = unsafe { libc::renamex_np(from.as_ptr(), to.as_ptr(), libc::RENAME_EXCL) };
+    if status == 0 {
+        return Ok(());
+    }
+    let error = std::io::Error::last_os_error();
+    // EINVAL, ENOSYS or ENOTSUP: the file system has no exclusive rename.
+    Err(match error.raw_os_error() {
+        Some(libc::EINVAL | libc::ENOSYS | libc::ENOTSUP) => {
+            std::io::Error::new(std::io::ErrorKind::Unsupported, error)
+        }
+        _ => error,
+    })
+}
+
+/// Windows: `MoveFileExW` without `MOVEFILE_REPLACE_EXISTING`.
+#[cfg(windows)]
+fn rename_no_replace(from: &FilePath, to: &FilePath) -> std::io::Result<()> {
+    use std::os::windows::ffi::OsStrExt;
+    #[link(name = "kernel32")]
+    unsafe extern "system" {
+        fn MoveFileExW(existing: *const u16, new: *const u16, flags: u32) -> i32;
+    }
+    let wide = |path: &FilePath| -> Vec<u16> {
+        path.as_os_str()
+            .encode_wide()
+            .chain(std::iter::once(0))
+            .collect()
+    };
+    let (from, to) = (wide(from), wide(to));
+    // SAFETY: both pointers are NUL-terminated UTF-16 strings that outlive the
+    // call. Flags 0 omit MOVEFILE_REPLACE_EXISTING (and copying), so an
+    // existing destination fails the move.
+    if unsafe { MoveFileExW(from.as_ptr(), to.as_ptr(), 0) } != 0 {
+        Ok(())
+    } else {
+        Err(std::io::Error::last_os_error())
+    }
+}
+
+/// Other platforms have no rename without replacement here: refused.
+#[cfg(not(any(target_os = "linux", target_os = "macos", windows)))]
+fn rename_no_replace(_from: &FilePath, _to: &FilePath) -> std::io::Result<()> {
+    Err(std::io::Error::new(
+        std::io::ErrorKind::Unsupported,
+        "no rename without replacement on this platform",
+    ))
+}
+
 fn restore_with(plan: &Plan, sets: &Sets) -> Result<Value, RecoveryError> {
     let id = &plan.set_id;
     let stale = remove_stale_staging(&plan.parent);
@@ -527,24 +607,26 @@ fn restore_pinned(plan: &Plan, sets: &Sets, pin_id: &str) -> Result<Value, Recov
         sync_directory(dir).map_err(|e| io_failure("cannot sync the staged output", e))?;
     }
 
-    // Claim the name, then move the staged output over the empty claim. The
-    // rename fails rather than replacing anything that took its place.
-    match std::fs::create_dir(&plan.output) {
+    // One rename that never replaces: whatever appeared at --output since it
+    // was checked (a file, a link or an empty directory) fails the
+    // publication and is left untouched; nothing is claimed or removed there.
+    #[cfg(test)]
+    BEFORE_PUBLISH.with(|hook| hook.take().map(|hook| hook(&plan.output)));
+    match rename_no_replace(&staged, &plan.output) {
         Ok(()) => {}
         Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {
-            return Err(require_absent(&plan.output).unwrap_err());
+            return Err(refused(
+                "restore_destination_exists",
+                "--output appeared while the restore ran; it was left untouched and nothing was published",
+            ));
         }
-        Err(e) => return Err(io_failure("cannot create --output", e)),
-    }
-    #[cfg(test)]
-    if crashes_at("claimed") {
-        staging.abandon();
-        return Err(refused("test_crash", "simulated crash"));
-    }
-    if let Err(e) = std::fs::rename(&staged, &plan.output) {
-        // Only an empty directory is ever removed: never the operator's data.
-        let _ = std::fs::remove_dir(&plan.output);
-        return Err(io_failure("cannot publish the restored output", e));
+        Err(e) if e.kind() == std::io::ErrorKind::Unsupported => {
+            return Err(refused(
+                "restore_publication_unsupported",
+                "the --output file system cannot rename without replacing an existing entry; choose an --output parent on a local file system",
+            ));
+        }
+        Err(e) => return Err(io_failure("cannot publish the restored output", e)),
     }
     if let Err(e) = sync_directory(&plan.parent) {
         return Err(refused(
@@ -1224,20 +1306,57 @@ mod tests {
     }
 
     #[test]
-    fn a_crash_after_the_claim_leaves_an_empty_output_that_is_never_reused() {
+    fn publication_never_replaces_what_appeared_at_the_output() {
         let env = setup();
-        assert_eq!(env.restore_crashing("claimed").code, "test_crash");
         let output = env.request().output;
-        assert!(names(&output).is_empty());
-        let error = env.restore(&env.request()).unwrap_err();
-        assert_eq!(error.code, "restore_destination_exists", "{error}");
-        assert!(error.message.contains("remove it and retry"), "{error}");
-
-        std::fs::remove_dir(&output).unwrap();
+        type Plant = fn(&FilePath);
+        let plants: [(&str, Plant); 2] = [
+            ("empty directory", |path| std::fs::create_dir(path).unwrap()),
+            ("file", |path| {
+                std::fs::write(path, b"operator data").unwrap()
+            }),
+        ];
+        for (what, plant) in plants {
+            BEFORE_PUBLISH.with(|hook| *hook.borrow_mut() = Some(Box::new(plant)));
+            let error = env.restore(&env.request()).unwrap_err();
+            assert_eq!(error.code, "restore_destination_exists", "{what}: {error}");
+            assert!(!error.message.contains("restored"), "{what}: {error}");
+            assert_eq!(env.pins(), 0, "{what}");
+            assert_eq!(env.leftovers(), ["restored"], "{what}");
+            if output.is_dir() {
+                assert!(names(&output).is_empty(), "{what}");
+                std::fs::remove_dir(&output).unwrap();
+            } else {
+                assert_eq!(std::fs::read(&output).unwrap(), b"operator data");
+                std::fs::remove_file(&output).unwrap();
+            }
+        }
         let report = env.restore(&env.request()).unwrap();
-        assert_eq!(report["stale_staging_removed"], 1);
+        assert_eq!(report["stale_staging_removed"], 0);
         assert_eq!(names(&output), ["admin", "database.vlite"]);
-        assert_eq!(env.leftovers(), ["restored"]);
+    }
+
+    #[test]
+    fn rename_no_replace_moves_only_onto_a_free_name() {
+        let dir = tempfile::tempdir().unwrap();
+        let from = dir.path().join("from");
+        std::fs::create_dir(&from).unwrap();
+        std::fs::write(from.join("data"), b"x").unwrap();
+        let empty = dir.path().join("empty");
+        std::fs::create_dir(&empty).unwrap();
+        let file = dir.path().join("file");
+        std::fs::write(&file, b"keep").unwrap();
+        for taken in [&empty, &file] {
+            let error = rename_no_replace(&from, taken).unwrap_err();
+            assert_eq!(error.kind(), std::io::ErrorKind::AlreadyExists, "{error}");
+        }
+        assert!(names(&empty).is_empty());
+        assert_eq!(std::fs::read(&file).unwrap(), b"keep");
+        assert!(from.join("data").exists());
+        let to = dir.path().join("to");
+        rename_no_replace(&from, &to).unwrap();
+        assert!(!from.exists());
+        assert_eq!(std::fs::read(to.join("data")).unwrap(), b"x");
     }
 
     #[test]

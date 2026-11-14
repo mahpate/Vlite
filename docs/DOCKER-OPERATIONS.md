@@ -460,10 +460,12 @@ private admin volume.
    restored files, then re-create credentials and webhooks.
 
    If a restore is interrupted, run it again: it removes abandoned staging
-   directories first. If it stopped right after creating the output directory,
-   that directory is empty and is never reused; remove it and retry. On
-   Windows the staging and output directories inherit the parent's access
-   list, so use a parent that only the operator can write.
+   directories first. The final move never replaces anything: if a file or
+   directory appears at `--output` while the restore runs, the restore fails
+   with `restore_destination_exists` and leaves it untouched. A file system
+   that cannot rename without replacing (`restore_publication_unsupported`)
+   is refused. Use an `--output` parent that only the operator can write; on
+   Windows the staging and output directories inherit its access list.
 
 `--mode seed` and `{"mode":"seed"}` (same-lineage standby seeding) are
 refused. Encrypted databases, served memory reservations, in-memory servers
