@@ -1184,11 +1184,14 @@ pub(super) fn fresh_admin(
 /// (feature-backup-ha ITEM-004). Every imported account gets a new ID, an
 /// unusable password, `disabled` and `must_change_password`; the required
 /// fresh super admin is the only usable sign-in, so a restore can never end
-/// without a working break-glass account. Refuses an existing store.
+/// without a working break-glass account. Refuses an existing store. Once
+/// users.json is persisted its path is pushed to `created`, so the caller
+/// can clean up a later failure without touching another writer's file.
 pub(super) fn rekey_import(
     directory: &FilePath,
     accounts: &[RecoveryAccount],
     (username, password): (&str, &str),
+    created: &mut Vec<std::path::PathBuf>,
 ) -> std::io::Result<usize> {
     let error = |message: &str| std::io::Error::other(message.to_owned());
     let path = directory.join(FILE);
@@ -1256,7 +1259,12 @@ pub(super) fn rekey_import(
     let mut file = tempfile::NamedTempFile::new_in(directory)?;
     file.write_all(&text)?;
     file.as_file().sync_all()?;
+    #[cfg(test)]
+    if let Some(hook) = REKEY_BEFORE_PERSIST.with(|h| h.borrow_mut().take()) {
+        hook(directory);
+    }
     file.persist_noclobber(&path).map_err(|e| e.error)?;
+    created.push(path);
     #[cfg(test)]
     if REKEY_SYNC_FAULT.with(std::cell::Cell::get) {
         return Err(error("injected directory sync failure"));
@@ -1266,11 +1274,18 @@ pub(super) fn rekey_import(
 }
 
 #[cfg(test)]
+type PersistHook = Box<dyn FnOnce(&FilePath)>;
+
+#[cfg(test)]
 thread_local! {
     /// Test-only: fails `rekey_import` after users.json is persisted, as a
     /// failed directory sync would.
     pub(super) static REKEY_SYNC_FAULT: std::cell::Cell<bool> =
         const { std::cell::Cell::new(false) };
+    /// Test-only, one shot: runs right before users.json is persisted, as a
+    /// colliding writer would.
+    pub(super) static REKEY_BEFORE_PERSIST: std::cell::RefCell<Option<PersistHook>> =
+        const { std::cell::RefCell::new(None) };
 }
 
 /// Re-reads a rekeyed store before it is published: it must load like a
@@ -2342,7 +2357,7 @@ mod tests {
             },
         ];
         let fresh = ("restore-admin", "correct horse battery staple");
-        let written = rekey_import(dir.path(), &imported, fresh).unwrap();
+        let written = rekey_import(dir.path(), &imported, fresh, &mut Vec::new()).unwrap();
         assert_eq!(written, 3);
         verify_rekeyed(dir.path(), fresh).unwrap();
         assert!(verify_rekeyed(dir.path(), ("restore-admin", "another long passphrase")).is_err());
@@ -2370,7 +2385,7 @@ mod tests {
         ));
         assert_eq!(accounts.recovery_inventory().unwrap().len(), 3);
         // The store exists now: a second import is refused.
-        assert!(rekey_import(dir.path(), &imported, fresh).is_err());
+        assert!(rekey_import(dir.path(), &imported, fresh, &mut Vec::new()).is_err());
     }
 
     #[test]
@@ -2412,7 +2427,7 @@ mod tests {
             (vec![account.clone(), account.clone()], fresh),
         ] {
             let dir = tempfile::tempdir().unwrap();
-            assert!(rekey_import(dir.path(), &accounts, admin).is_err());
+            assert!(rekey_import(dir.path(), &accounts, admin, &mut Vec::new()).is_err());
             assert!(!dir.path().join(FILE).exists());
         }
     }

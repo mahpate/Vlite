@@ -383,18 +383,23 @@ pub(super) fn import(
     }
     let c = &bundle.config;
     // Any step can fail after a store is in place (a directory sync fails
-    // after its file is persisted), so cleanup covers all of them.
-    let written =
-        super::users::rekey_import(directory, &c.accounts, fresh_admin).and_then(|accounts| {
-            super::tenants::recovery_import(directory, &c.tenants)?;
-            super::users::verify_rekeyed(directory, fresh_admin)?;
-            Ok(accounts)
-        });
+    // after its file is persisted), so cleanup covers every step, but it
+    // removes only the files this import persisted: a store another writer
+    // created first (a failed no-clobber persist) is never touched.
+    let mut created = Vec::new();
+    let written = (|| {
+        let accounts =
+            super::users::rekey_import(directory, &c.accounts, fresh_admin, &mut created)?;
+        super::tenants::recovery_import(directory, &c.tenants, &mut created)?;
+        super::users::verify_rekeyed(directory, fresh_admin)?;
+        Ok(accounts)
+    })();
     let accounts = match written {
         Ok(accounts) => accounts,
         Err(error) => {
-            let _ = std::fs::remove_file(directory.join("users.json"));
-            let _ = std::fs::remove_file(directory.join("tenants.json"));
+            for path in &created {
+                let _ = std::fs::remove_file(path);
+            }
             return Err(error);
         }
     };
@@ -575,6 +580,38 @@ mod tests {
         let error = result.unwrap_err();
         assert!(error.to_string().contains("directory sync"), "{error}");
         assert_eq!(std::fs::read_dir(dir.path()).unwrap().count(), 0);
+    }
+
+    #[test]
+    fn a_failed_import_removes_only_the_files_it_created() {
+        // Review NEW-FW3-02: another writer creates stores after the
+        // empty-directory check; the losing import keeps the winner's files.
+        let fresh = ("restore-admin", "correct horse battery staple");
+        let names = ["users.json", "tenants.json"];
+        for winner in [&names[..], &names[1..]] {
+            let dir = tempfile::tempdir().unwrap();
+            let b = sealed(sample(), None);
+            let files: Vec<&'static str> = winner.to_vec();
+            super::super::users::REKEY_BEFORE_PERSIST.with(|h| {
+                *h.borrow_mut() = Some(Box::new(move |d: &FilePath| {
+                    for name in files {
+                        std::fs::write(d.join(name), name.as_bytes()).unwrap();
+                    }
+                }));
+            });
+            let result = import(&b, dir.path(), fresh);
+            super::super::users::REKEY_BEFORE_PERSIST.with(|h| h.borrow_mut().take());
+            assert!(result.is_err(), "{winner:?}");
+            for name in winner {
+                assert_eq!(
+                    std::fs::read(dir.path().join(name)).ok().as_deref(),
+                    Some(name.as_bytes()),
+                    "the import removed the winner's {name}"
+                );
+            }
+            let left = std::fs::read_dir(dir.path()).unwrap().count();
+            assert_eq!(left, winner.len(), "{winner:?}");
+        }
     }
 
     #[test]

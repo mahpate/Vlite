@@ -96,10 +96,13 @@ pub(super) fn recovery_inventory(store: &Store) -> Result<Vec<Tenant>, ApiError>
     Ok(store.tenants.lock().map_err(internal)?.clone())
 }
 /// Writes a recovered tenant store into a new, empty admin directory; the
-/// result must load with `Store::load`. Refuses an existing store.
+/// result must load with `Store::load`. Refuses an existing store. Once
+/// tenants.json is persisted its path is pushed to `created`; the caller
+/// owns cleanup of a later failure, including a failed load here.
 pub(super) fn recovery_import(
     directory: &std::path::Path,
     tenants: &[Tenant],
+    created: &mut Vec<std::path::PathBuf>,
 ) -> std::io::Result<()> {
     let path = directory.join("tenants.json");
     if std::fs::symlink_metadata(&path).is_ok() {
@@ -112,10 +115,8 @@ pub(super) fn recovery_import(
     file.write_all(&bytes)?;
     file.as_file().sync_all()?;
     file.persist_noclobber(&path).map_err(|e| e.error)?;
-    if let Err(error) = Store::load(directory) {
-        let _ = std::fs::remove_file(&path);
-        return Err(error);
-    }
+    created.push(path);
+    Store::load(directory)?;
     super::admin::sync_directory(directory).map_err(|e| std::io::Error::other(e.message))
 }
 impl Store {
