@@ -88,7 +88,7 @@ The key words "MUST", "MUST NOT", "REQUIRED", "SHALL", "SHALL NOT", "SHOULD", "S
 | SRC-LOCAL-005 | Local `src/maintenance/compaction.rs:1-15,90-160,273-390`: `scan`, `compare`, `transform` | Frozen-copy directory conversion then packing preserves lineage/global sequence/allocator high-waters; graph revisions can advance to `S`. Existing refusals and stale-CAS re-read rules remain. |
 | SRC-LOCAL-006 | Local `src/server/admin.rs:267-440,1303-1340`; `src/bin/vlite-server.rs:700-739,788-805` | Control state can precede database opening. Restore/promotion needs a recovery-capable selection transition, not an assumed hot swap; managed compaction is not enabled with gRPC. |
 
-All `SRC-BASE` ranges above are pinned to [the pushed baseline](https://github.com/mahpate/Vlite/tree/25003dd9dace64f5829a4cf2afad23ab8d78edcc). The [full independent report](https://github.com/mahpate/Vlite/blob/eb936afa4202affd9f3e1aec91ca1fb8f2df5d81/reports/5b44b03d5e384ed5a871f2c5694cda33/b7731f6d6914400d8891332a607c9138.md) includes complete citations, limitations and test inventory. Its results are static evidence, not executed recovery/HA qualification.
+All `SRC-BASE` ranges above are pinned to [the pushed baseline](https://github.com/mahpate/Vlite/tree/25003dd9dace64f5829a4cf2afad23ab8d78edcc). They come from an independent report-only static review of that baseline; the review report is not published. Its results are static evidence, not executed recovery/HA qualification.
 
 ### 3.2 Recommended hosting topology
 
@@ -627,8 +627,7 @@ Official evidence supplied and verified by the parent on 2026-11-13:
 ### 14.3 Independent research and planning review
 
 - Planner workflow: `octane-planner-plan`, with configured artifact root `./docs/projects/`. `code-search` was attempted first but its MCP connection required authentication; local read-only Git/source inspection was used for unpublished compaction integration.
-- One canonical worker-pool **report-only** baseline research task: plan `5b44b03d5e384ed5a871f2c5694cda33`, task `b7731f6d6914400d8891332a607c9138`, worker `cpc-mahpa-46psc`, pinned pushed base `25003dd9dace64f5829a4cf2afad23ab8d78edcc`. **Succeeded**, one attempt, zero repairs, no integration requested. Report commit `eb936afa4202affd9f3e1aec91ca1fb8f2df5d81` adds only its 430-line report at `reports/5b44b03d5e384ed5a871f2c5694cda33/b7731f6d6914400d8891332a607c9138.md`; no feature/main/source push or unpublished snapshot. Static/artifact checks and JavaScript syntax passed, not runtime recovery/failover tests.
-- Worker outcome reference: `worker-artifacts://cpc-mahpa-46psc/b7731f6d6914400d8891332a607c9138-a1/outcome.json`; report branch `copilot/peer/devboxpool/pinned-baseline-backup-replication-and-r-b7731f6d6914400d8891332a607c9138-a1` was fetched without checkout/merge. No active pool work remains.
+- One report-only baseline research task ran against pinned pushed base `25003dd9dace64f5829a4cf2afad23ab8d78edcc` with no source changes; its report is not published. Its evidence is static/artifact checks, not runtime recovery or failover tests.
 - Independent local reviewer: `backup-ha-plan-review`, custom `deep-review:skeptic`; review ID **SKEPTIC-BACKUP-HA-01**, initial reviewed SHA-256 `ECD667831610EC8D28C478D5B3A3E706D2351E97FE1E150E8D735951F2DBB252`. Local review was necessary because the PRD and compaction integration are unpublished; no workspace snapshot was sent remotely.
 
 | Review finding | Resolution |
@@ -710,6 +709,7 @@ Vectors, graph, KV with versions and CAS, and allocation high-waters are restore
   - the full workspace test suite and strict Clippy
   - `cargo fmt`
   - the API, route-inventory, admin-coverage, dashboard-coverage and documentation gates
+  - every other `ci.yml` Python and Node gate that needs no built binary or network (66 commands, including the graph build-boundary gate); the gRPC smoke and the binary-driven end-to-end gates did not run
 - Ran the `#[ignore]`d Azurite end-to-end test (`tests/cloud_backup_azurite.rs`) and the Azure adapter boundary test against a local Azurite container. The end-to-end test covers backup, listing, drill, CLI restore, a recovered-server start, fresh-admin login, a disabled owner, released pins and a refused re-restore.
 - Mutation checks killed each mutant that reviewers reported as surviving.
 - Reviews:
@@ -745,5 +745,6 @@ Vectors, graph, KV with versions and CAS, and allocation high-waters are restore
     - `6daa1d65`, `879c2705`, `5b824281`, `5d9230b0`, `0870af12`, `6ba5af10`, `1292ea86`, `532ef15b`, `987ffaf9`, `aa5888c8`, `900f18d3`
     - `eb808646`, `276c16e1`, `3a2b1177`, `16f60206`, `29dea77a`, `5501c64c`, `e73c76b9`, `4bd88cd3`, `ee7455f2`, `3dff5397`
     - `dc5f34c6`, `ad1092d3`, `902bdcb1`, `14804b9b`
+    - `4344be7f`, `1557112e`, `d9ee80ab` (tests and comments for review mutants); `5e4c3d73` (the graph build-boundary gate excludes the test-only `compaction-test-hooks` feature from shipped artifact pins)
   - Statuses updated for ITEM-001 (backup portion), ITEM-003 to ITEM-007 and ITEM-017.
   - HA scope, ITEM-002 and EPIC-012 remain deferred and unapproved. Nothing was pushed, released or deployed.
