@@ -1,5 +1,6 @@
 """Real Chromium UI tests against an isolated Docker API; keeps its named data volume."""
 
+import contextlib
 import json
 import os
 import re
@@ -1787,6 +1788,20 @@ def exercise_epic015_mocked(browser):
     exercise_operations_mocked(browser)
     print("PASS EPIC-015 mocked console: collection switch confirm/cancel isolation, If-Match 412, hybrid/auto rendering, resumable import resume/replay, one-time masked credentials, scoped and legacy gating, scheduler merges/confirmations and run-now, selected-collection maintenance/search routing, diagnostics")
 
+def release_bind_mounts(image, directory, containers):
+    """Stop the API containers, then hand the bind-mounted directory back to the host user.
+
+    The API image runs as uid 10001, so what it creates under a bind-mounted admin directory (for
+    example compaction/owner.lock) is not removable by the host user and TemporaryDirectory cleanup
+    would fail after every test passed. Best effort: a cleanup failure must not mask a test failure."""
+    try:
+        subprocess.run(["docker", "rm", "-f", *containers], check=False, capture_output=True, timeout=60)
+        subprocess.run(["docker", "run", "--rm", "--user", "0", "--entrypoint", "chmod",
+                        "--mount", f"type=bind,source={directory},target=/reclaim",
+                        image, "-R", "a+rwX", "/reclaim"], check=False, capture_output=True, timeout=120)
+    except (OSError, subprocess.SubprocessError) as error:
+        print("WARN could not release bind mounts:", error)
+
 def main():
     name = "vlite-dashboard-" + uuid.uuid4().hex[:10]
     volume = name + "-data"
@@ -1804,7 +1819,8 @@ def main():
     docker("network", "create", network)
     try:
         # File secret: no token in process arguments or environment.
-        with tempfile.TemporaryDirectory(prefix="vlite-ui-secret-") as directory:
+        with tempfile.TemporaryDirectory(prefix="vlite-ui-secret-") as directory, contextlib.ExitStack() as cleanup:
+            cleanup.callback(release_bind_mounts, image, directory, [ui_name, name, v4_ui, v4_name])
             secret = os.path.join(directory, "token")
             with open(secret, "w", encoding="ascii") as stream:
                 stream.write(token)
