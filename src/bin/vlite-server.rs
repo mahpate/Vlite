@@ -994,6 +994,7 @@ async fn cloud(command: String, args: Vec<OsString>) -> std::process::ExitCode {
             Err(RecoveryError {
                 code: "internal_error",
                 message: format!("the command stopped unexpectedly: {error}"),
+                report: None,
             })
         });
     match result {
@@ -1006,7 +1007,7 @@ async fn cloud(command: String, args: Vec<OsString>) -> std::process::ExitCode {
         }
         Err(error) => {
             eprintln!("{}", error.to_json());
-            std::process::ExitCode::FAILURE
+            std::process::ExitCode::from(error.exit_status())
         }
     }
 }
@@ -1015,6 +1016,7 @@ fn cloud_command(command: &str, args: &[OsString]) -> Result<serde_json::Value, 
     let usage = |detail: String| RecoveryError {
         code: "invalid_arguments",
         message: format!("{detail}; {CLOUD_USAGE}"),
+        report: None,
     };
     let allowed: &[&str] = if command == "cloud-sets" {
         &["--target-file", "--shared-key-file"]
@@ -1030,13 +1032,19 @@ fn cloud_command(command: &str, args: &[OsString]) -> Result<serde_json::Value, 
         ]
     };
     let mut values: std::collections::BTreeMap<&str, OsString> = Default::default();
-    let mut rest = args.iter();
-    while let Some(flag) = rest.next() {
+    let mut rest = args.iter().enumerate();
+    while let Some((position, flag)) = rest.next() {
+        // Never echo an argument: a mistyped value may be a secret.
         let name = flag
             .to_str()
             .and_then(|flag| allowed.iter().find(|allowed| **allowed == flag))
-            .ok_or_else(|| usage(format!("unknown argument {}", flag.to_string_lossy())))?;
-        let value = rest
+            .ok_or_else(|| {
+                usage(format!(
+                    "argument {} after {command} is not an option of this command",
+                    position + 1
+                ))
+            })?;
+        let (_, value) = rest
             .next()
             .ok_or_else(|| usage(format!("{name} needs a value")))?;
         if values.insert(name, value.clone()).is_some() {

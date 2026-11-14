@@ -429,7 +429,12 @@ on the private admin volume.
    private staging directory next to the output (`.vlite-cloud-restore-*`,
    owner-only on Linux), checks that only the new super admin can sign in,
    and then moves the result into place in one rename: the output is either
-   complete or absent. It prints a JSON report. Imported accounts are disabled
+   complete or absent. It prints a JSON report; a failure prints
+   `{"error":...}` on stderr and exits 1, with diagnostics that never repeat
+   argument or target-file values. Exit status 3 (`restore_cleanup_failed`)
+   means the output is complete and usable but the restore's own pin could
+   not be released: the error carries the report and the `DELETE
+   .../pins/{pin}?force=true` call that removes it. Imported accounts are disabled
    with unusable passwords; the new super admin is the only working sign-in.
    No credential, session or webhook is restored. Start a server on the
    restored files, then re-create credentials and webhooks.

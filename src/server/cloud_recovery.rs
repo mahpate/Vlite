@@ -12,7 +12,9 @@
 //! the only usable sign-in, no credential, session or webhook is written.
 //! Both stores are re-read and the fresh admin authenticated before the
 //! output is published with one rename into a new `--output` directory, so
-//! the output appears complete or not at all. The pin is always released.
+//! the output appears complete or not at all. The pin is always released;
+//! if that fails after a publication, the command fails with
+//! `restore_cleanup_failed` and keeps the output.
 //!
 //! Nothing is selected or activated: the operator starts the restored copy
 //! explicitly. Only the lineage-changing rekey restore exists; the
@@ -38,11 +40,20 @@ const STAGING_LOCK: &str = "owner.lock";
 /// treated as abandoned.
 const STALE_UNLOCKED: std::time::Duration = std::time::Duration::from_secs(3600);
 
+/// Exit status of a command that published its output but could not
+/// clean up after itself (`restore_cleanup_failed`), distinct from the
+/// general failure status 1 so scripts never treat it as success or as
+/// "nothing happened".
+pub const CLEANUP_FAILED_EXIT: u8 = 3;
+
 /// A refused or failed offline recovery command.
 #[derive(Debug)]
 pub struct RecoveryError {
     pub code: &'static str,
     pub message: String,
+    /// The report of a restore whose output was published even though the
+    /// command failed afterwards (`restore_cleanup_failed`).
+    pub report: Option<Value>,
 }
 
 impl RecoveryError {
@@ -50,12 +61,27 @@ impl RecoveryError {
         Self {
             code,
             message: message.into(),
+            report: None,
         }
     }
 
-    /// The same `{"error":{"code","message"}}` shape as the admin API.
+    /// The same `{"error":{"code","message"}}` shape as the admin API, plus
+    /// the published restore's `report` when there is one.
     pub fn to_json(&self) -> Value {
-        json!({"error":{"code":self.code,"message":self.message}})
+        let mut body = json!({"error":{"code":self.code,"message":self.message}});
+        if let Some(report) = &self.report {
+            body["report"] = report.clone();
+        }
+        body
+    }
+
+    /// The process exit status for this failure.
+    pub fn exit_status(&self) -> u8 {
+        if self.code == "restore_cleanup_failed" {
+            CLEANUP_FAILED_EXIT
+        } else {
+            1
+        }
     }
 }
 
@@ -79,6 +105,7 @@ impl From<ApiError> for RecoveryError {
         Self {
             code: error.code,
             message,
+            report: None,
         }
     }
 }
@@ -166,8 +193,14 @@ fn read_target(path: &FilePath) -> Result<Target, RecoveryError> {
     std::fs::File::open(path)
         .and_then(|file| file.take(MAX_TARGET_FILE + 1).read_to_end(&mut bytes))
         .map_err(|e| invalid(format!("cannot read the target file: {e}")))?;
-    let target: Target = serde_json::from_slice(&bytes)
-        .map_err(|e| invalid(format!("the target file is not a valid target: {e}")))?;
+    // Position only: serde diagnostics quote unknown fields and values.
+    let target: Target = serde_json::from_slice(&bytes).map_err(|e| {
+        invalid(format!(
+            "the target file is not a valid target (line {}, column {}): it must be the policy's target object with only its documented fields",
+            e.line(),
+            e.column()
+        ))
+    })?;
     target.validate().map_err(invalid)?;
     Ok(target)
 }
@@ -425,14 +458,26 @@ fn restore_with(plan: &Plan, sets: &Sets) -> Result<Value, RecoveryError> {
     };
     report["stale_staging_removed"] = json!(stale);
     report["pin_released"] = json!(released);
-    if !released {
-        report["pin_id"] = json!(pin.id);
-        report["pin_warning"] = json!(format!(
-            "the pin blocks retention of this set until removed with DELETE /v1/admin/cloud-backup/sets/{id}/pins/{}?force=true",
-            pin.id
-        ));
+    if released {
+        return Ok(report);
     }
-    Ok(report)
+    // The output is complete and stays; the command still fails, so a
+    // script cannot mistake a leftover retention hold for a clean run.
+    let route = format!(
+        "DELETE /v1/admin/cloud-backup/sets/{id}/pins/{}?force=true",
+        pin.id
+    );
+    report["pin_id"] = json!(pin.id);
+    report["pin_removal"] = json!(route);
+    Err(RecoveryError {
+        code: "restore_cleanup_failed",
+        message: format!(
+            "the restore was published to {} and is usable, but its pin {} on set {id} could not be released and blocks retention of that set: remove it with {route}",
+            report["output"].as_str().unwrap_or("the output directory"),
+            pin.id
+        ),
+        report: Some(report),
+    })
 }
 
 /// Builds and verifies the whole output (database and admin stores) in
@@ -993,23 +1038,35 @@ mod tests {
     }
 
     #[test]
-    fn an_unreleased_pin_is_reported_with_its_removal_route() {
+    fn an_unreleased_pin_fails_the_command_but_keeps_the_published_output() {
         let env = setup();
         let record = format!("vlite/prod/sets/{}/record.json", env.set_id);
         // The pin write succeeds; every later record write fails.
         env.meta
             .fault(Op::Put, &record, Fault::Refuse, 1, usize::MAX);
-        let report = env.restore(&env.request()).unwrap();
+        let request = env.request();
+        let error = env.restore(&request).unwrap_err();
+        assert_eq!(error.code, "restore_cleanup_failed");
+        assert_eq!(error.exit_status(), CLEANUP_FAILED_EXIT);
+        assert_ne!(error.exit_status(), 1);
+        let report = error.report.as_ref().expect("the published report is kept");
         assert_eq!(report["pin_released"], false);
         let pin = report["pin_id"].as_str().unwrap();
         assert!(cloud::valid_pin_id(pin), "{pin}");
-        assert!(
-            report["pin_warning"]
-                .as_str()
-                .unwrap()
-                .contains(&format!("/sets/{}/pins/{pin}", env.set_id))
+        let route = format!(
+            "DELETE /v1/admin/cloud-backup/sets/{}/pins/{pin}?force=true",
+            env.set_id
         );
+        assert_eq!(report["pin_removal"], route.as_str());
+        assert!(error.message.contains(&route), "{}", error.message);
+        let body = error.to_json();
+        assert_eq!(body["error"]["code"], "restore_cleanup_failed");
+        assert_eq!(body["report"]["pin_id"], pin);
+        // The output was published before the failure and stays usable.
+        assert_eq!(names(&request.output), ["admin", "database.vlite"]);
         assert_eq!(env.pins(), 1);
+        // Ordinary failures keep the general status.
+        assert_eq!(refused("x", "y").exit_status(), 1);
     }
 
     #[test]

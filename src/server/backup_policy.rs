@@ -1097,6 +1097,43 @@ async fn blocking<T: Send + 'static>(
     tokio::task::spawn_blocking(work).await.map_err(internal)?
 }
 
+/// Parses a JSON body without echoing any of it: an unknown field name or
+/// a misplaced value may be a pasted secret, so diagnostics are fixed text.
+fn parsed<T>(input: Result<Json<T>, JsonRejection>) -> Result<T, ApiError> {
+    input.map(|Json(value)| value).map_err(|error| {
+        let status = error.status();
+        let message = match status {
+            StatusCode::UNSUPPORTED_MEDIA_TYPE => {
+                "the request needs Content-Type: application/json"
+            }
+            StatusCode::PAYLOAD_TOO_LARGE => "the request body is too large",
+            StatusCode::UNPROCESSABLE_ENTITY => {
+                "the request body has an unknown field or a value of the wrong type; see the API reference for the accepted fields"
+            }
+            _ => "the request body is not valid JSON",
+        };
+        ApiError::new(status, "invalid_json", message)
+    })
+}
+
+/// The restore body: empty, or `{"mode": "restore" | "seed"}`. Parse
+/// failures never echo the input.
+fn restore_input(bytes: &[u8]) -> Result<RestoreInput, ApiError> {
+    if bytes.iter().all(u8::is_ascii_whitespace) {
+        return Ok(RestoreInput::default());
+    }
+    let value: Value = serde_json::from_slice(bytes).map_err(|_| {
+        ApiError::new(
+            StatusCode::BAD_REQUEST,
+            "invalid_json",
+            "the request body is not valid JSON",
+        )
+    })?;
+    serde_json::from_value(value).map_err(|_| {
+        unprocessable(r#"the request body may only hold "mode": "restore" (the default) or "seed""#)
+    })
+}
+
 async fn status(State(s): State<Service>) -> Result<Json<Value>, ApiError> {
     Ok(Json(runtime(&s)?.view()?))
 }
@@ -1105,7 +1142,7 @@ async fn configure(
     State(s): State<Service>,
     input: Result<Json<Policy>, JsonRejection>,
 ) -> Result<Json<Value>, ApiError> {
-    let policy = body(input)?;
+    let policy = parsed(input)?;
     let runtime = runtime(&s)?;
     let handle = Handle::new(&s);
     let view = blocking(move || runtime.configure(policy, &handle, now())).await?;
@@ -1160,7 +1197,7 @@ async fn restore(
     Path(id): Path<String>,
     bytes: axum::body::Bytes,
 ) -> Result<(StatusCode, Json<Value>), ApiError> {
-    let input: RestoreInput = optional(&bytes)?;
+    let input = restore_input(&bytes)?;
     if input.mode == Mode::Seed {
         return Err(conflict(
             "cloud_seed_mode_deferred",
@@ -1186,7 +1223,7 @@ async fn pin(
     Path(id): Path<String>,
     input: Result<Json<PinInput>, JsonRejection>,
 ) -> Result<(StatusCode, Json<Value>), ApiError> {
-    let input = body(input)?;
+    let input = parsed(input)?;
     set_id(&id)?;
     let runtime = runtime(&s)?;
     let handle = Handle::new(&s);
@@ -2067,6 +2104,86 @@ mod tests {
             };
             let (status, body) = call(&app, method, &uri, None).await;
             assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY, "{uri}: {body}");
+        }
+    }
+
+    #[tokio::test]
+    async fn parse_errors_never_echo_the_request_body() {
+        const MARKER: &str = "FAKE_SECRET_REVIEW_MARKER";
+        let env = setup();
+        let mut service = env.service.clone();
+        let mut state = admin::AdminState::default();
+        state.directory = Some(env.root.join("admin"));
+        std::fs::create_dir(env.root.join("admin")).unwrap();
+        let _ = state.cloud.set(env.runtime.clone());
+        service.admin = Arc::new(state);
+        let app = routes().with_state(service);
+        let base = "/v1/admin/cloud-backup";
+        let set = format!("{base}/sets/20250101T000000Z-0123456789abcdef");
+        let mut tagged = target();
+        tagged[MARKER] = json!("x");
+        let cases = [
+            (
+                "PUT",
+                base.to_owned(),
+                json!({"target": target(), MARKER: "x"}),
+            ),
+            ("PUT", base.to_owned(), json!({"target": tagged})),
+            (
+                "PUT",
+                base.to_owned(),
+                json!({"target": target(), "enabled": MARKER}),
+            ),
+            (
+                "PUT",
+                base.to_owned(),
+                json!({"target": target(), "keep_sets": MARKER}),
+            ),
+            (
+                "PUT",
+                base.to_owned(),
+                json!({"target": {"account": MARKER}}),
+            ),
+            ("POST", format!("{set}/restore"), json!({"mode": MARKER})),
+            ("POST", format!("{set}/restore"), json!({MARKER: "restore"})),
+            ("POST", format!("{set}/restore"), json!([MARKER])),
+            (
+                "POST",
+                format!("{set}/pins"),
+                json!({"reason": "r", MARKER: 1}),
+            ),
+            ("POST", format!("{set}/pins"), json!({"reason": [MARKER]})),
+        ];
+        for (method, uri, body) in cases {
+            let (status, reply) = call(&app, method, &uri, Some(body.clone())).await;
+            assert!(status.is_client_error(), "{method} {uri} {body}: {status}");
+            assert!(
+                !reply.to_string().contains("MARKER"),
+                "{method} {uri} echoed {reply}"
+            );
+        }
+        // Malformed JSON, the restore route's raw parser included.
+        for uri in [
+            base.to_owned(),
+            format!("{set}/restore"),
+            format!("{set}/pins"),
+        ] {
+            let method = if uri == base { "PUT" } else { "POST" };
+            let request = Request::builder()
+                .method(method)
+                .uri(&uri)
+                .header("content-type", "application/json")
+                .body(Body::from(format!("{{\"{MARKER}\": tru")))
+                .unwrap();
+            let response = app.clone().oneshot(request).await.unwrap();
+            // An unknown key may be refused (422) before the syntax error.
+            assert!(response.status().is_client_error(), "{uri}");
+            let bytes = axum::body::to_bytes(response.into_body(), usize::MAX)
+                .await
+                .unwrap();
+            let text = String::from_utf8_lossy(&bytes);
+            assert!(!text.contains("MARKER"), "{uri} echoed {text}");
+            assert!(text.contains("invalid_json"), "{uri}: {text}");
         }
     }
 }

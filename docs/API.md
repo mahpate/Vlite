@@ -843,7 +843,8 @@ on Linux and macOS; Windows does not report free space to it). Errors: 409 confl
 such as `cloud_backup_not_configured`, `cloud_publication_lost`,
 `cloud_set_unpublished`, `cloud_set_unavailable`, `cloud_pin_owned` or
 `cloud_pin_in_use`; 404 `cloud_set_not_found`
-or `cloud_pin_not_found`; 400 or 422 `invalid_json` and 422 `invalid_input`; 502 `cloud_store_failed` or
+or `cloud_pin_not_found`; 400 or 422 `invalid_json` (fixed text that never
+repeats the body) and 422 `invalid_input`; 502 `cloud_store_failed` or
 `cloud_set_corrupt`; 503 `busy`, `cloud_store_unavailable` or
 `cloud_publication_unknown`. Policy changes, runs, collections, drills,
 restores and pins are audited.

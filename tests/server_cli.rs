@@ -1248,6 +1248,31 @@ fn cloud_recovery_commands_refuse_bad_requests_before_any_effect() {
     std::fs::write(&target, "{\"account\":\"x\"}").unwrap();
     assert_eq!(code(&restore(&[])), "invalid_target");
 
+    // Diagnostics never echo an argument or a target-file value: a
+    // mistyped value may be a secret.
+    const MARKER: &str = "FAKE_SECRET_REVIEW_MARKER";
+    let marked = format!("sig={MARKER}");
+    let mut echoes = vec![
+        cloud_cli(&["cloud-sets".as_ref(), marked.as_ref()]),
+        restore(&[marked.as_str(), "x"]),
+        restore(&["--mode", MARKER]),
+    ];
+    for document in [
+        json!({"account":"devstoreaccount1","container":"vlite-data","prefix":"cli/",MARKER:1}),
+        json!({"account":"devstoreaccount1","container":"vlite-data","prefix":"cli/","auth":MARKER}),
+        json!({"account":MARKER,"container":"vlite-data","prefix":"cli/"}),
+    ] {
+        std::fs::write(&target, document.to_string()).unwrap();
+        echoes.push(restore(&[]));
+    }
+    for result in &echoes {
+        assert!(
+            ["invalid_arguments", "invalid_target"].contains(&code(result).as_str()),
+            "{result:?}"
+        );
+        assert!(!result.2.to_string().contains("MARKER"), "{result:?}");
+    }
+
     std::fs::write(
         &target,
         json!({"account":"devstoreaccount1","container":"vlite-data","prefix":"cli/","endpoint":"http://127.0.0.1:9/devstoreaccount1","auth":"emulator_shared_key"}).to_string(),
