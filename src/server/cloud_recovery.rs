@@ -255,15 +255,13 @@ pub fn cloud_restore(request: &CloudRestore) -> Result<Value, RecoveryError> {
 }
 
 /// The output must be new: an existing path (including an empty directory
-/// left by an interrupted restore) is never reused or replaced.
+/// left by an interrupted restore) is never reused or replaced. Like every
+/// diagnostic here, the refusal does not repeat the argument's value.
 fn require_absent(path: &FilePath) -> Result<(), RecoveryError> {
     match std::fs::symlink_metadata(path) {
         Ok(_) => Err(refused(
             "restore_destination_exists",
-            format!(
-                "{} already exists; a restore only creates a new --output directory (if an interrupted restore left it empty, remove it and retry)",
-                display(path)
-            ),
+            "--output already exists; a restore only creates a new --output directory (if an interrupted restore left it empty, remove it and retry)",
         )),
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(()),
         Err(e) => Err(io_failure("cannot inspect --output", e)),
@@ -596,8 +594,7 @@ fn restore_with(plan: &Plan, sets: &Sets) -> Result<Value, RecoveryError> {
     Err(RecoveryError {
         code: "restore_cleanup_failed",
         message: format!(
-            "the restore was published to {} and is usable, but its pin {} on set {id} could not be released and blocks retention of that set: remove it with {route}",
-            report["output"].as_str().unwrap_or("the output directory"),
+            "the restore was published to --output and is usable (see the report), but its pin {} on set {id} could not be released and blocks retention of that set: remove it with {route}",
             pin.id
         ),
         report: Some(report),
@@ -676,8 +673,7 @@ fn restore_pinned(plan: &Plan, sets: &Sets, pin_id: &str) -> Result<Value, Recov
         return Err(refused(
             "restore_publication_indeterminate",
             format!(
-                "the restored output was moved to {} but the move could not be made durable ({e}); check that the directory exists and holds database.vlite and admin/ before using it",
-                display(&plan.output)
+                "the restored output was moved to --output but the move could not be made durable ({e}); check that --output exists and holds database.vlite and admin/ before using it"
             ),
         ));
     }
@@ -991,14 +987,18 @@ mod tests {
         };
         check(bad_id, "invalid_input");
         // The output must be new: a file or even an empty directory is
-        // never reused.
-        std::fs::create_dir(env.dir.path().join("empty")).unwrap();
-        for existing in ["source.vlite", "empty"] {
+        // never reused, and the refusal does not repeat the path (CR-06).
+        std::fs::create_dir(env.dir.path().join("empty-SENTINEL-c6")).unwrap();
+        for existing in ["source.vlite", "empty-SENTINEL-c6"] {
             let request = CloudRestore {
                 output: env.dir.path().join(existing),
                 ..env.request()
             };
-            check(request, "restore_destination_exists");
+            let error = env.restore(&request).unwrap_err();
+            assert_eq!(error.code, "restore_destination_exists", "{error}");
+            let text = error.to_json().to_string();
+            assert!(!text.contains(existing), "{text}");
+            assert!(!text.contains(&display(env.dir.path())), "{text}");
         }
         for output in [
             env.dir.path().join("missing").join("out"),
@@ -1059,7 +1059,13 @@ mod tests {
 
         assert_eq!(
             env.leftovers(),
-            ["empty", "large", "remote-key.json", "unknown.json", "weak"]
+            [
+                "empty-SENTINEL-c6",
+                "large",
+                "remote-key.json",
+                "unknown.json",
+                "weak"
+            ]
         );
     }
 
@@ -1488,6 +1494,10 @@ mod tests {
         );
         assert_eq!(report["pin_removal"], route.as_str());
         assert!(error.message.contains(&route), "{}", error.message);
+        // The message names --output, not its value; the report has it.
+        let output = display(&request.output);
+        assert!(!error.message.contains(&output), "{}", error.message);
+        assert_eq!(report["output"], output.as_str());
         let body = error.to_json();
         assert_eq!(body["error"]["code"], "restore_cleanup_failed");
         assert_eq!(body["report"]["pin_id"], pin);

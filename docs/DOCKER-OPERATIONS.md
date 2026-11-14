@@ -453,8 +453,11 @@ private admin volume.
    owner-only on Linux), checks that only the new super admin can sign in,
    and then moves the result into place in one rename: the output is either
    complete or absent. It prints a JSON report; a failure prints
-   `{"error":...}` on stderr and exits 1, with diagnostics that never repeat
-   argument or target-file values. Exit status 3 (`restore_cleanup_failed`)
+   `{"error":...}` on stderr and exits 1. Diagnostics name options such as
+   `--output` but do not repeat their values or the target file's contents;
+   only a validated set ID and pin ID appear, in a pin-removal route. Reports
+   (on success and with `restore_cleanup_failed`) list the output paths.
+   Exit status 3 (`restore_cleanup_failed`)
    means the output is complete and usable but the restore's own pin could
    not be released: the error carries the report and the `DELETE
    .../pins/{pin}?force=true` call that removes it. Imported accounts are disabled
