@@ -3035,6 +3035,54 @@ mod tests {
     }
 
     #[test]
+    fn a_resumed_decision_naming_the_current_revision_keeps_a_held_set() {
+        // The pin guard on its own: the persisted decision names the held
+        // record's CURRENT revision (read after the pin), so the revision
+        // check passes and only the pin keeps the set.
+        let env = setup();
+        let ids: Vec<String> = (0..3).map(|i| publish(&env, BASE + i * 1000)).collect();
+        let hold = env
+            .sets
+            .pin(&ids[0], "legal hold", PinKind::Operator, BASE)
+            .unwrap();
+        let held = record(&env, &ids[0]);
+        assert_eq!(held.pins.len(), 1);
+        let decision = Catalog {
+            schema: CATALOG_SCHEMA.into(),
+            revision: 9,
+            updated_unix_ms: BASE,
+            decision: Some(Decision {
+                id: "feedfacefeedface".into(),
+                created_unix_ms: BASE,
+                delete: vec![Victim {
+                    set_id: ids[0].clone(),
+                    revision: held.revision.clone(),
+                }],
+                survivors: vec![ids[1].clone(), ids[2].clone()],
+            }),
+        };
+        env.meta.set_raw(
+            &env.sets.catalog_key(),
+            &serde_json::to_vec(&decision).unwrap(),
+        );
+        let out = env
+            .sets
+            .collect(INSTALL, &retention(false), BASE + 86_400_000)
+            .unwrap();
+        assert_eq!(out.skipped, vec![ids[0].clone()], "{out:?}");
+        assert!(out.resumed.is_empty() && out.deleted.is_empty(), "{out:?}");
+        let kept = record(&env, &ids[0]);
+        assert_eq!(kept.state, SetState::Published);
+        assert_eq!(kept.revision, held.revision);
+        assert_eq!(kept.pins.len(), 1);
+        assert_eq!(kept.pins[0].id, hold.id);
+        assert_eq!(data_objects(&env, &ids[0]), 3);
+        let catalog: Catalog =
+            serde_json::from_slice(&env.meta.raw(&env.sets.catalog_key()).unwrap()).unwrap();
+        assert!(catalog.decision.is_none());
+    }
+
+    #[test]
     fn a_concurrent_catalog_change_stops_collection() {
         let env = setup();
         let ids: Vec<String> = (0..3).map(|i| publish(&env, BASE + i * 1000)).collect();
