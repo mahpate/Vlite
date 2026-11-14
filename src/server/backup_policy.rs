@@ -406,7 +406,7 @@ impl Runtime {
         if real_directory(&staging)? {
             std::fs::remove_dir_all(&staging)?;
         }
-        std::fs::create_dir(&staging)?;
+        cloud::create_private_subdir(&staging)?;
         let policy: Option<Policy> = read_json(&dir.join(POLICY))?;
         if let Some(policy) = &policy {
             policy
@@ -477,10 +477,7 @@ impl Runtime {
     }
 
     fn workdir(&self) -> Result<tempfile::TempDir, ApiError> {
-        tempfile::Builder::new()
-            .prefix("fetch-")
-            .tempdir_in(self.staging())
-            .map_err(internal)
+        cloud::private_dir(&self.staging(), "fetch-").map_err(internal)
     }
 
     pub(super) fn view(&self) -> Result<Value, ApiError> {

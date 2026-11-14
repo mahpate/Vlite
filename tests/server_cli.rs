@@ -1194,8 +1194,7 @@ fn cloud_recovery_commands_refuse_bad_requests_before_any_effect() {
     std::fs::write(&key, "c2VjcmV0LWtleS1ub3QtZWNob2Vk").unwrap();
     let password = root.join("password");
     std::fs::write(&password, "correct horse battery staple").unwrap();
-    let database = root.join("restored.vlite");
-    let admin = root.join("admin");
+    let output = root.join("restored");
     let os = |text: &str| std::ffi::OsString::from(text);
     let restore = |extra: &[&str]| {
         let mut args = vec![
@@ -1206,10 +1205,8 @@ fn cloud_recovery_commands_refuse_bad_requests_before_any_effect() {
             key.clone().into_os_string(),
             os("--set"),
             os("20260101T000000Z-0123456789abcdef"),
-            os("--database"),
-            database.clone().into_os_string(),
-            os("--admin-dir"),
-            admin.clone().into_os_string(),
+            os("--output"),
+            output.clone().into_os_string(),
             os("--admin-username"),
             os("restorer"),
             os("--admin-password-file"),
@@ -1241,10 +1238,13 @@ fn cloud_recovery_commands_refuse_bad_requests_before_any_effect() {
         code(&restore(&["--mode", "seed"])),
         "cloud_seed_mode_deferred"
     );
-    std::fs::write(&database, b"keep").unwrap();
+    std::fs::write(&output, b"keep").unwrap();
     assert_eq!(code(&restore(&[])), "restore_destination_exists");
-    assert_eq!(std::fs::read(&database).unwrap(), b"keep");
-    std::fs::remove_file(&database).unwrap();
+    assert_eq!(std::fs::read(&output).unwrap(), b"keep");
+    std::fs::remove_file(&output).unwrap();
+    std::fs::create_dir(&output).unwrap();
+    assert_eq!(code(&restore(&[])), "restore_destination_exists");
+    std::fs::remove_dir(&output).unwrap();
     std::fs::write(&target, "{\"account\":\"x\"}").unwrap();
     assert_eq!(code(&restore(&[])), "invalid_target");
 
@@ -1268,8 +1268,7 @@ fn cloud_recovery_commands_refuse_bad_requests_before_any_effect() {
     for result in [&unreachable, &failed] {
         assert!(!result.2.to_string().contains("c2VjcmV0"), "{result:?}");
     }
-    assert!(!database.exists());
-    assert!(!admin.exists());
+    assert!(!output.exists());
     let leftovers: Vec<_> = std::fs::read_dir(root)
         .unwrap()
         .map(|entry| entry.unwrap().file_name())

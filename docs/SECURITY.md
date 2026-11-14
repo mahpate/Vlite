@@ -330,7 +330,13 @@ are rejected, so a key or connection string cannot be saved there.
 - **Restore grants nothing silently.** A restore creates a new lineage, so old
   scoped credentials and sessions stop working. The offline `cloud-restore`
   imports accounts disabled with unusable passwords and creates one fresh
-  super admin from a password file you supply.
+  super admin from a password file you supply. It builds the database and
+  admin stores in a private staging directory (owner-only directories and
+  files on Linux), verifies that only the fresh admin can sign in, and
+  publishes them with one rename into a new `--output` directory that must
+  not exist; it never writes into an existing database or admin directory.
+  On Windows the staging directory inherits the parent's access list, so
+  choose a parent writable only by the operator.
 - **Pins.** A restore or drill pins its set so retention cannot delete it
   mid-download. Only the owning operation releases that pin; an operator can
   force-release one left by a crashed owner, which is audited separately.

@@ -983,7 +983,7 @@ async fn main() -> std::process::ExitCode {
     }
 }
 
-const CLOUD_USAGE: &str = "usage: vlite-server cloud-sets --target-file <json> [--shared-key-file <path>] | vlite-server cloud-restore --target-file <json> [--shared-key-file <path>] --set <set-id> --database <new-file> --admin-dir <new-or-empty-dir> --admin-username <name> --admin-password-file <path> [--mode rekey|seed] (default rekey: new lineage, imported accounts disabled, no credentials or sessions restored; seed is deferred HA scope and refused). The target file holds the cloud backup policy's target JSON; the emulator shared key falls back to VLITE_CLOUD_BACKUP_SHARED_KEY_FILE. Prints a JSON report; nothing is selected or started. A database literally named cloud-sets or cloud-restore needs a ./ prefix.";
+const CLOUD_USAGE: &str = "usage: vlite-server cloud-sets --target-file <json> [--shared-key-file <path>] | vlite-server cloud-restore --target-file <json> [--shared-key-file <path>] --set <set-id> --output <new-dir> --admin-username <name> --admin-password-file <path> [--mode rekey|seed] (default rekey: new lineage, imported accounts disabled, no credentials or sessions restored; seed is deferred HA scope and refused). The output directory must not exist; its parent must; it receives database.vlite and admin/ in one step. The target file holds the cloud backup policy's target JSON; the emulator shared key falls back to VLITE_CLOUD_BACKUP_SHARED_KEY_FILE. Prints a JSON report; nothing is selected or started. A database literally named cloud-sets or cloud-restore needs a ./ prefix.";
 
 /// Offline cloud recovery commands: JSON report on stdout, `{"error":...}`
 /// on stderr. The Azure client is blocking, so it runs off the runtime.
@@ -1023,8 +1023,7 @@ fn cloud_command(command: &str, args: &[OsString]) -> Result<serde_json::Value, 
             "--target-file",
             "--shared-key-file",
             "--set",
-            "--database",
-            "--admin-dir",
+            "--output",
             "--admin-username",
             "--admin-password-file",
             "--mode",
@@ -1067,8 +1066,7 @@ fn cloud_command(command: &str, args: &[OsString]) -> Result<serde_json::Value, 
     };
     let request = CloudRestore {
         set_id: text("--set", take("--set")?)?,
-        database: PathBuf::from(take("--database")?),
-        admin_directory: PathBuf::from(take("--admin-dir")?),
+        output: PathBuf::from(take("--output")?),
         admin_username: text("--admin-username", take("--admin-username")?)?,
         admin_password_file: PathBuf::from(take("--admin-password-file")?),
         target_file,

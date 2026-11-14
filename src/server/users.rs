@@ -655,35 +655,7 @@ impl Accounts {
     /// Loads (bounded, validated) or starts empty. Invalid content fails
     /// startup rather than silently dropping accounts.
     pub(super) fn load(directory: &FilePath, settings: &Settings) -> std::io::Result<Self> {
-        let path = directory.join(FILE);
-        let users = match std::fs::symlink_metadata(&path) {
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => Vec::new(),
-            Err(error) => return Err(error),
-            Ok(meta) => {
-                if !meta.is_file() || meta.file_type().is_symlink() {
-                    return Err(std::io::Error::other("users.json must be a regular file"));
-                }
-                if meta.len() > MAX_FILE_BYTES {
-                    return Err(std::io::Error::other("users.json exceeds 1 MiB"));
-                }
-                let mut text = Vec::new();
-                std::fs::File::open(&path)?
-                    .take(MAX_FILE_BYTES + 1)
-                    .read_to_end(&mut text)?;
-                let file: StoreFile = serde_json::from_slice(&text)
-                    .map_err(|_| std::io::Error::other("users.json is invalid"))?;
-                let (mut ids, mut names) = (HashSet::new(), HashSet::new());
-                if file.schema != SCHEMA
-                    || file.users.len() > CAPACITY
-                    || file.users.iter().any(|u| {
-                        !u.valid() || !ids.insert(u.id.clone()) || !names.insert(u.username.clone())
-                    })
-                {
-                    return Err(std::io::Error::other("users.json is invalid"));
-                }
-                file.users
-            }
-        };
+        let users = read_store(directory)?;
         let millis = |d: Duration| u64::try_from(d.as_millis()).unwrap_or(u64::MAX);
         Ok(Self {
             directory: directory.to_owned(),
@@ -1131,6 +1103,38 @@ fn unusable_hash() -> std::io::Result<String> {
     .encode())
 }
 
+/// Reads and validates `users.json` (bounded); a missing file is empty.
+fn read_store(directory: &FilePath) -> std::io::Result<Vec<Account>> {
+    let path = directory.join(FILE);
+    let meta = match std::fs::symlink_metadata(&path) {
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(Vec::new()),
+        other => other?,
+    };
+    if !meta.is_file() || meta.file_type().is_symlink() {
+        return Err(std::io::Error::other("users.json must be a regular file"));
+    }
+    if meta.len() > MAX_FILE_BYTES {
+        return Err(std::io::Error::other("users.json exceeds 1 MiB"));
+    }
+    let mut text = Vec::new();
+    std::fs::File::open(&path)?
+        .take(MAX_FILE_BYTES + 1)
+        .read_to_end(&mut text)?;
+    let file: StoreFile = serde_json::from_slice(&text)
+        .map_err(|_| std::io::Error::other("users.json is invalid"))?;
+    let (mut ids, mut names) = (HashSet::new(), HashSet::new());
+    if file.schema != SCHEMA
+        || file.users.len() > CAPACITY
+        || file
+            .users
+            .iter()
+            .any(|u| !u.valid() || !ids.insert(u.id.clone()) || !names.insert(u.username.clone()))
+    {
+        return Err(std::io::Error::other("users.json is invalid"));
+    }
+    Ok(file.users)
+}
+
 /// Reads a bootstrap password file: a regular file of at most 4 KiB, minus
 /// one trailing line ending. `label` names the setting in errors; the
 /// password itself never appears in one.
@@ -1178,19 +1182,20 @@ pub(super) fn fresh_admin(
 
 /// Rekey-only account import into a new, isolated admin directory
 /// (feature-backup-ha ITEM-004). Every imported account gets a new ID, an
-/// unusable password, `disabled` and `must_change_password`; the optional
-/// fresh super admin is the only usable sign-in. Refuses an existing store.
+/// unusable password, `disabled` and `must_change_password`; the required
+/// fresh super admin is the only usable sign-in, so a restore can never end
+/// without a working break-glass account. Refuses an existing store.
 pub(super) fn rekey_import(
     directory: &FilePath,
     accounts: &[RecoveryAccount],
-    admin: Option<(&str, &str)>,
+    (username, password): (&str, &str),
 ) -> std::io::Result<usize> {
     let error = |message: &str| std::io::Error::other(message.to_owned());
     let path = directory.join(FILE);
     if std::fs::symlink_metadata(&path).is_ok() {
         return Err(error("the restore admin directory already has users.json"));
     }
-    if accounts.len() + usize::from(admin.is_some()) > CAPACITY {
+    if accounts.len() + 1 > CAPACITY {
         return Err(error("the recovery bundle has too many accounts"));
     }
     let now = now();
@@ -1216,32 +1221,30 @@ pub(super) fn rekey_import(
             graph_access: account.graph_access,
         });
     }
-    if let Some((username, password)) = admin {
-        let username = normalize_username(username)
-            .map_err(|_| error("the fresh admin username is not valid"))?;
-        if names.contains(&username) {
-            return Err(error(
-                "the fresh admin username is already used by an imported account",
-            ));
-        }
-        check_password(password, &username)
-            .map_err(|e| std::io::Error::other(format!("fresh admin password: {}", e.message)))?;
-        users.push(Account {
-            id: random_id().map_err(|_| error("randomness is unavailable"))?,
-            username,
-            role: AccountRole::SuperAdmin,
-            tenant_id: None,
-            disabled: false,
-            must_change_password: false,
-            password: hash_password(password)
-                .map_err(|_| error("could not hash the fresh admin password"))?,
-            created_unix_ms: now,
-            updated_unix_ms: now,
-            version: 1,
-            graphs: None,
-            graph_access: None,
-        });
+    let username =
+        normalize_username(username).map_err(|_| error("the fresh admin username is not valid"))?;
+    if names.contains(&username) {
+        return Err(error(
+            "the fresh admin username is already used by an imported account",
+        ));
     }
+    check_password(password, &username)
+        .map_err(|e| std::io::Error::other(format!("fresh admin password: {}", e.message)))?;
+    users.push(Account {
+        id: random_id().map_err(|_| error("randomness is unavailable"))?,
+        username,
+        role: AccountRole::SuperAdmin,
+        tenant_id: None,
+        disabled: false,
+        must_change_password: false,
+        password: hash_password(password)
+            .map_err(|_| error("could not hash the fresh admin password"))?,
+        created_unix_ms: now,
+        updated_unix_ms: now,
+        version: 1,
+        graphs: None,
+        graph_access: None,
+    });
     if users.iter().any(|u| !u.valid()) {
         return Err(error("an imported account is invalid"));
     }
@@ -1256,6 +1259,49 @@ pub(super) fn rekey_import(
     file.persist_noclobber(&path).map_err(|e| e.error)?;
     admin::sync_directory(directory).map_err(|e| std::io::Error::other(e.message))?;
     Ok(users.len())
+}
+
+/// Re-reads a rekeyed store before it is published: it must load like a
+/// server start would, the fresh super admin must be the only enabled
+/// account and must sign in with its password, and every imported account
+/// must be disabled and marked for a password reset (their hashes are
+/// random by construction, see `unusable_hash`).
+pub(super) fn verify_rekeyed(
+    directory: &FilePath,
+    (username, password): (&str, &str),
+) -> std::io::Result<()> {
+    let users = read_store(directory)?;
+    let username = normalize_username(username)
+        .map_err(|_| std::io::Error::other("the fresh admin username is not valid"))?;
+    let mut enabled = users.iter().filter(|u| !u.disabled);
+    let fresh = enabled.next();
+    let sound = enabled.next().is_none()
+        && fresh.is_some_and(|u| {
+            u.username == username
+                && u.role == AccountRole::SuperAdmin
+                && u.tenant_id.is_none()
+                && !u.must_change_password
+                && verify_password(Some(&u.password), password)
+        })
+        && users.iter().all(|u| !u.disabled || u.must_change_password);
+    if sound {
+        Ok(())
+    } else {
+        Err(std::io::Error::other(
+            "the rekeyed account store failed verification",
+        ))
+    }
+}
+
+/// Test-only: whether `username` would authenticate with `password`
+/// against the store in `directory` (enabled and matching).
+#[cfg(test)]
+pub(super) fn signs_in(directory: &FilePath, username: &str, password: &str) -> bool {
+    read_store(directory).is_ok_and(|users| {
+        users.iter().any(|u| {
+            u.username == username && !u.disabled && verify_password(Some(&u.password), password)
+        })
+    })
 }
 
 fn audit_unavailable() -> ApiError {
@@ -2283,13 +2329,14 @@ mod tests {
                 graph_access: Some(GraphAccess::Read),
             },
         ];
-        let written = rekey_import(
-            dir.path(),
-            &imported,
-            Some(("restore-admin", "correct horse battery staple")),
-        )
-        .unwrap();
+        let fresh = ("restore-admin", "correct horse battery staple");
+        let written = rekey_import(dir.path(), &imported, fresh).unwrap();
         assert_eq!(written, 3);
+        verify_rekeyed(dir.path(), fresh).unwrap();
+        assert!(verify_rekeyed(dir.path(), ("restore-admin", "another long passphrase")).is_err());
+        assert!(verify_rekeyed(dir.path(), ("old-admin", "correct horse battery staple")).is_err());
+        assert!(signs_in(dir.path(), "restore-admin", fresh.1));
+        assert!(!signs_in(dir.path(), "old-admin", fresh.1));
         let accounts = Accounts::load(dir.path(), &settings()).unwrap();
         let users = accounts.users.lock().unwrap().clone();
         for user in users.iter().filter(|u| u.username != "restore-admin") {
@@ -2300,18 +2347,18 @@ mod tests {
             );
             assert!(!verify_password(Some(&user.password), ""));
         }
-        let fresh = users
+        let account = users
             .iter()
             .find(|u| u.username == "restore-admin")
             .unwrap();
-        assert!(!fresh.disabled && fresh.role == AccountRole::SuperAdmin);
+        assert!(!account.disabled && account.role == AccountRole::SuperAdmin);
         assert!(verify_password(
-            Some(&fresh.password),
+            Some(&account.password),
             "correct horse battery staple"
         ));
         assert_eq!(accounts.recovery_inventory().unwrap().len(), 3);
         // The store exists now: a second import is refused.
-        assert!(rekey_import(dir.path(), &imported, None).is_err());
+        assert!(rekey_import(dir.path(), &imported, fresh).is_err());
     }
 
     #[test]
@@ -2324,18 +2371,23 @@ mod tests {
             graphs: None,
             graph_access: None,
         };
+        let fresh = ("restore-admin", "correct horse battery staple");
         for (accounts, admin) in [
             (
                 vec![account.clone()],
-                Some(("alice", "correct horse battery staple")),
+                ("alice", "correct horse battery staple"),
             ),
-            (vec![account.clone()], Some(("restore-admin", "short"))),
+            (vec![account.clone()], ("restore-admin", "short")),
+            (
+                vec![account.clone()],
+                ("Not A Name", "correct horse battery staple"),
+            ),
             (
                 vec![RecoveryAccount {
                     username: "Not Normalized".into(),
                     ..account.clone()
                 }],
-                None,
+                fresh,
             ),
             (
                 vec![RecoveryAccount {
@@ -2343,9 +2395,9 @@ mod tests {
                     tenant_id: Some("b".repeat(32)),
                     ..account.clone()
                 }],
-                None,
+                fresh,
             ),
-            (vec![account.clone(), account.clone()], None),
+            (vec![account.clone(), account.clone()], fresh),
         ] {
             let dir = tempfile::tempdir().unwrap();
             assert!(rekey_import(dir.path(), &accounts, admin).is_err());

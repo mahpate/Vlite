@@ -214,14 +214,15 @@ pub(super) fn parse(bytes: &[u8]) -> Result<Bundle, String> {
     Ok(bundle)
 }
 
-/// Rekey-only import into a new, isolated admin directory: refuses any
-/// existing admin store, writes the accounts (all disabled, unusable
-/// passwords, plus the optional fresh super admin) and the tenants, and
-/// returns the operator report. Credentials and webhooks are never written.
+/// Rekey-only import into a new, empty admin directory: refuses a directory
+/// with any entry at all, writes the accounts (all disabled, unusable
+/// passwords, plus the required fresh super admin) and the tenants, re-reads
+/// both stores as a server start would, and returns the operator report.
+/// Credentials and webhooks are never written.
 pub(super) fn import(
     bundle: &Bundle,
     directory: &FilePath,
-    fresh_admin: Option<(&str, &str)>,
+    fresh_admin: (&str, &str),
 ) -> std::io::Result<Value> {
     let meta = std::fs::symlink_metadata(directory)?;
     if !meta.is_dir() || meta.file_type().is_symlink() {
@@ -229,23 +230,18 @@ pub(super) fn import(
             "the restore admin directory must be a real directory",
         ));
     }
-    for name in [
-        "users.json",
-        "tenants.json",
-        "credentials.json",
-        "webhooks.json",
-        "next-startup",
-    ] {
-        if std::fs::symlink_metadata(directory.join(name)).is_ok() {
-            return Err(std::io::Error::other(format!(
-                "the restore admin directory already has {name}; use a new, empty directory"
-            )));
-        }
+    if std::fs::read_dir(directory)?.next().is_some() {
+        return Err(std::io::Error::other(
+            "the restore admin directory is not empty; use a new, empty directory",
+        ));
     }
     let c = &bundle.config;
     let accounts = super::users::rekey_import(directory, &c.accounts, fresh_admin)?;
-    if let Err(error) = super::tenants::recovery_import(directory, &c.tenants) {
+    let written = super::tenants::recovery_import(directory, &c.tenants)
+        .and_then(|()| super::users::verify_rekeyed(directory, fresh_admin));
+    if let Err(error) = written {
         let _ = std::fs::remove_file(directory.join("users.json"));
+        let _ = std::fs::remove_file(directory.join("tenants.json"));
         return Err(error);
     }
     let reissue: Vec<Value> = c
@@ -260,7 +256,7 @@ pub(super) fn import(
         "tenants": c.tenants.len(),
         "accounts_imported_disabled": c.accounts.len(),
         "accounts_written": accounts,
-        "fresh_admin": fresh_admin.map(|(name, _)| name.trim().to_ascii_lowercase()),
+        "fresh_admin": fresh_admin.0.trim().to_ascii_lowercase(),
         "credentials_to_reissue": reissue,
         "webhook_subscriptions_to_recreate": c.webhook_subscriptions,
         "secret_references": c.secret_references,
@@ -342,12 +338,8 @@ mod tests {
     fn import_writes_loadable_rekeyed_stores_and_refuses_reuse() {
         let dir = tempfile::tempdir().unwrap();
         let b = bundle(sample(), "id", Some(7), 1);
-        let report = import(
-            &b,
-            dir.path(),
-            Some(("Restore-Admin", "correct horse battery staple")),
-        )
-        .unwrap();
+        let fresh = ("Restore-Admin", "correct horse battery staple");
+        let report = import(&b, dir.path(), fresh).unwrap();
         assert_eq!(report["accounts_imported_disabled"], 2);
         assert_eq!(report["accounts_written"], 3);
         assert_eq!(report["fresh_admin"], "restore-admin");
@@ -357,18 +349,39 @@ mod tests {
         assert!(!dir.path().join("webhooks.json").exists());
         let tenants = super::super::tenants::Store::load(dir.path()).unwrap();
         assert_eq!(tenants.name(&"c".repeat(32)).as_deref(), Some("Contoso"));
-        assert!(import(&b, dir.path(), None).is_err());
+        assert!(import(&b, dir.path(), fresh).is_err());
     }
 
     #[test]
-    fn import_refuses_a_directory_with_existing_admin_state() {
-        for existing in ["credentials.json", "webhooks.json", "next-startup"] {
+    fn import_refuses_any_pre_existing_entry() {
+        let fresh = ("restore-admin", "correct horse battery staple");
+        for existing in [
+            "credentials.json",
+            "webhooks.json",
+            "next-startup",
+            "unrelated.txt",
+            ".hidden",
+        ] {
             let dir = tempfile::tempdir().unwrap();
             std::fs::write(dir.path().join(existing), b"{}").unwrap();
             let b = bundle(sample(), "id", None, 1);
-            assert!(import(&b, dir.path(), None).is_err(), "{existing}");
+            assert!(import(&b, dir.path(), fresh).is_err(), "{existing}");
             assert!(!dir.path().join("users.json").exists());
         }
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::create_dir(dir.path().join("nested")).unwrap();
+        let b = bundle(sample(), "id", None, 1);
+        assert!(import(&b, dir.path(), fresh).is_err());
+    }
+
+    #[test]
+    fn a_failed_import_leaves_the_directory_empty() {
+        // An imported account collides with the fresh admin: nothing stays.
+        let dir = tempfile::tempdir().unwrap();
+        let b = bundle(sample(), "id", None, 1);
+        let error = import(&b, dir.path(), ("ops", "correct horse battery staple")).unwrap_err();
+        assert!(error.to_string().contains("already used"), "{error}");
+        assert_eq!(std::fs::read_dir(dir.path()).unwrap().count(), 0);
     }
 
     #[test]

@@ -350,6 +350,44 @@ fn hash_file(path: &FilePath) -> std::io::Result<(String, u64)> {
     Ok((sha, bytes))
 }
 
+/// A new temporary directory under `parent`, owner-only (0700) from
+/// creation on Unix. On Windows it inherits the parent's ACL, so downloads
+/// and restores must stage under a private parent.
+pub(super) fn private_dir(parent: &FilePath, prefix: &str) -> std::io::Result<tempfile::TempDir> {
+    let mut builder = tempfile::Builder::new();
+    builder.prefix(prefix);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        builder.permissions(std::fs::Permissions::from_mode(0o700));
+    }
+    builder.tempdir_in(parent)
+}
+
+/// A new owner-only (0700 on Unix) subdirectory; it must not exist yet.
+pub(super) fn create_private_subdir(path: &FilePath) -> std::io::Result<()> {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::DirBuilderExt;
+        std::fs::DirBuilder::new().mode(0o700).create(path)
+    }
+    #[cfg(not(unix))]
+    std::fs::create_dir(path)
+}
+
+/// Creates a new file, owner-only (0600 on Unix) from creation; refuses an
+/// existing path.
+pub(super) fn create_private_file(path: &FilePath) -> std::io::Result<std::fs::File> {
+    let mut options = std::fs::OpenOptions::new();
+    options.write(true).create_new(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        options.mode(0o600);
+    }
+    options.open(path)
+}
+
 // ---------------------------------------------------------------- records
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -1320,11 +1358,7 @@ impl Sets {
         }
 
         let database = dir.join("database.vlite");
-        let file = std::fs::OpenOptions::new()
-            .write(true)
-            .create_new(true)
-            .open(&database)
-            .map_err(internal)?;
+        let file = create_private_file(&database).map_err(internal)?;
         let mut writer = Hashing::new(BufWriter::new(file));
         self.data
             .download(&self.object_key(id, &db.sha256), &mut writer, db.bytes)
@@ -1971,6 +2005,26 @@ mod tests {
             keep_sets: 2,
             keep_days: 0,
             orphan_grace_hours: 1,
+        }
+    }
+
+    #[test]
+    fn private_staging_helpers_create_new_owner_only_entries() {
+        let parent = tempfile::tempdir().unwrap();
+        let dir = private_dir(parent.path(), "fetch-").unwrap();
+        let sub = dir.path().join("sub");
+        create_private_subdir(&sub).unwrap();
+        let file = sub.join("payload");
+        create_private_file(&file).unwrap();
+        assert!(create_private_file(&file).is_err(), "never reuses a file");
+        assert!(create_private_subdir(&sub).is_err(), "never reuses a dir");
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let mode = |p: &FilePath| std::fs::metadata(p).unwrap().permissions().mode() & 0o777;
+            assert_eq!(mode(dir.path()), 0o700);
+            assert_eq!(mode(&sub), 0o700);
+            assert_eq!(mode(&file), 0o600);
         }
     }
 

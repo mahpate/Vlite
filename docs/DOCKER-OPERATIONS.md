@@ -419,15 +419,26 @@ on the private admin volume.
    ```sh
    vlite-server cloud-sets --target-file target.json
    vlite-server cloud-restore --target-file target.json --set <set-id> \
-     --database /data/restored.vlite --admin-dir /data/admin-new \
+     --output /data/restored \
      --admin-username recovery-admin --admin-password-file ./admin-password
+   VLITE_ADMIN_DIR=/data/restored/admin vlite-server /data/restored/database.vlite
    ```
 
-   The command drills the set, writes a new-lineage database and a new, empty
-   admin directory, and prints a JSON report. Imported accounts are disabled
+   `--output` must not exist yet; its parent must. The command drills the
+   set, builds a new-lineage `database.vlite` and an `admin/` directory in a
+   private staging directory next to the output (`.vlite-cloud-restore-*`,
+   owner-only on Linux), checks that only the new super admin can sign in,
+   and then moves the result into place in one rename: the output is either
+   complete or absent. It prints a JSON report. Imported accounts are disabled
    with unusable passwords; the new super admin is the only working sign-in.
    No credential, session or webhook is restored. Start a server on the
    restored files, then re-create credentials and webhooks.
+
+   If a restore is interrupted, run it again: it removes abandoned staging
+   directories first. If it stopped right after creating the output directory,
+   that directory is empty and is never reused; remove it and retry. On
+   Windows the staging and output directories inherit the parent's access
+   list, so use a parent that only the operator can write.
 
 `--mode seed` and `{"mode":"seed"}` (same-lineage standby seeding) are
 refused. Encrypted databases, served memory reservations and in-memory

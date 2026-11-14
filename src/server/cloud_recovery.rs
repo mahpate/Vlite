@@ -3,13 +3,16 @@
 //! cloud-restore`.
 //!
 //! The restore runs without a server. Every local precondition (target file,
-//! paths, the fresh admin's name and password) is checked before any network
-//! access. It then pins the published set, downloads and verifies it,
-//! restores and probes a scratch copy (drill), restores the set to a new
-//! database path with a new lineage and imports the recovery bundle rekey-only
-//! into a new, empty admin directory: imported accounts are disabled with
-//! unusable passwords, the fresh super admin is the only usable sign-in, no
-//! credential, session or webhook is written. The pin is always released.
+//! output path, the fresh admin's name and password) is checked before any
+//! network access. It then pins the published set and, in a private staging
+//! directory next to the output (owner-only on Unix), downloads and verifies
+//! it, restores and probes a scratch copy (drill), restores the database
+//! with a new lineage and imports the recovery bundle rekey-only: imported
+//! accounts are disabled with unusable passwords, the fresh super admin is
+//! the only usable sign-in, no credential, session or webhook is written.
+//! Both stores are re-read and the fresh admin authenticated before the
+//! output is published with one rename into a new `--output` directory, so
+//! the output appears complete or not at all. The pin is always released.
 //!
 //! Nothing is selected or activated: the operator starts the restored copy
 //! explicitly. Only the lineage-changing rekey restore exists; the
@@ -19,12 +22,21 @@ use super::backup_policy::{SHARED_KEY_ENV, bundle_summary, inspection, lineage_h
 use super::cloud_backup::{self as cloud, PinKind, Sets, Target};
 use super::*;
 use crate::maintenance;
-use std::io::Read;
+use std::io::{Read, Write};
 use std::path::{Path as FilePath, PathBuf};
 
 const MAX_TARGET_FILE: u64 = 64 * 1024;
 const PIN_REASON: &str = "isolated-restore";
 const PASSWORD_LABEL: &str = "--admin-password-file";
+/// Published layout inside `--output`.
+const DATABASE_FILE: &str = "database.vlite";
+const ADMIN_DIR: &str = "admin";
+/// Staging directories next to `--output`, and their owner lock.
+const STAGING_PREFIX: &str = ".vlite-cloud-restore-";
+const STAGING_LOCK: &str = "owner.lock";
+/// Age after which an unlocked staging directory without a taken lock is
+/// treated as abandoned.
+const STALE_UNLOCKED: std::time::Duration = std::time::Duration::from_secs(3600);
 
 /// A refused or failed offline recovery command.
 #[derive(Debug)]
@@ -99,10 +111,9 @@ pub struct CloudRestore {
     /// Emulator account key file; falls back to the process setting.
     pub shared_key_file: Option<PathBuf>,
     pub set_id: String,
-    /// New database file; must not exist, its directory must.
-    pub database: PathBuf,
-    /// New admin directory: absent (created) or an empty directory.
-    pub admin_directory: PathBuf,
+    /// New output directory: must not exist, its parent must. It appears
+    /// complete, holding `database.vlite` and `admin/`, or not at all.
+    pub output: PathBuf,
     pub admin_username: String,
     pub admin_password_file: PathBuf,
     pub mode: RestoreMode,
@@ -111,11 +122,9 @@ pub struct CloudRestore {
 /// Everything checked before the network is touched.
 struct Plan {
     set_id: String,
-    database: PathBuf,
+    /// Canonical directory that receives `output` and the staging directory.
     parent: PathBuf,
-    admin: PathBuf,
-    admin_parent: PathBuf,
-    create_admin: bool,
+    output: PathBuf,
     username: String,
     password: String,
 }
@@ -126,6 +135,22 @@ fn refused(code: &'static str, message: impl Into<String>) -> RecoveryError {
 
 fn io_failure(what: &str, error: impl std::fmt::Display) -> RecoveryError {
     RecoveryError::new("restore_io_error", format!("{what}: {error}"))
+}
+
+/// A path for operators, without the `\\?\` prefix Windows canonical paths
+/// carry.
+fn display(path: &FilePath) -> String {
+    let text = path.display().to_string();
+    if !cfg!(windows) {
+        return text;
+    }
+    if let Some(rest) = text.strip_prefix(r"\\?\UNC\") {
+        format!(r"\\{rest}")
+    } else if let Some(rest) = text.strip_prefix(r"\\?\") {
+        rest.to_owned()
+    } else {
+        text
+    }
 }
 
 fn read_target(path: &FilePath) -> Result<Target, RecoveryError> {
@@ -196,6 +221,22 @@ pub fn cloud_restore(request: &CloudRestore) -> Result<Value, RecoveryError> {
     restore_with(&plan, &sets)
 }
 
+/// The output must be new: an existing path (including an empty directory
+/// left by an interrupted restore) is never reused or replaced.
+fn require_absent(path: &FilePath) -> Result<(), RecoveryError> {
+    match std::fs::symlink_metadata(path) {
+        Ok(_) => Err(refused(
+            "restore_destination_exists",
+            format!(
+                "{} already exists; a restore only creates a new --output directory (if an interrupted restore left it empty, remove it and retry)",
+                display(path)
+            ),
+        )),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(()),
+        Err(e) => Err(io_failure("cannot inspect --output", e)),
+    }
+}
+
 fn prepare(request: &CloudRestore) -> Result<Plan, RecoveryError> {
     if request.mode == RestoreMode::Seed {
         return Err(refused(
@@ -211,65 +252,27 @@ fn prepare(request: &CloudRestore) -> Result<Plan, RecoveryError> {
     }
     read_target(&request.target_file)?;
 
-    let database = request.database.clone();
-    match std::fs::symlink_metadata(&database) {
-        Ok(_) => {
+    // Staging directories share the parent; never let --output name one.
+    let name = match request.output.file_name() {
+        Some(name) if !name.to_string_lossy().starts_with(STAGING_PREFIX) => name.to_owned(),
+        _ => {
             return Err(refused(
-                "restore_destination_exists",
-                format!(
-                    "{} already exists; a restore never replaces a file",
-                    database.display()
-                ),
+                "invalid_input",
+                "--output must name a new directory (not ., .. or a name starting with .vlite-cloud-restore-)",
             ));
         }
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
-        Err(e) => return Err(io_failure("cannot inspect --database", e)),
-    }
-    let parent = match database.parent() {
-        Some(parent) if !parent.as_os_str().is_empty() => parent.to_path_buf(),
-        _ => PathBuf::from("."),
     };
-    if !std::fs::metadata(&parent).is_ok_and(|m| m.is_dir()) {
-        return Err(refused(
-            "invalid_input",
-            "the --database directory must exist",
-        ));
-    }
-
-    let admin = request.admin_directory.clone();
-    let admin_parent = match admin.parent() {
-        Some(parent) if !parent.as_os_str().is_empty() => parent.to_path_buf(),
-        _ => PathBuf::from("."),
+    let parent = match request.output.parent() {
+        Some(parent) if !parent.as_os_str().is_empty() => parent,
+        _ => FilePath::new("."),
     };
-    let create_admin = match std::fs::symlink_metadata(&admin) {
-        Ok(meta) if meta.is_dir() && !meta.file_type().is_symlink() => {
-            let mut entries =
-                std::fs::read_dir(&admin).map_err(|e| io_failure("cannot read --admin-dir", e))?;
-            if entries.next().is_some() {
-                return Err(refused(
-                    "restore_admin_dir_not_empty",
-                    "--admin-dir must be a new or empty directory; a restore never reuses an admin directory",
-                ));
-            }
-            false
-        }
-        Ok(_) => {
-            return Err(refused(
-                "restore_admin_dir_not_empty",
-                "--admin-dir must be a real directory",
-            ));
-        }
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
-            if !std::fs::metadata(&admin_parent).is_ok_and(|m| m.is_dir()) {
-                return Err(refused(
-                    "invalid_input",
-                    "the --admin-dir parent directory must exist",
-                ));
-            }
-            true
-        }
-        Err(e) => return Err(io_failure("cannot inspect --admin-dir", e)),
-    };
+    // Resolved once: staging and publication use this exact directory.
+    let parent = std::fs::canonicalize(parent)
+        .ok()
+        .filter(|path| path.is_dir())
+        .ok_or_else(|| refused("invalid_input", "the --output parent directory must exist"))?;
+    let output = parent.join(name);
+    require_absent(&output)?;
 
     let (username, password) = users::fresh_admin(
         &request.admin_username,
@@ -278,11 +281,8 @@ fn prepare(request: &CloudRestore) -> Result<Plan, RecoveryError> {
     )?;
     Ok(Plan {
         set_id: request.set_id.clone(),
-        database,
         parent,
-        admin,
-        admin_parent,
-        create_admin,
+        output,
         username,
         password,
     })
@@ -292,19 +292,122 @@ fn now() -> u64 {
     admin::now_ms() as u64
 }
 
-/// Makes a new directory entry durable (Unix; Windows has no directory sync).
-fn sync_directory(dir: &FilePath) -> Result<(), RecoveryError> {
+/// Makes directory entries durable (Unix; Windows has no directory sync).
+fn sync_directory(dir: &FilePath) -> std::io::Result<()> {
     #[cfg(unix)]
-    std::fs::File::open(dir)
-        .and_then(|d| d.sync_all())
-        .map_err(|e| io_failure("cannot sync the --admin-dir parent", e))?;
+    std::fs::File::open(dir)?.sync_all()?;
     #[cfg(not(unix))]
     let _ = dir;
     Ok(())
 }
 
+/// One restore's private staging directory next to `--output` (same volume,
+/// so publication is a single rename). Its locked `owner.lock`, which holds
+/// the process ID once locked, marks it as live for other restores' cleanup.
+struct Staging {
+    lock: Option<std::fs::File>,
+    dir: Option<tempfile::TempDir>,
+}
+
+impl Staging {
+    fn create(parent: &FilePath) -> std::io::Result<Self> {
+        let dir = cloud::private_dir(parent, STAGING_PREFIX)?;
+        let mut lock = cloud::create_private_file(&dir.path().join(STAGING_LOCK))?;
+        lock.try_lock().map_err(std::io::Error::from)?;
+        lock.write_all(format!("{}\n", std::process::id()).as_bytes())?;
+        Ok(Self {
+            lock: Some(lock),
+            dir: Some(dir),
+        })
+    }
+
+    fn path(&self) -> &FilePath {
+        self.dir
+            .as_ref()
+            .map_or(FilePath::new(""), |dir| dir.path())
+    }
+
+    /// Test-only crash: releases the lock but leaves the directory behind.
+    #[cfg(test)]
+    fn abandon(mut self) -> PathBuf {
+        drop(self.lock.take());
+        self.dir
+            .take()
+            .map(tempfile::TempDir::keep)
+            .unwrap_or_default()
+    }
+}
+
+impl Drop for Staging {
+    fn drop(&mut self) {
+        // Unlock and close before removal: Windows cannot delete open files.
+        if let Some(lock) = self.lock.take() {
+            let _ = lock.unlock();
+        }
+        drop(self.dir.take());
+    }
+}
+
+/// Removes staging directories that interrupted restores left in `parent`:
+/// those whose lock is free after it was taken (the PID is written under
+/// the lock), and those that are over an hour old without a taken lock. A
+/// live restore holds its lock, whatever its age, and is never touched.
+fn remove_stale_staging(parent: &FilePath) -> usize {
+    let Ok(entries) = std::fs::read_dir(parent) else {
+        return 0;
+    };
+    let mut removed = 0;
+    for entry in entries.flatten() {
+        if !entry
+            .file_name()
+            .to_string_lossy()
+            .starts_with(STAGING_PREFIX)
+        {
+            continue;
+        }
+        let path = entry.path();
+        let Ok(meta) = std::fs::symlink_metadata(&path) else {
+            continue;
+        };
+        if !meta.is_dir() || meta.file_type().is_symlink() {
+            continue;
+        }
+        let old = meta
+            .modified()
+            .ok()
+            .and_then(|at| at.elapsed().ok())
+            .is_some_and(|age| age >= STALE_UNLOCKED);
+        let stale = match std::fs::File::open(path.join(STAGING_LOCK)) {
+            Ok(mut lock) => {
+                lock.try_lock().is_ok() && {
+                    let mut byte = [0u8; 1];
+                    old || lock.read(&mut byte).is_ok_and(|read| read == 1)
+                }
+            }
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => old,
+            Err(_) => false,
+        };
+        if stale && std::fs::remove_dir_all(&path).is_ok() {
+            removed += 1;
+        }
+    }
+    removed
+}
+
+#[cfg(test)]
+thread_local! {
+    /// Test-only: the publication step at which to simulate a crash.
+    static CRASH_AT: std::cell::Cell<Option<&'static str>> = const { std::cell::Cell::new(None) };
+}
+
+#[cfg(test)]
+fn crashes_at(point: &str) -> bool {
+    CRASH_AT.with(|at| at.get() == Some(point))
+}
+
 fn restore_with(plan: &Plan, sets: &Sets) -> Result<Value, RecoveryError> {
     let id = &plan.set_id;
+    let stale = remove_stale_staging(&plan.parent);
     let pin = sets.pin(id, PIN_REASON, PinKind::Operation, now())?;
     let result = restore_pinned(plan, sets, &pin.id);
     let released = sets.release(id, &pin.id, now()).is_ok();
@@ -320,6 +423,7 @@ fn restore_with(plan: &Plan, sets: &Sets) -> Result<Value, RecoveryError> {
             return Err(error);
         }
     };
+    report["stale_staging_removed"] = json!(stale);
     report["pin_released"] = json!(released);
     if !released {
         report["pin_id"] = json!(pin.id);
@@ -331,68 +435,97 @@ fn restore_with(plan: &Plan, sets: &Sets) -> Result<Value, RecoveryError> {
     Ok(report)
 }
 
+/// Builds and verifies the whole output (database and admin stores) in
+/// private staging, then publishes it with one no-replace rename: a crash
+/// or failure leaves no partial `--output`.
 fn restore_pinned(plan: &Plan, sets: &Sets, pin_id: &str) -> Result<Value, RecoveryError> {
     let id = &plan.set_id;
-    // Same volume as the destination; removed with everything in it.
-    let work = tempfile::Builder::new()
-        .prefix(".vlite-cloud-restore-")
-        .tempdir_in(&plan.parent)
-        .map_err(|e| io_failure("cannot create the download directory", e))?;
-    let fetched = sets.fetch(id, pin_id, work.path())?;
-    let drill = maintenance::drill(&fetched.database, work.path()).map_err(|e| {
+    let staging = Staging::create(&plan.parent)
+        .map_err(|e| io_failure("cannot create the private staging directory", e))?;
+    let download = staging.path().join("download");
+    let staged = staging.path().join("output");
+    let admin = staged.join(ADMIN_DIR);
+    let database = staged.join(DATABASE_FILE);
+    for dir in [&download, &staged, &admin] {
+        cloud::create_private_subdir(dir)
+            .map_err(|e| io_failure("cannot create the private staging directory", e))?;
+    }
+
+    let fetched = sets.fetch(id, pin_id, &download)?;
+    let drill = maintenance::drill(&fetched.database, &download).map_err(|e| {
         refused(
             "cloud_drill_failed",
             format!("the downloaded set failed its drill: {e}"),
         )
     })?;
-
-    // Only an empty directory is ever removed: never the operator's data.
-    let cleanup_admin = || {
-        if plan.create_admin {
-            let _ = std::fs::remove_dir(&plan.admin);
-        }
-    };
-    if plan.create_admin {
-        std::fs::create_dir(&plan.admin).map_err(|e| io_failure("cannot create --admin-dir", e))?;
-        if let Err(error) = sync_directory(&plan.admin_parent) {
-            cleanup_admin();
-            return Err(error);
-        }
-    }
-    // Durable on return: the restore syncs the file and its directory.
-    let restored = match maintenance::restore(&fetched.database, &plan.database) {
-        Ok(restored) => restored,
-        Err(e) => {
-            cleanup_admin();
-            return Err(io_failure("cannot restore the database", e));
-        }
-    };
-    let undo = |error: RecoveryError| {
-        let _ = std::fs::remove_file(&plan.database);
-        cleanup_admin();
-        error
-    };
-    let lineage = maintenance::inspect_detail(&plan.database)
-        .map_err(|e| undo(io_failure("cannot inspect the restored database", e)))?
+    let restored = maintenance::restore(&fetched.database, &database)
+        .map_err(|e| io_failure("cannot restore the database", e))?;
+    let lineage = maintenance::inspect_detail(&database)
+        .map_err(|e| io_failure("cannot inspect the restored database", e))?
         .lineage;
-    let imported = recovery_bundle::import(
-        &fetched.bundle,
-        &plan.admin,
-        Some((&plan.username, &plan.password)),
-    )
-    .map_err(|e| {
-        undo(refused(
-            "restore_import_failed",
-            format!("the recovery bundle could not be imported: {e}"),
-        ))
-    })?;
+    // Writes, re-reads and authenticates the rekeyed stores.
+    let imported =
+        recovery_bundle::import(&fetched.bundle, &admin, (&plan.username, &plan.password))
+            .map_err(|e| {
+                refused(
+                    "restore_import_failed",
+                    format!("the recovery bundle could not be imported: {e}"),
+                )
+            })?;
+    let _ = std::fs::remove_dir_all(&download);
+    #[cfg(test)]
+    if crashes_at("staged") {
+        staging.abandon();
+        return Err(refused("test_crash", "simulated crash"));
+    }
+    for dir in [&admin, &staged] {
+        sync_directory(dir).map_err(|e| io_failure("cannot sync the staged output", e))?;
+    }
 
+    // Claim the name, then move the staged output over the empty claim. The
+    // rename fails rather than replacing anything that took its place.
+    match std::fs::create_dir(&plan.output) {
+        Ok(()) => {}
+        Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {
+            return Err(require_absent(&plan.output).unwrap_err());
+        }
+        Err(e) => return Err(io_failure("cannot create --output", e)),
+    }
+    #[cfg(test)]
+    if crashes_at("claimed") {
+        staging.abandon();
+        return Err(refused("test_crash", "simulated crash"));
+    }
+    if let Err(e) = std::fs::rename(&staged, &plan.output) {
+        // Only an empty directory is ever removed: never the operator's data.
+        let _ = std::fs::remove_dir(&plan.output);
+        return Err(io_failure("cannot publish the restored output", e));
+    }
+    if let Err(e) = sync_directory(&plan.parent) {
+        return Err(refused(
+            "restore_publication_indeterminate",
+            format!(
+                "the restored output was moved to {} but the move could not be made durable ({e}); check that the directory exists and holds database.vlite and admin/ before using it",
+                display(&plan.output)
+            ),
+        ));
+    }
+    drop(staging);
+
+    let database = display(&plan.output.join(DATABASE_FILE));
+    let admin = display(&plan.output.join(ADMIN_DIR));
     Ok(json!({
         "mode": "rekey",
         "rekey_only": true,
         "set_id": id,
-        "database": plan.database.display().to_string(),
-        "admin_directory": plan.admin.display().to_string(),
+        "output": display(&plan.output),
+        "database": database,
+        "admin_directory": admin,
+        "staging_permissions": if cfg!(unix) {
+            "owner-only: directories 0700, files 0600"
+        } else {
+            "inherited from the --output parent directory"
+        },
         "inspection": inspection(&restored),
         "lineage": lineage_hex(lineage),
         "source_lineage": fetched.manifest.source_lineage,
@@ -405,7 +538,7 @@ fn restore_pinned(plan: &Plan, sets: &Sets, pin_id: &str) -> Result<Value, Recov
         "import": imported,
         "next": [
             "provision a new admin bearer token (VLITE_AUTH_TOKEN_FILE); old tokens and credentials are not restored",
-            format!("start the restored copy explicitly: vlite-server {} with VLITE_ADMIN_DIR={}", plan.database.display(), plan.admin.display()),
+            format!("start the restored copy explicitly: VLITE_ADMIN_DIR={admin} vlite-server {database}"),
             format!("sign in as {} and reset passwords before re-enabling imported accounts", plan.username),
             "re-issue the scoped credentials and re-create the webhook subscriptions listed under import",
             "configure cloud backup with a new prefix: the source prefix belongs to the source installation",
@@ -498,8 +631,7 @@ mod tests {
                 target_file: self.dir.path().join("target.json"),
                 shared_key_file: None,
                 set_id: self.set_id.clone(),
-                database: self.dir.path().join("restored.vlite"),
-                admin_directory: self.dir.path().join("restored-admin"),
+                output: self.dir.path().join("restored"),
                 admin_username: "Recovery".into(),
                 admin_password_file: self.dir.path().join("password"),
                 mode: RestoreMode::Rekey,
@@ -508,6 +640,14 @@ mod tests {
 
         fn restore(&self, request: &CloudRestore) -> Result<Value, RecoveryError> {
             restore_with(&prepare(request)?, &self.sets)
+        }
+
+        /// Runs the default restore, simulating a crash at `point`.
+        fn restore_crashing(&self, point: &'static str) -> RecoveryError {
+            CRASH_AT.with(|at| at.set(Some(point)));
+            let result = self.restore(&self.request());
+            CRASH_AT.with(|at| at.set(None));
+            result.unwrap_err()
         }
 
         fn pins(&self) -> usize {
@@ -529,21 +669,46 @@ mod tests {
         }
     }
 
+    fn names(dir: &FilePath) -> Vec<String> {
+        let mut names: Vec<String> = std::fs::read_dir(dir)
+            .unwrap()
+            .map(|e| e.unwrap().file_name().to_string_lossy().into_owned())
+            .collect();
+        names.sort();
+        names
+    }
+
+    #[cfg(unix)]
+    fn mode(path: &FilePath) -> u32 {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::metadata(path).unwrap().permissions().mode() & 0o777
+    }
+
     #[test]
-    fn rekey_restore_creates_an_isolated_copy_with_only_the_fresh_admin_usable() {
+    fn rekey_restore_publishes_one_complete_output_with_only_the_fresh_admin_usable() {
         let env = setup();
+        let source_bytes = std::fs::read(env.dir.path().join("source.vlite")).unwrap();
         let request = env.request();
         let report = env.restore(&request).unwrap();
 
         assert_eq!(report["rekey_only"], true);
         assert_eq!(report["pin_released"], true);
+        assert_eq!(report["stale_staging_removed"], 0);
+        let output = &request.output;
+        assert_eq!(names(output), ["admin", "database.vlite"]);
+        let canonical = std::fs::canonicalize(output).unwrap();
+        assert_eq!(report["output"], display(&canonical).as_str());
+        assert_eq!(
+            report["database"],
+            display(&canonical.join("database.vlite")).as_str()
+        );
         assert_eq!(env.pins(), 0);
         assert_eq!(report["source_installation_id"], INSTALL);
         assert_eq!(report["inspection"]["live_records"], 4);
         assert_eq!(report["drill"]["probes"], 1);
         let source = lineage_hex(env.source_lineage).unwrap();
         assert_eq!(report["source_lineage"], source.as_str());
-        let restored = maintenance::inspect_detail(&request.database).unwrap();
+        let restored = maintenance::inspect_detail(output.join("database.vlite")).unwrap();
         assert_eq!(
             report["lineage"],
             lineage_hex(restored.lineage).unwrap().as_str()
@@ -560,7 +725,16 @@ mod tests {
         assert_eq!(import["credentials_to_reissue"][0]["id"], "abcdefghijkl");
         assert_eq!(import["webhook_subscriptions_to_recreate"], 2);
 
-        let admin = &request.admin_directory;
+        let admin = &output.join("admin");
+        assert_eq!(names(admin), ["tenants.json", "users.json"]);
+        // Authentication matrix: only the fresh admin signs in.
+        assert!(users::signs_in(admin, "recovery", PASSWORD));
+        for name in ["ops", "reader", "recovery"] {
+            for password in ["correct horse battery staple", "another long passphrase"] {
+                assert!(!users::signs_in(admin, name, password), "{name}");
+            }
+        }
+        assert!(!users::signs_in(admin, "ops", PASSWORD));
         let users: Value =
             serde_json::from_slice(&std::fs::read(admin.join("users.json")).unwrap()).unwrap();
         let users = users["users"].as_array().unwrap();
@@ -573,12 +747,22 @@ mod tests {
                 assert_eq!(user["must_change_password"], true, "{user}");
             }
         }
-        assert!(admin.join("tenants.json").is_file());
-        for absent in ["credentials.json", "webhooks.json", "next-startup"] {
-            assert!(!admin.join(absent).exists(), "{absent} must not be written");
+        // Only the output remains next to the source: no staging left, and
+        // the source is untouched.
+        assert_eq!(env.leftovers(), ["restored"]);
+        assert_eq!(
+            std::fs::read(env.dir.path().join("source.vlite")).unwrap(),
+            source_bytes
+        );
+        #[cfg(unix)]
+        {
+            for dir in [output.clone(), admin.clone()] {
+                assert_eq!(mode(&dir), 0o700, "{dir:?}");
+            }
+            for file in ["database.vlite", "admin/users.json", "admin/tenants.json"] {
+                assert_eq!(mode(&output.join(file)), 0o600, "{file}");
+            }
         }
-        // Only the two outputs remain next to the source: no scratch left.
-        assert_eq!(env.leftovers(), ["restored-admin", "restored.vlite"]);
         let text = report.to_string();
         assert!(
             !text.contains(PASSWORD),
@@ -607,29 +791,29 @@ mod tests {
             ..env.request()
         };
         check(bad_id, "invalid_input");
-        let existing = CloudRestore {
-            database: env.dir.path().join("source.vlite"),
-            ..env.request()
-        };
-        check(existing, "restore_destination_exists");
-        let orphan = CloudRestore {
-            database: env.dir.path().join("missing").join("x.vlite"),
-            ..env.request()
-        };
-        check(orphan, "invalid_input");
-
-        std::fs::create_dir(env.dir.path().join("used-admin")).unwrap();
-        std::fs::write(env.dir.path().join("used-admin").join("users.json"), "{}").unwrap();
-        let used = CloudRestore {
-            admin_directory: env.dir.path().join("used-admin"),
-            ..env.request()
-        };
-        check(used, "restore_admin_dir_not_empty");
-        let file_admin = CloudRestore {
-            admin_directory: env.dir.path().join("password"),
-            ..env.request()
-        };
-        check(file_admin, "restore_admin_dir_not_empty");
+        // The output must be new: a file or even an empty directory is
+        // never reused.
+        std::fs::create_dir(env.dir.path().join("empty")).unwrap();
+        for existing in ["source.vlite", "empty"] {
+            let request = CloudRestore {
+                output: env.dir.path().join(existing),
+                ..env.request()
+            };
+            check(request, "restore_destination_exists");
+        }
+        for output in [
+            env.dir.path().join("missing").join("out"),
+            env.dir.path().join("password").join("out"),
+            env.dir.path().join(".vlite-cloud-restore-mine"),
+            env.dir.path().join(".."),
+            PathBuf::from("."),
+        ] {
+            let request = CloudRestore {
+                output,
+                ..env.request()
+            };
+            check(request, "invalid_input");
+        }
 
         std::fs::write(env.dir.path().join("weak"), "password\n").unwrap();
         let weak = CloudRestore {
@@ -676,13 +860,7 @@ mod tests {
 
         assert_eq!(
             env.leftovers(),
-            [
-                "large",
-                "remote-key.json",
-                "unknown.json",
-                "used-admin",
-                "weak"
-            ]
+            ["empty", "large", "remote-key.json", "unknown.json", "weak"]
         );
     }
 
@@ -717,7 +895,7 @@ mod tests {
     }
 
     #[test]
-    fn a_failed_import_removes_the_restored_copy_and_the_created_admin_directory() {
+    fn a_failed_import_publishes_nothing() {
         let env = setup();
         // The fresh admin collides with an imported account.
         let colliding = CloudRestore {
@@ -729,21 +907,88 @@ mod tests {
         assert!(error.message.contains("already used"), "{error}");
         assert_eq!(env.pins(), 0);
         assert!(env.leftovers().is_empty(), "{:?}", env.leftovers());
+    }
 
-        // An existing empty admin directory is kept, still empty.
-        std::fs::create_dir(env.dir.path().join("empty-admin")).unwrap();
-        let kept = CloudRestore {
-            admin_username: "ops".into(),
-            admin_directory: env.dir.path().join("empty-admin"),
-            ..env.request()
-        };
-        env.restore(&kept).unwrap_err();
-        assert_eq!(env.leftovers(), ["empty-admin"]);
-        assert_eq!(
-            std::fs::read_dir(env.dir.path().join("empty-admin"))
-                .unwrap()
-                .count(),
-            0
+    #[test]
+    fn a_crash_before_publication_leaves_no_output_and_a_retry_cleans_up() {
+        let env = setup();
+        assert_eq!(env.restore_crashing("staged").code, "test_crash");
+        let left = env.leftovers();
+        assert_eq!(left.len(), 1, "{left:?}");
+        assert!(left[0].starts_with(STAGING_PREFIX), "{left:?}");
+        let staging = env.dir.path().join(&left[0]);
+        assert_eq!(names(&staging), ["output", "owner.lock"]);
+        assert!(!env.request().output.exists());
+        #[cfg(unix)]
+        {
+            for dir in ["", "output", "output/admin"] {
+                assert_eq!(mode(&staging.join(dir)), 0o700, "{dir}");
+            }
+            for file in [
+                "owner.lock",
+                "output/database.vlite",
+                "output/admin/users.json",
+            ] {
+                assert_eq!(mode(&staging.join(file)), 0o600, "{file}");
+            }
+        }
+
+        let report = env.restore(&env.request()).unwrap();
+        assert_eq!(report["stale_staging_removed"], 1);
+        assert_eq!(env.leftovers(), ["restored"]);
+        assert_eq!(names(&env.request().output), ["admin", "database.vlite"]);
+    }
+
+    #[test]
+    fn a_crash_after_the_claim_leaves_an_empty_output_that_is_never_reused() {
+        let env = setup();
+        assert_eq!(env.restore_crashing("claimed").code, "test_crash");
+        let output = env.request().output;
+        assert!(names(&output).is_empty());
+        let error = env.restore(&env.request()).unwrap_err();
+        assert_eq!(error.code, "restore_destination_exists", "{error}");
+        assert!(error.message.contains("remove it and retry"), "{error}");
+
+        std::fs::remove_dir(&output).unwrap();
+        let report = env.restore(&env.request()).unwrap();
+        assert_eq!(report["stale_staging_removed"], 1);
+        assert_eq!(names(&output), ["admin", "database.vlite"]);
+        assert_eq!(env.leftovers(), ["restored"]);
+    }
+
+    #[test]
+    fn stale_staging_cleanup_spares_live_recent_and_unrelated_entries() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        let live = Staging::create(root).unwrap();
+        let crashed = Staging::create(root).unwrap().abandon();
+        // Created but not yet locked (or never locked) and recent: kept.
+        let unlocked = root.join(format!("{STAGING_PREFIX}unlocked"));
+        std::fs::create_dir(&unlocked).unwrap();
+        std::fs::write(unlocked.join(STAGING_LOCK), b"").unwrap();
+        let fresh = root.join(format!("{STAGING_PREFIX}fresh"));
+        std::fs::create_dir(&fresh).unwrap();
+        let file = root.join(format!("{STAGING_PREFIX}file"));
+        std::fs::write(&file, b"x").unwrap();
+        std::fs::create_dir(root.join("restored")).unwrap();
+
+        assert!(crashed.exists());
+        assert_eq!(remove_stale_staging(root), 1);
+        assert!(!crashed.exists());
+        for kept in [
+            live.path(),
+            &unlocked,
+            &fresh,
+            &file,
+            &root.join("restored"),
+        ] {
+            assert!(kept.exists(), "{kept:?}");
+        }
+        let live_path = live.path().to_owned();
+        drop(live);
+        assert!(
+            !live_path.exists(),
+            "a finished restore removes its staging"
         );
     }
 
