@@ -237,6 +237,10 @@ struct Loaded {
     status: Status,
     installation: Option<String>,
     retry_at: Option<u64>,
+    /// Set when a policy write failed and `state.json` could not be read
+    /// back: the next start may load a different policy than memory holds,
+    /// so policy-dependent work is refused until a reread succeeds.
+    uncertain: bool,
     /// Set when `shutdown` gave up waiting: this runtime no longer writes
     /// its files, so a runtime opened later on the directory owns them.
     fenced: bool,
@@ -266,6 +270,31 @@ struct Unwinding<'a> {
     runtime: &'a Runtime,
     handle: &'a Handle,
     id: &'a str,
+}
+
+impl Loaded {
+    /// Rereads `state.json` while the policy is uncertain and adopts it, so
+    /// memory again matches what the next start loads; refused while it
+    /// still cannot be read.
+    fn settle(&mut self, dir: &FilePath) -> Result<(), ApiError> {
+        if !self.uncertain {
+            return Ok(());
+        }
+        let Ok(document) = read_document(dir) else {
+            return Err(policy_uncertain());
+        };
+        let (policy, status) = document.map_or((None, Status::default()), |d| (d.policy, d.status));
+        self.policy = policy;
+        self.status = status;
+        self.retry_at = None;
+        self.uncertain = false;
+        logs::stderr(
+            "info",
+            "cloud_backup",
+            json!({"event":"cloud_backup_policy_confirmed"}).to_string(),
+        );
+        Ok(())
+    }
 }
 
 impl Drop for Unwinding<'_> {
@@ -441,6 +470,14 @@ fn read_json<T: DeserializeOwned>(path: &FilePath) -> std::io::Result<Option<T>>
     }
 }
 
+fn policy_uncertain() -> ApiError {
+    ApiError::new(
+        StatusCode::SERVICE_UNAVAILABLE,
+        "cloud_backup_policy_uncertain",
+        "the cloud backup policy on disk could not be confirmed; policy-dependent operations are refused until it can be read again (GET /v1/admin/cloud-backup retries, PUT replaces it)",
+    )
+}
+
 fn closed() -> ApiError {
     ApiError::new(
         StatusCode::SERVICE_UNAVAILABLE,
@@ -469,6 +506,10 @@ fn encode(policy: Option<&Policy>, status: &Status) -> Result<Vec<u8>, ApiError>
 }
 
 fn read_document(dir: &FilePath) -> std::io::Result<Option<Document>> {
+    #[cfg(test)]
+    if READ_FAULT.with(std::cell::Cell::get) {
+        return Err(io_error("injected read fault"));
+    }
     let Some(document) = read_json::<Document>(&dir.join(STATE))? else {
         return Ok(None);
     };
@@ -498,6 +539,12 @@ thread_local! {
     /// Test fault: fail the next write before (`false`) or after (`true`)
     /// its rename.
     static WRITE_FAULT: std::cell::Cell<Option<bool>> = const { std::cell::Cell::new(None) };
+}
+
+#[cfg(test)]
+thread_local! {
+    /// Test fault: `read_document` fails while set.
+    static READ_FAULT: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
 }
 
 #[cfg(test)]
@@ -692,6 +739,7 @@ impl Runtime {
             status,
             installation,
             retry_at: None,
+            uncertain: false,
             fenced: false,
         };
         if reconcile_clock(&mut loaded, now()) {
@@ -711,10 +759,12 @@ impl Runtime {
         })
     }
 
+    /// Whether the scheduler should run: also while the policy is uncertain,
+    /// so its ticks retry the reread (`claim_due` refuses until it succeeds).
     pub(super) fn enabled(&self) -> bool {
         self.state
             .lock()
-            .is_ok_and(|s| s.policy.as_ref().is_some_and(|p| p.enabled))
+            .is_ok_and(|s| s.uncertain || s.policy.as_ref().is_some_and(|p| p.enabled))
     }
 
     /// Counts an operation until the guard drops; refused once `shutdown`
@@ -767,15 +817,20 @@ impl Runtime {
         cloud::private_dir(&self.staging(), "fetch-").map_err(internal)
     }
 
+    /// The policy and status. While the policy is uncertain (and a reread
+    /// still fails) it shows the last confirmed policy, flagged, and no next
+    /// run.
     pub(super) fn view(&self) -> Result<Value, ApiError> {
-        let loaded = lock(&self.state)?;
+        let mut loaded = lock(&self.state)?;
+        let uncertain = loaded.settle(&self.dir).is_err();
         Ok(json!({
             "configured": loaded.policy.is_some(),
             "policy": loaded.policy,
+            "policy_uncertain": uncertain,
             "installation_id": loaded.installation,
             "status": loaded.status,
             "running": self.busy.load(Ordering::Acquire),
-            "next_run_unix_ms": next_run(&loaded),
+            "next_run_unix_ms": if uncertain { None } else { next_run(&loaded) },
         }))
     }
 
@@ -789,6 +844,8 @@ impl Runtime {
         if loaded.fenced {
             return Err(closed());
         }
+        // Never overwrite a policy that may differ from memory.
+        loaded.settle(&self.dir)?;
         let previous = loaded.status.clone();
         change(&mut loaded);
         let bytes = match encode(loaded.policy.as_ref(), &loaded.status) {
@@ -814,7 +871,8 @@ impl Runtime {
     }
 
     fn configured(&self) -> Result<(Policy, String), ApiError> {
-        let loaded = lock(&self.state)?;
+        let mut loaded = lock(&self.state)?;
+        loaded.settle(&self.dir)?;
         match (&loaded.policy, &loaded.installation) {
             (Some(policy), Some(installation)) => Ok((policy.clone(), installation.clone())),
             _ => Err(not_configured()),
@@ -830,8 +888,10 @@ impl Runtime {
     /// Replaces the policy. Changing the target abandons an unresolved
     /// publication of the old target (it stays an orphan there). Policy and
     /// status are one document: a failed write whose rename may or may not
-    /// have happened adopts what the file holds, so memory always matches
-    /// what the next start reads, and the caller is told to check.
+    /// have happened adopts what the file holds, so memory matches what the
+    /// next start reads, and the caller is told to check. When the file
+    /// cannot be read back either, the policy is uncertain: policy-dependent
+    /// work is refused until a reread or a later configure succeeds.
     pub(super) fn configure(
         &self,
         policy: Policy,
@@ -847,6 +907,10 @@ impl Runtime {
             if loaded.fenced {
                 return Err(closed());
             }
+            // A failed reread is not fatal here: this write replaces the
+            // whole document, and the abandoned handle is decided against
+            // the last confirmed target, which is the one it belongs to.
+            let _ = loaded.settle(&self.dir);
             if loaded.installation.is_none() {
                 let mut bytes = [0u8; 8];
                 getrandom::fill(&mut bytes).map_err(internal)?;
@@ -860,28 +924,30 @@ impl Runtime {
             status.policy_updated_unix_ms = Some(now);
             let bytes = encode(Some(&policy), &status)?;
             if let Err(error) = write_atomic(&self.dir, STATE, &bytes) {
-                if let Ok(document) = read_document(&self.dir) {
-                    let (policy, status) =
-                        document.map_or((None, Status::default()), |d| (d.policy, d.status));
-                    loaded.policy = policy;
-                    loaded.status = status;
-                    loaded.retry_at = None;
-                }
                 logs::stderr(
                     "error",
                     "cloud_backup",
                     json!({"event":"cloud_backup_policy_write_failed","code":error.code})
                         .to_string(),
                 );
+                loaded.uncertain = true;
+                if loaded.settle(&self.dir).is_err() {
+                    logs::stderr(
+                        "error",
+                        "cloud_backup",
+                        json!({"event":"cloud_backup_policy_uncertain"}).to_string(),
+                    );
+                }
                 return Err(ApiError::new(
                     StatusCode::INTERNAL_SERVER_ERROR,
                     "cloud_backup_policy_uncertain",
-                    "the policy change could not be confirmed on disk; GET /v1/admin/cloud-backup shows the policy in effect",
+                    "the policy change could not be confirmed on disk; GET /v1/admin/cloud-backup shows the policy in effect, or policy_uncertain while it cannot be read back",
                 ));
             }
             loaded.policy = Some(policy.clone());
             loaded.status = status;
             loaded.retry_at = None;
+            loaded.uncertain = false;
             abandoned
         };
         if let Some(pending) = abandoned {
@@ -908,6 +974,9 @@ impl Runtime {
         let Ok(mut loaded) = self.state.lock() else {
             return false;
         };
+        if loaded.settle(&self.dir).is_err() {
+            return false;
+        }
         // Saved with the next status write; a restart reconciles again.
         reconcile_clock(&mut loaded, now);
         match next_run(&loaded) {
@@ -1631,9 +1700,10 @@ async fn configure(
     let policy = parsed(input)?;
     let runtime = runtime(&s)?;
     let handle = Handle::new(&s);
-    let view = blocking(move || runtime.configure(policy, &handle, now())).await?;
+    let view = blocking(move || runtime.configure(policy, &handle, now())).await;
+    // Also after a failure: the policy in effect may have changed.
     s.ops.cloud_changed();
-    Ok(Json(view))
+    Ok(Json(view?))
 }
 
 async fn run(State(s): State<Service>) -> Result<(StatusCode, Json<Value>), ApiError> {
@@ -2347,6 +2417,74 @@ mod tests {
         assert!(view["next_run_unix_ms"].as_u64().unwrap() <= after + 300_000);
         let file: Value = serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
         assert_eq!(file["status"]["last_attempt_unix_ms"], attempt);
+    }
+
+    #[test]
+    fn an_unconfirmed_policy_fails_closed_until_it_can_be_reread() {
+        // Review N-04: a failed policy write whose reread also failed left the
+        // old policy usable in memory while the next start adopts the new one.
+        let env = setup();
+        let h = Handle::new(&env.service);
+        let enabled = |prefix: &str| {
+            let mut p = policy(json!({"enabled":true,"interval_secs":300,"drill_every":0}));
+            p.target.prefix = prefix.into();
+            p
+        };
+        env.runtime
+            .configure(enabled("vlite/prod/"), &h, BASE)
+            .unwrap();
+        // The rename happened, but neither the write nor a reread confirms it.
+        WRITE_FAULT.with(|f| f.set(Some(true)));
+        READ_FAULT.with(|f| f.set(true));
+        assert_eq!(
+            code(env.runtime.configure(enabled("vlite/next/"), &h, BASE)),
+            "cloud_backup_policy_uncertain"
+        );
+        let view = env.runtime.view().unwrap();
+        assert_eq!(view["policy_uncertain"], true, "{view}");
+        assert!(view["next_run_unix_ms"].is_null(), "{view}");
+        assert!(env.runtime.enabled());
+        assert!(!env.runtime.claim_due_at(BASE + 365 * 24 * 3_600_000));
+        let refused = [
+            code(env.runtime.run_now(&h)),
+            code(env.runtime.collect(&h)),
+            code(env.runtime.list()),
+            code(env.runtime.drill(&h, "0123456789abcdef")),
+            code(env.runtime.pin(&h, "0123456789abcdef", "hold")),
+        ];
+        assert_eq!(refused, ["cloud_backup_policy_uncertain"; 5]);
+        assert!(env.meta.names().is_empty() && env.data.names().is_empty());
+        // Nothing overwrote the new policy on disk.
+        let path = env.root.join("cloud-backup").join(STATE);
+        let file: Value = serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
+        assert_eq!(file["policy"]["target"]["prefix"], "vlite/next/");
+
+        // A successful reread adopts what the next start loads.
+        READ_FAULT.with(|f| f.set(false));
+        let view = env.runtime.view().unwrap();
+        assert_eq!(view["policy_uncertain"], false, "{view}");
+        assert_eq!(view["policy"]["target"]["prefix"], "vlite/next/");
+        assert!(view["next_run_unix_ms"].is_u64());
+        let reopened = reopen(&env).view().unwrap();
+        assert_eq!(reopened["policy"], view["policy"]);
+        env.runtime.run_now(&h).unwrap();
+
+        // A later successful configure also settles it, even unread.
+        WRITE_FAULT.with(|f| f.set(Some(false)));
+        READ_FAULT.with(|f| f.set(true));
+        assert_eq!(
+            code(env.runtime.configure(enabled("vlite/other/"), &h, BASE)),
+            "cloud_backup_policy_uncertain"
+        );
+        assert_eq!(env.runtime.view().unwrap()["policy_uncertain"], true);
+        let view = env
+            .runtime
+            .configure(enabled("vlite/prod/"), &h, BASE)
+            .unwrap();
+        READ_FAULT.with(|f| f.set(false));
+        assert_eq!(view["policy_uncertain"], false, "{view}");
+        assert_eq!(view["policy"]["target"]["prefix"], "vlite/prod/");
+        assert_eq!(reopen(&env).view().unwrap()["policy"], view["policy"]);
     }
 
     #[test]

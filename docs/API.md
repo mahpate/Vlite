@@ -777,7 +777,7 @@ release: use these routes or the offline `vlite-server cloud-sets` and
 
 | Route | Purpose |
 | --- | --- |
-| `GET /v1/admin/cloud-backup` | Policy, installation ID, run status (last attempt, success, error code, unknown publication, the run in progress as `job`, `interrupted` runs, and `clock_reset_unix_ms` when future schedule times were pulled back to the clock) and the next scheduled run, measured on the wall clock. |
+| `GET /v1/admin/cloud-backup` | Policy, installation ID, run status (last attempt, success, error code, unknown publication, the run in progress as `job`, `interrupted` runs, and `clock_reset_unix_ms` when future schedule times were pulled back to the clock), the next scheduled run, measured on the wall clock, and `policy_uncertain`. |
 | `PUT /v1/admin/cloud-backup` | Save the policy (body below). Does no remote work. |
 | `POST /v1/admin/cloud-backup/run` | Publish one set now. Answers 201. **Not idempotent**: retrying after an unseen outcome can publish another set, so read the status or the set list first. |
 | `POST /v1/admin/cloud-backup/collect` | Cleanup now: removes unpublished sets older than `orphan_grace_hours` and finishes interrupted deletions; deletes published sets only when `retention_enabled` is set. A run collects automatically only with retention on. |
@@ -793,7 +793,12 @@ During server shutdown the `PUT`, `POST` and `DELETE` routes answer 503
 The policy is persisted with the run status in one atomically replaced
 `<admin>/cloud-backup/state.json` and survives restarts. A `PUT` that answers
 500 `cloud_backup_policy_uncertain` could not confirm its write; the `GET`
-view then shows the policy actually in effect. It holds no secret:
+view then shows the policy actually in effect. If the file cannot be read back
+either, `GET` shows the last confirmed policy with `"policy_uncertain": true`
+and no next run: no scheduled run starts, and the run, collect, set list,
+drill, restore and pin routes answer 503 `cloud_backup_policy_uncertain` until
+a reread (every `GET` and scheduler tick retries) or a successful `PUT`
+confirms the policy. It holds no secret:
 
 ```json
 {"target": {"account": "contosobackup", "container": "vlite-data",
@@ -865,8 +870,9 @@ such as `cloud_backup_not_configured`, `cloud_publication_lost`,
 `cloud_pin_in_use`; 404 `cloud_set_not_found`
 or `cloud_pin_not_found`; 400 or 422 `invalid_json` (fixed text that never
 repeats the body) and 422 `invalid_input`; 502 `cloud_store_failed` or
-`cloud_set_corrupt`; 500 `cloud_backup_policy_uncertain`; 503 `busy`,
-`cloud_store_unavailable` or `cloud_publication_unknown`. Policy changes, runs, collections, drills,
+`cloud_set_corrupt`; 500 `cloud_backup_policy_uncertain` (`PUT`); 503 `busy`,
+`cloud_store_unavailable`, `cloud_publication_unknown` or
+`cloud_backup_policy_uncertain`. Policy changes, runs, collections, drills,
 restores and pins are audited.
 
 `POST /v1/collections/{collection}/index/disk-ann` builds the collection's

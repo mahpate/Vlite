@@ -376,7 +376,10 @@ the local backup schedule, this policy is saved in
 one file holds the policy and the run status, replaced together by an atomic
 rename. If a `PUT` answers 500 `cloud_backup_policy_uncertain`, the write
 could not be confirmed: `GET /v1/admin/cloud-backup` shows the policy actually
-in effect. The same directory holds `installation-id` (the owner of the
+in effect. If the file cannot be read back either, the view shows
+`"policy_uncertain": true`, no scheduled run starts and the other cloud routes
+answer 503 until a reread or a successful `PUT` confirms the policy; check the
+admin volume. The same directory holds `installation-id` (the owner of the
 prefix) and `staging/` (temporary copies, emptied at startup); keep it on the
 private admin volume.
 
