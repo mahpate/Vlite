@@ -847,9 +847,9 @@ mod tests {
 
         fn pins(&self) -> usize {
             let key = format!("vlite/prod/sets/{}/record.json", self.set_id);
-            let record: cloud::Record =
-                serde_json::from_slice(&self.meta.raw(&key).unwrap()).unwrap();
-            record.pins.len()
+            // Read as plain JSON so a record with an injected field still counts.
+            let record: Value = serde_json::from_slice(&self.meta.raw(&key).unwrap()).unwrap();
+            record["pins"].as_array().expect("record pins").len()
         }
 
         /// Paths created next to the source by a restore, scratch included.
@@ -1172,6 +1172,62 @@ mod tests {
             let error = env.restore(&env.request()).unwrap_err();
             assert_eq!(error.code, "cloud_set_corrupt", "{case}: {error}");
             assert!(error.message.contains(message), "{case}: {error}");
+            assert_eq!(env.pins(), 0, "{case}: the pin is released");
+            assert!(env.leftovers().is_empty(), "{case}: {:?}", env.leftovers());
+        }
+    }
+
+    #[test]
+    fn set_document_parse_errors_never_echo_text_read_from_the_blob() {
+        // Review F2: serde names unknown fields and quotes mistyped values; a
+        // parse error reports only the position. A manifest without a policy
+        // capture predates the v1 schema and is never defaulted.
+        const MARKER: &str = "SYNTHETIC_SECRET_MARKER_005";
+        type Case = (&'static str, fn(&Env), &'static str);
+        let cases: [Case; 4] = [
+            (
+                "unknown manifest field",
+                |env| rewrite_manifest(env, |m| m[MARKER] = json!(1)),
+                "the manifest is invalid (line",
+            ),
+            (
+                "mistyped manifest value",
+                |env| rewrite_manifest(env, |m| m["created_unix_ms"] = json!(MARKER)),
+                "the manifest is invalid (line",
+            ),
+            (
+                "manifest without a policy capture",
+                |env| {
+                    rewrite_manifest(env, |m| {
+                        m.as_object_mut().unwrap().remove("policy");
+                    })
+                },
+                "unsupported manifest schema",
+            ),
+            (
+                "unknown record field",
+                |env| {
+                    let key = format!("vlite/prod/sets/{}/record.json", env.set_id);
+                    edit(&env.meta, &key, |record| {
+                        let mut value: Value = serde_json::from_slice(record).unwrap();
+                        value[MARKER] = json!(1);
+                        *record = serde_json::to_vec(&value).unwrap();
+                    });
+                },
+                "is not a valid object: (line",
+            ),
+        ];
+        for (case, change, message) in cases {
+            let env = setup();
+            change(&env);
+            let error = env.restore(&env.request()).unwrap_err();
+            assert!(
+                matches!(error.code, "cloud_set_corrupt" | "cloud_object_invalid"),
+                "{case}: {error}"
+            );
+            assert!(error.message.contains(message), "{case}: {error}");
+            let shown = format!("{error} {error:?} {}", json!(error.report));
+            assert!(!shown.contains(MARKER), "{case}: {shown}");
             assert_eq!(env.pins(), 0, "{case}: the pin is released");
             assert!(env.leftovers().is_empty(), "{case}: {:?}", env.leftovers());
         }

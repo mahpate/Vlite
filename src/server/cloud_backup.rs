@@ -874,8 +874,29 @@ fn invalid(key: &str, problem: impl std::fmt::Display) -> ApiError {
     )
 }
 
+/// Position of a parse error. serde's message names unknown fields and quotes
+/// mistyped values, i.e. text read from the blob, so it is never shown.
+fn position(e: &serde_json::Error) -> String {
+    format!("(line {}, column {})", e.line(), e.column())
+}
+
 fn decode<T: DeserializeOwned>(key: &str, bytes: &[u8]) -> Result<T, ApiError> {
-    serde_json::from_slice(bytes).map_err(|e| invalid(key, e))
+    serde_json::from_slice(bytes).map_err(|e| invalid(key, position(&e)))
+}
+
+/// Parses a fetched manifest with value-free errors. A manifest without a
+/// policy capture predates the v1 schema: it is unsupported, never given the
+/// current policy.
+fn parse_manifest(bytes: &[u8]) -> Result<Manifest, ApiError> {
+    serde_json::from_slice(bytes).map_err(|e| {
+        let legacy = serde_json::from_slice::<serde_json::Map<String, serde_json::Value>>(bytes)
+            .is_ok_and(|m| !m.contains_key("policy"));
+        if legacy {
+            corrupt("unsupported manifest schema")
+        } else {
+            corrupt(format!("the manifest is invalid {}", position(&e)))
+        }
+    })
 }
 
 fn decode_record(key: &str, bytes: &[u8], set_id: &str) -> Result<Record, ApiError> {
@@ -1456,8 +1477,7 @@ impl Sets {
         if sha_hex(&manifest_blob.bytes) != record.manifest_sha256 {
             return Err(corrupt("the manifest does not match the published record"));
         }
-        let manifest: Manifest = serde_json::from_slice(&manifest_blob.bytes)
-            .map_err(|e| corrupt(format!("the manifest is invalid: {e}")))?;
+        let manifest = parse_manifest(&manifest_blob.bytes)?;
         let (db, bundle_entry) = manifest.check(id, &record.installation_id)?;
         if bundle_entry.bytes > recovery_bundle::MAX_BYTES {
             return Err(corrupt("the recovery bundle is too large"));
