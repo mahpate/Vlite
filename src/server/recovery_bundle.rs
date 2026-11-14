@@ -116,6 +116,12 @@ fn recognized(name: &str, directory: bool) -> bool {
         let name = name.strip_suffix(".manifest.json").unwrap_or(name);
         admin::generated(name, "backup-") || admin::generated(name, "restore-")
     };
+    // An interrupted atomic write: the temporary-file helper's default name,
+    // ".tmp" and six random ASCII alphanumerics.
+    let temporary = |name: &str| {
+        name.strip_prefix(".tmp")
+            .is_some_and(|r| r.len() == 6 && r.bytes().all(|b| b.is_ascii_alphanumeric()))
+    };
     matches!(
         name,
         "users.json"
@@ -128,7 +134,7 @@ fn recognized(name: &str, directory: bool) -> bool {
             | "audit.jsonl"
             | "audit.1.jsonl"
             | "next-startup"
-    ) || name.starts_with(".tmp")
+    ) || temporary(name)
         || generated(name)
         || name
             .strip_prefix("disk-ann-")
@@ -699,9 +705,17 @@ mod tests {
             "disk-ann-x.dann",
             "backup-../x.vlite",
             "tls.key",
+            // Review RB02-TEMP: only the temporary-file helper's exact shape.
+            ".tmp",
+            ".tmpAbC12",
+            ".tmpAbC1234",
+            ".tmpAbC12!",
+            ".tmp-..-x",
+            ".tmpsecret.json",
         ] {
             assert!(!recognized(name, false), "{name}");
         }
+        assert!(!recognized(".tmpAbC123", true));
         assert!(!recognized("users.json", true));
         assert!(!recognized("staging", true));
 
