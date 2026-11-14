@@ -1301,3 +1301,350 @@ fn cloud_recovery_commands_refuse_bad_requests_before_any_effect() {
         .collect();
     assert!(leftovers.is_empty(), "{leftovers:?}");
 }
+
+/// A loopback fake for one published set: serves `objects` by the last path
+/// segment, stores record writes, and answers the record write that releases
+/// the pin with 403 so the release fails after publication.
+fn serve_until_unpin(
+    listener: std::net::TcpListener,
+    mut objects: std::collections::BTreeMap<String, Vec<u8>>,
+    output: std::path::PathBuf,
+) -> Vec<u8> {
+    let deadline = Instant::now() + Duration::from_secs(60);
+    loop {
+        let mut stream = match listener.accept() {
+            Ok((stream, _)) => stream,
+            Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => {
+                assert!(Instant::now() < deadline, "the CLI never released its pin");
+                std::thread::sleep(Duration::from_millis(5));
+                continue;
+            }
+            Err(e) => panic!("{e}"),
+        };
+        stream.set_nonblocking(false).unwrap();
+        stream
+            .set_read_timeout(Some(Duration::from_secs(10)))
+            .unwrap();
+        let mut reader = BufReader::new(stream.try_clone().unwrap());
+        let mut first = String::new();
+        reader.read_line(&mut first).unwrap();
+        let fields: Vec<&str> = first.split_whitespace().collect();
+        let method = fields[0];
+        let name = fields[1]
+            .split('?')
+            .next()
+            .unwrap()
+            .rsplit('/')
+            .next()
+            .unwrap();
+        let mut length = 0;
+        loop {
+            let mut line = String::new();
+            reader.read_line(&mut line).unwrap();
+            assert!(!line.is_empty(), "truncated request headers");
+            if line == "\r\n" {
+                break;
+            }
+            if let Some(value) = line.to_ascii_lowercase().strip_prefix("content-length:") {
+                length = value.trim().parse::<usize>().unwrap();
+            }
+        }
+        let mut body = vec![0; length];
+        reader.read_exact(&mut body).unwrap();
+        if method == "PUT" {
+            assert_eq!(name, "record.json");
+            let record: Value = serde_json::from_slice(&body).unwrap();
+            if record["pins"].as_array().unwrap().is_empty() {
+                // The release comes only after the whole output is published.
+                assert!(output.join("database.vlite").is_file());
+                assert!(output.join("admin").join("users.json").is_file());
+                stream
+                    .write_all(
+                        b"HTTP/1.1 403 Forbidden\r\nContent-Length: 0\r\nConnection: close\r\n\r\n",
+                    )
+                    .unwrap();
+                return objects.remove("record.json").unwrap();
+            }
+            assert!(!output.exists(), "nothing is published before the pin");
+            objects.insert(name.to_owned(), body);
+            stream
+                .write_all(b"HTTP/1.1 201 Created\r\nETag: \"1\"\r\nContent-Length: 0\r\nConnection: close\r\n\r\n")
+                .unwrap();
+        } else {
+            assert!(matches!(method, "GET" | "HEAD"), "{first}");
+            let bytes = objects.get(name).unwrap_or_else(|| panic!("{first}"));
+            write!(
+                stream,
+                "HTTP/1.1 200 OK\r\nETag: \"1\"\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+                bytes.len()
+            )
+            .unwrap();
+            if method != "HEAD" {
+                stream.write_all(bytes).unwrap();
+            }
+        }
+    }
+}
+
+#[test]
+fn an_unreleased_pin_exits_three_and_keeps_the_output_and_the_pin() {
+    use sha2::{Digest, Sha256};
+    let directory = tempfile::tempdir().unwrap();
+    let root = directory.path();
+    let source = root.join("source.vlite");
+    let mut database = vlite::Database::create(&source, 2).unwrap();
+    database.put(1, &[1.0, 2.0], b"retained").unwrap();
+    database.close().unwrap();
+    let verification = vlite::maintenance::verify(&source).unwrap();
+    let detail = vlite::maintenance::inspect_detail(&source).unwrap();
+    let lineage = detail.lineage.map(|l| format!("{l:016x}"));
+    let hash = |bytes: &[u8]| format!("{:x}", Sha256::digest(bytes));
+    let database = std::fs::read(&source).unwrap();
+    let database_sha = hash(&database);
+    let set = "20260101T000000Z-0123456789abcdef";
+    let install = "0123456789abcdef";
+    let policy = json!({"revision_unix_ms": 1, "sha256": hash(b"policy"),
+        "retention_enabled": false, "keep_sets": 3, "keep_days": 30});
+    let bundle = serde_json::to_vec(&json!({
+        "schema": "vlite.recovery-bundle/1", "created_unix_ms": 1,
+        "installation_id": install, "source_lineage": lineage,
+        "database_sha256": database_sha, "policy": policy, "rekey_only": true,
+        "config": {"tenants": [], "accounts": [], "credentials": [],
+            "webhook_subscriptions": 0, "secret_references": [],
+            "excluded": ["sessions", "password_hashes", "credential_secret_hashes",
+                "webhook_urls_and_signing_secrets", "bearer_tokens", "tls_material",
+                "audit_log", "provider_configuration", "filesystem_paths", "host_identity"]}
+    }))
+    .unwrap();
+    let bundle_sha = hash(&bundle);
+    let i = &verification.inspection;
+    let manifest = serde_json::to_vec(&json!({
+        "schema": "vlite.cloud-backup-manifest/1", "set_id": set,
+        "installation_id": install, "created_unix_ms": 1,
+        "vlite_version": env!("CARGO_PKG_VERSION"), "source_lineage": lineage,
+        "encrypted": false, "rekey_only": true, "policy": policy,
+        "database": {"format_version": i.format_version, "dimensions": i.dimensions,
+            "live_records": i.live_records, "commits": i.commits,
+            "collections": detail.collections, "open_imports": detail.open_imports,
+            "bytes": verification.bytes, "crc32": verification.crc32},
+        "objects": [{"role": "database", "sha256": database_sha, "bytes": database.len()},
+            {"role": "recovery_bundle", "sha256": bundle_sha, "bytes": bundle.len()}]
+    }))
+    .unwrap();
+    let record = serde_json::to_vec(&json!({
+        "schema": "vlite.cloud-backup-record/1", "set_id": set,
+        "installation_id": install, "state": "published", "created_unix_ms": 1,
+        "updated_unix_ms": 1, "revision": "0123456789abcdef",
+        "manifest_sha256": hash(&manifest), "pins": [], "last_drill": null,
+        "delete_reason": null
+    }))
+    .unwrap();
+    let objects = std::collections::BTreeMap::from([
+        ("record.json".to_owned(), record),
+        ("manifest.json".to_owned(), manifest),
+        (database_sha, database),
+        (bundle_sha, bundle),
+    ]);
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    listener.set_nonblocking(true).unwrap();
+    let endpoint = format!("http://{}/devstoreaccount1", listener.local_addr().unwrap());
+    let output = root.join("restored");
+    let visible = output.clone();
+    let fake = std::thread::spawn(move || serve_until_unpin(listener, objects, visible));
+
+    let target = root.join("target.json");
+    std::fs::write(
+        &target,
+        json!({"account": "devstoreaccount1", "container": "vlite-data",
+            "coordination_container": "vlite-meta", "prefix": "cli/",
+            "endpoint": endpoint, "auth": "emulator_shared_key"})
+        .to_string(),
+    )
+    .unwrap();
+    const PASSWORD: &str = "correct horse battery staple";
+    let password = root.join("password");
+    std::fs::write(&password, PASSWORD).unwrap();
+    let key = root.join("key");
+    std::fs::write(&key, "a2V5").unwrap();
+    let result = Command::new(env!("CARGO_BIN_EXE_vlite-server"))
+        .args(["cloud-restore", "--target-file"])
+        .arg(&target)
+        .arg("--shared-key-file")
+        .arg(&key)
+        .args(["--set", set, "--output"])
+        .arg(&output)
+        .args(["--admin-username", "recovery", "--admin-password-file"])
+        .arg(&password)
+        .env_remove("VLITE_CLOUD_BACKUP_SHARED_KEY_FILE")
+        .output()
+        .unwrap();
+    let stderr = String::from_utf8(result.stderr).unwrap();
+    assert_eq!(result.status.code(), Some(3), "{stderr}");
+    assert!(result.stdout.is_empty());
+    let record: Value = serde_json::from_slice(&fake.join().unwrap()).unwrap();
+    let body: Value = serde_json::from_str(stderr.trim()).unwrap();
+    assert_eq!(body["error"]["code"], "restore_cleanup_failed");
+    assert_eq!(body["report"]["pin_released"], false);
+    // The pin stays on the set, named in the report, until an operator
+    // removes it.
+    let pins = record["pins"].as_array().unwrap();
+    assert_eq!(pins.len(), 1, "{record}");
+    assert_eq!(pins[0]["id"], body["report"]["pin_id"]);
+    assert!(!stderr.contains(PASSWORD));
+    // The output was published and is usable.
+    let restored = vlite::Database::open(output.join("database.vlite")).unwrap();
+    assert_eq!(restored.get(1).unwrap().unwrap().payload, b"retained");
+}
+
+#[test]
+fn cloud_argument_errors_exit_one_with_a_json_error_and_no_effect() {
+    const MARKER: &str = "SYNTHETIC_SECRET_MARKER_005";
+    let directory = tempfile::tempdir().unwrap();
+    let root = directory.path();
+    let target = root.join("target.json");
+    let password = root.join("password");
+    let key = root.join("key");
+    let output = root.join("output");
+    // Loopback port 9 is closed; no case below gets that far.
+    std::fs::write(
+        &target,
+        json!({"account": "devstoreaccount1", "container": "vlite-data", "prefix": "cli/",
+            "endpoint": "http://127.0.0.1:9/devstoreaccount1", "auth": "emulator_shared_key"})
+        .to_string(),
+    )
+    .unwrap();
+    std::fs::write(&password, "correct horse battery staple").unwrap();
+    std::fs::write(&key, "a2V5").unwrap();
+    let os = std::ffi::OsString::from;
+    let mut baseline = vec![
+        os("cloud-restore"),
+        os("--target-file"),
+        target.into_os_string(),
+        os("--set"),
+        os("20260101T000000Z-0123456789abcdef"),
+        os("--output"),
+        output.clone().into_os_string(),
+        os("--admin-username"),
+        os("recovery"),
+        os("--admin-password-file"),
+        password.into_os_string(),
+        os("--shared-key-file"),
+        key.into_os_string(),
+        os("--mode"),
+        os("rekey"),
+    ];
+    // Per option, in baseline order: the code for an empty value.
+    let empty_codes = [
+        "invalid_target",
+        "invalid_input",
+        "invalid_input",
+        "invalid_username",
+        "invalid_password_file",
+        "invalid_shared_key",
+        "invalid_arguments",
+    ];
+    let mut cases = Vec::new();
+    for (pair, empty_code) in empty_codes.into_iter().enumerate() {
+        let index = 1 + pair * 2;
+        // The first five options are required.
+        if pair < 5 {
+            let mut missing = baseline.clone();
+            missing.drain(index..index + 2);
+            cases.push((missing, "invalid_arguments"));
+        }
+        let mut duplicate = baseline.clone();
+        duplicate.extend_from_slice(&baseline[index..index + 2]);
+        cases.push((duplicate, "invalid_arguments"));
+        let mut empty = baseline.clone();
+        empty[index + 1] = os("");
+        cases.push((empty, empty_code));
+        let no_value = vec![os("cloud-restore"), baseline[index].clone()];
+        cases.push((no_value, "invalid_arguments"));
+    }
+    baseline.extend([os("--unknown"), os(MARKER)]);
+    cases.push((baseline, "invalid_arguments"));
+    for (args, code) in [
+        (vec!["cloud-sets"], "invalid_arguments"),
+        (vec!["cloud-sets", "--target-file"], "invalid_arguments"),
+        (
+            vec!["cloud-sets", "--target-file", "", "--target-file", ""],
+            "invalid_arguments",
+        ),
+        (vec!["cloud-sets", "--set", MARKER], "invalid_arguments"),
+        (vec!["cloud-sets", "--target-file", ""], "invalid_target"),
+    ] {
+        cases.push((args.into_iter().map(os).collect(), code));
+    }
+    assert_eq!(cases.len(), 32);
+    for (args, code) in cases {
+        let result = Command::new(env!("CARGO_BIN_EXE_vlite-server"))
+            .args(&args)
+            .env_remove("VLITE_CLOUD_BACKUP_SHARED_KEY_FILE")
+            .output()
+            .unwrap();
+        let stderr = String::from_utf8(result.stderr).unwrap();
+        assert_eq!(result.status.code(), Some(1), "{args:?}: {stderr}");
+        assert!(result.stdout.is_empty(), "{args:?}");
+        let body: Value = serde_json::from_str(stderr.trim()).unwrap();
+        assert_eq!(body["error"]["code"], code, "{args:?}: {body}");
+        assert!(!stderr.contains(MARKER), "{args:?}: {stderr}");
+        assert!(!output.exists(), "{args:?}");
+        let staging = std::fs::read_dir(root).unwrap().any(|entry| {
+            let name = entry.unwrap().file_name();
+            name.to_string_lossy().starts_with(".vlite-cloud-restore")
+        });
+        assert!(!staging, "{args:?}");
+    }
+}
+
+#[test]
+fn databases_named_like_cloud_commands_need_a_path_prefix() {
+    let directory = tempfile::tempdir().unwrap();
+    for name in ["cloud-sets", "cloud-restore"] {
+        // A bare name is the command, so the server options are refused.
+        let bare = Command::new(env!("CARGO_BIN_EXE_vlite-server"))
+            .current_dir(directory.path())
+            .args([name, "--create-if-missing", "2"])
+            .output()
+            .unwrap();
+        assert_eq!(bare.status.code(), Some(1));
+        assert!(bare.stdout.is_empty());
+        let error: Value = serde_json::from_slice(&bare.stderr).unwrap();
+        assert_eq!(error["error"]["code"], "invalid_arguments");
+        assert!(!directory.path().join(name).exists());
+
+        // With ./ it is a database path and the server starts.
+        let mut child = Command::new(env!("CARGO_BIN_EXE_vlite-server"))
+            .current_dir(directory.path())
+            .arg(Path::new(".").join(name))
+            .args(["--create-if-missing", "2", "--bind", "127.0.0.1:0"])
+            .env_remove("VLITE_AUTH_TOKEN_FILE")
+            .env_remove("VLITE_PROVIDERS_FILE")
+            .env_remove("VLITE_ADMIN_DIR")
+            .env("VLITE_AUTH_TOKEN", TOKEN)
+            .stdout(Stdio::piped())
+            .stderr(Stdio::null())
+            .spawn()
+            .unwrap();
+        let stdout = child.stdout.take().unwrap();
+        let (sender, receiver) = mpsc::channel();
+        std::thread::spawn(move || {
+            let mut line = String::new();
+            BufReader::new(stdout).read_line(&mut line).unwrap();
+            let _ = sender.send(line);
+        });
+        let mut server = Server {
+            child,
+            address: String::new(),
+        };
+        let line = receiver.recv_timeout(Duration::from_secs(120)).unwrap();
+        server.address = line
+            .trim()
+            .strip_prefix("LISTENING http://")
+            .expect("startup address")
+            .to_owned();
+        assert_eq!(server.request("GET", "/ready", Value::Null).0, 200);
+        drop(server);
+        assert!(directory.path().join(name).is_file());
+    }
+}
