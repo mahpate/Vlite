@@ -168,7 +168,7 @@ jobs:
                            "compose.yaml", "compose.tls.yaml", "deploy/Caddyfile", "deploy/dashboard.conf", "Dockerfile",
                            "docs/REFERENCE.md", "docs/INSTALL.md", "docs/CONSOLE.md",
                            "docs/CONSOLE-ADMIN.md", "docs/DOCKER-OPERATIONS.md", "docs/CAPABILITIES.md",
-                           "docs/RELEASE-0.7.5.md", "docs/RELEASE-0.7.4.md", "docs/RELEASE-0.7.3.md", "docs/RELEASE-0.7.2.md", "docs/RELEASE-0.7.1.md", "docs/RELEASE-0.7.0.md", "docs/RELEASE-0.6.1.md", "docs/RELEASE-0.6.0.md", "docs/RELEASE-0.5.1.md", "docs/RELEASE-0.5.0.md", "docs/RELEASE-0.3.0.md", "docs/RELEASE-0.2.0.md",
+                           "docs/RELEASE-0.7.6.md", "docs/RELEASE-0.7.5.md", "docs/RELEASE-0.7.4.md", "docs/RELEASE-0.7.3.md", "docs/RELEASE-0.7.2.md", "docs/RELEASE-0.7.1.md", "docs/RELEASE-0.7.0.md", "docs/RELEASE-0.6.1.md", "docs/RELEASE-0.6.0.md", "docs/RELEASE-0.5.1.md", "docs/RELEASE-0.5.0.md", "docs/RELEASE-0.3.0.md", "docs/RELEASE-0.2.0.md",
                            "docs/GRAPH.md", "docs/GRAPH-QUERY.md", "docs/MCP.md", "docs/MEMORY.md", "src/openapi_graph.json",
                            "docs/API.md", "docs/STORAGE-FEATURES.md", "docs/KEY-VALUE.md", "docs/VECTORS.md",
                            "docs/SECURITY.md", "docs/WEBHOOKS.md", "docs/TOOLS.md",

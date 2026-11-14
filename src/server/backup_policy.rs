@@ -883,13 +883,22 @@ impl Runtime {
     /// `update` whose persistence failure is logged: the in-memory status is
     /// still current and the next write retries.
     fn note(&self, change: impl FnOnce(&mut Loaded)) {
-        if let Err(error) = self.update(change) {
-            logs::stderr(
-                "error",
-                "cloud_backup",
-                json!({"event":"cloud_backup_state_write_failed","code":error.code}).to_string(),
-            );
-        }
+        self.noted(change);
+    }
+
+    /// `note` that reports whether this runtime still owns the status: false
+    /// once fenced, when a successor settles (and audits) the same pending
+    /// publication again.
+    fn noted(&self, change: impl FnOnce(&mut Loaded)) -> bool {
+        let Err(error) = self.update(change) else {
+            return true;
+        };
+        logs::stderr(
+            "error",
+            "cloud_backup",
+            json!({"event":"cloud_backup_state_write_failed","code":error.code}).to_string(),
+        );
+        error.code != closed().code
     }
 
     /// The one authority check for remote publication writes: refused once
@@ -1283,6 +1292,8 @@ impl Runtime {
             Some(pending) => Some(self.settle(handle, &sets, &pending, now, &authorize)?),
             None => None,
         };
+        // Settling can block too: a fenced run never copies the database.
+        authorize()?;
         let admin = handle.admin.upgrade().ok_or_else(unavailable)?;
         // The configuration is read before and after the copy (outside the
         // database lock, so no lock order is introduced); a change between
@@ -1364,16 +1375,18 @@ impl Runtime {
     ) -> Result<Value, ApiError> {
         match sets.resolve_pending(pending, now, authorize) {
             Ok(Publication::Published(record)) => {
-                self.note(|l| {
+                let owned = self.noted(|l| {
                     l.status.pending = None;
                     bump(&mut l.status.published);
                     l.status.last_success_unix_ms = Some(now);
                     l.status.last_set = Some(record.set_id.clone());
                 });
-                handle.audit(
-                    json!({"event":"cloud_backup_published","set_id":record.set_id,
-                    "resolved":true}),
-                );
+                if owned {
+                    handle.audit(
+                        json!({"event":"cloud_backup_published","set_id":record.set_id,
+                        "resolved":true}),
+                    );
+                }
                 Ok(json!({"set_id":record.set_id,"outcome":"published"}))
             }
             Ok(Publication::Pending(_)) => Err(ApiError::new(
@@ -1385,9 +1398,10 @@ impl Runtime {
                 ),
             )),
             Err(error) if error.code == "cloud_publication_lost" => {
-                self.note(|l| l.status.pending = None);
-                handle.audit(json!({"event":"cloud_backup_publication_lost",
-                    "set_id":pending.set_id}));
+                if self.noted(|l| l.status.pending = None) {
+                    handle.audit(json!({"event":"cloud_backup_publication_lost",
+                        "set_id":pending.set_id}));
+                }
                 Ok(json!({"set_id":pending.set_id,"outcome":"lost"}))
             }
             Err(error) => Err(error),
@@ -2927,6 +2941,69 @@ mod tests {
         assert_eq!(set(&listing, &pending)["record"]["state"], "staging");
         assert_eq!(listing["sets"].as_array().unwrap().len(), 1);
         assert_eq!(status(&next)["pending"]["set_id"], pending);
+    }
+
+    #[test]
+    fn a_commit_that_lands_after_the_fence_is_audited_once_by_the_successor() {
+        // The fenced runtime cannot record the outcome, so its successor
+        // settles the same publication again; only the successor audits it.
+        let mut env = setup();
+        let mut admin = admin::AdminState::default();
+        admin.audit_log = Some(Arc::new(audit::Log::open(&env.root).unwrap()));
+        env.service.admin = Arc::new(admin);
+        let h = Handle::new(&env.service);
+        env.runtime
+            .configure(policy(json!({"drill_every":0})), &h, BASE)
+            .unwrap();
+        env.meta.fault(Op::Put, "record.json", Fault::Before, 1, 1);
+        env.meta.fault(Op::Get, "record.json", Fault::Before, 0, 1);
+        assert_eq!(code(env.runtime.run_now(&h)), "cloud_publication_unknown");
+        let pending = status(&env.runtime)["pending"]["set_id"]
+            .as_str()
+            .unwrap()
+            .to_owned();
+
+        let entered = Arc::new(AtomicBool::new(false));
+        let release = Arc::new(AtomicBool::new(false));
+        let (inside, gate) = (entered.clone(), release.clone());
+        env.meta
+            .hook(Op::Put, &format!("{pending}/record.json"), move || {
+                inside.store(true, Ordering::SeqCst);
+                while !gate.load(Ordering::SeqCst) {
+                    std::thread::sleep(Duration::from_millis(5));
+                }
+            });
+        let old = Arc::new(reopen(&env));
+        old.busy.store(true, Ordering::Release);
+        old.start_claimed(h.clone());
+        await_admitted(&old);
+        let deadline = Instant::now() + Duration::from_secs(10);
+        while !entered.load(Ordering::SeqCst) {
+            assert!(Instant::now() < deadline, "the commit was never attempted");
+            std::thread::sleep(Duration::from_millis(5));
+        }
+        assert!(!old.shutdown(Duration::from_millis(50)));
+        let next = reopen(&env);
+
+        release.store(true, Ordering::SeqCst);
+        assert!(old.shutdown(Duration::from_secs(10)));
+        let listing = next.list().unwrap();
+        assert_eq!(set(&listing, &pending)["record"]["state"], "published");
+        assert_eq!(listing["sets"].as_array().unwrap().len(), 1);
+        assert_eq!(status(&next)["pending"]["set_id"], pending);
+
+        let report = next.run_now(&h).unwrap();
+        assert_eq!(
+            report["settled"],
+            json!({"set_id":pending,"outcome":"published"})
+        );
+        let log = std::fs::read_to_string(env.root.join("audit.jsonl")).unwrap();
+        let audited = log
+            .lines()
+            .map(|line| serde_json::from_str::<Value>(line).unwrap())
+            .filter(|e| e["event"] == "cloud_backup_published" && e["set_id"] == pending)
+            .count();
+        assert_eq!(audited, 1);
     }
 
     #[test]

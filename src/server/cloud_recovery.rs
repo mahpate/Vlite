@@ -1889,7 +1889,9 @@ mod tests {
         assert_eq!(report["pin_removal"], route.as_str());
         assert!(error.message.contains(&route), "{}", error.message);
         // The message names --output, not its value; the report has it.
-        let output = display(&request.output);
+        let raw = display(&request.output);
+        let output = display(&std::fs::canonicalize(&request.output).unwrap());
+        assert!(!error.message.contains(&raw), "{}", error.message);
         assert!(!error.message.contains(&output), "{}", error.message);
         assert_eq!(report["output"], output.as_str());
         let body = error.to_json();
