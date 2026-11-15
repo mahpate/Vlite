@@ -6,18 +6,18 @@
   "capabilities": {
     "version": "0.7.6"
   },
-  "source_git_sha": "08076d7eceef271f58533d096aa860089319a1fc",
+  "source_git_sha": "08b506b3dbfbaceb69053dc06eab645d9d80933b",
   "source_git_dirty": false,
   "format_version": 5,
   "source_assets": {
     "admin-tools.js": "552a22f78633956fa74e0ae0a77afb4dcfcba2c14ac7ae4c7190d7698787045c",
     "ambience.js": "678612f0fe51412d5b8bce773f49333e3423154be61562a905908f7e41510087",
     "app.js": "74702ae3349e00d3318a42ad0526d3d83ce9562a4b2b139c73a2de6c5ac07ef3",
-    "console-tools.js": "df762ccd600206339969fe96c6a6e2d88baf700ec4ac897d7f3fa8bfb29f0c06",
+    "console-tools.js": "fab5e78d415a784f8976a2bf34e18eabca70fe1c725b164bfc17c925c8773b22",
     "graph.css": "fd125471b3613335c91ec0f9cc68b1499c25a27fbfe1f683a825544cab9efe9c",
     "graph.js": "02976f38ff2a4a23b5621b2639140d9082aea425cf75cb8b0d10925696554795",
     "graph3d.js": "0ef3b257f0304211838dd46417a89197df819da168e4aae465e7b59cd7a323c5",
-    "index.html": "f4ac0beacae68184c936def5bdd411a88b9b21d60ad0b566b2c4c2378c8f0616",
+    "index.html": "57ed5e227697a17b26b38a44b316857f3a5e2e61cb63bbaf4c9c4c54ec9f4393",
     "navigation.js": "2cba7240b3288d19e8536171c1498cf303a8b41de34fb7a1b2205a3330572bc5",
     "observability.js": "cce03d05074e86263a08b71eadb8298f3771d2b09878f1ddec78d638b8fb1d07",
     "style.css": "1b44fda7587f540fae1f1079103c3aec30bed68b7bcf3086c9bac2d248e27719"
@@ -77,12 +77,12 @@
     {
       "file": "current-search.png",
       "workspace": "Search",
-      "sha256": "3b4166b4c326b3754798a4de4160c32e1fd42fb71bcfd621f7f35f6abf5eabd1"
+      "sha256": "67ab0cca17a9bcd58ca4fc8abd39ab237d9671b874fa012deb79eb3fa0b31ce4"
     },
     {
       "file": "current-hybrid.png",
       "workspace": "Search",
-      "sha256": "78e6e32e0d35d9a033da4a3d1d10c9a8ad0b283fa1225240c222984698f8cf95"
+      "sha256": "70c4d1b98fd5574ec9313f4cfecf3bf5fcd4501c2c0723f4bfb2059f9814f193"
     },
     {
       "file": "current-retrieval.png",
@@ -122,17 +122,17 @@
     {
       "file": "current-observability.png",
       "workspace": "Observability",
-      "sha256": "99f171f37b2f9fd8446c12f4ba4947a65e980fa9abb980961e1596c039bfd9ce"
+      "sha256": "1b424919387de0b1228cef66fe912be4b3a37f7705e5732cbf08e4b2f8e5dd79"
     },
     {
       "file": "current-feed.png",
       "workspace": "Observability",
-      "sha256": "3db4f41f24854e941a06effdb6d4f19666362fdcd2fc236b1eb4502d781be638"
+      "sha256": "cf8b1728b2d7226705c37078628965deb524001f51600b0438310aede9620927"
     },
     {
       "file": "current-administration.png",
       "workspace": "Administration",
-      "sha256": "f89f22d74c4b98cbced0d56eacca6248fe2f0e7f7d3b643e9bf147c86324c664"
+      "sha256": "d76a6bc21619688a80ad5edefda2d7ac894e29bb966cf282616e4c2173b3144b"
     },
     {
       "file": "current-users.png",
@@ -142,7 +142,7 @@
     {
       "file": "current-backups.png",
       "workspace": "Administration",
-      "sha256": "7520228b422cec9c91cfba281ada6f353478f3af13dc9e2fee4e7eaec49a67cb"
+      "sha256": "a68b2867222b884be48a3b189e18695d41ab56ebd54067bfd5d5a183c7c77134"
     },
     {
       "file": "current-compaction.png",
@@ -152,12 +152,12 @@
     {
       "file": "current-credentials.png",
       "workspace": "Administration",
-      "sha256": "d4dd93af7eb58d58c45b5d92cda989d2ec49a448a05c616107680100587234a6"
+      "sha256": "b3ef4baea4e5cfe82e12ffee905fa95f2e8849854a07d0346f1634913e64a9af"
     },
     {
       "file": "current-tenants.png",
       "workspace": "Administration",
-      "sha256": "e9922b0642f514ea56cbfd2456ad59ded36344079bef1cd655da9fe42dbe6181"
+      "sha256": "a3844a4da863762d6f8e8563c7755cf494bb1b41f66129481dc3278746d1e972"
     },
     {
       "file": "current-automation.png",
@@ -177,12 +177,12 @@
     {
       "file": "current-replication.png",
       "workspace": "Administration",
-      "sha256": "64a440a7f9eb11351cfc5102104f7a3aa40aa40714859a4748bae774ff0e7e05"
+      "sha256": "68b22d4617e890d6ae20dfa5033e07bd05a81b4e741b4bcc338d0e3e7f8f20a2"
     },
     {
       "file": "current-developer.png",
       "workspace": "Developer Console",
-      "sha256": "b18b8d11a86ef3b00b6e3e31328d2fd0c533637338d3e0de4ce24f913b686cfe"
+      "sha256": "6931f0739d39bb860066443791a8db8c723af23f87cbdf1096ab951e5aa94a44"
     },
     {
       "file": "current-overview-dark.png",
