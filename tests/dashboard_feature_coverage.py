@@ -201,7 +201,7 @@ chain("GET", "/v1/changes", "feed-load", (
 ADMIN_SPECIAL = {
     "list-backups", "cred-list", "cred-table", "backup-verify", "backup-drill",
     "tenant-save-settings", "tenant-suspend", "tenant-resume", "replication-export",
-    "obs-refresh", "webhook-list", "tenant-list", "compaction-refresh", "compaction-cancel",
+    "obs-refresh", "webhook-list", "tenant-list", "compaction-refresh", "compaction-cancel", "cloud-backup-unpin",
 }
 ADMIN_DYNAMIC = {
     "/v1/admin/tenants/{id}": '`/v1/admin/tenants/${value}`',
@@ -210,6 +210,9 @@ ADMIN_DYNAMIC = {
     "/v1/admin/users/{id}/password": '`/v1/admin/users/${id}/password`',
     "/v1/admin/webhooks/{id}": '`/v1/admin/webhooks/${webhookId()}`',
     "/v1/admin/audit/persistent": '`/v1/admin/audit/persistent?limit=${limit}`',
+    "/v1/admin/cloud-backup/sets/{id}/drill": '`/v1/admin/cloud-backup/sets/${encodeURIComponent(item.id)}/drill`',
+    "/v1/admin/cloud-backup/sets/{id}/restore": '`/v1/admin/cloud-backup/sets/${encodeURIComponent(item.id)}/restore`',
+    "/v1/admin/cloud-backup/sets/{id}/pins": '`/v1/admin/cloud-backup/sets/${encodeURIComponent(item.id)}/pins`',
 }
 for (method, path), (script, control) in ADMIN_INVENTORY.items():
     if control in ADMIN_SPECIAL:
@@ -273,6 +276,11 @@ for path, expression in (
         ("async function cRefresh(mark, background = false)", expression),
         ("const cRead = (path) =>", 'ctx.background'),
     ), "admin-tools.js")
+# Cloud backup: releasing a hold builds its path (with the optional force flag) before the call.
+chain("DELETE", "/v1/admin/cloud-backup/sets/{id}/pins/{pin}", "cloud-backup-unpin", (
+    (on("cloud-backup-unpin"), 'const path = `/v1/admin/cloud-backup/sets/${encodeURIComponent(item.id)}/pins/${encodeURIComponent(pin)}${force ? "?force=true" : ""}`'),
+    (on("cloud-backup-unpin"), 'ctx.api("DELETE", path,'),
+), "admin-tools.js")
 
 # Collection management, resumable import and index lifecycle.
 for method, suffix, control in (

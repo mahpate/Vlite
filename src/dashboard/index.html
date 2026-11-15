@@ -784,6 +784,75 @@
     <button id="backup-schedule-run" data-admin data-feature="backup_schedule" type="button" class="secondary">Run one scheduled cycle now</button>
     <pre id="backup-schedule-result"></pre>
   </section>
+  <section id="admin-cloud-backup" class="wide cloud-backup">
+    <h2>Cloud backup (Azure Blob)</h2>
+    <p data-admin-availability="cloud_backup">Sign in to check cloud backup support.</p>
+    <p>Copies a verified snapshot of the whole database to your own Azure Blob Storage account, so you can recover even if this server's disk is lost. The server signs in to Azure with its managed identity: no password or key is entered here, and this page never shows one. Nothing is uploaded until you turn automatic backups on or select Back up now.</p>
+    <p id="cloud-backup-status" class="compaction-status" role="status" aria-live="polite" data-tone="idle">Cloud backup status not loaded.</p>
+    <dl id="cloud-backup-facts" class="compaction-facts" hidden></dl>
+    <div class="compaction-why">
+      <h3>Needs attention</h3>
+      <ul id="cloud-backup-reasons" hidden></ul>
+    </div>
+    <div class="compaction-actions">
+      <button id="cloud-backup-refresh" data-admin data-feature="cloud_backup" type="button" class="secondary">Refresh status</button>
+      <button id="cloud-backup-run" data-admin data-feature="cloud_backup" type="button" aria-describedby="cloud-backup-help">Back up now</button>
+      <button id="cloud-backup-collect" data-admin data-feature="cloud_backup" type="button" class="secondary" aria-describedby="cloud-backup-help">Clean up now</button>
+    </div>
+    <p id="cloud-backup-help" class="field-help">Sign in to use this.</p>
+    <fieldset class="compaction-schedule">
+      <legend>Where and how often</legend>
+      <label class="compaction-toggle"><input id="cloud-backup-enabled" type="checkbox" data-admin data-feature="cloud_backup"> Back up automatically</label>
+      <div class="compaction-grid">
+        <label>Storage account name (3 to 24 lowercase letters or digits)<input id="cloud-backup-account" data-admin data-feature="cloud_backup" spellcheck="false" autocomplete="off" aria-describedby="cloud-backup-account-error"></label>
+        <p id="cloud-backup-account-error" class="field-error" hidden></p>
+        <label>Container for backups (3 to 63 lowercase letters, digits or single hyphens)<input id="cloud-backup-container" data-admin data-feature="cloud_backup" spellcheck="false" autocomplete="off" aria-describedby="cloud-backup-container-error"></label>
+        <p id="cloud-backup-container-error" class="field-error" hidden></p>
+        <label>Separate container for coordination (optional, recommended)<input id="cloud-backup-coordination" data-admin data-feature="cloud_backup" spellcheck="false" autocomplete="off" aria-describedby="cloud-backup-coordination-error"></label>
+        <p id="cloud-backup-coordination-error" class="field-error" hidden></p>
+        <label>Folder in the container (for example vlite/prod/; must end with a slash)<input id="cloud-backup-prefix" data-admin data-feature="cloud_backup" spellcheck="false" autocomplete="off" aria-describedby="cloud-backup-prefix-error"></label>
+        <p id="cloud-backup-prefix-error" class="field-error" hidden></p>
+        <label>Managed identity client ID (optional; leave empty to use the server's own identity)<input id="cloud-backup-client-id" data-admin data-feature="cloud_backup" spellcheck="false" autocomplete="off" aria-describedby="cloud-backup-client-id-error"></label>
+        <p id="cloud-backup-client-id-error" class="field-error" hidden></p>
+        <label>Back up every (minutes, 5 to 10080)<input id="cloud-backup-interval" data-admin data-feature="cloud_backup" inputmode="decimal" aria-describedby="cloud-backup-interval-error"></label>
+        <p id="cloud-backup-interval-error" class="field-error" hidden></p>
+        <label>Test a restore after every N backups (0 to 100; 0 turns scheduled tests off)<input id="cloud-backup-drill-every" data-admin data-feature="cloud_backup" inputmode="numeric" aria-describedby="cloud-backup-drill-every-error"></label>
+        <p id="cloud-backup-drill-every-error" class="field-error" hidden></p>
+      </div>
+      <p id="cloud-backup-endpoint-note" class="field-help" hidden></p>
+      <label class="compaction-toggle"><input id="cloud-backup-retention" type="checkbox" data-admin data-feature="cloud_backup"> Delete old backups automatically</label>
+      <div class="compaction-grid">
+        <label>Always keep the newest (backups, 3 to 1000)<input id="cloud-backup-keep-sets" data-admin data-feature="cloud_backup" inputmode="numeric" aria-describedby="cloud-backup-keep-sets-error"></label>
+        <p id="cloud-backup-keep-sets-error" class="field-error" hidden></p>
+        <label>And every backup younger than (days, 30 to 3650)<input id="cloud-backup-keep-days" data-admin data-feature="cloud_backup" inputmode="numeric" aria-describedby="cloud-backup-keep-days-error"></label>
+        <p id="cloud-backup-keep-days-error" class="field-error" hidden></p>
+        <label>Remove unfinished uploads older than (hours, 1 to 720)<input id="cloud-backup-grace" data-admin data-feature="cloud_backup" inputmode="numeric" aria-describedby="cloud-backup-grace-error"></label>
+        <p id="cloud-backup-grace-error" class="field-error" hidden></p>
+      </div>
+      <p class="field-help">Nothing is ever deleted unless "Delete old backups automatically" is on. Even then the server keeps held backups, the newest verified backup and any backup being restored. Saving changes only these settings; it does not upload or delete anything.</p>
+      <button id="cloud-backup-save" data-admin data-feature="cloud_backup" type="button">Save cloud backup settings</button>
+    </fieldset>
+    <fieldset class="compaction-schedule">
+      <legend>Stored backups</legend>
+      <button id="cloud-backup-sets" data-admin data-feature="cloud_backup" type="button" class="secondary">Load stored backups</button>
+      <label>Backup<select id="cloud-backup-set-id" data-admin data-feature="cloud_backup" aria-describedby="cloud-backup-sets-help"></select></label>
+      <dl id="cloud-backup-set-facts" class="compaction-facts" hidden></dl>
+      <div class="compaction-actions">
+        <button id="cloud-backup-drill" data-admin data-feature="cloud_backup" type="button" class="secondary" aria-describedby="cloud-backup-sets-help">Test this backup</button>
+        <button id="cloud-backup-restore" data-admin data-feature="cloud_backup" type="button" aria-describedby="cloud-backup-sets-help">Restore as a new copy</button>
+      </div>
+      <div class="compaction-grid">
+        <label>Reason for holding this backup (1 to 200 characters)<input id="cloud-backup-pin-reason" data-admin data-feature="cloud_backup" maxlength="200" autocomplete="off" aria-describedby="cloud-backup-pin-reason-error"></label>
+        <p id="cloud-backup-pin-reason-error" class="field-error" hidden></p>
+      </div>
+      <button id="cloud-backup-pin" data-admin data-feature="cloud_backup" type="button" class="secondary" aria-describedby="cloud-backup-sets-help">Hold this backup</button>
+      <label>Existing hold<select id="cloud-backup-pin-id" data-admin data-feature="cloud_backup"></select></label>
+      <label class="compaction-toggle"><input id="cloud-backup-force" type="checkbox" data-admin data-feature="cloud_backup"> The operation that made this hold is no longer running; release it anyway</label>
+      <button id="cloud-backup-unpin" data-admin data-feature="cloud_backup" type="button" class="secondary" aria-describedby="cloud-backup-sets-help">Release hold</button>
+      <p id="cloud-backup-sets-help" class="field-help">Sign in to use this.</p>
+    </fieldset>
+    <pre id="cloud-backup-result" aria-live="polite"></pre>
+  </section>
   <section id="admin-compaction" class="wide compaction">
     <h2>File compaction</h2>
     <p data-admin-availability="compaction">Sign in to check file compaction support.</p>

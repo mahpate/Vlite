@@ -89,24 +89,21 @@ INVENTORY = {
     # The card polls the status and reads a watched job by id once a later run replaces it.
     ("GET", "/v1/admin/compaction/jobs/{id}"): ("admin-tools.js", "compaction-refresh"),
     ("POST", "/v1/admin/compaction/jobs/{id}/cancel"): ("admin-tools.js", "compaction-cancel"),
+    # Azure Blob cloud backup card (Administration > Backup & recovery > Cloud backup).
+    ("GET", "/v1/admin/cloud-backup"): ("admin-tools.js", "cloud-backup-refresh"),
+    ("PUT", "/v1/admin/cloud-backup"): ("admin-tools.js", "cloud-backup-save"),
+    ("POST", "/v1/admin/cloud-backup/run"): ("admin-tools.js", "cloud-backup-run"),
+    ("POST", "/v1/admin/cloud-backup/collect"): ("admin-tools.js", "cloud-backup-collect"),
+    ("GET", "/v1/admin/cloud-backup/sets"): ("admin-tools.js", "cloud-backup-sets"),
+    ("POST", "/v1/admin/cloud-backup/sets/{id}/drill"): ("admin-tools.js", "cloud-backup-drill"),
+    ("POST", "/v1/admin/cloud-backup/sets/{id}/restore"): ("admin-tools.js", "cloud-backup-restore"),
+    ("POST", "/v1/admin/cloud-backup/sets/{id}/pins"): ("admin-tools.js", "cloud-backup-pin"),
+    ("DELETE", "/v1/admin/cloud-backup/sets/{id}/pins/{pin}"): ("admin-tools.js", "cloud-backup-unpin"),
 }
 
 # Admin routes deliberately without a dashboard control. Each needs a reason, and
-# the dashboard must not half-implement one. Cloud backup is operated through the
-# REST API and the offline vlite-server cloud-sets/cloud-restore commands; its
-# dashboard card belongs to the separately approved admin dashboard work.
-CLOUD = "Azure Blob cloud backup: REST API and offline CLI only; no dashboard card in this milestone."
-BACKEND_ONLY = {
-    ("GET", "/v1/admin/cloud-backup"): CLOUD,
-    ("PUT", "/v1/admin/cloud-backup"): CLOUD,
-    ("POST", "/v1/admin/cloud-backup/run"): CLOUD,
-    ("POST", "/v1/admin/cloud-backup/collect"): CLOUD,
-    ("GET", "/v1/admin/cloud-backup/sets"): CLOUD,
-    ("POST", "/v1/admin/cloud-backup/sets/{id}/drill"): CLOUD,
-    ("POST", "/v1/admin/cloud-backup/sets/{id}/restore"): CLOUD,
-    ("POST", "/v1/admin/cloud-backup/sets/{id}/pins"): CLOUD,
-    ("DELETE", "/v1/admin/cloud-backup/sets/{id}/pins/{pin}"): CLOUD,
-}
+# the dashboard must not half-implement one.
+BACKEND_ONLY = {}
 
 # Graph routes (src/server/graph.rs).
 # graph.js builds its own controls inside <section id="graph"> (the Graph workspace), so the control id is

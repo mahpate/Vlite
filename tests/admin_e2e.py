@@ -588,6 +588,176 @@ def exercise(browser):
     context.close()
 
 
+CLOUD = "/v1/admin/cloud-backup"
+CLOUD_AT = 1794659400000  # 2026-11-14 12:30 UTC
+CLOUD_POLICY = {"target": {"account": "vlitebackups", "container": "backups", "coordination_container": "backups-lease",
+                           "prefix": "vlite/prod/", "auth": "managed_identity"},
+                "enabled": True, "interval_secs": 3600, "retention_enabled": True, "keep_sets": 5, "keep_days": 45,
+                "orphan_grace_hours": 12, "drill_every": 6}
+
+
+class CloudApi(AdminApi):
+    """The cloud backup REST API with its documented response shapes; nothing reaches Azure."""
+
+    def __init__(self, role="admin"):
+        super().__init__(role=role)
+        self.caps["features"]["cloud_backup"] = True
+        self.policy = None
+        self.busy = False
+        self.pins = [{"id": "p1", "reason": "restore", "created_unix_ms": CLOUD_AT, "kind": "operation"}]
+
+    def state(self):
+        return {"configured": self.policy is not None, "policy": self.policy, "policy_uncertain": False,
+                "installation_id": "inst-1", "running": False, "next_run_unix_ms": CLOUD_AT + 3600000,
+                "status": {"runs": 1, "published": 1, "failures": 0, "skipped_busy": 0,
+                           "last_success_unix_ms": CLOUD_AT, "last_set": "set-1"}}
+
+    def sets(self):
+        record = {"state": "published", "created_unix_ms": CLOUD_AT, "verified_unix_ms": CLOUD_AT,
+                  "last_drill": {"ok": True, "unix_ms": CLOUD_AT}, "pins": self.pins}
+        return {"installation_id": "inst-1", "tombstoned": [], "sets": [
+            {"set_id": "set-1", "data_objects": 4, "record": record},
+            {"set_id": "set-2", "data_objects": 1, "record": {**record, "state": "staging", "pins": []}}]}
+
+    def api(self, method, path, query, body, headers):
+        if path == CLOUD:
+            if method == "PUT":
+                self.policy = body
+            return 200, self.state(), {}
+        if path == CLOUD + "/run" and method == "POST":
+            if self.busy:
+                return self.error(409, "cloud_backup_busy")
+            return 200, {"set_id": "set-3", "drill": {"ok": True, "unix_ms": CLOUD_AT}}, {}
+        if path == CLOUD + "/sets" and method == "GET":
+            return 200, self.sets(), {}
+        prefix = CLOUD + "/sets/set-1"
+        if path == prefix + "/restore" and method == "POST":
+            return 200, {"name": "restore-set-1.vlite", "set_id": "set-1", "bundle": {"credentials": 2},
+                         "pin_released": True}, {}
+        if path == prefix + "/pins" and method == "POST":
+            pin = {"id": "p2", "reason": body["reason"], "created_unix_ms": CLOUD_AT, "kind": "operator"}
+            self.pins = [*self.pins, pin]
+            return 200, {"set_id": "set-1", "pin": pin}, {}
+        if path.startswith(prefix + "/pins/") and method == "DELETE":
+            pin = path.rsplit("/", 1)[1]
+            self.pins = [item for item in self.pins if item["id"] != pin]
+            return 200, {"set_id": "set-1", "pin_id": pin, "forced": query == "force=true"}, {}
+        return super().api(method, path, query, body, headers)
+
+
+def exercise_cloud_backup(browser):
+    fake = CloudApi()
+    context, page, errors = mocked_page(browser, fake)
+    card = control(page, "#admin-cloud-backup")
+    expect(card.locator('[data-admin-availability="cloud_backup"]')).to_have_text(
+        "Supported by this server. Select Refresh status to see whether it is set up.")
+    assert not [item for item in fake.log if item["path"].startswith(CLOUD)], "Cloud backup must not be read on connection"
+    expect(page.locator("#cloud-backup-run")).to_be_disabled()
+    control(page, "#cloud-backup-refresh").click()
+    expect(page.locator("#cloud-backup-status")).to_contain_text("Not set up yet")
+    expect(page.locator("#cloud-backup-interval")).to_have_value("60")
+
+    # Invalid settings are marked in place and nothing is sent.
+    page.locator("#cloud-backup-account").fill("Bad_Account")
+    page.locator("#cloud-backup-prefix").fill("vlite")
+    page.locator("#cloud-backup-save").click()
+    expect(page.locator("#cloud-backup-result")).to_have_text("Fix the highlighted settings; nothing was saved.")
+    expect(page.locator("#cloud-backup-account-error")).to_have_text("Enter 3 to 24 lowercase letters or digits.")
+    expect(page.locator("#cloud-backup-account")).to_have_attribute("aria-invalid", "true")
+    expect(page.locator("#cloud-backup-account")).to_be_focused()
+    expect(page.locator("#cloud-backup-prefix-error")).to_be_visible()
+    assert not calls(fake, CLOUD, "PUT")
+    for selector, value in (("#cloud-backup-account", "vlitebackups"), ("#cloud-backup-container", "backups"),
+                            ("#cloud-backup-coordination", "backups-lease"), ("#cloud-backup-prefix", "vlite/prod/"),
+                            ("#cloud-backup-keep-sets", "5"), ("#cloud-backup-keep-days", "45"),
+                            ("#cloud-backup-grace", "12"), ("#cloud-backup-drill-every", "6")):
+        page.locator(selector).fill(value)
+    expect(page.locator("#cloud-backup-account-error")).to_be_hidden()
+    page.locator("#cloud-backup-enabled").check()
+    page.locator("#cloud-backup-retention").check()
+    page.locator("#cloud-backup-save").click()
+    confirm(page, "Save cloud backup settings (account vlitebackups", accept=False)
+    assert not calls(fake, CLOUD, "PUT")
+    page.locator("#cloud-backup-save").click()
+    confirm(page, "keeping the newest 5 and any younger than 45 days")
+    expect(page.locator("#cloud-backup-result")).to_have_text("Saved. Automatic backups are on.")
+    assert calls(fake, CLOUD, "PUT")[-1]["body"] == CLOUD_POLICY, calls(fake, CLOUD, "PUT")[-1]["body"]
+    expect(page.locator("#cloud-backup-status")).to_have_text("On: a backup is made every 1 hour.")
+    expect(page.locator("#cloud-backup-facts")).to_contain_text("vlite/prod/")
+
+    page.locator("#cloud-backup-run").click()
+    confirm(page, "Back up to account vlitebackups now?")
+    expect(page.locator("#cloud-backup-result")).to_contain_text("Backup set-3 was uploaded. Restore test: Passed")
+    assert calls(fake, CLOUD + "/run", "POST")
+    fake.busy = True
+    page.locator("#cloud-backup-run").click()
+    confirm(page, "Back up to account vlitebackups now?")
+    expect(page.locator("#cloud-backup-result")).to_contain_text("Another cloud backup operation is running")
+
+    # Stored backups: an unfinished upload cannot be restored or held; a complete one can.
+    page.locator("#cloud-backup-sets").click()
+    expect(page.locator("#cloud-backup-result")).to_contain_text("2 stored backups found, newest first.")
+    page.locator("#cloud-backup-set-id").select_option("set-2")
+    for selector in ("#cloud-backup-drill", "#cloud-backup-restore", "#cloud-backup-pin"):
+        expect(page.locator(selector)).to_be_disabled()
+    page.locator("#cloud-backup-set-id").select_option("set-1")
+    expect(page.locator("#cloud-backup-set-facts")).to_contain_text("Stored files")
+    expect(page.locator("#cloud-backup-restore")).to_be_enabled()
+    page.locator("#cloud-backup-restore").click()
+    confirm(page, "The live database is not changed")
+    expect(page.locator("#cloud-backup-result")).to_contain_text("restored as a new copy named restore-set-1.vlite")
+    expect(page.locator("#cloud-backup-result")).to_contain_text("2 credentials must be issued again")
+    page.locator("#cloud-backup-pin").click()
+    expect(page.locator("#cloud-backup-pin-reason-error")).to_have_text("Enter a reason.")
+    expect(page.locator("#cloud-backup-pin-reason")).to_be_focused()
+    assert not calls(fake, CLOUD + "/sets/set-1/pins", "POST")
+    page.locator("#cloud-backup-pin-reason").fill("legal hold")
+    page.locator("#cloud-backup-pin").click()
+    expect(page.locator("#cloud-backup-result")).to_contain_text("Backup set-1 is held (hold p2)")
+    assert calls(fake, CLOUD + "/sets/set-1/pins", "POST")[-1]["body"] == {"reason": "legal hold"}
+    expect(page.locator("#cloud-backup-pin-id option")).to_have_count(2)
+    page.locator("#cloud-backup-pin-id").select_option("p1")
+    page.locator("#cloud-backup-force").check()
+    page.locator("#cloud-backup-unpin").click()
+    confirm(page, "no longer running")
+    expect(page.locator("#cloud-backup-result")).to_contain_text("Hold p1 released.")
+    assert calls(fake, CLOUD + "/sets/set-1/pins/p1", "DELETE")[-1]["query"] == "force=true"
+    expect(page.locator("#cloud-backup-force")).not_to_be_checked()
+
+    for width, height in ((1280, 900), (768, 1000), (390, 844)):
+        page.set_viewport_size({"width": width, "height": height})
+        control(page, "#admin-cloud-backup")
+        overflow = page.evaluate("""() => {
+            const card = document.querySelector('#admin-cloud-backup');
+            return { page: document.documentElement.scrollWidth - document.documentElement.clientWidth,
+                     card: card.scrollWidth - card.clientWidth };
+        }""")
+        assert overflow["page"] <= 0 and overflow["card"] <= 0, (width, overflow)
+    page.set_viewport_size({"width": 1280, "height": 900})
+    sign_out(page)
+    expect(page.locator("#cloud-backup-result")).to_have_text("")
+    expect(page.locator("#cloud-backup-status")).to_have_text("Cloud backup status not loaded.")
+    assert not errors, errors
+    context.close()
+
+    fake = CloudApi("read_only")
+    context, page, errors = mocked_page(browser, fake)
+    control(page, "#admin-cloud-backup")
+    expect(page.locator('[data-admin-availability="cloud_backup"]')).to_contain_text("Needs a super admin")
+    for selector in ("#cloud-backup-refresh", "#cloud-backup-save", "#cloud-backup-run", "#cloud-backup-sets"):
+        expect(page.locator(selector)).to_be_disabled()
+    assert not errors, errors
+    context.close()
+    fake = CloudApi()
+    fake.caps["features"]["cloud_backup"] = False
+    context, page, errors = mocked_page(browser, fake)
+    control(page, "#admin-cloud-backup")
+    expect(page.locator('[data-admin-availability="cloud_backup"]')).to_contain_text("Not available on this server.")
+    expect(page.locator("#cloud-backup-refresh")).to_be_disabled()
+    assert not errors, errors
+    context.close()
+
+
 if __name__ == "__main__":
     with sync_playwright() as playwright:
         browser = playwright.chromium.launch()
@@ -595,6 +765,7 @@ if __name__ == "__main__":
             exercise(browser)
             exercise_password(browser)
             exercise_password_memory_mode(browser)
+            exercise_cloud_backup(browser)
         finally:
             browser.close()
     print("PASS browser admin flows: identity badge, confirmations/cancel, tenant CRUD/usage/settings/"
@@ -604,3 +775,6 @@ if __name__ == "__main__":
           "headers, user add/save/reset/delete with self-protection, reload restore, ended session, account-menu "
           "password change and sign-out, token fallback and setup/HTTPS hints.")
     print("PASS password sign-in with agent memory enabled: the session's refused /metrics leaves sign-in working and says so.")
+    print("PASS cloud backup card: no read on connect, refresh, inline validation with focus, confirmed save with the "
+          "exact policy, run/busy, stored backups, restore as a copy, hold/forced release, no overflow, sign-out "
+          "clearing and role/feature gates.")

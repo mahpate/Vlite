@@ -154,7 +154,8 @@
       tenants: "Configure admin authentication and a private VLITE_ADMIN_DIR.",
       accounts: "Configure admin authentication and a private VLITE_ADMIN_DIR.",
       tls_reload: "Configure a file-backed native TLS listener. Plaintext and reverse-proxy TLS cannot be reloaded here.",
-      compaction: "Run the managed vlite-server with admin token authentication, a private VLITE_ADMIN_DIR, a durable database file and no gRPC listener."
+      compaction: "Run the managed vlite-server with admin token authentication, a private VLITE_ADMIN_DIR, a durable database file and no gRPC listener.",
+      cloud_backup: "Run the managed vlite-server with admin token authentication and a private VLITE_ADMIN_DIR."
     };
     document.querySelectorAll("[data-admin-availability]").forEach(element => {
       const name = element.dataset.adminAvailability;
@@ -162,6 +163,7 @@
         : capabilities.role !== "admin" ? "Needs a super admin. Your current sign-in cannot administer the server."
           : feature(name) ? (name === "compaction"
             ? "Supported by this server. The status below says whether compaction can run now."
+            : name === "cloud_backup" ? "Supported by this server. Select Refresh status to see whether it is set up."
             : "Available. Review each confirmation before changing anything.")
             : `Not available on this server. ${requirements[name] || "Use a server version that reports this capability."}`;
     });
@@ -568,7 +570,8 @@
     const controller = new AbortController();
     activeRequest = controller;
     $("cancel-request").disabled = false;
-    const timeout = setTimeout(() => controller.abort(), path.includes("/index/") ? 3600000 : 60000);
+    // Index builds and cloud backup publish/verify/restore move whole database files and can run for a long time.
+    const timeout = setTimeout(() => controller.abort(), path.includes("/index/") || /^\/v1\/admin\/cloud-backup\/(run|sets\/[^/?]+\/(drill|restore))$/.test(path) ? 3600000 : 60000);
     try {
       response = await fetch(`${apiBase}${path}`, {
         signal: controller.signal,

@@ -15,11 +15,10 @@ creation/rotation. Never log them.
 - `VLITE_READ_ONLY_TOKEN` or `VLITE_READ_ONLY_TOKEN_FILE` adds a read-only
   credential. Set one source only; an empty file disables it. It needs an
   admin token.
-- `--insecure-local` is loopback-only. Every caller is admin and there is no
-  sign-in.
-- `VLITE_TRUSTED_PROXY=1` is for when a TLS-terminating or local reverse proxy
-  fronts the API. Password sign-in otherwise needs HTTPS or a loopback-only
-  listener. Docker Compose sets it.
+- `--insecure-local` is loopback-only; every caller is admin, without sign-in.
+- Set `VLITE_TRUSTED_PROXY=1` behind a TLS-terminating or local reverse proxy
+  (Docker Compose does); otherwise password sign-in needs HTTPS or a
+  loopback-only listener.
 - `VLITE_SESSION_IDLE_MINUTES`, `VLITE_SESSION_MAX_HOURS`, `VLITE_ADMIN_USERNAME`
   and `VLITE_ADMIN_PASSWORD_FILE`: see [sign-in settings](SECURITY.md#dashboard-sign-in-and-accounts).
 
@@ -94,6 +93,9 @@ Listing and rotation show graph scope; rotation preserves permissions.
   stage a restored copy and select it for the next restart. Read the scheduled
   backup policy before editing it; runtime changes do not rewrite environment
   settings. No action replaces the live file.
+- **Cloud backup** (Azure Blob, off by default): policy, runs, clean-up,
+  drills, holds and new-copy restores. See
+  [API.md](API.md#cloud-backups-to-azure-blob-opt-in-off-by-default).
 - **File compaction** (experimental, local Linux ext4): shows status,
   plain reasons, safe **Cancel** and before/after bytes.
   **Compact now** pauses reads and writes (503), dropping older history.
@@ -110,8 +112,7 @@ Listing and rotation show graph scope; rotation preserves permissions.
   handshakes see the change.
 - **Replication export:** download a bounded log segment after a commit
   sequence. The budget defaults to 1 MiB (`1..16777216` bytes), and success
-  advances the input to `last_sequence`. Read-only keys and scoped keys with
-  database-wide `read` on `*` can use it. Segments contain database data;
+  advances the input to `last_sequence`. Segments contain database data;
   applying them needs an external replica workflow. Format v1–v3 files return
   409 `requires_format_v4`. A cursor past the end of the log returns 409
   `cursor_ahead`; start again from the replica's last applied sequence or 0.

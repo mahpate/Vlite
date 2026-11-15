@@ -30,7 +30,7 @@
     editor: [["editor", "One record"], ["write-json", "Bulk JSON"]],
     "data-tools": [["data-tools", "Quick import & export"], ["resumable-import", "Large file import"]],
     users: [["users", "Users"], ["credentials", "API keys"], ["tenants", "Tenants"], ["admin-token-management", "Admin tokens"], ["admin-persistent-audit", "Audit log"]],
-    "admin-backups": [["admin-backups", "Backups"], ["admin-backup-schedule", "Schedule"], ["admin-compaction", "File compaction"], ["admin-pitr", "Point-in-time restore"], ["replication", "Replication"]],
+    "admin-backups": [["admin-backups", "Backups"], ["admin-backup-schedule", "Schedule"], ["admin-cloud-backup", "Cloud backup"], ["admin-compaction", "File compaction"], ["admin-pitr", "Point-in-time restore"], ["replication", "Replication"]],
     "admin-auto-maintenance": [["admin-auto-maintenance", "Automation"], ["webhooks", "Webhooks"], ["transport-security", "TLS certificates"]]
   };
   // Links from earlier dashboard versions keep working.

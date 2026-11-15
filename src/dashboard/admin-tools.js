@@ -247,7 +247,7 @@
     const features = object(caps?.features) ? caps.features : {};
     const routes = Array.isArray(caps?.routes) ? caps.routes : [];
     const offline = { allowed: false, reason: "Sign in first." };
-    if (!connected || !object(caps)) return { users: offline, tenants: offline, lifecycle: offline, tls: offline, replication: offline, compaction: offline };
+    if (!connected || !object(caps)) return { users: offline, tenants: offline, lifecycle: offline, tls: offline, replication: offline, compaction: offline, cloudBackup: offline };
     const admin = role === "admin";
     const notAdmin = (what) => `${what} requires a super admin: a super-admin account or the bootstrap admin token (current role: ${role ?? "unknown"}). Editors, viewers, read-only and scoped credentials cannot use it.`;
     const users = !admin ? { allowed: false, reason: notAdmin("User management") }
@@ -273,7 +273,10 @@
     const compaction = !admin ? { allowed: false, reason: notAdmin("File compaction") }
       : features.compaction !== true ? { allowed: false, reason: "This server does not offer file compaction: it needs the managed vlite-server runtime with an admin directory (VLITE_ADMIN_DIR), a durable single-file database and no gRPC listener." }
       : { allowed: true, reason: "" };
-    return { users, tenants, lifecycle, tls, replication, compaction };
+    const cloudBackup = !admin ? { allowed: false, reason: notAdmin("Cloud backup") }
+      : features.cloud_backup !== true ? { allowed: false, reason: "This server does not offer cloud backup: it needs the managed vlite-server runtime with admin token authentication and a private admin directory (VLITE_ADMIN_DIR)." }
+      : { allowed: true, reason: "" };
+    return { users, tenants, lifecycle, tls, replication, compaction, cloudBackup };
   }
 
   const HINTS = {
@@ -310,6 +313,32 @@
     invalid_input: "The server rejected the input; nothing was changed.",
     invalid_query: "The server rejected the export parameters; nothing was exported.",
     invalid_id: "After sequence must be a canonical decimal u64.",
+    admin_directory_disabled: "Cloud backup needs a private admin directory (VLITE_ADMIN_DIR) on the server. Configure it and restart.",
+    cloud_backup_not_configured: "Cloud backup is not set up yet. Fill in the storage details and select Save cloud backup settings first.",
+    cloud_backup_busy: "Another cloud backup operation is running. Wait for it to finish, then select Refresh status.",
+    cloud_backup_policy_uncertain: "The saved settings could not be confirmed after a failure. Select Refresh status, or save the settings again, then retry.",
+    cloud_backup_closed: "The server is shutting down. Try again after it restarts.",
+    cloud_backup_requires_database_file: "Cloud backup needs the server to use a database file on disk, not an in-memory database. Nothing was uploaded.",
+    encrypted_cloud_backup_unqualified: "Cloud backup of an encrypted database is not supported yet. Nothing was uploaded or restored.",
+    memory_reservations_present: "Cloud backup is unavailable while agent memory is served by this server. Nothing was uploaded.",
+    unqualified_filesystem: "The disk holding the database has not been qualified for safe cloud backup (for example some network file shares). Nothing was uploaded.",
+    cloud_database_too_large: "The database is larger than the 1 GiB cloud backup limit. Nothing was uploaded.",
+    cloud_prefix_owned: "Another VLite installation already owns this folder in the container. Choose a different folder.",
+    cloud_store_failed: "Azure Storage refused or failed the request. Check the account, container and folder, and that the server's managed identity can use them, then try again.",
+    cloud_store_unavailable: "Azure Storage could not be reached just now. Try again shortly.",
+    cloud_publication_unknown: "The server could not confirm whether the backup finished uploading. Do not run it again blindly: it can create another backup. Select Load stored backups first.",
+    cloud_publication_unresolved: "The server could not confirm whether the backup finished uploading. Do not run it again blindly: it can create another backup. Select Load stored backups first.",
+    cloud_publication_lost: "An uploaded backup is no longer where the server left it. Select Refresh status and Load stored backups before doing anything else.",
+    cloud_set_not_found: "No stored backup has this ID. Select Load stored backups to refresh the list.",
+    cloud_set_unavailable: "This backup is not available: it is unfinished or being deleted. Choose a complete backup.",
+    cloud_set_unpublished: "This backup is not finished uploading. Choose a complete backup.",
+    cloud_set_corrupt: "The stored backup failed its integrity check. Do not rely on it; make a new backup.",
+    cloud_seed_mode_deferred: "Restoring as a seed is not available yet.",
+    restore_insufficient_space: "There is not enough free disk space in the server's admin directory for the restored copy. Free some space and try again.",
+    cloud_pins_full: "This backup already has the maximum number of holds. Release one first.",
+    cloud_pin_owned: "This hold belongs to a running operation, not an operator. Tick the override box only if that operation is no longer running.",
+    cloud_pin_in_use: "This server is still running the operation that made this hold, so it cannot be released.",
+    cloud_pin_not_found: "No hold with this ID exists on that backup. Select Load stored backups to refresh.",
   };
   function explain(error) {
     const message = String(error?.message ?? error);
@@ -467,6 +496,176 @@
     return `${h.slice(0, 8)}-${h.slice(8, 12)}-${h.slice(12, 16)}-${h.slice(16, 20)}-${h.slice(20)}`;
   }
 
+  // ---- Cloud backup (Administration > Backup & recovery) ----
+  const CLOUD_FIELDS = { account: "cloud-backup-account", container: "cloud-backup-container", coordination: "cloud-backup-coordination",
+    prefix: "cloud-backup-prefix", clientId: "cloud-backup-client-id", interval: "cloud-backup-interval", drillEvery: "cloud-backup-drill-every",
+    keepSets: "cloud-backup-keep-sets", keepDays: "cloud-backup-keep-days", grace: "cloud-backup-grace" };
+  const containerName = (name) => name.length >= 3 && name.length <= 63 && /^[a-z0-9]+(-[a-z0-9]+)*$/.test(name);
+  const prefixName = (name) => name.length >= 1 && name.length <= 200 && /^[a-z0-9._/-]+$/.test(name) && name.endsWith("/") && !name.startsWith("/")
+    && !name.includes("//") && !name.slice(0, -1).split("/").some((part) => part === "." || part === "..");
+  function cloudInterval(seconds) {
+    if (!Number.isFinite(seconds) || seconds <= 0) return "unknown";
+    const unit = (n, word) => `${n} ${word}${n === 1 ? "" : "s"}`;
+    if (seconds % 86400 === 0) return unit(seconds / 86400, "day");
+    if (seconds % 3600 === 0) return unit(seconds / 3600, "hour");
+    return unit(Number((seconds / 60).toFixed(2)), "minute");
+  }
+  // Server policy to form text; the interval is shown in minutes.
+  function cloudBackupForm(policy) {
+    const p = object(policy) ? policy : {};
+    const t = object(p.target) ? p.target : {};
+    const whole = (value, fallback) => String(Number.isSafeInteger(value) ? value : fallback);
+    return {
+      enabled: p.enabled === true, account: t.account ?? "", container: t.container ?? "", coordination: t.coordination_container ?? "",
+      prefix: t.prefix ?? "", clientId: t.client_id ?? "",
+      interval: Number.isFinite(p.interval_secs) ? String(Number((p.interval_secs / 60).toFixed(4))) : "60",
+      drillEvery: whole(p.drill_every, 24), retention: p.retention_enabled === true,
+      keepSets: whole(p.keep_sets, 3), keepDays: whole(p.keep_days, 30), grace: whole(p.orphan_grace_hours, 24),
+    };
+  }
+  // Form text to the server policy. Bounds mirror the server; errors are per field, in plain words.
+  // The page signs in with the server's managed identity only; a policy using anything else is left to the REST API.
+  function cloudBackupPolicy(fields, previous) {
+    const errors = {};
+    const text = (key) => String(fields?.[key] ?? "").trim();
+    const int = (key, min, max, message) => {
+      const value = /^\d{1,9}$/.test(text(key)) ? Number(text(key)) : NaN;
+      if (!(value >= min && value <= max)) { errors[key] = message; return null; }
+      return value;
+    };
+    const auth = previous?.target?.auth;
+    if (auth && auth !== "managed_identity") errors.account = "This server signs in with a test emulator key that this page cannot edit. Change it with the REST API.";
+    const account = text("account"), container = text("container"), coordination = text("coordination"), prefix = text("prefix"), clientId = text("clientId");
+    if (!errors.account && !/^[a-z0-9]{3,24}$/.test(account)) errors.account = "Enter 3 to 24 lowercase letters or digits.";
+    if (!containerName(container)) errors.container = "Enter 3 to 63 lowercase letters, digits or single hyphens, not starting or ending with a hyphen.";
+    if (coordination && !containerName(coordination)) errors.coordination = "Enter 3 to 63 lowercase letters, digits or single hyphens, or leave it empty.";
+    else if (coordination && coordination === container) errors.coordination = "Must be a different container from the one above.";
+    if (!prefixName(prefix)) errors.prefix = "Enter lowercase letters, digits, '.', '_', '-' and '/', ending with a slash (for example vlite/prod/), at most 200 characters, with no empty or dot-only parts.";
+    if (clientId && !/^[0-9a-fA-F-]{36}$/.test(clientId)) errors.clientId = "Enter the 36-character identity client ID (letters a-f, digits and hyphens), or leave it empty.";
+    const minutes = /^\d{1,6}(\.\d{1,4})?$/.test(text("interval")) ? Number(text("interval")) : NaN;
+    if (!(minutes >= 5 && minutes <= 10080)) errors.interval = "Enter minutes from 5 to 10080 (one week).";
+    const drillEvery = int("drillEvery", 0, 100, "Enter a whole number from 0 to 100.");
+    const keepSets = int("keepSets", 3, 1000, "Enter a whole number from 3 to 1000.");
+    const keepDays = int("keepDays", 30, 3650, "Enter whole days from 30 to 3650.");
+    const grace = int("grace", 1, 720, "Enter whole hours from 1 to 720.");
+    if (Object.keys(errors).length) return { errors };
+    return { errors, policy: {
+      target: { account, container, ...(coordination ? { coordination_container: coordination } : {}), prefix, auth: "managed_identity", ...(clientId ? { client_id: clientId } : {}) },
+      enabled: fields?.enabled === true, interval_secs: Math.round(minutes * 60), retention_enabled: fields?.retention === true,
+      keep_sets: keepSets, keep_days: keepDays, orphan_grace_hours: grace, drill_every: drillEvery,
+    } };
+  }
+  const cloudDrillText = (drill) => {
+    if (!object(drill)) return "Never";
+    const when = utcTime(drill.unix_ms);
+    // Status reports carry error {code, message}; a stored backup record carries a detail string.
+    const why = drill.error?.message ?? drill.error?.code ?? (typeof drill.detail === "string" && drill.detail ? drill.detail : "no reason recorded");
+    return drill.ok === true ? `Passed, ${when}` : `Failed, ${when}: ${why}`;
+  };
+  function cloudCollectionText(collection) {
+    if (!object(collection)) return "Never";
+    const when = utcTime(collection.unix_ms);
+    if (collection.ok !== true) return `Failed, ${when}: ${collection.error?.message ?? collection.error?.code ?? "no reason recorded"}`;
+    const result = object(collection.result) ? collection.result : {};
+    const count = (list) => Number.isSafeInteger(list?.count) ? list.count : Array.isArray(list) ? list.length : 0;
+    const failed = count(result.failures);
+    return `${when}: removed ${count(result.deleted)} old and ${count(result.orphans_deleted)} unfinished backups${collection.retention_enabled === true ? "" : " (automatic deletion of old backups is off)"}${failed ? `; ${failed} could not be removed` : ""}`;
+  }
+  // Pure view model of GET /v1/admin/cloud-backup.
+  function cloudBackupView(state) {
+    const idle = { headline: "Cloud backup status not loaded.", tone: "idle", facts: [], reasons: [], configured: false, uncertain: false, running: false, canRun: false };
+    if (!object(state)) return idle;
+    const policy = object(state.policy) ? state.policy : null;
+    const target = object(policy?.target) ? policy.target : {};
+    const status = object(state.status) ? state.status : {};
+    const configured = state.configured === true && policy !== null;
+    const uncertain = state.policy_uncertain === true;
+    const running = state.running === true || object(status.job);
+    const failedSince = Number.isSafeInteger(status.last_failure_unix_ms) && !(status.last_failure_unix_ms <= (status.last_success_unix_ms ?? 0));
+    const reasons = [];
+    let headline, tone;
+    if (uncertain) { headline = "The saved settings could not be confirmed after a failure. Select Refresh status, or save the settings again, before anything else can run."; tone = "blocked"; }
+    else if (!configured) { headline = "Not set up yet. Fill in the storage details below and save. Nothing is uploaded until you turn automatic backups on or select Back up now."; tone = "idle"; }
+    else if (running) { headline = "A backup or clean-up is running now."; tone = "busy"; }
+    else if (failedSince) { headline = "The latest backup failed. See what needs attention below."; tone = "blocked"; }
+    else if (policy.enabled === true) { headline = `On: a backup is made every ${cloudInterval(policy.interval_secs)}.`; tone = "ready"; }
+    else { headline = "Set up. Automatic backups are off; Back up now still works."; tone = "idle"; }
+    if (uncertain) reasons.push("The server could not confirm which settings are saved. The settings shown are the last confirmed ones.");
+    if (failedSince && object(status.last_error)) reasons.push(`The latest backup failed${status.last_error.code ? ` (${status.last_error.code})` : ""}: ${status.last_error.message ?? "no reason recorded"}`);
+    if (Number.isSafeInteger(status.interrupted) && status.interrupted > 0) reasons.push(`${status.interrupted} earlier run(s) did not finish because the server stopped. Clean up now removes what they left behind.`);
+    if (object(status.pending) && status.pending.set_id) reasons.push(`A backup upload (${status.pending.set_id}) has not been confirmed as complete yet.`);
+    if (object(status.last_drill) && status.last_drill.ok === false) reasons.push(`The latest restore test failed: ${status.last_drill.error?.message ?? status.last_drill.error?.code ?? "no reason recorded"}`);
+    if (object(status.last_collection) && status.last_collection.ok === false) reasons.push(`The latest clean-up failed: ${status.last_collection.error?.message ?? status.last_collection.error?.code ?? "no reason recorded"}`);
+    if (Number.isSafeInteger(status.clock_reset_unix_ms)) reasons.push(`The server clock moved backwards at ${utcTime(status.clock_reset_unix_ms)}, so scheduled times were reset to the clock.`);
+    const facts = [];
+    if (configured) {
+      facts.push(["Storage", `Account ${target.account}, container ${target.container}${target.coordination_container ? `, coordination container ${target.coordination_container}` : ""}, folder ${target.prefix}`]);
+      facts.push(["Automatic backups", policy.enabled === true ? `On, every ${cloudInterval(policy.interval_secs)}` : "Off"]);
+      if (policy.enabled === true) facts.push(["Next automatic backup", Number.isSafeInteger(state.next_run_unix_ms) ? utcTime(state.next_run_unix_ms) : "Not scheduled"]);
+      facts.push(["Old backups", policy.retention_enabled === true
+        ? `Deleted automatically, keeping the newest ${policy.keep_sets} and any younger than ${policy.keep_days} days`
+        : "Never deleted automatically"]);
+    }
+    if (typeof state.installation_id === "string") facts.push(["This server's ID", state.installation_id]);
+    if (configured || Number.isSafeInteger(status.runs)) {
+      facts.push(["Last successful backup", Number.isSafeInteger(status.last_success_unix_ms)
+        ? `${utcTime(status.last_success_unix_ms)}${status.last_set ? `, backup ${status.last_set}` : ""}` : "Never"]);
+      facts.push(["Backups so far", `${status.published ?? 0} made, ${status.failures ?? 0} failed, ${status.skipped_busy ?? 0} skipped because the server was busy`]);
+      facts.push(["Last restore test", cloudDrillText(status.last_drill)]);
+      facts.push(["Last clean-up", cloudCollectionText(status.last_collection)]);
+    }
+    return { headline, tone, facts, reasons, configured, uncertain, running, canRun: configured && !uncertain && !running };
+  }
+  // Outcome text of POST /v1/admin/cloud-backup/run.
+  function cloudRunOutcome(value) {
+    if (!object(value)) return "The backup finished.";
+    const parts = [`Backup ${value.set_id ?? "(unnamed)"} was uploaded.`];
+    if (value.stopped_for_shutdown === true) parts.push("The server began shutting down, so the restore test and clean-up were skipped.");
+    else {
+      if (object(value.drill)) parts.push(`Restore test: ${cloudDrillText(value.drill)}.`);
+      if (object(value.collection)) parts.push(`Clean-up: ${cloudCollectionText(value.collection)}.`);
+    }
+    return parts.join(" ");
+  }
+  // Outcome text of POST /v1/admin/cloud-backup/sets/{id}/restore: it writes a copy and never touches the live database.
+  function cloudRestoreOutcome(value) {
+    if (!object(value)) return "The restore finished.";
+    const parts = [`Backup ${value.set_id ?? "(unnamed)"} was restored as a new copy named ${value.name ?? "(unnamed)"} in the server's admin directory. The live database was not changed.`];
+    // Backups never carry secrets: the bundle only counts what must be issued again.
+    const reissue = Number.isSafeInteger(value.bundle?.credentials) ? value.bundle.credentials : 0;
+    if (reissue) parts.push(`${reissue} credential${reissue === 1 ? "" : "s"} must be issued again for the restored copy, because backups never contain secrets.`);
+    if (value.pin_released === false) parts.push("The temporary hold this restore placed on the backup could not be released: load stored backups, choose it under Existing hold, tick the box below it and select Release hold.");
+    parts.push("To use the copy: open Backups and restore above, select List snapshots, choose it under Restored copy for next startup, select Select restored copy for restart, then have an operator restart the server.");
+    return parts.join(" ");
+  }
+  // View model of GET /v1/admin/cloud-backup/sets: newest first (set IDs start with their creation time).
+  function cloudBackupSets(value) {
+    const items = (Array.isArray(value?.sets) ? value.sets : []).filter((s) => object(s) && typeof s.set_id === "string").map((s) => {
+      const record = object(s.record) ? s.record : null;
+      const complete = record?.state === "published";
+      const pins = (Array.isArray(record?.pins) ? record.pins : []).filter((p) => object(p) && typeof p.id === "string")
+        .map((p) => ({ id: p.id, label: `${p.kind === "operation" ? "Held by a running operation" : "Held by an operator"}: ${p.reason ?? "no reason"}` }));
+      const state = !record ? "unreadable" : complete ? "complete" : "unfinished";
+      return { id: s.set_id, complete, pins, state, record, error: object(s.error) ? s.error : null, objects: s.data_objects,
+        label: `${record ? utcTime(record.created_unix_ms) : "unknown time"}, ${state}${pins.length ? ", held" : ""} (${s.set_id})` };
+    }).sort((a, b) => (a.id < b.id ? 1 : a.id > b.id ? -1 : 0));
+    return { items, removing: Array.isArray(value?.tombstoned) ? value.tombstoned.length : 0 };
+  }
+  function cloudBackupSetFacts(item) {
+    if (!object(item)) return [];
+    const r = item.record;
+    const facts = [["Backup ID", item.id], ["State", item.state === "complete" ? "Complete" : item.state === "unfinished" ? "Unfinished upload" : "Could not be read"]];
+    if (r) {
+      facts.push(["Created", utcTime(r.created_unix_ms)]);
+      if (Number.isSafeInteger(r.verified_unix_ms)) facts.push(["Last verified", utcTime(r.verified_unix_ms)]);
+      facts.push(["Restore test", cloudDrillText(r.last_drill)]);
+      facts.push(["Holds", item.pins.length ? String(item.pins.length) : "None"]);
+    }
+    if (Number.isSafeInteger(item.objects)) facts.push(["Stored files", String(item.objects)]);
+    if (item.error) facts.push(["Problem", item.error.message ?? item.error.code ?? "unknown"]);
+    return facts;
+  }
+
   function init(ctx) {
     const $ = (id) => document.getElementById(id);
     const controls = ["tenant-list", "tenant-name", "tenant-max-vectors", "tenant-create", "tenant-id", "tenant-delete", "tenant-result",
@@ -479,9 +678,18 @@
       "compaction-history-policy-error", "compaction-start-utc", "compaction-start-utc-error", "compaction-local-time", "compaction-window", "compaction-window-error",
       "compaction-max-run", "compaction-max-run-error", "compaction-min-file", "compaction-min-file-error", "compaction-min-growth", "compaction-min-growth-error",
       "compaction-growth-percent", "compaction-growth-percent-error", "compaction-cooldown", "compaction-cooldown-error", "compaction-max-source",
-      "compaction-max-source-error", "compaction-save", "compaction-result"];
+      "compaction-max-source-error", "compaction-save", "compaction-result",
+      "cloud-backup-status", "cloud-backup-facts", "cloud-backup-reasons", "cloud-backup-refresh", "cloud-backup-run", "cloud-backup-collect", "cloud-backup-help",
+      "cloud-backup-enabled", "cloud-backup-account", "cloud-backup-account-error", "cloud-backup-container", "cloud-backup-container-error",
+      "cloud-backup-coordination", "cloud-backup-coordination-error", "cloud-backup-prefix", "cloud-backup-prefix-error",
+      "cloud-backup-client-id", "cloud-backup-client-id-error", "cloud-backup-interval", "cloud-backup-interval-error",
+      "cloud-backup-drill-every", "cloud-backup-drill-every-error", "cloud-backup-endpoint-note", "cloud-backup-retention",
+      "cloud-backup-keep-sets", "cloud-backup-keep-sets-error", "cloud-backup-keep-days", "cloud-backup-keep-days-error",
+      "cloud-backup-grace", "cloud-backup-grace-error", "cloud-backup-save", "cloud-backup-sets", "cloud-backup-set-id", "cloud-backup-set-facts",
+      "cloud-backup-drill", "cloud-backup-restore", "cloud-backup-pin-reason", "cloud-backup-pin-reason-error", "cloud-backup-pin",
+      "cloud-backup-pin-id", "cloud-backup-force", "cloud-backup-unpin", "cloud-backup-sets-help", "cloud-backup-result"];
     for (const name of controls) if (!$(name)) throw new Error(`admin markup is missing control #${name}`);
-    const OUTPUTS = { users: "user-result", tenants: "tenant-result", tls: "tls-result", replication: "replication-result", compaction: "compaction-result" };
+    const OUTPUTS = { users: "user-result", tenants: "tenant-result", tls: "tls-result", replication: "replication-result", compaction: "compaction-result", cloudBackup: "cloud-backup-result" };
     const TARGETS = { ...OUTPUTS, lifecycle: "tenant-result" };
     let epoch = 0;
     let segment = null;
@@ -881,11 +1089,201 @@
       cRender(value);
       show("compaction-result", `Saved. Automatic compaction is ${settings.enabled ? "on" : "off"} (settings version ${value?.settings_version ?? "?"}).`);
     });
+    // Cloud backup to Azure Blob. Status loads on Refresh status; nothing is fetched automatically.
+    const CLOUD_INPUTS = [...Object.values(CLOUD_FIELDS), "cloud-backup-enabled", "cloud-backup-retention"];
+    let cbState = null, cbView = cloudBackupView(null), cbDirty = false, cbSets = null;
+    const cloudFieldError = (id, message) => {
+      const input = $(id), note = $(`${id}-error`);
+      input.setAttribute?.("aria-invalid", message ? "true" : "false");
+      if (note) { note.textContent = message || ""; note.hidden = !message; }
+    };
+    const cloudFields = () => ({ enabled: $("cloud-backup-enabled").checked, retention: $("cloud-backup-retention").checked,
+      ...Object.fromEntries(Object.entries(CLOUD_FIELDS).map(([key, id]) => [key, $(id).value])) });
+    const cloudFill = (policy) => {
+      const form = cloudBackupForm(policy);
+      $("cloud-backup-enabled").checked = form.enabled;
+      $("cloud-backup-retention").checked = form.retention;
+      for (const [key, id] of Object.entries(CLOUD_FIELDS)) { $(id).value = form[key]; cloudFieldError(id, ""); }
+    };
+    const factRow = ([term, value]) => {
+      const row = document.createElement("div"), dt = document.createElement("dt"), dd = document.createElement("dd");
+      dt.textContent = term; dd.textContent = value; row.append(dt, dd); return row;
+    };
+    function cloudRender(state) {
+      cbState = object(state) ? state : null;
+      cbView = cloudBackupView(cbState);
+      $("cloud-backup-status").textContent = cbView.headline;
+      $("cloud-backup-status").setAttribute?.("data-tone", cbView.tone);
+      cList("cloud-backup-facts", cbView.facts, factRow);
+      cList("cloud-backup-reasons", cbView.reasons, (text) => { const li = document.createElement("li"); li.textContent = text; return li; });
+      const target = object(cbState?.policy?.target) ? cbState.policy.target : null;
+      const note = $("cloud-backup-endpoint-note");
+      note.textContent = !target ? ""
+        : target.auth && target.auth !== "managed_identity" ? "This server signs in to a local test emulator with a key set through the REST API. This page shows its status but cannot change its settings."
+        : target.endpoint ? `Storage address: ${target.endpoint}.` : "";
+      note.hidden = !note.textContent;
+      if (!cbDirty) cloudFill(object(cbState?.policy) ? cbState.policy : null);
+      gateCloudBackup();
+    }
+    const selectedSet = () => cbSets?.items.find((item) => item.id === $("cloud-backup-set-id").value) ?? null;
+    const option = (value, text) => { const o = document.createElement("option"); o.value = value; o.textContent = text; return o; };
+    function cloudSelection() {
+      const item = selectedSet();
+      cList("cloud-backup-set-facts", cloudBackupSetFacts(item), factRow);
+      const pins = $("cloud-backup-pin-id"), previous = pins.value;
+      pins.replaceChildren?.(...(item?.pins ?? []).map((pin) => option(pin.id, pin.label)));
+      pins.value = item?.pins.some((pin) => pin.id === previous) ? previous : item?.pins[0]?.id ?? "";
+      gateCloudBackup();
+    }
+    function cloudFillSets(value) {
+      cbSets = cloudBackupSets(value);
+      const select = $("cloud-backup-set-id"), previous = select.value;
+      select.replaceChildren?.(...cbSets.items.map((item) => option(item.id, item.label)));
+      select.value = cbSets.items.some((item) => item.id === previous) ? previous : cbSets.items[0]?.id ?? "";
+      cloudSelection();
+      const count = cbSets.items.length;
+      return `${count ? `${count} stored backup${count === 1 ? "" : "s"} found, newest first.` : "No stored backups yet."}${cbSets.removing ? ` ${cbSets.removing} more ${cbSets.removing === 1 ? "is" : "are"} being removed.` : ""}`;
+    }
+    function gateCloudBackup(offline = false) {
+      const allowed = !offline && gates.cloudBackup.allowed;
+      const editable = allowed && !cbView.running && !(cbState?.policy?.target?.auth && cbState.policy.target.auth !== "managed_identity");
+      for (const id of CLOUD_INPUTS) $(id).disabled = !editable;
+      $("cloud-backup-save").disabled = !editable;
+      $("cloud-backup-refresh").disabled = $("cloud-backup-sets").disabled = !allowed;
+      $("cloud-backup-run").disabled = $("cloud-backup-collect").disabled = !allowed || !cbView.canRun;
+      $("cloud-backup-help").textContent = !allowed ? gates.cloudBackup.reason
+        : !cbState ? "Select Refresh status first."
+        : cbView.uncertain ? "Back up now and Clean up now are off until the saved settings are confirmed."
+        : !cbView.configured ? "Save the storage details below before backing up."
+        : cbView.running ? "A backup or clean-up is running. Select Refresh status to see when it finishes."
+        : "Back up now uploads a new backup at once and may take several minutes. Clean up now removes old and unfinished backups as the settings allow.";
+      const item = allowed ? selectedSet() : null;
+      const pin = $("cloud-backup-pin-id").value;
+      $("cloud-backup-set-id").disabled = !allowed || !cbSets?.items.length;
+      $("cloud-backup-drill").disabled = $("cloud-backup-restore").disabled = !item?.complete || !cbView.canRun;
+      $("cloud-backup-pin-reason").disabled = $("cloud-backup-pin").disabled = !item?.complete;
+      $("cloud-backup-pin-id").disabled = $("cloud-backup-force").disabled = $("cloud-backup-unpin").disabled = !item || !pin;
+      $("cloud-backup-sets-help").textContent = !allowed ? gates.cloudBackup.reason
+        : !cbSets ? "Select Load stored backups to list the backups in your storage account."
+        : !cbSets.items.length ? "There are no stored backups yet."
+        : !item ? "Choose a backup."
+        : !item.complete ? "This backup is not complete, so it cannot be tested, restored or held. Clean up now removes unfinished uploads."
+        : !cbView.canRun ? "Test and Restore are off while a backup runs or the settings are not confirmed; select Refresh status."
+        : "Test this backup checks that it can be read and restored without changing anything. Restore as a new copy writes a separate database file; the live database is not changed.";
+    }
+    for (const id of CLOUD_INPUTS) $(id).addEventListener("input", () => { cbDirty = true; if (Object.values(CLOUD_FIELDS).includes(id)) cloudFieldError(id, ""); });
+    $("cloud-backup-pin-reason").addEventListener("input", () => cloudFieldError("cloud-backup-pin-reason", ""));
+    $("cloud-backup-set-id").addEventListener("change", cloudSelection);
+    $("cloud-backup-pin-id").addEventListener("change", () => gateCloudBackup());
+    on("cloud-backup-refresh", "cloudBackup", async (mark) => {
+      need("cloudBackup");
+      cbDirty = false;
+      const value = await ctx.api("GET", "/v1/admin/cloud-backup", undefined, { data: false });
+      if (!current(mark)) return;
+      cloudRender(value);
+      show("cloud-backup-result", "Status refreshed.");
+    });
+    on("cloud-backup-save", "cloudBackup", async (mark) => {
+      need("cloudBackup");
+      if (!cbState) throw new Error("Select Refresh status first.");
+      const { policy, errors } = cloudBackupPolicy(cloudFields(), cbState.policy);
+      for (const [key, id] of Object.entries(CLOUD_FIELDS)) cloudFieldError(id, errors[key] ?? "");
+      if (!policy) {
+        focusAfterRun(CLOUD_FIELDS[Object.keys(errors)[0]]);
+        throw new Error("Fix the highlighted settings; nothing was saved.");
+      }
+      const where = `account ${policy.target.account}, container ${policy.target.container}, folder ${policy.target.prefix}`;
+      const summary = `Save cloud backup settings (${where})? ${policy.enabled ? `Automatic backups are on: one every ${cloudInterval(policy.interval_secs)}.` : "Automatic backups are off; nothing is uploaded until you select Back up now."} ${policy.retention_enabled ? `Old backups are deleted automatically, keeping the newest ${policy.keep_sets} and any younger than ${policy.keep_days} days.` : "Old backups are never deleted automatically."} Saving does not upload or delete anything by itself.`;
+      if (!await ctx.confirm(summary)) return;
+      if (!current(mark)) return;
+      const value = await ctx.api("PUT", "/v1/admin/cloud-backup", policy, { data: false });
+      if (!current(mark)) return;
+      cbDirty = false;
+      cloudRender(value);
+      show("cloud-backup-result", `Saved. Automatic backups are ${policy.enabled ? "on" : "off"}.`);
+    });
+    on("cloud-backup-run", "cloudBackup", async (mark) => {
+      need("cloudBackup");
+      if (!cbView.canRun) throw new Error("Select Refresh status and make sure cloud backup is set up first.");
+      if (!await ctx.confirm(`Back up to account ${cbState.policy.target.account} now? This uploads a new full backup and may take several minutes. Each backup is stored separately; old ones are removed only if automatic deletion is on.`)) return;
+      if (!current(mark)) return;
+      const value = await ctx.api("POST", "/v1/admin/cloud-backup/run", undefined, { data: false });
+      if (!current(mark)) return;
+      show("cloud-backup-result", cloudRunOutcome(value));
+      cloudRender(await ctx.api("GET", "/v1/admin/cloud-backup", undefined, { data: false }));
+    });
+    on("cloud-backup-collect", "cloudBackup", async (mark) => {
+      need("cloudBackup");
+      if (!cbView.canRun) throw new Error("Select Refresh status and make sure cloud backup is set up first.");
+      const retention = cbState.policy.retention_enabled === true;
+      if (!await ctx.confirm(`Clean up now? This removes unfinished uploads older than ${cbState.policy.orphan_grace_hours} hours${retention ? ` and old backups beyond the newest ${cbState.policy.keep_sets} that are older than ${cbState.policy.keep_days} days` : ". Old complete backups are kept because automatic deletion is off"}. Held backups and the newest verified backup are never removed. Removed backups cannot be recovered.`)) return;
+      if (!current(mark)) return;
+      const value = await ctx.api("POST", "/v1/admin/cloud-backup/collect", undefined, { data: false });
+      if (!current(mark)) return;
+      show("cloud-backup-result", `Clean-up ${cloudCollectionText(value)}`);
+      cloudRender(await ctx.api("GET", "/v1/admin/cloud-backup", undefined, { data: false }));
+    });
+    const reloadSets = async (mark) => {
+      const value = await ctx.api("GET", "/v1/admin/cloud-backup/sets", undefined, { data: false });
+      return current(mark) ? cloudFillSets(value) : "";
+    };
+    on("cloud-backup-sets", "cloudBackup", async (mark) => {
+      need("cloudBackup");
+      const value = await ctx.api("GET", "/v1/admin/cloud-backup/sets", undefined, { data: false });
+      if (current(mark)) show("cloud-backup-result", cloudFillSets(value));
+    });
+    on("cloud-backup-drill", "cloudBackup", async (mark) => {
+      need("cloudBackup");
+      const item = selectedSet();
+      if (!item?.complete) throw new Error("Choose a complete backup first.");
+      if (!await ctx.confirm(`Test backup ${item.id}? The server downloads it, checks every file and opens a temporary copy, then deletes the copy. The live database and the stored backup are not changed. This may take several minutes.`)) return;
+      if (!current(mark)) return;
+      const value = await ctx.api("POST", `/v1/admin/cloud-backup/sets/${encodeURIComponent(item.id)}/drill`, undefined, { data: false });
+      if (!current(mark)) return;
+      const text = `Restore test of ${item.id}: ${cloudDrillText(value?.drill ?? value)}.`;
+      show("cloud-backup-result", `${text} ${await reloadSets(mark)}`);
+    });
+    on("cloud-backup-restore", "cloudBackup", async (mark) => {
+      need("cloudBackup");
+      const item = selectedSet();
+      if (!item?.complete) throw new Error("Choose a complete backup first.");
+      if (!await ctx.confirm(`Restore backup ${item.id} as a new copy? The server downloads it and writes a separate database file in its admin directory. The live database is not changed; to switch to the copy, select it under Backups and restore and restart the server. Credentials are not included in backups and must be issued again.`)) return;
+      if (!current(mark)) return;
+      const value = await ctx.api("POST", `/v1/admin/cloud-backup/sets/${encodeURIComponent(item.id)}/restore`, undefined, { data: false });
+      if (current(mark)) show("cloud-backup-result", cloudRestoreOutcome(value));
+    });
+    on("cloud-backup-pin", "cloudBackup", async (mark) => {
+      need("cloudBackup");
+      const item = selectedSet();
+      if (!item?.complete) throw new Error("Choose a complete backup first.");
+      const reason = $("cloud-backup-pin-reason").value.trim();
+      const problem = !reason ? "Enter a reason." : utf8Length(reason) > 200 ? "Use at most 200 characters (accented letters and symbols count as two or more)."
+        : /[\u0000-\u001f\u007f-\u009f]/.test(reason) ? "Remove line breaks and other control characters." : "";
+      cloudFieldError("cloud-backup-pin-reason", problem);
+      if (problem) { focusAfterRun("cloud-backup-pin-reason"); throw new Error(`${problem} Nothing was held.`); }
+      const value = await ctx.api("POST", `/v1/admin/cloud-backup/sets/${encodeURIComponent(item.id)}/pins`, { reason }, { data: false });
+      if (!current(mark)) return;
+      $("cloud-backup-pin-reason").value = "";
+      show("cloud-backup-result", `Backup ${item.id} is held (hold ${value?.pin?.id ?? "created"}); clean-up will not remove it until the hold is released. ${await reloadSets(mark)}`);
+    });
+    on("cloud-backup-unpin", "cloudBackup", async (mark) => {
+      need("cloudBackup");
+      const item = selectedSet(), pin = $("cloud-backup-pin-id").value, force = $("cloud-backup-force").checked;
+      if (!item || !pin) throw new Error("Choose a backup and one of its holds first.");
+      if (!await ctx.confirm(`Release hold ${pin} on backup ${item.id}? Clean-up may then remove the backup if it is old enough and automatic deletion is on.${force ? " You confirmed the operation that made this hold is no longer running." : ""}`)) return;
+      if (!current(mark)) return;
+      const path = `/v1/admin/cloud-backup/sets/${encodeURIComponent(item.id)}/pins/${encodeURIComponent(pin)}${force ? "?force=true" : ""}`;
+      await ctx.api("DELETE", path, undefined, { data: false });
+      if (!current(mark)) return;
+      $("cloud-backup-force").checked = false;
+      show("cloud-backup-result", `Hold ${pin} released. ${await reloadSets(mark)}`);
+    });
     function gate(offline = false) {
       gates = availability(ctx.capabilities(), !offline && ctx.connected());
       $("replication-export").disabled = !gates.replication.allowed;
       $("replication-download").disabled = !gates.replication.allowed || segment === null;
       gateCompaction(offline);
+      gateCloudBackup(offline);
     }
     function reset() {
       epoch++;
@@ -896,6 +1294,15 @@
       $("compaction-status").textContent = "Compaction status not loaded.";
       cList("compaction-facts", [], () => null);
       cList("compaction-reasons", [], () => null);
+      cbState = null; cbView = cloudBackupView(null); cbDirty = false; cbSets = null;
+      $("cloud-backup-status").textContent = cbView.headline;
+      $("cloud-backup-status").setAttribute?.("data-tone", cbView.tone);
+      for (const id of ["cloud-backup-facts", "cloud-backup-reasons", "cloud-backup-set-facts"]) cList(id, [], () => null);
+      for (const id of ["cloud-backup-set-id", "cloud-backup-pin-id"]) { $(id).replaceChildren?.(); $(id).value = ""; }
+      $("cloud-backup-endpoint-note").textContent = ""; $("cloud-backup-endpoint-note").hidden = true;
+      cloudFill(null);
+      $("cloud-backup-pin-reason").value = ""; cloudFieldError("cloud-backup-pin-reason", "");
+      $("cloud-backup-force").checked = false;
       graphSupport(false);
       for (const id of Object.values(OUTPUTS)) show(id, "");
     }
@@ -919,7 +1326,8 @@
 
   const api = { init, utils: { tenantName, maxVectors, tenantId, tenantRequest, tenantPath, tenantList, tenantView, tenantSettings, tenantUsage, identity, exportPath, exportSegment, exportFilename, availability, explain, utf8Length,
     username, password, userRole, userTenant, userId, userRequest, userChanges, userView, userList,
-    formatBytes, compactionForm, compactionSettings, compactionOutcome, compactionView, idempotencyKey, COMPACTION_PHASES } };
+    formatBytes, compactionForm, compactionSettings, compactionOutcome, compactionView, idempotencyKey, COMPACTION_PHASES,
+    cloudBackupForm, cloudBackupPolicy, cloudBackupView, cloudBackupSets, cloudBackupSetFacts, cloudRunOutcome, cloudRestoreOutcome, cloudInterval, cloudCollectionText, cloudDrillText } };
   if (typeof window !== "undefined") window.VLiteAdminTools = api;
   if (typeof module !== "undefined" && module.exports) module.exports = api;
 })();

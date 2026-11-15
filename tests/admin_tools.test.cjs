@@ -6,12 +6,14 @@ const vm = require("node:vm");
 function element(id, tagName = "BUTTON") {
   const listeners = [];
   const inputs = [];
-  return { id, tagName, value: "", textContent: "", disabled: false, checked: false, hidden: false, attributes: {}, children: [], focused: 0, listeners, inputs,
+  const changes = [];
+  return { id, tagName, value: "", textContent: "", disabled: false, checked: false, hidden: false, attributes: {}, children: [], focused: 0, listeners, inputs, changes,
     setAttribute(name, value) { this.attributes[name] = String(value); }, replaceChildren(...nodes) { this.children = nodes; },
     append(...nodes) { this.children.push(...nodes); }, focus() { this.focused++; },
-    addEventListener(type, fn) { if (type === "click") listeners.push(fn); else if (type === "input") inputs.push(fn); },
+    addEventListener(type, fn) { if (type === "click") listeners.push(fn); else if (type === "input") inputs.push(fn); else if (type === "change") changes.push(fn); },
     click() { return Promise.all(listeners.map((fn) => fn())); },
-    input() { inputs.forEach((fn) => fn()); } };
+    input() { inputs.forEach((fn) => fn()); },
+    change() { changes.forEach((fn) => fn()); } };
 }
 const ids = ["tenant-list", "tenant-name", "tenant-max-vectors", "tenant-create", "tenant-id", "tenant-delete", "tenant-result",
   "tenant-usage", "tenant-new-name", "tenant-limit-mode", "tenant-new-limit", "tenant-save-settings", "tenant-suspend", "tenant-resume",
@@ -23,7 +25,16 @@ const ids = ["tenant-list", "tenant-name", "tenant-max-vectors", "tenant-create"
   "compaction-history-policy-error", "compaction-start-utc", "compaction-start-utc-error", "compaction-local-time", "compaction-window", "compaction-window-error",
   "compaction-max-run", "compaction-max-run-error", "compaction-min-file", "compaction-min-file-error", "compaction-min-growth", "compaction-min-growth-error",
   "compaction-growth-percent", "compaction-growth-percent-error", "compaction-cooldown", "compaction-cooldown-error", "compaction-max-source",
-  "compaction-max-source-error", "compaction-save", "compaction-result"];
+  "compaction-max-source-error", "compaction-save", "compaction-result",
+  "cloud-backup-status", "cloud-backup-facts", "cloud-backup-reasons", "cloud-backup-refresh", "cloud-backup-run", "cloud-backup-collect", "cloud-backup-help",
+  "cloud-backup-enabled", "cloud-backup-account", "cloud-backup-account-error", "cloud-backup-container", "cloud-backup-container-error",
+  "cloud-backup-coordination", "cloud-backup-coordination-error", "cloud-backup-prefix", "cloud-backup-prefix-error",
+  "cloud-backup-client-id", "cloud-backup-client-id-error", "cloud-backup-interval", "cloud-backup-interval-error",
+  "cloud-backup-drill-every", "cloud-backup-drill-every-error", "cloud-backup-endpoint-note", "cloud-backup-retention",
+  "cloud-backup-keep-sets", "cloud-backup-keep-sets-error", "cloud-backup-keep-days", "cloud-backup-keep-days-error",
+  "cloud-backup-grace", "cloud-backup-grace-error", "cloud-backup-save", "cloud-backup-sets", "cloud-backup-set-id", "cloud-backup-set-facts",
+  "cloud-backup-drill", "cloud-backup-restore", "cloud-backup-pin-reason", "cloud-backup-pin-reason-error", "cloud-backup-pin",
+  "cloud-backup-pin-id", "cloud-backup-force", "cloud-backup-unpin", "cloud-backup-sets-help", "cloud-backup-result"];
 const elements = Object.fromEntries(ids.map((id) => [id, element(id, id.endsWith("-result") ? "PRE" : "BUTTON")]));
 const downloads = [];
 // Polling timers (5 s and longer) are captured so tests advance them by hand.
@@ -273,7 +284,7 @@ function fakeCtx() {
   };
   return ctx;
 }
-const reset = () => { for (const e of Object.values(elements)) { e.listeners.length = 0; e.inputs.length = 0; e.value = ""; e.textContent = ""; e.disabled = false; e.checked = false; e.hidden = false; e.attributes = {}; e.children = []; } };
+const reset = () => { for (const e of Object.values(elements)) { e.listeners.length = 0; e.inputs.length = 0; e.changes.length = 0; e.value = ""; e.textContent = ""; e.disabled = false; e.checked = false; e.hidden = false; e.attributes = {}; e.children = []; } };
 
 (async () => {
   // Missing markup fails loudly; init itself issues no requests.
@@ -568,6 +579,7 @@ const reset = () => { for (const e of Object.values(elements)) { e.listeners.len
   await elements["replication-export"].click();
   assert.equal(ctx.calls.length, count);
   await compactionTests();
+  await cloudBackupTests();
   console.log("admin tools tests passed");
 })().catch((error) => { console.error(error); process.exit(1); });
 
@@ -774,4 +786,303 @@ async function compactionTests() {
   tools.disconnect();
   assert.equal(pollTimer.fn, null, "disconnect cancels the poll");
   assert.equal(elements["compaction-cancel"].disabled, true);
+}
+async function cloudBackupTests() {
+  const { cloudBackupForm, cloudBackupPolicy, cloudBackupView, cloudBackupSets, cloudBackupSetFacts, cloudRunOutcome, cloudRestoreOutcome, cloudInterval, cloudCollectionText, cloudDrillText } = utils;
+  // Values built inside the sandbox have its prototypes; compare them as JSON.
+  const plain = (value) => JSON.parse(JSON.stringify(value));
+  const wait = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
+  const T = Date.UTC(2026, 10, 14, 12, 30), WHEN = "2026-11-14 12:30 UTC";
+
+  assert.deepEqual([60, 450, 3600, 172800, 0, NaN].map((s) => cloudInterval(s)), ["1 minute", "7.5 minutes", "1 hour", "2 days", "unknown", "unknown"]);
+  assert.deepEqual({ ...cloudBackupForm(null) }, { enabled: false, account: "", container: "", coordination: "", prefix: "", clientId: "", interval: "60",
+    drillEvery: "24", retention: false, keepSets: "3", keepDays: "30", grace: "24" });
+  // Round trip: what the form shows is exactly what Save sends back.
+  const policy = { target: { account: "vlitebackups", container: "backups", coordination_container: "backups-lease", prefix: "vlite/prod/", auth: "managed_identity",
+    client_id: "01234567-89ab-cdef-0123-456789abcdef" }, enabled: true, interval_secs: 450, retention_enabled: true, keep_sets: 5, keep_days: 45, orphan_grace_hours: 12, drill_every: 6 };
+  const form = cloudBackupForm(policy);
+  assert.equal(form.interval, "7.5");
+  assert.deepEqual(plain(cloudBackupPolicy(form, policy)), { errors: {}, policy });
+  const bare = cloudBackupPolicy({ ...form, coordination: "", clientId: " ", enabled: false, retention: false }, null).policy;
+  assert.deepEqual(plain(bare.target), { account: "vlitebackups", container: "backups", prefix: "vlite/prod/", auth: "managed_identity" });
+  assert.deepEqual([bare.enabled, bare.retention_enabled], [false, false]);
+  assert.equal(cloudBackupPolicy({ ...form, interval: "10080" }, policy).policy.interval_secs, 604800);
+  // Every field is checked at once, in plain words, and nothing is built.
+  const bad = cloudBackupPolicy({ account: "Bad_Account", container: "-x", coordination: "", prefix: "/abs/", clientId: "nope", interval: "4",
+    drillEvery: "101", keepSets: "2", keepDays: "29", grace: "0" }, null);
+  assert.equal(bad.policy, undefined);
+  assert.deepEqual(Object.keys(bad.errors).sort(), ["account", "clientId", "container", "drillEvery", "grace", "interval", "keepDays", "keepSets", "prefix"]);
+  assert.match(cloudBackupPolicy({ ...form, coordination: "backups" }, policy).errors.coordination, /different container/);
+  for (const prefix of ["vlite", "vlite//", "vlite/../", "./", "UPPER/"]) assert.ok(cloudBackupPolicy({ ...form, prefix }, policy).errors.prefix, prefix);
+  assert.ok(cloudBackupPolicy({ ...form, interval: "5.12345" }, policy).errors.interval);
+  // A policy signed in with an emulator key is left to the REST API.
+  const emulator = { ...policy, target: { ...policy.target, auth: "emulator_shared_key", endpoint: "http://127.0.0.1:10000/devstoreaccount1" } };
+  assert.match(cloudBackupPolicy(form, emulator).errors.account, /test emulator key/);
+
+  assert.equal(cloudDrillText(null), "Never");
+  assert.equal(cloudDrillText({ ok: true, unix_ms: T }), `Passed, ${WHEN}`);
+  assert.equal(cloudDrillText({ ok: false, unix_ms: T, error: { code: "cloud_set_corrupt", message: "checksum mismatch" } }), `Failed, ${WHEN}: checksum mismatch`);
+  assert.equal(cloudDrillText({ ok: false, unix_ms: T, error: { code: "cloud_set_corrupt" } }), `Failed, ${WHEN}: cloud_set_corrupt`);
+  assert.equal(cloudDrillText({ ok: false, unix_ms: T, detail: "object 3 missing" }), `Failed, ${WHEN}: object 3 missing`);
+  assert.equal(cloudDrillText({ ok: false }), "Failed, --: no reason recorded");
+  assert.equal(cloudCollectionText(undefined), "Never");
+  assert.equal(cloudCollectionText({ ok: false, unix_ms: T, error: { message: "403 from storage" } }), `Failed, ${WHEN}: 403 from storage`);
+  assert.equal(cloudCollectionText({ ok: true, unix_ms: T, retention_enabled: true, result: { deleted: ["a", "b"], orphans_deleted: { count: 1 }, failures: [] } }),
+    `${WHEN}: removed 2 old and 1 unfinished backups`);
+  assert.equal(cloudCollectionText({ ok: true, unix_ms: T, result: { failures: { count: 2 } } }),
+    `${WHEN}: removed 0 old and 0 unfinished backups (automatic deletion of old backups is off); 2 could not be removed`);
+
+  const state = (over = {}, statusOver = {}) => ({ configured: true, policy, policy_uncertain: false, installation_id: "inst-1", running: false, next_run_unix_ms: T + 60000,
+    status: { runs: 3, published: 2, failures: 1, skipped_busy: 0, last_success_unix_ms: T, last_set: "set-2", ...statusOver }, ...over });
+  assert.equal(cloudBackupView(null).headline, "Cloud backup status not loaded.");
+  const ready = cloudBackupView(state());
+  assert.deepEqual([ready.headline, ready.tone, ready.canRun], ["On: a backup is made every 7.5 minutes.", "ready", true]);
+  assert.deepEqual(plain(ready.facts), [
+    ["Storage", "Account vlitebackups, container backups, coordination container backups-lease, folder vlite/prod/"],
+    ["Automatic backups", "On, every 7.5 minutes"],
+    ["Next automatic backup", "2026-11-14 12:31 UTC"],
+    ["Old backups", "Deleted automatically, keeping the newest 5 and any younger than 45 days"],
+    ["This server's ID", "inst-1"],
+    ["Last successful backup", `${WHEN}, backup set-2`],
+    ["Backups so far", "2 made, 1 failed, 0 skipped because the server was busy"],
+    ["Last restore test", "Never"],
+    ["Last clean-up", "Never"]]);
+  assert.deepEqual(plain(ready.reasons), []);
+  const uncertain = cloudBackupView(state({ policy_uncertain: true, running: true }));
+  assert.match(uncertain.headline, /could not be confirmed/);
+  assert.deepEqual([uncertain.tone, uncertain.canRun], ["blocked", false]);
+  assert.match(uncertain.reasons[0], /could not confirm which settings are saved/);
+  const unset = cloudBackupView({ configured: false, policy: null, policy_uncertain: false, installation_id: "inst-1", status: {} });
+  assert.match(unset.headline, /^Not set up yet/);
+  assert.deepEqual([unset.tone, unset.canRun, plain(unset.facts)], ["idle", false, [["This server's ID", "inst-1"]]]);
+  const busy = cloudBackupView(state({}, { job: { kind: "run" } }));
+  assert.deepEqual([busy.headline, busy.tone, busy.canRun], ["A backup or clean-up is running now.", "busy", false]);
+  const failed = cloudBackupView(state({}, { last_failure_unix_ms: T + 1, last_error: { code: "cloud_store_failed", message: "403" }, interrupted: 1, pending: { set_id: "set-3" },
+    last_drill: { ok: false, unix_ms: T, error: { message: "bad" } }, last_collection: { ok: false, unix_ms: T, error: { code: "x" } }, clock_reset_unix_ms: T }));
+  assert.deepEqual([failed.headline, failed.tone, failed.canRun], ["The latest backup failed. See what needs attention below.", "blocked", true]);
+  assert.deepEqual(plain(failed.reasons), [
+    "The latest backup failed (cloud_store_failed): 403",
+    "1 earlier run(s) did not finish because the server stopped. Clean up now removes what they left behind.",
+    "A backup upload (set-3) has not been confirmed as complete yet.",
+    "The latest restore test failed: bad",
+    "The latest clean-up failed: x",
+    `The server clock moved backwards at ${WHEN}, so scheduled times were reset to the clock.`]);
+  assert.equal(cloudBackupView(state({}, { last_failure_unix_ms: T - 1 })).tone, "ready", "a failure before the latest success is history");
+  const off = cloudBackupView(state({ policy: { ...policy, enabled: false, retention_enabled: false } }));
+  assert.deepEqual([off.headline, off.tone], ["Set up. Automatic backups are off; Back up now still works.", "idle"]);
+  assert.ok(!off.facts.some(([term]) => term === "Next automatic backup"));
+  assert.deepEqual(plain(off.facts.find(([term]) => term === "Old backups")), ["Old backups", "Never deleted automatically"]);
+
+  assert.equal(cloudRunOutcome({ set_id: "set-4", drill: { ok: true, unix_ms: T }, collection: { ok: true, unix_ms: T, retention_enabled: true, result: {} } }),
+    `Backup set-4 was uploaded. Restore test: Passed, ${WHEN}. Clean-up: ${WHEN}: removed 0 old and 0 unfinished backups.`);
+  assert.equal(cloudRunOutcome({ set_id: "set-4", drill: { ok: true }, stopped_for_shutdown: true }),
+    "Backup set-4 was uploaded. The server began shutting down, so the restore test and clean-up were skipped.");
+  assert.equal(cloudRunOutcome(null), "The backup finished.");
+  assert.match(cloudRestoreOutcome({ name: "restore-set-4.vlite", set_id: "set-4", bundle: { credentials: 2 }, pin_released: false }),
+    /^Backup set-4 was restored as a new copy named restore-set-4\.vlite .*The live database was not changed\. 2 credentials must be issued again .*could not be released.*To use the copy: open Backups and restore above/);
+  assert.match(cloudRestoreOutcome({ set_id: "s", name: "c", bundle: { credentials: 1 } }), /1 credential must be issued again/);
+  assert.doesNotMatch(cloudRestoreOutcome({ name: "c", set_id: "s", bundle: { credentials: 0 }, pin_released: true }), /credential|could not be released/);
+
+  const record = (over = {}) => ({ state: "published", created_unix_ms: T, verified_unix_ms: T, last_drill: { ok: true, unix_ms: T, detail: "" }, pins: [], ...over });
+  const setsValue = { installation_id: "inst-1", tombstoned: ["set-0"], sets: [
+    { set_id: "set-1", data_objects: 4, record: record({ pins: [{ id: "p1", reason: "audit", created_unix_ms: T, kind: "operator" }, { id: "p2", reason: "restore", created_unix_ms: T, kind: "operation" }] }) },
+    { set_id: "set-3", data_objects: 1, record: record({ state: "staging", last_drill: undefined }) },
+    { set_id: "set-2", error: { code: "cloud_set_corrupt", message: "record unreadable" } },
+    { record: record() }] };
+  const sets = cloudBackupSets(setsValue);
+  assert.equal(sets.removing, 1);
+  assert.deepEqual(plain(sets.items.map((i) => [i.id, i.state, i.complete, i.label])), [
+    ["set-3", "unfinished", false, `${WHEN}, unfinished (set-3)`],
+    ["set-2", "unreadable", false, "unknown time, unreadable (set-2)"],
+    ["set-1", "complete", true, `${WHEN}, complete, held (set-1)`]]);
+  assert.deepEqual(plain(sets.items[2].pins), [{ id: "p1", label: "Held by an operator: audit" }, { id: "p2", label: "Held by a running operation: restore" }]);
+  assert.deepEqual(plain(cloudBackupSetFacts(sets.items[2])), [["Backup ID", "set-1"], ["State", "Complete"], ["Created", WHEN], ["Last verified", WHEN],
+    ["Restore test", `Passed, ${WHEN}`], ["Holds", "2"], ["Stored files", "4"]]);
+  assert.deepEqual(plain(cloudBackupSetFacts(sets.items[1])), [["Backup ID", "set-2"], ["State", "Could not be read"], ["Problem", "record unreadable"]]);
+  assert.deepEqual(plain(cloudBackupSetFacts(null)), []);
+
+  // Wiring: nothing is fetched until Refresh status.
+  reset(); timers.length = 0;
+  const ctx = fakeCtx();
+  const caps = { role: "admin", features: { cloud_backup: true }, routes: [] };
+  ctx.caps = caps;
+  const tools = init(ctx);
+  tools.capabilities(caps);
+  const el = (id) => elements[`cloud-backup-${id}`];
+  const disabled = (...names) => names.map((name) => el(name).disabled);
+  assert.equal(ctx.calls.length, 0);
+  assert.equal(el("status").textContent, "Cloud backup status not loaded.");
+  assert.equal(el("help").textContent, "Select Refresh status first.");
+  assert.match(el("sets-help").textContent, /^Select Load stored backups/);
+  assert.deepEqual(disabled("refresh", "sets", "save", "run", "collect", "drill"), [false, false, false, true, true, true]);
+  await el("save").click();
+  assert.equal(el("result").textContent, "Select Refresh status first.");
+  assert.equal(ctx.calls.length, 0);
+
+  ctx.responses.push(state());
+  await el("refresh").click();
+  assert.deepEqual(plain(ctx.calls.at(-1)), { method: "GET", path: "/v1/admin/cloud-backup", options: { data: false } });
+  assert.equal(el("result").textContent, "Status refreshed.");
+  assert.equal(el("status").textContent, "On: a backup is made every 7.5 minutes.");
+  assert.equal(el("status").attributes["data-tone"], "ready");
+  assert.equal(el("facts").children.length, 9);
+  assert.deepEqual(el("facts").children[0].children.map((node) => node.textContent), plain(ready.facts[0]));
+  assert.deepEqual([el("account").value, el("interval").value, el("enabled").checked, el("retention").checked], ["vlitebackups", "7.5", true, true]);
+  assert.deepEqual(disabled("run", "collect"), [false, false]);
+  assert.match(el("help").textContent, /^Back up now uploads/);
+  assert.equal(el("endpoint-note").hidden, true);
+
+  // Invalid settings: every bad field is marked, the first is focused, and nothing is sent.
+  const focused = el("account").focused;
+  el("account").value = "Bad"; el("account").input();
+  el("keep-sets").value = "2"; el("keep-sets").input();
+  await el("save").click();
+  await wait(5);
+  assert.equal(el("result").textContent, "Fix the highlighted settings; nothing was saved.");
+  assert.equal(ctx.calls.length, 1);
+  assert.deepEqual([el("account").attributes["aria-invalid"], el("account-error").hidden, el("keep-sets-error").textContent, el("container").attributes["aria-invalid"]],
+    ["true", false, "Enter a whole number from 3 to 1000.", "false"]);
+  assert.equal(el("account").focused, focused + 1);
+  el("account").value = "vlitebackups"; el("account").input();
+  assert.deepEqual([el("account").attributes["aria-invalid"], el("account-error").hidden], ["false", true]);
+  el("keep-sets").value = "7"; el("keep-sets").input();
+  el("enabled").checked = false; el("enabled").input();
+  ctx.answer = false;
+  await el("save").click();
+  assert.equal(ctx.calls.length, 1, "a declined save sends nothing");
+  assert.match(ctx.confirms.at(-1), /^Save cloud backup settings \(account vlitebackups, container backups, folder vlite\/prod\/\)\? Automatic backups are off; nothing is uploaded until you select Back up now\. Old backups are deleted automatically, keeping the newest 7 and any younger than 45 days\./);
+  ctx.answer = true;
+  const saved = { ...policy, enabled: false, keep_sets: 7 };
+  ctx.responses.push(state({ policy: saved }));
+  await el("save").click();
+  assert.deepEqual([ctx.calls.at(-1).method, ctx.calls.at(-1).path], ["PUT", "/v1/admin/cloud-backup"]);
+  assert.deepEqual(plain(ctx.calls.at(-1).body), saved);
+  assert.equal(el("result").textContent, "Saved. Automatic backups are off.");
+  assert.equal(el("status").textContent, "Set up. Automatic backups are off; Back up now still works.");
+
+  // Back up now reports the outcome and reloads the status, keeping unsaved edits.
+  el("prefix").value = "vlite/next/"; el("prefix").input();
+  ctx.responses.push({ set_id: "set-4", drill: { ok: true, unix_ms: T }, collection: { ok: true, unix_ms: T, retention_enabled: true, result: {} } }, state({ policy: saved }));
+  await el("run").click();
+  assert.match(ctx.confirms.at(-1), /^Back up to account vlitebackups now\?/);
+  assert.deepEqual(ctx.calls.slice(-2).map((c) => [c.method, c.path]), [["POST", "/v1/admin/cloud-backup/run"], ["GET", "/v1/admin/cloud-backup"]]);
+  assert.equal(el("result").textContent, `Backup set-4 was uploaded. Restore test: Passed, ${WHEN}. Clean-up: ${WHEN}: removed 0 old and 0 unfinished backups.`);
+  assert.equal(el("prefix").value, "vlite/next/", "a status reload keeps unsaved edits");
+  ctx.responses.push({ ok: true, unix_ms: T, retention_enabled: true, result: { deleted: ["set-0"] } }, state({ policy: saved }));
+  await el("collect").click();
+  assert.match(ctx.confirms.at(-1), /^Clean up now\? This removes unfinished uploads older than 12 hours and old backups beyond the newest 7 that are older than 45 days\./);
+  assert.deepEqual(ctx.calls.slice(-2).map((c) => [c.method, c.path]), [["POST", "/v1/admin/cloud-backup/collect"], ["GET", "/v1/admin/cloud-backup"]]);
+  assert.equal(el("result").textContent, `Clean-up ${WHEN}: removed 1 old and 0 unfinished backups`);
+  ctx.responses.push(state({ policy: saved }));
+  await el("refresh").click();
+  assert.equal(el("prefix").value, "vlite/prod/", "Refresh status discards unsaved edits");
+
+  // Stored backups: newest first; unfinished ones cannot be tested, restored or held.
+  ctx.responses.push(setsValue);
+  await el("sets").click();
+  assert.equal(ctx.calls.at(-1).path, "/v1/admin/cloud-backup/sets");
+  assert.equal(el("result").textContent, "3 stored backups found, newest first. 1 more is being removed.");
+  assert.equal(el("set-id").value, "set-3");
+  assert.deepEqual(el("set-id").children.map((o) => o.value), ["set-3", "set-2", "set-1"]);
+  assert.deepEqual(disabled("drill", "restore", "pin", "unpin"), [true, true, true, true]);
+  assert.match(el("sets-help").textContent, /not complete/);
+  await el("drill").click();
+  assert.equal(el("result").textContent, "Choose a complete backup first.");
+  el("set-id").value = "set-1"; el("set-id").change();
+  assert.equal(el("pin-id").value, "p1");
+  assert.deepEqual(el("pin-id").children.map((o) => o.textContent), ["Held by an operator: audit", "Held by a running operation: restore"]);
+  assert.deepEqual(disabled("drill", "restore", "pin", "unpin"), [false, false, false, false]);
+  assert.equal(el("set-facts").children.length, 7);
+
+  ctx.responses.push({ set_id: "set-1", drill: { ok: false, unix_ms: T, detail: "object 2 missing" } }, setsValue);
+  await el("drill").click();
+  assert.match(ctx.confirms.at(-1), /^Test backup set-1\?/);
+  assert.deepEqual(ctx.calls.slice(-2).map((c) => [c.method, c.path]), [["POST", "/v1/admin/cloud-backup/sets/set-1/drill"], ["GET", "/v1/admin/cloud-backup/sets"]]);
+  assert.equal(el("result").textContent, `Restore test of set-1: Failed, ${WHEN}: object 2 missing. 3 stored backups found, newest first. 1 more is being removed.`);
+  assert.equal(el("set-id").value, "set-1", "a reload keeps the selection");
+  const beforeRestore = ctx.calls.length;
+  ctx.responses.push({ name: "restore-1", set_id: "set-1", bundle: { credentials: 0 }, pin_released: true });
+  await el("restore").click();
+  assert.equal(ctx.calls.length, beforeRestore + 1, "restore does not reload");
+  assert.deepEqual([ctx.calls.at(-1).method, ctx.calls.at(-1).path], ["POST", "/v1/admin/cloud-backup/sets/set-1/restore"]);
+  assert.match(el("result").textContent, /^Backup set-1 was restored as a new copy named restore-1 /);
+
+  // Holds: the reason is checked before anything is sent; holding needs no confirmation.
+  const beforePin = ctx.calls.length, confirms = ctx.confirms.length;
+  for (const [reason, expected] of [["  ", /^Enter a reason\. Nothing was held\.$/], ["\u00e9".repeat(101), /^Use at most 200 characters .* Nothing was held\.$/],
+    ["a\nb", /^Remove line breaks and other control characters\. Nothing was held\.$/]]) {
+    el("pin-reason").value = reason;
+    await el("pin").click();
+    assert.match(el("result").textContent, expected);
+    assert.equal(el("pin-reason-error").hidden, false);
+  }
+  assert.equal(ctx.calls.length, beforePin);
+  el("pin-reason").value = "keep for audit"; el("pin-reason").input();
+  assert.equal(el("pin-reason-error").hidden, true);
+  ctx.responses.push({ set_id: "set-1", pin: { id: "p3", reason: "keep for audit", kind: "operator" } }, setsValue);
+  await el("pin").click();
+  assert.deepEqual(plain(ctx.calls.at(-2)), { method: "POST", path: "/v1/admin/cloud-backup/sets/set-1/pins", body: { reason: "keep for audit" }, options: { data: false } });
+  assert.equal(ctx.confirms.length, confirms);
+  assert.equal(el("pin-reason").value, "");
+  assert.match(el("result").textContent, /^Backup set-1 is held \(hold p3\); clean-up will not remove it until the hold is released\. 3 stored backups found/);
+  el("pin-id").value = "p2"; el("pin-id").change();
+  el("force").checked = true;
+  ctx.responses.push(undefined, setsValue);
+  await el("unpin").click();
+  assert.match(ctx.confirms.at(-1), /^Release hold p2 on backup set-1\?.*You confirmed the operation that made this hold is no longer running\.$/);
+  assert.deepEqual([ctx.calls.at(-2).method, ctx.calls.at(-2).path], ["DELETE", "/v1/admin/cloud-backup/sets/set-1/pins/p2?force=true"]);
+  assert.equal(el("force").checked, false);
+  assert.match(el("result").textContent, /^Hold p2 released\. 3 stored backups found/);
+
+  // Server refusals show the message plus a plain hint.
+  ctx.responses.push(Object.assign(new Error("HTTP 409: cloud_backup_busy"), { code: "cloud_backup_busy", status: 409 }));
+  await el("run").click();
+  assert.equal(el("result").textContent, "HTTP 409: cloud_backup_busy\nAnother cloud backup operation is running. Wait for it to finish, then select Refresh status.");
+  assert.equal(ctx.errors.at(-1).code, "cloud_backup_busy");
+
+  // Emulator sign-in is shown but not editable; a managed-identity endpoint is just shown.
+  ctx.responses.push(state({ policy: emulator }));
+  await el("refresh").click();
+  assert.match(el("endpoint-note").textContent, /local test emulator/);
+  assert.equal(el("endpoint-note").hidden, false);
+  assert.deepEqual(disabled("save", "account", "enabled", "run"), [true, true, true, false]);
+  ctx.responses.push(state({ policy: { ...policy, target: { ...policy.target, endpoint: "https://example.blob.core.windows.net" } } }));
+  await el("refresh").click();
+  assert.equal(el("endpoint-note").textContent, "Storage address: https://example.blob.core.windows.net.");
+  assert.deepEqual(disabled("save", "account"), [false, false]);
+  // While a backup runs, settings and runs wait.
+  ctx.responses.push(state({ running: true }));
+  await el("refresh").click();
+  assert.deepEqual(disabled("save", "run", "collect", "drill", "restore", "refresh", "sets"), [true, true, true, true, true, false, false]);
+  assert.match(el("help").textContent, /^A backup or clean-up is running/);
+  assert.match(el("sets-help").textContent, /^Test and Restore are off/);
+
+  // Gating: non-admins and servers without the feature get plain reasons and send nothing.
+  const sent = ctx.calls.length;
+  ctx.caps = { role: "read_only", features: { cloud_backup: true }, routes: [] };
+  tools.capabilities(ctx.caps);
+  assert.match(el("result").textContent, /^Cloud backup requires a super admin/);
+  assert.match(el("help").textContent, /requires a super admin/);
+  assert.deepEqual(disabled("refresh", "sets", "save", "run"), [true, true, true, true]);
+  await el("refresh").click();
+  ctx.caps = { role: "admin", features: {}, routes: [] };
+  tools.capabilities(ctx.caps);
+  assert.match(el("result").textContent, /does not offer cloud backup/);
+  await el("sets").click();
+  assert.equal(ctx.calls.length, sent);
+
+  // Disconnect clears the card and locks it; late results are dropped.
+  ctx.caps = caps;
+  tools.capabilities(caps);
+  ctx.responses.push(state());
+  await el("refresh").click();
+  tools.disconnect();
+  assert.equal(el("status").textContent, "Cloud backup status not loaded.");
+  assert.deepEqual([el("account").value, el("interval").value, el("result").textContent, el("facts").hidden], ["", "60", "", true]);
+  assert.deepEqual(disabled("refresh", "save", "sets"), [true, true, true]);
+  assert.equal(el("help").textContent, "Sign in first.");
+  tools.capabilities(caps);
+  ctx.responses.push(() => { tools.disconnect(); return state(); });
+  await el("refresh").click();
+  assert.equal(el("status").textContent, "Cloud backup status not loaded.");
 }

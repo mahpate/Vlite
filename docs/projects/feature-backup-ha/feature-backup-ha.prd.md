@@ -523,7 +523,7 @@ Requirements: FR-007, SEC-001. Dependencies: EPIC-004 APIs for backup slice; EPI
 
 | Task | Description | Status | Relevant Files |
 |------|-------------|--------|----------------|
-| ITEM-014 | Extend existing backup/replication controls and admin-only status/actions; show durable progress/freshness, policy/selection/epoch, fencing phase and disabled reasons. Add readiness-qualified stable routing and sanitized job results; stale probes do not authorize actions. Verify AC-012/013/014 and UI tests. | Not Started | `src/dashboard/admin-tools.js`, `src/dashboard/console-tools.js`, `src/dashboard/index.html`, `src/server/ha.rs`, `src/openapi.json`, `tests/admin_tools.test.cjs`, `docs/CONSOLE-ADMIN.md` |
+| ITEM-014 | Extend existing backup/replication controls and admin-only status/actions; show durable progress/freshness, policy/selection/epoch, fencing phase and disabled reasons. Add readiness-qualified stable routing and sanitized job results; stale probes do not authorize actions. Verify AC-012/013/014 and UI tests. | Backup slice done (Cloud backup card, 2026-11-14); HA slice Not Started | `src/dashboard/admin-tools.js`, `src/dashboard/console-tools.js`, `src/dashboard/index.html`, `src/server/ha.rs`, `src/openapi.json`, `tests/admin_tools.test.cjs`, `docs/CONSOLE-ADMIN.md` |
 
 ### EPIC-013: Acknowledgement receipts and qualified automation — 7–10 person-days
 
@@ -671,7 +671,7 @@ Final planning validation checked the mandatory 15 sections, 16 unique epics, 19
   - `docs/DOCKER-OPERATIONS.md` (runbook)
   - `docs/API.md`, `src/openapi.json`, `site/api.html`
   - `docs/SECURITY.md`, `docs/CAPABILITIES.md`
-- No dashboard card (EPIC-012 is deferred).
+- Dashboard: none in milestone 1. The **Cloud backup** card was added afterwards (see the change log, 2026-11-14); the rest of EPIC-012 stays deferred.
 
 **Explicit refusals (not silently skipped):**
 
@@ -728,7 +728,7 @@ Vectors, graph, KV with versions and CAS, and allocation high-waters are restore
 - On Windows there is no free-space check, and staging inherits the parent's access list, so the `--output` parent must be operator-private.
 - Import cleanup removes the stores it wrote by path, so its admin directory must be private with a single writer: a review reproduced that a failed import deletes a store another writer swapped in. The restore imports only into its own new staging directory, which is owner-only on Linux and macOS and inherits the `--output` parent's access list on Windows.
 - Manifests and bundles from before the policy-capture binding are refused; the schema was never released, so no migration is provided.
-- Deferred: the shared selection transaction for reseed/promotion, seed mode and seed or compaction-source pins, the policy-publisher hook, current-credential continuity, dashboard administration (EPIC-012) and every HA epic.
+- Deferred: the shared selection transaction for reseed/promotion, seed mode and seed or compaction-source pins, the policy-publisher hook, current-credential continuity, the HA part of dashboard administration (EPIC-012) and every HA epic.
 - Planned files not created:
   - `tests/cloud_backup.rs`, `tests/recovery_bundle.rs` and `tests/server_ops.rs`: coverage lives in module tests, `tests/server_cloud_backup_routes.rs`, `tests/server_cli.rs` and `tests/cloud_backup_azurite.rs`.
   - `tests/ha_qualification.py`.
@@ -749,3 +749,4 @@ Vectors, graph, KV with versions and CAS, and allocation high-waters are restore
     - `4344be7f`, `1557112e`, `d9ee80ab` (tests and comments for review mutants); `5e4c3d73` (the graph build-boundary gate excludes the test-only `compaction-test-hooks` feature from shipped artifact pins)
   - Statuses updated for ITEM-001 (backup portion), ITEM-003 to ITEM-007 and ITEM-017.
   - HA scope, ITEM-002 and EPIC-012 remain deferred and unapproved. Nothing was pushed, released or deployed.
+- 2026-11-14: Owner asked to "implement missing peaces in the dashboard". Delivered the backup slice of ITEM-014 as the **Administration → Cloud backup** card over the existing cloud-backup routes: no new route, no server change. It covers settings with inline validation, back up now, cleanup, stored backups, drill, restore as a new copy, and hold or release with a confirmed forced release. Super admins only; nothing is read until **Refresh status**. Tests: `tests/admin_tools.test.cjs`, `tests/admin_e2e.py` (including no overflow at 1280/768/390 px), and the admin-route and dashboard-coverage inventories. The HA slice of ITEM-014, live Azure validation, releases and deployment are not included.

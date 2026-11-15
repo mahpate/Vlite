@@ -771,9 +771,9 @@ The server can publish verified backup sets of its database to Azure Blob
 Storage and restore one as an isolated copy. These routes need a super
 administrator (admin token or `super_admin` account); read-only, scoped and
 tenant credentials get 403. They need `VLITE_ADMIN_DIR`; without it they
-answer 409 `admin_directory_disabled`. There is no dashboard card in this
-release: use these routes or the offline `vlite-server cloud-sets` and
-`cloud-restore` commands.
+answer 409 `admin_directory_disabled`. The dashboard's **Administration →
+Cloud backup** card drives these routes; the offline `vlite-server cloud-sets`
+and `cloud-restore` commands work without a running server.
 
 | Route | Purpose |
 | --- | --- |
