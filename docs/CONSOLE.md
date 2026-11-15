@@ -167,21 +167,21 @@ values, refusing lossy text conversions. See the [key-value guide](KEY-VALUE.md)
 
 ## MemoryAI
 
-MemoryAI serves agent memory through an operator-provided binding, exact
-agent/user/session scope and **scoped API token**, not administrator sign-in.
-Recall accepts seeds, indexed text or vectors. Weighted ranking combines squared
-Euclidean vector distance with other signals; exact/MMR use cosine distance
-without entity seeds. Exact permits text; MMR does not. Inspect revisions and truncation.
+MemoryAI uses an operator-provided binding, exact agent/user/session scope and
+**scoped API token**, not admin sign-in.
+Recall accepts seeds, indexed text or vectors. Weighted ranking mixes squared
+Euclidean distance with other signals; exact/MMR use cosine distance without
+seeds. Exact permits text; MMR does not. Inspect revisions and truncation.
 
-Remember supports entity/episodic memories; consolidation retains originals.
-Forget pins ID/revision pairs: **not secure erasure**. Confirm mutations with
-idempotency keys. Download requests after failures and responses before sign-out.
-Unchanged-draft replay preserves timestamps. Observation time uses server Date
-minus two seconds for proxy clock skew, never your device clock. If unavailable,
-refresh and ask your operator to check server/proxy time. Consolidation accepts
-at most 64 memories.
-Receipt lookup supports forget/consolidate only. Fact correction, erasure jobs
-and automatic chat import are unavailable. See the [agent memory guide](MEMORY.md).
+Remember stores entity/episodic memories, optionally attaching one binding evidence
+record (raw access; Forget deletes it; blocks 0.7.0 rollback) or merging a source at
+the current revision. Consolidation (≤64) keeps originals. Forget pins ID/revision
+pairs: **not secure erasure**. Confirm mutations with idempotency keys. Download
+requests after failures and responses before sign-out. Unchanged-draft replay
+preserves timestamps. Observation time is server Date minus two seconds; if
+unavailable, ask your operator to check server time.
+Receipts cover forget/consolidate only; fact correction, erasure jobs and chat
+import are unavailable. See the [agent memory guide](MEMORY.md).
 
 ## Explore graphs
 

@@ -389,7 +389,14 @@
           <label>Source ID<input id="memory-source" autocomplete="off"></label>
           <label>Source kind<input id="memory-source-kind" value="dashboard" autocomplete="off"></label>
           <label>Transformation ID (required for consolidation)<input id="memory-transformation" autocomplete="off"></label>
-          <p>Observation time comes from the server, not your device clock. If time is unavailable or rejected as future-dated, refresh the connection and ask your operator to check the server clock and proxy Date header. This version does not support facts, relations, evidence attachment or arbitrary metadata.</p>
+          <p>Observation time comes from the server, not your device clock. If time is unavailable or rejected as future-dated, refresh the connection and ask your operator to check the server clock and           proxy Date header. This version does not support facts, relations or arbitrary metadata.</p>
+                  </div>
+                  <div data-memory-action="remember" hidden>
+                    <label>Evidence record number (optional)<input id="memory-evidence-record" inputmode="numeric" autocomplete="off"></label>
+                    <p>Attaches one existing record from this binding's evidence collection. It needs a token with raw access. The record moves into the memory: Forget deletes it with the memory. After the first attachment, the database cannot roll back to 0.7.0.</p>
+                    <label><input id="memory-merge" type="checkbox"> Add this source to an existing memory (merge provenance)</label>
+                    <label>Current revision of that memory (required for a merge)<input id="memory-expected-revision" inputmode="numeric" autocomplete="off"></label>
+                    <p>A merge needs the same memory ID, kind and content, a new source ID and the revision from a recent recall. A wrong revision is refused, so recall again before retrying.</p>
         </div>
         <div data-memory-action="forget consolidate" hidden>
           <label>Memory references (JSON array of {"id":"…","revision":"1"}; at most 64 for consolidation)<textarea id="memory-references" rows="4">[]</textarea></label>

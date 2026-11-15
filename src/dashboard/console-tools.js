@@ -1103,7 +1103,23 @@
     if (action === "consolidate") {
       item.source.transformation_id = required(input.transformation, "Transformation ID");
       body.output = item;
-    } else body.items = [item];
+    } else {
+      const number = (value, label, positive) => {
+        let valid = null;
+        try { valid = id(value); } catch { /* reported below with the field name */ }
+        if (valid === null || (positive && valid === "0")) throw new Error(`${label} must be a whole number${positive ? " above 0" : ""} with no sign, spaces or leading zeros`);
+        return valid;
+      };
+      const record = (input.evidence ?? "").trim();
+      if (record) item.evidence = [{ collection: required(input.binding, "Binding name"), record: number(record, "Evidence record number") }];
+      const revision = (input.expectedRevision ?? "").trim();
+      if (input.merge) {
+        if (!revision) throw new Error("A merge needs the current revision of the existing memory");
+        item.merge = "merge_provenance";
+        item.expected = { revision: number(revision, "Current revision", true) };
+      } else if (revision) throw new Error("A current revision is used only for a merge. Select the merge option or clear the revision.");
+      body.items = [item];
+    }
     return body;
   }
   function dataWorkspaces(ctx, on) {
@@ -1301,6 +1317,7 @@
         id: $("memory-id").value, kind: $("memory-kind").value, content: $("memory-content").value,
         source: $("memory-source").value, sourceKind: $("memory-source-kind").value, transformation: $("memory-transformation").value,
         references: $("memory-references").value, idempotency: $("memory-idempotency").value, operation: $("memory-receipt-operation").value,
+        binding, evidence: $("memory-evidence-record").value, merge: $("memory-merge").checked, expectedRevision: $("memory-expected-revision").value,
       };
       const signature = JSON.stringify({ binding, action, input });
       // Reusing an unchanged draft must preserve its observation timestamp and idempotent body.
@@ -1314,7 +1331,11 @@
         throw error;
       }
       const read = ["recall", "receipts/lookup"].includes(action);
-      if (!read && !await ctx.confirm(`${actionLabels[action]} in binding ${binding}, exact scope ${JSON.stringify(body.scope)}?${action === "forget" ? " This is NOT secure erasure." : ""} Idempotency key: ${body.idempotency_key}. No automatic retry.`)) return;
+      const item = action === "remember" ? body.items[0] : undefined;
+      const notes = (action === "forget" ? " This is NOT secure erasure." : "")
+        + (item?.evidence ? ` Evidence record ${item.evidence[0].record} moves into this memory, and Forget deletes it with the memory. The database cannot roll back to 0.7.0 afterwards.` : "")
+        + (item?.merge ? ` Adds source ${item.source.source_id} to memory ${item.id} at revision ${item.expected.revision}.` : "");
+      if (!read && !await ctx.confirm(`${actionLabels[action]} in binding ${binding}, exact scope ${JSON.stringify(body.scope)}?${notes} Idempotency key: ${body.idempotency_key}. No automatic retry.`)) return;
       memoryAttempt = { signature, binding, operation: action, request: body };
       text("memory-outcome", read ? "Reading memories..." : "Mutation submitted. Retain the idempotency key; if interrupted, verify the outcome before retrying.");
       try {
@@ -1364,7 +1385,8 @@
       collectionChanged: clearKV,
       clear() {
         clearKV(); clearMemory();
-        for (const name of ["kv-namespace", "kv-prefix", "memory-binding", "memory-agent", "memory-user", "memory-session", "memory-id", "memory-content", "memory-source", "memory-transformation", "memory-seeds", "memory-text", "memory-vector", "memory-idempotency", "embed-text", "rerank-provider"]) $(name).value = "";
+        for (const name of ["kv-namespace", "kv-prefix", "memory-binding", "memory-agent", "memory-user", "memory-session", "memory-id", "memory-content", "memory-source", "memory-transformation", "memory-seeds", "memory-text", "memory-vector", "memory-idempotency", "memory-evidence-record", "memory-expected-revision", "embed-text", "rerank-provider"]) $(name).value = "";
+        $("memory-merge").checked = false;
         $("kv-namespace").value = "default"; $("memory-references").value = "[]";
         $("memory-ranking").value = "weighted"; $("memory-limit").value = "20"; $("memory-lambda").value = "0.5";
         text("embed-result", "");

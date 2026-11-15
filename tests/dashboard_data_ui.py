@@ -290,6 +290,31 @@ def exercise(browser):
     expect(page.locator("#memory-outcome")).to_contain_text("server confirmed")
     replay = next(item for item in reversed(fake.log) if item["path"].endswith("/remember"))
     assert replay["body"] == original, "Explicit replay of an unchanged draft must preserve its timestamp"
+    page.locator("#memory-idempotency").fill("merge-once")
+    page.locator("#memory-expected-revision").fill("3")
+    before = len(fake.log)
+    page.locator("#memory-run").click()
+    expect(page.locator("#status")).to_contain_text("used only for a merge")
+    expect(page.locator("#confirmation")).to_be_hidden()
+    assert not any(item["path"].endswith("/remember") for item in fake.log[before:]), "A revision without a merge must be refused before any request"
+    page.locator("#memory-evidence-record").fill("42")
+    page.locator("#memory-merge").check()
+    page.locator("#memory-run").click()
+    confirm(page, "Evidence record 42 moves into this memory")
+    # The outcome already reads "server confirmed" from the replay, so wait for the new request itself.
+    for _ in range(100):
+        sent = [item for item in fake.log[before:] if item["path"].endswith("/remember")]
+        if sent:
+            break
+        page.wait_for_timeout(50)
+    assert len(sent) == 1, "The merge must send exactly one remember request"
+    expect(page.locator("#memory-outcome")).to_contain_text("server confirmed")
+    merged = sent[0]["body"]["items"][0]
+    assert merged["evidence"] == [{"collection": "assistant-memory", "record": "42"}]
+    assert merged["merge"] == "merge_provenance" and merged["expected"] == {"revision": "3"}
+    page.locator("#memory-evidence-record").fill("")
+    page.locator("#memory-merge").uncheck()
+    page.locator("#memory-expected-revision").fill("")
     page.locator("#memory-action").select_option("consolidate")
     page.locator("#memory-transformation").fill("summary-v1")
     page.locator("#memory-references").fill(json.dumps([{"id": f"m{n}", "revision": "1"} for n in range(65)]))

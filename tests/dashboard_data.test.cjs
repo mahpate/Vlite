@@ -139,6 +139,31 @@ test("Memory requests use exact scope, bounded reads and revision-pinned logical
   assert.throws(() => u.memoryRequest("recall", { ...draft, limit: "101" }));
 });
 
+test("Remember attaches binding evidence and pins merge provenance to a revision", () => {
+  const plainRemember = plain(u.memoryRequest("remember", draft, 123)).items[0];
+  for (const key of ["evidence", "merge", "expected"]) assert.ok(!(key in plainRemember), key);
+  const evidence = plain(u.memoryRequest("remember", { ...draft, binding: "notes", evidence: " 7001 " }, 123)).items[0];
+  assert.deepEqual(evidence.evidence, [{ collection: "notes", record: "7001" }]);
+  const merged = plain(u.memoryRequest("remember", { ...draft, binding: "notes", merge: true, expectedRevision: "18446744073709551615" }, 123)).items[0];
+  assert.equal(merged.merge, "merge_provenance");
+  assert.deepEqual(merged.expected, { revision: "18446744073709551615" });
+  assert.ok(!("evidence" in merged));
+  const both = plain(u.memoryRequest("remember", { ...draft, binding: "notes", evidence: "0", merge: true, expectedRevision: "2" }, 123)).items[0];
+  assert.deepEqual([both.evidence[0].record, both.expected.revision], ["0", "2"]);
+  const consolidate = plain(u.memoryRequest("consolidate", { ...draft, binding: "notes", evidence: "7", merge: true, expectedRevision: "2" }, 123)).output;
+  for (const key of ["evidence", "merge", "expected"]) assert.ok(!(key in consolidate), key);
+  for (const [input, pattern] of [
+    [{ evidence: "07" }, /Evidence record number must be a whole number/],
+    [{ evidence: "-1" }, /Evidence record number/],
+    [{ evidence: "18446744073709551616" }, /Evidence record number/],
+    [{ evidence: "7", binding: "" }, /Binding name/],
+    [{ merge: true }, /needs the current revision/],
+    [{ merge: true, expectedRevision: "0" }, /above 0/],
+    [{ merge: true, expectedRevision: "1.5" }, /Current revision/],
+    [{ expectedRevision: "3" }, /used only for a merge/],
+  ]) assert.throws(() => u.memoryRequest("remember", { ...draft, binding: "notes", ...input }, 123), pattern, JSON.stringify(input));
+});
+
 test("named vector declarations and replacements validate complete wire shapes", () => {
   const declaration = { name: "text", dimensions: 65536, metric: "cosine", active_version: "v1", history: 64 };
   assert.deepEqual(plain(u.vectorDeclaration(declaration)), declaration);
