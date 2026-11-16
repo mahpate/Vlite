@@ -25,6 +25,9 @@ struct Fixture {
 
 impl Fixture {
     fn new() -> Self {
+        // Cargo creates this directory only when it compiles the test, so a
+        // reused binary (for example from a cache mount) can run without it.
+        std::fs::create_dir_all(env!("CARGO_TARGET_TMPDIR")).unwrap();
         Self {
             dir: tempfile::tempdir_in(env!("CARGO_TARGET_TMPDIR")).unwrap(),
         }
