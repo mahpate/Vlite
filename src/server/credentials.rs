@@ -1074,7 +1074,7 @@ pub(super) mod tests {
             excluded: bundle::EXCLUDED.iter().map(|s| (*s).to_owned()).collect(),
         };
         let policy = super::super::cloud_backup::fake::policy_capture();
-        let sealed = bundle::bundle(config, "id", None, &"5c".repeat(32), policy, 1);
+        let sealed = bundle::bundle(config, "id", None, &"5c".repeat(32), policy, None, 1);
         let bytes = serde_json::to_vec(&sealed).unwrap();
         let parsed = bundle::parse(&bytes).unwrap();
         let dir = tempfile::tempdir().unwrap();

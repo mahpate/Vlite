@@ -691,6 +691,46 @@ mod json {
     }
 
     #[test]
+    fn to_json_is_read_back_unchanged() {
+        assert_eq!(
+            to_json(&parse(EXAMPLE.as_bytes()).unwrap()),
+            serde_json::from_str::<serde_json::Value>(&edit(
+                r#""scopes":[{"agent":"a"}]"#,
+                r#""scopes":[{"agent":"a"}],"read_scopes":[],"raw_access":false"#,
+            ))
+            .unwrap()
+        );
+        let mut rich = entry("notes", "notes_graph");
+        rich.tenant = HEX_TENANT.into();
+        rich.generation = 7;
+        rich.state = BindingState::Retired { at_ms: 5 };
+        rich.evidence_collection = Some("ev".into());
+        rich.grants = vec![Grant {
+            principal: PRINCIPAL.into(),
+            raw_access: true,
+            scopes: vec![MemoryScope {
+                tenant: HEX_TENANT.into(),
+                agent: "a".into(),
+                user: Some("u".into()),
+                session: Some("s".into()),
+            }],
+            read_scopes: Vec::new(),
+        }];
+        let mut reader = entry("other", "other_graph");
+        reader.tenant = HEX_TENANT.into();
+        reader.grants[0].scopes = vec![scope(HEX_TENANT, "a")];
+        reader.grants[0].read_scopes = vec![scope(HEX_TENANT, "b")];
+        let original = set(vec![rich, reader]);
+        original.validate().unwrap();
+        let bytes = serde_json::to_vec(&to_json(&original)).unwrap();
+        assert_eq!(parse(&bytes), Ok(original));
+        assert_eq!(
+            parse(&serde_json::to_vec(&to_json(&set(vec![]))).unwrap()),
+            Ok(set(vec![]))
+        );
+    }
+
+    #[test]
     fn raw_access_is_a_strict_optional_bool() {
         let raw = edit(
             r#""scopes":[{"agent":"a"}]"#,

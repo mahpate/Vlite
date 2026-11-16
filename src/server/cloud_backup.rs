@@ -2141,7 +2141,8 @@ mod tests {
         }))
         .unwrap();
         let policy = fake::policy_capture();
-        let bundle = recovery_bundle::bundle(config, INSTALL, lineage, database_sha256, policy, 1);
+        let bundle =
+            recovery_bundle::bundle(config, INSTALL, lineage, database_sha256, policy, None, 1);
         serde_json::to_vec(&bundle).unwrap()
     }
 

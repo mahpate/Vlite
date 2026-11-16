@@ -83,8 +83,16 @@ pub(super) fn startup_at(service: &Service, now_ms: u64) -> std::io::Result<Vec<
 #[cfg(test)]
 pub(super) fn write_records(service: &Service) {
     let mut owner = service.database.write().unwrap();
-    let db = owner.as_mut().unwrap();
-    for binding in service.memory_bindings.current().iter() {
+    write_records_to(
+        owner.as_mut().unwrap(),
+        service.memory_bindings.current().set(),
+    );
+}
+
+/// [`write_records`] for `set` into `db` directly.
+#[cfg(test)]
+pub(super) fn write_records_to(db: &mut Database, set: &crate::memory::binding::BindingSet) {
+    for binding in &set.bindings {
         let (graph, evidence) = resources(binding);
         MemoryMut::bind(db, &graph, evidence.as_deref())
             .and_then(|mut memory| memory.write_binding_record(binding))
@@ -168,6 +176,20 @@ fn prepare(
         }
     }
     Ok(planned.orphans)
+}
+
+/// Runs the startup binding checks of `set` read-only against the database
+/// copy at `path` (a restored backup): bound resources exist, the records are
+/// valid and `set` passes the rotation rules against them. Returns the
+/// binding and orphan-record counts. The database is closed on return.
+pub(super) fn verify_restored(
+    path: &std::path::Path,
+    set: &crate::memory::binding::BindingSet,
+    now_ms: u64,
+) -> Result<(usize, usize), &'static str> {
+    let mut db = Database::open_read_only(path).map_err(|_| RECORDS_UNREADABLE)?;
+    let orphans = prepare(&mut db, &reserved::Bindings::new(set.clone()), now_ms)?;
+    Ok((set.bindings.len(), orphans.len()))
 }
 
 /// The memory routes: none (plain 404) unless the file names a binding

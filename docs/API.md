@@ -857,9 +857,31 @@ touches the live database; select the copy with `POST /v1/admin/restores/select`
 `vlite-server cloud-sets` and `vlite-server cloud-restore` commands (see
 [DOCKER-OPERATIONS.md](DOCKER-OPERATIONS.md#cloud-backups-to-azure-blob)).
 
+**Memory.** A server with memory bindings is backed up too. A run copies the
+binding set in force together with the database snapshot, and its bundle
+has the schema `vlite.recovery-bundle/2` with that set; every other bundle
+stays `vlite.recovery-bundle/1`, which older servers still read. A database
+that holds binding records but no bindings file names a binding gets a `/1`
+bundle, and its restored copy keeps those graphs and collections reserved
+with no grant. A drill and a restore run the startup binding checks against
+the restored copy: bound graphs and evidence collections exist, the records
+are valid and the captured set passes the rotation rules. A failure fails
+the drill (`cloud_restore_memory_failed` in its error) or answers 409
+`cloud_restore_memory_failed`; a malformed memory section answers 409
+`cloud_restore_memory_invalid`. The drill detail and the restore report
+carry `memory` counts (`bindings`, `active`, `retired`,
+`principals_to_rekey`, `orphan_records`) and never name a binding or
+principal. The restore route writes no bindings file: take it from the
+command-line restore or the source. Its principals are the old credentials,
+so before serving the copy with `--memory-bindings-file`, re-issue
+credentials, replace each binding's principals with the new IDs and raise
+its `generation`; never widen `raw_access`. Without the file the restored
+memory stays reserved with no grant. A restore brings back memories and
+evidence that were forgotten or erased after the backup was taken.
+Compaction still refuses a server with memory (`memory_reservations_present`).
+
 **Refused, not attempted.** These answer 409 with a reason code: an
-encrypted database (`encrypted_cloud_backup_unqualified`), served memory
-reservations (`memory_reservations_present`), an in-memory or recovery-mode
+encrypted database (`encrypted_cloud_backup_unqualified`), an in-memory or recovery-mode
 server (`cloud_backup_requires_database_file`), a prefix owned by another
 installation (`cloud_prefix_owned`) and a database over 1 GiB, the supported
 cloud-backup size (`cloud_database_too_large`, also refused before a restore

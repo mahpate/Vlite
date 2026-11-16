@@ -467,6 +467,21 @@ private admin volume.
    No credential, session or webhook is restored. Start a server on the
    restored files, then re-create credentials and webhooks.
 
+   A set taken on a server with memory bindings (bundle schema
+   `vlite.recovery-bundle/2`) is checked with the startup binding checks
+   before anything is published; a failure (`cloud_restore_memory_failed`,
+   or `cloud_restore_memory_invalid` for a malformed section) publishes
+   nothing. The output then also holds `memory-bindings.json`, the binding
+   set in force at the backup (owner-only on Linux and macOS), and the
+   report adds `memory` counts and `memory_bindings_file`. Its principals
+   are the old credentials, which grant nothing on the restored copy. To
+   serve memory, re-issue credentials, replace each binding's principals
+   with the new credential IDs, raise its `generation` (startup otherwise
+   refuses the changed binding) and never widen `raw_access`; then start
+   with `--memory-bindings-file`. Without the file the restored memory
+   stays reserved with no grant. A restore brings back memories and
+   evidence that were forgotten or erased after the backup was taken.
+
    If a restore is interrupted, run it again: it first removes abandoned
    staging directories, recognized by their generated name, their contents
    and a free lock; any other `.vlite-cloud-restore-*` entry is left alone. The final move never replaces anything: if a file or
@@ -477,9 +492,9 @@ private admin volume.
    Windows the staging and output directories inherit its access list.
 
 `--mode seed` and `{"mode":"seed"}` (same-lineage standby seeding) are
-refused. Encrypted databases, served memory reservations, in-memory servers
+refused. Encrypted databases, in-memory servers
 and databases over 1 GiB (`cloud_database_too_large`) are refused with a
-reason code. Before the payload download (after reading the manifest and
+reason code; a server with memory bindings is backed up (see step 5). Before the payload download (after reading the manifest and
 coordination records), a restore or drill checks that the staging
 volume has room for twice the database plus the recovery bundle and a 64 MiB
 margin (507 `restore_insufficient_space`); on Windows free space is not

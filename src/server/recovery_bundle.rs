@@ -17,10 +17,15 @@
 //! authenticated capture: a self-consistent rewrite by a writer to the trusted
 //! containers is outside the hash chain's guarantee (see docs/SECURITY.md).
 use super::*;
+use crate::memory::binding::{BindingSet, BindingState};
 use serde::Serialize;
 use std::{collections::HashSet, path::Path as FilePath};
 
 pub(super) const SCHEMA: &str = "vlite.recovery-bundle/1";
+/// A bundle that carries the memory binding set in force at capture.
+/// Servers that predate it reject it, so they never restore memory without
+/// its bindings.
+pub(super) const SCHEMA_V2: &str = "vlite.recovery-bundle/2";
 pub(super) const MAX_BYTES: u64 = 8 * 1024 * 1024;
 const MAX_ENTRIES: usize = 1024;
 
@@ -40,23 +45,12 @@ pub(super) const EXCLUDED: [&str; 10] = [
 
 /// Profile refusals: database shapes a cloud backup set cannot yet carry
 /// with a complete verify/drill/restore path. Returned as `(code, message)`.
-pub(super) fn refusal(
-    encrypted: bool,
-    memory_bindings: bool,
-) -> Option<(&'static str, &'static str)> {
-    if encrypted {
-        return Some((
-            "encrypted_cloud_backup_unqualified",
-            "cloud backup of an encrypted database is not supported yet: the isolated restore drill has no keyed path and key custody is outside this milestone",
-        ));
-    }
-    if memory_bindings {
-        return Some((
-            "memory_reservations_present",
-            "cloud backup is unavailable while memory reservations are served",
-        ));
-    }
-    None
+/// Served memory is carried in a `/2` bundle (section 14.5), not refused.
+pub(super) fn refusal(encrypted: bool) -> Option<(&'static str, &'static str)> {
+    encrypted.then_some((
+        "encrypted_cloud_backup_unqualified",
+        "cloud backup of an encrypted database is not supported yet: the isolated restore drill has no keyed path and key custody is outside this milestone",
+    ))
 }
 
 /// One secret the restore target must provision. Only the name and whether
@@ -98,6 +92,11 @@ pub(super) struct Bundle {
     /// Always true: the restore re-keys every credential and account.
     pub rekey_only: bool,
     pub config: Config,
+    /// The `memory-bindings-v1` set served at capture; present exactly in a
+    /// `/2` bundle. Its principals are credential IDs that the restore does
+    /// not bring back, so it grants nothing until the operator re-keys it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub memory_bindings: Option<Value>,
 }
 
 fn reference(name: &str, configured: bool, action: &str) -> SecretReference {
@@ -323,10 +322,11 @@ pub(super) fn bundle(
     lineage: Option<u64>,
     database_sha256: &str,
     policy: super::cloud_backup::PolicyCapture,
+    memory: Option<&BindingSet>,
     now: u64,
 ) -> Bundle {
     Bundle {
-        schema: SCHEMA.into(),
+        schema: if memory.is_some() { SCHEMA_V2 } else { SCHEMA }.into(),
         created_unix_ms: now,
         installation_id: installation_id.into(),
         source_lineage: lineage.map(|l| format!("{l:016x}")),
@@ -334,7 +334,62 @@ pub(super) fn bundle(
         policy,
         rekey_only: true,
         config,
+        memory_bindings: memory.map(crate::memory::binding::to_json),
     }
+}
+
+/// The binding set a `/2` bundle carries, validated as a bindings file is.
+pub(super) fn memory_set(bundle: &Bundle) -> Result<Option<BindingSet>, &'static str> {
+    const INVALID: &str = "the recovery bundle memory bindings are invalid";
+    let Some(value) = &bundle.memory_bindings else {
+        return Ok(None);
+    };
+    let bytes = serde_json::to_vec(value).map_err(|_| INVALID)?;
+    let set = crate::memory::binding::parse(&bytes).map_err(|_| INVALID)?;
+    if set.bindings.is_empty() {
+        return Err(INVALID);
+    }
+    Ok(Some(set))
+}
+
+/// Counts only: the summary never names a binding, principal or scope.
+pub(super) fn memory_summary(set: &BindingSet) -> Value {
+    let active = set
+        .bindings
+        .iter()
+        .filter(|b| b.state == BindingState::Active)
+        .count();
+    let principals: HashSet<&str> = set
+        .bindings
+        .iter()
+        .flat_map(|b| b.grants.iter().map(|g| g.principal.as_str()))
+        .collect();
+    json!({"bindings":set.bindings.len(),"active":active,
+        "retired":set.bindings.len() - active,"principals_to_rekey":principals.len()})
+}
+
+/// One active binding `b1` on graph `g1` and one retired binding `b0` on
+/// graph `g0`, both of `@root` with no evidence collection and granting the
+/// same principal.
+#[cfg(test)]
+pub(super) fn memory_bindings() -> BindingSet {
+    let mut entry = json!({"binding":"b1","tenant":"@root","generation":1,
+        "state":"active","graph":"g1","evidence_collection":null,
+        "schema_version":crate::memory::binding::SCHEMA_VERSION,
+        "ranking_version":crate::memory::binding::RANKING_VERSION,
+        "digest_version":crate::memory::binding::DIGEST_VERSION,
+        "receipt_window_ms":60000,
+        "grants":[{"principal":"abcdefgh2345","scopes":[{"agent":"a"}],
+            "read_scopes":[],"raw_access":false}]});
+    let mut retired = entry.clone();
+    retired["binding"] = json!("b0");
+    retired["graph"] = json!("g0");
+    retired["state"] = json!("retired");
+    retired["retired_at_ms"] = json!(5);
+    entry["generation"] = json!(2);
+    let document = json!({"version":crate::memory::binding::VERSION,
+        "bindings":[retired, entry]});
+    crate::memory::binding::parse(&serde_json::to_vec(&document).unwrap()).unwrap()
 }
 
 /// Parses, validates and certifies a downloaded bundle. Errors are fixed
@@ -345,9 +400,14 @@ pub(super) fn parse(bytes: &[u8]) -> Result<Bundle, &'static str> {
     }
     let bundle: Bundle =
         serde_json::from_slice(bytes).map_err(|_| "the recovery bundle is invalid")?;
-    if bundle.schema != SCHEMA {
-        return Err("the recovery bundle schema is unsupported");
+    match (bundle.schema.as_str(), bundle.memory_bindings.is_some()) {
+        (SCHEMA, false) | (SCHEMA_V2, true) => {}
+        (SCHEMA, true) | (SCHEMA_V2, false) => {
+            return Err("the recovery bundle memory section does not match its schema");
+        }
+        _ => return Err("the recovery bundle schema is unsupported"),
     }
+    memory_set(&bundle)?;
     if !bundle.rekey_only {
         return Err("the recovery bundle is not rekey-only");
     }
@@ -423,6 +483,8 @@ pub(super) fn import(
         "webhook_subscriptions_to_recreate": c.webhook_subscriptions,
         "secret_references": c.secret_references,
         "excluded": c.excluded,
+        "memory_bindings": bundle.memory_bindings.as_ref()
+            .and_then(|m| m["bindings"].as_array().map(Vec::len)),
     }))
 }
 
@@ -458,7 +520,21 @@ mod tests {
 
     fn sealed(config: Config, lineage: Option<u64>) -> Bundle {
         let policy = super::super::cloud_backup::fake::policy_capture();
-        bundle(config, "id", lineage, &DB_SHA.repeat(32), policy, 1)
+        bundle(config, "id", lineage, &DB_SHA.repeat(32), policy, None, 1)
+    }
+
+    fn sealed_with_memory() -> Bundle {
+        let policy = super::super::cloud_backup::fake::policy_capture();
+        let set = memory_bindings();
+        bundle(
+            sample(),
+            "id",
+            None,
+            &DB_SHA.repeat(32),
+            policy,
+            Some(&set),
+            1,
+        )
     }
 
     fn reparse(value: &Value) -> Result<Bundle, &'static str> {
@@ -497,7 +573,7 @@ mod tests {
         value["config"]["accounts"][0]["password"] = json!("$argon2id$...");
         assert!(parse(&serde_json::to_vec(&value).unwrap()).is_err());
         let mut value = serde_json::to_value(&b).unwrap();
-        value["schema"] = json!("vlite.recovery-bundle/2");
+        value["schema"] = json!("vlite.recovery-bundle/3");
         assert!(parse(&serde_json::to_vec(&value).unwrap()).is_err());
         let mut value = serde_json::to_value(&b).unwrap();
         value["rekey_only"] = json!(false);
@@ -929,13 +1005,57 @@ mod tests {
     #[test]
     fn refusals_name_unsupported_profiles() {
         assert_eq!(
-            refusal(true, false).unwrap().0,
+            refusal(true).unwrap().0,
             "encrypted_cloud_backup_unqualified"
         );
+        assert!(refusal(false).is_none());
+    }
+
+    #[test]
+    fn a_memory_bundle_is_v2_and_carries_its_bindings_unchanged() {
+        let b = sealed_with_memory();
+        assert_eq!(b.schema, SCHEMA_V2);
+        let bytes = serde_json::to_vec(&b).unwrap();
+        let parsed = parse(&bytes).unwrap();
+        assert_eq!(memory_set(&parsed).unwrap(), Some(memory_bindings()));
         assert_eq!(
-            refusal(false, true).unwrap().0,
-            "memory_reservations_present"
+            memory_summary(&memory_bindings()),
+            json!({"bindings":2,"active":1,"retired":1,"principals_to_rekey":1})
         );
-        assert!(refusal(false, false).is_none());
+        // A bundle without memory stays byte-for-byte a `/1` bundle.
+        let plain = serde_json::to_value(sealed(sample(), None)).unwrap();
+        assert_eq!(plain["schema"], json!(SCHEMA));
+        assert!(plain.get("memory_bindings").is_none());
+        assert_eq!(memory_set(&reparse(&plain).unwrap()).unwrap(), None);
+    }
+
+    #[test]
+    fn the_memory_section_must_match_the_schema_and_validate() {
+        let with = serde_json::to_value(sealed_with_memory()).unwrap();
+        let without = serde_json::to_value(sealed(sample(), None)).unwrap();
+        let mut v1_with = with.clone();
+        v1_with["schema"] = json!(SCHEMA);
+        let mut v2_without = without.clone();
+        v2_without["schema"] = json!(SCHEMA_V2);
+        for case in [v1_with, v2_without] {
+            assert_eq!(
+                reparse(&case).err().unwrap(),
+                "the recovery bundle memory section does not match its schema"
+            );
+        }
+        let invalid = "the recovery bundle memory bindings are invalid";
+        let mut unknown = with.clone();
+        unknown["memory_bindings"]["bindings"][0]["extra"] = json!(1);
+        let mut principal = with.clone();
+        principal["memory_bindings"]["bindings"][1]["grants"][0]["principal"] =
+            json!("SYNTHETIC-MARKER");
+        let mut empty = with.clone();
+        empty["memory_bindings"]["bindings"] = json!([]);
+        let mut not_a_document = with;
+        not_a_document["memory_bindings"] = json!("bindings");
+        for case in [unknown, principal, empty, not_a_document] {
+            let error = reparse(&case).err().unwrap();
+            assert_eq!(error, invalid);
+        }
     }
 }

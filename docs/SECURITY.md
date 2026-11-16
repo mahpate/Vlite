@@ -331,6 +331,10 @@ are rejected, so a key or connection string cannot be saved there.
   field, so a secret cannot ride along. Only files the server writes may sit
   in the admin directory; anything else (a token or TLS file, for example)
   fails the backup with `recovery_config_unrecognized` until it is moved.
+  On a server with memory bindings the bundle also carries the binding set
+  in force: binding, tenant, graph and evidence collection names, the
+  credential IDs it grants, their memory scopes (agent, user and session
+  identifiers) and `raw_access` flags. It holds no token, hash or secret.
 - **Restore grants nothing silently.** A restore creates a new lineage, so old
   scoped credentials and sessions stop working. The offline `cloud-restore`
   imports accounts disabled with unusable passwords and creates one fresh
@@ -340,7 +344,13 @@ are rejected, so a key or connection string cannot be saved there.
   publishes them with one rename into a new `--output` directory that must
   not exist; it never writes into an existing database or admin directory.
   On Windows the staging directory inherits the parent's access list, so
-  choose a parent writable only by the operator.
+  choose a parent writable only by the operator. A restored memory binding
+  set names the old credential IDs, which the restored admin directory does
+  not hold, so it grants nothing until the operator re-issues credentials,
+  replaces each binding's principals and raises its `generation`
+  ([DOCKER-OPERATIONS.md](DOCKER-OPERATIONS.md#cloud-backups-to-azure-blob)).
+  A restore also brings back memories and evidence forgotten or erased
+  after the backup was taken.
 - **Pins.** A restore or drill pins its set so retention cannot delete it
   mid-download. Only the owning operation releases that pin; an operator can
   force-release one left by a crashed owner, which is audited separately.

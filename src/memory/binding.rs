@@ -483,6 +483,58 @@ mod json {
         set.validate()?;
         Ok(set)
     }
+
+    /// The `memory-bindings-v1` document of `set`; [`parse`] reads it back
+    /// unchanged. Credential IDs only: a binding set holds no secret.
+    #[cfg_attr(not(feature = "server"), allow(dead_code))]
+    pub(crate) fn to_json(set: &BindingSet) -> serde_json::Value {
+        use serde_json::{Map, Value, json};
+        let scopes = |list: &[MemoryScope]| -> Value {
+            list.iter()
+                .map(|scope| {
+                    let mut entry = Map::new();
+                    entry.insert("agent".into(), json!(scope.agent));
+                    if let Some(user) = &scope.user {
+                        entry.insert("user".into(), json!(user));
+                    }
+                    if let Some(session) = &scope.session {
+                        entry.insert("session".into(), json!(session));
+                    }
+                    Value::Object(entry)
+                })
+                .collect()
+        };
+        let bindings: Vec<Value> = set
+            .bindings
+            .iter()
+            .map(|binding| {
+                let grants: Vec<Value> = binding
+                    .grants
+                    .iter()
+                    .map(|grant| {
+                        json!({"principal":grant.principal,"scopes":scopes(&grant.scopes),
+                            "read_scopes":scopes(&grant.read_scopes),
+                            "raw_access":grant.raw_access})
+                    })
+                    .collect();
+                let mut entry = json!({"binding":binding.binding,"tenant":binding.tenant,
+                    "generation":binding.generation,"graph":binding.graph,
+                    "evidence_collection":binding.evidence_collection,
+                    "schema_version":SCHEMA_VERSION,"ranking_version":RANKING_VERSION,
+                    "digest_version":DIGEST_VERSION,
+                    "receipt_window_ms":binding.receipt_window_ms,"grants":grants});
+                match binding.state {
+                    BindingState::Active => entry["state"] = json!("active"),
+                    BindingState::Retired { at_ms } => {
+                        entry["state"] = json!("retired");
+                        entry["retired_at_ms"] = json!(at_ms);
+                    }
+                }
+                entry
+            })
+            .collect();
+        json!({"version":VERSION,"bindings":bindings})
+    }
 }
 
 #[cfg(feature = "json")]
@@ -491,6 +543,13 @@ mod json {
     allow(unused_imports, reason = "only the server reads a bindings file")
 )]
 pub(crate) use json::parse;
+
+#[cfg(feature = "json")]
+#[cfg_attr(
+    not(feature = "server"),
+    allow(unused_imports, reason = "only the server backs up a binding set")
+)]
+pub(crate) use json::to_json;
 
 #[cfg(test)]
 mod tests;

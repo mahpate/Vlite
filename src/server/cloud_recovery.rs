@@ -17,9 +17,12 @@
 //! `restore_cleanup_failed` and keeps the output.
 //!
 //! Nothing is selected or activated: the operator starts the restored copy
-//! explicitly. Only the lineage-changing rekey restore exists; the
-//! identity-preserving seed mode belongs to the deferred HA work and is
-//! refused.
+//! explicitly. A bundle from a memory server carries its binding set: the
+//! restored database must pass the startup binding checks before publication,
+//! and the set is written as an owner-only `memory-bindings.json` whose
+//! principals the operator re-keys. Only the lineage-changing rekey restore
+//! exists; the identity-preserving seed mode belongs to the deferred HA work
+//! and is refused.
 use super::backup_policy::{SHARED_KEY_ENV, bundle_summary, inspection, lineage_hex};
 use super::cloud_backup::{self as cloud, PinKind, Sets, Target};
 use super::*;
@@ -33,6 +36,7 @@ const PASSWORD_LABEL: &str = "--admin-password-file";
 /// Published layout inside `--output`.
 const DATABASE_FILE: &str = "database.vlite";
 const ADMIN_DIR: &str = "admin";
+const MEMORY_BINDINGS_FILE: &str = "memory-bindings.json";
 /// Staging directories next to `--output`, and their owner lock.
 const STAGING_PREFIX: &str = ".vlite-cloud-restore-";
 const STAGING_LOCK: &str = "owner.lock";
@@ -618,6 +622,12 @@ fn restore_pinned(plan: &Plan, sets: &Sets, pin_id: &str) -> Result<Value, Recov
     }
 
     let fetched = sets.fetch(id, pin_id, &download)?;
+    let memory_set = recovery_bundle::memory_set(&fetched.bundle).map_err(|e| {
+        refused(
+            "cloud_restore_memory_invalid",
+            format!("the recovery bundle's memory section is invalid: {e}"),
+        )
+    })?;
     let drill = maintenance::drill(&fetched.database, &download).map_err(|e| {
         refused(
             "cloud_drill_failed",
@@ -629,6 +639,25 @@ fn restore_pinned(plan: &Plan, sets: &Sets, pin_id: &str) -> Result<Value, Recov
     let lineage = maintenance::inspect_detail(&database)
         .map_err(|e| io_failure("cannot inspect the restored database", e))?
         .lineage;
+    // The startup binding checks, read-only; the captured set is written
+    // beside the database for the operator to re-key.
+    let memory = match &memory_set {
+        Some(set) => {
+            let (_, orphans) =
+                super::memory::verify_restored(&database, set, now()).map_err(|e| {
+                    refused(
+                        "cloud_restore_memory_failed",
+                        format!("the restored memory failed its startup checks: {e}"),
+                    )
+                })?;
+            write_bindings(&staged.join(MEMORY_BINDINGS_FILE), set)
+                .map_err(|e| io_failure("cannot write the memory bindings file", e))?;
+            let mut summary = recovery_bundle::memory_summary(set);
+            summary["orphan_records"] = json!(orphans);
+            Some(summary)
+        }
+        None => None,
+    };
     // Writes, re-reads and authenticates the rekeyed stores.
     let imported =
         recovery_bundle::import(&fetched.bundle, &admin, (&plan.username, &plan.password))
@@ -681,6 +710,21 @@ fn restore_pinned(plan: &Plan, sets: &Sets, pin_id: &str) -> Result<Value, Recov
 
     let database = display(&plan.output.join(DATABASE_FILE));
     let admin = display(&plan.output.join(ADMIN_DIR));
+    let bindings_file = memory
+        .as_ref()
+        .map(|_| display(&plan.output.join(MEMORY_BINDINGS_FILE)));
+    let mut next = vec![
+        "provision a new admin bearer token (VLITE_AUTH_TOKEN_FILE); old tokens and credentials are not restored".to_owned(),
+        format!("start the restored copy explicitly: VLITE_ADMIN_DIR={admin} vlite-server {database}"),
+        format!("sign in as {} and reset passwords before re-enabling imported accounts", plan.username),
+        "re-issue the scoped credentials and re-create the webhook subscriptions listed under import".to_owned(),
+        "configure cloud backup with a new prefix: the source prefix belongs to the source installation".to_owned(),
+    ];
+    if let Some(file) = &bindings_file {
+        next.push(format!(
+            "to serve memory, edit {file}: replace each binding's principals with the re-issued credential IDs and raise its generation, then start with --memory-bindings-file {file}; without it the restored memory stays reserved with no grant"
+        ));
+    }
     Ok(json!({
         "mode": "rekey",
         "rekey_only": true,
@@ -702,15 +746,23 @@ fn restore_pinned(plan: &Plan, sets: &Sets, pin_id: &str) -> Result<Value, Recov
         "drill": {"scratch_lineage": lineage_hex(drill.scratch_lineage),
             "collections": drill.collections, "probes": drill.probes},
         "bundle": bundle_summary(&fetched.bundle),
+        "memory": memory,
+        "memory_bindings_file": bindings_file,
         "import": imported,
-        "next": [
-            "provision a new admin bearer token (VLITE_AUTH_TOKEN_FILE); old tokens and credentials are not restored",
-            format!("start the restored copy explicitly: VLITE_ADMIN_DIR={admin} vlite-server {database}"),
-            format!("sign in as {} and reset passwords before re-enabling imported accounts", plan.username),
-            "re-issue the scoped credentials and re-create the webhook subscriptions listed under import",
-            "configure cloud backup with a new prefix: the source prefix belongs to the source installation",
-        ],
+        "next": next,
     }))
+}
+
+/// Writes `set` as a new owner-only (0600 on Unix) `memory-bindings-v1` file.
+fn write_bindings(
+    path: &FilePath,
+    set: &crate::memory::binding::BindingSet,
+) -> std::io::Result<()> {
+    let bytes = serde_json::to_vec_pretty(&crate::memory::binding::to_json(set))
+        .map_err(std::io::Error::other)?;
+    let mut file = cloud::create_private_file(path)?;
+    file.write_all(&bytes)?;
+    file.sync_all()
 }
 
 #[cfg(test)]
@@ -762,6 +814,14 @@ mod tests {
 
     /// Publishes one set whose database `fill` populated.
     fn setup_with(fill: impl FnOnce(&mut Database)) -> Env {
+        setup_memory(fill, None)
+    }
+
+    /// [`setup_with`], the bundle carrying `memory` as a memory server's does.
+    fn setup_memory(
+        fill: impl FnOnce(&mut Database),
+        memory: Option<&crate::memory::binding::BindingSet>,
+    ) -> Env {
         let meta = Arc::new(Memory::default());
         let data = Arc::new(Memory::default());
         let sets = Sets::new(meta.clone(), data.clone(), false, "vlite/prod/".into());
@@ -780,6 +840,7 @@ mod tests {
             detail.lineage,
             &database.sha256,
             policy,
+            memory,
             1,
         );
         let uploads = vec![
@@ -966,6 +1027,97 @@ mod tests {
             !text.contains(PASSWORD),
             "the report must not echo the password"
         );
+        // Without memory nothing about memory is written or suggested.
+        assert!(report["memory"].is_null());
+        assert!(report["memory_bindings_file"].is_null());
+        let next = report["next"].as_array().unwrap();
+        assert!(
+            next.iter()
+                .all(|step| !step.as_str().unwrap().contains("memory"))
+        );
+    }
+
+    /// The source database of a memory server: the graphs of both bindings
+    /// of [`recovery_bundle::memory_bindings`] and the records startup writes,
+    /// or only `g0`.
+    fn memory_graphs(both: bool) -> impl FnOnce(&mut Database) {
+        move |database| {
+            database.put(1, &[1.0, 1.0, -0.5], b"p1").unwrap();
+            database.create_graph("g0").unwrap();
+            if both {
+                database.create_graph("g1").unwrap();
+                super::super::memory::write_records_to(
+                    database,
+                    &recovery_bundle::memory_bindings(),
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn a_memory_restore_checks_the_bindings_and_writes_them_beside_the_database() {
+        let set = recovery_bundle::memory_bindings();
+        let env = setup_memory(memory_graphs(true), Some(&set));
+        let request = env.request();
+        let report = env.restore(&request).unwrap();
+
+        let output = &request.output;
+        assert_eq!(
+            names(output),
+            ["admin", "database.vlite", MEMORY_BINDINGS_FILE]
+        );
+        let file = output.join(MEMORY_BINDINGS_FILE);
+        let written = crate::memory::binding::parse(&std::fs::read(&file).unwrap()).unwrap();
+        assert_eq!(written, set);
+        let memory = &report["memory"];
+        assert_eq!(memory["bindings"], 2);
+        assert_eq!(memory["active"], 1);
+        assert_eq!(memory["retired"], 1);
+        assert_eq!(memory["principals_to_rekey"], 1);
+        assert_eq!(memory["orphan_records"], 0);
+        let reported = report["memory_bindings_file"].as_str().unwrap();
+        assert!(reported.ends_with(MEMORY_BINDINGS_FILE), "{reported}");
+        let next = report["next"].as_array().unwrap();
+        assert!(
+            next.last()
+                .unwrap()
+                .as_str()
+                .unwrap()
+                .contains("--memory-bindings-file"),
+            "{next:?}"
+        );
+        // The report counts but never names a binding or principal.
+        let text = report.to_string();
+        assert!(!text.contains("abcdefgh2345"), "{text}");
+        assert_eq!(report["pin_released"], true);
+        assert_eq!(env.pins(), 0);
+        assert_eq!(env.leftovers(), ["restored"]);
+        // The restored copy passes the startup checks of the written file.
+        assert!(
+            super::super::memory::verify_restored(&output.join(DATABASE_FILE), &written, now())
+                .is_ok()
+        );
+        #[cfg(unix)]
+        assert_eq!(mode(&file), 0o600);
+    }
+
+    #[test]
+    fn a_memory_restore_whose_bound_graph_is_missing_publishes_nothing() {
+        let set = recovery_bundle::memory_bindings();
+        let env = setup_memory(memory_graphs(false), Some(&set));
+        let request = env.request();
+        let error = env.restore(&request).unwrap_err();
+
+        assert_eq!(error.code, "cloud_restore_memory_failed", "{error}");
+        assert!(
+            error
+                .message
+                .contains("a memory binding graph does not exist"),
+            "{error}"
+        );
+        assert!(!request.output.exists());
+        assert_eq!(env.pins(), 0);
+        assert!(env.leftovers().is_empty(), "{:?}", env.leftovers());
     }
 
     #[test]

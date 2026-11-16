@@ -383,6 +383,7 @@ These are recommended design decisions for approval, not authorization to execut
 | RD-009 | Zone HA only; never geo-failover the authority witness. | Geo-redundancy is asynchronous and can resurrect stale control state. |
 | RD-010 | No automatic deletion of compaction originals or general engine rewrite. | Keeps recovery invariants and implementation scope bounded. |
 | RD-011 | First backup milestone is rekey-only; later continuity depends on current-policy authority. | Avoids either revocation rollback or a hidden dependency cycle in the independent backup release. |
+| RD-012 | Back up served memory with its binding set; a restore re-keys its principals manually (section 14.5). | Servers that serve agent memory get the same cloud backup, drill and restore as others, without granting any restored credential access before an operator re-keys it. |
 
 ## 11. Alternatives Considered
 
@@ -677,7 +678,7 @@ Final planning validation checked the mandatory 15 sections, 16 unique epics, 19
 
 - seed mode: `cloud_seed_mode_deferred`
 - encrypted databases: `encrypted_cloud_backup_unqualified`
-- served memory reservations and in-memory servers
+- in-memory servers (served memory reservations were refused here too until section 14.5 added them)
 - databases over 1 GiB: `cloud_database_too_large`
 - unrecognized admin-directory content: `recovery_config_unrecognized`
 - a shared key with a non-loopback endpoint
@@ -735,6 +736,25 @@ Vectors, graph, KV with versions and CAS, and allocation high-waters are restore
   - `docs/STORAGE-FEATURES.md`: the profile is documented in the operations, API, security and capabilities documents.
 - Pre-existing and not caused by this work: `schedule_runs_once_per_window_after_measured_growth` in `tests/server_compaction.rs` failed once in ten runs at the base commit (503 during its growth writes). The suspected cause, a scheduled run starting before the writes finish, is unproven. It is left for a separate fix.
 
+### 14.5 Memory-aware cloud backup
+
+**Scope.** Milestone 1 refused cloud backup (`memory_reservations_present`) on a server that served memory bindings or held reserved memory records. This follow-up removes only that refusal. Encrypted databases, in-memory servers, the size cap and unrecognized admin-directory content stay refused. Compaction keeps its own memory refusal. No route, request field or public API is added.
+
+**Design.**
+
+1. **Capture.** A run copies the binding set in force inside the same exclusive write-lock section that snapshots the database. A reload installs a new set only under that lock, so the copy always matches the binding records in the snapshot. Nothing is captured when no bindings file names a binding.
+2. **Bundle schema.** A bundle that carries a binding set has the schema `vlite.recovery-bundle/2` and a `memory_bindings` section in strict `memory-bindings-v1` form. Every other bundle stays `vlite.recovery-bundle/1` and byte-identical to before. A parser accepts `/1` only without the section and `/2` only with a valid section. Servers older than this change reject `/2`, so they never restore memory without its bindings.
+3. **Orphan records.** A database whose binding records have no bindings file is backed up with a `/1` bundle. Its restored copy keeps the records, so their graphs and collections stay reserved with no grant, as on the source.
+4. **Drill.** The drill restores a second scratch copy and runs the startup binding checks against it read-only: every bound graph and evidence collection exists, the records are valid and the captured set passes the rotation rules against them. It reports `memory` with the binding and orphan counts. A failure fails the drill. The scratch copy is always deleted.
+5. **Command-line restore.** `cloud-restore` runs the same check on the staged database before it publishes the output. It writes the captured set to `memory-bindings.json` (owner-only on Linux and macOS) in the output directory and reports `memory` and `memory_bindings_file`. A failed check publishes nothing.
+6. **Restore through the server.** The `restore` route checks the restored copy the same way and reports the binding counts in its bundle summary. It writes no bindings file: the operator copies one from the command-line restore or the source.
+7. **Re-keying is manual.** The restored admin directory holds no credential, so the principals in the captured set grant nothing. Before serving the copy with `--memory-bindings-file`, the operator re-issues credentials, replaces each binding's principals with the new credential IDs and raises its `generation` (startup otherwise refuses with "a memory binding changed without a higher generation"). `raw_access` must not be widened. Without the file the restored memory stays reserved with no grant.
+8. **What a restore brings back.** A backup holds the database as it was. A restore brings back memories and evidence that were forgotten or erased after the backup was taken. Retention, legal holds and key retirement remain operator policy.
+
+**Storage replication.** Zone- or geo-redundant storage, or object replication, may protect the backup container. The coordination container must never fail over across regions (RD-009).
+
+**Tests.** The bundle round-trips a binding set; `/1` with a section and `/2` without one are refused; a run with served memory publishes a `/2` bundle whose drill and restore report the counts of the set in force; an orphan-only run publishes `/1` and its restored copy keeps the records; the drill and both restores fail when a bound graph is missing, and the failed command-line restore publishes nothing; the command-line restore writes a private bindings file equal to the captured set, which the restored copy passes, and its report names no principal; the REST restore reports memory.
+
 ## 15. Change Log
 
 - 2026-11-13: Initial design proposal prepared; no product version/changelog change, implementation or deployment authorization.
@@ -750,3 +770,4 @@ Vectors, graph, KV with versions and CAS, and allocation high-waters are restore
   - Statuses updated for ITEM-001 (backup portion), ITEM-003 to ITEM-007 and ITEM-017.
   - HA scope, ITEM-002 and EPIC-012 remain deferred and unapproved. Nothing was pushed, released or deployed.
 - 2026-11-14: Owner asked to "implement missing peaces in the dashboard". Delivered the backup slice of ITEM-014 as the **Administration → Cloud backup** card over the existing cloud-backup routes: no new route, no server change. It covers settings with inline validation, back up now, cleanup, stored backups, drill, restore as a new copy, and hold or release with a confirmed forced release. Super admins only; nothing is read until **Refresh status**. Tests: `tests/admin_tools.test.cjs`, `tests/admin_e2e.py` (including no overflow at 1280/768/390 px), and the admin-route and dashboard-coverage inventories. The HA slice of ITEM-014, live Azure validation, releases and deployment are not included.
+- 2026-11-16: Owner asked to "go ahead with memory-aware backup". Cloud backup, drill and restore now accept servers that serve agent memory (section 14.5, RD-012). Compaction, encryption and HA scope are unchanged. Nothing was pushed, released or deployed.

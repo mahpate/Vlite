@@ -401,7 +401,7 @@ impl Handle {
                 "cloud backups need a file-backed database; this server runs in memory or in recovery mode",
             ));
         }
-        match recovery_bundle::refusal(self.encrypted, !self.served.is_empty()) {
+        match recovery_bundle::refusal(self.encrypted) {
             Some((code, message)) => Err(ApiError::new(StatusCode::CONFLICT, code, message)),
             None => Ok(()),
         }
@@ -657,11 +657,56 @@ fn summarize(collection: &cloud::Collection) -> Value {
 /// What the operator must re-provision; the bundle never carries secrets.
 pub(super) fn bundle_summary(bundle: &recovery_bundle::Bundle) -> Value {
     let c = &bundle.config;
+    let memory = recovery_bundle::memory_set(bundle)
+        .ok()
+        .flatten()
+        .map(|set| recovery_bundle::memory_summary(&set));
     json!({"schema":bundle.schema,"created_unix_ms":bundle.created_unix_ms,
         "installation_id":bundle.installation_id,"source_lineage":bundle.source_lineage,
         "rekey_only":bundle.rekey_only,"tenants":c.tenants.len(),"accounts":c.accounts.len(),
         "credentials":c.credentials.len(),"webhook_subscriptions":c.webhook_subscriptions,
-        "secret_references":c.secret_references,"excluded":c.excluded})
+        "secret_references":c.secret_references,"excluded":c.excluded,"memory":memory})
+}
+
+/// The startup binding checks of a bundle's memory section, run read-only
+/// against a scratch restore of `database` in `workdir` (always deleted).
+/// `None` when the bundle carries no memory section.
+pub(super) fn check_memory(
+    bundle: &recovery_bundle::Bundle,
+    database: &FilePath,
+    workdir: &FilePath,
+) -> Result<Option<Value>, ApiError> {
+    let Some(set) = recovery_bundle::memory_set(bundle)
+        .map_err(|message| conflict("cloud_restore_memory_invalid", message))?
+    else {
+        return Ok(None);
+    };
+    let scratch = workdir.join(admin::name("memory-check-"));
+    let restored = maintenance::restore(database, &scratch);
+    let checked = restored
+        .map_err(ApiError::from)
+        .and_then(|_| verify_memory(&scratch, &set));
+    let removed = std::fs::remove_file(&scratch);
+    let report = checked?;
+    if let Err(error) = removed
+        && error.kind() != std::io::ErrorKind::NotFound
+    {
+        return Err(internal(error));
+    }
+    Ok(Some(report))
+}
+
+/// [`memory::verify_restored`] of `set` against the database copy at `path`,
+/// reported as the bundle's memory summary with the orphan-record count.
+fn verify_memory(
+    path: &FilePath,
+    set: &crate::memory::binding::BindingSet,
+) -> Result<Value, ApiError> {
+    let (_, orphans) = super::memory::verify_restored(path, set, now())
+        .map_err(|message| conflict("cloud_restore_memory_failed", message))?;
+    let mut report = recovery_bundle::memory_summary(set);
+    report["orphan_records"] = json!(orphans);
+    Ok(report)
 }
 
 /// Pulls schedule times that lie in the future back to `now`. A clock that
@@ -1299,7 +1344,7 @@ impl Runtime {
         // database lock, so no lock order is introduced); a change between
         // the two fails the set instead of pairing mismatched states.
         let before = recovery_bundle::capture(&admin, &handle.webhooks, now)?;
-        let staged = {
+        let (staged, memory) = {
             let Ok(_permit) = handle.workers.clone().try_acquire_owned() else {
                 return Err(busy_queue());
             };
@@ -1307,7 +1352,11 @@ impl Runtime {
             let mut owner = database.write().map_err(internal)?;
             let db = owner.as_mut().ok_or_else(unavailable)?;
             cloud::check_database_size(db.file.0.metadata().map_err(internal)?.len())?;
-            ops::snapshot(db, &self.staging())?.1
+            // A reload installs bindings only under this lock, so the set
+            // copied here matches the binding records in the snapshot.
+            let current = handle.served.current();
+            let memory = current.is_configured().then(|| current.set().clone());
+            (ops::snapshot(db, &self.staging())?.1, memory)
         };
         let after = recovery_bundle::capture(&admin, &handle.webhooks, now)?;
         recovery_bundle::stable(&before, &after)?;
@@ -1323,6 +1372,7 @@ impl Runtime {
             detail.lineage,
             &database.sha256,
             capture.clone(),
+            memory.as_ref(),
             now,
         );
         let uploads = vec![
@@ -1422,9 +1472,11 @@ impl Runtime {
             let work = self.workdir()?;
             let fetched = sets.fetch(set_id, &pin.id, work.path())?;
             let report = maintenance::drill(&fetched.database, work.path())?;
+            let memory = check_memory(&fetched.bundle, &fetched.database, work.path())?;
             Ok(json!({"backup":inspection(&report.backup),
                 "scratch_lineage":lineage_hex(report.scratch_lineage),
                 "collections":report.collections,"probes":report.probes,
+                "memory":memory,
                 "verified_bytes":fetched.verification.bytes,"crc32":fetched.verification.crc32}))
         })();
         let detail = match &result {
@@ -1626,16 +1678,30 @@ impl Runtime {
         let result = (|| {
             let work = self.workdir()?;
             let fetched = sets.fetch(set_id, &held.pin.id, work.path())?;
+            let memory = recovery_bundle::memory_set(&fetched.bundle)
+                .map_err(|message| conflict("cloud_restore_memory_invalid", message))?;
             let name = admin::name("restore-");
             let destination = admin_dir.join(&name);
             let restored = maintenance::restore(&fetched.database, &destination)?;
+            // A copy whose memory fails the startup checks is never offered.
+            let memory = match memory
+                .map(|set| verify_memory(&destination, &set))
+                .transpose()
+            {
+                Ok(memory) => memory,
+                Err(error) => {
+                    let _ = std::fs::remove_file(&destination);
+                    let _ = admin::sync_directory(admin_dir);
+                    return Err(error);
+                }
+            };
             admin::sync_directory(admin_dir)?;
             let lineage = maintenance::inspect_detail(&destination)?.lineage;
             Ok::<_, ApiError>(json!({"name":name,"set_id":set_id,
                 "inspection":inspection(&restored),"lineage":lineage_hex(lineage),
                 "source_lineage":fetched.manifest.source_lineage,
                 "source_installation_id":fetched.record.installation_id,
-                "bundle":bundle_summary(&fetched.bundle),"rekey_only":true,
+                "bundle":bundle_summary(&fetched.bundle),"memory":memory,"rekey_only":true,
                 "restart_required":true,
                 "next":"select the copy with POST /v1/admin/restores/select, then restart"}))
         })();
@@ -1650,10 +1716,9 @@ impl Runtime {
 }
 
 impl Handle {
-    /// Policy changes and restores are refused for an encrypted database
-    /// (memory reservations are checked per run: they can be reloaded).
+    /// Policy changes and restores are refused for an encrypted database.
     fn refusal_for_policy(&self) -> Result<(), ApiError> {
-        match recovery_bundle::refusal(self.encrypted, false) {
+        match recovery_bundle::refusal(self.encrypted) {
             Some((code, message)) => Err(conflict(code, message)),
             None => Ok(()),
         }
@@ -3082,6 +3147,135 @@ mod tests {
             "encrypted_cloud_backup_unqualified"
         );
         assert_eq!(std::fs::read_dir(&admin_dir).unwrap().count(), 1);
+    }
+
+    /// [`setup`] with a memory server: graph `g0` (and `g1` with the records
+    /// startup writes, when `both`) exist and the service serves
+    /// [`recovery_bundle::memory_bindings`].
+    fn memory_setup(both: bool) -> Env {
+        let env = setup();
+        let path = env.root.join("memory.vlite");
+        let mut database = Database::create(&path, 3).unwrap();
+        database.put(1, &[1.0, 0.5, -1.0], b"p1").unwrap();
+        database.create_graph("g0").unwrap();
+        if both {
+            database.create_graph("g1").unwrap();
+            super::super::memory::write_records_to(
+                &mut database,
+                &recovery_bundle::memory_bindings(),
+            );
+        }
+        let service = Service::new(database)
+            .with_bindings(reserved::Bindings::new(recovery_bundle::memory_bindings()));
+        service
+            .ops
+            .configure(None, Some(path), None, &ops::Schedule::default())
+            .unwrap();
+        Env { service, ..env }
+    }
+
+    #[test]
+    fn a_memory_server_backup_carries_its_bindings_through_drill_and_restore() {
+        let env = memory_setup(true);
+        let h = Handle::new(&env.service);
+        env.runtime
+            .configure(policy(json!({"drill_every":1})), &h, BASE)
+            .unwrap();
+        let report = env.runtime.run_now(&h).unwrap();
+        let id = report["set_id"].as_str().unwrap().to_owned();
+        assert_eq!(report["drill"]["ok"], true, "{report}");
+        assert_eq!(
+            report["drill"]["detail"]["memory"],
+            json!({"bindings":2,"active":1,"retired":1,"principals_to_rekey":1,
+                "orphan_records":0})
+        );
+
+        let admin_dir = env.root.join("admin");
+        std::fs::create_dir(&admin_dir).unwrap();
+        let report = env.runtime.restore(&h, &id, &admin_dir).unwrap();
+        assert_eq!(report["memory"]["bindings"], 2, "{report}");
+        assert_eq!(report["memory"]["orphan_records"], 0);
+        assert_eq!(report["bundle"]["schema"], recovery_bundle::SCHEMA_V2);
+        assert_eq!(report["bundle"]["memory"]["principals_to_rekey"], 1);
+        assert!(!report.to_string().contains("abcdefgh2345"), "{report}");
+        assert_eq!(report["pin_released"], true);
+        let name = report["name"].as_str().unwrap();
+        let path = admin::safe_file(&admin_dir, name, "restore-").unwrap();
+        assert_eq!(Database::open(&path).unwrap().len(), 1);
+    }
+
+    #[test]
+    fn a_memory_backup_whose_bound_graph_is_missing_fails_drill_and_restore() {
+        let env = memory_setup(false);
+        let h = Handle::new(&env.service);
+        env.runtime
+            .configure(policy(json!({"drill_every":1})), &h, BASE)
+            .unwrap();
+        let report = env.runtime.run_now(&h).unwrap();
+        let id = report["set_id"].as_str().unwrap().to_owned();
+        assert_eq!(report["drill"]["ok"], false, "{report}");
+        assert_eq!(
+            report["drill"]["error"]["code"],
+            "cloud_restore_memory_failed"
+        );
+        assert!(staging_empty(&env.runtime));
+
+        let admin_dir = env.root.join("admin");
+        std::fs::create_dir(&admin_dir).unwrap();
+        assert_eq!(
+            code(env.runtime.restore(&h, &id, &admin_dir)),
+            "cloud_restore_memory_failed"
+        );
+        assert_eq!(std::fs::read_dir(&admin_dir).unwrap().count(), 0);
+        let listing = env.runtime.list().unwrap();
+        assert_eq!(set(&listing, &id)["record"]["pins"], json!([]));
+    }
+
+    #[test]
+    fn an_orphan_only_server_backs_up_a_v1_bundle_that_keeps_the_records() {
+        let env = setup();
+        let path = env.root.join("orphans.vlite");
+        let set = recovery_bundle::memory_bindings();
+        let mut database = Database::create(&path, 3).unwrap();
+        database.put(1, &[1.0, 0.5, -1.0], b"p1").unwrap();
+        database.create_graph("g0").unwrap();
+        database.create_graph("g1").unwrap();
+        super::super::memory::write_records_to(&mut database, &set);
+        let orphans: Vec<_> = set
+            .bindings
+            .iter()
+            .map(crate::memory::binding::Recorded::of)
+            .collect();
+        let bindings = reserved::Bindings::new(Default::default()).with_orphans(&orphans);
+        assert!(!bindings.is_empty() && !bindings.is_configured());
+        let service = Service::new(database).with_bindings(bindings);
+        service
+            .ops
+            .configure(None, Some(path), None, &ops::Schedule::default())
+            .unwrap();
+        let env = Env { service, ..env };
+        let h = Handle::new(&env.service);
+        env.runtime
+            .configure(policy(json!({"drill_every":1})), &h, BASE)
+            .unwrap();
+        let report = env.runtime.run_now(&h).unwrap();
+        let id = report["set_id"].as_str().unwrap().to_owned();
+        assert_eq!(report["drill"]["ok"], true, "{report}");
+        assert!(report["drill"]["detail"]["memory"].is_null(), "{report}");
+
+        let admin_dir = env.root.join("admin");
+        std::fs::create_dir(&admin_dir).unwrap();
+        let report = env.runtime.restore(&h, &id, &admin_dir).unwrap();
+        assert_eq!(report["bundle"]["schema"], recovery_bundle::SCHEMA);
+        assert!(report["memory"].is_null(), "{report}");
+        assert!(report["bundle"]["memory"].is_null(), "{report}");
+        let name = report["name"].as_str().unwrap();
+        let path = admin::safe_file(&admin_dir, name, "restore-").unwrap();
+        let empty = Default::default();
+        assert_eq!(
+            super::super::memory::verify_restored(&path, &empty, now()),
+            Ok((0, 2))
+        );
     }
 
     fn status_installation(env: &Env) -> Value {
