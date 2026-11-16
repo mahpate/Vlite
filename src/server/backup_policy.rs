@@ -4507,4 +4507,75 @@ mod tests {
         assert_eq!(s["archive"]["last_error"]["code"], "pitr_source_diverged");
         assert_eq!(s["archive"]["last_checkpoint_sequence"], 5);
     }
+
+    #[test]
+    fn a_history_floor_past_the_last_checkpoint_stops_the_chain() {
+        let env = setup();
+        let h = Handle::new(&env.service);
+        env.runtime.configure(archiving(), &h, BASE).unwrap();
+        env.runtime.run_now(&h).unwrap();
+        let set = status(&env.runtime)["last_set"]
+            .as_str()
+            .unwrap()
+            .to_owned();
+        put(&env, 5..=5);
+        env.runtime.archive_now(&h).unwrap();
+        put(&env, 6..=6);
+
+        // Same lineage, but the log now starts at a checkpoint image at 6:
+        // the commits after the last archived checkpoint (5) are gone.
+        let live = env.service.database.write().unwrap().take().unwrap();
+        let lineage = live.lineage().unwrap();
+        live.close().unwrap();
+        let loaded = crate::format::load_with(
+            &mut std::fs::File::open(env.root.join("live.vlite")).unwrap(),
+            None,
+        )
+        .unwrap();
+        let image = env.root.join("history.vlite");
+        let mut output = std::fs::File::create_new(&image).unwrap();
+        crate::maintenance::write_v5_image(
+            &mut output,
+            &loaded,
+            lineage,
+            None,
+            None,
+            None,
+            loaded.flags & crate::format::FLAG_GRAPH,
+            loaded.sequence,
+        )
+        .unwrap();
+        drop(output);
+        let reopened = Database::open(&image).unwrap();
+        assert_eq!(reopened.lineage(), Some(lineage));
+        drop(env.service.database.write().unwrap().replace(reopened));
+
+        let before = env.data.names();
+        assert_eq!(
+            code(env.runtime.archive_now(&h)),
+            "pitr_history_floor_advanced"
+        );
+        assert_eq!(env.data.names(), before);
+        assert_eq!(
+            archive_index(&env, &set).unwrap()["checkpoints"]
+                .as_array()
+                .unwrap()
+                .len(),
+            1
+        );
+        let s = status(&env.runtime);
+        assert_eq!(
+            s["archive"]["last_error"]["code"],
+            "pitr_history_floor_advanced"
+        );
+        assert_eq!(s["archive"]["last_checkpoint_sequence"], 5);
+
+        // The next snapshot is a new baseline, and archiving resumes after it.
+        env.runtime.run_now(&h).unwrap();
+        put(&env, 7..=7);
+        assert_eq!(
+            env.runtime.archive_now(&h).unwrap()["checkpoint"]["sequence"],
+            7
+        );
+    }
 }
