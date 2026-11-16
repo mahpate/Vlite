@@ -1308,6 +1308,10 @@ impl Runtime {
                 self.note(|l| {
                     let a = l.status.archive.get_or_insert_with(Default::default);
                     bump(&mut a.runs);
+                    if a.baseline_set.as_deref() != report["set_id"].as_str() {
+                        a.last_checkpoint_sequence = None;
+                        a.last_checkpoint_unix_ms = None;
+                    }
                     a.baseline_set = report["set_id"].as_str().map(str::to_owned);
                     a.baseline_checkpoints = report["checkpoints"].as_u64().unwrap_or(0);
                     if let Some(sequence) = checkpoint["sequence"].as_u64() {
@@ -4326,6 +4330,13 @@ mod tests {
             .unwrap()
             .to_owned();
         assert_ne!(next, baseline);
+        assert!(env.runtime.archive_now(&h).unwrap()["checkpoint"].is_null());
+        let next_status = status(&env.runtime)["archive"].clone();
+        assert_eq!(next_status["baseline_set"], next.as_str());
+        assert_eq!(next_status["baseline_checkpoints"], 0);
+        assert!(next_status["last_checkpoint_sequence"].is_null());
+        assert!(next_status["last_checkpoint_unix_ms"].is_null());
+
         put(&env, 8..=8);
         let third = env.runtime.archive_now(&h).unwrap();
         assert_eq!(third["set_id"], next.as_str());
