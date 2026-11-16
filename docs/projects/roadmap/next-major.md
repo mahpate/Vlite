@@ -83,6 +83,16 @@ independent acceptance or the unchanged DO-005 quiet-host policy.
 
 ## Progress
 
+### HA priority update, 2026-11-16
+
+The owner approved starting the next steps of the
+[ACA HA plan](../feature-aca-ha/feature-aca-ha.prd.md). For this workstream,
+the existing Blob archival/PITR work and exported-segment reader preparation
+now precede local forks; see the revised [scale-out order](scale-out.md).
+Archive delivery, reader qualification, fencing and separate production
+approval remain gates. The approval does not start a benchmark campaign or
+approve synchronous acknowledgement.
+
 Status at the 0.7.0 freeze: entries below that say "unreleased" for a feature
 listed in [RELEASE-0.7.0](../../RELEASE-0.7.0.md) shipped in 0.7.0, and the
 parked size work stays private and inactive. [The handover](handover-0.7.0.md)
