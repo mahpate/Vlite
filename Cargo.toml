@@ -96,6 +96,11 @@ serde_json = "1"
 rcgen = { version = "0.14.10", default-features = false, features = ["ring", "pem"] }
 tower = { version = "0.5", features = ["util"] }
 
+[[example]]
+name = "ha-reader-apply"
+path = "benchmarks/ha_reader_apply.rs"
+required-features = ["json"]
+
 [[bin]]
 name = "vlite-server"
 required-features = ["server"]
