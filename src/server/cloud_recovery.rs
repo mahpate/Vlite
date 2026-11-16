@@ -24,6 +24,7 @@
 //! exists; the identity-preserving seed mode belongs to the deferred HA work
 //! and is refused.
 use super::backup_policy::{SHARED_KEY_ENV, bundle_summary, inspection, lineage_hex};
+use super::cloud_backup::archive::ArchiveTarget;
 use super::cloud_backup::{self as cloud, PinKind, Sets, Target};
 use super::*;
 use crate::maintenance;
@@ -148,6 +149,9 @@ pub struct CloudRestore {
     pub admin_username: String,
     pub admin_password_file: PathBuf,
     pub mode: RestoreMode,
+    /// Archived checkpoint to replay onto the set: `latest` or an exact
+    /// checkpoint sequence. `None` restores the snapshot itself.
+    pub archive_checkpoint: Option<String>,
 }
 
 /// Everything checked before the network is touched.
@@ -158,6 +162,7 @@ struct Plan {
     output: PathBuf,
     username: String,
     password: String,
+    checkpoint: Option<ArchiveTarget>,
 }
 
 fn refused(code: &'static str, message: impl Into<String>) -> RecoveryError {
@@ -285,6 +290,12 @@ fn prepare(request: &CloudRestore) -> Result<Plan, RecoveryError> {
             "--set must be a backup set ID such as 20250101T000000Z-0123456789abcdef",
         ));
     }
+    let checkpoint = request
+        .archive_checkpoint
+        .as_deref()
+        .map(ArchiveTarget::parse)
+        .transpose()
+        .map_err(|m| refused("pitr_target_unsupported", m))?;
     read_target(&request.target_file)?;
 
     // Staging directories share the parent; never let --output name one.
@@ -320,6 +331,7 @@ fn prepare(request: &CloudRestore) -> Result<Plan, RecoveryError> {
         output,
         username,
         password,
+        checkpoint,
     })
 }
 
@@ -622,7 +634,14 @@ fn restore_pinned(plan: &Plan, sets: &Sets, pin_id: &str) -> Result<Value, Recov
     }
 
     let fetched = sets.fetch(id, pin_id, &download)?;
-    let memory_set = recovery_bundle::memory_set(&fetched.bundle).map_err(|e| {
+    // A checkpoint restore replays the verified archive onto the downloaded
+    // baseline and takes the configuration captured with that checkpoint.
+    let replayed = match plan.checkpoint {
+        Some(target) => Some(sets.replay_archive(&fetched, target, &download)?),
+        None => None,
+    };
+    let bundle = replayed.as_ref().map_or(&fetched.bundle, |r| &r.bundle);
+    let memory_set = recovery_bundle::memory_set(bundle).map_err(|e| {
         refused(
             "cloud_restore_memory_invalid",
             format!("the recovery bundle's memory section is invalid: {e}"),
@@ -659,14 +678,13 @@ fn restore_pinned(plan: &Plan, sets: &Sets, pin_id: &str) -> Result<Value, Recov
         None => None,
     };
     // Writes, re-reads and authenticates the rekeyed stores.
-    let imported =
-        recovery_bundle::import(&fetched.bundle, &admin, (&plan.username, &plan.password))
-            .map_err(|e| {
-                refused(
-                    "restore_import_failed",
-                    format!("the recovery bundle could not be imported: {e}"),
-                )
-            })?;
+    let imported = recovery_bundle::import(bundle, &admin, (&plan.username, &plan.password))
+        .map_err(|e| {
+            refused(
+                "restore_import_failed",
+                format!("the recovery bundle could not be imported: {e}"),
+            )
+        })?;
     let _ = std::fs::remove_dir_all(&download);
     #[cfg(test)]
     if crashes_at("staged") {
@@ -745,7 +763,16 @@ fn restore_pinned(plan: &Plan, sets: &Sets, pin_id: &str) -> Result<Value, Recov
         "crc32": fetched.verification.crc32,
         "drill": {"scratch_lineage": lineage_hex(drill.scratch_lineage),
             "collections": drill.collections, "probes": drill.probes},
-        "bundle": bundle_summary(&fetched.bundle),
+        "bundle": bundle_summary(bundle),
+        "archive": replayed.as_ref().map(|r| json!({
+            "sequence": r.checkpoint.sequence,
+            "captured_unix_ms": r.checkpoint.captured_unix_ms,
+            "chain_sha256": r.checkpoint.chain_sha256,
+            "segments": r.segments,
+            "verified_bytes": r.verification.bytes,
+            "crc32": r.verification.crc32,
+            "baseline_sequence": fetched.manifest.database.commits,
+        })),
         "memory": memory,
         "memory_bindings_file": bindings_file,
         "import": imported,
@@ -894,6 +921,7 @@ mod tests {
                 admin_username: "Recovery".into(),
                 admin_password_file: self.dir.path().join("password"),
                 mode: RestoreMode::Rekey,
+                archive_checkpoint: None,
             }
         }
 
@@ -2090,5 +2118,467 @@ mod tests {
         assert_eq!(error.code, "invalid_input", "{error}");
         assert!(error.message.contains("emulator_shared_key"), "{error}");
         assert!(read_target(&env.dir.path().join("absent.json")).is_err());
+    }
+
+    /// Appends one checkpoint holding `fill`'s commits to `source.vlite`,
+    /// its bundle carrying `memory`, as the archive scheduler does.
+    fn checkpoint(
+        env: &Env,
+        fill: impl FnOnce(&mut Database),
+        memory: Option<&crate::memory::binding::BindingSet>,
+    ) -> u64 {
+        use super::super::cloud_backup::archive::MAX_SEGMENT_BYTES;
+        let path = env.dir.path().join("source.vlite");
+        let mut database = Database::open(&path).unwrap();
+        fill(&mut database);
+        let archive = env.sets.open_archive(&env.set_id).unwrap();
+        let segment = database
+            .export_log(archive.next_base(), MAX_SEGMENT_BYTES)
+            .unwrap();
+        database.close().unwrap();
+        let lineage = Some(segment.lineage);
+        env.sets
+            .append_checkpoint(
+                &archive,
+                &segment,
+                &|chain| {
+                    Ok(serde_json::to_vec(&recovery_bundle::bundle(
+                        config(),
+                        INSTALL,
+                        lineage,
+                        chain,
+                        cloud::fake::policy_capture(),
+                        memory,
+                        2,
+                    ))
+                    .unwrap())
+                },
+                now(),
+                &|| Ok(()),
+            )
+            .unwrap()
+            .sequence
+    }
+
+    fn puts(ids: std::ops::RangeInclusive<u64>) -> impl FnOnce(&mut Database) {
+        move |database| {
+            for id in ids {
+                database
+                    .put(id, &[id as f32, 1.0, -0.5], format!("p{id}").as_bytes())
+                    .unwrap();
+            }
+        }
+    }
+
+    fn at(env: &Env, target: &str) -> CloudRestore {
+        CloudRestore {
+            archive_checkpoint: Some(target.into()),
+            ..env.request()
+        }
+    }
+
+    fn ids(path: &FilePath) -> Vec<u64> {
+        let database = Database::open(path).unwrap();
+        (1..=20)
+            .filter(|id| database.get(*id).unwrap().is_some())
+            .collect()
+    }
+
+    fn archive_names(env: &Env) -> Vec<String> {
+        let dir = format!("vlite/prod/sets/{}/", env.set_id);
+        let mut names: Vec<String> = env
+            .data
+            .names()
+            .into_iter()
+            .filter(|n| n.starts_with(&dir))
+            .collect();
+        names.sort();
+        names
+    }
+
+    #[test]
+    fn a_checkpoint_restore_replays_exactly_to_the_chosen_checkpoint() {
+        let env = setup();
+        assert_eq!(checkpoint(&env, puts(5..=6), None), 6);
+        assert_eq!(checkpoint(&env, puts(7..=9), None), 9);
+
+        let latest = at(&env, "latest");
+        let report = env.restore(&latest).unwrap();
+        let database = latest.output.join(DATABASE_FILE);
+        assert_eq!(ids(&database), (1..=9).collect::<Vec<_>>());
+        let archive = &report["archive"];
+        assert_eq!(archive["sequence"], 9);
+        assert_eq!(archive["segments"], 2);
+        assert_eq!(archive["baseline_sequence"], 4);
+        assert_eq!(report["inspection"]["live_records"], 9);
+        assert_eq!(report["rekey_only"], true);
+        assert_eq!(report["pin_released"], true);
+        assert_eq!(env.pins(), 0);
+        let restored = maintenance::inspect_detail(&database).unwrap();
+        assert_ne!(restored.lineage, env.source_lineage, "a new lineage");
+        assert_eq!(env.leftovers(), ["restored"]);
+
+        // An exact earlier checkpoint replays only its prefix of the chain.
+        let earlier = CloudRestore {
+            output: env.dir.path().join("earlier"),
+            ..at(&env, "6")
+        };
+        let report = env.restore(&earlier).unwrap();
+        assert_eq!(
+            ids(&earlier.output.join(DATABASE_FILE)),
+            (1..=6).collect::<Vec<_>>()
+        );
+        assert_eq!(report["archive"]["sequence"], 6);
+        assert_eq!(report["archive"]["segments"], 1);
+        assert_eq!(env.pins(), 0);
+
+        // Without the flag the snapshot restores unchanged.
+        let snapshot = CloudRestore {
+            output: env.dir.path().join("snapshot"),
+            ..env.request()
+        };
+        let report = env.restore(&snapshot).unwrap();
+        assert!(report["archive"].is_null(), "{report}");
+        assert_eq!(
+            ids(&snapshot.output.join(DATABASE_FILE)),
+            (1..=4).collect::<Vec<_>>()
+        );
+    }
+
+    #[test]
+    fn a_checkpoint_restore_carries_vector_kv_and_graph_changes_and_reopens_writable() {
+        use crate::kv::KvPut;
+        let env = setup();
+        let first = checkpoint(
+            &env,
+            |db| {
+                db.put(5, &[5.0, 1.0, -0.5], b"p5").unwrap();
+                db.create_collection(
+                    "kv",
+                    CollectionSpec {
+                        dimensions: 1,
+                        settings: CollectionSettings::default(),
+                    },
+                )
+                .unwrap();
+                db.kv_store("kv")
+                    .unwrap()
+                    .put("n", "k", b"one", KvPut::default())
+                    .unwrap();
+                db.create_graph("g").unwrap();
+                let mut graph = db.graph_mut("g").unwrap();
+                graph.create_node("a", &["N"], &Metadata::new()).unwrap();
+                graph.create_node("b", &[], &Metadata::new()).unwrap();
+                graph
+                    .create_edge(Some("ab"), "a", "R", "b", &Metadata::new())
+                    .unwrap();
+            },
+            None,
+        );
+        let latest = checkpoint(
+            &env,
+            |db| {
+                db.delete(1).unwrap();
+                db.put(2, &[2.0, 2.0, 2.0], b"p2b").unwrap();
+                db.kv_store("kv")
+                    .unwrap()
+                    .put("n", "k", b"two", KvPut::default())
+                    .unwrap();
+                db.graph_mut("g")
+                    .unwrap()
+                    .create_node("c", &[], &Metadata::new())
+                    .unwrap();
+            },
+            None,
+        );
+        let source = Database::open(env.dir.path().join("source.vlite")).unwrap();
+        let source_revision = source.revision(2).unwrap();
+        drop(source);
+
+        let check = |target: String, name: &str| {
+            let request = CloudRestore {
+                output: env.dir.path().join(name),
+                ..at(&env, &target)
+            };
+            let report = env.restore(&request).unwrap();
+            assert_eq!(
+                report["archive"]["sequence"],
+                target.parse::<u64>().unwrap()
+            );
+            request.output.join(DATABASE_FILE)
+        };
+        let path = check(first.to_string(), "first");
+        assert_eq!(ids(&path), (1..=5).collect::<Vec<_>>());
+        let db = Database::open(&path).unwrap();
+        let kv = db.kv_view("kv").unwrap();
+        assert_eq!(kv.get("n", "k").unwrap().unwrap().value, b"one");
+        let graph = db.graph("g").unwrap().info();
+        assert_eq!((graph.node_count, graph.edge_count), (2, 1));
+        db.close().unwrap();
+
+        let path = check(latest.to_string(), "latest");
+        let mut db = Database::open(&path).unwrap();
+        assert!(db.get(1).unwrap().is_none());
+        assert_eq!(db.get(2).unwrap().unwrap().payload, b"p2b");
+        assert_eq!(db.revision(2).unwrap(), source_revision);
+        let kv = db.kv_view("kv").unwrap();
+        assert_eq!(kv.get("n", "k").unwrap().unwrap().value, b"two");
+        let graph = db.graph("g").unwrap().info();
+        assert_eq!((graph.node_count, graph.edge_count), (3, 1));
+        // The restored copy accepts new writes after the replayed history.
+        db.put(20, &[0.0, 0.0, 1.0], b"new").unwrap();
+        db.kv_store("kv")
+            .unwrap()
+            .put("n", "k2", b"x", KvPut::default())
+            .unwrap();
+        db.graph_mut("g")
+            .unwrap()
+            .create_node("d", &[], &Metadata::new())
+            .unwrap();
+        db.close().unwrap();
+        let reopened = Database::open(&path).unwrap();
+        assert!(reopened.get(20).unwrap().is_some());
+        assert_eq!(reopened.graph("g").unwrap().info().node_count, 4);
+        let kv = reopened.kv_view("kv").unwrap();
+        assert_eq!(kv.get("n", "k2").unwrap().unwrap().value, b"x");
+    }
+
+    #[test]
+    fn unsupported_targets_are_refused_and_never_rounded() {
+        let env = setup();
+        checkpoint(&env, puts(5..=6), None);
+        checkpoint(&env, puts(7..=9), None);
+        let objects = env.data.names();
+        // Sequences between, before or after checkpoints, the baseline
+        // itself, times and arbitrary text: never substituted.
+        for target in ["4", "5", "7", "8", "10", "0"] {
+            let error = env.restore(&at(&env, target)).unwrap_err();
+            assert_eq!(error.code, "pitr_target_unsupported", "{target}");
+            assert!(
+                error.message.contains("6, 9"),
+                "{target}: {}",
+                error.message
+            );
+            assert_eq!(env.pins(), 0);
+            assert_eq!(env.leftovers(), Vec::<String>::new(), "{target}");
+        }
+        for target in [
+            "2026-01-01T00:00:00Z",
+            "1700000000000ms",
+            "-1",
+            "",
+            "LATEST",
+            " 6",
+            "06",
+            "+6",
+        ] {
+            let error = prepare(&at(&env, target)).err().expect(target);
+            assert_eq!(error.code, "pitr_target_unsupported", "{target}");
+        }
+        assert_eq!(env.data.names(), objects, "nothing is written");
+        // A set without an archive has no checkpoints to choose from.
+        let plain = setup();
+        let error = plain.restore(&at(&plain, "latest")).unwrap_err();
+        assert_eq!(error.code, "pitr_archive_missing");
+        assert_eq!(plain.pins(), 0);
+        assert_eq!(plain.leftovers(), Vec::<String>::new());
+    }
+
+    #[test]
+    fn a_damaged_archive_is_refused_with_nothing_published() {
+        let segment = |env: &Env, n: usize| -> String {
+            let index: Value = serde_json::from_slice(
+                &env.data
+                    .raw(&format!("vlite/prod/sets/{}/archive.json", env.set_id))
+                    .unwrap(),
+            )
+            .unwrap();
+            let sha = index["checkpoints"][n]["segment_sha256"]
+                .as_str()
+                .unwrap()
+                .to_owned();
+            format!("vlite/prod/sets/{}/objects/{sha}", env.set_id)
+        };
+        let bundle = |env: &Env| -> String {
+            let index: Value = serde_json::from_slice(
+                &env.data
+                    .raw(&format!("vlite/prod/sets/{}/archive.json", env.set_id))
+                    .unwrap(),
+            )
+            .unwrap();
+            let sha = index["checkpoints"][1]["bundle_sha256"]
+                .as_str()
+                .unwrap()
+                .to_owned();
+            format!("vlite/prod/sets/{}/objects/{sha}", env.set_id)
+        };
+        type Damage = Box<dyn Fn(&Env)>;
+        let cases: Vec<(&str, &str, Damage)> = vec![
+            (
+                "flipped segment",
+                "cloud_set_corrupt",
+                Box::new(move |env| {
+                    edit(&env.data, &segment(env, 0), |b| {
+                        let n = b.len() - 1;
+                        b[n] ^= 1;
+                    })
+                }),
+            ),
+            (
+                "missing segment",
+                "cloud_set_corrupt",
+                Box::new(move |env| env.data.remove(&segment(env, 1))),
+            ),
+            (
+                "missing bundle",
+                "cloud_set_corrupt",
+                Box::new(move |env| env.data.remove(&bundle(env))),
+            ),
+            (
+                "tampered index",
+                "cloud_set_corrupt",
+                Box::new(|env| {
+                    let key = format!("vlite/prod/sets/{}/archive.json", env.set_id);
+                    edit(&env.data, &key, |b| {
+                        let mut index: Value = serde_json::from_slice(b).unwrap();
+                        index["checkpoints"][1]["sequence"] = json!(8);
+                        *b = serde_json::to_vec(&index).unwrap();
+                    })
+                }),
+            ),
+            (
+                "reordered chain",
+                "cloud_set_corrupt",
+                Box::new(|env| {
+                    let key = format!("vlite/prod/sets/{}/archive.json", env.set_id);
+                    edit(&env.data, &key, |b| {
+                        let mut index: Value = serde_json::from_slice(b).unwrap();
+                        index["checkpoints"].as_array_mut().unwrap().swap(0, 1);
+                        *b = serde_json::to_vec(&index).unwrap();
+                    })
+                }),
+            ),
+            (
+                "unknown index field",
+                "cloud_object_invalid",
+                Box::new(|env| {
+                    let key = format!("vlite/prod/sets/{}/archive.json", env.set_id);
+                    edit(&env.data, &key, |b| {
+                        let mut index: Value = serde_json::from_slice(b).unwrap();
+                        index["target_time"] = json!(1);
+                        *b = serde_json::to_vec(&index).unwrap();
+                    })
+                }),
+            ),
+        ];
+        for (name, expected, damage) in cases {
+            let env = setup();
+            checkpoint(&env, puts(5..=6), None);
+            checkpoint(&env, puts(7..=9), None);
+            damage(&env);
+            let error = env.restore(&at(&env, "latest")).unwrap_err();
+            assert_eq!(error.code, expected, "{name}: {}", error.message);
+            assert_eq!(env.pins(), 0, "{name}");
+            assert_eq!(env.leftovers(), Vec::<String>::new(), "{name}");
+        }
+    }
+
+    #[test]
+    fn a_bundle_from_another_capture_is_never_paired_with_a_checkpoint() {
+        let env = setup();
+        checkpoint(&env, puts(5..=6), None);
+        // Replace the checkpoint bundle by a valid bundle naming the
+        // baseline database instead of the checkpoint's chain hash, and
+        // point the index at it.
+        let key = format!("vlite/prod/sets/{}/archive.json", env.set_id);
+        let mut index: Value = serde_json::from_slice(&env.data.raw(&key).unwrap()).unwrap();
+        let wrong = serde_json::to_vec(&recovery_bundle::bundle(
+            config(),
+            INSTALL,
+            env.source_lineage,
+            index["baseline_sha256"].as_str().unwrap(),
+            cloud::fake::policy_capture(),
+            None,
+            3,
+        ))
+        .unwrap();
+        let sha = super::super::cloud_backup::sha_hex(&wrong);
+        env.data.set_raw(
+            &format!("vlite/prod/sets/{}/objects/{sha}", env.set_id),
+            &wrong,
+        );
+        index["checkpoints"][0]["bundle_sha256"] = json!(sha);
+        index["checkpoints"][0]["bundle_bytes"] = json!(wrong.len());
+        env.data.set_raw(&key, &serde_json::to_vec(&index).unwrap());
+        let error = env.restore(&at(&env, "latest")).unwrap_err();
+        assert_eq!(error.code, "cloud_set_corrupt", "{}", error.message);
+        assert_eq!(env.leftovers(), Vec::<String>::new());
+        assert_eq!(env.pins(), 0);
+    }
+
+    #[test]
+    fn a_checkpoint_restore_takes_memory_from_the_checkpoint_bundle() {
+        let set = recovery_bundle::memory_bindings();
+        let env = setup_memory(memory_graphs(false), None);
+        // The first checkpoint predates memory; the second adds its graph,
+        // records and bindings.
+        checkpoint(&env, puts(2..=2), None);
+        checkpoint(
+            &env,
+            |database| {
+                database.create_graph("g1").unwrap();
+                super::super::memory::write_records_to(database, &set);
+            },
+            Some(&set),
+        );
+        let latest = at(&env, "latest");
+        let report = env.restore(&latest).unwrap();
+        assert_eq!(report["memory"]["bindings"], 2, "{report}");
+        assert_eq!(report["bundle"]["memory"]["bindings"], 2);
+        let file = latest.output.join(MEMORY_BINDINGS_FILE);
+        assert_eq!(
+            crate::memory::binding::parse(&std::fs::read(&file).unwrap()).unwrap(),
+            set
+        );
+        let index: Value = serde_json::from_slice(
+            &env.data
+                .raw(&format!("vlite/prod/sets/{}/archive.json", env.set_id))
+                .unwrap(),
+        )
+        .unwrap();
+        let first = index["checkpoints"][0]["sequence"]
+            .as_u64()
+            .unwrap()
+            .to_string();
+        let earlier = CloudRestore {
+            output: env.dir.path().join("earlier"),
+            ..at(&env, &first)
+        };
+        let report = env.restore(&earlier).unwrap();
+        assert!(report["memory"].is_null(), "{report}");
+        assert!(!earlier.output.join(MEMORY_BINDINGS_FILE).exists());
+    }
+
+    #[test]
+    fn a_tombstoned_baseline_sweeps_its_archive_objects() {
+        let env = setup();
+        checkpoint(&env, puts(5..=6), None);
+        assert_eq!(archive_names(&env).len(), 6, "{:?}", archive_names(&env));
+        set_state(&env, "delete_pending");
+        let collected = env
+            .sets
+            .collect(
+                INSTALL,
+                &cloud::Retention {
+                    enabled: true,
+                    keep_sets: 1,
+                    keep_days: 1,
+                    orphan_grace_hours: 1,
+                },
+                now(),
+            )
+            .unwrap();
+        assert_eq!(collected.deleted, std::slice::from_ref(&env.set_id));
+        assert_eq!(archive_names(&env), Vec::<String>::new());
     }
 }

@@ -25,6 +25,7 @@ use serde::{Serialize, de::DeserializeOwned};
 use std::io::{BufWriter, Read, Write};
 use std::path::{Path as FilePath, PathBuf};
 
+pub(super) mod archive;
 pub(super) mod azure;
 
 pub(super) const RECORD_SCHEMA: &str = "vlite.cloud-backup-record/1";

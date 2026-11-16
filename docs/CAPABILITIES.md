@@ -223,7 +223,10 @@ Both are **off by default**.
 - **Cloud backups to Azure Blob** (`/v1/admin/cloud-backup`) are a separate
   opt-in with a persisted policy and managed identity. Each run publishes a
   verified set (database snapshot plus a sanitized recovery bundle); restore
-  makes a new-lineage copy and never replaces the active database. See
+  makes a new-lineage copy and never replaces the active database. An
+  optional continuous log archive adds verified checkpoints after the latest
+  set; the offline restore can recover to an exact checkpoint (not to an
+  arbitrary time). See
   [DOCKER-OPERATIONS.md](DOCKER-OPERATIONS.md#cloud-backups-to-azure-blob).
 
 ## Operational diagnostics

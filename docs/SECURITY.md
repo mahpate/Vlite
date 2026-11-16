@@ -350,7 +350,10 @@ are rejected, so a key or connection string cannot be saved there.
   replaces each binding's principals and raises its `generation`
   ([DOCKER-OPERATIONS.md](DOCKER-OPERATIONS.md#cloud-backups-to-azure-blob)).
   A restore also brings back memories and evidence forgotten or erased
-  after the backup was taken.
+  after the backup was taken. A checkpoint restore
+  (`--archive-checkpoint`) is the same rekey-only import, using the bundle
+  captured with that checkpoint; it brings back what was forgotten or erased
+  after the checkpoint.
 - **Pins.** A restore or drill pins its set so retention cannot delete it
   mid-download. Only the owning operation releases that pin; an operator can
   force-release one left by a crashed owner, which is audited separately.
