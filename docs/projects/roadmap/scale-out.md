@@ -2,11 +2,25 @@
 
 | Field | Value |
 |---|---|
-| Status | Design recommendation; order adopted 2026-11-02 and backlogged (unscheduled) until the owner revisits it. No new interfaces approved |
-| Decision | Gap 11 first, Gap 10 second, Gap 9 third (adopted 2026-11-02) |
+| Status | Staged HA work authorized 2026-11-16; runtime delivery, qualification and production rollout remain gated |
+| Decision | Original order: Gap 11, Gap 10, Gap 9 (2026-11-02). Revised HA priority: existing Blob archival/PITR, reader preparation, then gated gateway/readers/failover (2026-11-16); local forks are not a prerequisite |
 | Sources | [Next major](next-major.md), [product gaps](../product-gaps/product-gaps.md), [P2 directory store](p2-directory-store.md) |
 | Boundary | Embedded-first, one writer per database; no sharding, distributed transactions or automatic multi-writer operation |
 | Validation | Repository evidence reviewed; acceptance below is prospective, not test results or performance claims |
+
+## HA priority decision, 2026-11-16
+
+The owner asked to "go ahead with next steps for HA" after reviewing the
+[ACA HA plan](../feature-aca-ha/feature-aca-ha.prd.md). That staged work now
+takes priority over local forks: retain the existing Blob archival/PITR
+implementation, start the exported-segment reader harness, and keep actual
+archive-backed readers and failover behind the plan's gates. This changes
+priority, not evidence: asynchronous copying is not zero-loss HA, the
+zombie-writer decision remains open, and no Azure provisioning, production
+rollout or benchmark campaign is authorized by this decision.
+
+The original recommendation and its alternatives below remain rationale for
+the wider scale-out backlog, not the current HA execution order.
 
 ## Constraints and existing evidence
 
