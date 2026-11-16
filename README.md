@@ -46,8 +46,8 @@ service to operate.
   workspaces, interactive 2D and 3D graphs, provider controls and named and sparse
   vectors; see the [dashboard guide](docs/CONSOLE.md).
 - **Storage options.** Encryption at rest, point-in-time restore, Azure Blob
-  backups, a change feed, file-shipped read replicas, a disk-based ANN index,
-  a key-value store and an opt-in directory store with checkpoints (Rust).
+  backups including agent-memory bindings, a change feed, file-shipped read replicas,
+  a disk-based ANN index, a key-value store and an opt-in directory store with checkpoints (Rust).
 - **Tools.** Interactive shell, validated imports, offline maintenance, index
   tuning, a graph CLI, an MCP server and agent skills, with local key-value
   commands in the shell and MCP, and agent-memory tools and a CLI client.
@@ -200,7 +200,7 @@ Prebuilt packages: [PyPI](docs/INSTALL.md#pypi) and [release assets](docs/INSTAL
 | Webhooks | [WEBHOOKS](docs/WEBHOOKS.md) |
 | Property graphs, expiry and algorithms | [GRAPH](docs/GRAPH.md) |
 | Benchmarks | [Methodology](benchmarks/README.md), [results](benchmarks/RESULTS.md) |
-| Upgrade notes | [Release notes](docs/RELEASE-0.7.7.md) |
+| Upgrade notes | [Release notes](docs/RELEASE-0.7.8.md) |
 
 ## Status and limitations
 

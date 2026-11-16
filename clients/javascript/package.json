@@ -1,6 +1,6 @@
 {
   "name": "@vlite/client",
-  "version": "0.7.7",
+  "version": "0.7.8",
   "description": "Dependency-free VLite REST client for TypeScript and JavaScript",
   "type": "module",
   "license": "MIT",
