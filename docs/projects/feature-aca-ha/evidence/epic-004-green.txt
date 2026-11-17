@@ -1,0 +1,144 @@
+EPIC-004 gateway MVP: passing (green) capture and standalone no-regression check
+Base: HEAD 9bbdb31a. Code commit: 608c829b (EPIC-004: wire DB-free gateway mode
+and gateway-trusted backend). Docs and this file: the next EPIC-004 commit.
+Host: Windows cargo, local Azurite (Docker in WSL Ubuntu-24.04) on
+127.0.0.1:10000. No Azure access, no ACA, no deployment. Red capture:
+epic-004-red.txt. Every exit code below is cargo's or python's own exit code,
+not a pipe's.
+
+A. The failing-first tests, now passing (rerun on the committed tree)
+
+1) cargo test --features server --test server_cli
+   exit=0   test result: ok. 24 passed; 0 failed
+   (includes gateway_commands_validate_configuration_and_keep_keys_out_of_output
+   and databases_named_like_subcommands_need_a_path_prefix)
+
+2) $env:VLITE_AZURITE_BLOB_ENDPOINT='http://127.0.0.1:10000/devstoreaccount1'
+   cargo test --features server --test gateway_azurite -- --ignored
+   exit=0   test result: ok. 1 passed; 0 failed (12.43 s)
+   gateway_and_trusted_backends_serve_isolate_and_fail_closed runs real
+   vlite-server processes: gateway-keygen, control-state publish/update, two
+   gateways (`vlite-server gateway --config`), a shared-pool trusted backend
+   serving two tenants and a dedicated trusted backend (--gateway-trust-file),
+   plus a standalone server for expected answers. Asserted over HTTP:
+   - reads through either gateway equal the standalone server's status and body;
+     a write through gateway 1 is read through gateway 2
+   - shared-pool isolation (T2 sees neither T1's vector nor its collection);
+     the dedicated tenant reaches only its backend
+   - gateway denials before forwarding: no credential 401, admin bearer 401,
+     admin route with a vlk_ credential 403, dot-segment path 400/404;
+     forged X-VLite-Principal and Cookie headers grant nothing
+   - a trusted backend refuses vlk_ bearers, the admin bearer and a garbage
+     envelope (401); its /ready needs no credentials
+   - gateway stopped and restarted serves from the shared state
+   - edge rate limit: rps 2 / max_replicas 2 -> second request 429
+     rate_limited with Retry-After: 1; rps 1 / 2 -> 503
+     rate_limit_share_below_one
+   - revoke and suspend via control-state update reach both gateways within
+     3 x S_ctl; an idle backend raises minimum_generation from its own poll;
+     resume restores access
+   - a relay that drops the connection after the full write: 502
+     write_outcome_unknown, exactly one forwarded request, write applied once
+   - signal: gateway logs draining and /ready answers 503 draining while the
+     listener is open, then exits 0
+   - coordination container deleted: gateway and both backends /ready 503
+     within 4 x S_ctl, data request 503 control_state_stale, poll failure
+     logged; a republished lower generation is refused (control_state_regressed)
+   Local test inputs only: S_ctl 2000 ms, poll 200 ms, max_replicas 2,
+   lifetime 5000 ms, skew 1000 ms, propagation 1500 ms, drain 5000 ms.
+
+B. Focused and full validation
+
+3) cargo fmt --check                                              exit=0
+4) cargo clippy --features server --all-targets -- -D warnings    exit=0
+5) cargo clippy --features server,grpc --all-targets -- -D warnings  exit=0
+6) cargo test --features server --lib gateway                     exit=0  27 passed
+   cargo test --features server --lib control_state               exit=0  12 passed
+   cargo test --features server --lib principal_envelope          exit=0  15 passed
+7) cargo test --features server --lib                  exit=0  1798 passed; 6 ignored
+8) cargo test --features server --test cloud_backup_azurite -- --ignored
+   (same VLITE_AZURITE_BLOB_ENDPOINT)                             exit=0  1 passed
+9) python tests\api_route_inventory.py     exit=0  Ran 11 tests, OK
+   python tests\admin_route_coverage.py    exit=0  PASS, 60 method/actions across 50 paths
+   python tests\api_reference.py           exit=0  OK, 942 items (REST 179, CLI 15)
+   python tests\openapi_contract.py        exit=0  Ran 5 tests, OK
+Steps 3, 4 and 6 and step A were rerun after commit 608c829b. Steps 5, 7 and
+8 ran on the same source content just before the commit. Step 9 ran on the
+docs being committed.
+
+C. Standalone (no gateway flags or env) no-regression
+
+10) Existing suites, cargo test --features server --test <name>, each exit=0:
+    server_cli 24, server_serve_mode 6, tenants 5, users 11, server_ops 17,
+    server_audit_actor 5, server_admin 8, dashboard 2,
+    server_cloud_backup_routes 1, rest 13, rest_collections 10,
+    server_guard_differential 23, server_memory_reserved_as_missing 18,
+    server_memory_guards 20, server_logs 2, server_features 1, tls 2,
+    read_only 6, server_kv 19, server_memory 24 (passed counts).
+    cargo test --features server,grpc --test grpc                exit=0  12 passed
+    cargo test --features server,compaction-test-hooks --test server_compaction
+                                                                  exit=0  9 passed
+    The standalone graceful drain on Ctrl+Break/SIGTERM is covered by
+    server_cli and grpc.
+
+11) Image feature set builds (Dockerfile features):
+    cargo build --locked --features http-embedder,otel,tools,import-formats,json,mcp,server,grpc,gpu,mcp-proxy --bin vlite-server
+    exit=0, for 9bbdb31a (temporary detached worktree, since removed) and for
+    the candidate.
+
+12) Differential smoke, single-ACA deploy.ps1 argument shape (loopback bind):
+    python docs\projects\feature-aca-ha\evidence\epic-004-standalone-smoke.py <binary>
+    <db> --create-if-missing 3 --create-format 4 --bind 127.0.0.1:0 --allow-remote
+    env: VLITE_AUTH_TOKEN, VLITE_ADMIN_DIR; every other VLITE_* removed.
+    HEAD 9bbdb31a binary:  exit=0  SUMMARY 14/14 passed
+    candidate binary:      exit=0  SUMMARY 14/14 passed
+    Identical results: /health 200 unauthenticated; /ready 401 unauthenticated
+    and 200 with the token (unchanged: only /health is public, and the ACA
+    probes in deploy.ps1 use /health); data 401 unauthenticated;
+    GET /v1/database format 4; PUT then search; /v1/auth/config and /dashboard
+    200; serve-status mode standalone; Ctrl+Break exits 0; restart keeps the
+    write; second exit 0. No gateway or control-state events.
+    stderr event sequence and field names identical:
+      server_start(address,event), request x10 (credential_id,duration_ns,
+      event,method,request_id,route,status), server_shutdown(event).
+    Usage text (no arguments) differs only by the appended opt-in clause for
+    --gateway-trust-file, gateway, gateway-keygen and control-state, and the
+    ./ prefix note.
+
+13) Unchanged: Dockerfile, compose*.yaml, Cargo.lock, build.rs, proto/,
+    crates/, dependencies (Cargo.toml adds only the [[test]] gateway_azurite
+    entry). No new env variable is read. The new flag and subcommands are
+    opt-in. Before this change, --gateway-trust-file was an unknown-argument
+    error. A database literally named gateway, gateway-keygen or
+    control-state now needs a ./ prefix, as cloud-sets and cloud-restore
+    already did (tested).
+    deploy/azure-container-apps/{README.md,deploy.ps1,test.ps1} were already
+    dirty before this work; they were not modified, staged or committed.
+
+14) Files changed outside the new gateway files, and why:
+    src/server.rs           trust hook, tenant admission, scoped authorization shared
+                            with the gateway, unauthenticated /ready and quotas
+                            from control state only when trust is configured
+    src/bin/vlite-server.rs flag, subcommands, trust lifecycle and drain
+    src/server/collections.rs  tenant admission through the same hook (store.get
+                            unchanged without trust)
+    src/server/credentials.rs, tenants.rs  control-state update reuses the audited
+                            revoke/suspend/resume mutations
+    src/server/cloud_backup.rs, cloud_recovery.rs  reuse of the target,
+                            ObjectStore and managed-identity connect
+    src/server/control_state.rs, principal_envelope.rs, gateway.rs  the EPIC-003/004
+                            libraries wired here (source, feed, key generation)
+    Cargo.toml (test entry), tests/server_cli.rs (tests), docs/API.md (docs)
+
+D. Not run or not shown (open evidence gaps)
+
+- Tier (c) ACA rehearsal: not run. No Key Vault or managed-identity key
+  delivery, no ACA ingress, no scaling. GATE-003 and MEAS-004/005/007 have no
+  evidence from this work.
+- OD-002 fencing: no epoch check on responses. A static startup epoch is not
+  fencing. There is no automatic failover.
+- Not exercised: SIGKILL under load, scale out/in, requests in flight during
+  drain, a refused backend connection (5.4), a single paused replica,
+  memory-binding propagation, any load or latency measurement.
+- Rate-limit overshoot from over-replication or rollouts is unqualified.
+- The single-ACA rehearsal of the standalone image is left to the parent.

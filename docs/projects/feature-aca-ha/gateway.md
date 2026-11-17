@@ -2,7 +2,7 @@
 
 Design reference for the shared gateway in the staged Azure Container Apps (ACA) HA plan ([PRD](feature-aca-ha.prd.md), EPIC-004 ITEM-018). It states what the gateway is, what state it may hold, where its responsibility ends and what is built today. The PRD remains the authority; section references below point into it.
 
-> **Status (2026-11-17).** No gateway runs anywhere. There is no gateway mode, flag or environment variable, and production is unchanged. The default deployment is still one standalone server. Only the backend serving modes are configurable; the control state, principal envelope, trusted backend authentication and operation classifier are library code with tests.
+> **Status (2026-11-17).** The gateway MVP is wired as an opt-in mode of the same binary: `vlite-server gateway --config <json>` opens no database, and `vlite-server <db> --gateway-trust-file <json>` runs a gateway-trusted backend. Commands, configuration schema and the control-state bootstrap are in [API.md](../../API.md#gateway-mode-and-gateway-trusted-backends-experimental-opt-in-off-by-default). It has run only as local processes against a loopback Azurite (test plan tier (b)). It is not deployed, has no ACA rehearsal or measured timing, and has no epoch fencing or failover. The default deployment is still one standalone server, and production is unchanged.
 
 ## Gateway scale-out is not writer HA
 
@@ -25,16 +25,16 @@ The gateway is a stateless public edge: TLS, authentication, operation classific
 
 | State | Today (standalone) | Gateway class | Built so far |
 |---|---|---|---|
-| Credential and policy snapshot, generation `A` | `credentials.json`, loaded at startup | Authoritative in shared control state; replicas cache a snapshot for at most S_ctl | Library: `vlite.control-state/1` object with CAS writes and a poller that fails closed after S_ctl (`src/server/control_state.rs`) |
-| Tenant status (active, suspended, deleted) | `tenants.json` | Authoritative shared; cached like the policy snapshot | Library: carried in the same snapshot |
-| Tenant routing record (deployment kind, endpoints, epoch `E`) | Not present | Authoritative shared; cached snapshot, generation `A` | Not built |
-| Memory bindings | Startup-only file | Authoritative shared; enforced by backends | Not in the snapshot yet (FR-012) |
-| Dashboard users and sessions | `users.json`; sessions in process memory | Removed from the gateway MVP | Deferred (OD-004) |
-| Rate-limit buckets | One token bucket per process | Disposable per replica; static share of the tenant limit | Library: share computation `replica_share` (`src/server/gateway.rs`); no gateway bucket yet (ITEM-014) |
+| Credential and policy snapshot, generation `A` | `credentials.json`, loaded at startup | Authoritative in shared control state; replicas cache a snapshot for at most S_ctl | Wired (opt-in): `vlite.control-state/1` object with CAS writes, published from an admin directory by `vlite-server control-state`; gateways and trusted backends poll it and fail closed after S_ctl (`src/server/control_state.rs`) |
+| Tenant status (active, suspended, deleted) | `tenants.json` | Authoritative shared; cached like the policy snapshot | Wired: carried in the same snapshot; suspension reaches gateways and backends by polling |
+| Tenant routing record (deployment kind, endpoints, epoch `E`) | Not present | Authoritative shared; cached snapshot, generation `A` | Wired: directory records in the snapshot; every request goes to the record's writer. `E` is stored but not checked against responses (OD-002, EPIC-006) |
+| Memory bindings | Startup-only file | Authoritative shared; enforced by backends | Not in the snapshot yet (FR-012); a trusted backend applies its own startup bindings |
+| Dashboard users and sessions | `users.json`; sessions in process memory | Removed from the gateway MVP | Deferred (OD-004): the gateway refuses sign-in and dashboard routes |
+| Rate-limit buckets | One token bucket per process | Disposable per replica; static share of the tenant limit | Wired: one bounded bucket per credential per gateway replica, capacity and refill `replica_share(limit, max_replicas)`; backends keep their own bucket |
 | Writer authority, epoch `E` | Not present | Authoritative shared; CAS-only | Not built (EPIC-006) |
-| Route-classification table | Compiled code | Code, changed by release | Library: `src/server/gateway.rs` |
-| Idempotency receipts | Memory API only | Backend-owned; gateway keeps none | Unchanged |
-| Envelope signing key | Not present | Platform secret store, never in control state or logs (OD-009) | Library: startup bundle loader; platform delivery not run |
+| Route-classification table | Compiled code | Code, changed by release | Wired: the gateway classifies every request before forwarding (`src/server/gateway.rs`) |
+| Idempotency receipts | Memory API only | Backend-owned; gateway keeps none | Unchanged; the gateway retries nothing |
+| Envelope signing key | Not present | Platform secret store, never in control state or logs (OD-009) | Wired: `gateway-keygen` writes a signing-key file and a public bundle, both read at startup; platform (Key Vault) delivery not run |
 
 ## Boundary: gateway versus tenant backends
 
@@ -55,22 +55,24 @@ Backends never trust the gateway alone: a request without a valid envelope gets 
 | Piece | Status | Reachable in a running server? |
 |---|---|---|
 | Serving modes `standalone`, `writer`, `reader` (EPIC-002) | Implemented. `--serve-mode` or `VLITE_SERVE_MODE`, default `standalone`. A reader refuses writes with `403 reader_mode`; writer and reader report `draining` on `/ready` after SIGTERM; `GET /v1/admin/serve-status` reports mode and archive progress. | Yes, opt-in |
-| Control-state snapshot and poller (ITEM-008, ITEM-011) | Library. Generation `A`, CAS create and update, stale cache refused with `503 control_state_stale`, regression refused. | No |
-| Principal envelope (ITEM-009) | Library. Ed25519 `vle1` tokens in `x-vlite-principal`; audience, expiry, skew and minimum `A` checks; two-key rotation overlap. | No |
-| Gateway-trusted backend authentication (ITEM-010) | Crate-private. Envelope-only authentication feeding the existing `permission`/`authorize`/guard path. | No |
-| Operation classifier (ITEM-013) | Library. Classifies all 179 registered REST routes by method and path; unknown paths and methods are refused, never forwarded. | No |
-| Per-replica rate-limit share (ITEM-016) | Library. `replica_share` gives each replica `limit / max_replicas`, never rounded up; refuses zero replicas and shares under one request a second. Needs the OD-006 maximum. | No |
-| Tenant directory and routing (ITEM-014) | Library. The control-state snapshot carries one validated record per tenant (`shared-pool` or `dedicated`, writer, optional reader, audience, epoch). Every tenant request targets its writer (reader routing is ITEM-021); the envelope is minted with generation `A`; only unsent writes are retried; responses from an older epoch are refused. A credential without a tenant gets `403 gateway_tenant_required`, an unrouted tenant `503 tenant_not_routed`. Wiring needs OD-012. | No |
-| Gateway serving mode, readiness by snapshot age, drain, edge rate limiting (ITEM-014 wiring, ITEM-015, ITEM-016 wiring) | Not started | - |
+| Control-state snapshot and poller (ITEM-008, ITEM-011) | Generation `A`, CAS create and update, stale cache refused with `503 control_state_stale`, regression refused and logged. `vlite-server control-state publish` and `update` import an admin directory and a directory file with that CAS, so nobody edits the object by hand; `update` can also revoke a credential or suspend or resume a tenant. | Yes, opt-in |
+| Principal envelope (ITEM-009) | Ed25519 `vle1` tokens in `x-vlite-principal`; audience, expiry, skew and minimum `A` checks; two-key rotation overlap. `vlite-server gateway-keygen` writes the signing-key file and public bundle. | Yes, opt-in |
+| Gateway-trusted backend authentication (ITEM-010) | `--gateway-trust-file`. Envelope-only authentication feeding the existing `permission`/`authorize`/guard path. The backend checks the tenant's directory record (audience, lineage) and admission in its own polled copy, and its poll thread raises the minimum accepted `A` without waiting for requests. | Yes, opt-in |
+| Operation classifier (ITEM-013) | Classifies all 179 registered REST routes by method and path; unknown paths and methods are refused, never forwarded. | Yes, in gateway mode |
+| Tenant directory and routing (ITEM-014) | `vlite-server gateway`. One validated record per tenant (`shared-pool` or `dedicated`). Each request is authenticated against the fresh snapshot, classified and authorized, then forwarded to that tenant's writer with an envelope minted at the current `A`. Caller credentials, cookies, principal, proxy, hop-by-hop and `Connection`-named headers are dropped; no redirect is followed. Nothing is retried: a write that fails after it may have been sent gets `502 write_outcome_unknown`. Reader routing is ITEM-021; the epoch is not checked (OD-002). | Yes, opt-in |
+| Gateway readiness and drain (ITEM-015) | `/health` and `/ready` without a database or `/metrics`. Startup reads the control state before the listener binds. `/ready` fails when the snapshot is older than S_ctl. On a signal, `/ready` answers `draining` for `readiness_propagation_ms` before the listener closes, in-flight requests get `drain_timeout_ms`, and the poller stops. A trusted backend drains the same way. | Yes, opt-in |
+| Per-replica rate-limit share (ITEM-016) | One bucket per credential per gateway replica, holding and refilling `replica_share(limit, max_replicas)`, never rounded up; at most `max_buckets`. A share under one request a second is refused with `503 rate_limit_share_below_one`. Backends keep their own buckets and vector quotas. | Yes, opt-in |
+
+The timing and replica values are configuration fields with no defaults (S_ctl, poll interval, `max_replicas`, envelope lifetime and skew, readiness propagation, drain). Nothing here measures or recommends them; the values in tests are local inputs.
 
 ## Behavior the gateway must keep
 
 - **Fail closed.** With no snapshot, or one older than S_ctl, authentication answers `503`. There is no empty-policy or allow-by-default fallback (C-07, FM-004).
 - **Bounded revocation.** Revocation, suspension and binding changes reach every replica within S_ctl. Backends also refuse an envelope whose `A` is below the highest generation they have seen (C-06).
-- **No retry of ambiguous writes.** A write is retried only if it provably never reached a backend. Anything else is reported to the client as ambiguous (`502 write_outcome_unknown`), because most writes have no idempotency key (RD-010).
+- **No retry of ambiguous writes.** A write is retried only if it provably never reached a backend. Anything else is reported to the client as ambiguous (`502 write_outcome_unknown`), because most writes have no idempotency key (RD-010). The MVP retries nothing: a connection that was never established gets `502 backend_unavailable`.
 - **No sticky sessions.** Affinity would hide state bugs.
-- **Readiness without `/metrics`.** The gateway needs its own readiness route reporting snapshot age; `/metrics` is refused when memory bindings exist.
-- **Rate limits are shares.** Each replica enforces `limit / gateway_max_replicas`, never rounded up. Below the maximum replica count the tenant is under-served; temporary ACA over-replication during platform upgrades can overshoot the tenant limit (PRD 3.4.7).
+- **Readiness without `/metrics`.** The gateway's `/ready` reports the control-state generation and fails once the snapshot is older than S_ctl; `/metrics` is refused when memory bindings exist. It does not report the snapshot age itself.
+- **Rate limits are shares.** Each replica enforces `limit / gateway_max_replicas`, never rounded up. Below the maximum replica count the tenant is under-served; temporary ACA over-replication during platform upgrades or a rollout that overlaps revisions can overshoot the tenant limit by the replica ratio (PRD 3.4.7). That overshoot is not qualified for production.
 
 ## Open owner decisions
 
@@ -78,14 +80,16 @@ These are undecided. No value below is measured or approved.
 
 | ID | Question | Recommendation | Blocks |
 |---|---|---|---|
+| OD-002 | Writer fencing: per-batch epoch verification versus periodic recheck plus infrastructure fence plus gateway epoch stamp | Start with per-batch verification and measure (MEAS-006) | Gateway epoch checks on responses, failover (EPIC-006) |
 | OD-004 | Dashboard users and sessions through the gateway | Defer; later stateless signed session tokens | Dashboard sign-in through the gateway |
-| OD-005 | S_ctl and the poll interval | Decide from MEAS-005; no default | ITEM-015 readiness, revocation bound |
-| OD-006 | Gateway minimum and maximum replicas | Minimum 2 warm; maximum from MEAS-004 and quota check | ITEM-016 share, ACA sizing |
-| OD-012 | Gateway as a `vlite-server` mode or a separate binary | Mode of the same binary | ITEM-014 wiring |
+| OD-005 | S_ctl and the poll interval | Decide from MEAS-005; no default | The deployed values; the MVP takes them as required configuration |
+| OD-006 | Gateway minimum and maximum replicas | Minimum 2 warm; maximum from MEAS-004 and quota check | The deployed `max_replicas` and ACA sizing; the MVP takes the maximum as required configuration. The minimum is an ACA setting with no runtime effect |
+
+OD-012 (mode of `vlite-server` or a separate binary) was settled for the MVP as a mode of the same binary. That was an implementation decision by the coordinator under the 2026-11-17 continuation request, not an owner approval.
 
 ## Verification
 
-- **TEST-012 / AC-011.** This document states that gateway and reader replicas add no write capacity. Status output must say the same once a gateway mode exists (ITEM-015).
+- **TEST-012 / AC-011.** This document and API.md state that gateway and reader replicas add no write capacity. The gateway's `gateway_started` status event says the same; `tests/gateway_azurite.rs` asserts it.
 - **TEST-002.** `server::gateway::` tests and `tests/api_route_inventory.py` check that the classifier matches the registered routes and the existing authorization rules.
-- **TEST-004, TEST-010, TEST-014.** Library and in-process router tests in `src/server/principal_envelope.rs`, `src/server/control_state.rs` and `src/server/gateway_trust_tests.rs`. They are not end-to-end gateway or ACA tests.
-- **TEST-003, TEST-005.** Multi-replica kill/add and drain tests need a running gateway. Their scenarios, and the end-to-end part of TEST-004, are in the [test plan](gateway-test-plan.md) (ITEM-017), which is NOT RUN.
+- **TEST-004, TEST-010, TEST-014.** Library and in-process router tests in `src/server/principal_envelope.rs`, `src/server/control_state.rs`, `src/server/gateway_mode.rs` and `src/server/gateway_trust_tests.rs`.
+- **TEST-003, TEST-004, TEST-005 (local).** `tests/gateway_azurite.rs` (ignored by default; needs a loopback Azurite) runs two gateway processes and two trusted backends against Azurite: equivalence with a standalone server, shared-pool and dedicated tenant isolation, header stripping, restart, revocation and suspension within S_ctl, outage and regression fail-closed, drain, the edge rate limit and a write cut after sending. These are local tier (b) runs of the [test plan](gateway-test-plan.md). The ACA tier (c) is NOT RUN, so they are not GATE-003 or MEAS evidence.

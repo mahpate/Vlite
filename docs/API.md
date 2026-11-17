@@ -925,3 +925,293 @@ Encrypted creation uses V5. See [SECURITY.md](SECURITY.md).
 The bundled OpenAPI file contains the route and request schemas. The HTTP
 embedding provider is optional at build time; MMR and exact reranking operate
 only on the bounded candidate list returned by the selected search strategy.
+
+## Gateway mode and gateway-trusted backends (experimental, opt-in, off by default)
+
+A gateway is a `vlite-server gateway` process that opens no database. It
+authenticates tenant credentials against a shared control-state object in
+Azure Blob Storage, checks the operation, takes one request from its edge
+rate-limit share and forwards the request to the tenant's backend with a
+signed principal envelope. A gateway-trusted backend is an ordinary
+`vlite-server <database>` started with `--gateway-trust-file`. It accepts
+data requests only with such an envelope and checks the envelope itself.
+Nothing changes unless you use these commands or that flag. The default
+standalone server is unchanged, except that a database literally named
+`gateway`, `gateway-keygen` or `control-state` now needs a `./` prefix (as
+`cloud-sets` and `cloud-restore` already did).
+
+This is a local, experimental MVP of the feature-aca-ha plan (design and
+status: [gateway.md](projects/feature-aca-ha/gateway.md)). It has been tested
+with loopback processes and a local Azurite only. It is not qualified for
+production. It has no epoch fencing, failover, reader routing or ACA
+deployment, and no measured timing or replica values. Gateway replicas add no
+write capacity: every tenant has one backend.
+
+### What a gateway serves
+
+* **Tenant credentials only.** A single `Authorization: Bearer vlk_...`
+  credential that belongs to a tenant. Admin and read-only tokens, sessions,
+  sign-in, the dashboard and super-admin routes are not served through a
+  gateway.
+* **Its own health and readiness.** `GET /health` answers
+  `{"status":"ok"}`. `GET /ready` answers `{"status":"ready","generation":A}`
+  only while its control-state copy was confirmed within `s_ctl_ms`.
+  Otherwise it answers 503 `control_state_stale`, and 503 `draining` after a
+  stop signal. Neither route needs a database or `/metrics`.
+* **Every registered route, writer only.** Each request goes to the writer in
+  the tenant's directory record, whether the record is `shared-pool` or
+  `dedicated`.
+
+Before forwarding, the gateway checks, in order:
+
+1. The path. Dot segments, backslashes, and percent-encoded dots, slashes or
+   backslashes get 400 `invalid_path`.
+2. The route. An unregistered route gets 404 `not_found`, and a wrong method
+   gets 405 `method_not_allowed`. The standalone public routes
+   (`/v1/auth/login`, `/v1/auth/config` and the dashboard) also get 404
+   through a gateway.
+3. A fresh control-state snapshot, else 503 `control_state_stale`.
+4. The credential and tenant, with the standalone rules. Without a tenant
+   credential the answer is 401 `unauthorized`; unknown, revoked and expired
+   credentials are refused as on a standalone server; a suspended tenant gets
+   403 `tenant_suspended`. A credential without a tenant gets 403
+   `gateway_tenant_required`, and a tenant with no directory record gets 503
+   `tenant_not_routed`.
+5. Authorization. The credential's scope is checked as on a standalone server,
+   against the lineage in the tenant's directory record.
+6. The edge rate limit. A credential with `requests_per_second` gets one token
+   bucket on each gateway replica, holding and refilling
+   `requests_per_second / max_replicas` (never rounded up). An empty bucket
+   answers 429 `rate_limited` with `Retry-After`. A share below one request a
+   second answers 503 `rate_limit_share_below_one` for every request of that
+   credential rather than allowing more than the limit. Buckets are capped at
+   `max_buckets`; a new credential then gets 503 `rate_limit_capacity` until a
+   full bucket can be evicted.
+7. The body. Bodies over `max_request_bytes` get 413 `payload_too_large`.
+
+More than `max_in_flight` concurrent requests get 503 `overloaded`.
+
+**Forwarding.** The gateway keeps the method, path, query, body and status. It
+drops the caller's `Authorization`, `Cookie`, `x-vlite-principal`, `Host`,
+`Forwarded`, `X-Forwarded-*`, `X-Real-IP` and proxy headers, hop-by-hop
+headers and any header that `Connection` names, and it adds its own envelope.
+Responses are streamed back without hop-by-hop or `Set-Cookie` headers. The
+upstream URL is the record's `writer` origin plus the caller's path and query.
+A record endpoint with a path, query, fragment or user name, or a path that
+URL normalization would change, is refused (503 `tenant_route_invalid` or 400
+`invalid_path`). The gateway follows no redirect and uses no proxy.
+`upstream_timeout_ms` bounds the connection and the whole exchange, including
+a streamed response.
+
+**Nothing is retried.**
+
+| Upstream failure | Answer |
+| --- | --- |
+| Connection refused or not established (nothing was sent) | 502 `backend_unavailable` |
+| Any later failure of a write | 502 `write_outcome_unknown` (the write may have been applied; read before you repeat it) |
+| A read that timed out | 504 `backend_timeout` |
+| Any other read failure | 502 `backend_failed` |
+
+A response that fails after its status was sent is cut short and logged as
+`response_cut_short`.
+
+### Gateway-trusted backend
+
+Start an existing database with `--gateway-trust-file <json>`:
+
+```sh
+VLITE_AUTH_TOKEN_FILE=/run/secrets/admin-token \
+  vlite-server /data/pool.vlite --bind 127.0.0.1:8081 --gateway-trust-file trust.json
+```
+
+Before the database opens, the backend reads the control state once; it does
+not start without that read. In this mode:
+
+* Only one valid `x-vlite-principal` envelope authenticates. Bearer tokens,
+  including the admin token, sessions and network position grant nothing; a
+  request without an envelope gets 401 `unauthorized`. The startup rule that
+  requires an admin token still applies, but that token authorizes nothing.
+* The envelope must have a known key, a valid signature, this backend's
+  `audience`, an issue time and expiry within `skew_ms`, a lifetime of at most
+  `max_lifetime_ms`, and a generation `A` no lower than the highest this
+  backend has confirmed. Failures get 401 `envelope_invalid`,
+  `envelope_expired`, `credential_expired` or `envelope_stale`.
+* The backend checks its own control-state copy: the envelope's tenant must
+  have a directory record that names this backend's `audience` and database
+  lineage, and must be admitted (403 `tenant_suspended`). One `shared-pool`
+  backend therefore serves several tenants, each confined to its own scope. A
+  dedicated backend serves only its tenant.
+* The poll thread raises the minimum accepted `A` to every generation it
+  confirms, whether or not requests arrive. An envelope minted before a
+  revocation is refused once the backend has polled. A copy older than
+  `s_ctl_ms` fails closed (503 `control_state_stale`), and a generation lower
+  than one already seen is refused and logged (`control_state_regressed`).
+* The existing scope, admin-only, lineage, memory and quota guards run as for
+  a `vlk_` credential. Tenant vector quotas come from the control state, and
+  the backend keeps its own per-credential rate limit.
+* `/ready` is unauthenticated and answers
+  `{"status":"ready","generation":A,"minimum_generation":M}`, or 503
+  `control_state_stale` or `draining`.
+* Refused at startup: `--insecure-local`, `--grpc-bind`,
+  `--serve-mode reader`, `--durability none` and `VLITE_ADMIN_DIR` (the
+  backend keeps no credentials of its own).
+
+The trust file (unknown fields refused, at most 64 KiB):
+
+```json
+{"audience": "shared-pool",
+ "public_key_bundle_file": "/run/keys/gateway-public.json",
+ "control_state": {"target_file": "target.json", "object": "gateway/control-state.json"},
+ "s_ctl_ms": 2000, "poll_interval_ms": 200,
+ "skew_ms": 1000, "max_lifetime_ms": 5000,
+ "readiness_propagation_ms": 1500}
+```
+
+The example values are local test inputs, not recommendations. `audience` has
+1–2048 printable characters. Durations are at most 3600000 ms;
+`poll_interval_ms` must be positive and below `s_ctl_ms`; `max_lifetime_ms`
+must be positive.
+
+### Gateway configuration
+
+`vlite-server gateway --config <json>` validates the whole file and both key
+files, reads the control state once, prints `LISTENING http://<address>` and
+logs JSON events to stderr (`gateway_started`, which also states that gateway
+replicas add no write capacity, `gateway_upstream_failed`,
+`control_state_poll_failed`, `draining`, `server_shutdown`). The file is at
+most 64 KiB and unknown fields are refused:
+
+```json
+{"bind": "127.0.0.1:8080",
+ "control_state": {"target_file": "target.json", "object": "gateway/control-state.json"},
+ "s_ctl_ms": 2000, "poll_interval_ms": 200, "max_replicas": 2,
+ "envelope_lifetime_ms": 5000,
+ "public_key_bundle_file": "/run/keys/gateway-public.json",
+ "signing_key_file": "/run/secrets/gateway-signing-key",
+ "active_kid": "k1",
+ "readiness_propagation_ms": 1500, "drain_timeout_ms": 5000,
+ "max_request_bytes": 1048576, "max_in_flight": 64,
+ "upstream_timeout_ms": 10000, "max_buckets": 1024}
+```
+
+| Field | Meaning and bounds |
+| --- | --- |
+| `bind`, `allow_remote` | Listener address. It must be loopback unless `allow_remote` is `true`. The gateway serves plain HTTP; put TLS in front of it. |
+| `control_state` | `target_file`, `object` and optional `shared_key_file` (below). |
+| `s_ctl_ms`, `poll_interval_ms` | Longest a confirmed control-state copy is used, and the poll period: positive, `poll_interval_ms` below `s_ctl_ms`. |
+| `max_replicas` | Positive. The number of replicas each credential's rate limit is divided by. |
+| `envelope_lifetime_ms` | Positive. Keep it within the backends' `max_lifetime_ms`, or they refuse the envelopes. |
+| `public_key_bundle_file`, `signing_key_file`, `active_kid` | The bundle and signing key from `gateway-keygen`. The active key must be in the bundle and match the signing key. The signing key file is at most 1024 bytes. |
+| `readiness_propagation_ms` | 0 or more. How long `/ready` reports `draining` before the listener closes. |
+| `drain_timeout_ms` | Positive. How long in-flight requests may finish after the listener closes; they are then aborted (`drain_timeout`). |
+| `max_request_bytes` | 1–8388608. |
+| `max_in_flight` | 1–65536. |
+| `upstream_timeout_ms` | Positive. |
+| `max_buckets` | 1–1000000. |
+
+Durations are at most 3600000 ms. No field has a default except
+`allow_remote` (`false`): S_ctl, the poll interval and the replica maximum
+must be chosen per deployment and are not measured here.
+
+On SIGTERM or Ctrl+C (Ctrl+Break on Windows), a gateway or trusted backend
+logs `draining` and answers 503 `draining` on `/ready` for
+`readiness_propagation_ms` while it still serves. It then closes the listener,
+finishes in-flight requests (a gateway waits at most `drain_timeout_ms`),
+stops its control-state poller and exits.
+
+### Keys, control state and the tenant directory
+
+**Keys.** Generate an Ed25519 key pair. The command refuses existing output
+files and prints no key:
+
+```sh
+vlite-server gateway-keygen --kid k1 --generation 1 \
+  --signing-key-out /run/secrets/gateway-signing-key \
+  --public-bundle-out gateway-public.json
+```
+
+The signing key file is a base64url seed and goes only to gateways, through a
+secret store. The public bundle
+(`{"schema_version":1,"delivery_generation":1,"keys":[{"kid":"k1","public_key":"..."}]}`,
+one or two keys) goes to gateways and backends. To rotate keys, give backends
+a bundle with both keys, then switch the gateways' `active_kid` and signing
+key, then remove the old key. Bundles are read only at startup. No key has a
+default value.
+
+**Control-state target.** `target_file` is the same target JSON used by the
+cloud backup policy and by `cloud-sets` and `cloud-restore`: `account`,
+`container`, `coordination_container`, `prefix`, optional `endpoint`, and
+`auth` (`managed_identity` with an optional `client_id`, or
+`emulator_shared_key` for a loopback Azurite only). The control state is the
+object named by `object` under the coordination container's prefix. The name
+uses `[a-z0-9._/-]`, has no empty, `.` or `..` segments, and cannot be
+`owner.json`, `catalog.json` or under `sets/`. The emulator key comes from
+`shared_key_file` or `VLITE_CLOUD_BACKUP_SHARED_KEY_FILE`.
+
+**Publish and update.** A standalone server issues tenants and credentials
+into its `VLITE_ADMIN_DIR` (`POST /v1/admin/tenants`,
+`POST /v1/admin/credentials`). `control-state` imports that directory with
+its existing compare-and-swap. You never edit the object by hand:
+
+```sh
+# Generation 1. Refused with control_state_exists if the object is present.
+vlite-server control-state publish --target-file target.json \
+  --object gateway/control-state.json --admin-dir /data/admin \
+  --directory-file directory.json
+
+# Generation A+1: re-import the admin directory, and optionally replace the
+# directory or apply one change.
+vlite-server control-state update --target-file target.json \
+  --object gateway/control-state.json --admin-dir /data/admin \
+  [--directory-file directory.json] \
+  [--revoke-credential <id> | --suspend-tenant <id> | --resume-tenant <id>]
+```
+
+Each prints `{"generation":A,"object":"..."}`. Errors print `{"error":...}`
+on stderr and exit 1. `update` applies the change to the admin directory
+first (audited with `source: "control-state-cli"`) and then writes the next
+generation. A lost race is re-read and re-applied; an unknown store outcome
+answers `control_state_indeterminate` without a retry. Running the same
+command again after that is safe: it applies the same change and publishes
+another generation. Run only one `control-state update` at a time against an
+admin directory, and not while a standalone server uses it. Each gateway and
+backend picks up a new generation at its next successful poll; a backend then
+refuses envelopes minted from an older generation. Until every gateway has
+polled, some requests can therefore get 401 `envelope_stale`; callers may
+retry them.
+
+**Directory file.** A JSON array of at most 1 MiB with one record per tenant;
+unknown fields are refused (422 `directory_invalid`):
+
+```json
+[{"tenant": "<tenant id>", "kind": "shared-pool", "writer": "http://10.0.0.5:8081",
+  "audience": "shared-pool", "lineage": 1311768467294899695},
+ {"tenant": "<tenant id>", "kind": "dedicated", "writer": "http://10.0.0.6:8081",
+  "audience": "tenant-three", "lineage": 81985529216486895, "epoch": 1}]
+```
+
+* `writer` is a scheme, host and port only.
+* `audience` must equal the target backend's trust-file `audience`.
+* `lineage` is the backend database's lineage as a decimal number. Credential
+  responses and `GET /v1/admin/serve-status` show it as hex, so convert it
+  (`printf '%u\n' 0x<hex>`).
+* `dedicated` records need a positive `epoch`. `shared-pool` records have no
+  `epoch` and no `reader`. The epoch is stored but not yet checked against
+  responses.
+* A `dedicated` record may also carry a `reader` and `read_routing`
+  (`writer_only`, the default, or `readers`, which needs a `reader`). Any
+  record may carry `binding_generation` (default 0). These fields are
+  validated but not acted on: every request goes to the writer.
+* A record for a missing or deleted tenant, a duplicate tenant or the wrong
+  shape for its kind is refused (`control_state_invalid`).
+
+**Limits of this MVP.** A trusted backend has no admin directory. To issue new
+tenants or credentials, stop it, run the same database as a standalone server
+with the admin directory, issue them, stop it, run `control-state update` and
+restart the trusted backend. Revocation, suspension, resumption and directory
+changes need no restart. Rate-limit shares assume at most `max_replicas`
+gateways: more replicas, for example while a rollout overlaps old and new
+replicas, let a credential exceed its limit in proportion, and this overshoot
+is not qualified. A request body is held in memory up to `max_request_bytes`.
+In trusted mode, `/v1/auth/config` and the capabilities still describe the
+local token configuration.
