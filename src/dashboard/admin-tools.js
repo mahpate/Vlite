@@ -553,6 +553,8 @@
       target: { account, container, ...(coordination ? { coordination_container: coordination } : {}), prefix, auth: "managed_identity", ...(clientId ? { client_id: clientId } : {}) },
       enabled: fields?.enabled === true, interval_secs: Math.round(minutes * 60), retention_enabled: fields?.retention === true,
       keep_sets: keepSets, keep_days: keepDays, orphan_grace_hours: grace, drill_every: drillEvery,
+      // The page has no archive controls; keep the saved archive settings rather than turning them off.
+      ...(object(previous?.archive) ? { archive: previous.archive } : {}),
     } };
   }
   const cloudDrillText = (drill) => {

@@ -506,6 +506,82 @@ For a local Azurite emulator only, set `target.endpoint` to its loopback URL,
 file with the account key. The key is read per process and never written to
 the policy; a non-loopback endpoint with a shared key is refused.
 
+### Continuous log archive and checkpoint restore (opt-in)
+
+Snapshots alone lose everything written since the last published set. With
+`"archive": {"enabled": true, "interval_secs": 300}` in the cloud backup
+policy (60–86400 seconds; the cloud policy must also be `enabled`), the server
+also archives the database's change log after the **latest published set**
+(the baseline) at each interval, while no snapshot is due. A policy without
+`archive`, or with `"enabled": false`, behaves exactly as before.
+
+Each archive run appends one **checkpoint**: the log segment written since
+the previous checkpoint plus a recovery bundle captured with it (accounts,
+tenants, credential inventory and, if configured, the memory binding set in
+force at that cut). The segment and bundle are content-addressed objects
+under the baseline set, read back and checked, and become restorable only
+when the set's archive index is replaced by a compare-and-set. An index
+whose outcome was not seen is settled on the next run. A run with no new
+commits appends nothing. `GET /v1/admin/cloud-backup` shows the archive's
+`runs`, `checkpoints`, `failures`, `baseline_set`, `baseline_checkpoints`,
+`last_checkpoint_sequence`, `last_checkpoint_unix_ms` and `last_error`
+under `status.archive`; archive failures never change the snapshot counters.
+
+The chain stops, with a `last_error` code, until the next snapshot publishes
+a new baseline: the policy changed after the baseline
+(`pitr_policy_changed`), the live log no longer holds the commits after the
+last checkpoint (`pitr_history_floor_advanced`), the live database does not
+continue the baseline, for example after a compaction or a restore was
+selected (`pitr_source_diverged`), a single segment would exceed 64 MiB
+(`pitr_delta_too_large`), or the archive reached 256 checkpoints or 1 GiB
+(`pitr_archive_full`). Take a snapshot after such an event; checkpoints
+already published stay restorable.
+
+**Supported recovery points.** A restore recovers to an exact, verified
+checkpoint only, never to a time or an arbitrary log sequence:
+
+```sh
+vlite-server cloud-restore --target-file target.json --set <set-id> \
+  --archive-checkpoint latest --output /data/restored \
+  --admin-username recovery-admin --admin-password-file ./admin-password
+```
+
+`--archive-checkpoint` takes `latest` or the exact `sequence` of one of the
+set's checkpoints (as printed by a previous report or the status). Any other
+value (a time, the baseline sequence, a sequence between checkpoints, a
+padded or signed number) is refused with `pitr_target_unsupported`, and the
+message lists the available checkpoint sequences; the restore never rounds
+to a neighbouring checkpoint. A set without an archive answers
+`pitr_archive_missing`. The command verifies the whole chain from the
+baseline to the chosen checkpoint (object hashes, the chain hash, the
+lineage and contiguous sequences); any mismatch (`cloud_set_corrupt`) or
+malformed index (`cloud_object_invalid`) publishes nothing. It then replays
+the segments onto the baseline in staging and continues as the snapshot
+restore: the same rekey-only import (new lineage, accounts disabled, one new
+super admin), memory checks and no-overwrite publication, using the
+checkpoint's own bundle, so accounts and memory bindings match that
+checkpoint, not the baseline. The report adds an `archive` object
+(`sequence`, `captured_unix_ms`, `chain_sha256`, `segments`,
+`verified_bytes`, `crc32`, `baseline_sequence`). Without
+`--archive-checkpoint` the snapshot is restored unchanged.
+
+Limits to plan for:
+
+- The recovery point objective is the archive interval plus the time a run
+  takes, and only while the chain is healthy; it is not a guarantee. Watch
+  `status.archive.last_error` and `last_checkpoint_unix_ms`.
+- `captured_unix_ms` is when the segment was cut, not when each commit was
+  made. Commits after the last checkpoint are not recoverable from the cloud.
+- Checkpoint restore is offline (`cloud-restore`) only; the restore and drill
+  routes still restore the snapshot. A drill does not verify the archive.
+- Archive objects live under their baseline set: pins hold them and
+  retention or collection deletes them with that set. Objects of a run that
+  never committed its index are removed when the set is collected.
+- The live database is read-locked while a segment is cut, as during a
+  snapshot copy, and a segment of up to 64 MiB is held in memory.
+- A policy file with `archive` is refused by older servers (unknown field);
+  remove the field before downgrading.
+
 ## Release and image verification
 
 The release workflow builds and tests the runtime, API, and dashboard targets.

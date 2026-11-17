@@ -820,6 +820,15 @@ confirms the policy. It holds no secret:
   removed after `orphan_grace_hours` (1–720).
 * `drill_every` drills every Nth published set (0–100, 0 turns scheduled
   drills off).
+* `archive` (optional, absent by default) turns on the continuous log archive:
+  `{"enabled": true, "interval_secs": 300}` (60–86400, default 300). Each run
+  appends a verified checkpoint (log segment and recovery bundle) after the
+  latest published set; `status.archive` reports it. The offline
+  `vlite-server cloud-restore --archive-checkpoint latest|<sequence>`
+  restores to an exact checkpoint only: times and other sequences are refused
+  with `pitr_target_unsupported`, never rounded. Without the field the policy
+  and its capture hash are unchanged. See
+  [DOCKER-OPERATIONS.md](DOCKER-OPERATIONS.md#continuous-log-archive-and-checkpoint-restore-opt-in).
 
 **What a set holds.** A consistent snapshot of the database file and a
 recovery bundle: tenants, dashboard account names and roles, the scoped

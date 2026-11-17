@@ -983,7 +983,7 @@ async fn main() -> std::process::ExitCode {
     }
 }
 
-const CLOUD_USAGE: &str = "usage: vlite-server cloud-sets --target-file <json> [--shared-key-file <path>] | vlite-server cloud-restore --target-file <json> [--shared-key-file <path>] --set <set-id> --output <new-dir> --admin-username <name> --admin-password-file <path> [--mode rekey|seed] (default rekey: new lineage, imported accounts disabled, no credentials or sessions restored; seed is deferred HA scope and refused). The output directory must not exist; its parent must; it receives database.vlite and admin/ in one step. The target file holds the cloud backup policy's target JSON; the emulator shared key falls back to VLITE_CLOUD_BACKUP_SHARED_KEY_FILE. Prints a JSON report; nothing is selected or started. A database literally named cloud-sets or cloud-restore needs a ./ prefix.";
+const CLOUD_USAGE: &str = "usage: vlite-server cloud-sets --target-file <json> [--shared-key-file <path>] | vlite-server cloud-restore --target-file <json> [--shared-key-file <path>] --set <set-id> --output <new-dir> --admin-username <name> --admin-password-file <path> [--mode rekey|seed] [--archive-checkpoint latest|<sequence>] (default rekey: new lineage, imported accounts disabled, no credentials or sessions restored; seed is deferred HA scope and refused). --archive-checkpoint replays the set's verified log archive to exactly that checkpoint (latest, or a listed checkpoint sequence; times and other sequences are refused, never rounded). The output directory must not exist; its parent must; it receives database.vlite and admin/ in one step. The target file holds the cloud backup policy's target JSON; the emulator shared key falls back to VLITE_CLOUD_BACKUP_SHARED_KEY_FILE. Prints a JSON report; nothing is selected or started. A database literally named cloud-sets or cloud-restore needs a ./ prefix.";
 
 /// Offline cloud recovery commands: JSON report on stdout, `{"error":...}`
 /// on stderr. The Azure client is blocking, so it runs off the runtime.
@@ -1029,6 +1029,7 @@ fn cloud_command(command: &str, args: &[OsString]) -> Result<serde_json::Value, 
             "--admin-username",
             "--admin-password-file",
             "--mode",
+            "--archive-checkpoint",
         ]
     };
     let mut values: std::collections::BTreeMap<&str, OsString> = Default::default();
@@ -1072,6 +1073,10 @@ fn cloud_command(command: &str, args: &[OsString]) -> Result<serde_json::Value, 
             .map_err(usage)?,
         Err(_) => RestoreMode::Rekey,
     };
+    let archive_checkpoint = match take("--archive-checkpoint") {
+        Ok(value) => Some(text("--archive-checkpoint", value)?),
+        Err(_) => None,
+    };
     let request = CloudRestore {
         set_id: text("--set", take("--set")?)?,
         output: PathBuf::from(take("--output")?),
@@ -1080,6 +1085,7 @@ fn cloud_command(command: &str, args: &[OsString]) -> Result<serde_json::Value, 
         target_file,
         shared_key_file,
         mode,
+        archive_checkpoint,
     };
     vlite::server::cloud_restore(&request)
 }

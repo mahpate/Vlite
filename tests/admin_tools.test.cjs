@@ -807,6 +807,10 @@ async function cloudBackupTests() {
   assert.deepEqual(plain(bare.target), { account: "vlitebackups", container: "backups", prefix: "vlite/prod/", auth: "managed_identity" });
   assert.deepEqual([bare.enabled, bare.retention_enabled], [false, false]);
   assert.equal(cloudBackupPolicy({ ...form, interval: "10080" }, policy).policy.interval_secs, 604800);
+  // Saving from the page keeps archive settings it cannot show.
+  const archived = { ...policy, archive: { enabled: true, interval_secs: 600 } };
+  assert.deepEqual(plain(cloudBackupPolicy(cloudBackupForm(archived), archived)), { errors: {}, policy: archived });
+  assert.equal("archive" in cloudBackupPolicy(form, policy).policy, false);
   // Every field is checked at once, in plain words, and nothing is built.
   const bad = cloudBackupPolicy({ account: "Bad_Account", container: "-x", coordination: "", prefix: "/abs/", clientId: "nope", interval: "4",
     drillEvery: "101", keepSets: "2", keepDays: "29", grace: "0" }, null);

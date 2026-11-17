@@ -55,9 +55,11 @@ class DockerInputs(unittest.TestCase):
             for kind, directory in (("example", "examples"), ("test", "tests")):
                 for target in manifest.get(kind, []):
                     path = target.get("path", f"{directory}/{target['name']}.rs")
-                    with self.subTest(dockerfile=name, target=path):
-                        self.assertTrue((ROOT / path).is_file())
-                        self.assertTrue(any(path == source or path.startswith(source + "/") for source in copied))
+                    modules = re.findall(r'#\[path = "([^"]+)"\]', (ROOT / path).read_text(encoding="utf-8"))
+                    for needed in [path, *(str(Path(path).parent / module).replace("\\", "/") for module in modules)]:
+                        with self.subTest(dockerfile=name, target=needed):
+                            self.assertTrue((ROOT / needed).is_file())
+                            self.assertTrue(any(needed == source or needed.startswith(source + "/") for source in copied))
 
     def test_release_images_build_only_the_shipped_binaries(self):
         dockerfile = (ROOT / "Dockerfile").read_text(encoding="utf-8")
