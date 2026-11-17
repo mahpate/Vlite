@@ -20,6 +20,9 @@
 !tests/**
 !examples/
 !examples/**
+!benchmarks/
+!benchmarks/ha_reader_apply.rs
+!benchmarks/ha_reader_apply_tests.rs
 !crates/
 !crates/**
 !bindings/

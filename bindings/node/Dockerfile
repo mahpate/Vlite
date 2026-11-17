@@ -11,6 +11,8 @@ COPY proto ./proto
 COPY src ./src
 COPY tests ./tests
 COPY examples ./examples
+COPY benchmarks/ha_reader_apply.rs ./benchmarks/ha_reader_apply.rs
+COPY benchmarks/ha_reader_apply_tests.rs ./benchmarks/ha_reader_apply_tests.rs
 COPY bindings/c ./bindings/c
 COPY crates ./crates
 COPY bindings/node ./bindings/node
