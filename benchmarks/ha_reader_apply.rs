@@ -290,6 +290,7 @@ fn main() -> BoxResult<()> {
     match strategies::parse_mode(&std::env::args().skip(1).collect::<Vec<_>>())? {
         strategies::Mode::Smoke => smoke(),
         strategies::Mode::Measure => strategies::measure(),
+        strategies::Mode::ResourceEvidence => resource::run(),
     }
 }
 
@@ -359,6 +360,9 @@ fn smoke() -> BoxResult<()> {
 
 #[path = "ha_reader_strategies.rs"]
 mod strategies;
+
+#[path = "ha_reader_resource.rs"]
+mod resource;
 
 #[cfg(test)]
 #[path = "ha_reader_apply_tests.rs"]

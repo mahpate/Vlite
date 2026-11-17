@@ -1,4 +1,4 @@
-# HA reader-apply measurement protocol (ITEM-001, ITEM-002)
+# HA reader-apply measurement protocol (ITEM-001, ITEM-002, ITEM-003)
 
 This is the exported-segment first cut of MEAS-001/002/007, **not an HA
 qualification or a benchmark campaign**. It uses existing engine APIs only.
@@ -11,7 +11,9 @@ GATE-001 and GATE-002 remain open. The ITEM-001 text below describes the
 `--smoke` mode; ITEM-002 added a separate `--measure` mode that prototypes
 the three strategies on local synthetic fixtures (see
 [ITEM-002 local strategy measurements](#item-002-local-strategy-measurements)).
-The owner confirmed incremental apply with baseline-plus-tail recovery.
+The owner confirmed incremental apply with baseline-plus-tail recovery. A
+separate `--resource-evidence` mode adds a bounded local resource probe for
+those paths and compaction; it does not rerun ITEM-002's strategy cells.
 ITEM-003 still needs qualified MEAS-007 evidence; runtime refusal will be wired
 into the later reader enrollment path (see the HA PRD ITEM-003 blocker note).
 
@@ -26,8 +28,8 @@ cargo run --quiet --locked --features json --example ha-reader-apply -- --smoke
 
 The second command prints one JSON document. Redirect stdout to a new artifact
 path outside the repository to retain observations. Build diagnostics go to
-stderr. The harness accepts exactly one argument, `--smoke` or (since ITEM-002)
-`--measure`, and rejects anything else. It takes no database, endpoint,
+stderr. The harness accepts exactly one argument, `--smoke`, `--measure`, or
+`--resource-evidence`, and rejects anything else. It takes no database, endpoint,
 credential or production input. It creates fresh temporary files on the local
 temporary filesystem and removes them on success or error. Run from this
 checkout so the reported Git revision/dirty flag identifies the harness source.
@@ -118,6 +120,43 @@ owner-approved future qualification must record the exact source, host and
 filesystem, durability/format/index settings, workload and concurrency, every
 cost boundary, raw results and correctness evidence. Only that later evidence
 can support ITEM-002's strategy decision or ITEM-003's capacity/refusal work.
+
+## ITEM-003 bounded local resource probe
+
+Run this separately from `--measure`; it does not execute or duplicate any
+ITEM-002 strategy-comparison cells:
+
+```bash
+cargo run --quiet --locked --release --features json --example ha-reader-apply -- --resource-evidence > <artifact.json>
+```
+
+The mode is Linux-only and fails if allocated-block, `/proc`, or cgroup v2
+telemetry is unavailable. It uses the existing fixture, apply/reseed, full
+HNSW rebuild and compaction helpers. Its selected **development inputs** are a
+110,000-record, 64-dimensional baseline and a 300-mutation tail, with 64-byte
+payloads, Full durability, and the existing deterministic synthetic vectors.
+These are not qualified limits or a representative tenant workload.
+If a read-only container mount cannot resolve the checkout's Git metadata, pass
+both `VLITE_RESOURCE_SOURCE_REVISION` (full commit ID) and
+`VLITE_RESOURCE_SOURCE_DIRTY_PATHS` (raw `git status --porcelain` output) from
+the host; supplying only one fails, and the report names the provenance source.
+
+For baseline-plus-tail apply, fresh baseline-plus-tail recovery, and
+compaction, a sampler records allocated blocks (512-byte units) and sampled
+process RSS every 10 ms. Each phase reports its sample count, maximum observed
+sample gap, and maximum scan duration; peaks between samples may be missed.
+The output also records Linux `VmHWM`, the process-wide RSS high-water since
+process start (KiB precision; includes harness/model and ANN memory), and cgroup
+v2 CPU/memory limits. No telemetry failure is converted to zero. The probe
+verifies reader data/position/ANN results and compaction output before printing
+JSON.
+
+These are local Linux/container development observations only. They do not
+qualify ACA ephemeral storage or CPU tiers, tenant workloads, concurrency, or a
+capacity ceiling; they also do not isolate reader memory from harness/model
+memory or show ANN readiness during an apply. Preserve the JSON output outside
+the repository with its source revision and dirty-path record. ITEM-003 remains
+Blocked, GATE-002 remains open, and no enrollment refusal is implemented.
 
 ## ITEM-002 local strategy measurements
 

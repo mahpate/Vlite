@@ -41,18 +41,19 @@ const STALENESS_INTERVALS_MS: [u64; 2] = [250, 1_000];
 const STALENESS_DURATION_MS: u64 = 15_000;
 const STALENESS_TARGET_RATE: u64 = 200;
 
-const USAGE: &str =
-    "usage: cargo run --locked --features json --example ha-reader-apply -- (--smoke | --measure)";
+const USAGE: &str = "usage: cargo run --locked --features json --example ha-reader-apply -- (--smoke | --measure | --resource-evidence)";
 
 pub(crate) enum Mode {
     Smoke,
     Measure,
+    ResourceEvidence,
 }
 
 pub(crate) fn parse_mode(args: &[String]) -> BoxResult<Mode> {
     match args {
         [only] if only == "--smoke" => Ok(Mode::Smoke),
         [only] if only == "--measure" => Ok(Mode::Measure),
+        [only] if only == "--resource-evidence" => Ok(Mode::ResourceEvidence),
         _ => Err(USAGE.into()),
     }
 }

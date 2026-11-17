@@ -90,11 +90,16 @@ fn equivalence_checks_content_and_lineage_not_just_counts() {
 
 // ---------------------------------------------------------------- ITEM-002
 
+#[cfg(target_os = "linux")]
+use super::resource;
 use super::strategies::{
     self, HighWater, Mode, Strategy, baseline_replacement, dir_bytes, head_sequence,
     incremental_apply, measure_compaction, measure_staleness, parse_mode, percentile, poll_peak,
     prepare_baseline, prepare_rep, snapshot_refresh, summarize,
 };
+#[path = "ha_reader_resource_tests.rs"]
+#[cfg(target_os = "linux")]
+mod resource_tests;
 
 fn args(values: &[&str]) -> Vec<String> {
     values.iter().map(|value| (*value).to_owned()).collect()
@@ -110,11 +115,16 @@ fn mode_parsing_accepts_exactly_one_known_flag() {
         parse_mode(&args(&["--measure"])).unwrap(),
         Mode::Measure
     ));
+    assert!(matches!(
+        parse_mode(&args(&["--resource-evidence"])).unwrap(),
+        Mode::ResourceEvidence
+    ));
     for invalid in [
         &[][..],
         &["--measure", "--smoke"][..],
         &["--smoke", "--smoke"][..],
         &["--measure=1"][..],
+        &["--resource-evidence", "--smoke"][..],
         &["measure"][..],
         &["--records", "10"][..],
     ] {
