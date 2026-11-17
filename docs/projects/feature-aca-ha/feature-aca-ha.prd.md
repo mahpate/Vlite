@@ -500,13 +500,58 @@ Opt-in only; gateway is a stateless scale-out edge over shared authoritative con
 | OD-006 | Gateway min (proposal 2) and max replicas; ACA environment sizing. | Min 2 warm; max from MEAS-004 and quota check. | EPIC-004, EPIC-008 |
 | OD-007 | Position token and `X-` header names for staleness and read-your-writes. | Report position/age only in MVP; token later. | EPIC-005 |
 | OD-008 | Shared counter store for tenant-wide rate limits. | Defer; static share first. | Post-MVP |
-| OD-009 | Signing-key custody and rotation for envelopes (platform secret store versus control state). | Selected by the agent under the owner's temporary approval delegation on 2026-11-17: platform secret store, with explicit active-key identity and old/new verification overlap. Key material is not stored in control-state objects or logs; code uses injected test keys until platform delivery is verified. Platform integration remains UNVERIFIED. | Unblocks local EPIC-003 implementation; platform verification remains required before deployment |
+| OD-009 | Signing-key custody and rotation for envelopes (platform secret store versus control state). | Selected by the agent under the owner's temporary approval delegation on 2026-11-17: platform secret store, with explicit active-key identity and old/new verification overlap. Key material is not stored in control-state objects or logs; code uses injected test keys until platform delivery is verified. The agent also selected Ed25519 envelopes, so backends hold only verification keys. Delivery design and live gates G1–G8 are in the note below. Platform integration remains UNVERIFIED. | Unblocks local EPIC-003 implementation; platform verification remains required before deployment |
 | OD-010 | Any geo-redundant or object-replication posture for the archive (DR, separate from HA). | Defer; ZRS for HA. | Separate DR plan |
 | OD-011 | Dedicated deployment for every tenant versus `shared-pool` for small tenants. | Support both; dedicate by need until cost is measured. | EPIC-007 |
 | OD-012 | Gateway as a mode of `vlite-server` or a separate binary. | Mode of the same binary initially. | EPIC-004 |
 
 **Temporary decision delegation (2026-11-17).** The owner said, "take your best judgement for next approvals I am going offline for next 10 hours" at 06:20:50 UTC. Until 16:20:50 UTC, the agent may select conservative implementation decisions and must record them as delegated decisions, not direct owner confirmations. This does not turn unmeasured values into qualified limits, pass technical gates, authorize production changes, or alter the no-main-push/no-PR boundary. OD-009 above is the first such decision; other unresolved decisions retain their existing status until needed.
 
+**OD-009 key-delivery evidence (2026-11-17, documentation only).** A worker-pool research report (plan `a0a1939f31d340ec81a49fb7231f8ede`, commit `694a239b`) reviewed Azure Container Apps (ACA) and Key Vault secret delivery. The agent checked its central claims against [Manage secrets in Azure Container Apps](https://learn.microsoft.com/en-us/azure/container-apps/manage-secrets):
+
+- Secrets belong to the app, not to a revision.
+- An updated or deleted secret does not affect existing revisions until a new revision is deployed or the existing revision is restarted.
+- A Key Vault reference without a version picks up the latest version within 30 minutes and restarts every active revision that consumes the secret through an environment variable. A versioned reference gives full control.
+- The app's managed identity needs the Key Vault Secrets User role.
+
+ACA documents neither cross-app ordering nor a convergence bound. A versionless reference therefore cannot serve as an atomic key switch.
+
+Delegated design, selected by the agent and not confirmed by the owner:
+
+- **Signing algorithm.** Envelopes use Ed25519 through `ring`, which is already in the server build. Backends receive public verification keys only.
+- **Key IDs.** The key ID (`kid`) is inside the signed bytes. The verifier looks it up in a local allowlist and rejects unknown or retired IDs. It never falls back to another key, an unsigned identity or a test key.
+- **Verification checks.** The verifier checks the audience, tenant, expiry, future issue time within a skew budget, maximum lifetime and policy generation `A`.
+- **Key generation.** Key generation is separate from policy generation `A`.
+- **Key bundle.**
+  - Each role loads a validated bundle at startup. The bundle contains a schema version, delivery generation and `kid`-to-key map. The gateway bundle also names the active `kid` and holds its signing key.
+  - Missing material, a malformed bundle, a duplicate `kid` or an active ID without a signing key fails startup.
+  - There is no hot reload.
+  - Material never appears in logs, debug output, errors or control-state objects.
+- **Platform delivery.** Pin the Key Vault version and use a new ACA secret name for each generation. Roll out a new revision to switch generations.
+- **Rotation order.**
+  1. Prepare key B.
+  2. Roll every backend to accept A and B. Confirm through each replica's reported loaded generation.
+  3. Switch gateways to B.
+  4. Stop all A signers. Record that time as `Tstop`.
+  5. Retire A only after `Tstop` plus maximum lifetime, skew budget and in-flight allowance.
+  6. Remove A from consumers, then revoke access to A.
+
+  A rollback that resumes A signing resets `Tstop`.
+
+Live platform gates G1–G8 are **NOT RUN**:
+
+| Gate | What it verifies |
+|---|---|
+| G1 | Delivery through managed identity and the network. |
+| G2 | The difference between defining a secret and a revision consuming it. |
+| G3 | Old/new key overlap across independent replicas. |
+| G4 | Envelope lifetime and key retirement timing. |
+| G5 | Failure handling and recovery. |
+| G6 | Rollback. |
+| G7 | The optional volume-mount path. |
+| G8 | Confidentiality of the drill's evidence. |
+
+They require a separately authorized non-production environment and are prerequisites for any deployment that uses envelopes.
 # 11. Alternatives Considered
 
 | ID | Alternative | Why not (or when) |
@@ -795,6 +840,7 @@ To reproduce:
 | Date | Change |
 |---|---|
 | 2026-11-17 | Owner confirmed reader design (b) incremental apply with (c) baseline-plus-tail recovery; full ANN rebuild and open capacity/deployment gates were disclosed. Owner delegated the next design approvals until 16:20:50 UTC; agent selected platform-secret-store key custody with rotation overlap (OD-009) for local EPIC-003 implementation. Platform verification and technical capacity qualification remain open; no production, push or PR action. |
+| 2026-11-17 | Recorded documentation-verified ACA/Key Vault secret delivery behavior for OD-009. Under the owner's delegation, the agent selected Ed25519 envelopes, version-pinned per-generation bundles and a fenced rotation order. Live platform gates G1–G8 were not run. |
 | 2026-11-17 | EPIC-001 ITEM-003 recorded as Blocked, not Done: no ceiling set and no refusal implemented. Blockers are owner confirmation of the proposed reader strategy, unmeasured MEAS-007 qualification evidence (allocated/transient peaks, memory, target ACA tier, representative workload), and no reader enrollment path before EPIC-005. Docs only; no code, measurement or backup-limit change. GATE-002 remains open. |
 | 2026-11-17 | EPIC-001 ITEM-002 local measurements recorded (`--measure` harness at `607f9b22`; synthetic local fixtures only): MEAS-001 per-strategy costs, local (b) MEAS-002 percentiles, MEAS-007 sampled high-water and compaction. PROPOSED reader strategy (b) incremental apply with (c) re-seed, pending owner confirmation. GATE-002 remains open; ITEM-003 Not Started. |
 | 2026-11-16 | GATE-001 criteria verified on merged tree `75df5738`; owner go-ahead recorded as code-implementation go only. EPIC-002 serving modes, reader refusal, drain readiness and serve-status delivered with tests. No deployment, HA enablement or Azure provisioning. |
