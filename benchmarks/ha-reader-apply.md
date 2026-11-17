@@ -11,8 +11,9 @@ GATE-001 and GATE-002 remain open. The ITEM-001 text below describes the
 `--smoke` mode; ITEM-002 added a separate `--measure` mode that prototypes
 the three strategies on local synthetic fixtures (see
 [ITEM-002 local strategy measurements](#item-002-local-strategy-measurements)).
-ITEM-003 is Blocked: it needs owner strategy confirmation, qualified MEAS-007
-evidence and a reader enrollment path (see the HA PRD ITEM-003 blocker note).
+The owner confirmed incremental apply with baseline-plus-tail recovery.
+ITEM-003 still needs qualified MEAS-007 evidence; runtime refusal will be wired
+into the later reader enrollment path (see the HA PRD ITEM-003 blocker note).
 
 ## Reproduce the bounded smoke
 
