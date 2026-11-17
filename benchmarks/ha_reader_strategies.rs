@@ -27,7 +27,7 @@ pub(crate) const INDEX: HnswConfig = HnswConfig {
     ef_construction: 64,
     seed: 42,
 };
-pub(crate) const QUERY_EF: usize = 128;
+pub(crate) const QUERY_EF: usize = 512;
 const PAYLOAD_BYTES: usize = 64;
 const INGEST_BATCH: u64 = 1_000;
 const MAX_SEGMENT_BYTES: usize = 256 * 1024 * 1024;
@@ -399,9 +399,12 @@ fn verify_ann(rep: &Rep, database: &Database) -> BoxResult<()> {
     let (query, _) = rep.model.get(&0).ok_or("query record missing")?;
     let exact = database.search(query, 1)?;
     let approximate = database.search_approximate_ready(query, 1, QUERY_EF, INDEX)?;
-    require(
-        exact.len() == 1 && exact[0].id == 0 && exact == approximate,
-        "ANN query differs from exact result",
+    if exact.len() == 1 && exact[0].id == 0 && exact == approximate {
+        return Ok(());
+    }
+    Err(
+        format!("ANN query differs from exact result: exact={exact:?} approximate={approximate:?}")
+            .into(),
     )
 }
 
