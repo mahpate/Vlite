@@ -30,7 +30,7 @@ The gateway is a stateless public edge: TLS, authentication, operation classific
 | Tenant routing record (deployment kind, endpoints, epoch `E`) | Not present | Authoritative shared; cached snapshot, generation `A` | Not built |
 | Memory bindings | Startup-only file | Authoritative shared; enforced by backends | Not in the snapshot yet (FR-012) |
 | Dashboard users and sessions | `users.json`; sessions in process memory | Removed from the gateway MVP | Deferred (OD-004) |
-| Rate-limit buckets | One token bucket per process | Disposable per replica; static share of the tenant limit | Not built (ITEM-016) |
+| Rate-limit buckets | One token bucket per process | Disposable per replica; static share of the tenant limit | Library: share computation `replica_share` (`src/server/gateway.rs`); no gateway bucket yet (ITEM-014) |
 | Writer authority, epoch `E` | Not present | Authoritative shared; CAS-only | Not built (EPIC-006) |
 | Route-classification table | Compiled code | Code, changed by release | Library: `src/server/gateway.rs` |
 | Idempotency receipts | Memory API only | Backend-owned; gateway keeps none | Unchanged |
@@ -59,7 +59,8 @@ Backends never trust the gateway alone: a request without a valid envelope gets 
 | Principal envelope (ITEM-009) | Library. Ed25519 `vle1` tokens in `x-vlite-principal`; audience, expiry, skew and minimum `A` checks; two-key rotation overlap. | No |
 | Gateway-trusted backend authentication (ITEM-010) | Crate-private. Envelope-only authentication feeding the existing `permission`/`authorize`/guard path. | No |
 | Operation classifier (ITEM-013) | Library. Classifies all 179 registered REST routes by method and path; unknown paths and methods are refused, never forwarded. | No |
-| Routing, envelope minting, readiness by snapshot age, drain, rate-limit share (ITEM-014 to ITEM-016) | Not started | - |
+| Per-replica rate-limit share (ITEM-016) | Library. `replica_share` gives each replica `limit / max_replicas`, never rounded up; refuses zero replicas and shares under one request a second. Needs the OD-006 maximum. | No |
+| Routing, envelope minting, readiness by snapshot age, drain, edge rate limiting (ITEM-014, ITEM-015, ITEM-016 wiring) | Not started | - |
 
 ## Behavior the gateway must keep
 

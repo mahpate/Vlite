@@ -13,6 +13,9 @@
 //! chooses the template, a literal segment beating a parameter at the first
 //! position where two candidates differ, and only then is the method checked
 //! (HEAD is served by GET routes).
+//!
+//! It also sizes each replica's slice of a credential rate limit
+//! (`replica_share`, ITEM-016, PRD section 3.4.7).
 #![cfg_attr(not(test), allow(dead_code))]
 
 use axum::http::Method;
@@ -335,6 +338,42 @@ fn beats(candidate: &str, chosen: &str) -> bool {
         .is_some_and(|(a, _)| !is_param(a))
 }
 
+/// Why a credential limit has no per-replica share.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(super) enum ShareRefusal {
+    /// The replica maximum is zero.
+    NoReplicas,
+    /// The share is under one request a second. A bucket holding one second
+    /// of that rate could never admit a request, and rounding it up to one
+    /// would let the replicas together exceed the limit.
+    BelowOneRequest,
+}
+
+/// Each gateway replica's share of a credential's `requests_per_second`,
+/// used as both its refill rate and its bucket capacity (the backend bucket
+/// holds one second of requests). The largest value whose `max_replicas`
+/// multiples stay within the limit: never rounded up. If ACA briefly runs
+/// more replicas than the maximum, the aggregate exceeds the limit by that
+/// ratio; the backend's own bucket still applies.
+pub(super) fn replica_share(
+    requests_per_second: u32,
+    max_replicas: u32,
+) -> Result<f64, ShareRefusal> {
+    if max_replicas == 0 {
+        return Err(ShareRefusal::NoReplicas);
+    }
+    let (limit, replicas) = (f64::from(requests_per_second), f64::from(max_replicas));
+    let mut share = limit / replicas;
+    // Division rounds to nearest; `mul_add` keeps the product's sign exact.
+    if share.mul_add(replicas, -limit) > 0.0 {
+        share = share.next_down();
+    }
+    if share < 1.0 {
+        return Err(ShareRefusal::BelowOneRequest);
+    }
+    Ok(share)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -591,5 +630,55 @@ mod tests {
             .map(|(key, stats)| (key.clone(), stats.count))
             .collect();
         assert_eq!(recorded, expected);
+    }
+
+    /// Whether `share * replicas <= limit` holds exactly, using the share's
+    /// mantissa and exponent rather than float arithmetic.
+    fn fits(share: f64, replicas: u32, limit: u32) -> bool {
+        let bits = share.to_bits();
+        let exponent = i32::try_from((bits >> 52) & 0x7ff).unwrap() - 1075;
+        assert!((-52..=0).contains(&exponent), "share {share} out of range");
+        let mantissa = u128::from((bits & ((1 << 52) - 1)) | (1 << 52));
+        mantissa * u128::from(replicas) <= u128::from(limit) << exponent.unsigned_abs()
+    }
+
+    #[test]
+    fn replica_shares_never_sum_past_the_limit_and_are_the_largest_that_fit() {
+        let limits = (1..=3_000).chain([777_777, 999_983, 1_000_000]);
+        let mut corrected = 0;
+        for limit in limits {
+            for replicas in 1..=100 {
+                let Ok(share) = replica_share(limit, replicas) else {
+                    assert!(limit < replicas, "{limit}/{replicas} refused");
+                    continue;
+                };
+                assert!(
+                    fits(share, replicas, limit),
+                    "{limit}/{replicas} rounded up"
+                );
+                assert!(
+                    !fits(share.next_up(), replicas, limit),
+                    "{limit}/{replicas} not largest"
+                );
+                if share != f64::from(limit) / f64::from(replicas) {
+                    corrected += 1;
+                }
+            }
+        }
+        // The sweep must reach quotients that division rounds up.
+        assert!(corrected > 0);
+        assert_eq!(replica_share(100, 4), Ok(25.0));
+        assert_eq!(replica_share(250, 1), Ok(250.0));
+        assert_eq!(replica_share(4, 4), Ok(1.0));
+    }
+
+    #[test]
+    fn replica_shares_refuse_zero_replicas_and_sub_request_slices() {
+        assert_eq!(replica_share(100, 0), Err(ShareRefusal::NoReplicas));
+        assert_eq!(replica_share(3, 4), Err(ShareRefusal::BelowOneRequest));
+        assert_eq!(
+            replica_share(1, u32::MAX),
+            Err(ShareRefusal::BelowOneRequest)
+        );
     }
 }

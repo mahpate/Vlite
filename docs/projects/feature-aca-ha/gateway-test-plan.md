@@ -2,7 +2,7 @@
 
 Test plan for the shared gateway in the staged Azure Container Apps (ACA) HA plan ([PRD](feature-aca-ha.prd.md), EPIC-004 ITEM-017). It covers TEST-003 (statelessness and scale), TEST-004 (revocation and suspension staleness) and TEST-005 (drain). It says what is already tested, what each scenario must show, and what must exist before the scenarios can run. Design background is in [gateway.md](gateway.md).
 
-> **Status (2026-11-17): plan only, NOT RUN.** No gateway mode exists, so no scenario below has been executed and nothing here is evidence for GATE-003. Execution waits for ITEM-014 (routing and envelope minting), ITEM-015 (readiness and drain) and ITEM-016 (rate-limit share), which wait for owner decisions OD-012, OD-005 and OD-006. Production is unchanged.
+> **Status (2026-11-17): plan only, NOT RUN.** No gateway mode exists, so no scenario below has been executed and nothing here is evidence for GATE-003. Execution waits for ITEM-014 (routing and envelope minting), ITEM-015 (readiness and drain) and ITEM-016 (rate-limit share; the share computation exists as library code, enforcement is unwired), which wait for owner decisions OD-012, OD-005 and OD-006. Production is unchanged.
 
 ## Inputs, not defaults
 
@@ -109,7 +109,7 @@ Tier (b) needs a small fault proxy between gateway and writer for 5.3 and 5.4. I
 - **No gateway mode (ITEM-014, OD-012).** Nothing exists to start as a gateway process; minting, routing and retry handling are unbuilt.
 - **No gateway readiness (ITEM-015, OD-005).** Readiness on snapshot age needs S_ctl and the poll interval.
 - **No readiness-propagation window.** In `src/bin/vlite-server.rs` the signal task calls `begin_drain()` and sends the stop at the same moment, so the listener stops accepting as readiness fails. Step 5.1 needs ITEM-015 to keep accepting for a delay after readiness fails, inside the grace period; the delay is an input and is not set here.
-- **No rate-limit share (ITEM-016, OD-006).** Load steps must record whether edge limits fired; per-replica share follows section 3.4.7 and needs the replica maximum.
+- **No edge rate limiting (ITEM-016 wiring, OD-006).** The share computation exists as unwired library code (`replica_share`); no gateway bucket enforces it yet. Load steps must record whether edge limits fired; per-replica share follows section 3.4.7 and needs the replica maximum.
 - **Ambiguous-write error shape.** ITEM-014 defines the exact status and code for step 5.3; this plan only requires that it is neither success nor a definite failure, and not retried.
 
 ## Related, out of scope here
