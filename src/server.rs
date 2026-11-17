@@ -38,8 +38,11 @@ mod cloud_backup;
 mod cloud_recovery;
 mod collections;
 mod compaction;
+mod control_state;
 mod credentials;
 mod features;
+#[cfg(test)]
+mod gateway_trust_tests;
 mod graph;
 mod group_commit;
 mod guard;
@@ -51,6 +54,7 @@ mod logs;
 mod memory;
 mod observability;
 mod ops;
+mod principal_envelope;
 mod provider_serving;
 pub mod providers;
 #[cfg(all(test, feature = "grpc"))]
@@ -235,6 +239,9 @@ pub struct Service {
     metrics_with_memory: bool,
     /// EPIC-002: serve mode and drain flag, shared across generations.
     serve: Arc<serve_mode::State>,
+    /// feature-aca-ha ITEM-010: when set, the backend trusts only a signed
+    /// gateway principal envelope; standalone servers leave it unset.
+    trust: Option<Arc<principal_envelope::Verifier>>,
 }
 
 impl Service {
@@ -331,6 +338,7 @@ impl Service {
             memory_bindings: Arc::new(reserved::Served::default()),
             metrics_with_memory: false,
             serve: Arc::default(),
+            trust: None,
         })
     }
 
@@ -527,6 +535,15 @@ impl Service {
 
     /// Choose snapshot-based simple exact reads, or the original lock-held path.
     /// Configure before cloning the service so all listeners share one policy.
+    /// feature-aca-ha ITEM-010: opt-in gateway-trusted mode. Crate-private
+    /// until the gateway (EPIC-004) supplies keys from the platform secret
+    /// store; standalone servers never call it.
+    #[cfg_attr(not(test), allow(dead_code))]
+    fn with_gateway_trust(mut self, verifier: principal_envelope::Verifier) -> Self {
+        self.trust = Some(Arc::new(verifier));
+        self
+    }
+
     pub fn with_snapshot_reads(mut self, enabled: bool) -> std::io::Result<Self> {
         if Arc::strong_count(&self.database) != 1 {
             return Err(std::io::Error::other(
@@ -1136,6 +1153,9 @@ fn bearer(headers: &HeaderMap) -> Option<&str> {
 }
 
 fn authenticate(service: &Service, headers: &HeaderMap) -> Result<Option<admin::Role>, ApiError> {
+    if let Some(trust) = &service.trust {
+        return trusted(trust, headers);
+    }
     let value = bearer(headers);
     {
         let auth = service.admin.auth.lock().map_err(internal)?;
@@ -1163,6 +1183,29 @@ fn authenticate(service: &Service, headers: &HeaderMap) -> Result<Option<admin::
         }
         _ => Ok(None),
     }
+}
+
+/// feature-aca-ha ITEM-010 (SEC-002): in gateway-trusted mode a request is
+/// authenticated only by a valid principal envelope. Bearer tokens, sessions,
+/// the open development mode and network position grant nothing; tenant
+/// status was decided by the gateway at generation `A` and bound by the
+/// verifier's policy, so the local tenant store is not consulted.
+fn trusted(
+    trust: &principal_envelope::Verifier,
+    headers: &HeaderMap,
+) -> Result<Option<admin::Role>, ApiError> {
+    let mut values = headers.get_all(principal_envelope::HEADER).iter();
+    let Some(value) = values.next() else {
+        return Ok(None);
+    };
+    let token = match (value.to_str(), values.next()) {
+        (Ok(token), None) => token,
+        _ => return Err(principal_envelope::Refusal::Malformed.error()),
+    };
+    let grant = trust
+        .verify(token, admin::now_ms() as u64)
+        .map_err(principal_envelope::Refusal::error)?;
+    Ok(Some(admin::Role::Scoped(grant)))
 }
 
 /// Where a scoped credential's collection binding is enforced.

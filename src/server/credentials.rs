@@ -204,7 +204,7 @@ impl Grant {
     }
 }
 
-#[derive(Clone, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct Scope {
     name: String,
@@ -311,6 +311,137 @@ impl Entry {
             && !self.name.is_empty()
             && self.name.len() <= 64)
             .then_some(())
+    }
+
+    /// The principal this entry authenticates as. Rejects nothing that
+    /// `validate` accepts.
+    fn grant(&self) -> Option<Grant> {
+        Some(Grant {
+            id: self.id.clone(),
+            api_credential: true,
+            name: self.name.clone(),
+            tenant_id: self.tenant_id.clone(),
+            requests_per_second: self.requests_per_second,
+            max_vectors: self.max_vectors,
+            max_vectors_per_collection: self.max_vectors_per_collection,
+            all: self.all,
+            collections: self
+                .collections
+                .iter()
+                .map(|s| (s.name.clone(), s.id))
+                .collect(),
+            ops: parse_ops(&self.operations).ok()?,
+            lineage: u64::from_str_radix(&self.lineage, 16).ok()?,
+            expires: self.expires_unix_ms,
+            graphs: self.graphs.clone().unwrap_or_default(),
+        })
+    }
+}
+
+/// A scoped principal as a gateway forwards it in a signed envelope
+/// (feature-aca-ha ITEM-009): the grant of an `Entry` without its secret
+/// hash, creation, revocation or rotation state. A backend accepts it only
+/// under the rules `Entry::validate` applies to a stored credential.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(super) struct Principal {
+    id: String,
+    name: String,
+    all: bool,
+    collections: Vec<Scope>,
+    operations: Vec<String>,
+    lineage: String,
+    expires_unix_ms: u64,
+    tenant_id: Option<String>,
+    requests_per_second: Option<u32>,
+    max_vectors: Option<u64>,
+    max_vectors_per_collection: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    graphs: Option<Vec<String>>,
+}
+
+impl Principal {
+    #[cfg_attr(not(test), allow(dead_code))]
+    pub(super) fn of(grant: &Grant) -> Self {
+        Self {
+            id: grant.id.clone(),
+            name: grant.name.clone(),
+            all: grant.all,
+            collections: grant
+                .collections
+                .iter()
+                .map(|(name, id)| Scope {
+                    name: name.clone(),
+                    id: *id,
+                })
+                .collect(),
+            operations: op_names(grant.ops).into_iter().map(str::to_owned).collect(),
+            lineage: format!("{:016x}", grant.lineage),
+            expires_unix_ms: grant.expires,
+            tenant_id: grant.tenant_id.clone(),
+            requests_per_second: grant.requests_per_second,
+            max_vectors: grant.max_vectors,
+            max_vectors_per_collection: grant.max_vectors_per_collection,
+            graphs: (!grant.graphs.is_empty()).then(|| grant.graphs.clone()),
+        }
+    }
+
+    pub(super) fn tenant_id(&self) -> Option<&str> {
+        self.tenant_id.as_deref()
+    }
+
+    pub(super) fn expires_unix_ms(&self) -> u64 {
+        self.expires_unix_ms
+    }
+
+    /// The grant, or `None` when the principal breaks a credential rule.
+    pub(super) fn grant(&self) -> Option<Grant> {
+        let entry = Entry {
+            id: self.id.clone(),
+            name: self.name.clone(),
+            all: self.all,
+            collections: self.collections.clone(),
+            operations: self.operations.clone(),
+            lineage: self.lineage.clone(),
+            // Never compared: only satisfies the shape `validate` checks.
+            secret_sha256: "0".repeat(64),
+            created_unix_ms: 0,
+            expires_unix_ms: self.expires_unix_ms,
+            revoked_unix_ms: None,
+            rotated_from: None,
+            tenant_id: self.tenant_id.clone(),
+            requests_per_second: self.requests_per_second,
+            max_vectors: self.max_vectors,
+            max_vectors_per_collection: self.max_vectors_per_collection,
+            graphs: self.graphs.clone(),
+        };
+        entry.validate()?;
+        entry.grant()
+    }
+}
+
+/// Credentials as the shared control state carries them (feature-aca-ha
+/// ITEM-011): the stored entries verbatim, secret hashes, lineage bindings
+/// and revocation included, so it is as sensitive as `credentials.json`
+/// (SEC-004). It is only ever built from a live store, never from a recovery
+/// inventory, which has no hashes (rekey-only).
+#[derive(Clone, Default, Serialize, Deserialize)]
+#[serde(transparent)]
+pub(super) struct Snapshot(Vec<Entry>);
+
+impl Snapshot {
+    /// The rules `Store::load` applies to `credentials.json`.
+    pub(super) fn valid(&self) -> bool {
+        let mut ids = std::collections::BTreeSet::new();
+        self.0.len() <= CAPACITY
+            && self
+                .0
+                .iter()
+                .all(|e| e.validate().is_some() && ids.insert(e.id.as_str()))
+    }
+
+    pub(super) fn authenticate(&self, token: &str, now: u64) -> Result<Arc<Grant>, ApiError> {
+        verify(&self.0, token, now)
     }
 }
 
@@ -478,6 +609,42 @@ fn unauthorized() -> ApiError {
     )
 }
 
+/// Constant-time verification of a `vlk_` token against `entries`. Unknown
+/// IDs still hash and compare.
+fn verify(entries: &[Entry], token: &str, now: u64) -> Result<Arc<Grant>, ApiError> {
+    let rest = token.strip_prefix(TOKEN_PREFIX).ok_or_else(unauthorized)?;
+    let (id, secret) = rest.split_once('_').ok_or_else(unauthorized)?;
+    if id.len() != 12 || secret.len() != 43 {
+        return Err(unauthorized());
+    }
+    let presented = Sha256::digest(secret.as_bytes());
+    let entry = entries.iter().find(|e| e.id == id);
+    let stored = entry
+        .and_then(|e| {
+            let mut bytes = [0u8; 32];
+            for (i, chunk) in e.secret_sha256.as_bytes().chunks(2).enumerate() {
+                bytes[i] = u8::from_str_radix(std::str::from_utf8(chunk).ok()?, 16).ok()?;
+            }
+            Some(bytes)
+        })
+        .unwrap_or([0xa5; 32]);
+    let matched = bool::from(presented.as_slice().ct_eq(&stored));
+    let Some(entry) = entry.filter(|_| matched) else {
+        return Err(unauthorized());
+    };
+    if entry.revoked_unix_ms.is_some() {
+        return Err(unauthorized());
+    }
+    if now >= entry.expires_unix_ms {
+        return Err(ApiError::new(
+            StatusCode::UNAUTHORIZED,
+            "credential_expired",
+            "credential expired; request a new one",
+        ));
+    }
+    Ok(Arc::new(entry.grant().ok_or_else(unauthorized)?))
+}
+
 impl Store {
     /// Loads (bounded, validated) or starts empty. Invalid content fails
     /// startup rather than silently dropping credentials.
@@ -528,58 +695,14 @@ impl Store {
         Ok(entries.iter().map(|e| e.recovery(now)).collect())
     }
 
-    /// Constant-time verification. Unknown IDs still hash and compare.
+    /// The entries for a control-state snapshot (feature-aca-ha ITEM-011).
+    pub(super) fn snapshot(&self) -> Result<Snapshot, ApiError> {
+        Ok(Snapshot(self.entries.lock().map_err(internal)?.clone()))
+    }
+
+    /// Constant-time verification (see `verify`).
     pub(super) fn authenticate(&self, token: &str, now: u64) -> Result<Arc<Grant>, ApiError> {
-        let rest = token.strip_prefix(TOKEN_PREFIX).ok_or_else(unauthorized)?;
-        let (id, secret) = rest.split_once('_').ok_or_else(unauthorized)?;
-        if id.len() != 12 || secret.len() != 43 {
-            return Err(unauthorized());
-        }
-        let presented = Sha256::digest(secret.as_bytes());
-        let entries = self.entries.lock().map_err(internal)?;
-        let entry = entries.iter().find(|e| e.id == id);
-        let stored = entry
-            .and_then(|e| {
-                let mut bytes = [0u8; 32];
-                for (i, chunk) in e.secret_sha256.as_bytes().chunks(2).enumerate() {
-                    bytes[i] = u8::from_str_radix(std::str::from_utf8(chunk).ok()?, 16).ok()?;
-                }
-                Some(bytes)
-            })
-            .unwrap_or([0xa5; 32]);
-        let matched = bool::from(presented.as_slice().ct_eq(&stored));
-        let Some(entry) = entry.filter(|_| matched) else {
-            return Err(unauthorized());
-        };
-        if entry.revoked_unix_ms.is_some() {
-            return Err(unauthorized());
-        }
-        if now >= entry.expires_unix_ms {
-            return Err(ApiError::new(
-                StatusCode::UNAUTHORIZED,
-                "credential_expired",
-                "credential expired; request a new one",
-            ));
-        }
-        Ok(Arc::new(Grant {
-            id: entry.id.clone(),
-            api_credential: true,
-            name: entry.name.clone(),
-            tenant_id: entry.tenant_id.clone(),
-            requests_per_second: entry.requests_per_second,
-            max_vectors: entry.max_vectors,
-            max_vectors_per_collection: entry.max_vectors_per_collection,
-            all: entry.all,
-            collections: entry
-                .collections
-                .iter()
-                .map(|s| (s.name.clone(), s.id))
-                .collect(),
-            ops: parse_ops(&entry.operations).map_err(|_| unauthorized())?,
-            lineage: u64::from_str_radix(&entry.lineage, 16).map_err(|_| unauthorized())?,
-            expires: entry.expires_unix_ms,
-            graphs: entry.graphs.clone().unwrap_or_default(),
-        }))
+        verify(&self.entries.lock().map_err(internal)?, token, now)
     }
 
     /// Credential states bound to one tenant: `[active, expired, revoked]`.
@@ -1044,6 +1167,38 @@ pub(super) mod tests {
             max_vectors_per_collection: None,
             graphs: None,
         }
+    }
+
+    /// A store holding one read credential per `(id, tenant)`, bound to
+    /// `lineage`, and the plaintext tokens in the same order.
+    pub(crate) fn issued(specs: &[(&str, Option<&str>)], lineage: u64) -> (Store, Vec<String>) {
+        let mut tokens = Vec::new();
+        let entries = specs
+            .iter()
+            .enumerate()
+            .map(|(i, (id, tenant))| {
+                let secret = format!("{i:0>43}");
+                tokens.push(format!("{TOKEN_PREFIX}{id}_{secret}"));
+                Entry {
+                    lineage: format!("{lineage:016x}"),
+                    secret_sha256: sha256_hex(secret.as_bytes()),
+                    tenant_id: tenant.map(str::to_owned),
+                    ..entry(id)
+                }
+            })
+            .collect();
+        let store = Store {
+            directory: PathBuf::new(),
+            entries: Mutex::new(entries),
+        };
+        (store, tokens)
+    }
+
+    /// What the revoke route commits, without its audit and file write.
+    pub(crate) fn revoke(store: &Store, id: &str, at: u64) {
+        let mut entries = store.entries.lock().unwrap();
+        let entry = entries.iter_mut().find(|e| e.id == id).unwrap();
+        entry.revoked_unix_ms = Some(at);
     }
 
     fn event(id: &str) -> Value {

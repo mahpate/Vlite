@@ -1363,6 +1363,10 @@ pub(super) fn resolve(
     path: &str,
     headers: &HeaderMap,
 ) -> Option<Result<SignedIn, ApiError>> {
+    // Gateway-trusted backends accept only principal envelopes (ITEM-010).
+    if service.trust.is_some() {
+        return None;
+    }
     let accounts = service.admin.users.as_ref()?;
     if headers.contains_key(header::AUTHORIZATION) {
         return None;

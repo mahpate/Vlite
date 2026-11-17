@@ -19,7 +19,7 @@ tools = ["json", "dep:csv"]
 import-formats = ["tools", "dep:arrow-array", "dep:arrow-schema", "dep:arrow-ipc", "dep:parquet"]
 json = ["dep:serde", "dep:serde_json"]
 mcp = ["json"]
-server = ["json", "dep:axum", "dep:base64", "dep:tokio", "dep:subtle", "dep:tokio-rustls", "dep:rustls-pemfile", "dep:tokio-stream", "dep:reqwest", "dep:tower", "dep:libc"]
+server = ["json", "dep:axum", "dep:base64", "dep:tokio", "dep:subtle", "dep:tokio-rustls", "dep:rustls-pemfile", "dep:tokio-stream", "dep:reqwest", "dep:tower", "dep:libc", "dep:ring"]
 # Test-only fault points and the relaxed test profile of managed compaction.
 # Never enabled by release or container builds.
 compaction-test-hooks = ["server"]
@@ -69,6 +69,7 @@ chacha20poly1305 = { version = "0.10.1", default-features = false, features = ["
 argon2 = { version = "0.5.3", default-features = false, features = ["alloc"] }
 tempfile = "3"
 subtle = { version = "2.6", optional = true }
+ring = { version = "0.17", optional = true }
 tokio = { version = "1", features = ["macros", "rt-multi-thread", "net", "signal", "sync", "io-util"], optional = true }
 # Managed compaction routes the current server generation (already an axum dependency).
 tower = { version = "0.5", default-features = false, features = ["util"], optional = true }

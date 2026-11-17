@@ -91,6 +91,54 @@ pub(super) fn valid_store(tenants: &[Tenant]) -> bool {
                 && !t.name.chars().any(char::is_control)
         })
 }
+/// Admission check for tenant-bound credentials over a tenant list (the
+/// local store or a control-state snapshot): the tenant must exist, not be
+/// deleted and not be suspended.
+pub(super) fn admit(tenants: &[Tenant], id: &str) -> Result<Tenant, ApiError> {
+    let tenant = tenants
+        .iter()
+        .find(|t| t.id == id && !t.deleted)
+        .cloned()
+        .ok_or_else(unavailable_tenant)?;
+    if tenant.suspended_unix_ms.is_some() {
+        return Err(ApiError::new(
+            StatusCode::FORBIDDEN,
+            "tenant_suspended",
+            "tenant is suspended; ask an administrator to resume it",
+        ));
+    }
+    Ok(tenant)
+}
+#[cfg(test)]
+impl Tenant {
+    pub(super) fn for_test(id: &str, suspended: Option<u64>) -> Self {
+        Self {
+            id: id.to_owned(),
+            name: "test tenant".to_owned(),
+            max_vectors: None,
+            deleted: false,
+            suspended_unix_ms: suspended,
+        }
+    }
+}
+#[cfg(test)]
+impl Store {
+    pub(super) fn for_test(tenants: Vec<Tenant>) -> Self {
+        Self {
+            path: PathBuf::new(),
+            tenants: Mutex::new(tenants),
+        }
+    }
+    /// What the suspend route commits, without its audit and file write.
+    pub(super) fn suspend_for_test(&self, id: &str, at: u64) {
+        let mut tenants = self.tenants.lock().unwrap();
+        tenants
+            .iter_mut()
+            .find(|t| t.id == id)
+            .unwrap()
+            .suspended_unix_ms = Some(at);
+    }
+}
 /// Recovery copy of the tenant store (feature-backup-ha ITEM-003/004).
 pub(super) fn recovery_inventory(store: &Store) -> Result<Vec<Tenant>, ApiError> {
     Ok(store.tenants.lock().map_err(internal)?.clone())
@@ -167,22 +215,12 @@ impl Store {
     /// Admission check for tenant-bound credentials: the tenant must exist,
     /// not be deleted and not be suspended.
     pub fn get(&self, id: &str) -> Result<Tenant, ApiError> {
-        let tenant = self
-            .tenants
-            .lock()
-            .map_err(internal)?
-            .iter()
-            .find(|t| t.id == id && !t.deleted)
-            .cloned()
-            .ok_or_else(unavailable_tenant)?;
-        if tenant.suspended_unix_ms.is_some() {
-            return Err(ApiError::new(
-                StatusCode::FORBIDDEN,
-                "tenant_suspended",
-                "tenant is suspended; ask an administrator to resume it",
-            ));
-        }
-        Ok(tenant)
+        admit(&self.tenants.lock().map_err(internal)?, id)
+    }
+    /// The tenants for a control-state snapshot (feature-aca-ha ITEM-011),
+    /// deleted and suspended ones included so their state propagates.
+    pub(super) fn snapshot(&self) -> Result<Vec<Tenant>, ApiError> {
+        Ok(self.tenants.lock().map_err(internal)?.clone())
     }
     fn commit(&self, next: &[Tenant]) -> Result<(), ApiError> {
         let directory = self.path.parent().expect("tenant directory");
