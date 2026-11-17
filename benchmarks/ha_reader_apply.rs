@@ -287,10 +287,13 @@ fn command_output(program: &str, arguments: &[&str]) -> BoxResult<String> {
 }
 
 fn main() -> BoxResult<()> {
-    require(
-        std::env::args().skip(1).collect::<Vec<_>>() == ["--smoke"],
-        "usage: cargo run --locked --features json --example ha-reader-apply -- --smoke",
-    )?;
+    match strategies::parse_mode(&std::env::args().skip(1).collect::<Vec<_>>())? {
+        strategies::Mode::Smoke => smoke(),
+        strategies::Mode::Measure => strategies::measure(),
+    }
+}
+
+fn smoke() -> BoxResult<()> {
     let directory = tempfile::tempdir()?;
     let mut cases = Vec::new();
     for records in [8, 32] {
@@ -353,6 +356,9 @@ fn main() -> BoxResult<()> {
     directory.close()?;
     Ok(())
 }
+
+#[path = "ha_reader_strategies.rs"]
+mod strategies;
 
 #[cfg(test)]
 #[path = "ha_reader_apply_tests.rs"]
