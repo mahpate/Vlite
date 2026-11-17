@@ -1648,3 +1648,105 @@ fn databases_named_like_cloud_commands_need_a_path_prefix() {
         assert!(directory.path().join(name).is_file());
     }
 }
+
+// EPIC-002 (FR-006): `--serve-mode` / `VLITE_SERVE_MODE`.
+
+#[test]
+fn serve_mode_values_and_reader_incompatible_options_fail_before_opening() {
+    let directory = tempfile::tempdir().unwrap();
+    let path = directory.path().join("modes.vlite");
+    assert!(
+        fails(&path, &["--serve-mode", "primary"])
+            .contains("--serve-mode must be standalone, writer or reader")
+    );
+    let output = Command::new(env!("CARGO_BIN_EXE_vlite-server"))
+        .arg(&path)
+        .args(["--insecure-local", "--create-if-missing", "2"])
+        .env_remove("VLITE_AUTH_TOKEN")
+        .env_remove("VLITE_AUTH_TOKEN_FILE")
+        .env("VLITE_SERVE_MODE", "Reader")
+        .output()
+        .unwrap();
+    assert!(!output.status.success());
+    assert!(
+        String::from_utf8_lossy(&output.stderr)
+            .contains("VLITE_SERVE_MODE must be standalone, writer or reader")
+    );
+    for args in [
+        &["--serve-mode", "reader", "--create-if-missing", "2"][..],
+        &["--serve-mode", "reader", "--group-commit"],
+        &["--serve-mode", "reader", "--durability", "full"],
+        &["--serve-mode", "reader", "--ann-snapshot"],
+    ] {
+        let error = fails(&path, args);
+        assert!(error.contains("--serve-mode reader"), "{args:?}: {error}");
+    }
+    let output = Command::new(env!("CARGO_BIN_EXE_vlite-server"))
+        .arg(&path)
+        .args(["--insecure-local", "--serve-mode", "reader"])
+        .env_remove("VLITE_AUTH_TOKEN")
+        .env_remove("VLITE_AUTH_TOKEN_FILE")
+        .env("VLITE_ADMIN_DIR", directory.path().join("admin"))
+        .output()
+        .unwrap();
+    assert!(!output.status.success());
+    assert!(String::from_utf8_lossy(&output.stderr).contains("VLITE_ADMIN_DIR"));
+    assert!(!path.exists());
+    assert!(!directory.path().join("admin").exists());
+}
+
+#[test]
+fn reader_serves_an_existing_file_read_only_and_never_writes_it() {
+    let directory = tempfile::tempdir().unwrap();
+    let path = directory.path().join("replica.vlite");
+    let server = Server::start(&path);
+    assert_eq!(
+        server
+            .request("PUT", "/v1/vectors/1", json!({"vector":[1,2]}))
+            .0,
+        204
+    );
+    drop(server);
+    let bytes = std::fs::read(&path).unwrap();
+    let mut child = Command::new(env!("CARGO_BIN_EXE_vlite-server"))
+        .arg(&path)
+        .args(["--bind", "127.0.0.1:0"])
+        .env_remove("VLITE_AUTH_TOKEN_FILE")
+        .env_remove("VLITE_PROVIDERS_FILE")
+        .env_remove("VLITE_ADMIN_DIR")
+        .env("VLITE_AUTH_TOKEN", TOKEN)
+        .env("VLITE_SERVE_MODE", "writer")
+        // The flag wins over the environment.
+        .args(["--serve-mode", "reader"])
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null())
+        .spawn()
+        .unwrap();
+    let stdout = child.stdout.take().unwrap();
+    let (sender, receiver) = mpsc::channel();
+    std::thread::spawn(move || {
+        let mut line = String::new();
+        BufReader::new(stdout).read_line(&mut line).unwrap();
+        let _ = sender.send(line);
+    });
+    let mut server = Server {
+        child,
+        address: String::new(),
+    };
+    let line = receiver.recv_timeout(Duration::from_secs(120)).unwrap();
+    server.address = line
+        .trim()
+        .strip_prefix("LISTENING http://")
+        .expect("startup address")
+        .to_owned();
+    assert_eq!(server.request("GET", "/ready", Value::Null).0, 200);
+    assert_eq!(server.request("GET", "/v1/vectors/1", Value::Null).0, 200);
+    let (status, error) = server.request("PUT", "/v1/vectors/2", json!({"vector":[3,4]}));
+    assert_eq!(status, 403);
+    assert_eq!(error["error"]["code"], "reader_mode");
+    let (status, report) = server.request("GET", "/v1/admin/serve-status", Value::Null);
+    assert_eq!(status, 200);
+    assert_eq!(report["mode"], "reader");
+    drop(server);
+    assert_eq!(std::fs::read(&path).unwrap(), bytes);
+}

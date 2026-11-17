@@ -11,7 +11,7 @@ tags: [design, high-availability, azure-container-apps, gateway, replication, fe
 
 **Status: STAGED IMPLEMENTATION AUTHORIZED - NOT DEPLOYED.** On 2026-11-16 the user said "go ahead with next steps for HA". Start with the unblocked preparatory work below; this does not pass any acceptance gate or approve Azure provisioning, production access, a release, or a benchmark campaign. Authorization behavior stays unchanged: the gateway must enforce the existing route-to-permission map, every backend must enforce it again, and no new role or permission is introduced (see SEC-001).
 
-**Current slice.** EPIC-001 ITEM-001's exported-segment first cut is implemented and verified on small synthetic local fixtures only; see `benchmarks/ha-reader-apply.md`. EPIC-PITR-001 remains in flight in its existing isolated session; this slice does not duplicate or change its scope. GATE-001 remains open until archival delivery and its other prerequisites are satisfied. Archive-backed measurements, a reader strategy/capacity qualification, runtime serving modes and failover are not delivered by this preparatory slice. Other owner decisions remain open unless explicitly recorded as resolved.
+**Current slice.** EPIC-001 ITEM-001's exported-segment first cut is implemented and verified on small synthetic local fixtures only; see `benchmarks/ha-reader-apply.md`. GATE-001's criteria were verified on merged tree `75df5738` and the owner's go-ahead was recorded as a narrow code-implementation go (section 14, EPIC-002). EPIC-002 backend serving modes (`standalone`/`writer`/`reader`, reader refusal, drain readiness, `GET /v1/admin/serve-status`) are delivered in code and tests only. Archive-backed measurements, a reader strategy/capacity qualification, reader catch-up, epochs/fencing and failover are not delivered. No production deployment, production HA enablement, Azure provisioning or separate test instance was performed or authorized by this slice.
 
 **Relationship to the older backup/HA PRD.** `docs/projects/feature-backup-ha/feature-backup-ha.prd.md` (the "old PRD") holds a broad backup and HA design. Its backup half is implemented through the 0.7.8 release candidate (old PRD section 14.4 and 14.5); publication and deployment are separate from this work. Its HA epics were deliberately deferred. **Its 2026-11-13 approval text covered only the backup-only milestone and is NOT authority to implement HA** (old PRD Introduction; ITEM-002, authority/fencing, standby/replication were explicitly not approved). The new authorization above is for staged HA work, not a waiver of those safety gates. This PRD reuses and cites old-PRD sections instead of duplicating them: topology rejection of Azure Files (section 3.2, ALT-001, RISK-001), replication protocol (3.4), authority and fencing (3.5), access-policy generation (3.6), RD-009 (zone HA only; never geo-fail the authority witness), AZ-001/AZ-003 (section 14.2). Where this PRD departs from the old PRD, section 3.2 says so.
 
@@ -366,14 +366,14 @@ Opt-in only; gateway is a stateless scale-out edge over shared authoritative con
 
 **Open interface questions for EPIC-PITR-001 (HA needs these; it may not yet provide them):**
 
-| ID | Question |
-|---|---|
-| Q-1 | Writer epoch/fencing metadata: can archived segment and head objects carry `E` and a writer id, and can the head advance only by `If-Match` CAS bound to `E`? |
-| Q-2 | A reader consumption API: how does a reader list, fetch and verify contiguous segments after a baseline, and detect a gap/floor/divergence requiring a new baseline? |
-| Q-3 | Retention pins for reader consumers: can a reader pin its applied position so the baseline and segments it still needs are not removed? |
-| Q-4 | An actual-progress feed: last durable archived position/time, observed source position and failures, consumable by the status route and the failover loss report. |
-| Q-5 | Memory-bound tenants: the public export route is refused with bindings (SRC-012); confirm the in-process archiver path and that reserved frames are never exposed to readers or public endpoints beyond what the backend guards allow. |
-| Q-6 | Baseline refresh cadence and reader replacement from a new baseline (EPIC-001 option c). |
+| ID | Question | Owner disposition |
+|---|---|---|
+| Q-1 | Writer epoch/fencing metadata: can archived segment and head objects carry `E` and a writer id, and can the head advance only by `If-Match` CAS bound to `E`? | Accepted 2026-11-16: require writer ID and epoch on archive metadata, with epoch-bound `If-Match` CAS for authoritative head advancement. |
+| Q-2 | A reader consumption API: how does a reader list, fetch and verify contiguous segments after a baseline, and detect a gap/floor/divergence requiring a new baseline? | Accepted 2026-11-16: require contiguous verification and fail closed on gaps, compaction-floor changes, or divergence; require a new baseline to recover. |
+| Q-3 | Retention pins for reader consumers: can a reader pin its applied position so the baseline and segments it still needs are not removed? | Accepted 2026-11-16: require retention pins to protect each reader's baseline and needed segments until its position advances or it is safely replaced. |
+| Q-4 | An actual-progress feed: last durable archived position/time, observed source position and failures, consumable by the status route and the failover loss report. | Accepted 2026-11-16: require actual durable/source positions and explicit failures for status and failover-loss reporting; never infer progress from the configured interval. |
+| Q-5 | Memory-bound tenants: the public export route is refused with bindings (SRC-012); confirm the in-process archiver path and that reserved frames are never exposed to readers or public endpoints beyond what the backend guards allow. | Accepted 2026-11-16: use the protected in-process archiver for memory-bound tenants; never expose reserved frames to readers or public endpoints. |
+| Q-6 | Baseline refresh cadence and reader replacement from a new baseline (EPIC-001 option c). | Accepted 2026-11-16: allow replacement from a new verified baseline when required; determine refresh cadence from measurements. |
 
 # 7. Quality & Testing
 
@@ -494,7 +494,7 @@ Opt-in only; gateway is a stateless scale-out edge over shared authoritative con
 |---|---|---|---|
 | OD-001 | Treat this as the explicit HA requirement that reorders the scale-out.md backlog (async replication only; Gap 11 forks not a prerequisite)? | Resolved 2026-11-16: the user's go-ahead starts staged HA as the next scale-out workstream, building on the existing PITR work. | No longer blocks prioritization; technical gates remain |
 | OD-002 | Acceptable residual zombie window: verify epoch before every batch ack (latency cost) versus periodic recheck plus infrastructure fence plus gateway epoch stamp? | Start with per-batch verification and measure (MEAS-006); decide before GATE-005. If unprovable, no automation. | EPIC-006, EPIC-010 |
-| OD-003 | Confirm that failover with a disclosed loss report (operator-acknowledged) supersedes the old PRD v1 prohibition on nonzero-loss promotion. | Confirm, manual only. | EPIC-006 |
+| OD-003 | Confirm that failover with a disclosed loss report (operator-acknowledged) supersedes the old PRD v1 prohibition on nonzero-loss promotion. | Resolved 2026-11-16: accepted manual, operator-acknowledged failover with a disclosed loss report and possible loss of the latest writes. Automated failover and production rollout are not authorized. | EPIC-006 |
 | OD-004 | Defer dashboard users, sessions and interactive login through the gateway; later stateless signed session tokens? | Defer; later signed tokens bound to `Account.version` and `A`. | EPIC-004 scope |
 | OD-005 | S_ctl and the poll interval. | Decide from MEAS-005; no default until measured. | EPIC-004 |
 | OD-006 | Gateway min (proposal 2) and max replicas; ACA environment sizing. | Min 2 warm; max from MEAS-004 and quota check. | EPIC-004, EPIC-008 |
@@ -559,7 +559,7 @@ Protected and unchanged by this task: `deploy/azure-container-apps/README.md`, `
 
 # 14. Implementation Plan
 
-Estimates are planning estimates, not measurements. Statuses below track delivery, not approval. Only EPIC-001 ITEM-001's preparatory first cut is complete; the epic is not complete and other stages retain their dependencies and gates in section 9.
+Estimates are planning estimates, not measurements. Statuses below track delivery, not approval. Only EPIC-001 ITEM-001's preparatory first cut and EPIC-002 (code and tests only) are complete; EPIC-001 is not complete and other stages retain their dependencies and gates in section 9.
 
 ### EPIC-000: Phase 0 archival substrate (EPIC-PITR-001, external, in flight)
 **Requirements**: DEP-001, CON-004. **Dependencies**: none. **Deliverable**: baseline-first bounded archival with honest progress and answers to Q-1..Q-6. HA does not re-plan it.
@@ -573,21 +573,33 @@ Estimates are planning estimates, not measurements. Statuses below track deliver
 | ITEM-002 | Run on a non-production fixture only after owner approval; record results and the strategy decision. | Not Started | `docs/projects/feature-aca-ha/` |
 | ITEM-003 | Define the reader capacity ceiling and enrollment refusal. | Not Started | `src/server/cloud_backup.rs` |
 
+**ITEM-002 authorization (2026-11-16).** The owner approved reader measurements on existing local/non-production fixtures only. No Azure provisioning, production access, deployment, or failover is authorized. The measurement run remains Not Started.
+
+**Isolated HA test deployment authorization (2026-11-16).** The owner authorized deploying a separate VLite instance for HA testing if required, while keeping the current production instance unchanged. This does not authorize replacing, updating, or enabling HA on production. No test instance has been provisioned.
+
 **ITEM-001 implementation note (2026-11-16).** Based on `b23c57fb5da181b804504fca3def3e5e675c9947` with no base divergence. The frozen draft was copied byte-for-byte before updating this worktree's copy (original SHA-256 `DC614AECD4D1BC955149F4D73BFB24C3B6550B3DBB85760461A30450EBB606C7`). No engine, server, public API, deployment or archive-publication behavior changed. The `ha-reader-apply` Cargo example accepts only `--smoke`; it creates and cleans up two deterministic synthetic fixtures (8/32 records, 8 dimensions, three update/delete/insert rounds), validates data/revisions/sequence/lineage, file shipping, reopen/resume, rejected continuity/envelope faults, empty tails and final byte-identical verified logs. Tests were written and failed against stubs before implementation.
 
 The local Windows x86_64 debug smoke captured actual raw export/save/load/apply/reopen/detached-index-build and oldest-ack-to-visible intervals, plus baseline/segment/follower file lengths. These are uncontrolled-cache shared-host diagnostics, not representative throughput or an ACA SLO. Baselines were 1,216/4,768 bytes; each three-commit delta had 348 frame bytes and a 464-byte serialized file; final follower lengths were 2,260/5,812 bytes and retained baseline-plus-delta staging 2,608/6,160 bytes. Inclusive apply contains fsync and replay, which are not separately instrumented. Index build uses a separately reopened read-only handle, not a mutable or continuously serving follower. The protocol defines all overlapping and inclusive boundaries.
 
-**Remaining measurement gates.** Blob upload and durable-head latency, ACA staleness/capacity, individual apply phases and all three runtime reader strategies are explicitly UNMEASURED. Archive consumer/progress/baseline interfaces and Q-1..Q-6 remain dependencies; file lengths are not peak allocation, compaction headroom or a qualified enrollment ceiling. GATE-001/GATE-002 remain open. No strategy is chosen; ITEM-002/003 remain Not Started. Reproduce bounded checks with `cargo test --locked --features json --example ha-reader-apply --test replica` and capture observations with `cargo run --quiet --locked --features json --example ha-reader-apply -- --smoke`.
+**Remaining measurement gates.** Blob upload and durable-head latency, ACA staleness/capacity, individual apply phases and all three runtime reader strategies are explicitly UNMEASURED. Archive consumer/progress/baseline interfaces and Q-1..Q-6 remain dependencies; file lengths are not peak allocation, compaction headroom or a qualified enrollment ceiling. GATE-002 remains open (GATE-001's code-implementation go is recorded under EPIC-002). No strategy is chosen; ITEM-002/003 remain Not Started. Reproduce bounded checks with `cargo test --locked --features json --example ha-reader-apply --test replica` and capture observations with `cargo run --quiet --locked --features json --example ha-reader-apply -- --smoke`.
 
 ### EPIC-002: Backend serving modes - 8 person-days
 **Requirements**: FR-006, NFR-004, SEC-003. **Dependencies**: none beyond existing code; may start in parallel with EPIC-001. **Deliverable**: `standalone`/`writer`/`reader` modes; `reader` refuses mutations; mode fixed at startup; status route; SIGTERM-driven readiness failure. Standalone is byte-for-byte unchanged by default.
 
 | Task | Description | Status | Relevant Files |
 |---|---|---|---|
-| ITEM-004 | Add mode flag/env and startup validation; default `standalone`. | Not Started | `src/bin/vlite-server.rs` |
-| ITEM-005 | Route-layer refusal of mutations and writer-only admin routes in `reader`. | Not Started | `src/server.rs`, `src/server/serve_mode.rs` |
-| ITEM-006 | Status route with mode, lineage, `E`, positions, ages; independent of `/metrics`. | Not Started | `src/server/serve_mode.rs`, `site/api.html`, `src/openapi.json` |
-| ITEM-007 | Tests: refusal matrix, default-unchanged, route conventions (TEST-001, TEST-016). | Not Started | `tests/` |
+| ITEM-004 | Add mode flag/env and startup validation; default `standalone`. | Done | `src/bin/vlite-server.rs`, `src/server/serve_mode.rs` |
+| ITEM-005 | Route-layer refusal of mutations and writer-only admin routes in `reader`. | Done | `src/server.rs`, `src/server/serve_mode.rs` |
+| ITEM-006 | Status route with mode, lineage, `E`, positions, ages; independent of `/metrics`. | Done (`epoch` reported as `null` until EPIC-006) | `src/server/serve_mode.rs`, `src/server/backup_policy.rs`, `site/api.html`, `src/openapi.json`, `tests/admin_route_coverage.py` |
+| ITEM-007 | Tests: refusal matrix, default-unchanged, route conventions (TEST-001, TEST-016). | Done | `tests/server_serve_mode.rs`, `tests/server_cli.rs`, `tests/server_memory_guards.rs`, `Cargo.toml` |
+
+**GATE-001 code-implementation decision (2026-11-16).** Verified on merged tree `75df5738` (after merging `origin/main`): EPIC-PITR-001 baseline-first archival with progress reporting is present and `cargo test --locked --features server --lib server::backup_policy` passed 43/43; Q-1..Q-6 are resolved; OD-001 and OD-003 are confirmed. On the owner's explicit go-ahead this is recorded as GO for EPIC-002 code implementation only. It is NOT a go for production deployment, production HA enablement, Azure provisioning or automated failover. No separate HA test instance was needed or provisioned; production is unchanged.
+
+**EPIC-002 implementation note (2026-11-16).** Tests were written first and observed failing before implementation. `--serve-mode` (wins over `VLITE_SERVE_MODE`) accepts `standalone` (default; no behavior change), `writer` (requires a writable database) or `reader`. A reader opens the existing file with the shared read-only lock and refuses at startup `--create`/format, durability/flush interval, group commit, ANN snapshot, gRPC and `VLITE_ADMIN_DIR`. At the route layer, after rate-limit and authentication, a reader refuses every non-read request with 403 `reader_mode`; public health/login/dashboard paths are unaffected and admin-only reads stay admin-only. On SIGTERM/Ctrl-C, writer/reader mark draining before graceful shutdown so `/ready` returns 503 `draining`; standalone ignores drain. `GET /v1/admin/serve-status` (admin, backend-only, no `/metrics` dependency) reports mode, draining, read_only, lineage, format_version, sequence, `epoch: null`, archive progress (baseline/checkpoint counts, failures, last checkpoint sequence/time/age; no error text) and uptime; the sequence values are withheld while memory bindings refuse `/metrics`.
+
+**EPIC-002 caveats.** Axum graceful shutdown closes the listener immediately, so `draining` is observable only to in-flight/keep-alive connections; there is no pre-stop delay. A reader serves the snapshot it opened and does not catch up (EPIC-001 strategy and later epics). Drain is covered by library tests, not a process-signal test. There is no dashboard panel for serve-status.
+
+**EPIC-002 validation.** `cargo test --locked --features server --test server_serve_mode` 5/5; `server_cli` serve-mode tests 3/3; `server_memory_guards` 20/20; `server_ops` 17/17; `rest`, `server_guard_differential`, `server_memory_reserved_as_missing` passed; `--lib server::backup_policy` 43/43; `tests/admin_route_coverage.py`, `tests/api_route_inventory.py`, API reference check passed; `cargo fmt --check` and `cargo clippy --locked --features server --all-targets -- -D warnings` clean.
 
 ### EPIC-003: Shared control state and principal envelope - 8 person-days
 **Requirements**: FR-003, FR-012, SEC-002/004/005, OD-009. **Dependencies**: none (uses `cloud_backup.rs` substrate). **Deliverable**: versioned control-state objects (directory, policy snapshot `A`) with CAS mutation and poll; envelope sign/verify with key rotation overlap; backend verification mode. Ships a library and tests; no gateway yet.
@@ -697,5 +709,10 @@ The local Windows x86_64 debug smoke captured actual raw export/save/load/apply/
 
 | Date | Change |
 |---|---|
+| 2026-11-16 | GATE-001 criteria verified on merged tree `75df5738`; owner go-ahead recorded as code-implementation go only. EPIC-002 serving modes, reader refusal, drain readiness and serve-status delivered with tests. No deployment, HA enablement or Azure provisioning. |
 | 2026-11-16 | EPIC-001 ITEM-001 exported-segment preparatory harness/protocol and focused tests delivered; small local correctness smoke only. Whole epic, ITEM-002/003, archive/ACA qualification and gates remain open. |
 | 2026-11-16 | Initial design proposal for an ACA gateway plus per-tenant writer/reader topology on Azure Blob log shipping, including the stateless horizontally scalable gateway clarification (3.4), fencing options, staged epics and gates. Planning only. |
+| 2026-11-16 | Owner confirmed OD-003: manual failover may proceed with operator acknowledgment and a disclosed possible loss of the latest writes. Automated failover and production rollout remain unauthorized. |
+| 2026-11-16 | Owner authorized ITEM-002 reader measurements on existing local/non-production fixtures only; no Azure provisioning, production access, deployment, or failover. |
+| 2026-11-16 | Owner resolved Q-1..Q-6: require epoch-bound archive fencing, fail-closed reader consumption, retention pins, actual progress, protected memory archival, and measured-cadence replacement from verified baselines. |
+| 2026-11-16 | Owner authorized a separate VLite instance for HA testing if required; the current production instance must remain unchanged. No test instance has been provisioned. |

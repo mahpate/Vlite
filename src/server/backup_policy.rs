@@ -977,6 +977,12 @@ impl Runtime {
         }))
     }
 
+    /// Archive progress as last recorded in memory (EPIC-002 serve status).
+    /// Unlike `view` it never rereads `state.json`.
+    pub(super) fn archive_progress(&self) -> Result<Option<ArchiveStatus>, ApiError> {
+        Ok(lock(&self.state)?.status.archive.clone())
+    }
+
     /// Applies `change` and persists the status while holding the state lock,
     /// so status writes never reorder. A status that would exceed the read
     /// limit is refused and rolled back before the durable file is replaced:

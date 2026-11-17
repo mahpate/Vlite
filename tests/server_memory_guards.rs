@@ -758,6 +758,20 @@ async fn metrics_with_memory_opt_in_serves_totals_without_reserved_names() {
     }
 }
 
+// EPIC-002: serve-status withholds the change-feed position while memory
+// bindings make `/metrics` refuse; it moves with memory writes.
+#[tokio::test]
+async fn serve_status_withholds_the_sequence_while_memory_metrics_are_refused() {
+    let directory = tempfile::tempdir().unwrap();
+    let app = start(&directory, Some(BINDINGS), false).unwrap();
+    let (status, report) = get(&app, "/v1/admin/serve-status").await;
+    assert_eq!(status, 200, "{report}");
+    assert_eq!(report["mode"], "standalone");
+    assert!(report["sequence"].is_null(), "{report}");
+    let text = report.to_string();
+    assert!(!text.contains("notes_ev") && !text.contains("notes_graph"));
+}
+
 #[tokio::test]
 async fn reserved_graph_and_collection_are_denied_and_lists_filter_them() {
     let directory = tempfile::tempdir().unwrap();

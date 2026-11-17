@@ -103,7 +103,9 @@ INVENTORY = {
 
 # Admin routes deliberately without a dashboard control. Each needs a reason, and
 # the dashboard must not half-implement one.
-BACKEND_ONLY = {}
+BACKEND_ONLY = {
+    ("GET", "/v1/admin/serve-status"): "EPIC-002 HA role/drain/progress probe for operators and orchestration; the dashboard already shows health and metrics, and an HA panel is out of EPIC-002 scope.",
+}
 
 # Graph routes (src/server/graph.rs).
 # graph.js builds its own controls inside <section id="graph"> (the Graph workspace), so the control id is

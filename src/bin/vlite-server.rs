@@ -12,12 +12,12 @@ use vlite::{
     AnnSnapshotLoad, Database, Durability, FormatVersion,
     server::{
         BearerToken, CloudRestore, GroupCommitConfig, Managed, ManagedHandle, RecoveryError,
-        RestoreMode, ServerOptions, Service, configured_admin_router, read_token_file,
+        RestoreMode, ServeMode, ServerOptions, Service, configured_admin_router, read_token_file,
         selected_database,
     },
 };
 
-const USAGE: &str = "usage: vlite-server <database-path> [--providers-file <path> | VLITE_PROVIDERS_FILE] [--memory-bindings-file <path> | VLITE_MEMORY_BINDINGS_FILE] [--create-if-missing <dimensions> [--create-format 3|4|5]] (default 5: graph-enabled; 3 and 4 create plain vector files) [--bind <ip:port>] [--tls-cert <pem> --tls-key <pem>] [--otlp-endpoint <url>] [--grpc-bind <ip:port> [--grpc-tls-cert <pem> --grpc-tls-key <pem> [--grpc-tls-client-ca <pem>]]] [--allow-remote] [--ann-snapshot] [--lock-held-reads] [--group-commit [--group-commit-requests <1..16>] [--group-commit-bytes <1024..268435456>] [--group-commit-delay-ms <0..100>]] [--durability periodic|full|none] (default periodic) [--flush-interval-ms <1..60000>] (periodic only, default 60000; none keeps the database in memory only, needs --create-if-missing and loses all data when the server stops) [--encryption-key-file <path> | VLITE_ENCRYPTION_KEY | VLITE_ENCRYPTION_KEY_HEX] [--token-file <path> | --insecure-local]; admin: VLITE_AUTH_TOKEN or VLITE_AUTH_TOKEN_FILE; optional read-only: VLITE_READ_ONLY_TOKEN or VLITE_READ_ONLY_TOKEN_FILE; backups/credentials/persistent audit: VLITE_ADMIN_DIR; off-by-default schedules: VLITE_AUTO_MAINTENANCE_INTERVAL_SECS, VLITE_BACKUP_INTERVAL_SECS, VLITE_BACKUP_RETENTION_ENABLED=1, VLITE_BACKUP_RETAIN_LAST, VLITE_BACKUP_RETAIN_DAYS, VLITE_BACKUP_DRILL_EVERY, VLITE_BACKUP_DRILL_MAX_BYTES; VLITE_SLOW_QUERY_MS; VLITE_METRICS_WITH_MEMORY=1 (serve /metrics and the metrics summary while agent memory is configured; their totals then include memory data); dashboard sign-in (needs VLITE_ADMIN_DIR and an admin token): VLITE_TRUSTED_PROXY=1 behind a proxy that sets X-Forwarded-Proto/For, VLITE_SESSION_IDLE_MINUTES (default 30), VLITE_SESSION_MAX_HOURS (default 8), optional first super admin: VLITE_ADMIN_USERNAME with VLITE_ADMIN_PASSWORD_FILE; [--log-buffer <n>] (default 2000, maximum 100000); opt-in Azure Blob cloud backup policy: PUT /v1/admin/cloud-backup (emulator shared key: VLITE_CLOUD_BACKUP_SHARED_KEY_FILE); offline isolated cloud restore: vlite-server cloud-sets | cloud-restore (run either without arguments for its usage)";
+const USAGE: &str = "usage: vlite-server <database-path> [--providers-file <path> | VLITE_PROVIDERS_FILE] [--memory-bindings-file <path> | VLITE_MEMORY_BINDINGS_FILE] [--create-if-missing <dimensions> [--create-format 3|4|5]] (default 5: graph-enabled; 3 and 4 create plain vector files) [--bind <ip:port>] [--tls-cert <pem> --tls-key <pem>] [--otlp-endpoint <url>] [--grpc-bind <ip:port> [--grpc-tls-cert <pem> --grpc-tls-key <pem> [--grpc-tls-client-ca <pem>]]] [--allow-remote] [--ann-snapshot] [--lock-held-reads] [--group-commit [--group-commit-requests <1..16>] [--group-commit-bytes <1024..268435456>] [--group-commit-delay-ms <0..100>]] [--durability periodic|full|none] (default periodic) [--flush-interval-ms <1..60000>] (periodic only, default 60000; none keeps the database in memory only, needs --create-if-missing and loses all data when the server stops) [--encryption-key-file <path> | VLITE_ENCRYPTION_KEY | VLITE_ENCRYPTION_KEY_HEX] [--token-file <path> | --insecure-local]; admin: VLITE_AUTH_TOKEN or VLITE_AUTH_TOKEN_FILE; optional read-only: VLITE_READ_ONLY_TOKEN or VLITE_READ_ONLY_TOKEN_FILE; backups/credentials/persistent audit: VLITE_ADMIN_DIR; off-by-default schedules: VLITE_AUTO_MAINTENANCE_INTERVAL_SECS, VLITE_BACKUP_INTERVAL_SECS, VLITE_BACKUP_RETENTION_ENABLED=1, VLITE_BACKUP_RETAIN_LAST, VLITE_BACKUP_RETAIN_DAYS, VLITE_BACKUP_DRILL_EVERY, VLITE_BACKUP_DRILL_MAX_BYTES; VLITE_SLOW_QUERY_MS; VLITE_METRICS_WITH_MEMORY=1 (serve /metrics and the metrics summary while agent memory is configured; their totals then include memory data); dashboard sign-in (needs VLITE_ADMIN_DIR and an admin token): VLITE_TRUSTED_PROXY=1 behind a proxy that sets X-Forwarded-Proto/For, VLITE_SESSION_IDLE_MINUTES (default 30), VLITE_SESSION_MAX_HOURS (default 8), optional first super admin: VLITE_ADMIN_USERNAME with VLITE_ADMIN_PASSWORD_FILE; [--log-buffer <n>] (default 2000, maximum 100000); [--serve-mode standalone|writer|reader | VLITE_SERVE_MODE] (default standalone; reader serves an existing file read-only and refuses writes, creation, durability, group commit, ANN snapshots, gRPC and VLITE_ADMIN_DIR); opt-in Azure Blob cloud backup policy: PUT /v1/admin/cloud-backup (emulator shared key: VLITE_CLOUD_BACKUP_SHARED_KEY_FILE); offline isolated cloud restore: vlite-server cloud-sets | cloud-restore (run either without arguments for its usage)";
 
 struct Config {
     providers: vlite::server::providers::ProviderRegistry,
@@ -50,6 +50,8 @@ struct Config {
     log_buffer_capacity: usize,
     schedule: Schedule,
     accounts: AccountSettings,
+    /// EPIC-002: `--serve-mode` / `VLITE_SERVE_MODE`, default standalone.
+    serve_mode: ServeMode,
 }
 
 /// Dashboard sign-in settings from the environment.
@@ -206,6 +208,7 @@ fn config() -> Result<Config, Box<dyn Error>> {
     let mut lock_held_reads = false;
     let mut mode: Option<&'static str> = None;
     let mut flush_interval_ms: Option<u64> = None;
+    let mut serve_mode: Option<ServeMode> = None;
     while let Some(arg) = args.next() {
         match arg.to_str() {
             Some("--providers-file") if !seen_providers_file => {
@@ -247,6 +250,16 @@ fn config() -> Result<Config, Box<dyn Error>> {
             }
             Some("--flush-interval-ms") if flush_interval_ms.is_none() => {
                 flush_interval_ms = Some(args.next().ok_or(USAGE)?.to_str().ok_or(USAGE)?.parse()?);
+            }
+            Some("--serve-mode") if serve_mode.is_none() => {
+                serve_mode = Some(
+                    args.next()
+                        .ok_or(USAGE)?
+                        .to_str()
+                        .unwrap_or_default()
+                        .parse()
+                        .map_err(|_| "--serve-mode must be standalone, writer or reader")?,
+                );
             }
             Some("--otlp-endpoint") => {
                 otlp_endpoint = Some(args.next().ok_or(USAGE)?.to_str().ok_or(USAGE)?.to_owned());
@@ -312,6 +325,41 @@ fn config() -> Result<Config, Box<dyn Error>> {
         return Err(
             "--otlp-endpoint / OTEL_EXPORTER_OTLP_ENDPOINT requires the otel feature".into(),
         );
+    }
+    let serve_mode = match serve_mode {
+        Some(mode) => mode,
+        None => match std::env::var_os("VLITE_SERVE_MODE") {
+            None => ServeMode::Standalone,
+            Some(value) => value
+                .to_str()
+                .unwrap_or_default()
+                .parse()
+                .map_err(|_| "VLITE_SERVE_MODE must be standalone, writer or reader")?,
+        },
+    };
+    if serve_mode == ServeMode::Reader {
+        // A reader opens an existing file read-only; nothing it would write
+        // or schedule is accepted.
+        for (refused, option) in [
+            (
+                dimensions.is_some() || format.is_some(),
+                "--create-if-missing/--create-format",
+            ),
+            (
+                mode.is_some() || flush_interval_ms.is_some(),
+                "--durability/--flush-interval-ms",
+            ),
+            (group_commit.is_some(), "--group-commit"),
+            (ann_snapshot, "--ann-snapshot"),
+            (grpc_bind.is_some(), "--grpc-bind"),
+        ] {
+            if refused {
+                return Err(format!("--serve-mode reader cannot be used with {option}: a reader never writes its database").into());
+            }
+        }
+        if std::env::var_os("VLITE_ADMIN_DIR").is_some() {
+            return Err("--serve-mode reader cannot be used with VLITE_ADMIN_DIR: backups, credentials, accounts and schedules belong to the writer".into());
+        }
     }
     let durability = match (mode.unwrap_or("periodic"), flush_interval_ms) {
         ("periodic", Some(interval)) => Durability::periodic_ms(interval)?,
@@ -512,6 +560,7 @@ fn config() -> Result<Config, Box<dyn Error>> {
         log_buffer_capacity,
         schedule: schedule()?,
         accounts: account_settings()?,
+        serve_mode,
     };
     // Validate every option before creating or opening a database.
     options(&config, None).validate()?;
@@ -540,6 +589,14 @@ fn open(config: &Config) -> vlite::Result<(Database, PathBuf)> {
         .transpose()?
         .flatten();
     let path = selected.as_deref().unwrap_or(&config.path);
+    if config.serve_mode == ServeMode::Reader {
+        // Validated: no admin directory, so `path` is the configured file.
+        let db = config.encryption_key.as_ref().map_or_else(
+            || Database::open_read_only(path),
+            |key| Database::open_read_only_encrypted(path, key),
+        )?;
+        return Ok((db, path.to_path_buf()));
+    }
     let db = match config.encryption_key.as_ref().map_or_else(
         || Database::open(path),
         |key| Database::open_encrypted(path, key),
@@ -779,6 +836,10 @@ async fn run() -> Result<(), Box<dyn Error>> {
         None => service,
     };
     let service = service.with_snapshot_reads(!config.lock_held_reads)?;
+    let service = match config.serve_mode {
+        ServeMode::Standalone => service,
+        mode => service.with_serve_mode(mode)?,
+    };
     if let Some(tls) = &config.rest_tls {
         service.register_tls(tls.clone())?;
     }
@@ -834,8 +895,13 @@ async fn serve(
     let (stop_tx, stop_rx) = tokio::sync::watch::channel(false);
     let signal = tokio::spawn({
         let stop_tx = stop_tx.clone();
+        let draining = service.clone();
         async move {
             let result = signals.recv().await;
+            // Writer/reader: `/ready` answers 503 `draining` from here on.
+            if let Some(service) = &draining {
+                service.begin_drain();
+            }
             let _ = stop_tx.send(true);
             result
         }

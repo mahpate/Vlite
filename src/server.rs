@@ -60,6 +60,7 @@ mod published_rest;
 mod record_put;
 mod recovery_bundle;
 mod reserved;
+mod serve_mode;
 #[cfg(feature = "otel")]
 pub mod telemetry;
 mod tenants;
@@ -69,6 +70,7 @@ mod webhooks;
 pub use admin::{ServerOptions, configured_admin_router, read_token_file, selected_database};
 pub use cloud_recovery::{CloudRestore, RecoveryError, RestoreMode, cloud_restore, cloud_sets};
 pub use compaction::{Managed, ManagedHandle};
+pub use serve_mode::ServeMode;
 
 /// Emit a legacy stderr line and also capture it in the bounded server log buffer.
 pub fn log_stderr(level: &'static str, target: &'static str, message: impl Into<String>) {
@@ -231,6 +233,8 @@ pub struct Service {
     /// Operator opt-in: serve `/metrics` and the metrics summary while memory
     /// bindings exist. Their database-wide totals then include memory data.
     metrics_with_memory: bool,
+    /// EPIC-002: serve mode and drain flag, shared across generations.
+    serve: Arc<serve_mode::State>,
 }
 
 impl Service {
@@ -326,6 +330,7 @@ impl Service {
             providers: Arc::default(),
             memory_bindings: Arc::new(reserved::Served::default()),
             metrics_with_memory: false,
+            serve: Arc::default(),
         })
     }
 
@@ -561,6 +566,7 @@ impl Service {
         next.rate_limits = self.rate_limits.clone();
         next.started = self.started;
         next.metrics_with_memory = self.metrics_with_memory;
+        next.serve = self.serve.clone();
         if let Some(config) = self.group_commit_config {
             next = next.with_group_commit(config)?;
         }
@@ -874,6 +880,7 @@ fn routes(service: Service) -> Router {
         .merge(compaction::routes())
         .merge(ops::routes())
         .merge(backup_policy::routes())
+        .merge(serve_mode::routes())
         .merge(credentials::routes())
         .merge(data_routes())
         .merge(features::routes())
@@ -1319,6 +1326,23 @@ fn authorize(
     route: &str,
     path: &str,
 ) -> Result<(), ApiError> {
+    let read_only_allowed = path.starts_with("/v1/auth/")
+        || (!path.starts_with("/v1/admin/") && read_request(method, route, path));
+    // Legacy routes address `default` (ID 0); their handlers may not resolve
+    // a collection, so the binding is checked here as well.
+    let legacy = !route.contains("{collection}") && !route.starts_with("/v1/imports");
+    authorize_need(
+        service,
+        role,
+        permission(method, route),
+        read_only_allowed,
+        legacy,
+    )
+}
+
+/// Whether a request only reads: GET/HEAD or a search-like POST. Shared by
+/// the read-only token rule and reader-mode admission (NFR-004).
+fn read_request(method: &Method, route: &str, path: &str) -> bool {
     let read = method == Method::GET || method == Method::HEAD;
     let search = method == Method::POST
         && (path == "/v1/search"
@@ -1334,18 +1358,7 @@ fn authorize(
         || graph::read_post(method, route)
         || (method == Method::POST && memory::read_route(route))
         || (method == Method::POST && route == "/v1/collections/{collection}/kv/entries/get");
-    let read_only_allowed =
-        path.starts_with("/v1/auth/") || (!path.starts_with("/v1/admin/") && (read || search));
-    // Legacy routes address `default` (ID 0); their handlers may not resolve
-    // a collection, so the binding is checked here as well.
-    let legacy = !route.contains("{collection}") && !route.starts_with("/v1/imports");
-    authorize_need(
-        service,
-        role,
-        permission(method, route),
-        read_only_allowed,
-        legacy,
-    )
+    read || search
 }
 
 /// Transport-neutral authorization policy shared by REST and gRPC.
@@ -1508,15 +1521,19 @@ async fn observe(
             )
             .into_response(),
             Ok(Some(role)) => {
-                match rate_limit(&service, role).and_then(|()| {
-                    authorize(
-                        &service,
-                        role,
-                        request.method(),
-                        &route,
-                        request.uri().path(),
-                    )
-                }) {
+                match rate_limit(&service, role)
+                    .and_then(|()| {
+                        authorize(
+                            &service,
+                            role,
+                            request.method(),
+                            &route,
+                            request.uri().path(),
+                        )
+                    })
+                    .and_then(|()| {
+                        serve_mode::admit(&service, request.method(), &route, request.uri().path())
+                    }) {
                     Err(error) => error.into_response(),
                     Ok(()) => {
                         request.extensions_mut().insert(role.clone());
@@ -2302,6 +2319,13 @@ fn decode_payload(text: &str) -> Result<Vec<u8>, ApiError> {
 }
 
 async fn ready(State(service): State<Service>) -> Result<Json<Value>, ApiError> {
+    if service.draining() {
+        return Err(ApiError::new(
+            StatusCode::SERVICE_UNAVAILABLE,
+            "draining",
+            "the server is shutting down; route new requests elsewhere",
+        ));
+    }
     service
         .run_read(|db| {
             db.get(0)?;
