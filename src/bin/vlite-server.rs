@@ -11,13 +11,13 @@ use tokio::net::TcpListener;
 use vlite::{
     AnnSnapshotLoad, Database, Durability, FormatVersion,
     server::{
-        BearerToken, CloudRestore, GroupCommitConfig, Managed, ManagedHandle, RecoveryError,
-        RestoreMode, ServeMode, ServerOptions, Service, configured_admin_router, read_token_file,
-        selected_database,
+        BearerToken, CloudRestore, GatewayTrust, GatewayTrustConfig, GroupCommitConfig, Managed,
+        ManagedHandle, RecoveryError, RestoreMode, ServeMode, ServerOptions, Service,
+        configured_admin_router, read_token_file, selected_database,
     },
 };
 
-const USAGE: &str = "usage: vlite-server <database-path> [--providers-file <path> | VLITE_PROVIDERS_FILE] [--memory-bindings-file <path> | VLITE_MEMORY_BINDINGS_FILE] [--create-if-missing <dimensions> [--create-format 3|4|5]] (default 5: graph-enabled; 3 and 4 create plain vector files) [--bind <ip:port>] [--tls-cert <pem> --tls-key <pem>] [--otlp-endpoint <url>] [--grpc-bind <ip:port> [--grpc-tls-cert <pem> --grpc-tls-key <pem> [--grpc-tls-client-ca <pem>]]] [--allow-remote] [--ann-snapshot] [--lock-held-reads] [--group-commit [--group-commit-requests <1..16>] [--group-commit-bytes <1024..268435456>] [--group-commit-delay-ms <0..100>]] [--durability periodic|full|none] (default periodic) [--flush-interval-ms <1..60000>] (periodic only, default 60000; none keeps the database in memory only, needs --create-if-missing and loses all data when the server stops) [--encryption-key-file <path> | VLITE_ENCRYPTION_KEY | VLITE_ENCRYPTION_KEY_HEX] [--token-file <path> | --insecure-local]; admin: VLITE_AUTH_TOKEN or VLITE_AUTH_TOKEN_FILE; optional read-only: VLITE_READ_ONLY_TOKEN or VLITE_READ_ONLY_TOKEN_FILE; backups/credentials/persistent audit: VLITE_ADMIN_DIR; off-by-default schedules: VLITE_AUTO_MAINTENANCE_INTERVAL_SECS, VLITE_BACKUP_INTERVAL_SECS, VLITE_BACKUP_RETENTION_ENABLED=1, VLITE_BACKUP_RETAIN_LAST, VLITE_BACKUP_RETAIN_DAYS, VLITE_BACKUP_DRILL_EVERY, VLITE_BACKUP_DRILL_MAX_BYTES; VLITE_SLOW_QUERY_MS; VLITE_METRICS_WITH_MEMORY=1 (serve /metrics and the metrics summary while agent memory is configured; their totals then include memory data); dashboard sign-in (needs VLITE_ADMIN_DIR and an admin token): VLITE_TRUSTED_PROXY=1 behind a proxy that sets X-Forwarded-Proto/For, VLITE_SESSION_IDLE_MINUTES (default 30), VLITE_SESSION_MAX_HOURS (default 8), optional first super admin: VLITE_ADMIN_USERNAME with VLITE_ADMIN_PASSWORD_FILE; [--log-buffer <n>] (default 2000, maximum 100000); [--serve-mode standalone|writer|reader | VLITE_SERVE_MODE] (default standalone; reader serves an existing file read-only and refuses writes, creation, durability, group commit, ANN snapshots, gRPC and VLITE_ADMIN_DIR); opt-in Azure Blob cloud backup policy: PUT /v1/admin/cloud-backup (emulator shared key: VLITE_CLOUD_BACKUP_SHARED_KEY_FILE); offline isolated cloud restore: vlite-server cloud-sets | cloud-restore (run either without arguments for its usage)";
+const USAGE: &str = "usage: vlite-server <database-path> [--providers-file <path> | VLITE_PROVIDERS_FILE] [--memory-bindings-file <path> | VLITE_MEMORY_BINDINGS_FILE] [--create-if-missing <dimensions> [--create-format 3|4|5]] (default 5: graph-enabled; 3 and 4 create plain vector files) [--bind <ip:port>] [--tls-cert <pem> --tls-key <pem>] [--otlp-endpoint <url>] [--grpc-bind <ip:port> [--grpc-tls-cert <pem> --grpc-tls-key <pem> [--grpc-tls-client-ca <pem>]]] [--allow-remote] [--ann-snapshot] [--lock-held-reads] [--group-commit [--group-commit-requests <1..16>] [--group-commit-bytes <1024..268435456>] [--group-commit-delay-ms <0..100>]] [--durability periodic|full|none] (default periodic) [--flush-interval-ms <1..60000>] (periodic only, default 60000; none keeps the database in memory only, needs --create-if-missing and loses all data when the server stops) [--encryption-key-file <path> | VLITE_ENCRYPTION_KEY | VLITE_ENCRYPTION_KEY_HEX] [--token-file <path> | --insecure-local]; admin: VLITE_AUTH_TOKEN or VLITE_AUTH_TOKEN_FILE; optional read-only: VLITE_READ_ONLY_TOKEN or VLITE_READ_ONLY_TOKEN_FILE; backups/credentials/persistent audit: VLITE_ADMIN_DIR; off-by-default schedules: VLITE_AUTO_MAINTENANCE_INTERVAL_SECS, VLITE_BACKUP_INTERVAL_SECS, VLITE_BACKUP_RETENTION_ENABLED=1, VLITE_BACKUP_RETAIN_LAST, VLITE_BACKUP_RETAIN_DAYS, VLITE_BACKUP_DRILL_EVERY, VLITE_BACKUP_DRILL_MAX_BYTES; VLITE_SLOW_QUERY_MS; VLITE_METRICS_WITH_MEMORY=1 (serve /metrics and the metrics summary while agent memory is configured; their totals then include memory data); dashboard sign-in (needs VLITE_ADMIN_DIR and an admin token): VLITE_TRUSTED_PROXY=1 behind a proxy that sets X-Forwarded-Proto/For, VLITE_SESSION_IDLE_MINUTES (default 30), VLITE_SESSION_MAX_HOURS (default 8), optional first super admin: VLITE_ADMIN_USERNAME with VLITE_ADMIN_PASSWORD_FILE; [--log-buffer <n>] (default 2000, maximum 100000); [--serve-mode standalone|writer|reader | VLITE_SERVE_MODE] (default standalone; reader serves an existing file read-only and refuses writes, creation, durability, group commit, ANN snapshots, gRPC and VLITE_ADMIN_DIR); opt-in Azure Blob cloud backup policy: PUT /v1/admin/cloud-backup (emulator shared key: VLITE_CLOUD_BACKUP_SHARED_KEY_FILE); offline isolated cloud restore: vlite-server cloud-sets | cloud-restore (run either without arguments for its usage); [--gateway-trust-file <json>] (feature-aca-ha gateway-trusted backend: data requests are authorized only by gateway-signed principal envelopes checked against the shared control state; refuses --insecure-local, --grpc-bind, --serve-mode reader, --durability none and VLITE_ADMIN_DIR); DB-free gateway: vlite-server gateway --config <json>; its keys: vlite-server gateway-keygen; its shared control state: vlite-server control-state publish|update (run either without arguments for its usage; a database literally named gateway, gateway-keygen or control-state needs a ./ prefix)";
 
 struct Config {
     providers: vlite::server::providers::ProviderRegistry,
@@ -52,6 +52,8 @@ struct Config {
     accounts: AccountSettings,
     /// EPIC-002: `--serve-mode` / `VLITE_SERVE_MODE`, default standalone.
     serve_mode: ServeMode,
+    /// EPIC-004: `--gateway-trust-file`, validated (nothing contacted yet).
+    gateway_trust: Option<GatewayTrustConfig>,
 }
 
 /// Dashboard sign-in settings from the environment.
@@ -209,8 +211,12 @@ fn config() -> Result<Config, Box<dyn Error>> {
     let mut mode: Option<&'static str> = None;
     let mut flush_interval_ms: Option<u64> = None;
     let mut serve_mode: Option<ServeMode> = None;
+    let mut gateway_trust_file: Option<PathBuf> = None;
     while let Some(arg) = args.next() {
         match arg.to_str() {
+            Some("--gateway-trust-file") if gateway_trust_file.is_none() => {
+                gateway_trust_file = Some(args.next().ok_or(USAGE)?.into());
+            }
             Some("--providers-file") if !seen_providers_file => {
                 providers_file = Some(args.next().ok_or(USAGE)?.into());
                 seen_providers_file = true;
@@ -522,6 +528,26 @@ fn config() -> Result<Config, Box<dyn Error>> {
         return Err("encryption requires --create-format 5".into());
     }
     let admin_directory = std::env::var_os("VLITE_ADMIN_DIR").map(PathBuf::from);
+    let gateway_trust = match &gateway_trust_file {
+        None => None,
+        Some(file) => {
+            // The envelope is this server's only data authority: refuse
+            // anything that would serve data without one or keep its own
+            // credentials, before a database is created or opened.
+            for (refused, option) in [
+                (insecure_local, "--insecure-local"),
+                (grpc_bind.is_some(), "--grpc-bind"),
+                (serve_mode == ServeMode::Reader, "--serve-mode reader"),
+                (admin_directory.is_some(), "VLITE_ADMIN_DIR"),
+                (in_memory, "--durability none"),
+            ] {
+                if refused {
+                    return Err(format!("--gateway-trust-file cannot be used with {option}").into());
+                }
+            }
+            Some(GatewayTrustConfig::read(file)?)
+        }
+    };
     if in_memory {
         if encryption_key.is_some() {
             return Err("encryption protects data at rest; --durability none never writes the database, so remove the encryption key".into());
@@ -561,6 +587,7 @@ fn config() -> Result<Config, Box<dyn Error>> {
         schedule: schedule()?,
         accounts: account_settings()?,
         serve_mode,
+        gateway_trust,
     };
     // Validate every option before creating or opening a database.
     options(&config, None).validate()?;
@@ -756,6 +783,16 @@ async fn run() -> Result<(), Box<dyn Error>> {
         None => None,
     };
     let in_memory = config.durability == Durability::None;
+    // A gateway-trusted backend needs one confirmed control-state read
+    // before it opens (or creates) its database.
+    let trust = match config.gateway_trust.take() {
+        Some(trust) => Some(
+            tokio::task::spawn_blocking(move || GatewayTrust::start(trust))
+                .await
+                .map_err(|error| error.to_string())??,
+        ),
+        None => None,
+    };
     // Managed compaction runtime: control state (tokens, accounts, the
     // compaction journal) loads before any database opens, so an interrupted
     // compaction is reconciled first and recovery mode can still sign in.
@@ -782,7 +819,10 @@ async fn run() -> Result<(), Box<dyn Error>> {
                 recovery = Some("selected_candidate_open_failed");
                 None
             }
-            Err(error) => return Err(error.into()),
+            Err(error) => {
+                stop_trust(trust).await;
+                return Err(error.into());
+            }
         }
     };
     let Some((mut database, active)) = opened else {
@@ -796,6 +836,9 @@ async fn run() -> Result<(), Box<dyn Error>> {
             .to_string(),
         );
         let (router, handle) = managed.serve_recovery(code)?;
+        // Unreachable with a gateway trust (it refuses VLITE_ADMIN_DIR);
+        // recovery mode has no trust semantics either way.
+        stop_trust(trust).await;
         return finish(
             serve(
                 config,
@@ -805,6 +848,7 @@ async fn run() -> Result<(), Box<dyn Error>> {
                 signals,
                 router,
                 Some(handle),
+                None,
                 None,
                 None,
             )
@@ -840,6 +884,10 @@ async fn run() -> Result<(), Box<dyn Error>> {
         ServeMode::Standalone => service,
         mode => service.with_serve_mode(mode)?,
     };
+    let service = match &trust {
+        Some(trust) => service.with_gateway_trust(trust),
+        None => service,
+    };
     if let Some(tls) = &config.rest_tls {
         service.register_tls(tls.clone())?;
     }
@@ -860,6 +908,7 @@ async fn run() -> Result<(), Box<dyn Error>> {
         Err(error) => {
             // Never leave a scheduler or the database open on failed startup.
             let _ = service.close().await;
+            stop_trust(trust).await;
             return Err(error.into());
         }
     };
@@ -874,9 +923,18 @@ async fn run() -> Result<(), Box<dyn Error>> {
             handle,
             Some(service),
             snapshot,
+            trust,
         )
         .await,
     )
+}
+
+/// Stops a gateway trust's control-state poller (blocking join, off the
+/// runtime).
+async fn stop_trust(trust: Option<GatewayTrust>) {
+    if let Some(trust) = trust {
+        let _ = tokio::task::spawn_blocking(move || trust.stop()).await;
+    }
 }
 
 /// Serves REST (and gRPC) until a stop signal, then drains and closes.
@@ -891,16 +949,24 @@ async fn serve(
     handle: Option<ManagedHandle>,
     service: Option<Service>,
     snapshot: Option<PathBuf>,
+    trust: Option<GatewayTrust>,
 ) -> Result<(), Box<dyn Error>> {
     let (stop_tx, stop_rx) = tokio::sync::watch::channel(false);
     let signal = tokio::spawn({
         let stop_tx = stop_tx.clone();
         let draining = service.clone();
+        let trust = trust.clone();
         async move {
             let result = signals.recv().await;
             // Writer/reader: `/ready` answers 503 `draining` from here on.
             if let Some(service) = &draining {
                 service.begin_drain();
+            }
+            // Gateway-trusted: keep serving while the not-ready state
+            // propagates, then close the listener.
+            if let Some(trust) = &trust {
+                trust.begin_drain();
+                tokio::time::sleep(trust.readiness_propagation()).await;
             }
             let _ = stop_tx.send(true);
             result
@@ -1015,6 +1081,7 @@ async fn serve(
         Some(service) => service.close().await,
         None => Ok(()),
     };
+    stop_trust(trust).await;
     vlite::server::log_stderr(
         "info",
         "server",
@@ -1040,10 +1107,62 @@ async fn main() -> std::process::ExitCode {
     {
         return cloud(command.to_owned(), args[1..].to_vec()).await;
     }
+    match args.first().and_then(|first| first.to_str()) {
+        Some("gateway") => return gateway(args[1..].to_vec()).await,
+        Some(command @ ("gateway-keygen" | "control-state")) => {
+            return gateway_tool(command.to_owned(), args[1..].to_vec()).await;
+        }
+        _ => {}
+    }
     match run().await {
         Ok(()) => std::process::ExitCode::SUCCESS,
         Err(error) => {
             vlite::server::log_stderr("error", "server", serde_json::json!({"event":"startup_or_shutdown_failure","message":error.to_string()}).to_string());
+            std::process::ExitCode::FAILURE
+        }
+    }
+}
+
+/// `vlite-server gateway --config <json>`: the DB-free gateway (EPIC-004),
+/// until SIGTERM/SIGINT (Ctrl+Break/Ctrl+C on Windows), then drained.
+async fn gateway(args: Vec<OsString>) -> std::process::ExitCode {
+    let result = match Signals::new() {
+        Ok(signals) => vlite::server::run_gateway(args, signals.recv()).await,
+        Err(error) => Err(format!("signal handling failed: {error}")),
+    };
+    match result {
+        Ok(()) => std::process::ExitCode::SUCCESS,
+        Err(message) => {
+            vlite::server::log_stderr(
+                "error",
+                "gateway",
+                json!({"event":"startup_or_shutdown_failure","message":message}).to_string(),
+            );
+            std::process::ExitCode::FAILURE
+        }
+    }
+}
+
+/// `gateway-keygen` and `control-state`: JSON on stdout, `{"error":...}`
+/// on stderr. Both do blocking file or store I/O, so they run off the
+/// runtime.
+async fn gateway_tool(command: String, args: Vec<OsString>) -> std::process::ExitCode {
+    let result = tokio::task::spawn_blocking(move || match command.as_str() {
+        "gateway-keygen" => vlite::server::gateway_keygen(&args),
+        _ => vlite::server::control_state_command(&args),
+    })
+    .await
+    .unwrap_or_else(|error| Err(format!("internal_error: {error}")));
+    match result {
+        Ok(report) => {
+            println!(
+                "{}",
+                serde_json::to_string_pretty(&report).unwrap_or_else(|_| report.to_string())
+            );
+            std::process::ExitCode::SUCCESS
+        }
+        Err(message) => {
+            eprintln!("{}", json!({"error":message}));
             std::process::ExitCode::FAILURE
         }
     }

@@ -274,12 +274,7 @@ pub(super) async fn create_core(
     let info = service
         .run(move |db| {
             if let Some(id) = &tenant_id {
-                quota_service
-                    .admin
-                    .tenants
-                    .as_ref()
-                    .ok_or_else(forbidden_scope)?
-                    .get(id)?;
+                quota_service.admit_tenant(id)?;
             }
             let spec = CollectionSpec {
                 dimensions: input.dimensions,

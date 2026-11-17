@@ -114,6 +114,14 @@ pub(super) fn admit(tenants: &[Tenant], id: &str) -> Result<Tenant, ApiError> {
 pub(super) fn routable(tenants: &[Tenant], id: &str) -> bool {
     tenants.iter().any(|t| t.id == id && !t.deleted)
 }
+/// `Store::quota` over a tenant list (also a trusted backend's snapshot).
+pub(super) fn quota_in(tenants: &[Tenant], id: &str) -> Result<Option<Tenant>, ApiError> {
+    match tenants.iter().find(|t| t.id == id) {
+        None => Ok(None),
+        Some(t) if t.deleted => Err(unavailable_tenant()),
+        Some(t) => Ok(Some(t.clone())),
+    }
+}
 #[cfg(test)]
 impl Tenant {
     pub(super) fn for_test(id: &str, suspended: Option<u64>) -> Self {
@@ -202,11 +210,7 @@ impl Store {
     /// apply their quota so administrators can inspect and clean them up.
     pub fn quota(&self, id: &str) -> Result<Option<Tenant>, ApiError> {
         let tenants = self.tenants.lock().map_err(internal)?;
-        match tenants.iter().find(|t| t.id == id) {
-            None => Ok(None),
-            Some(t) if t.deleted => Err(unavailable_tenant()),
-            Some(t) => Ok(Some(t.clone())),
-        }
+        quota_in(&tenants, id)
     }
     /// Live display name, if any (for identity labels).
     pub fn name(&self, id: &str) -> Option<String> {
@@ -422,23 +426,68 @@ async fn mutate(
     let store = store(&service)?;
     let service_clone = service.clone();
     service
-        .run(move |_db| {
-            let mut next = store.tenants.lock().map_err(internal)?.clone();
-            let tenant = next
-                .iter_mut()
-                .find(|t| t.id == id && !t.deleted)
-                .ok_or_else(not_found)?;
-            let mut detail = change(tenant)?;
-            let view = tenant.view();
-            detail["event"] = json!(event);
-            detail["tenant_id"] = json!(id);
-            if let Some(log) = &service_clone.admin.audit_log {
-                log.append(detail, true).map_err(internal)?;
-            }
-            store.commit(&next)?;
-            Ok(view)
-        })
+        .run(move |_db| store.apply(service_clone.admin.audit_log.as_deref(), &id, event, change))
         .await
+}
+
+impl Store {
+    fn apply(
+        &self,
+        audit: Option<&audit::Log>,
+        id: &str,
+        event: &'static str,
+        change: impl FnOnce(&mut Tenant) -> Result<Value, ApiError>,
+    ) -> Result<Value, ApiError> {
+        let mut next = self.tenants.lock().map_err(internal)?.clone();
+        let tenant = next
+            .iter_mut()
+            .find(|t| t.id == id && !t.deleted)
+            .ok_or_else(not_found)?;
+        let mut detail = change(tenant)?;
+        let view = tenant.view();
+        detail["event"] = json!(event);
+        detail["tenant_id"] = json!(id);
+        if let Some(log) = audit {
+            log.append(detail, true).map_err(internal)?;
+        }
+        self.commit(&next)?;
+        Ok(view)
+    }
+
+    /// Suspends or resumes a live tenant outside the admin API (the offline
+    /// `control-state update` command), audited with `source`.
+    pub(super) fn set_suspended(
+        &self,
+        audit: &audit::Log,
+        id: &str,
+        suspend: bool,
+        now: u64,
+        source: &str,
+    ) -> Result<Value, ApiError> {
+        let (event, change): (_, fn(&mut Tenant, u64) -> Value) = if suspend {
+            ("tenant_suspended", suspend_tenant)
+        } else {
+            ("tenant_resumed", |tenant, _| resume_tenant(tenant))
+        };
+        self.apply(Some(audit), id, event, |tenant| {
+            let mut detail = change(tenant, now);
+            detail["source"] = json!(source);
+            Ok(detail)
+        })
+    }
+}
+
+fn suspend_tenant(tenant: &mut Tenant, now: u64) -> Value {
+    let already = tenant.suspended_unix_ms.is_some();
+    if !already {
+        tenant.suspended_unix_ms = Some(now);
+    }
+    json!({ "already_suspended": already })
+}
+
+fn resume_tenant(tenant: &mut Tenant) -> Value {
+    let was = tenant.suspended_unix_ms.take().is_some();
+    json!({ "was_suspended": was })
 }
 
 async fn usage_report(
@@ -521,11 +570,7 @@ async fn suspend(
     Path(id): Path<String>,
 ) -> Result<Json<Value>, ApiError> {
     let tenant = mutate(service, id, "tenant_suspended", |tenant| {
-        let already = tenant.suspended_unix_ms.is_some();
-        if !already {
-            tenant.suspended_unix_ms = Some(admin::now_ms() as u64);
-        }
-        Ok(json!({ "already_suspended": already }))
+        Ok(suspend_tenant(tenant, admin::now_ms() as u64))
     })
     .await?;
     Ok(Json(json!({ "tenant": tenant })))
@@ -535,8 +580,7 @@ async fn resume(
     Path(id): Path<String>,
 ) -> Result<Json<Value>, ApiError> {
     let tenant = mutate(service, id, "tenant_resumed", |tenant| {
-        let was = tenant.suspended_unix_ms.take().is_some();
-        Ok(json!({ "was_suspended": was }))
+        Ok(resume_tenant(tenant))
     })
     .await?;
     Ok(Json(json!({ "tenant": tenant })))

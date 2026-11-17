@@ -1598,20 +1598,28 @@ fn cloud_argument_errors_exit_one_with_a_json_error_and_no_effect() {
 }
 
 #[test]
-fn databases_named_like_cloud_commands_need_a_path_prefix() {
+fn databases_named_like_subcommands_need_a_path_prefix() {
     let directory = tempfile::tempdir().unwrap();
-    for name in ["cloud-sets", "cloud-restore"] {
+    for name in [
+        "cloud-sets",
+        "cloud-restore",
+        "gateway",
+        "gateway-keygen",
+        "control-state",
+    ] {
         // A bare name is the command, so the server options are refused.
         let bare = Command::new(env!("CARGO_BIN_EXE_vlite-server"))
             .current_dir(directory.path())
             .args([name, "--create-if-missing", "2"])
             .output()
             .unwrap();
-        assert_eq!(bare.status.code(), Some(1));
-        assert!(bare.stdout.is_empty());
-        let error: Value = serde_json::from_slice(&bare.stderr).unwrap();
-        assert_eq!(error["error"]["code"], "invalid_arguments");
-        assert!(!directory.path().join(name).exists());
+        assert_eq!(bare.status.code(), Some(1), "{name}");
+        assert!(bare.stdout.is_empty(), "{name}");
+        if name.starts_with("cloud-") {
+            let error: Value = serde_json::from_slice(&bare.stderr).unwrap();
+            assert_eq!(error["error"]["code"], "invalid_arguments");
+        }
+        assert!(!directory.path().join(name).exists(), "{name}");
 
         // With ./ it is a database path and the server starts.
         let mut child = Command::new(env!("CARGO_BIN_EXE_vlite-server"))
@@ -1749,4 +1757,208 @@ fn reader_serves_an_existing_file_read_only_and_never_writes_it() {
     assert_eq!(report["mode"], "reader");
     drop(server);
     assert_eq!(std::fs::read(&path).unwrap(), bytes);
+}
+
+/// feature-aca-ha EPIC-004: the gateway commands refuse unsafe or
+/// contradictory configuration before opening anything, and never print key
+/// material.
+#[test]
+fn gateway_commands_validate_configuration_and_keep_keys_out_of_output() {
+    let directory = tempfile::tempdir().unwrap();
+    let root = directory.path();
+    let run = |args: &[&std::ffi::OsStr], admin_dir: bool| {
+        let mut command = Command::new(env!("CARGO_BIN_EXE_vlite-server"));
+        command
+            .args(args)
+            .env_remove("VLITE_AUTH_TOKEN_FILE")
+            .env_remove("VLITE_ADMIN_DIR")
+            .env_remove("VLITE_PROVIDERS_FILE")
+            .env("VLITE_AUTH_TOKEN", TOKEN);
+        if admin_dir {
+            command.env("VLITE_ADMIN_DIR", root.join("admin"));
+        }
+        let output = command.output().unwrap();
+        (
+            output.status.success(),
+            String::from_utf8(output.stdout).unwrap(),
+            String::from_utf8(output.stderr).unwrap(),
+        )
+    };
+    let os = |text: &'static str| -> &std::ffi::OsStr { text.as_ref() };
+
+    // Key generation: a secret seed file and a public bundle; neither key is
+    // printed and existing files are never overwritten.
+    let key = root.join("signing.key");
+    let bundle = root.join("public.json");
+    let keygen = [
+        os("gateway-keygen"),
+        os("--kid"),
+        os("k1"),
+        os("--generation"),
+        os("1"),
+        os("--signing-key-out"),
+        key.as_os_str(),
+        os("--public-bundle-out"),
+        bundle.as_os_str(),
+    ];
+    let (ok, stdout, stderr) = run(&keygen, false);
+    assert!(ok, "{stdout} {stderr}");
+    let seed = std::fs::read_to_string(&key).unwrap();
+    let public: Value = serde_json::from_slice(&std::fs::read(&bundle).unwrap()).unwrap();
+    let public_key = public["keys"][0]["public_key"].as_str().unwrap();
+    assert_eq!(public["delivery_generation"], 1);
+    assert_eq!(public["keys"][0]["kid"], "k1");
+    assert!(!seed.trim().is_empty() && !public.to_string().contains(seed.trim()));
+    for text in [&stdout, &stderr] {
+        assert!(!text.contains(seed.trim()) && !text.contains(public_key));
+    }
+    let (ok, _, stderr) = run(&keygen, false);
+    assert!(!ok && stderr.contains("exists"), "{stderr}");
+    assert_eq!(std::fs::read_to_string(&key).unwrap(), seed);
+
+    // Gateway configuration: bounded, unknown fields refused, every timing
+    // input explicit and consistent. Refused before any store is contacted.
+    let target = root.join("target.json");
+    std::fs::write(
+        &target,
+        json!({"account":"devstoreaccount1","container":"d","coordination_container":"c",
+            "prefix":"p/","endpoint":"http://127.0.0.1:9/devstoreaccount1",
+            "auth":"emulator_shared_key"})
+        .to_string(),
+    )
+    .unwrap();
+    let base = json!({"bind":"127.0.0.1:0","allow_remote":false,
+        "control_state":{"target_file":target,"object":"gateway/state.json"},
+        "s_ctl_ms":2000,"poll_interval_ms":200,"max_replicas":2,
+        "envelope_lifetime_ms":5000,"public_key_bundle_file":bundle,
+        "signing_key_file":key,"active_kid":"k1","readiness_propagation_ms":100,
+        "drain_timeout_ms":1000,"max_request_bytes":1048576,"max_in_flight":8,
+        "upstream_timeout_ms":1000,"max_buckets":16});
+    let config = root.join("gateway.json");
+    let gateway = [os("gateway"), os("--config"), config.as_os_str()];
+    let mutate = |change: &dyn Fn(&mut Value)| {
+        let mut value = base.clone();
+        change(&mut value);
+        std::fs::write(&config, value.to_string()).unwrap();
+        let (ok, stdout, stderr) = run(&gateway, false);
+        assert!(!ok, "{stdout}");
+        assert!(!stdout.contains("LISTENING"), "{stdout}");
+        assert!(!stderr.contains(seed.trim()), "{stderr}");
+        stderr
+    };
+    for change in [
+        &(|v: &mut Value| v["surprise"] = json!(true)) as &dyn Fn(&mut Value),
+        &|v| v["control_state"]["extra"] = json!(1),
+        &|v| {
+            v.as_object_mut().unwrap().remove("s_ctl_ms");
+        },
+        &|v| v["poll_interval_ms"] = json!(2000),
+        &|v| v["poll_interval_ms"] = json!(0),
+        &|v| v["max_replicas"] = json!(0),
+        &|v| v["envelope_lifetime_ms"] = json!(0),
+        &|v| v["drain_timeout_ms"] = json!(0),
+        &|v| v["max_request_bytes"] = json!(0),
+        &|v| v["bind"] = json!("0.0.0.0:0"),
+        &|v| v["active_kid"] = json!("k9"),
+        &|v| v["signing_key_file"] = json!(bundle),
+        &|v| v["control_state"]["object"] = json!("../escape"),
+        &|v| v["control_state"]["object"] = json!("owner.json"),
+    ] {
+        let stderr = mutate(change);
+        assert!(stderr.contains("gateway_config_invalid"), "{stderr}");
+    }
+    std::fs::write(&config, vec![b' '; 70 * 1024]).unwrap();
+    let (ok, _, stderr) = run(&gateway, false);
+    assert!(!ok && stderr.contains("gateway_config_invalid"), "{stderr}");
+    let (ok, _, stderr) = run(&[os("gateway"), os("--config")], false);
+    assert!(!ok && !stderr.is_empty());
+    let (ok, _, stderr) = run(
+        &[
+            os("gateway"),
+            os("--config"),
+            config.as_os_str(),
+            os("--bind"),
+        ],
+        false,
+    );
+    assert!(!ok && !stderr.is_empty());
+
+    // A gateway-trusted backend refuses options that would add another
+    // authority next to the envelope, before creating the database.
+    let trust = root.join("trust.json");
+    let trust_base = json!({"audience":"shared-pool","public_key_bundle_file":bundle,
+        "control_state":{"target_file":target,"object":"gateway/state.json"},
+        "s_ctl_ms":2000,"poll_interval_ms":200,"skew_ms":1000,"max_lifetime_ms":5000,
+        "readiness_propagation_ms":100});
+    std::fs::write(&trust, trust_base.to_string()).unwrap();
+    let database = root.join("backend.vlite");
+    let backend = |extra: &[&std::ffi::OsStr], admin_dir: bool| {
+        let mut args = vec![
+            database.as_os_str(),
+            os("--create-if-missing"),
+            os("2"),
+            os("--bind"),
+            os("127.0.0.1:0"),
+            os("--gateway-trust-file"),
+            trust.as_os_str(),
+        ];
+        args.extend_from_slice(extra);
+        run(&args, admin_dir)
+    };
+    for (extra, admin_dir) in [
+        (vec![os("--insecure-local")], false),
+        (vec![os("--grpc-bind"), os("127.0.0.1:0")], false),
+        (vec![os("--serve-mode"), os("reader")], false),
+        (vec![], true),
+    ] {
+        let (ok, stdout, stderr) = backend(&extra, admin_dir);
+        assert!(!ok && !stdout.contains("LISTENING"), "{extra:?} {stderr}");
+    }
+    for change in [
+        &(|v: &mut Value| v["surprise"] = json!(true)) as &dyn Fn(&mut Value),
+        &|v| v["poll_interval_ms"] = json!(5000),
+        &|v| v["max_lifetime_ms"] = json!(0),
+        &|v| {
+            v.as_object_mut().unwrap().remove("skew_ms");
+        },
+    ] {
+        let mut value = trust_base.clone();
+        change(&mut value);
+        std::fs::write(&trust, value.to_string()).unwrap();
+        let (ok, _, stderr) = backend(&[], false);
+        assert!(!ok && stderr.contains("gateway_trust_invalid"), "{stderr}");
+    }
+    assert!(!database.exists(), "nothing is created on a refused start");
+
+    // control-state refuses unknown or duplicate flags and conflicting
+    // mutations before touching the store or the admin directory.
+    for args in [
+        vec![os("control-state"), os("publish")],
+        vec![os("control-state"), os("rotate")],
+        vec![
+            os("control-state"),
+            os("update"),
+            os("--target-file"),
+            target.as_os_str(),
+            os("--object"),
+            os("o.json"),
+            os("--admin-dir"),
+            root.as_os_str(),
+            os("--suspend-tenant"),
+            os("a"),
+            os("--resume-tenant"),
+            os("a"),
+        ],
+        vec![
+            os("control-state"),
+            os("publish"),
+            os("--target-file"),
+            target.as_os_str(),
+            os("--target-file"),
+            target.as_os_str(),
+        ],
+    ] {
+        let (ok, stdout, stderr) = run(&args, false);
+        assert!(!ok && stdout.is_empty() && !stderr.is_empty(), "{args:?}");
+    }
 }

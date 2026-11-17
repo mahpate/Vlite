@@ -124,6 +124,12 @@ required-features = ["server"]
 name = "cloud_backup_azurite"
 required-features = ["server"]
 
+# feature-aca-ha EPIC-004: gateway and trusted backends over Azurite control
+# state (#[ignore]d: run with --ignored and VLITE_AZURITE_BLOB_ENDPOINT).
+[[test]]
+name = "gateway_azurite"
+required-features = ["server"]
+
 # feature-dashboard-compaction: managed compaction lifecycle, recovery and API.
 [[test]]
 name = "server_compaction"

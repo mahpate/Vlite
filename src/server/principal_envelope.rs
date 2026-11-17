@@ -18,8 +18,6 @@
 //! written into control-state objects, envelopes, errors or logs. Skew,
 //! lifetime and the minimum generation are injected, never defaulted
 //! (OD-005, NFR-001).
-// The signing half is used by the gateway (EPIC-004); the backend verifies.
-#![cfg_attr(not(test), allow(dead_code))]
 use super::*;
 use base64::prelude::BASE64_URL_SAFE_NO_PAD;
 use ring::signature::{ED25519, Ed25519KeyPair, KeyPair, UnparsedPublicKey};
@@ -104,6 +102,43 @@ pub(super) struct GatewayKeyBundle<'a> {
     signing_key: Option<&'a [u8]>,
 }
 
+impl<'a> GatewayKeyBundle<'a> {
+    pub(super) fn new(
+        public_bundle: &'a [u8],
+        active_kid: &'a str,
+        signing_key: Option<&'a [u8]>,
+    ) -> Self {
+        Self {
+            public_bundle,
+            active_kid,
+            signing_key,
+        }
+    }
+}
+
+/// Decodes a signing seed file: 32 bytes as unpadded base64url, surrounding
+/// whitespace ignored. The error never contains the input.
+pub(super) fn decode_seed(text: &str) -> Result<[u8; 32], &'static str> {
+    BASE64_URL_SAFE_NO_PAD
+        .decode(text.trim())
+        .ok()
+        .and_then(|bytes| <[u8; 32]>::try_from(bytes).ok())
+        .ok_or("invalid signing material")
+}
+
+/// A new signing seed and its public bundle entry, for `gateway-keygen`.
+pub(super) fn generate(kid: &str, generation: u64) -> Result<(String, Value), &'static str> {
+    if !valid_kid(kid) || generation == 0 {
+        return Err("invalid key identity or generation");
+    }
+    let mut seed = [0u8; 32];
+    getrandom::fill(&mut seed).map_err(|_| "no system randomness")?;
+    let pair = Ed25519KeyPair::from_seed_unchecked(&seed).map_err(|_| "invalid signing key")?;
+    let bundle = json!({"schema_version":KEY_BUNDLE_SCHEMA_VERSION,"delivery_generation":generation,
+        "keys":[{"kid":kid,"public_key":BASE64_URL_SAFE_NO_PAD.encode(pair.public_key().as_ref())}]});
+    Ok((BASE64_URL_SAFE_NO_PAD.encode(seed), bundle))
+}
+
 impl Signer {
     /// Builds the gateway signer from a startup-loaded public bundle and
     /// separately delivered signing material. The secret is neither retained
@@ -165,6 +200,7 @@ impl Signer {
         &self.metadata
     }
 
+    #[cfg_attr(not(test), allow(dead_code))]
     pub(super) fn public_key(&self) -> [u8; 32] {
         let mut key = [0u8; 32];
         key.copy_from_slice(self.pair.public_key().as_ref());
@@ -259,6 +295,9 @@ pub(super) struct Policy {
     /// This backend's audience; equality only.
     pub audience: String,
     /// The tenant this backend serves (`None`: an untenanted deployment).
+    /// A gateway-trusted backend leaves it `None` and decides per request
+    /// from the control-state directory (`verify_with`).
+    #[cfg_attr(not(test), allow(dead_code))]
     pub tenant: Option<String>,
     /// Tolerated clock difference, milliseconds (FM-008).
     pub skew_ms: u64,
@@ -329,8 +368,23 @@ impl Verifier {
             .max(self.policy.minimum_generation)
     }
 
-    /// Verifies `token` at `now` (Unix ms) and returns the scoped grant.
+    /// Verifies `token` at `now` (Unix ms) for this verifier's one tenant
+    /// and returns the scoped grant.
+    #[cfg(test)]
     pub(super) fn verify(&self, token: &str, now: u64) -> Result<Arc<credentials::Grant>, Refusal> {
+        let tenant = self.policy.tenant.clone();
+        self.verify_with(token, now, |claimed| claimed == tenant.as_deref())
+    }
+
+    /// Verifies `token` at `now` (Unix ms); `tenant_ok` decides whether the
+    /// envelope's tenant is served here (a shared-pool backend serves every
+    /// tenant whose directory record names it). Returns the scoped grant.
+    pub(super) fn verify_with(
+        &self,
+        token: &str,
+        now: u64,
+        tenant_ok: impl FnOnce(Option<&str>) -> bool,
+    ) -> Result<Arc<credentials::Grant>, Refusal> {
         if token.len() > MAX_TOKEN_BYTES {
             return Err(Refusal::Malformed);
         }
@@ -366,7 +420,7 @@ impl Verifier {
         if claims.aud != policy.audience {
             return Err(Refusal::Audience);
         }
-        if claims.principal.tenant_id() != policy.tenant.as_deref() {
+        if !tenant_ok(claims.principal.tenant_id()) {
             return Err(Refusal::Tenant);
         }
         if claims.iat > now.saturating_add(policy.skew_ms) {
@@ -442,7 +496,7 @@ pub(super) mod tests {
         .unwrap()
     }
 
-    fn public_bundle(keys: &[&Signer], generation: u64) -> Vec<u8> {
+    pub(crate) fn public_bundle(keys: &[&Signer], generation: u64) -> Vec<u8> {
         serde_json::to_vec(&json!({
             "schema_version": 1,
             "delivery_generation": generation,
@@ -455,6 +509,32 @@ pub(super) mod tests {
     }
 
     const NOW: u64 = 1_000_000;
+
+    #[test]
+    fn generated_keys_round_trip_and_tenant_rule_is_the_callers() {
+        let (seed, bundle) = generate("k1", 2).unwrap();
+        let bundle = serde_json::to_vec(&bundle).unwrap();
+        let seed = decode_seed(&format!("{seed}\n")).unwrap();
+        let key =
+            Signer::from_gateway_bundle(GatewayKeyBundle::new(&bundle, "k1", Some(&seed))).unwrap();
+        assert!(generate("Bad", 1).is_err() && generate("k1", 0).is_err());
+        assert!(decode_seed("not a seed").is_err() && decode_seed("AAAA").is_err());
+        let verifier = Verifier::from_bundle(&bundle, policy(None)).unwrap();
+        let token = key.sign(&claims(3, NOW, NOW + 30_000)).unwrap();
+        let mut seen = None;
+        let grant = verifier
+            .verify_with(&token, NOW, |tenant| {
+                seen = tenant.map(str::to_owned);
+                true
+            })
+            .unwrap();
+        assert_eq!(
+            (seen.as_deref(), grant.tenant_id.as_deref()),
+            (Some(TENANT), Some(TENANT))
+        );
+        let refused = verifier.verify_with(&token, NOW, |_| false).err();
+        assert_eq!(refused, Some(Refusal::Tenant));
+    }
 
     #[test]
     fn valid_envelope_yields_the_scoped_grant() {

@@ -17,19 +17,19 @@
 //! It also sizes each replica's slice of a credential rate limit
 //! (`replica_share`, ITEM-016, PRD section 3.4.7).
 //!
-//! Routing (ITEM-014, PRD sections 3.4.6, 3.4.8 and 3.7) is a library that
-//! no serving mode calls yet (OD-012): `route_target` picks the backend for
-//! an authenticated tenant from the control-state directory, `mint` signs
-//! that backend's principal envelope, `Delivery::may_retry` allows a retry
-//! only when a request provably never reached a backend (a read may always
-//! retry), and `check_epoch` refuses a response stamped with an epoch older
-//! than the directory's. The target is always the writer; reader routing is
-//! ITEM-021. Still open: a backend verifies one envelope tenant
-//! (`principal_envelope::Policy`), so one `shared-pool` backend serving
-//! several tenants needs OD-011/OD-012 work; untenanted and super-admin
-//! requests have no route (OD-004/OD-012); and the response header that
-//! carries the epoch is named when the mode is wired.
-#![cfg_attr(not(test), allow(dead_code))]
+//! Routing (ITEM-014, PRD sections 3.4.6, 3.4.8 and 3.7): `route_target`
+//! picks the backend for an authenticated tenant from the control-state
+//! directory and `mint` signs that backend's principal envelope; the
+//! gateway mode (`gateway_mode`, `vlite-server gateway`) calls both on every
+//! forwarded request, and a gateway-trusted backend (`gateway_trust`)
+//! accepts an envelope only for a tenant whose directory record names its
+//! audience and lineage, so one `shared-pool` backend serves several
+//! tenants. The target is always the writer; reader routing is ITEM-021.
+//! Untenanted and super-admin requests have no route (OD-004/OD-012).
+//!
+//! Not yet used by the gateway mode: it never retries, so
+//! `Delivery::may_retry` is unused, and no backend stamps an epoch on its
+//! responses, so `check_epoch` is not applied (OD-002 fencing is open).
 
 use axum::http::{Method, StatusCode};
 
@@ -397,7 +397,8 @@ pub(super) struct Target {
     /// The envelope audience that backend verifies.
     pub(super) audience: String,
     /// `E` the backend must stamp on its response; `None` for `shared-pool`,
-    /// which has no failover to fence.
+    /// which has no failover to fence. Not checked yet (OD-002).
+    #[cfg_attr(not(test), allow(dead_code))]
     pub(super) epoch: Option<u64>,
     pub(super) operation: Operation,
 }
@@ -482,6 +483,8 @@ pub(super) fn mint(
 }
 
 /// How far a forwarded request got before it failed (PRD section 3.4.6).
+/// The gateway mode never retries, so it does not consult this yet.
+#[cfg_attr(not(test), allow(dead_code))]
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(super) enum Delivery {
     /// Refused before any byte was sent: no backend saw it.
@@ -496,6 +499,7 @@ impl Delivery {
     /// Writes have no general idempotency (SRC-015), so only a write that
     /// was never sent may be retried; a read may be retried after any
     /// failure (FR-007).
+    #[cfg_attr(not(test), allow(dead_code))]
     pub(super) fn may_retry(self, operation: Operation) -> bool {
         self == Self::NotSent || operation == Operation::Read
     }
@@ -510,7 +514,9 @@ pub(super) fn ambiguous_write() -> ApiError {
     )
 }
 
-/// Why a backend response is not accepted (PRD section 3.4.8).
+/// Why a backend response is not accepted (PRD section 3.4.8). Unused
+/// until a backend stamps its epoch (OD-002).
+#[cfg_attr(not(test), allow(dead_code))]
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(super) enum EpochRefusal {
     /// The record names an epoch and the response carries none.
@@ -523,6 +529,7 @@ pub(super) enum EpochRefusal {
 impl EpochRefusal {
     /// A refused write may have been applied by the deposed writer, so it
     /// is ambiguous; a refused read is stale and may be retried.
+    #[cfg_attr(not(test), allow(dead_code))]
     pub(super) fn error(self, operation: Operation) -> ApiError {
         match operation {
             Operation::Write => ambiguous_write(),
@@ -539,6 +546,7 @@ impl EpochRefusal {
 /// the gateway's directory. A newer stamp is accepted: the directory is
 /// behind and catches up within S_ctl. The residual window, a deposed
 /// writer answering before the directory moves, is OD-002.
+#[cfg_attr(not(test), allow(dead_code))]
 pub(super) fn check_epoch(expected: Option<u64>, stamped: Option<u64>) -> Result<(), EpochRefusal> {
     let Some(expected) = expected else {
         return Ok(());

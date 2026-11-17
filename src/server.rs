@@ -42,6 +42,8 @@ mod control_state;
 mod credentials;
 mod features;
 mod gateway;
+mod gateway_mode;
+mod gateway_trust;
 #[cfg(test)]
 mod gateway_trust_tests;
 mod graph;
@@ -75,6 +77,8 @@ mod webhooks;
 pub use admin::{ServerOptions, configured_admin_router, read_token_file, selected_database};
 pub use cloud_recovery::{CloudRestore, RecoveryError, RestoreMode, cloud_restore, cloud_sets};
 pub use compaction::{Managed, ManagedHandle};
+pub use gateway_mode::{control_state_command, gateway_keygen, run_gateway};
+pub use gateway_trust::{GatewayTrust, GatewayTrustConfig};
 pub use serve_mode::ServeMode;
 
 /// Emit a legacy stderr line and also capture it in the bounded server log buffer.
@@ -240,9 +244,10 @@ pub struct Service {
     metrics_with_memory: bool,
     /// EPIC-002: serve mode and drain flag, shared across generations.
     serve: Arc<serve_mode::State>,
-    /// feature-aca-ha ITEM-010: when set, the backend trusts only a signed
-    /// gateway principal envelope; standalone servers leave it unset.
-    trust: Option<Arc<principal_envelope::Verifier>>,
+    /// feature-aca-ha ITEM-010/014: when set, the backend trusts only a
+    /// signed gateway principal envelope checked against its own fresh
+    /// control state; standalone servers leave it unset.
+    trust: Option<Arc<gateway_trust::Trust>>,
 }
 
 impl Service {
@@ -536,15 +541,6 @@ impl Service {
 
     /// Choose snapshot-based simple exact reads, or the original lock-held path.
     /// Configure before cloning the service so all listeners share one policy.
-    /// feature-aca-ha ITEM-010: opt-in gateway-trusted mode. Crate-private
-    /// until the gateway (EPIC-004) supplies keys from the platform secret
-    /// store; standalone servers never call it.
-    #[cfg_attr(not(test), allow(dead_code))]
-    fn with_gateway_trust(mut self, verifier: principal_envelope::Verifier) -> Self {
-        self.trust = Some(Arc::new(verifier));
-        self
-    }
-
     pub fn with_snapshot_reads(mut self, enabled: bool) -> std::io::Result<Self> {
         if Arc::strong_count(&self.database) != 1 {
             return Err(std::io::Error::other(
@@ -585,6 +581,7 @@ impl Service {
         next.started = self.started;
         next.metrics_with_memory = self.metrics_with_memory;
         next.serve = self.serve.clone();
+        next.trust = self.trust.clone();
         if let Some(config) = self.group_commit_config {
             next = next.with_group_commit(config)?;
         }
@@ -1155,7 +1152,7 @@ fn bearer(headers: &HeaderMap) -> Option<&str> {
 
 fn authenticate(service: &Service, headers: &HeaderMap) -> Result<Option<admin::Role>, ApiError> {
     if let Some(trust) = &service.trust {
-        return trusted(trust, headers);
+        return trust.authenticate(headers, service.lineage);
     }
     let value = bearer(headers);
     {
@@ -1184,29 +1181,6 @@ fn authenticate(service: &Service, headers: &HeaderMap) -> Result<Option<admin::
         }
         _ => Ok(None),
     }
-}
-
-/// feature-aca-ha ITEM-010 (SEC-002): in gateway-trusted mode a request is
-/// authenticated only by a valid principal envelope. Bearer tokens, sessions,
-/// the open development mode and network position grant nothing; tenant
-/// status was decided by the gateway at generation `A` and bound by the
-/// verifier's policy, so the local tenant store is not consulted.
-fn trusted(
-    trust: &principal_envelope::Verifier,
-    headers: &HeaderMap,
-) -> Result<Option<admin::Role>, ApiError> {
-    let mut values = headers.get_all(principal_envelope::HEADER).iter();
-    let Some(value) = values.next() else {
-        return Ok(None);
-    };
-    let token = match (value.to_str(), values.next()) {
-        (Ok(token), None) => token,
-        _ => return Err(principal_envelope::Refusal::Malformed.error()),
-    };
-    let grant = trust
-        .verify(token, admin::now_ms() as u64)
-        .map_err(principal_envelope::Refusal::error)?;
-    Ok(Some(admin::Role::Scoped(grant)))
 }
 
 /// Where a scoped credential's collection binding is enforced.
@@ -1355,6 +1329,18 @@ fn forbidden_scope() -> ApiError {
     )
 }
 
+impl Service {
+    /// Admits `tenant` (known, not suspended) from the tenant store or, on a
+    /// gateway-trusted backend, from its fresh control state.
+    fn admit_tenant(&self, tenant: &str) -> Result<(), ApiError> {
+        match (&self.trust, &self.admin.tenants) {
+            (Some(trust), _) => trust.admit(tenant),
+            (None, Some(store)) => store.get(tenant).map(drop),
+            (None, None) => Err(forbidden_scope()),
+        }
+    }
+}
+
 pub(in crate::server) fn raw_credential(role: &admin::Role) -> Option<&str> {
     match role {
         admin::Role::Scoped(grant) if grant.api_credential => Some(grant.id.as_str()),
@@ -1424,30 +1410,42 @@ fn authorize_need(
             "admin access required",
         )),
         admin::Role::Scoped(grant) => {
-            if service.lineage != Some(grant.lineage) {
-                return Err(forbidden_scope());
-            }
-            match need {
-                Need::Any => Ok(()),
-                Need::Admin => Err(forbidden_scope()),
-                Need::Op(op, reach) => {
-                    let legacy = legacy && reach == Reach::Collection;
-                    // A backup holds every collection and graph, reserved ones
-                    // included, so it is the administrator's alone while any
-                    // resource is reserved.
-                    if !grant.allows(op)
-                        || (op == credentials::Op::Backup && service.has_bindings())
-                        || (reach == Reach::All
-                            && (!grant.all
-                                || (grant.tenant_id.is_some()
-                                    && op != credentials::Op::Collections)))
-                        || (legacy && !grant.covers(service.lineage, 0, "default"))
-                    {
-                        Err(forbidden_scope())
-                    } else {
-                        Ok(())
-                    }
-                }
+            authorize_scoped(grant, service.lineage, need, legacy, service.has_bindings())
+        }
+    }
+}
+
+/// The scoped-credential rule of `authorize_need`, for a database with
+/// `lineage`; a gateway applies it with the routed tenant's lineage before
+/// forwarding (the backend applies it again).
+fn authorize_scoped(
+    grant: &credentials::Grant,
+    lineage: Option<u64>,
+    need: Need,
+    legacy: bool,
+    has_bindings: bool,
+) -> Result<(), ApiError> {
+    if lineage != Some(grant.lineage) {
+        return Err(forbidden_scope());
+    }
+    match need {
+        Need::Any => Ok(()),
+        Need::Admin => Err(forbidden_scope()),
+        Need::Op(op, reach) => {
+            let legacy = legacy && reach == Reach::Collection;
+            // A backup holds every collection and graph, reserved ones
+            // included, so it is the administrator's alone while any
+            // resource is reserved.
+            if !grant.allows(op)
+                || (op == credentials::Op::Backup && has_bindings)
+                || (reach == Reach::All
+                    && (!grant.all
+                        || (grant.tenant_id.is_some() && op != credentials::Op::Collections)))
+                || (legacy && !grant.covers(lineage, 0, "default"))
+            {
+                Err(forbidden_scope())
+            } else {
+                Ok(())
             }
         }
     }
@@ -1521,6 +1519,9 @@ async fn observe(
             | "/v1/auth/config"
             | "/v1/auth/login"
     );
+    // A gateway-trusted backend answers `/ready` to its platform probe
+    // without credentials (it holds no bearer token a probe could carry).
+    let public = public || (service.trust.is_some() && request.uri().path() == "/ready");
     // A session cookie is used only when no Authorization header is present.
     let (authentication, principal) = match users::resolve(
         &service,
@@ -2365,11 +2366,17 @@ fn decode_payload(text: &str) -> Result<Vec<u8>, ApiError> {
 
 async fn ready(State(service): State<Service>) -> Result<Json<Value>, ApiError> {
     if service.draining() {
-        return Err(ApiError::new(
-            StatusCode::SERVICE_UNAVAILABLE,
-            "draining",
-            "the server is shutting down; route new requests elsewhere",
-        ));
+        return Err(gateway_trust::draining());
+    }
+    if let Some(trust) = &service.trust {
+        // Fresh control state is what lets this backend authorize anything.
+        let body = trust.ready()?;
+        return service
+            .run_read(move |db| {
+                db.get(0)?;
+                Ok(Json(body))
+            })
+            .await;
     }
     service
         .run_read(|db| {
@@ -4069,8 +4076,11 @@ fn enforce_quota(
         .and_then(|name| name.split_once("__"))
         .map(|(id, _)| id)
         .filter(|id| id.len() == 32 && id.bytes().all(|b| b.is_ascii_hexdigit()));
-    let tenant = match (tenant_id, &service.admin.tenants) {
-        (Some(id), Some(store)) => store.quota(id)?,
+    let tenant = match (tenant_id, &service.trust, &service.admin.tenants) {
+        // A trusted backend has no tenant store: its fresh control state
+        // carries the same quota (fail closed when stale).
+        (Some(id), Some(trust), _) => trust.tenant_quota(id)?,
+        (Some(id), None, Some(store)) => store.quota(id)?,
         _ => None,
     };
     if grant.is_none_or(|g| g.max_vectors.is_none() && g.max_vectors_per_collection.is_none())

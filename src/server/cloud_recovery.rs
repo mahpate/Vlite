@@ -234,7 +234,12 @@ fn shared_key(
     .transpose()
 }
 
-fn connect(target_file: &FilePath, key_file: Option<&FilePath>) -> Result<Sets, RecoveryError> {
+/// Opens a target's set protocol; also how serving processes reach the
+/// control-state object in its coordination store.
+pub(super) fn connect(
+    target_file: &FilePath,
+    key_file: Option<&FilePath>,
+) -> Result<Sets, RecoveryError> {
     let target = read_target(target_file)?;
     let key = shared_key(&target, key_file)?;
     Ok(cloud::azure::connect(&target, key)?)

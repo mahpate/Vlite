@@ -1,0 +1,24 @@
+EPIC-004 gateway MVP: failing-first (red) capture
+Base: HEAD 9bbdb31a, with only the new tests added (tests/gateway_azurite.rs,
+its Cargo [[test]] entry, and the gateway test appended to tests/server_cli.rs).
+Host: Windows cargo, local Azurite (Docker in WSL) on 127.0.0.1:10000. No Azure access.
+
+1) cargo test --features server --test server_cli gateway_commands
+   exit=101
+   test gateway_commands_validate_configuration_and_keep_keys_out_of_output ... FAILED
+   panicked at tests\server_cli.rs:1797:5:
+    {"event":"startup_or_shutdown_failure","message":"usage: vlite-server <database-path> ..."}
+   (gateway-keygen is not a subcommand: the binary treats it as a database path)
+   test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 23 filtered out
+
+2) $env:VLITE_AZURITE_BLOB_ENDPOINT='http://127.0.0.1:10000/devstoreaccount1'
+   cargo test --features server --test gateway_azurite -- --ignored
+   exit=101
+   test gateway_and_trusted_backends_serve_isolate_and_fail_closed ... FAILED
+   panicked at tests\gateway_azurite.rs:591:5:
+   null {"event":"startup_or_shutdown_failure","message":"usage: vlite-server <database-path> ..."}
+   (the first step, gateway-keygen, does not exist; no gateway process can start)
+   test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 0 filtered out
+
+   An earlier attempt of (2) failed with ConnectionRefused at tests\gateway_azurite.rs:334
+   because the WSL VM had stopped Azurite; it was restarted and (2) re-run as recorded.

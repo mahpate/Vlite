@@ -986,6 +986,12 @@ impl Sets {
         format!("{}owner.json", self.prefix)
     }
 
+    /// The coordination store and the target prefix, for the control-state
+    /// object (feature-aca-ha ITEM-008) kept beside the set protocol.
+    pub(super) fn coordination(&self) -> (Arc<dyn ObjectStore>, String) {
+        (self.meta.clone(), self.prefix.clone())
+    }
+
     fn catalog_key(&self) -> String {
         format!("{}catalog.json", self.prefix)
     }

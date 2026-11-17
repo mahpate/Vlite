@@ -20,12 +20,17 @@
 //! backend endpoints, envelope audience, lineage, epoch `E`, binding
 //! generation and read-routing policy. Tenant status is not repeated there;
 //! it is the tenant list of the same snapshot.
-// Consumed by the gateway (EPIC-004); exercised by the tests here.
-#![cfg_attr(not(test), allow(dead_code))]
+//
+// Served by `vlite-server gateway` (gateway_mode) and gateway-trusted
+// backends (gateway_trust) through a `Feed`; written by
+// `vlite-server control-state publish|update`.
 use super::cloud_backup::{Cond, ObjectStore, StoreError};
 use super::*;
 use serde::Serialize;
-use std::sync::PoisonError;
+use std::io::Read as _;
+use std::path::PathBuf;
+use std::sync::{PoisonError, mpsc};
+use std::time::{Duration, Instant};
 
 pub(super) const SCHEMA: &str = "vlite.control-state/1";
 /// Same bound as `credentials.json` and `tenants.json`.
@@ -207,6 +212,16 @@ impl Snapshot {
     /// The directory record for `tenant`, if it is routed.
     pub(super) fn record_for(&self, tenant: &str) -> Option<&Route> {
         self.directory.iter().find(|route| route.tenant == tenant)
+    }
+
+    /// Tenant admission (deleted: 503, suspended: 403) from this snapshot.
+    pub(super) fn admit(&self, tenant: &str) -> Result<(), ApiError> {
+        tenants::admit(&self.tenants, tenant).map(drop)
+    }
+
+    /// The tenant's quota record, as `tenants::Store::quota` answers it.
+    pub(super) fn tenant_quota(&self, tenant: &str) -> Result<Option<tenants::Tenant>, ApiError> {
+        tenants::quota_in(&self.tenants, tenant)
     }
 
     /// Authenticates a `vlk_` token against this snapshot, with the same
@@ -412,6 +427,158 @@ impl Poller {
                 "control_state_stale",
                 "control state is older than its staleness bound",
             )),
+        }
+    }
+}
+
+/// An object name below the target's coordination prefix: 1..=256 of
+/// `[a-z0-9._/-]`, relative, no empty, `.` or `..` segment, and never one
+/// of the set protocol's own objects.
+pub(super) fn valid_object_name(name: &str) -> bool {
+    (1..=256).contains(&name.len())
+        && name.bytes().all(|b| {
+            b.is_ascii_lowercase() || b.is_ascii_digit() || matches!(b, b'.' | b'_' | b'/' | b'-')
+        })
+        && name
+            .split('/')
+            .all(|segment| !matches!(segment, "" | "." | ".."))
+        && !matches!(name, "owner.json" | "catalog.json")
+        && !name.starts_with("sets/")
+}
+
+/// Where a process reads (and the CLI writes) the control state: a cloud
+/// backup target file (account, containers, managed identity or loopback
+/// emulator key) plus an object name under its coordination prefix.
+#[derive(Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(super) struct Source {
+    pub(super) target_file: PathBuf,
+    pub(super) object: String,
+    #[serde(default)]
+    pub(super) shared_key_file: Option<PathBuf>,
+}
+
+impl Source {
+    /// Checks the object name; touches no file or store.
+    pub(super) fn validate(&self) -> Result<(), &'static str> {
+        if valid_object_name(&self.object) {
+            Ok(())
+        } else {
+            Err(
+                "control_state.object must be a relative [a-z0-9._/-] name outside the set protocol",
+            )
+        }
+    }
+
+    /// Opens the store (blocking client: call off the async runtime).
+    pub(super) fn connect(&self) -> Result<Objects, cloud_recovery::RecoveryError> {
+        let sets = cloud_recovery::connect(&self.target_file, self.shared_key_file.as_deref())?;
+        let (store, prefix) = sets.coordination();
+        Ok(Objects::new(store, format!("{prefix}{}", self.object)))
+    }
+}
+
+/// Bound for a `--directory-file`: the snapshot's own size bound.
+pub(super) fn read_directory_file(path: &std::path::Path) -> Result<Vec<Route>, ApiError> {
+    let invalid = || {
+        ApiError::new(
+            StatusCode::UNPROCESSABLE_ENTITY,
+            "directory_invalid",
+            "directory file must be a JSON array of directory records of at most 1 MiB",
+        )
+    };
+    let mut bytes = Vec::new();
+    std::fs::File::open(path)
+        .and_then(|file| file.take(MAX_BYTES + 1).read_to_end(&mut bytes))
+        .map_err(|_| invalid())?;
+    if bytes.len() as u64 > MAX_BYTES {
+        return Err(invalid());
+    }
+    serde_json::from_slice(&bytes).map_err(|_| invalid())
+}
+
+/// A serving process's live control state: one confirmed read before it
+/// serves, then a background thread re-reading every poll interval until
+/// stopped. Every failed poll is logged (`control_state_poll_failed`, with
+/// its code), never swallowed; the cached snapshot is refused once it was
+/// last confirmed more than S_ctl ago.
+pub(super) struct Feed {
+    poller: Poller,
+    base: Instant,
+    interval: Duration,
+    worker: Mutex<Option<(mpsc::Sender<()>, std::thread::JoinHandle<()>)>>,
+}
+
+impl Feed {
+    pub(super) fn new(
+        objects: Objects,
+        s_ctl_ms: u64,
+        poll_interval_ms: u64,
+    ) -> Result<Self, &'static str> {
+        if poll_interval_ms == 0 || poll_interval_ms >= s_ctl_ms {
+            return Err("poll interval must be positive and below S_ctl");
+        }
+        Ok(Self {
+            poller: Poller::new(objects, s_ctl_ms)?,
+            base: Instant::now(),
+            interval: Duration::from_millis(poll_interval_ms),
+            worker: Mutex::new(None),
+        })
+    }
+
+    fn now(&self) -> u64 {
+        u64::try_from(self.base.elapsed().as_millis()).unwrap_or(u64::MAX)
+    }
+
+    /// The snapshot to authorize with now, or the fail-closed 503.
+    pub(super) fn current(&self) -> Result<Arc<Snapshot>, ApiError> {
+        self.poller.current(self.now())
+    }
+
+    /// One blocking read; a failure is logged and returned.
+    pub(super) fn poll_once(&self) -> Result<u64, ApiError> {
+        let result = self.poller.poll(self.now());
+        if let Err(error) = &result {
+            log_stderr(
+                "warn",
+                "control_state",
+                json!({"event":"control_state_poll_failed","code":error.code}).to_string(),
+            );
+        }
+        result
+    }
+
+    /// Starts the poll thread; `on_poll` sees each confirmed generation.
+    pub(super) fn start(
+        self: &Arc<Self>,
+        on_poll: impl Fn(u64) + Send + 'static,
+    ) -> std::io::Result<()> {
+        let (stop, stopped) = mpsc::channel::<()>();
+        let feed = self.clone();
+        let thread = std::thread::Builder::new()
+            .name("control-state-poll".to_owned())
+            .spawn(move || {
+                while let Err(mpsc::RecvTimeoutError::Timeout) = stopped.recv_timeout(feed.interval)
+                {
+                    if let Ok(generation) = feed.poll_once() {
+                        on_poll(generation);
+                    }
+                }
+            })?;
+        *self.worker.lock().unwrap_or_else(PoisonError::into_inner) = Some((stop, thread));
+        Ok(())
+    }
+
+    /// Stops and joins the poll thread (at most one in-flight read).
+    pub(super) fn stop(&self) {
+        let worker = self
+            .worker
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .take();
+        if let Some((stop, thread)) = worker {
+            drop(stop);
+            let _ = thread.join();
         }
     }
 }

@@ -1091,25 +1091,39 @@ async fn revoke(
     let (store, log) = store(&service)?;
     let id = credential_id(id)?;
     tokio::task::spawn_blocking(move || {
-        let now = now();
-        let entries = store.entries.lock().map_err(internal)?;
-        let index = find(&entries, &id)?;
-        if entries[index].revoked_unix_ms.is_some() {
-            return Ok(Json(json!({"credential": entries[index].view(now)})));
-        }
-        let mut next = entries.clone();
-        next[index].revoked_unix_ms = Some(now);
-        let view = next[index].view(now);
-        store.commit(
-            &log,
-            entries,
-            next,
-            json!({"event":"credential_revoked","credential_id":id}),
-        )?;
+        let view = store.revoke_id(&log, &id, now(), None)?;
         Ok(Json(json!({"credential": view})))
     })
     .await
     .map_err(internal)?
+}
+
+impl Store {
+    /// Revokes credential `id` (idempotent) and returns its view. The audit
+    /// event names `source` when the change does not come from the admin
+    /// API (the offline `control-state update` command).
+    pub(super) fn revoke_id(
+        &self,
+        audit: &audit::Log,
+        id: &str,
+        now: u64,
+        source: Option<&str>,
+    ) -> Result<Value, ApiError> {
+        let entries = self.entries.lock().map_err(internal)?;
+        let index = find(&entries, id)?;
+        if entries[index].revoked_unix_ms.is_some() {
+            return Ok(entries[index].view(now));
+        }
+        let mut next = entries.clone();
+        next[index].revoked_unix_ms = Some(now);
+        let view = next[index].view(now);
+        let mut event = json!({"event":"credential_revoked","credential_id":id});
+        if let Some(source) = source {
+            event["source"] = json!(source);
+        }
+        self.commit(audit, entries, next, event)?;
+        Ok(view)
+    }
 }
 
 #[derive(Deserialize)]
