@@ -140,6 +140,8 @@ If a read-only container mount cannot resolve the checkout's Git metadata, pass
 both `VLITE_RESOURCE_SOURCE_REVISION` (full commit ID) and
 `VLITE_RESOURCE_SOURCE_DIRTY_PATHS` (raw `git status --porcelain` output) from
 the host; supplying only one fails, and the report names the provenance source.
+Optionally set `VLITE_RESOURCE_HOST_NOTE` to describe the host (for example,
+the container image and VM); otherwise the report records an unrecorded host.
 
 For baseline-plus-tail apply, fresh baseline-plus-tail recovery, and
 compaction, a sampler records allocated blocks (512-byte units) and sampled

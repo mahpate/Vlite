@@ -360,7 +360,9 @@ pub(crate) fn run() -> BoxResult<()> {
             "build_profile": if cfg!(debug_assertions) { "debug" } else { "release" },
             "host_resource_limits": cgroup_limits()?,
             "temporary_filesystem_location": directory.path().display().to_string(),
-            "host_note": "WSL Ubuntu 24.04 Docker container; local development evidence only"
+            "host_note": std::env::var("VLITE_RESOURCE_HOST_NOTE")
+                .unwrap_or_else(|_| "unrecorded local Linux host".to_owned()),
+            "host_note_source": "VLITE_RESOURCE_HOST_NOTE, operator supplied; local development evidence only"
         },
         "profile": {
             "profile_status": "selected development inputs, not qualified limits or a representative tenant workload",
