@@ -1060,7 +1060,7 @@ pub(crate) fn measure() -> BoxResult<()> {
             "apply_fsync_and_replay_separately": "UNMEASURED: no engine instrumentation",
             "process_peak_memory": "UNMEASURED: no existing dependency exposes it",
             "in_place_incremental_index_maintenance": "UNAVAILABLE: ReplicaFollower drops indexes on apply and exposes only &Database",
-            "staleness_for_a_and_c": "NOT MEASURED: derived lower bound only (refresh interval + refresh cost)"
+            "staleness_for_a_and_c": "UNMEASURED: no staleness distribution or bound for (a)/(c); refresh cost is not per-commit staleness"
         },
         "meas_001_007_cells": cells,
         "meas_007_compaction": compactions,

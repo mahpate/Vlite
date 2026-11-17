@@ -3,7 +3,9 @@
 This is the exported-segment first cut of MEAS-001/002/007, **not an HA
 qualification or a benchmark campaign**. It uses existing engine APIs only.
 It does not implement a continuously serving reader, an archive consumer,
-fencing, a gateway, or any of the three proposed reader strategies. It chooses
+fencing or a gateway. The ITEM-001 `--smoke` mode does not prototype the reader
+strategies; only the ITEM-002 `--measure` mode does, as local harness
+prototypes rather than runtime reader implementations. It chooses
 no strategy, staleness bound, enrollment limit or production capacity ceiling.
 GATE-001 and GATE-002 remain open. The ITEM-001 text below describes the
 `--smoke` mode; ITEM-002 added a separate `--measure` mode that prototypes
@@ -22,7 +24,8 @@ cargo run --quiet --locked --features json --example ha-reader-apply -- --smoke
 
 The second command prints one JSON document. Redirect stdout to a new artifact
 path outside the repository to retain observations. Build diagnostics go to
-stderr. The harness accepts **only** `--smoke`; it takes no database, endpoint,
+stderr. The harness accepts exactly one argument, `--smoke` or (since ITEM-002)
+`--measure`, and rejects anything else. It takes no database, endpoint,
 credential or production input. It creates fresh temporary files on the local
 temporary filesystem and removes them on success or error. Run from this
 checkout so the reported Git revision/dirty flag identifies the harness source.
@@ -251,10 +254,20 @@ both runs, per-ship `apply_inclusive` rose over the 15 s window (raw series in t
 artifact) while the follower database grew; the
 cause was not isolated.
 
-For (a) and (c), no staleness distribution was measured. Staleness is **at least the
-refresh interval plus the refresh cost** (derived lower bound). Using the MEAS-001
-medians, the refresh cost is, for example, 5,979.1 ms for (a) and 5,892.2 ms for
-(c) at 100,000/100.
+Staleness for (a) and (c) is **UNMEASURED**. No distribution and no modeled
+bound is given. The refresh costs in MEAS-001 are per-refresh costs, not
+per-commit staleness.
+
+**Erratum (post-review).** An earlier version of this section, and the saved
+artifact's `unmeasured.staleness_for_a_and_c` annotation, stated that the
+staleness of (a)/(c) was at least the "refresh interval + refresh cost", as a
+derived lower bound. That is incorrect as a per-commit bound. For example, a
+commit just before a snapshot cutoff waits almost no interval time.
+
+That annotation is superseded. The harness annotation now reads UNMEASURED
+without a bound. The artifact is preserved unchanged (SHA-256
+`C285130DF3B807D5559E002C0BEAABA3BA5F217735D984816EF8FB63A6CE9D04`), and its
+measured values remain valid.
 
 ### MEAS-007 local sampled bytes
 

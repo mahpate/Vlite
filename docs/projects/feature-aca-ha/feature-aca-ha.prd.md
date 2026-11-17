@@ -577,7 +577,7 @@ Estimates are planning estimates, not measurements. Statuses below track deliver
 
 **Isolated HA test deployment authorization (2026-11-16).** The owner authorized deploying a separate VLite instance for HA testing if required, while keeping the current production instance unchanged. This does not authorize replacing, updating, or enabling HA on production. No test instance has been provisioned.
 
-**ITEM-001 implementation note (2026-11-16).** Based on `b23c57fb5da181b804504fca3def3e5e675c9947` with no base divergence. The frozen draft was copied byte-for-byte before updating this worktree's copy (original SHA-256 `DC614AECD4D1BC955149F4D73BFB24C3B6550B3DBB85760461A30450EBB606C7`). No engine, server, public API, deployment or archive-publication behavior changed. The `ha-reader-apply` Cargo example accepts only `--smoke`; it creates and cleans up two deterministic synthetic fixtures (8/32 records, 8 dimensions, three update/delete/insert rounds), validates data/revisions/sequence/lineage, file shipping, reopen/resume, rejected continuity/envelope faults, empty tails and final byte-identical verified logs. Tests were written and failed against stubs before implementation.
+**ITEM-001 implementation note (2026-11-16).** Based on `b23c57fb5da181b804504fca3def3e5e675c9947` with no base divergence. The frozen draft was copied byte-for-byte before updating this worktree's copy (original SHA-256 `DC614AECD4D1BC955149F4D73BFB24C3B6550B3DBB85760461A30450EBB606C7`). No engine, server, public API, deployment or archive-publication behavior changed. At ITEM-001 the `ha-reader-apply` Cargo example accepted only `--smoke` (ITEM-002 later added `--measure`); the smoke mode creates and cleans up two deterministic synthetic fixtures (8/32 records, 8 dimensions, three update/delete/insert rounds), validates data/revisions/sequence/lineage, file shipping, reopen/resume, rejected continuity/envelope faults, empty tails and final byte-identical verified logs. Tests were written and failed against stubs before implementation.
 
 The local Windows x86_64 debug smoke captured actual raw export/save/load/apply/reopen/detached-index-build and oldest-ack-to-visible intervals, plus baseline/segment/follower file lengths. These are uncontrolled-cache shared-host diagnostics, not representative throughput or an ACA SLO. Baselines were 1,216/4,768 bytes; each three-commit delta had 348 frame bytes and a 464-byte serialized file; final follower lengths were 2,260/5,812 bytes and retained baseline-plus-delta staging 2,608/6,160 bytes. Inclusive apply contains fsync and replay, which are not separately instrumented. Index build uses a separately reopened read-only handle, not a mutable or continuously serving follower. The protocol defines all overlapping and inclusive boundaries.
 
@@ -601,6 +601,10 @@ MEAS-002 was local only, for (b), at 199.9 achieved commits/s with Full durabili
 - 1,000 ms ship interval: p50 528.7, p90 928.8, p99 1,017.9, max 1,025.9 ms.
 
 These figures exclude Blob, the durable head, ACA and network, and they are not an SLO.
+
+Staleness for (a) and (c) is UNMEASURED; no bound is claimed.
+
+**Erratum (post-review).** The saved artifact's `unmeasured.staleness_for_a_and_c` annotation, and an earlier version of the protocol doc, stated that staleness was at least "refresh interval + refresh cost". That is not a valid per-commit lower bound: a commit just before a snapshot cutoff waits almost no interval time. The annotation is superseded by the statement above. The artifact (SHA-256 `C285130DF3B807D5559E002C0BEAABA3BA5F217735D984816EF8FB63A6CE9D04`) is preserved unchanged, and its measured values stand.
 
 MEAS-007 sampled reader high-water ÷ reader file (derived) was:
 - (a): 1.559–1.999, plus a separate ship snapshot of 1.0× the file, so about 3× when colocated (derived).
