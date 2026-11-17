@@ -86,4 +86,4 @@ These are undecided. No value below is measured or approved.
 - **TEST-012 / AC-011.** This document states that gateway and reader replicas add no write capacity. Status output must say the same once a gateway mode exists (ITEM-015).
 - **TEST-002.** `server::gateway::` tests and `tests/api_route_inventory.py` check that the classifier matches the registered routes and the existing authorization rules.
 - **TEST-004, TEST-010, TEST-014.** Library and in-process router tests in `src/server/principal_envelope.rs`, `src/server/control_state.rs` and `src/server/gateway_trust_tests.rs`. They are not end-to-end gateway or ACA tests.
-- **TEST-003, TEST-005.** Multi-replica kill/add and drain tests need a running gateway (ITEM-017).
+- **TEST-003, TEST-005.** Multi-replica kill/add and drain tests need a running gateway. Their scenarios, and the end-to-end part of TEST-004, are in the [test plan](gateway-test-plan.md) (ITEM-017), which is NOT RUN.
