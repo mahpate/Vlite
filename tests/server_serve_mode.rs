@@ -7,7 +7,8 @@ use axum::{
     http::{Request, StatusCode},
 };
 use http_body_util::BodyExt;
-use serde_json::Value;
+use serde_json::{Value, json};
+use sha2::{Digest, Sha256};
 use tower::ServiceExt;
 use vlite::{
     CreateOptions, Database, FormatVersion,
@@ -151,6 +152,59 @@ async fn writer_serves_mutations_and_reports_its_mode() {
     assert_eq!(body["error"]["code"], "draining");
     let (_, body) = call(&app, Some(ADMIN), "GET", "/v1/admin/serve-status", "").await;
     assert_eq!(body["draining"], true);
+}
+
+#[tokio::test]
+async fn serve_status_refuses_scoped_and_tenant_keys() {
+    const TENANT: &str = "0123456789abcdef0123456789abcdef";
+    let directory = tempfile::tempdir().unwrap();
+    let db = Database::create_in_memory(2, CreateOptions::default()).unwrap();
+    let lineage = format!("{:016x}", db.lineage().unwrap());
+    let secret = "B".repeat(43);
+    let credentials: Vec<_> = [
+        ("global_all", "abcdefghij45", false),
+        ("tenant_all", "abcdefghij46", true),
+    ]
+    .into_iter()
+    .map(|(name, id, tenant)| {
+        json!({"id":id,"name":name,"all":true,"collections":[],"graphs":["*"],
+                "operations":["read","write","search","diagnostics","backup","graph_read"],
+                "lineage":lineage,
+                "secret_sha256":format!("{:x}",Sha256::digest(secret.as_bytes())),
+                "created_unix_ms":0,"expires_unix_ms":9_999_999_999_999u64,
+                "revoked_unix_ms":null,"rotated_from":null,
+                "tenant_id":tenant.then_some(TENANT)})
+    })
+    .collect();
+    std::fs::write(
+        directory.path().join("credentials.json"),
+        json!({"schema":1,"credentials":credentials}).to_string(),
+    )
+    .unwrap();
+    std::fs::write(
+        directory.path().join("tenants.json"),
+        json!([{"id":TENANT,"name":"serve tenant","max_vectors":null}]).to_string(),
+    )
+    .unwrap();
+    let app = configured_admin_router(
+        Service::new(db).with_serve_mode(ServeMode::Writer).unwrap(),
+        ServerOptions {
+            loopback_only: true,
+            admin_token: Some(BearerToken::new(ADMIN).unwrap()),
+            admin_directory: Some(directory.path().into()),
+            ..Default::default()
+        },
+    )
+    .unwrap();
+    for id in ["abcdefghij45", "abcdefghij46"] {
+        let key = format!("vlk_{id}_{secret}");
+        let (status, body) = call(&app, Some(&key), "GET", "/v1/admin/serve-status", "").await;
+        assert_eq!(status, StatusCode::FORBIDDEN, "{id}: {body}");
+        assert_eq!(body["error"]["code"], "forbidden_scope", "{id}: {body}");
+    }
+    let (status, body) = call(&app, Some(ADMIN), "GET", "/v1/admin/serve-status", "").await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert_eq!(body["mode"], "writer");
 }
 
 #[tokio::test]
