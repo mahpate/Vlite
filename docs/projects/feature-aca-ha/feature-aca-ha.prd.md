@@ -809,11 +809,12 @@ To reproduce:
 - *No automatic behavior.* There is no failover, reader routing (ITEM-021), automatic scaling or capacity claim.
 - *Rate-limit overshoot.* Replicas above `max_replicas` and rollout overlap overshoot the credential limit by the replica ratio; this is unqualified production behavior.
 - *Propagation window.* Until every gateway has polled a new generation, a backend that has already polled answers 401 `envelope_stale` for requests minted at the older generation.
-- *Truncation.* A response cut short after its status was sent reaches the client truncated (logged as `response_cut_short`).
+- *Truncation.* A response cut short after its status was sent, or that stalls for longer than `upstream_timeout_ms` between pieces, reaches the client truncated (logged as `response_cut_short`). A long stream is not cut off while data keeps arriving.
 - *Backend administration.*
   - The trusted backend has no admin directory: issuing credentials or tenants needs the admin directory managed offline, then `control-state update`.
   - That command takes no admin-directory lock, so it must not run beside a server using the same directory.
-  - It applies a revoke or suspend locally before the CAS write.
+  - It applies a revoke or suspend locally before the CAS write, so a failed publish leaves the change applied and unpublished. Repeating the command is safe: it publishes it.
+  - It republishes the whole admin directory with no staleness check: an older copy publishes its older state over newer changes.
   - In trusted mode `/v1/auth/config` still describes the local token configuration.
 - *Deferred.* Login, the dashboard, super-admin operations and memory-binding propagation do not go through a gateway. `/ready` fails when the snapshot is older than S_ctl but reports only the generation, not the snapshot age.
 - *Not run.* Keys come from files; Key Vault, managed-identity delivery and any ACA run are NOT RUN. MEAS-004/005/007 and GATE-003 remain open.

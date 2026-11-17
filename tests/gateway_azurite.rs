@@ -896,10 +896,23 @@ fn gateway_and_trusted_backends_serve_isolate_and_fail_closed() {
 
     // Revocation and suspension propagate through the control state to
     // every replica within the poll interval (bounded here by S_ctl).
-    control_state(
+    let revoked = control_state(
         &paths,
         "update",
         &["--revoke-credential".as_ref(), c2_id.as_ref()],
+    );
+    // Repeating the same update after a failed or unknown publish is safe:
+    // the revoke is idempotent and it publishes the next generation.
+    let repeated = control_state(
+        &paths,
+        "update",
+        &["--revoke-credential".as_ref(), c2_id.as_ref()],
+    );
+    assert_eq!(
+        repeated["generation"].as_u64(),
+        revoked["generation"]
+            .as_u64()
+            .map(|generation| generation + 1)
     );
     for gateway in [&g1, &g2] {
         eventually("revocation", Duration::from_millis(S_CTL_MS * 3), || {

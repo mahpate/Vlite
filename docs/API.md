@@ -1000,16 +1000,18 @@ upstream URL is the record's `writer` origin plus the caller's path and query.
 A record endpoint with a path, query, fragment or user name, or a path that
 URL normalization would change, is refused (503 `tenant_route_invalid` or 400
 `invalid_path`). The gateway follows no redirect and uses no proxy.
-`upstream_timeout_ms` bounds the connection and the whole exchange, including
-a streamed response.
+`upstream_timeout_ms` bounds connecting, waiting for the response head, and
+then each wait for the next piece of a streamed response. A long stream may
+last longer than it as long as data keeps arriving; a stall for longer than it
+cuts the response short.
 
 **Nothing is retried.**
 
 | Upstream failure | Answer |
 | --- | --- |
 | Connection refused or not established (nothing was sent) | 502 `backend_unavailable` |
-| Any later failure of a write | 502 `write_outcome_unknown` (the write may have been applied; read before you repeat it) |
-| A read that timed out | 504 `backend_timeout` |
+| Any later failure of a write, including no response head in time | 502 `write_outcome_unknown` (the write may have been applied; read before you repeat it) |
+| A read that timed out before its response head | 504 `backend_timeout` |
 | Any other read failure | 502 `backend_failed` |
 
 A response that fails after its status was sent is cut short and logged as
@@ -1106,7 +1108,7 @@ most 64 KiB and unknown fields are refused:
 | `drain_timeout_ms` | Positive. How long in-flight requests may finish after the listener closes; they are then aborted (`drain_timeout`). |
 | `max_request_bytes` | 1–8388608. |
 | `max_in_flight` | 1–65536. |
-| `upstream_timeout_ms` | Positive. |
+| `upstream_timeout_ms` | Positive. Bounds connecting, waiting for the response head and each wait for the next streamed piece of a response, not the whole response. |
 | `max_buckets` | 1–1000000. |
 
 Durations are at most 3600000 ms. No field has a default except
@@ -1174,7 +1176,10 @@ generation. A lost race is re-read and re-applied; an unknown store outcome
 answers `control_state_indeterminate` without a retry. Running the same
 command again after that is safe: it applies the same change and publishes
 another generation. Run only one `control-state update` at a time against an
-admin directory, and not while a standalone server uses it. Each gateway and
+admin directory, and not while a standalone server uses it. `update` publishes
+the whole admin directory, so run it from the directory that holds the current
+credentials and tenants: an older copy publishes its older state over newer
+changes, and nothing checks for that. Each gateway and
 backend picks up a new generation at its next successful poll; a backend then
 refuses envelopes minted from an older generation. Until every gateway has
 polled, some requests can therefore get 401 `envelope_stale`; callers may

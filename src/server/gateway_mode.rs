@@ -17,7 +17,10 @@
 //! headers (and any a `Connection` header nominates) are dropped. Request
 //! bodies are bounded (`max_request_bytes`), responses are streamed, the
 //! upstream client follows no redirect and uses no proxy, and the upstream
-//! URL is the record's origin plus the caller's validated path. Nothing is
+//! URL is the record's origin plus the caller's validated path.
+//! `upstream_timeout_ms` bounds connecting, waiting for the response head and
+//! each wait for the next piece of a streamed body; it is not a limit on the
+//! whole response. Nothing is
 //! retried: a write whose connection fails after it may have been sent is
 //! `502 write_outcome_unknown` (`gateway::ambiguous_write`).
 //!
@@ -168,11 +171,14 @@ pub async fn run_gateway(
     };
     let Settings { file, signer } = read_config(&path)?;
     let upstream = Duration::from_millis(file.upstream_timeout_ms);
+    // No client-wide `timeout`: reqwest would count it from the connect to
+    // the end of the body and cut a long streamed response short. A connect
+    // failure still proves nothing was sent; the other deadlines are applied
+    // per phase in `forward`.
     let client = reqwest::Client::builder()
+        .connect_timeout(upstream)
         .redirect(reqwest::redirect::Policy::none())
         .no_proxy()
-        .connect_timeout(upstream)
-        .timeout(upstream)
         .pool_idle_timeout(Duration::from_secs(30))
         .build()
         .map_err(|error| format!("gateway_start_failed: upstream client: {error}"))?;
@@ -210,6 +216,7 @@ pub async fn run_gateway(
         feed: feed.clone(),
         signer,
         client,
+        upstream_timeout: upstream,
         draining: AtomicBool::new(false),
         in_flight: Arc::new(Semaphore::new(file.max_in_flight)),
         buckets: Buckets::new(file.max_buckets),
@@ -296,6 +303,9 @@ struct Gateway {
     feed: Arc<Feed>,
     signer: Signer,
     client: reqwest::Client,
+    /// Bounds connecting and waiting for the response head, then each wait
+    /// for the next piece of a streamed response.
+    upstream_timeout: Duration,
     draining: AtomicBool,
     in_flight: Arc<Semaphore>,
     buckets: Buckets,
@@ -445,54 +455,81 @@ impl Gateway {
             HeaderName::from_static(principal_envelope::HEADER),
             envelope.parse().map_err(super::internal)?,
         );
-        let sent = self
-            .client
-            .request(parts.method.clone(), url)
-            .headers(headers)
-            .body(body)
-            .send()
-            .await;
+        let sent = tokio::time::timeout(
+            self.upstream_timeout,
+            self.client
+                .request(parts.method.clone(), url)
+                .headers(headers)
+                .body(body)
+                .send(),
+        )
+        .await;
         let upstream = match sent {
-            Ok(upstream) => upstream,
-            Err(error) => return Err(upstream_failure(&error, target.operation)),
+            Ok(Ok(upstream)) => upstream,
+            Ok(Err(error)) => {
+                return Err(upstream_failure(
+                    error.is_connect(),
+                    error.is_timeout(),
+                    target.operation,
+                ));
+            }
+            // Connecting or waiting for the response head took too long;
+            // whether the request was sent is unknown.
+            Err(_) => return Err(upstream_failure(false, true, target.operation)),
         };
         let status = upstream.status();
         let headers = response_headers(upstream.headers());
         let (sender, receiver) = tokio::sync::mpsc::channel::<Result<Bytes, std::io::Error>>(4);
         let operation = target.operation;
-        tokio::spawn(async move {
-            let _permit = permit;
-            let mut upstream = upstream;
-            loop {
-                match upstream.chunk().await {
-                    Ok(Some(chunk)) => {
-                        if sender.send(Ok(chunk)).await.is_err() {
-                            return;
-                        }
-                    }
-                    Ok(None) => return,
-                    Err(_) => {
-                        log_stderr(
-                            "warn",
-                            "gateway",
-                            json!({"event":"gateway_upstream_failed","code":"response_cut_short",
-                                "operation":operation_name(operation)})
-                            .to_string(),
-                        );
-                        let _ = sender
-                            .send(Err(std::io::Error::other("backend response cut short")))
-                            .await;
-                        return;
-                    }
-                }
-            }
-        });
+        tokio::spawn(pump(
+            upstream,
+            sender,
+            self.upstream_timeout,
+            permit,
+            operation,
+        ));
         let mut response = Response::new(Body::from_stream(
             tokio_stream::wrappers::ReceiverStream::new(receiver),
         ));
         *response.status_mut() = status;
         *response.headers_mut() = headers;
         Ok(response)
+    }
+}
+
+/// Copies the upstream body to the client. Each wait for the next piece gets
+/// `idle`, so a long stream is not cut off while data keeps arriving; a stall
+/// or an error ends it with an error the client sees as a truncated body.
+/// `_permit` is held until the stream ends.
+async fn pump(
+    mut upstream: reqwest::Response,
+    sender: tokio::sync::mpsc::Sender<Result<Bytes, std::io::Error>>,
+    idle: Duration,
+    _permit: tokio::sync::OwnedSemaphorePermit,
+    operation: Operation,
+) {
+    loop {
+        match tokio::time::timeout(idle, upstream.chunk()).await {
+            Ok(Ok(Some(chunk))) => {
+                if sender.send(Ok(chunk)).await.is_err() {
+                    return;
+                }
+            }
+            Ok(Ok(None)) => return,
+            Ok(Err(_)) | Err(_) => {
+                log_stderr(
+                    "warn",
+                    "gateway",
+                    json!({"event":"gateway_upstream_failed","code":"response_cut_short",
+                        "operation":operation_name(operation)})
+                    .to_string(),
+                );
+                let _ = sender
+                    .send(Err(std::io::Error::other("backend response cut short")))
+                    .await;
+                return;
+            }
+        }
     }
 }
 
@@ -505,8 +542,8 @@ fn operation_name(operation: Operation) -> &'static str {
 
 /// The client error for a failed forward. Only a connect failure proves
 /// nothing was sent; otherwise a write may have been applied.
-fn upstream_failure(error: &reqwest::Error, operation: Operation) -> ApiError {
-    let failure = if error.is_connect() {
+fn upstream_failure(connect: bool, timed_out: bool, operation: Operation) -> ApiError {
+    let failure = if connect {
         ApiError::new(
             StatusCode::BAD_GATEWAY,
             "backend_unavailable",
@@ -514,7 +551,7 @@ fn upstream_failure(error: &reqwest::Error, operation: Operation) -> ApiError {
         )
     } else if matches!(operation, Operation::Write) {
         gateway::ambiguous_write()
-    } else if error.is_timeout() {
+    } else if timed_out {
         ApiError::new(
             StatusCode::GATEWAY_TIMEOUT,
             "backend_timeout",
@@ -846,7 +883,12 @@ enum Mutation {
 /// creates generation 1 and refuses an existing object; `update` applies at
 /// most one local mutation (revoke a credential, suspend or resume a
 /// tenant) and then republishes at the next generation, keeping the
-/// directory unless `--directory-file` replaces it. The store is blocking:
+/// directory unless `--directory-file` replaces it. The local mutation is
+/// applied before the compare-and-swap, so a failed publish leaves it applied
+/// and unpublished; repeating the command is safe (the mutation is idempotent)
+/// and publishes it. `update` republishes the whole admin directory, so run it
+/// from the directory that holds the current credentials and tenants: an older
+/// copy publishes its older state over newer changes. The store is blocking:
 /// call off the async runtime.
 pub fn control_state_command(args: &[OsString]) -> Result<Value, String> {
     let usage = |detail: &str| format!("invalid_arguments: {detail}; usage: {CONTROL_USAGE}");
@@ -1007,6 +1049,106 @@ mod tests {
         ]));
         let names: Vec<&str> = response.keys().map(HeaderName::as_str).collect();
         assert_eq!(names, ["content-type", "content-length", "retry-after"]);
+    }
+
+    /// A one-shot HTTP/1.1 backend that sends its head, then `chunks` four-byte
+    /// chunks `gap` apart, and then either ends the body or stalls.
+    async fn trickle(chunks: usize, gap: Duration, stall: bool) -> reqwest::Response {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        tokio::spawn(async move {
+            let (mut socket, _) = listener.accept().await.unwrap();
+            let _ = socket.read(&mut [0u8; 1024]).await;
+            let _ = socket
+                .write_all(b"HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n\r\n")
+                .await;
+            for _ in 0..chunks {
+                tokio::time::sleep(gap).await;
+                let _ = socket.write_all(b"4\r\nabcd\r\n").await;
+            }
+            if stall {
+                tokio::time::sleep(Duration::from_secs(30)).await;
+            } else {
+                let _ = socket.write_all(b"0\r\n\r\n").await;
+            }
+        });
+        reqwest::Client::builder()
+            .no_proxy()
+            .build()
+            .unwrap()
+            .get(format!("http://{address}/"))
+            .send()
+            .await
+            .unwrap()
+    }
+
+    fn permit() -> tokio::sync::OwnedSemaphorePermit {
+        Arc::new(tokio::sync::Semaphore::new(1))
+            .try_acquire_owned()
+            .unwrap()
+    }
+
+    #[tokio::test]
+    async fn a_streamed_body_longer_than_the_timeout_arrives_intact() {
+        // 8 chunks 100 ms apart take about 800 ms, twice the 400 ms timeout;
+        // no single wait comes near it.
+        let upstream = trickle(8, Duration::from_millis(100), false).await;
+        let (sender, mut receiver) = tokio::sync::mpsc::channel(4);
+        tokio::spawn(pump(
+            upstream,
+            sender,
+            Duration::from_millis(400),
+            permit(),
+            Operation::Read,
+        ));
+        let mut body = Vec::new();
+        while let Some(piece) = receiver.recv().await {
+            body.extend_from_slice(&piece.expect("no piece fails"));
+        }
+        assert_eq!(body, b"abcd".repeat(8));
+    }
+
+    #[tokio::test]
+    async fn a_stalled_stream_is_cut_short_after_the_timeout() {
+        let upstream = trickle(1, Duration::from_millis(10), true).await;
+        let (sender, mut receiver) = tokio::sync::mpsc::channel(4);
+        tokio::spawn(pump(
+            upstream,
+            sender,
+            Duration::from_millis(300),
+            permit(),
+            Operation::Write,
+        ));
+        assert_eq!(receiver.recv().await.unwrap().unwrap(), "abcd");
+        assert!(receiver.recv().await.unwrap().is_err());
+        assert!(receiver.recv().await.is_none());
+    }
+
+    #[test]
+    fn upstream_failures_say_whether_anything_was_sent() {
+        let answer = |connect, timed_out, operation| {
+            let failure = upstream_failure(connect, timed_out, operation);
+            (failure.status.as_u16(), failure.code)
+        };
+        for operation in [Operation::Read, Operation::Write] {
+            assert_eq!(answer(true, false, operation), (502, "backend_unavailable"));
+            assert_eq!(answer(true, true, operation), (502, "backend_unavailable"));
+        }
+        assert_eq!(
+            answer(false, true, Operation::Read),
+            (504, "backend_timeout")
+        );
+        assert_eq!(
+            answer(false, false, Operation::Read),
+            (502, "backend_failed")
+        );
+        for timed_out in [false, true] {
+            assert_eq!(
+                answer(false, timed_out, Operation::Write),
+                (502, "write_outcome_unknown")
+            );
+        }
     }
 
     #[test]
