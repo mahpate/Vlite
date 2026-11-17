@@ -109,6 +109,11 @@ pub(super) fn admit(tenants: &[Tenant], id: &str) -> Result<Tenant, ApiError> {
     }
     Ok(tenant)
 }
+/// Whether `id` names a tenant that exists and is not deleted, so it may
+/// hold a route; suspension is left to `admit`.
+pub(super) fn routable(tenants: &[Tenant], id: &str) -> bool {
+    tenants.iter().any(|t| t.id == id && !t.deleted)
+}
 #[cfg(test)]
 impl Tenant {
     pub(super) fn for_test(id: &str, suspended: Option<u64>) -> Self {

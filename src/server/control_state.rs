@@ -14,6 +14,12 @@
 //! `credentials.json` (SEC-004). It never holds signing keys or plaintext
 //! secrets: unknown fields are refused, and credentials are only imported
 //! from a live store, never from a recovery inventory (rekey-only).
+//!
+//! It also carries the tenant directory the gateway routes by (ITEM-014,
+//! PRD section 3.11): one record per tenant naming its deployment kind,
+//! backend endpoints, envelope audience, lineage, epoch `E`, binding
+//! generation and read-routing policy. Tenant status is not repeated there;
+//! it is the tenant list of the same snapshot.
 // Consumed by the gateway (EPIC-004); exercised by the tests here.
 #![cfg_attr(not(test), allow(dead_code))]
 use super::cloud_backup::{Cond, ObjectStore, StoreError};
@@ -36,6 +42,119 @@ pub(super) struct Snapshot {
     written_unix_ms: u64,
     tenants: Vec<tenants::Tenant>,
     credentials: credentials::Snapshot,
+    /// Absent in objects written before the directory existed.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    directory: Vec<Route>,
+}
+
+/// How a tenant is deployed (PRD section 3.11; which tenants get which is
+/// OD-011).
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub(super) enum Kind {
+    /// Today's single standalone database, fronted unchanged: no reader and
+    /// no epoch, because it has no failover to fence.
+    SharedPool,
+    /// The tenant's own writer app and optional reader app, fenced by `E`.
+    Dedicated,
+}
+
+/// Where a tenant's staleness-tolerant reads may go (RD-007, FR-010).
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub(super) enum ReadRouting {
+    /// Every request goes to the writer (the default).
+    #[default]
+    WriterOnly,
+    /// Opt-in reader routing; not acted on until ITEM-021.
+    Readers,
+}
+
+/// One tenant directory record.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(super) struct Route {
+    pub(super) tenant: String,
+    pub(super) kind: Kind,
+    /// Base URL of the writer app (`shared-pool`: the standalone server).
+    pub(super) writer: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(super) reader: Option<String>,
+    /// The envelope audience the tenant's backends verify.
+    pub(super) audience: String,
+    pub(super) lineage: u64,
+    /// `E`: required for `dedicated`, absent for `shared-pool`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(super) epoch: Option<u64>,
+    /// The writer's memory-binding generation; a reader is eligible only at
+    /// the same value (FM-009).
+    #[serde(default)]
+    pub(super) binding_generation: u64,
+    #[serde(default)]
+    pub(super) read_routing: ReadRouting,
+}
+
+impl Route {
+    fn valid(&self, tenants: &[tenants::Tenant]) -> bool {
+        fn text(value: &str) -> bool {
+            !value.is_empty() && value.len() <= 2048 && !value.chars().any(char::is_control)
+        }
+        let shape = match self.kind {
+            Kind::SharedPool => {
+                self.reader.is_none()
+                    && self.epoch.is_none()
+                    && self.read_routing == ReadRouting::WriterOnly
+            }
+            Kind::Dedicated => {
+                self.epoch.is_some_and(|epoch| epoch > 0)
+                    && (self.read_routing == ReadRouting::WriterOnly || self.reader.is_some())
+            }
+        };
+        shape
+            && tenants::routable(tenants, &self.tenant)
+            && text(&self.writer)
+            && text(&self.audience)
+            && self.reader.as_deref().is_none_or(text)
+    }
+}
+
+#[cfg(test)]
+impl Route {
+    pub(super) fn dedicated_for_test(tenant: &str, epoch: u64) -> Self {
+        Self {
+            tenant: tenant.to_owned(),
+            kind: Kind::Dedicated,
+            writer: format!("https://writer-{tenant}.internal"),
+            reader: Some(format!("https://reader-{tenant}.internal")),
+            audience: format!("backend-{tenant}"),
+            lineage: 0x1234,
+            epoch: Some(epoch),
+            binding_generation: 3,
+            read_routing: ReadRouting::WriterOnly,
+        }
+    }
+
+    pub(super) fn shared_for_test(tenant: &str) -> Self {
+        Self {
+            tenant: tenant.to_owned(),
+            kind: Kind::SharedPool,
+            writer: "https://shared-pool.internal".to_owned(),
+            reader: None,
+            audience: "shared-pool".to_owned(),
+            lineage: 0x1234,
+            epoch: None,
+            binding_generation: 0,
+            read_routing: ReadRouting::WriterOnly,
+        }
+    }
+}
+
+/// At most one record per tenant, each valid against `tenants`.
+fn valid_directory(directory: &[Route], tenants: &[tenants::Tenant]) -> bool {
+    let mut routed = std::collections::HashSet::new();
+    directory
+        .iter()
+        .all(|route| routed.insert(route.tenant.as_str()) && route.valid(tenants))
 }
 
 fn unavailable(code: &'static str, message: &'static str) -> ApiError {
@@ -58,11 +177,36 @@ impl Snapshot {
                 None => Vec::new(),
             },
             credentials: credentials.snapshot()?,
+            directory: Vec::new(),
         })
     }
 
     pub(super) fn generation(&self) -> u64 {
         self.generation
+    }
+
+    /// `self` with its tenant directory replaced.
+    pub(super) fn with_directory(mut self, directory: Vec<Route>) -> Self {
+        self.directory = directory;
+        self
+    }
+
+    /// A fresh import of `credentials` and `tenants` that keeps this
+    /// snapshot's directory. A bare `import` starts with no directory, so
+    /// refreshing through it would silently unroute every tenant. Deleting a
+    /// tenant that still has a route makes the result fail validation when
+    /// published (`control_state_invalid`): unroute it first.
+    pub(super) fn reimport(
+        &self,
+        credentials: &credentials::Store,
+        tenants: Option<&tenants::Store>,
+    ) -> Result<Self, ApiError> {
+        Ok(Self::import(credentials, tenants)?.with_directory(self.directory.clone()))
+    }
+
+    /// The directory record for `tenant`, if it is routed.
+    pub(super) fn record_for(&self, tenant: &str) -> Option<&Route> {
+        self.directory.iter().find(|route| route.tenant == tenant)
     }
 
     /// Authenticates a `vlk_` token against this snapshot, with the same
@@ -89,6 +233,7 @@ impl Snapshot {
             || snapshot.generation == 0
             || !tenants::valid_store(&snapshot.tenants)
             || !snapshot.credentials.valid()
+            || !valid_directory(&snapshot.directory, &snapshot.tenants)
         {
             return Err(Self::invalid());
         }
@@ -579,6 +724,115 @@ mod tests {
         assert_eq!(
             stale_replica.current(5_001).err().unwrap().code,
             "control_state_stale"
+        );
+    }
+
+    #[test]
+    fn directory_round_trips_and_survives_a_reimport() {
+        let w = world();
+        // Objects written before the directory existed carry none and
+        // still parse: every tenant is unrouted.
+        w.objects().create(w.import(), 1).unwrap();
+        assert!(
+            !String::from_utf8(w.memory.raw(NAME).unwrap())
+                .unwrap()
+                .contains("directory")
+        );
+        assert_eq!(w.objects().read().unwrap().0.record_for(T1), None);
+
+        let directory = vec![Route::dedicated_for_test(T1, 7), Route::shared_for_test(T2)];
+        let next = w
+            .objects()
+            .update(2, |s| Ok(s.clone().with_directory(directory.clone())))
+            .unwrap();
+        assert_eq!(next.generation(), 2);
+        let raw = String::from_utf8(w.memory.raw(NAME).unwrap()).unwrap();
+        assert!(raw.contains(r#""kind":"shared-pool""#) && raw.contains("writer_only"));
+        let (read, _) = w.objects().read().unwrap();
+        assert_eq!(read.record_for(T1), Some(&directory[0]));
+        assert_eq!(read.record_for(T2).unwrap().kind, Kind::SharedPool);
+        assert_eq!(read.record_for(T2).unwrap().epoch, None);
+        assert_eq!(read.record_for("00000000000000000000000000000000"), None);
+
+        // A credential refresh keeps the routes; a bare import would drop them.
+        credentials::tests::revoke(&w.credentials, "cccccccccccc", 3);
+        let refreshed = w
+            .objects()
+            .update(4, |s| s.reimport(&w.credentials, Some(&w.tenants)))
+            .unwrap();
+        assert_eq!(refreshed.generation(), 3);
+        assert_eq!(refreshed.record_for(T1), Some(&directory[0]));
+        assert!(refreshed.authenticate(&w.tokens[2], 5).is_err());
+    }
+
+    #[test]
+    fn invalid_directory_records_are_refused() {
+        let w = world();
+        let bad = Route {
+            epoch: Some(0),
+            ..Route::dedicated_for_test(T1, 1)
+        };
+        let error = w
+            .objects()
+            .create(w.import().with_directory(vec![bad]), 1)
+            .err()
+            .unwrap();
+        assert_eq!(error.code, "control_state_invalid");
+        assert!(w.memory.raw(NAME).is_none(), "nothing published");
+
+        let directory = vec![Route::dedicated_for_test(T1, 7), Route::shared_for_test(T2)];
+        w.objects()
+            .create(w.import().with_directory(directory), 1)
+            .unwrap();
+        let good: Value = serde_json::from_slice(&w.memory.raw(NAME).unwrap()).unwrap();
+        let mut cases = Vec::new();
+        let mut v = good.clone();
+        v["directory"][1] = v["directory"][0].clone();
+        cases.push(v);
+        let mut v = good.clone();
+        v["directory"][0]["tenant"] = json!("00000000000000000000000000000000");
+        cases.push(v);
+        let mut v = good.clone();
+        v["tenants"][0]["deleted"] = json!(true);
+        cases.push(v);
+        for (field, value) in [
+            ("writer", json!("")),
+            ("writer", json!("https://a\nb")),
+            ("audience", json!("")),
+            ("epoch", json!(0)),
+            ("epoch", Value::Null),
+            ("kind", json!("replica")),
+            ("read_routing", json!("anywhere")),
+            ("signing_key", json!("00")),
+        ] {
+            let mut v = good.clone();
+            v["directory"][0][field] = value;
+            cases.push(v);
+        }
+        // Opt-in reader routing needs a reader.
+        let mut v = good.clone();
+        v["directory"][0]["read_routing"] = json!("readers");
+        v["directory"][0].as_object_mut().unwrap().remove("reader");
+        cases.push(v);
+        // `shared-pool` has nothing to fence and no reader.
+        let mut v = good.clone();
+        v["directory"][1]["epoch"] = json!(1);
+        cases.push(v);
+        let mut v = good.clone();
+        v["directory"][1]["reader"] = json!("https://reader");
+        cases.push(v);
+        for case in cases {
+            w.memory.set_raw(NAME, &serde_json::to_vec(&case).unwrap());
+            let error = w.objects().read().err().expect("refused");
+            assert_eq!(error.code, "control_state_invalid", "{case}");
+        }
+        let mut v = good.clone();
+        v["directory"][0]["read_routing"] = json!("readers");
+        w.memory.set_raw(NAME, &serde_json::to_vec(&v).unwrap());
+        let (read, _) = w.objects().read().unwrap();
+        assert_eq!(
+            read.record_for(T1).unwrap().read_routing,
+            ReadRouting::Readers
         );
     }
 }

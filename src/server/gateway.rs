@@ -16,11 +16,26 @@
 //!
 //! It also sizes each replica's slice of a credential rate limit
 //! (`replica_share`, ITEM-016, PRD section 3.4.7).
+//!
+//! Routing (ITEM-014, PRD sections 3.4.6, 3.4.8 and 3.7) is a library that
+//! no serving mode calls yet (OD-012): `route_target` picks the backend for
+//! an authenticated tenant from the control-state directory, `mint` signs
+//! that backend's principal envelope, `Delivery::may_retry` allows a retry
+//! only when a request provably never reached a backend (a read may always
+//! retry), and `check_epoch` refuses a response stamped with an epoch older
+//! than the directory's. The target is always the writer; reader routing is
+//! ITEM-021. Still open: a backend verifies one envelope tenant
+//! (`principal_envelope::Policy`), so one `shared-pool` backend serving
+//! several tenants needs OD-011/OD-012 work; untenanted and super-admin
+//! requests have no route (OD-004/OD-012); and the response header that
+//! carries the epoch is named when the mode is wired.
 #![cfg_attr(not(test), allow(dead_code))]
 
-use axum::http::Method;
+use axum::http::{Method, StatusCode};
 
-use super::{Need, permission, read_request};
+use super::{
+    ApiError, Need, control_state, credentials, permission, principal_envelope, read_request,
+};
 
 /// Whether a classified request only reads.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -374,6 +389,167 @@ pub(super) fn replica_share(
     Ok(share)
 }
 
+/// Where the gateway sends an authenticated request.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(super) struct Target {
+    /// Base URL of the receiving backend.
+    pub(super) endpoint: String,
+    /// The envelope audience that backend verifies.
+    pub(super) audience: String,
+    /// `E` the backend must stamp on its response; `None` for `shared-pool`,
+    /// which has no failover to fence.
+    pub(super) epoch: Option<u64>,
+    pub(super) operation: Operation,
+}
+
+/// Why an authenticated request has no backend.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(super) enum RouteRefusal {
+    /// The credential has no tenant; how such requests pass a gateway is
+    /// still open (OD-004, OD-012).
+    NoTenant,
+    /// The tenant has no directory record.
+    NoRecord,
+}
+
+impl RouteRefusal {
+    pub(super) fn error(self) -> ApiError {
+        match self {
+            Self::NoTenant => ApiError::new(
+                StatusCode::FORBIDDEN,
+                "gateway_tenant_required",
+                "this gateway serves tenant credentials only",
+            ),
+            Self::NoRecord => ApiError::new(
+                StatusCode::SERVICE_UNAVAILABLE,
+                "tenant_not_routed",
+                "the tenant has no backend yet; ask an administrator",
+            ),
+        }
+    }
+}
+
+/// The backend for `grant`'s request, from the directory in `snapshot`
+/// (the snapshot that authenticated `grant`).
+pub(super) fn route_target(
+    classification: Classification,
+    grant: &credentials::Grant,
+    snapshot: &control_state::Snapshot,
+) -> Result<Target, RouteRefusal> {
+    let tenant = grant.tenant_id.as_deref().ok_or(RouteRefusal::NoTenant)?;
+    target_for(classification, snapshot.record_for(tenant))
+}
+
+/// Every request goes to the writer: a write must reach the writer whose
+/// epoch the record names (PRD section 3.7), and reads stay there until
+/// reader routing (ITEM-021) acts on `read_routing`.
+fn target_for(
+    classification: Classification,
+    record: Option<&control_state::Route>,
+) -> Result<Target, RouteRefusal> {
+    let record = record.ok_or(RouteRefusal::NoRecord)?;
+    Ok(Target {
+        endpoint: record.writer.clone(),
+        audience: record.audience.clone(),
+        epoch: record.epoch,
+        operation: classification.operation,
+    })
+}
+
+/// The principal envelope for `grant` to `target`, valid from `now` for
+/// `lifetime_ms` and carrying control-state generation `A` (RD-004).
+pub(super) fn mint(
+    signer: &principal_envelope::Signer,
+    target: &Target,
+    grant: &credentials::Grant,
+    generation: u64,
+    now: u64,
+    lifetime_ms: u64,
+) -> Result<String, &'static str> {
+    if lifetime_ms == 0 {
+        return Err("an envelope needs a positive lifetime");
+    }
+    let exp = now
+        .checked_add(lifetime_ms)
+        .ok_or("envelope expiry overflows")?;
+    signer.sign(&principal_envelope::Claims {
+        aud: target.audience.clone(),
+        iat: now,
+        exp,
+        generation,
+        principal: credentials::Principal::of(grant),
+    })
+}
+
+/// How far a forwarded request got before it failed (PRD section 3.4.6).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(super) enum Delivery {
+    /// Refused before any byte was sent: no backend saw it.
+    NotSent,
+    /// Failed after a byte was sent, before a response arrived.
+    Sent,
+    /// The response was lost or cut short after the backend may have acted.
+    ResponseLost,
+}
+
+impl Delivery {
+    /// Writes have no general idempotency (SRC-015), so only a write that
+    /// was never sent may be retried; a read may be retried after any
+    /// failure (FR-007).
+    pub(super) fn may_retry(self, operation: Operation) -> bool {
+        self == Self::NotSent || operation == Operation::Read
+    }
+}
+
+/// What a client is told when a write may or may not have been applied.
+pub(super) fn ambiguous_write() -> ApiError {
+    ApiError::new(
+        StatusCode::BAD_GATEWAY,
+        "write_outcome_unknown",
+        "the write may or may not have been applied; read before retrying",
+    )
+}
+
+/// Why a backend response is not accepted (PRD section 3.4.8).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(super) enum EpochRefusal {
+    /// The record names an epoch and the response carries none.
+    Missing,
+    /// The response comes from an epoch older than the record's: a deposed
+    /// writer answered.
+    Stale,
+}
+
+impl EpochRefusal {
+    /// A refused write may have been applied by the deposed writer, so it
+    /// is ambiguous; a refused read is stale and may be retried.
+    pub(super) fn error(self, operation: Operation) -> ApiError {
+        match operation {
+            Operation::Write => ambiguous_write(),
+            Operation::Read => ApiError::new(
+                StatusCode::SERVICE_UNAVAILABLE,
+                "backend_epoch_stale",
+                "the tenant's writer changed; retry the request",
+            ),
+        }
+    }
+}
+
+/// Checks the epoch `stamped` on a response against the `expected` one in
+/// the gateway's directory. A newer stamp is accepted: the directory is
+/// behind and catches up within S_ctl. The residual window, a deposed
+/// writer answering before the directory moves, is OD-002.
+pub(super) fn check_epoch(expected: Option<u64>, stamped: Option<u64>) -> Result<(), EpochRefusal> {
+    let Some(expected) = expected else {
+        return Ok(());
+    };
+    match stamped {
+        None => Err(EpochRefusal::Missing),
+        Some(stamped) if stamped < expected => Err(EpochRefusal::Stale),
+        Some(_) => Ok(()),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -680,5 +856,158 @@ mod tests {
             replica_share(1, u32::MAX),
             Err(ShareRefusal::BelowOneRequest)
         );
+    }
+
+    mod routing {
+        use super::super::*;
+        use crate::server::control_state::{ReadRouting, Route, Snapshot};
+        use crate::server::principal_envelope::{Policy, Refusal as EnvelopeRefusal, Verifier};
+        use crate::server::{credentials, tenants};
+
+        const T1: &str = "0123456789abcdef0123456789abcdef";
+        const T2: &str = "fedcba9876543210fedcba9876543210";
+
+        fn read() -> Classification {
+            classify(&Method::GET, "/v1/collections").unwrap()
+        }
+
+        fn write() -> Classification {
+            classify(&Method::POST, "/v1/collections").unwrap()
+        }
+
+        /// T1 routed to a dedicated writer at epoch 5; T2 a tenant with no
+        /// record; the third token untenanted.
+        fn routed() -> (Snapshot, Vec<String>) {
+            let (credentials, tokens) = credentials::tests::issued(
+                &[
+                    ("aaaaaaaaaaaa", Some(T1)),
+                    ("bbbbbbbbbbbb", Some(T2)),
+                    ("cccccccccccc", None),
+                ],
+                0x77,
+            );
+            let tenants = tenants::Store::for_test(vec![
+                tenants::Tenant::for_test(T1, None),
+                tenants::Tenant::for_test(T2, None),
+            ]);
+            let snapshot = Snapshot::import(&credentials, Some(&tenants))
+                .unwrap()
+                .with_directory(vec![Route::dedicated_for_test(T1, 5)]);
+            (snapshot, tokens)
+        }
+
+        #[test]
+        fn every_request_targets_the_writer_even_with_reader_routing() {
+            let mut record = Route::dedicated_for_test(T1, 5);
+            record.read_routing = ReadRouting::Readers;
+            for (classification, operation) in
+                [(read(), Operation::Read), (write(), Operation::Write)]
+            {
+                let target = target_for(classification, Some(&record)).unwrap();
+                assert_eq!(
+                    target,
+                    Target {
+                        endpoint: record.writer.clone(),
+                        audience: record.audience.clone(),
+                        epoch: Some(5),
+                        operation,
+                    }
+                );
+                assert_ne!(Some(target.endpoint), record.reader);
+            }
+            let shared = Route::shared_for_test(T1);
+            let target = target_for(write(), Some(&shared)).unwrap();
+            assert_eq!(target.endpoint, shared.writer);
+            assert_eq!(target.audience, "shared-pool");
+            assert_eq!(target.epoch, None);
+            assert_eq!(target_for(read(), None), Err(RouteRefusal::NoRecord));
+        }
+
+        #[test]
+        fn route_target_uses_the_authenticated_tenant_record() {
+            let (snapshot, tokens) = routed();
+            let grant = snapshot.authenticate(&tokens[0], 1).unwrap();
+            let target = route_target(write(), &grant, &snapshot).unwrap();
+            assert_eq!(target.endpoint, format!("https://writer-{T1}.internal"));
+            assert_eq!(target.epoch, Some(5));
+
+            let unrouted = snapshot.authenticate(&tokens[1], 1).unwrap();
+            let refusal = route_target(read(), &unrouted, &snapshot).unwrap_err();
+            assert_eq!(refusal, RouteRefusal::NoRecord);
+            let error = refusal.error();
+            assert_eq!(error.status, StatusCode::SERVICE_UNAVAILABLE);
+            assert_eq!(error.code, "tenant_not_routed");
+
+            let untenanted = snapshot.authenticate(&tokens[2], 1).unwrap();
+            let refusal = route_target(read(), &untenanted, &snapshot).unwrap_err();
+            assert_eq!(refusal, RouteRefusal::NoTenant);
+            let error = refusal.error();
+            assert_eq!(error.status, StatusCode::FORBIDDEN);
+            assert_eq!(error.code, "gateway_tenant_required");
+        }
+
+        #[test]
+        fn only_unsent_writes_are_retried() {
+            for delivery in [Delivery::NotSent, Delivery::Sent, Delivery::ResponseLost] {
+                assert!(delivery.may_retry(Operation::Read), "{delivery:?}");
+                assert_eq!(
+                    delivery.may_retry(Operation::Write),
+                    delivery == Delivery::NotSent,
+                    "{delivery:?}"
+                );
+            }
+            let error = ambiguous_write();
+            assert_eq!(error.status, StatusCode::BAD_GATEWAY);
+            assert_eq!(error.code, "write_outcome_unknown");
+        }
+
+        #[test]
+        fn a_minted_envelope_verifies_only_at_its_target() {
+            let (snapshot, tokens) = routed();
+            let grant = snapshot.authenticate(&tokens[0], 1).unwrap();
+            let target = route_target(write(), &grant, &snapshot).unwrap();
+            let signer = principal_envelope::Signer::from_seed("gw-1", &[7; 32]).unwrap();
+            let token = mint(&signer, &target, &grant, 4, 1_000, 30_000).unwrap();
+            let verifier = |audience: &str| {
+                Verifier::new(
+                    vec![(signer.metadata().active_kid.clone(), signer.public_key())],
+                    Policy {
+                        audience: audience.to_owned(),
+                        tenant: Some(T1.to_owned()),
+                        skew_ms: 1_000,
+                        max_lifetime_ms: 60_000,
+                        minimum_generation: 1,
+                    },
+                )
+                .unwrap()
+            };
+            let verified = verifier(&target.audience).verify(&token, 2_000).unwrap();
+            assert_eq!(verified.tenant_id.as_deref(), Some(T1));
+            assert_eq!(verified.id, grant.id);
+            assert_eq!(
+                verifier("backend-other").verify(&token, 2_000).err(),
+                Some(EnvelopeRefusal::Audience)
+            );
+            assert!(mint(&signer, &target, &grant, 4, 1_000, 0).is_err());
+            assert!(mint(&signer, &target, &grant, 4, u64::MAX, 1).is_err());
+        }
+
+        #[test]
+        fn responses_from_an_older_epoch_are_refused() {
+            assert_eq!(check_epoch(None, None), Ok(()));
+            assert_eq!(check_epoch(None, Some(3)), Ok(()));
+            assert_eq!(check_epoch(Some(5), None), Err(EpochRefusal::Missing));
+            assert_eq!(check_epoch(Some(5), Some(4)), Err(EpochRefusal::Stale));
+            assert_eq!(check_epoch(Some(5), Some(5)), Ok(()));
+            assert_eq!(check_epoch(Some(5), Some(6)), Ok(()));
+            for refusal in [EpochRefusal::Missing, EpochRefusal::Stale] {
+                let write = refusal.error(Operation::Write);
+                assert_eq!(write.status, StatusCode::BAD_GATEWAY);
+                assert_eq!(write.code, "write_outcome_unknown");
+                let read = refusal.error(Operation::Read);
+                assert_eq!(read.status, StatusCode::SERVICE_UNAVAILABLE);
+                assert_eq!(read.code, "backend_epoch_stale");
+            }
+        }
     }
 }

@@ -60,13 +60,14 @@ Backends never trust the gateway alone: a request without a valid envelope gets 
 | Gateway-trusted backend authentication (ITEM-010) | Crate-private. Envelope-only authentication feeding the existing `permission`/`authorize`/guard path. | No |
 | Operation classifier (ITEM-013) | Library. Classifies all 179 registered REST routes by method and path; unknown paths and methods are refused, never forwarded. | No |
 | Per-replica rate-limit share (ITEM-016) | Library. `replica_share` gives each replica `limit / max_replicas`, never rounded up; refuses zero replicas and shares under one request a second. Needs the OD-006 maximum. | No |
-| Routing, envelope minting, readiness by snapshot age, drain, edge rate limiting (ITEM-014, ITEM-015, ITEM-016 wiring) | Not started | - |
+| Tenant directory and routing (ITEM-014) | Library. The control-state snapshot carries one validated record per tenant (`shared-pool` or `dedicated`, writer, optional reader, audience, epoch). Every tenant request targets its writer (reader routing is ITEM-021); the envelope is minted with generation `A`; only unsent writes are retried; responses from an older epoch are refused. A credential without a tenant gets `403 gateway_tenant_required`, an unrouted tenant `503 tenant_not_routed`. Wiring needs OD-012. | No |
+| Gateway serving mode, readiness by snapshot age, drain, edge rate limiting (ITEM-014 wiring, ITEM-015, ITEM-016 wiring) | Not started | - |
 
 ## Behavior the gateway must keep
 
 - **Fail closed.** With no snapshot, or one older than S_ctl, authentication answers `503`. There is no empty-policy or allow-by-default fallback (C-07, FM-004).
 - **Bounded revocation.** Revocation, suspension and binding changes reach every replica within S_ctl. Backends also refuse an envelope whose `A` is below the highest generation they have seen (C-06).
-- **No retry of ambiguous writes.** A write is retried only if it provably never reached a backend. Anything else is reported to the client as ambiguous, because most writes have no idempotency key (RD-010).
+- **No retry of ambiguous writes.** A write is retried only if it provably never reached a backend. Anything else is reported to the client as ambiguous (`502 write_outcome_unknown`), because most writes have no idempotency key (RD-010).
 - **No sticky sessions.** Affinity would hide state bugs.
 - **Readiness without `/metrics`.** The gateway needs its own readiness route reporting snapshot age; `/metrics` is refused when memory bindings exist.
 - **Rate limits are shares.** Each replica enforces `limit / gateway_max_replicas`, never rounded up. Below the maximum replica count the tenant is under-served; temporary ACA over-replication during platform upgrades can overshoot the tenant limit (PRD 3.4.7).
