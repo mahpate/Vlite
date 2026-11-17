@@ -571,7 +571,7 @@ Estimates are planning estimates, not measurements. Statuses below track deliver
 |---|---|---|---|
 | ITEM-001 | Define measurement protocol and harness for MEAS-001/002/007. First cut uses existing exported segments; local correctness smoke is not archive/ACA qualification. | Done (exported-segment preparatory first cut only) | `benchmarks/ha_reader_apply.rs`, `benchmarks/ha_reader_apply_tests.rs`, `benchmarks/ha-reader-apply.md`, `Cargo.toml` |
 | ITEM-002 | Run on a non-production fixture only after owner approval; record results and the strategy decision. | Done (local evidence; strategy recommendation pending owner confirmation) | `benchmarks/ha_reader_strategies.rs`, `benchmarks/ha_reader_apply.rs`, `benchmarks/ha_reader_apply_tests.rs`, `benchmarks/ha-reader-apply.md`, `docs/projects/feature-aca-ha/` |
-| ITEM-003 | Define the reader capacity ceiling and enrollment refusal. | Not Started | `src/server/cloud_backup.rs` |
+| ITEM-003 | Define the reader capacity ceiling and enrollment refusal. | Blocked (owner strategy confirmation; unmeasured qualification evidence; no enrollment path) | `src/server/cloud_backup.rs` |
 
 **ITEM-002 authorization (2026-11-16).** The owner approved reader measurements on existing local/non-production fixtures only. No Azure provisioning, production access, deployment, or failover is authorized. The local measurement run was completed under this authorization (see the ITEM-002 result note).
 
@@ -636,7 +636,7 @@ Deviations from the brief:
 - These are local synthetic fixtures on a shared host, with no Azure, Blob or ACA. ACA is unqualified, and Blob upload, the durable head and ACA staleness are UNMEASURED.
 - In-place incremental index maintenance does not exist. `ReplicaFollower` drops indexes and exposes only `&Database`. ANN readiness under every option is therefore bounded by a full `build_hnsw`, a median of about 5.1–5.3 s at 100,000 records. Under (b), ANN serving would need a periodic detached rebuild or a future engine change.
 - Process memory, allocated blocks, fsync/replay split and sizes above 100,000 are UNMEASURED.
-- ITEM-003 (capacity ceiling and enrollment refusal) is Not Started, so GATE-002 remains open.
+- ITEM-003 (capacity ceiling and enrollment refusal) is Blocked (see the ITEM-003 blocker note), so GATE-002 remains open.
 
 **Remaining measurement gates.** ITEM-002 measured the three reader strategies, a local-only (b) staleness distribution and local sampled file-length high-water and compaction headroom on synthetic fixtures (above). The following remain explicitly UNMEASURED:
 - Blob upload and durable-head latency.
@@ -646,7 +646,19 @@ Deviations from the brief:
 - An online (live-writer) baseline.
 - In-place incremental index maintenance, which is unavailable in the engine.
 
-Archive consumer/progress/baseline interfaces and Q-1..Q-6 remain dependencies. Sampled file lengths are not a qualified enrollment ceiling. GATE-002 remains open (GATE-001's code-implementation go is recorded under EPIC-002): the strategy above is PROPOSED pending owner confirmation, and ITEM-003 (capacity ceiling) remains Not Started.
+Archive consumer/progress/baseline interfaces and Q-1..Q-6 remain dependencies. Sampled file lengths are not a qualified enrollment ceiling. GATE-002 remains open (GATE-001's code-implementation go is recorded under EPIC-002): the strategy above is PROPOSED pending owner confirmation, and ITEM-003 (capacity ceiling) is Blocked.
+
+**ITEM-003 blocker note (2026-11-17; Blocked, not Done).** No capacity ceiling is set and no enrollment refusal is implemented. The item cannot proceed without inventing evidence or behavior, for three reasons:
+- *Owner decision missing.* The reader strategy ((b) incremental apply with (c) re-seed) is PROPOSED and pending owner confirmation. The disk multiplier that a ceiling depends on differs by strategy: sampled 1.001–1.441× for (b), 2.000× for (c), and about 3× colocated for (a). Re-seed and compaction add their own peaks (compaction sampled at up to 2.148× input; a sample, not a bound). A ceiling cannot be derived before the owner confirms the strategy.
+- *Qualification evidence missing.* MEAS-007 evidence is only sampled logical file lengths at phase boundaries on a shared Windows host with synthetic fixtures (largest database 33,870,672 B). Allocated-block and transient peaks, process RSS and index memory, the target ACA vCPU/ephemeral-storage tier (AZ-001: about 1/2/4/8 GiB), a representative tenant workload and sizes above 100,000 records are UNMEASURED. A sampled high-water is not a guaranteed bound, and no multiplier or ACA-tier extrapolation is applied.
+- *No enrollment path exists.* Reader serve mode (EPIC-002) admission checks only for a read-only database; there is no archive bootstrap or reader enrollment, which EPIC-005 delivers. A refusal check now would be unwired or invent new enrollment API, CLI or configuration, which is out of scope.
+
+The existing `MAX_DATABASE_BYTES` (1 GiB) and restore free-space check in `src/server/cloud_backup.rs` qualify standalone cloud backup/restore only. They are not an HA reader ceiling and are unchanged; standalone wire behavior is unchanged.
+
+*Next unblock actions, in order:*
+1. Owner confirms or overrules the proposed reader strategy (GATE-002 input).
+2. Run MEAS-007 qualification for the confirmed strategy on the target ACA vCPU/storage tier, using the separately authorized HA test instance (not yet provisioned) or an equivalent non-production host. Record allocated-block and transient disk peaks, process memory and a representative workload, including re-seed and compaction.
+3. Set the qualified ceiling from those recorded numbers, then implement and test the refusal in the EPIC-005 enrollment/bootstrap path, refusing before any download or apply.
 
 To reproduce:
 - Bounded checks: `cargo test --locked --features json --example ha-reader-apply --test replica`.
@@ -779,6 +791,7 @@ To reproduce:
 
 | Date | Change |
 |---|---|
+| 2026-11-17 | EPIC-001 ITEM-003 recorded as Blocked, not Done: no ceiling set and no refusal implemented. Blockers are owner confirmation of the proposed reader strategy, unmeasured MEAS-007 qualification evidence (allocated/transient peaks, memory, target ACA tier, representative workload), and no reader enrollment path before EPIC-005. Docs only; no code, measurement or backup-limit change. GATE-002 remains open. |
 | 2026-11-17 | EPIC-001 ITEM-002 local measurements recorded (`--measure` harness at `607f9b22`; synthetic local fixtures only): MEAS-001 per-strategy costs, local (b) MEAS-002 percentiles, MEAS-007 sampled high-water and compaction. PROPOSED reader strategy (b) incremental apply with (c) re-seed, pending owner confirmation. GATE-002 remains open; ITEM-003 Not Started. |
 | 2026-11-16 | GATE-001 criteria verified on merged tree `75df5738`; owner go-ahead recorded as code-implementation go only. EPIC-002 serving modes, reader refusal, drain readiness and serve-status delivered with tests. No deployment, HA enablement or Azure provisioning. |
 | 2026-11-16 | EPIC-001 ITEM-001 exported-segment preparatory harness/protocol and focused tests delivered; small local correctness smoke only. Whole epic, ITEM-002/003, archive/ACA qualification and gates remain open. |
