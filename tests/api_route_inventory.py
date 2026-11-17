@@ -1,5 +1,6 @@
 """Regression tests for the registered-route coverage guard."""
 import json
+import re
 import unittest
 from pathlib import Path
 
@@ -215,6 +216,38 @@ class RouteInventoryTests(unittest.TestCase):
             f"update explicit reserved-route classification: "
             f"unclassified={sorted(candidates - classified)}, "
             f"stale={sorted(classified - candidates)}",
+        )
+
+    def test_gateway_classifier_matches_registered_routes(self):
+        gateway = (ROOT / "src" / "server" / "gateway.rs").read_text(encoding="utf-8")
+        routes = re.search(r"const ROUTES: &\[\(&str, &str\)\] = &\[(.*?)\n\];", gateway, re.S)
+        public = re.search(r"const PUBLIC: &\[&str\] = &\[(.*?)\n\];", gateway, re.S)
+        self.assertIsNotNone(routes, "gateway.rs must define ROUTES")
+        self.assertIsNotNone(public, "gateway.rs must define PUBLIC")
+        classified = [
+            f"rest:{method} {path}"
+            for method, path in re.findall(
+                r'\(\s*"([A-Z]+)",\s*"([^"]+)",?\s*\)', routes.group(1)
+            )
+        ]
+        self.assertEqual(len(classified), len(set(classified)), "duplicate classifier route")
+        registered = rest_keys(ROOT)
+        self.assertEqual(
+            set(classified),
+            registered,
+            f"regenerate src/server/gateway.rs ROUTES: "
+            f"missing={sorted(registered - set(classified))}, "
+            f"stale={sorted(set(classified) - registered)}",
+        )
+        server = (ROOT / "src" / "server.rs").read_text(encoding="utf-8")
+        observed = re.search(
+            r"let public = matches!\(\s*request\.uri\(\)\.path\(\),(.*?)\);", server, re.S
+        )
+        self.assertIsNotNone(observed, "server.rs observe must keep its public matches!")
+        self.assertEqual(
+            sorted(re.findall(r'"([^"]+)"', public.group(1))),
+            sorted(re.findall(r'"([^"]+)"', observed.group(1))),
+            "gateway PUBLIC must equal the observe public paths",
         )
 
 

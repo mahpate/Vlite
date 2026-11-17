@@ -765,12 +765,14 @@ To reproduce:
 
 | Task | Description | Status | Relevant Files |
 |---|---|---|---|
-| ITEM-013 | Operation classifier over the route inventory; deny-unmapped (TEST-002). | Not Started | `src/server/gateway.rs` |
+| ITEM-013 | Operation classifier over the route inventory; deny-unmapped (TEST-002). | Done | `src/server/gateway.rs`, `tests/api_route_inventory.py` |
 | ITEM-014 | Directory lookup, envelope minting, routing to writer/`shared-pool`; no retry of ambiguous writes. | Not Started | `src/server/gateway.rs` |
 | ITEM-015 | Readiness (snapshot age), startup and drain behavior; no `/metrics` dependency. | Not Started | `src/server/gateway.rs`, `src/bin/vlite-server.rs` |
 | ITEM-016 | Static per-replica rate-limit share and documented overshoot. | Not Started | `src/server/gateway.rs` |
 | ITEM-017 | Scale/readiness/drain test plan: multi-replica, kill/add, revocation staleness (TEST-003/004/005). | Not Started | `tests/` |
 | ITEM-018 | Docs: gateway is not writer HA; state classification and boundary tables. | Not Started | `docs/` |
+
+**ITEM-013 validation.** `src/server/gateway.rs` classifies a request by method and path against the 179 registered REST routes: the path picks the template (a literal segment beats a parameter at the first differing position), then the method is checked (HEAD served by GET routes); operation (read/write) comes from the existing `read_request` rule, scoped-credential need from `permission`, and the 21 unauthenticated paths from the same list `observe` uses. Unregistered paths and methods are refused (`UnknownRoute`, `MethodNotAllowed`), never forwarded as reads. Library code only: not yet wired into a serving path (ITEM-014). Tests: `server::gateway::` 6/6, including agreement with `authorize`/reader admission for every route (TEST-002) and a drift guard against the real router (memory routes, registered only with bindings, covered by the table tests); all `server::` 615 passed (3 ignored); `--test server_name_lookup_scan` 22/22, `server_memory_guards` 20/20, `server_serve_mode` 6/6; `tests/api_route_inventory.py` (new check that the classifier's route and public lists equal the router's) 11 OK, `admin_route_coverage`, `api_reference` (REST 179) and `openapi_contract` passed; `cargo fmt --check` and `cargo clippy --locked --workspace --all-targets -- -D warnings` with `--all-features`, `server` and `server,grpc` clean. OD-004/005/006/012 remain open; no deployment, Azure resource or production change.
 
 ### EPIC-005: Reader fleet (archive consumption and reader routing) - 8 person-days
 **Requirements**: FR-010, FR-011, FR-016, C-02/C-04. **Dependencies**: EPIC-000, EPIC-001 decision, EPIC-002, EPIC-004. **Deliverable**: reader apps apply verified history by the chosen strategy, report position/age, self-gate readiness on staleness; gateway routes eligible reads when a tenant opts in; freshness-required reads stay on the writer.
@@ -857,6 +859,7 @@ To reproduce:
 
 | Date | Change |
 |---|---|
+| 2026-11-17 | EPIC-004 ITEM-013 operation classifier implemented as library code (`src/server/gateway.rs`): route-template matching over the 179 REST routes, read/write from the existing read rule, scoped need from `permission`, deny-unmapped refusals, and a route-inventory sync check. Not wired into serving; ITEM-014..018 and OD-004/005/006/012 remain open. No deployment or production change. |
 | 2026-11-17 | EPIC-003 ITEM-008..012 implemented as local library code: control-state snapshot with CAS writes, bounded retry, fail-closed polling and generation `A`; Ed25519 principal envelope with audience/tenant/expiry/skew/lifetime/`A` checks and two-key rotation overlap; crate-private backend gateway-trusted authentication reusing existing authorization; rekey-aware credential/tenant import. Uses injected local test keys; platform key delivery, OD-005 values, gateway wiring, directory routing fields and deployment remain open. |
 | 2026-11-17 | EPIC-003 OD-009 follow-up: added validated immutable public-key startup bundles with separate key-delivery generation, explicit active key and externally supplied signing material; test seed construction is test-only. Ed25519/ring is fixed, key identities are signed and allowlisted without fallback, and metadata contains no key bytes. ACA/Key Vault integration and platform drill are NOT RUN; platform verification remains incomplete. |
 | 2026-11-17 | EPIC-001 ITEM-003: added the Linux-only `--resource-evidence` probe and recorded its local MEAS-007 development evidence (source `c06eddb3`; 2-CPU/2-GiB container; sampled allocated blocks and RSS for (b), (c) and compaction). Not ACA qualification: no ceiling set, no refusal implemented, ITEM-003 stays Blocked and GATE-002 stays open. |

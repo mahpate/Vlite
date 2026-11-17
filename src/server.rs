@@ -41,6 +41,7 @@ mod compaction;
 mod control_state;
 mod credentials;
 mod features;
+mod gateway;
 #[cfg(test)]
 mod gateway_trust_tests;
 mod graph;
@@ -1209,7 +1210,7 @@ fn trusted(
 }
 
 /// Where a scoped credential's collection binding is enforced.
-#[derive(Clone, Copy, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum Reach {
     /// The handler checks the collection ID and lineage under the database lock.
     Collection,
@@ -1219,6 +1220,7 @@ enum Reach {
     Filtered,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum Need {
     Any,
     Admin,
