@@ -570,10 +570,10 @@ Estimates are planning estimates, not measurements. Statuses below track deliver
 | Task | Description | Status | Relevant Files |
 |---|---|---|---|
 | ITEM-001 | Define measurement protocol and harness for MEAS-001/002/007. First cut uses existing exported segments; local correctness smoke is not archive/ACA qualification. | Done (exported-segment preparatory first cut only) | `benchmarks/ha_reader_apply.rs`, `benchmarks/ha_reader_apply_tests.rs`, `benchmarks/ha-reader-apply.md`, `Cargo.toml` |
-| ITEM-002 | Run on a non-production fixture only after owner approval; record results and the strategy decision. | Not Started | `docs/projects/feature-aca-ha/` |
+| ITEM-002 | Run on a non-production fixture only after owner approval; record results and the strategy decision. | Done (local evidence; strategy recommendation pending owner confirmation) | `benchmarks/ha_reader_strategies.rs`, `benchmarks/ha_reader_apply.rs`, `benchmarks/ha_reader_apply_tests.rs`, `benchmarks/ha-reader-apply.md`, `docs/projects/feature-aca-ha/` |
 | ITEM-003 | Define the reader capacity ceiling and enrollment refusal. | Not Started | `src/server/cloud_backup.rs` |
 
-**ITEM-002 authorization (2026-11-16).** The owner approved reader measurements on existing local/non-production fixtures only. No Azure provisioning, production access, deployment, or failover is authorized. The measurement run remains Not Started.
+**ITEM-002 authorization (2026-11-16).** The owner approved reader measurements on existing local/non-production fixtures only. No Azure provisioning, production access, deployment, or failover is authorized. The local measurement run was completed under this authorization (see the ITEM-002 result note).
 
 **Isolated HA test deployment authorization (2026-11-16).** The owner authorized deploying a separate VLite instance for HA testing if required, while keeping the current production instance unchanged. This does not authorize replacing, updating, or enabling HA on production. No test instance has been provisioned.
 
@@ -581,7 +581,73 @@ Estimates are planning estimates, not measurements. Statuses below track deliver
 
 The local Windows x86_64 debug smoke captured actual raw export/save/load/apply/reopen/detached-index-build and oldest-ack-to-visible intervals, plus baseline/segment/follower file lengths. These are uncontrolled-cache shared-host diagnostics, not representative throughput or an ACA SLO. Baselines were 1,216/4,768 bytes; each three-commit delta had 348 frame bytes and a 464-byte serialized file; final follower lengths were 2,260/5,812 bytes and retained baseline-plus-delta staging 2,608/6,160 bytes. Inclusive apply contains fsync and replay, which are not separately instrumented. Index build uses a separately reopened read-only handle, not a mutable or continuously serving follower. The protocol defines all overlapping and inclusive boundaries.
 
-**Remaining measurement gates.** Blob upload and durable-head latency, ACA staleness/capacity, individual apply phases and all three runtime reader strategies are explicitly UNMEASURED. Archive consumer/progress/baseline interfaces and Q-1..Q-6 remain dependencies; file lengths are not peak allocation, compaction headroom or a qualified enrollment ceiling. GATE-002 remains open (GATE-001's code-implementation go is recorded under EPIC-002). No strategy is chosen; ITEM-002/003 remain Not Started. Reproduce bounded checks with `cargo test --locked --features json --example ha-reader-apply --test replica` and capture observations with `cargo run --quiet --locked --features json --example ha-reader-apply -- --smoke`.
+**ITEM-002 result note (2026-11-17).** The `ha-reader-apply` example gained a `--measure` mode in `benchmarks/ha_reader_strategies.rs`. It prototypes (a) snapshot refresh, (b) incremental apply and (c) baseline replacement on local synthetic fixtures. The fixtures are 64-dimension vectors with 64-byte payloads, at 1,000/10,000/100,000 records with 100/1,000 mixed update/delete/insert deltas. Each cell ran 5 interleaved reps, and HNSW used m 16, ef_construction 64. Tests were written first and failed against a stub. No `src/` change and no new dependency were made.
+
+The release run used source `607f9b22590e55a72bc95933776a0411c842f438`. The tree was dirty only from the owner's three protected `deploy/azure-container-apps` edits. The host was Windows x86_64 with 16 logical CPUs and rustc 1.99.1, shared and with an uncontrolled warm cache. The run took 266.7 s and verified every rep. The artifact is `C:\Users\mahpate\.copilot\session-state\53d6b337-fd4c-4687-94a7-8e2a27d67b53\files\ha-item002-measure-20261117T051850Z.json`. Full tables are in `benchmarks/ha-reader-apply.md`.
+
+Key medians in ms (min–max), at 100,000 records with a 100-mutation delta:
+
+| Strategy | Cost | Median ms (min–max) |
+|---|---|---|
+| (a) | refresh | 5,979.1 (5,696.1–6,347.2), of which `build_hnsw` 5,275.1 |
+| (b) | exact-visible | 145.4 (143.4–159.4) |
+| (b) | index-ready (full detached rebuild) | 5,390.9 (5,259.8–5,493.6) |
+| (c) | refresh | 5,892.2 (5,678.7–6,013.9) |
+
+At 10,000/100 the corresponding values were (a) 648.2, (b) exact-visible 17.6, (b) index-ready 588.6 and (c) 634.4.
+
+MEAS-002 was local only, for (b), at 199.9 achieved commits/s with Full durability over 3,001 commits. Ack-to-exact-visible was:
+- 250 ms ship interval: p50 152.3, p90 252.1, p99 272.7, max 287.3 ms.
+- 1,000 ms ship interval: p50 528.7, p90 928.8, p99 1,017.9, max 1,025.9 ms.
+
+These figures exclude Blob, the durable head, ACA and network, and they are not an SLO.
+
+MEAS-007 sampled reader high-water ÷ reader file (derived) was:
+- (a): 1.559–1.999, plus a separate ship snapshot of 1.0× the file, so about 3× when colocated (derived).
+- (b): 1.001–1.441.
+- (c): 2.000.
+
+Compaction peak ÷ input (derived) was 1.647, 2.073 and 2.148 at 1,000, 10,000 and 100,000 records. At 100,000 records, input was 33,870,672 B, output 38,900,116 B and the sampled peak 72,770,788 B; the output was larger than the input.
+
+Deviations from the brief:
+- `maintenance::backup` stands in for reader-side restore, because `restore` assigns a new lineage.
+- The (a) source backup requires the writer to be closed, because of its exclusive lock.
+- The verification query uses ef_search 512. The first run at `3cc29131` failed ANN verification at 100,000 records with ef 128, and its numbers are unused.
+
+**PROPOSED reader-strategy decision (ITEM-002; pending owner confirmation; does not pass GATE-002).**
+
+*Recommended:* (b) incremental apply as the steady-state reader path, with (c) baseline replacement as the bounded re-seed and fallback path. Re-seeding applies after lineage change, a long or missing tail, compaction or a verification failure.
+
+*Rationale from the measured numbers:*
+- (b) makes exact reads visible at a small cost that depends on size: a median of 4.5, 17.6 and 145.4 ms for 100-mutation deltas at 1,000, 10,000 and 100,000 records. A full refresh at 100,000 records costs about 5.9–6.0 s, so (b) is about 41× cheaper than (a) there (derived from 5,979.1 / 145.4).
+- (b) has the lowest sampled disk high-water mark: 1.001–1.441× the reader file, against 2.0× for (c) and up to about 3× colocated for (a), as measured at 100,000/100.
+- Local ack-to-visible for (b) stayed at most about 23 ms above the ship interval at p99 (derived from 272.7 − 250 and 1,017.9 − 1,000; local only).
+- (c) costs about the same as (a): 5,892.2 versus 5,979.1 ms at 100,000/100. It does not need a source-side exclusive backup, because it uses an existing baseline plus tail. This makes it the better re-seed mechanism.
+
+*Rejected:*
+- (a) snapshot refresh as the steady state. Every refresh pays a full source backup, copy and HNSW build: 5,979.1 ms median at 100,000/100. The source writer must be closed for `maintenance::backup`, and it needs the largest disk headroom (about 3× colocated, derived).
+- (c) as the steady state. Its per-refresh cost matches (a) and it needs 2.0× disk, with no freshness benefit over (b).
+
+*Caveats:*
+- These are local synthetic fixtures on a shared host, with no Azure, Blob or ACA. ACA is unqualified, and Blob upload, the durable head and ACA staleness are UNMEASURED.
+- In-place incremental index maintenance does not exist. `ReplicaFollower` drops indexes and exposes only `&Database`. ANN readiness under every option is therefore bounded by a full `build_hnsw`, a median of about 5.1–5.3 s at 100,000 records. Under (b), ANN serving would need a periodic detached rebuild or a future engine change.
+- Process memory, allocated blocks, fsync/replay split and sizes above 100,000 are UNMEASURED.
+- ITEM-003 (capacity ceiling and enrollment refusal) is Not Started, so GATE-002 remains open.
+
+**Remaining measurement gates.** ITEM-002 measured the three reader strategies, a local-only (b) staleness distribution and local sampled file-length high-water and compaction headroom on synthetic fixtures (above). The following remain explicitly UNMEASURED:
+- Blob upload and durable-head latency.
+- ACA staleness, capacity and vCPU/storage tiers.
+- Individual fsync/replay apply phases.
+- Process peak memory and allocated-block peaks.
+- An online (live-writer) baseline.
+- In-place incremental index maintenance, which is unavailable in the engine.
+
+Archive consumer/progress/baseline interfaces and Q-1..Q-6 remain dependencies. Sampled file lengths are not a qualified enrollment ceiling. GATE-002 remains open (GATE-001's code-implementation go is recorded under EPIC-002): the strategy above is PROPOSED pending owner confirmation, and ITEM-003 (capacity ceiling) remains Not Started.
+
+To reproduce:
+- Bounded checks: `cargo test --locked --features json --example ha-reader-apply --test replica`.
+- Smoke observations: `cargo run --quiet --locked --features json --example ha-reader-apply -- --smoke`.
+- ITEM-002 measurements: `cargo run --quiet --release --locked --features json --example ha-reader-apply -- --measure`.
 
 ### EPIC-002: Backend serving modes - 8 person-days
 **Requirements**: FR-006, NFR-004, SEC-003. **Dependencies**: none beyond existing code; may start in parallel with EPIC-001. **Deliverable**: `standalone`/`writer`/`reader` modes; `reader` refuses mutations; mode fixed at startup; status route; SIGTERM-driven readiness failure. Standalone is byte-for-byte unchanged by default.
@@ -709,6 +775,7 @@ The local Windows x86_64 debug smoke captured actual raw export/save/load/apply/
 
 | Date | Change |
 |---|---|
+| 2026-11-17 | EPIC-001 ITEM-002 local measurements recorded (`--measure` harness at `607f9b22`; synthetic local fixtures only): MEAS-001 per-strategy costs, local (b) MEAS-002 percentiles, MEAS-007 sampled high-water and compaction. PROPOSED reader strategy (b) incremental apply with (c) re-seed, pending owner confirmation. GATE-002 remains open; ITEM-003 Not Started. |
 | 2026-11-16 | GATE-001 criteria verified on merged tree `75df5738`; owner go-ahead recorded as code-implementation go only. EPIC-002 serving modes, reader refusal, drain readiness and serve-status delivered with tests. No deployment, HA enablement or Azure provisioning. |
 | 2026-11-16 | EPIC-001 ITEM-001 exported-segment preparatory harness/protocol and focused tests delivered; small local correctness smoke only. Whole epic, ITEM-002/003, archive/ACA qualification and gates remain open. |
 | 2026-11-16 | Initial design proposal for an ACA gateway plus per-tenant writer/reader topology on Azure Blob log shipping, including the stateless horizontally scalable gateway clarification (3.4), fencing options, staged epics and gates. Planning only. |
