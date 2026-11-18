@@ -1044,6 +1044,35 @@ impl Accounts {
     }
 }
 
+#[cfg_attr(not(test), allow(dead_code))]
+impl Accounts {
+    /// Tenant selection precedes creation of any serializable account view.
+    pub(super) fn migration_inventory(
+        &self,
+        tenant: &str,
+    ) -> Result<Vec<RecoveryAccount>, ApiError> {
+        let users = self.users.lock().map_err(internal)?;
+        Ok(users
+            .iter()
+            .filter(|user| user.tenant_id.as_deref() == Some(tenant))
+            .map(|user| RecoveryAccount {
+                username: user.username.clone(),
+                role: user.role,
+                tenant_id: user.tenant_id.clone(),
+                disabled: user.disabled,
+                graphs: user.graphs.clone(),
+                graph_access: user.graph_access,
+            })
+            .collect())
+    }
+
+    #[cfg(test)]
+    pub(super) fn migration_test_session(&self) -> String {
+        let users = self.users.lock().unwrap();
+        self.start(&users[0], now()).unwrap().0
+    }
+}
+
 /// One account of a recovery bundle. It carries no password hash, account ID,
 /// version or session: a rekey-only restore cannot resurrect a credential.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]

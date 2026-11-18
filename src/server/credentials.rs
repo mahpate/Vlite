@@ -492,6 +492,157 @@ pub(super) struct RecoveryCredential {
     pub max_vectors_per_collection: Option<u64>,
 }
 
+/// Migration inventory retains the original stored collection identities,
+/// unlike general recovery, but never a secret hash or rotation lineage.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(super) struct MigrationCredential {
+    pub inventory: RecoveryCredential,
+    pub source_collections: Vec<MigrationCollection>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(super) struct MigrationCollection {
+    pub stored_name: String,
+    pub id: u16,
+}
+
+#[cfg_attr(not(test), allow(dead_code))]
+impl MigrationCredential {
+    pub(super) fn check(&self, tenant: &str) -> Result<(), &'static str> {
+        let inventory = &self.inventory;
+        inventory.check()?;
+        if inventory.tenant_id.as_deref() != Some(tenant) {
+            return Err("a migration credential belongs to another tenant");
+        }
+        let all = inventory.collections == ["*"];
+        let mut names = std::collections::BTreeSet::new();
+        if (all && !self.source_collections.is_empty())
+            || (!all
+                && (self.source_collections.is_empty()
+                    || self.source_collections.len() != inventory.collections.len()))
+            || self
+                .source_collections
+                .iter()
+                .enumerate()
+                .any(|(i, scope)| {
+                    !scope.stored_name.starts_with(&format!("t{tenant}__"))
+                        || !crate::format::valid_collection_name(&scope.stored_name)
+                        || !names.insert(&scope.stored_name)
+                        || inventory.collections.get(i) != Some(&scope.stored_name)
+                })
+        {
+            return Err("a migration collection scope is invalid");
+        }
+        let operations = parse_ops(&inventory.operations).map_err(|_| "invalid operations")?;
+        graph_scope(operations, inventory.graphs.as_deref(), true)
+            .map_err(|_| "invalid graph scopes")
+    }
+
+    pub(super) fn active(&self, now: u64) -> bool {
+        self.inventory.state == "active" && now < self.inventory.expires_unix_ms
+    }
+}
+
+#[cfg_attr(not(test), allow(dead_code))]
+impl Snapshot {
+    /// Selection happens before constructing any serializable inventory.
+    pub(super) fn migration_inventory(
+        &self,
+        tenant: &str,
+        lineage: u64,
+        now: u64,
+    ) -> Result<Vec<MigrationCredential>, &'static str> {
+        self.0
+            .iter()
+            .filter(|entry| entry.tenant_id.as_deref() == Some(tenant))
+            .map(|entry| {
+                if entry.validate().is_none()
+                    || u64::from_str_radix(&entry.lineage, 16).ok() != Some(lineage)
+                {
+                    return Err("a selected credential has an invalid source lineage or grant");
+                }
+                let credential = MigrationCredential {
+                    inventory: entry.recovery(now),
+                    source_collections: entry
+                        .collections
+                        .iter()
+                        .map(|scope| MigrationCollection {
+                            stored_name: scope.name.clone(),
+                            id: scope.id,
+                        })
+                        .collect(),
+                };
+                credential.check(tenant)?;
+                Ok(credential)
+            })
+            .collect()
+    }
+}
+
+/// Offline migration only. Call after tenant/target-scope certification; this
+/// does not alter ordinary issuance, rotation, recovery or a live store.
+#[cfg_attr(not(test), allow(dead_code))]
+pub(super) fn migration_rekey(
+    tenant: &str,
+    inventory: &[MigrationCredential],
+    source_lineage: u64,
+    target_lineage: u64,
+    now: u64,
+) -> Result<(Snapshot, Snapshot, Vec<String>), ApiError> {
+    if source_lineage == 0 || target_lineage == 0 || source_lineage == target_lineage {
+        return Err(unprocessable(
+            "migration requires distinct nonzero lineages",
+        ));
+    }
+    let mut ids = std::collections::BTreeSet::new();
+    if inventory.len() > CAPACITY
+        || inventory.iter().any(|credential| {
+            credential.check(tenant).is_err() || !ids.insert(credential.inventory.id.as_str())
+        })
+    {
+        return Err(unprocessable("invalid migration credential inventory"));
+    }
+    let (mut source, mut target, mut tokens) = (Vec::new(), Vec::new(), Vec::new());
+    for credential in inventory.iter().filter(|credential| credential.active(now)) {
+        let grant = &credential.inventory;
+        let secret = random_secret()?;
+        let entry = Entry {
+            id: grant.id.clone(),
+            name: grant.name.clone(),
+            all: grant.collections == ["*"],
+            collections: credential
+                .source_collections
+                .iter()
+                .map(|scope| Scope {
+                    name: scope.stored_name.clone(),
+                    id: scope.id,
+                })
+                .collect(),
+            operations: grant.operations.clone(),
+            lineage: format!("{source_lineage:016x}"),
+            secret_sha256: sha256_hex(secret.as_bytes()),
+            created_unix_ms: now,
+            expires_unix_ms: grant.expires_unix_ms,
+            revoked_unix_ms: None,
+            rotated_from: None,
+            tenant_id: grant.tenant_id.clone(),
+            requests_per_second: grant.requests_per_second,
+            max_vectors: grant.max_vectors,
+            max_vectors_per_collection: grant.max_vectors_per_collection,
+            graphs: grant.graphs.clone(),
+        };
+        tokens.push(token(&entry, &secret));
+        target.push(Entry {
+            lineage: format!("{target_lineage:016x}"),
+            ..entry.clone()
+        });
+        source.push(entry);
+    }
+    Ok((Snapshot(source), Snapshot(target), tokens))
+}
+
 impl RecoveryCredential {
     /// Shape and bounds only; values are never echoed.
     pub(super) fn check(&self) -> Result<(), &'static str> {
