@@ -34,7 +34,7 @@ The gateway is a stateless public edge: TLS, authentication, operation classific
 | Writer authority, epoch `E` | Not present | Authoritative shared; CAS-only | Not built (EPIC-006) |
 | Route-classification table | Compiled code | Code, changed by release | Wired: the gateway classifies every request before forwarding (`src/server/gateway.rs`) |
 | Idempotency receipts | Memory API only | Backend-owned; gateway keeps none | Unchanged; the gateway retries nothing |
-| Envelope signing key | Not present | Platform secret store, never in control state or logs (OD-009) | Wired: `gateway-keygen` writes a signing-key file and a public bundle, both read at startup; platform (Key Vault) delivery not run |
+| Envelope signing key | Not present | Platform secret store, never in control state or logs (OD-009) | Wired: `gateway-keygen` writes a signing-key file and a public bundle, both read at startup; ACA app-secret volume delivery (OD-009) not run |
 
 ## Boundary: gateway versus tenant backends
 

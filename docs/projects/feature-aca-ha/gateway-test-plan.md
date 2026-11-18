@@ -147,7 +147,7 @@ Tier (b) uses a small relay between gateway and writer for 5.3 (`Relay` in `test
 The MVP is wired, so nothing blocks tier (b). What remains:
 
 - **Not run at tier (b):** 3.3, 3.5, 3.6, 5.2, 5.4 and 5.6 (above), a single paused replica for 4.4, and memory-binding propagation in 4.1.
-- **Tier (c) NOT RUN.** It needs a non-production ACA environment, Key Vault or managed-identity key delivery, and owner approval for each run. It is the only tier that can feed GATE-003.
+- **Tier (c) NOT RUN.** It needs a non-production ACA environment, key delivery through ACA app secrets mounted as files (OD-009), and owner approval for each run. It is the only tier that can feed GATE-003.
 - **No measurements.** S_ctl, the poll interval, `max_replicas` and the readiness-propagation delay are inputs. MEAS-004, MEAS-005 and MEAS-007 remain open, and so do OD-005 and OD-006.
 - **No fencing (OD-002).** The gateway does not verify a writer epoch on responses. The directory epoch is a static startup value, not fencing.
 - **Rate-limit overshoot.** Each replica enforces its share of `rps` independently. During rollout or above `max_replicas`, the total can exceed the tenant's limit; this is unqualified production behavior. Backend vector quotas still apply.
