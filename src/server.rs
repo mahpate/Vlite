@@ -1638,6 +1638,11 @@ async fn observe(
         header::CACHE_CONTROL,
         axum::http::HeaderValue::from_static("no-store"),
     );
+    if role.is_some() {
+        response
+            .extensions_mut()
+            .insert(reader_staleness::Authenticated);
+    }
     response
 }
 

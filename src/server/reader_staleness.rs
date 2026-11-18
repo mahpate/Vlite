@@ -40,6 +40,11 @@ pub(super) fn report(service: &Service, hide: bool, now: u64) -> Option<Value> {
     })
 }
 
+/// Marks a response to a request that authenticated, so reader identity
+/// and freshness headers never reach anonymous or rejected callers.
+#[derive(Clone, Copy)]
+pub(super) struct Authenticated;
+
 pub(super) async fn headers(
     State(service): State<Service>,
     request: Request,
@@ -47,6 +52,7 @@ pub(super) async fn headers(
 ) -> Response {
     let mut response = next.run(request).await;
     if service.serve.mode == ServeMode::Reader
+        && response.extensions().get::<Authenticated>().is_some()
         && let Some(progress) = &service.reader
     {
         let values = [
@@ -93,7 +99,10 @@ mod tests {
 
     use crate::{
         Database,
-        server::{ServeMode, Service, reader_apply::Progress, reserved, router},
+        server::{
+            BearerToken, ServeMode, Service, authenticated_router, reader_apply::Progress,
+            reserved, router,
+        },
     };
 
     fn reader() -> (tempfile::TempDir, Service, Arc<Progress>) {
@@ -230,6 +239,37 @@ mod tests {
         service.lineage = None;
         let response = request(&service, "/health").await;
         assert!(!response.headers().contains_key("x-vlite-lineage"));
+    }
+
+    #[tokio::test]
+    async fn reader_headers_go_only_to_authenticated_callers() {
+        const TOKEN: &str = "reader_token_reader_token_reader_tok_1";
+        let (_dir, service, progress) = reader();
+        progress.confirm(7, super::unix_ms());
+        let app = authenticated_router(service, BearerToken::new(TOKEN).unwrap());
+        for (uri, token, status) in [
+            ("/health", None, StatusCode::OK),
+            ("/v1/vectors/1", None, StatusCode::UNAUTHORIZED),
+            ("/v1/vectors/1", Some("wrong"), StatusCode::UNAUTHORIZED),
+            ("/health", Some(TOKEN), StatusCode::OK),
+            ("/v1/vectors/1", Some(TOKEN), StatusCode::OK),
+        ] {
+            let mut request = Request::builder().uri(uri);
+            if let Some(token) = token {
+                request = request.header("authorization", format!("Bearer {token}"));
+            }
+            let response = app
+                .clone()
+                .oneshot(request.body(Body::empty()).unwrap())
+                .await
+                .unwrap();
+            assert_eq!(response.status(), status, "{uri}");
+            let tagged = response
+                .headers()
+                .keys()
+                .any(|key| key.as_str().starts_with("x-vlite-"));
+            assert_eq!(tagged, token == Some(TOKEN), "{uri} {token:?}");
+        }
     }
 
     #[tokio::test]

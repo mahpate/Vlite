@@ -957,7 +957,8 @@ the bound refuses `/ready` and authorized reads with 503 `reader_stale`.
 staleness gating. A permanently failed follower fails readiness with
 `reader_apply_failed`. gRPC staleness gating is not provided.
 
-Every REST response from a reader with archive-apply progress carries:
+Every REST response to an authenticated request (including a later 403, 429
+or 503 refusal) from a reader with archive-apply progress carries:
 
 * `X-VLite-Lineage`: the database lineage as 16 hexadecimal digits, omitted if
   lineage is unavailable.
@@ -968,8 +969,10 @@ Every REST response from a reader with archive-apply progress carries:
   bindings block metrics.
 
 These headers include no position token and provide no read-your-writes
-guarantee. Standalone servers, writers and readers without apply progress do
-not send them. Writer/reader roles and gateway replicas add no write capacity.
+guarantee. Requests that do not authenticate (anonymous probes of public
+routes such as `/health` and `/ready`, and 401 refusals) never receive them,
+so anonymous callers cannot learn reader identity or freshness. Standalone
+servers, writers and readers without apply progress do not send them. Writer/reader roles and gateway replicas add no write capacity.
 
 ## Gateway mode and gateway-trusted backends (experimental, opt-in, off by default)
 
