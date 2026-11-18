@@ -443,22 +443,7 @@ impl Sets {
         self.apply_segments(id, manifest, &index, path, &mut follower)?;
         let checkpoint = path[position].clone();
         let verification = seal(follower, &fetched.database, checkpoint.sequence, manifest)?;
-        let blob = self
-            .data
-            .get(
-                &self.object_key(id, &checkpoint.bundle_sha256),
-                checkpoint.bundle_bytes,
-            )
-            .map_err(missing_object)?;
-        if blob.bytes.len() as u64 != checkpoint.bundle_bytes
-            || sha_hex(&blob.bytes) != checkpoint.bundle_sha256
-        {
-            return Err(corrupt(
-                "the checkpoint recovery bundle does not match its hash",
-            ));
-        }
-        let bundle = recovery_bundle::parse(&blob.bytes).map_err(corrupt)?;
-        check_bundle(&bundle, manifest, &checkpoint.chain_sha256)?;
+        let bundle = self.checkpoint_bundle(id, manifest, &checkpoint)?;
         Ok(Replayed {
             checkpoint,
             bundle,
@@ -470,8 +455,9 @@ impl Sets {
     /// Advances `database`, a verified copy of `record`'s baseline that
     /// earlier follows may already have advanced, to the newest archived
     /// checkpoint. Only the verified checkpoints after the copy's own
-    /// position are applied, with the same checks as a replay; the copy is
-    /// never moved past the verified head. A copy that is not at the
+    /// position are applied, with the same checks as a replay, and the head
+    /// checkpoint's recovery bundle is verified before any of them is; the
+    /// copy is never moved past the verified head. A copy that is not at the
     /// baseline or an archived checkpoint of this chain cannot continue it
     /// and is reported for a re-seed. Store and verification failures are
     /// errors and leave the copy at a whole checkpoint.
@@ -517,12 +503,40 @@ impl Sets {
         let needed: u64 = path.iter().map(|c| c.segment_bytes).sum();
         let dir = database.parent().unwrap_or(FilePath::new("."));
         check_restore_space(free_bytes(dir), restore_space_needed(needed, 0))?;
+        self.checkpoint_bundle(id, manifest, checkpoint)?;
         self.apply_segments(id, manifest, &index, path, &mut follower)?;
         seal(follower, database, checkpoint.sequence, manifest)?;
         Ok(Follow::Applied {
             sequence: checkpoint.sequence,
             segments: path.len(),
         })
+    }
+
+    /// The recovery bundle `checkpoint` names, checked against its hash
+    /// and against `manifest` and the checkpoint's chain hash.
+    fn checkpoint_bundle(
+        &self,
+        id: &str,
+        manifest: &Manifest,
+        checkpoint: &Checkpoint,
+    ) -> Result<recovery_bundle::Bundle, ApiError> {
+        let blob = self
+            .data
+            .get(
+                &self.object_key(id, &checkpoint.bundle_sha256),
+                checkpoint.bundle_bytes,
+            )
+            .map_err(missing_object)?;
+        if blob.bytes.len() as u64 != checkpoint.bundle_bytes
+            || sha_hex(&blob.bytes) != checkpoint.bundle_sha256
+        {
+            return Err(corrupt(
+                "the checkpoint recovery bundle does not match its hash",
+            ));
+        }
+        let bundle = recovery_bundle::parse(&blob.bytes).map_err(corrupt)?;
+        check_bundle(&bundle, manifest, &checkpoint.chain_sha256)?;
+        Ok(bundle)
     }
 
     /// The set's archive index checked against its baseline; `None` when

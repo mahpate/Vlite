@@ -2760,19 +2760,17 @@ mod tests {
 
     #[test]
     fn a_damaged_archive_fails_the_follow_and_keeps_the_last_checkpoint() {
-        let segment = |env: &Env, n: usize| -> String {
+        let object = |env: &Env, n: usize, role: &str| -> String {
             let index: Value = serde_json::from_slice(
                 &env.data
                     .raw(&format!("vlite/prod/sets/{}/archive.json", env.set_id))
                     .unwrap(),
             )
             .unwrap();
-            let sha = index["checkpoints"][n]["segment_sha256"]
-                .as_str()
-                .unwrap()
-                .to_owned();
+            let sha = index["checkpoints"][n][role].as_str().unwrap().to_owned();
             format!("vlite/prod/sets/{}/objects/{sha}", env.set_id)
         };
+        let segment = move |env: &Env, n: usize| object(env, n, "segment_sha256");
         type Damage = Box<dyn Fn(&Env)>;
         let cases: Vec<(&str, Damage)> = vec![
             (
@@ -2797,6 +2795,38 @@ mod tests {
                         index["checkpoints"][1]["sequence"] = json!(8);
                         *b = serde_json::to_vec(&index).unwrap();
                     })
+                }),
+            ),
+            (
+                "missing bundle",
+                Box::new(move |env| env.data.remove(&object(env, 1, "bundle_sha256"))),
+            ),
+            (
+                "swapped bundle",
+                Box::new(|env| {
+                    // A valid bundle of another capture (the baseline's),
+                    // named by the head checkpoint.
+                    let key = format!("vlite/prod/sets/{}/archive.json", env.set_id);
+                    let mut index: Value =
+                        serde_json::from_slice(&env.data.raw(&key).unwrap()).unwrap();
+                    let wrong = serde_json::to_vec(&recovery_bundle::bundle(
+                        config(),
+                        INSTALL,
+                        env.source_lineage,
+                        index["baseline_sha256"].as_str().unwrap(),
+                        cloud::fake::policy_capture(),
+                        None,
+                        3,
+                    ))
+                    .unwrap();
+                    let sha = super::super::cloud_backup::sha_hex(&wrong);
+                    env.data.set_raw(
+                        &format!("vlite/prod/sets/{}/objects/{sha}", env.set_id),
+                        &wrong,
+                    );
+                    index["checkpoints"][1]["bundle_sha256"] = json!(sha);
+                    index["checkpoints"][1]["bundle_bytes"] = json!(wrong.len());
+                    env.data.set_raw(&key, &serde_json::to_vec(&index).unwrap());
                 }),
             ),
         ];
