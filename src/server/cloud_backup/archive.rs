@@ -405,23 +405,12 @@ impl Sets {
     ) -> Result<Replayed, ApiError> {
         let id = &fetched.record.set_id;
         let manifest = &fetched.manifest;
-        let database_sha256 = manifest
-            .check(id, &fetched.record.installation_id)?
-            .0
-            .sha256
-            .clone();
-        let key = self.archive_key(id);
-        let index: Index = match self.data.get(&key, META_MAX) {
-            Ok(blob) => decode(&key, &blob.bytes)?,
-            Err(StoreError::NotFound) => {
-                return Err(not_found(
-                    "pitr_archive_missing",
-                    "the set has no archived checkpoints; restore the snapshot without --archive-checkpoint",
-                ));
-            }
-            Err(e) => return Err(e.into()),
+        let Some(index) = self.read_index(id, &fetched.record.installation_id, manifest)? else {
+            return Err(not_found(
+                "pitr_archive_missing",
+                "the set has no archived checkpoints; restore the snapshot without --archive-checkpoint",
+            ));
         };
-        index.check(id, manifest, &database_sha256)?;
         let position = match target {
             ArchiveTarget::Latest => index.checkpoints.len() - 1,
             ArchiveTarget::Sequence(sequence) => index
@@ -446,22 +435,132 @@ impl Sets {
             free_bytes(dir),
             restore_space_needed(fetched.verification.bytes.saturating_add(needed), 0),
         )?;
-        let missing = |e: StoreError| match e {
-            StoreError::NotFound => corrupt("an archived checkpoint object is missing"),
-            StoreError::TooLarge => corrupt("an archived object is larger than its index entry"),
-            e => e.into(),
-        };
         let mut follower = ReplicaFollower::open(&fetched.database, None)
             .map_err(|e| corrupt(format!("the baseline cannot be replayed: {e}")))?;
         if follower.applied_sequence() != index.baseline_sequence {
             return Err(corrupt("the baseline does not match the archive"));
         }
+        self.apply_segments(id, manifest, &index, path, &mut follower)?;
+        let checkpoint = path[position].clone();
+        let verification = seal(follower, &fetched.database, checkpoint.sequence, manifest)?;
+        let blob = self
+            .data
+            .get(
+                &self.object_key(id, &checkpoint.bundle_sha256),
+                checkpoint.bundle_bytes,
+            )
+            .map_err(missing_object)?;
+        if blob.bytes.len() as u64 != checkpoint.bundle_bytes
+            || sha_hex(&blob.bytes) != checkpoint.bundle_sha256
+        {
+            return Err(corrupt(
+                "the checkpoint recovery bundle does not match its hash",
+            ));
+        }
+        let bundle = recovery_bundle::parse(&blob.bytes).map_err(corrupt)?;
+        check_bundle(&bundle, manifest, &checkpoint.chain_sha256)?;
+        Ok(Replayed {
+            checkpoint,
+            bundle,
+            segments: path.len(),
+            verification,
+        })
+    }
+
+    /// Advances `database`, a verified copy of `record`'s baseline that
+    /// earlier follows may already have advanced, to the newest archived
+    /// checkpoint. Only the verified checkpoints after the copy's own
+    /// position are applied, with the same checks as a replay; the copy is
+    /// never moved past the verified head. A copy that is not at the
+    /// baseline or an archived checkpoint of this chain cannot continue it
+    /// and is reported for a re-seed. Store and verification failures are
+    /// errors and leave the copy at a whole checkpoint.
+    #[cfg_attr(not(test), allow(dead_code))]
+    pub(in crate::server) fn follow_archive(
+        &self,
+        record: &Record,
+        manifest: &Manifest,
+        database: &FilePath,
+    ) -> Result<Follow, ApiError> {
+        let id = &record.set_id;
+        let mut follower = match ReplicaFollower::open(database, None) {
+            Ok(follower) => follower,
+            Err(e) => return Ok(Follow::Reseed(format!("the copy cannot be followed: {e}"))),
+        };
+        if follower.db().lineage().map(lineage_hex) != manifest.source_lineage {
+            return Ok(Follow::Reseed("the copy has another lineage".into()));
+        }
+        let applied = follower.applied_sequence();
+        let Some(index) = self.read_index(id, &record.installation_id, manifest)? else {
+            return Ok(if applied == manifest.database.commits {
+                Follow::Current { sequence: applied }
+            } else {
+                Follow::Reseed("the copy is not at the baseline and the set has no archive".into())
+            });
+        };
+        let start = if applied == index.baseline_sequence {
+            0
+        } else {
+            match index.checkpoints.iter().position(|c| c.sequence == applied) {
+                Some(position) => position + 1,
+                None => {
+                    return Ok(Follow::Reseed(format!(
+                        "the copy at sequence {applied} is not an archived checkpoint of this set"
+                    )));
+                }
+            }
+        };
+        let path = &index.checkpoints[start..];
+        let Some(checkpoint) = path.last() else {
+            return Ok(Follow::Current { sequence: applied });
+        };
+        let needed: u64 = path.iter().map(|c| c.segment_bytes).sum();
+        let dir = database.parent().unwrap_or(FilePath::new("."));
+        check_restore_space(free_bytes(dir), restore_space_needed(needed, 0))?;
+        self.apply_segments(id, manifest, &index, path, &mut follower)?;
+        seal(follower, database, checkpoint.sequence, manifest)?;
+        Ok(Follow::Applied {
+            sequence: checkpoint.sequence,
+            segments: path.len(),
+        })
+    }
+
+    /// The set's archive index checked against its baseline; `None` when
+    /// the set has no archive.
+    fn read_index(
+        &self,
+        id: &str,
+        installation_id: &str,
+        manifest: &Manifest,
+    ) -> Result<Option<Index>, ApiError> {
+        let database_sha256 = &manifest.check(id, installation_id)?.0.sha256;
+        let key = self.archive_key(id);
+        let index: Index = match self.data.get(&key, META_MAX) {
+            Ok(blob) => decode(&key, &blob.bytes)?,
+            Err(StoreError::NotFound) => return Ok(None),
+            Err(e) => return Err(e.into()),
+        };
+        index.check(id, manifest, database_sha256)?;
+        Ok(Some(index))
+    }
+
+    /// Downloads, verifies and applies `path`, contiguous checkpoints of
+    /// `index` that continue `follower`, in batches that end on a
+    /// checkpoint.
+    fn apply_segments(
+        &self,
+        id: &str,
+        manifest: &Manifest,
+        index: &Index,
+        path: &[Checkpoint],
+        follower: &mut ReplicaFollower,
+    ) -> Result<(), ApiError> {
         let mut batch: Option<LogSegment> = None;
         for (n, c) in path.iter().enumerate() {
             let blob = self
                 .data
                 .get(&self.object_key(id, &c.segment_sha256), c.segment_bytes)
-                .map_err(missing)?;
+                .map_err(missing_object)?;
             if blob.bytes.len() as u64 != c.segment_bytes
                 || sha_hex(&blob.bytes) != c.segment_sha256
             {
@@ -498,45 +597,53 @@ impl Sets {
                 })?;
             }
         }
-        let checkpoint = path[position].clone();
-        if follower.applied_sequence() != checkpoint.sequence {
-            return Err(corrupt("the replay did not reach the checkpoint"));
-        }
-        follower
-            .promote()
-            .close()
-            .map_err(|e| corrupt(format!("the replayed database cannot be closed: {e}")))?;
-        let verification = maintenance::verify(&fetched.database)
-            .map_err(|e| corrupt(format!("the replayed database failed verification: {e}")))?;
-        let detail = maintenance::inspect_detail(&fetched.database)
-            .map_err(|e| corrupt(format!("the replayed database failed inspection: {e}")))?;
-        if verification.inspection.commits != checkpoint.sequence
-            || verification.inspection.incomplete_tail_bytes != 0
-            || detail.lineage.map(lineage_hex) != manifest.source_lineage
-        {
-            return Err(corrupt("the replayed database differs from its checkpoint"));
-        }
-        let blob = self
-            .data
-            .get(
-                &self.object_key(id, &checkpoint.bundle_sha256),
-                checkpoint.bundle_bytes,
-            )
-            .map_err(missing)?;
-        if blob.bytes.len() as u64 != checkpoint.bundle_bytes
-            || sha_hex(&blob.bytes) != checkpoint.bundle_sha256
-        {
-            return Err(corrupt(
-                "the checkpoint recovery bundle does not match its hash",
-            ));
-        }
-        let bundle = recovery_bundle::parse(&blob.bytes).map_err(corrupt)?;
-        check_bundle(&bundle, manifest, &checkpoint.chain_sha256)?;
-        Ok(Replayed {
-            checkpoint,
-            bundle,
-            segments: path.len(),
-            verification,
-        })
+        Ok(())
     }
+}
+
+/// What one [`Sets::follow_archive`] step did to a copy.
+#[derive(Debug, PartialEq, Eq)]
+#[cfg_attr(not(test), allow(dead_code))]
+pub(in crate::server) enum Follow {
+    /// `segments` verified checkpoints were applied, up to `sequence`.
+    Applied { sequence: u64, segments: usize },
+    /// The copy is at the newest archived checkpoint (or the baseline).
+    Current { sequence: u64 },
+    /// The copy cannot continue this archive; seed a fresh copy.
+    Reseed(String),
+}
+
+fn missing_object(e: StoreError) -> ApiError {
+    match e {
+        StoreError::NotFound => corrupt("an archived checkpoint object is missing"),
+        StoreError::TooLarge => corrupt("an archived object is larger than its index entry"),
+        e => e.into(),
+    }
+}
+
+/// Closes `follower` at exactly `sequence` and verifies the file it wrote.
+fn seal(
+    follower: ReplicaFollower,
+    database: &FilePath,
+    sequence: u64,
+    manifest: &Manifest,
+) -> Result<maintenance::Verification, ApiError> {
+    if follower.applied_sequence() != sequence {
+        return Err(corrupt("the replay did not reach the checkpoint"));
+    }
+    follower
+        .promote()
+        .close()
+        .map_err(|e| corrupt(format!("the replayed database cannot be closed: {e}")))?;
+    let verification = maintenance::verify(database)
+        .map_err(|e| corrupt(format!("the replayed database failed verification: {e}")))?;
+    let detail = maintenance::inspect_detail(database)
+        .map_err(|e| corrupt(format!("the replayed database failed inspection: {e}")))?;
+    if verification.inspection.commits != sequence
+        || verification.inspection.incomplete_tail_bytes != 0
+        || detail.lineage.map(lineage_hex) != manifest.source_lineage
+    {
+        return Err(corrupt("the replayed database differs from its checkpoint"));
+    }
+    Ok(verification)
 }

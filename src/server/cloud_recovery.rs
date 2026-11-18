@@ -799,6 +799,7 @@ fn write_bindings(
 
 #[cfg(test)]
 mod tests {
+    use super::super::cloud_backup::archive::Follow;
     use super::cloud::fake::{Fault, Memory, Op};
     use super::cloud::{Manifest, Publication, ROLE_BUNDLE, ROLE_DATABASE, SetState, Upload};
     use super::*;
@@ -2585,5 +2586,212 @@ mod tests {
             .unwrap();
         assert_eq!(collected.deleted, std::slice::from_ref(&env.set_id));
         assert_eq!(archive_names(&env), Vec::<String>::new());
+    }
+
+    /// Seeds a reader's copy as a reader does: pinned only while the
+    /// verified baseline downloads into `name`.
+    fn seed(env: &Env, name: &str) -> cloud::Fetched {
+        let pin = env
+            .sets
+            .pin(&env.set_id, "reader-seed", PinKind::Operation, now())
+            .unwrap();
+        let dir = env.dir.path().join(name);
+        cloud::create_private_subdir(&dir).unwrap();
+        let fetched = env.sets.fetch(&env.set_id, &pin.id, &dir).unwrap();
+        env.sets.release(&env.set_id, &pin.id, now()).unwrap();
+        fetched
+    }
+
+    fn follow(env: &Env, copy: &cloud::Fetched) -> Result<Follow, ApiError> {
+        env.sets
+            .follow_archive(&copy.record, &copy.manifest, &copy.database)
+    }
+
+    fn commits(path: &FilePath) -> u64 {
+        maintenance::verify(path).unwrap().inspection.commits
+    }
+
+    #[test]
+    fn a_follower_applies_only_the_checkpoints_after_its_copy() {
+        let env = setup();
+        let copy = seed(&env, "copy");
+        assert_eq!(env.pins(), 0, "no pin outlives the seed");
+        assert_eq!(
+            follow(&env, &copy).unwrap(),
+            Follow::Current { sequence: 4 }
+        );
+
+        assert_eq!(checkpoint(&env, puts(5..=6), None), 6);
+        assert_eq!(
+            follow(&env, &copy).unwrap(),
+            Follow::Applied {
+                sequence: 6,
+                segments: 1
+            }
+        );
+        assert_eq!(ids(&copy.database), (1..=6).collect::<Vec<_>>());
+        assert_eq!(
+            follow(&env, &copy).unwrap(),
+            Follow::Current { sequence: 6 }
+        );
+
+        checkpoint(&env, puts(7..=9), None);
+        assert_eq!(checkpoint(&env, puts(10..=11), None), 11);
+        assert_eq!(
+            follow(&env, &copy).unwrap(),
+            Follow::Applied {
+                sequence: 11,
+                segments: 2
+            }
+        );
+        assert_eq!(ids(&copy.database), (1..=11).collect::<Vec<_>>());
+        assert_eq!(commits(&copy.database), 11);
+        let detail = maintenance::inspect_detail(&copy.database).unwrap();
+        assert_eq!(detail.lineage, env.source_lineage, "the source's lineage");
+        assert_eq!(
+            follow(&env, &copy).unwrap(),
+            Follow::Current { sequence: 11 }
+        );
+
+        // A fresh seed applies the whole chain in one step.
+        let fresh = seed(&env, "fresh");
+        assert_eq!(
+            follow(&env, &fresh).unwrap(),
+            Follow::Applied {
+                sequence: 11,
+                segments: 3
+            }
+        );
+        assert_eq!(ids(&fresh.database), (1..=11).collect::<Vec<_>>());
+        assert_eq!(env.pins(), 0);
+        // The followed copy is served read-only.
+        let served = Database::open_read_only(&copy.database).unwrap();
+        assert_eq!(served.get(11).unwrap().unwrap().payload, b"p11");
+    }
+
+    #[test]
+    fn a_copy_the_archive_cannot_continue_is_reported_for_a_reseed() {
+        let reseed = |result: Result<Follow, ApiError>, case: &str| match result {
+            Ok(Follow::Reseed(reason)) => reason,
+            other => panic!("{case}: {other:?}"),
+        };
+        let write = |path: &FilePath, id: u64| {
+            let mut database = Database::open(path).unwrap();
+            database.put(id, &[0.0, 0.0, 1.0], b"local").unwrap();
+            database.close().unwrap();
+        };
+
+        // Past the baseline of a set with no archive.
+        let env = setup();
+        let copy = seed(&env, "plain");
+        write(&copy.database, 5);
+        let reason = reseed(follow(&env, &copy), "no archive");
+        assert!(reason.contains("no archive"), "{reason}");
+
+        // Between archived checkpoints: never applied, never changed.
+        checkpoint(&env, puts(5..=6), None);
+        checkpoint(&env, puts(7..=9), None);
+        let reason = reseed(follow(&env, &copy), "off the chain");
+        assert!(reason.contains("sequence 5"), "{reason}");
+        assert_eq!(commits(&copy.database), 5);
+        let copy = seed(&env, "advanced");
+        assert!(matches!(follow(&env, &copy), Ok(Follow::Applied { .. })));
+        write(&copy.database, 12);
+        let reason = reseed(follow(&env, &copy), "past the head");
+        assert!(reason.contains("sequence 10"), "{reason}");
+
+        // Another database's lineage.
+        let other = seed(&env, "other");
+        std::fs::remove_file(&other.database).unwrap();
+        Database::create(&other.database, 3)
+            .unwrap()
+            .close()
+            .unwrap();
+        let reason = reseed(follow(&env, &other), "lineage");
+        assert!(reason.contains("lineage"), "{reason}");
+
+        // A file that is not a database.
+        let garbage = seed(&env, "garbage");
+        std::fs::write(&garbage.database, b"not a database").unwrap();
+        let reason = reseed(follow(&env, &garbage), "garbage");
+        assert!(reason.contains("cannot be followed"), "{reason}");
+        assert_eq!(env.pins(), 0);
+    }
+
+    #[test]
+    fn a_damaged_archive_fails_the_follow_and_keeps_the_last_checkpoint() {
+        let segment = |env: &Env, n: usize| -> String {
+            let index: Value = serde_json::from_slice(
+                &env.data
+                    .raw(&format!("vlite/prod/sets/{}/archive.json", env.set_id))
+                    .unwrap(),
+            )
+            .unwrap();
+            let sha = index["checkpoints"][n]["segment_sha256"]
+                .as_str()
+                .unwrap()
+                .to_owned();
+            format!("vlite/prod/sets/{}/objects/{sha}", env.set_id)
+        };
+        type Damage = Box<dyn Fn(&Env)>;
+        let cases: Vec<(&str, Damage)> = vec![
+            (
+                "flipped segment",
+                Box::new(move |env| {
+                    edit(&env.data, &segment(env, 1), |b| {
+                        let n = b.len() - 1;
+                        b[n] ^= 1;
+                    })
+                }),
+            ),
+            (
+                "missing segment",
+                Box::new(move |env| env.data.remove(&segment(env, 1))),
+            ),
+            (
+                "tampered index",
+                Box::new(|env| {
+                    let key = format!("vlite/prod/sets/{}/archive.json", env.set_id);
+                    edit(&env.data, &key, |b| {
+                        let mut index: Value = serde_json::from_slice(b).unwrap();
+                        index["checkpoints"][1]["sequence"] = json!(8);
+                        *b = serde_json::to_vec(&index).unwrap();
+                    })
+                }),
+            ),
+        ];
+        for (name, damage) in cases {
+            let env = setup();
+            checkpoint(&env, puts(5..=6), None);
+            let copy = seed(&env, "copy");
+            assert!(matches!(follow(&env, &copy), Ok(Follow::Applied { .. })));
+            checkpoint(&env, puts(7..=9), None);
+            damage(&env);
+            let error = follow(&env, &copy).unwrap_err();
+            assert_eq!(error.code, "cloud_set_corrupt", "{name}: {}", error.message);
+            assert_eq!(commits(&copy.database), 6, "{name}");
+            assert_eq!(ids(&copy.database), (1..=6).collect::<Vec<_>>(), "{name}");
+        }
+
+        // Too little space fails before any segment is read.
+        let env = setup();
+        let copy = seed(&env, "copy");
+        checkpoint(&env, puts(5..=6), None);
+        let reads = Arc::new(AtomicUsize::new(0));
+        let count = reads.clone();
+        env.data.hook(Op::Get, "/objects/", move || {
+            count.fetch_add(1, Ordering::SeqCst);
+        });
+        cloud::FREE_BYTES.with(|free| free.set(Some(Some(0))));
+        let error = follow(&env, &copy).unwrap_err();
+        cloud::FREE_BYTES.with(|free| free.set(None));
+        assert_eq!(
+            error.code, "restore_insufficient_space",
+            "{}",
+            error.message
+        );
+        assert_eq!(reads.load(Ordering::SeqCst), 0, "no segment was read");
+        assert_eq!(commits(&copy.database), 4);
+        assert!(matches!(follow(&env, &copy), Ok(Follow::Applied { .. })));
     }
 }
