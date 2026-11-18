@@ -526,6 +526,9 @@ commits appends nothing. `GET /v1/admin/cloud-backup` shows the archive's
 `runs`, `checkpoints`, `failures`, `baseline_set`, `baseline_checkpoints`,
 `last_checkpoint_sequence`, `last_checkpoint_unix_ms` and `last_error`
 under `status.archive`; archive failures never change the snapshot counters.
+`GET /v1/admin/serve-status` repeats this progress, including `last_error`,
+under `archive`; while memory bindings withhold `/metrics` it shows the
+`last_error` code but not its message, which can name log positions.
 
 The chain stops, with a `last_error` code, until the next snapshot publishes
 a new baseline: the policy changed after the baseline

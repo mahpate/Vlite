@@ -19,7 +19,7 @@ use axum::{
 };
 use serde_json::{Value, json};
 
-use super::{ApiError, Service};
+use super::{ApiError, Service, backup_policy::ArchiveStatus};
 
 /// How this process serves its database; fixed for the process lifetime.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -153,19 +153,7 @@ async fn status(Extract(service): Extract<Service>) -> Result<Json<Value>, ApiEr
         None => None,
     };
     let now = unix_ms();
-    let archive = archive.map(|archive| {
-        json!({
-            "baseline_set": archive.baseline_set,
-            "baseline_checkpoints": archive.baseline_checkpoints,
-            "checkpoints": archive.checkpoints,
-            "failures": archive.failures,
-            "last_checkpoint_sequence": if hide { None } else { archive.last_checkpoint_sequence },
-            "last_checkpoint_unix_ms": archive.last_checkpoint_unix_ms,
-            "last_checkpoint_age_ms": archive
-                .last_checkpoint_unix_ms
-                .map(|at| now.saturating_sub(at)),
-        })
-    });
+    let archive = archive.map(|archive| archive_report(archive, hide, now));
     Ok(Json(json!({
         "mode": service.serve.mode.as_str(),
         "draining": service.draining(),
@@ -178,4 +166,76 @@ async fn status(Extract(service): Extract<Service>) -> Result<Json<Value>, ApiEr
         "uptime_ms": u64::try_from(service.started.elapsed().as_millis()).unwrap_or(u64::MAX),
         "note": "writer/reader roles add no write capacity: one writer accepts every write; readers serve the state they opened",
     })))
+}
+
+/// `last_error` is the latest failed archive attempt, cleared by the next
+/// verified checkpoint. Its message can name log positions, so it is
+/// withheld with them; the code stays.
+fn archive_report(archive: ArchiveStatus, hide: bool, now: u64) -> Value {
+    json!({
+        "baseline_set": archive.baseline_set,
+        "baseline_checkpoints": archive.baseline_checkpoints,
+        "checkpoints": archive.checkpoints,
+        "failures": archive.failures,
+        "last_checkpoint_sequence": if hide { None } else { archive.last_checkpoint_sequence },
+        "last_checkpoint_unix_ms": archive.last_checkpoint_unix_ms,
+        "last_checkpoint_age_ms": archive
+            .last_checkpoint_unix_ms
+            .map(|at| now.saturating_sub(at)),
+        "last_error": archive.last_error.map(|error| json!({
+            "code": error.code,
+            "message": if hide { None } else { Some(error.message) },
+        })),
+    })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::super::backup_policy::{ArchiveStatus, LastError};
+    use super::archive_report;
+
+    fn failed() -> ArchiveStatus {
+        ArchiveStatus {
+            runs: 3,
+            checkpoints: 1,
+            failures: 2,
+            baseline_set: Some("set-1".into()),
+            baseline_checkpoints: 1,
+            last_checkpoint_sequence: Some(41),
+            last_checkpoint_unix_ms: Some(1_000),
+            last_error: Some(LastError {
+                code: "archive_log_floor".into(),
+                message: "the live log no longer holds the commits after 41".into(),
+            }),
+            ..ArchiveStatus::default()
+        }
+    }
+
+    #[test]
+    fn archive_report_carries_the_last_error() {
+        let report = archive_report(failed(), false, 1_500);
+        assert_eq!(report["last_error"]["code"], "archive_log_floor");
+        assert_eq!(
+            report["last_error"]["message"],
+            "the live log no longer holds the commits after 41"
+        );
+        assert_eq!(report["last_checkpoint_sequence"], 41);
+        assert_eq!(report["last_checkpoint_age_ms"], 500);
+        assert_eq!(report["failures"], 2);
+    }
+
+    #[test]
+    fn hidden_positions_also_withhold_the_error_message() {
+        let report = archive_report(failed(), true, 1_500);
+        assert_eq!(report["last_error"]["code"], "archive_log_floor");
+        assert!(report["last_error"]["message"].is_null(), "{report}");
+        assert!(report["last_checkpoint_sequence"].is_null(), "{report}");
+    }
+
+    #[test]
+    fn a_healthy_archive_reports_a_null_last_error() {
+        let mut status = failed();
+        status.last_error = None;
+        assert!(archive_report(status, false, 1_500)["last_error"].is_null());
+    }
 }
