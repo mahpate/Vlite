@@ -322,7 +322,7 @@ impl Target {
 
 // ------------------------------------------------------------ identifiers
 
-fn random_hex() -> Result<String, ApiError> {
+pub(super) fn random_hex() -> Result<String, ApiError> {
     let mut bytes = [0u8; 8];
     getrandom::fill(&mut bytes).map_err(internal)?;
     Ok(hex(&bytes))
@@ -342,7 +342,7 @@ pub(super) fn new_set_id(now_ms: u64) -> Result<String, ApiError> {
     ))
 }
 
-fn lower_hex(bytes: &[u8]) -> bool {
+pub(super) fn lower_hex(bytes: &[u8]) -> bool {
     bytes
         .iter()
         .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(b))
@@ -363,7 +363,7 @@ pub(super) fn valid_pin_id(id: &str) -> bool {
     id.len() == 20 && id.starts_with("pin-") && lower_hex(&id.as_bytes()[4..])
 }
 
-fn is_sha256(text: &str) -> bool {
+pub(super) fn is_sha256(text: &str) -> bool {
     text.len() == 64 && lower_hex(text.as_bytes())
 }
 
