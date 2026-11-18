@@ -64,6 +64,7 @@ pub mod providers;
 mod published;
 #[cfg(all(test, not(feature = "grpc")))]
 mod published_rest;
+mod reader_apply;
 mod record_put;
 mod recovery_bundle;
 mod reserved;
@@ -248,6 +249,9 @@ pub struct Service {
     /// signed gateway principal envelope checked against its own fresh
     /// control state; standalone servers leave it unset.
     trust: Option<Arc<gateway_trust::Trust>>,
+    /// feature-aca-ha ITEM-019: apply progress of a reader that follows the
+    /// writer's archive; unset everywhere else.
+    reader: Option<Arc<reader_apply::Progress>>,
 }
 
 impl Service {
@@ -345,6 +349,7 @@ impl Service {
             metrics_with_memory: false,
             serve: Arc::default(),
             trust: None,
+            reader: None,
         })
     }
 
@@ -582,6 +587,7 @@ impl Service {
         next.metrics_with_memory = self.metrics_with_memory;
         next.serve = self.serve.clone();
         next.trust = self.trust.clone();
+        next.reader = self.reader.clone();
         if let Some(config) = self.group_commit_config {
             next = next.with_group_commit(config)?;
         }
@@ -2367,6 +2373,9 @@ fn decode_payload(text: &str) -> Result<Vec<u8>, ApiError> {
 async fn ready(State(service): State<Service>) -> Result<Json<Value>, ApiError> {
     if service.draining() {
         return Err(gateway_trust::draining());
+    }
+    if let Some(error) = service.reader_failure() {
+        return Err(error);
     }
     if let Some(trust) = &service.trust {
         // Fresh control state is what lets this backend authorize anything.
