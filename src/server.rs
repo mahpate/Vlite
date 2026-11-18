@@ -51,6 +51,7 @@ mod group_commit;
 mod guard;
 mod kv;
 pub use group_commit::GroupCommitConfig;
+mod authority;
 #[cfg(feature = "grpc")]
 pub mod grpc;
 mod logs;
