@@ -150,7 +150,8 @@ fn edited_golden() -> String {
 /// leave existing lines untouched. v1.2.20 adds the graph-build-only
 /// `graphs` and `graph_access` account fields to those three account lines.
 /// Private Gap 8 REST step 2a adds exactly ProviderAlias, EmbedResponse and
-/// seven named provider error schemas. Existing-route and schema changes are
+/// seven named provider error schemas. HA EPIC-002 adds the admin
+/// `/v1/admin/serve-status` operation. Existing-route and schema changes are
 /// reviewed separately in APPROVED_OPENAPI_EDITS; the baseline is not re-pinned.
 /// Extend this list only for reviewed, intentional additions, or re-pin the
 /// baseline with `python scripts\graph_baseline.py fixtures --rev <sha>`.
@@ -638,6 +639,8 @@ const APPROVED_OPENAPI_ADDITIONS: &[&str] = &[
         r##"    "/v1/admin/cloud-backup/sets/{id}/pins/{pin}": {"parameters":[{"name":"id","in":"path","required":true,"schema":{"type":"string"}},{"name":"pin","in":"path","required":true,"schema":{"type":"string"}}],"delete":{"summary":"Admin only: remove a cloud backup pin","description":"Removes an operator hold (audited as cloud_backup_unpinned). A pin owned by a restore or drill (kind operation) is refused with cloud_pin_owned; ?force=true releases one left by a crashed owner (audited as cloud_backup_pin_force_released) and is refused with cloud_pin_in_use while this server still runs that operation.","parameters":[{"name":"force","in":"query","required":false,"schema":{"type":"boolean"}}],"responses":{"401":{"description":"unauthorized: missing or invalid authentication"},"403":{"description":"read_only or forbidden_scope: super administrators only"},"409":{"description":"admin_directory_disabled (VLITE_ADMIN_DIR not configured), cloud_backup_not_configured, cloud_pin_owned (a restore or drill pin; use force=true only if its owner crashed) or cloud_pin_in_use"},"404":{"description":"cloud_set_not_found or cloud_pin_not_found"},"422":{"description":"invalid_input: the only query parameter is force=true"},"502":{"description":"cloud_store_failed"},"503":{"description":"cloud_store_unavailable"},"200":{"description":"{set_id, pin_id, removed, forced}"}}}},"##,
         "\n",
     ),
+    // HA EPIC-002: the admin serve-status operation.
+    concat!(r##"    "/v1/admin/serve-status":{"get":{"summary":"Admin only: serve mode, drain state and progress","description":"mode is standalone (default), writer or reader, fixed at startup by --serve-mode or VLITE_SERVE_MODE. A reader serves a read-only database opened at startup and answers every mutation and writer-only administration route with 403 reader_mode after authentication and authorization. A writer or reader answers /ready with 503 draining once shutdown begins. Also reports lineage, format_version, the change-feed sequence (null while memory bindings withhold /metrics), epoch (always null until epochs exist), archive progress (null without a cloud backup runtime) and uptime_ms. No role adds write capacity.","responses":{"200":{"description":"mode, draining, read_only, lineage, format_version, sequence, epoch, archive, uptime_ms and note"},"401":{"description":"unauthorized: missing or invalid authentication"},"403":{"description":"read_only or forbidden_scope: administrators only"}}}},"##, "\n"),
 ];
 
 /// `/openapi.json` (`info.version`) and the MCP `initialize` result
