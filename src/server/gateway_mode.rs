@@ -26,9 +26,9 @@
 //! `502 write_outcome_unknown` (`gateway::ambiguous_write`).
 //!
 //! Not yet: login, the dashboard and super-admin operations through a
-//! gateway (OD-004/OD-012); and fencing. A
-//! dedicated record's epoch is carried in the directory, but no backend
-//! stamps responses, so `gateway::check_epoch` is not applied (OD-002).
+//! gateway (OD-004/OD-012). Dedicated responses require a valid epoch stamp
+//! checked against the freshest usable same-lineage directory before streaming;
+//! an epoch refusal is final, with no retry or writer fallback.
 
 use super::control_state::{self, Feed, Snapshot, Source};
 use super::gateway::{self, Operation, RouteRefusal};
@@ -509,6 +509,31 @@ impl Gateway {
         };
         let status = upstream.status();
         let headers = response_headers(upstream.headers());
+        if let Some(dispatched) = target.epoch {
+            let stamped = gateway::stamped_epoch(&headers);
+            let checked = self
+                .feed
+                .current()
+                .map_err(|_| gateway::EpochRefusal::Stale)
+                .and_then(|current| {
+                    let record = current
+                        .record_for(tenant)
+                        .filter(|record| record.lineage == target.lineage)
+                        .ok_or(gateway::EpochRefusal::Stale)?;
+                    let expected = dispatched.max(record.epoch.unwrap_or(dispatched));
+                    gateway::check_epoch(Some(expected), stamped)
+                });
+            if let Err(refusal) = checked {
+                log_stderr(
+                    "warn",
+                    "gateway",
+                    json!({"event":"gateway_upstream_failed","code":"backend_epoch_stale",
+                        "operation":operation_name(target.operation)})
+                    .to_string(),
+                );
+                return Err(refusal.error(target.operation));
+            }
+        }
         let (sender, receiver) = tokio::sync::mpsc::channel::<Result<Bytes, std::io::Error>>(4);
         let operation = target.operation;
         tokio::spawn(pump(
@@ -701,7 +726,7 @@ fn nominated(headers: &HeaderMap) -> Vec<String> {
 }
 
 /// The caller's headers that may reach a backend: no credential, cookie,
-/// principal, forwarding/proxy, host, framing or hop-by-hop header.
+/// principal, epoch, forwarding/proxy, host, framing or hop-by-hop header.
 fn request_headers(incoming: &HeaderMap) -> HeaderMap {
     let nominated = nominated(incoming);
     let mut headers = HeaderMap::new();
@@ -717,6 +742,7 @@ fn request_headers(incoming: &HeaderMap) -> HeaderMap {
                     | "host"
                     | "expect"
                     | "content-length"
+                    | "x-vlite-epoch"
             )
             || name_text == principal_envelope::HEADER
             || name_text.starts_with("x-forwarded-")
@@ -1131,6 +1157,7 @@ mod tests {
 
     fn reader_headers() -> HeaderMap {
         map(&[
+            ("x-vlite-epoch", "5"),
             ("x-vlite-lineage", "0000000000001234"),
             ("x-vlite-binding-generation", "3"),
             ("x-vlite-applied-age-ms", "12"),
@@ -1143,25 +1170,37 @@ mod tests {
         reader: &str,
         routing: control_state::ReadRouting,
     ) -> (Arc<Gateway>, String) {
-        let (credentials, tokens) =
-            credentials::tests::issued(&[("aaaaaaaaaaaa", Some(TENANT))], 0x1234);
-        let tenants = tenants::Store::for_test(vec![tenants::Tenant::for_test(TENANT, None)]);
         let mut record = control_state::Route::dedicated_for_test(TENANT, 5);
         record.writer = writer.to_owned();
         record.reader = Some(reader.to_owned());
         record.read_routing = routing;
+        let (gateway, token, _) = gateway_with_route(record);
+        (gateway, token)
+    }
+
+    fn gateway_with_route(
+        record: control_state::Route,
+    ) -> (Arc<Gateway>, String, control_state::Objects) {
+        let (credentials, tokens) =
+            credentials::tests::issued(&[("aaaaaaaaaaaa", Some(TENANT))], 0x1234);
+        let tenants = tenants::Store::for_test(vec![tenants::Tenant::for_test(TENANT, None)]);
         let snapshot = Snapshot::import(&credentials, Some(&tenants))
             .unwrap()
             .with_directory(vec![record]);
         let mut value = serde_json::to_value(snapshot).unwrap();
         value["credentials"][0]["operations"] = json!(["read", "write", "search", "collections"]);
         let snapshot = serde_json::from_value(value).unwrap();
-        let objects = control_state::Objects::new(
-            Arc::new(super::super::cloud_backup::fake::Memory::default()),
-            "control/state.json",
-        );
+        let store = Arc::new(super::super::cloud_backup::fake::Memory::default());
+        let objects = control_state::Objects::new(store.clone(), "control/state.json");
         objects.create(snapshot, admin::now_ms() as u64).unwrap();
-        let feed = Arc::new(Feed::new(objects, 60_000, 1_000).unwrap());
+        let feed = Arc::new(
+            Feed::new(
+                control_state::Objects::new(store, "control/state.json"),
+                60_000,
+                1_000,
+            )
+            .unwrap(),
+        );
         feed.poll_once().unwrap();
         (
             Arc::new(Gateway {
@@ -1177,6 +1216,7 @@ mod tests {
                 max_replicas: 1,
             }),
             tokens[0].clone(),
+            objects,
         )
     }
 
@@ -1196,7 +1236,7 @@ mod tests {
                     .unwrap(),
             )
             .await
-            .unwrap()
+            .unwrap_or_else(IntoResponse::into_response)
     }
 
     #[tokio::test]
@@ -1227,7 +1267,7 @@ mod tests {
         // A writer's 503 is final even when its headers would fail reader validation.
         let writer = upstream(
             StatusCode::SERVICE_UNAVAILABLE,
-            HeaderMap::new(),
+            map(&[("x-vlite-epoch", "5")]),
             Duration::ZERO,
         )
         .await;
@@ -1292,7 +1332,12 @@ mod tests {
 
     #[tokio::test]
     async fn reader_connection_refusal_falls_back_to_writer() {
-        let writer = upstream(StatusCode::OK, HeaderMap::new(), Duration::ZERO).await;
+        let writer = upstream(
+            StatusCode::OK,
+            map(&[("x-vlite-epoch", "5")]),
+            Duration::ZERO,
+        )
+        .await;
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let reader = format!("http://{}", listener.local_addr().unwrap());
         drop(listener);
@@ -1314,7 +1359,12 @@ mod tests {
             (control_state::ReadRouting::Readers, true),
             (control_state::ReadRouting::WriterOnly, false),
         ] {
-            let writer = upstream(StatusCode::OK, HeaderMap::new(), Duration::ZERO).await;
+            let writer = upstream(
+                StatusCode::OK,
+                map(&[("x-vlite-epoch", "5")]),
+                Duration::ZERO,
+            )
+            .await;
             let reader = upstream(StatusCode::OK, reader_headers(), Duration::ZERO).await;
             let (gateway, token) = routed_gateway(&writer.endpoint, &reader.endpoint, routing);
             let response = routed_request(gateway, &token, write).await;
@@ -1334,6 +1384,286 @@ mod tests {
             );
         }
         headers
+    }
+
+    async fn assert_epoch_refusal(response: Response, write: bool) {
+        assert_eq!(
+            response.status(),
+            if write {
+                StatusCode::BAD_GATEWAY
+            } else {
+                StatusCode::SERVICE_UNAVAILABLE
+            }
+        );
+        assert!(!response.headers().contains_key("x-vlite-epoch"));
+        let body = axum::body::to_bytes(response.into_body(), 1024)
+            .await
+            .unwrap();
+        assert!(
+            !body
+                .windows(b"backend answer".len())
+                .any(|part| part == b"backend answer")
+        );
+        let body: Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(
+            body["error"]["code"],
+            if write {
+                "write_outcome_unknown"
+            } else {
+                "backend_epoch_stale"
+            }
+        );
+    }
+
+    #[tokio::test]
+    async fn gateway_checks_epoch_before_stream() {
+        // HTTP normalizes field-edge whitespace; the parser test covers it directly.
+        let cases = [
+            (map(&[]), false),
+            (map(&[("x-vlite-epoch", "4")]), false),
+            (map(&[("x-vlite-epoch", "05")]), false),
+            (map(&[("x-vlite-epoch", "+5")]), false),
+            (map(&[("x-vlite-epoch", "5 5")]), false),
+            (map(&[("x-vlite-epoch", "5,5")]), false),
+            (
+                map(&[("x-vlite-epoch", "5"), ("x-vlite-epoch", "5")]),
+                false,
+            ),
+            (map(&[("x-vlite-epoch", "0")]), false),
+            (map(&[("x-vlite-epoch", "18446744073709551616")]), false),
+            (map(&[("x-vlite-epoch", "5")]), true),
+            (map(&[("x-vlite-epoch", "6")]), true),
+        ];
+        for (headers, accepted) in cases {
+            let writer = upstream(StatusCode::ACCEPTED, headers.clone(), Duration::ZERO).await;
+            let (gateway, token) = routed_gateway(
+                &writer.endpoint,
+                &writer.endpoint,
+                control_state::ReadRouting::WriterOnly,
+            );
+            let response = routed_request(gateway, &token, false).await;
+            if accepted {
+                assert_eq!(response.status(), StatusCode::ACCEPTED);
+                assert_eq!(
+                    response.headers().get("x-vlite-epoch"),
+                    headers.get("x-vlite-epoch")
+                );
+                assert_eq!(
+                    axum::body::to_bytes(response.into_body(), 1024)
+                        .await
+                        .unwrap(),
+                    "backend answer"
+                );
+            } else {
+                assert_epoch_refusal(response, false).await;
+            }
+            assert_eq!(writer.requests.lock().unwrap().len(), 1);
+        }
+    }
+
+    #[tokio::test]
+    async fn gateway_epoch_refusal_never_retries_write() {
+        let writer = upstream(
+            StatusCode::OK,
+            map(&[("x-vlite-epoch", "4")]),
+            Duration::ZERO,
+        )
+        .await;
+        let reader = upstream(StatusCode::OK, reader_headers(), Duration::ZERO).await;
+        let (gateway, token) = routed_gateway(
+            &writer.endpoint,
+            &reader.endpoint,
+            control_state::ReadRouting::Readers,
+        );
+        assert_epoch_refusal(routed_request(gateway, &token, true).await, true).await;
+        assert_eq!(writer.requests.lock().unwrap().len(), 1);
+        assert!(reader.requests.lock().unwrap().is_empty());
+    }
+
+    #[tokio::test]
+    async fn gateway_epoch_refusal_does_not_fall_back_to_writer() {
+        let writer = upstream(StatusCode::OK, HeaderMap::new(), Duration::ZERO).await;
+        let mut headers = reader_headers();
+        headers.insert("x-vlite-epoch", "4".parse().unwrap());
+        let reader = upstream(StatusCode::OK, headers, Duration::ZERO).await;
+        let (gateway, token) = routed_gateway(
+            &writer.endpoint,
+            &reader.endpoint,
+            control_state::ReadRouting::Readers,
+        );
+        assert_epoch_refusal(routed_request(gateway, &token, false).await, false).await;
+        assert!(writer.requests.lock().unwrap().is_empty());
+        assert_eq!(reader.requests.lock().unwrap().len(), 1);
+    }
+
+    #[tokio::test]
+    async fn gateway_strips_forged_epoch_request() {
+        let writer = upstream(
+            StatusCode::OK,
+            map(&[("x-vlite-epoch", "5")]),
+            Duration::ZERO,
+        )
+        .await;
+        let (gateway, token) = routed_gateway(
+            &writer.endpoint,
+            &writer.endpoint,
+            control_state::ReadRouting::WriterOnly,
+        );
+        let response = gateway
+            .forward(
+                Request::builder()
+                    .uri("/v1/collections")
+                    .header(header::AUTHORIZATION, format!("Bearer {token}"))
+                    .header("X-VLite-Epoch", "99")
+                    .header("x-vlite-custom", "preserved")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        let requests = writer.requests.lock().unwrap();
+        assert_eq!(requests.len(), 1);
+        assert!(!requests[0].0.contains_key("x-vlite-epoch"));
+        assert_eq!(requests[0].0.get("x-vlite-custom").unwrap(), "preserved");
+    }
+
+    #[tokio::test]
+    async fn gateway_connection_nominated_epoch_refused() {
+        let writer = upstream(
+            StatusCode::OK,
+            map(&[("x-vlite-epoch", "5"), ("connection", "x-vlite-epoch")]),
+            Duration::ZERO,
+        )
+        .await;
+        let (gateway, token) = routed_gateway(
+            &writer.endpoint,
+            &writer.endpoint,
+            control_state::ReadRouting::WriterOnly,
+        );
+        assert_epoch_refusal(routed_request(gateway, &token, false).await, false).await;
+        assert_eq!(writer.requests.lock().unwrap().len(), 1);
+    }
+
+    #[tokio::test]
+    async fn gateway_directory_advance_raises_expected_epoch() {
+        assert_directory_change_refused(|mut record| {
+            record.epoch = Some(6);
+            Some(record)
+        })
+        .await;
+    }
+
+    #[tokio::test]
+    async fn gateway_directory_removal_or_lineage_change_fails_closed() {
+        assert_directory_change_refused(|_| None).await;
+        assert_directory_change_refused(|mut record| {
+            record.lineage = 0x5678;
+            Some(record)
+        })
+        .await;
+    }
+
+    async fn assert_directory_change_refused(
+        change: impl FnOnce(control_state::Route) -> Option<control_state::Route>,
+    ) {
+        let writer = upstream(
+            StatusCode::OK,
+            map(&[("x-vlite-epoch", "5")]),
+            Duration::from_millis(200),
+        )
+        .await;
+        let mut record = control_state::Route::dedicated_for_test(TENANT, 5);
+        record.writer = writer.endpoint.clone();
+        let (mut gateway, token, objects) = gateway_with_route(record.clone());
+        Arc::get_mut(&mut gateway).unwrap().upstream_timeout = Duration::from_secs(2);
+        let directory: Vec<_> = change(record).into_iter().collect();
+        let update = async {
+            tokio::time::timeout(Duration::from_secs(1), async {
+                while writer.requests.lock().unwrap().is_empty() {
+                    tokio::task::yield_now().await;
+                }
+            })
+            .await
+            .unwrap();
+            objects
+                .update(admin::now_ms() as u64, |snapshot| {
+                    Ok(snapshot.clone().with_directory(directory.clone()))
+                })
+                .unwrap();
+            gateway.feed.poll_once().unwrap();
+        };
+        let (response, ()) = tokio::join!(routed_request(gateway.clone(), &token, false), update);
+        assert_epoch_refusal(response, false).await;
+        assert_eq!(writer.requests.lock().unwrap().len(), 1);
+    }
+
+    #[tokio::test]
+    async fn gateway_expired_control_state_refuses_dedicated_but_not_shared_responses() {
+        for (dedicated, write) in [(true, false), (true, true), (false, false)] {
+            let writer = upstream(
+                StatusCode::ACCEPTED,
+                map(&[("x-vlite-epoch", "5")]),
+                Duration::from_millis(500),
+            )
+            .await;
+            let mut record = if dedicated {
+                control_state::Route::dedicated_for_test(TENANT, 5)
+            } else {
+                control_state::Route::shared_for_test(TENANT)
+            };
+            record.writer = writer.endpoint.clone();
+            let (mut gateway, token, objects) = gateway_with_route(record);
+            let settings = Arc::get_mut(&mut gateway).unwrap();
+            settings.upstream_timeout = Duration::from_secs(2);
+            settings.feed = Arc::new(Feed::new(objects, 250, 10).unwrap());
+            settings.feed.poll_once().unwrap();
+            let response = routed_request(gateway.clone(), &token, write).await;
+            assert!(gateway.feed.current().is_err());
+            if dedicated {
+                assert_epoch_refusal(response, write).await;
+            } else {
+                assert_eq!(response.status(), StatusCode::ACCEPTED);
+                assert_eq!(response.headers().get("x-vlite-epoch").unwrap(), "5");
+                assert_eq!(
+                    axum::body::to_bytes(response.into_body(), 1024)
+                        .await
+                        .unwrap(),
+                    "backend answer"
+                );
+            }
+            assert_eq!(writer.requests.lock().unwrap().len(), 1);
+        }
+    }
+
+    #[tokio::test]
+    async fn gateway_shared_pool_ignores_epoch_header() {
+        for headers in [
+            map(&[]),
+            map(&[("x-vlite-epoch", "malformed")]),
+            map(&[("x-vlite-epoch", "0"), ("x-vlite-epoch", "05")]),
+        ] {
+            let writer = upstream(StatusCode::ACCEPTED, headers.clone(), Duration::ZERO).await;
+            let mut record = control_state::Route::shared_for_test(TENANT);
+            record.writer = writer.endpoint.clone();
+            let (gateway, token, _) = gateway_with_route(record);
+            let response = routed_request(gateway, &token, false).await;
+            assert_eq!(response.status(), StatusCode::ACCEPTED);
+            assert_eq!(
+                response
+                    .headers()
+                    .get_all("x-vlite-epoch")
+                    .iter()
+                    .collect::<Vec<_>>(),
+                headers.get_all("x-vlite-epoch").iter().collect::<Vec<_>>()
+            );
+            assert_eq!(
+                axum::body::to_bytes(response.into_body(), 1024)
+                    .await
+                    .unwrap(),
+                "backend answer"
+            );
+        }
     }
 
     #[test]
