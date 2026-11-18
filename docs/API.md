@@ -1161,25 +1161,45 @@ vlite-server control-state publish --target-file target.json \
   --object gateway/control-state.json --admin-dir /data/admin \
   --directory-file directory.json
 
-# Generation A+1: re-import the admin directory, and optionally replace the
-# directory or apply one change.
+# Generation A+1 with exactly one change. Give one of the four change flags,
+# --directory-file, or one change flag plus --directory-file.
 vlite-server control-state update --target-file target.json \
   --object gateway/control-state.json --admin-dir /data/admin \
   [--directory-file directory.json] \
-  [--revoke-credential <id> | --suspend-tenant <id> | --resume-tenant <id>]
+  [--revoke-credential <id> | --suspend-tenant <id> | --resume-tenant <id> |
+   --reimport-if-generation <A>]
 ```
 
 Each prints `{"generation":A,"object":"..."}`. Errors print `{"error":...}`
-on stderr and exit 1. `update` applies the change to the admin directory
-first (audited with `source: "control-state-cli"`) and then writes the next
-generation. A lost race is re-read and re-applied; an unknown store outcome
-answers `control_state_indeterminate` without a retry. Running the same
-command again after that is safe: it applies the same change and publishes
-another generation. Run only one `control-state update` at a time against an
-admin directory, and not while a standalone server uses it. `update` publishes
-the whole admin directory, so run it from the directory that holds the current
-credentials and tenants: an older copy publishes its older state over newer
-changes, and nothing checks for that. Each gateway and
+on stderr and exit 1. An `update` with none of these flags is refused.
+
+* `--revoke-credential`, `--suspend-tenant` and `--resume-tenant` change the
+  admin directory first (audited with `source: "control-state-cli"`). They
+  then make the same change to the published state and keep everything else
+  in it. They never republish the rest of the admin directory, so an older or
+  concurrent admin directory cannot undo another change. An id that is not
+  published gets 404 `credential_not_found` or `tenant_not_found`, and
+  nothing is published.
+* `--reimport-if-generation <A>` publishes the admin directory's credentials
+  and tenants, for example newly issued credentials or new tenants. It
+  publishes only while the published generation is still `A`; otherwise it
+  answers 409 `control_state_generation_mismatch` and publishes nothing.
+  Use the generation printed by the last `publish` or `update`, or reported
+  by a gateway's `/ready`. Restrictions already published stay even when
+  the admin directory is older: a revoked credential stays revoked, the
+  earlier expiry wins, and a suspended or deleted tenant stays so. Resume a
+  tenant with `--resume-tenant`.
+* `--directory-file` alone replaces only the tenant routes.
+
+A lost race is re-read and the change is re-applied to the winning
+generation (a re-import is then refused, because the generation moved). An
+unknown store outcome answers `control_state_indeterminate` without a retry.
+Repeating a revoke, suspend or resume after that is safe: the change is
+idempotent and publishes another generation. Only one `control-state`
+command runs at a time per admin directory. A second one answers
+`admin_dir_busy`, which comes from the `control-state.lock` file in that
+directory. A standalone server does not take that lock, so do not run the
+command while a server uses the directory. Each gateway and
 backend picks up a new generation at its next successful poll; a backend then
 refuses envelopes minted from an older generation. Until every gateway has
 polled, some requests can therefore get 401 `envelope_stale`; callers may

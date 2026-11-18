@@ -443,6 +443,29 @@ impl Snapshot {
     pub(super) fn authenticate(&self, token: &str, now: u64) -> Result<Arc<Grant>, ApiError> {
         verify(&self.0, token, now)
     }
+
+    /// Revokes `id` in this snapshot (idempotent: an earlier revocation time
+    /// is kept). 404 `credential_not_found` when the snapshot lacks it.
+    pub(super) fn revoke(&mut self, id: &str, now: u64) -> Result<(), ApiError> {
+        let index = find(&self.0, id)?;
+        self.0[index].revoked_unix_ms.get_or_insert(now);
+        Ok(())
+    }
+
+    /// Keeps `current`'s restrictions on the credentials both hold: a
+    /// revocation stays and the earlier expiry wins, so republishing an
+    /// older admin directory never revives or extends a credential.
+    /// Credentials missing here are not brought back.
+    pub(super) fn keep_restrictions(&mut self, current: &Snapshot) {
+        for entry in &mut self.0 {
+            if let Some(old) = current.0.iter().find(|old| old.id == entry.id) {
+                entry.expires_unix_ms = entry.expires_unix_ms.min(old.expires_unix_ms);
+                if entry.revoked_unix_ms.is_none() {
+                    entry.revoked_unix_ms = old.revoked_unix_ms;
+                }
+            }
+        }
+    }
 }
 
 /// One scoped credential in a recovery bundle: its identity, grant and

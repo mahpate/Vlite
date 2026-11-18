@@ -477,6 +477,46 @@ impl Store {
     }
 }
 
+/// Suspends or resumes live tenant `id` in a tenant list (a control-state
+/// snapshot); idempotent. 404 `tenant_not_found` when it is missing or
+/// deleted.
+pub(super) fn set_suspended_in(
+    tenants: &mut [Tenant],
+    id: &str,
+    suspend: bool,
+    now: u64,
+) -> Result<(), ApiError> {
+    let tenant = tenants
+        .iter_mut()
+        .find(|t| t.id == id && !t.deleted)
+        .ok_or_else(not_found)?;
+    if suspend {
+        suspend_tenant(tenant, now);
+    } else {
+        resume_tenant(tenant);
+    }
+    Ok(())
+}
+
+/// Keeps `current`'s restrictions on the tenants both lists hold: a
+/// deletion stays and so does a suspension, so republishing an older admin
+/// directory never revives or resumes a tenant (resume with
+/// `control-state update --resume-tenant`). Tenants missing here are not
+/// brought back.
+pub(super) fn keep_restrictions(tenants: &mut [Tenant], current: &[Tenant]) {
+    for tenant in tenants {
+        let Some(old) = current.iter().find(|old| old.id == tenant.id) else {
+            continue;
+        };
+        if old.deleted {
+            tenant.deleted = true;
+            tenant.suspended_unix_ms = None;
+        } else if !tenant.deleted && tenant.suspended_unix_ms.is_none() {
+            tenant.suspended_unix_ms = old.suspended_unix_ms;
+        }
+    }
+}
+
 fn suspend_tenant(tenant: &mut Tenant, now: u64) -> Value {
     let already = tenant.suspended_unix_ms.is_some();
     if !already {

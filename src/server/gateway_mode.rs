@@ -48,7 +48,7 @@ use std::time::Duration;
 
 const GATEWAY_USAGE: &str = "vlite-server gateway --config <json>";
 const KEYGEN_USAGE: &str = "vlite-server gateway-keygen --kid <kid> --generation <n> --signing-key-out <new-file> --public-bundle-out <new-file>";
-const CONTROL_USAGE: &str = "vlite-server control-state publish|update --target-file <json> --object <name> [--shared-key-file <path>] --admin-dir <dir> [--directory-file <json>] [update only, at most one of: --revoke-credential <id> | --suspend-tenant <id> | --resume-tenant <id>]";
+const CONTROL_USAGE: &str = "vlite-server control-state publish|update --target-file <json> --object <name> [--shared-key-file <path>] --admin-dir <dir> [--directory-file <json>] [update only, at most one of: --revoke-credential <id> | --suspend-tenant <id> | --resume-tenant <id> | --reimport-if-generation <n>]";
 /// A signing seed file is 43 base64url characters; allow whitespace.
 const MAX_SEED_FILE_BYTES: u64 = 1024;
 const MAX_IN_FLIGHT: usize = 65_536;
@@ -875,21 +875,34 @@ pub fn gateway_keygen(args: &[OsString]) -> Result<Value, String> {
 enum Mutation {
     Revoke(String),
     Suspend(String, bool),
+    Reimport(u64),
 }
 
-/// `vlite-server control-state publish|update`: publishes the admin
-/// directory's credentials and tenants (plus an optional tenant directory)
-/// as the shared control state, through its compare-and-swap. `publish`
-/// creates generation 1 and refuses an existing object; `update` applies at
-/// most one local mutation (revoke a credential, suspend or resume a
-/// tenant) and then republishes at the next generation, keeping the
-/// directory unless `--directory-file` replaces it. The local mutation is
-/// applied before the compare-and-swap, so a failed publish leaves it applied
-/// and unpublished; repeating the command is safe (the mutation is idempotent)
-/// and publishes it. `update` republishes the whole admin directory, so run it
-/// from the directory that holds the current credentials and tenants: an older
-/// copy publishes its older state over newer changes. The store is blocking:
-/// call off the async runtime.
+/// Name of the admin-directory file `control-state` locks, so two commands
+/// on one admin directory never interleave.
+const CONTROL_STATE_LOCK: &str = "control-state.lock";
+
+/// `vlite-server control-state publish|update`: the shared control state's
+/// command line, through its compare-and-swap. `publish` creates generation 1
+/// from the admin directory's credentials and tenants (plus an optional
+/// tenant directory) and refuses an existing object. `update` publishes the
+/// next generation with exactly one change:
+/// - `--revoke-credential`, `--suspend-tenant` or `--resume-tenant` applies
+///   the change to the admin directory (for its audit log) and then to the
+///   published state, never republishing the rest of the admin directory, so
+///   concurrent or stale admin directories cannot undo each other's changes
+///   (security review, finding 1). The local change is applied first, so a
+///   failed publish leaves it applied and unpublished; repeating the command
+///   is safe (the change is idempotent) and publishes it.
+/// - `--reimport-if-generation <n>` republishes the admin directory's
+///   credentials and tenants (to publish newly issued credentials or new
+///   tenants), only while the published generation is still `n`; restrictions
+///   already published stay.
+/// - `--directory-file` alone replaces only the tenant routes; with one of the
+///   above it replaces them too.
+///
+/// One command at a time runs per admin directory (`control-state.lock`,
+/// else `admin_dir_busy`). The store is blocking: call off the async runtime.
 pub fn control_state_command(args: &[OsString]) -> Result<Value, String> {
     let usage = |detail: &str| format!("invalid_arguments: {detail}; usage: {CONTROL_USAGE}");
     let (verb, rest) = args
@@ -908,7 +921,12 @@ pub fn control_state_command(args: &[OsString]) -> Result<Value, String> {
         "--directory-file",
     ];
     if !publish {
-        allowed.extend(["--revoke-credential", "--suspend-tenant", "--resume-tenant"]);
+        allowed.extend([
+            "--revoke-credential",
+            "--suspend-tenant",
+            "--resume-tenant",
+            "--reimport-if-generation",
+        ]);
     }
     let mut values = flags(rest, &allowed, CONTROL_USAGE)?;
     let mut required = |name: &str| {
@@ -942,9 +960,19 @@ pub fn control_state_command(args: &[OsString]) -> Result<Value, String> {
             mutations.push(make(utf8(flag, value)?));
         }
     }
+    if let Some(value) = values.remove("--reimport-if-generation") {
+        let generation = utf8("--reimport-if-generation", value)?
+            .parse::<u64>()
+            .ok()
+            .filter(|generation| *generation > 0)
+            .ok_or_else(|| {
+                usage("--reimport-if-generation must be a published generation (1 or more)")
+            })?;
+        mutations.push(Mutation::Reimport(generation));
+    }
     if mutations.len() > 1 {
         return Err(usage(
-            "give at most one of --revoke-credential, --suspend-tenant, --resume-tenant",
+            "give at most one of --revoke-credential, --suspend-tenant, --resume-tenant, --reimport-if-generation",
         ));
     }
     let api = |error: ApiError| format!("{}: {}", error.code, error.message);
@@ -953,6 +981,11 @@ pub fn control_state_command(args: &[OsString]) -> Result<Value, String> {
         .map(|path| control_state::read_directory_file(Path::new(&path)))
         .transpose()
         .map_err(api)?;
+    if !publish && mutations.is_empty() && directory.is_none() {
+        return Err(usage(
+            "update needs one of --revoke-credential, --suspend-tenant, --resume-tenant, --reimport-if-generation or --directory-file",
+        ));
+    }
     let directory_admin = std::fs::canonicalize(&admin_dir)
         .ok()
         .filter(|path| path.is_dir())
@@ -961,6 +994,17 @@ pub fn control_state_command(args: &[OsString]) -> Result<Value, String> {
         let what = what.to_owned();
         move |error: std::io::Error| format!("admin_dir_invalid: {what}: {}", error.kind())
     };
+    // Held until the command returns; the OS releases it if the process dies.
+    let lock = std::fs::OpenOptions::new()
+        .create(true)
+        .truncate(false)
+        .write(true)
+        .open(directory_admin.join(CONTROL_STATE_LOCK))
+        .map_err(io("control-state lock"))?;
+    lock.try_lock().map_err(|_| {
+        "admin_dir_busy: another control-state command is running on this admin directory"
+            .to_owned()
+    })?;
     let log = audit::Log::open(&directory_admin).map_err(io("audit log"))?;
     let credentials = credentials::Store::load(&directory_admin).map_err(io("credentials"))?;
     let tenants = tenants::Store::load(&directory_admin).map_err(io("tenants"))?;
@@ -973,26 +1017,30 @@ pub fn control_state_command(args: &[OsString]) -> Result<Value, String> {
         let snapshot = snapshot.with_directory(directory.unwrap_or_default());
         objects.create(snapshot, now).map_err(api)?
     } else {
-        match mutations.pop() {
+        let (edit, expected) = match mutations.pop() {
             Some(Mutation::Revoke(id)) => {
-                credentials.revoke_id(&log, &id, now, Some("control-state-cli"))
+                credentials
+                    .revoke_id(&log, &id, now, Some("control-state-cli"))
+                    .map_err(api)?;
+                (control_state::Edit::Revoke(id), None)
             }
             Some(Mutation::Suspend(id, suspend)) => {
-                tenants.set_suspended(&log, &id, suspend, now, "control-state-cli")
+                tenants
+                    .set_suspended(&log, &id, suspend, now, "control-state-cli")
+                    .map_err(api)?;
+                (control_state::Edit::Suspend(id, suspend), None)
             }
-            None => Ok(Value::Null),
-        }
-        .map_err(api)?;
+            Some(Mutation::Reimport(generation)) => (
+                control_state::Edit::Reimport(&credentials, &tenants),
+                Some(generation),
+            ),
+            None => (control_state::Edit::Directory, None),
+        };
         objects
-            .update(now, |current| {
-                let next = current.reimport(&credentials, Some(&tenants))?;
-                Ok(match &directory {
-                    Some(directory) => next.with_directory(directory.clone()),
-                    None => next,
-                })
-            })
+            .apply(now, &edit, directory.as_deref(), expected)
             .map_err(api)?
     };
+    drop(lock);
     Ok(json!({"generation":snapshot.generation(),"object":source.object}))
 }
 
@@ -1296,5 +1344,48 @@ mod tests {
             .unwrap_err()
             .contains("at most one")
         );
+    }
+
+    #[test]
+    fn control_state_update_refuses_blind_republishes_and_concurrent_runs() {
+        // Security review, finding 1.
+        let dir = tempfile::tempdir().unwrap();
+        let admin = dir.path().to_str().unwrap();
+        let run = |extra: &[&str]| {
+            let mut list = vec![
+                "update",
+                "--target-file",
+                "missing-target.json",
+                "--object",
+                "o.json",
+                "--admin-dir",
+                admin,
+            ];
+            list.extend_from_slice(extra);
+            let args = list.iter().map(OsString::from).collect::<Vec<_>>();
+            control_state_command(&args).unwrap_err()
+        };
+        assert!(run(&[]).contains("update needs one of"));
+        for generation in ["0", "abc", "-1"] {
+            let error = run(&["--reimport-if-generation", generation]);
+            assert!(error.contains("published generation"), "{error}");
+        }
+        let error = run(&["--revoke-credential", "x", "--reimport-if-generation", "3"]);
+        assert!(error.contains("at most one"), "{error}");
+
+        let held = std::fs::OpenOptions::new()
+            .create(true)
+            .truncate(false)
+            .write(true)
+            .open(dir.path().join(CONTROL_STATE_LOCK))
+            .unwrap();
+        held.try_lock().unwrap();
+        let error = run(&["--revoke-credential", "aaaaaaaaaaaa"]);
+        assert!(error.starts_with("admin_dir_busy"), "{error}");
+        drop(held);
+        // Free again: the run gets past the lock (and stops at the empty
+        // admin directory or the missing target instead).
+        let error = run(&["--revoke-credential", "aaaaaaaaaaaa"]);
+        assert!(!error.starts_with("admin_dir_busy"), "{error}");
     }
 }

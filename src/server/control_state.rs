@@ -201,12 +201,39 @@ impl Snapshot {
     /// refreshing through it would silently unroute every tenant. Deleting a
     /// tenant that still has a route makes the result fail validation when
     /// published (`control_state_invalid`): unroute it first.
+    ///
+    /// Restrictions already published stay (security review, finding 1): a
+    /// revoked credential stays revoked, the earlier expiry wins, and a
+    /// deleted or suspended tenant stays so, even when the admin directory
+    /// is an older copy. Resuming a tenant needs `with_suspended`.
     pub(super) fn reimport(
         &self,
         credentials: &credentials::Store,
         tenants: Option<&tenants::Store>,
     ) -> Result<Self, ApiError> {
-        Ok(Self::import(credentials, tenants)?.with_directory(self.directory.clone()))
+        let mut next = Self::import(credentials, tenants)?.with_directory(self.directory.clone());
+        next.credentials.keep_restrictions(&self.credentials);
+        tenants::keep_restrictions(&mut next.tenants, &self.tenants);
+        Ok(next)
+    }
+
+    /// `self` with credential `id` revoked; nothing else changes, so a
+    /// stale admin directory cannot republish older state with it.
+    pub(super) fn with_revoked(mut self, id: &str, now: u64) -> Result<Self, ApiError> {
+        self.credentials.revoke(id, now)?;
+        Ok(self)
+    }
+
+    /// `self` with live tenant `id` suspended or resumed; nothing else
+    /// changes.
+    pub(super) fn with_suspended(
+        mut self,
+        id: &str,
+        suspend: bool,
+        now: u64,
+    ) -> Result<Self, ApiError> {
+        tenants::set_suspended_in(&mut self.tenants, id, suspend, now)?;
+        Ok(self)
     }
 
     /// The directory record for `tenant`, if it is routed.
@@ -357,6 +384,63 @@ impl Objects {
             "control state is changing too often; retry later",
         ))
     }
+
+    /// One `control-state update` through the compare-and-swap. A
+    /// revocation, suspension or resumption is applied to the published
+    /// state just read, not taken from the admin directory, so a concurrent
+    /// or stale admin directory cannot republish older credentials or
+    /// tenants with it (security review, finding 1); a lost race re-applies
+    /// it to the winner. Only `Edit::Reimport` reads the admin directory. A
+    /// given `directory` replaces the tenant routes. With `expected`, the
+    /// update is refused (409 `control_state_generation_mismatch`) unless
+    /// the published generation is exactly that.
+    pub(super) fn apply(
+        &self,
+        now: u64,
+        edit: &Edit<'_>,
+        directory: Option<&[Route]>,
+        expected: Option<u64>,
+    ) -> Result<Snapshot, ApiError> {
+        self.update(now, |current| {
+            if let Some(expected) = expected
+                && current.generation != expected
+            {
+                return Err(ApiError::new(
+                    StatusCode::CONFLICT,
+                    "control_state_generation_mismatch",
+                    format!(
+                        "control state is at generation {}, not the expected {expected}; nothing was published",
+                        current.generation
+                    ),
+                ));
+            }
+            let next = match edit {
+                Edit::Revoke(id) => current.clone().with_revoked(id, now)?,
+                Edit::Suspend(id, suspend) => current.clone().with_suspended(id, *suspend, now)?,
+                Edit::Reimport(credentials, tenants) => {
+                    current.reimport(credentials, Some(*tenants))?
+                }
+                Edit::Directory => current.clone(),
+            };
+            Ok(match directory {
+                Some(directory) => next.with_directory(directory.to_vec()),
+                None => next,
+            })
+        })
+    }
+}
+
+/// What one `control-state update` changes besides the routes.
+pub(super) enum Edit<'a> {
+    /// Revoke the credential.
+    Revoke(String),
+    /// Suspend (`true`) or resume (`false`) the live tenant.
+    Suspend(String, bool),
+    /// Re-import the admin directory's credentials and tenants; published
+    /// restrictions stay (`Snapshot::reimport`).
+    Reimport(&'a credentials::Store, &'a tenants::Store),
+    /// Nothing; only the given routes change.
+    Directory,
 }
 
 struct Cached {
@@ -1001,5 +1085,167 @@ mod tests {
             read.record_for(T1).unwrap().read_routing,
             ReadRouting::Readers
         );
+    }
+
+    fn revoke(id: &str) -> Edit<'static> {
+        Edit::Revoke(id.to_owned())
+    }
+
+    fn suspend(id: &str, suspend: bool) -> Edit<'static> {
+        Edit::Suspend(id.to_owned(), suspend)
+    }
+
+    #[test]
+    fn edits_survive_each_other_and_a_stale_reimport() {
+        // Security review, finding 1: each edit changes only the published
+        // state, so the admin directory (`w`, which saw none of them) cannot
+        // undo one by republishing its older copy.
+        let w = world();
+        let objects = w.objects();
+        objects.create(w.import(), 1).unwrap();
+        let unauthorized =
+            |read: &Snapshot, i: usize| read.authenticate(&w.tokens[i], 9).err().unwrap().status;
+        assert_eq!(
+            objects
+                .apply(2, &revoke("aaaaaaaaaaaa"), None, None)
+                .unwrap()
+                .generation(),
+            2
+        );
+        assert_eq!(
+            objects
+                .apply(3, &suspend(T2, true), None, None)
+                .unwrap()
+                .generation(),
+            3
+        );
+        let (read, _) = objects.read().unwrap();
+        assert_eq!(unauthorized(&read, 0), StatusCode::UNAUTHORIZED);
+        assert_eq!(
+            read.authenticate(&w.tokens[1], 9).err().unwrap().code,
+            "tenant_suspended"
+        );
+
+        // A newer credential reaches the published state only by re-import,
+        // which keeps the published revocation and suspension.
+        let (newer, tokens) = credentials::tests::issued(
+            &[
+                ("aaaaaaaaaaaa", Some(T1)),
+                ("bbbbbbbbbbbb", Some(T2)),
+                ("cccccccccccc", None),
+                ("dddddddddddd", Some(T1)),
+            ],
+            0x77,
+        );
+        let edit = Edit::Reimport(&newer, &w.tenants);
+        assert_eq!(
+            objects.apply(4, &edit, None, Some(3)).unwrap().generation(),
+            4
+        );
+        let (read, _) = objects.read().unwrap();
+        assert_eq!(unauthorized(&read, 0), StatusCode::UNAUTHORIZED);
+        assert_eq!(
+            read.authenticate(&w.tokens[1], 9).err().unwrap().code,
+            "tenant_suspended"
+        );
+        assert!(read.authenticate(&tokens[3], 9).is_ok());
+
+        // A re-import that did not see the current generation publishes
+        // nothing.
+        let error = objects.apply(5, &edit, None, Some(3)).err().unwrap();
+        assert_eq!(error.status, StatusCode::CONFLICT);
+        assert_eq!(error.code, "control_state_generation_mismatch");
+        assert_eq!(objects.read().unwrap().0.generation(), 4);
+
+        // Resuming is explicit, and revoking again keeps the first time.
+        let first: Value = serde_json::from_slice(&w.memory.raw(NAME).unwrap()).unwrap();
+        objects.apply(6, &suspend(T2, false), None, None).unwrap();
+        objects
+            .apply(7, &revoke("aaaaaaaaaaaa"), None, None)
+            .unwrap();
+        let (read, _) = objects.read().unwrap();
+        assert_eq!(read.generation(), 6);
+        assert!(read.authenticate(&w.tokens[1], 9).is_ok());
+        let last: Value = serde_json::from_slice(&w.memory.raw(NAME).unwrap()).unwrap();
+        assert_eq!(first["credentials"][0], last["credentials"][0]);
+    }
+
+    #[test]
+    fn edits_to_unknown_ids_publish_nothing() {
+        let w = world();
+        let objects = w.objects();
+        objects.create(w.import(), 1).unwrap();
+        let error = objects
+            .apply(2, &revoke("dddddddddddd"), None, None)
+            .err()
+            .unwrap();
+        assert_eq!(
+            (error.status, error.code),
+            (StatusCode::NOT_FOUND, "credential_not_found")
+        );
+        for state in [true, false] {
+            let error = objects
+                .apply(2, &suspend(&"0".repeat(32), state), None, None)
+                .err()
+                .unwrap();
+            assert_eq!(
+                (error.status, error.code),
+                (StatusCode::NOT_FOUND, "tenant_not_found")
+            );
+        }
+        assert_eq!(objects.read().unwrap().0.generation(), 1);
+    }
+
+    #[test]
+    fn a_lost_race_reapplies_the_edit_to_the_winner() {
+        let w = world();
+        w.objects().create(w.import(), 1).unwrap();
+        let other = w.memory.clone();
+        w.memory.hook(Op::Put, NAME, move || {
+            Objects::new(other, NAME)
+                .apply(2, &revoke("bbbbbbbbbbbb"), None, None)
+                .unwrap();
+        });
+        let next = w
+            .objects()
+            .apply(3, &revoke("aaaaaaaaaaaa"), None, None)
+            .unwrap();
+        assert_eq!(next.generation(), 3);
+        let (read, _) = w.objects().read().unwrap();
+        for token in &w.tokens[..2] {
+            assert_eq!(
+                read.authenticate(token, 9).err().unwrap().status,
+                StatusCode::UNAUTHORIZED
+            );
+        }
+        assert!(read.authenticate(&w.tokens[2], 9).is_ok());
+    }
+
+    #[test]
+    fn a_reimport_never_revives_a_deleted_tenant() {
+        let w = world();
+        w.objects().create(w.import(), 1).unwrap();
+        // T2 was deleted through another admin directory; `w` still holds it.
+        let mut v: Value = serde_json::from_slice(&w.memory.raw(NAME).unwrap()).unwrap();
+        let tenants = v["tenants"].as_array_mut().unwrap();
+        let t2 = tenants.iter_mut().find(|t| t["id"] == T2).unwrap();
+        t2["deleted"] = json!(true);
+        w.memory.set_raw(NAME, &serde_json::to_vec(&v).unwrap());
+        let edit = Edit::Reimport(&w.credentials, &w.tenants);
+        w.objects().apply(2, &edit, None, Some(1)).unwrap();
+        let (read, _) = w.objects().read().unwrap();
+        assert_eq!(read.admit(T2).err().unwrap().code, "tenant_unavailable");
+        assert_eq!(
+            read.authenticate(&w.tokens[1], 9).err().unwrap().code,
+            "tenant_unavailable"
+        );
+        assert!(read.authenticate(&w.tokens[0], 9).is_ok());
+        // A deleted tenant cannot be resumed either.
+        let error = w
+            .objects()
+            .apply(3, &suspend(T2, false), None, None)
+            .err()
+            .unwrap();
+        assert_eq!(error.code, "tenant_not_found");
     }
 }

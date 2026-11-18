@@ -136,6 +136,7 @@ fn recognized(name: &str, directory: bool) -> bool {
             | "audit.jsonl"
             | "audit.1.jsonl"
             | "next-startup"
+            | "control-state.lock"
     ) || temporary(name)
         || generated(name)
         || name
@@ -959,6 +960,7 @@ mod tests {
             "webhooks.cursor.tmp",
             "audit.1.jsonl",
             "next-startup",
+            "control-state.lock",
             ".tmpAbC123",
             "backup-1700000000000-1.vlite",
             "backup-1700000000000-1.vlite.manifest.json",

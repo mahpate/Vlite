@@ -69,7 +69,7 @@ Failing-first and passing runs, with the standalone no-regression checks, are re
 | 3.3 | No | No SIGKILL under load |
 | 3.4 | Partly | A gateway stopped and restarted serves from the shared state; every gateway and backend loads a snapshot before `/ready` answers 200 |
 | 3.5, 3.6 | No | No scaling or load |
-| 4.1 | Partly | Revoke, suspend and resume each advance the generation through `control-state update` (CAS); concurrent admin mutations are tier (a) only |
+| 4.1 | Partly | Revoke, suspend and resume each advance the generation through `control-state update` (CAS). Concurrent and stale admin mutations are tier (a) only: `edits_survive_each_other_and_a_stale_reimport`, `a_lost_race_reapplies_the_edit_to_the_winner`, `a_reimport_never_revives_a_deleted_tenant`, `edits_to_unknown_ids_publish_nothing` and `control_state_update_refuses_blind_republishes_and_concurrent_runs` |
 | 4.2 | Partly | Both gateways refuse the revoked credential (401) and the suspended tenant (`tenant_suspended`) within 3 × S_ctl; a backend with no traffic advances its `minimum_generation` from its own poll. Not a propagation measurement |
 | 4.3 | Tier (a) | `backend_holds_the_highest_generation_and_accepts_rotation_overlap` |
 | 4.4, 4.5 | Yes, for a store outage | With the coordination container deleted, the running gateway and both backends answer `/ready` 503 within 4 × S_ctl, the gateway denies with 503 `control_state_stale`, and the poll failure is logged as `control_state_poll_failed`. A single paused replica is not separately tested |
