@@ -24,6 +24,7 @@ pub use gpu::GpuExactSearcher;
 pub mod replica;
 pub use replica::{ReplicaFollower, ReplicaStatus};
 mod logops;
+mod tenant_log;
 pub use crypto::{EncryptionKey, KdfParams};
 pub use logops::LogSegment;
 pub mod embedding;

@@ -73,6 +73,7 @@ mod reserved;
 mod serve_mode;
 #[cfg(feature = "otel")]
 pub mod telemetry;
+mod tenant_migration;
 mod tenants;
 pub mod tls;
 mod users;
