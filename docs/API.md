@@ -926,6 +926,51 @@ The bundled OpenAPI file contains the route and request schemas. The HTTP
 embedding provider is optional at build time; MMR and exact reranking operate
 only on the bounded candidate list returned by the selected search strategy.
 
+## Serve status and reader freshness
+
+`GET /v1/admin/serve-status` is administrator-only and works independently of
+`/metrics`, including when memory bindings are configured. It reports `mode`
+(`standalone`, `writer` or `reader`), `draining`, `read_only`, hexadecimal
+`lineage`, `binding_generation`, `format_version`, `sequence`, `epoch` (currently
+null), `archive`, `reader`, `uptime_ms` and `note`. Existing archive progress
+includes checkpoint ages and errors. Positions and archive error text are
+withheld when memory bindings block metrics.
+
+`binding_generation` is 0 without configured bindings; otherwise it is a
+deterministic, nonzero, JSON-safe fingerprint of the binding configuration.
+Copy this decimal number from the **writer's** serve-status into the tenant's
+control-state directory record as `binding_generation`. A reader must load the
+same configuration to be eligible for that record's reads.
+
+`reader` is null without archive-apply progress. A following reader reports:
+
+```json
+{"applied_sequence": 42, "age_ms": 100, "bound_ms": 1000,
+ "stale": false, "failed": false}
+```
+
+`applied_sequence` is null when memory bindings block metrics; `age_ms` is null
+before the first confirmation. No failure text is exposed. With a positive
+`bound_ms`, a reader that has never confirmed freshness or whose age exceeds
+the bound refuses `/ready` and authorized reads with 503 `reader_stale`.
+`/v1/admin/serve-status` remains available for diagnosis. A bound of 0 disables
+staleness gating. A permanently failed follower fails readiness with
+`reader_apply_failed`. gRPC staleness gating is not provided.
+
+Every REST response from a reader with archive-apply progress carries:
+
+* `X-VLite-Lineage`: the database lineage as 16 hexadecimal digits, omitted if
+  lineage is unavailable.
+* `X-VLite-Binding-Generation`: the decimal binding fingerprint.
+* `X-VLite-Applied-Age-Ms`: decimal milliseconds since the last freshness
+  confirmation, omitted before the first confirmation.
+* `X-VLite-Applied-Sequence`: the decimal applied sequence, omitted when memory
+  bindings block metrics.
+
+These headers include no position token and provide no read-your-writes
+guarantee. Standalone servers, writers and readers without apply progress do
+not send them. Writer/reader roles and gateway replicas add no write capacity.
+
 ## Gateway mode and gateway-trusted backends (experimental, opt-in, off by default)
 
 A gateway is a `vlite-server gateway` process that opens no database. It
@@ -943,7 +988,7 @@ standalone server is unchanged, except that a database literally named
 This is a local, experimental MVP of the feature-aca-ha plan (design and
 status: [gateway.md](projects/feature-aca-ha/gateway.md)). It has been tested
 with loopback processes and a local Azurite only. It is not qualified for
-production. It has no epoch fencing, failover, reader routing or ACA
+production. It has no epoch fencing, failover or ACA
 deployment, and no measured timing or replica values. Gateway replicas add no
 write capacity: every tenant has one backend.
 
@@ -958,9 +1003,8 @@ write capacity: every tenant has one backend.
   only while its control-state copy was confirmed within `s_ctl_ms`.
   Otherwise it answers 503 `control_state_stale`, and 503 `draining` after a
   stop signal. Neither route needs a database or `/metrics`.
-* **Every registered route, writer only.** Each request goes to the writer in
-  the tenant's directory record, whether the record is `shared-pool` or
-  `dedicated`.
+* **Every registered route.** Writes always go to the writer. Reads also go
+  to the writer by default; a dedicated tenant can opt into reader routing.
 
 Before forwarding, the gateway checks, in order:
 
@@ -1225,8 +1269,11 @@ unknown fields are refused (422 `directory_invalid`):
   responses.
 * A `dedicated` record may also carry a `reader` and `read_routing`
   (`writer_only`, the default, or `readers`, which needs a `reader`). Any
-  record may carry `binding_generation` (default 0). These fields are
-  validated but not acted on: every request goes to the writer.
+  record may carry `binding_generation` (default 0). With `read_routing:
+  "readers"`, the gateway sends reads to the record's reader and falls back
+  to the writer on connect failure/timeout, a 503, or a missing or mismatched
+  `X-VLite-Lineage` or `X-VLite-Binding-Generation`. Writes always go to the
+  writer; `writer_only` keeps all requests on the writer.
 * A record for a missing or deleted tenant, a duplicate tenant or the wrong
   shape for its kind is refused (`control_state_invalid`).
 

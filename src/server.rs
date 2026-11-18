@@ -65,6 +65,7 @@ mod published;
 #[cfg(all(test, not(feature = "grpc")))]
 mod published_rest;
 mod reader_apply;
+mod reader_staleness;
 mod record_put;
 mod recovery_bundle;
 mod reserved;
@@ -390,6 +391,10 @@ impl Service {
     /// Whether the memory guard refuses `/metrics` and the metrics summary.
     fn metrics_blocked_by_memory(&self) -> bool {
         self.has_bindings() && !self.metrics_with_memory
+    }
+
+    fn binding_generation(&self) -> u64 {
+        self.memory_bindings.current().binding_generation()
     }
 
     /// Whether a gRPC router already runs from this engine without the tokens
@@ -1111,6 +1116,10 @@ fn routes(service: Service) -> Router {
             compaction::fence,
         ))
         .layer(middleware::from_fn_with_state(observation, observe))
+        .layer(middleware::from_fn_with_state(
+            service.clone(),
+            reader_staleness::headers,
+        ))
         .with_state(service)
 }
 
@@ -2376,6 +2385,9 @@ async fn ready(State(service): State<Service>) -> Result<Json<Value>, ApiError> 
     }
     if let Some(error) = service.reader_failure() {
         return Err(error);
+    }
+    if service.reader_stale(serve_mode::unix_ms()) {
+        return Err(reader_staleness::stale());
     }
     if let Some(trust) = &service.trust {
         // Fresh control state is what lets this backend authorize anything.

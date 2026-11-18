@@ -56,7 +56,7 @@ impl std::str::FromStr for ServeMode {
 /// Shared by every clone and compaction generation of one service.
 #[derive(Default)]
 pub(super) struct State {
-    mode: ServeMode,
+    pub(super) mode: ServeMode,
     draining: AtomicBool,
 }
 
@@ -115,6 +115,10 @@ pub(super) fn admit(
     path: &str,
 ) -> Result<(), ApiError> {
     if service.serve.mode != ServeMode::Reader || super::read_request(method, route, path) {
+        // `/ready` applies its own failure precedence; status stays diagnostic.
+        if !matches!(path, "/ready" | "/v1/admin/serve-status") && service.reader_stale(unix_ms()) {
+            return Err(super::reader_staleness::stale());
+        }
         return Ok(());
     }
     Err(ApiError::new(
@@ -128,7 +132,7 @@ pub(super) fn routes() -> Router<Service> {
     Router::new().route("/v1/admin/serve-status", get(status))
 }
 
-fn unix_ms() -> u64 {
+pub(super) fn unix_ms() -> u64 {
     SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .map_or(0, |elapsed| {
@@ -159,10 +163,12 @@ async fn status(Extract(service): Extract<Service>) -> Result<Json<Value>, ApiEr
         "draining": service.draining(),
         "read_only": service.serve.mode == ServeMode::Reader,
         "lineage": service.lineage.map(|lineage| format!("{lineage:016x}")),
+        "binding_generation": service.binding_generation(),
         "format_version": service.format_version,
         "sequence": sequence,
         "epoch": null,
         "archive": archive,
+        "reader": super::reader_staleness::report(&service, hide, now),
         "uptime_ms": u64::try_from(service.started.elapsed().as_millis()).unwrap_or(u64::MAX),
         "note": "writer/reader roles add no write capacity: one writer accepts every write; readers serve the state they opened",
     })))
