@@ -107,6 +107,7 @@ fn trusted(keys: &[&Signer], minimum: u64, s_ctl_ms: u64, suspend_t2: bool) -> B
     let mut service = service();
     let lineage = service.lineage.unwrap();
     let here = |tenant: &str| Route {
+        authority_mode: None,
         audience: AUDIENCE.into(),
         lineage,
         ..Route::shared_for_test(tenant)
@@ -115,6 +116,7 @@ fn trusted(keys: &[&Signer], minimum: u64, s_ctl_ms: u64, suspend_t2: bool) -> B
         here(T1),
         here(T2),
         Route {
+            authority_mode: None,
             audience: "backend-b".into(),
             lineage,
             ..Route::shared_for_test(T3)

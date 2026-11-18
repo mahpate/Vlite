@@ -6,11 +6,14 @@
 //! The offline coordinator supplies sidecar/import observations to `select`,
 //! verifies projected resources, then obtains `TargetState` with `for_target`.
 //! Rekey returns sensitive candidate snapshots and a separate one-time token
-//! output, not a live update. Admission, latest revocation checks, publication,
-//! control-state transitions and read-only-window enforcement remain unwired.
+//! output, not a live update. Control-state transitions below atomically
+//! publish generation-fenced routes and credential views while retaining
+//! current restrictions. Live admission and read-only-window guards remain
+//! unwired.
 
+use super::control_state::{Migration, Objects, Phase, Snapshot};
 use super::reserved::Bindings;
-use super::{credentials, recovery_bundle, tenants, users};
+use super::{ApiError, StatusCode, credentials, recovery_bundle, tenants, users};
 use crate::memory::binding::{self, BindingSet, BindingState, Recorded};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
@@ -484,6 +487,164 @@ pub(super) fn import_users(
     users::rekey_import(directory, &state.users, fresh_admin, created)
 }
 
+pub(super) fn conflict() -> ApiError {
+    ApiError::new(
+        StatusCode::CONFLICT,
+        "tenant_migration_conflict",
+        "migration generation, phase or identity does not match; nothing was published",
+    )
+}
+
+fn transition(
+    objects: &Objects,
+    now: u64,
+    change: impl FnMut(&Snapshot) -> Result<Snapshot, ApiError>,
+) -> Result<Snapshot, ApiError> {
+    objects
+        .update(now, change)
+        .map_err(|error| match error.code {
+            "control_state_indeterminate" => ApiError::new(
+                StatusCode::SERVICE_UNAVAILABLE,
+                "tenant_migration_indeterminate",
+                "migration write outcome is unknown; reconcile before retrying",
+            ),
+            "control_state_conflict" => conflict(),
+            _ => error,
+        })
+}
+
+/// All phase changes carry the expected generation and the immutable
+/// tenant/source/target identity captured by preparation. A lost CAS race
+/// rechecks that generation against the winner and cannot replay a change.
+#[cfg_attr(not(test), allow(dead_code))]
+pub(super) fn prepare(
+    objects: &Objects,
+    migration_id: &str,
+    expected_generation: u64,
+    migration: &Migration,
+    now: u64,
+) -> Result<Snapshot, ApiError> {
+    transition(objects, now, |current| {
+        current.prepare(expected_generation, migration_id, migration, now)
+    })
+}
+
+#[cfg_attr(not(test), allow(dead_code))]
+pub(super) fn freeze(
+    objects: &Objects,
+    migration_id: &str,
+    expected_generation: u64,
+    identity: &Migration,
+    now: u64,
+) -> Result<Snapshot, ApiError> {
+    transition(objects, now, |current| {
+        current.freeze(expected_generation, migration_id, identity, now)
+    })
+}
+
+#[cfg_attr(not(test), allow(dead_code))]
+pub(super) fn target_verified(
+    objects: &Objects,
+    migration_id: &str,
+    expected_generation: u64,
+    identity: &Migration,
+    now: u64,
+) -> Result<Snapshot, ApiError> {
+    transition(objects, now, |current| {
+        current.target_verified(expected_generation, migration_id, identity, now)
+    })
+}
+
+#[cfg_attr(not(test), allow(dead_code))]
+pub(super) fn cutover(
+    objects: &Objects,
+    migration_id: &str,
+    expected_generation: u64,
+    identity: &Migration,
+    views: &CredentialViews,
+    now: u64,
+) -> Result<Snapshot, ApiError> {
+    transition(objects, now, |current| {
+        current.cutover(expected_generation, migration_id, identity, views, now)
+    })
+}
+
+#[cfg_attr(not(test), allow(dead_code))]
+pub(super) fn rollback(
+    objects: &Objects,
+    migration_id: &str,
+    expected_generation: u64,
+    identity: &Migration,
+    views: &CredentialViews,
+    target_acked_mutations: bool,
+    now: u64,
+) -> Result<Snapshot, ApiError> {
+    transition(objects, now, |current| {
+        current.rollback(
+            expected_generation,
+            migration_id,
+            identity,
+            views,
+            target_acked_mutations,
+            now,
+        )
+    })
+}
+
+#[cfg_attr(not(test), allow(dead_code))]
+pub(super) fn release(
+    objects: &Objects,
+    migration_id: &str,
+    expected_generation: u64,
+    identity: &Migration,
+    ack_irreversible: bool,
+    now: u64,
+) -> Result<Snapshot, ApiError> {
+    transition(objects, now, |current| {
+        current.release(
+            expected_generation,
+            migration_id,
+            identity,
+            ack_irreversible,
+            now,
+        )
+    })
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[cfg_attr(not(test), allow(dead_code))]
+pub(super) enum Reconciled {
+    Applied,
+    NotApplied,
+}
+
+/// Readback never writes or retries a transition. Only the exact successor
+/// generation with the intended phase proves an ambiguous CAS applied.
+#[cfg_attr(not(test), allow(dead_code))]
+pub(super) fn reconcile(
+    objects: &Objects,
+    migration_id: &str,
+    expected_generation: u64,
+    intended_phase: Phase,
+) -> Result<Reconciled, ApiError> {
+    let (current, _) = objects.read()?;
+    let phase = current
+        .migration(migration_id)
+        .map(|migration| migration.phase);
+    if expected_generation.checked_add(1) == Some(current.generation())
+        && phase == Some(intended_phase)
+    {
+        return Ok(Reconciled::Applied);
+    }
+    if current.generation() == expected_generation
+        && (phase.is_some_and(|phase| intended_phase.can_follow(phase))
+            || (intended_phase == Phase::Prepared && phase.is_none()))
+    {
+        return Ok(Reconciled::NotApplied);
+    }
+    Err(conflict())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -496,6 +657,615 @@ mod tests {
     const ID: &str = "abcdefghijkl";
     const NOW: u64 = 100;
     const PASSWORD: &str = "Quartz!7-mango-River-29";
+
+    use super::super::cloud_backup::fake::{Fault, Memory, Op};
+    use super::super::control_state::{self as control, AuthorityMode, Migration, Phase, Route};
+    use std::sync::Arc;
+
+    const CONTROL: &str = "control/state.json";
+
+    struct World {
+        memory: Arc<Memory>,
+        objects: control::Objects,
+        migration: Migration,
+        views: CredentialViews,
+        old_tokens: Vec<String>,
+        fresh_tokens: Vec<String>,
+        credentials: credentials::Store,
+        tenants: tenants::Store,
+    }
+
+    impl World {
+        fn new() -> Self {
+            let (credentials, old_tokens) =
+                credentials::tests::issued(&[(ID, Some(T)), ("bbbbbbbbbbbb", Some(OTHER))], 0x77);
+            let tenants = tenants::Store::for_test(vec![
+                tenants::Tenant::for_test(T, None),
+                tenants::Tenant::for_test(OTHER, None),
+            ]);
+            let source = Route {
+                lineage: 0x77,
+                ..Route::shared_for_test(T)
+            };
+            let target = Route {
+                kind: control::Kind::Dedicated,
+                writer: "https://target.internal".into(),
+                audience: "target".into(),
+                lineage: 0x88,
+                authority_mode: Some(AuthorityMode::Off),
+                ..source.clone()
+            };
+            let migration = Migration {
+                id: "move-one".into(),
+                tenant: T.into(),
+                phase: Phase::Prepared,
+                source: source.clone(),
+                target,
+                source_lineage: 0x77,
+                target_lineage: 0x88,
+                updated_unix_ms: NOW,
+            };
+            let snapshot = credentials.snapshot().unwrap();
+            let inventory = snapshot.migration_inventory(T, 0x77, NOW).unwrap();
+            let (source_view, target_view, fresh_tokens) =
+                credentials::migration_rekey(T, &inventory, 0x77, 0x88, NOW).unwrap();
+            let memory = Arc::new(Memory::default());
+            let objects = control::Objects::new(memory.clone(), CONTROL);
+            objects
+                .create(
+                    control::Snapshot::import(&credentials, Some(&tenants))
+                        .unwrap()
+                        .with_directory(vec![source, Route::shared_for_test(OTHER)]),
+                    NOW,
+                )
+                .unwrap();
+            Self {
+                memory,
+                objects,
+                migration,
+                views: CredentialViews {
+                    source: source_view,
+                    target: target_view,
+                },
+                old_tokens,
+                fresh_tokens,
+                credentials,
+                tenants,
+            }
+        }
+
+        fn prepare(&self) -> control::Snapshot {
+            prepare(&self.objects, "move-one", 1, &self.migration, NOW).unwrap()
+        }
+
+        fn verified(&self) {
+            self.prepare();
+            freeze(&self.objects, "move-one", 2, &self.migration, NOW).unwrap();
+            target_verified(&self.objects, "move-one", 3, &self.migration, NOW).unwrap();
+        }
+
+        fn cutover(&self, generation: u64) -> Result<control::Snapshot, super::super::ApiError> {
+            cutover(
+                &self.objects,
+                "move-one",
+                generation,
+                &self.migration,
+                &self.views,
+                NOW,
+            )
+        }
+
+        fn validating(&self) {
+            self.verified();
+            self.cutover(4).unwrap();
+        }
+
+        fn rollback(
+            &self,
+            generation: u64,
+            writes: bool,
+        ) -> Result<control::Snapshot, super::super::ApiError> {
+            rollback(
+                &self.objects,
+                "move-one",
+                generation,
+                &self.migration,
+                &self.views,
+                writes,
+                NOW,
+            )
+        }
+
+        fn release(
+            &self,
+            generation: u64,
+            ack: bool,
+        ) -> Result<control::Snapshot, super::super::ApiError> {
+            release(
+                &self.objects,
+                "move-one",
+                generation,
+                &self.migration,
+                ack,
+                NOW,
+            )
+        }
+
+        fn raw(&self) -> Value {
+            serde_json::from_slice(&self.memory.raw(CONTROL).unwrap()).unwrap()
+        }
+    }
+
+    #[test]
+    fn migration_happy_path_advances_generation_once_per_phase() {
+        let w = World::new();
+        assert_eq!(w.prepare().generation(), 2);
+        assert_eq!(
+            freeze(&w.objects, "move-one", 2, &w.migration, NOW)
+                .unwrap()
+                .generation(),
+            3
+        );
+        assert_eq!(
+            target_verified(&w.objects, "move-one", 3, &w.migration, NOW)
+                .unwrap()
+                .generation(),
+            4
+        );
+        assert_eq!(w.cutover(4).unwrap().generation(), 5);
+        assert_eq!(w.release(5, true).unwrap().generation(), 6);
+        assert_eq!(w.raw()["migrations"][0]["phase"], "released");
+    }
+
+    #[test]
+    fn cutover_switches_route_and_credentials_atomically() {
+        let w = World::new();
+        w.verified();
+        let before = w.raw();
+        let after = w.cutover(4).unwrap();
+        assert_eq!(after.record_for(T), Some(&w.migration.target));
+        assert!(after.authenticate(&w.old_tokens[0], NOW).is_err());
+        assert_eq!(
+            after.authenticate(&w.fresh_tokens[0], NOW).unwrap().lineage,
+            0x88
+        );
+        assert_eq!(before["directory"][1], w.raw()["directory"][1]);
+        let other = |raw: Value| {
+            raw["credentials"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .find(|entry| entry["tenant_id"] == OTHER)
+                .unwrap()
+                .clone()
+        };
+        assert_eq!(
+            serde_json::to_vec(&other(before)).unwrap(),
+            serde_json::to_vec(&other(w.raw())).unwrap()
+        );
+        assert!(after.authenticate(&w.old_tokens[1], NOW).is_ok());
+    }
+
+    #[test]
+    fn cutover_preserves_revocation_expiry_and_suspension() {
+        let w = World::new();
+        w.verified();
+        w.objects
+            .update(NOW, |current| {
+                let mut raw = serde_json::to_value(current).unwrap();
+                raw["credentials"][0]["expires_unix_ms"] = json!(NOW + 1);
+                serde_json::from_value::<control::Snapshot>(raw)
+                    .unwrap()
+                    .with_revoked(ID, NOW)?
+                    .with_suspended(T, true, NOW)
+            })
+            .unwrap();
+        let after = w.cutover(5).unwrap();
+        assert_eq!(after.admit(T).err().unwrap().code, "tenant_suspended");
+        let raw = w.raw();
+        let entry = raw["credentials"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|e| e["id"] == ID)
+            .unwrap();
+        assert_eq!(entry["expires_unix_ms"], NOW + 1);
+        assert_eq!(entry["revoked_unix_ms"], NOW);
+        assert!(after.authenticate(&w.fresh_tokens[0], NOW).is_err());
+        let refreshed = w
+            .objects
+            .update(NOW, |s| s.reimport(&w.credentials, Some(&w.tenants)))
+            .unwrap();
+        assert!(refreshed.authenticate(&w.old_tokens[0], NOW).is_err());
+        assert_eq!(refreshed.record_for(T), Some(&w.migration.target));
+        assert_eq!(w.raw()["migrations"][0]["phase"], "validating");
+        w.rollback(7, false).unwrap();
+        let raw = w.raw();
+        let entry = raw["credentials"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|e| e["id"] == ID)
+            .unwrap();
+        assert_eq!(entry["expires_unix_ms"], NOW + 1);
+        assert_eq!(entry["revoked_unix_ms"], NOW);
+    }
+
+    #[test]
+    fn rollback_restores_shared_route_with_the_same_fresh_credentials() {
+        let w = World::new();
+        w.validating();
+        let before = w.raw()["credentials"].clone();
+        let after = w.rollback(5, false).unwrap();
+        assert_eq!(after.record_for(T), Some(&w.migration.source));
+        assert_eq!(
+            after.authenticate(&w.fresh_tokens[0], NOW).unwrap().lineage,
+            0x77
+        );
+        assert!(after.authenticate(&w.old_tokens[0], NOW).is_err());
+        let mut restored = w.raw()["credentials"].clone();
+        for entry in restored.as_array_mut().unwrap() {
+            if entry["tenant_id"] == T {
+                entry["lineage"] = json!("0000000000000088");
+            }
+        }
+        assert_eq!(before, restored);
+    }
+
+    #[test]
+    fn rollback_with_target_writes_requires_reconciliation() {
+        for phase in [Phase::Frozen, Phase::TargetVerified, Phase::Validating] {
+            let w = World::new();
+            w.prepare();
+            freeze(&w.objects, "move-one", 2, &w.migration, NOW).unwrap();
+            let mut generation = 3;
+            if phase != Phase::Frozen {
+                target_verified(&w.objects, "move-one", 3, &w.migration, NOW).unwrap();
+                generation = 4;
+            }
+            if phase == Phase::Validating {
+                w.cutover(4).unwrap();
+                generation = 5;
+            }
+            let before = w.memory.raw(CONTROL).unwrap();
+            let error = w.rollback(generation, true).err().unwrap();
+            assert_eq!(error.code, "rollback_requires_reconciliation");
+            assert_eq!(error.status, axum::http::StatusCode::CONFLICT);
+            assert_eq!(before, w.memory.raw(CONTROL).unwrap());
+            w.rollback(generation, false).unwrap();
+            if phase != Phase::Validating {
+                let after = w.objects.read().unwrap().0;
+                assert!(after.authenticate(&w.old_tokens[0], NOW).is_ok());
+                assert_eq!(after.record_for(T), Some(&w.migration.source));
+            }
+        }
+    }
+
+    #[test]
+    fn rollback_after_release_is_migration_source_released() {
+        let w = World::new();
+        w.validating();
+        w.release(5, true).unwrap();
+        assert_eq!(
+            w.rollback(6, false).err().unwrap().code,
+            "migration_source_released"
+        );
+    }
+
+    #[test]
+    fn release_requires_validating_and_ack() {
+        let w = World::new();
+        w.prepare();
+        assert_eq!(
+            w.release(2, true).err().unwrap().code,
+            "tenant_migration_conflict"
+        );
+        let w = World::new();
+        w.validating();
+        let error = w.release(5, false).err().unwrap();
+        assert_eq!(error.code, "tenant_migration_ack_required");
+        assert_eq!(error.status, axum::http::StatusCode::UNPROCESSABLE_ENTITY);
+        assert_eq!(w.objects.read().unwrap().0.generation(), 5);
+    }
+
+    #[test]
+    fn release_and_rollback_race_has_one_winner() {
+        let w = World::new();
+        w.validating();
+        let barrier = std::sync::Barrier::new(2);
+        let results = std::thread::scope(|scope| {
+            let release = scope.spawn(|| {
+                barrier.wait();
+                w.release(5, true)
+            });
+            let rollback = scope.spawn(|| {
+                barrier.wait();
+                w.rollback(5, false)
+            });
+            [release.join().unwrap(), rollback.join().unwrap()]
+        });
+        assert_eq!(results.iter().filter(|r| r.is_ok()).count(), 1);
+        assert_eq!(
+            results.into_iter().find_map(Result::err).unwrap().code,
+            "tenant_migration_conflict"
+        );
+        assert_eq!(w.objects.read().unwrap().0.generation(), 6);
+    }
+
+    #[test]
+    fn stale_expected_generation_is_conflict_without_write() {
+        let w = World::new();
+        w.verified();
+        let before = w.memory.raw(CONTROL).unwrap();
+        w.memory.fault(Op::Put, CONTROL, Fault::After, 0, 1);
+        assert_eq!(
+            w.cutover(3).err().unwrap().code,
+            "tenant_migration_conflict"
+        );
+        assert_eq!(before, w.memory.raw(CONTROL).unwrap());
+        assert_eq!(
+            w.cutover(4).err().unwrap().code,
+            "tenant_migration_indeterminate"
+        );
+    }
+
+    #[test]
+    fn unknown_write_outcome_is_indeterminate_and_reconcile_reads_exactly() {
+        for (fault, outcome) in [
+            (Fault::Before, Reconciled::NotApplied),
+            (Fault::After, Reconciled::Applied),
+        ] {
+            let w = World::new();
+            w.verified();
+            w.memory.fault(Op::Put, CONTROL, fault, 0, 1);
+            let error = w.cutover(4).err().unwrap();
+            assert_eq!(error.code, "tenant_migration_indeterminate");
+            assert_eq!(error.status, axum::http::StatusCode::SERVICE_UNAVAILABLE);
+            assert_eq!(
+                reconcile(&w.objects, "move-one", 4, Phase::Validating).unwrap(),
+                outcome
+            );
+            assert_eq!(
+                w.objects.read().unwrap().0.generation(),
+                if outcome == Reconciled::Applied { 5 } else { 4 }
+            );
+            assert_eq!(
+                reconcile(&w.objects, "move-one", 3, Phase::Released)
+                    .err()
+                    .unwrap()
+                    .code,
+                "tenant_migration_conflict"
+            );
+            w.memory.fault(Op::Put, CONTROL, Fault::After, 0, 1);
+            reconcile(&w.objects, "move-one", 4, Phase::Validating).unwrap();
+            assert_eq!(
+                w.objects.update(NOW, |s| Ok(s.clone())).err().unwrap().code,
+                "control_state_indeterminate"
+            );
+        }
+    }
+
+    #[test]
+    fn generation_never_decreases_across_rollback() {
+        let w = World::new();
+        w.validating();
+        let after = w.rollback(5, false).unwrap();
+        assert_eq!(after.generation(), 6);
+        assert_eq!(w.raw()["migrations"][0]["phase"], "rolled_back");
+        let refreshed = w
+            .objects
+            .update(NOW, |s| s.reimport(&w.credentials, Some(&w.tenants)))
+            .unwrap();
+        assert_eq!(refreshed.generation(), 7);
+        assert!(refreshed.authenticate(&w.old_tokens[0], NOW).is_err());
+        assert_eq!(
+            refreshed
+                .authenticate(&w.fresh_tokens[0], NOW)
+                .unwrap()
+                .lineage,
+            0x77
+        );
+    }
+
+    #[test]
+    fn rollback_refuses_different_rekeyed_credentials() {
+        let mut w = World::new();
+        w.validating();
+        let before = w.memory.raw(CONTROL).unwrap();
+        for view in [&mut w.views.source, &mut w.views.target] {
+            let mut raw = serde_json::to_value(&*view).unwrap();
+            raw[0]["secret_sha256"] = json!("f".repeat(64));
+            *view = serde_json::from_value(raw).unwrap();
+        }
+        assert_eq!(
+            w.rollback(5, false).err().unwrap().code,
+            "tenant_migration_conflict"
+        );
+        assert_eq!(before, w.memory.raw(CONTROL).unwrap());
+    }
+
+    #[test]
+    fn reimport_accepts_new_restrictions_without_restoring_old_hashes() {
+        let w = World::new();
+        w.validating();
+        credentials::tests::revoke(&w.credentials, ID, NOW);
+        let after = w
+            .objects
+            .update(NOW, |s| s.reimport(&w.credentials, Some(&w.tenants)))
+            .unwrap();
+        assert!(after.authenticate(&w.fresh_tokens[0], NOW).is_err());
+        assert!(after.authenticate(&w.old_tokens[0], NOW).is_err());
+        let raw = w.raw();
+        let entry = raw["credentials"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|e| e["id"] == ID)
+            .unwrap();
+        assert_eq!(entry["lineage"], "0000000000000088");
+        assert_eq!(entry["revoked_unix_ms"], NOW);
+    }
+
+    #[test]
+    fn migration_lost_cas_race_refuses_to_reapply_to_the_winner() {
+        let w = World::new();
+        w.verified();
+        let memory = w.memory.clone();
+        w.memory.hook(Op::Put, CONTROL, move || {
+            control::Objects::new(memory, CONTROL)
+                .update(NOW, |s| s.clone().with_revoked(ID, NOW))
+                .unwrap();
+        });
+        assert_eq!(
+            w.cutover(4).err().unwrap().code,
+            "tenant_migration_conflict"
+        );
+        assert_eq!(w.raw()["migrations"][0]["phase"], "target_verified");
+        assert_eq!(w.objects.read().unwrap().0.generation(), 5);
+        assert!(
+            w.objects
+                .read()
+                .unwrap()
+                .0
+                .authenticate(&w.old_tokens[0], NOW)
+                .is_err()
+        );
+        let next = w.cutover(5).unwrap();
+        assert_eq!(next.generation(), 6);
+        assert!(next.authenticate(&w.fresh_tokens[0], NOW).is_err());
+    }
+
+    #[test]
+    fn wrong_phase_missing_migration_and_changed_identity_are_conflicts_without_writes() {
+        let w = World::new();
+        w.verified();
+        let before = w.memory.raw(CONTROL).unwrap();
+        let mut identities = vec![w.migration.clone(); 5];
+        identities[0].id = "missing".into();
+        identities[1].tenant = OTHER.into();
+        identities[2].source.binding_generation += 1;
+        identities[3].target.audience = "different".into();
+        identities[4].target_lineage += 1;
+        for identity in identities {
+            assert_eq!(
+                cutover(&w.objects, "move-one", 4, &identity, &w.views, NOW)
+                    .err()
+                    .unwrap()
+                    .code,
+                "tenant_migration_conflict",
+            );
+        }
+        assert_eq!(
+            cutover(&w.objects, "missing", 4, &w.migration, &w.views, NOW)
+                .err()
+                .unwrap()
+                .code,
+            "tenant_migration_conflict",
+        );
+        assert_eq!(
+            freeze(&w.objects, "move-one", 4, &w.migration, NOW)
+                .err()
+                .unwrap()
+                .code,
+            "tenant_migration_conflict"
+        );
+        assert_eq!(before, w.memory.raw(CONTROL).unwrap());
+    }
+
+    #[test]
+    fn invalid_cross_tenant_or_wrong_lineage_views_cannot_cutover() {
+        for (field, value) in [
+            ("tenant_id", json!(OTHER)),
+            ("lineage", json!("0000000000000077")),
+            ("operations", json!(["read", "write"])),
+        ] {
+            let mut w = World::new();
+            w.verified();
+            let before = w.memory.raw(CONTROL).unwrap();
+            let mut raw = serde_json::to_value(&w.views.target).unwrap();
+            raw[0][field] = value;
+            w.views.target = serde_json::from_value(raw).unwrap();
+            assert_eq!(
+                w.cutover(4).err().unwrap().code,
+                "tenant_migration_conflict"
+            );
+            assert_eq!(before, w.memory.raw(CONTROL).unwrap());
+        }
+    }
+
+    #[test]
+    fn prepare_refuses_overlaps_and_source_route_changes() {
+        let w = World::new();
+        w.prepare();
+        let before = w.memory.raw(CONTROL).unwrap();
+        let mut second = w.migration.clone();
+        second.id = "move-two".into();
+        assert_eq!(
+            prepare(&w.objects, "move-two", 2, &second, NOW)
+                .err()
+                .unwrap()
+                .code,
+            "tenant_migration_conflict"
+        );
+        assert_eq!(before, w.memory.raw(CONTROL).unwrap());
+        let w = World::new();
+        let mut changed = w.migration.clone();
+        changed.source.binding_generation += 1;
+        assert_eq!(
+            prepare(&w.objects, "move-one", 1, &changed, NOW)
+                .err()
+                .unwrap()
+                .code,
+            "tenant_migration_conflict"
+        );
+        assert_eq!(w.objects.read().unwrap().0.generation(), 1);
+    }
+
+    #[test]
+    fn reconcile_requires_exact_phase_and_generation_and_handles_prepare() {
+        for (fault, outcome) in [
+            (Fault::Before, Reconciled::NotApplied),
+            (Fault::After, Reconciled::Applied),
+        ] {
+            let w = World::new();
+            w.memory.fault(Op::Put, CONTROL, fault, 0, 1);
+            assert_eq!(
+                prepare(&w.objects, "move-one", 1, &w.migration, NOW)
+                    .err()
+                    .unwrap()
+                    .code,
+                "tenant_migration_indeterminate"
+            );
+            assert_eq!(
+                reconcile(&w.objects, "move-one", 1, Phase::Prepared).unwrap(),
+                outcome
+            );
+        }
+        let w = World::new();
+        w.validating();
+        assert_eq!(
+            reconcile(&w.objects, "move-one", 4, Phase::Released)
+                .err()
+                .unwrap()
+                .code,
+            "tenant_migration_conflict"
+        );
+        assert_eq!(
+            reconcile(&w.objects, "move-one", 5, Phase::Validating)
+                .err()
+                .unwrap()
+                .code,
+            "tenant_migration_conflict"
+        );
+        w.objects.update(NOW, |s| Ok(s.clone())).unwrap();
+        assert_eq!(
+            reconcile(&w.objects, "move-one", 4, Phase::Validating)
+                .err()
+                .unwrap()
+                .code,
+            "tenant_migration_conflict"
+        );
+    }
 
     fn binding(tenant: &str) -> Binding {
         Binding {
