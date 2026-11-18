@@ -23,6 +23,7 @@
 //! Objects live in the baseline set, so the set's pins, retention and sweep
 //! cover the archive with the baseline it depends on.
 use super::*;
+use crate::server::authority::{AuthorityError, AuthorityStore, Claim, HeadRef, Observed, Phase};
 use crate::{LogSegment, ReplicaFollower};
 
 pub(in crate::server) const ARCHIVE_SCHEMA: &str = "vlite.cloud-backup-archive/1";
@@ -199,6 +200,483 @@ impl Index {
             tip = &c.chain_sha256;
         }
         Ok(())
+    }
+}
+
+#[cfg_attr(not(test), allow(dead_code))]
+pub(in crate::server) const HA_INDEX_SCHEMA: &str = "vlite.cloud-backup-ha-archive/1";
+#[cfg_attr(not(test), allow(dead_code))]
+pub(in crate::server) const HA_CHECKPOINT_SCHEMA: &str = "vlite.cloud-backup-ha-checkpoint/1";
+const HA_CHAIN_DOMAIN: &str = "vlite.cloud-backup-ha-chain/1";
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(in crate::server) struct HaCheckpoint {
+    pub schema: String,
+    pub authority: HaIdentity,
+    pub checkpoint: Checkpoint,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(in crate::server) struct HaIndex {
+    pub schema: String,
+    pub authority: HaIdentity,
+    pub prior_head_sha256: String,
+    pub prior_head: HeadRef,
+    pub set_id: String,
+    pub installation_id: String,
+    pub header_sha256: String,
+    pub baseline_sequence: u64,
+    pub baseline_sha256: String,
+    pub checkpoints: Vec<HaCheckpoint>,
+}
+
+#[derive(Debug)]
+pub(in crate::server) struct HaArchive {
+    pub set_id: String,
+    pub manifest: HaManifest,
+    pub head: HeadRef,
+    database_sha256: String,
+    index: Option<HaIndex>,
+}
+
+#[cfg_attr(not(test), allow(dead_code))]
+impl HaArchive {
+    pub(in crate::server) fn checkpoints(&self) -> &[HaCheckpoint] {
+        self.index.as_ref().map_or(&[], |i| &i.checkpoints)
+    }
+
+    pub(in crate::server) fn next_base(&self) -> u64 {
+        self.head.sequence
+    }
+}
+
+/// Keep fencing and the full conflicting observation available to the caller.
+#[derive(Debug)]
+#[allow(clippy::large_enum_variant)]
+pub(in crate::server) enum HaArchiveError {
+    Authority(AuthorityError),
+    Api(ApiError),
+}
+
+impl From<AuthorityError> for HaArchiveError {
+    fn from(error: AuthorityError) -> Self {
+        Self::Authority(error)
+    }
+}
+
+impl From<ApiError> for HaArchiveError {
+    fn from(error: ApiError) -> Self {
+        Self::Api(error)
+    }
+}
+
+impl From<HaArchiveError> for ApiError {
+    fn from(error: HaArchiveError) -> Self {
+        match error {
+            HaArchiveError::Authority(error) => error.into(),
+            HaArchiveError::Api(error) => error,
+        }
+    }
+}
+
+/// Canonical digest of the complete prior authority head, including its index.
+#[cfg_attr(not(test), allow(dead_code))]
+pub(in crate::server) fn ha_head_digest(head: &HeadRef) -> Result<String, ApiError> {
+    Ok(sha_hex(&encode(head)?))
+}
+
+fn ha_chain(
+    previous: &str,
+    identity: &HaIdentity,
+    base_sequence: u64,
+    sequence: u64,
+    segment_sha256: &str,
+) -> String {
+    // Length-prefix the variable fields; no identity spelling can alias a boundary.
+    let mut bytes = HA_CHAIN_DOMAIN.as_bytes().to_vec();
+    for field in [previous, &identity.writer_id, segment_sha256] {
+        bytes.extend_from_slice(&(field.len() as u64).to_be_bytes());
+        bytes.extend_from_slice(field.as_bytes());
+    }
+    bytes.extend_from_slice(&identity.epoch.to_be_bytes());
+    bytes.extend_from_slice(&base_sequence.to_be_bytes());
+    bytes.extend_from_slice(&sequence.to_be_bytes());
+    sha_hex(&bytes)
+}
+
+fn check_ha_identity(manifest: &HaManifest) -> Result<(), ApiError> {
+    let identity = &manifest.authority;
+    if identity.epoch == 0
+        || identity.writer_id.len() != 32
+        || !lower_hex(identity.writer_id.as_bytes())
+        || identity.scope_id.is_empty()
+        || identity.scope_id.len() > 128
+        || !identity
+            .scope_id
+            .bytes()
+            .all(|b| b.is_ascii_alphanumeric() || b"._-".contains(&b))
+        || identity.lineage.len() != 16
+        || !lower_hex(identity.lineage.as_bytes())
+        || manifest.manifest.source_lineage.as_deref() != Some(&identity.lineage)
+    {
+        return Err(corrupt("the HA manifest authority identity is invalid"));
+    }
+    Ok(())
+}
+
+#[cfg_attr(not(test), allow(dead_code))]
+impl HaIndex {
+    pub(in crate::server) fn check(
+        &self,
+        set_id: &str,
+        manifest: &HaManifest,
+        head: &HeadRef,
+    ) -> Result<(), ApiError> {
+        check_ha_identity(manifest)?;
+        let baseline = &manifest.manifest;
+        let database = baseline.check(set_id, &baseline.installation_id)?.0;
+        check_database_size(database.bytes)?;
+        let bad = || corrupt("the HA archive index is invalid or belongs to another baseline");
+        if self.schema != HA_INDEX_SCHEMA
+            || self.authority != manifest.authority
+            || self.set_id != set_id
+            || self.installation_id != baseline.installation_id
+            || self.baseline_sequence != baseline.database.commits
+            || self.baseline_sha256 != database.sha256
+            || !is_sha256(&self.header_sha256)
+            || self.checkpoints.is_empty()
+            || self.checkpoints.len() > MAX_CHECKPOINTS
+            || head.epoch != self.authority.epoch
+            || head.set_id != set_id
+            || !is_sha256(&head.manifest_sha256)
+            || !head.index_sha256.as_deref().is_some_and(is_sha256)
+            || self.prior_head_sha256 != ha_head_digest(&self.prior_head)?
+            || self.prior_head.epoch != head.epoch
+            || self.prior_head.set_id != head.set_id
+            || self.prior_head.manifest_sha256 != head.manifest_sha256
+        {
+            return Err(bad());
+        }
+        let (mut base, mut tip, mut total, mut epoch) = (
+            self.baseline_sequence,
+            self.baseline_sha256.as_str(),
+            0u64,
+            manifest.authority.epoch,
+        );
+        for (n, entry) in self.checkpoints.iter().enumerate() {
+            let c = &entry.checkpoint;
+            total = total.saturating_add(c.segment_bytes);
+            if entry.schema != HA_CHECKPOINT_SCHEMA
+                || entry.authority.epoch < epoch
+                || entry.authority != manifest.authority
+                || c.base_sequence != base
+                || c.sequence <= base
+                || !is_sha256(&c.segment_sha256)
+                || !is_sha256(&c.bundle_sha256)
+                || c.segment_bytes == 0
+                || c.segment_bytes > MAX_SEGMENT_BYTES as u64
+                || c.bundle_bytes == 0
+                || c.bundle_bytes > recovery_bundle::MAX_BYTES
+                || c.chain_sha256
+                    != ha_chain(tip, &entry.authority, base, c.sequence, &c.segment_sha256)
+                || total > MAX_ARCHIVE_BYTES
+            {
+                return Err(bad());
+            }
+            if n + 1 == self.checkpoints.len()
+                && (self.prior_head.sequence != base
+                    || self.prior_head.chain_sha256 != tip
+                    || (n == 0 && self.prior_head.index_sha256.is_some())
+                    || (n > 0
+                        && !self
+                            .prior_head
+                            .index_sha256
+                            .as_deref()
+                            .is_some_and(is_sha256)))
+            {
+                return Err(bad());
+            }
+            base = c.sequence;
+            tip = &c.chain_sha256;
+            epoch = entry.authority.epoch;
+        }
+        if head.sequence != base || head.chain_sha256 != tip {
+            return Err(bad());
+        }
+        Ok(())
+    }
+}
+
+#[cfg_attr(not(test), allow(dead_code))]
+pub(in crate::server) fn parse_ha_index(bytes: &[u8]) -> Result<HaIndex, ApiError> {
+    if bytes.len() as u64 > META_MAX {
+        return Err(corrupt("the HA archive index is too large"));
+    }
+    let index: HaIndex = decode("HA archive index", bytes)?;
+    if index.schema != HA_INDEX_SCHEMA {
+        return Err(corrupt("unsupported HA archive index schema"));
+    }
+    Ok(index)
+}
+
+#[cfg_attr(not(test), allow(dead_code))]
+#[allow(clippy::result_large_err)]
+impl Sets {
+    /// Opens only the exact immutable index named by `head`; never archive.json.
+    /// This also supports an explicitly selected frozen head for recovery.
+    pub(in crate::server) fn open_archive_ha_at(
+        &self,
+        head: &HeadRef,
+    ) -> Result<HaArchive, ApiError> {
+        if !valid_set_id(&head.set_id)
+            || head.epoch == 0
+            || !is_sha256(&head.manifest_sha256)
+            || !is_sha256(&head.chain_sha256)
+            || head
+                .index_sha256
+                .as_deref()
+                .is_some_and(|sha| !is_sha256(sha))
+        {
+            return Err(corrupt("the HA archive head is invalid"));
+        }
+        let id = &head.set_id;
+        let key = self.record_key(id);
+        let blob = self.meta.get(&key, META_MAX).map_err(missing_object)?;
+        let record = decode_record(&key, &blob.bytes, id)?;
+        if record.state != SetState::Published || record.manifest_sha256 != head.manifest_sha256 {
+            return Err(corrupt("the HA head does not name a published baseline"));
+        }
+        let blob = self
+            .data
+            .get(&self.manifest_key(id), META_MAX)
+            .map_err(missing_object)?;
+        if sha_hex(&blob.bytes) != head.manifest_sha256 {
+            return Err(corrupt("the HA manifest does not match the authority head"));
+        }
+        let manifest = parse_ha_manifest(&blob.bytes)?;
+        check_ha_identity(&manifest)?;
+        if manifest.authority.epoch != head.epoch {
+            return Err(corrupt(
+                "the HA manifest epoch differs from the authority head",
+            ));
+        }
+        let (database, bundle) = manifest.manifest.check(id, &record.installation_id)?;
+        check_database_size(database.bytes)?;
+        if bundle.bytes > recovery_bundle::MAX_BYTES {
+            return Err(corrupt("the HA baseline recovery bundle is too large"));
+        }
+        let database_sha256 = database.sha256.clone();
+        let index = match &head.index_sha256 {
+            Some(sha) => {
+                let blob = self
+                    .data
+                    .get(&self.object_key(id, sha), META_MAX)
+                    .map_err(missing_object)?;
+                if sha_hex(&blob.bytes) != *sha {
+                    return Err(corrupt("the HA index does not match the authority head"));
+                }
+                let index = parse_ha_index(&blob.bytes)?;
+                index.check(id, &manifest, head)?;
+                Some(index)
+            }
+            None => {
+                if head.sequence != manifest.manifest.database.commits
+                    || head.chain_sha256 != database_sha256
+                {
+                    return Err(corrupt("the HA head does not match its baseline"));
+                }
+                None
+            }
+        };
+        Ok(HaArchive {
+            set_id: id.clone(),
+            manifest,
+            head: head.clone(),
+            database_sha256,
+            index,
+        })
+    }
+
+    pub(in crate::server) fn open_archive_ha(
+        &self,
+        authority: &AuthorityStore,
+        claim: &Claim,
+    ) -> Result<HaArchive, HaArchiveError> {
+        let observed = authority.verify_writer(claim)?;
+        if observed.record.phase != Phase::Serving {
+            return Err(AuthorityError::Invalid.into());
+        }
+        let head = observed
+            .record
+            .head
+            .as_ref()
+            .ok_or(AuthorityError::Invalid)?;
+        let archive = self.open_archive_ha_at(head)?;
+        Self::check_archive_authority(&archive, &observed)?;
+        Ok(archive)
+    }
+
+    fn check_archive_authority(
+        archive: &HaArchive,
+        observed: &Observed,
+    ) -> Result<(), HaArchiveError> {
+        let identity = &archive.manifest.authority;
+        if observed.record.phase != Phase::Serving {
+            return Err(AuthorityError::Invalid.into());
+        }
+        if observed.record.head.as_ref() != Some(&archive.head) {
+            return Err(AuthorityError::HeadMoved(observed.clone()).into());
+        }
+        if observed.record.writer_id.as_deref() != Some(&identity.writer_id)
+            || observed.record.epoch != identity.epoch
+            || observed.record.scope_id != identity.scope_id
+            || observed.record.lineage != identity.lineage
+            || observed.record.installation_id != archive.manifest.manifest.installation_id
+        {
+            return Err(AuthorityError::Invalid.into());
+        }
+        Ok(())
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub(in crate::server) fn append_checkpoint_ha(
+        &self,
+        archive: &HaArchive,
+        segment: &LogSegment,
+        bundle: &dyn Fn(&str) -> Result<Vec<u8>, ApiError>,
+        now: u64,
+        authorize: Authorize<'_>,
+        authority: &AuthorityStore,
+        claim: &Claim,
+    ) -> Result<HaCheckpoint, HaArchiveError> {
+        let observed = authority.verify_writer(claim)?;
+        Self::check_archive_authority(archive, &observed)?;
+        let id = &archive.set_id;
+        let manifest = &archive.manifest.manifest;
+        let identity = &archive.manifest.authority;
+        if archive.head.set_id != *id {
+            return Err(corrupt("the HA archive set differs from its head").into());
+        }
+        if Some(lineage_hex(segment.lineage)) != manifest.source_lineage
+            || segment.base_sequence != archive.next_base()
+            || segment.last_sequence > segment.head_sequence
+            || archive
+                .index
+                .as_ref()
+                .is_some_and(|i| i.header_sha256 != sha_hex(&segment.header))
+        {
+            return Err(pitr(
+                "pitr_source_diverged",
+                "the segment does not continue the HA archive",
+            )
+            .into());
+        }
+        if segment.last_sequence < segment.head_sequence {
+            return Err(pitr(
+                "pitr_delta_too_large",
+                "the commits exceed one archive segment",
+            )
+            .into());
+        }
+        if segment.is_empty() || segment.last_sequence < segment.base_sequence {
+            return Err(internal("an empty or reversed segment is not a checkpoint").into());
+        }
+        if archive.checkpoints().len() >= MAX_CHECKPOINTS {
+            return Err(pitr(
+                "pitr_archive_full",
+                "the HA archive reached its checkpoint limit",
+            )
+            .into());
+        }
+        // Check before serializing so an oversized segment is never copied.
+        let bytes = (segment.frames.len() as u64)
+            .saturating_add(segment.header.len() as u64)
+            .saturating_add(84);
+        if bytes > MAX_SEGMENT_BYTES as u64 {
+            return Err(pitr(
+                "pitr_delta_too_large",
+                "the HA segment exceeds its size limit",
+            )
+            .into());
+        }
+        let total: u64 = archive
+            .checkpoints()
+            .iter()
+            .map(|c| c.checkpoint.segment_bytes)
+            .sum();
+        if total.saturating_add(bytes) > MAX_ARCHIVE_BYTES {
+            return Err(pitr("pitr_archive_full", "the HA archive reached its size limit").into());
+        }
+        let segment_upload = Upload::bytes(ROLE_SEGMENT, segment.to_bytes());
+        let chain_sha256 = ha_chain(
+            &archive.head.chain_sha256,
+            identity,
+            segment.base_sequence,
+            segment.last_sequence,
+            &segment_upload.sha256,
+        );
+        let bundle_bytes = bundle(&chain_sha256)?;
+        let parsed = recovery_bundle::parse(&bundle_bytes).map_err(internal)?;
+        check_bundle(&parsed, manifest, &chain_sha256)
+            .map_err(|_| internal("the checkpoint bundle does not match its baseline"))?;
+        let bundle_upload = Upload::bytes(ROLE_ARCHIVE_BUNDLE, bundle_bytes);
+        let checkpoint = HaCheckpoint {
+            schema: HA_CHECKPOINT_SCHEMA.into(),
+            authority: identity.clone(),
+            checkpoint: Checkpoint {
+                sequence: segment.last_sequence,
+                base_sequence: segment.base_sequence,
+                segment_sha256: segment_upload.sha256.clone(),
+                segment_bytes: segment_upload.bytes,
+                bundle_sha256: bundle_upload.sha256.clone(),
+                bundle_bytes: bundle_upload.bytes,
+                chain_sha256,
+                captured_unix_ms: now,
+            },
+        };
+        let mut next = HaIndex {
+            schema: HA_INDEX_SCHEMA.into(),
+            authority: identity.clone(),
+            prior_head_sha256: ha_head_digest(&archive.head)?,
+            prior_head: archive.head.clone(),
+            set_id: id.clone(),
+            installation_id: manifest.installation_id.clone(),
+            header_sha256: sha_hex(&segment.header),
+            baseline_sequence: manifest.database.commits,
+            baseline_sha256: archive.database_sha256.clone(),
+            checkpoints: archive.checkpoints().to_vec(),
+        };
+        next.checkpoints.push(checkpoint.clone());
+        let index_bytes = encode(&next)?;
+        if index_bytes.len() as u64 > META_MAX {
+            return Err(pitr(
+                "pitr_archive_full",
+                "the HA archive index exceeds its metadata limit",
+            )
+            .into());
+        }
+        let index_upload = Upload::bytes("ha_archive_index", index_bytes);
+        let head = HeadRef {
+            epoch: claim.epoch,
+            set_id: id.clone(),
+            manifest_sha256: archive.head.manifest_sha256.clone(),
+            index_sha256: Some(index_upload.sha256.clone()),
+            sequence: checkpoint.checkpoint.sequence,
+            chain_sha256: checkpoint.checkpoint.chain_sha256.clone(),
+        };
+        next.check(id, &archive.manifest, &head)?;
+        authorize()?;
+        self.upload(id, &segment_upload)?;
+        self.upload(id, &bundle_upload)?;
+        self.upload(id, &index_upload)?;
+        self.open_archive_ha_at(&archive.head)?;
+        authorize()?;
+        // Never retry with a successor ETag. AuthorityStore reconciles Unknown
+        // only against its exact intended bytes, retaining typed CAS failures.
+        authority.advance_head(claim, &observed, head)?;
+        Ok(checkpoint)
     }
 }
 
@@ -660,4 +1138,600 @@ fn seal(
         return Err(corrupt("the replayed database differs from its checkpoint"));
     }
     Ok(verification)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::super::fake::{self, Fault, Memory, Op};
+    use super::*;
+    use crate::Database;
+
+    const PREFIX: &str = "ha/";
+    const AUTHORITY_KEY: &str = "ha/authority.json";
+    const INSTALL: &str = "installation";
+    const HA_MANIFEST_SCHEMA: &str = "vlite.cloud-backup-ha-manifest/1";
+
+    struct Env {
+        meta: Arc<Memory>,
+        data: Arc<Memory>,
+        sets: Sets,
+        authority: Arc<AuthorityStore>,
+        claim: Claim,
+        observed: Observed,
+        archive: HaArchive,
+        segment: LogSegment,
+        dir: tempfile::TempDir,
+    }
+
+    fn bundle_bytes(manifest: &Manifest, chain: &str) -> Vec<u8> {
+        let config = serde_json::from_value(serde_json::json!({
+            "tenants": [], "accounts": [], "credentials": [],
+            "webhook_subscriptions": 0, "secret_references": [],
+            "excluded": recovery_bundle::EXCLUDED,
+        }))
+        .unwrap();
+        let bundle = recovery_bundle::bundle(
+            config,
+            &manifest.installation_id,
+            manifest
+                .source_lineage
+                .as_ref()
+                .map(|s| u64::from_str_radix(s, 16).unwrap()),
+            chain,
+            manifest.policy.clone(),
+            None,
+            2,
+        );
+        serde_json::to_vec(&bundle).unwrap()
+    }
+
+    fn setup() -> Env {
+        let meta = Arc::new(Memory::default());
+        let data = Arc::new(Memory::default());
+        let sets = Sets::new(meta.clone(), data.clone(), false, PREFIX.into());
+        let authority = Arc::new(AuthorityStore::new(meta.clone(), PREFIX.into()));
+        let dir = tempfile::tempdir().unwrap();
+        let source = dir.path().join("source.vlite");
+        let mut database = Database::create(&source, 3).unwrap();
+        database.put(1, &[1.0, 0.0, 0.0], b"one").unwrap();
+        database.close().unwrap();
+        let verification = maintenance::verify(&source).unwrap();
+        let detail = maintenance::inspect_detail(&source).unwrap();
+        let database_upload = Upload::file(ROLE_DATABASE, source.clone()).unwrap();
+        let id = new_set_id(1_700_000_000_000).unwrap();
+        let mut manifest = Manifest::new(
+            &id,
+            INSTALL,
+            1,
+            &verification,
+            &detail,
+            &[],
+            fake::policy_capture(),
+        );
+        let baseline_bundle = bundle_bytes(&manifest, &database_upload.sha256);
+        let uploads = [database_upload, Upload::bytes(ROLE_BUNDLE, baseline_bundle)];
+        manifest.objects = uploads
+            .iter()
+            .map(|u| ObjectEntry {
+                role: u.role.into(),
+                sha256: u.sha256.clone(),
+                bytes: u.bytes,
+            })
+            .collect();
+        let Publication::Published(mut record) =
+            sets.publish(&manifest, &uploads, 1, &fake::open).unwrap()
+        else {
+            panic!("the fixture baseline must be published");
+        };
+        let created = authority
+            .create(INSTALL, "scope", manifest.source_lineage.as_ref().unwrap())
+            .unwrap();
+        let (claim, claimed) = authority.claim(&created, 1).unwrap();
+        let manifest = HaManifest {
+            schema: HA_MANIFEST_SCHEMA.into(),
+            authority: HaIdentity {
+                writer_id: claim.writer_id.clone(),
+                epoch: claim.epoch,
+                scope_id: created.record.scope_id,
+                lineage: manifest.source_lineage.clone().unwrap(),
+            },
+            manifest,
+        };
+        // The baseline-publication peer owns publish_ha; install its fixed
+        // manifest envelope here so these tests exercise only archive commits.
+        let bytes = encode(&manifest).unwrap();
+        record.manifest_sha256 = sha_hex(&bytes);
+        data.set_raw(&sets.manifest_key(&id), &bytes);
+        meta.set_raw(&sets.record_key(&id), &encode(&record).unwrap());
+        let head = HeadRef {
+            epoch: claim.epoch,
+            set_id: id,
+            manifest_sha256: record.manifest_sha256,
+            index_sha256: None,
+            sequence: manifest.manifest.database.commits,
+            chain_sha256: uploads[0].sha256.clone(),
+        };
+        let observed = authority.advance_head(&claim, &claimed, head).unwrap();
+        let archive = sets.open_archive_ha(&authority, &claim).unwrap();
+        let mut database = Database::open(&source).unwrap();
+        database.put(2, &[0.0, 1.0, 0.0], b"two").unwrap();
+        let segment = database
+            .export_log(archive.next_base(), MAX_SEGMENT_BYTES)
+            .unwrap();
+        database.close().unwrap();
+        Env {
+            meta,
+            data,
+            sets,
+            authority,
+            claim,
+            observed,
+            archive,
+            segment,
+            dir,
+        }
+    }
+
+    #[allow(clippy::result_large_err)]
+    fn append(env: &Env) -> Result<HaCheckpoint, HaArchiveError> {
+        env.sets.append_checkpoint_ha(
+            &env.archive,
+            &env.segment,
+            &|chain| Ok(bundle_bytes(&env.archive.manifest.manifest, chain)),
+            2,
+            &fake::open,
+            &env.authority,
+            &env.claim,
+        )
+    }
+
+    #[test]
+    fn legacy_index_checkpoint_golden_bytes() {
+        let checkpoint = Checkpoint {
+            sequence: 12,
+            base_sequence: 10,
+            segment_sha256: "segment".into(),
+            segment_bytes: 123,
+            bundle_sha256: "bundle".into(),
+            bundle_bytes: 456,
+            chain_sha256: "chain".into(),
+            captured_unix_ms: 789,
+        };
+        assert_eq!(
+            serde_json::to_vec(&checkpoint).unwrap(),
+            br#"{"sequence":12,"base_sequence":10,"segment_sha256":"segment","segment_bytes":123,"bundle_sha256":"bundle","bundle_bytes":456,"chain_sha256":"chain","captured_unix_ms":789}"#
+        );
+        let index = Index {
+            schema: ARCHIVE_SCHEMA.into(),
+            set_id: "set".into(),
+            installation_id: "install".into(),
+            source_lineage: "lineage".into(),
+            header_sha256: "header".into(),
+            baseline_sequence: 10,
+            baseline_sha256: "database".into(),
+            checkpoints: vec![checkpoint],
+        };
+        assert_eq!(
+            serde_json::to_vec(&index).unwrap(),
+            br#"{"schema":"vlite.cloud-backup-archive/1","set_id":"set","installation_id":"install","source_lineage":"lineage","header_sha256":"header","baseline_sequence":10,"baseline_sha256":"database","checkpoints":[{"sequence":12,"base_sequence":10,"segment_sha256":"segment","segment_bytes":123,"bundle_sha256":"bundle","bundle_bytes":456,"chain_sha256":"chain","captured_unix_ms":789}]}"#
+        );
+    }
+
+    #[test]
+    fn ha_index_refused_by_legacy_parser() {
+        let env = setup();
+        let checkpoint = append(&env).unwrap();
+        let archive = env
+            .sets
+            .open_archive_ha(&env.authority, &env.claim)
+            .unwrap();
+        let index = archive.index.as_ref().unwrap();
+        let bytes = encode(index).unwrap();
+        assert!(decode::<Index>("index", &bytes).is_err());
+        assert!(decode::<Checkpoint>("checkpoint", &encode(&checkpoint).unwrap()).is_err());
+        assert_eq!(parse_ha_index(&bytes).unwrap(), *index);
+        let mut value = serde_json::to_value(index).unwrap();
+        value["extra"] = serde_json::json!(true);
+        assert!(parse_ha_index(&serde_json::to_vec(&value).unwrap()).is_err());
+        let mut value = serde_json::to_value(index).unwrap();
+        value["checkpoints"][0]["extra"] = serde_json::json!(true);
+        assert!(parse_ha_index(&serde_json::to_vec(&value).unwrap()).is_err());
+        // Even a misleading legacy pointer cannot make the legacy opener
+        // accept either the HA manifest or the HA index.
+        env.data
+            .set_raw(&env.sets.archive_key(&archive.set_id), &bytes);
+        assert!(env.sets.open_archive(&archive.set_id).is_err());
+    }
+
+    #[test]
+    fn ha_chain_is_domain_separated_from_legacy() {
+        let identity = HaIdentity {
+            writer_id: "a".repeat(32),
+            epoch: 1,
+            scope_id: "scope".into(),
+            lineage: "0123456789abcdef".into(),
+        };
+        let previous = "b".repeat(64);
+        let segment = "c".repeat(64);
+        let tip = ha_chain(&previous, &identity, 10, 12, &segment);
+        assert_ne!(tip, chain(&previous, &segment, 12));
+        let mut changed = identity.clone();
+        changed.epoch += 1;
+        assert_ne!(tip, ha_chain(&previous, &changed, 10, 12, &segment));
+        changed = identity.clone();
+        changed.writer_id = "d".repeat(32);
+        assert_ne!(tip, ha_chain(&previous, &changed, 10, 12, &segment));
+        assert_ne!(tip, ha_chain(&"d".repeat(64), &identity, 10, 12, &segment));
+        assert_ne!(tip, ha_chain(&previous, &identity, 11, 12, &segment));
+        assert_ne!(tip, ha_chain(&previous, &identity, 10, 13, &segment));
+        assert_ne!(tip, ha_chain(&previous, &identity, 10, 12, &"d".repeat(64)));
+    }
+
+    #[test]
+    fn head_epoch_bump_invalidates_old_etag() {
+        let env = setup();
+        let authority = env.authority.clone();
+        let current = env.observed.clone();
+        env.meta.hook(Op::Put, AUTHORITY_KEY, move || {
+            let prepared = authority
+                .prepare_transfer(&current, current.record.epoch, &current.record.revision)
+                .unwrap();
+            authority.claim(&prepared, 3).unwrap();
+        });
+        assert!(matches!(
+            append(&env),
+            Err(HaArchiveError::Authority(AuthorityError::Fenced {
+                observed_epoch: 2
+            }))
+        ));
+        let current = env.authority.read().unwrap();
+        assert_eq!(current.record.phase, Phase::Recovering);
+        assert_eq!(current.record.base.as_ref(), Some(&env.archive.head));
+        assert!(current.record.head.is_none());
+        assert!(env.archive.checkpoints().is_empty());
+        assert!(
+            env.data
+                .raw(&env.sets.archive_key(&env.archive.set_id))
+                .is_none()
+        );
+    }
+
+    #[test]
+    fn head_unknown_commit_requires_exact_reference() {
+        let env = setup();
+        env.meta.fault(Op::Put, AUTHORITY_KEY, Fault::After, 0, 1);
+        let checkpoint = append(&env).unwrap();
+        let current = env
+            .sets
+            .open_archive_ha(&env.authority, &env.claim)
+            .unwrap();
+        assert_eq!(current.checkpoints(), &[checkpoint]);
+        assert!(
+            env.data
+                .raw(&env.sets.archive_key(&env.archive.set_id))
+                .is_none()
+        );
+
+        let env = setup();
+        env.meta.fault(Op::Put, AUTHORITY_KEY, Fault::Before, 0, 1);
+        assert!(matches!(
+            append(&env),
+            Err(HaArchiveError::Authority(AuthorityError::HeadMoved(_)))
+        ));
+        assert_eq!(env.authority.read().unwrap(), env.observed);
+        assert!(env.archive.checkpoints().is_empty());
+
+        let env = setup();
+        // Change just the immutable reference on ambiguous readback, retaining
+        // the same writer, epoch and sequence. It must not count as success.
+        env.meta.fault(Op::Put, AUTHORITY_KEY, Fault::After, 0, 1);
+        let meta = env.meta.clone();
+        env.data.hook(Op::Put, "/objects/", move || {
+            let target = meta.clone();
+            meta.hook(Op::Get, AUTHORITY_KEY, move || {
+                let mut value: serde_json::Value =
+                    serde_json::from_slice(&target.raw(AUTHORITY_KEY).unwrap()).unwrap();
+                value["head"]["index_sha256"] = serde_json::json!("e".repeat(64));
+                target.set_raw(AUTHORITY_KEY, &serde_json::to_vec(&value).unwrap());
+            });
+        });
+        assert!(matches!(
+            append(&env),
+            Err(HaArchiveError::Authority(AuthorityError::HeadMoved(_)))
+        ));
+        assert!(env.archive.checkpoints().is_empty());
+
+        let env = setup();
+        env.meta.fault(Op::Put, AUTHORITY_KEY, Fault::After, 0, 1);
+        env.meta.fault(Op::Get, AUTHORITY_KEY, Fault::Before, 1, 1);
+        assert!(matches!(
+            append(&env),
+            Err(HaArchiveError::Authority(AuthorityError::Unresolved))
+        ));
+        assert!(env.archive.checkpoints().is_empty());
+    }
+
+    #[test]
+    fn head_moved_same_writer_requires_rebase() {
+        let env = setup();
+        let rival = Sets::new(env.meta.clone(), env.data.clone(), false, PREFIX.into());
+        let authority = env.authority.clone();
+        let claim = env.claim.clone();
+        let segment = env.segment.to_bytes();
+        env.meta.hook(Op::Put, AUTHORITY_KEY, move || {
+            let archive = rival.open_archive_ha(&authority, &claim).unwrap();
+            rival
+                .append_checkpoint_ha(
+                    &archive,
+                    &LogSegment::from_bytes(&segment).unwrap(),
+                    &|chain| Ok(bundle_bytes(&archive.manifest.manifest, chain)),
+                    99,
+                    &fake::open,
+                    &authority,
+                    &claim,
+                )
+                .unwrap();
+        });
+        let Err(HaArchiveError::Authority(AuthorityError::HeadMoved(observed))) = append(&env)
+        else {
+            panic!("a same-writer head CAS loser must explicitly rebase");
+        };
+        assert_eq!(observed, env.authority.read().unwrap());
+        assert_eq!(
+            observed.record.writer_id.as_ref(),
+            Some(&env.claim.writer_id)
+        );
+        let current = env
+            .sets
+            .open_archive_ha(&env.authority, &env.claim)
+            .unwrap();
+        assert_eq!(current.checkpoints().len(), 1);
+        assert_eq!(current.checkpoints()[0].checkpoint.captured_unix_ms, 99);
+        assert!(env.archive.checkpoints().is_empty());
+        let names = env.data.names();
+        assert!(matches!(
+            append(&env),
+            Err(HaArchiveError::Authority(AuthorityError::HeadMoved(_)))
+        ));
+        assert_eq!(env.data.names(), names);
+    }
+
+    #[test]
+    fn index_check_rejects_epoch_regression_and_writer_mismatch() {
+        let env = setup();
+        append(&env).unwrap();
+        let archive = env
+            .sets
+            .open_archive_ha(&env.authority, &env.claim)
+            .unwrap();
+        let mut database = Database::open(env.dir.path().join("source.vlite")).unwrap();
+        database.put(3, &[0.0, 0.0, 1.0], b"three").unwrap();
+        let segment = database
+            .export_log(archive.next_base(), MAX_SEGMENT_BYTES)
+            .unwrap();
+        database.close().unwrap();
+        env.sets
+            .append_checkpoint_ha(
+                &archive,
+                &segment,
+                &|chain| Ok(bundle_bytes(&archive.manifest.manifest, chain)),
+                3,
+                &fake::open,
+                &env.authority,
+                &env.claim,
+            )
+            .unwrap();
+        let archive = env
+            .sets
+            .open_archive_ha(&env.authority, &env.claim)
+            .unwrap();
+        let index = archive.index.as_ref().unwrap();
+        let check =
+            |index: &HaIndex| index.check(&archive.set_id, &archive.manifest, &archive.head);
+        check(index).unwrap();
+        let mut bad = index.clone();
+        bad.checkpoints[1].authority.epoch = 0;
+        assert!(check(&bad).is_err());
+        let mut bad = index.clone();
+        bad.checkpoints[1].authority.writer_id = "f".repeat(32);
+        assert!(check(&bad).is_err());
+        let mut bad = index.clone();
+        bad.authority.writer_id = "f".repeat(32);
+        assert!(check(&bad).is_err());
+        let mut bad = index.clone();
+        bad.prior_head_sha256 = "f".repeat(64);
+        assert!(check(&bad).is_err());
+        let mut bad = index.clone();
+        bad.checkpoints[1].checkpoint.chain_sha256 = chain(
+            &bad.checkpoints[0].checkpoint.chain_sha256,
+            &bad.checkpoints[1].checkpoint.segment_sha256,
+            bad.checkpoints[1].checkpoint.sequence,
+        );
+        assert!(check(&bad).is_err());
+        for (field, value) in [
+            ("scope_id", serde_json::json!("another-scope")),
+            ("lineage", serde_json::json!("fedcba9876543210")),
+        ] {
+            let mut value_index = serde_json::to_value(index).unwrap();
+            value_index["checkpoints"][1]["authority"][field] = value;
+            let bad: HaIndex = serde_json::from_value(value_index).unwrap();
+            assert!(check(&bad).is_err());
+        }
+        let mut bad = index.clone();
+        bad.checkpoints[0].checkpoint.segment_bytes = MAX_SEGMENT_BYTES as u64 + 1;
+        assert!(check(&bad).is_err());
+        let mut bad = index.clone();
+        bad.checkpoints[0].checkpoint.bundle_bytes = recovery_bundle::MAX_BYTES + 1;
+        assert!(check(&bad).is_err());
+    }
+
+    #[test]
+    fn ha_checkpoint_bundle_still_checked() {
+        let env = setup();
+        let original = env.data.names();
+        for field in [
+            "installation_id",
+            "source_lineage",
+            "database_sha256",
+            "policy",
+            "memory",
+        ] {
+            let bundle = |chain: &str| {
+                let mut value: serde_json::Value =
+                    serde_json::from_slice(&bundle_bytes(&env.archive.manifest.manifest, chain))
+                        .unwrap();
+                match field {
+                    "installation_id" => value[field] = serde_json::json!("other"),
+                    "source_lineage" => value[field] = serde_json::json!("fedcba9876543210"),
+                    "database_sha256" => value[field] = serde_json::json!("f".repeat(64)),
+                    "policy" => value[field]["revision_unix_ms"] = serde_json::json!(77),
+                    "memory" => {
+                        value["schema"] = serde_json::json!(recovery_bundle::SCHEMA_V2);
+                        value["memory_bindings"] = serde_json::json!({});
+                    }
+                    _ => unreachable!(),
+                }
+                Ok(serde_json::to_vec(&value).unwrap())
+            };
+            assert!(
+                env.sets
+                    .append_checkpoint_ha(
+                        &env.archive,
+                        &env.segment,
+                        &bundle,
+                        2,
+                        &fake::open,
+                        &env.authority,
+                        &env.claim,
+                    )
+                    .is_err(),
+                "{field}"
+            );
+        }
+        assert!(
+            env.sets
+                .append_checkpoint_ha(
+                    &env.archive,
+                    &env.segment,
+                    &|_| Ok(vec![b' '; recovery_bundle::MAX_BYTES as usize + 1]),
+                    2,
+                    &fake::open,
+                    &env.authority,
+                    &env.claim,
+                )
+                .is_err()
+        );
+        assert_eq!(env.data.names(), original);
+        assert_eq!(env.authority.read().unwrap(), env.observed);
+        append(&env).unwrap();
+    }
+
+    #[test]
+    fn ha_open_uses_exact_authority_index_and_checks_hash() {
+        let env = setup();
+        append(&env).unwrap();
+        let current = env
+            .sets
+            .open_archive_ha(&env.authority, &env.claim)
+            .unwrap();
+        env.data
+            .set_raw(&env.sets.archive_key(&current.set_id), b"not an index");
+        let reopened = env
+            .sets
+            .open_archive_ha(&env.authority, &env.claim)
+            .unwrap();
+        assert_eq!(reopened.head, current.head);
+        assert_eq!(reopened.checkpoints(), current.checkpoints());
+        let key = env
+            .sets
+            .object_key(&current.set_id, current.head.index_sha256.as_ref().unwrap());
+        env.data.set_raw(&key, b"{}");
+        assert!(
+            env.sets
+                .open_archive_ha(&env.authority, &env.claim)
+                .is_err()
+        );
+    }
+
+    #[test]
+    fn ha_append_requires_serving_and_authorization() {
+        let env = setup();
+        let names = env.data.names();
+        let denied = || Err(conflict("test_denied", "publication stopped"));
+        assert!(
+            env.sets
+                .append_checkpoint_ha(
+                    &env.archive,
+                    &env.segment,
+                    &|chain| Ok(bundle_bytes(&env.archive.manifest.manifest, chain)),
+                    2,
+                    &denied,
+                    &env.authority,
+                    &env.claim,
+                )
+                .is_err()
+        );
+        assert_eq!(env.data.names(), names);
+        assert_eq!(env.authority.read().unwrap(), env.observed);
+        let mut current = env.observed.record.clone();
+        current.phase = Phase::Recovering;
+        current.head = None;
+        env.meta.set_raw(AUTHORITY_KEY, &encode(&current).unwrap());
+        assert!(matches!(
+            append(&env),
+            Err(HaArchiveError::Authority(AuthorityError::Invalid))
+        ));
+        assert_eq!(env.data.names(), names);
+    }
+
+    #[test]
+    fn ha_uploads_require_readback_and_final_authorization() {
+        for skip in 0..3 {
+            let env = setup();
+            env.data.fault(Op::Get, "/objects/", Fault::Refuse, skip, 1);
+            assert!(append(&env).is_err());
+            assert_eq!(env.authority.read().unwrap(), env.observed);
+            assert!(env.archive.checkpoints().is_empty());
+        }
+        let env = setup();
+        let bytes = env.segment.to_bytes();
+        let key = env.sets.object_key(&env.archive.set_id, &sha_hex(&bytes));
+        env.data.set_raw(&key, &vec![b'?'; bytes.len()]);
+        assert!(matches!(
+            append(&env),
+            Err(HaArchiveError::Api(error)) if error.code == "cloud_object_conflict"
+        ));
+        assert_eq!(env.authority.read().unwrap(), env.observed);
+
+        let env = setup();
+        let calls = std::cell::Cell::new(0);
+        let authorize = || {
+            calls.set(calls.get() + 1);
+            if calls.get() == 1 {
+                Ok(())
+            } else {
+                Err(conflict("test_denied", "publication stopped"))
+            }
+        };
+        assert!(
+            env.sets
+                .append_checkpoint_ha(
+                    &env.archive,
+                    &env.segment,
+                    &|chain| Ok(bundle_bytes(&env.archive.manifest.manifest, chain)),
+                    2,
+                    &authorize,
+                    &env.authority,
+                    &env.claim,
+                )
+                .is_err()
+        );
+        assert_eq!(calls.get(), 2);
+        assert_eq!(env.authority.read().unwrap(), env.observed);
+        assert!(
+            env.data
+                .raw(&env.sets.archive_key(&env.archive.set_id))
+                .is_none()
+        );
+    }
 }
