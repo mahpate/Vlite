@@ -78,6 +78,7 @@ mod tenants;
 pub mod tls;
 mod users;
 mod webhooks;
+mod writer_fence;
 pub use admin::{ServerOptions, configured_admin_router, read_token_file, selected_database};
 pub use cloud_recovery::{CloudRestore, RecoveryError, RestoreMode, cloud_restore, cloud_sets};
 pub use compaction::{Managed, ManagedHandle};
