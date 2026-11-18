@@ -1908,7 +1908,6 @@ fn gateway_commands_validate_configuration_and_keep_keys_out_of_output() {
     for (extra, admin_dir) in [
         (vec![os("--insecure-local")], false),
         (vec![os("--grpc-bind"), os("127.0.0.1:0")], false),
-        (vec![os("--serve-mode"), os("reader")], false),
         (vec![], true),
     ] {
         let (ok, stdout, stderr) = backend(&extra, admin_dir);
@@ -1929,6 +1928,30 @@ fn gateway_commands_validate_configuration_and_keep_keys_out_of_output() {
         assert!(!ok && stderr.contains("gateway_trust_invalid"), "{stderr}");
     }
     assert!(!database.exists(), "nothing is created on a refused start");
+
+    std::fs::write(&trust, trust_base.to_string()).unwrap();
+    vlite::Database::create(&database, 2)
+        .unwrap()
+        .close()
+        .unwrap();
+    let (ok, stdout, stderr) = run(
+        &[
+            database.as_os_str(),
+            os("--bind"),
+            os("127.0.0.1:0"),
+            os("--gateway-trust-file"),
+            trust.as_os_str(),
+            os("--serve-mode"),
+            os("reader"),
+        ],
+        false,
+    );
+    assert!(!ok && !stdout.contains("LISTENING"), "{stderr}");
+    assert!(
+        !stderr.contains("cannot be used with --serve-mode reader"),
+        "{stderr}"
+    );
+    assert!(stderr.contains("control state store"), "{stderr}");
 
     // control-state refuses unknown or duplicate flags and conflicting
     // mutations before touching the store or the admin directory.

@@ -537,7 +537,6 @@ fn config() -> Result<Config, Box<dyn Error>> {
             for (refused, option) in [
                 (insecure_local, "--insecure-local"),
                 (grpc_bind.is_some(), "--grpc-bind"),
-                (serve_mode == ServeMode::Reader, "--serve-mode reader"),
                 (admin_directory.is_some(), "VLITE_ADMIN_DIR"),
                 (in_memory, "--durability none"),
             ] {

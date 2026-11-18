@@ -8,8 +8,8 @@
 //! routes refused), apply the same scoped-credential rule as a backend for
 //! the routed tenant's lineage, take one request from this replica's share
 //! of the credential's rate limit (`gateway::replica_share`), and only then
-//! forward to that tenant's writer (`gateway::route_target`) with a principal
-//! envelope signed for that writer's audience and the snapshot's generation
+//! forward to that tenant's writer or opted-in reader (`gateway::route_target`)
+//! with a principal envelope signed for the record's audience and snapshot generation
 //! `A`. The backend (`gateway_trust`) re-verifies all of it independently.
 //!
 //! Forwarding keeps the method, path, query, body and status; the caller's
@@ -20,12 +20,13 @@
 //! URL is the record's origin plus the caller's validated path.
 //! `upstream_timeout_ms` bounds connecting, waiting for the response head and
 //! each wait for the next piece of a streamed body; it is not a limit on the
-//! whole response. Nothing is
-//! retried: a write whose connection fails after it may have been sent is
+//! whole response. Reader failures before a response head, 503s, and lineage
+//! or binding-generation mismatches fall back to the writer once. Writes are
+//! never retried: a connection failure after a write may have been sent is
 //! `502 write_outcome_unknown` (`gateway::ambiguous_write`).
 //!
 //! Not yet: login, the dashboard and super-admin operations through a
-//! gateway (OD-004/OD-012); reader routing (ITEM-021); and fencing. A
+//! gateway (OD-004/OD-012); and fencing. A
 //! dedicated record's epoch is carried in the directory, but no backend
 //! stamps responses, so `gateway::check_epoch` is not applied (OD-002).
 
@@ -417,18 +418,8 @@ impl Gateway {
             })?;
             self.buckets.take(&grant.id, share, Instant::now())?;
         }
-        let target = gateway::route_target(classification, &grant, &snapshot)
+        let mut target = gateway::route_target(classification, &grant, &snapshot)
             .map_err(RouteRefusal::error)?;
-        let url = upstream_url(&target.endpoint, &parts.uri)?;
-        let envelope = gateway::mint(
-            &self.signer,
-            &target,
-            &grant,
-            snapshot.generation(),
-            now,
-            self.envelope_lifetime_ms,
-        )
-        .map_err(super::internal)?;
         let declared = parts
             .headers
             .get(header::CONTENT_LENGTH)
@@ -450,32 +441,71 @@ impl Gateway {
         let body = axum::body::to_bytes(body, self.max_request_bytes)
             .await
             .map_err(|_| too_large())?;
-        let mut headers = request_headers(&parts.headers);
-        headers.insert(
-            HeaderName::from_static(principal_envelope::HEADER),
-            envelope.parse().map_err(super::internal)?,
-        );
-        let sent = tokio::time::timeout(
-            self.upstream_timeout,
-            self.client
-                .request(parts.method.clone(), url)
-                .headers(headers)
-                .body(body)
-                .send(),
-        )
-        .await;
-        let upstream = match sent {
-            Ok(Ok(upstream)) => upstream,
-            Ok(Err(error)) => {
-                return Err(upstream_failure(
-                    error.is_connect(),
-                    error.is_timeout(),
-                    target.operation,
-                ));
+        let upstream = loop {
+            let url = upstream_url(&target.endpoint, &parts.uri)?;
+            let envelope = gateway::mint(
+                &self.signer,
+                &target,
+                &grant,
+                snapshot.generation(),
+                admin::now_ms() as u64,
+                self.envelope_lifetime_ms,
+            )
+            .map_err(super::internal)?;
+            let mut headers = request_headers(&parts.headers);
+            headers.insert(
+                HeaderName::from_static(principal_envelope::HEADER),
+                envelope.parse().map_err(super::internal)?,
+            );
+            let sent = tokio::time::timeout(
+                self.upstream_timeout,
+                self.client
+                    .request(parts.method.clone(), url)
+                    .headers(headers)
+                    .body(body.clone())
+                    .send(),
+            )
+            .await;
+            let (delivery, failure) = match sent {
+                Ok(Ok(upstream)) => {
+                    if target.fallback.is_none() || eligible_reader(&upstream, &target) {
+                        break upstream;
+                    }
+                    (
+                        gateway::Delivery::ResponseLost,
+                        ApiError::new(
+                            StatusCode::SERVICE_UNAVAILABLE,
+                            "reader_ineligible",
+                            "the reader is unavailable or has a different lineage or binding generation",
+                        ),
+                    )
+                }
+                Ok(Err(error)) => (
+                    if error.is_connect() {
+                        gateway::Delivery::NotSent
+                    } else {
+                        gateway::Delivery::Sent
+                    },
+                    upstream_failure(error.is_connect(), error.is_timeout(), target.operation),
+                ),
+                // Whether the request was sent before the head timeout is unknown.
+                Err(_) => (
+                    gateway::Delivery::Sent,
+                    upstream_failure(false, true, target.operation),
+                ),
+            };
+            if delivery.may_retry(target.operation)
+                && let Some(writer) = target.fallback.take()
+            {
+                log_stderr(
+                    "warn",
+                    "gateway",
+                    json!({"event":"gateway_reader_fallback","code":failure.code}).to_string(),
+                );
+                target.endpoint = writer;
+            } else {
+                return Err(failure);
             }
-            // Connecting or waiting for the response head took too long;
-            // whether the request was sent is unknown.
-            Err(_) => return Err(upstream_failure(false, true, target.operation)),
         };
         let status = upstream.status();
         let headers = response_headers(upstream.headers());
@@ -495,6 +525,19 @@ impl Gateway {
         *response.headers_mut() = headers;
         Ok(response)
     }
+}
+
+fn eligible_reader(upstream: &reqwest::Response, target: &gateway::Target) -> bool {
+    let headers = upstream.headers();
+    upstream.status() != StatusCode::SERVICE_UNAVAILABLE
+        && headers
+            .get("x-vlite-lineage")
+            .is_some_and(|value| value.as_bytes() == format!("{:016x}", target.lineage).as_bytes())
+        && headers
+            .get("x-vlite-binding-generation")
+            .and_then(|value| value.to_str().ok())
+            .and_then(|value| value.parse::<u64>().ok())
+            == Some(target.binding_generation)
 }
 
 /// Copies the upstream body to the client. Each wait for the next piece gets
@@ -1047,6 +1090,240 @@ pub fn control_state_command(args: &[OsString]) -> Result<Value, String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    const TENANT: &str = "0123456789abcdef0123456789abcdef";
+
+    struct Upstream {
+        endpoint: String,
+        requests: Arc<Mutex<Vec<(HeaderMap, Bytes)>>>,
+        task: tokio::task::JoinHandle<()>,
+    }
+
+    impl Drop for Upstream {
+        fn drop(&mut self) {
+            self.task.abort();
+        }
+    }
+
+    async fn upstream(status: StatusCode, headers: HeaderMap, delay: Duration) -> Upstream {
+        let requests = Arc::new(Mutex::new(Vec::new()));
+        let captured = requests.clone();
+        let router = Router::new().fallback(move |request: Request| {
+            let captured = captured.clone();
+            let headers = headers.clone();
+            async move {
+                let (parts, body) = request.into_parts();
+                let body = axum::body::to_bytes(body, 1024).await.unwrap();
+                captured.lock().unwrap().push((parts.headers, body));
+                tokio::time::sleep(delay).await;
+                (status, headers, "backend answer")
+            }
+        });
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let endpoint = format!("http://{}", listener.local_addr().unwrap());
+        let task = tokio::spawn(async move { axum::serve(listener, router).await.unwrap() });
+        Upstream {
+            endpoint,
+            requests,
+            task,
+        }
+    }
+
+    fn reader_headers() -> HeaderMap {
+        map(&[
+            ("x-vlite-lineage", "0000000000001234"),
+            ("x-vlite-binding-generation", "3"),
+            ("x-vlite-applied-age-ms", "12"),
+            ("x-vlite-applied-sequence", "42"),
+        ])
+    }
+
+    fn routed_gateway(
+        writer: &str,
+        reader: &str,
+        routing: control_state::ReadRouting,
+    ) -> (Arc<Gateway>, String) {
+        let (credentials, tokens) =
+            credentials::tests::issued(&[("aaaaaaaaaaaa", Some(TENANT))], 0x1234);
+        let tenants = tenants::Store::for_test(vec![tenants::Tenant::for_test(TENANT, None)]);
+        let mut record = control_state::Route::dedicated_for_test(TENANT, 5);
+        record.writer = writer.to_owned();
+        record.reader = Some(reader.to_owned());
+        record.read_routing = routing;
+        let snapshot = Snapshot::import(&credentials, Some(&tenants))
+            .unwrap()
+            .with_directory(vec![record]);
+        let mut value = serde_json::to_value(snapshot).unwrap();
+        value["credentials"][0]["operations"] = json!(["read", "write", "search", "collections"]);
+        let snapshot = serde_json::from_value(value).unwrap();
+        let objects = control_state::Objects::new(
+            Arc::new(super::super::cloud_backup::fake::Memory::default()),
+            "control/state.json",
+        );
+        objects.create(snapshot, admin::now_ms() as u64).unwrap();
+        let feed = Arc::new(Feed::new(objects, 60_000, 1_000).unwrap());
+        feed.poll_once().unwrap();
+        (
+            Arc::new(Gateway {
+                feed,
+                signer: Signer::from_seed("gw-1", &[7; 32]).unwrap(),
+                client: reqwest::Client::builder().no_proxy().build().unwrap(),
+                upstream_timeout: Duration::from_millis(100),
+                draining: AtomicBool::new(false),
+                in_flight: Arc::new(Semaphore::new(8)),
+                buckets: Buckets::new(8),
+                max_request_bytes: 1024,
+                envelope_lifetime_ms: 5_000,
+                max_replicas: 1,
+            }),
+            tokens[0].clone(),
+        )
+    }
+
+    async fn routed_request(gateway: Arc<Gateway>, token: &str, write: bool) -> Response {
+        gateway
+            .forward(
+                Request::builder()
+                    .method(Method::POST)
+                    .uri(if write {
+                        "/v1/collections"
+                    } else {
+                        "/v1/collections/docs/search"
+                    })
+                    .header(header::AUTHORIZATION, format!("Bearer {token}"))
+                    .header(header::CONTENT_TYPE, "application/json")
+                    .body(Body::from(r#"{"limit":3}"#))
+                    .unwrap(),
+            )
+            .await
+            .unwrap()
+    }
+
+    #[tokio::test]
+    async fn reader_response_with_matching_identity_is_returned_unchanged() {
+        let writer = upstream(StatusCode::OK, HeaderMap::new(), Duration::ZERO).await;
+        let reader = upstream(StatusCode::ACCEPTED, reader_headers(), Duration::ZERO).await;
+        let (gateway, token) = routed_gateway(
+            &writer.endpoint,
+            &reader.endpoint,
+            control_state::ReadRouting::Readers,
+        );
+        let response = routed_request(gateway, &token, false).await;
+        assert_eq!(response.status(), StatusCode::ACCEPTED);
+        for (name, value) in &reader_headers() {
+            assert_eq!(response.headers().get(name), Some(value));
+        }
+        assert_eq!(
+            axum::body::to_bytes(response.into_body(), 1024)
+                .await
+                .unwrap(),
+            "backend answer"
+        );
+        assert!(writer.requests.lock().unwrap().is_empty());
+        assert_eq!(reader.requests.lock().unwrap().len(), 1);
+    }
+
+    async fn assert_reader_fallback(status: StatusCode, headers: HeaderMap, delay: Duration) {
+        // A writer's 503 is final even when its headers would fail reader validation.
+        let writer = upstream(
+            StatusCode::SERVICE_UNAVAILABLE,
+            HeaderMap::new(),
+            Duration::ZERO,
+        )
+        .await;
+        let reader = upstream(status, headers, delay).await;
+        let (gateway, token) = routed_gateway(
+            &writer.endpoint,
+            &reader.endpoint,
+            control_state::ReadRouting::Readers,
+        );
+        let response = routed_request(gateway, &token, false).await;
+        assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
+        let writer_requests = writer.requests.lock().unwrap();
+        let reader_requests = reader.requests.lock().unwrap();
+        assert_eq!(writer_requests.len(), 1);
+        assert_eq!(reader_requests.len(), 1);
+        assert_eq!(writer_requests[0].1, reader_requests[0].1);
+        assert_eq!(writer_requests[0].1, r#"{"limit":3}"#);
+        for request in [&writer_requests[0], &reader_requests[0]] {
+            assert!(request.0.contains_key(principal_envelope::HEADER));
+            assert!(!request.0.contains_key(header::AUTHORIZATION));
+        }
+    }
+
+    #[tokio::test]
+    async fn reader_503_falls_back_to_writer_once() {
+        assert_reader_fallback(
+            StatusCode::SERVICE_UNAVAILABLE,
+            reader_headers(),
+            Duration::ZERO,
+        )
+        .await;
+    }
+
+    #[tokio::test]
+    async fn missing_or_mismatched_reader_lineage_falls_back_to_writer() {
+        for lineage in [None, Some("0000000000005678")] {
+            let mut headers = reader_headers();
+            headers.remove("x-vlite-lineage");
+            if let Some(lineage) = lineage {
+                headers.insert("x-vlite-lineage", lineage.parse().unwrap());
+            }
+            assert_reader_fallback(StatusCode::OK, headers, Duration::ZERO).await;
+        }
+    }
+
+    #[tokio::test]
+    async fn missing_mismatched_or_invalid_reader_binding_generation_falls_back_to_writer() {
+        for generation in [None, Some("4"), Some("invalid")] {
+            let mut headers = reader_headers();
+            headers.remove("x-vlite-binding-generation");
+            if let Some(generation) = generation {
+                headers.insert("x-vlite-binding-generation", generation.parse().unwrap());
+            }
+            assert_reader_fallback(StatusCode::OK, headers, Duration::ZERO).await;
+        }
+    }
+
+    #[tokio::test]
+    async fn reader_response_head_timeout_falls_back_to_writer() {
+        assert_reader_fallback(StatusCode::OK, reader_headers(), Duration::from_secs(1)).await;
+    }
+
+    #[tokio::test]
+    async fn reader_connection_refusal_falls_back_to_writer() {
+        let writer = upstream(StatusCode::OK, HeaderMap::new(), Duration::ZERO).await;
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let reader = format!("http://{}", listener.local_addr().unwrap());
+        drop(listener);
+        let (gateway, token) = routed_gateway(
+            &writer.endpoint,
+            &reader,
+            control_state::ReadRouting::Readers,
+        );
+        assert_eq!(
+            routed_request(gateway, &token, false).await.status(),
+            StatusCode::OK
+        );
+        assert_eq!(writer.requests.lock().unwrap().len(), 1);
+    }
+
+    #[tokio::test]
+    async fn writes_and_writer_only_reads_never_touch_the_reader() {
+        for (routing, write) in [
+            (control_state::ReadRouting::Readers, true),
+            (control_state::ReadRouting::WriterOnly, false),
+        ] {
+            let writer = upstream(StatusCode::OK, HeaderMap::new(), Duration::ZERO).await;
+            let reader = upstream(StatusCode::OK, reader_headers(), Duration::ZERO).await;
+            let (gateway, token) = routed_gateway(&writer.endpoint, &reader.endpoint, routing);
+            let response = routed_request(gateway, &token, write).await;
+            assert_eq!(response.status(), StatusCode::OK);
+            assert!(!response.headers().contains_key("x-vlite-lineage"));
+            assert_eq!(writer.requests.lock().unwrap().len(), 1);
+            assert!(reader.requests.lock().unwrap().is_empty());
+        }
+    }
 
     fn map(pairs: &[(&'static str, &'static str)]) -> HeaderMap {
         let mut headers = HeaderMap::new();
