@@ -235,6 +235,25 @@ impl Bindings {
         &self.reserved
     }
 
+    /// Full reservation-name evidence, independent of configured-set routing
+    /// fingerprint B. Orphans contribute names but never owners or grants.
+    pub(super) fn reservation_digest(&self) -> String {
+        let mut digest = Sha256::new();
+        digest.update(b"vlite.tenant-migration.reservations.v1\0");
+        digest.update((self.reserved.owners.len() as u64).to_be_bytes());
+        for (resource, name) in self.reserved.owners.keys() {
+            let kind: &[u8] = match resource {
+                Resource::Graph => b"graph",
+                Resource::Collection => b"collection",
+            };
+            for field in [kind, name.as_bytes()] {
+                digest.update((field.len() as u64).to_be_bytes());
+                digest.update(field);
+            }
+        }
+        super::hex(&digest.finalize())
+    }
+
     /// Whether everything `other` reserves is reserved here too; owners and
     /// raw-access grants are not compared (`Reserved::covers`).
     pub(super) fn covers(&self, other: &Self) -> bool {

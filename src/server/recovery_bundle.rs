@@ -145,6 +145,12 @@ fn recognized(name: &str, directory: bool) -> bool {
             .is_some_and(|n| n.parse::<u16>().is_ok())
 }
 
+/// Pure migration-side counterpart of the admin-directory inventory check.
+#[cfg_attr(not(test), allow(dead_code))]
+pub(super) fn migration_sidecar_known(name: &str, directory: bool, symlink: bool) -> bool {
+    !symlink && recognized(name, directory)
+}
+
 /// Refuses an admin directory with an entry the server did not write. Only
 /// the count is reported; symbolic links are never recognized.
 fn check_directory(directory: &FilePath) -> Result<(), ApiError> {
