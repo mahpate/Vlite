@@ -2612,6 +2612,46 @@ mod tests {
     }
 
     #[test]
+    fn a_seed_above_the_reader_capacity_is_refused_before_any_payload_read() {
+        let env = setup();
+        let reads = Arc::new(AtomicUsize::new(0));
+        let count = reads.clone();
+        env.data.hook(Op::Get, "/objects/", move || {
+            count.fetch_add(1, Ordering::SeqCst);
+        });
+        let pin = env
+            .sets
+            .pin(&env.set_id, "reader-seed", PinKind::Operation, now())
+            .unwrap();
+        let dir = env.dir.path().join("small");
+        cloud::create_private_subdir(&dir).unwrap();
+        let size = env
+            .sets
+            .fetch_with(&env.set_id, &pin.id, &dir, u64::MAX)
+            .unwrap()
+            .manifest
+            .database
+            .bytes;
+        let reads_before = reads.load(Ordering::SeqCst);
+        let dir = env.dir.path().join("smaller");
+        cloud::create_private_subdir(&dir).unwrap();
+        let error = match env.sets.fetch_with(&env.set_id, &pin.id, &dir, size - 1) {
+            Ok(_) => panic!("a database above the capacity was fetched"),
+            Err(error) => error,
+        };
+        assert_eq!(error.code, "reader_capacity_exceeded", "{}", error.message);
+        assert_eq!(error.status, StatusCode::CONFLICT);
+        assert_eq!(
+            reads.load(Ordering::SeqCst),
+            reads_before,
+            "no payload read"
+        );
+        assert!(!dir.join("database.vlite").exists());
+        env.sets.release(&env.set_id, &pin.id, now()).unwrap();
+        assert_eq!(env.pins(), 0);
+    }
+
+    #[test]
     fn a_follower_applies_only_the_checkpoints_after_its_copy() {
         let env = setup();
         let copy = seed(&env, "copy");

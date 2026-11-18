@@ -1478,6 +1478,19 @@ impl Sets {
         pin_id: &str,
         dir: &FilePath,
     ) -> Result<Fetched, ApiError> {
+        self.fetch_with(id, pin_id, dir, MAX_DATABASE_BYTES)
+    }
+
+    /// [`Sets::fetch`] for a caller that accepts a database of at most
+    /// `capacity_bytes`; a larger one is refused before any payload is
+    /// requested.
+    pub(super) fn fetch_with(
+        &self,
+        id: &str,
+        pin_id: &str,
+        dir: &FilePath,
+        capacity_bytes: u64,
+    ) -> Result<Fetched, ApiError> {
         let key = self.record_key(id);
         let blob = match self.meta.get(&key, META_MAX) {
             Err(StoreError::NotFound) => {
@@ -1522,6 +1535,12 @@ impl Sets {
         }
         // Size envelope and peak space before any payload is requested.
         check_database_size(db.bytes)?;
+        if db.bytes > capacity_bytes {
+            return Err(conflict(
+                "reader_capacity_exceeded",
+                "the backup set's database is larger than this reader's capacity ceiling",
+            ));
+        }
         check_restore_space(
             free_bytes(dir),
             restore_space_needed(db.bytes, bundle_entry.bytes),
