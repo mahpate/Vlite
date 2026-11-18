@@ -24,12 +24,12 @@
 //! forwarded request, and a gateway-trusted backend (`gateway_trust`)
 //! accepts an envelope only for a tenant whose directory record names its
 //! audience and lineage, so one `shared-pool` backend serves several
-//! tenants. The target is always the writer; reader routing is ITEM-021.
+//! tenants. Opted-in reads target the reader, with one writer fallback on
+//! failure or an ineligible reader response (ITEM-021). Writes use the writer.
 //! Untenanted and super-admin requests have no route (OD-004/OD-012).
 //!
-//! Not yet used by the gateway mode: it never retries, so
-//! `Delivery::may_retry` is unused, and no backend stamps an epoch on its
-//! responses, so `check_epoch` is not applied (OD-002 fencing is open).
+//! No backend stamps an epoch on its responses yet, so `check_epoch` is
+//! not applied (OD-002 fencing is open).
 
 use axum::http::{Method, StatusCode};
 
@@ -394,6 +394,11 @@ pub(super) fn replica_share(
 pub(super) struct Target {
     /// Base URL of the receiving backend.
     pub(super) endpoint: String,
+    /// Writer endpoint for a reader's single fallback; `None` at the writer.
+    pub(super) fallback: Option<String>,
+    /// Identity a reader must report before its response can be accepted.
+    pub(super) lineage: u64,
+    pub(super) binding_generation: u64,
     /// The envelope audience that backend verifies.
     pub(super) audience: String,
     /// `E` the backend must stamp on its response; `None` for `shared-pool`,
@@ -441,16 +446,21 @@ pub(super) fn route_target(
     target_for(classification, snapshot.record_for(tenant))
 }
 
-/// Every request goes to the writer: a write must reach the writer whose
-/// epoch the record names (PRD section 3.7), and reads stay there until
-/// reader routing (ITEM-021) acts on `read_routing`.
+/// Only opted-in reads may use a reader; all other requests use the writer.
 fn target_for(
     classification: Classification,
     record: Option<&control_state::Route>,
 ) -> Result<Target, RouteRefusal> {
     let record = record.ok_or(RouteRefusal::NoRecord)?;
+    let reader = (classification.operation == Operation::Read
+        && record.read_routing == control_state::ReadRouting::Readers)
+        .then_some(record.reader.as_ref())
+        .flatten();
     Ok(Target {
-        endpoint: record.writer.clone(),
+        endpoint: reader.unwrap_or(&record.writer).clone(),
+        fallback: reader.map(|_| record.writer.clone()),
+        lineage: record.lineage,
+        binding_generation: record.binding_generation,
         audience: record.audience.clone(),
         epoch: record.epoch,
         operation: classification.operation,
@@ -483,8 +493,6 @@ pub(super) fn mint(
 }
 
 /// How far a forwarded request got before it failed (PRD section 3.4.6).
-/// The gateway mode never retries, so it does not consult this yet.
-#[cfg_attr(not(test), allow(dead_code))]
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(super) enum Delivery {
     /// Refused before any byte was sent: no backend saw it.
@@ -499,7 +507,6 @@ impl Delivery {
     /// Writes have no general idempotency (SRC-015), so only a write that
     /// was never sent may be retried; a read may be retried after any
     /// failure (FR-007).
-    #[cfg_attr(not(test), allow(dead_code))]
     pub(super) fn may_retry(self, operation: Operation) -> bool {
         self == Self::NotSent || operation == Operation::Read
     }
@@ -905,29 +912,46 @@ mod tests {
         }
 
         #[test]
-        fn every_request_targets_the_writer_even_with_reader_routing() {
+        fn opted_in_reads_target_the_reader_with_writer_fallback() {
             let mut record = Route::dedicated_for_test(T1, 5);
             record.read_routing = ReadRouting::Readers;
-            for (classification, operation) in
-                [(read(), Operation::Read), (write(), Operation::Write)]
-            {
+            let target = target_for(read(), Some(&record)).unwrap();
+            assert_eq!(Some(target.endpoint), record.reader);
+            assert_eq!(target.fallback, Some(record.writer));
+            assert_eq!(target.audience, record.audience);
+            assert_eq!(target.lineage, record.lineage);
+            assert_eq!(target.binding_generation, record.binding_generation);
+            assert_eq!(target.operation, Operation::Read);
+        }
+
+        #[test]
+        fn writer_only_reads_and_all_writes_target_the_writer() {
+            let mut record = Route::dedicated_for_test(T1, 5);
+            for classification in [read(), write()] {
                 let target = target_for(classification, Some(&record)).unwrap();
-                assert_eq!(
-                    target,
-                    Target {
-                        endpoint: record.writer.clone(),
-                        audience: record.audience.clone(),
-                        epoch: Some(5),
-                        operation,
-                    }
-                );
-                assert_ne!(Some(target.endpoint), record.reader);
+                assert_eq!(target.endpoint, record.writer);
+                assert_eq!(target.fallback, None);
             }
+            record.read_routing = ReadRouting::Readers;
+            let target = target_for(write(), Some(&record)).unwrap();
+            assert_eq!(target.endpoint, record.writer);
+            assert_eq!(target.fallback, None);
+            record.reader = None;
+            let target = target_for(read(), Some(&record)).unwrap();
+            assert_eq!(target.endpoint, record.writer);
+            assert_eq!(target.fallback, None);
+        }
+
+        #[test]
+        fn shared_pool_requests_target_the_writer() {
             let shared = Route::shared_for_test(T1);
-            let target = target_for(write(), Some(&shared)).unwrap();
-            assert_eq!(target.endpoint, shared.writer);
-            assert_eq!(target.audience, "shared-pool");
-            assert_eq!(target.epoch, None);
+            for classification in [read(), write()] {
+                let target = target_for(classification, Some(&shared)).unwrap();
+                assert_eq!(target.endpoint, shared.writer);
+                assert_eq!(target.audience, "shared-pool");
+                assert_eq!(target.epoch, None);
+                assert_eq!(target.fallback, None);
+            }
             assert_eq!(target_for(read(), None), Err(RouteRefusal::NoRecord));
         }
 
