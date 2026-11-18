@@ -18,6 +18,7 @@
 )]
 
 use crate::memory::binding::{Binding, BindingSet, ROOT_TENANT, Recorded};
+use sha2::{Digest, Sha256};
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex, PoisonError, RwLock, Weak};
@@ -168,13 +169,25 @@ impl Reserved {
 pub(super) struct Bindings {
     set: BindingSet,
     reserved: Reserved,
+    binding_generation: u64,
 }
 
 impl Bindings {
     /// `set` must already be validated (`binding::parse` validates).
     pub(super) fn new(set: BindingSet) -> Self {
         let reserved = Reserved::new(&set);
-        Self { set, reserved }
+        let binding_generation = if set.bindings.is_empty() {
+            0
+        } else {
+            let json = crate::memory::binding::to_json(&set);
+            let digest = Sha256::digest(serde_json::to_vec(&json).unwrap());
+            (u64::from_be_bytes(digest[..8].try_into().unwrap()) & ((1_u64 << 53) - 1)).max(1)
+        };
+        Self {
+            set,
+            reserved,
+            binding_generation,
+        }
     }
 
     /// Whether nothing is reserved: no entry is configured and no record in
@@ -187,6 +200,10 @@ impl Bindings {
     /// routes served and the startup checks of the file run.
     pub(super) fn is_configured(&self) -> bool {
         !self.set.bindings.is_empty()
+    }
+
+    pub(super) fn binding_generation(&self) -> u64 {
+        self.binding_generation
     }
 
     pub(super) fn set(&self) -> &BindingSet {
@@ -210,6 +227,7 @@ impl Bindings {
         Self {
             set: self.set.clone(),
             reserved,
+            binding_generation: self.binding_generation,
         }
     }
 
@@ -411,6 +429,31 @@ mod tests {
                 },
             ],
         }
+    }
+
+    #[test]
+    fn binding_generation_is_stable_json_safe_and_tracks_the_set() {
+        assert_eq!(Bindings::default().binding_generation(), 0);
+        assert_eq!(Bindings::new(BindingSet::default()).binding_generation(), 0);
+        let set = BindingSet {
+            bindings: vec![binding(TENANT, "one", "graph", None)],
+        };
+        let original = Bindings::new(set.clone());
+        let generation = original.binding_generation();
+        assert!((1..=(1_u64 << 53) - 1).contains(&generation));
+        assert_eq!(Bindings::new(set.clone()).binding_generation(), generation);
+        assert_eq!(
+            original
+                .with_orphans(&[recorded(TENANT, "orphan", None)])
+                .binding_generation(),
+            generation
+        );
+        let mut changed = set.clone();
+        changed.bindings[0].receipt_window_ms += 1;
+        assert_ne!(Bindings::new(changed).binding_generation(), generation);
+        let mut added = set;
+        added.bindings.push(binding(TENANT, "two", "other", None));
+        assert_ne!(Bindings::new(added).binding_generation(), generation);
     }
 
     fn registry() -> Bindings {
