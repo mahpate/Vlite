@@ -599,6 +599,97 @@ pub(super) struct Manifest {
     pub policy: PolicyCapture,
 }
 
+#[cfg_attr(not(test), allow(dead_code))]
+const HA_MANIFEST_SCHEMA: &str = "vlite.cloud-backup-ha-manifest/1";
+
+#[cfg_attr(not(test), allow(dead_code))]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(super) struct HaIdentity {
+    pub writer_id: String,
+    pub epoch: u64,
+    pub scope_id: String,
+    pub lineage: String,
+}
+
+/// Separate envelope: legacy manifests and their wire bytes never acquire HA fields.
+#[cfg_attr(not(test), allow(dead_code))]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(super) struct HaManifest {
+    pub schema: String,
+    pub authority: HaIdentity,
+    pub manifest: Manifest,
+}
+
+#[cfg_attr(not(test), allow(dead_code))]
+impl HaManifest {
+    fn check(&self) -> Result<(), ApiError> {
+        let identity = &self.authority;
+        if self.schema != HA_MANIFEST_SCHEMA
+            || identity.writer_id.len() != 32
+            || !lower_hex(identity.writer_id.as_bytes())
+            || identity.epoch == 0
+            || !(1..=128).contains(&identity.scope_id.len())
+            || !identity
+                .scope_id
+                .bytes()
+                .all(|b| b.is_ascii_alphanumeric() || b"._-".contains(&b))
+            || identity.lineage.len() != 16
+            || !lower_hex(identity.lineage.as_bytes())
+            || self.manifest.source_lineage.as_ref() != Some(&identity.lineage)
+            || !valid_set_id(&self.manifest.set_id)
+        {
+            return Err(corrupt("the HA manifest identity or schema is invalid"));
+        }
+        self.manifest
+            .check(&self.manifest.set_id, &self.manifest.installation_id)?;
+        Ok(())
+    }
+
+    fn check_authority(&self, record: &super::authority::Record) -> Result<(), ApiError> {
+        self.check()?;
+        if self.manifest.installation_id != record.installation_id
+            || self.authority.scope_id != record.scope_id
+            || self.authority.lineage != record.lineage
+            || self.authority.epoch != record.epoch
+            || record.writer_id.as_ref() != Some(&self.authority.writer_id)
+        {
+            return Err(super::authority::AuthorityError::Invalid.into());
+        }
+        Ok(())
+    }
+}
+
+/// Preserve authority observations until the caller explicitly maps to an API error.
+#[cfg_attr(not(test), allow(dead_code))]
+#[derive(Debug)]
+pub(super) enum HaPublicationError {
+    Authority(Box<super::authority::AuthorityError>),
+    Api(ApiError),
+}
+
+impl From<super::authority::AuthorityError> for HaPublicationError {
+    fn from(error: super::authority::AuthorityError) -> Self {
+        Self::Authority(Box::new(error))
+    }
+}
+
+impl From<ApiError> for HaPublicationError {
+    fn from(error: ApiError) -> Self {
+        Self::Api(error)
+    }
+}
+
+impl From<HaPublicationError> for ApiError {
+    fn from(error: HaPublicationError) -> Self {
+        match error {
+            HaPublicationError::Authority(error) => (*error).into(),
+            HaPublicationError::Api(error) => error,
+        }
+    }
+}
+
 impl Manifest {
     pub(super) fn new(
         set_id: &str,
@@ -917,6 +1008,14 @@ fn parse_manifest(bytes: &[u8]) -> Result<Manifest, ApiError> {
     })
 }
 
+#[cfg_attr(not(test), allow(dead_code))]
+pub(super) fn parse_ha_manifest(bytes: &[u8]) -> Result<HaManifest, ApiError> {
+    let manifest: HaManifest = serde_json::from_slice(bytes)
+        .map_err(|e| corrupt(format!("the HA manifest is invalid {}", position(&e))))?;
+    manifest.check()?;
+    Ok(manifest)
+}
+
 fn decode_record(key: &str, bytes: &[u8], set_id: &str) -> Result<Record, ApiError> {
     let record: Record = decode(key, bytes)?;
     if record.schema != RECORD_SCHEMA || record.set_id != set_id {
@@ -1102,6 +1201,124 @@ impl Sets {
             staging_revision: staging.revision.clone(),
         };
         self.finish(&pending, Some((staging, etag)), now, authorize)
+    }
+
+    /// Prepares an immutable HA baseline and a Published record. Only the CAS
+    /// against the original authority observation commits it to HA history.
+    #[cfg_attr(not(test), allow(dead_code))]
+    pub(super) fn publish_ha(
+        &self,
+        authority: &super::authority::AuthorityStore,
+        claim: &super::authority::Claim,
+        manifest: &HaManifest,
+        uploads: &[Upload],
+        now: u64,
+        authorize: Authorize<'_>,
+    ) -> Result<super::authority::Observed, HaPublicationError> {
+        use super::authority::{AuthorityError, HeadRef};
+
+        let observed = authority.verify_writer(claim)?;
+        manifest.check_authority(&observed.record)?;
+        let inner = &manifest.manifest;
+        if uploads.len() != inner.objects.len()
+            || inner.objects.iter().any(|entry| {
+                !uploads.iter().any(|upload| {
+                    upload.role == entry.role
+                        && upload.sha256 == entry.sha256
+                        && upload.bytes == entry.bytes
+                })
+            })
+        {
+            return Err(internal("the HA manifest does not describe the uploads").into());
+        }
+        let (database, _) = inner.check(&inner.set_id, &inner.installation_id)?;
+        let manifest_bytes = encode(manifest)?;
+        if manifest_bytes.len() as u64 > META_MAX {
+            return Err(corrupt("the HA manifest exceeds the metadata size limit").into());
+        }
+        let manifest_sha256 = sha_hex(&manifest_bytes);
+        let id = &inner.set_id;
+        let staging = Record {
+            schema: RECORD_SCHEMA.into(),
+            set_id: id.clone(),
+            installation_id: inner.installation_id.clone(),
+            state: SetState::Staging,
+            created_unix_ms: now,
+            updated_unix_ms: now,
+            revision: random_hex()?,
+            manifest_sha256: manifest_sha256.clone(),
+            pins: Vec::new(),
+            last_drill: None,
+            verified_unix_ms: None,
+            delete_reason: None,
+        };
+        authorize()?;
+        let etag = create_verified(&*self.meta, &self.record_key(id), &encode(&staging)?)?;
+        for upload in uploads {
+            authorize()?;
+            self.upload(id, upload)?;
+        }
+        authorize()?;
+        let key = self.manifest_key(id);
+        create_verified(&*self.data, &key, &manifest_bytes)?;
+        if self.data.get(&key, META_MAX).map_err(ApiError::from)?.bytes != manifest_bytes {
+            return Err(corrupt("the HA manifest readback does not match the capture").into());
+        }
+        let pending = Pending {
+            set_id: id.clone(),
+            manifest_sha256: manifest_sha256.clone(),
+            staging_revision: staging.revision.clone(),
+        };
+        let published = match self.finish(&pending, Some((staging, etag)), now, authorize)? {
+            Publication::Published(record) => record,
+            Publication::Pending(_) => return Err(AuthorityError::Unresolved.into()),
+        };
+        let key = self.record_key(id);
+        let readback = self.meta.get(&key, META_MAX).map_err(ApiError::from)?;
+        if readback.bytes != encode(&published)? {
+            return Err(publication_lost().into());
+        }
+        authorize()?;
+        // Never retry with a newer observation, even for this same writer.
+        authority
+            .advance_head(
+                claim,
+                &observed,
+                HeadRef {
+                    epoch: claim.epoch,
+                    set_id: id.clone(),
+                    manifest_sha256,
+                    index_sha256: None,
+                    sequence: inner.database.commits,
+                    chain_sha256: database.sha256.clone(),
+                },
+            )
+            .map_err(Into::into)
+    }
+
+    /// Resolves only the current head, never a newest-Published listing or a
+    /// frozen recovery base. Validate the exact immutable index, when present.
+    #[cfg_attr(not(test), allow(dead_code))]
+    pub(super) fn resolve_ha_baseline(
+        &self,
+        authority: &super::authority::AuthorityStore,
+    ) -> Result<Option<(super::authority::Observed, Record, HaManifest)>, HaPublicationError> {
+        let observed = authority.read()?;
+        let Some(head) = &observed.record.head else {
+            return Ok(None);
+        };
+        let key = self.record_key(&head.set_id);
+        let blob = self.meta.get(&key, META_MAX).map_err(ApiError::from)?;
+        let record = decode_record(&key, &blob.bytes, &head.set_id)?;
+        if record.state != SetState::Published
+            || record.installation_id != observed.record.installation_id
+            || record.manifest_sha256 != head.manifest_sha256
+        {
+            return Err(corrupt("the authority head does not name this Published set").into());
+        }
+        let manifest = self.open_archive_ha_at(head)?.manifest;
+        manifest.check_authority(&observed.record)?;
+        Ok(Some((observed, record, manifest)))
     }
 
     /// Completes a publication whose final CAS result was unknown, asking
@@ -2124,12 +2341,62 @@ pub(super) mod fake {
 
 #[cfg(test)]
 mod tests {
+    use super::super::authority::{AuthorityError, AuthorityStore, Claim, Phase};
     use super::fake::{Fault, Memory, Op, open};
     use super::*;
 
     const INSTALL: &str = "0123456789abcdef";
     const HOUR: u64 = 3_600_000;
     const BASE: u64 = 1_700_000_000_000;
+
+    #[test]
+    fn ha_off_manifest_wire_unchanged() {
+        // Captured from the legacy pretty-JSON serializer before adding HA.
+        let golden = r#"{
+  "schema": "vlite.cloud-backup-manifest/1",
+  "set_id": "20231114T221320Z-0123456789abcdef",
+  "installation_id": "0123456789abcdef",
+  "created_unix_ms": 1700000000000,
+  "vlite_version": "0.7.8",
+  "source_lineage": "fedcba9876543210",
+  "encrypted": false,
+  "rekey_only": true,
+  "database": {
+    "format_version": 1,
+    "dimensions": 3,
+    "live_records": 5,
+    "commits": 5,
+    "collections": 0,
+    "open_imports": 0,
+    "bytes": 1024,
+    "crc32": 42
+  },
+  "objects": [
+    {
+      "role": "database",
+      "sha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "bytes": 1024
+    },
+    {
+      "role": "recovery_bundle",
+      "sha256": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+      "bytes": 256
+    }
+  ],
+  "policy": {
+    "revision_unix_ms": 1,
+    "sha256": "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+    "retention_enabled": false,
+    "keep_sets": 3,
+    "keep_days": 30
+  }
+}"#;
+        let manifest = parse_manifest(golden.as_bytes()).unwrap();
+        manifest
+            .check(&manifest.set_id, &manifest.installation_id)
+            .unwrap();
+        assert_eq!(encode(&manifest).unwrap(), golden.as_bytes());
+    }
 
     struct Env {
         meta: Arc<Memory>,
@@ -2193,6 +2460,469 @@ mod tests {
             fake::policy_capture(),
         );
         (manifest, uploads)
+    }
+
+    fn setup_ha(env: &Env) -> (Arc<AuthorityStore>, Claim) {
+        let lineage = maintenance::inspect_detail(env.db.path().join("source.vlite"))
+            .unwrap()
+            .lineage
+            .map(lineage_hex)
+            .unwrap();
+        let authority = Arc::new(AuthorityStore::new(
+            env.meta.clone(),
+            env.sets.prefix.clone(),
+        ));
+        let prepared = authority.create(INSTALL, "scope", &lineage).unwrap();
+        let (claim, _) = authority.claim(&prepared, BASE).unwrap();
+        (authority, claim)
+    }
+
+    fn prepare_ha(
+        env: &Env,
+        authority: &AuthorityStore,
+        claim: &Claim,
+        now: u64,
+    ) -> (HaManifest, Vec<Upload>) {
+        let record = authority.read().unwrap().record;
+        let (manifest, uploads) = prepare(env, now);
+        (
+            HaManifest {
+                schema: HA_MANIFEST_SCHEMA.into(),
+                authority: HaIdentity {
+                    writer_id: claim.writer_id.clone(),
+                    epoch: claim.epoch,
+                    scope_id: record.scope_id,
+                    lineage: record.lineage,
+                },
+                manifest,
+            },
+            uploads,
+        )
+    }
+
+    #[test]
+    fn ha_manifest_is_distinct_and_profile_checked() {
+        let env = setup();
+        let (authority, claim) = setup_ha(&env);
+        let (manifest, _) = prepare_ha(&env, &authority, &claim, BASE);
+        let bytes = encode(&manifest).unwrap();
+        assert_eq!(parse_ha_manifest(&bytes).unwrap(), manifest);
+        assert!(parse_manifest(&bytes).is_err());
+        assert!(parse_ha_manifest(&encode(&manifest.manifest).unwrap()).is_err());
+        let value = serde_json::to_value(&manifest).unwrap();
+        for (path, bad) in [
+            ("/schema", json!(MANIFEST_SCHEMA)),
+            ("/authority/writer_id", json!("A".repeat(32))),
+            ("/authority/epoch", json!(0)),
+            ("/authority/scope_id", json!("../scope")),
+            ("/authority/lineage", json!("f".repeat(16))),
+            ("/manifest/schema", json!(HA_MANIFEST_SCHEMA)),
+            ("/manifest/set_id", json!("../set")),
+            ("/manifest/encrypted", json!(true)),
+            ("/manifest/rekey_only", json!(false)),
+            ("/manifest/policy/keep_sets", json!(0)),
+            ("/manifest/objects/0/sha256", json!("bad")),
+        ] {
+            let mut changed = value.clone();
+            *changed.pointer_mut(path).unwrap() = bad;
+            assert!(
+                parse_ha_manifest(&serde_json::to_vec(&changed).unwrap()).is_err(),
+                "{path}"
+            );
+        }
+        for path in ["", "/authority", "/manifest"] {
+            let mut changed = value.clone();
+            changed
+                .pointer_mut(path)
+                .unwrap()
+                .as_object_mut()
+                .unwrap()
+                .insert("unknown".into(), json!(true));
+            assert!(parse_ha_manifest(&serde_json::to_vec(&changed).unwrap()).is_err());
+        }
+    }
+
+    #[test]
+    fn first_baseline_moves_recovering_to_serving() {
+        let env = setup();
+        let (authority, claim) = setup_ha(&env);
+        assert_eq!(authority.read().unwrap().record.phase, Phase::Recovering);
+        assert!(env.sets.resolve_ha_baseline(&authority).unwrap().is_none());
+        for now in [BASE, BASE + 1000] {
+            let (manifest, uploads) = prepare_ha(&env, &authority, &claim, now);
+            let published = env
+                .sets
+                .publish_ha(&authority, &claim, &manifest, &uploads, now, &open)
+                .unwrap();
+            assert_eq!(published.record.phase, Phase::Serving);
+            assert_eq!(published.record.epoch, claim.epoch);
+            assert_eq!(published.record.writer_id.as_ref(), Some(&claim.writer_id));
+            let head = published.record.head.as_ref().unwrap();
+            assert_eq!(head.set_id, manifest.manifest.set_id);
+            assert_eq!(head.manifest_sha256, sha_hex(&encode(&manifest).unwrap()));
+            assert_eq!(head.sequence, manifest.manifest.database.commits);
+            assert_eq!(head.chain_sha256, uploads[0].sha256);
+            assert!(head.index_sha256.is_none());
+            let (resolved, record, fetched) =
+                env.sets.resolve_ha_baseline(&authority).unwrap().unwrap();
+            assert_eq!(resolved, published);
+            assert_eq!(record.state, SetState::Published);
+            assert_eq!(fetched, manifest);
+        }
+    }
+
+    #[test]
+    fn head_cannot_escape_through_new_baseline() {
+        let env = setup();
+        let (authority, claim) = setup_ha(&env);
+        let (first, uploads) = prepare_ha(&env, &authority, &claim, BASE);
+        env.sets
+            .publish_ha(&authority, &claim, &first, &uploads, BASE, &open)
+            .unwrap();
+        let (orphan, uploads) = prepare_ha(&env, &authority, &claim, BASE + 1000);
+        let rival = authority.clone();
+        let key = format!("{}authority.json", env.sets.prefix);
+        env.meta.hook(Op::Put, &key, move || {
+            let current = rival.read().unwrap();
+            let prepared = rival
+                .prepare_transfer(&current, current.record.epoch, &current.record.revision)
+                .unwrap();
+            rival.claim(&prepared, BASE + 1).unwrap();
+        });
+        let error = env
+            .sets
+            .publish_ha(&authority, &claim, &orphan, &uploads, BASE + 1000, &open)
+            .unwrap_err();
+        assert!(matches!(
+            error,
+            HaPublicationError::Authority(error)
+                if matches!(*error, AuthorityError::Fenced { observed_epoch: 2 })
+        ));
+        assert_eq!(
+            record(&env, &orphan.manifest.set_id).state,
+            SetState::Published
+        );
+        let successor = authority.read().unwrap();
+        assert_eq!(successor.record.epoch, 2);
+        assert_eq!(successor.record.phase, Phase::Recovering);
+        assert_eq!(
+            successor.record.base.as_ref().unwrap().set_id,
+            first.manifest.set_id
+        );
+        assert!(env.sets.resolve_ha_baseline(&authority).unwrap().is_none());
+        let (stale, uploads) = prepare_ha(&env, &authority, &claim, BASE + 2000);
+        let before = (env.meta.names(), env.data.names());
+        assert!(matches!(
+            env.sets
+                .publish_ha(&authority, &claim, &stale, &uploads, BASE + 2000, &open),
+            Err(HaPublicationError::Authority(error))
+                if matches!(*error, AuthorityError::Fenced { observed_epoch: 2 })
+        ));
+        assert_eq!((env.meta.names(), env.data.names()), before);
+        assert_eq!(authority.read().unwrap(), successor);
+    }
+
+    #[test]
+    fn orphan_published_set_not_selected() {
+        let env = setup();
+        let (authority, claim) = setup_ha(&env);
+        let (first, uploads) = prepare_ha(&env, &authority, &claim, BASE);
+        let committed = env
+            .sets
+            .publish_ha(&authority, &claim, &first, &uploads, BASE, &open)
+            .unwrap();
+        let (orphan, uploads) = prepare_ha(&env, &authority, &claim, BASE + 1000);
+        env.meta
+            .fault(Op::Put, "authority.json", Fault::Before, 0, 1);
+        let error = env
+            .sets
+            .publish_ha(&authority, &claim, &orphan, &uploads, BASE + 1000, &open)
+            .unwrap_err();
+        assert!(matches!(
+            error,
+            HaPublicationError::Authority(error)
+                if matches!(*error, AuthorityError::HeadMoved(ref observed) if *observed == committed)
+        ));
+        assert_eq!(
+            record(&env, &orphan.manifest.set_id).state,
+            SetState::Published
+        );
+        assert_eq!(
+            env.sets.list().unwrap().sets[0].set_id,
+            orphan.manifest.set_id
+        );
+        let (resolved, _, manifest) = env.sets.resolve_ha_baseline(&authority).unwrap().unwrap();
+        assert_eq!(resolved, committed);
+        assert_eq!(manifest, first);
+    }
+
+    #[test]
+    fn baseline_unknown_commit_requires_exact_reference() {
+        for fault in [Fault::Before, Fault::After] {
+            let env = setup();
+            let (authority, claim) = setup_ha(&env);
+            let original = authority.read().unwrap();
+            let (manifest, uploads) = prepare_ha(&env, &authority, &claim, BASE);
+            env.meta.fault(Op::Put, "authority.json", fault, 0, 1);
+            let result = env
+                .sets
+                .publish_ha(&authority, &claim, &manifest, &uploads, BASE, &open);
+            if fault == Fault::After {
+                let committed = result.unwrap();
+                assert_eq!(authority.read().unwrap(), committed);
+                assert_eq!(
+                    committed.record.head.unwrap().manifest_sha256,
+                    sha_hex(&encode(&manifest).unwrap())
+                );
+            } else {
+                assert!(matches!(
+                    result,
+                    Err(HaPublicationError::Authority(error))
+                        if matches!(*error, AuthorityError::HeadMoved(ref observed) if *observed == original)
+                ));
+                assert_eq!(authority.read().unwrap(), original);
+                assert!(env.sets.resolve_ha_baseline(&authority).unwrap().is_none());
+            }
+        }
+    }
+
+    #[test]
+    fn baseline_unknown_matching_head_with_other_revision_not_accepted() {
+        let env = setup();
+        let (authority, claim) = setup_ha(&env);
+        let original = authority.read().unwrap();
+        let (manifest, uploads) = prepare_ha(&env, &authority, &claim, BASE);
+        let mut competing = original.record.clone();
+        competing.phase = Phase::Serving;
+        competing.revision = random_hex().unwrap().repeat(2);
+        competing.head = Some(super::super::authority::HeadRef {
+            epoch: claim.epoch,
+            set_id: manifest.manifest.set_id.clone(),
+            manifest_sha256: sha_hex(&encode(&manifest).unwrap()),
+            index_sha256: None,
+            sequence: manifest.manifest.database.commits,
+            chain_sha256: uploads[0].sha256.clone(),
+        });
+        let meta = env.meta.clone();
+        let key = format!("{}authority.json", env.sets.prefix);
+        let hook_key = key.clone();
+        env.meta.hook(Op::Put, &key, move || {
+            meta.set_raw(&hook_key, &serde_json::to_vec(&competing).unwrap());
+        });
+        env.meta.fault(Op::Put, &key, Fault::Before, 0, 1);
+        let result = env
+            .sets
+            .publish_ha(&authority, &claim, &manifest, &uploads, BASE, &open);
+        let readback = authority.read().unwrap();
+        assert!(matches!(
+            result,
+            Err(HaPublicationError::Authority(error))
+                if matches!(*error, AuthorityError::HeadMoved(ref observed) if *observed == readback)
+        ));
+    }
+
+    #[test]
+    fn baseline_unknown_unreadable_authority_stays_unresolved() {
+        let env = setup();
+        let (authority, claim) = setup_ha(&env);
+        let (manifest, uploads) = prepare_ha(&env, &authority, &claim, BASE);
+        env.meta
+            .fault(Op::Put, "authority.json", Fault::After, 0, 1);
+        env.meta
+            .fault(Op::Get, "authority.json", Fault::Before, 1, 1);
+        let result = env
+            .sets
+            .publish_ha(&authority, &claim, &manifest, &uploads, BASE, &open);
+        assert!(matches!(
+            result,
+            Err(HaPublicationError::Authority(error))
+                if matches!(*error, AuthorityError::Unresolved)
+        ));
+    }
+
+    #[test]
+    fn baseline_head_moved_same_writer_requires_rebase() {
+        let env = setup();
+        let (authority, claim) = setup_ha(&env);
+        let original = authority.read().unwrap();
+        let (orphan, uploads) = prepare_ha(&env, &authority, &claim, BASE);
+        let (winner, winner_uploads) = prepare_ha(&env, &authority, &claim, BASE + 1000);
+        let winner_id = winner.manifest.set_id.clone();
+        let sets = env.sets.clone();
+        let rival = authority.clone();
+        let rival_claim = claim.clone();
+        let key = format!("{}authority.json", env.sets.prefix);
+        env.meta.hook(Op::Put, &key, move || {
+            sets.publish_ha(
+                &rival,
+                &rival_claim,
+                &winner,
+                &winner_uploads,
+                BASE + 1000,
+                &open,
+            )
+            .unwrap();
+        });
+        let result = env
+            .sets
+            .publish_ha(&authority, &claim, &orphan, &uploads, BASE, &open);
+        let committed = authority.read().unwrap();
+        assert_ne!(committed.etag, original.etag);
+        assert_eq!(committed.record.writer_id, original.record.writer_id);
+        assert_eq!(committed.record.epoch, original.record.epoch);
+        assert_eq!(committed.record.head.as_ref().unwrap().set_id, winner_id);
+        assert!(matches!(
+            result,
+            Err(HaPublicationError::Authority(error))
+                if matches!(*error, AuthorityError::HeadMoved(ref observed) if *observed == committed)
+        ));
+        let (resolved, _, _) = env.sets.resolve_ha_baseline(&authority).unwrap().unwrap();
+        assert_eq!(resolved, committed);
+    }
+
+    #[test]
+    fn ha_baseline_checks_authority_metadata_before_writes() {
+        let env = setup();
+        let (authority, claim) = setup_ha(&env);
+        let (manifest, uploads) = prepare_ha(&env, &authority, &claim, BASE);
+        for n in 0..5 {
+            let mut wrong = manifest.clone();
+            match n {
+                0 => wrong.manifest.installation_id = "another-installation".into(),
+                1 => wrong.authority.scope_id = "another-scope".into(),
+                2 => {
+                    wrong.authority.lineage = "f".repeat(16);
+                    wrong.manifest.source_lineage = Some(wrong.authority.lineage.clone());
+                }
+                3 => wrong.authority.writer_id = "f".repeat(32),
+                _ => wrong.authority.epoch += 1,
+            }
+            assert!(
+                env.sets
+                    .publish_ha(&authority, &claim, &wrong, &uploads, BASE, &open)
+                    .is_err()
+            );
+            assert!(
+                env.meta
+                    .raw(&env.sets.record_key(&wrong.manifest.set_id))
+                    .is_none()
+            );
+        }
+        assert!(env.data.names().is_empty());
+    }
+
+    #[test]
+    fn ha_baseline_resolution_checks_exact_hash_and_identity() {
+        let env = setup();
+        let (authority, claim) = setup_ha(&env);
+        let (manifest, uploads) = prepare_ha(&env, &authority, &claim, BASE);
+        let published = env
+            .sets
+            .publish_ha(&authority, &claim, &manifest, &uploads, BASE, &open)
+            .unwrap();
+        let key = env.sets.manifest_key(&manifest.manifest.set_id);
+        let bytes = env.data.raw(&key).unwrap();
+        let mut changed = bytes.clone();
+        changed.push(b'\n');
+        env.data.set_raw(&key, &changed);
+        assert!(env.sets.resolve_ha_baseline(&authority).is_err());
+        env.data.set_raw(&key, &bytes);
+        assert!(env.sets.resolve_ha_baseline(&authority).unwrap().is_some());
+
+        for n in 0..5 {
+            let mut wrong = manifest.clone();
+            match n {
+                0 => wrong.manifest.installation_id = "another-installation".into(),
+                1 => wrong.authority.scope_id = "another-scope".into(),
+                2 => {
+                    wrong.authority.lineage = "f".repeat(16);
+                    wrong.manifest.source_lineage = Some(wrong.authority.lineage.clone());
+                }
+                3 => wrong.authority.writer_id = "f".repeat(32),
+                _ => wrong.authority.epoch += 1,
+            }
+            let bytes = encode(&wrong).unwrap();
+            let digest = sha_hex(&bytes);
+            env.data.set_raw(&key, &bytes);
+            let mut record = record(&env, &manifest.manifest.set_id);
+            record.manifest_sha256 = digest.clone();
+            env.meta.set_raw(
+                &env.sets.record_key(&record.set_id),
+                &encode(&record).unwrap(),
+            );
+            let mut current = published.record.clone();
+            current.head.as_mut().unwrap().manifest_sha256 = digest;
+            env.meta.set_raw(
+                &format!("{}authority.json", env.sets.prefix),
+                &serde_json::to_vec(&current).unwrap(),
+            );
+            assert!(env.sets.resolve_ha_baseline(&authority).is_err(), "{n}");
+        }
+    }
+
+    #[test]
+    fn ha_baseline_shutdown_fence_prevents_head_commit() {
+        let env = setup();
+        let (authority, claim) = setup_ha(&env);
+        let original = authority.read().unwrap();
+        let (manifest, uploads) = prepare_ha(&env, &authority, &claim, BASE);
+        let authorize = || {
+            if env
+                .meta
+                .raw(&env.sets.record_key(&manifest.manifest.set_id))
+                .is_some_and(|bytes| {
+                    serde_json::from_slice::<Record>(&bytes).unwrap().state == SetState::Published
+                })
+            {
+                Err(conflict("writer_fenced", "shutdown"))
+            } else {
+                Ok(())
+            }
+        };
+        assert!(
+            env.sets
+                .publish_ha(&authority, &claim, &manifest, &uploads, BASE, &authorize)
+                .is_err()
+        );
+        assert_eq!(
+            record(&env, &manifest.manifest.set_id).state,
+            SetState::Published
+        );
+        assert_eq!(authority.read().unwrap(), original);
+        assert!(env.sets.resolve_ha_baseline(&authority).unwrap().is_none());
+    }
+
+    #[test]
+    fn ha_baseline_reads_back_manifest_and_published_record_before_head() {
+        for manifest_readback in [true, false] {
+            let env = setup();
+            let (authority, claim) = setup_ha(&env);
+            let original = authority.read().unwrap();
+            let (manifest, uploads) = prepare_ha(&env, &authority, &claim, BASE);
+            let (store, key) = if manifest_readback {
+                (
+                    env.data.clone(),
+                    env.sets.manifest_key(&manifest.manifest.set_id),
+                )
+            } else {
+                (
+                    env.meta.clone(),
+                    env.sets.record_key(&manifest.manifest.set_id),
+                )
+            };
+            let corrupt_store = store.clone();
+            let corrupt_key = key.clone();
+            store.hook(Op::Get, &key, move || {
+                corrupt_store.set_raw(&corrupt_key, b"{}");
+            });
+            assert!(
+                env.sets
+                    .publish_ha(&authority, &claim, &manifest, &uploads, BASE, &open)
+                    .is_err()
+            );
+            assert_eq!(authority.read().unwrap(), original);
+            assert!(env.sets.resolve_ha_baseline(&authority).unwrap().is_none());
+        }
     }
 
     fn publish(env: &Env, now: u64) -> String {
