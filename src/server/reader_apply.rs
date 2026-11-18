@@ -24,6 +24,8 @@ pub(super) struct Progress {
     /// When the reader last confirmed that it serves the newest verified
     /// checkpoint of the archive it follows.
     confirmed_unix_ms: AtomicU64,
+    /// The configured staleness bound in milliseconds; 0 until set.
+    bound_ms: AtomicU64,
 }
 
 impl Progress {
@@ -63,6 +65,30 @@ impl Progress {
             self.applied_sequence.load(Ordering::SeqCst),
             self.confirmed_unix_ms.load(Ordering::SeqCst),
         )
+    }
+
+    /// Sets the staleness bound (ITEM-020): beyond it the reader fails
+    /// readiness and refuses reads.
+    #[cfg_attr(not(test), allow(dead_code))]
+    pub(super) fn set_bound(&self, bound_ms: u64) {
+        self.bound_ms.store(bound_ms, Ordering::SeqCst);
+    }
+
+    /// The staleness bound in milliseconds; 0 when none is set.
+    #[cfg_attr(not(test), allow(dead_code))]
+    pub(super) fn bound(&self) -> u64 {
+        self.bound_ms.load(Ordering::SeqCst)
+    }
+
+    /// Milliseconds since the served generation was last confirmed current,
+    /// or `None` before the first confirmation. A clock that went backwards
+    /// reads as age 0.
+    #[cfg_attr(not(test), allow(dead_code))]
+    pub(super) fn age_ms(&self, now_unix_ms: u64) -> Option<u64> {
+        match self.confirmed_unix_ms.load(Ordering::SeqCst) {
+            0 => None,
+            at => Some(now_unix_ms.saturating_sub(at)),
+        }
     }
 }
 
@@ -277,5 +303,17 @@ mod tests {
         let progress = Progress::default();
         progress.confirm(7, 1_000);
         assert_eq!(progress.applied(), (7, 1_000));
+    }
+
+    #[test]
+    fn age_is_unknown_until_confirmed_and_never_negative() {
+        let progress = Progress::default();
+        assert_eq!(progress.bound(), 0);
+        assert_eq!(progress.age_ms(5_000), None);
+        progress.set_bound(30_000);
+        progress.confirm(3, 1_000);
+        assert_eq!(progress.bound(), 30_000);
+        assert_eq!(progress.age_ms(5_000), Some(4_000));
+        assert_eq!(progress.age_ms(500), Some(0));
     }
 }

@@ -43,7 +43,7 @@ pub(super) const ROLE_BUNDLE: &str = "recovery_bundle";
 /// envelope): larger sources are refused at backup and at restore.
 pub(super) const MAX_DATABASE_BYTES: u64 = 1 << 30;
 /// Free space kept beyond the restore's own peak use.
-const RESTORE_SPACE_MARGIN: u64 = 64 << 20;
+pub(super) const RESTORE_SPACE_MARGIN: u64 = 64 << 20;
 
 /// Refuses a database outside the supported size envelope.
 pub(super) fn check_database_size(bytes: u64) -> Result<(), ApiError> {
@@ -77,7 +77,7 @@ thread_local! {
 }
 
 /// Free bytes where a restore stages its copies, if measurable.
-fn free_bytes(dir: &std::path::Path) -> Option<u64> {
+pub(super) fn free_bytes(dir: &std::path::Path) -> Option<u64> {
     #[cfg(test)]
     if let Some(free) = FREE_BYTES.with(std::cell::Cell::get) {
         return free;
