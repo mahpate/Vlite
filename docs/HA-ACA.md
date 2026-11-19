@@ -119,6 +119,9 @@ advance the authority head by CAS; continuous archive checkpoints extend that
 head through immutable HA indexes, never the legacy archive. Every archive
 commit rechecks the writer epoch. `failover report` therefore reflects the
 authority-bound archived sequence, not merely local backup status.
+Retention never deletes the set named by the authority head or base. In a
+cycle where the authority cannot be read it condemns no Published set; it only
+finishes deletes already in progress and removes stale staging sets.
 
 Configure cloud backup before initializing authority: `authority init
 --installation-id` must use the `installation_id` shown by
@@ -254,6 +257,13 @@ audience/control configuration. Do not set `VLITE_ADMIN_DIR`, create flags,
 durability flags, group commit, ANN snapshots or gRPC on a reader.
 Enrollment selects the newest Published set, pins the whole set, follows
 verified history and swaps read-only generations.
+When a writer authority exists in the target's coordination container, the
+reader instead follows the set named by the authority head (or its frozen
+base during a prepared transfer) and applies only checkpoints committed by
+that head. A non-HA or mismatched manifest is refused with
+`reader_apply_reseed_required`; an authority naming no set is
+`reader_apply_no_set`. Without an authority, enrollment is unchanged.
+An enrollment failure exits the process before it serves HTTP.
 
 **Verify:** require `/ready` success and an authorized read of expected data.
 Inspect administrator-only `/v1/admin/serve-status` for `mode: reader`,
@@ -272,6 +282,11 @@ for readiness and authorized reads. A permanently failed follower fails
 readiness with 503 `reader_apply_failed`; inspect private logs for the
 reason. A newer baseline or broken continuity requires restart/re-enrollment,
 not automatic reseeding.
+For an HA reader, a frozen base is not a freshness confirmation, so age keeps
+growing during a prepared transfer and the reader turns `reader_stale` at its
+bound. A transient authority read failure is retried without advancing; a
+removed authority fails the follower with `writer_authority_missing`, and a
+replaced or regressed head fails it until re-enrollment.
 
 **Back out:** remove the reader from routing, stop it, and keep reads on the
 writer (`read_routing: writer_only` in the directory). Keep ACA routing
@@ -398,6 +413,8 @@ Exact usage excerpt: `[--archive-checkpoint latest|<sequence>]`.
 Replace `latest` with an exact listed checkpoint sequence when required.
 Times, intermediate sequences and rounding are refused
 (`pitr_target_unsupported`). No archive gives `pitr_archive_missing`.
+For an HA set, `latest` and the listed sequences are only the checkpoints
+committed by the authority head (or base) for that set.
 Only rekey is supported: new lineage, imported accounts disabled, no
 credentials/sessions restored; seed mode is refused. This is not a
 same-lineage writer promotion.
