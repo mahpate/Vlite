@@ -107,6 +107,20 @@ name = "ha-meas002"
 path = "benchmarks/ha_meas002.rs"
 required-features = ["server"]
 
+[[example]]
+name = "ha-meas004"
+path = "benchmarks/ha_meas004.rs"
+required-features = ["server"]
+
+[[example]]
+name = "ha-meas005"
+path = "benchmarks/ha_meas005.rs"
+required-features = ["server"]
+
+[[test]]
+name = "gateway_measure"
+required-features = ["server"]
+
 [[bin]]
 name = "vlite-server"
 required-features = ["server"]

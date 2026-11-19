@@ -57,17 +57,17 @@ const MAX_BUCKETS: usize = 1_000_000;
 
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
-struct GatewayFile {
+pub(super) struct GatewayFile {
     bind: SocketAddr,
     /// A non-loopback `bind` must be explicitly allowed.
     #[serde(default)]
     allow_remote: bool,
-    control_state: Source,
+    pub(super) control_state: Source,
     s_ctl_ms: u64,
     poll_interval_ms: u64,
     /// The replica maximum each credential limit is divided by.
-    max_replicas: u32,
-    envelope_lifetime_ms: u64,
+    pub(super) max_replicas: u32,
+    pub(super) envelope_lifetime_ms: u64,
     public_key_bundle_file: PathBuf,
     signing_key_file: PathBuf,
     active_kid: String,
@@ -87,12 +87,12 @@ fn invalid(detail: impl std::fmt::Display) -> String {
 }
 
 /// A validated gateway configuration with its signer; nothing contacted.
-struct Settings {
-    file: GatewayFile,
-    signer: Signer,
+pub(super) struct Settings {
+    pub(super) file: GatewayFile,
+    pub(super) signer: Signer,
 }
 
-fn read_config(path: &Path) -> Result<Settings, String> {
+pub(super) fn read_config(path: &Path) -> Result<Settings, String> {
     let bytes = read_bounded(path, MAX_CONFIG_BYTES, "gateway config").map_err(invalid)?;
     let file: GatewayFile = serde_json::from_slice(&bytes).map_err(invalid)?;
     file.control_state.validate().map_err(invalid)?;

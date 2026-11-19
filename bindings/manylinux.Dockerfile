@@ -16,6 +16,9 @@ COPY benchmarks/ha_reader_strategies.rs ./benchmarks/ha_reader_strategies.rs
 COPY benchmarks/ha_reader_resource.rs ./benchmarks/ha_reader_resource.rs
 COPY benchmarks/ha_reader_resource_tests.rs ./benchmarks/ha_reader_resource_tests.rs
 COPY benchmarks/ha_meas002.rs ./benchmarks/ha_meas002.rs
+COPY benchmarks/ha_meas004.rs ./benchmarks/ha_meas004.rs
+COPY benchmarks/ha_meas005.rs ./benchmarks/ha_meas005.rs
+COPY benchmarks/ha_gateway_support.rs ./benchmarks/ha_gateway_support.rs
 COPY bindings/c ./bindings/c
 COPY crates ./crates
 COPY bindings/python ./bindings/python

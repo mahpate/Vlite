@@ -45,6 +45,7 @@ mod features;
 #[cfg(test)]
 mod fencing_fault_tests;
 mod gateway;
+pub mod gateway_measure;
 mod gateway_mode;
 mod gateway_trust;
 #[cfg(test)]

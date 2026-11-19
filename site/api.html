@@ -1323,6 +1323,16 @@ searchManyF32(vectors: Float32Array[], k: number, options?: Scope &amp; { filter
     </table>
 
     <h2 id="rest">REST</h2>
+    <p>Experimental gateway measurement tools are opt-in, not new REST routes:
+      build the <code>ha-meas004</code> and <code>ha-meas005</code> examples with
+      <code>--features server</code>. <code>vlite-server gateway-measure bootstrap</code>
+      creates a private synthetic fixture; <code>gateway-measure mint</code>
+      exports a short-lived normally verified principal, not an authentication
+      bypass. See the
+      <a href="https://github.com/mahpate/Vlite/blob/main/deploy/azure-container-apps/ha/measure-gateway-contract.md">executable MEAS-004/005 contract</a>
+      for exact configs, ABBA load, per-process observers and bounded command-bracket
+      propagation analysis. Evidence is <code>proposal_evidence_only</code>;
+      unknown scale/clock/coverage stays explicit. Deployment gates are unchanged.</p>
     <p>Run <code>vlite-server</code> or the Docker image. Send an API key as a bearer token.</p>
 <pre class="code">curl -s -X POST localhost:8080/v1/search \
   -H "Authorization: Bearer $TOKEN" -H "Content-Type: application/json" \

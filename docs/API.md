@@ -979,6 +979,20 @@ servers, writers and readers without apply progress do not send them. Writer/rea
 
 ## Gateway mode and gateway-trusted backends (experimental, opt-in, off by default)
 
+Disposable measurement tooling is separately opt-in: build the `ha-meas004` and
+`ha-meas005` examples with `--features server`. `vlite-server gateway-measure
+bootstrap --config <json>` creates a private synthetic fixture and normal
+credentials/keys without publishing control state; `gateway-measure mint
+--gateway-config <json> --token-file <path> --output <new-private-file>` exports a
+short-lived normally verified principal, never an auth bypass. A database named
+`gateway-measure` now requires a `./` prefix. See the executable
+[MEAS-004/005 CLI/config contract](../deploy/azure-container-apps/ha/measure-gateway-contract.md)
+for exact app/job entrypoints, limits, ABBA load, owned-process observers,
+command-bracket propagation analysis and cleanup. Outputs are
+`proposal_evidence_only`, not qualification; unknown scale/clock/coverage and
+read-cost capabilities remain explicit. No serving endpoints or deployment gates
+are added or changed.
+
 A gateway is a `vlite-server gateway` process that opens no database. It
 authenticates tenant credentials against a shared control-state object in
 Azure Blob Storage, checks the operation, takes one request from its edge
