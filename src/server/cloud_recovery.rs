@@ -656,6 +656,36 @@ fn restore_pinned(plan: &Plan, sets: &Sets, pin_id: &str) -> Result<Value, Recov
     // A checkpoint restore replays the verified archive onto the downloaded
     // baseline and takes the configuration captured with that checkpoint.
     let replayed = match plan.checkpoint {
+        Some(target) if fetched.ha.is_some() => {
+            let observed = sets
+                .read_authority()?
+                .ok_or_else(|| ApiError::from(super::authority::AuthorityError::Missing))?;
+            fetched
+                .ha
+                .as_ref()
+                .expect("checked HA manifest")
+                .check_scope(&fetched.manifest.installation_id, &observed.record)?;
+            let head = observed
+                .record
+                .head
+                .as_ref()
+                .or(observed.record.base.as_ref())
+                .filter(|head| head.set_id == fetched.record.set_id)
+                .ok_or_else(|| {
+                    refused(
+                        "pitr_archive_missing",
+                        "the authority has no head or base for this set",
+                    )
+                })?;
+            Some(match target {
+                ArchiveTarget::Latest => sets.restore_ha_head(&fetched, &download, head)?
+                    .ok_or_else(|| refused(
+                        "pitr_archive_missing",
+                        "the set has no archived checkpoints; restore the snapshot without --archive-checkpoint",
+                    ))?,
+                ArchiveTarget::Sequence(_) => sets.replay_archive_ha(&fetched, target, &download, head)?,
+            })
+        }
         Some(target) => Some(sets.replay_archive(&fetched, target, &download)?),
         None => None,
     };
@@ -857,6 +887,143 @@ pub(in crate::server) mod tests {
                     .unwrap();
             }
         })
+    }
+
+    pub(in crate::server) fn setup_ha() -> (
+        Env,
+        super::super::authority::AuthorityStore,
+        super::super::authority::Claim,
+    ) {
+        use super::super::authority::AuthorityStore;
+        use cloud::{HaIdentity, HaManifest};
+        let mut env = setup();
+        let archive = env.sets.open_archive(&env.set_id).unwrap();
+        let mut manifest = archive.manifest;
+        let (store, prefix) = env.sets.coordination();
+        let authority = AuthorityStore::new(store, prefix);
+        let prepared = authority
+            .create(INSTALL, "scope", manifest.source_lineage.as_ref().unwrap())
+            .unwrap();
+        let (claim, _) = authority.claim(&prepared, now()).unwrap();
+        let uploads: Vec<_> = manifest
+            .objects
+            .iter()
+            .map(|entry| {
+                let key = format!("vlite/prod/sets/{}/objects/{}", env.set_id, entry.sha256);
+                Upload::bytes(
+                    if entry.role == ROLE_DATABASE {
+                        ROLE_DATABASE
+                    } else {
+                        ROLE_BUNDLE
+                    },
+                    env.data.raw(&key).unwrap(),
+                )
+            })
+            .collect();
+        manifest.set_id = cloud::new_set_id(now()).unwrap();
+        let manifest = HaManifest {
+            schema: "vlite.cloud-backup-ha-manifest/1".into(),
+            authority: HaIdentity {
+                writer_id: claim.writer_id.clone(),
+                epoch: claim.epoch,
+                scope_id: prepared.record.scope_id,
+                lineage: manifest.source_lineage.clone().unwrap(),
+            },
+            manifest,
+        };
+        env.sets
+            .publish_ha(
+                &authority,
+                &claim,
+                &manifest,
+                &uploads,
+                now(),
+                &cloud::fake::open,
+            )
+            .unwrap();
+        env.set_id = manifest.manifest.set_id;
+        (env, authority, claim)
+    }
+
+    pub(in crate::server) fn checkpoint_ha(
+        env: &Env,
+        authority: &super::super::authority::AuthorityStore,
+        claim: &super::super::authority::Claim,
+        ids: std::ops::RangeInclusive<u64>,
+    ) -> u64 {
+        let archive = env.sets.open_archive_ha(authority, claim).unwrap();
+        let mut database = Database::open(env.dir.path().join("source.vlite")).unwrap();
+        puts(ids)(&mut database);
+        let segment = database
+            .export_log(archive.next_base(), cloud::archive::MAX_SEGMENT_BYTES)
+            .unwrap();
+        database.close().unwrap();
+        env.sets
+            .append_checkpoint_ha(
+                &archive,
+                &segment,
+                &|chain| {
+                    Ok(serde_json::to_vec(&recovery_bundle::bundle(
+                        config(),
+                        INSTALL,
+                        env.source_lineage,
+                        chain,
+                        cloud::fake::policy_capture(),
+                        None,
+                        now(),
+                    ))
+                    .unwrap())
+                },
+                now(),
+                &cloud::fake::open,
+                authority,
+                claim,
+            )
+            .unwrap()
+            .checkpoint
+            .sequence
+    }
+
+    #[test]
+    fn ha_checkpoint_restore_is_exact_and_lists_only_committed_targets() {
+        let (env, authority, claim) = setup_ha();
+        checkpoint_ha(&env, &authority, &claim, 5..=6);
+        checkpoint_ha(&env, &authority, &claim, 7..=8);
+        let mut request = env.request();
+        request.archive_checkpoint = Some("7".into());
+        let error = env.restore(&request).unwrap_err();
+        assert_eq!(error.code, "pitr_target_unsupported");
+        assert!(error.message.ends_with("6, 8"), "{error}");
+        request.archive_checkpoint = Some("6".into());
+        let report = env.restore(&request).unwrap();
+        assert_eq!(report["inspection"]["commits"], 6);
+        let database = Database::open_read_only(request.output.join(DATABASE_FILE)).unwrap();
+        assert!(database.get(6).unwrap().is_some());
+        assert!(database.get(7).unwrap().is_none());
+        database.close().unwrap();
+    }
+
+    #[test]
+    fn ha_snapshot_and_latest_frozen_base_restore() {
+        for archived in [false, true] {
+            let (env, authority, claim) = setup_ha();
+            let mut request = env.request();
+            if archived {
+                checkpoint_ha(&env, &authority, &claim, 5..=6);
+                checkpoint_ha(&env, &authority, &claim, 7..=8);
+                let observed = authority.read().unwrap();
+                authority
+                    .prepare_transfer(&observed, observed.record.epoch, &observed.record.revision)
+                    .unwrap();
+                request.archive_checkpoint = Some("latest".into());
+            }
+            let report = env.restore(&request).unwrap();
+            assert_eq!(
+                report["inspection"]["commits"],
+                if archived { 8 } else { 4 }
+            );
+            assert_eq!(env.pins(), 0);
+        }
     }
 
     /// Publishes one set whose database `fill` populated.

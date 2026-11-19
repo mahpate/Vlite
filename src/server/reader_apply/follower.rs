@@ -13,7 +13,9 @@ use serde_json::json;
 
 use super::{ApiError, Database, Progress, Service, log_stderr};
 use crate::server::{
-    cloud_backup::{self as cloud, Manifest, PinKind, Record, SetState, Sets, archive::Follow},
+    cloud_backup::{
+        self as cloud, HaIdentity, Manifest, PinKind, Record, SetState, Sets, archive::Follow,
+    },
     cloud_recovery,
     serve_mode::unix_ms,
 };
@@ -103,6 +105,7 @@ struct Follower {
     config: ReaderApplyConfig,
     record: Record,
     manifest: Manifest,
+    ha: Option<HaIdentity>,
     pin: String,
     slots: [PathBuf; 2],
     progress: Arc<Progress>,
@@ -193,12 +196,32 @@ impl ReaderApply {
         replica: &str,
         now: u64,
     ) -> Result<Self, ApiError> {
+        let authority = sets.read_authority()?;
+        let head = authority
+            .as_ref()
+            .map(|observed| {
+                observed
+                    .record
+                    .head
+                    .as_ref()
+                    .or(observed.record.base.as_ref())
+                    .ok_or_else(|| {
+                        error(
+                            "reader_apply_no_set",
+                            "no published backup set is available",
+                        )
+                    })
+            })
+            .transpose()?;
         let listing = sets.list()?;
         let chosen = listing
             .sets
             .iter()
             .filter_map(|set| set.record.as_ref())
-            .find(|record| record.state == SetState::Published)
+            .find(|record| {
+                record.state == SetState::Published
+                    && head.is_none_or(|head| head.set_id == record.set_id)
+            })
             .ok_or_else(|| {
                 error(
                     "reader_apply_no_set",
@@ -238,13 +261,41 @@ impl ReaderApply {
             }
             let fetched =
                 sets.fetch_with(&chosen.set_id, &pin.id, &dirs[0], config.capacity_bytes)?;
-            let sequence =
-                match sets.follow_archive(&fetched.record, &fetched.manifest, &fetched.database)? {
-                    Follow::Applied { sequence, .. } | Follow::Current { sequence } => sequence,
-                    Follow::Reseed(reason) => {
-                        return Err(error("reader_apply_reseed_required", reason));
+            let followed = match head {
+                Some(head) => {
+                    if fetched.ha.is_none()
+                        || fetched.record.manifest_sha256 != head.manifest_sha256
+                    {
+                        return Err(error(
+                            "reader_apply_reseed_required",
+                            "the authority head does not name this HA baseline",
+                        ));
                     }
-                };
+                    fetched
+                        .ha
+                        .as_ref()
+                        .expect("checked HA manifest")
+                        .check_scope(
+                            &fetched.manifest.installation_id,
+                            &authority.as_ref().expect("head has an authority").record,
+                        )?;
+                    sets.follow_archive_ha(
+                        &fetched.record,
+                        &fetched.manifest,
+                        &fetched.database,
+                        head,
+                    )?
+                }
+                None => {
+                    sets.follow_archive(&fetched.record, &fetched.manifest, &fetched.database)?
+                }
+            };
+            let sequence = match followed {
+                Follow::Applied { sequence, .. } | Follow::Current { sequence } => sequence,
+                Follow::Reseed(reason) => {
+                    return Err(error("reader_apply_reseed_required", reason));
+                }
+            };
             let len = fs::metadata(&fetched.database).map_err(io_error)?.len();
             if len > config.capacity_bytes {
                 return Err(error(
@@ -289,6 +340,7 @@ impl ReaderApply {
                 config,
                 record: fetched.record,
                 manifest: fetched.manifest,
+                ha: authority.and(fetched.ha),
                 pin: pin.id,
                 slots: dirs.map(|dir| dir.join("database.vlite")),
                 progress,
@@ -401,38 +453,95 @@ impl Follower {
             return Step::Stopped;
         }
         let result = (|| {
-            let listing = self.sets.list()?;
-            let newest = listing
-                .sets
-                .iter()
-                .filter_map(|set| set.record.as_ref())
-                .find(|record| record.state == SetState::Published);
-            if newest.is_some_and(|record| {
-                (record.created_unix_ms, &record.set_id)
-                    > (self.record.created_unix_ms, &self.record.set_id)
-            }) {
-                return Err(error(
-                    "reader_apply_reseed_required",
-                    "a newer published set needs a re-seed",
-                ));
+            let authority = self.sets.read_authority()?;
+            if self.ha.is_some() && authority.is_none() {
+                return Err(crate::server::authority::AuthorityError::Missing.into());
             }
-            if !listing
-                .sets
-                .iter()
-                .filter_map(|set| set.record.as_ref())
-                .any(|record| {
-                    record.set_id == self.record.set_id && record.state == SetState::Published
+            let head = authority
+                .as_ref()
+                .map(|observed| {
+                    observed
+                        .record
+                        .head
+                        .as_ref()
+                        .or(observed.record.base.as_ref())
+                        .ok_or_else(|| {
+                            error(
+                                "reader_apply_no_set",
+                                "no published backup set is available",
+                            )
+                        })
                 })
-            {
-                return Err(error(
-                    "reader_apply_reseed_required",
-                    "the followed set is missing or no longer published",
-                ));
+                .transpose()?;
+            if let Some(head) = head {
+                if head.set_id != self.record.set_id {
+                    return Err(error(
+                        "reader_apply_reseed_required",
+                        "a newer published set needs a re-seed",
+                    ));
+                }
+                if head.sequence < self.progress.applied().0 {
+                    return Err(error(
+                        "reader_apply_reseed_required",
+                        "the archive head moved backwards",
+                    ));
+                }
+                if let Some(identity) = &self.ha {
+                    identity.check_scope(
+                        &self.manifest.installation_id,
+                        &authority.as_ref().expect("head has an authority").record,
+                    )?;
+                }
+            } else {
+                let listing = self.sets.list()?;
+                let newest = listing
+                    .sets
+                    .iter()
+                    .filter_map(|set| set.record.as_ref())
+                    .find(|record| record.state == SetState::Published);
+                if newest.is_some_and(|record| {
+                    (record.created_unix_ms, &record.set_id)
+                        > (self.record.created_unix_ms, &self.record.set_id)
+                }) {
+                    return Err(error(
+                        "reader_apply_reseed_required",
+                        "a newer published set needs a re-seed",
+                    ));
+                }
+                if !listing
+                    .sets
+                    .iter()
+                    .filter_map(|set| set.record.as_ref())
+                    .any(|record| {
+                        record.set_id == self.record.set_id && record.state == SetState::Published
+                    })
+                {
+                    return Err(error(
+                        "reader_apply_reseed_required",
+                        "the followed set is missing or no longer published",
+                    ));
+                }
             }
             let standby = 1 - state.served;
-            let followed =
-                self.sets
-                    .follow_archive(&self.record, &self.manifest, &self.slots[standby])?;
+            let followed = match head {
+                Some(head) => self.sets.follow_archive_ha(
+                    &self.record,
+                    &self.manifest,
+                    &self.slots[standby],
+                    head,
+                )?,
+                None => {
+                    self.sets
+                        .follow_archive(&self.record, &self.manifest, &self.slots[standby])?
+                }
+            };
+            let confirmed_at = if authority.as_ref().is_some_and(|observed| {
+                observed.record.phase == crate::server::authority::Phase::Recovering
+            }) {
+                self.progress.applied().1
+            } else {
+                now
+            };
             let (sequence, segments) = match followed {
                 Follow::Applied { sequence, segments } => (sequence, segments),
                 Follow::Current { sequence } => (sequence, 0),
@@ -448,7 +557,7 @@ impl Follower {
                 ));
             }
             if sequence == served {
-                self.progress.confirm(served, now);
+                self.progress.confirm(served, confirmed_at);
                 return Ok(Step::Confirmed);
             }
             if fs::metadata(&self.slots[standby]).map_err(io_error)?.len()
@@ -465,7 +574,7 @@ impl Follower {
                 .swap_reader_generation(next)
                 .map_err(|e| error("reader_apply_swap_failed", e.to_string()))?;
             state.served = standby;
-            self.progress.confirm(sequence, now);
+            self.progress.confirm(sequence, confirmed_at);
             log_stderr(
                 "info",
                 "reader_apply",
@@ -481,7 +590,10 @@ impl Follower {
             Ok(step) => step,
             Err(error)
                 if (error.status == StatusCode::SERVICE_UNAVAILABLE
-                    && error.code == "cloud_store_unavailable")
+                    && matches!(
+                        error.code,
+                        "cloud_store_unavailable" | "writer_authority_unavailable"
+                    ))
                     || (error.status == StatusCode::INSUFFICIENT_STORAGE
                         && error.code == "restore_insufficient_space") =>
             {
