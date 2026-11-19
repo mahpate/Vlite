@@ -53,6 +53,8 @@ mod graph;
 mod group_commit;
 mod guard;
 mod kv;
+#[cfg(test)]
+mod writer_fence_wiring_tests;
 pub use group_commit::GroupCommitConfig;
 mod authority;
 #[cfg(feature = "grpc")]
@@ -254,6 +256,7 @@ pub struct Service {
     metrics_with_memory: bool,
     /// EPIC-002: serve mode and drain flag, shared across generations.
     serve: Arc<serve_mode::State>,
+    writer_fence: writer_fence::WriterFence,
     /// feature-aca-ha ITEM-010/014: when set, the backend trusts only a
     /// signed gateway principal envelope checked against its own fresh
     /// control state; standalone servers leave it unset.
@@ -357,6 +360,7 @@ impl Service {
             memory_bindings: Arc::new(reserved::Served::default()),
             metrics_with_memory: false,
             serve: Arc::default(),
+            writer_fence: writer_fence::WriterFence::disabled(),
             trust: None,
             reader: None,
         })
@@ -586,6 +590,50 @@ impl Service {
         Ok(self)
     }
 
+    /// Installs authority after `with_serve_mode`. gRPC has no response barrier
+    /// yet and must be refused by the future authority startup.
+    #[cfg_attr(not(test), allow(dead_code))]
+    pub(super) fn with_writer_fence(
+        mut self,
+        fence: writer_fence::WriterFence,
+    ) -> std::io::Result<Self> {
+        if self.serve.mode != ServeMode::Writer {
+            return Err(std::io::Error::other(
+                "writer authority needs --serve-mode writer",
+            ));
+        }
+        self.writer_fence = fence;
+        Ok(self)
+    }
+
+    /// Internal authority stop notification, absent for existing deployments.
+    #[doc(hidden)]
+    pub fn writer_stop_signal(&self) -> Option<tokio::sync::watch::Receiver<bool>> {
+        self.writer_fence.stop_signal()
+    }
+
+    #[doc(hidden)]
+    pub fn writer_exit_code(&self) -> Option<i32> {
+        self.writer_fence.exit_code()
+    }
+
+    #[doc(hidden)]
+    pub fn begin_writer_drain(&self) -> std::io::Result<()> {
+        if self.writer_fence.state() == writer_fence::State::Draining {
+            return Ok(());
+        }
+        self.writer_fence
+            .begin_drain()
+            .map_err(|error| std::io::Error::other(format!("{error:?}")))
+    }
+
+    #[doc(hidden)]
+    pub fn writer_stopped(&self) -> std::io::Result<()> {
+        self.writer_fence
+            .stopped()
+            .map_err(|error| std::io::Error::other(format!("{error:?}")))
+    }
+
     /// A new generation around `database` (a compaction successor or the
     /// freshly reopened source) with this service's startup policy: provider
     /// state, group commit, snapshot reads, TLS identities and encryption key.
@@ -599,6 +647,7 @@ impl Service {
         next.started = self.started;
         next.metrics_with_memory = self.metrics_with_memory;
         next.serve = self.serve.clone();
+        next.writer_fence = self.writer_fence.clone();
         next.trust = self.trust.clone();
         next.reader = self.reader.clone();
         if let Some(config) = self.group_commit_config {
@@ -664,11 +713,21 @@ impl Service {
             )
         })?;
         let hidden = guard::current();
-        group
+        let fence = self.writer_fence.clone();
+        let result = group
             .submit(bytes, permit, move |db| {
+                fence.verify_before_commit()?;
                 guard::within(hidden, || operation(db))
             })
-            .await
+            .await?;
+        if self.writer_fence.epoch().is_some() {
+            let fence = self.writer_fence.clone();
+            tokio::task::spawn_blocking(move || fence.verify_before_ack())
+                .await
+                .map_err(internal)??;
+            writer_fence::record_receipt();
+        }
+        Ok(result)
     }
 
     async fn run<T: Send + 'static>(
@@ -685,11 +744,13 @@ impl Service {
         let database = self.database.clone();
         let metrics = self.metrics.clone();
         let hidden = guard::current();
-        tokio::task::spawn_blocking(move || {
+        let fence = self.writer_fence.clone();
+        let result = tokio::task::spawn_blocking(move || {
             // The permit stays with the worker even if the HTTP client disconnects.
             let _permit = permit;
             let mut owner = database.write().map_err(internal)?;
             let db = owner.as_mut().ok_or_else(unavailable)?;
+            fence.verify_before_commit()?;
             let result = guard::within(hidden, || operation(db));
             if result
                 .as_ref()
@@ -697,10 +758,16 @@ impl Service {
             {
                 metrics.commit_failures.fetch_add(1, Ordering::Relaxed);
             }
-            result
+            let value = result?;
+            fence.verify_before_ack()?;
+            Ok::<T, ApiError>(value)
         })
         .await
-        .map_err(internal)?
+        .map_err(internal)??;
+        if self.writer_fence.epoch().is_some() {
+            writer_fence::record_receipt();
+        }
+        Ok(result)
     }
 
     /// Shared-lock variant of `run` for operations that only read. Readers
@@ -711,7 +778,21 @@ impl Service {
         &self,
         operation: impl FnOnce(&Database) -> Result<T, ApiError> + Send + 'static,
     ) -> Result<T, ApiError> {
-        self.run_read_then(operation, Ok).await
+        let diagnostic = writer_fence::diagnostic_read();
+        if !diagnostic {
+            self.writer_fence.admit_read()?;
+        }
+        let fence = self.writer_fence.clone();
+        self.run_read_then(
+            move |db| {
+                if !diagnostic {
+                    fence.admit_read()?;
+                }
+                operation(db)
+            },
+            Ok,
+        )
+        .await
     }
 
     /// Capture bounded immutable state under the owner lock, then perform work
@@ -1563,57 +1644,101 @@ async fn observe(
     if let Some(principal) = principal {
         request.extensions_mut().insert(principal);
     }
+    let mutation = !read_request(request.method(), &route, &request_path);
+    let enabled = service.writer_fence.epoch().is_some();
     let mut hidden = false;
-    let mut response = if public {
-        if let Some(role) = role.clone() {
-            request.extensions_mut().insert(role);
-        }
-        next.run(request).await
-    } else {
-        match &authentication {
-            Err(error) => {
-                let mut response = error.clone().into_response();
-                if error.code == "session_expired" {
-                    for cookie in users::clear_cookies() {
-                        response.headers_mut().append(
-                            header::SET_COOKIE,
-                            axum::http::HeaderValue::from_static(cookie),
-                        );
-                    }
-                }
-                response
+    let handling = async {
+        if public {
+            if let Some(role) = role.clone() {
+                request.extensions_mut().insert(role);
             }
-            Ok(None) => ApiError::new(
-                StatusCode::UNAUTHORIZED,
-                "unauthorized",
-                "valid bearer token required",
-            )
-            .into_response(),
-            Ok(Some(role)) => {
-                match rate_limit(&service, role)
-                    .and_then(|()| {
-                        authorize(
-                            &service,
-                            role,
-                            request.method(),
-                            &route,
-                            request.uri().path(),
-                        )
-                    })
-                    .and_then(|()| {
-                        serve_mode::admit(&service, request.method(), &route, request.uri().path())
-                    }) {
-                    Err(error) => error.into_response(),
-                    Ok(()) => {
-                        request.extensions_mut().insert(role.clone());
-                        let (response, noted) = guard::track_hidden(next.run(request)).await;
-                        hidden = noted;
-                        response
+            match service
+                .writer_fence
+                .admit(request.method(), &route, &request_path)
+            {
+                Ok(()) => next.run(request).await,
+                Err(error) => error.into_response(),
+            }
+        } else {
+            match &authentication {
+                Err(error) => {
+                    let mut response = error.clone().into_response();
+                    if error.code == "session_expired" {
+                        for cookie in users::clear_cookies() {
+                            response.headers_mut().append(
+                                header::SET_COOKIE,
+                                axum::http::HeaderValue::from_static(cookie),
+                            );
+                        }
+                    }
+                    response
+                }
+                Ok(None) => ApiError::new(
+                    StatusCode::UNAUTHORIZED,
+                    "unauthorized",
+                    "valid bearer token required",
+                )
+                .into_response(),
+                Ok(Some(role)) => {
+                    match rate_limit(&service, role)
+                        .and_then(|()| {
+                            authorize(
+                                &service,
+                                role,
+                                request.method(),
+                                &route,
+                                request.uri().path(),
+                            )
+                        })
+                        .and_then(|()| {
+                            serve_mode::admit(
+                                &service,
+                                request.method(),
+                                &route,
+                                request.uri().path(),
+                            )
+                        })
+                        .and_then(|()| {
+                            service.writer_fence.admit(
+                                request.method(),
+                                &route,
+                                request.uri().path(),
+                            )
+                        }) {
+                        Err(error) => error.into_response(),
+                        Ok(()) => {
+                            request.extensions_mut().insert(role.clone());
+                            let (response, noted) = guard::track_hidden(next.run(request)).await;
+                            hidden = noted;
+                            response
+                        }
                     }
                 }
             }
         }
     };
+    let (mut response, receipt) = if enabled {
+        writer_fence::track_request(writer_fence::diagnostic(&request_path), handling).await
+    } else {
+        (handling.await, false)
+    };
+    if enabled && mutation && response.status().is_success() {
+        let checked = if !service.writer_fence.ready() {
+            Err(gateway::ambiguous_write())
+        } else if !receipt {
+            let fence = service.writer_fence.clone();
+            tokio::task::spawn_blocking(move || fence.verify_before_ack())
+                .await
+                .unwrap_or_else(|_| Err(gateway::ambiguous_write()))
+        } else {
+            Ok(())
+        };
+        if let Err(error) = checked {
+            response = error.into_response();
+        } else if !service.writer_fence.ready() {
+            response = gateway::ambiguous_write().into_response();
+        }
+    }
     if response.status() == StatusCode::UNAUTHORIZED {
         response.headers_mut().insert(
             header::WWW_AUTHENTICATE,
@@ -1646,6 +1771,12 @@ async fn observe(
         header::CACHE_CONTROL,
         axum::http::HeaderValue::from_static("no-store"),
     );
+    if let Some(epoch) = service.writer_fence.epoch() {
+        response.headers_mut().insert(
+            "x-vlite-epoch",
+            epoch.to_string().parse().expect("decimal epoch"),
+        );
+    }
     if role.is_some() {
         response
             .extensions_mut()
@@ -2393,6 +2524,7 @@ fn decode_payload(text: &str) -> Result<Vec<u8>, ApiError> {
 }
 
 async fn ready(State(service): State<Service>) -> Result<Json<Value>, ApiError> {
+    service.writer_fence.admit_mutation()?;
     if service.draining() {
         return Err(gateway_trust::draining());
     }

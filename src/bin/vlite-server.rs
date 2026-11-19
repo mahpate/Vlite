@@ -779,19 +779,19 @@ async fn stopped(mut stop: tokio::sync::watch::Receiver<bool>, health: Option<Gr
     let _ = health;
 }
 
-async fn run() -> Result<(), Box<dyn Error>> {
+async fn run() -> Result<i32, Box<dyn Error>> {
     let mut config = config()?;
     #[cfg(feature = "otel")]
     let telemetry = vlite::server::telemetry::configure(config.otlp_endpoint.as_deref())?;
     #[cfg(not(feature = "otel"))]
     let _ = &config.otlp_endpoint;
-    let finish = move |result: Result<(), Box<dyn Error>>| -> Result<(), Box<dyn Error>> {
-        result?;
+    let finish = move |result: Result<i32, Box<dyn Error>>| -> Result<i32, Box<dyn Error>> {
+        let code = result?;
         #[cfg(feature = "otel")]
         if let Some(provider) = telemetry {
             provider.shutdown()?;
         }
-        Ok(())
+        Ok(code)
     };
     let signals = Signals::new()?;
     // Bind both listeners before opening, so a port conflict never opens
@@ -1004,17 +1004,37 @@ async fn serve(
     snapshot: Option<PathBuf>,
     trust: Option<GatewayTrust>,
     apply: Option<ReaderApply>,
-) -> Result<(), Box<dyn Error>> {
+) -> Result<i32, Box<dyn Error>> {
     let (stop_tx, stop_rx) = tokio::sync::watch::channel(false);
     let signal = tokio::spawn({
         let stop_tx = stop_tx.clone();
         let draining = service.clone();
         let trust = trust.clone();
+        let authority = service.as_ref().and_then(Service::writer_stop_signal);
         async move {
-            let result = signals.recv().await;
+            let authority_stop = async move {
+                let Some(mut authority) = authority else {
+                    return std::future::pending::<()>().await;
+                };
+                loop {
+                    if *authority.borrow_and_update() {
+                        return;
+                    }
+                    if authority.changed().await.is_err() {
+                        return std::future::pending::<()>().await;
+                    }
+                }
+            };
+            let (result, authority_stop) = tokio::select! {
+                result = signals.recv() => (result, false),
+                () = authority_stop => (Ok(()), true),
+            };
             // Writer/reader: `/ready` answers 503 `draining` from here on.
             if let Some(service) = &draining {
                 service.begin_drain();
+                if authority_stop {
+                    service.begin_writer_drain()?;
+                }
             }
             // Gateway-trusted: keep serving while the not-ready state
             // propagates, then close the listener.
@@ -1137,6 +1157,7 @@ async fn serve(
         None => Ok(()),
     };
     stop_trust(trust).await;
+    let exit_code = service.as_ref().and_then(Service::writer_exit_code);
     vlite::server::log_stderr(
         "info",
         "server",
@@ -1150,7 +1171,14 @@ async fn serve(
     } else {
         signal.abort();
     }
-    Ok(())
+    if exit_code.is_some()
+        && let Some(service) = &service
+    {
+        // An OS signal may have won just before authority was lost.
+        service.begin_writer_drain()?;
+        service.writer_stopped()?;
+    }
+    Ok(exit_code.unwrap_or(0))
 }
 #[tokio::main]
 async fn main() -> std::process::ExitCode {
@@ -1170,7 +1198,7 @@ async fn main() -> std::process::ExitCode {
         _ => {}
     }
     match run().await {
-        Ok(()) => std::process::ExitCode::SUCCESS,
+        Ok(code) => std::process::ExitCode::from(code as u8),
         Err(error) => {
             vlite::server::log_stderr("error", "server", serde_json::json!({"event":"startup_or_shutdown_failure","message":error.to_string()}).to_string());
             std::process::ExitCode::FAILURE

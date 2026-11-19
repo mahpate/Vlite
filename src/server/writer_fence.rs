@@ -1,7 +1,8 @@
-//! Local, latched authority gates. No request or signal-drain wiring lives here.
+//! Latched authority gates and request receipts shared by serving and shutdown.
 #![cfg_attr(not(test), allow(dead_code))]
 
 use std::{
+    cell::Cell,
     collections::VecDeque,
     sync::{Arc, Mutex},
     time::{Duration, Instant},
@@ -17,6 +18,51 @@ use super::{
 };
 
 const SAMPLE_LIMIT: usize = 256;
+
+tokio::task_local! {
+    static REQUEST: Request;
+}
+
+struct Request {
+    receipt: Cell<bool>,
+    diagnostic: bool,
+}
+
+pub(super) async fn track_request<F: std::future::Future>(
+    diagnostic: bool,
+    future: F,
+) -> (F::Output, bool) {
+    REQUEST
+        .scope(
+            Request {
+                receipt: Cell::new(false),
+                diagnostic,
+            },
+            async {
+                let output = future.await;
+                let receipt = REQUEST.with(|request| request.receipt.get());
+                (output, receipt)
+            },
+        )
+        .await
+}
+
+pub(super) fn record_receipt() {
+    let _ = REQUEST.try_with(|request| request.receipt.set(true));
+}
+
+pub(super) fn diagnostic_read() -> bool {
+    REQUEST
+        .try_with(|request| request.diagnostic)
+        .unwrap_or(false)
+}
+
+pub(super) fn diagnostic(path: &str) -> bool {
+    matches!(
+        path,
+        "/ready" | "/health" | "/metrics" | "/v1/admin/serve-status"
+    )
+}
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(super) enum State {
@@ -66,7 +112,7 @@ struct Inner {
 }
 
 #[derive(Clone)]
-pub(super) struct WriterFence {
+pub(crate) struct WriterFence {
     // Disabled gates do not allocate, lock, consult a clock, or access a store.
     inner: Option<Arc<Inner>>,
 }
@@ -76,7 +122,7 @@ impl WriterFence {
         Self { inner: None }
     }
 
-    pub fn new(store: AuthorityStore, claim: Claim) -> Self {
+    pub(super) fn new(store: AuthorityStore, claim: Claim) -> Self {
         let (stop, _) = watch::channel(false);
         Self {
             inner: Some(Arc::new(Inner {
@@ -98,17 +144,47 @@ impl WriterFence {
         }
     }
 
-    pub fn state(&self) -> State {
+    pub(super) fn state(&self) -> State {
         self.inner
             .as_ref()
             .map_or(State::Disabled, |inner| inner.gate.lock().unwrap().state)
+    }
+
+    pub fn epoch(&self) -> Option<u64> {
+        self.inner.as_ref().map(|inner| inner.claim.epoch)
+    }
+
+    pub(super) fn admit_read(&self) -> Result<(), ApiError> {
+        if matches!(
+            self.state(),
+            State::Fenced | State::Draining | State::Stopped
+        ) {
+            Err(AuthorityError::Unavailable.into())
+        } else {
+            Ok(())
+        }
+    }
+
+    pub(super) fn admit(
+        &self,
+        method: &axum::http::Method,
+        route: &str,
+        path: &str,
+    ) -> Result<(), ApiError> {
+        if !super::read_request(method, route, path) {
+            self.admit_mutation()
+        } else if diagnostic(path) {
+            Ok(())
+        } else {
+            self.admit_read()
+        }
     }
 
     pub fn ready(&self) -> bool {
         matches!(self.state(), State::Disabled | State::Serving)
     }
 
-    pub fn admit_mutation(&self) -> Result<(), ApiError> {
+    pub(super) fn admit_mutation(&self) -> Result<(), ApiError> {
         if self.ready() {
             Ok(())
         } else {
@@ -127,7 +203,7 @@ impl WriterFence {
     }
 
     /// Startup transitions are explicit; outage recovery requires a fresh check.
-    pub fn transition(&self, to: State) -> Result<(), TransitionError> {
+    pub(super) fn transition(&self, to: State) -> Result<(), TransitionError> {
         let Some(inner) = &self.inner else {
             return Err(TransitionError {
                 from: State::Disabled,
@@ -174,14 +250,14 @@ impl WriterFence {
         Ok(())
     }
 
-    pub fn begin_drain(&self) -> Result<(), TransitionError> {
+    pub(super) fn begin_drain(&self) -> Result<(), TransitionError> {
         if self.inner.is_none() {
             return Ok(());
         }
         self.transition(State::Draining)
     }
 
-    pub fn stopped(&self) -> Result<(), TransitionError> {
+    pub(super) fn stopped(&self) -> Result<(), TransitionError> {
         if self.inner.is_none() {
             return Ok(());
         }
@@ -189,7 +265,7 @@ impl WriterFence {
     }
 
     /// Called by the deadline owner; this library does not own timers.
-    pub fn drain_timeout(&self) -> Result<(), TransitionError> {
+    pub(super) fn drain_timeout(&self) -> Result<(), TransitionError> {
         let Some(inner) = &self.inner else {
             return Ok(());
         };
@@ -207,12 +283,12 @@ impl WriterFence {
         Ok(())
     }
 
-    pub fn verify_before_commit(&self) -> Result<(), ApiError> {
+    pub(super) fn verify_before_commit(&self) -> Result<(), ApiError> {
         self.verify(false)
             .map_err(|()| AuthorityError::Unavailable.into())
     }
 
-    pub fn verify_before_ack(&self) -> Result<(), ApiError> {
+    pub(super) fn verify_before_ack(&self) -> Result<(), ApiError> {
         self.verify(true).map_err(|()| gateway::ambiguous_write())
     }
 
@@ -275,7 +351,7 @@ impl WriterFence {
     }
 
     /// Percentiles cover the latest bounded sample; max/count cover all checks.
-    pub fn measurements(&self) -> Measurements {
+    pub(super) fn measurements(&self) -> Measurements {
         let Some(inner) = &self.inner else {
             return Measurements::default();
         };
