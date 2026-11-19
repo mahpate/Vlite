@@ -80,7 +80,7 @@ These are undecided. No value below is measured or approved.
 
 | ID | Question | Recommendation | Blocks |
 |---|---|---|---|
-| OD-002 | Writer fencing: per-batch epoch verification versus periodic recheck plus infrastructure fence plus gateway epoch stamp | Start with per-batch verification and measure (MEAS-006); implemented locally under the 2026-11-18 delegation, not an owner confirmation | Qualification of the gateway epoch check and fenced failover; MEAS-006 not run |
+| OD-002 | Writer fencing: per-batch epoch verification versus periodic recheck plus infrastructure fence plus gateway epoch stamp | Start with per-batch verification and measure (MEAS-006); implemented locally under the 2026-11-18 delegation, not an owner confirmation | Qualification of the gateway epoch check and fenced failover; MEAS-006 has only a local in-memory probe and no ACA run |
 | OD-004 | Dashboard users and sessions through the gateway | Defer; later stateless signed session tokens | Dashboard sign-in through the gateway |
 | OD-005 | S_ctl and the poll interval | Decide from MEAS-005; no default | The deployed values; the MVP takes them as required configuration |
 | OD-006 | Gateway minimum and maximum replicas | Minimum 2 warm; maximum from MEAS-004 and quota check | The deployed `max_replicas` and ACA sizing; the MVP takes the maximum as required configuration. The minimum is an ACA setting with no runtime effect |

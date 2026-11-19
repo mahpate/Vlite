@@ -85,6 +85,8 @@ mod users;
 mod webhooks;
 mod writer_authority;
 mod writer_fence;
+#[cfg(test)]
+mod writer_fence_bench;
 pub use admin::{ServerOptions, configured_admin_router, read_token_file, selected_database};
 pub use cloud_recovery::{CloudRestore, RecoveryError, RestoreMode, cloud_restore, cloud_sets};
 pub use compaction::{Managed, ManagedHandle};
