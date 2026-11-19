@@ -336,7 +336,7 @@ impl WriterAuthority {
 }
 
 #[cfg(test)]
-fn claim(store: AuthorityStore, lineage: Option<u64>) -> Result<WriterFence, String> {
+pub(super) fn claim(store: AuthorityStore, lineage: Option<u64>) -> Result<WriterFence, String> {
     claim_prepared(store, lineage, None, None)
 }
 
@@ -451,6 +451,15 @@ impl Service {
     ) -> Result<(), String> {
         recheck(self.writer_fence.clone(), interval, stop).await
     }
+}
+
+#[cfg(test)]
+pub(super) async fn recheck_for_measurement(
+    fence: WriterFence,
+    interval: Duration,
+    stop: watch::Receiver<bool>,
+) -> Result<(), String> {
+    recheck(fence, interval, stop).await
 }
 
 async fn recheck(
