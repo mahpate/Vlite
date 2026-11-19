@@ -439,6 +439,19 @@ Opt-in only; gateway is a stateless scale-out edge over shared authoritative con
 
 The transfer clock starts immediately **before** the conditional update and stops when the probe observes the local writer in its fenced state. It includes the transfer itself, the next authority check and observer scheduling. There was no client write in flight, so this is not a stale-acknowledgment window. The elapsed times come from one host, not ACA, and do not test clock skew. Original `meas006-azurite-01/probe.log` SHA-256: `fda823b2d49ad27036e8d1b360574f5ef90dbc05b65f4e417346ea4ca1f656a2`.
 
+**MEAS-003 archive-loss probe (`3e5d324b`, 2026-11-19; local correctness evidence).** The ignored `backup_policy::tests::meas003` probe uses the real archive runtime, authority-based loss report and restore path with deterministic faults in the in-memory object store. Each write is one commit. It records writes acknowledged through the library's writer gates, restores the published position, and compares missing records with the report. It does not send HTTP requests. An independent run from the clean commit used three fault-phase commits and two rounds; all 12 scenario/phase rows agreed and repeated identically.
+
+| Injected fault | Acknowledged position | Published and restored position | Missing acknowledged writes | Report loss | Estimate from local archive status alone |
+|---|---:|---:|---:|---|---:|
+| Segment upload refused | 8 | 5 | 3 | Known 3 | 3 |
+| Index upload outcome unknown | 8 | 5 | 3 | Known 3 | 3 |
+| Head update not applied | 8 | 5 | 3 | Known 3 | 3 |
+| Head update applied but unconfirmed | 8 | 8 | 0 | Known 0 | 3 |
+
+After recovery, all scenarios restored position 9 with no missing writes. After one further unarchived write and manual failover execution, the frozen base remained at 9: both the acknowledged operator report and the subsequent report correctly said Known 1, and the former writer refused another write. Missing or older-than-archive observations preserved Unknown; an unreadable authority refused the report with `failover_authority_unavailable`. The unconfirmed head case demonstrates why local archive status alone is not the loss report: it can lag a successfully published head.
+
+Run with `VLITE_MEAS003=1 cargo test --locked --features server --lib backup_policy::tests::meas003 -- --ignored --nocapture`. Optional `VLITE_MEAS003_COMMITS` is 1-64 (default 3); `VLITE_MEAS003_ROUNDS` is 1-8 (default 2). Output is labelled `local-fake` and contains positions and error codes, not writer/set identifiers. Original acceptance log `meas003-local-3e5d324b/probe.log` SHA-256: `ef04c7b7600a084b9e6259c129584b1a6639e82494d3e48c85aba44b8994f8be`. This is a single-process measurement in commit positions, not elapsed time, Azure/network fault behavior, a production loss bound or an SLO. No gate changes.
+
 **MEAS-002 ACA run `meas002a` (2026-11-19; proposal evidence only, NOT an SLO).** The `measure.ps1` MEAS-002 mode (T30, commit `09c5d870`) ran the `benchmarks/ha_meas002.rs` driver as one ACA job in the temporary resource group `vlite-ha-meas-meas002a`, from clean source `09c5d8702c6f45573a633039f77e717e362b27a2`. The job used the c1 tier (1 vCPU / 2 GiB), which is not a target tier, and reported `available_parallelism` 1. The driver starts a writer and a reader `vlite-server` in the same job, over a fresh prefix in a temporary Standard_LRS StorageV2 account reached with the job's managed identity. Settings: 360 s at 20 commits/s, a 60 s archive interval, a 1,000 ms reader head poll, a 100 ms observer, a 300,000 ms staleness bound and a 1 GiB capacity.
 
 | Metric (ms) | p50 | p90 | p95 | p99 | max |
