@@ -102,6 +102,11 @@ name = "ha-reader-apply"
 path = "benchmarks/ha_reader_apply.rs"
 required-features = ["json"]
 
+[[example]]
+name = "ha-meas002"
+path = "benchmarks/ha_meas002.rs"
+required-features = ["server"]
+
 [[bin]]
 name = "vlite-server"
 required-features = ["server"]
