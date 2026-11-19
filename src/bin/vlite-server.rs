@@ -12,12 +12,12 @@ use vlite::{
     AnnSnapshotLoad, Database, Durability, FormatVersion,
     server::{
         BearerToken, CloudRestore, GatewayTrust, GatewayTrustConfig, GroupCommitConfig, Managed,
-        ManagedHandle, RecoveryError, RestoreMode, ServeMode, ServerOptions, Service,
-        configured_admin_router, read_token_file, selected_database,
+        ManagedHandle, ReaderApply, ReaderApplyConfig, RecoveryError, RestoreMode, ServeMode,
+        ServerOptions, Service, configured_admin_router, read_token_file, selected_database,
     },
 };
 
-const USAGE: &str = "usage: vlite-server <database-path> [--providers-file <path> | VLITE_PROVIDERS_FILE] [--memory-bindings-file <path> | VLITE_MEMORY_BINDINGS_FILE] [--create-if-missing <dimensions> [--create-format 3|4|5]] (default 5: graph-enabled; 3 and 4 create plain vector files) [--bind <ip:port>] [--tls-cert <pem> --tls-key <pem>] [--otlp-endpoint <url>] [--grpc-bind <ip:port> [--grpc-tls-cert <pem> --grpc-tls-key <pem> [--grpc-tls-client-ca <pem>]]] [--allow-remote] [--ann-snapshot] [--lock-held-reads] [--group-commit [--group-commit-requests <1..16>] [--group-commit-bytes <1024..268435456>] [--group-commit-delay-ms <0..100>]] [--durability periodic|full|none] (default periodic) [--flush-interval-ms <1..60000>] (periodic only, default 60000; none keeps the database in memory only, needs --create-if-missing and loses all data when the server stops) [--encryption-key-file <path> | VLITE_ENCRYPTION_KEY | VLITE_ENCRYPTION_KEY_HEX] [--token-file <path> | --insecure-local]; admin: VLITE_AUTH_TOKEN or VLITE_AUTH_TOKEN_FILE; optional read-only: VLITE_READ_ONLY_TOKEN or VLITE_READ_ONLY_TOKEN_FILE; backups/credentials/persistent audit: VLITE_ADMIN_DIR; off-by-default schedules: VLITE_AUTO_MAINTENANCE_INTERVAL_SECS, VLITE_BACKUP_INTERVAL_SECS, VLITE_BACKUP_RETENTION_ENABLED=1, VLITE_BACKUP_RETAIN_LAST, VLITE_BACKUP_RETAIN_DAYS, VLITE_BACKUP_DRILL_EVERY, VLITE_BACKUP_DRILL_MAX_BYTES; VLITE_SLOW_QUERY_MS; VLITE_METRICS_WITH_MEMORY=1 (serve /metrics and the metrics summary while agent memory is configured; their totals then include memory data); dashboard sign-in (needs VLITE_ADMIN_DIR and an admin token): VLITE_TRUSTED_PROXY=1 behind a proxy that sets X-Forwarded-Proto/For, VLITE_SESSION_IDLE_MINUTES (default 30), VLITE_SESSION_MAX_HOURS (default 8), optional first super admin: VLITE_ADMIN_USERNAME with VLITE_ADMIN_PASSWORD_FILE; [--log-buffer <n>] (default 2000, maximum 100000); [--serve-mode standalone|writer|reader | VLITE_SERVE_MODE] (default standalone; reader serves an existing file read-only and refuses writes, creation, durability, group commit, ANN snapshots, gRPC and VLITE_ADMIN_DIR); opt-in Azure Blob cloud backup policy: PUT /v1/admin/cloud-backup (emulator shared key: VLITE_CLOUD_BACKUP_SHARED_KEY_FILE); offline isolated cloud restore: vlite-server cloud-sets | cloud-restore (run either without arguments for its usage); [--gateway-trust-file <json>] (feature-aca-ha gateway-trusted backend: data requests are authorized only by gateway-signed principal envelopes checked against the shared control state; refuses --insecure-local, --grpc-bind, --serve-mode reader, --durability none and VLITE_ADMIN_DIR); DB-free gateway: vlite-server gateway --config <json>; its keys: vlite-server gateway-keygen; its shared control state: vlite-server control-state publish|update (run either without arguments for its usage; a database literally named gateway, gateway-keygen or control-state needs a ./ prefix)";
+const USAGE: &str = "usage: vlite-server <database-path> [--providers-file <path> | VLITE_PROVIDERS_FILE] [--memory-bindings-file <path> | VLITE_MEMORY_BINDINGS_FILE] [--create-if-missing <dimensions> [--create-format 3|4|5]] (default 5: graph-enabled; 3 and 4 create plain vector files) [--bind <ip:port>] [--tls-cert <pem> --tls-key <pem>] [--otlp-endpoint <url>] [--grpc-bind <ip:port> [--grpc-tls-cert <pem> --grpc-tls-key <pem> [--grpc-tls-client-ca <pem>]]] [--allow-remote] [--ann-snapshot] [--lock-held-reads] [--group-commit [--group-commit-requests <1..16>] [--group-commit-bytes <1024..268435456>] [--group-commit-delay-ms <0..100>]] [--durability periodic|full|none] (default periodic) [--flush-interval-ms <1..60000>] (periodic only, default 60000; none keeps the database in memory only, needs --create-if-missing and loses all data when the server stops) [--encryption-key-file <path> | VLITE_ENCRYPTION_KEY | VLITE_ENCRYPTION_KEY_HEX] [--token-file <path> | --insecure-local]; admin: VLITE_AUTH_TOKEN or VLITE_AUTH_TOKEN_FILE; optional read-only: VLITE_READ_ONLY_TOKEN or VLITE_READ_ONLY_TOKEN_FILE; backups/credentials/persistent audit: VLITE_ADMIN_DIR; off-by-default schedules: VLITE_AUTO_MAINTENANCE_INTERVAL_SECS, VLITE_BACKUP_INTERVAL_SECS, VLITE_BACKUP_RETENTION_ENABLED=1, VLITE_BACKUP_RETAIN_LAST, VLITE_BACKUP_RETAIN_DAYS, VLITE_BACKUP_DRILL_EVERY, VLITE_BACKUP_DRILL_MAX_BYTES; VLITE_SLOW_QUERY_MS; VLITE_METRICS_WITH_MEMORY=1 (serve /metrics and the metrics summary while agent memory is configured; their totals then include memory data); dashboard sign-in (needs VLITE_ADMIN_DIR and an admin token): VLITE_TRUSTED_PROXY=1 behind a proxy that sets X-Forwarded-Proto/For, VLITE_SESSION_IDLE_MINUTES (default 30), VLITE_SESSION_MAX_HOURS (default 8), optional first super admin: VLITE_ADMIN_USERNAME with VLITE_ADMIN_PASSWORD_FILE; [--log-buffer <n>] (default 2000, maximum 100000); [--serve-mode standalone|writer|reader | VLITE_SERVE_MODE] (default standalone; reader serves an existing file read-only and refuses writes, creation, durability, group commit, ANN snapshots, gRPC and VLITE_ADMIN_DIR); [--reader-apply-file <json>] (reader mode only, no environment variable; JSON requires target_file, follower_dir, capacity_bytes (1..1073741824, 1 GiB cap), staleness_bound_ms (1..3600000), poll_interval_ms (positive and below the staleness bound); optional shared_key_file; two private follower slots <follower_dir>/reader-a|reader-b; positional path must be <follower_dir>/reader-a/database.vlite; encrypted databases refused); opt-in Azure Blob cloud backup policy: PUT /v1/admin/cloud-backup (emulator shared key: VLITE_CLOUD_BACKUP_SHARED_KEY_FILE); offline isolated cloud restore: vlite-server cloud-sets | cloud-restore (run either without arguments for its usage); [--gateway-trust-file <json>] (feature-aca-ha gateway-trusted backend: data requests are authorized only by gateway-signed principal envelopes checked against the shared control state; refuses --insecure-local, --grpc-bind, --durability none and VLITE_ADMIN_DIR); DB-free gateway: vlite-server gateway --config <json>; its keys: vlite-server gateway-keygen; its shared control state: vlite-server control-state publish|update (run either without arguments for its usage; a database literally named gateway, gateway-keygen or control-state needs a ./ prefix)";
 
 struct Config {
     providers: vlite::server::providers::ProviderRegistry,
@@ -54,6 +54,7 @@ struct Config {
     serve_mode: ServeMode,
     /// EPIC-004: `--gateway-trust-file`, validated (nothing contacted yet).
     gateway_trust: Option<GatewayTrustConfig>,
+    reader_apply: Option<ReaderApplyConfig>,
 }
 
 /// Dashboard sign-in settings from the environment.
@@ -212,8 +213,12 @@ fn config() -> Result<Config, Box<dyn Error>> {
     let mut flush_interval_ms: Option<u64> = None;
     let mut serve_mode: Option<ServeMode> = None;
     let mut gateway_trust_file: Option<PathBuf> = None;
+    let mut reader_apply_file: Option<PathBuf> = None;
     while let Some(arg) = args.next() {
         match arg.to_str() {
+            Some("--reader-apply-file") if reader_apply_file.is_none() => {
+                reader_apply_file = Some(args.next().ok_or(USAGE)?.into());
+            }
             Some("--gateway-trust-file") if gateway_trust_file.is_none() => {
                 gateway_trust_file = Some(args.next().ok_or(USAGE)?.into());
             }
@@ -490,6 +495,20 @@ fn config() -> Result<Config, Box<dyn Error>> {
     }
     let env_key = std::env::var_os("VLITE_ENCRYPTION_KEY");
     let env_hex = std::env::var_os("VLITE_ENCRYPTION_KEY_HEX");
+    if reader_apply_file.is_some() {
+        if serve_mode != ServeMode::Reader {
+            return Err("--reader-apply-file needs --serve-mode reader".into());
+        }
+        if encryption_key_file.is_some() || env_key.is_some() || env_hex.is_some() {
+            return Err(
+                "a reader that applies the archive cannot open an encrypted database".into(),
+            );
+        }
+    }
+    let reader_apply = reader_apply_file
+        .as_deref()
+        .map(|file| ReaderApplyConfig::load(file, Path::new(&path)))
+        .transpose()?;
     if usize::from(encryption_key_file.is_some())
         + usize::from(env_key.is_some())
         + usize::from(env_hex.is_some())
@@ -587,6 +606,7 @@ fn config() -> Result<Config, Box<dyn Error>> {
         accounts: account_settings()?,
         serve_mode,
         gateway_trust,
+        reader_apply,
     };
     // Validate every option before creating or opening a database.
     options(&config, None).validate()?;
@@ -792,6 +812,22 @@ async fn run() -> Result<(), Box<dyn Error>> {
         ),
         None => None,
     };
+    let mut apply = match config.reader_apply.take() {
+        Some(config) => {
+            let enrolled = tokio::task::spawn_blocking(move || ReaderApply::enroll(config))
+                .await
+                .map_err(|error| error.to_string())
+                .and_then(|result| result);
+            match enrolled {
+                Ok(apply) => Some(apply),
+                Err(error) => {
+                    stop_trust(trust).await;
+                    return Err(error.into());
+                }
+            }
+        }
+        None => None,
+    };
     // Managed compaction runtime: control state (tokens, accounts, the
     // compaction journal) loads before any database opens, so an interrupted
     // compaction is reconciled first and recovery mode can still sign in.
@@ -819,6 +855,7 @@ async fn run() -> Result<(), Box<dyn Error>> {
                 None
             }
             Err(error) => {
+                stop_apply(apply.take()).await;
                 stop_trust(trust).await;
                 return Err(error.into());
             }
@@ -847,6 +884,7 @@ async fn run() -> Result<(), Box<dyn Error>> {
                 signals,
                 router,
                 Some(handle),
+                None,
                 None,
                 None,
                 None,
@@ -887,6 +925,10 @@ async fn run() -> Result<(), Box<dyn Error>> {
         Some(trust) => service.with_gateway_trust(trust),
         None => service,
     };
+    let service = match &apply {
+        Some(apply) => service.with_reader_apply(apply),
+        None => service,
+    };
     if let Some(tls) = &config.rest_tls {
         service.register_tls(tls.clone())?;
     }
@@ -906,11 +948,15 @@ async fn run() -> Result<(), Box<dyn Error>> {
         Ok(started) => started,
         Err(error) => {
             // Never leave a scheduler or the database open on failed startup.
+            stop_apply(apply.take()).await;
             let _ = service.close().await;
             stop_trust(trust).await;
             return Err(error.into());
         }
     };
+    if let Some(apply) = &mut apply {
+        apply.start(service.clone());
+    }
     finish(
         serve(
             config,
@@ -923,6 +969,7 @@ async fn run() -> Result<(), Box<dyn Error>> {
             Some(service),
             snapshot,
             trust,
+            apply,
         )
         .await,
     )
@@ -933,6 +980,12 @@ async fn run() -> Result<(), Box<dyn Error>> {
 async fn stop_trust(trust: Option<GatewayTrust>) {
     if let Some(trust) = trust {
         let _ = tokio::task::spawn_blocking(move || trust.stop()).await;
+    }
+}
+
+async fn stop_apply(apply: Option<ReaderApply>) {
+    if let Some(apply) = apply {
+        let _ = tokio::task::spawn_blocking(move || apply.stop()).await;
     }
 }
 
@@ -949,6 +1002,7 @@ async fn serve(
     service: Option<Service>,
     snapshot: Option<PathBuf>,
     trust: Option<GatewayTrust>,
+    apply: Option<ReaderApply>,
 ) -> Result<(), Box<dyn Error>> {
     let (stop_tx, stop_rx) = tokio::sync::watch::channel(false);
     let signal = tokio::spawn({
@@ -1076,6 +1130,7 @@ async fn serve(
     if let (Some(path), Some(service)) = (&snapshot, &service) {
         save_ann_snapshot(service, path).await;
     }
+    stop_apply(apply).await;
     let closing = match &service {
         Some(service) => service.close().await,
         None => Ok(()),
