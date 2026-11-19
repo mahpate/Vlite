@@ -83,6 +83,12 @@ revision, dirty flag, and cleanup status, **never the subscription ID**.
 Failure summaries retain completed results. No JSON fields from the probe
 are interpreted or treated as a serving/SLO qualification.
 
+`failedStep` identifies the failed measurement/setup step (for example,
+`BuildImage`); `cleanupFailedStep` independently identifies `DeleteGroup` or
+`WaitDeleted` if cleanup fails. Both are null when that part of the run
+succeeds. Only plan step names are saved, not native error text or command
+arguments; cleanup does not overwrite the original failure step.
+
 There are charges for Basic ACR, remote builds, job CPU/memory, and log
 ingestion. Builds are bounded at 7,200 seconds, replicas at 3,600 seconds,
 execution polling at 4,200 seconds per tier, log fallback at 12 attempts

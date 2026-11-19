@@ -340,6 +340,7 @@ function Invoke-VLiteMeas([hashtable]$Options) {
         measurement = 'MEAS-007'; sourceRevision = $config.SourceRevision
         dirty = [bool]$config.DirtyPaths; resourceGroup = $config.ResourceGroup
         status = 'Running'; cleanupStatus = 'Pending'; results = [Collections.Generic.List[object]]::new()
+        failedStep = $null; cleanupFailedStep = $null
     }
     $failed = $true; $principal = ''; $workspace = ''; $execution = ''; $current = $null
     try {
@@ -404,6 +405,7 @@ function Invoke-VLiteMeas([hashtable]$Options) {
         $failed = $false
     } catch {
         $summary.status = 'Failed'
+        $summary.failedStep = $step.Step
         if ($null -ne $current -and $current.status -notin @('Failed', 'Stopped', 'Canceled', 'Cancelled')) { $current.status = 'Failed' }
         throw
     } finally {
@@ -415,12 +417,15 @@ function Invoke-VLiteMeas([hashtable]$Options) {
                 try {
                     $delete = $steps | Where-Object Step -eq DeleteGroup
                     $wait = $steps | Where-Object Step -eq WaitDeleted
+                    $cleanupStep = 'DeleteGroup'
                     $null = Invoke-VLiteMeasAz (Arguments $delete)
+                    $cleanupStep = 'WaitDeleted'
                     Wait-VLiteMeasDeleted (Arguments $wait)
                     $summary.cleanupStatus = 'Deleted'
                 } catch {
                     $summary.status = 'Failed'
                     $summary.cleanupStatus = 'Failed'
+                    $summary.cleanupFailedStep = $cleanupStep
                     throw "MEASUREMENT CLEANUP FAILED: delete tagged resource group $($config.ResourceGroup) manually."
                 }
             }

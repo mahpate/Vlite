@@ -133,41 +133,67 @@ try {
     Assert ($docker.Contains('cargo build --locked --release --features json --example ha-reader-apply')) 'Missing example build'
     Assert ($docker -match '(?m)^USER (?!root)') 'Image must run non-root'
 
-    foreach ($keep in @($false, $true)) {
+    foreach ($failureCase in @(
+        @{ Step = 'CreateRegistry'; Command = 'acr create'; Keep = $false; CleanupFails = $false },
+        @{ Step = 'CreateRegistry'; Command = 'acr create'; Keep = $true; CleanupFails = $false },
+        @{ Step = 'BuildImage'; Command = 'acr build'; Keep = $false; CleanupFails = $false },
+        @{ Step = 'BuildImage'; Command = 'acr build'; Keep = $true; CleanupFails = $false },
+        @{ Step = 'BuildImage'; Command = 'acr build'; Keep = $false; CleanupFails = $true }
+    )) {
+        $keep = $failureCase.Keep
+        $script:failureCase = $failureCase
         $script:calls = [Collections.Generic.List[string]]::new()
         function Invoke-VLiteMeasAz {
             param([string[]]$Arguments, [switch]$Raw)
             $script:calls.Add(($Arguments -join ' '))
-            switch (($Arguments[0..1] -join ' ')) {
+            $command = $Arguments[0..1] -join ' '
+            if ($command -eq $script:failureCase.Command) {
+                throw 'injected mid-run failure never-print-this-subscription'
+            }
+            switch ($command) {
                 'group exists' { return $false }
                 'group create' { return @{ name = 'temporary' } }
-                'acr create' { throw 'injected mid-run failure' }
-                'group delete' { return }
+                'acr create' { return @{ name = 'temporary-registry' } }
+                'group delete' {
+                    if ($script:failureCase.CleanupFails) { throw 'injected cleanup failure' }
+                    return
+                }
                 default { throw 'unexpected Azure stub invocation' }
             }
         }
         $run = $options.Clone(); $run.Plan = $false; $run.SubscriptionId = 'never-print-this-subscription'
         $run.AllowDirty = $true; $run.KeepOnFailure = $keep
-        $run.OutDir = Join-Path $scratch "failure-$keep"
+        $run.OutDir = Join-Path $scratch "failure-$($failureCase.Step)-$keep-$($failureCase.CleanupFails)"
         function git { $global:LASTEXITCODE = 0; return }
-        Assert-Throws { Invoke-VLiteMeas -Options $run } 'injected'
+        Assert-Throws { Invoke-VLiteMeas -Options $run } 'injected|CLEANUP FAILED'
         Assert ((@($script:calls | Where-Object { $_ -like 'group delete *' }).Count -eq 1) -eq (-not $keep)) 'Failure cleanup policy differs'
         Assert (Test-Path (Join-Path $run.OutDir 'summary.json')) 'Failure must persist a summary'
+        $saved = Get-Content -Raw (Join-Path $run.OutDir 'summary.json')
+        $summary = $saved | ConvertFrom-Json
+        Assert ($summary.failedStep -eq $failureCase.Step) 'Setup failure must identify its step even after cleanup'
+        $cleanupStep = if ($failureCase.CleanupFails) { 'DeleteGroup' } else { $null }
+        Assert ($summary.cleanupFailedStep -eq $cleanupStep) 'Cleanup failure must be separate from the setup failure'
+        Assert (-not $saved.Contains($run.SubscriptionId)) 'Failure summary leaked native diagnostics'
     }
 
     $script:sampleLines = @(New-TestLog)
     function Start-Sleep { param([int]$Seconds) }
-    foreach ($mode in 'Console', 'TableFallback', 'RowFallback', 'Retry', 'FailedJob', 'CleanupFailure', 'ExistingGroup') {
+    foreach ($mode in 'Console', 'TableFallback', 'RowFallback', 'Retry', 'FailedJob', 'CleanupFailure', 'CleanupWaitFailure', 'ExistingGroup') {
         $script:mode = $mode
         $script:startAttempts = 0
+        $script:deleteRequested = $false
         $script:recorded = [Collections.Generic.List[object]]::new()
         function Invoke-VLiteMeasAz {
             param([string[]]$Arguments, [switch]$Raw)
             $script:recorded.Add(@($Arguments))
             switch -Regex ($Arguments -join ' ') {
-                '^group exists ' { return ($script:mode -eq 'ExistingGroup') }
+                '^group exists ' {
+                    if ($script:mode -eq 'CleanupWaitFailure' -and $script:deleteRequested) { throw 'injected deletion wait failure' }
+                    return ($script:mode -eq 'ExistingGroup')
+                }
                 '^group delete ' {
                     if ($script:mode -eq 'CleanupFailure') { throw 'injected deletion failure' }
+                    $script:deleteRequested = $true
                     return
                 }
                 '^identity create ' { return @{ principalId = 'principal-001' } }
@@ -210,7 +236,7 @@ try {
             Assert ($script:recorded.Count -eq 1) 'Existing resource group must never be mutated or deleted'
             continue
         }
-        if ($mode -in 'FailedJob', 'CleanupFailure') {
+        if ($mode -in 'FailedJob', 'CleanupFailure', 'CleanupWaitFailure') {
             Assert-Throws { Invoke-VLiteMeas -Options $run } 'did not succeed|CLEANUP FAILED'
         } else {
             Invoke-VLiteMeas -Options $run
@@ -222,8 +248,16 @@ try {
         $summary = $saved | ConvertFrom-Json
         Assert ($summary.results.Count -eq 1) 'Summary result count differs'
         Assert ($summary.results[0].executionName -eq 'execution-001') 'Execution missing from summary'
-        $expectedCleanup = if ($mode -eq 'CleanupFailure') { 'Failed' } else { 'Deleted' }
+        $expectedCleanup = if ($mode -in 'CleanupFailure', 'CleanupWaitFailure') { 'Failed' } else { 'Deleted' }
         Assert ($summary.cleanupStatus -eq $expectedCleanup) 'Cleanup status differs'
+        $expectedStep = if ($mode -eq 'FailedJob') { 'ReadLogs' } else { $null }
+        Assert ($summary.failedStep -eq $expectedStep) 'Measurement failure step differs'
+        $expectedCleanupStep = switch ($mode) {
+            'CleanupFailure' { 'DeleteGroup' }
+            'CleanupWaitFailure' { 'WaitDeleted' }
+            default { $null }
+        }
+        Assert ($summary.cleanupFailedStep -eq $expectedCleanupStep) 'Cleanup failure step differs'
         if ($mode -eq 'Retry') { Assert ($script:startAttempts -eq 2) 'Role propagation did not retry start' }
         $allArguments = $script:recorded | ConvertTo-Json -Depth 10
         Assert (-not ($allArguments -match '<subscription>|<execution>|<principal-id>|<workspace-id>')) 'Unresolved placeholder in live command'
