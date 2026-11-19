@@ -79,7 +79,6 @@ fn startup_authority_options_are_validated_before_creating_a_database() {
     for extra in [
         vec![],
         vec!["--serve-mode", "reader"],
-        vec!["--serve-mode", "writer", "--durability", "none"],
         vec!["--serve-mode", "writer", "--grpc-bind", "127.0.0.1:0"],
         vec!["--serve-mode", "writer", "--authority-recheck-ms", "499"],
         vec!["--serve-mode", "writer", "--authority-recheck-ms", "60001"],
@@ -95,6 +94,15 @@ fn startup_authority_options_are_validated_before_creating_a_database() {
             "invalid_arguments",
         );
     }
+    // A writer without durable commits has no archived base to restore from.
+    refused(
+        &[
+            base.as_slice(),
+            &["--serve-mode", "writer", "--durability", "none"],
+        ]
+        .concat(),
+        "writer_authority_base_unverified",
+    );
     refused(
         &[base.as_slice(), &["--serve-mode", "writer"]].concat(),
         "invalid_target",
