@@ -9,6 +9,12 @@ param(
     [string]$Records,
     [string]$Delta,
     [string]$Dimensions,
+    [string]$DurationSecs,
+    [string]$Rate,
+    [string]$ArchiveIntervalSecs,
+    [string]$StalenessBoundMs,
+    [string]$ReaderPollMs,
+    [string]$ObserveMs,
     [string]$OutDir,
     [string]$Image,
     [string]$SourceRevision,
@@ -30,6 +36,7 @@ function Test-VLiteMeasParameters([hashtable]$Options) {
     $config = @{
         SubscriptionId = ''; Location = 'westus2'; Id = ([guid]::NewGuid().ToString('N').Substring(0, 8))
         Measurements = @('MEAS-007'); Tiers = @(0.5, 1, 2); Records = ''; Delta = ''; Dimensions = ''
+        DurationSecs = ''; Rate = ''; ArchiveIntervalSecs = ''; StalenessBoundMs = ''; ReaderPollMs = ''; ObserveMs = ''
         OutDir = ''; Image = ''; SourceRevision = ''; AllowDirty = $false; KeepOnFailure = $false
         Plan = $false; DirtyPaths = ''
     }
@@ -43,8 +50,38 @@ function Test-VLiteMeasParameters([hashtable]$Options) {
     }
     if ([string]::IsNullOrWhiteSpace($config.Location)) { throw 'Location is required.' }
     $config.Measurements = @($config.Measurements)
-    if ($config.Measurements.Count -ne 1 -or $config.Measurements[0] -cne 'MEAS-007') {
-        throw 'Requested measurements are not implemented; only MEAS-007 is implemented.'
+    if ($config.Measurements.Count -ne 1 -or $config.Measurements[0] -cnotin @('MEAS-007', 'MEAS-002')) {
+        throw 'Requested measurements are not implemented; select only MEAS-007 or MEAS-002.'
+    }
+    $meas002 = $config.Measurements[0] -ceq 'MEAS-002'
+    $stalenessFields = @(
+        @('DurationSecs', 60L, 3600L, 360L), @('Rate', 1L, 200L, 20L),
+        @('ArchiveIntervalSecs', 60L, 86400L, 60L), @('StalenessBoundMs', 1000L, 3600000L, 300000L),
+        @('ReaderPollMs', 100L, 60000L, 1000L), @('ObserveMs', 50L, 5000L, 100L)
+    )
+    $refusedFields = if ($meas002) { @('Records', 'Delta', 'Dimensions') } else { @($stalenessFields | ForEach-Object { $_[0] }) }
+    foreach ($name in $refusedFields) {
+        if ($Options.ContainsKey($name)) { throw "$name is not supported for the selected measurement." }
+    }
+    if ($meas002 -and -not $Options.ContainsKey('Tiers')) { $config.Tiers = @(1) }
+    if ($meas002) {
+        $effective002 = @{}
+        foreach ($field in $stalenessFields) {
+            $name = $field[0]
+            $number = $field[3]
+            if ($Options.ContainsKey($name)) {
+                if ([string]$config[$name] -cnotmatch '\A[0-9]+\z' -or
+                    -not [long]::TryParse([string]$config[$name], [ref]$number) -or
+                    $number -lt $field[1] -or $number -gt $field[2]) { throw "$name is outside the probe limits." }
+            }
+            $effective002[$name] = $number
+        }
+        if ($effective002.ReaderPollMs -ge $effective002.StalenessBoundMs) {
+            throw 'ReaderPollMs must be below StalenessBoundMs.'
+        }
+        if (600 + $effective002.DurationSecs + 2 * (2 * $effective002.ArchiveIntervalSecs + 120) -gt 3600) {
+            throw 'MEAS-002 time budget exceeds the 3600 second replica timeout.'
+        }
     }
     if (@($config.Tiers).Count -eq 0) { throw 'At least one tier is required.' }
     $seen = @{}
@@ -107,6 +144,9 @@ function Test-VLiteMeasParameters([hashtable]$Options) {
     $config.Environment = "vlite-meas-$($config.Id)-env"
     $config.Registry = "vlitemeas$($config.Id)"
     $config.Identity = "vlite-meas-$($config.Id)-id"
+    $config.StorageAccount = "vlitemeas$($config.Id)st"
+    if ($config.StorageAccount -cnotmatch '\A[a-z0-9]{3,24}\z') { throw 'Invalid measurement storage account name.' }
+    Assert-VLiteMeasName $config.StorageAccount
     foreach ($name in $config.ResourceGroup, $config.Environment, $config.Registry, $config.Identity) {
         Assert-VLiteMeasName $name
     }
@@ -147,6 +187,19 @@ function New-VLiteMeasPlan([hashtable]$Config) {
     Step 'CreateIdentity' @('identity', 'create', '--name', $Config.Identity, '--resource-group', $rg)
     Step 'GrantPull' @('role', 'assignment', 'create', '--assignee-object-id', '<principal-id>',
         '--assignee-principal-type', 'ServicePrincipal', '--role', 'AcrPull', '--scope', $registry)
+    if ($Config.Measurements[0] -ceq 'MEAS-002') {
+        Step 'CreateStorage' @('storage', 'account', 'create', '--name', $Config.StorageAccount,
+            '--resource-group', $rg, '--location', $Config.Location, '--sku', 'Standard_LRS', '--kind', 'StorageV2',
+            '--allow-shared-key-access', 'false', '--allow-blob-public-access', 'false',
+            '--min-tls-version', 'TLS1_2', '--https-only', 'true')
+        Step 'CreateArchiveContainer' @('storage', 'container-rm', 'create', '--storage-account', $Config.StorageAccount,
+            '--resource-group', $rg, '--name', 'archive')
+        Step 'CreateCoordinationContainer' @('storage', 'container-rm', 'create', '--storage-account', $Config.StorageAccount,
+            '--resource-group', $rg, '--name', 'coordination')
+        Step 'GrantBlob' @('role', 'assignment', 'create', '--assignee-object-id', '<principal-id>',
+            '--assignee-principal-type', 'ServicePrincipal', '--role', 'Storage Blob Data Contributor',
+            '--scope', "$base/providers/Microsoft.Storage/storageAccounts/$($Config.StorageAccount)")
+    }
     Step 'CreateEnvironment' @('containerapp', 'env', 'create', '--name', $Config.Environment,
         '--resource-group', $rg, '--location', $Config.Location, '--enable-workload-profiles', 'true')
     foreach ($tier in $Config.Tiers) {
@@ -157,7 +210,16 @@ function New-VLiteMeasPlan([hashtable]$Config) {
         Assert-VLiteMeasName $job
         $envVars = @("VLITE_RESOURCE_SOURCE_REVISION=$($Config.SourceRevision)",
             "VLITE_RESOURCE_SOURCE_DIRTY_PATHS=$($Config.DirtyPaths)",
-            "VLITE_RESOURCE_HOST_NOTE=MEAS-007 temporary ACA job; requested CPU=$cpu memory=$memory")
+            "VLITE_RESOURCE_HOST_NOTE=$($Config.Measurements[0]) temporary ACA job; requested CPU=$cpu memory=$memory")
+        if ($Config.Measurements[0] -ceq 'MEAS-002') {
+            $envVars += @('VLITE_MEAS_KIND=MEAS-002', 'VLITE_MEAS002_TARGET_B64=<target-b64>')
+            foreach ($field in @(
+                @('DurationSecs', 'DURATION_SECS'), @('Rate', 'RATE'), @('ArchiveIntervalSecs', 'ARCHIVE_INTERVAL_SECS'),
+                @('StalenessBoundMs', 'STALENESS_BOUND_MS'), @('ReaderPollMs', 'READER_POLL_MS'), @('ObserveMs', 'OBSERVE_MS')
+            )) {
+                if ([string]$Config[$field[0]] -ne '') { $envVars += "VLITE_MEAS002_$($field[1])=$($Config[$field[0]])" }
+            }
+        }
         foreach ($field in 'Records', 'Delta', 'Dimensions') {
             if ([string]$Config[$field] -ne '') { $envVars += "VLITE_RESOURCE_$($field.ToUpperInvariant())=$($Config[$field])" }
         }
@@ -179,6 +241,14 @@ function New-VLiteMeasPlan([hashtable]$Config) {
     }
     Step 'DeleteGroup' @('group', 'delete', '--name', $rg, '--yes', '--no-wait')
     Step 'WaitDeleted' @('group', 'exists', '--name', $rg)
+}
+
+function New-VLiteMeas002Target([hashtable]$Config, [string]$ClientId) {
+    $target = [ordered]@{
+        account = $Config.StorageAccount; container = 'archive'; coordination_container = 'coordination'
+        prefix = 'meas002/'; auth = 'managed_identity'; client_id = $ClientId
+    } | ConvertTo-Json -Compress
+    return [Convert]::ToBase64String([Text.Encoding]::UTF8.GetBytes($target))
 }
 
 function ConvertFrom-VLiteMeasLog([string[]]$Lines) {
@@ -329,15 +399,16 @@ function Invoke-VLiteMeas([hashtable]$Options) {
     function Arguments($Step, [string]$Execution = '', [string]$Workspace = '', [string]$Principal = '') {
         @($Step.Arguments | ForEach-Object {
             $_.Replace('<subscription>', $config.SubscriptionId).Replace('<execution>', $Execution).
-                Replace('<workspace-id>', $Workspace).Replace('<principal-id>', $Principal)
+                Replace('<workspace-id>', $Workspace).Replace('<principal-id>', $Principal).Replace('<target-b64>', $targetB64)
         })
     }
+    $targetB64 = ''
     $exists = Invoke-VLiteMeasAz (Arguments $steps[0])
     if ($exists -isnot [bool]) { throw 'Group existence check did not return a boolean.' }
     if ($exists) { throw 'Measurement resource group already exists; refusing to reuse or delete it.' }
     $null = [IO.Directory]::CreateDirectory($config.OutDir)
     $summary = [ordered]@{
-        measurement = 'MEAS-007'; sourceRevision = $config.SourceRevision
+        measurement = $config.Measurements[0]; sourceRevision = $config.SourceRevision
         dirty = [bool]$config.DirtyPaths; resourceGroup = $config.ResourceGroup
         status = 'Running'; cleanupStatus = 'Pending'; results = [Collections.Generic.List[object]]::new()
         failedStep = $null; cleanupFailedStep = $null
@@ -353,8 +424,14 @@ function Invoke-VLiteMeas([hashtable]$Options) {
                     $identity = Invoke-VLiteMeasAz (Arguments $step)
                     $principal = [string]$identity.principalId
                     if (-not $principal) { throw 'Created identity lacks a principal ID.' }
+                    if ($config.Measurements[0] -ceq 'MEAS-002') {
+                        $clientId = [string]$identity.clientId
+                        if (-not $clientId) { throw 'Created identity lacks a client ID.' }
+                        $targetB64 = New-VLiteMeas002Target $config $clientId
+                    }
                 }
                 'GrantPull' { $null = Invoke-VLiteMeasAz (Arguments $step -Principal $principal) }
+                'GrantBlob' { $null = Invoke-VLiteMeasAz (Arguments $step -Principal $principal) }
                 'CreateEnvironment' {
                     $environment = Invoke-VLiteMeasAz (Arguments $step)
                     $workspace = [string]$environment.properties.appLogsConfiguration.logAnalyticsConfiguration.customerId
@@ -395,7 +472,7 @@ function Invoke-VLiteMeas([hashtable]$Options) {
                     $null = $begin -match 'VLITE-MEAS BEGIN ([a-f0-9]{64})'
                     $current.sha256 = $Matches[1]
                     if ($current.status -ne 'Succeeded') { throw 'Measurement job did not succeed.' }
-                    $current.fileName = "MEAS-007-c$($step.Tier).json"
+                    $current.fileName = "$($config.Measurements[0])-c$($step.Tier).json"
                     [IO.File]::WriteAllBytes((Join-Path $config.OutDir $current.fileName), $evidence.Bytes)
                     $summary | ConvertTo-Json -Depth 10 | Set-Content -LiteralPath (Join-Path $config.OutDir 'summary.json') -Encoding utf8
                 }
