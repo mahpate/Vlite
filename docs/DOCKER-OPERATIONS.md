@@ -585,6 +585,14 @@ Limits to plan for:
 - A policy file with `archive` is refused by older servers (unknown field);
   remove the field before downgrading.
 
+### HA operator runbooks (experimental, opt-in)
+
+See [HA operations on Azure Container Apps](HA-ACA.md) for manual failover
+preparation, reader replacement, control-state recovery, signing-key rotation
+and checkpoint restore. Gateway/read scale-out is not writer HA; the writer
+serving fence is not wired into the shipped binary and failover is not automatic.
+Azure Files remains experimental and is not power-loss qualified.
+
 ## Release and image verification
 
 The release workflow builds and tests the runtime, API, and dashboard targets.

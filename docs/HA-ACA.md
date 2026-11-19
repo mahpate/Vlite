@@ -1,0 +1,354 @@
+# Opt-in HA operations on Azure Container Apps
+
+These are experimental operator procedures, not production qualification.
+**HA is opt-in.** With none of the HA flags or files, VLite runs exactly as
+the single-writer deployment does today: no new headers, fields, reads,
+errors or startup requirements.
+
+Gateway and reader scale-out add read capacity and isolation, **not writer
+HA**. There is one writer. The writer serving fence is **not wired into the
+shipped binary yet**, and there is no automatic failover. Failover is an
+operator-run, reported and acknowledged procedure; the command prepares
+authority transfer, not a running replacement.
+
+**Azure Files remains experimental and is not power-loss qualified.**
+The [singleton deployment](../deploy/azure-container-apps/README.md) is
+unchanged. The separate [HA scaffolding](../deploy/azure-container-apps/ha/README.md)
+stops at its qualification gate before rollout; these instructions do not
+bypass it. Reader verification, fencing/manual drills, migration rollback,
+and measured SLO/chaos/runbook review gates remain separate requirements
+(GATE-004 through GATE-007 in the
+[project plan](projects/feature-aca-ha/feature-aca-ha.prd.md)).
+Older [gateway boundary tables](projects/feature-aca-ha/gateway.md) and
+[local test evidence](projects/feature-aca-ha/gateway-test-plan.md) are not
+proof of current writer HA or ACA qualification.
+
+## Prepare private inputs
+
+Use an approved isolated environment, the matching `vlite-server` binary,
+verified backups and archive, scoped Blob identity permissions, and a
+recorded recovery decision. Do not touch the live singleton for a drill.
+Measure capacity, polling, staleness and drain inputs; there are no
+qualified timing defaults or promised RPO/RTO.
+
+Examples below use PowerShell and Windows paths. Replace bracketed
+placeholders before running; paths refer to private operator files, not
+repository files. In Linux containers use the corresponding mounted paths.
+Configuration schemas are in the
+[API reference](API.md#gateway-mode-and-gateway-trusted-backends-experimental-opt-in-off-by-default);
+target JSON is the cloud backup policy's target, not the whole policy.
+Keep control and tenant archive targets separate.
+
+Use the existing **Container Apps secrets**, the same way as the admin
+token; no Key Vault or other new service is required. Project only the
+role's required files read-only, with generation-specific immutable secret
+names. Backends receive verification keys, never signing seeds; gateways
+receive no admin token. Preserve private originals and verify permissions
+on the actual platform. Follow the
+[private material procedure](../deploy/azure-container-apps/ha/README.md#private-material-and-intended-reconciliation).
+Never put key or token values in command lines, logs, examples, control-state
+objects or Git. Disable transcripts, debug tracing and payload capture.
+Use file arguments and `VLITE_AUTH_TOKEN_FILE`, not literal credentials.
+
+To inspect shipped usage without accessing Azure, run these without arguments:
+
+```powershell
+vlite-server failover
+vlite-server gateway
+vlite-server gateway-keygen
+vlite-server control-state
+vlite-server cloud-sets
+vlite-server cloud-restore
+```
+
+Missing-argument errors are expected. The following usage excerpts are quoted
+verbatim; examples beneath them supply the required arguments.
+
+## Planned or unplanned writer failover
+
+**When:** preparing a manual handoff after maintenance or writer loss in an
+approved isolated exercise. **Prerequisites:** existing valid authority,
+access to its coordination target, archive verification, exclusive operator
+control, and infrastructure proof that the old writer cannot run.
+
+For planned work, first stop client writes, quiesce/flush the writer using
+the existing shutdown procedure, and capture its final observed sequence/time
+and archive status if available. For unplanned loss, missing observations
+mean unknown loss, not zero loss.
+
+Deactivate **all** old writer revisions, wait for **every** revision to have
+zero replicas, and re-enumerate to confirm they remain stopped. Follow the
+[deployment stop requirements](../deploy/azure-container-apps/ha/README.md#private-material-and-intended-reconciliation).
+Do not treat one replica, single-revision mode, a dead process, or an expired
+lease as fencing. Never acknowledge zero based only on app scale settings.
+
+Exact usage:
+
+```text
+vlite-server failover report|execute --target-file <json> [--shared-key-file <path>] [--archive-status-file <json>] [--observed-sequence <n> --observed-unix-ms <ms>] [execute only, all required: --ack-report-id <id> --expected-epoch <n> --expected-revision <rev> --old-replicas <n>]
+```
+
+After confirming the stop, obtain and privately retain the report:
+
+```powershell
+vlite-server failover report --target-file C:\private\authority-target.json
+```
+
+Read both `report` and `text`. Check scope, lineage, epoch, revision,
+archived position and disclosed loss. The authority's durable head is the
+recovery boundary; a newer status checkpoint is not authority evidence.
+Commits after the archived position are lost. An observation only measures
+loss at that position; later loss can still be unknown.
+
+If available, add `--archive-status-file C:\private\archive-status.json`
+(the archive status object only, at most 64 KiB), and the paired
+`--observed-sequence <n> --observed-unix-ms <ms>`. Use the **identical**
+optional inputs for report and execute, or the acknowledgement changes.
+Do not invent observations or replace unknown values with zero.
+
+Only after explicitly accepting that exact loss report:
+
+```powershell
+vlite-server failover execute --target-file C:\private\authority-target.json `
+  --ack-report-id <report.report_id> --expected-epoch <report.epoch> `
+  --expected-revision <report.revision> --old-replicas 0
+```
+
+The acknowledgement is the exact `report_id`, epoch and revision, not a
+general approval string. `--old-replicas 0` is an operator assertion; the
+command does not inspect Azure. It refuses nonzero replicas with
+`failover_fence_unconfirmed`, mismatches with `failover_ack_mismatch`, and
+changed authority with `failover_report_stale` or `failover_conflict`.
+For `failover_indeterminate`, inspect authority before any retry; never
+blindly repeat a potentially successful transfer.
+
+**Verify:** successful JSON contains `result.record` and `result.etag`.
+The record has an incremented epoch, a new revision, phase `recovering`,
+no writer ID, and the previous archived head as its base. This does **not**
+restore, claim, start, route to, or enable serving on a new writer. There is
+no shipped CLI step that completes the fenced writer-serving handoff.
+Keep writes unavailable pending a separately qualified recovery path.
+In that path, verify restored data, sole ownership, authority, readiness,
+tenant routing and a read/write check before admitting traffic;
+`GET /v1/admin/serve-status` currently reports `epoch: null`, not proof of fencing.
+
+**Back out:** before execute, cancel without changing authority, and resume
+the old writer only after proving no handoff occurred and sole ownership
+is intact. After execute or an uncertain result, leave old revisions
+stopped. Do not decrement authority, overwrite it, or reactivate the old
+writer as rollback.
+
+## Add or replace a reader
+
+**When:** adding isolated read capacity or replacing a stale/failed follower.
+**Prerequisites:** a Published baseline and verified archive, an unencrypted
+database, reader-scoped Blob permissions including operation pins, private
+per-replica storage, and room for two follower generations plus staging.
+Never mount the writer's database share on a reader.
+
+Create `C:\private\reader-apply.json` with these fields (numbers below are
+illustrative local inputs, not recommended defaults):
+
+```json
+{
+  "target_file": "C:\\private\\archive-target.json",
+  "follower_dir": "C:\\private\\follower",
+  "capacity_bytes": 1073741824,
+  "staleness_bound_ms": 60000,
+  "poll_interval_ms": 1000
+}
+```
+
+`target_file`, `follower_dir` and all three numeric fields are required.
+`shared_key_file` is optional for the loopback emulator only. Unknown fields
+and configuration over 64 KiB are refused. `follower_dir` must be absolute
+without dot components. `capacity_bytes` is 1..1073741824 (1 GiB);
+`staleness_bound_ms` is 1..3600000; `poll_interval_ms` is positive and
+strictly below the staleness bound. These are implementation caps, not
+ACA-qualified capacities.
+
+The positional served path must be exactly
+`<follower_dir>\reader-a\database.vlite`; the second private slot is
+`<follower_dir>\reader-b`. Enrollment replaces the two slot directories:
+use a dedicated follower directory, never a recovery copy to preserve.
+With `VLITE_AUTH_TOKEN_FILE` set to the mounted private token file:
+
+```powershell
+vlite-server C:\private\follower\reader-a\database.vlite `
+  --serve-mode reader --reader-apply-file C:\private\reader-apply.json
+```
+
+For a gateway-trusted reader, also supply
+`--gateway-trust-file C:\private\reader-trust.json`, with the reader's
+audience/control configuration. Do not set `VLITE_ADMIN_DIR`, create flags,
+durability flags, group commit, ANN snapshots or gRPC on a reader.
+Enrollment selects the newest Published set, pins the whole set, follows
+verified history and swaps read-only generations.
+
+**Verify:** require `/ready` success and an authorized read of expected data.
+Inspect administrator-only `/v1/admin/serve-status` for `mode: reader`,
+`read_only`, lineage, binding generation and `reader` progress:
+`applied_sequence`, `age_ms`, `bound_ms`, `stale`, `failed`.
+Authenticated reader responses carry `x-vlite-lineage`,
+`x-vlite-binding-generation`, `x-vlite-applied-sequence` and
+`x-vlite-applied-age-ms`. Age is since the last confirmation of the archived
+head, **not** writer-commit lag. Sequence is withheld when memory bindings
+block metrics; lineage/age can be absent before available. Anonymous probes
+and authentication failures get none of these headers. They provide no
+position token or read-your-writes guarantee.
+
+No freshness confirmation or age beyond the bound causes 503 `reader_stale`
+for readiness and authorized reads. A permanently failed follower fails
+readiness with 503 `reader_apply_failed`; inspect private logs for the
+reason. A newer baseline or broken continuity requires restart/re-enrollment,
+not automatic reseeding.
+
+**Back out:** remove the reader from routing, stop it, and keep reads on the
+writer (`read_routing: writer_only` in the directory). Keep ACA routing
+writer-only until reader qualification passes. Never route writes to a
+reader. Clean shutdown releases its operation pin; a crashed replica can
+leave `reader-apply:<replica>` pins (maximum 16 per set). Remove abandoned
+pins only after proving that replica is stopped, using the existing
+[forced-unpin procedure](DOCKER-OPERATIONS.md#run-check-and-restore).
+Restart with its dedicated private directory to enroll again; verify before
+reintroducing reads.
+
+## Recover control-state availability or publish a refresh
+
+**When:** gateways/trusted backends fail readiness after a control-store
+outage, or credentials/tenant routes need publication.
+**Prerequisites:** authoritative admin directory, correct control target and
+object, permissions, and a reviewed tenant directory file. Do not confuse
+control policy generation with writer authority epoch.
+
+Exact usage:
+
+```text
+vlite-server control-state publish|update --target-file <json> --object <name> [--shared-key-file <path>] --admin-dir <dir> [--directory-file <json>] [update only, at most one of: --revoke-credential <id> | --suspend-tenant <id> | --resume-tenant <id> | --reimport-if-generation <n>]
+```
+
+For first initialization only:
+
+```powershell
+vlite-server control-state publish --target-file C:\private\control-target.json `
+  --object control.json --admin-dir C:\private\admin `
+  --directory-file C:\private\directory.json
+```
+
+`publish` is create-only and refuses an existing object. For reviewed route
+replacement or importing newly issued credentials/tenants:
+
+```powershell
+vlite-server control-state update --target-file C:\private\control-target.json `
+  --object control.json --admin-dir C:\private\admin `
+  --directory-file C:\private\directory.json
+vlite-server control-state update --target-file C:\private\control-target.json `
+  --object control.json --admin-dir C:\private\admin `
+  --reimport-if-generation <current-generation>
+```
+
+A bare update is refused. Reimport requires the exact published generation,
+else `control_state_generation_mismatch`; it preserves existing security
+restrictions. Revocation/suspension/resumption options change the local
+admin directory first, then CAS-update only that ID remotely. If publication
+fails, the local change remains; retry that same mutation after repair,
+not a blind reimport. `admin_dir_busy` means another command holds the
+directory lock.
+
+**Verify/recover:** restore store connectivity, identity permissions and the
+valid object first; an outage alone needs no publication. Startup requires a
+successful control read. Running gateway/trusted backend copies older than
+`s_ctl_ms` fail closed with 503 `control_state_stale`; `/ready` also fails.
+They poll and recover after confirming fresh state. Check `/ready` and its
+`generation` on every gateway/backend, then verify both an allowed request
+and a revoked/suspended denial. Returned mutation JSON reports `generation`
+and `object`. A regressed generation is refused (`control_state_regressed`),
+not accepted as recovery.
+
+**Back out:** keep unavailable replicas out of traffic; never disable trust,
+raise staleness to hide an outage, or restore an older control object.
+Correct routes with another reviewed CAS update. Do not undo revocations
+or suspensions merely to restore service.
+
+## Rotate gateway signing keys with overlap
+
+**When:** planned signing-key replacement.
+**Prerequisites:** pinned current material/revisions, fresh immutable secret
+names, space for both generations and a reviewed rollout/drain budget.
+Exact key-generation usage:
+
+```text
+vlite-server gateway-keygen --kid <kid> --generation <n> --signing-key-out <new-file> --public-bundle-out <new-file>
+```
+
+Generate privately; existing output files are refused:
+
+```powershell
+vlite-server gateway-keygen --kid <new-kid> --generation <next-generation> `
+  --signing-key-out C:\private\new-signing-key `
+  --public-bundle-out C:\private\new-public-bundle.json
+```
+
+Follow the required
+[manual staged overlap procedure](../deploy/azure-container-apps/ha/README.md#manual-staged-overlap-rotation-not-automated):
+roll backends accepting old+new verification keys first, then gateways
+signing with the new key. Keys/bundles load at process start; changing an
+app secret alone is not a rollout. The gateway command is exactly
+`vlite-server gateway --config <json>`; use the approved config, for example
+`vlite-server gateway --config C:\private\gateway.json`.
+
+**Verify:** require exact ready revisions and authorized requests at every
+stage. Confirm all old signing replicas are stopped; wait the maximum old
+envelope lifetime plus skew and in-flight/drain allowance before removing
+old verification keys. Remove retired secret references only after all
+referencing revisions/replicas are gone.
+
+**Back out:** stop at the failed stage and retain overlap. A non-compromised
+old signer may be restored only while all backends still accept it; never
+drop an old verifier mid-rollout. Emergency compromise revocation can
+deliberately interrupt service. Rotation is not automated, and the writer's
+blocked handoff/qualification is not bypassed by key rotation.
+
+## Restore an archive checkpoint offline
+
+**When:** recovering an isolated copy to a verified durable checkpoint.
+**Prerequisites:** a Published set with archive, scoped target access, private
+password file, stopped destination server, and an existing private output
+parent with sufficient free space. Output must not exist.
+
+```powershell
+vlite-server cloud-sets --target-file C:\private\archive-target.json
+vlite-server cloud-restore --target-file C:\private\archive-target.json `
+  --set <set-id> --archive-checkpoint latest --mode rekey `
+  --output C:\private\restored --admin-username recovery-admin `
+  --admin-password-file C:\private\admin-password
+```
+
+Exact usage excerpt: `[--archive-checkpoint latest|<sequence>]`.
+Replace `latest` with an exact listed checkpoint sequence when required.
+Times, intermediate sequences and rounding are refused
+(`pitr_target_unsupported`). No archive gives `pitr_archive_missing`.
+Only rekey is supported: new lineage, imported accounts disabled, no
+credentials/sessions restored; seed mode is refused. This is not a
+same-lineage writer promotion.
+
+**Verify:** inspect the JSON report and `archive` checkpoint details, then
+validate the isolated data and fresh admin sign-in before selecting or
+routing anything. Nothing starts or selects automatically. Reissue
+credentials and review restored memory bindings. Exit 3
+`restore_cleanup_failed` means complete output but an unreleased pin,
+not an absent restore. Follow the existing
+[checkpoint restore and limits](DOCKER-OPERATIONS.md#continuous-log-archive-and-checkpoint-restore-opt-in)
+and [restore security procedure](DOCKER-OPERATIONS.md#run-check-and-restore).
+
+**Back out:** leave production routing/files untouched; keep or discard only
+the isolated output after inspection. Never overwrite the old database to
+test recovery or reuse old credentials on the new lineage.
+
+## What is not provided
+
+- Automatic failover or a completed fenced writer-serving handoff.
+- Multi-writer operation or additional write capacity.
+- Cross-region failover or geo-failing the authority.
+- Power-loss-qualified Azure Files or production availability/durability SLOs.
+- Query routing of writes to readers, position tokens or read-your-writes overrides.
