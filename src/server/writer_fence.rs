@@ -115,11 +115,15 @@ struct Inner {
 pub(crate) struct WriterFence {
     // Disabled gates do not allocate, lock, consult a clock, or access a store.
     inner: Option<Arc<Inner>>,
+    target: Option<Arc<super::cloud_backup::Target>>,
 }
 
 impl WriterFence {
     pub fn disabled() -> Self {
-        Self { inner: None }
+        Self {
+            inner: None,
+            target: None,
+        }
     }
 
     pub(super) fn new(store: AuthorityStore, claim: Claim) -> Self {
@@ -141,7 +145,23 @@ impl WriterFence {
                     max: Duration::ZERO,
                 }),
             })),
+            target: None,
         }
+    }
+
+    pub(super) fn with_target(mut self, target: super::cloud_backup::Target) -> Self {
+        self.target = Some(Arc::new(target));
+        self
+    }
+
+    pub(super) fn authority(&self) -> Option<(&AuthorityStore, &Claim)> {
+        self.inner
+            .as_ref()
+            .map(|inner| (&inner.store, &inner.claim))
+    }
+
+    pub(super) fn authority_target(&self) -> Option<&super::cloud_backup::Target> {
+        self.target.as_deref()
     }
 
     pub(super) fn state(&self) -> State {

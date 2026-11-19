@@ -68,7 +68,7 @@ verbatim; examples beneath them supply the required arguments.
 ## Initialize and claim writer authority
 
 Only use this path for an operator-verified local database with no archived
-base to recover. It does not bind or verify an HA archive. Read the database's
+base to recover. Startup does not restore an archived base. Read the database's
 16-character lowercase hexadecimal `lineage` from
 `GET /v1/admin/serve-status`; files without a v4 lineage are refused.
 Stop that server before starting the authority-enabled writer.
@@ -113,6 +113,23 @@ while idle; an observed replacement fences it, drains it and exits with code
 on a fresh periodic check without a write. Recheck timing is not a guaranteed
 wall-clock zombie bound: store latency and process pauses still matter.
 Without authority options there is no store access, recheck task or fence.
+
+With a claimed authority, cloud-backup snapshots publish HA manifests and
+advance the authority head by CAS; continuous archive checkpoints extend that
+head through immutable HA indexes, never the legacy archive. Every archive
+commit rechecks the writer epoch. `failover report` therefore reflects the
+authority-bound archived sequence, not merely local backup status.
+
+Configure cloud backup before initializing authority: `authority init
+--installation-id` must use the `installation_id` shown by
+`GET /v1/admin/cloud-backup`. The backup target's account, container,
+coordination container, prefix and endpoint must match the authority target.
+Policy updates and each publish/archive refuse mismatches with HTTP 409
+`writer_authority_target_mismatch` or
+`writer_authority_installation_mismatch`, before uploading anything.
+A concurrent head change returns HTTP 409 `writer_rebase_required`; the next
+cycle takes a new snapshot rather than retrying the stale head observation.
+Without authority, snapshot and checkpoint publication remain unchanged.
 
 ## Planned or unplanned writer failover
 

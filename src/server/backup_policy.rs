@@ -432,6 +432,7 @@ pub(super) struct Handle {
     encrypted: bool,
     file_backed: bool,
     metrics: Arc<Metrics>,
+    writer_fence: writer_fence::WriterFence,
 }
 
 impl Handle {
@@ -445,6 +446,7 @@ impl Handle {
             encrypted: s.encryption_key.is_some(),
             file_backed: s.ops.file_backed(),
             metrics: s.metrics.clone(),
+            writer_fence: s.writer_fence.clone(),
         }
     }
 
@@ -469,6 +471,47 @@ impl Handle {
             && log.append(event, true).is_err()
         {
             self.metrics.audit_failures.fetch_add(1, Ordering::Relaxed);
+        }
+    }
+
+    fn check_authority(
+        &self,
+        target: &Target,
+        installation: Option<&str>,
+    ) -> Result<Option<authority::Observed>, ApiError> {
+        let Some((store, claim)) = self.writer_fence.authority() else {
+            return Ok(None);
+        };
+        if let Some(expected) = self.writer_fence.authority_target()
+            && (target.account != expected.account
+                || target.container != expected.container
+                || target.coordination_container != expected.coordination_container
+                || target.prefix != expected.prefix
+                || target.endpoint != expected.endpoint)
+        {
+            return Err(conflict(
+                "writer_authority_target_mismatch",
+                "the cloud backup target must match the writer authority target",
+            ));
+        }
+        self.writer_fence.verify_before_commit()?;
+        let observed = store
+            .verify_writer(claim)
+            .map_err(|error| self.ha_error(error))?;
+        if installation.is_some_and(|id| id != observed.record.installation_id) {
+            return Err(conflict(
+                "writer_authority_installation_mismatch",
+                "the cloud backup installation-id must match the writer authority installation_id",
+            ));
+        }
+        Ok(Some(observed))
+    }
+
+    fn ha_error(&self, error: impl Into<ApiError>) -> ApiError {
+        // Latch an ownership loss observed inside the HA protocol as well.
+        match self.writer_fence.verify_before_commit() {
+            Ok(()) => error.into(),
+            Err(error) => error,
         }
     }
 }
@@ -504,7 +547,7 @@ fn io_error(message: impl Into<String>) -> std::io::Error {
     std::io::Error::other(message.into())
 }
 
-fn read_limited(path: &FilePath) -> std::io::Result<Option<Vec<u8>>> {
+pub(super) fn read_limited(path: &FilePath) -> std::io::Result<Option<Vec<u8>>> {
     let file = match std::fs::File::open(path) {
         Ok(file) => file,
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
@@ -1032,11 +1075,11 @@ impl Runtime {
     /// an expired shutdown wait fenced this runtime (a successor may own the
     /// directory). The lock is held only for the check, never across the
     /// remote call that follows.
-    fn authorized(&self) -> Result<(), ApiError> {
+    fn authorized(&self, handle: &Handle) -> Result<(), ApiError> {
         if lock(&self.state)?.fenced {
             return Err(closed());
         }
-        Ok(())
+        handle.writer_fence.verify_before_commit()
     }
 
     fn configured(&self) -> Result<(Policy, String), ApiError> {
@@ -1069,6 +1112,7 @@ impl Runtime {
     ) -> Result<Value, ApiError> {
         handle.refusal_for_policy()?;
         policy.validate().map_err(unprocessable)?;
+        handle.check_authority(&policy.target, None)?;
         let _active = self.enter()?;
         let _busy = self.try_busy()?;
         let abandoned = {
@@ -1087,6 +1131,7 @@ impl Runtime {
                 write_atomic(&self.dir, INSTALLATION, id.as_bytes())?;
                 loaded.installation = Some(id);
             }
+            handle.check_authority(&policy.target, loaded.installation.as_deref())?;
             let mut status = loaded.status.clone();
             let changed = loaded.policy.as_ref().map(|p| &p.target) != Some(&policy.target);
             let abandoned = if changed { status.pending.take() } else { None };
@@ -1377,19 +1422,55 @@ impl Runtime {
                 "continuous archiving needs an enabled policy with archive.enabled",
             ));
         }
-        let baseline = baseline.ok_or_else(|| {
+        let missing_baseline = || {
             pitr(
                 "pitr_baseline_missing",
                 "no published snapshot to archive after; the next snapshot publishes the baseline",
             )
-        })?;
+        };
         let capture = admitted.capture()?;
-        let authorize = || self.authorized();
+        // Legacy baselines remain status-based, including their early refusal.
+        if handle.writer_fence.authority().is_none() && baseline.is_none() {
+            return Err(missing_baseline());
+        }
+        handle.check_authority(&admitted.policy.target, Some(installation))?;
+        let authorize = || self.authorized(handle);
         let sets = (self.connector)(&admitted.policy.target)?;
         authorize()?;
         sets.ensure_owner(installation, now)?;
-        let archive = sets.open_archive(&baseline)?;
-        if archive.manifest.policy != capture {
+        enum OpenArchive {
+            Legacy(Box<cloud::archive::Archive>),
+            Ha(Box<cloud::archive::HaArchive>),
+        }
+        let archive = match handle.writer_fence.authority() {
+            Some((store, claim)) => {
+                sets.resolve_ha_baseline(store)
+                    .map_err(|error| handle.ha_error(error))?
+                    .ok_or_else(missing_baseline)?;
+                OpenArchive::Ha(Box::new(
+                    sets.open_archive_ha(store, claim)
+                        .map_err(|error| handle.ha_error(error))?,
+                ))
+            }
+            None => OpenArchive::Legacy(Box::new(
+                sets.open_archive(&baseline.ok_or_else(missing_baseline)?)?,
+            )),
+        };
+        let (baseline, policy, next_base, count) = match &archive {
+            OpenArchive::Legacy(archive) => (
+                &archive.set_id,
+                &archive.manifest.policy,
+                archive.next_base(),
+                archive.checkpoints().len(),
+            ),
+            OpenArchive::Ha(archive) => (
+                &archive.set_id,
+                &archive.manifest.manifest.policy,
+                archive.next_base(),
+                archive.checkpoints().len(),
+            ),
+        };
+        if *policy != capture {
             return Err(pitr(
                 "pitr_policy_changed",
                 "the policy changed after the baseline snapshot; archiving resumes after the next snapshot",
@@ -1412,7 +1493,7 @@ impl Runtime {
             let current = handle.served.current();
             let memory = current.is_configured().then(|| current.set().clone());
             let segment = db
-                .export_log(archive.next_base(), MAX_SEGMENT_BYTES)
+                .export_log(next_base, MAX_SEGMENT_BYTES)
                 .map_err(|error| match error {
                     crate::Error::CursorBeforeHistory { cursor, floor } => pitr(
                         "pitr_history_floor_advanced",
@@ -1431,7 +1512,6 @@ impl Runtime {
         let after = recovery_bundle::capture(&admin, &handle.webhooks, now)?;
         recovery_bundle::stable(&before, &after)?;
         drop(admin);
-        let count = archive.checkpoints().len();
         if segment.is_empty() && segment.head_sequence == segment.base_sequence {
             // Nothing committed since the last checkpoint.
             return Ok(
@@ -1452,7 +1532,17 @@ impl Runtime {
             );
             serde_json::to_vec_pretty(&bundle).map_err(internal)
         };
-        let checkpoint = sets.append_checkpoint(&archive, &segment, &bundle, now, &authorize)?;
+        let checkpoint = match &archive {
+            OpenArchive::Legacy(archive) => {
+                sets.append_checkpoint(archive, &segment, &bundle, now, &authorize)?
+            }
+            OpenArchive::Ha(archive) => {
+                let (store, claim) = handle.writer_fence.authority().ok_or_else(unavailable)?;
+                sets.append_checkpoint_ha(archive, &segment, &bundle, now, &authorize, store, claim)
+                    .map_err(|error| handle.ha_error(error))?
+                    .checkpoint
+            }
+        };
         Ok(json!({"set_id":baseline,"checkpoint":checkpoint,"checkpoints":count + 1}))
     }
 
@@ -1612,11 +1702,23 @@ impl Runtime {
     ) -> Result<(Sets, cloud::Record, Option<Value>), ApiError> {
         handle.refusal()?;
         let capture = admitted.capture()?;
-        let authorize = || self.authorized();
+        let authority = handle.check_authority(&admitted.policy.target, Some(installation))?;
+        let authorize = || self.authorized(handle);
         let sets = (self.connector)(&admitted.policy.target)?;
         // The connector can block (token, network): recheck after it returns.
         authorize()?;
         sets.ensure_owner(installation, now)?;
+        let pending = if authority.is_some() {
+            if let Some(pending) = pending {
+                self.note(|loaded| loaded.status.pending = None);
+                handle.audit(
+                    json!({"event":"cloud_backup_pending_abandoned","set_id":pending.set_id}),
+                );
+            }
+            None
+        } else {
+            pending
+        };
         let settled = match pending {
             Some(pending) => Some(self.settle(handle, &sets, &pending, now, &authorize)?),
             None => None,
@@ -1679,6 +1781,32 @@ impl Runtime {
         // A run fenced by an expired shutdown wait never publishes: the set
         // protocol asks again before its first write and before every
         // commit; collection removes what it left.
+        if let Some(observed) = authority {
+            let (store, claim) = handle.writer_fence.authority().ok_or_else(unavailable)?;
+            let ha = cloud::HaManifest {
+                schema: "vlite.cloud-backup-ha-manifest/1".into(),
+                authority: cloud::HaIdentity {
+                    writer_id: claim.writer_id.clone(),
+                    epoch: claim.epoch,
+                    scope_id: observed.record.scope_id,
+                    lineage: observed.record.lineage,
+                },
+                manifest,
+            };
+            sets.publish_ha(store, claim, &ha, &uploads, now, &authorize)
+                .map_err(|error| handle.ha_error(error))?;
+            let (_, record, _) = sets
+                .resolve_ha_baseline(store)
+                .map_err(|error| handle.ha_error(error))?
+                .filter(|(_, record, _)| record.set_id == set_id)
+                .ok_or_else(|| {
+                    conflict(
+                        "writer_rebase_required",
+                        "the authority head moved after publication; take a new snapshot",
+                    )
+                })?;
+            return Ok((sets, record, settled));
+        }
         let publication = sets.publish(&manifest, &uploads, now, &authorize)?;
         drop(staged);
         match publication {
@@ -4213,6 +4341,311 @@ mod tests {
         env.data
             .raw(&format!("vlite/prod/sets/{set}/archive.json"))
             .map(|bytes| serde_json::from_slice(&bytes).unwrap())
+    }
+
+    fn setup_ha() -> (Env, super::super::authority::AuthorityStore) {
+        use super::super::{authority::AuthorityStore, writer_fence::WriterFence};
+        let mut env = setup();
+        let h = Handle::new(&env.service);
+        env.runtime.configure(archiving(), &h, BASE).unwrap();
+        let installation = env.runtime.configured().unwrap().1;
+        let store = AuthorityStore::new(env.meta.clone(), "vlite/prod/".into());
+        let prepared = store
+            .create(
+                &installation,
+                "runtime",
+                &lineage_hex(env.service.lineage).unwrap(),
+            )
+            .unwrap();
+        let (claim, _) = store.claim(&prepared, BASE).unwrap();
+        let fence = WriterFence::new(
+            AuthorityStore::new(env.meta.clone(), "vlite/prod/".into()),
+            claim,
+        )
+        .with_target(serde_json::from_value(target()).unwrap());
+        fence
+            .transition(super::super::writer_fence::State::Recovering)
+            .unwrap();
+        fence
+            .transition(super::super::writer_fence::State::Serving)
+            .unwrap();
+        env.service.writer_fence = fence;
+        (env, store)
+    }
+
+    #[test]
+    fn runtime_ha_publish_and_archive_follow_authority_not_local_status() {
+        let (env, store) = setup_ha();
+        let h = Handle::new(&env.service);
+        assert_eq!(code(env.runtime.archive_now(&h)), "pitr_baseline_missing");
+        let published = env.runtime.run_now(&h).unwrap();
+        let head = store.read().unwrap().record.head.unwrap();
+        assert_eq!(published["set_id"], head.set_id);
+        assert_eq!(head.epoch, 1);
+        assert_eq!(head.sequence, 4);
+        assert_eq!(published["record"]["manifest_sha256"], head.manifest_sha256);
+        let manifest = env
+            .data
+            .raw(&format!("vlite/prod/sets/{}/manifest.json", head.set_id))
+            .unwrap();
+        let manifest: Value = serde_json::from_slice(&manifest).unwrap();
+        assert_eq!(manifest["authority"]["epoch"], 1);
+        assert_eq!(manifest["authority"]["scope_id"], "runtime");
+        assert_eq!(manifest["manifest"]["set_id"], head.set_id);
+        env.runtime
+            .update(|loaded| loaded.status.last_set = Some("stale-status".into()))
+            .unwrap();
+        put(&env, 5..=6);
+        let report = env.runtime.archive_now(&h).unwrap();
+        assert_eq!(report["set_id"], head.set_id);
+        assert_eq!(report["checkpoint"]["sequence"], 6);
+        assert_eq!(report["checkpoints"], 1);
+        let next = store.read().unwrap().record.head.unwrap();
+        assert_eq!(next.sequence, 6);
+        assert_eq!(next.manifest_sha256, head.manifest_sha256);
+        assert_eq!(next.index_sha256.unwrap().len(), 64);
+        assert_ne!(next.chain_sha256, head.chain_sha256);
+        assert!(archive_index(&env, &head.set_id).is_none());
+    }
+
+    #[test]
+    fn runtime_ha_transfer_fences_publish_and_archive_without_committing() {
+        for archive in [false, true] {
+            let (env, store) = setup_ha();
+            let h = Handle::new(&env.service);
+            env.runtime.run_now(&h).unwrap();
+            put(&env, 5..=5);
+            let observed = store.read().unwrap();
+            store
+                .prepare_transfer(&observed, observed.record.epoch, &observed.record.revision)
+                .unwrap();
+            let before = (env.meta.names(), env.data.names());
+            let result = if archive {
+                env.runtime.archive_now(&h)
+            } else {
+                env.runtime.run_now(&h)
+            };
+            assert_eq!(code(result), "writer_authority_unavailable");
+            assert_eq!((env.meta.names(), env.data.names()), before);
+            assert_eq!(
+                env.service.writer_fence.state(),
+                super::super::writer_fence::State::Fenced
+            );
+            assert!(*env.service.writer_stop_signal().unwrap().borrow());
+            assert!(store.read().unwrap().record.head.is_none());
+        }
+    }
+
+    #[test]
+    fn runtime_ha_head_moved_requires_a_new_snapshot() {
+        let (env, store) = setup_ha();
+        let h = Handle::new(&env.service);
+        env.runtime.run_now(&h).unwrap();
+        let competing =
+            super::super::authority::AuthorityStore::new(env.meta.clone(), "vlite/prod/".into());
+        let claim = env.service.writer_fence.authority().unwrap().1.clone();
+        let database = env.service.database.clone();
+        env.meta
+            .hook(Op::Put, "vlite/prod/authority.json", move || {
+                let observed = competing.read().unwrap();
+                competing
+                    .advance_head(&claim, &observed, observed.record.head.clone().unwrap())
+                    .unwrap();
+                database
+                    .write()
+                    .unwrap()
+                    .as_mut()
+                    .unwrap()
+                    .put(99, &[1.0, 0.5, -1.0], b"after-cut")
+                    .unwrap();
+            });
+        assert_eq!(code(env.runtime.run_now(&h)), "writer_rebase_required");
+        assert_eq!(store.read().unwrap().record.head.unwrap().sequence, 4);
+        let retry = env.runtime.run_now(&h).unwrap();
+        assert_eq!(
+            retry["record"]["set_id"],
+            store.read().unwrap().record.head.unwrap().set_id
+        );
+        assert_eq!(store.read().unwrap().record.head.unwrap().sequence, 5);
+        assert_eq!(
+            env.service.writer_fence.state(),
+            super::super::writer_fence::State::Serving
+        );
+    }
+
+    #[test]
+    fn runtime_ha_mismatches_refuse_before_uploads() {
+        for field in [
+            "account",
+            "container",
+            "coordination_container",
+            "prefix",
+            "endpoint",
+        ] {
+            let (env, _) = setup_ha();
+            let h = Handle::new(&env.service);
+            let mut changed = serde_json::to_value(archiving()).unwrap();
+            changed["target"][field] = json!(match field {
+                "prefix" => "other/",
+                "endpoint" => "https://vlitebackup.blob.core.windows.net",
+                _ => "other",
+            });
+            let changed: Policy = serde_json::from_value(changed).unwrap();
+            assert_eq!(
+                code(env.runtime.configure(changed.clone(), &h, BASE)),
+                "writer_authority_target_mismatch"
+            );
+            // Simulate a persisted policy from before authority enrollment.
+            env.runtime
+                .update(|loaded| loaded.policy = Some(changed))
+                .unwrap();
+            let before = (env.meta.names(), env.data.names());
+            assert_eq!(
+                code(env.runtime.run_now(&h)),
+                "writer_authority_target_mismatch"
+            );
+            assert_eq!(
+                code(env.runtime.archive_now(&h)),
+                "writer_authority_target_mismatch"
+            );
+            assert_eq!((env.meta.names(), env.data.names()), before);
+        }
+        let (env, _) = setup_ha();
+        let h = Handle::new(&env.service);
+        env.runtime.state.lock().unwrap().installation = Some("fedcba9876543210".into());
+        let before = (env.meta.names(), env.data.names());
+        assert_eq!(
+            code(env.runtime.configure(archiving(), &h, BASE)),
+            "writer_authority_installation_mismatch"
+        );
+        assert_eq!(
+            code(env.runtime.run_now(&h)),
+            "writer_authority_installation_mismatch"
+        );
+        assert_eq!(
+            code(env.runtime.archive_now(&h)),
+            "writer_authority_installation_mismatch"
+        );
+        assert_eq!((env.meta.names(), env.data.names()), before);
+    }
+
+    #[test]
+    fn runtime_ha_transfer_during_upload_never_advances_the_head() {
+        for archive in [false, true] {
+            let (env, store) = setup_ha();
+            let h = Handle::new(&env.service);
+            env.runtime.run_now(&h).unwrap();
+            put(&env, 5..=5);
+            let previous = store.read().unwrap().record.head;
+            let transfer = super::super::authority::AuthorityStore::new(
+                env.meta.clone(),
+                "vlite/prod/".into(),
+            );
+            env.data.hook(Op::Put, "/objects/", move || {
+                let observed = transfer.read().unwrap();
+                transfer
+                    .prepare_transfer(&observed, observed.record.epoch, &observed.record.revision)
+                    .unwrap();
+            });
+            let result = if archive {
+                env.runtime.archive_now(&h)
+            } else {
+                env.runtime.run_now(&h)
+            };
+            assert_eq!(code(result), "writer_authority_unavailable");
+            let transferred = store.read().unwrap();
+            assert_eq!(transferred.record.base, previous);
+            assert!(transferred.record.head.is_none());
+            assert_eq!(
+                env.service.writer_fence.state(),
+                super::super::writer_fence::State::Fenced
+            );
+            assert!(*env.service.writer_stop_signal().unwrap().borrow());
+            assert!(
+                !env.data
+                    .names()
+                    .iter()
+                    .any(|key| key.ends_with("/archive.json"))
+            );
+        }
+    }
+
+    #[test]
+    fn runtime_ha_disabled_keeps_legacy_manifest_bytes_and_never_reads_authority() {
+        let env = setup();
+        let h = Handle::new(&env.service);
+        assert!(h.writer_fence.authority().is_none());
+        env.runtime.configure(archiving(), &h, BASE).unwrap();
+        let authority_key = "vlite/prod/authority.json";
+        env.meta.set_raw(authority_key, b"not an authority record");
+        env.meta.hook(Op::Get, authority_key, || {
+            panic!("legacy publication consulted authority")
+        });
+        let (policy, installation) = env.runtime.configured().unwrap();
+        let admitted = Admitted {
+            policy,
+            revision: Some(BASE),
+        };
+        let capture = admitted.capture().unwrap();
+        let staged = {
+            let mut owner = env.service.database.write().unwrap();
+            ops::snapshot(owner.as_mut().unwrap(), &env.runtime.staging())
+                .unwrap()
+                .1
+        };
+        let verification = maintenance::verify(staged.path()).unwrap();
+        let detail = maintenance::inspect_detail(staged.path()).unwrap();
+        let database = Upload::file(cloud::ROLE_DATABASE, staged.path().to_path_buf()).unwrap();
+        let admin = h.admin.upgrade().unwrap();
+        let configuration = recovery_bundle::capture(&admin, &h.webhooks, BASE).unwrap();
+        let bundle = recovery_bundle::bundle(
+            configuration,
+            &installation,
+            detail.lineage,
+            &database.sha256,
+            capture.clone(),
+            None,
+            BASE,
+        );
+        let uploads = [
+            database,
+            Upload::bytes(
+                cloud::ROLE_BUNDLE,
+                serde_json::to_vec_pretty(&bundle).unwrap(),
+            ),
+        ];
+        let (_, record, _) = env
+            .runtime
+            .publish(&h, &admitted, &installation, None, BASE)
+            .unwrap();
+        let expected = Manifest::new(
+            &record.set_id,
+            &installation,
+            BASE,
+            &verification,
+            &detail,
+            &uploads,
+            capture,
+        );
+        assert_eq!(
+            env.data
+                .raw(&format!("vlite/prod/sets/{}/manifest.json", record.set_id))
+                .unwrap(),
+            serde_json::to_vec_pretty(&expected).unwrap()
+        );
+        env.runtime
+            .update(|loaded| loaded.status.last_set = Some(record.set_id.clone()))
+            .unwrap();
+        put(&env, 5..=5);
+        assert_eq!(
+            env.runtime.archive_now(&h).unwrap()["checkpoint"]["sequence"],
+            5
+        );
+        assert!(archive_index(&env, &record.set_id).is_some());
+        assert_eq!(
+            env.meta.raw(authority_key).unwrap(),
+            b"not an authority record"
+        );
     }
 
     #[test]
