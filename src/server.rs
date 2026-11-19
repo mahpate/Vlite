@@ -40,6 +40,7 @@ mod collections;
 mod compaction;
 mod control_state;
 mod credentials;
+mod failover;
 mod features;
 mod gateway;
 mod gateway_mode;
