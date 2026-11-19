@@ -82,6 +82,9 @@ and memory, execution name, status, compressed SHA-256, file name, source
 revision, dirty flag, and cleanup status, **never the subscription ID**.
 Failure summaries retain completed results. No JSON fields from the probe
 are interpreted or treated as a serving/SLO qualification.
+The recorded SHA-256 covers the compressed log payload, not the decompressed
+JSON file. Use a separate file checksum when preserving the extracted files;
+do not compare `Get-FileHash` on those files with the transport checksum.
 
 `failedStep` identifies the failed measurement/setup step (for example,
 `BuildImage`); `cleanupFailedStep` independently identifies `DeleteGroup` or
@@ -96,12 +99,21 @@ execution polling at 4,200 seconds per tier, log fallback at 12 attempts
 for managed-identity role propagation. Native CLI diagnostics/build logs are
 withheld to avoid exposing credentials or subscription identifiers.
 
-The `finally` block **always deletes the resource group and waits for
-deletion**, including after measurement failure. The only explicit exception
+The `finally` block **always requests resource-group deletion and waits up to
+600 seconds for confirmation**, including after measurement failure. The only explicit exception
 is `-KeepOnFailure`, which retains a failed run and warns with its group name.
 Cleanup failure is loud and fails the command. Forced process termination,
 machine loss, or revoked permissions can still prevent cleanup. The expiry
 tag is a cleanup aid, **not an automatic deletion service**.
+
+A `WaitDeleted` timeout can occur while Azure continues an accepted deletion.
+Check the exact run's group and ownership tags before acting. If the group is
+already `Deleting`, observe that operation rather than rerunning the measurements
+or repeatedly requesting deletion. Confirm absence with `az group exists`,
+checking the command's exit code and its boolean result; a lookup error is not
+proof of deletion. Preserve the original failed summary and record any later
+cleanup confirmation separately with its timestamp. Successful jobs and later
+cleanup do not retroactively make the original command successful or qualify HA.
 
 To clean up a retained/interrupted run by owner and run-ID tags, review the
 selected names and delete them (no JMESPath filters, for Windows `az.cmd`
