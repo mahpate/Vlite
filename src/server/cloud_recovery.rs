@@ -359,7 +359,7 @@ fn now() -> u64 {
 }
 
 /// Makes directory entries durable (Unix; Windows has no directory sync).
-fn sync_directory(dir: &FilePath) -> std::io::Result<()> {
+pub(in crate::server) fn sync_directory(dir: &FilePath) -> std::io::Result<()> {
     #[cfg(unix)]
     std::fs::File::open(dir)?.sync_all()?;
     #[cfg(not(unix))]
@@ -370,13 +370,13 @@ fn sync_directory(dir: &FilePath) -> std::io::Result<()> {
 /// One restore's private staging directory next to `--output` (same volume,
 /// so publication is a single rename). Its locked `owner.lock`, which holds
 /// the process ID once locked, marks it as live for other restores' cleanup.
-struct Staging {
+pub(in crate::server) struct Staging {
     lock: Option<std::fs::File>,
     dir: Option<tempfile::TempDir>,
 }
 
 impl Staging {
-    fn create(parent: &FilePath) -> std::io::Result<Self> {
+    pub(in crate::server) fn create(parent: &FilePath) -> std::io::Result<Self> {
         let dir = cloud::private_dir(parent, STAGING_PREFIX)?;
         let mut lock = cloud::create_private_file(&dir.path().join(STAGING_LOCK))?;
         lock.try_lock().map_err(std::io::Error::from)?;
@@ -387,7 +387,7 @@ impl Staging {
         })
     }
 
-    fn path(&self) -> &FilePath {
+    pub(in crate::server) fn path(&self) -> &FilePath {
         self.dir
             .as_ref()
             .map_or(FilePath::new(""), |dir| dir.path())
@@ -527,7 +527,7 @@ thread_local! {
 /// `std::fs::rename`, it never replaces a file or an empty directory. A
 /// file system without such a rename returns `Unsupported`.
 #[cfg(any(target_os = "linux", target_os = "macos"))]
-fn rename_no_replace(from: &FilePath, to: &FilePath) -> std::io::Result<()> {
+pub(in crate::server) fn rename_no_replace(from: &FilePath, to: &FilePath) -> std::io::Result<()> {
     use std::os::unix::ffi::OsStrExt;
     let c_path = |path: &FilePath| {
         std::ffi::CString::new(path.as_os_str().as_bytes())
@@ -563,7 +563,7 @@ fn rename_no_replace(from: &FilePath, to: &FilePath) -> std::io::Result<()> {
 
 /// Windows: `MoveFileExW` without `MOVEFILE_REPLACE_EXISTING`.
 #[cfg(windows)]
-fn rename_no_replace(from: &FilePath, to: &FilePath) -> std::io::Result<()> {
+pub(in crate::server) fn rename_no_replace(from: &FilePath, to: &FilePath) -> std::io::Result<()> {
     use std::os::windows::ffi::OsStrExt;
     #[link(name = "kernel32")]
     unsafe extern "system" {
@@ -588,7 +588,10 @@ fn rename_no_replace(from: &FilePath, to: &FilePath) -> std::io::Result<()> {
 
 /// Other platforms have no rename without replacement here: refused.
 #[cfg(not(any(target_os = "linux", target_os = "macos", windows)))]
-fn rename_no_replace(_from: &FilePath, _to: &FilePath) -> std::io::Result<()> {
+pub(in crate::server) fn rename_no_replace(
+    _from: &FilePath,
+    _to: &FilePath,
+) -> std::io::Result<()> {
     Err(std::io::Error::new(
         std::io::ErrorKind::Unsupported,
         "no rename without replacement on this platform",

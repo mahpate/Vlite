@@ -403,7 +403,7 @@ fn config() -> Result<Config, Box<dyn Error>> {
         }
         if mode == Some("none") {
             return Err(
-                "invalid_arguments: writer authority cannot be used with --durability none".into(),
+                "writer_authority_base_unverified: writer authority cannot be used with --durability none".into(),
             );
         }
     }
@@ -855,7 +855,7 @@ async fn run() -> Result<i32, Box<dyn Error>> {
         Ok(code)
     };
     let signals = Signals::new()?;
-    let authority = match config.authority_target_file.take() {
+    let mut authority = match config.authority_target_file.take() {
         Some(target) => {
             let key = config.authority_shared_key_file.take();
             Some(
@@ -914,11 +914,63 @@ async fn run() -> Result<i32, Box<dyn Error>> {
     // compaction is reconciled first and recovery mode can still sign in.
     let mut managed =
         if !in_memory && config.admin_directory.is_some() && config.grpc_bind.is_none() {
-            Some(Managed::prepare(&options(&config, None))?)
+            match Managed::prepare(&options(&config, None)) {
+                Ok(managed) => Some(managed),
+                Err(error) => {
+                    stop_apply(apply.take()).await;
+                    stop_trust(trust).await;
+                    return Err(error.into());
+                }
+            }
         } else {
             None
         };
     let mut recovery = managed.as_ref().and_then(Managed::recovery_reason);
+    if let Some(mut startup) = authority.take() {
+        let safe = (|| -> Result<(), Box<dyn Error>> {
+            let selected = config
+                .admin_directory
+                .as_deref()
+                .map(selected_database)
+                .transpose()?
+                .flatten()
+                .is_some();
+            WriterAuthority::check_database_configuration(
+                !in_memory,
+                config.encryption_key.is_some(),
+                selected,
+                recovery.is_some(),
+            )?;
+            Ok(())
+        })();
+        if let Err(error) = safe {
+            stop_apply(apply.take()).await;
+            stop_trust(trust).await;
+            return Err(error);
+        }
+        let path = config.path.clone();
+        let prepared = tokio::task::spawn_blocking(move || {
+            let report = startup.prepare_database(&path)?;
+            Ok::<_, String>((startup, report))
+        })
+        .await
+        .map_err(|_| "internal_error: writer authority recovery stopped unexpectedly".to_owned())
+        .and_then(|result| result);
+        match prepared {
+            Ok((startup, report)) => {
+                authority = Some(startup);
+                if let Some(mut report) = report {
+                    report["event"] = json!("writer_authority_base_restored");
+                    vlite::server::log_stderr("info", "authority", report.to_string());
+                }
+            }
+            Err(error) => {
+                stop_apply(apply.take()).await;
+                stop_trust(trust).await;
+                return Err(error.into());
+            }
+        }
+    }
     let opened = if recovery.is_some() {
         None
     } else {
@@ -947,7 +999,7 @@ async fn run() -> Result<i32, Box<dyn Error>> {
             stop_apply(apply.take()).await;
             stop_trust(trust).await;
             return Err(
-                "writer_authority_unavailable: cannot claim a database in recovery mode".into(),
+                "writer_authority_base_unverified: cannot claim a database in recovery mode".into(),
             );
         }
         let listener = listener.expect("legacy recovery listener");
@@ -1013,9 +1065,21 @@ async fn run() -> Result<i32, Box<dyn Error>> {
     };
     let service = match authority {
         Some(authority) => {
-            tokio::task::spawn_blocking(move || service.with_writer_authority(authority))
-                .await
-                .map_err(|_| "internal_error: writer authority startup stopped unexpectedly")??
+            let claimed =
+                tokio::task::spawn_blocking(move || service.with_writer_authority(authority))
+                    .await
+                    .map_err(|_| {
+                        "internal_error: writer authority startup stopped unexpectedly".to_owned()
+                    })
+                    .and_then(|result| result);
+            match claimed {
+                Ok(service) => service,
+                Err(error) => {
+                    stop_apply(apply.take()).await;
+                    stop_trust(trust).await;
+                    return Err(error.into());
+                }
+            }
         }
         None => service,
     };
