@@ -5164,4 +5164,419 @@ mod tests {
             7
         );
     }
+
+    /// MEAS-003 (ITEM-033): an opt-in, local-fake measurement of the HA
+    /// archive loss window under deterministic injected archive storage
+    /// faults, and after recovery. Acknowledged writes are observed
+    /// independently and compared with what the published authority head
+    /// actually restores and with the real failover loss report.
+    mod meas003 {
+        use super::*;
+        use crate::server::{
+            authority::{AuthorityStore, HeadRef},
+            failover::{FailoverAck, Loss, WriterObservation, build_report, execute},
+            writer_fence::State as FenceState,
+        };
+        use std::collections::BTreeSet;
+
+        const OPT_IN: &str = "VLITE_MEAS003";
+        const COMMITS: &str = "VLITE_MEAS003_COMMITS";
+        const ROUNDS: &str = "VLITE_MEAS003_ROUNDS";
+        const AUTHORITY: &str = "vlite/prod/authority.json";
+
+        fn opt_in(var: impl Fn(&str) -> Option<String>) -> Result<(), String> {
+            if var(OPT_IN).as_deref() == Some("1") {
+                Ok(())
+            } else {
+                Err(format!("MEAS-003 probe is opt-in; set {OPT_IN}=1"))
+            }
+        }
+
+        fn bounded(
+            var: &impl Fn(&str) -> Option<String>,
+            name: &str,
+            default: u64,
+            min: u64,
+            max: u64,
+        ) -> Result<u64, String> {
+            let Some(raw) = var(name) else {
+                return Ok(default);
+            };
+            raw.trim()
+                .parse()
+                .ok()
+                .filter(|value| (min..=max).contains(value))
+                .ok_or_else(|| format!("{name} must be an integer in {min}..={max}"))
+        }
+
+        /// Deterministic archive storage faults, each consumed entirely by
+        /// the next archive attempt so that recovery runs without faults.
+        #[derive(Clone, Copy)]
+        enum Scenario {
+            SegmentPutRefused,
+            IndexPutUnknown,
+            HeadCasNotApplied,
+            HeadCasAppliedUnconfirmed,
+        }
+
+        impl Scenario {
+            const ALL: [Self; 4] = [
+                Self::SegmentPutRefused,
+                Self::IndexPutUnknown,
+                Self::HeadCasNotApplied,
+                Self::HeadCasAppliedUnconfirmed,
+            ];
+
+            fn name(self) -> &'static str {
+                match self {
+                    Self::SegmentPutRefused => "segment_put_refused",
+                    Self::IndexPutUnknown => "index_put_unknown",
+                    Self::HeadCasNotApplied => "head_cas_not_applied",
+                    Self::HeadCasAppliedUnconfirmed => "head_cas_applied_unconfirmed",
+                }
+            }
+
+            fn arm(self, env: &Env) {
+                match self {
+                    // The segment is the first object upload; a refusal is definite.
+                    Self::SegmentPutRefused => {
+                        env.data.fault(Op::Put, "/objects/", Fault::Refuse, 0, 1);
+                    }
+                    // The index is the third upload. An unknown, absent create
+                    // is retried once, so both attempts are lost.
+                    Self::IndexPutUnknown => {
+                        env.data.fault(Op::Put, "/objects/", Fault::Before, 2, 2);
+                    }
+                    // The head compare-and-swap is not applied.
+                    Self::HeadCasNotApplied => {
+                        env.meta.fault(Op::Put, AUTHORITY, Fault::Before, 0, 1);
+                    }
+                    // The head compare-and-swap is applied, but both its
+                    // result and the readback that would confirm it are lost.
+                    Self::HeadCasAppliedUnconfirmed => {
+                        env.meta.fault(Op::Put, AUTHORITY, Fault::After, 0, 1);
+                        let meta = env.meta.clone();
+                        env.meta.hook(Op::Put, AUTHORITY, move || {
+                            meta.fault(Op::Get, AUTHORITY, Fault::Before, 0, 1);
+                        });
+                    }
+                }
+            }
+        }
+
+        fn api(error: ApiError) -> String {
+            error.code.to_owned()
+        }
+
+        fn live_sequence(env: &Env) -> u64 {
+            let guard = env.service.database.read().unwrap();
+            guard.as_ref().unwrap().feed_cursor().unwrap().sequence
+        }
+
+        /// One put per id, acknowledged as the HA gateway does: admit,
+        /// verify before commit, commit, verify before acknowledging.
+        fn acknowledge(
+            env: &Env,
+            ids: std::ops::RangeInclusive<u64>,
+            acknowledged: &mut BTreeSet<u64>,
+        ) -> Result<(), String> {
+            let fence = &env.service.writer_fence;
+            for id in ids {
+                fence.admit_mutation().map_err(api)?;
+                fence.verify_before_commit().map_err(api)?;
+                put(env, id..=id);
+                fence.verify_before_ack().map_err(api)?;
+                acknowledged.insert(id);
+            }
+            Ok(())
+        }
+
+        /// Restores `head` as a successor does (pin, fetch and verify, then
+        /// replay the archive) and returns its sequence and how many
+        /// acknowledged writes it lacks.
+        fn restore(
+            env: &Env,
+            head: &HeadRef,
+            acknowledged: &BTreeSet<u64>,
+        ) -> Result<(u64, u64), String> {
+            let sets = Sets::new(
+                env.meta.clone(),
+                env.data.clone(),
+                false,
+                "vlite/prod/".into(),
+            );
+            let dir = tempfile::tempdir().map_err(|error| error.kind().to_string())?;
+            let pin = sets
+                .pin(
+                    &head.set_id,
+                    "meas003 restore",
+                    cloud::PinKind::Operation,
+                    now(),
+                )
+                .map_err(api)?;
+            let restored = (|| {
+                let fetched = sets.fetch(&head.set_id, &pin.id, dir.path()).map_err(api)?;
+                sets.restore_ha_head(&fetched, dir.path(), head)
+                    .map_err(api)?;
+                let db = Database::open_read_only(&fetched.database)
+                    .map_err(|_| "restored_database_unreadable".to_owned())?;
+                let sequence = db
+                    .feed_cursor()
+                    .map_err(|_| "restored_cursor_unreadable".to_owned())?
+                    .sequence;
+                let mut missing = 0;
+                for id in acknowledged {
+                    let found = db
+                        .get(*id)
+                        .map_err(|_| "restored_record_unreadable".to_owned())?;
+                    missing += u64::from(found.is_none());
+                }
+                Ok((sequence, missing))
+            })();
+            sets.release(&head.set_id, &pin.id, now()).map_err(api)?;
+            restored
+        }
+
+        struct Step {
+            scenario: Scenario,
+            phase: &'static str,
+            outcome: Result<(), String>,
+            /// Expected outcome success, authority position and lost writes.
+            ok: bool,
+            published: u64,
+            lost: u64,
+            /// The loss of the report an operator acknowledged, if any.
+            acked: Option<Loss>,
+        }
+
+        /// Compares the independently observed loss (acknowledged writes
+        /// missing from the restored authority position) with the real
+        /// failover loss report. Only codes and positions are emitted.
+        fn measure(
+            env: &Env,
+            store: &AuthorityStore,
+            acknowledged: &BTreeSet<u64>,
+            step: Step,
+        ) -> Result<Value, String> {
+            let observed = live_sequence(env);
+            let record = store.read().map_err(|error| api(error.into()))?.record;
+            let (slot, archived) = match (&record.head, &record.base) {
+                (Some(head), _) => ("head", head.clone()),
+                (None, Some(base)) => ("base", base.clone()),
+                (None, None) => return Err(format!("{}: no authority position", step.phase)),
+            };
+            let restored = restore(env, &archived, acknowledged);
+            let status = env.runtime.archive_progress().map_err(api)?;
+            let report = |sequence: Option<u64>| {
+                let observation = sequence.map(|sequence| WriterObservation {
+                    sequence,
+                    observed_unix_ms: now(),
+                });
+                build_report(store, status.as_ref(), observation)
+                    .map_err(|error| error.code().to_owned())
+            };
+            let known = report(Some(observed))?;
+            let blind = report(None)?.loss;
+            let stale = report(archived.sequence.checked_sub(1))?.loss;
+            // Without a readable authority record there is no report at all.
+            env.meta.fault(Op::Get, AUTHORITY, Fault::Before, 0, 1);
+            let unreadable = report(Some(observed)).err();
+            let lost = restored.as_ref().ok().map(|(_, lost)| *lost);
+            let agrees = restored
+                .as_ref()
+                .is_ok_and(|(sequence, _)| *sequence == archived.sequence)
+                && lost.is_some_and(|lost| {
+                    observed.checked_sub(archived.sequence) == Some(lost)
+                        && known.loss == Loss::Known { commits: lost }
+                        && step.acked.is_none_or(|acked| acked == known.loss)
+                });
+            let unknown = blind == Loss::Unknown && stale == Loss::Unknown && unreadable.is_some();
+            let fence = env.service.writer_fence.state();
+            let expected = step.outcome.is_ok() == step.ok
+                && archived.sequence == step.published
+                && lost == Some(step.lost)
+                && (slot == "base") == step.acked.is_some()
+                && (fence == FenceState::Serving) == step.acked.is_none();
+            let checkpoint = status.as_ref().and_then(|s| s.last_checkpoint_sequence);
+            let mut row = json!({
+                "scope": "local-fake",
+                "scenario": step.scenario.name(),
+                "phase": step.phase,
+                "outcome": step.outcome.as_ref().err().map_or("ok", String::as_str),
+                "fence": format!("{fence:?}"),
+                "acknowledged_sequence": observed,
+                "acknowledged_writes": acknowledged.len(),
+                "published_slot": slot,
+                "published_sequence": archived.sequence,
+                "restored_sequence": restored.as_ref().ok().map(|(sequence, _)| *sequence),
+                "restore_error": restored.as_ref().err(),
+                "missing_acknowledged_writes": lost,
+                "report_loss": known.loss,
+                "acknowledged_report_loss": step.acked,
+                "report_unpublished_commits":
+                    known.archive_status.as_ref().and_then(|s| s.unpublished_commits),
+                "status_last_checkpoint_sequence": checkpoint,
+                "status_failures": status.as_ref().map_or(0, |s| s.failures),
+                "status_last_error_code":
+                    status.as_ref().and_then(|s| s.last_error.as_ref()).map(|e| &e.code),
+                "status_only_loss_estimate":
+                    checkpoint.and_then(|checkpoint| observed.checked_sub(checkpoint)),
+                "loss_without_observation": blind,
+                "loss_with_stale_observation": stale,
+                "report_when_authority_unreadable": unreadable,
+                "report_matches_observed": agrees,
+                "unknown_preserved": unknown,
+                "expected": expected,
+            });
+            let text = row.to_string();
+            let redacted = [
+                archived.set_id.as_str(),
+                record.revision.as_str(),
+                record.lineage.as_str(),
+                known.report_id.as_str(),
+            ]
+            .into_iter()
+            .chain(record.writer_id.as_deref())
+            .all(|secret| !text.contains(secret));
+            let pass = agrees && unknown && expected && redacted;
+            row["redacted"] = json!(redacted);
+            row["verdict"] = json!(if pass { "pass" } else { "fail" });
+            Ok(row)
+        }
+
+        /// A fresh HA writer: baseline at 4 and one archived checkpoint at
+        /// 5, then `commits` acknowledged writes and a faulted archive
+        /// attempt, one more write and a fault-free archive (recovery), and
+        /// finally one unarchived write followed by an acknowledged failover.
+        fn trial(scenario: Scenario, commits: u64) -> Result<Vec<Value>, String> {
+            let (env, store) = setup_ha();
+            let h = Handle::new(&env.service);
+            let mut acknowledged: BTreeSet<u64> = (1..=4).collect();
+            env.runtime.run_now(&h).map_err(api)?;
+            acknowledge(&env, 5..=5, &mut acknowledged)?;
+            env.runtime.archive_now(&h).map_err(api)?;
+            let last = 5 + commits;
+            let mut rows = Vec::new();
+
+            acknowledge(&env, 6..=last, &mut acknowledged)?;
+            scenario.arm(&env);
+            let outcome = env.runtime.archive_now(&h).map(drop).map_err(api);
+            let advanced = matches!(scenario, Scenario::HeadCasAppliedUnconfirmed);
+            let step = Step {
+                scenario,
+                phase: "fault",
+                outcome,
+                ok: false,
+                published: if advanced { last } else { 5 },
+                lost: if advanced { 0 } else { commits },
+                acked: None,
+            };
+            rows.push(measure(&env, &store, &acknowledged, step)?);
+
+            acknowledge(&env, last + 1..=last + 1, &mut acknowledged)?;
+            let outcome = env.runtime.archive_now(&h).map(drop).map_err(api);
+            let step = Step {
+                scenario,
+                phase: "recovered",
+                outcome,
+                ok: true,
+                published: last + 1,
+                lost: 0,
+                acked: None,
+            };
+            rows.push(measure(&env, &store, &acknowledged, step)?);
+
+            acknowledge(&env, last + 2..=last + 2, &mut acknowledged)?;
+            let status = env.runtime.archive_progress().map_err(api)?;
+            let observation = WriterObservation {
+                sequence: live_sequence(&env),
+                observed_unix_ms: now(),
+            };
+            let report = build_report(&store, status.as_ref(), Some(observation))
+                .map_err(|error| error.code().to_owned())?;
+            let ack = FailoverAck {
+                report_id: report.report_id.clone(),
+                expected_epoch: report.epoch,
+                expected_revision: report.revision.clone(),
+                old_replicas: 0,
+            };
+            let outcome = execute(&store, &report, &ack)
+                .map(drop)
+                .map_err(|error| error.code().to_owned());
+            // The old writer may no longer acknowledge anything.
+            if acknowledge(&env, last + 3..=last + 3, &mut acknowledged).is_ok() {
+                return Err("the old writer acknowledged a write after failover".into());
+            }
+            let step = Step {
+                scenario,
+                phase: "failover",
+                outcome,
+                ok: true,
+                published: last + 1,
+                lost: 1,
+                acked: Some(report.loss),
+            };
+            rows.push(measure(&env, &store, &acknowledged, step)?);
+            Ok(rows)
+        }
+
+        #[test]
+        fn meas003_requires_opt_in_and_bounded_settings() {
+            let unset = |_: &str| None;
+            let set = |value: &'static str| move |_: &str| Some(value.to_owned());
+            assert!(opt_in(unset).is_err());
+            assert!(opt_in(set("true")).is_err());
+            assert!(opt_in(set("0")).is_err());
+            assert!(opt_in(set("1")).is_ok());
+            assert_eq!(bounded(&unset, COMMITS, 3, 1, 64), Ok(3));
+            assert_eq!(bounded(&set("64"), COMMITS, 3, 1, 64), Ok(64));
+            for bad in ["0", "65", "-1", "x", ""] {
+                assert!(bounded(&set(bad), COMMITS, 3, 1, 64).is_err(), "{bad}");
+            }
+        }
+
+        #[test]
+        #[ignore = "MEAS-003 probe; requires VLITE_MEAS003=1"]
+        fn meas003_archive_fault_loss_window_probe() -> Result<(), String> {
+            let var = |name: &str| std::env::var(name).ok();
+            opt_in(var)?;
+            let commits = bounded(&var, COMMITS, 3, 1, 64)?;
+            let rounds = bounded(&var, ROUNDS, 2, 1, 8)?;
+            let mut all = Vec::new();
+            for _ in 0..rounds {
+                let mut rows = Vec::new();
+                for scenario in Scenario::ALL {
+                    rows.extend(trial(scenario, commits)?);
+                }
+                all.push(rows);
+            }
+            // Deterministic faults must reproduce the same positions.
+            let repeatable = all.windows(2).all(|pair| pair[0] == pair[1]);
+            let rows = all.swap_remove(0);
+            let failed: Vec<String> = rows
+                .iter()
+                .filter(|row| row["verdict"] != "pass")
+                .map(|row| format!("{}/{}", row["scenario"], row["phase"]))
+                .collect();
+            for row in &rows {
+                println!("MEAS003 {row}");
+            }
+            println!(
+                "MEAS003 {}",
+                json!({"scope":"local-fake","summary":{
+                    "scenarios":Scenario::ALL.len(),"rows":rows.len(),"failed":failed.len(),
+                    "rounds":rounds,"fault_commits":commits,"repeatable":repeatable},
+                    "claim":"in-process fake object store with deterministic injected faults; \
+                     validates loss reporting against independently observed acknowledged \
+                     writes only; not an SLO, production or Azure loss bound"})
+            );
+            if !repeatable {
+                return Err("MEAS-003 rounds disagree".into());
+            }
+            if !failed.is_empty() {
+                return Err(format!("MEAS-003 failed rows: {}", failed.join(", ")));
+            }
+            Ok(())
+        }
+    }
 }
