@@ -13,12 +13,15 @@ use vlite::{
     server::{
         BearerToken, CloudRestore, GatewayTrust, GatewayTrustConfig, GroupCommitConfig, Managed,
         ManagedHandle, ReaderApply, ReaderApplyConfig, RecoveryError, RestoreMode, ServeMode,
-        ServerOptions, Service, configured_admin_router, read_token_file, selected_database,
+        ServerOptions, Service, WriterAuthority, configured_admin_router, read_token_file,
+        selected_database,
     },
 };
 
-const USAGE: &str = "usage: vlite-server <database-path> [--providers-file <path> | VLITE_PROVIDERS_FILE] [--memory-bindings-file <path> | VLITE_MEMORY_BINDINGS_FILE] [--create-if-missing <dimensions> [--create-format 3|4|5]] (default 5: graph-enabled; 3 and 4 create plain vector files) [--bind <ip:port>] [--tls-cert <pem> --tls-key <pem>] [--otlp-endpoint <url>] [--grpc-bind <ip:port> [--grpc-tls-cert <pem> --grpc-tls-key <pem> [--grpc-tls-client-ca <pem>]]] [--allow-remote] [--ann-snapshot] [--lock-held-reads] [--group-commit [--group-commit-requests <1..16>] [--group-commit-bytes <1024..268435456>] [--group-commit-delay-ms <0..100>]] [--durability periodic|full|none] (default periodic) [--flush-interval-ms <1..60000>] (periodic only, default 60000; none keeps the database in memory only, needs --create-if-missing and loses all data when the server stops) [--encryption-key-file <path> | VLITE_ENCRYPTION_KEY | VLITE_ENCRYPTION_KEY_HEX] [--token-file <path> | --insecure-local]; admin: VLITE_AUTH_TOKEN or VLITE_AUTH_TOKEN_FILE; optional read-only: VLITE_READ_ONLY_TOKEN or VLITE_READ_ONLY_TOKEN_FILE; backups/credentials/persistent audit: VLITE_ADMIN_DIR; off-by-default schedules: VLITE_AUTO_MAINTENANCE_INTERVAL_SECS, VLITE_BACKUP_INTERVAL_SECS, VLITE_BACKUP_RETENTION_ENABLED=1, VLITE_BACKUP_RETAIN_LAST, VLITE_BACKUP_RETAIN_DAYS, VLITE_BACKUP_DRILL_EVERY, VLITE_BACKUP_DRILL_MAX_BYTES; VLITE_SLOW_QUERY_MS; VLITE_METRICS_WITH_MEMORY=1 (serve /metrics and the metrics summary while agent memory is configured; their totals then include memory data); dashboard sign-in (needs VLITE_ADMIN_DIR and an admin token): VLITE_TRUSTED_PROXY=1 behind a proxy that sets X-Forwarded-Proto/For, VLITE_SESSION_IDLE_MINUTES (default 30), VLITE_SESSION_MAX_HOURS (default 8), optional first super admin: VLITE_ADMIN_USERNAME with VLITE_ADMIN_PASSWORD_FILE; [--log-buffer <n>] (default 2000, maximum 100000); [--serve-mode standalone|writer|reader | VLITE_SERVE_MODE] (default standalone; reader serves an existing file read-only and refuses writes, creation, durability, group commit, ANN snapshots, gRPC and VLITE_ADMIN_DIR); [--reader-apply-file <json>] (reader mode only, no environment variable; JSON requires target_file, follower_dir, capacity_bytes (1..1073741824, 1 GiB cap), staleness_bound_ms (1..3600000), poll_interval_ms (positive and below the staleness bound); optional shared_key_file; two private follower slots <follower_dir>/reader-a|reader-b; positional path must be <follower_dir>/reader-a/database.vlite; encrypted databases refused); opt-in Azure Blob cloud backup policy: PUT /v1/admin/cloud-backup (emulator shared key: VLITE_CLOUD_BACKUP_SHARED_KEY_FILE); offline isolated cloud restore: vlite-server cloud-sets | cloud-restore (run either without arguments for its usage); [--gateway-trust-file <json>] (feature-aca-ha gateway-trusted backend: data requests are authorized only by gateway-signed principal envelopes checked against the shared control state; refuses --insecure-local, --grpc-bind, --durability none and VLITE_ADMIN_DIR); DB-free gateway: vlite-server gateway --config <json>; its keys: vlite-server gateway-keygen; its shared control state: vlite-server control-state publish|update (run either without arguments for its usage; a database literally named gateway, gateway-keygen, control-state or failover needs a ./ prefix)\n\
-vlite-server failover report|execute --target-file <json> [options] (run without a verb for usage; execute requires the old writer at zero replicas and the exact report acknowledgement)";
+const USAGE: &str = "usage: vlite-server <database-path> [--providers-file <path> | VLITE_PROVIDERS_FILE] [--memory-bindings-file <path> | VLITE_MEMORY_BINDINGS_FILE] [--create-if-missing <dimensions> [--create-format 3|4|5]] (default 5: graph-enabled; 3 and 4 create plain vector files) [--bind <ip:port>] [--tls-cert <pem> --tls-key <pem>] [--otlp-endpoint <url>] [--grpc-bind <ip:port> [--grpc-tls-cert <pem> --grpc-tls-key <pem> [--grpc-tls-client-ca <pem>]]] [--allow-remote] [--ann-snapshot] [--lock-held-reads] [--group-commit [--group-commit-requests <1..16>] [--group-commit-bytes <1024..268435456>] [--group-commit-delay-ms <0..100>]] [--durability periodic|full|none] (default periodic) [--flush-interval-ms <1..60000>] (periodic only, default 60000; none keeps the database in memory only, needs --create-if-missing and loses all data when the server stops) [--encryption-key-file <path> | VLITE_ENCRYPTION_KEY | VLITE_ENCRYPTION_KEY_HEX] [--token-file <path> | --insecure-local]; admin: VLITE_AUTH_TOKEN or VLITE_AUTH_TOKEN_FILE; optional read-only: VLITE_READ_ONLY_TOKEN or VLITE_READ_ONLY_TOKEN_FILE; backups/credentials/persistent audit: VLITE_ADMIN_DIR; off-by-default schedules: VLITE_AUTO_MAINTENANCE_INTERVAL_SECS, VLITE_BACKUP_INTERVAL_SECS, VLITE_BACKUP_RETENTION_ENABLED=1, VLITE_BACKUP_RETAIN_LAST, VLITE_BACKUP_RETAIN_DAYS, VLITE_BACKUP_DRILL_EVERY, VLITE_BACKUP_DRILL_MAX_BYTES; VLITE_SLOW_QUERY_MS; VLITE_METRICS_WITH_MEMORY=1 (serve /metrics and the metrics summary while agent memory is configured; their totals then include memory data); dashboard sign-in (needs VLITE_ADMIN_DIR and an admin token): VLITE_TRUSTED_PROXY=1 behind a proxy that sets X-Forwarded-Proto/For, VLITE_SESSION_IDLE_MINUTES (default 30), VLITE_SESSION_MAX_HOURS (default 8), optional first super admin: VLITE_ADMIN_USERNAME with VLITE_ADMIN_PASSWORD_FILE; [--log-buffer <n>] (default 2000, maximum 100000); [--serve-mode standalone|writer|reader | VLITE_SERVE_MODE] (default standalone; reader serves an existing file read-only and refuses writes, creation, durability, group commit, ANN snapshots, gRPC and VLITE_ADMIN_DIR); [--reader-apply-file <json>] (reader mode only, no environment variable; JSON requires target_file, follower_dir, capacity_bytes (1..1073741824, 1 GiB cap), staleness_bound_ms (1..3600000), poll_interval_ms (positive and below the staleness bound); optional shared_key_file; two private follower slots <follower_dir>/reader-a|reader-b; positional path must be <follower_dir>/reader-a/database.vlite; encrypted databases refused); opt-in Azure Blob cloud backup policy: PUT /v1/admin/cloud-backup (emulator shared key: VLITE_CLOUD_BACKUP_SHARED_KEY_FILE); offline isolated cloud restore: vlite-server cloud-sets | cloud-restore (run either without arguments for its usage); [--gateway-trust-file <json>] (feature-aca-ha gateway-trusted backend: data requests are authorized only by gateway-signed principal envelopes checked against the shared control state; refuses --insecure-local, --grpc-bind, --durability none and VLITE_ADMIN_DIR); DB-free gateway: vlite-server gateway --config <json>; its keys: vlite-server gateway-keygen; its shared control state: vlite-server control-state publish|update (run either without arguments for its usage; a database literally named gateway, gateway-keygen, control-state, failover or authority needs a ./ prefix)\n\
+vlite-server failover report|execute --target-file <json> [options] (run without a verb for usage; execute requires the old writer at zero replicas and the exact report acknowledgement)\n\
+vlite-server authority init|show --target-file <json> [options] (run without a verb for usage)\n\
+Writer authority: --authority-target-file <json> [--authority-shared-key-file <path>] [--authority-recheck-ms <500..60000>] (default 5000; explicit files only; requires --serve-mode writer, persistent durability and REST without --grpc-bind)";
 
 struct Config {
     providers: vlite::server::providers::ProviderRegistry,
@@ -56,6 +59,9 @@ struct Config {
     /// EPIC-004: `--gateway-trust-file`, validated (nothing contacted yet).
     gateway_trust: Option<GatewayTrustConfig>,
     reader_apply: Option<ReaderApplyConfig>,
+    authority_target_file: Option<PathBuf>,
+    authority_shared_key_file: Option<PathBuf>,
+    authority_recheck: Duration,
 }
 
 /// Dashboard sign-in settings from the environment.
@@ -215,8 +221,39 @@ fn config() -> Result<Config, Box<dyn Error>> {
     let mut serve_mode: Option<ServeMode> = None;
     let mut gateway_trust_file: Option<PathBuf> = None;
     let mut reader_apply_file: Option<PathBuf> = None;
+    let mut authority_target_file: Option<PathBuf> = None;
+    let mut authority_shared_key_file: Option<PathBuf> = None;
+    let mut authority_recheck_ms = None;
     while let Some(arg) = args.next() {
         match arg.to_str() {
+            Some(
+                name @ ("--authority-target-file"
+                | "--authority-shared-key-file"
+                | "--authority-recheck-ms"),
+            ) => {
+                let value = args
+                    .next()
+                    .ok_or("invalid_arguments: authority option needs a value")?;
+                match name {
+                    "--authority-target-file" if authority_target_file.is_none() => {
+                        authority_target_file = Some(value.into());
+                    }
+                    "--authority-shared-key-file" if authority_shared_key_file.is_none() => {
+                        authority_shared_key_file = Some(value.into());
+                    }
+                    "--authority-recheck-ms" if authority_recheck_ms.is_none() => {
+                        let value = value
+                            .to_str()
+                            .and_then(|value| value.parse::<u64>().ok())
+                            .filter(|value| (500..=60000).contains(value))
+                            .ok_or(
+                                "invalid_arguments: --authority-recheck-ms must be 500..60000",
+                            )?;
+                        authority_recheck_ms = Some(value);
+                    }
+                    _ => return Err("invalid_arguments: duplicate authority option".into()),
+                }
+            }
             Some("--reader-apply-file") if reader_apply_file.is_none() => {
                 reader_apply_file = Some(args.next().ok_or(USAGE)?.into());
             }
@@ -349,6 +386,27 @@ fn config() -> Result<Config, Box<dyn Error>> {
                 .map_err(|_| "VLITE_SERVE_MODE must be standalone, writer or reader")?,
         },
     };
+    if authority_target_file.is_some()
+        || authority_shared_key_file.is_some()
+        || authority_recheck_ms.is_some()
+    {
+        if authority_target_file.is_none() {
+            return Err(
+                "invalid_arguments: authority options require --authority-target-file".into(),
+            );
+        }
+        if serve_mode != ServeMode::Writer {
+            return Err("invalid_arguments: authority options require --serve-mode writer".into());
+        }
+        if grpc_bind.is_some() {
+            return Err("invalid_arguments: writer authority cannot be used with --grpc-bind (no response barrier)".into());
+        }
+        if mode == Some("none") {
+            return Err(
+                "invalid_arguments: writer authority cannot be used with --durability none".into(),
+            );
+        }
+    }
     if serve_mode == ServeMode::Reader {
         // A reader opens an existing file read-only; nothing it would write
         // or schedule is accepted.
@@ -608,6 +666,9 @@ fn config() -> Result<Config, Box<dyn Error>> {
         serve_mode,
         gateway_trust,
         reader_apply,
+        authority_target_file,
+        authority_shared_key_file,
+        authority_recheck: Duration::from_millis(authority_recheck_ms.unwrap_or(5000)),
     };
     // Validate every option before creating or opening a database.
     options(&config, None).validate()?;
@@ -794,10 +855,29 @@ async fn run() -> Result<i32, Box<dyn Error>> {
         Ok(code)
     };
     let signals = Signals::new()?;
+    let authority = match config.authority_target_file.take() {
+        Some(target) => {
+            let key = config.authority_shared_key_file.take();
+            Some(
+                tokio::task::spawn_blocking(move || {
+                    WriterAuthority::connect(&target, key.as_deref())
+                })
+                .await
+                .map_err(
+                    |_| "internal_error: writer authority connection stopped unexpectedly",
+                )??,
+            )
+        }
+        None => None,
+    };
     // Bind both listeners before opening, so a port conflict never opens
-    // (or creates) the database.
-    let listener = TcpListener::bind(config.bind).await?;
-    let address = listener.local_addr()?;
+    // (or creates) the database. Authority-enabled writers instead claim
+    // their database lineage before binding any listener.
+    let listener = if authority.is_none() {
+        Some(TcpListener::bind(config.bind).await?)
+    } else {
+        None
+    };
     let grpc_listener = match config.grpc_bind {
         Some(bind) => Some(TcpListener::bind(bind).await?),
         None => None,
@@ -863,6 +943,15 @@ async fn run() -> Result<i32, Box<dyn Error>> {
         }
     };
     let Some((mut database, active)) = opened else {
+        if authority.is_some() {
+            stop_apply(apply.take()).await;
+            stop_trust(trust).await;
+            return Err(
+                "writer_authority_unavailable: cannot claim a database in recovery mode".into(),
+            );
+        }
+        let listener = listener.expect("legacy recovery listener");
+        let address = listener.local_addr()?;
         let managed = managed.take().expect("recovery needs the managed runtime");
         let code = recovery.unwrap_or("recovery_required");
         vlite::server::log_stderr(
@@ -922,6 +1011,19 @@ async fn run() -> Result<i32, Box<dyn Error>> {
         ServeMode::Standalone => service,
         mode => service.with_serve_mode(mode)?,
     };
+    let service = match authority {
+        Some(authority) => {
+            tokio::task::spawn_blocking(move || service.with_writer_authority(authority))
+                .await
+                .map_err(|_| "internal_error: writer authority startup stopped unexpectedly")??
+        }
+        None => service,
+    };
+    let listener = match listener {
+        Some(listener) => listener,
+        None => TcpListener::bind(config.bind).await?,
+    };
+    let address = listener.local_addr()?;
     let service = match &trust {
         Some(trust) => service.with_gateway_trust(trust),
         None => service,
@@ -1006,6 +1108,22 @@ async fn serve(
     apply: Option<ReaderApply>,
 ) -> Result<i32, Box<dyn Error>> {
     let (stop_tx, stop_rx) = tokio::sync::watch::channel(false);
+    let recheck = service
+        .as_ref()
+        .filter(|service| service.writer_stop_signal().is_some())
+        .map(|service| {
+            let service = service.clone();
+            let stop_rx = stop_rx.clone();
+            let stop_tx = stop_tx.clone();
+            let interval = config.authority_recheck;
+            tokio::spawn(async move {
+                let result = service.recheck_writer_authority(interval, stop_rx).await;
+                if result.is_err() {
+                    let _ = stop_tx.send(true);
+                }
+                result
+            })
+        });
     let signal = tokio::spawn({
         let stop_tx = stop_tx.clone();
         let draining = service.clone();
@@ -1157,6 +1275,9 @@ async fn serve(
         None => Ok(()),
     };
     stop_trust(trust).await;
+    if let Some(recheck) = recheck {
+        recheck.await??;
+    }
     let exit_code = service.as_ref().and_then(Service::writer_exit_code);
     vlite::server::log_stderr(
         "info",
@@ -1192,15 +1313,28 @@ async fn main() -> std::process::ExitCode {
     }
     match args.first().and_then(|first| first.to_str()) {
         Some("gateway") => return gateway(args[1..].to_vec()).await,
-        Some(command @ ("gateway-keygen" | "control-state" | "failover")) => {
+        Some(command @ ("gateway-keygen" | "control-state" | "failover" | "authority")) => {
             return gateway_tool(command.to_owned(), args[1..].to_vec()).await;
         }
         _ => {}
     }
+    let authority_options = args.iter().any(|arg| {
+        matches!(
+            arg.to_str(),
+            Some(
+                "--authority-target-file"
+                    | "--authority-shared-key-file"
+                    | "--authority-recheck-ms"
+            )
+        )
+    });
     match run().await {
         Ok(code) => std::process::ExitCode::from(code as u8),
         Err(error) => {
             vlite::server::log_stderr("error", "server", serde_json::json!({"event":"startup_or_shutdown_failure","message":error.to_string()}).to_string());
+            if authority_options {
+                eprintln!("{}", json!({"error":error.to_string()}));
+            }
             std::process::ExitCode::FAILURE
         }
     }
@@ -1233,6 +1367,7 @@ async fn gateway_tool(command: String, args: Vec<OsString>) -> std::process::Exi
     let result = tokio::task::spawn_blocking(move || match command.as_str() {
         "gateway-keygen" => vlite::server::gateway_keygen(&args),
         "failover" => vlite::server::failover_command(&args),
+        "authority" => vlite::server::authority_command(&args),
         _ => vlite::server::control_state_command(&args),
     })
     .await

@@ -245,6 +245,20 @@ pub(super) fn connect(
     Ok(cloud::azure::connect(&target, key)?)
 }
 
+/// Authority enrollment accepts only explicit private key files, never an
+/// ambient backup credential left in the server's environment.
+pub(super) fn connect_explicit(
+    target_file: &FilePath,
+    key_file: Option<&FilePath>,
+) -> Result<Sets, RecoveryError> {
+    let target = read_target(target_file)?;
+    let key = key_file
+        .map(cloud::azure::read_shared_key)
+        .transpose()
+        .map_err(|message| refused("invalid_shared_key", message))?;
+    Ok(cloud::azure::connect(&target, key)?)
+}
+
 /// Lists the target's sets (`vlite-server cloud-sets`): read-only.
 pub fn cloud_sets(
     target_file: &FilePath,

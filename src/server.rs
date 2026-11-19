@@ -83,6 +83,7 @@ mod tenants;
 pub mod tls;
 mod users;
 mod webhooks;
+mod writer_authority;
 mod writer_fence;
 pub use admin::{ServerOptions, configured_admin_router, read_token_file, selected_database};
 pub use cloud_recovery::{CloudRestore, RecoveryError, RestoreMode, cloud_restore, cloud_sets};
@@ -92,6 +93,7 @@ pub use gateway_mode::{control_state_command, gateway_keygen, run_gateway};
 pub use gateway_trust::{GatewayTrust, GatewayTrustConfig};
 pub use reader_apply::{ReaderApply, ReaderApplyConfig};
 pub use serve_mode::ServeMode;
+pub use writer_authority::{WriterAuthority, authority_command};
 
 /// Emit a legacy stderr line and also capture it in the bounded server log buffer.
 pub fn log_stderr(level: &'static str, target: &'static str, message: impl Into<String>) {
@@ -591,7 +593,7 @@ impl Service {
     }
 
     /// Installs authority after `with_serve_mode`. gRPC has no response barrier
-    /// yet and must be refused by the future authority startup.
+    /// yet and is refused by authority startup.
     #[cfg_attr(not(test), allow(dead_code))]
     pub(super) fn with_writer_fence(
         mut self,

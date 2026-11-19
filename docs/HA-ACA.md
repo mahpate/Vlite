@@ -6,8 +6,8 @@ the single-writer deployment does today: no new headers, fields, reads,
 errors or startup requirements.
 
 Gateway and reader scale-out add read capacity and isolation, **not writer
-HA**. There is one writer. The writer serving fence is **not wired into the
-shipped binary yet**, and there is no automatic failover. Failover is an
+HA**. There is one writer. The writer serving fence is **explicitly opt-in**,
+and there is no automatic failover. Failover is an
 operator-run, reported and acknowledged procedure; the command prepares
 authority transfer, not a running replacement.
 
@@ -54,6 +54,7 @@ To inspect shipped usage without accessing Azure, run these without arguments:
 
 ```powershell
 vlite-server failover
+vlite-server authority
 vlite-server gateway
 vlite-server gateway-keygen
 vlite-server control-state
@@ -63,6 +64,55 @@ vlite-server cloud-restore
 
 Missing-argument errors are expected. The following usage excerpts are quoted
 verbatim; examples beneath them supply the required arguments.
+
+## Initialize and claim writer authority
+
+Only use this path for an operator-verified local database with no archived
+base to recover. It does not bind or verify an HA archive. Read the database's
+16-character lowercase hexadecimal `lineage` from
+`GET /v1/admin/serve-status`; files without a v4 lineage are refused.
+Stop that server before starting the authority-enabled writer.
+
+```text
+vlite-server authority init|show --target-file <json> [--shared-key-file <path>] [init only, all required: --installation-id <id> --scope-id <id> --lineage <16 lowercase hex>]
+```
+
+```powershell
+vlite-server authority init --target-file C:\private\authority-target.json `
+  --installation-id <installation-id> --scope-id <scope-id> --lineage <lineage>
+vlite-server authority show --target-file C:\private\authority-target.json
+vlite-server C:\private\database.vlite --serve-mode writer `
+  --token-file C:\private\admin-token.txt `
+  --authority-target-file C:\private\authority-target.json `
+  --authority-recheck-ms 5000
+```
+
+IDs use 1-128 ASCII letters, digits, `.`, `_` or `-`. Initialization creates
+the authority once (`writer_authority_exists` otherwise); show never mutates
+it. Both print schema, installation/scope IDs, lineage, epoch, revision,
+phase, `writer_present`, base and head as JSON, never the full writer ID.
+For Azurite add `--shared-key-file <path>` to authority commands and
+`--authority-shared-key-file <path>` to server startup. Authority options
+have no environment-variable or ambient backup-key fallback.
+
+Before binding a listener, startup reads authority, checks the local lineage
+and CAS-claims the prepared epoch. Missing, invalid, unavailable or unresolved
+authority fails closed. A lineage mismatch returns
+`writer_authority_lineage_mismatch`; an existing writer returns
+`writer_authority_claimed`; an archived base returns
+`writer_authority_base_unverified`; a lost claim CAS returns
+`writer_authority_conflict`. No automatic reclaim or election occurs.
+Even a restart requires an explicit, acknowledged operator failover.
+
+Authority requires `--serve-mode writer` and persistent durability; gRPC is
+refused because it has no response barrier. `--gateway-trust-file` remains
+compatible. `--authority-recheck-ms` is 500-60000 (default 5000), only with
+a target file. The writer verifies authority around writes and periodically
+while idle; an observed replacement fences it, drains it and exits with code
+1. A pre-commit authority outage fails readiness/writes closed but can recover
+on a fresh periodic check without a write. Recheck timing is not a guaranteed
+wall-clock zombie bound: store latency and process pauses still matter.
+Without authority options there is no store access, recheck task or fence.
 
 ## Planned or unplanned writer failover
 
@@ -125,12 +175,15 @@ blindly repeat a potentially successful transfer.
 **Verify:** successful JSON contains `result.record` and `result.etag`.
 The record has an incremented epoch, a new revision, phase `recovering`,
 no writer ID, and the previous archived head as its base. This does **not**
-restore, claim, start, route to, or enable serving on a new writer. There is
-no shipped CLI step that completes the fenced writer-serving handoff.
-Keep writes unavailable pending a separately qualified recovery path.
-In that path, verify restored data, sole ownership, authority, readiness,
+restore, claim, start, route to, or enable serving on a new writer. Startup
+can claim this prepared epoch only if its lineage matches and its base is
+absent. An archived base is deliberately refused until HA archive binding
+can verify the local database against it; keep writes unavailable rather
+than start from stale files. In a separately qualified recovery path,
+verify restored data, sole ownership, authority, readiness,
 tenant routing and a read/write check before admitting traffic;
-`GET /v1/admin/serve-status` currently reports `epoch: null`, not proof of fencing.
+`GET /v1/admin/serve-status` reports the claimed epoch only with authority
+enabled (`null` otherwise); that alone is not proof of recovery correctness.
 
 **Back out:** before execute, cancel without changing authority, and resume
 the old writer only after proving no handoff occurred and sole ownership

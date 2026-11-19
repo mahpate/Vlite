@@ -589,8 +589,17 @@ Limits to plan for:
 
 See [HA operations on Azure Container Apps](HA-ACA.md) for manual failover
 preparation, reader replacement, control-state recovery, signing-key rotation
-and checkpoint restore. Gateway/read scale-out is not writer HA; the writer
-serving fence is not wired into the shipped binary and failover is not automatic.
+and checkpoint restore. Gateway/read scale-out is not writer HA.
+Writer fencing is opt-in: initialize once with `vlite-server authority init`,
+inspect with `authority show`, then start with `--serve-mode writer
+--authority-target-file <json>`. Use explicit private
+`--authority-shared-key-file <path>` for the emulator, never an ambient
+backup-key setting. The optional `--authority-recheck-ms` is 500-60000
+(default 5000); an idle writer that observes lost authority drains and exits
+with code 1. gRPC, in-memory durability, a claimed authority, mismatched
+lineage and an unverified archived base are refused. Restarts require an
+explicit operator failover; there is no automatic election or reclaim.
+Existing deployments without authority options remain unchanged.
 Azure Files remains experimental and is not power-loss qualified.
 
 ## Release and image verification
