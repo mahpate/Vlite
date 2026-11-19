@@ -841,10 +841,10 @@ To reproduce:
 
 | Task | Description | Status | Relevant Files |
 |---|---|---|---|
-| ITEM-019 | Reader apply per EPIC-001 strategy; never apply beyond the verified head. | In Progress: `follow_archive` on a verified copy, generation swap and failed-reader readiness done; step 3 (enrollment, follower loop, CLI wiring) in progress. | `src/server/reader_apply.rs`, `src/replica.rs` |
+| ITEM-019 | Reader apply per EPIC-001 strategy; never apply beyond the verified head. | Done (local): `follow_archive` on a verified copy, generation swap, failed-reader readiness, and step 3 enrollment, follower loop and `--reader-apply-file` CLI wiring (pool T15, c29747ea). ACA qualification and MEAS-001/002 NOT RUN. | `src/server/reader_apply.rs`, `src/server/reader_apply/follower.rs`, `src/replica.rs` |
 | ITEM-020 | Staleness-gated readiness; position/age response reporting. | Done: staleness bound, position/age headers on authenticated responses only, binding generation. | `src/server/serve_mode.rs` |
 | ITEM-021 | Gateway reader routing, per-tenant opt-in, binding-generation eligibility. | Done: per-tenant opt-in with writer fallback. | `src/server/gateway.rs` |
-| ITEM-022 | Tests TEST-006/011; memory reservations and binding mismatch. | In Progress: TEST-011 memory isolation done; TEST-006 waits for ITEM-019 step 3. | `tests/`, `src/server/memory/` |
+| ITEM-022 | Tests TEST-006/011; memory reservations and binding mismatch. | In Progress: TEST-011 memory isolation done; TEST-006 is unblocked by ITEM-019 step 3. | `tests/`, `src/server/memory/` |
 
 ### EPIC-006: Epoch fencing and manual controlled failover - 10 person-days
 **Requirements**: FR-013, FR-014, OD-002/003, RISK-001. **Dependencies**: EPIC-000 (Q-1), EPIC-002, EPIC-004. **Deliverable**: epoch `E` bound into archived history; head advances by `If-Match` CAS; serve-time and startup checks; operator failover tool printing a loss report from actual archive progress; infrastructure-fence confirmation enforced before the `E` bump; proof obligations 1-5.
@@ -923,6 +923,7 @@ To reproduce:
 
 | Date | Change |
 |---|---|
+| 2026-11-18 | ITEM-019 done locally: step 3 adds reader enrollment from `--reader-apply-file` (reader mode only; required `capacity_bytes` up to 1 GiB, `staleness_bound_ms` and a `poll_interval_ms` below it; encrypted databases refused), the follower loop over the two private slots and the serve wiring (pool T15). The HA reader template mounts the apply file. ACA qualification and MEAS-001/002 NOT RUN; no deployment or production change. |
 | 2026-11-18 | ITEM-025 done: `vlite-server failover report\|execute` (pool T16) reuses the report and execute safeguards, caps the archive-status file at 64 KiB and prints JSON. Status rows for ITEM-019..031 now match the delivered commits. No deployment or production change. |
 | 2026-11-18 | Owner approved ITEM-033 measurements: "measurements and SLO's you can deploy on the saperate apps if those required and clean them up after measurements." Scope: separate, temporary, tagged ACA apps in a dedicated resource group and environment, deleted afterwards. A temporary container registry in that resource group holds the branch image and is deleted with it; it is not a runtime dependency. The live app, its environment and share are not touched, and the subscription ID is not recorded. |
 | 2026-11-18 | ITEM-032 done: Learn re-checked (AZ-006, AZ-009) and quotas observed read-only (AZ-016: 50 environments per region, 500 cores per environment per pool on the owner's subscription). Section 3.13 gains the tenant-capacity formula. Platform default numbers, the apps-per-environment limit and the template-level grace maximum stay UNVERIFIED. ITEM-029 tenant migration cutover and rollback integrated (pool T11). No deployment or production change. |
