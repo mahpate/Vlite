@@ -841,37 +841,37 @@ To reproduce:
 
 | Task | Description | Status | Relevant Files |
 |---|---|---|---|
-| ITEM-019 | Reader apply per EPIC-001 strategy; never apply beyond the verified head. | In Progress | `src/server/reader_apply.rs`, `src/replica.rs` |
-| ITEM-020 | Staleness-gated readiness; position/age response reporting. | Not Started | `src/server/serve_mode.rs` |
-| ITEM-021 | Gateway reader routing, per-tenant opt-in, binding-generation eligibility. | Not Started | `src/server/gateway.rs` |
-| ITEM-022 | Tests TEST-006/011; memory reservations and binding mismatch. | Not Started | `tests/`, `src/server/memory/` |
+| ITEM-019 | Reader apply per EPIC-001 strategy; never apply beyond the verified head. | In Progress: `follow_archive` on a verified copy, generation swap and failed-reader readiness done; step 3 (enrollment, follower loop, CLI wiring) in progress. | `src/server/reader_apply.rs`, `src/replica.rs` |
+| ITEM-020 | Staleness-gated readiness; position/age response reporting. | Done: staleness bound, position/age headers on authenticated responses only, binding generation. | `src/server/serve_mode.rs` |
+| ITEM-021 | Gateway reader routing, per-tenant opt-in, binding-generation eligibility. | Done: per-tenant opt-in with writer fallback. | `src/server/gateway.rs` |
+| ITEM-022 | Tests TEST-006/011; memory reservations and binding mismatch. | In Progress: TEST-011 memory isolation done; TEST-006 waits for ITEM-019 step 3. | `tests/`, `src/server/memory/` |
 
 ### EPIC-006: Epoch fencing and manual controlled failover - 10 person-days
 **Requirements**: FR-013, FR-014, OD-002/003, RISK-001. **Dependencies**: EPIC-000 (Q-1), EPIC-002, EPIC-004. **Deliverable**: epoch `E` bound into archived history; head advances by `If-Match` CAS; serve-time and startup checks; operator failover tool printing a loss report from actual archive progress; infrastructure-fence confirmation enforced before the `E` bump; proof obligations 1-5.
 
 | Task | Description | Status | Relevant Files |
 |---|---|---|---|
-| ITEM-023 | Authority object and head CAS schema; epoch in archived metadata (needs Q-1). | Not Started | `src/server/authority.rs`, `src/server/cloud_backup.rs` |
-| ITEM-024 | Backend startup/serve-time epoch checks; fenced self-stop. | Not Started | `src/server/authority.rs`, `src/server.rs` |
-| ITEM-025 | Operator failover command and loss report; refuse without infrastructure-fence confirmation. | Not Started | `src/bin/vlite-server.rs` |
-| ITEM-026 | Fault-injection: pause/zombie, double writer, CAS 412, partial uploads, skew (TEST-007/008/009/014/015). | Not Started | `tests/` |
+| ITEM-023 | Authority object and head CAS schema; epoch in archived metadata (needs Q-1). | Done: authority object store, authority-bound baseline publication and checkpoint archive, gateway epoch enforcement before streaming. | `src/server/authority.rs`, `src/server/cloud_backup.rs` |
+| ITEM-024 | Backend startup/serve-time epoch checks; fenced self-stop. | In Progress: writer fence library done; serving wiring not started. | `src/server/authority.rs`, `src/server.rs` |
+| ITEM-025 | Operator failover command and loss report; refuse without infrastructure-fence confirmation. | Done: library and loss report, plus `vlite-server failover report\|execute`. Execute rebuilds the report and refuses unless the report id, expected epoch and revision match and the operator confirms zero old replicas. | `src/server/failover.rs`, `src/bin/vlite-server.rs` |
+| ITEM-026 | Fault-injection: pause/zombie, double writer, CAS 412, partial uploads, skew (TEST-007/008/009/014/015). | Done at library level: 14 deterministic fake-store tests (faults before and after each write, refusals, stale claims after transfer, unknown outcomes). Process-level zombie and clock-skew drills belong to ITEM-035 and MEAS-006. | `src/server/fencing_fault_tests.rs` |
 
 ### EPIC-007: Per-tenant deployment mapping and migration - 8 person-days
 **Requirements**: FR-015, G-5, OD-011. **Dependencies**: EPIC-003, EPIC-004; EPIC-006 for writer/reader migration targets. **Deliverable**: tenant export/import tooling moving namespace data, grants, memory bindings and credentials (re-issued) to a dedicated deployment; directory flip; rollback until source release.
 
 | Task | Description | Status | Relevant Files |
 |---|---|---|---|
-| ITEM-027 | Tenant export (`t<id>__*` data) via existing log/restore primitives. | Not Started | `src/logops.rs`, `src/server/tenants.rs` |
-| ITEM-028 | Carry grants, bindings (reserved prefixes/orphans), users; re-issue credentials. | Not Started | `src/server/recovery_bundle.rs`, `src/server/credentials.rs` |
-| ITEM-029 | Verification, directory flip and rollback procedure (TEST-013). | Not Started | `src/server/cloud_recovery.rs`, `tests/` |
+| ITEM-027 | Tenant export (`t<id>__*` data) via existing log/restore primitives. | Done: tenant log projector. | `src/logops.rs`, `src/server/tenants.rs` |
+| ITEM-028 | Carry grants, bindings (reserved prefixes/orphans), users; re-issue credentials. | Done: tenant migration state and rekey. | `src/server/recovery_bundle.rs`, `src/server/credentials.rs` |
+| ITEM-029 | Verification, directory flip and rollback procedure (TEST-013). | Done: cutover and rollback. | `src/server/cloud_recovery.rs`, `tests/` |
 
 ### EPIC-008: Provisioning automation (IaC) - 5 person-days
 **Requirements**: SEC-003, RISK-011, OD-006. **Dependencies**: EPIC-004; EPIC-005/006 as targets exist. **Deliverable**: templates creating gateway (external ingress, min 2, HTTP rule, readiness/startup probes, termination grace), per-tenant writer (1 replica, internal ingress) and reader (internal ingress, scale rule) apps; a deploy-time check that backends are internal-only and no environment-level HTTP route targets them. Existing ACA deploy files are not modified. Execution requires separate approval.
 
 | Task | Description | Status | Relevant Files |
 |---|---|---|---|
-| ITEM-030 | Gateway/writer/reader app templates (format per owner). | Not Started | `deploy/azure-container-apps/` (new subdirectory) |
-| ITEM-031 | Deploy-time internal-ingress and route checks. | Not Started | `deploy/azure-container-apps/` (new subdirectory) |
+| ITEM-030 | Gateway/writer/reader app templates (format per owner). | Done with mocked tests: `deploy/azure-container-apps/ha/` (PowerShell plus `az`). Deployment stays refused by the qualification check until the open gates pass. | `deploy/azure-container-apps/ha/` |
+| ITEM-031 | Deploy-time internal-ingress and route checks. | Done with mocked tests, in the same scripts. | `deploy/azure-container-apps/ha/` |
 | ITEM-032 | Verify ACA quotas and apps-per-environment limits against current docs; record. | Done (2026-11-18): section 3.13, AZ-006, AZ-009 and AZ-016. Numeric platform defaults, the apps-per-environment limit and the template-level grace maximum remain UNVERIFIED because Learn does not publish them. | `docs/` |
 
 ### EPIC-009: Observability, SLOs, runbooks, chaos testing - 8 person-days
@@ -923,6 +923,7 @@ To reproduce:
 
 | Date | Change |
 |---|---|
+| 2026-11-18 | ITEM-025 done: `vlite-server failover report\|execute` (pool T16) reuses the report and execute safeguards, caps the archive-status file at 64 KiB and prints JSON. Status rows for ITEM-019..031 now match the delivered commits. No deployment or production change. |
 | 2026-11-18 | Owner approved ITEM-033 measurements: "measurements and SLO's you can deploy on the saperate apps if those required and clean them up after measurements." Scope: separate, temporary, tagged ACA apps in a dedicated resource group and environment, deleted afterwards. A temporary container registry in that resource group holds the branch image and is deleted with it; it is not a runtime dependency. The live app, its environment and share are not touched, and the subscription ID is not recorded. |
 | 2026-11-18 | ITEM-032 done: Learn re-checked (AZ-006, AZ-009) and quotas observed read-only (AZ-016: 50 environments per region, 500 cores per environment per pool on the owner's subscription). Section 3.13 gains the tenant-capacity formula. Platform default numbers, the apps-per-environment limit and the template-level grace maximum stay UNVERIFIED. ITEM-029 tenant migration cutover and rollback integrated (pool T11). No deployment or production change. |
 | 2026-11-18 | ITEM-019 mechanism decided under the owner's 2026-11-18 delegation: readers follow the newest Published set, apply only verified archive segments into two private follower files, verify, then swap the read-only generation; a re-seed fails readiness until restart in the first cut; required capacity ceiling and staleness bound with no defaults; encrypted databases refused. Delegated decision, not an owner confirmation; no new dependency, deployment or production change. |
