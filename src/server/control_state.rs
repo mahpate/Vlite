@@ -50,6 +50,14 @@ pub(super) struct Snapshot {
     /// Absent in objects written before the directory existed.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     directory: Vec<Route>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    migrations: Vec<Migration>,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub(super) enum AuthorityMode {
+    Off,
 }
 
 /// How a tenant is deployed (PRD section 3.11; which tenants get which is
@@ -91,6 +99,8 @@ pub(super) struct Route {
     /// `E`: required for `dedicated`, absent for `shared-pool`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub(super) epoch: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(super) authority_mode: Option<AuthorityMode>,
     /// The writer's memory-binding generation; a reader is eligible only at
     /// the same value (FM-009).
     #[serde(default)]
@@ -106,8 +116,14 @@ impl Route {
         }
         let shape = match self.kind {
             Kind::SharedPool => {
-                self.reader.is_none()
+                self.authority_mode.is_none()
+                    && self.reader.is_none()
                     && self.epoch.is_none()
+                    && self.read_routing == ReadRouting::WriterOnly
+            }
+            Kind::Dedicated if self.authority_mode == Some(AuthorityMode::Off) => {
+                self.epoch.is_none()
+                    && self.reader.is_none()
                     && self.read_routing == ReadRouting::WriterOnly
             }
             Kind::Dedicated => {
@@ -134,6 +150,7 @@ impl Route {
             audience: format!("backend-{tenant}"),
             lineage: 0x1234,
             epoch: Some(epoch),
+            authority_mode: None,
             binding_generation: 3,
             read_routing: ReadRouting::WriterOnly,
         }
@@ -148,6 +165,7 @@ impl Route {
             audience: "shared-pool".to_owned(),
             lineage: 0x1234,
             epoch: None,
+            authority_mode: None,
             binding_generation: 0,
             read_routing: ReadRouting::WriterOnly,
         }
@@ -160,6 +178,84 @@ fn valid_directory(directory: &[Route], tenants: &[tenants::Tenant]) -> bool {
     directory
         .iter()
         .all(|route| routed.insert(route.tenant.as_str()) && route.valid(tenants))
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+#[cfg_attr(not(test), allow(dead_code))]
+pub(super) enum Phase {
+    Prepared,
+    Frozen,
+    TargetVerified,
+    Validating,
+    Released,
+    RolledBack,
+}
+
+#[cfg_attr(not(test), allow(dead_code))]
+impl Phase {
+    fn terminal(self) -> bool {
+        matches!(self, Self::Released | Self::RolledBack)
+    }
+
+    pub(super) fn can_follow(self, previous: Self) -> bool {
+        matches!(
+            (previous, self),
+            (Self::Prepared, Self::Frozen)
+                | (Self::Frozen, Self::TargetVerified)
+                | (Self::TargetVerified, Self::Validating)
+                | (Self::Validating, Self::Released)
+                | (
+                    Self::Frozen | Self::TargetVerified | Self::Validating,
+                    Self::RolledBack
+                )
+        )
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(super) struct Migration {
+    pub(super) id: String,
+    pub(super) tenant: String,
+    pub(super) phase: Phase,
+    pub(super) source: Route,
+    pub(super) target: Route,
+    pub(super) source_lineage: u64,
+    pub(super) target_lineage: u64,
+    pub(super) updated_unix_ms: u64,
+}
+
+#[cfg_attr(not(test), allow(dead_code))]
+impl Migration {
+    fn valid(&self, tenants: &[tenants::Tenant]) -> bool {
+        (1..=64).contains(&self.id.len())
+            && self
+                .id
+                .bytes()
+                .all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'-')
+            && self.source.tenant == self.tenant
+            && self.target.tenant == self.tenant
+            && self.source.kind == Kind::SharedPool
+            && self.target.kind == Kind::Dedicated
+            && self.target.authority_mode == Some(AuthorityMode::Off)
+            && self.source.valid(tenants)
+            && self.target.valid(tenants)
+            && self.source_lineage != 0
+            && self.target_lineage != 0
+            && self.source_lineage != self.target_lineage
+            && self.source.lineage == self.source_lineage
+            && self.target.lineage == self.target_lineage
+    }
+
+    fn same_identity(&self, other: &Self) -> bool {
+        self.id == other.id
+            && self.tenant == other.tenant
+            && self.source == other.source
+            && self.target == other.target
+            && self.source_lineage == other.source_lineage
+            && self.target_lineage == other.target_lineage
+    }
 }
 
 fn unavailable(code: &'static str, message: &'static str) -> ApiError {
@@ -183,6 +279,7 @@ impl Snapshot {
             },
             credentials: credentials.snapshot()?,
             directory: Vec::new(),
+            migrations: Vec::new(),
         })
     }
 
@@ -206,12 +303,26 @@ impl Snapshot {
     /// revoked credential stays revoked, the earlier expiry wins, and a
     /// deleted or suspended tenant stays so, even when the admin directory
     /// is an older copy. Resuming a tenant needs `with_suspended`.
+    /// Migration records and activated credential views also stay: a local
+    /// file may add restrictions but cannot restore retired secret hashes.
     pub(super) fn reimport(
         &self,
         credentials: &credentials::Store,
         tenants: Option<&tenants::Store>,
     ) -> Result<Self, ApiError> {
         let mut next = Self::import(credentials, tenants)?.with_directory(self.directory.clone());
+        next.migrations = self.migrations.clone();
+        let imported_restrictions = next.credentials.clone();
+        for migration in &self.migrations {
+            if matches!(
+                migration.phase,
+                Phase::Validating | Phase::Released | Phase::RolledBack
+            ) {
+                next.credentials
+                    .keep_migration_tenant(&self.credentials, &migration.tenant);
+            }
+        }
+        next.credentials.keep_restrictions(&imported_restrictions);
         next.credentials.keep_restrictions(&self.credentials);
         tenants::keep_restrictions(&mut next.tenants, &self.tenants);
         Ok(next)
@@ -276,12 +387,235 @@ impl Snapshot {
             || !tenants::valid_store(&snapshot.tenants)
             || !snapshot.credentials.valid()
             || !valid_directory(&snapshot.directory, &snapshot.tenants)
+            || !snapshot.valid_migrations()
         {
             return Err(Self::invalid());
         }
         Ok(snapshot)
     }
+}
 
+#[cfg_attr(not(test), allow(dead_code))]
+impl Snapshot {
+    fn valid_migrations(&self) -> bool {
+        let mut ids = std::collections::HashSet::new();
+        let mut active = std::collections::HashSet::new();
+        self.migrations.iter().all(|migration| {
+            migration.valid(&self.tenants)
+                && self.record_for(&migration.tenant).is_some()
+                && ids.insert(migration.id.as_str())
+                && (migration.phase.terminal() || active.insert(migration.tenant.as_str()))
+        })
+    }
+
+    pub(super) fn migration(&self, id: &str) -> Option<&Migration> {
+        self.migrations.iter().find(|migration| migration.id == id)
+    }
+
+    pub(super) fn prepare(
+        &self,
+        expected_generation: u64,
+        migration_id: &str,
+        migration: &Migration,
+        now: u64,
+    ) -> Result<Self, ApiError> {
+        if self.generation != expected_generation
+            || migration.id != migration_id
+            || migration.phase != Phase::Prepared
+            || !migration.valid(&self.tenants)
+            || self.migration(migration_id).is_some()
+            || self
+                .migrations
+                .iter()
+                .any(|existing| existing.tenant == migration.tenant && !existing.phase.terminal())
+            || self.record_for(&migration.tenant) != Some(&migration.source)
+        {
+            return Err(tenant_migration::conflict());
+        }
+        let mut next = self.clone();
+        let mut migration = migration.clone();
+        migration.updated_unix_ms = now;
+        next.migrations.push(migration);
+        Ok(next)
+    }
+
+    fn migration_index(
+        &self,
+        expected_generation: u64,
+        migration_id: &str,
+        identity: &Migration,
+    ) -> Result<usize, ApiError> {
+        if self.generation != expected_generation {
+            return Err(tenant_migration::conflict());
+        }
+        let index = self
+            .migrations
+            .iter()
+            .position(|migration| migration.id == migration_id)
+            .ok_or_else(tenant_migration::conflict)?;
+        let migration = &self.migrations[index];
+        let route = if matches!(migration.phase, Phase::Validating | Phase::Released) {
+            &migration.target
+        } else {
+            &migration.source
+        };
+        if !migration.same_identity(identity) || self.record_for(&migration.tenant) != Some(route) {
+            return Err(tenant_migration::conflict());
+        }
+        Ok(index)
+    }
+
+    fn with_phase(&self, index: usize, phase: Phase, now: u64) -> Self {
+        let mut next = self.clone();
+        next.migrations[index].phase = phase;
+        next.migrations[index].updated_unix_ms = now;
+        next
+    }
+
+    pub(super) fn freeze(
+        &self,
+        expected_generation: u64,
+        migration_id: &str,
+        identity: &Migration,
+        now: u64,
+    ) -> Result<Self, ApiError> {
+        let index = self.migration_index(expected_generation, migration_id, identity)?;
+        if self.migrations[index].phase != Phase::Prepared {
+            return Err(tenant_migration::conflict());
+        }
+        Ok(self.with_phase(index, Phase::Frozen, now))
+    }
+
+    pub(super) fn target_verified(
+        &self,
+        expected_generation: u64,
+        migration_id: &str,
+        identity: &Migration,
+        now: u64,
+    ) -> Result<Self, ApiError> {
+        let index = self.migration_index(expected_generation, migration_id, identity)?;
+        if self.migrations[index].phase != Phase::Frozen {
+            return Err(tenant_migration::conflict());
+        }
+        Ok(self.with_phase(index, Phase::TargetVerified, now))
+    }
+
+    fn switch_migration(
+        &self,
+        index: usize,
+        phase: Phase,
+        views: &tenant_migration::CredentialViews,
+        now: u64,
+    ) -> Result<Self, ApiError> {
+        let migration = &self.migrations[index];
+        if !views.source.migration_views_match(
+            &views.target,
+            &migration.tenant,
+            migration.source_lineage,
+            migration.target_lineage,
+        ) {
+            return Err(tenant_migration::conflict());
+        }
+        if phase == Phase::RolledBack
+            && !self
+                .credentials
+                .migration_view_is_current(&migration.tenant, &views.target)
+        {
+            return Err(tenant_migration::conflict());
+        }
+        let (route, view) = if phase == Phase::Validating {
+            (&migration.target, &views.target)
+        } else {
+            (&migration.source, &views.source)
+        };
+        let mut next = self.with_phase(index, phase, now);
+        next.credentials = self
+            .credentials
+            .with_migration_view(&migration.tenant, view)
+            .ok_or_else(tenant_migration::conflict)?;
+        let current = next
+            .directory
+            .iter_mut()
+            .find(|route| route.tenant == migration.tenant)
+            .ok_or_else(tenant_migration::conflict)?;
+        *current = route.clone();
+        Ok(next)
+    }
+
+    pub(super) fn cutover(
+        &self,
+        expected_generation: u64,
+        migration_id: &str,
+        identity: &Migration,
+        views: &tenant_migration::CredentialViews,
+        now: u64,
+    ) -> Result<Self, ApiError> {
+        let index = self.migration_index(expected_generation, migration_id, identity)?;
+        if self.migrations[index].phase != Phase::TargetVerified {
+            return Err(tenant_migration::conflict());
+        }
+        self.switch_migration(index, Phase::Validating, views, now)
+    }
+
+    pub(super) fn rollback(
+        &self,
+        expected_generation: u64,
+        migration_id: &str,
+        identity: &Migration,
+        views: &tenant_migration::CredentialViews,
+        target_acked_mutations: bool,
+        now: u64,
+    ) -> Result<Self, ApiError> {
+        let index = self.migration_index(expected_generation, migration_id, identity)?;
+        let phase = self.migrations[index].phase;
+        if phase == Phase::Released {
+            return Err(ApiError::new(
+                StatusCode::CONFLICT,
+                "migration_source_released",
+                "migration source was irreversibly released",
+            ));
+        }
+        if !Phase::RolledBack.can_follow(phase) {
+            return Err(tenant_migration::conflict());
+        }
+        if target_acked_mutations {
+            return Err(ApiError::new(
+                StatusCode::CONFLICT,
+                "rollback_requires_reconciliation",
+                "target acknowledged mutations; rollback requires reconciliation",
+            ));
+        }
+        if phase == Phase::Validating {
+            self.switch_migration(index, Phase::RolledBack, views, now)
+        } else {
+            Ok(self.with_phase(index, Phase::RolledBack, now))
+        }
+    }
+
+    pub(super) fn release(
+        &self,
+        expected_generation: u64,
+        migration_id: &str,
+        identity: &Migration,
+        ack_irreversible: bool,
+        now: u64,
+    ) -> Result<Self, ApiError> {
+        let index = self.migration_index(expected_generation, migration_id, identity)?;
+        if self.migrations[index].phase != Phase::Validating {
+            return Err(tenant_migration::conflict());
+        }
+        if !ack_irreversible {
+            return Err(ApiError::new(
+                StatusCode::UNPROCESSABLE_ENTITY,
+                "tenant_migration_ack_required",
+                "source release requires explicit irreversible acknowledgement",
+            ));
+        }
+        Ok(self.with_phase(index, Phase::Released, now))
+    }
+}
+
+impl Snapshot {
     /// `self` stamped as generation `generation`, serialized.
     fn publish(mut self, generation: u64, now: u64) -> Result<(Self, Vec<u8>), ApiError> {
         self.schema = SCHEMA.to_owned();
@@ -711,6 +1045,162 @@ mod tests {
         fn import(&self) -> Snapshot {
             Snapshot::import(&self.credentials, Some(&self.tenants)).unwrap()
         }
+    }
+
+    #[test]
+    fn authority_off_dedicated_route_is_valid_without_epoch_or_reader() {
+        let w = world();
+        let mut route = serde_json::to_value(Route::dedicated_for_test(T1, 1)).unwrap();
+        route["authority_mode"] = json!("off");
+        route.as_object_mut().unwrap().remove("epoch");
+        route.as_object_mut().unwrap().remove("reader");
+        let route: Route = serde_json::from_value(route).unwrap();
+        assert!(route.valid(&w.import().tenants));
+    }
+
+    #[test]
+    fn authority_off_with_epoch_or_reader_or_shared_is_rejected() {
+        let w = world();
+        let mut base = serde_json::to_value(Route::shared_for_test(T1)).unwrap();
+        base["kind"] = json!("dedicated");
+        base["authority_mode"] = json!("off");
+        for (field, value) in [
+            ("epoch", json!(1)),
+            ("reader", json!("https://reader.internal")),
+            ("kind", json!("shared-pool")),
+            ("read_routing", json!("readers")),
+        ] {
+            let mut raw = base.clone();
+            raw[field] = value;
+            let route: Route = serde_json::from_value(raw).unwrap();
+            assert!(!route.valid(&w.import().tenants));
+        }
+    }
+
+    #[test]
+    fn legacy_dedicated_route_still_requires_positive_epoch() {
+        let w = world();
+        for epoch in [None, Some(0), Some(1)] {
+            let mut route = Route::dedicated_for_test(T1, 1);
+            route.epoch = epoch;
+            assert_eq!(route.valid(&w.import().tenants), epoch == Some(1));
+        }
+    }
+
+    #[test]
+    fn legacy_snapshot_without_migrations_or_authority_mode_round_trips_unchanged() {
+        let w = world();
+        w.objects()
+            .create(
+                w.import()
+                    .with_directory(vec![Route::dedicated_for_test(T1, 7)]),
+                1,
+            )
+            .unwrap();
+        let bytes = w.memory.raw(NAME).unwrap();
+        let raw = String::from_utf8(bytes.clone()).unwrap();
+        assert!(!raw.contains("migrations") && !raw.contains("authority_mode"));
+        assert_eq!(
+            bytes,
+            serde_json::to_vec(&Snapshot::parse(&bytes).unwrap()).unwrap()
+        );
+    }
+
+    #[test]
+    fn overlapping_migrations_for_one_tenant_are_rejected() {
+        let w = world();
+        let source = Route::shared_for_test(T1);
+        w.objects()
+            .create(w.import().with_directory(vec![source.clone()]), 1)
+            .unwrap();
+        let mut target = serde_json::to_value(&source).unwrap();
+        target["kind"] = json!("dedicated");
+        target["authority_mode"] = json!("off");
+        target["lineage"] = json!(0x5678);
+        let migration = json!({
+            "id": "move-one", "tenant": T1, "phase": "prepared",
+            "source": source, "target": target,
+            "source_lineage": 0x1234, "target_lineage": 0x5678, "updated_unix_ms": 1
+        });
+        let mut raw: Value = serde_json::from_slice(&w.memory.raw(NAME).unwrap()).unwrap();
+        raw["migrations"] = json!([migration]);
+        assert!(Snapshot::parse(&serde_json::to_vec(&raw).unwrap()).is_ok());
+        let mut second = raw["migrations"][0].clone();
+        second["id"] = json!("move-two");
+        raw["migrations"].as_array_mut().unwrap().push(second);
+        assert!(Snapshot::parse(&serde_json::to_vec(&raw).unwrap()).is_err());
+        raw["migrations"][1]["phase"] = json!("rolled_back");
+        assert!(Snapshot::parse(&serde_json::to_vec(&raw).unwrap()).is_ok());
+    }
+
+    #[test]
+    fn malformed_migration_identity_routes_lineages_and_unknown_fields_are_rejected() {
+        let w = world();
+        let source = Route::shared_for_test(T1);
+        w.objects()
+            .create(w.import().with_directory(vec![source.clone()]), 1)
+            .unwrap();
+        let mut target = source.clone();
+        target.kind = Kind::Dedicated;
+        target.authority_mode = Some(AuthorityMode::Off);
+        target.lineage += 1;
+        let migration = Migration {
+            id: "move-one".into(),
+            tenant: T1.into(),
+            phase: Phase::Prepared,
+            source: source.clone(),
+            target,
+            source_lineage: source.lineage,
+            target_lineage: source.lineage + 1,
+            updated_unix_ms: 1,
+        };
+        let mut good: Value = serde_json::from_slice(&w.memory.raw(NAME).unwrap()).unwrap();
+        good["migrations"] = json!([migration]);
+        assert!(Snapshot::parse(&serde_json::to_vec(&good).unwrap()).is_ok());
+        for (field, value) in [
+            ("id", json!("")),
+            ("id", json!("A")),
+            ("id", json!("x".repeat(65))),
+            ("id", json!("move_one")),
+            ("tenant", json!(T2)),
+            ("source_lineage", json!(0)),
+            ("source_lineage", json!(source.lineage + 1)),
+            ("target_lineage", json!(0)),
+            ("target_lineage", json!(source.lineage)),
+            ("phase", json!("unknown")),
+            ("extra", json!(true)),
+        ] {
+            let mut raw = good.clone();
+            raw["migrations"][0][field] = value;
+            assert!(
+                Snapshot::parse(&serde_json::to_vec(&raw).unwrap()).is_err(),
+                "{field}"
+            );
+        }
+        for (route, field, value) in [
+            ("source", "kind", json!("dedicated")),
+            ("target", "kind", json!("shared-pool")),
+            ("target", "authority_mode", Value::Null),
+            ("target", "epoch", json!(1)),
+            ("target", "tenant", json!(T2)),
+            ("target", "lineage", json!(source.lineage + 2)),
+            ("source", "audience", json!("")),
+        ] {
+            let mut raw = good.clone();
+            raw["migrations"][0][route][field] = value;
+            assert!(
+                Snapshot::parse(&serde_json::to_vec(&raw).unwrap()).is_err(),
+                "{route}.{field}"
+            );
+        }
+        let mut raw = good.clone();
+        raw["migrations"][0]["phase"] = json!("released");
+        let duplicate = raw["migrations"][0].clone();
+        raw["migrations"].as_array_mut().unwrap().push(duplicate);
+        assert!(Snapshot::parse(&serde_json::to_vec(&raw).unwrap()).is_err());
+        let mut raw = good;
+        raw["directory"] = json!([]);
+        assert!(Snapshot::parse(&serde_json::to_vec(&raw).unwrap()).is_err());
     }
 
     #[test]

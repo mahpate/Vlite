@@ -211,7 +211,7 @@ struct Scope {
     id: u16,
 }
 
-#[derive(Clone, Serialize, Deserialize)]
+#[derive(Clone, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct Entry {
     id: String,
@@ -465,6 +465,71 @@ impl Snapshot {
                 }
             }
         }
+    }
+}
+
+#[cfg_attr(not(test), allow(dead_code))]
+impl Snapshot {
+    /// Both views must name exactly the same fresh principals and secrets;
+    /// only their database lineage differs.
+    pub(super) fn migration_views_match(
+        &self,
+        target: &Self,
+        tenant: &str,
+        source_lineage: u64,
+        target_lineage: u64,
+    ) -> bool {
+        let scoped = |view: &Self, lineage| {
+            view.valid()
+                && view.0.iter().all(|entry| {
+                    entry.tenant_id.as_deref() == Some(tenant)
+                        && u64::from_str_radix(&entry.lineage, 16).ok() == Some(lineage)
+                })
+        };
+        scoped(self, source_lineage)
+            && scoped(target, target_lineage)
+            && self.0.len() == target.0.len()
+            && self.0.iter().all(|entry| {
+                target.0.iter().any(|other| {
+                    let mut rebound = entry.clone();
+                    rebound.lineage = other.lineage.clone();
+                    rebound == *other
+                })
+            })
+    }
+
+    /// Replace only this tenant, retiring all previous hashes. Restrictions
+    /// are merged by stable principal ID before the candidate is published.
+    pub(super) fn with_migration_view(&self, tenant: &str, view: &Self) -> Option<Self> {
+        let mut next = self.clone();
+        next.keep_migration_tenant(view, tenant);
+        next.keep_restrictions(self);
+        next.valid().then_some(next)
+    }
+
+    pub(super) fn migration_view_is_current(&self, tenant: &str, view: &Self) -> bool {
+        let mut restricted = view.clone();
+        restricted.keep_restrictions(self);
+        let current: Vec<_> = self
+            .0
+            .iter()
+            .filter(|entry| entry.tenant_id.as_deref() == Some(tenant))
+            .collect();
+        current.len() == restricted.0.len()
+            && restricted.0.iter().all(|entry| current.contains(&entry))
+    }
+
+    /// A stale local credential file must never undo a published rekey.
+    pub(super) fn keep_migration_tenant(&mut self, current: &Self, tenant: &str) {
+        self.0
+            .retain(|entry| entry.tenant_id.as_deref() != Some(tenant));
+        self.0.extend(
+            current
+                .0
+                .iter()
+                .filter(|entry| entry.tenant_id.as_deref() == Some(tenant))
+                .cloned(),
+        );
     }
 }
 
