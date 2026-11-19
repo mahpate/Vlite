@@ -1,5 +1,6 @@
-//! Contract-only writer authority. The stable object is also the head CAS
-//! serialization point; no runtime path uses this protocol yet.
+//! Writer authority shared by explicit initialization, startup enrollment,
+//! serving checks and operator failover. The stable object is also the head CAS
+//! serialization point.
 
 use std::sync::Arc;
 
