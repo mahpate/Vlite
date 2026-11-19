@@ -414,6 +414,211 @@ impl Drop for Server {
     }
 }
 
+struct ArchiveWriter {
+    _containers: Containers,
+    directory: tempfile::TempDir,
+    database: std::path::PathBuf,
+    target: std::path::PathBuf,
+    key: std::path::PathBuf,
+    policy: std::path::PathBuf,
+}
+
+impl ArchiveWriter {
+    fn new() -> Self {
+        let endpoint = std::env::var("VLITE_AZURITE_BLOB_ENDPOINT").expect("Azurite endpoint");
+        let key_text =
+            std::env::var("VLITE_AZURITE_ACCOUNT_KEY").unwrap_or_else(|_| DEVELOPMENT_KEY.into());
+        let unique = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let containers = Containers {
+            endpoint: endpoint.trim_end_matches('/').into(),
+            key: base64::engine::general_purpose::STANDARD
+                .decode(key_text.trim())
+                .unwrap(),
+            names: [
+                format!("vlite-policy-{unique:x}-data"),
+                format!("vlite-policy-{unique:x}-coord"),
+            ],
+        };
+        for name in &containers.names {
+            assert_eq!(containers.request(reqwest::Method::PUT, name), 201);
+        }
+        let directory = tempfile::tempdir().unwrap();
+        let database = directory.path().join("writer.vlite");
+        let db = Database::create_with_format(&database, 2, FormatVersion::V4).unwrap();
+        let lineage = format!("{:016x}", db.lineage().unwrap());
+        db.close().unwrap();
+        let target_value = json!({
+            "account":ACCOUNT,"container":containers.names[0],
+            "coordination_container":containers.names[1],"prefix":"e2e/policy/",
+            "endpoint":containers.endpoint,"auth":"emulator_shared_key"
+        });
+        let target = directory.path().join("target.json");
+        let key = directory.path().join("emulator.key");
+        let policy = directory.path().join("policy.json");
+        std::fs::write(&target, target_value.to_string()).unwrap();
+        std::fs::write(&key, key_text.trim()).unwrap();
+        std::fs::write(
+            &policy,
+            json!({
+                "target":target_value,"enabled":true,"interval_secs":604800,
+                "drill_every":0,"archive":{"enabled":true,"interval_secs":60}
+            })
+            .to_string(),
+        )
+        .unwrap();
+        operator(
+            &["authority", "init"],
+            &target,
+            &key,
+            &[
+                "--installation-id",
+                "0123456789abcdef",
+                "--scope-id",
+                "policy",
+                "--lineage",
+                &lineage,
+            ],
+        );
+        Self {
+            _containers: containers,
+            directory,
+            database,
+            target,
+            key,
+            policy,
+        }
+    }
+
+    fn start_command(&self) -> Command {
+        let mut start = writer_command(&self.database, &self.target, &self.key);
+        start
+            .arg("--archive-policy-file")
+            .arg(&self.policy)
+            .env("VLITE_CLOUD_BACKUP_SHARED_KEY_FILE", &self.key);
+        start
+    }
+
+    fn state(&self) -> Value {
+        serde_json::from_slice(
+            &std::fs::read(
+                self.directory
+                    .path()
+                    .join("writer.vlite.cloud-backup")
+                    .join("state.json"),
+            )
+            .unwrap(),
+        )
+        .unwrap()
+    }
+
+    fn wait_head(&self, sequence: u64, epoch: u64) -> Value {
+        let deadline = Instant::now() + Duration::from_secs(100);
+        loop {
+            let shown = operator(&["authority", "show"], &self.target, &self.key, &[]);
+            if shown["head"]["epoch"] == epoch
+                && shown["head"]["sequence"]
+                    .as_u64()
+                    .is_some_and(|s| s > sequence)
+            {
+                return shown;
+            }
+            assert!(
+                Instant::now() < deadline,
+                "archive did not advance: {shown}; {}",
+                self.state()
+            );
+            std::thread::sleep(Duration::from_millis(250));
+        }
+    }
+}
+
+#[test]
+#[ignore = "needs a local Azurite Blob endpoint in VLITE_AZURITE_BLOB_ENDPOINT"]
+fn startup_policy_publishes_initial_base_and_restart_uses_the_existing_runtime() {
+    let env = ArchiveWriter::new();
+    let writer = Server::spawn(env.start_command());
+    let initial = operator(&["authority", "show"], &env.target, &env.key, &[]);
+    let base_sequence = initial["head"]["sequence"].as_u64().expect("initial base");
+    assert_eq!(env.state()["status"]["published"], 1);
+    assert_eq!(
+        std::fs::read_to_string(
+            env.directory
+                .path()
+                .join("writer.vlite.cloud-backup")
+                .join("installation-id")
+        )
+        .unwrap(),
+        "0123456789abcdef"
+    );
+    for id in 1..=3 {
+        let response = client()
+            .put(format!("{}/v1/vectors/{id}", writer.url))
+            .json(&json!({"vector":[1.0,2.0]}))
+            .send()
+            .unwrap();
+        assert!(response.status().is_success(), "{response:?}");
+    }
+    env.wait_head(base_sequence, 1);
+    drop(writer);
+    let report = operator(&["failover", "report"], &env.target, &env.key, &[]);
+    let report = &report["report"];
+    operator(
+        &["failover", "execute"],
+        &env.target,
+        &env.key,
+        &[
+            "--ack-report-id",
+            report["report_id"].as_str().unwrap(),
+            "--expected-epoch",
+            &report["epoch"].to_string(),
+            "--expected-revision",
+            report["revision"].as_str().unwrap(),
+            "--old-replicas",
+            "0",
+        ],
+    );
+    let replacement = Server::spawn(env.start_command());
+    assert_eq!(
+        env.state()["status"]["published"],
+        1,
+        "restart forced another initial base"
+    );
+    replacement.write(2);
+    env.wait_head(base_sequence + 3, 2);
+    assert_eq!(
+        env.state()["status"]["published"],
+        2,
+        "new epoch needs one scheduled base"
+    );
+}
+
+#[test]
+#[ignore = "needs a local Azurite Blob endpoint in VLITE_AZURITE_BLOB_ENDPOINT"]
+fn startup_policy_refuses_target_and_persisted_installation_mismatches() {
+    let env = ArchiveWriter::new();
+    let original = std::fs::read(&env.policy).unwrap();
+    let mut policy: Value = serde_json::from_slice(&original).unwrap();
+    policy["target"]["prefix"] = json!("wrong/");
+    std::fs::write(&env.policy, policy.to_string()).unwrap();
+    let output = env.start_command().output().unwrap();
+    assert!(!output.status.success());
+    assert!(output.stdout.is_empty());
+    assert!(String::from_utf8_lossy(&output.stderr).contains("writer_authority_target_mismatch"));
+    std::fs::write(&env.policy, original).unwrap();
+    let runtime = env.directory.path().join("writer.vlite.cloud-backup");
+    std::fs::create_dir(&runtime).unwrap();
+    std::fs::write(runtime.join("installation-id"), "fedcba9876543210").unwrap();
+    let output = env.start_command().output().unwrap();
+    assert!(!output.status.success());
+    assert!(output.stdout.is_empty());
+    assert!(
+        String::from_utf8_lossy(&output.stderr).contains("writer_authority_installation_mismatch")
+    );
+}
+
 #[test]
 fn nonpersistent_authority_startup_refuses_before_target_access() {
     let directory = tempfile::tempdir().unwrap();

@@ -127,6 +127,13 @@ fn restore_error(error: ApiError) -> String {
 
 impl WriterAuthority {
     #[doc(hidden)]
+    pub fn validate_archive_policy(&self, path: &Path) -> Result<(), String> {
+        let policy = super::backup_policy::read_writer_policy(path).map_err(|e| e.to_string())?;
+        super::backup_policy::check_writer_target(&policy.target, &self.target)
+            .map_err(|error| format!("{}: {}", error.code, error.message))
+    }
+
+    #[doc(hidden)]
     pub fn connect(target: &Path, key: Option<&Path>) -> Result<Self, String> {
         let invalid =
             || "invalid_target: the authority target could not be read consistently".to_owned();
@@ -402,6 +409,22 @@ fn claim_prepared(
 }
 
 impl Service {
+    #[doc(hidden)]
+    pub async fn initialize_archive_base(&self) {
+        let ops = self.ops.clone();
+        if tokio::task::spawn_blocking(move || ops.initial_archive_base())
+            .await
+            .is_err()
+        {
+            super::logs::stderr(
+                "error",
+                "cloud_backup",
+                json!({"event":"writer_archive_initial_base_failed","code":"internal_error"})
+                    .to_string(),
+            );
+        }
+    }
+
     /// Blocking startup enrollment, immediately after choosing writer serve mode.
     #[doc(hidden)]
     pub fn with_writer_authority(self, authority: WriterAuthority) -> Result<Self, String> {

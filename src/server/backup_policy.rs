@@ -156,6 +156,40 @@ impl Policy {
     }
 }
 
+pub(super) fn read_writer_policy(path: &FilePath) -> std::io::Result<Policy> {
+    let invalid = || {
+        io_error(
+            "invalid_arguments: archive_policy_invalid: invalid or unavailable archive policy file",
+        )
+    };
+    let bytes = read_limited(path)
+        .map_err(|_| invalid())?
+        .ok_or_else(invalid)?;
+    let policy: Policy = serde_json::from_slice(&bytes).map_err(|_| invalid())?;
+    policy.validate().map_err(|_| invalid())?;
+    if !policy.enabled || policy.archive_interval_ms().is_none() {
+        return Err(io_error(
+            "invalid_arguments: archive_policy_invalid: enabled and archive.enabled must both be true",
+        ));
+    }
+    Ok(policy)
+}
+
+pub(super) fn check_writer_target(target: &Target, expected: &Target) -> Result<(), ApiError> {
+    if target.account != expected.account
+        || target.container != expected.container
+        || target.coordination_container != expected.coordination_container
+        || target.prefix != expected.prefix
+        || target.endpoint != expected.endpoint
+    {
+        return Err(conflict(
+            "writer_authority_target_mismatch",
+            "the cloud backup target must match the writer authority target",
+        ));
+    }
+    Ok(())
+}
+
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub(super) struct LastError {
     pub code: String,
@@ -474,7 +508,7 @@ impl Handle {
         }
     }
 
-    fn check_authority(
+    pub(super) fn check_authority(
         &self,
         target: &Target,
         installation: Option<&str>,
@@ -482,17 +516,8 @@ impl Handle {
         let Some((store, claim)) = self.writer_fence.authority() else {
             return Ok(None);
         };
-        if let Some(expected) = self.writer_fence.authority_target()
-            && (target.account != expected.account
-                || target.container != expected.container
-                || target.coordination_container != expected.coordination_container
-                || target.prefix != expected.prefix
-                || target.endpoint != expected.endpoint)
-        {
-            return Err(conflict(
-                "writer_authority_target_mismatch",
-                "the cloud backup target must match the writer authority target",
-            ));
+        if let Some(expected) = self.writer_fence.authority_target() {
+            check_writer_target(target, expected)?;
         }
         self.writer_fence.verify_before_commit()?;
         let observed = store
@@ -873,6 +898,29 @@ fn next_archive(loaded: &Loaded) -> Option<u64> {
 }
 
 impl Runtime {
+    pub(super) fn seed_installation(&self, id: &str) -> Result<(), ApiError> {
+        if !valid_installation(id) {
+            return Err(conflict(
+                "archive_policy_invalid",
+                "installation-id must be 16 lowercase hexadecimal characters",
+            ));
+        }
+        let mut loaded = lock(&self.state)?;
+        if let Some(existing) = &loaded.installation {
+            return if existing == id {
+                Ok(())
+            } else {
+                Err(conflict(
+                    "writer_authority_installation_mismatch",
+                    "the cloud backup installation-id must match the writer authority installation_id",
+                ))
+            };
+        }
+        write_atomic(&self.dir, INSTALLATION, id.as_bytes())?;
+        loaded.installation = Some(id.to_owned());
+        Ok(())
+    }
+
     pub(super) fn open(dir: PathBuf) -> std::io::Result<Self> {
         Self::open_with(dir, Box::new(connect))
     }
@@ -1320,6 +1368,37 @@ impl Runtime {
         self.cycle(handle, false)
     }
 
+    pub(super) fn initial_base(&self, handle: &Handle) {
+        let result: Result<bool, ApiError> = (|| {
+            if lock(&self.state)?.status.published > 0 {
+                return Ok(false);
+            }
+            self.run_now(handle)?;
+            Ok(true)
+        })();
+        match result {
+            Ok(false) => {}
+            Ok(true) => logs::stderr(
+                "info",
+                "cloud_backup",
+                json!({"event":"writer_archive_initial_base_published"}).to_string(),
+            ),
+            Err(error) => {
+                self.note(|loaded| {
+                    loaded.status.last_error = Some(LastError {
+                        code: error.code.into(),
+                        message: error.message.clone(),
+                    });
+                    loaded.status.last_failure_unix_ms = Some(now());
+                });
+                logs::stderr(
+                    "error", "cloud_backup",
+                    json!({"event":"writer_archive_initial_base_failed","code":error.code,"message":error.message}).to_string(),
+                );
+            }
+        }
+    }
+
     /// Runs one archive checkpoint now (tests drive the scheduler path
     /// through `claim_due_at` and this).
     #[cfg(test)]
@@ -1352,7 +1431,18 @@ impl Runtime {
             });
         })?;
         let admitted = admitted.ok_or_else(not_configured)?;
-        let outcome = self.archive_once(handle, &admitted, &installation, baseline, started);
+        let outcome = (|| {
+            if handle
+                .check_authority(&admitted.policy.target, Some(&installation))?
+                .is_some_and(|observed| {
+                    observed.record.head.is_none() && observed.record.base.is_some()
+                })
+            {
+                // A transferred epoch cannot extend its predecessor's archive.
+                return self.cycle(handle, true);
+            }
+            self.archive_once(handle, &admitted, &installation, baseline, started)
+        })();
         match &outcome {
             Ok(report) => {
                 let checkpoint = report["checkpoint"].clone();
@@ -2224,6 +2314,12 @@ async fn configure(
     State(s): State<Service>,
     input: Result<Json<Policy>, JsonRejection>,
 ) -> Result<Json<Value>, ApiError> {
+    if s.admin.directory.is_none() {
+        return Err(conflict(
+            "admin_directory_disabled",
+            "cloud backup policy updates require VLITE_ADMIN_DIR; startup archive policies are file-configured",
+        ));
+    }
     let policy = parsed(input)?;
     let runtime = runtime(&s)?;
     let handle = Handle::new(&s);
@@ -4510,6 +4606,7 @@ mod tests {
             );
             assert_eq!((env.meta.names(), env.data.names()), before);
         }
+
         let (env, _) = setup_ha();
         let h = Handle::new(&env.service);
         env.runtime.state.lock().unwrap().installation = Some("fedcba9876543210".into());
@@ -4527,6 +4624,56 @@ mod tests {
             "writer_authority_installation_mismatch"
         );
         assert_eq!((env.meta.names(), env.data.names()), before);
+    }
+
+    #[test]
+    fn installation_seeding_is_durable_idempotent_and_preserved_by_configure() {
+        let env = setup();
+        let id = "0123456789abcdef";
+        assert_eq!(
+            code(env.runtime.seed_installation("invalid")),
+            "archive_policy_invalid"
+        );
+        env.runtime.seed_installation(id).unwrap();
+        env.runtime.seed_installation(id).unwrap();
+        assert_eq!(
+            code(env.runtime.seed_installation("fedcba9876543210")),
+            "writer_authority_installation_mismatch"
+        );
+        assert_eq!(reopen(&env).view().unwrap()["installation_id"], id);
+        let h = Handle::new(&env.service);
+        env.runtime.configure(policy(json!({})), &h, BASE).unwrap();
+        assert_eq!(env.runtime.view().unwrap()["installation_id"], id);
+        assert_eq!(reopen(&env).view().unwrap()["installation_id"], id);
+    }
+
+    #[tokio::test]
+    async fn private_startup_runtime_does_not_enable_rest_policy_updates() {
+        let env = setup();
+        assert!(env.service.admin.directory.is_none());
+        assert!(env.service.admin.cloud.set(env.runtime.clone()).is_ok());
+        let result = configure(State(env.service.clone()), Ok(Json(archiving()))).await;
+        assert_eq!(code(result), "admin_directory_disabled");
+        assert!(env.runtime.view().unwrap()["policy"].is_null());
+    }
+
+    #[test]
+    fn initial_base_runs_only_without_a_published_set_and_records_failure() {
+        let env = setup();
+        let h = Handle::new(&env.service);
+        env.runtime
+            .configure(policy(json!({"drill_every":0})), &h, BASE)
+            .unwrap();
+        let mut refused = h.clone();
+        refused.encrypted = true;
+        env.runtime.initial_base(&refused);
+        assert_eq!(status(&env.runtime)["published"], 0);
+        assert!(status(&env.runtime)["last_error"]["code"].is_string());
+        assert!(reopen(&env).view().unwrap()["status"]["last_error"]["code"].is_string());
+        env.runtime.initial_base(&h);
+        assert_eq!(status(&env.runtime)["published"], 1);
+        env.runtime.initial_base(&h);
+        assert_eq!(status(&env.runtime)["published"], 1);
     }
 
     #[test]

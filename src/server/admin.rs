@@ -130,11 +130,23 @@ pub struct ServerOptions {
     /// bindings exist (default off). Their database-wide totals then count
     /// memory resources; reserved names stay hidden.
     pub metrics_with_memory: bool,
+    #[doc(hidden)]
+    pub archive_policy_file: Option<PathBuf>,
+    #[doc(hidden)]
+    pub archive_runtime_directory: Option<PathBuf>,
 }
 
 impl ServerOptions {
     /// Validate roles before creating/opening a database.
     pub fn validate(&self) -> std::io::Result<()> {
+        if let Some(path) = &self.archive_policy_file {
+            if self.admin_directory.is_some() {
+                return Err(std::io::Error::other(
+                    "invalid_arguments: --archive-policy-file is for writers without VLITE_ADMIN_DIR; use PUT /v1/admin/cloud-backup",
+                ));
+            }
+            super::backup_policy::read_writer_policy(path)?;
+        }
         if self.admin_token.is_none()
             && (self.read_only_token.is_some()
                 || self.read_only_token_file.is_some()
@@ -404,6 +416,30 @@ pub(super) fn configured_service(
         Some(control) => control,
         None => load_control(&options)?,
     };
+    let archive_policy = options
+        .archive_policy_file
+        .as_deref()
+        .map(super::backup_policy::read_writer_policy)
+        .transpose()?;
+    if archive_policy.is_some() {
+        if control.directory.is_some() || service.serve.mode != super::ServeMode::Writer {
+            return Err(std::io::Error::other(
+                "invalid_arguments: archive policy requires a writer without a managed admin directory",
+            ));
+        }
+        let directory = options.archive_runtime_directory.as_ref().ok_or_else(|| {
+            std::io::Error::other(
+                "invalid_arguments: archive policy requires a private runtime directory",
+            )
+        })?;
+        if !directory.try_exists()? {
+            super::cloud_backup::create_private_subdir(directory)?;
+        }
+        let runtime = super::backup_policy::Runtime::open(directory.clone())?;
+        control.cloud.set(Arc::new(runtime)).map_err(|_| {
+            std::io::Error::other("invalid_arguments: archive runtime is already configured")
+        })?;
+    }
     // An invalid persisted cloud policy fails startup instead of silently
     // disabling backups.
     if let Some(directory) = &control.directory
@@ -442,6 +478,31 @@ pub(super) fn configured_service(
         .webhooks
         .configure(service.admin.directory.clone(), service.clone())?;
     service.publish_reserving()?;
+    if let Some(policy) = archive_policy {
+        let configure = || -> Result<(), ApiError> {
+            let handle = super::backup_policy::Handle::new(&service);
+            let observed = handle
+                .check_authority(&policy.target, None)?
+                .ok_or_else(|| {
+                    ApiError::new(
+                        StatusCode::CONFLICT,
+                        "archive_policy_invalid",
+                        "archive policy requires writer authority",
+                    )
+                })?;
+            let runtime = service
+                .admin
+                .cloud
+                .get()
+                .expect("installed archive runtime");
+            runtime.seed_installation(&observed.record.installation_id)?;
+            runtime.configure(policy, &handle, now_ms() as u64)?;
+            service.ops.cloud_changed();
+            Ok(())
+        };
+        configure()
+            .map_err(|error| std::io::Error::other(format!("{}: {}", error.code, error.message)))?;
+    }
     // Recovery mode and in-memory servers have no database file to back up.
     if let Some(runtime) = service.admin.cloud.get()
         && options.database_path.is_some()
