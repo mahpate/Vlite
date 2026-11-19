@@ -163,10 +163,11 @@ struct Server {
 
 impl Server {
     fn start(database: &Path, target: &Path, key: &Path) -> Self {
-        let mut child = writer_command(database, target, key)
-            .stdout(Stdio::piped())
-            .spawn()
-            .unwrap();
+        Self::spawn(writer_command(database, target, key))
+    }
+
+    fn spawn(mut command: Command) -> Self {
+        let mut child = command.stdout(Stdio::piped()).spawn().unwrap();
         let stdout = child.stdout.take().unwrap();
         let (sender, receiver) = mpsc::channel();
         std::thread::spawn(move || {
@@ -201,6 +202,157 @@ impl Server {
             epoch.to_string()
         );
     }
+}
+
+#[test]
+#[ignore = "needs a local Azurite Blob endpoint in VLITE_AZURITE_BLOB_ENDPOINT"]
+fn runtime_archive_advances_authority_and_failover_refuses_unverified_base() {
+    let Ok(endpoint) = std::env::var("VLITE_AZURITE_BLOB_ENDPOINT") else {
+        eprintln!("skipping: VLITE_AZURITE_BLOB_ENDPOINT is unset");
+        return;
+    };
+    let endpoint = endpoint.trim_end_matches('/').to_owned();
+    let key_text =
+        std::env::var("VLITE_AZURITE_ACCOUNT_KEY").unwrap_or_else(|_| DEVELOPMENT_KEY.into());
+    let unique = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap()
+        .as_nanos();
+    let containers = Containers {
+        endpoint: endpoint.clone(),
+        key: base64::engine::general_purpose::STANDARD
+            .decode(key_text.trim())
+            .unwrap(),
+        names: [
+            format!("vlite-runtime-{unique:x}-data"),
+            format!("vlite-runtime-{unique:x}-coord"),
+        ],
+    };
+    for name in &containers.names {
+        assert_eq!(containers.request(reqwest::Method::PUT, name), 201);
+    }
+    let directory = tempfile::tempdir().unwrap();
+    let database = directory.path().join("writer.vlite");
+    let db = Database::create_with_format(&database, 2, FormatVersion::V4).unwrap();
+    let lineage = format!("{:016x}", db.lineage().unwrap());
+    db.close().unwrap();
+    let target_value = json!({
+        "account":ACCOUNT, "container":containers.names[0],
+        "coordination_container":containers.names[1], "prefix":"e2e/runtime/",
+        "endpoint":endpoint, "auth":"emulator_shared_key"
+    });
+    let target = directory.path().join("target.json");
+    std::fs::write(&target, target_value.to_string()).unwrap();
+    let key = directory.path().join("emulator.key");
+    std::fs::write(&key, key_text.trim()).unwrap();
+    let admin = directory.path().join("admin");
+    let mut initial = command();
+    initial
+        .arg(&database)
+        .args(["--insecure-local", "--bind", "127.0.0.1:0"])
+        .env("VLITE_ADMIN_DIR", &admin)
+        .env("VLITE_CLOUD_BACKUP_SHARED_KEY_FILE", &key);
+    let initial = Server::spawn(initial);
+    let configured = client()
+        .put(format!("{}/v1/admin/cloud-backup", initial.url))
+        .json(
+            &json!({"target":target_value,"enabled":true,"interval_secs":604800,
+            "drill_every":0,"archive":{"enabled":true,"interval_secs":60}}),
+        )
+        .send()
+        .unwrap();
+    assert!(configured.status().is_success(), "{configured:?}");
+    let configured: Value = configured.json().unwrap();
+    let installation = configured["installation_id"].as_str().unwrap();
+    drop(initial);
+    operator(
+        &["authority", "init"],
+        &target,
+        &key,
+        &[
+            "--installation-id",
+            installation,
+            "--scope-id",
+            "runtime",
+            "--lineage",
+            &lineage,
+        ],
+    );
+    let mut start = writer_command(&database, &target, &key);
+    start
+        .env("VLITE_ADMIN_DIR", &admin)
+        .env("VLITE_CLOUD_BACKUP_SHARED_KEY_FILE", &key);
+    let mut writer = Server::spawn(start);
+    writer.write(1);
+    let published = client()
+        .post(format!("{}/v1/admin/cloud-backup/run", writer.url))
+        .send()
+        .unwrap();
+    assert_eq!(published.status().as_u16(), 201, "{published:?}");
+    let published: Value = published.json().unwrap();
+    let shown = operator(&["authority", "show"], &target, &key, &[]);
+    assert_eq!(shown["head"]["set_id"], published["set_id"]);
+    assert_eq!(shown["head"]["epoch"], 1);
+    let baseline_sequence = shown["head"]["sequence"].as_u64().unwrap();
+    let report = operator(&["failover", "report"], &target, &key, &[]);
+    assert_eq!(report["report"]["archived"], shown["head"]);
+    writer.write(1);
+    let deadline = Instant::now() + Duration::from_secs(100);
+    loop {
+        let status: Value = client()
+            .get(format!("{}/v1/admin/cloud-backup", writer.url))
+            .send()
+            .unwrap()
+            .json()
+            .unwrap();
+        if status["status"]["archive"]["last_checkpoint_sequence"]
+            .as_u64()
+            .is_some_and(|sequence| sequence > baseline_sequence)
+        {
+            break;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "archive did not advance: {status}"
+        );
+        std::thread::sleep(Duration::from_millis(250));
+    }
+    let shown = operator(&["authority", "show"], &target, &key, &[]);
+    assert!(shown["head"]["sequence"].as_u64().unwrap() > baseline_sequence);
+    assert_eq!(shown["head"]["index_sha256"].as_str().unwrap().len(), 64);
+    let report = operator(&["failover", "report"], &target, &key, &[]);
+    assert_eq!(report["report"]["archived"], shown["head"]);
+    let report = &report["report"];
+    let transfer = operator(
+        &["failover", "execute"],
+        &target,
+        &key,
+        &[
+            "--ack-report-id",
+            report["report_id"].as_str().unwrap(),
+            "--expected-epoch",
+            &report["epoch"].to_string(),
+            "--expected-revision",
+            report["revision"].as_str().unwrap(),
+            "--old-replicas",
+            "0",
+        ],
+    );
+    assert_eq!(transfer["result"]["record"]["base"], shown["head"]);
+    let deadline = Instant::now() + Duration::from_secs(6);
+    loop {
+        if let Some(status) = writer.child.try_wait().unwrap() {
+            assert_eq!(status.code(), Some(1));
+            break;
+        }
+        assert!(Instant::now() < deadline, "former writer did not stop");
+        std::thread::sleep(Duration::from_millis(20));
+    }
+    let replacement = writer_command(&database, &target, &key).output().unwrap();
+    assert!(!replacement.status.success());
+    assert!(
+        String::from_utf8_lossy(&replacement.stderr).contains("writer_authority_base_unverified")
+    );
 }
 
 impl Drop for Server {

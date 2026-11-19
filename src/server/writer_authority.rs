@@ -93,16 +93,31 @@ pub fn authority_command(args: &[OsString]) -> Result<Value, String> {
 #[doc(hidden)]
 pub struct WriterAuthority {
     store: AuthorityStore,
+    target: super::cloud_backup::Target,
 }
 
 impl WriterAuthority {
     #[doc(hidden)]
     pub fn connect(target: &Path, key: Option<&Path>) -> Result<Self, String> {
+        let invalid =
+            || "invalid_target: the authority target could not be read consistently".to_owned();
+        let bytes = super::backup_policy::read_limited(target)
+            .map_err(|_| invalid())?
+            .ok_or_else(invalid)?;
         let sets = super::cloud_recovery::connect_explicit(target, key)
             .map_err(|error| format!("{}: {}", error.code, error.message))?;
+        if super::backup_policy::read_limited(target)
+            .map_err(|_| invalid())?
+            .as_ref()
+            != Some(&bytes)
+        {
+            return Err(invalid());
+        }
+        let target = serde_json::from_slice(&bytes).map_err(|_| invalid())?;
         let (store, prefix) = sets.coordination();
         Ok(Self {
             store: AuthorityStore::new(store, prefix),
+            target,
         })
     }
 }
@@ -156,7 +171,7 @@ impl Service {
         if self.serve.mode != super::ServeMode::Writer {
             return Err("invalid_arguments: writer authority needs --serve-mode writer".into());
         }
-        let fence = claim(authority.store, self.lineage)?;
+        let fence = claim(authority.store, self.lineage)?.with_target(authority.target);
         self.with_writer_fence(fence)
             .map_err(|_| "internal_error: cannot install writer authority".into())
     }
