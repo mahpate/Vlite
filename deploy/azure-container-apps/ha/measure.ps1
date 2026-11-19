@@ -354,6 +354,7 @@ function Invoke-VLiteMeas([hashtable]$Options) {
                     $principal = [string]$identity.principalId
                     if (-not $principal) { throw 'Created identity lacks a principal ID.' }
                 }
+                'GrantPull' { $null = Invoke-VLiteMeasAz (Arguments $step -Principal $principal) }
                 'CreateEnvironment' {
                     $environment = Invoke-VLiteMeasAz (Arguments $step)
                     $workspace = [string]$environment.properties.appLogsConfiguration.logAnalyticsConfiguration.customerId

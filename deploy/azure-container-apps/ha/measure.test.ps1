@@ -197,6 +197,11 @@ try {
                     return
                 }
                 '^identity create ' { return @{ principalId = 'principal-001' } }
+                '^role assignment create ' {
+                    $assigneeIndex = [Array]::IndexOf($Arguments, '--assignee-object-id')
+                    Assert ($assigneeIndex -ge 0 -and $Arguments[$assigneeIndex + 1] -eq 'principal-001') 'AcrPull assignment must use the created identity principal'
+                    return @{ ok = $true }
+                }
                 '^containerapp env create ' {
                     return @{ properties = @{ appLogsConfiguration = @{ logAnalyticsConfiguration = @{ customerId = 'workspace-001' } } } }
                 }
@@ -224,7 +229,7 @@ try {
                     }
                     return ,@($script:sampleLines | ForEach-Object { @{ Log_s = $_ } })
                 }
-                '^(group create|acr create|acr build|role assignment create) ' { return @{ ok = $true } }
+                '^(group create|acr create|acr build) ' { return @{ ok = $true } }
                 default { throw "Unexpected mock command: $($Arguments[0..1] -join ' ')" }
             }
         }
