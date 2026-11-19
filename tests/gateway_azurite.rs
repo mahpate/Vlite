@@ -11,8 +11,12 @@
 //!   cargo test --features server --test gateway_azurite -- --ignored
 //! ```
 //!
+//! The dedicated backend holds the writer authority (ITEM-024), so the
+//! gateway's epoch check runs against a real `x-vlite-epoch` stamp.
+//!
 //! Local evidence only: no ACA ingress, managed identity, replica scaling,
-//! fencing (OD-002) or measured timing (MEAS-004/005/007) is exercised.
+//! failover fencing (OD-002) or measured timing (MEAS-004/005/007) is
+//! exercised.
 
 use base64::Engine as _;
 use serde_json::{Value, json};
@@ -378,6 +382,26 @@ fn backend(database: &Path, trust: &Path) -> Proc {
     Proc::spawn(command)
 }
 
+/// A gateway-trusted dedicated writer that claims the writer authority, so
+/// its responses carry the epoch stamp the gateway requires for a
+/// dedicated route with an epoch.
+fn authority_backend(database: &Path, trust: &Path, authority: &Path, key: &Path) -> Proc {
+    let mut command = Command::new(env!("CARGO_BIN_EXE_vlite-server"));
+    command
+        .arg(database)
+        .args(["--bind", "127.0.0.1:0", "--serve-mode", "writer"])
+        .arg("--gateway-trust-file")
+        .arg(trust)
+        .arg("--authority-target-file")
+        .arg(authority)
+        .arg("--authority-shared-key-file")
+        .arg(key)
+        .env("VLITE_AUTH_TOKEN", TOKEN)
+        .env_remove("VLITE_ADMIN_DIR")
+        .env_remove("VLITE_SERVE_MODE");
+    Proc::spawn(command)
+}
+
 fn gateway(config: &Path) -> Proc {
     let mut command = Command::new(env!("CARGO_BIN_EXE_vlite-server"));
     command
@@ -553,7 +577,10 @@ fn gateway_and_trusted_backends_serve_isolate_and_fail_closed() {
     let unique = format!("{:x}", now_ms() % 0xffff_ffff_ffff);
     let data = format!("vlite-gw-data-{unique}");
     let coordination = format!("vlite-gw-coord-{unique}");
-    for name in [&data, &coordination] {
+    // The writer authority lives apart from the control state, which the
+    // store-outage step below deletes and recreates.
+    let authority = format!("vlite-gw-auth-{unique}");
+    for name in [&data, &coordination, &authority] {
         assert_eq!(
             container(&endpoint, &account_key, "PUT", name),
             201,
@@ -655,6 +682,45 @@ fn gateway_and_trusted_backends_serve_isolate_and_fail_closed() {
     let dedicated = standalone(&dedicated_db, &paths.admin);
     let (c3, _, dedicated_lineage) = issue(&dedicated, &t3, None);
     drop(dedicated);
+    let authority_target = root.join("authority-target.json");
+    std::fs::write(
+        &authority_target,
+        json!({"account":ACCOUNT,"container":data,"coordination_container":authority,
+            "prefix":"gw-authority/","endpoint":endpoint,"auth":"emulator_shared_key"})
+        .to_string(),
+    )
+    .unwrap();
+    let authority_cli = |verb: &str, extra: &[&str]| {
+        let mut args: Vec<&std::ffi::OsStr> = vec![
+            "authority".as_ref(),
+            verb.as_ref(),
+            "--target-file".as_ref(),
+            authority_target.as_os_str(),
+            "--shared-key-file".as_ref(),
+            paths.key.as_os_str(),
+        ];
+        args.extend(extra.iter().map(|arg| std::ffi::OsStr::new(*arg)));
+        let (ok, value, stderr) = cli(&args);
+        assert!(ok, "authority {verb}: {value} {stderr}");
+        value
+    };
+    let lineage_hex = format!("{dedicated_lineage:016x}");
+    let initialized = authority_cli(
+        "init",
+        &[
+            "--installation-id",
+            "gateway-e2e",
+            "--scope-id",
+            "tenant-three",
+            "--lineage",
+            &lineage_hex,
+        ],
+    );
+    assert_eq!(
+        (&initialized["epoch"], &initialized["writer_present"]),
+        (&json!(1), &json!(false)),
+        "{initialized}"
+    );
 
     // Bootstrap: publish generation 1 from the admin directory (no routes yet).
     let routes_file = root.join("routes.json");
@@ -698,7 +764,18 @@ fn gateway_and_trusted_backends_serve_isolate_and_fail_closed() {
         path
     };
     let backend_a = backend(&pool_db, &trust("shared-pool", "trust-a.json"));
-    let backend_b = backend(&dedicated_db, &trust("tenant-three", "trust-b.json"));
+    let backend_b = authority_backend(
+        &dedicated_db,
+        &trust("tenant-three", "trust-b.json"),
+        &authority_target,
+        &paths.key,
+    );
+    let claimed = authority_cli("show", &[]);
+    assert_eq!(
+        (&claimed["epoch"], &claimed["writer_present"]),
+        (&json!(1), &json!(true)),
+        "{claimed}"
+    );
     let a_url = format!("http://{}", backend_a.address);
     let routes = |pool_writer: &str| {
         vec![
@@ -803,16 +880,13 @@ fn gateway_and_trusted_backends_serve_isolate_and_fail_closed() {
     // The dedicated tenant reaches its own backend and nothing else.
     let t3_auth = bearer(&c3);
     let as_t3: &[(&str, &str)] = &[("Authorization", &t3_auth)];
-    assert_eq!(
-        g1.call(
-            "POST",
-            "/v1/collections",
-            r#"{"name":"own","dimensions":2}"#,
-            as_t3
-        )
-        .status,
-        201
+    let created = g1.call(
+        "POST",
+        "/v1/collections",
+        r#"{"name":"own","dimensions":2}"#,
+        as_t3,
     );
+    assert_eq!(created.status, 201, "{created:?}");
     assert_eq!(
         g1.call("GET", "/v1/collections/docs/vectors/1", "", as_t3)
             .status,
@@ -1031,7 +1105,7 @@ fn gateway_and_trusted_backends_serve_isolate_and_fail_closed() {
     assert_eq!(backend_a.call("GET", "/ready", "", &[]).status, 503);
 
     drop((g1, backend_a, backend_b));
-    for name in [&data, &coordination] {
+    for name in [&data, &coordination, &authority] {
         container(&endpoint, &account_key, "DELETE", name);
     }
 }
