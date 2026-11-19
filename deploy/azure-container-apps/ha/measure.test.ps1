@@ -83,6 +83,97 @@ try {
     Assert ($imagePlan.Step -notcontains 'BuildImage') 'Image must skip build'
     Assert ($imagePlan.Step -contains 'ImportImage') 'Supplied image must be copied into the temporary registry'
 
+    Assert (-not ($text.Contains('VLITE_MEAS_KIND='))) 'MEAS-007 must not set the measurement kind'
+    $options002 = $options.Clone(); $options002.Measurements = @('MEAS-002')
+    $options002.SubscriptionId = 'never-print-this-subscription'
+    $planOutput = @(Invoke-VLiteMeas -Options $options002 6>&1)
+    $plan002 = @($planOutput | Where-Object { $_ -isnot [System.Management.Automation.InformationRecord] })
+    Assert (($plan002.Step -join ',') -ceq 'CheckGroup,CreateGroup,CreateRegistry,BuildImage,CreateIdentity,GrantPull,CreateStorage,CreateArchiveContainer,CreateCoordinationContainer,GrantBlob,CreateEnvironment,CreateJob,StartJob,PollExecution,ReadLogs,QueryLogs,DeleteGroup,WaitDeleted') 'MEAS-002 plan order differs'
+    $printed002 = $planOutput | Out-String
+    Assert (-not $printed002.Contains($options002.SubscriptionId)) 'MEAS-002 printed plan leaked subscription'
+    Assert (-not $printed002.Contains('client-secret-001')) 'MEAS-002 printed plan leaked client ID'
+    Assert ($printed002.Contains('<target-b64>')) 'MEAS-002 plan must retain the target placeholder'
+    $scriptPlan002 = @(& (Join-Path $PSScriptRoot 'measure.ps1') @options002 6>$null)
+    Assert (($scriptPlan002.Step -join ',') -ceq ($plan002.Step -join ',')) 'MEAS-002 script entrypoint Plan differs'
+    foreach ($step002 in $plan002) {
+        Assert ($step002.Arguments[-2] -ceq '--subscription' -and $step002.Arguments[-1] -ceq '<subscription>') 'MEAS-002 step lacks subscription placeholder'
+    }
+    $storage = ($plan002 | Where-Object Step -eq CreateStorage).Arguments
+    Assert (($storage -join ' ') -ceq 'storage account create --name vlitemeast26st --resource-group vlite-ha-meas-t26 --location westus2 --sku Standard_LRS --kind StorageV2 --allow-shared-key-access false --allow-blob-public-access false --min-tls-version TLS1_2 --https-only true --subscription <subscription>') 'Storage security arguments differ'
+    foreach ($container in @(@('CreateArchiveContainer', 'archive'), @('CreateCoordinationContainer', 'coordination'))) {
+        $args002 = ($plan002 | Where-Object Step -eq $container[0]).Arguments
+        Assert (($args002 -join ' ') -ceq "storage container-rm create --storage-account vlitemeast26st --resource-group vlite-ha-meas-t26 --name $($container[1]) --subscription <subscription>") 'Container must use the control plane'
+    }
+    $grant002 = ($plan002 | Where-Object Step -eq GrantBlob).Arguments
+    Assert (($grant002 -join ' ') -ceq 'role assignment create --assignee-object-id <principal-id> --assignee-principal-type ServicePrincipal --role Storage Blob Data Contributor --scope /subscriptions/<subscription>/resourceGroups/vlite-ha-meas-t26/providers/Microsoft.Storage/storageAccounts/vlitemeast26st --subscription <subscription>') 'Blob role arguments differ'
+    $job002 = @($plan002 | Where-Object Step -eq CreateJob)
+    Assert ($job002.Count -eq 1 -and $job002[0].Cpu -eq 1 -and $job002[0].Memory -ceq '2Gi') 'MEAS-002 must default to one 1 vCPU / 2Gi tier'
+    foreach ($env002 in @(
+        'VLITE_MEAS_KIND=MEAS-002', 'VLITE_MEAS002_TARGET_B64=<target-b64>',
+        "VLITE_RESOURCE_SOURCE_REVISION=$('a' * 40)", 'VLITE_RESOURCE_SOURCE_DIRTY_PATHS=',
+        'VLITE_RESOURCE_HOST_NOTE=MEAS-002 temporary ACA job; requested CPU=1 memory=2Gi'
+    )) { Assert ($job002[0].Arguments -ccontains $env002) "Missing MEAS-002 environment: $env002" }
+    Assert (@($job002[0].Arguments | Where-Object { $_ -match '^VLITE_MEAS002_(?!TARGET_B64)' }).Count -eq 0) 'Omitted driver options must not be sent'
+    $custom002 = $options002.Clone(); $custom002.Tiers = @(0.5, 2)
+    $optionFields002 = @(
+        @('DurationSecs', 60, 3600, 'DURATION_SECS', '360'),
+        @('Rate', 1, 200, 'RATE', '20'),
+        @('ArchiveIntervalSecs', 60, 86400, 'ARCHIVE_INTERVAL_SECS', '60'),
+        @('StalenessBoundMs', 1000, 3600000, 'STALENESS_BOUND_MS', '300000'),
+        @('ReaderPollMs', 100, 60000, 'READER_POLL_MS', '1000'),
+        @('ObserveMs', 50, 5000, 'OBSERVE_MS', '100')
+    )
+    foreach ($field in $optionFields002) { $custom002[$field[0]] = $field[4] }
+    $customPlan002 = @(New-VLiteMeasPlan (Test-VLiteMeasParameters $custom002))
+    $customJobs002 = @($customPlan002 | Where-Object Step -eq CreateJob)
+    Assert (($customJobs002.Memory -join ',') -ceq '1Gi,4Gi') 'MEAS-002 explicit tiers changed'
+    foreach ($field in $optionFields002) {
+        Assert ($customJobs002[0].Arguments -ccontains "VLITE_MEAS002_$($field[3])=$($field[4])") 'Missing custom MEAS-002 option'
+        foreach ($value in @(([long]$field[1] - 1), ([long]$field[2] + 1), '', '+100', "100`n", '1.5', '9223372036854775808')) {
+            $bad002 = $options002.Clone(); $bad002[$field[0]] = [string]$value
+            Assert-Throws { Test-VLiteMeasParameters $bad002 } "$($field[0]) is outside"
+        }
+        foreach ($value in @($field[1], ([long]$field[1] + 1), ([long]$field[2] - 1), $field[2])) {
+            $edge002 = $options002.Clone(); $edge002[$field[0]] = [string]$value
+            if ($field[0] -eq 'StalenessBoundMs') { $edge002.ReaderPollMs = '100' }
+            if ($field[0] -in 'DurationSecs', 'ArchiveIntervalSecs' -and $value -ge ([long]$field[2] - 1)) {
+                Assert-Throws { Test-VLiteMeasParameters $edge002 } 'budget'
+            } else { $null = Test-VLiteMeasParameters $edge002 }
+        }
+        $bad007 = $options.Clone(); $bad007[$field[0]] = $field[4]
+        Assert-Throws { Test-VLiteMeasParameters $bad007 } 'not supported'
+    }
+    foreach ($name in 'Records', 'Delta', 'Dimensions') {
+        $bad002 = $options002.Clone(); $bad002[$name] = '1'
+        Assert-Throws { Test-VLiteMeasParameters $bad002 } 'not supported'
+    }
+    foreach ($entry in @(
+        @{ Measurements = @('MEAS-002','MEAS-007') }, @{ Measurements = @('MEAS-007','MEAS-002') },
+        @{ Measurements = @('MEAS-001') }, @{ Measurements = @('MEAS-003') }, @{ Measurements = @('MEAS-004') },
+        @{ Measurements = @('MEAS-005') }, @{ Measurements = @('MEAS-006') }, @{ Measurements = @('MEAS-008') },
+        @{ Measurements = @() }, @{ Measurements = @('meas-002') },
+        @{ Tiers = @() }, @{ Tiers = @(0.3) }, @{ Tiers = @(1,1) },
+        @{ ReaderPollMs = '1000'; StalenessBoundMs = '1000' },
+        @{ ReaderPollMs = '1001'; StalenessBoundMs = '1000' },
+        @{ DurationSecs = '2521' }, @{ ArchiveIntervalSecs = '601'; DurationSecs = '360' }
+    )) {
+        $bad002 = $options002.Clone()
+        foreach ($key in $entry.Keys) { $bad002[$key] = $entry[$key] }
+        Assert-Throws { Test-VLiteMeasParameters $bad002 } '.+'
+    }
+    $budget002 = $options002.Clone(); $budget002.DurationSecs = '2520'
+    $null = Test-VLiteMeasParameters $budget002
+    $budget002.DurationSecs = '360'; $budget002.ArchiveIntervalSecs = '600'
+    $null = Test-VLiteMeasParameters $budget002
+    $target002 = New-VLiteMeas002Target (Test-VLiteMeasParameters $options002) 'client-secret-001'
+    $targetJson002 = [Text.Encoding]::UTF8.GetString([Convert]::FromBase64String($target002))
+    $target = $targetJson002 | ConvertFrom-Json -AsHashtable
+    Assert ((($target.Keys | Sort-Object) -join ',') -ceq 'account,auth,client_id,container,coordination_container,prefix') 'Target key set differs'
+    Assert ($target.account -ceq 'vlitemeast26st' -and $target.container -ceq 'archive' -and
+        $target.coordination_container -ceq 'coordination' -and $target.prefix -ceq 'meas002/' -and
+        $target.auth -ceq 'managed_identity' -and $target.client_id -ceq 'client-secret-001') 'Target values differ'
+    Assert (-not $target.ContainsKey('endpoint') -and -not $targetJson002.Contains("`n")) 'Target must be compact with no endpoint'
+
     foreach ($name in 'asendme-rg','ASENDME-prod','vlite-app','vlite-env','vlite-data') {
         Assert-Throws { Assert-VLiteMeasName $name } 'protected'
     }
@@ -132,6 +223,16 @@ try {
     Assert ($docker.Contains('FROM rust:1.89-bookworm')) 'Wrong toolchain image'
     Assert ($docker.Contains('cargo build --locked --release --features json --example ha-reader-apply')) 'Missing example build'
     Assert ($docker -match '(?m)^USER (?!root)') 'Image must run non-root'
+    Assert ($docker.Contains("COPY benchmarks/ha_reader_resource_tests.rs ./benchmarks/ha_reader_resource_tests.rs`nCOPY benchmarks/ha_meas002.rs ./benchmarks/ha_meas002.rs") -or
+        $docker.Contains("COPY benchmarks/ha_reader_resource_tests.rs ./benchmarks/ha_reader_resource_tests.rs`r`nCOPY benchmarks/ha_meas002.rs ./benchmarks/ha_meas002.rs")) 'Missing MEAS-002 COPY in order'
+    Assert ($docker.Contains('cargo build --locked --release --features server --bin vlite-server --example ha-meas002')) 'Missing MEAS-002 server/example build'
+    Assert ($docker.Contains('case "${VLITE_MEAS_KIND:-MEAS-007}" in')) 'Missing measurement kind switch'
+    Assert ($docker.Contains('base64 -d >"$work/target.json"')) 'Missing target decoding'
+    Assert ($docker.Contains('*) printf "VLITE-MEAS FAILED 2\n"; exit 2 ;;')) 'Unknown measurement kind must fail'
+    Assert (-not ($docker -match '\beval\b')) 'Entrypoint must not use eval'
+    foreach ($field in $optionFields002) {
+        Assert ($docker.Contains('[ -z "${VLITE_MEAS002_' + $field[3] + ':-}" ] || set -- "$@" --')) 'Missing explicit option forwarding'
+    }
 
     foreach ($failureCase in @(
         @{ Step = 'CreateRegistry'; Command = 'acr create'; Keep = $false; CleanupFails = $false },
@@ -178,7 +279,7 @@ try {
 
     $script:sampleLines = @(New-TestLog)
     function Start-Sleep { param([int]$Seconds) }
-    foreach ($mode in 'Console', 'TableFallback', 'RowFallback', 'Retry', 'FailedJob', 'CleanupFailure', 'CleanupWaitFailure', 'ExistingGroup') {
+    foreach ($mode in 'Console', 'TableFallback', 'RowFallback', 'Retry', 'FailedJob', 'CleanupFailure', 'CleanupWaitFailure', 'Meas002', 'MissingClientId', 'ExistingGroup') {
         $script:mode = $mode
         $script:startAttempts = 0
         $script:deleteRequested = $false
@@ -196,7 +297,11 @@ try {
                     $script:deleteRequested = $true
                     return
                 }
-                '^identity create ' { return @{ principalId = 'principal-001' } }
+                '^identity create ' {
+                    if ($script:mode -eq 'Meas002') { return @{ principalId = 'principal-001'; clientId = 'client-secret-001' } }
+                    return @{ principalId = 'principal-001' }
+                }
+                '^storage (account|container-rm) create ' { return @{ ok = $true } }
                 '^role assignment create ' {
                     $assigneeIndex = [Array]::IndexOf($Arguments, '--assignee-object-id')
                     Assert ($assigneeIndex -ge 0 -and $Arguments[$assigneeIndex + 1] -eq 'principal-001') 'AcrPull assignment must use the created identity principal'
@@ -205,7 +310,14 @@ try {
                 '^containerapp env create ' {
                     return @{ properties = @{ appLogsConfiguration = @{ logAnalyticsConfiguration = @{ customerId = 'workspace-001' } } } }
                 }
-                '^containerapp job create ' { return @{ name = 'job-001' } }
+                '^containerapp job create ' {
+                    if ($script:mode -eq 'Meas002') {
+                        $encodedTarget = @($Arguments | Where-Object { $_ -like 'VLITE_MEAS002_TARGET_B64=*' })[0].Split('=', 2)[1]
+                        $liveTarget = [Text.Encoding]::UTF8.GetString([Convert]::FromBase64String($encodedTarget)) | ConvertFrom-Json
+                        Assert ($liveTarget.client_id -ceq 'client-secret-001' -and $liveTarget.account -ceq 'vlitemeast26st') 'Live target placeholder was not resolved'
+                    }
+                    return @{ name = 'job-001' }
+                }
                 '^containerapp job start ' {
                     $script:startAttempts++
                     if ($script:mode -eq 'Retry' -and $script:startAttempts -eq 1) { throw 'role propagation' }
@@ -235,7 +347,17 @@ try {
         }
         $run = $options.Clone(); $run.Plan = $false; $run.SubscriptionId = 'never-print-this-subscription'
         $run.Tiers = @(0.5); $run.OutDir = Join-Path $scratch "run-$mode"
+        if ($mode -in 'Meas002', 'MissingClientId') {
+            $run.Measurements = @('MEAS-002'); $run.Remove('Tiers')
+        }
         function git { $global:LASTEXITCODE = 0; return }
+        if ($mode -eq 'MissingClientId') {
+            Assert-Throws { Invoke-VLiteMeas -Options $run } 'lacks a client ID'
+            $missingSummary = Get-Content -Raw (Join-Path $run.OutDir 'summary.json') | ConvertFrom-Json
+            Assert ($missingSummary.failedStep -ceq 'CreateIdentity' -and $missingSummary.cleanupStatus -ceq 'Deleted') 'Missing client ID must fail and clean up'
+            Assert $script:deleteRequested 'Missing client ID must request deletion'
+            continue
+        }
         if ($mode -eq 'ExistingGroup') {
             Assert-Throws { Invoke-VLiteMeas -Options $run } 'already exists'
             Assert ($script:recorded.Count -eq 1) 'Existing resource group must never be mutated or deleted'
@@ -246,11 +368,15 @@ try {
         } else {
             Invoke-VLiteMeas -Options $run
             $outputFile = Join-Path $run.OutDir 'MEAS-007-c05.json'
+            if ($mode -eq 'Meas002') { $outputFile = Join-Path $run.OutDir 'MEAS-002-c1.json' }
             Assert ((Get-Content -Raw $outputFile) -ceq '{"sample":true,"text":"resource evidence"}') 'Collected bytes changed'
         }
         $saved = Get-Content -Raw (Join-Path $run.OutDir 'summary.json')
         Assert (-not $saved.Contains($run.SubscriptionId)) 'Summary leaked subscription'
+        Assert (-not $saved.Contains('client-secret-001')) 'Summary leaked identity client ID'
         $summary = $saved | ConvertFrom-Json
+        $expectedMeasurement = if ($mode -eq 'Meas002') { 'MEAS-002' } else { 'MEAS-007' }
+        Assert ($summary.measurement -ceq $expectedMeasurement) 'Summary measurement differs'
         Assert ($summary.results.Count -eq 1) 'Summary result count differs'
         Assert ($summary.results[0].executionName -eq 'execution-001') 'Execution missing from summary'
         $expectedCleanup = if ($mode -in 'CleanupFailure', 'CleanupWaitFailure') { 'Failed' } else { 'Deleted' }
@@ -265,7 +391,7 @@ try {
         Assert ($summary.cleanupFailedStep -eq $expectedCleanupStep) 'Cleanup failure step differs'
         if ($mode -eq 'Retry') { Assert ($script:startAttempts -eq 2) 'Role propagation did not retry start' }
         $allArguments = $script:recorded | ConvertTo-Json -Depth 10
-        Assert (-not ($allArguments -match '<subscription>|<execution>|<principal-id>|<workspace-id>')) 'Unresolved placeholder in live command'
+        Assert (-not ($allArguments -match '<subscription>|<execution>|<principal-id>|<workspace-id>|<target-b64>')) 'Unresolved placeholder in live command'
     }
 
     function git { $global:LASTEXITCODE = 0; return ' M src/example.rs' }

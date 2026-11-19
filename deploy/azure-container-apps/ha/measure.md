@@ -5,7 +5,9 @@ owner-approved **separate, temporary measurement apps**. It creates a new,
 tagged resource group containing an ACR, user-assigned identity, Consumption
 environment (with Log Analytics), and one Manual job per requested CPU tier.
 It never reuses a group or touches the live app, environment, or share.
-**MEAS-001..006 are not implemented yet** and are refused.
+MEAS-002 also measures reader staleness under write load against real Blob
+Storage. **MEAS-001 and MEAS-003..006 are still refused**, as are combinations
+of measurement IDs.
 
 ## Prerequisites and command
 
@@ -52,7 +54,7 @@ Offline preview (no Azure calls; specifying the revision also avoids Git):
 ```
 
 The preview prints ordered Azure CLI argument arrays and returns step objects.
-`<subscription>`, `<principal-id>`, `<execution>`, and `<workspace-id>` are
+`<subscription>`, `<principal-id>`, `<target-b64>`, `<execution>`, and `<workspace-id>` are
 placeholders resolved at execution. Poll steps repeat; `QueryLogs` is a
 conditional fallback. Preview provenance assumes clean and does not attest
 the working tree. A real run always checks it.
@@ -71,6 +73,56 @@ measurement image into the temporary ACR. This keeps all managed-identity
 pull grants within the disposable group. The source must allow ACR import
 without supplied credentials and implement the same entrypoint protocol;
 use an immutable digest for reproducibility. No registry passwords are used.
+
+## MEAS-002: reader staleness under write load
+
+```powershell
+& .\deploy\azure-container-apps\ha\measure.ps1 `
+  -SubscriptionId $env:AZURE_SUBSCRIPTION_ID -Id meas002 `
+  -Measurements MEAS-002 -DurationSecs 360 -Rate 20 `
+  -ArchiveIntervalSecs 60 -StalenessBoundMs 300000 `
+  -ReaderPollMs 1000 -ObserveMs 100 `
+  -OutDir C:\VLiteMeasurements\meas002
+```
+
+MEAS-002 defaults to one 1 vCPU / 2 GiB job; explicit `-Tiers` follows the
+same CPU/memory rules as MEAS-007. Its optional plain-decimal inputs are:
+
+| Option | Range | Default |
+|---|---|---|
+| `DurationSecs` | 60..3600 | 360 |
+| `Rate` (commits/second) | 1..200 | 20 |
+| `ArchiveIntervalSecs` | 60..86400 | 60 |
+| `StalenessBoundMs` | 1000..3600000 | 300000 |
+| `ReaderPollMs` | 100..60000, strictly below the effective staleness bound | 1000 |
+| `ObserveMs` | 50..5000 | 100 |
+
+The effective options must also satisfy
+`600 + duration + 2 * (2 * archive + 120) <= 3600` seconds to fit the
+replica timeout; this budget further restricts duration and archive interval.
+These options are refused with MEAS-007; `Records`, `Delta`, and `Dimensions`
+are refused with MEAS-002. Omitted options use the driver's defaults.
+
+In addition to the shared resources, this mode creates a temporary
+Standard_LRS StorageV2 account (`vlitemeas<id>st`) and `archive` and
+`coordination` containers via the ARM control plane. Register the
+`Microsoft.Storage` provider first. The operator needs role-assignment
+rights for **Storage Blob Data Contributor** as well as `AcrPull`. Shared
+keys and public Blob access are disabled; the job uses its user-assigned
+managed identity. Its target JSON is passed as base64 to avoid Windows
+`az.cmd` quoting issues; base64 is transport encoding, not encryption.
+Plans retain `<target-b64>` rather than the identity client ID.
+
+The driver runs a writer and reader, measuring acknowledged commits becoming
+visible and archive-head publication under load. `MEAS-002-c1.json` (or
+the corresponding explicit tier suffix) contains its original evidence.
+`summary.json` records `measurement: MEAS-002`; it never includes the
+subscription ID, identity client ID, or account keys. Blob capacity and
+transaction charges apply in addition to the shared ACR, job, and logging
+costs. The account and containers are deleted with the group under the same
+cleanup policy below.
+
+**This is evidence for a staleness proposal, not an SLO or HA qualification.**
 
 ## Outputs, cost, and cleanup
 

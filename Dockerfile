@@ -15,6 +15,7 @@ COPY benchmarks/ha_reader_apply_tests.rs ./benchmarks/ha_reader_apply_tests.rs
 COPY benchmarks/ha_reader_strategies.rs ./benchmarks/ha_reader_strategies.rs
 COPY benchmarks/ha_reader_resource.rs ./benchmarks/ha_reader_resource.rs
 COPY benchmarks/ha_reader_resource_tests.rs ./benchmarks/ha_reader_resource_tests.rs
+COPY benchmarks/ha_meas002.rs ./benchmarks/ha_meas002.rs
 COPY bindings/c ./bindings/c
 COPY crates ./crates
 
