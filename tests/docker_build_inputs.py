@@ -7,6 +7,19 @@ import unittest
 ROOT = Path(__file__).resolve().parents[1]
 
 
+def path_modules(path):
+    """Return a target file and every file it pulls in through #[path], at any depth."""
+    found, pending = [], [path]
+    while pending:
+        current = pending.pop()
+        if current in found:
+            continue
+        found.append(current)
+        modules = re.findall(r'#\[path = "([^"]+)"\]', (ROOT / current).read_text(encoding="utf-8"))
+        pending += [str(Path(current).parent / module).replace("\\", "/") for module in modules]
+    return found
+
+
 class DockerInputs(unittest.TestCase):
     def test_dashboard_image_rewrites_every_embedded_asset(self):
         html = (ROOT / "src/dashboard/index.html").read_text(encoding="utf-8")
@@ -52,9 +65,7 @@ class DockerInputs(unittest.TestCase):
         needed_files = []
         for kind, directory in (("example", "examples"), ("test", "tests")):
             for target in manifest.get(kind, []):
-                path = target.get("path", f"{directory}/{target['name']}.rs")
-                modules = re.findall(r'#\[path = "([^"]+)"\]', (ROOT / path).read_text(encoding="utf-8"))
-                needed_files += [path, *(str(Path(path).parent / module).replace("\\", "/") for module in modules)]
+                needed_files += path_modules(target.get("path", f"{directory}/{target['name']}.rs"))
         for name in ("Dockerfile", "bindings/manylinux.Dockerfile", "bindings/node/Dockerfile"):
             lines = (ROOT / name).read_text(encoding="utf-8").splitlines()
             copied = [match.group(1) for line in lines if (match := re.fullmatch(r"COPY (\S+) \./\1", line.strip()))]

@@ -130,12 +130,21 @@ ITEM-002 strategy-comparison cells:
 cargo run --quiet --locked --release --features json --example ha-reader-apply -- --resource-evidence > <artifact.json>
 ```
 
-The mode is Linux-only and fails if allocated-block, `/proc`, or cgroup v2
-telemetry is unavailable. It uses the existing fixture, apply/reseed, full
+The mode is Linux-only and fails if allocated-block or `/proc` telemetry is
+unavailable. It uses the existing fixture, apply/reseed, full
 HNSW rebuild and compaction helpers. Its selected **development inputs** are a
 110,000-record, 64-dimensional baseline and a 300-mutation tail, with 64-byte
 payloads, Full durability, and the existing deterministic synthetic vectors.
 These are not qualified limits or a representative tenant workload.
+
+An operator may select other inputs with `VLITE_RESOURCE_RECORDS` (at most
+2,000,000), `VLITE_RESOURCE_DELTA` (at most 100,000) and
+`VLITE_RESOURCE_DIMENSIONS` (at most 1,024). Each must be a plain decimal; the
+delta must leave room for its deletions (`2 * (delta / 3) + 2 <= records`), and
+records times dimensions must not exceed 32,000,000 vector values. Any invalid
+value fails before work starts. The report names each input's source, and any
+override marks the profile as operator-selected rather than the development
+profile. These bounds keep the probe safe to run; they are not capacity claims.
 If a read-only container mount cannot resolve the checkout's Git metadata, pass
 both `VLITE_RESOURCE_SOURCE_REVISION` (full commit ID) and
 `VLITE_RESOURCE_SOURCE_DIRTY_PATHS` (raw `git status --porcelain` output) from
@@ -148,13 +157,26 @@ compaction, a sampler records allocated blocks (512-byte units) and sampled
 process RSS every 10 ms. Each phase reports its sample count, maximum observed
 sample gap, and maximum scan duration; peaks between samples may be missed.
 The output also records Linux `VmHWM`, the process-wide RSS high-water since
-process start (KiB precision; includes harness/model and ANN memory), and cgroup
-v2 CPU/memory limits. No telemetry failure is converted to zero. The probe
-verifies reader data/position/ANN results and compaction output before printing
-JSON.
+process start (KiB precision; includes harness/model and ANN memory), and the
+container CPU/memory limits the kernel exposes: cgroup v2 `memory.max` and
+`cpu.max`, or else cgroup v1 `memory.limit_in_bytes` and the CFS quota/period
+(v1 values of 2^62 or more mean unlimited). `limits_status` is `finite` only
+when both a memory limit and a CPU quota are present; otherwise it is
+`incomplete`, the raw text is kept, the report lists the missing limit as
+unqualified, and no requested platform tier is substituted. No telemetry
+failure is converted to zero. The probe verifies reader data/position/ANN
+results and compaction output before printing JSON.
 
-These are local Linux/container development observations only. They do not
-qualify ACA ephemeral storage or CPU tiers, tenant workloads, concurrency, or a
+When both `CONTAINER_APP_JOB_NAME` and `CONTAINER_APP_JOB_EXECUTION_NAME` are
+set (Azure Container Apps injects them into job replicas), the report labels the
+platform `azure_container_apps_job` and its scope becomes
+`ACA_JOB_RESOURCE_MEASUREMENT_EVIDENCE_NOT_SERVING_QUALIFICATION`. That label
+comes from the environment and is not an attestation. Otherwise the scope is
+`LOCAL_LINUX_RESOURCE_DEVELOPMENT_EVIDENCE_NOT_ACA_QUALIFICATION`.
+
+Local runs are Linux/container development observations only. They do not
+qualify ACA ephemeral storage or CPU tiers. Neither local nor ACA job runs
+qualify tenant workloads, concurrency, serving load, restart behaviour or a
 capacity ceiling; they also do not isolate reader memory from harness/model
 memory or show ANN readiness during an apply. Preserve the JSON output outside
 the repository with its source revision and dirty-path record. ITEM-003 remains
