@@ -106,14 +106,18 @@ reaches the exported head before each reopen and makes no live lag claim.
 
 ## Concrete gates before extending these observations
 
+Status refreshed on 2026-11-19 against the HA PRD
+(`docs/projects/feature-aca-ha/feature-aca-ha.prd.md`). Delivered prerequisites
+are not measurements; every row still marked UNMEASURED has no qualifying result.
+
 | Measurement / dependency | Status and required evidence |
 |---|---|
 | MEAS-001 separate fsync/replay costs | **UNMEASURED**. Requires individually instrumented engine phases; this slice measures only inclusive apply. |
 | MEAS-001 strategy comparison (a)/(b)/(c) | **Measured locally by ITEM-002** on synthetic fixtures only (see below). Representative workloads and ACA qualification remain UNMEASURED. Detached index-build time is not evidence that any strategy is qualified. |
-| MEAS-002 Blob upload/verified-head latency | **UNMEASURED**. Requires EPIC-PITR-001 baseline-first archive and actual durable-progress/consumer interfaces (Q-2/Q-4/Q-6); memory path Q-5 also remains open. Local segment save is not a substitute. |
-| MEAS-002 ACA staleness distribution | **UNMEASURED**. Requires the archive, polling/scheduling, reader serving mode and representative load on the intended platform, with source-commit and visible-position correlation. No p50/p99 or staleness bound is derived from these three samples. ITEM-002 recorded a local single-process ack-to-exact-visible distribution for strategy (b) only; it is not an ACA staleness distribution. |
-| MEAS-007 local/ACA capacity | **Local sampled file-length high-water marks and compaction measured by ITEM-002**; otherwise **UNMEASURED** beyond the enumerated fixture file lengths. Requires baseline download/staging lifetime, allocated-space peaks, compaction scratch, process/index memory, vCPU storage tier and workload-size qualification; do not infer a ceiling from smoke sizes. |
-| Archive continuity and fencing | **UNMEASURED**. Exported segments have lineage and sequence, but no fenced writer epoch, durable archive head, retention pins or Blob fault outcomes. Q-1..Q-6 and GATE-001 remain open. |
+| MEAS-002 Blob upload/verified-head latency | **UNMEASURED**. Prerequisites are delivered in code: EPIC-PITR-001 baseline-first archive with progress reporting, Q-1..Q-6 accepted (including the in-process archiver for memory-bound tenants, Q-5), the runtime HA archive (ITEM-038) and authority-bound reader follow (ITEM-039). No harness mode measures this latency yet. Local segment save is not a substitute. |
+| MEAS-002 ACA staleness distribution | **UNMEASURED**. The archive, authority-bound follow, startup restore (ITEM-040) and writer archive wiring (ITEM-041) exist and are tested locally over Azurite only. Still requires a measurement mode (the ACA harness accepts only MEAS-007), polling/scheduling and representative load on the intended platform, with source-commit and visible-position correlation. No p50/p99 or staleness bound is derived from these three samples. ITEM-002 recorded a local single-process ack-to-exact-visible distribution for strategy (b) only, and the Azurite TEST-006 visibility time is set by that test's archive interval; neither is an ACA staleness distribution. |
+| MEAS-007 local/ACA capacity | **Local sampled file-length high-water marks and compaction measured by ITEM-002.** ACA development-fixture jobs at 0.5/1/2 vCPU (`meas007c`, recorded under ITEM-033) completed apply, baseline-plus-tail and compaction; they are observations, not qualification. Otherwise **UNMEASURED**. Requires baseline download/staging lifetime, allocated-space peaks, compaction scratch, process/index memory, effective vCPU entitlement (the container's cgroup quota does not reflect the requested vCPU) and workload-size qualification; do not infer a ceiling from smoke sizes. |
+| Archive continuity and fencing | **Delivered in code; UNMEASURED.** The writer authority carries a fenced epoch, the archive head advances only by epoch-bound CAS, every archive commit re-verifies the epoch, and retention never deletes the head or base set (ITEM-038/039). These are tested locally over Azurite only. Fencing overhead and zombie window (MEAS-006) and Blob fault outcomes and loss window (MEAS-003) have no measured result. Q-1..Q-6 are accepted, and GATE-001 is a code-implementation go only. |
 
 ITEM-001 delivers this protocol and repeatable first-cut harness only. An
 owner-approved future qualification must record the exact source, host and
