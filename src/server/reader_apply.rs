@@ -15,6 +15,9 @@ use serde_json::json;
 use super::{ApiError, Service, log_stderr};
 use crate::Database;
 
+mod follower;
+pub use follower::{ReaderApply, ReaderApplyConfig};
+
 /// Apply progress shared by every clone and generation of one reader.
 #[derive(Default)]
 pub(super) struct Progress {
@@ -30,7 +33,6 @@ pub(super) struct Progress {
 
 impl Progress {
     /// Stops applying; readiness fails from now on. The first reason wins.
-    #[cfg_attr(not(test), allow(dead_code))]
     pub(super) fn fail(&self, reason: String) {
         let mut failed = self.failed.lock().unwrap_or_else(PoisonError::into_inner);
         if failed.is_none() {
@@ -52,14 +54,12 @@ impl Progress {
 
     /// Records that the served generation is at `sequence`, the newest
     /// verified checkpoint as of `at` (Unix milliseconds).
-    #[cfg_attr(not(test), allow(dead_code))]
     pub(super) fn confirm(&self, sequence: u64, at: u64) {
         self.applied_sequence.store(sequence, Ordering::SeqCst);
         self.confirmed_unix_ms.store(at, Ordering::SeqCst);
     }
 
     /// The served sequence and when it was last confirmed current.
-    #[cfg_attr(not(test), allow(dead_code))]
     pub(super) fn applied(&self) -> (u64, u64) {
         (
             self.applied_sequence.load(Ordering::SeqCst),
@@ -69,13 +69,11 @@ impl Progress {
 
     /// Sets the staleness bound (ITEM-020): beyond it the reader fails
     /// readiness and refuses reads.
-    #[cfg_attr(not(test), allow(dead_code))]
     pub(super) fn set_bound(&self, bound_ms: u64) {
         self.bound_ms.store(bound_ms, Ordering::SeqCst);
     }
 
     /// The staleness bound in milliseconds; 0 when none is set.
-    #[cfg_attr(not(test), allow(dead_code))]
     pub(super) fn bound(&self) -> u64 {
         self.bound_ms.load(Ordering::SeqCst)
     }
@@ -83,7 +81,6 @@ impl Progress {
     /// Milliseconds since the served generation was last confirmed current,
     /// or `None` before the first confirmation. A clock that went backwards
     /// reads as age 0.
-    #[cfg_attr(not(test), allow(dead_code))]
     pub(super) fn age_ms(&self, now_unix_ms: u64) -> Option<u64> {
         match self.confirmed_unix_ms.load(Ordering::SeqCst) {
             0 => None,
@@ -103,6 +100,12 @@ pub(super) fn failed() -> ApiError {
 }
 
 impl Service {
+    /// Attaches archive freshness and failure admission to this reader.
+    pub fn with_reader_apply(mut self, apply: &ReaderApply) -> Self {
+        self.reader = Some(apply.progress());
+        self
+    }
+
     /// The readiness refusal of a reader that stopped applying, if any.
     pub(super) fn reader_failure(&self) -> Option<ApiError> {
         self.reader
@@ -117,7 +120,6 @@ impl Service {
     /// closed afterwards, which releases its shared file lock so its file
     /// can be advanced again. A refused `next` is closed and the served
     /// generation is kept.
-    #[cfg_attr(not(test), allow(dead_code))]
     pub(super) fn swap_reader_generation(&self, next: Database) -> std::io::Result<()> {
         let refusal = if !next.is_read_only() {
             Some("the new generation is not read-only")
@@ -173,11 +175,488 @@ mod tests {
     };
     use tower::ServiceExt;
 
-    use super::Progress;
+    use super::{Progress, ReaderApply, ReaderApplyConfig, follower::Step};
+    use crate::server::{
+        cloud_backup::{
+            self as cloud, PinKind, Record, SetState,
+            fake::{Fault, Op},
+        },
+        cloud_recovery::tests::{Env, checkpoint, puts, setup},
+    };
     use crate::{
         Database,
         server::{ServeMode, Service, router},
     };
+
+    fn config(env: &Env) -> ReaderApplyConfig {
+        ReaderApplyConfig {
+            target_file: env.dir.path().join("target.json"),
+            shared_key_file: None,
+            follower_dir: env.dir.path().join("followers"),
+            capacity_bytes: cloud::MAX_DATABASE_BYTES,
+            staleness_bound_ms: 30_000,
+            poll_interval_ms: 10_000,
+        }
+    }
+
+    fn enroll(env: &Env) -> ReaderApply {
+        ReaderApply::enroll_with(env.sets.clone(), config(env), "replica", 1_000)
+            .unwrap_or_else(|e| panic!("{}: {}", e.code, e.message))
+    }
+
+    fn slot(env: &Env, name: &str) -> std::path::PathBuf {
+        config(env).follower_dir.join(name).join("database.vlite")
+    }
+
+    fn record(env: &Env) -> Record {
+        env.sets
+            .list()
+            .unwrap()
+            .sets
+            .into_iter()
+            .find(|set| set.set_id == env.set_id)
+            .unwrap()
+            .record
+            .unwrap()
+    }
+
+    fn extra_set(env: &Env, newer: bool, state: SetState) -> String {
+        let mut record = record(env);
+        record.created_unix_ms = if newer {
+            record.created_unix_ms + 10_000
+        } else {
+            record.created_unix_ms - 10_000
+        };
+        record.set_id = cloud::new_set_id(record.created_unix_ms).unwrap();
+        record.state = state;
+        record.pins.clear();
+        env.meta.set_raw(
+            &format!("vlite/prod/sets/{}/record.json", record.set_id),
+            &serde_json::to_vec(&record).unwrap(),
+        );
+        record.set_id
+    }
+
+    #[test]
+    fn reader_apply_config_validation() {
+        use serde_json::json;
+        let dir = tempfile::tempdir().unwrap();
+        let follower = dir.path().join("followers");
+        let served = follower.join("reader-a").join("database.vlite");
+        let file = dir.path().join("reader.json");
+        let valid = json!({
+            "target_file":"never-read-secret",
+            "follower_dir":follower,
+            "capacity_bytes":1073741824u64,
+            "staleness_bound_ms":3600000,
+            "poll_interval_ms":1
+        });
+        std::fs::write(&file, valid.to_string()).unwrap();
+        ReaderApplyConfig::load(&file, &served).unwrap();
+        let mut missing = valid.clone();
+        missing.as_object_mut().unwrap().remove("poll_interval_ms");
+        let mut cases = vec![missing];
+        for (key, value) in [
+            ("unknown", json!("never-echo")),
+            ("capacity_bytes", json!(0)),
+            ("capacity_bytes", json!(1073741825u64)),
+            ("staleness_bound_ms", json!(0)),
+            ("staleness_bound_ms", json!(3600001)),
+            ("poll_interval_ms", json!(0)),
+            ("poll_interval_ms", json!(3600000)),
+            ("follower_dir", json!("relative")),
+            ("follower_dir", json!(follower.join("..").join("other"))),
+            (
+                "follower_dir",
+                json!(format!(
+                    "{}{s}.{s}other",
+                    follower.display(),
+                    s = std::path::MAIN_SEPARATOR
+                )),
+            ),
+        ] {
+            let mut value_config = valid.clone();
+            value_config[key] = value;
+            cases.push(value_config);
+        }
+        for value in cases {
+            std::fs::write(&file, value.to_string()).unwrap();
+            let error = ReaderApplyConfig::load(&file, &served).unwrap_err();
+            assert!(error.starts_with("reader_apply_invalid:"), "{error}");
+            assert!(!error.contains("never-"), "{error}");
+        }
+        std::fs::write(&file, valid.to_string()).unwrap();
+        assert!(ReaderApplyConfig::load(&file, &dir.path().join("wrong")).is_err());
+        std::fs::write(&file, vec![b' '; 65_537]).unwrap();
+        assert!(
+            ReaderApplyConfig::load(&file, &served)
+                .unwrap_err()
+                .contains("64 KiB")
+        );
+    }
+
+    #[test]
+    fn reader_apply_enroll_pins_newest_published_set() {
+        let env = setup();
+        extra_set(&env, false, SetState::Published);
+        extra_set(&env, true, SetState::Staging);
+        let untouched = config(&env).follower_dir.join("unrelated");
+        std::fs::create_dir_all(&untouched).unwrap();
+        std::fs::write(untouched.join("keep"), b"keep").unwrap();
+        let apply = enroll(&env);
+        let pins = record(&env).pins;
+        assert_eq!(pins.len(), 1);
+        assert_eq!(pins[0].reason, "reader-apply:replica");
+        assert_eq!(pins[0].kind, PinKind::Operation);
+        assert_eq!(
+            std::fs::read(slot(&env, "reader-a")).unwrap(),
+            std::fs::read(slot(&env, "reader-b")).unwrap()
+        );
+        assert_eq!(apply.progress().applied(), (4, 1_000));
+        assert_eq!(apply.progress().bound(), 30_000);
+        assert!(untouched.join("keep").exists());
+    }
+
+    #[test]
+    fn reader_apply_enroll_follows_the_archive_and_replaces_only_its_slots() {
+        let env = setup();
+        checkpoint(&env, puts(5..=6), None);
+        for name in ["reader-a", "reader-b"] {
+            std::fs::create_dir_all(slot(&env, name).parent().unwrap()).unwrap();
+            std::fs::write(slot(&env, name), b"previous enrollment").unwrap();
+        }
+        let apply = enroll(&env);
+        assert_eq!(apply.progress().applied(), (6, 1_000));
+        for name in ["reader-a", "reader-b"] {
+            let database = Database::open_read_only(slot(&env, name)).unwrap();
+            assert_eq!(database.get(6).unwrap().unwrap().payload, b"p6");
+            database.close().unwrap();
+        }
+    }
+
+    #[test]
+    fn reader_apply_enroll_refuses_without_a_published_set() {
+        let env = setup();
+        let mut record = record(&env);
+        record.state = SetState::Staging;
+        env.meta.set_raw(
+            &format!("vlite/prod/sets/{}/record.json", env.set_id),
+            &serde_json::to_vec(&record).unwrap(),
+        );
+        let error = ReaderApply::enroll_with(env.sets.clone(), config(&env), "replica", 1_000)
+            .err()
+            .unwrap();
+        assert_eq!(error.code, "reader_apply_no_set");
+        assert_eq!(env.pins(), 0);
+        assert!(!config(&env).follower_dir.exists());
+    }
+
+    #[test]
+    fn reader_apply_enroll_releases_own_stale_pins() {
+        let env = setup();
+        let older = extra_set(&env, false, SetState::Published);
+        for id in [&env.set_id, &older] {
+            env.sets
+                .pin(id, "reader-apply:replica", PinKind::Operation, 1)
+                .unwrap();
+            env.sets
+                .pin(id, "reader-apply:other", PinKind::Operation, 1)
+                .unwrap();
+        }
+        let _apply = enroll(&env);
+        for set in env.sets.list().unwrap().sets {
+            let record = set.record.unwrap();
+            assert!(
+                record
+                    .pins
+                    .iter()
+                    .any(|pin| pin.reason == "reader-apply:other")
+            );
+            assert_eq!(
+                record
+                    .pins
+                    .iter()
+                    .filter(|pin| pin.reason == "reader-apply:replica")
+                    .count(),
+                usize::from(set.set_id == env.set_id)
+            );
+        }
+    }
+
+    #[test]
+    fn reader_apply_enroll_refuses_over_capacity_before_download() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        let env = setup();
+        let reads = Arc::new(AtomicUsize::new(0));
+        let count = reads.clone();
+        env.data.hook(Op::Get, "/objects/", move || {
+            count.fetch_add(1, Ordering::SeqCst);
+        });
+        let mut config = config(&env);
+        config.capacity_bytes = 1;
+        let error = ReaderApply::enroll_with(env.sets.clone(), config, "replica", 1)
+            .err()
+            .unwrap();
+        assert_eq!(error.code, "reader_capacity_exceeded");
+        assert_eq!(reads.load(Ordering::SeqCst), 0);
+        assert_eq!(env.pins(), 0);
+        assert!(!slot(&env, "reader-a").parent().unwrap().exists());
+        assert!(!slot(&env, "reader-b").parent().unwrap().exists());
+    }
+
+    #[test]
+    fn reader_apply_enroll_refuses_insufficient_space() {
+        let env = setup();
+        cloud::FREE_BYTES.with(|free| free.set(Some(Some(0))));
+        let result = ReaderApply::enroll_with(env.sets.clone(), config(&env), "replica", 1);
+        cloud::FREE_BYTES.with(|free| free.set(None));
+        assert_eq!(result.err().unwrap().code, "restore_insufficient_space");
+        assert_eq!(env.pins(), 0);
+        assert!(!slot(&env, "reader-a").parent().unwrap().exists());
+    }
+
+    #[test]
+    fn reader_apply_enroll_failure_releases_pin_and_slots() {
+        let env = setup();
+        env.data.fault(Op::Get, "/objects/", Fault::Refuse, 0, 1);
+        let error = ReaderApply::enroll_with(env.sets.clone(), config(&env), "replica", 1)
+            .err()
+            .unwrap();
+        assert_eq!(error.code, "cloud_store_failed");
+        assert_eq!(env.pins(), 0);
+        for name in ["reader-a", "reader-b"] {
+            assert!(!slot(&env, name).parent().unwrap().exists());
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn reader_apply_enroll_refuses_symlinked_slot() {
+        let env = setup();
+        std::fs::create_dir_all(config(&env).follower_dir).unwrap();
+        std::os::unix::fs::symlink(env.dir.path(), slot(&env, "reader-a").parent().unwrap())
+            .unwrap();
+        let error = ReaderApply::enroll_with(env.sets.clone(), config(&env), "replica", 1)
+            .err()
+            .unwrap();
+        assert_eq!(error.code, "reader_apply_invalid");
+        assert!(env.dir.path().join("source.vlite").exists());
+        assert_eq!(env.pins(), 0);
+    }
+
+    #[test]
+    fn reader_apply_step_applies_swaps_and_confirms() {
+        let env = setup();
+        let apply = enroll(&env);
+        let service = reader(&slot(&env, "reader-a")).with_reader_apply(&apply);
+        checkpoint(&env, puts(5..=6), None);
+        assert_eq!(apply.step(&service, 2_000), Step::Swapped);
+        assert_eq!(apply.progress().applied(), (6, 2_000));
+        assert_eq!(
+            service
+                .database
+                .read()
+                .unwrap()
+                .as_ref()
+                .unwrap()
+                .get(6)
+                .unwrap()
+                .unwrap()
+                .payload,
+            b"p6"
+        );
+        // The old served slot is now writable; the new slot is still served.
+        Database::open(slot(&env, "reader-a"))
+            .unwrap()
+            .close()
+            .unwrap();
+        assert!(matches!(
+            Database::open(slot(&env, "reader-b")),
+            Err(crate::Error::Locked)
+        ));
+        assert_eq!(apply.step(&service, 3_000), Step::Confirmed);
+        checkpoint(&env, puts(7..=8), None);
+        assert_eq!(apply.step(&service, 4_000), Step::Swapped);
+        assert_eq!(
+            service
+                .database
+                .read()
+                .unwrap()
+                .as_ref()
+                .unwrap()
+                .get(8)
+                .unwrap()
+                .unwrap()
+                .payload,
+            b"p8"
+        );
+        Database::open(slot(&env, "reader-b"))
+            .unwrap()
+            .close()
+            .unwrap();
+    }
+
+    #[test]
+    fn reader_apply_step_current_confirms() {
+        let env = setup();
+        let apply = enroll(&env);
+        let service = reader(&slot(&env, "reader-a")).with_reader_apply(&apply);
+        assert_eq!(apply.step(&service, 2_000), Step::Confirmed);
+        assert_eq!(apply.progress().applied(), (4, 2_000));
+    }
+
+    #[test]
+    fn reader_apply_step_newer_set_fails_and_releases_pin() {
+        let env = setup();
+        let apply = enroll(&env);
+        let service = reader(&slot(&env, "reader-a")).with_reader_apply(&apply);
+        extra_set(&env, true, SetState::Published);
+        assert_eq!(apply.step(&service, 2_000), Step::Failed);
+        assert_eq!(
+            apply.progress().failure().as_deref(),
+            Some("a newer published set needs a re-seed")
+        );
+        assert_eq!(env.pins(), 0);
+    }
+
+    #[test]
+    fn reader_apply_step_unpublished_set_fails_and_releases_pin() {
+        let env = setup();
+        let apply = enroll(&env);
+        let service = reader(&slot(&env, "reader-a")).with_reader_apply(&apply);
+        let mut record = record(&env);
+        record.state = SetState::Staging;
+        env.meta.set_raw(
+            &format!("vlite/prod/sets/{}/record.json", env.set_id),
+            &serde_json::to_vec(&record).unwrap(),
+        );
+        assert_eq!(apply.step(&service, 2_000), Step::Failed);
+        assert_eq!(env.pins(), 0);
+    }
+
+    #[test]
+    fn reader_apply_step_capacity_failure_keeps_the_served_generation() {
+        let env = setup();
+        let mut config = config(&env);
+        config.capacity_bytes = std::fs::metadata(env.dir.path().join("source.vlite"))
+            .unwrap()
+            .len();
+        let apply = ReaderApply::enroll_with(env.sets.clone(), config, "replica", 1_000)
+            .unwrap_or_else(|e| panic!("{}: {}", e.code, e.message));
+        let service = reader(&slot(&env, "reader-a")).with_reader_apply(&apply);
+        checkpoint(&env, puts(5..=6), None);
+        assert_eq!(apply.step(&service, 2_000), Step::Failed);
+        assert_eq!(
+            apply.progress().failure().as_deref(),
+            Some("reader_capacity_exceeded")
+        );
+        assert_eq!(apply.progress().applied(), (4, 1_000));
+        assert!(
+            service
+                .database
+                .read()
+                .unwrap()
+                .as_ref()
+                .unwrap()
+                .get(6)
+                .unwrap()
+                .is_none()
+        );
+        assert_eq!(env.pins(), 0);
+    }
+
+    #[test]
+    fn reader_apply_step_permanent_store_error_fails_and_releases_pin() {
+        let env = setup();
+        let apply = enroll(&env);
+        let service = reader(&slot(&env, "reader-a")).with_reader_apply(&apply);
+        env.meta.fault(Op::Get, "record.json", Fault::Refuse, 0, 1);
+        assert_eq!(apply.step(&service, 2_000), Step::Failed);
+        assert_eq!(
+            apply.progress().failure().as_deref(),
+            Some("cloud_store_failed")
+        );
+        assert_eq!(env.pins(), 0);
+    }
+
+    #[test]
+    fn reader_apply_step_reseed_fails_and_releases_pin() {
+        let env = setup();
+        let apply = enroll(&env);
+        let service = reader(&slot(&env, "reader-a")).with_reader_apply(&apply);
+        let mut standby = Database::open(slot(&env, "reader-b")).unwrap();
+        standby.put(5, &[0.0, 0.0, 1.0], b"not archived").unwrap();
+        standby.close().unwrap();
+        assert_eq!(apply.step(&service, 2_000), Step::Failed);
+        assert_eq!(env.pins(), 0);
+    }
+
+    #[test]
+    fn reader_apply_step_transient_store_error_retries() {
+        let env = setup();
+        let apply = enroll(&env);
+        let service = reader(&slot(&env, "reader-a")).with_reader_apply(&apply);
+        env.meta.fault(Op::Get, "record.json", Fault::Before, 0, 1);
+        assert_eq!(apply.step(&service, 2_000), Step::Retry);
+        assert_eq!(apply.progress().applied(), (4, 1_000));
+        assert!(apply.progress().failure().is_none());
+        checkpoint(&env, puts(5..=6), None);
+        cloud::FREE_BYTES.with(|free| free.set(Some(Some(0))));
+        let step = apply.step(&service, 3_000);
+        cloud::FREE_BYTES.with(|free| free.set(None));
+        assert_eq!(step, Step::Retry);
+        assert_eq!(apply.progress().applied(), (4, 1_000));
+        assert_eq!(env.pins(), 1);
+    }
+
+    #[test]
+    fn reader_apply_step_after_failure_makes_no_store_call() {
+        use std::sync::atomic::{AtomicBool, Ordering};
+        let env = setup();
+        let apply = enroll(&env);
+        let service = reader(&slot(&env, "reader-a")).with_reader_apply(&apply);
+        apply.progress().fail("stop".into());
+        let called = Arc::new(AtomicBool::new(false));
+        let count = called.clone();
+        env.meta.hook(Op::List, "", move || {
+            count.store(true, Ordering::SeqCst);
+        });
+        assert_eq!(apply.step(&service, 2_000), Step::Stopped);
+        assert!(!called.load(Ordering::SeqCst));
+    }
+
+    #[test]
+    fn reader_apply_stop_releases_pin() {
+        let env = setup();
+        let mut apply = enroll(&env);
+        let service = reader(&slot(&env, "reader-a")).with_reader_apply(&apply);
+        apply.start(service);
+        apply.stop();
+        assert_eq!(env.pins(), 0);
+    }
+
+    #[tokio::test]
+    async fn reader_apply_failed_reader_is_not_ready() {
+        let env = setup();
+        let apply = enroll(&env);
+        let service = reader(&slot(&env, "reader-a")).with_reader_apply(&apply);
+        extra_set(&env, true, SetState::Published);
+        assert_eq!(apply.step(&service, 2_000), Step::Failed);
+        let response = router(service)
+            .oneshot(
+                Request::builder()
+                    .uri("/ready")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
+        let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        assert!(String::from_utf8_lossy(&body).contains("reader_apply_failed"));
+    }
 
     fn file(dir: &Path, name: &str, ids: std::ops::RangeInclusive<u64>) -> std::path::PathBuf {
         let path = dir.join(name);

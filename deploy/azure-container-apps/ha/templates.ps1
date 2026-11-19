@@ -147,8 +147,8 @@ function New-VLiteHaReaderApplyConfig {
         $Config.FollowerDir -cne '/data') {
         throw 'Config.ReaderTargetFile and Config.FollowerDir must match /run/vlite/archive-target.json and private /data.'
     }
-    Assert-VLiteHaInteger $Config 'ReaderCapacityBytes' 1 ([long]::MaxValue)
-    Assert-VLiteHaInteger $Config 'ReaderStalenessBoundMs' 1 ([long]::MaxValue)
+    Assert-VLiteHaInteger $Config 'ReaderCapacityBytes' 1 1073741824
+    Assert-VLiteHaInteger $Config 'ReaderStalenessBoundMs' 1 3600000
     Assert-VLiteHaInteger $Config 'ReaderPollIntervalMs' 1 3600000
     Assert-VLiteHaInteger $Config 'SCtlMs' 1 3600000
     if ([long]$Config.ReaderPollIntervalMs -ge [long]$Config.SCtlMs) {
@@ -369,7 +369,7 @@ function New-VLiteHaAppTemplate {
         } else {
             $files['archive-target'] = 'archive-target.json'
             $files['reader-config'] = 'reader.json'
-            $arguments = @('/data/served/database.vlite', '--serve-mode', 'reader', '--bind', '0.0.0.0:8080',
+            $arguments = @('/data/reader-a/database.vlite', '--serve-mode', 'reader', '--bind', '0.0.0.0:8080',
                 '--allow-remote', '--gateway-trust-file', '/run/vlite/trust.json',
                 '--reader-apply-file', '/run/vlite/reader.json')
             $minimum = [int]$Config.ReaderMinReplicas

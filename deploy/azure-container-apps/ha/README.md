@@ -4,9 +4,14 @@
 The pure templates and mocked reconciliation are implemented, but actual rollout
 always stops at `Assert-VLiteHaQualification`, before creating private state,
 deactivating revisions or applying apps. The existing runtime has gateway/trust
-configuration and reader progress support, but no executable
-`--reader-apply-file` enrollment/configuration contract. The reader JSON/template
-is a future contract, not a claim that the current binary accepts it.
+configuration and `--reader-apply-file` enrollment on the newest Published set.
+Readers keep two private follower slots under `/data`, cap capacity at 1 GiB
+and staleness at 3,600,000 ms, and hold whole-set operation pins named
+`reader-apply:<replica>` (at most 16 pins per set). A crashed replica's pin
+stays until an admin removes it with the existing forced unpin, or the same
+replica name re-enrolls. The first cut stops applying and fails readiness when
+a re-seed is needed, until restart. This is not ACA-qualified: GATE-003 still
+requires MEAS-002/007 on the target tier.
 
 There is no Boolean qualification bypass. The missing verifier must establish
 digest-bound `linux/amd64` capabilities, complete route enumeration, effective
@@ -91,7 +96,7 @@ Supply approval switches explicitly, not as JSON strings.
 | Key material | Positive `SecretGeneration`, lowercase `ActiveKid` (1..64 ASCII letters/digits/underscore/hyphen), exact `WriterAudience`; `ReaderAudience` when enabled. First initialization needs private offline `gateway-keygen` files via `SigningKeySourceFile`, `PublicKeyBundleSourceFile`. No implicit key generation. |
 | Scaling | Required `GatewayMinReplicas` >=2, mandatory `GatewayMaxReplicas` >=min and <=1000, positive `GatewayHttpConcurrency`. Gateway config `max_replicas` must match scale max. Writer is fixed min=max=1 with no scale rules. |
 | Resources | Required `GatewayCpu`, `GatewayMemory`, `WriterCpu`, `WriterMemory`; `ReaderCpu`, `ReaderMemory` when enabled. CPU 0.25..2 in 0.25 increments; explicit RAM is twice CPU in `Gi`. This validates supported pairs, not measured headroom. |
-| Reader | When enabled: `ReaderMinReplicas` >=1, mandatory `ReaderMaxReplicas` >=min and <=1000, positive `ReaderHttpConcurrency`, `ReaderCapacityBytes`, `ReaderStalenessBoundMs`, `ReaderPollIntervalMs`. Reader poll must be below both `SCtlMs` and staleness bound. Disabled by default; enabling does not qualify reader routing. |
+| Reader | When enabled: `ReaderMinReplicas` >=1, mandatory `ReaderMaxReplicas` >=min and <=1000, positive `ReaderHttpConcurrency`, `ReaderCapacityBytes` <=1073741824 (1 GiB), `ReaderStalenessBoundMs` <=3600000, `ReaderPollIntervalMs`. Reader poll must be below both `SCtlMs` and staleness bound. Disabled by default; enabling does not qualify reader routing. |
 | Control/envelopes | Required positive `SCtlMs`, `PollIntervalMs`, `EnvelopeLifetimeMs`, `MaxLifetimeMs`, `UpstreamTimeoutMs`; explicit nonnegative `SkewMs`, `ReadinessPropagationMs`. Runtime timing bounds <=3,600,000 ms; poll < S_ctl; envelope lifetime <= backend max lifetime. Upstream timeout is per phase, not a total stream deadline. |
 | Drain/startup | Required positive `DrainTimeoutMs`, explicit nonnegative `SafetyMarginMs`; required per-enabled-role `Gateway/Writer/ReaderTerminationGracePeriodSeconds` (1..3600) and `Gateway/Writer/ReaderStartupBudgetSeconds` (10..100, multiples of 10). Required `WriterStopBudgetMs`, plus `ReaderStopBudgetMs` if enabled (1..3,600,000). Every grace_ms must be strictly greater than readiness propagation + drain + margin; backend grace must also exceed readiness propagation + measured stop budget + margin. |
 | Limits/wait | Required `MaxRequestBytes` 1..8,388,608; `MaxInFlight` 1..65,536; `MaxBuckets` 1..1,000,000; positive `TimeoutSeconds` for rollout waits. |

@@ -133,7 +133,11 @@ Assert-Keys $gatewayConfig (Get-RustFields (Get-RustSource @('src', 'server', 'g
 Assert-Keys $trust (Get-RustFields (Get-RustSource @('src', 'server', 'gateway_trust.rs')) 'TrustFile') 'Trust Rust'
 Assert-Keys (New-VLiteHaReaderApplyConfig $config) @(
     'target_file', 'follower_dir', 'capacity_bytes', 'staleness_bound_ms', 'poll_interval_ms'
-) 'Proposed reader contract (not yet a Rust CLI schema)'
+) 'Reader apply configuration'
+$overCapacity = $config.Clone(); $overCapacity.ReaderCapacityBytes = 1073741825
+Assert-Throws { New-VLiteHaReaderApplyConfig $overCapacity } 'ReaderCapacityBytes'
+$overBound = $config.Clone(); $overBound.ReaderStalenessBoundMs = 3600001
+Assert-Throws { New-VLiteHaReaderApplyConfig $overBound } 'ReaderStalenessBoundMs'
 
 $templates = @{}
 foreach ($role in @('Gateway', 'Writer', 'Reader')) {
@@ -165,6 +169,7 @@ Assert (($initWriter.properties.template.containers[0].args -join ' ') -match
 Assert (@($reader.properties.template.volumes | Where-Object { $_.storageType -ceq 'EmptyDir' }).Count -eq 1) 'Reader scratch is not private EmptyDir.'
 Assert (($reader | ConvertTo-Json -Depth 30) -notmatch 'AzureFile|test-ha-storage|test-ha-share') 'Reader can mount writer storage.'
 $readerArgs = $reader.properties.template.containers[0].args -join ' '
+Assert ($reader.properties.template.containers[0].args[0] -ceq '/data/reader-a/database.vlite') 'Reader positional path is not slot A.'
 Assert ($readerArgs -match '--reader-apply-file /run/vlite/reader.json$') 'Reader apply contract missing.'
 Assert ($readerArgs -notmatch '--(create|durability|group-commit|admin|grpc|ann-snapshot)') 'Reader has prohibited flags.'
 foreach ($role in @('Gateway', 'Writer', 'Reader')) {

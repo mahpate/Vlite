@@ -798,7 +798,7 @@ fn write_bindings(
 }
 
 #[cfg(test)]
-mod tests {
+pub(in crate::server) mod tests {
     use super::super::cloud_backup::archive::Follow;
     use super::cloud::fake::{Fault, Memory, Op};
     use super::cloud::{Manifest, Publication, ROLE_BUNDLE, ROLE_DATABASE, SetState, Upload};
@@ -810,12 +810,12 @@ mod tests {
     const INSTALL: &str = "0123456789abcdef";
     const PASSWORD: &str = "correct horse battery staple 42";
 
-    struct Env {
-        meta: Arc<Memory>,
-        data: Arc<Memory>,
-        sets: Sets,
-        dir: tempfile::TempDir,
-        set_id: String,
+    pub(in crate::server) struct Env {
+        pub(in crate::server) meta: Arc<Memory>,
+        pub(in crate::server) data: Arc<Memory>,
+        pub(in crate::server) sets: Sets,
+        pub(in crate::server) dir: tempfile::TempDir,
+        pub(in crate::server) set_id: String,
         source_lineage: Option<u64>,
     }
 
@@ -835,7 +835,7 @@ mod tests {
         .unwrap()
     }
 
-    fn setup() -> Env {
+    pub(in crate::server) fn setup() -> Env {
         setup_with(|database| {
             for id in 1..=4u64 {
                 database
@@ -943,7 +943,7 @@ mod tests {
             result.unwrap_err()
         }
 
-        fn pins(&self) -> usize {
+        pub(in crate::server) fn pins(&self) -> usize {
             let key = format!("vlite/prod/sets/{}/record.json", self.set_id);
             // Read as plain JSON so a record with an injected field still counts.
             let record: Value = serde_json::from_slice(&self.meta.raw(&key).unwrap()).unwrap();
@@ -2128,7 +2128,7 @@ mod tests {
 
     /// Appends one checkpoint holding `fill`'s commits to `source.vlite`,
     /// its bundle carrying `memory`, as the archive scheduler does.
-    fn checkpoint(
+    pub(in crate::server) fn checkpoint(
         env: &Env,
         fill: impl FnOnce(&mut Database),
         memory: Option<&crate::memory::binding::BindingSet>,
@@ -2166,7 +2166,9 @@ mod tests {
             .sequence
     }
 
-    fn puts(ids: std::ops::RangeInclusive<u64>) -> impl FnOnce(&mut Database) {
+    pub(in crate::server) fn puts(
+        ids: std::ops::RangeInclusive<u64>,
+    ) -> impl FnOnce(&mut Database) {
         move |database| {
             for id in ids {
                 database
