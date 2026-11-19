@@ -354,8 +354,11 @@ qualification gap. Do not expose the backend, add admin secrets or disable
 trust to obtain it.
 Authenticated reader responses carry `x-vlite-lineage`,
 `x-vlite-binding-generation`, `x-vlite-applied-sequence` and
-`x-vlite-applied-age-ms`. Age is since the last confirmation of the archived
-head, **not** writer-commit lag. Sequence is withheld when memory bindings
+`x-vlite-applied-age-ms`. An HA reader also sends `x-vlite-epoch`, the epoch
+of the archived head it follows, once known; the gateway falls back to the
+writer when that stamp is missing or older than the tenant's epoch. Age is
+since the last confirmation of the archived head, **not** writer-commit lag.
+Sequence is withheld when memory bindings
 block metrics; lineage/age can be absent before available. Anonymous probes
 and authentication failures get none of these headers. They provide no
 position token or read-your-writes guarantee.

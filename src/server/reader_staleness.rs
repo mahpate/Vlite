@@ -72,6 +72,10 @@ pub(super) async fn headers(
                 "x-vlite-applied-sequence",
                 (!service.metrics_blocked_by_memory()).then(|| progress.applied().0.to_string()),
             ),
+            (
+                "x-vlite-epoch",
+                progress.epoch().map(|epoch| epoch.to_string()),
+            ),
         ];
         for (name, value) in values {
             if let Some(value) = value {
@@ -242,10 +246,32 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn reader_stamps_its_followed_epoch_only_once_known() {
+        let (_dir, service, progress) = reader();
+        progress.confirm(7, super::unix_ms());
+        let response = request(&service, "/v1/vectors/1").await;
+        assert!(!response.headers().contains_key("x-vlite-epoch"));
+        progress.set_epoch(5);
+        for uri in ["/v1/vectors/1", "/v1/vectors/99", "/health"] {
+            let response = request(&service, uri).await;
+            assert_eq!(
+                response
+                    .headers()
+                    .get_all("x-vlite-epoch")
+                    .iter()
+                    .collect::<Vec<_>>(),
+                ["5"],
+                "{uri}"
+            );
+        }
+    }
+
+    #[tokio::test]
     async fn reader_headers_go_only_to_authenticated_callers() {
         const TOKEN: &str = "reader_token_reader_token_reader_tok_1";
         let (_dir, service, progress) = reader();
         progress.confirm(7, super::unix_ms());
+        progress.set_epoch(5);
         let app = authenticated_router(service, BearerToken::new(TOKEN).unwrap());
         for (uri, token, status) in [
             ("/health", None, StatusCode::OK),

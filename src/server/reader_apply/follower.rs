@@ -325,6 +325,10 @@ impl ReaderApply {
         let progress = Arc::new(Progress::default());
         progress.set_bound(config.staleness_bound_ms);
         progress.confirm(sequence, now);
+        // Only an HA follower, whose authority scope is checked, stamps.
+        if let (Some(head), Some(_)) = (head, &fetched.ha) {
+            progress.set_epoch(head.epoch);
+        }
         log_stderr(
             "info",
             "reader_apply",
@@ -522,6 +526,10 @@ impl Follower {
                     ));
                 }
             }
+            // Only an HA follower stamps. While the authority recovers, the
+            // head is its base, whose epoch is below the record's, so a
+            // gateway that already names the new epoch refuses the stamp.
+            let epoch = self.ha.as_ref().and(head).map(|head| head.epoch);
             let standby = 1 - state.served;
             let followed = match head {
                 Some(head) => self.sets.follow_archive_ha(
@@ -558,6 +566,9 @@ impl Follower {
             }
             if sequence == served {
                 self.progress.confirm(served, confirmed_at);
+                if let Some(epoch) = epoch {
+                    self.progress.set_epoch(epoch);
+                }
                 return Ok(Step::Confirmed);
             }
             if fs::metadata(&self.slots[standby]).map_err(io_error)?.len()
@@ -575,6 +586,9 @@ impl Follower {
                 .map_err(|e| error("reader_apply_swap_failed", e.to_string()))?;
             state.served = standby;
             self.progress.confirm(sequence, confirmed_at);
+            if let Some(epoch) = epoch {
+                self.progress.set_epoch(epoch);
+            }
             log_stderr(
                 "info",
                 "reader_apply",

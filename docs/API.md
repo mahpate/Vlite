@@ -1274,8 +1274,9 @@ unknown fields are refused (422 `directory_invalid`):
   responses and `GET /v1/admin/serve-status` show it as hex, so convert it
   (`printf '%u\n' 0x<hex>`).
 * `dedicated` records need a positive `epoch`. `shared-pool` records have no
-  `epoch` and no `reader`. Only an authority-enabled writer stamps responses
-  with `X-VLite-Epoch` (its claimed epoch). For a `dedicated` record, the
+  `epoch` and no `reader`. An authority-enabled writer stamps responses with
+  `X-VLite-Epoch` (its claimed epoch). An HA reader stamps the epoch of the
+  archived head it follows, once known. For a `dedicated` record, the
   gateway requires exactly one canonical stamp that is at least both the
   dispatched record's epoch and the current directory record's epoch. A
   missing, malformed or older stamp is refused finally, with no other
@@ -1286,12 +1287,12 @@ unknown fields are refused (422 `directory_invalid`):
   record may carry `binding_generation` (default 0). With `read_routing:
   "readers"`, the gateway sends reads to the record's reader and falls back
   to the writer on connect failure/timeout, a 503, or a missing or mismatched
-  `X-VLite-Lineage` or `X-VLite-Binding-Generation`. Writes always go to the
-  writer; `writer_only` keeps all requests on the writer. A reader cannot
-  enable writer authority, so it never stamps `X-VLite-Epoch`, and the epoch
-  check above refuses an eligible reader's answer instead of falling back.
-  `readers` routing is therefore not usable for a `dedicated` record in this
-  release, and no real gateway-plus-reader process test qualifies it: keep
+  `X-VLite-Lineage` or `X-VLite-Binding-Generation`, or a missing, malformed
+  or older `X-VLite-Epoch`. A reader following a prepared transfer stamps
+  the older base epoch, so its reads also fall back to the writer. The
+  writer's answer is still epoch-checked finally as above. Writes always go
+  to the writer; `writer_only` keeps all requests on the writer. No real
+  gateway-plus-reader process test qualifies `readers` routing yet: keep
   `writer_only`.
 * A record for a missing or deleted tenant, a duplicate tenant or the wrong
   shape for its kind is refused (`control_state_invalid`).

@@ -335,6 +335,30 @@ fn unauthorized() -> ApiError {
 }
 
 impl Gateway {
+    /// Checks a backend's epoch stamp, in headers already filtered by
+    /// `response_headers`, against the higher of the dispatched epoch and the
+    /// tenant's current record. A route without an epoch always passes.
+    fn check_epoch(
+        &self,
+        tenant: &str,
+        target: &gateway::Target,
+        headers: &HeaderMap,
+    ) -> Result<(), gateway::EpochRefusal> {
+        let Some(dispatched) = target.epoch else {
+            return Ok(());
+        };
+        let current = self
+            .feed
+            .current()
+            .map_err(|_| gateway::EpochRefusal::Stale)?;
+        let record = current
+            .record_for(tenant)
+            .filter(|record| record.lineage == target.lineage)
+            .ok_or(gateway::EpochRefusal::Stale)?;
+        let expected = dispatched.max(record.epoch.unwrap_or(dispatched));
+        gateway::check_epoch(Some(expected), gateway::stamped_epoch(headers))
+    }
+
     fn ready(&self) -> Result<Value, ApiError> {
         if self.draining.load(Ordering::SeqCst) {
             return Err(gateway_trust::draining());
@@ -468,7 +492,12 @@ impl Gateway {
             .await;
             let (delivery, failure) = match sent {
                 Ok(Ok(upstream)) => {
-                    if target.fallback.is_none() || eligible_reader(&upstream, &target) {
+                    if target.fallback.is_none()
+                        || (eligible_reader(&upstream, &target)
+                            && self
+                                .check_epoch(tenant, &target, &response_headers(upstream.headers()))
+                                .is_ok())
+                    {
                         break upstream;
                     }
                     (
@@ -476,7 +505,7 @@ impl Gateway {
                         ApiError::new(
                             StatusCode::SERVICE_UNAVAILABLE,
                             "reader_ineligible",
-                            "the reader is unavailable or has a different lineage or binding generation",
+                            "the reader is unavailable or has a different lineage, binding generation or epoch",
                         ),
                     )
                 }
@@ -509,30 +538,15 @@ impl Gateway {
         };
         let status = upstream.status();
         let headers = response_headers(upstream.headers());
-        if let Some(dispatched) = target.epoch {
-            let stamped = gateway::stamped_epoch(&headers);
-            let checked = self
-                .feed
-                .current()
-                .map_err(|_| gateway::EpochRefusal::Stale)
-                .and_then(|current| {
-                    let record = current
-                        .record_for(tenant)
-                        .filter(|record| record.lineage == target.lineage)
-                        .ok_or(gateway::EpochRefusal::Stale)?;
-                    let expected = dispatched.max(record.epoch.unwrap_or(dispatched));
-                    gateway::check_epoch(Some(expected), stamped)
-                });
-            if let Err(refusal) = checked {
-                log_stderr(
-                    "warn",
-                    "gateway",
-                    json!({"event":"gateway_upstream_failed","code":"backend_epoch_stale",
-                        "operation":operation_name(target.operation)})
-                    .to_string(),
-                );
-                return Err(refusal.error(target.operation));
-            }
+        if let Err(refusal) = self.check_epoch(tenant, &target, &headers) {
+            log_stderr(
+                "warn",
+                "gateway",
+                json!({"event":"gateway_upstream_failed","code":"backend_epoch_stale",
+                    "operation":operation_name(target.operation)})
+                .to_string(),
+            );
+            return Err(refusal.error(target.operation));
         }
         let (sender, receiver) = tokio::sync::mpsc::channel::<Result<Bytes, std::io::Error>>(4);
         let operation = target.operation;
@@ -1481,7 +1495,22 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn gateway_epoch_refusal_does_not_fall_back_to_writer() {
+    async fn stale_missing_or_invalid_reader_epoch_falls_back_to_writer() {
+        for epoch in [None, Some("4"), Some("05"), Some("malformed")] {
+            let mut headers = reader_headers();
+            headers.remove("x-vlite-epoch");
+            if let Some(epoch) = epoch {
+                headers.insert("x-vlite-epoch", epoch.parse().unwrap());
+            }
+            assert_reader_fallback(StatusCode::OK, headers, Duration::ZERO).await;
+        }
+        let mut nominated = reader_headers();
+        nominated.insert("connection", "x-vlite-epoch".parse().unwrap());
+        assert_reader_fallback(StatusCode::OK, nominated, Duration::ZERO).await;
+    }
+
+    #[tokio::test]
+    async fn reader_epoch_fallback_still_checks_the_writer_stamp() {
         let writer = upstream(StatusCode::OK, HeaderMap::new(), Duration::ZERO).await;
         let mut headers = reader_headers();
         headers.insert("x-vlite-epoch", "4".parse().unwrap());
@@ -1492,7 +1521,7 @@ mod tests {
             control_state::ReadRouting::Readers,
         );
         assert_epoch_refusal(routed_request(gateway, &token, false).await, false).await;
-        assert!(writer.requests.lock().unwrap().is_empty());
+        assert_eq!(writer.requests.lock().unwrap().len(), 1);
         assert_eq!(reader.requests.lock().unwrap().len(), 1);
     }
 

@@ -29,6 +29,9 @@ pub(super) struct Progress {
     confirmed_unix_ms: AtomicU64,
     /// The configured staleness bound in milliseconds; 0 until set.
     bound_ms: AtomicU64,
+    /// The epoch of the authority head the served generation was last
+    /// confirmed against; 0 when the reader follows no authority.
+    epoch: AtomicU64,
 }
 
 impl Progress {
@@ -76,6 +79,21 @@ impl Progress {
     /// The staleness bound in milliseconds; 0 when none is set.
     pub(super) fn bound(&self) -> u64 {
         self.bound_ms.load(Ordering::SeqCst)
+    }
+
+    /// Records the epoch of the authority head the served generation was
+    /// just confirmed against (ITEM-021). Set after the swap, so a response
+    /// can carry an older epoch, which a gateway refuses, never a newer one.
+    pub(super) fn set_epoch(&self, epoch: u64) {
+        self.epoch.store(epoch, Ordering::SeqCst);
+    }
+
+    /// The epoch a reader stamps on responses, `None` without an authority.
+    pub(super) fn epoch(&self) -> Option<u64> {
+        match self.epoch.load(Ordering::SeqCst) {
+            0 => None,
+            epoch => Some(epoch),
+        }
     }
 
     /// Milliseconds since the served generation was last confirmed current,
@@ -503,6 +521,7 @@ mod tests {
         let service = reader(&slot(&env, "reader-a")).with_reader_apply(&apply);
         assert_eq!(apply.step(&service, 2_000), Step::Confirmed);
         assert_eq!(apply.progress().applied(), (4, 2_000));
+        assert_eq!(apply.progress().epoch(), None);
     }
 
     #[test]
@@ -513,6 +532,7 @@ mod tests {
         checkpoint_ha(&env, &authority, &claim, 7..=8);
         let apply = enroll(&env);
         assert_eq!(apply.progress().applied(), (8, 1_000));
+        assert_eq!(apply.progress().epoch(), Some(claim.epoch));
         let service = reader(&slot(&env, "reader-a")).with_reader_apply(&apply);
         checkpoint_ha(&env, &authority, &claim, 9..=10);
         env.meta
@@ -521,6 +541,7 @@ mod tests {
         assert_eq!(apply.progress().applied(), (8, 1_000));
         assert_eq!(apply.step(&service, 3_000), Step::Swapped);
         assert_eq!(apply.progress().applied(), (10, 3_000));
+        assert_eq!(apply.progress().epoch(), Some(claim.epoch));
         assert_eq!(apply.step(&service, 4_000), Step::Confirmed);
         env.meta.remove("vlite/prod/authority.json");
         assert_eq!(apply.step(&service, 5_000), Step::Failed);
@@ -536,7 +557,7 @@ mod tests {
         let (env, authority, claim) = setup_ha();
         checkpoint_ha(&env, &authority, &claim, 5..=6);
         let current = authority.read().unwrap();
-        authority
+        let recovering = authority
             .prepare_transfer(&current, current.record.epoch, &current.record.revision)
             .unwrap();
         let apply = enroll(&env);
@@ -545,6 +566,9 @@ mod tests {
         assert_eq!(apply.step(&service, 2_000), Step::Confirmed);
         assert_eq!(apply.progress().applied(), (6, 1_000));
         assert_eq!(apply.progress().age_ms(40_000), Some(39_000));
+        // The frozen base keeps the old epoch, below the recovering record's.
+        assert_eq!(apply.progress().epoch(), Some(claim.epoch));
+        assert!(recovering.record.epoch > claim.epoch);
     }
 
     #[test]
