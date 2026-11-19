@@ -71,7 +71,8 @@ Initialize only for an operator-verified local database. After failover,
 startup restores the authority's verified archived base before opening the
 database, including when the local file is stale, ahead, or absent. Read the database's
 16-character lowercase hexadecimal `lineage` from
-`GET /v1/admin/serve-status`; files without a v4 lineage are refused.
+`GET /v1/admin/serve-status` on that standalone server (a gateway-trusted
+backend has no admin path); files without a v4 lineage are refused.
 Stop that server before starting the authority-enabled writer.
 
 ```text
@@ -278,7 +279,9 @@ baseline at the new epoch. In a separately qualified recovery path,
 verify restored data, sole ownership, authority, readiness,
 tenant routing and a read/write check before admitting traffic;
 `GET /v1/admin/serve-status` reports the claimed epoch only with authority
-enabled (`null` otherwise); that alone is not proof of recovery correctness.
+enabled (`null` otherwise) and is unavailable on a gateway-trusted backend,
+where `authority show` reports the authority state instead; neither alone is
+proof of recovery correctness.
 
 **Back out:** before execute, cancel without changing authority, and resume
 the old writer only after proving no handoff occurred and sole ownership
@@ -344,6 +347,11 @@ An enrollment failure exits the process before it serves HTTP.
 Inspect administrator-only `/v1/admin/serve-status` for `mode: reader`,
 `read_only`, lineage, binding generation and `reader` progress:
 `applied_sequence`, `age_ms`, `bound_ms`, `stale`, `failed`.
+A gateway-trusted reader grants only scoped tenant roles, so this route is
+unavailable there. Use `/ready`, authorized reads, the freshness headers
+below and private logs, and record the missing admin evidence as a
+qualification gap. Do not expose the backend, add admin secrets or disable
+trust to obtain it.
 Authenticated reader responses carry `x-vlite-lineage`,
 `x-vlite-binding-generation`, `x-vlite-applied-sequence` and
 `x-vlite-applied-age-ms`. Age is since the last confirmation of the archived
@@ -357,9 +365,12 @@ for readiness and authorized reads. A permanently failed follower fails
 readiness with 503 `reader_apply_failed`; inspect private logs for the
 reason. A newer baseline or broken continuity requires restart/re-enrollment,
 not automatic reseeding.
-For an HA reader, a frozen base is not a freshness confirmation, so age keeps
-growing during a prepared transfer and the reader turns `reader_stale` at its
-bound. A transient authority read failure is retried without advancing; a
+For an HA reader that keeps running, a frozen base is not a freshness
+confirmation, so age keeps growing during a prepared transfer and the reader
+turns `reader_stale` at its bound. Enrollment always confirms freshness, so a
+reader that restarts or re-enrolls during the transfer appears fresh again on
+the frozen base. Keep replacement and re-enrolled readers out of routing
+until the transfer completes. A transient authority read failure is retried without advancing; a
 removed authority fails the follower with `writer_authority_missing`, and a
 replaced or regressed head fails it until re-enrollment.
 
@@ -370,6 +381,10 @@ reader. Clean shutdown releases its operation pin; a crashed replica can
 leave `reader-apply:<replica>` pins (maximum 16 per set). Remove abandoned
 pins only after proving that replica is stopped, using the existing
 [forced-unpin procedure](DOCKER-OPERATIONS.md#run-check-and-restore).
+That procedure is an admin route, so it is unavailable on gateway-trusted
+backends; there is no supported trusted-mode removal yet (a qualification
+gap). Re-enrolling the same replica name replaces its pin; do not expose a
+backend, add admin secrets or disable trust to remove one.
 Restart with its dedicated private directory to enroll again; verify before
 reintroducing reads.
 
@@ -485,7 +500,10 @@ vlite-server cloud-restore --target-file C:\private\archive-target.json `
 ```
 
 Exact usage excerpt: `[--archive-checkpoint latest|<sequence>]`.
-Replace `latest` with an exact listed checkpoint sequence when required.
+Replace `latest` with an exact checkpoint sequence when required. Take it
+from a retained checkpoint report or the archive status; `cloud-sets` lists
+sets, not checkpoint sequences. A refused value's message lists the
+available sequences.
 Times, intermediate sequences and rounding are refused
 (`pitr_target_unsupported`). No archive gives `pitr_archive_missing`.
 For an HA set, `latest` and the listed sequences are only the checkpoints
@@ -509,7 +527,8 @@ test recovery or reuse old credentials on the new lineage.
 
 ## What is not provided
 
-- Automatic failover or a completed fenced writer-serving handoff.
+- Automatic failover, or an ACA-qualified, deployment-orchestrated completed
+  fenced handoff; `failover execute` itself only prepares the transfer.
 - Multi-writer operation or additional write capacity.
 - Cross-region failover or geo-failing the authority.
 - Power-loss-qualified Azure Files or production availability/durability SLOs.

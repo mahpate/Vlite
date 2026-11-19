@@ -245,8 +245,8 @@ function Assert-VLiteHaDeploymentParameters([hashtable]$Config) {
         if (-not $Config["${role}IdentityId"]) { throw "Existing ${role}IdentityId is required." }
     }
     if ($Config.InitializeTenant -and
-        ($Config.Dimensions -lt 1 -or $Config.Dimensions -gt 65536 -or $Config.CreateFormat -notin @(3, 4, 5))) {
-        throw 'InitializeTenant requires explicit Dimensions (1..65536) and CreateFormat (3, 4, or 5).'
+        ($Config.Dimensions -lt 1 -or $Config.Dimensions -gt 65536 -or $Config.CreateFormat -notin @(4, 5))) {
+        throw 'InitializeTenant requires explicit Dimensions (1..65536) and CreateFormat (4 or 5; writer authority needs a format-4+ lineage).'
     }
     foreach ($key in @('ControlTarget', 'ArchiveTarget')) {
         $target = $Config[$key]

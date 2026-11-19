@@ -197,6 +197,8 @@ $init = $config.Clone(); $init.InitializeTenant = $true; $init.Dimensions = 8; $
 $initWriter = New-VLiteHaWriterTemplate $init $environmentId (New-TestSecrets 'Writer' $init) 'g7-init'
 Assert (($initWriter.properties.template.containers[0].args -join ' ') -match
     '--create-if-missing 8 --create-format 4$') 'Explicit initialization flags missing.'
+$format3 = $init.Clone(); $format3.CreateFormat = 3
+Assert-Throws { New-VLiteHaWriterTemplate $format3 $environmentId (New-TestSecrets 'Writer' $format3) 'g7-init' } 'CreateFormat'
 Assert (@($reader.properties.template.volumes | Where-Object { $_.storageType -ceq 'EmptyDir' }).Count -eq 1) 'Reader scratch is not private EmptyDir.'
 Assert (($reader | ConvertTo-Json -Depth 30) -notmatch 'AzureFile|test-ha-storage|test-ha-share') 'Reader can mount writer storage.'
 $readerArgs = $reader.properties.template.containers[0].args -join ' '
@@ -290,6 +292,10 @@ foreach ($case in $refusals) {
     Assert-Throws { Invoke-VLiteHaDeployment $candidate } $case.Error
     Assert ($script:calls.Count -eq 0) "Azure contacted before parameter refusal: $($case.Key)"
 }
+$format3 = $config.Clone(); $format3.InitializeTenant = $true; $format3.Dimensions = 8; $format3.CreateFormat = 3
+$script:calls.Clear()
+Assert-Throws { Invoke-VLiteHaDeployment $format3 } 'CreateFormat'
+Assert ($script:calls.Count -eq 0) 'Azure contacted before create-format refusal.'
 Assert-Throws { & (Join-Path $PSScriptRoot 'deploy.ps1') -Config $config } 'opt-in'
 $badSecrets = New-TestSecrets 'Gateway'
 $badGateway = $gatewayConfig.Clone(); $badGateway.max_replicas = 5

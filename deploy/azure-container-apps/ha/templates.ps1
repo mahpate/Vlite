@@ -284,7 +284,7 @@ function Test-VLiteHaParameters {
     }
     if ($Config['InitializeTenant']) {
         Assert-VLiteHaInteger $Config 'Dimensions' 1 65536
-        Assert-VLiteHaInteger $Config 'CreateFormat' 3 5
+        Assert-VLiteHaInteger $Config 'CreateFormat' 4 5
     } elseif ($Config.ContainsKey('Dimensions') -or $Config.ContainsKey('CreateFormat')) {
         throw 'Config.Dimensions and Config.CreateFormat require explicit Config.InitializeTenant; omit initialization inputs on restarts.'
     }

@@ -4,12 +4,15 @@
 The pure templates and mocked reconciliation are implemented, but actual rollout
 always stops at `Assert-VLiteHaQualification`, before creating private state,
 deactivating revisions or applying apps. The existing runtime has gateway/trust
-configuration and `--reader-apply-file` enrollment on the newest Published set.
-Readers keep two private follower slots under `/data`, cap capacity at 1 GiB
+configuration and `--reader-apply-file` enrollment: on the newest Published
+set without writer authority, or only on the authority head or base set with
+it. Readers keep two private follower slots under `/data`, cap capacity at 1 GiB
 and staleness at 3,600,000 ms, and hold whole-set operation pins named
 `reader-apply:<replica>` (at most 16 pins per set). A crashed replica's pin
 stays until an admin removes it with the existing forced unpin, or the same
-replica name re-enrolls. The first cut stops applying and fails readiness when
+replica name re-enrolls. Forced unpin and serve-status are admin routes, which
+a gateway-trusted backend does not have; trusted-mode pin removal is an open
+qualification gap. The first cut stops applying and fails readiness when
 a re-seed is needed, until restart. This is not ACA-qualified: GATE-003 still
 requires MEAS-002/007 on the target tier.
 
@@ -100,7 +103,7 @@ Supply approval switches explicitly, not as JSON strings.
 | Control/envelopes | Required positive `SCtlMs`, `PollIntervalMs`, `EnvelopeLifetimeMs`, `MaxLifetimeMs`, `UpstreamTimeoutMs`; explicit nonnegative `SkewMs`, `ReadinessPropagationMs`. Runtime timing bounds <=3,600,000 ms; poll < S_ctl; envelope lifetime <= backend max lifetime. Upstream timeout is per phase, not a total stream deadline. |
 | Drain/startup | Required positive `DrainTimeoutMs`, explicit nonnegative `SafetyMarginMs`; required per-enabled-role `Gateway/Writer/ReaderTerminationGracePeriodSeconds` (1..3600) and `Gateway/Writer/ReaderStartupBudgetSeconds` (10..100, multiples of 10). Required `WriterStopBudgetMs`, plus `ReaderStopBudgetMs` if enabled (1..3,600,000). Every grace_ms must be strictly greater than readiness propagation + drain + margin; backend grace must also exceed readiness propagation + measured stop budget + margin. |
 | Limits/wait | Required `MaxRequestBytes` 1..8,388,608; `MaxInFlight` 1..65,536; `MaxBuckets` 1..1,000,000; positive `TimeoutSeconds` for rollout waits. |
-| Initialization only | With `InitializeTenant`, explicit `Dimensions` 1..65,536 and `CreateFormat` 3, 4 or 5. Omit both otherwise. Initialization requires brand-new apps, empty-scope/create-only authority proof and no previous initialization attempt. It is never a missing-database recovery strategy. |
+| Initialization only | With `InitializeTenant`, explicit `Dimensions` 1..65,536 and `CreateFormat` 4 or 5 (writer authority needs a format-4+ lineage). Omit both otherwise. Initialization requires brand-new apps, empty-scope/create-only authority proof and no previous initialization attempt. It is never a missing-database recovery strategy. |
 
 `-Config` is a hashtable of these inputs. The pure template API additionally uses
 fixed runtime paths: `ControlTargetFile=/run/vlite/control-target.json`,
