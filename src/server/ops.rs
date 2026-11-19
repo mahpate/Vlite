@@ -249,6 +249,24 @@ impl Ops {
         }
     }
 
+    pub(super) fn initial_archive_base(&self) {
+        let cloud = match self.inner.lock() {
+            Ok(inner) => inner.cloud.clone(),
+            Err(_) => {
+                super::logs::stderr(
+                    "error",
+                    "cloud_backup",
+                    json!({"event":"writer_archive_initial_base_failed","code":"internal_error"})
+                        .to_string(),
+                );
+                return;
+            }
+        };
+        if let Some((runtime, handle)) = cloud {
+            runtime.initial_base(&handle);
+        }
+    }
+
     /// Whether this generation serves a database file (not in-memory or the
     /// recovery placeholder).
     pub(super) fn file_backed(&self) -> bool {

@@ -21,7 +21,7 @@ use vlite::{
 const USAGE: &str = "usage: vlite-server <database-path> [--providers-file <path> | VLITE_PROVIDERS_FILE] [--memory-bindings-file <path> | VLITE_MEMORY_BINDINGS_FILE] [--create-if-missing <dimensions> [--create-format 3|4|5]] (default 5: graph-enabled; 3 and 4 create plain vector files) [--bind <ip:port>] [--tls-cert <pem> --tls-key <pem>] [--otlp-endpoint <url>] [--grpc-bind <ip:port> [--grpc-tls-cert <pem> --grpc-tls-key <pem> [--grpc-tls-client-ca <pem>]]] [--allow-remote] [--ann-snapshot] [--lock-held-reads] [--group-commit [--group-commit-requests <1..16>] [--group-commit-bytes <1024..268435456>] [--group-commit-delay-ms <0..100>]] [--durability periodic|full|none] (default periodic) [--flush-interval-ms <1..60000>] (periodic only, default 60000; none keeps the database in memory only, needs --create-if-missing and loses all data when the server stops) [--encryption-key-file <path> | VLITE_ENCRYPTION_KEY | VLITE_ENCRYPTION_KEY_HEX] [--token-file <path> | --insecure-local]; admin: VLITE_AUTH_TOKEN or VLITE_AUTH_TOKEN_FILE; optional read-only: VLITE_READ_ONLY_TOKEN or VLITE_READ_ONLY_TOKEN_FILE; backups/credentials/persistent audit: VLITE_ADMIN_DIR; off-by-default schedules: VLITE_AUTO_MAINTENANCE_INTERVAL_SECS, VLITE_BACKUP_INTERVAL_SECS, VLITE_BACKUP_RETENTION_ENABLED=1, VLITE_BACKUP_RETAIN_LAST, VLITE_BACKUP_RETAIN_DAYS, VLITE_BACKUP_DRILL_EVERY, VLITE_BACKUP_DRILL_MAX_BYTES; VLITE_SLOW_QUERY_MS; VLITE_METRICS_WITH_MEMORY=1 (serve /metrics and the metrics summary while agent memory is configured; their totals then include memory data); dashboard sign-in (needs VLITE_ADMIN_DIR and an admin token): VLITE_TRUSTED_PROXY=1 behind a proxy that sets X-Forwarded-Proto/For, VLITE_SESSION_IDLE_MINUTES (default 30), VLITE_SESSION_MAX_HOURS (default 8), optional first super admin: VLITE_ADMIN_USERNAME with VLITE_ADMIN_PASSWORD_FILE; [--log-buffer <n>] (default 2000, maximum 100000); [--serve-mode standalone|writer|reader | VLITE_SERVE_MODE] (default standalone; reader serves an existing file read-only and refuses writes, creation, durability, group commit, ANN snapshots, gRPC and VLITE_ADMIN_DIR); [--reader-apply-file <json>] (reader mode only, no environment variable; JSON requires target_file, follower_dir, capacity_bytes (1..1073741824, 1 GiB cap), staleness_bound_ms (1..3600000), poll_interval_ms (positive and below the staleness bound); optional shared_key_file; two private follower slots <follower_dir>/reader-a|reader-b; positional path must be <follower_dir>/reader-a/database.vlite; encrypted databases refused); opt-in Azure Blob cloud backup policy: PUT /v1/admin/cloud-backup (emulator shared key: VLITE_CLOUD_BACKUP_SHARED_KEY_FILE); offline isolated cloud restore: vlite-server cloud-sets | cloud-restore (run either without arguments for its usage); [--gateway-trust-file <json>] (feature-aca-ha gateway-trusted backend: data requests are authorized only by gateway-signed principal envelopes checked against the shared control state; refuses --insecure-local, --grpc-bind, --durability none and VLITE_ADMIN_DIR); DB-free gateway: vlite-server gateway --config <json>; its keys: vlite-server gateway-keygen; its shared control state: vlite-server control-state publish|update (run either without arguments for its usage; a database literally named gateway, gateway-keygen, control-state, failover or authority needs a ./ prefix)\n\
 vlite-server failover report|execute --target-file <json> [options] (run without a verb for usage; execute requires the old writer at zero replicas and the exact report acknowledgement)\n\
 vlite-server authority init|show --target-file <json> [options] (run without a verb for usage)\n\
-Writer authority: --authority-target-file <json> [--authority-shared-key-file <path>] [--authority-recheck-ms <500..60000>] (default 5000; explicit files only; requires --serve-mode writer, persistent durability and REST without --grpc-bind)";
+Writer authority: --authority-target-file <json> [--authority-shared-key-file <path>] [--authority-recheck-ms <500..60000>] (default 5000; explicit files only; requires --serve-mode writer, persistent durability and REST without --grpc-bind); [--archive-policy-file <json>] (enabled backup and archive policy; writer authority only, without VLITE_ADMIN_DIR; private state beside the database)";
 
 struct Config {
     providers: vlite::server::providers::ProviderRegistry,
@@ -62,6 +62,7 @@ struct Config {
     authority_target_file: Option<PathBuf>,
     authority_shared_key_file: Option<PathBuf>,
     authority_recheck: Duration,
+    archive_policy_file: Option<PathBuf>,
 }
 
 /// Dashboard sign-in settings from the environment.
@@ -146,6 +147,13 @@ fn schedule() -> Result<Schedule, Box<dyn Error>> {
 
 fn options(config: &Config, database_path: Option<PathBuf>) -> ServerOptions {
     let s = &config.schedule;
+    let archive_runtime_directory = config.archive_policy_file.as_ref().and_then(|_| {
+        database_path.as_ref().map(|path| {
+            let mut directory = path.as_os_str().to_os_string();
+            directory.push(".cloud-backup");
+            PathBuf::from(directory)
+        })
+    });
     ServerOptions {
         admin_token: config.token.clone(),
         read_only_token: config.read_only_token.clone(),
@@ -172,6 +180,8 @@ fn options(config: &Config, database_path: Option<PathBuf>) -> ServerOptions {
         memory_bindings_file: config.memory_bindings_file.clone(),
         grpc_enabled: config.grpc_bind.is_some(),
         metrics_with_memory: s.metrics_with_memory,
+        archive_policy_file: config.archive_policy_file.clone(),
+        archive_runtime_directory,
     }
 }
 
@@ -224,17 +234,22 @@ fn config() -> Result<Config, Box<dyn Error>> {
     let mut authority_target_file: Option<PathBuf> = None;
     let mut authority_shared_key_file: Option<PathBuf> = None;
     let mut authority_recheck_ms = None;
+    let mut archive_policy_file: Option<PathBuf> = None;
     while let Some(arg) = args.next() {
         match arg.to_str() {
             Some(
                 name @ ("--authority-target-file"
                 | "--authority-shared-key-file"
-                | "--authority-recheck-ms"),
+                | "--authority-recheck-ms"
+                | "--archive-policy-file"),
             ) => {
                 let value = args
                     .next()
                     .ok_or("invalid_arguments: authority option needs a value")?;
                 match name {
+                    "--archive-policy-file" if archive_policy_file.is_none() => {
+                        archive_policy_file = Some(value.into());
+                    }
                     "--authority-target-file" if authority_target_file.is_none() => {
                         authority_target_file = Some(value.into());
                     }
@@ -389,6 +404,7 @@ fn config() -> Result<Config, Box<dyn Error>> {
     if authority_target_file.is_some()
         || authority_shared_key_file.is_some()
         || authority_recheck_ms.is_some()
+        || archive_policy_file.is_some()
     {
         if authority_target_file.is_none() {
             return Err(
@@ -606,6 +622,9 @@ fn config() -> Result<Config, Box<dyn Error>> {
         return Err("encryption requires --create-format 5".into());
     }
     let admin_directory = std::env::var_os("VLITE_ADMIN_DIR").map(PathBuf::from);
+    if archive_policy_file.is_some() && admin_directory.is_some() {
+        return Err("invalid_arguments: --archive-policy-file is for writers without VLITE_ADMIN_DIR; use PUT /v1/admin/cloud-backup".into());
+    }
     let gateway_trust = match &gateway_trust_file {
         None => None,
         Some(file) => {
@@ -669,6 +688,7 @@ fn config() -> Result<Config, Box<dyn Error>> {
         authority_target_file,
         authority_shared_key_file,
         authority_recheck: Duration::from_millis(authority_recheck_ms.unwrap_or(5000)),
+        archive_policy_file,
     };
     // Validate every option before creating or opening a database.
     options(&config, None).validate()?;
@@ -858,9 +878,14 @@ async fn run() -> Result<i32, Box<dyn Error>> {
     let mut authority = match config.authority_target_file.take() {
         Some(target) => {
             let key = config.authority_shared_key_file.take();
+            let policy = config.archive_policy_file.clone();
             Some(
                 tokio::task::spawn_blocking(move || {
-                    WriterAuthority::connect(&target, key.as_deref())
+                    let authority = WriterAuthority::connect(&target, key.as_deref())?;
+                    if let Some(policy) = policy {
+                        authority.validate_archive_policy(&policy)?;
+                    }
+                    Ok::<_, String>(authority)
                 })
                 .await
                 .map_err(
@@ -1065,8 +1090,9 @@ async fn run() -> Result<i32, Box<dyn Error>> {
     };
     let service = match authority {
         Some(authority) => {
+            let enrolling = service.clone();
             let claimed =
-                tokio::task::spawn_blocking(move || service.with_writer_authority(authority))
+                tokio::task::spawn_blocking(move || enrolling.with_writer_authority(authority))
                     .await
                     .map_err(|_| {
                         "internal_error: writer authority startup stopped unexpectedly".to_owned()
@@ -1076,6 +1102,7 @@ async fn run() -> Result<i32, Box<dyn Error>> {
                 Ok(service) => service,
                 Err(error) => {
                     stop_apply(apply.take()).await;
+                    let _ = service.close().await;
                     stop_trust(trust).await;
                     return Err(error.into());
                 }
@@ -1085,9 +1112,25 @@ async fn run() -> Result<i32, Box<dyn Error>> {
     };
     let listener = match listener {
         Some(listener) => listener,
-        None => TcpListener::bind(config.bind).await?,
+        None => match TcpListener::bind(config.bind).await {
+            Ok(listener) => listener,
+            Err(error) => {
+                stop_apply(apply.take()).await;
+                let _ = service.close().await;
+                stop_trust(trust).await;
+                return Err(error.into());
+            }
+        },
     };
-    let address = listener.local_addr()?;
+    let address = match listener.local_addr() {
+        Ok(address) => address,
+        Err(error) => {
+            stop_apply(apply.take()).await;
+            let _ = service.close().await;
+            stop_trust(trust).await;
+            return Err(error.into());
+        }
+    };
     let service = match &trust {
         Some(trust) => service.with_gateway_trust(trust),
         None => service,
@@ -1096,18 +1139,40 @@ async fn run() -> Result<i32, Box<dyn Error>> {
         Some(apply) => service.with_reader_apply(apply),
         None => service,
     };
-    if let Some(tls) = &config.rest_tls {
-        service.register_tls(tls.clone())?;
-    }
-    #[cfg(feature = "grpc")]
-    if let Some(tls) = &config.grpc_tls {
-        service.register_tls(tls.clone())?;
+    let registered = (|| -> Result<(), Box<dyn Error>> {
+        if let Some(tls) = &config.rest_tls {
+            service.register_tls(tls.clone())?;
+        }
+        #[cfg(feature = "grpc")]
+        if let Some(tls) = &config.grpc_tls {
+            service.register_tls(tls.clone())?;
+        }
+        Ok(())
+    })();
+    if let Err(error) = registered {
+        stop_apply(apply.take()).await;
+        let _ = service.close().await;
+        stop_trust(trust).await;
+        return Err(error);
     }
     let database_path = (!in_memory).then_some(active.clone());
     let started = match managed {
         Some(managed) => managed
             .serve(service.clone(), active, config.durability)
             .map(|(router, handle)| (router, Some(handle))),
+        None if config.archive_policy_file.is_some() => {
+            let configuring = service.clone();
+            let options = options(&config, database_path);
+            tokio::task::spawn_blocking(move || configured_admin_router(configuring, options))
+                .await
+                .map_err(|_| {
+                    std::io::Error::other(
+                        "internal_error: archive policy startup stopped unexpectedly",
+                    )
+                })
+                .and_then(|result| result)
+                .map(|router| (router, None))
+        }
         None => configured_admin_router(service.clone(), options(&config, database_path))
             .map(|router| (router, None)),
     };
@@ -1121,6 +1186,9 @@ async fn run() -> Result<i32, Box<dyn Error>> {
             return Err(error.into());
         }
     };
+    if config.archive_policy_file.is_some() {
+        service.initialize_archive_base().await;
+    }
     if let Some(apply) = &mut apply {
         apply.start(service.clone());
     }
@@ -1389,6 +1457,7 @@ async fn main() -> std::process::ExitCode {
                 "--authority-target-file"
                     | "--authority-shared-key-file"
                     | "--authority-recheck-ms"
+                    | "--archive-policy-file"
             )
         )
     });

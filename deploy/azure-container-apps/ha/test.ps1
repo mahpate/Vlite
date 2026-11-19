@@ -117,7 +117,10 @@ function New-TestSecrets([string]$Role, [hashtable]$Candidate = $config) {
         $trust = $Candidate.Clone()
         $trust.Audience = $Candidate["${Role}Audience"]
         $secrets["backend-trust-$g"] = New-VLiteHaTrustConfig $trust | ConvertTo-Json -Depth 30 -Compress
-        if ($Role -eq 'Reader') {
+        if ($Role -eq 'Writer') {
+            $secrets["archive-target-$g"] = $Candidate.ArchiveTarget | ConvertTo-Json -Depth 30 -Compress
+            $secrets["archive-policy-$g"] = New-VLiteHaWriterArchivePolicy $Candidate | ConvertTo-Json -Depth 30 -Compress
+        } elseif ($Role -eq 'Reader') {
             $secrets["archive-target-$g"] = '{"test_only":"archive"}'
             $secrets["reader-config-$g"] = New-VLiteHaReaderApplyConfig $Candidate | ConvertTo-Json -Depth 30 -Compress
         }
@@ -158,7 +161,35 @@ Assert ($writer.properties.template.scale.minReplicas -eq 1 -and
     $writer.properties.template.scale.maxReplicas -eq 1 -and
     $writer.properties.template.scale.rules.Count -eq 0) 'Writer can scale out.'
 Assert ($writer.properties.template.containers[0].args -notcontains '--create-if-missing') 'Restart initializes a database.'
-Assert (($writer.properties.template.containers[0].args -join ' ') -match '--durability full$') 'Writer lost full durability.'
+Assert (($writer.properties.template.containers[0].args -join ' ') -match '--durability full') 'Writer lost full durability.'
+foreach ($flag in @('--authority-target-file', '--archive-policy-file')) {
+    Assert (@($writer.properties.template.containers[0].args | Where-Object { $_ -ceq $flag }).Count -eq 1) "Writer needs exactly one $flag."
+}
+Assert (($writer.properties.template.containers[0].args -join ' ') -match
+    '--authority-target-file /run/vlite/archive-target.json --archive-policy-file /run/vlite/archive-policy.json') 'Writer archive arguments missing.'
+$writerPolicy = New-VLiteHaWriterArchivePolicy $config
+Assert ($writerPolicy.target.client_id -ceq $config.ArchiveTarget.client_id) 'Writer policy lost identity.'
+Assert-VLiteHaConfigDocument -Json @($writer.properties.configuration.secrets |
+    Where-Object { $_.name -ceq 'archive-policy-g7' })[0].value `
+    -Expected $writerPolicy -Label 'Mounted writer policy'
+$wrongPolicySecrets = New-TestSecrets 'Writer'
+$wrongPolicy = New-VLiteHaWriterArchivePolicy $config
+$wrongPolicy.target.client_id = 'wrong-writer-client'
+$wrongPolicySecrets['archive-policy-g7'] = $wrongPolicy | ConvertTo-Json -Depth 30 -Compress
+Assert-Throws {
+    New-VLiteHaWriterTemplate $config $environmentId $wrongPolicySecrets 'g7-test'
+} 'must match the validated Config value'
+foreach ($case in @(
+    @('WriterBackupIntervalSecs', 299), @('WriterBackupKeepSets', 2),
+    @('WriterBackupKeepDays', 29), @('WriterBackupOrphanGraceHours', 0),
+    @('WriterBackupDrillEvery', 101), @('WriterArchiveIntervalSecs', 59),
+    @('WriterBackupIntervalSecs', 604801), @('WriterBackupKeepSets', 1001),
+    @('WriterBackupKeepDays', 3651), @('WriterBackupOrphanGraceHours', 721),
+    @('WriterBackupDrillEvery', -1), @('WriterArchiveIntervalSecs', 86401)
+)) {
+    $invalidPolicy = $config.Clone(); $invalidPolicy[$case[0]] = $case[1]
+    Assert-Throws { New-VLiteHaWriterArchivePolicy $invalidPolicy } 'must be an integer'
+}
 Assert (@($writer.properties.template.volumes | Where-Object {
     $_.storageType -ceq 'AzureFile' -and $_.storageName -ceq $config.WriterStorageName
 }).Count -eq 1) 'Writer share binding missing.'
@@ -196,7 +227,10 @@ foreach ($role in @('Gateway', 'Writer', 'Reader')) {
         $expectedPaths['gateway-config-g7'] = 'gateway.json'
     } else {
         $expectedPaths['backend-trust-g7'] = 'trust.json'
-        if ($role -eq 'Reader') {
+        if ($role -eq 'Writer') {
+            $expectedPaths['archive-target-g7'] = 'archive-target.json'
+            $expectedPaths['archive-policy-g7'] = 'archive-policy.json'
+        } elseif ($role -eq 'Reader') {
             $expectedPaths['archive-target-g7'] = 'archive-target.json'
             $expectedPaths['reader-config-g7'] = 'reader.json'
         }
@@ -503,6 +537,9 @@ try {
     $initArgs = @($script:captured[0].properties.template.containers[0].args)
     Assert ($initArgs -contains '--create-if-missing' -and $initArgs -contains '--create-format') 'Initial deployment did not initialize explicitly.'
     Assert (-not (Test-CreateFlags $script:captured[1])) 'Replacement writer revision retained create flags.'
+    $firstSecrets = $script:captured[0].properties.configuration.secrets | ConvertTo-Json -Depth 30 -Compress
+    $replacementSecrets = $script:captured[1].properties.configuration.secrets | ConvertTo-Json -Depth 30 -Compress
+    Assert ($firstSecrets -ceq $replacementSecrets) 'Replacement writer changed immutable archive secrets.'
     Assert (-not (Test-CreateFlags $script:apps['test-writer'])) 'Live writer manifest retained create flags.'
     $initRevision = "test-writer--$($script:captured[0].properties.template.revisionSuffix)"
     $flaglessRevision = "test-writer--$($script:apps['test-writer'].properties.template.revisionSuffix)"

@@ -322,7 +322,7 @@ function Assert-VLiteHaQualification([hashtable]$Config) {
         'runtime capabilities, complete route inventory, effective container-scoped identity grants, ' +
         'quota/storage qualification, control-directory writer-only routing, and recovery/authority ' +
         'create-only initialization or expected-epoch CAS handoff with quiesce/loss acknowledgement. ' +
-        'Provision these operational interfaces before enabling rollout; no authority PUT or invented CLI flag is used.')
+        'The writer archive policy is mounted from app secrets; live qualification is still pending.')
 }
 
 function Stop-VLiteRevisions([hashtable]$Config) {
@@ -577,6 +577,9 @@ function Invoke-VLiteHaDeployment([hashtable]$Config) {
             $target.client_id = $identities[$role].clientId
             $files["$role-archive-target-$g"] = $target
         }
+        $writerConfig = $Config.Clone()
+        $writerConfig.ArchiveTarget = $files["writer-archive-target-$g"]
+        $files["writer-archive-policy-$g"] = New-VLiteHaWriterArchivePolicy -Config $writerConfig
         if ($Config.EnableReaders) {
             $files["reader-config-$g"] = New-VLiteHaReaderApplyConfig -Config $Config
         }
@@ -618,7 +621,10 @@ function Invoke-VLiteHaDeployment([hashtable]$Config) {
             switch ($role) {
                 'writer' {
                     $roleConfig.Audience = $Config.WriterAudience
+                    $roleConfig.ArchiveTarget = $files["writer-archive-target-$g"]
                     $roleSecrets["backend-trust-$g"] = $secrets["writer-trust-$g"]
+                    $roleSecrets["archive-target-$g"] = $secrets["writer-archive-target-$g"]
+                    $roleSecrets["archive-policy-$g"] = $secrets["writer-archive-policy-$g"]
                     $template = New-VLiteHaWriterTemplate -Config $roleConfig -EnvironmentId $environmentId -Secrets $roleSecrets -Revision $revision
                     $minimum = 1
                 }

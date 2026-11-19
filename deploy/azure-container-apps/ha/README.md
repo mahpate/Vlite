@@ -127,8 +127,26 @@ Explicit `storageType: Secret` `secretRef`/`path` entries project only the
 role's files under `/run/vlite`; never mount all secrets. Gateway receives seed,
 public bundle, gateway config and control target only, **never an admin token**.
 Backends receive trust/control/public bundle; reader additionally receives
-archive target and reader config. Writer archive/authority runtime wiring
-remains blocked rather than inventing flags. Reader `/data` is private
+archive target and reader config. Writer additionally receives
+`archive-target-gN` and `archive-policy-gN`, mounted as
+`/run/vlite/archive-target.json` and `/run/vlite/archive-policy.json`.
+Its arguments include `--authority-target-file` and `--archive-policy-file`;
+both projections use the writer identity's `client_id`. The private generation
+material names are `writer-archive-target-gN` and `writer-archive-policy-gN`;
+the flagless replacement writer inherits the same secrets. There is no admin
+directory or REST configuration step for this writer. Initialize authority
+first with a chosen 16-character lowercase hexadecimal installation id and
+the database lineage, as described in `docs/HA-ACA.md`; startup seeds that id
+into `/data/vectors.vlite.cloud-backup/` and attempts the initial backup.
+The live qualification check still always refuses rollout.
+
+Optional policy config keys and defaults are `WriterBackupIntervalSecs=3600`
+(300..604800), `WriterBackupKeepSets=3` (3..1000),
+`WriterBackupKeepDays=30` (30..3650), `WriterBackupOrphanGraceHours=24`
+(1..720), `WriterBackupDrillEvery=24` (0..100), and
+`WriterArchiveIntervalSecs=300` (60..86400).
+`WriterBackupRetentionEnabled` defaults to false; backup and archive are
+always enabled in the projected policy. Reader `/data` is private
 `EmptyDir`, never the writer share; gateway has no database volume.
 
 After qualification, state would live privately under

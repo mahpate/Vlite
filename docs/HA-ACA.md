@@ -131,10 +131,67 @@ Retention never deletes the set named by the authority head or base. In a
 cycle where the authority cannot be read it condemns no Published set; it only
 finishes deletes already in progress and removes stale staging sets.
 
-Configure cloud backup before initializing authority: `authority init
---installation-id` must use the `installation_id` shown by
-`GET /v1/admin/cloud-backup`. The backup target's account, container,
+For an **admin-directory writer**, configure cloud backup with
+`PUT /v1/admin/cloud-backup` before initializing authority:
+`authority init --installation-id` must use the `installation_id` shown by
+`GET /v1/admin/cloud-backup`.
+
+For a **gateway-trust writer**, `VLITE_ADMIN_DIR` is prohibited. Use the
+writer-only `--archive-policy-file <json>` together with
+`--serve-mode writer --authority-target-file <json>`. There is no policy
+environment variable or additional REST configuration route. The file is the
+existing cloud-backup policy JSON, capped at 64 KiB; unknown fields, invalid
+targets, out-of-range settings, `enabled:false`, and missing/disabled
+`archive.enabled` refuse startup before listening with
+`invalid_arguments: archive_policy_invalid`. It cannot be combined with an
+admin directory: admin-directory writers must keep using the REST path.
+
+The exact gateway-trust startup order is:
+
+1. Prepare the durable v4/v5 database and record its lineage, then stop the
+   preparatory server. Choose a **16-character lowercase hexadecimal**
+   installation id (the backup runtime's format) and a scope id.
+2. Run `authority init --target-file <archive-target.json>
+   --installation-id <chosen-id> --scope-id <scope> --lineage <lineage>`.
+   Authority initialization comes **before** the policy-enabled writer;
+   neither its startup nor the policy file creates authority.
+3. Mount the matching archive target and enabled policy JSON (in ACA,
+   `/run/vlite/archive-target.json` and `/run/vlite/archive-policy.json`),
+   then start the writer with both file flags and `--gateway-trust-file`.
+   Startup validates the policy, restores/claims authority, and opens private
+   state in `<database path>.cloud-backup/` (owner-only on Unix). It seeds
+   `installation-id` from the authority record before configuring the policy;
+   an existing different id refuses with
+   `writer_authority_installation_mismatch`.
+4. After router construction, startup attempts one initial snapshot on a
+   blocking worker if the runtime has no published set, even when the regular
+   snapshot interval is days. Success/failure is logged to stderr; failure
+   does not stop serving, remains visible in cloud-backup status, and is
+   retried by scheduling. An existing published set skips this initial run.
+   Restarts still require the explicit failover above; the next scheduled
+   archive tick publishes a new epoch's base before extending its archive.
+
+For example, the policy (target fields must match the mounted authority target):
+
+```json
+{
+  "target": {
+    "account": "exampleaccount",
+    "container": "archive-data",
+    "coordination_container": "archive-coordination",
+    "prefix": "tenant/",
+    "auth": "managed_identity",
+    "client_id": "<writer-managed-identity-client-id>"
+  },
+  "enabled": true,
+  "interval_secs": 3600,
+  "archive": { "enabled": true, "interval_secs": 300 }
+}
+```
+
+In either configuration path, the backup target's account, container,
 coordination container, prefix and endpoint must match the authority target.
+Authentication mode and managed-identity client id are not part of that comparison.
 Policy updates and each publish/archive refuse mismatches with HTTP 409
 `writer_authority_target_mismatch` or
 `writer_authority_installation_mismatch`, before uploading anything.

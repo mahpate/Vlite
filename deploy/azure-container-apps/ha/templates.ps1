@@ -329,6 +329,37 @@ function Assert-VLiteHaConfigDocument {
     Assert-VLiteHaConfigFields -Actual $actual -Expected $Expected -Label $Label
 }
 
+function New-VLiteHaWriterArchivePolicy {
+    [CmdletBinding()]
+    param([Parameter(Mandatory)][hashtable]$Config)
+
+    if ($Config.ArchiveTarget -isnot [hashtable]) { throw 'Config.ArchiveTarget must be an object.' }
+    $values = $Config.Clone()
+    foreach ($entry in @(
+        @('WriterBackupIntervalSecs', 3600, 300, 604800),
+        @('WriterBackupKeepSets', 3, 3, 1000),
+        @('WriterBackupKeepDays', 30, 30, 3650),
+        @('WriterBackupOrphanGraceHours', 24, 1, 720),
+        @('WriterBackupDrillEvery', 24, 0, 100),
+        @('WriterArchiveIntervalSecs', 300, 60, 86400)
+    )) {
+        if (-not $values.ContainsKey($entry[0])) { $values[$entry[0]] = $entry[1] }
+        Assert-VLiteHaInteger $values $entry[0] $entry[2] $entry[3]
+    }
+    Assert-VLiteHaFlag $Config 'WriterBackupRetentionEnabled'
+    @{
+        target = $Config.ArchiveTarget.Clone()
+        enabled = $true
+        interval_secs = [long]$values.WriterBackupIntervalSecs
+        retention_enabled = [bool]$Config['WriterBackupRetentionEnabled']
+        keep_sets = [int]$values.WriterBackupKeepSets
+        keep_days = [long]$values.WriterBackupKeepDays
+        orphan_grace_hours = [long]$values.WriterBackupOrphanGraceHours
+        drill_every = [long]$values.WriterBackupDrillEvery
+        archive = @{ enabled = $true; interval_secs = [long]$values.WriterArchiveIntervalSecs }
+    }
+}
+
 function New-VLiteHaAppTemplate {
     param(
         [hashtable]$Config, [string]$EnvironmentId, [hashtable]$Secrets,
@@ -359,8 +390,12 @@ function New-VLiteHaAppTemplate {
     } else {
         $files['backend-trust'] = 'trust.json'
         if ($Role -eq 'Writer') {
+            $files['archive-target'] = 'archive-target.json'
+            $files['archive-policy'] = 'archive-policy.json'
             $arguments = @('/data/vectors.vlite', '--serve-mode', 'writer', '--bind', '0.0.0.0:8080',
-                '--allow-remote', '--gateway-trust-file', '/run/vlite/trust.json', '--durability', 'full')
+                '--allow-remote', '--gateway-trust-file', '/run/vlite/trust.json', '--durability', 'full',
+                '--authority-target-file', '/run/vlite/archive-target.json',
+                '--archive-policy-file', '/run/vlite/archive-policy.json')
             if ($Config['InitializeTenant']) {
                 $arguments += @('--create-if-missing', [string]$Config.Dimensions, '--create-format', [string]$Config.CreateFormat)
             }
@@ -402,7 +437,12 @@ function New-VLiteHaAppTemplate {
         $trustConfig.Audience = $Config["${Role}Audience"]
         Assert-VLiteHaConfigDocument -Json $Secrets["backend-trust-g$generation"] `
             -Expected (New-VLiteHaTrustConfig -Config $trustConfig) -Label "$Role trust projection"
-        if ($Role -eq 'Reader') {
+        if ($Role -eq 'Writer') {
+            Assert-VLiteHaConfigDocument -Json $Secrets["archive-target-g$generation"] `
+                -Expected $Config.ArchiveTarget -Label 'Writer archive target projection'
+            Assert-VLiteHaConfigDocument -Json $Secrets["archive-policy-g$generation"] `
+                -Expected (New-VLiteHaWriterArchivePolicy -Config $Config) -Label 'Writer archive policy projection'
+        } elseif ($Role -eq 'Reader') {
             Assert-VLiteHaConfigDocument -Json $Secrets["reader-config-g$generation"] `
                 -Expected (New-VLiteHaReaderApplyConfig -Config $Config) -Label 'Reader apply projection'
         }

@@ -94,6 +94,7 @@ fn startup_authority_options_are_validated_before_creating_a_database() {
             "invalid_arguments",
         );
     }
+
     // A writer without durable commits has no archived base to restore from.
     refused(
         &[
@@ -118,4 +119,91 @@ fn startup_authority_options_are_validated_before_creating_a_database() {
         );
     }
     assert_eq!(std::fs::read_dir(directory.path()).unwrap().count(), 0);
+}
+
+#[test]
+fn archive_policy_startup_refusals_precede_listening_and_database_creation() {
+    let directory = tempfile::tempdir().unwrap();
+    let database = directory.path().join("never-created.vlite");
+    let target = directory.path().join("target.json");
+    let policy = directory.path().join("policy.json");
+    let key = directory.path().join("emulator.key");
+    std::fs::write(
+        &key,
+        "Eby8vdM02xNOcqFlqUwJPLlmEtlCDXJ1OUzFT50uSRZ6IFsuFq2UVErCz4I6tq/K1SZFPTOtr/KBHBeksoGMGw==",
+    )
+    .unwrap();
+    let target_value = serde_json::json!({
+        "account":"devstoreaccount1", "container":"data",
+        "coordination_container":"coordination", "prefix":"writer/",
+        "endpoint":"http://127.0.0.1:10010/devstoreaccount1", "auth":"emulator_shared_key"
+    });
+    std::fs::write(&target, target_value.to_string()).unwrap();
+    let base = [
+        database.to_str().unwrap(),
+        "--insecure-local",
+        "--archive-policy-file",
+        policy.to_str().unwrap(),
+    ];
+    refused(&base, "invalid_arguments");
+    refused(
+        &[base.as_slice(), &["--serve-mode", "writer"]].concat(),
+        "invalid_arguments",
+    );
+    refused(
+        &[
+            base.as_slice(),
+            &["--authority-target-file", target.to_str().unwrap()],
+        ]
+        .concat(),
+        "invalid_arguments",
+    );
+    let args = [
+        base.as_slice(),
+        &[
+            "--serve-mode",
+            "writer",
+            "--authority-target-file",
+            target.to_str().unwrap(),
+            "--authority-shared-key-file",
+            key.to_str().unwrap(),
+        ],
+    ]
+    .concat();
+    let output = Command::new(env!("CARGO_BIN_EXE_vlite-server"))
+        .args(&args)
+        .env("VLITE_ADMIN_DIR", directory.path().join("admin"))
+        .output()
+        .unwrap();
+    assert!(!output.status.success());
+    assert!(output.stdout.is_empty());
+    assert!(
+        String::from_utf8_lossy(&output.stderr)
+            .contains("--archive-policy-file is for writers without VLITE_ADMIN_DIR")
+    );
+    refused(&args, "invalid_arguments");
+    for contents in [
+            "{".to_owned(),
+            serde_json::json!({"target":target_value,"enabled":true,"unknown":true}).to_string(),
+            serde_json::json!({"target":target_value,"enabled":true,"archive":{"enabled":false}}).to_string(),
+            serde_json::json!({"target":target_value,"enabled":false,"archive":{"enabled":true}}).to_string(),
+            serde_json::json!({"target":target_value,"enabled":true,"interval_secs":299,"archive":{"enabled":true}}).to_string(),
+            " ".repeat(65537),
+        ] {
+            std::fs::write(&policy, contents).unwrap();
+            refused(&args, "invalid_arguments");
+        }
+    let mut changed = target_value.clone();
+    changed["prefix"] = serde_json::json!("other/");
+    std::fs::write(
+        &policy,
+        serde_json::json!({
+            "target":changed,"enabled":true,"archive":{"enabled":true}
+        })
+        .to_string(),
+    )
+    .unwrap();
+    refused(&args, "writer_authority_target_mismatch");
+    assert!(!database.exists());
+    assert!(!directory.path().join("admin").exists());
 }
