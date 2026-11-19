@@ -1,22 +1,181 @@
 //! Operator-acknowledged failover preparation; no election or automatic retry.
 
+use std::{ffi::OsString, io::Read, path::PathBuf};
+
 use serde::Serialize;
-use serde_json::json;
+use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
 
 use super::{
     authority::{AuthorityError, AuthorityStore, HeadRef, Observed, Phase},
     backup_policy::ArchiveStatus,
+    gateway_mode::{flags, utf8},
 };
 
-#[cfg_attr(not(test), allow(dead_code))]
+const FAILOVER_USAGE: &str = "vlite-server failover report|execute --target-file <json> [--shared-key-file <path>] [--archive-status-file <json>] [--observed-sequence <n> --observed-unix-ms <ms>] [execute only, all required: --ack-report-id <id> --expected-epoch <n> --expected-revision <rev> --old-replicas <n>]";
+
+struct Request {
+    status: Option<ArchiveStatus>,
+    observation: Option<WriterObservation>,
+    ack: Option<FailoverAck>,
+}
+
+fn number(name: &str, value: OsString) -> Result<u64, String> {
+    utf8(name, value)?
+        .parse()
+        .map_err(|_| format!("invalid_arguments: {name} must be an unsigned 64-bit integer"))
+}
+
+fn identifier(name: &str, value: OsString) -> Result<String, String> {
+    let value = utf8(name, value)?;
+    if value.is_empty() || value.len() > 256 {
+        return Err(format!(
+            "invalid_arguments: {name} must contain 1 to 256 UTF-8 bytes"
+        ));
+    }
+    Ok(value)
+}
+
+/// Blocking operator command; call off the async runtime.
+pub fn failover_command(args: &[OsString]) -> Result<Value, String> {
+    let verb = match args.first().and_then(|arg| arg.to_str()) {
+        Some("report") => "report",
+        Some("execute") => "execute",
+        _ => "invalid",
+    };
+    let result = (|| {
+        let usage = |detail: &str| format!("invalid_arguments: {detail}; usage: {FAILOVER_USAGE}");
+        if verb == "invalid" {
+            return Err(usage("the verb must be report or execute"));
+        }
+        let mut allowed = vec![
+            "--target-file",
+            "--shared-key-file",
+            "--archive-status-file",
+            "--observed-sequence",
+            "--observed-unix-ms",
+        ];
+        if verb == "execute" {
+            allowed.extend([
+                "--ack-report-id",
+                "--expected-epoch",
+                "--expected-revision",
+                "--old-replicas",
+            ]);
+        }
+        let mut values = flags(&args[1..], &allowed, FAILOVER_USAGE)?;
+        let mut required = |name: &str| {
+            values
+                .remove(name)
+                .ok_or_else(|| usage(&format!("{name} is required")))
+        };
+        let target = PathBuf::from(required("--target-file")?);
+        let ack = if verb == "execute" {
+            Some(FailoverAck {
+                report_id: identifier("--ack-report-id", required("--ack-report-id")?)?,
+                expected_epoch: number("--expected-epoch", required("--expected-epoch")?)?,
+                expected_revision: identifier(
+                    "--expected-revision",
+                    required("--expected-revision")?,
+                )?,
+                old_replicas: number("--old-replicas", required("--old-replicas")?)?,
+            })
+        } else {
+            None
+        };
+        let observation = match (
+            values.remove("--observed-sequence"),
+            values.remove("--observed-unix-ms"),
+        ) {
+            (None, None) => None,
+            (Some(sequence), Some(time)) => Some(WriterObservation {
+                sequence: number("--observed-sequence", sequence)?,
+                observed_unix_ms: number("--observed-unix-ms", time)?,
+            }),
+            _ => {
+                return Err(
+                    "invalid_arguments: --observed-sequence and --observed-unix-ms go together"
+                        .into(),
+                );
+            }
+        };
+        let status = values
+            .remove("--archive-status-file")
+            .map(|path| -> Result<ArchiveStatus, String> {
+                const LIMIT: u64 = 64 * 1024;
+                let mut bytes = Vec::new();
+                std::fs::File::open(PathBuf::from(path))
+                    .and_then(|file| file.take(LIMIT + 1).read_to_end(&mut bytes))
+                    .map_err(|error| {
+                        format!(
+                            "invalid_arguments: --archive-status-file cannot be read: {}",
+                            error.kind()
+                        )
+                    })?;
+                if bytes.len() as u64 > LIMIT {
+                    return Err(
+                        "invalid_arguments: --archive-status-file is larger than 64 KiB".into(),
+                    );
+                }
+                serde_json::from_slice::<ArchiveStatus>(&bytes).map_err(|_| {
+                    "invalid_arguments: --archive-status-file is not archive status JSON".into()
+                })
+            })
+            .transpose()?;
+        let key = values.remove("--shared-key-file").map(PathBuf::from);
+        let sets = super::cloud_recovery::connect(&target, key.as_deref())
+            .map_err(|error| format!("{}: {}", error.code, error.message))?;
+        let (meta, prefix) = sets.coordination();
+        run(
+            &AuthorityStore::new(meta, prefix),
+            Request {
+                status,
+                observation,
+                ack,
+            },
+        )
+        .map_err(|error| {
+            let description = match error {
+                FailoverError::FenceUnconfirmed => "old writer must have zero replicas",
+                FailoverError::AckMismatch => "acknowledgement does not match the exact report",
+                FailoverError::ReportStale => "authority changed since the report",
+                FailoverError::Conflict => "authority mutation conflicted",
+                FailoverError::Indeterminate => "authority mutation outcome is indeterminate",
+                FailoverError::Unavailable => "authority is unavailable",
+                FailoverError::Missing => "authority is missing",
+                FailoverError::Invalid => "authority is invalid",
+            };
+            format!("{}: {description}", error.code())
+        })
+    })();
+    let outcome = match &result {
+        Ok(_) => "ok",
+        Err(error) => error.split(':').next().unwrap_or("internal_error"),
+    };
+    super::log_stderr(
+        if result.is_ok() { "info" } else { "warn" },
+        "failover",
+        json!({"event": "failover_command", "verb": verb, "outcome": outcome}).to_string(),
+    );
+    result
+}
+
+fn run(store: &AuthorityStore, request: Request) -> Result<Value, FailoverError> {
+    let report = build_report(store, request.status.as_ref(), request.observation)?;
+    let mut output = json!({"report": report, "text": report.render()});
+    if let Some(ack) = request.ack {
+        let result = execute(store, &report, &ack)?;
+        output["result"] = json!({"record": result.record, "etag": result.etag});
+    }
+    Ok(output)
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
 pub(super) struct WriterObservation {
     pub sequence: u64,
     pub observed_unix_ms: u64,
 }
 
-#[cfg_attr(not(test), allow(dead_code))]
 #[derive(Clone, Debug, PartialEq, Eq, Serialize)]
 pub(super) struct ArchiveCrossCheck {
     pub last_checkpoint_sequence: Option<u64>,
@@ -26,7 +185,6 @@ pub(super) struct ArchiveCrossCheck {
     pub unpublished_commits: Option<u64>,
 }
 
-#[cfg_attr(not(test), allow(dead_code))]
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub(super) enum Loss {
@@ -34,7 +192,6 @@ pub(super) enum Loss {
     Unknown,
 }
 
-#[cfg_attr(not(test), allow(dead_code))]
 #[derive(Clone, Debug, Serialize)]
 pub(super) struct LossReport {
     #[serde(skip_serializing_if = "String::is_empty")]
@@ -54,7 +211,6 @@ pub(super) struct LossReport {
     pub loss: Loss,
 }
 
-#[cfg_attr(not(test), allow(dead_code))]
 impl LossReport {
     fn digest(&self) -> Result<String, FailoverError> {
         let mut canonical = self.clone();
@@ -107,7 +263,6 @@ impl LossReport {
     }
 }
 
-#[cfg_attr(not(test), allow(dead_code))]
 #[derive(Clone, Debug)]
 pub(super) struct FailoverAck {
     pub report_id: String,
@@ -116,7 +271,6 @@ pub(super) struct FailoverAck {
     pub old_replicas: u64,
 }
 
-#[cfg_attr(not(test), allow(dead_code))]
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(super) enum FailoverError {
     FenceUnconfirmed,
@@ -129,7 +283,6 @@ pub(super) enum FailoverError {
     Invalid,
 }
 
-#[cfg_attr(not(test), allow(dead_code))]
 impl FailoverError {
     pub fn code(self) -> &'static str {
         match self {
@@ -176,7 +329,6 @@ fn refused(error: &FailoverError) {
     );
 }
 
-#[cfg_attr(not(test), allow(dead_code))]
 pub(super) fn build_report(
     store: &AuthorityStore,
     status: Option<&ArchiveStatus>,
@@ -236,7 +388,6 @@ pub(super) fn build_report(
     .inspect_err(refused)
 }
 
-#[cfg_attr(not(test), allow(dead_code))]
 pub(super) fn execute(
     store: &AuthorityStore,
     report: &LossReport,
@@ -340,9 +491,9 @@ mod tests {
         }
     }
 
-    fn assert_no_put(
+    fn assert_no_put<T: std::fmt::Debug>(
         memory: &Arc<Memory>,
-        operation: impl FnOnce() -> Result<Observed, FailoverError>,
+        operation: impl FnOnce() -> Result<T, FailoverError>,
         expected: FailoverError,
     ) {
         let before = memory.raw(KEY);
@@ -354,6 +505,166 @@ mod tests {
         assert_eq!(operation().unwrap_err(), expected);
         assert_eq!(memory.raw(KEY), before);
         assert_eq!(puts.load(Ordering::SeqCst), 0);
+    }
+
+    fn command(args: &[&str]) -> Result<serde_json::Value, String> {
+        failover_command(&args.iter().map(OsString::from).collect::<Vec<_>>())
+    }
+
+    fn request(ack: Option<FailoverAck>) -> Request {
+        Request {
+            status: None,
+            observation: Some(observation(15)),
+            ack,
+        }
+    }
+
+    #[test]
+    fn failover_command_rejects_unknown_verb() {
+        for args in [vec![], vec!["unknown"]] {
+            assert_eq!(
+                command(&args).unwrap_err(),
+                format!(
+                    "invalid_arguments: the verb must be report or execute; usage: {FAILOVER_USAGE}"
+                )
+            );
+        }
+    }
+
+    #[test]
+    fn failover_command_requires_target_file() {
+        assert!(
+            command(&["report"])
+                .unwrap_err()
+                .starts_with("invalid_arguments: --target-file is required")
+        );
+    }
+
+    #[test]
+    fn failover_command_observation_flags_go_together() {
+        for flag in ["--observed-sequence", "--observed-unix-ms"] {
+            assert_eq!(
+                command(&["report", "--target-file", "missing", flag, "1"]).unwrap_err(),
+                "invalid_arguments: --observed-sequence and --observed-unix-ms go together"
+            );
+        }
+    }
+
+    #[test]
+    fn failover_command_execute_requires_ack_flags() {
+        let mut args = vec!["execute", "--target-file", "missing"];
+        for (flag, value) in [
+            ("--ack-report-id", "id"),
+            ("--expected-epoch", "1"),
+            ("--expected-revision", "rev"),
+            ("--old-replicas", "0"),
+        ] {
+            assert!(
+                command(&args)
+                    .unwrap_err()
+                    .starts_with(&format!("invalid_arguments: {flag} is required"))
+            );
+            args.extend([flag, value]);
+        }
+    }
+
+    #[test]
+    fn failover_command_never_echoes_values() {
+        let secret = "secret-expected-epoch-DO-NOT-PRINT";
+        let error = command(&[
+            "execute",
+            "--target-file",
+            "missing",
+            "--ack-report-id",
+            "id",
+            "--expected-epoch",
+            secret,
+            "--expected-revision",
+            "rev",
+            "--old-replicas",
+            "0",
+        ])
+        .unwrap_err();
+        assert!(error.starts_with("invalid_arguments: --expected-epoch"));
+        assert!(!error.contains(secret));
+    }
+
+    #[test]
+    fn failover_command_archive_status_file_bounds() {
+        let directory = tempfile::tempdir().unwrap();
+        let file = directory.path().join("status.json");
+        for (bytes, detail) in [
+            (vec![b' '; 64 * 1024 + 1], "is larger than 64 KiB"),
+            (b"secret-not-json".to_vec(), "is not archive status JSON"),
+        ] {
+            std::fs::write(&file, bytes).unwrap();
+            assert_eq!(
+                command(&[
+                    "report",
+                    "--target-file",
+                    "missing",
+                    "--archive-status-file",
+                    file.to_str().unwrap(),
+                ])
+                .unwrap_err(),
+                format!("invalid_arguments: --archive-status-file {detail}")
+            );
+        }
+    }
+
+    #[test]
+    fn failover_run_report_matches_build_report() {
+        let (_, store, _, _) = setup();
+        let mut request = request(None);
+        request.status = Some(ArchiveStatus {
+            last_checkpoint_sequence: Some(10),
+            last_checkpoint_unix_ms: Some(75),
+            ..ArchiveStatus::default()
+        });
+        let report = build_report(&store, request.status.as_ref(), request.observation).unwrap();
+        let output = run(&store, request).unwrap();
+        assert_eq!(output["report"]["report_id"], report.report_id);
+        assert_eq!(output["text"], report.render());
+        assert!(output.get("result").is_none());
+    }
+
+    #[test]
+    fn failover_run_execute_prepares_recovering_epoch() {
+        let (_, store, _, served) = setup();
+        let report = build_report(&store, None, Some(observation(15))).unwrap();
+        let output = run(&store, request(Some(ack(&report)))).unwrap();
+        assert_eq!(output["report"]["report_id"], report.report_id);
+        assert_eq!(output["text"], report.render());
+        assert_eq!(output["result"]["record"]["epoch"], served.record.epoch + 1);
+        assert_eq!(output["result"]["record"]["phase"], "recovering");
+        assert!(!output["result"]["etag"].as_str().unwrap().is_empty());
+        assert_eq!(store.read().unwrap().record.phase, Phase::Recovering);
+    }
+
+    #[test]
+    fn failover_run_execute_refuses_nonzero_replicas() {
+        let (memory, store, _, _) = setup();
+        let report = build_report(&store, None, Some(observation(15))).unwrap();
+        let mut ack = ack(&report);
+        ack.old_replicas = 1;
+        assert_no_put(
+            &memory,
+            || run(&store, request(Some(ack))),
+            FailoverError::FenceUnconfirmed,
+        );
+    }
+
+    #[test]
+    fn failover_run_execute_refuses_wrong_report_id() {
+        let (memory, store, _, _) = setup();
+        let report = build_report(&store, None, Some(observation(15))).unwrap();
+        let mut ack = ack(&report);
+        ack.report_id = "wrong".into();
+        assert_no_put(
+            &memory,
+            || run(&store, request(Some(ack))),
+            FailoverError::AckMismatch,
+        );
     }
 
     #[test]

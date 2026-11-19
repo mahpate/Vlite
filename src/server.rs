@@ -85,6 +85,7 @@ mod writer_fence;
 pub use admin::{ServerOptions, configured_admin_router, read_token_file, selected_database};
 pub use cloud_recovery::{CloudRestore, RecoveryError, RestoreMode, cloud_restore, cloud_sets};
 pub use compaction::{Managed, ManagedHandle};
+pub use failover::failover_command;
 pub use gateway_mode::{control_state_command, gateway_keygen, run_gateway};
 pub use gateway_trust::{GatewayTrust, GatewayTrustConfig};
 pub use serve_mode::ServeMode;

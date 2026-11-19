@@ -840,7 +840,7 @@ impl Buckets {
 
 /// Command-line flags: each allowed flag at most once with one value.
 /// Errors never echo an argument (a mistyped value may be a secret).
-fn flags(
+pub(super) fn flags(
     args: &[OsString],
     allowed: &[&'static str],
     usage: &str,
@@ -869,7 +869,7 @@ fn flags(
     Ok(values)
 }
 
-fn utf8(name: &str, value: OsString) -> Result<String, String> {
+pub(super) fn utf8(name: &str, value: OsString) -> Result<String, String> {
     value
         .into_string()
         .map_err(|_| format!("invalid_arguments: {name} must be valid UTF-8"))
