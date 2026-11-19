@@ -246,9 +246,13 @@ async fn higher_epoch_fences_and_refuses_everything() {
     }
 }
 
-fn bypass_router(service: Service, handler: axum::routing::MethodRouter<Service>) -> Router {
+fn bypass_router<H, T>(service: Service, handler: H) -> Router
+where
+    H: axum::handler::Handler<T, Service>,
+    T: 'static,
+{
     Router::new()
-        .route("/v1/batches", handler)
+        .route("/v1/batches", post(handler))
         .layer(middleware::from_fn_with_state(service.clone(), observe))
         .with_state(service)
 }
@@ -257,13 +261,10 @@ fn bypass_router(service: Service, handler: axum::routing::MethodRouter<Service>
 async fn fenced_latch_suppresses_success_without_receipt() {
     let (_, fence, _) = setup();
     let service = writer(fence.clone(), false);
-    let router = bypass_router(
-        service,
-        post(move || async move {
-            fence.transition(FenceState::Fenced).unwrap();
-            StatusCode::OK
-        }),
-    );
+    let router = bypass_router(service, move || async move {
+        fence.transition(FenceState::Fenced).unwrap();
+        StatusCode::OK
+    });
     error(
         &call(&router, "POST", "/v1/batches", "").await,
         StatusCode::BAD_GATEWAY,
@@ -274,7 +275,7 @@ async fn fenced_latch_suppresses_success_without_receipt() {
 #[tokio::test]
 async fn response_barrier_checks_routes_without_receipts() {
     let (memory, fence, gets) = setup();
-    let router = bypass_router(writer(fence, false), post(|| async { StatusCode::OK }));
+    let router = bypass_router(writer(fence, false), || async { StatusCode::OK });
     assert!(
         call(&router, "POST", "/v1/batches", "")
             .await
@@ -294,18 +295,15 @@ async fn response_barrier_checks_routes_without_receipts() {
 async fn fenced_latch_suppresses_success_with_receipt() {
     let (_, fence, gets) = setup();
     let service = writer(fence.clone(), false);
-    let router = bypass_router(
-        service.clone(),
-        post(move || {
-            let service = service.clone();
-            let fence = fence.clone();
-            async move {
-                service.run(|_| Ok(())).await.unwrap();
-                fence.transition(FenceState::Fenced).unwrap();
-                StatusCode::OK
-            }
-        }),
-    );
+    let router = bypass_router(service.clone(), move || {
+        let service = service.clone();
+        let fence = fence.clone();
+        async move {
+            service.run(|_| Ok(())).await.unwrap();
+            fence.transition(FenceState::Fenced).unwrap();
+            StatusCode::OK
+        }
+    });
     error(
         &call(&router, "POST", "/v1/batches", "").await,
         StatusCode::BAD_GATEWAY,
