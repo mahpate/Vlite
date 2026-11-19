@@ -506,6 +506,131 @@ mod tests {
     }
 
     #[test]
+    fn ha_reader_enrolls_at_head_swaps_and_retries_authority_outages() {
+        use crate::server::cloud_recovery::tests::{checkpoint_ha, setup_ha};
+        let (env, authority, claim) = setup_ha();
+        checkpoint_ha(&env, &authority, &claim, 5..=6);
+        checkpoint_ha(&env, &authority, &claim, 7..=8);
+        let apply = enroll(&env);
+        assert_eq!(apply.progress().applied(), (8, 1_000));
+        let service = reader(&slot(&env, "reader-a")).with_reader_apply(&apply);
+        checkpoint_ha(&env, &authority, &claim, 9..=10);
+        env.meta
+            .fault(Op::Get, "authority.json", Fault::Before, 0, 1);
+        assert_eq!(apply.step(&service, 2_000), Step::Retry);
+        assert_eq!(apply.progress().applied(), (8, 1_000));
+        assert_eq!(apply.step(&service, 3_000), Step::Swapped);
+        assert_eq!(apply.progress().applied(), (10, 3_000));
+        assert_eq!(apply.step(&service, 4_000), Step::Confirmed);
+        env.meta.remove("vlite/prod/authority.json");
+        assert_eq!(apply.step(&service, 5_000), Step::Failed);
+        assert_eq!(
+            apply.progress().failure().as_deref(),
+            Some("writer_authority_missing")
+        );
+    }
+
+    #[test]
+    fn ha_reader_frozen_base_is_not_a_freshness_confirmation() {
+        use crate::server::cloud_recovery::tests::{checkpoint_ha, setup_ha};
+        let (env, authority, claim) = setup_ha();
+        checkpoint_ha(&env, &authority, &claim, 5..=6);
+        let current = authority.read().unwrap();
+        authority
+            .prepare_transfer(&current, current.record.epoch, &current.record.revision)
+            .unwrap();
+        let apply = enroll(&env);
+        assert_eq!(apply.progress().applied(), (6, 1_000));
+        let service = reader(&slot(&env, "reader-a")).with_reader_apply(&apply);
+        assert_eq!(apply.step(&service, 2_000), Step::Confirmed);
+        assert_eq!(apply.progress().applied(), (6, 1_000));
+        assert_eq!(apply.progress().age_ms(40_000), Some(39_000));
+    }
+
+    #[test]
+    fn ha_reader_reseeds_for_replaced_or_regressed_head() {
+        use crate::server::cloud_recovery::tests::{checkpoint_ha, setup_ha};
+        for replaced in [false, true] {
+            let (env, authority, claim) = setup_ha();
+            let baseline = authority.read().unwrap();
+            checkpoint_ha(&env, &authority, &claim, 5..=6);
+            let apply = enroll(&env);
+            let service = reader(&slot(&env, "reader-a")).with_reader_apply(&apply);
+            let mut current = baseline.record;
+            if replaced {
+                current.head.as_mut().unwrap().set_id = cloud::new_set_id(1).unwrap();
+            }
+            env.meta.set_raw(
+                "vlite/prod/authority.json",
+                &serde_json::to_vec(&current).unwrap(),
+            );
+            assert_eq!(apply.step(&service, 2_000), Step::Failed);
+            assert_eq!(
+                apply.progress().failure().as_deref(),
+                Some(if replaced {
+                    "a newer published set needs a re-seed"
+                } else {
+                    "the archive head moved backwards"
+                }),
+            );
+        }
+    }
+
+    #[test]
+    fn authority_without_head_refuses_legacy_fallback() {
+        use crate::server::authority::AuthorityStore;
+        let env = setup();
+        let archive = env.sets.open_archive(&env.set_id).unwrap();
+        let (store, prefix) = env.sets.coordination();
+        AuthorityStore::new(store, prefix)
+            .create(
+                &archive.manifest.installation_id,
+                "scope",
+                archive.manifest.source_lineage.as_ref().unwrap(),
+            )
+            .unwrap();
+        let error = ReaderApply::enroll_with(env.sets.clone(), config(&env), "replica", 1)
+            .err()
+            .unwrap();
+        assert_eq!(error.code, "reader_apply_no_set");
+    }
+
+    #[test]
+    fn ha_reader_refuses_non_ha_or_mismatched_manifest() {
+        use crate::server::cloud_recovery::tests::setup_ha;
+        for legacy in [false, true] {
+            let (env, authority, _) = setup_ha();
+            let mut observed = authority.read().unwrap();
+            if legacy {
+                let key = format!("vlite/prod/sets/{}/manifest.json", env.set_id);
+                let envelope: serde_json::Value =
+                    serde_json::from_slice(&env.data.raw(&key).unwrap()).unwrap();
+                let bytes = serde_json::to_vec(&envelope["manifest"]).unwrap();
+                let digest = cloud::sha_hex(&bytes);
+                env.data.set_raw(&key, &bytes);
+                let mut record = record(&env);
+                record.manifest_sha256 = digest.clone();
+                env.meta.set_raw(
+                    &format!("vlite/prod/sets/{}/record.json", env.set_id),
+                    &serde_json::to_vec(&record).unwrap(),
+                );
+                observed.record.head.as_mut().unwrap().manifest_sha256 = digest;
+            } else {
+                observed.record.head.as_mut().unwrap().manifest_sha256 = "f".repeat(64);
+            }
+            env.meta.set_raw(
+                "vlite/prod/authority.json",
+                &serde_json::to_vec(&observed.record).unwrap(),
+            );
+            let error = ReaderApply::enroll_with(env.sets.clone(), config(&env), "replica", 1)
+                .err()
+                .unwrap();
+            assert_eq!(error.code, "reader_apply_reseed_required");
+            assert_eq!(env.pins(), 0);
+        }
+    }
+
+    #[test]
     fn reader_apply_step_newer_set_fails_and_releases_pin() {
         let env = setup();
         let apply = enroll(&env);

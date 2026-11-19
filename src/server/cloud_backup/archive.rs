@@ -206,9 +206,7 @@ impl Index {
     }
 }
 
-#[cfg_attr(not(test), allow(dead_code))]
 pub(in crate::server) const HA_INDEX_SCHEMA: &str = "vlite.cloud-backup-ha-archive/1";
-#[cfg_attr(not(test), allow(dead_code))]
 pub(in crate::server) const HA_CHECKPOINT_SCHEMA: &str = "vlite.cloud-backup-ha-checkpoint/1";
 const HA_CHAIN_DOMAIN: &str = "vlite.cloud-backup-ha-chain/1";
 
@@ -244,14 +242,26 @@ pub(in crate::server) struct HaArchive {
     index: Option<HaIndex>,
 }
 
-#[cfg_attr(not(test), allow(dead_code))]
 impl HaArchive {
     pub(in crate::server) fn checkpoints(&self) -> &[HaCheckpoint] {
         self.index.as_ref().map_or(&[], |i| &i.checkpoints)
     }
 
+    #[cfg_attr(not(test), allow(dead_code))]
     pub(in crate::server) fn next_base(&self) -> u64 {
         self.head.sequence
+    }
+
+    fn check_fetched(&self, fetched: &Fetched) -> Result<(), ApiError> {
+        if fetched.record.set_id != self.head.set_id
+            || fetched.record.manifest_sha256 != self.head.manifest_sha256
+            || fetched.manifest != self.manifest.manifest
+            || fetched.ha.as_ref() != Some(&self.manifest.authority)
+            || hash_file(&fetched.database).map_err(internal)?.0 != self.database_sha256
+        {
+            return Err(corrupt("the downloaded baseline differs from the HA head"));
+        }
+        Ok(())
     }
 }
 
@@ -285,7 +295,6 @@ impl From<HaArchiveError> for ApiError {
 }
 
 /// Canonical digest of the complete prior authority head, including its index.
-#[cfg_attr(not(test), allow(dead_code))]
 pub(in crate::server) fn ha_head_digest(head: &HeadRef) -> Result<String, ApiError> {
     Ok(sha_hex(&encode(head)?))
 }
@@ -309,7 +318,6 @@ fn ha_chain(
     sha_hex(&bytes)
 }
 
-#[cfg_attr(not(test), allow(dead_code))]
 impl HaIndex {
     pub(in crate::server) fn check(
         &self,
@@ -392,7 +400,6 @@ impl HaIndex {
     }
 }
 
-#[cfg_attr(not(test), allow(dead_code))]
 pub(in crate::server) fn parse_ha_index(bytes: &[u8]) -> Result<HaIndex, ApiError> {
     if bytes.len() as u64 > META_MAX {
         return Err(corrupt("the HA archive index is too large"));
@@ -404,7 +411,6 @@ pub(in crate::server) fn parse_ha_index(bytes: &[u8]) -> Result<HaIndex, ApiErro
     Ok(index)
 }
 
-#[cfg_attr(not(test), allow(dead_code))]
 #[allow(clippy::result_large_err)]
 impl Sets {
     /// Opens only the exact immutable index named by `head`; never archive.json.
@@ -481,6 +487,7 @@ impl Sets {
         })
     }
 
+    #[cfg_attr(not(test), allow(dead_code))]
     pub(in crate::server) fn open_archive_ha(
         &self,
         authority: &AuthorityStore,
@@ -500,6 +507,7 @@ impl Sets {
         Ok(archive)
     }
 
+    #[cfg_attr(not(test), allow(dead_code))]
     fn check_archive_authority(
         archive: &HaArchive,
         observed: &Observed,
@@ -523,6 +531,7 @@ impl Sets {
     }
 
     #[allow(clippy::too_many_arguments)]
+    #[cfg_attr(not(test), allow(dead_code))]
     pub(in crate::server) fn append_checkpoint_ha(
         &self,
         archive: &HaArchive,
@@ -871,15 +880,83 @@ impl Sets {
                 "the set has no archived checkpoints; restore the snapshot without --archive-checkpoint",
             ));
         };
+        self.replay_checkpoints(
+            fetched,
+            target,
+            dir,
+            &index.header_sha256,
+            index.baseline_sequence,
+            &index.checkpoints,
+        )
+    }
+
+    /// Replays only checkpoints committed by this exact immutable HA head.
+    pub(in crate::server) fn replay_archive_ha(
+        &self,
+        fetched: &Fetched,
+        target: ArchiveTarget,
+        dir: &FilePath,
+        head: &HeadRef,
+    ) -> Result<Replayed, ApiError> {
+        let archive = self.open_archive_ha_at(head)?;
+        archive.check_fetched(fetched)?;
+        let Some(index) = &archive.index else {
+            return Err(not_found(
+                "pitr_archive_missing",
+                "the set has no archived checkpoints; restore the snapshot without --archive-checkpoint",
+            ));
+        };
+        let checkpoints: Vec<_> = index
+            .checkpoints
+            .iter()
+            .map(|c| c.checkpoint.clone())
+            .collect();
+        self.replay_checkpoints(
+            fetched,
+            target,
+            dir,
+            &index.header_sha256,
+            index.baseline_sequence,
+            &checkpoints,
+        )
+    }
+
+    /// Restores an exact HA head, including a head at its unchanged baseline.
+    /// `None` means the verified downloaded baseline already is the head.
+    pub(in crate::server) fn restore_ha_head(
+        &self,
+        fetched: &Fetched,
+        dir: &FilePath,
+        head: &HeadRef,
+    ) -> Result<Option<Replayed>, ApiError> {
+        if head.index_sha256.is_some() {
+            self.replay_archive_ha(fetched, ArchiveTarget::Latest, dir, head)
+                .map(Some)
+        } else {
+            self.open_archive_ha_at(head)?.check_fetched(fetched)?;
+            Ok(None)
+        }
+    }
+
+    fn replay_checkpoints(
+        &self,
+        fetched: &Fetched,
+        target: ArchiveTarget,
+        dir: &FilePath,
+        header_sha256: &str,
+        baseline_sequence: u64,
+        checkpoints: &[Checkpoint],
+    ) -> Result<Replayed, ApiError> {
+        let id = &fetched.record.set_id;
+        let manifest = &fetched.manifest;
         let position = match target {
-            ArchiveTarget::Latest => index.checkpoints.len() - 1,
-            ArchiveTarget::Sequence(sequence) => index
-                .checkpoints
+            ArchiveTarget::Latest => checkpoints.len() - 1,
+            ArchiveTarget::Sequence(sequence) => checkpoints
                 .iter()
                 .position(|c| c.sequence == sequence)
                 .ok_or_else(|| {
                     let list: Vec<String> =
-                        index.checkpoints.iter().map(|c| c.sequence.to_string()).collect();
+                        checkpoints.iter().map(|c| c.sequence.to_string()).collect();
                     pitr(
                         "pitr_target_unsupported",
                         format!(
@@ -889,7 +966,7 @@ impl Sets {
                     )
                 })?,
         };
-        let path = &index.checkpoints[..=position];
+        let path = &checkpoints[..=position];
         let needed: u64 = path.iter().map(|c| c.segment_bytes).sum();
         check_restore_space(
             free_bytes(dir),
@@ -897,10 +974,12 @@ impl Sets {
         )?;
         let mut follower = ReplicaFollower::open(&fetched.database, None)
             .map_err(|e| corrupt(format!("the baseline cannot be replayed: {e}")))?;
-        if follower.applied_sequence() != index.baseline_sequence {
+        if follower.applied_sequence() != baseline_sequence
+            || follower.db().lineage().map(lineage_hex) != manifest.source_lineage
+        {
             return Err(corrupt("the baseline does not match the archive"));
         }
-        self.apply_segments(id, manifest, &index, path, &mut follower)?;
+        self.apply_segments(id, manifest, header_sha256, path, &mut follower)?;
         let checkpoint = path[position].clone();
         let verification = seal(follower, &fetched.database, checkpoint.sequence, manifest)?;
         let bundle = self.checkpoint_bundle(id, manifest, &checkpoint)?;
@@ -909,6 +988,73 @@ impl Sets {
             bundle,
             segments: path.len(),
             verification,
+        })
+    }
+
+    pub(in crate::server) fn follow_archive_ha(
+        &self,
+        record: &Record,
+        manifest: &Manifest,
+        database: &FilePath,
+        head: &HeadRef,
+    ) -> Result<Follow, ApiError> {
+        let archive = self.open_archive_ha_at(head)?;
+        if record.set_id != head.set_id
+            || record.manifest_sha256 != head.manifest_sha256
+            || manifest != &archive.manifest.manifest
+        {
+            return Err(corrupt("the followed baseline differs from the HA head"));
+        }
+        let mut follower = match ReplicaFollower::open(database, None) {
+            Ok(follower) => follower,
+            Err(error) => {
+                return Ok(Follow::Reseed(format!(
+                    "the copy cannot be followed: {error}"
+                )));
+            }
+        };
+        if follower.db().lineage().map(lineage_hex) != manifest.source_lineage {
+            return Ok(Follow::Reseed("the copy has another lineage".into()));
+        }
+        let applied = follower.applied_sequence();
+        if applied > head.sequence {
+            return Ok(Follow::Reseed("the archive head moved backwards".into()));
+        }
+        let checkpoints: Vec<_> = archive
+            .checkpoints()
+            .iter()
+            .map(|c| c.checkpoint.clone())
+            .collect();
+        let start = if applied == manifest.database.commits {
+            0
+        } else {
+            match checkpoints.iter().position(|c| c.sequence == applied) {
+                Some(position) => position + 1,
+                None => {
+                    return Ok(Follow::Reseed(format!(
+                        "the copy at sequence {applied} is not an archived checkpoint of this set"
+                    )));
+                }
+            }
+        };
+        let path = &checkpoints[start..];
+        let Some(checkpoint) = path.last() else {
+            return Ok(Follow::Current { sequence: applied });
+        };
+        let needed = path.iter().map(|c| c.segment_bytes).sum();
+        let dir = database.parent().unwrap_or(FilePath::new("."));
+        check_restore_space(free_bytes(dir), restore_space_needed(needed, 0))?;
+        self.checkpoint_bundle(&record.set_id, manifest, checkpoint)?;
+        let header = &archive
+            .index
+            .as_ref()
+            .expect("checkpoints have an index")
+            .header_sha256;
+        self.apply_segments(&record.set_id, manifest, header, path, &mut follower)?;
+        seal(follower, database, head.sequence, manifest)?;
+        Ok(Follow::Applied {
+            sequence: head.sequence,
+            segments: path.len(),
         })
     }
 
@@ -964,7 +1110,7 @@ impl Sets {
         let dir = database.parent().unwrap_or(FilePath::new("."));
         check_restore_space(free_bytes(dir), restore_space_needed(needed, 0))?;
         self.checkpoint_bundle(id, manifest, checkpoint)?;
-        self.apply_segments(id, manifest, &index, path, &mut follower)?;
+        self.apply_segments(id, manifest, &index.header_sha256, path, &mut follower)?;
         seal(follower, database, checkpoint.sequence, manifest)?;
         Ok(Follow::Applied {
             sequence: checkpoint.sequence,
@@ -1025,7 +1171,7 @@ impl Sets {
         &self,
         id: &str,
         manifest: &Manifest,
-        index: &Index,
+        header_sha256: &str,
         path: &[Checkpoint],
         follower: &mut ReplicaFollower,
     ) -> Result<(), ApiError> {
@@ -1045,7 +1191,7 @@ impl Sets {
             if segment.base_sequence != c.base_sequence
                 || segment.last_sequence != c.sequence
                 || Some(lineage_hex(segment.lineage)) != manifest.source_lineage
-                || sha_hex(&segment.header) != index.header_sha256
+                || sha_hex(&segment.header) != header_sha256
             {
                 return Err(corrupt("an archived segment does not match its checkpoint"));
             }
@@ -1305,6 +1451,91 @@ mod tests {
         assert_eq!(manifest, env.archive.manifest);
         assert!(env.data.raw(&sets.archive_key(&record.set_id)).is_none());
         assert!(sets.open_archive(&record.set_id).is_err());
+    }
+
+    #[test]
+    fn ha_restore_stops_at_frozen_head_and_checks_baseline_identity() {
+        let env = setup();
+        append(&env).unwrap();
+        let frozen = env.authority.read().unwrap().record.head.unwrap();
+        let archive = env.sets.open_archive_ha_at(&frozen).unwrap();
+        let mut database = Database::open(env.dir.path().join("source.vlite")).unwrap();
+        database.put(3, &[0.0, 0.0, 1.0], b"three").unwrap();
+        let segment = database
+            .export_log(archive.next_base(), MAX_SEGMENT_BYTES)
+            .unwrap();
+        database.close().unwrap();
+        env.sets
+            .append_checkpoint_ha(
+                &archive,
+                &segment,
+                &|chain| Ok(bundle_bytes(&archive.manifest.manifest, chain)),
+                3,
+                &fake::open,
+                &env.authority,
+                &env.claim,
+            )
+            .unwrap();
+        let pin = env
+            .sets
+            .pin(&archive.set_id, "restore", PinKind::Operation, 4)
+            .unwrap();
+        let dir = tempfile::tempdir().unwrap();
+        let mut fetched = env
+            .sets
+            .fetch(&archive.set_id, &pin.id, dir.path())
+            .unwrap();
+        let original = fetched.record.manifest_sha256.clone();
+        fetched.record.manifest_sha256 = "e".repeat(64);
+        assert!(
+            env.sets
+                .replay_archive_ha(&fetched, ArchiveTarget::Latest, dir.path(), &frozen,)
+                .is_err()
+        );
+        fetched.record.manifest_sha256 = original;
+        let original = fetched.manifest.source_lineage.clone();
+        fetched.manifest.source_lineage = Some("f".repeat(16));
+        assert!(
+            env.sets
+                .replay_archive_ha(&fetched, ArchiveTarget::Latest, dir.path(), &frozen,)
+                .is_err()
+        );
+        fetched.manifest.source_lineage = original;
+        let replayed = env
+            .sets
+            .restore_ha_head(&fetched, dir.path(), &frozen)
+            .unwrap()
+            .unwrap();
+        assert_eq!(replayed.checkpoint.sequence, frozen.sequence);
+        assert_eq!(replayed.verification.inspection.commits, frozen.sequence);
+        let database = Database::open_read_only(&fetched.database).unwrap();
+        assert!(database.get(2).unwrap().is_some());
+        assert!(database.get(3).unwrap().is_none());
+        database.close().unwrap();
+    }
+
+    #[test]
+    fn ha_restore_head_accepts_only_the_verified_baseline_without_checkpoints() {
+        let env = setup();
+        let head = &env.archive.head;
+        let pin = env
+            .sets
+            .pin(&head.set_id, "restore", PinKind::Operation, 4)
+            .unwrap();
+        let dir = tempfile::tempdir().unwrap();
+        let fetched = env.sets.fetch(&head.set_id, &pin.id, dir.path()).unwrap();
+        assert!(
+            env.sets
+                .restore_ha_head(&fetched, dir.path(), head)
+                .unwrap()
+                .is_none()
+        );
+        std::fs::write(&fetched.database, b"tampered baseline").unwrap();
+        assert!(
+            env.sets
+                .restore_ha_head(&fetched, dir.path(), head)
+                .is_err()
+        );
     }
 
     #[test]

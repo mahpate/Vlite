@@ -365,6 +365,151 @@ impl Drop for Containers {
 
 #[test]
 #[ignore = "needs a local Azurite Blob endpoint in VLITE_AZURITE_BLOB_ENDPOINT"]
+fn authority_without_head_never_serves_a_published_legacy_set() {
+    let Ok(endpoint) = std::env::var("VLITE_AZURITE_BLOB_ENDPOINT") else {
+        eprintln!("skipping: VLITE_AZURITE_BLOB_ENDPOINT is unset");
+        return;
+    };
+    let endpoint = endpoint.trim_end_matches('/').to_owned();
+    let key_text =
+        std::env::var("VLITE_AZURITE_ACCOUNT_KEY").unwrap_or_else(|_| WELL_KNOWN_KEY.into());
+    let unique = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap()
+        .as_nanos();
+    let containers = Containers {
+        endpoint: endpoint.clone(),
+        key: base64::engine::general_purpose::STANDARD
+            .decode(key_text.trim())
+            .unwrap(),
+        names: [
+            format!("vlite-data-{unique:x}"),
+            format!("vlite-coord-{unique:x}"),
+        ],
+    };
+    for name in &containers.names {
+        assert_eq!(container(&endpoint, &containers.key, "PUT", name), 201);
+    }
+    let directory = tempfile::tempdir().unwrap();
+    let root = directory.path().canonicalize().unwrap();
+    let key = root.join("emulator.key");
+    std::fs::write(&key, key_text.trim()).unwrap();
+    let target = json!({
+        "account":ACCOUNT, "container":containers.names[0],
+        "coordination_container":containers.names[1], "prefix":"e2e/reader/",
+        "endpoint":endpoint, "auth":"emulator_shared_key"
+    });
+    let target_file = root.join("target.json");
+    std::fs::write(&target_file, target.to_string()).unwrap();
+    let admin = root.join("writer-admin");
+    std::fs::create_dir(&admin).unwrap();
+    let writer = Server::start(
+        &root.join("writer.vlite"),
+        &admin,
+        TOKEN,
+        &[("VLITE_CLOUD_BACKUP_SHARED_KEY_FILE", &key)],
+    );
+    let configured = writer.admin(
+        "PUT",
+        "/v1/admin/cloud-backup",
+        json!({
+            "target":target, "enabled":true, "interval_secs":604800, "drill_every":0,
+        }),
+    );
+    assert_eq!(configured.status, 200, "{configured:?}");
+    let run = writer.admin("POST", "/v1/admin/cloud-backup/run", Value::Null);
+    assert_eq!(run.status, 201, "{run:?}");
+    let set_id = run.body["set_id"].as_str().unwrap();
+    eventually("Published legacy set", Duration::from_secs(30), || {
+        let listing = writer.admin("GET", "/v1/admin/cloud-backup/sets", Value::Null);
+        listing.body["sets"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|set| set["set_id"] == set_id && set["record"]["state"] == "published")
+    });
+    let status = writer.admin("GET", "/v1/admin/serve-status", Value::Null);
+    let lineage = status.body["lineage"].as_str().unwrap();
+    let initialized = Command::new(env!("CARGO_BIN_EXE_vlite-server"))
+        .args(["authority", "init", "--target-file"])
+        .arg(&target_file)
+        .arg("--shared-key-file")
+        .arg(&key)
+        .args([
+            "--installation-id",
+            "reader-test",
+            "--scope-id",
+            "reader-test",
+            "--lineage",
+            lineage,
+        ])
+        .output()
+        .unwrap();
+    assert!(
+        initialized.status.success(),
+        "{}",
+        String::from_utf8_lossy(&initialized.stderr)
+    );
+    let authority: Value = serde_json::from_slice(&initialized.stdout).unwrap();
+    assert_eq!(authority["phase"], "recovering");
+    let follower = root.join("follower");
+    let config = root.join("reader.json");
+    std::fs::write(
+        &config,
+        json!({
+            "target_file":target_file, "shared_key_file":key, "follower_dir":follower,
+            "capacity_bytes":1073741824u64, "staleness_bound_ms":10000,
+            "poll_interval_ms":250,
+        })
+        .to_string(),
+    )
+    .unwrap();
+    let child = Command::new(env!("CARGO_BIN_EXE_vlite-server"))
+        .arg(follower.join("reader-a").join("database.vlite"))
+        .args(["--serve-mode", "reader", "--reader-apply-file"])
+        .arg(&config)
+        .args(["--bind", "127.0.0.1:0"])
+        .env("VLITE_AUTH_TOKEN", TOKEN)
+        .env_remove("VLITE_AUTH_TOKEN_FILE")
+        .env_remove("VLITE_ADMIN_DIR")
+        .env_remove("VLITE_ENCRYPTION_KEY")
+        .env_remove("VLITE_ENCRYPTION_KEY_HEX")
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .unwrap();
+    let mut reader = Server {
+        child,
+        address: String::new(),
+        token: TOKEN,
+    };
+    eventually("reader enrollment refusal", Duration::from_secs(30), || {
+        reader.child.try_wait().unwrap().is_some()
+    });
+    assert!(!reader.child.wait().unwrap().success());
+    let mut stdout = String::new();
+    reader
+        .child
+        .stdout
+        .take()
+        .unwrap()
+        .read_to_string(&mut stdout)
+        .unwrap();
+    let mut stderr = String::new();
+    reader
+        .child
+        .stderr
+        .take()
+        .unwrap()
+        .read_to_string(&mut stderr)
+        .unwrap();
+    assert!(!stdout.contains("LISTENING"), "{stdout}");
+    assert!(stderr.contains("reader_apply_no_set"), "{stderr}");
+    assert!(!follower.join("reader-a").exists());
+}
+
+#[test]
+#[ignore = "needs a local Azurite Blob endpoint in VLITE_AZURITE_BLOB_ENDPOINT"]
 fn reader_applies_archive_reports_position_and_fails_closed_when_stale() {
     let Ok(endpoint) = std::env::var("VLITE_AZURITE_BLOB_ENDPOINT") else {
         eprintln!("skipping: VLITE_AZURITE_BLOB_ENDPOINT is unset");

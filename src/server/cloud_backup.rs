@@ -599,10 +599,8 @@ pub(super) struct Manifest {
     pub policy: PolicyCapture,
 }
 
-#[cfg_attr(not(test), allow(dead_code))]
 const HA_MANIFEST_SCHEMA: &str = "vlite.cloud-backup-ha-manifest/1";
 
-#[cfg_attr(not(test), allow(dead_code))]
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub(super) struct HaIdentity {
@@ -612,8 +610,23 @@ pub(super) struct HaIdentity {
     pub lineage: String,
 }
 
+impl HaIdentity {
+    pub(super) fn check_scope(
+        &self,
+        installation_id: &str,
+        authority: &super::authority::Record,
+    ) -> Result<(), ApiError> {
+        if installation_id != authority.installation_id
+            || self.scope_id != authority.scope_id
+            || self.lineage != authority.lineage
+        {
+            return Err(super::authority::AuthorityError::Invalid.into());
+        }
+        Ok(())
+    }
+}
+
 /// Separate envelope: legacy manifests and their wire bytes never acquire HA fields.
-#[cfg_attr(not(test), allow(dead_code))]
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub(super) struct HaManifest {
@@ -622,7 +635,6 @@ pub(super) struct HaManifest {
     pub manifest: Manifest,
 }
 
-#[cfg_attr(not(test), allow(dead_code))]
 impl HaManifest {
     fn check(&self) -> Result<(), ApiError> {
         let identity = &self.authority;
@@ -647,12 +659,12 @@ impl HaManifest {
         Ok(())
     }
 
+    #[cfg_attr(not(test), allow(dead_code))]
     fn check_authority(&self, record: &super::authority::Record) -> Result<(), ApiError> {
         self.check()?;
-        if self.manifest.installation_id != record.installation_id
-            || self.authority.scope_id != record.scope_id
-            || self.authority.lineage != record.lineage
-            || self.authority.epoch != record.epoch
+        self.authority
+            .check_scope(&self.manifest.installation_id, record)?;
+        if self.authority.epoch != record.epoch
             || record.writer_id.as_ref() != Some(&self.authority.writer_id)
         {
             return Err(super::authority::AuthorityError::Invalid.into());
@@ -939,6 +951,7 @@ impl Collection {
 pub(super) struct Fetched {
     pub record: Record,
     pub manifest: Manifest,
+    pub ha: Option<HaIdentity>,
     pub database: PathBuf,
     pub bundle: recovery_bundle::Bundle,
     pub verification: maintenance::Verification,
@@ -1021,7 +1034,6 @@ fn parse_manifest(bytes: &[u8]) -> Result<Manifest, ApiError> {
     })
 }
 
-#[cfg_attr(not(test), allow(dead_code))]
 pub(super) fn parse_ha_manifest(bytes: &[u8]) -> Result<HaManifest, ApiError> {
     let manifest: HaManifest = serde_json::from_slice(bytes)
         .map_err(|e| corrupt(format!("the HA manifest is invalid {}", position(&e))))?;
@@ -1102,6 +1114,16 @@ impl Sets {
     /// object (feature-aca-ha ITEM-008) kept beside the set protocol.
     pub(super) fn coordination(&self) -> (Arc<dyn ObjectStore>, String) {
         (self.meta.clone(), self.prefix.clone())
+    }
+
+    pub(super) fn read_authority(&self) -> Result<Option<super::authority::Observed>, ApiError> {
+        use super::authority::{AuthorityError, AuthorityStore};
+        let (store, prefix) = self.coordination();
+        match AuthorityStore::new(store, prefix).read() {
+            Ok(observed) => Ok(Some(observed)),
+            Err(AuthorityError::Missing) => Ok(None),
+            Err(error) => Err(error.into()),
+        }
     }
 
     fn catalog_key(&self) -> String {
@@ -1758,7 +1780,10 @@ impl Sets {
         if sha_hex(&manifest_blob.bytes) != record.manifest_sha256 {
             return Err(corrupt("the manifest does not match the published record"));
         }
-        let manifest = parse_manifest(&manifest_blob.bytes)?;
+        let (manifest, ha) = match parse_ha_manifest(&manifest_blob.bytes) {
+            Ok(envelope) => (envelope.manifest, Some(envelope.authority)),
+            Err(_) => (parse_manifest(&manifest_blob.bytes)?, None),
+        };
         let (db, bundle_entry) = manifest.check(id, &record.installation_id)?;
         if bundle_entry.bytes > recovery_bundle::MAX_BYTES {
             return Err(corrupt("the recovery bundle is too large"));
@@ -1836,6 +1861,7 @@ impl Sets {
         Ok(Fetched {
             record,
             manifest,
+            ha,
             database,
             bundle,
             verification,
@@ -2001,8 +2027,28 @@ impl Sets {
             return Err(prefix_owned());
         }
         let (mut catalog, mut etag) = self.catalog(now)?;
-        if let Some(decision) = catalog.decision.clone() {
+        let authority = self.read_authority();
+        let authority_readable = authority.is_ok();
+        let protected: Vec<String> = match authority {
+            Ok(Some(observed)) => observed
+                .record
+                .head
+                .iter()
+                .chain(observed.record.base.iter())
+                .map(|head| head.set_id.clone())
+                .collect(),
+            Ok(None) => Vec::new(),
+            Err(error) => {
+                out.fail("", error);
+                Vec::new()
+            }
+        };
+        if let Some(decision) = catalog.decision.clone().filter(|_| authority_readable) {
             for victim in &decision.delete {
+                if protected.contains(&victim.set_id) {
+                    out.skipped.push(victim.set_id.clone());
+                    continue;
+                }
                 let (id, why) = (
                     &victim.set_id,
                     Condemn::Retention(&decision.id, &victim.revision),
@@ -2023,6 +2069,9 @@ impl Sets {
         let grace_ms = retention.orphan_grace_hours.saturating_mul(3_600_000);
         for listed in &listing.sets {
             let id = &listed.set_id;
+            if protected.contains(id) {
+                continue;
+            }
             let Some(record) = &listed.record else {
                 out.unreadable.push(id.clone());
                 continue;
@@ -2055,7 +2104,7 @@ impl Sets {
             }
         }
         for (id, data) in &listing.tombstoned {
-            if *data > 0 {
+            if *data > 0 && !protected.contains(id) {
                 match self.sweep(id) {
                     Ok(_) => out.swept.push(id.clone()),
                     Err(e) => out.fail(id, e),
@@ -2063,7 +2112,7 @@ impl Sets {
             }
         }
 
-        if !retention.enabled {
+        if !retention.enabled || !authority_readable {
             return Ok(out);
         }
         let published: Vec<(&String, &Record)> = listing
@@ -2086,7 +2135,8 @@ impl Sets {
         let keep_ms = retention.keep_days.saturating_mul(86_400_000);
         let (mut delete, mut survivors) = (Vec::new(), Vec::new());
         for (index, (id, record)) in published.iter().enumerate() {
-            let protected = index < retention.keep_sets
+            let protected = protected.contains(id)
+                || index < retention.keep_sets
                 || now.saturating_sub(record.created_unix_ms) < keep_ms
                 || !record.pins.is_empty()
                 || Some(*id) == newest_verified
@@ -2511,6 +2561,121 @@ mod tests {
             },
             uploads,
         )
+    }
+
+    #[test]
+    fn ha_fetch_verifies_envelope_and_returns_identity() {
+        let env = setup();
+        let (authority, claim) = setup_ha(&env);
+        let (manifest, uploads) = prepare_ha(&env, &authority, &claim, BASE);
+        env.sets
+            .publish_ha(&authority, &claim, &manifest, &uploads, BASE, &open)
+            .unwrap();
+        let id = &manifest.manifest.set_id;
+        let pin = env.sets.pin(id, "fetch", PinKind::Operation, BASE).unwrap();
+        let dir = tempfile::tempdir().unwrap();
+        let fetched = env.sets.fetch(id, &pin.id, dir.path()).unwrap();
+        assert_eq!(fetched.ha, Some(manifest.authority.clone()));
+        assert_eq!(fetched.manifest, manifest.manifest);
+        let mut bad = manifest.clone();
+        bad.authority.lineage = "f".repeat(16);
+        let bytes = encode(&bad).unwrap();
+        env.data.set_raw(&env.sets.manifest_key(id), &bytes);
+        let mut record = record(&env, id);
+        record.manifest_sha256 = sha_hex(&bytes);
+        env.meta
+            .set_raw(&env.sets.record_key(id), &encode(&record).unwrap());
+        let dir = tempfile::tempdir().unwrap();
+        assert_eq!(
+            env.sets.fetch(id, &pin.id, dir.path()).err().unwrap().code,
+            "cloud_set_corrupt"
+        );
+    }
+
+    #[test]
+    fn retention_protects_authority_head_and_base_and_fails_closed() {
+        let env = setup();
+        let (authority, claim) = setup_ha(&env);
+        let (base, uploads) = prepare_ha(&env, &authority, &claim, BASE);
+        let current = env
+            .sets
+            .publish_ha(&authority, &claim, &base, &uploads, BASE, &open)
+            .unwrap();
+        let prepared = authority
+            .prepare_transfer(&current, current.record.epoch, &current.record.revision)
+            .unwrap();
+        let (claim, _) = authority.claim(&prepared, BASE + 1).unwrap();
+        let (head, uploads) = prepare_ha(&env, &authority, &claim, BASE + 1);
+        env.sets
+            .publish_ha(&authority, &claim, &head, &uploads, BASE + 1, &open)
+            .unwrap();
+        let victim = publish(&env, BASE + 2);
+        publish(&env, BASE + 3);
+        let mut policy = retention(true);
+        policy.keep_sets = 1;
+        policy.keep_days = 0;
+        let catalog = Catalog {
+            schema: CATALOG_SCHEMA.into(),
+            revision: 1,
+            updated_unix_ms: BASE,
+            decision: Some(Decision {
+                id: "interrupted".into(),
+                created_unix_ms: BASE,
+                delete: [&base.manifest.set_id, &victim]
+                    .into_iter()
+                    .map(|id| Victim {
+                        set_id: id.clone(),
+                        revision: record(&env, id).revision,
+                    })
+                    .collect(),
+                survivors: vec![head.manifest.set_id.clone()],
+            }),
+        };
+        let bytes = encode(&catalog).unwrap();
+        env.meta.set_raw(&env.sets.catalog_key(), &bytes);
+        let (staging, uploads) = prepare(&env, BASE + 4);
+        env.data
+            .fault(Op::Put, "manifest.json", Fault::Refuse, 0, 1);
+        assert!(
+            env.sets
+                .publish(&staging, &uploads, BASE + 4, &open)
+                .is_err()
+        );
+        env.meta
+            .fault(Op::Get, "authority.json", Fault::Before, 0, 1);
+        let out = env
+            .sets
+            .collect(INSTALL, &policy, BASE + 10 * HOUR)
+            .unwrap();
+        assert!(out.deleted.is_empty());
+        assert!(out.resumed.is_empty());
+        assert_eq!(out.orphans_deleted, vec![staging.set_id]);
+        assert_eq!(env.meta.raw(&env.sets.catalog_key()).unwrap(), bytes);
+        assert_eq!(out.failures.len(), 1);
+        assert_eq!(record(&env, &victim).state, SetState::Published);
+        let out = env
+            .sets
+            .collect(INSTALL, &policy, BASE + 10 * HOUR)
+            .unwrap();
+        assert!(out.failures.is_empty());
+        assert!(out.resumed.contains(&victim));
+        assert!(out.skipped.contains(&base.manifest.set_id));
+        for id in [&base.manifest.set_id, &head.manifest.set_id] {
+            assert_eq!(record(&env, id).state, SetState::Published);
+        }
+        let mut pending = record(&env, &base.manifest.set_id);
+        pending.state = SetState::DeletePending;
+        env.meta.set_raw(
+            &env.sets.record_key(&pending.set_id),
+            &encode(&pending).unwrap(),
+        );
+        let out = env
+            .sets
+            .collect(INSTALL, &policy, BASE + 11 * HOUR)
+            .unwrap();
+        assert!(out.deleted.is_empty());
+        assert_eq!(record(&env, &pending.set_id).state, SetState::DeletePending);
+        assert!(data_objects(&env, &pending.set_id) > 0);
     }
 
     #[test]
@@ -3106,6 +3271,7 @@ mod tests {
             .pin(&id, "restore drill", PinKind::Operator, BASE + 1)
             .unwrap();
         let fetched = env.sets.fetch(&id, &pin.id, dir.path()).unwrap();
+        assert!(fetched.ha.is_none());
         assert_eq!(fetched.verification.inspection.live_records, 5);
         assert_eq!(fetched.bundle.installation_id, INSTALL);
         assert_eq!(
