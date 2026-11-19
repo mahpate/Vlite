@@ -166,7 +166,7 @@ async fn status(Extract(service): Extract<Service>) -> Result<Json<Value>, ApiEr
         "binding_generation": service.binding_generation(),
         "format_version": service.format_version,
         "sequence": sequence,
-        "epoch": null,
+        "epoch": service.writer_fence.epoch(),
         "archive": archive,
         "reader": super::reader_staleness::report(&service, hide, now),
         "uptime_ms": u64::try_from(service.started.elapsed().as_millis()).unwrap_or(u64::MAX),
