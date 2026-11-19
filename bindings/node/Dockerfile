@@ -13,6 +13,8 @@ COPY tests ./tests
 COPY examples ./examples
 COPY benchmarks/ha_reader_apply.rs ./benchmarks/ha_reader_apply.rs
 COPY benchmarks/ha_reader_apply_tests.rs ./benchmarks/ha_reader_apply_tests.rs
+COPY benchmarks/ha_reader_strategies.rs ./benchmarks/ha_reader_strategies.rs
+COPY benchmarks/ha_reader_resource.rs ./benchmarks/ha_reader_resource.rs
 COPY bindings/c ./bindings/c
 COPY crates ./crates
 COPY bindings/node ./bindings/node

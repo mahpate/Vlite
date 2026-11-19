@@ -49,17 +49,25 @@ class DockerInputs(unittest.TestCase):
 
     def test_build_stages_copy_explicit_cargo_targets(self):
         manifest = tomllib.loads((ROOT / "Cargo.toml").read_text(encoding="utf-8"))
+        needed_files = []
+        for kind, directory in (("example", "examples"), ("test", "tests")):
+            for target in manifest.get(kind, []):
+                path = target.get("path", f"{directory}/{target['name']}.rs")
+                modules = re.findall(r'#\[path = "([^"]+)"\]', (ROOT / path).read_text(encoding="utf-8"))
+                needed_files += [path, *(str(Path(path).parent / module).replace("\\", "/") for module in modules)]
         for name in ("Dockerfile", "bindings/manylinux.Dockerfile", "bindings/node/Dockerfile"):
             lines = (ROOT / name).read_text(encoding="utf-8").splitlines()
             copied = [match.group(1) for line in lines if (match := re.fullmatch(r"COPY (\S+) \./\1", line.strip()))]
-            for kind, directory in (("example", "examples"), ("test", "tests")):
-                for target in manifest.get(kind, []):
-                    path = target.get("path", f"{directory}/{target['name']}.rs")
-                    modules = re.findall(r'#\[path = "([^"]+)"\]', (ROOT / path).read_text(encoding="utf-8"))
-                    for needed in [path, *(str(Path(path).parent / module).replace("\\", "/") for module in modules)]:
-                        with self.subTest(dockerfile=name, target=needed):
-                            self.assertTrue((ROOT / needed).is_file())
-                            self.assertTrue(any(needed == source or needed.startswith(source + "/") for source in copied))
+            for needed in needed_files:
+                with self.subTest(dockerfile=name, target=needed):
+                    self.assertTrue((ROOT / needed).is_file())
+                    self.assertTrue(any(needed == source or needed.startswith(source + "/") for source in copied))
+        # The context is an allowlist, so a COPY of an unlisted file fails at build time.
+        allowed = [rule[1:] for rule in (ROOT / ".dockerignore").read_text(encoding="utf-8").splitlines() if rule.startswith("!")]
+        for needed in needed_files:
+            with self.subTest(dockerignore=needed):
+                self.assertTrue(any(
+                    needed == rule or (rule.endswith("/**") and needed.startswith(rule[:-2])) for rule in allowed))
 
     def test_release_images_build_only_the_shipped_binaries(self):
         dockerfile = (ROOT / "Dockerfile").read_text(encoding="utf-8")

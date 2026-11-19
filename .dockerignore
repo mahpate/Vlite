@@ -23,6 +23,8 @@
 !benchmarks/
 !benchmarks/ha_reader_apply.rs
 !benchmarks/ha_reader_apply_tests.rs
+!benchmarks/ha_reader_strategies.rs
+!benchmarks/ha_reader_resource.rs
 !crates/
 !crates/**
 !bindings/
