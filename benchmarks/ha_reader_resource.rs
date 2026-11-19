@@ -9,8 +9,9 @@ use std::{
 
 #[cfg(target_os = "linux")]
 use std::{
+    collections::BTreeMap,
     sync::{
-        Mutex,
+        Mutex, OnceLock,
         atomic::{AtomicBool, Ordering},
     },
     thread,
@@ -211,8 +212,10 @@ pub(crate) fn observe_phase<T>(
     stats.record(now, Duration::ZERO, disk, rss);
     let stop = AtomicBool::new(false);
     let shared_stats = Mutex::new(stats);
+    let cpu_before = cpu_snapshot();
+    let cpu_started = Instant::now();
 
-    let (operation_result, monitor_result) = thread::scope(|scope| {
+    let (operation_result, monitor_result, cpu_after) = thread::scope(|scope| {
         let monitor = scope.spawn(|| -> Result<(), String> {
             let mut next = Instant::now() + interval;
             loop {
@@ -237,12 +240,13 @@ pub(crate) fn observe_phase<T>(
             Ok(())
         });
         let result = operation();
+        let cpu_after = (cpu_snapshot(), cpu_started.elapsed());
         stop.store(true, Ordering::Release);
         let monitor_result = monitor
             .join()
             .map_err(|_| "resource sampler panicked".to_owned())
             .and_then(|result| result);
-        (result, monitor_result)
+        (result, monitor_result, cpu_after)
     });
 
     monitor_result.map_err(|error| -> Box<dyn std::error::Error> { error.into() })?;
@@ -259,7 +263,197 @@ pub(crate) fn observe_phase<T>(
         rss,
     );
     let value = operation_result?;
-    Ok((value, stats.to_json()))
+    let mut telemetry = stats.to_json();
+    telemetry["cpu"] = cpu_phase_report(
+        &cpu_before,
+        &cpu_after.0,
+        cpu_after.1,
+        clock_ticks_per_second(),
+    );
+    Ok((value, telemetry))
+}
+
+#[cfg(target_os = "linux")]
+const CGROUP_V2_CPU_STAT: &str = "/sys/fs/cgroup/cpu.stat";
+#[cfg(target_os = "linux")]
+const CGROUP_V1_CPU_STAT: &str = "/sys/fs/cgroup/cpu/cpu.stat";
+
+/// Counts the CPUs in a kernel list such as "0-3,8,10-11"; malformed text yields `None`.
+#[cfg(target_os = "linux")]
+pub(crate) fn cpu_list_count(list: &str) -> Option<u64> {
+    let list = list.trim();
+    if list.is_empty() {
+        return None;
+    }
+    let mut count = 0u64;
+    for part in list.split(',') {
+        let (low, high) = match part.split_once('-') {
+            Some((low, high)) => (low.parse::<u64>().ok()?, high.parse::<u64>().ok()?),
+            None => {
+                let cpu = part.parse::<u64>().ok()?;
+                (cpu, cpu)
+            }
+        };
+        if high < low {
+            return None;
+        }
+        count = count.checked_add(high - low + 1)?;
+    }
+    Some(count)
+}
+
+/// Parses "name value" counter lines (cgroup `cpu.stat`); other lines are skipped.
+#[cfg(target_os = "linux")]
+pub(crate) fn kernel_counters(text: &str) -> BTreeMap<String, u64> {
+    text.lines()
+        .filter_map(|line| {
+            let mut fields = line.split_whitespace();
+            let (name, value) = (fields.next()?, fields.next()?);
+            if fields.next().is_some() {
+                return None;
+            }
+            Some((name.to_owned(), value.parse().ok()?))
+        })
+        .collect()
+}
+
+/// Sums utime and stime (fields 14 and 15 of proc(5) stat) for all threads, in clock ticks.
+#[cfg(target_os = "linux")]
+pub(crate) fn process_cpu_ticks(stat: &str) -> Option<u64> {
+    // The command name may contain spaces or parentheses; fields resume after the last ')'
+    // at field 3, so utime and stime are at offsets 11 and 12.
+    let mut fields = stat.rsplit_once(')')?.1.split_whitespace().skip(11);
+    let utime = fields.next()?.parse::<u64>().ok()?;
+    let stime = fields.next()?.parse::<u64>().ok()?;
+    utime.checked_add(stime)
+}
+
+#[cfg(target_os = "linux")]
+#[derive(Clone, Debug, Default)]
+pub(crate) struct CpuSnapshot {
+    process_ticks: Option<u64>,
+    cgroup_source: Option<&'static str>,
+    cgroup: BTreeMap<String, u64>,
+}
+
+#[cfg(target_os = "linux")]
+pub(crate) fn cpu_snapshot_from(read: impl Fn(&str) -> Option<String>) -> CpuSnapshot {
+    let (cgroup_source, cgroup) = [CGROUP_V2_CPU_STAT, CGROUP_V1_CPU_STAT]
+        .into_iter()
+        .find_map(|path| read(path).map(|text| (Some(path), kernel_counters(&text))))
+        .unwrap_or_default();
+    CpuSnapshot {
+        process_ticks: read("/proc/self/stat")
+            .as_deref()
+            .and_then(process_cpu_ticks),
+        cgroup_source,
+        cgroup,
+    }
+}
+
+#[cfg(target_os = "linux")]
+fn cpu_snapshot() -> CpuSnapshot {
+    cpu_snapshot_from(|path| fs::read_to_string(path).ok())
+}
+
+#[cfg(target_os = "linux")]
+fn clock_ticks_per_second() -> Option<u64> {
+    static TICKS: OnceLock<Option<u64>> = OnceLock::new();
+    *TICKS.get_or_init(|| {
+        command_output("getconf", &["CLK_TCK"])
+            .ok()?
+            .parse()
+            .ok()
+            .filter(|ticks| *ticks > 0)
+    })
+}
+
+/// Reports one phase's raw CPU deltas. Missing counters, a changed `cpu.stat` source or a
+/// decreasing counter yield `null`, never zero.
+#[cfg(target_os = "linux")]
+pub(crate) fn cpu_phase_report(
+    before: &CpuSnapshot,
+    after: &CpuSnapshot,
+    elapsed: Duration,
+    clock_ticks_per_second: Option<u64>,
+) -> Value {
+    let elapsed_seconds = elapsed.as_secs_f64();
+    let per_wall_second = |amount: f64| (elapsed_seconds > 0.0).then(|| amount / elapsed_seconds);
+    let process_ticks = before
+        .process_ticks
+        .zip(after.process_ticks)
+        .and_then(|(before, after)| after.checked_sub(before));
+    let process_seconds = process_ticks
+        .zip(clock_ticks_per_second.filter(|ticks| *ticks > 0))
+        .map(|(ticks, per_second)| ticks as f64 / per_second as f64);
+    let same_source = before.cgroup_source.is_some() && before.cgroup_source == after.cgroup_source;
+    let delta: BTreeMap<&str, Option<u64>> = if same_source {
+        after
+            .cgroup
+            .iter()
+            .map(|(name, after)| {
+                let before = before.cgroup.get(name);
+                (
+                    name.as_str(),
+                    before.and_then(|before| after.checked_sub(*before)),
+                )
+            })
+            .collect()
+    } else {
+        BTreeMap::new()
+    };
+    let counter = |name: &str| delta.get(name).copied().flatten();
+    let throttled_fraction = counter("nr_throttled")
+        .zip(counter("nr_periods").filter(|periods| *periods > 0))
+        .map(|(throttled, periods)| throttled as f64 / periods as f64);
+    json!({
+        "wall_elapsed_ms": elapsed_seconds * 1_000.0,
+        "process_cpu_ticks": process_ticks,
+        "clock_ticks_per_second": clock_ticks_per_second,
+        "process_cpu_seconds": process_seconds,
+        "mean_process_cores_used": process_seconds.and_then(per_wall_second),
+        "process_cpu_source": "Linux /proc/self/stat utime+stime of every process thread, including the resource sampler; clock-tick resolution; tick rate from getconf CLK_TCK",
+        "cgroup_cpu_stat_source": if same_source { before.cgroup_source } else { None },
+        "cgroup_cpu_stat_delta": delta,
+        "cgroup_throttled_period_fraction": throttled_fraction,
+        "mean_cgroup_cores_used": counter("usage_usec")
+            .and_then(|usec| per_wall_second(usec as f64 / 1_000_000.0)),
+        "interpretation": "Raw kernel deltas for this phase. Missing or decreasing counters stay null. They do not establish the requested tier's vCPU allocation."
+    })
+}
+
+/// Records the kernel's view of usable CPUs. These label, but do not attest, the effective vCPU.
+#[cfg(target_os = "linux")]
+pub(crate) fn cpu_signals_from(
+    read: impl Fn(&str) -> Option<String>,
+    available_parallelism: Option<usize>,
+) -> Value {
+    let trimmed = |path: &str| read(path).map(|text| text.trim().to_owned());
+    let affinity = read("/proc/self/status").and_then(|status| {
+        status
+            .lines()
+            .find_map(|line| line.strip_prefix("Cpus_allowed_list:"))
+            .map(|list| list.trim().to_owned())
+    });
+    let online = trimmed("/sys/devices/system/cpu/online");
+    let membership = trimmed("/proc/self/cgroup");
+    let v2_path = membership
+        .as_deref()
+        .and_then(|text| text.lines().find_map(|line| line.strip_prefix("0::")));
+    json!({
+        "available_parallelism": available_parallelism,
+        "available_parallelism_source": "Rust std::thread::available_parallelism; considers the affinity mask and cgroup CPU quota on Linux",
+        "affinity_cpus": affinity.as_deref().and_then(cpu_list_count),
+        "affinity_cpu_list": affinity,
+        "online_cpus": online.as_deref().and_then(cpu_list_count),
+        "online_cpu_list": online,
+        "cgroup_v2_cpu_weight": trimmed("/sys/fs/cgroup/cpu.weight"),
+        "cgroup_v1_cpu_shares": trimmed("/sys/fs/cgroup/cpu/cpu.shares"),
+        "process_cgroup": membership,
+        "cgroup_v2_path_is_root": v2_path.map(|path| path == "/"),
+        "source": "/proc/self/status Cpus_allowed_list, /sys/devices/system/cpu/online, /proc/self/cgroup, and cgroup v2 cpu.weight or v1 cpu.shares",
+        "interpretation": "Kernel observations only; they label, but do not attest, the effective vCPU allocation. When cgroup_v2_path_is_root is false, /sys/fs/cgroup files may describe an ancestor cgroup."
+    })
 }
 
 #[cfg(target_os = "linux")]
@@ -480,6 +674,10 @@ pub(crate) fn run() -> BoxResult<()> {
     let platform = platform_from(|name| std::env::var(name).ok());
     let on_aca = platform["kind"] == "azure_container_apps_job";
     let limits = cgroup_limits();
+    let cpu_signals = cpu_signals_from(
+        |path| fs::read_to_string(path).ok(),
+        thread::available_parallelism().ok().map(usize::from),
+    );
     let directory = tempfile::tempdir()?;
     let (source_revision, dirty_paths, provenance_source) = source_provenance()?;
     let baseline_root = directory.path().join("baseline");
@@ -512,7 +710,10 @@ pub(crate) fn run() -> BoxResult<()> {
 
     let memory = process_memory()?;
     let mut unqualified = if on_aca {
-        vec!["serving load, restart and re-seed behavior on the measured tier"]
+        vec![
+            "serving load, restart and re-seed behavior on the measured tier",
+            "effective vCPU allocation of the requested tier; recorded CPU signals are kernel observations, not an attestation",
+        ]
     } else {
         vec![
             "ACA CPU and ephemeral-storage tier",
@@ -533,7 +734,7 @@ pub(crate) fn run() -> BoxResult<()> {
         .map(|(field, source)| ((*field).to_owned(), json!(source)))
         .collect();
     let report = json!({
-        "schema_version": 1,
+        "schema_version": 2,
         "scope": if on_aca {
             "ACA_JOB_RESOURCE_MEASUREMENT_EVIDENCE_NOT_SERVING_QUALIFICATION"
         } else {
@@ -551,6 +752,7 @@ pub(crate) fn run() -> BoxResult<()> {
             "build_profile": if cfg!(debug_assertions) { "debug" } else { "release" },
             "platform": platform,
             "host_resource_limits": limits,
+            "effective_cpu_signals": cpu_signals,
             "temporary_filesystem_location": directory.path().display().to_string(),
             "temporary_filesystem_df_kp": command_output("df", &["-kP", &directory.path().display().to_string()])?,
             "host_note": std::env::var("VLITE_RESOURCE_HOST_NOTE")

@@ -171,6 +171,39 @@ unqualified, and no requested platform tier is substituted. No telemetry
 failure is converted to zero. The probe verifies reader data/position/ANN
 results and compaction output before printing JSON.
 
+The resource report uses `schema_version` 2. It adds two kinds of CPU
+observation. Each measured phase's `telemetry.cpu` records:
+
+- the raw delta of every `cpu.stat` counter (cgroup v2 preferred, else v1
+  `cpuacct`/`cpu`), computed only when the same file was read before and after
+  the phase;
+- `mean_cgroup_cores_used` (the `usage_usec` delta divided by wall time);
+- `cgroup_throttled_period_fraction`, computed only when the `nr_periods` delta
+  is positive, so it is null without a CFS quota;
+- the process's own `/proc/self/stat` CPU time at clock-tick resolution, using
+  the tick rate from `getconf CLK_TCK`. This time includes the resource sampler
+  thread.
+
+A missing counter, an unreadable file or a decreasing counter (a reset) stays
+null and is never converted to zero.
+
+`source.effective_cpu_signals` records:
+
+- the affinity CPU list and count;
+- the online CPU list and count;
+- Rust's `available_parallelism`;
+- the process's `/proc/self/cgroup` line, and whether its cgroup v2 path is the
+  root;
+- cgroup v2 `cpu.weight` or v1 `cpu.shares`.
+
+These are kernel observations that label the run. They do not attest the
+effective vCPU allocation, and the ACA report keeps that allocation
+unqualified. The cgroup counters cover every process in the cgroup mounted at
+`/sys/fs/cgroup`. When `cgroup_v2_path_is_root` is false, that cgroup may be an
+ancestor that also counts unrelated work. A local WSL run on a busy host showed
+about 13–14 cgroup cores against 1–2 probe cores. Compare the process figures
+against the cgroup figures before drawing any conclusion.
+
 When both `CONTAINER_APP_JOB_NAME` and `CONTAINER_APP_JOB_EXECUTION_NAME` are
 set (Azure Container Apps injects them into job replicas), the report labels the
 platform `azure_container_apps_job` and its scope becomes

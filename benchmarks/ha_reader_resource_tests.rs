@@ -28,6 +28,154 @@ fn resource_observer_captures_transient_allocated_blocks_and_sampled_rss() {
     assert_eq!(report["sampling_interval_ms"], 5);
     assert!(report["max_observed_sample_gap_ms"].as_f64().unwrap() >= 0.0);
     assert!(report["max_scan_duration_ms"].as_f64().unwrap() >= 0.0);
+    let cpu = &report["cpu"];
+    assert!(cpu["wall_elapsed_ms"].as_f64().unwrap() >= 35.0);
+    assert!(cpu["process_cpu_ticks"].is_u64(), "{cpu}");
+    assert!(cpu["cgroup_cpu_stat_delta"].is_object(), "{cpu}");
+}
+
+#[cfg(target_os = "linux")]
+fn fake_files(entries: &'static [(&'static str, &'static str)]) -> impl Fn(&str) -> Option<String> {
+    move |path: &str| {
+        entries
+            .iter()
+            .find(|(name, _)| *name == path)
+            .map(|(_, text)| (*text).to_owned())
+    }
+}
+
+#[cfg(target_os = "linux")]
+#[test]
+fn cpu_list_and_counter_parsers_reject_malformed_text() {
+    assert_eq!(resource::cpu_list_count("0-3,8,10-11\n"), Some(7));
+    assert_eq!(resource::cpu_list_count("0"), Some(1));
+    for malformed in ["", "3-1", "0-3,", "a", "0-x"] {
+        assert_eq!(resource::cpu_list_count(malformed), None, "{malformed:?}");
+    }
+
+    let counters =
+        resource::kernel_counters("usage_usec 42\nnr_periods 7\nbad line here\nname x\n");
+    assert_eq!(counters.len(), 2);
+    assert_eq!(counters["usage_usec"], 42);
+
+    let stat = "1234 (my) prog) S 1 2 3 4 5 6 7 8 9 10 250 50 0 0 20 0";
+    assert_eq!(resource::process_cpu_ticks(stat), Some(300));
+    assert_eq!(resource::process_cpu_ticks("1234 (x) S 1"), None);
+}
+
+#[cfg(target_os = "linux")]
+#[test]
+fn cpu_phase_report_records_raw_deltas_and_never_invents_values() {
+    let before = resource::cpu_snapshot_from(fake_files(&[
+        (
+            "/proc/self/stat",
+            "9 (vlite) R 1 2 3 4 5 6 7 8 9 10 100 50 0 0",
+        ),
+        (
+            "/sys/fs/cgroup/cpu.stat",
+            "usage_usec 1000000\nnr_periods 10\nnr_throttled 2\nthrottled_usec 5000\n",
+        ),
+    ]));
+    let after = resource::cpu_snapshot_from(fake_files(&[
+        (
+            "/proc/self/stat",
+            "9 (vlite) R 1 2 3 4 5 6 7 8 9 10 300 150 0 0",
+        ),
+        (
+            "/sys/fs/cgroup/cpu.stat",
+            "usage_usec 3000000\nnr_periods 30\nnr_throttled 7\nthrottled_usec 15000\nnr_bursts 1\n",
+        ),
+        ("/sys/fs/cgroup/cpu/cpu.stat", "nr_periods 99\n"),
+    ]));
+    let two_seconds = Duration::from_secs(2);
+    let report = resource::cpu_phase_report(&before, &after, two_seconds, Some(100));
+    assert_eq!(report["process_cpu_ticks"], 300);
+    assert_eq!(report["process_cpu_seconds"], 3.0);
+    assert_eq!(report["mean_process_cores_used"], 1.5);
+    assert_eq!(report["cgroup_cpu_stat_source"], "/sys/fs/cgroup/cpu.stat");
+    assert_eq!(report["cgroup_cpu_stat_delta"]["usage_usec"], 2_000_000);
+    assert_eq!(report["cgroup_cpu_stat_delta"]["throttled_usec"], 10_000);
+    assert!(report["cgroup_cpu_stat_delta"]["nr_bursts"].is_null());
+    assert_eq!(report["cgroup_throttled_period_fraction"], 0.25);
+    assert_eq!(report["mean_cgroup_cores_used"], 1.0);
+
+    let unknown_rate = resource::cpu_phase_report(&before, &after, Duration::ZERO, None);
+    assert_eq!(unknown_rate["process_cpu_ticks"], 300);
+    assert!(unknown_rate["process_cpu_seconds"].is_null());
+    assert!(unknown_rate["mean_cgroup_cores_used"].is_null());
+
+    let reset = resource::cpu_phase_report(&after, &before, two_seconds, Some(100));
+    assert!(reset["process_cpu_ticks"].is_null());
+    assert!(reset["cgroup_cpu_stat_delta"]["usage_usec"].is_null());
+    assert!(reset["cgroup_throttled_period_fraction"].is_null());
+
+    let v1 = resource::cpu_snapshot_from(fake_files(&[(
+        "/sys/fs/cgroup/cpu/cpu.stat",
+        "nr_periods 5\nnr_throttled 1\nthrottled_time 100\n",
+    )]));
+    let source_changed = resource::cpu_phase_report(&before, &v1, two_seconds, Some(100));
+    assert!(source_changed["cgroup_cpu_stat_source"].is_null());
+    assert_eq!(source_changed["cgroup_cpu_stat_delta"], json!({}));
+    assert!(source_changed["process_cpu_ticks"].is_null());
+
+    let v1_report = resource::cpu_phase_report(&v1, &v1, two_seconds, Some(100));
+    assert_eq!(
+        v1_report["cgroup_cpu_stat_source"],
+        "/sys/fs/cgroup/cpu/cpu.stat"
+    );
+    assert_eq!(v1_report["cgroup_cpu_stat_delta"]["throttled_time"], 0);
+    assert!(v1_report["mean_cgroup_cores_used"].is_null());
+}
+
+#[cfg(target_os = "linux")]
+#[test]
+fn cpu_signals_record_kernel_views_without_attesting_an_allocation() {
+    let signals = resource::cpu_signals_from(
+        fake_files(&[
+            (
+                "/proc/self/status",
+                "Name:\tvlite\nCpus_allowed_list:\t0-3\n",
+            ),
+            ("/sys/devices/system/cpu/online", "0-15\n"),
+            ("/proc/self/cgroup", "0::/\n"),
+            ("/sys/fs/cgroup/cpu.weight", "100\n"),
+        ]),
+        Some(4),
+    );
+    assert_eq!(signals["available_parallelism"], 4);
+    assert_eq!(signals["affinity_cpus"], 4);
+    assert_eq!(signals["affinity_cpu_list"], "0-3");
+    assert_eq!(signals["online_cpus"], 16);
+    assert_eq!(signals["cgroup_v2_cpu_weight"], "100");
+    assert!(signals["cgroup_v1_cpu_shares"].is_null());
+    assert_eq!(signals["cgroup_v2_path_is_root"], true);
+
+    let nested = resource::cpu_signals_from(
+        fake_files(&[("/proc/self/cgroup", "0::/system.slice/vlite.scope\n")]),
+        None,
+    );
+    assert_eq!(nested["cgroup_v2_path_is_root"], false);
+    assert!(nested["available_parallelism"].is_null());
+
+    let v1 = resource::cpu_signals_from(
+        fake_files(&[
+            ("/proc/self/cgroup", "12:cpu,cpuacct:/docker/abc\n"),
+            ("/sys/fs/cgroup/cpu/cpu.shares", "1024\n"),
+        ]),
+        Some(2),
+    );
+    assert!(v1["cgroup_v2_path_is_root"].is_null());
+    assert_eq!(v1["cgroup_v1_cpu_shares"], "1024");
+
+    let none = resource::cpu_signals_from(fake_files(&[]), None);
+    for key in [
+        "affinity_cpus",
+        "online_cpus",
+        "process_cgroup",
+        "cgroup_v2_path_is_root",
+    ] {
+        assert!(none[key].is_null(), "{key}");
+    }
 }
 
 #[cfg(target_os = "linux")]
