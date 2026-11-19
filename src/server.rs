@@ -41,6 +41,8 @@ mod compaction;
 mod control_state;
 mod credentials;
 mod features;
+#[cfg(test)]
+mod fencing_fault_tests;
 mod gateway;
 mod gateway_mode;
 mod gateway_trust;
