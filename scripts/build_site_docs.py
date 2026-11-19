@@ -19,7 +19,7 @@ GROUPS = [
     ("Getting started", ["INSTALL", "REFERENCE"]),
     ("Interfaces", ["API", "GRPC", "CAPABILITIES", "VECTORS"]),
     ("Storage & indexes", ["STORAGE-FEATURES", "KEY-VALUE", "ANN-SNAPSHOTS", "GRAPH", "GRAPH-QUERY"]),
-    ("Operations", ["DOCKER-OPERATIONS", "SECURITY", "WEBHOOKS", "TOOLS"]),
+    ("Operations", ["DOCKER-OPERATIONS", "HA-ACA", "SECURITY", "WEBHOOKS", "TOOLS"]),
     ("Agents", ["MEMORY", "MCP", "AGENT-SKILLS"]),
     ("Console", ["CONSOLE", "CONSOLE-ADMIN"]),
     ("Releases", ["RELEASE-0.7.2", "RELEASE-0.7.1", "RELEASE-0.7.0", "RELEASE-0.6.1", "RELEASE-0.6.0", "RELEASE-0.5.1", "RELEASE-0.5.0", "RELEASE-0.4.1", "RELEASE-0.4.0", "RELEASE-0.3.0", "RELEASE-0.2.0"]),
