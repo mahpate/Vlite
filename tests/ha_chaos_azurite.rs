@@ -3,10 +3,7 @@
 //! Run ignored tests with VLITE_AZURITE_BLOB_ENDPOINT; VLITE_CHAOS_SEED
 //! replays timing/choice and VLITE_CHAOS_ITERATIONS repeats each drill (1..=20).
 //!
-//! # Blocked drills
-//! Only TEST-008's loss-report match remains blocked on the runtime HA archive
-//! head (ITEM-038). TEST-007 and TEST-014 exercise startup claims and fencing
-//! without configuring cloud backup or an archive.
+//! D7 and D8 require ITEM-040's verified-base writer startup restore.
 
 #![cfg(feature = "server")]
 
@@ -116,6 +113,7 @@ struct ProxyState {
     cut: bool,
     stopped: bool,
     gate: Option<Gate>,
+    head_cas_rejected: bool,
     sockets: BTreeMap<u64, (TcpStream, TcpStream)>,
 }
 
@@ -217,6 +215,21 @@ impl Proxy {
         });
     }
 
+    fn arm_head_cas(&self) {
+        let mut state = self.shared.state.lock().unwrap();
+        state.head_cas_rejected = false;
+        state.gate = Some(Gate {
+            method: "PUT ",
+            path: "/authority.json",
+            claimed: false,
+            hit: false,
+        });
+    }
+
+    fn head_cas_rejected(&self) -> bool {
+        self.shared.state.lock().unwrap().head_cas_rejected
+    }
+
     fn hit(&self) -> bool {
         self.shared
             .state
@@ -295,7 +308,16 @@ fn forward(
     let request = head.lines().next().unwrap_or_default();
     let (gated, refused) = {
         let mut state = shared.state.lock().unwrap();
-        if let Some(gate) = &mut state.gate
+        if state.gate.as_ref().is_some_and(|gate| {
+            gate.path == "/authority.json"
+                && gate.method == "PUT "
+                && gate.claimed
+                && request.starts_with("GET ")
+                && request.contains(gate.path)
+        }) {
+            // Hold the old CAS observation while rechecks fail closed.
+            (false, true)
+        } else if let Some(gate) = &mut state.gate
             && request.starts_with(gate.method)
             && request.contains(gate.path)
         {
@@ -359,6 +381,18 @@ fn forward(
         let _ = request_writer.shutdown(Shutdown::Write);
         result
     });
+    if gated && request.starts_with("PUT ") && request.contains("/authority.json") {
+        let mut response_head = Vec::new();
+        while !response_head.ends_with(b"\r\n\r\n") {
+            let mut byte = [0];
+            remote.read_exact(&mut byte)?;
+            response_head.push(byte[0]);
+        }
+        let head = String::from_utf8_lossy(&response_head);
+        shared.state.lock().unwrap().head_cas_rejected =
+            head.split_whitespace().nth(1) == Some("412");
+        client.write_all(&response_head)?;
+    }
     let result = io::copy(&mut remote, &mut client);
     let _ = client.shutdown(Shutdown::Both);
     let _ = remote.shutdown(Shutdown::Both);
@@ -884,16 +918,23 @@ impl Fixture {
     fn authority_databases(&self) -> [PathBuf; 2] {
         let paths = [self.root.join("a.vlite"), self.root.join("b.vlite")];
         let database = Database::create_with_format(&paths[0], 2, FormatVersion::V4).unwrap();
-        let lineage = format!("{:016x}", database.lineage().unwrap());
         database.close().unwrap();
         std::fs::copy(&paths[0], &paths[1]).unwrap();
+        self.initialize_authority(&paths[0], "chaos-installation");
+        paths
+    }
+
+    fn initialize_authority(&self, path: &Path, installation: &str) {
+        let database = Database::open(path).unwrap();
+        let lineage = format!("{:016x}", database.lineage().unwrap());
+        database.close().unwrap();
         let initialized = operator(
             &["authority", "init"],
             &self.target_file,
             &self.key_file,
             &[
                 "--installation-id",
-                "chaos-installation",
+                installation,
                 "--scope-id",
                 "chaos-scope",
                 "--lineage",
@@ -904,7 +945,41 @@ impl Fixture {
             initialized["epoch"] == 1 && initialized["writer_present"] == false,
             "authority initialization: {initialized}"
         );
-        paths
+    }
+
+    fn archiving_authority_writer(&self) -> (Server, [PathBuf; 2]) {
+        let paths = [self.root.join("a.vlite"), self.root.join("b.vlite")];
+        Database::create_with_format(&paths[0], 2, FormatVersion::V4)
+            .unwrap()
+            .close()
+            .unwrap();
+        std::fs::copy(&paths[0], &paths[1]).unwrap();
+        let admin = self.root.join("writer-admin");
+        let initial = Server::start(&paths[0], &admin, &self.key_file);
+        let configured = initial.admin(
+            "PUT",
+            "/v1/admin/cloud-backup",
+            json!({
+                "target": self.writer_target, "enabled":true, "interval_secs":604800,
+                "drill_every":0, "archive":{"enabled":true,"interval_secs":ARCHIVE_INTERVAL_SECS}
+            }),
+        );
+        check!(
+            configured.status == 200,
+            "configure HA archive: {configured:?}"
+        );
+        drop(initial);
+        self.initialize_authority(
+            &paths[0],
+            configured.body["installation_id"].as_str().unwrap(),
+        );
+        let target = self.root.join("proxied-authority.json");
+        std::fs::write(&target, self.writer_target.to_string()).unwrap();
+        let mut command = writer_command(&paths[0], &target, &self.key_file);
+        command
+            .env("VLITE_ADMIN_DIR", &admin)
+            .env("VLITE_CLOUD_BACKUP_SHARED_KEY_FILE", &self.key_file);
+        (Server(Proc::spawn(command)), paths)
     }
 
     fn baseline(&self, writer: &Server) {
@@ -1385,6 +1460,7 @@ fn chaos_paused_writer_after_promotion_never_acknowledges() {
                 fixture.proxy.hit()
             });
         }
+
         eventually(
             "fence observes authority pause",
             Duration::from_secs(10),
@@ -1485,5 +1561,379 @@ fn chaos_paused_writer_after_promotion_never_acknowledges() {
             r#"{"vector":[13.0,1.0]}"#,
             &[("Authorization", &bearer(TOKEN))],
         ));
+    });
+}
+
+fn authority(fixture: &Fixture) -> Value {
+    operator(
+        &["authority", "show"],
+        &fixture.target_file,
+        &fixture.key_file,
+        &[],
+    )
+}
+
+fn served_sequence(writer: &Proc) -> u64 {
+    let status = writer.call("GET", "/v1/admin/serve-status", Value::Null);
+    check!(status.status == 200, "serve status: {status:?}");
+    check!(
+        status.body["sequence"].is_u64(),
+        "missing restored/committed sequence: {status:?}"
+    );
+    status.body["sequence"].as_u64().unwrap()
+}
+
+fn recorded_inserts(writer: &Server, count: u64, writes: &mut BTreeMap<u64, u64>) -> u64 {
+    for _ in 0..count {
+        let id = writes.len() as u64 + 1;
+        insert(writer, id..=id);
+        let sequence = served_sequence(&writer.0);
+        check!(
+            writes
+                .last_key_value()
+                .is_none_or(|(_, last)| sequence > *last),
+            "write sequence did not advance: {sequence}"
+        );
+        writes.insert(id, sequence);
+    }
+    *writes.last_key_value().unwrap().1
+}
+
+fn publish_authority_baseline(fixture: &Fixture, writer: &Server) -> Value {
+    let published = writer.admin("POST", "/v1/admin/cloud-backup/run", Value::Null);
+    check!(published.status == 201, "HA baseline: {published:?}");
+    let shown = authority(fixture);
+    check!(
+        shown["epoch"] == 1
+            && shown["head"]["set_id"] == published.body["set_id"]
+            && shown["head"]["sequence"] == served_sequence(&writer.0),
+        "baseline did not advance authority: {shown}"
+    );
+    shown["head"].clone()
+}
+
+fn wait_for_archived_sequence(fixture: &Fixture, writer: &Server, sequence: u64) -> Value {
+    eventually("authority-bound archive checkpoint", ARCHIVE_WAIT, || {
+        let status = writer.admin("GET", "/v1/admin/cloud-backup", Value::Null);
+        check!(status.status == 200, "archive status: {status:?}");
+        status.body["status"]["archive"]["last_checkpoint_sequence"] == sequence
+    });
+    let shown = authority(fixture);
+    check!(
+        shown["head"]["sequence"] == sequence
+            && shown["head"]["index_sha256"]
+                .as_str()
+                .is_some_and(|s| s.len() == 64),
+        "archive status is not a committed authority head: {shown}"
+    );
+    shown["head"].clone()
+}
+
+fn reported_transfer(fixture: &Fixture, observed: Option<u64>) -> (Value, Value) {
+    let mut options = Vec::new();
+    if let Some(sequence) = observed {
+        options.extend([
+            "--observed-sequence".to_owned(),
+            sequence.to_string(),
+            "--observed-unix-ms".to_owned(),
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap()
+                .as_millis()
+                .to_string(),
+        ]);
+    }
+    let report = operator(
+        &["failover", "report"],
+        &fixture.target_file,
+        &fixture.key_file,
+        &options.iter().map(String::as_str).collect::<Vec<_>>(),
+    );
+    let report = report["report"].clone();
+    options.extend([
+        "--ack-report-id".into(),
+        report["report_id"].as_str().unwrap().into(),
+        "--expected-epoch".into(),
+        report["epoch"].to_string(),
+        "--expected-revision".into(),
+        report["revision"].as_str().unwrap().into(),
+        "--old-replicas".into(),
+        "0".into(),
+    ]);
+    // Test-only infrastructure acknowledgement: A is killed or paused by the
+    // proxy. Production operators must establish zero replicas independently.
+    let transfer = operator(
+        &["failover", "execute"],
+        &fixture.target_file,
+        &fixture.key_file,
+        &options.iter().map(String::as_str).collect::<Vec<_>>(),
+    );
+    check!(
+        transfer["report"] == report
+            && transfer["result"]["record"]["epoch"] == 2
+            && transfer["result"]["record"]["head"].is_null()
+            && transfer["result"]["record"]["base"] == report["archived"],
+        "transfer differs from acknowledged archived position: {transfer}"
+    );
+    (report, transfer["result"]["record"].clone())
+}
+
+fn former_owner_stops(writer: &mut Proc) {
+    let bound = Duration::from_millis(AUTHORITY_RECHECK_MS + 5_000);
+    let resumed = Instant::now();
+    eventually("archiving former writer self-stop", bound, || {
+        writer_refused(try_call_with_timeout(
+            &writer.address,
+            "PUT",
+            "/v1/vectors/999999",
+            r#"{"vector":[999999.0,1.0]}"#,
+            &[("Authorization", &bearer(TOKEN))],
+            Duration::from_millis(250),
+        ));
+        check!(
+            resumed.elapsed() <= bound,
+            "FINDING: archiving former writer exceeded authority recheck + 5s self-stop bound"
+        );
+        if let Some(status) = writer.child.try_wait().unwrap() {
+            check!(status.code() == Some(1), "former writer exit: {status}");
+            true
+        } else {
+            false
+        }
+    });
+}
+
+fn verify_restored_writes(
+    replacement: &Proc,
+    report: &Value,
+    writes: &BTreeMap<u64, u64>,
+) -> (u64, u64) {
+    let ready = replacement.call("GET", "/ready", Value::Null);
+    check!(
+        ready.status == 200,
+        "restored writer is not ready: {ready:?}"
+    );
+    let restored = served_sequence(replacement);
+    let reported = report["archived"]["sequence"].as_u64().unwrap();
+    check!(
+        reported == restored,
+        "FINDING: report archived sequence {reported} differs from B restored sequence {restored}"
+    );
+    let status = replacement.call("GET", "/v1/admin/serve-status", Value::Null);
+    check!(
+        status.body["lineage"] == report["lineage"] && status.body["epoch"] == 2,
+        "replacement restored a different lineage/epoch: {status:?}"
+    );
+    let mut lost = 0;
+    for (&id, &sequence) in writes {
+        let reply = replacement.call("GET", &format!("/v1/vectors/{id}"), Value::Null);
+        if sequence <= reported {
+            check!(
+                reply.status == 200 && reply.body["vector"] == json!([id as f64, 1.0]),
+                "FINDING: report counts id={id} sequence={sequence} as archived, B returned {reply:?}"
+            );
+        } else {
+            check!(
+                reply.status == 404,
+                "unarchived id={id} sequence={sequence} survived verified-base restore: {reply:?}"
+            );
+        }
+        if reply.status == 404 {
+            check!(
+                sequence > reported,
+                "FINDING: missing id={id} sequence={sequence} is outside reported loss window >{reported}"
+            );
+            lost += 1;
+        }
+    }
+    check!(lost > 0, "drill did not exercise loss of unarchived writes");
+    (restored, lost)
+}
+
+#[test]
+#[ignore = "needs a local Azurite Blob endpoint and ITEM-040 verified-base startup restore"]
+fn chaos_former_owner_head_cas_fails_and_new_writer_starts_from_verified_head() {
+    drill("D7 former-owner head CAS", |endpoint, random| {
+        let fixture = Fixture::new(endpoint, true, false);
+        let (mut writer, databases) = fixture.archiving_authority_writer();
+        let mut writes = BTreeMap::new();
+        recorded_inserts(&writer, 2 + random.next() % 5, &mut writes);
+        let baseline = publish_authority_baseline(&fixture, &writer);
+        let sequence = recorded_inserts(&writer, 1 + random.next() % 5, &mut writes);
+        let head = wait_for_archived_sequence(&fixture, &writer, sequence);
+        check!(
+            head["sequence"].as_u64().unwrap() > baseline["sequence"].as_u64().unwrap(),
+            "archive did not advance beyond baseline"
+        );
+        let observed = recorded_inserts(&writer, 1 + random.next() % 5, &mut writes);
+
+        // Pause a real head CAS after it captured epoch 1's ETag, not merely
+        // an archive timer. Rechecks fail closed until the CAS is released.
+        fixture.proxy.arm_head_cas();
+        let address = writer.0.address.clone();
+        let pending = thread::spawn(move || {
+            try_call_with_timeout(
+                &address,
+                "POST",
+                "/v1/admin/cloud-backup/run",
+                "",
+                &[("Authorization", &bearer(TOKEN))],
+                Duration::from_secs(120),
+            )
+        });
+        eventually(
+            "paused former-owner head CAS",
+            Duration::from_secs(30),
+            || fixture.proxy.hit(),
+        );
+        delayed_fault(random.delay(), || {});
+        eventually("CAS-paused writer unready", Duration::from_secs(10), || {
+            former_writer_not_ready(&writer.0.address, false)
+        });
+        let (report, transferred) = reported_transfer(&fixture, Some(observed));
+        check!(
+            report["archived"] == head,
+            "paused publish advanced the head: {report}"
+        );
+        check!(
+            former_writer_not_ready(&writer.0.address, true),
+            "former writer became ready after transfer"
+        );
+        writer_refused(try_call(
+            &writer.0.address,
+            "PUT",
+            "/v1/vectors/999999",
+            r#"{"vector":[999999.0,1.0]}"#,
+            &[("Authorization", &bearer(TOKEN))],
+        ));
+        fixture.proxy.restore();
+        former_owner_stops(&mut writer.0);
+        writer_refused(pending.join().unwrap());
+        check!(
+            fixture.proxy.head_cas_rejected(),
+            "FINDING: former-owner head CAS did not receive Azure HTTP 412"
+        );
+        let stopped = authority(&fixture);
+        check!(
+            stopped["epoch"] == 2
+                && stopped["head"].is_null()
+                && stopped["base"] == head
+                && stopped["revision"] == transferred["revision"]
+                && stopped["writer_present"] == false,
+            "FINDING: former owner changed transferred authority: {stopped}"
+        );
+
+        let stale = random.next() & 1 == 0;
+        if !stale {
+            std::fs::remove_file(&databases[1]).unwrap();
+        }
+        eprintln!(
+            "D7 seed={}: stale_path={stale}, archived={sequence}",
+            SEED.get()
+        );
+        let replacement = Proc::spawn(writer_command(
+            &databases[1],
+            &fixture.target_file,
+            &fixture.key_file,
+        ));
+        verify_restored_writes(&replacement, &report, &writes);
+        check!(
+            fixture.root.join("b.vlite.superseded-epoch1").is_file() == stale,
+            "stale database was not preserved as a superseded file"
+        );
+        let claimed = authority(&fixture);
+        check!(
+            claimed["epoch"] == 2
+                && claimed["head"].is_null()
+                && claimed["base"] == head
+                && claimed["writer_present"] == true
+                && claimed["revision"] != transferred["revision"],
+            "replacement claim changed the transferred head/base: {claimed}"
+        );
+        writer_acknowledges(&replacement, 2);
+        check!(
+            authority(&fixture) == claimed,
+            "authority changed without a new archive or claim"
+        );
+    });
+}
+
+#[test]
+#[ignore = "needs a local Azurite Blob endpoint and ITEM-040 verified-base startup restore"]
+fn chaos_failover_loss_report_matches_archived_position() {
+    drill("D8 failover loss report", |endpoint, random| {
+        let fixture = Fixture::new(endpoint, true, false);
+        let (mut writer, databases) = fixture.archiving_authority_writer();
+        let mut writes = BTreeMap::new();
+        recorded_inserts(&writer, 2 + random.next() % 5, &mut writes);
+        publish_authority_baseline(&fixture, &writer);
+        let rounds = 1 + random.next() % 2;
+        let mut durable = Value::Null;
+        for _ in 0..rounds {
+            let sequence = recorded_inserts(&writer, 1 + random.next() % 5, &mut writes);
+            durable = wait_for_archived_sequence(&fixture, &writer, sequence);
+        }
+        let cut_mid_archive = random.next() & 1 == 0;
+        if cut_mid_archive {
+            fixture.proxy.arm("PUT ");
+        }
+        let observed = recorded_inserts(&writer, 1 + random.next() % 5, &mut writes);
+        if cut_mid_archive {
+            eventually("final partial archive upload", ARCHIVE_WAIT, || {
+                fixture.proxy.hit()
+            });
+            delayed_fault(random.delay(), || {
+                check!(
+                    authority(&fixture)["head"] == durable,
+                    "partially uploaded archive was committed"
+                );
+            });
+            fixture.proxy.cut();
+            eventually(
+                "cut archiving writer unready",
+                Duration::from_secs(10),
+                || former_writer_not_ready(&writer.0.address, false),
+            );
+        } else {
+            thread::sleep(random.delay());
+            writer.0.kill();
+        }
+        let (report, _) = reported_transfer(&fixture, Some(observed));
+        check!(
+            report["archived"] == durable,
+            "report set/index/chain differs from durable authority checkpoint: {report}"
+        );
+        let reported = report["archived"]["sequence"].as_u64().unwrap();
+        check!(
+            report["observation"]["sequence"] == observed
+                && report["loss"]["kind"] == "known"
+                && report["loss"]["commits"] == observed - reported,
+            "FINDING: loss report understates observed unarchived commits: {report}"
+        );
+        if cut_mid_archive {
+            fixture.proxy.restore();
+            former_owner_stops(&mut writer.0);
+        }
+        std::fs::remove_file(&databases[1]).unwrap();
+        let replacement = Proc::spawn(writer_command(
+            &databases[1],
+            &fixture.target_file,
+            &fixture.key_file,
+        ));
+        let (restored, lost) = verify_restored_writes(&replacement, &report, &writes);
+        check!(
+            report["loss"]["commits"] == lost,
+            "FINDING: actual missing writes {lost} differ from reported loss: {report}"
+        );
+        let claimed = authority(&fixture);
+        check!(
+            claimed["base"] == report["archived"] && claimed["head"].is_null(),
+            "B did not claim the report's exact set/manifest/index/chain: {claimed}"
+        );
+        eprintln!(
+            "D8 seed={}: reported={reported} restored={restored} lost={lost}",
+            SEED.get()
+        );
+        writer_acknowledges(&replacement, 2);
     });
 }
