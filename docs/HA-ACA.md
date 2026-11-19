@@ -67,8 +67,9 @@ verbatim; examples beneath them supply the required arguments.
 
 ## Initialize and claim writer authority
 
-Only use this path for an operator-verified local database with no archived
-base to recover. Startup does not restore an archived base. Read the database's
+Initialize only for an operator-verified local database. After failover,
+startup restores the authority's verified archived base before opening the
+database, including when the local file is stale, ahead, or absent. Read the database's
 16-character lowercase hexadecimal `lineage` from
 `GET /v1/admin/serve-status`; files without a v4 lineage are refused.
 Stop that server before starting the authority-enabled writer.
@@ -95,12 +96,19 @@ For Azurite add `--shared-key-file <path>` to authority commands and
 `--authority-shared-key-file <path>` to server startup. Authority options
 have no environment-variable or ambient backup-key fallback.
 
-Before binding a listener, startup reads authority, checks the local lineage
-and CAS-claims the prepared epoch. Missing, invalid, unavailable or unresolved
+Before binding a listener, startup reads authority, restores any archived
+base in private staging, checks the lineage and sequence, and CAS-claims the
+prepared epoch using that same authority observation. Missing, invalid, unavailable or unresolved
 authority fails closed. A lineage mismatch returns
 `writer_authority_lineage_mismatch`; an existing writer returns
-`writer_authority_claimed`; an archived base returns
-`writer_authority_base_unverified`; a lost claim CAS returns
+`writer_authority_claimed`. A base verification mismatch (set, manifest,
+installation/scope, lineage, epoch, index/chain or sequence) returns HTTP 409
+`writer_authority_base_mismatch` without replacing the local file.
+Unsupported recovery configurations return HTTP 409
+`writer_authority_base_unverified` before downloading: encryption, nonpersistent
+durability, a managed-compaction selected candidate, or recovery mode.
+The CLI rejects `--durability none` before authority access.
+A changed authority or lost claim CAS returns
 `writer_authority_conflict`. No automatic reclaim or election occurs.
 Even a restart requires an explicit, acknowledged operator failover.
 
@@ -194,12 +202,22 @@ blindly repeat a potentially successful transfer.
 
 **Verify:** successful JSON contains `result.record` and `result.etag`.
 The record has an incremented epoch, a new revision, phase `recovering`,
-no writer ID, and the previous archived head as its base. This does **not**
-restore, claim, start, route to, or enable serving on a new writer. Startup
-can claim this prepared epoch only if its lineage matches and its base is
-absent. An archived base is deliberately refused until HA archive binding
-can verify the local database against it; keep writes unavailable rather
-than start from stale files. In a separately qualified recovery path,
+no writer ID, and the previous archived head as its base. Execute itself does
+**not** restore, claim, start, route to, or enable serving on a new writer.
+Start the replacement with the same authority target. Before opening its
+database it pins and downloads the base, verifies the HA manifest, scope,
+lineage and immutable index/chain, and replays exactly to `base.sequence`.
+It syncs the staged file, moves an existing database aside using a no-replace
+rename to `<database>.superseded-epoch<base.epoch>`, installs the restored
+file and syncs its parent directory. The operation pin is released and staging
+removed on success or failure.
+An existing superseded path refuses startup; it is never overwritten.
+Disposable ANN caches are removed so no stale cache is loaded.
+Only then does the writer claim the observed epoch, with no CAS retry.
+Commits after the verified base are not restored: they were never archived.
+The superseded file preserves them for forensics only, is never served, and
+operators may delete it after review. The next backup publishes a fresh HA
+baseline at the new epoch. In a separately qualified recovery path,
 verify restored data, sole ownership, authority, readiness,
 tenant routing and a read/write check before admitting traffic;
 `GET /v1/admin/serve-status` reports the claimed epoch only with authority
