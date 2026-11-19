@@ -1,13 +1,12 @@
-//! ITEM-035: repeatable process-level Azurite drills (TEST-006/008/009/015).
+//! ITEM-035: repeatable process-level Azurite drills (TEST-006/007/008/009/014/015).
 //! Local emulator evidence only, not ACA or managed-identity qualification.
 //! Run ignored tests with VLITE_AZURITE_BLOB_ENDPOINT; VLITE_CHAOS_SEED
 //! replays timing/choice and VLITE_CHAOS_ITERATIONS repeats each drill (1..=20).
 //!
 //! # Blocked drills
-//! TEST-007 (double writer), TEST-014 (paused writer after promotion), and
-//! TEST-008's loss-report match need a runtime path creating/claiming
-//! `<prefix>authority.json`. Writer startup claim is outside ITEM-024's
-//! serving wiring and is not wired; these are deliberately not placeholders.
+//! Only TEST-008's loss-report match remains blocked on the runtime HA archive
+//! head (ITEM-038). TEST-007 and TEST-014 exercise startup claims and fencing
+//! without configuring cloud backup or an archive.
 
 #![cfg(feature = "server")]
 
@@ -25,6 +24,7 @@ use std::{
     thread::{self, JoinHandle},
     time::{Duration, Instant, SystemTime, UNIX_EPOCH},
 };
+use vlite::{Database, FormatVersion};
 
 const ACCOUNT: &str = "devstoreaccount1";
 // Azurite's published development key, not a credential.
@@ -35,6 +35,7 @@ const ARCHIVE_INTERVAL_SECS: u64 = 60;
 const STALENESS_BOUND_MS: u64 = 10_000;
 const POLL_INTERVAL_MS: u64 = 250;
 const ARCHIVE_WAIT: Duration = Duration::from_secs(100);
+const AUTHORITY_RECHECK_MS: u64 = 500;
 
 thread_local! {
     static SEED: Cell<u64> = const { Cell::new(0) };
@@ -105,6 +106,7 @@ fn eventually(what: &str, within: Duration, mut probe: impl FnMut() -> bool) {
 /// This makes the fault hit an actual archive/apply window, not a guessed timer.
 struct Gate {
     method: &'static str,
+    path: &'static str,
     claimed: bool,
     hit: bool,
 }
@@ -200,6 +202,16 @@ impl Proxy {
     fn arm(&self, method: &'static str) {
         self.shared.state.lock().unwrap().gate = Some(Gate {
             method,
+            path: "/objects/",
+            claimed: false,
+            hit: false,
+        });
+    }
+
+    fn arm_authority(&self) {
+        self.shared.state.lock().unwrap().gate = Some(Gate {
+            method: "GET ",
+            path: "/authority.json",
             claimed: false,
             hit: false,
         });
@@ -281,19 +293,28 @@ fn forward(
     }
     let head = String::from_utf8(head).map_err(io::Error::other)?;
     let request = head.lines().next().unwrap_or_default();
-    let gated = {
+    let (gated, refused) = {
         let mut state = shared.state.lock().unwrap();
         if let Some(gate) = &mut state.gate
-            && !gate.claimed
             && request.starts_with(gate.method)
-            && request.contains("/objects/")
+            && request.contains(gate.path)
         {
-            gate.claimed = true;
-            true
+            if !gate.claimed {
+                gate.claimed = true;
+                (true, false)
+            } else {
+                // Keep one stale authority response in flight, while other checks
+                // observe the outage and latch readiness closed.
+                (false, gate.path == "/authority.json")
+            }
         } else {
-            false
+            (false, false)
         }
     };
+    if refused {
+        client.shutdown(Shutdown::Both)?;
+        return Ok(());
+    }
     // Close each upstream response so subsequent HTTP requests also pass
     // through the header-aware fault hook rather than an opaque keepalive.
     for line in head.split("\r\n").filter(|line| !line.is_empty()) {
@@ -351,14 +372,13 @@ struct Proc {
 }
 
 impl Proc {
-    fn spawn(mut command: Command) -> Self {
+    fn launch(mut command: Command) -> (Self, mpsc::Receiver<String>) {
         command
             .env_remove("VLITE_AUTH_TOKEN_FILE")
             .env_remove("VLITE_ADMIN_USERNAME")
             .env_remove("VLITE_ADMIN_PASSWORD_FILE")
             .env_remove("VLITE_PROVIDERS_FILE")
-            .stdout(Stdio::piped())
-            .stderr(Stdio::inherit());
+            .stdout(Stdio::piped());
         let child = command.spawn().unwrap();
         let mut process = Self {
             child,
@@ -372,6 +392,11 @@ impl Proc {
                 let _ = sender.send(line);
             }
         });
+        (process, receiver)
+    }
+
+    fn spawn(command: Command) -> Self {
+        let (mut process, receiver) = Self::launch(command);
         let line = receiver.recv_timeout(Duration::from_secs(120));
         check!(line.is_ok(), "server startup failed: {line:?}");
         let line = line.unwrap();
@@ -480,20 +505,54 @@ fn dechunk(mut body: &[u8]) -> Vec<u8> {
 }
 
 fn call(address: &str, method: &str, path: &str, body: &str, headers: &[(&str, &str)]) -> Reply {
-    let mut stream = TcpStream::connect(address).unwrap();
-    stream
-        .set_read_timeout(Some(Duration::from_secs(10)))
-        .unwrap();
-    stream
-        .set_write_timeout(Some(Duration::from_secs(10)))
-        .unwrap();
-    write!(stream, "{method} {path} HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\nContent-Type: application/json\r\nContent-Length: {}\r\n", body.len()).unwrap();
+    try_call(address, method, path, body, headers).unwrap()
+}
+
+fn try_call(
+    address: &str,
+    method: &str,
+    path: &str,
+    body: &str,
+    headers: &[(&str, &str)],
+) -> io::Result<Reply> {
+    try_call_with_timeout(
+        address,
+        method,
+        path,
+        body,
+        headers,
+        Duration::from_secs(10),
+    )
+}
+
+fn try_call_with_timeout(
+    address: &str,
+    method: &str,
+    path: &str,
+    body: &str,
+    headers: &[(&str, &str)],
+    timeout: Duration,
+) -> io::Result<Reply> {
+    let mut stream = TcpStream::connect(address)?;
+    stream.set_read_timeout(Some(timeout))?;
+    stream.set_write_timeout(Some(timeout))?;
+    write!(
+        stream,
+        "{method} {path} HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\nContent-Type: application/json\r\nContent-Length: {}\r\n",
+        body.len()
+    )?;
     for (name, value) in headers {
-        write!(stream, "{name}: {value}\r\n").unwrap();
+        write!(stream, "{name}: {value}\r\n")?;
     }
-    write!(stream, "\r\n{body}").unwrap();
+    write!(stream, "\r\n{body}")?;
     let mut response = Vec::new();
-    stream.read_to_end(&mut response).unwrap();
+    stream.read_to_end(&mut response)?;
+    if response.is_empty() {
+        return Err(io::Error::new(
+            io::ErrorKind::UnexpectedEof,
+            "connection closed without an HTTP response",
+        ));
+    }
     let split = response.windows(4).position(|w| w == b"\r\n\r\n");
     check!(split.is_some(), "missing HTTP response: {response:?}");
     let split = split.unwrap();
@@ -505,10 +564,150 @@ fn call(address: &str, method: &str, path: &str, body: &str, headers: &[(&str, &
     {
         payload = dechunk(&payload);
     }
-    Reply {
+    Ok(Reply {
         status: head.split_whitespace().nth(1).unwrap().parse().unwrap(),
         body: serde_json::from_slice(&payload).unwrap_or(Value::Null),
         head,
+    })
+}
+
+fn command() -> Command {
+    let mut command = Command::new(env!("CARGO_BIN_EXE_vlite-server"));
+    for name in [
+        "VLITE_AUTH_TOKEN",
+        "VLITE_AUTH_TOKEN_FILE",
+        "VLITE_READ_ONLY_TOKEN",
+        "VLITE_READ_ONLY_TOKEN_FILE",
+        "VLITE_ADMIN_DIR",
+        "VLITE_SERVE_MODE",
+        "VLITE_PROVIDERS_FILE",
+        "VLITE_MEMORY_BINDINGS_FILE",
+        "VLITE_CLOUD_BACKUP_SHARED_KEY_FILE",
+    ] {
+        command.env_remove(name);
+    }
+    command
+}
+
+fn operator(verb: &[&str], target: &Path, key: &Path, extra: &[&str]) -> Value {
+    let output = command()
+        .args(verb)
+        .arg("--target-file")
+        .arg(target)
+        .arg("--shared-key-file")
+        .arg(key)
+        .args(extra)
+        .output()
+        .unwrap();
+    check!(
+        output.status.success(),
+        "operator {verb:?}: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    serde_json::from_slice(&output.stdout).unwrap()
+}
+
+fn writer_command(database: &Path, target: &Path, key: &Path) -> Command {
+    let mut command = command();
+    command
+        .arg(database)
+        .args([
+            "--serve-mode",
+            "writer",
+            "--insecure-local",
+            "--durability",
+            "full",
+            "--bind",
+            "127.0.0.1:0",
+            "--authority-recheck-ms",
+        ])
+        .arg(AUTHORITY_RECHECK_MS.to_string())
+        .arg("--authority-target-file")
+        .arg(target)
+        .arg("--authority-shared-key-file")
+        .arg(key);
+    command
+}
+
+fn writer_acknowledges(writer: &Proc, epoch: u64) {
+    let ready = writer.call("GET", "/ready", Value::Null);
+    check!(ready.status == 200, "writer not ready: {ready:?}");
+    let reply = writer.call(
+        "PUT",
+        &format!("/v1/vectors/{epoch}"),
+        json!({"vector":[1.0,2.0]}),
+    );
+    check!(reply.status == 204, "writer did not acknowledge: {reply:?}");
+    check!(
+        reply.number("x-vlite-epoch") == epoch,
+        "wrong acknowledgement epoch: {reply:?}"
+    );
+}
+
+fn closed_connection(error: &io::Error) -> bool {
+    matches!(
+        error.kind(),
+        io::ErrorKind::ConnectionRefused
+            | io::ErrorKind::ConnectionReset
+            | io::ErrorKind::ConnectionAborted
+            | io::ErrorKind::BrokenPipe
+            | io::ErrorKind::NotConnected
+            | io::ErrorKind::UnexpectedEof
+    )
+}
+
+fn writer_refused(result: io::Result<Reply>) {
+    match result {
+        Ok(reply) => check!(
+            matches!(
+                (reply.status, reply.code()),
+                (503, Some("writer_authority_unavailable"))
+                    | (409, Some("writer_fenced"))
+                    | (502, Some("write_outcome_unknown"))
+            ),
+            "former writer acknowledged or returned an unexpected refusal: {reply:?}"
+        ),
+        Err(error) => check!(
+            closed_connection(&error),
+            "unexpected former-writer transport error: {error}"
+        ),
+    }
+}
+
+fn former_writer_not_ready(address: &str, observed: bool) -> bool {
+    match try_call_with_timeout(
+        address,
+        "GET",
+        "/ready",
+        "",
+        &[("Authorization", &bearer(TOKEN))],
+        Duration::from_millis(250),
+    ) {
+        Ok(reply) => {
+            if reply.status == 200 {
+                return false;
+            }
+            check!(
+                reply.status == 503 && reply.code() == Some("writer_authority_unavailable"),
+                "unexpected readiness refusal: {reply:?}"
+            );
+            true
+        }
+        // A probe admitted before the fence sees the outage may wait on the
+        // database lock held by the paused mutation. This is not fence evidence.
+        Err(error)
+            if !observed
+                && matches!(
+                    error.kind(),
+                    io::ErrorKind::TimedOut | io::ErrorKind::WouldBlock
+                ) =>
+        {
+            false
+        }
+        Err(error) => {
+            check!(closed_connection(&error), "readiness transport: {error}");
+            true
+        }
     }
 }
 
@@ -680,6 +879,32 @@ impl Fixture {
             &self.root.join("writer-admin"),
             &self.key_file,
         )
+    }
+
+    fn authority_databases(&self) -> [PathBuf; 2] {
+        let paths = [self.root.join("a.vlite"), self.root.join("b.vlite")];
+        let database = Database::create_with_format(&paths[0], 2, FormatVersion::V4).unwrap();
+        let lineage = format!("{:016x}", database.lineage().unwrap());
+        database.close().unwrap();
+        std::fs::copy(&paths[0], &paths[1]).unwrap();
+        let initialized = operator(
+            &["authority", "init"],
+            &self.target_file,
+            &self.key_file,
+            &[
+                "--installation-id",
+                "chaos-installation",
+                "--scope-id",
+                "chaos-scope",
+                "--lineage",
+                &lineage,
+            ],
+        );
+        check!(
+            initialized["epoch"] == 1 && initialized["writer_present"] == false,
+            "authority initialization: {initialized}"
+        );
+        paths
     }
 
     fn baseline(&self, writer: &Server) {
@@ -1026,5 +1251,239 @@ fn chaos_failover_report_refuses_without_authority() {
                 .is_some_and(|error| error.starts_with("failover_authority_missing: ")),
             "wrong refusal: {stderr}"
         );
+    });
+}
+
+#[test]
+#[ignore = "needs a local Azurite Blob endpoint in VLITE_AZURITE_BLOB_ENDPOINT"]
+fn chaos_double_writer_claims_exactly_once() {
+    drill("D5 concurrent writer claims", |endpoint, random| {
+        let fixture = Fixture::new(endpoint, false, false);
+        let databases = fixture.authority_databases();
+        let skew = random.delay();
+        let delayed = (random.next() & 1) as usize;
+        eprintln!(
+            "D5 seed={}: delayed writer={delayed}, skew={skew:?}",
+            SEED.get()
+        );
+        let barrier = std::sync::Barrier::new(2);
+        let mut pending = thread::scope(|scope| {
+            let workers: Vec<_> = databases
+                .iter()
+                .enumerate()
+                .map(|(index, database)| {
+                    let mut command =
+                        writer_command(database, &fixture.target_file, &fixture.key_file);
+                    let stderr = fixture.root.join(format!("writer-{index}.stderr"));
+                    command.stderr(std::fs::File::create(&stderr).unwrap());
+                    let barrier = &barrier;
+                    scope.spawn(move || {
+                        barrier.wait();
+                        if index == delayed {
+                            thread::sleep(skew);
+                        }
+                        let (process, stdout) = Proc::launch(command);
+                        (process, stdout, stderr)
+                    })
+                })
+                .collect();
+            workers
+                .into_iter()
+                .map(|worker| worker.join().unwrap())
+                .collect::<Vec<_>>()
+        });
+        let mut winner = None;
+        for (index, (process, stdout, _)) in pending.iter_mut().enumerate() {
+            match stdout.recv_timeout(Duration::from_secs(30)) {
+                Ok(line) => {
+                    check!(winner.is_none(), "both writer processes started: {line}");
+                    check!(
+                        line.starts_with("LISTENING http://"),
+                        "unexpected writer stdout: {line}"
+                    );
+                    process.address = line.trim_start_matches("LISTENING http://").to_owned();
+                    winner = Some(index);
+                }
+                Err(mpsc::RecvTimeoutError::Disconnected) => {}
+                Err(error) => panic!("seed={}: writer startup: {error}", SEED.get()),
+            }
+        }
+        check!(winner.is_some(), "neither writer became ready");
+        let winner = winner.unwrap();
+        writer_acknowledges(&pending[winner].0, 1);
+        let (loser, stdout, stderr) = &mut pending[1 - winner];
+        eventually("rival writer refusal", Duration::from_secs(5), || {
+            loser.child.try_wait().unwrap().is_some()
+        });
+        let status = loser.child.wait().unwrap();
+        let stderr = std::fs::read_to_string(stderr).unwrap();
+        check!(!status.success(), "rival writer exited successfully");
+        check!(stdout.try_iter().next().is_none(), "rival wrote stdout");
+        check!(
+            stderr.contains("writer_authority_claimed:")
+                || stderr.contains("writer_authority_conflict:"),
+            "wrong rival refusal: {stderr}"
+        );
+        let shown = operator(
+            &["authority", "show"],
+            &fixture.target_file,
+            &fixture.key_file,
+            &[],
+        );
+        check!(
+            shown["epoch"] == 1
+                && shown["writer_present"] == true
+                && shown.get("writer_id").is_none()
+                && shown["head"].is_null(),
+            "claimed authority summary: {shown}"
+        );
+    });
+}
+
+#[test]
+#[ignore = "needs a local Azurite Blob endpoint in VLITE_AZURITE_BLOB_ENDPOINT"]
+fn chaos_paused_writer_after_promotion_never_acknowledges() {
+    drill("D6 paused former writer", |endpoint, random| {
+        let fixture = Fixture::new(endpoint, true, false);
+        let databases = fixture.authority_databases();
+        let proxied_target = fixture.root.join("proxied-authority.json");
+        std::fs::write(&proxied_target, fixture.writer_target.to_string()).unwrap();
+        let mut writer = Proc::spawn(writer_command(
+            &databases[0],
+            &proxied_target,
+            &fixture.key_file,
+        ));
+        writer_acknowledges(&writer, 1);
+        thread::sleep(random.delay());
+        let gated = random.next() & 1 == 0;
+        eprintln!(
+            "D6 seed={}: fault={}",
+            SEED.get(),
+            if gated {
+                "held authority response"
+            } else {
+                "authority cut"
+            }
+        );
+        if gated {
+            fixture.proxy.arm_authority();
+        } else {
+            fixture.proxy.cut();
+        }
+        let address = writer.address.clone();
+        let in_flight = thread::spawn(move || {
+            try_call(
+                &address,
+                "PUT",
+                "/v1/vectors/10",
+                r#"{"vector":[10.0,1.0]}"#,
+                &[("Authorization", &bearer(TOKEN))],
+            )
+        });
+        if gated {
+            eventually("paused authority response", Duration::from_secs(5), || {
+                fixture.proxy.hit()
+            });
+        }
+        eventually(
+            "fence observes authority pause",
+            Duration::from_secs(10),
+            || former_writer_not_ready(&writer.address, false),
+        );
+        let seed = SEED.get();
+        thread::scope(|scope| {
+            let promote = scope.spawn(|| {
+                SEED.set(seed);
+                let report = operator(
+                    &["failover", "report"],
+                    &fixture.target_file,
+                    &fixture.key_file,
+                    &[],
+                );
+                let report = &report["report"];
+                // Simulated infrastructure acknowledgement only: the proxy pauses
+                // A, whereas a real operator must stop every old replica first.
+                let bumped = operator(
+                    &["failover", "execute"],
+                    &fixture.target_file,
+                    &fixture.key_file,
+                    &[
+                        "--ack-report-id",
+                        report["report_id"].as_str().unwrap(),
+                        "--expected-epoch",
+                        &report["epoch"].to_string(),
+                        "--expected-revision",
+                        report["revision"].as_str().unwrap(),
+                        "--old-replicas",
+                        "0",
+                    ],
+                );
+                check!(
+                    bumped["result"]["record"]["epoch"] == 2,
+                    "promotion did not bump epoch: {bumped}"
+                );
+            });
+            eventually(
+                "promotion while A is unready",
+                Duration::from_secs(30),
+                || {
+                    check!(
+                        former_writer_not_ready(&writer.address, true),
+                        "A became ready after observing the pause"
+                    );
+                    promote.is_finished()
+                },
+            );
+            promote.join().unwrap();
+        });
+        check!(
+            former_writer_not_ready(&writer.address, true),
+            "A ready before authority restore"
+        );
+        writer_refused(try_call(
+            &writer.address,
+            "PUT",
+            "/v1/vectors/11",
+            r#"{"vector":[11.0,1.0]}"#,
+            &[("Authorization", &bearer(TOKEN))],
+        ));
+        let resumed = Instant::now();
+        fixture.proxy.restore();
+        writer_refused(in_flight.join().unwrap());
+        let bound = Duration::from_millis(AUTHORITY_RECHECK_MS) + Duration::from_secs(5);
+        eventually("former writer self-stop", bound, || {
+            writer_refused(try_call(
+                &writer.address,
+                "PUT",
+                "/v1/vectors/12",
+                r#"{"vector":[12.0,1.0]}"#,
+                &[("Authorization", &bearer(TOKEN))],
+            ));
+            check!(resumed.elapsed() <= bound, "A exceeded self-stop bound");
+            if let Some(status) = writer.child.try_wait().unwrap() {
+                check!(status.code() == Some(1), "A exit status: {status}");
+                true
+            } else {
+                false
+            }
+        });
+        eprintln!(
+            "D6 seed={}: A stopped after {:?}",
+            SEED.get(),
+            resumed.elapsed()
+        );
+        let replacement = Proc::spawn(writer_command(
+            &databases[1],
+            &fixture.target_file,
+            &fixture.key_file,
+        ));
+        writer_acknowledges(&replacement, 2);
+        writer_refused(try_call(
+            &writer.address,
+            "PUT",
+            "/v1/vectors/13",
+            r#"{"vector":[13.0,1.0]}"#,
+            &[("Authorization", &bearer(TOKEN))],
+        ));
     });
 }
