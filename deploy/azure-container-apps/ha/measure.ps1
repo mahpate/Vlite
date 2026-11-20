@@ -298,37 +298,49 @@ function New-VLiteMeas002Target([hashtable]$Config, [string]$ClientId) {
     return [Convert]::ToBase64String([Text.Encoding]::UTF8.GetBytes($target))
 }
 
+function New-VLiteMeasFailure([string]$Reason, [string]$Message) {
+    # Reason is a static code from this script and is safe to persist; the message never is for MEAS-006.
+    $failure = [InvalidOperationException]::new($Message)
+    $failure.Data['VLiteMeasReason'] = $Reason
+    return $failure
+}
+
 function ConvertFrom-VLiteMeasLog([string[]]$Lines) {
     $begin = $null; $end = $null
     $chunks = @{}
     foreach ($line in $Lines) {
-        if ($line -match 'VLITE-MEAS FAILED(?:\s|$)') { throw 'Probe emitted a FAILED marker.' }
+        if ($line -match 'VLITE-MEAS FAILED(?:\s+([0-9]{1,3}))?(?:\s|$)') {
+            $failure = New-VLiteMeasFailure 'FailedMarker' 'Probe emitted a FAILED marker.'
+            # Only a bounded numeric process exit code is kept; the rest of the line is discarded.
+            if ($Matches[1] -and [int]$Matches[1] -le 255) { $failure.Data['VLiteMeasExitCode'] = [int]$Matches[1] }
+            throw $failure
+        }
         if ($line -match 'VLITE-MEAS BEGIN ([a-f0-9]{64}) ([0-9]+)\s*$') {
-            if ($begin) { throw 'Duplicate BEGIN marker.' }
+            if ($begin) { throw (New-VLiteMeasFailure 'DuplicateMarker' 'Duplicate BEGIN marker.') }
             $begin = @{ Hash = $Matches[1]; Length = [long]$Matches[2] }
         } elseif ($line -match 'VLITE-MEAS END ([0-9]+)\s*$') {
-            if ($null -ne $end) { throw 'Duplicate END marker.' }
+            if ($null -ne $end) { throw (New-VLiteMeasFailure 'DuplicateMarker' 'Duplicate END marker.') }
             $end = [int]$Matches[1]
         } elseif ($line -match 'VLITE-MEAS ([0-9]+) ([A-Za-z0-9+/=]{1,76})\s*$') {
             $sequence = [int]$Matches[1]
-            if ($chunks.ContainsKey($sequence)) { throw 'Duplicate log sequence.' }
+            if ($chunks.ContainsKey($sequence)) { throw (New-VLiteMeasFailure 'DuplicateMarker' 'Duplicate log sequence.') }
             $chunks[$sequence] = $Matches[2]
         }
     }
-    if (-not $begin) { throw 'Missing BEGIN marker.' }
-    if ($null -eq $end) { throw 'Missing END marker.' }
-    if ($end -lt 1 -or $chunks.Count -ne $end) { throw 'Log chunk count mismatch or gap.' }
+    if (-not $begin) { throw (New-VLiteMeasFailure 'MissingBegin' 'Missing BEGIN marker.') }
+    if ($null -eq $end) { throw (New-VLiteMeasFailure 'MissingEnd' 'Missing END marker.') }
+    if ($end -lt 1 -or $chunks.Count -ne $end) { throw (New-VLiteMeasFailure 'ChunkGap' 'Log chunk count mismatch or gap.') }
     $payload = [Text.StringBuilder]::new()
     for ($i = 1; $i -le $end; $i++) {
-        if (-not $chunks.ContainsKey($i)) { throw 'Log sequence gap.' }
-        if ($i -lt $end -and $chunks[$i].Length -ne 76) { throw 'Invalid log chunk length.' }
+        if (-not $chunks.ContainsKey($i)) { throw (New-VLiteMeasFailure 'ChunkGap' 'Log sequence gap.') }
+        if ($i -lt $end -and $chunks[$i].Length -ne 76) { throw (New-VLiteMeasFailure 'ChunkLength' 'Invalid log chunk length.') }
         $null = $payload.Append($chunks[$i])
     }
     try { $compressed = [Convert]::FromBase64String($payload.ToString()) }
-    catch { throw 'Invalid base64 log payload.' }
-    if ($compressed.Length -ne $begin.Length) { throw 'Compressed byte length mismatch.' }
+    catch { throw (New-VLiteMeasFailure 'Base64' 'Invalid base64 log payload.') }
+    if ($compressed.Length -ne $begin.Length) { throw (New-VLiteMeasFailure 'LengthMismatch' 'Compressed byte length mismatch.') }
     $hash = [Convert]::ToHexString([Security.Cryptography.SHA256]::HashData($compressed)).ToLowerInvariant()
-    if ($hash -cne $begin.Hash) { throw 'Compressed sha256 mismatch.' }
+    if ($hash -cne $begin.Hash) { throw (New-VLiteMeasFailure 'ChecksumMismatch' 'Compressed sha256 mismatch.') }
     $inputStream = [IO.MemoryStream]::new($compressed, $false)
     $outputStream = [IO.MemoryStream]::new()
     $gzip = [IO.Compression.GZipStream]::new($inputStream, [IO.Compression.CompressionMode]::Decompress)
@@ -338,7 +350,7 @@ function ConvertFrom-VLiteMeasLog([string[]]$Lines) {
         $utf8 = [Text.UTF8Encoding]::new($false, $true)
         $document = $utf8.GetString($bytes) | ConvertFrom-Json -AsHashtable -NoEnumerate
         if ($document -isnot [System.Collections.IDictionary]) { throw 'Expected a JSON object.' }
-    } catch { throw 'Payload must be valid gzip containing a UTF-8 JSON object.' }
+    } catch { throw (New-VLiteMeasFailure 'PayloadDecode' 'Payload must be valid gzip containing a UTF-8 JSON object.') }
     finally { $gzip.Dispose(); $inputStream.Dispose(); $outputStream.Dispose() }
     return ,$bytes
 }
@@ -384,25 +396,55 @@ function Wait-VLiteMeasDeleted([string[]]$Arguments) {
     throw 'Timed out waiting for resource group deletion.'
 }
 
-function Get-VLiteMeasEvidence([string[]]$ConsoleArguments, [string[]]$QueryArguments) {
+function Get-VLiteMeasEvidenceOutcome($Failure) {
+    # Maps a failure to static per-source codes only; exception text is never read.
+    $reason = [string]$Failure.Data['VLiteMeasReason']
+    $outcome = switch ($reason) {
+        'FailedMarker' { 'JobFailed' }
+        { $_ -in 'MissingBegin', 'MissingEnd', 'ChunkGap' } { 'Incomplete' }
+        { $_ -in 'DuplicateMarker', 'ChunkLength', 'Base64', 'LengthMismatch', 'ChecksumMismatch', 'PayloadDecode' } { 'IntegrityFailure' }
+        'ResponseShape' { 'Unavailable' }
+        default { $reason = 'RetrievalFailed'; 'Unavailable' }
+    }
+    return @($outcome, $reason)
+}
+
+function Get-VLiteMeasEvidence([string[]]$ConsoleArguments, [string[]]$QueryArguments,
+    [Collections.IDictionary]$Diagnostic = [ordered]@{}) {
     $lastFailure = 'Console evidence unavailable.'
+    $Diagnostic.consoleEvidence = 'NotQueried'; $Diagnostic.logAnalyticsEvidence = 'NotQueried'
+    $Diagnostic.logAnalyticsAttempts = 0
+    function Stop-OnFailedMarker($Failure) {
+        if ($Failure.Data['VLiteMeasReason'] -ceq 'FailedMarker') {
+            $Diagnostic.category = 'JobFailed'; $Diagnostic.reason = 'FailedMarker'
+            $Diagnostic.jobExitCode = $Failure.Data['VLiteMeasExitCode']
+            return $true
+        }
+        return $false
+    }
+    $consoleReason = $null
     try {
         $lines = @(Invoke-VLiteMeasAz $ConsoleArguments -Raw)
         $bytes = ConvertFrom-VLiteMeasLog $lines
+        $Diagnostic.consoleEvidence = 'Verified'
         return @{ Bytes = $bytes; Lines = $lines }
     } catch {
-        if ($_.Exception.Message -match 'FAILED marker') { throw }
+        $outcome, $consoleReason = Get-VLiteMeasEvidenceOutcome $_.Exception
+        $Diagnostic.consoleEvidence = $outcome
+        if (Stop-OnFailedMarker $_.Exception) { throw }
         $lastFailure = $_.Exception.Message
         Write-Warning 'Console evidence unavailable or incomplete; trying Log Analytics.'
     }
+    $queryReason = $null
     for ($attempt = 0; $attempt -lt 12; $attempt++) {
+        $Diagnostic.logAnalyticsAttempts = $attempt + 1
         try {
             $result = Invoke-VLiteMeasAz $QueryArguments
             $lines = @(
                 if ($result -is [System.Collections.IDictionary] -and $result.Contains('tables')) {
                     foreach ($table in $result.tables) {
                         $column = @($table.columns.name).IndexOf('Log_s')
-                        if ($column -lt 0) { throw 'Log Analytics response lacks Log_s.' }
+                        if ($column -lt 0) { throw (New-VLiteMeasFailure 'ResponseShape' 'Log Analytics response lacks Log_s.') }
                         foreach ($row in $table.rows) { [string]$row[$column] }
                     }
                 } else {
@@ -412,12 +454,23 @@ function Get-VLiteMeasEvidence([string[]]$ConsoleArguments, [string[]]$QueryArgu
                 }
             )
             $bytes = ConvertFrom-VLiteMeasLog $lines
+            $Diagnostic.logAnalyticsEvidence = 'Verified'
             return @{ Bytes = $bytes; Lines = $lines }
         } catch {
-            if ($_.Exception.Message -match 'FAILED marker') { throw }
+            $outcome, $queryReason = Get-VLiteMeasEvidenceOutcome $_.Exception
+            $Diagnostic.logAnalyticsEvidence = $outcome
+            if (Stop-OnFailedMarker $_.Exception) { throw }
             $lastFailure = $_.Exception.Message
             if ($attempt -lt 11) { Start-Sleep -Seconds 10 }
         }
+    }
+    # Evidence that arrived but failed transport verification outranks evidence that never arrived.
+    if ($Diagnostic.logAnalyticsEvidence -ceq 'IntegrityFailure') {
+        $Diagnostic.category = 'EvidenceIntegrity'; $Diagnostic.reason = $queryReason
+    } elseif ($Diagnostic.consoleEvidence -ceq 'IntegrityFailure') {
+        $Diagnostic.category = 'EvidenceIntegrity'; $Diagnostic.reason = $consoleReason
+    } else {
+        $Diagnostic.category = 'EvidenceUnavailable'; $Diagnostic.reason = $queryReason
     }
     throw "Unable to collect verified measurement evidence: $lastFailure"
 }
@@ -427,28 +480,28 @@ function Assert-VLiteMeas006Evidence([byte[]]$Bytes, [hashtable]$Config, [string
     function Keys($Object, [string[]]$Expected) {
         if ($Object -isnot [Collections.IDictionary] -or
             (($Object.Keys | Sort-Object) -join ',') -cne (($Expected | Sort-Object) -join ',')) {
-            throw 'MEAS-006 evidence has an invalid schema.'
+            throw (New-VLiteMeasFailure 'Schema' 'MEAS-006 evidence has an invalid schema.')
         }
     }
     Keys $document @('schema', 'measurement', 'scope', 'source', 'requested', 'metrics', 'limits')
     if ($document.schema -cne 'vlite-meas006/1' -or $document.measurement -cne 'MEAS-006' -or
-        $document.scope -cne 'aca-blob') { throw 'MEAS-006 evidence has an invalid schema or scope.' }
+        $document.scope -cne 'aca-blob') { throw (New-VLiteMeasFailure 'Schema' 'MEAS-006 evidence has an invalid schema or scope.') }
     $canonical = $document | ConvertTo-Json -Depth 20 -Compress
     foreach ($value in $PrivateValues) {
         if ($value -and $canonical.Contains($value, [StringComparison]::OrdinalIgnoreCase)) {
-            throw 'MEAS-006 evidence contains private identifiers.'
+            throw (New-VLiteMeasFailure 'PrivateIdentifier' 'MEAS-006 evidence contains private identifiers.')
         }
     }
     Keys $document.source @('revision', 'working_tree_dirty', 'dirty_paths')
     if ($document.source.revision -cne $Config.SourceRevision -or
         $document.source.working_tree_dirty -isnot [bool] -or $document.source.working_tree_dirty -or
         $document.source.dirty_paths -isnot [array] -or $document.source.dirty_paths.Count -ne 0) {
-        throw 'MEAS-006 evidence provenance differs from the clean pinned source.'
+        throw (New-VLiteMeasFailure 'Provenance' 'MEAS-006 evidence provenance differs from the clean pinned source.')
     }
     Keys $document.requested @('gate_samples', 'transfer_repetitions', 'recheck_interval_ms')
     foreach ($field in @(@('gate_samples', 'Samples'), @('transfer_repetitions', 'Repetitions'), @('recheck_interval_ms', 'IntervalMs'))) {
         $value = $document.requested[$field[0]]
-        if ($value -isnot [long] -or $value -ne $Config[$field[1]]) { throw 'MEAS-006 evidence requested settings differ.' }
+        if ($value -isnot [long] -or $value -ne $Config[$field[1]]) { throw (New-VLiteMeasFailure 'RequestedSettings' 'MEAS-006 evidence requested settings differ.') }
     }
     $metrics = @('verify_before_commit', 'verify_before_ack', 'commit_then_ack', 'transfer_to_observed_fenced')
     Keys $document.metrics $metrics
@@ -461,29 +514,29 @@ function Assert-VLiteMeas006Evidence([byte[]]$Bytes, [hashtable]$Config, [string
         $count = if ($transfer) { $Config.Repetitions } else { $Config.Samples }
         $unit = if ($transfer) { 'milliseconds' } else { 'microseconds' }
         if ($metric.count -isnot [long] -or $metric.count -ne $count -or $metric.unit -cne $unit) {
-            throw 'MEAS-006 evidence has incomplete metric samples.'
+            throw (New-VLiteMeasFailure 'Metrics' 'MEAS-006 evidence has incomplete metric samples.')
         }
         foreach ($key in 'p50', 'p95', 'max') {
             if (($metric[$key] -isnot [long] -and $metric[$key] -isnot [double]) -or
                 -not [double]::IsFinite($metric[$key]) -or $metric[$key] -lt 0) {
-                throw 'MEAS-006 evidence has invalid metric observations.'
+                throw (New-VLiteMeasFailure 'Metrics' 'MEAS-006 evidence has invalid metric observations.')
             }
         }
         if ($metric.p50 -gt $metric.p95 -or $metric.p95 -gt $metric.max -or
             ($transfer -and ($metric.interval_ms -isnot [long] -or $metric.interval_ms -ne $Config.IntervalMs -or
                 $metric.transfer_clock -cne 'immediately-before-transfer-CAS'))) {
-            throw 'MEAS-006 evidence has inconsistent metric observations.'
+            throw (New-VLiteMeasFailure 'Metrics' 'MEAS-006 evidence has inconsistent metric observations.')
         }
     }
     Keys $document.limits @('claim', 'not_measured', 'gates', 'transfer')
     foreach ($key in 'claim', 'gates', 'transfer') {
         if ($document.limits[$key] -isnot [string] -or [string]::IsNullOrWhiteSpace($document.limits[$key])) {
-            throw 'MEAS-006 evidence lacks measurement limits.'
+            throw (New-VLiteMeasFailure 'Limits' 'MEAS-006 evidence lacks measurement limits.')
         }
     }
     if ($document.limits.not_measured -isnot [array] -or
         ($document.limits.not_measured -join ',') -cne 'stale_acknowledgment_window,clock_skew,slo') {
-        throw 'MEAS-006 evidence lacks measurement limits.'
+        throw (New-VLiteMeasFailure 'Limits' 'MEAS-006 evidence lacks measurement limits.')
     }
 }
 
@@ -567,8 +620,9 @@ function Invoke-VLiteMeas([hashtable]$Options) {
     if ($meas006) {
         $summary.measurementStatus = 'Running'
         $summary.requested = [ordered]@{ Samples = $config.Samples; Repetitions = $config.Repetitions; IntervalMs = $config.IntervalMs }
+        $summary.failureDiagnostic = $null
     }
-    $failed = $true; $principal = ''; $workspace = ''; $execution = ''; $current = $null
+    $failed = $true; $principal = ''; $workspace = ''; $execution = ''; $current = $null; $readDiagnostic = $null
     try {
         foreach ($step in $steps | Select-Object -Skip 1) {
             switch ($step.Step) {
@@ -625,15 +679,26 @@ function Invoke-VLiteMeas([hashtable]$Options) {
                 'PollExecution' { $current.status = Wait-VLiteMeasExecution (Arguments $step $execution) }
                 'ReadLogs' {
                     $query = $steps | Where-Object { $_.Step -eq 'QueryLogs' -and $_.Tier -eq $step.Tier }
-                    $evidence = Get-VLiteMeasEvidence (Arguments $step $execution) (Arguments $query $execution $workspace)
+                    # Static codes only; raw logs, native errors and exception text are never recorded.
+                    $readDiagnostic = [ordered]@{ category = $null; reason = $null; jobExitCode = $null
+                        consoleEvidence = 'NotQueried'; logAnalyticsEvidence = 'NotQueried'; logAnalyticsAttempts = 0 }
+                    $evidence = Get-VLiteMeasEvidence (Arguments $step $execution) (Arguments $query $execution $workspace) $readDiagnostic
                     $begin = $evidence.Lines | Where-Object {
                         $_ -match 'VLITE-MEAS BEGIN ([a-f0-9]{64}) ([0-9]+)\s*$'
                     } | Select-Object -First 1
                     $null = $begin -match 'VLITE-MEAS BEGIN ([a-f0-9]{64})'
                     $current.sha256 = $Matches[1]
-                    if ($current.status -ne 'Succeeded') { throw 'Measurement job did not succeed.' }
+                    if ($current.status -ne 'Succeeded') {
+                        $readDiagnostic.category = 'JobNotSucceeded'; $readDiagnostic.reason = 'ExecutionNotSucceeded'
+                        throw 'Measurement job did not succeed.'
+                    }
                     if ($meas006) {
-                        Assert-VLiteMeas006Evidence $evidence.Bytes $config @($clientId, $principal, $workspace, $config.SubscriptionId)
+                        try { Assert-VLiteMeas006Evidence $evidence.Bytes $config @($clientId, $principal, $workspace, $config.SubscriptionId) }
+                        catch {
+                            $readDiagnostic.category = 'EvidenceRejected'
+                            $readDiagnostic.reason = if ($_.Exception.Data['VLiteMeasReason']) { [string]$_.Exception.Data['VLiteMeasReason'] } else { 'Unclassified' }
+                            throw
+                        }
                     }
                     $current.fileName = "$($config.Measurements[0])-c$($step.Tier).json"
                     [IO.File]::WriteAllBytes((Join-Path $config.OutDir $current.fileName), $evidence.Bytes)
@@ -650,6 +715,10 @@ function Invoke-VLiteMeas([hashtable]$Options) {
         $summary.failedStep = $step.Step
         if ($meas006) { $summary.measurementStatus = 'Failed' }
         if ($null -ne $current -and $current.status -notin @('Failed', 'Stopped', 'Canceled', 'Cancelled')) { $current.status = 'Failed' }
+        if ($meas006 -and $step.Step -eq 'ReadLogs' -and $null -ne $readDiagnostic) {
+            if (-not $readDiagnostic.category) { $readDiagnostic.category = 'Unclassified' }
+            $summary.failureDiagnostic = $readDiagnostic
+        }
         if ($meas006) { throw "MEAS-006 failed at $($step.Step); diagnostics withheld." }
         throw
     } finally {

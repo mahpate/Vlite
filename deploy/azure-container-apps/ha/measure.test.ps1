@@ -334,10 +334,29 @@ try {
     }
 
     function Start-Sleep { param([int]$Seconds) }
+    # Sentinel private data injected into native errors and job output; none may reach summary or console.
+    $sentinel006 = 'sentinel-private-7f3a9c'
+    # category, reason, jobExitCode, consoleEvidence, logAnalyticsEvidence, logAnalyticsAttempts
+    $expectedDiagnostic006 = @{
+        JobFailedExit = @('JobFailed', 'FailedMarker', 101, 'JobFailed', 'NotQueried', 0)
+        JobFailedBadCode = @('JobFailed', 'FailedMarker', $null, 'JobFailed', 'NotQueried', 0)
+        JobFailedViaLogAnalytics = @('JobFailed', 'FailedMarker', 3, 'Unavailable', 'JobFailed', 1)
+        LogsUnavailable = @('EvidenceUnavailable', 'RetrievalFailed', $null, 'Unavailable', 'Unavailable', 12)
+        LogsIncomplete = @('EvidenceUnavailable', 'MissingEnd', $null, 'Incomplete', 'Incomplete', 12)
+        BadChecksum = @('EvidenceIntegrity', 'ChecksumMismatch', $null, 'IntegrityFailure', 'IntegrityFailure', 12)
+        BadEvidence = @('EvidenceRejected', 'PrivateIdentifier', $null, 'Verified', 'NotQueried', 0)
+        BothFailures = @('EvidenceRejected', 'PrivateIdentifier', $null, 'Verified', 'NotQueried', 0)
+        BadSchema = @('EvidenceRejected', 'Schema', $null, 'Verified', 'NotQueried', 0)
+        BadProvenance = @('EvidenceRejected', 'Provenance', $null, 'Verified', 'NotQueried', 0)
+        NotSucceeded = @('JobNotSucceeded', 'ExecutionNotSucceeded', $null, 'Verified', 'NotQueried', 0)
+    }
     foreach ($case006 in 'Success', 'ExistingGroup', 'ForeignRegistry', 'ForeignStorage', 'UnknownAvailability',
         'ForeignGroupResponse', 'ForeignIdentity', 'ForeignStorageResponse', 'ForeignJobResponse', 'ForeignExecution',
-        'MissingClient', 'BadEvidence', 'BadChecksum', 'CleanupFailure', 'BothFailures', 'WaitFailure', 'Dirty', 'WrongRevision') {
+        'MissingClient', 'BadEvidence', 'BadChecksum', 'CleanupFailure', 'BothFailures', 'WaitFailure', 'Dirty', 'WrongRevision',
+        'JobFailedExit', 'JobFailedBadCode', 'JobFailedViaLogAnalytics', 'LogsUnavailable', 'LogsIncomplete',
+        'BadSchema', 'BadProvenance', 'NotSucceeded') {
         $script:case006 = $case006
+        $script:sentinel006 = $sentinel006
         $script:delete006 = $false
         $script:calls006 = [Collections.Generic.List[object]]::new()
         function git {
@@ -399,13 +418,29 @@ try {
                     if ($script:case006 -eq 'ForeignExecution') { return @{ name = 'foreign-execution' } }
                     return @{ name = 'vlite-meas-t26-c1-abc1234' }
                 }
-                '^containerapp job execution show ' { return @{ properties = @{ status = 'Succeeded' } } }
+                '^containerapp job execution show ' {
+                    $status006 = if ($script:case006 -like 'JobFailed*' -or $script:case006 -eq 'NotSucceeded') { 'Failed' } else { 'Succeeded' }
+                    return @{ properties = @{ status = $status006 } }
+                }
                 '^containerapp job logs show |^monitor log-analytics query ' {
+                    $s006 = $script:sentinel006
+                    if ($script:case006 -eq 'LogsUnavailable' -or ($Raw -and $script:case006 -eq 'JobFailedViaLogAnalytics')) {
+                        throw "native failure $s006 client-secret-001 principal-001 workspace-001 never-print-this-subscription"
+                    }
                     $d006 = New-TestDocument006
                     if ($script:case006 -in 'BadEvidence', 'BothFailures') { $d006.limits.claim = 'client-secret-001' }
+                    if ($script:case006 -eq 'BadSchema') { $d006.schema = "unknown-$s006" }
+                    if ($script:case006 -eq 'BadProvenance') { $d006.source.revision = 'b' * 40 }
                     $lines006 = @(New-TestLog ($d006 | ConvertTo-Json -Depth 10 -Compress))
                     if ($script:case006 -eq 'BadChecksum') {
                         $lines006 = @($lines006 | ForEach-Object { $_ -replace '(BEGIN )[a-f0-9]{64}', ('${1}' + ('0' * 64)) })
+                    }
+                    if ($script:case006 -eq 'LogsIncomplete') { $lines006 = @($lines006 | Where-Object { $_ -notmatch ' END ' }) + "raw $s006" }
+                    $failed006 = @{ JobFailedExit = 'VLITE-MEAS FAILED 101'; JobFailedBadCode = "VLITE-MEAS FAILED 9999 $s006"
+                        JobFailedViaLogAnalytics = 'VLITE-MEAS FAILED 3' }[$script:case006]
+                    if ($failed006) {
+                        $lines006 = @("stderr $s006 client-secret-001 principal-001 workspace-001", $failed006,
+                            "VLITE-MEAS-ERR $s006 never-print-this-subscription")
                     }
                     if ($Raw) { return $lines006 }
                     return ,@($lines006 | ForEach-Object { @{ Log_s = $_ } })
@@ -420,8 +455,12 @@ try {
         }
         $live006 = $options006.Clone(); $live006.Plan = $false
         $live006.OutDir = Join-Path $scratch "meas006-$case006"
-        if ($case006 -eq 'Success') { $captured006 = @(Invoke-VLiteMeas -Options $live006 *>&1) }
-        else { Assert-Throws { Invoke-VLiteMeas -Options $live006 *> $null } 'MEAS-006|already exists|Dirty working tree|CLEANUP FAILED|clean checkout HEAD' }
+        $captured006 = [Collections.Generic.List[object]]::new()
+        $thrown006 = $null
+        try { Invoke-VLiteMeas -Options $live006 *>&1 | ForEach-Object { $captured006.Add($_) } }
+        catch { $thrown006 = $_.Exception.Message; $captured006.Add($thrown006) }
+        if ($case006 -eq 'Success') { Assert (-not $thrown006) 'MEAS-006 success case failed' }
+        else { Assert ($thrown006 -match 'MEAS-006|already exists|Dirty working tree|CLEANUP FAILED|clean checkout HEAD') "Expected MEAS-006 refusal; received: $thrown006" }
         if ($case006 -in 'Dirty', 'WrongRevision') {
             Assert ($script:calls006.Count -eq 0) 'Invalid MEAS-006 provenance must fail before Azure'
             continue
@@ -440,10 +479,25 @@ try {
             'ForeignStorageResponse' { 'CreateStorage' }
             'ForeignJobResponse' { 'CreateJob' }
             'ForeignExecution' { 'StartJob' }
-            { $_ -in 'BadEvidence', 'BadChecksum', 'BothFailures' } { 'ReadLogs' }
+            { $expectedDiagnostic006.ContainsKey($_) } { 'ReadLogs' }
             default { $null }
         }
         Assert ($summary006.failedStep -ceq $expectedFailed006) 'MEAS-006 measurement failure must be separate'
+        Assert ($summary006.PSObject.Properties.Name -contains 'failureDiagnostic') 'MEAS-006 summary must always carry failureDiagnostic'
+        if ($expectedDiagnostic006.ContainsKey($case006)) {
+            $want006 = $expectedDiagnostic006[$case006]
+            $got006 = $summary006.failureDiagnostic
+            Assert ((($got006.PSObject.Properties.Name | Sort-Object) -join ',') -ceq
+                'category,consoleEvidence,jobExitCode,logAnalyticsAttempts,logAnalyticsEvidence,reason') "MEAS-006 diagnostic shape differs ($case006)"
+            $actual006 = @($got006.category, $got006.reason, $got006.jobExitCode, $got006.consoleEvidence,
+                $got006.logAnalyticsEvidence, $got006.logAnalyticsAttempts)
+            for ($i = 0; $i -lt 6; $i++) {
+                Assert ($actual006[$i] -ceq $want006[$i]) "MEAS-006 diagnostic field $i differs ($case006): $($actual006[$i])"
+            }
+            Assert ($thrown006 -match 'MEAS-006 failed at ReadLogs; diagnostics withheld\.|CLEANUP FAILED') 'MEAS-006 must keep the static failure message'
+        } else {
+            Assert ($null -eq $summary006.failureDiagnostic) "MEAS-006 failureDiagnostic must be null ($case006)"
+        }
         Assert ($summary006.requested.Samples -eq 100 -and $summary006.requested.Repetitions -eq 20 -and
             $summary006.requested.IntervalMs -eq 50) 'MEAS-006 summary must record effective options'
         $expectedMeasurement006 = if ($expectedFailed006) { 'Failed' } else { 'Succeeded' }
@@ -459,9 +513,10 @@ try {
             $doc006 = $evidence006 | ConvertFrom-Json
             Assert ($doc006.schema -ceq 'vlite-meas006/1' -and @($doc006.metrics.PSObject.Properties).Count -eq 4) 'MEAS-006 JSON document differs'
         }
-        foreach ($private006 in 'client-secret-001', 'principal-001', 'workspace-001', $live006.SubscriptionId) {
-            Assert (-not $saved006.Contains($private006)) 'MEAS-006 summary leaked private identifiers'
-            Assert (-not (($captured006 | Out-String).Contains($private006))) 'MEAS-006 console leaked private identifiers'
+        foreach ($private006 in 'client-secret-001', 'principal-001', 'workspace-001', $live006.SubscriptionId, $sentinel006,
+            'native failure', 'stderr', 'VLITE-MEAS-ERR', 'unknown-') {
+            Assert (-not $saved006.Contains($private006)) "MEAS-006 summary leaked private identifiers ($case006)"
+            Assert (-not (($captured006 | Out-String).Contains($private006))) "MEAS-006 console leaked private identifiers ($case006)"
             if (Test-Path $evidencePath006) { Assert (-not $evidence006.Contains($private006)) 'MEAS-006 evidence leaked private identifiers' }
         }
     }

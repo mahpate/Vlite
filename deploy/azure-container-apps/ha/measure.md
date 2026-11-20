@@ -165,6 +165,23 @@ identifiers. Its metrics are `verify_before_commit`,
 reports only `MEAS-006 failed at <step>; diagnostics withheld.` and still
 requests group deletion under the cleanup policy below.
 
+The MEAS-006 `summary.json` always has a `failureDiagnostic` field. It is
+null on success and after a failure at any step other than `ReadLogs`. If
+`ReadLogs` fails, the field holds a few fixed codes. It never holds stderr,
+console or Log Analytics lines, exception text, or any client, principal,
+workspace, subscription or resource identifier:
+
+| Field | Values |
+|---|---|
+| `category` | `JobFailed` (the job printed `VLITE-MEAS FAILED <code>`), `EvidenceUnavailable` (logs could not be read or were incomplete), `EvidenceIntegrity` (the framing, length, SHA-256, base64 or gzip/JSON check failed), `EvidenceRejected` (the document failed MEAS-006 validation), `JobNotSucceeded` (valid evidence, but the execution was not `Succeeded`), `Unclassified` |
+| `reason` | A fixed code. `FailedMarker`; `RetrievalFailed`, `ResponseShape`, `MissingBegin`, `MissingEnd` or `ChunkGap`; `DuplicateMarker`, `ChunkLength`, `Base64`, `LengthMismatch`, `ChecksumMismatch` or `PayloadDecode`; `Schema`, `PrivateIdentifier`, `Provenance`, `RequestedSettings`, `Metrics`, `Limits` or `Unclassified`; `ExecutionNotSucceeded` |
+| `jobExitCode` | The numeric exit code from the `FAILED` marker (0..255), otherwise null |
+| `consoleEvidence`, `logAnalyticsEvidence` | `NotQueried`, `Unavailable`, `Incomplete`, `IntegrityFailure`, `JobFailed` or `Verified`, for each source |
+| `logAnalyticsAttempts` | The number of Log Analytics queries made (0..12) |
+
+These codes help an operator with diagnosis only. They are not measurement
+results and do not qualify the run.
+
 **This is proposal evidence for fencing overhead, not an SLO, a stale-ack
 window, or HA qualification.**
 
