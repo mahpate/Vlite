@@ -73,19 +73,28 @@ fn check_rejections(
     drop(follower);
     let before = fs::read(&path)?;
     follower = ReplicaFollower::open(&path, None)?;
-    // The duplicate is real; the gap and lineage faults change one envelope field.
+    // The duplicate is real; the gap and lineage faults change envelope fields.
+    // The foreign case continues from the applied position, so only its lineage
+    // guard can refuse it, and each case must fail for its own reason.
     let gap = LogSegment {
         base_sequence: follower.applied_sequence() + 1,
         ..segment.clone()
     };
     let foreign = LogSegment {
         lineage: segment.lineage ^ 1,
+        base_sequence: follower.applied_sequence(),
         ..segment.clone()
     };
-    for invalid in [segment, &gap, &foreign] {
+    const DISCONTINUOUS: &str = "segment does not continue from the applied revision";
+    const FOREIGN: &str = "segment is from another lineage";
+    for (invalid, reason) in [
+        (segment, DISCONTINUOUS),
+        (&gap, DISCONTINUOUS),
+        (&foreign, FOREIGN),
+    ] {
         require(
-            matches!(follower.apply(invalid), Err(Error::ReplicaDiverged(_))),
-            "duplicate, gap or foreign lineage was not refused",
+            matches!(follower.apply(invalid), Err(Error::ReplicaDiverged(got)) if got == reason),
+            "duplicate, gap or foreign lineage was not refused for its own reason",
         )?;
         require(
             (follower.status().lineage, follower.applied_sequence()) == position,

@@ -74,6 +74,14 @@ pub(in crate::server) struct Index {
     pub checkpoints: Vec<Checkpoint>,
 }
 
+/// The size `LogSegment::to_bytes` would produce, computed without copying
+/// so an oversized segment is refused before it is serialized.
+fn encoded_bytes(segment: &LogSegment) -> u64 {
+    (segment.frames.len() as u64)
+        .saturating_add(segment.header.len() as u64)
+        .saturating_add(84)
+}
+
 /// A replay target. Only exact archived checkpoints are supported.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(in crate::server) enum ArchiveTarget {
@@ -581,10 +589,7 @@ impl Sets {
             )
             .into());
         }
-        // Check before serializing so an oversized segment is never copied.
-        let bytes = (segment.frames.len() as u64)
-            .saturating_add(segment.header.len() as u64)
-            .saturating_add(84);
+        let bytes = encoded_bytes(segment);
         if bytes > MAX_SEGMENT_BYTES as u64 {
             return Err(pitr(
                 "pitr_delta_too_large",
@@ -784,6 +789,12 @@ impl Sets {
             return Err(pitr(
                 "pitr_archive_full",
                 "the baseline's archive holds the maximum number of checkpoints; the next baseline snapshot starts a new archive",
+            ));
+        }
+        if encoded_bytes(segment) > MAX_SEGMENT_BYTES as u64 {
+            return Err(pitr(
+                "pitr_delta_too_large",
+                "the commits since the last checkpoint exceed the 64 MiB segment limit; shorten the archive interval (archiving resumes after the next baseline snapshot)",
             ));
         }
         let data = segment.to_bytes();
@@ -2004,6 +2015,38 @@ mod tests {
             Err(HaArchiveError::Authority(AuthorityError::Invalid))
         ));
         assert_eq!(env.data.names(), names);
+    }
+
+    #[test]
+    fn legacy_append_refuses_an_oversized_segment_before_uploading() {
+        let env = setup();
+        let archive = Archive {
+            set_id: env.archive.set_id.clone(),
+            manifest: env.archive.manifest.manifest.clone(),
+            database_sha256: String::new(),
+            index: None,
+        };
+        let mut segment = env.segment.clone();
+        segment.base_sequence = archive.next_base();
+        segment.last_sequence = segment.base_sequence + 1;
+        segment.head_sequence = segment.last_sequence;
+        segment.frames = vec![0; MAX_SEGMENT_BYTES - segment.header.len() - 84 + 1];
+        assert_eq!(segment.to_bytes().len(), MAX_SEGMENT_BYTES + 1);
+        let names = env.data.names();
+        let error = env
+            .sets
+            .append_checkpoint(
+                &archive,
+                &segment,
+                &|_: &str| -> Result<Vec<u8>, ApiError> {
+                    panic!("a refused segment needs no bundle")
+                },
+                2,
+                &|| Ok(()),
+            )
+            .unwrap_err();
+        assert_eq!(error.code, "pitr_delta_too_large");
+        assert_eq!(env.data.names(), names, "nothing is uploaded");
     }
 
     #[test]

@@ -823,7 +823,8 @@ confirms the policy. It holds no secret:
 * `archive` (optional, absent by default) turns on the continuous log archive:
   `{"enabled": true, "interval_secs": 300}` (60–86400, default 300). Each run
   appends a verified checkpoint (log segment and recovery bundle) after the
-  latest published set; `status.archive` reports it. The offline
+  latest published set; `status.archive` reports it (a run with nothing new
+  still reports the latest checkpoint as `tip`). The offline
   `vlite-server cloud-restore --archive-checkpoint latest|<sequence>`
   restores to an exact checkpoint only: times and other sequences are refused
   with `pitr_target_unsupported`, never rounded. Without the field the policy
@@ -1054,7 +1055,9 @@ Before forwarding, the gateway checks, in order:
    credential rather than allowing more than the limit. Buckets are capped at
    `max_buckets`; a new credential then gets 503 `rate_limit_capacity` until a
    full bucket can be evicted.
-7. The body. Bodies over `max_request_bytes` get 413 `payload_too_large`.
+7. The body. Bodies over `max_request_bytes` get 413 `payload_too_large`. A
+   body whose next piece does not arrive within `upstream_timeout_ms` gets
+   408 `request_body_timeout`, and nothing is sent upstream.
 
 More than `max_in_flight` concurrent requests get 503 `overloaded`.
 
@@ -1070,7 +1073,9 @@ URL normalization would change, is refused (503 `tenant_route_invalid` or 400
 `upstream_timeout_ms` bounds connecting, waiting for the response head, and
 then each wait for the next piece of a streamed response. A long stream may
 last longer than it as long as data keeps arriving; a stall for longer than it
-cuts the response short.
+cuts the response short. The same bound applies to a client that stops
+reading a streamed response: it loses the response (`gateway_client_stalled`)
+and its in-flight slot is released.
 
 **Nothing is retried.**
 
@@ -1172,10 +1177,10 @@ most 64 KiB and unknown fields are refused:
 | `envelope_lifetime_ms` | Positive. Keep it within the backends' `max_lifetime_ms`, or they refuse the envelopes. |
 | `public_key_bundle_file`, `signing_key_file`, `active_kid` | The bundle and signing key from `gateway-keygen`. The active key must be in the bundle and match the signing key. The signing key file is at most 1024 bytes. |
 | `readiness_propagation_ms` | 0 or more. How long `/ready` reports `draining` before the listener closes. |
-| `drain_timeout_ms` | Positive. How long in-flight requests may finish after the listener closes; they are then aborted (`drain_timeout`). |
+| `drain_timeout_ms` | Positive. How long in-flight requests may finish after the listener closes; they are then cancelled (`drain_timeout`), as described below. |
 | `max_request_bytes` | 1–8388608. |
 | `max_in_flight` | 1–65536. |
-| `upstream_timeout_ms` | Positive. Bounds connecting, waiting for the response head and each wait for the next streamed piece of a response, not the whole response. |
+| `upstream_timeout_ms` | Positive. Bounds connecting, waiting for the response head and each wait for the next piece of a request or streamed response body, in either direction, not the whole request or response. |
 | `max_buckets` | 1–1000000. |
 
 Durations are at most 3600000 ms. No field has a default except
@@ -1187,6 +1192,22 @@ logs `draining` and answers 503 `draining` on `/ready` for
 `readiness_propagation_ms` while it still serves. It then closes the listener,
 finishes in-flight requests (a gateway waits at most `drain_timeout_ms`),
 stops its control-state poller and exits.
+
+A gateway cancels every request still running when `drain_timeout_ms` passes
+and logs `drain_timeout`. Nothing is retried or re-routed:
+
+| State at the deadline | Answer |
+| --- | --- |
+| Not yet sent upstream (including a body still arriving) | 503 `draining` |
+| A write already sent | 502 `write_outcome_unknown` (read before you repeat it) |
+| A read already sent | 503 `draining` |
+| A response already streaming | cut short |
+
+Cancelled requests get at most one more second to release their slots, and
+the control-state poller at most one more second to stop (a poll still
+reading is left to finish on its own, logged `poller_stop_timeout`). A gateway
+therefore exits within about `readiness_propagation_ms` + `drain_timeout_ms`
++ 2 seconds of the signal.
 
 ### Keys, control state and the tenant directory
 
