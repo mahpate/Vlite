@@ -108,7 +108,7 @@
         <div class="tabpanel" role="tabpanel" id="p-py" aria-labelledby="t-py" tabindex="0">
 <button class="copy" data-copy="c-py" aria-label="Copy Python example">Copy</button>
 <pre class="code" id="c-py"><span class="c-c"># Python 3.11+; run in a fresh directory</span>
-<span class="c-c"># python -m pip install vlite-embedded==0.7.10</span>
+<span class="c-c"># python -m pip install vlite-embedded</span>
 <span class="c-k">from</span> vlite_embedded <span class="c-k">import</span> NativeLibrary
 
 native = NativeLibrary()
@@ -118,7 +118,7 @@ native = NativeLibrary()
         </div>
         <div class="tabpanel" role="tabpanel" id="p-node" aria-labelledby="t-node" hidden>
 <button class="copy" data-copy="c-node">Copy</button>
-<pre class="code" id="c-node"><span class="c-c">// npm install ./vlite-embedded-0.7.10-&lt;platform&gt;.tgz (release tarball)</span>
+<pre class="code" id="c-node"><span class="c-c">// npm install ./vlite-embedded-&lt;version&gt;-&lt;platform&gt;.tgz (download the matching release tarball)</span>
 <span class="c-k">import</span> { NativeLibrary } <span class="c-k">from</span> <span class="c-s">"@vlite/embedded"</span>;
 
 <span class="c-k">const</span> native = <span class="c-k">new</span> NativeLibrary();
@@ -216,7 +216,7 @@ powershell -NoProfile -ExecutionPolicy Bypass -File .\devbox.ps1 -Token
           <p>Add the library; no separate service.</p><a class="more" href="#quickstart">Embedded example &#8594;</a></article>
         <article class="card"><div class="label">Self-hosted</div><h3>You run the server</h3>
           <picture><source media="(prefers-color-scheme: dark)" srcset="assets/diagrams/deployment-self-hosted-dark.svg?v=b40b71f1fef8"><img src="assets/diagrams/deployment-self-hosted-light.svg?v=c1fc1f9575e3" data-light="assets/diagrams/deployment-self-hosted-light.svg?v=c1fc1f9575e3" data-dark="assets/diagrams/deployment-self-hosted-dark.svg?v=b40b71f1fef8" alt="Self-hosted: clients and an optional browser dashboard call vlite-server. Its embedded engine owns the database file on your server's persistent storage." width="520" height="690" loading="lazy"></picture>
-          <p><code>vlite-server</code> serves REST, gRPC and the dashboard. You manage access, HTTPS, backups and upgrades.</p><a class="more" href="docs/DOCKER-OPERATIONS.html">Deployment guide &#8594;</a></article>
+          <p><code>vlite-server</code> serves REST, gRPC and the dashboard. Explore <a href="docs/HA-ACA.html">experimental HA on Azure</a>.</p><a class="more" href="docs/DOCKER-OPERATIONS.html">Deployment guide &#8594;</a></article>
       </div>
       <aside class="product-adoption" aria-label="Applications using VLite">
         <div><div class="label">Real applications</div><h3>Powered by VLite</h3>

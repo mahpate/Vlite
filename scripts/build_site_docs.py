@@ -22,7 +22,6 @@ GROUPS = [
     ("Operations", ["DOCKER-OPERATIONS", "HA-ACA", "SECURITY", "WEBHOOKS", "TOOLS"]),
     ("Agents", ["MEMORY", "MCP", "AGENT-SKILLS"]),
     ("Console", ["CONSOLE", "CONSOLE-ADMIN"]),
-    ("Releases", ["RELEASE-0.7.2", "RELEASE-0.7.1", "RELEASE-0.7.0", "RELEASE-0.6.1", "RELEASE-0.6.0", "RELEASE-0.5.1", "RELEASE-0.5.0", "RELEASE-0.4.1", "RELEASE-0.4.0", "RELEASE-0.3.0", "RELEASE-0.2.0"]),
 ]
 
 
@@ -100,14 +99,14 @@ def page(title, description, header, footer, body):
 """
 
 
-def sidebar(meta, current):
+def sidebar(meta, current, groups):
     parts = ['<aside class="docs-sidebar" aria-label="Documentation"><details class="docs-nav" open>'
              '<summary>Browse docs</summary>',
              '<div class="docs-group"><h4>Overview</h4>'
              f'<a href="./"{" aria-current=\"page\"" if current == "index" else ""}>All docs</a>'
              '<a href="../architecture.html">Architecture</a>'
              '<a href="../api.html">API reference</a></div>']
-    for group, names in GROUPS:
+    for group, names in groups:
         parts.append(f'<div class="docs-group"><h4>{html.escape(group)}</h4>')
         for name in names:
             if name in meta:
@@ -138,10 +137,14 @@ def main():
     header, footer = chrome(site)
     sources = {path.stem: path.read_text(encoding="utf-8") for path in sorted(DOCS.glob("*.md"))}
     meta = {name: title_and_summary(text) for name, text in sources.items()}
-    grouped = {name for _, names in GROUPS for name in names}
+    releases = sorted((name for name in meta if re.fullmatch(r"RELEASE-\d+\.\d+\.\d+", name)),
+                      key=lambda name: tuple(map(int, name.removeprefix("RELEASE-").split("."))),
+                      reverse=True)
+    groups = [*GROUPS, ("Releases", releases)]
+    grouped = {name for _, names in groups for name in names}
     extra = sorted(set(meta) - grouped)
     if extra:
-        GROUPS.append(("More", extra))
+        groups.append(("More", extra))
 
     for name, text in sources.items():
         md = markdown.Markdown(extensions=["fenced_code", "tables", "sane_lists", "toc"],
@@ -152,14 +155,14 @@ def main():
         body = body.replace("<pre><code", '<pre class="code"><code')
         body = re.sub(r"<table>", '<div class="table-scroll"><table>', body).replace("</table>", "</table></div>")
         title, summary = meta[name]
-        main_html = (f'<div class="docs-layout">\n{sidebar(meta, name)}\n'
+        main_html = (f'<div class="docs-layout">\n{sidebar(meta, name, groups)}\n'
                      f'<main class="docs-main prose">\n<p class="kicker">Documentation</p>\n{body}\n'
                      f'<p class="doc-edit"><a href="{REPO}/blob/main/docs/{name}.md">View or edit this page on GitHub ↗</a></p>\n'
                      f'</main>\n{toc_html(md.toc_tokens)}\n</div>')
         (output / f"{name}.html").write_text(page(title, summary, header, footer, main_html), encoding="utf-8")
 
     cards = []
-    for group, names in GROUPS:
+    for group, names in groups:
         cards.append(f'<h2 id="{slugify(group)}">{html.escape(group)}</h2><div class="grid cols-2 docs-cards">')
         for name in names:
             if name in meta:
@@ -167,7 +170,7 @@ def main():
                 cards.append(f'<a class="card" href="{name}.html"><span class="label">{name}.md</span>'
                              f'<h3>{html.escape(title)}</h3><p>{html.escape(summary)}</p></a>')
         cards.append("</div>")
-    index = (f'<div class="docs-layout">\n{sidebar(meta, "index")}\n<main class="docs-main prose">\n'
+    index = (f'<div class="docs-layout">\n{sidebar(meta, "index", groups)}\n<main class="docs-main prose">\n'
              '<p class="kicker">Documentation</p><h1>VLite documentation</h1>\n'
              '<p class="lead"><a href="INSTALL.html">Install VLite</a>, explore the '
              '<a href="../architecture.html">architecture</a>, or use the '

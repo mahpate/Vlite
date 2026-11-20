@@ -1,8 +1,9 @@
 # VLite 0.7.10 upgrade and rollback
 
-VLite 0.7.10 is the first published release of the **experimental, opt-in
-high-availability building blocks for Azure Container Apps** described in the
-[0.7.9 notes](RELEASE-0.7.9.md). The `v0.7.9` tag exists, but its release build
+VLite 0.7.10 includes the **experimental, opt-in high-availability building
+blocks for Azure Container Apps** described in the [0.7.9 notes](RELEASE-0.7.9.md).
+Check [published releases](https://github.com/mahpate/Vlite/releases) for downloadable
+artifacts; a Git tag alone does not publish them. The `v0.7.9` tag exists, but its release build
 failed Windows lint and a macOS compaction test before publication. There are
 no 0.7.9 release assets, container images, Python wheels or npm packages.
 
@@ -50,4 +51,5 @@ The [0.7.9 limits](RELEASE-0.7.9.md#compatibility-and-known-limits) all apply.
 In short: no automatic failover, one writer per database, no ACA-qualified
 deployment (gateway load and staleness measurements have not run on ACA, and
 the Blob fencing measurement has not completed there), Azure Files remains
-experimental, and the dashboard has no HA view.
+experimental, and the dashboard has no HA view. The [HA measurement summary](HA-ACA.md#what-has-been-measured)
+distinguishes the temporary ACA reader run from local emulator evidence.

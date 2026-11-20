@@ -1,5 +1,9 @@
 # VLite 0.7.9 upgrade and rollback
 
+**Unpublished tag.** The release build failed and produced no published
+packages or images. These notes describe the HA changes included in
+[0.7.10](RELEASE-0.7.10.md), not a version to install.
+
 VLite 0.7.9 adds **experimental, opt-in high-availability building blocks for
 Azure Container Apps**: a stateless gateway, read-only reader replicas fed
 from the Azure Blob archive, writer authority with epoch fencing, and an

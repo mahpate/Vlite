@@ -19,6 +19,7 @@ class Page(HTMLParser):
         self.text = []
         self.sections = []
         self.headings = []
+        self.release_cards = []
         self.feed(text)
 
     def handle_data(self, data):
@@ -36,6 +37,8 @@ class Page(HTMLParser):
             self.sections.append(attrs["id"])
         if tag == "h2" and attrs.get("id"):
             self.headings.append(attrs["id"])
+        if tag == "a" and self.headings[-1:] == ["releases"] and "card" in attrs.get("class", "").split():
+            self.release_cards.append(attrs.get("href"))
         for key in ("href", "src", "data-tour", "data-poster"):
             if attrs.get(key):
                 self.links.append(attrs[key])
@@ -57,6 +60,12 @@ def check(root):
     }
     errors = []
     for path, page in pages.items():
+        if path == root / "docs" / "index.html":
+            releases = {p.name: tuple(map(int, match.groups())) for p in pages
+                        if p.parent == path.parent and
+                        (match := re.fullmatch(r"RELEASE-(\d+)\.(\d+)\.(\d+)\.html", p.name))}
+            if page.release_cards != sorted(releases, key=releases.get, reverse=True):
+                errors.append("docs/index.html: list all release notes under Releases, newest version first")
         if path == root / "docs" / "TOOLS.html":
             expected = [
                 "choose-a-tool",

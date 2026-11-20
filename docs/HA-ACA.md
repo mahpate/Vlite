@@ -23,6 +23,33 @@ Older [gateway boundary tables](projects/feature-aca-ha/gateway.md) and
 [local test evidence](projects/feature-aca-ha/gateway-test-plan.md) are not
 proof of current writer HA or ACA qualification.
 
+## What has been measured
+
+- **Reader lag (MEAS-002):** A writer and reader in the same temporary ACA job
+  used a 60-second archive interval. All 7,200 acknowledged commits became
+  visible to the reader; the median delay was 30.7 seconds and the longest
+  observed was 60.9 seconds. This was not a target deployment tier or a
+  bound on reader lag.
+- **Archive faults (MEAS-003):** In local tests with an in-memory object
+  store, the loss report agreed with the records missing after restore.
+  Those tests did not measure data loss during an ACA outage.
+- **Gateway load and control-state changes (MEAS-004/005):** Neither has been
+  measured on ACA. The local drivers exist, but the ACA harness still needs to
+  distribute the same bootstrap database to each backend. Generating a new
+  database gives it a different lineage and invalidates the comparison.
+- **Writer fencing (MEAS-006):** In-memory and local Blob emulator runs
+  exercised the writer checks. Both ACA attempts reached log collection
+  without a usable result; the cause is unknown. Neither fencing latency on ACA nor a bound
+  on how long a stale writer can acknowledge writes has been established.
+- **Reader sizing (MEAS-007):** Temporary ACA jobs measured resources during
+  reader apply, index rebuild and compaction on test data. These were not
+  serving workloads and do not establish a supported tenant size.
+
+These are not availability, recovery-time or data-loss guarantees. There is
+no HA dashboard or automatic failover. Use the operator procedures below;
+see the [measurement record](projects/feature-aca-ha/feature-aca-ha.prd.md#measurement-plans-qualification-remains-gated)
+for the fixtures and limitations.
+
 ## Prepare private inputs
 
 Use an approved isolated environment, the matching `vlite-server` binary,

@@ -95,8 +95,8 @@ dashboard at http://127.0.0.1:8082. On Ubuntu, `sudo sh scripts/docker-dashboard
 installs Docker and starts the published images. See
 [Docker operations](docs/DOCKER-OPERATIONS.md#first-deployment).
 
-Azure Container Apps: [experimental deployment](deploy/azure-container-apps/README.md) on a separate Azure Files share
-in ASENDME's existing storage account; opt-in [HA building blocks](docs/HA-ACA.md) keep one writer, no automatic failover.
+Azure Container Apps: the [single-server deployment](deploy/azure-container-apps/README.md) uses a dedicated Azure Files share. The experimental [HA mode](docs/HA-ACA.md) adds a gateway, Blob-backed readers and optional writer fencing.
+There is still one writer per database. Failover is manual; [measurement results](docs/HA-ACA.md#what-has-been-measured) are not production guarantees.
 
 ### Embedded Rust
 
