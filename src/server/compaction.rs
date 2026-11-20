@@ -485,6 +485,16 @@ impl Coordinator {
     /// Mutates and durably stores the state; on failure the in-memory state
     /// keeps the mutation (it describes the attempted transition).
     fn update(&self, change: impl FnOnce(&mut Persisted)) -> std::io::Result<()> {
+        self.update_then(change, || {})
+    }
+
+    /// Move the fence after the journal write attempt, before readers can see
+    /// the terminal job. Admission stays closed throughout the write itself.
+    fn update_then(
+        &self,
+        change: impl FnOnce(&mut Persisted),
+        after_store: impl FnOnce(),
+    ) -> std::io::Result<()> {
         let mut state = self
             .state
             .lock()
@@ -502,6 +512,7 @@ impl Coordinator {
         let mut copy = state.clone();
         let result = store_state(&self.work, &mut copy);
         state.epoch = copy.epoch;
+        after_store();
         result
     }
 
@@ -1525,15 +1536,15 @@ async fn pipeline(c: &Arc<Coordinator>, template: &Service) {
         Ok(database) => database,
         Err(error) if error.kind() == std::io::ErrorKind::TimedOut => {
             // Nothing changed: the generation is intact; reopen admission.
-            let _ = c.update(|state| {
-                finish_job(
+            let _ = c.update_then(
+                |state| finish_job(
                     state,
                     "failed",
                     Some("drain_timeout"),
                     Some("In-flight work did not finish within 30 seconds; nothing changed. Retry when traffic is lower."),
-                );
-            });
-            c.fence.store(OPEN, Ordering::SeqCst);
+                ),
+                || c.fence.store(OPEN, Ordering::SeqCst),
+            );
             return;
         }
         Err(_) => {
@@ -1869,20 +1880,22 @@ async fn select(
     match rebuilt {
         Ok(()) => {
             let after = std::fs::metadata(&candidate).map(|m| m.len()).ok();
-            let _ = c.update(|state| {
-                let cooldown = u64::from(state.settings.cooldown_hours) * 3_600_000;
-                if let Some(job) = state.job.as_mut() {
-                    job.after_bytes = after.or(job.after_bytes);
-                }
-                state.baseline_bytes = after;
-                state.next_eligible_unix_ms = now().saturating_add(cooldown);
-                state.failures = 0;
-                finish_job(state, "succeeded", None, None);
-            });
-            c.fence.store(OPEN, Ordering::SeqCst);
+            let _ = c.update_then(
+                |state| {
+                    let cooldown = u64::from(state.settings.cooldown_hours) * 3_600_000;
+                    if let Some(job) = state.job.as_mut() {
+                        job.after_bytes = after.or(job.after_bytes);
+                    }
+                    state.baseline_bytes = after;
+                    state.next_eligible_unix_ms = now().saturating_add(cooldown);
+                    state.failures = 0;
+                    finish_job(state, "succeeded", None, None);
+                },
+                || c.fence.store(OPEN, Ordering::SeqCst),
+            );
         }
         Err(code) => {
-            let _ = c.update(|state| {
+            let _ = c.update_then(|state| {
                 state.suspended = true;
                 finish_job(
                     state,
@@ -1893,8 +1906,7 @@ async fn select(
                 if let Some(job) = state.history.first_mut() {
                     job.selection = "committed".into();
                 }
-            });
-            c.fence_recovery(code);
+            }, || c.fence_recovery(code));
         }
     }
 }
@@ -1929,27 +1941,28 @@ async fn recover_source(
         cleanup(&c.dir, &c.work, job);
     }
     if !rebuilt {
-        let _ = c.update(|state| {
+        let _ = c.update_then(|state| {
             finish_job(
                 state,
                 "failed",
                 Some("source_open_failed"),
                 Some("The source file could not be reopened. Restart the server; no file was selected."),
             );
-        });
-        c.fence_recovery("source_open_failed");
+        }, || c.fence_recovery("source_open_failed"));
         return;
     }
-    let _ = c.update(|state| {
-        if let Some(bytes) = baseline {
-            state.baseline_bytes = Some(bytes);
-            let cooldown = u64::from(state.settings.cooldown_hours) * 3_600_000;
-            state.next_eligible_unix_ms = now().saturating_add(cooldown);
-            state.failures = 0;
-        }
-        finish_job(state, outcome, code, Some(action));
-    });
-    c.fence.store(OPEN, Ordering::SeqCst);
+    let _ = c.update_then(
+        |state| {
+            if let Some(bytes) = baseline {
+                state.baseline_bytes = Some(bytes);
+                let cooldown = u64::from(state.settings.cooldown_hours) * 3_600_000;
+                state.next_eligible_unix_ms = now().saturating_add(cooldown);
+                state.failures = 0;
+            }
+            finish_job(state, outcome, code, Some(action));
+        },
+        || c.fence.store(OPEN, Ordering::SeqCst),
+    );
 }
 
 // ------------------------------------------------------------------ routes
