@@ -535,4 +535,6 @@ test recovery or reuse old credentials on the new lineage.
 - Multi-writer operation or additional write capacity.
 - Cross-region failover or geo-failing the authority.
 - Power-loss-qualified Azure Files or production availability/durability SLOs.
+- ACA gateway load and staleness measurements, or a completed ACA run of the
+  Blob fencing measurement.
 - Query routing of writes to readers, position tokens or read-your-writes overrides.

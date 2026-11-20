@@ -5,7 +5,7 @@
     <Nullable>enable</Nullable>
     <TreatWarningsAsErrors>true</TreatWarningsAsErrors>
     <PackageId>VLite.Client</PackageId>
-    <Version>0.7.8</Version>
+    <Version>0.7.9</Version>
     <Description>Dependency-free VLite REST client</Description>
     <PackageLicenseExpression>MIT</PackageLicenseExpression>
   </PropertyGroup>
