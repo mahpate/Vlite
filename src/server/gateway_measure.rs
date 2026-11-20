@@ -245,6 +245,7 @@ fn bootstrap(config: Bootstrap) -> Result<Value, String> {
         .output_dir
         .parent()
         .ok_or("measurement_output_invalid")?;
+    #[cfg_attr(not(unix), allow(unused_mut))]
     let mut stage = tempfile::Builder::new();
     // The published directory holds secrets; create it private, not umask-derived.
     #[cfg(unix)]
