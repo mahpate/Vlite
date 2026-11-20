@@ -1,0 +1,2013 @@
+diff --git a/docs/API.md b/docs/API.md
+index 37391744..fdffddad 100644
+--- a/docs/API.md
++++ b/docs/API.md
+@@ -820,6 +820,15 @@ confirms the policy. It holds no secret:
+   removed after `orphan_grace_hours` (1–720).
+ * `drill_every` drills every Nth published set (0–100, 0 turns scheduled
+   drills off).
++* `archive` (optional, absent by default) turns on the continuous log archive:
++  `{"enabled": true, "interval_secs": 300}` (60–86400, default 300). Each run
++  appends a verified checkpoint (log segment and recovery bundle) after the
++  latest published set; `status.archive` reports it. The offline
++  `vlite-server cloud-restore --archive-checkpoint latest|<sequence>`
++  restores to an exact checkpoint only: times and other sequences are refused
++  with `pitr_target_unsupported`, never rounded. Without the field the policy
++  and its capture hash are unchanged. See
++  [DOCKER-OPERATIONS.md](DOCKER-OPERATIONS.md#continuous-log-archive-and-checkpoint-restore-opt-in).
+ 
+ **What a set holds.** A consistent snapshot of the database file and a
+ recovery bundle: tenants, dashboard account names and roles, the scoped
+diff --git a/docs/CAPABILITIES.md b/docs/CAPABILITIES.md
+index 4f6bafe2..5d735ea7 100644
+--- a/docs/CAPABILITIES.md
++++ b/docs/CAPABILITIES.md
+@@ -223,7 +223,10 @@ Both are **off by default**.
+ - **Cloud backups to Azure Blob** (`/v1/admin/cloud-backup`) are a separate
+   opt-in with a persisted policy and managed identity. Each run publishes a
+   verified set (database snapshot plus a sanitized recovery bundle); restore
+-  makes a new-lineage copy and never replaces the active database. See
++  makes a new-lineage copy and never replaces the active database. An
++  optional continuous log archive adds verified checkpoints after the latest
++  set; the offline restore can recover to an exact checkpoint (not to an
++  arbitrary time). See
+   [DOCKER-OPERATIONS.md](DOCKER-OPERATIONS.md#cloud-backups-to-azure-blob).
+ 
+ ## Operational diagnostics
+diff --git a/docs/DOCKER-OPERATIONS.md b/docs/DOCKER-OPERATIONS.md
+index 34e46cd8..faa49b51 100644
+--- a/docs/DOCKER-OPERATIONS.md
++++ b/docs/DOCKER-OPERATIONS.md
+@@ -506,6 +506,82 @@ For a local Azurite emulator only, set `target.endpoint` to its loopback URL,
+ file with the account key. The key is read per process and never written to
+ the policy; a non-loopback endpoint with a shared key is refused.
+ 
++### Continuous log archive and checkpoint restore (opt-in)
++
++Snapshots alone lose everything written since the last published set. With
++`"archive": {"enabled": true, "interval_secs": 300}` in the cloud backup
++policy (60–86400 seconds; the cloud policy must also be `enabled`), the server
++also archives the database's change log after the **latest published set**
++(the baseline) at each interval, while no snapshot is due. A policy without
++`archive`, or with `"enabled": false`, behaves exactly as before.
++
++Each archive run appends one **checkpoint**: the log segment written since
++the previous checkpoint plus a recovery bundle captured with it (accounts,
++tenants, credential inventory and, if configured, the memory binding set in
++force at that cut). The segment and bundle are content-addressed objects
++under the baseline set, read back and checked, and become restorable only
++when the set's archive index is replaced by a compare-and-set. An index
++whose outcome was not seen is settled on the next run. A run with no new
++commits appends nothing. `GET /v1/admin/cloud-backup` shows the archive's
++`runs`, `checkpoints`, `failures`, `baseline_set`, `baseline_checkpoints`,
++`last_checkpoint_sequence`, `last_checkpoint_unix_ms` and `last_error`
++under `status.archive`; archive failures never change the snapshot counters.
++
++The chain stops, with a `last_error` code, until the next snapshot publishes
++a new baseline: the policy changed after the baseline
++(`pitr_policy_changed`), the live log no longer holds the commits after the
++last checkpoint (`pitr_history_floor_advanced`), the live database does not
++continue the baseline, for example after a compaction or a restore was
++selected (`pitr_source_diverged`), a single segment would exceed 64 MiB
++(`pitr_delta_too_large`), or the archive reached 256 checkpoints or 1 GiB
++(`pitr_archive_full`). Take a snapshot after such an event; checkpoints
++already published stay restorable.
++
++**Supported recovery points.** A restore recovers to an exact, verified
++checkpoint only, never to a time or an arbitrary log sequence:
++
++```sh
++vlite-server cloud-restore --target-file target.json --set <set-id> \
++  --archive-checkpoint latest --output /data/restored \
++  --admin-username recovery-admin --admin-password-file ./admin-password
++```
++
++`--archive-checkpoint` takes `latest` or the exact `sequence` of one of the
++set's checkpoints (as printed by a previous report or the status). Any other
++value (a time, the baseline sequence, a sequence between checkpoints, a
++padded or signed number) is refused with `pitr_target_unsupported`, and the
++message lists the available checkpoint sequences; the restore never rounds
++to a neighbouring checkpoint. A set without an archive answers
++`pitr_archive_missing`. The command verifies the whole chain from the
++baseline to the chosen checkpoint (object hashes, the chain hash, the
++lineage and contiguous sequences); any mismatch (`cloud_set_corrupt`) or
++malformed index (`cloud_object_invalid`) publishes nothing. It then replays
++the segments onto the baseline in staging and continues as the snapshot
++restore: the same rekey-only import (new lineage, accounts disabled, one new
++super admin), memory checks and no-overwrite publication, using the
++checkpoint's own bundle, so accounts and memory bindings match that
++checkpoint, not the baseline. The report adds an `archive` object
++(`sequence`, `captured_unix_ms`, `chain_sha256`, `segments`,
++`verified_bytes`, `crc32`, `baseline_sequence`). Without
++`--archive-checkpoint` the snapshot is restored unchanged.
++
++Limits to plan for:
++
++- The recovery point objective is the archive interval plus the time a run
++  takes, and only while the chain is healthy; it is not a guarantee. Watch
++  `status.archive.last_error` and `last_checkpoint_unix_ms`.
++- `captured_unix_ms` is when the segment was cut, not when each commit was
++  made. Commits after the last checkpoint are not recoverable from the cloud.
++- Checkpoint restore is offline (`cloud-restore`) only; the restore and drill
++  routes still restore the snapshot. A drill does not verify the archive.
++- Archive objects live under their baseline set: pins hold them and
++  retention or collection deletes them with that set. Objects of a run that
++  never committed its index are removed when the set is collected.
++- The live database is read-locked while a segment is cut, as during a
++  snapshot copy, and a segment of up to 64 MiB is held in memory.
++- A policy file with `archive` is refused by older servers (unknown field);
++  remove the field before downgrading.
++
+ ## Release and image verification
+ 
+ The release workflow builds and tests the runtime, API, and dashboard targets.
+diff --git a/docs/SECURITY.md b/docs/SECURITY.md
+index 718857cc..074c2d17 100644
+--- a/docs/SECURITY.md
++++ b/docs/SECURITY.md
+@@ -350,7 +350,10 @@ are rejected, so a key or connection string cannot be saved there.
+   replaces each binding's principals and raises its `generation`
+   ([DOCKER-OPERATIONS.md](DOCKER-OPERATIONS.md#cloud-backups-to-azure-blob)).
+   A restore also brings back memories and evidence forgotten or erased
+-  after the backup was taken.
++  after the backup was taken. A checkpoint restore
++  (`--archive-checkpoint`) is the same rekey-only import, using the bundle
++  captured with that checkpoint; it brings back what was forgotten or erased
++  after the checkpoint.
+ - **Pins.** A restore or drill pins its set so retention cannot delete it
+   mid-download. Only the owning operation releases that pin; an operator can
+   force-release one left by a crashed owner, which is audited separately.
+diff --git a/src/bin/vlite-server.rs b/src/bin/vlite-server.rs
+index 05488d32..4af685b4 100644
+--- a/src/bin/vlite-server.rs
++++ b/src/bin/vlite-server.rs
+@@ -983,7 +983,7 @@ async fn main() -> std::process::ExitCode {
+     }
+ }
+ 
+-const CLOUD_USAGE: &str = "usage: vlite-server cloud-sets --target-file <json> [--shared-key-file <path>] | vlite-server cloud-restore --target-file <json> [--shared-key-file <path>] --set <set-id> --output <new-dir> --admin-username <name> --admin-password-file <path> [--mode rekey|seed] (default rekey: new lineage, imported accounts disabled, no credentials or sessions restored; seed is deferred HA scope and refused). The output directory must not exist; its parent must; it receives database.vlite and admin/ in one step. The target file holds the cloud backup policy's target JSON; the emulator shared key falls back to VLITE_CLOUD_BACKUP_SHARED_KEY_FILE. Prints a JSON report; nothing is selected or started. A database literally named cloud-sets or cloud-restore needs a ./ prefix.";
++const CLOUD_USAGE: &str = "usage: vlite-server cloud-sets --target-file <json> [--shared-key-file <path>] | vlite-server cloud-restore --target-file <json> [--shared-key-file <path>] --set <set-id> --output <new-dir> --admin-username <name> --admin-password-file <path> [--mode rekey|seed] [--archive-checkpoint latest|<sequence>] (default rekey: new lineage, imported accounts disabled, no credentials or sessions restored; seed is deferred HA scope and refused). --archive-checkpoint replays the set's verified log archive to exactly that checkpoint (latest, or a listed checkpoint sequence; times and other sequences are refused, never rounded). The output directory must not exist; its parent must; it receives database.vlite and admin/ in one step. The target file holds the cloud backup policy's target JSON; the emulator shared key falls back to VLITE_CLOUD_BACKUP_SHARED_KEY_FILE. Prints a JSON report; nothing is selected or started. A database literally named cloud-sets or cloud-restore needs a ./ prefix.";
+ 
+ /// Offline cloud recovery commands: JSON report on stdout, `{"error":...}`
+ /// on stderr. The Azure client is blocking, so it runs off the runtime.
+@@ -1029,6 +1029,7 @@ fn cloud_command(command: &str, args: &[OsString]) -> Result<serde_json::Value,
+             "--admin-username",
+             "--admin-password-file",
+             "--mode",
++            "--archive-checkpoint",
+         ]
+     };
+     let mut values: std::collections::BTreeMap<&str, OsString> = Default::default();
+@@ -1072,6 +1073,10 @@ fn cloud_command(command: &str, args: &[OsString]) -> Result<serde_json::Value,
+             .map_err(usage)?,
+         Err(_) => RestoreMode::Rekey,
+     };
++    let archive_checkpoint = match take("--archive-checkpoint") {
++        Ok(value) => Some(text("--archive-checkpoint", value)?),
++        Err(_) => None,
++    };
+     let request = CloudRestore {
+         set_id: text("--set", take("--set")?)?,
+         output: PathBuf::from(take("--output")?),
+@@ -1080,6 +1085,7 @@ fn cloud_command(command: &str, args: &[OsString]) -> Result<serde_json::Value,
+         target_file,
+         shared_key_file,
+         mode,
++        archive_checkpoint,
+     };
+     vlite::server::cloud_restore(&request)
+ }
+diff --git a/src/server/backup_policy.rs b/src/server/backup_policy.rs
+index e8bd5548..2e966830 100644
+--- a/src/server/backup_policy.rs
++++ b/src/server/backup_policy.rs
+@@ -92,9 +92,35 @@ pub(super) struct Policy {
+     /// Drill every Nth published set (0 disables scheduled drills).
+     #[serde(default = "default_drill_every")]
+     pub drill_every: u64,
++    /// Opt-in continuous log archive of the latest published set (blob-pitr
++    /// EPIC-PITR-001). Absent means snapshot-only, and an absent field
++    /// leaves the policy document and its capture hash unchanged.
++    #[serde(default, skip_serializing_if = "Option::is_none")]
++    pub archive: Option<ArchivePolicy>,
++}
++
++fn default_archive_interval() -> u64 {
++    300
++}
++
++/// Continuous archive settings. The interval is how often a checkpoint is
++/// attempted, not a recovery-point guarantee.
++#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
++#[serde(deny_unknown_fields)]
++pub(super) struct ArchivePolicy {
++    #[serde(default)]
++    pub enabled: bool,
++    #[serde(default = "default_archive_interval")]
++    pub interval_secs: u64,
+ }
+ 
+ impl Policy {
++    fn archive_interval_ms(&self) -> Option<u64> {
++        let archive = self.archive.as_ref().filter(|a| a.enabled)?;
++        self.enabled
++            .then(|| archive.interval_secs.saturating_mul(1000))
++    }
++
+     pub(super) fn validate(&self) -> Result<(), String> {
+         self.target.validate()?;
+         if !(300..=604_800).contains(&self.interval_secs) {
+@@ -112,6 +138,11 @@ impl Policy {
+         if self.drill_every > 100 {
+             return Err("drill_every must be 0-100".into());
+         }
++        if let Some(archive) = &self.archive
++            && !(60..=86_400).contains(&archive.interval_secs)
++        {
++            return Err("archive.interval_secs must be 60-86400".into());
++        }
+         Ok(())
+     }
+ 
+@@ -161,6 +192,26 @@ pub(super) struct Status {
+     /// When schedule times found in the future were pulled back to the
+     /// clock (a clock that ran ahead and was corrected).
+     pub clock_reset_unix_ms: Option<u64>,
++    /// Continuous archive progress; absent until the first archive attempt.
++    #[serde(skip_serializing_if = "Option::is_none")]
++    pub archive: Option<ArchiveStatus>,
++}
++
++/// Archive progress. `last_checkpoint_*` is the newest verified recovery
++/// point; commits after it are not recoverable from the archive.
++#[derive(Clone, Debug, Default, Serialize, Deserialize)]
++#[serde(default)]
++pub(super) struct ArchiveStatus {
++    pub runs: u64,
++    pub checkpoints: u64,
++    pub failures: u64,
++    pub last_attempt_unix_ms: Option<u64>,
++    pub baseline_set: Option<String>,
++    /// Verified checkpoints of `baseline_set` in the archive index.
++    pub baseline_checkpoints: u64,
++    pub last_checkpoint_sequence: Option<u64>,
++    pub last_checkpoint_unix_ms: Option<u64>,
++    pub last_error: Option<LastError>,
+ }
+ 
+ #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+@@ -265,6 +316,9 @@ pub(super) struct Runtime {
+     live: Mutex<HashSet<String>>,
+     /// The thread of the last scheduled run, waited for at shutdown.
+     operation: Mutex<Option<std::thread::JoinHandle<()>>>,
++    /// Set with `busy` when the claimed scheduled run is an archive
++    /// checkpoint rather than a snapshot.
++    archive_claim: AtomicBool,
+     connector: Connector,
+ }
+ 
+@@ -727,6 +781,12 @@ fn reconcile_clock(loaded: &mut Loaded, now: u64) -> bool {
+             changed = true;
+         }
+     }
++    if let Some(stamp) = status.archive.as_mut().map(|a| &mut a.last_attempt_unix_ms)
++        && stamp.is_some_and(|at| at > now)
++    {
++        *stamp = Some(now);
++        changed = true;
++    }
+     let retry = now.saturating_add(RETRY_MS);
+     if loaded.retry_at.is_some_and(|at| at > retry) {
+         loaded.retry_at = Some(retry);
+@@ -754,6 +814,21 @@ fn next_run(loaded: &Loaded) -> Option<u64> {
+     }))
+ }
+ 
++/// When the next archive checkpoint is due, if archiving is enabled. It runs
++/// only when no snapshot is due (a due snapshot has priority).
++fn next_archive(loaded: &Loaded) -> Option<u64> {
++    let interval = loaded.policy.as_ref()?.archive_interval_ms()?;
++    let s = &loaded.status;
++    Some(
++        s.archive
++            .as_ref()
++            .and_then(|a| a.last_attempt_unix_ms)
++            .max(s.policy_updated_unix_ms)
++            .unwrap_or(0)
++            .saturating_add(interval),
++    )
++}
++
+ impl Runtime {
+     pub(super) fn open(dir: PathBuf) -> std::io::Result<Self> {
+         Self::open_with(dir, Box::new(connect))
+@@ -822,6 +897,7 @@ impl Runtime {
+             active: Arc::default(),
+             live: Mutex::default(),
+             operation: Mutex::default(),
++            archive_claim: AtomicBool::new(false),
+             connector,
+         })
+     }
+@@ -1068,7 +1144,22 @@ impl Runtime {
+         reconcile_clock(&mut loaded, now);
+         match next_run(&loaded) {
+             Some(next) if now >= next => {}
+-            _ => return false,
++            _ => {
++                // No snapshot is due: an archive checkpoint may be. A busy
++                // skip simply waits for a later tick.
++                if next_archive(&loaded).is_some_and(|next| now >= next)
++                    && !self.busy.swap(true, Ordering::AcqRel)
++                {
++                    loaded
++                        .status
++                        .archive
++                        .get_or_insert_with(Default::default)
++                        .last_attempt_unix_ms = Some(now);
++                    self.archive_claim.store(true, Ordering::Release);
++                    return true;
++                }
++                return false;
++            }
+         }
+         if self.busy.swap(true, Ordering::AcqRel) {
+             bump(&mut loaded.status.skipped_busy);
+@@ -1085,16 +1176,22 @@ impl Runtime {
+     /// for it.
+     pub(super) fn start_claimed(self: &Arc<Self>, handle: Handle) {
+         let Ok(active) = self.enter() else {
++            self.archive_claim.store(false, Ordering::Release);
+             self.busy.store(false, Ordering::Release);
+             return;
+         };
++        let archive = self.archive_claim.swap(false, Ordering::AcqRel);
+         let runtime = self.clone();
+         let spawned = std::thread::Builder::new()
+             .name("vlite-cloud-backup".into())
+             .spawn(move || {
+                 let _active = active;
+                 let _claim = Busy(&runtime.busy);
+-                let _ = runtime.cycle(&handle, true);
++                if archive {
++                    let _ = runtime.archive_cycle(&handle);
++                } else {
++                    let _ = runtime.cycle(&handle, true);
++                }
+             });
+         if let Ok(thread) = spawned {
+             *self
+@@ -1172,6 +1269,187 @@ impl Runtime {
+         self.cycle(handle, false)
+     }
+ 
++    /// Runs one archive checkpoint now (tests drive the scheduler path
++    /// through `claim_due_at` and this).
++    #[cfg(test)]
++    fn archive_now(&self, handle: &Handle) -> Result<Value, ApiError> {
++        let _active = self.enter()?;
++        let _busy = self.try_busy()?;
++        self.archive_cycle(handle)
++    }
++
++    /// One continuous-archive checkpoint of the latest published set
++    /// (blob-pitr ITEM-PITR-001). Its outcome is recorded in
++    /// `status.archive` and audited; snapshot counters are untouched.
++    fn archive_cycle(&self, handle: &Handle) -> Result<Value, ApiError> {
++        if self.stopping.load(Ordering::SeqCst) {
++            return Err(closed());
++        }
++        let started = now();
++        let (_, installation) = self.configured()?;
++        let mut admitted = None;
++        let mut baseline = None;
++        self.update(|l| {
++            l.status
++                .archive
++                .get_or_insert_with(Default::default)
++                .last_attempt_unix_ms = Some(started);
++            baseline = l.status.last_set.clone();
++            admitted = l.policy.clone().map(|policy| Admitted {
++                policy,
++                revision: l.status.policy_updated_unix_ms,
++            });
++        })?;
++        let admitted = admitted.ok_or_else(not_configured)?;
++        let outcome = self.archive_once(handle, &admitted, &installation, baseline, started);
++        match &outcome {
++            Ok(report) => {
++                let checkpoint = report["checkpoint"].clone();
++                self.note(|l| {
++                    let a = l.status.archive.get_or_insert_with(Default::default);
++                    bump(&mut a.runs);
++                    if a.baseline_set.as_deref() != report["set_id"].as_str() {
++                        a.last_checkpoint_sequence = None;
++                        a.last_checkpoint_unix_ms = None;
++                    }
++                    a.baseline_set = report["set_id"].as_str().map(str::to_owned);
++                    a.baseline_checkpoints = report["checkpoints"].as_u64().unwrap_or(0);
++                    if let Some(sequence) = checkpoint["sequence"].as_u64() {
++                        bump(&mut a.checkpoints);
++                        a.last_checkpoint_sequence = Some(sequence);
++                        a.last_checkpoint_unix_ms = checkpoint["captured_unix_ms"].as_u64();
++                    }
++                    a.last_error = None;
++                });
++                if !checkpoint.is_null() {
++                    handle.audit(json!({"event":"cloud_backup_archived",
++                        "set_id":report["set_id"],"sequence":checkpoint["sequence"]}));
++                }
++            }
++            Err(error) => {
++                self.note(|l| {
++                    let a = l.status.archive.get_or_insert_with(Default::default);
++                    bump(&mut a.runs);
++                    bump(&mut a.failures);
++                    a.last_error = Some(LastError {
++                        code: error.code.into(),
++                        message: clip(&error.message),
++                    });
++                });
++                handle.audit(
++                    json!({"event":"cloud_backup_archive_failed","code":error.code,
++                    "message":error.message}),
++                );
++                logs::stderr(
++                    "error",
++                    "cloud_backup",
++                    json!({"event":"cloud_backup_archive_failed","code":error.code}).to_string(),
++                );
++            }
++        }
++        outcome
++    }
++
++    /// Cuts the log after the archive's last checkpoint (or the baseline)
++    /// and the configuration captured with it, then appends the checkpoint.
++    /// The baseline must be the latest published set, captured under the
++    /// policy now in effect: otherwise archiving waits for the next
++    /// snapshot instead of pairing a segment with another policy.
++    fn archive_once(
++        &self,
++        handle: &Handle,
++        admitted: &Admitted,
++        installation: &str,
++        baseline: Option<String>,
++        now: u64,
++    ) -> Result<Value, ApiError> {
++        use cloud::archive::{MAX_SEGMENT_BYTES, pitr};
++        handle.refusal()?;
++        if admitted.policy.archive_interval_ms().is_none() {
++            return Err(conflict(
++                "pitr_archive_disabled",
++                "continuous archiving needs an enabled policy with archive.enabled",
++            ));
++        }
++        let baseline = baseline.ok_or_else(|| {
++            pitr(
++                "pitr_baseline_missing",
++                "no published snapshot to archive after; the next snapshot publishes the baseline",
++            )
++        })?;
++        let capture = admitted.capture()?;
++        let authorize = || self.authorized();
++        let sets = (self.connector)(&admitted.policy.target)?;
++        authorize()?;
++        sets.ensure_owner(installation, now)?;
++        let archive = sets.open_archive(&baseline)?;
++        if archive.manifest.policy != capture {
++            return Err(pitr(
++                "pitr_policy_changed",
++                "the policy changed after the baseline snapshot; archiving resumes after the next snapshot",
++            ));
++        }
++        let admin = handle.admin.upgrade().ok_or_else(unavailable)?;
++        // As for a snapshot: the configuration is read before and after the
++        // cut, and a change between the two fails this checkpoint.
++        let before = recovery_bundle::capture(&admin, &handle.webhooks, now)?;
++        let (segment, memory) = {
++            let Ok(_permit) = handle.workers.clone().try_acquire_owned() else {
++                return Err(busy_queue());
++            };
++            let database = handle.database.upgrade().ok_or_else(unavailable)?;
++            // Writers and binding reloads take the write lock, so the cut and
++            // the binding set read here belong together.
++            let owner = database.read().map_err(internal)?;
++            let db = owner.as_ref().ok_or_else(unavailable)?;
++            cloud::check_database_size(db.file.0.metadata().map_err(internal)?.len())?;
++            let current = handle.served.current();
++            let memory = current.is_configured().then(|| current.set().clone());
++            let segment = db
++                .export_log(archive.next_base(), MAX_SEGMENT_BYTES)
++                .map_err(|error| match error {
++                    crate::Error::CursorBeforeHistory { cursor, floor } => pitr(
++                        "pitr_history_floor_advanced",
++                        format!(
++                            "the live log no longer holds the commits after {cursor} (history starts at {floor}, e.g. after compaction); archiving resumes after the next snapshot"
++                        ),
++                    ),
++                    crate::Error::CursorAhead { .. } | crate::Error::ReplicaDiverged(_) => pitr(
++                        "pitr_source_diverged",
++                        "the live database does not continue the baseline; archiving resumes after the next snapshot",
++                    ),
++                    error => error.into(),
++                })?;
++            (segment, memory)
++        };
++        let after = recovery_bundle::capture(&admin, &handle.webhooks, now)?;
++        recovery_bundle::stable(&before, &after)?;
++        drop(admin);
++        let count = archive.checkpoints().len();
++        if segment.is_empty() && segment.head_sequence == segment.base_sequence {
++            // Nothing committed since the last checkpoint.
++            return Ok(
++                json!({"set_id":baseline,"checkpoint":null,"checkpoints":count,
++                "sequence":segment.base_sequence}),
++            );
++        }
++        let lineage = Some(segment.lineage);
++        let bundle = |chain: &str| {
++            let bundle = recovery_bundle::bundle(
++                after.clone(),
++                installation,
++                lineage,
++                chain,
++                capture.clone(),
++                memory.as_ref(),
++                now,
++            );
++            serde_json::to_vec_pretty(&bundle).map_err(internal)
++        };
++        let checkpoint = sets.append_checkpoint(&archive, &segment, &bundle, now, &authorize)?;
++        Ok(json!({"set_id":baseline,"checkpoint":checkpoint,"checkpoints":count + 1}))
++    }
++
+     /// Saves the job before any remote work, runs it, then clears it. A
+     /// panic is recorded by the unwinding guard; a process that stops
+     /// mid-run leaves the job for the next start to record.
+@@ -3910,4 +4188,323 @@ mod tests {
+             assert!(text.contains("invalid_json"), "{uri}: {text}");
+         }
+     }
++
++    fn archiving() -> Policy {
++        policy(json!({"enabled":true,"drill_every":0,
++            "archive":{"enabled":true,"interval_secs":60}}))
++    }
++
++    fn put(env: &Env, ids: std::ops::RangeInclusive<u64>) {
++        let mut guard = env.service.database.write().unwrap();
++        let db = guard.as_mut().unwrap();
++        for id in ids {
++            db.put(id, &[id as f32, 0.25, 1.0], format!("a{id}").as_bytes())
++                .unwrap();
++        }
++    }
++
++    fn archive_index(env: &Env, set: &str) -> Option<Value> {
++        env.data
++            .raw(&format!("vlite/prod/sets/{set}/archive.json"))
++            .map(|bytes| serde_json::from_slice(&bytes).unwrap())
++    }
++
++    #[test]
++    fn archive_policy_is_opt_in_bounded_and_leaves_snapshot_policies_unchanged() {
++        let plain = policy(json!({"enabled":true}));
++        let value = serde_json::to_value(&plain).unwrap();
++        // Absent, the field is not serialized: the snapshot-only policy and
++        // its capture hash are byte-for-byte what they were.
++        assert!(value.get("archive").is_none(), "{value}");
++        assert_eq!(plain.archive_interval_ms(), None);
++        let off = policy(json!({"enabled":true,"archive":{"enabled":false}}));
++        assert_eq!(off.archive_interval_ms(), None);
++        let on = policy(json!({"enabled":true,"archive":{"enabled":true}}));
++        on.validate().unwrap();
++        assert_eq!(on.archive_interval_ms(), Some(300_000));
++        // Archiving follows the snapshot schedule's switch.
++        assert_eq!(
++            policy(json!({"archive":{"enabled":true}})).archive_interval_ms(),
++            None
++        );
++        for bad in [0, 59, 86_401] {
++            let p = policy(json!({"archive":{"enabled":true,"interval_secs":bad}}));
++            assert!(p.validate().is_err(), "{bad}");
++        }
++        // No time target or other knob can be smuggled into the policy.
++        for extra in [json!({"target_time":1}), json!({"retain_days":1})] {
++            let mut archive = json!({"enabled":true});
++            archive
++                .as_object_mut()
++                .unwrap()
++                .extend(extra.as_object().unwrap().clone());
++            let value = json!({"target":target(),"archive":archive});
++            assert!(serde_json::from_value::<Policy>(value).is_err(), "{extra}");
++        }
++    }
++
++    #[test]
++    fn archive_checkpoints_continue_the_latest_published_snapshot() {
++        let env = setup();
++        let h = Handle::new(&env.service);
++        env.runtime
++            .configure(policy(json!({"enabled":true,"drill_every":0})), &h, BASE)
++            .unwrap();
++        assert_eq!(code(env.runtime.archive_now(&h)), "pitr_archive_disabled");
++        env.runtime.configure(archiving(), &h, BASE).unwrap();
++        assert_eq!(code(env.runtime.archive_now(&h)), "pitr_baseline_missing");
++        env.runtime.run_now(&h).unwrap();
++        let baseline = status(&env.runtime)["last_set"]
++            .as_str()
++            .unwrap()
++            .to_owned();
++
++        // Nothing committed since the snapshot: no checkpoint, no write.
++        let objects = env.data.names();
++        let idle = env.runtime.archive_now(&h).unwrap();
++        assert!(idle["checkpoint"].is_null(), "{idle}");
++        assert_eq!(
++            (idle["checkpoints"].clone(), idle["sequence"].clone()),
++            (json!(0), json!(4))
++        );
++        assert_eq!(env.data.names(), objects, "an idle run writes nothing");
++        assert!(archive_index(&env, &baseline).is_none());
++
++        put(&env, 5..=6);
++        let first = env.runtime.archive_now(&h).unwrap();
++        assert_eq!(first["set_id"], baseline.as_str());
++        assert_eq!(first["checkpoint"]["base_sequence"], 4);
++        assert_eq!(first["checkpoint"]["sequence"], 6);
++        assert_eq!(first["checkpoints"], 1);
++        put(&env, 7..=7);
++        let second = env.runtime.archive_now(&h).unwrap();
++        assert_eq!(second["checkpoint"]["base_sequence"], 6);
++        assert_eq!(second["checkpoint"]["sequence"], 7);
++        assert_eq!(second["checkpoints"], 2);
++        let index = archive_index(&env, &baseline).unwrap();
++        assert_eq!(index["checkpoints"].as_array().unwrap().len(), 2);
++        assert_eq!(index["baseline_sequence"], 4);
++        // Two objects (segment and bundle) per checkpoint, plus the index,
++        // all inside the baseline's set directory.
++        let added: Vec<_> = env
++            .data
++            .names()
++            .into_iter()
++            .filter(|n| !objects.contains(n))
++            .collect();
++        assert_eq!(added.len(), 5, "{added:?}");
++        let dir = format!("vlite/prod/sets/{baseline}/");
++        assert!(added.iter().all(|n| n.starts_with(&dir)), "{added:?}");
++
++        let s = status(&env.runtime);
++        let a = &s["archive"];
++        assert_eq!(
++            (
++                a["runs"].clone(),
++                a["failures"].clone(),
++                a["checkpoints"].clone()
++            ),
++            (json!(5), json!(2), json!(2)),
++            "{a}"
++        );
++        assert_eq!(a["baseline_set"], baseline.as_str());
++        assert_eq!(a["baseline_checkpoints"], 2);
++        assert_eq!(a["last_checkpoint_sequence"], 7);
++        assert!(a["last_error"].is_null(), "{a}");
++        // Snapshot counters never see archive runs.
++        assert_eq!(
++            (
++                s["runs"].clone(),
++                s["published"].clone(),
++                s["failures"].clone()
++            ),
++            (json!(1), json!(1), json!(0)),
++            "{s}"
++        );
++        assert_eq!(status(&reopen(&env))["archive"], s["archive"], "durable");
++
++        // A new snapshot is a new baseline with its own chain.
++        env.runtime.run_now(&h).unwrap();
++        let next = status(&env.runtime)["last_set"]
++            .as_str()
++            .unwrap()
++            .to_owned();
++        assert_ne!(next, baseline);
++        assert!(env.runtime.archive_now(&h).unwrap()["checkpoint"].is_null());
++        let next_status = status(&env.runtime)["archive"].clone();
++        assert_eq!(next_status["baseline_set"], next.as_str());
++        assert_eq!(next_status["baseline_checkpoints"], 0);
++        assert!(next_status["last_checkpoint_sequence"].is_null());
++        assert!(next_status["last_checkpoint_unix_ms"].is_null());
++
++        put(&env, 8..=8);
++        let third = env.runtime.archive_now(&h).unwrap();
++        assert_eq!(third["set_id"], next.as_str());
++        assert_eq!(third["checkpoint"]["base_sequence"], 7);
++        assert_eq!(third["checkpoints"], 1);
++        assert_eq!(
++            archive_index(&env, &baseline).unwrap()["checkpoints"]
++                .as_array()
++                .unwrap()
++                .len(),
++            2
++        );
++
++        // A policy change after the baseline pauses archiving: a segment is
++        // never paired with a configuration captured under another policy.
++        let changed = policy(json!({"enabled":true,"drill_every":0,"keep_sets":5,
++            "archive":{"enabled":true,"interval_secs":60}}));
++        env.runtime.configure(changed, &h, BASE).unwrap();
++        put(&env, 9..=9);
++        let before = env.data.names();
++        assert_eq!(code(env.runtime.archive_now(&h)), "pitr_policy_changed");
++        assert_eq!(env.data.names(), before);
++        env.runtime.run_now(&h).unwrap();
++        assert!(env.runtime.archive_now(&h).unwrap()["checkpoint"].is_null());
++    }
++
++    #[test]
++    fn the_scheduler_claims_an_archive_only_when_no_snapshot_is_due() {
++        let env = setup();
++        let h = Handle::new(&env.service);
++        env.runtime.configure(archiving(), &h, BASE).unwrap();
++        assert!(!env.runtime.claim_due_at(BASE + 59_999));
++        assert!(env.runtime.claim_due_at(BASE + 60_000));
++        assert!(env.runtime.archive_claim.load(Ordering::Acquire));
++        // The claim excludes every writing operation, as a snapshot's does.
++        assert_eq!(code(env.runtime.run_now(&h)), "cloud_backup_busy");
++        assert_eq!(code(env.runtime.archive_now(&h)), "cloud_backup_busy");
++        env.runtime.archive_claim.store(false, Ordering::Release);
++        env.runtime.busy.store(false, Ordering::Release);
++        // A due snapshot has priority over a due archive.
++        assert!(env.runtime.claim_due_at(BASE + 3_600_000));
++        assert!(!env.runtime.archive_claim.load(Ordering::Acquire));
++        env.runtime.busy.store(false, Ordering::Release);
++        // The claimed archive runs on the scheduler thread and records only
++        // archive status.
++        assert!(env.runtime.claim_due_at(BASE + 3_660_000));
++        assert!(env.runtime.archive_claim.load(Ordering::Acquire));
++        env.runtime.start_claimed(h.clone());
++        let deadline = Instant::now() + Duration::from_secs(30);
++        while env.runtime.busy.load(Ordering::Acquire) {
++            assert!(
++                Instant::now() < deadline,
++                "the claimed archive never finished"
++            );
++            std::thread::sleep(Duration::from_millis(5));
++        }
++        assert!(env.runtime.shutdown(Duration::from_secs(30)));
++        assert!(!env.runtime.archive_claim.load(Ordering::Acquire));
++        let s = status(&env.runtime);
++        assert_eq!(s["archive"]["runs"], 1, "{s}");
++        assert_eq!(s["archive"]["last_error"]["code"], "pitr_baseline_missing");
++        assert_eq!(
++            (s["runs"].clone(), s["failures"].clone()),
++            (json!(0), json!(0)),
++            "{s}"
++        );
++        // Without archiving, nothing but snapshots is ever claimed.
++        let plain = setup();
++        let h = Handle::new(&plain.service);
++        plain
++            .runtime
++            .configure(policy(json!({"enabled":true})), &h, BASE)
++            .unwrap();
++        assert!(!plain.runtime.claim_due_at(BASE + 299_999));
++        assert!(!plain.runtime.archive_claim.load(Ordering::Acquire));
++    }
++
++    #[test]
++    fn an_ambiguous_index_commit_is_settled_and_a_lost_one_retried() {
++        let env = setup();
++        let h = Handle::new(&env.service);
++        env.runtime.configure(archiving(), &h, BASE).unwrap();
++        env.runtime.run_now(&h).unwrap();
++        let set = status(&env.runtime)["last_set"]
++            .as_str()
++            .unwrap()
++            .to_owned();
++        put(&env, 5..=5);
++        // Applied, then reported unknown: confirmed by reading it back.
++        env.data.fault(Op::Put, "archive.json", Fault::After, 0, 1);
++        assert_eq!(
++            env.runtime.archive_now(&h).unwrap()["checkpoint"]["sequence"],
++            5
++        );
++        // Not applied and unknown: refused, and the next run cuts again.
++        put(&env, 6..=6);
++        env.data.fault(Op::Put, "archive.json", Fault::Before, 0, 1);
++        assert_eq!(code(env.runtime.archive_now(&h)), "pitr_archive_conflict");
++        assert_eq!(
++            archive_index(&env, &set).unwrap()["checkpoints"]
++                .as_array()
++                .unwrap()
++                .len(),
++            1
++        );
++        let retried = env.runtime.archive_now(&h).unwrap();
++        assert_eq!(retried["checkpoint"]["base_sequence"], 5);
++        assert_eq!(retried["checkpoint"]["sequence"], 6);
++        // A definite segment upload failure leaves the index untouched.
++        put(&env, 7..=7);
++        env.data.fault(Op::Put, "/objects/", Fault::Refuse, 0, 1);
++        assert!(env.runtime.archive_now(&h).is_err());
++        assert_eq!(
++            archive_index(&env, &set).unwrap()["checkpoints"]
++                .as_array()
++                .unwrap()
++                .len(),
++            2
++        );
++        assert_eq!(
++            env.runtime.archive_now(&h).unwrap()["checkpoint"]["sequence"],
++            7
++        );
++    }
++
++    #[test]
++    fn a_compacted_or_replaced_live_database_stops_the_chain() {
++        let env = setup();
++        let h = Handle::new(&env.service);
++        env.runtime.configure(archiving(), &h, BASE).unwrap();
++        env.runtime.run_now(&h).unwrap();
++        let set = status(&env.runtime)["last_set"]
++            .as_str()
++            .unwrap()
++            .to_owned();
++        put(&env, 5..=5);
++        env.runtime.archive_now(&h).unwrap();
++        put(&env, 6..=6);
++
++        // Offline compaction writes a new lineage whose sequences restart:
++        // the commits after the last checkpoint are no longer the chain's.
++        let compacted = env.root.join("compacted.vlite");
++        let live = env.service.database.write().unwrap().take().unwrap();
++        live.close().unwrap();
++        crate::maintenance::compact(env.root.join("live.vlite"), &compacted).unwrap();
++        let reopened = Database::open(&compacted).unwrap();
++        drop(env.service.database.write().unwrap().replace(reopened));
++        let before = env.data.names();
++        assert_eq!(code(env.runtime.archive_now(&h)), "pitr_source_diverged");
++        assert_eq!(env.data.names(), before);
++
++        // Another database (another lineage) never continues the chain.
++        let mut other = Database::create(env.root.join("other.vlite"), 3).unwrap();
++        for id in 1..=8u64 {
++            other.put(id, &[1.0, 2.0, 3.0], b"x").unwrap();
++        }
++        drop(env.service.database.write().unwrap().replace(other));
++        assert_eq!(code(env.runtime.archive_now(&h)), "pitr_source_diverged");
++        assert_eq!(env.data.names(), before);
++        assert_eq!(
++            archive_index(&env, &set).unwrap()["checkpoints"]
++                .as_array()
++                .unwrap()
++                .len(),
++            1
++        );
++        let s = status(&env.runtime);
++        assert_eq!(s["archive"]["last_error"]["code"], "pitr_source_diverged");
++        assert_eq!(s["archive"]["last_checkpoint_sequence"], 5);
++    }
+ }
+diff --git a/src/server/cloud_backup.rs b/src/server/cloud_backup.rs
+index 2193576d..afcdc1b0 100644
+--- a/src/server/cloud_backup.rs
++++ b/src/server/cloud_backup.rs
+@@ -25,6 +25,7 @@ use serde::{Serialize, de::DeserializeOwned};
+ use std::io::{BufWriter, Read, Write};
+ use std::path::{Path as FilePath, PathBuf};
+ 
++pub(super) mod archive;
+ pub(super) mod azure;
+ 
+ pub(super) const RECORD_SCHEMA: &str = "vlite.cloud-backup-record/1";
+diff --git a/src/server/cloud_backup/archive.rs b/src/server/cloud_backup/archive.rs
+new file mode 100644
+index 00000000..7ea7be74
+--- /dev/null
++++ b/src/server/cloud_backup/archive.rs
+@@ -0,0 +1,542 @@
++//! Continuous log archive of a published baseline set and its exact
++//! checkpoint replay (blob-pitr EPIC-PITR-001).
++//!
++//! A baseline is a published set whose database object is a byte copy of the
++//! live file, so the live log continues it under the same lineage and file
++//! header. Each archive checkpoint adds, under the baseline's own set
++//! directory in the data container:
++//!
++//! - `objects/{sha256}` with the verified log segment (`VLSEG001`) that
++//!   extends the previous checkpoint (or the baseline) by whole commits, and
++//! - `objects/{sha256}` with the recovery bundle captured with that segment,
++//!   bound to the checkpoint's chain hash instead of a database object;
++//!
++//! then replaces `archive.json` by ETag compare-and-swap. The index is the
++//! only authority: a checkpoint exists only once the index names it, after
++//! both objects were written and read back. The checkpoints form a
++//! contiguous chain from the baseline sequence; each chain hash covers the
++//! previous one, so a replay that verifies every hash up to the target
++//! proves the exact segment sequence the archiver cut.
++//!
++//! Recovery targets are exact checkpoints only (`latest` or a checkpoint's
++//! sequence): any other sequence or a time is refused, never rounded.
++//! Objects live in the baseline set, so the set's pins, retention and sweep
++//! cover the archive with the baseline it depends on.
++use super::*;
++use crate::{LogSegment, ReplicaFollower};
++
++pub(in crate::server) const ARCHIVE_SCHEMA: &str = "vlite.cloud-backup-archive/1";
++pub(in crate::server) const ROLE_SEGMENT: &str = "archive_segment";
++pub(in crate::server) const ROLE_ARCHIVE_BUNDLE: &str = "archive_bundle";
++/// Checkpoints one baseline can carry; the next baseline starts a new chain.
++pub(in crate::server) const MAX_CHECKPOINTS: usize = 256;
++/// Total segment bytes one baseline's archive can carry.
++pub(in crate::server) const MAX_ARCHIVE_BYTES: u64 = 1 << 30;
++/// Soft bound of one exported segment: a delta that does not fit in one
++/// segment stops the chain (`pitr_delta_too_large`) rather than splitting a
++/// checkpoint whose configuration was captured once.
++pub(in crate::server) const MAX_SEGMENT_BYTES: usize = 64 << 20;
++/// Frames replayed per follower apply (each apply replays the whole file).
++const REPLAY_BATCH: usize = 64 << 20;
++
++/// One archived recovery point: the database at exactly `sequence`, with
++/// the configuration captured when its segment was cut.
++#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
++#[serde(deny_unknown_fields)]
++pub(in crate::server) struct Checkpoint {
++    pub sequence: u64,
++    pub base_sequence: u64,
++    pub segment_sha256: String,
++    pub segment_bytes: u64,
++    pub bundle_sha256: String,
++    pub bundle_bytes: u64,
++    pub chain_sha256: String,
++    /// When the segment was cut (not the commit time of `sequence`).
++    pub captured_unix_ms: u64,
++}
++
++/// `archive.json`: the authoritative list of a baseline's checkpoints.
++#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
++#[serde(deny_unknown_fields)]
++pub(in crate::server) struct Index {
++    pub schema: String,
++    pub set_id: String,
++    pub installation_id: String,
++    pub source_lineage: String,
++    /// SHA-256 of the file header every segment carries.
++    pub header_sha256: String,
++    pub baseline_sequence: u64,
++    pub baseline_sha256: String,
++    pub checkpoints: Vec<Checkpoint>,
++}
++
++/// A replay target. Only exact archived checkpoints are supported.
++#[derive(Clone, Copy, Debug, PartialEq, Eq)]
++pub(in crate::server) enum ArchiveTarget {
++    Latest,
++    Sequence(u64),
++}
++
++impl ArchiveTarget {
++    /// `latest` or a decimal sequence; times and anything else are refused.
++    pub(in crate::server) fn parse(text: &str) -> Result<Self, String> {
++        if text == "latest" {
++            return Ok(Self::Latest);
++        }
++        // Only the canonical decimal spelling: no sign, padding or spaces.
++        if let Ok(sequence) = text.parse::<u64>()
++            && sequence.to_string() == text
++        {
++            return Ok(Self::Sequence(sequence));
++        }
++        Err("--archive-checkpoint must be latest or the exact sequence of an archived checkpoint; times and other sequences are not supported".into())
++    }
++}
++
++/// A baseline's archive as read for appending.
++pub(in crate::server) struct Archive {
++    pub set_id: String,
++    pub manifest: Manifest,
++    database_sha256: String,
++    index: Option<(Index, String)>,
++}
++
++impl Archive {
++    pub(in crate::server) fn checkpoints(&self) -> &[Checkpoint] {
++        self.index.as_ref().map_or(&[], |(i, _)| &i.checkpoints)
++    }
++
++    /// The sequence the next segment continues from.
++    pub(in crate::server) fn next_base(&self) -> u64 {
++        self.checkpoints()
++            .last()
++            .map_or(self.manifest.database.commits, |c| c.sequence)
++    }
++
++    fn chain_tip(&self) -> &str {
++        self.checkpoints()
++            .last()
++            .map_or(&self.database_sha256, |c| &c.chain_sha256)
++    }
++
++    fn bytes(&self) -> u64 {
++        self.checkpoints().iter().map(|c| c.segment_bytes).sum()
++    }
++}
++
++/// A database replayed to an exact checkpoint.
++pub(in crate::server) struct Replayed {
++    pub checkpoint: Checkpoint,
++    pub bundle: recovery_bundle::Bundle,
++    pub segments: usize,
++    pub verification: maintenance::Verification,
++}
++
++pub(in crate::server) fn pitr(code: &'static str, message: impl Into<String>) -> ApiError {
++    ApiError::new(StatusCode::CONFLICT, code, message)
++}
++
++/// Chain hash of a checkpoint: binds the previous hash (the baseline
++/// database object for the first one), the segment and its sequence.
++fn chain(previous: &str, segment_sha256: &str, sequence: u64) -> String {
++    sha_hex(format!("{ARCHIVE_SCHEMA}\n{previous}\n{segment_sha256}\n{sequence}").as_bytes())
++}
++
++/// The recovery bundle of a checkpoint must name its chain hash, the
++/// baseline's lineage, installation and admitted policy.
++fn check_bundle(
++    bundle: &recovery_bundle::Bundle,
++    manifest: &Manifest,
++    chain_sha256: &str,
++) -> Result<(), ApiError> {
++    if bundle.installation_id != manifest.installation_id
++        || bundle.source_lineage != manifest.source_lineage
++        || bundle.database_sha256 != chain_sha256
++        || bundle.policy != manifest.policy
++    {
++        return Err(corrupt(
++            "the checkpoint recovery bundle belongs to another capture",
++        ));
++    }
++    Ok(())
++}
++
++impl Index {
++    /// Checks identity against the baseline and the whole chain.
++    fn check(
++        &self,
++        set_id: &str,
++        manifest: &Manifest,
++        database_sha256: &str,
++    ) -> Result<(), ApiError> {
++        let bad = || corrupt("the archive index is invalid or belongs to another baseline");
++        if self.schema != ARCHIVE_SCHEMA
++            || self.set_id != set_id
++            || self.installation_id != manifest.installation_id
++            || Some(&self.source_lineage) != manifest.source_lineage.as_ref()
++            || self.baseline_sequence != manifest.database.commits
++            || self.baseline_sha256 != database_sha256
++            || !is_sha256(&self.header_sha256)
++            || self.checkpoints.is_empty()
++            || self.checkpoints.len() > MAX_CHECKPOINTS
++        {
++            return Err(bad());
++        }
++        let (mut base, mut tip, mut total) = (self.baseline_sequence, database_sha256, 0u64);
++        for c in &self.checkpoints {
++            total = total.saturating_add(c.segment_bytes);
++            if c.base_sequence != base
++                || c.sequence <= base
++                || !is_sha256(&c.segment_sha256)
++                || !is_sha256(&c.bundle_sha256)
++                || c.bundle_bytes > recovery_bundle::MAX_BYTES
++                || c.chain_sha256 != chain(tip, &c.segment_sha256, c.sequence)
++                || total > MAX_ARCHIVE_BYTES
++            {
++                return Err(bad());
++            }
++            base = c.sequence;
++            tip = &c.chain_sha256;
++        }
++        Ok(())
++    }
++}
++
++impl Sets {
++    fn archive_key(&self, id: &str) -> String {
++        format!("{}archive.json", self.set_dir(id))
++    }
++
++    /// The published baseline, its manifest and its current archive.
++    pub(in crate::server) fn open_archive(&self, id: &str) -> Result<Archive, ApiError> {
++        let missing = || {
++            pitr(
++                "pitr_baseline_missing",
++                "the baseline set is not published in the configured target; the next snapshot publishes a new baseline",
++            )
++        };
++        let key = self.record_key(id);
++        let record = match self.meta.get(&key, META_MAX) {
++            Ok(blob) => decode_record(&key, &blob.bytes, id)?,
++            Err(StoreError::NotFound) => return Err(missing()),
++            Err(e) => return Err(e.into()),
++        };
++        if record.state != SetState::Published {
++            return Err(missing());
++        }
++        let blob = self
++            .data
++            .get(&self.manifest_key(id), META_MAX)
++            .map_err(|e| match e {
++                StoreError::NotFound => corrupt("a published set object is missing"),
++                e => e.into(),
++            })?;
++        if sha_hex(&blob.bytes) != record.manifest_sha256 {
++            return Err(corrupt("the manifest does not match the published record"));
++        }
++        let manifest = parse_manifest(&blob.bytes)?;
++        let database_sha256 = manifest
++            .check(id, &record.installation_id)?
++            .0
++            .sha256
++            .clone();
++        if manifest.source_lineage.is_none() {
++            return Err(pitr(
++                "pitr_baseline_unsupported",
++                "the baseline database has no lineage; it cannot anchor a log archive",
++            ));
++        }
++        let key = self.archive_key(id);
++        let index = match self.data.get(&key, META_MAX) {
++            Ok(blob) => {
++                let index: Index = decode(&key, &blob.bytes)?;
++                index.check(id, &manifest, &database_sha256)?;
++                Some((index, blob.etag))
++            }
++            Err(StoreError::NotFound) => None,
++            Err(e) => return Err(e.into()),
++        };
++        Ok(Archive {
++            set_id: id.into(),
++            manifest,
++            database_sha256,
++            index,
++        })
++    }
++
++    /// Publishes one checkpoint after `archive`: verifies that `segment`
++    /// continues it, uploads and reads back the segment and the bundle that
++    /// `bundle` builds for the checkpoint's chain hash, rechecks that the
++    /// baseline is still published, then commits the index by CAS. An
++    /// ambiguous commit is accepted only when the index now holds exactly
++    /// this checkpoint.
++    pub(in crate::server) fn append_checkpoint(
++        &self,
++        archive: &Archive,
++        segment: &LogSegment,
++        bundle: &dyn Fn(&str) -> Result<Vec<u8>, ApiError>,
++        now: u64,
++        authorize: Authorize<'_>,
++    ) -> Result<Checkpoint, ApiError> {
++        let id = &archive.set_id;
++        let manifest = &archive.manifest;
++        let diverged = |what: &str| {
++            pitr(
++                "pitr_source_diverged",
++                format!("{what}; archiving stops until the next baseline snapshot"),
++            )
++        };
++        if Some(lineage_hex(segment.lineage)) != manifest.source_lineage {
++            return Err(diverged(
++                "the live database lineage differs from the baseline",
++            ));
++        }
++        if segment.base_sequence != archive.next_base() {
++            return Err(diverged("the segment does not continue the archive"));
++        }
++        if segment.last_sequence < segment.head_sequence {
++            return Err(pitr(
++                "pitr_delta_too_large",
++                "the commits since the last checkpoint exceed one archive segment; shorten the archive interval (archiving resumes after the next baseline snapshot)",
++            ));
++        }
++        if segment.is_empty() {
++            return Err(internal("an empty segment is not a checkpoint"));
++        }
++        let header_sha256 = sha_hex(&segment.header);
++        if let Some((index, _)) = &archive.index
++            && index.header_sha256 != header_sha256
++        {
++            return Err(diverged(
++                "the live database header differs from the archive",
++            ));
++        }
++        if archive.checkpoints().len() >= MAX_CHECKPOINTS {
++            return Err(pitr(
++                "pitr_archive_full",
++                "the baseline's archive holds the maximum number of checkpoints; the next baseline snapshot starts a new archive",
++            ));
++        }
++        let data = segment.to_bytes();
++        if archive.bytes().saturating_add(data.len() as u64) > MAX_ARCHIVE_BYTES {
++            return Err(pitr(
++                "pitr_archive_full",
++                "the baseline's archive reached its size limit; the next baseline snapshot starts a new archive",
++            ));
++        }
++        let segment_upload = Upload::bytes(ROLE_SEGMENT, data);
++        let chain_sha256 = chain(
++            archive.chain_tip(),
++            &segment_upload.sha256,
++            segment.last_sequence,
++        );
++        let bundle_bytes = bundle(&chain_sha256)?;
++        let parsed = recovery_bundle::parse(&bundle_bytes).map_err(internal)?;
++        check_bundle(&parsed, manifest, &chain_sha256)
++            .map_err(|_| internal("the checkpoint bundle does not match its baseline"))?;
++        let bundle_upload = Upload::bytes(ROLE_ARCHIVE_BUNDLE, bundle_bytes);
++        let checkpoint = Checkpoint {
++            sequence: segment.last_sequence,
++            base_sequence: segment.base_sequence,
++            segment_sha256: segment_upload.sha256.clone(),
++            segment_bytes: segment_upload.bytes,
++            bundle_sha256: bundle_upload.sha256.clone(),
++            bundle_bytes: bundle_upload.bytes,
++            chain_sha256,
++            captured_unix_ms: now,
++        };
++        let mut next = archive.index.as_ref().map_or_else(
++            || Index {
++                schema: ARCHIVE_SCHEMA.into(),
++                set_id: id.clone(),
++                installation_id: manifest.installation_id.clone(),
++                source_lineage: lineage_hex(segment.lineage),
++                header_sha256,
++                baseline_sequence: manifest.database.commits,
++                baseline_sha256: archive.database_sha256.clone(),
++                checkpoints: Vec::new(),
++            },
++            |(index, _)| index.clone(),
++        );
++        next.checkpoints.push(checkpoint.clone());
++
++        authorize()?;
++        self.upload(id, &segment_upload)?;
++        self.upload(id, &bundle_upload)?;
++        // Objects first; the index names them only while the baseline is
++        // still published (a collected set never gains an archive).
++        let current = self.open_archive(id)?;
++        if current.index.as_ref().map(|(i, _)| i) != archive.index.as_ref().map(|(i, _)| i) {
++            return Err(pitr(
++                "pitr_archive_conflict",
++                "the archive changed while this checkpoint was prepared; the next run retries",
++            ));
++        }
++        authorize()?;
++        let bytes = encode(&next)?;
++        let cond = match &archive.index {
++            Some((_, etag)) => Cond::Match(etag),
++            None => Cond::Create,
++        };
++        match self.data.put(&self.archive_key(id), &bytes, cond) {
++            Ok(_) => Ok(checkpoint),
++            Err(StoreError::Conflict | StoreError::Unknown(_)) => {
++                match self.open_archive(id)?.index {
++                    Some((index, _)) if index == next => Ok(checkpoint),
++                    _ => Err(pitr(
++                        "pitr_archive_conflict",
++                        "the archive index commit was not confirmed; the next run retries from the committed index",
++                    )),
++                }
++            }
++            Err(e) => Err(e.into()),
++        }
++    }
++
++    /// Replays the verified archive of `fetched`'s set onto its downloaded
++    /// baseline (in place) up to exactly `target`, verifying every segment
++    /// hash, the chain, contiguity, lineage and header, then the result and
++    /// the checkpoint's recovery bundle.
++    pub(in crate::server) fn replay_archive(
++        &self,
++        fetched: &Fetched,
++        target: ArchiveTarget,
++        dir: &FilePath,
++    ) -> Result<Replayed, ApiError> {
++        let id = &fetched.record.set_id;
++        let manifest = &fetched.manifest;
++        let database_sha256 = manifest
++            .check(id, &fetched.record.installation_id)?
++            .0
++            .sha256
++            .clone();
++        let key = self.archive_key(id);
++        let index: Index = match self.data.get(&key, META_MAX) {
++            Ok(blob) => decode(&key, &blob.bytes)?,
++            Err(StoreError::NotFound) => {
++                return Err(not_found(
++                    "pitr_archive_missing",
++                    "the set has no archived checkpoints; restore the snapshot without --archive-checkpoint",
++                ));
++            }
++            Err(e) => return Err(e.into()),
++        };
++        index.check(id, manifest, &database_sha256)?;
++        let position = match target {
++            ArchiveTarget::Latest => index.checkpoints.len() - 1,
++            ArchiveTarget::Sequence(sequence) => index
++                .checkpoints
++                .iter()
++                .position(|c| c.sequence == sequence)
++                .ok_or_else(|| {
++                    let list: Vec<String> =
++                        index.checkpoints.iter().map(|c| c.sequence.to_string()).collect();
++                    pitr(
++                        "pitr_target_unsupported",
++                        format!(
++                            "sequence {sequence} is not an archived checkpoint of this set; supported targets are exactly: {}",
++                            list.join(", ")
++                        ),
++                    )
++                })?,
++        };
++        let path = &index.checkpoints[..=position];
++        let needed: u64 = path.iter().map(|c| c.segment_bytes).sum();
++        check_restore_space(
++            free_bytes(dir),
++            restore_space_needed(fetched.verification.bytes.saturating_add(needed), 0),
++        )?;
++        let missing = |e: StoreError| match e {
++            StoreError::NotFound => corrupt("an archived checkpoint object is missing"),
++            StoreError::TooLarge => corrupt("an archived object is larger than its index entry"),
++            e => e.into(),
++        };
++        let mut follower = ReplicaFollower::open(&fetched.database, None)
++            .map_err(|e| corrupt(format!("the baseline cannot be replayed: {e}")))?;
++        if follower.applied_sequence() != index.baseline_sequence {
++            return Err(corrupt("the baseline does not match the archive"));
++        }
++        let mut batch: Option<LogSegment> = None;
++        for (n, c) in path.iter().enumerate() {
++            let blob = self
++                .data
++                .get(&self.object_key(id, &c.segment_sha256), c.segment_bytes)
++                .map_err(missing)?;
++            if blob.bytes.len() as u64 != c.segment_bytes
++                || sha_hex(&blob.bytes) != c.segment_sha256
++            {
++                return Err(corrupt("an archived segment does not match its hash"));
++            }
++            let segment = LogSegment::from_bytes(&blob.bytes)
++                .map_err(|_| corrupt("an archived segment is invalid"))?;
++            if segment.base_sequence != c.base_sequence
++                || segment.last_sequence != c.sequence
++                || Some(lineage_hex(segment.lineage)) != manifest.source_lineage
++                || sha_hex(&segment.header) != index.header_sha256
++            {
++                return Err(corrupt("an archived segment does not match its checkpoint"));
++            }
++            match &mut batch {
++                Some(open) => {
++                    open.frames.extend_from_slice(&segment.frames);
++                    open.last_sequence = segment.last_sequence;
++                    open.head_sequence = segment.last_sequence;
++                }
++                None => batch = Some(segment),
++            }
++            let last = n + 1 == path.len();
++            if last
++                || batch
++                    .as_ref()
++                    .is_some_and(|b| b.frames.len() >= REPLAY_BATCH)
++            {
++                let ready = batch.take().expect("a batch is open");
++                follower.apply(&ready).map_err(|e| {
++                    corrupt(format!(
++                        "the archived segments do not extend the baseline: {e}"
++                    ))
++                })?;
++            }
++        }
++        let checkpoint = path[position].clone();
++        if follower.applied_sequence() != checkpoint.sequence {
++            return Err(corrupt("the replay did not reach the checkpoint"));
++        }
++        follower
++            .promote()
++            .close()
++            .map_err(|e| corrupt(format!("the replayed database cannot be closed: {e}")))?;
++        let verification = maintenance::verify(&fetched.database)
++            .map_err(|e| corrupt(format!("the replayed database failed verification: {e}")))?;
++        let detail = maintenance::inspect_detail(&fetched.database)
++            .map_err(|e| corrupt(format!("the replayed database failed inspection: {e}")))?;
++        if verification.inspection.commits != checkpoint.sequence
++            || verification.inspection.incomplete_tail_bytes != 0
++            || detail.lineage.map(lineage_hex) != manifest.source_lineage
++        {
++            return Err(corrupt("the replayed database differs from its checkpoint"));
++        }
++        let blob = self
++            .data
++            .get(
++                &self.object_key(id, &checkpoint.bundle_sha256),
++                checkpoint.bundle_bytes,
++            )
++            .map_err(missing)?;
++        if blob.bytes.len() as u64 != checkpoint.bundle_bytes
++            || sha_hex(&blob.bytes) != checkpoint.bundle_sha256
++        {
++            return Err(corrupt(
++                "the checkpoint recovery bundle does not match its hash",
++            ));
++        }
++        let bundle = recovery_bundle::parse(&blob.bytes).map_err(corrupt)?;
++        check_bundle(&bundle, manifest, &checkpoint.chain_sha256)?;
++        Ok(Replayed {
++            checkpoint,
++            bundle,
++            segments: path.len(),
++            verification,
++        })
++    }
++}
+diff --git a/src/server/cloud_recovery.rs b/src/server/cloud_recovery.rs
+index 32dec67d..e8f6ac21 100644
+--- a/src/server/cloud_recovery.rs
++++ b/src/server/cloud_recovery.rs
+@@ -24,6 +24,7 @@
+ //! exists; the identity-preserving seed mode belongs to the deferred HA work
+ //! and is refused.
+ use super::backup_policy::{SHARED_KEY_ENV, bundle_summary, inspection, lineage_hex};
++use super::cloud_backup::archive::ArchiveTarget;
+ use super::cloud_backup::{self as cloud, PinKind, Sets, Target};
+ use super::*;
+ use crate::maintenance;
+@@ -148,6 +149,9 @@ pub struct CloudRestore {
+     pub admin_username: String,
+     pub admin_password_file: PathBuf,
+     pub mode: RestoreMode,
++    /// Archived checkpoint to replay onto the set: `latest` or an exact
++    /// checkpoint sequence. `None` restores the snapshot itself.
++    pub archive_checkpoint: Option<String>,
+ }
+ 
+ /// Everything checked before the network is touched.
+@@ -158,6 +162,7 @@ struct Plan {
+     output: PathBuf,
+     username: String,
+     password: String,
++    checkpoint: Option<ArchiveTarget>,
+ }
+ 
+ fn refused(code: &'static str, message: impl Into<String>) -> RecoveryError {
+@@ -285,6 +290,12 @@ fn prepare(request: &CloudRestore) -> Result<Plan, RecoveryError> {
+             "--set must be a backup set ID such as 20250101T000000Z-0123456789abcdef",
+         ));
+     }
++    let checkpoint = request
++        .archive_checkpoint
++        .as_deref()
++        .map(ArchiveTarget::parse)
++        .transpose()
++        .map_err(|m| refused("pitr_target_unsupported", m))?;
+     read_target(&request.target_file)?;
+ 
+     // Staging directories share the parent; never let --output name one.
+@@ -320,6 +331,7 @@ fn prepare(request: &CloudRestore) -> Result<Plan, RecoveryError> {
+         output,
+         username,
+         password,
++        checkpoint,
+     })
+ }
+ 
+@@ -622,7 +634,14 @@ fn restore_pinned(plan: &Plan, sets: &Sets, pin_id: &str) -> Result<Value, Recov
+     }
+ 
+     let fetched = sets.fetch(id, pin_id, &download)?;
+-    let memory_set = recovery_bundle::memory_set(&fetched.bundle).map_err(|e| {
++    // A checkpoint restore replays the verified archive onto the downloaded
++    // baseline and takes the configuration captured with that checkpoint.
++    let replayed = match plan.checkpoint {
++        Some(target) => Some(sets.replay_archive(&fetched, target, &download)?),
++        None => None,
++    };
++    let bundle = replayed.as_ref().map_or(&fetched.bundle, |r| &r.bundle);
++    let memory_set = recovery_bundle::memory_set(bundle).map_err(|e| {
+         refused(
+             "cloud_restore_memory_invalid",
+             format!("the recovery bundle's memory section is invalid: {e}"),
+@@ -659,14 +678,13 @@ fn restore_pinned(plan: &Plan, sets: &Sets, pin_id: &str) -> Result<Value, Recov
+         None => None,
+     };
+     // Writes, re-reads and authenticates the rekeyed stores.
+-    let imported =
+-        recovery_bundle::import(&fetched.bundle, &admin, (&plan.username, &plan.password))
+-            .map_err(|e| {
+-                refused(
+-                    "restore_import_failed",
+-                    format!("the recovery bundle could not be imported: {e}"),
+-                )
+-            })?;
++    let imported = recovery_bundle::import(bundle, &admin, (&plan.username, &plan.password))
++        .map_err(|e| {
++            refused(
++                "restore_import_failed",
++                format!("the recovery bundle could not be imported: {e}"),
++            )
++        })?;
+     let _ = std::fs::remove_dir_all(&download);
+     #[cfg(test)]
+     if crashes_at("staged") {
+@@ -745,7 +763,16 @@ fn restore_pinned(plan: &Plan, sets: &Sets, pin_id: &str) -> Result<Value, Recov
+         "crc32": fetched.verification.crc32,
+         "drill": {"scratch_lineage": lineage_hex(drill.scratch_lineage),
+             "collections": drill.collections, "probes": drill.probes},
+-        "bundle": bundle_summary(&fetched.bundle),
++        "bundle": bundle_summary(bundle),
++        "archive": replayed.as_ref().map(|r| json!({
++            "sequence": r.checkpoint.sequence,
++            "captured_unix_ms": r.checkpoint.captured_unix_ms,
++            "chain_sha256": r.checkpoint.chain_sha256,
++            "segments": r.segments,
++            "verified_bytes": r.verification.bytes,
++            "crc32": r.verification.crc32,
++            "baseline_sequence": fetched.manifest.database.commits,
++        })),
+         "memory": memory,
+         "memory_bindings_file": bindings_file,
+         "import": imported,
+@@ -894,6 +921,7 @@ mod tests {
+                 admin_username: "Recovery".into(),
+                 admin_password_file: self.dir.path().join("password"),
+                 mode: RestoreMode::Rekey,
++                archive_checkpoint: None,
+             }
+         }
+ 
+@@ -2091,4 +2119,466 @@ mod tests {
+         assert!(error.message.contains("emulator_shared_key"), "{error}");
+         assert!(read_target(&env.dir.path().join("absent.json")).is_err());
+     }
++
++    /// Appends one checkpoint holding `fill`'s commits to `source.vlite`,
++    /// its bundle carrying `memory`, as the archive scheduler does.
++    fn checkpoint(
++        env: &Env,
++        fill: impl FnOnce(&mut Database),
++        memory: Option<&crate::memory::binding::BindingSet>,
++    ) -> u64 {
++        use super::super::cloud_backup::archive::MAX_SEGMENT_BYTES;
++        let path = env.dir.path().join("source.vlite");
++        let mut database = Database::open(&path).unwrap();
++        fill(&mut database);
++        let archive = env.sets.open_archive(&env.set_id).unwrap();
++        let segment = database
++            .export_log(archive.next_base(), MAX_SEGMENT_BYTES)
++            .unwrap();
++        database.close().unwrap();
++        let lineage = Some(segment.lineage);
++        env.sets
++            .append_checkpoint(
++                &archive,
++                &segment,
++                &|chain| {
++                    Ok(serde_json::to_vec(&recovery_bundle::bundle(
++                        config(),
++                        INSTALL,
++                        lineage,
++                        chain,
++                        cloud::fake::policy_capture(),
++                        memory,
++                        2,
++                    ))
++                    .unwrap())
++                },
++                now(),
++                &|| Ok(()),
++            )
++            .unwrap()
++            .sequence
++    }
++
++    fn puts(ids: std::ops::RangeInclusive<u64>) -> impl FnOnce(&mut Database) {
++        move |database| {
++            for id in ids {
++                database
++                    .put(id, &[id as f32, 1.0, -0.5], format!("p{id}").as_bytes())
++                    .unwrap();
++            }
++        }
++    }
++
++    fn at(env: &Env, target: &str) -> CloudRestore {
++        CloudRestore {
++            archive_checkpoint: Some(target.into()),
++            ..env.request()
++        }
++    }
++
++    fn ids(path: &FilePath) -> Vec<u64> {
++        let database = Database::open(path).unwrap();
++        (1..=20)
++            .filter(|id| database.get(*id).unwrap().is_some())
++            .collect()
++    }
++
++    fn archive_names(env: &Env) -> Vec<String> {
++        let dir = format!("vlite/prod/sets/{}/", env.set_id);
++        let mut names: Vec<String> = env
++            .data
++            .names()
++            .into_iter()
++            .filter(|n| n.starts_with(&dir))
++            .collect();
++        names.sort();
++        names
++    }
++
++    #[test]
++    fn a_checkpoint_restore_replays_exactly_to_the_chosen_checkpoint() {
++        let env = setup();
++        assert_eq!(checkpoint(&env, puts(5..=6), None), 6);
++        assert_eq!(checkpoint(&env, puts(7..=9), None), 9);
++
++        let latest = at(&env, "latest");
++        let report = env.restore(&latest).unwrap();
++        let database = latest.output.join(DATABASE_FILE);
++        assert_eq!(ids(&database), (1..=9).collect::<Vec<_>>());
++        let archive = &report["archive"];
++        assert_eq!(archive["sequence"], 9);
++        assert_eq!(archive["segments"], 2);
++        assert_eq!(archive["baseline_sequence"], 4);
++        assert_eq!(report["inspection"]["live_records"], 9);
++        assert_eq!(report["rekey_only"], true);
++        assert_eq!(report["pin_released"], true);
++        assert_eq!(env.pins(), 0);
++        let restored = maintenance::inspect_detail(&database).unwrap();
++        assert_ne!(restored.lineage, env.source_lineage, "a new lineage");
++        assert_eq!(env.leftovers(), ["restored"]);
++
++        // An exact earlier checkpoint replays only its prefix of the chain.
++        let earlier = CloudRestore {
++            output: env.dir.path().join("earlier"),
++            ..at(&env, "6")
++        };
++        let report = env.restore(&earlier).unwrap();
++        assert_eq!(
++            ids(&earlier.output.join(DATABASE_FILE)),
++            (1..=6).collect::<Vec<_>>()
++        );
++        assert_eq!(report["archive"]["sequence"], 6);
++        assert_eq!(report["archive"]["segments"], 1);
++        assert_eq!(env.pins(), 0);
++
++        // Without the flag the snapshot restores unchanged.
++        let snapshot = CloudRestore {
++            output: env.dir.path().join("snapshot"),
++            ..env.request()
++        };
++        let report = env.restore(&snapshot).unwrap();
++        assert!(report["archive"].is_null(), "{report}");
++        assert_eq!(
++            ids(&snapshot.output.join(DATABASE_FILE)),
++            (1..=4).collect::<Vec<_>>()
++        );
++    }
++
++    #[test]
++    fn a_checkpoint_restore_carries_vector_kv_and_graph_changes_and_reopens_writable() {
++        use crate::kv::KvPut;
++        let env = setup();
++        let first = checkpoint(
++            &env,
++            |db| {
++                db.put(5, &[5.0, 1.0, -0.5], b"p5").unwrap();
++                db.create_collection(
++                    "kv",
++                    CollectionSpec {
++                        dimensions: 1,
++                        settings: CollectionSettings::default(),
++                    },
++                )
++                .unwrap();
++                db.kv_store("kv")
++                    .unwrap()
++                    .put("n", "k", b"one", KvPut::default())
++                    .unwrap();
++                db.create_graph("g").unwrap();
++                let mut graph = db.graph_mut("g").unwrap();
++                graph.create_node("a", &["N"], &Metadata::new()).unwrap();
++                graph.create_node("b", &[], &Metadata::new()).unwrap();
++                graph
++                    .create_edge(Some("ab"), "a", "R", "b", &Metadata::new())
++                    .unwrap();
++            },
++            None,
++        );
++        let latest = checkpoint(
++            &env,
++            |db| {
++                db.delete(1).unwrap();
++                db.put(2, &[2.0, 2.0, 2.0], b"p2b").unwrap();
++                db.kv_store("kv")
++                    .unwrap()
++                    .put("n", "k", b"two", KvPut::default())
++                    .unwrap();
++                db.graph_mut("g")
++                    .unwrap()
++                    .create_node("c", &[], &Metadata::new())
++                    .unwrap();
++            },
++            None,
++        );
++        let source = Database::open(env.dir.path().join("source.vlite")).unwrap();
++        let source_revision = source.revision(2).unwrap();
++        drop(source);
++
++        let check = |target: String, name: &str| {
++            let request = CloudRestore {
++                output: env.dir.path().join(name),
++                ..at(&env, &target)
++            };
++            let report = env.restore(&request).unwrap();
++            assert_eq!(
++                report["archive"]["sequence"],
++                target.parse::<u64>().unwrap()
++            );
++            request.output.join(DATABASE_FILE)
++        };
++        let path = check(first.to_string(), "first");
++        assert_eq!(ids(&path), (1..=5).collect::<Vec<_>>());
++        let db = Database::open(&path).unwrap();
++        let kv = db.kv_view("kv").unwrap();
++        assert_eq!(kv.get("n", "k").unwrap().unwrap().value, b"one");
++        let graph = db.graph("g").unwrap().info();
++        assert_eq!((graph.node_count, graph.edge_count), (2, 1));
++        db.close().unwrap();
++
++        let path = check(latest.to_string(), "latest");
++        let mut db = Database::open(&path).unwrap();
++        assert!(db.get(1).unwrap().is_none());
++        assert_eq!(db.get(2).unwrap().unwrap().payload, b"p2b");
++        assert_eq!(db.revision(2).unwrap(), source_revision);
++        let kv = db.kv_view("kv").unwrap();
++        assert_eq!(kv.get("n", "k").unwrap().unwrap().value, b"two");
++        let graph = db.graph("g").unwrap().info();
++        assert_eq!((graph.node_count, graph.edge_count), (3, 1));
++        // The restored copy accepts new writes after the replayed history.
++        db.put(20, &[0.0, 0.0, 1.0], b"new").unwrap();
++        db.kv_store("kv")
++            .unwrap()
++            .put("n", "k2", b"x", KvPut::default())
++            .unwrap();
++        db.graph_mut("g")
++            .unwrap()
++            .create_node("d", &[], &Metadata::new())
++            .unwrap();
++        db.close().unwrap();
++        let reopened = Database::open(&path).unwrap();
++        assert!(reopened.get(20).unwrap().is_some());
++        assert_eq!(reopened.graph("g").unwrap().info().node_count, 4);
++        let kv = reopened.kv_view("kv").unwrap();
++        assert_eq!(kv.get("n", "k2").unwrap().unwrap().value, b"x");
++    }
++
++    #[test]
++    fn unsupported_targets_are_refused_and_never_rounded() {
++        let env = setup();
++        checkpoint(&env, puts(5..=6), None);
++        checkpoint(&env, puts(7..=9), None);
++        let objects = env.data.names();
++        // Sequences between, before or after checkpoints, the baseline
++        // itself, times and arbitrary text: never substituted.
++        for target in ["4", "5", "7", "8", "10", "0"] {
++            let error = env.restore(&at(&env, target)).unwrap_err();
++            assert_eq!(error.code, "pitr_target_unsupported", "{target}");
++            assert!(
++                error.message.contains("6, 9"),
++                "{target}: {}",
++                error.message
++            );
++            assert_eq!(env.pins(), 0);
++            assert_eq!(env.leftovers(), Vec::<String>::new(), "{target}");
++        }
++        for target in [
++            "2026-01-01T00:00:00Z",
++            "1700000000000ms",
++            "-1",
++            "",
++            "LATEST",
++            " 6",
++            "06",
++            "+6",
++        ] {
++            let error = prepare(&at(&env, target)).err().expect(target);
++            assert_eq!(error.code, "pitr_target_unsupported", "{target}");
++        }
++        assert_eq!(env.data.names(), objects, "nothing is written");
++        // A set without an archive has no checkpoints to choose from.
++        let plain = setup();
++        let error = plain.restore(&at(&plain, "latest")).unwrap_err();
++        assert_eq!(error.code, "pitr_archive_missing");
++        assert_eq!(plain.pins(), 0);
++        assert_eq!(plain.leftovers(), Vec::<String>::new());
++    }
++
++    #[test]
++    fn a_damaged_archive_is_refused_with_nothing_published() {
++        let segment = |env: &Env, n: usize| -> String {
++            let index: Value = serde_json::from_slice(
++                &env.data
++                    .raw(&format!("vlite/prod/sets/{}/archive.json", env.set_id))
++                    .unwrap(),
++            )
++            .unwrap();
++            let sha = index["checkpoints"][n]["segment_sha256"]
++                .as_str()
++                .unwrap()
++                .to_owned();
++            format!("vlite/prod/sets/{}/objects/{sha}", env.set_id)
++        };
++        let bundle = |env: &Env| -> String {
++            let index: Value = serde_json::from_slice(
++                &env.data
++                    .raw(&format!("vlite/prod/sets/{}/archive.json", env.set_id))
++                    .unwrap(),
++            )
++            .unwrap();
++            let sha = index["checkpoints"][1]["bundle_sha256"]
++                .as_str()
++                .unwrap()
++                .to_owned();
++            format!("vlite/prod/sets/{}/objects/{sha}", env.set_id)
++        };
++        type Damage = Box<dyn Fn(&Env)>;
++        let cases: Vec<(&str, &str, Damage)> = vec![
++            (
++                "flipped segment",
++                "cloud_set_corrupt",
++                Box::new(move |env| {
++                    edit(&env.data, &segment(env, 0), |b| {
++                        let n = b.len() - 1;
++                        b[n] ^= 1;
++                    })
++                }),
++            ),
++            (
++                "missing segment",
++                "cloud_set_corrupt",
++                Box::new(move |env| env.data.remove(&segment(env, 1))),
++            ),
++            (
++                "missing bundle",
++                "cloud_set_corrupt",
++                Box::new(move |env| env.data.remove(&bundle(env))),
++            ),
++            (
++                "tampered index",
++                "cloud_set_corrupt",
++                Box::new(|env| {
++                    let key = format!("vlite/prod/sets/{}/archive.json", env.set_id);
++                    edit(&env.data, &key, |b| {
++                        let mut index: Value = serde_json::from_slice(b).unwrap();
++                        index["checkpoints"][1]["sequence"] = json!(8);
++                        *b = serde_json::to_vec(&index).unwrap();
++                    })
++                }),
++            ),
++            (
++                "reordered chain",
++                "cloud_set_corrupt",
++                Box::new(|env| {
++                    let key = format!("vlite/prod/sets/{}/archive.json", env.set_id);
++                    edit(&env.data, &key, |b| {
++                        let mut index: Value = serde_json::from_slice(b).unwrap();
++                        index["checkpoints"].as_array_mut().unwrap().swap(0, 1);
++                        *b = serde_json::to_vec(&index).unwrap();
++                    })
++                }),
++            ),
++            (
++                "unknown index field",
++                "cloud_object_invalid",
++                Box::new(|env| {
++                    let key = format!("vlite/prod/sets/{}/archive.json", env.set_id);
++                    edit(&env.data, &key, |b| {
++                        let mut index: Value = serde_json::from_slice(b).unwrap();
++                        index["target_time"] = json!(1);
++                        *b = serde_json::to_vec(&index).unwrap();
++                    })
++                }),
++            ),
++        ];
++        for (name, expected, damage) in cases {
++            let env = setup();
++            checkpoint(&env, puts(5..=6), None);
++            checkpoint(&env, puts(7..=9), None);
++            damage(&env);
++            let error = env.restore(&at(&env, "latest")).unwrap_err();
++            assert_eq!(error.code, expected, "{name}: {}", error.message);
++            assert_eq!(env.pins(), 0, "{name}");
++            assert_eq!(env.leftovers(), Vec::<String>::new(), "{name}");
++        }
++    }
++
++    #[test]
++    fn a_bundle_from_another_capture_is_never_paired_with_a_checkpoint() {
++        let env = setup();
++        checkpoint(&env, puts(5..=6), None);
++        // Replace the checkpoint bundle by a valid bundle naming the
++        // baseline database instead of the checkpoint's chain hash, and
++        // point the index at it.
++        let key = format!("vlite/prod/sets/{}/archive.json", env.set_id);
++        let mut index: Value = serde_json::from_slice(&env.data.raw(&key).unwrap()).unwrap();
++        let wrong = serde_json::to_vec(&recovery_bundle::bundle(
++            config(),
++            INSTALL,
++            env.source_lineage,
++            index["baseline_sha256"].as_str().unwrap(),
++            cloud::fake::policy_capture(),
++            None,
++            3,
++        ))
++        .unwrap();
++        let sha = super::super::cloud_backup::sha_hex(&wrong);
++        env.data.set_raw(
++            &format!("vlite/prod/sets/{}/objects/{sha}", env.set_id),
++            &wrong,
++        );
++        index["checkpoints"][0]["bundle_sha256"] = json!(sha);
++        index["checkpoints"][0]["bundle_bytes"] = json!(wrong.len());
++        env.data.set_raw(&key, &serde_json::to_vec(&index).unwrap());
++        let error = env.restore(&at(&env, "latest")).unwrap_err();
++        assert_eq!(error.code, "cloud_set_corrupt", "{}", error.message);
++        assert_eq!(env.leftovers(), Vec::<String>::new());
++        assert_eq!(env.pins(), 0);
++    }
++
++    #[test]
++    fn a_checkpoint_restore_takes_memory_from_the_checkpoint_bundle() {
++        let set = recovery_bundle::memory_bindings();
++        let env = setup_memory(memory_graphs(false), None);
++        // The first checkpoint predates memory; the second adds its graph,
++        // records and bindings.
++        checkpoint(&env, puts(2..=2), None);
++        checkpoint(
++            &env,
++            |database| {
++                database.create_graph("g1").unwrap();
++                super::super::memory::write_records_to(database, &set);
++            },
++            Some(&set),
++        );
++        let latest = at(&env, "latest");
++        let report = env.restore(&latest).unwrap();
++        assert_eq!(report["memory"]["bindings"], 2, "{report}");
++        assert_eq!(report["bundle"]["memory"]["bindings"], 2);
++        let file = latest.output.join(MEMORY_BINDINGS_FILE);
++        assert_eq!(
++            crate::memory::binding::parse(&std::fs::read(&file).unwrap()).unwrap(),
++            set
++        );
++        let index: Value = serde_json::from_slice(
++            &env.data
++                .raw(&format!("vlite/prod/sets/{}/archive.json", env.set_id))
++                .unwrap(),
++        )
++        .unwrap();
++        let first = index["checkpoints"][0]["sequence"]
++            .as_u64()
++            .unwrap()
++            .to_string();
++        let earlier = CloudRestore {
++            output: env.dir.path().join("earlier"),
++            ..at(&env, &first)
++        };
++        let report = env.restore(&earlier).unwrap();
++        assert!(report["memory"].is_null(), "{report}");
++        assert!(!earlier.output.join(MEMORY_BINDINGS_FILE).exists());
++    }
++
++    #[test]
++    fn a_tombstoned_baseline_sweeps_its_archive_objects() {
++        let env = setup();
++        checkpoint(&env, puts(5..=6), None);
++        assert_eq!(archive_names(&env).len(), 6, "{:?}", archive_names(&env));
++        set_state(&env, "delete_pending");
++        let collected = env
++            .sets
++            .collect(
++                INSTALL,
++                &cloud::Retention {
++                    enabled: true,
++                    keep_sets: 1,
++                    keep_days: 1,
++                    orphan_grace_hours: 1,
++                },
++                now(),
++            )
++            .unwrap();
++        assert_eq!(collected.deleted, std::slice::from_ref(&env.set_id));
++        assert_eq!(archive_names(&env), Vec::<String>::new());
++    }
+ }
