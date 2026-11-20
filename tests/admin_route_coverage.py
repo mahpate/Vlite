@@ -99,13 +99,13 @@ INVENTORY = {
     ("POST", "/v1/admin/cloud-backup/sets/{id}/restore"): ("admin-tools.js", "cloud-backup-restore"),
     ("POST", "/v1/admin/cloud-backup/sets/{id}/pins"): ("admin-tools.js", "cloud-backup-pin"),
     ("DELETE", "/v1/admin/cloud-backup/sets/{id}/pins/{pin}"): ("admin-tools.js", "cloud-backup-unpin"),
+    # Live monitor > Server role and replication panel, refreshed with the other observability reads.
+    ("GET", "/v1/admin/serve-status"): ("observability.js", "obs-refresh"),
 }
 
 # Admin routes deliberately without a dashboard control. Each needs a reason, and
 # the dashboard must not half-implement one.
-BACKEND_ONLY = {
-    ("GET", "/v1/admin/serve-status"): "EPIC-002 HA role/drain/progress probe for operators and orchestration; the dashboard already shows health and metrics, and an HA panel is out of EPIC-002 scope.",
-}
+BACKEND_ONLY = {}
 
 # Graph routes (src/server/graph.rs).
 # graph.js builds its own controls inside <section id="graph"> (the Graph workspace), so the control id is

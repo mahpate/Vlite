@@ -2,7 +2,7 @@
 const { test } = require("node:test");
 const assert = require("node:assert/strict");
 const fs = require("node:fs");
-const { parsePrometheus, counterRate, deriveRates, histogramQuantile, prometheusSummary, filterLogs, formatLog, mergeLogs } = require("../src/dashboard/observability.js");
+const { parsePrometheus, counterRate, deriveRates, histogramQuantile, prometheusSummary, filterLogs, formatLog, mergeLogs, serveStatusView } = require("../src/dashboard/observability.js");
 
 test("Prometheus parser handles comments, escapes, labels, timestamps and histogram series", () => {
   const samples = parsePrometheus('# HELP requests Help\n# TYPE requests counter\nvlite_requests_total{route="/a,\\\"b",method="GET",target="x\\\\y\\nz"} 1.2e2 123\nlatency_bucket{le="+Inf"} 4\nlatency_sum .3\nlatency_count 4\n');
@@ -85,6 +85,81 @@ test("route histograms preserve method boundaries and derive p95 in milliseconds
   assert.equal(rows.find((row) => row.method === "POST").p95_ms, 950);
 });
 
+const serveRows = (status) => Object.fromEntries(serveStatusView(status).map((row) => [row.label, row]));
+const standalone = { mode: "standalone", draining: false, read_only: false, lineage: null, binding_generation: 0, format_version: 5, sequence: 42, epoch: null, archive: null, reader: null, uptime_ms: 65000 };
+test("serve status view explains a standalone server in plain language", () => {
+  const rows = serveStatusView(standalone);
+  assert.deepEqual(rows.map((row) => row.label), ["Role", "Accepts writes", "Draining", "Writer epoch", "Data lineage", "Change-feed position", "Storage format", "Uptime", "Cloud archive"]);
+  const view = serveRows(standalone);
+  assert.equal(view.Role.value, "Standalone (single server)");
+  assert.equal(view["Accepts writes"].value, "Yes");
+  assert.equal(view.Draining.value, "No");
+  assert.equal(view["Writer epoch"].value, "Not used");
+  assert.equal(view["Data lineage"].value, "Not recorded");
+  assert.equal(view["Change-feed position"].value, "42");
+  assert.equal(view["Storage format"].value, "Version 5");
+  assert.equal(view.Uptime.value, "1 min 5 s");
+  assert.equal(view["Cloud archive"].value, "No cloud archive configured");
+  assert.ok(rows.every((row) => row.level === undefined));
+  assert.deepEqual(serveStatusView(null).map((row) => row.value).slice(0, 3), ["Unknown", "Yes", "No"]);
+  assert.equal(serveRows({ ...standalone, mode: "gateway" }).Role.value, "Unknown (gateway)");
+});
+test("serve status view reports writer epoch, draining and archive health", () => {
+  const archive = { baseline_set: "set-7", baseline_checkpoints: 3, checkpoints: 1, failures: 2, last_checkpoint_sequence: 900, last_checkpoint_unix_ms: 1, last_checkpoint_age_ms: 3723000, last_error: { code: "archive_upload_failed", message: "blob store timed out" } };
+  const rows = serveStatusView({ ...standalone, mode: "writer", draining: true, lineage: "00000000000000ab", epoch: 7, archive, uptime_ms: 90000000 });
+  assert.deepEqual(rows.map((row) => row.label).slice(-3), ["Cloud archive", "Last archive checkpoint", "Last archive error"]);
+  const view = Object.fromEntries(rows.map((row) => [row.label, row]));
+  assert.equal(view.Role.value, "Writer (accepts every write)");
+  assert.equal(view.Draining.value, "Yes — shutting down, not ready for new traffic");
+  assert.equal(view.Draining.level, "warn");
+  assert.equal(view["Writer epoch"].value, "7");
+  assert.equal(view["Data lineage"].value, "00000000000000ab");
+  assert.equal(view.Uptime.value, "1 d 1 h");
+  assert.equal(view["Cloud archive"].value, "1 verified checkpoint · 2 failed attempts · baseline set-7 (3 checkpoints)");
+  assert.equal(view["Last archive checkpoint"].value, "1 h 2 min ago · position 900");
+  assert.equal(view["Last archive error"].value, "archive_upload_failed: blob store timed out");
+  assert.equal(view["Last archive error"].level, "error");
+  const clean = serveRows({ ...standalone, archive: { ...archive, baseline_set: null, baseline_checkpoints: 0, checkpoints: 0, failures: 0, last_checkpoint_sequence: null, last_checkpoint_unix_ms: null, last_checkpoint_age_ms: null, last_error: null } });
+  assert.equal(clean["Cloud archive"].value, "0 verified checkpoints · 0 failed attempts · no baseline yet");
+  assert.equal(clean["Last archive checkpoint"].value, "None yet");
+  assert.equal(clean["Last archive error"].value, "None");
+  assert.equal(clean["Last archive error"].level, undefined);
+});
+test("serve status view shows reader freshness against its bound", () => {
+  const reader = { ...standalone, mode: "reader", read_only: true, epoch: null, reader: { applied_sequence: 41, age_ms: 1500, bound_ms: 5000, stale: false, failed: false } };
+  const rows = serveStatusView(reader);
+  assert.deepEqual(rows.map((row) => row.label).slice(-3), ["Reader freshness", "Confirmed data age", "Applied position"]);
+  let view = serveRows(reader);
+  assert.equal(view.Role.value, "Reader (read-only replica)");
+  assert.equal(view["Accepts writes"].value, "No — read-only replica (writes get 403 reader_mode)");
+  assert.equal(view["Reader freshness"].value, "Fresh");
+  assert.equal(view["Reader freshness"].level, undefined);
+  assert.equal(view["Confirmed data age"].value, "1.5 s (limit 5.0 s)");
+  assert.equal(view["Applied position"].value, "41");
+  view = serveRows({ ...reader, reader: { applied_sequence: 41, age_ms: 250, bound_ms: 0, stale: true, failed: false } });
+  assert.equal(view["Reader freshness"].value, "Stale — reads get 503 reader_stale; send reads to the writer");
+  assert.equal(view["Reader freshness"].level, "warn");
+  assert.equal(view["Confirmed data age"].value, "250 ms (no staleness limit)");
+  view = serveRows({ ...reader, reader: { applied_sequence: 41, age_ms: null, bound_ms: 5000, stale: true, failed: true } });
+  assert.equal(view["Reader freshness"].value, "Failed — replication stopped; readiness reports reader_apply_failed");
+  assert.equal(view["Reader freshness"].level, "error");
+  assert.equal(view["Confirmed data age"].value, "Not yet confirmed (limit 5.0 s)");
+  view = serveRows({ ...reader, reader: null });
+  assert.equal(view["Reader freshness"].value, "Not reported — this reader does not follow a writer");
+  assert.equal(view["Confirmed data age"], undefined);
+});
+test("serve status view says when agent memory withholds positions", () => {
+  const withheld = "Withheld while agent memory is on";
+  const archive = { baseline_set: null, baseline_checkpoints: 0, checkpoints: 1, failures: 1, last_checkpoint_sequence: null, last_checkpoint_unix_ms: 1, last_checkpoint_age_ms: 500, last_error: { code: "archive_upload_failed", message: null } };
+  let view = serveRows({ ...standalone, mode: "reader", read_only: true, binding_generation: 3, sequence: null, archive, reader: { applied_sequence: null, age_ms: 10, bound_ms: 0, stale: false, failed: false } });
+  assert.equal(view["Change-feed position"].value, withheld);
+  assert.equal(view["Applied position"].value, withheld);
+  assert.equal(view["Last archive checkpoint"].value, "500 ms ago · position withheld while agent memory is on");
+  assert.equal(view["Last archive error"].value, "archive_upload_failed (details withheld while agent memory is on)");
+  view = serveRows({ ...standalone, sequence: null });
+  assert.equal(view["Change-feed position"].value, "Not available");
+});
+
 test("read-only connection bridge reuses bearer auth without touching foreground request state", async () => {
   const vm = require("node:vm");
   const source = fs.readFileSync("src/dashboard/app.js", "utf8");
@@ -93,6 +168,7 @@ test("read-only connection bridge reuses bearer auth without touching foreground
   assert.ok(start >= 0 && end > start);
   const calls = [];
   const context = { window: {}, connected: true, token: "test-bearer", apiBase: "", AbortController, setTimeout, clearTimeout,
+    confirmOperation: async () => true, memoryOff: () => null, memoryFailure: (error) => error,
     fetch: async (url, options) => { calls.push({ url, options }); return { ok: true, json: async () => ({ ok: true }), text: async () => "text metrics" }; } };
   vm.runInNewContext(source.slice(start, end), context);
   const bridge = context.window.VLiteObservabilityConnection;
@@ -105,6 +181,9 @@ test("read-only connection bridge reuses bearer auth without touching foreground
   assert.equal(await bridge.request("/metrics", { text: true }), "text metrics");
   await assert.rejects(bridge.request("https://example.com/metrics"), /Unsupported/);
   await assert.rejects(bridge.request("/v1/admin/tokens"), /Unsupported/);
+  await assert.rejects(bridge.request("/v1/admin/serve-status/extra"), /Unsupported/);
+  assert.deepEqual(await bridge.request("/v1/admin/serve-status"), { ok: true });
+  assert.equal(calls.at(-1).url, "/v1/admin/serve-status");
   context.fetch = async () => ({ ok: false, status: 403 });
   await assert.rejects(bridge.request("/v1/admin/logs"), (error) => error.status === 403);
   context.connected = false;

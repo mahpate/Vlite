@@ -938,7 +938,9 @@ claimed writer-authority epoch on an authority-enabled writer, otherwise null),
 only scoped tenant roles and has no admin path, so this route is unavailable
 there. Existing archive progress
 includes checkpoint ages and errors. Positions and archive error text are
-withheld when memory bindings block metrics.
+withheld when memory bindings block metrics. Super admins see the same report
+in the dashboard under **Observability → Live monitor → Server role and
+replication**.
 
 `binding_generation` is 0 without configured bindings; otherwise it is a
 deterministic, nonzero, JSON-safe fingerprint of the binding configuration.
