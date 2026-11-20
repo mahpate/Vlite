@@ -7,17 +7,19 @@ environment (with Log Analytics), and one Manual job per requested CPU tier.
 It never reuses a group or touches the live app, environment, or share.
 MEAS-002 also measures reader staleness under write load against real Blob
 Storage, and MEAS-006 measures writer-fence costs against a temporary Blob
-coordination container. **MEAS-001 and MEAS-003..005 are still refused**, as
-are combinations of measurement IDs. MEAS-004/005 have a gateway container
-runtime (`measure-gateway-entrypoint.py`, packaged with `python3` in the
-`gateway-measure` image) and a contract (`measure-gateway-contract.md`). The
+coordination container. **MEAS-001 and MEAS-003 are still refused**, as are combinations of measurement IDs. MEAS-004/005 have a gateway
+container runtime (`measure-gateway-entrypoint.py`, packaged with `python3` in
+the `gateway-measure` image) and a contract (`measure-gateway-contract.md`). The
 offline Linux/WSL exact-fixture preparation (`measure-gateway-fixture.py`) is
 also in place. It bootstraps once at `/measurement/bootstrap`. It then exports
 and verifies the four role bundles and writes a private image context for that
-bootstrap's own `database.vlite`. It only plans the `az acr build`. There is
-still no live orchestration harness: nothing here provisions, builds, writes
-secrets for, or starts MEAS-004/005. Offline tests run in Linux/WSL:
-`python3 -B measure-gateway-fixture.test.py`.
+bootstrap's own `database.vlite`. It only plans the `az acr build`.
+`measure.ps1` now also contains MEAS-004/005 orchestration
+(`measure-gateway.ps1`; see *MEAS-004/005 gateway orchestration* below). It is
+tested offline only. **It has never been run against Azure, and MEAS-004/005
+have no evidence.** Offline tests: `python3 -B measure-gateway-fixture.test.py`
+(Linux/WSL) and `pwsh -NoProfile -File measure-gateway.test.ps1`. The second
+suite mocks every Azure CLI call, local process, clock and sleep.
 
 ## Prerequisites and command
 
@@ -190,6 +192,84 @@ results and do not qualify the run.
 
 **This is proposal evidence for fencing overhead, not an SLO, a stale-ack
 window, or HA qualification.**
+
+## MEAS-004/005 gateway orchestration (offline-tested, never run)
+
+`-Measurements MEAS-004` or `MEAS-005` dispatches to `measure-gateway.ps1`.
+`-Plan` works on any host. It prints every step with placeholders
+(`<subscription>`, `<principal-id:ROLE>`, `<projections:ROLE>`, digests) and
+returns them. It writes no files and runs no process. A live run requires a
+Linux/WSL operator host, `-FixtureServer` (absolute path of a native
+`vlite-server` built from the same source revision; the operator must
+ensure this) and, for MEAS-005, `-ControlProgram` (the native `ha-meas005`).
+`-GatewayProfile pilot|full` (default `pilot`) selects the contract's
+settings. `Tiers`, `Records`, `Delta`, `Dimensions`, `Image` and
+`-KeepOnFailure` are refused.
+
+The planned live order is:
+
+1. Check that the uniquely named, tagged group and the registry and storage
+   names are unused. Check that `/measurement` exists and is empty.
+2. Create the group, ACR, `gateway-measure` image, one identity per role
+   (driver, gateway, writer, reader), `AcrPull`, the storage account with
+   control containers (only the driver may write), and the environment.
+3. Run `measure-gateway-fixture.py prepare` **once**. Verify its single-line
+   summary and each export exactly. The checks cover:
+   - paths;
+   - digests;
+   - role file allowances (backends never receive signing, admin or driver
+     files);
+   - generation and source;
+   - one shared lineage and fixture digest;
+   - the planned build, which must equal the harness's build command;
+   - `executed: []`;
+   - a credential deadline inside the bootstrap window.
+
+   Any mismatch stops the run before the build. The emptiness of
+   `/measurement` is checked again just before `prepare`. Only one run may
+   use the host's `/measurement` at a time; there is no lock.
+4. Build the planned fixture image. Create the publish job and start it once,
+   with no retry. The run continues only on an exact publish receipt.
+5. Create writer (and reader for MEAS-005) and two gateway replicas, plus the
+   driver job. Each gets only its own role's projections, a role-specific
+   control target and the exact fixture image digest. Remove the local
+   fixture with `cleanup` right after distribution.
+6. Record replica inventory; any restart refuses the run. Start the driver
+   once, verify its evidence, and record inventory again. A changed
+   inventory marks the run `Incomplete`.
+7. MEAS-005 only: wait for the bounded observer window, then collect one
+   observer report per recorded replica. Run the offline analysis when every
+   report is present.
+8. Always remove local fixture files, delete the group and write
+   `summary.json`.
+
+The 2-hour credential lifetime is a hard limit. Before each create and start
+step, the run checks the time left: 2 minutes for most steps, the full
+1-hour job timeout plus margin before the driver starts, and the observer
+window plus 15 minutes before MEAS-005 apps start. If time is short, the run
+fails with `CredentialWindow`. Errors are static
+(`<MEAS> failed at <step>; diagnostics withheld.`). The summary records a
+fixed `failureReason` code and never includes identifiers or secrets.
+
+Clock calibration is not implemented. MEAS-005 summaries therefore always
+carry `ClockCalibrationUnavailable` and stay `Incomplete`. The fixed fixture
+bootstraps with a 1,000 ms poll, so the contract's 100 ms pilot setting and
+poll sweep cannot be run.
+
+The following are unverified until a live run:
+
+- ACA secret-volume behavior and limits;
+- internal HTTPS trust;
+- empty environment values;
+- console log `--tail` limits;
+- probe behavior;
+- `--yaml` acceptance of JSON manifests;
+- ACR `--target` builds;
+- whether the run fits inside 2 hours.
+
+An `AcrPull` propagation delay fails the publish step, which is never
+retried. **No MEAS-004/005 evidence exists. Nothing here qualifies serving,
+SLOs or gates.**
 
 ## Outputs, cost, and cleanup
 

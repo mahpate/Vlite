@@ -21,12 +21,16 @@ param(
     [string]$OutDir,
     [string]$Image,
     [string]$SourceRevision,
+    [string]$FixtureServer,
+    [string]$ControlProgram,
+    [string]$GatewayProfile,
     [switch]$AllowDirty,
     [switch]$KeepOnFailure,
     [switch]$Plan
 )
 $ErrorActionPreference = 'Stop'
 $script:VLiteMeasRepository = [IO.Path]::GetFullPath((Join-Path $PSScriptRoot '..\..\..'))
+. (Join-Path $PSScriptRoot 'measure-gateway.ps1')
 
 function Assert-VLiteMeasName([string]$Name) {
     if ($Name -imatch '\A(asendme.*|vlite-app|vlite-env|vlite-data)\z') {
@@ -42,6 +46,7 @@ function Test-VLiteMeasParameters([hashtable]$Options) {
         DurationSecs = ''; Rate = ''; ArchiveIntervalSecs = ''; StalenessBoundMs = ''; ReaderPollMs = ''; ObserveMs = ''
         Samples = ''; Repetitions = ''; IntervalMs = ''
         OutDir = ''; Image = ''; SourceRevision = ''; AllowDirty = $false; KeepOnFailure = $false
+        FixtureServer = ''; ControlProgram = ''; GatewayProfile = ''
         Plan = $false; DirtyPaths = ''
     }
     foreach ($key in $Options.Keys) {
@@ -54,11 +59,18 @@ function Test-VLiteMeasParameters([hashtable]$Options) {
     }
     if ([string]::IsNullOrWhiteSpace($config.Location)) { throw 'Location is required.' }
     $config.Measurements = @($config.Measurements)
-    if ($config.Measurements.Count -ne 1 -or $config.Measurements[0] -cnotin @('MEAS-007', 'MEAS-002', 'MEAS-006')) {
-        throw 'Requested measurements are not implemented; select only MEAS-007, MEAS-002 or MEAS-006.'
+    if ($config.Measurements.Count -ne 1 -or
+        $config.Measurements[0] -cnotin @('MEAS-007', 'MEAS-002', 'MEAS-006', 'MEAS-004', 'MEAS-005')) {
+        throw 'Requested measurements are not implemented; select only one of MEAS-007, MEAS-002, MEAS-006, MEAS-004 or MEAS-005.'
     }
     $meas002 = $config.Measurements[0] -ceq 'MEAS-002'
     $meas006 = $config.Measurements[0] -ceq 'MEAS-006'
+    $gateway = $config.Measurements[0] -cin @('MEAS-004', 'MEAS-005')
+    if (-not $gateway) {
+        foreach ($name in 'FixtureServer', 'ControlProgram', 'GatewayProfile') {
+            if ($Options.ContainsKey($name)) { throw "$name is not supported for the selected measurement." }
+        }
+    }
     foreach ($field in @(@('Samples', 1L, 2000L, 100L), @('Repetitions', 1L, 100L, 20L), @('IntervalMs', 5L, 5000L, 50L))) {
         $name = $field[0]
         if ($Options.ContainsKey($name)) {
@@ -176,6 +188,7 @@ function Test-VLiteMeasParameters([hashtable]$Options) {
     foreach ($name in $config.ResourceGroup, $config.Environment, $config.Registry, $config.Identity) {
         Assert-VLiteMeasName $name
     }
+    if ($gateway) { Test-VLiteMeasGatewayParameters $config $Options }
     return $config
 }
 
@@ -564,6 +577,7 @@ function Invoke-VLiteMeas([hashtable]$Options) {
             throw 'Dirty working tree; pass -AllowDirty to record it explicitly.'
         }
     }
+    if ($config.Measurements[0] -cin @('MEAS-004', 'MEAS-005')) { return (Invoke-VLiteMeasGateway $config) }
     $steps = @(New-VLiteMeasPlan $config)
     if ($config.Plan) {
         foreach ($step in $steps) {

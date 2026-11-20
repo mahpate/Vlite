@@ -149,8 +149,8 @@ try {
     }
     foreach ($entry in @(
         @{ Measurements = @('MEAS-002','MEAS-007') }, @{ Measurements = @('MEAS-007','MEAS-002') },
-        @{ Measurements = @('MEAS-001') }, @{ Measurements = @('MEAS-003') }, @{ Measurements = @('MEAS-004') },
-        @{ Measurements = @('MEAS-005') }, @{ Measurements = @('MEAS-008') },
+        @{ Measurements = @('MEAS-001') }, @{ Measurements = @('MEAS-003') },
+        @{ Measurements = @('MEAS-008') },
         @{ Measurements = @() }, @{ Measurements = @('meas-002') },
         @{ Tiers = @() }, @{ Tiers = @(0.3) }, @{ Tiers = @(1,1) },
         @{ ReaderPollMs = '1000'; StalenessBoundMs = '1000' },
