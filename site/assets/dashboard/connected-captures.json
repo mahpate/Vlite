@@ -4,23 +4,23 @@
   "connected": true,
   "backend_image": "native isolated server",
   "capabilities": {
-    "version": "0.7.8"
+    "version": "0.7.10"
   },
-  "source_git_sha": "becc2a0f341068539b9264ea1555da9bc2fa67e7",
-  "source_git_dirty": false,
+  "source_git_sha": "9dbb50b6e192a299b0a38cd7ff9b9548b3068626",
+  "source_git_dirty": true,
   "format_version": 5,
   "source_assets": {
     "admin-tools.js": "6a4aff421897f6a18d813ee56d900154e18b688de260c320e689f424a9564ee9",
     "ambience.js": "678612f0fe51412d5b8bce773f49333e3423154be61562a905908f7e41510087",
-    "app.js": "74702ae3349e00d3318a42ad0526d3d83ce9562a4b2b139c73a2de6c5ac07ef3",
+    "app.js": "2be1ab92d22e73b1075ca3962e100a92612258bc83654cfcb4a6fd6f0fe52a1e",
     "console-tools.js": "fab5e78d415a784f8976a2bf34e18eabca70fe1c725b164bfc17c925c8773b22",
     "graph.css": "fd125471b3613335c91ec0f9cc68b1499c25a27fbfe1f683a825544cab9efe9c",
     "graph.js": "02976f38ff2a4a23b5621b2639140d9082aea425cf75cb8b0d10925696554795",
     "graph3d.js": "0ef3b257f0304211838dd46417a89197df819da168e4aae465e7b59cd7a323c5",
-    "index.html": "57ed5e227697a17b26b38a44b316857f3a5e2e61cb63bbaf4c9c4c54ec9f4393",
+    "index.html": "82cfe3ba1d362b2bd29ccfde067c16ca19e3e5c7252c4a4b220178fb55f57f1d",
     "navigation.js": "2cba7240b3288d19e8536171c1498cf303a8b41de34fb7a1b2205a3330572bc5",
-    "observability.js": "cce03d05074e86263a08b71eadb8298f3771d2b09878f1ddec78d638b8fb1d07",
-    "style.css": "1b44fda7587f540fae1f1079103c3aec30bed68b7bcf3086c9bac2d248e27719"
+    "observability.js": "20a3ea33558507e3ecb133f18741dd073d6529ef09060b0b6a3a699278523701",
+    "style.css": "b61c82ab8cc46bab4ed94b55a1f1ef2ab8ef1389e264904f056c9b727cd2a6c3"
   },
   "theme_sha256": "4192ff7fd37dcf8221b558863c4a55112557f6e7a3bee90c0a8045207a96987f",
   "shared_assets": {
@@ -77,12 +77,12 @@
     {
       "file": "current-search.png",
       "workspace": "Search",
-      "sha256": "10cf2e51f79a1d464c034e08b04c05fbe70a5e863b8c23f0e4a6defafbafd912"
+      "sha256": "dde0c94d72bf2f9dd5d4a0716a4ab23d5ac736458d312410c1103fb4cec50dbd"
     },
     {
       "file": "current-hybrid.png",
       "workspace": "Search",
-      "sha256": "ebda0ca39e5a228ca91ede5f0015bf4e5602b47bf16c228112323c2a07da6cd9"
+      "sha256": "0292a5e484417323bb32a76f5dc572b7d618aa01532448cff9c4a82d29fa878f"
     },
     {
       "file": "current-retrieval.png",
@@ -122,17 +122,17 @@
     {
       "file": "current-observability.png",
       "workspace": "Observability",
-      "sha256": "a1b011669d88ba3d92dfd989011b74e885311863b04a28477a0856ac977d7ba6"
+      "sha256": "9c4049491105d7a7d8dcc2b25596d000c363760b0e559560d8b984e1513fad05"
     },
     {
       "file": "current-feed.png",
       "workspace": "Observability",
-      "sha256": "6609aa7aedc26dac3d1c06b2697fada804d769dd2a36d30bb3642588d609ddd1"
+      "sha256": "435c94d2cbfb4f4df71dd0f094a12459fa9cd95b0a0fb715222bc10be9488213"
     },
     {
       "file": "current-administration.png",
       "workspace": "Administration",
-      "sha256": "226a04aa68ef9ac25f6a1c321441272b6b89ffb076ffe524c9341ab1cab2fc0d"
+      "sha256": "13362f82a18bd0dae2d80cd4eac8bf090d56bc1070192465d9c26827ad4bb330"
     },
     {
       "file": "current-users.png",
@@ -142,7 +142,7 @@
     {
       "file": "current-backups.png",
       "workspace": "Administration",
-      "sha256": "4eadaea3ee1da6bedc4eda4209dc6fd2791922b87d2ff6645f68a3b5dacbe196"
+      "sha256": "cbde46555de620fb58627f6626504832029f73d103f56e1ffc772e48b4368d02"
     },
     {
       "file": "current-compaction.png",
@@ -152,12 +152,12 @@
     {
       "file": "current-credentials.png",
       "workspace": "Administration",
-      "sha256": "2b1a2b0410dc8dc257374b596e63304f85d7df14fb717aa88252c7cd6385d147"
+      "sha256": "8fe5c25681dde23349e1fcdee233b49b6058b0030193a749cd582b6ea86c45d3"
     },
     {
       "file": "current-tenants.png",
       "workspace": "Administration",
-      "sha256": "e4a7c25d406be22f745f5c8ad79aac5665527fe79237661c9aa22ff3c6662559"
+      "sha256": "cba9f9e8e68ff60e391a184c8228ebe670f83a6e9773cf7564e1de0444a45e6e"
     },
     {
       "file": "current-automation.png",
@@ -177,12 +177,12 @@
     {
       "file": "current-replication.png",
       "workspace": "Administration",
-      "sha256": "1e274fa92282908d7acc29cbff41c64a35caf9bb83a7b67f7d13aa3ca802a005"
+      "sha256": "9b5bfa8bcdea818f6b69350c5a23e4b39810ba3a359e5c9147aeae78135ca622"
     },
     {
       "file": "current-developer.png",
       "workspace": "Developer Console",
-      "sha256": "bcb4503e446bc7c258f361f0aedbc758463f56047975f0071d2c59d18c9cce87"
+      "sha256": "57bed7f6d27dc204650fd085040e0d9d45d147cb3bde2c8eef2b94594f054ea5"
     },
     {
       "file": "current-overview-dark.png",
