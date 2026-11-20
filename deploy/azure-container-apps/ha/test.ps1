@@ -21,7 +21,7 @@ function Get-RustFields([string]$File, [string]$Struct) {
     $source = Get-Content -Raw -LiteralPath $File
     $body = [regex]::Match($source, "(?s)struct $Struct \{(.*?)\n\}").Groups[1].Value
     Assert ($body.Length -gt 0) "Missing Rust schema $Struct."
-    @([regex]::Matches($body, '(?m)^\s+([a-z_]+):') | ForEach-Object { $_.Groups[1].Value })
+    @([regex]::Matches($body, '(?m)^\s+(?:pub(?:\([a-z]+\))?\s+)?([a-z_]+):') | ForEach-Object { $_.Groups[1].Value })
 }
 
 $repo = (Resolve-Path -LiteralPath (Join-Path $PSScriptRoot '..' '..' '..')).Path

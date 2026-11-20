@@ -18,6 +18,7 @@ COPY benchmarks/ha_meas002.rs ./benchmarks/ha_meas002.rs
 COPY benchmarks/ha_meas004.rs ./benchmarks/ha_meas004.rs
 COPY benchmarks/ha_meas005.rs ./benchmarks/ha_meas005.rs
 COPY benchmarks/ha_gateway_support.rs ./benchmarks/ha_gateway_support.rs
+COPY deploy/azure-container-apps/ha/meas006-collect.sh ./deploy/azure-container-apps/ha/meas006-collect.sh
 COPY deploy/azure-container-apps/ha/meas006-collect.sh /usr/local/bin/meas006-collect.sh
 COPY bindings/c ./bindings/c
 COPY crates ./crates

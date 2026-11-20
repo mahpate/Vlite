@@ -6,8 +6,12 @@ tagged resource group containing an ACR, user-assigned identity, Consumption
 environment (with Log Analytics), and one Manual job per requested CPU tier.
 It never reuses a group or touches the live app, environment, or share.
 MEAS-002 also measures reader staleness under write load against real Blob
-Storage. **MEAS-001 and MEAS-003..006 are still refused**, as are combinations
-of measurement IDs.
+Storage, and MEAS-006 measures writer-fence costs against a temporary Blob
+coordination container. **MEAS-001 and MEAS-003..005 are still refused**, as
+are combinations of measurement IDs. MEAS-004/005 have a gateway container
+runtime (`measure-gateway-entrypoint.py`) and a contract
+(`measure-gateway-contract.md`), but no orchestration harness yet; nothing
+here provisions or starts it.
 
 ## Prerequisites and command
 
@@ -123,6 +127,46 @@ costs. The account and containers are deleted with the group under the same
 cleanup policy below.
 
 **This is evidence for a staleness proposal, not an SLO or HA qualification.**
+
+## MEAS-006: writer-fence costs on Blob coordination
+
+```powershell
+& .\deploy\azure-container-apps\ha\measure.ps1 `
+  -SubscriptionId $env:AZURE_SUBSCRIPTION_ID -Id meas006 `
+  -Measurements MEAS-006 -Samples 100 -Repetitions 20 -IntervalMs 50 `
+  -OutDir C:\VLiteMeasurements\meas006
+```
+
+MEAS-006 always runs one 1 vCPU / 2 GiB job from **clean source**:
+`-AllowDirty`, `-KeepOnFailure` and any other tier are refused, and an
+`-Image` must be pinned by `@sha256:` digest. The MEAS-007/MEAS-002 options
+are refused. Its optional plain-decimal inputs are:
+
+| Option | Range | Default |
+|---|---|---|
+| `Samples` (per gate metric) | 1..2000 | 100 |
+| `Repetitions` (transfers) | 1..100 | 20 |
+| `IntervalMs` (fence recheck) | 5..5000 | 50 |
+
+The run refuses an existing registry or storage account name. It creates a
+Standard_ZRS StorageV2 account (`vlitemeas<id>st`, shared keys and public
+access disabled) with one `coordination` container, and grants the job's
+identity **Storage Blob Data Contributor** on that container only. Before
+measuring, the job waits up to 900 seconds for identity and role
+propagation by reading an absent `meas006/preflight-*` blob; it never writes
+during the preflight.
+
+`MEAS-006-c1.json` holds one `vlite-meas006/1` document. The harness checks
+its exact schema, `aca-blob` scope, clean pinned source revision, requested
+settings and sample counts. It also refuses any document containing private
+identifiers. Its metrics are `verify_before_commit`,
+`verify_before_ack` and `commit_then_ack` (microseconds, `Samples` each), and
+`transfer_to_observed_fenced` (milliseconds, `Repetitions`). Any failure
+reports only `MEAS-006 failed at <step>; diagnostics withheld.` and still
+requests group deletion under the cleanup policy below.
+
+**This is proposal evidence for fencing overhead, not an SLO, a stale-ack
+window, or HA qualification.**
 
 ## Outputs, cost, and cleanup
 
