@@ -1605,6 +1605,7 @@ fn databases_named_like_subcommands_need_a_path_prefix() {
         "cloud-restore",
         "gateway",
         "gateway-keygen",
+        "gateway-measure",
         "control-state",
     ] {
         // A bare name is the command, so the server options are refused.

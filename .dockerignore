@@ -27,6 +27,9 @@
 !benchmarks/ha_reader_resource.rs
 !benchmarks/ha_reader_resource_tests.rs
 !benchmarks/ha_meas002.rs
+!benchmarks/ha_meas004.rs
+!benchmarks/ha_meas005.rs
+!benchmarks/ha_gateway_support.rs
 !crates/
 !crates/**
 !bindings/

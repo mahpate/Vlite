@@ -16,6 +16,9 @@ COPY benchmarks/ha_reader_strategies.rs ./benchmarks/ha_reader_strategies.rs
 COPY benchmarks/ha_reader_resource.rs ./benchmarks/ha_reader_resource.rs
 COPY benchmarks/ha_reader_resource_tests.rs ./benchmarks/ha_reader_resource_tests.rs
 COPY benchmarks/ha_meas002.rs ./benchmarks/ha_meas002.rs
+COPY benchmarks/ha_meas004.rs ./benchmarks/ha_meas004.rs
+COPY benchmarks/ha_meas005.rs ./benchmarks/ha_meas005.rs
+COPY benchmarks/ha_gateway_support.rs ./benchmarks/ha_gateway_support.rs
 COPY bindings/c ./bindings/c
 COPY crates ./crates
 
@@ -80,6 +83,28 @@ CMD ["run", "/data/smoke.vlite"]
 FROM runtime AS api
 ENTRYPOINT ["/usr/local/bin/vlite-server"]
 CMD ["/data/vectors.vlite", "--create-if-missing", "3", "--bind", "0.0.0.0:8080", "--allow-remote"]
+
+FROM source AS gateway-measure-build
+RUN --mount=type=cache,target=/usr/local/cargo/registry,sharing=locked \
+    --mount=type=cache,target=/usr/local/cargo/git,sharing=locked \
+    --mount=type=cache,target=/gateway-measure-target,sharing=locked \
+    cargo build --locked --target-dir /gateway-measure-target --release --features server --bin vlite-server --example ha-meas004 --example ha-meas005 \
+    && mkdir /out \
+    && cp /gateway-measure-target/release/vlite-server /gateway-measure-target/release/examples/ha-meas004 /gateway-measure-target/release/examples/ha-meas005 /out/
+
+FROM debian:bookworm-slim AS gateway-measure
+RUN groupadd --gid 10001 vlite \
+    && useradd --uid 10001 --gid vlite --no-create-home --shell /usr/sbin/nologin vlite \
+    && mkdir /measurement \
+    && chown vlite:vlite /measurement \
+    && chmod 700 /measurement
+COPY --from=gateway-measure-build /out/vlite-server /usr/local/bin/vlite-server
+COPY --from=gateway-measure-build /out/ha-meas004 /usr/local/bin/ha-meas004
+COPY --from=gateway-measure-build /out/ha-meas005 /usr/local/bin/ha-meas005
+USER 10001:10001
+WORKDIR /measurement
+ENTRYPOINT ["/usr/local/bin/vlite-server"]
+CMD ["gateway-measure"]
 
 FROM nginxinc/nginx-unprivileged:1.30.6-alpine AS dashboard
 COPY deploy/dashboard.conf /etc/nginx/conf.d/default.conf
