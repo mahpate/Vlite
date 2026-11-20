@@ -19,11 +19,19 @@
 //! upstream client follows no redirect and uses no proxy, and the upstream
 //! URL is the record's origin plus the caller's validated path.
 //! `upstream_timeout_ms` bounds connecting, waiting for the response head and
-//! each wait for the next piece of a streamed body; it is not a limit on the
-//! whole response. Reader failures before a response head, 503s, and lineage
+//! each wait for the next piece of a streamed body, in either direction; it
+//! is not a limit on the whole request or response. A request body that
+//! stalls is `408 request_body_timeout` with nothing sent, and a client that
+//! stops reading a response loses it, so neither holds an in-flight slot
+//! indefinitely. Reader failures before a response head, 503s, and lineage
 //! or binding-generation mismatches fall back to the writer once. Writes are
 //! never retried: a connection failure after a write may have been sent is
 //! `502 write_outcome_unknown` (`gateway::ambiguous_write`).
+//!
+//! Past `drain_timeout_ms` at shutdown every request still running is
+//! cancelled: one not yet sent is `503 draining`, a sent write is
+//! `502 write_outcome_unknown`, a sent read is `503 draining`, and a
+//! streaming response ends with an error; nothing is retried or re-routed.
 //!
 //! Not yet: login, the dashboard and super-admin operations through a
 //! gateway (OD-004/OD-012). Dedicated responses require a valid epoch stamp
@@ -54,6 +62,10 @@ const CONTROL_USAGE: &str = "vlite-server control-state publish|update --target-
 const MAX_SEED_FILE_BYTES: u64 = 1024;
 const MAX_IN_FLIGHT: usize = 65_536;
 const MAX_BUCKETS: usize = 1_000_000;
+/// After the drain deadline: how long cancelled requests get to release their
+/// in-flight slots, and separately how long the control-state poller gets to
+/// stop before it is left to finish its read on its own.
+const SHUTDOWN_SETTLE: Duration = Duration::from_secs(1);
 
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -73,7 +85,8 @@ pub(super) struct GatewayFile {
     active_kid: String,
     /// How long `/ready` reports draining before the listener closes.
     readiness_propagation_ms: u64,
-    /// Bound on in-flight requests finishing after the listener closed.
+    /// Bound on in-flight requests finishing after the listener closed;
+    /// requests still running then are cancelled.
     drain_timeout_ms: u64,
     max_request_bytes: usize,
     max_in_flight: usize,
@@ -160,8 +173,9 @@ pub(super) fn read_config(path: &Path) -> Result<Settings, String> {
 
 /// Runs a gateway until `shutdown` resolves, then drains: `/ready` answers
 /// 503 `draining` for `readiness_propagation_ms` while the listener still
-/// serves, the listener closes, in-flight requests get `drain_timeout_ms`,
-/// and the control-state poller stops.
+/// serves, the listener closes, in-flight requests get `drain_timeout_ms`
+/// and are then cancelled (at most `SHUTDOWN_SETTLE` more to release their
+/// slots), and the control-state poller stops (at most `SHUTDOWN_SETTLE`).
 pub async fn run_gateway(
     args: Vec<OsString>,
     shutdown: impl Future<Output = std::io::Result<()>> + Send,
@@ -219,6 +233,7 @@ pub async fn run_gateway(
         client,
         upstream_timeout: upstream,
         draining: AtomicBool::new(false),
+        cancel: tokio::sync::watch::Sender::new(false),
         in_flight: Arc::new(Semaphore::new(file.max_in_flight)),
         buckets: Buckets::new(file.max_buckets),
         max_request_bytes: file.max_request_bytes,
@@ -268,15 +283,28 @@ pub async fn run_gateway(
                 Ok(Ok(Err(error))) => outcome = Err(format!("gateway_serve_failed: {error}")),
                 Ok(Err(error)) => outcome = Err(format!("gateway_serve_failed: {error}")),
                 Err(_) => {
+                    // Aborting the server task leaves its connection tasks
+                    // running, so cancel every request explicitly.
+                    gateway.cancel.send_replace(true);
+                    server.abort();
+                    let settled = matches!(
+                        tokio::time::timeout(
+                            SHUTDOWN_SETTLE,
+                            gateway.in_flight.acquire_many(file.max_in_flight as u32),
+                        )
+                        .await,
+                        Ok(Ok(_))
+                    );
                     log_stderr(
                         "warn",
                         "gateway",
-                        json!({"event":"drain_timeout","drain_timeout_ms":file.drain_timeout_ms})
-                            .to_string(),
+                        json!({"event":"drain_timeout","drain_timeout_ms":file.drain_timeout_ms,
+                            "settled":settled})
+                        .to_string(),
                     );
-                    server.abort();
                 }
             }
+            gateway.cancel.send_replace(true);
         }
         served = &mut server => {
             outcome = Err(match served {
@@ -295,9 +323,37 @@ pub async fn run_gateway(
     outcome
 }
 
-async fn stop_feed(feed: &Arc<Feed>) {
-    let feed = feed.clone();
-    let _ = tokio::task::spawn_blocking(move || feed.stop()).await;
+/// Stops the poll thread, waiting at most `settle` for a read in progress;
+/// past that the thread is left to end after its read.
+async fn stop_feed_within(feed: &Feed, settle: Duration) {
+    let Some(thread) = feed.begin_stop() else {
+        return;
+    };
+    let deadline = Instant::now() + settle;
+    while !thread.is_finished() {
+        if Instant::now() >= deadline {
+            log_stderr(
+                "warn",
+                "gateway",
+                json!({"event":"poller_stop_timeout","settle_ms":settle.as_millis() as u64})
+                    .to_string(),
+            );
+            return;
+        }
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+    let _ = thread.join();
+}
+
+async fn stop_feed(feed: &Feed) {
+    stop_feed_within(feed, SHUTDOWN_SETTLE).await;
+}
+
+/// Resolves once `cancel` is set; never if its sender is gone.
+async fn cancelled(cancel: &mut tokio::sync::watch::Receiver<bool>) {
+    if cancel.wait_for(|cancelled| *cancelled).await.is_err() {
+        std::future::pending::<()>().await;
+    }
 }
 
 struct Gateway {
@@ -305,9 +361,11 @@ struct Gateway {
     signer: Signer,
     client: reqwest::Client,
     /// Bounds connecting and waiting for the response head, then each wait
-    /// for the next piece of a streamed response.
+    /// for the next piece of a request or streamed response body.
     upstream_timeout: Duration,
     draining: AtomicBool,
+    /// Set when the drain deadline passes: every request still running ends.
+    cancel: tokio::sync::watch::Sender<bool>,
     in_flight: Arc<Semaphore>,
     buckets: Buckets,
     max_request_bytes: usize,
@@ -449,23 +507,21 @@ impl Gateway {
             .get(header::CONTENT_LENGTH)
             .and_then(|value| value.to_str().ok())
             .and_then(|value| value.parse::<u64>().ok());
-        let too_large = || {
-            ApiError::new(
-                StatusCode::PAYLOAD_TOO_LARGE,
-                "payload_too_large",
-                format!(
-                    "the request body must be complete and at most {} bytes",
-                    self.max_request_bytes
-                ),
-            )
-        };
         if declared.is_some_and(|length| length > self.max_request_bytes as u64) {
-            return Err(too_large());
+            return Err(too_large(self.max_request_bytes));
         }
-        let body = axum::body::to_bytes(body, self.max_request_bytes)
-            .await
-            .map_err(|_| too_large())?;
+        let mut cancel = self.cancel.subscribe();
+        let body = tokio::select! {
+            biased;
+            () = cancelled(&mut cancel) => {
+                return Err(drain_cancelled("request_body", target.operation, false));
+            }
+            body = receive_body(body, self.max_request_bytes, self.upstream_timeout) => body?,
+        };
         let upstream = loop {
+            if *cancel.borrow() {
+                return Err(drain_cancelled("dispatch", target.operation, false));
+            }
             let url = upstream_url(&target.endpoint, &parts.uri)?;
             let envelope = gateway::mint(
                 &self.signer,
@@ -481,15 +537,21 @@ impl Gateway {
                 HeaderName::from_static(principal_envelope::HEADER),
                 envelope.parse().map_err(super::internal)?,
             );
-            let sent = tokio::time::timeout(
-                self.upstream_timeout,
-                self.client
-                    .request(parts.method.clone(), url)
-                    .headers(headers)
-                    .body(body.clone())
-                    .send(),
-            )
-            .await;
+            let sent = tokio::select! {
+                biased;
+                // Nothing is retried after a cancel, not even a read.
+                () = cancelled(&mut cancel) => {
+                    return Err(drain_cancelled("dispatch", target.operation, true));
+                }
+                sent = tokio::time::timeout(
+                    self.upstream_timeout,
+                    self.client
+                        .request(parts.method.clone(), url)
+                        .headers(headers)
+                        .body(body.clone())
+                        .send(),
+                ) => sent,
+            };
             let (delivery, failure) = match sent {
                 Ok(Ok(upstream)) => {
                     if target.fallback.is_none()
@@ -548,18 +610,17 @@ impl Gateway {
             );
             return Err(refusal.error(target.operation));
         }
-        let (sender, receiver) = tokio::sync::mpsc::channel::<Result<Bytes, std::io::Error>>(4);
+        let (sender, receiver) = tokio::sync::mpsc::channel::<Piece>(4);
         let operation = target.operation;
         tokio::spawn(pump(
             upstream,
             sender,
             self.upstream_timeout,
+            cancel,
             permit,
             operation,
         ));
-        let mut response = Response::new(Body::from_stream(
-            tokio_stream::wrappers::ReceiverStream::new(receiver),
-        ));
+        let mut response = Response::new(Body::from_stream(Relay::new(receiver)));
         *response.status_mut() = status;
         *response.headers_mut() = headers;
         Ok(response)
@@ -579,25 +640,31 @@ fn eligible_reader(upstream: &reqwest::Response, target: &gateway::Target) -> bo
             == Some(target.binding_generation)
 }
 
-/// Copies the upstream body to the client. Each wait for the next piece gets
-/// `idle`, so a long stream is not cut off while data keeps arriving; a stall
-/// or an error ends it with an error the client sees as a truncated body.
-/// `_permit` is held until the stream ends.
+/// Copies the upstream body to the client. Each wait for the next piece, and
+/// each wait for the client to take one, gets `idle`, so a long stream is not
+/// cut off while data keeps moving. A stall, an error, a client that stops
+/// reading or a drain cancel ends the copy without `Piece::End`, which the
+/// client sees as a truncated body. `_permit` is held until the copy ends.
 async fn pump(
     mut upstream: reqwest::Response,
-    sender: tokio::sync::mpsc::Sender<Result<Bytes, std::io::Error>>,
+    sender: tokio::sync::mpsc::Sender<Piece>,
     idle: Duration,
+    mut cancel: tokio::sync::watch::Receiver<bool>,
     _permit: tokio::sync::OwnedSemaphorePermit,
     operation: Operation,
 ) {
     loop {
-        match tokio::time::timeout(idle, upstream.chunk()).await {
-            Ok(Ok(Some(chunk))) => {
-                if sender.send(Ok(chunk)).await.is_err() {
-                    return;
-                }
+        let next = tokio::select! {
+            biased;
+            () = cancelled(&mut cancel) => {
+                log_drain_cancelled("response_body", operation);
+                return;
             }
-            Ok(Ok(None)) => return,
+            next = tokio::time::timeout(idle, upstream.chunk()) => next,
+        };
+        let piece = match next {
+            Ok(Ok(Some(chunk))) => Piece::Data(chunk),
+            Ok(Ok(None)) => Piece::End,
             Ok(Err(_)) | Err(_) => {
                 log_stderr(
                     "warn",
@@ -606,12 +673,143 @@ async fn pump(
                         "operation":operation_name(operation)})
                     .to_string(),
                 );
-                let _ = sender
-                    .send(Err(std::io::Error::other("backend response cut short")))
-                    .await;
+                return;
+            }
+        };
+        let end = matches!(piece, Piece::End);
+        let delivered = tokio::select! {
+            biased;
+            () = cancelled(&mut cancel) => {
+                log_drain_cancelled("response_body", operation);
+                return;
+            }
+            delivered = tokio::time::timeout(idle, sender.send(piece)) => delivered,
+        };
+        match delivered {
+            Ok(Ok(())) if !end => {}
+            Ok(_) => return,
+            Err(_) => {
+                log_stderr(
+                    "warn",
+                    "gateway",
+                    json!({"event":"gateway_client_stalled","operation":operation_name(operation)})
+                        .to_string(),
+                );
                 return;
             }
         }
+    }
+}
+
+/// One piece of a relayed response body; only `End` finishes it cleanly.
+enum Piece {
+    Data(Bytes),
+    End,
+}
+
+/// The client's view of a relayed body: if the pump stops without `End`,
+/// the body ends with an error, so the response is never mistaken for a
+/// complete one.
+struct Relay {
+    receiver: tokio::sync::mpsc::Receiver<Piece>,
+    finished: bool,
+}
+
+impl Relay {
+    fn new(receiver: tokio::sync::mpsc::Receiver<Piece>) -> Self {
+        Self {
+            receiver,
+            finished: false,
+        }
+    }
+}
+
+impl tokio_stream::Stream for Relay {
+    type Item = Result<Bytes, std::io::Error>;
+
+    fn poll_next(
+        mut self: std::pin::Pin<&mut Self>,
+        cx: &mut std::task::Context<'_>,
+    ) -> std::task::Poll<Option<Self::Item>> {
+        use std::task::Poll;
+        if self.finished {
+            return Poll::Ready(None);
+        }
+        match self.receiver.poll_recv(cx) {
+            Poll::Pending => Poll::Pending,
+            Poll::Ready(Some(Piece::Data(bytes))) => Poll::Ready(Some(Ok(bytes))),
+            Poll::Ready(Some(Piece::End)) => {
+                self.finished = true;
+                Poll::Ready(None)
+            }
+            Poll::Ready(None) => {
+                self.finished = true;
+                Poll::Ready(Some(Err(std::io::Error::other(
+                    "backend response cut short",
+                ))))
+            }
+        }
+    }
+}
+
+fn too_large(limit: usize) -> ApiError {
+    ApiError::new(
+        StatusCode::PAYLOAD_TOO_LARGE,
+        "payload_too_large",
+        format!("the request body must be complete and at most {limit} bytes"),
+    )
+}
+
+/// Reads a request body of at most `limit` bytes, giving each wait for the
+/// next piece `idle`, so a client that stops sending cannot hold an
+/// in-flight slot.
+async fn receive_body(body: Body, limit: usize, idle: Duration) -> Result<Bytes, ApiError> {
+    use tokio_stream::StreamExt;
+    let mut stream = body.into_data_stream();
+    let mut received = Vec::new();
+    loop {
+        match tokio::time::timeout(idle, stream.next()).await {
+            Ok(None) => return Ok(Bytes::from(received)),
+            Ok(Some(Ok(piece))) => {
+                if piece.len() > limit - received.len() {
+                    return Err(too_large(limit));
+                }
+                received.extend_from_slice(&piece);
+            }
+            Ok(Some(Err(_))) => return Err(too_large(limit)),
+            Err(_) => {
+                log_stderr(
+                    "warn",
+                    "gateway",
+                    json!({"event":"request_body_timeout"}).to_string(),
+                );
+                return Err(ApiError::new(
+                    StatusCode::REQUEST_TIMEOUT,
+                    "request_body_timeout",
+                    "the request body stalled; nothing was sent",
+                ));
+            }
+        }
+    }
+}
+
+fn log_drain_cancelled(phase: &str, operation: Operation) {
+    log_stderr(
+        "warn",
+        "gateway",
+        json!({"event":"drain_cancelled","phase":phase,"operation":operation_name(operation)})
+            .to_string(),
+    );
+}
+
+/// The client error for a request cancelled at the drain deadline: a write
+/// that may have been sent is ambiguous, anything else was not completed.
+fn drain_cancelled(phase: &str, operation: Operation, sent: bool) -> ApiError {
+    log_drain_cancelled(phase, operation);
+    if sent && matches!(operation, Operation::Write) {
+        gateway::ambiguous_write()
+    } else {
+        gateway_trust::draining()
     }
 }
 
@@ -1223,6 +1421,7 @@ mod tests {
                 client: reqwest::Client::builder().no_proxy().build().unwrap(),
                 upstream_timeout: Duration::from_millis(100),
                 draining: AtomicBool::new(false),
+                cancel: tokio::sync::watch::Sender::new(false),
                 in_flight: Arc::new(Semaphore::new(8)),
                 buckets: Buckets::new(8),
                 max_request_bytes: 1024,
@@ -1235,6 +1434,15 @@ mod tests {
     }
 
     async fn routed_request(gateway: Arc<Gateway>, token: &str, write: bool) -> Response {
+        request_with_body(gateway, token, write, Body::from(r#"{"limit":3}"#)).await
+    }
+
+    async fn request_with_body(
+        gateway: Arc<Gateway>,
+        token: &str,
+        write: bool,
+        body: Body,
+    ) -> Response {
         gateway
             .forward(
                 Request::builder()
@@ -1246,7 +1454,7 @@ mod tests {
                     })
                     .header(header::AUTHORIZATION, format!("Bearer {token}"))
                     .header(header::CONTENT_TYPE, "application/json")
-                    .body(Body::from(r#"{"limit":3}"#))
+                    .body(body)
                     .unwrap(),
             )
             .await
@@ -1773,21 +1981,50 @@ mod tests {
             .unwrap()
     }
 
+    async fn next_piece(relay: &mut Relay) -> Option<Result<Bytes, std::io::Error>> {
+        tokio::time::timeout(Duration::from_secs(5), tokio_stream::StreamExt::next(relay))
+            .await
+            .expect("the relay answers promptly")
+    }
+
+    async fn error_code(response: Response) -> String {
+        let body = axum::body::to_bytes(response.into_body(), 4096)
+            .await
+            .unwrap();
+        let body: Value = serde_json::from_slice(&body).unwrap();
+        body["error"]["code"].as_str().unwrap().to_owned()
+    }
+
+    /// Waits until every slot of `semaphore` is free again.
+    async fn released(semaphore: &Semaphore, slots: usize, within: Duration) {
+        let deadline = std::time::Instant::now() + within;
+        while semaphore.available_permits() < slots {
+            assert!(
+                std::time::Instant::now() < deadline,
+                "the in-flight slot was not released"
+            );
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    }
+
     #[tokio::test]
     async fn a_streamed_body_longer_than_the_timeout_arrives_intact() {
         // 8 chunks 100 ms apart take about 800 ms, twice the 400 ms timeout;
         // no single wait comes near it.
         let upstream = trickle(8, Duration::from_millis(100), false).await;
-        let (sender, mut receiver) = tokio::sync::mpsc::channel(4);
+        let (sender, receiver) = tokio::sync::mpsc::channel::<Piece>(4);
+        let (_cancel, cancel_rx) = tokio::sync::watch::channel(false);
         tokio::spawn(pump(
             upstream,
             sender,
             Duration::from_millis(400),
+            cancel_rx,
             permit(),
             Operation::Read,
         ));
+        let mut relay = Relay::new(receiver);
         let mut body = Vec::new();
-        while let Some(piece) = receiver.recv().await {
+        while let Some(piece) = next_piece(&mut relay).await {
             body.extend_from_slice(&piece.expect("no piece fails"));
         }
         assert_eq!(body, b"abcd".repeat(8));
@@ -1796,17 +2033,215 @@ mod tests {
     #[tokio::test]
     async fn a_stalled_stream_is_cut_short_after_the_timeout() {
         let upstream = trickle(1, Duration::from_millis(10), true).await;
-        let (sender, mut receiver) = tokio::sync::mpsc::channel(4);
+        let (sender, receiver) = tokio::sync::mpsc::channel::<Piece>(4);
+        let (_cancel, cancel_rx) = tokio::sync::watch::channel(false);
         tokio::spawn(pump(
             upstream,
             sender,
             Duration::from_millis(300),
+            cancel_rx,
             permit(),
             Operation::Write,
         ));
-        assert_eq!(receiver.recv().await.unwrap().unwrap(), "abcd");
-        assert!(receiver.recv().await.unwrap().is_err());
-        assert!(receiver.recv().await.is_none());
+        let mut relay = Relay::new(receiver);
+        assert_eq!(next_piece(&mut relay).await.unwrap().unwrap(), "abcd");
+        assert!(next_piece(&mut relay).await.unwrap().is_err());
+        assert!(next_piece(&mut relay).await.is_none());
+    }
+
+    #[tokio::test]
+    async fn a_drain_cancel_cuts_a_stream_short_and_frees_its_slot() {
+        let upstream = trickle(1, Duration::from_millis(10), true).await;
+        let in_flight = Arc::new(Semaphore::new(1));
+        let (sender, receiver) = tokio::sync::mpsc::channel::<Piece>(4);
+        let (cancel, cancel_rx) = tokio::sync::watch::channel(false);
+        tokio::spawn(pump(
+            upstream,
+            sender,
+            Duration::from_secs(30),
+            cancel_rx,
+            in_flight.clone().try_acquire_owned().unwrap(),
+            Operation::Read,
+        ));
+        let mut relay = Relay::new(receiver);
+        assert_eq!(next_piece(&mut relay).await.unwrap().unwrap(), "abcd");
+        cancel.send_replace(true);
+        assert!(next_piece(&mut relay).await.unwrap().is_err());
+        assert!(next_piece(&mut relay).await.is_none());
+        released(&in_flight, 1, Duration::from_secs(2)).await;
+    }
+
+    #[tokio::test]
+    async fn a_client_that_stops_reading_frees_its_slot() {
+        let upstream = trickle(16, Duration::from_millis(5), false).await;
+        let in_flight = Arc::new(Semaphore::new(1));
+        let (sender, receiver) = tokio::sync::mpsc::channel::<Piece>(1);
+        let (_cancel, cancel_rx) = tokio::sync::watch::channel(false);
+        tokio::spawn(pump(
+            upstream,
+            sender,
+            Duration::from_millis(200),
+            cancel_rx,
+            in_flight.clone().try_acquire_owned().unwrap(),
+            Operation::Read,
+        ));
+        // The relay stays open but is never read.
+        let _relay = Relay::new(receiver);
+        released(&in_flight, 1, Duration::from_secs(2)).await;
+    }
+
+    #[tokio::test]
+    async fn a_stalled_request_body_times_out_and_frees_its_slot() {
+        let writer = upstream(
+            StatusCode::OK,
+            map(&[("x-vlite-epoch", "5")]),
+            Duration::ZERO,
+        )
+        .await;
+        let reader = upstream(StatusCode::OK, reader_headers(), Duration::ZERO).await;
+        let (mut gateway, token) = routed_gateway(
+            &writer.endpoint,
+            &reader.endpoint,
+            control_state::ReadRouting::Readers,
+        );
+        Arc::get_mut(&mut gateway).unwrap().in_flight = Arc::new(Semaphore::new(1));
+        let (body_tx, body_rx) = tokio::sync::mpsc::channel::<Result<Bytes, std::io::Error>>(1);
+        body_tx
+            .send(Ok(Bytes::from_static(b"{\"na")))
+            .await
+            .unwrap();
+        let body = Body::from_stream(tokio_stream::wrappers::ReceiverStream::new(body_rx));
+        let response = tokio::time::timeout(
+            Duration::from_secs(2),
+            request_with_body(gateway.clone(), &token, true, body),
+        )
+        .await
+        .expect("a stalled body is refused promptly");
+        assert_eq!(response.status(), StatusCode::REQUEST_TIMEOUT);
+        assert_eq!(error_code(response).await, "request_body_timeout");
+        assert!(writer.requests.lock().unwrap().is_empty());
+        drop(body_tx);
+        // The only slot is free again: the next request is not `overloaded`.
+        let response = routed_request(gateway, &token, true).await;
+        assert_eq!(response.status(), StatusCode::OK);
+        assert_eq!(writer.requests.lock().unwrap().len(), 1);
+    }
+
+    #[tokio::test]
+    async fn a_drain_cancel_refuses_a_request_still_receiving_its_body() {
+        let writer = upstream(
+            StatusCode::OK,
+            map(&[("x-vlite-epoch", "5")]),
+            Duration::ZERO,
+        )
+        .await;
+        let reader = upstream(StatusCode::OK, reader_headers(), Duration::ZERO).await;
+        let (mut gateway, token) = routed_gateway(
+            &writer.endpoint,
+            &reader.endpoint,
+            control_state::ReadRouting::Readers,
+        );
+        Arc::get_mut(&mut gateway).unwrap().upstream_timeout = Duration::from_secs(5);
+        let (body_tx, body_rx) = tokio::sync::mpsc::channel::<Result<Bytes, std::io::Error>>(1);
+        let body = Body::from_stream(tokio_stream::wrappers::ReceiverStream::new(body_rx));
+        let forwarded = tokio::spawn({
+            let gateway = gateway.clone();
+            async move { request_with_body(gateway, &token, true, body).await }
+        });
+        tokio::time::sleep(Duration::from_millis(50)).await;
+        gateway.cancel.send_replace(true);
+        let response = tokio::time::timeout(Duration::from_secs(1), forwarded)
+            .await
+            .expect("the cancel ends the request promptly")
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
+        assert_eq!(error_code(response).await, "draining");
+        assert!(writer.requests.lock().unwrap().is_empty());
+        drop(body_tx);
+    }
+
+    /// Starts a request against a backend that answers after 5 s, waits
+    /// until the backend has it, then cancels.
+    async fn cancel_after_send(write: bool) -> (Response, usize, usize) {
+        let delay = Duration::from_secs(5);
+        let writer = upstream(StatusCode::OK, map(&[("x-vlite-epoch", "5")]), delay).await;
+        let reader = upstream(StatusCode::OK, reader_headers(), delay).await;
+        let (mut gateway, token) = routed_gateway(
+            &writer.endpoint,
+            &reader.endpoint,
+            control_state::ReadRouting::Readers,
+        );
+        Arc::get_mut(&mut gateway).unwrap().upstream_timeout = Duration::from_secs(10);
+        let forwarded = tokio::spawn({
+            let gateway = gateway.clone();
+            async move { routed_request(gateway, &token, write).await }
+        });
+        let target = if write { &writer } else { &reader };
+        let deadline = std::time::Instant::now() + Duration::from_secs(5);
+        while target.requests.lock().unwrap().is_empty() {
+            assert!(
+                std::time::Instant::now() < deadline,
+                "the backend never got the request"
+            );
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+        gateway.cancel.send_replace(true);
+        let response = tokio::time::timeout(Duration::from_secs(1), forwarded)
+            .await
+            .expect("the cancel ends the request promptly")
+            .unwrap();
+        let writes = writer.requests.lock().unwrap().len();
+        let reads = reader.requests.lock().unwrap().len();
+        (response, writes, reads)
+    }
+
+    #[tokio::test]
+    async fn a_drain_cancel_after_a_write_was_sent_says_the_outcome_is_unknown() {
+        let (response, writes, reads) = cancel_after_send(true).await;
+        assert_eq!(response.status(), StatusCode::BAD_GATEWAY);
+        assert_eq!(error_code(response).await, "write_outcome_unknown");
+        assert_eq!((writes, reads), (1, 0));
+    }
+
+    #[tokio::test]
+    async fn a_drain_cancel_after_a_read_was_sent_is_not_retried_on_the_writer() {
+        let (response, writes, reads) = cancel_after_send(false).await;
+        assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
+        assert_eq!(error_code(response).await, "draining");
+        assert_eq!((writes, reads), (0, 1));
+    }
+
+    #[tokio::test]
+    async fn stopping_the_feed_does_not_wait_out_a_blocked_read() {
+        use super::super::cloud_backup::fake::{Memory, Op};
+        let memory = Arc::new(Memory::default());
+        let feed = Arc::new(
+            Feed::new(
+                control_state::Objects::new(memory.clone(), "control/state.json"),
+                60_000,
+                10,
+            )
+            .unwrap(),
+        );
+        let (entered_tx, entered_rx) = std::sync::mpsc::channel();
+        let (release_tx, release_rx) = std::sync::mpsc::channel::<()>();
+        memory.hook(Op::Get, "control/state.json", move || {
+            entered_tx.send(()).unwrap();
+            let _ = release_rx.recv();
+        });
+        feed.start(|_| {}).unwrap();
+        tokio::task::spawn_blocking(move || entered_rx.recv_timeout(Duration::from_secs(5)))
+            .await
+            .unwrap()
+            .expect("the poll thread reads");
+        let started = std::time::Instant::now();
+        stop_feed_within(&feed, Duration::from_millis(200)).await;
+        let elapsed = started.elapsed();
+        assert!(
+            elapsed >= Duration::from_millis(200) && elapsed < Duration::from_secs(2),
+            "{elapsed:?}"
+        );
+        release_tx.send(()).unwrap();
     }
 
     #[test]

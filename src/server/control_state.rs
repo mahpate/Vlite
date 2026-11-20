@@ -989,15 +989,21 @@ impl Feed {
 
     /// Stops and joins the poll thread (at most one in-flight read).
     pub(super) fn stop(&self) {
-        let worker = self
+        if let Some(thread) = self.begin_stop() {
+            let _ = thread.join();
+        }
+    }
+
+    /// Tells the poll thread to stop without waiting for it: it ends after
+    /// any read in progress. Returns the thread to join, once.
+    pub(super) fn begin_stop(&self) -> Option<std::thread::JoinHandle<()>> {
+        let (stop, thread) = self
             .worker
             .lock()
             .unwrap_or_else(PoisonError::into_inner)
-            .take();
-        if let Some((stop, thread)) = worker {
-            drop(stop);
-            let _ = thread.join();
-        }
+            .take()?;
+        drop(stop);
+        Some(thread)
     }
 }
 
@@ -1403,6 +1409,26 @@ mod tests {
         // Neither replaced nor refreshed by the regressed read.
         assert_eq!(poller.current(1_000).unwrap().generation(), 2);
         assert!(poller.current(1_001).is_err());
+    }
+
+    #[test]
+    fn begin_stop_returns_at_once_while_a_read_is_in_progress() {
+        let w = world();
+        w.objects().create(w.import(), 1).unwrap();
+        let feed = Arc::new(Feed::new(w.objects(), 60_000, 10).unwrap());
+        let (entered_tx, entered_rx) = mpsc::channel();
+        let (release_tx, release_rx) = mpsc::channel::<()>();
+        w.memory.hook(Op::Get, NAME, move || {
+            entered_tx.send(()).unwrap();
+            let _ = release_rx.recv();
+        });
+        feed.start(|_| {}).unwrap();
+        entered_rx.recv_timeout(Duration::from_secs(5)).unwrap();
+        let thread = feed.begin_stop().expect("the poll thread is running");
+        assert!(!thread.is_finished());
+        assert!(feed.begin_stop().is_none());
+        release_tx.send(()).unwrap();
+        thread.join().unwrap();
     }
 
     /// TEST-004 (library level): a revocation and a suspension published as
