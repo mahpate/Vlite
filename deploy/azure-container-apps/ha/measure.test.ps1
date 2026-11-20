@@ -150,7 +150,7 @@ try {
     foreach ($entry in @(
         @{ Measurements = @('MEAS-002','MEAS-007') }, @{ Measurements = @('MEAS-007','MEAS-002') },
         @{ Measurements = @('MEAS-001') }, @{ Measurements = @('MEAS-003') }, @{ Measurements = @('MEAS-004') },
-        @{ Measurements = @('MEAS-005') }, @{ Measurements = @('MEAS-006') }, @{ Measurements = @('MEAS-008') },
+        @{ Measurements = @('MEAS-005') }, @{ Measurements = @('MEAS-008') },
         @{ Measurements = @() }, @{ Measurements = @('meas-002') },
         @{ Tiers = @() }, @{ Tiers = @(0.3) }, @{ Tiers = @(1,1) },
         @{ ReaderPollMs = '1000'; StalenessBoundMs = '1000' },
@@ -232,6 +232,238 @@ try {
     Assert (-not ($docker -match '\beval\b')) 'Entrypoint must not use eval'
     foreach ($field in $optionFields002) {
         Assert ($docker.Contains('[ -z "${VLITE_MEAS002_' + $field[3] + ':-}" ] || set -- "$@" --')) 'Missing explicit option forwarding'
+    }
+    Assert ($docker.Contains('cargo test --locked --release --features server --lib --no-run --message-format=json')) 'Missing real MEAS-006 release lib test build'
+    Assert ($docker.Contains('test "$(wc -l < /tmp/meas006-executable)" -eq 1')) 'Artifact selection must refuse missing/ambiguous matches'
+    Assert ($docker.Contains('cp "$(cat /tmp/meas006-executable)" /usr/local/bin/vlite-meas006-tests')) 'Missing fixed executable path'
+    Assert ($docker.Contains('COPY deploy/azure-container-apps/ha/meas006-collect.sh /usr/local/bin/meas006-collect.sh')) 'Missing existing collector'
+    Assert ($docker.Contains('MEAS-006) set -- /bin/sh /usr/local/bin/meas006-collect.sh /usr/local/bin/vlite-meas006-tests ;;')) 'MEAS-006 must use the existing collector and transport'
+    Assert ($docker.Contains('if [ "${VLITE_MEAS_KIND:-MEAS-007}" != MEAS-006 ]; then')) 'MEAS-006 must not expose test diagnostics'
+
+    $options006 = $options.Clone(); $options006.Measurements = @('MEAS-006')
+    $options006.SubscriptionId = 'never-print-this-subscription'
+    $output006 = @(Invoke-VLiteMeas -Options $options006 6>&1)
+    $plan006 = @($output006 | Where-Object { $_ -isnot [Management.Automation.InformationRecord] })
+    Assert (($plan006.Step -join ',') -ceq 'CheckGroup,CheckRegistryName,CheckStorageName,CreateGroup,CreateRegistry,BuildImage,CreateIdentity,GrantPull,CreateStorage,CreateCoordinationContainer,GrantBlob,CreateEnvironment,CreateJob,StartJob,PollExecution,ReadLogs,QueryLogs,DeleteGroup,WaitDeleted') 'MEAS-006 plan order differs'
+    Assert (-not (($output006 | Out-String).Contains($options006.SubscriptionId))) 'MEAS-006 printed plan leaked subscription'
+    $script006 = @(& (Join-Path $PSScriptRoot 'measure.ps1') @options006 6>$null)
+    Assert (($script006.Step -join ',') -ceq ($plan006.Step -join ',')) 'MEAS-006 CLI entrypoint differs'
+    foreach ($step006 in $plan006) {
+        Assert ($step006.Arguments[-2] -ceq '--subscription' -and $step006.Arguments[-1] -ceq '<subscription>') 'MEAS-006 subscription placeholder differs'
+    }
+    $storage006 = ($plan006 | Where-Object Step -eq CreateStorage).Arguments
+    Assert (($storage006 -join ' ') -ceq 'storage account create --name vlitemeast26st --resource-group vlite-ha-meas-t26 --location westus2 --sku Standard_ZRS --kind StorageV2 --allow-shared-key-access false --allow-blob-public-access false --min-tls-version TLS1_2 --https-only true --subscription <subscription>') 'MEAS-006 storage security arguments differ'
+    $blob006 = ($plan006 | Where-Object Step -eq GrantBlob).Arguments
+    Assert (($blob006 -join ' ') -ceq 'role assignment create --assignee-object-id <principal-id> --assignee-principal-type ServicePrincipal --role Storage Blob Data Contributor --scope /subscriptions/<subscription>/resourceGroups/vlite-ha-meas-t26/providers/Microsoft.Storage/storageAccounts/vlitemeast26st/blobServices/default/containers/coordination --subscription <subscription>') 'MEAS-006 grant must be container-scoped'
+    $jobs006 = @($plan006 | Where-Object Step -eq CreateJob)
+    Assert ($jobs006.Count -eq 1 -and $jobs006[0].Cpu -eq 1 -and $jobs006[0].Memory -ceq '2Gi') 'MEAS-006 must use exactly tier 1'
+    foreach ($argument in @('vlite-meas-t26-c1', 'VLITE_MEAS_KIND=MEAS-006', 'VLITE_MEAS006=1',
+        'VLITE_MEAS006_ACA_RUN_ID=t26', 'VLITE_MEAS006_CLIENT_ID=<client-id>', 'VLITE_MEAS006_SAMPLES=100',
+        'VLITE_MEAS006_REPETITIONS=20', 'VLITE_MEAS006_INTERVAL_MS=50',
+        "VLITE_RESOURCE_SOURCE_REVISION=$('a' * 40)", 'VLITE_RESOURCE_SOURCE_DIRTY_PATHS=')) {
+        Assert ($jobs006[0].Arguments -ccontains $argument) "Missing MEAS-006 job argument: $argument"
+    }
+    foreach ($pair in @(@('--trigger-type', 'Manual'), @('--replica-timeout', '3600'), @('--replica-retry-limit', '0'),
+        @('--parallelism', '1'), @('--replica-completion-count', '1'), @('--cpu', '1'), @('--memory', '2Gi'))) {
+        $index = [Array]::IndexOf($jobs006[0].Arguments, $pair[0])
+        Assert ($index -ge 0 -and $jobs006[0].Arguments[$index + 1] -ceq $pair[1]) 'MEAS-006 job CLI shape differs'
+    }
+    $fields006 = @(@('Samples', 1L, 2000L, 'SAMPLES'), @('Repetitions', 1L, 100L, 'REPETITIONS'), @('IntervalMs', 5L, 5000L, 'INTERVAL_MS'))
+    foreach ($field in $fields006) {
+        foreach ($value in @('', '+1', "10`n", '1.5', '9223372036854775808', ($field[1] - 1), ($field[2] + 1))) {
+            $bad006 = $options006.Clone(); $bad006[$field[0]] = [string]$value
+            Assert-Throws { Test-VLiteMeasParameters $bad006 } "$($field[0]) is outside"
+        }
+        foreach ($value in @($field[1], ($field[1] + 1), ($field[2] - 1), $field[2])) {
+            $edge006 = $options006.Clone(); $edge006[$field[0]] = [string]$value
+            $edgePlan = @(New-VLiteMeasPlan (Test-VLiteMeasParameters $edge006))
+            Assert (($edgePlan | Where-Object Step -eq CreateJob).Arguments -ccontains "VLITE_MEAS006_$($field[3])=$value") 'MEAS-006 bounded value was not forwarded'
+        }
+        foreach ($legacy in @($options, $options002)) {
+            $badLegacy = $legacy.Clone(); $badLegacy[$field[0]] = '10'
+            Assert-Throws { Test-VLiteMeasParameters $badLegacy } 'not supported'
+        }
+    }
+    foreach ($entry in @(@{ AllowDirty = $true }, @{ DirtyPaths = ' M src/lib.rs' }, @{ KeepOnFailure = $true },
+        @{ Tiers = @(0.5) }, @{ Tiers = @(1, 2) }, @{ Tiers = @() }, @{ Image = 'example.invalid/probe:tag' },
+        @{ Records = '10' }, @{ DurationSecs = '60' }, @{ ResourceGroup = 'asendme-rg' },
+        @{ Identity = 'foreign' }, @{ StorageAccount = 'vlite-data' }, @{ Measurements = @('MEAS-006', 'MEAS-007') })) {
+        $bad006 = $options006.Clone()
+        foreach ($key in $entry.Keys) { $bad006[$key] = $entry[$key] }
+        Assert-Throws { Test-VLiteMeasParameters $bad006 } '.+'
+    }
+    $pinned006 = $options006.Clone(); $pinned006.Image = "example.invalid/probe@sha256:$('b' * 64)"
+    $null = Test-VLiteMeasParameters $pinned006
+
+    function New-TestDocument006 {
+        $metrics = @{}
+        foreach ($name in 'verify_before_commit', 'verify_before_ack', 'commit_then_ack') {
+            $metrics[$name] = @{ count = 100; unit = 'microseconds'; p50 = 1.0; p95 = 2.0; max = 3.0 }
+        }
+        $metrics.transfer_to_observed_fenced = @{
+            count = 20; unit = 'milliseconds'; p50 = 50.0; p95 = 51.0; max = 52.0
+            interval_ms = 50; transfer_clock = 'immediately-before-transfer-CAS'
+        }
+        return @{
+            schema = 'vlite-meas006/1'; measurement = 'MEAS-006'; scope = 'aca-blob'
+            source = @{ revision = 'a' * 40; working_tree_dirty = $false; dirty_paths = @() }
+            requested = @{ gate_samples = 100; transfer_repetitions = 20; recheck_interval_ms = 50 }
+            metrics = $metrics
+            limits = @{ claim = 'not an SLO or HA qualification'; gates = 'one writer'; transfer = 'includes CAS'
+                not_measured = @('stale_acknowledgment_window', 'clock_skew', 'slo') }
+        }
+    }
+    $config006 = Test-VLiteMeasParameters $options006
+    foreach ($mutation in @(
+        { param($d) $d.schema = 'unknown' }, { param($d) $d.scope = 'local-fake' },
+        { param($d) $d.source.revision = 'b' * 40 }, { param($d) $d.source.working_tree_dirty = $true },
+        { param($d) $d.source.dirty_paths = @(' M src/lib.rs') }, { param($d) $d.source = $null },
+        { param($d) $d.requested.gate_samples = 101 }, { param($d) $d.requested.gate_samples = '100' },
+        { param($d) $d.metrics.Remove('commit_then_ack') },
+        { param($d) $d.metrics.unknown = $d.metrics.commit_then_ack },
+        { param($d) $d.metrics.commit_then_ack.count = 0 }, { param($d) $d.metrics.commit_then_ack.p50 = $null },
+        { param($d) $d.metrics.commit_then_ack.p95 = -1 }, { param($d) $d.metrics.commit_then_ack.max = 0 },
+        { param($d) $d.metrics.transfer_to_observed_fenced.interval_ms = 51 },
+        { param($d) $d.limits.claim = 'client-secret-001' },
+        { param($d) $d.client_id = 'client-secret-001' }
+    )) {
+        $document006 = New-TestDocument006
+        & $mutation $document006
+        $bytes006 = [Text.Encoding]::UTF8.GetBytes(($document006 | ConvertTo-Json -Depth 10))
+        Assert-Throws { Assert-VLiteMeas006Evidence $bytes006 $config006 @('client-secret-001') } 'MEAS-006 evidence'
+    }
+
+    function Start-Sleep { param([int]$Seconds) }
+    foreach ($case006 in 'Success', 'ExistingGroup', 'ForeignRegistry', 'ForeignStorage', 'UnknownAvailability',
+        'ForeignGroupResponse', 'ForeignIdentity', 'ForeignStorageResponse', 'ForeignJobResponse', 'ForeignExecution',
+        'MissingClient', 'BadEvidence', 'BadChecksum', 'CleanupFailure', 'BothFailures', 'WaitFailure', 'Dirty', 'WrongRevision') {
+        $script:case006 = $case006
+        $script:delete006 = $false
+        $script:calls006 = [Collections.Generic.List[object]]::new()
+        function git {
+            $global:LASTEXITCODE = 0
+            if ($args -contains 'rev-parse') {
+                if ($script:case006 -eq 'WrongRevision') { return ('b' * 40) }
+                return ('a' * 40)
+            }
+            if ($script:case006 -eq 'Dirty') { return ' M src/lib.rs' }
+        }
+        function Invoke-VLiteMeasAz {
+            param([string[]]$Arguments, [switch]$Raw)
+            $script:calls006.Add(@($Arguments))
+            $base006 = '/subscriptions/never-print-this-subscription/resourceGroups/vlite-ha-meas-t26'
+            switch -Regex ($Arguments -join ' ') {
+                '^group exists ' {
+                    if ($script:case006 -eq 'WaitFailure' -and $script:delete006) { return $null }
+                    return ($script:case006 -eq 'ExistingGroup')
+                }
+                '^acr check-name ' { return @{ nameAvailable = ($script:case006 -ne 'ForeignRegistry') } }
+                '^storage account check-name ' {
+                    if ($script:case006 -eq 'UnknownAvailability') { return @{ nameAvailable = 'true' } }
+                    return @{ nameAvailable = ($script:case006 -ne 'ForeignStorage') }
+                }
+                '^group create ' {
+                    if ($script:case006 -eq 'ForeignGroupResponse') { return @{ id = '/subscriptions/foreign/resourceGroups/foreign' } }
+                    return @{ id = $base006 }
+                }
+                '^acr create ' { return @{ id = "$base006/providers/Microsoft.ContainerRegistry/registries/vlitemeast26" } }
+                '^acr build ' { return }
+                '^identity create ' {
+                    $id006 = "$base006/providers/Microsoft.ManagedIdentity/userAssignedIdentities/vlite-meas-t26-id"
+                    if ($script:case006 -eq 'ForeignIdentity') { $id006 = '/subscriptions/foreign/resourceGroups/foreign' }
+                    $client006 = if ($script:case006 -eq 'MissingClient') { '' } else { 'client-secret-001' }
+                    return @{ id = $id006; principalId = 'principal-001'; clientId = $client006 }
+                }
+                '^storage account create ' {
+                    if ($script:case006 -eq 'ForeignStorageResponse') { return @{ id = "$base006/providers/Microsoft.Storage/storageAccounts/foreign" } }
+                    return @{ id = "$base006/providers/Microsoft.Storage/storageAccounts/vlitemeast26st" }
+                }
+                '^storage container-rm create ' { return @{ id = "$base006/providers/Microsoft.Storage/storageAccounts/vlitemeast26st/blobServices/default/containers/coordination" } }
+                '^role assignment create ' {
+                    $i = [Array]::IndexOf($Arguments, '--assignee-object-id')
+                    Assert ($Arguments[$i + 1] -ceq 'principal-001') 'MEAS-006 role must use the identity principal'
+                    return @{ ok = $true }
+                }
+                '^containerapp env create ' {
+                    return @{ id = "$base006/providers/Microsoft.App/managedEnvironments/vlite-meas-t26-env"
+                        properties = @{ appLogsConfiguration = @{ logAnalyticsConfiguration = @{ customerId = 'workspace-001' } } } }
+                }
+                '^containerapp job create ' {
+                    Assert ($Arguments -ccontains 'VLITE_MEAS006_CLIENT_ID=client-secret-001') 'Job must receive the client ID, not principal ID'
+                    Assert ($Arguments -ccontains 'vlite-meas-t26-c1') 'Live job name differs'
+                    Assert (-not (($Arguments -join ' ') -match '<[^>]+>')) 'Live MEAS-006 job has unresolved placeholders'
+                    if ($script:case006 -eq 'ForeignJobResponse') { return @{ id = "$base006/providers/Microsoft.App/jobs/vlite-app" } }
+                    return @{ id = "$base006/providers/Microsoft.App/jobs/vlite-meas-t26-c1" }
+                }
+                '^containerapp job start ' {
+                    if ($script:case006 -eq 'ForeignExecution') { return @{ name = 'foreign-execution' } }
+                    return @{ name = 'vlite-meas-t26-c1-abc1234' }
+                }
+                '^containerapp job execution show ' { return @{ properties = @{ status = 'Succeeded' } } }
+                '^containerapp job logs show |^monitor log-analytics query ' {
+                    $d006 = New-TestDocument006
+                    if ($script:case006 -in 'BadEvidence', 'BothFailures') { $d006.limits.claim = 'client-secret-001' }
+                    $lines006 = @(New-TestLog ($d006 | ConvertTo-Json -Depth 10 -Compress))
+                    if ($script:case006 -eq 'BadChecksum') {
+                        $lines006 = @($lines006 | ForEach-Object { $_ -replace '(BEGIN )[a-f0-9]{64}', ('${1}' + ('0' * 64)) })
+                    }
+                    if ($Raw) { return $lines006 }
+                    return ,@($lines006 | ForEach-Object { @{ Log_s = $_ } })
+                }
+                '^group delete ' {
+                    $script:delete006 = $true
+                    if ($script:case006 -in 'CleanupFailure', 'BothFailures') { throw 'secret native cleanup diagnostics' }
+                    return
+                }
+                default { throw 'Unexpected MEAS-006 mock invocation' }
+            }
+        }
+        $live006 = $options006.Clone(); $live006.Plan = $false
+        $live006.OutDir = Join-Path $scratch "meas006-$case006"
+        if ($case006 -eq 'Success') { $captured006 = @(Invoke-VLiteMeas -Options $live006 *>&1) }
+        else { Assert-Throws { Invoke-VLiteMeas -Options $live006 *> $null } 'MEAS-006|already exists|Dirty working tree|CLEANUP FAILED|clean checkout HEAD' }
+        if ($case006 -in 'Dirty', 'WrongRevision') {
+            Assert ($script:calls006.Count -eq 0) 'Invalid MEAS-006 provenance must fail before Azure'
+            continue
+        }
+        if ($case006 -in 'ExistingGroup', 'ForeignRegistry', 'ForeignStorage', 'UnknownAvailability') {
+            Assert (-not $script:delete006) 'Preexisting/foreign resources must not be deleted'
+            Assert (@($script:calls006 | Where-Object { $_ -contains 'create' }).Count -eq 0) 'Preflight refusal must not mutate resources'
+            continue
+        }
+        Assert $script:delete006 'MEAS-006 must always request deletion'
+        $saved006 = Get-Content -Raw (Join-Path $live006.OutDir 'summary.json')
+        $summary006 = $saved006 | ConvertFrom-Json
+        $expectedFailed006 = switch ($case006) {
+            'ForeignGroupResponse' { 'CreateGroup' }
+            { $_ -in 'ForeignIdentity', 'MissingClient' } { 'CreateIdentity' }
+            'ForeignStorageResponse' { 'CreateStorage' }
+            'ForeignJobResponse' { 'CreateJob' }
+            'ForeignExecution' { 'StartJob' }
+            { $_ -in 'BadEvidence', 'BadChecksum', 'BothFailures' } { 'ReadLogs' }
+            default { $null }
+        }
+        Assert ($summary006.failedStep -ceq $expectedFailed006) 'MEAS-006 measurement failure must be separate'
+        Assert ($summary006.requested.Samples -eq 100 -and $summary006.requested.Repetitions -eq 20 -and
+            $summary006.requested.IntervalMs -eq 50) 'MEAS-006 summary must record effective options'
+        $expectedMeasurement006 = if ($expectedFailed006) { 'Failed' } else { 'Succeeded' }
+        Assert ($summary006.measurementStatus -ceq $expectedMeasurement006) 'MEAS-006 cleanup must not overwrite measurement status'
+        $expectedCleanup006 = if ($case006 -in 'CleanupFailure', 'BothFailures', 'WaitFailure') { 'Failed' } else { 'Deleted' }
+        Assert ($summary006.cleanupStatus -ceq $expectedCleanup006) 'MEAS-006 cleanup status differs'
+        $expectedCleanupStep006 = if ($case006 -eq 'WaitFailure') { 'WaitDeleted' } elseif ($expectedCleanup006 -eq 'Failed') { 'DeleteGroup' } else { $null }
+        Assert ($summary006.cleanupFailedStep -ceq $expectedCleanupStep006) 'MEAS-006 cleanup failure step differs'
+        $evidencePath006 = Join-Path $live006.OutDir 'MEAS-006-c1.json'
+        if ($expectedFailed006) { Assert (-not (Test-Path $evidencePath006)) 'Invalid MEAS-006 evidence must not be saved' }
+        else {
+            $evidence006 = Get-Content -Raw $evidencePath006
+            $doc006 = $evidence006 | ConvertFrom-Json
+            Assert ($doc006.schema -ceq 'vlite-meas006/1' -and @($doc006.metrics.PSObject.Properties).Count -eq 4) 'MEAS-006 JSON document differs'
+        }
+        foreach ($private006 in 'client-secret-001', 'principal-001', 'workspace-001', $live006.SubscriptionId) {
+            Assert (-not $saved006.Contains($private006)) 'MEAS-006 summary leaked private identifiers'
+            Assert (-not (($captured006 | Out-String).Contains($private006))) 'MEAS-006 console leaked private identifiers'
+            if (Test-Path $evidencePath006) { Assert (-not $evidence006.Contains($private006)) 'MEAS-006 evidence leaked private identifiers' }
+        }
     }
 
     foreach ($failureCase in @(

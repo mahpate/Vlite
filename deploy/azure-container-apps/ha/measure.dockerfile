@@ -15,6 +15,10 @@ COPY benchmarks/ha_reader_strategies.rs ./benchmarks/ha_reader_strategies.rs
 COPY benchmarks/ha_reader_resource.rs ./benchmarks/ha_reader_resource.rs
 COPY benchmarks/ha_reader_resource_tests.rs ./benchmarks/ha_reader_resource_tests.rs
 COPY benchmarks/ha_meas002.rs ./benchmarks/ha_meas002.rs
+COPY benchmarks/ha_meas004.rs ./benchmarks/ha_meas004.rs
+COPY benchmarks/ha_meas005.rs ./benchmarks/ha_meas005.rs
+COPY benchmarks/ha_gateway_support.rs ./benchmarks/ha_gateway_support.rs
+COPY deploy/azure-container-apps/ha/meas006-collect.sh /usr/local/bin/meas006-collect.sh
 COPY bindings/c ./bindings/c
 COPY crates ./crates
 ARG VLITE_RESOURCE_SOURCE_REVISION
@@ -25,6 +29,13 @@ RUN test "${#VLITE_RESOURCE_SOURCE_REVISION}" -eq 40 \
     && printf '%s\n' "$VLITE_RESOURCE_SOURCE_REVISION" | grep -Eq '^[0-9a-f]{40}$' \
     && cargo build --locked --release --features json --example ha-reader-apply \
     && cargo build --locked --release --features server --bin vlite-server --example ha-meas002
+RUN cargo test --locked --release --features server --lib --no-run --message-format=json > /tmp/meas006-artifacts.json \
+    && sed -n '/"reason":"compiler-artifact"/{ /"kind":\["lib"\]/{ /"name":"vlite"/{ /"test":true/s/.*"executable":"\(\/app\/target\/release\/deps\/vlite-[0-9a-f]*\)".*/\1/p; }; }; }' /tmp/meas006-artifacts.json > /tmp/meas006-executable \
+    && test "$(wc -l < /tmp/meas006-executable)" -eq 1 \
+    && test -x "$(cat /tmp/meas006-executable)" \
+    && cp "$(cat /tmp/meas006-executable)" /usr/local/bin/vlite-meas006-tests \
+    && chmod 755 /usr/local/bin/meas006-collect.sh \
+    && rm /tmp/meas006-artifacts.json /tmp/meas006-executable
 RUN printf '%s\n' \
     '#!/bin/sh' \
     'set -eu' \
@@ -32,6 +43,7 @@ RUN printf '%s\n' \
     'trap '\''rm -rf "$work"'\'' EXIT HUP INT TERM' \
     'case "${VLITE_MEAS_KIND:-MEAS-007}" in' \
     '  MEAS-007) set -- /app/target/release/examples/ha-reader-apply --resource-evidence ;;' \
+    '  MEAS-006) set -- /bin/sh /usr/local/bin/meas006-collect.sh /usr/local/bin/vlite-meas006-tests ;;' \
     '  MEAS-002)' \
     '    if ! printf "%s" "${VLITE_MEAS002_TARGET_B64:-}" | base64 -d >"$work/target.json"; then' \
     '      printf "VLITE-MEAS FAILED 2\n"; exit 2' \
@@ -56,7 +68,7 @@ RUN printf '%s\n' \
     'else' \
     '  code=$?' \
     '  printf "VLITE-MEAS FAILED %s\n" "$code"' \
-    '  tail -n 50 "$work/err" | sed "s/^/VLITE-MEAS-ERR /"' \
+    '  if [ "${VLITE_MEAS_KIND:-MEAS-007}" != MEAS-006 ]; then tail -n 50 "$work/err" | sed "s/^/VLITE-MEAS-ERR /"; fi' \
     '  exit "$code"' \
     'fi' \
     > /usr/local/bin/vlite-meas \
