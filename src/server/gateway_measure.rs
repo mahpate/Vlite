@@ -245,7 +245,16 @@ fn bootstrap(config: Bootstrap) -> Result<Value, String> {
         .output_dir
         .parent()
         .ok_or("measurement_output_invalid")?;
-    let stage = tempfile::tempdir_in(parent).map_err(|_| "measurement_output_invalid")?;
+    let mut stage = tempfile::Builder::new();
+    // The published directory holds secrets; create it private, not umask-derived.
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        stage.permissions(std::fs::Permissions::from_mode(0o700));
+    }
+    let stage = stage
+        .tempdir_in(parent)
+        .map_err(|_| "measurement_output_invalid")?;
     let root = &config.output_dir;
     let local = stage.path();
     std::fs::create_dir(local.join("admin")).map_err(|_| "measurement_write_failed")?;
