@@ -15,6 +15,9 @@ param(
     [string]$StalenessBoundMs,
     [string]$ReaderPollMs,
     [string]$ObserveMs,
+    [string]$Samples,
+    [string]$Repetitions,
+    [string]$IntervalMs,
     [string]$OutDir,
     [string]$Image,
     [string]$SourceRevision,
@@ -37,6 +40,7 @@ function Test-VLiteMeasParameters([hashtable]$Options) {
         SubscriptionId = ''; Location = 'westus2'; Id = ([guid]::NewGuid().ToString('N').Substring(0, 8))
         Measurements = @('MEAS-007'); Tiers = @(0.5, 1, 2); Records = ''; Delta = ''; Dimensions = ''
         DurationSecs = ''; Rate = ''; ArchiveIntervalSecs = ''; StalenessBoundMs = ''; ReaderPollMs = ''; ObserveMs = ''
+        Samples = ''; Repetitions = ''; IntervalMs = ''
         OutDir = ''; Image = ''; SourceRevision = ''; AllowDirty = $false; KeepOnFailure = $false
         Plan = $false; DirtyPaths = ''
     }
@@ -50,16 +54,38 @@ function Test-VLiteMeasParameters([hashtable]$Options) {
     }
     if ([string]::IsNullOrWhiteSpace($config.Location)) { throw 'Location is required.' }
     $config.Measurements = @($config.Measurements)
-    if ($config.Measurements.Count -ne 1 -or $config.Measurements[0] -cnotin @('MEAS-007', 'MEAS-002')) {
-        throw 'Requested measurements are not implemented; select only MEAS-007 or MEAS-002.'
+    if ($config.Measurements.Count -ne 1 -or $config.Measurements[0] -cnotin @('MEAS-007', 'MEAS-002', 'MEAS-006')) {
+        throw 'Requested measurements are not implemented; select only MEAS-007, MEAS-002 or MEAS-006.'
     }
     $meas002 = $config.Measurements[0] -ceq 'MEAS-002'
+    $meas006 = $config.Measurements[0] -ceq 'MEAS-006'
+    foreach ($field in @(@('Samples', 1L, 2000L, 100L), @('Repetitions', 1L, 100L, 20L), @('IntervalMs', 5L, 5000L, 50L))) {
+        $name = $field[0]
+        if ($Options.ContainsKey($name)) {
+            if (-not $meas006) { throw "$name is not supported for the selected measurement." }
+            $number = 0L
+            if ([string]$config[$name] -cnotmatch '\A[0-9]+\z' -or
+                -not [long]::TryParse([string]$config[$name], [ref]$number) -or
+                $number -lt $field[1] -or $number -gt $field[2]) { throw "$name is outside the probe limits." }
+            $config[$name] = $number
+        } elseif ($meas006) { $config[$name] = $field[3] }
+    }
+    if ($meas006) {
+        if ($config.AllowDirty -or $config.DirtyPaths) { throw 'MEAS-006 requires clean source; AllowDirty is not supported.' }
+        if ($config.KeepOnFailure) { throw 'KeepOnFailure is not supported for MEAS-006.' }
+        if (-not $Options.ContainsKey('Tiers')) { $config.Tiers = @(1) }
+        if (@($config.Tiers).Count -ne 1 -or $config.Tiers[0] -ne 1) { throw 'MEAS-006 requires exactly tier 1.' }
+        if ($config.Image -and $config.Image -cnotmatch '@sha256:[a-f0-9]{64}\z') {
+            throw 'MEAS-006 Image must be pinned by digest.'
+        }
+    }
     $stalenessFields = @(
         @('DurationSecs', 60L, 3600L, 360L), @('Rate', 1L, 200L, 20L),
         @('ArchiveIntervalSecs', 60L, 86400L, 60L), @('StalenessBoundMs', 1000L, 3600000L, 300000L),
         @('ReaderPollMs', 100L, 60000L, 1000L), @('ObserveMs', 50L, 5000L, 100L)
     )
-    $refusedFields = if ($meas002) { @('Records', 'Delta', 'Dimensions') } else { @($stalenessFields | ForEach-Object { $_[0] }) }
+    $refusedFields = if ($meas006) { @('Records', 'Delta', 'Dimensions') + @($stalenessFields | ForEach-Object { $_[0] }) }
+        elseif ($meas002) { @('Records', 'Delta', 'Dimensions') } else { @($stalenessFields | ForEach-Object { $_[0] }) }
     foreach ($name in $refusedFields) {
         if ($Options.ContainsKey($name)) { throw "$name is not supported for the selected measurement." }
     }
@@ -168,6 +194,10 @@ function New-VLiteMeasPlan([hashtable]$Config) {
         }
     }
     Step 'CheckGroup' @('group', 'exists', '--name', $rg)
+    if ($Config.Measurements[0] -ceq 'MEAS-006') {
+        Step 'CheckRegistryName' @('acr', 'check-name', '--name', $Config.Registry)
+        Step 'CheckStorageName' @('storage', 'account', 'check-name', '--name', $Config.StorageAccount)
+    }
     Step 'CreateGroup' @('group', 'create', '--name', $rg, '--location', $Config.Location, '--tags',
         "vliteMeasurement=$($Config.Id)", 'vliteMeasurementOwner=ha-harness', "vliteMeasurementExpires=$expires")
     Step 'CreateRegistry' @('acr', 'create', '--name', $Config.Registry, '--resource-group', $rg,
@@ -200,6 +230,17 @@ function New-VLiteMeasPlan([hashtable]$Config) {
             '--assignee-principal-type', 'ServicePrincipal', '--role', 'Storage Blob Data Contributor',
             '--scope', "$base/providers/Microsoft.Storage/storageAccounts/$($Config.StorageAccount)")
     }
+    if ($Config.Measurements[0] -ceq 'MEAS-006') {
+        Step 'CreateStorage' @('storage', 'account', 'create', '--name', $Config.StorageAccount,
+            '--resource-group', $rg, '--location', $Config.Location, '--sku', 'Standard_ZRS', '--kind', 'StorageV2',
+            '--allow-shared-key-access', 'false', '--allow-blob-public-access', 'false',
+            '--min-tls-version', 'TLS1_2', '--https-only', 'true')
+        Step 'CreateCoordinationContainer' @('storage', 'container-rm', 'create', '--storage-account', $Config.StorageAccount,
+            '--resource-group', $rg, '--name', 'coordination')
+        Step 'GrantBlob' @('role', 'assignment', 'create', '--assignee-object-id', '<principal-id>',
+            '--assignee-principal-type', 'ServicePrincipal', '--role', 'Storage Blob Data Contributor',
+            '--scope', "$base/providers/Microsoft.Storage/storageAccounts/$($Config.StorageAccount)/blobServices/default/containers/coordination")
+    }
     Step 'CreateEnvironment' @('containerapp', 'env', 'create', '--name', $Config.Environment,
         '--resource-group', $rg, '--location', $Config.Location, '--enable-workload-profiles', 'true')
     foreach ($tier in $Config.Tiers) {
@@ -219,6 +260,12 @@ function New-VLiteMeasPlan([hashtable]$Config) {
             )) {
                 if ([string]$Config[$field[0]] -ne '') { $envVars += "VLITE_MEAS002_$($field[1])=$($Config[$field[0]])" }
             }
+        }
+        if ($Config.Measurements[0] -ceq 'MEAS-006') {
+            $envVars += @('VLITE_MEAS_KIND=MEAS-006', 'VLITE_MEAS006=1',
+                "VLITE_MEAS006_ACA_RUN_ID=$($Config.Id)", 'VLITE_MEAS006_CLIENT_ID=<client-id>',
+                "VLITE_MEAS006_SAMPLES=$($Config.Samples)", "VLITE_MEAS006_REPETITIONS=$($Config.Repetitions)",
+                "VLITE_MEAS006_INTERVAL_MS=$($Config.IntervalMs)")
         }
         foreach ($field in 'Records', 'Delta', 'Dimensions') {
             if ([string]$Config[$field] -ne '') { $envVars += "VLITE_RESOURCE_$($field.ToUpperInvariant())=$($Config[$field])" }
@@ -375,19 +422,94 @@ function Get-VLiteMeasEvidence([string[]]$ConsoleArguments, [string[]]$QueryArgu
     throw "Unable to collect verified measurement evidence: $lastFailure"
 }
 
+function Assert-VLiteMeas006Evidence([byte[]]$Bytes, [hashtable]$Config, [string[]]$PrivateValues) {
+    $document = [Text.Encoding]::UTF8.GetString($Bytes) | ConvertFrom-Json -AsHashtable
+    function Keys($Object, [string[]]$Expected) {
+        if ($Object -isnot [Collections.IDictionary] -or
+            (($Object.Keys | Sort-Object) -join ',') -cne (($Expected | Sort-Object) -join ',')) {
+            throw 'MEAS-006 evidence has an invalid schema.'
+        }
+    }
+    Keys $document @('schema', 'measurement', 'scope', 'source', 'requested', 'metrics', 'limits')
+    if ($document.schema -cne 'vlite-meas006/1' -or $document.measurement -cne 'MEAS-006' -or
+        $document.scope -cne 'aca-blob') { throw 'MEAS-006 evidence has an invalid schema or scope.' }
+    $canonical = $document | ConvertTo-Json -Depth 20 -Compress
+    foreach ($value in $PrivateValues) {
+        if ($value -and $canonical.Contains($value, [StringComparison]::OrdinalIgnoreCase)) {
+            throw 'MEAS-006 evidence contains private identifiers.'
+        }
+    }
+    Keys $document.source @('revision', 'working_tree_dirty', 'dirty_paths')
+    if ($document.source.revision -cne $Config.SourceRevision -or
+        $document.source.working_tree_dirty -isnot [bool] -or $document.source.working_tree_dirty -or
+        $document.source.dirty_paths -isnot [array] -or $document.source.dirty_paths.Count -ne 0) {
+        throw 'MEAS-006 evidence provenance differs from the clean pinned source.'
+    }
+    Keys $document.requested @('gate_samples', 'transfer_repetitions', 'recheck_interval_ms')
+    foreach ($field in @(@('gate_samples', 'Samples'), @('transfer_repetitions', 'Repetitions'), @('recheck_interval_ms', 'IntervalMs'))) {
+        $value = $document.requested[$field[0]]
+        if ($value -isnot [long] -or $value -ne $Config[$field[1]]) { throw 'MEAS-006 evidence requested settings differ.' }
+    }
+    $metrics = @('verify_before_commit', 'verify_before_ack', 'commit_then_ack', 'transfer_to_observed_fenced')
+    Keys $document.metrics $metrics
+    foreach ($name in $metrics) {
+        $metric = $document.metrics[$name]
+        $transfer = $name -ceq 'transfer_to_observed_fenced'
+        $keys = @('unit', 'count', 'p50', 'p95', 'max')
+        if ($transfer) { $keys += @('interval_ms', 'transfer_clock') }
+        Keys $metric $keys
+        $count = if ($transfer) { $Config.Repetitions } else { $Config.Samples }
+        $unit = if ($transfer) { 'milliseconds' } else { 'microseconds' }
+        if ($metric.count -isnot [long] -or $metric.count -ne $count -or $metric.unit -cne $unit) {
+            throw 'MEAS-006 evidence has incomplete metric samples.'
+        }
+        foreach ($key in 'p50', 'p95', 'max') {
+            if (($metric[$key] -isnot [long] -and $metric[$key] -isnot [double]) -or
+                -not [double]::IsFinite($metric[$key]) -or $metric[$key] -lt 0) {
+                throw 'MEAS-006 evidence has invalid metric observations.'
+            }
+        }
+        if ($metric.p50 -gt $metric.p95 -or $metric.p95 -gt $metric.max -or
+            ($transfer -and ($metric.interval_ms -isnot [long] -or $metric.interval_ms -ne $Config.IntervalMs -or
+                $metric.transfer_clock -cne 'immediately-before-transfer-CAS'))) {
+            throw 'MEAS-006 evidence has inconsistent metric observations.'
+        }
+    }
+    Keys $document.limits @('claim', 'not_measured', 'gates', 'transfer')
+    foreach ($key in 'claim', 'gates', 'transfer') {
+        if ($document.limits[$key] -isnot [string] -or [string]::IsNullOrWhiteSpace($document.limits[$key])) {
+            throw 'MEAS-006 evidence lacks measurement limits.'
+        }
+    }
+    if ($document.limits.not_measured -isnot [array] -or
+        ($document.limits.not_measured -join ',') -cne 'stale_acknowledgment_window,clock_skew,slo') {
+        throw 'MEAS-006 evidence lacks measurement limits.'
+    }
+}
+
 function Invoke-VLiteMeas([hashtable]$Options) {
     $config = Test-VLiteMeasParameters $Options
+    $meas006 = $config.Measurements[0] -ceq 'MEAS-006'
     if (-not $config.SourceRevision) {
         $revision = & git -C $script:VLiteMeasRepository rev-parse HEAD 2>$null
         if ($LASTEXITCODE -ne 0 -or $revision -cnotmatch '\A[0-9a-f]{40}\z') { throw 'Cannot determine source revision.' }
         $config.SourceRevision = [string]$revision
     }
     if (-not $config.Plan) {
+        if ($meas006) {
+            $head = & git -C $script:VLiteMeasRepository rev-parse HEAD 2>$null
+            if ($LASTEXITCODE -ne 0 -or $head -cnotmatch '\A[0-9a-f]{40}\z' -or $head -cne $config.SourceRevision) {
+                throw 'MEAS-006 SourceRevision must match the clean checkout HEAD.'
+            }
+        }
         $dirty = @(& git -C $script:VLiteMeasRepository status --porcelain --untracked-files=all 2>$null)
         if ($LASTEXITCODE -ne 0) { throw 'Cannot determine source dirty paths.' }
         # The probe expects newline-separated porcelain entries; the clean value is empty.
         $config.DirtyPaths = $dirty -join "`n"
-        if ($dirty.Count -gt 0 -and -not $config.AllowDirty) { throw 'Dirty working tree; pass -AllowDirty to record it explicitly.' }
+        if ($dirty.Count -gt 0 -and -not $config.AllowDirty) {
+            if ($meas006) { throw 'Dirty working tree; MEAS-006 requires clean pinned source.' }
+            throw 'Dirty working tree; pass -AllowDirty to record it explicitly.'
+        }
     }
     $steps = @(New-VLiteMeasPlan $config)
     if ($config.Plan) {
@@ -399,19 +521,52 @@ function Invoke-VLiteMeas([hashtable]$Options) {
     function Arguments($Step, [string]$Execution = '', [string]$Workspace = '', [string]$Principal = '') {
         @($Step.Arguments | ForEach-Object {
             $_.Replace('<subscription>', $config.SubscriptionId).Replace('<execution>', $Execution).
-                Replace('<workspace-id>', $Workspace).Replace('<principal-id>', $Principal).Replace('<target-b64>', $targetB64)
+                Replace('<workspace-id>', $Workspace).Replace('<principal-id>', $Principal).
+                Replace('<target-b64>', $targetB64).Replace('<client-id>', $clientId)
         })
     }
+    function Invoke-ResourceStep($Step) {
+        $result = Invoke-VLiteMeasAz (Arguments $Step)
+        if ($meas006) {
+            $base = "/subscriptions/$($config.SubscriptionId)/resourceGroups/$($config.ResourceGroup)"
+            $expected = switch ($Step.Step) {
+                'CreateGroup' { $base }
+                'CreateRegistry' { "$base/providers/Microsoft.ContainerRegistry/registries/$($config.Registry)" }
+                'CreateIdentity' { "$base/providers/Microsoft.ManagedIdentity/userAssignedIdentities/$($config.Identity)" }
+                'CreateStorage' { "$base/providers/Microsoft.Storage/storageAccounts/$($config.StorageAccount)" }
+                'CreateCoordinationContainer' { "$base/providers/Microsoft.Storage/storageAccounts/$($config.StorageAccount)/blobServices/default/containers/coordination" }
+                'CreateEnvironment' { "$base/providers/Microsoft.App/managedEnvironments/$($config.Environment)" }
+                'CreateJob' { "$base/providers/Microsoft.App/jobs/vlite-meas-$($config.Id)-c1" }
+            }
+            if ($expected -and ($result -isnot [Collections.IDictionary] -or $result.id -ine $expected)) {
+                throw 'MEAS-006 resource response is missing its expected ID or references a foreign resource.'
+            }
+        }
+        return $result
+    }
     $targetB64 = ''
+    $clientId = ''
     $exists = Invoke-VLiteMeasAz (Arguments $steps[0])
     if ($exists -isnot [bool]) { throw 'Group existence check did not return a boolean.' }
     if ($exists) { throw 'Measurement resource group already exists; refusing to reuse or delete it.' }
+    if ($meas006) {
+        foreach ($check in $steps | Where-Object { $_.Step -in 'CheckRegistryName', 'CheckStorageName' }) {
+            $availability = Invoke-VLiteMeasAz (Arguments $check)
+            if ($availability.nameAvailable -isnot [bool] -or -not $availability.nameAvailable) {
+                throw 'MEAS-006 resource name is unavailable; refusing preexisting or foreign resources.'
+            }
+        }
+    }
     $null = [IO.Directory]::CreateDirectory($config.OutDir)
     $summary = [ordered]@{
         measurement = $config.Measurements[0]; sourceRevision = $config.SourceRevision
         dirty = [bool]$config.DirtyPaths; resourceGroup = $config.ResourceGroup
         status = 'Running'; cleanupStatus = 'Pending'; results = [Collections.Generic.List[object]]::new()
         failedStep = $null; cleanupFailedStep = $null
+    }
+    if ($meas006) {
+        $summary.measurementStatus = 'Running'
+        $summary.requested = [ordered]@{ Samples = $config.Samples; Repetitions = $config.Repetitions; IntervalMs = $config.IntervalMs }
     }
     $failed = $true; $principal = ''; $workspace = ''; $execution = ''; $current = $null
     try {
@@ -420,20 +575,22 @@ function Invoke-VLiteMeas([hashtable]$Options) {
                 'DeleteGroup' { continue }
                 'WaitDeleted' { continue }
                 'QueryLogs' { continue }
+                'CheckRegistryName' { continue }
+                'CheckStorageName' { continue }
                 'CreateIdentity' {
-                    $identity = Invoke-VLiteMeasAz (Arguments $step)
+                    $identity = Invoke-ResourceStep $step
                     $principal = [string]$identity.principalId
                     if (-not $principal) { throw 'Created identity lacks a principal ID.' }
-                    if ($config.Measurements[0] -ceq 'MEAS-002') {
+                    if ($config.Measurements[0] -ceq 'MEAS-002' -or $meas006) {
                         $clientId = [string]$identity.clientId
                         if (-not $clientId) { throw 'Created identity lacks a client ID.' }
-                        $targetB64 = New-VLiteMeas002Target $config $clientId
+                        if (-not $meas006) { $targetB64 = New-VLiteMeas002Target $config $clientId }
                     }
                 }
                 'GrantPull' { $null = Invoke-VLiteMeasAz (Arguments $step -Principal $principal) }
                 'GrantBlob' { $null = Invoke-VLiteMeasAz (Arguments $step -Principal $principal) }
                 'CreateEnvironment' {
-                    $environment = Invoke-VLiteMeasAz (Arguments $step)
+                    $environment = Invoke-ResourceStep $step
                     $workspace = [string]$environment.properties.appLogsConfiguration.logAnalyticsConfiguration.customerId
                     if (-not $workspace) { throw 'Created environment lacks its Log Analytics workspace ID.' }
                 }
@@ -444,7 +601,7 @@ function Invoke-VLiteMeas([hashtable]$Options) {
                         sourceRevision = $config.SourceRevision; dirty = [bool]$config.DirtyPaths
                     }
                     $summary.results.Add($current)
-                    $null = Invoke-VLiteMeasAz (Arguments $step)
+                    $null = Invoke-ResourceStep $step
                 }
                 'StartJob' {
                     for ($attempt = 0; $attempt -lt 6; $attempt++) {
@@ -452,6 +609,9 @@ function Invoke-VLiteMeas([hashtable]$Options) {
                             $started = Invoke-VLiteMeasAz (Arguments $step)
                             $execution = [string]$started.name
                             if (-not $execution) { throw 'Job start did not return an execution name.' }
+                            if ($meas006 -and $execution -cnotmatch "\Avlite-meas-$($config.Id)-c1-[a-z0-9]+\z") {
+                                throw 'MEAS-006 job start returned a foreign or invalid execution name.'
+                            }
                             break
                         } catch {
                             if ($attempt -eq 5) { throw }
@@ -472,19 +632,25 @@ function Invoke-VLiteMeas([hashtable]$Options) {
                     $null = $begin -match 'VLITE-MEAS BEGIN ([a-f0-9]{64})'
                     $current.sha256 = $Matches[1]
                     if ($current.status -ne 'Succeeded') { throw 'Measurement job did not succeed.' }
+                    if ($meas006) {
+                        Assert-VLiteMeas006Evidence $evidence.Bytes $config @($clientId, $principal, $workspace, $config.SubscriptionId)
+                    }
                     $current.fileName = "$($config.Measurements[0])-c$($step.Tier).json"
                     [IO.File]::WriteAllBytes((Join-Path $config.OutDir $current.fileName), $evidence.Bytes)
                     $summary | ConvertTo-Json -Depth 10 | Set-Content -LiteralPath (Join-Path $config.OutDir 'summary.json') -Encoding utf8
                 }
-                default { $null = Invoke-VLiteMeasAz (Arguments $step) }
+                default { $null = Invoke-ResourceStep $step }
             }
         }
         $summary.status = 'Succeeded'
+        if ($meas006) { $summary.measurementStatus = 'Succeeded' }
         $failed = $false
     } catch {
         $summary.status = 'Failed'
         $summary.failedStep = $step.Step
+        if ($meas006) { $summary.measurementStatus = 'Failed' }
         if ($null -ne $current -and $current.status -notin @('Failed', 'Stopped', 'Canceled', 'Cancelled')) { $current.status = 'Failed' }
+        if ($meas006) { throw "MEAS-006 failed at $($step.Step); diagnostics withheld." }
         throw
     } finally {
         try {
