@@ -21,6 +21,7 @@ COPY benchmarks/ha_meas005.rs ./benchmarks/ha_meas005.rs
 COPY benchmarks/ha_gateway_support.rs ./benchmarks/ha_gateway_support.rs
 COPY bindings/c ./bindings/c
 COPY crates ./crates
+COPY deploy/azure-container-apps/ha/meas006-collect.sh ./deploy/azure-container-apps/ha/meas006-collect.sh
 
 FROM source AS test
 ARG TARGETARCH
