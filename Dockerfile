@@ -94,7 +94,10 @@ RUN --mount=type=cache,target=/usr/local/cargo/registry,sharing=locked \
     && cp /gateway-measure-target/release/vlite-server /gateway-measure-target/release/examples/ha-meas004 /gateway-measure-target/release/examples/ha-meas005 /out/
 
 FROM debian:bookworm-slim AS gateway-measure
-RUN groupadd --gid 10001 vlite \
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends python3 \
+    && rm -rf /var/lib/apt/lists/* \
+    && groupadd --gid 10001 vlite \
     && useradd --uid 10001 --gid vlite --no-create-home --shell /usr/sbin/nologin vlite \
     && mkdir /measurement \
     && chown vlite:vlite /measurement \
@@ -102,6 +105,7 @@ RUN groupadd --gid 10001 vlite \
 COPY --from=gateway-measure-build /out/vlite-server /usr/local/bin/vlite-server
 COPY --from=gateway-measure-build /out/ha-meas004 /usr/local/bin/ha-meas004
 COPY --from=gateway-measure-build /out/ha-meas005 /usr/local/bin/ha-meas005
+COPY deploy/azure-container-apps/ha/measure-gateway-entrypoint.py /usr/local/bin/measure-gateway-entrypoint.py
 USER 10001:10001
 WORKDIR /measurement
 ENTRYPOINT ["/usr/local/bin/vlite-server"]

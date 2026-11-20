@@ -9,9 +9,15 @@ MEAS-002 also measures reader staleness under write load against real Blob
 Storage, and MEAS-006 measures writer-fence costs against a temporary Blob
 coordination container. **MEAS-001 and MEAS-003..005 are still refused**, as
 are combinations of measurement IDs. MEAS-004/005 have a gateway container
-runtime (`measure-gateway-entrypoint.py`) and a contract
-(`measure-gateway-contract.md`), but no orchestration harness yet; nothing
-here provisions or starts it.
+runtime (`measure-gateway-entrypoint.py`, packaged with `python3` in the
+`gateway-measure` image) and a contract (`measure-gateway-contract.md`). The
+offline Linux/WSL exact-fixture preparation (`measure-gateway-fixture.py`) is
+also in place. It bootstraps once at `/measurement/bootstrap`. It then exports
+and verifies the four role bundles and writes a private image context for that
+bootstrap's own `database.vlite`. It only plans the `az acr build`. There is
+still no live orchestration harness: nothing here provisions, builds, writes
+secrets for, or starts MEAS-004/005. Offline tests run in Linux/WSL:
+`python3 -B measure-gateway-fixture.test.py`.
 
 ## Prerequisites and command
 

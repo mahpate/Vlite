@@ -21,7 +21,8 @@ $Control = (Resolve-Path .\target\release\examples\ha-meas005.exe).Path
 
 Linux container build: `docker build --target gateway-measure -t vlite-gateway-measure .`.
 That **separate** target contains `/usr/local/bin/vlite-server`,
-`/usr/local/bin/ha-meas004`, `/usr/local/bin/ha-meas005`, runs as UID/GID 10001,
+`/usr/local/bin/ha-meas004`, `/usr/local/bin/ha-meas005`, `python3` and
+`/usr/local/bin/measure-gateway-entrypoint.py`, runs as UID/GID 10001,
 and has writable work directory `/measurement` (0700).
 It does not change the production `api` target. Docker COPY/context allowlists
 include all three benchmark sources. No examples are installed in the normal
@@ -59,9 +60,11 @@ Set these **on driver jobs and every observer app** from the source build:
 
 Configs are UTF-8 JSON, at most 65536 bytes, with unknown fields refused.
 Use absolute paths to existing mounted files, no shell expansion in JSON.
-The JSON below uses **container paths**. Native Windows JSON must use escaped
-absolute Windows paths (`C:\\measurement\\...`). Mount equivalent paths at the
-same absolute locations when distributing generated configs/manifest.
+The JSON below uses **container paths**. Bootstrap writes absolute paths into
+`gateway.json`, `trust.json` and the manifest, so the one real bootstrap runs on a
+Linux/WSL operator host at the container path `/measurement/bootstrap` (see
+"Exact shared fixture" below). Windows-path bootstrap output is not
+distributable to the containers.
 Opaque `requested` label maps accept at most 32 entries with 1..128 characters
 from `[A-Za-z0-9._-]` in keys and values. Put only nonsecret resource/settings
 labels there, never tokens or resource URLs. Endpoint origins accept only HTTP(S),
@@ -70,9 +73,10 @@ HTTP redirects/proxies/retries are disabled in load/probe clients.
 
 ## 1. Offline fixture/bootstrap
 
-Create a new private parent directory owned by the measurement user. On Windows,
-restrict its ACL before running bootstrap; Unix staging directories are 0700,
-explicit secret outputs 0600. The output directory **must not exist**. Partial
+Create a new private parent directory owned by the measurement user (for a
+distributable run: `/measurement` on the Linux operator host). Unix staging
+directories are 0700, explicit secret outputs 0600. A Windows bootstrap is only
+for local smoke and must restrict its ACL first. The output directory **must not exist**. Partial
 bootstrap contents are removed on failure. Existing directories/files are not
 replaced. The successful directory persists for the harness to distribute and
 must be deleted in harness `finally`.
@@ -158,6 +162,66 @@ epoch fencing, failover, archive/apply, reader freshness or durable writer
 restart. It does not relax any deployment gate. A harness using real authority
 must provision it with the existing authority tools and replace the directory
 before publication; preserve that difference in requested labels.
+
+### Exact shared fixture (Linux operator host)
+
+Every role must use the **same** bootstrap result: role bundles carry the files,
+and backends carry that result's own `database.vlite`. A separately bootstrapped
+database has different tenant IDs and lineage and is invalid. Prepare one run
+on Linux/WSL with Python 3, the source-revision Linux `vlite-server`, and an
+**empty** `/measurement` (0700, owned by the operator, not a symlink):
+
+```sh
+export VLITE_RESOURCE_SOURCE_REVISION=... VLITE_RESOURCE_SOURCE_DIRTY_PATHS=...
+python3 deploy/azure-container-apps/ha/measure-gateway-fixture.py prepare --plan /private/plan.json
+python3 deploy/azure-container-apps/ha/measure-gateway-fixture.py cleanup
+```
+
+The plan names `server`, `writer_url` (the run's internal writer origin, so the
+writer app environment must exist first), `audience`, `control_target`
+(account/containers/prefix; written as managed identity, no `client_id`),
+`control_object`, `generation`, `registry`, `base_image`
+(`REGISTRY.azurecr.io/REPO@sha256:DIGEST` of the `gateway-measure` image) and
+`fixture_repository`. `prepare` then does the following:
+
+1. It runs the entrypoint `bootstrap` once, at `/measurement/bootstrap`, with
+   `/measurement/control-target.json`. It never retries.
+2. It exports `driver`, `gateway`, `writer` and `reader` to
+   `/measurement/exports/ROLE.json`.
+3. It decodes each export and checks that it matches the bootstrap files byte
+   for byte: exactly the role-allowed set, with no `database.vlite`. It also
+   checks the schema, role, generation, source, the `bootstrap_dir`, and the
+   receipt's digest and size. Finally it checks that the `measurement.json`
+   fixture digest and lineage match the bootstrap fixture and manifest.
+4. It refuses a fixture that contains any generated token or signing seed.
+5. It writes a private image context, `/measurement/image/`, containing only
+   `database.vlite` (digest-verified) and this Dockerfile:
+   `FROM <base_image>` plus `COPY --chown=10001:10001 --chmod=0400 database.vlite
+   /opt/vlite-measure/fixture/database.vlite`.
+
+Its stdout is one public JSON summary. The summary holds the fixture digest,
+the export digests and paths, the conservative credential deadline (bootstrap
+start plus 2 h) and a **planned, not executed** `az acr build` into the run's
+private ACR, tagged `GENERATION-DIGEST12`. Any failure prints only
+`VLITE-MEAS FAILED 1` and a static code, then removes everything under
+`/measurement`. A non-empty root is refused and left untouched.
+
+Distribute the parts as follows:
+
+- Each role's projection goes only to that role's ACA secrets. Each role then
+  runs `restore` to `/measurement/bootstrap`.
+- Each role gets its own `control-target.json`, with its own `client_id`.
+- Writer and reader run `copy_fixture` from
+  `/opt/vlite-measure/fixture/database.vlite`, with `fixture_sha256` set to the
+  summary digest.
+- `serve` independently rechecks that digest against the restored
+  `measurement.json`.
+
+Credentials expire 2 h after issuance, so the build, the secrets, publish and
+the whole trial must finish before `credentials_expire_not_before_unix_ms`. Do
+not reuse a run. Run `cleanup` once secrets are written, and again in harness
+`finally`. Delete the fixture image with the run's ACR/resource group. Never
+push it to a public registry or copy it into evidence.
 
 Publish exactly once, **after** fixture/config distribution and **before** apps:
 
