@@ -19,7 +19,9 @@ use tokio::sync::watch;
 
 use super::{
     authority::AuthorityStore,
-    cloud_backup::{AuthMode, ObjectStore, Target, azure, fake::Memory, random_hex},
+    cloud_backup::{
+        AuthMode, Blob, Cond, ObjectStore, StoreError, Target, azure, fake::Memory, random_hex,
+    },
     writer_authority::{claim, recheck_for_measurement},
     writer_fence::{State, WriterFence},
 };
@@ -60,6 +62,65 @@ fn blob_measurement_refuses_unrelated_targets() {
     assert_eq!(aca.account, "vlitemeasrun001st");
     assert!(aca.endpoint.is_none());
     assert!(aca.validate().is_ok());
+}
+
+/// Answers `get` from a script; MEAS-006 preflight only reads.
+struct Scripted(std::sync::Mutex<(Vec<StoreError>, Vec<String>)>);
+
+impl ObjectStore for Scripted {
+    fn get(&self, name: &str, _max: u64) -> Result<Blob, StoreError> {
+        let mut state = self.0.lock().unwrap();
+        state.1.push(name.to_owned());
+        Err(state.0.remove(0))
+    }
+    fn download(&self, _: &str, _: &mut dyn Write, _: u64) -> Result<u64, StoreError> {
+        unreachable!("preflight only reads")
+    }
+    fn put(&self, _: &str, _: &[u8], _: Cond<'_>) -> Result<String, StoreError> {
+        unreachable!("preflight only reads")
+    }
+    fn put_file(&self, _: &str, _: &Path, _: Cond<'_>) -> Result<String, StoreError> {
+        unreachable!("preflight only reads")
+    }
+    fn delete(&self, _: &str) -> Result<(), StoreError> {
+        unreachable!("preflight only reads")
+    }
+    fn list(&self, _: &str) -> Result<Vec<String>, StoreError> {
+        unreachable!("preflight only reads")
+    }
+}
+
+#[test]
+fn preflight_waits_for_identity_and_role_propagation() {
+    let store = Scripted(std::sync::Mutex::new((
+        vec![
+            StoreError::Failed("managed identity token request returned HTTP 400".into()),
+            StoreError::Failed("HTTP 403 AuthorizationPermissionMismatch".into()),
+            StoreError::NotFound,
+        ],
+        Vec::new(),
+    )));
+    preflight(&store, Duration::from_secs(60), Duration::ZERO).unwrap();
+    let names = store.0.lock().unwrap().1.clone();
+    assert_eq!(names.len(), 3);
+    assert!(
+        names
+            .iter()
+            .all(|name| name.starts_with("meas006/preflight-"))
+    );
+}
+
+#[test]
+fn preflight_fails_closed_at_its_deadline() {
+    let store = Scripted(std::sync::Mutex::new((
+        vec![StoreError::Failed(
+            "HTTP 403 AuthorizationPermissionMismatch".into(),
+        )],
+        Vec::new(),
+    )));
+    let error = preflight(&store, Duration::ZERO, Duration::ZERO).unwrap_err();
+    assert!(error.contains("403"), "{error}");
+    assert_eq!(store.0.lock().unwrap().1.len(), 1);
 }
 
 const REVISION: &str = "0123456789abcdef0123456789abcdef01234567";
@@ -334,10 +395,37 @@ impl Probe {
             }
         };
         let sets = azure::connect(&target, key).map_err(|e| e.code.to_string())?;
-        Ok(Self {
-            scope,
-            objects: sets.coordination().0,
-        })
+        let objects = sets.coordination().0;
+        if scope == "aca-blob" {
+            // The job starts minutes after its identity and Blob role are granted;
+            // data-plane role assignments can take about ten minutes to apply.
+            preflight(
+                objects.as_ref(),
+                Duration::from_secs(900),
+                Duration::from_secs(15),
+            )?;
+        }
+        Ok(Self { scope, objects })
+    }
+}
+
+/// Waits until a read of a fresh, absent name is answered (404 or a body),
+/// retrying every refusal until `deadline`; it never writes.
+fn preflight(
+    objects: &dyn ObjectStore,
+    deadline: Duration,
+    interval: Duration,
+) -> Result<(), String> {
+    let name = format!("meas006/preflight-{}", random_hex().map_err(|e| e.code)?);
+    let start = Instant::now();
+    loop {
+        match objects.get(&name, 1) {
+            Ok(_) | Err(StoreError::NotFound) => return Ok(()),
+            Err(error) if start.elapsed() >= deadline => {
+                return Err(format!("MEAS-006 storage preflight: {error:?}"));
+            }
+            Err(_) => std::thread::sleep(interval),
+        }
     }
 }
 
