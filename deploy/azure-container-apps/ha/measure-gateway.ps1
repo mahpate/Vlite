@@ -649,7 +649,7 @@ function Invoke-VLiteMeasGateway([hashtable]$Config) {
         measurement = $measurement; profile = $Config.GatewayProfile; qualification = 'proposal_evidence_only'
         sourceRevision = $Config.SourceRevision; dirty = [bool]$Config.DirtyPaths; resourceGroup = $Config.ResourceGroup
         status = 'Running'; measurementStatus = 'Running'; incompleteReasons = [Collections.Generic.List[string]]::new()
-        failedStep = $null; failureReason = $null; fixtureSha256 = $null; credentialsExpireNotBeforeUnixMs = $null
+        failedStep = $null; failureReason = $null; failureDiagnostic = $null; fixtureSha256 = $null; credentialsExpireNotBeforeUnixMs = $null
         publishExecution = $null; driverExecution = $null; driverStatus = $null
         inventory = [ordered]@{ before = $null; after = $null; fixed = $false }
         evidence = [Collections.Generic.List[object]]::new()
@@ -664,11 +664,17 @@ function Invoke-VLiteMeasGateway([hashtable]$Config) {
         $summary.evidence.Add([ordered]@{ kind = $Kind; file = $Name; sha256 = $hash })
     }
     function Read-JobEvidence([string]$Prefix, [string]$Execution) {
-        $diagnostic = [ordered]@{}
+        # Static codes only; raw logs, native errors and exception text are never recorded.
+        $diagnostic = [ordered]@{ category = $null; reason = $null; jobExitCode = $null
+            consoleEvidence = 'NotQueried'; logAnalyticsEvidence = 'NotQueried'; logAnalyticsAttempts = 0 }
         try {
             return (Get-VLiteMeasEvidence (Expand "Read$Prefix" '' @{ '<execution>' = $Execution }) `
                 (Expand "Query$Prefix" '' @{ '<execution>' = $Execution; '<workspace-id>' = $workspace }) $diagnostic).Bytes
-        } catch { throw (New-VLiteMeasFailure "${Prefix}Evidence" 'Job evidence was unavailable or failed verification.') }
+        } catch {
+            if (-not $diagnostic.category) { $diagnostic.category = 'Unclassified' }
+            $summary.failureDiagnostic = $diagnostic
+            throw (New-VLiteMeasFailure "${Prefix}Evidence" 'Job evidence was unavailable or failed verification.')
+        }
     }
     function Start-Job([string]$Name, [string]$Job) {
         # No retry: publish and driver writes are unknown_do_not_retry once attempted.

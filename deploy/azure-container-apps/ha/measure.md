@@ -204,7 +204,7 @@ workspace, subscription or resource identifier:
 | `reason` | A fixed code. `FailedMarker`; `RetrievalFailed`, `ResponseShape`, `MissingBegin`, `MissingEnd` or `ChunkGap`; `DuplicateMarker`, `ChunkLength`, `Base64`, `LengthMismatch`, `ChecksumMismatch` or `PayloadDecode`; `Schema`, `PrivateIdentifier`, `Provenance`, `RequestedSettings`, `Metrics`, `Limits` or `Unclassified`; `ExecutionNotSucceeded` |
 | `jobExitCode` | The numeric exit code from the `FAILED` marker (0..255), otherwise null |
 | `consoleEvidence`, `logAnalyticsEvidence` | `NotQueried`, `Unavailable`, `Incomplete`, `IntegrityFailure`, `JobFailed` or `Verified`, for each source |
-| `logAnalyticsAttempts` | The number of Log Analytics queries made (0..12) |
+| `logAnalyticsAttempts` | The number of Log Analytics queries made (0..72) |
 
 These codes help an operator with diagnosis only. They are not measurement
 results and do not qualify the run.
@@ -379,6 +379,39 @@ The original pilot's precise lineage was not retained, so this reproduces and
 fixes a concrete cause of that refusal rather than recovering its deleted
 private metadata. ACA fixture-image and workload validation remain pending.
 
+An independent read-only check confirmed `m4fix21b` absent at
+`2026-11-21T06:29:04Z`, after the bounded observer expired. A separate cleanup
+follow-up binds the unchanged failed summary and postflight by SHA-256; deletion
+was not resubmitted. Clean `537c74d1` then passed a matching-source native build
+and real fixture/full-summary preflight with no Azure calls and an empty private
+fixture root. A single fresh pilot, `m4u64a`, started at `06:31:35Z` after account,
+source, fixture, prior-cleanup and zero-tagged-group checks.
+
+That pilot passed fixture validation, so the lineage repair worked live. The
+publish job then reached `Succeeded` by 06:45:04Z, but the run failed at
+`ReadPublish` (`failureReason: PublishEvidence`) before the driver started:
+the console read was unavailable and no Log Analytics rows were usable within
+the 12-attempt (about 2 minute) wait. The summary has empty `evidence` and
+`measurementStatus: Failed`. The fixture was removed. The group's deletion wait
+expired (`cleanupStatus: Failed` at `WaitDeleted`) while Azure was still
+deleting it; the failed summary and postflight stay unchanged and deletion is
+not resubmitted. No measurement evidence exists, and this run is not
+qualification evidence.
+
+This was the fourth live run to stop at an evidence read. Microsoft's ACA
+documentation says to expect a delay of several minutes before console logs
+are queryable, and a Q&A thread reports about 5 to 9.5 minutes (p95). The
+collector therefore now waits up to 72 attempts (about 12 minutes). Gateway
+group deletion only starts after the read gives up, so the group stays alive
+while it waits. **This ingestion-delay explanation is unverified until a live
+run confirms it**; a Log Analytics access or retention cause has not been ruled
+out. When a gateway read fails, `summary.json` now also carries a
+`failureDiagnostic` with the same static codes as MEAS-006 (`category`,
+`reason`, `jobExitCode`, `consoleEvidence`, `logAnalyticsEvidence` and
+`logAnalyticsAttempts`). It is null on success and never holds native error
+text, log lines or identifiers. These codes help an operator with diagnosis
+only and are not measurement results.
+
 The following are unverified until a live run:
 
 - ACA secret-volume behavior and limits;
@@ -416,8 +449,8 @@ arguments; cleanup does not overwrite the original failure step.
 
 There are charges for Basic ACR, remote builds, job CPU/memory, and log
 ingestion. Builds are bounded at 7,200 seconds, replicas at 3,600 seconds,
-execution polling at 4,200 seconds per tier, log fallback at 12 attempts
-(10-second intervals), and deletion polling at 600 seconds. Job starts retry
+execution polling at 4,200 seconds per tier, log fallback at 72 attempts
+(10-second intervals, about 12 minutes), and deletion polling at 600 seconds. Job starts retry
 for managed-identity role propagation. Native CLI diagnostics/build logs are
 withheld to avoid exposing credentials or subscription identifiers.
 

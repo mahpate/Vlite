@@ -133,6 +133,9 @@ function Reset-Mock([string]$Measurement, [string[]]$Dirty = @()) {
     $script:AfterReplicaSuffix = 'x'
     $script:SourceRevision = $revision
     $script:OnCall = $null
+    $script:ConsoleDownPublish = $false
+    $script:QueryReadyAfter = 0
+    $script:QueryCount = 0
     $script:PublishLog = New-Frame (Report ([ordered]@{ schema = 'vlite-meas-runtime/1'; operation = 'publish'; generation = 1
         control_state_published = $true; authority_mode = 'off'; read_routing = 'writer_only' }))
     $script:DriverLog = if ($Measurement -ceq 'MEAS-005') {
@@ -220,6 +223,7 @@ function Invoke-VLiteMeasAz {
         '^containerapp job start' { return @{ name = "$(Value '--name')-abc12" } }
         '^containerapp job execution show' { return @{ properties = @{ status = $script:JobStatus[(Value '--name')] } } }
         '^containerapp job logs show' {
+            if ($script:ConsoleDownPublish -and (Value '--name') -ceq 'vlite-meas-t26-pub') { throw 'console unavailable for completed execution' }
             if ((Value '--name') -ceq 'vlite-meas-t26-pub') { return $script:PublishLog }
             return $script:DriverLog
         }
@@ -242,7 +246,14 @@ function Invoke-VLiteMeasAz {
             if ($script:TamperObserver) { & $script:TamperObserver $observed }
             return New-Frame (Report $observed)
         }
-        '^monitor log-analytics query' { throw 'no rows' }
+        '^monitor log-analytics query' {
+            $script:QueryCount++
+            # Models Log Analytics ingestion lag: rows appear only after QueryReadyAfter empty polls.
+            if ($script:QueryReadyAfter -gt 0 -and $script:QueryCount -gt $script:QueryReadyAfter) {
+                return @($script:PublishLog | ForEach-Object { @{ Log_s = $_ } })
+            }
+            throw 'no rows'
+        }
         default { return @{ id = 'ok' } }
     }
 }
@@ -676,6 +687,38 @@ try {
     Assert (@($script:Calls | Where-Object { $_ -like 'containerapp job start*' }).Count -eq 1) 'Publish is never retried'
     Assert (-not ($script:Calls | Where-Object { $_ -like 'containerapp create*' })) 'No apps after failed publish'
     Assert-Cleaned $result 'publish-failure'
+
+    # Evidence that appears in Log Analytics late is still collected, and a read that never succeeds
+    # is bounded and leaves a static diagnostic (no raw errors or log text) in the failed summary.
+    Assert (($script:VLiteMeasLogAttempts - 1) * $script:VLiteMeasLogIntervalSecs -ge 600) 'Log Analytics wait must cover documented ingestion delay'
+    Reset-Mock 'MEAS-004'
+    $script:ConsoleDownPublish = $true
+    $script:QueryReadyAfter = 30
+    $result = Invoke-Live 'MEAS-004'
+    Assert (-not $result.Error -and $result.Summary.status -ceq 'Succeeded' -and $null -eq $result.Summary.failureDiagnostic) "Late Log Analytics evidence not collected: $($result.Error)"
+    Assert (@($script:Calls | Where-Object { $_ -like 'monitor log-analytics query*' }).Count -eq 31) 'Collector must stop polling once evidence arrives'
+    Assert-Cleaned $result 'late-evidence'
+
+    Reset-Mock 'MEAS-004'
+    $script:ConsoleDownPublish = $true
+    $result = Invoke-Live 'MEAS-004'
+    Assert ($result.Summary.failedStep -ceq 'ReadPublish' -and $result.Summary.failureReason -ceq 'PublishEvidence') 'Unavailable publish evidence fails the read step'
+    $diagnostic = $result.Summary.failureDiagnostic
+    Assert (($diagnostic.Keys | Sort-Object) -join ',' -ceq 'category,consoleEvidence,jobExitCode,logAnalyticsAttempts,logAnalyticsEvidence,reason') 'Failure diagnostic shape differs'
+    Assert ($diagnostic.category -ceq 'EvidenceUnavailable' -and $diagnostic.reason -ceq 'RetrievalFailed' -and $null -eq $diagnostic.jobExitCode -and
+        $diagnostic.consoleEvidence -ceq 'Unavailable' -and $diagnostic.logAnalyticsEvidence -ceq 'Unavailable') 'Failure diagnostic codes differ'
+    Assert ($diagnostic.logAnalyticsAttempts -eq $script:VLiteMeasLogAttempts -and $script:QueryCount -eq $script:VLiteMeasLogAttempts) 'Log Analytics polling must be bounded by the attempt limit'
+    Assert (-not ($script:Calls | Where-Object { $_ -like 'containerapp job start --name vlite-meas-t26-drv*' })) 'Driver must not start without publish evidence'
+    Assert (-not $result.SummaryText.Contains('no rows') -and -not $result.SummaryText.Contains('console unavailable')) 'Diagnostic leaked raw error text'
+    Assert-Cleaned $result 'evidence-unavailable'
+
+    Reset-Mock 'MEAS-004'
+    $script:PublishLog = @('VLITE-MEAS FAILED 7')
+    $result = Invoke-Live 'MEAS-004'
+    $diagnostic = $result.Summary.failureDiagnostic
+    Assert ($result.Summary.failureReason -ceq 'PublishEvidence' -and $diagnostic.category -ceq 'JobFailed' -and $diagnostic.jobExitCode -eq 7 -and
+        $diagnostic.consoleEvidence -ceq 'JobFailed' -and $diagnostic.logAnalyticsAttempts -eq 0) 'Probe failure marker is reported as JobFailed with its exit code'
+    Assert-Cleaned $result 'publish-marker'
 
     Reset-Mock 'MEAS-004'
     $script:DriverLog = New-Frame (Report ([ordered]@{ schema = 'vlite-meas004/1'; order = 'ABBA'; windows = @(@{ note = 'client-driver-1a2b3c' }) }))

@@ -31,6 +31,11 @@ param(
 )
 $ErrorActionPreference = 'Stop'
 $script:VLiteMeasRepository = [IO.Path]::GetFullPath((Join-Path $PSScriptRoot '..\..\..'))
+# Container Apps console logs become queryable in Log Analytics several minutes after emission
+# (documented as "several minutes"; reported up to ~10 minutes), so the collector waits ~12 minutes
+# of sleeps, plus query time, before it declares evidence unavailable. Unverified against a live run.
+$script:VLiteMeasLogAttempts = 72
+$script:VLiteMeasLogIntervalSecs = 10
 . (Join-Path $PSScriptRoot 'measure-gateway.ps1')
 
 function Assert-VLiteMeasName([string]$Name) {
@@ -450,7 +455,8 @@ function Get-VLiteMeasEvidence([string[]]$ConsoleArguments, [string[]]$QueryArgu
         Write-Warning 'Console evidence unavailable or incomplete; trying Log Analytics.'
     }
     $queryReason = $null
-    for ($attempt = 0; $attempt -lt 12; $attempt++) {
+    $attempts = $script:VLiteMeasLogAttempts
+    for ($attempt = 0; $attempt -lt $attempts; $attempt++) {
         $Diagnostic.logAnalyticsAttempts = $attempt + 1
         try {
             $result = Invoke-VLiteMeasAz $QueryArguments
@@ -475,7 +481,7 @@ function Get-VLiteMeasEvidence([string[]]$ConsoleArguments, [string[]]$QueryArgu
             $Diagnostic.logAnalyticsEvidence = $outcome
             if (Stop-OnFailedMarker $_.Exception) { throw }
             $lastFailure = $_.Exception.Message
-            if ($attempt -lt 11) { Start-Sleep -Seconds 10 }
+            if ($attempt -lt $attempts - 1) { Start-Sleep -Seconds $script:VLiteMeasLogIntervalSecs }
         }
     }
     # Evidence that arrived but failed transport verification outranks evidence that never arrived.
