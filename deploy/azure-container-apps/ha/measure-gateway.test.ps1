@@ -25,16 +25,16 @@ function ConvertTo-Gzip([byte[]]$Bytes) {
     return ,$result
 }
 function Get-Sha([byte[]]$Bytes) { [Convert]::ToHexString([Security.Cryptography.SHA256]::HashData($Bytes)).ToLowerInvariant() }
-function New-Frame([string]$Json) {
+function New-Frame([string]$Json, [string]$Tag = 'VLITE-MEAS') {
     $compressed = ConvertTo-Gzip ([Text.Encoding]::UTF8.GetBytes($Json))
     $base64 = [Convert]::ToBase64String($compressed)
-    "VLITE-MEAS BEGIN $(Get-Sha $compressed) $($compressed.Length)"
+    "$Tag BEGIN $(Get-Sha $compressed) $($compressed.Length)"
     $sequence = 0
     for ($i = 0; $i -lt $base64.Length; $i += 76) {
         $sequence++
-        "VLITE-MEAS $sequence $($base64.Substring($i, [Math]::Min(76, $base64.Length - $i)))"
+        "$Tag $sequence $($base64.Substring($i, [Math]::Min(76, $base64.Length - $i)))"
     }
-    "VLITE-MEAS END $sequence"
+    "$Tag END $sequence"
 }
 function Source { [ordered]@{ revision = $script:SourceRevision; dirty_paths = @($script:SourceDirty) } }
 function Report([Collections.IDictionary]$Fields) {
@@ -139,11 +139,20 @@ function Reset-Mock([string]$Measurement, [string[]]$Dirty = @()) {
     $script:PublishLog = New-Frame (Report ([ordered]@{ schema = 'vlite-meas-runtime/1'; operation = 'publish'; generation = 1
         control_state_published = $true; authority_mode = 'off'; read_routing = 'writer_only' }))
     $script:DriverLog = if ($Measurement -ceq 'MEAS-005') {
-        New-Frame (Report ([ordered]@{ schema = 'vlite-meas005/1'; stage = 'mutations'; complete = $true
-            mutation_and_ingress_checks_complete = $true; mutations = @() }))
+        $script:MutationJson = Report ([ordered]@{ schema = 'vlite-meas005/1'; stage = 'mutations'; complete = $true
+            mutation_and_ingress_checks_complete = $true; mutations = @() })
+        $script:CompanionJson = Report ([ordered]@{ schema = 'vlite-meas005-driver-clock/1'; scope = 'job_local_driver_process_only'
+            binding = [ordered]@{ job_name = 'vlite-meas-t26-drv'; job_execution = 'vlite-meas-t26-drv-abc12' } })
+        # The companion precedes the unchanged mutation frame; console lines may carry a prefix.
+        @(New-Frame $script:CompanionJson 'VLITE-CLOCK' | ForEach-Object { "2026-11-18T00:00:01Z $_" }) + @(New-Frame $script:MutationJson)
     } else {
         New-Frame (Report ([ordered]@{ schema = 'vlite-meas004/1'; order = 'ABBA'; windows = @(@{ rate = 5 }) }))
     }
+    $script:ClockReceipt = [ordered]@{ schema = 'vlite-meas005-driver-clock-check/1'; operation = 'check_driver_clock'
+        complete = $true; incomplete_reasons = @() }
+    $script:ClockExit = 0
+    $script:ClockRuntime = $null
+    $script:ClockCompanion = $null
     $script:AnalysisLog = New-Frame (Report ([ordered]@{ schema = 'vlite-meas005/1'; stage = 'analysis'; complete = $true; replicas = @() }))
     $script:AnalysisExit = 0
     $script:ObserverMissing = ''
@@ -182,8 +191,23 @@ function Invoke-VLiteMeasLocal([string]$FilePath, [string[]]$Arguments, [hashtab
         return @{ ExitCode = 0; Output = @('{"schema":"vlite-meas-fixture-cleanup/1","removed":true}') }
     }
     $runtimeFile = $Arguments[[array]::IndexOf($Arguments, '--config') + 1]
-    $script:AnalyzeRuntime = [IO.File]::ReadAllText($runtimeFile) | ConvertFrom-Json -AsHashtable
+    $runtime = [IO.File]::ReadAllText($runtimeFile) | ConvertFrom-Json -AsHashtable
+    $script:LocalCalls[$script:LocalCalls.Count - 1].Operation = $runtime.operation
+    # Both offline consumers must receive the exact verified mutation bytes, not re-serialized values.
+    $mutationHex = [Convert]::ToHexString((ConvertFrom-VLiteMeasLog @($script:DriverLog)))
+    if ($runtime.operation -ceq 'check_driver_clock') {
+        $script:ClockRuntime = $runtime
+        $script:ClockCompanion = [IO.File]::ReadAllText($runtime.clock_evidence_file)
+        $mutationBytes = [IO.File]::ReadAllBytes($runtime.mutation_evidence_file)
+        Assert ([Convert]::ToHexString($mutationBytes) -ceq $mutationHex) 'Clock check must receive the exact mutation evidence bytes'
+        $receipt = [ordered]@{ companion_sha256 = (Get-Sha ([IO.File]::ReadAllBytes($runtime.clock_evidence_file)))
+            mutation_evidence_sha256 = (Get-Sha $mutationBytes); job_name = $runtime.job_name; job_execution = $runtime.job_execution }
+        foreach ($key in $script:ClockReceipt.Keys) { $receipt[$key] = $script:ClockReceipt[$key] }
+        return @{ ExitCode = $script:ClockExit; Output = @(New-Frame (Report $receipt)) }
+    }
+    $script:AnalyzeRuntime = $runtime
     $script:AnalyzeNative = [IO.File]::ReadAllText($script:AnalyzeRuntime.native_config) | ConvertFrom-Json -AsHashtable
+    Assert ([Convert]::ToHexString([IO.File]::ReadAllBytes($script:AnalyzeNative.mutation_evidence_file)) -ceq $mutationHex) 'Analysis must receive the exact mutation evidence bytes'
     return @{ ExitCode = $script:AnalysisExit; Output = @($script:AnalysisLog) }
 }
 function Invoke-VLiteMeasAz {
@@ -317,7 +341,7 @@ try {
             'CreateEnvironment', 'PrepareFixture', 'BuildFixtureImage', 'ShowFixtureImage', 'CreatePublishJob', 'StartPublish',
             'PollPublish', 'ReadPublish', 'QueryPublish', 'CreateApp', 'CreateDriverJob', 'CleanupFixture', 'InventoryBefore',
             'StartDriver', 'PollDriver', 'ReadDriver', 'QueryDriver', 'InventoryAfter')
-        if ($measurement -ceq 'MEAS-005') { $expected += @('ReadObserver', 'QueryObserver', 'Analyze') }
+        if ($measurement -ceq 'MEAS-005') { $expected += @('CheckDriverClock', 'ReadObserver', 'QueryObserver', 'Analyze') }
         $expected += @('DeleteGroup', 'WaitDeleted')
         Assert (($order -join ',') -ceq ($expected -join ',')) "$measurement plan order differs: $($order -join ',')"
         $apps = @($steps | Where-Object Step -ceq 'CreateApp' | ForEach-Object Role)
@@ -495,6 +519,18 @@ try {
     Assert ($script:AnalyzeRuntime.control_program -ceq '/opt/vlite/bin/ha-meas005' -and $script:AnalyzeRuntime.operation -ceq 'analyze' -and
         $script:AnalyzeNative.fixed_inventory_confirmed -eq $true -and $script:AnalyzeNative.replicas.Count -eq 4) 'Analyze config differs'
     Assert ($script:Now -ge 1800000000000 + 1260000) 'Observers waited for their bounded window'
+    Assert ($script:ClockRuntime.operation -ceq 'check_driver_clock' -and $script:ClockRuntime.role -ceq 'driver' -and
+        $script:ClockRuntime.job_name -ceq 'vlite-meas-t26-drv' -and $script:ClockRuntime.job_execution -ceq 'vlite-meas-t26-drv-abc12' -and
+        $script:ClockRuntime.source_revision -ceq $revision -and -not $script:ClockRuntime.Contains('native_config')) 'Clock check must bind the started driver execution'
+    Assert ($script:ClockCompanion -ceq $script:CompanionJson) 'Clock check must receive the exact VLITE-CLOCK payload'
+    Assert ([IO.File]::ReadAllText((Join-Path $result.Out 'MEAS-005-driver-clock.json')) -ceq $script:CompanionJson -and
+        (Test-Path (Join-Path $result.Out 'MEAS-005-driver-clock-check.json')) -and
+        @($result.Summary.evidence | Where-Object { $_.kind -cin @('driver-clock', 'driver-clock-check') }).Count -eq 2) 'Driver clock evidence saved'
+    Assert (-not ($result.Summary.incompleteReasons | Where-Object { $_ -like 'DriverClock*' })) 'A complete job-local check adds no clock reason'
+    Assert ([IO.File]::ReadAllText((Join-Path $result.Out 'MEAS-005-mutations.json')) -ceq $script:MutationJson) 'Mutation evidence unchanged by the companion'
+    $clockIndex = @($script:LocalCalls | ForEach-Object { $_.Operation }).IndexOf('check_driver_clock')
+    Assert ($clockIndex -ge 0 -and $clockIndex -lt @($script:LocalCalls | ForEach-Object { $_.Operation }).IndexOf('analyze')) 'Clock check runs once before analysis'
+    Assert (@($script:LocalCalls | Where-Object { $_.Operation -ceq 'check_driver_clock' }).Count -eq 1) 'Clock check runs once'
     $observerCalls = @($script:Calls | Where-Object { $_ -like 'containerapp logs show*' })
     Assert ($observerCalls.Count -eq 4 -and ($observerCalls | Where-Object { $_ -like '*--replica vlite-meas-t26-rd--r1-x1*--container reader*' })) 'Replica-specific observer collection'
     $reader = $script:Manifests['vlite-meas-t26-rd']
@@ -502,6 +538,41 @@ try {
     $mutate = (($script:Manifests['vlite-meas-t26-drv'].properties.configuration.secrets | Where-Object name -ceq 'cfg-native').value | ConvertFrom-Json -AsHashtable)
     Assert ($mutate.target_file -ceq '/measurement/control-target.json' -and $mutate.server -ceq '/usr/local/bin/vlite-server' -and $mutate.mode -ceq 'run') 'Mutate config differs'
     Assert-Cleaned $result 'MEAS-005'
+
+    # Driver clock evidence is job-local and advisory: problems add incomplete reasons, never failures or retries.
+    # Each case: reason, whether the offline check runs, and the setup.
+    $clockCases = @(
+        @('DriverClockContinuityUnavailable', $false, { $script:DriverLog = New-Frame $script:MutationJson }),
+        @('DriverClockContinuityIncomplete', $true, {
+            $script:ClockExit = 2; $script:ClockReceipt.complete = $false; $script:ClockReceipt.incomplete_reasons = @('monitor_unavailable') }),
+        @('DriverClockEvidenceRejected', $true, { $script:ClockExit = 1 }),
+        @('DriverClockEvidenceRejected', $true, { $script:ClockExit = 2 }),
+        @('DriverClockEvidenceRejected', $true, { $script:ClockReceipt.complete = 'true' }),
+        @('DriverClockEvidenceRejected', $true, { $script:ClockReceipt.schema = 'vlite-meas005-driver-clock/1' }),
+        @('DriverClockEvidenceRejected', $true, { $script:ClockReceipt.operation = 'analyze' }),
+        @('DriverClockEvidenceRejected', $true, { $script:ClockReceipt.job_execution = 'vlite-meas-t26-drv-other1' }),
+        @('DriverClockEvidenceRejected', $true, { $script:ClockReceipt.mutation_evidence_sha256 = 'e' * 64 }),
+        @('DriverClockEvidenceRejected', $true, { $script:ClockReceipt.companion_sha256 = 'e' * 64 }),
+        @('DriverClockEvidenceRejected', $false, { $script:DriverLog = @($script:DriverLog | Select-Object -Skip 1) }),
+        @('DriverClockEvidenceRejected', $false, { $script:DriverLog = @(New-Frame $script:CompanionJson 'VLITE-CLOCK') + @($script:DriverLog) }),
+        @('DriverClockEvidenceRejected', $false, {
+            $script:DriverLog = @(New-Frame (Report ([ordered]@{ schema = 'vlite-meas005-observer/1' })) 'VLITE-CLOCK') + @(New-Frame $script:MutationJson) }))
+    foreach ($case in $clockCases) {
+        $reason, $checked, $setup = $case
+        Reset-Mock 'MEAS-005'
+        & $setup
+        $result = Invoke-Live 'MEAS-005'
+        Assert (-not $result.Error -and $result.Summary.status -ceq 'Succeeded') "$reason`: clock evidence must not fail the run: $($result.Error)"
+        Assert ($result.Summary.incompleteReasons -contains $reason -and
+            $result.Summary.incompleteReasons -contains 'ClockCalibrationUnavailable') "$reason`: missing incomplete reason"
+        Assert (@($result.Summary.incompleteReasons | Where-Object { $_ -like 'DriverClock*' }).Count -eq 1) "$reason`: one clock reason"
+        Assert (Test-Path (Join-Path $result.Out 'MEAS-005-analysis.json')) "$reason`: analysis still runs"
+        Assert ([IO.File]::ReadAllText((Join-Path $result.Out 'MEAS-005-mutations.json')) -ceq $script:MutationJson) "$reason`: mutation evidence changed"
+        Assert (@($script:Calls | Where-Object { $_ -like 'containerapp job start --name vlite-meas-t26-drv*' }).Count -eq 1) "$reason`: driver must never be retried"
+        $saved = @($result.Summary.evidence | Where-Object { $_.kind -like 'driver-clock*' }).Count
+        Assert ($saved -eq $(if ($reason -ceq 'DriverClockContinuityIncomplete') { 2 } else { 0 })) "$reason`: unverified clock evidence saved"
+        Assert (($null -ne $script:ClockRuntime) -eq $checked) "$reason`: clock check invocation differs"
+    }
 
     foreach ($field in 'app', 'revision') {
         Reset-Mock 'MEAS-005'
@@ -554,7 +625,7 @@ try {
     foreach ($reason in 'MutationChecksIncomplete', 'ObserverReportMissing', 'AnalysisNotRun') {
         Assert ($result.Summary.incompleteReasons -contains $reason) "Missing incomplete reason $reason"
     }
-    Assert (-not ($script:LocalCalls | Where-Object { $_.Arguments -contains '--config' })) 'Analysis must not run with missing observers'
+    Assert (-not ($script:LocalCalls | Where-Object { $_.Operation -ceq 'analyze' })) 'Analysis must not run with missing observers'
 
     Reset-Mock 'MEAS-005'
     $script:JobStatus['vlite-meas-t26-drv'] = 'Failed'  # status disagrees with complete mutation checks

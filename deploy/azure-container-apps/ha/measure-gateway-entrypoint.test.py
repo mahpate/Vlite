@@ -9,11 +9,14 @@ import io
 import json
 import os
 from pathlib import Path
+import re
 import signal
 import stat
 import subprocess
 import sys
 import tempfile
+import threading
+import time
 import unittest
 from unittest.mock import patch
 
@@ -23,6 +26,8 @@ SPEC = importlib.util.spec_from_file_location(
     "gateway_entrypoint", Path(__file__).with_name("measure-gateway-entrypoint.py"))
 runtime = importlib.util.module_from_spec(SPEC)
 SPEC.loader.exec_module(runtime)
+JOB = {"CONTAINER_APP_JOB_NAME": "vlite-meas-t26-drv",
+       "CONTAINER_APP_JOB_EXECUTION_NAME": "vlite-meas-t26-drv-abc12"}
 
 
 class RuntimeTests(unittest.TestCase):
@@ -527,6 +532,281 @@ class RuntimeTests(unittest.TestCase):
         self.assertEqual(runtime.verify_frame(runtime.frame(data)), output)
         self.assertNotIn("FAILED", runtime.frame(data))
         self.fail(config, "unknown_do_not_retry").assert_not_called()
+
+    def mutate_config(self):
+        self.fixture()
+        path = self.work / "mutate.json"
+        self.put(path, {"mode": "run", "server": self.config["server"],
+            "bootstrap_dir": str(self.root), "target_file": str(self.target),
+            "object": "gateway/control.json", "gateway_url": "https://gateway.internal",
+            "poll_interval_ms": 100, "mutations": 1, "observation_deadline_ms": 1000,
+            "seed": 1, "requested": {"routing": "writer_only", "reader_replicas": "0"}})
+        return self.config_for("mutate", native_config=str(path))
+
+    def native_mutation(self, code=0, sleep=0.12):
+        def native(argv, timeout, work):
+            start = time.time_ns() // 1_000_000
+            time.sleep(sleep)
+            end = time.time_ns() // 1_000_000
+            return code, self.report("vlite-meas005/1",
+                mutation_and_ingress_checks_complete=code == 0, mutations=[
+                    {"index": 0, "generation": 2, "outcome": "acknowledged",
+                     "commit": {"kind": "command_bracket", "start_unix_ms": start,
+                                "end_unix_ms": end, "elapsed_ms": float(end - start)}}])
+        return native
+
+    def linux_clocks(self):
+        # Native commit brackets are CLOCK_REALTIME; Windows test hosts differ.
+        return {**runtime.clock_sources(), "wall": "clock_gettime(CLOCK_REALTIME)",
+                "monotonic": "clock_gettime(CLOCK_MONOTONIC)"}
+
+    def observed(self, env=JOB, code=0):
+        config = self.mutate_config()
+        with patch.dict(os.environ, env), \
+                patch.object(runtime, "clock_sources", return_value=self.linux_clocks()), \
+                patch.object(runtime, "run_native", side_effect=self.native_mutation(code)) as native:
+            worker = runtime.Runtime(config)
+            result = worker.execute()
+        self.assertEqual(native.call_count, 1)
+        return worker.companion, result
+
+    def check(self, companion, data, job="vlite-meas-t26-drv",
+              execution="vlite-meas-t26-drv-abc12", role="driver"):
+        clock = self.work / f"clock-{len(list(self.work.glob('clock-*')))}.json"
+        mutation = self.work / f"mutation-{len(list(self.work.glob('mutation-*')))}.json"
+        self.put(clock, runtime.encode(companion))
+        self.put(mutation, data)
+        config = self.config_for("check_driver_clock", role, clock_evidence_file=str(clock),
+            mutation_evidence_file=str(mutation), job_name=job, job_execution=execution)
+        with patch.object(runtime, "run_native") as native:
+            code, receipt = runtime.Runtime(config).execute()
+        native.assert_not_called()
+        self.assertEqual(runtime.verify_frame(runtime.frame(receipt)), receipt)
+        result = json.loads(receipt)
+        self.assertEqual(result["companion_sha256"], runtime.digest(clock.read_bytes()))
+        return code, result
+
+    def no_monitor_thread(self):
+        return not any(t.name == "vlite-driver-clock" and t.is_alive()
+                       for t in threading.enumerate())
+
+    def test_frame_tag_default_unchanged_and_tags_do_not_cross(self):
+        data = self.report()
+        meas, clock = runtime.frame(data), runtime.frame(data, "VLITE-CLOCK")
+        self.assertEqual(meas, runtime.frame(data, "VLITE-MEAS"))
+        self.assertTrue(meas.startswith("VLITE-MEAS BEGIN "))
+        self.assertNotIn("VLITE-MEAS", clock)
+        # The harness rewrites only the tag before its existing strict decoder.
+        self.assertEqual(clock.replace("VLITE-CLOCK ", "VLITE-MEAS "), meas)
+        self.assertEqual(runtime.verify_frame(clock, "VLITE-CLOCK"), data)
+        for text, tag in ((clock, "VLITE-MEAS"), (meas, "VLITE-CLOCK")):
+            with self.subTest(tag=tag), self.assertRaises(runtime.Failure):
+                runtime.verify_frame(text, tag)
+        with self.assertRaises(runtime.Failure):
+            runtime.frame(data, "VLITE-OTHER")
+
+    def test_mutation_companion_binds_exact_execution_evidence_and_covers_run(self):
+        companion, (code, data) = self.observed()
+        self.assertEqual(code, 0)
+        self.assertEqual(json.loads(data)["mutations"][0]["outcome"], "acknowledged")
+        self.assertEqual(runtime.validate_driver_clock(
+            runtime.encode(companion), self.config), companion)
+        self.assertEqual(companion["schema"], "vlite-meas005-driver-clock/1")
+        self.assertEqual(companion["scope"], "job_local_driver_process_only")
+        binding = companion["binding"]
+        self.assertEqual(binding["mutation_evidence_sha256"], runtime.digest(data))
+        self.assertEqual(binding["mutation_evidence_bytes"], len(data))
+        self.assertEqual((binding["native_exit_code"], binding["job_name"],
+                          binding["job_execution"], binding["replica"]),
+                         (0, "vlite-meas-t26-drv", "vlite-meas-t26-drv-abc12", "replica-one"))
+        self.assertTrue(binding["boot_id"] is None or re.fullmatch(
+            "[a-f0-9]{8}(?:-[a-f0-9]{4}){3}-[a-f0-9]{12}", binding["boot_id"]))
+        self.assertEqual(companion["unavailable"], {"clock_offset_ms": None,
+            "clock_uncertainty_ms": None, "undetected_excursion_bound_ms": None,
+            "calibration": None})
+        monitor = companion["monitor"]
+        self.assertEqual(monitor["status"], "observed")
+        self.assertGreaterEqual(monitor["samples"], 4)
+        self.assertLessEqual(monitor["first_monotonic_ns"], monitor["spawn"]["monotonic_ns"])
+        self.assertLessEqual(monitor["spawn"]["monotonic_ns"], monitor["exit"]["monotonic_ns"])
+        self.assertLessEqual(monitor["exit"]["monotonic_ns"], monitor["last_monotonic_ns"])
+        commit = json.loads(data)["mutations"][0]["commit"]
+        self.assertLessEqual(monitor["spawn"]["unix_ns"] // 1_000_000, commit["start_unix_ms"])
+        self.assertLessEqual(commit["end_unix_ms"], monitor["exit"]["unix_ns"] // 1_000_000)
+        self.assertEqual(monitor["elapsed_monotonic_minus_raw_ns"] is None,
+                         companion["clocks"]["raw"] is None)
+        self.assertTrue(self.no_monitor_thread())
+
+    def test_mutation_companion_identity_null_when_absent_or_foreign(self):
+        for env in ({}, {"CONTAINER_APP_JOB_NAME": "vlite-meas-t26-drv",
+                         "CONTAINER_APP_JOB_EXECUTION_NAME": "other-job-abc12"},
+                    {"CONTAINER_APP_JOB_NAME": "Bad_Name",
+                     "CONTAINER_APP_JOB_EXECUTION_NAME": "Bad_Name-abc12"}):
+            with self.subTest(env=env):
+                self.setUp()  # Fresh private work: mutate attempts are create-only.
+                with patch.dict(os.environ):
+                    for name in JOB:
+                        os.environ.pop(name, None)
+                    companion, (code, _) = self.observed(env)
+                self.assertEqual(code, 0)
+                self.assertIsNone(companion["binding"]["job_execution"])
+                self.assertEqual(companion["binding"]["job_name"],
+                                 "vlite-meas-t26-drv" if len(env) and "Bad" not in
+                                 env["CONTAINER_APP_JOB_NAME"] else None)
+
+    def test_mutation_monitor_failure_never_changes_native_evidence_or_retries(self):
+        output = self.report("vlite-meas005/1", mutations=[])
+        for target in (None, "clock_reading", "ClockMonitor"):
+            with self.subTest(target=target):
+                self.setUp()
+                config = self.mutate_config()
+                with contextlib.ExitStack() as stack:
+                    native = stack.enter_context(
+                        patch.object(runtime, "run_native", return_value=(0, output)))
+                    if target:
+                        stack.enter_context(
+                            patch.object(runtime, target, side_effect=RuntimeError))
+                    worker = runtime.Runtime(config)
+                    result = worker.execute()
+                self.assertEqual(native.call_count, 1)
+                self.assertEqual(result, (0, output))
+                monitor = worker.companion["monitor"]
+                if target:
+                    self.assertEqual({k for k, v in monitor.items() if v is not None}, {"status"})
+                    self.assertEqual(monitor["status"], "unavailable")
+                else:
+                    self.assertEqual(monitor["status"], "observed")
+                self.assertTrue(self.no_monitor_thread())
+
+    def test_mutation_native_failure_emits_no_companion_and_stops_monitor(self):
+        config = self.mutate_config()
+        with patch.object(runtime, "run_native", return_value=(1, b"private")) as native:
+            worker = runtime.Runtime(config)
+            with self.assertRaisesRegex(runtime.Failure, "native_failed"):
+                worker.execute()
+        self.assertEqual(native.call_count, 1)
+        self.assertIsNone(worker.companion)
+        self.assertTrue(self.no_monitor_thread())
+
+    def test_main_prints_companion_before_unchanged_mutation_frame(self):
+        config = self.mutate_config()
+        path = self.work / "entrypoint.json"
+        self.put(path, config)
+        stdout, stderr = io.StringIO(), io.StringIO()
+        with patch.dict(os.environ, JOB), \
+                patch.object(runtime, "run_native", side_effect=self.native_mutation(2)), \
+                contextlib.redirect_stdout(stdout), contextlib.redirect_stderr(stderr):
+            code = runtime.main(["--config", str(path)])
+        self.assertEqual((code, stderr.getvalue()), (2, ""))
+        lines = stdout.getvalue().splitlines()
+        clock = [line for line in lines if line.startswith("VLITE-CLOCK ")]
+        meas = [line for line in lines if line.startswith("VLITE-MEAS ")]
+        self.assertTrue(clock and meas)
+        self.assertEqual(lines, clock + meas)
+        data = runtime.verify_frame("\n".join(meas))
+        companion = runtime.json_bytes(runtime.verify_frame("\n".join(clock), "VLITE-CLOCK"))
+        self.assertEqual(companion["binding"]["mutation_evidence_sha256"], runtime.digest(data))
+        self.assertEqual(companion["binding"]["native_exit_code"], 2)
+        self.assertNotIn("FAILED", stdout.getvalue())
+
+    def test_check_driver_clock_complete_only_for_bound_covered_chronology(self):
+        companion, (_, data) = self.observed()
+        code, receipt = self.check(companion, data)
+        self.assertEqual(code, 0, receipt["incomplete_reasons"])
+        self.assertEqual(receipt["schema"], "vlite-meas005-driver-clock-check/1")
+        self.assertEqual(receipt["source"], runtime.source(self.config))
+        self.assertEqual(receipt["mutation_evidence_sha256"], runtime.digest(data))
+        self.assertEqual((receipt["job_name"], receipt["job_execution"]),
+                         ("vlite-meas-t26-drv", "vlite-meas-t26-drv-abc12"))
+        self.assertEqual((receipt["bound_to_execution"], receipt["coverage_observed"],
+                          receipt["chronology_consistent"],
+                          receipt["sampled_within_declared_allowance"],
+                          receipt["commits_checked"], receipt["complete"],
+                          receipt["incomplete_reasons"]),
+                         (True, True, True, True, 1, True, []))
+        self.assertEqual(receipt["declared_mutator_drift_allowance_ms"], 10)
+        self.assertEqual(receipt["max_sample_gap_ns"], companion["monitor"]["max_gap_ns"])
+        self.assertEqual(receipt["wall_backward_steps"], 0)
+        self.assertEqual(receipt["unavailable"], companion["unavailable"])
+
+    def test_check_driver_clock_preserves_unavailable_as_incomplete(self):
+        companion, (_, data) = self.observed(env={})
+        cases = {"job_execution_unavailable": lambda c: None,
+                 "clock_source_unverified": lambda c: c["clocks"].update(
+                     wall="GetSystemTimePreciseAsFileTime()"),
+                 "monitor_unavailable": lambda c: c["monitor"].update(
+                     {k: None for k in c["monitor"]}, status="unavailable"),
+                 "coverage_gap": lambda c: c["monitor"].update(
+                     first_monotonic_ns=c["monitor"]["spawn"]["monotonic_ns"] + 1),
+                 "wall_backward_step": lambda c: c["monitor"].update(wall_backward_steps=1),
+                 "allowance_exceeded": lambda c: c["monitor"].update(
+                     wall_minus_monotonic_range_ns=10_000_001),
+                 "chronology_inconsistent": lambda c: c["monitor"]["spawn"].update(
+                     unix_ns=c["monitor"]["spawn"]["unix_ns"] + 10**12)}
+        for reason, change in cases.items():
+            with self.subTest(reason=reason):
+                changed = copy.deepcopy(companion)
+                change(changed)
+                if reason != "job_execution_unavailable":
+                    changed["binding"].update(job_name="vlite-meas-t26-drv",
+                                              job_execution="vlite-meas-t26-drv-abc12")
+                code, receipt = self.check(changed, data)
+                self.assertEqual((code, receipt["complete"]), (2, False))
+                self.assertEqual(receipt["incomplete_reasons"], [reason])
+                self.assertEqual(set(receipt["unavailable"].values()), {None})
+                self.assertEqual(receipt["bound_to_execution"],
+                                 reason != "job_execution_unavailable")
+                if reason == "monitor_unavailable":
+                    self.assertEqual((receipt["coverage_observed"],
+                                      receipt["chronology_consistent"],
+                                      receipt["sampled_within_declared_allowance"],
+                                      receipt["max_sample_gap_ns"]),
+                                     (None, None, None, None))
+
+    def test_check_driver_clock_refuses_foreign_or_malformed_evidence(self):
+        companion, (_, data) = self.observed()
+        other = self.native_mutation()(None, None, None)[1]
+
+        def changed(path, value):
+            result = copy.deepcopy(companion)
+            *parents, key = path
+            target = result
+            for parent in parents:
+                target = target[parent]
+            target[key] = value
+            return result
+        cases = [
+            (companion, other, {}, "binding_mismatch"),
+            (changed(("binding", "native_exit_code"), 2), data, {}, "binding_mismatch"),
+            (changed(("binding", "mutation_evidence_bytes"), len(data) + 1), data, {},
+             "binding_mismatch"),
+            (companion, data, {"execution": "vlite-meas-t26-drv-other1"}, "identity_mismatch"),
+            (companion, data, {"job": "vlite-meas-t27-drv",
+                               "execution": "vlite-meas-t27-drv-abc12"}, "identity_mismatch"),
+            (companion, data, {"execution": "other-job-abc12"}, "invalid_config"),
+            (changed(("unknown",), None), data, {}, "driver_clock_shape"),
+            (changed(("monitor", "unknown"), None), data, {}, "driver_clock_shape"),
+            (changed(("source",), {"revision": "b" * 40, "dirty_paths": []}), data, {},
+             "evidence_provenance"),
+            (changed(("unavailable", "clock_offset_ms"), 0), data, {}, "driver_clock_shape"),
+            (changed(("unavailable", "calibration"), "assumed"), data, {}, "driver_clock_shape"),
+            (changed(("qualification",), "qualified"), data, {}, "driver_clock_shape"),
+            (changed(("monitor", "samples"), 1.5), data, {}, "driver_clock_shape"),
+            (changed(("monitor", "exit", "monotonic_ns"), 0), data, {}, "driver_clock_shape"),
+            (changed(("binding", "job_execution"), "other-job-abc12"), data, {},
+             "driver_clock_shape"),
+        ]
+        malformed = json.loads(data)
+        malformed["mutations"][0]["commit"]["start_unix_ms"] = "1000"
+        malformed = runtime.encode(malformed)
+        cases.append((changed(("binding",), {**companion["binding"],
+            "mutation_evidence_sha256": runtime.digest(malformed),
+            "mutation_evidence_bytes": len(malformed)}), malformed, {}, "commit_shape"))
+        for index, (document, evidence, inputs, pattern) in enumerate(cases):
+            with self.subTest(index=index), self.assertRaisesRegex(runtime.Failure, pattern):
+                self.check(document, evidence, **inputs)
+        with self.assertRaisesRegex(runtime.Failure, "role_refused"):
+            self.check(companion, data, role="gateway")
 
     def test_analysis_without_reader_retains_unknown_clocks(self):
         mutation_path = self.work / "mutations.json"

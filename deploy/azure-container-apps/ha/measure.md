@@ -304,6 +304,22 @@ Observer evidence must match its recorded app and revision, and the
 analyzer requires conservative lifetime through the entire command plus
 observation deadline, not merely through an early matching observation.
 
+The actual mutating driver execution now also prints a job-local
+`VLITE-CLOCK` companion (`vlite-meas005-driver-clock/1`) ahead of its
+unchanged mutation frame. It samples only that container's own wall,
+monotonic and, where present, raw clocks around the single native attempt,
+and binds them to the ACA job execution, replica, boot id and the exact
+mutation evidence digest. The harness checks it offline with
+`check_driver_clock` and saves `MEAS-005-driver-clock.json` and
+`MEAS-005-driver-clock-check.json`. The reasons it can add are
+`DriverClockContinuityUnavailable`, `DriverClockEvidenceRejected` and
+`DriverClockContinuityIncomplete`. These are advisory: they never fail the
+run or retry the driver. A complete check says the sampled points were
+continuous and within the existing 10 ms allowance for this execution. It
+does not bound unsampled motion, calibrate any observer, or populate offset,
+uncertainty, excursion or calibration values. Those remain null, and
+`ClockCalibrationUnavailable` still applies.
+
 The first live MEAS-004 attempt failed at `BuildMeasureImage` with
 `failureReason: Unclassified`; no fixture digest, publish execution, driver
 execution or evidence was produced. Cleanup reported `Deleted`, and a later

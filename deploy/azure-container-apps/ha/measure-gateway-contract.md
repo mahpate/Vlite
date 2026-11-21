@@ -455,7 +455,9 @@ stops the remaining mutation sequence and preserves the partial records.
 The `vlite-meas005/1` mutation report contains requested settings, source, limits,
 uncertainty, generation/whole-command UTC+monotonic brackets, jitter, bounded
 behavior records and `mutation_and_ingress_checks_complete`. `complete:false`
-is intentional until observer analysis.
+is intentional until observer analysis. The runtime wrapper may print a separate
+job-local `VLITE-CLOCK` companion before this unchanged frame (§5); the native
+mutation report, its schema and its exit semantics are not altered.
 
 ## 5. Clock samples and offline MEAS-005 analysis
 
@@ -470,6 +472,60 @@ any before/after disagreement. The implementation does not claim that ACA exec,
 NTP, or cross-host drift has a prevalidated precision. If no defensible bound is
 available, use nulls, preserve generation/floor coverage, and expect incomplete
 timing. Do not estimate host offset from load-balanced HTTP RTT.
+
+### Job-local driver clock continuity (`VLITE-CLOCK`)
+
+The ACA driver is a single Manual job execution (parallelism 1, no replica
+retry) whose only evidence channel is console output; the harness has no exec
+path into it for calibration. Instead the runtime wrapper's existing
+`operation:"mutate"` path monitors **its own container's** clocks around the one
+unchanged native attempt. A daemon thread samples Python's wall
+(`time.time_ns`), monotonic and, on Linux, `CLOCK_MONOTONIC_RAW` every 50 ms
+(target), with spawn/exit marks bracketing the native process. Monitor faults
+leave `monitor.status:"unavailable"` with every other monitor field null; they
+never change or repeat the native command or its evidence (stopping the
+sampler waits at most 1 s after native exit).
+
+After the native evidence validates (exit 0 or 2), the wrapper prints a
+`vlite-meas005-driver-clock/1` companion, framed exactly like `VLITE-MEAS` but
+tagged `VLITE-CLOCK`, **before** the unchanged mutation frame. It contains
+`scope:"job_local_driver_process_only"`, a `binding` of ACA
+`CONTAINER_APP_JOB_NAME`/`CONTAINER_APP_JOB_EXECUTION_NAME`/`CONTAINER_APP_REPLICA_NAME`
+(each null unless well-formed; the execution must carry the job-name prefix),
+`/proc` boot id or null, native exit code and the sha256/byte length of the
+exact mutation evidence, the reported clock implementations, monitor summary
+(samples, spawn/exit readings, first/last monotonic, maximum sample gap and read
+width, wall-minus-monotonic range and elapsed change, backward wall steps,
+elapsed monotonic-minus-raw slew), and an `unavailable` object whose
+`clock_offset_ms`, `clock_uncertainty_ms`, `undetected_excursion_bound_ms` and
+`calibration` are always null.
+
+The harness extracts `VLITE-CLOCK` lines from the same verified driver log
+read, verifies frame, schema, qualification, provenance and private values,
+and runs the offline consumer `check_driver_clock` (driver role) with the
+companion, the exact mutation bytes, and the job name/execution the harness
+started. It refuses malformed, foreign-source, digest/byte/exit-code-mismatched
+or foreign-execution companions. Otherwise it writes a
+`vlite-meas005-driver-clock-check/1` receipt (exit 0 complete, 2 incomplete)
+whose `incomplete_reasons` are, in order: `job_execution_unavailable`,
+`clock_source_unverified` (not `clock_gettime(CLOCK_REALTIME)`/`CLOCK_MONOTONIC`,
+the native bracket clock), `monitor_unavailable`, `coverage_gap` (samples do not
+enclose spawn..exit), `wall_backward_step`, `allowance_exceeded` (sampled
+wall-minus-monotonic range plus maximum read width above the existing declared
+10 ms mutator allowance) and `chronology_inconsistent` (floor-ms
+spawn <= each command bracket start <= end <= next start ... <= exit).
+Harness outcomes are advisory: no companion adds
+`DriverClockContinuityUnavailable`; a rejected companion or receipt adds
+`DriverClockEvidenceRejected` and saves neither; an incomplete receipt saves
+`MEAS-005-driver-clock.json` plus `MEAS-005-driver-clock-check.json` and adds
+`DriverClockContinuityIncomplete`. None fails the run or retries the driver,
+and `ClockCalibrationUnavailable` remains unconditional.
+
+A complete receipt means only that the **sampled points** of one driver
+container's clocks were continuous and stayed within the declared allowance
+across this execution. It does not bound motion between samples, does not
+measure any observer clock, does not derive an observer-minus-mutator offset,
+and does not supply `clock_offset_ms`/`clock_uncertainty_ms` for analysis.
 
 After observers finish, collect all reports, after-inventory and calibration.
 `analyze.json`:

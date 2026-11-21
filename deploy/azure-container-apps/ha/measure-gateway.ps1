@@ -351,6 +351,7 @@ function New-VLiteMeasGatewayPlan([hashtable]$Config) {
         Add 'InventoryAfter' @('containerapp', 'replica', 'list', '--name', $Config.Apps[$role], '--resource-group', $rg) $role
     }
     if ($meas005) {
+        Add 'CheckDriverClock' @((Join-Path $here 'measure-gateway-entrypoint.py'), '--config', '<clock-config>') '' 'python3'
         Add 'ReadObserver' @('containerapp', 'logs', 'show', '--name', '<app>', '--resource-group', $rg,
             '--revision', '<revision>', '--replica', '<replica>',
             '--container', '<container>', '--tail', '300', '--format', 'text', '--type', 'console')
@@ -668,8 +669,9 @@ function Invoke-VLiteMeasGateway([hashtable]$Config) {
         $diagnostic = [ordered]@{ category = $null; reason = $null; jobExitCode = $null
             consoleEvidence = 'NotQueried'; logAnalyticsEvidence = 'NotQueried'; logAnalyticsAttempts = 0 }
         try {
+            # The whole result is returned: emitting .Bytes here would unroll the byte[] into Object[].
             return (Get-VLiteMeasEvidence (Expand "Read$Prefix" '' @{ '<execution>' = $Execution }) `
-                (Expand "Query$Prefix" '' @{ '<execution>' = $Execution; '<workspace-id>' = $workspace }) $diagnostic).Bytes
+                (Expand "Query$Prefix" '' @{ '<execution>' = $Execution; '<workspace-id>' = $workspace }) $diagnostic)
         } catch {
             if (-not $diagnostic.category) { $diagnostic.category = 'Unclassified' }
             $summary.failureDiagnostic = $diagnostic
@@ -808,7 +810,7 @@ function Invoke-VLiteMeasGateway([hashtable]$Config) {
         $stage = 'PollPublish'
         $status = Wait-VLiteMeasExecution (Expand 'PollPublish' '' @{ '<execution>' = $execution })
         $stage = 'ReadPublish'
-        $receipt = ConvertFrom-VLiteMeasJsonBytes (Read-JobEvidence 'Publish' $execution)
+        $receipt = ConvertFrom-VLiteMeasJsonBytes (Read-JobEvidence 'Publish' $execution).Bytes
         Assert-VLiteMeasKeys $receipt @('schema', 'qualification', 'operation', 'source', 'generation',
             'control_state_published', 'authority_mode', 'read_routing') 'PublishReceipt'
         if ($status -cne 'Succeeded' -or $receipt.schema -cne 'vlite-meas-runtime/1' -or
@@ -865,7 +867,8 @@ function Invoke-VLiteMeasGateway([hashtable]$Config) {
         $status = Wait-VLiteMeasExecution (Expand 'PollDriver' '' @{ '<execution>' = $execution })
         $summary.driverStatus = $status
         $stage = 'ReadDriver'
-        $bytes = Read-JobEvidence 'Driver' $execution
+        $driverEvidence = Read-JobEvidence 'Driver' $execution
+        $bytes = $driverEvidence.Bytes
         if ($meas005) {
             $mutation = Assert-VLiteMeasGatewayReport $bytes 'vlite-meas005/1' $Config $privateValues
             $checks = $mutation.mutation_and_ingress_checks_complete
@@ -893,6 +896,45 @@ function Invoke-VLiteMeasGateway([hashtable]$Config) {
         if (-not $summary.inventory.fixed) { Add-Incomplete 'InventoryChanged' }
 
         if ($meas005) {
+            $stage = 'CheckDriverClock'
+            # Job-local companion of the same driver execution. It is advisory: any problem only adds an
+            # incomplete reason; the driver is never retried and unverified clock evidence is never saved.
+            $clockLines = @($driverEvidence.Lines | Where-Object { $_ -cmatch 'VLITE-CLOCK (BEGIN |END |[0-9]+ )' } |
+                ForEach-Object { $_ -creplace '\A.*?VLITE-CLOCK ', 'VLITE-MEAS ' })
+            if (-not $clockLines.Count) {
+                Add-Incomplete 'DriverClockContinuityUnavailable'
+            } else {
+                try {
+                    $companion = ConvertFrom-VLiteMeasLog $clockLines
+                    $null = Assert-VLiteMeasGatewayReport $companion 'vlite-meas005-driver-clock/1' $Config $privateValues
+                    $clockDir = New-VLiteMeasPrivateDirectory $work
+                    $clockFile = Join-Path $clockDir 'clock.json'
+                    Set-VLiteMeasPrivate $clockFile $companion
+                    $clockMutations = Join-Path $clockDir 'mutations.json'
+                    Set-VLiteMeasPrivate $clockMutations $bytes
+                    $runtime = Join-Path $clockDir 'runtime.json'
+                    Set-VLiteMeasPrivate $runtime (ConvertTo-VLiteMeasJson ([ordered]@{ operation = 'check_driver_clock'; role = 'driver'
+                        work_dir = $clockDir; source_revision = $Config.SourceRevision; source_dirty_paths = $Config.DirtyPaths
+                        clock_evidence_file = $clockFile; mutation_evidence_file = $clockMutations
+                        job_name = $Config.DriverJob; job_execution = $summary.driverExecution }))
+                    $clocked = Invoke-VLiteMeasLocal 'python3' (Expand 'CheckDriverClock' '' @{ '<clock-config>' = $runtime }) $provenance
+                    if ($clocked.ExitCode -notin @(0, 2)) { throw 'exit' }
+                    $clockCheck = ConvertFrom-VLiteMeasLog @($clocked.Output)
+                    $clockReceipt = Assert-VLiteMeasGatewayReport $clockCheck 'vlite-meas005-driver-clock-check/1' $Config $privateValues
+                    $hashes = @($companion, $bytes) | ForEach-Object {
+                        [Convert]::ToHexString([Security.Cryptography.SHA256]::HashData([byte[]]$_)).ToLowerInvariant() }
+                    if ($clockReceipt.operation -cne 'check_driver_clock' -or $clockReceipt.complete -isnot [bool] -or
+                        $clockReceipt.complete -ne ($clocked.ExitCode -eq 0) -or $clockReceipt.job_name -cne $Config.DriverJob -or
+                        $clockReceipt.job_execution -cne $summary.driverExecution -or $clockReceipt.companion_sha256 -cne $hashes[0] -or
+                        $clockReceipt.mutation_evidence_sha256 -cne $hashes[1]) { throw 'receipt' }
+                } catch { $clockReceipt = $null; Add-Incomplete 'DriverClockEvidenceRejected' }
+                if ($clockReceipt) {
+                    Save-Evidence 'MEAS-005-driver-clock.json' $companion 'driver-clock'
+                    Save-Evidence 'MEAS-005-driver-clock-check.json' $clockCheck 'driver-clock-check'
+                    if (-not $clockReceipt.complete) { Add-Incomplete 'DriverClockContinuityIncomplete' }
+                }
+            }
+
             $stage = 'ReadObserver'
             $analysis = New-VLiteMeasPrivateDirectory $work
             $replicaEntries = [Collections.Generic.List[object]]::new()
@@ -917,7 +959,8 @@ function Invoke-VLiteMeasGateway([hashtable]$Config) {
                     $replicaEntries.Add([ordered]@{ replica = $replica.name; role = $observerRole; report_file = $file })
                 }
             }
-            # Replica-specific exec is not implemented, so clock fields are omitted and timing remains incomplete.
+            # Replica-specific exec is not implemented, so cross-clock calibration stays unavailable; the driver
+            # clock companion is job-local and never supplies offsets, so timing remains incomplete.
             Add-Incomplete 'ClockCalibrationUnavailable'
             if ($summary.incompleteReasons.Contains('ObserverReportMissing')) {
                 Add-Incomplete 'AnalysisNotRun'
