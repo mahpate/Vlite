@@ -24,6 +24,7 @@ param(
     [string]$FixtureServer,
     [string]$ControlProgram,
     [string]$GatewayProfile,
+    [string]$GatewayPollMs,
     [switch]$AllowDirty,
     [switch]$KeepOnFailure,
     [switch]$Plan
@@ -46,7 +47,7 @@ function Test-VLiteMeasParameters([hashtable]$Options) {
         DurationSecs = ''; Rate = ''; ArchiveIntervalSecs = ''; StalenessBoundMs = ''; ReaderPollMs = ''; ObserveMs = ''
         Samples = ''; Repetitions = ''; IntervalMs = ''
         OutDir = ''; Image = ''; SourceRevision = ''; AllowDirty = $false; KeepOnFailure = $false
-        FixtureServer = ''; ControlProgram = ''; GatewayProfile = ''
+        FixtureServer = ''; ControlProgram = ''; GatewayProfile = ''; GatewayPollMs = ''
         Plan = $false; DirtyPaths = ''
     }
     foreach ($key in $Options.Keys) {
@@ -67,7 +68,7 @@ function Test-VLiteMeasParameters([hashtable]$Options) {
     $meas006 = $config.Measurements[0] -ceq 'MEAS-006'
     $gateway = $config.Measurements[0] -cin @('MEAS-004', 'MEAS-005')
     if (-not $gateway) {
-        foreach ($name in 'FixtureServer', 'ControlProgram', 'GatewayProfile') {
+        foreach ($name in 'FixtureServer', 'ControlProgram', 'GatewayProfile', 'GatewayPollMs') {
             if ($Options.ContainsKey($name)) { throw "$name is not supported for the selected measurement." }
         }
     }

@@ -691,6 +691,7 @@ fn analyze(config: Analyze) -> Result<Value> {
                     && ((c1 - c0) - command_elapsed).abs() <= 10.;
                 covered = lifetime_start <= c0
                     && lifetime_end >= o1
+                    && lifetime_end >= c1 + deadline
                     && o1 <= c1 + deadline
                     && o1 >= c0
                     && clock_consistent;
@@ -815,7 +816,7 @@ mod tests {
             let report = json!({"schema":"vlite-meas005-observer/1","qualification":"proposal_evidence_only",
                 "source":source,"replica":role,"role":role,"boot_id":format!("boot-{role}"),
                 "owns_serving_child":true,"terminated_early":false,"interrupted":false,
-                "start_unix_ms":500,"end_unix_ms":2000,"max_clock_jump_ms":0.,
+                "start_unix_ms":500,"end_unix_ms":3000,"max_clock_jump_ms":0.,
                 "polls":50,"readiness_failures":0,"max_sample_start_gap_ms":50,"events":events});
             let report_file = root.join(format!("{role}.json"));
             std::fs::write(&report_file,report.to_string()).unwrap();
@@ -850,6 +851,23 @@ mod tests {
             true
         );
         assert!(no_clocks["replicas"][0]["samples"][0]["latency_ms"].is_null());
+    }
+
+    #[test]
+    fn analysis_requires_lifetime_through_entire_observation_deadline() {
+        let root = tempfile::tempdir().unwrap();
+        for (end, complete, count) in [(2420, true, 3), (2419, false, 2), (2000, false, 0)] {
+            let config = analysis_fixture(root.path(), 1, true);
+            let mut observer: Value = read(&config.replicas[0].report_file).unwrap();
+            observer["end_unix_ms"] = json!(end);
+            std::fs::write(&config.replicas[0].report_file, observer.to_string()).unwrap();
+            let report = analyze(config).unwrap();
+            assert_eq!(report["complete"], complete);
+            assert_eq!(report["replicas"][0]["successful_upper_ms"]["count"], count);
+            if !complete {
+                assert!(report["replicas"][0]["samples"][2]["latency_ms"].is_null());
+            }
+        }
     }
 
     #[test]

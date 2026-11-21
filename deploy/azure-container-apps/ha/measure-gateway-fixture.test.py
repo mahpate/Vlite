@@ -54,18 +54,22 @@ class FakeNative:
 
     def __init__(self, database=DATABASE):
         self.calls = []
+        self.configs = []
         self.database = database
 
     def __call__(self, argv, timeout, work, serving=False):
         self.calls.append(list(argv))
         native = json.loads(Path(argv[4]).read_bytes())
+        self.configs.append(native)
         root = Path(native["output_dir"])
         root.mkdir(mode=0o700)
         control = native["control_state"]
         put(root / "gateway.json", {"bind": "0.0.0.0:8080", "control_state": control,
+            "poll_interval_ms": native["poll_interval_ms"], "max_replicas": native["max_replicas"],
             "public_key_bundle_file": str(root / "public.json"),
             "signing_key_file": str(root / "signing.key")})
         put(root / "trust.json", {"audience": native["audience"], "control_state": control,
+            "poll_interval_ms": native["poll_interval_ms"],
             "public_key_bundle_file": str(root / "public.json")})
         put(root / "public.json", {"keys": []})
         for name, value in SECRETS.items():
@@ -73,15 +77,20 @@ class FakeNative:
         put(root / "load.expected.json", {"id": 1})
         put(root / "suspension.expected.json", {"id": 1})
         put(root / "database.vlite", self.database)
+        revoked = []
+        for i in range(native["revocations"]):
+            name = f"load-{i+1}.token"
+            if i:
+                put(root / name, f"revoke-secret-{i}-never-log".encode())
+            revoked.append({"purpose": "revocation", "id": f"r{i}", "tenant": "t0",
+                            "token_file": str(root / name)})
         put(root / "manifest.json", {"schema": "vlite-gateway-measure-bootstrap/1",
             "lineage": 4242, "writer_url": native["writer_url"],
             "path": "/v1/collections/probe/vectors/1",
             "credentials": [{"purpose": "load", "id": "c0", "tenant": "t0",
                              "token_file": str(root / "load-0.token")},
-                            {"purpose": "revocation", "id": "c1", "tenant": "t0",
-                             "token_file": str(root / "load-1.token")},
                             {"purpose": "suspension", "id": "c2", "tenant": "t1",
-                             "token_file": str(root / "suspension-0.token")}]})
+                             "token_file": str(root / "suspension-0.token")}] + revoked})
         put(root / "directory.json", [
             {"tenant": t, "kind": "dedicated", "authority_mode": "off",
              "writer": native["writer_url"], "audience": native["audience"],
@@ -118,7 +127,8 @@ class FixturePreparationTests(unittest.TestCase):
                                "prefix": "isolated-run/"},
             "control_object": "gateway/control.json", "generation": "g1",
             "registry": "vlitemeasrun", "base_image": BASE,
-            "fixture_repository": "vlite-gateway-measure-fixture"}
+            "fixture_repository": "vlite-gateway-measure-fixture",
+            "poll_interval_ms": 100, "revocations": 1}
 
     def write_plan(self, **changes):
         plan = {**self.plan, **changes}
@@ -231,6 +241,39 @@ class FixturePreparationTests(unittest.TestCase):
         with patch.object(fixture, "WORK_ROOT", self.outer / "missing"):
             self.assert_failed(self.run_prepare(), "private_directory_required")
 
+    def test_polling_and_revocations_reach_bootstrap_and_both_role_configs(self):
+        for poll in (1, 100, 250, 500, 1000, 2000, 5000):
+            with self.subTest(poll=poll):
+                status, out, err, native = self.run_prepare(poll_interval_ms=poll, revocations=10)
+                self.assertEqual((status, err), (0, ""))
+                self.assertEqual(native.configs[0]["poll_interval_ms"], poll)
+                self.assertEqual(native.configs[0]["revocations"], 10)
+                self.assertEqual(native.configs[0]["max_replicas"], 2)
+                summary = json.loads(out)
+                for role, name in (("gateway", "gateway.json"), ("writer", "trust.json"),
+                                   ("reader", "trust.json")):
+                    files = self.decode_export(summary["exports"][role]["file"])[2]["files"]
+                    self.assertEqual(json.loads(base64.b64decode(files[name]))["poll_interval_ms"], poll)
+                fixture.clear(self.root)
+
+    def test_bootstrap_cannot_silently_ignore_polling_or_revocation_settings(self):
+        for name, field, value in (("gateway.json", "poll_interval_ms", 1000),
+                                   ("trust.json", "poll_interval_ms", 1000),
+                                   ("gateway.json", "max_replicas", 1),
+                                   ("manifest.json", "credentials", [])):
+            with self.subTest(name=name, field=field):
+                native = FakeNative()
+                def mismatch(argv, timeout, work, serving=False):
+                    result = native(argv, timeout, work, serving)
+                    path = self.root / "bootstrap" / name
+                    config = json.loads(path.read_bytes())
+                    config[field] = value
+                    put(path, config)
+                    return result
+                self.assert_failed(self.run_prepare(native=mismatch), "bootstrap_settings_mismatch")
+                self.assertEqual(len(native.calls), 1)
+                self.assertEqual(list(self.root.iterdir()), [])
+
     def test_production_root_is_fixed(self):
         self.assertEqual(SPEC.loader.get_source("gateway_fixture").count(
             'WORK_ROOT = Path("/measurement")'), 1)
@@ -242,6 +285,9 @@ class FixturePreparationTests(unittest.TestCase):
                 ({"registry": "otherregistry"}, "invalid_plan"),
                 ({"generation": "Bad"}, "invalid_plan"),
                 ({"unknown": 1}, "invalid_plan"),
+                *[({key: value}, "invalid_plan")
+                  for key, maximum in (("poll_interval_ms", 5000), ("revocations", 100))
+                  for value in (True, "100", 0, maximum + 1, 1.5)],
                 ({"server": "relative/server"}, "unsafe_path"),
                 ({"control_target": {**self.plan["control_target"], "auth": "shared_key"}},
                  "invalid_plan")):

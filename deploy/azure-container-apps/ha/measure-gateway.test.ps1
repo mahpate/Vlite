@@ -103,9 +103,11 @@ function New-Fixture([long]$Started, [scriptblock]$Tamper) {
 }
 
 function Get-Replicas([string]$App, [int]$Count, [string]$Suffix = 'x') {
+    $role = switch -Wildcard ($App) { '*-gw' { 'gateway' } '*-wr' { 'writer' } '*-rd' { 'reader' } }
     $list = @(for ($i = 1; $i -le $Count; $i++) {
-        @{ name = "$App--r1-$Suffix$i"; properties = @{ createdTime = '2026-11-18T00:00:00Z'
-            containers = @(@{ ready = $true; runningState = 'Running'; restartCount = 0 }) } }
+        @{ name = "$App--r1-$Suffix$i"; id = "$base/providers/Microsoft.App/containerApps/$App/revisions/$App--r1/replicas/$App--r1-$Suffix$i"
+            properties = @{ createdTime = '2026-11-18T00:00:00Z'
+                containers = @(@{ name = $role; ready = $true; runningState = 'Running'; restartCount = 0 }) } }
     })
     return ,$list
 }
@@ -142,6 +144,8 @@ function Reset-Mock([string]$Measurement, [string[]]$Dirty = @()) {
     $script:AnalysisLog = New-Frame (Report ([ordered]@{ schema = 'vlite-meas005/1'; stage = 'analysis'; complete = $true; replicas = @() }))
     $script:AnalysisExit = 0
     $script:ObserverMissing = ''
+    $script:TamperInventory = $null
+    $script:TamperObserver = $null
 }
 
 $script:VLiteMeasIsLinux = $true
@@ -224,14 +228,19 @@ function Invoke-VLiteMeasAz {
             $count = if ($app -like '*-gw') { 2 } else { 1 }
             $before = @($script:Calls | Where-Object { $_ -like 'containerapp job start --name vlite-meas-t26-drv*' }).Count -eq 0
             $suffix = if ($before) { 'x' } else { $script:AfterReplicaSuffix }
-            return ,(Get-Replicas $app $count $suffix)
+            $replicas = Get-Replicas $app $count $suffix
+            if ($script:TamperInventory) { $replicas = @(& $script:TamperInventory $replicas $before) }
+            return ,$replicas
         }
         '^containerapp logs show' {
             $replica = Value '--replica'
             if ($replica -ceq $script:ObserverMissing) { return @() }
             $role = if ($replica -like '*-gw--*') { 'gateway' } else { 'backend' }
-            return New-Frame (Report ([ordered]@{ schema = 'vlite-meas005-observer/1'; replica = $replica; role = $role
-                owns_serving_child = $true; terminated_early = $false; interrupted = $false; events = @() }))
+            $observed = [ordered]@{ schema = 'vlite-meas005-observer/1'; replica = $replica; role = $role
+                app = (Value '--name'); revision = (Value '--revision')
+                owns_serving_child = $true; terminated_early = $false; interrupted = $false; events = @() }
+            if ($script:TamperObserver) { & $script:TamperObserver $observed }
+            return New-Frame (Report $observed)
         }
         '^monitor log-analytics query' { throw 'no rows' }
         default { return @{ id = 'ok' } }
@@ -323,7 +332,7 @@ try {
         $build = ($steps | Where-Object Step -ceq 'BuildFixtureImage').Arguments
         Assert (($build[0..11] -join ' ') -ceq 'acr build --registry vlitemeast26 --platform linux/amd64 --no-logs --file /measurement/image/Dockerfile --image gateway-measure-fixture:t26-<fixture-sha12> /measurement/image') 'Fixture build must follow the helper plan'
         $fixturePlan = ($steps | Where-Object Step -ceq 'PrepareFixture').Manifest
-        Assert ((@($fixturePlan.Keys) -join ',') -ceq 'server,writer_url,audience,control_target,control_object,generation,registry,base_image,fixture_repository') 'Fixture plan keys differ'
+        Assert ((@($fixturePlan.Keys) -join ',') -ceq 'server,writer_url,audience,control_target,control_object,generation,registry,base_image,fixture_repository,poll_interval_ms,revocations') 'Fixture plan keys differ'
         Assert ($fixturePlan.writer_url -ceq 'https://vlite-meas-t26-wr.internal.<default-domain>') 'Fixture writer URL differs'
         foreach ($create in $steps | Where-Object { $_.Step -cin 'CreateApp', 'CreatePublishJob', 'CreateDriverJob' }) {
             $manifest = $create.Manifest
@@ -352,10 +361,13 @@ try {
         $driver = ($steps | Where-Object Step -ceq 'CreateDriverJob').Manifest.properties.configuration.secrets
         $native = ($driver | Where-Object name -ceq 'cfg-native').value | ConvertFrom-Json -AsHashtable
         if ($measurement -ceq 'MEAS-004') {
+            Assert ($fixturePlan.poll_interval_ms -eq 1000 -and $fixturePlan.revocations -eq 10) 'MEAS-004 fixture defaults changed'
             Assert (($native.rates -join ',') -ceq '5' -and $native.requested.trial -ceq 'fixed-two') 'MEAS-004 pilot settings differ'
             Assert ($native.direct_url -ceq 'https://vlite-meas-t26-wr.internal.<default-domain>') 'Direct URL differs'
         } else {
-            Assert ($native.poll_interval_ms -eq 1000 -and $native.mutations -eq 3 -and $native.seed -eq 1) 'MEAS-005 pilot settings differ'
+            Assert ($native.poll_interval_ms -eq 100 -and $native.observation_deadline_ms -eq 1000 -and
+                $native.mutations -eq 3 -and $native.seed -eq 1 -and $fixturePlan.poll_interval_ms -eq 100 -and
+                $fixturePlan.revocations -eq 1) 'MEAS-005 pilot settings differ'
             $observe = ((($steps | Where-Object { $_.Step -ceq 'CreateApp' -and $_.Role -ceq 'gateway' }).Manifest.properties.configuration.secrets |
                 Where-Object name -ceq 'cfg-run').value | ConvertFrom-Json -AsHashtable)
             Assert ($observe.operation -ceq 'observe' -and $observe.observe_interval_ms -eq 50 -and $observe.duration_secs -eq 1200 -and
@@ -366,6 +378,17 @@ try {
         Measurements = @('MEAS-004'); GatewayProfile = 'full' } 6>$null)
     $native = (($full | Where-Object Step -ceq 'CreateDriverJob').Manifest.properties.configuration.secrets | Where-Object name -ceq 'cfg-native').value | ConvertFrom-Json -AsHashtable
     Assert (($native.rates -join ',') -ceq '50,200,800,1600' -and $native.duration_secs -eq 180 -and $native.max_in_flight -eq 256) 'Full MEAS-004 settings differ from the contract'
+    foreach ($poll in 1, 100, 250, 500, 1000, 2000, 5000) {
+        $steps = @(Invoke-VLiteMeas -Options @{ Id = "sweep$poll"; SourceRevision = $revision; Plan = $true
+            OutDir = (Join-Path $scratch "sweep-$poll"); Measurements = @('MEAS-005')
+            GatewayProfile = 'full'; GatewayPollMs = "$poll" } 6>$null)
+        $fixturePlan = ($steps | Where-Object Step -ceq 'PrepareFixture').Manifest
+        $native = (($steps | Where-Object Step -ceq 'CreateDriverJob').Manifest.properties.configuration.secrets |
+            Where-Object name -ceq 'cfg-native').value | ConvertFrom-Json -AsHashtable
+        Assert ($fixturePlan.poll_interval_ms -eq $poll -and $fixturePlan.revocations -eq 10 -and
+            $native.poll_interval_ms -eq $poll -and $native.observation_deadline_ms -eq 30000 -and
+            $native.mutations -eq 20) "Sweep $poll does not share effective settings"
+    }
 
     # ---- Option refusals. ----
     $opts = @{ Id = 't26'; SourceRevision = $revision; OutDir = (Join-Path $scratch 'opts'); Plan = $true }
@@ -375,7 +398,12 @@ try {
         @{ Measurements = @('MEAS-004'); ControlProgram = '/x/y' }, @{ Measurements = @('MEAS-005'); GatewayProfile = 'huge' },
         @{ Measurements = @('MEAS-005'); FixtureServer = 'relative/server' }, @{ Measurements = @('MEAS-005'); FixtureServer = '/a/../b' },
         @{ Measurements = @('MEAS-007'); FixtureServer = '/a/b' }, @{ Measurements = @('MEAS-002'); GatewayProfile = 'pilot' },
-        @{ Measurements = @('MEAS-004', 'MEAS-005') }, @{ Measurements = @('MEAS-004'); Samples = '5' }
+        @{ Measurements = @('MEAS-004', 'MEAS-005') }, @{ Measurements = @('MEAS-004'); Samples = '5' },
+        @{ Measurements = @('MEAS-004'); GatewayPollMs = '100' }, @{ Measurements = @('MEAS-006'); GatewayPollMs = '100' },
+        @{ Measurements = @('MEAS-002'); GatewayPollMs = '100' }, @{ Measurements = @('MEAS-007'); GatewayPollMs = '100' },
+        @{ Measurements = @('MEAS-005'); GatewayPollMs = '' }, @{ Measurements = @('MEAS-005'); GatewayPollMs = '0' },
+        @{ Measurements = @('MEAS-005'); GatewayPollMs = '5001' }, @{ Measurements = @('MEAS-005'); GatewayPollMs = '1.5' },
+        @{ Measurements = @('MEAS-005'); GatewayPollMs = 'true' }
     )) {
         $candidate = $opts.Clone(); foreach ($key in $bad.Keys) { $candidate[$key] = $bad[$key] }
         $failed = $false
@@ -464,6 +492,47 @@ try {
     Assert ($mutate.target_file -ceq '/measurement/control-target.json' -and $mutate.server -ceq '/usr/local/bin/vlite-server' -and $mutate.mode -ceq 'run') 'Mutate config differs'
     Assert-Cleaned $result 'MEAS-005'
 
+    foreach ($field in 'app', 'revision') {
+        Reset-Mock 'MEAS-005'
+        $script:TamperObserver = { param($report) $report[$field] = 'foreign' }.GetNewClosure()
+        $result = Invoke-Live 'MEAS-005'
+        Assert ($result.Summary.incompleteReasons -contains 'ObserverReportMissing' -and
+            $result.Summary.incompleteReasons -contains 'AnalysisNotRun') "Foreign observer $field was accepted"
+    }
+
+    Reset-Mock 'MEAS-005'
+    $script:TamperInventory = { param($replicas, $before)
+        if (-not $before) {
+            [array]::Reverse($replicas)
+            foreach ($replica in $replicas) { $replica.properties.containers[0].ready = $false }
+        }
+        $replicas
+    }
+    $result = Invoke-Live 'MEAS-005'
+    Assert ($result.Summary.inventory.fixed -and -not $result.Error) 'Reordered inventory and intentionally stopped observers must preserve fixed identity'
+
+    foreach ($badCount in $null, '', '0', $false, -1, 0.5) {
+        Reset-Mock 'MEAS-005'
+        $script:TamperInventory = { param($replicas, $before)
+            $replicas[0].properties.containers[0].restartCount = $badCount
+            $replicas
+        }.GetNewClosure()
+        $result = Invoke-Live 'MEAS-005'
+        Assert ($result.Summary.failureReason -ceq 'Inventory') 'Missing or malformed restart count was accepted'
+        Assert (-not ($script:Calls | Where-Object { $_ -like 'containerapp job start --name vlite-meas-t26-drv*' })) 'Invalid inventory must stop before driver writes'
+    }
+
+    foreach ($inventoryTamper in
+        { param($replicas, $before) $replicas[0].id = ''; $replicas },
+        { param($replicas, $before) $replicas[0].id = $replicas[0].id.Replace('/containerApps/', '/foreignApps/'); $replicas },
+        { param($replicas, $before) $replicas[0].properties.containers[0].name = 'foreign'; $replicas },
+        { param($replicas, $before) $replicas[0]; $replicas[0] }) {
+        Reset-Mock 'MEAS-005'
+        $script:TamperInventory = $inventoryTamper
+        $result = Invoke-Live 'MEAS-005'
+        Assert ($result.Summary.failureReason -ceq 'Inventory') 'Missing, foreign or duplicate identity was accepted'
+    }
+
     Reset-Mock 'MEAS-005'
     $script:JobStatus['vlite-meas-t26-drv'] = 'Failed'
     $script:DriverLog = New-Frame (Report ([ordered]@{ schema = 'vlite-meas005/1'; stage = 'mutations'; complete = $false
@@ -517,6 +586,22 @@ try {
     Assert (($env | Where-Object name -ceq 'VLITE_RESOURCE_SOURCE_DIRTY_PATHS').value -ceq " M deploy/x.ps1`n?? new file.txt") 'Dirty paths env differs'
 
     # ---- Credential window is a hard bound. ----
+    foreach ($elapsed in 782700L, 782701L) {
+        Reset-Mock 'MEAS-005'
+        $script:OnCall = { param($line)
+            if ($line -like 'containerapp job create --name vlite-meas-t26-drv*') { $script:Now += $elapsed }
+        }
+        $result = Invoke-Live 'MEAS-005'
+        if ($elapsed -eq 782700L) {
+            Assert (-not $result.Error) 'Exact conservative pilot observer window should pass'
+        } else {
+            Assert ($result.Summary.failureReason -ceq 'ObserverWindow' -and
+                $result.Summary.failedStep -ceq 'StartDriver') 'Insufficient observer lifetime must stop before mutation'
+            Assert (-not ($script:Calls | Where-Object { $_ -like 'containerapp job start --name vlite-meas-t26-drv*' })) 'Driver started after conservative observer window elapsed'
+        }
+        Assert-Cleaned $result 'observer-window'
+    }
+
     Reset-Mock 'MEAS-004'
     $script:OnCall = { param($line) if ($line -like 'acr build*gateway-measure-fixture*') { $script:Now += 7100000 } }
     $result = Invoke-Live 'MEAS-004'

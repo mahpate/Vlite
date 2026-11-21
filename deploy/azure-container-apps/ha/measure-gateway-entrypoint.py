@@ -528,9 +528,12 @@ def validate_evidence(data, schema, config, code):
                 and isinstance(report.get("windows"), list)
                 and 1 <= len(report["windows"]) <= 25, "evidence_shape")
     else:
-        require(code == 0 and all(isinstance(report.get(k), (int, float))
-                and not isinstance(report[k], bool) and math.isfinite(report[k])
-                for k in ("start_unix_ms", "end_unix_ms", "elapsed_ms")),
+        require(code == 0 and all(type(report.get(k)) is int
+                and 0 <= report[k] <= 2**64 - 1 for k in ("start_unix_ms", "end_unix_ms"))
+                and type(report.get("elapsed_ms")) in (int, float)
+                and 0 <= report["elapsed_ms"] <= 60000
+                and report["end_unix_ms"] >= report["start_unix_ms"]
+                and abs(report["end_unix_ms"] - report["start_unix_ms"] - report["elapsed_ms"]) <= 10,
                 "evidence_shape")
     # Native evidence contains no private config or credential fields.
     forbidden = {"token", "bearer", "signing_key", "signing_key_file", "client_id",

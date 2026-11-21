@@ -245,9 +245,11 @@ The planned live order is:
    driver job. Each gets only its own role's projections, a role-specific
    control target and the exact fixture image digest. Remove the local
    fixture with `cleanup` right after distribution.
-6. Record replica inventory; any restart refuses the run. Start the driver
-   once, verify its evidence, and record inventory again. A changed
-   inventory marks the run `Incomplete`.
+6. Record sorted app/revision/replica/container identities; missing or invalid
+   restart counts, duplicate or foreign identities refuse the run. Any
+   restart refuses it too. Start the driver once, verify its evidence, and
+   record inventory again. Changed identities mark the run `Incomplete`;
+   ordering changes and observers' intentional final shutdown do not.
 7. MEAS-005 only: wait for the bounded observer window, then collect one
    observer report per recorded replica. Run the offline analysis when every
    report is present.
@@ -262,10 +264,37 @@ fails with `CredentialWindow`. Errors are static
 (`<MEAS> failed at <step>; diagnostics withheld.`). The summary records a
 fixed `failureReason` code and never includes identifiers or secrets.
 
-Clock calibration is not implemented. MEAS-005 summaries therefore always
-carry `ClockCalibrationUnavailable` and stay `Incomplete`. The fixed fixture
-bootstraps with a 1,000 ms poll, so the contract's 100 ms pilot setting and
-poll sweep cannot be run.
+MEAS-005 also checks remaining observer lifetime immediately before mutation.
+Its conservative start is recorded before creating the first observer app,
+not when all apps eventually become ready. The remaining window must cover
+the native worst-case driver budget:
+`mutations * (observation_deadline_ms + poll_interval_ms + 138000)`.
+Otherwise `ObserverWindow` stops the run before the driver starts. Full
+profiles have little setup slack and may refuse even with valid credentials;
+this does not justify shortening the budget or extending a qualification gate.
+
+MEAS-005's pilot now uses the contract's 100 ms poll, one sacrificial
+revocation, three mutations and 1,000 ms observation deadline. Full profiles
+use ten revocations, twenty mutations and a 30,000 ms deadline. The
+MEAS-005-only `-GatewayPollMs` accepts an integer from 1 through 5,000; its
+default is 100 for `pilot` and 1,000 for `full`. The proposed full sweep uses
+100, 250, 500, 1,000, 2,000 and 5,000 ms, each in a separate, isolated
+fresh run. It is not an automatic retry or sweep. Fixture preparation
+forwards and verifies the poll, replica cap and revocation count before
+export; gateway and both backend polls must match the mutator. MEAS-004
+retains its existing 1,000 ms poll and ten revocations.
+
+Clock calibration is still not implemented. MEAS-005 summaries carry
+`ClockCalibrationUnavailable` and stay `Incomplete`. Sampling observers alone
+does not calibrate the actual mutator job, and before/after agreement does
+not establish a run-wide ACA clock-motion bound. No zero offsets, operator
+UTC or assumed NTP precision substitute for that evidence. Clock reports
+now refuse noninteger/negative UTC values, reversed timestamps, elapsed
+values outside the one-minute sample bound, and wall/monotonic disagreement
+above the existing 10 ms limit. These checks do not supply calibration.
+Observer evidence must match its recorded app and revision, and the
+analyzer requires conservative lifetime through the entire command plus
+observation deadline, not merely through an early matching observation.
 
 The first live MEAS-004 attempt failed at `BuildMeasureImage` with
 `failureReason: Unclassified`; no fixture digest, publish execution, driver

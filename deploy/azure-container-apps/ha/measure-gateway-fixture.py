@@ -24,7 +24,8 @@ Plan JSON keys (all required, unknown keys refused): server (absolute Linux
 vlite-server built from the source revision), writer_url, audience,
 control_target {account, container, coordination_container, prefix} (written
 as managed_identity, no client_id), control_object, generation, registry,
-base_image (REGISTRY.azurecr.io/REPO@sha256:DIGEST), fixture_repository.
+base_image (REGISTRY.azurecr.io/REPO@sha256:DIGEST), fixture_repository,
+poll_interval_ms (integer 1..5000), revocations (integer 1..100).
 VLITE_RESOURCE_SOURCE_REVISION / VLITE_RESOURCE_SOURCE_DIRTY_PATHS supply source.
 
 stdout is one public JSON summary: digests, file paths, the conservative
@@ -56,7 +57,8 @@ ROLES = ("driver", "gateway", "writer", "reader")
 FIXTURE_FILE = "/opt/vlite-measure/fixture/database.vlite"
 CREDENTIAL_LIFETIME_MS = 7_200_000
 PLAN_KEYS = {"server", "writer_url", "audience", "control_target", "control_object",
-             "generation", "registry", "base_image", "fixture_repository"}
+             "generation", "registry", "base_image", "fixture_repository",
+             "poll_interval_ms", "revocations"}
 TARGET_KEYS = {"account", "container", "coordination_container", "prefix"}
 REPOSITORY = "[a-z0-9]+(?:[._/-][a-z0-9]+)*"
 
@@ -97,6 +99,9 @@ def private_mkdir(path):
 def load_plan(path):
     plan = entry.read_json(entry.absolute(path))
     require(isinstance(plan, dict) and set(plan) == PLAN_KEYS, "invalid_plan")
+    require(type(plan["poll_interval_ms"]) is int and 1 <= plan["poll_interval_ms"] <= 5000
+            and type(plan["revocations"]) is int and 1 <= plan["revocations"] <= 100,
+            "invalid_plan")
     entry.absolute(plan["server"])
     target = plan["control_target"]
     require(isinstance(target, dict) and set(target) == TARGET_KEYS, "invalid_plan")
@@ -185,7 +190,9 @@ def build(root, plan, revision, dirty):
     native = root / "bootstrap-config.json"
     entry.write_new(native, entry.encode({"output_dir": str(bootstrap),
         "control_state": {"target_file": str(target_file), "object": plan["control_object"]},
-        "writer_url": plan["writer_url"], "audience": plan["audience"]}))
+        "writer_url": plan["writer_url"], "audience": plan["audience"],
+        "poll_interval_ms": plan["poll_interval_ms"], "max_replicas": 2,
+        "revocations": plan["revocations"]}))
     config = root / "runtime-bootstrap.json"
     entry.write_new(config, entry.encode({**common, "operation": "bootstrap",
                                           "native_config": str(native)}))
@@ -197,6 +204,13 @@ def build(root, plan, revision, dirty):
     require(gateway["control_state"]["target_file"] == str(target_file)
             and all(isinstance(c, dict) and Path(c.get("token_file", "")).parent == bootstrap
                     for c in manifest.get("credentials", [])), "artifact_path_mismatch")
+    trust = entry.read_json(bootstrap / "trust.json")
+    require(all(type(config.get("poll_interval_ms")) is int
+                and config["poll_interval_ms"] == plan["poll_interval_ms"]
+                for config in (gateway, trust))
+            and type(gateway.get("max_replicas")) is int and gateway["max_replicas"] == 2
+            and sum(c.get("purpose") == "revocation" for c in manifest["credentials"])
+                == plan["revocations"], "bootstrap_settings_mismatch")
     database = entry.read_bytes(bootstrap / "database.vlite", entry.FIXTURE_LIMIT)
     require(entry.digest(database) == fixture_sha256, "fixture_checksum")
     secrets = [entry.read_bytes(p).strip() for p in entry.bounded_tree(bootstrap)

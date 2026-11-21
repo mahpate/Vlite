@@ -156,6 +156,17 @@ class RuntimeTests(unittest.TestCase):
         self.assertEqual(runtime.verify_frame(runtime.frame(data)), data)
         self.assertFalse(any(self.work.glob("native-*")))
 
+    def test_clock_refuses_invalid_timestamps_and_wall_monotonic_disagreement(self):
+        for changes in ({"start_unix_ms": -1}, {"start_unix_ms": 1000.0},
+                        {"start_unix_ms": True}, {"end_unix_ms": 999},
+                        {"end_unix_ms": 2**64}, {"elapsed_ms": -1},
+                        {"elapsed_ms": True}, {"elapsed_ms": 60001},
+                        {"end_unix_ms": 1012, "elapsed_ms": 1}):
+            with self.subTest(changes=changes):
+                self.fail(self.config, "evidence_shape", output=self.report(**changes))
+        (code, _), _ = self.call(self.config, output=self.report(elapsed_ms=0.25))
+        self.assertEqual(code, 0)
+
     def test_strict_outer_config_and_provenance(self):
         for override in ({"unknown": True}, {"timeout_secs": 0}, {"timeout_secs": True},
                          {"source_revision": "A" * 40}, {"role": "bogus"},

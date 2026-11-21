@@ -31,6 +31,16 @@ function Test-VLiteMeasGatewayParameters([hashtable]$Config, [hashtable]$Options
     }
     if (-not $Config.GatewayProfile) { $Config.GatewayProfile = 'pilot' }
     if ($Config.GatewayProfile -cnotin @('pilot', 'full')) { throw 'GatewayProfile must be pilot or full.' }
+    if ($Options.ContainsKey('GatewayPollMs')) {
+        if (-not $meas005) { throw 'GatewayPollMs is not supported for the selected measurement.' }
+        $poll = 0L
+        if ([string]$Config.GatewayPollMs -cnotmatch '\A[0-9]+\z' -or
+            -not [long]::TryParse([string]$Config.GatewayPollMs, [ref]$poll) -or
+            $poll -lt 1 -or $poll -gt 5000) { throw 'GatewayPollMs is outside the probe limits.' }
+        $Config.GatewayPollMs = $poll
+    } else {
+        $Config.GatewayPollMs = if ($meas005 -and $Config.GatewayProfile -ceq 'pilot') { 100L } else { 1000L }
+    }
     foreach ($name in 'FixtureServer', 'ControlProgram') {
         $value = [string]$Config[$name]
         if ($value -and ($value -cnotmatch '\A(?:/[A-Za-z0-9._-]+)+\z' -or $value -cmatch '/\.\.?(?:/|\z)')) {
@@ -58,6 +68,9 @@ function Test-VLiteMeasGatewayParameters([hashtable]$Config, [hashtable]$Options
 
 function Get-VLiteMeasGatewaySettings([hashtable]$Config) {
     $full = $Config.GatewayProfile -ceq 'full'
+    $controlPilot = $Config.Measurements[0] -ceq 'MEAS-005' -and -not $full
+    $mutations = if ($full) { 20 } else { 3 }
+    $deadline = if ($controlPilot) { 1000L } else { 30000L }
     $load = if ($full) {
         [ordered]@{ rates = @(50, 200, 800, 1600); duration_secs = 180; warmup_secs = 30; recovery_secs = 180
             max_in_flight = 256; timeout_ms = 5000 }
@@ -66,9 +79,11 @@ function Get-VLiteMeasGatewaySettings([hashtable]$Config) {
     }
     return @{
         Load = $load
-        # Pilot deviation (recorded in measure.md): the fixed fixture bootstraps with
-        # poll 1000 ms and 10 revocations, so the contract's poll-100 pilot is impossible.
-        Mutations = if ($full) { 20 } else { 3 }
+        PollIntervalMs = $Config.GatewayPollMs
+        Revocations = if ($controlPilot) { 1 } else { 10 }
+        ObservationDeadlineMs = $deadline
+        Mutations = $mutations
+        DriverBoundMs = $mutations * ($deadline + $Config.GatewayPollMs + 138000L)
         ObserverSecs = if ($full) { 3540L } else { 1200L }
     }
 }
@@ -133,8 +148,8 @@ function Get-VLiteMeasGatewaySecrets([hashtable]$Config, [string]$Role, [string]
                 $run = Doc 'mutate' ([ordered]@{ native_config = '/measurement/in/cfg-native' })
                 $native = [ordered]@{ mode = 'run'; server = '/usr/local/bin/vlite-server'
                     bootstrap_dir = '/measurement/bootstrap'; target_file = '/measurement/control-target.json'
-                    object = 'gateway/control.json'; gateway_url = $Values.GatewayUrl; poll_interval_ms = 1000
-                    observation_deadline_ms = 30000; mutations = $settings.Mutations; seed = 1
+                    object = 'gateway/control.json'; gateway_url = $Values.GatewayUrl; poll_interval_ms = $settings.PollIntervalMs
+                    observation_deadline_ms = $settings.ObservationDeadlineMs; mutations = $settings.Mutations; seed = 1
                     requested = [ordered]@{ gateway_replicas = '2'; writer_replicas = '1'; reader_replicas = '1'
                         gateway_cpu = '1'; gateway_memory = '2Gi'; writer_cpu = '1'; writer_memory = '2Gi'
                         reader_cpu = '0.5'; reader_memory = '1Gi'; driver_cpu = '1'; driver_memory = '2Gi'
@@ -237,12 +252,14 @@ function Get-VLiteMeasGatewayValues([hashtable]$Config, [string]$Subscription, [
 
 function New-VLiteMeasFixturePlan([hashtable]$Config, [string]$Domain, [string]$Digest) {
     $server = if ($Config.FixtureServer) { $Config.FixtureServer } else { '<fixture-server>' }
+    $settings = Get-VLiteMeasGatewaySettings $Config
     return [ordered]@{
         server = $server; writer_url = "https://$($Config.Apps.writer).internal.$Domain"; audience = 'measurement-writer'
         control_target = [ordered]@{ account = $Config.StorageAccount; container = 'control-data'
             coordination_container = 'control-coordination'; prefix = "meas-$($Config.Id)/" }
         control_object = 'gateway/control.json'; generation = $Config.Id; registry = $Config.Registry
         base_image = "$($Config.Registry).azurecr.io/gateway-measure@$Digest"; fixture_repository = 'gateway-measure-fixture'
+        poll_interval_ms = $settings.PollIntervalMs; revocations = $settings.Revocations
     }
 }
 
@@ -334,7 +351,8 @@ function New-VLiteMeasGatewayPlan([hashtable]$Config) {
         Add 'InventoryAfter' @('containerapp', 'replica', 'list', '--name', $Config.Apps[$role], '--resource-group', $rg) $role
     }
     if ($meas005) {
-        Add 'ReadObserver' @('containerapp', 'logs', 'show', '--name', '<app>', '--resource-group', $rg, '--replica', '<replica>',
+        Add 'ReadObserver' @('containerapp', 'logs', 'show', '--name', '<app>', '--resource-group', $rg,
+            '--revision', '<revision>', '--replica', '<replica>',
             '--container', '<container>', '--tail', '300', '--format', 'text', '--type', 'console')
         Add 'QueryObserver' @('monitor', 'log-analytics', 'query', '--workspace', '<workspace-id>', '--analytics-query',
             "ContainerAppConsoleLogs_CL | where ContainerAppName_s == '<app>' and tostring(column_ifexists('ContainerGroupName_s', '')) == '<replica>' | order by TimeGenerated asc | project Log_s",
@@ -660,25 +678,41 @@ function Invoke-VLiteMeasGateway([hashtable]$Config) {
     }
     function Read-Inventory([string]$Name) {
         $inventory = [ordered]@{}; $ready = $true
-        foreach ($role in $Config.Apps.Keys) {
+        foreach ($role in @($Config.Apps.Keys | Sort-Object -CaseSensitive)) {
             $listed = InvokeGatewayStep $Name $role
             if ($listed -isnot [array]) { throw (New-VLiteMeasFailure 'Inventory' 'Replica inventory is not a list.') }
+            $app = $Config.Apps[$role]
+            $prefix = "/subscriptions/$($Config.SubscriptionId)/resourceGroups/$($Config.ResourceGroup)/providers/Microsoft.App/containerApps/$app/revisions/"
+            $seen = [Collections.Generic.HashSet[string]]::new([StringComparer]::Ordinal)
             $replicas = @(foreach ($replica in $listed) {
                 $replicaName = [string]$replica.name
-                if ($replicaName -cnotmatch '\A[a-z0-9][a-z0-9-]{0,252}\z') {
-                    throw (New-VLiteMeasFailure 'Inventory' 'Replica inventory contains an invalid name.')
+                $identity = [regex]::Match([string]$replica.id,
+                    "\A$([regex]::Escape($prefix))(?<revision>[a-z0-9][a-z0-9-]{0,252})/replicas/$([regex]::Escape($replicaName))\z",
+                    [Text.RegularExpressions.RegexOptions]::IgnoreCase)
+                if ($replicaName -cnotmatch '\A[a-z0-9][a-z0-9-]{0,252}\z' -or
+                    -not $identity.Success -or -not $seen.Add($replicaName)) {
+                    throw (New-VLiteMeasFailure 'Inventory' 'Replica inventory contains a missing, duplicate or foreign identity.')
                 }
+                $revision = $identity.Groups['revision'].Value
                 $restarts = 0L
+                if (@($replica.properties.containers).Count -ne 1) {
+                    throw (New-VLiteMeasFailure 'Inventory' 'Replica inventory lacks its single measurement container.')
+                }
                 foreach ($container in @($replica.properties.containers)) {
+                    if ([string]$container.name -cne $role -or
+                        ($container.restartCount -isnot [int] -and $container.restartCount -isnot [long]) -or
+                        $container.restartCount -lt 0 -or $container.restartCount -gt [int]::MaxValue) {
+                        throw (New-VLiteMeasFailure 'Inventory' 'Replica inventory lacks its container identity or restart count.')
+                    }
                     $restarts += [long]$container.restartCount
                     if ($container.ready -ne $true -or [string]$container.runningState -cne 'Running') { $ready = $false }
                 }
-                if (@($replica.properties.containers).Count -ne 1) { $ready = $false }
-                [ordered]@{ name = $replicaName; created = [string]$replica.properties.createdTime; restarts = $restarts }
+                [ordered]@{ app = $app; revision = $revision; name = $replicaName; container = $role
+                    created = [string]$replica.properties.createdTime; restarts = $restarts }
             })
             $expected = if ($role -ceq 'gateway') { 2 } else { 1 }
             if ($replicas.Count -ne $expected) { $ready = $false }
-            $inventory[$role] = $replicas
+            $inventory[$role] = @($replicas | Sort-Object -Property { $_['name'] } -CaseSensitive)
         }
         return @{ Inventory = $inventory; Ready = $ready }
     }
@@ -780,6 +814,7 @@ function Invoke-VLiteMeasGateway([hashtable]$Config) {
             # Observers start with the apps and must finish, with slack, before credential expiry.
             Assert-VLiteMeasGatewayTime $deadline (($settings.ObserverSecs * 1000L) + 900000L)
         }
+        $observersStartedNotBefore = Get-VLiteMeasUnixMs
         foreach ($role in $Config.Apps.Keys) { $stage = 'CreateApp'; Create 'CreateApp' $role $serveKind $role }
         $stage = 'CreateDriverJob'; Create 'CreateDriverJob' 'driver' 'driver' 'driver'
         $stage = 'CleanupFixture'
@@ -808,6 +843,13 @@ function Invoke-VLiteMeasGateway([hashtable]$Config) {
 
         $stage = 'StartDriver'
         Assert-VLiteMeasGatewayTime $deadline (($script:VLiteMeasJobTimeoutSecs * 1000L) + $script:VLiteMeasGatewayMarginMs)
+        if ($meas005) {
+            $now = Get-VLiteMeasUnixMs
+            if ($now -lt $observersStartedNotBefore -or
+                $now + $settings.DriverBoundMs -gt $observersStartedNotBefore + ($settings.ObserverSecs * 1000L)) {
+                throw (New-VLiteMeasFailure 'ObserverWindow' 'Insufficient conservative observer lifetime for the driver.')
+            }
+        }
         $execution = Start-Job 'StartDriver' $Config.DriverJob
         $summary.driverExecution = $execution
         $stage = 'PollDriver'
@@ -850,12 +892,14 @@ function Invoke-VLiteMeasGateway([hashtable]$Config) {
                 $observerRole = if ($role -ceq 'gateway') { 'gateway' } else { 'backend' }
                 foreach ($replica in $summary.inventory.before[$role]) {
                     $index++
-                    $map = @{ '<app>' = $Config.Apps[$role]; '<replica>' = $replica.name; '<container>' = $role
+                    $map = @{ '<app>' = $replica.app; '<revision>' = $replica.revision
+                        '<replica>' = $replica.name; '<container>' = $replica.container
                         '<workspace-id>' = $workspace }
                     try {
                         $observed = (Get-VLiteMeasEvidence (Expand 'ReadObserver' '' $map) (Expand 'QueryObserver' '' $map) ([ordered]@{})).Bytes
                         $report = Assert-VLiteMeasGatewayReport $observed 'vlite-meas005-observer/1' $Config $privateValues
-                        if ($report.replica -cne $replica.name -or $report.role -cne $observerRole) { throw 'identity' }
+                        if ($report.replica -cne $replica.name -or $report.role -cne $observerRole -or
+                            $report.app -cne $replica.app -or $report.revision -cne $replica.revision) { throw 'identity' }
                     } catch { Add-Incomplete 'ObserverReportMissing'; continue }
                     $name = "MEAS-005-observer-$index.json"
                     Save-Evidence $name $observed 'observer'

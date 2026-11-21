@@ -511,7 +511,9 @@ uncertainty 0..60000 ms. The analyzer additionally expands bounds by observed
 observer clock drift plus a declared 10 ms mutator drift allowance. A >10 ms
 observer clock jump or command wall/monotonic mismatch makes timing incomplete.
 It requires observed lifetime to conservatively cover each whole command and
-observation, the target generation exactly, backend floor >= target, and first
+the entire observation deadline (`command_end + observation_deadline_ms`),
+even when the target is observed earlier; the target generation exactly,
+backend floor >= target, and first
 observation by the declared deadline. A skipped target generation is not a
 successful sample. For calibrated brackets:
 
