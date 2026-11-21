@@ -220,9 +220,10 @@ def build(root, plan, revision, dirty):
                                  "projections": result["projections"]}
     context = private_mkdir(root / "image")
     copy_fixture_file(bootstrap / "database.vlite", context / "database.vlite")
-    dockerfile = ("# syntax=docker/dockerfile:1\n" f"FROM {plan['base_image']}\n"
-                  "COPY --chown=10001:10001 --chmod=0400 database.vlite "
-                  f"{FIXTURE_FILE}\n")
+    # The fixture uses `az acr build`'s classic builder, unlike the base-image task.
+    dockerfile = (f"FROM {plan['base_image']}\n"
+                  f"COPY --chown=10001:10001 database.vlite {FIXTURE_FILE}\n"
+                  f"RUN chmod 0400 {FIXTURE_FILE}\n")
     entry.write_new(context / "Dockerfile", dockerfile.encode("ascii"))
     require(sorted(p.name for p in context.iterdir()) == ["Dockerfile", "database.vlite"]
             and entry.digest(entry.read_bytes(context / "database.vlite", entry.FIXTURE_LIMIT))

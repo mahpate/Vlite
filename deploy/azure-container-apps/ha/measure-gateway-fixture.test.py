@@ -200,10 +200,10 @@ class FixturePreparationTests(unittest.TestCase):
         self.assertEqual(sorted(p.name for p in context.iterdir()), ["Dockerfile", "database.vlite"])
         self.assertEqual((context / "database.vlite").read_bytes(), DATABASE)
         self.assertEqual((context / "Dockerfile").read_text(),
-            "# syntax=docker/dockerfile:1\n"
             f"FROM {BASE}\n"
-            "COPY --chown=10001:10001 --chmod=0400 database.vlite "
-            "/opt/vlite-measure/fixture/database.vlite\n")
+            "COPY --chown=10001:10001 database.vlite "
+            "/opt/vlite-measure/fixture/database.vlite\n"
+            "RUN chmod 0400 /opt/vlite-measure/fixture/database.vlite\n")
         image = f"vlite-gateway-measure-fixture:g1-{sha[:12]}"
         self.assertEqual(summary["image"]["fixture_file"], "/opt/vlite-measure/fixture/database.vlite")
         self.assertEqual(summary["image"]["image"], f"vlitemeasrun.azurecr.io/{image}")

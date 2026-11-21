@@ -24,9 +24,10 @@ cleanup wait timed out, but a later read-only check confirmed the group absent.
 MEAS-004 cleanup and group absence were also confirmed. Hash-bound cleanup
 follow-ups were preserved beside the unchanged summaries. These failures do
 not qualify HA or SLOs. The gateway image build now uses an ACR task with
-`DOCKER_BUILDKIT=1`, and the MEAS-006 collector is pinned to LF by
-`.gitattributes`; both fixes are offline-tested only and neither has been
-rerun in Azure. The context explicitly excludes `pool-briefs/`. Offline tests:
+`DOCKER_BUILDKIT=1`. A build-only run verified the new path in ACR; it did
+not run a measurement. The MEAS-006 collector is pinned to LF by
+`.gitattributes`; that fix has only been verified offline. The context
+explicitly excludes `pool-briefs/`. Offline tests:
 `python3 -B measure-gateway-fixture.test.py`
 (Linux/WSL) and `pwsh -NoProfile -File measure-gateway.test.ps1`. The second
 suite mocks every Azure CLI call, local process, clock and sleep.
@@ -203,7 +204,7 @@ results and do not qualify the run.
 **This is proposal evidence for fencing overhead, not an SLO, a stale-ack
 window, or HA qualification.**
 
-## MEAS-004/005 gateway orchestration (offline-tested; live attempt failed)
+## MEAS-004/005 gateway orchestration (pilot failed; no measurement evidence)
 
 `-Measurements MEAS-004` or `MEAS-005` dispatches to `measure-gateway.ps1`.
 `-Plan` works on any host. It prints every step with placeholders
@@ -271,10 +272,38 @@ The first live MEAS-004 attempt failed at `BuildMeasureImage` with
 execution or evidence was produced. Cleanup reported `Deleted`, and a later
 read-only check confirmed the group absent. The likely incompatibility was
 using `az acr build` for a Dockerfile that uses BuildKit cache mounts; the
-replacement ACR task explicitly enables BuildKit. This is not yet confirmed by
-a live ACR build. MEAS-006's exit-2 collector failure is addressed by enforcing
-LF, but has not been rerun. MEAS-005 has not been run. Do not claim new
-measurement evidence until a permitted, clean-source diagnostic succeeds.
+replacement ACR task explicitly enables BuildKit. On 2026-11-21 the build-only
+ACR diagnostic `cc1` succeeded from clean `1fa98c5c8702a74c065cfc9c99f1b055327a8b7b`.
+The revision tag resolved to `sha256:79d5b66fd43a21257e51dbfdd6abefd3762b46ca84cf8ae99780618daab1b3b9`
+before the temporary group was confirmed absent. This verifies the replacement
+build path, not the cause of the earlier failure. No fixture, ACA app or job
+was created by the diagnostic.
+
+The isolated MEAS-004 pilot `m496673cd9` then ran from that clean revision
+with a matching native server. It passed the measurement-image build and
+fixture validation but failed at `BuildFixtureImage` with `Unclassified`.
+There was no publish or driver execution and no measurement evidence. The
+fixture was removed. The cleanup wait expired at `WaitDeleted`; a read-only
+check at 2026-11-21T04:32:13Z still found the owned group `Deleting`, with only
+the managed-environment resource listed. The registry had already been
+deleted, so its build logs were unavailable. Preserve the failed summary
+and postflight; do not restart the pilot or overlap its ongoing deletion.
+Next: confirm group absence and diagnose the fixture-image failure before
+another MEAS-004 attempt. MEAS-005 has not run. MEAS-006's collector now uses
+LF, but the fix has not been verified in ACA.
+
+Follow-up at 2026-11-21T04:52:36Z confirmed the pilot group absent; Azure
+recorded deletion succeeding at 04:34:00Z. The original failed summary and
+postflight remain unchanged. A local Docker reproduction then confirmed that
+the generated fixture layer's `COPY --chmod=0400` requires BuildKit, while the
+fixture step uses classic `az acr build`. Unlike the base-image build, this
+layer needs no BuildKit feature: it now uses `COPY --chown=10001:10001` followed
+by `RUN chmod 0400`. A real classic-builder smoke check using a cached
+non-root base verified the unchanged fixture digest, UID/GID 10001 and mode
+0400. This fixes a demonstrated build incompatibility; it does not recover
+the deleted Azure logs or constitute a successful ACA pilot. MEAS-006 run
+`m6lf21a` has started from clean `1fa98c5c` with an LF-only collector. Live
+campaigns remain serialized; MEAS-004 must wait for that run and cleanup.
 
 The following are unverified until a live run:
 
