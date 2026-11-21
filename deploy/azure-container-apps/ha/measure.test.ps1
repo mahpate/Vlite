@@ -216,6 +216,9 @@ try {
 
     $source = (Get-Content -Raw (Join-Path $repo 'Dockerfile')) -split '(?m)^FROM source AS test'
     $docker = Get-Content -Raw (Join-Path $PSScriptRoot 'measure.dockerfile')
+    $collectorBytes = [IO.File]::ReadAllBytes((Join-Path $PSScriptRoot 'meas006-collect.sh'))
+    $collectorText = [Text.Encoding]::UTF8.GetString($collectorBytes)
+    Assert (-not $collectorText.Contains("`r`n")) 'MEAS-006 collector must use LF line endings'
     foreach ($copy in [regex]::Matches($source[0], '(?m)^COPY .+$')) {
         Assert ($docker.Contains($copy.Value.TrimEnd("`r"))) "Missing source input: $($copy.Value)"
     }

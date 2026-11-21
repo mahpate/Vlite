@@ -13,11 +13,21 @@ the `gateway-measure` image) and a contract (`measure-gateway-contract.md`). The
 offline Linux/WSL exact-fixture preparation (`measure-gateway-fixture.py`) is
 also in place. It bootstraps once at `/measurement/bootstrap`. It then exports
 and verifies the four role bundles and writes a private image context for that
-bootstrap's own `database.vlite`. It only plans the `az acr build`.
+bootstrap's own `database.vlite`. It plans the fixture image `az acr build`.
 `measure.ps1` now also contains MEAS-004/005 orchestration
 (`measure-gateway.ps1`; see *MEAS-004/005 gateway orchestration* below). It is
-tested offline only. **It has never been run against Azure, and MEAS-004/005
-have no evidence.** Offline tests: `python3 -B measure-gateway-fixture.test.py`
+tested offline. First live attempts on 2026-11-20/21 produced no evidence:
+MEAS-004 failed at `BuildMeasureImage` with `Unclassified`, and MEAS-005 was not
+started. The MEAS-006 run from clean revision `467f54d` failed at `ReadLogs`
+with `JobFailed` / `FailedMarker` (exit 2); Log Analytics was not queried. Its
+cleanup wait timed out, but a later read-only check confirmed the group absent.
+MEAS-004 cleanup and group absence were also confirmed. Hash-bound cleanup
+follow-ups were preserved beside the unchanged summaries. These failures do
+not qualify HA or SLOs. The gateway image build now uses an ACR task with
+`DOCKER_BUILDKIT=1`, and the MEAS-006 collector is pinned to LF by
+`.gitattributes`; both fixes are offline-tested only and neither has been
+rerun in Azure. The context explicitly excludes `pool-briefs/`. Offline tests:
+`python3 -B measure-gateway-fixture.test.py`
 (Linux/WSL) and `pwsh -NoProfile -File measure-gateway.test.ps1`. The second
 suite mocks every Azure CLI call, local process, clock and sleep.
 
@@ -193,7 +203,7 @@ results and do not qualify the run.
 **This is proposal evidence for fencing overhead, not an SLO, a stale-ack
 window, or HA qualification.**
 
-## MEAS-004/005 gateway orchestration (offline-tested, never run)
+## MEAS-004/005 gateway orchestration (offline-tested; live attempt failed)
 
 `-Measurements MEAS-004` or `MEAS-005` dispatches to `measure-gateway.ps1`.
 `-Plan` works on any host. It prints every step with placeholders
@@ -255,6 +265,16 @@ Clock calibration is not implemented. MEAS-005 summaries therefore always
 carry `ClockCalibrationUnavailable` and stay `Incomplete`. The fixed fixture
 bootstraps with a 1,000 ms poll, so the contract's 100 ms pilot setting and
 poll sweep cannot be run.
+
+The first live MEAS-004 attempt failed at `BuildMeasureImage` with
+`failureReason: Unclassified`; no fixture digest, publish execution, driver
+execution or evidence was produced. Cleanup reported `Deleted`, and a later
+read-only check confirmed the group absent. The likely incompatibility was
+using `az acr build` for a Dockerfile that uses BuildKit cache mounts; the
+replacement ACR task explicitly enables BuildKit. This is not yet confirmed by
+a live ACR build. MEAS-006's exit-2 collector failure is addressed by enforcing
+LF, but has not been rerun. MEAS-005 has not been run. Do not claim new
+measurement evidence until a permitted, clean-source diagnostic succeeds.
 
 The following are unverified until a live run:
 

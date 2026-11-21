@@ -114,6 +114,7 @@ function Reset-Mock([string]$Measurement, [string[]]$Dirty = @()) {
     $script:SourceDirty = @($Dirty)
     $script:Now = 1800000000000L
     $script:Calls = [Collections.Generic.List[string]]::new()
+    $script:BuildStatus = 'Succeeded'
     $script:LocalCalls = [Collections.Generic.List[object]]::new()
     $script:Manifests = @{}
     $script:FixturePlan = $null
@@ -190,6 +191,9 @@ function Invoke-VLiteMeasAz {
         '^group exists' { return $script:GroupExists }
         'check-name' { return @{ nameAvailable = $true } }
         '^group delete' { if ($script:DeleteFails) { throw 'delete failed' }; return }
+        '^acr run' {
+            return @{ status = $script:BuildStatus }
+        }
         '^acr build' { return }
         '^acr repository show .*gateway-measure-fixture:' { return @{ digest = "sha256:$('c' * 64)" } }
         '^acr repository show' { return @{ digest = "sha256:$('b' * 64)" } }
@@ -300,6 +304,13 @@ try {
         $expectedApps = if ($measurement -ceq 'MEAS-005') { 'writer,reader,gateway' } else { 'writer,gateway' }
         Assert (($apps -join ',') -ceq $expectedApps) "$measurement app set differs"
         Assert (@($steps | Where-Object Step -ceq 'PrepareFixture').Count -eq 1) 'Exactly one bootstrap must be planned'
+        $measureBuild = $steps | Where-Object Step -ceq 'BuildMeasureImage'
+        $taskPath = $measureBuild.Arguments[[array]::IndexOf($measureBuild.Arguments, '--file') + 1]
+        $context = $measureBuild.Arguments[-3]
+        Assert (-not [IO.Path]::IsPathRooted($taskPath) -and (Test-Path -LiteralPath (Join-Path $context $taskPath) -PathType Leaf)) 'ACR must resolve the task file inside the uploaded source'
+        $taskYaml = [IO.File]::ReadAllText((Join-Path $context $taskPath))
+        Assert ($taskYaml.Contains('DOCKER_BUILDKIT=1') -and $taskYaml.Contains('--target gateway-measure') -and
+            $taskYaml.Contains('gateway-measure:{{.Values.revision}}') -and $measureBuild.Arguments -ccontains "revision=$revision") 'Build and push must use the pinned source tag'
         $text = $steps | ConvertTo-Json -Depth 30
         foreach ($needle in '<subscription>', '<projections:driver>', '<client-id:gateway>', 'vlite-ha-meas-t26', 'vliteMeasurementOwner=ha-harness') {
             Assert ($text.Contains($needle)) "$measurement plan lacks $needle"
@@ -381,6 +392,13 @@ try {
 
     # ---- Live MEAS-004 orchestration with mocks. ----
     Reset-Mock 'MEAS-004'
+    $script:BuildStatus = 'Failed'
+    $result = Invoke-Live 'MEAS-004'
+    Assert ($result.Summary.failedStep -ceq 'BuildMeasureImage' -and $result.Summary.failureReason -ceq 'GatewayImageBuild') 'Unsuccessful task cannot supply an image'
+    Assert (-not ($script:Calls | Where-Object { $_ -like 'acr repository show*' -or $_ -like 'containerapp *' })) 'Stop provisioning after failed task'
+    Assert-Cleaned $result 'gateway-build-failure'
+
+    Reset-Mock 'MEAS-004'
     $result = Invoke-Live 'MEAS-004'
     Assert (-not $result.Error) "MEAS-004 run failed: $($result.Error)"
     Assert ($result.Summary.status -ceq 'Succeeded' -and $result.Summary.measurementStatus -ceq 'Collected') 'MEAS-004 summary status'
@@ -394,10 +412,12 @@ try {
         $script:FixturePlan.writer_url -ceq 'https://vlite-meas-t26-wr.internal.calm-sea-1.westus2.azurecontainerapps.io' -and
         $script:FixturePlan.base_image -ceq "vlitemeast26.azurecr.io/gateway-measure@sha256:$('b' * 64)") 'Fixture plan uses live values'
     $prepareIndex = $script:Calls.IndexOf(($script:Calls | Where-Object { $_ -like 'containerapp env create*' }))
+    $measureBuildIndex = $script:Calls.IndexOf(($script:Calls | Where-Object { $_ -like 'acr run*gateway-build.yaml*' }))
     $buildIndex = $script:Calls.IndexOf(($script:Calls | Where-Object { $_ -like 'acr build*gateway-measure-fixture*' }))
     $publishIndex = $script:Calls.IndexOf(($script:Calls | Where-Object { $_ -like 'containerapp job start --name vlite-meas-t26-pub*' }))
     $appIndex = $script:Calls.IndexOf(($script:Calls | Where-Object { $_ -like 'containerapp create --name vlite-meas-t26-wr*' }))
-    Assert ($prepareIndex -lt $buildIndex -and $buildIndex -lt $publishIndex -and $publishIndex -lt $appIndex) 'Build after bootstrap, publish before apps'
+    Assert ($measureBuildIndex -ge 0 -and $measureBuildIndex -lt $prepareIndex -and
+        $prepareIndex -lt $buildIndex -and $buildIndex -lt $publishIndex -and $publishIndex -lt $appIndex) 'Build after bootstrap, publish before apps'
     Assert ($script:Calls -contains "acr build --registry vlitemeast26 --platform linux/amd64 --no-logs --file /measurement/image/Dockerfile --image gateway-measure-fixture:t26-ffffffffffff /measurement/image --resource-group vlite-ha-meas-t26 --subscription $subscription") 'Exact fixture build'
     Assert (@($script:Calls | Where-Object { $_ -like 'containerapp job start --name vlite-meas-t26-pub*' }).Count -eq 1) 'Publish once'
     foreach ($name in 'vlite-meas-t26-pub', 'vlite-meas-t26-drv', 'vlite-meas-t26-gw', 'vlite-meas-t26-wr') {

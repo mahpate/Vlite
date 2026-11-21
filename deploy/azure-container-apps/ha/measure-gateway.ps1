@@ -277,9 +277,9 @@ function New-VLiteMeasGatewayPlan([hashtable]$Config) {
         "vliteMeasurement=$($Config.Id)", 'vliteMeasurementOwner=ha-harness', "vliteMeasurementExpires=$expires")
     Add 'CreateRegistry' @('acr', 'create', '--name', $Config.Registry, '--resource-group', $rg, '--sku', 'Basic',
         '--admin-enabled', 'false')
-    Add 'BuildMeasureImage' @('acr', 'build', '--registry', $Config.Registry, '--resource-group', $rg,
-        '--platform', 'linux/amd64', '--timeout', '7200', '--no-logs', '--file', 'Dockerfile', '--target', 'gateway-measure',
-        '--image', "gateway-measure:$($Config.SourceRevision)", $script:VLiteMeasRepository)
+    Add 'BuildMeasureImage' @('acr', 'run', '--registry', $Config.Registry, '--timeout', '7200', '--no-logs',
+        '--file', 'deploy/azure-container-apps/ha/gateway-build.yaml', '--set', "revision=$($Config.SourceRevision)",
+        $script:VLiteMeasRepository)
     Add 'ShowMeasureImage' @('acr', 'repository', 'show', '--name', $Config.Registry, '--image',
         "gateway-measure:$($Config.SourceRevision)")
     foreach ($role in $script:VLiteMeasGatewayRoles) {
@@ -608,15 +608,15 @@ function Invoke-VLiteMeasGateway([hashtable]$Config) {
             $value
         })
     }
-    function Az([string]$Name, [string]$Role = '', [hashtable]$Extra = @{}) { Invoke-VLiteMeasAz (Expand $Name $Role $Extra) }
+    function InvokeGatewayStep([string]$Name, [string]$Role = '', [hashtable]$Extra = @{}) { Invoke-VLiteMeasAz (Expand $Name $Role $Extra) }
     function Fixture([string]$Name, [hashtable]$Extra = @{}) {
         Invoke-VLiteMeasLocal 'python3' (Expand $Name '' $Extra) $provenance
     }
-    $exists = Az 'CheckGroup'
+    $exists = InvokeGatewayStep 'CheckGroup'
     if ($exists -isnot [bool]) { throw 'Group existence check did not return a boolean.' }
     if ($exists) { throw 'Measurement resource group already exists; refusing to reuse or delete it.' }
     foreach ($check in 'CheckRegistryName', 'CheckStorageName') {
-        $availability = Az $check
+        $availability = InvokeGatewayStep $check
         if ($availability.nameAvailable -isnot [bool] -or -not $availability.nameAvailable) {
             throw 'Measurement resource name is unavailable; refusing preexisting or foreign resources.'
         }
@@ -651,7 +651,7 @@ function Invoke-VLiteMeasGateway([hashtable]$Config) {
     }
     function Start-Job([string]$Name, [string]$Job) {
         # No retry: publish and driver writes are unknown_do_not_retry once attempted.
-        $started = Az $Name
+        $started = InvokeGatewayStep $Name
         $execution = [string]$started.name
         if ($execution -cnotmatch "\A$([regex]::Escape($Job))-[a-z0-9]{1,32}\z") {
             throw (New-VLiteMeasFailure 'JobStart' 'Job start returned a foreign or invalid execution name.')
@@ -661,7 +661,7 @@ function Invoke-VLiteMeasGateway([hashtable]$Config) {
     function Read-Inventory([string]$Name) {
         $inventory = [ordered]@{}; $ready = $true
         foreach ($role in $Config.Apps.Keys) {
-            $listed = Az $Name $role
+            $listed = InvokeGatewayStep $Name $role
             if ($listed -isnot [array]) { throw (New-VLiteMeasFailure 'Inventory' 'Replica inventory is not a list.') }
             $replicas = @(foreach ($replica in $listed) {
                 $replicaName = [string]$replica.name
@@ -685,15 +685,18 @@ function Invoke-VLiteMeasGateway([hashtable]$Config) {
     function Add-Incomplete([string]$Reason) { if (-not $summary.incompleteReasons.Contains($Reason)) { $summary.incompleteReasons.Add($Reason) } }
     try {
         $work = New-VLiteMeasPrivateDirectory ''
-        foreach ($name in 'CreateGroup', 'CreateRegistry', 'BuildMeasureImage') { $stage = $name; $null = Az $name }
+        foreach ($name in 'CreateGroup', 'CreateRegistry') { $stage = $name; $null = InvokeGatewayStep $name }
+        $stage = 'BuildMeasureImage'
+        $build = InvokeGatewayStep 'BuildMeasureImage'
+        if ($build.status -cne 'Succeeded') { throw (New-VLiteMeasFailure 'GatewayImageBuild' 'Gateway image build did not succeed.') }
         $stage = 'ShowMeasureImage'
-        $digest = [string](Az 'ShowMeasureImage').digest
+        $digest = [string](InvokeGatewayStep 'ShowMeasureImage').digest
         if ($digest -cnotmatch '\Asha256:[a-f0-9]{64}\z') { throw 'Measurement image digest is invalid.' }
         $values = Get-VLiteMeasGatewayValues $Config $Config.SubscriptionId '<pending>'
         $principals = @{}
         foreach ($role in $script:VLiteMeasGatewayRoles) {
             $stage = 'CreateIdentity'
-            $identity = Az 'CreateIdentity' $role
+            $identity = InvokeGatewayStep 'CreateIdentity' $role
             if ($identity -isnot [Collections.IDictionary] -or [string]$identity.id -ine $values.IdentityIds[$role] -or
                 -not $identity.principalId -or -not $identity.clientId) {
                 throw 'Created identity lacks its expected ID, principal or client.'
@@ -703,12 +706,12 @@ function Invoke-VLiteMeasGateway([hashtable]$Config) {
             $replacements["<principal-id:$role>"] = $principals[$role]
             $privateValues.Add($principals[$role]); $privateValues.Add($values.ClientIds[$role])
         }
-        foreach ($role in $script:VLiteMeasGatewayRoles) { $stage = 'GrantPull'; $null = Az 'GrantPull' $role }
-        $stage = 'CreateStorage'; $null = Az 'CreateStorage'
-        foreach ($container in 'control-data', 'control-coordination') { $stage = 'CreateControlContainer'; $null = Az 'CreateControlContainer' $container }
-        foreach ($role in $script:VLiteMeasGatewayRoles) { $stage = 'GrantControl'; $null = Az 'GrantControl' $role }
+        foreach ($role in $script:VLiteMeasGatewayRoles) { $stage = 'GrantPull'; $null = InvokeGatewayStep 'GrantPull' $role }
+        $stage = 'CreateStorage'; $null = InvokeGatewayStep 'CreateStorage'
+        foreach ($container in 'control-data', 'control-coordination') { $stage = 'CreateControlContainer'; $null = InvokeGatewayStep 'CreateControlContainer' $container }
+        foreach ($role in $script:VLiteMeasGatewayRoles) { $stage = 'GrantControl'; $null = InvokeGatewayStep 'GrantControl' $role }
         $stage = 'CreateEnvironment'
-        $environment = Az 'CreateEnvironment'
+        $environment = InvokeGatewayStep 'CreateEnvironment'
         $domain = [string]$environment.properties.defaultDomain
         $workspace = [string]$environment.properties.appLogsConfiguration.logAnalyticsConfiguration.customerId
         if ([string]$environment.id -ine $values.EnvironmentId -or $domain -cnotmatch '\A[a-z0-9]([a-z0-9-]*[a-z0-9])?(\.[a-z0-9]([a-z0-9-]*[a-z0-9])?)+\z' -or
@@ -742,16 +745,16 @@ function Invoke-VLiteMeasGateway([hashtable]$Config) {
         $live.FixtureSha = $fixture.FixtureSha; $live.Projections = $fixture.Projections; $live.ExportSha = $fixture.ExportSha
         Assert-VLiteMeasGatewayTime $deadline $script:VLiteMeasGatewayMarginMs
 
-        $stage = 'BuildFixtureImage'; $null = Az 'BuildFixtureImage'
+        $stage = 'BuildFixtureImage'; $null = InvokeGatewayStep 'BuildFixtureImage'
         $stage = 'ShowFixtureImage'
-        $fixtureDigest = [string](Az 'ShowFixtureImage').digest
+        $fixtureDigest = [string](InvokeGatewayStep 'ShowFixtureImage').digest
         if ($fixtureDigest -cnotmatch '\Asha256:[a-f0-9]{64}\z') { throw 'Fixture image digest is invalid.' }
         $live.Image = "$($Config.Registry).azurecr.io/gateway-measure-fixture@$fixtureDigest"
         function Create([string]$Name, [string]$Role, [string]$Kind, [string]$Label) {
             Assert-VLiteMeasGatewayTime $deadline $script:VLiteMeasGatewayMarginMs
             $file = Join-Path $work "$Label.json"
             Set-VLiteMeasPrivate $file ((New-VLiteMeasGatewayManifest $Config $Role $Kind $live) | ConvertTo-Json -Depth 20)
-            try { $null = Az $Name $Role @{ "<manifest:$Label>" = $file } }
+            try { $null = InvokeGatewayStep $Name $Role @{ "<manifest:$Label>" = $file } }
             finally { Remove-Item -LiteralPath $file -Force -ErrorAction SilentlyContinue }
         }
         $stage = 'CreatePublishJob'; Create 'CreatePublishJob' 'driver' 'publish' 'publish'
