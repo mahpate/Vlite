@@ -403,9 +403,10 @@ documentation says to expect a delay of several minutes before console logs
 are queryable, and a Q&A thread reports about 5 to 9.5 minutes (p95). The
 collector therefore now waits up to 72 attempts (about 12 minutes). Gateway
 group deletion only starts after the read gives up, so the group stays alive
-while it waits. **This ingestion-delay explanation is unverified until a live
-run confirms it**; a Log Analytics access or retention cause has not been ruled
-out. When a gateway read fails, `summary.json` now also carries a
+while it waits. One later live run, `m4log72`, read its evidence within this
+wait (see below). That is a single observation, so the ingestion-delay
+explanation is supported but not proven; a Log Analytics access or retention
+cause has not been ruled out. When a gateway read fails, `summary.json` now also carries a
 `failureDiagnostic` with the same static codes as MEAS-006 (`category`,
 `reason`, `jobExitCode`, `consoleEvidence`, `logAnalyticsEvidence` and
 `logAnalyticsAttempts`). It is null on success and never holds native error
@@ -424,8 +425,25 @@ The following are unverified until a live run:
 - whether the run fits inside 2 hours.
 
 An `AcrPull` propagation delay fails the publish step, which is never
-retried. **No MEAS-004/005 evidence exists. Nothing here qualifies serving,
-SLOs or gates.**
+retried.
+
+Pilot `m4log72` (clean `479ede2a`, started `07:16:21Z`, one fresh group after
+the zero-tagged-group check) is the first live MEAS-004 run to finish:
+`status: Succeeded`, `measurementStatus: Collected`, no failed step. Both job
+reads recovered through the Log Analytics fallback and the evidence file was
+written about 22 minutes after launch. The record is
+`proposal_evidence_only`, profile `pilot`: 5 requests per window at 5 rps, 1 s
+windows, two direct and two gateway windows in ABBA order, all 200 with no
+errors or mismatches. Paired window mean deltas (about 4.9 and 7.9 ms) are not a
+per-request overhead distribution, and CPU entitlement, pure CPU overhead and
+scale-out remain unknown. The replica inventory was identical before and after
+(2 gateway, 1 writer, 0 restarts). The harness cleanup ended `NeedsVerification`
+at `WaitDeleted` because Azure was still deleting the group; a separate
+hash-bound follow-up later confirmed it absent with the original summary and
+postflight unchanged and no deletion resubmitted.
+
+**No MEAS-005 evidence exists, and the only MEAS-004 evidence is this tiny
+pilot. Nothing here qualifies serving, SLOs or gates.**
 
 ## Outputs, cost, and cleanup
 
