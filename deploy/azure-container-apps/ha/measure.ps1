@@ -669,6 +669,7 @@ function Invoke-VLiteMeas([hashtable]$Options) {
                         executionName = $null; status = 'Creating'; sha256 = $null; fileName = $null
                         sourceRevision = $config.SourceRevision; dirty = [bool]$config.DirtyPaths
                     }
+                    if ($meas006) { $current.executionStatus = $null }
                     $summary.results.Add($current)
                     $null = Invoke-ResourceStep $step
                 }
@@ -691,7 +692,10 @@ function Invoke-VLiteMeas([hashtable]$Options) {
                     $current.executionName = $execution
                     $current.status = 'Running'
                 }
-                'PollExecution' { $current.status = Wait-VLiteMeasExecution (Arguments $step $execution) }
+                'PollExecution' {
+                    $current.status = Wait-VLiteMeasExecution (Arguments $step $execution)
+                    if ($meas006) { $current.executionStatus = $current.status }
+                }
                 'ReadLogs' {
                     $query = $steps | Where-Object { $_.Step -eq 'QueryLogs' -and $_.Tier -eq $step.Tier }
                     # Static codes only; raw logs, native errors and exception text are never recorded.

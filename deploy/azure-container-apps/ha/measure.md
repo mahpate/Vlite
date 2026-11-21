@@ -184,6 +184,14 @@ identifiers. Its metrics are `verify_before_commit`,
 reports only `MEAS-006 failed at <step>; diagnostics withheld.` and still
 requests group deletion under the cleanup policy below.
 
+Each MEAS-006 result records `executionStatus` separately from `status`. It
+is the validated terminal ACA execution status, or null if polling did not
+complete. Evidence collection or cleanup failure cannot overwrite it.
+`Succeeded` here does not mean the evidence was collected or accepted.
+Older summaries lack this field; their result `status` may have been changed
+to `Failed` during evidence collection, so it cannot recover the original
+execution outcome.
+
 The MEAS-006 `summary.json` always has a `failureDiagnostic` field. It is
 null on success and after a failure at any step other than `ReadLogs`. If
 `ReadLogs` fails, the field holds a few fixed codes. It never holds stderr,
@@ -333,6 +341,22 @@ non-root base verified the unchanged fixture digest, UID/GID 10001 and mode
 the deleted Azure logs or constitute a successful ACA pilot. MEAS-006 run
 `m6lf21a` has started from clean `1fa98c5c` with an LF-only collector. Live
 campaigns remain serialized; MEAS-004 must wait for that run and cleanup.
+
+Superseding MEAS-006 result: `m6lf21a` ended at 2026-11-21T05:33:04Z with
+`ReadLogs` / `EvidenceUnavailable` / `MissingBegin`. Console retrieval was
+unavailable and all twelve Log Analytics attempts lacked complete evidence.
+No exit code or measurement document was recovered. Unlike the earlier
+exit-2 failure, this does not establish whether the collector ran or why the
+job produced no retrievable evidence. The old result `status` can be changed
+to `Failed` by evidence collection itself; the harness now preserves the
+validated `executionStatus` independently for future runs.
+
+The deletion wait also expired. A separate read-only check confirmed the
+group absent at 2026-11-21T05:48:14Z; `cleanup-followup.json` binds that
+confirmation to the unchanged failed summary and postflight by SHA-256.
+Deletion was not resubmitted. MEAS-006 remains unqualified and must not be
+blindly rerun. The separate MEAS-004 fixture-repair pilot may proceed after
+its own clean-source, ownership, empty-fixture and zero-live-group preflight.
 
 The following are unverified until a live run:
 

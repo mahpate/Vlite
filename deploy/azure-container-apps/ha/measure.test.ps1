@@ -345,6 +345,7 @@ try {
         JobFailedBadCode = @('JobFailed', 'FailedMarker', $null, 'JobFailed', 'NotQueried', 0)
         JobFailedViaLogAnalytics = @('JobFailed', 'FailedMarker', 3, 'Unavailable', 'JobFailed', 1)
         LogsUnavailable = @('EvidenceUnavailable', 'RetrievalFailed', $null, 'Unavailable', 'Unavailable', 12)
+        LogsMissingBegin = @('EvidenceUnavailable', 'MissingBegin', $null, 'Unavailable', 'Incomplete', 12)
         LogsIncomplete = @('EvidenceUnavailable', 'MissingEnd', $null, 'Incomplete', 'Incomplete', 12)
         BadChecksum = @('EvidenceIntegrity', 'ChecksumMismatch', $null, 'IntegrityFailure', 'IntegrityFailure', 12)
         BadEvidence = @('EvidenceRejected', 'PrivateIdentifier', $null, 'Verified', 'NotQueried', 0)
@@ -356,7 +357,7 @@ try {
     foreach ($case006 in 'Success', 'ExistingGroup', 'ForeignRegistry', 'ForeignStorage', 'UnknownAvailability',
         'ForeignGroupResponse', 'ForeignIdentity', 'ForeignStorageResponse', 'ForeignJobResponse', 'ForeignExecution',
         'MissingClient', 'BadEvidence', 'BadChecksum', 'CleanupFailure', 'BothFailures', 'WaitFailure', 'Dirty', 'WrongRevision',
-        'JobFailedExit', 'JobFailedBadCode', 'JobFailedViaLogAnalytics', 'LogsUnavailable', 'LogsIncomplete',
+        'JobFailedExit', 'JobFailedBadCode', 'JobFailedViaLogAnalytics', 'LogsUnavailable', 'LogsMissingBegin', 'LogsIncomplete',
         'BadSchema', 'BadProvenance', 'NotSucceeded') {
         $script:case006 = $case006
         $script:sentinel006 = $sentinel006
@@ -427,9 +428,10 @@ try {
                 }
                 '^containerapp job logs show |^monitor log-analytics query ' {
                     $s006 = $script:sentinel006
-                    if ($script:case006 -eq 'LogsUnavailable' -or ($Raw -and $script:case006 -eq 'JobFailedViaLogAnalytics')) {
+                    if ($script:case006 -eq 'LogsUnavailable' -or ($Raw -and $script:case006 -in 'JobFailedViaLogAnalytics', 'LogsMissingBegin')) {
                         throw "native failure $s006 client-secret-001 principal-001 workspace-001 never-print-this-subscription"
                     }
+                    if ($script:case006 -eq 'LogsMissingBegin') { return ,@() }
                     $d006 = New-TestDocument006
                     if ($script:case006 -in 'BadEvidence', 'BothFailures') { $d006.limits.claim = 'client-secret-001' }
                     if ($script:case006 -eq 'BadSchema') { $d006.schema = "unknown-$s006" }
@@ -486,6 +488,12 @@ try {
             default { $null }
         }
         Assert ($summary006.failedStep -ceq $expectedFailed006) 'MEAS-006 measurement failure must be separate'
+        if ($summary006.results.Count) {
+            $expectedExecution006 = if ($expectedFailed006 -in 'CreateJob', 'StartJob') { $null }
+                elseif ($case006 -like 'JobFailed*' -or $case006 -eq 'NotSucceeded') { 'Failed' }
+                else { 'Succeeded' }
+            Assert ($summary006.results[0].executionStatus -ceq $expectedExecution006) "MEAS-006 must preserve the observed execution status independently of evidence and cleanup ($case006)"
+        }
         Assert ($summary006.PSObject.Properties.Name -contains 'failureDiagnostic') 'MEAS-006 summary must always carry failureDiagnostic'
         if ($expectedDiagnostic006.ContainsKey($case006)) {
             $want006 = $expectedDiagnostic006[$case006]
