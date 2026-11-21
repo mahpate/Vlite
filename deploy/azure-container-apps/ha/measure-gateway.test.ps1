@@ -557,6 +557,19 @@ try {
     Assert ($result.Summary.measurementStatus -ceq 'Incomplete' -and $result.Summary.incompleteReasons -contains 'InventoryChanged' -and
         -not $result.Summary.inventory.fixed) 'Replacement replicas make the trial incomplete'
 
+    foreach ($lineageValue in 1uL, 9223372036854775807uL, 9223372036854775808uL, [ulong]::MaxValue) {
+        Reset-Mock 'MEAS-004'
+        $script:Tamper = {
+            param($s, $p)
+            if ($p -ceq 'pre') {
+                foreach ($role in $s.metadata.Keys) { $s.metadata[$role].lineage = $lineageValue }
+            }
+        }.GetNewClosure()
+        $result = Invoke-Live 'MEAS-004'
+        Assert (-not $result.Error -and $result.Summary.measurementStatus -ceq 'Collected') "Valid u64 lineage $lineageValue was refused: $($result.Error)"
+        Assert-Cleaned $result 'unsigned-lineage'
+    }
+
     # ---- Fixture lineage/path/digest/role/expiry refusals. ----
     Assert-FixtureRefusal 'export-sha' { param($s, $p) if ($p -ceq 'post') { $s.summary.exports.gateway.sha256 = 'e' * 64 } } 'FixtureExport'
     Assert-FixtureRefusal 'export-path' { param($s, $p) if ($p -ceq 'post') { $s.summary.exports.writer.file = '/tmp/writer.json' } } 'FixtureSummary'
@@ -569,6 +582,21 @@ try {
     Assert-FixtureRefusal 'source' { param($s, $p) if ($p -ceq 'pre') { $s.bundles.driver.source = [ordered]@{ revision = 'b' * 40; dirty_paths = @() } } } 'FixtureExport'
     Assert-FixtureRefusal 'fixture-digest' { param($s, $p) if ($p -ceq 'pre') { $s.metadata.writer.fixture_sha256 = 'd' * 64 } } 'FixtureLineage'
     Assert-FixtureRefusal 'lineage' { param($s, $p) if ($p -ceq 'pre') { $s.metadata.reader.lineage = 8 } } 'FixtureLineage'
+    Assert-FixtureRefusal 'adjacent-unsigned-lineages' {
+        param($s, $p)
+        if ($p -ceq 'pre') {
+            foreach ($role in $s.metadata.Keys) { $s.metadata[$role].lineage = [ulong]::MaxValue }
+            $s.metadata.reader.lineage = 18446744073709551614uL
+        }
+    } 'FixtureLineage'
+    foreach ($lineageValue in @($null, $true, '7', 1.5, 0, -1, [bigint]::Parse('18446744073709551616'))) {
+        Assert-FixtureRefusal 'invalid-lineage' {
+            param($s, $p)
+            if ($p -ceq 'pre') {
+                foreach ($role in $s.metadata.Keys) { $s.metadata[$role].lineage = $lineageValue }
+            }
+        }.GetNewClosure() 'FixtureLineage'
+    }
     Assert-FixtureRefusal 'expiry-late' { param($s, $p) if ($p -ceq 'post') { $s.summary.credentials_expire_not_before_unix_ms += 1 } } 'FixtureExpiry'
     Assert-FixtureRefusal 'expiry-early' { param($s, $p) if ($p -ceq 'post') { $s.summary.credentials_expire_not_before_unix_ms -= 5000 } } 'FixtureExpiry'
     Assert-FixtureRefusal 'planned-build' { param($s, $p) if ($p -ceq 'post') { $s.summary.image.planned_build[4] = 'otherregistry' } } 'FixtureBuild'

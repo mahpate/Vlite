@@ -509,11 +509,14 @@ function Assert-VLiteMeasFixtureExport([string]$Text, [string]$Role, [hashtable]
     }
     try { $metadata = ConvertFrom-VLiteMeasJsonBytes ([Convert]::FromBase64String($files['measurement.json'])) }
     catch { throw (New-VLiteMeasFailure 'FixtureExport' 'Fixture bundle metadata is invalid.') }
+    $lineage = $metadata.lineage
     if ($metadata.schema -cne 'vlite-meas-artifacts/1' -or -not (Test-VLiteMeasSource $metadata.source $Config) -or
-        $metadata.fixture_sha256 -cne $Expected.fixture_sha256 -or $metadata.lineage -isnot [long] -and $metadata.lineage -isnot [int]) {
+        $metadata.fixture_sha256 -cne $Expected.fixture_sha256 -or
+        ($lineage -isnot [long] -and $lineage -isnot [int] -and $lineage -isnot [bigint]) -or
+        [bigint]$lineage -lt 1 -or [bigint]$lineage -gt [bigint][ulong]::MaxValue) {
         throw (New-VLiteMeasFailure 'FixtureLineage' 'Fixture bundle lineage differs from the bootstrap.')
     }
-    return @{ Projections = $projections.ToArray(); Lineage = [long]$metadata.lineage }
+    return @{ Projections = $projections.ToArray(); Lineage = [ulong]$lineage }
 }
 
 function Assert-VLiteMeasFixtureSummary([string[]]$Output, [hashtable]$Config, [hashtable]$Expected) {

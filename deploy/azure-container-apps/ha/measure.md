@@ -358,6 +358,27 @@ Deletion was not resubmitted. MEAS-006 remains unqualified and must not be
 blindly rerun. The separate MEAS-004 fixture-repair pilot may proceed after
 its own clean-source, ownership, empty-fixture and zero-live-group preflight.
 
+The subsequent MEAS-004 pilot `m4fix21b`, from clean `5f080c61`, stopped at
+`ValidateFixture` / `FixtureLineage`. It never reached the fixture-image build,
+publish or driver, and produced no measurement evidence. The private fixture
+was removed; the Azure deletion wait expired, so the original failed summary
+and postflight remain intact while a read-only observer checks the existing
+deletion. No deletion or campaign was resubmitted.
+
+A local reproduction using that same native binary and fixture generator
+isolated a signed/unsigned validation defect: database lineages are nonzero
+`u64`, but the PowerShell validator accepted only signed integers and cast to
+`long`. JSON integers above `Int64.MaxValue` arrive as `BigInteger` and were
+incorrectly refused. Validation now accepts the exact nonzero `u64` range,
+returns `ulong`, and still rejects mismatched role lineages, including adjacent
+values near `UInt64.MaxValue`. Boundary and invalid-type regressions pass on
+Windows and the pilot's Linux PowerShell runtime. The real generated fixture
+fails the old validator with `FixtureLineage` and passes the repaired full
+summary validation without any Azure calls; its private files were removed.
+The original pilot's precise lineage was not retained, so this reproduces and
+fixes a concrete cause of that refusal rather than recovering its deleted
+private metadata. ACA fixture-image and workload validation remain pending.
+
 The following are unverified until a live run:
 
 - ACA secret-volume behavior and limits;
