@@ -1,4 +1,5 @@
 //! Operator-acknowledged failover preparation; no election or automatic retry.
+//! The opt-in automatic supervisor (`auto_failover`) reuses these steps and makes one attempt.
 
 use std::{ffi::OsString, io::Read, path::PathBuf};
 
@@ -12,7 +13,7 @@ use super::{
     gateway_mode::{flags, utf8},
 };
 
-const FAILOVER_USAGE: &str = "vlite-server failover report|execute --target-file <json> [--shared-key-file <path>] [--archive-status-file <json>] [--observed-sequence <n> --observed-unix-ms <ms>] [execute only, all required: --ack-report-id <id> --expected-epoch <n> --expected-revision <rev> --old-replicas <n>]";
+const FAILOVER_USAGE: &str = "vlite-server failover report|execute --target-file <json> [--shared-key-file <path>] [--archive-status-file <json>] [--observed-sequence <n> --observed-unix-ms <ms>] [execute only, all required: --ack-report-id <id> --expected-epoch <n> --expected-revision <rev> --old-replicas <n>]; unqualified automatic failover (GATE-005 open, off by default): vlite-server failover auto --config <json> | failover policy show|enable|disable --target-file <json>";
 
 struct Request {
     status: Option<ArchiveStatus>,
@@ -38,6 +39,11 @@ fn identifier(name: &str, value: OsString) -> Result<String, String> {
 
 /// Blocking operator command; call off the async runtime.
 pub fn failover_command(args: &[OsString]) -> Result<Value, String> {
+    match args.first().and_then(|arg| arg.to_str()) {
+        Some("auto") => return super::auto_failover::auto_command(&args[1..]),
+        Some("policy") => return super::auto_failover::policy_command(&args[1..]),
+        _ => {}
+    }
     let verb = match args.first().and_then(|arg| arg.to_str()) {
         Some("report") => "report",
         Some("execute") => "execute",
@@ -46,7 +52,7 @@ pub fn failover_command(args: &[OsString]) -> Result<Value, String> {
     let result = (|| {
         let usage = |detail: &str| format!("invalid_arguments: {detail}; usage: {FAILOVER_USAGE}");
         if verb == "invalid" {
-            return Err(usage("the verb must be report or execute"));
+            return Err(usage("the verb must be report, execute, auto or policy"));
         }
         let mut allowed = vec![
             "--target-file",
@@ -192,7 +198,7 @@ pub(super) enum Loss {
     Unknown,
 }
 
-#[derive(Clone, Debug, Serialize)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
 pub(super) struct LossReport {
     #[serde(skip_serializing_if = "String::is_empty")]
     pub report_id: String,
@@ -525,7 +531,7 @@ mod tests {
             assert_eq!(
                 command(&args).unwrap_err(),
                 format!(
-                    "invalid_arguments: the verb must be report or execute; usage: {FAILOVER_USAGE}"
+                    "invalid_arguments: the verb must be report, execute, auto or policy; usage: {FAILOVER_USAGE}"
                 )
             );
         }

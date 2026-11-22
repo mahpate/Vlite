@@ -980,6 +980,87 @@ routes such as `/health` and `/ready`, and 401 refusals) never receive them,
 so anonymous callers cannot learn reader identity or freshness. Standalone
 servers, writers and readers without apply progress do not send them. Writer/reader roles and gateway replicas add no write capacity.
 
+## Automatic failover (unqualified, opt-in, off by default)
+
+Automatic failover is **unqualified**: the failover drills and loss-report
+review of GATE-005 have not passed, so it is not supported for production.
+It is off unless an operator turns it on, and it does nothing unless an
+operator also runs a supervisor. Nothing changes for servers without writer
+authority.
+
+The switch is one small policy object stored beside the writer authority
+record (`<prefix>auto-failover.json`, schema `vlite.auto-failover/1`). Every
+supervisor reads it before each probe, immediately before fencing and again
+after fencing, so one switch stops them all; it cannot recall a fence
+command that is already running.
+
+`GET /v1/admin/auto-failover` (super administrator) returns:
+
+```json
+{"available": true, "enabled": false, "revision": null,
+ "updated_unix_ms": null, "source": null, "invalid": false,
+ "qualified": false, "gate": "GATE-005", "warning": "..."}
+```
+
+`available` is false on a server without an authority target; the PUT then
+fails with 409 `auto_failover_not_configured`. `invalid` is true when the
+stored object cannot be read as a policy; it then counts as off.
+
+`PUT /v1/admin/auto-failover` takes
+`{"enabled": bool, "expected_revision": "<revision>", "acknowledge_unqualified": bool}`
+and rejects other fields.
+
+* Turning it **on** needs `acknowledge_unqualified: true` (otherwise 422
+  `auto_failover_unacknowledged`) and the `revision` from the last GET
+  (omit it only while no policy exists). A stale or missing revision fails
+  with 409 `auto_failover_conflict`; an unreadable stored policy fails with
+  409 `auto_failover_invalid` until it is turned off. When turning on, a
+  revision that is not 32 lowercase hexadecimal characters is 422
+  `invalid_json`.
+* Turning it **off** ignores any revision and replaces an invalid policy. It
+  is the kill switch: off always wins. `vlite-server failover policy disable`
+  does the same without the dashboard or a running writer.
+* Storage errors return 503 `auto_failover_unavailable` or
+  `auto_failover_indeterminate` (the change may have been written; read it
+  again before retrying).
+* A reader refuses the PUT with 403 `reader_mode`. A successful change is
+  audited as `auto_failover_policy_changed` with `actor`, `enabled` and
+  `revision`. Super admins use the same switch in the dashboard under
+  **Administration → Backup & recovery → Automatic failover**.
+
+The supervisor is a separate process run by the operator:
+
+```text
+vlite-server failover auto --config <json>
+vlite-server failover policy show|enable|disable --target-file <json> [--shared-key-file <path>] [enable: --expected-revision <rev> --acknowledge-unqualified true]
+```
+
+The config JSON requires `target_file`, `writer_ready_url` (http or https),
+`probe_interval_ms` (500 to 60000), `probe_timeout_ms` (100 or more, below
+the interval), `failure_threshold` (2 to 100) and `fence_command` (an argument
+list run without a shell); `shared_key_file`, `probe_token_file` (a bearer
+token for `/ready`, needed unless the writer trusts a proxy),
+`promote_command` and `command_timeout_ms` (1000 to 3600000, default 300000)
+are optional. It counts consecutive failed readiness probes of the serving
+writer for the same authority epoch and revision, and acts only on a writer
+it has itself seen ready in that epoch. A 401, 403 or redirect from the probe
+holds it instead of counting. At the threshold it checks the switch and
+authority again, runs the fence command, which must stop every old writer
+replica and print exactly `{"old_replicas":0}`, checks the switch again,
+takes a loss report as `failover report` does, refuses if authority changed,
+runs the same transfer as `failover execute`, and then runs the promote
+command, if any. Commands receive `VLITE_FAILOVER_EPOCH`,
+`VLITE_FAILOVER_REVISION` and `VLITE_FAILOVER_WRITER_ID`; the promote command
+also receives `VLITE_FAILOVER_NEW_EPOCH`. It stops after one attempt. A
+promotion prints the result, with the full loss report and its text, and
+exits 0; if the promote command failed after authority moved it exits
+nonzero with `auto_failover_standby_failed`, and an abort exits nonzero with
+`auto_failover_aborted: <reason>`. Commands get no shell, a time limit and
+bounded output. Run exactly one supervisor per authority target. The
+supervisor cannot itself verify that the old writer has stopped; the fence
+command is the operator's assertion, exactly like `--old-replicas 0`. See the
+[HA operations guide](HA-ACA.md#automatic-failover-unqualified-off-by-default).
+
 ## Gateway mode and gateway-trusted backends (experimental, opt-in, off by default)
 
 Disposable measurement tooling is separately opt-in: build the `ha-meas004` and

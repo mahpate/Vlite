@@ -195,6 +195,15 @@ impl AuthorityStore {
         }
     }
 
+    /// The coordination store and prefix this record lives under.
+    pub fn objects(&self) -> Arc<dyn ObjectStore> {
+        self.store.clone()
+    }
+
+    pub fn prefix(&self) -> &str {
+        self.key.strip_suffix("authority.json").unwrap_or("")
+    }
+
     fn fresh_id() -> Result<String, AuthorityError> {
         Ok(format!(
             "{}{}",

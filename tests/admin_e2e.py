@@ -758,6 +758,121 @@ def exercise_cloud_backup(browser):
     context.close()
 
 
+AUTO = "/v1/admin/auto-failover"
+
+
+class AutoFailoverApi(AdminApi):
+    """The automatic failover switch with its documented response shape; no supervisor or HA store exists."""
+
+    def __init__(self, role="admin", available=True):
+        super().__init__(role=role)
+        self.available = available
+        self.enabled = False
+        self.revision = 0
+        self.conflict = False
+
+    def state(self):
+        stored = self.available and self.revision > 0
+        return {"available": self.available, "enabled": self.enabled,
+                "revision": f"r{self.revision}" if stored else None,
+                "updated_unix_ms": CLOUD_AT if stored else None, "source": "rest:admin" if stored else None,
+                "invalid": False, "qualified": False, "gate": "GATE-005",
+                "warning": "automatic failover is unqualified (GATE-005 open)"}
+
+    def api(self, method, path, query, body, headers):
+        if path == AUTO:
+            if method == "GET":
+                return 200, self.state(), {}
+            if method == "PUT":
+                if not self.available:
+                    return self.error(409, "auto_failover_not_configured")
+                if body.get("enabled") and self.conflict:
+                    return self.error(409, "auto_failover_conflict")
+                self.enabled = body["enabled"]
+                self.revision += 1
+                return 200, self.state(), {}
+        return super().api(method, path, query, body, headers)
+
+
+def exercise_auto_failover(browser):
+    fake = AutoFailoverApi()
+    context, page, errors = mocked_page(browser, fake)
+    control(page, "#admin-auto-failover")
+    expect(page.locator("#auto-failover-status")).to_have_text("Automatic failover status not loaded.")
+    assert not calls(fake, AUTO, "GET"), "Automatic failover must not be read on connection"
+    expect(page.locator("#auto-failover-toggle")).to_be_disabled()
+    expect(page.locator("#auto-failover-help")).to_have_text("Select Refresh status first.")
+    control(page, "#auto-failover-refresh").click()
+    expect(page.locator("#auto-failover-status")).to_contain_text("Off: failover happens only when a person runs it")
+    expect(page.locator("#auto-failover-facts")).to_contain_text("GATE-005 has not passed")
+    toggle = page.locator("#auto-failover-toggle")
+    expect(toggle).to_have_text("Turn on automatic failover")
+    expect(toggle).to_be_enabled()
+
+    # Cancelling the warning sends nothing; accepting sends the acknowledged, revision-guarded change.
+    toggle.click()
+    confirm(page, "NOT yet proven safe (GATE-005 has not passed)", accept=False)
+    assert not calls(fake, AUTO, "PUT")
+    toggle.click()
+    confirm(page, "can be lost")
+    expect(page.locator("#auto-failover-result")).to_have_text("Automatic failover is on (not yet proven safe).")
+    assert calls(fake, AUTO, "PUT")[-1]["body"] == {"enabled": True, "acknowledge_unqualified": True}
+    expect(page.locator("#auto-failover-status")).to_contain_text("On (not yet proven safe)")
+    expect(page.locator("#auto-failover-facts")).to_contain_text("rest:admin")
+    expect(toggle).to_have_text("Turn off automatic failover")
+
+    # Turning off is the emergency stop: no revision guard.
+    toggle.click()
+    confirm(page, "Turn off automatic failover?")
+    expect(page.locator("#auto-failover-result")).to_have_text("Automatic failover is off.")
+    assert calls(fake, AUTO, "PUT")[-1]["body"] == {"enabled": False}
+    expect(toggle).to_have_text("Turn on automatic failover")
+
+    fake.conflict = True
+    toggle.click()
+    confirm(page, "can be lost")
+    expect(page.locator("#auto-failover-result")).to_contain_text("Someone else changed automatic failover first")
+    assert calls(fake, AUTO, "PUT")[-1]["body"]["expected_revision"] == "r2"
+    expect(page.locator("#auto-failover-status")).to_have_text("Automatic failover status not loaded.")
+    expect(toggle).to_be_disabled()
+    expect(page.locator("#auto-failover-help")).to_have_text("Select Refresh status first.")
+
+    for width, height in ((1280, 900), (768, 1000), (390, 844)):
+        page.set_viewport_size({"width": width, "height": height})
+        control(page, "#admin-auto-failover")
+        overflow = page.evaluate("""() => {
+            const card = document.querySelector('#admin-auto-failover');
+            return { page: document.documentElement.scrollWidth - document.documentElement.clientWidth,
+                     card: card.scrollWidth - card.clientWidth };
+        }""")
+        assert overflow["page"] <= 0 and overflow["card"] <= 0, (width, overflow)
+    page.set_viewport_size({"width": 1280, "height": 900})
+    sign_out(page)
+    expect(page.locator("#auto-failover-result")).to_have_text("")
+    expect(page.locator("#auto-failover-status")).to_have_text("Automatic failover status not loaded.")
+    assert not errors, errors
+    context.close()
+
+    fake = AutoFailoverApi(available=False)
+    context, page, errors = mocked_page(browser, fake)
+    control(page, "#auto-failover-refresh").click()
+    expect(page.locator("#auto-failover-status")).to_contain_text("Not set up")
+    expect(page.locator("#auto-failover-toggle")).to_be_disabled()
+    expect(page.locator("#auto-failover-help")).to_contain_text("cannot switch automatic failover")
+    assert not errors, errors
+    context.close()
+
+    fake = AutoFailoverApi("read_only")
+    context, page, errors = mocked_page(browser, fake)
+    control(page, "#admin-auto-failover")
+    for selector in ("#auto-failover-refresh", "#auto-failover-toggle"):
+        expect(page.locator(selector)).to_be_disabled()
+    expect(page.locator("#auto-failover-help")).to_contain_text("Automatic failover requires a super admin")
+    assert not calls(fake, AUTO, "GET") and not calls(fake, AUTO, "PUT")
+    assert not errors, errors
+    context.close()
+
+
 if __name__ == "__main__":
     with sync_playwright() as playwright:
         browser = playwright.chromium.launch()
@@ -766,6 +881,7 @@ if __name__ == "__main__":
             exercise_password(browser)
             exercise_password_memory_mode(browser)
             exercise_cloud_backup(browser)
+            exercise_auto_failover(browser)
         finally:
             browser.close()
     print("PASS browser admin flows: identity badge, confirmations/cancel, tenant CRUD/usage/settings/"
@@ -778,3 +894,6 @@ if __name__ == "__main__":
     print("PASS cloud backup card: no read on connect, refresh, inline validation with focus, confirmed save with the "
           "exact policy, run/busy, stored backups, restore as a copy, hold/forced release, no overflow, sign-out "
           "clearing and role/feature gates.")
+    print("PASS automatic failover card: no read on connect, refresh, cancelled and confirmed turn-on with the "
+          "acknowledgement and revision, unguarded turn-off, conflict message, no overflow, sign-out clearing and "
+          "unavailable/role gates.")

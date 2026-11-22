@@ -58,6 +58,7 @@ mod kv;
 mod writer_fence_wiring_tests;
 pub use group_commit::GroupCommitConfig;
 mod authority;
+mod auto_failover;
 #[cfg(feature = "grpc")]
 pub mod grpc;
 mod logs;
@@ -1001,6 +1002,7 @@ fn routes(service: Service) -> Router {
         .merge(ops::routes())
         .merge(backup_policy::routes())
         .merge(serve_mode::routes())
+        .merge(auto_failover::routes())
         .merge(credentials::routes())
         .merge(data_routes())
         .merge(features::routes())
