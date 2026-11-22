@@ -599,6 +599,12 @@
       <div><span>Collections</span><strong class="obs-card-value" id="obs-collections">—</strong><svg id="obs-spark-collections" class="obs-spark" viewBox="0 0 120 34" aria-hidden="true"></svg></div>
       <div><span>In-flight requests</span><strong class="obs-card-value" id="obs-in-flight">—</strong><svg id="obs-spark-in-flight" class="obs-spark" viewBox="0 0 120 34" aria-hidden="true"></svg></div>
     </div>
+    <div class="obs-panel obs-serving" id="obs-serving">
+      <h3>Server role and replication</h3>
+      <p>Shows whether this server is a standalone server, the single writer, or a read-only reader replica. Readers refuse writes (403 reader_mode) and refuse reads with 503 reader_stale when their copy is older than the configured limit. Adding readers spreads reads only; every write still goes to the one writer.</p>
+      <p id="obs-serving-status" role="status">Sign in as a super admin to view the server role.</p>
+      <div class="table-scroll"><table><caption>Role, drain state, data position and cloud archive health for this server</caption><tbody id="obs-serving-rows"></tbody></table></div>
+    </div>
     <div class="obs-panel"><h3>Requests by route</h3>
       <div class="table-scroll"><table><caption>Cumulative request counts and latency in milliseconds. Select a column button to sort.</caption><thead><tr><th scope="col">Route</th><th scope="col" data-obs-sort="count" aria-sort="descending"><button type="button" class="secondary">Count</button></th><th scope="col" data-obs-sort="errors" aria-sort="none"><button type="button" class="secondary">Errors</button></th><th scope="col">p50 ms</th><th scope="col" data-obs-sort="p95_ms" aria-sort="none"><button type="button" class="secondary">p95 ms</button></th><th scope="col">p99 ms</th></tr></thead><tbody id="obs-routes"></tbody></table></div>
     </div>
@@ -930,6 +936,19 @@
     <button id="replication-export" type="button">Export next log segment</button>
     <button id="replication-download" type="button" class="secondary" disabled>Download exported segment</button>
     <pre id="replication-result" aria-live="polite"></pre>
+  </section>
+  <section id="admin-auto-failover" class="wide">
+    <h2>Automatic failover</h2>
+    <p><strong>Not yet proven safe, and off unless you turn it on.</strong> Its release check (GATE-005) has not passed. While it is on, a supervisor that loses contact with the writer stops that writer and hands over to a standby without anyone reviewing what could be lost, so the most recent changes can be lost.</p>
+    <p>This is one shared switch per authority target. Run exactly one <code>vlite-server failover auto</code> supervisor for that target; turning the switch on does not start it. Turning it off writes a fresh disabled revision and prevents promotion until the supervisor's final transfer check. A transfer already past that check may still complete. Manual failover is not affected.</p>
+    <p id="auto-failover-status" class="compaction-status" role="status" aria-live="polite" data-tone="idle">Automatic failover status not loaded.</p>
+    <dl id="auto-failover-facts" class="compaction-facts" hidden></dl>
+    <div class="compaction-actions">
+      <button id="auto-failover-refresh" data-admin type="button" class="secondary">Refresh status</button>
+      <button id="auto-failover-toggle" data-admin type="button" aria-describedby="auto-failover-help">Turn on automatic failover</button>
+    </div>
+    <p id="auto-failover-help" class="field-help">Sign in to use this.</p>
+    <pre id="auto-failover-result" aria-live="polite"></pre>
   </section>
   <section id="admin-auto-maintenance" class="wide">
     <h2>Automatic index maintenance</h2>

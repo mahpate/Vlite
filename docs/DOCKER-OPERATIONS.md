@@ -522,7 +522,10 @@ force at that cut). The segment and bundle are content-addressed objects
 under the baseline set, read back and checked, and become restorable only
 when the set's archive index is replaced by a compare-and-set. An index
 whose outcome was not seen is settled on the next run. A run with no new
-commits appends nothing. `GET /v1/admin/cloud-backup` shows the archive's
+commits appends nothing, but it still reports the index's latest checkpoint
+as `tip`, so a checkpoint whose commit an earlier run could not confirm
+appears in `last_checkpoint_sequence` and `last_checkpoint_unix_ms` without
+being counted again. `GET /v1/admin/cloud-backup` shows the archive's
 `runs`, `checkpoints`, `failures`, `baseline_set`, `baseline_checkpoints`,
 `last_checkpoint_sequence`, `last_checkpoint_unix_ms` and `last_error`
 under `status.archive`; archive failures never change the snapshot counters.
@@ -535,8 +538,9 @@ a new baseline: the policy changed after the baseline
 (`pitr_policy_changed`), the live log no longer holds the commits after the
 last checkpoint (`pitr_history_floor_advanced`), the live database does not
 continue the baseline, for example after a compaction or a restore was
-selected (`pitr_source_diverged`), a single segment would exceed 64 MiB
-(`pitr_delta_too_large`), or the archive reached 256 checkpoints or 1 GiB
+selected (`pitr_source_diverged`), a single encoded segment would exceed
+64 MiB (`pitr_delta_too_large`, refused before anything is uploaded), or the
+archive reached 256 checkpoints or 1 GiB
 (`pitr_archive_full`). Take a snapshot after such an event; checkpoints
 already published stay restorable.
 

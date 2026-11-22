@@ -65,7 +65,7 @@ pub(super) struct Classification {
     pub(super) need: Need,
 }
 
-/// Every registered REST route (179) as (method, template).
+/// Every registered REST route (181) as (method, template).
 const ROUTES: &[(&str, &str)] = &[
     ("GET", "/dashboard"),
     ("GET", "/dashboard/admin-tools.js"),
@@ -94,6 +94,8 @@ const ROUTES: &[(&str, &str)] = &[
     ("GET", "/ready"),
     ("GET", "/v1/admin/audit"),
     ("GET", "/v1/admin/audit/persistent"),
+    ("GET", "/v1/admin/auto-failover"),
+    ("PUT", "/v1/admin/auto-failover"),
     ("GET", "/v1/admin/backups"),
     ("POST", "/v1/admin/backups"),
     ("GET", "/v1/admin/backups/schedule"),

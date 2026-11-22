@@ -1373,7 +1373,7 @@
       async function request(route, options = {}) {
         if (!connected) throw new Error("Sign in before accessing the database");
         const endpoint = route.split("?")[0];
-        if (!["/metrics", "/v1/admin/metrics/summary", "/v1/admin/logs", "/v1/admin/diagnostics/slow-queries", "/v1/admin/audit", "/v1/admin/compaction"].includes(endpoint)
+        if (!["/metrics", "/v1/admin/metrics/summary", "/v1/admin/logs", "/v1/admin/diagnostics/slow-queries", "/v1/admin/audit", "/v1/admin/compaction", "/v1/admin/serve-status"].includes(endpoint)
           && !/^\/v1\/admin\/compaction\/jobs\/[A-Za-z0-9-]{1,64}$/.test(endpoint)) throw new Error("Unsupported observability endpoint");
         // Independent reads never replace the foreground cancel handle or request inspector.
         const controller = new AbortController();

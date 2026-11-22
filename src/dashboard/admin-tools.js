@@ -247,7 +247,7 @@
     const features = object(caps?.features) ? caps.features : {};
     const routes = Array.isArray(caps?.routes) ? caps.routes : [];
     const offline = { allowed: false, reason: "Sign in first." };
-    if (!connected || !object(caps)) return { users: offline, tenants: offline, lifecycle: offline, tls: offline, replication: offline, compaction: offline, cloudBackup: offline };
+    if (!connected || !object(caps)) return { users: offline, tenants: offline, lifecycle: offline, tls: offline, replication: offline, compaction: offline, cloudBackup: offline, autoFailover: offline };
     const admin = role === "admin";
     const notAdmin = (what) => `${what} requires a super admin: a super-admin account or the bootstrap admin token (current role: ${role ?? "unknown"}). Editors, viewers, read-only and scoped credentials cannot use it.`;
     const users = !admin ? { allowed: false, reason: notAdmin("User management") }
@@ -276,7 +276,9 @@
     const cloudBackup = !admin ? { allowed: false, reason: notAdmin("Cloud backup") }
       : features.cloud_backup !== true ? { allowed: false, reason: "This server does not offer cloud backup: it needs the managed vlite-server runtime with admin token authentication and a private admin directory (VLITE_ADMIN_DIR)." }
       : { allowed: true, reason: "" };
-    return { users, tenants, lifecycle, tls, replication, compaction, cloudBackup };
+    // Admin-only; whether this server can switch it is shown after Refresh status.
+    const autoFailover = !admin ? { allowed: false, reason: notAdmin("Automatic failover") } : { allowed: true, reason: "" };
+    return { users, tenants, lifecycle, tls, replication, compaction, cloudBackup, autoFailover };
   }
 
   const HINTS = {
@@ -339,6 +341,12 @@
     cloud_pin_owned: "This hold belongs to a running operation, not an operator. Tick the override box only if that operation is no longer running.",
     cloud_pin_in_use: "This server is still running the operation that made this hold, so it cannot be released.",
     cloud_pin_not_found: "No hold with this ID exists on that backup. Select Load stored backups to refresh.",
+    auto_failover_not_configured: "This server cannot switch automatic failover: only a writer started with an HA authority target (--serve-mode writer --authority-target-file) can.",
+    auto_failover_unacknowledged: "Confirm the warning to turn automatic failover on. Nothing changed.",
+    auto_failover_conflict: "Someone else changed automatic failover first. Select Refresh status to see the latest setting, then try again.",
+    auto_failover_invalid: "The stored setting is damaged, so it cannot be turned on. Turn automatic failover off to replace it, then turn it on again.",
+    auto_failover_unavailable: "The HA coordination store could not be reached. Nothing changed; try again shortly.",
+    auto_failover_indeterminate: "The coordination store did not confirm the change. Select Refresh status to see whether it took effect before trying again.",
   };
   function explain(error) {
     const message = String(error?.message ?? error);
@@ -668,6 +676,36 @@
     return facts;
   }
 
+  // ---- Automatic failover (Administration > Backup & recovery) ----
+  // View model of GET/PUT /v1/admin/auto-failover. It is unqualified (GATE-005 open), so "on" is never shown as healthy.
+  function autoFailoverView(state) {
+    const idle = { headline: "Automatic failover status not loaded.", tone: "idle", facts: [], available: false, enabled: false, invalid: false, canToggle: false };
+    if (!object(state)) return idle;
+    const available = state.available === true;
+    const enabled = available && state.enabled === true;
+    const invalid = available && state.invalid === true;
+    let headline, tone;
+    if (!available) { headline = "Not set up: automatic failover needs this server to be the writer with an HA authority target. Manual failover is unaffected."; tone = "idle"; }
+    else if (invalid) { headline = "The stored setting is damaged, so supervisors treat it as off. Turn automatic failover off to replace it."; tone = "blocked"; }
+    else if (enabled) { headline = "On (not yet proven safe): a supervisor that loses contact with the writer will fail over without review, and recent changes can be lost."; tone = "blocked"; }
+    else { headline = "Off: failover happens only when a person runs it and reviews what could be lost."; tone = "idle"; }
+    const facts = [];
+    if (available) {
+      facts.push(["Automatic failover", invalid ? "Damaged setting (treated as off)" : enabled ? "On" : "Off"]);
+      facts.push(["Proven safe", `No: ${typeof state.gate === "string" ? state.gate : "GATE-005"} has not passed`]);
+      if (Number.isSafeInteger(state.updated_unix_ms)) facts.push(["Last changed", utcTime(state.updated_unix_ms)]);
+      if (typeof state.source === "string" && state.source) facts.push(["Changed by", state.source]);
+      if (typeof state.revision === "string" && state.revision) facts.push(["Setting version", state.revision]);
+    }
+    return { headline, tone, facts, available, enabled, invalid, canToggle: available };
+  }
+  // PUT body for the toggle: turning on acknowledges the warning and guards against a concurrent change; turning off writes a fresh disabled revision.
+  function autoFailoverRequest(state, enable) {
+    if (!enable) return { enabled: false };
+    const revision = object(state) && typeof state.revision === "string" && state.revision ? state.revision : null;
+    return { enabled: true, acknowledge_unqualified: true, ...(revision ? { expected_revision: revision } : {}) };
+  }
+
   function init(ctx) {
     const $ = (id) => document.getElementById(id);
     const controls = ["tenant-list", "tenant-name", "tenant-max-vectors", "tenant-create", "tenant-id", "tenant-delete", "tenant-result",
@@ -689,9 +727,10 @@
       "cloud-backup-keep-sets", "cloud-backup-keep-sets-error", "cloud-backup-keep-days", "cloud-backup-keep-days-error",
       "cloud-backup-grace", "cloud-backup-grace-error", "cloud-backup-save", "cloud-backup-sets", "cloud-backup-set-id", "cloud-backup-set-facts",
       "cloud-backup-drill", "cloud-backup-restore", "cloud-backup-pin-reason", "cloud-backup-pin-reason-error", "cloud-backup-pin",
-      "cloud-backup-pin-id", "cloud-backup-force", "cloud-backup-unpin", "cloud-backup-sets-help", "cloud-backup-result"];
+      "cloud-backup-pin-id", "cloud-backup-force", "cloud-backup-unpin", "cloud-backup-sets-help", "cloud-backup-result",
+      "auto-failover-status", "auto-failover-facts", "auto-failover-refresh", "auto-failover-toggle", "auto-failover-help", "auto-failover-result"];
     for (const name of controls) if (!$(name)) throw new Error(`admin markup is missing control #${name}`);
-    const OUTPUTS = { users: "user-result", tenants: "tenant-result", tls: "tls-result", replication: "replication-result", compaction: "compaction-result", cloudBackup: "cloud-backup-result" };
+    const OUTPUTS = { users: "user-result", tenants: "tenant-result", tls: "tls-result", replication: "replication-result", compaction: "compaction-result", cloudBackup: "cloud-backup-result", autoFailover: "auto-failover-result" };
     const TARGETS = { ...OUTPUTS, lifecycle: "tenant-result" };
     let epoch = 0;
     let segment = null;
@@ -1280,12 +1319,65 @@
       $("cloud-backup-force").checked = false;
       show("cloud-backup-result", `Hold ${pin} released. ${await reloadSets(mark)}`);
     });
+    // Automatic failover: one shared on/off switch read by every supervisor. Status loads on Refresh status.
+    let afState = null, afView = autoFailoverView(null);
+    function afRender(state) {
+      afState = object(state) ? state : null;
+      afView = autoFailoverView(afState);
+      $("auto-failover-status").textContent = afView.headline;
+      $("auto-failover-status").setAttribute?.("data-tone", afView.tone);
+      cList("auto-failover-facts", afView.facts, factRow);
+      gateAutoFailover();
+    }
+    function gateAutoFailover(offline = false) {
+      const allowed = !offline && gates.autoFailover.allowed;
+      const toggle = $("auto-failover-toggle");
+      $("auto-failover-refresh").disabled = !allowed;
+      toggle.disabled = !allowed || !afState || !afView.canToggle;
+      const turnOff = afView.enabled || afView.invalid;
+      toggle.textContent = turnOff ? "Turn off automatic failover" : "Turn on automatic failover";
+      toggle.classList?.toggle("danger", !turnOff);
+      $("auto-failover-help").textContent = !allowed ? gates.autoFailover.reason
+        : !afState ? "Select Refresh status first."
+        : !afView.available ? "This server cannot switch automatic failover. Manual failover still works."
+        : turnOff ? "Turning it off writes a fresh disabled revision. A promotion that has not passed its final transfer check will stop; one already past that check may complete."
+        : "Turning it on lets supervisors fail over without review. It does not start a supervisor.";
+    }
+    on("auto-failover-refresh", "autoFailover", async (mark) => {
+      need("autoFailover");
+      const value = await ctx.api("GET", "/v1/admin/auto-failover", undefined, { data: false });
+      if (!current(mark)) return;
+      afRender(value);
+      show("auto-failover-result", "Status refreshed.");
+    });
+    on("auto-failover-toggle", "autoFailover", async (mark) => {
+      need("autoFailover");
+      if (!afState || !afView.canToggle) throw new Error("Select Refresh status first.");
+      const enable = !(afView.enabled || afView.invalid);
+      const prompt = enable
+        ? "Turn on automatic failover? It is NOT yet proven safe (GATE-005 has not passed). A supervisor that loses contact with the writer will fence it and promote its standby without asking anyone, and changes the writer had not yet copied can be lost. Turn it off at any time to stop it."
+        : "Turn off automatic failover? This writes a fresh disabled revision. A promotion that has not passed its final transfer check will stop; one already past that check may complete. Manual failover still works.";
+      if (!await ctx.confirm(prompt)) return;
+      if (!current(mark)) return;
+      const body = autoFailoverRequest(afState, enable);
+      let value;
+      try { value = await ctx.api("PUT", "/v1/admin/auto-failover", body, { data: false }); }
+      catch (error) {
+        // The stored setting is now unknown, so the next switch needs a fresh status.
+        if (current(mark)) afRender(null);
+        throw error;
+      }
+      if (!current(mark)) return;
+      afRender(value);
+      show("auto-failover-result", enable ? "Automatic failover is on (not yet proven safe)." : "Automatic failover is off.");
+    });
     function gate(offline = false) {
       gates = availability(ctx.capabilities(), !offline && ctx.connected());
       $("replication-export").disabled = !gates.replication.allowed;
       $("replication-download").disabled = !gates.replication.allowed || segment === null;
       gateCompaction(offline);
       gateCloudBackup(offline);
+      gateAutoFailover(offline);
     }
     function reset() {
       epoch++;
@@ -1305,6 +1397,10 @@
       cloudFill(null);
       $("cloud-backup-pin-reason").value = ""; cloudFieldError("cloud-backup-pin-reason", "");
       $("cloud-backup-force").checked = false;
+      afState = null; afView = autoFailoverView(null);
+      $("auto-failover-status").textContent = afView.headline;
+      $("auto-failover-status").setAttribute?.("data-tone", afView.tone);
+      cList("auto-failover-facts", [], () => null);
       graphSupport(false);
       for (const id of Object.values(OUTPUTS)) show(id, "");
     }
@@ -1329,7 +1425,8 @@
   const api = { init, utils: { tenantName, maxVectors, tenantId, tenantRequest, tenantPath, tenantList, tenantView, tenantSettings, tenantUsage, identity, exportPath, exportSegment, exportFilename, availability, explain, utf8Length,
     username, password, userRole, userTenant, userId, userRequest, userChanges, userView, userList,
     formatBytes, compactionForm, compactionSettings, compactionOutcome, compactionView, idempotencyKey, COMPACTION_PHASES,
-    cloudBackupForm, cloudBackupPolicy, cloudBackupView, cloudBackupSets, cloudBackupSetFacts, cloudRunOutcome, cloudRestoreOutcome, cloudInterval, cloudCollectionText, cloudDrillText } };
+    cloudBackupForm, cloudBackupPolicy, cloudBackupView, cloudBackupSets, cloudBackupSetFacts, cloudRunOutcome, cloudRestoreOutcome, cloudInterval, cloudCollectionText, cloudDrillText,
+    autoFailoverView, autoFailoverRequest } };
   if (typeof window !== "undefined") window.VLiteAdminTools = api;
   if (typeof module !== "undefined" && module.exports) module.exports = api;
 })();

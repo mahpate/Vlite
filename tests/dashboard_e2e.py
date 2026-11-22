@@ -851,6 +851,10 @@ def settings(metric="squared_l2", text_fields=()):
             "planner": {"exact_max_candidates": 4096, "exact_max_selectivity_ppm": 20000}, "metadata_indexes": [], "text_fields": list(text_fields)}
 
 
+STANDALONE_SERVE_STATUS = {"mode": "standalone", "draining": False, "read_only": False, "lineage": "a" * 16, "binding_generation": 0,
+                           "format_version": 4, "sequence": 1, "epoch": None, "archive": None, "reader": None, "uptime_ms": 5000, "note": ""}
+
+
 class FakeApi:
     """Minimal in-memory Wave 2 API: records every request so tests can assert routing and headers."""
 
@@ -942,6 +946,12 @@ class FakeApi:
             return self.error(401, "unauthorized")
         if path == "/v1/capabilities":
             return 200, self.caps, {}
+        if path == "/v1/admin/serve-status":
+            # Administrator-only and answered even with agent memory on (positions are hidden instead).
+            if self.caps["role"] != "admin":
+                return self.error(403, "read_only" if self.caps["role"] == "read_only" else "forbidden_scope")
+            status = getattr(self, "serve_status", STANDALONE_SERVE_STATUS)
+            return self.error(404, "not_found") if status is None else (200, status, {})
         if path == "/v1/collections" and method == "GET":
             return 200, {"items": list(self.collections.values()), "format_version": self.caps.get("format_version")}, {}
         if path == "/v1/database":
@@ -1695,6 +1705,10 @@ def exercise_memory_mode_mocked(browser):
     control(page, "#obs-interval").select_option("2000")  # refreshes at once, then on every tick
     wait_until(lambda: calls(slow) >= 2, "Observability stopped refreshing")
     assert calls(summary) == 0 and calls("/metrics") == 0, fake.log
+    # The server role panel reads serve-status, not metrics, so it keeps working with agent memory on.
+    wait_until(lambda: calls("/v1/admin/serve-status") >= 2, "The server role stopped refreshing with metrics off")
+    expect(control(page, "#obs-serving-rows")).to_contain_text("Standalone (single server)")
+    expect(control(page, "#obs-serving-status")).to_contain_text("No problems reported")
     control(page, "#obs-interval").select_option("0")
     for _ in range(50):  # a click made while a refresh is still running is ignored, so repeat until it is answered
         if calls(summary):
@@ -1773,7 +1787,96 @@ def exercise_memory_mode_mocked(browser):
                        "/metrics": [403, "forbidden_scope"], "/v1/imports/7": [403, "forbidden_scope"]}, answers
     assert not errors, errors
     context.close()
-    print("PASS agent memory enabled (mocked): sign-in survives the refused /metrics; overview, Observability, health, Prometheus, webhooks, automatic maintenance, import status and replication export each say so in plain words; no raw 403; no overflow at 1280/768/390")
+    print("PASS agent memory enabled (mocked): sign-in survives the refused /metrics; overview, Observability (server role still shown), health, Prometheus, webhooks, automatic maintenance, import status and replication export each say so in plain words; no raw 403; no overflow at 1280/768/390")
+
+
+def exercise_serve_status_mocked(browser):
+    """Live monitor > Server role: GET /v1/admin/serve-status in plain words for a standalone server, a stale
+    reader, a draining writer with a failed archive upload, and a reader with agent memory on (positions withheld)."""
+    fake = FeatureApi()
+    context, page, errors = mocked_page(browser, fake)
+    rows, status = "#obs-serving-rows", "#obs-serving-status"
+    calls = lambda: sum(1 for item in fake.log if item["path"] == "/v1/admin/serve-status")
+
+    def show(value):
+        fake.serve_status = value
+        before = calls()
+        for _ in range(50):  # a click made while a refresh is still running is ignored, so repeat until it is answered
+            if calls() > before:
+                return
+            control(page, "#obs-refresh").click()
+            page.wait_for_timeout(200)
+        raise AssertionError("Refresh now did not ask for the server role")
+
+    def cell(label):
+        return control(page, rows).locator("tr", has=page.locator(f'th:text-is("{label}")')).locator("td")
+
+    def expect_rows(expected, levels=None):
+        for label, value in expected.items():
+            expect(cell(label)).to_have_text(value)
+        for label, level in (levels or {}).items():
+            expect(cell(label)).to_have_class(f"obs-level-{level}")
+
+    def no_overflow():
+        control(page, rows)
+        for width in (1280, 768, 390):
+            page.set_viewport_size({"width": width, "height": 844})
+            assert page.evaluate("document.documentElement.scrollWidth <= innerWidth"), width
+        page.set_viewport_size({"width": 1280, "height": 900})
+
+    expect_rows({"Role": "Standalone (single server)", "Write behavior": "Standalone role; admission depends on server state", "Draining": "No", "Writer epoch": "Not used",
+                 "Data lineage": "a" * 16, "Change-feed position": "1", "Storage format": "Version 4", "Uptime": "5.0 s",
+                 "Cloud archive": "No cloud archive configured"})
+    expect(control(page, status)).to_contain_text("No problems reported")
+    expect(control(page, rows).locator("tr")).to_have_count(9)
+    control(page, "#obs-interval").select_option("0")
+
+    show({**STANDALONE_SERVE_STATUS, "mode": "reader", "read_only": True, "epoch": 3, "sequence": 40, "uptime_ms": 7_500_000,
+          "reader": {"applied_sequence": 40, "age_ms": 12000, "bound_ms": 5000, "stale": True, "failed": False}})
+    expect_rows({"Role": "Reader (read-only replica)", "Write behavior": "Read-only role; writes are rejected",
+                 "Writer epoch": "3", "Change-feed position": "40", "Uptime": "2 h 5 min",
+                 "Reader freshness": "Stale — reads get 503 reader_stale; send reads to the writer",
+                 "Confirmed data age": "12.0 s (limit 5.0 s)", "Applied position": "40"}, {"Reader freshness": "warn"})
+    expect(control(page, status)).to_contain_text("1 item needs attention")
+    no_overflow()
+
+    show({**STANDALONE_SERVE_STATUS, "mode": "writer", "draining": True, "epoch": 4, "sequence": 90, "uptime_ms": 90_000_000,
+          "archive": {"baseline_set": "set-1", "baseline_checkpoints": 2, "checkpoints": 3, "failures": 1, "last_checkpoint_sequence": 90,
+                      "last_checkpoint_unix_ms": 1700000000000, "last_checkpoint_age_ms": 65000,
+                      "last_error": {"code": "archive_upload_failed", "message": "blob store answered 503"}}})
+    expect_rows({"Role": "Writer (configured role)", "Write behavior": "Writer role; admission may be fenced", "Draining": "Yes — shutting down, not ready for new traffic", "Uptime": "1 d 1 h",
+                 "Cloud archive": "3 verified checkpoints · 1 failed attempt · baseline set-1 (2 checkpoints)",
+                 "Last archive checkpoint": "1 min 5 s ago · position 90",
+                 "Last archive error": "archive_upload_failed: blob store answered 503"}, {"Draining": "warn", "Last archive error": "error"})
+    expect(control(page, status)).to_contain_text("2 items need attention")
+    expect(control(page, rows)).not_to_contain_text("Reader freshness")
+    no_overflow()
+
+    show({**STANDALONE_SERVE_STATUS, "mode": "reader", "read_only": True, "binding_generation": 1, "epoch": 4, "sequence": None,
+          "archive": {"baseline_set": None, "baseline_checkpoints": 0, "checkpoints": 1, "failures": 1, "last_checkpoint_sequence": None,
+                      "last_checkpoint_unix_ms": 1700000000000, "last_checkpoint_age_ms": 500,
+                      "last_error": {"code": "archive_upload_failed", "message": None}},
+          "reader": {"applied_sequence": None, "age_ms": None, "bound_ms": 0, "stale": False, "failed": True}})
+    withheld = "Withheld while agent memory is on"
+    expect_rows({"Change-feed position": withheld, "Applied position": withheld, "Cloud archive": "1 verified checkpoint · 1 failed attempt · no baseline yet",
+                 "Last archive checkpoint": "500 ms ago · position withheld while agent memory is on",
+                 "Last archive error": "archive_upload_failed (details withheld while agent memory is on)",
+                 "Reader freshness": "Failed — replication stopped; readiness reports reader_apply_failed",
+                 "Confirmed data age": "Not yet confirmed (no staleness limit)"}, {"Reader freshness": "error", "Last archive error": "error"})
+    expect(control(page, status)).to_contain_text("2 items need attention")
+    no_overflow()
+
+    # Server text is shown as text, never parsed as markup.
+    show({**STANDALONE_SERVE_STATUS, "mode": "<img src=x onerror=alert(1)>", "lineage": "<b>lineage</b>"})
+    expect_rows({"Role": "Unknown (<img src=x onerror=alert(1)>)", "Data lineage": "<b>lineage</b>"})
+    assert control(page, rows).locator("img, b").count() == 0
+    # An older server without the route keeps the last rows and says why nothing new arrived.
+    show(None)
+    expect(control(page, status)).to_have_text("Endpoint not available on this server version.")
+    expect(cell("Data lineage")).to_have_text("<b>lineage</b>")
+    assert not errors, errors
+    context.close()
+    print("PASS serve status (mocked): standalone, stale reader, draining writer with archive error, memory-withheld positions, text-only rendering, older server 404; no overflow at 1280/768/390")
 
 
 def exercise_epic015_mocked(browser):
@@ -1781,6 +1884,7 @@ def exercise_epic015_mocked(browser):
     exercise_read_loading_mocked(browser)
     exercise_features_mocked(browser)
     exercise_memory_mode_mocked(browser)
+    exercise_serve_status_mocked(browser)
     exercise_collections_mocked(browser)
     exercise_scoped_mocked(browser)
     exercise_legacy_mocked(browser)

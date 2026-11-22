@@ -34,7 +34,8 @@ const ids = ["tenant-list", "tenant-name", "tenant-max-vectors", "tenant-create"
   "cloud-backup-keep-sets", "cloud-backup-keep-sets-error", "cloud-backup-keep-days", "cloud-backup-keep-days-error",
   "cloud-backup-grace", "cloud-backup-grace-error", "cloud-backup-save", "cloud-backup-sets", "cloud-backup-set-id", "cloud-backup-set-facts",
   "cloud-backup-drill", "cloud-backup-restore", "cloud-backup-pin-reason", "cloud-backup-pin-reason-error", "cloud-backup-pin",
-  "cloud-backup-pin-id", "cloud-backup-force", "cloud-backup-unpin", "cloud-backup-sets-help", "cloud-backup-result"];
+  "cloud-backup-pin-id", "cloud-backup-force", "cloud-backup-unpin", "cloud-backup-sets-help", "cloud-backup-result",
+  "auto-failover-status", "auto-failover-facts", "auto-failover-refresh", "auto-failover-toggle", "auto-failover-help", "auto-failover-result"];
 const elements = Object.fromEntries(ids.map((id) => [id, element(id, id.endsWith("-result") ? "PRE" : "BUTTON")]));
 const downloads = [];
 // Polling timers (5 s and longer) are captured so tests advance them by hand.
@@ -580,6 +581,7 @@ const reset = () => { for (const e of Object.values(elements)) { e.listeners.len
   assert.equal(ctx.calls.length, count);
   await compactionTests();
   await cloudBackupTests();
+  await autoFailoverTests();
   console.log("admin tools tests passed");
 })().catch((error) => { console.error(error); process.exit(1); });
 
@@ -1089,4 +1091,132 @@ async function cloudBackupTests() {
   ctx.responses.push(() => { tools.disconnect(); return state(); });
   await el("refresh").click();
   assert.equal(el("status").textContent, "Cloud backup status not loaded.");
+}
+
+async function autoFailoverTests() {
+  const { autoFailoverView, autoFailoverRequest } = utils;
+  const plain = (value) => JSON.parse(JSON.stringify(value));
+  const T = Date.UTC(2026, 10, 14, 12, 30), WHEN = "2026-11-14 12:30 UTC";
+  const base = { available: true, enabled: false, revision: null, updated_unix_ms: null, source: null, invalid: false, qualified: false, gate: "GATE-005", warning: "w" };
+  const on = { ...base, enabled: true, revision: "r2", updated_unix_ms: T, source: "rest:admin" };
+
+  // View: "on" is never shown as healthy, and an unavailable server cannot be switched.
+  assert.deepEqual(plain(autoFailoverView(null)), { headline: "Automatic failover status not loaded.", tone: "idle", facts: [], available: false, enabled: false, invalid: false, canToggle: false });
+  const off = autoFailoverView(base);
+  assert.match(off.headline, /^Off: failover happens only when a person runs it/);
+  assert.deepEqual([off.tone, off.enabled, off.canToggle], ["idle", false, true]);
+  assert.deepEqual(plain(off.facts), [["Automatic failover", "Off"], ["Proven safe", "No: GATE-005 has not passed"]]);
+  const enabled = autoFailoverView(on);
+  assert.match(enabled.headline, /^On \(not yet proven safe\)/);
+  assert.match(enabled.headline, /recent changes can be lost/);
+  assert.deepEqual([enabled.tone, enabled.enabled], ["blocked", true]);
+  assert.deepEqual(plain(enabled.facts), [["Automatic failover", "On"], ["Proven safe", "No: GATE-005 has not passed"], ["Last changed", WHEN],
+    ["Changed by", "rest:admin"], ["Setting version", "r2"]]);
+  const damaged = autoFailoverView({ ...base, invalid: true });
+  assert.match(damaged.headline, /damaged/);
+  assert.deepEqual([damaged.tone, damaged.invalid, damaged.canToggle], ["blocked", true, true]);
+  const missing = autoFailoverView({ ...base, available: false, enabled: true, invalid: true });
+  assert.match(missing.headline, /^Not set up/);
+  assert.deepEqual([missing.enabled, missing.invalid, missing.canToggle, missing.facts.length], [false, false, false, 0]);
+
+  // Request: turning on acknowledges the warning and carries the revision it saw; turning off needs no revision.
+  assert.deepEqual(plain(autoFailoverRequest(base, true)), { enabled: true, acknowledge_unqualified: true });
+  assert.deepEqual(plain(autoFailoverRequest({ ...base, revision: "r1" }, true)), { enabled: true, acknowledge_unqualified: true, expected_revision: "r1" });
+  assert.deepEqual(plain(autoFailoverRequest(on, false)), { enabled: false });
+  assert.match(explain(Object.assign(new Error("HTTP 409"), { code: "auto_failover_not_configured", status: 409 })), /--authority-target-file/);
+  assert.match(explain(Object.assign(new Error("HTTP 409"), { code: "auto_failover_conflict", status: 409 })), /Select Refresh status/);
+  assert.match(explain(Object.assign(new Error("HTTP 409"), { code: "auto_failover_invalid", status: 409 })), /Turn automatic failover off to replace it/);
+
+  // Wiring: nothing is fetched until Refresh status; the toggle stays off until a status is loaded.
+  reset(); timers.length = 0;
+  const ctx = fakeCtx();
+  const caps = { role: "admin", features: {}, routes: [] };
+  ctx.caps = caps;
+  const tools = init(ctx);
+  tools.capabilities(caps);
+  const el = (id) => elements[`auto-failover-${id}`];
+  const disabled = (...names) => names.map((name) => el(name).disabled);
+  assert.equal(ctx.calls.length, 0);
+  assert.equal(el("status").textContent, "Automatic failover status not loaded.");
+  assert.equal(el("help").textContent, "Select Refresh status first.");
+  assert.deepEqual(disabled("refresh", "toggle"), [false, true]);
+  await el("toggle").click();
+  assert.equal(el("result").textContent, "Select Refresh status first.");
+  assert.equal(ctx.calls.length, 0);
+
+  ctx.responses.push(base);
+  await el("refresh").click();
+  assert.deepEqual(plain(ctx.calls.at(-1)), { method: "GET", path: "/v1/admin/auto-failover", options: { data: false } });
+  assert.equal(el("result").textContent, "Status refreshed.");
+  assert.equal(el("status").attributes["data-tone"], "idle");
+  assert.equal(el("facts").children.length, 2);
+  assert.deepEqual([el("toggle").disabled, el("toggle").textContent], [false, "Turn on automatic failover"]);
+  assert.match(el("help").textContent, /does not start a supervisor/);
+
+  // Declining the warning sends nothing.
+  ctx.answer = false;
+  await el("toggle").click();
+  assert.match(ctx.confirms.at(-1), /NOT yet proven safe \(GATE-005 has not passed\)/);
+  assert.match(ctx.confirms.at(-1), /can be lost/);
+  assert.equal(ctx.calls.length, 1);
+  // Turning on: acknowledged PUT, then the card shows the stored setting.
+  ctx.answer = true;
+  ctx.responses.push(on);
+  await el("toggle").click();
+  assert.deepEqual(plain(ctx.calls.at(-1)), { method: "PUT", path: "/v1/admin/auto-failover", body: { enabled: true, acknowledge_unqualified: true }, options: { data: false } });
+  assert.equal(el("result").textContent, "Automatic failover is on (not yet proven safe).");
+  assert.equal(el("status").attributes["data-tone"], "blocked");
+  assert.deepEqual([el("toggle").textContent, el("facts").children.length], ["Turn off automatic failover", 5]);
+  assert.match(el("help").textContent, /fresh disabled revision/);
+  assert.match(el("help").textContent, /one already past that check may complete/);
+  // Turning off: plain PUT.
+  ctx.responses.push({ ...base, revision: "r3", updated_unix_ms: T, source: "rest:admin" });
+  await el("toggle").click();
+  assert.match(ctx.confirms.at(-1), /^Turn off automatic failover\?/);
+  assert.deepEqual(plain(ctx.calls.at(-1).body), { enabled: false });
+  assert.equal(el("result").textContent, "Automatic failover is off.");
+  assert.equal(el("toggle").textContent, "Turn on automatic failover");
+  // Turning on again carries the revision it saw; a conflict is explained and the stale status is dropped.
+  ctx.responses.push(Object.assign(new Error("HTTP 409: auto_failover_conflict"), { code: "auto_failover_conflict", status: 409 }));
+  await el("toggle").click();
+  assert.deepEqual(plain(ctx.calls.at(-1).body), { enabled: true, acknowledge_unqualified: true, expected_revision: "r3" });
+  assert.match(el("result").textContent, /Someone else changed automatic failover first/);
+  assert.equal(el("status").textContent, "Automatic failover status not loaded.");
+  assert.deepEqual([el("toggle").disabled, el("help").textContent], [true, "Select Refresh status first."]);
+  // A damaged setting offers only Turn off.
+  ctx.responses.push({ ...base, invalid: true });
+  await el("refresh").click();
+  assert.equal(el("toggle").textContent, "Turn off automatic failover");
+  ctx.responses.push(base);
+  await el("toggle").click();
+  assert.deepEqual(plain(ctx.calls.at(-1).body), { enabled: false });
+  // A server without an authority target cannot be switched.
+  ctx.responses.push({ ...base, available: false });
+  await el("refresh").click();
+  assert.match(el("status").textContent, /^Not set up/);
+  assert.equal(el("toggle").disabled, true);
+  assert.match(el("help").textContent, /cannot switch automatic failover/);
+
+  // Gating: non-admins get a plain reason and send nothing.
+  const sent = ctx.calls.length;
+  ctx.caps = { role: "read_only", features: {}, routes: [] };
+  tools.capabilities(ctx.caps);
+  assert.match(el("result").textContent, /^Automatic failover requires a super admin/);
+  assert.deepEqual(disabled("refresh", "toggle"), [true, true]);
+  await el("refresh").click();
+  assert.equal(ctx.calls.length, sent);
+  assert.equal(availability(null, false).autoFailover.allowed, false);
+
+  // Disconnect clears the card and locks it; late results are dropped.
+  tools.capabilities(caps);
+  ctx.responses.push(on);
+  await el("refresh").click();
+  tools.disconnect();
+  assert.equal(el("status").textContent, "Automatic failover status not loaded.");
+  assert.deepEqual([el("result").textContent, el("facts").hidden], ["", true]);
+  assert.deepEqual(disabled("refresh", "toggle"), [true, true]);
+  tools.capabilities(caps);
+  ctx.responses.push(() => { tools.disconnect(); return on; });
+  await el("refresh").click();
+  assert.equal(el("status").textContent, "Automatic failover status not loaded.");
 }

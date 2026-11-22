@@ -158,7 +158,7 @@
           <tr><th scope="row">Remote clients</th><td>Python, JavaScript/TypeScript, Go and .NET clients.</td></tr>
           <tr><th scope="row">Docker</th><td>API and optional dashboard images, persistent data and admin volumes, and loopback defaults. The API server includes graph support.</td></tr>
           <tr><th scope="row">Helm deployment</th><td>A chart and operational configuration for Kubernetes.</td></tr>
-          <tr><th scope="row">Azure Container Apps (experimental)</th><td><a href="https://github.com/mahpate/Vlite/blob/main/deploy/azure-container-apps/README.md">Single server</a> by default. <a href="docs/HA-ACA.html">Opt-in HA</a>: gateway, Blob-backed readers, optional fencing for one writer. Failover is manual. <a href="docs/HA-ACA.html#what-has-been-measured">Measurement limits</a>.</td></tr>
+          <tr><th scope="row">Azure Container Apps (experimental)</th><td><a href="https://github.com/mahpate/Vlite/blob/main/deploy/azure-container-apps/README.md">Single server</a> by default. <a href="docs/HA-ACA.html">Opt-in HA</a>: gateway, Blob-backed readers, optional single-writer fencing. Manual failover; <a href="docs/HA-ACA.html#automatic-failover-unqualified-off-by-default">auto-failover is opt-in, unqualified</a>. <a href="docs/HA-ACA.html#what-has-been-measured">Measurement limits</a>.</td></tr>
           <tr><th scope="row">WebAssembly</th><td>A byte-buffer backend and wasm-bindgen wrapper, built from source; the host supplies time and persistence. No path locking or background threads.</td></tr>
           <tr><th scope="row">Native platforms</th><td>Windows, Linux and macOS; available binaries and wheels vary by architecture and package.</td></tr>
         </tbody></table></div>

@@ -1,0 +1,8 @@
+version: v1.1.0
+steps:
+  - build: -t {{.Run.Registry}}/gateway-measure:{{.Values.revision}} --platform linux/amd64 --target gateway-measure --file Dockerfile .
+    env:
+      - DOCKER_BUILDKIT=1
+    timeout: 7200
+  - push:
+      - "{{.Run.Registry}}/gateway-measure:{{.Values.revision}}"

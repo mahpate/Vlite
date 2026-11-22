@@ -207,15 +207,17 @@ writes stay searchable until the replacement is published.
 ## Monitor the server
 
 Super admins open **Observability → Live monitor** for request rates, errors,
-latency, a per-route table and a live log tail with level/text filters and
-JSONL export. The log is memory-only and clears on restart. **Diagnostics**
-lists slow queries. **Change feed** lists committed
-events across the database and needs read access to all collections. Server
-health is under **Administration → Health**.
+latency, per-route stats and a live log with level/text filters and JSONL
+export; the log clears on restart. **Server role and replication** shows role,
+draining, data position, archive health and
+[reader freshness](API.md#serve-status-and-reader-freshness).
+**Diagnostics** lists slow queries; **Change feed** lists committed events
+(needs read access to all collections). Health is under
+**Administration → Health**.
 
-With [agent memory](MEMORY.md) on, metrics-based views say they are unavailable
-unless the operator sets `VLITE_METRICS_WITH_MEMORY=1`. Sign-in still works. See
-[SECURITY.md](SECURITY.md#memory-bound-resources).
+With [agent memory](MEMORY.md) on, metrics stay off unless
+`VLITE_METRICS_WITH_MEMORY=1`; sign-in and server role still work
+([SECURITY.md](SECURITY.md#memory-bound-resources)).
 
 ## Administer users and tenants
 

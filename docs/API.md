@@ -823,7 +823,8 @@ confirms the policy. It holds no secret:
 * `archive` (optional, absent by default) turns on the continuous log archive:
   `{"enabled": true, "interval_secs": 300}` (60–86400, default 300). Each run
   appends a verified checkpoint (log segment and recovery bundle) after the
-  latest published set; `status.archive` reports it. The offline
+  latest published set; `status.archive` reports it (a run with nothing new
+  still reports the latest checkpoint as `tip`). The offline
   `vlite-server cloud-restore --archive-checkpoint latest|<sequence>`
   restores to an exact checkpoint only: times and other sequences are refused
   with `pitr_target_unsupported`, never rounded. Without the field the policy
@@ -937,7 +938,9 @@ claimed writer-authority epoch on an authority-enabled writer, otherwise null),
 only scoped tenant roles and has no admin path, so this route is unavailable
 there. Existing archive progress
 includes checkpoint ages and errors. Positions and archive error text are
-withheld when memory bindings block metrics.
+withheld when memory bindings block metrics. Super admins see the same report
+in the dashboard under **Observability → Live monitor → Server role and
+replication**.
 
 `binding_generation` is 0 without configured bindings; otherwise it is a
 deterministic, nonzero, JSON-safe fingerprint of the binding configuration.
@@ -976,6 +979,94 @@ guarantee. Requests that do not authenticate (anonymous probes of public
 routes such as `/health` and `/ready`, and 401 refusals) never receive them,
 so anonymous callers cannot learn reader identity or freshness. Standalone
 servers, writers and readers without apply progress do not send them. Writer/reader roles and gateway replicas add no write capacity.
+
+## Automatic failover (unqualified, opt-in, off by default)
+
+Automatic failover is **unqualified**: the failover drills and loss-report
+review of GATE-005 have not passed, so it is not supported for production.
+It is off unless an operator turns it on, and it does nothing unless an
+operator also runs a supervisor. Nothing changes for servers without writer
+authority.
+
+The switch is one small policy object stored beside the writer authority
+record (`<prefix>auto-failover.json`, schema `vlite.auto-failover/1`). Every
+supervisor reads it before each probe, immediately before fencing and again
+after fencing, so one switch stops them all; it cannot recall a fence
+command that is already running.
+
+`GET /v1/admin/auto-failover` (super administrator) returns:
+
+```json
+{"available": true, "enabled": false, "revision": null,
+ "updated_unix_ms": null, "source": null, "invalid": false,
+ "qualified": false, "gate": "GATE-005", "warning": "..."}
+```
+
+`available` is false on a server without an authority target; the PUT then
+fails with 409 `auto_failover_not_configured`. `invalid` is true when the
+stored object cannot be read as a policy; it then counts as off.
+
+`PUT /v1/admin/auto-failover` takes
+`{"enabled": bool, "expected_revision": "<revision>", "acknowledge_unqualified": bool}`
+and rejects other fields.
+
+* Turning it **on** needs `acknowledge_unqualified: true` (otherwise 422
+  `auto_failover_unacknowledged`) and the `revision` from the last GET
+  (omit it only while no policy exists). A stale or missing revision fails
+  with 409 `auto_failover_conflict`; an unreadable stored policy fails with
+  409 `auto_failover_invalid` until it is turned off. When turning on, a
+  revision that is not 32 lowercase hexadecimal characters is 422
+  `invalid_json`.
+* Turning it **off** ignores any revision and replaces an invalid policy. It
+  always writes a fresh disabled revision, including when already off or no
+  policy exists; this invalidates an enable based on an earlier revision.
+  `vlite-server failover policy disable` does the same without the dashboard
+  or a running writer. Disabling before the supervisor's final transfer check
+  aborts promotion; a transfer already past that check may still complete.
+* Storage errors return 503 `auto_failover_unavailable` or
+  `auto_failover_indeterminate` (the change may have been written; read it
+  again before retrying).
+* Open development administration refuses the PUT with 401
+  `admin_auth_required`; configure administrator authentication before using
+  this mutation. A reader refuses the PUT with 403 `reader_mode`. A successful change is
+  audited as `auto_failover_policy_changed` with `actor`, `enabled` and
+  `revision`. Super admins use the same switch in the dashboard under
+  **Administration → Backup & recovery → Automatic failover**.
+
+The supervisor is a separate process run by the operator:
+
+```text
+vlite-server failover auto --config <json>
+vlite-server failover policy show|enable|disable --target-file <json> [--shared-key-file <path>] [enable: --expected-revision <rev> --acknowledge-unqualified true]
+```
+
+The config JSON requires `target_file`, `writer_ready_url` (http or https),
+`probe_interval_ms` (500 to 60000), `probe_timeout_ms` (100 or more, below
+the interval), `failure_threshold` (2 to 100) and `fence_command` (an argument
+list run without a shell); `shared_key_file`, `probe_token_file` (a bearer
+token for `/ready`, needed unless the writer trusts a proxy),
+`promote_command` and `command_timeout_ms` (1000 to 3600000, default 300000)
+are optional. It counts consecutive failed readiness probes of the serving
+writer for the same authority epoch and revision, and acts only on a writer
+it has itself seen ready in that epoch. A successful response must identify
+`status: "ready"`, `mode: "writer"` and the expected authority `epoch`;
+otherwise it holds instead of counting. HTTP 401, 403, redirects, 429
+throttling and other unexpected responses hold instead of counting. At the threshold it checks the switch and
+authority again, runs the fence command, which must stop every old writer
+replica and print exactly `{"old_replicas":0}`, checks the switch again,
+takes a loss report as `failover report` does, refuses if authority changed,
+runs the same transfer as `failover execute`, and then runs the promote
+command, if any. Commands receive `VLITE_FAILOVER_EPOCH`,
+`VLITE_FAILOVER_REVISION` and `VLITE_FAILOVER_WRITER_ID`; the promote command
+also receives `VLITE_FAILOVER_NEW_EPOCH`. It stops after one attempt. A
+promotion prints the result, with the full loss report and its text, and
+exits 0; if the promote command failed after authority moved it exits
+nonzero with `auto_failover_standby_failed`, and an abort exits nonzero with
+`auto_failover_aborted: <reason>`. Commands get no shell, a time limit and
+bounded output. Run exactly one supervisor per authority target. The
+supervisor cannot itself verify that the old writer has stopped; the fence
+command is the operator's assertion, exactly like `--old-replicas 0`. See the
+[HA operations guide](HA-ACA.md#automatic-failover-unqualified-off-by-default).
 
 ## Gateway mode and gateway-trusted backends (experimental, opt-in, off by default)
 
@@ -1054,7 +1145,9 @@ Before forwarding, the gateway checks, in order:
    credential rather than allowing more than the limit. Buckets are capped at
    `max_buckets`; a new credential then gets 503 `rate_limit_capacity` until a
    full bucket can be evicted.
-7. The body. Bodies over `max_request_bytes` get 413 `payload_too_large`.
+7. The body. Bodies over `max_request_bytes` get 413 `payload_too_large`. A
+   body whose next piece does not arrive within `upstream_timeout_ms` gets
+   408 `request_body_timeout`, and nothing is sent upstream.
 
 More than `max_in_flight` concurrent requests get 503 `overloaded`.
 
@@ -1070,7 +1163,9 @@ URL normalization would change, is refused (503 `tenant_route_invalid` or 400
 `upstream_timeout_ms` bounds connecting, waiting for the response head, and
 then each wait for the next piece of a streamed response. A long stream may
 last longer than it as long as data keeps arriving; a stall for longer than it
-cuts the response short.
+cuts the response short. The same bound applies to a client that stops
+reading a streamed response: it loses the response (`gateway_client_stalled`)
+and its in-flight slot is released.
 
 **Nothing is retried.**
 
@@ -1172,10 +1267,10 @@ most 64 KiB and unknown fields are refused:
 | `envelope_lifetime_ms` | Positive. Keep it within the backends' `max_lifetime_ms`, or they refuse the envelopes. |
 | `public_key_bundle_file`, `signing_key_file`, `active_kid` | The bundle and signing key from `gateway-keygen`. The active key must be in the bundle and match the signing key. The signing key file is at most 1024 bytes. |
 | `readiness_propagation_ms` | 0 or more. How long `/ready` reports `draining` before the listener closes. |
-| `drain_timeout_ms` | Positive. How long in-flight requests may finish after the listener closes; they are then aborted (`drain_timeout`). |
+| `drain_timeout_ms` | Positive. How long in-flight requests may finish after the listener closes; they are then cancelled (`drain_timeout`), as described below. |
 | `max_request_bytes` | 1–8388608. |
 | `max_in_flight` | 1–65536. |
-| `upstream_timeout_ms` | Positive. Bounds connecting, waiting for the response head and each wait for the next streamed piece of a response, not the whole response. |
+| `upstream_timeout_ms` | Positive. Bounds connecting, waiting for the response head and each wait for the next piece of a request or streamed response body, in either direction, not the whole request or response. |
 | `max_buckets` | 1–1000000. |
 
 Durations are at most 3600000 ms. No field has a default except
@@ -1187,6 +1282,22 @@ logs `draining` and answers 503 `draining` on `/ready` for
 `readiness_propagation_ms` while it still serves. It then closes the listener,
 finishes in-flight requests (a gateway waits at most `drain_timeout_ms`),
 stops its control-state poller and exits.
+
+A gateway cancels every request still running when `drain_timeout_ms` passes
+and logs `drain_timeout`. Nothing is retried or re-routed:
+
+| State at the deadline | Answer |
+| --- | --- |
+| Not yet sent upstream (including a body still arriving) | 503 `draining` |
+| A write already sent | 502 `write_outcome_unknown` (read before you repeat it) |
+| A read already sent | 503 `draining` |
+| A response already streaming | cut short |
+
+Cancelled requests get at most one more second to release their slots, and
+the control-state poller at most one more second to stop (a poll still
+reading is left to finish on its own, logged `poller_stop_timeout`). A gateway
+therefore exits within about `readiness_propagation_ms` + `drain_timeout_ms`
++ 2 seconds of the signal.
 
 ### Keys, control state and the tenant directory
 

@@ -53,7 +53,24 @@ Operations and additional keys:
   full durability; optional reader uses reader WITHOUT --durability. A serving
   attempt marker refuses container restarts reusing the same ephemeral work.
 * load (driver): native_config (exact ha-meas004 config from runtime contract).
-* mutate (driver): native_config (exact ha-meas005 mode=run config).
+* mutate (driver): native_config (exact ha-meas005 mode=run config). The one
+  native attempt is unchanged and never retried. While it runs, a daemon
+  thread samples THIS process's wall (time.time_ns) and monotonic clocks every
+  50 ms; a spawn/exit mark brackets the native process. After the native
+  evidence validates, a VLITE-CLOCK frame (same framing, distinct tag) is
+  printed BEFORE the unchanged VLITE-MEAS frame: vlite-meas005-driver-clock/1
+  binds the samples to the evidence digest/bytes/exit code, ACA job name,
+  execution and replica (null unless well-formed). Monitor faults leave the
+  monitor "unavailable" (all null) and never alter the native outcome.
+* check_driver_clock (driver, offline): clock_evidence_file, mutation_evidence_file,
+  job_name, job_execution. Verifies the companion against the exact mutation
+  evidence and expected execution, then sample coverage of spawn..exit,
+  sampled wall-minus-monotonic motion against the declared 10 ms mutator
+  allowance, and floor-ms chronology of native commit brackets inside
+  spawn..exit. Exits 2 with incomplete_reasons when anything is unavailable.
+  Job-local only: it observes sampled points of one container's clocks, NOT
+  motion between samples, NOT any observer clock. clock_offset_ms,
+  clock_uncertainty_ms, undetected_excursion_bound_ms and calibration stay null.
 * analyze (driver): native_config (exact mode=analyze config). No reader required;
   inventory must explicitly include all real replicas, >=1 gateway and backend.
 * clock (any role): no extra keys; runs mode=clock_sample.
@@ -116,6 +133,8 @@ EXTRA = {
     "load": {"native_config"}, "mutate": {"native_config"},
     "analyze": {"native_config"}, "clock": set(),
     "transport": {"evidence_file", "evidence_schema", "native_exit_code"},
+    "check_driver_clock": {"clock_evidence_file", "mutation_evidence_file",
+                           "job_name", "job_execution"},
 }
 BASE_FILES = {
     "gateway": {"gateway.json", "public.json", "signing.key", "measurement.json"},
@@ -125,6 +144,23 @@ BASE_FILES = {
                "backend.token", "directory.json", "manifest.json",
                "load.expected.json", "suspension.expected.json", "measurement.json"},
 }
+FRAME_TAGS = ("VLITE-MEAS", "VLITE-CLOCK")
+DRIVER_CLOCK_SCHEMA = "vlite-meas005-driver-clock/1"
+DRIVER_CLOCK_CHECK_SCHEMA = "vlite-meas005-driver-clock-check/1"
+DRIVER_CLOCK_INTERVAL_NS = 50_000_000
+# The existing declared mutator wall/monotonic allowance; not a new threshold.
+MUTATOR_DRIFT_ALLOWANCE_MS = 10
+JOB_NAME = "[a-z][a-z0-9-]{0,31}"
+EXECUTION_SUFFIX = "-[a-z0-9]{1,32}"
+REPLICA_NAME = "[a-z0-9][a-z0-9-]{0,252}"
+BOOT_ID = "[a-f0-9]{8}(?:-[a-f0-9]{4}){3}-[a-f0-9]{12}"
+MONITOR_KEYS = ("status", "interval_target_ns", "samples", "spawn", "exit",
+                "first_monotonic_ns", "last_monotonic_ns", "max_gap_ns", "max_read_width_ns",
+                "wall_minus_monotonic_range_ns", "elapsed_wall_minus_monotonic_ns",
+                "wall_backward_steps", "elapsed_monotonic_minus_raw_ns")
+# Job-local sampling never yields these; they stay null rather than inferred.
+UNAVAILABLE_CLOCK = {"clock_offset_ms": None, "clock_uncertainty_ms": None,
+                     "undetected_excursion_bound_ms": None, "calibration": None}
 
 
 class Failure(Exception):
@@ -432,14 +468,15 @@ def run_native(argv, timeout, work, serving=False):
             signal.signal(signum, handler)
 
 
-def frame(data):
+def frame(data, tag="VLITE-MEAS"):
+    require(tag in FRAME_TAGS, "frame_tag")
     require(len(data) <= REPORT_LIMIT, "evidence_limit")
     compressed = gzip.compress(data, mtime=0)
     payload = base64.b64encode(compressed).decode("ascii")
-    lines = [f"VLITE-MEAS BEGIN {digest(compressed)} {len(compressed)}"]
+    lines = [f"{tag} BEGIN {digest(compressed)} {len(compressed)}"]
     chunks = [payload[n:n + 76] for n in range(0, len(payload), 76)]
-    lines.extend(f"VLITE-MEAS {n} {chunk}" for n, chunk in enumerate(chunks, 1))
-    lines.append(f"VLITE-MEAS END {len(chunks)}")
+    lines.extend(f"{tag} {n} {chunk}" for n, chunk in enumerate(chunks, 1))
+    lines.append(f"{tag} END {len(chunks)}")
     return "\n".join(lines) + "\n"
 
 
@@ -453,17 +490,19 @@ def gunzip(data, limit):
     return result
 
 
-def verify_frame(text):
+def verify_frame(text, tag="VLITE-MEAS"):
     """Strict transport verifier, also used by offline tests/collectors."""
+    require(tag in FRAME_TAGS, "frame_tag")
+    prefix = re.escape(tag)
     require(isinstance(text, str) and len(text) <= 2 * REPORT_LIMIT, "transport_limit")
     lines = text.splitlines()
     require(len(lines) >= 3, "transport_incomplete")
-    begin = re.fullmatch(r"VLITE-MEAS BEGIN ([a-f0-9]{64}) ([0-9]{1,8})", lines[0])
-    end = re.fullmatch(r"VLITE-MEAS END ([0-9]{1,6})", lines[-1])
+    begin = re.fullmatch(prefix + r" BEGIN ([a-f0-9]{64}) ([0-9]{1,8})", lines[0])
+    end = re.fullmatch(prefix + r" END ([0-9]{1,6})", lines[-1])
     require(begin and end and int(end[1]) == len(lines) - 2, "transport_incomplete")
     chunks = []
     for index, line in enumerate(lines[1:-1], 1):
-        match = re.fullmatch(r"VLITE-MEAS ([0-9]+) ([A-Za-z0-9+/=]{1,76})", line)
+        match = re.fullmatch(prefix + r" ([0-9]+) ([A-Za-z0-9+/=]{1,76})", line)
         require(match and int(match[1]) == index, "transport_sequence")
         require(index == len(lines) - 2 or len(match[2]) == 76, "transport_chunk")
         chunks.append(match[2])
@@ -491,7 +530,8 @@ def validate_evidence(data, schema, config, code):
         "vlite-meas004/1": {"order", "request_class", "generation",
                             "authenticated_policy", "windows", "deltas"},
         "vlite-meas005/1": {"stage", "complete", "mutation_and_ingress_checks_complete",
-                            "mutations", "replicas", "fixed_inventory_confirmed"},
+                            "mutations", "replicas", "fixed_inventory_confirmed",
+                            "mutator_clock_calibration"},
         "vlite-meas005-observer/1": {"replica", "role", "app", "revision",
             "identity_source", "boot_id", "owns_serving_child", "terminated_early",
             "interrupted", "start_unix_ms", "end_unix_ms", "elapsed_ms", "polls",
@@ -528,9 +568,12 @@ def validate_evidence(data, schema, config, code):
                 and isinstance(report.get("windows"), list)
                 and 1 <= len(report["windows"]) <= 25, "evidence_shape")
     else:
-        require(code == 0 and all(isinstance(report.get(k), (int, float))
-                and not isinstance(report[k], bool) and math.isfinite(report[k])
-                for k in ("start_unix_ms", "end_unix_ms", "elapsed_ms")),
+        require(code == 0 and all(type(report.get(k)) is int
+                and 0 <= report[k] <= 2**64 - 1 for k in ("start_unix_ms", "end_unix_ms"))
+                and type(report.get("elapsed_ms")) in (int, float)
+                and 0 <= report["elapsed_ms"] <= 60000
+                and report["end_unix_ms"] >= report["start_unix_ms"]
+                and abs(report["end_unix_ms"] - report["start_unix_ms"] - report["elapsed_ms"]) <= 10,
                 "evidence_shape")
     # Native evidence contains no private config or credential fields.
     forbidden = {"token", "bearer", "signing_key", "signing_key_file", "client_id",
@@ -553,6 +596,215 @@ def validate_evidence(data, schema, config, code):
     return report
 
 
+def clock_sources():
+    raw = getattr(time, "CLOCK_MONOTONIC_RAW", None) is not None and hasattr(time, "clock_gettime_ns")
+    return {"wall": time.get_clock_info("time").implementation,
+            "monotonic": time.get_clock_info("monotonic").implementation,
+            "raw": "clock_gettime(CLOCK_MONOTONIC_RAW)" if raw else None}
+
+
+def clock_reading(raw):
+    before = time.monotonic_ns()
+    unix = time.time_ns()
+    raw_ns = time.clock_gettime_ns(time.CLOCK_MONOTONIC_RAW) if raw else None
+    after = time.monotonic_ns()
+    return {"unix_ns": unix, "monotonic_ns": (before + after) // 2, "raw_ns": raw_ns,
+            "read_width_ns": after - before}
+
+
+def unavailable_monitor():
+    return {**{key: None for key in MONITOR_KEYS}, "status": "unavailable"}
+
+
+class ClockMonitor:
+    """Samples this process's own clocks around one native run.
+
+    Records only sampled points. Wall-minus-monotonic changes only when the
+    wall clock is stepped, but motion between samples is unobserved and is
+    never bounded here. No other host's clock is read or inferred."""
+
+    def __init__(self, sources):
+        self.sources = dict(sources)
+        self.raw = sources["raw"] is not None
+        self.lock = threading.Lock()
+        self.halt = threading.Event()
+        self.thread = threading.Thread(target=self.run, name="vlite-driver-clock", daemon=True)
+        self.failed = False
+        self.marks = {}
+        self.samples = self.max_gap = self.max_width = self.backward = 0
+        self.first = self.last = self.low = self.high = None
+
+    def sample(self):
+        with self.lock:
+            reading = clock_reading(self.raw)
+            if self.last is None:
+                self.first = reading
+            else:
+                self.max_gap = max(self.max_gap,
+                                   reading["monotonic_ns"] - self.last["monotonic_ns"])
+                self.backward += reading["unix_ns"] < self.last["unix_ns"]
+            offset = reading["unix_ns"] - reading["monotonic_ns"]
+            self.low = offset if self.low is None else min(self.low, offset)
+            self.high = offset if self.high is None else max(self.high, offset)
+            self.max_width = max(self.max_width, reading["read_width_ns"])
+            self.samples += 1
+            self.last = reading
+            return reading
+
+    def run(self):
+        try:
+            while not self.halt.wait(DRIVER_CLOCK_INTERVAL_NS / 1e9):
+                self.sample()
+        except Exception:
+            self.failed = True
+
+    def start(self):
+        self.sample()
+        self.thread.start()
+
+    def mark(self, name):
+        self.marks[name] = self.sample()
+
+    def finish(self):
+        try:
+            self.mark("exit")
+        except Exception:
+            self.failed = True
+        self.halt.set()
+        try:
+            if self.thread.ident is not None:
+                self.thread.join(1)
+            self.failed = self.failed or self.thread.is_alive()
+            self.sample()
+        except Exception:
+            self.failed = True
+
+    def summary(self):
+        with self.lock:
+            if self.failed or set(self.marks) != {"spawn", "exit"}:
+                return unavailable_monitor()
+            first, last = self.first, self.last
+            mono = last["monotonic_ns"] - first["monotonic_ns"]
+            return {"status": "observed", "interval_target_ns": DRIVER_CLOCK_INTERVAL_NS,
+                    "samples": self.samples, "spawn": dict(self.marks["spawn"]),
+                    "exit": dict(self.marks["exit"]),
+                    "first_monotonic_ns": first["monotonic_ns"],
+                    "last_monotonic_ns": last["monotonic_ns"],
+                    "max_gap_ns": self.max_gap, "max_read_width_ns": self.max_width,
+                    "wall_minus_monotonic_range_ns": self.high - self.low,
+                    "elapsed_wall_minus_monotonic_ns":
+                        last["unix_ns"] - first["unix_ns"] - mono,
+                    "wall_backward_steps": self.backward,
+                    "elapsed_monotonic_minus_raw_ns":
+                        mono - (last["raw_ns"] - first["raw_ns"]) if self.raw else None}
+
+
+def job_identity():
+    name = os.environ.get("CONTAINER_APP_JOB_NAME")
+    execution = os.environ.get("CONTAINER_APP_JOB_EXECUTION_NAME")
+    replica = os.environ.get("CONTAINER_APP_REPLICA_NAME")
+    name = name if name and re.fullmatch(JOB_NAME, name) else None
+    execution = execution if name and execution and re.fullmatch(
+        re.escape(name) + EXECUTION_SUFFIX, execution) else None
+    replica = replica if replica and re.fullmatch(REPLICA_NAME, replica) else None
+    return name, execution, replica
+
+
+def boot_id():
+    try:
+        with open("/proc/sys/kernel/random/boot_id", "rb") as stream:
+            value = stream.read(64).decode("ascii").strip()
+    except (OSError, UnicodeError):
+        return None
+    return value if re.fullmatch(BOOT_ID, value) else None
+
+
+def validate_driver_clock(data, config):
+    """Strict companion shape; unavailable values must stay null."""
+    shape = "driver_clock_shape"
+    document = json_bytes(data)
+
+    def keys(value, names):
+        require(isinstance(value, dict) and set(value) == set(names), shape)
+        return value
+
+    def count(value, low=0):
+        require(type(value) is int and low <= value <= 2**64 - 1, shape)
+        return value
+
+    def signed(value):
+        require(type(value) is int and -2**63 <= value <= 2**63 - 1, shape)
+
+    def named(value, pattern):
+        require(value is None or (isinstance(value, str) and re.fullmatch(pattern, value)), shape)
+
+    keys(document, ("schema", "qualification", "source", "scope", "binding", "clocks",
+                    "monitor", "unavailable"))
+    require(document["schema"] == DRIVER_CLOCK_SCHEMA
+            and document["qualification"] == "proposal_evidence_only"
+            and document["scope"] == "job_local_driver_process_only", shape)
+    require(document["source"] == source(config), "evidence_provenance")
+    binding = keys(document["binding"], ("job_name", "job_execution", "replica", "boot_id",
+        "native_exit_code", "mutation_evidence_sha256", "mutation_evidence_bytes"))
+    named(binding["job_name"], JOB_NAME)
+    require(binding["job_execution"] is None or binding["job_name"] is not None, shape)
+    if binding["job_name"] is not None:
+        named(binding["job_execution"], re.escape(binding["job_name"]) + EXECUTION_SUFFIX)
+    named(binding["replica"], REPLICA_NAME)
+    named(binding["boot_id"], BOOT_ID)
+    require(type(binding["native_exit_code"]) is int and binding["native_exit_code"] in (0, 2)
+            and isinstance(binding["mutation_evidence_sha256"], str)
+            and re.fullmatch("[a-f0-9]{64}", binding["mutation_evidence_sha256"]), shape)
+    require(count(binding["mutation_evidence_bytes"]) <= REPORT_LIMIT, shape)
+    clocks = keys(document["clocks"], ("wall", "monotonic", "raw"))
+    for name, value in clocks.items():
+        require((name == "raw" and value is None)
+                or (isinstance(value, str) and re.fullmatch("[ -~]{1,64}", value)), shape)
+    unavailable = keys(document["unavailable"], UNAVAILABLE_CLOCK)
+    require(all(value is None for value in unavailable.values()), shape)
+    monitor = keys(document["monitor"], MONITOR_KEYS)
+    require(monitor["status"] in ("observed", "unavailable"), shape)
+    if monitor["status"] == "unavailable":
+        require(all(monitor[key] is None for key in MONITOR_KEYS if key != "status"), shape)
+        return document
+    raw = clocks["raw"] is not None
+    require(monitor["interval_target_ns"] == DRIVER_CLOCK_INTERVAL_NS, shape)
+    count(monitor["interval_target_ns"], 1)
+    count(monitor["samples"], 1)
+    for name in ("spawn", "exit"):
+        reading = keys(monitor[name], ("unix_ns", "monotonic_ns", "raw_ns", "read_width_ns"))
+        for key in ("unix_ns", "monotonic_ns", "read_width_ns"):
+            count(reading[key])
+        require((reading["raw_ns"] is not None) == raw, shape)
+        if raw:
+            count(reading["raw_ns"])
+    for key in ("first_monotonic_ns", "last_monotonic_ns", "max_gap_ns", "max_read_width_ns",
+                "wall_minus_monotonic_range_ns", "wall_backward_steps"):
+        count(monitor[key])
+    signed(monitor["elapsed_wall_minus_monotonic_ns"])
+    require((monitor["elapsed_monotonic_minus_raw_ns"] is not None) == raw, shape)
+    if raw:
+        signed(monitor["elapsed_monotonic_minus_raw_ns"])
+    require(monitor["spawn"]["monotonic_ns"] <= monitor["exit"]["monotonic_ns"]
+            and monitor["first_monotonic_ns"] <= monitor["last_monotonic_ns"], shape)
+    return document
+
+
+def commit_brackets(mutations):
+    """Native command brackets; records without one are skipped, not invented."""
+    brackets = []
+    for record in mutations:
+        require(isinstance(record, dict), "mutation_commit_shape")
+        commit = record.get("commit")
+        if commit is None:
+            continue
+        require(isinstance(commit, dict) and commit.get("kind") == "command_bracket"
+                and all(type(commit.get(key)) is int and 0 <= commit[key] <= 2**64 - 1
+                        for key in ("start_unix_ms", "end_unix_ms")), "mutation_commit_shape")
+        brackets.append((commit["start_unix_ms"], commit["end_unix_ms"]))
+    return brackets
+
+
 class Runtime:
     def __init__(self, config):
         object_keys(config, COMMON | set().union(*EXTRA.values()),
@@ -562,7 +814,8 @@ class Runtime:
         self.role = config["role"]
         require(self.op in EXTRA and self.role in BASE_FILES)
         object_keys(config, COMMON | EXTRA[self.op])
-        driver_ops = {"bootstrap", "export", "publish", "load", "mutate", "analyze"}
+        driver_ops = {"bootstrap", "export", "publish", "load", "mutate", "analyze",
+                      "check_driver_clock"}
         require(self.op not in driver_ops or self.role == "driver", "role_refused")
         require(self.op not in ("serve", "observe") or self.role != "driver", "role_refused")
         require(self.op != "copy_fixture" or self.role in ("writer", "reader"), "role_refused")
@@ -581,6 +834,8 @@ class Runtime:
         self.server = absolute(config.get("server", "/usr/local/bin/vlite-server"))
         self.load = absolute(config.get("load_program", "/usr/local/bin/ha-meas004"))
         self.control = absolute(config.get("control_program", "/usr/local/bin/ha-meas005"))
+        self.monitor = None
+        self.companion = None
 
     def destination(self, value):
         path = absolute(value)
@@ -615,6 +870,107 @@ class Runtime:
             if uncertain:
                 raise Failure("unknown_do_not_retry") from None
             raise
+
+    def monitored(self, argv):
+        """Run the single native attempt while sampling this process's clocks.
+
+        Monitor faults only make the companion unavailable; they never alter
+        or repeat the native command."""
+        monitor = None
+        try:
+            monitor = ClockMonitor(clock_sources())
+            monitor.start()
+            monitor.mark("spawn")
+        except Exception:
+            if monitor is not None:
+                monitor.failed = True
+        try:
+            return self.invoke(argv)
+        finally:
+            if monitor is not None:
+                monitor.finish()
+            self.monitor = monitor
+
+    def driver_clock(self, code, data):
+        """Self-validated companion for validated evidence, else None."""
+        try:
+            monitor = self.monitor
+            sources = monitor.sources if monitor is not None else clock_sources()
+            name, execution, replica = job_identity()
+            document = {"schema": DRIVER_CLOCK_SCHEMA, "qualification": "proposal_evidence_only",
+                "source": source(self.c), "scope": "job_local_driver_process_only",
+                "binding": {"job_name": name, "job_execution": execution, "replica": replica,
+                            "boot_id": boot_id(), "native_exit_code": code,
+                            "mutation_evidence_sha256": digest(data),
+                            "mutation_evidence_bytes": len(data)},
+                "clocks": dict(sources),
+                "monitor": monitor.summary() if monitor is not None else unavailable_monitor(),
+                "unavailable": dict(UNAVAILABLE_CLOCK)}
+            return validate_driver_clock(encode(document), self.c)
+        except Exception:
+            return None
+
+    def check_driver_clock(self):
+        job, execution = self.c["job_name"], self.c["job_execution"]
+        require(isinstance(job, str) and re.fullmatch(JOB_NAME, job)
+                and isinstance(execution, str)
+                and re.fullmatch(re.escape(job) + EXECUTION_SUFFIX, execution))
+        companion_data = read_bytes(self.c["clock_evidence_file"])
+        evidence = read_bytes(self.c["mutation_evidence_file"], REPORT_LIMIT)
+        mutation = json_bytes(evidence)
+        code = 0 if mutation.get("mutation_and_ingress_checks_complete") is True else 2
+        report = self.evidence(evidence, "vlite-meas005/1", code)
+        require(report["stage"] == "mutations", "evidence_stage")
+        companion = validate_driver_clock(companion_data, self.c)
+        binding, monitor, clocks = (companion[key] for key in ("binding", "monitor", "clocks"))
+        require(binding["mutation_evidence_sha256"] == digest(evidence)
+                and binding["mutation_evidence_bytes"] == len(evidence)
+                and binding["native_exit_code"] == code, "driver_clock_binding_mismatch")
+        require(binding["job_name"] in (None, job)
+                and binding["job_execution"] in (None, execution),
+                "driver_clock_identity_mismatch")
+        brackets = commit_brackets(report["mutations"])
+        reasons = []
+        if binding["job_execution"] is None:
+            reasons.append("job_execution_unavailable")
+        if (clocks["wall"], clocks["monotonic"]) != ("clock_gettime(CLOCK_REALTIME)",
+                                                     "clock_gettime(CLOCK_MONOTONIC)"):
+            # Native commit brackets read CLOCK_REALTIME; other sources are not comparable.
+            reasons.append("clock_source_unverified")
+        coverage = within = chronology = None
+        if monitor["status"] != "observed":
+            reasons.append("monitor_unavailable")
+        else:
+            spawn, end = monitor["spawn"], monitor["exit"]
+            coverage = (monitor["samples"] >= 2
+                        and monitor["first_monotonic_ns"] <= spawn["monotonic_ns"]
+                        and end["monotonic_ns"] <= monitor["last_monotonic_ns"])
+            within = (monitor["wall_minus_monotonic_range_ns"] + monitor["max_read_width_ns"]
+                      <= MUTATOR_DRIFT_ALLOWANCE_MS * 1_000_000)
+            previous, chronology = spawn["unix_ns"] // 1_000_000, True
+            for start, finish in brackets:
+                chronology = chronology and previous <= start <= finish
+                previous = finish
+            chronology = chronology and previous <= end["unix_ns"] // 1_000_000
+            for failed, reason in ((not coverage, "coverage_gap"),
+                                   (monitor["wall_backward_steps"], "wall_backward_step"),
+                                   (not within, "allowance_exceeded"),
+                                   (not chronology, "chronology_inconsistent")):
+                if failed:
+                    reasons.append(reason)
+        receipt = {"schema": DRIVER_CLOCK_CHECK_SCHEMA, "qualification": "proposal_evidence_only",
+            "source": source(self.c), "operation": self.op,
+            "companion_sha256": digest(companion_data),
+            "mutation_evidence_sha256": digest(evidence),
+            "job_name": job, "job_execution": execution,
+            "bound_to_execution": binding["job_execution"] == execution,
+            "coverage_observed": coverage, "wall_backward_steps": monitor["wall_backward_steps"],
+            "sampled_within_declared_allowance": within, "chronology_consistent": chronology,
+            "commits_checked": len(brackets), "max_sample_gap_ns": monitor["max_gap_ns"],
+            "declared_mutator_drift_allowance_ms": MUTATOR_DRIFT_ALLOWANCE_MS,
+            "complete": not reasons, "incomplete_reasons": reasons,
+            "unavailable": dict(UNAVAILABLE_CLOCK)}
+        return (2 if reasons else 0), encode(receipt)
 
     def attempt(self, name):
         try:
@@ -881,7 +1237,7 @@ class Runtime:
             program, schema = self.control, "vlite-meas005/1"
         else:
             object_keys(native, {"mode", "mutation_evidence_file", "replicas",
-                                "fixed_inventory_confirmed"},
+                                "fixed_inventory_confirmed", "calibration"},
                         {"mode", "mutation_evidence_file", "replicas"})
             require(native["mode"] == "analyze")
             evidence = read_bytes(native["mutation_evidence_file"], REPORT_LIMIT)
@@ -892,8 +1248,7 @@ class Runtime:
             require(isinstance(replicas, list) and 1 <= len(replicas) <= 64)
             identities = set()
             for replica in replicas:
-                object_keys(replica, {"replica", "role", "report_file",
-                                     "clock_offset_ms", "clock_uncertainty_ms"},
+                object_keys(replica, {"replica", "role", "report_file", "calibration"},
                             {"replica", "role", "report_file"})
                 require(replica["replica"] not in identities, "duplicate_replica")
                 identities.add(replica["replica"])
@@ -904,11 +1259,14 @@ class Runtime:
                 require(report["replica"] == replica["replica"]
                         and report["role"] == replica["role"], "observer_identity_mismatch")
             program, schema = self.control, "vlite-meas005/1"
-        code, data = self.invoke([program, "--config", path])
+        argv = [program, "--config", path]
+        code, data = self.monitored(argv) if self.op == "mutate" else self.invoke(argv)
         report = self.evidence(data, schema, code)
         if self.op != "load":
             require(report["stage"] == ("mutations" if self.op == "mutate" else "analysis"),
                     "evidence_stage")
+        if self.op == "mutate":
+            self.companion = self.driver_clock(code, data)
         return code, data
 
     def execute(self):
@@ -930,8 +1288,16 @@ def main(argv=None):
     try:
         args = sys.argv[1:] if argv is None else argv
         require(len(args) == 2 and args[0] == "--config", "usage_config_file_required")
-        code, data = Runtime(read_json(absolute(args[1]))).execute()
-        sys.stdout.write(frame(data))
+        worker = Runtime(read_json(absolute(args[1])))
+        code, data = worker.execute()
+        output = frame(data)
+        if worker.companion is not None:
+            # Printed first so the primary evidence frame stays at the log tail.
+            try:
+                sys.stdout.write(frame(encode(worker.companion), "VLITE-CLOCK"))
+            except Failure:
+                pass
+        sys.stdout.write(output)
         return code
     except Failure as error:
         sys.stdout.write("VLITE-MEAS FAILED 1\n")

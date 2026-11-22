@@ -21,7 +21,8 @@ $Control = (Resolve-Path .\target\release\examples\ha-meas005.exe).Path
 
 Linux container build: `docker build --target gateway-measure -t vlite-gateway-measure .`.
 That **separate** target contains `/usr/local/bin/vlite-server`,
-`/usr/local/bin/ha-meas004`, `/usr/local/bin/ha-meas005`, runs as UID/GID 10001,
+`/usr/local/bin/ha-meas004`, `/usr/local/bin/ha-meas005`, `python3` and
+`/usr/local/bin/measure-gateway-entrypoint.py`, runs as UID/GID 10001,
 and has writable work directory `/measurement` (0700).
 It does not change the production `api` target. Docker COPY/context allowlists
 include all three benchmark sources. No examples are installed in the normal
@@ -59,9 +60,11 @@ Set these **on driver jobs and every observer app** from the source build:
 
 Configs are UTF-8 JSON, at most 65536 bytes, with unknown fields refused.
 Use absolute paths to existing mounted files, no shell expansion in JSON.
-The JSON below uses **container paths**. Native Windows JSON must use escaped
-absolute Windows paths (`C:\\measurement\\...`). Mount equivalent paths at the
-same absolute locations when distributing generated configs/manifest.
+The JSON below uses **container paths**. Bootstrap writes absolute paths into
+`gateway.json`, `trust.json` and the manifest, so the one real bootstrap runs on a
+Linux/WSL operator host at the container path `/measurement/bootstrap` (see
+"Exact shared fixture" below). Windows-path bootstrap output is not
+distributable to the containers.
 Opaque `requested` label maps accept at most 32 entries with 1..128 characters
 from `[A-Za-z0-9._-]` in keys and values. Put only nonsecret resource/settings
 labels there, never tokens or resource URLs. Endpoint origins accept only HTTP(S),
@@ -70,9 +73,10 @@ HTTP redirects/proxies/retries are disabled in load/probe clients.
 
 ## 1. Offline fixture/bootstrap
 
-Create a new private parent directory owned by the measurement user. On Windows,
-restrict its ACL before running bootstrap; Unix staging directories are 0700,
-explicit secret outputs 0600. The output directory **must not exist**. Partial
+Create a new private parent directory owned by the measurement user (for a
+distributable run: `/measurement` on the Linux operator host). Unix staging
+directories are 0700, explicit secret outputs 0600. A Windows bootstrap is only
+for local smoke and must restrict its ACL first. The output directory **must not exist**. Partial
 bootstrap contents are removed on failure. Existing directories/files are not
 replaced. The successful directory persists for the harness to distribute and
 must be deleted in harness `finally`.
@@ -158,6 +162,66 @@ epoch fencing, failover, archive/apply, reader freshness or durable writer
 restart. It does not relax any deployment gate. A harness using real authority
 must provision it with the existing authority tools and replace the directory
 before publication; preserve that difference in requested labels.
+
+### Exact shared fixture (Linux operator host)
+
+Every role must use the **same** bootstrap result: role bundles carry the files,
+and backends carry that result's own `database.vlite`. A separately bootstrapped
+database has different tenant IDs and lineage and is invalid. Prepare one run
+on Linux/WSL with Python 3, the source-revision Linux `vlite-server`, and an
+**empty** `/measurement` (0700, owned by the operator, not a symlink):
+
+```sh
+export VLITE_RESOURCE_SOURCE_REVISION=... VLITE_RESOURCE_SOURCE_DIRTY_PATHS=...
+python3 deploy/azure-container-apps/ha/measure-gateway-fixture.py prepare --plan /private/plan.json
+python3 deploy/azure-container-apps/ha/measure-gateway-fixture.py cleanup
+```
+
+The plan names `server`, `writer_url` (the run's internal writer origin, so the
+writer app environment must exist first), `audience`, `control_target`
+(account/containers/prefix; written as managed identity, no `client_id`),
+`control_object`, `generation`, `registry`, `base_image`
+(`REGISTRY.azurecr.io/REPO@sha256:DIGEST` of the `gateway-measure` image) and
+`fixture_repository`. `prepare` then does the following:
+
+1. It runs the entrypoint `bootstrap` once, at `/measurement/bootstrap`, with
+   `/measurement/control-target.json`. It never retries.
+2. It exports `driver`, `gateway`, `writer` and `reader` to
+   `/measurement/exports/ROLE.json`.
+3. It decodes each export and checks that it matches the bootstrap files byte
+   for byte: exactly the role-allowed set, with no `database.vlite`. It also
+   checks the schema, role, generation, source, the `bootstrap_dir`, and the
+   receipt's digest and size. Finally it checks that the `measurement.json`
+   fixture digest and lineage match the bootstrap fixture and manifest.
+4. It refuses a fixture that contains any generated token or signing seed.
+5. It writes a private image context, `/measurement/image/`, containing only
+   `database.vlite` (digest-verified) and this Dockerfile:
+   `FROM <base_image>` plus `COPY --chown=10001:10001 --chmod=0400 database.vlite
+   /opt/vlite-measure/fixture/database.vlite`.
+
+Its stdout is one public JSON summary. The summary holds the fixture digest,
+the export digests and paths, the conservative credential deadline (bootstrap
+start plus 2 h) and a **planned, not executed** `az acr build` into the run's
+private ACR, tagged `GENERATION-DIGEST12`. Any failure prints only
+`VLITE-MEAS FAILED 1` and a static code, then removes everything under
+`/measurement`. A non-empty root is refused and left untouched.
+
+Distribute the parts as follows:
+
+- Each role's projection goes only to that role's ACA secrets. Each role then
+  runs `restore` to `/measurement/bootstrap`.
+- Each role gets its own `control-target.json`, with its own `client_id`.
+- Writer and reader run `copy_fixture` from
+  `/opt/vlite-measure/fixture/database.vlite`, with `fixture_sha256` set to the
+  summary digest.
+- `serve` independently rechecks that digest against the restored
+  `measurement.json`.
+
+Credentials expire 2 h after issuance, so the build, the secrets, publish and
+the whole trial must finish before `credentials_expire_not_before_unix_ms`. Do
+not reuse a run. Run `cleanup` once secrets are written, and again in harness
+`finally`. Delete the fixture image with the run's ACR/resource group. Never
+push it to a public registry or copy it into evidence.
 
 Publish exactly once, **after** fixture/config distribution and **before** apps:
 
@@ -391,7 +455,9 @@ stops the remaining mutation sequence and preserves the partial records.
 The `vlite-meas005/1` mutation report contains requested settings, source, limits,
 uncertainty, generation/whole-command UTC+monotonic brackets, jitter, bounded
 behavior records and `mutation_and_ingress_checks_complete`. `complete:false`
-is intentional until observer analysis.
+is intentional until observer analysis. The runtime wrapper may print a separate
+job-local `VLITE-CLOCK` companion before this unchanged frame (§5); the native
+mutation report, its schema and its exit semantics are not altered.
 
 ## 5. Clock samples and offline MEAS-005 analysis
 
@@ -400,12 +466,169 @@ is intentional until observer analysis.
 Run it in the mutator job/host and via **replica-specific exec** on each observer
 replica before and after each trial. It returns `vlite-meas005-clock/1` with
 remote UTC start/end and monotonic elapsed. Bracket remote exec locally.
-Derive conservative **observer UTC minus mutator UTC** offset intervals, including
-both command RTT brackets, their reference-host calibration, rounding, drift and
-any before/after disagreement. The implementation does not claim that ACA exec,
-NTP, or cross-host drift has a prevalidated precision. If no defensible bound is
-available, use nulls, preserve generation/floor coverage, and expect incomplete
-timing. Do not estimate host offset from load-balanced HTTP RTT.
+Cross-clock correction uses only the four-timestamp calibration below. The
+implementation does not claim that ACA exec, NTP, or cross-host drift has a
+prevalidated precision. If no defensible exchange is available, supply
+`"calibration": null`, preserve generation/floor coverage, and expect
+`clock_unknown` timing. Do not estimate host offset from load-balanced HTTP RTT.
+
+### Cross-clock calibration protocol (offline analyzer; advisory)
+
+Each calibrated **subject** clock (every observer replica, plus the mutator for
+a common reference) is calibrated against a **reference** clock by `N`
+four-timestamp exchanges taken **before** the measurement window (`pre`) and
+`N` **after** it (`post`): `t0` reference send, `t1` subject receive, `t2`
+subject reply, `t3` reference receive (Unix ms; `t0`/`t3` on the reference
+clock, `t1`/`t2` on the subject clock). The reference is either the mutator's
+own clock (`reference:"mutator"`) or a separate common host
+(`reference:"common"`, which then also requires a `mutator` bracket). Each
+exchange must address one exact replica, never a load-balanced endpoint.
+
+Per side, with `theta = subject - reference` and resolution `r`:
+
+- `net = (t3 - t0) - (t2 - t1)` (round trip minus subject processing)
+- `offset = ((t1 - t0) + (t2 - t3)) / 2` of the **minimum-net** exchange
+- `error = net / 2 + r` of that exchange, which bounds any forward/back
+  asymmetry: the truth lies in `[t2 - t3 - r, t1 - t0 + r]` for every exchange,
+  and an empty intersection is rejected
+- `at = (t0 + t3) / 2` of that exchange
+
+The two bracket endpoints bound only the *mean* offset change across the run.
+They cannot bound an interior clock excursion (a step or slew that returns to
+baseline before the post exchanges), so no drift rate is inferred from them
+and none is assumed. Correction therefore requires an independent run-wide
+continuity envelope `E` (ms): a measured bound on how far the offset may depart
+from its nearest endpoint at any interior instant. A subject reading at
+reference time `x` uses the nearest endpoint and
+`error_x = endpoint.error + E`, and the bracket is rejected when
+`|post.offset - pre.offset| > E + pre.error + post.error`. For a common
+reference, the observer-minus-mutator offset is
+`theta_observer - theta_mutator` and the errors add (the mutator bracket needs
+its own envelope). Every corrected observer timestamp is then widened by that
+error, the observed observer jump (<= 10 ms) and the declared 10 ms mutator
+drift allowance.
+
+**No current evidence source supplies `E`.** The analyzer therefore rejects
+every replica (and a common-reference mutator bracket) with
+`calibration_continuity_unbounded`: all samples are `clock_unknown` and the
+analysis is incomplete, not merely advisory. This holds even when the pre and
+post offsets are identical.
+
+Exchange evidence, policy and results:
+
+- `analyze.json` adds `calibration`:
+  `{reference, mutator, min_samples 1..=64, max_rtt_ms (0,60000], slo_margin_ms (0,60000], resolution_ms 0..=1000 (default 1)}`.
+  `mutator` is a bracket that is required if and only if the reference is
+  common.
+- Each replica entry adds `calibration`: `null` or
+  `{"pre":[{"t0_ms","t1_ms","t2_ms","t3_ms"}...],"post":[...]}`, with at most
+  64 exchanges per side.
+- Each output replica reports `clock_calibration`:
+  `{status: accepted|rejected, reasons, observer: {pre, post, elapsed_ms, endpoint_mean_rate_ms_per_s, endpoint_rate_bounds_interior: false, continuity_envelope_ms}, max_applied_error_ms}`.
+  `endpoint_mean_rate_ms_per_s` is diagnostic only; `continuity_envelope_ms`
+  is `null` until a measured envelope exists.
+  Each side shows `offset_ms`, `error_ms`, `at_reference_unix_ms`,
+  `min_rtt_net_ms` and `samples`.
+- The top level reports `mutator_clock_calibration`.
+- `uncertainty` reports `clock_calibration:"four_timestamp_min_rtt_exchanges_bracketing_run"`,
+  `drift_model:"endpoint_offsets_do_not_bound_interior_excursion"`,
+  `continuity_envelope:"required_none_available_rejects_clock_unknown"` and
+  `calibration_qualification:"advisory_unqualified_until_live_run"`.
+
+The analyzer fails closed. A rejected replica censors every sample as
+`clock_unknown`, is never counted in distributions, and makes the analysis
+incomplete. Static reason codes, sorted and deduplicated:
+
+- `calibration_missing`: no policy, a null replica calibration, or a common
+  reference without a mutator bracket.
+- `calibration_policy_invalid`: the policy is out of range, or a mutator
+  bracket is supplied for the mutator reference.
+- `calibration_exchange_invalid`: a non-finite value, `t3 < t0`, `t2 < t1`,
+  a negative net, or more than 64 exchanges.
+- `calibration_too_few_samples`: fewer than `min_samples` exchanges on a side.
+- `calibration_rtt_exceeds_bound`: the minimum net RTT on a side is above
+  `max_rtt_ms`.
+- `calibration_exchange_inconsistent`: the exchanges admit no common offset.
+- `calibration_does_not_bracket_run`: the pre exchanges do not all end before
+  the post exchanges start, or a command/observation does not lie between them.
+- `calibration_continuity_unbounded`: no finite, non-negative run-wide
+  continuity envelope is available (currently always).
+- `calibration_endpoints_exceed_continuity_envelope`: the endpoint offset
+  change exceeds the envelope plus both endpoint errors.
+- `calibration_uncertainty_exceeds_slo_margin`: a sample's applied error is
+  above `slo_margin_ms`.
+- `observer_clock_jump_exceeds_allowance`: the observer clock jump is missing,
+  or above 10 ms.
+
+**Live-run gap.** No exchange channel is implemented yet. The ACA driver is a
+Manual job with no exec path, and the gateway/backends are load balanced. The
+harness therefore still records `ClockCalibrationUnavailable` unconditionally
+and supplies null calibration, so MEAS-005 timing remains `clock_unknown`. A
+future live run must take timestamps through a per-replica channel and record
+them as the evidence above, and must also supply a measured run-wide
+continuity envelope (for example dense interior exchanges or another
+independent bound); the endpoint pair alone never qualifies. Candidates are a Blob-coordinated request/reply
+with the coordinator as the common reference, or an exec-bracketed
+`clock_sample` where the sample start/end give `t1`/`t2` and the harness exec
+bracket gives `t0`/`t3`. Until an approved live throwaway run captures real
+exchanges and the bounds are reviewed against the SLO, **MEAS-005 remains
+unqualified**. Offline synthetic tests show only that the math recovers known
+offsets within a supplied (hypothetical) envelope, and that identical endpoints
+with an unconstrained interior excursion are rejected.
+
+### Job-local driver clock continuity (`VLITE-CLOCK`)
+
+The ACA driver is a single Manual job execution (parallelism 1, no replica
+retry) whose only evidence channel is console output; the harness has no exec
+path into it for calibration. Instead the runtime wrapper's existing
+`operation:"mutate"` path monitors **its own container's** clocks around the one
+unchanged native attempt. A daemon thread samples Python's wall
+(`time.time_ns`), monotonic and, on Linux, `CLOCK_MONOTONIC_RAW` every 50 ms
+(target), with spawn/exit marks bracketing the native process. Monitor faults
+leave `monitor.status:"unavailable"` with every other monitor field null; they
+never change or repeat the native command or its evidence (stopping the
+sampler waits at most 1 s after native exit).
+
+After the native evidence validates (exit 0 or 2), the wrapper prints a
+`vlite-meas005-driver-clock/1` companion, framed exactly like `VLITE-MEAS` but
+tagged `VLITE-CLOCK`, **before** the unchanged mutation frame. It contains
+`scope:"job_local_driver_process_only"`, a `binding` of ACA
+`CONTAINER_APP_JOB_NAME`/`CONTAINER_APP_JOB_EXECUTION_NAME`/`CONTAINER_APP_REPLICA_NAME`
+(each null unless well-formed; the execution must carry the job-name prefix),
+`/proc` boot id or null, native exit code and the sha256/byte length of the
+exact mutation evidence, the reported clock implementations, monitor summary
+(samples, spawn/exit readings, first/last monotonic, maximum sample gap and read
+width, wall-minus-monotonic range and elapsed change, backward wall steps,
+elapsed monotonic-minus-raw slew), and an `unavailable` object whose
+`clock_offset_ms`, `clock_uncertainty_ms`, `undetected_excursion_bound_ms` and
+`calibration` are always null.
+
+The harness extracts `VLITE-CLOCK` lines from the same verified driver log
+read, verifies frame, schema, qualification, provenance and private values,
+and runs the offline consumer `check_driver_clock` (driver role) with the
+companion, the exact mutation bytes, and the job name/execution the harness
+started. It refuses malformed, foreign-source, digest/byte/exit-code-mismatched
+or foreign-execution companions. Otherwise it writes a
+`vlite-meas005-driver-clock-check/1` receipt (exit 0 complete, 2 incomplete)
+whose `incomplete_reasons` are, in order: `job_execution_unavailable`,
+`clock_source_unverified` (not `clock_gettime(CLOCK_REALTIME)`/`CLOCK_MONOTONIC`,
+the native bracket clock), `monitor_unavailable`, `coverage_gap` (samples do not
+enclose spawn..exit), `wall_backward_step`, `allowance_exceeded` (sampled
+wall-minus-monotonic range plus maximum read width above the existing declared
+10 ms mutator allowance) and `chronology_inconsistent` (floor-ms
+spawn <= each command bracket start <= end <= next start ... <= exit).
+Harness outcomes are advisory: no companion adds
+`DriverClockContinuityUnavailable`; a rejected companion or receipt adds
+`DriverClockEvidenceRejected` and saves neither; an incomplete receipt saves
+`MEAS-005-driver-clock.json` plus `MEAS-005-driver-clock-check.json` and adds
+`DriverClockContinuityIncomplete`. None fails the run or retries the driver,
+and `ClockCalibrationUnavailable` remains unconditional.
+
+A complete receipt means only that the **sampled points** of one driver
+container's clocks were continuous and stayed within the declared allowance
+across this execution. It does not bound motion between samples, does not
+measure any observer clock, does not derive an observer-minus-mutator offset,
+and does not supply cross-clock `calibration` for analysis.
 
 After observers finish, collect all reports, after-inventory and calibration.
 `analyze.json`:
@@ -415,20 +638,26 @@ After observers finish, collect all reports, after-inventory and calibration.
   "mode": "analyze",
   "mutation_evidence_file": "/measurement/evidence/mutations.json",
   "fixed_inventory_confirmed": true,
+  "calibration": {
+    "reference": "mutator",
+    "mutator": null,
+    "min_samples": 8,
+    "max_rtt_ms": 250,
+    "slo_margin_ms": 1000,
+    "resolution_ms": 1
+  },
   "replicas": [
     {
       "replica": "ACTUAL-GATEWAY-REPLICA-NAME",
       "role": "gateway",
       "report_file": "/measurement/evidence/gateway-1.json",
-      "clock_offset_ms": null,
-      "clock_uncertainty_ms": null
+      "calibration": null
     },
     {
       "replica": "ACTUAL-WRITER-REPLICA-NAME",
       "role": "backend",
       "report_file": "/measurement/evidence/writer.json",
-      "clock_offset_ms": null,
-      "clock_uncertainty_ms": null
+      "calibration": null
     }
   ]
 }
@@ -442,18 +671,27 @@ and backend must be present. `fixed_inventory_confirmed:true` is the harness's
 explicit assertion that the list is exhaustive, not the analyzer discovering
 all replicas. Never set it from ingress sampling.
 
-Invoke `& $Control --config $AnalyzeConfig`. Calibration values must be finite,
-uncertainty 0..60000 ms. The analyzer additionally expands bounds by observed
-observer clock drift plus a declared 10 ms mutator drift allowance. A >10 ms
+The policy values shown are illustrative placeholders, not validated
+thresholds. Invoke `& $Control --config $AnalyzeConfig`. Exchange values must
+be finite (see the calibration protocol above). The analyzer additionally
+expands bounds by the calibration error plus the required run-wide continuity
+envelope (absent today, so timing is rejected `clock_unknown`) and a
+declared 10 ms mutator drift allowance. A >10 ms
 observer clock jump or command wall/monotonic mismatch makes timing incomplete.
 It requires observed lifetime to conservatively cover each whole command and
-observation, the target generation exactly, backend floor >= target, and first
+the entire observation deadline (`command_end + observation_deadline_ms`),
+even when the target is observed earlier; the target generation exactly,
+backend floor >= target, and first
 observation by the declared deadline. A skipped target generation is not a
 successful sample. For calibrated brackets:
 
-`lower=max(0, last_old_ready_send - command_end - clock_uncertainty)`
+`lower=max(0, corrected(last_old_ready_send) - applied_error - command_end)`
 
-`upper=max(0, first_new_ready_receive - command_start + clock_uncertainty)`
+`upper=max(0, corrected(first_new_ready_receive) + applied_error - command_start)`
+
+Here `corrected(x) = x - observer_minus_mutator_offset(x)`. `applied_error` is
+the calibration error at `x`, plus the observer jump and the 10 ms mutator
+allowance. Observer lifetime start and end are shrunk by the same error.
 
 Analysis also requires non-null matching source provenance and the requested
 mutation count. Observation before command acknowledgement is legitimate, not negative latency.

@@ -539,6 +539,74 @@ async fn compaction_admin_routes_address_no_collection_or_graph() {
     );
 }
 
+/// The automatic-failover policy switch (EPIC-010) addresses the writer's
+/// authority target, never a collection or graph, so it needs no
+/// reserved-versus-missing differential case. The documented set is exactly
+/// GET and PUT on one literal path, and with memory bindings enabled a server
+/// without an authority target names no reserved tenant resource, reports the
+/// switch unavailable and refuses to change it; tenant and read-only callers
+/// cannot reach it.
+#[tokio::test]
+async fn auto_failover_admin_route_addresses_no_collection_or_graph() {
+    use std::collections::BTreeSet;
+
+    let spec: Value = serde_json::from_str(include_str!("../src/openapi.json")).unwrap();
+    let documented: BTreeSet<(String, String)> = spec["paths"]
+        .as_object()
+        .unwrap()
+        .iter()
+        .filter(|(path, _)| path.starts_with("/v1/admin/auto-failover"))
+        .flat_map(|(path, item)| {
+            item.as_object()
+                .unwrap()
+                .keys()
+                .map(move |method| (method.clone(), path.clone()))
+        })
+        .collect();
+    let expected: BTreeSet<(String, String)> = [
+        ("get", "/v1/admin/auto-failover"),
+        ("put", "/v1/admin/auto-failover"),
+    ]
+    .into_iter()
+    .map(|(method, path)| (method.to_owned(), path.to_owned()))
+    .collect();
+    assert_eq!(documented, expected);
+    let fixture = fixture_with_bindings(true);
+    let (status, _, body) =
+        request(&fixture.app, ADMIN, "GET", "/v1/admin/auto-failover", "").await;
+    assert_eq!(status, 200, "{}", String::from_utf8_lossy(&body));
+    assert!(!String::from_utf8_lossy(&body).contains(TENANT));
+    let reply: Value = serde_json::from_slice(&body).unwrap();
+    assert_eq!(reply["available"], false, "{reply}");
+    assert_eq!(reply["enabled"], false, "{reply}");
+    assert_eq!(reply["qualified"], false, "{reply}");
+    let (status, _, body) = request(
+        &fixture.app,
+        ADMIN,
+        "PUT",
+        "/v1/admin/auto-failover",
+        r#"{"enabled":false}"#,
+    )
+    .await;
+    assert_eq!(status, 409, "{}", String::from_utf8_lossy(&body));
+    assert!(!String::from_utf8_lossy(&body).contains(TENANT));
+    let tenant = token(&fixture, "tenant").to_owned();
+    for (actor, method, body) in [
+        (READ_ONLY, "GET", ""),
+        (READ_ONLY, "PUT", r#"{"enabled":false}"#),
+        (tenant.as_str(), "GET", ""),
+        (tenant.as_str(), "PUT", r#"{"enabled":false}"#),
+    ] {
+        let (status, _, answer) =
+            request(&fixture.app, actor, method, "/v1/admin/auto-failover", body).await;
+        assert!(
+            status == 401 || status == 403,
+            "{method} by a non-super-admin must be refused: {status} {}",
+            String::from_utf8_lossy(&answer)
+        );
+    }
+}
+
 async fn add_sessions(fixture: &mut Fixture) {
     for tenant in [false, true] {
         for role in ["viewer", "editor"] {

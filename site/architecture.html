@@ -603,7 +603,7 @@ sequenceDiagram
 
     <h2 id="limitations">Limitations</h2>
     <ul class="list">
-      <li>One writer per file. Readers can follow a Blob archive; <a href="docs/HA-ACA.html">failover is manual</a>.</li>
+      <li>One writer per file. Readers can follow a Blob archive; <a href="docs/HA-ACA.html">failover is manual</a>; <a href="docs/HA-ACA.html#automatic-failover-unqualified-off-by-default">auto-failover is opt-in, unqualified</a>.</li>
       <li>Periodic sync can lose 60 s on OS crash; full fsyncs each commit, so batch writes.</li>
       <li>Opening a file replays the log, so open time and memory grow with data. Compaction reclaims space.</li>
       <li>HNSW and ScalarU8 are approximate. Inner product always searches exactly.</li>

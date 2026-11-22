@@ -7,9 +7,11 @@ errors or startup requirements.
 
 Gateway and reader scale-out add read capacity and isolation, **not writer
 HA**. There is one writer. The writer serving fence is **explicitly opt-in**,
-and there is no automatic failover. Failover is an
+and there is no qualified automatic failover. Failover is an
 operator-run, reported and acknowledged procedure; the command prepares
-authority transfer, not a running replacement.
+authority transfer, not a running replacement. An unqualified
+[automatic failover supervisor](#automatic-failover-unqualified-off-by-default)
+exists for isolated drills only; it is off by default.
 
 **Azure Files remains experimental and is not power-loss qualified.**
 The [singleton deployment](../deploy/azure-container-apps/README.md) is
@@ -46,7 +48,10 @@ proof of current writer HA or ACA qualification.
   serving workloads and do not establish a supported tenant size.
 
 These are not availability, recovery-time or data-loss guarantees. There is
-no HA dashboard or automatic failover. Use the operator procedures below;
+no qualified automatic failover. The dashboard shows the server's HA role and
+replication status and the off-by-default switch for the
+[unqualified supervisor](#automatic-failover-unqualified-off-by-default);
+it does not perform failover. Use the operator procedures below;
 see the [measurement record](projects/feature-aca-ha/feature-aca-ha.prd.md#measurement-plans-qualification-remains-gated)
 for the fixtures and limitations.
 
@@ -138,7 +143,9 @@ durability, a managed-compaction selected candidate, or recovery mode.
 The CLI rejects `--durability none` before authority access.
 A changed authority or lost claim CAS returns
 `writer_authority_conflict`. No automatic reclaim or election occurs.
-Even a restart requires an explicit, acknowledged operator failover.
+Even a restart requires an explicit, acknowledged operator failover, unless
+an operator turned on and runs the unqualified
+[automatic failover supervisor](#automatic-failover-unqualified-off-by-default).
 
 Authority requires `--serve-mode writer` and persistent durability; gRPC is
 refused because it has no response barrier. `--gateway-trust-file` remains
@@ -248,7 +255,7 @@ lease as fencing. Never acknowledge zero based only on app scale settings.
 Exact usage:
 
 ```text
-vlite-server failover report|execute --target-file <json> [--shared-key-file <path>] [--archive-status-file <json>] [--observed-sequence <n> --observed-unix-ms <ms>] [execute only, all required: --ack-report-id <id> --expected-epoch <n> --expected-revision <rev> --old-replicas <n>]
+vlite-server failover report|execute --target-file <json> [--shared-key-file <path>] [--archive-status-file <json>] [--observed-sequence <n> --observed-unix-ms <ms>] [execute only, all required: --ack-report-id <id> --expected-epoch <n> --expected-revision <rev> --old-replicas <n>]; unqualified automatic failover (GATE-005 open, off by default): vlite-server failover auto --config <json> | failover policy show|enable|disable --target-file <json>
 ```
 
 After confirming the stop, obtain and privately retain the report:
@@ -315,6 +322,157 @@ the old writer only after proving no handoff occurred and sole ownership
 is intact. After execute or an uncertain result, leave old revisions
 stopped. Do not decrement authority, overwrite it, or reactivate the old
 writer as rollback.
+
+## Automatic failover (unqualified, off by default)
+
+> **Automatic failover is unqualified: GATE-005 has not passed.** When it is
+> on, a supervisor that loses contact with the writer fences it and transfers
+> authority without a person reviewing the loss report, so recent commits
+> can be lost. Use it only in an approved isolated drill, never for
+> production.
+
+**When:** exercising unattended detection and transfer in an isolated
+environment. **Prerequisites:** everything required for the manual
+[writer failover](#planned-or-unplanned-writer-failover), plus a fence command
+that reliably stops **every** old writer replica and proves it, and exactly
+one operator-run supervisor per authority target. Nothing changes until the
+switch is on **and** a supervisor is running.
+
+**Switch it on or off.** One policy object beside the authority record
+(`<prefix>auto-failover.json`) is the switch for every supervisor of that
+target. A super administrator uses the dashboard under
+**Administration → Backup & recovery → Automatic failover**, the REST route
+`GET`/`PUT /v1/admin/auto-failover` on the writer (see the
+[API reference](API.md#automatic-failover-unqualified-opt-in-off-by-default)), or:
+
+```text
+vlite-server failover policy show|enable|disable --target-file <json> [--shared-key-file <path>] [enable only: --expected-revision <rev> (when a policy exists) --acknowledge-unqualified true]
+```
+
+Turning it on needs the unqualified acknowledgement and the revision last
+read (32 lowercase hexadecimal characters, required once a policy exists),
+so two operators cannot silently overwrite each other. Turning it off needs
+neither and always writes a fresh disabled revision, even if the policy is
+already off or missing; this invalidates an enable based on an older
+observation. It is the **kill switch**. The command-line
+`failover policy disable` is the primary kill switch because it needs neither
+the dashboard nor a running writer. A missing or unreadable policy counts as
+off; if the store cannot be reached, supervisors hold with
+`policy_unavailable` and fence nothing. Supervisors read the switch before
+every probe, immediately before fencing and again after fencing. They check
+it once more after building the loss report, immediately before authority
+transfer. Disabling before that final check aborts promotion; a transfer
+already past that check may still complete. Disabling cannot recall a fence
+command that is already running.
+
+**Run a supervisor** with a private config file of at most 64 KiB; unknown
+fields are refused:
+
+```json
+{
+  "target_file": "C:\\private\\authority-target.json",
+  "writer_ready_url": "https://<writer-host>/ready",
+  "probe_token_file": "C:\\private\\probe-token.txt",
+  "probe_interval_ms": 5000,
+  "probe_timeout_ms": 2000,
+  "failure_threshold": 6,
+  "fence_command": ["pwsh", "-NoProfile", "-File", "C:\\private\\fence-writer.ps1"],
+  "promote_command": ["pwsh", "-NoProfile", "-File", "C:\\private\\start-replacement.ps1"],
+  "command_timeout_ms": 300000
+}
+```
+
+```powershell
+vlite-server failover auto --config C:\private\auto-failover.json
+```
+
+`target_file` and `shared_key_file` (optional) are the same as for
+`failover report`. `writer_ready_url` is http or https; use the writer's
+`/ready`, not `/health`, which always succeeds. `/ready` needs a credential
+unless the writer trusts a proxy: `probe_token_file` (optional) holds one
+bearer token of any role, at most 4096 printable ASCII characters. Only
+HTTP 200 with JSON `status: "ready"`, `mode: "writer"` and the expected
+authority `epoch` counts as healthy. HTTP 401 or 403 holds the supervisor
+with `probe_unauthorized`, a redirect with `probe_redirected`, throttling
+(429) with `probe_throttled`, and a mismatched or malformed identity also
+holds instead of counting as a failure. Redirects are not followed.
+`probe_interval_ms` is
+500 to 60000,
+`probe_timeout_ms` is 100 or more and below the interval, and
+`failure_threshold` is 2 to 100 consecutive failures. These are examples,
+not qualified timing defaults. Each command is an argument list of 1 to 64
+arguments run **without a shell**, with no standard input, a time limit
+(`command_timeout_ms`, 1000 to 3600000, default 300000) and at most 64 KiB
+of standard output; its standard error passes through. A command must not
+leave a background process holding its standard output open. Each command
+receives the writer it acts on in `VLITE_FAILOVER_EPOCH`,
+`VLITE_FAILOVER_REVISION` and `VLITE_FAILOVER_WRITER_ID`; `promote_command`
+also receives `VLITE_FAILOVER_NEW_EPOCH`.
+
+Run **exactly one** supervisor per authority target; nothing stops a second
+one. Turn the switch off before any planned maintenance, restart or manual
+failover of the writer, or the supervisor may fence it. The switch is shared
+by the target; starting multiple supervisors does not create independent
+switches.
+
+**What it does.** The supervisor counts consecutive failed probes for the
+same authority epoch and revision; a healthy probe or any authority change
+restarts the count. It acts only on a serving writer that it has itself seen
+ready in the same epoch, so a probe URL that never reached the writer cannot
+fence it; otherwise it holds with `writer_never_seen_healthy` or
+`no_serving_writer`. If the store cannot return the switch or the authority
+record, it holds with `policy_unavailable` or `authority_unavailable`. At
+the threshold it:
+
+1. Reads the switch and the authority record again; if the switch is off it
+   stops counting, and if authority changed it holds. Either way it fences
+   nothing.
+2. Runs `fence_command`, which must stop all old writer replicas, re-enumerate
+   them and print exactly `{"old_replicas":0}`. This is the same operator
+   assertion as `--old-replicas 0`: the supervisor cannot inspect Azure, so
+   the fence command's proof is the safety boundary.
+3. Checks the switch again.
+4. Takes a loss report as `failover report` does and refuses if the epoch
+   or revision changed.
+5. Re-reads the switch immediately before transfer. If it is off, promotion
+   aborts. This is the disable cutoff; a transfer already past this check may
+   complete.
+6. Runs the same transfer as `failover execute`, acknowledging that report.
+7. Runs `promote_command`, if any, to start the replacement writer.
+
+It makes **one** attempt and then exits. It never restores, verifies or
+routes traffic itself; the replacement starts exactly as after a manual
+`failover execute`, and the same verification applies before admitting
+traffic. Supervisors log `auto_failover_started` and each changed
+`auto_failover_tick` to standard error.
+
+**Verify:** a promotion prints JSON with `state` `promoted`, `old_epoch`,
+`new_epoch`, `report_id`, the full `report`, its `text`, and `standby`
+(`started` or `not_configured`), and exits 0. The same JSON is logged as
+`auto_failover_tick`. Retain that output and log privately and review the
+disclosed loss exactly as for a manual failover. Then verify the replacement
+as in [writer failover](#planned-or-unplanned-writer-failover).
+
+If authority moved but `promote_command` failed, the supervisor exits
+nonzero with `auto_failover_standby_failed`, naming both epochs and the
+report; the logged tick has `standby` `start_failed`. The replacement's
+state is unconfirmed: the command may have partially succeeded or timed out
+after starting it. Inspect the authority and actual writer replicas before
+deciding whether to start a writer manually as after `failover execute`.
+
+Any other outcome exits nonzero with `auto_failover_aborted: <reason>`:
+`fence_failed` or `fence_unconfirmed` (the fence command failed, or did not
+report zero), `disabled_during_promotion`,
+`policy_unavailable_during_promotion`, `report_failed`, `authority_changed`
+(another operator or supervisor moved authority first), or
+`transfer_failed`. After any abort the old writer may already be stopped.
+After `transfer_failed` the transfer may have happened: inspect authority
+before any retry; never blindly rerun the supervisor.
+
+**Back out:** turn the switch off and stop the supervisor. Before a
+transfer, resume the old writer only as the manual back-out allows. After a
+promotion or an uncertain result, follow the manual back-out: leave old
+revisions stopped and never decrement or overwrite authority.
 
 ## Add or replace a reader
 
@@ -557,8 +715,9 @@ test recovery or reuse old credentials on the new lineage.
 
 ## What is not provided
 
-- Automatic failover, or an ACA-qualified, deployment-orchestrated completed
-  fenced handoff; `failover execute` itself only prepares the transfer.
+- Qualified (GATE-005) automatic failover, or an ACA-qualified,
+  deployment-orchestrated completed fenced handoff; `failover execute` itself
+  only prepares the transfer.
 - Multi-writer operation or additional write capacity.
 - Cross-region failover or geo-failing the authority.
 - Power-loss-qualified Azure Files or production availability/durability SLOs.

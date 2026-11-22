@@ -120,7 +120,60 @@
       seen.add(key); return true;
     })].slice(-capacity);
   }
-  const helpers = { parsePrometheus, counterRate, deriveRates, histogramQuantile, prometheusSummary, filterLogs, formatLog, mergeLogs };
+  function duration(ms) {
+    const value = Math.max(0, Math.round(Number(ms)));
+    if (value < 1000) return `${value} ms`;
+    if (value < 60000) return `${(value / 1000).toFixed(1)} s`;
+    const seconds = Math.floor(value / 1000), minutes = Math.floor(seconds / 60), hours = Math.floor(minutes / 60);
+    if (hours < 1) return `${minutes} min ${seconds % 60} s`;
+    if (hours < 24) return `${hours} h ${minutes % 60} min`;
+    return `${Math.floor(hours / 24)} d ${hours % 24} h`;
+  }
+  const plural = (count, word) => `${count} ${word}${count === 1 ? "" : "s"}`;
+  // Turns GET /v1/admin/serve-status into labelled rows; `level` marks rows that need attention.
+  function serveStatusView(status) {
+    const data = status && typeof status === "object" ? status : {};
+    const withheld = (finite(data.binding_generation) ?? 0) > 0;
+    const position = (value) => finite(value) !== null ? String(value) : withheld ? "Withheld while agent memory is on" : "Not available";
+    const roles = { standalone: "Standalone (single server)", writer: "Writer (configured role)", reader: "Reader (read-only replica)" };
+    const rows = [
+      { label: "Role", value: roles[data.mode] ?? (data.mode ? `Unknown (${data.mode})` : "Unknown") },
+      { label: "Write behavior", value: data.mode === "reader" ? "Read-only role; writes are rejected" : data.mode === "writer" ? "Writer role; admission may be fenced" : data.mode === "standalone" ? "Standalone role; admission depends on server state" : "Not reported" },
+      data.draining ? { label: "Draining", value: "Yes — shutting down, not ready for new traffic", level: "warn" } : { label: "Draining", value: "No" },
+      { label: "Writer epoch", value: finite(data.epoch) !== null ? String(data.epoch) : "Not used" },
+      { label: "Data lineage", value: data.lineage ? String(data.lineage) : "Not recorded" },
+      { label: "Change-feed position", value: position(data.sequence) },
+      { label: "Storage format", value: finite(data.format_version) !== null ? `Version ${data.format_version}` : "Not reported" },
+      { label: "Uptime", value: finite(data.uptime_ms) !== null ? duration(data.uptime_ms) : "Not reported" },
+    ];
+    const archive = data.archive && typeof data.archive === "object" ? data.archive : null;
+    if (!archive) rows.push({ label: "Cloud archive", value: "No cloud archive configured" });
+    else {
+      const baseline = archive.baseline_set ? `baseline ${archive.baseline_set} (${plural(finite(archive.baseline_checkpoints) ?? 0, "checkpoint")})` : "no baseline yet";
+      rows.push({ label: "Cloud archive", value: `${plural(finite(archive.checkpoints) ?? 0, "verified checkpoint")} · ${plural(finite(archive.failures) ?? 0, "failed attempt")} · ${baseline}` });
+      const age = finite(archive.last_checkpoint_age_ms);
+      const at = finite(archive.last_checkpoint_sequence) !== null ? ` · position ${archive.last_checkpoint_sequence}` : withheld ? " · position withheld while agent memory is on" : "";
+      rows.push({ label: "Last archive checkpoint", value: age === null ? "None yet" : `${duration(age)} ago${at}` });
+      const error = archive.last_error && typeof archive.last_error === "object" ? archive.last_error : null;
+      const code = String(error?.code || "archive_error");
+      const detail = error?.message ? `${code}: ${error.message}` : withheld ? `${code} (details withheld while agent memory is on)` : code;
+      rows.push(error ? { label: "Last archive error", value: detail, level: "error" } : { label: "Last archive error", value: "None" });
+    }
+    if (data.mode === "reader") {
+      const reader = data.reader && typeof data.reader === "object" ? data.reader : null;
+      if (!reader) rows.push({ label: "Reader freshness", value: "Not reported — this reader does not follow a writer" });
+      else {
+        rows.push(reader.failed ? { label: "Reader freshness", value: "Failed — replication stopped; readiness reports reader_apply_failed", level: "error" }
+          : reader.stale ? { label: "Reader freshness", value: "Stale — reads get 503 reader_stale; send reads to the writer", level: "warn" }
+            : { label: "Reader freshness", value: "Fresh" });
+        const bound = finite(reader.bound_ms) ?? 0, age = finite(reader.age_ms);
+        rows.push({ label: "Confirmed data age", value: `${age === null ? "Not yet confirmed" : duration(age)} (${bound > 0 ? `limit ${duration(bound)}` : "no staleness limit"})` });
+        rows.push({ label: "Applied position", value: position(reader.applied_sequence) });
+      }
+    }
+    return rows;
+  }
+  const helpers = { parsePrometheus, counterRate, deriveRates, histogramQuantile, prometheusSummary, filterLogs, formatLog, mergeLogs, serveStatusView };
   if (typeof module !== "undefined" && module.exports) module.exports = helpers;
   if (typeof document === "undefined") return;
   const $ = (id) => document.getElementById(id);
@@ -258,6 +311,21 @@
       message(statusId, `Most recent entries · ${new Date().toLocaleTimeString()}${data?.threshold_ms !== undefined ? ` · slow threshold ${number(data.threshold_ms)} ms` : ""}`);
     } catch (error) { if (epoch === generation) message(statusId, failure(error)); }
   }
+  async function serving(epoch) {
+    try {
+      const data = await get("/v1/admin/serve-status");
+      if (epoch !== generation) return;
+      const body = $("obs-serving-rows"), rows = serveStatusView(data);
+      body.replaceChildren(...rows.map((entry) => {
+        const row = make("tr"), label = make("th", entry.label);
+        label.setAttribute("scope", "row");
+        row.append(label, make("td", entry.value, entry.level ? `obs-level-${entry.level}` : undefined));
+        return row;
+      }));
+      const attention = rows.filter((entry) => entry.level).length;
+      message("obs-serving-status", `${attention ? `${attention} item${attention === 1 ? " needs" : "s need"} attention` : "No problems reported"} · ${new Date().toLocaleTimeString()}`);
+    } catch (error) { if (epoch === generation) message("obs-serving-status", failure(error)); }
+  }
   const timeOf = (entry) => formatLog(entry).time;
   const isActive = () => inView && !document.hidden && !section.hidden && section.getClientRects().length > 0 && connected();
   function schedule() {
@@ -270,7 +338,7 @@
     loading = true;
     const epoch = generation;
     await Promise.all([
-      metrics(epoch), logs(epoch),
+      metrics(epoch), logs(epoch), serving(epoch),
       diagnostics(epoch, "/v1/admin/diagnostics/slow-queries", "obs-slow-status", "obs-slow-rows", [timeOf, (e) => e.route || "search", (e) => e.collection || "default", (e) => number(e.duration_ms ?? e.elapsed_ms)]),
       diagnostics(epoch, "/v1/admin/audit", "obs-audit-status", "obs-audit-rows", [timeOf, (e) => String(e.event || e.action || "event"), (e) => String(e.route || e.collection || e.name || "—")]),
     ]);
@@ -280,8 +348,8 @@
     generation++; previous = null; source = null; entries = []; since = 0; target = ""; dropped = 0; routeRows = []; endpointSupported = true; metricsOff = false; history.clear();
     for (const value of section.querySelectorAll(".obs-card-value")) value.textContent = "—";
     for (const svg of section.querySelectorAll(".obs-spark")) svg.replaceChildren();
-    for (const id of ["obs-routes", "obs-log-view", "obs-targets", "obs-slow-rows", "obs-audit-rows"]) $(id).replaceChildren();
-    for (const id of ["obs-metrics-status", "obs-logs-status", "obs-slow-status", "obs-audit-status"]) message(id, "Sign in as a super admin to view server observability.");
+    for (const id of ["obs-routes", "obs-log-view", "obs-targets", "obs-slow-rows", "obs-audit-rows", "obs-serving-rows"]) $(id).replaceChildren();
+    for (const id of ["obs-metrics-status", "obs-logs-status", "obs-slow-status", "obs-audit-status", "obs-serving-status"]) message(id, "Sign in as a super admin to view server observability.");
     message("obs-log-count", "No log entries buffered.");
     schedule();
   }

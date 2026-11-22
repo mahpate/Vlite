@@ -149,8 +149,8 @@ try {
     }
     foreach ($entry in @(
         @{ Measurements = @('MEAS-002','MEAS-007') }, @{ Measurements = @('MEAS-007','MEAS-002') },
-        @{ Measurements = @('MEAS-001') }, @{ Measurements = @('MEAS-003') }, @{ Measurements = @('MEAS-004') },
-        @{ Measurements = @('MEAS-005') }, @{ Measurements = @('MEAS-008') },
+        @{ Measurements = @('MEAS-001') }, @{ Measurements = @('MEAS-003') },
+        @{ Measurements = @('MEAS-008') },
         @{ Measurements = @() }, @{ Measurements = @('meas-002') },
         @{ Tiers = @() }, @{ Tiers = @(0.3) }, @{ Tiers = @(1,1) },
         @{ ReaderPollMs = '1000'; StalenessBoundMs = '1000' },
@@ -213,9 +213,31 @@ try {
     Assert-Throws { ConvertFrom-VLiteMeasLog ($lines + 'VLITE-MEAS FAILED 1') } 'FAILED'
     Assert-Throws { ConvertFrom-VLiteMeasLog @(New-TestLog '[]') } 'JSON object'
     Assert-Throws { ConvertFrom-VLiteMeasLog @($lines + $lines[0]) } 'BEGIN'
+    $markers = @('VLITE-MEAS START MEAS-006', 'VLITE-MEAS STAGE 6-COLLECT', 'VLITE-MEAS ALIVE 60', 'VLITE-MEAS SIGNAL 15')
+    $interleaved = @($markers[0], $markers[1], $lines[0], $markers[2], $lines[1..($lines.Count - 2)], $markers[3], $lines[-1]) | ForEach-Object { $_ }
+    Assert ([Text.Encoding]::UTF8.GetString((ConvertFrom-VLiteMeasLog $interleaved)) -ceq '{"sample":true,"text":"resource evidence"}') 'Liveness markers must not affect payload framing'
+    Assert-Throws { ConvertFrom-VLiteMeasLog $markers } 'BEGIN'
+
+    $liveness = [ordered]@{ jobStarted = $null; lastStage = $null; lastAliveSecs = $null; signal = $null }
+    Update-VLiteMeasLiveness @() $liveness
+    Assert ($null -eq $liveness.jobStarted) 'No lines must leave jobStarted unknown'
+    Update-VLiteMeasLiveness @('raw line', 'VLITE-MEAS START MEAS-006 extra', 'VLITE-MEAS ALIVE 60 secret', 'VLITE-MEAS ALIVE 1234567',
+        'VLITE-MEAS STAGE other', 'VLITE-MEAS SIGNAL 999') $liveness
+    Assert ($liveness.jobStarted -eq $false -and $null -eq $liveness.lastAliveSecs -and $null -eq $liveness.lastStage -and
+        $null -eq $liveness.signal) 'Non-static liveness markers must be ignored'
+    Update-VLiteMeasLiveness @('VLITE-MEAS STAGE 6-ENCODE', 'VLITE-MEAS ALIVE 180', 'VLITE-MEAS STAGE 6-COLLECT', 'VLITE-MEAS ALIVE 60') $liveness
+    Assert ($liveness.jobStarted -eq $true -and $liveness.lastAliveSecs -eq 180 -and $liveness.lastStage -ceq '6-ENCODE') 'Liveness must keep the furthest stage and longest heartbeat'
+    Update-VLiteMeasLiveness @('raw line') $liveness
+    Assert ($liveness.jobStarted -eq $true) 'A later source must not clear jobStarted'
+    $optOut = [ordered]@{ category = $null }
+    Update-VLiteMeasLiveness @('VLITE-MEAS START MEAS-006') $optOut
+    Assert (@($optOut.Keys).Count -eq 1) 'Liveness fields must only be recorded for opted-in diagnostics'
 
     $source = (Get-Content -Raw (Join-Path $repo 'Dockerfile')) -split '(?m)^FROM source AS test'
     $docker = Get-Content -Raw (Join-Path $PSScriptRoot 'measure.dockerfile')
+    $collectorBytes = [IO.File]::ReadAllBytes((Join-Path $PSScriptRoot 'meas006-collect.sh'))
+    $collectorText = [Text.Encoding]::UTF8.GetString($collectorBytes)
+    Assert (-not $collectorText.Contains("`r`n")) 'MEAS-006 collector must use LF line endings'
     foreach ($copy in [regex]::Matches($source[0], '(?m)^COPY .+$')) {
         Assert ($docker.Contains($copy.Value.TrimEnd("`r"))) "Missing source input: $($copy.Value)"
     }
@@ -239,6 +261,13 @@ try {
     Assert ($docker.Contains('COPY deploy/azure-container-apps/ha/meas006-collect.sh /usr/local/bin/meas006-collect.sh')) 'Missing existing collector'
     Assert ($docker.Contains('MEAS-006) set -- /bin/sh /usr/local/bin/meas006-collect.sh /usr/local/bin/vlite-meas006-tests ;;')) 'MEAS-006 must use the existing collector and transport'
     Assert ($docker.Contains('if [ "${VLITE_MEAS_KIND:-MEAS-007}" != MEAS-006 ]; then')) 'MEAS-006 must not expose test diagnostics'
+    foreach ($marker in 'printf "VLITE-MEAS START %s\n" "$started"', 'printf "VLITE-MEAS STAGE 6-COLLECT\n"', 'printf "VLITE-MEAS STAGE 6-ENCODE\n"',
+        'while sleep 60 </dev/null >/dev/null 2>&1; do s=$((s + 60)); printf "VLITE-MEAS ALIVE %s\n" "$s"; done ) &',
+        'trap cleanup EXIT', 'trap "on_signal 15 143" TERM', 'printf "VLITE-MEAS SIGNAL %s\n" "$1"', 'wait "$child" || code=$?',
+        'kill "$hb"', 'rm -rf "$work"', 'printf "VLITE-MEAS FAILED %s\n" "$code"') {
+        Assert ($docker.Contains($marker)) "Wrapper liveness/cleanup fragment missing: $marker"
+    }
+    Assert ($docker.IndexOf('VLITE-MEAS START') -lt $docker.IndexOf('MEAS-006) set --')) 'START must be emitted before the collector is selected'
 
     $options006 = $options.Clone(); $options006.Measurements = @('MEAS-006')
     $options006.SubscriptionId = 'never-print-this-subscription'
@@ -334,11 +363,61 @@ try {
     }
 
     function Start-Sleep { param([int]$Seconds) }
+    # Sentinel private data injected into native errors and job output; none may reach summary or console.
+    $sentinel006 = 'sentinel-private-7f3a9c'
+    # category, reason, jobExitCode, consoleEvidence, logAnalyticsEvidence, logAnalyticsAttempts
+    $expectedDiagnostic006 = @{
+        JobFailedExit = @('JobFailed', 'FailedMarker', 101, 'JobFailed', 'NotQueried', 0)
+        JobFailedBadCode = @('JobFailed', 'FailedMarker', $null, 'JobFailed', 'NotQueried', 0)
+        JobFailedViaLogAnalytics = @('JobFailed', 'FailedMarker', 3, 'Unavailable', 'JobFailed', 1)
+        LogsUnavailable = @('EvidenceUnavailable', 'RetrievalFailed', $null, 'Unavailable', 'Unavailable', $script:VLiteMeasLogAttempts)
+        LogsMissingBegin = @('EvidenceUnavailable', 'MissingBegin', $null, 'Unavailable', 'Incomplete', $script:VLiteMeasLogAttempts)
+        LogsIncomplete = @('EvidenceUnavailable', 'MissingEnd', $null, 'Incomplete', 'Incomplete', $script:VLiteMeasLogAttempts)
+        BadChecksum = @('EvidenceIntegrity', 'ChecksumMismatch', $null, 'IntegrityFailure', 'IntegrityFailure', $script:VLiteMeasLogAttempts)
+        QueryIntegrityThenUnavailable = @('EvidenceIntegrity', 'ChecksumMismatch', $null, 'Unavailable', 'IntegrityFailure', $script:VLiteMeasLogAttempts)
+        QueryIntegrityThenIncomplete = @('EvidenceIntegrity', 'ChecksumMismatch', $null, 'Unavailable', 'IntegrityFailure', $script:VLiteMeasLogAttempts)
+        BadEvidence = @('EvidenceRejected', 'PrivateIdentifier', $null, 'Verified', 'NotQueried', 0)
+        BothFailures = @('EvidenceRejected', 'PrivateIdentifier', $null, 'Verified', 'NotQueried', 0)
+        BadSchema = @('EvidenceRejected', 'Schema', $null, 'Verified', 'NotQueried', 0)
+        BadProvenance = @('EvidenceRejected', 'Provenance', $null, 'Verified', 'NotQueried', 0)
+        NotSucceeded = @('JobNotSucceeded', 'ExecutionNotSucceeded', $null, 'Verified', 'NotQueried', 0)
+        LogsStartedNoResult = @('EvidenceUnavailable', 'StartedNoResult', $null, 'Unavailable', 'Incomplete', $script:VLiteMeasLogAttempts)
+        LogsSignal = @('EvidenceUnavailable', 'StartedNoResult', $null, 'Unavailable', 'Incomplete', $script:VLiteMeasLogAttempts)
+        LogsNeverStarted = @('EvidenceUnavailable', 'NeverStarted', $null, 'Unavailable', 'Incomplete', $script:VLiteMeasLogAttempts)
+        LogsLateVerified = @('EvidenceUnavailable', 'StartedNoResult', $null, 'Unavailable', 'Incomplete', $script:VLiteMeasLogAttempts)
+    }
+    # executionStatus, jobStarted, lastStage, lastAliveSecs, signal, lateQueryAttempts, lateLogAnalyticsEvidence, lateJobExitCode
+    $late006 = $script:VLiteMeas006LateLogAttempts
+    $verifiedLiveness006 = @('Succeeded', $true, '6-ENCODE', 120, $null, 0, 'NotQueried', $null)
+    $expectedLiveness006 = @{
+        JobFailedExit = @('Failed', $false, $null, $null, $null, 0, 'NotQueried', $null)
+        JobFailedBadCode = @('Failed', $false, $null, $null, $null, 0, 'NotQueried', $null)
+        JobFailedViaLogAnalytics = @('Failed', $false, $null, $null, $null, 0, 'NotQueried', $null)
+        LogsUnavailable = @('Succeeded', $null, $null, $null, $null, $late006, 'Unavailable', $null)
+        LogsMissingBegin = @('Succeeded', $null, $null, $null, $null, $late006, 'Incomplete', $null)
+        LogsIncomplete = @('Succeeded', $false, $null, $null, $null, $late006, 'Incomplete', $null)
+        BadChecksum = $verifiedLiveness006; BadEvidence = $verifiedLiveness006; BothFailures = $verifiedLiveness006
+        QueryIntegrityThenUnavailable = $verifiedLiveness006; QueryIntegrityThenIncomplete = $verifiedLiveness006
+        BadSchema = $verifiedLiveness006; BadProvenance = $verifiedLiveness006
+        NotSucceeded = @('Failed', $true, '6-ENCODE', 120, $null, 0, 'NotQueried', $null)
+        LogsStartedNoResult = @('Succeeded', $true, '6-COLLECT', 120, $null, $late006, 'Incomplete', $null)
+        LogsSignal = @('Succeeded', $true, '6-COLLECT', $null, 15, $late006, 'Incomplete', $null)
+        LogsNeverStarted = @('Succeeded', $false, $null, $null, $null, $late006, 'Incomplete', $null)
+        LogsLateVerified = @('Succeeded', $true, '6-ENCODE', 120, $null, 1, 'Verified', $null)
+    }
+    $diagnosticKeys006 = (@('category', 'reason', 'jobExitCode', 'consoleEvidence', 'logAnalyticsEvidence', 'logAnalyticsAttempts',
+        'executionStatus', 'jobStarted', 'lastStage', 'lastAliveSecs', 'signal', 'lateQueryAttempts', 'lateLogAnalyticsEvidence',
+        'lateJobExitCode') | Sort-Object) -join ','
     foreach ($case006 in 'Success', 'ExistingGroup', 'ForeignRegistry', 'ForeignStorage', 'UnknownAvailability',
         'ForeignGroupResponse', 'ForeignIdentity', 'ForeignStorageResponse', 'ForeignJobResponse', 'ForeignExecution',
-        'MissingClient', 'BadEvidence', 'BadChecksum', 'CleanupFailure', 'BothFailures', 'WaitFailure', 'Dirty', 'WrongRevision') {
+        'MissingClient', 'BadEvidence', 'BadChecksum', 'CleanupFailure', 'BothFailures', 'WaitFailure', 'Dirty', 'WrongRevision',
+        'JobFailedExit', 'JobFailedBadCode', 'JobFailedViaLogAnalytics', 'LogsUnavailable', 'LogsMissingBegin', 'LogsIncomplete',
+        'BadSchema', 'BadProvenance', 'NotSucceeded', 'LogsStartedNoResult', 'LogsSignal', 'LogsNeverStarted', 'LogsLateVerified',
+        'QueryIntegrityThenUnavailable', 'QueryIntegrityThenIncomplete', 'QueryIntegrityThenVerified') {
         $script:case006 = $case006
+        $script:sentinel006 = $sentinel006
         $script:delete006 = $false
+        $script:query006 = 0
         $script:calls006 = [Collections.Generic.List[object]]::new()
         function git {
             $global:LASTEXITCODE = 0
@@ -399,13 +478,52 @@ try {
                     if ($script:case006 -eq 'ForeignExecution') { return @{ name = 'foreign-execution' } }
                     return @{ name = 'vlite-meas-t26-c1-abc1234' }
                 }
-                '^containerapp job execution show ' { return @{ properties = @{ status = 'Succeeded' } } }
+                '^containerapp job execution show ' {
+                    $status006 = if ($script:case006 -like 'JobFailed*' -or $script:case006 -eq 'NotSucceeded') { 'Failed' } else { 'Succeeded' }
+                    return @{ properties = @{ status = $status006 } }
+                }
                 '^containerapp job logs show |^monitor log-analytics query ' {
+                    $s006 = $script:sentinel006
+                    if ($script:case006 -like 'QueryIntegrityThen*') {
+                        if ($Raw) { throw "console unavailable $s006" }
+                        $script:query006++
+                        if ($script:query006 -gt 1 -and $script:case006 -eq 'QueryIntegrityThenUnavailable') {
+                            throw "query unavailable $s006"
+                        }
+                        if ($script:query006 -gt 1 -and $script:case006 -eq 'QueryIntegrityThenIncomplete') { return ,@() }
+                    }
+                    if ($script:case006 -eq 'LogsUnavailable' -or ($Raw -and $script:case006 -in 'JobFailedViaLogAnalytics', 'LogsMissingBegin',
+                            'LogsStartedNoResult', 'LogsSignal', 'LogsNeverStarted', 'LogsLateVerified')) {
+                        throw "native failure $s006 client-secret-001 principal-001 workspace-001 never-print-this-subscription"
+                    }
+                    if ($script:case006 -eq 'LogsMissingBegin') { return ,@() }
+                    $start006 = @('VLITE-MEAS START MEAS-006', 'VLITE-MEAS STAGE 6-COLLECT')
+                    $rows006 = switch ($script:case006) {
+                        'LogsStartedNoResult' { $start006 + @('VLITE-MEAS ALIVE 60', "VLITE-MEAS ALIVE 120 $s006", 'VLITE-MEAS ALIVE 120') }
+                        'LogsSignal' { $start006 + @('VLITE-MEAS SIGNAL 15') }
+                        'LogsNeverStarted' { @("raw $s006") }
+                        default { $null }
+                    }
+                    if ($rows006) { return ,@($rows006 | ForEach-Object { @{ Log_s = $_ } }) }
+                    if ($script:case006 -eq 'LogsLateVerified') {
+                        $script:query006++
+                        if ($script:query006 -le $script:VLiteMeasLogAttempts) { return ,@() }
+                    }
                     $d006 = New-TestDocument006
                     if ($script:case006 -in 'BadEvidence', 'BothFailures') { $d006.limits.claim = 'client-secret-001' }
+                    if ($script:case006 -eq 'BadSchema') { $d006.schema = "unknown-$s006" }
+                    if ($script:case006 -eq 'BadProvenance') { $d006.source.revision = 'b' * 40 }
                     $lines006 = @(New-TestLog ($d006 | ConvertTo-Json -Depth 10 -Compress))
-                    if ($script:case006 -eq 'BadChecksum') {
+                    if ($script:case006 -eq 'BadChecksum' -or ($script:case006 -like 'QueryIntegrityThen*' -and $script:query006 -eq 1)) {
                         $lines006 = @($lines006 | ForEach-Object { $_ -replace '(BEGIN )[a-f0-9]{64}', ('${1}' + ('0' * 64)) })
+                    }
+                    if ($script:case006 -eq 'LogsIncomplete') { $lines006 = @($lines006 | Where-Object { $_ -notmatch ' END ' }) + "raw $s006" }
+                    else { $lines006 = $start006 + @('VLITE-MEAS ALIVE 60', 'VLITE-MEAS STAGE 6-ENCODE', $lines006[0], 'VLITE-MEAS ALIVE 120') + $lines006[1..($lines006.Count - 1)] }
+                    $failed006 = @{ JobFailedExit = 'VLITE-MEAS FAILED 101'; JobFailedBadCode = "VLITE-MEAS FAILED 9999 $s006"
+                        JobFailedViaLogAnalytics = 'VLITE-MEAS FAILED 3' }[$script:case006]
+                    if ($failed006) {
+                        $lines006 = @("stderr $s006 client-secret-001 principal-001 workspace-001", $failed006,
+                            "VLITE-MEAS-ERR $s006 never-print-this-subscription")
                     }
                     if ($Raw) { return $lines006 }
                     return ,@($lines006 | ForEach-Object { @{ Log_s = $_ } })
@@ -420,8 +538,12 @@ try {
         }
         $live006 = $options006.Clone(); $live006.Plan = $false
         $live006.OutDir = Join-Path $scratch "meas006-$case006"
-        if ($case006 -eq 'Success') { $captured006 = @(Invoke-VLiteMeas -Options $live006 *>&1) }
-        else { Assert-Throws { Invoke-VLiteMeas -Options $live006 *> $null } 'MEAS-006|already exists|Dirty working tree|CLEANUP FAILED|clean checkout HEAD' }
+        $captured006 = [Collections.Generic.List[object]]::new()
+        $thrown006 = $null
+        try { Invoke-VLiteMeas -Options $live006 *>&1 | ForEach-Object { $captured006.Add($_) } }
+        catch { $thrown006 = $_.Exception.Message; $captured006.Add($thrown006) }
+        if ($case006 -in 'Success', 'QueryIntegrityThenVerified') { Assert (-not $thrown006) 'MEAS-006 success case failed' }
+        else { Assert ($thrown006 -match 'MEAS-006|already exists|Dirty working tree|CLEANUP FAILED|clean checkout HEAD') "Expected MEAS-006 refusal; received: $thrown006" }
         if ($case006 -in 'Dirty', 'WrongRevision') {
             Assert ($script:calls006.Count -eq 0) 'Invalid MEAS-006 provenance must fail before Azure'
             continue
@@ -440,10 +562,33 @@ try {
             'ForeignStorageResponse' { 'CreateStorage' }
             'ForeignJobResponse' { 'CreateJob' }
             'ForeignExecution' { 'StartJob' }
-            { $_ -in 'BadEvidence', 'BadChecksum', 'BothFailures' } { 'ReadLogs' }
+            { $expectedDiagnostic006.ContainsKey($_) } { 'ReadLogs' }
             default { $null }
         }
         Assert ($summary006.failedStep -ceq $expectedFailed006) 'MEAS-006 measurement failure must be separate'
+        if ($summary006.results.Count) {
+            $expectedExecution006 = if ($expectedFailed006 -in 'CreateJob', 'StartJob') { $null }
+                elseif ($case006 -like 'JobFailed*' -or $case006 -eq 'NotSucceeded') { 'Failed' }
+                else { 'Succeeded' }
+            Assert ($summary006.results[0].executionStatus -ceq $expectedExecution006) "MEAS-006 must preserve the observed execution status independently of evidence and cleanup ($case006)"
+        }
+        Assert ($summary006.PSObject.Properties.Name -contains 'failureDiagnostic') 'MEAS-006 summary must always carry failureDiagnostic'
+        if ($expectedDiagnostic006.ContainsKey($case006)) {
+            $want006 = $expectedDiagnostic006[$case006]
+            $got006 = $summary006.failureDiagnostic
+            Assert ((($got006.PSObject.Properties.Name | Sort-Object) -join ',') -ceq $diagnosticKeys006) "MEAS-006 diagnostic shape differs ($case006)"
+            $want006 = @($want006) + @($expectedLiveness006[$case006])
+            $actual006 = @($got006.category, $got006.reason, $got006.jobExitCode, $got006.consoleEvidence,
+                $got006.logAnalyticsEvidence, $got006.logAnalyticsAttempts, $got006.executionStatus, $got006.jobStarted,
+                $got006.lastStage, $got006.lastAliveSecs, $got006.signal, $got006.lateQueryAttempts,
+                $got006.lateLogAnalyticsEvidence, $got006.lateJobExitCode)
+            for ($i = 0; $i -lt 14; $i++) {
+                Assert ($actual006[$i] -ceq $want006[$i]) "MEAS-006 diagnostic field $i differs ($case006): $($actual006[$i])"
+            }
+            Assert ($thrown006 -match 'MEAS-006 failed at ReadLogs; diagnostics withheld\.|CLEANUP FAILED') 'MEAS-006 must keep the static failure message'
+        } else {
+            Assert ($null -eq $summary006.failureDiagnostic) "MEAS-006 failureDiagnostic must be null ($case006)"
+        }
         Assert ($summary006.requested.Samples -eq 100 -and $summary006.requested.Repetitions -eq 20 -and
             $summary006.requested.IntervalMs -eq 50) 'MEAS-006 summary must record effective options'
         $expectedMeasurement006 = if ($expectedFailed006) { 'Failed' } else { 'Succeeded' }
@@ -459,9 +604,10 @@ try {
             $doc006 = $evidence006 | ConvertFrom-Json
             Assert ($doc006.schema -ceq 'vlite-meas006/1' -and @($doc006.metrics.PSObject.Properties).Count -eq 4) 'MEAS-006 JSON document differs'
         }
-        foreach ($private006 in 'client-secret-001', 'principal-001', 'workspace-001', $live006.SubscriptionId) {
-            Assert (-not $saved006.Contains($private006)) 'MEAS-006 summary leaked private identifiers'
-            Assert (-not (($captured006 | Out-String).Contains($private006))) 'MEAS-006 console leaked private identifiers'
+        foreach ($private006 in 'client-secret-001', 'principal-001', 'workspace-001', $live006.SubscriptionId, $sentinel006,
+            'native failure', 'stderr', 'VLITE-MEAS-ERR', 'unknown-') {
+            Assert (-not $saved006.Contains($private006)) "MEAS-006 summary leaked private identifiers ($case006)"
+            Assert (-not (($captured006 | Out-String).Contains($private006))) "MEAS-006 console leaked private identifiers ($case006)"
             if (Test-Path $evidencePath006) { Assert (-not $evidence006.Contains($private006)) 'MEAS-006 evidence leaked private identifiers' }
         }
     }

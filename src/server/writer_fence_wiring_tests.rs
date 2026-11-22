@@ -366,7 +366,11 @@ async fn read_routes_do_not_read_authority_while_serving() {
     ] {
         let response = call(&router, method, path, body).await;
         assert!(response.0.is_success(), "{path}: {:?}", response.2);
-        if path.ends_with("serve-status") {
+        if path == "/ready" {
+            assert_eq!(response.2["status"], "ready");
+            assert_eq!(response.2["mode"], "writer");
+            assert_eq!(response.2["epoch"], epoch);
+        } else if path.ends_with("serve-status") {
             assert_eq!(response.2["epoch"], epoch);
         }
     }

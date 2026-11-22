@@ -335,6 +335,7 @@ footer { margin-top: 28px; padding: 16px 0 8px; border-top: 1px solid var(--stud
 #observability .obs-level-error { color: var(--danger, #ae3140); }
 #observability .obs-diagnostics { display: grid; grid-template-columns: repeat(auto-fit, minmax(min(100%, 420px), 1fr)); gap: 22px; }
 #observability .obs-diagnostics table { min-width: 420px; }
+#observability .obs-serving th { width: 34%; }
 [data-theme="dark"] #observability { --obs-border: var(--studio-border, #3d4b63); --obs-muted: var(--studio-muted, #b1bed3); --obs-accent: var(--studio-accent, #c0b4ff); }
 [data-theme="dark"] #observability .obs-level-warn { color: var(--warning, #f4c270); }
 [data-theme="dark"] #observability .obs-level-error { color: var(--danger, #ffb0bc); }

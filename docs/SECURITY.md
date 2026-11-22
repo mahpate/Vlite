@@ -470,8 +470,9 @@ name or request content. It has four forms:
 
 These events carry an `actor`: `kv_put`, `kv_delete`, `kv_batch`, `memory_request`,
 `collection_created`, `collection_dropped`, `collection_settings_changed`,
-`credential_denied`, and the account events `user_created`, `user_updated`,
-`user_deleted`, `user_password_reset` and `user_password_changed`. The account
+`credential_denied`, `auto_failover_policy_changed`, and the account events
+`user_created`, `user_updated`, `user_deleted`, `user_password_reset` and
+`user_password_changed`. The account
 that the server creates at startup from `VLITE_ADMIN_USERNAME` is recorded with
 the actor `bootstrap`, the one value outside the four forms. Other audit events
 do not carry an `actor`.

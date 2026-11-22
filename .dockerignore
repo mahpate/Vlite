@@ -1,4 +1,5 @@
 **
+!Dockerfile
 !Cargo.toml
 !Cargo.lock
 !build.rs
@@ -41,6 +42,7 @@ bindings/python/build/
 bindings/python/dist/
 bindings/python/*.egg-info/
 bindings/python/**/__pycache__/
+pool-briefs/
 !bindings/build_wheel.py
 !bindings/manylinux.Dockerfile
 !bindings/node/

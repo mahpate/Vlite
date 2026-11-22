@@ -7,11 +7,30 @@ environment (with Log Analytics), and one Manual job per requested CPU tier.
 It never reuses a group or touches the live app, environment, or share.
 MEAS-002 also measures reader staleness under write load against real Blob
 Storage, and MEAS-006 measures writer-fence costs against a temporary Blob
-coordination container. **MEAS-001 and MEAS-003..005 are still refused**, as
-are combinations of measurement IDs. MEAS-004/005 have a gateway container
-runtime (`measure-gateway-entrypoint.py`) and a contract
-(`measure-gateway-contract.md`), but no orchestration harness yet; nothing
-here provisions or starts it.
+coordination container. **MEAS-001 and MEAS-003 are still refused**, as are combinations of measurement IDs. MEAS-004/005 have a gateway
+container runtime (`measure-gateway-entrypoint.py`, packaged with `python3` in
+the `gateway-measure` image) and a contract (`measure-gateway-contract.md`). The
+offline Linux/WSL exact-fixture preparation (`measure-gateway-fixture.py`) is
+also in place. It bootstraps once at `/measurement/bootstrap`. It then exports
+and verifies the four role bundles and writes a private image context for that
+bootstrap's own `database.vlite`. It plans the fixture image `az acr build`.
+`measure.ps1` now also contains MEAS-004/005 orchestration
+(`measure-gateway.ps1`; see *MEAS-004/005 gateway orchestration* below). It is
+tested offline. First live attempts on 2026-11-20/21 produced no evidence:
+MEAS-004 failed at `BuildMeasureImage` with `Unclassified`, and MEAS-005 was not
+started. The MEAS-006 run from clean revision `467f54d` failed at `ReadLogs`
+with `JobFailed` / `FailedMarker` (exit 2); Log Analytics was not queried. Its
+cleanup wait timed out, but a later read-only check confirmed the group absent.
+MEAS-004 cleanup and group absence were also confirmed. Hash-bound cleanup
+follow-ups were preserved beside the unchanged summaries. These failures do
+not qualify HA or SLOs. The gateway image build now uses an ACR task with
+`DOCKER_BUILDKIT=1`. A build-only run verified the new path in ACR; it did
+not run a measurement. The MEAS-006 collector is pinned to LF by
+`.gitattributes`; that fix has only been verified offline. The context
+explicitly excludes `pool-briefs/`. Offline tests:
+`python3 -B measure-gateway-fixture.test.py`
+(Linux/WSL) and `pwsh -NoProfile -File measure-gateway.test.ps1`. The second
+suite mocks every Azure CLI call, local process, clock and sleep.
 
 ## Prerequisites and command
 
@@ -165,8 +184,318 @@ identifiers. Its metrics are `verify_before_commit`,
 reports only `MEAS-006 failed at <step>; diagnostics withheld.` and still
 requests group deletion under the cleanup policy below.
 
+Each MEAS-006 result records `executionStatus` separately from `status`. It
+is the validated terminal ACA execution status, or null if polling did not
+complete. Evidence collection or cleanup failure cannot overwrite it.
+`Succeeded` here does not mean the evidence was collected or accepted.
+Older summaries lack this field; their result `status` may have been changed
+to `Failed` during evidence collection, so it cannot recover the original
+execution outcome.
+
+The MEAS-006 `summary.json` always has a `failureDiagnostic` field. It is
+null on success and after a failure at any step other than `ReadLogs`. If
+`ReadLogs` fails, the field holds a few fixed codes. It never holds stderr,
+console or Log Analytics lines, exception text, or any client, principal,
+workspace, subscription or resource identifier:
+
+| Field | Values |
+|---|---|
+| `category` | `JobFailed` (the job printed `VLITE-MEAS FAILED <code>`), `EvidenceUnavailable` (logs could not be read or were incomplete), `EvidenceIntegrity` (the framing, length, SHA-256, base64 or gzip/JSON check failed), `EvidenceRejected` (the document failed MEAS-006 validation), `JobNotSucceeded` (valid evidence, but the execution was not `Succeeded`), `Unclassified` |
+| `reason` | A fixed code. `FailedMarker`; `RetrievalFailed`, `ResponseShape`, `MissingBegin`, `NeverStarted`, `StartedNoResult`, `MissingEnd` or `ChunkGap`; `DuplicateMarker`, `ChunkLength`, `Base64`, `LengthMismatch`, `ChecksumMismatch` or `PayloadDecode`; `Schema`, `PrivateIdentifier`, `Provenance`, `RequestedSettings`, `Metrics`, `Limits` or `Unclassified`; `ExecutionNotSucceeded` |
+| `jobExitCode` | The numeric exit code from the `FAILED` marker (0..255), otherwise null |
+| `consoleEvidence`, `logAnalyticsEvidence` | `NotQueried`, `Unavailable`, `Incomplete`, `IntegrityFailure`, `JobFailed` or `Verified`, for each source |
+| `logAnalyticsAttempts` | The number of Log Analytics queries made (0..72) |
+| `executionStatus` | The validated terminal execution status (as in the result), or null |
+| `jobStarted` | `true` if any source showed a wrapper liveness marker, `false` if lines were read but none was a marker, null if no line was read |
+| `lastStage` | The furthest `VLITE-MEAS STAGE` seen: `6-COLLECT` (collector started) or `6-ENCODE` (collector exited 0), otherwise null |
+| `lastAliveSecs` | The largest `VLITE-MEAS ALIVE <seconds>` heartbeat seen, otherwise null |
+| `signal` | The number from `VLITE-MEAS SIGNAL <n>` (the wrapper caught HUP, INT or TERM), otherwise null |
+| `lateQueryAttempts`, `lateLogAnalyticsEvidence`, `lateJobExitCode` | The diagnostic-only late re-query described below: attempts (0..3), outcome (`NotQueried`, then the `logAnalyticsEvidence` codes) and any `FAILED` exit code |
+
+These codes help an operator with diagnosis only. They are not measurement
+results and do not qualify the run.
+
+For `EvidenceUnavailable` / `MissingBegin`, `reason` is split once any line
+was read: `NeverStarted` means no wrapper marker was seen (the container did
+not start the wrapper, or the logs were not ingested, or the image predates
+the markers); `StartedNoResult` means the wrapper started but no complete
+payload was recovered. `MissingBegin` remains when no line at all was read.
+The wrapper prints `VLITE-MEAS START <kind>` at once, and for MEAS-006 prints
+`VLITE-MEAS STAGE 6-COLLECT` before the collector, `VLITE-MEAS ALIVE
+<seconds>` every 60 s while it runs and `VLITE-MEAS STAGE 6-ENCODE` after it
+exits 0. It prints `VLITE-MEAS SIGNAL <n>` if terminated by a catchable
+signal; an OOM kill or SIGKILL prints nothing further, so the last heartbeat
+bounds when the container died. Markers carry only fixed codes and numbers.
+They are ignored by payload framing; the collector stderr stays suppressed.
+
+When MEAS-006 fails at `ReadLogs` with `EvidenceUnavailable`, the harness
+re-queries Log Analytics up to three times, 120 s apart (about 6 minutes),
+before deleting the group, to tell ingestion lag from missing output. This
+re-query only updates the diagnostic fields above. Its payload is discarded
+and never qualifies the run, even if `Verified`. `-KeepOnFailure` remains
+refused for MEAS-006.
+
 **This is proposal evidence for fencing overhead, not an SLO, a stale-ack
 window, or HA qualification.**
+
+## MEAS-004/005 gateway orchestration (pilot failed; no measurement evidence)
+
+`-Measurements MEAS-004` or `MEAS-005` dispatches to `measure-gateway.ps1`.
+`-Plan` works on any host. It prints every step with placeholders
+(`<subscription>`, `<principal-id:ROLE>`, `<projections:ROLE>`, digests) and
+returns them. It writes no files and runs no process. A live run requires a
+Linux/WSL operator host, `-FixtureServer` (absolute path of a native
+`vlite-server` built from the same source revision; the operator must
+ensure this) and, for MEAS-005, `-ControlProgram` (the native `ha-meas005`).
+`-GatewayProfile pilot|full` (default `pilot`) selects the contract's
+settings. `Tiers`, `Records`, `Delta`, `Dimensions`, `Image` and
+`-KeepOnFailure` are refused.
+
+The planned live order is:
+
+1. Check that the uniquely named, tagged group and the registry and storage
+   names are unused. Check that `/measurement` exists and is empty.
+2. Create the group, ACR, `gateway-measure` image, one identity per role
+   (driver, gateway, writer, reader), `AcrPull`, the storage account with
+   control containers (only the driver may write), and the environment.
+3. Run `measure-gateway-fixture.py prepare` **once**. Verify its single-line
+   summary and each export exactly. The checks cover:
+   - paths;
+   - digests;
+   - role file allowances (backends never receive signing, admin or driver
+     files);
+   - generation and source;
+   - one shared lineage and fixture digest;
+   - the planned build, which must equal the harness's build command;
+   - `executed: []`;
+   - a credential deadline inside the bootstrap window.
+
+   Any mismatch stops the run before the build. The emptiness of
+   `/measurement` is checked again just before `prepare`. Only one run may
+   use the host's `/measurement` at a time; there is no lock.
+4. Build the planned fixture image. Create the publish job and start it once,
+   with no retry. The run continues only on an exact publish receipt.
+5. Create writer (and reader for MEAS-005) and two gateway replicas, plus the
+   driver job. Each gets only its own role's projections, a role-specific
+   control target and the exact fixture image digest. Remove the local
+   fixture with `cleanup` right after distribution.
+6. Record sorted app/revision/replica/container identities; missing or invalid
+   restart counts, duplicate or foreign identities refuse the run. Any
+   restart refuses it too. Start the driver once, verify its evidence, and
+   record inventory again. Changed identities mark the run `Incomplete`;
+   ordering changes and observers' intentional final shutdown do not.
+7. MEAS-005 only: wait for the bounded observer window, then collect one
+   observer report per recorded replica. Run the offline analysis when every
+   report is present.
+8. Always remove local fixture files, delete the group and write
+   `summary.json`.
+
+The 2-hour credential lifetime is a hard limit. Before each create and start
+step, the run checks the time left: 2 minutes for most steps, the full
+1-hour job timeout plus margin before the driver starts, and the observer
+window plus 15 minutes before MEAS-005 apps start. If time is short, the run
+fails with `CredentialWindow`. Errors are static
+(`<MEAS> failed at <step>; diagnostics withheld.`). The summary records a
+fixed `failureReason` code and never includes identifiers or secrets.
+
+MEAS-005 also checks remaining observer lifetime immediately before mutation.
+Its conservative start is recorded before creating the first observer app,
+not when all apps eventually become ready. The remaining window must cover
+the native worst-case driver budget:
+`mutations * (observation_deadline_ms + poll_interval_ms + 138000)`.
+Otherwise `ObserverWindow` stops the run before the driver starts. Full
+profiles have little setup slack and may refuse even with valid credentials;
+this does not justify shortening the budget or extending a qualification gate.
+
+MEAS-005's pilot now uses the contract's 100 ms poll, one sacrificial
+revocation, three mutations and 1,000 ms observation deadline. Full profiles
+use ten revocations, twenty mutations and a 30,000 ms deadline. The
+MEAS-005-only `-GatewayPollMs` accepts an integer from 1 through 5,000; its
+default is 100 for `pilot` and 1,000 for `full`. The proposed full sweep uses
+100, 250, 500, 1,000, 2,000 and 5,000 ms, each in a separate, isolated
+fresh run. It is not an automatic retry or sweep. Fixture preparation
+forwards and verifies the poll, replica cap and revocation count before
+export; gateway and both backend polls must match the mutator. MEAS-004
+retains its existing 1,000 ms poll and ten revocations.
+
+Clock calibration is still not implemented. MEAS-005 summaries carry
+`ClockCalibrationUnavailable` and stay `Incomplete`. Sampling observers alone
+does not calibrate the actual mutator job, and before/after agreement does
+not establish a run-wide ACA clock-motion bound. No zero offsets, operator
+UTC or assumed NTP precision substitute for that evidence. Clock reports
+now refuse noninteger/negative UTC values, reversed timestamps, elapsed
+values outside the one-minute sample bound, and wall/monotonic disagreement
+above the existing 10 ms limit. These checks do not supply calibration.
+Observer evidence must match its recorded app and revision, and the
+analyzer requires conservative lifetime through the entire command plus
+observation deadline, not merely through an early matching observation.
+
+The actual mutating driver execution now also prints a job-local
+`VLITE-CLOCK` companion (`vlite-meas005-driver-clock/1`) ahead of its
+unchanged mutation frame. It samples only that container's own wall,
+monotonic and, where present, raw clocks around the single native attempt,
+and binds them to the ACA job execution, replica, boot id and the exact
+mutation evidence digest. The harness checks it offline with
+`check_driver_clock` and saves `MEAS-005-driver-clock.json` and
+`MEAS-005-driver-clock-check.json`. The reasons it can add are
+`DriverClockContinuityUnavailable`, `DriverClockEvidenceRejected` and
+`DriverClockContinuityIncomplete`. These are advisory: they never fail the
+run or retry the driver. A complete check says the sampled points were
+continuous and within the existing 10 ms allowance for this execution. It
+does not bound unsampled motion, calibrate any observer, or populate offset,
+uncertainty, excursion or calibration values. Those remain null, and
+`ClockCalibrationUnavailable` still applies.
+
+The first live MEAS-004 attempt failed at `BuildMeasureImage` with
+`failureReason: Unclassified`; no fixture digest, publish execution, driver
+execution or evidence was produced. Cleanup reported `Deleted`, and a later
+read-only check confirmed the group absent. The likely incompatibility was
+using `az acr build` for a Dockerfile that uses BuildKit cache mounts; the
+replacement ACR task explicitly enables BuildKit. On 2026-11-21 the build-only
+ACR diagnostic `cc1` succeeded from clean `1fa98c5c8702a74c065cfc9c99f1b055327a8b7b`.
+The revision tag resolved to `sha256:79d5b66fd43a21257e51dbfdd6abefd3762b46ca84cf8ae99780618daab1b3b9`
+before the temporary group was confirmed absent. This verifies the replacement
+build path, not the cause of the earlier failure. No fixture, ACA app or job
+was created by the diagnostic.
+
+The isolated MEAS-004 pilot `m496673cd9` then ran from that clean revision
+with a matching native server. It passed the measurement-image build and
+fixture validation but failed at `BuildFixtureImage` with `Unclassified`.
+There was no publish or driver execution and no measurement evidence. The
+fixture was removed. The cleanup wait expired at `WaitDeleted`; a read-only
+check at 2026-11-21T04:32:13Z still found the owned group `Deleting`, with only
+the managed-environment resource listed. The registry had already been
+deleted, so its build logs were unavailable. Preserve the failed summary
+and postflight; do not restart the pilot or overlap its ongoing deletion.
+Next: confirm group absence and diagnose the fixture-image failure before
+another MEAS-004 attempt. MEAS-005 has not run. MEAS-006's collector now uses
+LF, but the fix has not been verified in ACA.
+
+Follow-up at 2026-11-21T04:52:36Z confirmed the pilot group absent; Azure
+recorded deletion succeeding at 04:34:00Z. The original failed summary and
+postflight remain unchanged. A local Docker reproduction then confirmed that
+the generated fixture layer's `COPY --chmod=0400` requires BuildKit, while the
+fixture step uses classic `az acr build`. Unlike the base-image build, this
+layer needs no BuildKit feature: it now uses `COPY --chown=10001:10001` followed
+by `RUN chmod 0400`. A real classic-builder smoke check using a cached
+non-root base verified the unchanged fixture digest, UID/GID 10001 and mode
+0400. This fixes a demonstrated build incompatibility; it does not recover
+the deleted Azure logs or constitute a successful ACA pilot. MEAS-006 run
+`m6lf21a` has started from clean `1fa98c5c` with an LF-only collector. Live
+campaigns remain serialized; MEAS-004 must wait for that run and cleanup.
+
+Superseding MEAS-006 result: `m6lf21a` ended at 2026-11-21T05:33:04Z with
+`ReadLogs` / `EvidenceUnavailable` / `MissingBegin`. Console retrieval was
+unavailable and all twelve Log Analytics attempts lacked complete evidence.
+No exit code or measurement document was recovered. Unlike the earlier
+exit-2 failure, this does not establish whether the collector ran or why the
+job produced no retrievable evidence. The old result `status` can be changed
+to `Failed` by evidence collection itself; the harness now preserves the
+validated `executionStatus` independently for future runs.
+
+Root cause is unproven. The old wrapper printed nothing until the collector
+exited and suppressed MEAS-006 stderr, so a killed container (2Gi OOM, the
+3600 s replica timeout, eviction or a start failure), a hung collector and
+late Log Analytics ingestion all looked the same. The twelve 10 s attempts
+(about 2 minutes) were also shorter than typical ACA ingestion delay; the
+harness now makes 72. The wrapper liveness markers, `jobStarted`,
+`lastStage`, `lastAliveSecs`, `signal`, `executionStatus` in the diagnostic
+and the late re-query are meant to separate these causes. MEAS-006 remains
+unqualified pending one approved throwaway rerun with a freshly built image.
+
+The deletion wait also expired. A separate read-only check confirmed the
+group absent at 2026-11-21T05:48:14Z; `cleanup-followup.json` binds that
+confirmation to the unchanged failed summary and postflight by SHA-256.
+Deletion was not resubmitted. MEAS-006 remains unqualified and must not be
+blindly rerun. The separate MEAS-004 fixture-repair pilot may proceed after
+its own clean-source, ownership, empty-fixture and zero-live-group preflight.
+
+The subsequent MEAS-004 pilot `m4fix21b`, from clean `5f080c61`, stopped at
+`ValidateFixture` / `FixtureLineage`. It never reached the fixture-image build,
+publish or driver, and produced no measurement evidence. The private fixture
+was removed; the Azure deletion wait expired, so the original failed summary
+and postflight remain intact while a read-only observer checks the existing
+deletion. No deletion or campaign was resubmitted.
+
+A local reproduction using that same native binary and fixture generator
+isolated a signed/unsigned validation defect: database lineages are nonzero
+`u64`, but the PowerShell validator accepted only signed integers and cast to
+`long`. JSON integers above `Int64.MaxValue` arrive as `BigInteger` and were
+incorrectly refused. Validation now accepts the exact nonzero `u64` range,
+returns `ulong`, and still rejects mismatched role lineages, including adjacent
+values near `UInt64.MaxValue`. Boundary and invalid-type regressions pass on
+Windows and the pilot's Linux PowerShell runtime. The real generated fixture
+fails the old validator with `FixtureLineage` and passes the repaired full
+summary validation without any Azure calls; its private files were removed.
+The original pilot's precise lineage was not retained, so this reproduces and
+fixes a concrete cause of that refusal rather than recovering its deleted
+private metadata. ACA fixture-image and workload validation remain pending.
+
+An independent read-only check confirmed `m4fix21b` absent at
+`2026-11-21T06:29:04Z`, after the bounded observer expired. A separate cleanup
+follow-up binds the unchanged failed summary and postflight by SHA-256; deletion
+was not resubmitted. Clean `537c74d1` then passed a matching-source native build
+and real fixture/full-summary preflight with no Azure calls and an empty private
+fixture root. A single fresh pilot, `m4u64a`, started at `06:31:35Z` after account,
+source, fixture, prior-cleanup and zero-tagged-group checks.
+
+That pilot passed fixture validation, so the lineage repair worked live. The
+publish job then reached `Succeeded` by 06:45:04Z, but the run failed at
+`ReadPublish` (`failureReason: PublishEvidence`) before the driver started:
+the console read was unavailable and no Log Analytics rows were usable within
+the 12-attempt (about 2 minute) wait. The summary has empty `evidence` and
+`measurementStatus: Failed`. The fixture was removed. The group's deletion wait
+expired (`cleanupStatus: Failed` at `WaitDeleted`) while Azure was still
+deleting it; the failed summary and postflight stay unchanged and deletion is
+not resubmitted. No measurement evidence exists, and this run is not
+qualification evidence.
+
+This was the fourth live run to stop at an evidence read. Microsoft's ACA
+documentation says to expect a delay of several minutes before console logs
+are queryable, and a Q&A thread reports about 5 to 9.5 minutes (p95). The
+collector therefore now waits up to 72 attempts (about 12 minutes). Gateway
+group deletion only starts after the read gives up, so the group stays alive
+while it waits. One later live run, `m4log72`, read its evidence within this
+wait (see below). That is a single observation, so the ingestion-delay
+explanation is supported but not proven; a Log Analytics access or retention
+cause has not been ruled out. When a gateway read fails, `summary.json` now also carries a
+`failureDiagnostic` with the same static codes as MEAS-006 (`category`,
+`reason`, `jobExitCode`, `consoleEvidence`, `logAnalyticsEvidence` and
+`logAnalyticsAttempts`). It is null on success and never holds native error
+text, log lines or identifiers. These codes help an operator with diagnosis
+only and are not measurement results.
+
+The following are unverified until a live run:
+
+- ACA secret-volume behavior and limits;
+- internal HTTPS trust;
+- empty environment values;
+- console log `--tail` limits;
+- probe behavior;
+- `--yaml` acceptance of JSON manifests;
+- ACR `--target` builds;
+- whether the run fits inside 2 hours.
+
+An `AcrPull` propagation delay fails the publish step, which is never
+retried.
+
+Pilot `m4log72` (clean `479ede2a`, started `07:16:21Z`, one fresh group after
+the zero-tagged-group check) is the first live MEAS-004 run to finish:
+`status: Succeeded`, `measurementStatus: Collected`, no failed step. Both job
+reads recovered through the Log Analytics fallback and the evidence file was
+written about 22 minutes after launch. The record is
+`proposal_evidence_only`, profile `pilot`: 5 requests per window at 5 rps, 1 s
+windows, two direct and two gateway windows in ABBA order, all 200 with no
+errors or mismatches. Paired window mean deltas (about 4.9 and 7.9 ms) are not a
+per-request overhead distribution, and CPU entitlement, pure CPU overhead and
+scale-out remain unknown. The replica inventory was identical before and after
+(2 gateway, 1 writer, 0 restarts). The harness cleanup ended `NeedsVerification`
+at `WaitDeleted` because Azure was still deleting the group; a separate
+hash-bound follow-up later confirmed it absent with the original summary and
+postflight unchanged and no deletion resubmitted.
+
+**No MEAS-005 evidence exists, and the only MEAS-004 evidence is this tiny
+pilot. Nothing here qualifies serving, SLOs or gates.**
 
 ## Outputs, cost, and cleanup
 
@@ -190,8 +519,8 @@ arguments; cleanup does not overwrite the original failure step.
 
 There are charges for Basic ACR, remote builds, job CPU/memory, and log
 ingestion. Builds are bounded at 7,200 seconds, replicas at 3,600 seconds,
-execution polling at 4,200 seconds per tier, log fallback at 12 attempts
-(10-second intervals), and deletion polling at 600 seconds. Job starts retry
+execution polling at 4,200 seconds per tier, log fallback at 72 attempts
+(10-second intervals, about 12 minutes), and deletion polling at 600 seconds. Job starts retry
 for managed-identity role propagation. Native CLI diagnostics/build logs are
 withheld to avoid exposing credentials or subscription identifiers.
 

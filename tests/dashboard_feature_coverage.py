@@ -436,6 +436,7 @@ for method, path, control, expression, helper in (
 for path, loader, expression in (
     ("/v1/admin/metrics/summary", "metrics", '"/v1/admin/metrics/summary"'),
     ("/v1/admin/logs", "logs", '`/v1/admin/logs?${query}`'),
+    ("/v1/admin/serve-status", "serving", '"/v1/admin/serve-status"'),
 ):
     chain("GET", path, "obs-refresh", (
         (event("obs-refresh"), 'refresh(true)'),

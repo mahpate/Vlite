@@ -1459,6 +1459,11 @@ impl Runtime {
                         bump(&mut a.checkpoints);
                         a.last_checkpoint_sequence = Some(sequence);
                         a.last_checkpoint_unix_ms = checkpoint["captured_unix_ms"].as_u64();
+                    } else if let Some(sequence) = report["tip"]["sequence"].as_u64() {
+                        // Not counted as this run's checkpoint: an earlier run
+                        // committed it but could not confirm the commit.
+                        a.last_checkpoint_sequence = Some(sequence);
+                        a.last_checkpoint_unix_ms = report["tip"]["captured_unix_ms"].as_u64();
                     }
                     a.last_error = None;
                 });
@@ -1546,18 +1551,20 @@ impl Runtime {
                 sets.open_archive(&baseline.ok_or_else(missing_baseline)?)?,
             )),
         };
-        let (baseline, policy, next_base, count) = match &archive {
+        let (baseline, policy, next_base, count, tip) = match &archive {
             OpenArchive::Legacy(archive) => (
                 &archive.set_id,
                 &archive.manifest.policy,
                 archive.next_base(),
                 archive.checkpoints().len(),
+                archive.checkpoints().last().cloned(),
             ),
             OpenArchive::Ha(archive) => (
                 &archive.set_id,
                 &archive.manifest.manifest.policy,
                 archive.next_base(),
                 archive.checkpoints().len(),
+                archive.checkpoints().last().map(|c| c.checkpoint.clone()),
             ),
         };
         if *policy != capture {
@@ -1603,10 +1610,14 @@ impl Runtime {
         recovery_bundle::stable(&before, &after)?;
         drop(admin);
         if segment.is_empty() && segment.head_sequence == segment.base_sequence {
-            // Nothing committed since the last checkpoint.
+            // Nothing committed since the last checkpoint. The index tip is
+            // still reported: a previous run may have committed it without
+            // being able to confirm the commit.
+            let tip =
+                tip.map(|c| json!({"sequence":c.sequence,"captured_unix_ms":c.captured_unix_ms}));
             return Ok(
                 json!({"set_id":baseline,"checkpoint":null,"checkpoints":count,
-                "sequence":segment.base_sequence}),
+                "sequence":segment.base_sequence,"tip":tip}),
             );
         }
         let lineage = Some(segment.lineage);
@@ -5046,6 +5057,44 @@ mod tests {
             env.runtime.archive_now(&h).unwrap()["checkpoint"]["sequence"],
             7
         );
+    }
+
+    #[test]
+    fn an_idle_run_reports_a_checkpoint_whose_commit_was_unconfirmed() {
+        let env = setup();
+        let h = Handle::new(&env.service);
+        env.runtime.configure(archiving(), &h, BASE).unwrap();
+        env.runtime.run_now(&h).unwrap();
+        let set = status(&env.runtime)["last_set"]
+            .as_str()
+            .unwrap()
+            .to_owned();
+        put(&env, 5..=5);
+        // The index commit is applied but reported unknown, and the
+        // confirming read fails too: the run cannot claim the checkpoint.
+        let data = env.data.clone();
+        env.data.hook(Op::Put, "archive.json", move || {
+            data.fault(Op::Get, "archive.json", Fault::Before, 0, 1);
+        });
+        env.data.fault(Op::Put, "archive.json", Fault::After, 0, 1);
+        assert!(env.runtime.archive_now(&h).is_err());
+        let index = archive_index(&env, &set).unwrap();
+        assert_eq!(index["checkpoints"].as_array().unwrap().len(), 1);
+        assert!(status(&env.runtime)["archive"]["last_checkpoint_sequence"].is_null());
+
+        // The next run finds nothing new, but the committed tip is the
+        // recovery point and status must say so.
+        let idle = env.runtime.archive_now(&h).unwrap();
+        assert!(idle["checkpoint"].is_null(), "{idle}");
+        assert_eq!(idle["tip"]["sequence"], 5, "{idle}");
+        let a = status(&env.runtime)["archive"].clone();
+        assert_eq!(a["last_checkpoint_sequence"], 5, "{a}");
+        assert_eq!(
+            a["last_checkpoint_unix_ms"], index["checkpoints"][0]["captured_unix_ms"],
+            "{a}"
+        );
+        assert_eq!(a["baseline_checkpoints"], 1, "{a}");
+        assert!(a["last_error"].is_null(), "{a}");
     }
 
     #[test]
